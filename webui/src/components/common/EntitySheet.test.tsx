@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import SessionChat from '@/components/common/SessionChat';
@@ -581,6 +581,53 @@ describe('EntitySheet', () => {
 
       const submitButton = screen.getByText('创建');
       expect(submitButton).toBeDisabled();
+    });
+  });
+
+  describe('Viewport width', () => {
+    const originalMatchMedia = window.matchMedia;
+
+    function stubViewport(narrow: boolean) {
+      window.matchMedia = vi.fn().mockImplementation((query: string) => ({
+        matches: narrow && query === '(max-width: 767px)',
+        media: query,
+        onchange: null,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+        addListener: vi.fn(),
+        removeListener: vi.fn(),
+        dispatchEvent: vi.fn(),
+      })) as unknown as typeof window.matchMedia;
+    }
+
+    afterEach(() => {
+      window.matchMedia = originalMatchMedia;
+    });
+
+    it('takes the full width and drops the resize handle on phone-width viewports', () => {
+      stubViewport(true);
+      const { container } = render(
+        <EntitySheet {...defaultProps}>
+          <div>Form content</div>
+        </EntitySheet>,
+      );
+
+      const drawer = screen.getByTestId('entity-sheet-drawer');
+      expect(drawer.style.width).toBe('100%');
+      expect(container.querySelector('.cursor-ew-resize')).toBeNull();
+    });
+
+    it('keeps a pixel width and the resize handle on desktop viewports', () => {
+      stubViewport(false);
+      const { container } = render(
+        <EntitySheet {...defaultProps} width={480}>
+          <div>Form content</div>
+        </EntitySheet>,
+      );
+
+      const drawer = screen.getByTestId('entity-sheet-drawer');
+      expect(drawer.style.width).toBe('480px');
+      expect(container.querySelector('.cursor-ew-resize')).not.toBeNull();
     });
   });
 });

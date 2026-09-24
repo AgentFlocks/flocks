@@ -49,6 +49,7 @@ from flocks.tool.registry import (
     ToolResult,
 )
 from flocks.utils.log import Log
+from flocks.net.http import async_client
 
 log = Log.create(service="tool.wecom_mcp")
 
@@ -180,7 +181,7 @@ async def _initialize_session(url: str, category: str) -> _McpSession:
     }
 
     headers: dict[str, str] = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream"}
-    async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
+    async with async_client(timeout=_HTTP_TIMEOUT) as client:
         resp = await client.post(url, json=init_body, headers=headers)
 
     new_session_id = resp.headers.get("mcp-session-id")
@@ -197,7 +198,7 @@ async def _initialize_session(url: str, category: str) -> _McpSession:
         # 发送 notifications/initialized
         notify_body = {"jsonrpc": "2.0", "method": "notifications/initialized"}
         notify_headers = {**headers, "Mcp-Session-Id": session.session_id}
-        async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
+        async with async_client(timeout=_HTTP_TIMEOUT) as client:
             await client.post(url, json=notify_body, headers=notify_headers)
 
         session.initialized = True
@@ -301,7 +302,7 @@ async def _send_rpc(
         req_headers["Mcp-Session-Id"] = session.session_id
 
     try:
-        async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
+        async with async_client(timeout=_HTTP_TIMEOUT) as client:
             resp = await client.post(session.url or "", json=body, headers=req_headers)
 
         # 更新 session_id（如有新值）

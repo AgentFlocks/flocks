@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { X, RefreshCw, ChevronDown, FileText } from 'lucide-react';
+import { IconX, IconRefresh, IconChevronDown, IconFileText } from '@tabler/icons-react';
 import { useTranslation } from 'react-i18next';
 import { logsAPI, type LogFileInfo, type LogContentResponse } from '@/api/logs';
 
@@ -73,7 +73,7 @@ export default function LogViewerModal({ open, onClose }: LogViewerModalProps) {
       <div className="fixed inset-0 bg-black/40 z-40" onClick={onClose} />
       <div className="fixed inset-4 md:inset-8 lg:inset-12 z-50 flex flex-col bg-white rounded-2xl shadow-2xl overflow-hidden">
         <div className="flex items-center gap-3 px-6 py-4 border-b border-gray-200 bg-gray-50 flex-shrink-0">
-          <FileText className="w-5 h-5 text-purple-600" />
+          <IconFileText aria-hidden="true" className="w-5 h-5 text-purple-600" />
           <h2 className="text-lg font-semibold text-gray-900 flex-1">{t('logs.title')}</h2>
           <div className="flex items-center gap-2">
             <select
@@ -93,7 +93,7 @@ export default function LogViewerModal({ open, onClose }: LogViewerModalProps) {
               className="p-2 text-gray-500 hover:text-gray-700 hover:bg-gray-200 rounded-lg transition-colors disabled:opacity-50"
               title={t('logs.refresh')}
             >
-              <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
+              <IconRefresh aria-hidden="true" className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
             </button>
             <label className="flex items-center gap-1.5 text-xs text-gray-500 cursor-pointer select-none">
               <input
@@ -102,11 +102,11 @@ export default function LogViewerModal({ open, onClose }: LogViewerModalProps) {
                 onChange={(e) => setAutoScroll(e.target.checked)}
                 className="rounded text-purple-600 focus:ring-purple-500"
               />
-              <ChevronDown className="w-3 h-3" />
+              <IconChevronDown aria-hidden="true" className="w-3 h-3" />
               {t('logs.autoScroll')}
             </label>
             <button onClick={onClose} className="p-2 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-lg transition-colors">
-              <X className="w-5 h-5" />
+              <IconX aria-hidden="true" className="w-5 h-5" />
             </button>
           </div>
         </div>
@@ -114,7 +114,7 @@ export default function LogViewerModal({ open, onClose }: LogViewerModalProps) {
         <div className="flex-1 overflow-hidden relative">
           {loading && !logContent && (
             <div className="flex items-center justify-center h-full">
-              <RefreshCw className="w-6 h-6 text-gray-400 animate-spin" />
+              <IconRefresh aria-hidden="true" className="w-6 h-6 text-gray-400 animate-spin" />
             </div>
           )}
           {error && (

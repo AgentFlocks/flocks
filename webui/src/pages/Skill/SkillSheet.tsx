@@ -9,7 +9,7 @@
 
 import { lazy, Suspense, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { BookOpen, Lock, Pencil, Eye, Save, Loader2, Trash2 } from 'lucide-react';
+import { IconBook, IconLock, IconPencil, IconEye, IconDeviceFloppy, IconLoader2, IconTrash } from '@tabler/icons-react';
 import { skillAPI, Skill } from '@/api/skill';
 import { useToast } from '@/components/common/Toast';
 import EntitySheet from '@/components/common/EntitySheet';
@@ -21,7 +21,7 @@ const ReactMarkdown = lazy(() => import('react-markdown'));
 function MarkdownFallback() {
   return (
     <div className="flex min-h-[160px] items-center justify-center text-gray-400">
-      <Loader2 className="h-4 w-4 animate-spin" />
+      <IconLoader2 aria-hidden="true" className="h-4 w-4 animate-spin" />
     </div>
   );
 }
@@ -118,7 +118,10 @@ export default function SkillSheet({ skill, onClose, onSaved, onDeleted }: Skill
   ]), [t]);
   const rexComposerControls = useRexComposerControls();
 
-  const canSubmit = !isReadonly && (formData.name && formData.description && formData.content);
+  // Mirrors the backend rule (Skill._is_valid_name): lowercase slug, single hyphens.
+  const nameValid = /^[a-z0-9]+(-[a-z0-9]+)*$/.test(formData.name || '');
+  const showNameHint = !isReadonly && !!formData.name && !nameValid;
+  const canSubmit = !isReadonly && nameValid && (formData.name && formData.description && formData.content);
 
   const handleSubmit = async () => {
     if (isReadonly) { onClose(); return; }
@@ -188,16 +191,17 @@ export default function SkillSheet({ skill, onClose, onSaved, onDeleted }: Skill
       mode={isEdit ? 'edit' : 'create'}
       entityType={t('sheet.entityType')}
       entityName={skill?.name}
-      icon={<BookOpen className="w-5 h-5" />}
+      icon={<IconBook aria-hidden="true" className="w-5 h-5" />}
       rexSystemContext={buildRexContext(isEdit, formData)}
       rexWelcomeMessage={buildRexWelcome(isEdit, skill?.name)}
       rexGuideGroups={!isEdit ? createGuideGroups : undefined}
       rexGuidePanelTitle={!isEdit ? t('create.guidePanelTitle') : undefined}
       rexGuidePanelDesc={!isEdit ? t('create.guidePanelDesc') : undefined}
       rexGuideEmptyTitle={!isEdit ? t('create.emptyStateTitle') : undefined}
-      rexGuideIcon={!isEdit ? <BookOpen className="h-5 w-5" /> : undefined}
+      rexGuideIcon={!isEdit ? <IconBook aria-hidden="true" className="h-5 w-5" /> : undefined}
       {...(!isEdit ? rexComposerControls : {})}
-      submitDisabled={!canSubmit}
+      // Read-only sheets turn the submit button into 「关闭」; it must stay clickable even though the form can't be submitted.
+      submitDisabled={isReadonly ? false : !canSubmit}
       submitLoading={loading}
       submitLabel={isReadonly ? t('sheet.submitClose') : undefined}
       hideForm={!isEdit}
@@ -215,7 +219,7 @@ export default function SkillSheet({ skill, onClose, onSaved, onDeleted }: Skill
               : 'text-gray-300 border-gray-200 cursor-not-allowed'
             }`}
         >
-          {deleting ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Trash2 className="w-3.5 h-3.5" />}
+          {deleting ? <IconLoader2 aria-hidden="true" className="w-3.5 h-3.5 animate-spin" /> : <IconTrash aria-hidden="true" className="w-3.5 h-3.5" />}
           {deleting ? t('sheet.deleting') : t('sheet.delete')}
         </button>
       ) : undefined}
@@ -224,7 +228,7 @@ export default function SkillSheet({ skill, onClose, onSaved, onDeleted }: Skill
         {/* Read-only banner */}
         {isReadonly && (
           <div className="flex items-center gap-2 px-3 py-2 bg-amber-50 border border-amber-200 rounded-lg text-xs text-amber-700">
-            <Lock className="w-3.5 h-3.5 shrink-0" />
+            <IconLock aria-hidden="true" className="w-3.5 h-3.5 shrink-0" />
             {t('sheet.readonlyNote')}
           </div>
         )}
@@ -243,9 +247,13 @@ export default function SkillSheet({ skill, onClose, onSaved, onDeleted }: Skill
               type="text"
               value={formData.name}
               onChange={(e) => setFormData({ ...formData, name: e.target.value })}
-              className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-red-500 text-sm font-mono"
+              className={`w-full px-4 py-2 border rounded-lg focus:outline-none focus:ring-2 text-sm font-mono ${showNameHint ? 'border-red-400 focus:ring-red-500' : 'border-gray-300 focus:ring-red-500'}`}
               placeholder="my-skill"
+              aria-invalid={showNameHint || undefined}
             />
+          )}
+          {showNameHint && (
+            <p className="mt-1 text-xs text-red-600" data-testid="skill-name-hint">{t('sheet.nameFormatHint')}</p>
           )}
         </div>
 
@@ -298,7 +306,7 @@ export default function SkillSheet({ skill, onClose, onSaved, onDeleted }: Skill
                   onClick={() => setContentEditing(false)}
                   className="flex items-center gap-1 text-xs text-gray-500 hover:text-gray-700 transition-colors"
                 >
-                  <Eye className="w-3.5 h-3.5" />
+                  <IconEye aria-hidden="true" className="w-3.5 h-3.5" />
                   {t('sheet.preview')}
                 </button>
               ) : (
@@ -307,7 +315,7 @@ export default function SkillSheet({ skill, onClose, onSaved, onDeleted }: Skill
                   onClick={() => setContentEditing(true)}
                   className="flex items-center gap-1 text-xs text-red-600 hover:text-red-700 transition-colors"
                 >
-                  <Pencil className="w-3.5 h-3.5" />
+                  <IconPencil aria-hidden="true" className="w-3.5 h-3.5" />
                   {t('sheet.edit')}
                 </button>
               )
@@ -342,7 +350,7 @@ export default function SkillSheet({ skill, onClose, onSaved, onDeleted }: Skill
                   disabled={saving || !formData.content.trim()}
                   className="flex items-center gap-1.5 px-3 py-1.5 text-sm bg-red-600 text-white rounded-lg hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
                 >
-                  {saving ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5" />}
+                  {saving ? <IconLoader2 aria-hidden="true" className="w-3.5 h-3.5 animate-spin" /> : <IconDeviceFloppy aria-hidden="true" className="w-3.5 h-3.5" />}
                   {saving ? t('sheet.saving') : t('common:button.save')}
                 </button>
               </div>

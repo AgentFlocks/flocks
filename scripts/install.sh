@@ -999,26 +999,18 @@ get_chrome_for_testing_dir() {
 }
 
 resolve_chrome_for_testing_path_from_dir() {
-  local browser_dir="$1" candidate restore_globstar=0 restore_nullglob=0
+  local browser_dir="$1" name candidate
   [[ -d "$browser_dir" ]] || return 1
 
-  shopt -q globstar || restore_globstar=1
-  shopt -q nullglob || restore_nullglob=1
-  shopt -s globstar nullglob
-
-  for candidate in \
-    "$browser_dir"/**/"Google Chrome for Testing" \
-    "$browser_dir"/**/chrome.exe \
-    "$browser_dir"/**/chrome; do
-    [[ -f "$candidate" && -x "$candidate" ]] || continue
-    printf '%s' "$candidate"
-    [[ "$restore_globstar" -eq 1 ]] && shopt -u globstar
-    [[ "$restore_nullglob" -eq 1 ]] && shopt -u nullglob
-    return 0
+  # `find` instead of `**` globs: globstar needs bash 4+, while macOS ships bash 3.2.
+  for name in "Google Chrome for Testing" chrome.exe chrome; do
+    candidate="$(find "$browser_dir" -type f -name "$name" -perm -u+x 2>/dev/null | sort | head -n 1)"
+    if [[ -n "$candidate" ]]; then
+      printf '%s' "$candidate"
+      return 0
+    fi
   done
 
-  [[ "$restore_globstar" -eq 1 ]] && shopt -u globstar
-  [[ "$restore_nullglob" -eq 1 ]] && shopt -u nullglob
   return 1
 }
 

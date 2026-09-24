@@ -1,22 +1,23 @@
-import { 
-  Bot, 
-  Zap, 
-  Sparkles, 
-  Github,
-  ChevronDown,
-  ChevronRight,
-  Workflow,
-  MessageSquare,
-  BarChart3,
-  AlertCircle,
-  CalendarClock,
-  Wrench,
-  BookOpen,
-  Cpu,
-  LayoutDashboard,
-  Loader2,
-} from 'lucide-react';
+import {
+  IconRobot,
+  IconBolt,
+  IconSparkles,
+  IconBrandGithub,
+  IconChevronDown,
+  IconChevronRight,
+  IconRouteSquare2,
+  IconMessage,
+  IconChartBar,
+  IconAlertCircle,
+  IconCalendarClock,
+  IconTool,
+  IconBook,
+  IconCpu,
+  IconLayoutDashboard,
+  IconLoader2,
+} from '@tabler/icons-react';
 import { useCallback, useState } from 'react';
+import type { ReactNode } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { useStats } from '@/hooks/useStats';
@@ -29,6 +30,51 @@ import { useProductName } from '@/contexts/ProductNameContext';
 const GITHUB_URL = 'https://github.com/AgentFlocks/flocks';
 const GITEE_URL = 'https://gitee.com/flocks/flocks';
 const GITEE_LOGO_URL = `${import.meta.env.BASE_URL}gitee-logo.png`;
+const STAT_CARD_CLASS = 'ui-card p-5';
+const STAT_LINK_CARD_CLASS = 'ui-card-interactive block p-5';
+
+function StatCard({
+  title,
+  value,
+  icon,
+  to,
+  interactiveClassName,
+  valueClassName = 'text-gray-900',
+  children,
+}: {
+  title: string;
+  value: ReactNode;
+  icon: ReactNode;
+  to?: string;
+  interactiveClassName?: string;
+  valueClassName?: string;
+  children?: ReactNode;
+}) {
+  const content = (
+    <>
+      <div className="flex items-center justify-between mb-2">
+        <span className="text-fg-secondary text-sm">{title}</span>
+        {icon}
+      </div>
+      <div className={`text-3xl font-bold tabular-nums ${valueClassName}`}>{value}</div>
+      {children}
+    </>
+  );
+
+  if (to) {
+    return (
+      <Link
+        to={to}
+        aria-label={title}
+        className={`${STAT_LINK_CARD_CLASS} ${interactiveClassName ?? ''}`}
+      >
+        {content}
+      </Link>
+    );
+  }
+
+  return <div className={STAT_CARD_CLASS}>{content}</div>;
+}
 
 export default function Home() {
   const { stats, loading, error } = useStats();
@@ -39,18 +85,30 @@ export default function Home() {
   const { productName } = useProductName();
   const canCreateWebUIContractPage = user?.role === 'admin';
   const [isRepoMenuOpen, setIsRepoMenuOpen] = useState(false);
-  const [creatingWebUIContractPageSession, setCreatingWebUIContractPageSession] = useState(false);
-  const statsErrorHint = error ? t(`stats.loadErrorHint.${error.message}`, { defaultValue: t('stats.loadErrorHint.unavailable') }) : '';
+  const [
+    creatingWebUIContractPageSession,
+    setCreatingWebUIContractPageSession,
+  ] = useState(false);
+  const statsErrorHint = error
+    ? t(`stats.loadErrorHint.${error.message}`, {
+        defaultValue: t('stats.loadErrorHint.unavailable'),
+      })
+    : '';
 
   const handleCreateWebUIContractPage = useCallback(async () => {
     if (creatingWebUIContractPageSession) return;
     setCreatingWebUIContractPageSession(true);
     try {
-      const session = await sessionApi.create({ title: t('createWebUIContractPageSessionTitle') });
+      const session = await sessionApi.create({
+        title: t('createWebUIContractPageSessionTitle'),
+      });
       const message = t('createWebUIContractPageInitialMessage');
-      navigate(`/sessions?session=${session.id}&message=${encodeURIComponent(message)}`);
+      navigate(
+        `/sessions?session=${session.id}&message=${encodeURIComponent(message)}`,
+      );
     } catch (err: unknown) {
-      const detail = err instanceof Error ? err.message : t('createWebUIContractPageError');
+      const detail =
+        err instanceof Error ? err.message : t('createWebUIContractPageError');
       toast.error(t('createWebUIContractPageError'), detail);
     } finally {
       setCreatingWebUIContractPageSession(false);
@@ -60,38 +118,41 @@ export default function Home() {
   return (
     <div className="max-w-7xl mx-auto">
       {/* Hero Section */}
-      <div className="relative overflow-hidden rounded-2xl bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 px-6 lg:px-12 py-8 mb-10">
-        {/* Subtle red glow accent */}
-        <div className="absolute top-0 left-0 w-72 h-72 bg-red-600/10 rounded-full blur-3xl -translate-x-1/2 -translate-y-1/2"></div>
-        <div className="absolute bottom-0 right-0 w-96 h-96 bg-red-600/5 rounded-full blur-3xl translate-x-1/3 translate-y-1/3"></div>
+      {/* No overflow-hidden on the card itself: the repository dropdown below
+          opens past the card's bottom edge on narrow viewports (the buttons wrap
+          onto extra rows) and would otherwise be clipped. Only the decorative
+          glows need clipping, so they get their own clipped layer. */}
+      <div className="relative rounded-card border border-line bg-surface px-6 lg:px-8 py-6 mb-6">
 
         <div className="relative z-10 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-6">
           <div className="flex-1 min-w-0">
-            <div className="inline-flex items-center px-3 py-1.5 bg-white/10 text-slate-300 rounded-full text-xs font-medium mb-4 border border-white/10">
-              <Sparkles className="w-3.5 h-3.5 mr-1.5 text-red-400" />
+            <div className="ui-badge ui-badge-brand mb-3">
+              <IconSparkles aria-hidden="true" className="w-3.5 h-3.5" />
               {t('badge')}
             </div>
 
-            <h1 className="text-2xl font-extrabold mb-3 tracking-tight">
-              <span className="text-red-500">{productName}</span>
+            <h1 className="text-title-page mb-2 text-fg">
+              <span className="text-action">{productName}</span>
             </h1>
 
-            <p className="text-sm text-white font-semibold mb-2">
+            <p className="text-sm text-fg font-semibold mb-1">
               {t('subtitle')}
             </p>
 
-            <p className="text-sm text-slate-400 leading-relaxed max-w-2xl">
+            <p className="text-sm text-fg-secondary max-w-2xl">
               {t('description')}
             </p>
           </div>
 
           <div className="flex flex-wrap sm:flex-nowrap gap-3 sm:flex-shrink-0">
             <button
-              onClick={() => window.dispatchEvent(new Event('flocks:open-onboarding'))}
-              className="inline-flex items-center px-6 py-2.5 bg-red-600 text-white rounded-lg font-semibold hover:bg-red-500 transition-colors shadow-lg shadow-red-900/40"
+              onClick={() =>
+                window.dispatchEvent(new Event('flocks:open-onboarding'))
+              }
+              className="ui-btn ui-btn-primary"
             >
               {t('getStarted')}
-              <ChevronRight className="ml-1.5 w-4 h-4" />
+              <IconChevronRight aria-hidden="true" className="w-4 h-4" />
             </button>
 
             {canCreateWebUIContractPage ? (
@@ -99,12 +160,12 @@ export default function Home() {
                 type="button"
                 onClick={() => void handleCreateWebUIContractPage()}
                 disabled={creatingWebUIContractPageSession}
-                className="inline-flex items-center px-6 py-2.5 bg-white/10 text-slate-100 rounded-lg font-semibold hover:bg-white/15 transition-colors border border-red-500/40 disabled:opacity-60 disabled:cursor-not-allowed"
+                className="ui-btn"
               >
                 {creatingWebUIContractPageSession ? (
-                  <Loader2 className="mr-2 w-4 h-4 animate-spin" />
+                  <IconLoader2 aria-hidden="true" className="w-4 h-4 animate-spin" />
                 ) : (
-                  <LayoutDashboard className="mr-2 w-4 h-4 text-red-300" />
+                  <IconLayoutDashboard aria-hidden="true" className="w-4 h-4" />
                 )}
                 {t('createWebUIContractPage')}
               </button>
@@ -114,31 +175,35 @@ export default function Home() {
               <button
                 type="button"
                 onClick={() => setIsRepoMenuOpen((open) => !open)}
-                className="inline-flex items-center px-6 py-2.5 bg-white/10 text-slate-200 rounded-lg font-semibold hover:bg-white/15 transition-colors border border-white/10"
+                className="ui-btn"
               >
-                <Github className="mr-2 w-4 h-4" />
+                <IconBrandGithub aria-hidden="true" className="w-4 h-4" />
                 {t('openSource')}
-                <ChevronDown className="ml-2 w-4 h-4" />
+                <IconChevronDown aria-hidden="true" className="w-4 h-4" />
               </button>
 
               {isRepoMenuOpen ? (
-                <div className="absolute right-0 mt-2 min-w-52 overflow-hidden rounded-lg border border-white/10 bg-slate-900/95 shadow-xl backdrop-blur">
+                <div className="absolute right-0 z-20 mt-2 min-w-52 overflow-hidden rounded-overlay border border-line bg-surface shadow-overlay">
                   <a
                     href={GITHUB_URL}
                     target="_blank"
                     rel="noopener noreferrer"
-                    className="flex items-center px-4 py-3 text-sm text-slate-200 hover:bg-white/10 transition-colors"
+                    className="flex items-center px-4 py-2.5 text-sm text-fg hover:bg-hover transition-colors"
                   >
-                    <Github className="mr-2 w-4 h-4" />
+                    <IconBrandGithub aria-hidden="true" className="mr-2 w-4 h-4" />
                     GitHub
                   </a>
                   <a
                     href={GITEE_URL}
                     target="_blank"
                     rel="noopener noreferrer"
-                    className="flex items-center px-4 py-3 text-sm text-slate-200 hover:bg-white/10 transition-colors border-t border-white/10"
+                    className="flex items-center px-4 py-2.5 text-sm text-fg hover:bg-hover transition-colors border-t border-line"
                   >
-                    <img src={GITEE_LOGO_URL} alt="Gitee" className="mr-2 w-4 h-4 rounded-sm" />
+                    <img
+                      src={GITEE_LOGO_URL}
+                      alt="Gitee"
+                      className="mr-2 w-4 h-4 rounded-sm"
+                    />
                     Gitee
                   </a>
                 </div>
@@ -153,44 +218,56 @@ export default function Home() {
         <Link
           to="/sessions"
           state={{ skipLastSelectedSessionRestore: true }}
-          className="group flex items-center gap-4 bg-white p-5 rounded-xl border border-gray-100 hover:border-sky-200 hover:shadow-md hover:shadow-sky-50 transition-all duration-200"
+          className="group ui-card-interactive flex items-center gap-4 p-5"
         >
-          <div className="w-11 h-11 bg-sky-50 rounded-xl flex items-center justify-center flex-shrink-0 group-hover:bg-sky-100 transition-colors">
-            <MessageSquare className="w-5 h-5 text-sky-500" />
+          <div className="w-11 h-11 bg-data-soft rounded-control flex items-center justify-center flex-shrink-0">
+            <IconMessage aria-hidden="true" className="w-5 h-5 text-data" />
           </div>
           <div className="flex-1 min-w-0">
-            <h3 className="text-sm font-semibold text-gray-900">{t('quickActions.sessions.title')}</h3>
-            <p className="text-xs text-gray-400 mt-0.5 truncate">{t('quickActions.sessions.description')}</p>
+            <h3 className="text-sm font-semibold text-fg">
+              {t('quickActions.sessions.title')}
+            </h3>
+            <p className="text-xs text-fg-secondary mt-0.5 truncate">
+              {t('quickActions.sessions.description')}
+            </p>
           </div>
-          <ChevronRight className="w-4 h-4 text-gray-300 group-hover:text-sky-400 flex-shrink-0 transition-colors" />
+          <IconChevronRight aria-hidden="true" className="w-4 h-4 text-fg-muted flex-shrink-0" />
         </Link>
 
         <Link
           to="/workflows"
-          className="group flex items-center gap-4 bg-white p-5 rounded-xl border border-gray-100 hover:border-violet-200 hover:shadow-md hover:shadow-violet-50 transition-all duration-200"
+          className="group ui-card-interactive flex items-center gap-4 p-5"
         >
-          <div className="w-11 h-11 bg-violet-50 rounded-xl flex items-center justify-center flex-shrink-0 group-hover:bg-violet-100 transition-colors">
-            <Workflow className="w-5 h-5 text-violet-500" />
+          <div className="w-11 h-11 bg-ai-soft rounded-control flex items-center justify-center flex-shrink-0">
+            <IconRouteSquare2 aria-hidden="true" className="w-5 h-5 text-ai" />
           </div>
           <div className="flex-1 min-w-0">
-            <h3 className="text-sm font-semibold text-gray-900">{t('quickActions.workflows.title')}</h3>
-            <p className="text-xs text-gray-400 mt-0.5 truncate">{t('quickActions.workflows.description')}</p>
+            <h3 className="text-sm font-semibold text-fg">
+              {t('quickActions.workflows.title')}
+            </h3>
+            <p className="text-xs text-fg-secondary mt-0.5 truncate">
+              {t('quickActions.workflows.description')}
+            </p>
           </div>
-          <ChevronRight className="w-4 h-4 text-gray-300 group-hover:text-violet-400 flex-shrink-0 transition-colors" />
+          <IconChevronRight aria-hidden="true" className="w-4 h-4 text-fg-muted flex-shrink-0" />
         </Link>
 
         <Link
           to="/agents"
-          className="group flex items-center gap-4 bg-white p-5 rounded-xl border border-gray-100 hover:border-emerald-200 hover:shadow-md hover:shadow-emerald-50 transition-all duration-200"
+          className="group ui-card-interactive flex items-center gap-4 p-5"
         >
-          <div className="w-11 h-11 bg-emerald-50 rounded-xl flex items-center justify-center flex-shrink-0 group-hover:bg-emerald-100 transition-colors">
-            <Bot className="w-5 h-5 text-emerald-500" />
+          <div className="w-11 h-11 bg-ai-soft rounded-control flex items-center justify-center flex-shrink-0">
+            <IconRobot aria-hidden="true" className="w-5 h-5 text-ai" />
           </div>
           <div className="flex-1 min-w-0">
-            <h3 className="text-sm font-semibold text-gray-900">{t('quickActions.agents.title')}</h3>
-            <p className="text-xs text-gray-400 mt-0.5 truncate">{t('quickActions.agents.description')}</p>
+            <h3 className="text-sm font-semibold text-fg">
+              {t('quickActions.agents.title')}
+            </h3>
+            <p className="text-xs text-fg-secondary mt-0.5 truncate">
+              {t('quickActions.agents.description')}
+            </p>
           </div>
-          <ChevronRight className="w-4 h-4 text-gray-300 group-hover:text-emerald-400 flex-shrink-0 transition-colors" />
+          <IconChevronRight aria-hidden="true" className="w-4 h-4 text-fg-muted flex-shrink-0" />
         </Link>
       </div>
 
@@ -203,100 +280,95 @@ export default function Home() {
         <>
           {error && (
             <div className="bg-red-50 border border-red-200 rounded-xl p-4 mb-6 flex items-center gap-3">
-              <AlertCircle className="w-5 h-5 text-red-500 shrink-0" />
+              <IconAlertCircle aria-hidden="true" className="w-5 h-5 text-red-500 shrink-0" />
               <div>
-                <span className="text-sm font-medium text-red-900">{t('stats.abnormal')}</span>
-                <span className="text-sm text-red-600 ml-2">{statsErrorHint}</span>
+                <span className="text-sm font-medium text-red-900">
+                  {t('stats.abnormal')}
+                </span>
+                <span className="text-sm text-red-600 ml-2">
+                  {statsErrorHint}
+                </span>
               </div>
             </div>
           )}
           <div className="grid md:grid-cols-4 gap-6">
-          <div className="bg-white rounded-xl p-6 border border-gray-200">
-            <div className="flex items-center justify-between mb-2">
-              <span className="text-gray-600 text-sm">{t('stats.agentCount')}</span>
-              <Bot className="w-5 h-5 text-purple-500" />
-            </div>
-            <div className="text-xl font-bold text-gray-900">
-              {stats?.agents.total ?? 0}
-            </div>
-          </div>
+            <StatCard
+              title={t('stats.agentCount')}
+              value={stats?.agents.total ?? 0}
+              icon={<IconRobot aria-hidden="true" className="w-5 h-5 text-purple-500" />}
+              to="/agents"
+            />
 
-          <div className="bg-white rounded-xl p-6 border border-gray-200">
-            <div className="flex items-center justify-between mb-2">
-              <span className="text-gray-600 text-sm">{t('stats.workflowCount')}</span>
-              <Workflow className="w-5 h-5 text-teal-500" />
-            </div>
-            <div className="text-xl font-bold text-gray-900">
-              {stats?.workflows.total ?? 0}
-            </div>
-          </div>
+            <StatCard
+              title={t('stats.workflowCount')}
+              value={stats?.workflows.total ?? 0}
+              icon={<IconRouteSquare2 aria-hidden="true" className="w-5 h-5 text-teal-500" />}
+              to="/workflows"
+            />
 
-          <div className="bg-white rounded-xl p-6 border border-gray-200">
-            <div className="flex items-center justify-between mb-2">
-              <span className="text-gray-600 text-sm">{t('stats.skillCount')}</span>
-              <BookOpen className="w-5 h-5 text-green-500" />
-            </div>
-            <div className="text-xl font-bold text-gray-900">
-              {stats?.skills.total ?? 0}
-            </div>
-          </div>
+            <StatCard
+              title={t('stats.skillCount')}
+              value={stats?.skills.total ?? 0}
+              icon={<IconBook aria-hidden="true" className="w-5 h-5 text-green-500" />}
+              to="/skills"
+            />
 
-          <div className="bg-white rounded-xl p-6 border border-gray-200">
-            <div className="flex items-center justify-between mb-2">
-              <span className="text-gray-600 text-sm">{t('stats.toolCount')}</span>
-              <Wrench className="w-5 h-5 text-orange-500" />
-            </div>
-            <div className="text-xl font-bold text-gray-900">
-              {stats?.tools.total ?? 0}
-            </div>
-          </div>
+            <StatCard
+              title={t('stats.toolCount')}
+              value={stats?.tools.total ?? 0}
+              icon={<IconTool aria-hidden="true" className="w-5 h-5 text-orange-500" />}
+              to="/tools"
+            />
 
-          <div className="bg-white rounded-xl p-6 border border-gray-200">
-            <div className="flex items-center justify-between mb-2">
-              <span className="text-gray-600 text-sm">{t('stats.weeklyTasks')}</span>
-              <Zap className="w-5 h-5 text-amber-500" />
-            </div>
-            <div className="text-xl font-bold text-gray-900">
-              {stats?.tasks.week ?? 0}
-            </div>
-          </div>
+            <StatCard
+              title={t('stats.weeklyTasks')}
+              value={stats?.tasks.week ?? 0}
+              icon={<IconBolt aria-hidden="true" className="w-5 h-5 text-amber-500" />}
+              to="/tasks"
+            />
 
-          <div className="bg-white rounded-xl p-6 border border-gray-200">
-            <div className="flex items-center justify-between mb-2">
-              <span className="text-gray-600 text-sm">{t('stats.activeScheduled')}</span>
-              <CalendarClock className="w-5 h-5 text-violet-500" />
-            </div>
-            <div className="text-xl font-bold text-gray-900">
-              {stats?.tasks.scheduledActive ?? 0}
-            </div>
-          </div>
+            <StatCard
+              title={t('stats.activeScheduled')}
+              value={stats?.tasks.scheduledActive ?? 0}
+              icon={<IconCalendarClock aria-hidden="true" className="w-5 h-5 text-ai" />}
+              to="/tasks"
+            />
 
-          <div className="bg-white rounded-xl p-6 border border-gray-200">
-            <div className="flex items-center justify-between mb-2">
-              <span className="text-gray-600 text-sm">{t('stats.modelCount')}</span>
-              <Cpu className="w-5 h-5 text-pink-500" />
-            </div>
-            <div className="text-xl font-bold text-gray-900">
-              {stats?.models.total ?? 0}
-            </div>
-          </div>
+            <StatCard
+              title={t('stats.modelCount')}
+              value={stats?.models.total ?? 0}
+              icon={<IconCpu aria-hidden="true" className="w-5 h-5 text-pink-500" />}
+              to="/models"
+            />
 
-          <div className="bg-white rounded-xl p-6 border border-gray-200">
-            <div className="flex items-center justify-between mb-2">
-              <span className="text-gray-600 text-sm">{t('stats.systemStatus')}</span>
-              <BarChart3 className={`w-5 h-5 ${
-                stats?.system.status === 'healthy' ? 'text-green-500' : 'text-red-500'
-              }`} />
-            </div>
-            <div className={`text-xl font-bold ${
-              stats?.system.status === 'healthy' ? 'text-green-600' : 'text-red-600'
-            }`}>
-              {stats?.system.status === 'healthy' ? t('stats.normal') : t('stats.abnormal')}
-            </div>
-            <div className="text-xs text-gray-500 mt-1">
-              {stats?.system.status ? t(`stats.statusMessage.${stats.system.status}`) : ''}
-            </div>
-          </div>
+            <StatCard
+              title={t('stats.systemStatus')}
+              value={
+                stats?.system.status === 'healthy'
+                  ? t('stats.normal')
+                  : t('stats.abnormal')
+              }
+              valueClassName={
+                stats?.system.status === 'healthy'
+                  ? 'text-green-600'
+                  : 'text-red-600'
+              }
+              icon={
+                <IconChartBar aria-hidden="true"
+                  className={`w-5 h-5 ${
+                    stats?.system.status === 'healthy'
+                      ? 'text-green-500'
+                      : 'text-red-500'
+                  }`}
+                />
+              }
+            >
+              <div className="text-xs text-gray-500 mt-1">
+                {stats?.system.status
+                  ? t(`stats.statusMessage.${stats.system.status}`)
+                  : ''}
+              </div>
+            </StatCard>
           </div>
         </>
       )}

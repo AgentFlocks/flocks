@@ -189,6 +189,31 @@ class PermissionNext:
         )
 
     @classmethod
+    async def list_permanent_rules(cls) -> Dict[str, str]:
+        """Return the durable permission -> action ("allow"/"deny") rules."""
+        await cls._ensure_persisted_state_loaded()
+        return dict(cls._permanent_rules)
+
+    @classmethod
+    async def set_permanent_rule(cls, permission: str, action: str) -> None:
+        """Create or replace a durable rule (same store an "always" reply writes)."""
+        if action not in {"allow", "deny"}:
+            raise ValueError("action must be 'allow' or 'deny'")
+        await cls._ensure_persisted_state_loaded()
+        cls._permanent_rules[permission] = action
+        await cls._persist_permanent_rule(permission, action)
+
+    @classmethod
+    async def delete_permanent_rule(cls, permission: str) -> bool:
+        """Remove a durable rule; False when there was none."""
+        await cls._ensure_persisted_state_loaded()
+        if permission not in cls._permanent_rules:
+            return False
+        cls._permanent_rules.pop(permission, None)
+        await Storage.delete(f"{cls._PERMANENT_PREFIX}{permission}")
+        return True
+
+    @classmethod
     async def _persist_session_rules(cls, session_id: str) -> None:
         await Storage.set(
             f"{cls._SESSION_PREFIX}{session_id}",
@@ -478,6 +503,29 @@ class PermissionNext:
         Returns one of: 'allow', 'deny', 'ask'.
         """
         return cls._evaluate(permission, pattern, ruleset)
+
+    @classmethod
+    def evaluate_request(
+        cls,
+        permission: str,
+        patterns: List[str],
+        ruleset: Ruleset,
+    ) -> Optional[str]:
+        """Evaluate a tool request, or return None when it has no configured rule."""
+        if not any(
+            cls._pattern_matches(permission, rule.permission or "*")
+            for rule in ruleset
+        ):
+            return None
+
+        actions = {
+            cls._evaluate(permission, pattern, ruleset)
+            for pattern in (patterns or ["*"])
+        }
+        for action in ("deny", "ask", "allow"):
+            if action in actions:
+                return action
+        return None
 
     @classmethod
     def _evaluate(

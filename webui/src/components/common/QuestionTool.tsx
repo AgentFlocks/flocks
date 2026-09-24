@@ -11,7 +11,7 @@
  */
 
 import { useState, useRef } from 'react';
-import { Check, Loader2, Upload, Eye, EyeOff, CircleHelp } from 'lucide-react';
+import { IconCheck, IconLoader2, IconUpload, IconEye, IconEyeOff, IconHelpCircle } from '@tabler/icons-react';
 import { useTranslation } from 'react-i18next';
 
 // ============================================================================
@@ -290,7 +290,7 @@ function ChoiceInput({
                       selected ? 'border-emerald-500 bg-emerald-500' : 'border-zinc-300 bg-transparent'
                     }`}
                   >
-                    {selected && <Check className="w-2.5 h-2.5 text-white" strokeWidth={3} />}
+                    {selected && <IconCheck aria-hidden="true" className="w-2.5 h-2.5 text-white" stroke={3} />}
                   </span>
                 ) : (
                   <span
@@ -433,7 +433,7 @@ function PasswordInput({
         className="absolute right-2 top-1/2 -translate-y-1/2 text-zinc-400 hover:text-zinc-600"
         tabIndex={-1}
       >
-        {show ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+        {show ? <IconEyeOff aria-hidden="true" className="w-4 h-4" /> : <IconEye aria-hidden="true" className="w-4 h-4" />}
       </button>
     </div>
   );
@@ -491,7 +491,7 @@ function FileInput({
             : 'border-zinc-300 text-zinc-500 hover:border-emerald-300 hover:bg-emerald-50 hover:text-emerald-700'
         }`}
       >
-        <Upload className="w-4 h-4 flex-shrink-0" />
+        <IconUpload aria-hidden="true" className="w-4 h-4 flex-shrink-0" />
         <span className="truncate max-w-[240px]">
           {filename || q.placeholder || t('question.filePlaceholder')}
         </span>
@@ -589,7 +589,7 @@ export function QuestionTool({ questions, onAnswer, onReject, compact = false }:
     <div className="overflow-hidden rounded-lg border border-zinc-200 bg-white">
       {/* Header */}
       <div className={`${px} flex items-center gap-2 border-b border-zinc-100 bg-white py-2`}>
-        <CircleHelp className={`${compact ? 'h-3.5 w-3.5' : 'h-4 w-4'} flex-shrink-0 text-emerald-500`} />
+        <IconHelpCircle aria-hidden="true" className={`${compact ? 'h-3.5 w-3.5' : 'h-4 w-4'} flex-shrink-0 text-emerald-500`} />
         <span className={`${textSm} font-medium text-zinc-700`}>{t('question.needsAnswer')}</span>
       </div>
 
@@ -654,8 +654,8 @@ export function QuestionTool({ questions, onAnswer, onReject, compact = false }:
             className={`flex flex-1 items-center justify-center gap-1.5 rounded-lg bg-emerald-600 py-2 ${textSm} font-medium text-white transition-colors hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-40`}
           >
             {submitting
-              ? <Loader2 className={`${compact ? 'w-3 h-3' : 'w-4 h-4'} animate-spin`} />
-              : <Check className={`${compact ? 'w-3 h-3' : 'w-4 h-4'}`} />
+              ? <IconLoader2 aria-hidden="true" className={`${compact ? 'w-3 h-3' : 'w-4 h-4'} animate-spin`} />
+              : <IconCheck aria-hidden="true" className={`${compact ? 'w-3 h-3' : 'w-4 h-4'}`} />
             }
             {t('question.confirm')}
           </button>

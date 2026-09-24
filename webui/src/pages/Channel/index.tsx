@@ -1,38 +1,38 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { QRCodeSVG } from 'qrcode.react';
 import {
-  Radio,
-  Save,
-  Download,
-  Eye,
-  EyeOff,
-  Plus,
-  Trash2,
-  CheckCircle,
-  XCircle,
-  AlertTriangle,
-  ChevronDown,
-  ChevronUp,
-  Activity,
-  MessageSquare,
-  Wifi,
-  WifiOff,
-  RefreshCw,
-  Loader2,
-  RotateCcw,
-  ExternalLink,
-} from 'lucide-react';
+  IconBroadcast,
+  IconDeviceFloppy,
+  IconDownload,
+  IconEye,
+  IconEyeOff,
+  IconPlus,
+  IconTrash,
+  IconCircleCheck,
+  IconCircleX,
+  IconAlertTriangle,
+  IconChevronDown,
+  IconChevronUp,
+  IconActivity,
+  IconMessage,
+  IconWifi,
+  IconWifiOff,
+  IconRefresh,
+  IconLoader2,
+  IconRotate,
+  IconExternalLink,
+} from '@tabler/icons-react';
 import { useTranslation } from 'react-i18next';
 import PageHeader from '@/components/common/PageHeader';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
 import EmptyState from '@/components/common/EmptyState';
 import ChannelIcon from '@/components/common/ChannelIcon';
 import { useToast } from '@/components/common/Toast';
+import { extractErrorMessage } from '@/utils/error';
 import client from '@/api/client';
 import { useAgents } from '@/hooks/useAgents';
 import { getAgentDisplayName, isAgentUsableInChat } from '@/utils/agentDisplay';
-import { flocksproPolicyApi, type PermissionMode } from '@/api/flocksproPolicy';
-import { flocksproUsersApi } from '@/api/flocksproUsers';
+import ExtensionSlot from '@/components/extensions/ExtensionSlot';
 
 // ============================================================================
 // Types
@@ -626,7 +626,7 @@ function HostInput({
           }}
           className="absolute inset-y-0 right-0 flex items-center px-2.5 text-gray-400 hover:text-gray-600 disabled:cursor-not-allowed disabled:text-gray-300"
         >
-          <ChevronDown className="w-4 h-4" />
+          <IconChevronDown aria-hidden="true" className="w-4 h-4" />
         </button>
       </div>
 
@@ -681,7 +681,7 @@ function SecretInput({
         onClick={() => setShow(!show)}
         className="absolute inset-y-0 right-0 pr-2.5 flex items-center text-gray-400 hover:text-gray-600"
       >
-        {show ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+        {show ? <IconEyeOff aria-hidden="true" className="w-4 h-4" /> : <IconEye aria-hidden="true" className="w-4 h-4" />}
       </button>
     </div>
   );
@@ -810,7 +810,7 @@ function TagsInput({
             onClick={() => onChange(value.filter((t) => t !== tag))}
             className="hover:text-red-900"
           >
-            <XCircle className="w-3 h-3" />
+            <IconCircleX aria-hidden="true" className="w-3 h-3" />
           </button>
         </span>
       ))}
@@ -916,7 +916,7 @@ function ChannelSecurityFields({
             <span className={`${selectedVisibleAgents.length === 0 ? 'text-gray-400' : 'text-gray-700'} truncate`}>
               {visibleAgentSummary}
             </span>
-            <ChevronDown className={`w-4 h-4 text-gray-400 transition-transform ${visibleAgentOpen ? 'rotate-180' : ''}`} />
+            <IconChevronDown aria-hidden="true" className={`w-4 h-4 text-gray-400 transition-transform ${visibleAgentOpen ? 'rotate-180' : ''}`} />
           </button>
           {visibleAgentOpen && (
             <div className="absolute z-20 mt-1 w-full max-h-64 overflow-y-auto rounded-md border border-gray-200 bg-white shadow-lg">
@@ -946,45 +946,6 @@ function ChannelSecurityFields({
   );
 }
 
-function ProChannelPermissionModeField({ channelId }: { channelId: string }) {
-  const { t } = useTranslation('channel');
-  const [enabled, setEnabled] = useState(false);
-  const [mode, setMode] = useState<PermissionMode>('require-confirm');
-
-  useEffect(() => {
-    let active = true;
-    void flocksproUsersApi.hasCapability().then((available) => {
-      if (!active) return;
-      setEnabled(available);
-      if (available) {
-        void flocksproPolicyApi.getChannel(channelId)
-          .then((result) => active && setMode(result.permissionMode ?? 'require-confirm'))
-          .catch(() => active && setEnabled(false));
-      }
-    });
-    return () => { active = false; };
-  }, [channelId]);
-
-  if (!enabled) return null;
-  return (
-    <FieldRow label={t('security.permissionMode')} hint={t('security.permissionModeHint')}>
-      <Select
-        value={mode}
-        onChange={(value) => {
-          const next = value as PermissionMode;
-          setMode(next);
-          void flocksproPolicyApi.setChannel(channelId, next).catch(() => setMode(mode));
-        }}
-        options={[
-          { value: 'readonly', label: t('security.permissionModeReadonly') },
-          { value: 'require-confirm', label: t('security.permissionModeRequireConfirm') },
-          { value: 'auto-allow-all', label: t('security.permissionModeAutoConfirmAll') },
-        ]}
-      />
-    </FieldRow>
-  );
-}
-
 function Section({
   title,
   description,
@@ -1011,9 +972,9 @@ function Section({
           )}
         </div>
         {open ? (
-          <ChevronUp className="w-4 h-4 text-gray-400 flex-shrink-0" />
+          <IconChevronUp aria-hidden="true" className="w-4 h-4 text-gray-400 flex-shrink-0" />
         ) : (
-          <ChevronDown className="w-4 h-4 text-gray-400 flex-shrink-0" />
+          <IconChevronDown aria-hidden="true" className="w-4 h-4 text-gray-400 flex-shrink-0" />
         )}
       </button>
       {open && <div className="px-4 py-2">{children}</div>}
@@ -1049,7 +1010,7 @@ function GuideDownloadButton({
         download={download}
         className="inline-flex items-center justify-center gap-1.5 rounded-md border border-blue-300 bg-white px-3 py-2 text-sm font-medium text-blue-700 transition-colors hover:bg-blue-50 hover:text-blue-800"
       >
-        <Download className="w-4 h-4" />
+        <IconDownload aria-hidden="true" className="w-4 h-4" />
         {label}
       </a>
     </div>
@@ -1146,22 +1107,22 @@ function ConnectionStatusPanel({ status, config, channelId }: ConnectionStatusPa
     {
       label: t('connection.uptime'),
       value: isConnected ? formatUptime(status?.uptime_seconds) : '--',
-      icon: <Activity className="w-3.5 h-3.5 text-gray-400" />,
+      icon: <IconActivity aria-hidden="true" className="w-3.5 h-3.5 text-gray-400" />,
     },
     {
       label: t('connection.lastMessage'),
       value: formatLastMessageAt(status?.last_message_at, t, i18n.language),
-      icon: <MessageSquare className="w-3.5 h-3.5 text-gray-400" />,
+      icon: <IconMessage aria-hidden="true" className="w-3.5 h-3.5 text-gray-400" />,
     },
     {
       label: t('connection.reconnects'),
       value: status?.reconnect_count != null ? String(status.reconnect_count) : '--',
-      icon: <RotateCcw className="w-3.5 h-3.5 text-gray-400" />,
+      icon: <IconRotate aria-hidden="true" className="w-3.5 h-3.5 text-gray-400" />,
     },
     {
       label: t('connection.totalErrors'),
       value: status?.error_count != null ? String(status.error_count) : '--',
-      icon: <AlertTriangle className="w-3.5 h-3.5 text-gray-400" />,
+      icon: <IconAlertTriangle aria-hidden="true" className="w-3.5 h-3.5 text-gray-400" />,
     },
   ];
 
@@ -1192,7 +1153,7 @@ function ConnectionStatusPanel({ status, config, channelId }: ConnectionStatusPa
           )}
         </div>
         <span className={`flex-shrink-0 inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium rounded-full ${sc.badge}`}>
-          {channelId === 'feishu' && 'WebSocket'}
+          {channelId === 'feishu' && ((config as FeishuChannelConfig).connectionMode === 'webhook' ? 'Webhook' : 'WebSocket')}
           {channelId === 'wecom' && 'WebSocket'}
           {channelId === 'dingtalk' && 'Stream'}
           {channelId === 'weixin' && 'Long-Poll'}
@@ -1205,7 +1166,7 @@ function ConnectionStatusPanel({ status, config, channelId }: ConnectionStatusPa
       {status?.last_error && (
         <div className="border-t border-red-100 bg-white/70 px-4 py-3">
           <div className="mb-1.5 flex items-center gap-1.5 text-xs font-semibold text-red-700">
-            <AlertTriangle className="h-3.5 w-3.5 flex-shrink-0" />
+            <IconAlertTriangle aria-hidden="true" className="h-3.5 w-3.5 flex-shrink-0" />
             {t('connection.failureReason')}
           </div>
           <p className="whitespace-pre-wrap break-words text-sm leading-relaxed text-red-700">
@@ -1277,7 +1238,7 @@ function ChannelCard({ meta, config, status, isSelected, onClick }: ChannelCardP
     <button
       type="button"
       onClick={onClick}
-      className={`w-full text-left flex items-center gap-3 px-3 py-3 rounded-lg border transition-all ${
+      className={`w-40 flex-shrink-0 md:w-full text-left flex items-center gap-3 px-3 py-3 rounded-lg border transition-all ${
         isSelected
           ? 'border-red-200 bg-red-50 shadow-sm'
           : 'border-gray-200 bg-white hover:border-gray-300 hover:bg-gray-50'
@@ -1495,7 +1456,7 @@ function FeishuPanel({ config, agentOptions, onChange }: FeishuPanelProps) {
       >
         {!config.appId && accountKeys.length === 0 && (
           <div className="flex items-start gap-2 px-3 py-2.5 mb-3 text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded-md">
-            <AlertTriangle className="w-4 h-4 flex-shrink-0 mt-0.5" />
+            <IconAlertTriangle aria-hidden="true" className="w-4 h-4 flex-shrink-0 mt-0.5" />
             <span>{t('feishu.multiAccountHint')}</span>
           </div>
         )}
@@ -1516,7 +1477,7 @@ function FeishuPanel({ config, agentOptions, onChange }: FeishuPanelProps) {
           onClick={addAccount}
           className="mt-3 flex items-center gap-1.5 text-sm text-red-600 hover:text-red-700"
         >
-          <Plus className="w-4 h-4" />
+          <IconPlus aria-hidden="true" className="w-4 h-4" />
           {t('feishu.addAccount')}
         </button>
       </Section>
@@ -1552,7 +1513,7 @@ function AccountCard({ id, config, onChange, onRename, onRemove }: AccountCardPr
             onClick={onRemove}
             className="text-gray-400 hover:text-red-500 transition-colors"
           >
-            <Trash2 className="w-4 h-4" />
+            <IconTrash aria-hidden="true" className="w-4 h-4" />
           </button>
         </div>
       </div>
@@ -1898,9 +1859,9 @@ function TelegramPanel({ config, agentOptions, onChange, onRefresh }: TelegramPa
                   className="flex items-center gap-1.5 px-4 py-1.5 text-sm bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
                 >
                   {pairingState === 'loading' ? (
-                    <Loader2 className="w-4 h-4 animate-spin" />
+                    <IconLoader2 aria-hidden="true" className="w-4 h-4 animate-spin" />
                   ) : pairingState === 'done' ? (
-                    <CheckCircle className="w-4 h-4" />
+                    <IconCircleCheck aria-hidden="true" className="w-4 h-4" />
                   ) : null}
                   {pairingState === 'loading'
                     ? t('telegram.pairingLoading')
@@ -2018,7 +1979,7 @@ function SlackPanel({
       link.remove();
       URL.revokeObjectURL(url);
     } catch (err: any) {
-      toast.error(t('slack.downloadManifestFailed'), err.message);
+      toast.error(t('slack.downloadManifestFailed'), extractErrorMessage(err));
     }
   }, [t, toast]);
 
@@ -2030,35 +1991,35 @@ function SlackPanel({
             <button
               type="button"
               onClick={handleDownloadManifest}
-              className="group flex min-h-[82px] items-center justify-between gap-3 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-left shadow-sm transition-all hover:-translate-y-0.5 hover:border-red-300 hover:bg-red-100 hover:shadow-md focus:outline-none focus:ring-2 focus:ring-red-400 focus:ring-offset-1"
+              className="group flex min-h-[82px] items-center justify-between gap-3 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-left shadow-sm transition-all hover:-translate-y-0.5 hover:border-red-300 hover:bg-red-100 focus:outline-none focus:ring-2 focus:ring-red-400 focus:ring-offset-1"
             >
               <span className="flex min-w-0 items-center gap-3">
                 <span className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-md bg-white text-red-600 shadow-sm">
-                  <Download className="h-5 w-5" />
+                  <IconDownload aria-hidden="true" className="h-5 w-5" />
                 </span>
                 <span className="min-w-0">
                   <span className="block text-sm font-semibold text-red-700">{t('slack.downloadManifest')}</span>
                   <span className="mt-0.5 block text-xs leading-relaxed text-red-600">{t('slack.downloadManifestDesc')}</span>
                 </span>
               </span>
-              <Download className="h-4 w-4 flex-shrink-0 text-red-500 transition-transform group-hover:translate-y-0.5" />
+              <IconDownload aria-hidden="true" className="h-4 w-4 flex-shrink-0 text-red-500 transition-transform group-hover:translate-y-0.5" />
             </button>
             <a
               href={SLACK_APPS_URL}
               target="_blank"
               rel="noreferrer"
-              className="group flex min-h-[82px] items-center justify-between gap-3 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-left shadow-sm transition-all hover:-translate-y-0.5 hover:border-red-300 hover:bg-red-100 hover:shadow-md focus:outline-none focus:ring-2 focus:ring-red-400 focus:ring-offset-1"
+              className="group flex min-h-[82px] items-center justify-between gap-3 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-left shadow-sm transition-all hover:-translate-y-0.5 hover:border-red-300 hover:bg-red-100 focus:outline-none focus:ring-2 focus:ring-red-400 focus:ring-offset-1"
             >
               <span className="flex min-w-0 items-center gap-3">
                 <span className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-md bg-white text-red-600 shadow-sm">
-                  <MessageSquare className="h-5 w-5" />
+                  <IconMessage aria-hidden="true" className="h-5 w-5" />
                 </span>
                 <span className="min-w-0">
                   <span className="block text-sm font-semibold text-red-700">{t('slack.openSlackApps')}</span>
                   <span className="mt-0.5 block text-xs leading-relaxed text-red-600">{t('slack.openSlackAppsDesc')}</span>
                 </span>
               </span>
-              <ExternalLink className="h-4 w-4 flex-shrink-0 text-red-500 transition-transform group-hover:-translate-y-0.5 group-hover:translate-x-0.5" />
+              <IconExternalLink aria-hidden="true" className="h-4 w-4 flex-shrink-0 text-red-500 transition-transform group-hover:-translate-y-0.5 group-hover:translate-x-0.5" />
             </a>
           </div>
           <ol className="grid gap-2 text-sm text-gray-600">
@@ -2591,9 +2552,9 @@ function WhatsAppPanel({ config, onChange, onPairSuccess }: WhatsAppPanelProps) 
             className="flex items-center gap-2 px-4 py-2 text-sm font-medium bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors shadow-sm"
           >
             {qrPhase === 'loading' ? (
-              <Loader2 className="w-4 h-4 animate-spin" />
+              <IconLoader2 aria-hidden="true" className="w-4 h-4 animate-spin" />
             ) : (
-              <MessageSquare className="w-4 h-4" />
+              <IconMessage aria-hidden="true" className="w-4 h-4" />
             )}
             {qrPhase === 'loading'
               ? t('whatsapp.qrLoading')
@@ -2603,7 +2564,7 @@ function WhatsAppPanel({ config, onChange, onPairSuccess }: WhatsAppPanelProps) 
           </button>
           {isPaired && (
             <p className="mt-1.5 text-xs text-emerald-700 flex items-center gap-1">
-              <CheckCircle className="w-3 h-3 text-emerald-500" />
+              <IconCircleCheck aria-hidden="true" className="w-3 h-3 text-emerald-500" />
               {t('whatsapp.sessionConfigured')}
             </p>
           )}
@@ -2622,7 +2583,7 @@ function WhatsAppPanel({ config, onChange, onPairSuccess }: WhatsAppPanelProps) 
               <h3 className="text-base font-semibold text-gray-800">{t('whatsapp.qrModalTitle')}</h3>
               {qrPhase === 'loading' && (
                 <div className="w-48 h-48 flex items-center justify-center">
-                  <Loader2 className="w-10 h-10 animate-spin text-emerald-500" />
+                  <IconLoader2 aria-hidden="true" className="w-10 h-10 animate-spin text-emerald-500" />
                 </div>
               )}
               {qrPhase === 'scanning' && qrValue && (
@@ -2630,7 +2591,7 @@ function WhatsAppPanel({ config, onChange, onPairSuccess }: WhatsAppPanelProps) 
               )}
               {(qrPhase === 'connected' || qrPhase === 'complete') && (
                 <div className="w-48 h-48 flex flex-col items-center justify-center gap-2">
-                  <CheckCircle className="w-14 h-14 text-emerald-500" />
+                  <IconCircleCheck aria-hidden="true" className="w-14 h-14 text-emerald-500" />
                   <p className="text-sm font-medium text-emerald-700">
                     {qrPhase === 'complete' ? t('whatsapp.qrComplete') : t('whatsapp.qrConnected')}
                   </p>
@@ -2638,7 +2599,7 @@ function WhatsAppPanel({ config, onChange, onPairSuccess }: WhatsAppPanelProps) 
               )}
               {qrPhase === 'error' && (
                 <div className="w-48 flex flex-col items-center gap-3">
-                  <XCircle className="w-10 h-10 text-red-500" />
+                  <IconCircleX aria-hidden="true" className="w-10 h-10 text-red-500" />
                   <p className="text-xs text-red-600 text-center break-all">{qrError || t('whatsapp.qrError')}</p>
                   <button
                     type="button"
@@ -2960,7 +2921,7 @@ function WeixinPanel({ config, agentOptions, onChange, onQrLoginSuccess }: Weixi
             className="flex items-center gap-2 px-4 py-2 text-sm font-medium bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors shadow-sm"
           >
             {qrPhase === 'loading' ? (
-              <Loader2 className="w-4 h-4 animate-spin" />
+              <IconLoader2 aria-hidden="true" className="w-4 h-4 animate-spin" />
             ) : (
               <span className="text-base leading-none">▣</span>
             )}
@@ -2968,7 +2929,7 @@ function WeixinPanel({ config, agentOptions, onChange, onQrLoginSuccess }: Weixi
           </button>
           {config.token && config.accountId && (
             <p className="mt-1.5 text-xs text-gray-500 flex items-center gap-1">
-              <CheckCircle className="w-3 h-3 text-green-500" />
+              <IconCircleCheck aria-hidden="true" className="w-3 h-3 text-green-500" />
               {t('weixin.qrAlreadyLinked')}
             </p>
           )}
@@ -2992,7 +2953,7 @@ function WeixinPanel({ config, agentOptions, onChange, onQrLoginSuccess }: Weixi
               {/* QR code display area */}
               {qrPhase === 'loading' && (
                 <div className="w-48 h-48 flex items-center justify-center">
-                  <Loader2 className="w-10 h-10 animate-spin text-green-500" />
+                  <IconLoader2 aria-hidden="true" className="w-10 h-10 animate-spin text-green-500" />
                 </div>
               )}
               {(qrPhase === 'scanning' || qrPhase === 'scaned') && qrUrl && (
@@ -3003,7 +2964,7 @@ function WeixinPanel({ config, agentOptions, onChange, onQrLoginSuccess }: Weixi
                   {qrPhase === 'scaned' && (
                     <div className="absolute inset-0 flex items-center justify-center">
                       <div className="bg-white/90 rounded-xl px-3 py-2 text-center shadow">
-                        <CheckCircle className="w-6 h-6 text-green-500 mx-auto mb-1" />
+                        <IconCircleCheck aria-hidden="true" className="w-6 h-6 text-green-500 mx-auto mb-1" />
                         <p className="text-xs font-medium text-gray-700">{t('weixin.qrScaned')}</p>
                       </div>
                     </div>
@@ -3012,13 +2973,13 @@ function WeixinPanel({ config, agentOptions, onChange, onQrLoginSuccess }: Weixi
               )}
               {qrPhase === 'confirmed' && (
                 <div className="w-48 h-48 flex flex-col items-center justify-center gap-2">
-                  <CheckCircle className="w-14 h-14 text-green-500" />
+                  <IconCircleCheck aria-hidden="true" className="w-14 h-14 text-green-500" />
                   <p className="text-sm font-medium text-green-700">{t('weixin.qrConfirmed')}</p>
                 </div>
               )}
               {qrPhase === 'expired' && (
                 <div className="w-48 h-48 flex flex-col items-center justify-center gap-3">
-                  <AlertTriangle className="w-10 h-10 text-amber-500" />
+                  <IconAlertTriangle aria-hidden="true" className="w-10 h-10 text-amber-500" />
                   <p className="text-sm text-gray-600 text-center">{t('weixin.qrExpired')}</p>
                   <button
                     type="button"
@@ -3031,7 +2992,7 @@ function WeixinPanel({ config, agentOptions, onChange, onQrLoginSuccess }: Weixi
               )}
               {qrPhase === 'error' && (
                 <div className="w-48 flex flex-col items-center gap-3">
-                  <XCircle className="w-10 h-10 text-red-500" />
+                  <IconCircleX aria-hidden="true" className="w-10 h-10 text-red-500" />
                   <p className="text-xs text-red-600 text-center break-all">{qrError || t('weixin.qrError')}</p>
                   <button
                     type="button"
@@ -3198,35 +3159,38 @@ function DetailHeader({
 
   const saveIcon =
     isBusy ? (
-      <Loader2 className="w-4 h-4 animate-spin" />
+      <IconLoader2 aria-hidden="true" className="w-4 h-4 animate-spin" />
     ) : (
-      <Save className="w-4 h-4" />
+      <IconDeviceFloppy aria-hidden="true" className="w-4 h-4" />
     );
 
   return (
-    <div className="px-6 py-4 border-b border-gray-200 flex items-center gap-4">
+    // flex-wrap: on phone widths the action group (toggle / restart / save) drops
+    // to its own line instead of squeezing the title to 0px and pushing the save
+    // button past the panel edge.
+    <div className="px-6 py-4 border-b border-gray-200 flex flex-wrap items-center gap-4">
       <div className="flex-shrink-0"><ChannelIcon channelId={meta.id} size="md" /></div>
       <div className="flex-1 min-w-0">
         <div className="flex items-center gap-2">
           <h2 className="text-lg font-semibold text-gray-900">{t(`channelName.${meta.id}`, { defaultValue: meta.label })}</h2>
           {isConnected ? (
             <span className="inline-flex items-center gap-1 px-2 py-0.5 text-xs font-medium bg-green-100 text-green-700 rounded-full">
-              <Wifi className="w-3 h-3" />
+              <IconWifi aria-hidden="true" className="w-3 h-3" />
               {t('status.running')}
             </span>
           ) : isInGateway ? (
             <span className="inline-flex items-center gap-1 px-2 py-0.5 text-xs font-medium bg-amber-100 text-amber-700 rounded-full">
-              <Activity className="w-3 h-3" />
+              <IconActivity aria-hidden="true" className="w-3 h-3" />
               {t('header.connecting')}
             </span>
           ) : isEnabled ? (
             <span className="inline-flex items-center gap-1 px-2 py-0.5 text-xs font-medium bg-amber-100 text-amber-700 rounded-full">
-              <Activity className="w-3 h-3" />
+              <IconActivity aria-hidden="true" className="w-3 h-3" />
               {t('status.configured')}
             </span>
           ) : (
             <span className="inline-flex items-center gap-1 px-2 py-0.5 text-xs font-medium bg-gray-100 text-gray-500 rounded-full">
-              <WifiOff className="w-3 h-3" />
+              <IconWifiOff aria-hidden="true" className="w-3 h-3" />
               {t('status.disabled')}
             </span>
           )}
@@ -3243,7 +3207,7 @@ function DetailHeader({
             .join(' · ')}
         </p>
       </div>
-      <div className="flex items-center gap-2 flex-shrink-0">
+      <div className="flex items-center gap-2 flex-shrink-0 ml-auto">
         <div className="flex items-center gap-2 mr-1">
           <span className="text-sm text-gray-500">{t('enableChannel')}</span>
           <Toggle checked={isEnabled} onChange={onToggleEnabled} disabled={isBusy} />
@@ -3256,9 +3220,9 @@ function DetailHeader({
             className="flex items-center gap-1.5 px-3 py-2 text-sm border border-gray-300 text-gray-600 rounded-lg hover:bg-gray-50 disabled:opacity-50 transition-colors"
           >
             {restarting ? (
-              <Loader2 className="w-4 h-4 animate-spin" />
+              <IconLoader2 aria-hidden="true" className="w-4 h-4 animate-spin" />
             ) : (
-              <RotateCcw className="w-4 h-4" />
+              <IconRotate aria-hidden="true" className="w-4 h-4" />
             )}
             {restarting ? t('restarting') : t('restart')}
           </button>
@@ -3266,7 +3230,7 @@ function DetailHeader({
         <button
           onClick={onSave}
           disabled={isBusy}
-          className="flex items-center gap-1.5 px-4 py-2 text-sm bg-slate-800 text-white rounded-lg hover:bg-slate-900 disabled:opacity-50 transition-colors"
+          className="ui-btn ui-btn-primary"
         >
           {saveIcon}
           {saveLabel}
@@ -3297,9 +3261,9 @@ function StatsStrip({
   return (
     <div className="flex gap-3 mb-4">
       {[
-        { label: t('stats.total'), value: total, icon: <Radio className="w-4 h-4 text-gray-400" /> },
-        { label: t('stats.enabled'), value: enabled, icon: <CheckCircle className="w-4 h-4 text-slate-500" /> },
-        { label: t('stats.running'), value: running, icon: <Activity className="w-4 h-4 text-green-500" /> },
+        { label: t('stats.total'), value: total, icon: <IconBroadcast aria-hidden="true" className="w-4 h-4 text-gray-400" /> },
+        { label: t('stats.enabled'), value: enabled, icon: <IconCircleCheck aria-hidden="true" className="w-4 h-4 text-slate-500" /> },
+        { label: t('stats.running'), value: running, icon: <IconActivity aria-hidden="true" className="w-4 h-4 text-green-500" /> },
       ].map((stat) => (
         <div
           key={stat.label}
@@ -3424,7 +3388,7 @@ export default function ChannelPage() {
         return nextSelectedId;
       });
     } catch (err: any) {
-      toast.error(t('loadFailed'), err.message);
+      toast.error(t('loadFailed'), extractErrorMessage(err));
     } finally {
       setLoading(false);
     }
@@ -3499,7 +3463,7 @@ export default function ChannelPage() {
         toast.success(t('saveSucess'));
       }
     } catch (err: any) {
-      toast.error(t('saveFailed'), err.message);
+      toast.error(t('saveFailed'), extractErrorMessage(err));
     } finally {
       setSavePhase('idle');
     }
@@ -3586,8 +3550,16 @@ export default function ChannelPage() {
     if (!id) return;
     setRestarting(true);
     const channelName = t(`channelName.${id}`, { defaultValue: channels.find((c) => c.id === id)?.label ?? id });
-    // Fire-and-forget with a short timeout — the actual reconnect runs in background
-    client.post(`/api/channel/${id}/restart`, {}, { timeout: 5000 }).catch(() => {});
+    // The route only schedules the reconnect (it returns right away), so a
+    // non-2xx here is a real failure (unknown channel, auth, server error)
+    // and must not be reported as "restarted".
+    try {
+      await client.post(`/api/channel/${id}/restart`, {}, { timeout: 5000 });
+    } catch (err: any) {
+      toast.error(t('restartFailed'), extractErrorMessage(err));
+      setRestarting(false);
+      return;
+    }
     toast.success(t('restartSuccess', { channel: channelName }));
     setTimeout(() => {
       fetchAll();
@@ -3649,7 +3621,7 @@ export default function ChannelPage() {
         ...prev,
         [selectedId]: { ...prev[selectedId], enabled: !enabled },
       }));
-      toast.error(t('saveFailed'), err.message);
+      toast.error(t('saveFailed'), extractErrorMessage(err));
     } finally {
       toggleInFlightRef.current = false;
       setSavePhase('idle');
@@ -3676,7 +3648,7 @@ export default function ChannelPage() {
       <PageHeader
         title={t('pageTitle')}
         description={t('pageDescription')}
-        icon={<Radio className="w-8 h-8" />}
+        icon={<IconBroadcast aria-hidden="true" className="w-8 h-8" />}
         action={
           <button
             onClick={async () => {
@@ -3691,7 +3663,7 @@ export default function ChannelPage() {
                 : 'border-gray-300 text-gray-600 hover:bg-gray-50'
             }`}
           >
-            <RefreshCw className={`w-4 h-4 transition-transform ${refreshingStatus ? 'animate-spin' : ''}`} />
+            <IconRefresh aria-hidden="true" className={`w-4 h-4 transition-transform ${refreshingStatus ? 'animate-spin' : ''}`} />
             {refreshingStatus ? t('refreshing') : refreshDone ? t('refreshed') : t('refreshStatus')}
           </button>
         }
@@ -3702,15 +3674,19 @@ export default function ChannelPage() {
       {channels.length === 0 ? (
         <div className="flex-1 bg-white rounded-lg border border-gray-200 flex items-center justify-center">
           <EmptyState
-            icon={<Radio className="w-16 h-16" />}
+            icon={<IconBroadcast aria-hidden="true" className="w-16 h-16" />}
             title={t('empty.title')}
             description={t('empty.description')}
           />
         </div>
       ) : (
-        <div className="flex gap-3 flex-1 overflow-hidden min-h-0">
-          {/* Left: Channel List */}
-          <div className="w-56 flex-shrink-0 flex flex-col gap-1.5 overflow-y-auto pr-0.5">
+        <div className="flex flex-col md:flex-row gap-3 flex-1 overflow-hidden min-h-0">
+          {/* Left: Channel List — on narrow screens it becomes a horizontal
+              selector strip above the form instead of squeezing the form. */}
+          <div
+            data-testid="channel-list"
+            className="flex-shrink-0 flex flex-row gap-1.5 overflow-x-auto pb-1 md:w-56 md:flex-col md:overflow-x-visible md:overflow-y-auto md:pb-0 md:pr-0.5"
+          >
             {channels.map((ch) => (
               <ChannelCard
                 key={ch.id}
@@ -3804,13 +3780,13 @@ export default function ChannelPage() {
                       onQrLoginSuccess={handleWeixinQrSuccess}
                     />
                   )}
-                  <ProChannelPermissionModeField channelId={selectedId!} />
+                  <ExtensionSlot name="channel.settings" context={{ channelId: selectedId }} />
                 </div>
               </>
             ) : (
               <div className="h-full flex items-center justify-center">
                 <EmptyState
-                  icon={<Radio className="w-16 h-16" />}
+                  icon={<IconBroadcast aria-hidden="true" className="w-16 h-16" />}
                   title={t('empty.selectChannel')}
                   description={t('empty.selectChannelHint')}
                 />

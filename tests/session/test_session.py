@@ -114,8 +114,8 @@ async def test_session_list():
 
 
 @pytest.mark.asyncio
-async def test_session_list_all_uses_cache(monkeypatch: pytest.MonkeyPatch):
-    """Repeated list_all calls should reuse the in-memory cache."""
+async def test_session_list_all_reads_fresh_shared_state(monkeypatch: pytest.MonkeyPatch):
+    """Repeated list_all calls read shared state so peer writes are visible."""
     Session._all_sessions_cache = None
 
     session = await Session.create(
@@ -139,7 +139,7 @@ async def test_session_list_all_uses_cache(monkeypatch: pytest.MonkeyPatch):
 
     assert any(s.id == session.id for s in first)
     assert any(s.id == session.id for s in second)
-    assert call_count == 1
+    assert call_count == 2
 
 
 @pytest.mark.asyncio
@@ -154,7 +154,7 @@ async def test_session_cache_invalidated_after_storage_clear():
     first = await Session.list_all()
     assert any(s.project_id == "test_project_clear_cache" for s in first)
 
-    await Storage.clear()
+    await Storage.clear(prefix="session:test_project_clear_cache:")
 
     second = await Session.list_all()
     assert all(s.project_id != "test_project_clear_cache" for s in second)
@@ -443,6 +443,48 @@ async def test_agent_register():
     assert agent is not None
     assert agent.name == "custom"
     assert agent.native is False
+
+
+@pytest.mark.asyncio
+async def test_session_delete_keeps_other_sessions_cached():
+    """Deleting one session must only evict that session's runtime caches."""
+    from flocks.session.message import Message, MessageRole, _session_locks
+
+    victim = await Session.create(
+        project_id="test_project_cache_scope",
+        directory="/test/dir",
+        title="victim",
+    )
+    sibling = await Session.create(
+        project_id="test_project_cache_scope",
+        directory="/test/dir",
+        title="sibling",
+    )
+    other_project = await Session.create(
+        project_id="test_project_cache_scope_other",
+        directory="/test/dir",
+        title="other project",
+    )
+    for session in (victim, sibling, other_project):
+        await Message.create(session.id, MessageRole.USER, f"hello {session.title}")
+        await Message.list(session.id)
+    await Session.list_all()
+    epoch_before = Message._cache_epoch
+
+    assert await Session.delete(victim.project_id, victim.id) is True
+
+    assert victim.id not in Message._messages_cache
+    assert victim.id not in Session._id_index
+    for session in (sibling, other_project):
+        assert session.id in Message._messages_cache
+        assert session.id in Message._lru
+        assert session.id in Message._parts_cache
+        assert session.id in _session_locks._locks
+        assert session.id in Session._id_index
+    # A global reset bumps the epoch and aborts in-flight loads of every session.
+    assert Message._cache_epoch == epoch_before
+    assert Session._all_sessions_cache is None
+    assert {s.id for s in await Session.list_all()} == {sibling.id, other_project.id}
 
 
 if __name__ == "__main__":

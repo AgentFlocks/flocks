@@ -44,8 +44,10 @@ def unregister_auth_context_adapter(name: str) -> None:
 PUBLIC_PATHS = frozenset({
     "/",
     "/health",
+    "/ready",
     "/favicon.ico",
     "/api/health",
+    "/api/ready",
     "/api/config/ui-display",
     "/api/config/ui-favicon",
     "/api/auth/login",
@@ -55,6 +57,18 @@ PUBLIC_PATHS = frozenset({
     "/auth/bootstrap-status",
     "/auth/bootstrap-admin",
 })
+
+# The TUI-prefixed auth paths are public only for the verb that implements
+# them: ``/auth/login`` etc. also match the TUI-compatible
+# ``PUT /auth/{provider_id}`` route in ``routes/misc.py``, which must stay
+# behind auth — a path-only exemption would let an anonymous ``PUT /auth/login``
+# reach it.  Paths not listed here are public for every method (an unmapped
+# verb then gets the router's usual 405).
+PUBLIC_PATH_METHODS: dict[str, frozenset[str]] = {
+    "/auth/login": frozenset({"POST", "OPTIONS"}),
+    "/auth/bootstrap-admin": frozenset({"POST", "OPTIONS"}),
+    "/auth/bootstrap-status": frozenset({"GET", "HEAD", "OPTIONS"}),
+}
 
 # Static asset prefixes never require auth (WebUI / favicon / etc.)
 PUBLIC_PREFIXES = (
@@ -153,10 +167,17 @@ def require_admin(request: Request) -> AuthUser:
     return user
 
 
-def auth_middleware_exempt(path: str) -> bool:
-    """Return True if the path is public (no auth required)."""
+def auth_middleware_exempt(path: str, method: Optional[str] = None) -> bool:
+    """Return True if the path is public (no auth required).
+
+    ``method`` narrows the fixed-path allowlist for entries listed in
+    ``PUBLIC_PATH_METHODS``; when omitted the check is path-only.
+    """
     if path in PUBLIC_PATHS:
-        return True
+        allowed = PUBLIC_PATH_METHODS.get(path)
+        if method is None or allowed is None or method.upper() in allowed:
+            return True
+        return False
     if any(path.startswith(prefix) for prefix in PUBLIC_PREFIXES):
         return True
     return any(pattern.match(path) for pattern in PUBLIC_PATH_REGEXES)
@@ -265,7 +286,9 @@ async def apply_auth_for_request(request: HTTPConnection):
         result = await _apply_auth_for_request(request)
         _blocked, auth_token, user = result
         extension_context: dict[str, Any] = {}
-        for adapter in _auth_context_adapters.values():
+        # Snapshot: an adapter may (re)register adapters while awaited, and
+        # resuming iteration over the live dict would raise RuntimeError.
+        for adapter in list(_auth_context_adapters.values()):
             supplied = await adapter(request, user)
             if isinstance(supplied, Mapping):
                 extension_context.update(supplied)
@@ -286,7 +309,7 @@ async def _apply_auth_for_request(request: HTTPConnection):
     Policy: every path is protected by default; only whitelisted public paths
     (see `PUBLIC_PATHS` / `PUBLIC_PREFIXES`) bypass auth.
     """
-    if auth_middleware_exempt(request.url.path):
+    if auth_middleware_exempt(request.url.path, request.scope.get("method")):
         token = set_current_auth_user(None)
         return None, token, None
 
@@ -298,7 +321,7 @@ async def _apply_auth_for_request(request: HTTPConnection):
                 detail="系统尚未初始化管理员账号，请先完成初始化",
             )
 
-        session_id = request.cookies.get(SESSION_COOKIE_NAME)
+        session_id = (request.cookies.get(SESSION_COOKIE_NAME) or "").strip()
         if not session_id:
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="请先登录")
 
@@ -349,7 +372,9 @@ async def _apply_auth_for_request(request: HTTPConnection):
             detail="系统尚未初始化管理员账号，请先完成初始化",
         )
 
-    session_id = request.cookies.get(SESSION_COOKIE_NAME)
+    # A whitespace-only cookie is "no cookie" for _has_session_cookie(); keep
+    # the same reading here so it lands on 请先登录, not 登录已过期.
+    session_id = (request.cookies.get(SESSION_COOKIE_NAME) or "").strip()
     if not session_id:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="请先登录")
 

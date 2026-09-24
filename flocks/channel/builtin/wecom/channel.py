@@ -141,10 +141,16 @@ class WeComChannel(ChannelPlugin):
             )
 
         ws_url = config.get("websocketUrl", "")
+        # websockets would read HTTPS_PROXY on its own (and miss the CIDR / port
+        # whitelist); hand it the policy's decision for this endpoint instead.
+        from flocks.net import proxy_url_for
+
+        ws_proxy = proxy_url_for(ws_url or "wss://openws.work.weixin.qq.com")
         self._ws_client = WSClient(
             bot_id=config["botId"],
             secret=config["secret"],
             **({"ws_url": ws_url} if ws_url else {}),
+            ws_options={"proxy": ws_proxy},
             max_reconnect_attempts=-1,
             heartbeat_interval=30_000,
             scene=1,            # SCENE_WECOM_OPENCLAW — 标识为 OpenClaw 连接，MCP 能力依赖此字段

@@ -2,15 +2,39 @@ import { useState, useEffect, useMemo, useCallback, useRef, useId } from 'react'
 import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
 import {
-  Brain, Cog, TestTube, Trash2, Search,
-  Zap, Eye, EyeOff, Wrench, MessageSquare,
-  Link2, Link2Off, DollarSign, Cpu,
-  Plus, ToggleLeft, ToggleRight,
-  ChevronDown, Check, AlertCircle, Loader2,
-  X, Shield, Pencil, Star, AlertTriangle,
-  CheckCircle2, ArrowUp, ArrowDown, ListOrdered,
-  Info,
-} from 'lucide-react';
+  IconChartBar,
+  IconSettings,
+  IconTestPipe,
+  IconTrash,
+  IconSearch,
+  IconBolt,
+  IconEye,
+  IconEyeOff,
+  IconTool,
+  IconMessage,
+  IconLink,
+  IconLinkOff,
+  IconCurrencyDollar,
+  IconCpu,
+  IconPlus,
+  IconToggleLeft,
+  IconToggleRight,
+  IconChevronDown,
+  IconCheck,
+  IconAlertCircle,
+  IconLoader2,
+  IconX,
+  IconShield,
+  IconPencil,
+  IconStar,
+  IconAlertTriangle,
+  IconCircleCheck,
+  IconArrowUp,
+  IconArrowDown,
+  IconListNumbers,
+  IconInfoCircle,
+  IconExternalLink,
+} from '@tabler/icons-react';
 import PageHeader from '@/components/common/PageHeader';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
 import EmptyState from '@/components/common/EmptyState';
@@ -66,9 +90,15 @@ function isCatalogBaseUrlRequired(providerId: string): boolean {
 }
 
 const AZURE_PROVIDER_IDS = new Set(['azure-openai', 'azure']);
+const THREATBOOK_LLM_PROVIDER_IDS = new Set(['threatbook-cn-llm', 'threatbook-io-llm']);
+const THREATBOOK_FREE_KEY_URL = 'https://portal.agentflocks.com/';
 
 function isAzureProviderId(providerId: string): boolean {
   return AZURE_PROVIDER_IDS.has(providerId);
+}
+
+function isThreatBookLLMProviderId(providerId: string): boolean {
+  return THREATBOOK_LLM_PROVIDER_IDS.has(providerId);
 }
 
 function convertEditablePrice(
@@ -468,7 +498,7 @@ export default function ModelPage() {
         <div className="text-center">
           <p className="text-red-600 mb-4">{error}</p>
           <button onClick={refetch} className="px-4 py-2 bg-slate-800 text-white rounded-lg hover:bg-slate-900">
-            Retry
+            {t('form.retry')}
           </button>
         </div>
       </div>
@@ -481,14 +511,14 @@ export default function ModelPage() {
       <PageHeader
         title={t('pageTitle')}
         description={t('pageDescription')}
-        icon={<Brain className="w-8 h-8" />}
+        icon={<IconCpu aria-hidden="true" className="w-8 h-8" />}
         action={
           <div className="flex items-center gap-2">
             <button
               onClick={() => setShowAddProvider(true)}
               className="flex items-center gap-2 px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 transition-colors"
             >
-              <Plus className="w-4 h-4" />
+              <IconPlus aria-hidden="true" className="w-4 h-4" />
               {t('addProvider')}
             </button>
             {selectedProvider && (
@@ -496,7 +526,7 @@ export default function ModelPage() {
                 onClick={() => setShowAddModel(true)}
                 className="flex items-center gap-2 px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors"
               >
-                <Plus className="w-4 h-4" />
+                <IconPlus aria-hidden="true" className="w-4 h-4" />
                 {t('addModel')}
               </button>
             )}
@@ -517,22 +547,23 @@ export default function ModelPage() {
       />
 
       {/* Main Content: Provider List + Detail Panel */}
-      <div className="flex gap-3 flex-1 overflow-hidden min-h-0">
+      {/* Stacks vertically below md so the detail panel is not squeezed on phones */}
+      <div className="flex flex-col md:flex-row gap-3 flex-1 overflow-hidden min-h-0">
         {/* Provider List */}
-        <div className="w-64 flex-shrink-0 flex flex-col min-w-0">
+        <div className="w-full md:w-64 flex-shrink-0 flex flex-col min-w-0 max-h-[38vh] md:max-h-none">
           <div className="flex-1 overflow-y-auto space-y-1.5 pr-1">
             {configuredProviders.length === 0 ? (
               <div className="flex flex-col items-center justify-center py-12 text-center">
                 <div className="w-16 h-16 rounded-full bg-gray-100 flex items-center justify-center mb-3">
-                  <Brain className="w-8 h-8 text-gray-400" />
+                  <IconCpu aria-hidden="true" className="w-8 h-8 text-gray-400" />
                 </div>
                 <p className="text-sm font-medium text-gray-700 mb-1">{t('providerList.empty')}</p>
                 <p className="text-xs text-gray-500 mb-4">{t('providerList.emptyHint')}</p>
                 <button
                   onClick={() => setShowAddProvider(true)}
-                  className="flex items-center gap-1.5 px-3 py-1.5 text-xs bg-slate-800 text-white rounded-lg hover:bg-slate-900 transition-colors"
+                  className="ui-btn ui-btn-primary ui-btn-sm"
                 >
-                  <Plus className="w-3.5 h-3.5" />
+                  <IconPlus aria-hidden="true" className="w-3.5 h-3.5" />
                   {t('providerList.addProvider')}
                 </button>
               </div>
@@ -565,7 +596,7 @@ export default function ModelPage() {
         </div>
 
         {/* Detail Panel */}
-        <div className="flex-1 bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden">
+        <div className="flex-1 min-h-0 bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden">
           {selectedProvider ? (
             <ProviderDetail
               key={selectedProvider.id}
@@ -585,7 +616,7 @@ export default function ModelPage() {
           ) : (
             <div className="h-full flex items-center justify-center">
               <EmptyState
-                icon={<Brain className="w-16 h-16" />}
+                icon={<IconCpu aria-hidden="true" className="w-16 h-16" />}
                 title={configuredProviders.length === 0 ? t('emptyDetail.addFirst') : t('emptyDetail.selectProvider')}
                 description={
                   configuredProviders.length === 0
@@ -736,7 +767,7 @@ function DashboardStrip({
       <div className="rounded-lg border p-3 bg-purple-50 text-purple-700 border-purple-200">
         <div className="flex items-center justify-between mb-1 opacity-70">
           <div className="flex items-center gap-2">
-            <Star className="w-5 h-5" />
+            <IconStar aria-hidden="true" className="w-5 h-5" />
             <span className="text-xs font-medium">{t('dashboard.defaultModel')}</span>
           </div>
           <button
@@ -744,18 +775,18 @@ function DashboardStrip({
             className="hover:opacity-100 opacity-60 transition-opacity"
             title={t('dashboard.setDefaultModel')}
           >
-            <Pencil className="w-3.5 h-3.5" />
+            <IconPencil aria-hidden="true" className="w-3.5 h-3.5" />
           </button>
         </div>
-        <div className="text-lg font-bold truncate">
+        <div className="text-lg font-bold truncate" title={defaultModel ? `${defaultModel.provider_id}/${defaultModel.model_id}` : undefined}>
           {defaultModel ? defaultModel.model_id : t('dashboard.noDefaultModel')}
         </div>
         {defaultModel && (
-          <div className="text-xs opacity-60 truncate">{defaultModel.provider_id}</div>
+          <div className="text-xs opacity-60 truncate" title={defaultModel.provider_id}>{defaultModel.provider_id}</div>
         )}
       </div>
       <StatCard
-        icon={<ListOrdered className="w-5 h-5" />}
+        icon={<IconListNumbers aria-hidden="true" className="w-5 h-5" />}
         label={t('dashboard.fallbackModels')}
         value={fallbackCount > 0
           ? t('dashboard.fallbackAvailability', { available: availableFallbackCount, total: fallbackCount })
@@ -765,16 +796,16 @@ function DashboardStrip({
         onClick={onEditFallbacks}
         title={t('dashboard.editFallbackModels')}
       />
-      <StatCard icon={<Link2 className="w-5 h-5" />} label={t('dashboard.connected')} value={String(connectedCount)} color="green" />
-      <StatCard icon={<Cpu className="w-5 h-5" />} label={t('dashboard.availableModels')} value={String(totalModels)} color="blue" />
+      <StatCard icon={<IconLink aria-hidden="true" className="w-5 h-5" />} label={t('dashboard.connected')} value={String(connectedCount)} color="green" />
+      <StatCard icon={<IconCpu aria-hidden="true" className="w-5 h-5" />} label={t('dashboard.availableModels')} value={String(totalModels)} color="blue" />
       <StatCard
-        icon={<Brain className="w-5 h-5" />}
+        icon={<IconChartBar aria-hidden="true" className="w-5 h-5" />}
         label={t('dashboard.totalTokens')}
         value={totalTokens > 0 ? formatTokenMillions(totalTokens) : t('dashboard.noUsage')}
         color="blue"
       />
       <StatCard
-        icon={<DollarSign className="w-5 h-5" />}
+        icon={<IconCurrencyDollar aria-hidden="true" className="w-5 h-5" />}
         label={t('dashboard.totalCost')}
         value={totalCost ?? t('dashboard.noCost')}
         color="amber"
@@ -862,9 +893,9 @@ function ProviderCard({ provider, isSelected, connStatus, onClick, onConfigure }
       <button
         onClick={(e) => { e.stopPropagation(); onConfigure(); }}
         className="p-1.5 rounded text-gray-400 hover:text-gray-700 hover:bg-gray-100 flex-shrink-0"
-        title="Configure"
+        title={t('form.configure')}
       >
-        <Cog className="w-3.5 h-3.5" />
+        <IconSettings aria-hidden="true" className="w-3.5 h-3.5" />
       </button>
     </div>
   );
@@ -990,7 +1021,7 @@ function ProviderDetail({
               disabled={batchTesting || loadingModels || models.length === 0}
               className="flex items-center gap-1 px-2 py-1 text-xs border border-gray-300 text-gray-600 rounded hover:border-slate-400 hover:text-slate-800 hover:bg-slate-50 disabled:opacity-50"
             >
-              {batchTesting ? <Loader2 className="w-3 h-3 animate-spin" /> : <TestTube className="w-3 h-3" />}
+              {batchTesting ? <IconLoader2 aria-hidden="true" className="w-3 h-3 animate-spin" /> : <IconTestPipe aria-hidden="true" className="w-3 h-3" />}
               {batchTesting ? t('detail.testing') : t('detail.batchTest')}
             </button>
           </div>
@@ -1002,7 +1033,7 @@ function ProviderDetail({
           </div>
         ) : models.length === 0 ? (
           <EmptyState
-            icon={<Brain className="w-10 h-10" />}
+            icon={<IconCpu aria-hidden="true" className="w-10 h-10" />}
             title={t('detail.noModels')}
             description={provider.configured ? t('detail.addModelHint') : t('detail.configureFirst')}
           />
@@ -1081,17 +1112,17 @@ function ModelCard({ model, enabled, testStatus, onOpenDetail, onTestModel, onTo
           )}
           {testStatus?.status === 'testing' && (
             <span className="inline-flex items-center gap-0.5 px-1 py-0.5 bg-amber-100 text-amber-800 text-[10px] rounded shrink-0">
-              <Loader2 className="w-2.5 h-2.5 animate-spin" /> {t('status.testingModel')}
+              <IconLoader2 aria-hidden="true" className="w-2.5 h-2.5 animate-spin" /> {t('status.testingModel')}
             </span>
           )}
           {testStatus?.status === 'success' && (
             <span className="inline-flex items-center gap-0.5 px-1 py-0.5 bg-green-100 text-green-700 text-[10px] rounded shrink-0" title={t('testSuccess')}>
-              <Link2 className="w-2.5 h-2.5" /> {testStatus.latency ? `${testStatus.latency}ms` : t('status.available')}
+              <IconLink aria-hidden="true" className="w-2.5 h-2.5" /> {testStatus.latency ? `${testStatus.latency}ms` : t('status.available')}
             </span>
           )}
           {testStatus?.status === 'failed' && (
             <span className="inline-flex items-center gap-0.5 px-1 py-0.5 bg-red-100 text-red-700 text-[10px] rounded shrink-0" title={testStatus.message ?? ''}>
-              <AlertCircle className="w-2.5 h-2.5" /> {t('detail.failed')}
+              <IconAlertCircle aria-hidden="true" className="w-2.5 h-2.5" /> {t('detail.failed')}
             </span>
           )}
           <span className="text-[11px] text-gray-400 font-mono break-all" title={`${model.provider_id}/${model.id}`}>
@@ -1106,10 +1137,10 @@ function ModelCard({ model, enabled, testStatus, onOpenDetail, onTestModel, onTo
           )}
           {enabled && (
             <span className="flex items-center gap-0.5 shrink-0">
-              {hasTools && <span className="text-slate-600" title={t('form.toolCall')}><Wrench className="w-3 h-3" /></span>}
-              {hasVision && <span className="text-purple-500" title={t('form.vision')}><Eye className="w-3 h-3" /></span>}
-              {hasReasoning && <span className="text-amber-500" title={t('form.reasoning')}><Zap className="w-3 h-3" /></span>}
-              {model.capabilities?.supports_streaming && <span className="text-gray-400" title={t('form.streaming')}><MessageSquare className="w-3 h-3" /></span>}
+              {hasTools && <span className="text-slate-600" title={t('form.toolCall')}><IconTool aria-hidden="true" className="w-3 h-3" /></span>}
+              {hasVision && <span className="text-purple-500" title={t('form.vision')}><IconEye aria-hidden="true" className="w-3 h-3" /></span>}
+              {hasReasoning && <span className="text-amber-500" title={t('form.reasoning')}><IconBolt aria-hidden="true" className="w-3 h-3" /></span>}
+              {model.capabilities?.supports_streaming && <span className="text-gray-400" title={t('form.streaming')}><IconMessage aria-hidden="true" className="w-3 h-3" /></span>}
             </span>
           )}
         </div>
@@ -1122,7 +1153,7 @@ function ModelCard({ model, enabled, testStatus, onOpenDetail, onTestModel, onTo
               className="p-1 rounded text-gray-400 hover:text-slate-700 hover:bg-slate-100 disabled:opacity-50"
               title={t('form.testConnection')}
             >
-              {testStatus?.status === 'testing' ? <Loader2 className="w-4 h-4 animate-spin text-amber-600" /> : <TestTube className="w-4 h-4" />}
+              {testStatus?.status === 'testing' ? <IconLoader2 aria-hidden="true" className="w-4 h-4 animate-spin text-amber-600" /> : <IconTestPipe aria-hidden="true" className="w-4 h-4" />}
             </button>
           )}
           <button
@@ -1130,11 +1161,11 @@ function ModelCard({ model, enabled, testStatus, onOpenDetail, onTestModel, onTo
             className={`p-1 rounded ${enabled ? 'text-green-600 hover:text-slate-600' : 'text-gray-400 hover:text-green-600'}`}
             title={enabled ? t('status.disabled') : t('status.available')}
           >
-            {enabled ? <ToggleRight className="w-4 h-4" /> : <ToggleLeft className="w-4 h-4" />}
+            {enabled ? <IconToggleRight aria-hidden="true" className="w-4 h-4" /> : <IconToggleLeft aria-hidden="true" className="w-4 h-4" />}
           </button>
           {onDelete && (
-            <button onClick={(e) => { e.stopPropagation(); onDelete(); }} className="p-1 rounded text-gray-400 hover:text-slate-700 hover:bg-slate-100" title="Delete">
-              <Trash2 className="w-4 h-4" />
+            <button onClick={(e) => { e.stopPropagation(); onDelete(); }} className="p-1 rounded text-gray-400 hover:text-slate-700 hover:bg-slate-100" title={t('form.delete')}>
+              <IconTrash aria-hidden="true" className="w-4 h-4" />
             </button>
           )}
         </div>
@@ -1142,7 +1173,7 @@ function ModelCard({ model, enabled, testStatus, onOpenDetail, onTestModel, onTo
 
       {testStatus?.status === 'failed' && testStatus.message && (
         <div className="mt-1.5 flex items-start gap-1.5 px-2 py-1 bg-red-50 border border-red-200 rounded text-[11px] text-red-700">
-          <AlertCircle className="w-3 h-3 mt-0.5 flex-shrink-0" />
+          <IconAlertCircle aria-hidden="true" className="w-3 h-3 mt-0.5 flex-shrink-0" />
           <span className="break-all">{testStatus.message}</span>
         </div>
       )}
@@ -1304,11 +1335,11 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
   // Test credentials
   const handleTest = async () => {
     if (selectedCatalogId === 'openai-compatible') {
-      toast.info('OpenAI-compatible Provider 需要先创建，创建后可在配置弹窗中测试连接');
+      toast.info(t('form.compatCreateFirst'));
       return;
     }
     if (!apiKey.trim() && !providerAllowsEmptyApiKey(selectedCatalogId)) {
-      toast.warning('Please enter API Key first');
+      toast.warning(t('form.apiKeyRequiredFirst'));
       return;
     }
     try {
@@ -1334,9 +1365,9 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
 
   // Save — catalog provider (transitions to next wizard step instead of closing)
   const handleSaveCatalog = async () => {
-    if (!selectedCatalogId) { toast.warning('Please select a Provider'); return; }
+    if (!selectedCatalogId) { toast.warning(t('form.selectProviderRequired')); return; }
     if (selectedCatalogId === 'openai-compatible' && !providerName.trim()) {
-      toast.warning('Please enter Provider Name');
+      toast.warning(t('form.providerNameRequired'));
       return;
     }
     if (isCatalogBaseUrlRequired(selectedCatalogId) && !baseUrl.trim()) {
@@ -1344,7 +1375,7 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
       return;
     }
     if (!apiKey.trim() && !providerAllowsEmptyApiKey(selectedCatalogId)) {
-      toast.warning('Please enter API Key');
+      toast.warning(t('form.apiKeyRequired'));
       return;
     }
     const azureModelId = isAzureProviderId(selectedCatalogId) ? azureDeploymentName.trim() : '';
@@ -1395,7 +1426,7 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
       setSavedProviderName(displayName);
       setStep('success');
     } catch (err: any) {
-      toast.error(t('deleteFailed'), err.response?.data?.detail || err.message);
+      toast.error(t('configFailed'), err.response?.data?.detail || err.message);
     } finally {
       setSaving(false);
     }
@@ -1469,7 +1500,7 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
         return {
           submitDisabled: !canSave,
           submitLoading: saving || testing,
-          submitLabel: 'Save',
+          submitLabel: t('form.save'),
           onSubmit: handleSave,
           footerLeft: undefined as React.ReactNode,
         };
@@ -1484,7 +1515,7 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
               onClick={() => setStep('add-model')}
               className="flex items-center gap-1.5 px-4 py-2 text-sm text-slate-700 border border-slate-300 rounded-lg hover:bg-slate-50 transition-colors"
             >
-              <Plus className="w-4 h-4" />
+              <IconPlus aria-hidden="true" className="w-4 h-4" />
               {t('wizard.addCustomModel')}
             </button>
           ),
@@ -1501,7 +1532,7 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
                 onClick={resetModelFormState}
                 className="flex items-center gap-1.5 px-4 py-2 text-sm text-slate-700 border border-slate-300 rounded-lg hover:bg-slate-50 transition-colors"
               >
-                <Plus className="w-4 h-4" />
+                <IconPlus aria-hidden="true" className="w-4 h-4" />
                 {t('wizard.addAnother')}
               </button>
             ),
@@ -1554,7 +1585,7 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
       mode="create"
       entityType={step === 'add-model' ? 'Custom Model' : t('form.model')}
       entityName={step !== 'provider' ? savedProviderName : undefined}
-      icon={<Brain className="w-5 h-5" />}
+      icon={<IconCpu aria-hidden="true" className="w-5 h-5" />}
       rexSystemContext={rexContext}
       rexWelcomeMessage={rexWelcome}
       submitDisabled={sheetProps.submitDisabled}
@@ -1597,14 +1628,14 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
                         ) : (
                           <span className="text-gray-400">{t('form.selectProvider')}</span>
                         )}
-                        <ChevronDown className={`w-4 h-4 text-gray-400 transition-transform ${showDropdown ? 'rotate-180' : ''}`} />
+                        <IconChevronDown aria-hidden="true" className={`w-4 h-4 text-gray-400 transition-transform ${showDropdown ? 'rotate-180' : ''}`} />
                       </button>
 
                       {showDropdown && (
                         <div className="absolute z-20 mt-1 w-full bg-white border border-gray-200 rounded-lg shadow-lg max-h-[50vh] overflow-hidden">
                           <div className="p-2 border-b border-gray-100">
                             <div className="relative">
-                              <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-400" />
+                              <IconSearch aria-hidden="true" className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-400" />
                               <input
                                 type="text"
                                 value={dropdownSearch}
@@ -1643,7 +1674,7 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
                                       <p className="text-xs text-gray-500 mt-0.5 truncate">{p.description}</p>
                                     </div>
                                     <span className="text-xs text-gray-400 flex-shrink-0">{t('status.models', { count: p.model_count })}</span>
-                                    {selectedCatalogId === p.id && <Check className="w-4 h-4 text-slate-700 flex-shrink-0" />}
+                                    {selectedCatalogId === p.id && <IconCheck aria-hidden="true" className="w-4 h-4 text-slate-700 flex-shrink-0" />}
                                   </button>
                                 );
                               })
@@ -1660,7 +1691,7 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
                       {selectedCatalogId === 'openai-compatible' && (
                         <div>
                           <label className="block text-sm font-medium text-gray-700 mb-1">
-                            Provider Name
+                            {t('form.providerName')}
                             <span className="text-slate-500 ml-1">*</span>
                           </label>
                           <input
@@ -1671,7 +1702,7 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
                             placeholder="e.g. SiliconFlow, LM Studio, My API"
                           />
                           <p className="mt-1 text-xs text-gray-500">
-                            用于创建独立的 OpenAI-compatible Provider 实例，不会覆盖已有配置。
+                            {t('form.providerNameHint')}
                           </p>
                         </div>
                       )}
@@ -1721,9 +1752,20 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
                             className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-gray-400 hover:text-gray-600 rounded"
                             title={showApiKey ? t('form.hide') : t('form.show')}
                           >
-                            {showApiKey ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                            {showApiKey ? <IconEyeOff aria-hidden="true" className="w-4 h-4" /> : <IconEye aria-hidden="true" className="w-4 h-4" />}
                           </button>
                         </div>
+                        {isThreatBookLLMProviderId(selectedCatalogId) && (
+                          <a
+                            href={THREATBOOK_FREE_KEY_URL}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="mt-2 inline-flex items-center gap-1.5 rounded-lg border border-green-200 bg-green-50 px-3 py-2 text-sm font-medium text-green-700 transition-colors hover:border-green-300 hover:bg-green-100"
+                          >
+                            <IconExternalLink aria-hidden="true" className="h-4 w-4" />
+                            {t('form.claimFreeKey')}
+                          </a>
+                        )}
                         {selectedCatalogId !== 'ollama' && providerAllowsEmptyApiKey(selectedCatalogId) && (
                           <p className="text-xs text-gray-500 mt-1">{t('form.apiKeyOptionalHint')}</p>
                         )}
@@ -1733,7 +1775,7 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
                         <div className={`flex items-start gap-2 p-3 rounded-lg text-sm ${
                           testResult.success ? 'bg-green-50 text-green-800 border border-green-200' : 'bg-red-50 text-red-800 border border-red-200'
                         }`}>
-                          {testResult.success ? <Check className="w-4 h-4 mt-0.5 flex-shrink-0" /> : <AlertCircle className="w-4 h-4 mt-0.5 flex-shrink-0" />}
+                          {testResult.success ? <IconCheck aria-hidden="true" className="w-4 h-4 mt-0.5 flex-shrink-0" /> : <IconAlertCircle aria-hidden="true" className="w-4 h-4 mt-0.5 flex-shrink-0" />}
                           <span>{testResult.message}</span>
                         </div>
                       )}
@@ -1819,7 +1861,7 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
                       )}
 
                       <div className="flex items-start gap-2 p-3 bg-slate-50 border border-slate-200 rounded-lg">
-                        <Shield className="w-4 h-4 text-slate-600 mt-0.5 flex-shrink-0" />
+                        <IconShield aria-hidden="true" className="w-4 h-4 text-slate-600 mt-0.5 flex-shrink-0" />
                         <p className="text-xs text-slate-700">
                           {t('form.credentialNote')}
                         </p>
@@ -1837,7 +1879,7 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
               disabled={!canTest || testing || saving}
               className="flex items-center gap-2 px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 disabled:opacity-50 text-sm"
             >
-              {testing ? <Loader2 className="w-4 h-4 animate-spin" /> : <TestTube className="w-4 h-4" />}
+              {testing ? <IconLoader2 aria-hidden="true" className="w-4 h-4 animate-spin" /> : <IconTestPipe aria-hidden="true" className="w-4 h-4" />}
               {testing ? t('form.testingConnection') : t('form.testConnection')}
             </button>
           </div>
@@ -1848,7 +1890,7 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
       {step === 'success' && (
         <div className="flex flex-col items-center justify-center py-8 text-center">
           <div className="w-16 h-16 rounded-full bg-green-100 flex items-center justify-center mb-4">
-            <CheckCircle2 className="w-8 h-8 text-green-600" />
+            <IconCircleCheck aria-hidden="true" className="w-8 h-8 text-green-600" />
           </div>
           <h3 className="text-lg font-semibold text-gray-900 mb-2">{t('wizard.providerSaved')}</h3>
           <p className="text-sm text-gray-500 max-w-xs">
@@ -1867,13 +1909,13 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
         <div className="space-y-4">
           {addedModelCount === 0 && (
             <div className="flex items-start gap-2 p-3 bg-amber-50 border border-amber-200 rounded-lg">
-              <AlertTriangle className="w-4 h-4 text-amber-600 mt-0.5 flex-shrink-0" />
+              <IconAlertTriangle aria-hidden="true" className="w-4 h-4 text-amber-600 mt-0.5 flex-shrink-0" />
               <p className="text-xs text-amber-800">{t('wizard.noModelsNote')}</p>
             </div>
           )}
           {addedModelCount > 0 && !modelTestResult && (
             <div className="flex items-center gap-2 p-3 bg-green-50 border border-green-200 rounded-lg">
-              <CheckCircle2 className="w-4 h-4 text-green-600 flex-shrink-0" />
+              <IconCircleCheck aria-hidden="true" className="w-4 h-4 text-green-600 flex-shrink-0" />
               <p className="text-xs text-green-800">{t('wizard.modelsAdded', { count: addedModelCount })}</p>
             </div>
           )}
@@ -1895,17 +1937,17 @@ function CatalogModelBadges({ model }: { model: CatalogModel }) {
     <div className="flex items-center gap-1">
       {model.capabilities.supports_tools && (
         <span className="inline-flex items-center px-1 py-0.5 bg-slate-100 text-slate-700 text-[9px] rounded">
-          <Wrench className="w-2.5 h-2.5" />
+          <IconTool aria-hidden="true" className="w-2.5 h-2.5" />
         </span>
       )}
       {model.capabilities.supports_vision && (
         <span className="inline-flex items-center px-1 py-0.5 bg-purple-100 text-purple-700 text-[9px] rounded">
-          <Eye className="w-2.5 h-2.5" />
+          <IconEye aria-hidden="true" className="w-2.5 h-2.5" />
         </span>
       )}
       {model.capabilities.supports_reasoning && (
         <span className="inline-flex items-center px-1 py-0.5 bg-amber-100 text-amber-700 text-[9px] rounded">
-          <Zap className="w-2.5 h-2.5" />
+          <IconBolt aria-hidden="true" className="w-2.5 h-2.5" />
         </span>
       )}
     </div>
@@ -2114,11 +2156,11 @@ function ModelFormFields({ form, testResult, testing, modelIdPlaceholder, modelI
               : 'bg-red-50 text-red-800 border border-red-200'
         }`}>
           {testing ? (
-            <Loader2 className="w-4 h-4 mt-0.5 flex-shrink-0 animate-spin" />
+            <IconLoader2 aria-hidden="true" className="w-4 h-4 mt-0.5 flex-shrink-0 animate-spin" />
           ) : testResult?.success ? (
-            <Check className="w-4 h-4 mt-0.5 flex-shrink-0" />
+            <IconCheck aria-hidden="true" className="w-4 h-4 mt-0.5 flex-shrink-0" />
           ) : (
-            <AlertCircle className="w-4 h-4 mt-0.5 flex-shrink-0" />
+            <IconAlertCircle aria-hidden="true" className="w-4 h-4 mt-0.5 flex-shrink-0" />
           )}
           <span>{testing ? t('form.testingConnection') : testResult?.message}</span>
         </div>
@@ -2204,7 +2246,7 @@ Provider: ${provider.name} (${provider.id})
       mode="create"
       entityType="Custom Model"
       entityName={provider.name}
-      icon={<Plus className="w-5 h-5" />}
+      icon={<IconPlus aria-hidden="true" className="w-5 h-5" />}
       rexSystemContext={rexContext}
       rexWelcomeMessage={rexWelcome}
       submitDisabled={loading || testing || !form.isValid}
@@ -2393,7 +2435,7 @@ function ConfigureProviderDialog({ provider, existingCredentials, models, onClos
     const nextApiKey = apiKey.trim();
     const apiKeyChanged = nextApiKey !== existingKey.trim();
     if (!nextApiKey && !hasExisting && !providerAllowsEmptyApiKey(provider.id)) {
-      toast.warning('Please enter API Key');
+      toast.warning(t('form.apiKeyRequired'));
       return;
     }
     try {
@@ -2447,7 +2489,7 @@ function ConfigureProviderDialog({ provider, existingCredentials, models, onClos
     const nextApiKey = apiKey.trim();
     const apiKeyChanged = nextApiKey !== existingKey.trim();
     if (!nextApiKey && !hasExisting && !providerAllowsEmptyApiKey(provider.id)) {
-      toast.warning('Please enter API Key first');
+      toast.warning(t('form.apiKeyRequiredFirst'));
       return;
     }
 
@@ -2464,7 +2506,7 @@ function ConfigureProviderDialog({ provider, existingCredentials, models, onClos
         if (nextApiKey && apiKeyChanged) payload.api_key = nextApiKey;
         await providerAPI.setCredentials(provider.id, payload);
       } catch (err: any) {
-        toast.error(t('deleteFailed'), err.message);
+        toast.error(t('configFailed'), err.message);
         return;
       }
     }
@@ -2520,12 +2562,12 @@ ${hasExisting ? '你已有凭证配置，可以更新或测试连接。' : '请�
       mode="edit"
       entityType={t('form.model')}
       entityName={provider.name}
-      icon={<Brain className="w-5 h-5" />}
+      icon={<IconCpu aria-hidden="true" className="w-5 h-5" />}
       rexSystemContext={rexContext}
       rexWelcomeMessage={rexWelcome}
       submitDisabled={!canSave}
       submitLoading={loading}
-      submitLabel="Save"
+      submitLabel={t('form.save')}
       onClose={onClose}
       onSubmit={handleSubmit}
       footerLeft={
@@ -2533,7 +2575,7 @@ ${hasExisting ? '你已有凭证配置，可以更新或测试连接。' : '请�
           onClick={onDelete}
           className="flex items-center gap-1.5 px-3 py-2 text-sm text-red-600 hover:text-red-700 hover:bg-red-50 rounded-lg transition-colors"
         >
-          <Trash2 className="w-4 h-4" />
+          <IconTrash aria-hidden="true" className="w-4 h-4" />
           {t('form.removeProvider')}
         </button>
       }
@@ -2549,7 +2591,7 @@ ${hasExisting ? '你已有凭证配置，可以更新或测试连接。' : '请�
         {(provider.id === 'openai-compatible' || provider.id.startsWith('custom-')) && (
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1.5">
-              Provider Name
+              {t('form.providerName')}
             </label>
             <input
               type="text"
@@ -2611,9 +2653,20 @@ ${hasExisting ? '你已有凭证配置，可以更新或测试连接。' : '请�
               className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-gray-400 hover:text-gray-600 rounded"
               title={showApiKey ? t('form.hide') : t('form.show')}
             >
-              {showApiKey ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+              {showApiKey ? <IconEyeOff aria-hidden="true" className="w-4 h-4" /> : <IconEye aria-hidden="true" className="w-4 h-4" />}
             </button>
           </div>
+          {isThreatBookLLMProviderId(provider.id) && (
+            <a
+              href={THREATBOOK_FREE_KEY_URL}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="mt-2 inline-flex items-center gap-1.5 rounded-lg border border-green-200 bg-green-50 px-3 py-2 text-sm font-medium text-green-700 transition-colors hover:border-green-300 hover:bg-green-100"
+            >
+              <IconExternalLink aria-hidden="true" className="h-4 w-4" />
+              {t('form.claimFreeKey')}
+            </a>
+          )}
           {provider.id !== 'ollama' && providerAllowsEmptyApiKey(provider.id) && (
             <p className="text-xs text-gray-500 mt-1">{t('form.apiKeyOptionalHint')}</p>
           )}
@@ -2735,7 +2788,7 @@ ${hasExisting ? '你已有凭证配置，可以更新或测试连接。' : '请�
               disabled={models.length === 0 || loading || testing}
               className="flex items-center gap-2 px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 disabled:opacity-50 text-sm flex-shrink-0"
             >
-              {testing ? <Loader2 className="w-4 h-4 animate-spin" /> : <TestTube className="w-4 h-4" />}
+              {testing ? <IconLoader2 aria-hidden="true" className="w-4 h-4 animate-spin" /> : <IconTestPipe aria-hidden="true" className="w-4 h-4" />}
               {testing ? t('form.testingConnection') : t('form.testConnection2')}
             </button>
           </div>
@@ -2755,7 +2808,7 @@ ${hasExisting ? '你已有凭证配置，可以更新或测试连接。' : '请�
           )}
           {testError && (
             <div className="flex items-start gap-2 p-3 rounded-lg border border-red-200 bg-red-50">
-              <AlertCircle className="w-4 h-4 text-red-500 flex-shrink-0 mt-0.5" />
+              <IconAlertCircle aria-hidden="true" className="w-4 h-4 text-red-500 flex-shrink-0 mt-0.5" />
               <span className="text-sm text-red-700">{testError}</span>
             </div>
           )}
@@ -2763,7 +2816,7 @@ ${hasExisting ? '你已有凭证配置，可以更新或测试连接。' : '请�
 
         {/* 凭证说明 — 与添加模型抽屉一致 */}
         <div className="flex items-start gap-2 p-3 bg-slate-50 border border-slate-200 rounded-lg">
-          <Shield className="w-4 h-4 text-slate-600 mt-0.5 flex-shrink-0" />
+          <IconShield aria-hidden="true" className="w-4 h-4 text-slate-600 mt-0.5 flex-shrink-0" />
           <p className="text-xs text-slate-700">
             {t('form.credentialNote')}
           </p>
@@ -2891,12 +2944,12 @@ function ModelDetailSheet({
       mode="edit"
       entityType={t('form.model')}
       entityName={model.name}
-      icon={<Brain className="w-5 h-5" />}
+      icon={<IconCpu aria-hidden="true" className="w-5 h-5" />}
       rexSystemContext=""
       rexWelcomeMessage=""
       submitDisabled={false}
       submitLoading={loading}
-      submitLabel="Save"
+      submitLabel={t('form.save')}
       onClose={onClose}
       onSubmit={handleSave}
       hideRex
@@ -3014,7 +3067,7 @@ function ModelDetailSheet({
                 className="transition-colors"
                 aria-checked={enabled}
               >
-                {enabled ? <ToggleRight className="w-8 h-8 text-green-500" /> : <ToggleLeft className="w-8 h-8 text-gray-300" />}
+                {enabled ? <IconToggleRight aria-hidden="true" className="w-8 h-8 text-green-500" /> : <IconToggleLeft aria-hidden="true" className="w-8 h-8 text-gray-300" />}
               </button>
             </div>
           </>
@@ -3119,7 +3172,7 @@ function ModelSelectionInfo({ model }: { model: ModelDefinitionV2 }) {
         onMouseLeave={hide}
         className="mr-3 inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-gray-300 transition-colors hover:bg-gray-100 hover:text-gray-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-400 focus-visible:ring-offset-1"
       >
-        <Info className="h-4 w-4" aria-hidden="true" />
+        <IconInfoCircle className="h-4 w-4" aria-hidden="true" />
       </button>
       {position && typeof document !== 'undefined' && createPortal(
         <div
@@ -3207,9 +3260,9 @@ function ModelSelectionList({
                     {model.id}
                   </span>
                   {pendingKey === key ? (
-                    <Loader2 className="h-4 w-4 shrink-0 animate-spin text-gray-400" />
+                    <IconLoader2 aria-hidden="true" className="h-4 w-4 shrink-0 animate-spin text-gray-400" />
                   ) : selected ? (
-                    <Check className="h-4 w-4 shrink-0 text-slate-700" />
+                    <IconCheck aria-hidden="true" className="h-4 w-4 shrink-0 text-slate-700" />
                   ) : null}
                 </button>
                 <ModelSelectionInfo model={model} />
@@ -3340,20 +3393,20 @@ function SetDefaultModelDialog({
             aria-label={t('modelSelection.closeDefault')}
             className="text-gray-400 hover:text-gray-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-400 disabled:opacity-50"
           >
-            <X className="w-5 h-5" />
+            <IconX aria-hidden="true" className="w-5 h-5" />
           </button>
         </div>
 
         <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
           {invalidWarning && (
             <div className="mb-3 flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-700">
-              <AlertTriangle className="mt-0.5 w-3.5 h-3.5 flex-shrink-0" />
+              <IconAlertTriangle aria-hidden="true" className="mt-0.5 w-3.5 h-3.5 flex-shrink-0" />
               <span>{invalidWarning}</span>
             </div>
           )}
           {loading ? (
             <div className="flex justify-center py-10">
-              <Loader2 className="w-6 h-6 animate-spin text-gray-400" />
+              <IconLoader2 aria-hidden="true" className="w-6 h-6 animate-spin text-gray-400" />
             </div>
           ) : grouped.length === 0 ? (
             <div className="py-10 text-center text-sm text-gray-500">{t('detail.noModels')}</div>
@@ -3558,18 +3611,18 @@ function FallbackModelsDialog({
             aria-label={t('fallbacks.close')}
             className="text-gray-400 hover:text-gray-600 disabled:opacity-50"
           >
-            <X className="h-5 w-5" />
+            <IconX aria-hidden="true" className="h-5 w-5" />
           </button>
         </div>
 
         <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
           {routingDataLoading ? (
             <div className="flex justify-center py-10">
-              <Loader2 className="h-6 w-6 animate-spin text-gray-400" />
+              <IconLoader2 aria-hidden="true" className="h-6 w-6 animate-spin text-gray-400" />
             </div>
           ) : loadFailed ? (
             <div role="alert" className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-6 text-center">
-              <AlertCircle className="mx-auto mb-2 h-6 w-6 text-amber-500" />
+              <IconAlertCircle aria-hidden="true" className="mx-auto mb-2 h-6 w-6 text-amber-500" />
               <p className="text-sm font-medium text-amber-800">{t('fallbacks.loadFailed')}</p>
               <p className="mt-1 text-xs text-amber-700">{currentLoadError || modelsLoadError}</p>
               <button
@@ -3584,7 +3637,7 @@ function FallbackModelsDialog({
             <div className="space-y-3">
               {draft.length === 0 ? (
                 <div className="rounded-lg border border-dashed border-gray-300 px-4 py-8 text-center">
-                  <ListOrdered className="mx-auto mb-2 h-6 w-6 text-gray-300" />
+                  <IconListNumbers aria-hidden="true" className="mx-auto mb-2 h-6 w-6 text-gray-300" />
                   <p className="text-sm font-medium text-gray-600">{t('fallbacks.empty')}</p>
                   <p className="mt-1 text-xs text-gray-400">{t('fallbacks.emptyHint')}</p>
                 </div>
@@ -3625,7 +3678,7 @@ function FallbackModelsDialog({
                             aria-label={t('fallbacks.moveUp')}
                             className="rounded p-1.5 text-gray-400 hover:bg-gray-100 hover:text-gray-700 disabled:cursor-not-allowed disabled:opacity-30"
                           >
-                            <ArrowUp className="h-3.5 w-3.5" />
+                            <IconArrowUp aria-hidden="true" className="h-3.5 w-3.5" />
                           </button>
                           <button
                             type="button"
@@ -3635,7 +3688,7 @@ function FallbackModelsDialog({
                             aria-label={t('fallbacks.moveDown')}
                             className="rounded p-1.5 text-gray-400 hover:bg-gray-100 hover:text-gray-700 disabled:cursor-not-allowed disabled:opacity-30"
                           >
-                            <ArrowDown className="h-3.5 w-3.5" />
+                            <IconArrowDown aria-hidden="true" className="h-3.5 w-3.5" />
                           </button>
                           <button
                             type="button"
@@ -3645,7 +3698,7 @@ function FallbackModelsDialog({
                             aria-label={t('fallbacks.remove')}
                             className="rounded p-1.5 text-gray-400 hover:bg-red-50 hover:text-red-600 disabled:opacity-30"
                           >
-                            <Trash2 className="h-3.5 w-3.5" />
+                            <IconTrash aria-hidden="true" className="h-3.5 w-3.5" />
                           </button>
                         </div>
                       </div>
@@ -3666,10 +3719,10 @@ function FallbackModelsDialog({
                 disabled={saving || selectableGroups.length === 0}
                 className="flex w-full items-center justify-center gap-1.5 rounded-lg border border-gray-300 px-3 py-2 text-sm font-medium text-gray-700 transition-colors hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
               >
-                <Plus className="h-4 w-4" />
+                <IconPlus aria-hidden="true" className="h-4 w-4" />
                 {selectableGroups.length === 0 ? t('fallbacks.noModelsToAdd') : t('fallbacks.add')}
                 {selectableGroups.length > 0 && (
-                  <ChevronDown className={`h-4 w-4 transition-transform ${adding ? 'rotate-180' : ''}`} />
+                  <IconChevronDown aria-hidden="true" className={`h-4 w-4 transition-transform ${adding ? 'rotate-180' : ''}`} />
                 )}
               </button>
 
@@ -3703,9 +3756,9 @@ function FallbackModelsDialog({
             type="button"
             onClick={() => void handleSave()}
             disabled={!dirty || saving || routingDataLoading || loadFailed || hasInvalidDraft}
-            className="flex items-center gap-1.5 rounded-lg bg-slate-800 px-4 py-2 text-sm font-medium text-white hover:bg-slate-900 disabled:cursor-not-allowed disabled:opacity-50"
+            className="ui-btn ui-btn-primary"
           >
-            {saving && <Loader2 className="h-4 w-4 animate-spin" />}
+            {saving && <IconLoader2 aria-hidden="true" className="h-4 w-4 animate-spin" />}
             {t('fallbacks.save')}
           </button>
         </div>

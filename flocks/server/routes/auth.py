@@ -8,6 +8,7 @@ import threading
 import time
 from typing import Any
 
+import httpx
 from fastapi import APIRouter, HTTPException, Request, Response, status
 from pydantic import BaseModel, Field
 
@@ -192,6 +193,18 @@ async def _emit_auth_audit(event_type: str, payload: dict) -> None:
     except Exception:
         # Audit failures must not block auth flow.
         pass
+
+
+_CONSOLE_UPSTREAM_ERROR = "console 登录服务调用失败，请稍后重试"
+
+
+def _validate_return_to(value: str) -> str:
+    """Only an in-site path may be handed to the Console as the post-login target."""
+    if not value.startswith("/") or value.startswith("//") or "\\" in value or "://" in value:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="return_to 仅允许站内路径")
+    return value
+
+
 class BootstrapStatusResponse(BaseModel):
     bootstrapped: bool
 
@@ -342,12 +355,14 @@ async def login(payload: LoginRequest, response: Response, request: Request) -> 
 @router.get("/console-login/start", response_model=ConsoleLoginStartResponse, summary="发起 console 云账号登录")
 async def console_login_start(request: Request, return_to: str | None = None) -> ConsoleLoginStartResponse:
     require_admin(request)
-    resolved_return_to = return_to or "/flockspro-upgrade/callback"
+    resolved_return_to = _validate_return_to(return_to or "/flockspro-upgrade/callback")
     try:
         result = await ConsoleLoginService.start_console_login(return_to=resolved_return_to)
         return ConsoleLoginStartResponse(**result)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=_CONSOLE_UPSTREAM_ERROR) from exc
 
 
 @router.post("/logout", summary="退出登录")
@@ -407,6 +422,8 @@ async def console_login_finish(
         )
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=_CONSOLE_UPSTREAM_ERROR) from exc
 
 
 @router.get("/console-login/session", response_model=ConsoleLoginSessionResponse, summary="查询本地 console 登录状态")

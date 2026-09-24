@@ -26,7 +26,6 @@ class TestIdentifierCompatibility:
             "call": "cal",
             "step": "stp",
             "agent": "agt",
-            "subtask": "stk",
             "event": "evt",
             "tqref": "tqr",
             "task": "tsk",

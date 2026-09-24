@@ -59,7 +59,7 @@ async def _wait_for_execution_terminal_state(
 def isolated_workflow_filesystem(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """Redirect workflow route filesystem writes into a per-test temp dir."""
     from flocks.server.routes import workflow as workflow_routes
-    from flocks.workflow import fs_store
+    from flocks.workflow import center, fs_store
 
     workspace_root = tmp_path / "workspace"
     project_root = workspace_root / ".flocks" / "plugins" / "workflows"
@@ -80,23 +80,20 @@ def isolated_workflow_filesystem(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ]:
         root.mkdir(parents=True, exist_ok=True)
 
-    monkeypatch.setattr(workflow_routes, "_workspace_root", workspace_root, raising=False)
     monkeypatch.setattr(workflow_routes, "_find_workspace_root", lambda: workspace_root)
     monkeypatch.setattr(workflow_routes, "_workflow_dir", lambda workflow_id: project_root / workflow_id)
     monkeypatch.setattr(workflow_routes, "_global_workflow_dir", lambda workflow_id: global_root / workflow_id)
-    monkeypatch.setattr(fs_store, "_workspace_root", workspace_root, raising=False)
+    monkeypatch.setattr(fs_store, "_workspace_root", workspace_root)
     monkeypatch.setattr(fs_store, "find_workspace_root", lambda: workspace_root)
     monkeypatch.setattr(
-        fs_store,
+        center,
         "resolve_project_workflow_roots",
         lambda workspace=None: [legacy_project_main, legacy_project_plugin, project_root],
-        raising=False,
     )
     monkeypatch.setattr(
-        fs_store,
+        center,
         "resolve_global_workflow_roots",
         lambda: [legacy_global_main, legacy_global_plugin, global_root],
-        raising=False,
     )
 
     yield {
@@ -377,7 +374,7 @@ class TestWorkflowRoutes:
                     },
                 ],
                 "edges": [
-                    {"from": "step1", "to": "step2"},
+                    {"from": "step1", "to": "step2", "mapping": {"value": "value"}},
                 ],
             },
         }
@@ -420,14 +417,19 @@ class TestWorkflowRoutes:
 class TestProviderRoutes:
 
     @pytest.mark.asyncio
-    async def test_list_providers_returns_expected_shape(self, client: AsyncClient):
+    async def test_list_providers_returns_expected_shape(self, client: AsyncClient, monkeypatch):
         """GET /api/provider returns dict with all/default/connected keys."""
+        from flocks.config.config_writer import ConfigWriter
+
+        monkeypatch.setattr(ConfigWriter, "list_provider_ids", lambda: ["anthropic"])
         resp = await client.get("/api/provider")
         assert resp.status_code == status.HTTP_200_OK
         data = resp.json()
         assert "all" in data
         assert isinstance(data["all"], list)
         assert len(data["all"]) > 0
+        assert [item["id"] for item in data["all"]] == ["anthropic"]
+        assert data["connected"] == ["anthropic"]
 
     @pytest.mark.asyncio
     async def test_provider_model_fields(self, client: AsyncClient):
@@ -728,10 +730,11 @@ class TestConfigRoutes:
     ):
         """UI display-name endpoints expose only the visible product name."""
         from flocks.config.config import Config
-        from flocks.server.routes import config as config_routes
+        from flocks.server import branding
 
         monkeypatch.setenv("FLOCKS_CONFIG_DIR", str(tmp_path / "config"))
-        monkeypatch.setattr(config_routes, "_is_flockspro_enabled", lambda: False)
+        # 没有任何 branding 扩展注册时用开源默认名
+        monkeypatch.setattr(branding, "_providers", [])
         Config._global_config = None
         Config._cached_config = None
 
@@ -781,19 +784,25 @@ class TestConfigRoutes:
         tmp_path,
         monkeypatch,
     ):
-        """Empty display-name config falls back to the active product edition."""
+        """Empty display-name config falls back to the registered branding provider (Pro)."""
         from flocks.config.config import Config
-        from flocks.server.routes import config as config_routes
+        from flocks.server import branding
+
+        class _ProBranding:
+            # 与 flockspro.branding.ProBranding 同名：许可证有效时给 "FlocksPro"
+            def display_name(self):
+                return "FlocksPro"
 
         monkeypatch.setenv("FLOCKS_CONFIG_DIR", str(tmp_path / "config"))
-        monkeypatch.setattr(config_routes, "_is_flockspro_enabled", lambda: True)
+        monkeypatch.setattr(branding, "_providers", [])
+        branding.register_branding_provider(_ProBranding())
         Config._global_config = None
         Config._cached_config = None
 
         resp = await client.get("/api/config/ui-display")
         assert resp.status_code == status.HTTP_200_OK
         assert resp.json() == {
-            "displayName": "Flocks Pro",
+            "displayName": "FlocksPro",
             "configuredDisplayName": None,
             "faviconUrl": None,
         }
@@ -805,7 +814,7 @@ class TestConfigRoutes:
 
         resp = await client.patch("/api/config/ui", json={"displayName": ""})
         assert resp.status_code == status.HTTP_200_OK
-        assert resp.json()["displayName"] == "Flocks Pro"
+        assert resp.json()["displayName"] == "FlocksPro"
         assert resp.json()["configuredDisplayName"] is None
 
     @pytest.mark.parametrize(

@@ -342,3 +342,92 @@ async def test_manual_webui_apply_update_upgrades_to_confirmed_branch(
 
     assert response.status_code == 200, response.text
     assert '"stage":"error"' not in response.text
+
+
+@pytest.mark.parametrize("bad", ["../../evil", "2026.03.24/../x", "v1;rm", "..", "a b", "2026.03.24\\n"])
+async def test_apply_update_rejects_malformed_target_version(monkeypatch: pytest.MonkeyPatch, bad: str):
+    """``target_version`` is spliced into the download URL / archive name, so
+    anything that is not a release tag is refused before perform_update."""
+    from flocks.server.routes import update as update_routes
+
+    monkeypatch.setattr(update_routes, "require_admin", lambda _request: None)
+
+    def _no_perform(*args, **kwargs):
+        raise AssertionError("perform_update must not run for a malformed target_version")
+
+    monkeypatch.setattr(update_routes, "perform_update", _no_perform)
+    with pytest.raises(HTTPException) as exc:
+        await update_routes.apply_update(_request(), target_version=bad, locale=None, edition="flocks")
+    assert exc.value.status_code == 400
+    assert exc.value.detail == "Invalid target_version"
+
+
+@pytest.mark.parametrize("good", ["2026.03.24", "v2026.3.24", "1.2.3-rc1", "2026.9.9+build.7"])
+async def test_apply_update_accepts_release_tags(monkeypatch: pytest.MonkeyPatch, good: str):
+    from flocks.server.routes import update as update_routes
+
+    monkeypatch.setattr(update_routes, "require_admin", lambda _request: None)
+    monkeypatch.setattr(update_routes, "detect_deploy_mode", lambda: "source")
+
+    async def _gen(*args, **kwargs):
+        if False:
+            yield None
+
+    monkeypatch.setattr(update_routes, "perform_update", _gen)
+    response = await update_routes.apply_update(_request(), target_version=good, locale=None, edition="flocks")
+    assert response.media_type == "text/event-stream"
+
+
+async def test_apply_update_refuses_managed_deployments_with_409(monkeypatch: pytest.MonkeyPatch):
+    """A Go-managed release package is upgraded by the core; the route answers
+    409 with the canonical refusal text without touching the network."""
+    from flocks.server.routes import update as update_routes
+    from flocks.updater.deploy import MANAGED_UPGRADE_REFUSAL
+
+    monkeypatch.setattr(update_routes, "require_admin", lambda _request: None)
+    monkeypatch.setattr(update_routes, "detect_deploy_mode", lambda: "managed")
+
+    async def _no_check(**kwargs):
+        raise AssertionError("check_update must not run for a managed deployment")
+
+    monkeypatch.setattr(update_routes, "check_update", _no_check)
+    with pytest.raises(HTTPException) as exc:
+        await update_routes.apply_update(_request(), target_version=None, locale=None, edition="flocks")
+    assert exc.value.status_code == status.HTTP_409_CONFLICT
+    assert exc.value.detail == MANAGED_UPGRADE_REFUSAL
+
+
+async def test_apply_update_keeps_docker_refusal_as_sse_event(monkeypatch: pytest.MonkeyPatch):
+    """Docker keeps the historical SSE error event (the WebUI renders it)."""
+    import json
+
+    from flocks.server.routes import update as update_routes
+    from flocks.updater.deploy import DOCKER_UPGRADE_REFUSAL
+
+    monkeypatch.setattr(update_routes, "require_admin", lambda _request: None)
+    monkeypatch.setattr(update_routes, "detect_deploy_mode", lambda: "docker")
+    response = await update_routes.apply_update(_request(), target_version=None, locale=None, edition="flocks")
+    chunks = [c async for c in response.body_iterator]
+    body = "".join(c.decode() if isinstance(c, bytes) else c for c in chunks)
+    assert response.media_type == "text/event-stream"
+    assert response.headers["cache-control"] == "no-cache" and response.headers["x-accel-buffering"] == "no"
+    assert json.loads(body.split("data: ", 1)[1].strip()) == {"stage": "error", "message": DOCKER_UPGRADE_REFUSAL, "success": False}
+
+
+async def test_apply_update_refuses_on_offline_install(monkeypatch: pytest.MonkeyPatch):
+    from flocks.server.routes import update as update_routes
+
+    monkeypatch.setattr(update_routes, "require_admin", lambda _req: None)
+    monkeypatch.setattr(update_routes, "detect_deploy_mode", lambda: "offline")
+
+    async def _must_not_run(*_args, **_kwargs):
+        raise AssertionError("perform_update must not start on an offline install")
+
+    monkeypatch.setattr(update_routes, "perform_update", _must_not_run)
+
+    response = await update_routes.apply_update(_request())
+    body = "".join([chunk if isinstance(chunk, str) else chunk.decode() async for chunk in response.body_iterator])
+
+    assert response.media_type == "text/event-stream"
+    assert '"stage": "error"' in body
+    assert "flocks-offline.run" in body

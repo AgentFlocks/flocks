@@ -12,6 +12,7 @@ from pydantic import BaseModel
 
 from flocks.auth.context import AuthUser
 from flocks.project.project import (
+    DEFAULT_PROJECT_ID,
     Project,
     ProjectDeletionError,
     ProjectInfo,
@@ -234,6 +235,10 @@ async def browse_project_folders(request: Request, path: Optional[str] = Query(N
 @router.patch("/{project_id}", response_model=ProjectInfo, summary="Rename project")
 async def update_project(project_id: str, payload: ProjectUpdateRequest, request: Request):
     user = require_user(request)
+    if not payload.name or not payload.name.strip():
+        # Project.update raises a plain ValueError for this, which the handler
+        # below maps to 404; a blank name is a client error, not a missing project.
+        raise HTTPException(status_code=400, detail="Project name cannot be empty")
     try:
         return await Project.update(project_id, owner_id=user.id, name=payload.name)
     except ProjectNameConflictError as exc:
@@ -291,6 +296,10 @@ async def delete_project(project_id: str, request: Request):
     """Archive project tasks and hide the project while preserving project files."""
 
     user = require_user(request)
+    if project_id == DEFAULT_PROJECT_ID:
+        # Not part of any user registry, so the lookup below would report 404;
+        # the default project is protected, not missing.
+        raise HTTPException(status_code=409, detail="The default project cannot be deleted")
     try:
         async with Project.lifecycle_guard(project_id):
             if await Project.get(project_id, owner_id=user.id) is None:

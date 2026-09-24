@@ -1,7 +1,5 @@
-"""
-Edit Tool - File editing with batch exact replacements
+"""Edit Tool - File editing with one or more targeted replacements.
 
-Supports both legacy single-edit arguments and pi-style edits[] batch edits.
 All edits in one call are matched against the same original file snapshot.
 """
 
@@ -29,18 +27,19 @@ log = Log.create(service="tool.edit")
 
 DESCRIPTION = """Edit a single existing file using targeted text replacement.
 
-Use this tool for one or more changes within the same file.
+Provide every replacement in the required `edits` array:
+`{"filePath":"path/to/file","edits":[{"oldString":"current text","newString":"replacement text"}]}`
 
 Do not use this tool when a dedicated tool is a better fit:
 - Create a new file -> `write`
 - Modify, add, delete, or move multiple files in one coordinated change -> `apply_patch`
 
 Usage notes:
-- Prefer `edits` for one or more disjoint replacements.
+- `edits` must contain at least one replacement.
 - Every `edits[].oldString` is matched against the original file snapshot.
 - Each `oldString` must be unique, and edits must not overlap.
-- The tool preserves the file's encoding and line-ending style.
-- Legacy `oldString` / `newString` / `replaceAll` remains supported."""
+- To replace repeated text, provide enough surrounding context to target each occurrence uniquely.
+- The tool preserves the file's encoding and line-ending style."""
 
 
 def normalize_line_endings(text: str) -> str:
@@ -311,72 +310,28 @@ def _get_no_change_error(filepath: str, total_edits: int) -> str:
     return f"No changes made to {filepath}. The replacements produced identical content."
 
 
-def _prepare_batch_edits(
+def _prepare_edits(
     filepath: str,
-    edits: Optional[List[Dict[str, Any]]],
-    old_string: Optional[str],
-    new_string: Optional[str],
+    edits: List[Dict[str, Any]],
 ) -> tuple[Optional[List[Dict[str, str]]], Optional[str]]:
-    """Return normalized batch edits or a validation error."""
-    if edits is not None:
-        if old_string is not None or new_string is not None:
-            return None, "Use either edits or oldString/newString, not both."
-        if not isinstance(edits, list) or not edits:
-            return None, "edits must contain at least one replacement."
+    """Validate and normalize the required edits array."""
+    if not isinstance(edits, list) or not edits:
+        return None, "edits must contain at least one replacement."
 
-        prepared: List[Dict[str, str]] = []
-        for index, edit in enumerate(edits):
-            if not isinstance(edit, dict):
-                return None, f"edits[{index}] must be an object."
-            current_old = edit.get("oldString")
-            current_new = edit.get("newString")
-            if not isinstance(current_old, str) or not isinstance(current_new, str):
-                return None, f"edits[{index}] must include string oldString and newString."
-            if current_old == "":
-                return None, _get_empty_old_string_error(filepath, index, len(edits))
-            if current_old == current_new:
-                return None, f"edits[{index}].oldString and newString must be different."
-            prepared.append({"oldString": current_old, "newString": current_new})
-        return prepared, None
-
-    if old_string is None or new_string is None:
-        return None, "Provide edits or legacy oldString/newString arguments."
-    if old_string != "" and old_string == new_string:
-        return None, "oldString and newString must be different"
-    return [{"oldString": old_string, "newString": new_string}], None
-
-
-def _apply_replace_all(
-    normalized_content: str,
-    old_string: str,
-    new_string: str,
-    filepath: str,
-) -> tuple[str, str]:
-    """Apply a legacy replaceAll operation without mutating untouched content."""
-    normalized_old = normalize_line_endings(old_string)
-    normalized_new = normalize_line_endings(new_string)
-    content_index = _build_fuzzy_text_index(normalized_content)
-    found, _, _, used_fuzzy = _fuzzy_find_text(
-        normalized_content,
-        normalized_old,
-        content_index,
-    )
-    if not found:
-        raise ValueError(_get_not_found_error(filepath, 0, 1))
-
-    if not used_fuzzy:
-        if normalized_old == "":
-            raise ValueError(_get_empty_old_string_error(filepath, 0, 1))
-        new_content = normalized_content.replace(normalized_old, normalized_new)
-    else:
-        fuzzy_spans = _find_fuzzy_spans(content_index, normalized_old)
-        new_content = normalized_content
-        for match_start, match_end in reversed(fuzzy_spans):
-            new_content = new_content[:match_start] + normalized_new + new_content[match_end:]
-
-    if new_content == normalized_content:
-        raise ValueError(_get_no_change_error(filepath, 1))
-    return normalized_content, new_content
+    prepared: List[Dict[str, str]] = []
+    for index, edit in enumerate(edits):
+        if not isinstance(edit, dict):
+            return None, f"edits[{index}] must be an object."
+        current_old = edit.get("oldString")
+        current_new = edit.get("newString")
+        if not isinstance(current_old, str) or not isinstance(current_new, str):
+            return None, f"edits[{index}] must include string oldString and newString."
+        if current_old == "":
+            return None, _get_empty_old_string_error(filepath, index, len(edits))
+        if current_old == current_new:
+            return None, f"edits[{index}].oldString and newString must be different."
+        prepared.append({"oldString": current_old, "newString": current_new})
+    return prepared, None
 
 
 def _apply_edits_to_normalized_content(
@@ -463,12 +418,14 @@ def _apply_edits_to_normalized_content(
             name="edits",
             type=ParameterType.ARRAY,
             description=(
-                "One or more targeted replacements. Each edits[].oldString is matched "
-                "against the original file, not incrementally."
+                "Required non-empty list of targeted replacements. Each oldString is "
+                "matched against the original file snapshot, must be unique, and must "
+                "not overlap another replacement."
             ),
-            required=False,
+            required=True,
             json_schema={
                 "type": "array",
+                "minItems": 1,
                 "items": {
                     "type": "object",
                     "properties": {
@@ -490,36 +447,14 @@ def _apply_edits_to_normalized_content(
                 },
             },
         ),
-        ToolParameter(
-            name="oldString",
-            type=ParameterType.STRING,
-            description="Legacy single-edit old text. Use edits[] for new callers.",
-            required=False,
-        ),
-        ToolParameter(
-            name="newString",
-            type=ParameterType.STRING,
-            description="Legacy single-edit replacement text. Use edits[] for new callers.",
-            required=False,
-        ),
-        ToolParameter(
-            name="replaceAll",
-            type=ParameterType.BOOLEAN,
-            description="Legacy single-edit option to replace every occurrence of oldString.",
-            required=False,
-            default=False,
-        ),
     ],
 )
 async def edit_tool(
     ctx: ToolContext,
     filePath: str,
-    edits: Optional[List[Dict[str, Any]]] = None,
-    oldString: Optional[str] = None,
-    newString: Optional[str] = None,
-    replaceAll: bool = False,
+    edits: List[Dict[str, Any]],
 ) -> ToolResult:
-    """Edit a file with legacy single-edit or pi-style edits[] semantics."""
+    """Edit an existing file using one or more targeted replacements."""
     if not filePath:
         return ToolResult(success=False, error="filePath is required")
 
@@ -572,54 +507,7 @@ async def edit_tool(
 
     title = resolution.display_path
 
-    if oldString == "" and edits is None:
-        if newString is None:
-            return ToolResult(success=False, error="newString is required when oldString is empty", title=title)
-        if ctx.agent == "self-improve" and Path(filepath).name == "SKILL.md":
-            from flocks.memory.evolution.skill_guard import (
-                validate_evolution_skill_write,
-            )
-
-            skill_path = Path(filepath)
-            if skill_path.exists():
-                evolution_error = (
-                    "Read the existing managed Skill and use a precise edit"
-                )
-            else:
-                evolution_error = await validate_evolution_skill_write(
-                    skill_path,
-                    newString,
-                    exists=False,
-                )
-            if evolution_error:
-                return ToolResult(
-                    success=False,
-                    error=evolution_error,
-                    title=title,
-                )
-        diff = trim_diff(generate_diff(filepath, "", newString))
-        parent_dir = os.path.dirname(filepath)
-        if parent_dir and not os.path.exists(parent_dir):
-            os.makedirs(parent_dir, exist_ok=True)
-
-        try:
-            with open(filepath, "w", encoding="utf-8", newline="") as file_handle:
-                file_handle.write(newString)
-        except Exception as error:
-            return ToolResult(
-                success=False,
-                error=f"Failed to write file: {str(error)}",
-                title=title,
-            )
-
-        return ToolResult(
-            success=True,
-            output="Edit applied successfully. If you need to make additional edits to this file, use the Read tool first to get the current file content.",
-            title=title,
-            metadata={"diff": diff, "diagnostics": {}},
-        )
-
-    prepared_edits, validation_error = _prepare_batch_edits(filepath, edits, oldString, newString)
+    prepared_edits, validation_error = _prepare_edits(filepath, edits)
     if validation_error:
         return ToolResult(success=False, error=validation_error, title=title)
     assert prepared_edits is not None
@@ -648,22 +536,11 @@ async def edit_tool(
     normalized_content_old = normalize_line_endings(content_without_bom)
 
     try:
-        if replaceAll:
-            if edits is not None:
-                raise ValueError("replaceAll is only supported with legacy oldString/newString arguments.")
-            assert oldString is not None and newString is not None
-            base_content, normalized_content_new = _apply_replace_all(
-                normalized_content_old,
-                oldString,
-                newString,
-                filepath,
-            )
-        else:
-            base_content, normalized_content_new = _apply_edits_to_normalized_content(
-                normalized_content_old,
-                prepared_edits,
-                filepath,
-            )
+        base_content, normalized_content_new = _apply_edits_to_normalized_content(
+            normalized_content_old,
+            prepared_edits,
+            filepath,
+        )
     except ValueError as error:
         return ToolResult(success=False, error=str(error), title=title)
 

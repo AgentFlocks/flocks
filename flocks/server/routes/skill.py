@@ -8,21 +8,22 @@ from __future__ import annotations
 import os
 import shutil
 from pathlib import Path
-from typing import List, Optional, Set
+from typing import List, Literal, Optional, Set
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
 
 from flocks.skill.skill import Skill, SkillInfo
 from flocks.skill.installer import SkillInstaller, SkillInstallResult, DepInstallResult
 from flocks.command.command import API_SURFACES, Command, CommandInfo
-from flocks.server.auth import require_user
+from flocks.server.auth import require_admin, require_user
 from flocks.storage.storage import Storage
 from flocks.utils.log import Log
+from flocks.config.config import get_user_plugins_root
 
 
 def _user_skills_root() -> Path:
-    """Return the canonical user-level skills directory (~/.flocks/plugins/skills/)."""
-    return Path.home() / ".flocks" / "plugins" / "skills"
+    """Return the canonical user-level skills directory (<flocks root>/plugins/skills/)."""
+    return get_user_plugins_root() / "skills"
 
 
 def _is_user_managed_skill(skill: SkillInfo) -> bool:
@@ -33,9 +34,50 @@ def _is_user_managed_skill(skill: SkillInfo) -> bool:
     or other system locations are read-only from the API's perspective.
     """
     try:
-        return Path(skill.location).is_relative_to(_user_skills_root())
-    except ValueError:
+        return Path(skill.location).resolve().is_relative_to(_user_skills_root().resolve())
+    except (ValueError, OSError):
         return False
+
+
+def _validate_skill_name(name: str) -> str:
+    """Validate a skill name used as a directory under the skills root.
+
+    The name becomes a filesystem path component, so anything that is not a
+    plain lowercase slug (``[a-z0-9]+(-[a-z0-9]+)*``) is rejected with 400.
+    This blocks path traversal (``../``), absolute paths and names the skill
+    discovery would never list anyway (``Skill._is_valid_name``).
+    """
+    candidate = (name or "").strip()
+    if not candidate:
+        raise HTTPException(status_code=422, detail="Skill name must not be empty")
+    if not Skill._is_valid_name(candidate):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Invalid skill name: use lowercase letters, digits and single hyphens "
+                "(e.g. 'my-skill'); path separators and '..' are not allowed"
+            ),
+        )
+    return candidate
+
+
+def _user_skill_dir(name: str) -> Path:
+    """Resolve ``<skills root>/<name>`` and assert it stays inside the root."""
+    root = _user_skills_root()
+    target = (root / name)
+    try:
+        if not target.resolve().is_relative_to(root.resolve()):
+            raise ValueError("outside root")
+    except (ValueError, OSError):
+        raise HTTPException(status_code=400, detail="Invalid skill name: path escapes skills directory")
+    return target
+
+
+def _validate_skill_description(description: str) -> str:
+    """Descriptions are written into YAML frontmatter; keep them single-line."""
+    if "\n" in description or "\r" in description:
+        raise HTTPException(status_code=400, detail="Skill description must be a single line")
+    return description
 
 
 router = APIRouter()
@@ -114,9 +156,13 @@ class SkillInstallRequest(BaseModel):
             "  <owner>/<repo>         – shorthand for GitHub"
         ),
     )
-    scope: str = Field(
+    scope: Literal["global", "project"] = Field(
         default="global",
         description="'global' (default, ~/.flocks/plugins/skills/) or 'project' (.flocks/plugins/skills/)",
+    )
+    overwrite: bool = Field(
+        default=False,
+        description="Replace an existing skill with the same name (otherwise 409)",
     )
 
 
@@ -136,6 +182,7 @@ class DepInstallSpecResult(BaseModel):
     stderr: str = ""
     returncode: int = 0
     error: Optional[str] = None
+    message: Optional[str] = None
 
 
 class DepInstallResponse(BaseModel):
@@ -147,7 +194,7 @@ class DepInstallRequest(BaseModel):
         default=None,
         description="If set, only install the spec with this id",
     )
-    timeout_ms: int = Field(default=300_000, description="Timeout in milliseconds (default 5 min)")
+    timeout_ms: int = Field(default=300_000, gt=0, description="Timeout in milliseconds (default 5 min)")
 
 
 class SkillToggleResponse(BaseModel):
@@ -164,7 +211,6 @@ class CommandResponse(BaseModel):
     template: str = Field(..., description="Command template")
     agent: Optional[str] = Field(None, description="Preferred agent")
     model: Optional[str] = Field(None, description="Preferred model")
-    subtask: Optional[bool] = Field(None, description="Run as subtask")
     hidden: bool = Field(False, description="Hidden from UI")
     aliases: List[str] = Field(default_factory=list, description="Alternate slash aliases")
     visible_surfaces: List[str] = Field(default_factory=list, description="Surfaces where the command is visible")
@@ -182,7 +228,6 @@ def _command_to_response(cmd: CommandInfo) -> CommandResponse:
         template=cmd.template,
         agent=cmd.agent,
         model=cmd.model,
-        subtask=cmd.subtask,
         hidden=cmd.hidden,
         aliases=list(cmd.aliases),
         visible_surfaces=list(cmd.visible_surfaces),
@@ -324,7 +369,7 @@ async def refresh_skills(_user=Depends(require_user)):
 
 
 @router.post("/skills/install", response_model=SkillInstallResponse, status_code=status.HTTP_200_OK)
-async def install_skill(req: SkillInstallRequest, _user=Depends(require_user)):
+async def install_skill(req: SkillInstallRequest, _admin=Depends(require_admin)):
     """
     Install a skill from an external source
 
@@ -336,12 +381,17 @@ async def install_skill(req: SkillInstallRequest, _user=Depends(require_user)):
     - `/local/path` — local filesystem path
     """
     try:
-        result = await SkillInstaller.install_from_source(req.source, scope=req.scope)
+        result = await SkillInstaller.install_from_source(req.source, scope=req.scope, overwrite=req.overwrite)
         if not result.success:
             raise HTTPException(
-                status_code=422,
+                status_code=409 if (result.error or "").startswith("Skill already exists") else 422,
                 detail=result.error or "Install failed",
             )
+        if result.skill_name:
+            # A previously deleted skill of the same name must not inherit its
+            # stale disabled flag.
+            Skill.forget_disabled(result.skill_name)
+            Skill.clear_cache()
         await _refresh_agents_for_skill_change()
         log.info("skill.install.api.ok", {"source": req.source, "name": result.skill_name})
         return SkillInstallResponse(
@@ -380,7 +430,7 @@ async def get_skill(name: str):
 
 
 @router.post("/skills/{name}/install-deps", response_model=DepInstallResponse)
-async def install_skill_deps(name: str, req: DepInstallRequest, _user=Depends(require_user)):
+async def install_skill_deps(name: str, req: DepInstallRequest, _admin=Depends(require_admin)):
     """
     Install a skill's tool dependencies
 
@@ -402,6 +452,7 @@ async def install_skill_deps(name: str, req: DepInstallRequest, _user=Depends(re
                 stderr=r.stderr,
                 returncode=r.returncode,
                 error=r.error,
+                message=getattr(r, "message", None) or None,
             )
             for r in results
         ]
@@ -420,11 +471,14 @@ async def create_skill(req: SkillCreateRequest, _user=Depends(require_user)):
     Creates a new SKILL.md file in the user's skill directory
     (~/.flocks/plugins/skills/<name>/SKILL.md).
     """
+    name = _validate_skill_name(req.name)
+    _validate_skill_description(req.description)
     try:
-        skill_dir = _user_skills_root() / req.name
-        skill_dir.mkdir(parents=True, exist_ok=True)
-
+        skill_dir = _user_skill_dir(name)
         skill_path = skill_dir / "SKILL.md"
+        if skill_path.exists() or await Skill.get(name):
+            raise HTTPException(status_code=409, detail=f"Skill already exists: {name}")
+        skill_dir.mkdir(parents=True, exist_ok=True)
 
         frontmatter = f"---\nname: {req.name}\ndescription: {req.description}\n---\n\n"
         full_content = frontmatter + req.content
@@ -471,9 +525,11 @@ async def update_skill(name: str, req: SkillCreateRequest, _user=Depends(require
         if not skill:
             raise HTTPException(status_code=404, detail=f"Skill not found: {name}")
 
+        target_name = _validate_skill_name(req.name)
+        _validate_skill_description(req.description)
         frontmatter = f"---\nname: {req.name}\ndescription: {req.description}\n---\n\n"
         full_content = frontmatter + req.content
-        is_rename = req.name != name
+        is_rename = target_name != name
 
         if is_rename:
             if skill.source == 'project':
@@ -481,8 +537,15 @@ async def update_skill(name: str, req: SkillCreateRequest, _user=Depends(require
                     status_code=400,
                     detail="Built-in project skills (.flocks/plugins/skills/) cannot be renamed",
                 )
-            new_dir = _user_skills_root() / req.name
+            if not _is_user_managed_skill(skill):
+                raise HTTPException(
+                    status_code=403,
+                    detail="Built-in skills are read-only; only user skills (~/.flocks/plugins/skills/) can be renamed",
+                )
+            new_dir = _user_skill_dir(target_name)
             new_path = new_dir / "SKILL.md"
+            if new_path.exists() or await Skill.get(target_name):
+                raise HTTPException(status_code=409, detail=f"Skill already exists: {target_name}")
             new_dir.mkdir(parents=True, exist_ok=True)
             new_path.write_text(full_content, encoding="utf-8")
 
@@ -505,6 +568,11 @@ async def update_skill(name: str, req: SkillCreateRequest, _user=Depends(require
             Skill.rename_disabled(name, req.name)
             log.info("skill.renamed", {"old": name, "new": req.name, "path": location})
         else:
+            if not _is_user_managed_skill(skill):
+                raise HTTPException(
+                    status_code=403,
+                    detail="Built-in skills are read-only; only user skills (~/.flocks/plugins/skills/) can be updated",
+                )
             Path(skill.location).write_text(full_content, encoding="utf-8")
             location = skill.location
             log.info("skill.updated", {"name": name, "path": location})
@@ -547,6 +615,11 @@ async def delete_skill(name: str, _user=Depends(require_user)):
             raise HTTPException(
                 status_code=403,
                 detail="Built-in project skills (.flocks/plugins/skills/) cannot be deleted",
+            )
+        if not _is_user_managed_skill(skill):
+            raise HTTPException(
+                status_code=403,
+                detail="Built-in skills are read-only; only user skills (~/.flocks/plugins/skills/) can be deleted",
             )
 
         skill_dir = Path(skill.location).parent

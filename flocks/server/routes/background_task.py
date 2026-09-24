@@ -7,9 +7,13 @@ Moved from agent.py to avoid route conflict with /api/agent/{name}.
 
 from typing import List, Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
+from flocks.auth.context import AuthUser
+from flocks.server.auth import require_user
+from flocks.session.policy import SessionPolicy
+from flocks.session.session import Session
 from flocks.utils.log import Log
 
 router = APIRouter()
@@ -35,12 +39,34 @@ class BackgroundTaskResponse(BaseModel):
 
 
 def _get_background_manager():
-    """Return the background manager from the current Instance, or None."""
-    from flocks.project.instance import Instance
-    instance = Instance.get()
-    if not instance or not hasattr(instance, "background_manager"):
+    """Return the per-instance background manager, or None when unavailable."""
+    try:
+        from flocks.task.background import get_background_manager
+
+        return get_background_manager()
+    except Exception as exc:
+        log.warning("background_task.manager_unavailable", {"error": str(exc)})
         return None
-    return instance.background_manager
+
+
+async def _can_access_task(task, user: AuthUser, *, write: bool) -> bool:
+    """A task is visible to whoever can read its parent session (or its own
+    session); cancelling requires write access on it. Same rules as the
+    session list, so admins see exactly what they can see there."""
+    for session_id in (task.parent_session_id, task.session_id):
+        if not session_id:
+            continue
+        session = await Session.get_by_id(session_id)
+        if session is None:
+            continue
+        allowed = (
+            SessionPolicy.can_write(session, user)
+            if write
+            else SessionPolicy.can_read(session, user)
+        )
+        if allowed:
+            return True
+    return False
 
 
 def _task_to_response(task) -> BackgroundTaskResponse:
@@ -62,24 +88,29 @@ def _task_to_response(task) -> BackgroundTaskResponse:
 
 
 @router.get("", response_model=List[BackgroundTaskResponse], summary="List background tasks")
-async def list_background_tasks():
+async def list_background_tasks(user: AuthUser = Depends(require_user)):
     """
     List background tasks
 
-    Returns list of all background tasks (pending, running, completed).
+    Returns the background tasks (pending, running, completed) whose parent
+    session the caller can read.
     """
     try:
         manager = _get_background_manager()
         if not manager:
             return []
-        return [_task_to_response(t) for t in manager.list_tasks()]
+        visible = []
+        for task in manager.list_tasks():
+            if await _can_access_task(task, user, write=False):
+                visible.append(_task_to_response(task))
+        return visible
     except Exception as e:
         log.error("background_task.list.error", {"error": str(e)})
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("/{task_id}", response_model=BackgroundTaskResponse, summary="Get background task")
-async def get_background_task(task_id: str):
+async def get_background_task(task_id: str, user: AuthUser = Depends(require_user)):
     """
     Get background task details
 
@@ -92,6 +123,8 @@ async def get_background_task(task_id: str):
         task = manager.get_task(task_id)
         if not task:
             raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+        if not await _can_access_task(task, user, write=False):
+            raise HTTPException(status_code=403, detail="Not allowed to view this task")
         return _task_to_response(task)
     except HTTPException:
         raise
@@ -101,7 +134,7 @@ async def get_background_task(task_id: str):
 
 
 @router.post("/{task_id}/cancel", summary="Cancel background task")
-async def cancel_background_task(task_id: str):
+async def cancel_background_task(task_id: str, user: AuthUser = Depends(require_user)):
     """
     Cancel a background task
 
@@ -111,6 +144,9 @@ async def cancel_background_task(task_id: str):
         manager = _get_background_manager()
         if not manager:
             raise HTTPException(status_code=404, detail="Background manager not available")
+        task = manager.get_task(task_id)
+        if task is not None and not await _can_access_task(task, user, write=True):
+            raise HTTPException(status_code=403, detail="Only the session owner can cancel this task")
         cancelled = manager.cancel(task_id=task_id)
         if cancelled == 0:
             raise HTTPException(status_code=404, detail=f"Task {task_id} not found or already completed")

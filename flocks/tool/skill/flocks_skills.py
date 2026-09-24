@@ -12,7 +12,9 @@ situation.
 from __future__ import annotations
 
 import asyncio
+import os
 import shutil
+import signal
 from typing import Optional
 
 from flocks.tool.registry import (
@@ -221,6 +223,9 @@ async def flocks_skills(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            # Own process group so a timeout kills the CLI's children too
+            # (e.g. a hung downloader), not just the wrapper process.
+            start_new_session=True,
         )
         try:
             stdout_b, stderr_b = await asyncio.wait_for(
@@ -228,9 +233,12 @@ async def flocks_skills(
             )
         except asyncio.TimeoutError:
             try:
-                proc.kill()
-            except ProcessLookupError:
-                pass
+                os.killpg(proc.pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError, OSError):
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
             # Drain pipes so the process can exit cleanly and avoid zombies.
             try:
                 await asyncio.wait_for(proc.communicate(), timeout=5)

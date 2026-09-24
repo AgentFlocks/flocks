@@ -16,6 +16,7 @@ ProgressCallback = Callable[[str, Dict[str, Any]], Awaitable[None]]
 from flocks.provider.provider import ChatMessage
 from flocks.utils.log import Log
 from flocks.session.prompt import SessionPrompt
+from flocks.session.response_rewriter import transform_complete_response
 from flocks.session.llm_hook_utils import (
     apply_hook_request_output,
     restore_text_with_replacements,
@@ -173,6 +174,13 @@ async def _llm_chat_with_timeout(
     """Call provider_client.chat with a timeout guard."""
     provider_options: Dict[str, Any] = {"max_tokens": max_tokens}
     replacements: list[tuple[str, str]] = []
+    llm_hook_metadata: Dict[str, Any] = {
+        "sessionID": session_id,
+        "agent": "session.compaction",
+        "step": None,
+        "model": {"providerID": None, "modelID": model_id},
+        "purpose": purpose,
+    }
     if session_id:
         try:
             from flocks.hooks.pipeline import HookPipeline, HookStage
@@ -228,8 +236,12 @@ async def _llm_chat_with_timeout(
         ),
         timeout=timeout,
     )
-    if replacements and response is not None and isinstance(getattr(response, "content", None), str):
-        response.content = restore_text_with_replacements(response.content, replacements)
+    if response is not None and isinstance(getattr(response, "content", None), str):
+        response.content = await transform_complete_response(
+            response.content,
+            llm_hook_metadata,
+            legacy_replacements=replacements,
+        )
     if response is not None and isinstance(getattr(response, "content", None), str):
         response.content = strip_think_blocks(response.content)
     return response

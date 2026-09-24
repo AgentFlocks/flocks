@@ -57,7 +57,9 @@ def test_plugin_loader_high_volume_logs_use_debug(tmp_path: Path, monkeypatch) -
     (project_tools_dir / "project.yaml").write_text("name: project-tool\n", encoding="utf-8")
 
     monkeypatch.setattr(PluginLoader, "_plugin_root", user_root)
-    PluginLoader.clear_extension_points()
+    monkeypatch.setattr(PluginLoader, "_extension_points", {})
+    monkeypatch.setattr(PluginLoader, "_last_load_errors", [])
+    monkeypatch.setattr(PluginLoader, "_runtime_critical_entrypoint_failure", False)
     consumed: list[dict[str, str]] = []
     PluginLoader.register_extension_point(
         ExtensionPoint(
@@ -71,10 +73,7 @@ def test_plugin_loader_high_volume_logs_use_debug(tmp_path: Path, monkeypatch) -
         )
     )
 
-    try:
-        PluginLoader.load_all(project_dir=project_dir)
-    finally:
-        PluginLoader.clear_extension_points()
+    PluginLoader.load_all(project_dir=project_dir)
 
     assert consumed == [
         {"name": "user-tool", "path": str(user_tools_dir / "user.yaml")},

@@ -163,21 +163,6 @@ export namespace MessageV2 {
   })
   export type CompactionPart = z.infer<typeof CompactionPart>
 
-  export const SubtaskPart = PartBase.extend({
-    type: z.literal("subtask"),
-    prompt: z.string(),
-    description: z.string(),
-    agent: z.string(),
-    model: z
-      .object({
-        providerID: z.string(),
-        modelID: z.string(),
-      })
-      .optional(),
-    command: z.string().optional(),
-  })
-  export type SubtaskPart = z.infer<typeof SubtaskPart>
-
   export const RetryPart = PartBase.extend({
     type: z.literal("retry"),
     attempt: z.number(),
@@ -329,7 +314,6 @@ export namespace MessageV2 {
   export const Part = z
     .discriminatedUnion("type", [
       TextPart,
-      SubtaskPart,
       ReasoningPart,
       FilePart,
       ToolPart,
@@ -345,6 +329,22 @@ export namespace MessageV2 {
       ref: "Part",
     })
   export type Part = z.infer<typeof Part>
+
+  export function normalizeStoredPart(part: unknown): Part {
+    if (typeof part === "object" && part !== null && "type" in part && part.type === "subtask") {
+      const legacy = PartBase.parse(part)
+      return {
+        id: legacy.id,
+        sessionID: legacy.sessionID,
+        messageID: legacy.messageID,
+        type: "text",
+        text: "",
+        ignored: true,
+        metadata: { legacyPartType: "subtask" },
+      }
+    }
+    return Part.parse(part)
+  }
 
   export const Assistant = Base.extend({
     role: z.literal("assistant"),
@@ -466,12 +466,6 @@ export namespace MessageV2 {
               text: "What did we do so far?",
             })
           }
-          if (part.type === "subtask") {
-            userMessage.parts.push({
-              type: "text",
-              text: "The following tool was executed by the user",
-            })
-          }
         }
       }
 
@@ -581,8 +575,8 @@ export namespace MessageV2 {
   export const parts = fn(Identifier.schema("message"), async (messageID) => {
     const result = [] as MessageV2.Part[]
     for (const item of await Storage.list(["part", messageID])) {
-      const read = await Storage.read<MessageV2.Part>(item)
-      result.push(read)
+      const read = await Storage.read<unknown>(item)
+      result.push(normalizeStoredPart(read))
     }
     result.sort((a, b) => (a.id > b.id ? 1 : -1))
     return result

@@ -1,4 +1,4 @@
-import { Layers, Tag, Activity, User, Calendar, Clock, MessageSquarePlus } from 'lucide-react';
+import { IconStack2, IconTag, IconActivity, IconUser, IconCalendar, IconClock, IconMessagePlus } from '@tabler/icons-react';
 import { useTranslation } from 'react-i18next';
 import { Workflow } from '@/api/workflow';
 
@@ -67,12 +67,12 @@ export default function CreateOverviewTab({ workflow }: CreateOverviewTabProps) 
             {t('detail.overview.configInfo')}
           </h3>
           <div className="bg-white rounded-lg border border-gray-100 px-3">
-            <PlaceholderRow label={t('detail.overview.nodeCount')} icon={<Layers className="w-3.5 h-3.5" />} />
-            <PlaceholderRow label={t('detail.overview.category')} icon={<Tag className="w-3.5 h-3.5" />} />
-            <PlaceholderRow label={t('detail.overview.version')} icon={<Activity className="w-3.5 h-3.5" />} />
-            <PlaceholderRow label={t('detail.overview.createdBy')} icon={<User className="w-3.5 h-3.5" />} />
-            <PlaceholderRow label={t('detail.overview.createdAt')} icon={<Calendar className="w-3.5 h-3.5" />} />
-            <PlaceholderRow label={t('detail.overview.updatedAt')} icon={<Clock className="w-3.5 h-3.5" />} />
+            <PlaceholderRow label={t('detail.overview.nodeCount')} icon={<IconStack2 aria-hidden="true" className="w-3.5 h-3.5" />} />
+            <PlaceholderRow label={t('detail.overview.category')} icon={<IconTag aria-hidden="true" className="w-3.5 h-3.5" />} />
+            <PlaceholderRow label={t('detail.overview.version')} icon={<IconActivity aria-hidden="true" className="w-3.5 h-3.5" />} />
+            <PlaceholderRow label={t('detail.overview.createdBy')} icon={<IconUser aria-hidden="true" className="w-3.5 h-3.5" />} />
+            <PlaceholderRow label={t('detail.overview.createdAt')} icon={<IconCalendar aria-hidden="true" className="w-3.5 h-3.5" />} />
+            <PlaceholderRow label={t('detail.overview.updatedAt')} icon={<IconClock aria-hidden="true" className="w-3.5 h-3.5" />} />
           </div>
         </section>
 
@@ -90,7 +90,7 @@ export default function CreateOverviewTab({ workflow }: CreateOverviewTabProps) 
 
         <div className="flex flex-col items-center justify-center py-6 gap-3">
           <div className="flex items-center justify-center w-10 h-10 rounded-xl bg-gray-100">
-            <MessageSquarePlus className="w-5 h-5 text-gray-400" />
+            <IconMessagePlus aria-hidden="true" className="w-5 h-5 text-gray-400" />
           </div>
           <p className="text-xs text-gray-400 text-center max-w-[180px] leading-relaxed">
             {t('create.overview.chatHint')}
@@ -131,7 +131,7 @@ export default function CreateOverviewTab({ workflow }: CreateOverviewTabProps) 
         </h3>
         <div className="bg-white rounded-lg border border-gray-100 px-3">
           <MetaRow
-            icon={<Layers className="w-3.5 h-3.5" />}
+            icon={<IconStack2 aria-hidden="true" className="w-3.5 h-3.5" />}
             label={t('detail.overview.nodeCount')}
             value={t('detail.overview.nodesAndEdges', {
               nodes: workflow.workflowJson.nodes.length,
@@ -139,31 +139,31 @@ export default function CreateOverviewTab({ workflow }: CreateOverviewTabProps) 
             })}
           />
           <MetaRow
-            icon={<Tag className="w-3.5 h-3.5" />}
+            icon={<IconTag aria-hidden="true" className="w-3.5 h-3.5" />}
             label={t('detail.overview.category')}
             value={workflow.category}
           />
           {workflow.workflowJson.version && (
             <MetaRow
-              icon={<Activity className="w-3.5 h-3.5" />}
+              icon={<IconActivity aria-hidden="true" className="w-3.5 h-3.5" />}
               label={t('detail.overview.version')}
               value={workflow.workflowJson.version}
             />
           )}
           {workflow.createdBy && (
             <MetaRow
-              icon={<User className="w-3.5 h-3.5" />}
+              icon={<IconUser aria-hidden="true" className="w-3.5 h-3.5" />}
               label={t('detail.overview.createdBy')}
               value={workflow.createdBy}
             />
           )}
           <MetaRow
-            icon={<Calendar className="w-3.5 h-3.5" />}
+            icon={<IconCalendar aria-hidden="true" className="w-3.5 h-3.5" />}
             label={t('detail.overview.createdAt')}
             value={createdAt}
           />
           <MetaRow
-            icon={<Clock className="w-3.5 h-3.5" />}
+            icon={<IconClock aria-hidden="true" className="w-3.5 h-3.5" />}
             label={t('detail.overview.updatedAt')}
             value={updatedAt}
           />

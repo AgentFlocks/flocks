@@ -25,7 +25,9 @@ _LOCK_FILENAME = "agent_delegatable_settings.json.lock"
 
 
 def settings_path() -> Path:
-    return Path.home() / ".flocks" / "config" / "agent_delegatable_settings.json"
+    from flocks.config.config import _get_config_dir
+
+    return _get_config_dir() / "agent_delegatable_settings.json"
 
 
 def _platform_file_lock(fd: int) -> None:

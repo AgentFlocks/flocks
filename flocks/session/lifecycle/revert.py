@@ -196,11 +196,12 @@ class SessionRevertManager:
             
             for part in msg_parts:
                 if revert_info:
-                    # After revert point, collect patches
-                    if isinstance(part, dict) and part.get("type") == "patch":
+                    # After revert point, collect patches（part 可能是对象也可能是 dict）
+                    part_type = part.get("type") if isinstance(part, dict) else getattr(part, "type", None)
+                    if part_type == "patch":
                         patches.append(SnapshotPatch(
-                            hash=part.get("hash", ""),
-                            files=part.get("files", [])
+                            hash=(part.get("hash") if isinstance(part, dict) else getattr(part, "hash", "")) or "",
+                            files=list((part.get("files") if isinstance(part, dict) else getattr(part, "files", None)) or []),
                         ))
                     continue
                 

@@ -1,6 +1,6 @@
 import { useCallback, useId, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { Info } from 'lucide-react';
+import { IconInfoCircle } from '@tabler/icons-react';
 
 interface GuideTooltip {
   title: string;
@@ -63,7 +63,7 @@ export default function GuideInfoIcon({
         onBlur={interactive ? hideTooltip : undefined}
         onMouseLeave={hideTooltip}
       >
-        <Info className="h-3.5 w-3.5" aria-hidden="true" />
+        <IconInfoCircle className="h-3.5 w-3.5" aria-hidden="true" />
       </span>
       {tooltip && canPortal && createPortal(
         <div

@@ -16,12 +16,16 @@ Stats:      GET /stats
 
 from __future__ import annotations
 
+import asyncio
 import io
 import zipfile
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
+from fastapi import HTTPException, Request
 from fastapi.testclient import TestClient
+from starlette.datastructures import UploadFile
 from tests.utils.file_type_samples import ALL_SUPPORTED_UPLOAD_FILENAMES, create_sample_file
 
 
@@ -49,6 +53,7 @@ def workspace_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
     monkeypatch.setenv("FLOCKS_WORKSPACE_DIR", str(ws))
     monkeypatch.setenv("FLOCKS_DATA_DIR", str(data))
+    monkeypatch.setenv("FLOCKS_ROOT", str(tmp_path / ".flocks"))
 
     # Reset both singletons so they re-read env vars
     from flocks.workspace.manager import WorkspaceManager
@@ -58,9 +63,21 @@ def workspace_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
     # Build a minimal FastAPI app with only the workspace router
     from fastapi import FastAPI
+    from flocks.auth.context import AuthUser
     from flocks.server.routes.workspace import router
 
     app = FastAPI()
+
+    @app.middleware("http")
+    async def inject_auth_user(request, call_next):
+        request.state.auth_user = AuthUser(
+            id="usr_workspace",
+            username="workspace",
+            role="member",
+            status="active",
+        )
+        return await call_next(request)
+
     app.include_router(router, prefix="/api/workspace")
 
     client = TestClient(app, raise_server_exceptions=True)
@@ -70,6 +87,36 @@ def workspace_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     # Cleanup
     WorkspaceManager._instance = None
     Config._global_config = None
+
+
+@pytest.fixture()
+def chat_staging(workspace_client, monkeypatch):
+    """Track newly created targets alongside an unrelated existing upload."""
+    from flocks.session import files as session_files
+
+    create_target = session_files.create_chat_upload_target
+    existing = create_target("usr_workspace", "part_existing", "keep.txt")
+    existing.write_bytes(b"keep")
+    created = []
+
+    def track_target(owner_id, upload_id, filename):
+        target = create_target(owner_id, upload_id, filename)
+        created.append(target)
+        return target
+
+    monkeypatch.setattr(session_files, "create_chat_upload_target", track_target)
+    return created, existing
+
+
+@pytest.fixture()
+def upload_request():
+    from flocks.auth.context import AuthUser
+
+    request = Request({"type": "http"})
+    request.state.auth_user = AuthUser(
+        id="usr_workspace", username="workspace", role="member", status="active",
+    )
+    return request
 
 
 # Convenience unpacking helpers used in every test
@@ -115,6 +162,19 @@ class TestDirList:
         assert r.status_code == 200
         assert any(n["name"] == "sub.txt" for n in r.json())
 
+    def test_list_outputs_hides_hidden_entries_and_sorts_directories_descending(self, workspace_client):
+        ws = _ws(workspace_client)
+        (ws / "outputs" / "2026-09-06").mkdir()
+        (ws / "outputs" / "2026-09-07").mkdir()
+        (ws / "outputs" / ".staging").mkdir()
+        (ws / "outputs" / "report.md").write_text("visible")
+        (ws / "outputs" / ".DS_Store").write_text("hidden")
+
+        r = _client(workspace_client).get("/api/workspace/list?path=outputs")
+
+        assert r.status_code == 200
+        assert [item["name"] for item in r.json()] == ["2026-09-07", "2026-09-06", "report.md"]
+
     def test_list_nonexistent_returns_404(self, workspace_client):
         r = _client(workspace_client).get("/api/workspace/list?path=does_not_exist")
         assert r.status_code == 404
@@ -124,6 +184,33 @@ class TestDirList:
         (ws / "file.txt").write_text("x")
         r = _client(workspace_client).get("/api/workspace/list?path=file.txt")
         assert r.status_code == 400
+
+    def test_list_subdir_when_workspace_root_is_symlink(self, workspace_client, tmp_path: Path):
+        ws = _ws(workspace_client)
+        link = tmp_path / "workspace-link"
+        try:
+            link.symlink_to(ws, target_is_directory=True)
+        except OSError as exc:
+            pytest.skip(f"symlink unavailable on this platform: {exc}")
+
+        from flocks.workspace.manager import WorkspaceManager
+
+        manager = WorkspaceManager.get_instance()
+        manager._workspace_dir = link
+        (ws / "outputs" / "report.txt").write_text("ok")
+
+        root = _client(workspace_client).get("/api/workspace/list")
+        r = _client(workspace_client).get("/api/workspace/list?path=outputs")
+
+        assert root.status_code == 200
+        assert any(item["name"] == "outputs" and item["path"] == "outputs" for item in root.json())
+        assert r.status_code == 200
+        assert any(
+            item["name"] == "report.txt"
+            and item["path"] == "outputs/report.txt"
+            and item["type"] == "file"
+            for item in r.json()
+        )
 
 
 class TestDirTree:
@@ -146,9 +233,45 @@ class TestDirTree:
         children_names = {c["name"] for c in (r.json().get("children") or [])}
         assert "a" in children_names
 
+    def test_tree_hides_hidden_entries(self, workspace_client):
+        ws = _ws(workspace_client)
+        (ws / ".hidden").mkdir()
+        (ws / "outputs" / ".staging").mkdir()
+
+        r = _client(workspace_client).get("/api/workspace/tree?depth=2")
+
+        assert r.status_code == 200
+        assert all(child["name"] != ".hidden" for child in r.json()["children"])
+        outputs = next(child for child in r.json()["children"] if child["name"] == "outputs")
+        assert all(child["name"] != ".staging" for child in outputs["children"])
+
     def test_tree_nonexistent_returns_404(self, workspace_client):
         r = _client(workspace_client).get("/api/workspace/tree?path=nope")
         assert r.status_code == 404
+
+    def test_tree_subdir_when_workspace_root_is_symlink(self, workspace_client, tmp_path: Path):
+        ws = _ws(workspace_client)
+        link = tmp_path / "workspace-link"
+        try:
+            link.symlink_to(ws, target_is_directory=True)
+        except OSError as exc:
+            pytest.skip(f"symlink unavailable on this platform: {exc}")
+
+        from flocks.workspace.manager import WorkspaceManager
+
+        manager = WorkspaceManager.get_instance()
+        manager._workspace_dir = link
+        (ws / "outputs" / "nested").mkdir()
+
+        root = _client(workspace_client).get("/api/workspace/tree?depth=1")
+        r = _client(workspace_client).get("/api/workspace/tree?path=outputs&depth=1")
+
+        assert root.status_code == 200
+        assert root.json()["path"] == ""
+        assert r.status_code == 200
+        data = r.json()
+        assert data["path"] == "outputs"
+        assert any(child["path"] == "outputs/nested" for child in data["children"])
 
 
 class TestDirCreate:
@@ -265,7 +388,13 @@ class TestUpload:
         result = response.json()["uploaded"][0]
         assert result.get("error") is None
         assert result["name"] == filename
-        assert (_ws(workspace_client) / filename).exists()
+        assert result.get("uploadID")
+        assert "path" not in result
+        assert "abs_path" not in result
+        from flocks.session.files import resolve_staged_chat_upload
+
+        staged = resolve_staged_chat_upload("usr_workspace", result["uploadID"])
+        assert staged.read_bytes() == source.read_bytes()
 
     def test_upload_multiple_files(self, workspace_client):
         client = _client(workspace_client)
@@ -294,6 +423,59 @@ class TestUpload:
         uploaded = r.json()["uploaded"]
         assert uploaded[0]["name"] == "evil.txt"
 
+    @pytest.mark.parametrize(("raw_name", "filename"), [
+        ("folder\\report\x01.pdf", "report_.pdf"),
+        ("folder%5Creport%0A.pdf", "report_.pdf"),
+        ("folder/report%3F%3C.pdf", "report_.pdf"),
+        ("  report   notes.txt  ", "report notes.txt"),
+        ("café.txt", "café.txt"),
+    ])
+    def test_chat_upload_sanitizes_filename(self, workspace_client, raw_name, filename):
+        response = _client(workspace_client).post(
+            "/api/workspace/upload?purpose=chat",
+            files=[("files", (raw_name, b"report", "application/octet-stream"))],
+        )
+
+        assert response.status_code == 200
+        result = response.json()["uploaded"][0]
+        assert result.get("error") is None
+        assert result["name"] == filename
+
+    @pytest.mark.parametrize("filename", [None, "", "  ", ".", "..", "folder/", "%20", "%2e%2e"])
+    async def test_chat_upload_rejects_empty_filename(
+        self, chat_staging, upload_request, filename,
+    ):
+        from flocks.server.routes.workspace import upload_files
+
+        upload = UploadFile(filename=filename, file=io.BytesIO(b"report"))
+        try:
+            response = await upload_files(upload_request, dest="", purpose="chat", files=[upload])
+            assert response["uploaded"][0] == {
+                "name": "",
+                "error": "Filename is missing" if not filename else "Filename is invalid",
+            }
+            assert upload.file.tell() == 0
+        finally:
+            await upload.close()
+        created, existing = chat_staging
+        assert created == []
+        assert existing.read_bytes() == b"keep"
+
+    async def test_chat_upload_requires_user_before_reading(self, chat_staging):
+        from flocks.server.routes.workspace import upload_files
+
+        upload = UploadFile(filename="report.txt", file=io.BytesIO(b"report"))
+        try:
+            with pytest.raises(HTTPException) as exc:
+                await upload_files(Request({"type": "http"}), dest="", purpose="chat", files=[upload])
+            assert exc.value.status_code == 401
+            assert upload.file.tell() == 0
+        finally:
+            await upload.close()
+        created, existing = chat_staging
+        assert created == []
+        assert existing.read_bytes() == b"keep"
+
     def test_upload_to_nonexistent_dest_creates_it(self, workspace_client):
         client = _client(workspace_client)
         r = client.post(
@@ -303,27 +485,107 @@ class TestUpload:
         assert r.status_code == 200
         assert (_ws(workspace_client) / "new_folder" / "x.txt").exists()
 
-    def test_upload_overwrites_duplicate_file_without_chat_purpose(self, workspace_client):
-        client = _client(workspace_client)
-        first = client.post(
-            "/api/workspace/upload?dest=uploads",
-            files=[("files", ("report.pdf", b"first", "application/pdf"))],
-        )
-        second = client.post(
-            "/api/workspace/upload?dest=uploads",
-            files=[("files", ("report.pdf", b"second", "application/pdf"))],
-        )
-        assert first.status_code == 200
-        assert second.status_code == 200
-        first_item = first.json()["uploaded"][0]
-        second_item = second.json()["uploaded"][0]
-        assert first_item["name"] == "report.pdf"
-        assert second_item["name"] == "report.pdf"
-        assert first_item["path"] == "uploads/report.pdf"
-        assert second_item["path"] == "uploads/report.pdf"
-        assert (_ws(workspace_client) / "uploads" / "report.pdf").read_bytes() == b"second"
+    @pytest.mark.parametrize("purpose", [None, "chat"])
+    def test_upload_to_dest_when_workspace_root_is_symlink(
+        self,
+        workspace_client,
+        tmp_path: Path,
+        purpose: str | None,
+    ):
+        ws = _ws(workspace_client)
+        link = tmp_path / "workspace-link"
+        try:
+            link.symlink_to(ws, target_is_directory=True)
+        except OSError as exc:
+            pytest.skip(f"symlink unavailable on this platform: {exc}")
 
-    def test_chat_upload_overwrites_duplicate_file(self, workspace_client):
+        from flocks.workspace.manager import WorkspaceManager
+
+        WorkspaceManager.get_instance()._workspace_dir = link
+        url = "/api/workspace/upload?dest=uploads"
+        if purpose:
+            url += f"&purpose={purpose}"
+
+        response = _client(workspace_client).post(
+            url,
+            files=[("files", ("report.pdf", b"report", "application/pdf"))],
+        )
+
+        assert response.status_code == 200
+        result = response.json()["uploaded"][0]
+        assert result.get("error") is None
+        if purpose == "chat":
+            from flocks.session.files import resolve_staged_chat_upload
+
+            assert "path" not in result
+            assert "abs_path" not in result
+            staged = resolve_staged_chat_upload("usr_workspace", result["uploadID"])
+            assert staged.read_bytes() == b"report"
+        else:
+            assert result["path"] == "uploads/report.pdf"
+            assert result["abs_path"] == str(ws / "uploads" / "report.pdf")
+            assert (ws / "uploads" / "report.pdf").read_bytes() == b"report"
+
+    def test_upload_to_root_when_workspace_root_is_symlink(
+        self,
+        workspace_client,
+        tmp_path: Path,
+    ):
+        ws = _ws(workspace_client)
+        link = tmp_path / "workspace-link"
+        try:
+            link.symlink_to(ws, target_is_directory=True)
+        except OSError as exc:
+            pytest.skip(f"symlink unavailable on this platform: {exc}")
+
+        from flocks.workspace.manager import WorkspaceManager
+
+        WorkspaceManager.get_instance()._workspace_dir = link
+        response = _client(workspace_client).post(
+            "/api/workspace/upload",
+            files=[("files", ("root.txt", b"root", "text/plain"))],
+        )
+
+        assert response.status_code == 200
+        result = response.json()["uploaded"][0]
+        assert result.get("error") is None
+        assert result["path"] == "root.txt"
+        assert result["abs_path"] == str(link / "root.txt")
+        assert (ws / "root.txt").read_bytes() == b"root"
+
+    @pytest.mark.parametrize("filename", [
+        "report.pdf",
+        "normalfilename.txt",
+        "report%20notes.txt",
+        "report%2Fnotes.txt",
+        "r" * 210 + ".txt",
+        "  report   notes.txt",
+        "folder\\report.txt",
+    ])
+    def test_upload_overwrites_duplicate_file_without_chat_purpose(self, workspace_client, filename):
+        client = _client(workspace_client)
+        first = client.post(
+            "/api/workspace/upload?dest=uploads",
+            files=[("files", (filename, b"first", "application/octet-stream"))],
+        )
+        second = client.post(
+            "/api/workspace/upload?dest=uploads",
+            files=[("files", (filename, b"second", "application/octet-stream"))],
+        )
+        assert first.status_code == 200
+        assert second.status_code == 200
+        expected_name = Path(filename).name
+        target = _ws(workspace_client) / "uploads" / expected_name
+        for response in (first, second):
+            item = response.json()["uploaded"][0]
+            assert item.get("error") is None
+            assert item["name"] == expected_name
+            assert item["path"] == str(Path("uploads") / expected_name)
+            assert item["abs_path"] == str(target)
+        assert target.read_bytes() == b"second"
+        assert list(target.parent.iterdir()) == [target]
+
+    def test_chat_upload_keeps_duplicate_filenames_isolated(self, workspace_client):
         client = _client(workspace_client)
         first = client.post(
             "/api/workspace/upload?dest=uploads&purpose=chat",
@@ -339,9 +601,242 @@ class TestUpload:
         second_item = second.json()["uploaded"][0]
         assert first_item["name"] == "report.pdf"
         assert second_item["name"] == "report.pdf"
-        assert first_item["path"] == "uploads/report.pdf"
-        assert second_item["path"] == "uploads/report.pdf"
-        assert (_ws(workspace_client) / "uploads" / "report.pdf").read_bytes() == b"second"
+        assert first_item["uploadID"] != second_item["uploadID"]
+        assert "path" not in first_item
+        assert "abs_path" not in first_item
+
+        from flocks.session.files import resolve_staged_chat_upload
+
+        assert resolve_staged_chat_upload("usr_workspace", first_item["uploadID"]).read_bytes() == b"first"
+        assert resolve_staged_chat_upload("usr_workspace", second_item["uploadID"]).read_bytes() == b"second"
+
+    @pytest.mark.parametrize("content", [b"", b"x" * (3 * 65536)], ids=["empty", "multiple-chunks"])
+    def test_chat_upload_streams_chunks_to_disk(
+        self, workspace_client, chat_staging, monkeypatch, content,
+    ):
+        from flocks.server.routes import workspace as workspace_routes
+        from flocks.session.files import resolve_staged_chat_upload
+
+        created, existing = chat_staging
+        original_read = UploadFile.read
+        read_sizes = []
+        bytes_read = 0
+
+        async def tracked_read(upload, size=-1):
+            nonlocal bytes_read
+            assert size == 65536
+            assert len(created) == 1  # Staging must precede the first read.
+            assert created[0].stat().st_size == bytes_read
+            read_sizes.append(size)
+            chunk = await original_read(upload, size)
+            bytes_read += len(chunk)
+            return chunk
+
+        def reject_write_bytes(*args, **kwargs):
+            pytest.fail("Chat uploads must not buffer content for write_bytes")
+
+        monkeypatch.setattr(UploadFile, "read", tracked_read)
+        monkeypatch.setattr(Path, "write_bytes", reject_write_bytes)
+        monkeypatch.setattr(workspace_routes, "_max_upload_bytes", lambda: len(content))
+        response = _client(workspace_client).post(
+            "/api/workspace/upload?purpose=chat",
+            files=[("files", ("report.txt", content, "text/plain"))],
+        )
+
+        assert response.status_code == 200
+        result = response.json()["uploaded"][0]
+        assert result.get("error") is None
+        assert result["size"] == len(content)
+        assert read_sizes == [65536] * (len(content) // 65536 + 1)
+        assert resolve_staged_chat_upload("usr_workspace", result["uploadID"]).read_bytes() == content
+        assert existing.read_bytes() == b"keep"
+
+    def test_chat_upload_size_limit_cleans_partial_file_and_continues(
+        self, workspace_client, chat_staging, monkeypatch,
+    ):
+        from flocks.server.routes import workspace as workspace_routes
+
+        created, existing = chat_staging
+        original_read = UploadFile.read
+        big_reads = []
+
+        async def tracked_read(upload, size=-1):
+            chunk = await original_read(upload, size)
+            if upload.filename == "big.txt":
+                big_reads.append(len(chunk))
+            return chunk
+
+        monkeypatch.setattr(UploadFile, "read", tracked_read)
+        monkeypatch.setattr(workspace_routes, "_max_upload_bytes", lambda: 65536)
+        response = _client(workspace_client).post(
+            "/api/workspace/upload?purpose=chat",
+            files=[
+                ("files", ("big.txt", b"x" * (3 * 65536), "text/plain")),
+                ("files", ("small.txt", b"ok", "text/plain")),
+            ],
+        )
+
+        assert response.status_code == 200
+        failed, succeeded = response.json()["uploaded"]
+        assert "File too large" in failed["error"]
+        assert "uploadID" not in failed
+        assert succeeded.get("error") is None
+        assert big_reads == [65536, 65536]  # Stop as soon as the sum exceeds the limit.
+        assert len(created) == 2
+        assert not created[0].parent.exists()
+        assert created[1].read_bytes() == b"ok"
+        assert existing.read_bytes() == b"keep"
+        assert set(existing.parent.parent.iterdir()) == {existing.parent, created[1].parent}
+
+    @pytest.mark.parametrize("error_type", [OSError, RuntimeError])
+    def test_chat_upload_read_exception_cleans_partial_file(
+        self, workspace_client, chat_staging, monkeypatch, error_type,
+    ):
+        created, existing = chat_staging
+        original_read = UploadFile.read
+        reads = 0
+
+        async def failing_read(upload, size=-1):
+            nonlocal reads
+            reads += 1
+            if reads == 2:
+                assert created[0].stat().st_size == 65536
+                raise error_type("read failed")
+            return await original_read(upload, size)
+
+        monkeypatch.setattr(UploadFile, "read", failing_read)
+        response = _client(workspace_client).post(
+            "/api/workspace/upload?purpose=chat",
+            files=[("files", ("report.txt", b"x" * (2 * 65536), "text/plain"))],
+        )
+
+        assert response.status_code == 200
+        result = response.json()["uploaded"][0]
+        assert "Failed to stage upload: read failed" == result["error"]
+        assert "uploadID" not in result
+        assert len(created) == 1
+        assert not created[0].parent.exists()
+        assert existing.read_bytes() == b"keep"
+        assert list(existing.parent.parent.iterdir()) == [existing.parent]
+
+    @pytest.mark.parametrize("failure", ["open", "write", "close"])
+    def test_chat_upload_disk_exception_cleans_partial_file(
+        self, workspace_client, chat_staging, monkeypatch, failure,
+    ):
+        created, existing = chat_staging
+        original_open = Path.open
+
+        @contextmanager
+        def failing_writer(path):
+            if failure == "open":
+                raise OSError("open failed")
+            with original_open(path, "xb") as handle:
+                class FailingWriter:
+                    def write(self, chunk):
+                        handle.write(chunk[:16])
+                        handle.flush()
+                        raise OSError("write failed")
+
+                yield FailingWriter() if failure == "write" else handle
+            if failure == "close":
+                raise OSError("close failed")
+
+        def patched_open(path, mode="r", *args, **kwargs):
+            if path in created and mode == "xb":
+                return failing_writer(path)
+            return original_open(path, mode, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "open", patched_open)
+        response = _client(workspace_client).post(
+            "/api/workspace/upload?purpose=chat",
+            files=[("files", ("report.txt", b"x" * 65536, "text/plain"))],
+        )
+
+        assert response.status_code == 200
+        result = response.json()["uploaded"][0]
+        assert result["error"] == f"Failed to stage upload: {failure} failed"
+        assert "uploadID" not in result
+        assert len(created) == 1
+        assert not created[0].parent.exists()
+        assert existing.read_bytes() == b"keep"
+        assert list(existing.parent.parent.iterdir()) == [existing.parent]
+
+    async def test_chat_upload_cancellation_cleans_partial_file(
+        self, chat_staging, upload_request, monkeypatch,
+    ):
+        from flocks.server.routes.workspace import upload_files
+
+        created, existing = chat_staging
+        upload = UploadFile(filename="report.txt", file=io.BytesIO(b"x" * 65536))
+        original_read = upload.read
+        waiting_for_chunk = asyncio.Event()
+
+        async def blocking_read(size=-1):
+            if upload.file.tell():
+                assert created[0].stat().st_size == 65536
+                waiting_for_chunk.set()
+                await asyncio.Future()
+            return await original_read(size)
+
+        monkeypatch.setattr(upload, "read", blocking_read)
+        task = asyncio.create_task(
+            upload_files(upload_request, dest="", purpose="chat", files=[upload])
+        )
+        try:
+            await asyncio.wait_for(waiting_for_chunk.wait(), timeout=5)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        finally:
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            await upload.close()
+
+        assert len(created) == 1
+        assert not created[0].parent.exists()
+        assert existing.read_bytes() == b"keep"
+        assert list(existing.parent.parent.iterdir()) == [existing.parent]
+
+    @pytest.mark.parametrize("filename", ["keep.txt", "report.pdf"])
+    def test_chat_upload_id_collision_preserves_existing_upload(
+        self, workspace_client, chat_staging, monkeypatch, filename,
+    ):
+        from flocks.utils.id import Identifier
+
+        created, existing = chat_staging
+        monkeypatch.setattr(Identifier, "ascending", staticmethod(lambda prefix: "part_existing"))
+        response = _client(workspace_client).post(
+            "/api/workspace/upload?purpose=chat",
+            files=[("files", (filename, b"replacement", "application/octet-stream"))],
+        )
+
+        assert response.status_code == 200
+        result = response.json()["uploaded"][0]
+        assert "Failed to stage upload" in result["error"]
+        assert "uploadID" not in result
+        assert created == []
+        assert existing.read_bytes() == b"keep"
+        assert list(existing.parent.iterdir()) == [existing]
+        assert list(existing.parent.parent.iterdir()) == [existing.parent]
+
+    def test_discard_chat_upload_removes_staged_file(self, workspace_client):
+        client = _client(workspace_client)
+        uploaded = client.post(
+            "/api/workspace/upload?purpose=chat",
+            files=[("files", ("draft.md", b"draft", "text/markdown"))],
+        ).json()["uploaded"][0]
+
+        response = client.delete(
+            f"/api/workspace/upload/chat/{uploaded['uploadID']}"
+        )
+
+        assert response.status_code == 200
+        assert response.json()["removed"] is True
+        from flocks.session.files import resolve_staged_chat_upload
+
+        with pytest.raises(FileNotFoundError):
+            resolve_staged_chat_upload("usr_workspace", uploaded["uploadID"])
 
     def test_upload_too_large_file_rejected(self, workspace_client, monkeypatch):
         # Set the limit to 0 MB; _max_upload_bytes() reads the env var at
@@ -697,10 +1192,21 @@ class TestMemoryView:
         assert daily["type"] == "directory"
         assert daily["children"] == []
 
-    def test_list_memory_with_files(self, workspace_client):
+    def test_list_memory_with_files(self, workspace_client, monkeypatch):
+        from flocks.project.project import Project
+
+        monkeypatch.setattr(
+            Project,
+            "registered_project_ids",
+            classmethod(lambda cls, owner_id: {"prj_example"}),
+        )
         mem = _mem(workspace_client)
         (mem / "USER.md").write_text("# User")
         (mem / "MEMORY.md").write_text("# Memory")
+        (mem / "SHORT_MEMORY.md").write_text("# Short")
+        (mem / "bak.txt").write_text("backup")
+        (mem / "archive").mkdir()
+        (mem / "archive" / "2026-08-18.md").write_text("# Archived")
         (mem / "daily").mkdir()
         (mem / "daily" / "2026-03-14.md").write_text("## Daily")
         (mem / "projects" / "prj_example").mkdir(parents=True)
@@ -716,17 +1222,29 @@ class TestMemoryView:
             "MEMORY.md",
             "projects",
             "daily",
+            "archive",
+            "bak.txt",
+            "SHORT_MEMORY.md",
         ]
         nodes = {node["name"]: node for node in r.json()}
-        assert set(nodes) == {"USER.md", "MEMORY.md", "daily", "projects"}
+        assert set(nodes) == {"USER.md", "MEMORY.md", "SHORT_MEMORY.md", "archive", "bak.txt", "daily", "projects"}
         assert nodes["USER.md"]["type"] == "file"
+        assert nodes["USER.md"]["editable"] is True
         assert nodes["MEMORY.md"]["type"] == "file"
+        assert nodes["MEMORY.md"]["editable"] is True
+        assert nodes["SHORT_MEMORY.md"]["editable"] is False
+        assert nodes["bak.txt"]["editable"] is False
+        assert nodes["archive"]["editable"] is False
+        assert nodes["archive"]["children"][0]["path"] == "archive/2026-08-18.md"
+        assert nodes["archive"]["children"][0]["editable"] is False
         assert nodes["daily"]["type"] == "directory"
         assert nodes["daily"]["children"][0]["path"] == "daily/2026-03-14.md"
+        assert nodes["daily"]["children"][0]["editable"] is True
         assert nodes["projects"]["type"] == "directory"
         project = nodes["projects"]["children"][0]
         assert project["path"] == "projects/prj_example"
         assert project["children"][0]["path"] == "projects/prj_example/MEMORY.md"
+        assert project["children"][0]["editable"] is True
 
     def test_read_memory_file(self, workspace_client):
         mem = _mem(workspace_client)
@@ -833,6 +1351,40 @@ class TestMemoryView:
             "written": True,
         }
         assert target.read_text() == "new content"
+
+    def test_write_non_editable_memory_file_returns_403(self, workspace_client):
+        mem = _mem(workspace_client)
+        target = mem / "SHORT_MEMORY.md"
+        target.write_text("old content")
+
+        r = _client(workspace_client).put(
+            "/api/workspace/memory/file",
+            json={"path": "SHORT_MEMORY.md", "content": "tampered"},
+        )
+
+        assert r.status_code == 403
+        assert target.read_text() == "old content"
+
+    def test_write_unreadable_project_memory_returns_403(self, workspace_client, monkeypatch):
+        from flocks.project.project import Project
+
+        monkeypatch.setattr(
+            Project,
+            "registered_project_ids",
+            classmethod(lambda cls, owner_id: {"prj_allowed"}),
+        )
+        mem = _mem(workspace_client)
+        target = mem / "projects" / "prj_stale" / "MEMORY.md"
+        target.parent.mkdir(parents=True)
+        target.write_text("old content")
+
+        r = _client(workspace_client).put(
+            "/api/workspace/memory/file",
+            json={"path": "projects/prj_stale/MEMORY.md", "content": "tampered"},
+        )
+
+        assert r.status_code == 403
+        assert target.read_text() == "old content"
 
     def test_write_memory_traversal_rejected(self, workspace_client):
         r = _client(workspace_client).put(

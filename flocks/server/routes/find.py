@@ -4,6 +4,7 @@ Find routes for Flocks TUI compatibility
 Provides /find/* endpoints that Flocks SDK expects.
 """
 
+import asyncio
 import os
 import subprocess
 from typing import Optional, List
@@ -62,7 +63,8 @@ async def find_text(
     
     try:
         # Use ripgrep if available
-        result = subprocess.run(
+        result = await asyncio.to_thread(  # keep the event loop free while the search runs
+            subprocess.run,
             ["rg", "--json", "--max-count", "100", "--", pattern],
             cwd=cwd,
             capture_output=True,
@@ -94,7 +96,8 @@ async def find_text(
     except FileNotFoundError:
         # ripgrep not available, use grep
         try:
-            result = subprocess.run(
+            result = await asyncio.to_thread(
+                subprocess.run,
                 ["grep", "-rn", "--", pattern, "."],
                 cwd=cwd,
                 capture_output=True,
@@ -145,7 +148,8 @@ async def find_files(
             cmd.extend(["--type", "f"])
         cmd.extend(["--", query])
         
-        result = subprocess.run(
+        result = await asyncio.to_thread(  # keep the event loop free while the search runs
+            subprocess.run,
             cmd,
             cwd=cwd,
             capture_output=True,
@@ -163,7 +167,8 @@ async def find_files(
             elif type == "file":
                 cmd.extend(["-type", "f"])
             
-            result = subprocess.run(
+            result = await asyncio.to_thread(
+                subprocess.run,
                 cmd,
                 cwd=cwd,
                 capture_output=True,

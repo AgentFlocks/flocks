@@ -6,6 +6,21 @@ import pytest
 from flocks.tool.registry import ToolContext, ToolRegistry
 
 
+async def _persist_continuation_sessions(child_id: str) -> None:
+    from flocks.session.session import SessionInfo
+    from flocks.storage.storage import Storage
+
+    parent = SessionInfo(
+        id="test-session", project_id="delegate-test", directory="/tmp/project", agent="rex",
+    )
+    child = SessionInfo(
+        id=child_id, project_id=parent.project_id, directory=parent.directory,
+        parent_id=parent.id, agent="asset-survey", category="task",
+    )
+    await Storage.set(f"session:{parent.project_id}:{parent.id}", parent)
+    await Storage.set(f"session:{child.project_id}:{child.id}", child)
+
+
 def _make_ctx() -> ToolContext:
     return ToolContext(session_id="test-session", message_id="test-message", agent="rex")
 
@@ -234,13 +249,9 @@ class TestDelegateTaskTolerance:
 
     @pytest.mark.asyncio
     async def test_delegate_task_sync_continue_fails_when_last_message_missing(self):
-        session = SimpleNamespace(
-            id="ses-child",
-            agent="asset-survey",
-        )
+        await _persist_continuation_sessions("ses-child")
 
-        with patch("flocks.tool.agent.delegate_task.Session.get_by_id", AsyncMock(return_value=session)), \
-             patch("flocks.tool.agent.delegate_task.Message.create", AsyncMock()), \
+        with patch("flocks.tool.agent.delegate_task.Message.create", AsyncMock()), \
              patch("flocks.tool.agent.delegate_task.SessionLoop.run", AsyncMock(return_value=SimpleNamespace(
                  action="stop",
                  error=None,
@@ -260,16 +271,9 @@ class TestDelegateTaskTolerance:
 
     @pytest.mark.asyncio
     async def test_delegate_task_sync_continue_reports_normalized_abort(self):
-        session = SimpleNamespace(
-            id="ses-child-aborted",
-            agent="asset-survey",
-        )
+        await _persist_continuation_sessions("ses-child-aborted")
 
         with (
-            patch(
-                "flocks.tool.agent.delegate_task.Session.get_by_id",
-                AsyncMock(return_value=session),
-            ),
             patch("flocks.tool.agent.delegate_task.Message.create", AsyncMock()),
             patch(
                 "flocks.tool.agent.delegate_task.SessionLoop.run",

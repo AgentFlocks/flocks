@@ -1,0 +1,14 @@
+{
+  "schemaVersion": "hub.component.v1",
+  "id": "ai-redteam-workspace",
+  "name": "AI Redteam Workspace",
+  "nameCn": "AI 红队工作区",
+  "description": "Composite package for the Flocks AI redteam workspace WebUI.",
+  "descriptionCn": "Flocks AI 红队工作区组件包，包含 WebUI 页面。",
+  "components": [
+    {
+      "type": "webui",
+      "id": "ai_redteam_ui"
+    }
+  ]
+}

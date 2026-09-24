@@ -22,19 +22,51 @@ Flocks TUI expects Agent format:
 """
 
 import asyncio
-from typing import List, Optional, Dict, Any
+from typing import List, Literal, Optional, Dict, Any
 
-from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, Field
+from fastapi import APIRouter, HTTPException, Request
+from pydantic import BaseModel, Field, StrictBool
 
 import flocks.agent.delegatable_settings as delegatable_settings
 from flocks.agent.registry import Agent
+from flocks.agent.tool_permissions import (
+    normalize_permission_items,
+    permission_items_to_ruleset,
+    sync_question_permission_with_tools,
+)
 from flocks.agent.agent import AgentInfo as AgentInfoModel, AgentModel as AgentModelConfig
-from flocks.agent.agent_factory import find_yaml_agent, read_yaml_agent, update_yaml_agent, delete_yaml_agent
+from flocks.agent.agent_factory import (
+    _find_yaml_file,
+    delete_yaml_agent,
+    find_yaml_agent,
+    read_yaml_agent,
+    update_yaml_agent,
+)
 from flocks.utils.log import Log
 
 router = APIRouter()
 log = Log.create(service="routes.agent")
+
+# Custom agent names double as storage keys and URL path segments.
+AGENT_NAME_PATTERN = r"^[a-z0-9][a-z0-9_-]*$"
+AGENT_MODE_VALUES = ("primary", "subagent", "all")
+
+
+def _require_admin_for_agent_config(request: Request) -> None:
+    """Agents are global configuration; only admins may change them."""
+    from flocks.server.auth import require_admin
+
+    require_admin(request)
+
+
+def _require_known_provider(model: Optional["AgentModelInfo"]) -> None:
+    if model is None:
+        return
+    from flocks.provider.provider import Provider
+
+    Provider._ensure_initialized()
+    if Provider.get(model.providerID) is None:
+        raise HTTPException(status_code=400, detail=f"Provider {model.providerID} not found")
 
 # Lazily-initialised lock to prevent concurrent read-modify-write on model_overrides.
 # Created on first use so it is always bound to the running event loop.
@@ -92,6 +124,7 @@ def agent_to_response(
     delegatable_override: Optional[bool] = None,
     skills: Optional[List[str]] = None,
     tools: Optional[List[str]] = None,
+    permission: Optional[List[Dict[str, Any]]] = None,
 ) -> AgentResponse:
     """Convert internal AgentInfo to API response format."""
     delegatable = (
@@ -124,7 +157,7 @@ def agent_to_response(
         topP=agent.top_p,
         temperature=temperature_override if temperature_override is not None else agent.temperature,
         color=agent.color,
-        permission=[],
+        permission=permission or [],
         model=model_info,
         prompt=agent.prompt,
         options=agent.options,
@@ -155,6 +188,8 @@ def _agent_data_to_info(agent_data: Dict[str, Any]) -> AgentInfoModel:
         temperature=agent_data.get("temperature"),
         color=agent_data.get("color"),
         mode=mode,
+        permission=permission_items_to_ruleset(agent_data.get("permission")),
+        tools=agent_data.get("tools", []),
         model=AgentModelConfig(
             model_id=model_data["modelID"],
             provider_id=model_data["providerID"],
@@ -185,7 +220,7 @@ def _custom_agent_data_to_response(agent_data: Dict[str, Any]) -> AgentResponse:
         model=model_info,
         native=agent_data.get("native", False),
         hidden=agent_data.get("hidden", False),
-        permission=[],
+        permission=normalize_permission_items(agent_data.get("permission")),
         options={},
         delegatable=delegatable,
         skills=agent_data.get("skills", []),
@@ -208,8 +243,8 @@ def _load_delegatable_overrides() -> Dict[str, bool]:
     return delegatable_settings.load_overrides()
 
 
-async def _load_custom_agent_extras(name: str) -> tuple[List[str], List[str]]:
-    """Load skills/tools list for an agent from storage.
+async def _load_custom_agent_extras(name: str) -> tuple[List[str], List[str], List[Dict[str, Any]]]:
+    """Load skills/tools/permission overlay for an agent from storage.
 
     Works for both full Storage-based custom agents and YAML agents with
     a skills/tools overlay (written by the YAML update path).
@@ -218,10 +253,14 @@ async def _load_custom_agent_extras(name: str) -> tuple[List[str], List[str]]:
     try:
         data = await Storage.read(f"agent/custom/{name}")
         if not isinstance(data, dict):
-            return [], []
-        return data.get("skills", []), data.get("tools", [])
+            return [], [], []
+        return (
+            data.get("skills", []),
+            data.get("tools", []),
+            normalize_permission_items(data.get("permission")),
+        )
     except Exception:
-        return [], []
+        return [], [], []
 
 
 def _get_all_tool_names() -> List[str]:
@@ -257,8 +296,9 @@ async def _build_single_agent_response(
     if agent.native:
         tools = _compute_native_agent_tools(agent, all_tool_names)
         skills: List[str] = []
+        permission: List[Dict[str, Any]] = []
     else:
-        skills, tools = await _load_custom_agent_extras(agent.name)
+        skills, tools, permission = await _load_custom_agent_extras(agent.name)
     override = overrides.get(agent.name, {})
     model_override = {k: override[k] for k in ("modelID", "providerID") if k in override} or None
     temperature_override = override.get("temperature")
@@ -269,6 +309,7 @@ async def _build_single_agent_response(
         delegatable_override=delegatable_overrides.get(agent.name),
         skills=skills,
         tools=tools,
+        permission=permission,
     )
 
 
@@ -349,16 +390,17 @@ async def get_agent_prompt(name: str):
 
 class AgentCreateRequest(BaseModel):
     """Request to create a custom agent"""
-    name: str = Field(..., description="Agent name")
+    name: str = Field(..., min_length=1, max_length=64, pattern=AGENT_NAME_PATTERN, description="Agent name")
     nameCn: Optional[str] = Field(None, description="Chinese UI agent name")
     description: Optional[str] = Field(None, description="Agent description (English; used for delegation)")
     descriptionCn: Optional[str] = Field(None, description="Chinese UI description")
     prompt: str = Field(..., description="System prompt")
-    temperature: Optional[float] = Field(None, description="Temperature")
+    temperature: Optional[float] = Field(None, ge=0, le=2, description="Temperature")
     color: Optional[str] = Field(None, description="Color")
-    mode: str = Field("primary", description="Agent mode")
+    mode: Literal["primary", "subagent", "all"] = Field("primary", description="Agent mode")
     model: Optional[AgentModelInfo] = Field(None, description="Preferred model")
     delegatable: Optional[bool] = Field(None, description="Whether this agent can be delegated to")
+    permission: List[Dict[str, Any]] = Field(default_factory=list, description="Permission rules")
     skills: List[str] = Field(default_factory=list, description="Enabled skill names")
     tools: List[str] = Field(default_factory=list, description="Enabled tool names")
 
@@ -369,10 +411,11 @@ class AgentUpdateRequest(BaseModel):
     description: Optional[str] = Field(None, description="Agent description (English; used for delegation)")
     descriptionCn: Optional[str] = Field(None, description="Chinese UI description")
     prompt: Optional[str] = Field(None, description="System prompt")
-    temperature: Optional[float] = Field(None, description="Temperature")
+    temperature: Optional[float] = Field(None, ge=0, le=2, description="Temperature")
     color: Optional[str] = Field(None, description="Color")
     model: Optional[AgentModelInfo] = Field(None, description="Preferred model")
     delegatable: Optional[bool] = Field(None, description="Whether this agent can be delegated to")
+    permission: Optional[List[Dict[str, Any]]] = Field(None, description="Permission rules")
     skills: Optional[List[str]] = Field(None, description="Enabled skill names")
     tools: Optional[List[str]] = Field(None, description="Enabled tool names")
 
@@ -380,16 +423,21 @@ class AgentUpdateRequest(BaseModel):
 class AgentModelUpdateRequest(BaseModel):
     """Request to update the model (and optionally temperature) for any agent (native or custom)"""
     model: Optional[AgentModelInfo] = Field(None, description="New model, or null to reset to default")
-    temperature: Optional[float] = Field(None, description="Temperature override for native agents")
+    temperature: Optional[float] = Field(None, ge=0, le=2, description="Temperature override for native agents")
+
+    @property
+    def model_given(self) -> bool:
+        """Whether ``model`` was sent at all (``null`` resets, absent keeps)."""
+        return "model" in self.model_fields_set
 
 
 class AgentDelegatableUpdateRequest(BaseModel):
     """Request to update the delegatable toggle without rewriting YAML."""
-    delegatable: bool = Field(..., description="Whether this agent can be delegated to")
+    delegatable: StrictBool = Field(..., description="Whether this agent can be delegated to")
 
 
 @router.post("", response_model=AgentResponse, summary="Create custom agent")
-async def create_agent(req: AgentCreateRequest):
+async def create_agent(req: AgentCreateRequest, request: Request):
     """
     Create a custom agent
 
@@ -397,11 +445,18 @@ async def create_agent(req: AgentCreateRequest):
     """
     from flocks.storage.storage import Storage
 
+    _require_admin_for_agent_config(request)
+    _require_known_provider(req.model)
     try:
         existing = await Agent.get(req.name)
         if existing:
             raise HTTPException(status_code=409, detail=f"Agent {req.name} already exists")
 
+        permission = (
+            sync_question_permission_with_tools(req.permission, req.tools)
+            if "tools" in req.model_fields_set
+            else normalize_permission_items(req.permission)
+        )
         agent_data: Dict[str, Any] = {
             "name": req.name,
             "name_cn": req.nameCn,
@@ -415,6 +470,7 @@ async def create_agent(req: AgentCreateRequest):
             "delegatable": req.delegatable if req.delegatable is not None else req.mode != "primary",
             "native": False,
             "hidden": False,
+            "permission": permission,
             "skills": req.skills,
             "tools": req.tools,
         }
@@ -432,12 +488,14 @@ async def create_agent(req: AgentCreateRequest):
 
 
 @router.put("/{name}", response_model=AgentResponse, summary="Update custom agent")
-async def update_agent(name: str, req: AgentUpdateRequest):
+async def update_agent(name: str, req: AgentUpdateRequest, request: Request):
     """
     Update a custom agent (Storage-based or YAML plugin).
     """
     from flocks.storage.storage import Storage
 
+    _require_admin_for_agent_config(request)
+    _require_known_provider(req.model)
     try:
         # --- Try Storage-based custom agent first ---
         agent_key = f"agent/custom/{name}"
@@ -468,10 +526,16 @@ async def update_agent(name: str, req: AgentUpdateRequest):
             if req.delegatable is not None:
                 agent_data["delegatable"] = req.delegatable
                 delegatable_settings.forget_override(name)
+            if req.permission is not None:
+                agent_data["permission"] = normalize_permission_items(req.permission)
             if req.skills is not None:
                 agent_data["skills"] = req.skills
             if req.tools is not None:
                 agent_data["tools"] = req.tools
+                agent_data["permission"] = sync_question_permission_with_tools(
+                    agent_data.get("permission"),
+                    req.tools,
+                )
 
             await Storage.write(agent_key, agent_data)
 
@@ -508,12 +572,18 @@ async def update_agent(name: str, req: AgentUpdateRequest):
             # Persist skills/tools overlay for YAML agents in Storage.
             # The entry intentionally omits "name" so it is not mistaken
             # for a full Storage-based custom agent on subsequent updates.
-            if req.skills is not None or req.tools is not None:
+            if req.skills is not None or req.tools is not None or req.permission is not None:
                 extras: Dict[str, Any] = agent_data if isinstance(agent_data, dict) else {}
+                if req.permission is not None:
+                    extras["permission"] = normalize_permission_items(req.permission)
                 if req.skills is not None:
                     extras["skills"] = req.skills
                 if req.tools is not None:
                     extras["tools"] = req.tools
+                    extras["permission"] = sync_question_permission_with_tools(
+                        extras.get("permission"),
+                        req.tools,
+                    )
                 await Storage.write(agent_key, extras)
 
             # Sync: apply updates to the in-memory AgentInfo cache
@@ -538,6 +608,11 @@ async def update_agent(name: str, req: AgentUpdateRequest):
                     )
                 if req.delegatable is not None:
                     agent.delegatable = req.delegatable
+                if req.tools is not None:
+                    agent.tools = req.tools
+                    agent.permission = permission_items_to_ruleset(extras.get("permission"))
+                elif req.permission is not None:
+                    agent.permission = permission_items_to_ruleset(extras.get("permission"))
                 overrides = await _load_model_overrides()
                 delegatable_overrides = _load_delegatable_overrides()
                 all_tool_names = await _get_all_tool_names_async()
@@ -554,10 +629,11 @@ async def update_agent(name: str, req: AgentUpdateRequest):
 
 
 @router.patch("/{name}/delegatable", response_model=AgentResponse, summary="Update agent delegatable toggle")
-async def update_agent_delegatable(name: str, req: AgentDelegatableUpdateRequest):
+async def update_agent_delegatable(name: str, req: AgentDelegatableUpdateRequest, request: Request):
     """Update footer-toggle delegatable state without rewriting YAML sources."""
     from flocks.storage.storage import Storage
 
+    _require_admin_for_agent_config(request)
     try:
         agent = await Agent.get(name)
         if not agent:
@@ -603,7 +679,7 @@ async def update_agent_delegatable(name: str, req: AgentDelegatableUpdateRequest
 
 
 @router.delete("/{name}", summary="Delete custom agent")
-async def delete_agent(name: str):
+async def delete_agent(name: str, request: Request):
     """
     Delete a custom agent (Storage-based and/or YAML plugin).
 
@@ -612,21 +688,37 @@ async def delete_agent(name: str):
     """
     from flocks.storage.storage import Storage
 
+    _require_admin_for_agent_config(request)
     try:
         deleted_storage = False
         deleted_yaml = False
+
+        # Built-in and project-bundled agents are not deletable through the
+        # API (only user-level plugin YAML is); a stale ``agent/custom/<name>``
+        # overlay record must not turn into a "deleted" answer for them.
+        existing = await Agent.get(name)
+        if (
+            existing is not None
+            and getattr(existing, "native", False)
+            and _find_yaml_file(name, include_project=False, include_user=True) is None
+        ):
+            raise HTTPException(
+                status_code=404,
+                detail=f"Custom agent {name} not found or is a built-in agent",
+            )
 
         # Always try both sources — an agent can have a Storage entry
         # AND a YAML file (e.g. YAML base + Storage overlay from edits).
 
         agent_key = f"agent/custom/{name}"
         try:
-            await Storage.read(agent_key)
+            stored = await Storage.read(agent_key)
+        except Storage.NotFoundError:
+            stored = None
+        if stored is not None:
             await Storage.remove(agent_key)
             deleted_storage = True
             log.info("agent.deleted", {"name": name, "source": "storage"})
-        except Storage.NotFoundError:
-            pass
 
         if delete_yaml_agent(name):
             deleted_yaml = True
@@ -657,16 +749,18 @@ async def delete_agent(name: str):
 
 
 @router.put("/{name}/model", response_model=AgentResponse, summary="Update agent model")
-async def update_agent_model(name: str, req: AgentModelUpdateRequest):
+async def update_agent_model(name: str, req: AgentModelUpdateRequest, request: Request):
     """
     Update the model for any agent (native, Storage-based custom, or YAML plugin).
 
     For native agents: saves a model override to storage (applied at query time).
     For custom/YAML agents: updates the model in the agent config.
-    Pass null model to reset to system default.
+    Pass null model to reset to system default; omit it to keep the current one.
     """
     from flocks.storage.storage import Storage
 
+    _require_admin_for_agent_config(request)
+    _require_known_provider(req.model)
     try:
         agent = await Agent.get(name)
         if not agent:
@@ -679,7 +773,7 @@ async def update_agent_model(name: str, req: AgentModelUpdateRequest):
                 if req.model:
                     entry["modelID"] = req.model.modelID
                     entry["providerID"] = req.model.providerID
-                else:
+                elif req.model_given:
                     entry.pop("modelID", None)
                     entry.pop("providerID", None)
                 if req.temperature is not None:
@@ -708,7 +802,10 @@ async def update_agent_model(name: str, req: AgentModelUpdateRequest):
                 pass
 
             if agent_data is not None and agent_data.get("name"):
-                agent_data["model"] = req.model.model_dump() if req.model else None
+                if req.model:
+                    agent_data["model"] = req.model.model_dump()
+                elif req.model_given:
+                    agent_data["model"] = None
                 await Storage.write(agent_key, agent_data)
 
                 from flocks.agent.registry import Agent as AgentRegistry
@@ -720,18 +817,19 @@ async def update_agent_model(name: str, req: AgentModelUpdateRequest):
 
             # --- Fall back to YAML plugin agent ---
             if find_yaml_agent(name) is not None:
-                model_update = req.model.model_dump() if req.model else None
-                if not update_yaml_agent(name, {"model": model_update}):
-                    raise HTTPException(status_code=500, detail=f"Failed to write YAML for agent {name}")
+                if req.model_given:
+                    model_update = req.model.model_dump() if req.model else None
+                    if not update_yaml_agent(name, {"model": model_update}):
+                        raise HTTPException(status_code=500, detail=f"Failed to write YAML for agent {name}")
 
-                # Sync in-memory cache
-                if req.model:
-                    agent.model = AgentModelConfig(
-                        model_id=req.model.modelID,
-                        provider_id=req.model.providerID,
-                    )
-                else:
-                    agent.model = None
+                    # Sync in-memory cache
+                    if req.model:
+                        agent.model = AgentModelConfig(
+                            model_id=req.model.modelID,
+                            provider_id=req.model.providerID,
+                        )
+                    else:
+                        agent.model = None
 
                 log.info("agent.model.updated", {"name": name, "source": "yaml"})
                 overrides = await _load_model_overrides()

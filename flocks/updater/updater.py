@@ -35,7 +35,9 @@ from flocks.updater.models import UpdateProgress, VersionInfo
 from flocks.utils.log import Log
 
 _DEFAULT_REPO = "AgentFlocks/Flocks"
-_BACKUP_DIR = Path.home() / ".flocks" / "version"
+# Backup/version-marker locations follow the runtime root (``FLOCKS_ROOT``) at call
+# time; tests may pin these to a fixed path.  ``None`` = ``<FLOCKS_ROOT>/version``.
+_BACKUP_DIR: Path | None = None
 _UPDATE_REGION_CN = "cn"
 _CN_NPM_REGISTRY = "https://registry.npmmirror.com/"
 _CN_UV_DEFAULT_INDEX = "https://mirrors.aliyun.com/pypi/simple"
@@ -45,6 +47,12 @@ _FRONTEND_DEPENDENCY_INSTALL_TIMEOUT_SECONDS = 300
 _FRONTEND_BUILD_TIMEOUT_SECONDS = 300
 _DEPENDENCY_SYNC_TIMEOUT_SECONDS = 300
 _WINDOWS_DEPENDENCY_SYNC_TIMEOUT_SECONDS = 300
+
+# Deploy modes where a network-based in-place upgrade must never run
+# (``update_allowed_for_mode`` in ``flocks.updater.deploy`` is the source of truth).
+_NO_INPLACE_UPGRADE_MODES = ("docker", "managed", "offline")
+from flocks.updater.deploy import OFFLINE_UPGRADE_REFUSAL as OFFLINE_UPGRADE_REFUSED_MESSAGE  # noqa: E402
+from flocks.net.http import async_client
 
 _PRESERVE_NAMES: set[str] = {
     ".venv",
@@ -534,6 +542,40 @@ def _build_dependency_sync_command(uv_path: str, *, uv_default_index: str | None
     return cmd
 
 
+def _downgrade_refusal(target_tag: str, *, allow_downgrade: bool = False) -> str | None:
+    """Reason a *target_tag* older than the installed version is refused, else ``None``.
+
+    Equal versions stay allowed (``flocks update --force`` reinstalls the current
+    release); only a strictly older target is a downgrade.
+    """
+    if allow_downgrade:
+        return None
+    current = get_current_version()
+    target = str(target_tag or "").strip()
+    if not current or not target:
+        return None
+    if _parse_version(target) < _parse_version(current):
+        return (
+            f"Target version {_version_label(target)} is older than the installed "
+            f"{_version_label(current)}; downgrades are not applied by the built-in updater. "
+            "Restore the previous release from its backup archive instead, or pass allow_downgrade explicitly."
+        )
+    return None
+
+
+def _install_modification_refusal() -> str | None:
+    """Reason the built-in updater must not touch this installation (venv/source), else ``None``.
+
+    Docker images are replaced by pulling a new image and managed release packages
+    are upgraded by the commercial core; in both cases ``uv sync`` / source
+    replacement from inside the runtime would corrupt the deployment. Offline
+    installations are allowed through: their Pro bundle is installed from disk.
+    """
+    from flocks.updater.deploy import install_modification_refusal
+
+    return install_modification_refusal()
+
+
 async def _sync_project_dependencies(
     *,
     uv_path: str,
@@ -543,6 +585,10 @@ async def _sync_project_dependencies(
     env: dict[str, str] | None = None,
 ) -> str | None:
     """Synchronize backend dependencies in the active project environment."""
+    refusal = _install_modification_refusal()
+    if refusal is not None:
+        log.warning("updater.dependencies.sync_refused", {"path": str(install_root), "reason": refusal})
+        return refusal
     effective_timeout = sync_timeout or _dependency_sync_timeout_seconds()
     uv_cmd = _build_dependency_sync_command(uv_path, uv_default_index=uv_default_index)
     retried_after_managed_python_repair = False
@@ -821,7 +867,7 @@ async def _fetch_github_release(
     if token:
         headers["Authorization"] = f"Bearer {token}"
 
-    async with httpx.AsyncClient(timeout=15) as client:
+    async with async_client(timeout=15) as client:
         resp = await client.get(url, headers=headers, follow_redirects=True)
         resp.raise_for_status()
         data = resp.json()
@@ -856,7 +902,7 @@ async def _fetch_gitee_release(
     if token:
         params["access_token"] = token
 
-    async with httpx.AsyncClient(timeout=15) as client:
+    async with async_client(timeout=15) as client:
         resp = await client.get(api_url, params=params, follow_redirects=True)
         resp.raise_for_status()
         data = resp.json()
@@ -1008,7 +1054,7 @@ async def _fetch_gitlab_release(
     if token:
         headers["PRIVATE-TOKEN"] = token
 
-    async with httpx.AsyncClient(timeout=15) as client:
+    async with async_client(timeout=15) as client:
         releases_url = f"{base}/api/v4/projects/{encoded}/releases"
         resp = await client.get(releases_url, headers=headers, follow_redirects=True)
 
@@ -1059,7 +1105,7 @@ def _read_local_pro_license_id() -> str:
     return str(payload.get("license_id") or "").strip()
 
 
-async def _load_console_session_token() -> str | None:
+async def _load_console_session_token(*, use_storage: bool = True) -> str | None:
     def _token_from_payload(payload: Any) -> str | None:
         if not isinstance(payload, dict):
             return None
@@ -1087,6 +1133,10 @@ async def _load_console_session_token() -> str | None:
     token = _token_from_payload(shared_session)
     if token:
         return token
+    if not use_storage:
+        # read-only callers (`flocks update --check --pro-bundle`): opening Storage would
+        # create / migrate the SQLite database from a CLI process
+        return None
 
     try:
         from flocks.storage.storage import Storage
@@ -1101,7 +1151,11 @@ async def _load_console_session_token() -> str | None:
     return None
 
 
-async def _fetch_console_manifest_release_info(console_session_token: str | None = None) -> ConsoleManifestRelease:
+async def _fetch_console_manifest_release_info(
+    console_session_token: str | None = None,
+    *,
+    use_storage_token: bool = True,
+) -> ConsoleManifestRelease:
     """
     Fetch latest Pro bundle manifest from console.
     """
@@ -1118,11 +1172,13 @@ async def _fetch_console_manifest_release_info(console_session_token: str | None
     headers: dict[str, str] = {}
     if license_id:
         headers["x-license-id"] = license_id
-    token = str(console_session_token or "").strip() or await _load_console_session_token()
+    token = str(console_session_token or "").strip() or await _load_console_session_token(  # secret-guard: allow (expression)
+        use_storage=use_storage_token
+    )
     if token:
         headers["Authorization"] = f"Bearer {token}"
 
-    async with httpx.AsyncClient(timeout=15) as client:
+    async with async_client(timeout=15) as client:
         resp = await client.get(url, headers=headers, follow_redirects=True)
         resp.raise_for_status()
         data = resp.json()
@@ -1317,7 +1373,7 @@ async def _download_archive(
     elif token and "gitee.com" not in url:
         headers["Authorization"] = f"Bearer {token}"
 
-    async with httpx.AsyncClient(timeout=httpx.Timeout(30, read=300), follow_redirects=True) as client:
+    async with async_client(timeout=httpx.Timeout(30, read=300), follow_redirects=True) as client:
         async with client.stream("GET", url, headers=headers) as resp:
             if resp.status_code != 200:
                 await _raise_download_status_error(resp)
@@ -1346,7 +1402,7 @@ async def _download_console_bundle(
         if token and _is_console_origin_url(url)
         else {}
     )
-    async with httpx.AsyncClient(timeout=httpx.Timeout(30, read=300), follow_redirects=True) as client:
+    async with async_client(timeout=httpx.Timeout(30, read=300), follow_redirects=True) as client:
         async with client.stream("GET", url, headers=headers) as resp:
             if resp.status_code != 200:
                 await _raise_download_status_error(resp)
@@ -1492,16 +1548,17 @@ def _backup_current_version(
     retain_count: int = 1,
 ) -> Path | None:
     """
-    Compress the current source tree into ~/.flocks/version/ .
+    Compress the current source tree into <FLOCKS_ROOT>/version/ .
     Falls back to archiving a temporary source snapshot when direct archiving fails.
     Returns the backup path on success, None on failure.
     Preserved runtime/user directories are excluded.
     """
-    _BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+    backup_dir = _backup_dir()
+    backup_dir.mkdir(parents=True, exist_ok=True)
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
     backup_name = f"flocks-{current_version}-{ts}"
-    backup_path = _BACKUP_DIR / f"{backup_name}.tar.gz"
-    partial_path = _BACKUP_DIR / f"{backup_name}.tar.gz.partial"
+    backup_path = backup_dir / f"{backup_name}.tar.gz"
+    partial_path = backup_dir / f"{backup_name}.tar.gz.partial"
     partial_path.unlink(missing_ok=True)
 
     try:
@@ -1541,11 +1598,12 @@ def _backup_current_version(
 
 def _cleanup_old_backups(retain_count: int) -> None:
     """Remove the oldest backups beyond *retain_count*."""
-    if not _BACKUP_DIR.is_dir():
+    backup_dir = _backup_dir()
+    if not backup_dir.is_dir():
         return
     effective_retain_count = max(1, retain_count)
     backups = sorted(
-        [p for p in _BACKUP_DIR.iterdir() if p.name.startswith("flocks-") and p.is_file()],
+        [p for p in backup_dir.iterdir() if p.name.startswith("flocks-") and p.is_file()],
         key=lambda p: p.stat().st_mtime,
         reverse=True,
     )
@@ -1583,23 +1641,107 @@ def _resolve_bundle_member_path(bundle_root: Path, relative_path: str) -> Path |
     return bundle_root / raw_path
 
 
+_LOCAL_PRO_BUNDLE_DIR_ENV = "FLOCKS_PRO_BUNDLE_DIR"
+_PREBUILT_DEPENDENCY_WHEELS_KEY = "dependency_wheels_dir"
+
+
+def _is_prebuilt_pro_bundle_manifest(manifest: dict[str, Any] | None) -> bool:
+    """Return whether a Pro bundle declares itself as prebuilt (no uv sync / npm build)."""
+    if not isinstance(manifest, dict):
+        return False
+    value = manifest.get("prebuilt")
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
+
+
+def _prebuilt_dependency_wheels_dir(content_root: Path, manifest: dict[str, Any] | None) -> Path | None:
+    """Return the bundled dependency wheel directory of a prebuilt bundle, if any."""
+    if not isinstance(manifest, dict):
+        return None
+    raw = str(manifest.get(_PREBUILT_DEPENDENCY_WHEELS_KEY) or "").strip()
+    if not raw:
+        return None
+    resolved = _resolve_bundle_member_path(content_root, raw)
+    if resolved is None or not resolved.is_dir():
+        return None
+    return resolved
+
+
+def _local_pro_bundle_dir() -> Path | None:
+    """Return the offline Pro bundle directory configured via FLOCKS_PRO_BUNDLE_DIR.
+
+    Offline installations ship the Pro bundle (manifest.json + wheels/) inside the
+    package instead of downloading it from Console. The variable is only set by the
+    offline installer; when it is absent this returns None and the online path is
+    unchanged.
+    """
+    raw = os.getenv(_LOCAL_PRO_BUNDLE_DIR_ENV, "").strip()
+    if not raw:
+        return None
+    bundle_dir = Path(raw).expanduser()
+    if not (bundle_dir / "manifest.json").is_file():
+        log.warning("updater.pro_bundle.local_dir_invalid", {"path": str(bundle_dir)})
+        return None
+    return bundle_dir
+
+
+def _load_local_pro_bundle_release(bundle_dir: Path) -> ConsoleManifestRelease:
+    """Describe a local Pro bundle directory with the same shape as a Console manifest."""
+    manifest = _load_json_file(bundle_dir / "manifest.json")
+    _validate_pro_bundle_marker_manifest(manifest)
+    _resolve_pro_bundle_wheel(bundle_dir)
+    version = _console_manifest_bundle_version(manifest)
+    release_id = str(manifest.get("release_id") or manifest.get("bundle_release_id") or "").strip() or None
+    bundle_release_id = str(manifest.get("bundle_release_id") or manifest.get("release_id") or "").strip() or None
+    return ConsoleManifestRelease(
+        version=version,
+        release_notes=manifest.get("release_notes") or manifest.get("notes"),
+        release_url=str(bundle_dir),
+        bundle_url=str(bundle_dir),
+        bundle_sha256=str(manifest.get("bundle_sha256") or "").strip() or None,
+        bundle_format="dir",
+        manifest=manifest,
+        console_session_token=None,
+        release_id=release_id,
+        bundle_release_id=bundle_release_id,
+    )
+
+
+def _pro_bundle_root(source_root: Path) -> Path:
+    """Return the directory holding manifest.json for a resolved Pro bundle source root."""
+    if (source_root / "manifest.json").is_file():
+        return source_root
+    if (source_root.parent / "manifest.json").is_file():
+        return source_root.parent
+    return source_root
+
+
 def _resolve_pro_bundle_content(content_root: Path) -> tuple[Path, Path | None, dict[str, Any]]:
     """
     Return the OSS source root and optional flockspro wheel when an archive is a
     Pro bundle. Plain OSS archives are returned unchanged.
+
+    A prebuilt bundle (``"prebuilt": true`` in manifest.json) may omit the
+    ``flocks/`` source tree; it then only carries the Pro wheel and the returned
+    root is the bundle directory itself, which has no ``pyproject.toml``.
     """
     manifest_path = content_root / "manifest.json"
     flocks_dir = content_root / "flocks"
-    if not manifest_path.is_file() or not flocks_dir.is_dir():
+    if not manifest_path.is_file():
         return content_root, None, {}
 
     manifest = _load_json_file(manifest_path)
+    if not flocks_dir.is_dir() and not _is_prebuilt_pro_bundle_manifest(manifest):
+        return content_root, None, {}
+
     wheel_value = str(manifest.get("flockspro_wheel") or "").strip()
     wheel_path = _resolve_bundle_member_path(content_root, wheel_value) if wheel_value else None
     if wheel_path is None or not wheel_path.is_file():
         wheels = sorted((content_root / "wheels").glob("*.whl"))
         wheel_path = wheels[0] if wheels else None
-    return flocks_dir, wheel_path, manifest
+    source_root = flocks_dir if flocks_dir.is_dir() else content_root
+    return source_root, wheel_path, manifest
 
 
 def _resolve_pro_bundle_wheel(content_root: Path) -> tuple[Path, dict[str, Any]]:
@@ -1625,6 +1767,39 @@ def _venv_python_path(install_root: Path) -> Path:
     return install_root / ".venv" / "bin" / "python"
 
 
+def _build_prebuilt_dependency_sync_command(uv_path: str, wheels_dir: Path) -> list[str]:
+    """Build the offline ``uv sync`` used when a prebuilt bundle ships dependency wheels."""
+    return [
+        uv_path,
+        "sync",
+        "--frozen",
+        "--offline",
+        "--no-python-downloads",
+        "--find-links",
+        str(wheels_dir),
+    ]
+
+
+async def _sync_prebuilt_dependencies(
+    *,
+    uv_path: str,
+    install_root: Path,
+    wheels_dir: Path,
+    sync_timeout: int,
+    env: dict[str, str] | None,
+) -> str | None:
+    """Sync backend dependencies from bundled wheels without touching the network."""
+    cmd = _build_prebuilt_dependency_sync_command(uv_path, wheels_dir)
+    log.info("updater.dependencies.sync_prebuilt", {"tool": "uv sync", "path": uv_path, "wheels": str(wheels_dir)})
+    try:
+        code, _, err = await _run_async(cmd, cwd=install_root, timeout=sync_timeout, env=env)
+    except subprocess.TimeoutExpired:
+        return f"Dependency sync timed out after {sync_timeout}s while running offline uv sync."
+    if code != 0:
+        return f"Dependency sync failed: {err}"
+    return None
+
+
 async def install_or_repair_source(
     install_root: Path,
     *,
@@ -1636,10 +1811,21 @@ async def install_or_repair_source(
     pro_wheel_path: Path | None = None,
     pro_bundle_manifest_path: Path | None = None,
     bundle_sha256: str | None = None,
+    prebuilt: bool = False,
+    dependency_wheels_dir: Path | None = None,
 ) -> None:
-    """Install or repair the active source tree after managed services stop."""
+    """Install or repair the active source tree after managed services stop.
+
+    ``prebuilt`` is set for offline bundles: the WebUI bundle is already built and
+    the Python environment is either untouched (Pro-only change) or refreshed from
+    ``dependency_wheels_dir`` without network access. The default (``False``) is
+    the online behaviour: ``uv sync`` against the index and ``npm run build``.
+    """
+    refusal = _install_modification_refusal()
+    if refusal is not None:
+        raise RuntimeError(refusal)
     install_webui_dir = install_root / "webui"
-    if install_webui_dir.is_dir() and (install_webui_dir / "package.json").exists():
+    if not prebuilt and install_webui_dir.is_dir() and (install_webui_dir / "package.json").exists():
         from flocks.cli import service_manager
 
         install_script = "scripts/install.ps1" if sys.platform == "win32" else "scripts/install.sh"
@@ -1654,15 +1840,37 @@ async def install_or_repair_source(
             )
 
     sync_env = _build_uv_sync_env()
-    sync_error = await _sync_project_dependencies(
-        uv_path=uv_path,
-        install_root=install_root,
-        uv_default_index=uv_default_index,
-        sync_timeout=sync_timeout,
-        env=sync_env,
-    )
-    if sync_error is not None:
-        raise RuntimeError(sync_error)
+    if prebuilt:
+        if dependency_wheels_dir is not None:
+            sync_error = await _sync_prebuilt_dependencies(
+                uv_path=uv_path,
+                install_root=install_root,
+                wheels_dir=dependency_wheels_dir,
+                sync_timeout=sync_timeout,
+                env=sync_env,
+            )
+            if sync_error is not None:
+                raise RuntimeError(sync_error)
+        else:
+            log.info("updater.dependencies.sync_skipped_prebuilt", {"install_root": str(install_root)})
+    else:
+        sync_error = await _sync_project_dependencies(
+            uv_path=uv_path,
+            install_root=install_root,
+            uv_default_index=uv_default_index,
+            sync_timeout=sync_timeout,
+            env=sync_env,
+        )
+        if sync_error is not None:
+            raise RuntimeError(sync_error)
+
+    if prebuilt:
+        from flocks.server.static_webui import resolve_webui_dist_dir
+
+        dist_index = install_webui_dir / "dist" / "index.html"
+        if not dist_index.is_file() and resolve_webui_dist_dir() is None:
+            raise RuntimeError("Prebuilt bundle is missing the WebUI bundle (webui/dist/index.html).")
+        log.info("updater.frontend.build_skipped_prebuilt", {"dist": str(dist_index)})
 
     if pro_wheel_path is not None:
         python_path = _venv_python_path(install_root)
@@ -1676,7 +1884,7 @@ async def install_or_repair_source(
         if code != 0:
             raise RuntimeError(f"Flocks Pro component install failed: {err}")
 
-    if install_webui_dir.is_dir() and (install_webui_dir / "package.json").exists():
+    if not prebuilt and install_webui_dir.is_dir() and (install_webui_dir / "package.json").exists():
         frontend_error = await _build_frontend_workspace(
             install_webui_dir,
             npm_registry=npm_registry,
@@ -1972,6 +2180,23 @@ def cleanup_replaced_files(root: Path | None = None) -> None:
             log.warning("updater.cleanup.leftover_failed", {"path": str(path)})
 
 
+def _stage_local_pro_bundle(source: Path, tmp_dir: Path) -> Path:
+    """Copy a local Pro bundle (directory or archive) into the update temp dir.
+
+    The shipped bundle must survive the update (cleanup removes *tmp_dir*), so it
+    is never used in place.
+    """
+    if source.is_dir():
+        staged = tmp_dir / "local-bundle"
+        shutil.copytree(source, staged, symlinks=True)
+        return staged
+    if not source.is_file():
+        raise ValueError(f"Local Pro bundle not found: {source}")
+    staged_file = tmp_dir / source.name
+    shutil.copy2(source, staged_file)
+    return staged_file
+
+
 def _extract_archive(archive_path: Path, dest_dir: Path) -> Path:
     """
     Extract a zip or tar.gz archive into *dest_dir* and return the
@@ -2072,7 +2297,9 @@ def _replace_install_dir(
         else:
             if target.exists() or target.is_symlink():
                 _safe_remove(target)
-            shutil.copy2(item, target)
+            # Keep symlinks as links at this level too (copytree above already does
+            # so for nested ones); copy2 would silently dereference them.
+            shutil.copy2(item, target, follow_symlinks=False)
 
     for child in install_root.iterdir():
         if child.name not in source_names and child.name not in preserve_names:
@@ -2083,14 +2310,25 @@ def _replace_install_dir(
 # Public API
 # ------------------------------------------------------------------ #
 
-_VERSION_MARKER_PATH = _BACKUP_DIR / ".current_version"
+_VERSION_MARKER_PATH: Path | None = None
+
+
+def _backup_dir() -> Path:
+    """``<FLOCKS_ROOT>/version`` (or the pinned ``_BACKUP_DIR``)."""
+    return _BACKUP_DIR if _BACKUP_DIR is not None else _flocks_root() / "version"
+
+
+def _version_marker_path() -> Path:
+    """``<FLOCKS_ROOT>/version/.current_version`` (or the pinned ``_VERSION_MARKER_PATH``)."""
+    return _VERSION_MARKER_PATH if _VERSION_MARKER_PATH is not None else _backup_dir() / ".current_version"
 
 
 def _read_version_marker() -> str:
     """Read the persisted installed version marker."""
     try:
-        if _VERSION_MARKER_PATH.is_file():
-            return _VERSION_MARKER_PATH.read_text(encoding="utf-8").strip().lstrip("v")
+        marker = _version_marker_path()
+        if marker.is_file():
+            return marker.read_text(encoding="utf-8").strip().lstrip("v")
     except Exception:
         pass
     return ""
@@ -2150,8 +2388,9 @@ def _is_newer_version(latest: str | None, current: str | None) -> bool:
 def get_current_version() -> str:
     """
     Return the running version.
-    Compare the persisted marker at ~/.flocks/version/.current_version
-    with the source version in pyproject.toml and return the higher one.
+    Compare the persisted marker at <FLOCKS_ROOT>/version/.current_version
+    (``~/.flocks`` by default) with the source version in pyproject.toml and
+    return the higher one.
     """
     return _pick_best_tag([
         _read_version_marker(),
@@ -2161,8 +2400,9 @@ def get_current_version() -> str:
 
 def _write_version_marker(version: str) -> None:
     """Persist the installed version so get_current_version() picks it up after restart."""
-    _VERSION_MARKER_PATH.parent.mkdir(parents=True, exist_ok=True)
-    _VERSION_MARKER_PATH.write_text(f"{version}\n", encoding="utf-8")
+    marker = _version_marker_path()
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text(f"{version}\n", encoding="utf-8")
 
 
 async def get_latest_release(
@@ -2225,7 +2465,7 @@ async def check_update(
     force_console_manifest: bool = False,
 ) -> VersionInfo:
     """Return version comparison info without performing any upgrade."""
-    from flocks.updater.deploy import detect_deploy_mode
+    from flocks.updater.deploy import detect_deploy_mode, update_allowed_for_mode
 
     mode = detect_deploy_mode()
     ucfg = await _get_updater_config()
@@ -2244,14 +2484,19 @@ async def check_update(
     if not current:
         current = local_core_version
 
-    if not ucfg.enabled:
+    if not ucfg.enabled or (mode == "offline" and not is_console_manifest):
+        # An offline package deployment cannot reach GitHub / Gitee and does not upgrade the core
+        # in place anyway (a new .run does that): report the local state without any network
+        # round trips (each source would otherwise wait for its timeout, and the last fallback
+        # even runs `git tag` in the CLI's cwd). Console-manifest checks still run: Console is the
+        # one endpoint such a machine is allowed to reach.
         return VersionInfo(
             current_version=current,
             current_core_version=current_pro_state.core_version if current_pro_state else None,
             current_bundle_version=current_pro_state.bundle_version if current_pro_state else None,
             current_pro_component_version=current_pro_state.pro_component_version if current_pro_state else None,
             deploy_mode=mode,
-            update_allowed=(mode != "docker"),
+            update_allowed=update_allowed_for_mode(mode),
         )
 
     bundle_sha256: str | None = None
@@ -2283,7 +2528,7 @@ async def check_update(
             current_pro_component_version=current_pro_state.pro_component_version if current_pro_state else None,
             error="Failed to check for updates. Please check your network connection.",
             deploy_mode=mode,
-            update_allowed=(mode != "docker"),
+            update_allowed=update_allowed_for_mode(mode),
         )
 
     bundle_has_update = _is_newer_version(tag, current)
@@ -2329,7 +2574,7 @@ async def check_update(
         bundle_sha256=bundle_sha256,
         bundle_format=bundle_format if bundle_format in {"zip", "tar.gz"} else None,
         deploy_mode=mode,
-        update_allowed=(mode != "docker"),
+        update_allowed=update_allowed_for_mode(mode),
     )
 
 
@@ -2398,12 +2643,156 @@ def _ensure_pro_heartbeat_env_default() -> None:
     log.info("updater.pro_bundle.heartbeat_url.defaulted", {"heartbeat_url": heartbeat_url})
 
 
+async def _fetch_console_manifest_for_local_bundle(
+    local_release: ConsoleManifestRelease,
+    console_session_token: str | None,
+) -> dict[str, Any] | None:
+    """Best-effort Console manifest lookup used to enrich a local bundle's release identity.
+
+    Offline installations may not reach Console at all; a failure here only means the
+    marker is written from the local manifest alone. When Console publishes a different
+    version than the local bundle, the local bundle still wins and nothing is merged.
+    """
+    try:
+        if console_session_token:
+            console_info = await _fetch_console_manifest_release_info(console_session_token)
+        else:
+            console_info = await _fetch_console_manifest_release_info()
+    except Exception as exc:
+        log.warning("updater.pro_bundle.local_console_manifest_unavailable", {"error": str(exc)})
+        return None
+    if _parse_version(console_info.version) != _parse_version(local_release.version):
+        log.warning(
+            "updater.pro_bundle.local_version_differs",
+            {"local_version": local_release.version, "console_version": console_info.version},
+        )
+        return None
+    return _console_identity_for_local_bundle(local_release.manifest, console_info.manifest)
+
+
+def _console_identity_for_local_bundle(
+    local_manifest: dict[str, Any],
+    console_manifest: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Reduce a Console manifest to the release ids a local bundle may borrow.
+
+    The same bundle version can be repacked with a different wheel, so a version match
+    alone does not make the Console release *this* bundle. Only when every identity field
+    both sides carry (core version, Pro component version, build id) agrees are the
+    release ids handed over; the local manifest stays authoritative for everything else
+    and a conflict merges nothing. ``bundle_sha256`` is not compared: Console hashes the
+    bundle archive, a local bundle directory hashes its wheel.
+    """
+    if not console_manifest:
+        return None
+    for key in ("core_version", "flockspro_component_version", "build_id"):
+        local_value = str(local_manifest.get(key) or "").strip().lstrip("v")
+        console_value = str(console_manifest.get(key) or "").strip().lstrip("v")
+        if local_value and console_value and local_value != console_value:
+            log.warning(
+                "updater.pro_bundle.local_identity_conflict",
+                {"field": key, "local": local_value, "console": console_value},
+            )
+            return None
+    identity: dict[str, Any] = {}
+    for key in ("release_id", "bundle_release_id"):
+        value = str(console_manifest.get(key) or "").strip()
+        if value:
+            identity[key] = value
+    return identity or None
+
+
+async def describe_pro_bundle(*, console_session_token: str | None = None) -> dict[str, Any]:
+    """What ``perform_pro_bundle_install`` would install, without touching anything.
+
+    Reads the local bundle (``FLOCKS_PRO_BUNDLE_DIR``) or, failing that, the Console
+    manifest, and pairs it with the Pro state of this installation. Used by
+    ``flocks update --check --pro-bundle``.
+    """
+    configured = os.getenv(_LOCAL_PRO_BUNDLE_DIR_ENV, "").strip()
+    local_dir = _local_pro_bundle_dir()
+    if configured and local_dir is None:
+        # a configured but broken local bundle is the answer, not a reason to ask Console
+        raise ValueError(f"本地 Pro bundle 无效：{Path(configured).expanduser()} 缺少 manifest.json")
+    if local_dir is not None:
+        manifest_path = local_dir / "manifest.json"
+        try:
+            json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError(f"本地 Pro bundle 无效（{manifest_path}）: {exc}") from exc
+        try:
+            release = _load_local_pro_bundle_release(local_dir)
+        except Exception as exc:
+            raise ValueError(f"本地 Pro bundle 无效（{local_dir}）: {exc}") from exc
+        source = "local"
+        location = str(local_dir)
+    else:
+        # read-only: the session token comes from the shared session file only, never from Storage
+        release = await _fetch_console_manifest_release_info(console_session_token, use_storage_token=False)
+        source = "console"
+        location = release.bundle_url
+    manifest = release.manifest or {}
+    marker = _read_pro_bundle_install_marker()
+    return {
+        "source": source,
+        "location": location,
+        "bundle_version": release.version,
+        "core_version": manifest.get("core_version"),
+        "component_version": manifest.get("flockspro_component_version"),
+        "release_id": release.release_id,
+        "prebuilt": _is_prebuilt_pro_bundle_manifest(manifest),
+        "current_core_version": get_current_version(),
+        "installed": _is_pro_component_installed(),
+        "installed_bundle_version": marker.get("bundle_version"),
+        "installed_component_version": marker.get("flockspro_component_version"),
+    }
+
+
 async def perform_pro_bundle_install(
     *,
     restart: bool = True,
     console_session_token: str | None = None,
+    local_bundle_dir: Path | None = None,
 ) -> AsyncGenerator[UpdateProgress, None]:
-    """Apply the Console Pro bundle as a combined OSS core + Pro component upgrade."""
+    """Apply the Console Pro bundle as a combined OSS core + Pro component upgrade.
+
+    When ``local_bundle_dir`` is given, or ``FLOCKS_PRO_BUNDLE_DIR`` points at a
+    bundle shipped with an offline installation, the bundle is installed from disk
+    and Console is only consulted (best effort) for the release identity.
+    """
+    refusal = _install_modification_refusal()
+    if refusal is not None:
+        yield UpdateProgress(stage="error", message=refusal, success=False)
+        return
+    local_dir = local_bundle_dir or _local_pro_bundle_dir()
+    if local_dir is not None:
+        try:
+            manifest_info = _load_local_pro_bundle_release(local_dir)
+        except Exception as exc:
+            log.error("updater.pro_bundle.local_manifest_failed", {"path": str(local_dir), "error": str(exc)})
+            yield UpdateProgress(
+                stage="error",
+                message=f"Local Flocks Pro bundle is invalid: {exc}",
+                success=False,
+            )
+            return
+        console_payload = await _fetch_console_manifest_for_local_bundle(manifest_info, console_session_token)
+        log.info(
+            "updater.pro_bundle.local_install",
+            {"path": str(local_dir), "version": manifest_info.version, "console_merged": console_payload is not None},
+        )
+        async for progress in perform_update(
+            manifest_info.version,
+            bundle_sha256=manifest_info.bundle_sha256,
+            bundle_format=manifest_info.bundle_format,
+            console_manifest_payload=console_payload,
+            restart=restart,
+            force_console_manifest=True,
+            local_bundle_path=local_dir,
+        ):
+            yield progress
+        return
+
     try:
         if console_session_token:
             manifest_info = await _fetch_console_manifest_release_info(console_session_token)
@@ -2449,6 +2838,10 @@ async def perform_pro_bundle_downgrade(
             message="Downgrading to OSS is not supported in Docker deployments. Please redeploy with the OSS image.",
             success=False,
         )
+        return
+    refusal = _install_modification_refusal()
+    if refusal is not None:
+        yield UpdateProgress(stage="error", message=refusal, success=False)
         return
 
     install_root = _get_repo_root()
@@ -2541,6 +2934,9 @@ async def perform_pro_bundle_downgrade(
     try:
         restart_argv = _build_restart_argv(install_root)
         sync_timeout = _dependency_sync_timeout_seconds()
+        # Offline installations carry a prebuilt runtime: the handoff must not try to
+        # uv sync / rebuild the WebUI (no index, no npm registry), only restart.
+        offline_install = detect_deploy_mode() == "offline"
         handoff_argv = _build_restart_handoff_argv(
             restart_argv,
             install_root,
@@ -2548,8 +2944,9 @@ async def perform_pro_bundle_downgrade(
             sync_timeout=sync_timeout,
             version=oss_core_version or current_version,
             current_version=current_version,
+            prebuilt=offline_install,
         )
-        log.info("updater.downgrade.restart_handoff_spawn", {"argv": handoff_argv})
+        log.info("updater.downgrade.restart_handoff_spawn", {"argv": handoff_argv, "prebuilt": offline_install})
         _spawn_restart_handoff(handoff_argv, cwd=install_root)
         os._exit(0)
     except Exception as exc:
@@ -2576,6 +2973,8 @@ async def perform_update(
     region: str | None = None,
     force_console_manifest: bool = False,
     wait_for_handoff: bool = False,
+    allow_downgrade: bool = False,
+    local_bundle_path: Path | None = None,
 ) -> AsyncGenerator[UpdateProgress, None]:
     """
     Async generator that executes the upgrade steps and yields progress events.
@@ -2585,7 +2984,40 @@ async def perform_update(
 
     Sources are tried in the order configured in ``updater.sources``.
     If one source fails the download, the next source is tried automatically.
+
+    A *latest_tag* older than the installed version is refused unless
+    *allow_downgrade* is set: an explicit ``target_version`` must not silently
+    roll the installation back; rollbacks go through the backup archive.
+
+    *local_bundle_path* installs a Pro bundle from a local directory or archive
+    instead of downloading it (offline installations).
     """
+    from flocks.updater.deploy import detect_deploy_mode
+
+    refusal = _install_modification_refusal()
+    if refusal is not None:
+        log.warning("updater.perform_update.refused", {"target": latest_tag, "reason": refusal})
+        yield UpdateProgress(stage="error", message=refusal, success=False)
+        return
+    if local_bundle_path is None and detect_deploy_mode() == "offline":
+        # An offline installation has UV_OFFLINE / npm offline pinned; a download-based
+        # upgrade would replace the source and then fail in dependency sync, leaving the
+        # service down. Refuse before touching anything.
+        log.warning("updater.offline_install.refused", {"tag": latest_tag})
+        _record_update_journal(f"ERROR {OFFLINE_UPGRADE_REFUSED_MESSAGE}")
+        yield UpdateProgress(stage="error", message=OFFLINE_UPGRADE_REFUSED_MESSAGE, success=False)
+        return
+    # Pro bundle installs carry their own core/bundle version semantics (an older
+    # bundle core keeps the newer local core); the guard covers source upgrades.
+    downgrade_refusal = (
+        None if force_console_manifest else _downgrade_refusal(latest_tag, allow_downgrade=allow_downgrade)
+    )
+    if downgrade_refusal is not None:
+        log.warning("updater.perform_update.downgrade_refused", {"target": latest_tag, "current": get_current_version()})
+        _record_update_journal(f"ERROR {downgrade_refusal}")
+        yield UpdateProgress(stage="error", message=downgrade_refusal, success=False)
+        return
+
     ucfg = await _get_updater_config()
     effective_sources = await _resolve_sources_for_edition(ucfg.sources)
     if force_console_manifest:
@@ -2599,10 +3031,14 @@ async def perform_update(
     current_version = get_current_version()
     effective_update_version = current_version
     skip_core_replace = False
+    prebuilt = False
+    dependency_wheels_dir: Path | None = None
     console_manifest_info: ConsoleManifestRelease | None = None
     console_manifest_payload = console_manifest_payload if isinstance(console_manifest_payload, dict) else None
     fmt = _choose_archive_format(ucfg.archive_format)
-    if profile.sources == ["console-manifest"]:
+    if local_bundle_path is not None:
+        fmt = "dir" if local_bundle_path.is_dir() else _archive_format_for_url(local_bundle_path.name, bundle_format)
+    elif profile.sources == ["console-manifest"]:
         if not (zipball_url or tarball_url) or console_session_token is None:
             try:
                 console_manifest_info = await _fetch_console_manifest_release_info()
@@ -2637,22 +3073,36 @@ async def perform_update(
     # ------------------------------------------------------------------ #
     sources_desc = " → ".join(profile.sources)
     archive_filename = _archive_filename_for_format(latest_tag, fmt)
-    if profile.sources == ["console-manifest"]:
-        archive_filename = _download_filename_for_url(
-            _absolute_console_url(zipball_url or tarball_url or ""),
-            f"flockspro-bundle-{Path(latest_tag).name}.{'zip' if fmt == 'zip' else 'tar.gz'}",
+    if local_bundle_path is not None:
+        archive_filename = local_bundle_path.name
+        yield UpdateProgress(
+            stage="fetching",
+            message=f"Using local Flocks Pro bundle {local_bundle_path}...",
+            bundle_filename=archive_filename,
         )
-    yield UpdateProgress(
-        stage="fetching",
-        message=f"Downloading {'Flocks Pro bundle' if profile.sources == ['console-manifest'] else 'source archive'} (sources: {sources_desc})...",
-        bundle_filename=archive_filename if profile.sources == ["console-manifest"] else None,
-    )
+    else:
+        if profile.sources == ["console-manifest"]:
+            archive_filename = _download_filename_for_url(
+                _absolute_console_url(zipball_url or tarball_url or ""),
+                f"flockspro-bundle-{Path(latest_tag).name}.{'zip' if fmt == 'zip' else 'tar.gz'}",
+            )
+        yield UpdateProgress(
+            stage="fetching",
+            message=f"Downloading {'Flocks Pro bundle' if profile.sources == ['console-manifest'] else 'source archive'} (sources: {sources_desc})...",
+            bundle_filename=archive_filename if profile.sources == ["console-manifest"] else None,
+        )
 
     tmp_dir = Path(tempfile.mkdtemp(prefix="flocks-update-"))
     if sys.platform == "win32":
         tmp_dir = _resolve_windows_long_path(tmp_dir)
+    local_bundle_copy: Path | None = None
     try:
-        if profile.sources == ["console-manifest"]:
+        if local_bundle_path is not None:
+            local_bundle_copy = await asyncio.to_thread(_stage_local_pro_bundle, local_bundle_path, tmp_dir)
+            archive_path = local_bundle_copy
+            if local_bundle_copy.is_file():
+                await asyncio.to_thread(_verify_download_sha256, archive_path, bundle_sha256)
+        elif profile.sources == ["console-manifest"]:
             primary_bundle_url = _absolute_console_url(zipball_url or tarball_url or "")
             if not primary_bundle_url:
                 raise ValueError("Console manifest did not provide a bundle URL")
@@ -2712,11 +3162,14 @@ async def perform_update(
     extract_dir = tmp_dir / "extracted"
     extract_dir.mkdir()
     try:
-        content_root = await asyncio.to_thread(
-            _extract_archive,
-            archive_path,
-            extract_dir,
-        )
+        if local_bundle_copy is not None and local_bundle_copy.is_dir():
+            content_root = local_bundle_copy
+        else:
+            content_root = await asyncio.to_thread(
+                _extract_archive,
+                archive_path,
+                extract_dir,
+            )
         content_root, pro_wheel_path, pro_bundle_manifest = _resolve_pro_bundle_content(content_root)
         if profile.sources == ["console-manifest"]:
             pro_bundle_manifest = _merge_console_manifest_release_identity(
@@ -2726,6 +3179,15 @@ async def perform_update(
             _validate_pro_bundle_marker_manifest(pro_bundle_manifest)
         if profile.sources == ["console-manifest"] and pro_wheel_path is None:
             raise ValueError("Pro bundle 中未找到 flockspro wheel")
+        prebuilt = _is_prebuilt_pro_bundle_manifest(pro_bundle_manifest)
+        if prebuilt:
+            dependency_wheels_dir = _prebuilt_dependency_wheels_dir(
+                _pro_bundle_root(content_root),
+                pro_bundle_manifest,
+            )
+            if local_bundle_copy is not None and local_bundle_copy.is_dir() and bundle_sha256 and pro_wheel_path:
+                # A local bundle directory carries no archive; its sha256 covers the Pro wheel.
+                await asyncio.to_thread(_verify_download_sha256, pro_wheel_path, bundle_sha256)
     except Exception as exc:
         shutil.rmtree(tmp_dir, ignore_errors=True)
         msg = f"Failed to extract files: {exc}"
@@ -2733,7 +3195,21 @@ async def perform_update(
         yield UpdateProgress(stage="error", message=msg, success=False)
         return
     if profile.sources == ["console-manifest"]:
+        bundle_has_core_source = (content_root / "pyproject.toml").is_file()
         skip_core_replace = _is_pro_bundle_core_older_than_local(pro_bundle_manifest, current_version)
+        if prebuilt and not bundle_has_core_source:
+            # Pro-only prebuilt bundle: nothing to replace, keep the local core untouched.
+            skip_core_replace = True
+            log.info("updater.pro_bundle.prebuilt_pro_only", {"local_version": current_version})
+        elif prebuilt and not skip_core_replace and dependency_wheels_dir is None:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+            msg = (
+                "Prebuilt Flocks Pro bundle replaces the core but ships no dependency wheels; "
+                "refusing to leave the environment out of sync."
+            )
+            _record_update_journal(f"ERROR {msg}")
+            yield UpdateProgress(stage="error", message=msg, success=False)
+            return
         if skip_core_replace:
             bundle_core_version = _pro_bundle_core_version_for_compare(pro_bundle_manifest)
             pro_bundle_manifest = _effective_pro_bundle_manifest(pro_bundle_manifest, current_version)
@@ -2791,6 +3267,8 @@ async def perform_update(
                 pro_bundle_manifest_path=pro_bundle_manifest_path,
                 bundle_sha256=bundle_sha256,
                 sync_timeout=sync_timeout,
+                prebuilt=prebuilt,
+                dependency_wheels_dir=dependency_wheels_dir,
             )
         except RuntimeError as exc:
             shutil.rmtree(tmp_dir, ignore_errors=True)
@@ -2858,6 +3336,8 @@ async def perform_update(
             bundle_sha256=bundle_sha256,
             cleanup_dir=tmp_dir,
             wait_for_parent=not wait_for_handoff,
+            prebuilt=prebuilt,
+            dependency_wheels_dir=dependency_wheels_dir,
         )
     except Exception as exc:
         log.error("updater.restart.build_argv_failed", {"error": str(exc)})
@@ -3038,6 +3518,8 @@ def _build_restart_handoff_argv(
     bundle_sha256: str | None = None,
     cleanup_dir: Path | None = None,
     wait_for_parent: bool = True,
+    prebuilt: bool = False,
+    dependency_wheels_dir: Path | None = None,
 ) -> list[str]:
     """Wrap the real restart command in a helper that finishes upgrade work."""
     if not restart_argv:
@@ -3134,6 +3616,10 @@ def _build_restart_handoff_argv(
         argv.extend(["--bundle-sha256", bundle_sha256])
     if cleanup_dir is not None:
         argv.extend(["--cleanup-dir", str(cleanup_dir)])
+    if prebuilt:
+        argv.append("--prebuilt")
+    if dependency_wheels_dir is not None:
+        argv.extend(["--dependency-wheels-dir", str(dependency_wheels_dir)])
     argv.extend(["--", *managed_restart_argv])
     return argv
 

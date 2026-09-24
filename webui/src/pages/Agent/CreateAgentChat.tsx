@@ -1,5 +1,5 @@
 import { useEffect } from 'react';
-import { X, Bot } from 'lucide-react';
+import { IconX, IconRobot } from '@tabler/icons-react';
 import { useTranslation } from 'react-i18next';
 import SessionChat from '@/components/common/SessionChat';
 import { useSessionChat } from '@/hooks/useSessionChat';
@@ -80,7 +80,7 @@ export default function CreateAgentChat({ open, onClose }: CreateAgentChatProps)
         <div className="px-5 py-4 border-b border-gray-100 flex items-center justify-between flex-shrink-0 bg-gradient-to-r from-purple-50 to-slate-50">
           <div className="flex items-center gap-3">
             <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-purple-600 to-slate-700 flex items-center justify-center shadow-sm">
-              <Bot className="w-5 h-5 text-white" />
+              <IconRobot aria-hidden="true" className="w-5 h-5 text-white" />
             </div>
             <div>
               <h2 className="text-lg font-semibold text-gray-900">{t('agent:chat.createTitle')}</h2>
@@ -91,7 +91,7 @@ export default function CreateAgentChat({ open, onClose }: CreateAgentChatProps)
             onClick={onClose}
             className="text-gray-400 hover:text-gray-600 p-1.5 rounded-lg hover:bg-white/80 transition-colors"
           >
-            <X className="w-5 h-5" />
+            <IconX aria-hidden="true" className="w-5 h-5" />
           </button>
         </div>
 
@@ -108,7 +108,7 @@ export default function CreateAgentChat({ open, onClose }: CreateAgentChatProps)
           onCreateAndSend={!sessionId ? (text, imageParts) => createAndSend({ text, imageParts }) : undefined}
           welcomeContent={!sessionId ? (
             <div className="text-center max-w-md">
-              <Bot className="w-10 h-10 text-purple-500 mx-auto mb-3" />
+              <IconRobot aria-hidden="true" className="w-10 h-10 text-purple-500 mx-auto mb-3" />
               <h3 className="text-lg font-semibold text-gray-900 mb-2">{t('agent:chat.createTitle')}</h3>
               <p className="text-sm text-gray-500">{t('agent:chat.subtitle')}</p>
             </div>

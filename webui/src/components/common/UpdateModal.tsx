@@ -1,18 +1,21 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import {
-  X,
-  RefreshCw,
-  ArrowUpCircle,
-  CheckCircle,
-  XCircle,
-  Loader2,
-  Sparkles,
-  Container,
-  BellOff,
-} from 'lucide-react';
+  IconX,
+  IconRefresh,
+  IconCircleArrowUp,
+  IconCircleCheck,
+  IconCircleX,
+  IconLoader2,
+  IconSparkles,
+  IconContainer,
+  IconShieldCheck,
+  IconServer,
+  IconBellOff,
+} from '@tabler/icons-react';
+import NoticeCard, { NoticePrimaryAction } from './NoticeCard';
 import { useTranslation } from 'react-i18next';
-import { checkUpdate, applyUpdate, VersionInfo, UpdateProgress, type UpdateEdition } from '@/api/update';
+import { checkUpdate, applyUpdate, IncompleteUpdateError, UpdateStreamTimeoutError, VersionInfo, UpdateProgress, DEFAULT_UPDATE_CHANNEL } from '@/api/update';
 import { checkRestartReadiness } from '@/utils/restartPolling';
 import { UPDATE_DISMISSED_KEY, buildUpdateDismissalKey } from '@/utils/updateDismissal';
 
@@ -26,7 +29,7 @@ export { UPDATE_DISMISSED_KEY };
 function formatUpdateVersion(version?: string | null): string {
   const raw = (version || '').trim();
   if (!raw) return '—';
-  return /^(pro-)?v/i.test(raw) ? raw : `v${raw}`;
+  return /^\d/.test(raw) ? `v${raw}` : raw;
 }
 
 function clampPercent(value?: number | null): number | null {
@@ -54,34 +57,35 @@ function formatBytes(value?: number | null): string {
 interface UpdateModalProps {
   initialInfo?: VersionInfo | null;
   forceInitialCheck?: boolean;
-  edition?: UpdateEdition;
+  /** Update channel to check and apply; unset means the default channel. */
+  channel?: string;
   canUpgrade?: boolean;
   onClose: () => void;
   onDismiss?: () => void;
+  onPresented?: () => void;
 }
 
 export default function UpdateModal({
   initialInfo,
   forceInitialCheck = false,
-  edition = 'flocks',
+  channel = DEFAULT_UPDATE_CHANNEL,
   canUpgrade = true,
   onClose,
   onDismiss,
+  onPresented,
 }: UpdateModalProps) {
+  useEffect(() => { onPresented?.(); }, [onPresented]);
   const { t, i18n } = useTranslation('update');
   const [info, setInfo] = useState<VersionInfo | null>(initialInfo ?? null);
   const [checking, setChecking] = useState(false);
   const [upgrading, setUpgrading] = useState(false);
+  const [upgradeAttempted, setUpgradeAttempted] = useState(false);
   const [steps, setSteps] = useState<UpdateProgress[]>([]);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(initialInfo?.error ?? null);
   const [restarting, setRestarting] = useState(false);
-  const modalTitle = edition === 'flockspro' ? t('proTitle') : t('title');
-  const currentDisplayVersion = edition === 'flockspro'
-    ? info?.current_bundle_version || null
-    : info?.current_version || null;
-  const latestDisplayVersion = edition === 'flockspro'
-    ? info?.latest_bundle_version || null
-    : info?.latest_version || null;
+  const modalTitle = t('title');
+  const currentDisplayVersion = info?.current_version || null;
+  const latestDisplayVersion = info?.latest_version || null;
   // useRef avoids stale closure: the `restarting` value inside async callbacks
   // always reflects the latest state even after re-renders.
   const restartingRef = useRef(false);
@@ -95,7 +99,7 @@ export default function UpdateModal({
     setChecking(true);
     setError(null);
     try {
-      const data = await checkUpdate(i18n.language, edition, force);
+      const data = await checkUpdate(i18n.language, channel, force);
       setInfo(data);
       if (data.error) setError(data.error);
     } catch (e: any) {
@@ -103,7 +107,7 @@ export default function UpdateModal({
     } finally {
       setChecking(false);
     }
-  }, [edition, i18n.language, t]);
+  }, [channel, i18n.language, t]);
 
   useEffect(() => {
     if (!initialInfo) {
@@ -112,8 +116,9 @@ export default function UpdateModal({
   }, [fetchVersion, forceInitialCheck, initialInfo]);
 
   const handleUpgrade = useCallback(async () => {
-    if (!info?.has_update) return;
+    if (!info?.has_update || !canUpgrade || info.update_allowed === false) return;
     setUpgrading(true);
+    setUpgradeAttempted(true);
     setSteps([]);
     setError(null);
 
@@ -134,21 +139,24 @@ export default function UpdateModal({
           setRestartingSync(true);
           pollUntilReady();
         }
-      }, i18n.language, edition);
+      }, i18n.language, channel);
+      if (!restartingRef.current) setUpgrading(false);
     } catch (e: any) {
       // Use the ref to avoid stale closure — restarting may have been set
       // to true by the progress callback before this catch fires.
       if (!restartingRef.current) {
-        setError(e.message ?? t('upgradeFailed'));
+        setError(e instanceof IncompleteUpdateError ? t('streamInterrupted')
+          : e instanceof UpdateStreamTimeoutError ? t('streamTimeout') : e.message ?? t('upgradeFailed'));
         setUpgrading(false);
       } else if (e?.message) {
         restartFailureReasonRef.current = e.message;
       }
     }
-  }, [edition, i18n.language, info, t]);
+  }, [canUpgrade, channel, i18n.language, info, t]);
 
   const isBusy = upgrading || restarting;
-  const showProgressDialog = upgrading || restarting || steps.length > 0;
+  const completed = !isBusy && !error && steps.some((step) => step.stage === 'done');
+  const showProgressDialog = upgradeAttempted || upgrading || restarting || steps.length > 0;
   const safeClose = () => {
     if (!isBusy) onClose();
   };
@@ -182,21 +190,19 @@ export default function UpdateModal({
   };
 
   const renderStep = (step: UpdateProgress, index: number) => {
-    const label = edition === 'flockspro' && step.stage === 'fetching'
-      ? t('stageLabels.fetchingPro')
-      : t(`stageLabels.${step.stage}`, { defaultValue: step.stage });
+    const label = t(`stageLabels.${step.stage}`, { defaultValue: step.stage });
     const isError = step.stage === 'error';
-    const isSpinning = step.stage === 'restarting';
+    const isSpinning = step.stage === 'restarting' && restarting;
     const downloadPercent = clampPercent(step.percent);
     const hasDownloadProgress = step.stage === 'fetching' && typeof step.downloaded_bytes === 'number';
-    const detail = step.pro_component_filename || step.bundle_filename || step.message;
+    const detail = step.bundle_filename || step.message;
     return (
       <div key={index} className="flex items-start gap-2.5 py-1 text-sm">
         {isError
-          ? <XCircle className="mt-0.5 w-4 h-4 text-red-500 flex-shrink-0" />
+          ? <IconCircleX aria-hidden="true" className="mt-0.5 w-4 h-4 text-red-500 flex-shrink-0" />
           : isSpinning
-          ? <Loader2 className="mt-0.5 w-4 h-4 text-blue-500 animate-spin flex-shrink-0" />
-          : <CheckCircle className="mt-0.5 w-4 h-4 text-green-500 flex-shrink-0" />
+          ? <IconLoader2 aria-hidden="true" className="mt-0.5 w-4 h-4 text-blue-500 animate-spin flex-shrink-0" />
+          : <IconCircleCheck aria-hidden="true" className="mt-0.5 w-4 h-4 text-green-500 flex-shrink-0" />
         }
         <div className="min-w-0 flex-1">
           <div className="flex min-w-0 items-center gap-2">
@@ -243,20 +249,24 @@ export default function UpdateModal({
 
         <div className="fixed inset-0 z-[100] flex items-center justify-center pointer-events-none">
           <div
-            className="pointer-events-auto w-full max-w-md mx-4 bg-white rounded-2xl shadow-2xl border border-gray-200 overflow-hidden"
+            role="dialog"
+            aria-modal="true"
+            aria-label={modalTitle}
+            className="pointer-events-auto w-full max-w-md max-h-[calc(100dvh-2rem)] mx-4 bg-white rounded-2xl shadow-2xl border border-gray-200 overflow-y-auto"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-center justify-between px-4 py-3 border-b border-gray-100">
               <div className="flex items-center gap-2">
-                <Sparkles className="w-4 h-4 text-gray-500" />
+                <IconSparkles aria-hidden="true" className="w-4 h-4 text-gray-500" />
                 <span className="text-sm font-semibold text-gray-800">{modalTitle}</span>
               </div>
               <button
+                aria-label={t('closeAction')}
                 onClick={safeClose}
                 disabled={isBusy}
                 className="p-1 text-gray-400 hover:text-gray-600 rounded transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
               >
-                <X className="w-4 h-4" />
+                <IconX aria-hidden="true" className="w-4 h-4" />
               </button>
             </div>
 
@@ -264,19 +274,19 @@ export default function UpdateModal({
               <div className="rounded-2xl border border-amber-200 bg-gradient-to-br from-amber-50 via-orange-50 to-rose-50 p-4 shadow-sm">
                 <div className="flex items-start gap-3">
                   <span className="flex h-10 w-10 items-center justify-center rounded-full bg-amber-500 text-white shadow-sm">
-                    <ArrowUpCircle className="h-5 w-5" />
+                    <IconCircleArrowUp aria-hidden="true" className="h-5 w-5" />
                   </span>
                   <div className="min-w-0 flex-1">
                     <div className="text-sm font-semibold text-amber-950">
-                      {upgrading || restarting ? t('upgrading') : t('newVersionTitle')}
+                      {isBusy ? t('upgrading') : completed ? t('upgradeComplete') : t('upgradeFailed')}
                     </div>
                     {latestDisplayVersion && (
-                      <div className="mt-1 text-2xl font-bold text-amber-900">
+                      <div className="mt-1 text-2xl font-bold text-amber-900 dark:text-amber-100">
                         {formatUpdateVersion(latestDisplayVersion)}
                       </div>
                     )}
                     <p className="mt-2 text-sm leading-6 text-amber-800">
-                      {t('confirmUpgradeDesc')}
+                      {t(isBusy ? 'confirmUpgradeDesc' : completed ? 'upgradeCompleteDesc' : 'upgradeFailedDesc')}
                     </p>
                   </div>
                 </div>
@@ -297,33 +307,33 @@ export default function UpdateModal({
             {error && (
               <div className="px-4 pb-3">
                 <div className="flex items-start gap-2 text-xs text-red-600 bg-red-50 rounded-lg p-2.5">
-                  <XCircle className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
-                  <span>{error}</span>
+                  <IconCircleX aria-hidden="true" className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
+                  <span className="min-w-0 break-words">{error}</span>
                 </div>
               </div>
             )}
 
             <div className="px-4 pb-4 flex items-center gap-2 flex-wrap">
-              {!restarting && (
+              {upgrading && !restarting && (
                 <span className="flex items-center gap-1.5 text-xs text-gray-500">
-                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  <IconLoader2 aria-hidden="true" className="w-3.5 h-3.5 animate-spin" />
                   {t('upgrading')}
                 </span>
               )}
 
               {restarting && (
                 <span className="flex items-center gap-1.5 text-xs text-blue-600">
-                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  <IconLoader2 aria-hidden="true" className="w-3.5 h-3.5 animate-spin" />
                   {t('waitingRestart')}
                 </span>
               )}
 
-              {!isBusy && error && (
+              {!isBusy && (
                 <button
                   onClick={safeClose}
                   className="ml-auto flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-gray-600 bg-gray-100 hover:bg-gray-200 rounded-lg transition-colors"
                 >
-                  {t('laterAction')}
+                  {t('closeAction')}
                 </button>
               )}
             </div>
@@ -331,58 +341,58 @@ export default function UpdateModal({
         </div>
       </>
     ) : (
-      <div className="fixed inset-x-4 bottom-4 z-[100] pointer-events-none sm:inset-x-auto sm:left-4 sm:w-full sm:max-w-sm lg:left-6 lg:bottom-6">
-        <div
-          className="pointer-events-auto rounded-2xl border border-amber-200 bg-white shadow-2xl overflow-hidden"
-          onClick={(e) => e.stopPropagation()}
-        >
-          <div className="flex items-center justify-between border-b border-amber-100 bg-gradient-to-r from-amber-50 via-orange-50 to-rose-50 px-4 py-3">
-            <div className="flex items-center gap-2">
-              <span className="flex h-8 w-8 items-center justify-center rounded-full bg-amber-500 text-white shadow-sm">
-                <ArrowUpCircle className="h-4 w-4" />
-              </span>
-              <div>
-                <div className="text-sm font-semibold text-amber-950">
-                  {info?.has_update ? t('newVersionTitle') : modalTitle}
-                </div>
-                {latestDisplayVersion && (
-                  <div className="text-xs text-amber-700">{formatUpdateVersion(latestDisplayVersion)}</div>
-                )}
-              </div>
-            </div>
-            <button
-              onClick={safeClose}
-              className="p-1 text-gray-400 hover:text-gray-600 rounded transition-colors"
-            >
-              <X className="w-4 h-4" />
-            </button>
-          </div>
-
+      <NoticeCard
+        title={info?.has_update ? t('newVersionTitle') : modalTitle}
+        subtitle={latestDisplayVersion ? formatUpdateVersion(latestDisplayVersion) : undefined}
+        icon={IconCircleArrowUp}
+        closeLabel={t('laterAction')}
+        onClose={safeClose}
+      >
           <div className="px-4 py-4">
             {info?.has_update ? (
-              <>
-                <div className="rounded-xl border border-amber-100 bg-amber-50/70 px-3 py-2 text-xs text-amber-800">
-                  <div className="font-medium">
-                    {t('confirmUpgrade', { version: formatUpdateVersion(latestDisplayVersion) })}
-                  </div>
-                  <div className="mt-1 leading-5">{t('newVersionDesc')}</div>
+              <div className="rounded-xl border border-amber-100 bg-amber-50/70 px-3 py-2 text-xs text-amber-800">
+                <div className="font-medium">
+                  {t('confirmUpgrade', { version: formatUpdateVersion(latestDisplayVersion) })}
                 </div>
-                {info.update_allowed === false && (
-                  <div className="mt-2 rounded-xl border border-blue-200 bg-blue-50 px-3 py-2.5 text-xs text-blue-800">
-                    <div className="flex items-center gap-1.5 font-medium">
-                      <Container className="w-3.5 h-3.5 flex-shrink-0" />
-                      {t('dockerModeTitle')}
-                    </div>
-                    <p className="mt-1 leading-5">{t('dockerModeDesc')}</p>
-                    <code className="mt-1.5 block rounded bg-blue-100 px-2 py-1 text-xs text-blue-900 select-all">
-                      {t('dockerUpgradeHint')}
-                    </code>
-                  </div>
-                )}
-              </>
+                <div className="mt-1 leading-5">{t('newVersionDesc')}</div>
+              </div>
             ) : (
               <div className="rounded-xl border border-gray-100 bg-gray-50 px-3 py-2 text-xs text-gray-600">
-                {checking ? t('checkUpdate') : error ?? t('upToDate')}
+                {checking
+                  ? t('checkUpdate')
+                  : error ?? (info?.deploy_mode === 'offline' && !info.latest_version ? t('offlineNotChecked') : t('upToDate'))}
+              </div>
+            )}
+            {/* The deploy-mode notice does not depend on has_update: an offline package
+                deployment usually cannot reach the update server at all, and the answer to
+                "how do I upgrade" is the .run either way. */}
+            {info?.update_allowed === false && info.deploy_mode === 'managed' && (
+              // Managed (commercial-core supervised) install: the core owns
+              // package upgrades, so the Docker guidance would be misleading.
+              <div className="mt-2 rounded-xl border border-blue-200 bg-blue-50 px-3 py-2.5 text-xs text-blue-800">
+                <div className="flex items-center gap-1.5 font-medium">
+                  <IconShieldCheck aria-hidden="true" className="w-3.5 h-3.5 flex-shrink-0" />
+                  {t('managedModeTitle')}
+                </div>
+                <p className="mt-1 leading-5">{t('managedModeDesc')}</p>
+              </div>
+            )}
+            {info?.update_allowed === false && info.deploy_mode !== 'managed' && (
+              <div className="mt-2 rounded-xl border border-blue-200 bg-blue-50 px-3 py-2.5 text-xs text-blue-800">
+                <div className="flex items-center gap-1.5 font-medium">
+                  {info.deploy_mode === 'offline' ? (
+                    <IconServer aria-hidden="true" className="w-3.5 h-3.5 flex-shrink-0" />
+                  ) : (
+                    <IconContainer aria-hidden="true" className="w-3.5 h-3.5 flex-shrink-0" />
+                  )}
+                  {t(info.deploy_mode === 'offline' ? 'offlineModeTitle' : 'dockerModeTitle')}
+                </div>
+                <p className="mt-1 leading-5">
+                  {t(info.deploy_mode === 'offline' ? 'offlineModeDesc' : 'dockerModeDesc')}
+                </p>
+                <code className="mt-1.5 block rounded bg-blue-100 px-2 py-1 text-xs text-blue-900 select-all">
+                  {t(info.deploy_mode === 'offline' ? 'offlineUpgradeHint' : 'dockerUpgradeHint')}
+                </code>
               </div>
             )}
           </div>
@@ -396,7 +406,7 @@ export default function UpdateModal({
               <span className="text-gray-400">{t('latestVersion')}</span>
               <div className="flex items-center gap-1.5">
                 {checking ? (
-                  <Loader2 className="w-3 h-3 text-gray-400 animate-spin" />
+                  <IconLoader2 aria-hidden="true" className="w-3 h-3 text-gray-400 animate-spin" />
                 ) : latestDisplayVersion ? (
                   <>
                     <span className="font-medium text-gray-700">{formatUpdateVersion(latestDisplayVersion)}</span>
@@ -419,7 +429,7 @@ export default function UpdateModal({
               disabled={checking}
               className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-gray-600 bg-gray-100 hover:bg-gray-200 rounded-lg disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
             >
-              <RefreshCw className={`w-3.5 h-3.5 ${checking ? 'animate-spin' : ''}`} />
+              <IconRefresh aria-hidden="true" className={`w-3.5 h-3.5 ${checking ? 'animate-spin' : ''}`} />
               {t('checkUpdate')}
             </button>
 
@@ -442,23 +452,19 @@ export default function UpdateModal({
                 className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-gray-400 hover:text-gray-600 transition-colors"
                 title={t('dismissAction')}
               >
-                <BellOff className="w-3.5 h-3.5" />
+                <IconBellOff aria-hidden="true" className="w-3.5 h-3.5" />
                 {t('dismissAction')}
               </button>
             )}
 
             {canUpgrade && info?.has_update && info.update_allowed !== false && (
-              <button
-                onClick={handleUpgrade}
-                className="ml-auto flex items-center gap-1.5 px-4 py-2 text-xs font-semibold text-white bg-amber-500 hover:bg-amber-600 rounded-lg shadow-sm transition-colors"
-              >
-                <ArrowUpCircle className="w-3.5 h-3.5" />
+              <NoticePrimaryAction onClick={handleUpgrade} className="ml-auto">
+                <IconCircleArrowUp aria-hidden="true" className="w-3.5 h-3.5" />
                 {t('confirmAction')}
-              </button>
+              </NoticePrimaryAction>
             )}
           </div>
-        </div>
-      </div>
+      </NoticeCard>
     ),
     document.body,
   );

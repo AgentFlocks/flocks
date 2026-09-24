@@ -16,6 +16,7 @@ from .models import (
     TaskScheduler,
     TaskStatus,
 )
+from .lease import ExecutionLease, ExecutionOwnershipError, current_execution_cancelled
 from .store import TaskStore
 
 log = Log.create(service="task.executor")
@@ -42,66 +43,95 @@ class TaskExecutor:
     async def dispatch(
         cls,
         execution: TaskExecution,
-        scheduler: TaskScheduler,
+        scheduler: Optional[TaskScheduler],
     ) -> TaskExecution:
-        # The execution row was already flipped to RUNNING atomically with the
-        # queue ref inside TaskStore.claim_next_queue_execution. We only need
-        # to make sure the in-memory object reflects that and to persist the
-        # session_id once the task session has been created.
-        if execution.status != TaskStatus.RUNNING:
-            execution.status = TaskStatus.RUNNING
-        if execution.started_at is None:
-            execution.started_at = datetime.now(timezone.utc)
+        # Claim before creating a session, publishing events, or writing any
+        # execution fields. Another node may have reclaimed the dequeued row.
+        async with ExecutionLease(execution.id) as lease:
+            if not lease.acquired:
+                raise ExecutionOwnershipError(f"execution ownership refused: {execution.id}")
+            lease.require_owned()
 
-        session_id: Optional[str] = None
-        if execution.execution_mode == ExecutionMode.AGENT:
-            session_id = await cls._create_task_session(execution, scheduler)
-
-        execution.session_id = session_id
-        await TaskStore.update_execution(execution)
-
-        if session_id:
+            execution.owner_node_id = lease.node_id
+            execution.owner_generation = lease.generation or 0
+            session_id: Optional[str] = None
             try:
-                from flocks.server.routes.event import publish_event
+                if scheduler is None:
+                    raise ValueError(f"Scheduler {execution.scheduler_id} not found")
+                if execution.execution_mode == ExecutionMode.AGENT:
+                    session_id = await cls._create_task_session(execution, scheduler)
+                if not await TaskStore.set_execution_session(
+                    execution.id,
+                    session_id,
+                    node_id=lease.node_id,
+                    expected_generation=lease.generation or 0,
+                ):
+                    raise ExecutionOwnershipError(f"execution ownership superseded: {execution.id}")
+                execution.session_id = session_id
+                lease.require_owned()
 
-                await publish_event(
-                    "task.updated",
-                    {
-                        "executionID": execution.id,
-                        "schedulerID": execution.scheduler_id,
-                        "sessionID": session_id,
-                        "status": execution.status.value,
-                    },
-                )
+                if session_id:
+                    try:
+                        from flocks.server.routes.event import publish_event
+
+                        await publish_event(
+                            "task.updated",
+                            {
+                                "executionID": execution.id,
+                                "schedulerID": execution.scheduler_id,
+                                "sessionID": session_id,
+                                "status": execution.status.value,
+                            },
+                        )
+                    except Exception as exc:
+                        log.warn("task.dispatch.sse_error", {"execution_id": execution.id, "error": str(exc)})
+
+                if execution.execution_mode == ExecutionMode.WORKFLOW:
+                    result = await cls._trigger_workflow(execution, scheduler)
+                else:
+                    result = await cls._run_agent_session(execution, session_id)
+                final_status = TaskStatus.COMPLETED
+                execution.result_summary = result
+                execution.delivery_status = DeliveryStatus.UNREAD
+            except ExecutionOwnershipError:
+                raise
             except Exception as exc:
-                log.warn("task.dispatch.sse_error", {"execution_id": execution.id, "error": str(exc)})
+                final_status = TaskStatus.FAILED
+                execution.error = str(exc)
+                log.error("task.dispatch.failed", {"id": execution.id, "error": str(exc)})
 
-        try:
-            if execution.execution_mode == ExecutionMode.WORKFLOW:
-                result = await cls._trigger_workflow(execution, scheduler)
-            else:
-                result = await cls._run_agent_session(execution, session_id)
-            final_status = TaskStatus.COMPLETED
-            execution.result_summary = result
-            execution.delivery_status = DeliveryStatus.UNREAD
-        except Exception as exc:
-            final_status = TaskStatus.FAILED
-            execution.error = str(exc)
-            log.error("task.dispatch.failed", {"id": execution.id, "error": str(exc)})
+            lease.require_owned()
 
-        current = await TaskStore.get_execution(execution.id)
-        if current and current.status != TaskStatus.RUNNING:
-            return current
+            current = await TaskStore.get_execution(execution.id)
+            if current is None or (
+                current.owner_node_id != lease.node_id
+                or current.owner_generation != lease.generation
+            ):
+                raise ExecutionOwnershipError(f"execution ownership superseded: {execution.id}")
+            if current and current.status != TaskStatus.RUNNING:
+                return current
 
-        completed_at = datetime.now(timezone.utc)
-        execution.status = final_status
-        execution.completed_at = completed_at
-        if execution.started_at:
-            execution.duration_ms = int(
-                (completed_at - execution.started_at).total_seconds() * 1000
-            )
-        await TaskStore.update_execution(execution)
-        return execution
+            completed_at = datetime.now(timezone.utc)
+            execution.status = final_status
+            execution.completed_at = completed_at
+            if execution.started_at:
+                execution.duration_ms = int(
+                    (completed_at - execution.started_at).total_seconds() * 1000
+                )
+
+            # The result is written under the claim it was produced under. A
+            # node that lost its lease while the work ran -- a long pause, a
+            # partition -- would otherwise report over the top of whichever
+            # node took the execution over, and the row would end up
+            # describing a run that is not the one that produced it.
+            written = await lease.finish_execution(execution)
+            if written is None:
+                log.warn(
+                    "task.dispatch.result_dropped_superseded",
+                    {"id": execution.id, "node_id": lease.node_id},
+                )
+                raise ExecutionOwnershipError(f"execution ownership expired or superseded: {execution.id}")
+            return execution
 
     @classmethod
     async def _create_task_session(
@@ -220,7 +250,7 @@ class TaskExecutor:
                 workflow=workflow,
                 inputs=inputs,
                 timeout_s=_TASK_ABSOLUTE_TIMEOUT_S,
-                cancel=cancel_event.is_set,
+                cancel=lambda: cancel_event.is_set() or current_execution_cancelled(),
                 tool_context=tool_context,
             )
         finally:

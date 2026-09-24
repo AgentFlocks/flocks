@@ -89,7 +89,7 @@ async def test_vertex_anthropic_stream_emits_reasoning_and_tool_chunks(monkeypat
     def _client_factory(*_args, **_kwargs):
         return _FakeAsyncClient(lines, calls)
 
-    monkeypatch.setitem(sys.modules, "httpx", SimpleNamespace(AsyncClient=_client_factory))
+    monkeypatch.setattr("flocks.provider.sdk.vertex_anthropic.async_client", _client_factory)
 
     provider = VertexAnthropicProvider(project="demo-project", location="global")
     provider._get_access_token = AsyncMock(return_value="token")
@@ -131,7 +131,7 @@ async def test_vertex_anthropic_chat_serializes_tool_use_without_name_error(monk
     def _client_factory(*_args, **_kwargs):
         return _FakeAsyncClient([], calls)
 
-    monkeypatch.setitem(sys.modules, "httpx", SimpleNamespace(AsyncClient=_client_factory))
+    monkeypatch.setattr("flocks.provider.sdk.vertex_anthropic.async_client", _client_factory)
 
     provider = VertexAnthropicProvider(project="demo-project", location="global")
     provider._get_access_token = AsyncMock(return_value="token")
@@ -162,7 +162,7 @@ async def test_vertex_anthropic_chat_replays_preserved_thinking_blocks(monkeypat
     def _client_factory(*_args, **_kwargs):
         return _FakeAsyncClient([], calls)
 
-    monkeypatch.setitem(sys.modules, "httpx", SimpleNamespace(AsyncClient=_client_factory))
+    monkeypatch.setattr("flocks.provider.sdk.vertex_anthropic.async_client", _client_factory)
 
     provider = VertexAnthropicProvider(project="demo-project", location="global")
     provider._get_access_token = AsyncMock(return_value="token")

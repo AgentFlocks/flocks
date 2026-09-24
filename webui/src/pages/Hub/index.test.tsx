@@ -117,6 +117,18 @@ describe('HubPage catalog loading', () => {
     });
   });
 
+  it('prioritizes installed and updateable plugins in the default catalog request', async () => {
+    hubAPI.catalogPage.mockResolvedValue(catalogPage([catalogEntry('available', 'Available')]));
+
+    renderHub();
+
+    await waitFor(() => {
+      expect(hubAPI.catalogPage).toHaveBeenCalledWith(expect.objectContaining({
+        prioritizeInstalled: true,
+      }));
+    });
+  });
+
   it('ignores an older search response that finishes after the latest query', async () => {
     const oldSearch = deferred<ReturnType<typeof catalogPage>>();
     const latestSearch = deferred<ReturnType<typeof catalogPage>>();
@@ -175,6 +187,7 @@ describe('HubPage catalog loading', () => {
       useCases: undefined,
       tags: undefined,
       state: undefined,
+      prioritizeInstalled: true,
     });
   });
 
@@ -444,5 +457,20 @@ describe('HubPage catalog loading', () => {
     expect(screen.queryByRole('button', { name: 'tree-action' })).not.toBeInTheDocument();
     expect(hubAPI.catalogPage).toHaveBeenCalledTimes(2);
     expect(hubAPI.catalog.mock.calls.filter(([params]) => params?.q === undefined)).toHaveLength(1);
+  });
+
+  it('leads with the localized label when a workflow plugin ships a broken workflow.json (TOL-1210)', async () => {
+    const user = userEvent.setup();
+    const wf = { ...catalogEntry('broken-wf', 'Broken WF'), type: 'workflow' as const };
+    hubAPI.catalogPage.mockResolvedValue(catalogPage([wf]));
+    hubAPI.get.mockResolvedValue({ data: wf });
+    hubAPI.fileContent.mockResolvedValue({ data: { path: 'workflow.json', content: '{"nodes": [ ', language: 'json' } });
+
+    renderHub();
+    await user.click(await screen.findByText('Broken WF'));
+
+    const error = await screen.findByText(/^Failed to parse workflow\.json: /);
+    expect(error).toBeInTheDocument();
+    expect(hubAPI.fileContent).toHaveBeenCalledWith('workflow', 'broken-wf', 'workflow.json');
   });
 });

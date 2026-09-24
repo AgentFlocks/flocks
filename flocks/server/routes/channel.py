@@ -5,8 +5,11 @@ Channel HTTP routes: webhook callbacks, health/status, and outbound send APIs.
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
+from pathlib import Path
 from typing import Optional
+from urllib.parse import urlparse
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, Response
@@ -15,6 +18,7 @@ from pydantic import BaseModel
 from flocks.channel.gateway.manager import default_manager
 from flocks.channel.registry import default_registry
 from flocks.hooks.execution import ExecutionStopped, execute_with_hooks
+from flocks.server.config_mutation import serialized_config_mutation
 from flocks.utils.log import Log
 
 router = APIRouter()
@@ -40,12 +44,19 @@ class SessionSendRequest(BaseModel):
     chat_id: Optional[str] = None
 
 
+def _require_message_content(text: str, media_url: Optional[str]) -> None:
+    # An empty message used to be "delivered" as zero chunks and answered ok.
+    if not (text or "").strip() and not media_url:
+        raise HTTPException(status_code=422, detail="text or media_url is required")
+
+
 @router.post("/send")
 async def channel_send(req: SendMessageRequest):
     """向指定渠道的指定目标（chat_id / user_id）主动发送消息。"""
     from flocks.channel.base import OutboundContext
     from flocks.channel.outbound.deliver import OutboundDelivery
 
+    _require_message_content(req.text, req.media_url)
     out_ctx = OutboundContext(
         channel_id=req.channel_id,
         account_id=req.account_id,
@@ -64,13 +75,40 @@ async def channel_send(req: SendMessageRequest):
     }
 
 
+async def _assert_session_send_allowed(request: Request, session_id: str) -> None:
+    """A browser user may only relay into sessions they can read.
+
+    The service identity (Bearer server_api_token, used by the channel_message
+    tool and out-of-process bridges) keeps its cross-session reach; the check
+    only closes the gap for logged-in users addressing someone else's session.
+    """
+    from flocks.auth.context import API_TOKEN_SERVICE_USER_ID
+    from flocks.server.auth import get_optional_user
+    from flocks.session.policy import SessionPolicy
+    from flocks.session.session import Session
+
+    user = get_optional_user(request)
+    if user is None or getattr(user, "id", None) == API_TOKEN_SERVICE_USER_ID:
+        # No HTTP identity (internal/in-process caller) or the service token:
+        # nothing to scope against.
+        return
+    session = await Session.get_by_id_unfiltered(session_id)
+    if session is None:
+        # No such session: fall through to the binding lookup, which answers 404.
+        return
+    if not SessionPolicy.can_read(session, user):
+        raise HTTPException(status_code=403, detail=f"No access to session '{session_id}'")
+
+
 @router.post("/session-send")
-async def channel_session_send(req: SessionSendRequest):
+async def channel_session_send(req: SessionSendRequest, request: Request):
     """通过 session_id 查找绑定的渠道，向该渠道发送消息。"""
     from flocks.channel.base import OutboundContext
     from flocks.channel.inbound.session_binding import SessionBindingService
     from flocks.channel.outbound.deliver import OutboundDelivery
 
+    _require_message_content(req.text, req.media_url)
+    await _assert_session_send_allowed(request, req.session_id)
     svc = SessionBindingService()
     all_bindings = await svc.list_bindings()
     matched = [b for b in all_bindings if b.session_id == req.session_id]
@@ -183,6 +221,12 @@ async def channel_webhook(channel_id: str, request: Request):
         )
     except ExecutionStopped as exc:
         raise HTTPException(status_code=403, detail="Channel webhook stopped by extension") from exc
+    except NotImplementedError as exc:
+        # Stream / long-poll plugins have no webhook surface; this is a public
+        # path, so say so instead of leaking a 500.
+        raise HTTPException(
+            status_code=404, detail=f"Channel '{channel_id}' does not support webhook mode"
+        ) from exc
     if isinstance(result, dict) and isinstance(result.get("status_code"), int):
         status_code = int(result["status_code"])
         payload = {k: v for k, v in result.items() if k != "status_code"}
@@ -262,6 +306,8 @@ async def record_inbound(channel_id: str):
     Used by out-of-process bridges (e.g. DingTalk's runner.ts) that bypass the
     InboundDispatcher so that last_message_at is updated on the plugin status.
     """
+    if not default_registry.get(channel_id):
+        raise HTTPException(status_code=404, detail=f"Channel '{channel_id}' not found")
     default_manager.record_message(channel_id)
     return {"ok": True}
 
@@ -291,6 +337,10 @@ async def bind_session(channel_id: str, req: BindSessionRequest):
     """
     from flocks.channel.base import ChatType
     from flocks.channel.inbound.session_binding import SessionBindingService
+
+    default_registry.init()
+    if not default_registry.get(channel_id):
+        raise HTTPException(status_code=404, detail=f"Channel '{channel_id}' not found")
 
     # Conversation-level bindings only — CHANNEL-broadcast style targets
     # (e.g. Telegram channels) are not addressable by a single chat reply
@@ -360,7 +410,15 @@ async def restart_channel(channel_id: str):
             status_code=404, detail=f"Channel '{channel_id}' not found"
         )
 
-    asyncio.create_task(default_manager.restart_channel(channel_id))
+    async def _restart() -> None:
+        try:
+            await default_manager.restart_channel(channel_id)
+        except Exception as exc:
+            # The caller already got 200; without this the failure only shows
+            # up as "Task exception was never retrieved" on stderr.
+            log.error("channel.restart_failed", {"channel": channel_id, "error": str(exc)})
+
+    asyncio.create_task(_restart())
     return {"ok": True, "channel_id": channel_id}
 
 
@@ -370,8 +428,11 @@ async def restart_all_channels():
     import asyncio
 
     async def _do():
-        await default_manager.stop_all()
-        await default_manager.start_all()
+        try:
+            await default_manager.stop_all()
+            await default_manager.start_all()
+        except Exception as exc:
+            log.error("channel.restart_all_failed", {"error": str(exc)})
 
     asyncio.create_task(_do())
     return {"ok": True}
@@ -385,6 +446,35 @@ class WeixinQrStartRequest(BaseModel):
     baseUrl: Optional[str] = None
 
 
+def _resolve_ilink_base_url(raw: Optional[str]) -> str:
+    """Accept only a public https iLink endpoint.
+
+    The value is fetched server-side; an arbitrary URL would turn this route
+    into a probe of the internal network.
+    """
+    from flocks.channel.builtin.weixin.config import ILINK_BASE_URL
+
+    base_url = (raw or "").strip()
+    if not base_url:
+        return ILINK_BASE_URL
+    parsed = urlparse(base_url)
+    host = (parsed.hostname or "").strip().lower()
+    if parsed.scheme != "https" or not host:
+        raise HTTPException(status_code=422, detail="baseUrl must be an https URL")
+    if host == "localhost" or host.endswith(".localhost"):
+        raise HTTPException(status_code=422, detail="baseUrl must not point at a local address")
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        ip = None
+    if ip is not None and (
+        ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast
+        or ip.is_reserved or ip.is_unspecified
+    ):
+        raise HTTPException(status_code=422, detail="baseUrl must not point at a private address")
+    return base_url.rstrip("/")
+
+
 @router.post("/weixin/qr-login/start")
 async def weixin_qr_login_start(req: WeixinQrStartRequest):
     """Request a fresh iLink Bot QR code for WeChat account login.
@@ -392,10 +482,9 @@ async def weixin_qr_login_start(req: WeixinQrStartRequest):
     No credentials needed — this is the pre-authentication step.
     Returns ``{qrcode_value, qrcode_url}`` for the frontend to render.
     """
-    from flocks.channel.builtin.weixin.config import ILINK_BASE_URL
     from flocks.channel.builtin.weixin.qr_login import start_qr_login
 
-    base_url = (req.baseUrl or "").strip() or ILINK_BASE_URL
+    base_url = _resolve_ilink_base_url(req.baseUrl)
     try:
         result = await start_qr_login(base_url=base_url)
         return {"ok": True, **result}
@@ -411,10 +500,9 @@ async def weixin_qr_login_status(qrcode: str, baseUrl: Optional[str] = None):
     Returns ``{status}`` where status ∈ waiting | scaned | expired | confirmed.
     On ``confirmed`` also returns ``{account_id, token}``.
     """
-    from flocks.channel.builtin.weixin.config import ILINK_BASE_URL
     from flocks.channel.builtin.weixin.qr_login import poll_qr_status
 
-    base_url = (baseUrl or "").strip() or ILINK_BASE_URL
+    base_url = _resolve_ilink_base_url(baseUrl)
     try:
         result = await poll_qr_status(qrcode_value=qrcode, base_url=base_url)
         return {"ok": True, **result}
@@ -433,6 +521,43 @@ class WhatsAppPairStartRequest(BaseModel):
     resetSession: bool = False
 
 
+def _whatsapp_allowed_roots() -> list[Path]:
+    from flocks.channel.builtin.whatsapp.config import default_state_dir
+    from flocks.config.config import _get_flocks_root
+
+    roots = [_get_flocks_root(), Path.home() / ".flocks", default_state_dir()]
+    resolved: list[Path] = []
+    for root in roots:
+        try:
+            candidate = root.expanduser().resolve()
+        except Exception:
+            continue
+        if candidate not in resolved:
+            resolved.append(candidate)
+    return resolved
+
+
+def _resolve_whatsapp_path(raw: Optional[str], *, field: str) -> Optional[Path]:
+    """Expand ``~`` and require the path to live under the Flocks data directory.
+
+    These paths are read (creds.json existence) or executed (bridge.js) by the
+    server, so an unrestricted value lets any signed-in user probe the
+    filesystem or run their own script.
+    """
+    if raw is None or not str(raw).strip():
+        return None
+    path = Path(str(raw).strip()).expanduser()
+    if not path.is_absolute():
+        raise HTTPException(status_code=400, detail=f"{field} must be an absolute path")
+    resolved = path.resolve()
+    if not any(resolved == root or resolved.is_relative_to(root) for root in _whatsapp_allowed_roots()):
+        raise HTTPException(
+            status_code=400,
+            detail=f"{field} must be inside the Flocks data directory",
+        )
+    return resolved
+
+
 @router.post("/whatsapp/pair/start")
 async def whatsapp_pair_start(req: WhatsAppPairStartRequest):
     """Start a WhatsApp Web QR pairing process.
@@ -443,10 +568,12 @@ async def whatsapp_pair_start(req: WhatsAppPairStartRequest):
     """
     from flocks.channel.builtin.whatsapp.pairing import start_pairing
 
+    session_path = _resolve_whatsapp_path(req.sessionPath, field="sessionPath")
+    bridge_dir = _resolve_whatsapp_path(req.bridgeDir, field="bridgeDir")
     try:
         pairing = await start_pairing(
-            session_path=req.sessionPath,
-            bridge_dir=req.bridgeDir,
+            session_path=str(session_path) if session_path else None,
+            bridge_dir=str(bridge_dir) if bridge_dir else None,
             reset_session=req.resetSession,
         )
         return {
@@ -463,11 +590,9 @@ async def whatsapp_pair_start(req: WhatsAppPairStartRequest):
 @router.get("/whatsapp/session-status")
 async def whatsapp_session_status(sessionPath: Optional[str] = None):
     """Return whether the configured WhatsApp session contains credentials."""
-    from pathlib import Path
-
     from flocks.channel.builtin.whatsapp.config import default_session_path
 
-    path = Path(sessionPath).expanduser() if sessionPath else default_session_path()
+    path = _resolve_whatsapp_path(sessionPath, field="sessionPath") or default_session_path()
     return {
         "session_path": str(path),
         "paired": (path / "creds.json").exists(),
@@ -534,6 +659,7 @@ def _append_telegram_allow_from(user_id: str) -> None:
 
 
 @router.post("/telegram/pair")
+@serialized_config_mutation
 async def telegram_pair(req: TelegramPairRequest):
     """
     Verify a Telegram pairing code.

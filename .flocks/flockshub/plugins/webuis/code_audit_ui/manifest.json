@@ -1,0 +1,61 @@
+{
+  "schemaVersion": "hub.plugin.v1",
+  "id": "code_audit_ui",
+  "type": "webui",
+  "name": "Code Audit Workspace WebUI",
+  "nameCn": "代码审计工作区页面",
+  "description": "Code audit workspace pages for audit overview and findings.",
+  "descriptionCn": "代码审计工作区页面，包含审计总览和缺陷清单。",
+  "version": "1.0.0",
+  "author": "Flocks Team",
+  "license": "MIT",
+  "homepage": "",
+  "category": "workflow-automation",
+  "tags": [
+    "integration"
+  ],
+  "useCases": [
+    "security-reporting"
+  ],
+  "domains": [
+    "security-ops"
+  ],
+  "capabilities": [
+    "workflow"
+  ],
+  "trust": "official",
+  "edition": "pro",
+  "source": {
+    "kind": "bundled",
+    "path": "plugins/webuis/code_audit_ui"
+  },
+  "compatibility": {
+    "flocks": ">=0.8.0",
+    "os": [
+      "darwin",
+      "linux",
+      "windows"
+    ]
+  },
+  "dependencies": {
+    "skills": [],
+    "tools": [],
+    "python": [],
+    "external": []
+  },
+  "permissions": {
+    "tools": [],
+    "network": false,
+    "shell": false,
+    "filesystem": "read"
+  },
+  "risk": {
+    "level": "low",
+    "reasons": []
+  },
+  "entrypoints": [
+    "workspace.json"
+  ],
+  "components": [],
+  "checksums": {}
+}

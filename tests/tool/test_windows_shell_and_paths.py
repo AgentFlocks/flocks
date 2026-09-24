@@ -303,15 +303,25 @@ async def test_lsp_tool_resolves_relative_path_from_instance(tmp_path, monkeypat
 
     seen = {}
 
-    class _FakeLSP:
-        @staticmethod
-        async def has_clients(filepath):
-            seen["filepath"] = filepath
-            return False
+    async def _fake_init():
+        return None
+
+    async def _fake_has_clients(filepath):
+        seen["filepath"] = filepath
+        return False
 
     monkeypatch.setattr(path_utils_module.Instance, "get_directory", lambda: str(tmp_path))
     monkeypatch.setattr(path_utils_module.Instance, "get_worktree", lambda: str(tmp_path))
-    monkeypatch.setitem(sys.modules, "flocks.lsp", SimpleNamespace(LSP=_FakeLSP))
+    # ``flocks.lsp`` exposes module-level coroutines (init/has_clients/hover/...),
+    # not an ``LSP`` class; the tool does ``from flocks import lsp``, which reads
+    # the ``flocks`` package attribute once the real submodule was imported by an
+    # earlier test, so patch both the module table and the package attribute.
+    import flocks as flocks_pkg
+    import flocks.lsp  # noqa: F401  (binds the package attribute so setattr can replace it)
+
+    fake_lsp = SimpleNamespace(init=_fake_init, has_clients=_fake_has_clients)
+    monkeypatch.setitem(sys.modules, "flocks.lsp", fake_lsp)
+    monkeypatch.setattr(flocks_pkg, "lsp", fake_lsp)
 
     result = await lsp_module.lsp_tool(
         ctx=ctx,

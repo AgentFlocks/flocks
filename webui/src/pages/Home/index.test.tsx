@@ -4,16 +4,20 @@ import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import Home from './index';
 
-const { createMock, navigateMock, toastErrorMock, useAuthMock, useStatsMock } = vi.hoisted(() => ({
-  createMock: vi.fn(),
-  navigateMock: vi.fn(),
-  toastErrorMock: vi.fn(),
-  useAuthMock: vi.fn(),
-  useStatsMock: vi.fn(),
-}));
+const { createMock, navigateMock, toastErrorMock, useAuthMock, useStatsMock } =
+  vi.hoisted(() => ({
+    createMock: vi.fn(),
+    navigateMock: vi.fn(),
+    toastErrorMock: vi.fn(),
+    useAuthMock: vi.fn(),
+    useStatsMock: vi.fn(),
+  }));
 
 vi.mock('react-router-dom', async () => {
-  const actual = await vi.importActual<typeof import('react-router-dom')>('react-router-dom');
+  const actual =
+    await vi.importActual<typeof import('react-router-dom')>(
+      'react-router-dom',
+    );
   return {
     ...actual,
     useNavigate: () => navigateMock,
@@ -75,7 +79,9 @@ describe('Home create WebUI contract page entry', () => {
       </MemoryRouter>,
     );
 
-    await user.click(screen.getByRole('button', { name: 'createWebUIContractPage' }));
+    await user.click(
+      screen.getByRole('button', { name: 'createWebUIContractPage' }),
+    );
 
     await waitFor(() => {
       expect(createMock).toHaveBeenCalledWith({
@@ -105,8 +111,36 @@ describe('Home create WebUI contract page entry', () => {
       </MemoryRouter>,
     );
 
-    expect(screen.queryByRole('button', { name: 'createWebUIContractPage' })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole('button', { name: 'createWebUIContractPage' }),
+    ).not.toBeInTheDocument();
     expect(createMock).not.toHaveBeenCalled();
+  });
+
+  it.each(['admin', 'member'])('opens onboarding without creating a contract-page session for %s', async (role) => {
+    useAuthMock.mockReturnValue({
+      user: {
+        id: `user-${role}`,
+        username: role,
+        role,
+        status: 'active',
+        must_reset_password: false,
+      },
+    });
+    const user = userEvent.setup();
+    const onOpenOnboarding = vi.fn();
+    window.addEventListener('flocks:open-onboarding', onOpenOnboarding);
+    try {
+      render(<MemoryRouter><Home /></MemoryRouter>);
+
+      await user.click(screen.getByRole('button', { name: 'getStarted' }));
+
+      expect(onOpenOnboarding).toHaveBeenCalledTimes(1);
+      expect(createMock).not.toHaveBeenCalled();
+      expect(navigateMock).not.toHaveBeenCalled();
+    } finally {
+      window.removeEventListener('flocks:open-onboarding', onOpenOnboarding);
+    }
   });
 
   it('shows the concrete stats load failure instead of a backend-not-running hint', () => {
@@ -122,7 +156,81 @@ describe('Home create WebUI contract page entry', () => {
       </MemoryRouter>,
     );
 
-    expect(screen.getByText('stats.loadErrorHint.authExpired')).toBeInTheDocument();
+    expect(
+      screen.getByText('stats.loadErrorHint.authExpired'),
+    ).toBeInTheDocument();
     expect(screen.queryByText(/backend is running/i)).not.toBeInTheDocument();
+  });
+
+  it('lets the repository dropdown open past the hero card edge', async () => {
+    const user = userEvent.setup();
+    render(
+      <MemoryRouter>
+        <Home />
+      </MemoryRouter>,
+    );
+
+    await user.click(screen.getByRole('button', { name: 'openSource' }));
+
+    const menu = screen.getByRole('link', { name: 'GitHub' }).parentElement as HTMLElement;
+    expect(screen.getByRole('link', { name: /Gitee/ })).toBeInTheDocument();
+    expect(menu).toHaveClass('z-20');
+    // On phone widths the hero buttons wrap and the menu extends below the
+    // card, so no ancestor between the menu and the page may clip overflow.
+    for (let node = menu.parentElement; node && node !== document.body; node = node.parentElement) {
+      expect(node.className).not.toMatch(/(^|\s)overflow-hidden(\s|$)/);
+    }
+  });
+
+  it('links dashboard stat cards to their matching pages', () => {
+    useStatsMock.mockReturnValue({
+      stats: {
+        agents: { total: 11 },
+        workflows: { total: 7 },
+        skills: { total: 14 },
+        tools: { total: 202 },
+        tasks: { week: 3, scheduledActive: 2 },
+        models: { total: 39 },
+        system: { status: 'healthy', message: 'healthy' },
+      },
+      loading: false,
+      error: null,
+    });
+
+    render(
+      <MemoryRouter>
+        <Home />
+      </MemoryRouter>,
+    );
+
+    expect(
+      screen.getByRole('link', { name: 'stats.agentCount' }),
+    ).toHaveAttribute('href', '/agents');
+    expect(screen.getByRole('link', { name: 'stats.agentCount' })).toHaveClass('ui-card-interactive');
+    expect(
+      screen.getByRole('link', { name: 'stats.workflowCount' }),
+    ).toHaveAttribute('href', '/workflows');
+    expect(screen.getByRole('link', { name: 'stats.workflowCount' })).toHaveClass('ui-card-interactive');
+    expect(
+      screen.getByRole('link', { name: 'stats.skillCount' }),
+    ).toHaveAttribute('href', '/skills');
+    expect(screen.getByRole('link', { name: 'stats.skillCount' })).toHaveClass('ui-card-interactive');
+    expect(
+      screen.getByRole('link', { name: 'stats.toolCount' }),
+    ).toHaveAttribute('href', '/tools');
+    expect(screen.getByRole('link', { name: 'stats.toolCount' })).toHaveClass('ui-card-interactive');
+    expect(
+      screen.getByRole('link', { name: 'stats.weeklyTasks' }),
+    ).toHaveAttribute('href', '/tasks');
+    expect(screen.getByRole('link', { name: 'stats.weeklyTasks' })).toHaveClass('ui-card-interactive');
+    expect(
+      screen.getByRole('link', { name: 'stats.activeScheduled' }),
+    ).toHaveAttribute('href', '/tasks');
+    expect(screen.getByRole('link', { name: 'stats.activeScheduled' })).toHaveClass('ui-card-interactive');
+    expect(
+      screen.getByRole('link', { name: 'stats.modelCount' }),
+    ).toHaveAttribute('href', '/models');
+    expect(screen.getByRole('link', { name: 'stats.modelCount' })).toHaveClass('ui-card-interactive');
+    expect(screen.getByText('stats.systemStatus').closest('a')).toBeNull();
   });
 });

@@ -30,6 +30,10 @@ from flocks.cli.service_process import BackendProcessAdapter, ProcessAdapter
 SUPERVISOR_CHECK_INTERVAL_SECONDS = 30.0
 SUPERVISOR_HEALTH_FAILURE_THRESHOLD = 10
 SUPERVISOR_BACKOFF_SECONDS = (1.0, 2.0, 5.0, 10.0, 30.0)
+SUPERVISOR_PID_FILENAME = "service-daemon.pid"
+# Status reads must never hang on a busy daemon (backend start/stop can hold the
+# lock for the whole readiness probe); fall back to a lock-free snapshot instead.
+STATUS_LOCK_TIMEOUT_SECONDS = 0.25
 _CLIENT_DISCONNECT_ERRORS = (BrokenPipeError, ConnectionResetError, ConnectionAbortedError)
 
 
@@ -47,6 +51,7 @@ class ManagedService:
     restart_count: int = 0
     last_restart_at: float | None = None
     health_failure_count: int = 0
+    start_failure_count: int = 0
     next_restart_at: float = 0.0
     built_once: bool = False
 
@@ -55,14 +60,31 @@ class ManagedService:
         return self.process.pid if self.process is not None else None
 
 
+def _stdout_is_utf8() -> bool:
+    encoding = (getattr(sys.stdout, "encoding", None) or "").lower().replace("-", "").replace("_", "")
+    return encoding == "utf8"
+
+
 def _daemon_log(event: str, details: dict[str, object] | None = None) -> None:
-    """Write a structured daemon log line to stdout."""
+    """Write a structured daemon log line to stdout.
+
+    Error texts are localized; keep them readable in daemon.log / ``flocks logs``
+    whenever stdout can carry UTF-8 and only fall back to ``\\uXXXX`` escapes on
+    consoles that cannot (legacy Windows code pages).
+    """
     timestamp = datetime.datetime.now().isoformat(timespec="seconds")
     suffix = ""
     if details:
-        suffix = " " + json.dumps(details, ensure_ascii=True, sort_keys=True)
+        suffix = " " + json.dumps(details, ensure_ascii=not _stdout_is_utf8(), sort_keys=True)
     sys.stdout.write(f"[{timestamp}] daemon.{event}{suffix}\n")
     sys.stdout.flush()
+
+
+def _coerce_line_count(value: object, default: int = 50) -> int:
+    """Parse the ``lines`` query value; ``0`` is a valid request for no history (matches ``flocks logs -n 0``)."""
+    if isinstance(value, str) and value.isdigit():
+        return int(value)
+    return default
 
 
 def _health_status_from_service_state(state: str) -> str:
@@ -94,6 +116,11 @@ if hasattr(socket, "AF_UNIX"):
 
 else:  # pragma: no cover - exercised by importing on Windows
     _UnixControlServer = None
+
+
+def supervisor_pid_path(paths) -> Path:
+    """Return the pid file that identifies the daemon owning a runtime root."""
+    return paths.run_dir / SUPERVISOR_PID_FILENAME
 
 
 class SupervisorDaemon:
@@ -139,6 +166,7 @@ class SupervisorDaemon:
         """Run the supervisor until the control API asks it to stop."""
         self._install_signal_handlers()
         self._cleanup_legacy_runtime()
+        self._write_pid_file()
         self._start_control_server()
         try:
             self.restart_all(reason="startup")
@@ -148,7 +176,14 @@ class SupervisorDaemon:
             self.shutdown_children()
             self._stop_control_server()
             stop_all_browser_daemons()
+            supervisor_pid_path(self.paths).unlink(missing_ok=True)
             _daemon_log("stopped")
+
+    def _write_pid_file(self) -> None:
+        """Record this daemon's pid so CLI cleanup only targets the daemon of this runtime root."""
+        pid_path = supervisor_pid_path(self.paths)
+        pid_path.parent.mkdir(parents=True, exist_ok=True)
+        pid_path.write_text(f"{os.getpid()}\n", encoding="utf-8")
 
     def _install_signal_handlers(self) -> None:
         if threading.current_thread() is not threading.main_thread():
@@ -188,6 +223,8 @@ class SupervisorDaemon:
             socket_path.unlink(missing_ok=True)
             assert _UnixControlServer is not None
             server = _UnixControlServer(str(socket_path), handler)
+            # Only the owning user may talk to the control API (stop/restart), regardless of umask.
+            os.chmod(socket_path, 0o600)
         self._server = server
         self._server_thread = threading.Thread(target=server.serve_forever, name="flocks-supervisor-control", daemon=True)
         self._server_thread.start()
@@ -300,7 +337,8 @@ class SupervisorDaemon:
             from flocks import __version__
         except Exception:  # pragma: no cover - defensive
             __version__ = "unknown"
-        with self._lock:
+        acquired = self._lock.acquire(timeout=STATUS_LOCK_TIMEOUT_SECONDS)
+        try:
             return {
                 "daemon": {
                     "pid": os.getpid(),
@@ -313,12 +351,15 @@ class SupervisorDaemon:
                 "webui": _service_payload(self.webui),
                 "config": service_config_payload(self.config),
             }
+        finally:
+            if acquired:
+                self._lock.release()
 
     def handle_logs_request(self, handler: BaseHTTPRequestHandler, query: dict[str, list[str]]) -> None:
-        from flocks.cli.service_manager import FOLLOW_POLL_INTERVAL, _coerce_positive_int, tail_lines
+        from flocks.cli.service_manager import FOLLOW_POLL_INTERVAL, tail_lines
 
         service_name = (query.get("service") or ["backend"])[0]
-        lines = _coerce_positive_int((query.get("lines") or ["50"])[0]) or 50
+        lines = _coerce_line_count((query.get("lines") or ["50"])[0])
         follow = (query.get("follow") or ["false"])[0].lower() == "true"
         selections = self._log_paths_for_service(service_name)
         if not selections:
@@ -464,13 +505,17 @@ class SupervisorDaemon:
         self.backend.state = "healthy"
         self.backend.last_error = None
         self.backend.health_failure_count = 0
+        self.backend.start_failure_count = 0
         self._sync_static_webui_state()
 
     def _mark_start_failed(self, service: ManagedService, error: Exception) -> None:
         service.process = None
         service.state = "degraded"
         service.last_error = str(error)
-        service.next_restart_at = self._next_restart_time(service.restart_count)
+        # Escalate the retry delay with every consecutive failed start attempt
+        # (1/2/5/10/30s); a successful start resets the counter.
+        service.start_failure_count += 1
+        service.next_restart_at = self._next_restart_time(service.start_failure_count)
         _daemon_log(
             "service_start_failed",
             {"service": service.name, "error": str(error), "retry_at": service.next_restart_at},
@@ -481,10 +526,14 @@ class SupervisorDaemon:
         return time.monotonic() + SUPERVISOR_BACKOFF_SECONDS[index]
 
     def _probe_backend_locked(self) -> None:
-        result = self.backend_adapter.probe(self.backend.process, self.backend.host, self.backend.port)
         if self.backend.process is None:
-            self.backend.state = "stopped"
+            # A start that failed (or a restart waiting for its backoff slot) keeps
+            # its diagnostic state and last_error; only an explicit stop reads as
+            # "stopped".
+            if self.backend.state not in {"degraded", "restarting", "starting"}:
+                self.backend.state = "stopped"
             return
+        result = self.backend_adapter.probe(self.backend.process, self.backend.host, self.backend.port)
         if result.restart:
             self._restart_service(self.backend, reason=result.reason or "backend probe failed", immediate=True)
             return

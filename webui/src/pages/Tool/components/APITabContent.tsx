@@ -1,7 +1,16 @@
 import { useState, useMemo, useCallback, useEffect } from 'react';
 import {
-  Cloud, Wrench, Settings, X, Download, ExternalLink, Star, Power, PowerOff, Trash2,
-} from 'lucide-react';
+  IconCloud,
+  IconTool,
+  IconSettings,
+  IconX,
+  IconDownload,
+  IconExternalLink,
+  IconStar,
+  IconPower,
+  IconPlugOff,
+  IconTrash,
+} from '@tabler/icons-react';
 import { useTranslation } from 'react-i18next';
 import { mcpAPI } from '@/api/mcp';
 import { providerAPI } from '@/api/provider';
@@ -11,7 +20,14 @@ import EmptyState from '@/components/common/EmptyState';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
 import { getCatalogDescription } from '@/utils/mcpCatalog';
 import { APIServiceDetailPanel } from './ServiceDetailPanel';
-import { SERVICE_TAB_GRID_COLS } from './gridLayout';
+import {
+  SERVICE_TAB_ACTIONS_CELL,
+  SERVICE_TAB_BADGE_CELL,
+  SERVICE_TAB_GRID_COLS,
+  SERVICE_TAB_NAME_CELL,
+  SERVICE_TAB_ROW_CLASS,
+  SERVICE_TAB_STATS_CELL,
+} from './gridLayout';
 
 const DETAIL_DRAWER_WIDTH = 560;
 const LANG_COLORS: Record<string, string> = {
@@ -334,9 +350,9 @@ export default function APITabContent({
           <LoadingSpinner delayMs={180} />
         </div>
       ) : services.length === 0 && filteredCatalog.length === 0 && !catalogLoading ? (
-        <EmptyState icon={<Cloud className="w-16 h-16" />} title={t('api.noTools')} description={t('api.noToolsDesc')} />
+        <EmptyState icon={<IconCloud aria-hidden="true" className="w-16 h-16" />} title={t('api.noTools')} description={t('api.noToolsDesc')} />
       ) : (
-        <div className="bg-white border border-gray-200 rounded-lg overflow-hidden divide-y divide-gray-100">
+        <div className="bg-white border border-gray-200 rounded-lg overflow-x-auto divide-y divide-gray-100">
           {services.map((service) => {
             const isSelected = selectedServiceId === service.id;
             const rowDescription = getServiceDescription(service) || `${service.name} API service`;
@@ -344,12 +360,12 @@ export default function APITabContent({
             return (
               <div
                 key={service.id}
-                className={`grid items-center gap-3 px-4 py-3 transition-colors ${isSelected ? 'bg-purple-50' : 'hover:bg-gray-50'}`}
+                className={`${SERVICE_TAB_ROW_CLASS} transition-colors ${isSelected ? 'bg-purple-50' : 'hover:bg-gray-50'}`}
                 style={{ gridTemplateColumns: SERVICE_TAB_GRID_COLS }}
               >
                 {/* Icon */}
                 <div className={`w-8 h-8 flex items-center justify-center rounded-lg ${service.enabled ? 'bg-purple-50' : 'bg-gray-50'}`}>
-                  <Cloud className={`w-4 h-4 ${service.enabled ? 'text-purple-600' : 'text-gray-400'}`} />
+                  <IconCloud aria-hidden="true" className={`w-4 h-4 ${service.enabled ? 'text-purple-600' : 'text-gray-400'}`} />
                 </div>
 
                 {/* Name + description.
@@ -360,7 +376,7 @@ export default function APITabContent({
                 <button
                   type="button"
                   onClick={() => setSelectedServiceId(isSelected ? null : service.id)}
-                  className="min-w-0 text-left group/name focus:outline-none"
+                  className={`${SERVICE_TAB_NAME_CELL} text-left group/name focus:outline-none`}
                 >
                   <div className="flex items-center gap-1.5">
                     <span className="text-sm font-semibold text-gray-900 truncate transition-colors group-hover/name:text-purple-700 group-focus-visible/name:underline">{service.name}</span>
@@ -374,32 +390,32 @@ export default function APITabContent({
                 </button>
 
                 {/* Type column */}
-                <div className="text-center">
+                <div className={SERVICE_TAB_BADGE_CELL}>
                   <span className="px-1.5 py-0.5 bg-purple-100 text-purple-700 text-[10px] font-medium rounded">API</span>
                 </div>
 
                 {/* Status column */}
-                <div className="text-center">
+                <div className={SERVICE_TAB_BADGE_CELL}>
                   <span className={`px-1.5 py-0.5 text-[10px] font-medium rounded ${service.enabled ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-500'}`}>
                     {service.enabled ? t('enabledBadge.enabled') : t('enabledBadge.disabled')}
                   </span>
                 </div>
 
                 {/* Stats column */}
-                <div className="flex items-center justify-end gap-3 text-xs text-gray-400">
-                  <span className="flex items-center gap-1"><Wrench className="w-3 h-3" />{service.tool_count}</span>
+                <div className={`${SERVICE_TAB_STATS_CELL} gap-3 text-xs text-gray-400`}>
+                  <span className="flex items-center gap-1"><IconTool aria-hidden="true" className="w-3 h-3" />{service.tool_count}</span>
                   {service.latency_ms != null && <span>{service.latency_ms}ms</span>}
                 </div>
 
                 {/* Actions column */}
-                <div className="flex items-center justify-end gap-1.5">
+                <div className={`${SERVICE_TAB_ACTIONS_CELL} gap-1.5`}>
                   {service.enabled ? (
                     <>
                       <button
                         onClick={() => setSelectedServiceId(isSelected ? null : service.id)}
                         className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border text-xs font-medium transition-colors ${isSelected ? 'border-purple-300 text-purple-700 bg-purple-50' : 'border-gray-200 text-gray-600 hover:bg-gray-100'}`}
                       >
-                        <Settings className="w-3 h-3" />{t('mcp.manage')}
+                        <IconSettings aria-hidden="true" className="w-3 h-3" />{t('mcp.manage')}
                       </button>
                       <button
                         onClick={(e) => handleToggleEnabled(service.id, false, e)}
@@ -407,7 +423,7 @@ export default function APITabContent({
                         className="p-1.5 rounded-lg border border-red-200 text-red-400 hover:bg-red-50 transition-colors disabled:opacity-50"
                         title={t('detail.disableServer')}
                       >
-                        <PowerOff className="w-3.5 h-3.5" />
+                        <IconPlugOff aria-hidden="true" className="w-3.5 h-3.5" />
                       </button>
                     </>
                   ) : (
@@ -417,14 +433,14 @@ export default function APITabContent({
                         disabled={installing === service.id}
                         className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-green-600 text-white text-xs font-medium hover:bg-green-700 disabled:opacity-50 transition-colors"
                       >
-                        <Power className="w-3 h-3" />{installing === service.id ? t('mcp.configuring') : t('detail.enableServer')}
+                        <IconPower aria-hidden="true" className="w-3 h-3" />{installing === service.id ? t('mcp.configuring') : t('detail.enableServer')}
                       </button>
                       <button
                         onClick={() => setSelectedServiceId(isSelected ? null : service.id)}
                         className="p-1.5 rounded-lg border border-gray-200 text-gray-400 hover:bg-gray-100 transition-colors"
                         title={t('mcp.manage')}
                       >
-                        <Settings className="w-3.5 h-3.5" />
+                        <IconSettings aria-hidden="true" className="w-3.5 h-3.5" />
                       </button>
                     </>
                   )}
@@ -434,7 +450,7 @@ export default function APITabContent({
                     className={`p-1.5 rounded-lg border transition-colors ${service.builtin ? 'border-gray-100 text-gray-300 cursor-not-allowed' : 'border-red-100 text-red-400 hover:bg-red-50'}`}
                     title={service.builtin ? t('api.builtinCannotDelete') : t('button.delete')}
                   >
-                    <Trash2 className="w-3.5 h-3.5" />
+                    <IconTrash aria-hidden="true" className="w-3.5 h-3.5" />
                   </button>
                 </div>
               </div>
@@ -444,16 +460,16 @@ export default function APITabContent({
           {filteredCatalog.map((entry) => (
             <div
               key={`catalog-${entry.id}`}
-              className="grid items-center gap-3 px-4 py-3 cursor-default hover:bg-gray-50 transition-colors"
+              className={`${SERVICE_TAB_ROW_CLASS} cursor-default hover:bg-gray-50 transition-colors`}
               style={{ gridTemplateColumns: SERVICE_TAB_GRID_COLS }}
             >
               {/* Icon */}
               <div className="w-8 h-8 flex items-center justify-center rounded-lg bg-gray-50">
-                <Cloud className="w-4 h-4 text-gray-400" />
+                <IconCloud aria-hidden="true" className="w-4 h-4 text-gray-400" />
               </div>
 
               {/* Name + description */}
-              <div className="min-w-0">
+              <div className={SERVICE_TAB_NAME_CELL}>
                 <div className="flex items-center gap-1.5">
                   <span className="text-sm font-semibold text-gray-900 truncate">{entry.name}</span>
                   {PRIORITY_IDS.has(entry.id) && (
@@ -464,23 +480,23 @@ export default function APITabContent({
               </div>
 
               {/* Type column */}
-              <div className="text-center">
+              <div className={SERVICE_TAB_BADGE_CELL}>
                 <span className="px-1.5 py-0.5 bg-purple-100 text-purple-700 text-[10px] font-medium rounded">API</span>
               </div>
 
               {/* Status column */}
-              <div className="text-center">
+              <div className={SERVICE_TAB_BADGE_CELL}>
                 <span className="px-1.5 py-0.5 bg-gray-100 text-gray-500 text-[10px] font-medium rounded">{t('statusBadge.inactive')}</span>
               </div>
 
               {/* Stats column */}
-              <div className="flex items-center justify-end gap-2 text-xs text-gray-400">
+              <div className={`${SERVICE_TAB_STATS_CELL} gap-2 text-xs text-gray-400`}>
                 <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${LANG_COLORS[entry.language] || 'bg-gray-100 text-gray-600'}`}>{entry.language}</span>
-                <span className="flex items-center gap-1"><Star className="w-3 h-3" />{entry.stars}</span>
+                <span className="flex items-center gap-1"><IconStar aria-hidden="true" className="w-3 h-3" />{entry.stars}</span>
               </div>
 
               {/* Actions column */}
-              <div className="flex items-center justify-end gap-1.5">
+              <div className={`${SERVICE_TAB_ACTIONS_CELL} gap-1.5`}>
                 <button
                   onClick={() => {
                     if (entry.requires_auth && !isConfigured(entry.id)) {
@@ -492,7 +508,7 @@ export default function APITabContent({
                   disabled={installing === entry.id}
                   className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-green-600 text-white text-xs font-medium hover:bg-green-700 disabled:opacity-50 transition-colors"
                 >
-                  <Download className="w-3 h-3" />{installing === entry.id ? t('api.configuring') : t('button.install')}
+                  <IconDownload aria-hidden="true" className="w-3 h-3" />{installing === entry.id ? t('api.configuring') : t('button.install')}
                 </button>
                 {entry.github ? (
                   <a
@@ -502,7 +518,7 @@ export default function APITabContent({
                     className="p-1.5 rounded-lg border border-gray-200 text-gray-400 hover:bg-gray-100 transition-colors"
                     title="GitHub"
                   >
-                    <ExternalLink className="w-3.5 h-3.5" />
+                    <IconExternalLink aria-hidden="true" className="w-3.5 h-3.5" />
                   </a>
                 ) : (
                   <span className="w-7 h-7" aria-hidden="true" />
@@ -564,14 +580,14 @@ export default function APITabContent({
               <div className="flex-shrink-0 border-b border-gray-200">
                 <div className="flex items-center gap-3 px-6 py-4">
                   <div className="w-10 h-10 rounded-lg flex items-center justify-center flex-shrink-0 bg-purple-50">
-                    <Cloud className="w-5 h-5 text-purple-600" />
+                    <IconCloud aria-hidden="true" className="w-5 h-5 text-purple-600" />
                   </div>
                   <div className="flex-1 min-w-0">
                     <h2 className="text-lg font-semibold text-gray-900">{displayName}</h2>
                     <p className="text-sm text-gray-500">{t('api.serviceConfig')}</p>
                   </div>
                   <button onClick={() => setSelectedServiceId(null)} className="text-gray-400 hover:text-gray-600 p-2 rounded-lg hover:bg-gray-100 flex-shrink-0">
-                    <X className="w-5 h-5" />
+                    <IconX aria-hidden="true" className="w-5 h-5" />
                   </button>
                 </div>
               </div>

@@ -15,18 +15,25 @@
 export function extractErrorMessage(err: unknown, fallback = '操作失败'): string {
   if (!err) return fallback;
   const e = err as any;
+  const asMessage = (value: unknown): string | undefined => (
+    typeof value === 'string' && value.trim() ? value : undefined
+  );
   const detail = e?.response?.data?.detail;
   if (Array.isArray(detail)) {
-    const msgs = detail
-      .map((d: any) => (typeof d === 'string' ? d : d?.msg || JSON.stringify(d)))
-      .filter(Boolean);
+    const msgs = detail.map((d: any) => {
+      const message = asMessage(d) || asMessage(d?.msg);
+      if (message) return message;
+      try {
+        return d == null ? undefined : JSON.stringify(d);
+      } catch {
+        return undefined;
+      }
+    }).filter(Boolean);
     if (msgs.length > 0) return msgs.join('; ');
-  } else if (typeof detail === 'string' && detail) {
-    return detail;
   }
-  return (
-    e?.response?.data?.message ||
-    e?.message ||
-    fallback
-  );
+  return asMessage(detail)
+    || asMessage(e?.response?.data?.message)
+    || asMessage(e?.message)
+    || asMessage(err)
+    || fallback;
 }

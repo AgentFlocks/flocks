@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ArchiveRestore, Loader2, RefreshCw, Search, Trash2 } from 'lucide-react';
+import { IconRestore, IconLoader2, IconRefresh, IconSearch, IconTrash } from '@tabler/icons-react';
 import { useTranslation } from 'react-i18next';
 import { sessionApi } from '@/api/session';
 import { useToast } from '@/components/common/Toast';
@@ -160,7 +160,7 @@ export default function ArchivedDataPanel() {
 
       <div className="mt-6 flex items-center gap-3">
         <label className="relative block w-full sm:max-w-sm">
-          <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-zinc-400" />
+          <IconSearch aria-hidden="true" className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-zinc-400" />
           <input
             value={searchValue}
             onChange={(event) => setSearchValue(event.target.value)}
@@ -177,7 +177,7 @@ export default function ArchivedDataPanel() {
           title={t('archivedData.refresh')}
           className="ml-auto inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-lg text-zinc-500 transition-colors hover:bg-zinc-100 hover:text-zinc-900 disabled:opacity-50 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
         >
-          <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
+          <IconRefresh aria-hidden="true" className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
         </button>
       </div>
 
@@ -193,14 +193,14 @@ export default function ArchivedDataPanel() {
             title={t('archivedData.restoreSelected')}
             className="inline-flex h-9 w-9 items-center justify-center rounded-md text-zinc-600 transition-colors hover:bg-white hover:text-zinc-950 dark:text-zinc-300 dark:hover:bg-zinc-800 dark:hover:text-zinc-50"
           >
-            <ArchiveRestore className="h-4 w-4" />
+            <IconRestore aria-hidden="true" className="h-4 w-4" />
           </button>
           <button
             type="button"
             onClick={() => setPendingDeleteIds(Array.from(selectedIds))}
             className="inline-flex h-9 items-center gap-2 rounded-md bg-red-600 px-3 text-sm font-semibold text-white hover:bg-red-700"
           >
-            <Trash2 className="h-4 w-4" />
+            <IconTrash aria-hidden="true" className="h-4 w-4" />
             {t('archivedData.deleteSelected')}
           </button>
         </div>
@@ -209,7 +209,7 @@ export default function ArchivedDataPanel() {
       <div className="mt-4 overflow-hidden rounded-xl border border-zinc-200 dark:border-zinc-800">
         {loading ? (
           <div className="flex min-h-48 items-center justify-center gap-2 text-sm text-zinc-500">
-            <Loader2 className="h-5 w-5 animate-spin" />
+            <IconLoader2 aria-hidden="true" className="h-5 w-5 animate-spin" />
             {t('archivedData.loading')}
           </div>
         ) : error ? (
@@ -221,7 +221,7 @@ export default function ArchivedDataPanel() {
           </div>
         ) : sessions.length === 0 ? (
           <div className="flex min-h-48 flex-col items-center justify-center p-6 text-center text-zinc-500">
-            <ArchiveRestore className="mb-3 h-8 w-8 text-zinc-300 dark:text-zinc-700" />
+            <IconRestore aria-hidden="true" className="mb-3 h-8 w-8 text-zinc-300 dark:text-zinc-700" />
             <p className="text-sm font-semibold text-zinc-700 dark:text-zinc-300">{t('archivedData.empty')}</p>
             <p className="mt-1 text-xs">{t('archivedData.emptyDescription')}</p>
           </div>
@@ -309,7 +309,7 @@ export default function ArchivedDataPanel() {
             disabled={loadingMore}
             className="inline-flex h-9 items-center gap-2 rounded-md border border-zinc-200 px-4 text-sm font-semibold hover:bg-zinc-50 disabled:opacity-50 dark:border-zinc-800 dark:hover:bg-zinc-900"
           >
-            {loadingMore && <Loader2 className="h-4 w-4 animate-spin" />}
+            {loadingMore && <IconLoader2 aria-hidden="true" className="h-4 w-4 animate-spin" />}
             {t('archivedData.loadMore')}
           </button>
         </div>
@@ -339,7 +339,7 @@ export default function ArchivedDataPanel() {
                 disabled={deleting}
                 className="inline-flex h-9 items-center gap-2 rounded-md bg-red-600 px-4 text-sm font-semibold text-white hover:bg-red-700 disabled:opacity-50"
               >
-                {deleting && <Loader2 className="h-4 w-4 animate-spin" />}
+                {deleting && <IconLoader2 aria-hidden="true" className="h-4 w-4 animate-spin" />}
                 {t('archivedData.confirmDelete')}
               </button>
             </div>

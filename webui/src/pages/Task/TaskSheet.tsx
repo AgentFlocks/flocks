@@ -9,7 +9,7 @@
 
 import { useState, useEffect, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Calendar, Clock, Sparkles } from 'lucide-react';
+import { IconCalendar, IconClock, IconSparkles } from '@tabler/icons-react';
 import { taskAPI, TaskScheduler, TaskPriority, TaskCreateParams, ExecutionMode } from '@/api/task';
 import { sessionApi } from '@/api/session';
 import client from '@/api/client';
@@ -25,6 +25,7 @@ import { workflowAPI, WorkflowSummary } from '@/api/workflow';
 import { getAgentDisplayDescription } from '@/utils/agentDisplay';
 import { getWorkflowDisplayName } from '@/utils/workflowDisplay';
 import { StatusBadge } from './components';
+import { extractErrorMessage } from '@/utils/error';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -213,7 +214,7 @@ export default function TaskSheet({ task, defaultScheduleKind = 'recurring', onC
       onSaved();
       onClose();
     } catch (err: unknown) {
-      toast.error(t(isEdit ? 'taskSheet.saveFailed' : 'taskSheet.createFailed'), err instanceof Error ? err.message : String(err));
+      toast.error(t(isEdit ? 'taskSheet.saveFailed' : 'taskSheet.createFailed'), extractErrorMessage(err));
     } finally {
       setLoading(false);
     }
@@ -285,7 +286,7 @@ ${fields}
     throw new Error(t('taskSheet.extractTimeout'));
   };
 
-  const icon = isRecurring ? <Calendar className="w-5 h-5" /> : <Clock className="w-5 h-5" />;
+  const icon = isRecurring ? <IconCalendar aria-hidden="true" className="w-5 h-5" /> : <IconClock aria-hidden="true" className="w-5 h-5" />;
 
   return (
     <EntitySheet
@@ -300,7 +301,7 @@ ${fields}
       rexGuidePanelTitle={t(isEdit ? 'taskSheet.edit.guidePanelTitle' : 'taskSheet.create.guidePanelTitle')}
       rexGuidePanelDesc={t(isEdit ? 'taskSheet.edit.guidePanelDesc' : 'taskSheet.create.guidePanelDesc', { name: task?.title ?? formData.title })}
       rexGuideEmptyTitle={t(isEdit ? 'taskSheet.edit.emptyStateTitle' : 'taskSheet.create.emptyStateTitle')}
-      rexGuideIcon={<Calendar className="h-5 w-5" />}
+      rexGuideIcon={<IconCalendar aria-hidden="true" className="h-5 w-5" />}
       {...rexComposerControls}
       submitDisabled={!canSubmit || loading}
       submitLoading={loading}
@@ -435,13 +436,13 @@ function TaskFormContent({
               isOnce || isRunOnce ? 'text-orange-800' : 'text-purple-800'
             }`}
           >
-            <Calendar className="w-4 h-4" /> {t('form.scheduleConfig')}
+            <IconCalendar aria-hidden="true" className="w-4 h-4" /> {t('form.scheduleConfig')}
           </p>
 
           {/* Run-once mode: locked badge (edit) */}
           {isEdit && isRunOnce && (
             <div className="flex items-center gap-2 px-3 py-2 bg-white border border-orange-200 rounded-lg text-sm text-orange-700 font-medium">
-              <Clock className="w-4 h-4" /> {t('form.runOnce')}
+              <IconClock aria-hidden="true" className="w-4 h-4" /> {t('form.runOnce')}
             </div>
           )}
 
@@ -628,7 +629,7 @@ function TaskFormContent({
             }
             className="flex items-center gap-1 text-xs text-sky-600 hover:text-sky-700 transition-colors"
           >
-            <Sparkles className="w-3.5 h-3.5" />
+            <IconSparkles aria-hidden="true" className="w-3.5 h-3.5" />
             {t('form.rexAssist')}
           </button>
         </div>

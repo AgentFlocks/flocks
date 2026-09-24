@@ -1,5 +1,5 @@
 import { useTranslation } from 'react-i18next';
-import { ChevronLeft, ChevronRight } from 'lucide-react';
+import { IconChevronLeft, IconChevronRight } from '@tabler/icons-react';
 
 interface PaginationProps {
   currentPage: number;
@@ -49,7 +49,7 @@ export default function Pagination({
           disabled={currentPage === 1}
           className={`p-2 rounded-md text-sm ${currentPage === 1 ? 'text-gray-300 cursor-not-allowed' : 'text-gray-600 hover:bg-gray-100'}`}
         >
-          <ChevronLeft className="w-4 h-4" />
+          <IconChevronLeft aria-hidden="true" className="w-4 h-4" />
         </button>
         {getPages().map((page, i) =>
           typeof page === 'string' ? (
@@ -71,7 +71,7 @@ export default function Pagination({
           disabled={currentPage === totalPages}
           className={`p-2 rounded-md text-sm ${currentPage === totalPages ? 'text-gray-300 cursor-not-allowed' : 'text-gray-600 hover:bg-gray-100'}`}
         >
-          <ChevronRight className="w-4 h-4" />
+          <IconChevronRight aria-hidden="true" className="w-4 h-4" />
         </button>
       </div>
     </div>

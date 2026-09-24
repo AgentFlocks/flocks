@@ -1,7 +1,7 @@
 """
 Session status tracking
 
-Manages session execution state (idle, busy, retry).
+Manages session execution state (idle, queued, busy, retry).
 Based on Flocks' ported src/session/status.ts
 """
 
@@ -23,6 +23,12 @@ class SessionStatusIdle(BaseModel):
 class SessionStatusBusy(BaseModel):
     """Busy status"""
     type: Literal["busy"] = "busy"
+
+
+class SessionStatusQueued(BaseModel):
+    """Queued status - accepted work is waiting to enter the session loop."""
+
+    type: Literal["queued"] = "queued"
 
 
 class SessionStatusRetry(BaseModel):
@@ -52,6 +58,7 @@ class SessionStatusDreaming(BaseModel):
 # Union of all status types
 SessionStatusInfo = (
     SessionStatusIdle
+    | SessionStatusQueued
     | SessionStatusBusy
     | SessionStatusRetry
     | SessionStatusCompacting
@@ -96,7 +103,44 @@ class SessionStatus:
             Session status (defaults to idle if not found)
         """
         state = cls._get_state()
-        return state.get(session_id, SessionStatusIdle())
+        found = state.get(session_id)
+        if found is not None:
+            return found
+        # A loop runs under its session's project directory while HTTP
+        # callers read from the request context; session IDs are global, so
+        # fall back to every instance's state before reporting idle.
+        for _inst_id, statuses in list(cls._state.items()):
+            if session_id in statuses:
+                return statuses[session_id]
+        return SessionStatusIdle()
+
+    @classmethod
+    def get_for_session(
+        cls,
+        session_id: str,
+        preferred_instance_id: Optional[str] = None,
+    ) -> SessionStatusInfo:
+        """Get a session status without relying on the ambient instance context.
+
+        Session IDs are globally unique, but runtime state remains grouped by
+        instance directory for compatibility. Prefer the session's persisted
+        directory and fall back to the remaining live instance states so a
+        canonicalized or historical directory cannot cause a false idle.
+        """
+        if preferred_instance_id:
+            preferred_state = cls._state.get(preferred_instance_id, {})
+            status = preferred_state.get(session_id)
+            if status is not None:
+                return status
+
+        for instance_id, state in list(cls._state.items()):
+            if instance_id == preferred_instance_id:
+                continue
+            status = state.get(session_id)
+            if status is not None:
+                return status
+
+        return SessionStatusIdle()
     
     @classmethod
     def list(cls) -> Dict[str, SessionStatusInfo]:
@@ -104,10 +148,13 @@ class SessionStatus:
         List all session statuses
         
         Returns:
-            Dictionary mapping session IDs to their status
+            Dictionary mapping session IDs to their status (across instances)
         """
-        state = cls._get_state()
-        return dict(state)
+        merged: Dict[str, SessionStatusInfo] = {}
+        for _inst_id, statuses in list(cls._state.items()):
+            merged.update(statuses)
+        merged.update(cls._get_state())
+        return merged
     
     @classmethod
     def set(cls, session_id: str, status: SessionStatusInfo) -> None:

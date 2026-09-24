@@ -139,92 +139,75 @@ async def lsp_tool(
     )
     
     title = f"{operation} {resolution.display_path}:{line}:{character}"
-    
+
+    # Positions are 1-based in the tool contract; refuse 0 instead of
+    # silently sending -1 to the language server.
+    if line < 1 or character < 1:
+        return ToolResult(
+            success=False,
+            error=f"line and character are 1-based and must be >= 1 (got line={line}, character={character})",
+            title=title,
+        )
+
     # Convert to 0-based indices for LSP
     position = {
         "line": line - 1,
         "character": character - 1
     }
-    
+
     try:
-        # Import LSP module
-        from flocks.lsp import LSP
-        
+        # ``flocks.lsp`` exposes module-level coroutines (init/hover/definition/...),
+        # not an ``LSP`` class; import the package itself.
+        from flocks import lsp as lsp_module
+
+        await lsp_module.init()
+
         # Check if LSP is available for this file
-        has_client = await LSP.has_clients(filepath)
+        has_client = await lsp_module.has_clients(filepath)
         if not has_client:
             return ToolResult(
                 success=False,
-                error="No LSP server available for this file type."
+                error="No LSP server available for this file type.",
+                title=title,
             )
-        
+
         # Touch file to ensure LSP has it open
-        await LSP.touch_file(filepath, sync=True)
-        
+        await lsp_module.touch_file(filepath)
+
         # Execute operation
-        result: List[Any] = []
-        
+        result: Any = []
+
         if operation == "goToDefinition":
-            result = await LSP.definition({
-                "file": filepath,
-                "line": position["line"],
-                "character": position["character"]
-            })
+            result = await lsp_module.definition(filepath, position["line"], position["character"])
         elif operation == "findReferences":
-            result = await LSP.references({
-                "file": filepath,
-                "line": position["line"],
-                "character": position["character"]
-            })
+            result = await lsp_module.references(filepath, position["line"], position["character"])
         elif operation == "hover":
-            result = await LSP.hover({
-                "file": filepath,
-                "line": position["line"],
-                "character": position["character"]
-            })
+            result = await lsp_module.hover(filepath, position["line"], position["character"])
         elif operation == "documentSymbol":
-            uri = f"file://{filepath}"
-            result = await LSP.document_symbol(uri)
+            result = await lsp_module.document_symbol(filepath)
         elif operation == "workspaceSymbol":
-            result = await LSP.workspace_symbol("")
-        elif operation == "goToImplementation":
-            result = await LSP.implementation({
-                "file": filepath,
-                "line": position["line"],
-                "character": position["character"]
-            })
-        elif operation == "prepareCallHierarchy":
-            result = await LSP.prepare_call_hierarchy({
-                "file": filepath,
-                "line": position["line"],
-                "character": position["character"]
-            })
-        elif operation == "incomingCalls":
-            result = await LSP.incoming_calls({
-                "file": filepath,
-                "line": position["line"],
-                "character": position["character"]
-            })
-        elif operation == "outgoingCalls":
-            result = await LSP.outgoing_calls({
-                "file": filepath,
-                "line": position["line"],
-                "character": position["character"]
-            })
-        
+            result = await lsp_module.workspace_symbol("")
+        else:
+            # goToImplementation / call hierarchy are not offered by flocks.lsp yet
+            return ToolResult(
+                success=False,
+                error=f"Operation {operation} is not supported by the LSP subsystem yet.",
+                title=title,
+            )
+
         # Format output
         if not result:
             output = f"No results found for {operation}"
         else:
             output = json.dumps(result, indent=2)
-        
+
         return ToolResult(
             success=True,
             output=output,
             title=title,
             metadata={"result": result}
         )
-        
+
     except ImportError:
         # LSP module not available, return placeholder
         return ToolResult(

@@ -107,6 +107,35 @@ async def test_question_tool_preserves_custom_flag(
 
 
 @pytest.mark.asyncio
+async def test_question_tool_respects_permission_denial_before_waiting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    handler = AsyncMock(return_value=[["yes"]])
+    channel_send = AsyncMock(return_value=None)
+
+    async def deny_question(_request):
+        raise PermissionError("Permission denied: question")
+
+    monkeypatch.setattr(question_module, "_question_handler", handler)
+    monkeypatch.setattr(question_module, "_send_channel_question_if_applicable", channel_send)
+
+    result = await question_module.question_tool(
+        ToolContext(
+            session_id="ses_question_denied",
+            message_id="msg_1",
+            call_id="call_1",
+            permission_callback=deny_question,
+        ),
+        questions=[{"question": "Continue?", "type": "confirm"}],
+    )
+
+    assert result.success is False
+    assert "Permission denied" in (result.error or "")
+    handler.assert_not_awaited()
+    channel_send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_question_tool_sends_plain_text_for_channel_session() -> None:
     binding = SimpleNamespace(
         channel_id="feishu",

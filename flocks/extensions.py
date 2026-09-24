@@ -1,5 +1,5 @@
 """
-Shared extension registration semantics for OSS and Flocks Pro integrations.
+Shared registration semantics for every Flocks extension point.
 """
 
 from __future__ import annotations
@@ -134,6 +134,100 @@ def register_lifecycle_hook(
     )
 
 
+def register_content_source(
+    source: Any,
+    *,
+    priority: int = 100,
+    exclusive_kinds: Optional[Iterable[str]] = None,
+) -> None:
+    """Register a source for Agent/Skill/Workflow/tool content.
+
+    Lower ``priority`` is consulted first.  Naming a kind in *exclusive_kinds*
+    stops lower-priority sources from serving that kind at all, which is how a
+    deployment keeps local files from shadowing content it manages centrally.
+    """
+
+    from flocks.content import register_source
+
+    register_source(source, priority=priority, exclusive_kinds=exclusive_kinds)
+
+
+def register_response_transform(
+    transform: Any,
+    *,
+    max_pending_chars: Optional[int] = None,
+) -> None:
+    """Register the transform applied to model responses before delivery.
+
+    Installed transforms see the response ahead of the UI, of persistence and
+    of any tool that consumes it, which is what makes them usable for
+    processing that has to be in place before anything downstream reads the
+    text.  Only the processed result reaches the caller.
+    """
+
+    from flocks.transform import register_response_transform as _register
+
+    _register(transform, max_pending_chars=max_pending_chars)
+
+
+def register_route_provider(
+    router: Any,
+    *,
+    name: str,
+    prefix: str = "",
+    tags: Optional[Iterable[str]] = None,
+) -> None:
+    """Register an extension's HTTP routes.
+
+    Order-independent: routers registered before the application finishes
+    building are installed once it has, and later ones are installed on the
+    spot.
+    """
+
+    from flocks.server.route_extensions import register_route_provider as _register
+
+    _register(router, name=name, prefix=prefix, tags=list(tags) if tags else None)
+
+
+def register_readiness_probe(name: str, probe: Callable[..., Any]) -> None:
+    """Register a dependency check the readiness endpoint reports on.
+
+    Registration alone says an extension is wired; it does not say the thing it
+    talks to is reachable.  A probe closes that gap, so an instance whose
+    database or local service is down is taken out of rotation instead of
+    answering "ready" and failing every request it is handed.
+
+    *probe* takes no arguments, may be async, and returns ``(ok, detail)``.
+    """
+
+    from flocks.plugin.readiness import register_readiness_probe as _register
+
+    _register(name, probe)
+
+
+def unregister_readiness_probe(name: str) -> None:
+    from flocks.plugin.readiness import unregister_readiness_probe as _unregister
+
+    _unregister(name)
+
+
+def register_branding_provider(provider: Any) -> None:
+    """Register the source of the product name shown in the interface.
+
+    The default name lives in the open product.  A deployment that ships its
+    own branding registers a provider rather than the core asking who is
+    installed, which is the kind of question that puts a specific product's
+    name into open source.
+
+    *provider* exposes ``display_name() -> str | None``; returning ``None``
+    keeps the default.
+    """
+
+    from flocks.server.branding import register_branding_provider as _register
+
+    _register(provider)
+
+
 def register_event_hook(
     event_key: str,
     handler: Callable[..., Any],
@@ -166,8 +260,14 @@ __all__ = [
     "normalize_timeout",
     "register_audit_sink",
     "register_auth_backend",
+    "register_branding_provider",
+    "register_content_source",
+    "register_readiness_probe",
+    "unregister_readiness_probe",
     "register_http_hook",
     "register_license_checker",
+    "register_response_transform",
+    "register_route_provider",
     "register_lifecycle_hook",
     "register_event_hook",
 ]

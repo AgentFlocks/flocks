@@ -11,6 +11,20 @@ permissions:
 jobs:
   python:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_USER: flocks_test
+          POSTGRES_DB: flocks_test
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U flocks_test -d flocks_test"
+          --health-interval 5s --health-timeout 3s --health-retries 20
+    env:
+      FLOCKS_TEST_PG_DSN: postgresql://flocks_test@127.0.0.1:5432/flocks_test
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -35,7 +49,7 @@ jobs:
         run: uv run python scripts/validate_flockshub.py
 
       - name: Python test
-        run: uv run pytest tests/scripts tests/hub
+        run: uv run pytest tests/scripts tests/hub tests/net tests/db
 
 
   frontend:
@@ -59,6 +73,9 @@ jobs:
 
       - name: Frontend lint
         run: npm run lint
+
+      - name: UI spec check (webui/UI_SPEC.md)
+        run: python3 ../scripts/ui_spec_check.py
 
       - name: Frontend build
         run: npm run build

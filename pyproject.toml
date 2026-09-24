@@ -1,6 +1,6 @@
 [project]
 name = "flocks"
-version = "v2026.8.17"
+version = "v2026.9.14"
 description = "AI-Native SecOps platform with multi-agent collaboration"
 authors = [
     {name = "Flocks Team", email = "team@example.com"}
@@ -24,7 +24,7 @@ dependencies = [
     "python-multipart>=0.0.9",
     "sse-starlette>=1.8.2",
     "starlette>=1.0.1",
-    "websockets>=12.0",
+    "websockets>=14.0",
     "aiohttp>=3.13.3",
     "requests>=2.32.5",
     # Data Validation & Schema
@@ -51,7 +51,7 @@ dependencies = [
     "pygls>=1.3.0",
     "lsprotocol>=2023.0.0",
     # Storage & Database
-    "aiosqlite>=0.19.0",
+    "asyncpg>=0.29.0",
     "sqlalchemy>=2.0.25",
     # Utilities
     "ulid-py>=1.1.0",
@@ -91,6 +91,14 @@ dependencies = [
     # Kafka ingest (workflow input/output)
     "aiokafka>=0.14.0",
     "ddddocr>=1.6.1",
+    "aiohttp-socks>=0.10.1",
+    "pysocks>=1.7.1",
+]
+
+[project.optional-dependencies]
+# Compatibility extra for existing install commands; PostgreSQL is required.
+postgres = [
+    "asyncpg>=0.29.0",
 ]
 
 [dependency-groups]

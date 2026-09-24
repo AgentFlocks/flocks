@@ -58,28 +58,37 @@ _SENSITIVE_VALUE_PATTERNS = (
 )
 _DAILY_SESSION_HEADER_RE = re.compile(r"^## Session (?P<prefix>[A-Za-z0-9_-]+)(?:…|\.\.\.)?")
 
-_SCHEMA_DDL = """
-CREATE TABLE IF NOT EXISTS memory_evolution_checkpoints (
-    pipeline TEXT NOT NULL,
-    scope TEXT NOT NULL,
-    scope_id TEXT NOT NULL,
-    source_type TEXT NOT NULL,
-    source_key TEXT NOT NULL,
-    content_hash TEXT NOT NULL,
-    line_count INTEGER NOT NULL DEFAULT 0,
-    last_message_id TEXT,
-    source_mtime REAL,
-    processed_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    PRIMARY KEY (pipeline, scope, scope_id, source_type, source_key)
-);
-CREATE INDEX IF NOT EXISTS idx_memory_evolution_checkpoint_updated
-ON memory_evolution_checkpoints(pipeline, scope, scope_id, updated_at);
+def _checkpoint_schema(dialect) -> list[str]:
+    """The checkpoint table, typed by the active backend.
 
-DROP INDEX IF EXISTS idx_memory_skill_proposals_status;
-DROP TABLE IF EXISTS memory_skill_proposals;
-DROP TABLE IF EXISTS memory_skill_evolution_state;
-"""
+    ``source_mtime`` holds an epoch float, so it needs the double-precision
+    type rather than SQLite's REAL, which means something narrower elsewhere.
+    """
+    text = dialect.text_type()
+    num = dialect.integer_type()
+    stamp = dialect.double_type()
+    return [
+        f"""
+        CREATE TABLE IF NOT EXISTS memory_evolution_checkpoints (
+            pipeline        {text} NOT NULL,
+            scope           {text} NOT NULL,
+            scope_id        {text} NOT NULL,
+            source_type     {text} NOT NULL,
+            source_key      {text} NOT NULL,
+            content_hash    {text} NOT NULL,
+            line_count      {num} NOT NULL DEFAULT 0,
+            last_message_id {text},
+            source_mtime    {stamp},
+            processed_at    {text} NOT NULL,
+            updated_at      {text} NOT NULL,
+            PRIMARY KEY (pipeline, scope, scope_id, source_type, source_key)
+        )
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS idx_memory_evolution_checkpoint_updated
+            ON memory_evolution_checkpoints(pipeline, scope, scope_id, updated_at)
+        """,
+    ]
 
 
 @dataclass(frozen=True)
@@ -137,7 +146,7 @@ class DreamTarget:
 
 
 class EvolutionCheckpointStore:
-    """SQLite source cursors for incremental Dream processing."""
+    """Source cursors for incremental Dream processing."""
 
     _schema_lock = asyncio.Lock()
 
@@ -145,9 +154,9 @@ class EvolutionCheckpointStore:
     async def ensure_schema(cls) -> None:
         await Storage._ensure_init()
         async with cls._schema_lock:
-            async with Storage.connect() as db:
-                await db.executescript(_SCHEMA_DDL)
-                await db.commit()
+            async with Storage.transaction() as db:
+                for statement in _checkpoint_schema(db.dialect):
+                    await db.execute(statement)
 
     @classmethod
     async def get(
@@ -160,7 +169,7 @@ class EvolutionCheckpointStore:
         scope_id: str = GLOBAL_SCOPE_ID,
     ) -> Optional[dict[str, Any]]:
         await cls.ensure_schema()
-        async with Storage.connect() as db:
+        async with Storage.transaction() as db:
             cursor = await db.execute(
                 """
                 SELECT content_hash, line_count, last_message_id, source_mtime,
@@ -222,54 +231,56 @@ class EvolutionCheckpointStore:
             return
         await cls.ensure_schema()
         now = _now_iso()
-        async with Storage.connect() as db:
-            await db.execute("BEGIN IMMEDIATE")
-            try:
-                for source in sources:
-                    await cls._upsert_in_transaction(db, pipeline, source, now)
-                await db.commit()
-            except BaseException:
-                await db.rollback()
-                raise
+        # transaction() commits on success and rolls back on failure, which is
+        # what the hand-rolled BEGIN IMMEDIATE here used to provide. The rows
+        # go in one statement rather than one per source: they differ only in
+        # their values, and a batch can carry every changed memory file.
+        async with Storage.transaction() as db:
+            await db.execute_many(
+                _checkpoint_upsert(db.dialect),
+                [cls._checkpoint_row(pipeline, source, now) for source in sources],
+            )
 
     @staticmethod
-    async def _upsert_in_transaction(
-        db: Any,
-        pipeline: Pipeline,
-        source: SourceSnapshot,
-        now: str,
-    ) -> None:
-        await db.execute(
-            """
-            INSERT INTO memory_evolution_checkpoints (
-                pipeline, scope, scope_id, source_type, source_key, content_hash,
-                line_count, last_message_id, source_mtime,
-                processed_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(
-                pipeline, scope, scope_id, source_type, source_key
-            ) DO UPDATE SET
-                content_hash = excluded.content_hash,
-                line_count = excluded.line_count,
-                last_message_id = excluded.last_message_id,
-                source_mtime = excluded.source_mtime,
-                processed_at = excluded.processed_at,
-                updated_at = excluded.updated_at
-            """,
-            (
-                pipeline,
-                source.scope.value,
-                source.scope_id,
-                source.source_type,
-                source.source_key,
-                source.content_hash,
-                source.line_count,
-                source.last_message_id,
-                source.source_mtime,
-                now,
-                now,
-            ),
+    def _checkpoint_row(pipeline: Pipeline, source: SourceSnapshot, now: str) -> tuple:
+        return (
+            pipeline,
+            source.scope.value,
+            source.scope_id,
+            source.source_type,
+            source.source_key,
+            source.content_hash,
+            source.line_count,
+            source.last_message_id,
+            source.source_mtime,
+            now,
+            now,
         )
+
+
+_CHECKPOINT_COLUMNS = (
+    "pipeline",
+    "scope",
+    "scope_id",
+    "source_type",
+    "source_key",
+    "content_hash",
+    "line_count",
+    "last_message_id",
+    "source_mtime",
+    "processed_at",
+    "updated_at",
+)
+_CHECKPOINT_KEYS = ("pipeline", "scope", "scope_id", "source_type", "source_key")
+
+
+def _checkpoint_upsert(dialect) -> str:
+    return dialect.upsert(
+        "memory_evolution_checkpoints",
+        _CHECKPOINT_COLUMNS,
+        key_columns=_CHECKPOINT_KEYS,
+        update_columns=tuple(c for c in _CHECKPOINT_COLUMNS if c not in _CHECKPOINT_KEYS),
+    )
 
 
 def _now_iso() -> str:

@@ -21,6 +21,26 @@ describe('buildPromptParts', () => {
     ]);
   });
 
+  it('staged document — emits uploadID without a host path', () => {
+    const parts = buildPromptParts('review', [{
+      id: 'attachment-1',
+      uploadID: 'prt_upload_1',
+      mime: 'application/pdf',
+      filename: 'paper.pdf',
+    }]);
+    expect(parts).toEqual([
+      { type: 'text', text: 'review' },
+      {
+        type: 'file',
+        id: 'attachment-1',
+        uploadID: 'prt_upload_1',
+        mime: 'application/pdf',
+        filename: 'paper.pdf',
+      },
+    ]);
+    expect(JSON.stringify(parts)).not.toContain('/Users/');
+  });
+
   it('text + image — text first, then image', () => {
     const parts = buildPromptParts('describe this', [img]);
     expect(parts[0]).toEqual({ type: 'text', text: 'describe this' });

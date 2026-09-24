@@ -29,12 +29,17 @@ def _write_project_hook(project_dir: Path, module_name: str, hook_name: str) -> 
 
 
 @pytest.fixture(autouse=True)
-def _reset_pipeline_state() -> None:
-    HookPipeline.reset()
-    PluginLoader.clear_extension_points()
-    yield
-    HookPipeline.reset()
-    PluginLoader.clear_extension_points()
+def _reset_pipeline_state(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Clearing the shared loader leaves an already initialized ToolRegistry
+    # without its TOOLS point. Isolate this suite and restore the original
+    # objects so other initialized registries keep their matching state.
+    monkeypatch.setattr(HookPipeline, "_hooks", [])
+    monkeypatch.setattr(HookPipeline, "_initialized", False)
+    monkeypatch.setattr(HookPipeline, "_loaded_project_dir", None)
+    monkeypatch.setattr(HookPipeline, "_plugin_hook_names", set())
+    monkeypatch.setattr(PluginLoader, "_extension_points", {})
+    monkeypatch.setattr(PluginLoader, "_last_load_errors", [])
+    monkeypatch.setattr(PluginLoader, "_runtime_critical_entrypoint_failure", False)
 
 
 @pytest.mark.asyncio

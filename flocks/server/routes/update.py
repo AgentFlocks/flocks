@@ -4,14 +4,16 @@ Update routes — check version and apply self-upgrade via SSE stream
 
 import asyncio
 import json
+import re
 import time
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, Query, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 
 from flocks.server.auth import require_admin
 from flocks.updater import check_update, perform_update, detect_deploy_mode
+from flocks.updater.deploy import update_refusal_reason
 from flocks.updater.models import VersionInfo
 from flocks.utils.log import Log
 
@@ -23,6 +25,16 @@ _UPDATE_CHECK_ERROR_CACHE_TTL_SECONDS = 60.0
 _update_check_cache: dict[tuple[str, str], tuple[float, VersionInfo]] = {}
 _update_check_inflight: dict[tuple[str, str], asyncio.Task[VersionInfo]] = {}
 _update_check_lock = asyncio.Lock()
+
+# ``target_version`` ends up in the download URL and the archive filename, so
+# it must look like a release tag (``2026.03.24``, ``v1.2.3-rc1``) and nothing
+# else — no path separators, no ``..``.
+_SSE_HEADERS = {
+    "Cache-Control": "no-cache",
+    "Connection": "keep-alive",
+    "X-Accel-Buffering": "no",
+}
+_TARGET_VERSION_RE = re.compile(r"^v?\d+(?:\.\d+)*(?:[.+-][0-9A-Za-z][0-9A-Za-z.-]{0,63})?$")
 
 
 def _update_cache_key(locale: str | None, edition: str) -> tuple[str, str]:
@@ -146,14 +158,28 @@ async def apply_update(
     async def _error(msg: str):
         yield f"data: {json.dumps({'stage': 'error', 'message': msg, 'success': False})}\n\n"
 
-    if detect_deploy_mode() == "docker":
-        return StreamingResponse(
-            _error(
-                "In-place upgrade is not supported in Docker deployments. "
-                "Please pull the latest image and restart the container."
-            ),
-            media_type="text/event-stream",
-        )
+    # Docker images, offline installer packages and Go-managed release packages
+    # are not upgraded from inside the runtime; answer before any network
+    # round-trip or argument parsing.  Docker and offline keep the historical
+    # SSE error event the WebUI renders; a managed package is a hard 409 so
+    # scripts and the core see a real status code.
+    mode = detect_deploy_mode()
+    refusal = update_refusal_reason(mode)
+    if refusal is not None:
+        if mode in ("docker", "offline"):
+            return StreamingResponse(_error(refusal), media_type="text/event-stream", headers=_SSE_HEADERS)
+        raise HTTPException(status_code=409, detail=refusal)
+
+    # ``target_version`` is spliced into the download URL / archive name, so
+    # anything that is not a release tag is refused before perform_update.
+    # (A direct call without the query layer hands over the ``Query`` default
+    # object itself; that is "not provided".)
+    if not isinstance(target_version, str):
+        target_version = None
+    if target_version is not None:
+        target_version = target_version.strip()
+        if not _TARGET_VERSION_RE.fullmatch(target_version):
+            raise HTTPException(status_code=400, detail="Invalid target_version")
 
     zipball_url: str | None = None
     tarball_url: str | None = None
@@ -202,12 +228,4 @@ async def apply_update(
         finally:
             await gen.aclose()
 
-    return StreamingResponse(
-        _stream(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        },
-    )
+    return StreamingResponse(_stream(), media_type="text/event-stream", headers=_SSE_HEADERS)

@@ -270,6 +270,7 @@ class TestToolRouteSecurity:
         from flocks.server.routes import tool as tool_routes
 
         permission_ask = AsyncMock(return_value=None)
+        monkeypatch.setattr(tool_routes, "legacy_tool_permission_prompt_required", lambda: True)
         monkeypatch.setattr(tool_routes.PermissionNext, "ask", permission_ask)
 
         session_id, _ = await _create_session_and_message("owner-session")
@@ -316,7 +317,9 @@ class TestToolRouteSecurity:
     ):
         from flocks.server.routes import tool as tool_routes
 
+        monkeypatch.setattr(tool_routes, "legacy_tool_permission_prompt_required", lambda: True)
         permission_ask = AsyncMock(return_value=None)
+        monkeypatch.setattr(tool_routes, "legacy_tool_permission_prompt_required", lambda: True)
         monkeypatch.setattr(tool_routes.PermissionNext, "ask", permission_ask)
         session_id, message_id = await _create_session_and_message("valid-session-context")
 
@@ -366,7 +369,9 @@ class TestToolRouteSecurity:
     ):
         from flocks.server.routes import tool as tool_routes
 
+        monkeypatch.setattr(tool_routes, "legacy_tool_permission_prompt_required", lambda: True)
         permission_ask = AsyncMock(return_value=None)
+        monkeypatch.setattr(tool_routes, "legacy_tool_permission_prompt_required", lambda: True)
         monkeypatch.setattr(tool_routes.PermissionNext, "ask", permission_ask)
         session_id, message_id = await _create_session_and_message("valid-batch-session-context")
 
@@ -583,3 +588,140 @@ class TestToolListPageRoute:
         assert first_builds > 0
         assert second_builds == first_builds
         assert index_builds > second_builds
+
+
+class TestToolRouteRegressions:
+    """Regressions found during the 2026-09-14 full-suite run (G3a)."""
+
+    @pytest.mark.asyncio
+    async def test_list_page_enabled_filter_is_case_insensitive(self, client: AsyncClient):
+        lower = await client.get("/api/tools/page", params={"enabled": "true", "limit": 200})
+        upper = await client.get("/api/tools/page", params={"enabled": "TRUE", "limit": 200})
+
+        assert lower.status_code == 200 and upper.status_code == 200
+        assert lower.json()["total"] > 0
+        assert upper.json()["total"] == lower.json()["total"]
+
+    @pytest.mark.asyncio
+    async def test_patch_unknown_device_returns_404(self, client: AsyncClient):
+        response = await client.patch(
+            "/api/tools/read",
+            params={"device_id": "device-that-does-not-exist"},
+            json={"enabled": False},
+        )
+
+        assert response.status_code == 404, response.text
+        assert response.json()["message"] == "Device not found: device-that-does-not-exist"
+
+    @pytest.mark.asyncio
+    async def test_http_execution_context_carries_call_id(self, client: AsyncClient):
+        seen: dict[str, object] = {}
+
+        async def handler(ctx) -> ToolResult:
+            seen["call_id"] = ctx.call_id
+            seen["profile"] = ctx.extra.get("session_execution_profile")
+            return ToolResult(success=True, output="ok")
+
+        tool = Tool(
+            info=ToolInfo(name="http_call_id_probe", description="probe", category=ToolCategory.CUSTOM, source="custom"),
+            handler=handler,
+        )
+        with _temporary_tool(tool):
+            response = await client.post("/api/tools/http_call_id_probe/execute", json={"params": {}})
+
+        assert response.status_code == 200, response.text
+        assert isinstance(seen["call_id"], str) and seen["call_id"].startswith("cal_")
+        # direct execution describes the HTTP caller so policy extensions see a subject
+        profile = seen["profile"]
+        assert isinstance(profile, dict)
+        assert profile["entry"] == "api"
+        assert profile["subject_id"] == "api-token-service" and profile["subject_type"] == "service"
+
+    @pytest.mark.asyncio
+    async def test_direct_http_ask_is_rejected_with_403(self, client: AsyncClient):
+        async def handler(ctx) -> ToolResult:
+            await ctx.ask(permission="bash", patterns=["pwd"], always=["*"], metadata={})
+            return ToolResult(success=True, output="should not run")
+
+        tool = Tool(
+            info=ToolInfo(name="http_ask_probe", description="probe", category=ToolCategory.CUSTOM, source="custom"),
+            handler=handler,
+        )
+        with _temporary_tool(tool):
+            response = await client.post("/api/tools/http_ask_probe/execute", json={"params": {}})
+
+        assert response.status_code == 403, response.text
+        assert response.json()["message"] == "This HTTP execution context cannot auto-approve tool permissions."
+
+    @pytest.mark.asyncio
+    async def test_create_tool_rejects_empty_name(self, client: AsyncClient):
+        response = await client.post("/api/tools", json={"name": "", "handler": {"type": "http", "url": "https://x"}})
+
+        assert response.status_code == 422, response.text
+        assert response.json()["details"][0]["loc"] == ["body", "name"]
+
+    @pytest.mark.asyncio
+    async def test_create_tool_rejects_path_traversal_name(self, client: AsyncClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+        from flocks.tool import tool_loader
+
+        plugins = tmp_path / "plugins"
+        monkeypatch.setattr(tool_loader, "_TOOLS_SUBDIR", plugins / "tools")
+        response = await client.post(
+            "/api/tools",
+            json={"name": "../evil", "handler": {"type": "http", "method": "GET", "url": "https://x"}},
+        )
+
+        assert response.status_code == 422, response.text
+        assert response.json()["details"][0]["loc"] == ["body", "name"]
+        assert not list(plugins.rglob("*.yaml")) if plugins.exists() else True
+
+    @pytest.mark.asyncio
+    async def test_create_tool_rejects_path_traversal_provider(self, client: AsyncClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+        from flocks.tool import tool_loader
+
+        plugins = tmp_path / "plugins"
+        monkeypatch.setattr(tool_loader, "_TOOLS_SUBDIR", plugins / "tools")
+        response = await client.post(
+            "/api/tools",
+            json={"name": "t1", "provider": "../../escape", "handler": {"type": "http", "method": "GET", "url": "https://x"}},
+        )
+
+        assert response.status_code == 422, response.text
+        assert response.json()["details"][0]["loc"] == ["body", "provider"]
+        assert not list(plugins.rglob("*.yaml")) if plugins.exists() else True
+
+    @pytest.mark.asyncio
+    async def test_create_tool_invalid_handler_leaves_no_file(self, client: AsyncClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+        from flocks.tool import tool_loader
+
+        plugins = tmp_path / "plugins"
+        monkeypatch.setattr(tool_loader, "_TOOLS_SUBDIR", plugins / "tools")
+        response = await client.post("/api/tools", json={"name": "bad_handler", "handler": {"type": "python"}})
+
+        assert response.status_code == 400, response.text
+        assert response.json()["message"] == "Invalid tool definition: Unknown handler type: python"
+        assert not (plugins / "tools" / "api" / "bad_handler.yaml").exists()
+        assert ToolRegistry.get("bad_handler") is None
+
+    @pytest.mark.asyncio
+    async def test_update_tool_rejects_invalid_handler_without_writing(self, client: AsyncClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+        import yaml
+
+        from flocks.tool import tool_loader
+
+        plugins = tmp_path / "plugins"
+        monkeypatch.setattr(tool_loader, "_TOOLS_SUBDIR", plugins / "tools")
+        created = await client.post(
+            "/api/tools",
+            json={"name": "put_probe", "handler": {"type": "http", "method": "GET", "url": "https://x"}},
+        )
+        assert created.status_code == 201, created.text
+        try:
+            response = await client.put("/api/tools/put_probe", json={"handler": {"type": "nope"}})
+
+            assert response.status_code == 400, response.text
+            assert "Unknown handler type: nope" in response.json()["message"]
+            raw = yaml.safe_load((plugins / "tools" / "api" / "put_probe.yaml").read_text())
+            assert raw["handler"]["type"] == "http"
+        finally:
+            await client.delete("/api/tools/put_probe")

@@ -20,6 +20,9 @@ TriggerType = Literal[
 ]
 
 _TRIGGER_ID_SANITIZE_RE = re.compile(r"[^a-zA-Z0-9_.-]+")
+# Valid TCP/UDP listener ports for syslog trigger sources.
+SYSLOG_PORT_MIN = 1
+SYSLOG_PORT_MAX = 65535
 
 
 def _sanitize_trigger_id(value: str) -> str:
@@ -119,6 +122,36 @@ class TriggerDefinition(BaseModel):
     def _ensure_id(self) -> "TriggerDefinition":
         source = self.source if isinstance(self.source, dict) else {}
         self.id = _sanitize_trigger_id(self.id or default_trigger_id(self.type, source=source))
+        return self
+
+    @model_validator(mode="after")
+    def _validate_syslog_source_port(self) -> "TriggerDefinition":
+        """Reject an unbindable syslog port at validation time.
+
+        ``source`` is an open dict, so without this the API accepted
+        ``port=70000`` and the operator only found out when the listener
+        failed to bind.  Missing ``port`` keeps its downstream default.
+        """
+        if self.type != "syslog" or not isinstance(self.source, dict):
+            return self
+        raw = self.source.get("port")
+        if raw is None:
+            return self
+        port: Optional[int] = None
+        if isinstance(raw, bool):
+            port = None
+        elif isinstance(raw, int):
+            port = raw
+        elif isinstance(raw, float) and raw.is_integer():
+            port = int(raw)
+        elif isinstance(raw, str) and raw.strip().lstrip("-").isdigit():
+            port = int(raw.strip())
+        if port is None or not (SYSLOG_PORT_MIN <= port <= SYSLOG_PORT_MAX):
+            raise ValueError(
+                f"syslog trigger source.port must be an integer between {SYSLOG_PORT_MIN} and "
+                f"{SYSLOG_PORT_MAX} (got {raw!r})"
+            )
+        self.source["port"] = port
         return self
 
 

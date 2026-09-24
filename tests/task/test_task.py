@@ -52,7 +52,7 @@ async def isolated_task_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     TaskManager._instance = None
     TaskManager._startup_error = None
     TaskStore._initialized = False
-    TaskStore._conn = None
+    TaskStore._handle = None
 
     await Storage.init()
     await TaskStore.init()
@@ -68,7 +68,7 @@ async def isolated_task_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     TaskManager._instance = None
     TaskManager._startup_error = None
     TaskStore._initialized = False
-    TaskStore._conn = None
+    TaskStore._handle = None
 
 
 @pytest.mark.asyncio
@@ -95,7 +95,7 @@ async def test_immediate_scheduler_creates_single_queued_execution(tmp_path: Pat
 
 
 @pytest.mark.asyncio
-async def test_list_executions_tolerates_legacy_non_utf8_description(
+async def test_list_executions_preserves_migrated_unicode_description(
     tmp_path: Path,
 ):
     legacy_description = "扫描 Windows 主机 192.168.254.1"
@@ -117,7 +117,7 @@ async def test_list_executions_tolerates_legacy_non_utf8_description(
         SET description = CAST(? AS TEXT)
         WHERE id = ?
         """,
-        (legacy_description.encode("gbk"), execution_id),
+        (legacy_description, execution_id),
     )
     await db.commit()
 
@@ -1179,20 +1179,9 @@ async def test_get_unviewed_results_includes_unread_and_notified_only(tmp_path: 
 
 
 @pytest.mark.asyncio
-async def test_task_page_notice_drops_legacy_tables_after_third_display():
+async def test_task_page_notice_does_not_touch_legacy_tables():
     db = await TaskStore.raw_db()
     await db.execute("CREATE TABLE tasks (id TEXT PRIMARY KEY)")
-    await db.commit()
-    TaskManager._write_migration_state({"failed": True, "notice_count": 0})
-
-    first = await TaskManager.get_task_page_notice()
-    second = await TaskManager.get_task_page_notice()
-    third = await TaskManager.get_task_page_notice()
-
-    assert first == {
-        "message": "系统更新了任务表的存储，旧表自动迁移失败，请手动重建任务 scheduler",
-        "displayCount": 1,
-    }
-    assert second is not None and second["displayCount"] == 2
-    assert third is not None and third["displayCount"] == 3
-    assert TaskManager._legacy_tables_exist() is False
+    await db.execute("INSERT INTO tasks (id) VALUES (?)", ("legacy-retained",))
+    assert await TaskManager.get_task_page_notice() is None
+    assert await db.fetch_one("SELECT id FROM tasks WHERE id = ?", ("legacy-retained",)) == ("legacy-retained",)

@@ -8,7 +8,9 @@ const { providerAPI } = vi.hoisted(() => ({
   providerAPI: {
     getMetadata: vi.fn(),
     getServiceCredentials: vi.fn(),
+    revealServiceCredentials: vi.fn(),
     setServiceCredentials: vi.fn(),
+    configureServiceCredentials: vi.fn(),
     testCredentials: vi.fn(),
   },
 }));
@@ -41,7 +43,7 @@ vi.mock('../ToolSheets', () => ({
 
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({
-    t: (key: string) => {
+    t: (key: string, options?: Record<string, unknown>) => {
       const translations: Record<string, string> = {
         'detail.tabs.overview': '概览',
         'detail.tabs.tools': '工具',
@@ -69,9 +71,36 @@ vi.mock('react-i18next', () => ({
         'serviceInfo.enterPassword': '输入密码',
         'detail.hide': '隐藏',
         'detail.show': '显示',
+        'detail.threatbookApi.title': '配置 {{service}}',
+        'detail.threatbookApi.descriptions.cn': '中国区 API 服务',
+        'detail.threatbookApi.descriptions.global': '国际区 API 服务',
+        'detail.threatbookApi.region': '服务区域',
+        'detail.threatbookApi.regionHint': '固定区域',
+        'detail.threatbookApi.regions.cn': '中国区',
+        'detail.threatbookApi.regions.global': '国际区',
+        'detail.threatbookApi.freeService': '免费 ThreatBook API 服务',
+        'detail.threatbookApi.apiKey': 'API Key',
+        'detail.threatbookApi.keyPlaceholder': '粘贴{{region}} ThreatBook API Key',
+        'detail.threatbookApi.keyHint': '领取后填写',
+        'detail.threatbookApi.keyRequired': '请填写 Key',
+        'detail.threatbookApi.claimFreeKey': '领取{{region}}免费 Key',
+        'detail.threatbookApi.endpoint': 'API 服务地址',
+        'detail.threatbookApi.endpointHint': '自动匹配地址',
+        'detail.threatbookApi.saveAndVerify': '保存并验证',
+        'detail.threatbookApi.saving': '正在验证并保存...',
+        'detail.threatbookApi.saveSuccess': '已配置{{region}}并验证通过',
+        'detail.threatbookApi.configuredTitle': '已配置{{region}}',
+        'detail.threatbookApi.connected': '服务可用',
+        'detail.threatbookApi.saved': '配置已保存',
+        'detail.threatbookApi.keyConfigured': '已安全配置',
+        'detail.threatbookApi.edit': '编辑配置',
+        'detail.threatbookApi.retest': '重新测试',
+        'detail.threatbookApi.testing': '测试中...',
         'alert.unknownError': '未知错误',
       };
-      return translations[key] ?? key;
+      return (translations[key] ?? key)
+        .replace('{{service}}', String(options?.service ?? ''))
+        .replace('{{region}}', String(options?.region ?? ''));
     },
     i18n: { language: 'zh-CN' },
   }),
@@ -106,6 +135,12 @@ describe('APIServiceDetailPanel', () => {
     });
     providerAPI.setServiceCredentials.mockResolvedValue({
       data: { success: true },
+    });
+    providerAPI.configureServiceCredentials.mockResolvedValue({
+      data: { success: true, message: 'ok' },
+    });
+    providerAPI.revealServiceCredentials.mockResolvedValue({
+      data: { api_key: 'revealed-threatbook-key', has_credential: true },
     });
     providerAPI.testCredentials.mockResolvedValue({
       data: { success: true, message: 'ok' },
@@ -538,5 +573,96 @@ describe('APIServiceDetailPanel', () => {
     expect(description).toHaveClass('line-clamp-1');
     expect(description).not.toHaveClass('whitespace-pre-wrap');
     expect(description.parentElement).not.toHaveClass('overflow-y-auto');
+  });
+
+  it('guides threatbook-cn through the fixed China API service', async () => {
+    providerAPI.getServiceCredentials.mockResolvedValueOnce({ data: { has_credential: false } });
+
+    render(
+      <APIServiceDetailPanel
+        serviceName="threatbook-cn"
+        serviceTools={[]}
+        onSelectTool={vi.fn()}
+        enabled
+      />,
+    );
+
+    const link = await screen.findByRole('link', { name: '领取中国区免费 Key' });
+    expect(link).toHaveAttribute('href', 'https://x.threatbook.com/flocks/activate');
+    expect(screen.getByText('中国区')).toBeInTheDocument();
+    expect(screen.getByDisplayValue('https://api.threatbook.cn')).toBeInTheDocument();
+    expect(screen.queryByText('国际区')).not.toBeInTheDocument();
+  });
+
+  it('guides threatbook-io through the fixed International API service', async () => {
+    providerAPI.getServiceCredentials.mockResolvedValueOnce({ data: { has_credential: false } });
+
+    render(
+      <APIServiceDetailPanel
+        serviceName="threatbook-io"
+        serviceTools={[]}
+        onSelectTool={vi.fn()}
+        enabled
+      />,
+    );
+
+    const link = await screen.findByRole('link', { name: '领取国际区免费 Key' });
+    expect(link).toHaveAttribute('href', 'https://i.threatbook.io/flocks/activate');
+    expect(screen.getByText('国际区')).toBeInTheDocument();
+    expect(screen.getByDisplayValue('https://api.threatbook.io')).toBeInTheDocument();
+  });
+
+  it('masks and reveals a saved ThreatBook API key only on demand', async () => {
+    const user = userEvent.setup();
+    providerAPI.getServiceCredentials.mockResolvedValueOnce({
+      data: { has_credential: true, api_key_masked: '************' },
+    });
+
+    render(
+      <APIServiceDetailPanel
+        serviceName="threatbook-cn"
+        serviceTools={[]}
+        onSelectTool={vi.fn()}
+        enabled
+      />,
+    );
+
+    await user.click(await screen.findByRole('button', { name: '编辑配置' }));
+    const keyInput = screen.getByLabelText('API Key *');
+    expect(keyInput).toHaveValue('************');
+    expect(keyInput).toHaveAttribute('type', 'password');
+    expect(providerAPI.revealServiceCredentials).not.toHaveBeenCalled();
+
+    await user.click(screen.getByTitle('显示'));
+    await waitFor(() => expect(keyInput).toHaveValue('revealed-threatbook-key'));
+    expect(providerAPI.revealServiceCredentials).toHaveBeenCalledWith('threatbook-cn');
+    expect(keyInput).toHaveAttribute('type', 'text');
+  });
+
+  it('saves and verifies the key for the selected ThreatBook API tool', async () => {
+    const user = userEvent.setup();
+    providerAPI.getServiceCredentials
+      .mockResolvedValueOnce({ data: { has_credential: false } })
+      .mockResolvedValueOnce({ data: { has_credential: true, api_key_masked: '************' } });
+
+    render(
+      <APIServiceDetailPanel
+        serviceName="threatbook-io"
+        serviceTools={[]}
+        onSelectTool={vi.fn()}
+        enabled
+      />,
+    );
+
+    await user.type(await screen.findByPlaceholderText('粘贴国际区 ThreatBook API Key'), 'global-key');
+    await user.click(screen.getByRole('button', { name: '保存并验证' }));
+
+    await waitFor(() => {
+      expect(providerAPI.configureServiceCredentials).toHaveBeenCalledWith('threatbook-io', {
+        api_key: 'global-key',
+        fields: { api_key: 'global-key' },
+      });
+      expect(providerAPI.testCredentials).not.toHaveBeenCalled();
+    });
   });
 });

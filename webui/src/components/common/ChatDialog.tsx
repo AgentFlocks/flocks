@@ -5,7 +5,7 @@
  * 会话在用户首次发送消息时才创建，避免空会话污染会话列表。
  */
 import { useEffect } from 'react';
-import { X, Sparkles } from 'lucide-react';
+import { IconX, IconSparkles } from '@tabler/icons-react';
 import { useTranslation } from 'react-i18next';
 import SessionChat from './SessionChat';
 import { useSessionChat } from '@/hooks/useSessionChat';
@@ -65,7 +65,7 @@ export default function ChatDialog({
           <div className="flex items-center justify-center">
             <div className="flex items-center gap-3">
               <div className="w-9 h-9 rounded-lg bg-gradient-to-br from-red-500 to-purple-600 flex items-center justify-center">
-                <Sparkles className="w-5 h-5 text-white" />
+                <IconSparkles aria-hidden="true" className="w-5 h-5 text-white" />
               </div>
               <div>
                 <h2 className="text-lg font-semibold text-gray-900">{title}</h2>
@@ -76,7 +76,7 @@ export default function ChatDialog({
               onClick={onClose}
               className="text-gray-400 hover:text-gray-600 p-1.5 rounded-lg hover:bg-gray-100 transition-colors"
             >
-              <X className="w-5 h-5" />
+              <IconX aria-hidden="true" className="w-5 h-5" />
             </button>
           </div>
         </div>
@@ -95,7 +95,7 @@ export default function ChatDialog({
           onCreateAndSend={!sessionId ? (text, imageParts) => createAndSend({ text, imageParts }) : undefined}
           welcomeContent={!sessionId ? (
             <div className="text-center max-w-md">
-              <Sparkles className="w-10 h-10 text-red-500 mx-auto mb-3" />
+              <IconSparkles aria-hidden="true" className="w-10 h-10 text-red-500 mx-auto mb-3" />
               <h3 className="text-lg font-semibold text-gray-900 mb-2">{t('chat.talkToRex')}</h3>
               <p className="text-sm text-gray-500">{t('chat.talkToRexHint')}</p>
             </div>

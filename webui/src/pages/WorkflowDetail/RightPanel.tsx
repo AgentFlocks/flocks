@@ -1,5 +1,5 @@
 import { useState, Component, type ReactNode, type ErrorInfo } from 'react';
-import { Trash2 } from 'lucide-react';
+import { IconTrash } from '@tabler/icons-react';
 import { useTranslation } from 'react-i18next';
 import { Workflow, WorkflowExecution, WorkflowNode } from '@/api/workflow';
 import { useConfirm } from '@/components/common/ConfirmDialog';
@@ -69,6 +69,8 @@ interface RightPanelProps {
   latestExecution?: WorkflowExecution | null;
   open: boolean;
   width?: number;
+  /** Render as a full-size overlay of the canvas area (phone widths). */
+  overlay?: boolean;
   activeTab?: RightPanelTabId;
   chatLaunchRequest?: WorkflowChatLaunchRequest | null;
   onChatLaunchRequestHandled?: (id: number) => void;
@@ -101,6 +103,7 @@ export default function RightPanel({
   focusExecutionId,
   selectedNode, onDeselectNode,
   onDelete,
+  overlay = false,
 }: RightPanelProps) {
   const { t, i18n } = useTranslation('workflow');
   const confirm = useConfirm();
@@ -140,8 +143,13 @@ export default function RightPanel({
 
   return (
     <div
-      className="relative z-10 flex min-w-0 flex-col bg-white border-l border-gray-200 flex-shrink-0 overflow-hidden transition-[width] duration-300 ease-in-out"
-      style={{ width: open ? width : 0 }}
+      className={
+        overlay
+          // Phone widths: cover the canvas area instead of sharing the row.
+          ? `absolute inset-0 z-40 flex min-w-0 flex-col bg-white overflow-hidden ${open ? '' : 'hidden'}`
+          : 'relative z-10 flex min-w-0 flex-col bg-white border-l border-gray-200 flex-shrink-0 overflow-hidden transition-[width] duration-300 ease-in-out'
+      }
+      style={overlay ? undefined : { width: open ? width : 0 }}
     >
       {/* Tab bar */}
       <div className="flex border-b border-gray-100 flex-shrink-0">
@@ -206,7 +214,7 @@ export default function RightPanel({
             disabled={deleting}
             className="flex items-center gap-1.5 px-3 py-1.5 text-xs text-red-600 border border-red-200 rounded-lg hover:bg-red-50 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
           >
-            <Trash2 className="w-3.5 h-3.5" />
+            <IconTrash aria-hidden="true" className="w-3.5 h-3.5" />
             {deleting ? t('detail.rightPanel.deleting') : t('detail.rightPanel.deleteWorkflow')}
           </button>
         </div>

@@ -1,4 +1,4 @@
-import { Moon, Sun } from 'lucide-react';
+import { IconMoon, IconSun } from '@tabler/icons-react';
 import { useContext } from 'react';
 import { useTranslation } from 'react-i18next';
 import { ThemeContext } from '@/contexts/ThemeContext';
@@ -11,7 +11,7 @@ export default function ThemeToggle({ collapsed = false }: ThemeToggleProps) {
   const { theme, toggleTheme } = useContext(ThemeContext);
   const { t } = useTranslation('nav');
   const isDark = theme === 'dark';
-  const Icon = isDark ? Sun : Moon;
+  const Icon = isDark ? IconSun : IconMoon;
 
   return (
     <button
@@ -27,7 +27,7 @@ export default function ThemeToggle({ collapsed = false }: ThemeToggleProps) {
         ${collapsed ? 'h-8 w-8' : 'h-8 w-8'}
       `}
     >
-      <Icon className="h-4 w-4" />
+      <Icon aria-hidden="true" className="h-4 w-4" />
     </button>
   );
 }

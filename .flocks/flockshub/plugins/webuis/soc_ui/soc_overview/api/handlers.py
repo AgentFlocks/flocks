@@ -1,10 +1,9 @@
 import json
 import math
-import os
 import re
-import sqlite3
 import time
 from collections import Counter
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -14,19 +13,31 @@ DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 SQL_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 CONTRACTS_ROOT = Path(__file__).resolve().parents[4]
 ACCESS_CONFIG_PATH = CONTRACTS_ROOT / "access" / "soc_alerts.json"
-DEFAULT_DATA_SOURCE = "sqlite"
-DEFAULT_SQLITE_DB = Path.home() / ".flocks" / "data" / "soc.db"
-DEFAULT_SQLITE_TABLE = "alert_records"
-DEFAULT_SQLITE_RECORD_COLUMN = "record_json"
-DEFAULT_SQLITE_DATE_COLUMN = "asset_date"
-DEFAULT_SQLITE_EVENT_TIME_COLUMN = "event_time"
+DEFAULT_DATA_SOURCE = "postgres"
+DEFAULT_SOURCE_PATH = Path("/postgresql/alert_records")
+DEFAULT_TABLE = "alert_records"
+DEFAULT_RECORD_COLUMN = "record_json"
+DEFAULT_DATE_COLUMN = "asset_date"
+DEFAULT_EVENT_TIME_COLUMN = "event_time"
 SIMULATED_TIME_BUCKETS = 24
-
-WORKFLOW_DB = Path.home() / ".flocks" / "data" / "workflow.db"
+MAX_OVERVIEW_RECORDS = 50_000
+MAX_OVERVIEW_BYTES = 32 * 1024 * 1024
+MAX_RECORD_BYTES = 64 * 1024
 
 _workflow_stats_cache: dict = {}
-_cache_updated_at: float = 0
 _CACHE_TTL: float = 30.0
+_request_state = ContextVar("soc_overview_request", default=None)
+
+
+class OverviewRangeTooLarge(ValueError):
+    """The requested statistics must be retried with a smaller time range."""
+
+
+def _database():
+    state = _request_state.get()
+    if state is None or state.get("database") is None:
+        raise RuntimeError("SOC overview requires the PostgreSQL database capability")
+    return state["database"]
 
 
 @dataclass(frozen=True)
@@ -40,64 +51,75 @@ class _RecordSource:
     end_time: int | None = None
 
 
-def _get_workflow_call_count(workflow_name: str, date: str = None) -> int:
-    global _workflow_stats_cache, _cache_updated_at
-    now = time.time()
-    cache_key = f"{workflow_name}:{date or 'total'}"
-
-    if now - _cache_updated_at < _CACHE_TTL and cache_key in _workflow_stats_cache:
-        return _workflow_stats_cache[cache_key]
+def _get_workflow_call_count(workflow_name: str, date: str = None) -> dict:
+    now = time.monotonic()
+    cache_key = (_database().identity(), workflow_name, date)
+    cached = _workflow_stats_cache.get(cache_key)
+    if cached is not None and now < cached[0]:
+        return dict(cached[1])
 
     empty = {"callCount": 0, "dupCount": 0, "uniqueCount": 0}
-    if not WORKFLOW_DB.is_file():
-        return empty
 
     try:
         if date:
             start = int(datetime.strptime(date, "%Y-%m-%d").timestamp() * 1000)
             end = start + 86400 * 1000
-            with sqlite3.connect(WORKFLOW_DB) as conn:
+            call_count = dup_count = unique_count = total_bytes = 0
+            with _database().connect(readonly=True) as conn:
+                if not conn.table_exists("workflow_executions"):
+                    return empty
                 rows = conn.execute(
                     """
-                    SELECT output_results
+                    SELECT CASE WHEN octet_length(output_results) <= ? THEN output_results ELSE NULL END,
+                           octet_length(output_results)
                     FROM workflow_executions
                     WHERE workflow_id = ? AND started_at >= ? AND started_at < ?
+                    ORDER BY started_at LIMIT ?
                     """,
-                    (workflow_name, start, end),
-                ).fetchall()
-            dup_count = 0
-            unique_count = 0
-            for (output_text,) in rows:
-                try:
-                    output = json.loads(output_text or "{}")
-                except Exception:
-                    output = {}
-                stats = output.get("stats") if isinstance(output.get("stats"), dict) else {}
-                raw = _safe_int(stats.get("raw_count"))
-                if "after_dedup_count" in stats and stats.get("after_dedup_count") is not None:
-                    unique_count += _safe_int(stats.get("after_dedup_count"))
-                else:
-                    unique_count += raw
-                if output.get("is_duplicate") is True:
-                    dup_count += 1
+                    (MAX_RECORD_BYTES, workflow_name, start, end, MAX_OVERVIEW_RECORDS + 1),
+                )
+                for output_text, output_bytes in rows:
+                    call_count += 1
+                    total_bytes += output_bytes or 0
+                    if call_count > MAX_OVERVIEW_RECORDS or total_bytes > MAX_OVERVIEW_BYTES or (output_bytes or 0) > MAX_RECORD_BYTES:
+                        raise OverviewRangeTooLarge("所选范围数据过多，请缩小时间范围后重试。")
+                    try:
+                        output = json.loads(output_text or "{}")
+                    except (TypeError, ValueError):
+                        output = {}
+                    if not isinstance(output, dict):
+                        output = {}
+                    stats = output.get("stats") if isinstance(output.get("stats"), dict) else {}
+                    raw = _safe_int(stats.get("raw_count"))
+                    if "after_dedup_count" in stats and stats.get("after_dedup_count") is not None:
+                        unique_count += _safe_int(stats.get("after_dedup_count"))
+                    else:
+                        unique_count += raw
+                    if output.get("is_duplicate") is True:
+                        dup_count += 1
             result_dict = {
-                "callCount": len(rows),
+                "callCount": call_count,
                 "dupCount": dup_count,
                 "uniqueCount": unique_count,
             }
         else:
-            with sqlite3.connect(WORKFLOW_DB) as conn:
+            with _database().connect(readonly=True) as conn:
+                if not conn.table_exists("workflow_stats"):
+                    return empty
                 row = conn.execute(
                     "SELECT call_count FROM workflow_stats WHERE workflow_id = ?",
                     (workflow_name,),
                 ).fetchone()
             result_dict = {"callCount": _safe_int(row[0] if row else 0), "dupCount": 0, "uniqueCount": 0}
 
-        _workflow_stats_cache[cache_key] = result_dict
-        _cache_updated_at = now
+        if len(_workflow_stats_cache) >= 512:
+            _workflow_stats_cache.pop(next(iter(_workflow_stats_cache)))
+        _workflow_stats_cache[cache_key] = (now + _CACHE_TTL, result_dict)
         return result_dict
+    except OverviewRangeTooLarge:
+        raise
     except Exception:
-        return _workflow_stats_cache.get(cache_key, empty)
+        return empty
 
 
 SOURCE_DEFS = [
@@ -179,6 +201,14 @@ def _triage_attack_success_value(record):
 
 
 def get_stats(ctx, request):
+    token = _request_state.set({"database": ctx.database, "records": {}, "decoded": {}, "config": None})
+    try:
+        return _get_stats(request)
+    finally:
+        _request_state.reset(token)
+
+
+def _get_stats(request):
     start_time, end_time = _normalize_time_range(
         request.query_params.get("startTime"),
         request.query_params.get("endTime"),
@@ -231,7 +261,7 @@ def get_stats(ctx, request):
         "generatedAt": datetime.now().isoformat(timespec="seconds"),
         "latencyMs": round((time.time() - started) * 1000),
         "sourceStatus": {
-            "workflowStatsDb": _display_path(WORKFLOW_DB),
+            "workflowStatsDb": "PostgreSQL",
             "workflowStats": workflow_stats,
             "sampleMode": sample_mode,
             "sampleFile": ", ".join(_source_label(path) for path in asset_files) if sample_mode else "",
@@ -425,7 +455,7 @@ def _date_span(start_date, end_date):
 
 
 def _find_asset_files(start_date, end_date, start_time=None, end_time=None):
-    return _find_sqlite_sources(start_date, end_date, start_time, end_time)
+    return _find_postgres_sources(start_date, end_date, start_time, end_time)
 
 
 def _asset_file_date(path):
@@ -440,10 +470,13 @@ def _latest_asset_date():
 
 
 def _available_asset_dates():
-    return _available_sqlite_dates()
+    return _available_postgres_dates()
 
 
 def _load_alerts_config():
+    state = _request_state.get()
+    if state is not None and state["config"] is not None:
+        return state["config"]
     raw = {}
     if ACCESS_CONFIG_PATH.is_file():
         try:
@@ -453,28 +486,27 @@ def _load_alerts_config():
         if isinstance(value, dict):
             raw = value
 
-    sqlite_config = raw.get("sqlite") if isinstance(raw.get("sqlite"), dict) else {}
-    return {
+    postgres_config = raw.get("postgres") if isinstance(raw.get("postgres"), dict) else {}
+    config = {
         "dataSource": DEFAULT_DATA_SOURCE,
-        "sqlite": {
-            "dbPath": _read_config_string(
-                os.environ.get("FLOCKS_SOC_ALERTS_SQLITE_DB"),
-                sqlite_config.get("dbPath"),
-                str(DEFAULT_SQLITE_DB),
-            ),
-            "table": _read_config_string(sqlite_config.get("table"), DEFAULT_SQLITE_TABLE),
-            "recordColumn": _read_config_string(sqlite_config.get("recordColumn"), DEFAULT_SQLITE_RECORD_COLUMN),
-            "dateColumn": _read_config_string(sqlite_config.get("dateColumn"), DEFAULT_SQLITE_DATE_COLUMN),
+        "postgres": {
+            "table": _read_config_string(postgres_config.get("table"), DEFAULT_TABLE),
+            "recordColumn": _read_config_string(postgres_config.get("recordColumn"), DEFAULT_RECORD_COLUMN),
+            "dateColumn": _read_config_string(postgres_config.get("dateColumn"), DEFAULT_DATE_COLUMN),
             "eventTimeColumn": _read_config_string(
-                sqlite_config.get("eventTimeColumn"),
-                DEFAULT_SQLITE_EVENT_TIME_COLUMN,
+                postgres_config.get("eventTimeColumn"),
+                DEFAULT_EVENT_TIME_COLUMN,
             ),
+            "orderColumn": _read_config_string(postgres_config.get("orderColumn"), "rowid"),
         },
     }
+    if state is not None:
+        state["config"] = config
+    return config
 
 
 def _active_data_source():
-    return "sqlite"
+    return "postgres"
 
 
 def _read_config_string(*values):
@@ -484,25 +516,19 @@ def _read_config_string(*values):
     return ""
 
 
-def _resolve_config_path(value, fallback):
-    text = _read_config_string(value, str(fallback))
-    path = Path(text).expanduser()
-    if path.is_absolute():
-        return path
-    return (ACCESS_CONFIG_PATH.parent / path).resolve()
-
-
-def _sqlite_settings():
-    config = _load_alerts_config()["sqlite"]
+def _postgres_settings():
+    config = _load_alerts_config()["postgres"]
+    table = _sql_identifier(config.get("table"), DEFAULT_TABLE)
     return {
-        "db_path": _resolve_config_path(config.get("dbPath"), DEFAULT_SQLITE_DB),
-        "table": _sql_identifier(config.get("table"), DEFAULT_SQLITE_TABLE),
-        "record_column": _sql_identifier(config.get("recordColumn"), DEFAULT_SQLITE_RECORD_COLUMN),
-        "date_column": _sql_identifier(config.get("dateColumn"), DEFAULT_SQLITE_DATE_COLUMN),
+        "table_name": table[1:-1],
+        "table": table,
+        "record_column": _sql_identifier(config.get("recordColumn"), DEFAULT_RECORD_COLUMN),
+        "date_column": _sql_identifier(config.get("dateColumn"), DEFAULT_DATE_COLUMN),
         "event_time_column": _sql_identifier(
             config.get("eventTimeColumn"),
-            DEFAULT_SQLITE_EVENT_TIME_COLUMN,
+            DEFAULT_EVENT_TIME_COLUMN,
         ),
+        "order_column": _sql_identifier(config.get("orderColumn"), "rowid"),
     }
 
 
@@ -514,19 +540,16 @@ def _sql_identifier(value, fallback):
 
 
 def _active_source_path():
-    return _sqlite_settings()["db_path"]
+    return DEFAULT_SOURCE_PATH
 
 
 def _active_source_exists():
-    path = _active_source_path()
-    return path.is_file()
+    with _database().connect(readonly=True) as conn:
+        return conn.table_exists(_postgres_settings()["table_name"])
 
 
-def _find_sqlite_sources(start_date, end_date, start_time=None, end_time=None):
-    settings = _sqlite_settings()
-    db_path = settings["db_path"]
-    if not db_path.is_file():
-        return []
+def _find_postgres_sources(start_date, end_date, start_time=None, end_time=None):
+    settings = _postgres_settings()
 
     where = [f"{settings['date_column']} BETWEEN ? AND ?"]
     params = [start_date, end_date]
@@ -534,31 +557,50 @@ def _find_sqlite_sources(start_date, end_date, start_time=None, end_time=None):
         where.append(f"{settings['event_time_column']} BETWEEN ? AND ?")
         params.extend([start_time, end_time])
 
+    record_size = f"octet_length({settings['record_column']}::text)"
     query = (
-        f"SELECT {settings['date_column']} AS asset_date, COUNT(*) AS record_count "
+        f"SELECT {settings['date_column']} AS asset_date, "
+        f"CASE WHEN {record_size} <= ? THEN {settings['record_column']} ELSE NULL END AS record_json, "
+        f"{record_size} AS record_bytes "
         f"FROM {settings['table']} "
         f"WHERE {' AND '.join(where)} "
-        f"GROUP BY {settings['date_column']} "
-        f"ORDER BY {settings['date_column']}"
+        f"ORDER BY {settings['date_column']}, {settings['event_time_column']}, {settings['order_column']} LIMIT ?"
     )
+    by_date = {}
+    count = total_bytes = 0
     try:
-        with sqlite3.connect(db_path) as conn:
-            rows = conn.execute(query, params).fetchall()
+        with _database().connect(readonly=True) as conn:
+            if not conn.table_exists(settings["table_name"]):
+                return []
+            # The capability streams batches of 256 records. Keep a bounded
+            # request snapshot for the independent aggregates and fail visibly
+            # rather than presenting a truncated total as complete statistics.
+            for asset_date, raw, record_bytes in conn.execute(query, [MAX_RECORD_BYTES, *params, MAX_OVERVIEW_RECORDS + 1]):
+                count += 1
+                total_bytes += record_bytes or 0
+                if count > MAX_OVERVIEW_RECORDS or total_bytes > MAX_OVERVIEW_BYTES or (record_bytes or 0) > MAX_RECORD_BYTES:
+                    raise OverviewRangeTooLarge("所选范围数据过多，请缩小时间范围后重试。")
+                asset_date = str(asset_date or "")
+                if DATE_RE.match(asset_date):
+                    by_date.setdefault(asset_date, []).append(raw)
+    except OverviewRangeTooLarge:
+        raise
     except Exception:
         return []
 
+    state = _request_state.get()
     sources = []
-    for asset_date, record_count in rows:
-        asset_date = str(asset_date or "")
-        if not DATE_RE.match(asset_date):
-            continue
+    for asset_date, records in by_date.items():
+        # Each date is consumed by several aggregates; retain its fetched rows
+        # only for this request rather than executing the same query repeatedly.
+        state["records"][asset_date] = records
         sources.append(
             _RecordSource(
-                path=db_path,
+                path=DEFAULT_SOURCE_PATH,
                 role="denoise",
                 date=asset_date,
-                data_source="sqlite",
-                record_count=int(record_count or 0),
+                data_source="postgres",
+                record_count=len(records),
                 start_time=start_time,
                 end_time=end_time,
             )
@@ -566,11 +608,8 @@ def _find_sqlite_sources(start_date, end_date, start_time=None, end_time=None):
     return sources
 
 
-def _available_sqlite_dates():
-    settings = _sqlite_settings()
-    db_path = settings["db_path"]
-    if not db_path.is_file():
-        return []
+def _available_postgres_dates():
+    settings = _postgres_settings()
     query = (
         f"SELECT DISTINCT {settings['date_column']} AS asset_date "
         f"FROM {settings['table']} "
@@ -578,7 +617,9 @@ def _available_sqlite_dates():
         f"ORDER BY {settings['date_column']}"
     )
     try:
-        with sqlite3.connect(db_path) as conn:
+        with _database().connect(readonly=True) as conn:
+            if not conn.table_exists(settings["table_name"]):
+                return []
             rows = conn.execute(query).fetchall()
     except Exception:
         return []
@@ -1136,42 +1177,28 @@ def _port_label(value):
 
 
 def _iter_source_records(path):
-    if isinstance(path, _RecordSource) and path.data_source == "sqlite":
-        yield from _iter_sqlite_records(path)
+    if isinstance(path, _RecordSource) and path.data_source == "postgres":
+        yield from _iter_postgres_records(path)
     return
 
 
-def _iter_sqlite_records(source):
-    settings = _sqlite_settings()
-    where = [f"{settings['date_column']} = ?"]
-    params = [source.date]
-    if source.start_time is not None and source.end_time is not None:
-        where.append(f"{settings['event_time_column']} BETWEEN ? AND ?")
-        params.extend([source.start_time, source.end_time])
-    query = (
-        f"SELECT {settings['record_column']} AS record_json "
-        f"FROM {settings['table']} "
-        f"WHERE {' AND '.join(where)} "
-        f"ORDER BY {settings['event_time_column']}, rowid"
-    )
-    try:
-        with sqlite3.connect(settings["db_path"]) as conn:
-            rows = conn.execute(query, params).fetchall()
-    except Exception:
-        return
-
-    for row in rows:
-        try:
-            payload = json.loads(row[0])
-        except Exception:
-            yield None
-            continue
-        if isinstance(payload, dict):
-            yield payload
-        elif isinstance(payload, list):
-            yield from _iter_json_payload(payload)
-        else:
-            yield None
+def _iter_postgres_records(source):
+    state = _request_state.get()
+    if source.date not in state["decoded"]:
+        decoded = []
+        for raw in state["records"].pop(source.date, []):
+            try:
+                payload = json.loads(raw) if isinstance(raw, str) else raw
+            except (ValueError, TypeError):
+                payload = None
+            if isinstance(payload, dict):
+                decoded.append(payload)
+            elif isinstance(payload, list):
+                decoded.extend(_iter_json_payload(payload))
+            else:
+                decoded.append(None)
+        state["decoded"][source.date] = decoded
+    yield from state["decoded"][source.date]
 
 
 def _iter_json_payload(payload):
@@ -1225,7 +1252,6 @@ def _counter_items(counter, limit):
 
 def _file_brief(path):
     if isinstance(path, _RecordSource):
-        stat = path.path.stat() if path.path.exists() else None
         return {
             "name": f"{path.path.name}:{path.date}",
             "path": _display_path(path.path),
@@ -1233,8 +1259,8 @@ def _file_brief(path):
             "role": path.role,
             "dataSource": path.data_source,
             "recordCount": path.record_count,
-            "sizeBytes": stat.st_size if stat else 0,
-            "modifiedAt": datetime.fromtimestamp(stat.st_mtime).isoformat(timespec="seconds") if stat else "",
+            "sizeBytes": 0,
+            "modifiedAt": "",
         }
     stat = path.stat()
     return {

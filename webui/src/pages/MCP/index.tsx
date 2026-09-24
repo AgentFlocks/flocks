@@ -1,8 +1,18 @@
 import { useState, useEffect, useMemo } from 'react';
 import {
-  Server, RefreshCw, Power, PowerOff, Wrench, FileText,
-  Download, Search, ExternalLink, Star, Shield, Tag,
-} from 'lucide-react';
+  IconServer,
+  IconRefresh,
+  IconPower,
+  IconPlugOff,
+  IconTool,
+  IconFileText,
+  IconDownload,
+  IconSearch,
+  IconExternalLink,
+  IconStar,
+  IconShield,
+  IconTag,
+} from '@tabler/icons-react';
 import { useTranslation } from 'react-i18next';
 import PageHeader from '@/components/common/PageHeader';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
@@ -31,7 +41,7 @@ export default function MCPPage() {
       <PageHeader
         title={t('pageTitle')}
         description={t('pageDescription')}
-        icon={<Server className="w-8 h-8" />}
+        icon={<IconServer aria-hidden="true" className="w-8 h-8" />}
       />
 
       <div className="flex gap-1 mb-6 border-b border-gray-200">
@@ -44,7 +54,7 @@ export default function MCPPage() {
           }`}
         >
           <div className="flex items-center gap-2">
-            <Server className="w-4 h-4" />
+            <IconServer aria-hidden="true" className="w-4 h-4" />
             {t('tabs.myServers')}
           </div>
         </button>
@@ -57,7 +67,7 @@ export default function MCPPage() {
           }`}
         >
           <div className="flex items-center gap-2">
-            <Download className="w-4 h-4" />
+            <IconDownload aria-hidden="true" className="w-4 h-4" />
             {t('tabs.catalog')}
           </div>
         </button>
@@ -134,14 +144,14 @@ function ServersTab() {
       <div className="flex items-center justify-between mb-4">
         <div className="text-sm text-gray-600">{t('servers.count', { count: servers.length })}</div>
         <button onClick={fetchServers} className="flex items-center gap-2 px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700">
-          <RefreshCw className="w-4 h-4" /> {t('servers.refresh')}
+          <IconRefresh aria-hidden="true" className="w-4 h-4" /> {t('servers.refresh')}
         </button>
       </div>
 
       <div className="flex gap-6 flex-1 overflow-hidden">
         <div className="w-96 flex-col overflow-y-auto space-y-3">
           {servers.length === 0 ? (
-            <EmptyState icon={<Server className="w-12 h-12" />} title={t('servers.empty')} description={t('servers.emptyHint')} />
+            <EmptyState icon={<IconServer aria-hidden="true" className="w-12 h-12" />} title={t('servers.empty')} description={t('servers.emptyHint')} />
           ) : (
             servers.map((s) => (
               <div key={s.name} onClick={() => handleSelectServer(s)}
@@ -161,12 +171,12 @@ function ServersTab() {
                   {s.status === 'connected' ? (
                     <button onClick={(e) => { e.stopPropagation(); handleDisconnect(s.name); }}
                       className="flex-1 flex items-center justify-center gap-2 px-3 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50">
-                      <PowerOff className="w-4 h-4" /> {t('servers.disconnect')}
+                      <IconPlugOff aria-hidden="true" className="w-4 h-4" /> {t('servers.disconnect')}
                     </button>
                   ) : (
                     <button onClick={(e) => { e.stopPropagation(); handleConnect(s.name); }}
                       className="flex-1 flex items-center justify-center gap-2 px-3 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700">
-                      <Power className="w-4 h-4" /> {t('servers.connect')}
+                      <IconPower aria-hidden="true" className="w-4 h-4" /> {t('servers.connect')}
                     </button>
                   )}
                 </div>
@@ -184,7 +194,7 @@ function ServersTab() {
             <div className="p-6 overflow-y-auto">
               <div className="mb-6">
                 <div className="flex items-center gap-2 mb-3">
-                  <Wrench className="w-5 h-5 text-gray-700" />
+                  <IconTool aria-hidden="true" className="w-5 h-5 text-gray-700" />
                   <h3 className="text-lg font-semibold text-gray-900">{t('servers.tools')} ({selectedServer.tools.length})</h3>
                 </div>
                 {selectedServer.tools.length === 0 ? <p className="text-sm text-gray-600">{t('servers.noTools')}</p> : (
@@ -195,7 +205,7 @@ function ServersTab() {
               </div>
               <div>
                 <div className="flex items-center gap-2 mb-3">
-                  <FileText className="w-5 h-5 text-gray-700" />
+                  <IconFileText aria-hidden="true" className="w-5 h-5 text-gray-700" />
                   <h3 className="text-lg font-semibold text-gray-900">{t('servers.resources')} ({selectedServer.resources.length})</h3>
                 </div>
                 {selectedServer.resources.length === 0 ? <p className="text-sm text-gray-600">{t('servers.noResources')}</p> : (
@@ -319,7 +329,7 @@ function CatalogTab() {
       <div className="flex-1 flex flex-col overflow-hidden">
         {/* Search */}
         <div className="relative mb-4">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
+          <IconSearch aria-hidden="true" className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
           <input
             type="text"
             placeholder={t('catalog.searchPlaceholder')}
@@ -343,7 +353,7 @@ function CatalogTab() {
               <div
                 key={entry.id}
                 onClick={() => setSelectedEntry(entry)}
-                className={`bg-white rounded-lg border-2 p-4 cursor-pointer transition-all hover:shadow-md ${selectedEntry?.id === entry.id ? 'border-red-500 ring-2 ring-red-200' : 'border-gray-200 hover:border-gray-300'}`}
+                className={`bg-white rounded-lg border-2 p-4 cursor-pointer transition-all ${selectedEntry?.id === entry.id ? 'border-red-500 ring-2 ring-red-200' : 'border-gray-200 hover:border-gray-300'}`}
               >
                 <div className="flex items-start justify-between mb-2">
                   <div className="flex items-center gap-2">
@@ -351,7 +361,7 @@ function CatalogTab() {
                     {entry.official && <span className="px-1.5 py-0.5 bg-yellow-100 text-yellow-700 rounded text-[10px] font-medium">{t('catalog.official')}</span>}
                   </div>
                   <div className="flex items-center gap-1 text-xs text-gray-400">
-                    <Star className="w-3 h-3" />
+                    <IconStar aria-hidden="true" className="w-3 h-3" />
                     {entry.stars}
                   </div>
                 </div>
@@ -363,7 +373,7 @@ function CatalogTab() {
                     </span>
                     {Object.values(entry.env_vars).some(v => v.secret) && (
                       <span className="flex items-center gap-0.5 text-[10px] text-amber-600">
-                        <Shield className="w-3 h-3" /> {t('catalog.requiresSecret')}
+                        <IconShield aria-hidden="true" className="w-3 h-3" /> {t('catalog.requiresSecret')}
                       </span>
                     )}
                   </div>
@@ -372,7 +382,7 @@ function CatalogTab() {
                     disabled={installing === entry.id}
                     className="flex items-center gap-1 px-3 py-1.5 bg-red-600 text-white rounded-lg text-xs hover:bg-red-700 disabled:opacity-50"
                   >
-                    <Download className="w-3 h-3" />
+                    <IconDownload aria-hidden="true" className="w-3 h-3" />
                     {installing === entry.id ? t('catalog.installing') : t('catalog.install')}
                   </button>
                 </div>
@@ -380,7 +390,7 @@ function CatalogTab() {
             ))}
           </div>
           {filtered.length === 0 && (
-            <EmptyState icon={<Search className="w-12 h-12" />} title={t('catalog.noResults')} description={t('catalog.noResultsHint')} />
+            <EmptyState icon={<IconSearch aria-hidden="true" className="w-12 h-12" />} title={t('catalog.noResults')} description={t('catalog.noResultsHint')} />
           )}
         </div>
       </div>
@@ -420,7 +430,7 @@ function CatalogTab() {
             {/* Tags */}
             <div>
                 <div className="flex items-center gap-1 text-xs text-gray-400 mb-2">
-                <Tag className="w-3 h-3" /> {t('catalog.tags')}
+                <IconTag aria-hidden="true" className="w-3 h-3" /> {t('catalog.tags')}
               </div>
               <div className="flex flex-wrap gap-1.5">
                 {selectedEntry.tags.map(tag => (
@@ -433,7 +443,7 @@ function CatalogTab() {
             {Object.keys(selectedEntry.env_vars).length > 0 && (
               <div>
                 <div className="flex items-center gap-1 text-xs text-gray-400 mb-2">
-                  <Shield className="w-3 h-3" /> {t('catalog.envVars')}
+                  <IconShield aria-hidden="true" className="w-3 h-3" /> {t('catalog.envVars')}
                 </div>
                 <div className="space-y-2">
                   {Object.entries(selectedEntry.env_vars).map(([key, spec]) => (
@@ -441,7 +451,7 @@ function CatalogTab() {
                       <div className="flex items-center gap-1">
                         <code className="font-mono text-gray-800 bg-gray-50 px-1.5 py-0.5 rounded">{key}</code>
                         {spec.required && <span className="text-red-500">*</span>}
-                        {spec.secret && <Shield className="w-3 h-3 text-amber-500" />}
+                        {spec.secret && <IconShield aria-hidden="true" className="w-3 h-3 text-amber-500" />}
                       </div>
                       <p className="text-gray-500 mt-0.5">{spec.description}</p>
                     </div>
@@ -479,7 +489,7 @@ function CatalogTab() {
               rel="noopener noreferrer"
               className="flex items-center gap-2 text-sm text-red-600 hover:text-red-700"
             >
-              <ExternalLink className="w-4 h-4" />
+              <IconExternalLink aria-hidden="true" className="w-4 h-4" />
               {t('catalog.githubRepo')}
             </a>
           </div>
@@ -491,7 +501,7 @@ function CatalogTab() {
               disabled={installing === selectedEntry.id}
               className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-red-600 text-white rounded-lg hover:bg-red-700 disabled:opacity-50 font-medium"
             >
-              <Download className="w-4 h-4" />
+              <IconDownload aria-hidden="true" className="w-4 h-4" />
               {installing === selectedEntry.id ? t('catalog.installing') : t('catalog.addToMyServers')}
             </button>
           </div>

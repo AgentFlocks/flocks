@@ -27,17 +27,25 @@ export const EditTool = Tool.define("edit", {
   description: DESCRIPTION,
   parameters: z.object({
     filePath: z.string().describe("The absolute path to the file to modify"),
-    oldString: z.string().describe("The text to replace"),
-    newString: z.string().describe("The text to replace it with (must be different from oldString)"),
-    replaceAll: z.boolean().optional().describe("Replace all occurrences of oldString (default false)"),
+    edits: z
+      .array(
+        z.object({
+          oldString: z.string().min(1).describe("Unique text to replace in the original file"),
+          newString: z.string().describe("Replacement text, which must differ from oldString"),
+        }),
+      )
+      .min(1)
+      .describe("One or more non-overlapping replacements matched against the original file"),
   }),
   async execute(params, ctx) {
     if (!params.filePath) {
       throw new Error("filePath is required")
     }
 
-    if (params.oldString === params.newString) {
-      throw new Error("oldString and newString must be different")
+    for (const [index, edit] of params.edits.entries()) {
+      if (edit.oldString === edit.newString) {
+        throw new Error(`edits[${index}].oldString and newString must be different`)
+      }
     }
 
     const filePath = path.isAbsolute(params.filePath) ? params.filePath : path.join(Instance.directory, params.filePath)
@@ -47,33 +55,13 @@ export const EditTool = Tool.define("edit", {
     let contentOld = ""
     let contentNew = ""
     await FileTime.withLock(filePath, async () => {
-      if (params.oldString === "") {
-        contentNew = params.newString
-        diff = trimDiff(createTwoFilesPatch(filePath, filePath, contentOld, contentNew))
-        await ctx.ask({
-          permission: "edit",
-          patterns: [path.relative(Instance.worktree, filePath)],
-          always: ["*"],
-          metadata: {
-            filepath: filePath,
-            diff,
-          },
-        })
-        await Bun.write(filePath, params.newString)
-        await Bus.publish(File.Event.Edited, {
-          file: filePath,
-        })
-        FileTime.read(ctx.sessionID, filePath)
-        return
-      }
-
       const file = Bun.file(filePath)
       const stats = await file.stat().catch(() => {})
       if (!stats) throw new Error(`File ${filePath} not found`)
       if (stats.isDirectory()) throw new Error(`Path is a directory, not a file: ${filePath}`)
       await FileTime.assert(ctx.sessionID, filePath)
       contentOld = await file.text()
-      contentNew = replace(contentOld, params.oldString, params.newString, params.replaceAll)
+      contentNew = replaceEdits(contentOld, params.edits)
 
       diff = trimDiff(
         createTwoFilesPatch(filePath, filePath, normalizeLineEndings(contentOld), normalizeLineEndings(contentNew)),
@@ -472,8 +460,7 @@ export const EscapeNormalizedReplacer: Replacer = function* (content, find) {
 }
 
 export const MultiOccurrenceReplacer: Replacer = function* (content, find) {
-  // This replacer yields all exact matches, allowing the replace function
-  // to handle multiple occurrences based on replaceAll parameter
+  // Yield exact matches so the caller can reject ambiguous replacement targets.
   let startIndex = 0
 
   while (true) {
@@ -605,9 +592,9 @@ export function trimDiff(diff: string): string {
   return trimmedLines.join("\n")
 }
 
-export function replace(content: string, oldString: string, newString: string, replaceAll = false): string {
-  if (oldString === newString) {
-    throw new Error("oldString and newString must be different")
+function findUniqueMatch(content: string, oldString: string): { index: number; search: string } {
+  if (oldString === "") {
+    throw new Error("oldString must not be empty")
   }
 
   let notFound = true
@@ -627,12 +614,8 @@ export function replace(content: string, oldString: string, newString: string, r
       const index = content.indexOf(search)
       if (index === -1) continue
       notFound = false
-      if (replaceAll) {
-        return content.replaceAll(search, newString)
-      }
-      const lastIndex = content.lastIndexOf(search)
-      if (index !== lastIndex) continue
-      return content.substring(0, index) + newString + content.substring(index + search.length)
+      if (index !== content.lastIndexOf(search)) continue
+      return { index, search }
     }
   }
 
@@ -642,4 +625,52 @@ export function replace(content: string, oldString: string, newString: string, r
   throw new Error(
     "Found multiple matches for oldString. Provide more surrounding lines in oldString to identify the correct match.",
   )
+}
+
+export function replace(content: string, oldString: string, newString: string): string {
+  if (oldString === newString) {
+    throw new Error("oldString and newString must be different")
+  }
+
+  const match = findUniqueMatch(content, oldString)
+  return content.substring(0, match.index) + newString + content.substring(match.index + match.search.length)
+}
+
+export function replaceEdits(
+  content: string,
+  edits: Array<{ oldString: string; newString: string }>,
+): string {
+  if (edits.length === 0) {
+    throw new Error("edits must contain at least one replacement")
+  }
+
+  const matches = edits.map((edit, editIndex) => {
+    if (edit.oldString === edit.newString) {
+      throw new Error(`edits[${editIndex}].oldString and newString must be different`)
+    }
+    const match = findUniqueMatch(content, edit.oldString)
+    return {
+      editIndex,
+      start: match.index,
+      end: match.index + match.search.length,
+      newString: edit.newString,
+    }
+  })
+
+  matches.sort((a, b) => a.start - b.start)
+  for (let index = 1; index < matches.length; index++) {
+    const previous = matches[index - 1]
+    const current = matches[index]
+    if (previous.end > current.start) {
+      throw new Error(
+        `edits[${previous.editIndex}] and edits[${current.editIndex}] overlap; merge them into one edit or target disjoint regions`,
+      )
+    }
+  }
+
+  let result = content
+  for (const match of matches.reverse()) {
+    result = result.substring(0, match.start) + match.newString + result.substring(match.end)
+  }
+  return result
 }

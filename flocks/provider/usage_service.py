@@ -12,7 +12,6 @@ import uuid
 from datetime import UTC, datetime
 from typing import Dict, List, Optional, Sequence, Tuple
 
-import aiosqlite
 from pydantic import BaseModel, Field
 
 from flocks.provider.cost_calculator import CostCalculator
@@ -20,6 +19,7 @@ from flocks.provider.provider import Provider
 from flocks.provider.types import PriceConfig, UsageCost, UsageRecord
 from flocks.session.message import Message
 from flocks.session.session import Session
+from flocks.db.params import Params, in_clause
 from flocks.storage.storage import Storage
 from flocks.utils.log import Log
 
@@ -36,12 +36,14 @@ class RecordUsageRequest(BaseModel):
     credential_id: Optional[str] = None
     session_id: Optional[str] = None
     message_id: Optional[str] = None
-    input_tokens: int = 0
-    output_tokens: int = 0
-    cached_tokens: int = 0
-    cache_write_tokens: int = 0
-    reasoning_tokens: int = 0
-    latency_ms: Optional[int] = None
+    # Token counters are quantities: a negative value can only be a caller
+    # bug and would corrupt cost / usage aggregates, so reject it (422).
+    input_tokens: int = Field(0, ge=0)
+    output_tokens: int = Field(0, ge=0)
+    cached_tokens: int = Field(0, ge=0)
+    cache_write_tokens: int = Field(0, ge=0)
+    reasoning_tokens: int = Field(0, ge=0)
+    latency_ms: Optional[int] = Field(None, ge=0)
     pricing: Optional[PriceConfig] = None
     cost_override: Optional[UsageCost] = None
     source: str = "live"
@@ -176,7 +178,7 @@ def _currency_rollup(cost_rows: Sequence[Tuple[str, float]]) -> tuple[float, str
     return 0.0, "MIXED", grouped
 
 
-def _usage_record_from_row(row: aiosqlite.Row) -> UsageRecord:
+def _usage_record_from_row(row) -> UsageRecord:
     """Convert a database row into a UsageRecord."""
     created_at = datetime.fromisoformat(row["created_at"])
     backfilled_at = (
@@ -209,43 +211,39 @@ def _usage_record_from_row(row: aiosqlite.Row) -> UsageRecord:
 
 
 def _build_filters(
+    dialect,
     *,
     start_date: Optional[str],
     end_date: Optional[str],
     provider_id: Optional[str],
     model_id: Optional[str],
     session_ids: Optional[Sequence[str]],
-) -> tuple[str, List[str]]:
-    """Build SQL filters for usage queries."""
+) -> tuple[str, tuple]:
+    """Build SQL filters for usage queries.
+
+    Markers come from Params rather than a literal ``?`` so the clause is
+    correct on a backend that numbers its parameters.
+    """
+    params = Params(dialect)
     clauses: List[str] = []
-    params: List[str] = []
 
     if start_date:
-        clauses.append("created_at >= ?")
-        params.append(start_date)
+        clauses.append(f"created_at >= {params.add(start_date)}")
     if end_date:
-        clauses.append("created_at <= ?")
-        params.append(end_date)
+        clauses.append(f"created_at <= {params.add(end_date)}")
     if provider_id:
-        clauses.append("provider_id = ?")
-        params.append(provider_id)
+        clauses.append(f"provider_id = {params.add(provider_id)}")
     if model_id:
-        clauses.append("model_id = ?")
-        params.append(model_id)
+        clauses.append(f"model_id = {params.add(model_id)}")
     if session_ids is not None:
-        if not session_ids:
-            clauses.append("1 = 0")
-        else:
-            placeholders = ", ".join("?" for _ in session_ids)
-            clauses.append(f"session_id IN ({placeholders})")
-            params.extend(session_ids)
+        clauses.append(in_clause(params, "session_id", session_ids))
 
     where_sql = f" WHERE {' AND '.join(clauses)}" if clauses else ""
-    return where_sql, params
+    return where_sql, params.values
 
 
 async def _get_existing_usage_record(
-    db: aiosqlite.Connection,
+    handle,
     *,
     session_id: Optional[str],
     message_id: Optional[str],
@@ -253,41 +251,41 @@ async def _get_existing_usage_record(
     """Look up an existing usage record for an assistant message."""
     if not session_id or not message_id:
         return None
-    async with db.execute(
-        """SELECT id, provider_id, model_id, credential_id, session_id, message_id,
+    mark = handle.dialect.placeholder
+    row = await handle.fetch_one_mapping(
+        f"""SELECT id, provider_id, model_id, credential_id, session_id, message_id,
                   input_tokens, output_tokens, cached_tokens, cache_write_tokens, reasoning_tokens,
                   total_tokens, input_cost, output_cost, total_cost, currency,
                   latency_ms, source, created_at, backfilled_at
            FROM usage_records
-           WHERE session_id = ? AND message_id = ?
+           WHERE session_id = {mark(1)} AND message_id = {mark(2)}
            LIMIT 1""",
         (session_id, message_id),
-    ) as cursor:
-        row = await cursor.fetchone()
+    )
     return _usage_record_from_row(row) if row else None
 
 
 async def usage_record_exists(*, session_id: str, message_id: str) -> bool:
     """Check whether a usage row already exists for a message."""
-    await Storage._ensure_init()
-    async with Storage.connect(Storage._db_path) as db:
-        async with db.execute(
-            "SELECT 1 FROM usage_records WHERE session_id = ? AND message_id = ? LIMIT 1",
+    async with Storage.transaction(Storage._db_path) as handle:
+        mark = handle.dialect.placeholder
+        row = await handle.fetch_one(
+            f"SELECT 1 FROM usage_records WHERE session_id = {mark(1)} "
+            f"AND message_id = {mark(2)} LIMIT 1",
             (session_id, message_id),
-        ) as cursor:
-            row = await cursor.fetchone()
+        )
     return row is not None
 
 
 async def _get_recorded_message_ids(session_id: str) -> set[str]:
     """Return all assistant message ids already present in usage_records."""
-    await Storage._ensure_init()
-    async with Storage.connect(Storage._db_path) as db:
-        async with db.execute(
-            "SELECT message_id FROM usage_records WHERE session_id = ? AND message_id IS NOT NULL",
+    async with Storage.transaction(Storage._db_path) as handle:
+        mark = handle.dialect.placeholder
+        rows = await handle.fetch_all(
+            f"SELECT message_id FROM usage_records WHERE session_id = {mark(1)} "
+            "AND message_id IS NOT NULL",
             (session_id,),
-        ) as cursor:
-            rows = await cursor.fetchall()
+        )
     return {row[0] for row in rows if row[0]}
 
 
@@ -334,10 +332,10 @@ async def record_usage(req: RecordUsageRequest) -> UsageRecord:
         total_cost = 0.0
         currency = "USD"
 
-    async with Storage.connect(Storage._db_path) as db:
-        db.row_factory = aiosqlite.Row
+    async with Storage.transaction(Storage._db_path) as handle:
+        mark = handle.dialect.placeholder
         existing = await _get_existing_usage_record(
-            db,
+            handle,
             session_id=req.session_id,
             message_id=req.message_id,
         )
@@ -345,13 +343,14 @@ async def record_usage(req: RecordUsageRequest) -> UsageRecord:
             return existing
 
         record_id = str(uuid.uuid4())
-        await db.execute(
-            """INSERT INTO usage_records
+        markers = ", ".join(mark(position) for position in range(1, 21))
+        await handle.execute(
+            f"""INSERT INTO usage_records
                (id, provider_id, model_id, credential_id, session_id, message_id,
                 input_tokens, output_tokens, cached_tokens, cache_write_tokens, reasoning_tokens,
                 total_tokens, input_cost, output_cost, total_cost, currency,
                 latency_ms, source, created_at, backfilled_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES ({markers})""",
             (
                 record_id,
                 req.provider_id,
@@ -375,7 +374,7 @@ async def record_usage(req: RecordUsageRequest) -> UsageRecord:
                 req.backfilled_at.isoformat() if req.backfilled_at else None,
             ),
         )
-        await db.commit()
+        # Storage.transaction commits when the block exits.
 
     return UsageRecord(
         id=record_id,
@@ -411,17 +410,16 @@ async def get_usage_records(
 ) -> List[UsageRecord]:
     """Return raw usage rows for callers that need custom aggregation."""
     await ensure_usage_backfilled()
-    await Storage._ensure_init()
-    where_sql, params = _build_filters(
-        start_date=start_date,
-        end_date=end_date,
-        provider_id=provider_id,
-        model_id=model_id,
-        session_ids=session_ids,
-    )
-    async with Storage.connect(Storage._db_path) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute(
+    async with Storage.transaction(Storage._db_path) as handle:
+        where_sql, params = _build_filters(
+            handle.dialect,
+            start_date=start_date,
+            end_date=end_date,
+            provider_id=provider_id,
+            model_id=model_id,
+            session_ids=session_ids,
+        )
+        rows = await handle.fetch_all_mappings(
             f"""SELECT id, provider_id, model_id, credential_id, session_id, message_id,
                        input_tokens, output_tokens, cached_tokens, cache_write_tokens, reasoning_tokens,
                        total_tokens, input_cost, output_cost, total_cost, currency,
@@ -429,8 +427,7 @@ async def get_usage_records(
                 FROM usage_records{where_sql}
                 ORDER BY created_at ASC""",
             params,
-        ) as cursor:
-            rows = await cursor.fetchall()
+        )
     return [_usage_record_from_row(row) for row in rows]
 
 
@@ -444,19 +441,17 @@ async def get_usage_stats(
 ) -> UsageStatsResponse:
     """Query aggregated usage stats from SQLite."""
     await ensure_usage_backfilled()
-    await Storage._ensure_init()
-    where_sql, params = _build_filters(
-        start_date=start_date,
-        end_date=end_date,
-        provider_id=provider_id,
-        model_id=model_id,
-        session_ids=session_ids,
-    )
+    async with Storage.transaction(Storage._db_path) as handle:
+        where_sql, params = _build_filters(
+            handle.dialect,
+            start_date=start_date,
+            end_date=end_date,
+            provider_id=provider_id,
+            model_id=model_id,
+            session_ids=session_ids,
+        )
 
-    async with Storage.connect(Storage._db_path) as db:
-        db.row_factory = aiosqlite.Row
-
-        async with db.execute(
+        totals_row = await handle.fetch_one_mapping(
             f"""SELECT
                     COALESCE(SUM(total_tokens), 0) AS total_tokens,
                     COALESCE(SUM(input_tokens), 0) AS total_input,
@@ -464,17 +459,15 @@ async def get_usage_stats(
                     COUNT(*) AS total_requests
                 FROM usage_records{where_sql}""",
             params,
-        ) as cursor:
-            totals_row = await cursor.fetchone()
+        )
 
-        async with db.execute(
+        summary_cost_rows = await handle.fetch_all_mappings(
             f"""SELECT currency, COALESCE(SUM(total_cost), 0) AS total_cost
                 FROM usage_records{where_sql}
                 GROUP BY currency
                 ORDER BY currency ASC""",
             params,
-        ) as cursor:
-            summary_cost_rows = await cursor.fetchall()
+        )
 
         summary_total_cost, summary_currency, summary_cost_by_currency = _currency_rollup(
             [(row["currency"], row["total_cost"]) for row in summary_cost_rows]
@@ -489,7 +482,7 @@ async def get_usage_stats(
             cost_by_currency=summary_cost_by_currency,
         )
 
-        async with db.execute(
+        provider_rows = await handle.fetch_all_mappings(
             f"""SELECT provider_id, currency,
                        COALESCE(SUM(total_tokens), 0) AS total_tokens,
                        COALESCE(SUM(total_cost), 0) AS total_cost,
@@ -498,8 +491,7 @@ async def get_usage_stats(
                 GROUP BY provider_id, currency
                 ORDER BY provider_id ASC, currency ASC""",
             params,
-        ) as cursor:
-            provider_rows = await cursor.fetchall()
+        )
 
         provider_agg: Dict[str, Dict[str, object]] = {}
         for row in provider_rows:
@@ -530,7 +522,7 @@ async def get_usage_stats(
                 )
             )
 
-        async with db.execute(
+        model_rows = await handle.fetch_all_mappings(
             f"""SELECT provider_id, model_id, currency,
                        COALESCE(SUM(total_tokens), 0) AS total_tokens,
                        COALESCE(SUM(total_cost), 0) AS total_cost,
@@ -539,8 +531,7 @@ async def get_usage_stats(
                 GROUP BY provider_id, model_id, currency
                 ORDER BY provider_id ASC, model_id ASC, currency ASC""",
             params,
-        ) as cursor:
-            model_rows = await cursor.fetchall()
+        )
 
         model_agg: Dict[tuple[str, str], Dict[str, object]] = {}
         for row in model_rows:
@@ -574,18 +565,17 @@ async def get_usage_stats(
                 )
             )
 
-        async with db.execute(
-            f"""SELECT DATE(created_at) AS date, currency,
+        daily_rows = await handle.fetch_all_mappings(
+            f"""SELECT {handle.dialect.date_of("created_at")} AS date, currency,
                        COALESCE(SUM(total_tokens), 0) AS total_tokens,
                        COALESCE(SUM(total_cost), 0) AS total_cost,
                        COUNT(*) AS request_count
                 FROM usage_records{where_sql}
-                GROUP BY DATE(created_at), currency
+                GROUP BY {handle.dialect.date_of("created_at")}, currency
                 ORDER BY date DESC, currency ASC
                 LIMIT 180""",
             params,
-        ) as cursor:
-            daily_rows = await cursor.fetchall()
+        )
 
         daily_agg: Dict[str, Dict[str, object]] = {}
         for row in daily_rows:
@@ -608,7 +598,7 @@ async def get_usage_stats(
             total_cost, currency, cost_by_currency = _currency_rollup(aggregate["cost_rows"])
             daily.append(
                 DailyUsageSummary(
-                    date=date_key,
+                    date=date_key.isoformat() if hasattr(date_key, "isoformat") else str(date_key),
                     total_tokens=aggregate["total_tokens"],
                     total_cost=total_cost,
                     request_count=aggregate["request_count"],

@@ -42,7 +42,7 @@ bun run preview
 - **Zustand** - 状态管理
 - **Axios** - HTTP 客户端
 - **@xyflow/react** - 工作流 DAG 可视化
-- **Lucide React** - 图标库
+- **@tabler/icons-react** - 图标库（Tabler Outline，见 UI_SPEC.md）
 
 ## 项目结构
 
@@ -59,6 +59,10 @@ src/
 ├── config/        # 配置
 └── styles/        # 样式文件
 ```
+
+## 界面规范
+
+所有界面按 [UI_SPEC.md](./UI_SPEC.md) 写（设计源 `design/flocks-ui-spec-v1.4.html`，浅色 / 深色并排样板）：颜色只用 `src/styles/tokens.css` 暴露的语义类（`bg-surface`、`text-fg-secondary`、`border-line`、`bg-action`、`text-success + bg-success-soft`…），字号 `text-xs` / `text-sm` / `text-title-*`，控件高 36、圆角 8、卡片 12，图标用 `@tabler/icons-react`，常用组件直接用 `index.css` 里的 `ui-*` 类。提交前跑 `python3 ../scripts/ui_spec_check.py`（CI 阻断，按基线只减不增）。
 
 ## 开发规范
 

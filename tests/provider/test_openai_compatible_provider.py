@@ -3,6 +3,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from flocks.net.http import ProxyRoutingTransport
 from flocks.provider.provider import ChatMessage, ChatResponse
 from flocks.provider.provider import ProviderConfig
 from flocks.provider.sdk.openai_compatible import OpenAICompatibleProvider
@@ -52,8 +53,11 @@ class TestOpenAICompatibleProviderConfiguration:
         # so minor adjustments to non-critical values don't break the test.
         assert mock_http_client.call_count == 1
         kwargs = mock_http_client.call_args.kwargs
-        assert kwargs["verify"] is False
-        assert kwargs["trust_env"] is True
+        # verify_ssl lands on the routing transport (one direct + one per proxy), and
+        # the client runs with trust_env=False: the outbound proxy policy decides.
+        assert kwargs["trust_env"] is False
+        assert isinstance(kwargs["transport"], ProxyRoutingTransport)
+        assert kwargs["transport"].verify is False
         timeout_arg = kwargs["timeout"]
         assert getattr(timeout_arg, "connect", None) == 30.0
         assert getattr(timeout_arg, "read", None) == 180.0

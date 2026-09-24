@@ -17,7 +17,7 @@ import {
   NodeProps,
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
-import { Code2, Zap, GitBranch, RotateCw, RotateCcw, X, ChevronRight, ChevronUp, ChevronDown, Wrench, Sparkles, Globe, Workflow, ZoomIn, ZoomOut, Scan } from 'lucide-react';
+import { IconCode, IconBolt, IconGitBranch, IconRotateClockwise, IconRotate, IconX, IconChevronRight, IconChevronUp, IconChevronDown, IconTool, IconSparkles, IconWorld, IconRouteSquare2, IconZoomIn, IconZoomOut, IconMaximize } from '@tabler/icons-react';
 import { WorkflowJSON, WorkflowNode as APINode } from '@/api/workflow';
 import { ThemeContext } from '@/contexts/ThemeContext';
 import {
@@ -182,23 +182,23 @@ const TYPE_CONFIG: Record<string, NodeStyle> = {
 };
 
 const TYPE_ICONS: Record<string, React.ReactNode> = {
-  python: <Code2 className="w-3.5 h-3.5" />,
-  logic: <Zap className="w-3.5 h-3.5" />,
-  branch: <GitBranch className="w-3.5 h-3.5" />,
-  loop: <RotateCw className="w-3.5 h-3.5" />,
-  tool: <Wrench className="w-3.5 h-3.5" />,
-  llm: <Sparkles className="w-3.5 h-3.5" />,
-  http_request: <Globe className="w-3.5 h-3.5" />,
-  subworkflow: <Workflow className="w-3.5 h-3.5" />,
-  schedule: <RotateCw className="w-3.5 h-3.5" />,
-  webhook: <Globe className="w-3.5 h-3.5" />,
-  custom_webhook: <Globe className="w-3.5 h-3.5" />,
-  kafka: <Workflow className="w-3.5 h-3.5" />,
-  syslog: <Zap className="w-3.5 h-3.5" />,
-  internal_event: <Sparkles className="w-3.5 h-3.5" />,
-  custom_adapter: <Wrench className="w-3.5 h-3.5" />,
-  manual: <Code2 className="w-3.5 h-3.5" />,
-  plugin: <Wrench className="w-3.5 h-3.5" />,
+  python: <IconCode aria-hidden="true" className="w-3.5 h-3.5" />,
+  logic: <IconBolt aria-hidden="true" className="w-3.5 h-3.5" />,
+  branch: <IconGitBranch aria-hidden="true" className="w-3.5 h-3.5" />,
+  loop: <IconRotateClockwise aria-hidden="true" className="w-3.5 h-3.5" />,
+  tool: <IconTool aria-hidden="true" className="w-3.5 h-3.5" />,
+  llm: <IconSparkles aria-hidden="true" className="w-3.5 h-3.5" />,
+  http_request: <IconWorld aria-hidden="true" className="w-3.5 h-3.5" />,
+  subworkflow: <IconRouteSquare2 aria-hidden="true" className="w-3.5 h-3.5" />,
+  schedule: <IconRotateClockwise aria-hidden="true" className="w-3.5 h-3.5" />,
+  webhook: <IconWorld aria-hidden="true" className="w-3.5 h-3.5" />,
+  custom_webhook: <IconWorld aria-hidden="true" className="w-3.5 h-3.5" />,
+  kafka: <IconRouteSquare2 aria-hidden="true" className="w-3.5 h-3.5" />,
+  syslog: <IconBolt aria-hidden="true" className="w-3.5 h-3.5" />,
+  internal_event: <IconSparkles aria-hidden="true" className="w-3.5 h-3.5" />,
+  custom_adapter: <IconTool aria-hidden="true" className="w-3.5 h-3.5" />,
+  manual: <IconCode aria-hidden="true" className="w-3.5 h-3.5" />,
+  plugin: <IconTool aria-hidden="true" className="w-3.5 h-3.5" />,
 };
 
 const TYPE_LABELS: Record<string, string> = {
@@ -273,7 +273,7 @@ const ViewNode = memo(function ViewNode({ data, selected }: NodeProps) {
         ${cfg.bg} ${cfg.border} border-2 rounded-xl shadow-sm
         w-[220px] cursor-pointer select-none
         transition-all duration-150
-        ${selected ? 'shadow-md ring-2 ring-offset-1 ring-red-300' : 'hover:shadow-md'}
+        ${selected ? 'ring-2 ring-offset-1 ring-red-300' : ''}
       `}
       onClick={() => {
         if (!d.isTrigger) d.onNodeClick?.(d.label);
@@ -324,7 +324,7 @@ const ViewNode = memo(function ViewNode({ data, selected }: NodeProps) {
       {!d.isTrigger && (
         <div className="px-3 pb-2 flex items-center justify-end">
           <span className="text-xs text-gray-300 flex items-center gap-0.5">
-            {t('detail.flow.details')} <ChevronRight className="w-3 h-3" />
+            {t('detail.flow.details')} <IconChevronRight aria-hidden="true" className="w-3 h-3" />
           </span>
         </div>
       )}
@@ -394,7 +394,7 @@ function NodeDetailModal({ node, isStart, onClose }: NodeDetailModalProps) {
             onClick={onClose}
             className="text-gray-400 hover:text-gray-700 transition-colors p-1 rounded-lg hover:bg-white/60"
           >
-            <X className="w-5 h-5" />
+            <IconX aria-hidden="true" className="w-5 h-5" />
           </button>
         </div>
 
@@ -818,16 +818,16 @@ function FlowCanvasInner({ workflowJson, editable = false, onNodeClick: external
         {!controlsCollapsed && (
           <div className="flex w-full flex-col divide-y divide-slate-100 overflow-visible rounded-lg border border-slate-200 bg-white/90 backdrop-blur dark:divide-zinc-800 dark:border-zinc-700 dark:bg-zinc-900/90">
             <CanvasControlButton label={t('detail.flowControls.zoomIn')} onClick={handleZoomIn}>
-              <ZoomIn className="h-4 w-4" strokeWidth={1.8} />
+              <IconZoomIn aria-hidden="true" className="h-4 w-4" stroke={1.8} />
             </CanvasControlButton>
             <CanvasControlButton label={t('detail.flowControls.zoomOut')} onClick={handleZoomOut}>
-              <ZoomOut className="h-4 w-4" strokeWidth={1.8} />
+              <IconZoomOut aria-hidden="true" className="h-4 w-4" stroke={1.8} />
             </CanvasControlButton>
             <CanvasControlButton label={t('detail.flowControls.fitView')} onClick={handleFitView}>
-              <Scan className="h-4 w-4" strokeWidth={1.8} />
+              <IconMaximize aria-hidden="true" className="h-4 w-4" stroke={1.8} />
             </CanvasControlButton>
             <CanvasControlButton label={t('detail.resetLayout')} onClick={resetLayout}>
-              <RotateCcw className="h-4 w-4" strokeWidth={1.8} />
+              <IconRotate aria-hidden="true" className="h-4 w-4" stroke={1.8} />
             </CanvasControlButton>
           </div>
         )}
@@ -838,9 +838,9 @@ function FlowCanvasInner({ workflowJson, editable = false, onNodeClick: external
           className="flex h-8 w-full items-center justify-center rounded-lg border border-slate-200 bg-white/90 text-slate-500 backdrop-blur transition-colors hover:bg-slate-50 hover:text-slate-700 focus:outline-none focus:ring-2 focus:ring-red-100 dark:border-zinc-700 dark:bg-zinc-900/90 dark:text-zinc-300 dark:hover:bg-zinc-800 dark:hover:text-zinc-50 dark:focus:ring-zinc-700"
         >
           {controlsCollapsed ? (
-            <ChevronDown className="h-4 w-4" strokeWidth={1.8} />
+            <IconChevronDown aria-hidden="true" className="h-4 w-4" stroke={1.8} />
           ) : (
-            <ChevronUp className="h-4 w-4" strokeWidth={1.8} />
+            <IconChevronUp aria-hidden="true" className="h-4 w-4" stroke={1.8} />
           )}
         </button>
       </div>

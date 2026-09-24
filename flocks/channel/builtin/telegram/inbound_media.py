@@ -22,12 +22,12 @@ from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import unquote, urlparse
 
-import httpx
 
 from flocks.channel.base import InboundMessage
 from flocks.channel.media_filename import sanitize_filename
 from flocks.utils.log import Log
 from .config import resolve_account_config, resolve_api_base
+from flocks.net.http import async_client
 
 log = Log.create(service="channel.telegram.media")
 
@@ -103,7 +103,7 @@ async def _get_file_path(
 ) -> tuple[str, str]:
     """Call ``/getFile`` and return ``(file_path, file_id)``."""
     url = f"{api_base.rstrip('/')}/getFile"
-    async with httpx.AsyncClient(timeout=timeout) as client:
+    async with async_client(timeout=timeout) as client:
         resp = await client.get(
             url, params={"file_id": file_id},
         )
@@ -134,7 +134,7 @@ async def _download_file(
     timeout: float,
 ) -> bytes:
     url = f"{download_base.rstrip('/')}/{file_path.lstrip('/')}"
-    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+    async with async_client(timeout=timeout, follow_redirects=True) as client:
         async with client.stream("GET", url) as resp:
             resp.raise_for_status()
             content_length = resp.headers.get("content-length")

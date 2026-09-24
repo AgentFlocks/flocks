@@ -1,7 +1,7 @@
 import React from 'react';
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { ContextUsageSnapshot } from '@/api/session';
 import type { Message } from '@/types';
@@ -14,7 +14,6 @@ import {
   buildTodoSummary,
   ChatMessageBubble,
   ChatToolPart,
-  dedupeUploadedDocumentAttachments,
   default as SessionChat,
   getCompactionDividerClassName,
   getEditingActionBarClassName,
@@ -31,7 +30,6 @@ import {
   getUserAvatarSpacerClassName,
   hasActiveToolPart,
   isActiveSessionStatus,
-  listUploadedDocumentPaths,
   shouldRenderMessage,
   shouldForwardSSEEventToParent,
   shouldRefetchFinishedMessage,
@@ -42,6 +40,7 @@ import { areChatMessagePartsRenderEqual } from './sessionChatRenderEquality';
 
 const clientGetMock = vi.fn();
 const clientPostMock = vi.fn();
+const clientDeleteMock = vi.fn();
 const sessionApiListPromptQueueMock = vi.fn();
 const sessionApiEnqueuePromptMock = vi.fn();
 const sessionApiUpdateQueuedPromptMock = vi.fn();
@@ -211,6 +210,7 @@ vi.mock('@/api/client', () => ({
   default: {
     get: (...args: unknown[]) => clientGetMock(...args),
     post: (...args: unknown[]) => clientPostMock(...args),
+    delete: (...args: unknown[]) => clientDeleteMock(...args),
   },
   getApiBase: () => '',
 }));
@@ -228,6 +228,8 @@ vi.mock('@/api/session', () => ({
     resendMessage: (...args: unknown[]) => sessionApiResendMessageMock(...args),
     regenerateMessage: (...args: unknown[]) => sessionApiRegenerateMessageMock(...args),
     getContextUsage: (...args: unknown[]) => sessionApiGetContextUsageMock(...args),
+    contextFilePreviewUrl: (sessionId: string, resourceId: string) => `/api/session/${sessionId}/context/files/${resourceId}/preview`,
+    contextFileDownloadUrl: (sessionId: string, resourceId: string) => `/api/session/${sessionId}/context/files/${resourceId}/download`,
   },
 }));
 
@@ -254,6 +256,7 @@ beforeEach(() => {
   });
   clientGetMock.mockResolvedValue({ data: {} });
   clientPostMock.mockResolvedValue({ data: {} });
+  clientDeleteMock.mockResolvedValue({ data: { removed: true } });
   sessionApiListPromptQueueMock.mockResolvedValue({ items: [] });
   sessionApiEnqueuePromptMock.mockResolvedValue({});
   sessionApiUpdateQueuedPromptMock.mockResolvedValue({});
@@ -502,7 +505,7 @@ describe('SessionChat focused message deep links', () => {
       truncateAfterMessage: vi.fn(),
     });
 
-    render(React.createElement(SessionChat, {
+    const { rerender } = render(React.createElement(SessionChat, {
       sessionId: 'sess-1',
       focusMessageId: 'target-message',
       onFocusMessageConsumed,
@@ -510,6 +513,11 @@ describe('SessionChat focused message deep links', () => {
 
     await waitFor(() => expect(window.HTMLElement.prototype.scrollIntoView).toHaveBeenCalled());
     expect(onFocusMessageConsumed).toHaveBeenCalledTimes(1);
+    rerender(React.createElement(SessionChat, { sessionId: 'sess-1', onFocusMessageConsumed }));
+    rerender(React.createElement(SessionChat, {
+      sessionId: 'sess-1', focusMessageId: 'target-message', onFocusMessageConsumed,
+    }));
+    await waitFor(() => expect(onFocusMessageConsumed).toHaveBeenCalledTimes(2));
   });
 });
 
@@ -581,6 +589,72 @@ describe('ChatToolPart file operation titles', () => {
     expect(container).toHaveTextContent(firstPath);
   });
 
+  it('renders output attachments with separate preview and download actions', () => {
+    const onOpenContextFile = vi.fn();
+    render(React.createElement(ChatMessageBubble, {
+      message: {
+        id: 'msg-output',
+        sessionID: 'sess-1',
+        role: 'assistant',
+        timestamp: Date.now(),
+        parts: [{
+          id: 'tool-write-output',
+          sessionID: 'sess-1',
+          type: 'tool',
+          tool: 'write',
+          state: {
+            status: 'completed',
+            input: { filePath: 'report.md' },
+            output: 'Wrote file successfully.',
+            attachments: [{
+              id: 'prt-output',
+              resourceID: 'res-output',
+              filename: 'report.md',
+              mime: 'text/markdown',
+              origin: 'agent_output',
+            }],
+          },
+        }],
+      } as any,
+      onOpenContextFile,
+    }));
+
+    fireEvent.click(screen.getByRole('button', { name: /report\.md/i }));
+    expect(onOpenContextFile).toHaveBeenCalledWith('res-output');
+    const download = screen.getByTitle('context.download');
+    expect(download).toHaveAttribute('href', '/api/session/sess-1/context/files/res-output/download');
+  });
+
+  it('renders channel attachments without a context resource through the file route', () => {
+    // Channel inbound media (WeCom / Feishu ...) keeps its file:// URL and has
+    // no resourceID: the image must still render and a non-image file must
+    // still show a chip, both served by /api/file/download.
+    const imageUrl = 'file:///data/channel_media/wecom/acct/2026-09-21/msg_1_shot.png';
+    const fileUrl = 'file:///data/channel_media/wecom/acct/2026-09-21/msg_2_report.pdf';
+    const { container } = render(React.createElement(ChatMessageBubble, {
+      message: {
+        id: 'msg-channel',
+        sessionID: 'sess-1',
+        role: 'user',
+        timestamp: Date.now(),
+        parts: [
+          { id: 'text-1', sessionID: 'sess-1', type: 'text', text: '[图片] 分析图片内容' },
+          { id: 'file-img', sessionID: 'sess-1', type: 'file', mime: 'image/png', filename: '企业微信截图.png', url: imageUrl },
+          { id: 'file-doc', sessionID: 'sess-1', type: 'file', mime: 'application/pdf', filename: 'report.pdf', url: fileUrl },
+        ],
+      } as any,
+    }));
+
+    const image = container.querySelector('img[alt="企业微信截图.png"]');
+    expect(image).toHaveAttribute('src', expect.stringContaining('/api/file/download?path='));
+    expect(image?.getAttribute('src')).toContain(encodeURIComponent('/data/channel_media/wecom/acct/2026-09-21/msg_1_shot.png'));
+    expect(screen.queryByTitle('context.download')).toBeNull();
+
+    const chip = screen.getByText('report.pdf').closest('a');
+    expect(chip).toHaveAttribute('href', expect.stringContaining('/api/file/download?path='));
+    expect(chip).toHaveAttribute('download', 'report.pdf');
+  });
+
   it('does not change summaries for non-file tools', () => {
     const { container } = render(React.createElement(ChatToolPart, {
       part: {
@@ -596,31 +670,6 @@ describe('ChatToolPart file operation titles', () => {
     }));
 
     expect(container.querySelector('summary')).toHaveTextContent('path=/api/v1/incidents');
-  });
-});
-
-describe('dedupeUploadedDocumentAttachments', () => {
-  it('keeps the latest successful document for a workspace path', () => {
-    const items = dedupeUploadedDocumentAttachments([
-      { id: 'old', status: 'success', workspacePath: '/tmp/uploads/report.pdf', isImage: false },
-      { id: 'image', status: 'success', isImage: true, workspacePath: '/tmp/uploads/diagram.png' },
-      { id: 'new', status: 'success', workspacePath: '/tmp/uploads/report.pdf', isImage: false },
-      { id: 'error', status: 'error', workspacePath: '/tmp/uploads/report.pdf', isImage: false },
-    ]);
-
-    expect(items.map((item) => item.id)).toEqual(['image', 'new', 'error']);
-  });
-});
-
-describe('listUploadedDocumentPaths', () => {
-  it('returns unique successful document paths in attachment order', () => {
-    expect(listUploadedDocumentPaths([
-      { status: 'success', workspacePath: '/tmp/uploads/a.pdf', isImage: false },
-      { status: 'success', workspacePath: '/tmp/uploads/a.pdf', isImage: false },
-      { status: 'success', workspacePath: '/tmp/uploads/b.pdf', isImage: false },
-      { status: 'success', workspacePath: '/tmp/uploads/image.png', isImage: true },
-      { status: 'error', workspacePath: '/tmp/uploads/c.pdf', isImage: false },
-    ])).toEqual(['/tmp/uploads/a.pdf', '/tmp/uploads/b.pdf']);
   });
 });
 
@@ -963,6 +1012,39 @@ describe('SessionChat embedded full layout', () => {
 
     expect(container.querySelector('.space-y-5.px-12')).toBeInTheDocument();
   });
+
+  it('keeps a wide left gutter for the hanging avatar on the page canvas below sm', () => {
+    useSessionMessagesMock.mockReturnValue({
+      messages: [
+        makeMessage({
+          id: 'assistant-canvas-avatar',
+          role: 'assistant',
+          parts: [{ id: 'text-1', type: 'text', text: 'Task complete.' } as any],
+        }),
+      ],
+      loading: false,
+      refetch: vi.fn(),
+      addMessage: vi.fn(),
+      updateMessage: vi.fn(),
+      updateMessagePart: vi.fn(),
+      removeMessage: vi.fn(),
+      replaceMessageText: vi.fn(),
+      markMessageStopped: vi.fn(),
+      truncateAfterMessage: vi.fn(),
+    });
+
+    const { container } = render(React.createElement(SessionChat, {
+      sessionId: 'sess-1',
+      hideInput: true,
+      display: { compact: false, pageCanvas: true },
+    }));
+
+    // avatar sits at -left-10 (40px) of the message column; 375px viewports
+    // previously clipped it because the column only had a 28px gutter.
+    const list = container.querySelector('.max-w-\\[760px\\]');
+    expect(list).toHaveClass('px-12');
+    expect(list).toHaveClass('sm:px-7');
+  });
 });
 
 describe('SessionChat copy action', () => {
@@ -1251,7 +1333,7 @@ describe('SessionChat standalone thinking indicator', () => {
     }));
 
     await user.type(screen.getByPlaceholderText('请输入消息'), '接入设备');
-    await user.click(container.querySelector('button[class*="bg-sky-500"]')!);
+    await user.click(container.querySelector('button[class*="bg-action"]')!);
 
     await waitFor(() => {
       expect(container.querySelectorAll('.animate-bounce').length).toBeGreaterThanOrEqual(3);
@@ -1296,7 +1378,7 @@ describe('SessionChat standalone thinking indicator', () => {
     }));
 
     await user.type(screen.getByPlaceholderText('请输入消息'), '已连接涉笔');
-    await user.click(container.querySelector('button[class*="bg-sky-500"]')!);
+    await user.click(container.querySelector('button[class*="bg-action"]')!);
 
     await waitFor(() => {
       expect(container.querySelectorAll('.animate-bounce').length).toBeGreaterThanOrEqual(3);
@@ -1527,6 +1609,17 @@ describe('SessionChat instruction display text', () => {
     expect(screen.queryByText(/Please read guide\.md/)).not.toBeInTheDocument();
   });
 
+  it('does not duplicate an initial message during StrictMode effects', async () => {
+    const consumed = vi.fn();
+    render(React.createElement(React.StrictMode, null, React.createElement(SessionChat, {
+      sessionId: 'sess-1',
+      initialMessage: 'one initial message',
+      onInitialMessageConsumed: consumed,
+    })));
+    await waitFor(() => expect(clientPostMock.mock.calls.filter(([url]) => url === '/api/session/sess-1/prompt_async')).toHaveLength(1));
+    expect(consumed).toHaveBeenCalledTimes(1);
+  });
+
   it('sends initialMessage with an instruction display label', async () => {
     render(React.createElement(SessionChat, {
       sessionId: 'sess-1',
@@ -1582,9 +1675,10 @@ describe('SessionChat composer controls', () => {
     const disabledButtons = Array.from(container.querySelectorAll('button:disabled'));
     const sendButton = disabledButtons.find((button) => button.querySelector('svg'));
 
-    expect(sendButton?.className).toContain('dark:bg-[#46515e]');
-    expect(sendButton?.className).toContain('dark:text-[#b8c2cc]');
-    expect(sendButton?.className).toContain('dark:border-[#5a6573]');
+    // 禁用态走 tokens.css 的 disabled token，深色由 .dark 变量接管，不再写 dark: 字面色
+    expect(sendButton?.className).toContain('bg-disabled');
+    expect(sendButton?.className).toContain('text-fg-disabled');
+    expect(sendButton?.className).toContain('border-line');
   });
 
   it('groups attachment and injected actions in the Add menu', async () => {
@@ -1630,6 +1724,78 @@ describe('SessionChat composer controls', () => {
 
     expect(screen.queryByRole('menu', { name: '添加' })).not.toBeInTheDocument();
     expect(onOpenChange).toHaveBeenLastCalledWith(false);
+  });
+
+  it('sends uploaded documents as file parts without embedding a host path', async () => {
+    clientPostMock.mockImplementation((url: string) => {
+      if (url === '/api/workspace/upload') {
+        return Promise.resolve({
+          data: {
+            uploaded: [{
+              uploadID: 'prt-upload-1',
+              name: 'paper.md',
+              mime: 'text/markdown',
+              size: 7,
+              is_text_file: true,
+            }],
+          },
+        });
+      }
+      return Promise.resolve({ data: {} });
+    });
+    const { container } = render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
+    const input = container.querySelector('input[type="file"]') as HTMLInputElement;
+    const file = new File(['# Paper'], 'paper.md', { type: 'text/markdown' });
+
+    fireEvent.change(input, { target: { files: [file] } });
+    await screen.findByText('paper.md');
+    await userEvent.type(screen.getByPlaceholderText('请输入消息'), 'review{enter}');
+
+    await waitFor(() => {
+      expect(clientPostMock).toHaveBeenCalledWith(
+        '/api/session/sess-1/prompt_async',
+        expect.objectContaining({
+          parts: expect.arrayContaining([
+            { type: 'text', text: 'review' },
+            expect.objectContaining({
+              type: 'file',
+              uploadID: 'prt-upload-1',
+              mime: 'text/markdown',
+              filename: 'paper.md',
+            }),
+          ]),
+        }),
+      );
+    });
+    const promptCall = clientPostMock.mock.calls.find(([url]) => url === '/api/session/sess-1/prompt_async');
+    expect(JSON.stringify(promptCall?.[1])).not.toContain('Attached files:');
+    expect(JSON.stringify(promptCall?.[1])).not.toContain('/Users/');
+  });
+
+  it('deletes an abandoned staged document when the user removes it', async () => {
+    clientPostMock.mockResolvedValue({
+      data: {
+        uploaded: [{
+          uploadID: 'prt-upload-remove',
+          name: 'draft.md',
+          mime: 'text/markdown',
+          size: 5,
+          is_text_file: true,
+        }],
+      },
+    });
+    const { container } = render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
+    const input = container.querySelector('input[type="file"]') as HTMLInputElement;
+
+    fireEvent.change(input, {
+      target: { files: [new File(['draft'], 'draft.md', { type: 'text/markdown' })] },
+    });
+    await screen.findByText('draft.md');
+    fireEvent.click(screen.getByTitle('chat.upload.remove'));
+
+    await waitFor(() => {
+      expect(clientDeleteMock).toHaveBeenCalledWith('/api/workspace/upload/chat/prt-upload-remove');
+    });
   });
 
   it('keeps a selected subagent reference when the default agent changes', async () => {
@@ -1680,6 +1846,357 @@ describe('SessionChat composer controls', () => {
     await user.click(screen.getByRole('button', { name: '选择 Explore' }));
 
     expect(within(screen.getByLabelText('已选择的资源')).getByText('explore')).toBeInTheDocument();
+  });
+});
+
+describe('SessionChat staged upload lifecycle', () => {
+  const modes = ['create', 'send', 'queue'] as const;
+  type Mode = typeof modes[number];
+  const uploadUrl = (name = 'draft.md') => `/api/workspace/upload/chat/prt-${name}`;
+  const uploadResponse = (...names: string[]) => ({
+    data: { uploaded: names.map((name) => ({ name, uploadID: `prt-${name}`, mime: 'text/markdown' })) },
+  });
+  const selectDocuments = (container: HTMLElement, ...names: string[]) => {
+    fireEvent.change(container.querySelector('input[type="file"]')!, {
+      target: { files: names.map((name) => new File(['draft'], name, { type: 'text/markdown' })) },
+    });
+  };
+  const removeDocument = (name = 'draft.md') => {
+    const chip = screen.getByText(name).parentElement!.parentElement!;
+    fireEvent.click(within(chip).getByTitle('chat.upload.remove'));
+  };
+  const submit = () => {
+    const textarea = screen.getByRole('textbox');
+    fireEvent.change(textarea, { target: { value: 'review' } });
+    fireEvent.keyDown(textarea, { key: 'Enter', code: 'Enter' });
+  };
+
+  beforeEach(() => {
+    vi.spyOn(window, 'alert').mockImplementation(() => undefined);
+  });
+  afterEach(() => {
+    vi.mocked(window.alert).mockRestore();
+  });
+
+  async function setupSubmission(mode: Mode, overrides: Partial<React.ComponentProps<typeof SessionChat>> = {}) {
+    const request = deferred<unknown>();
+    const createAndSend = vi.fn(() => request.promise);
+    clientPostMock.mockImplementation((url: string, body: FormData) => url === '/api/workspace/upload'
+      ? Promise.resolve(uploadResponse(...body.getAll('files').map((file) => (file as File).name)))
+      : request.promise);
+    sessionApiEnqueuePromptMock.mockReturnValue(request.promise);
+    const props = {
+      sessionId: mode === 'create' ? null : 'sess-1',
+      onCreateAndSend: createAndSend,
+      live: true,
+      ...overrides,
+    };
+    const view = render(React.createElement(SessionChat, props));
+    await act(async () => {
+      selectDocuments(view.container, 'draft.md');
+    });
+    if (mode === 'queue') {
+      act(() => {
+        useSSEOptionsRef.current.onEvent({
+          type: 'session.status',
+          properties: { sessionID: 'sess-1', status: { type: 'busy' } },
+        });
+      });
+    }
+    const expectRequested = () => {
+      const parts = expect.arrayContaining([expect.objectContaining({ uploadID: 'prt-draft.md' })]);
+      if (mode === 'create') {
+        expect(createAndSend).toHaveBeenCalledWith('review', parts, undefined, undefined, undefined, 'build');
+      } else if (mode === 'queue') {
+        expect(sessionApiEnqueuePromptMock).toHaveBeenCalledWith('sess-1', expect.objectContaining({ parts }));
+      } else {
+        expect(clientPostMock).toHaveBeenCalledWith('/api/session/sess-1/prompt_async', expect.objectContaining({ parts }));
+      }
+    };
+    return { ...view, props, request, createAndSend, expectRequested };
+  }
+
+  it.each(modes)('protects IDs before the first %s await and after an unmounted acceptance', async (mode) => {
+    const view = await setupSubmission(mode);
+    act(() => {
+      submit();
+      view.unmount();
+    });
+    expect(clientDeleteMock).not.toHaveBeenCalled();
+    await waitFor(view.expectRequested);
+    await act(async () => { view.request.resolve({ status: 202, data: {} }); });
+    expect(clientDeleteMock).not.toHaveBeenCalled();
+  });
+
+  it('reserves uploads before the create callback synchronously switches away', async () => {
+    const view = await setupSubmission('create');
+    view.createAndSend.mockImplementation(() => {
+      view.unmount();
+      expect(clientDeleteMock).not.toHaveBeenCalled();
+      return view.request.promise;
+    });
+    await act(async () => { submit(); });
+    view.expectRequested();
+    await act(async () => { view.request.resolve('sess-created'); });
+    expect(clientDeleteMock).not.toHaveBeenCalled();
+  });
+
+  it.each(modes)('transfers accepted %s uploads before a parent callback unmounts the tray', async (mode) => {
+    const onAccepted = vi.fn(() => view.unmount());
+    const view = await setupSubmission(mode, { onExecutionModeAccepted: onAccepted });
+    await act(async () => { submit(); });
+    view.expectRequested();
+    await act(async () => { view.request.resolve({ status: 202, data: {} }); });
+    expect(onAccepted).toHaveBeenCalledOnce();
+    expect(clientDeleteMock).not.toHaveBeenCalled();
+  });
+
+  it.each(['send', 'queue'] as const)('reserves %s uploads throughout deferred model selection', async (mode) => {
+    const modelUpdate = deferred<unknown>();
+    sessionApiUpdateMock.mockReturnValue(modelUpdate.promise);
+    const view = await setupSubmission(mode, { modelAuto: true });
+    act(() => { submit(); });
+    expect(sessionApiUpdateMock).toHaveBeenCalledOnce();
+    expect(clientPostMock.mock.calls.filter(([url]) => url.endsWith('/prompt_async'))).toHaveLength(0);
+    expect(sessionApiEnqueuePromptMock).not.toHaveBeenCalled();
+    removeDocument();
+    view.unmount();
+    expect(clientDeleteMock).not.toHaveBeenCalled();
+    await act(async () => { modelUpdate.resolve({}); });
+    view.expectRequested();
+    await act(async () => { view.request.resolve({ status: 202, data: {} }); });
+    expect(clientDeleteMock).not.toHaveBeenCalled();
+  });
+
+  it.each(['send', 'queue'] as const)('cleans unmounted %s drafts when model selection fails before any prompt request', async (mode) => {
+    const modelUpdate = deferred<unknown>();
+    sessionApiUpdateMock.mockReturnValue(modelUpdate.promise);
+    const view = await setupSubmission(mode, { modelAuto: true });
+    act(() => { submit(); });
+    view.unmount();
+    await act(async () => { modelUpdate.reject({ response: { status: 503 } }); });
+    expect(clientDeleteMock).toHaveBeenCalledExactlyOnceWith(uploadUrl());
+    expect(sessionApiEnqueuePromptMock).not.toHaveBeenCalled();
+    expect(clientPostMock.mock.calls.filter(([url]) => url.endsWith('/prompt_async'))).toHaveLength(0);
+  });
+
+  it('keeps accepted queue uploads while queue refresh is pending and the session switches', async () => {
+    const view = await setupSubmission('queue');
+    const refresh = deferred<unknown>();
+    sessionApiListPromptQueueMock.mockReturnValueOnce(refresh.promise);
+    await act(async () => { submit(); });
+    await act(async () => { view.request.resolve({ status: 202, data: {} }); });
+    expect(sessionApiListPromptQueueMock).toHaveBeenCalledTimes(2);
+    removeDocument();
+    view.rerender(React.createElement(SessionChat, { ...view.props, sessionId: 'sess-2' }));
+    view.unmount();
+    expect(clientDeleteMock).not.toHaveBeenCalled();
+    await act(async () => { refresh.resolve({ items: [] }); });
+    expect(clientDeleteMock).not.toHaveBeenCalled();
+  });
+
+  it.each(modes)('restores a rejected %s draft, retries the same IDs and transfers accepted ownership', async (mode) => {
+    const view = await setupSubmission(mode);
+    await act(async () => { submit(); });
+    view.expectRequested();
+    await act(async () => { view.request.reject({ response: { status: 409 } }); });
+    expect(screen.getByRole('textbox')).toHaveValue('review');
+    expect(screen.getByText('draft.md')).toBeInTheDocument();
+    expect(clientDeleteMock).not.toHaveBeenCalled();
+    const retry = deferred<unknown>();
+    view.createAndSend.mockReturnValue(retry.promise);
+    sessionApiEnqueuePromptMock.mockReturnValue(retry.promise);
+    clientPostMock.mockReturnValue(retry.promise);
+    await act(async () => { submit(); });
+    view.expectRequested();
+    await act(async () => { retry.resolve({ status: 202, data: {} }); });
+    expect(screen.queryByText('draft.md')).not.toBeInTheDocument();
+    view.unmount();
+    expect(clientDeleteMock).not.toHaveBeenCalled();
+  });
+
+  it.each(modes)('cleans a recovered %s draft on unmount without waiting for another render', async (mode) => {
+    const view = await setupSubmission(mode);
+    await act(async () => { submit(); });
+    await act(async () => {
+      view.request.reject({ response: { status: 422 } });
+      await view.request.promise.catch(() => undefined);
+      view.unmount();
+    });
+    expect(clientDeleteMock).toHaveBeenCalledExactlyOnceWith(uploadUrl());
+  });
+
+  it.each(modes)('cleans an unmounted %s upload only after an explicit non-acceptance', async (mode) => {
+    const view = await setupSubmission(mode);
+    await act(async () => { submit(); });
+    view.unmount();
+    expect(clientDeleteMock).not.toHaveBeenCalled();
+    await act(async () => { view.request.reject({ response: { status: 400 } }); });
+    expect(clientDeleteMock).toHaveBeenCalledExactlyOnceWith(uploadUrl());
+  });
+
+  it.each(modes)('does not resurrect a %s chip cancelled while submitting if the request is rejected', async (mode) => {
+    const view = await setupSubmission(mode);
+    await act(async () => { submit(); });
+    removeDocument();
+    expect(clientDeleteMock).not.toHaveBeenCalled();
+    await act(async () => { view.request.reject({ response: { status: 403 } }); });
+    expect(screen.queryByText('draft.md')).not.toBeInTheDocument();
+    expect(screen.getByRole('textbox')).toHaveValue('review');
+    expect(clientDeleteMock).toHaveBeenCalledExactlyOnceWith(uploadUrl());
+    view.unmount();
+    expect(clientDeleteMock).toHaveBeenCalledTimes(1);
+  });
+
+  describe.each(modes)('%s acceptance uncertainty', (mode) => {
+    it.each([
+      ['network timeout', { code: 'ECONNABORTED', message: 'timeout' }],
+      ['server error', { response: { status: 503 } }],
+      ['HTTP timeout', { response: { status: 408 } }],
+    ])('retains IDs after %s, even on removal and unmount', async (_label, error) => {
+      const view = await setupSubmission(mode);
+      await act(async () => { submit(); });
+      await act(async () => { view.request.reject(error); });
+      expect(screen.getByRole('textbox')).toHaveValue('review');
+      removeDocument();
+      view.unmount();
+      expect(clientDeleteMock).not.toHaveBeenCalled();
+    });
+
+    it('retains IDs when a server error arrives after unmount', async () => {
+      const view = await setupSubmission(mode);
+      await act(async () => { submit(); });
+      view.unmount();
+      await act(async () => { view.request.reject({ response: { status: 500 } }); });
+      expect(clientDeleteMock).not.toHaveBeenCalled();
+    });
+
+    it('does not downgrade an earlier unknown acceptance when a retry gets a 4xx', async () => {
+      const view = await setupSubmission(mode);
+      await act(async () => { submit(); });
+      await act(async () => { view.request.reject(new Error('network disconnected')); });
+      const retry = deferred<unknown>();
+      view.createAndSend.mockReturnValue(retry.promise);
+      sessionApiEnqueuePromptMock.mockReturnValue(retry.promise);
+      clientPostMock.mockReturnValue(retry.promise);
+      await act(async () => { submit(); });
+      view.unmount();
+      await act(async () => { retry.reject({ response: { status: 422 } }); });
+      expect(clientDeleteMock).not.toHaveBeenCalled();
+    });
+  });
+
+  it('does not restore an old rejected draft into a different session', async () => {
+    const view = await setupSubmission('send');
+    await act(async () => { submit(); });
+    view.rerender(React.createElement(SessionChat, { ...view.props, sessionId: 'sess-2' }));
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'new draft' } });
+    await act(async () => { view.request.reject({ response: { status: 422 } }); });
+    expect(screen.getByRole('textbox')).toHaveValue('new draft');
+    expect(screen.queryByText('draft.md')).not.toBeInTheDocument();
+    expect(clientDeleteMock).toHaveBeenCalledExactlyOnceWith(uploadUrl());
+  });
+
+  it('cleans a draft whose upload resolves before its next render on unmount', async () => {
+    const upload = deferred<ReturnType<typeof uploadResponse>>();
+    clientPostMock.mockReturnValue(upload.promise);
+    const view = render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
+    selectDocuments(view.container, 'draft.md');
+    await act(async () => {
+      upload.resolve(uploadResponse('draft.md'));
+      await upload.promise;
+      view.unmount();
+    });
+    expect(clientDeleteMock).toHaveBeenCalledExactlyOnceWith(uploadUrl());
+  });
+
+  it.each(['cancel', 'unmount'] as const)('disposes every late batch ID after %s, once under StrictMode', async (action) => {
+    const upload = deferred<ReturnType<typeof uploadResponse>>();
+    clientPostMock.mockReturnValue(upload.promise);
+    const view = render(React.createElement(React.StrictMode, null,
+      React.createElement(SessionChat, { sessionId: 'sess-1' })));
+    selectDocuments(view.container, 'a.md', 'b.md');
+    if (action === 'cancel') {
+      removeDocument('a.md');
+      removeDocument('b.md');
+    } else {
+      view.unmount();
+    }
+    expect(clientDeleteMock).not.toHaveBeenCalled();
+    await act(async () => { upload.resolve(uploadResponse('a.md', 'b.md')); });
+    expect(clientDeleteMock).toHaveBeenCalledTimes(2);
+    expect(clientDeleteMock).toHaveBeenCalledWith(uploadUrl('a.md'));
+    expect(clientDeleteMock).toHaveBeenCalledWith(uploadUrl('b.md'));
+    if (action === 'cancel') {
+      expect(screen.queryByText('a.md')).not.toBeInTheDocument();
+      expect(screen.queryByText('b.md')).not.toBeInTheDocument();
+      view.unmount();
+    }
+    expect(clientDeleteMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('disposes only the cancelled item from a late batch and sends the remaining document', async () => {
+    const upload = deferred<ReturnType<typeof uploadResponse>>();
+    clientPostMock.mockImplementation((url: string) => url === '/api/workspace/upload'
+      ? upload.promise : Promise.resolve({ status: 202, data: {} }));
+    const view = render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
+    selectDocuments(view.container, 'a.md', 'b.md');
+    removeDocument('a.md');
+    await act(async () => { upload.resolve(uploadResponse('a.md', 'b.md')); });
+    expect(clientDeleteMock).toHaveBeenCalledExactlyOnceWith(uploadUrl('a.md'));
+    expect(screen.queryByText('a.md')).not.toBeInTheDocument();
+    expect(screen.getByText('b.md')).toBeInTheDocument();
+    await act(async () => { submit(); });
+    const payload = clientPostMock.mock.calls.find(([url]) => url.endsWith('/prompt_async'))?.[1];
+    expect(payload.parts.filter((part: { type: string }) => part.type === 'file')).toEqual([
+      expect.objectContaining({ uploadID: 'prt-b.md' }),
+    ]);
+    view.unmount();
+    expect(clientDeleteMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('tracks late IDs after repeated failed upload retries without reviving a cancelled chip', async () => {
+    const first = deferred<unknown>();
+    const second = deferred<unknown>();
+    const third = deferred<unknown>();
+    clientPostMock.mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise).mockReturnValueOnce(third.promise);
+    const view = render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
+    selectDocuments(view.container, 'draft.md');
+    await act(async () => { first.reject(new Error('upload failed')); });
+    fireEvent.click(screen.getByTitle('chat.upload.retry'));
+    await act(async () => { second.reject(new Error('upload failed again')); });
+    fireEvent.click(screen.getByTitle('chat.upload.retry'));
+    removeDocument();
+    view.unmount();
+    await act(async () => { third.resolve(uploadResponse('draft.md')); });
+    expect(clientDeleteMock).toHaveBeenCalledExactlyOnceWith(uploadUrl());
+    expect(clientPostMock).toHaveBeenCalledTimes(3);
+  });
+
+  it('disposes IDs included in failed upload results and tracks the retry ID separately', async () => {
+    clientPostMock.mockResolvedValueOnce({ data: { uploaded: [{
+      name: 'draft.md', uploadID: 'prt-failed', error: 'processing failed',
+    }] } });
+    const view = render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
+    await act(async () => { selectDocuments(view.container, 'draft.md'); });
+    expect(clientDeleteMock).toHaveBeenCalledExactlyOnceWith('/api/workspace/upload/chat/prt-failed');
+    clientPostMock.mockResolvedValueOnce(uploadResponse('draft.md'));
+    await act(async () => { fireEvent.click(screen.getByTitle('chat.upload.retry')); });
+    expect(screen.queryByTitle('chat.upload.retry')).not.toBeInTheDocument();
+    view.unmount();
+    expect(clientDeleteMock).toHaveBeenCalledTimes(2);
+    expect(clientDeleteMock).toHaveBeenLastCalledWith(uploadUrl());
+  });
+
+  it('keeps ownership of newly added drafts when an earlier queue submission completes', async () => {
+    const view = await setupSubmission('queue');
+    await act(async () => { submit(); });
+    await act(async () => { selectDocuments(view.container, 'next.md'); });
+    await act(async () => { view.request.resolve({ status: 202, data: {} }); });
+    expect(screen.queryByText('draft.md')).not.toBeInTheDocument();
+    expect(screen.getByText('next.md')).toBeInTheDocument();
+    view.unmount();
+    expect(clientDeleteMock).toHaveBeenCalledExactlyOnceWith(uploadUrl('next.md'));
   });
 });
 
@@ -1771,18 +2288,62 @@ describe('getThinkingFirstSentence', () => {
 });
 
 describe('process group duration', () => {
-  it('uses the full wall-clock range and the current time for an active step', () => {
+  it('sums actual process intervals without counting gaps', () => {
     const parts = [
-      { id: 'reason', type: 'reasoning', time: { start: 1_000, end: 2_000 } },
-      { id: 'tool', type: 'tool', state: { status: 'running', time: { start: 2_500 } } },
+      { id: 'reason', type: 'reasoning', time: { start: 0, end: 5_000 } },
+      { id: 'summary', type: 'text', text: '继续检查', time: { start: 8_000, end: 9_000 } },
+      { id: 'tool', type: 'tool', state: { status: 'completed', time: { start: 20_000, end: 28_000 } } },
     ] as Message['parts'];
 
-    expect(getProcessGroupDurationMs(parts, 5_000)).toBe(4_000);
+    expect(getProcessGroupDurationMs(parts)).toBe(14_000);
     expect(formatProcessDuration(500)).toBe('1s');
     expect(formatProcessDuration(7_600)).toBe('7s');
     expect(formatProcessDuration(260_900)).toBe('4m20s');
     expect(getProcessGroupDurationMs([{ id: 'legacy', type: 'reasoning' }] as Message['parts']))
       .toBeNull();
+  });
+
+  it('uses current time only for unfinished active intervals', () => {
+    const parts = [
+      { id: 'done', type: 'tool', state: { status: 'completed', time: { start: 0, end: 5_000 } } },
+      { id: 'stale-text', type: 'text', text: 'missed final update', time: { start: 8_000 } },
+      { id: 'running', type: 'tool', state: { status: 'running', time: { start: 20_000 } } },
+      { id: 'future-text', type: 'text', text: '等待下一步', time: { start: 40_000 } },
+    ] as Message['parts'];
+
+    expect(getProcessGroupDurationMs(parts, 22_000)).toBe(7_000);
+    expect(getProcessGroupDurationMs(parts, 23_000)).toBe(8_000);
+    expect(getProcessGroupDurationMs(parts, 23_000, 'running')).toBe(8_000);
+  });
+
+  it('merges overlapping intervals so parallel process steps are not double counted', () => {
+    const parts = [
+      { id: 'tool-a', type: 'tool', state: { status: 'completed', time: { start: 0, end: 10_000 } } },
+      { id: 'tool-b', type: 'tool', state: { status: 'completed', time: { start: 5_000, end: 15_000 } } },
+      { id: 'reason', type: 'reasoning', time: { start: 20_000, end: 22_000 } },
+    ] as Message['parts'];
+
+    expect(getProcessGroupDurationMs(parts)).toBe(17_000);
+  });
+
+  it('ignores invalid or incomplete historical intervals', () => {
+    const parts = [
+      { id: 'missing-start', type: 'reasoning', time: { end: 5_000 } },
+      { id: 'missing-end', type: 'tool', state: { status: 'completed', time: { start: 10_000 } } },
+      { id: 'negative', type: 'text', text: 'bad clock', time: { start: 20_000, end: 19_000 } },
+      { id: 'zero', type: 'tool', state: { status: 'completed', time: { start: 25_000, end: 25_000 } } },
+      { id: 'valid', type: 'reasoning', time: { start: 30_000, end: 32_000 } },
+    ] as unknown as Message['parts'];
+
+    expect(getProcessGroupDurationMs(parts)).toBe(2_000);
+  });
+
+  it('keeps zero-duration completed intervals displayable', () => {
+    const parts = [
+      { id: 'instant', type: 'tool', state: { status: 'completed', time: { start: 1_000, end: 1_000 } } },
+    ] as Message['parts'];
+
+    expect(getProcessGroupDurationMs(parts)).toBe(0);
   });
 
   it('updates the displayed duration while the last process step is active', () => {
@@ -1811,6 +2372,54 @@ describe('process group duration', () => {
       expect(screen.getByTestId('chat-process-duration')).toHaveTextContent('已处理 4s');
       act(() => vi.advanceTimersByTime(1_000));
       expect(screen.getByTestId('chat-process-duration')).toHaveTextContent('已处理 5s');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('continues timing while the active assistant output streams after a process group', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(5_000);
+    try {
+      render(React.createElement(ChatMessageBubble, {
+        message: makeMessage({
+          id: 'assistant-active-output-duration',
+          role: 'assistant',
+          parts: [
+            {
+              id: 'reason-active-output',
+              type: 'reasoning',
+              text: '先读取上下文',
+              time: { start: 0, end: 1_000 },
+            },
+            {
+              id: 'tool-active-output',
+              type: 'tool',
+              tool: 'todo',
+              state: {
+                status: 'completed',
+                input: { todos: ['检查'] },
+                output: { ok: true },
+                time: { start: 1_000, end: 1_000 },
+              },
+            },
+            {
+              id: 'text-active-output',
+              type: 'text',
+              text: '继续输出中...',
+              time: { start: 1_000 },
+            },
+          ] as Message['parts'],
+        }),
+        isActive: true,
+        collapseIntermediateSteps: true,
+      }));
+
+      expect(screen.getByText('查看 2 个步骤')).toBeInTheDocument();
+      expect(screen.getAllByText('继续输出中...').length).toBeGreaterThan(0);
+      expect(screen.getByTestId('chat-process-duration')).toHaveTextContent('已处理 5s');
+      act(() => vi.advanceTimersByTime(1_000));
+      expect(screen.getByTestId('chat-process-duration')).toHaveTextContent('已处理 6s');
     } finally {
       vi.useRealTimers();
     }
@@ -2273,8 +2882,12 @@ describe('SessionChat intermediate process collapse', () => {
     expect(screen.getByTestId('chat-process-reasoning-preview')).toHaveTextContent('需要先读取工作流文件。');
     expect(screen.getByTestId('chat-process-reasoning-preview')).not.toHaveTextContent('然后检查配置');
     expect(screen.getByTestId('chat-process-reasoning-preview')).not.toHaveClass('flex-1');
-    expect(screen.getByTestId('chat-process-reasoning-preview').nextElementSibling).toHaveClass('lucide-chevron-down');
+    expect(screen.getByTestId('chat-process-reasoning-preview').nextElementSibling).toHaveClass('tabler-icon-chevron-down');
     expect(screen.getByTestId('chat-process-tool-step')).toHaveTextContent('读取文件');
+    // the timeline shows the tool status as an icon; its label must still be exposed
+    const toolStep = screen.getByTestId('chat-process-tool-step');
+    expect(toolStep).toHaveAttribute('data-tool-status', 'completed');
+    expect(toolStep.querySelector('summary [role="img"]')).toHaveAttribute('aria-label', '已完成');
   });
 
   it('hides the reasoning preview while the reasoning body is expanded', () => {
@@ -3122,6 +3735,35 @@ describe('SessionChat optimistic message identity', () => {
     }
   });
 
+  it('reports a rejected prompt through a toast (not a blocking alert) and keeps the draft', async () => {
+    const user = userEvent.setup();
+    const alertSpy = vi.spyOn(window, 'alert').mockImplementation(() => {});
+    const err = Object.assign(new Error('Request failed with status code 403'), { response: { status: 403, data: { message: '无权向此会话发送' } } });
+    clientPostMock.mockRejectedValueOnce(err);
+    useSessionMessagesMock.mockReturnValue({
+      messages: [],
+      loading: false,
+      refetch: vi.fn(),
+      addMessage: vi.fn(),
+      updateMessage: vi.fn(),
+      updateMessagePart: vi.fn(),
+      removeMessage: vi.fn(),
+      replaceMessageText: vi.fn(),
+      truncateAfterMessage: vi.fn(),
+    });
+
+    try {
+      render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
+      await user.type(screen.getByPlaceholderText('请输入消息'), '这条会被 403{enter}');
+
+      await waitFor(() => expect(toastMock.error).toHaveBeenCalledWith('chat.sendFailed', '无权向此会话发送'));
+      expect(alertSpy).not.toHaveBeenCalled();
+      expect(screen.getByPlaceholderText('请输入消息')).toHaveValue('这条会被 403');
+    } finally {
+      alertSpy.mockRestore();
+    }
+  });
+
   it('uses the optimistic user message ID for the persisted prompt', async () => {
     const user = userEvent.setup();
     const addMessage = vi.fn();
@@ -3479,6 +4121,30 @@ describe('buildTodoSummary', () => {
 });
 
 describe('ChatToolPart delegate rendering', () => {
+  it('keeps the streaming indicator visible while delegation is running', () => {
+    render(React.createElement(ChatMessageBubble, {
+      message: makeMessage({
+        id: 'assistant-running-delegate',
+        role: 'assistant',
+        parts: [{
+          id: 'delegate-running',
+          type: 'tool',
+          tool: 'delegate_task',
+          state: {
+            status: 'running',
+            input: {
+              subagent_type: 'explore',
+              description: '排查会话页面',
+            },
+          },
+        } as any],
+      }),
+      isActive: true,
+    }));
+
+    expect(screen.getByText('继续输出中...')).toBeInTheDocument();
+  });
+
   it('keeps the specialized delegate view inside a process timeline', () => {
     render(
       React.createElement(ChatToolPart, {
@@ -4561,6 +5227,8 @@ describe('SessionChat context usage popover', () => {
     expect(contextButton).toHaveTextContent('21%');
 
     await user.click(screen.getByLabelText('chat.edit'));
+    // editing shows the raw-content hint above the editor
+    expect(screen.getByTestId('chat-edit-raw-hint')).toHaveTextContent('chat.editRawHint');
     fireEvent.change(screen.getByDisplayValue(originalText), { target: { value: editedText } });
     await user.click(screen.getByLabelText('chat.sendEdited'));
 
@@ -5361,7 +6029,7 @@ describe('SessionChat fallback polling', () => {
       expect(refetch).toHaveBeenCalledTimes(1);
       expect(clientGetMock.mock.calls.filter(
         ([url]) => url === '/api/session/sess-1/message',
-      )).toHaveLength(2);
+      )).toHaveLength(1);
 
       await act(async () => {
         resolveRefetch?.();
@@ -5419,6 +6087,7 @@ describe('SessionChat fallback polling', () => {
 
       expect(clientGetMock).toHaveBeenCalledWith('/api/session/sess-1/message', {
         params: { page: true, limit: 50, include_archived: true },
+        signal: expect.any(AbortSignal),
       });
       expect(clientGetMock).not.toHaveBeenCalledWith('/api/session/status');
       expect(refetch).not.toHaveBeenCalled();
@@ -5477,7 +6146,7 @@ describe('SessionChat fallback polling', () => {
         await vi.advanceTimersByTimeAsync(5_000);
       });
 
-      expect(clientGetMock).toHaveBeenCalledWith('/api/session/status');
+      expect(clientGetMock).toHaveBeenCalledWith('/api/session/status', { signal: expect.any(AbortSignal) });
       expect(refetch).toHaveBeenCalledTimes(1);
       expect(onStreamingDone).toHaveBeenCalledTimes(1);
 
@@ -5530,6 +6199,7 @@ describe('SessionChat fallback polling', () => {
       expect(clientGetMock).not.toHaveBeenCalledWith('/api/session/status');
       expect(clientGetMock).toHaveBeenCalledWith('/api/session/sess-1/message', {
         params: { page: true, limit: 50, include_archived: true },
+        signal: expect.any(AbortSignal),
       });
     } finally {
       vi.useRealTimers();
@@ -5623,6 +6293,98 @@ describe('SessionChat fallback polling', () => {
   });
 });
 
+describe('SessionChat fallback request lifecycle', () => {
+  const finishedPage = { data: { items: [makeFetchedMessage({ id: 'done', role: 'assistant', finish: 'stop' })] } };
+  const emitStatus = (sessionID: string, type: string) => {
+    act(() => useSSEOptionsRef.current.onEvent({ type: 'session.status', properties: { sessionID, status: { type } } }));
+  };
+  async function mountChat(key?: string) {
+    const view = render(React.createElement(SessionChat, { key, sessionId: 'sess-1', live: true }));
+    await act(async () => {});
+    emitStatus('sess-1', 'busy');
+    return view;
+  }
+  afterEach(() => { vi.useRealTimers(); });
+
+  it.each([false, true])('ignores an old session response after switching (keyed=%s)', async (keyed) => {
+    vi.useFakeTimers();
+    const pending = deferred<any>();
+    const view = await mountChat(keyed ? 'sess-1' : undefined);
+    clientGetMock.mockImplementation((url: string) => url === '/api/session/sess-1/message'
+      ? pending.promise : Promise.resolve({ data: {} }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+    view.rerender(React.createElement(SessionChat, { key: keyed ? 'sess-2' : undefined, sessionId: 'sess-2', live: true }));
+    await act(async () => {});
+    emitStatus('sess-2', 'busy');
+    clientGetMock.mockClear();
+    await act(async () => { pending.resolve(finishedPage); });
+    expect(screen.getByTitle('chat.stopTitle')).toBeInTheDocument();
+    expect(clientGetMock.mock.calls.filter(([url]) => url === '/api/session/status')).toHaveLength(0);
+  });
+
+  it('ignores the old idle response after a new turn starts in the same batched update', async () => {
+    vi.useFakeTimers();
+    const pending = deferred<any>();
+    await mountChat();
+    clientGetMock.mockImplementation((url: string) => url.endsWith('/message')
+      ? Promise.resolve(finishedPage) : url === '/api/session/status' ? pending.promise : Promise.resolve({ data: {} }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+    act(() => {
+      useSSEOptionsRef.current.onEvent({ type: 'session.status', properties: { sessionID: 'sess-1', status: { type: 'idle' } } });
+      useSSEOptionsRef.current.onEvent({ type: 'session.status', properties: { sessionID: 'sess-1', status: { type: 'busy' } } });
+    });
+    await act(async () => { pending.resolve({ data: {} }); });
+    expect(screen.getByTitle('chat.stopTitle')).toBeInTheDocument();
+  });
+
+  it('ignores an idle response after a newer active tool event', async () => {
+    vi.useFakeTimers();
+    const pending = deferred<any>();
+    await mountChat();
+    clientGetMock.mockImplementation((url: string) => url.endsWith('/message')
+      ? Promise.resolve(finishedPage) : url === '/api/session/status' ? pending.promise : Promise.resolve({ data: {} }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+    act(() => useSSEOptionsRef.current.onEvent({ type: 'message.part.updated', properties: {
+      part: { id: 'new-tool', messageID: 'new-assistant', sessionID: 'sess-1', type: 'tool', tool: 'bash', state: { status: 'running' } },
+    } }));
+    await act(async () => { pending.resolve({ data: {} }); });
+    expect(screen.getByTitle('chat.stopTitle')).toBeInTheDocument();
+  });
+
+  it('allows only one slow poll and aborts it when the component unmounts', async () => {
+    vi.useFakeTimers();
+    const pending = deferred<any>();
+    const view = await mountChat();
+    clientGetMock.mockImplementation((url: string) => url.endsWith('/message') ? pending.promise : Promise.resolve({ data: {} }));
+    clientGetMock.mockClear();
+    await act(async () => { await vi.advanceTimersByTimeAsync(15_000); });
+    const requests = clientGetMock.mock.calls.filter(([url]) => url.endsWith('/message'));
+    expect(requests).toHaveLength(1);
+    const signal = requests[0][1].signal as AbortSignal;
+    view.unmount();
+    expect(signal.aborted).toBe(true);
+    await act(async () => { pending.resolve(finishedPage); });
+    expect(clientGetMock.mock.calls.filter(([url]) => url === '/api/session/status')).toHaveLength(0);
+  });
+
+  it('retries after a failed poll and completes on the next idle response', async () => {
+    vi.useFakeTimers();
+    await mountChat();
+    let messageRequests = 0;
+    clientGetMock.mockImplementation((url: string) => {
+      if (!url.endsWith('/message')) return Promise.resolve({ data: {} });
+      messageRequests += 1;
+      return messageRequests === 1 ? Promise.reject(new Error('network down')) : Promise.resolve(finishedPage);
+    });
+    await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+    expect(screen.getByTitle('chat.stopTitle')).toBeInTheDocument();
+    expect(messageRequests).toBe(1);
+    await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+    expect(messageRequests).toBe(2);
+    expect(screen.queryByTitle('chat.stopTitle')).not.toBeInTheDocument();
+  });
+});
+
 describe('areChatMessagePartsRenderEqual', () => {
   it('detects streamed text updates even when a later tool part exists', () => {
     const sharedToolPart = {
@@ -5640,6 +6402,27 @@ describe('areChatMessagePartsRenderEqual', () => {
       [
         { id: 'text-1', type: 'text', text: '现在生成简化版 workflow.json' } as Message['parts'][number],
         sharedToolPart,
+      ],
+    )).toBe(false);
+  });
+
+  it('detects top-level part time updates used by reasoning and text parts', () => {
+    expect(areChatMessagePartsRenderEqual(
+      [
+        {
+          id: 'reason-1',
+          type: 'reasoning',
+          text: '检查上下文',
+          time: { start: 1_000 },
+        } as Message['parts'][number],
+      ],
+      [
+        {
+          id: 'reason-1',
+          type: 'reasoning',
+          text: '检查上下文',
+          time: { start: 1_000, end: 2_500 },
+        } as Message['parts'][number],
       ],
     )).toBe(false);
   });

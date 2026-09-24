@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { __resetWebUIContractPagesResourceForTesting, useWebUIContractPages } from './useWebUIContractPages';
 import { setupSSEMock } from '@/test/mocks/sse';
+import { SCENE_SUITES_CHANGED_EVENT } from '@/utils/sceneSuites';
 
 const { listMock, listWorkspacesMock } = vi.hoisted(() => ({
   listMock: vi.fn(),
@@ -52,7 +53,7 @@ describe('useWebUIContractPages', () => {
     expect(result.current.pages[0].title).toBe('仪表盘');
     expect(result.current.workspaces).toHaveLength(0);
     expect(listMock).toHaveBeenCalledWith(true);
-    expect(listWorkspacesMock).toHaveBeenCalledWith(true);
+    expect(listWorkspacesMock).toHaveBeenCalledWith(false);
   });
 
   it('shares the initial navigation request across concurrent hook instances', async () => {
@@ -124,5 +125,85 @@ describe('useWebUIContractPages', () => {
     });
     expect(listMock).toHaveBeenCalledTimes(2);
     expect(listWorkspacesMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps disabled workspaces and refreshes after a local suite change', async () => {
+    listMock.mockResolvedValue({ data: [] });
+    listWorkspacesMock
+      .mockResolvedValueOnce({ data: [{ id: 'scene_ui', enabled: false, pages: [] }] })
+      .mockResolvedValueOnce({ data: [{ id: 'scene_ui', enabled: true, pages: [] }] });
+    const { result } = renderHook(() => useWebUIContractPages());
+    await waitFor(() => expect(result.current.workspaces).toHaveLength(1));
+    expect(result.current.workspaces[0].enabled).toBe(false);
+
+    act(() => window.dispatchEvent(new Event(SCENE_SUITES_CHANGED_EVENT)));
+
+    await waitFor(() => expect(result.current.workspaces[0].enabled).toBe(true));
+    expect(listWorkspacesMock).toHaveBeenCalledWith(false);
+  });
+
+  it('keeps the last navigation data when a refresh fails', async () => {
+    listMock.mockResolvedValueOnce({ data: [{ id: 'page' }] }).mockRejectedValueOnce(new Error('offline'));
+    listWorkspacesMock.mockResolvedValue({ data: [{ id: 'scene_ui', enabled: true, pages: [] }] });
+    const { result } = renderHook(() => useWebUIContractPages());
+    await waitFor(() => expect(result.current.workspaces).toHaveLength(1));
+    act(() => window.dispatchEvent(new Event(SCENE_SUITES_CHANGED_EVENT)));
+    await waitFor(() => expect(result.current.error).toBe('offline'));
+    expect(result.current.pages).toHaveLength(1);
+    expect(result.current.workspaces).toHaveLength(1);
+  });
+
+  it('shares a local mutation refresh across mounted consumers', async () => {
+    listMock.mockResolvedValue({ data: [] });
+    const first = renderHook(() => useWebUIContractPages());
+    const second = renderHook(() => useWebUIContractPages());
+    await waitFor(() => expect(first.result.current.loading).toBe(false));
+    await act(async () => window.dispatchEvent(new Event(SCENE_SUITES_CHANGED_EVENT)));
+    expect(listMock).toHaveBeenCalledTimes(2);
+    first.unmount();
+    await act(async () => window.dispatchEvent(new Event(SCENE_SUITES_CHANGED_EVENT)));
+    expect(listMock).toHaveBeenCalledTimes(3);
+    expect(second.result.current.loading).toBe(false);
+  });
+
+  it('discards an old in-flight response when a suite changes', async () => {
+    let resolveOld: (value: { data: any[] }) => void = () => {};
+    listMock
+      .mockReturnValueOnce(new Promise((resolve) => { resolveOld = resolve; }))
+      .mockResolvedValueOnce({ data: [{ id: 'current-page' }] });
+    listWorkspacesMock.mockResolvedValue({ data: [] });
+    const { result } = renderHook(() => useWebUIContractPages());
+    act(() => window.dispatchEvent(new Event(SCENE_SUITES_CHANGED_EVENT)));
+    await act(async () => resolveOld({ data: [{ id: 'old-page' }] }));
+    await waitFor(() => expect(result.current.pages[0]?.id).toBe('current-page'));
+    expect(listMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('invalidates an old in-flight navigation response when a remote SSE arrives', async () => {
+    let resolveOld: (value: { data: any[] }) => void = () => {};
+    listMock
+      .mockReturnValueOnce(new Promise((resolve) => { resolveOld = resolve; }))
+      .mockResolvedValueOnce({ data: [{ id: 'current-page' }] });
+    const { result } = renderHook(() => useWebUIContractPages());
+    act(() => sse.send({ type: 'contracts.webui.pages.nav_changed', properties: {} }));
+    await act(async () => resolveOld({ data: [{ id: 'old-page' }] }));
+    await waitFor(() => expect(result.current.pages[0]?.id).toBe('current-page'));
+    expect(listMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('handles each remote event once across consumers while retaining later changes', async () => {
+    listMock.mockResolvedValue({ data: [] });
+    const first = renderHook(() => useWebUIContractPages());
+    const second = renderHook(() => useWebUIContractPages());
+    await waitFor(() => expect(first.result.current.loading).toBe(false));
+
+    await act(async () => sse.send({ type: 'contracts.webui.pages.nav_changed', properties: {} }));
+    expect(listMock).toHaveBeenCalledTimes(2);
+    expect(listWorkspacesMock).toHaveBeenCalledTimes(2);
+    first.unmount();
+    listMock.mockResolvedValue({ data: [{ id: 'next-page' }] });
+    await act(async () => sse.send({ type: 'contracts.webui.pages.nav_changed', properties: {} }));
+    expect(listMock).toHaveBeenCalledTimes(3);
+    expect(second.result.current.pages[0].id).toBe('next-page');
   });
 });

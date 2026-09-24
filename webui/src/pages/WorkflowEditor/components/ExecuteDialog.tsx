@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { X, Play, AlertCircle } from 'lucide-react';
+import { IconX, IconPlayerPlay, IconAlertCircle } from '@tabler/icons-react';
 
 interface ExecuteDialogProps {
   onClose: () => void;
@@ -37,7 +37,7 @@ export default function ExecuteDialog({ onClose, onExecute }: ExecuteDialogProps
             onClick={onClose}
             className="p-2 hover:bg-gray-100 rounded-lg transition-colors"
           >
-            <X className="w-5 h-5" />
+            <IconX aria-hidden="true" className="w-5 h-5" />
           </button>
         </div>
 
@@ -61,7 +61,7 @@ export default function ExecuteDialog({ onClose, onExecute }: ExecuteDialogProps
             />
             {error && (
               <div className="mt-2 flex items-start gap-2 p-3 bg-red-50 border border-red-200 rounded-lg">
-                <AlertCircle className="w-4 h-4 text-red-600 flex-shrink-0 mt-0.5" />
+                <IconAlertCircle aria-hidden="true" className="w-4 h-4 text-red-600 flex-shrink-0 mt-0.5" />
                 <p className="text-sm text-red-800">{error}</p>
               </div>
             )}
@@ -123,7 +123,7 @@ export default function ExecuteDialog({ onClose, onExecute }: ExecuteDialogProps
             onClick={handleExecute}
             className="flex items-center gap-2 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors"
           >
-            <Play className="w-4 h-4" />
+            <IconPlayerPlay aria-hidden="true" className="w-4 h-4" />
             {t('editor.dialog.startExecute')}
           </button>
         </div>

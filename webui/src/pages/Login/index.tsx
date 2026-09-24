@@ -71,7 +71,7 @@ export default function LoginPage() {
         <button
           type="submit"
           disabled={submitting}
-          className="w-full bg-slate-900 text-white rounded-lg py-2.5 font-medium hover:bg-slate-800 disabled:opacity-60 dark:bg-[#46515e] dark:hover:bg-[#5a6573]"
+          className="ui-btn ui-btn-primary ui-btn-lg w-full"
         >
           {submitting ? t('actions.loggingIn') : t('actions.login')}
         </button>

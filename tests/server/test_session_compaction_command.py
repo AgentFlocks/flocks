@@ -226,16 +226,17 @@ async def test_resolve_compaction_context_prefers_requested_agent_override():
 
 
 @pytest.mark.asyncio
-async def test_compact_command_uses_resolved_compaction_context_for_message_metadata():
-    session = SimpleNamespace(id="ses_test", directory="/tmp")
+async def test_compact_command_uses_resolved_compaction_context_for_message_metadata(tmp_path):
+    from flocks.server.routes import session as session_routes
+    from flocks.session.session import Session
+
+    # A real durable session must exist for the lifecycle write guard.
+    session = await Session.create(project_id="default", directory=str(tmp_path))
 
     async def provide_side_effect(*, directory, init, fn):
         return await fn()
 
     with patch(
-        "flocks.server.routes.session.Session.get_by_id",
-        new=AsyncMock(return_value=session),
-    ), patch(
         "flocks.server.routes.session._resolve_compaction_context",
         new=AsyncMock(return_value=("security", "threatbook-cn-llm", "minimax-m2.7")),
     ), patch(
@@ -252,10 +253,12 @@ async def test_compact_command_uses_resolved_compaction_context_for_message_meta
         new=AsyncMock(),
     ) as run_compaction_mock:
         response = await send_session_command(
-            "ses_test",
+            session.id,
             CommandRequest(command="compact", arguments=""),
         )
-        await asyncio.sleep(0.01)
+        pending = list(session_routes.pending_background_tasks())
+        assert pending
+        await asyncio.wait_for(asyncio.gather(*pending), timeout=5)
 
     assert response["status"] == "accepted"
     create_message_mock.assert_awaited()

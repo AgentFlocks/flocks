@@ -6,7 +6,7 @@ from typing import Optional
 
 from flocks.utils.log import Log
 
-from .models import ExecutionTriggerType, SchedulerMode, SchedulerStatus, TaskTrigger
+from .models import ExecutionTriggerType, SchedulerMode, TaskTrigger
 from .store import TaskStore
 
 log = Log.create(service="task.scheduler")
@@ -68,31 +68,19 @@ class TaskScheduler:
             next_run = self._parse_next_run(scheduler.trigger)
             if not next_run or next_run > now:
                 continue
-            active = await TaskStore.get_active_execution_for_scheduler(scheduler.id)
-            if active is not None:
-                continue
-
             trigger_type = (
                 ExecutionTriggerType.RUN_ONCE
                 if scheduler.mode == SchedulerMode.ONCE
                 else ExecutionTriggerType.SCHEDULED
             )
-            await TaskManager.create_execution_from_scheduler(
-                scheduler,
-                trigger_type=trigger_type,
-                enqueue=True,
+            execution = TaskManager.build_execution(scheduler, trigger_type=trigger_type)
+            following_run = (
+                self._compute_next(scheduler.trigger, after=now)
+                if scheduler.mode == SchedulerMode.CRON else None
             )
-
-            if scheduler.mode == SchedulerMode.CRON and scheduler.trigger.cron:
-                scheduler.trigger.next_run = self._compute_next(
-                    scheduler.trigger,
-                    after=now,
-                )
-                await TaskStore.update_scheduler(scheduler)
-            if scheduler.mode == SchedulerMode.ONCE:
-                scheduler.status = SchedulerStatus.DISABLED
-                scheduler.trigger.next_run = None
-                await TaskStore.update_scheduler(scheduler)
+            await TaskStore.enqueue_schedule_occurrence(
+                scheduler, execution, next_run=following_run,
+            )
 
     @staticmethod
     def _parse_next_run(trigger: TaskTrigger) -> Optional[datetime]:

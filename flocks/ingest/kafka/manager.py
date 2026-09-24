@@ -45,6 +45,7 @@ from flocks.workflow.fs_store import read_workflow_from_fs
 from flocks.workflow.models import Workflow
 from flocks.workflow.runner import run_workflow
 from flocks.workflow.store import WorkflowStore
+from flocks.workflow.ownership import execution_cancelled
 from flocks.workflow.tool_context import (
     build_workflow_tool_context,
     cleanup_workflow_tool_context,
@@ -63,7 +64,7 @@ log = Log.create(service="kafka.manager")
 
 
 # Maximum concurrent workflow executions per workflow to avoid FD exhaustion and
-# SQLite write contention. Kafka messages can carry large JSON payloads, so keep
+# database write contention. Kafka messages can carry large JSON payloads, so keep
 # this bounded even when a trigger requests a larger worker pool.
 _MAX_CONCURRENT_EXECUTIONS = 8
 # Maximum number of buffered Kafka messages per workflow.  Unlike syslog we do
@@ -90,6 +91,7 @@ def _worker_count_for_trigger(trigger: TriggerDefinition) -> int:
 
 def _queue_size_for_trigger(trigger: TriggerDefinition) -> int:
     return min(_MAX_QUEUE_SIZE, max(1, int(trigger.concurrency.queueSize)))
+
 
 _KAFKA_STORAGE_LIST_KEYS = DEFAULT_LARGE_LIST_KEYS | frozenset(
     {
@@ -121,6 +123,20 @@ def _strip_execution_only_comments(value: Any) -> Any:
         for key, nested in value.items()
         if not str(key).startswith("_comment")
     }
+
+
+def _configured_bool(value: Any, *, default: bool) -> bool:
+    """Parse a boolean trigger input without treating ``"false"`` as true."""
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    normalized = str(value).strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    return default
 
 
 def _decode_message(raw: Optional[bytes]) -> Any:
@@ -446,10 +462,13 @@ class KafkaManager:
             err = "workflow_not_found"
             if startup:
                 self._status[workflow_id] = {"state": "stopped", "error": err}
-                log.info("kafka.workflow_not_found_on_start", {
-                    "workflow_id": workflow_id,
-                    "action": "stale_config_skipped",
-                })
+                log.info(
+                    "kafka.workflow_not_found_on_start",
+                    {
+                        "workflow_id": workflow_id,
+                        "action": "stale_config_skipped",
+                    },
+                )
                 return {"state": "stopped", "error": err}
             self._status[workflow_id] = {"state": "failed", "error": err}
             log.warning("kafka.workflow_not_found", {"workflow_id": workflow_id})
@@ -689,9 +708,7 @@ class KafkaManager:
         generation_cancel_event: Optional[threading.Event] = None,
     ) -> None:
         run_cancel_event = (
-            generation_cancel_event
-            or self._generation_cancel_events.get(workflow_id)
-            or threading.Event()
+            generation_cancel_event or self._generation_cancel_events.get(workflow_id) or threading.Event()
         )
         while not abort.is_set():
             try:
@@ -748,6 +765,10 @@ class KafkaManager:
         configured_inputs = _strip_execution_only_comments(
             configured_inputs if isinstance(configured_inputs, dict) else {}
         )
+        tool_context_required = _configured_bool(
+            configured_inputs.get("tool_context_required"),
+            default=True,
+        )
         event = build_trigger_event(
             workflow_id=workflow_id,
             trigger=trigger,
@@ -767,15 +788,10 @@ class KafkaManager:
                 input_params=summarized_inputs,
             )
             exec_id = exec_data["id"]
-            loop = asyncio.get_running_loop()
             start_time = time.time()
             trigger_meta = mapped_inputs.get("_flocks", {}).get("trigger", {})
             trigger_input_keys = list((trigger.mapping or {}).keys()) or [input_key]
             step_recorder = ExecutionStepRecorder(
-                exec_id=exec_id,
-                loop=loop,
-                logger=log,
-                log_event="kafka.execution_step.write_failed",
                 step_compactor=lambda step: _compact_step_for_kafka_storage(
                     step,
                     input_key=input_key,
@@ -784,10 +800,11 @@ class KafkaManager:
             )
             tool_context = None
             try:
-                tool_context = await build_workflow_tool_context(
-                    workflow_id=workflow_id,
-                    action_name=f"trigger:{trigger.type}",
-                )
+                if tool_context_required:
+                    tool_context = await build_workflow_tool_context(
+                        workflow_id=workflow_id,
+                        action_name=f"trigger:{trigger.type}",
+                    )
                 result = await asyncio.to_thread(
                     run_workflow,
                     workflow=workflow_plan,
@@ -795,7 +812,7 @@ class KafkaManager:
                     run_id=exec_id,
                     trace=False,
                     execution_profile="high_frequency",
-                    cancel=run_cancel_event.is_set,
+                    cancel=lambda: run_cancel_event.is_set() or execution_cancelled(exec_id),
                     on_step_complete=step_recorder.on_step_complete,
                     tool_context=tool_context,
                 )
@@ -845,9 +862,16 @@ class KafkaManager:
                     }
                 )
             finally:
-                await cleanup_workflow_tool_context(tool_context)
+                steps = step_recorder.take_steps()
+                if tool_context is not None:
+                    await cleanup_workflow_tool_context(tool_context)
                 try:
-                    await record_execution_result(workflow_id, exec_id, exec_data)
+                    await record_execution_result(
+                        workflow_id,
+                        exec_id,
+                        exec_data,
+                        steps=steps,
+                    )
                 except Exception as exc:
                     log.warning("kafka.exec_record_failed", {"exec_id": exec_id, "error": str(exc)})
             return exec_data
@@ -859,6 +883,15 @@ class KafkaManager:
                 "workflow_id": workflow_id,
                 "trigger": trigger,
                 "event": event,
+                # The listener itself is the authenticated ingress here; ingress
+                # policies read the legacy-compat carrier from the top level
+                # (the metadata copy feeds the action recheck), so keep both.
+                "legacy_compat": True,
+                "evidence": {
+                    "auth_scheme": "kafka",
+                    "trigger_id": trigger.id,
+                    "trigger_type": trigger.type,
+                },
                 "metadata": {
                     "legacy_compat": True,
                     "trigger_type": "kafka",

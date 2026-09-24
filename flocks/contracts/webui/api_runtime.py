@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import asyncio
 import builtins
+import contextvars
 import importlib.util
 import inspect
 import json
 import sys
 import sysconfig
 import time
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -33,6 +36,11 @@ _MAX_RESPONSE_BYTES = 2_000_000
 _MAX_REQUEST_BODY_BYTES = 1_000_000
 _CLIENT_CLOSED_REQUEST_STATUS = 499
 _STDLIB_DIR = Path(sysconfig.get_paths()["stdlib"]).resolve()
+_SYNC_HANDLER_WORKERS = 8
+_sync_handler_executor = ThreadPoolExecutor(
+    max_workers=_SYNC_HANDLER_WORKERS, thread_name_prefix="webui-page-api"
+)
+_sync_handler_slots = threading.BoundedSemaphore(_SYNC_HANDLER_WORKERS)
 
 
 @dataclass(frozen=True)
@@ -336,7 +344,25 @@ class WebUIPageApiRuntime:
         return False
 
     async def _invoke_handler(self, handler: Any, ctx: Any, request: Request) -> Any:
-        result = handler(ctx, request)
+        if inspect.iscoroutinefunction(handler):
+            return await handler(ctx, request)
+        # Timed-out threads cannot be forcibly stopped. Keep their slots until
+        # the work actually finishes so retries cannot grow an unbounded queue.
+        if not _sync_handler_slots.acquire(blocking=False):
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="page api synchronous handlers are busy",
+                headers={"Retry-After": "1"},
+            )
+        try:
+            future = _sync_handler_executor.submit(
+                contextvars.copy_context().run, handler, ctx, request
+            )
+        except BaseException:
+            _sync_handler_slots.release()
+            raise
+        future.add_done_callback(lambda _: _sync_handler_slots.release())
+        result = await asyncio.wrap_future(future)
         if inspect.isawaitable(result):
             return await result
         return result
@@ -350,6 +376,8 @@ class WebUIPageApiRuntime:
         return JSONResponse(content=result)
 
     def _create_context(self, page_id: str, user: Any) -> Any:
+        from flocks.db import sync_query
+
         logger = Log.create(service=f"webui-page-api:{page_id}")
         return SimpleNamespace(
             page_id=page_id,
@@ -357,6 +385,7 @@ class WebUIPageApiRuntime:
             secrets=_SecretAccessor(),
             logger=logger,
             cache=None,
+            database=SimpleNamespace(connect=sync_query.connect, identity=sync_query.identity),
         )
 
     async def _mark_failed(self, page_id: str, error: str) -> None:

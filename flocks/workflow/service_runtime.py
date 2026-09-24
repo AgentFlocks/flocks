@@ -25,6 +25,7 @@ from flocks.hooks.execution import (
 from flocks.hooks.pipeline import HookPipeline
 from flocks.mcp import MCP, get_manager
 from flocks.utils.log import Log
+from flocks.workflow._async_runtime import register_primary_loop
 from flocks.workflow.runner import RunWorkflowResult, run_workflow
 from flocks.workflow.tool_context import build_workflow_tool_context
 
@@ -146,6 +147,7 @@ def create_service_app(
                     action_name="invoke",
                     **context_kwargs,
                 )
+                register_primary_loop()
                 return await asyncio.to_thread(
                     run_workflow,
                     workflow=app.state.workflow_json,
@@ -162,6 +164,12 @@ def create_service_app(
                 "workflow_id": app.state.workflow_id,
                 "release_id": app.state.release_id,
                 "inputs": req.inputs,
+                # The service key issued at publish time was verified above
+                # (compare_digest). It is not a managed identity, so ingress
+                # policies treat the call as the legacy compatibility carrier;
+                # the fingerprint below still lets them bind a managed key
+                # when one was registered under the same id.
+                "legacy_compat": True,
             }
             if expected_api_key:
                 action_payload["evidence"] = {

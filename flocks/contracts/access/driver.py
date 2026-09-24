@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import json
 import re
-import sqlite3
+import time
+from flocks.db.sync_query import connect
 from collections.abc import Callable, Iterable
 from datetime import datetime
 from pathlib import Path
@@ -14,25 +15,28 @@ from flocks.contracts.access.models import DriverResult, Predicate, QueryPlan, C
 
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 JSON_DATA_SUFFIXES = frozenset({".jsonl", ".json"})
+MAX_PG_SCAN_ROWS = 50_000
+MAX_PG_SCAN_BYTES = 32 * 1024 * 1024
+MAX_PG_SCAN_SECONDS = 30
 
 
 class DriverProxy:
     def __init__(
         self,
         jsonl_executor: "JsonlDriverExecutor | None" = None,
-        sqlite_executor: "SqliteJsonDriverExecutor | None" = None,
+        postgres_executor: "PostgresJsonDriverExecutor | None" = None,
     ) -> None:
         self._jsonl_executor = jsonl_executor or JsonlDriverExecutor()
-        self._sqlite_executor = sqlite_executor or SqliteJsonDriverExecutor()
+        self._postgres_executor = postgres_executor or PostgresJsonDriverExecutor()
 
     def execute(self, plan: QueryPlan) -> DriverResult:
         self._validate_plan(plan)
-        if plan.binding.adapter_kind == "builtin-sqlite-json":
-            return self._sqlite_executor.execute(plan)
+        if plan.binding.adapter_kind == "builtin-postgres-json":
+            return self._postgres_executor.execute(plan)
         return self._jsonl_executor.execute(plan)
 
     def _validate_plan(self, plan: QueryPlan) -> None:
-        if plan.binding.adapter_kind not in {"builtin-jsonl", "builtin-sqlite-json"}:
+        if plan.binding.adapter_kind not in {"builtin-jsonl", "builtin-postgres-json"}:
             raise ContractRuntimeError(
                 "adapter_sandbox_unavailable",
                 status_code=400,
@@ -50,23 +54,16 @@ class DriverProxy:
         )
 
 
-class SqliteJsonDriverExecutor:
+class PostgresJsonDriverExecutor:
     def execute(self, plan: QueryPlan) -> DriverResult:
         db_path = plan.binding.source_root
         self._assert_allowed(db_path, plan.binding.driver_allowlist_roots)
-        if not db_path.is_file():
-            raise ContractRuntimeError(
-                "data_source_unavailable",
-                status_code=404,
-                user_message="WebUI contract SQLite database is not available.",
-                admin_message=f"SQLite source does not exist: {db_path}",
-            )
 
         options = plan.binding.driver_options
-        table = _sqlite_identifier(options.get("table"), "records")
-        record_column = _sqlite_identifier(options.get("recordColumn"), "record_json")
-        date_column = _sqlite_identifier(options.get("dateColumn"), "record_date")
-        event_time_column = _sqlite_identifier_optional(options.get("eventTimeColumn"))
+        table = _postgres_identifier(options.get("table"), "records")
+        record_column = _postgres_identifier(options.get("recordColumn"), "record_json")
+        date_column = _postgres_identifier(options.get("dateColumn"), "record_date")
+        event_time_column = _postgres_identifier_optional(options.get("eventTimeColumn"))
         query = f"SELECT {record_column} FROM {table}"
         conditions: list[str] = []
         query_params: list[Any] = []
@@ -81,7 +78,8 @@ class SqliteJsonDriverExecutor:
             query_params.extend([start_time, end_time])
         if conditions:
             query += f" WHERE {' AND '.join(conditions)}"
-        query += " ORDER BY rowid"
+        order_column = _postgres_identifier(options.get("orderColumn"), "rowid")
+        query += f" ORDER BY {order_column} LIMIT {MAX_PG_SCAN_ROWS + 1}"
 
         rows: list[dict[str, Any]] = []
         seen_record_ids: set[str] = set()
@@ -89,22 +87,38 @@ class SqliteJsonDriverExecutor:
         duplicates = 0
         filtered_unique = 0
         parse_errors = 0
-        try:
-            connection = sqlite3.connect(db_path)
-            cursor = connection.execute(query, query_params)
-            raw_records = cursor.fetchall()
-            connection.close()
-        except sqlite3.Error as exc:
-            raise ContractRuntimeError(
-                "data_source_unavailable",
-                status_code=500,
-                user_message="WebUI contract SQLite database cannot be queried.",
-                admin_message=f"SQLite query failed for {db_path}: {exc}",
-            ) from exc
-
-        for (record_value,) in raw_records:
+        def records():
             try:
-                record = json.loads(record_value) if isinstance(record_value, str) else None
+                with connect(readonly=True, timeout=30) as connection:
+                    if not connection.table_exists(table):
+                        return
+                    # The synchronous query facade streams fixed-size cursor
+                    # batches; only the requested result window is retained.
+                    started = time.monotonic()
+                    scanned_bytes = 0
+                    for count, row in enumerate(connection.execute(query, query_params), start=1):
+                        raw = row[0]
+                        scanned_bytes += len((raw if isinstance(raw, str) else json.dumps(raw)).encode("utf-8"))
+                        if (count > MAX_PG_SCAN_ROWS or scanned_bytes > MAX_PG_SCAN_BYTES
+                                or time.monotonic() - started > MAX_PG_SCAN_SECONDS):
+                            raise ContractRuntimeError(
+                                "query_range_too_large", status_code=422,
+                                user_message="Query range is too large; select a shorter time range.",
+                                admin_message="PostgreSQL contract scan exceeded its row, byte or time budget.",
+                            )
+                        yield row
+            except ContractRuntimeError:
+                raise
+            except Exception as exc:
+                raise ContractRuntimeError(
+                    "data_source_unavailable", status_code=500,
+                    user_message="WebUI contract PostgreSQL data source cannot be queried.",
+                    admin_message=f"PostgreSQL query failed ({type(exc).__name__}).",
+                ) from exc
+
+        for (record_value,) in records():
+            try:
+                record = json.loads(record_value) if isinstance(record_value, str) else record_value
             except json.JSONDecodeError:
                 record = None
             if not isinstance(record, dict):
@@ -408,19 +422,31 @@ def _read_string(value: Any, fallback: str) -> str:
     return value if isinstance(value, str) and value else fallback
 
 
-def _sqlite_identifier(value: Any, fallback: str) -> str:
+def _empty_postgres_result(db_path: Path) -> DriverResult:
+    return DriverResult(
+        rows=[],
+        source_files=(db_path,),
+        total_raw=0,
+        total_unique=0,
+        duplicates=0,
+        filtered_unique=0,
+        parse_errors=0,
+    )
+
+
+def _postgres_identifier(value: Any, fallback: str) -> str:
     text = str(value or fallback).strip()
     if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", text):
         raise ContractRuntimeError(
             "data_source_unavailable",
             status_code=400,
-            user_message="WebUI contract SQLite source is misconfigured.",
-            admin_message=f"Invalid SQLite identifier: {text}",
+            user_message="WebUI contract PostgreSQL source is misconfigured.",
+            admin_message=f"Invalid PostgreSQL identifier: {text}",
         )
-    return text
+    return text.lower()
 
 
-def _sqlite_identifier_optional(value: Any) -> str:
+def _postgres_identifier_optional(value: Any) -> str:
     text = str(value or "").strip()
     if not text:
         return ""
@@ -428,7 +454,7 @@ def _sqlite_identifier_optional(value: Any) -> str:
         raise ContractRuntimeError(
             "data_source_unavailable",
             status_code=400,
-            user_message="WebUI contract SQLite source is misconfigured.",
-            admin_message=f"Invalid SQLite identifier: {text}",
+            user_message="WebUI contract PostgreSQL source is misconfigured.",
+            admin_message=f"Invalid PostgreSQL identifier: {text}",
         )
-    return text
+    return text.lower()

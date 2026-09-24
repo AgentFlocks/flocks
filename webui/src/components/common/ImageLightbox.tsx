@@ -12,7 +12,7 @@
 
 import { useEffect, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
-import { X } from 'lucide-react';
+import { IconX } from '@tabler/icons-react';
 
 interface ImageLightboxProps {
   /** Image source URL — supports both `data:` URLs and remote http(s) URLs. */
@@ -90,7 +90,7 @@ export default function ImageLightbox({ src, alt, onClose }: ImageLightboxProps)
         className="absolute top-4 right-4 inline-flex items-center justify-center w-10 h-10 rounded-full bg-white/10 text-white hover:bg-white/20 transition-colors"
         aria-label={t('button.close')}
       >
-        <X className="w-5 h-5" />
+        <IconX aria-hidden="true" className="w-5 h-5" />
       </button>
       <img
         src={src}

@@ -29,6 +29,7 @@ from .config import (
 )
 from .format import markdown_to_slack_mrkdwn
 from .inbound import build_inbound_message, slack_thread_cache_key
+from .transport import build_web_client, close_web_client, route_socket_mode
 
 try:
     from slack_bolt.async_app import AsyncApp
@@ -211,7 +212,8 @@ class SlackChannel(ChannelPlugin):
         assert AsyncApp is not None
         assert AsyncSocketModeHandler is not None
 
-        self._app = AsyncApp(token=bot_token)
+        # the bot client (and Socket Mode below) go through the outbound proxy policy
+        self._app = AsyncApp(client=build_web_client(bot_token, client_cls=AsyncWebClient))
         abort = abort_event or asyncio.Event()
         try:
             try:
@@ -257,6 +259,7 @@ class SlackChannel(ChannelPlugin):
         assert AsyncSocketModeHandler is not None
         await self._verify_app_token(app_token)
         self._handler = AsyncSocketModeHandler(self._app, app_token)
+        await route_socket_mode(self._handler)
         timeout_seconds = float(self._config.get("socketConnectTimeoutSeconds") or 15.0)
         try:
             await asyncio.wait_for(
@@ -278,7 +281,7 @@ class SlackChannel(ChannelPlugin):
     async def _verify_app_token(self, app_token: str) -> None:
         """Validate the app-level token once before Socket Mode's retry loop."""
         assert AsyncWebClient is not None
-        client = AsyncWebClient(token=app_token)
+        client = build_web_client(app_token, client_cls=AsyncWebClient)
         try:
             await client.apps_connections_open(app_token=app_token)
         except Exception as exc:
@@ -287,6 +290,8 @@ class SlackChannel(ChannelPlugin):
             if _is_permanent_slack_error(exc):
                 raise NonRetryableChannelError(message) from exc
             raise RuntimeError(message) from exc
+        finally:
+            await close_web_client(client)
 
     async def stop(self) -> None:
         handler = self._handler
@@ -307,6 +312,11 @@ class SlackChannel(ChannelPlugin):
                 pass
             except Exception:
                 pass
+
+        app = self._app
+        self._app = None
+        if app is not None:
+            await close_web_client(app.client)
 
         self.mark_disconnected()
 

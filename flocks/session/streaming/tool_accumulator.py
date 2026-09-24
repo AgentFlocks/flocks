@@ -13,6 +13,7 @@ from typing import Any, Optional
 
 from flocks.utils.log import Log
 from flocks.utils.id import Identifier
+from flocks.utils.monitor import get_monitor
 from flocks.utils.json_repair import (
     parse_json_robust as _parse_json_robust,
     repair_truncated_json,
@@ -20,10 +21,50 @@ from flocks.utils.json_repair import (
 from flocks.tool.registry import ToolRegistry
 from flocks.session.streaming.stream_events import (
     ToolInputStartEvent,
+    ToolInputErrorEvent,
     ToolCallEvent,
 )
 
 log = Log.create(service="tool_accumulator")
+
+
+class StreamToolArgumentsTruncatedError(RuntimeError):
+    """Raised when the stream ends before tool arguments form valid JSON."""
+
+    def __init__(
+        self,
+        *,
+        tool_call_id: str,
+        tool_name: str,
+        finish_reason: str,
+        arguments_len: int,
+        arguments_preview: str,
+    ) -> None:
+        self.tool_call_id = tool_call_id
+        self.tool_name = tool_name
+        self.finish_reason = finish_reason
+        self.arguments_len = arguments_len
+        self.arguments_preview = arguments_preview
+        super().__init__(
+            "Model output was truncated while generating tool arguments "
+            f"for '{tool_name}' (finish_reason='{finish_reason}', "
+            f"{arguments_len} chars). The tool was not executed."
+        )
+
+
+def _looks_truncated(accumulated_args: str) -> bool:
+    """True when the arguments are valid JSON that simply stops early.
+
+    Closing the open strings / brackets makes it parse, which is the signature
+    of a stream that was cut mid-argument. Text that stays unparseable after
+    that is malformed for some other reason and keeps going down the existing
+    invalid-tool path.
+    """
+    repaired = repair_truncated_json(accumulated_args)
+    if repaired == accumulated_args:
+        return False
+    _, repaired_ok = _parse_json_robust(repaired)
+    return repaired_ok
 
 
 class ToolCallAccumulator:
@@ -39,6 +80,37 @@ class ToolCallAccumulator:
         self._processor = processor
         self._accumulator: dict[str, dict[str, Any]] = {}
         self._index_to_id: dict[int, str] = {}
+
+    @property
+    def _session_id(self) -> Optional[str]:
+        return getattr(self._processor, "session_id", None)
+
+    def _record_parsed(self, tool_name: str) -> None:
+        # Feed the monitor behind /api/session/metrics; it never blocks the stream.
+        try:
+            get_monitor().record_tool_call_parsed(tool_name, session_id=self._session_id)
+        except Exception as exc:  # pragma: no cover - metrics are best effort
+            log.debug("tool_accumulator.monitor_failed", {"error": str(exc)})
+
+    def _record_failed(self, tool_name: str, error: str, arguments: str) -> None:
+        try:
+            get_monitor().record_tool_call_failed(
+                tool_name, error, arguments, session_id=self._session_id,
+            )
+        except Exception as exc:  # pragma: no cover
+            log.debug("tool_accumulator.monitor_failed", {"error": str(exc)})
+
+    def _record_repaired(self, tool_name: str, strategy: str) -> None:
+        try:
+            get_monitor().record_tool_call_repaired(tool_name, strategy, session_id=self._session_id)
+        except Exception as exc:  # pragma: no cover
+            log.debug("tool_accumulator.monitor_failed", {"error": str(exc)})
+
+    def _record_invalid(self, tool_name: str) -> None:
+        try:
+            get_monitor().record_tool_call_invalid(tool_name, session_id=self._session_id)
+        except Exception as exc:  # pragma: no cover
+            log.debug("tool_accumulator.monitor_failed", {"error": str(exc)})
 
     async def feed_chunk(self, tc: dict[str, Any]) -> None:
         """Process a single tool-call chunk from the provider stream."""
@@ -106,6 +178,7 @@ class ToolCallAccumulator:
                         return
 
                 if final_name:
+                    self._record_parsed(final_name)
                     await self._processor.process_event(
                         ToolCallEvent(
                             tool_call_id=tc_id,
@@ -121,17 +194,98 @@ class ToolCallAccumulator:
     ) -> None:
         """Process any tool calls still in the accumulator after the stream ends."""
         is_truncated = stream_finish_reason in ("length", "max_tokens")
+        truncation_error: StreamToolArgumentsTruncatedError | None = None
 
         for tc_id, tc_data in list(self._accumulator.items()):
-            if tc_data.get("completed"):
+            if tc_data.get("completed") or tc_data.get("failed"):
                 continue
             accumulated_args = tc_data.get("arguments_str", "")
             tool_name = tc_data.get("name", "")
-            if not (accumulated_args and tool_name):
+            if not tool_name:
+                continue
+
+            if is_truncated:
+                if accumulated_args:
+                    detail = (
+                        f"Tool arguments for '{tool_name}' cut off at "
+                        f"{len(accumulated_args)} chars."
+                    )
+                else:
+                    detail = f"Tool arguments for '{tool_name}' were not completed."
+                error_msg = (
+                    f"Output was truncated (finish_reason='{stream_finish_reason}'). "
+                    f"{detail} The tool was not executed."
+                )
+                self._record_failed(tool_name, error_msg, accumulated_args)
+                await self._processor.process_event(
+                    ToolInputErrorEvent(
+                        id=tc_id,
+                        tool_name=tool_name,
+                        input={
+                            "tool": tool_name,
+                            "arguments_preview": accumulated_args[:500],
+                            "finish_reason": stream_finish_reason,
+                        },
+                        error=error_msg,
+                    )
+                )
+                tc_data["failed"] = True
+                if truncation_error is None:
+                    truncation_error = StreamToolArgumentsTruncatedError(
+                        tool_call_id=tc_id,
+                        tool_name=tool_name,
+                        finish_reason=str(stream_finish_reason),
+                        arguments_len=len(accumulated_args),
+                        arguments_preview=accumulated_args[:500],
+                    )
+                continue
+
+            if not accumulated_args:
                 continue
 
             arguments, ok = _parse_json_robust(accumulated_args)
+            if not ok and _looks_truncated(accumulated_args):
+                # The JSON has an unterminated string or unclosed bracket, i.e.
+                # the stream stopped mid-argument. Providers only sometimes say
+                # so via finish_reason ("stop" or None is common when a gateway
+                # drops the connection, and the Anthropic SDK path never reports
+                # "length" at all), so the shape of the JSON is the reliable
+                # signal. Repairing it and executing anyway silently wrote half
+                # a file and reported success.
+                detail = (
+                    f"Tool arguments for '{tool_name}' stopped mid-value at "
+                    f"{len(accumulated_args)} chars (unterminated JSON)."
+                )
+                error_msg = (
+                    f"Output was truncated (finish_reason={stream_finish_reason!r}). "
+                    f"{detail} The tool was not executed."
+                )
+                self._record_failed(tool_name, error_msg, accumulated_args)
+                await self._processor.process_event(
+                    ToolInputErrorEvent(
+                        id=tc_id,
+                        tool_name=tool_name,
+                        input={
+                            "tool": tool_name,
+                            "arguments_preview": accumulated_args[:500],
+                            "finish_reason": stream_finish_reason,
+                        },
+                        error=error_msg,
+                    )
+                )
+                tc_data["failed"] = True
+                if truncation_error is None:
+                    truncation_error = StreamToolArgumentsTruncatedError(
+                        tool_call_id=tc_id,
+                        tool_name=tool_name,
+                        finish_reason=str(stream_finish_reason),
+                        arguments_len=len(accumulated_args),
+                        arguments_preview=accumulated_args[:500],
+                    )
+                continue
+
             if ok:
+                self._record_parsed(tool_name)
                 if not tc_data.get("input_started"):
                     await self._processor.process_event(
                         ToolInputStartEvent(id=tc_id, tool_name=tool_name)
@@ -143,6 +297,8 @@ class ToolCallAccumulator:
                 )
                 continue
 
+            self._record_failed(tool_name, "tool arguments are not valid JSON", accumulated_args)
+
             # --- Repair strategies ---
             repaired = await self._try_repair(
                 tc_id, tool_name, accumulated_args, tc_data,
@@ -151,18 +307,12 @@ class ToolCallAccumulator:
                 continue
 
             # All strategies failed — redirect to invalid tool
-            if is_truncated:
-                error_msg = (
-                    f"Output was truncated (finish_reason='{stream_finish_reason}'). "
-                    f"Tool arguments for '{tool_name}' cut off at {len(accumulated_args)} chars. "
-                    f"Please reduce the content size or split the operation."
-                )
-            else:
-                error_msg = (
-                    f"Failed to parse tool arguments ({len(accumulated_args)} chars). "
-                    f"Please ensure valid JSON with balanced braces/brackets."
-                )
+            error_msg = (
+                f"Failed to parse tool arguments ({len(accumulated_args)} chars). "
+                f"Please ensure valid JSON with balanced braces/brackets."
+            )
 
+            self._record_invalid(tool_name)
             await self._processor.process_event(
                 ToolCallEvent(
                     tool_call_id=tc_id,
@@ -174,6 +324,9 @@ class ToolCallAccumulator:
                     },
                 )
             )
+
+        if truncation_error is not None:
+            raise truncation_error
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -204,11 +357,14 @@ class ToolCallAccumulator:
         accumulated_args: str,
         tc_data: dict[str, Any],
     ) -> bool:
-        """Attempt multiple repair strategies. Return True if repaired."""
-        repaired_json = repair_truncated_json(accumulated_args)
+        """Attempt multiple repair strategies. Return True if repaired.
+
+        Only the tool *name* is repaired here. Padding truncated JSON back into
+        shape and executing it is what let a cut-off ``write`` land on disk as a
+        half file; ``flush_remaining`` now routes that case to the truncation
+        path before this method is reached.
+        """
         jsons_to_try = [accumulated_args]
-        if repaired_json != accumulated_args:
-            jsons_to_try.append(repaired_json)
 
         async def _try_exec(candidate: str, variants: list[str]) -> bool:
             for v in variants:
@@ -229,26 +385,12 @@ class ToolCallAccumulator:
                     log.info("tool_accumulator.repair.success", {
                         "original": tool_name, "repaired": candidate,
                     })
-                    return True
-            return False
-
-        # Strategy 0: truncated JSON repair with original name
-        if repaired_json != accumulated_args:
-            args, ok = _parse_json_robust(repaired_json)
-            if ok:
-                schema = ToolRegistry.get_schema(tool_name)
-                missing = [p for p in schema.required if p not in args] if schema else []
-                if not missing:
-                    if not tc_data.get("input_started"):
-                        await self._processor.process_event(
-                            ToolInputStartEvent(id=tc_id, tool_name=tool_name)
-                        )
-                    await self._processor.process_event(
-                        ToolCallEvent(
-                            tool_call_id=tc_id, tool_name=tool_name, input=args,
-                        )
+                    self._record_repaired(
+                        tool_name,
+                        "case" if candidate != tool_name else "json",
                     )
                     return True
+            return False
 
         # Strategy 1: case sensitivity
         lower = tool_name.lower()

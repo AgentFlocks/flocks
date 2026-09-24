@@ -390,9 +390,12 @@ class BackgroundManager:
             handle = self._task_handles.get(tid)
             if not handle:
                 continue
-            if not handle.done():
-                handle.cancel()
-                cancelled += 1
+            if handle.done():
+                # Already finished (completed/error/cancelled): nothing to
+                # cancel, and the recorded outcome must stay intact.
+                continue
+            handle.cancel()
+            cancelled += 1
             task = self._tasks.get(tid)
             if task:
                 task.status = "cancelled"

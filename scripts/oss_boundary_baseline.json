@@ -1,0 +1,25 @@
+{
+  "_comment": "Occurrences of commercial-build names remaining in the public source. New or increased counts fail scripts/oss_boundary_check.py. Lower these as the migration proceeds; the target is an empty map.",
+  "total": 139,
+  "files": {
+    "flocks/auth/service.py": 1,
+    "flocks/cli/commands/update.py": 1,
+    "flocks/config/config.py": 2,
+    "flocks/console/login.py": 7,
+    "flocks/server/routes/auth.py": 1,
+    "flocks/server/routes/console_upgrade.py": 33,
+    "flocks/server/routes/flockspro_license.py": 8,
+    "flocks/server/routes/hub.py": 1,
+    "flocks/server/routes/update.py": 10,
+    "flocks/updater/models.py": 1,
+    "flocks/updater/updater.py": 40,
+    "webui/src/api/flocksproPolicy.ts": 6,
+    "webui/src/api/flocksproUsers.ts": 8,
+    "webui/src/api/hub.test.ts": 2,
+    "webui/src/locales/en-US/webuiContractPage.json": 2,
+    "webui/src/locales/zh-CN/webuiContractPage.json": 2,
+    "webui/src/pages/SceneSuites/index.test.tsx": 2,
+    "webui/src/pages/SceneSuites/index.tsx": 3,
+    "webui/src/pages/Session/index.test.tsx": 9
+  }
+}

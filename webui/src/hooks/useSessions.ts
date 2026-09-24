@@ -457,10 +457,20 @@ export function useSessionMessages(sessionId?: string) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [hasOlder, setHasOlder] = useState(false);
+  const [hasNewer, setHasNewer] = useState(false);
+  const [loadingOlder, setLoadingOlder] = useState(false);
+  const [loadingNewer, setLoadingNewer] = useState(false);
+  const pageRef = useRef({ before: null as string | null, after: null as string | null, anchor: null as string | null });
+  const pendingPageRef = useRef(new Map<string, symbol>());
+  const messagesRef = useRef(messages);
+  messagesRef.current = messages;
   const activeSessionIdRef = useRef(sessionId);
   const requestIdRef = useRef(0);
   const provisionalMessageIdsRef = useRef<Set<string>>(new Set());
   const messageMutationVersionsRef = useRef<Map<string, number>>(new Map());
+  const deletedMessageVersionsRef = useRef(new Map<string, number>());
+  const activeRequestVersionsRef = useRef(new Map<symbol, { generation: number; mutation: number }>());
   const mutationVersionRef = useRef(0);
 
   const markMessageMutation = (messageId: string) => {
@@ -468,28 +478,71 @@ export function useSessionMessages(sessionId?: string) {
     messageMutationVersionsRef.current.set(messageId, mutationVersionRef.current);
   };
 
-  const fetchMessages = useCallback(async () => {
+  const fetchMessages = useCallback(async (mode: 'refresh' | 'older' | 'newer' | 'focus' | 'latest' = 'refresh', target?: string) => {
     if (!sessionId || activeSessionIdRef.current !== sessionId) return;
-
+    const extending = mode === 'older' || mode === 'newer';
+    if (extending && pendingPageRef.current.has(mode)) return;
+    const cursor = mode === 'older' ? pageRef.current.before : pageRef.current.after;
+    if (extending && !cursor) return;
     const requestSessionId = sessionId;
-    const requestId = ++requestIdRef.current;
+    const requestId = extending ? requestIdRef.current : ++requestIdRef.current;
     const requestMutationVersion = mutationVersionRef.current;
+    const requestToken = Symbol(mode);
+    if (!extending) {
+      pendingPageRef.current.clear();
+      setLoadingOlder(false);
+      setLoadingNewer(false);
+    } else {
+      pendingPageRef.current.set(mode, requestToken);
+    }
+    activeRequestVersionsRef.current.set(requestToken, { generation: requestId, mutation: requestMutationVersion });
+    const anchor = mode === 'focus' ? target : mode === 'latest' ? null : pageRef.current.anchor;
     const isCurrentRequest = () => (
       activeSessionIdRef.current === requestSessionId
       && requestIdRef.current === requestId
     );
     
     try {
-      setLoading(true);
+      if (mode === 'older') setLoadingOlder(true);
+      else if (mode === 'newer') setLoadingNewer(true);
+      else setLoading(true);
       setError(null);
       const startMark = 'session:messages:start';
       if (typeof performance !== 'undefined') performance.mark(startMark);
       const response = await client.get(`/api/session/${sessionId}/message`, {
-        params: { include_archived: true },
+        params: {
+          page: true, limit: 50, include_archived: true,
+          ...(mode === 'older' ? { before: cursor } : mode === 'newer' ? { after: cursor } : anchor ? { around: anchor } : {}),
+        },
       });
       markMeasure('session:messages', startMark);
       if (!isCurrentRequest()) return;
       const messagesData = transformMessageResponse(response.data);
+      const older = response.data?.hasMore === true;
+      const newer = response.data?.hasNewer === true;
+      const compare = (a: Message, b: Message) => a.timestamp - b.timestamp || a.id.localeCompare(b.id);
+      const first = messagesData[0];
+      const last = messagesData[messagesData.length - 1];
+      const current = messagesRef.current;
+      const currentIds = new Set(current
+        .filter(message => !provisionalMessageIdsRef.current.has(message.id))
+        .map(message => message.id));
+      // A reconnect can miss more than one page. Without an overlap we cannot
+      // claim that the retained window is continuous; use the new page's cursors.
+      // A new SSE tail message is not proof that the intervening history loaded.
+      const resetWindow = mode === 'refresh' && current.length > 0
+        && !messagesData.some(message => currentIds.has(message.id));
+      const keepOlderCursor = mode === 'refresh' && !resetWindow && first && current[0] && compare(current[0], first) < 0;
+      const keepNewerCursor = mode === 'refresh' && !resetWindow && anchor && last && current.length > 0 && compare(current[current.length - 1], last) > 0;
+      if (mode !== 'newer' && !keepOlderCursor) {
+        pageRef.current.before = response.data?.nextBefore ?? null;
+        setHasOlder(older);
+      }
+      if (mode !== 'older' && !keepNewerCursor) {
+        pageRef.current.after = response.data?.nextAfter ?? null;
+        setHasNewer(newer);
+      }
+      if (!extending) pageRef.current.anchor = anchor ?? null;
       const protectedMessageIds = new Set(
         Array.from(messageMutationVersionsRef.current.entries())
           .filter(([, version]) => version > requestMutationVersion)
@@ -500,24 +553,49 @@ export function useSessionMessages(sessionId?: string) {
           provisionalMessageIdsRef.current.delete(message.id);
         }
       });
-      messageMutationVersionsRef.current.forEach((version, messageId) => {
-        if (version <= requestMutationVersion) {
-          messageMutationVersionsRef.current.delete(messageId);
-        }
-      });
-      setMessages(prev => mergeCompleteFetchedMessages(
-        prev,
-        messagesData,
-        provisionalMessageIdsRef.current,
-        protectedMessageIds,
+      const fetchedMessages = messagesData.filter(message => (
+        (deletedMessageVersionsRef.current.get(message.id) ?? 0) <= requestMutationVersion
       ));
+      setMessages(prev => {
+        const replace = mode === 'focus' || mode === 'latest' || resetWindow;
+        const complete = !older && !newer;
+        const retained = replace || (!extending && complete) ? [] : prev.filter(message => (
+          extending || (first && compare(message, first) < 0) || (anchor && last && compare(message, last) > 0)
+        ));
+        const byId = new Map(retained.map(message => [message.id, message]));
+        for (const message of fetchedMessages) byId.set(message.id, message);
+        return mergeCompleteFetchedMessages(
+          prev, [...byId.values()].sort(compare), provisionalMessageIdsRef.current, protectedMessageIds,
+        );
+      });
+      return true;
     } catch (err: any) {
       if (isCurrentRequest()) {
         setError(err.message || 'Failed to fetch messages');
       }
+      return false;
     } finally {
+      activeRequestVersionsRef.current.delete(requestToken);
+      // A later response must not discard deletion/update protection needed by
+      // another page that is still in flight. Retain only that request horizon.
+      let oldestMutation = Infinity;
+      activeRequestVersionsRef.current.forEach(request => {
+        if (request.generation === requestIdRef.current) {
+          oldestMutation = Math.min(oldestMutation, request.mutation);
+        }
+      });
+      for (const versions of [messageMutationVersionsRef.current, deletedMessageVersionsRef.current]) {
+        versions.forEach((version, messageId) => {
+          if (version <= oldestMutation) versions.delete(messageId);
+        });
+      }
       if (isCurrentRequest()) {
         setLoading(false);
+      }
+      if (activeSessionIdRef.current === requestSessionId && extending && pendingPageRef.current.get(mode) === requestToken) {
+        pendingPageRef.current.delete(mode);
+        if (mode === 'older') setLoadingOlder(false);
+        else setLoadingNewer(false);
       }
     }
   }, [sessionId]);
@@ -528,7 +606,16 @@ export function useSessionMessages(sessionId?: string) {
     activeSessionIdRef.current = sessionId;
     provisionalMessageIdsRef.current.clear();
     messageMutationVersionsRef.current.clear();
+    deletedMessageVersionsRef.current.clear();
+    activeRequestVersionsRef.current.clear();
     mutationVersionRef.current = 0;
+    requestIdRef.current += 1;
+    pageRef.current = { before: null, after: null, anchor: null };
+    pendingPageRef.current.clear();
+    setHasOlder(false);
+    setHasNewer(false);
+    setLoadingOlder(false);
+    setLoadingNewer(false);
     setMessages([]);
     setError(null);
     if (sessionId) {
@@ -546,13 +633,23 @@ export function useSessionMessages(sessionId?: string) {
     messages,
     loading,
     error,
-    refetch: fetchMessages,
+    refetch: useCallback(() => fetchMessages(), [fetchMessages]),
+    hasOlder,
+    hasNewer,
+    loadingOlder,
+    loadingNewer,
+    loadOlder: useCallback(() => fetchMessages('older'), [fetchMessages]),
+    loadNewer: useCallback(() => fetchMessages('newer'), [fetchMessages]),
+    loadLatest: useCallback(() => fetchMessages('latest'), [fetchMessages]),
+    focusMessage: useCallback((messageId: string) => fetchMessages('focus', messageId), [fetchMessages]),
     addMessage: (message: Message) => {
+      if (pageRef.current.after) void fetchMessages('latest');
       provisionalMessageIdsRef.current.add(message.id);
       markMessageMutation(message.id);
       setMessages(prev => [...prev, message]);
     },
     updateMessage: (messageInfo: any) => {
+      if (pageRef.current.after && !messagesRef.current.some(message => message.id === messageInfo.id)) return;
       markMessageMutation(messageInfo.id);
       setMessages(prev => {
         const existingIndex = prev.findIndex(m => m.id === messageInfo.id);
@@ -640,6 +737,7 @@ export function useSessionMessages(sessionId?: string) {
      * frame-level typing cadence and Markdown parse budget.
      */
     updateMessagePart: (partInfo: any, delta?: string) => {
+      if (pageRef.current.after && !messagesRef.current.some(message => message.id === partInfo.messageID)) return;
       markMessageMutation(partInfo.messageID);
       setMessages(prev => {
         if (!prev.some((message) => message.id === partInfo.messageID)) {
@@ -651,12 +749,18 @@ export function useSessionMessages(sessionId?: string) {
     removeMessage: (messageId: string) => {
       provisionalMessageIdsRef.current.delete(messageId);
       messageMutationVersionsRef.current.delete(messageId);
+      mutationVersionRef.current += 1;
+      if (activeRequestVersionsRef.current.size > 0) {
+        deletedMessageVersionsRef.current.set(messageId, mutationVersionRef.current);
+      }
       setMessages(prev => prev.filter((message) => message.id !== messageId));
     },
     clearMessages: () => {
       requestIdRef.current += 1;
       provisionalMessageIdsRef.current.clear();
       messageMutationVersionsRef.current.clear();
+      deletedMessageVersionsRef.current.clear();
+      activeRequestVersionsRef.current.clear();
       mutationVersionRef.current = 0;
       setMessages([]);
       setError(null);

@@ -143,6 +143,27 @@ def test_agent_watcher_rejects_unrelated_paths() -> None:
     assert _agent_event_should_reload(evt) is False
 
 
+def test_agent_watcher_ignores_md_outside_agents_dir() -> None:
+    # 监听的是 plugins 根目录，skills/tools 里的 .md 不能触发 agent 缓存失效
+    evt = _modify_event("/repo/.flocks/plugins/skills/foo/SKILL.md")
+    assert _agent_event_should_reload(evt) is False
+
+
+def test_agent_watcher_watches_plugin_root_to_catch_new_agent_dirs(monkeypatch, tmp_path) -> None:
+    from flocks.plugin import loader
+    from flocks.agent.registry import AgentFileWatcher
+
+    user_plugin_root = tmp_path / "home" / ".flocks" / "plugins"
+    user_plugin_root.mkdir(parents=True)  # 启动时还没有 agents/ 子目录
+    project_root = tmp_path / "missing-project"
+    project_root.mkdir()
+    monkeypatch.setattr(loader, "DEFAULT_PLUGIN_ROOT", user_plugin_root)
+    monkeypatch.chdir(project_root)
+
+    assert AgentFileWatcher()._collect_watch_dirs() == {str(user_plugin_root)}
+    assert (user_plugin_root / "agents").is_dir()
+
+
 # ---------------------------------------------------------------------------
 # Skill watcher predicate
 # ---------------------------------------------------------------------------

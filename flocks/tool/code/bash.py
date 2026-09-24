@@ -12,6 +12,7 @@ Executes bash commands with:
 import os
 import sys
 import asyncio
+import time
 import subprocess
 import shlex
 import tempfile
@@ -614,12 +615,28 @@ async def _stream_output(
     extra_metadata: Optional[dict] = None,
 ) -> ToolResult:
     """流式读取进程输出并返回结果（host 和 sandbox 共用）."""
-    output = ""
+    # Output is kept in memory only up to MAX_OUTPUT_BYTES; anything beyond
+    # is spilled to a file so a runaway command cannot inflate the process
+    # (200MB of `yes` used to become a 1.5GB RSS and a 120s timeout).
+    chunks: list[str] = []
+    kept_bytes = 0
+    total_bytes = 0
+    spill_path: Optional[str] = None
+    spill_file = None
     timed_out = False
     aborted = False
+    last_publish = [0.0, 0]  # monotonic time, kept_bytes at last publish
 
-    def update_output_metadata() -> None:
-        truncated_output = output
+    def current_output() -> str:
+        return "".join(chunks)
+
+    def update_output_metadata(force: bool = False) -> None:
+        # throttle: at most every 200ms or every 8KB of new output
+        now = time.monotonic()
+        if not force and (now - last_publish[0] < 0.2) and (kept_bytes - last_publish[1] < 8192):
+            return
+        last_publish[0], last_publish[1] = now, kept_bytes
+        truncated_output = current_output()
         if len(truncated_output) > MAX_METADATA_LENGTH:
             truncated_output = truncated_output[:MAX_METADATA_LENGTH] + "\n\n..."
 
@@ -633,14 +650,40 @@ async def _stream_output(
             }
         )
 
+    def open_spill() -> None:
+        nonlocal spill_path, spill_file
+        if spill_file is not None:
+            return
+        try:
+            from flocks.tool.truncation import _ensure_output_dir
+
+            spill_path = str(_ensure_output_dir() / f"bash_{int(time.time() * 1000)}")
+            spill_file = open(spill_path, "wb")  # noqa: SIM115 - closed explicitly below
+            spill_file.write(current_output().encode("utf-8", errors="replace"))
+        except Exception as exc:  # pragma: no cover - disk problems
+            log.warn("bash.output_spill_failed", {"error": str(exc)})
+            spill_path = None
+            spill_file = None
+
     async def read_stream(stream: asyncio.StreamReader) -> None:
-        nonlocal output
+        nonlocal kept_bytes, total_bytes
         while True:
-            chunk = await stream.read(4096)
+            chunk = await stream.read(65536)
             if not chunk:
                 break
-            output += chunk.decode("utf-8", errors="replace")
-            update_output_metadata()
+            total_bytes += len(chunk)
+            if kept_bytes < MAX_OUTPUT_BYTES:
+                remaining = MAX_OUTPUT_BYTES - kept_bytes
+                piece, rest = chunk[:remaining], chunk[remaining:]
+                chunks.append(piece.decode("utf-8", errors="replace"))
+                kept_bytes += len(piece)
+                update_output_metadata()
+                if rest:
+                    open_spill()
+                    if spill_file is not None:
+                        spill_file.write(rest)
+            elif spill_file is not None:
+                spill_file.write(chunk)
 
     async def wait_for_abort() -> None:
         while not ctx.aborted:
@@ -687,6 +730,14 @@ async def _stream_output(
         pass
 
     exit_code = proc.returncode
+    if spill_file is not None:
+        try:
+            spill_file.close()
+        except Exception:
+            pass
+    output = current_output()
+    output_truncated = total_bytes > kept_bytes
+    update_output_metadata(force=True)
 
     # Build result metadata
     result_metadata = []
@@ -694,6 +745,11 @@ async def _stream_output(
         result_metadata.append(f"bash tool terminated command after exceeding timeout {timeout_ms} ms")
     if aborted:
         result_metadata.append("User aborted the command")
+    if output_truncated:
+        note = f"output truncated at {MAX_OUTPUT_BYTES} bytes (command produced {total_bytes} bytes)"
+        if spill_path:
+            note += f"; full output saved to: {spill_path}"
+        result_metadata.append(note)
 
     if result_metadata:
         output += "\n\n<bash_metadata>\n" + "\n".join(result_metadata) + "\n</bash_metadata>"
@@ -715,17 +771,25 @@ async def _stream_output(
             aborted=aborted,
         )
 
+    metadata = {
+        "output": truncated_output,
+        "exit": exit_code,
+        "description": description or command,
+        "timed_out": timed_out,
+        "aborted": aborted,
+        **(extra_metadata or {}),
+    }
+    if output_truncated:
+        metadata["truncated"] = True
+        metadata["total_bytes"] = total_bytes
+        if spill_path:
+            metadata["output_path"] = spill_path
+
     return ToolResult(
         success=success,
         output=output,
         error=error_message,
         title=description or command,
-        metadata={
-            "output": truncated_output,
-            "exit": exit_code,
-            "description": description or command,
-            "timed_out": timed_out,
-            "aborted": aborted,
-            **(extra_metadata or {}),
-        },
+        truncated=output_truncated,
+        metadata=metadata,
     )

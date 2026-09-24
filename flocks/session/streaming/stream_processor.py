@@ -38,6 +38,7 @@ from flocks.session.streaming.stream_events import (
     TextDeltaEvent,
     TextEndEvent,
     ToolInputStartEvent,
+    ToolInputErrorEvent,
 )
 from flocks.tool.registry import ToolRegistry, ToolContext, ToolResult
 from flocks.permission import PermissionNext
@@ -218,6 +219,9 @@ class StreamProcessor:
         
         elif event_type == "tool-input-end":
             pass  # Input is complete
+
+        elif event_type == "tool-input-error":
+            await self._handle_tool_input_error(event)
         
         elif event_type == "tool-call":
             if self._should_run_tool_call_parallel(event):
@@ -471,6 +475,69 @@ class StreamProcessor:
             })
         except Exception as e:
             log.error("stream.tool_input_start.store_part_failed", {"error": str(e)})
+
+    async def _handle_tool_input_error(self, event: ToolInputErrorEvent) -> None:
+        """Mark an input-generation failure without executing a tool."""
+        if event.id in self.tool_calls:
+            tool_state = self.tool_calls[event.id]
+            part_id = tool_state.part_id
+        else:
+            part_id = Identifier.create("part")
+            tool_state = ToolCallState(
+                id=event.id,
+                name=event.tool_name,
+                input=event.input,
+                part_id=part_id,
+                status="pending",
+            )
+            self.tool_calls[event.id] = tool_state
+
+        tool_state.name = event.tool_name
+        tool_state.input = event.input
+        tool_state.status = "error"
+        tool_state.error = event.error
+
+        tool_error_time = int(datetime.now().timestamp() * 1000)
+        error_state = ToolStateError(
+            status="error",
+            input=event.input,
+            error=event.error,
+            time={"start": tool_error_time, "end": tool_error_time},
+        )
+        error_part = ToolPart(
+            id=part_id,
+            sessionID=self.session_id,
+            messageID=self.assistant_message.id,
+            type="tool",
+            callID=event.id,
+            tool=event.tool_name,
+            state=error_state,
+        )
+        await Message.store_part(self.session_id, self.assistant_message.id, error_part)
+
+        if self.event_publish_callback:
+            await self.event_publish_callback("message.part.updated", {
+                "part": {
+                    "id": part_id,
+                    "messageID": self.assistant_message.id,
+                    "sessionID": self.session_id,
+                    "type": "tool",
+                    "callID": event.id,
+                    "tool": event.tool_name,
+                    "state": {
+                        "status": "error",
+                        "input": event.input,
+                        "error": event.error,
+                        "time": {"start": tool_error_time, "end": tool_error_time},
+                    },
+                },
+            })
+
+        log.warn("stream.tool_input.error", {
+            "tool_call_id": event.id,
+            "tool_name": event.tool_name,
+            "error": event.error,
+        })
     
     async def _handle_tool_call(self, event: ToolCallEvent) -> None:
         """
@@ -584,9 +651,51 @@ class StreamProcessor:
         post_hook_fired = False
         hook_blocked = False
         hook_block_reason = ""
+        # Carries the gate verdict from here down to the registry.  Merged into
+        # the tool context below rather than passed separately, so it travels
+        # with the call it belongs to.
+        tool_extra_for_gate: dict = {}
         try:
-            from flocks.hooks.pipeline import HookPipeline
-            hook_ctx = await HookPipeline.run_tool_before({
+            from flocks.hooks.tool_gate import carry_decision, run_tool_gate
+            from flocks.session.tool_execution import build_session_tool_execution_payload
+
+            # The verdict made here is reused by the registry, so the gate must
+            # see the same canonical ``tool_execution`` contract the registry
+            # would have built (actor subject, session profile, ingress carrier).
+            # The legacy flat shape carried none of that, and an enforcing
+            # policy gate refused every streamed call as an untrusted subject.
+            gate_tool = ToolRegistry.get(tool_name)
+            gate_schema = ToolRegistry.get_schema(tool_name)
+            gate_payload = await build_session_tool_execution_payload(
+                session_id=self.session_id,
+                message_id=self.assistant_message.id,
+                agent=self.agent.name,
+                tool_name=tool_name,
+                tool_input=tool_input,
+                validated_input=tool_input,
+                tool_schema=gate_schema.to_json_schema() if gate_schema else {},
+                tool_context_extra={
+                    "tool_call_id": tool_call_id,
+                    "workspace_dir": self._workspace_dir,
+                    "tool_source": getattr(getattr(gate_tool, "info", None), "source", None),
+                    "tool_category": getattr(
+                        getattr(getattr(gate_tool, "info", None), "category", None),
+                        "value",
+                        getattr(getattr(gate_tool, "info", None), "category", None),
+                    ),
+                    "execution_context": {
+                        "trace_id": f"{self.session_id}:{self.assistant_message.id}",
+                        "execution_id": self.assistant_message.id,
+                        "turn_id": self.assistant_message.id,
+                        "step": int(self._step_index or 0),
+                        "attempt": 1,
+                    },
+                },
+            )
+            # Keep the flat legacy keys next to the contract: handlers written
+            # against the old shape (and in-place ``tool.input`` rewrites) keep
+            # working, while contract-aware gates read ``tool_execution``.
+            gate_payload.update({
                 "sessionID": self.session_id,
                 "workspace": self._workspace_dir,
                 "agent": self.agent.name,
@@ -596,17 +705,21 @@ class StreamProcessor:
                     "callID": tool_call_id,
                 },
             })
-            if hook_ctx and isinstance(hook_ctx.input, dict):
-                updated = hook_ctx.input.get("tool", {}).get("input")
-                if isinstance(updated, dict):
-                    tool_input = updated
-                    tool_state.input = tool_input
-            hook_output = hook_ctx.output if hook_ctx and isinstance(hook_ctx.output, dict) else {}
-            decision = str(hook_output.get("decision") or "").strip().lower()
-            hook_blocked = decision == "block" or bool(hook_output.get("skip", False))
-            hook_block_reason = str(
-                hook_output.get("reason") or hook_output.get("error") or ""
-            ).strip()
+            gate_verdict = await run_tool_gate(
+                gate_payload,
+                call_id=tool_call_id,
+                tool_input=tool_input,
+            )
+            # Apply the rewrite before the running state is published so the UI
+            # shows the input the tool actually receives.
+            if gate_verdict.tool_input is not tool_input:
+                tool_input = gate_verdict.tool_input
+                tool_state.input = tool_input
+            hook_blocked = not gate_verdict.allowed
+            hook_block_reason = gate_verdict.reason
+            # The registry runs the same gate; hand it this verdict so the
+            # handlers are not asked a second time for the same call.
+            carry_decision(tool_extra_for_gate, gate_verdict)
         except asyncio.CancelledError:
             await self._finalize_interrupted_tool_call(
                 tool_state=tool_state,
@@ -617,10 +730,6 @@ class StreamProcessor:
                 post_hook_fired=False,
             )
             raise
-        except Exception as e:
-            log.error("stream.tool_before_hook.error", {"error": str(e)})
-            hook_blocked = True
-            hook_block_reason = "Tool execution blocked because tool-before hook failed"
 
         tool_state.status = "running"
         
@@ -846,6 +955,7 @@ class StreamProcessor:
 
                 tool_extra = {
                     **sandbox_meta["extra"],
+                    **tool_extra_for_gate,
                     "agent_execution_session": True,
                     "execution_mode": self._execution_mode,
                     "workspace_dir": self._workspace_dir,
@@ -928,6 +1038,9 @@ class StreamProcessor:
                 tool_end_time = int(datetime.now().timestamp() * 1000)
                 
                 if result.success:
+                    from flocks.session.files import output_file_attachments, public_resource_id
+
+                    attachments = output_file_attachments(tool_name, getattr(result, "attachments", None))
                     # output can be str, dict, or list - ToolStateCompleted handles all
                     completed_state = ToolStateCompleted(
                         status="completed",
@@ -936,6 +1049,7 @@ class StreamProcessor:
                         title=result.title or tool_name,
                         metadata=result.metadata or {},
                         time={"start": tool_start_time, "end": tool_end_time},
+                        attachments=attachments,
                     )
                 else:
                     resolved_error = _resolve_tool_error(result)
@@ -970,6 +1084,16 @@ class StreamProcessor:
                         state_dict["output"] = result.output if result.output is not None else ""
                         state_dict["title"] = result.title or tool_name
                         state_dict["metadata"] = result.metadata or {}
+                        if attachments:
+                            state_dict["attachments"] = [
+                                {
+                                    **attachment,
+                                    "resourceID": public_resource_id(
+                                        self.assistant_message.id, attachment["id"],
+                                    ),
+                                }
+                                for attachment in attachments
+                            ]
                     else:
                         state_dict["error"] = resolved_error
                         state_dict["metadata"] = result.metadata or {}
@@ -1778,7 +1902,7 @@ class StreamProcessor:
             re.DOTALL | re.IGNORECASE,
         ):
             body = match.group(1).strip()
-            if not body or not body[:1] in "{[":
+            if not body or body[:1] not in "{[":
                 continue
 
             try:

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Bot, ChevronDown, Cpu, Info, Sparkles } from 'lucide-react';
+import { IconRobot, IconChevronDown, IconCpu, IconInfoCircle, IconSparkles } from '@tabler/icons-react';
 import { useTranslation } from 'react-i18next';
 
 import type { Agent } from '@/api/agent';
@@ -304,7 +304,7 @@ export function ChatAgentDisplay({
       className="flex h-7 w-auto max-w-[150px] min-w-0 items-center gap-1.5 rounded-lg px-2 text-xs text-zinc-600 dark:text-zinc-300"
       title={t('agentPicker.title')}
     >
-      <Bot className="h-3 w-3 shrink-0" />
+      <IconRobot aria-hidden="true" className="h-3 w-3 shrink-0" />
       <span className="truncate font-medium">
         {selectedAgentInfo ? getAgentDisplayName(selectedAgentInfo, i18n.language) : formatAgentName(selectedAgent)}
       </span>
@@ -366,11 +366,11 @@ export function ChatAgentPicker({
         className="flex h-7 w-auto max-w-[150px] min-w-0 items-center gap-1.5 rounded-lg px-2 text-xs text-zinc-600 transition-colors hover:bg-zinc-200/60 hover:text-zinc-900 dark:text-zinc-300 dark:hover:bg-zinc-800 dark:hover:text-zinc-50"
         title={t('agentPicker.title')}
       >
-        <Bot className="h-3 w-3 shrink-0" />
+        <IconRobot aria-hidden="true" className="h-3 w-3 shrink-0" />
         <span className="truncate font-medium">
           {selectedAgentInfo ? getAgentDisplayName(selectedAgentInfo, i18n.language) : formatAgentName(selectedAgent)}
         </span>
-        <ChevronDown className={`h-3 w-3 shrink-0 transition-transform ${open ? 'rotate-180' : ''}`} />
+        <IconChevronDown aria-hidden="true" className={`h-3 w-3 shrink-0 transition-transform ${open ? 'rotate-180' : ''}`} />
       </button>
       {open && (
         <div className="absolute left-0 bottom-full z-50 mb-2 w-80 max-w-[calc(100vw-2rem)] rounded-lg border border-zinc-200 bg-white shadow-sm dark:border-zinc-800 dark:bg-zinc-900 dark:shadow-xl dark:shadow-black/30">
@@ -425,7 +425,7 @@ export function ChatAgentPicker({
                     }`}
                   >
                     <div className="flex min-w-0 items-center gap-2">
-                      <Bot className={`h-3 w-3 shrink-0 ${selectedAgent === agent.name ? 'text-zinc-600 dark:text-zinc-200' : 'text-zinc-400 dark:text-zinc-500'}`} />
+                      <IconRobot aria-hidden="true" className={`h-3 w-3 shrink-0 ${selectedAgent === agent.name ? 'text-zinc-600 dark:text-zinc-200' : 'text-zinc-400 dark:text-zinc-500'}`} />
                       <span className="min-w-0 flex-1 truncate text-xs font-medium text-zinc-900 dark:text-zinc-100">
                         {displayName}
                       </span>
@@ -454,7 +454,7 @@ export function ChatAgentPicker({
                             onMouseLeave={hideTooltip}
                             onPointerLeave={hideTooltip}
                           >
-                            <Info className="h-3 w-3 text-zinc-300 transition-colors group-hover:text-zinc-500 dark:text-zinc-600 dark:group-hover:text-zinc-300" />
+                            <IconInfoCircle aria-hidden="true" className="h-3 w-3 text-zinc-300 transition-colors group-hover:text-zinc-500 dark:text-zinc-600 dark:group-hover:text-zinc-300" />
                           </span>
                         )}
                       </div>
@@ -539,14 +539,14 @@ export function ChatModelPicker({
             : t('modelPicker.empty')}
       >
         {autoOption?.selected
-          ? <Sparkles className="h-3 w-3 shrink-0" />
-          : <Cpu className="h-3 w-3 shrink-0" />}
+          ? <IconSparkles aria-hidden="true" className="h-3 w-3 shrink-0" />
+          : <IconCpu aria-hidden="true" className="h-3 w-3 shrink-0" />}
         <span className="truncate font-medium">
           {autoOption?.selected
             ? t('modelPicker.auto')
             : selectedModelOption?.label ?? (loading ? t('loading') : t('modelPicker.empty'))}
         </span>
-        <ChevronDown className={`h-3 w-3 shrink-0 transition-transform ${open ? 'rotate-180' : ''}`} />
+        <IconChevronDown aria-hidden="true" className={`h-3 w-3 shrink-0 transition-transform ${open ? 'rotate-180' : ''}`} />
       </button>
       {open && (
         <div
@@ -578,7 +578,7 @@ export function ChatModelPicker({
                       }`}
                     >
                       <div className="flex min-w-0 items-center gap-2">
-                        <Sparkles className={`h-3 w-3 shrink-0 ${autoOption.selected ? 'text-zinc-600 dark:text-zinc-200' : 'text-zinc-400 dark:text-zinc-500'}`} />
+                        <IconSparkles aria-hidden="true" className={`h-3 w-3 shrink-0 ${autoOption.selected ? 'text-zinc-600 dark:text-zinc-200' : 'text-zinc-400 dark:text-zinc-500'}`} />
                         <span className="min-w-0 flex-1 truncate text-xs font-medium text-zinc-900 dark:text-zinc-100">
                           {t('modelPicker.auto')}
                         </span>
@@ -592,7 +592,7 @@ export function ChatModelPicker({
                           onMouseLeave={hideTooltip}
                           onPointerLeave={hideTooltip}
                         >
-                          <Info className="h-3 w-3 text-zinc-300 transition-colors group-hover:text-zinc-500 dark:text-zinc-600 dark:group-hover:text-zinc-300" />
+                          <IconInfoCircle aria-hidden="true" className="h-3 w-3 text-zinc-300 transition-colors group-hover:text-zinc-500 dark:text-zinc-600 dark:group-hover:text-zinc-300" />
                         </span>
                       </div>
                     </button>
@@ -622,7 +622,7 @@ export function ChatModelPicker({
                           }`}
                         >
                           <div className="flex min-w-0 items-center gap-2">
-                            <Cpu className={`h-3 w-3 shrink-0 ${!autoOption?.selected && selectedModelOption?.key === option.key ? 'text-zinc-600 dark:text-zinc-200' : 'text-zinc-400 dark:text-zinc-500'}`} />
+                            <IconCpu aria-hidden="true" className={`h-3 w-3 shrink-0 ${!autoOption?.selected && selectedModelOption?.key === option.key ? 'text-zinc-600 dark:text-zinc-200' : 'text-zinc-400 dark:text-zinc-500'}`} />
                             <span className="min-w-0 flex-1 truncate text-xs font-medium text-zinc-900 dark:text-zinc-100">{option.label}</span>
                             {option.supportsVision === true && (
                               <span className="shrink-0 rounded bg-zinc-100 px-1.5 py-0.5 text-[9px] font-medium text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">
@@ -640,7 +640,7 @@ export function ChatModelPicker({
                                 onMouseLeave={hideTooltip}
                                 onPointerLeave={hideTooltip}
                               >
-                                <Info className="h-3 w-3 text-zinc-300 transition-colors group-hover:text-zinc-500 dark:text-zinc-600 dark:group-hover:text-zinc-300" />
+                                <IconInfoCircle aria-hidden="true" className="h-3 w-3 text-zinc-300 transition-colors group-hover:text-zinc-500 dark:text-zinc-600 dark:group-hover:text-zinc-300" />
                               </span>
                             </div>
                           </div>

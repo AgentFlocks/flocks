@@ -9,6 +9,7 @@ import json
 from typing import Any, Dict, Optional
 
 from flocks.mcp.utils import (
+    REMOTE_MCP_TYPES,
     extract_api_key_from_mcp_url,
     get_connect_block_reason,
     normalize_mcp_config,
@@ -127,7 +128,7 @@ async def flocks_mcp(
             return ToolResult(success=False, error="'add' requires a server name.")
         if not config:
             return ToolResult(success=False, error="'add' requires a config dict.")
-        return await _add(name, config)
+        return await _add(ctx, name, config)
     if subcommand == "remove":
         if not name:
             return ToolResult(success=False, error="'remove' requires a server name.")
@@ -199,7 +200,7 @@ async def _list() -> ToolResult:
     return ToolResult(success=True, output="\n".join(lines))
 
 
-async def _add(name: str, config: Dict[str, Any]) -> ToolResult:
+async def _add(ctx: ToolContext, name: str, config: Dict[str, Any]) -> ToolResult:
     from flocks.config.config_writer import ConfigWriter
     from flocks.mcp import MCP
     from flocks.tool.tool_loader import save_mcp_config
@@ -211,6 +212,18 @@ async def _add(name: str, config: Dict[str, Any]) -> ToolResult:
             return ToolResult(success=False, error=f"config is not valid JSON: {exc}")
 
     config = extract_api_key_from_mcp_url(name, normalize_mcp_config(config))
+
+    if config.get("type") not in REMOTE_MCP_TYPES:
+        # A local/stdio server is an arbitrary subprocess on the host: route it
+        # through the same permission gate as bash so policy/user can block it.
+        command = [str(part) for part in (config.get("command") or [])]
+        command += [str(part) for part in (config.get("args") or [])]
+        await ctx.ask(
+            permission="bash",
+            patterns=[" ".join(command) or f"mcp add {name}"],
+            always=[],
+            metadata={"subcommand": "add", "server": name, "type": config.get("type"), "command": command},
+        )
 
     if should_skip_connect_on_add(config):
         ConfigWriter.add_mcp_server(name, config)
@@ -356,16 +369,20 @@ async def _connect(name: str) -> ToolResult:
         return ToolResult(success=False, error=blocked_reason)
 
     timeout_seconds = max(float(server_config.get("timeout", 30.0) or 30.0), 1.0) + 2.0
-    try:
-        success = await asyncio.wait_for(
-            MCP.connect(name, server_config),
-            timeout=timeout_seconds,
-        )
-    except asyncio.TimeoutError:
+    # Decide the timeout ourselves: the transport layer may swallow the
+    # cancellation raised by wait_for and return False, which used to surface
+    # as a generic "Failed to connect" instead of a timeout.
+    connect_task = asyncio.ensure_future(MCP.connect(name, server_config))
+    done, _pending = await asyncio.wait({connect_task}, timeout=timeout_seconds)
+    if connect_task not in done:
+        connect_task.cancel()
+        await asyncio.gather(connect_task, return_exceptions=True)
         return ToolResult(
             success=False,
             error=f"Connection timed out while connecting to '{name}'.",
         )
+    try:
+        success = connect_task.result()
     except Exception as exc:
         return ToolResult(success=False, error=f"Connection failed: {exc}")
 
@@ -375,7 +392,10 @@ async def _connect(name: str) -> ToolResult:
         error = getattr(info, "error", None) if info else None
         return ToolResult(
             success=False,
-            error=f"Failed to connect to '{name}'. {error or ''}",
+            error=(
+                f"Failed to connect to '{name}'. "
+                f"{error or 'Check the config and server availability.'}"
+            ),
         )
 
     status = await MCP.status()

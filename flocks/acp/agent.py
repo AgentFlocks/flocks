@@ -94,6 +94,31 @@ def to_locations(tool_name: str, input_data: Dict[str, Any]) -> List[ToolCallLoc
         return []
 
 
+def edit_diff_text(
+    input_data: Dict[str, Any],
+    metadata: Any,
+) -> tuple[str, str]:
+    """Extract edit text for ACP diff rendering from result metadata or edits[]."""
+    if isinstance(metadata, dict):
+        filediff = metadata.get("filediff")
+        if isinstance(filediff, dict):
+            before = filediff.get("before")
+            after = filediff.get("after")
+            if isinstance(before, str) and isinstance(after, str):
+                return before, after
+
+    edits = input_data.get("edits")
+    if isinstance(edits, list) and len(edits) == 1 and isinstance(edits[0], dict):
+        old_text = edits[0].get("oldString", "")
+        new_text = edits[0].get("newString", "")
+        return (
+            old_text if isinstance(old_text, str) else "",
+            new_text if isinstance(new_text, str) else "",
+        )
+
+    return "", ""
+
+
 def parse_uri(uri: str) -> Dict[str, Any]:
     """
     Parse URI into file or text content
@@ -503,8 +528,10 @@ class ACPAgent:
             # Add diff content for edit tools
             if kind == "edit":
                 file_path = input_data.get("filePath", "")
-                old_text = input_data.get("oldString", "")
-                new_text = input_data.get("newString", input_data.get("content", ""))
+                old_text, new_text = edit_diff_text(
+                    input_data,
+                    state.get("metadata"),
+                )
                 content.append({
                     "type": "diff",
                     "path": file_path,
@@ -595,14 +622,60 @@ class ACPAgent:
             
         Returns:
             Patched content or None if failed
+
+        Hunks are applied in order against the original text; any context or
+        removed line that does not match returns None so the client is never
+        handed a half-applied file.
         """
+        import re
+
+        hunk_re = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
         try:
-            # Simple implementation - for full support would need a proper diff library
-            import difflib
-            
-            # This is a simplified implementation
-            # A full implementation would use a proper patch library
-            return None  # Placeholder - patch application would go here
+            src = content.splitlines(keepends=True)
+            lines = diff.splitlines(keepends=True)
+            out: List[str] = []
+            pos = 0
+            applied = False
+            i = 0
+            while i < len(lines):
+                match = hunk_re.match(lines[i])
+                if not match:
+                    i += 1
+                    continue
+                start = max(int(match.group(1)) - 1, 0)
+                if start < pos:
+                    return None
+                out.extend(src[pos:start])
+                pos = start
+                i += 1
+                while i < len(lines) and not lines[i].startswith("@@"):
+                    line = lines[i]
+                    i += 1
+                    if line.startswith("\\"):
+                        # "\ No newline at end of file" marker
+                        continue
+                    tag, body = line[:1], line[1:]
+                    if tag == " ":
+                        if pos >= len(src) or src[pos].rstrip("\r\n") != body.rstrip("\r\n"):
+                            return None
+                        out.append(src[pos])
+                        pos += 1
+                    elif tag == "-":
+                        if pos >= len(src) or src[pos].rstrip("\r\n") != body.rstrip("\r\n"):
+                            return None
+                        pos += 1
+                    elif tag == "+":
+                        out.append(body)
+                    else:
+                        return None
+                applied = True
+            if not applied:
+                return None
+            out.extend(src[pos:])
+            result = "".join(out)
+            if content and not content.endswith("\n") and result.endswith("\n") and pos >= len(src):
+                result = result[:-1]
+            return result
         except Exception as e:
             log.error("patch.apply.error", {"error": str(e)})
             return None
@@ -854,8 +927,10 @@ class ACPAgent:
                     
                     if kind == "edit":
                         file_path = input_data.get("filePath", "")
-                        old_text = input_data.get("oldString", "")
-                        new_text = input_data.get("newString", input_data.get("content", ""))
+                        old_text, new_text = edit_diff_text(
+                            input_data,
+                            state.get("metadata"),
+                        )
                         content.append({
                             "type": "diff",
                             "path": file_path,
@@ -1048,7 +1123,10 @@ class ACPAgent:
         
         # Get default agent
         from flocks.agent.registry import Agent
-        default_agent_name = Agent.default_agent()
+        # ``default_agent`` is a coroutine; calling it without awaiting stored
+        # the coroutine object as the current mode id and broke the
+        # session/new response.
+        default_agent_name = await Agent.default_agent()
         
         current_mode_id = default_agent_name
         for mode in available_modes:

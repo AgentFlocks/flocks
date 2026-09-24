@@ -12,6 +12,7 @@ import re
 
 from flocks.utils.log import Log
 from flocks.provider.provider import ChatMessage
+from flocks.session.response_rewriter import transform_complete_response
 from flocks.session.llm_hook_utils import (
     apply_hook_request_output,
     restore_text_with_replacements,
@@ -91,7 +92,8 @@ class SessionTitle:
             
             # Skip if already has a meaningful title (not default placeholder or auto-generated timestamp title)
             if session.title and session.title.lower().strip() not in _DEFAULT_TITLES and not Session.is_default_title(session.title):
-                log.debug("title.already_exists", {"session_id": session_id, "title": session.title})
+                # 与 title.generation.start 同级：否则日志里只看到开始、看不到为什么没生成
+                log.info("title.already_exists", {"session_id": session_id, "title": session.title})
                 return session.title
             
             # Get all messages (use async version)
@@ -102,7 +104,7 @@ class SessionTitle:
             
             # Only generate title after first user message (exactly 1 user message)
             if len(user_messages) != 1:
-                log.debug("title.not_first_message", {
+                log.info("title.not_first_message", {
                     "session_id": session_id,
                     "user_message_count": len(user_messages)
                 })
@@ -144,19 +146,19 @@ class SessionTitle:
                 ]
                 provider_options: Dict[str, Any] = {"max_tokens": 50}
                 replacements: list[tuple[str, str]] = []
+                llm_hook_metadata = {
+                    "sessionID": session_id,
+                    "agent": "session.title",
+                    "step": None,
+                    "model": {
+                        "providerID": provider_id,
+                        "modelID": model_id,
+                    },
+                    "purpose": "title_generation",
+                }
                 try:
                     from flocks.hooks.pipeline import HookPipeline, HookStage
 
-                    llm_hook_metadata = {
-                        "sessionID": session_id,
-                        "agent": "session.title",
-                        "step": None,
-                        "model": {
-                            "providerID": provider_id,
-                            "modelID": model_id,
-                        },
-                        "purpose": "title_generation",
-                    }
                     if await HookPipeline.has_stage_handlers(HookStage.LLM_BEFORE, llm_hook_metadata):
                         llm_before_ctx = await HookPipeline.run_llm_before({
                             **llm_hook_metadata,
@@ -191,8 +193,11 @@ class SessionTitle:
                 ):
                     if hasattr(chunk, 'delta') and chunk.delta:
                         title += chunk.delta
-                if replacements:
-                    title = restore_text_with_replacements(title, replacements)
+                title = await transform_complete_response(
+                    title,
+                    llm_hook_metadata,
+                    legacy_replacements=replacements,
+                )
             except Exception as llm_err:
                 log.warn("title.llm_failed", {
                     "session_id": session_id,

@@ -32,7 +32,7 @@ Use this tool when testing a workflow node-by-node (BFS order):
 4. After all nodes pass, run the full workflow with `run_workflow`.
 
 Parameters:
-- workflow: Workflow definition (dict) or absolute path to workflow.json.
+- workflow: Workflow definition (dict), registered workflow ID, or absolute path to workflow.json.
 - node_id: ID of the node to execute (must exist in the workflow).
 - inputs: Input data for the node (use previous node's outputs for downstream nodes).
 
@@ -49,12 +49,20 @@ def _load_workflow_dict(workflow: Union[Dict[str, Any], str]) -> Dict[str, Any]:
     try:
         return json.loads(raw)
     except json.JSONDecodeError:
+        # Same resolution order as run_workflow: registered workflow ID first,
+        # then a workflow.json path.
+        from flocks.workflow.fs_store import read_workflow_from_fs
+
+        existing = read_workflow_from_fs(raw)
+        if existing is not None:
+            return dict(existing["workflowJson"])
         p = Path(raw).expanduser()
         if p.exists() and p.is_file():
             with open(p, encoding="utf-8") as f:
                 return json.load(f)
         raise ValueError(
-            f"Unsupported workflow value. Provide a workflow dict or a valid workflow.json file path. Got: {raw!r}"
+            "Unsupported workflow value. Provide a workflow dict, a registered workflow ID, "
+            f"or a valid workflow.json file path. Got: {raw!r}"
         )
 
 
@@ -128,7 +136,7 @@ def _format_node_result(result: Dict[str, Any]) -> str:
         ToolParameter(
             name="workflow",
             type=ParameterType.OBJECT,
-            description="Workflow definition (dict) or absolute path to workflow.json.",
+            description="Workflow definition (dict), registered workflow ID, or absolute path to workflow.json.",
             required=True,
             json_schema={
                 "anyOf": [

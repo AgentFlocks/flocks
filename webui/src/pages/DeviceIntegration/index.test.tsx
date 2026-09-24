@@ -388,6 +388,31 @@ describe('DeviceIntegrationPage', () => {
     mocks.getSessionMessagesPage.mockResolvedValue({ items: [] });
   });
 
+  it('clears the floating mobile menu button as a full-screen page', async () => {
+    const { container } = render(<DeviceIntegrationPage />);
+
+    await screen.findByText('设备接入');
+
+    // Layout renders /devices without its padded wrapper, so the page must
+    // reproduce the wrapper's "pt-16 below lg" offset itself.
+    const root = container.firstElementChild;
+    expect(root).toHaveClass('p-6');
+    expect(root).toHaveClass('pt-16');
+    expect(root).toHaveClass('lg:pt-6');
+  });
+
+  it('stacks the room sidebar above the device list below md', async () => {
+    render(<DeviceIntegrationPage />);
+
+    const sidebar = await screen.findByTestId('device-room-sidebar');
+    expect(sidebar).toHaveClass('w-full');
+    expect(sidebar).toHaveClass('md:w-52');
+    expect(sidebar).toHaveClass('max-h-48');
+    expect(sidebar).toHaveClass('md:max-h-none');
+    expect(sidebar.parentElement).toHaveClass('flex-col');
+    expect(sidebar.parentElement).toHaveClass('md:flex-row');
+  });
+
   it('refreshes templates and syncs devices when the window regains focus', async () => {
     render(<DeviceIntegrationPage />);
 

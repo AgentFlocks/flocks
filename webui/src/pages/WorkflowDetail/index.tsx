@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import { X, GitBranch, FileText, Code2, FileJson, Bot } from 'lucide-react';
+import { IconX, IconGitBranch, IconFileText, IconCode, IconFileCode, IconRobot } from '@tabler/icons-react';
 import { workflowAPI, Workflow, WorkflowExecution, WorkflowNode } from '@/api/workflow';
 import { sessionApi } from '@/api/session';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
@@ -21,11 +21,7 @@ import {
   type TextDiffHunk,
 } from '@/utils/textDiff';
 import { useConfirm } from '@/components/common/ConfirmDialog';
-import {
-  SIDE_PANEL_MIN_WIDTH,
-  getInitialSidePanelWidth,
-  getMaxSidePanelWidth,
-} from '@/components/common/sidePanelSizing';
+import { SIDE_PANEL_MIN_WIDTH, getInitialSidePanelWidth, getMaxSidePanelWidth, useNarrowViewport, isNarrowViewport } from '@/components/common/sidePanelSizing';
 
 type CanvasTab = 'flow' | 'md' | 'json';
 
@@ -58,15 +54,18 @@ export default function WorkflowDetail() {
   const focusedExecutionId = searchParams.get('execId')?.trim() || '';
 
   const CANVAS_TABS: { id: CanvasTab; label: string; icon: React.ReactNode }[] = [
-    { id: 'flow', label: t('detail.canvasTabs.flow'), icon: <GitBranch className="w-3.5 h-3.5" /> },
-    { id: 'md', label: t('detail.canvasTabs.md'), icon: <FileText className="w-3.5 h-3.5" /> },
-    { id: 'json', label: t('detail.canvasTabs.json'), icon: <Code2 className="w-3.5 h-3.5" /> },
+    { id: 'flow', label: t('detail.canvasTabs.flow'), icon: <IconGitBranch aria-hidden="true" className="w-3.5 h-3.5" /> },
+    { id: 'md', label: t('detail.canvasTabs.md'), icon: <IconFileText aria-hidden="true" className="w-3.5 h-3.5" /> },
+    { id: 'json', label: t('detail.canvasTabs.json'), icon: <IconCode aria-hidden="true" className="w-3.5 h-3.5" /> },
   ];
 
   const [workflow, setWorkflow] = useState<Workflow | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [panelOpen, setPanelOpen] = useState(true);
+  // Phone widths: the right panel / node panel become full-width overlays
+  // (toggled from the top bar) instead of sharing the row with the canvas.
+  const narrowViewport = useNarrowViewport();
+  const [panelOpen, setPanelOpen] = useState(() => !isNarrowViewport());
   const [panelWidth, setPanelWidth] = useState(getInitialSidePanelWidth);
   const [runToast, setRunToast] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const [drawerNode, setDrawerNode] = useState<WorkflowNode | null>(null);
@@ -659,13 +658,13 @@ export default function WorkflowDetail() {
       <div className="relative isolate flex flex-1 min-h-0 overflow-hidden">
         {/* 左侧画布区域（含三 Tab） */}
         <div className="relative z-0 flex flex-col flex-1 min-w-0 overflow-hidden">
-          {/* Canvas Tab 栏 */}
-          <div className="flex items-center border-b border-gray-200 bg-white flex-shrink-0 px-2">
+          {/* Canvas Tab 栏（窄屏可横向滚动，不把 tab 文案挤成竖排） */}
+          <div className="flex items-center border-b border-gray-200 bg-white flex-shrink-0 px-2 overflow-x-auto">
             {CANVAS_TABS.map((tab) => (
               <button
                 key={tab.id}
                 onClick={() => handleCanvasTabChange(tab.id)}
-                className={`flex items-center gap-1.5 px-3 py-2.5 text-xs font-medium transition-colors relative ${
+                className={`flex items-center gap-1.5 px-3 py-2.5 text-xs font-medium transition-colors relative flex-shrink-0 whitespace-nowrap ${
                   canvasTab === tab.id
                     ? 'text-red-600'
                     : 'text-gray-500 hover:text-gray-700'
@@ -688,7 +687,7 @@ export default function WorkflowDetail() {
                 onClick={() => setShowMdHint(false)}
                 className="flex-shrink-0 text-red-400 hover:text-red-600 transition-colors"
               >
-                <X className="w-3.5 h-3.5" />
+                <IconX aria-hidden="true" className="w-3.5 h-3.5" />
               </button>
             </div>
           )}
@@ -708,7 +707,7 @@ export default function WorkflowDetail() {
                 className="absolute left-3 top-2 z-20 inline-flex max-w-[calc(100%-7rem)] items-center gap-2 truncate whitespace-nowrap rounded-lg border border-emerald-100 bg-white/90 px-3 py-1.5 text-xs font-medium text-slate-700 backdrop-blur transition-colors hover:border-emerald-200 hover:bg-emerald-50/80 hover:text-emerald-700 focus:outline-none focus:ring-2 focus:ring-emerald-100"
                 title={t('detail.flocksHelpTitle')}
               >
-                <Bot className="h-4 w-4 flex-shrink-0 text-emerald-500" />
+                <IconRobot aria-hidden="true" className="h-4 w-4 flex-shrink-0 text-emerald-500" />
                 <span className="truncate">{t('detail.flocksHelp')}</span>
               </button>
             </div>
@@ -721,6 +720,7 @@ export default function WorkflowDetail() {
                 dirty={editDocDirty}
                 saving={editDocSaving}
                 saveDisabled={!editDocDirty || editDocSaving}
+                generateWorkflowDisabled={editDocSaving}
                 onModeChange={setEditDocMode}
                 onChange={(value) => {
                   setEditDocDraft(value);
@@ -758,7 +758,7 @@ export default function WorkflowDetail() {
                   className="absolute top-3 right-3 z-10 flex items-center gap-1.5 px-3 py-1.5 bg-gray-700 border border-gray-600 text-gray-200 text-xs rounded-lg hover:bg-gray-600 shadow-sm transition-colors"
                   title={t('detail.downloadJsonTitle')}
                 >
-                  <FileJson className="w-3.5 h-3.5" />
+                  <IconFileCode aria-hidden="true" className="w-3.5 h-3.5" />
                   {t('detail.downloadJson')}
                 </button>
                 <pre className="text-xs text-gray-200 leading-relaxed whitespace-pre font-mono">
@@ -769,23 +769,23 @@ export default function WorkflowDetail() {
           </div>
         </div>
 
-        {/* 节点信息面板 — 并列在对话左侧，可关闭 */}
+        {/* 节点信息面板 — 并列在对话左侧，可关闭；窄屏铺满画布区域 */}
         {drawerNode && (
-          <>
-            <div className="w-px flex-shrink-0 bg-gray-200" />
+          <div className={narrowViewport ? 'absolute inset-0 z-30 flex bg-white' : 'contents'}>
+            {!narrowViewport && <div className="w-px flex-shrink-0 bg-gray-200" />}
             <NodeInfoPanel
               node={drawerNode}
               workflow={workflow}
               latestExecution={latestExecution}
-              width={264}
+              width={narrowViewport ? '100%' : 264}
               onClose={() => setDrawerNode(null)}
               onSaved={(updated) => setWorkflow(updated)}
             />
-          </>
+          </div>
         )}
 
         {/* 拖动分隔条 */}
-        {panelOpen && (
+        {panelOpen && !narrowViewport && (
           <div
             onMouseDown={onDragStart}
             className="relative z-20 w-1 flex-shrink-0 bg-gray-200 hover:bg-red-400 active:bg-red-500 cursor-col-resize transition-colors duration-150 group"
@@ -801,6 +801,7 @@ export default function WorkflowDetail() {
           latestExecution={latestExecution}
           open={panelOpen}
           width={panelWidth}
+          overlay={narrowViewport}
           activeTab={rightPanelTab}
           onActiveTabChange={handleRightPanelTabChange}
           chatLaunchRequest={chatLaunchRequest}

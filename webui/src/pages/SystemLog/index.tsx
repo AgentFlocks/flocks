@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { RefreshCw, ChevronDown, ScrollText } from 'lucide-react';
+import { IconRefresh, IconChevronDown, IconScript } from '@tabler/icons-react';
 import { useTranslation } from 'react-i18next';
 import PageHeader from '@/components/common/PageHeader';
 import { logsAPI, type LogFileInfo, type LogContentResponse } from '@/api/logs';
@@ -64,17 +64,20 @@ export default function SystemLogPage() {
       <PageHeader
         title={t('logs.title')}
         description={t('logs.description')}
-        icon={<ScrollText className="w-8 h-8" />}
+        icon={<IconScript aria-hidden="true" className="w-8 h-8" />}
       />
 
       {/* Toolbar */}
+      {/* On narrow screens the select must yield width (min-w-0 + truncate) so
+          the auto-scroll label keeps one line and the refresh button stays on
+          screen instead of being pushed past the right edge. */}
       <div className="px-4 py-2 border-b border-gray-100 flex items-center gap-3">
         {/* File selector */}
         <select
           value={selectedFile || ''}
           onChange={(e) => handleFileSelect(e.target.value)}
           disabled={files.length === 0}
-          className="text-sm border border-gray-200 rounded-lg px-2.5 py-1.5 bg-white
+          className="min-w-0 flex-1 max-w-sm truncate text-sm border border-gray-200 rounded-lg px-2.5 py-1.5 bg-white
                      focus:outline-none focus:ring-1 focus:ring-slate-300 focus:border-slate-400
                      disabled:opacity-50 disabled:cursor-not-allowed"
         >
@@ -87,18 +90,18 @@ export default function SystemLogPage() {
         </select>
 
         {/* Auto-scroll toggle */}
-        <label className="flex items-center gap-1.5 text-xs text-gray-500 cursor-pointer select-none">
+        <label className="flex shrink-0 items-center gap-1.5 whitespace-nowrap text-xs text-gray-500 cursor-pointer select-none">
           <input
             type="checkbox"
             checked={autoScroll}
             onChange={(e) => setAutoScroll(e.target.checked)}
             className="rounded text-slate-600 focus:ring-slate-400"
           />
-          <ChevronDown className="w-3 h-3" />
+          <IconChevronDown aria-hidden="true" className="w-3 h-3" />
           {t('logs.autoScroll')}
         </label>
 
-        <div className="ml-auto">
+        <div className="ml-auto shrink-0">
           <button
             onClick={handleRefresh}
             disabled={loading}
@@ -106,7 +109,7 @@ export default function SystemLogPage() {
             className="p-1.5 rounded-lg border border-gray-200 text-gray-400
                        hover:bg-gray-50 hover:text-gray-600 disabled:opacity-50 transition-colors"
           >
-            <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
+            <IconRefresh aria-hidden="true" className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
           </button>
         </div>
       </div>
@@ -115,7 +118,7 @@ export default function SystemLogPage() {
       <div className="flex-1 overflow-hidden relative">
         {loading && !logContent && (
           <div className="flex items-center justify-center h-full">
-            <RefreshCw className="w-6 h-6 text-gray-400 animate-spin" />
+            <IconRefresh aria-hidden="true" className="w-6 h-6 text-gray-400 animate-spin" />
           </div>
         )}
         {error && (

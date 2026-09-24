@@ -1308,3 +1308,107 @@ def test_ensure_backend_port_free_waits_again_after_timeout(monkeypatch) -> None
         "log:backend_port_still_in_use port=8000",
         "wait:8000:20.0",
     ]
+
+
+def test_upgrade_source_replace_failure_restores_from_backup_and_restarts(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """OPS-0380：源码替换失败 → 自动从备份还原 → 原本在跑的服务重新拉起；备份保留，结果记 restored_from_backup=True。"""
+    events: list[str] = []
+    results: list[dict[str, object]] = []
+    backup_path = tmp_path / "backup.tar.gz"
+    backup_path.write_text("backup", encoding="utf-8")
+    args = _simple_upgrade_handoff_args(tmp_path)
+
+    monkeypatch.setattr(restart_handoff, "_wait_for_parent_exit", lambda _pid: True)
+    monkeypatch.setattr(restart_handoff, "_stop_services_before_upgrade", lambda _args: True)
+    monkeypatch.setattr(
+        restart_handoff,
+        "_apply_new_source",
+        lambda _args: (_ for _ in ()).throw(RuntimeError("[Errno 13] Permission denied: 'flocks/unreadable.py'")),
+    )
+    restored: list[tuple[Path, Path]] = []
+    monkeypatch.setattr(
+        restart_handoff,
+        "_restore_install_from_backup",
+        lambda backup, install_root: restored.append((backup, install_root)),
+    )
+    monkeypatch.setattr(restart_handoff, "_run_upgrade_tasks", lambda _args: events.append("install") or None)
+    monkeypatch.setattr(
+        restart_handoff,
+        "_start_service_after_upgrade",
+        lambda _args: events.append("start") or (True, "started", ""),
+    )
+    monkeypatch.setattr(restart_handoff, "_record_handoff_log", lambda message: events.append(message))
+    monkeypatch.setattr(restart_handoff, "_write_upgrade_result", lambda **kwargs: results.append(kwargs))
+
+    assert restart_handoff.run(args) == 1
+    assert restored == [(backup_path, tmp_path / "install")]
+    assert "install" not in events  # 半替换后不再继续装依赖
+    assert "start" in events  # 还原成功且升级前在跑 → 重新拉起
+    assert any(event.startswith("source_restored_from_backup") for event in events)
+    assert backup_path.exists()
+    assert results[-1]["phase"] == "failed"
+    assert results[-1]["failed_stage"] == "source_replace"
+    assert results[-1]["backup_path"] == backup_path
+    assert results[-1]["restored_from_backup"] is True
+    assert results[-1]["restore_error"] is None
+    assert "Permission denied" in str(results[-1]["error"])
+
+
+def test_upgrade_source_replace_failure_keeps_manual_path_when_restore_fails(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """还原也失败：不拉起服务，结果里 restored_from_backup=False + restore_error，backup_path 留给人工。"""
+    events: list[str] = []
+    results: list[dict[str, object]] = []
+    backup_path = tmp_path / "backup.tar.gz"
+    backup_path.write_text("backup", encoding="utf-8")
+    args = _simple_upgrade_handoff_args(tmp_path)
+
+    monkeypatch.setattr(restart_handoff, "_wait_for_parent_exit", lambda _pid: True)
+    monkeypatch.setattr(restart_handoff, "_stop_services_before_upgrade", lambda _args: True)
+    monkeypatch.setattr(restart_handoff, "_apply_new_source", lambda _args: (_ for _ in ()).throw(RuntimeError("copy failed")))
+    monkeypatch.setattr(
+        restart_handoff,
+        "_restore_install_from_backup",
+        lambda backup, install_root: (_ for _ in ()).throw(OSError("disk full")),
+    )
+    monkeypatch.setattr(restart_handoff, "_start_service_after_upgrade", lambda _args: events.append("start") or (True, "", ""))
+    monkeypatch.setattr(restart_handoff, "_record_handoff_log", lambda message: events.append(message))
+    monkeypatch.setattr(restart_handoff, "_write_upgrade_result", lambda **kwargs: results.append(kwargs))
+
+    assert restart_handoff.run(args) == 1
+    assert "start" not in events
+    assert any(event.startswith("source_restore_failed") for event in events)
+    assert results[-1]["failed_stage"] == "source_replace"
+    assert results[-1]["restored_from_backup"] is False
+    assert results[-1]["restore_error"] == "disk full"
+    assert results[-1]["backup_path"] == backup_path
+
+
+def test_restore_install_from_backup_puts_half_replaced_tree_back(tmp_path: Path) -> None:
+    """真实备份归档：半替换（pyproject 已是新版本、多了新文件）后按备份回放，旧文件全部回来。"""
+    from flocks.updater import updater
+
+    install = tmp_path / "install"
+    (install / "flocks").mkdir(parents=True)
+    (install / "pyproject.toml").write_text('[project]\nname = "flocks"\nversion = "2026.8.17"\n', encoding="utf-8")
+    (install / "flocks" / "keep.py").write_text("old", encoding="utf-8")
+    (install / ".flocks").mkdir()
+    (install / ".flocks" / "runtime.json").write_text("{}", encoding="utf-8")  # 运行时数据不进备份、不被动
+    backup = updater._backup_current_version(install, "2026.8.17")
+
+    # 模拟替换到一半
+    (install / "pyproject.toml").write_text('[project]\nname = "flocks"\nversion = "2099.1.1"\n', encoding="utf-8")
+    (install / "flocks" / "keep.py").write_text("new", encoding="utf-8")
+    (install / "flocks" / "added.py").write_text("x", encoding="utf-8")
+
+    restart_handoff._restore_install_from_backup(backup, install)
+
+    assert "2026.8.17" in (install / "pyproject.toml").read_text(encoding="utf-8")
+    assert (install / "flocks" / "keep.py").read_text(encoding="utf-8") == "old"
+    assert (install / ".flocks" / "runtime.json").exists()
+    assert backup.exists()

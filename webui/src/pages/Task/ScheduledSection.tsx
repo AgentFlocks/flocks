@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Calendar, Clock, Trash2, ToggleLeft, ToggleRight } from 'lucide-react';
+import { IconCalendar, IconClock, IconTrash, IconToggleLeft, IconToggleRight } from '@tabler/icons-react';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
 import EmptyState from '@/components/common/EmptyState';
 import { useToast } from '@/components/common/Toast';
@@ -10,6 +10,7 @@ import { taskAPI, TaskScheduler } from '@/api/task';
 import { PriorityBadge, ModeBadge } from './components';
 import { describeCron, formatTime } from './helpers';
 import TaskSheet from './TaskSheet';
+import { extractErrorMessage } from '@/utils/error';
 
 export default function ScheduledSection({ onRefreshGlobal }: { onRefreshGlobal: () => void }) {
   const { t } = useTranslation('task');
@@ -29,7 +30,7 @@ export default function ScheduledSection({ onRefreshGlobal }: { onRefreshGlobal:
       else await taskAPI.enableScheduler(task.id);
       refresh();
     } catch (err: unknown) {
-      toast.error(t('scheduled.actionFailed'), err instanceof Error ? err.message : String(err));
+      toast.error(t('scheduled.actionFailed'), extractErrorMessage(err));
     }
   };
 
@@ -44,7 +45,7 @@ export default function ScheduledSection({ onRefreshGlobal }: { onRefreshGlobal:
       await taskAPI.deleteScheduler(taskId);
       refresh();
     } catch (err: unknown) {
-      toast.error(t('scheduled.deleteFailed'), err instanceof Error ? err.message : String(err));
+      toast.error(t('scheduled.deleteFailed'), extractErrorMessage(err));
     }
   };
 
@@ -57,13 +58,15 @@ export default function ScheduledSection({ onRefreshGlobal }: { onRefreshGlobal:
         {tasks.length === 0 ? (
           <div className="p-8">
             <EmptyState
-              icon={<Calendar className="w-8 h-8" />}
+              icon={<IconCalendar aria-hidden="true" className="w-8 h-8" />}
               title={t('scheduled.emptyTitle')}
               description={t('scheduled.emptyDescription')}
             />
           </div>
         ) : (
           <>
+            {/* 窄屏（375px）下表格比容器宽，overflow-hidden 会把后几列裁掉且无法滚动；改为容器内横向滚动 */}
+            <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead className="bg-gray-50 border-b border-gray-200">
                 <tr>
@@ -116,7 +119,7 @@ export default function ScheduledSection({ onRefreshGlobal }: { onRefreshGlobal:
                       <td className="px-4 py-3 font-medium whitespace-nowrap">
                         {runOnce ? (
                           <span className="inline-flex items-center gap-1 text-gray-500">
-                            <Clock className="w-3.5 h-3.5" /> {t('scheduled.runOnce')}
+                            <IconClock aria-hidden="true" className="w-3.5 h-3.5" /> {t('scheduled.runOnce')}
                           </span>
                         ) : (
                           <span className="text-purple-700">{cronDesc}</span>
@@ -147,8 +150,8 @@ export default function ScheduledSection({ onRefreshGlobal }: { onRefreshGlobal:
                             }`}
                           >
                             {enabled
-                              ? <ToggleRight className="w-5 h-5" />
-                              : <ToggleLeft className="w-5 h-5" />
+                              ? <IconToggleRight aria-hidden="true" className="w-5 h-5" />
+                              : <IconToggleLeft aria-hidden="true" className="w-5 h-5" />
                             }
                           </button>
                           <button
@@ -156,7 +159,7 @@ export default function ScheduledSection({ onRefreshGlobal }: { onRefreshGlobal:
                             title={t('common:button.delete')}
                             className="p-1.5 text-gray-300 hover:text-slate-600 hover:bg-slate-100 rounded transition-colors"
                           >
-                            <Trash2 className="w-4 h-4" />
+                            <IconTrash aria-hidden="true" className="w-4 h-4" />
                           </button>
                         </div>
                       </td>
@@ -165,6 +168,7 @@ export default function ScheduledSection({ onRefreshGlobal }: { onRefreshGlobal:
                 })}
               </tbody>
             </table>
+            </div>
             <div className="px-4 py-3 border-t border-gray-200 bg-gray-50 text-sm text-gray-500">
               {t('scheduled.totalCount', { count: tasks.length })}
             </div>

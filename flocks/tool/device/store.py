@@ -13,7 +13,6 @@ import time
 import uuid
 from typing import Any, Dict, List, Optional
 
-import aiosqlite
 
 from flocks.storage.storage import Storage
 from flocks.utils.log import Log
@@ -113,7 +112,7 @@ def _now_ms() -> int:
 # Row → model converters
 # ---------------------------------------------------------------------------
 
-def row_to_device(row: aiosqlite.Row) -> DeviceIntegration:
+def row_to_device(row: Any) -> DeviceIntegration:
     raw_fields: Dict[str, str] = json.loads(row["fields"] or "{}")
     display, has_value = mask_for_display(raw_fields)
     # Recompute service_id from storage_key so historically-wrong rows
@@ -142,7 +141,7 @@ def row_to_device(row: aiosqlite.Row) -> DeviceIntegration:
     )
 
 
-def row_to_group(row: aiosqlite.Row) -> DeviceGroup:
+def row_to_group(row: Any) -> DeviceGroup:
     return DeviceGroup(
         id=row["id"],
         name=row["name"],
@@ -158,8 +157,8 @@ def row_to_group(row: aiosqlite.Row) -> DeviceGroup:
 # ---------------------------------------------------------------------------
 
 async def list_groups() -> List[DeviceGroup]:
-    async with Storage.connect(Storage.get_db_path()) as db:
-        db.row_factory = aiosqlite.Row
+    async with Storage.transaction(Storage.get_db_path()) as db:
+
         async with db.execute(
             "SELECT * FROM device_groups ORDER BY sort_order ASC, created_at ASC"
         ) as cur:
@@ -168,8 +167,8 @@ async def list_groups() -> List[DeviceGroup]:
 
 
 async def get_group(group_id: str) -> Optional[DeviceGroup]:
-    async with Storage.connect(Storage.get_db_path()) as db:
-        db.row_factory = aiosqlite.Row
+    async with Storage.transaction(Storage.get_db_path()) as db:
+
         async with db.execute(
             "SELECT * FROM device_groups WHERE id = ?", (group_id,)
         ) as cur:
@@ -178,7 +177,7 @@ async def get_group(group_id: str) -> Optional[DeviceGroup]:
 
 
 async def group_exists(group_id: str) -> bool:
-    async with Storage.connect(Storage.get_db_path()) as db:
+    async with Storage.transaction(Storage.get_db_path()) as db:
         async with db.execute(
             "SELECT 1 FROM device_groups WHERE id = ?", (group_id,)
         ) as cur:
@@ -188,8 +187,8 @@ async def group_exists(group_id: str) -> bool:
 async def create_group(name: str, description: Optional[str], sort_order: int) -> DeviceGroup:
     group_id = str(uuid.uuid4())
     now = _now_ms()
-    async with Storage.connect(Storage.get_db_path()) as db:
-        db.row_factory = aiosqlite.Row
+    async with Storage.transaction(Storage.get_db_path()) as db:
+
         await db.execute(
             """
             INSERT INTO device_groups (id, name, description, sort_order, created_at, updated_at)
@@ -218,7 +217,7 @@ async def update_group(
     new_name = (name.strip() if name else "") or current.name
     new_desc = description if description is not None else current.description
     new_sort = sort_order if sort_order is not None else current.sort_order
-    async with Storage.connect(Storage.get_db_path()) as db:
+    async with Storage.transaction(Storage.get_db_path()) as db:
         await db.execute(
             "UPDATE device_groups SET name=?, description=?, sort_order=?, updated_at=? WHERE id=?",
             (new_name, new_desc, new_sort, _now_ms(), group_id),
@@ -230,7 +229,7 @@ async def update_group(
 
 async def delete_group(group_id: str) -> int:
     """Delete a group; return the number of devices that prevented deletion (0 = deleted)."""
-    async with Storage.connect(Storage.get_db_path()) as db:
+    async with Storage.transaction(Storage.get_db_path()) as db:
         async with db.execute(
             "SELECT COUNT(*) FROM device_integrations WHERE group_id = ?", (group_id,)
         ) as cur:
@@ -255,17 +254,17 @@ async def list_devices(group_id: Optional[str] = None) -> List[DeviceIntegration
         params = (group_id,)
     sql += " ORDER BY created_at DESC"
 
-    async with Storage.connect(Storage.get_db_path()) as db:
-        db.row_factory = aiosqlite.Row
+    async with Storage.transaction(Storage.get_db_path()) as db:
+
         async with db.execute(sql, params) as cur:
             rows = await cur.fetchall()
     return [row_to_device(r) for r in rows]
 
 
-async def fetch_device(device_id: str) -> Optional[aiosqlite.Row]:
+async def fetch_device(device_id: str) -> Optional[Any]:
     """Return the raw DB row (for callers that need the full record incl. fields blob)."""
-    async with Storage.connect(Storage.get_db_path()) as db:
-        db.row_factory = aiosqlite.Row
+    async with Storage.transaction(Storage.get_db_path()) as db:
+
         async with db.execute(
             "SELECT * FROM device_integrations WHERE id = ?", (device_id,)
         ) as cur:
@@ -293,7 +292,7 @@ async def insert_device(
     derived by the caller (so secrets can be persisted under their final id).
     """
     now = _now_ms()
-    async with Storage.connect(Storage.get_db_path()) as db:
+    async with Storage.transaction(Storage.get_db_path()) as db:
         await db.execute(
             """
             INSERT INTO device_integrations
@@ -320,7 +319,7 @@ async def update_device_row(
     verify_ssl: bool,
     db_fields: Dict[str, str],
 ) -> None:
-    async with Storage.connect(Storage.get_db_path()) as db:
+    async with Storage.transaction(Storage.get_db_path()) as db:
         await db.execute(
             """
             UPDATE device_integrations
@@ -335,7 +334,7 @@ async def update_device_row(
 
 
 async def delete_device_row(device_id: str) -> None:
-    async with Storage.connect(Storage.get_db_path()) as db:
+    async with Storage.transaction(Storage.get_db_path()) as db:
         await db.execute("DELETE FROM device_integrations WHERE id = ?", (device_id,))
         await db.commit()
     _bump_revision()
@@ -350,7 +349,7 @@ async def record_test_result(
 ) -> None:
     """Persist the outcome of a connectivity test."""
     now = _now_ms()
-    async with Storage.connect(Storage.get_db_path()) as db:
+    async with Storage.transaction(Storage.get_db_path()) as db:
         await db.execute(
             "UPDATE device_integrations SET status=?, message=?, latency_ms=?, checked_at=?, updated_at=? WHERE id=?",
             ("ok" if success else "error", message, latency_ms, now, now, device_id),
@@ -367,7 +366,7 @@ async def ensure_default_group() -> None:
 
     Only inserts if the row is missing; subsequent user renames are preserved.
     """
-    async with Storage.connect(Storage.get_db_path()) as db:
+    async with Storage.transaction(Storage.get_db_path()) as db:
         async with db.execute(
             "SELECT 1 FROM device_groups WHERE id = ?", (DEFAULT_GROUP_ID,)
         ) as cur:
@@ -401,8 +400,8 @@ async def get_device_tool_enabled(device_id: str, tool_name: str) -> Optional[bo
     True  → explicitly enabled for this device.
     False → explicitly disabled for this device.
     """
-    async with Storage.connect(Storage.get_db_path()) as db:
-        db.row_factory = aiosqlite.Row
+    async with Storage.transaction(Storage.get_db_path()) as db:
+
         async with db.execute(
             "SELECT enabled FROM device_tool_settings WHERE device_id = ? AND tool_name = ?",
             (device_id, tool_name),
@@ -423,7 +422,7 @@ async def set_device_tool_enabled(
     Agent would keep seeing the pre-toggle tool list until the cache TTL.
     """
     now = _now_ms()
-    async with Storage.connect(Storage.get_db_path()) as db:
+    async with Storage.transaction(Storage.get_db_path()) as db:
         await db.execute(
             """
             INSERT INTO device_tool_settings (device_id, tool_name, enabled, updated_at)
@@ -447,7 +446,7 @@ async def delete_device_tool_setting(device_id: str, tool_name: str) -> bool:
     Returns True if a row existed and was deleted.  Bumps the device
     revision on actual deletion so cached prompts get rebuilt.
     """
-    async with Storage.connect(Storage.get_db_path()) as db:
+    async with Storage.transaction(Storage.get_db_path()) as db:
         cur = await db.execute(
             "DELETE FROM device_tool_settings WHERE device_id = ? AND tool_name = ?",
             (device_id, tool_name),
@@ -466,8 +465,8 @@ async def list_device_tool_settings(
     device_id: str,
 ) -> Dict[str, bool]:
     """Return {tool_name: enabled} for all per-device overrides of *device_id*."""
-    async with Storage.connect(Storage.get_db_path()) as db:
-        db.row_factory = aiosqlite.Row
+    async with Storage.transaction(Storage.get_db_path()) as db:
+
         async with db.execute(
             "SELECT tool_name, enabled FROM device_tool_settings WHERE device_id = ?",
             (device_id,),
@@ -483,8 +482,8 @@ async def list_all_device_tool_settings() -> Dict[str, Dict[str, bool]]:
     prompt section) that need per-device overrides for many devices at once.
     """
     result: Dict[str, Dict[str, bool]] = {}
-    async with Storage.connect(Storage.get_db_path()) as db:
-        db.row_factory = aiosqlite.Row
+    async with Storage.transaction(Storage.get_db_path()) as db:
+
         async with db.execute(
             "SELECT device_id, tool_name, enabled FROM device_tool_settings"
         ) as cur:

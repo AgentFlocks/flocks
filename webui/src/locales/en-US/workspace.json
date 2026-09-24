@@ -37,6 +37,7 @@
       "htmlSandbox": "HTML is rendered in a restricted sandbox. Scripts will not run.",
       "jsonParseFailed": "JSON parsing failed, so the original text is shown.",
       "jsonlParseFailed": "{{count}} JSONL line(s) could not be parsed and were kept as original text.",
+      "csvTruncated": "Preview limited to {{rows}} rows and {{columns}} columns.",
       "pdfLoading": "Loading PDF...",
       "pdfRendering": "Rendering page...",
       "pdfLoadFailed": "Failed to load PDF preview",

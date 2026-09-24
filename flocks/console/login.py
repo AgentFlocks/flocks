@@ -16,6 +16,7 @@ import httpx
 
 from flocks import __version__
 from flocks.storage.storage import Storage
+from flocks.net.http import async_client
 
 
 def _shared_console_session_path() -> Path:
@@ -157,6 +158,16 @@ def _delete_shared_console_session() -> None:
         return
 
 
+def update_channel() -> str:
+    """Return the Console manifest channel pinned via FLOCKS_UPDATE_CHANNEL, if any.
+
+    Offline installations pin a frozen channel so Console can tell them apart from
+    the default ``flockspro`` channel. Online installations leave it unset and the
+    field is omitted from every payload.
+    """
+    return (os.getenv("FLOCKS_UPDATE_CHANNEL") or "").strip()
+
+
 def _now_iso() -> str:
     return datetime.now(UTC).isoformat()
 
@@ -186,6 +197,10 @@ class ConsoleLoginService:
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
     @staticmethod
+    def update_channel() -> str:
+        return update_channel()
+
+    @staticmethod
     def console_base_url() -> str:
         raw = os.getenv("FLOCKS_CONSOLE_BASE_URL", "").strip().rstrip("/")
         if not raw:
@@ -211,7 +226,7 @@ class ConsoleLoginService:
             "status": "pending",
         }
 
-        async with httpx.AsyncClient(timeout=10) as client:
+        async with async_client(timeout=10) as client:
             resp = await client.post(f"{console_base}/v1/flocks/console-logins", json=payload)
             resp.raise_for_status()
             data = resp.json()
@@ -236,13 +251,18 @@ class ConsoleLoginService:
         pending = await Storage.get(f"console:login:{console_login_id}")
         if not isinstance(pending, dict):
             raise ValueError("console_login_id 不存在或已过期")
+        # A login record is single-use: once exchanged, replaying the same
+        # console_login_id/state must be refused locally instead of asking the
+        # console to exchange again (which could overwrite console:session).
+        if str(pending.get("status") or "") == "exchanged":
+            raise ValueError("console 登录会话已使用，请重新登录")
         expected_state = str(pending.get("state") or "")
         if expected_state and state != expected_state:
             raise ValueError("console login state 校验失败")
 
         fingerprint = await cls.get_fingerprint()
         install_id = await cls._get_install_id()
-        async with httpx.AsyncClient(timeout=10) as client:
+        async with async_client(timeout=10) as client:
             resp = await client.post(
                 f"{console_base}/v1/flocks/console-logins/{console_login_id}/exchange",
                 json={
@@ -302,7 +322,7 @@ class ConsoleLoginService:
         if not console_base:
             return {"ok": True, "mode": "mock", "session": session}
         token = str(session["console_session_token"])
-        async with httpx.AsyncClient(timeout=10) as client:
+        async with async_client(timeout=10) as client:
             resp = await client.post(
                 f"{console_base}/v1/console-sessions/refresh",
                 headers={"Authorization": f"Bearer {token}"},
@@ -337,7 +357,7 @@ class ConsoleLoginService:
             token = str(session.get("console_session_token") or "").strip()
             if token:
                 try:
-                    async with httpx.AsyncClient(timeout=10) as client:
+                    async with async_client(timeout=10) as client:
                         await client.post(
                             f"{console_base}/v1/console-sessions/revoke",
                             headers={"Authorization": f"Bearer {token}"},
@@ -417,7 +437,7 @@ class ConsoleLoginService:
         pro_component_version: str | None = None,
     ) -> dict[str, Any]:
         version_payload = cls.runtime_version_payload(pro_component_version=pro_component_version)
-        return {
+        payload = {
             "fingerprint": session.get("fingerprint"),
             "install_id": session.get("install_id"),
             "console_login_id": session.get("console_login_id"),
@@ -426,6 +446,10 @@ class ConsoleLoginService:
             "license_id": license_id or None,
             **version_payload,
         }
+        channel = update_channel()
+        if channel:
+            payload["channel"] = channel
+        return payload
 
     @classmethod
     async def send_heartbeat_for_session(
@@ -451,7 +475,7 @@ class ConsoleLoginService:
         token = str(session.get("console_session_token") or "").strip()
         if not token:
             raise ValueError("console_session_token 缺失，无法发送心跳")
-        async with httpx.AsyncClient(timeout=10) as client:
+        async with async_client(timeout=10) as client:
             resp = await client.post(
                 target_url,
                 json=payload,
@@ -484,7 +508,7 @@ class ConsoleLoginService:
             session = read_shared_console_session()
         if not session:
             return False
-        async with httpx.AsyncClient(timeout=10) as client:
+        async with async_client(timeout=10) as client:
             return await cls._report_pending_pro_bundle_install_receipt(client=client, session=session)
 
     @classmethod
@@ -563,7 +587,7 @@ class ConsoleLoginService:
         }
         if not console_base:
             return {"ok": True, "mode": "mock", "node": payload}
-        async with httpx.AsyncClient(timeout=10) as client:
+        async with async_client(timeout=10) as client:
             resp = await client.post(
                 f"{console_base}/v1/nodes/sync",
                 json=payload,

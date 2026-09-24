@@ -1,3 +1,4 @@
+import asyncio
 import json
 
 import pytest
@@ -70,12 +71,18 @@ def test_export_and_import_round_trip(monkeypatch, tmp_path) -> None:
 
     stored_entries: list[tuple[str, object, str | None]] = []
 
-    async def fake_set(key: str, value: object, category: str | None = None):
-        stored_entries.append((key, value, category))
+    async def fake_mutate_many(*, set_entries=(), transaction_hook=None, **kwargs):
+        assert transaction_hook is not None
+        stored_entries.extend(set_entries)
 
     monkeypatch.setattr(export_cmd.Session, "get_by_id", fake_get_by_id)
     monkeypatch.setattr(export_cmd.Message, "list_with_parts", fake_list_with_parts)
-    monkeypatch.setattr(import_cmd.Storage, "set", fake_set)
+    monkeypatch.setattr(import_cmd.Storage, "mutate_many", fake_mutate_many)
+
+    async def fake_get(key: str, default=None):
+        return default  # nothing imported yet: no conflict
+
+    monkeypatch.setattr(import_cmd.Storage, "get", fake_get)
 
     export_result = runner.invoke(
         export_cmd.export_app,
@@ -123,7 +130,9 @@ async def test_import_writes_messages_in_runtime_storage_format(monkeypatch, tmp
     input_path = tmp_path / "session-import.json"
     input_path.write_text(json.dumps(payload), encoding="utf-8")
 
-    await import_cmd._import_session(str(input_path), "proj_imported")
+    # force=True: the shared Storage singleton may still hold this session id from an
+    # earlier test in the same process, and this test is about part normalization.
+    await import_cmd._import_session(str(input_path), "proj_imported", force=True)
 
     Message.invalidate_cache(session.id)
     imported = await Message.list_with_parts(session.id)
@@ -136,6 +145,41 @@ async def test_import_writes_messages_in_runtime_storage_format(monkeypatch, tmp
     assert await Storage.get(f"message_parts:{session.id}") is None
     stored_parts = await Storage.get(f"message_parts:{session.id}:msg_export_test")
     assert stored_parts[0]["text"] == "hello export"
+    recent, *_ = await Message.list_recent_with_parts(session.id)
+    assert [item.info.id for item in recent] == [message.info.id]
+    assert recent[0].parts[0].text == "hello export"
+
+    # A deliberate replacement must invalidate an already warm message cache.
+    payload["messages"][0]["parts"][0]["text"] = "updated import"
+    await asyncio.to_thread(input_path.write_text, json.dumps(payload), encoding="utf-8")
+    await import_cmd._import_session(str(input_path), "proj_imported", force=True)
+    assert (await Message.list_with_parts(session.id))[0].parts[0].text == "updated import"
+
+
+@pytest.mark.asyncio
+async def test_import_deleted_session_refuses_without_partial_documents(tmp_path) -> None:
+    import typer
+    from flocks.session.session import Session
+
+    session = _build_session("proj_imported")
+    message = _build_message_with_parts(session.id)
+    payload = {
+        "info": session.model_dump(by_alias=True),
+        "messages": [{"info": message.info.model_dump(), "parts": [part.model_dump() for part in message.parts]}],
+    }
+    input_path = tmp_path / "deleted-session-import.json"
+    await asyncio.to_thread(input_path.write_text, json.dumps(payload), encoding="utf-8")
+    await import_cmd._import_session(str(input_path), "proj_imported")
+    assert await Session.delete("proj_imported", session.id)
+    with pytest.raises(typer.Exit):
+        await import_cmd._import_session(str(input_path), "proj_imported", force=True)
+    assert await Storage.get(f"session:proj_imported:{session.id}") is None
+    assert await Storage.get(f"message:{session.id}") is None
+    assert await Storage.get(f"message_parts:{session.id}:{message.info.id}") is None
+
+    await import_cmd._import_session(str(input_path), "proj_imported", new_id=True)
+    entries = await Storage.list_entries(prefix="session:proj_imported:")
+    assert len(entries) == 1 and entries[0][1]["id"] != session.id
 
 
 @pytest.mark.asyncio
@@ -195,7 +239,9 @@ async def test_import_normalizes_legacy_reasoning_parts(monkeypatch, tmp_path) -
     input_path = tmp_path / "legacy-session-import.json"
     input_path.write_text(json.dumps(payload), encoding="utf-8")
 
-    await import_cmd._import_session(str(input_path), "proj_imported")
+    # force=True: the shared Storage singleton may still hold this session id from an
+    # earlier test in the same process, and this test is about part normalization.
+    await import_cmd._import_session(str(input_path), "proj_imported", force=True)
 
     Message.invalidate_cache(session.id)
     imported = await Message.list_with_parts(session.id, include_archived=True)

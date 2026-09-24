@@ -99,8 +99,7 @@ async def test_file_tools_allow_only_host_memory_root_in_sandbox(
             "edit",
             ctx=ctx,
             filePath=str(memory_file),
-            oldString="old fact",
-            newString="new fact",
+            edits=[{"oldString": "old fact", "newString": "new fact"}],
         )
 
     assert read_result.success
@@ -175,22 +174,34 @@ async def test_sandbox_self_improve_can_manage_only_marked_host_skills(
             "edit",
             ctx=ctx,
             filePath=str(managed_path),
-            oldString="Initial workflow.",
-            newString="Improved workflow.",
+            edits=[
+                {
+                    "oldString": "Initial workflow.",
+                    "newString": "Improved workflow.",
+                }
+            ],
         )
         unmanaged_result = await ToolRegistry.execute(
             "edit",
             ctx=ctx,
             filePath=str(unmanaged_path),
-            oldString="Manual workflow.",
-            newString="Changed workflow.",
+            edits=[
+                {
+                    "oldString": "Manual workflow.",
+                    "newString": "Changed workflow.",
+                }
+            ],
         )
         project_skill_result = await ToolRegistry.execute(
             "edit",
             ctx=ctx,
             filePath=str(project_skill_path),
-            oldString="",
-            newString=managed_content.replace("managed-skill", "project-skill"),
+            edits=[
+                {
+                    "oldString": "managed-skill",
+                    "newString": "project-skill",
+                }
+            ],
         )
 
     assert create_result.success
@@ -204,7 +215,7 @@ async def test_sandbox_self_improve_can_manage_only_marked_host_skills(
     assert "existing managed Skills" in (unmanaged_result.error or "")
     assert unmanaged_path.read_text(encoding="utf-8") == unmanaged_content
     assert not project_skill_result.success
-    assert "outside the self-improve user root" in (project_skill_result.error or "")
+    assert "not found" in (project_skill_result.error or "")
     assert not project_skill_path.exists()
 
 
@@ -231,8 +242,12 @@ async def test_sandbox_agent_cannot_write_or_edit_daily_memory(
             "edit",
             ctx=ctx,
             filePath=str(daily_file),
-            oldString="lifecycle entry",
-            newString="replacement",
+            edits=[
+                {
+                    "oldString": "lifecycle entry",
+                    "newString": "replacement",
+                }
+            ],
         )
 
     assert not write_result.success
@@ -268,8 +283,7 @@ async def test_edit_tool_rejects_path_outside_sandbox() -> None:
                 "edit",
                 ctx=ctx,
                 filePath=outside_file,
-                oldString="hello",
-                newString="world",
+                edits=[{"oldString": "hello", "newString": "world"}],
             )
             assert not result.success
             assert "Path escapes sandbox workspace" in (result.error or "")

@@ -214,21 +214,40 @@ def apply_chunks(content: str, chunks: List[PatchChunk]) -> str:
         return content
     
     lines = content.split("\n")
-    
+
+    # Validate every chunk against the file before touching it: a hunk that
+    # points past the end or whose context no longer matches must fail loudly
+    # instead of deleting whatever happens to sit at that line number.
+    for chunk in chunks:
+        start_idx = chunk.start_line - 1
+        if start_idx < 0 or start_idx > len(lines) or (
+            start_idx == len(lines) and chunk.original_lines
+        ):
+            raise ValueError(
+                f"Patch hunk starts at line {chunk.start_line} but the file only has {len(lines)} lines"
+            )
+        end_idx = start_idx + len(chunk.original_lines)
+        if end_idx > len(lines):
+            raise ValueError(
+                f"Patch hunk at line {chunk.start_line} removes {len(chunk.original_lines)} lines "
+                f"but only {len(lines) - start_idx} remain in the file"
+            )
+        for offset, expected in enumerate(chunk.original_lines):
+            actual = lines[start_idx + offset]
+            if expected.rstrip() != actual.rstrip():
+                raise ValueError(
+                    f"Patch context mismatch at line {chunk.start_line + offset}: "
+                    f"expected {expected!r}, found {actual!r}. Re-read the file and regenerate the patch."
+                )
+
     # Apply chunks in reverse order to preserve line numbers
     for chunk in reversed(chunks):
         start_idx = chunk.start_line - 1
-        
-        # Find and replace the matching lines
-        if start_idx >= 0 and start_idx < len(lines):
-            # Remove original lines
-            end_idx = start_idx + len(chunk.original_lines)
-            del lines[start_idx:end_idx]
-            
-            # Insert new lines
-            for i, new_line in enumerate(chunk.new_lines):
-                lines.insert(start_idx + i, new_line)
-    
+        end_idx = start_idx + len(chunk.original_lines)
+        del lines[start_idx:end_idx]
+        for i, new_line in enumerate(chunk.new_lines):
+            lines.insert(start_idx + i, new_line)
+
     return "\n".join(lines)
 
 
@@ -329,6 +348,14 @@ async def apply_patch_tool(
             move_resolution = await resolve_tool_path(ctx, hunk.move_path) if hunk.move_path else None
 
             if hunk.type == "add":
+                if os.path.exists(filepath):
+                    return ToolResult(
+                        success=False,
+                        error=(
+                            f"File already exists: {filepath}. "
+                            "Use '*** Update File:' to change it or '*** Delete File:' first."
+                        ),
+                    )
                 old_content = ""
                 new_content = hunk.contents if hunk.contents.endswith("\n") or not hunk.contents else hunk.contents + "\n"
                 diff = generate_diff(filepath, old_content, new_content)

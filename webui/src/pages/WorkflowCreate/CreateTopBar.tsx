@@ -1,5 +1,5 @@
 import { Link, useNavigate } from 'react-router-dom';
-import { ArrowLeft, ExternalLink, PanelRight, PanelRightClose } from 'lucide-react';
+import { IconArrowLeft, IconExternalLink, IconLayoutSidebarRight, IconLayoutSidebarRightCollapse } from '@tabler/icons-react';
 import { useTranslation } from 'react-i18next';
 import { Workflow } from '@/api/workflow';
 import { getWorkflowDisplayName } from '@/utils/workflowDisplay';
@@ -16,12 +16,12 @@ export default function CreateTopBar({ workflow, panelOpen, onTogglePanel }: Cre
   const displayName = workflow ? getWorkflowDisplayName(workflow, i18n?.language) : '';
 
   return (
-    <div className="h-14 bg-white border-b border-gray-200 flex items-center px-4 gap-3 flex-shrink-0 z-10">
+    <div className="h-14 bg-white border-b border-gray-200 flex items-center pl-14 pr-4 gap-3 flex-shrink-0 z-10 lg:pl-4">
       <Link
         to="/workflows"
         className="flex items-center gap-1.5 text-gray-500 hover:text-gray-800 transition-colors text-sm font-medium"
       >
-        <ArrowLeft className="w-4 h-4" />
+        <IconArrowLeft aria-hidden="true" className="w-4 h-4" />
         {t('pageTitle')}
       </Link>
 
@@ -48,7 +48,7 @@ export default function CreateTopBar({ workflow, panelOpen, onTogglePanel }: Cre
             onClick={() => navigate(`/workflows/${workflow.id}`)}
             className="flex items-center gap-1.5 px-3 py-1.5 bg-red-600 text-white text-sm rounded-lg hover:bg-red-700 transition-colors"
           >
-            <ExternalLink className="w-3.5 h-3.5" />
+            <IconExternalLink aria-hidden="true" className="w-3.5 h-3.5" />
             {t('create.topBar.viewDetail')}
           </button>
         )}
@@ -58,9 +58,9 @@ export default function CreateTopBar({ workflow, panelOpen, onTogglePanel }: Cre
           title={panelOpen ? t('detail.topBar.collapsePanel') : t('detail.topBar.expandPanel')}
         >
           {panelOpen ? (
-            <PanelRightClose className="w-4 h-4" />
+            <IconLayoutSidebarRightCollapse aria-hidden="true" className="w-4 h-4" />
           ) : (
-            <PanelRight className="w-4 h-4" />
+            <IconLayoutSidebarRight aria-hidden="true" className="w-4 h-4" />
           )}
         </button>
       </div>

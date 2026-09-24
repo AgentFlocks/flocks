@@ -136,6 +136,7 @@ export interface MessagePart {
   mime?: string;
   filename?: string;
   url?: string;
+  resourceID?: string;
   // Legacy support
   toolCall?: ToolCall;
   toolResult?: ToolResult;
@@ -158,6 +159,17 @@ export interface ToolState {
   error?: string;
   title?: string;
   metadata?: Record<string, any>;
+  attachments?: Array<{
+    id: string;
+    resourceID?: string;
+    type?: 'file';
+    mime?: string;
+    filename?: string;
+    size?: number;
+    modifiedAt?: number;
+    origin?: string;
+    source?: { root?: string; path?: string };
+  }>;
   time?: {
     start: number;
     end?: number;

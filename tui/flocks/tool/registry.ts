@@ -4,7 +4,7 @@ import { EditTool } from "./edit"
 import { GlobTool } from "./glob"
 import { GrepTool } from "./grep"
 import { ReadTool } from "./read"
-import { TaskTool } from "./task"
+import { DelegateTaskTool } from "./delegate-task"
 import { TodoTool } from "./todo"
 import { WebFetchTool } from "./webfetch"
 import { WriteTool } from "./write"
@@ -99,7 +99,7 @@ export namespace ToolRegistry {
       GrepTool,
       EditTool,
       WriteTool,
-      TaskTool,
+      DelegateTaskTool,
       WebFetchTool,
       TodoTool,
       WebSearchTool,

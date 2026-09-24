@@ -1,0 +1,165 @@
+/*
+ * Flocks UI 规范 v1.4 的设计 token（浅色 / 深色）。
+ *
+ * 变量名与规范文档（webui/UI_SPEC.md，源自设计稿 webui/design/flocks-ui-spec-v1.4.html）
+ * 一一对应，设计侧改值时按同名替换即可。Tailwind 里通过 tailwind.config.js 暴露为
+ * 语义类：bg-canvas / bg-surface / text-fg / text-fg-secondary / border-line /
+ * bg-action / text-success / bg-success-soft / text-ai … 深色由 html.dark 切换，
+ * 新界面写这些语义类即可，不需要再配 dark: 前缀。
+ *
+ * 规则：新界面不得再写裸色板类（gray-500 / red-600 …）或十六进制颜色，只能引用这里的
+ * token；scripts/ui_spec_check.py 会按基线拦截新增的裸色板用法。
+ */
+
+:root {
+  /* 字体 */
+  --font-sans: Inter, system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+  --font-mono: ui-monospace, "SFMono-Regular", Consolas, monospace;
+  --font-body: 14px;
+  --line-body: 22px;
+  --weight-regular: 400;
+  --weight-medium: 500;
+  --weight-semibold: 600;
+  --weight-bold: 700;
+
+  /* 几何 */
+  --radius-sm: 4px;        /* 标签 */
+  --radius-segment: 6px;   /* 分段内项 */
+  --radius-control: 8px;   /* 按钮、输入框、下拉触发器 */
+  --radius-card: 12px;     /* 卡片 */
+  --radius-overlay: 12px;  /* 弹窗、抽屉、菜单 */
+  --radius-pill: 999px;
+  --control-sm: 32px;
+  --control-md: 36px;
+  --control-lg: 40px;
+  --control-touch: 48px;
+  --border-width: 1px;
+  --focus-width: 2px;
+  --focus-offset: 2px;
+  --layout-sidebar: 208px;
+  --layout-topbar: 44px;
+  --overlay-modal: 560px;
+  --overlay-drawer: 480px;
+  --overlay-onboarding: 768px;
+
+  /* 动效 */
+  --motion-fast: 120ms;
+  --motion-normal: 180ms;
+  --motion-overlay: 240ms;
+  --motion-easing: cubic-bezier(0.2, 0, 0, 1);
+
+  /* 间距（4px 步长） */
+  --space-4: 4px;
+  --space-8: 8px;
+  --space-12: 12px;
+  --space-16: 16px;
+  --space-20: 20px;
+  --space-24: 24px;
+  --space-32: 32px;
+  --space-40: 40px;
+  --space-48: 48px;
+  --space-64: 64px;
+
+  /* 背景层级 */
+  --bg-canvas: #f8fafc;
+  --bg-surface: #ffffff;
+  --bg-subtle: #f1f5f9;
+  --bg-hover: #e2e8f0;
+  --bg-selected: #e2e8f0;
+
+  /* 文字层级 */
+  --text-primary: #0f172a;
+  --text-secondary: #475569;
+  --text-muted: #64748b;
+  --text-placeholder: #94a3b8;
+  --text-link: #1d4ed8;
+
+  /* 边框 */
+  --border-subtle: #e2e8f0;
+  --border-control: #64748b;
+
+  /* 操作（品牌红） */
+  --action-primary: #dc2626;
+  --action-hover: #b91c1c;
+  --action-pressed: #991b1b;
+  --action-onPrimary: #ffffff;
+  --action-danger: #b91c1c;
+  --action-onDanger: #ffffff;
+  --focus-ring: #1d4ed8;
+
+  /* 功能状态：文字与底色成对使用 */
+  --status-success: #166534;
+  --status-successBg: #f0fdf4;
+  --status-warning: #92400e;
+  --status-warningBg: #fffbeb;
+  --status-danger: #b91c1c;
+  --status-dangerBg: #fef2f2;
+  --status-info: #1e40af;
+  --status-infoBg: #eff6ff;
+
+  /* 分类强调：AI 紫（模型 / Rex / 智能体）、数据青（情报 / 接口 / 连接）、品牌红 */
+  --accent-ai: #6d28d9;
+  --accent-aiBg: #f5f3ff;
+  --accent-data: #0e7490;
+  --accent-dataBg: #ecfeff;
+  --accent-brand: #b91c1c;
+  --accent-brandBg: #fef2f2;
+
+  /* 交互状态 */
+  --disabled-bg: #f1f5f9;
+  --disabled-text: #64748b;
+  --switch-on: #047857;
+  --switch-thumb: #ffffff;
+  --shadow-overlay: 0 12px 32px rgba(15, 23, 42, 0.16);
+
+  color-scheme: light;
+}
+
+.dark {
+  --bg-canvas: #252c35;
+  --bg-surface: #303842;
+  --bg-subtle: #39434f;
+  --bg-hover: #46515e;
+  --bg-selected: #46515e;
+
+  --text-primary: #d7dee8;
+  --text-secondary: #bcc6d0;
+  --text-muted: #9aa7b4;
+  --text-placeholder: #9aa7b4;
+  --text-link: #bfdbfe;
+
+  --border-subtle: #4a5563;
+  --border-control: #9aa7b4;
+
+  --action-primary: #dc2626;
+  --action-hover: #b91c1c;
+  --action-pressed: #991b1b;
+  --action-onPrimary: #ffffff;
+  --action-danger: #b91c1c;
+  --action-onDanger: #ffffff;
+  --focus-ring: #93c5fd;
+
+  --status-success: #86efac;
+  --status-successBg: #14332a;
+  --status-warning: #fcd34d;
+  --status-warningBg: #392d13;
+  --status-danger: #fca5a5;
+  --status-dangerBg: #3b2028;
+  --status-info: #93c5fd;
+  --status-infoBg: #1e3a5f;
+
+  --accent-ai: #c4b5fd;
+  --accent-aiBg: #352b4b;
+  --accent-data: #67e8f9;
+  --accent-dataBg: #173c46;
+  --accent-brand: #fca5a5;
+  --accent-brandBg: #3b2028;
+
+  --disabled-bg: #303842;
+  --disabled-text: #778393;
+  --switch-on: #34d399;
+  --switch-thumb: #ffffff;
+  --shadow-overlay: 0 12px 32px rgba(0, 0, 0, 0.4);
+
+  color-scheme: dark;
+}

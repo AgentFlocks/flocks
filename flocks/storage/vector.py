@@ -1,18 +1,29 @@
 """
 Vector storage and search extension for Storage system
 
-Provides vector similarity search and FTS5 full-text search capabilities
+Provides vector similarity and PostgreSQL substring search capabilities
 for the memory system.
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, List, Optional, Dict, Any, Tuple
+from typing import TYPE_CHECKING, Awaitable, Callable, List, Optional, Dict, Any, Tuple
 from pathlib import Path
 import json
+import asyncio
+import heapq
 import math
+import re
+from uuid import uuid4
 from datetime import datetime
 
+from flocks.db.params import Params, in_clause
+from flocks.db.search import (
+    MEMORY_COLUMNS,
+    RANK_ALIAS,
+    MEMORY_MIN_TERM_CHARS,
+    memory_search_index_for,
+)
 from flocks.storage.storage import Storage
 from flocks.utils.log import Log
 
@@ -22,81 +33,77 @@ if TYPE_CHECKING:
 log = Log.create(service="storage.vector")
 
 
-# Database Schema SQL
-VECTOR_SCHEMA_SQL = """
--- Memory files index table
-CREATE TABLE IF NOT EXISTS memory_files (
-    scope TEXT NOT NULL,
-    scope_id TEXT NOT NULL,
-    path TEXT NOT NULL,
-    source TEXT NOT NULL,  -- 'memory' | 'session'
-    hash TEXT NOT NULL,
-    mtime REAL NOT NULL,
-    size INTEGER NOT NULL,
-    indexed_at REAL NOT NULL,
-    PRIMARY KEY (scope, scope_id, path)
-);
+def _vector_schema(dialect) -> list[str]:
+    """PostgreSQL memory metadata and UTF-8 JSON embeddings stored as BYTEA."""
+    text = dialect.text_type()
+    num = dialect.integer_type()
+    real = dialect.double_type()
+    blob = dialect.blob_type()
+    return [
+        f"""
+        CREATE TABLE IF NOT EXISTS memory_files (
+            scope      {text} NOT NULL,
+            scope_id   {text} NOT NULL,
+            path       {text} NOT NULL,
+            source     {text} NOT NULL,
+            hash       {text} NOT NULL,
+            mtime      {real} NOT NULL,
+            size       {num} NOT NULL,
+            indexed_at {real} NOT NULL,
+            PRIMARY KEY (scope, scope_id, path)
+        )
+        """,
+        f"""
+        CREATE TABLE IF NOT EXISTS memory_chunks (
+            id              {text} PRIMARY KEY,
+            scope           {text} NOT NULL,
+            scope_id        {text} NOT NULL,
+            path            {text} NOT NULL,
+            source          {text} NOT NULL,
+            start_line      {num} NOT NULL,
+            end_line        {num} NOT NULL,
+            hash            {text} NOT NULL,
+            text            {text} NOT NULL,
+            embedding       {blob},
+            embedding_model {text},
+            embedding_dims  {num},
+            created_at      {real} NOT NULL,
+            updated_at      {real} NOT NULL,
+            FOREIGN KEY (scope, scope_id, path)
+                REFERENCES memory_files(scope, scope_id, path) ON DELETE CASCADE
+        )
+        """,
+        f"""
+        CREATE TABLE IF NOT EXISTS memory_embedding_cache (
+            text_hash   {text} NOT NULL,
+            provider    {text} NOT NULL,
+            model       {text} NOT NULL,
+            embedding   {blob} NOT NULL,
+            dims        {num} NOT NULL,
+            created_at  {real} NOT NULL,
+            accessed_at {real} NOT NULL,
+            PRIMARY KEY (text_hash, provider, model)
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS idx_memory_files_scope ON memory_files(scope, scope_id)",
+        "CREATE INDEX IF NOT EXISTS idx_memory_files_source ON memory_files(source)",
+        "CREATE INDEX IF NOT EXISTS idx_memory_chunks_scope ON memory_chunks(scope, scope_id)",
+        "CREATE INDEX IF NOT EXISTS idx_memory_chunks_path ON memory_chunks(scope, scope_id, path)",
+        "CREATE INDEX IF NOT EXISTS idx_memory_chunks_source ON memory_chunks(source)",
+        (
+            "CREATE INDEX IF NOT EXISTS idx_memory_embedding_cache_accessed "
+            "ON memory_embedding_cache(accessed_at)"
+        ),
+    ]
 
--- Memory chunks table
-CREATE TABLE IF NOT EXISTS memory_chunks (
-    id TEXT PRIMARY KEY,
-    scope TEXT NOT NULL,
-    scope_id TEXT NOT NULL,
-    path TEXT NOT NULL,
-    source TEXT NOT NULL,
-    start_line INTEGER NOT NULL,
-    end_line INTEGER NOT NULL,
-    hash TEXT NOT NULL,
-    text TEXT NOT NULL,
-    embedding BLOB,  -- pickled numpy array or JSON list
-    embedding_model TEXT,
-    embedding_dims INTEGER,
-    created_at REAL NOT NULL,
-    updated_at REAL NOT NULL,
-    FOREIGN KEY (scope, scope_id, path)
-        REFERENCES memory_files(scope, scope_id, path) ON DELETE CASCADE
-);
 
--- Embedding cache table (shared across projects)
-CREATE TABLE IF NOT EXISTS memory_embedding_cache (
-    text_hash TEXT NOT NULL,
-    provider TEXT NOT NULL,
-    model TEXT NOT NULL,
-    embedding BLOB NOT NULL,
-    dims INTEGER NOT NULL,
-    created_at REAL NOT NULL,
-    accessed_at REAL NOT NULL,
-    PRIMARY KEY (text_hash, provider, model)
-);
-
--- Indexes for performance
-CREATE INDEX IF NOT EXISTS idx_memory_files_scope
-    ON memory_files(scope, scope_id);
-CREATE INDEX IF NOT EXISTS idx_memory_files_source ON memory_files(source);
-CREATE INDEX IF NOT EXISTS idx_memory_chunks_scope
-    ON memory_chunks(scope, scope_id);
-CREATE INDEX IF NOT EXISTS idx_memory_chunks_path
-    ON memory_chunks(scope, scope_id, path);
-CREATE INDEX IF NOT EXISTS idx_memory_chunks_source ON memory_chunks(source);
-CREATE INDEX IF NOT EXISTS idx_memory_embedding_cache_accessed ON memory_embedding_cache(accessed_at);
-"""
-
-# FTS5 Schema (created separately to handle errors gracefully)
-FTS5_SCHEMA_SQL = """
--- FTS5 full-text search table
-CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
-    text,
-    chunk_id UNINDEXED,
-    path UNINDEXED,
-    source UNINDEXED,
-    scope UNINDEXED,
-    scope_id UNINDEXED,
-    start_line UNINDEXED,
-    end_line UNINDEXED,
-    tokenize = 'porter unicode61'
-);
-"""
-
+# trigram 分词器把任何文字按 3 字符滑窗建索引，中文不用分词也能命中（porter unicode61 会把
+# "告警处理约定" 整段当一个 token，中文查询恒 0 结果）。代价：短于 3 个字符的词 trigram
+# 查不到，fts_search 对这类词走 LIKE 兜底。表结构本身由 flocks.db.search 的索引实现给出，
+# PostgreSQL 上换成 pg_trgm——同样按三字符窗口、同样是子串语义。
+FTS_TOKENIZER = "pg_trgm"
+FTS_MIN_TERM_CHARS = MEMORY_MIN_TERM_CHARS
+FTS_COLUMNS = ", ".join(("text",) + tuple(c for c in MEMORY_COLUMNS if c != "text"))
 
 async def ensure_vector_tables(db_path: Path) -> Dict[str, Any]:
     """
@@ -105,6 +112,7 @@ async def ensure_vector_tables(db_path: Path) -> Dict[str, Any]:
     Returns:
         Status dict with table availability info
     """
+    # Keep the legacy status keys for callers; the implementation is PG-only.
     status: Dict[str, Any] = {
         "vector_tables": False,
         "fts5": False,
@@ -112,45 +120,84 @@ async def ensure_vector_tables(db_path: Path) -> Dict[str, Any]:
     }
     
     try:
-        async with Storage.connect(db_path) as db:
-            cursor = await db.execute("PRAGMA table_info(memory_files)")
-            file_columns = {row[1] for row in await cursor.fetchall()}
-            cursor = await db.execute("PRAGMA table_info(memory_chunks)")
-            chunk_columns = {row[1] for row in await cursor.fetchall()}
-            cursor = await db.execute("PRAGMA table_info(memory_fts)")
-            fts_columns = {row[1] for row in await cursor.fetchall()}
+        # ensure_init=False: this runs from inside Storage.init(); asking init
+        # to finish from within it recurses until the stack runs out.
+        async with Storage.transaction(db_path, ensure_init=False) as db:
+            d = db.dialect
+            await db.execute("SELECT pg_advisory_xact_lock(hashtext(current_schema()), hashtext('flocks.memory.schema'))")
+            columns_of = lambda table: db.fetch_all(  # noqa: E731
+                d.columns_query().format(table=table), d.columns_query_params(table)
+            )
+            name_at = d.column_name_index()
+            file_columns = {row[name_at] for row in await columns_of("memory_files")}
+            chunk_columns = {row[name_at] for row in await columns_of("memory_chunks")}
+            fts_columns = {row[name_at] for row in await columns_of("memory_fts")}
             old_scope_schema = any(
                 columns
                 and not {"scope", "scope_id"}.issubset(columns)
-                for columns in (file_columns, chunk_columns, fts_columns)
+                for columns in (file_columns, chunk_columns)
             )
-            if old_scope_schema:
-                await db.execute("BEGIN IMMEDIATE")
-                try:
-                    await db.execute("DROP TABLE IF EXISTS memory_fts")
-                    await db.execute("DROP TABLE IF EXISTS memory_chunks")
-                    await db.execute("DROP TABLE IF EXISTS memory_files")
-                    await db.commit()
-                    log.info("vector.memory_scope_schema.rebuilt")
-                except BaseException:
-                    await db.rollback()
-                    raise
-            # Create vector tables
-            await db.executescript(VECTOR_SCHEMA_SQL)
-            await db.commit()
+            old_fts_schema = bool(fts_columns and not {"scope", "scope_id"}.issubset(fts_columns))
+            if old_scope_schema or old_fts_schema:
+                # Tables from before scope/scope_id existed. Renaming them
+                # aside leaves the rows on disk and lets the CREATE statements
+                # below build the current schema next to them; dropping would
+                # destroy an index that can only be rebuilt by re-reading every
+                # memory file, and would do it without asking.
+                stamp = uuid4().hex[:12]
+                present = {"memory_fts": fts_columns, "memory_chunks": chunk_columns, "memory_files": file_columns}
+                retained = [table for table in present if present[table] and (old_scope_schema or table == "memory_fts")]
+                indexes = await db.fetch_all(
+                    "SELECT indexname FROM pg_indexes WHERE schemaname = current_schema() AND tablename = ANY(?::text[])",
+                    (retained,),
+                )
+                # PostgreSQL index names live in the schema namespace. Retain
+                # them under new names so the new tables receive real indexes.
+                statements = [f"ALTER INDEX {d.quote(name)} RENAME TO {d.quote(name[:35] + '_legacy_' + stamp)}"
+                              for (name,) in indexes]
+                statements.extend(f"ALTER TABLE {d.quote(table)} RENAME TO {d.quote(table + '_legacy_prescope_' + stamp)}"
+                                  for table in retained)
+                if statements:
+                    await db.executescript(";\n".join(statements))
+                log.info(
+                    "vector.memory_scope_schema.rebuilt",
+                    {"legacy_suffix": f"legacy_prescope_{stamp}"},
+                )
+
+            await db.executescript(";\n".join(_vector_schema(d)))
             status["vector_tables"] = True
             log.info("vector.tables.created")
-            
-            # Try to create FTS5 table
+
+            index = memory_search_index_for(d.name)
+            if index is None:
+                status["fts5_error"] = f"no full-text index for backend {d.name!r}"
+                log.warn("vector.fts5.unsupported", {"backend": d.name})
+                return status
             try:
-                await db.executescript(FTS5_SCHEMA_SQL)
-                await db.commit()
+                await db.executescript(";\n".join(index.schema_statements()))
+                if old_fts_schema and not old_scope_schema:
+                    await db.execute("""INSERT INTO memory_fts(chunk_id, path, source, scope, scope_id, start_line, end_line, text)
+                        SELECT id, path, source, scope, scope_id, start_line, end_line, text FROM memory_chunks
+                        ON CONFLICT (chunk_id) DO NOTHING""")
                 status["fts5"] = True
                 log.info("vector.fts5.created")
             except Exception as e:
                 status["fts5_error"] = str(e)
                 log.warn("vector.fts5.failed", {"error": str(e)})
-        
+                raise
+
+            # Matching is correct without these; they only make it fast, and
+            # CREATE EXTENSION needs privileges a deployment may withhold.
+            for statement in index.accelerator_statements():
+                await db.execute("SAVEPOINT memory_accelerator")
+                try:
+                    await db.execute(statement)
+                except Exception as e:
+                    await db.execute("ROLLBACK TO SAVEPOINT memory_accelerator")
+                    log.warn("vector.fts5.accelerator_skipped", {"error": str(e)})
+                finally:
+                    await db.execute("RELEASE SAVEPOINT memory_accelerator")
+
         return status
     except Exception as e:
         log.error("vector.tables.failed", {"error": str(e)})
@@ -181,6 +228,26 @@ def cosine_similarity(a: List[float], b: List[float]) -> float:
     return dot_product / (magnitude_a * magnitude_b)
 
 
+def _embedding_bytes(value: Any) -> bytes | None:
+    """The BYTEA representation is UTF-8 JSON, including migrated text blobs."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value.encode("utf-8")
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        return bytes(value)
+    return json.dumps(value, ensure_ascii=False, allow_nan=False).encode("utf-8")
+
+
+def _embedding_values(value: Any) -> list[float]:
+    if isinstance(value, (bytearray, memoryview)):
+        value = bytes(value)
+    decoded = json.loads(value) if isinstance(value, (str, bytes)) else value
+    if not isinstance(decoded, list):
+        raise ValueError("Embedding must be a JSON array")
+    return decoded
+
+
 def bm25_rank_to_score(rank: float) -> float:
     """
     Convert BM25 rank to normalized score (0-1)
@@ -207,8 +274,7 @@ async def vector_search(
     """
     Perform vector similarity search
     
-    Note: This is a basic implementation using Python.
-    For production, consider using sqlite-vec extension for better performance.
+    Exact cosine scoring uses bounded pages and runs outside the event loop.
     
     Args:
         db_path: Database path
@@ -223,9 +289,12 @@ async def vector_search(
         List of search results
     """
     results = []
+    max_results = max(0, int(max_results))
+    if max_results == 0:
+        return results
     
     try:
-        async with Storage.connect(db_path) as db:
+        async with Storage.transaction(db_path) as db:
             query = """
                 SELECT id, path, source, start_line, end_line, text, embedding
                 FROM memory_chunks
@@ -238,7 +307,12 @@ async def vector_search(
             params: list[Any] = [project_id]
 
             if time_range is not None:
-                query += " AND scope = 'global' AND path GLOB 'daily/????-??-??.md'"
+                # Daily notes are named by date; PostgreSQL matches that shape
+                # with a regular expression plus an indexed path range.
+                daily = memory_search_index_for(db.dialect.name)
+                query += " AND scope = 'global'"
+                if daily is not None:
+                    query += f" AND {daily.daily_path_clause('path')}"
                 if time_range.daily_start_date is not None:
                     query += " AND path >= ?"
                     params.append(f"daily/{time_range.daily_start_date}.md")
@@ -251,51 +325,48 @@ async def vector_search(
                 query += f" AND source IN ({placeholders})"
                 params.extend(sources)
             
-            # Fetch all chunks with embeddings
-            cursor = await db.execute(query, params)
-            rows = await cursor.fetchall()
-            
-            # Calculate similarities
-            for row in rows:
-                chunk_id, path, source, start_line, end_line, text, embedding_blob = row
-                
-                # Deserialize embedding (assuming JSON for now)
-                try:
-                    if isinstance(embedding_blob, str):
-                        chunk_embedding = json.loads(embedding_blob)
-                    elif isinstance(embedding_blob, bytes):
-                        chunk_embedding = json.loads(embedding_blob.decode())
-                    else:
-                        continue
-                    
-                    # Calculate cosine similarity
-                    score = cosine_similarity(embedding, chunk_embedding)
-                    
-                    if score >= min_score:
-                        results.append({
-                            "id": chunk_id,
-                            "path": path,
-                            "source": source,
-                            "start_line": start_line,
-                            "end_line": end_line,
-                            "text": text,
-                            "score": score,
-                        })
-                except Exception as e:
-                    log.warn("vector.search.embedding_error", {
-                        "chunk_id": chunk_id,
-                        "error": str(e)
-                    })
-                    continue
-            
-            # Sort by score descending
-            results.sort(key=lambda x: x["score"], reverse=True)
-            
-            return results[:max_results]
+            cursor_id = None
+            while True:
+                page_sql = query + (" AND id > ?" if cursor_id is not None else "") + " ORDER BY id LIMIT 256"
+                page_params = [*params, cursor_id] if cursor_id is not None else params
+                rows = await db.fetch_all(page_sql, page_params)
+                if not rows:
+                    break
+                scored = await asyncio.to_thread(_score_vector_rows, rows, embedding, min_score)
+                results = heapq.nlargest(max_results, [*results, *scored], key=lambda item: item["score"])
+                cursor_id = rows[-1][0]
+                if len(rows) < 256:
+                    break
+            return results
     
     except Exception as e:
         log.error("vector.search.failed", {"error": str(e)})
         raise
+
+
+def _score_vector_rows(rows, embedding, min_score):
+    results = []
+    for chunk_id, path, source, start_line, end_line, text, stored in rows:
+        try:
+            score = cosine_similarity(embedding, _embedding_values(stored))
+            if math.isfinite(score) and score >= min_score:
+                results.append({"id": chunk_id, "path": path, "source": source,
+                                "start_line": start_line, "end_line": end_line,
+                                "text": text, "score": score})
+        except (TypeError, ValueError, UnicodeError, OverflowError) as exc:
+            log.warn("vector.search.embedding_error", {"chunk_id": chunk_id, "error": str(exc)})
+    return results
+
+
+def split_fts_terms(raw: str) -> Tuple[List[str], List[str]]:
+    """Split raw text into (MATCH-able terms, short terms).
+
+    trigram 只能匹配 ≥3 个字符的词，"告警"、"IP" 这类短词由调用方走 LIKE 兜底。
+    """
+    tokens = [t for t in re.findall(r"\w+", raw, flags=re.UNICODE) if t.strip()]
+    long_terms = [t for t in tokens if len(t) >= FTS_MIN_TERM_CHARS]
+    short_terms = [t for t in tokens if len(t) < FTS_MIN_TERM_CHARS]
+    return long_terms, short_terms
 
 
 def build_fts_query(raw: str) -> Optional[str]:
@@ -310,19 +381,21 @@ def build_fts_query(raw: str) -> Optional[str]:
     Returns:
         FTS5 query string or None if no valid tokens
     """
-    import re
-    
     # Python's Unicode-aware ``\w`` keeps CJK and other scripts intact while
     # quoting prevents user input from becoming FTS5 syntax.
-    tokens = re.findall(r"\w+", raw, flags=re.UNICODE)
-    tokens = [t.strip() for t in tokens if t.strip()]
-    
-    if not tokens:
+    long_terms, _short = split_fts_terms(raw)
+    if not long_terms:
         return None
     
     # Quote and combine with AND
-    quoted = ['"' + t.replace('"', "") + '"' for t in tokens]
+    quoted = ['"' + t.replace('"', "") + '"' for t in long_terms]
     return ' AND '.join(quoted)
+
+
+def _like_pattern(term: str) -> str:
+    """LIKE 兜底用的模式：转义 % _ \\ 后包成 %term%。"""
+    escaped = term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"%{escaped}%"
 
 
 async def fts_search(
@@ -334,77 +407,89 @@ async def fts_search(
     time_range: Optional[MemoryTimeRange] = None,
 ) -> List[Dict[str, Any]]:
     """
-    Perform FTS5 full-text search
+    Perform PostgreSQL substring search
     
     Args:
         db_path: Database path
         project_id: Current Session project ID
-        query: Search query (FTS5 format)
+        query: Plain keyword query
         max_results: Maximum results to return
         sources: Optional list of sources to filter
         time_range: Optional Daily filename date filter
         
     Returns:
-        List of search results with BM25 scores
+        List of search results with normalized relevance scores
     """
     results = []
     
     try:
-        async with Storage.connect(db_path) as db:
-            # Build FTS query
-            fts_query = build_fts_query(query)
+        async with Storage.transaction(db_path) as db:
+            index = memory_search_index_for(db.dialect.name)
+            if index is None:
+                # No full-text index on this backend. Returning nothing is the
+                # honest answer; a query that always matches is not.
+                return results
 
-            # Build SQL query
-            rank_expression = "rank" if fts_query else "0.0"
+            # ≥3 字符走索引匹配；更短的词 trigram 查不到，用子串兜底。
+            # 查询串长什么样由索引自己决定：FTS5 要它自己的语法，pg_trgm 要的是词本身。
+            fts_query = index.prepare_query(query)
+            _long_terms, short_terms = split_fts_terms(query)
+
+            params = Params(db.dialect)
+            # Assembled in the order the markers appear, because a backend that
+            # numbers its parameters cannot have them added out of order.
+            trigram = await db.fetch_one("SELECT to_regprocedure('similarity(text,text)') IS NOT NULL") if fts_query else None
+            rank_expression = index.rank_expression(params, fts_query, use_trigram=bool(trigram and trigram[0]))
             sql = f"""
-                SELECT 
+                SELECT
                     f.chunk_id,
                     f.path,
                     f.source,
                     f.start_line,
                     f.end_line,
                     f.text,
-                    {rank_expression}
-                FROM memory_fts f
+                    {rank_expression} AS {RANK_ALIAS}
+                FROM {index.table} f
                 WHERE (
                         f.scope = 'global'
-                        OR (f.scope = 'project' AND f.scope_id = ?)
+                        OR (f.scope = 'project' AND f.scope_id = {params.add(project_id)})
                     )
             """
-            params: list[Any] = [project_id]
             if fts_query:
-                sql += " AND f.text MATCH ?"
-                params.append(fts_query)
+                sql += f" AND {index.match_clause(params, 'f.text', fts_query)}"
+            for term in short_terms:
+                sql += f" AND {index.contains_clause(params, 'f.text', _like_pattern(term))}"
 
             if time_range is not None:
-                sql += " AND f.scope = 'global' AND f.path GLOB 'daily/????-??-??.md'"
+                sql += f" AND f.scope = 'global' AND {index.daily_path_clause('f.path')}"
                 if time_range.daily_start_date is not None:
-                    sql += " AND f.path >= ?"
-                    params.append(f"daily/{time_range.daily_start_date}.md")
+                    sql += f" AND f.path >= {params.add(f'daily/{time_range.daily_start_date}.md')}"
                 if time_range.daily_end_date is not None:
-                    sql += " AND f.path < ?"
-                    params.append(f"daily/{time_range.daily_end_date}.md")
-            
+                    sql += f" AND f.path < {params.add(f'daily/{time_range.daily_end_date}.md')}"
+
             if sources:
-                placeholders = ",".join("?" * len(sources))
-                sql += f" AND f.source IN ({placeholders})"
-                params.extend(sources)
-            
+                sql += f" AND {in_clause(params, 'f.source', list(sources))}"
+
             if fts_query:
-                sql += " ORDER BY rank"
+                sql += f" ORDER BY {index.rank_order()}"
             else:
                 sql += " ORDER BY f.path DESC, CAST(f.start_line AS INTEGER)"
-            sql += " LIMIT ?"
-            params.append(max_results)
-            
-            # Execute query
-            cursor = await db.execute(sql, params)
-            rows = await cursor.fetchall()
-            
+            sql += f" LIMIT {params.add(max_results)}"
+
+            rows = await db.fetch_all(sql, params.values)
+
             # Convert ranks to scores
             for row in rows:
                 chunk_id, path, source, start_line, end_line, text, rank = row
-                score = bm25_rank_to_score(rank) if fts_query else 1.0
+                # Every returned row contains all requested terms. Give that
+                # exact substring match the same 0.5 floor as the short-term
+                # fallback; whole-document trigram similarity alone approaches
+                # zero for long notes and defeats the default keyword fallback.
+                # Keep higher PG ranks better, including during hybrid merging.
+                score = 0.5 + 0.5 * max(0.0, min(float(rank), 1.0)) if fts_query else 1.0
+                if not fts_query and short_terms:
+                    # Short terms have no trigram relevance score.
+                    score = 0.5
                 
                 results.append({
                     "id": chunk_id,
@@ -440,16 +525,23 @@ async def insert_chunks(
         Number of chunks inserted
     """
     try:
-        async with Storage.connect(db_path) as db:
+        async with Storage.transaction(db_path) as db:
             now = datetime.now().timestamp()
             
             # Insert into chunks table
-            await db.executemany("""
-                INSERT OR REPLACE INTO memory_chunks
-                (id, scope, scope_id, path, source, start_line, end_line, hash, text,
-                 embedding, embedding_model, embedding_dims, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, [
+            chunk_columns = (
+                "id", "scope", "scope_id", "path", "source", "start_line", "end_line",
+                "hash", "text", "embedding", "embedding_model", "embedding_dims",
+                "created_at", "updated_at",
+            )
+            await db.execute_many(
+                db.dialect.upsert(
+                    "memory_chunks",
+                    chunk_columns,
+                    key_columns=("id",),
+                    update_columns=tuple(c for c in chunk_columns if c != "id"),
+                ),
+                [
                 (
                     chunk["id"],
                     chunk["scope"],
@@ -460,16 +552,18 @@ async def insert_chunks(
                     chunk["end_line"],
                     chunk["hash"],
                     chunk["text"],
-                    json.dumps(chunk["embedding"]) if chunk.get("embedding") else None,
+                    _embedding_bytes(chunk.get("embedding")),
                     chunk.get("embedding_model"),
                     chunk.get("embedding_dims"),
                     now,
                     now,
                 )
                 for chunk in chunks
-            ])
-            
-            # Insert into FTS5 table (if exists)
+                ],
+            )
+
+            # Insert into the full-text index (if it exists)
+            await db.execute("SAVEPOINT memory_chunk_search")
             try:
                 chunk_ids = [chunk["id"] for chunk in chunks]
                 if chunk_ids:
@@ -478,11 +572,18 @@ async def insert_chunks(
                         f"DELETE FROM memory_fts WHERE chunk_id IN ({placeholders})",
                         tuple(chunk_ids),
                     )
-                await db.executemany("""
-                    INSERT OR REPLACE INTO memory_fts
-                    (chunk_id, path, source, scope, scope_id, start_line, end_line, text)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """, [
+                fts_columns = (
+                    "chunk_id", "path", "source", "scope", "scope_id",
+                    "start_line", "end_line", "text",
+                )
+                await db.execute_many(
+                    db.dialect.upsert(
+                        "memory_fts",
+                        fts_columns,
+                        key_columns=("chunk_id",),
+                        update_columns=tuple(c for c in fts_columns if c != "chunk_id"),
+                    ),
+                    [
                     (
                         chunk["id"],
                         chunk["path"],
@@ -494,9 +595,13 @@ async def insert_chunks(
                         chunk["text"],
                     )
                     for chunk in chunks
-                ])
+                    ],
+                )
             except Exception as e:
+                await db.execute("ROLLBACK TO SAVEPOINT memory_chunk_search")
                 log.warn("fts.insert.failed", {"error": str(e)})
+            finally:
+                await db.execute("RELEASE SAVEPOINT memory_chunk_search")
             
             await db.commit()
             
@@ -513,15 +618,20 @@ async def replace_memory_file_index(
     *,
     file_entry: Dict[str, Any],
     chunks: List[Dict[str, Any]],
+    before_replace: Optional[Callable[[Any, Dict[str, Any]], Awaitable[None]]] = None,
 ) -> int:
     """Atomically replace one Memory file's metadata, chunks, and FTS rows."""
     scope = file_entry["scope"]
     scope_id = file_entry["scope_id"]
     path = file_entry["path"]
     now = datetime.now().timestamp()
-    async with Storage.connect(db_path) as db:
+    async with Storage.transaction(db_path) as db:
         try:
-            await db.execute("BEGIN IMMEDIATE")
+            # Serialize replacements of the same logical memory file.
+            await db.execute("SELECT pg_advisory_xact_lock(hashtext(?))",
+                             (f"memory:{scope}:{scope_id}:{path}",))
+            if before_replace is not None:
+                await before_replace(db, file_entry)
             await db.execute(
                 """
                 DELETE FROM memory_fts
@@ -538,23 +648,29 @@ async def replace_memory_file_index(
                 """,
                 (scope, scope_id, path),
             )
+            file_columns = (
+                "scope", "scope_id", "path", "source", "hash", "mtime", "size",
+                "indexed_at",
+            )
             await db.execute(
-                """
-                INSERT OR REPLACE INTO memory_files (
-                    scope, scope_id, path, source, hash, mtime, size, indexed_at
-                ) VALUES (?, ?, ?, 'memory', ?, ?, ?, ?)
-                """,
+                db.dialect.upsert(
+                    "memory_files",
+                    file_columns,
+                    key_columns=("scope", "scope_id", "path"),
+                    update_columns=("source", "hash", "mtime", "size", "indexed_at"),
+                ),
                 (
                     scope,
                     scope_id,
                     path,
+                    "memory",
                     file_entry["hash"],
                     file_entry["mtime"],
                     file_entry["size"],
                     now,
                 ),
             )
-            await db.executemany(
+            await db.execute_many(
                 """
                 INSERT INTO memory_chunks (
                     id, scope, scope_id, path, source, start_line, end_line, hash,
@@ -573,11 +689,7 @@ async def replace_memory_file_index(
                         chunk["end_line"],
                         chunk["hash"],
                         chunk["text"],
-                        (
-                            json.dumps(chunk["embedding"])
-                            if chunk.get("embedding")
-                            else None
-                        ),
+                        _embedding_bytes(chunk.get("embedding")),
                         chunk.get("embedding_model"),
                         chunk.get("embedding_dims"),
                         now,
@@ -586,7 +698,7 @@ async def replace_memory_file_index(
                     for chunk in chunks
                 ],
             )
-            await db.executemany(
+            await db.execute_many(
                 """
                 INSERT INTO memory_fts (
                     chunk_id, path, source, scope, scope_id, start_line, end_line,
@@ -627,7 +739,7 @@ async def get_embedding_from_cache(
         Tuple of (embedding, dims) or None if not found
     """
     try:
-        async with Storage.connect(db_path) as db:
+        async with Storage.transaction(db_path) as db:
             cursor = await db.execute("""
                 SELECT embedding, dims
                 FROM memory_embedding_cache
@@ -637,7 +749,7 @@ async def get_embedding_from_cache(
             row = await cursor.fetchone()
             if row:
                 embedding_blob, dims = row
-                embedding = json.loads(embedding_blob) if isinstance(embedding_blob, (str, bytes)) else embedding_blob
+                embedding = _embedding_values(embedding_blob)
                 
                 # Update accessed_at
                 now = datetime.now().timestamp()
@@ -668,21 +780,29 @@ async def put_embedding_to_cache(
     Put embedding to cache
     """
     try:
-        async with Storage.connect(db_path) as db:
+        async with Storage.transaction(db_path) as db:
             now = datetime.now().timestamp()
-            await db.execute("""
-                INSERT OR REPLACE INTO memory_embedding_cache
-                (text_hash, provider, model, embedding, dims, created_at, accessed_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            """, (
+            cache_columns = (
+                "text_hash", "provider", "model", "embedding", "dims",
+                "created_at", "accessed_at",
+            )
+            await db.execute(
+                db.dialect.upsert(
+                    "memory_embedding_cache",
+                    cache_columns,
+                    key_columns=("text_hash", "provider", "model"),
+                    update_columns=("embedding", "dims", "created_at", "accessed_at"),
+                ),
+                (
                 text_hash,
                 provider,
                 model,
-                json.dumps(embedding),
+                _embedding_bytes(embedding),
                 dims,
                 now,
                 now,
-            ))
+                ),
+            )
             await db.commit()
     except Exception as e:
         log.warn("cache.put.failed", {"error": str(e)})

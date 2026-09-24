@@ -7,6 +7,7 @@ import asyncio
 import json
 import shutil
 import subprocess
+import tempfile
 import time
 from pathlib import Path
 from typing import Sequence
@@ -214,6 +215,8 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--pro-bundle-manifest-path")
     parser.add_argument("--bundle-sha256")
     parser.add_argument("--cleanup-dir")
+    parser.add_argument("--prebuilt", action="store_true")
+    parser.add_argument("--dependency-wheels-dir")
     parser.add_argument("--prepare-handover", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("restart_argv", nargs=argparse.REMAINDER)
     args = parser.parse_args(argv)
@@ -237,6 +240,10 @@ def _run_upgrade_tasks(args: argparse.Namespace) -> str | None:
                 ),
                 bundle_sha256=args.bundle_sha256,
                 sync_timeout=args.sync_timeout,
+                prebuilt=bool(getattr(args, "prebuilt", False)),
+                dependency_wheels_dir=(
+                    Path(args.dependency_wheels_dir) if getattr(args, "dependency_wheels_dir", None) else None
+                ),
             )
         )
     except RuntimeError as exc:
@@ -305,6 +312,28 @@ def _apply_new_source(args: argparse.Namespace) -> None:
     updater_module._replace_install_dir(content_root, Path(args.install_root))
 
 
+def _restore_install_from_backup(backup_path: Path, install_root: Path) -> None:
+    """Put the pre-upgrade source back from the backup archive.
+
+    备份是升级前源码的 tar.gz（排除运行时/构建目录），按升级本身同样的覆盖方式回放到安装目录，
+    半替换状态里被新版本改过的文件会全部回到旧版本；备份文件本身保留，供人工核对。
+    """
+    with tempfile.TemporaryDirectory(prefix="flocks-restore-") as tmp:
+        content_root = updater_module._extract_archive(backup_path, Path(tmp))
+        updater_module._replace_install_dir(content_root, install_root)
+
+
+def _restore_after_failed_replace(args: argparse.Namespace, backup_path: Path) -> tuple[bool, str | None]:
+    """Roll the install back after a failed source replacement; returns (restored, error)."""
+    try:
+        _restore_install_from_backup(backup_path, Path(args.install_root))
+    except Exception as exc:  # 还原也失败：留人工路径（backup_path）
+        _record_handoff_log(f"source_restore_failed backup={backup_path} error={exc}")
+        return False, str(exc)
+    _record_handoff_log(f"source_restored_from_backup backup={backup_path}")
+    return True, None
+
+
 def _build_captured_start_argv(args: argparse.Namespace) -> list[str]:
     """Build ``flocks start`` directly from the pre-upgrade config snapshot."""
     if not args.restart_argv:
@@ -363,8 +392,10 @@ def _write_upgrade_result(
     backup_path: Path | None = None,
     stdout: str | None = None,
     stderr: str | None = None,
+    restored_from_backup: bool | None = None,
+    restore_error: str | None = None,
 ) -> None:
-    """Persist a result record without driving automatic recovery."""
+    """Persist a result record（自动回滚的结果也记在这里：restored_from_backup / restore_error）."""
     try:
         config_payload = json.loads(args.service_config_json or "{}")
     except json.JSONDecodeError:
@@ -382,6 +413,10 @@ def _write_upgrade_result(
         payload["failed_stage"] = failed_stage
     if backup_path is not None:
         payload["backup_path"] = str(backup_path)
+    if restored_from_backup is not None:
+        payload["restored_from_backup"] = restored_from_backup
+    if restore_error:
+        payload["restore_error"] = restore_error
     if stdout:
         payload["stdout"] = stdout
     if stderr:
@@ -448,12 +483,24 @@ def _run_simple_upgrade(args: argparse.Namespace) -> int:
     except Exception as exc:
         error = str(exc)
         _record_handoff_log(f"source_replace_failed error={error}")
+        # 替换到一半失败不能留半新半旧的目录：先从备份自动还原，还原成功再把原本在跑的服务拉起来，
+        # 保证基础 OSS 能力可用；只有还原也失败才把 backup_path 留给人工处理
+        restored, restore_error = _restore_after_failed_replace(args, backup_path)
+        stdout = stderr = ""
+        if restored:
+            _started, stdout, stderr = _start_service_after_upgrade(args)
+            if not _started:
+                _record_handoff_log("service_restart_after_restore_failed")
         _write_upgrade_result(
             args=args,
             phase="failed",
             failed_stage="source_replace",
             error=error,
             backup_path=backup_path,
+            restored_from_backup=restored,
+            restore_error=restore_error,
+            stdout=stdout or None,
+            stderr=stderr or None,
         )
         return 1
 

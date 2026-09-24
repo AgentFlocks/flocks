@@ -348,7 +348,6 @@ class CLISessionRunner:
             from flocks.input.dispatcher import dispatch_user_input
             from flocks.input.events import UserInputEvent
             from flocks.input.output import CliOutputSink
-            from flocks.session.message import Message
 
             event = UserInputEvent(
                 source_type="cli",

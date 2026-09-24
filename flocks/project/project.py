@@ -299,7 +299,16 @@ class Project:
 
     @staticmethod
     def _normalized_worktree(worktree: str) -> str:
-        return os.path.normcase(str(Path(worktree).expanduser().resolve(strict=True)))
+        """Compare registry paths even after their directories become unavailable."""
+
+        path = Path(worktree).expanduser()
+        try:
+            path = path.resolve(strict=False)
+        except (OSError, RuntimeError):
+            # Unreadable paths and symlink loops must not block other projects.
+            # New/restored worktrees are still checked by validate_worktree.
+            path = Path(os.path.abspath(path))
+        return os.path.normcase(str(path))
 
     @staticmethod
     def _directory_context(directory: str) -> Tuple[Path, Path, Optional[str]]:
@@ -532,7 +541,9 @@ class Project:
                     if cls._normalized_worktree(entry.worktree) == normalized_worktree:
                         raise ProjectPathConflictError(cls._entry_to_info(entry))
 
-                normalized_name = (name or Path(normalized_worktree).name).strip()
+                # A blank name falls back to the directory name; only an empty
+                # directory name (e.g. a filesystem root) is an error.
+                normalized_name = (name or "").strip() or Path(normalized_worktree).name.strip()
                 if not normalized_name:
                     raise ValueError("Project name cannot be empty")
                 if normalized_name.casefold() in _RESERVED_PROJECT_NAMES:

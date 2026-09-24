@@ -1,5 +1,5 @@
 import { useState, createContext, useContext, useCallback, ReactNode } from 'react';
-import { AlertTriangle } from 'lucide-react';
+import { IconAlertTriangle } from '@tabler/icons-react';
 import { useTranslation } from 'react-i18next';
 
 interface ConfirmOptions {
@@ -54,7 +54,7 @@ export function ConfirmProvider({ children }: { children: ReactNode }) {
             <div className="flex items-start gap-3">
               {state.options.variant === 'danger' && (
                 <div className="p-2 bg-red-100 rounded-lg flex-shrink-0">
-                  <AlertTriangle className="w-5 h-5 text-red-600" />
+                  <IconAlertTriangle aria-hidden="true" className="w-5 h-5 text-red-600" />
                 </div>
               )}
               <div className="min-w-0 flex-1">

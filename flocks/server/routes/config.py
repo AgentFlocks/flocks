@@ -16,11 +16,13 @@ Flocks TUI expects Config format:
 }
 """
 
+import asyncio
+import os
 import re
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Dict, Any, Optional
-from fastapi import APIRouter, File, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from defusedxml import ElementTree as DefusedET
@@ -29,6 +31,8 @@ from defusedxml.common import DefusedXmlException
 from flocks.config.config import Config, GlobalConfig, ConfigInfo as ConfigInfoModel, UIConfig
 from flocks.config.config_writer import ConfigWriter
 from flocks.provider.provider import Provider
+from flocks.server.auth import require_admin
+from flocks.server.config_mutation import serialized_config_mutation
 from flocks.utils.log import Log
 
 
@@ -146,6 +150,10 @@ def _merge_config_models(
         merged = _build_model_from_config(provider_id, model_id, model_cfg, existing)
         if merged:
             models_dict[model_id] = merged
+        else:
+            # disabled (soft-deleted) in flocks.json: hide it even if the runtime
+            # still lists it
+            models_dict.pop(model_id, None)
 
     return models_dict
 
@@ -184,7 +192,6 @@ class ToolFailurePreference(BaseModel):
 
 
 DEFAULT_UI_DISPLAY_NAME = "Flocks"
-DEFAULT_UI_PRO_DISPLAY_NAME = "Flocks Pro"
 FAVICON_MAX_BYTES = 512 * 1024
 FAVICON_RELATIVE_DIR = "assets"
 FAVICON_BASENAME = "favicon"
@@ -295,18 +302,17 @@ SVG_UNSAFE_VALUE_PATTERN = re.compile(
 SVG_URL_PATTERN = re.compile(r"url\(\s*(['\"]?)(.*?)\1\s*\)", re.IGNORECASE)
 
 
-def _is_flockspro_enabled() -> bool:
-    try:
-        from flocks.server.routes.console_upgrade import _get_pro_capability_status
-
-        status_data = _get_pro_capability_status()
-    except Exception:
-        return False
-    return any(status_data.get(key) is True for key in ("pro_enabled", "active", "activated"))
-
-
 def _default_display_name() -> str:
-    return DEFAULT_UI_PRO_DISPLAY_NAME if _is_flockspro_enabled() else DEFAULT_UI_DISPLAY_NAME
+    """The product name when the deployment has not configured one.
+
+    Comes from whatever branding provider is registered, so an installation
+    that ships its own name supplies it through the extension point rather than
+    this module knowing which packages exist and what they are called.
+    """
+
+    from flocks.server.branding import default_display_name
+
+    return default_display_name()
 
 
 def _effective_display_name(config: ConfigInfoModel) -> tuple[str, Optional[str]]:
@@ -453,7 +459,7 @@ async def get_ui_display() -> UIDisplayResponse:
     """Return only the effective WebUI display name for public screens."""
     try:
         complete_config = await Config.get()
-        display_name, configured_display_name = _effective_display_name(complete_config)
+        display_name, configured_display_name = await asyncio.to_thread(_effective_display_name, complete_config)
         return UIDisplayResponse(
             displayName=display_name,
             configuredDisplayName=configured_display_name,
@@ -465,7 +471,11 @@ async def get_ui_display() -> UIDisplayResponse:
 
 
 @router.patch("/ui", response_model=UIDisplayResponse, summary="Update UI display preferences")
-async def update_ui_config(request: UIConfigUpdateRequest) -> UIDisplayResponse:
+@serialized_config_mutation
+async def update_ui_config(
+    request: UIConfigUpdateRequest,
+    _admin: object = Depends(require_admin),
+) -> UIDisplayResponse:
     """Update visible WebUI display preferences."""
     try:
         ui_config = UIConfig.model_validate({"displayName": request.display_name})
@@ -501,7 +511,11 @@ async def get_ui_favicon() -> FileResponse:
 
 
 @router.post("/ui/favicon", response_model=UIDisplayResponse, summary="Upload UI favicon")
-async def upload_ui_favicon(file: UploadFile = File(...)) -> UIDisplayResponse:
+@serialized_config_mutation
+async def upload_ui_favicon(
+    file: UploadFile = File(...),
+    _admin: object = Depends(require_admin),
+) -> UIDisplayResponse:
     """Upload a custom favicon for visible WebUI branding."""
     filename = Path(file.filename or "").name
     ext = Path(filename).suffix.lower()
@@ -551,7 +565,8 @@ async def upload_ui_favicon(file: UploadFile = File(...)) -> UIDisplayResponse:
 
 
 @router.delete("/ui/favicon", response_model=UIDisplayResponse, summary="Reset UI favicon")
-async def reset_ui_favicon() -> UIDisplayResponse:
+@serialized_config_mutation
+async def reset_ui_favicon(_admin: object = Depends(require_admin)) -> UIDisplayResponse:
     """Remove the uploaded favicon and fall back to the default bundled favicon."""
     assets_dir = _ui_assets_dir()
     if assets_dir.exists():
@@ -591,8 +606,10 @@ async def get_tool_failure_preference() -> ToolFailurePreference:
     response_model=ToolFailurePreference,
     summary="Update repeated tool-failure preference",
 )
+@serialized_config_mutation
 async def update_tool_failure_preference(
     request: ToolFailurePreference,
+    _admin: object = Depends(require_admin),
 ) -> ToolFailurePreference:
     """Update only the repeated-failure switch in flocks.json."""
     try:
@@ -610,6 +627,219 @@ async def update_tool_failure_preference(
         raise HTTPException(status_code=400, detail=str(e))
 
 
+
+# ---------------------------------------------------------------------------
+# network.proxy — outbound proxy policy (mode / URLs / direct-connection whitelist)
+# ---------------------------------------------------------------------------
+
+_PROXY_PASSWORD_SECRET_ID = "network_proxy_password"
+
+
+class NetworkProxyView(BaseModel):
+    """What the WebUI sees: credentials redacted, effective policy resolved."""
+
+    model_config = {"populate_by_name": True}
+
+    mode: str
+    http: Optional[str] = None
+    https: Optional[str] = None
+    all: Optional[str] = None
+    username: Optional[str] = None
+    has_password: bool = Field(False, alias="hasPassword")
+    bypass: list[str] = Field(default_factory=list)
+    bypass_private: bool = Field(True, alias="bypassPrivate")
+    source: str = "default"
+    effective: Dict[str, Any] = Field(default_factory=dict)
+    process_env: Dict[str, str] = Field(default_factory=dict, alias="processEnv")
+
+
+class NetworkProxyUpdate(BaseModel):
+    """PATCH body; omitted fields keep their current value, empty strings clear them."""
+
+    model_config = {"populate_by_name": True, "extra": "forbid"}
+
+    mode: Optional[str] = Field(None, pattern="^(off|system|manual)$")
+    http: Optional[str] = None
+    https: Optional[str] = None
+    all: Optional[str] = None
+    username: Optional[str] = None
+    password: Optional[str] = Field(None, description="New password; empty string removes it; omit to keep")
+    bypass: Optional[list[str]] = None
+    bypass_private: Optional[bool] = Field(None, alias="bypassPrivate")
+
+
+class NetworkProxyTestRequest(BaseModel):
+    model_config = {"populate_by_name": True, "extra": "forbid"}
+
+    url: str = Field("https://www.google.com/generate_204", description="http(s) URL to fetch through the current policy")
+    timeout: float = Field(10.0, ge=1, le=60)
+
+
+class NetworkProxyTestResult(BaseModel):
+    model_config = {"populate_by_name": True}
+
+    ok: bool
+    url: str
+    via: Optional[str] = Field(None, description="Proxy used (credentials redacted) or null for direct")
+    status: Optional[int] = None
+    elapsed_ms: Optional[int] = Field(None, alias="elapsedMs")
+    error: Optional[str] = None
+
+
+def _proxy_view() -> NetworkProxyView:
+    from flocks.net import get_proxy_settings
+
+    settings = get_proxy_settings()  # re-reads flocks.json when its mtime changed
+    public = settings.public_dict()
+    env = {name: os.environ[name] for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY") if name in os.environ}
+    from flocks.net.proxy import _redact  # credentials never leave the process
+
+    return NetworkProxyView(
+        mode=public["mode"],
+        http=public["http"],
+        https=public["https"],
+        all=public["all"],
+        username=public["username"],
+        hasPassword=public["hasPassword"],
+        bypass=public["bypass"],
+        bypassPrivate=public["bypassPrivate"],
+        source=public["source"],
+        effective=public["effective"],
+        processEnv={k: (_redact(v) or v) for k, v in env.items()},
+    )
+
+
+@router.get("/network/proxy", response_model=NetworkProxyView, summary="Get outbound proxy policy")
+async def get_network_proxy(_admin: object = Depends(require_admin)) -> NetworkProxyView:
+    """Proxy mode, URLs (credentials redacted), whitelist and the policy actually in effect."""
+    return _proxy_view()
+
+
+@router.patch("/network/proxy", response_model=NetworkProxyView, summary="Update outbound proxy policy")
+@serialized_config_mutation
+async def update_network_proxy(
+    request: NetworkProxyUpdate,
+    _admin: object = Depends(require_admin),
+) -> NetworkProxyView:
+    """Write ``network.proxy`` in flocks.json, keep the password in .secret.json, apply immediately."""
+    from flocks.net import apply_process_environment, invalidate_proxy_settings
+    from flocks.net.proxy import ProxySettings, _normalise_proxy_url, _redact, validate_bypass_rules
+    from flocks.security import get_secret_manager
+
+    def _redacted_forms(stored: str) -> set:
+        forms = {_redact(stored)}
+        try:
+            forms.add(_redact(_normalise_proxy_url(stored)))  # what GET actually returned
+        except ValueError:
+            pass
+        return {form for form in forms if form}
+
+    data = ConfigWriter._read_raw()
+    network = data.get("network")
+    network = dict(network) if isinstance(network, dict) else {}
+    section = network.get("proxy")
+    section = dict(section) if isinstance(section, dict) else {}
+
+    payload = request.model_dump(exclude_unset=True, by_alias=False)
+    if "bypass" in payload and payload["bypass"] is not None:
+        cleaned = [str(rule).strip() for rule in payload["bypass"] if str(rule).strip()]
+        bad = validate_bypass_rules(cleaned)
+        if bad:
+            raise HTTPException(status_code=400, detail=f"无效的白名单条目: {', '.join(bad)}")
+        section["bypass"] = cleaned
+    for key in ("mode", "http", "https", "all", "username"):
+        if key in payload:
+            value = payload[key]
+            if isinstance(value, str) and not value.strip():
+                section.pop(key, None)
+            elif value is not None:
+                value = value.strip() if isinstance(value, str) else value
+                stored = section.get(key)
+                if key in ("http", "https", "all") and isinstance(stored, str) and value != stored and value in _redacted_forms(stored):
+                    # GET hands out the redacted (and normalised) form of a URL with inline
+                    # credentials ("http://user:***@host:80"); a client echoing it back has not changed it
+                    continue
+                section[key] = value
+    if "bypass_private" in payload and payload["bypass_private"] is not None:
+        section["bypassPrivate"] = bool(payload["bypass_private"])
+        section.pop("bypass_private", None)
+    if "password" in payload:
+        if payload["password"]:
+            section["password"] = "{secret:" + _PROXY_PASSWORD_SECRET_ID + "}"
+        else:
+            section.pop("password", None)
+
+    # Validate before writing anything: bad URLs / schemes are rejected with a 400,
+    # and neither flocks.json nor .secret.json is touched.
+    try:
+        ProxySettings.build(
+            mode=section.get("mode", "system"),
+            http=section.get("http"),
+            https=section.get("https"),
+            all=section.get("all"),
+            username=section.get("username"),
+            bypass=section.get("bypass"),
+            bypass_private=section.get("bypassPrivate", True),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"代理地址无效: {exc}") from exc
+
+    if "password" in payload:
+        secrets = get_secret_manager()
+        if payload["password"]:
+            secrets.set(_PROXY_PASSWORD_SECRET_ID, payload["password"])
+        else:
+            secrets.delete(_PROXY_PASSWORD_SECRET_ID)
+
+    network["proxy"] = section
+    data["network"] = network
+    ConfigWriter._write_raw(data)
+
+    settings = invalidate_proxy_settings()
+    apply_process_environment(settings)
+    log.info("config.network.proxy.updated", {"mode": settings.mode, "source": settings.source})
+    return _proxy_view()
+
+
+@router.post("/network/proxy/test", response_model=NetworkProxyTestResult, summary="Test the proxy policy against a URL")
+async def test_network_proxy(
+    request: NetworkProxyTestRequest,
+    _admin: object = Depends(require_admin),
+) -> NetworkProxyTestResult:
+    """Fetch ``url`` with the policy currently saved (HEAD-like GET, no body kept) and report route / status / latency."""
+    import time as _time
+
+    import httpx
+
+    from flocks.net import get_proxy_settings
+    from flocks.net.http import async_client
+    from flocks.net.proxy import _redact
+
+    url = request.url.strip()
+    if not url.lower().startswith(("http://", "https://")):
+        raise HTTPException(status_code=400, detail="只支持 http:// 或 https:// 地址")
+    settings = get_proxy_settings()
+    via = _redact(settings.proxy_url_for(url))
+    started = _time.perf_counter()
+    try:
+        async with async_client(settings=settings, timeout=request.timeout, follow_redirects=False) as client:
+            async with client.stream("GET", url) as response:
+                status_code = response.status_code
+        return NetworkProxyTestResult(
+            ok=True, url=url, via=via, status=status_code, elapsedMs=int((_time.perf_counter() - started) * 1000)
+        )
+    except httpx.HTTPError as exc:
+        return NetworkProxyTestResult(
+            ok=False, url=url, via=via, elapsedMs=int((_time.perf_counter() - started) * 1000),
+            error=f"{type(exc).__name__}: {exc}"[:300],
+        )
+    except Exception as exc:  # socks handshake errors surface as generic exceptions
+        return NetworkProxyTestResult(
+            ok=False, url=url, via=via, elapsedMs=int((_time.perf_counter() - started) * 1000),
+            error=f"{type(exc).__name__}: {exc}"[:300],
+        )
+
+
 @router.get("", summary="Get configuration")
 async def get_config() -> Dict[str, Any]:
     """
@@ -619,8 +849,22 @@ async def get_config() -> Dict[str, Any]:
     Flocks TUI expects the merged Config object directly.
     """
     try:
-        # Get complete configuration (includes global + project + env)
-        complete_config = await Config.get()
+        # Merged configuration with {secret:}/{env:} references kept verbatim:
+        # clients never receive resolved secret values, and a client that
+        # PATCHes this document back keeps the references intact.
+        try:
+            complete_config = await Config.get_unresolved()
+        except ValueError as exc:
+            # An unreadable file must surface as an error (never serve the
+            # stale cached config for a corrupt flocks.json) ...
+            ConfigWriter._read_path_raw(ConfigWriter._get_config_path(), strict=True)
+            # ... but a typed field holding an unresolved reference is fine:
+            # fall back to the resolved view with stored secret values scrubbed.
+            log.warning("config.get.unresolved_failed", {"error": str(exc)})
+            complete_config = await Config.get()
+            return _mask_secret_values(
+                complete_config.model_dump(by_alias=True, exclude_none=True)
+            )
         
         # Return merged config in Flocks format
         return complete_config.model_dump(by_alias=True, exclude_none=True)
@@ -629,8 +873,36 @@ async def get_config() -> Dict[str, Any]:
         raise HTTPException(status_code=500, detail=str(e))
 
 
+def _mask_secret_values(data: Any) -> Any:
+    """Replace any string equal to a stored secret value with its masked form."""
+    from flocks.security import get_secret_manager
+    from flocks.security.secrets import SecretManager
+
+    secrets = get_secret_manager()
+    values = {
+        value
+        for value in (secrets.get(secret_id) for secret_id in secrets.list())
+        if isinstance(value, str) and value
+    }
+
+    def walk(node: Any) -> Any:
+        if isinstance(node, dict):
+            return {key: walk(value) for key, value in node.items()}
+        if isinstance(node, list):
+            return [walk(item) for item in node]
+        if isinstance(node, str) and node in values:
+            return SecretManager.mask(node)
+        return node
+
+    return walk(data)
+
+
 @router.patch("/", summary="Update configuration")
-async def update_config(config_data: Dict[str, Any]) -> Dict[str, Any]:
+@serialized_config_mutation
+async def update_config(
+    config_data: Dict[str, Any],
+    _admin: object = Depends(require_admin),
+) -> Dict[str, Any]:
     """
     Update configuration
     
@@ -655,6 +927,13 @@ async def update_config(config_data: Dict[str, Any]) -> Dict[str, Any]:
 
         # Parse and validate configuration
         config = ConfigInfoModel.model_validate(config_data)
+        # ``memory`` is typed as Any on ConfigInfo; validate it against the
+        # memory schema here so bad values fail the request instead of the
+        # memory subsystem later.
+        if isinstance(config_data.get("memory"), dict):
+            from flocks.memory.config import MemoryConfig
+
+            MemoryConfig.model_validate(config_data["memory"])
 
         # Update project config
         await Config.update(

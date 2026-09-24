@@ -12,6 +12,8 @@ from flocks.server import app as server_app
         "/api/health",
         "/api/event",
         "/api/session/status",
+        "/api/session/ses_123/status",
+        "/session/ses_123/status",
         "/api/session/ses_123/message",
         "/api/question/session/ses_123/pending",
     ],

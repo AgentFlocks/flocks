@@ -1,4 +1,4 @@
-import { CheckCircle, Loader2, X, XCircle } from 'lucide-react';
+import { IconCircleCheck, IconLoader2, IconX, IconCircleX } from '@tabler/icons-react';
 import type {
   HubCatalogEntry,
   HubInstallProgressEvent,
@@ -212,11 +212,11 @@ export default function SuiteInstallProgressPanel({ progress, language, onClose 
         <div className="min-w-0">
           <div className="flex items-center gap-1.5 text-xs font-semibold text-gray-900">
             {progress.status === 'completed' ? (
-              <CheckCircle className="w-3.5 h-3.5 text-green-600" />
+              <IconCircleCheck aria-hidden="true" className="w-3.5 h-3.5 text-green-600" />
             ) : progress.status === 'failed' ? (
-              <XCircle className="w-3.5 h-3.5 text-red-600" />
+              <IconCircleX aria-hidden="true" className="w-3.5 h-3.5 text-red-600" />
             ) : (
-              <Loader2 className="w-3.5 h-3.5 animate-spin text-slate-600" />
+              <IconLoader2 aria-hidden="true" className="w-3.5 h-3.5 animate-spin text-slate-600" />
             )}
             <span>{text.title}</span>
           </div>
@@ -230,7 +230,7 @@ export default function SuiteInstallProgressPanel({ progress, language, onClose 
           title={text.close}
           className="shrink-0 rounded-md p-0.5 text-gray-400 hover:bg-gray-100 hover:text-gray-700"
         >
-          <X className="w-3.5 h-3.5" />
+          <IconX aria-hidden="true" className="w-3.5 h-3.5" />
         </button>
       </div>
 
@@ -287,9 +287,9 @@ export default function SuiteInstallProgressPanel({ progress, language, onClose 
 }
 
 function InstallProgressStatusIcon({ status }: { status: HubInstallProgressItem['status'] }) {
-  if (status === 'installing') return <Loader2 className="w-3.5 h-3.5 animate-spin text-slate-600" />;
-  if (status === 'installed' || status === 'completed') return <CheckCircle className="w-3.5 h-3.5 text-green-600" />;
-  if (status === 'failed') return <XCircle className="w-3.5 h-3.5 text-red-600" />;
-  if (status === 'skipped') return <CheckCircle className="w-3.5 h-3.5 text-gray-400" />;
+  if (status === 'installing') return <IconLoader2 aria-hidden="true" className="w-3.5 h-3.5 animate-spin text-slate-600" />;
+  if (status === 'installed' || status === 'completed') return <IconCircleCheck aria-hidden="true" className="w-3.5 h-3.5 text-green-600" />;
+  if (status === 'failed') return <IconCircleX aria-hidden="true" className="w-3.5 h-3.5 text-red-600" />;
+  if (status === 'skipped') return <IconCircleCheck aria-hidden="true" className="w-3.5 h-3.5 text-gray-400" />;
   return <span className="ml-1 h-1.5 w-1.5 rounded-full bg-gray-300" />;
 }

@@ -9,7 +9,7 @@
  */
 
 import { useState, useEffect, useMemo } from 'react';
-import { Bot, Sparkles, Lock } from 'lucide-react';
+import { IconRobot, IconSparkles, IconLock } from '@tabler/icons-react';
 import { useTranslation } from 'react-i18next';
 import { agentAPI, Agent } from '@/api/agent';
 import { sessionApi } from '@/api/session';
@@ -329,7 +329,7 @@ export default function AgentSheet({ agent, onClose, onSaved }: AgentSheetProps)
       mode={isEdit ? 'edit' : 'create'}
       entityType="Agent"
       entityName={agent?.name}
-      icon={<Bot className="w-5 h-5" />}
+      icon={<IconRobot aria-hidden="true" className="w-5 h-5" />}
       rexSystemContext={buildRexContext(formData, isEdit, isNative)}
       rexWelcomeMessage={buildRexWelcome(isEdit, agent?.name, isNative)}
       rexGuideGroups={guideGroups}
@@ -338,7 +338,7 @@ export default function AgentSheet({ agent, onClose, onSaved }: AgentSheetProps)
         ? t(isNative ? 'edit.nativeGuidePanelDesc' : 'edit.guidePanelDesc', { name: agent?.name ?? formData.name })
         : t('create.guidePanelDesc')}
       rexGuideEmptyTitle={isEdit ? t('edit.emptyStateTitle') : t('create.emptyStateTitle')}
-      rexGuideIcon={<Bot className="h-5 w-5" />}
+      rexGuideIcon={<IconRobot aria-hidden="true" className="h-5 w-5" />}
       initialTab={isEdit ? 'rex' : undefined}
       rexSessionStorageKey={isEdit && agent?.name ? `agent-edit:${agent.name}` : undefined}
       {...rexComposerControls}
@@ -441,7 +441,7 @@ function AgentFormContent({
       {/* Native read-only banner */}
       {nativeReadOnly && (
         <div className="flex items-center gap-2 px-3 py-2 bg-amber-50 border border-amber-200 rounded-lg text-xs text-amber-700">
-          <Lock className="w-3.5 h-3.5 shrink-0" />
+          <IconLock aria-hidden="true" className="w-3.5 h-3.5 shrink-0" />
           {t('form.nativeReadOnlyMessage')}
         </div>
       )}
@@ -530,7 +530,7 @@ function AgentFormContent({
               onClick={() => openRex()}
               className="flex items-center gap-1 text-xs text-sky-700 hover:text-sky-900 transition-colors"
             >
-              <Sparkles className="w-3.5 h-3.5" />
+              <IconSparkles aria-hidden="true" className="w-3.5 h-3.5" />
               {t('form.rexAssistWrite')}
             </button>
           )}

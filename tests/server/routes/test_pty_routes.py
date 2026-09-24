@@ -206,3 +206,18 @@ async def test_pty_websocket_keeps_authenticated_context_for_full_connection(
         websocket,
         use_action_lifecycle=False,
     )
+
+
+@pytest.mark.asyncio
+async def test_create_session_maps_limit_to_429(monkeypatch: pytest.MonkeyPatch):
+    """E2E-0064: hitting the running-session cap is reported as 429, not as a bad request."""
+    from flocks.pty.pty import PtyLimitExceeded
+
+    async def _refuse(_input, **_kwargs):
+        raise PtyLimitExceeded("PTY session limit reached (2/2 running); close an existing session before opening another")
+
+    monkeypatch.setattr(pty_routes.Pty, "create", _refuse)
+    with pytest.raises(HTTPException) as excinfo:
+        await pty_routes.create_session(CreateInput(command="/bin/sh"), _admin=object())
+    assert excinfo.value.status_code == 429
+    assert "limit reached (2/2 running)" in excinfo.value.detail

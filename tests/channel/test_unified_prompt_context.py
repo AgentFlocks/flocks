@@ -546,17 +546,16 @@ class TestLegacyBindingAgentIdMigration:
     """
 
     @pytest.fixture
-    async def db(self, tmp_path):
-        import aiosqlite
+    async def db(self, tmp_path, monkeypatch):
+        from flocks.db.connect import open_transaction
 
-        path = tmp_path / "channel_bindings.db"
-        conn = await aiosqlite.connect(str(path))
-        conn.row_factory = aiosqlite.Row
-        await conn.executescript(binding_mod._DDL)
+        monkeypatch.setenv("FLOCKS_ROOT", str(tmp_path / "root"))
+        handle = await open_transaction()
+        await handle.executescript(";\n".join(binding_mod._binding_schema(handle.dialect)))
         try:
-            yield conn
+            yield handle
         finally:
-            await conn.close()
+            await handle.close()
 
     @staticmethod
     async def _insert(conn, *, agent_id, chat_id, session_id):
@@ -633,9 +632,9 @@ class TestLegacyBindingAgentIdMigration:
     async def test_swallows_db_errors_without_raising(self):
         # Closed connection → execute raises; the migration must catch it
         # and only log a warning, never bubble out into _get_db().
-        import aiosqlite
+        from flocks.db.connect import open_transaction
 
-        broken = await aiosqlite.connect(":memory:")
+        broken = await open_transaction()
         await broken.close()
 
         with patch.object(binding_mod.log, "warning") as warn_log:
@@ -647,34 +646,21 @@ class TestLegacyBindingAgentIdMigration:
         assert event == "channel.binding.legacy_agent_id_migration_failed"
 
     @pytest.mark.asyncio
-    async def test_get_db_runs_migration_on_init(self, tmp_path, monkeypatch):
+    async def test_get_db_runs_migration_on_init(self, db, monkeypatch):
         """End-to-end: ``_get_db()`` must invoke the migration after DDL."""
         # Reset module-level singleton state so _get_db() really initialises.
-        monkeypatch.setattr(binding_mod, "_db_conn", None)
+        monkeypatch.setattr(binding_mod, "_db_handle", None)
         monkeypatch.setattr(binding_mod, "_db_ready", False)
 
-        # Point Storage.get_db_path() at a fresh sqlite file.
-        from flocks.storage.storage import Storage
-
-        db_path = tmp_path / "flocks.db"
-        monkeypatch.setattr(Storage, "get_db_path", staticmethod(lambda: db_path))
-
         # Pre-create the schema and insert a legacy row, mimicking an upgrade
-        # from an older build that already populated the table.
-        import aiosqlite
-
-        seed = await aiosqlite.connect(str(db_path))
-        await seed.executescript(binding_mod._DDL)
-        await seed.execute(
+        # whose explicit migration has already copied its bindings to PG.
+        await db.execute(
             "INSERT INTO channel_bindings "
             "(id, channel_id, account_id, chat_id, chat_type, thread_id, "
             " session_id, agent_id, created_at, last_message_at) "
             "VALUES ('chbind_legacy', 'wecom', 'default', 'c1', 'direct', "
             "NULL, 's1', 'default', 0, 0)",
         )
-        await seed.commit()
-        await seed.close()
-
         try:
             conn = await binding_mod._get_db()
             cursor = await conn.execute(

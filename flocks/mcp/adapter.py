@@ -9,7 +9,12 @@ from typing import Dict, Any
 
 from flocks.mcp.types import McpToolDef
 from flocks.mcp.client import McpClient
-from flocks.mcp.utils import generate_tool_name, calculate_schema_hash
+from flocks.mcp.utils import (
+    calculate_schema_hash,
+    check_name_conflict,
+    generate_tool_name,
+    resolve_conflict,
+)
 from flocks.tool.registry import (
     Tool,
     ToolInfo,
@@ -61,6 +66,17 @@ class McpToolAdapter:
         """
         # 1. Generate tool name (avoid conflicts)
         tool_name = generate_tool_name(server_name, mcp_tool.name)
+        if check_name_conflict(tool_name):
+            # Never overwrite an existing (built-in / plugin / other MCP) tool:
+            # the registry's ``register`` replaces entries silently.
+            resolved_name = resolve_conflict(tool_name)
+            log.warn("mcp.tool.name_conflict", {
+                "server": server_name,
+                "tool": mcp_tool.name,
+                "requested": tool_name,
+                "resolved": resolved_name,
+            })
+            tool_name = resolved_name
         
         # 2. Convert parameters
         parameters = McpToolAdapter._convert_parameters(mcp_tool.input_schema)
@@ -113,10 +129,18 @@ class McpToolAdapter:
                     # MCP SDK result has content field
                     content = result.content
                     if isinstance(content, list) and len(content) > 0:
-                        # content is a list, take the first item
-                        output = content[0] if hasattr(content[0], 'text') else content[0]
-                        if hasattr(output, 'text'):
-                            output = output.text
+                        # content is a list of blocks; join every text block so
+                        # multi-part results are not truncated to the first item.
+                        text_parts = [
+                            item.text for item in content
+                            if hasattr(item, 'text') and isinstance(item.text, str)
+                        ]
+                        if len(text_parts) == len(content):
+                            output = "\n".join(text_parts)
+                        elif len(content) == 1:
+                            output = content[0]
+                        else:
+                            output = content
                     else:
                         output = content
                 else:

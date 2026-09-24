@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
-import { ArrowUp, ArrowDown, Filter } from 'lucide-react';
+import { IconArrowUp, IconArrowDown, IconFilter } from '@tabler/icons-react';
 import type { SortState, SortField, ColumnFilters } from '../types';
 
 interface SortFilterHeaderProps {
@@ -52,13 +52,13 @@ export default function SortFilterHeader({
           className={`flex items-center gap-0.5 hover:text-gray-900 transition-colors ${isActive ? 'text-red-600' : ''}`}
         >
           {label}
-          {isActive && (sort.dir === 'asc' ? <ArrowUp className="w-3 h-3" /> : <ArrowDown className="w-3 h-3" />)}
+          {isActive && (sort.dir === 'asc' ? <IconArrowUp aria-hidden="true" className="w-3 h-3" /> : <IconArrowDown aria-hidden="true" className="w-3 h-3" />)}
         </button>
         <button
           onClick={() => setOpen((v) => !v)}
           className={`p-0.5 rounded hover:bg-gray-200 transition-colors ${hasFilter ? 'text-red-600' : 'text-gray-400'}`}
         >
-          <Filter className="w-3 h-3" />
+          <IconFilter aria-hidden="true" className="w-3 h-3" />
         </button>
       </div>
 

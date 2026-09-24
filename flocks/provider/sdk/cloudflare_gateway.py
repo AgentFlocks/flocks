@@ -20,6 +20,7 @@ from flocks.provider.provider import (
     StreamChunk,
 )
 from flocks.utils.log import Log
+from flocks.net.http import async_client
 
 log = Log.create(service="provider.cloudflare-gateway")
 
@@ -215,9 +216,8 @@ class CloudflareGatewayProvider(BaseProvider):
         payload = self._transform_request_body(payload)
         
         try:
-            import httpx
             
-            async with httpx.AsyncClient() as client:
+            async with async_client() as client:
                 response = await client.post(
                     f"{self._base_url}/chat/completions",
                     headers=self._get_headers(),
@@ -295,9 +295,8 @@ class CloudflareGatewayProvider(BaseProvider):
         payload = self._transform_request_body(payload)
         
         try:
-            import httpx
             
-            async with httpx.AsyncClient() as client:
+            async with async_client() as client:
                 async with client.stream(
                     "POST",
                     f"{self._base_url}/chat/completions",
@@ -353,9 +352,8 @@ class CloudflareGatewayProvider(BaseProvider):
             }
         
         try:
-            import httpx
             
-            async with httpx.AsyncClient() as client:
+            async with async_client() as client:
                 # Simple connectivity check
                 response = await client.get(
                     f"{self._base_url}/models",

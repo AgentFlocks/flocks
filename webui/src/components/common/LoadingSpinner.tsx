@@ -1,4 +1,4 @@
-import { Loader2 } from 'lucide-react';
+import { IconLoader2 } from '@tabler/icons-react';
 import { useDelayedVisible } from '@/hooks/useDelayedVisible';
 
 interface LoadingSpinnerProps {
@@ -19,7 +19,7 @@ export default function LoadingSpinner({ size = 'md', className = '', delayMs = 
 
   return (
     <div role="status" className={`flex items-center justify-center ${className}`}>
-      <Loader2 className={`${sizeClasses[size]} animate-spin text-red-600`} />
+      <IconLoader2 aria-hidden="true" className={`${sizeClasses[size]} animate-spin text-red-600`} />
     </div>
   );
 }

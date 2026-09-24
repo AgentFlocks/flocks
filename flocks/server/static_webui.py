@@ -28,6 +28,7 @@ _PROTECTED_PREFIXES = (
     "/redoc",
     "/openapi.json",
     "/health",
+    "/ready",
 )
 
 

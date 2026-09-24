@@ -22,7 +22,9 @@ import time
 from dataclasses import dataclass
 from typing import Literal, Optional
 
-import aiosqlite
+
+from flocks.db.connect import open_transaction
+from flocks.db.store import Transaction
 
 from flocks.channel.base import ChatType, InboundMessage
 from flocks.utils.id import Identifier
@@ -55,33 +57,49 @@ class SessionBinding:
     last_message_at: float
 
 
-_DDL = """
-CREATE TABLE IF NOT EXISTS channel_bindings (
-    id TEXT PRIMARY KEY,
-    channel_id TEXT NOT NULL,
-    account_id TEXT NOT NULL DEFAULT 'default',
-    chat_id TEXT NOT NULL,
-    chat_type TEXT NOT NULL DEFAULT 'direct',
-    thread_id TEXT,
-    session_id TEXT NOT NULL,
-    agent_id TEXT,
-    created_at REAL NOT NULL,
-    last_message_at REAL NOT NULL
-);
+def _binding_schema(dialect) -> list[str]:
+    """The binding table, typed by the active backend.
 
-CREATE UNIQUE INDEX IF NOT EXISTS idx_channel_bindings_unique
-    ON channel_bindings(channel_id, account_id, chat_id, COALESCE(thread_id, ''));
+    ``REAL`` is the one that matters: SQLite's is 64-bit, PostgreSQL's is
+    single precision, and these columns hold epoch seconds -- which single
+    precision cannot represent to the second.
+    """
+    text = dialect.text_type()
+    stamp = dialect.double_type()
+    return [
+        f"""
+        CREATE TABLE IF NOT EXISTS channel_bindings (
+            id              {text} PRIMARY KEY,
+            channel_id      {text} NOT NULL,
+            account_id      {text} NOT NULL DEFAULT 'default',
+            chat_id         {text} NOT NULL,
+            chat_type       {text} NOT NULL DEFAULT 'direct',
+            thread_id       {text},
+            session_id      {text} NOT NULL,
+            agent_id        {text},
+            created_at      {stamp} NOT NULL,
+            last_message_at {stamp} NOT NULL
+        )
+        """,
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_channel_bindings_unique
+            ON channel_bindings(channel_id, account_id, chat_id, COALESCE(thread_id, ''))
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS idx_channel_bindings_session
+            ON channel_bindings(session_id)
+        """,
+    ]
 
-CREATE INDEX IF NOT EXISTS idx_channel_bindings_session
-    ON channel_bindings(session_id);
-"""
 
 _init_lock = asyncio.Lock()
 
 # Persistent connection shared by all SessionBindingService instances.
-_db_conn: Optional[aiosqlite.Connection] = None
+# The handle, not the driver connection: on PostgreSQL there is no file to
+# connect to and the connection comes from a shared pool.
+_db_handle: Optional[Transaction] = None
 _db_ready = False
-# PID that owns ``_db_conn``.  Used to detect ``fork()`` (uvicorn
+# PID that owns ``_db_handle``.  Used to detect ``fork()`` (uvicorn
 # ``--reload`` / multi-worker launches) so a child process never reuses
 # its parent's open SQLite file descriptor — a documented SQLite
 # corruption vector.
@@ -130,42 +148,47 @@ async def resolve_channel_session_owner_kwargs(source_session=None) -> dict[str,
 # during Storage.init() as well (idempotent CREATE IF NOT EXISTS).
 try:
     from flocks.storage.storage import Storage
-    Storage.register_ddl(_DDL)
+
+    async def _register_binding_schema(db) -> None:
+        for statement in _binding_schema(db.dialect):
+            await db.execute(statement)
+
+    Storage.register_ddl(_register_binding_schema)
 except Exception:
     pass
 
 
-async def _get_db() -> aiosqlite.Connection:
+async def _get_db():
     """Return (and lazily create) the shared persistent database connection.
 
     Uses ``Storage.get_db_path()`` to ensure the same database file is
     shared with the rest of the Flocks storage subsystem.
     """
-    global _db_conn, _db_ready, _db_owner_pid
+    global _db_handle, _db_ready, _db_owner_pid
 
     from flocks.storage.storage import Storage
 
     await Storage._ensure_init()
     current_pid = os.getpid()
     if (
-        _db_conn is not None
+        _db_handle is not None
         and _db_ready
         and _db_owner_pid is not None
         and _db_owner_pid == current_pid
     ):
-        return _db_conn
+        return _db_handle
 
     async with _init_lock:
         if (
-            _db_conn is not None
+            _db_handle is not None
             and _db_ready
             and _db_owner_pid is not None
             and _db_owner_pid == current_pid
         ):
-            return _db_conn
+            return _db_handle
 
         if (
-            _db_conn is not None
+            _db_handle is not None
             and _db_owner_pid is not None
             and _db_owner_pid != current_pid
         ):
@@ -176,27 +199,32 @@ async def _get_db() -> aiosqlite.Connection:
                 "parent_pid": _db_owner_pid,
                 "child_pid": current_pid,
             })
-            _db_conn = None
+            _db_handle = None
             _db_ready = False
             _db_owner_pid = None
 
         db_path = Storage.get_db_path()
-        db_path.parent.mkdir(parents=True, exist_ok=True)
 
-        _db_conn = await aiosqlite.connect(
-            str(db_path),
-            timeout=Storage._sqlite_timeout_s,
+        # This handle is process-lived and only released through
+        # ``close_binding_db`` (wired into ``Storage.shutdown``), so its
+        # SQLite worker is marked daemon -- see ``open_transaction``.
+        handle = await open_transaction(
+            sqlite_path=db_path,
+            configure=Storage.configure_connection,
+            daemon_worker=True,
         )
-        _db_conn.row_factory = aiosqlite.Row
-        await Storage.configure_connection(_db_conn)
-        await _db_conn.executescript(_DDL)
-        await _migrate_legacy_binding_agent_ids(_db_conn)
+        _db_handle = handle
+        async with handle.transaction() as tx:
+            if tx.dialect.name == "postgres":
+                await tx.execute("SELECT pg_advisory_xact_lock(hashtext(?))", ("flocks.channel.schema",))
+            await tx.executescript(";\n".join(_binding_schema(tx.dialect)))
+        await _migrate_legacy_binding_agent_ids(handle)
         _db_ready = True
         _db_owner_pid = current_pid
-        return _db_conn
+        return handle
 
 
-async def _migrate_legacy_binding_agent_ids(db: aiosqlite.Connection) -> None:
+async def _migrate_legacy_binding_agent_ids(db) -> None:
     """One-shot normalisation of pre-unification ``channel_bindings.agent_id``.
 
     Older builds of the dispatcher used ``channel_config.default_agent or "default"``
@@ -241,12 +269,12 @@ async def _migrate_legacy_binding_agent_ids(db: aiosqlite.Connection) -> None:
 
 
 async def _close_binding_db_locked(*, suppress_errors: bool) -> None:
-    """Invalidate and close ``_db_conn`` while ``_init_lock`` is held."""
+    """Invalidate and close ``_db_handle`` while ``_init_lock`` is held."""
 
-    global _db_conn, _db_ready, _db_owner_pid
+    global _db_handle, _db_ready, _db_owner_pid
 
-    conn = _db_conn
-    _db_conn = None
+    conn = _db_handle
+    _db_handle = None
     _db_ready = False
     _db_owner_pid = None
     if conn is not None:
@@ -590,11 +618,22 @@ class SessionBindingService:
     async def _insert(self, b: SessionBinding) -> None:
         binding_id = Identifier.ascending("chbind")
         db = await _get_db()
+        # The row this replaces is found by the unique index, whose last key
+        # is an expression -- so the conflict target is written out here rather
+        # than built from column names. Every column is updated, including id
+        # and created_at, which is what INSERT OR REPLACE did.
+        mark = db.dialect.placeholder
+        markers = ", ".join(mark(index) for index in range(1, 11))
         await db.execute(
-            "INSERT OR REPLACE INTO channel_bindings "
+            "INSERT INTO channel_bindings "
             "(id, channel_id, account_id, chat_id, chat_type, thread_id, "
             " session_id, agent_id, created_at, last_message_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            f"VALUES ({markers}) "
+            "ON CONFLICT (channel_id, account_id, chat_id, COALESCE(thread_id, '')) "
+            "DO UPDATE SET id = excluded.id, chat_type = excluded.chat_type, "
+            "session_id = excluded.session_id, agent_id = excluded.agent_id, "
+            "created_at = excluded.created_at, "
+            "last_message_at = excluded.last_message_at",
             (
                 binding_id,
                 b.channel_id, b.account_id, b.chat_id,

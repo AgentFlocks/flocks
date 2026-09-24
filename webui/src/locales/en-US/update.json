@@ -1,6 +1,5 @@
 {
   "title": "Flocks Version Info",
-  "proTitle": "Flocks Pro Version Info",
   "currentVersion": "Current Version",
   "latestVersion": "Latest Version",
   "coreVersion": "Core Version",
@@ -26,12 +25,22 @@
   "downloadProgressUnknown": "Downloaded {{downloaded}}",
   "checkFailed": "Failed to check version",
   "upgradeFailed": "Upgrade failed",
+  "upgradeComplete": "Upgrade complete",
+  "upgradeCompleteDesc": "The service confirmed completion. You can close this window.",
+  "upgradeFailedDesc": "This update could not be confirmed as complete. Check the service status using the details below.",
+  "closeAction": "Close",
+  "streamInterrupted": "The update connection ended before completion. Check the service status before checking for updates again.",
+  "streamTimeout": "The update connection has not responded for 5 minutes. Check the service status before checking for updates again.",
   "restartTimeout": "Service readiness check timed out: {{reason}}. Please refresh manually to confirm status.",
   "restartUnknown": "No explicit health-check result was received",
   "dismissAction": "Don't remind me again",
   "dockerModeTitle": "Docker Deployment",
   "dockerModeDesc": "You are running Flocks via Docker. In-place upgrade is not available. Please pull the latest image and restart the container to upgrade.",
   "dockerUpgradeHint": "docker pull ghcr.io/agentflocks/flocks:latest",
+  "offlineModeTitle": "Offline Package Deployment",
+  "offlineModeDesc": "This instance was installed from the offline package (flocks-offline.run); network-based in-place upgrades are disabled. Get the newer package, upload it to the server and run the install command again; data and licenses are kept.",
+  "offlineUpgradeHint": "sudo bash /var/tmp/flocks-offline.run",
+  "offlineNotChecked": "Offline deployment: remote versions are not checked",
   "stageLabels": {
     "fetching": "Downloading latest source archive",
     "fetchingPro": "Downloading Pro bundle",
@@ -40,5 +49,7 @@
     "restarting": "Restarting service",
     "done": "Done",
     "error": "Error"
-  }
+  },
+  "managedModeTitle": "Managed Release Package",
+  "managedModeDesc": "This installation's upgrades are managed by the deployment; the built-in updater will not modify the managed runtime. Use the deployment's upgrade flow or contact an administrator."
 }

@@ -202,6 +202,7 @@ async def test_resolve_or_create_replaces_archived_binding() -> None:
     service._create_session.assert_awaited_once_with(
         msg,
         default_agent="rex",
+        visible_agents=[],
         directory=None,
         source_session=archived,
     )

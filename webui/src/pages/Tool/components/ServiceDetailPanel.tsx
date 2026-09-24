@@ -1,9 +1,24 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
-  Info, Wrench, FileText, Activity, Zap, RefreshCw, Power, PowerOff,
-  CheckCircle, XCircle, Cloud, Database, AlertTriangle, Eye, EyeOff, Save, Trash2,
-} from 'lucide-react';
+  IconInfoCircle,
+  IconTool,
+  IconFileText,
+  IconActivity,
+  IconBolt,
+  IconRefresh,
+  IconPower,
+  IconPlugOff,
+  IconCircleCheck,
+  IconCircleX,
+  IconCloud,
+  IconDatabase,
+  IconAlertTriangle,
+  IconEye,
+  IconEyeOff,
+  IconDeviceFloppy,
+  IconTrash,
+} from '@tabler/icons-react';
 import type { Tool } from '@/api/tool';
 import type { MCPCatalogCategory, MCPCatalogEntry, MCPCredentials, MCPServer, MCPServerDetail } from '@/types';
 import { mcpAPI } from '@/api/mcp';
@@ -15,6 +30,16 @@ import { EnabledBadge } from './badges';
 import { buildMCPConfigFromForm, buildMCPFormDataFromConfig, getMCPFormError, MCPFormFields } from '../ToolSheets';
 import type { MCPFormData, ConnStatus as MCPConnStatus } from '../ToolSheets';
 import type { APIServiceCredentialField, APIServiceMetadata, ProviderCredentials } from '@/types';
+import ThreatBookMCPConfigPanel from './ThreatBookMCPConfigPanel';
+import ThreatBookAPIConfigPanel from './ThreatBookAPIConfigPanel';
+
+function isThreatBookMCPServer(serverName: string): boolean {
+  return serverName.trim().toLowerCase() === 'threatbook_mcp';
+}
+
+function isThreatBookAPIService(serviceName: string): boolean {
+  return ['threatbook-cn', 'threatbook-io'].includes(serviceName.trim().toLowerCase());
+}
 
 function KvRowValue({ value }: { value: string }) {
   const [showTooltip, setShowTooltip] = useState(false);
@@ -82,6 +107,7 @@ export function MCPServerDetailPanel({
   const [testResult, setTestResult] = useState<{ success: boolean; message: string; latency?: number; tools_count?: number } | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [savingConfig, setSavingConfig] = useState(false);
+  const isThreatBookServer = isThreatBookMCPServer(server.name);
 
   const createFormData = useCallback((detail: MCPServerDetail | null): MCPFormData => (
     buildMCPFormDataFromConfig(server.name, detail?.config, server.url)
@@ -205,9 +231,9 @@ export function MCPServerDetailPanel({
     <div className="bg-white" onClick={(e) => e.stopPropagation()}>
       <div className="flex items-center border-b border-gray-200 px-5">
         {([
-          { key: 'overview' as const, label: t('detail.tabs.overview'), icon: <Info className="w-3.5 h-3.5" /> },
-          { key: 'tools' as const, label: t('detail.tabs.tools', { count: serverTools.length }), icon: <Wrench className="w-3.5 h-3.5" /> },
-          { key: 'resources' as const, label: t('detail.tabs.resources', { count: serverDetail?.resources?.length || 0 }), icon: <FileText className="w-3.5 h-3.5" /> },
+          { key: 'overview' as const, label: t('detail.tabs.overview'), icon: <IconInfoCircle aria-hidden="true" className="w-3.5 h-3.5" /> },
+          { key: 'tools' as const, label: t('detail.tabs.tools', { count: serverTools.length }), icon: <IconTool aria-hidden="true" className="w-3.5 h-3.5" /> },
+          { key: 'resources' as const, label: t('detail.tabs.resources', { count: serverDetail?.resources?.length || 0 }), icon: <IconFileText aria-hidden="true" className="w-3.5 h-3.5" /> },
         ]).map((tab) => (
           <button
             key={tab.key}
@@ -225,7 +251,17 @@ export function MCPServerDetailPanel({
           <div className="flex justify-center py-8"><LoadingSpinner /></div>
         ) : detailTab === 'overview' ? (
           <div className="space-y-5">
-            {formData && (
+            {isThreatBookServer ? (
+              <ThreatBookMCPConfigPanel
+                serverName={server.name}
+                serverStatus={server.status}
+                configUrl={serverDetail?.config?.url || server.url}
+                onConfigured={async () => {
+                  await loadServerDetail();
+                  await onStatusChange?.();
+                }}
+              />
+            ) : formData && (
               <MCPFormFields
                 formData={formData}
                 onChange={handleFormChange}
@@ -259,7 +295,7 @@ export function MCPServerDetailPanel({
                   title={t('detail.refreshTools')}
                   className="p-1.5 text-gray-400 hover:text-gray-600 hover:bg-gray-200 rounded-md disabled:opacity-40 transition-colors"
                 >
-                  <RefreshCw className={`w-4 h-4 ${refreshing ? 'animate-spin' : ''}`} />
+                  <IconRefresh aria-hidden="true" className={`w-4 h-4 ${refreshing ? 'animate-spin' : ''}`} />
                 </button>
               </div>
               <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2">
@@ -283,32 +319,32 @@ export function MCPServerDetailPanel({
                     disabled={savingConfig}
                     className="inline-flex items-center gap-2 px-4 py-2.5 bg-red-600 text-white rounded-lg hover:bg-red-700 text-sm font-medium transition-colors disabled:opacity-50"
                   >
-                    {savingConfig ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
+                    {savingConfig ? <IconRefresh aria-hidden="true" className="w-4 h-4 animate-spin" /> : <IconDeviceFloppy aria-hidden="true" className="w-4 h-4" />}
                     {savingConfig ? t('button.saving') : t('button.save')}
                   </button>
                 </>
               )}
               {server.status === 'connected' ? (
                 <button onClick={onDisconnect} className="inline-flex items-center gap-2 px-4 py-2.5 border border-red-300 text-red-700 rounded-lg hover:bg-red-50 text-sm font-medium transition-colors">
-                  <PowerOff className="w-4 h-4" />{t('detail.disconnectConn')}
+                  <IconPlugOff aria-hidden="true" className="w-4 h-4" />{t('detail.disconnectConn')}
                 </button>
               ) : server.status === 'disabled' ? (
                 <button onClick={handleToggleEnabled} disabled={savingConfig} className="inline-flex items-center gap-2 px-4 py-2.5 bg-green-600 text-white rounded-lg hover:bg-green-700 text-sm font-medium transition-colors disabled:opacity-50">
-                  <Power className="w-4 h-4" />{t('detail.enableServer')}
+                  <IconPower aria-hidden="true" className="w-4 h-4" />{t('detail.enableServer')}
                 </button>
               ) : (
                 <button onClick={onConnect} className="inline-flex items-center gap-2 px-4 py-2.5 bg-red-600 text-white rounded-lg hover:bg-red-700 text-sm font-medium transition-colors">
-                  <Power className="w-4 h-4" />{t('detail.connectConn')}
+                  <IconPower aria-hidden="true" className="w-4 h-4" />{t('detail.connectConn')}
                 </button>
               )}
               {server.status !== 'disabled' && (
                 <button onClick={handleToggleEnabled} disabled={savingConfig} className="inline-flex items-center gap-2 px-4 py-2.5 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 text-sm font-medium transition-colors disabled:opacity-50">
-                  <PowerOff className="w-4 h-4" />{t('detail.disableServer')}
+                  <IconPlugOff aria-hidden="true" className="w-4 h-4" />{t('detail.disableServer')}
                 </button>
               )}
               {onRemove && (
                 <button onClick={onRemove} className="inline-flex items-center gap-2 px-4 py-2.5 border border-red-300 text-red-700 rounded-lg hover:bg-red-50 text-sm font-medium transition-colors">
-                  <Trash2 className="w-4 h-4" />{t('detail.removeServer')}
+                  <IconTrash aria-hidden="true" className="w-4 h-4" />{t('detail.removeServer')}
                 </button>
               )}
             </div>
@@ -422,7 +458,7 @@ export function CatalogAPIDetailPanel({
           <div className="space-y-5">
             <div className="bg-white rounded-lg border border-gray-200 p-4">
               <h4 className="text-sm font-semibold text-gray-900 mb-3 flex items-center">
-                <Activity className="w-4 h-4 mr-2 text-purple-500" />
+                <IconActivity aria-hidden="true" className="w-4 h-4 mr-2 text-purple-500" />
                 {t('serviceInfo.title')}
               </h4>
               <div className="space-y-3">
@@ -463,7 +499,7 @@ export function CatalogAPIDetailPanel({
           <div className="space-y-5">
             <div className="bg-white rounded-lg border border-gray-200 p-4">
               <h4 className="text-sm font-semibold text-gray-900 mb-3 flex items-center">
-                <Zap className="w-4 h-4 mr-2 text-amber-500" />
+                <IconBolt aria-hidden="true" className="w-4 h-4 mr-2 text-amber-500" />
                 {t('detail.quickActions')}
               </h4>
               <div className="space-y-2.5">
@@ -472,10 +508,10 @@ export function CatalogAPIDetailPanel({
                   disabled={testing}
                   className={`w-full flex items-center justify-center gap-2 px-4 py-2.5 border rounded-lg text-sm font-medium transition-colors ${testing ? 'border-red-300 bg-red-50 text-red-600 cursor-not-allowed' : 'bg-white border-gray-300 text-gray-700 hover:bg-gray-50'}`}
                 >
-                  {testing ? <><RefreshCw className="w-4 h-4 animate-spin" />{t('button.testing')}</> : <><Activity className="w-4 h-4" />{t('button.testConnectivity')}</>}
+                  {testing ? <><IconRefresh aria-hidden="true" className="w-4 h-4 animate-spin" />{t('button.testing')}</> : <><IconActivity aria-hidden="true" className="w-4 h-4" />{t('button.testConnectivity')}</>}
                 </button>
                 <button onClick={handleConnect} className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-red-600 text-white rounded-lg text-sm font-medium hover:bg-red-700 transition-colors">
-                  <Power className="w-4 h-4" />{t('detail.connectConn')}
+                  <IconPower aria-hidden="true" className="w-4 h-4" />{t('detail.connectConn')}
                 </button>
               </div>
             </div>
@@ -503,7 +539,7 @@ export function CatalogAPIDetailPanel({
             {!testing && testResult && (
               <div className={`p-3 rounded-lg border ${testResult.success ? 'bg-green-50 border-green-200' : 'bg-red-50 border-red-200'}`}>
                 <div className="flex items-start">
-                  {testResult.success ? <CheckCircle className="w-4 h-4 text-green-600 mr-2 mt-0.5 flex-shrink-0" /> : <XCircle className="w-4 h-4 text-red-600 mr-2 mt-0.5 flex-shrink-0" />}
+                  {testResult.success ? <IconCircleCheck aria-hidden="true" className="w-4 h-4 text-green-600 mr-2 mt-0.5 flex-shrink-0" /> : <IconCircleX aria-hidden="true" className="w-4 h-4 text-red-600 mr-2 mt-0.5 flex-shrink-0" />}
                   <div className="flex-1">
                     <div className={`text-sm font-medium ${testResult.success ? 'text-green-800' : 'text-red-800'}`}>
                       {testResult.success ? t('testing.testSuccess') : t('testing.testFailed')}
@@ -775,8 +811,8 @@ export function APIServiceDetailPanel({
     <div className="bg-white" onClick={(e) => e.stopPropagation()}>
       <div className="flex items-center border-b border-gray-200 px-5">
         {([
-          { key: 'overview' as const, label: t('detail.tabs.overview'), icon: <Info className="w-3.5 h-3.5" /> },
-          { key: 'tools' as const, label: t('detail.tabs.tools', { count: serviceTools.length }), icon: <Wrench className="w-3.5 h-3.5" /> },
+          { key: 'overview' as const, label: t('detail.tabs.overview'), icon: <IconInfoCircle aria-hidden="true" className="w-3.5 h-3.5" /> },
+          { key: 'tools' as const, label: t('detail.tabs.tools', { count: serviceTools.length }), icon: <IconTool aria-hidden="true" className="w-3.5 h-3.5" /> },
         ]).map((tab) => (
           <button
             key={tab.key}
@@ -794,6 +830,15 @@ export function APIServiceDetailPanel({
           <div className="flex justify-center py-8"><LoadingSpinner /></div>
         ) : detailTab === 'overview' ? (
           <div className="space-y-5">
+            {isThreatBookAPIService(serviceName) ? (
+              <ThreatBookAPIConfigPanel
+                serviceName={serviceName}
+                credentials={credentials}
+                initialStatus={initialStatus}
+                onConfigured={loadData}
+                onTestResult={onTestResult}
+              />
+            ) : (
             <div className="rounded-lg border border-gray-200 divide-y divide-gray-100">
               {(() => {
                 const status = quickTesting
@@ -866,7 +911,7 @@ export function APIServiceDetailPanel({
                               className="shrink-0 text-gray-400 hover:text-gray-600 p-1 rounded transition-colors"
                               title={visible ? t('detail.hide') : t('detail.show')}
                             >
-                              {visible ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                              {visible ? <IconEyeOff aria-hidden="true" className="w-3.5 h-3.5" /> : <IconEye aria-hidden="true" className="w-3.5 h-3.5" />}
                             </button>
                           )}
                         </div>
@@ -881,7 +926,7 @@ export function APIServiceDetailPanel({
                         disabled={apiKeySaving}
                         className="shrink-0 inline-flex items-center gap-1 px-2 py-1 bg-red-600 text-white rounded text-xs font-medium hover:bg-red-700 disabled:opacity-50 transition-colors"
                       >
-                        {apiKeySaving ? <RefreshCw className="w-3 h-3 animate-spin" /> : <Save className="w-3 h-3" />}
+                        {apiKeySaving ? <IconRefresh aria-hidden="true" className="w-3 h-3 animate-spin" /> : <IconDeviceFloppy aria-hidden="true" className="w-3 h-3" />}
                         {t('button.save')}
                       </button>
                       <button
@@ -914,17 +959,18 @@ export function APIServiceDetailPanel({
                 </button>
               </div>
             </div>
+            )}
 
             <div className="flex flex-col gap-2">
               <button onClick={handleQuickTestConnectivity} disabled={quickTesting} className="inline-flex items-center justify-center gap-2 px-4 py-2.5 bg-white border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 disabled:opacity-50 text-sm font-medium transition-colors">
-                {quickTesting ? <><RefreshCw className="w-4 h-4 animate-spin" />{t('button.testing')}</> : <><Activity className="w-4 h-4" />{t('button.testConnectivity')}</>}
+                {quickTesting ? <><IconRefresh aria-hidden="true" className="w-4 h-4 animate-spin" />{t('button.testing')}</> : <><IconActivity aria-hidden="true" className="w-4 h-4" />{t('button.testConnectivity')}</>}
               </button>
               <div className="flex gap-2">
                 <button
                   onClick={() => onToggleEnabled?.(!enabled)}
                   className={`flex-1 inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg text-sm font-medium transition-colors ${enabled ? 'border border-gray-300 text-gray-700 bg-white hover:bg-gray-50' : 'bg-green-600 text-white hover:bg-green-700'}`}
                 >
-                  {enabled ? <PowerOff className="w-4 h-4" /> : <Power className="w-4 h-4" />}
+                  {enabled ? <IconPlugOff aria-hidden="true" className="w-4 h-4" /> : <IconPower aria-hidden="true" className="w-4 h-4" />}
                   {enabled ? t('detail.disableServer') : t('detail.enableServer')}
                 </button>
                 <button
@@ -933,13 +979,13 @@ export function APIServiceDetailPanel({
                   className={`inline-flex items-center justify-center gap-2 px-4 py-2.5 border rounded-lg text-sm font-medium transition-colors ${builtin ? 'border-gray-200 text-gray-400 bg-gray-50 cursor-not-allowed' : 'border-red-200 text-red-600 bg-white hover:bg-red-50'}`}
                   title={builtin ? t('api.builtinCannotDelete') : t('button.delete')}
                 >
-                  <Trash2 className="w-4 h-4" />
+                  <IconTrash aria-hidden="true" className="w-4 h-4" />
                   {t('button.delete')}
                 </button>
               </div>
               {!quickTesting && quickTestResult && (
                 <div className={`flex items-start gap-2 rounded-lg border p-3 text-sm ${quickTestResult.success ? 'bg-green-50 border-green-200 text-green-800' : 'bg-red-50 border-red-200 text-red-800'}`}>
-                  {quickTestResult.success ? <CheckCircle className="w-4 h-4 mt-0.5 flex-shrink-0" /> : <XCircle className="w-4 h-4 mt-0.5 flex-shrink-0" />}
+                  {quickTestResult.success ? <IconCircleCheck aria-hidden="true" className="w-4 h-4 mt-0.5 flex-shrink-0" /> : <IconCircleX aria-hidden="true" className="w-4 h-4 mt-0.5 flex-shrink-0" />}
                   <span>{quickTestResult.message}</span>
                   {quickTestResult.latency_ms != null && <span className="text-xs opacity-90"> · {quickTestResult.latency_ms}ms</span>}
                 </div>

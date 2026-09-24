@@ -23,10 +23,17 @@ from flocks.console.login import ConsoleLoginService
 from flocks.server.auth import require_admin, require_user
 from flocks.storage.storage import Storage
 from flocks.updater import perform_pro_bundle_downgrade, perform_pro_bundle_install
+from flocks.utils.log import Log
+from flocks.net.http import async_client
 
 router = APIRouter()
+log = Log.create(service="console-upgrade-routes")
 _AUTO_UPGRADE_TASKS: set[asyncio.Task[None]] = set()
 _AUTO_UPGRADE_REQUEST_IDS: set[str] = set()
+# Request ids whose manual (/start) installation stream is currently running.
+# Together with _AUTO_UPGRADE_REQUEST_IDS this makes "one install per request"
+# hold across the manual and the auto-activate paths.
+_MANUAL_UPGRADE_RUNNING: set[str] = set()
 
 
 def _console_base_url() -> str:
@@ -48,6 +55,15 @@ class UpgradeRequestCreate(BaseModel):
     applicant_email: str = Field(min_length=1)
     applicant_phone: str = Field(min_length=1)
     notes: Optional[str] = None
+
+    @field_validator("company", "applicant_name")
+    @classmethod
+    def validate_required_text(cls, value: str, info) -> str:
+        # min_length=1 only rejects the empty string; whitespace-only values
+        # would otherwise be stripped to '' downstream and stored as blank.
+        if not value.strip():
+            raise ValueError(f"{info.field_name} is required.")
+        return value
 
     @field_validator("applicant_email")
     @classmethod
@@ -628,7 +644,7 @@ async def _report_pro_bundle_installation(
         details["install_receipt_error"] = "FLOCKS_CONSOLE_BASE_URL 未配置"
         return
     try:
-        async with httpx.AsyncClient(timeout=10) as client:
+        async with async_client(timeout=10) as client:
             resp = await client.post(
                 f"{console_base}/v1/pro-bundles/installations",
                 json=payload,
@@ -663,7 +679,7 @@ async def _report_pro_bundle_downgrade(
         raise ValueError(message)
 
     payload = _build_pro_bundle_downgrade_payload(target_record, reason=reason, console_session=console_session)
-    async with httpx.AsyncClient(timeout=10) as client:
+    async with async_client(timeout=10) as client:
         resp = await client.post(
             f"{console_base}/v1/pro-bundles/installations",
             json=payload,
@@ -795,7 +811,7 @@ async def _mark_console_upgrade_activated(record: dict[str, Any]) -> None:
     try:
         console_session = await ConsoleLoginService.require_console_session()
         headers = {"Authorization": f"Bearer {console_session['console_session_token']}"}
-        async with httpx.AsyncClient(timeout=10) as client:
+        async with async_client(timeout=10) as client:
             resp = await client.post(f"{console_base}/v1/upgrade-requests/{request_id}/activate", headers=headers)
             resp.raise_for_status()
             details["console_activated_reported_at"] = datetime.now(UTC).isoformat()
@@ -917,6 +933,17 @@ async def create_upgrade_request(payload: UpgradeRequestCreate, request: Request
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
+    # Only one in-flight application at a time: the WebUI hides the form while a
+    # request is pending, but the API must enforce it too or a client can pile
+    # up duplicate pending records.
+    for existing_id in await _list_request_ids():
+        existing = await Storage.get(_request_key(existing_id))
+        if isinstance(existing, dict) and existing.get("status") == "pending":
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="当前已有升级申请在处理中，请刷新状态或撤回后再发起新申请",
+            )
+
     now = datetime.now(UTC).isoformat()
     request_id = str(uuid4())
     normalized_product = payload.product.strip() or "Flocks Pro"
@@ -972,9 +999,12 @@ async def create_upgrade_request(payload: UpgradeRequestCreate, request: Request
             "idempotency_key": request_id,
             "form_data": details,
         }
+        channel = ConsoleLoginService.update_channel()
+        if channel:
+            console_payload["channel"] = channel
         headers = {"Authorization": f"Bearer {console_session['console_session_token']}"}
         try:
-            async with httpx.AsyncClient(timeout=10) as client:
+            async with async_client(timeout=10) as client:
                 resp = await client.post(f"{console_base}/v1/upgrade-requests", json=console_payload, headers=headers)
                 resp.raise_for_status()
                 data = resp.json()
@@ -1010,10 +1040,16 @@ async def list_upgrade_requests(request: Request) -> list[UpgradeRequestStatus]:
     result: list[UpgradeRequestStatus] = []
     for request_id in reversed(await _list_request_ids()):
         raw = await Storage.get(_request_key(request_id))
-        if raw:
-            raw = await _finalize_restarting_upgrade_if_installed(raw)
-            await Storage.set(_request_key(request_id), raw, "json")
+        if not raw:
+            continue
+        raw = await _finalize_restarting_upgrade_if_installed(raw)
+        await Storage.set(_request_key(request_id), raw, "json")
+        try:
             result.append(UpgradeRequestStatus(**_enrich_record_from_install_marker(raw)))
+        except Exception as exc:
+            # One corrupt record (e.g. missing created_at) must not take the
+            # whole list down; skip it and keep the rest visible.
+            log.warn("console.upgrade_requests.record_invalid", {"request_id": request_id, "error": str(exc)})
     return result
 
 
@@ -1167,7 +1203,7 @@ async def refresh_upgrade_request(request_id: str, request: Request) -> UpgradeR
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
         headers = {"Authorization": f"Bearer {console_session['console_session_token']}"}
         try:
-            async with httpx.AsyncClient(timeout=10) as client:
+            async with async_client(timeout=10) as client:
                 resp = await client.get(
                     f"{console_base}/v1/upgrade-requests/{request_id}",
                     headers=headers,
@@ -1213,6 +1249,11 @@ async def start_upgrade_request(request_id: str, request: Request) -> StreamingR
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="升级申请不存在")
     if not _can_install_from_request(raw):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="仅已审批通过或已激活但本地缺少 Pro 组件的申请可以开始升级")
+    # Refuse a second concurrent installation for the same request: two
+    # interleaved streams would clobber each other's record updates.
+    if request_id in _MANUAL_UPGRADE_RUNNING or request_id in _AUTO_UPGRADE_REQUEST_IDS:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="该申请的升级正在进行中")
+    _MANUAL_UPGRADE_RUNNING.add(request_id)
 
     async def _stream():
         details = raw.setdefault("details", {})
@@ -1262,6 +1303,10 @@ async def start_upgrade_request(request_id: str, request: Request) -> StreamingR
                     await _report_pro_bundle_installation(raw, install_result="success")
                     if capability.get("pro_enabled"):
                         await _mark_console_upgrade_activated(raw)
+                    # The two reporters above only write their receipt
+                    # timestamps into the in-memory record; persist them so
+                    # GET /upgrade-requests/{id} reflects them after completion.
+                    await Storage.set(_request_key(request_id), raw, "json")
                 yield f"data: {progress.model_dump_json()}\n\n"
                 await asyncio.sleep(0)
                 if progress.stage == "error":
@@ -1273,6 +1318,8 @@ async def start_upgrade_request(request_id: str, request: Request) -> StreamingR
             await Storage.set(_request_key(request_id), raw, "json")
             await _report_pro_bundle_installation(raw, install_result="failed", error_message=str(exc))
             yield f"data: {json.dumps({'stage': 'error', 'message': str(exc), 'success': False})}\n\n"
+        finally:
+            _MANUAL_UPGRADE_RUNNING.discard(request_id)
 
     return StreamingResponse(
         _stream(),
@@ -1291,6 +1338,10 @@ async def cancel_upgrade_request(request_id: str, request: Request) -> UpgradeRe
     raw = await Storage.get(_request_key(request_id))
     if not raw:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="升级申请不存在")
+    # An activated application already produced a live licence; marking it
+    # cancelled locally would desynchronise the record from the real state.
+    if isinstance(raw, dict) and raw.get("status") == "activated":
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="已激活的申请不可撤回")
 
     console_base = _console_base_url()
     if console_base:
@@ -1300,7 +1351,7 @@ async def cancel_upgrade_request(request_id: str, request: Request) -> UpgradeRe
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
         headers = {"Authorization": f"Bearer {console_session['console_session_token']}"}
         try:
-            async with httpx.AsyncClient(timeout=10) as client:
+            async with async_client(timeout=10) as client:
                 data: dict[str, Any] | None = None
                 resp = await client.post(
                     f"{console_base}/v1/upgrade-requests/{request_id}/withdraw",

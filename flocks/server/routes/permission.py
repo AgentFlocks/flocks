@@ -15,7 +15,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 
 from flocks.auth.context import AuthUser
-from flocks.server.auth import require_user
+from flocks.server.auth import require_admin, require_user
 from flocks.session.policy import SessionPolicy
 from flocks.session.session import Session
 from flocks.utils.log import Log
@@ -79,6 +79,22 @@ def _network_confirm_options(metadata: Dict[str, Any]) -> set[str]:
 
 def _is_network_confirmation(metadata: Dict[str, Any]) -> bool:
     return isinstance(metadata.get("network_confirm_options"), list)
+
+
+class PermissionRuleInfo(BaseModel):
+    """Durable permission rule exposed to the WebUI."""
+    id: str
+    permission: str
+    action: Literal["allow", "deny"]
+    pattern: str = "*"
+    createdAt: Optional[int] = None
+
+
+class PermissionRuleCreateRequest(BaseModel):
+    """Create a durable permission rule (permission-level, pattern must be '*')."""
+    permission: str
+    action: Literal["allow", "deny"]
+    pattern: str = "*"
 
 
 class PermissionInfo(BaseModel):
@@ -205,6 +221,61 @@ async def list_permissions(
             time=info.time,
         ))
     return result
+
+
+# Durable rules. Fixed paths, so they are registered before /{permission_id}.
+@router.get(
+    "/rules",
+    response_model=List[PermissionRuleInfo],
+    summary="List permission rules",
+    description="Durable allow/deny rules (the store an 'always' reply writes to)",
+)
+async def list_permission_rules(
+    user: AuthUser = Depends(require_user),
+) -> List[PermissionRuleInfo]:
+    rules = await PermissionNext.list_permanent_rules()
+    return [
+        PermissionRuleInfo(id=permission, permission=permission, action=action)
+        for permission, action in sorted(rules.items())
+        if action in ("allow", "deny")
+    ]
+
+
+@router.post(
+    "/rules",
+    response_model=PermissionRuleInfo,
+    status_code=status.HTTP_201_CREATED,
+    summary="Create permission rule",
+)
+async def create_permission_rule(
+    request: PermissionRuleCreateRequest,
+    _admin: AuthUser = Depends(require_admin),
+) -> PermissionRuleInfo:
+    permission = request.permission.strip()
+    if not permission:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="permission is required")
+    if request.pattern.strip() != "*":
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Durable rules apply to the whole permission; pattern must be '*'",
+        )
+    await PermissionNext.set_permanent_rule(permission, request.action)
+    log.info("permission.rule.created", {"permission": permission, "action": request.action})
+    return PermissionRuleInfo(id=permission, permission=permission, action=request.action)
+
+
+@router.delete(
+    "/rules/{permission}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Delete permission rule",
+)
+async def delete_permission_rule(
+    permission: str,
+    _admin: AuthUser = Depends(require_admin),
+) -> None:
+    if not await PermissionNext.delete_permanent_rule(permission):
+        raise HTTPException(status_code=404, detail="Permission rule not found")
+    log.info("permission.rule.deleted", {"permission": permission})
 
 
 @router.get(

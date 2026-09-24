@@ -28,6 +28,9 @@ vi.mock('react-i18next', () => ({
         'toolDetail.runTest': '执行测试',
         'toolDetail.enabled': '启用',
         'toolDetail.disabled': '禁用',
+        'toolDetail.customized': '已自定义',
+        'toolDetail.resetSetting': '恢复默认',
+        'alert.unknownError': '未知错误',
       };
 
       return translations[key] ?? key;
@@ -134,5 +137,50 @@ describe('ToolDetailDrawer', () => {
     expect(paramDescriptionCell?.className).toContain('whitespace-pre-wrap');
     expect(paramDescriptionCell?.className).toContain('break-words');
     expect(paramDescriptionCell?.className).toContain('align-top');
+  });
+
+  it('passes the reset payload to onEnabledChange so the parent cannot restore a stale badge', async () => {
+    const { toolAPI } = await import('@/api/tool');
+    (toolAPI.resetSetting as any).mockResolvedValue({
+      data: { ...enabledTool, enabled: true, enabled_customized: false, enabled_default: true },
+    });
+    const onEnabledChange = vi.fn();
+    const customizedTool = { ...enabledTool, enabled: false, enabled_customized: true, enabled_default: true };
+    const { rerender } = render(
+      <ToolDetailDrawer {...drawerProps} tool={customizedTool} onEnabledChange={onEnabledChange} />,
+    );
+    expect(screen.getByText('已自定义')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: '恢复默认' }));
+    await waitFor(() => expect(onEnabledChange).toHaveBeenCalled());
+    const [, newEnabled, updated] = onEnabledChange.mock.calls[0];
+    expect(newEnabled).toBe(true);
+    expect(updated.enabled_customized).toBe(false);
+
+    // parent re-renders with the merged tool (enabled + overlay flags) → badge stays gone
+    rerender(
+      <ToolDetailDrawer
+        {...drawerProps}
+        tool={{ ...customizedTool, enabled: true, enabled_customized: updated.enabled_customized, enabled_default: updated.enabled_default }}
+        onEnabledChange={onEnabledChange}
+      />,
+    );
+    await waitFor(() => expect(screen.queryByText('已自定义')).toBeNull());
+  });
+
+  it('surfaces the backend message when toggling is rejected', async () => {
+    const { toolAPI } = await import('@/api/tool');
+    (toolAPI.setEnabled as any).mockRejectedValue({
+      response: { status: 403, data: { error: 'HTTPException', message: '仅管理员可执行该操作' } },
+      message: 'Request failed with status code 403',
+    });
+    const alertSpy = vi.spyOn(window, 'alert').mockImplementation(() => {});
+    render(<ToolDetailDrawer {...drawerProps} />);
+
+    const toggle = screen.getAllByRole('button').find((b) => b.className.includes('rounded-full'))!;
+    fireEvent.click(toggle);
+    await waitFor(() => expect(alertSpy).toHaveBeenCalledWith('仅管理员可执行该操作'));
+    expect(screen.getByText('启用')).toBeInTheDocument();
+    alertSpy.mockRestore();
   });
 });

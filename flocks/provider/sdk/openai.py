@@ -18,6 +18,7 @@ from flocks.provider.provider import (
 )
 from flocks.provider.sdk.openai_base import (
     DEFAULT_HTTP_TIMEOUT,
+    create_chat_completion_with_fallbacks,
     create_openai_http_client,
     _normalize_stream_usage,
     build_reasoning_metadata,
@@ -39,6 +40,18 @@ def _env_bool(name: str, default: bool) -> bool:
     if raw is None:
         return default
     return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+_REASONING_MODEL_PREFIXES = ("o1", "o3", "o4", "gpt-5")
+
+
+def _is_reasoning_model(model_id: str) -> bool:
+    """o-series / GPT-5 models reject ``temperature`` and ``max_tokens``."""
+    lowered = (model_id or "").lower()
+    return any(
+        lowered == prefix or lowered.startswith(prefix + "-") or lowered.startswith(prefix + ".")
+        for prefix in _REASONING_MODEL_PREFIXES
+    )
 
 
 class OpenAIProvider(BaseProvider):
@@ -138,6 +151,27 @@ class OpenAIProvider(BaseProvider):
         """Convert ChatMessage list to OpenAI API dicts, preserving tool_calls / tool results."""
         return format_openai_messages(messages)
 
+    @staticmethod
+    def _apply_generation_params(
+        request_params: Dict[str, Any], model_id: str, kwargs: Dict[str, Any]
+    ) -> Optional[int]:
+        """Fill temperature / token-limit fields the way the target model accepts them.
+
+        Reasoning models (o1/o3/o4/gpt-5, or any request carrying
+        ``reasoningEffort``) take ``max_completion_tokens`` and no
+        ``temperature``; everything else keeps the classic fields.
+        """
+        reasoning = _is_reasoning_model(model_id) or bool(kwargs.get("reasoningEffort"))
+        max_tokens = kwargs.get("max_completion_tokens") or kwargs.get("max_tokens")
+        if reasoning:
+            if max_tokens:
+                request_params["max_completion_tokens"] = max_tokens
+        else:
+            request_params["temperature"] = kwargs.get("temperature", 0.7)
+            if max_tokens:
+                request_params["max_tokens"] = max_tokens
+        return max_tokens
+
     async def chat(
         self,
         model_id: str,
@@ -153,11 +187,8 @@ class OpenAIProvider(BaseProvider):
         request_params = {
             "model": model_id,
             "messages": openai_messages,
-            "temperature": kwargs.get("temperature", 0.7),
         }
-        
-        if kwargs.get("max_tokens"):
-            request_params["max_tokens"] = kwargs["max_tokens"]
+        max_tokens = self._apply_generation_params(request_params, model_id, kwargs)
         
         if kwargs.get("tools"):
             request_params["tools"] = kwargs["tools"]
@@ -166,11 +197,13 @@ class OpenAIProvider(BaseProvider):
         if kwargs.get("reasoningEffort"):
             request_params["reasoning_effort"] = kwargs["reasoningEffort"]
         
-        try:
-            response = await client.chat.completions.create(**request_params)
-        except Exception as exc:
-            raise_if_response_body_unsafe(exc)
-            raise
+        response = await create_chat_completion_with_fallbacks(
+            client.chat.completions.create,
+            request_params,
+            max_tokens=max_tokens,
+            logger=self.log,
+            log_prefix="openai",
+        )
         choice = response.choices[0]
         assistant_message = getattr(choice, "message", None)
         text_content = (
@@ -210,13 +243,10 @@ class OpenAIProvider(BaseProvider):
         request_params = {
             "model": model_id,
             "messages": openai_messages,
-            "temperature": kwargs.get("temperature", 0.7),
             "stream": True,
             "stream_options": {"include_usage": True},
         }
-        
-        if kwargs.get("max_tokens"):
-            request_params["max_tokens"] = kwargs["max_tokens"]
+        max_tokens = self._apply_generation_params(request_params, model_id, kwargs)
         
         if kwargs.get("tools"):
             request_params["tools"] = kwargs["tools"]
@@ -228,7 +258,15 @@ class OpenAIProvider(BaseProvider):
         # Track tool calls during streaming
         tool_calls: Dict[int, Dict[str, Any]] = {}
         
-        stream = await client.chat.completions.create(**request_params)
+        # Retries once without stream_options / with max_tokens when the
+        # endpoint rejects them (same policy as OpenAIBaseProvider).
+        stream = await create_chat_completion_with_fallbacks(
+            client.chat.completions.create,
+            request_params,
+            max_tokens=max_tokens,
+            logger=self.log,
+            log_prefix="openai",
+        )
         
         # Track usage from final chunk (when stream_options.include_usage is set)
         stream_usage: Optional[Dict[str, int]] = None
@@ -251,7 +289,7 @@ class OpenAIProvider(BaseProvider):
                         sorted_calls = [tool_calls[i] for i in sorted(tool_calls.keys())]
                         yield StreamChunk(
                             delta="",
-                            finish_reason="tool_calls",
+                            finish_reason=choice.finish_reason,
                             tool_calls=sorted_calls,
                             usage=stream_usage,
                         )
@@ -312,11 +350,13 @@ class OpenAIProvider(BaseProvider):
             # Handle finish
             if choice.finish_reason:
                 if tool_calls:
-                    # Sort by index and convert to list
+                    # Sort by index and convert to list. Keep the real
+                    # finish_reason ("length" = truncated tool arguments) so
+                    # the runner can react to it.
                     sorted_calls = [tool_calls[i] for i in sorted(tool_calls.keys())]
                     yield StreamChunk(
                         delta="",
-                        finish_reason="tool_calls",
+                        finish_reason=choice.finish_reason,
                         tool_calls=sorted_calls,
                         usage=stream_usage,
                     )

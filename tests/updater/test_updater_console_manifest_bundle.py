@@ -53,7 +53,7 @@ async def test_fetch_console_manifest_release_uses_bundle_url(monkeypatch: pytes
             return _Resp()
 
     monkeypatch.setenv("FLOCKS_CONSOLE_BASE_URL", "https://console.example.com")
-    monkeypatch.setattr(updater.httpx, "AsyncClient", lambda timeout=15: _Client())
+    monkeypatch.setattr(updater.httpx, "AsyncClient", lambda **_kw: _Client())
     result = await updater._fetch_console_manifest_release()
     assert result == (
         "v2026.5.10",
@@ -687,7 +687,7 @@ async def test_fetch_console_manifest_release_blocks_frozen_channel(monkeypatch:
             return _Resp()
 
     monkeypatch.setenv("FLOCKS_CONSOLE_BASE_URL", "https://console.example.com")
-    monkeypatch.setattr(updater.httpx, "AsyncClient", lambda timeout=15: _Client())
+    monkeypatch.setattr(updater.httpx, "AsyncClient", lambda **_kw: _Client())
     with pytest.raises(ValueError, match="frozen"):
         await updater._fetch_console_manifest_release()
 

@@ -24,6 +24,7 @@ from flocks.tool.registry import ToolRegistry
 from flocks.tool.schema.api_service_schema import _build_api_service_credential_schema
 from flocks.tool.tool_loader import TOOL_TYPE_DEVICE, extract_provider_version
 from flocks.utils.log import Log
+from flocks.config.config import get_user_plugins_root
 
 log = Log.create(service="device.plugin-index")
 
@@ -127,11 +128,11 @@ def create_custom_device_template(body: CustomDeviceTemplateCreate) -> DeviceTem
     if target.exists() and hub_local.has_install_payload("device", target):
         raise FileExistsError(f"device plugin '{plugin_id}' already exists")
 
-    provider_yaml = _custom_provider_yaml(body)
-    target.mkdir(parents=True, exist_ok=True)
-    _write_yaml(target / "_provider.yaml", provider_yaml)
-
+    # Validate every tool before touching the filesystem: a bad tool name must
+    # not leave a half-written plugin directory (provider yaml without an
+    # install record) behind that later blocks or shadows a retry.
     seen_tools: set[str] = set()
+    validated_tools: list[tuple[str, Dict[str, Any]]] = []
     for tool in body.tools:
         tool_name = tool.name.strip()
         if not _SAFE_SERVICE_ID.match(tool_name):
@@ -139,7 +140,13 @@ def create_custom_device_template(body: CustomDeviceTemplateCreate) -> DeviceTem
         if tool_name in seen_tools:
             raise ValueError(f"duplicate tool name '{tool_name}'")
         seen_tools.add(tool_name)
-        _write_yaml(target / f"{tool_name}.yaml", _custom_tool_yaml(tool.model_dump(exclude_none=True), service_id))
+        validated_tools.append((tool_name, tool.model_dump(exclude_none=True)))
+
+    provider_yaml = _custom_provider_yaml(body)
+    target.mkdir(parents=True, exist_ok=True)
+    _write_yaml(target / "_provider.yaml", provider_yaml)
+    for tool_name, tool_data in validated_tools:
+        _write_yaml(target / f"{tool_name}.yaml", _custom_tool_yaml(tool_data, service_id))
 
     record = hub_local.make_record(
         plugin_type="device",
@@ -317,7 +324,7 @@ def _source_from_path(path: Optional[Path]) -> str:
     except Exception:
         pass
     try:
-        resolved.relative_to((Path.home() / ".flocks" / "plugins").resolve())
+        resolved.relative_to(get_user_plugins_root().resolve())
         return "global"
     except Exception:
         pass

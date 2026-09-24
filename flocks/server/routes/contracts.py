@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +13,7 @@ from flocks.auth.context import AuthUser
 from flocks.server.auth import require_user
 from flocks.contracts.access.models import ContractRuntimeError
 from flocks.contracts.access.runtime import OperationRuntime
+from flocks.config.config import get_user_plugins_root
 
 router = APIRouter()
 _runtime: OperationRuntime | None = None
@@ -28,8 +30,8 @@ async def execute_webui_contract_operation(
     user: AuthUser = Depends(require_user),
 ):
     try:
-        runtime = _get_runtime()
-        response = runtime.execute(
+        runtime = await asyncio.to_thread(_get_runtime)
+        response = await asyncio.to_thread(runtime.execute,
             page_id=page_path,
             contract_id=contract_id,
             operation_name=operation_name,
@@ -63,7 +65,7 @@ def _get_runtime() -> OperationRuntime:
 
 def _contract_plugin_signature() -> tuple[tuple[str, int, int], ...]:
     roots = (
-        Path.home() / ".flocks" / "plugins" / "contracts" / "access",
+        get_user_plugins_root() / "contracts" / "access",
         Path.cwd() / ".flocks" / "plugins" / "contracts" / "access",
     )
     entries: list[tuple[str, int, int]] = []

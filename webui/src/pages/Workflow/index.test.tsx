@@ -192,6 +192,25 @@ describe('WorkflowPage', () => {
     );
   });
 
+  it('卡片网格在窄屏为单列，创建按钮不换行', () => {
+    mockUseWorkflows.mockReturnValue({
+      workflows: [makeWorkflow({ id: 'wf-a', name: 'A' })],
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    const { container } = render(<WorkflowPage />);
+
+    const grid = container.querySelector('.grid');
+    expect(grid?.className).toContain('grid-cols-1');
+    expect(grid?.className).toContain('sm:grid-cols-2');
+    const createButton = screen.getAllByRole('button', { name: /创建工作流/ })[0];
+    expect(createButton.className).toContain('whitespace-nowrap');
+    const filterScroller = screen.getByRole('tablist').parentElement;
+    expect(filterScroller?.className).toContain('overflow-x-auto');
+  });
+
   it('没有自定义工作流时不渲染空分组', () => {
     mockUseWorkflows.mockReturnValue({
       workflows: [makeWorkflow({ id: 'wf-project-only', name: 'Project Only', source: 'project' })],

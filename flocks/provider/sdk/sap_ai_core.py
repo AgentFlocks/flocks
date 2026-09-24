@@ -20,6 +20,7 @@ from flocks.provider.provider import (
     StreamChunk,
 )
 from flocks.utils.log import Log
+from flocks.net.http import async_client
 
 log = Log.create(service="provider.sap-ai-core")
 
@@ -157,9 +158,8 @@ class SAPAICoreProvider(BaseProvider):
             )
         
         try:
-            import httpx
             
-            async with httpx.AsyncClient() as client:
+            async with async_client() as client:
                 response = await client.post(
                     f"{self._auth_url}/oauth/token",
                     data={
@@ -248,12 +248,11 @@ class SAPAICoreProvider(BaseProvider):
             payload["max_tokens"] = kwargs["max_tokens"]
         
         try:
-            import httpx
             
             # Build URL with deployment ID if specified
             url = f"{self._api_url}/v2/inference/deployments/{self.deployment_id}/chat/completions"
             
-            async with httpx.AsyncClient() as client:
+            async with async_client() as client:
                 response = await client.post(
                     url,
                     headers=self._get_headers(token),
@@ -327,12 +326,11 @@ class SAPAICoreProvider(BaseProvider):
             payload["max_tokens"] = kwargs["max_tokens"]
         
         try:
-            import httpx
             
             # Build URL with deployment ID if specified
             url = f"{self._api_url}/v2/inference/deployments/{self.deployment_id}/chat/completions"
             
-            async with httpx.AsyncClient() as client:
+            async with async_client() as client:
                 async with client.stream(
                     "POST",
                     url,

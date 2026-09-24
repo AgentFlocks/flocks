@@ -66,6 +66,18 @@
     "cors": ["http://127.0.0.1:5173", "http://localhost:5173"]
   },
   "allowReadPaths": [],
+  "network": {
+    "proxy": {
+      "mode": "system",
+      "http": "",
+      "https": "",
+      "all": "",
+      "username": "",
+      "password": "",
+      "bypass": [],
+      "bypassPrivate": true
+    }
+  },
   "updater": {
     "enabled": true,
     "repo": "AgentFlocks/flocks",

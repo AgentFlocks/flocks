@@ -73,3 +73,30 @@ def test_existing_rfc3164_parsing_is_unchanged() -> None:
     assert parsed["hostname"] == "host-a"
     assert parsed["app_name"] == "sshd"
     assert parsed["message"] == "login accepted"
+
+
+def test_rfc3164_tag_with_pid_is_split() -> None:
+    parsed = parse_syslog("<13>Oct 11 22:14:15 host app[123]: hello", "auto")
+
+    assert parsed["format"] == "rfc3164"
+    assert parsed["app_name"] == "app"
+    assert parsed["pid"] == "123"
+    assert parsed["message"] == "hello"
+
+
+def test_rfc3164_tag_without_pid_has_no_pid_field() -> None:
+    parsed = parse_syslog("<13>Oct 11 22:14:15 host sshd: hi", "auto")
+
+    assert parsed["app_name"] == "sshd"
+    assert "pid" not in parsed
+
+
+def test_iso3164_and_rfc5424_expose_pid() -> None:
+    iso = parse_syslog("<13>2026-09-14T10:00:00Z host nginx[77]: x", "auto")
+    assert (iso["format"], iso["app_name"], iso["pid"]) == ("iso3164", "nginx", "77")
+
+    rfc = parse_syslog("<34>1 2003-10-11T22:14:15.003Z mymachine su 4711 ID47 - msg", "auto")
+    assert (rfc["format"], rfc["app_name"], rfc["pid"]) == ("rfc5424", "su", "4711")
+
+    nil = parse_syslog("<34>1 2003-10-11T22:14:15.003Z mymachine su - ID47 - msg", "auto")
+    assert nil["app_name"] == "su" and "pid" not in nil

@@ -271,19 +271,33 @@ class McpCatalog:
             return
         try:
             mtime = self._catalog_path.stat().st_mtime
-            if mtime != self._catalog_mtime:
-                log.info("catalog.reloading", {"path": str(self._catalog_path)})
-                self._entries = []
-                self._categories = {}
-                self._version = "0.0.0"
-                self._load()
+        except FileNotFoundError:
+            # The catalog file was removed after load: serving the stale cache
+            # would hide the misconfiguration, so surface it like a fresh load.
+            raise FileNotFoundError(
+                f"mcp_list.json not found. Make sure {self._catalog_path} exists."
+            )
         except OSError:
-            pass
+            return
+        if mtime != self._catalog_mtime:
+            log.info("catalog.reloading", {"path": str(self._catalog_path)})
+            self._entries = []
+            self._categories = {}
+            self._version = "0.0.0"
+            self._load()
 
     def _load(self) -> None:
-        """Load catalog data from JSON file."""
+        """Load catalog data from JSON file.
+
+        A missing catalog file propagates as ``FileNotFoundError`` so callers
+        (the HTTP API) can report the misconfiguration instead of serving an
+        empty catalog forever. A single malformed entry is skipped with a log
+        line rather than aborting the whole load.
+        """
+        # Missing file: propagate (see docstring). Also leave ``_catalog_path``
+        # unset so the next access retries once the file is restored.
+        catalog_path = _resolve_catalog_file()
         try:
-            catalog_path = _resolve_catalog_file()
             self._catalog_path = catalog_path
             self._catalog_mtime = catalog_path.stat().st_mtime
             raw = json.loads(catalog_path.read_text(encoding="utf-8"))
@@ -294,28 +308,34 @@ class McpCatalog:
                 self._categories[cat_id] = CategoryInfo(**cat_data)
 
             for entry_data in raw.get("servers", []):
-                env_vars_raw = entry_data.get("env_vars", {})
-                parsed_env: Dict[str, EnvVarSpec] = {}
-                for k, v in env_vars_raw.items():
-                    if isinstance(v, dict):
-                        parsed_env[k] = EnvVarSpec(**v)
-                    else:
-                        parsed_env[k] = EnvVarSpec()
-                entry_data["env_vars"] = parsed_env
+                try:
+                    env_vars_raw = entry_data.get("env_vars", {})
+                    parsed_env: Dict[str, EnvVarSpec] = {}
+                    for k, v in env_vars_raw.items():
+                        if isinstance(v, dict):
+                            parsed_env[k] = EnvVarSpec(**v)
+                        else:
+                            parsed_env[k] = EnvVarSpec()
+                    entry_data["env_vars"] = parsed_env
 
-                install_raw = entry_data.get("install", {})
-                if isinstance(install_raw, dict):
-                    # Normalise params values to ParamSpec instances
-                    params_raw = install_raw.get("params")
-                    if isinstance(params_raw, dict):
-                        install_raw = dict(install_raw)
-                        install_raw["params"] = {
-                            k: ParamSpec(**v) if isinstance(v, dict) else ParamSpec()
-                            for k, v in params_raw.items()
-                        }
-                    entry_data["install"] = InstallSpec(**install_raw)
+                    install_raw = entry_data.get("install", {})
+                    if isinstance(install_raw, dict):
+                        # Normalise params values to ParamSpec instances
+                        params_raw = install_raw.get("params")
+                        if isinstance(params_raw, dict):
+                            install_raw = dict(install_raw)
+                            install_raw["params"] = {
+                                k: ParamSpec(**v) if isinstance(v, dict) else ParamSpec()
+                                for k, v in params_raw.items()
+                            }
+                        entry_data["install"] = InstallSpec(**install_raw)
 
-                self._entries.append(CatalogEntry(**entry_data))
+                    self._entries.append(CatalogEntry(**entry_data))
+                except Exception as entry_error:
+                    log.error("catalog.entry_invalid", {
+                        "id": entry_data.get("id") if isinstance(entry_data, dict) else None,
+                        "error": str(entry_error),
+                    })
 
             log.info(
                 "catalog.loaded",

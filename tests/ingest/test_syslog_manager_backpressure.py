@@ -25,12 +25,15 @@ from unittest.mock import AsyncMock
 import pytest
 
 from flocks.ingest.syslog import manager as syslog_manager
-from flocks.workflow import execution_store
+from flocks.workflow.execution_store import create_execution_record, record_execution_result
 from flocks.workflow.triggers.models import TriggerDefinition
 
 
 @pytest.fixture(autouse=True)
 def trigger_tool_context(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
+    from flocks.session.recorder import Recorder
+
+    monkeypatch.setattr(Recorder, "record_workflow_execution", AsyncMock())
     context = object()
     builder = AsyncMock(return_value=context)
     cleanup = AsyncMock()
@@ -148,10 +151,7 @@ def test_trigger_concurrency_config_is_honored_with_safety_caps() -> None:
             "concurrency": {"maxParallel": 999, "queueSize": 999_999},
         }
     )
-    assert (
-        syslog_manager._worker_count_for_trigger(oversized)
-        == syslog_manager._MAX_CONCURRENT_EXECUTIONS
-    )
+    assert syslog_manager._worker_count_for_trigger(oversized) == syslog_manager._MAX_CONCURRENT_EXECUTIONS
     assert syslog_manager._queue_size_for_trigger(oversized) == syslog_manager._MAX_QUEUE_SIZE
 
 
@@ -211,21 +211,19 @@ async def test_stop_workflow_signals_running_thread(
     abort = asyncio.Event()
     started = threading.Event()
     stopped = threading.Event()
+    initial_cancel_states: list[bool] = []
     trigger = TriggerDefinition.model_validate(
         {"id": "syslog-default", "type": "syslog", "mapping": {"message": "$.body"}}
     )
 
-    async def _fake_create_execution_record(*args, **kwargs):  # noqa: ANN001, ANN002, ANN003
-        return {"id": "exec-running-stop"}
-
-    async def _fake_record_execution_result(*args, **kwargs):  # noqa: ANN001, ANN002, ANN003
-        return None
-
     def _fake_run_workflow(**kwargs):  # noqa: ANN003
+        initial_cancel_states.append(kwargs["cancel"]())
         started.set()
-        while not kwargs["cancel"]():
+        deadline = time.monotonic() + 5.0
+        while not kwargs["cancel"]() and time.monotonic() < deadline:
             time.sleep(0.01)
-        stopped.set()
+        if kwargs["cancel"]():
+            stopped.set()
         return SimpleNamespace(
             status="CANCELLED",
             error=None,
@@ -235,8 +233,6 @@ async def test_stop_workflow_signals_running_thread(
             steps=0,
         )
 
-    monkeypatch.setattr(syslog_manager, "create_execution_record", _fake_create_execution_record)
-    monkeypatch.setattr(syslog_manager, "record_execution_result", _fake_record_execution_result)
     monkeypatch.setattr(syslog_manager, "run_workflow", _fake_run_workflow)
 
     manager._queues[workflow_id] = queue
@@ -258,6 +254,8 @@ async def test_stop_workflow_signals_running_thread(
     manager._worker_pools[workflow_id] = [worker]
 
     assert await asyncio.wait_for(asyncio.to_thread(started.wait, 1.0), timeout=2.0)
+    assert initial_cancel_states == [False]
+    assert not stopped.is_set()
     await manager.stop_workflow(workflow_id)
 
     assert stopped.is_set()
@@ -284,10 +282,7 @@ async def test_stop_cancels_run_that_is_still_creating_execution_record(
     async def _slow_create(*args, **kwargs):  # noqa: ANN001, ANN002, ANN003
         create_started.set()
         await allow_create.wait()
-        return {"id": "exec-late-run"}
-
-    async def _record(*args, **kwargs):  # noqa: ANN001, ANN002, ANN003
-        return None
+        return await create_execution_record(*args, **kwargs)
 
     def _run_workflow(**kwargs):  # noqa: ANN003
         cancel_state_seen.append(kwargs["cancel"]())
@@ -301,7 +296,6 @@ async def test_stop_cancels_run_that_is_still_creating_execution_record(
         )
 
     monkeypatch.setattr(syslog_manager, "create_execution_record", _slow_create)
-    monkeypatch.setattr(syslog_manager, "record_execution_result", _record)
     monkeypatch.setattr(syslog_manager, "run_workflow", _run_workflow)
     manager._queues[workflow_id] = queue
     manager._abort_events[workflow_id] = abort
@@ -352,20 +346,25 @@ async def test_trigger_workflow_applies_mapping_and_filter(
     manager = syslog_manager.SyslogManager()
     captured_run_kwargs: dict = {}
     recorded_exec_data: dict = {}
-    recorded_steps: list[tuple[str, int, dict]] = []
+    recorded_steps: list[tuple[int, dict]] = []
+    cancellation_observations: list[tuple[int, bool]] = []
+    owner_thread = threading.get_ident()
 
-    async def _fake_create_execution_record(workflow_id, *, input_params=None, exec_id=None):  # noqa: ANN001
-        return {"id": "exec-syslog", "workflowId": workflow_id, "inputParams": input_params}
+    async def _fake_create_execution_record(  # noqa: ANN001
+        workflow_id, *, input_params=None, exec_id=None
+    ):
+        return await create_execution_record(workflow_id, input_params=input_params, exec_id="exec-syslog")
 
-    async def _fake_record_execution_result(workflow_id, exec_id, exec_data):  # noqa: ANN001
+    async def _fake_record_execution_result(  # noqa: ANN001
+        workflow_id, exec_id, exec_data, *, steps=None
+    ):
         recorded_exec_data.update(exec_data)
-
-    async def _fake_record_execution_step(exec_id, step_index, step):  # noqa: ANN001
-        recorded_steps.append((exec_id, step_index, step))
-        return step
+        recorded_steps.extend(steps or [])
+        await record_execution_result(workflow_id, exec_id, exec_data, steps=steps)
 
     def _fake_run_workflow(**kwargs):  # noqa: ANN003
         captured_run_kwargs.update(kwargs)
+        cancellation_observations.append((threading.get_ident(), kwargs["cancel"]()))
         kwargs["on_step_complete"](
             SimpleNamespace(
                 model_dump=lambda mode="json": {
@@ -392,7 +391,6 @@ async def test_trigger_workflow_applies_mapping_and_filter(
     monkeypatch.setattr(syslog_manager, "create_execution_record", _fake_create_execution_record)
     monkeypatch.setattr(syslog_manager, "record_execution_result", _fake_record_execution_result)
     monkeypatch.setattr(syslog_manager, "run_workflow", _fake_run_workflow)
-    monkeypatch.setattr(execution_store, "record_execution_step", _fake_record_execution_step)
 
     trigger = TriggerDefinition.model_validate(
         {
@@ -423,16 +421,27 @@ async def test_trigger_workflow_applies_mapping_and_filter(
     assert captured_run_kwargs["execution_profile"] == "high_frequency"
     assert captured_run_kwargs["tool_context"] is trigger_tool_context.context
     assert callable(captured_run_kwargs["cancel"])
-    assert captured_run_kwargs["cancel"]() is False
+    assert len(cancellation_observations) == 1
+    assert cancellation_observations[0][0] != owner_thread
+    assert cancellation_observations[0][1] is False
+    assert captured_run_kwargs["cancel"]() is True  # completion released the lease
     assert callable(captured_run_kwargs["on_step_complete"])
     trigger_tool_context.builder.assert_awaited_once_with(
         workflow_id="wf-syslog",
         action_name="trigger:syslog",
     )
     trigger_tool_context.cleanup.assert_awaited_once_with(trigger_tool_context.context)
-    assert recorded_steps[0][0] == "exec-syslog"
-    assert recorded_steps[0][1] == 1
-    assert recorded_steps[0][2]["node_id"] == "receive_alert"
+    assert recorded_steps == [
+        (
+            1,
+            {
+                "node_id": "receive_alert",
+                "node_type": "python",
+                "inputs": {"message": "demo"},
+                "outputs": {"ok": True},
+            },
+        )
+    ]
     assert recorded_exec_data["triggerId"] == "syslog-alerts"
     assert recorded_exec_data["triggerSource"] == "udp://0.0.0.0:5514"
     assert recorded_exec_data["executionLog"] == []

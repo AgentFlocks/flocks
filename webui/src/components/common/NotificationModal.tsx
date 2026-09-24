@@ -1,15 +1,17 @@
 import { createPortal } from 'react-dom';
 import { useEffect } from 'react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import {
-  Bell,
-  CheckCircle,
-  ExternalLink,
-  Gift,
-  Loader2,
-  Sparkles,
-  X,
-  BellOff,
-} from 'lucide-react';
+  IconBell,
+  IconCircleCheck,
+  IconExternalLink,
+  IconGift,
+  IconLoader2,
+  IconSparkles,
+  IconX,
+  IconBellOff,
+} from '@tabler/icons-react';
 import { useTranslation } from 'react-i18next';
 import type { UserNotification } from '@/api/notifications';
 
@@ -24,36 +26,36 @@ interface NotificationModalProps {
 const getAccent = (kind: UserNotification['kind']) => {
   if (kind === 'benefit') {
     return {
-      icon: Gift,
+      icon: IconGift,
       ring: 'border-emerald-200',
       header: 'from-emerald-50 via-teal-50 to-cyan-50',
       iconBg: 'bg-emerald-500',
       title: 'text-emerald-950',
       text: 'text-emerald-800',
-      button: 'bg-emerald-600 hover:bg-emerald-700',
+      button: 'bg-red-600 hover:bg-red-700',
     };
   }
 
   if (kind === 'whats_new') {
     return {
-      icon: Sparkles,
+      icon: IconSparkles,
       ring: 'border-amber-200',
       header: 'from-amber-50 via-orange-50 to-rose-50',
       iconBg: 'bg-amber-500',
       title: 'text-amber-950',
       text: 'text-amber-800',
-      button: 'bg-amber-500 hover:bg-amber-600',
+      button: 'bg-red-600 hover:bg-red-700',
     };
   }
 
   return {
-    icon: Bell,
+    icon: IconBell,
     ring: 'border-blue-200',
     header: 'from-blue-50 via-sky-50 to-indigo-50',
     iconBg: 'bg-blue-500',
     title: 'text-blue-950',
     text: 'text-blue-800',
-    button: 'bg-blue-600 hover:bg-blue-700',
+    button: 'bg-red-600 hover:bg-red-700',
   };
 };
 
@@ -101,7 +103,7 @@ export default function NotificationModal({
         >
           <div className={`flex items-start gap-3 bg-gradient-to-r ${accent.header} px-5 py-4`}>
             <span className={`mt-0.5 flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-full ${accent.iconBg} text-white shadow-sm`}>
-              <Icon className="h-5 w-5" />
+              <Icon aria-hidden="true" className="h-5 w-5" />
             </span>
             <div className="min-w-0 flex-1">
               <div id="notification-modal-title" className={`text-base font-semibold ${accent.title}`}>{t('title')}</div>
@@ -113,7 +115,7 @@ export default function NotificationModal({
               className="rounded p-1 text-gray-400 transition-colors hover:text-gray-600 disabled:cursor-not-allowed disabled:opacity-50"
               aria-label={t('close')}
             >
-              <X className="h-4 w-4" />
+              <IconX aria-hidden="true" className="h-4 w-4" />
             </button>
           </div>
 
@@ -133,7 +135,7 @@ export default function NotificationModal({
                   >
                     <div className="flex items-start gap-3">
                       <span className={`mt-0.5 flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full ${sectionAccent.iconBg} text-white shadow-sm`}>
-                        <SectionIcon className="h-4 w-4" />
+                        <SectionIcon aria-hidden="true" className="h-4 w-4" />
                       </span>
                       <div className="min-w-0 flex-1">
                         <div className={`text-sm font-semibold ${sectionAccent.title}`}>{notification.title}</div>
@@ -144,14 +146,29 @@ export default function NotificationModal({
                     </div>
 
                     {notification.body && (
-                      <p className="mt-3 whitespace-pre-wrap text-sm leading-6 text-gray-600">{notification.body}</p>
+                      notification.kind === 'whats_new' ? (
+                        <div className="prose prose-sm mt-3 max-w-none break-words text-gray-600 prose-headings:my-3 prose-headings:text-gray-800 prose-p:my-2 prose-p:leading-6 prose-ul:my-2 prose-ol:my-2 prose-li:my-1 prose-a:break-all prose-a:text-amber-700 prose-pre:overflow-x-auto">
+                          <ReactMarkdown
+                            remarkPlugins={[remarkGfm]}
+                            components={{
+                              a: ({ children, ...props }) => (
+                                <a {...props} target="_blank" rel="noopener noreferrer">{children}</a>
+                              ),
+                            }}
+                          >
+                            {notification.body}
+                          </ReactMarkdown>
+                        </div>
+                      ) : (
+                        <p className="mt-3 whitespace-pre-wrap text-sm leading-6 text-gray-600">{notification.body}</p>
+                      )
                     )}
 
                     {notification.highlights.length > 0 && (
                       <div className="mt-3 space-y-2">
                         {notification.highlights.map((highlight) => (
                           <div key={highlight} className="flex items-start gap-2 text-sm text-gray-700">
-                            <CheckCircle className="mt-0.5 h-4 w-4 flex-shrink-0 text-emerald-500" />
+                            <IconCircleCheck aria-hidden="true" className="mt-0.5 h-4 w-4 flex-shrink-0 text-emerald-500" />
                             <span className="leading-5">{highlight}</span>
                           </div>
                         ))}
@@ -166,7 +183,7 @@ export default function NotificationModal({
                           className="flex items-center gap-1.5 rounded-lg bg-gray-100 px-3 py-1.5 text-xs font-medium text-gray-600 transition-colors hover:bg-gray-200 disabled:cursor-not-allowed disabled:opacity-50"
                         >
                           {action.label}
-                          <ExternalLink className="h-3.5 w-3.5" />
+                          <IconExternalLink aria-hidden="true" className="h-3.5 w-3.5" />
                         </button>
                       </div>
                     )}
@@ -184,9 +201,9 @@ export default function NotificationModal({
               title={t('dismissThis')}
             >
               {isBusy ? (
-                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                <IconLoader2 aria-hidden="true" className="h-3.5 w-3.5 animate-spin" />
               ) : (
-                <BellOff className="h-3.5 w-3.5" />
+                <IconBellOff aria-hidden="true" className="h-3.5 w-3.5" />
               )}
               {t('dismissThis')}
             </button>
@@ -196,7 +213,7 @@ export default function NotificationModal({
               disabled={isBusy}
               className={`ml-auto flex items-center gap-1.5 rounded-lg px-4 py-2 text-xs font-semibold text-white shadow-sm transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${accent.button}`}
             >
-              {isBusy && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+              {isBusy && <IconLoader2 aria-hidden="true" className="h-3.5 w-3.5 animate-spin" />}
               {t('gotIt')}
             </button>
           </div>

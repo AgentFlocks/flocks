@@ -1,0 +1,104 @@
+# Build the Linux offline installer (flocks-offline.run) for CentOS Stream 9 / RHEL 9
+# compatible hosts, for x86_64 and aarch64 (matrix on native runners). Runs inside a
+# CentOS Stream 9 container so the bundled virtualenv is built against the target glibc.
+# Manual runs upload one artifact per arch; published releases also get both .run files
+# attached as release assets (flocks-offline-<arch>.run; the customer renames it to
+# flocks-offline.run as the manual says).
+
+name: Linux offline installer
+
+on:
+  workflow_dispatch:
+    inputs:
+      flockspro_wheel_url:
+        description: "Optional URL of the paired flockspro wheel to embed as the offline Pro bundle"
+        required: false
+        default: ""
+      pro_release_id:
+        description: "Optional Console release id to stamp into bundle/manifest.json"
+        required: false
+        default: ""
+  release:
+    types:
+      - published
+
+permissions:
+  contents: write
+
+jobs:
+  build-run:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-latest
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    container:
+      image: quay.io/centos/centos:stream9
+    steps:
+      - name: Install build prerequisites
+        run: |
+          dnf -y install tar gzip xz findutils which git python3 diffutils procps-ng >/dev/null
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Cache toolchain downloads
+        uses: actions/cache@v5
+        with:
+          path: /root/.cache/flocks-offline-build
+          key: linux-offline-toolchain-${{ matrix.arch }}-${{ hashFiles('packaging/linux/versions.manifest.json') }}
+          restore-keys: |
+            linux-offline-toolchain-${{ matrix.arch }}-
+
+      - name: Fetch optional flockspro wheel
+        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.flockspro_wheel_url != '' }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/pro"
+          curl -fL "${{ github.event.inputs.flockspro_wheel_url }}" -o "$RUNNER_TEMP/pro/$(basename "${{ github.event.inputs.flockspro_wheel_url }}")"
+          echo "FLOCKSPRO_WHEEL=$(ls "$RUNNER_TEMP"/pro/flockspro-*.whl | head -n1)" >> "$GITHUB_ENV"
+
+      - name: Build flocks-offline.run
+        run: |
+          set -euo pipefail
+          args=(--output-dir "$RUNNER_TEMP/out")
+          if [ -n "${FLOCKSPRO_WHEEL:-}" ]; then
+            args+=(--flockspro-wheel "$FLOCKSPRO_WHEEL")
+          fi
+          if [ -n "${{ github.event.inputs.pro_release_id }}" ]; then
+            args+=(--pro-release-id "${{ github.event.inputs.pro_release_id }}")
+          fi
+          bash packaging/linux/build-offline-run.sh "${args[@]}"
+          ls -la "$RUNNER_TEMP/out"
+          test "$(uname -m)" = "${{ matrix.arch }}"
+          # arch-specific file names so both matrix legs can be attached to one release
+          mv "$RUNNER_TEMP/out/flocks-offline.run" "$RUNNER_TEMP/out/flocks-offline-${{ matrix.arch }}.run"
+          ( cd "$RUNNER_TEMP/out" && sha256sum "flocks-offline-${{ matrix.arch }}.run" > "flocks-offline-${{ matrix.arch }}.run.sha256" )
+
+      - name: Smoke-check the archive
+        run: |
+          bash "$RUNNER_TEMP/out/flocks-offline-${{ matrix.arch }}.run" --check
+          bash "$RUNNER_TEMP/out/flocks-offline-${{ matrix.arch }}.run" --info
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: flocks-offline-run-${{ matrix.arch }}
+          path: |
+            ${{ runner.temp }}/out/flocks-offline-${{ matrix.arch }}.run
+            ${{ runner.temp }}/out/flocks-offline-${{ matrix.arch }}.run.sha256
+            ${{ runner.temp }}/out/versions.json
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Attach to GitHub Release
+        if: ${{ github.event_name == 'release' }}
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            ${{ runner.temp }}/out/flocks-offline-${{ matrix.arch }}.run
+            ${{ runner.temp }}/out/flocks-offline-${{ matrix.arch }}.run.sha256

@@ -53,3 +53,72 @@ def test_download_file_rejects_unallowed_path(file_client, tmp_path: Path):
     response = client.get("/api/file/download", params={"path": str(secret)})
 
     assert response.status_code == 403
+
+
+def test_read_directory_is_400_not_500(file_client):
+    client, data, _workspace = file_client
+    (data / "sub").mkdir()
+
+    response = client.get("/api/file/content", params={"path": str(data / "sub")})
+
+    assert response.status_code == 400
+    assert response.json()["detail"].startswith("Not a file: ")
+
+
+def test_read_missing_file_does_not_echo_resolved_path(file_client):
+    client, data, _workspace = file_client
+
+    response = client.get("/api/file/content", params={"path": str(data / "missing.txt")})
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == f"File not found: {data / 'missing.txt'}"
+
+
+def test_list_internal_error_is_generic(file_client, monkeypatch: pytest.MonkeyPatch):
+    client, data, _workspace = file_client
+    from flocks.server.routes import file as file_routes
+
+    async def boom(_path):
+        raise RuntimeError("boom /secret/path")
+
+    monkeypatch.setattr(file_routes.File, "list", boom)
+    response = client.get("/api/file/list", params={"path": str(data)})
+
+    assert response.status_code == 500
+    assert "/secret/path" not in response.text
+    assert response.json()["detail"] == "Internal server error"
+
+
+def test_find_text_timeout_returns_empty(file_client, monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    import subprocess
+
+    client, _data, _workspace = file_client
+    from flocks.server.routes import file as file_routes
+
+    (tmp_path / ".flocks").mkdir(exist_ok=True)
+    monkeypatch.chdir(tmp_path)
+
+    def slow_run(cmd, **kwargs):
+        raise subprocess.TimeoutExpired(cmd, kwargs.get("timeout"))
+
+    monkeypatch.setattr(file_routes.subprocess if hasattr(file_routes, "subprocess") else subprocess, "run", slow_run)
+    response = client.get("/api/file/find/text", params={"pattern": "x"})
+
+    assert response.status_code == 200
+    assert response.json() == []
+
+
+def test_read_file_over_size_cap_is_413(file_client, monkeypatch: pytest.MonkeyPatch):
+    client, data, _workspace = file_client
+    from flocks.server.routes import file as file_routes
+
+    big = data / "big.bin"
+    big.write_bytes(b"x" * 2048)
+    monkeypatch.setattr(file_routes, "_CONTENT_MAX_BYTES", 1024)
+
+    response = client.get("/api/file/content", params={"path": str(big)})
+
+    assert response.status_code == 413
+    assert "use /api/file/download" in response.json()["detail"]
+    # download is unaffected by the inline cap
+    assert client.get("/api/file/download", params={"path": str(big)}).status_code == 200

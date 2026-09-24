@@ -5,6 +5,7 @@ Performs web searches using external search APIs.
 Requires API configuration to function.
 """
 
+import asyncio
 import json
 from typing import Optional
 from datetime import datetime
@@ -95,6 +96,11 @@ async def websearch_tool(
             success=False,
             error="Search query is required"
         )
+    if type not in ("auto", "fast", "deep"):
+        return ToolResult(
+            success=False,
+            error=f"Invalid search type '{type}': expected one of auto, fast, deep"
+        )
     
     # Request permission
     await ctx.ask(
@@ -134,7 +140,9 @@ async def websearch_tool(
             "Content-Type": "application/json"
         }
         
-        async with aiohttp.ClientSession() as session:
+        from flocks.net.aio import make_session
+
+        async with make_session(target_url=API_BASE_URL) as session:
             async with session.post(
                 f"{API_BASE_URL}/mcp",
                 json=request_data,
@@ -179,7 +187,13 @@ async def websearch_tool(
             title=title
         )
     except Exception as e:
-        if "timeout" in str(e).lower() or "abort" in str(e).lower():
+        # asyncio/aiohttp timeouts carry an empty message, so a substring check
+        # alone reported them as a generic "Search failed: ".
+        if (
+            isinstance(e, (asyncio.TimeoutError, TimeoutError))
+            or "timeout" in str(e).lower()
+            or "abort" in str(e).lower()
+        ):
             return ToolResult(
                 success=False,
                 error="Search request timed out",

@@ -253,6 +253,13 @@ def test_run_workflow_cancels_python_node_llm_ask(monkeypatch) -> None:
         "edges": [],
     }
 
+    # ``llm.ask`` now runs the llm.before/llm.after hook stages; warm up the
+    # pipeline first so the one-time plugin/entry-point load is not counted
+    # against the cancellation latency measured below.
+    from flocks.hooks.pipeline import HookPipeline
+
+    asyncio.run(HookPipeline.ensure_initialized())
+
     cancel_event = threading.Event()
     timer = threading.Timer(0.05, cancel_event.set)
     started = time.perf_counter()

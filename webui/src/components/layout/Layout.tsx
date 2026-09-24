@@ -1,40 +1,53 @@
-import { Outlet, Link, useLocation, matchPath, useNavigate } from 'react-router-dom';
+import { Link, useLocation, useNavigate, type RouteObject } from 'react-router-dom';
 import {
-  Home,
-  MessageSquare,
-  Bot,
-  Brain,
-  Workflow,
-  ListTodo,
-  Wrench,
-  BookOpen,
-  Radio,
-  X,
-  ChevronLeft,
-  ChevronRight,
-  ChevronUp,
-  Menu,
-  FolderOpen,
-  Sparkles,
-  Archive,
-  ServerCog,
-  LogOut,
-  Settings,
-  ArrowUpCircle,
-  RefreshCw,
-  Loader2,
-  type LucideIcon,
-} from 'lucide-react';
-import { useState, useEffect, useLayoutEffect, useCallback, useMemo, useRef, lazy, Suspense } from 'react';
-import type { ComponentType, CSSProperties, KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent } from 'react';
+  IconHome,
+  IconMessageCircle,
+  IconRobot,
+  IconCpu,
+  IconRouteSquare2,
+  IconListCheck,
+  IconTool,
+  IconBook,
+  IconBroadcast,
+  IconX,
+  IconChevronLeft,
+  IconChevronRight,
+  IconChevronUp,
+  IconMenu2,
+  IconFolderOpen,
+  IconSparkles,
+  IconArchive,
+  IconServerCog,
+  IconLogout,
+  IconRefresh,
+  IconGauge,
+  IconGripVertical,
+  IconLoader2,
+  IconPencil,
+  IconPlus,
+  IconShieldCheck,
+  type TablerIcon,
+} from '@tabler/icons-react';
+import { useState, useEffect, useCallback, useMemo, useRef, lazy, Suspense } from 'react';
+import type {
+  ComponentType,
+  CSSProperties,
+  DragEvent as ReactDragEvent,
+  KeyboardEvent as ReactKeyboardEvent,
+  PointerEvent as ReactPointerEvent,
+} from 'react';
 import { useTranslation } from 'react-i18next';
+import { onboardingAPI } from '@/api/onboarding';
+import { useTokenPolicyNotice } from '@/hooks/useTokenPolicyNotice';
 // Modals are only rendered after the user clicks/triggers them; pulling them
-// into the eager Layout chunk costs ~1.7k LOC + i18n keys + lucide icons that
-// the home page never needs. To keep the lazy split effective, we don't
-// re-import dismissal helpers from the modal modules (a static named import
-// would force Rollup to bundle the whole module eagerly).
-const ONBOARDING_DISMISSED_KEY = 'flocks_onboarding_dismissed';
+// into the eager Layout chunk costs ~1.7k LOC + i18n keys + tabler icons that
+// the home page never needs.
 const COLLAPSED_NAV_SECTIONS_KEY = 'flocks_layout_collapsed_nav_sections';
+const EXPANDED_PRIMARY_NAV_SECTION_KEY = 'flocks_layout_expanded_primary_nav_section';
+const WORKSPACE_NAV_SECTION_PREFIX = 'workspace:';
+const AI_WORKBENCH_NAV_SECTION_ID = 'aiWorkbench';
+// Pane used for routes that are not a sidebar entry (they are not kept as tabs).
+const TRANSIENT_PANE_HREF = '__current__';
 const SIDEBAR_WIDTH_KEY = 'flocks_layout_sidebar_width';
 const SIDEBAR_DEFAULT_WIDTH = 208;
 const SIDEBAR_MIN_WIDTH = 176;
@@ -55,10 +68,6 @@ function lazyLayoutComponent<T extends LazyLayoutModule>(
       preloadI18nNamespaces(namespaces),
     ]).then(([module]) => module),
   ));
-}
-
-function isOnboardingDismissed(): boolean {
-  return localStorage.getItem(ONBOARDING_DISMISSED_KEY) === 'true';
 }
 
 function readCollapsedNavSectionIds(): Set<string> {
@@ -83,6 +92,33 @@ function saveCollapsedNavSectionIds(sectionIds: Set<string>): void {
   } catch {
     // Local storage can be unavailable in restricted browser contexts.
   }
+}
+
+/**
+ * The primary accordion (the AI workbench group today): at most one of its
+ * members shows its second-level menu at a time. `undefined` means nothing
+ * has been stored yet, `null` means the user collapsed all of them.
+ */
+function readExpandedPrimaryNavSectionId(): string | null | undefined {
+  try {
+    const rawValue = localStorage.getItem(EXPANDED_PRIMARY_NAV_SECTION_KEY);
+    if (rawValue === null) return undefined;
+    return rawValue === '' ? null : rawValue;
+  } catch {
+    return undefined;
+  }
+}
+
+function saveExpandedPrimaryNavSectionId(sectionId: string | null): void {
+  try {
+    localStorage.setItem(EXPANDED_PRIMARY_NAV_SECTION_KEY, sectionId ?? '');
+  } catch {
+    // Local storage can be unavailable in restricted browser contexts.
+  }
+}
+
+function workspaceNavSectionId(workspaceId: string): string {
+  return `${WORKSPACE_NAV_SECTION_PREFIX}${workspaceId}`;
 }
 
 function clampSidebarWidth(width: number): number {
@@ -147,26 +183,48 @@ function saveSocDashboardTitle(title: string): void {
 const OnboardingModal = lazyLayoutComponent(() => import('@/components/common/OnboardingModal'));
 const UpdateModal = lazyLayoutComponent(() => import('@/components/common/UpdateModal'), ['update']);
 const NotificationModal = lazyLayoutComponent(() => import('@/components/common/NotificationModal'), ['notification']);
+const TokenPolicyNotice = lazyLayoutComponent(() => import('@/components/common/TokenPolicyNotice'), ['notification']);
 import { checkUpdate, type VersionInfo } from '@/api/update';
-import { consoleUpgradeApi } from '@/api/consoleUpgrade';
 import {
   ackNotification,
   getActiveNotifications,
   getNotificationAckStatus,
   type UserNotification,
 } from '@/api/notifications';
-import { flocksproUsersApi } from '@/api/flocksproUsers';
+import registry from '@ext/registry';
+import ExtensionSlot from '@/components/extensions/ExtensionSlot';
 import { useAuth } from '@/contexts/AuthContext';
 import { useProductName } from '@/contexts/ProductNameContext';
 import { getLocalizedReleaseNotes } from '@/utils/releaseNotes';
 import { UPDATE_DISMISSED_KEY, buildUpdateDismissalKey, isUpdateDismissed } from '@/utils/updateDismissal';
 import { useWebUIContractPages } from '@/hooks/useWebUIContractPages';
+import { useSceneSuiteUpdates } from '@/hooks/useSceneSuiteUpdates';
 import { preloadI18nNamespaces } from '@/i18nResources';
 import { resolveWebUIContractPageIcon } from '@/utils/webuiContractPageIcons';
 import {
+  buildWebUIContractWorkspacePageList,
   buildWebUIContractWorkspaceSections,
   getLocalizedWebUIContractTitle,
 } from '@/utils/webuiContractWorkspaceSections';
+import { useWorkspacePageOrders } from '@/hooks/useWorkspacePageOrders';
+import { moveItem, saveNavItemOrder } from '@/utils/workspaceNavOrder';
+import { useLayoutOpenTabs } from '@/hooks/useLayoutOpenTabs';
+import { findActiveTabHref, resolveOpenTabs } from '@/utils/layoutTabs';
+import {
+  AGENT_PARTITION_DEFAULT_PATH,
+  SCENE_SUITES_PATH,
+  SETTINGS_PARTITION_DEFAULT_PATH,
+  readPartitionPaths,
+  resolveNavPartition,
+  savePartitionPaths,
+  workspaceIdFromPath,
+  type NavPartitionId,
+  type NavPartitionPaths,
+} from '@/utils/navPartitions';
+import { useSettingsSectionGroups } from '@/utils/settingsSections';
+import PartitionTopBar, { type PartitionTopBarItem } from './PartitionTopBar';
+import KeepAlivePanes from './KeepAlivePanes';
+import { contentRoutes as appContentRoutes } from '@/routes/contentRoutes';
 import { sessionApi } from '@/api/session';
 import { useToast } from '@/components/common/Toast';
 import LazyLoadErrorBoundary from '@/components/common/LazyLoadErrorBoundary';
@@ -176,25 +234,34 @@ import { recoverLazyLoad } from '@/utils/chunkLoadRecovery';
 const UPDATE_CHECK_INTERVAL_MS = 3_600_000;
 const UPDATE_CHECK_MIN_GAP_MS = 600_000;
 const UPDATE_CHECK_INITIAL_DELAY_MS = 250;
+const FLOCKS_LLM_USAGE_URL = 'https://portal.agentflocks.com';
 
 interface LayoutNavItem {
+  /** Stable id so an extension registry can hide a default entry (`hideDefault`). */
+  id?: string;
   name: string;
   href: string;
-  icon: LucideIcon;
-  opensWorkspaceMenu?: boolean;
-  workspaceId?: string;
+  icon: TablerIcon;
+  /** Opens in a new tab instead of routing (Flocks LLM usage portal). */
+  external?: boolean;
+  /** Workspace page id; present for reorderable workspace pages. */
+  pageId?: string;
 }
 
 interface LayoutNavSection {
   id?: string;
   name: string;
+  /** Top-bar partition this section belongs to. */
+  partition: NavPartitionId;
   items: LayoutNavItem[];
   collapsible?: boolean;
-}
-
-function formatProVersion(version?: string | null): string | null {
-  const normalized = (version || '').trim().replace(/^pro-v/i, '').replace(/^v/i, '');
-  return normalized ? `v${normalized}` : null;
+  /** Sections in the same accordion group expand one at a time. */
+  accordionGroup?: 'primary';
+  /** Scene workspace whose pages this group lists (one group per workspace section, e.g. SOC 态势 / 告警运营). */
+  workspace?: WebUIContractWorkspaceListItem;
+  /** Workspace the section's own actions belong to (自定义页面 / 自定义标题).
+   *  Set on the last group of the SOC scene only, so the actions close its menu. */
+  actionsWorkspace?: WebUIContractWorkspaceListItem;
 }
 
 function formatUpdateVersion(version?: string | null): string | null {
@@ -203,17 +270,11 @@ function formatUpdateVersion(version?: string | null): string | null {
   return /^(pro-)?v/i.test(raw) ? raw : `v${raw}`;
 }
 
-function currentProductVersion(info: VersionInfo, isFlocksproActive: boolean): string | null {
-  if (isFlocksproActive || info.edition === 'flockspro') {
-    return info.current_bundle_version || info.current_version || null;
-  }
+function currentProductVersion(info: VersionInfo): string | null {
   return info.current_version || null;
 }
 
-function latestProductVersion(info: VersionInfo, isFlocksproActive: boolean): string | null {
-  if (isFlocksproActive || info.edition === 'flockspro') {
-    return info.latest_bundle_version || info.latest_version || null;
-  }
+function latestProductVersion(info: VersionInfo): string | null {
   return info.latest_version || null;
 }
 
@@ -249,7 +310,12 @@ function isSocWorkspace(workspace: WebUIContractWorkspaceListItem | null): boole
     || workspace.title.includes('SOC 工作区');
 }
 
-export default function Layout() {
+interface LayoutProps {
+  /** Pages rendered inside the layout; defaults to the app routes (tests inject probes). */
+  contentRoutes?: RouteObject[];
+}
+
+export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps = {}) {
   const location = useLocation();
   const navigate = useNavigate();
   const { user, logout } = useAuth();
@@ -261,12 +327,28 @@ export default function Layout() {
   const accountMenuRef = useRef<HTMLDivElement | null>(null);
   const isHome = location.pathname === '/';
   const [showOnboarding, setShowOnboarding] = useState(false);
-  const [showUpdate, setShowUpdate] = useState(false);
+  const [updateState, setUpdateState] = useState<'idle' | 'pending' | 'visible'>('idle');
+  // Whether the open dialog was asked for explicitly. Inferring it from
+  // "we have no cached version info" was fragile: a background refresh landing
+  // while the dialog was open filled the cache and silently turned the forced
+  // check off under it.
+  const [updateCheckForced, setUpdateCheckForced] = useState(false);
+  const tokenPolicy = useTokenPolicyNotice(user?.id, showOnboarding || updateState === 'visible');
+  const handleUpdatePresented = useCallback(() => {
+    if (document.visibilityState === 'visible') setUpdateState('visible');
+  }, []);
+  const requestUpdate = useCallback(() => {
+    setUpdateState((state) => state === 'visible' ? state : 'pending');
+  }, []);
+  const closeUpdate = useCallback(() => {
+    setUpdateState('idle');
+    setUpdateCheckForced(false);
+  }, []);
   const { t, i18n } = useTranslation('nav');
   const { t: tWebUIContractPage } = useTranslation('webuiContractPage');
   const { t: tAuth } = useTranslation('auth');
   const toast = useToast();
-  const { productName, proProductName, configuredDisplayName } = useProductName();
+  const { productName, configuredDisplayName } = useProductName();
   const [hasUpdate, setHasUpdate] = useState(false);
   const [latestVersion, setLatestVersion] = useState<string | null>(null);
   const [currentVersion, setCurrentVersion] = useState<string | null>(null);
@@ -281,21 +363,45 @@ export default function Layout() {
   const [updateNotificationReady, setUpdateNotificationReady] = useState(false);
   const [acknowledgingNotificationIds, setAcknowledgingNotificationIds] = useState<string[]>([]);
   const lastNotificationFetchKeyRef = useRef<string | null>(null);
-  const [isFlocksproActive, setIsFlocksproActive] = useState(false);
-  const [flocksproStatusReady, setFlocksproStatusReady] = useState(false);
-  const [flocksproVersion, setFlocksproVersion] = useState<string | null>(null);
   const canManageUpdates = user?.role === 'admin';
-  const notificationGateReady = flocksproStatusReady
-    && (!canManageUpdates || hasCompletedUpdateCheck);
+  const notificationGateReady = !canManageUpdates || hasCompletedUpdateCheck;
   const canCreateWorkspaceCustomPage = user?.role === 'admin';
-  const { pages: webuiContractPages, workspaces: webuiContractWorkspaces = [] } = useWebUIContractPages();
-  const [openWorkspaceMenuId, setOpenWorkspaceMenuId] = useState<string | null>(null);
+  // Entries an extension added to the account menu, admin-only ones filtered
+  // out for everyone else. Empty in a stock build.
+  const accountMenuExtensions = useMemo(
+    () =>
+      registry.navItems
+        .filter((item) => item.placement === 'accountMenu')
+        .filter((item) => !item.adminOnly || user?.role === 'admin')
+        .filter((item) => !registry.hideDefault?.(item.id))
+        .sort((a, b) => (a.order ?? 0) - (b.order ?? 0)),
+    [user?.role],
+  );
+  const {
+    pages: webuiContractPages,
+    workspaces: webuiContractWorkspaces = [],
+    loading: webuiContractNavLoading,
+    error: webuiContractNavError,
+  } = useWebUIContractPages();
+  const viewingScenes = location.pathname === '/scenes' || location.pathname.startsWith('/scenes/');
+  const { hasUnseenSuites } = useSceneSuiteUpdates({ viewingScenes, userId: user?.id });
+  const workspacePageOrders = useWorkspacePageOrders();
+  const [openTabRecords, setOpenTabRecords] = useLayoutOpenTabs();
+  // Tab whose close is in flight: React Router commits the navigation as a
+  // transition, so until the route changes it must not be re-added.
+  const openTabRecordsRef = useRef(openTabRecords);
+  useEffect(() => {
+    openTabRecordsRef.current = openTabRecords;
+  }, [openTabRecords]);
   const [collapsedNavSectionIds, setCollapsedNavSectionIds] = useState<Set<string>>(readCollapsedNavSectionIds);
-  const [collapsedWorkspaceSectionIds, setCollapsedWorkspaceSectionIds] = useState<Set<string>>(() => new Set());
+  const [expandedPrimaryNavSectionId, setExpandedPrimaryNavSectionId] = useState<string | null | undefined>(
+    readExpandedPrimaryNavSectionId,
+  );
+  const [draggingNavItem, setDraggingNavItem] = useState<{ sectionId: string; key: string } | null>(null);
+  const [dragOverNavItemKey, setDragOverNavItemKey] = useState<string | null>(null);
   const [creatingWorkspaceCustomPageSession, setCreatingWorkspaceCustomPageSession] = useState(false);
   const [socTitleDialogOpen, setSocTitleDialogOpen] = useState(false);
   const [socTitleDraft, setSocTitleDraft] = useState(readSocDashboardTitle);
-  const workspaceMenuCloseTimerRef = useRef<number | null>(null);
   const hasCustomDisplayName = Boolean(configuredDisplayName?.trim());
   const expandedSidebarWidth = sidebarWidth;
   const sidebarOffsetStyle = {
@@ -380,12 +486,25 @@ export default function Layout() {
     updateSidebarWidth(sidebarWidth + (event.key === 'ArrowRight' ? 16 : -16));
   }, [collapsed, sidebarWidth, updateSidebarWidth]);
 
-  // useLayoutEffect runs synchronously before paint, so there's no flash on initial load.
-  // It also re-runs when the user navigates back to /, covering both cases in one place.
-  useLayoutEffect(() => {
-    if (isHome && !isOnboardingDismissed()) {
-      setShowOnboarding(true);
-    }
+  useEffect(() => {
+    if (!isHome) return undefined;
+
+    let cancelled = false;
+    onboardingAPI.getStatus()
+      .then((res) => {
+        if (!cancelled && !res.data.completed) {
+          setShowOnboarding(true);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setShowOnboarding(true);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
   }, [isHome]);
 
   const handleOpenOnboarding = useCallback(() => setShowOnboarding(true), []);
@@ -396,7 +515,7 @@ export default function Layout() {
   }, [handleOpenOnboarding]);
 
   const refreshUpdateStatus = useCallback(async (bypassMinGap = false) => {
-    if (!flocksproStatusReady || !canManageUpdates) return;
+    if (!canManageUpdates) return;
 
     const now = Date.now();
     if (checkingUpdateRef.current) return;
@@ -406,12 +525,11 @@ export default function Layout() {
     lastUpdateCheckAtRef.current = now;
 
     try {
-      const edition = isFlocksproActive ? 'flockspro' : 'flocks';
-      const info = await checkUpdate(i18n.language, edition);
+      const info = await checkUpdate(i18n.language, registry.updateChannel);
       setUpdateInfo(info);
 
-      const displayCurrentVersion = currentProductVersion(info, edition === 'flockspro');
-      const displayLatestVersion = latestProductVersion(info, edition === 'flockspro');
+      const displayCurrentVersion = currentProductVersion(info);
+      const displayLatestVersion = latestProductVersion(info);
 
       if (displayCurrentVersion) {
         setCurrentVersion(displayCurrentVersion);
@@ -429,7 +547,7 @@ export default function Layout() {
           && !isUpdateDismissed(info, localStorage.getItem(UPDATE_DISMISSED_KEY))
         ) {
           lastPromptedVersionRef.current = updateDismissalKey;
-          setShowUpdate(true);
+          requestUpdate();
         }
         return;
       }
@@ -444,10 +562,10 @@ export default function Layout() {
       checkingUpdateRef.current = false;
       setHasCompletedUpdateCheck(true);
     }
-  }, [canManageUpdates, flocksproStatusReady, i18n.language, isFlocksproActive]);
+  }, [canManageUpdates, i18n.language, requestUpdate]);
 
   useEffect(() => {
-    if (!flocksproStatusReady || !canManageUpdates) return undefined;
+    if (!canManageUpdates) return undefined;
 
     const initialCheckTimerId = window.setTimeout(() => {
       refreshUpdateStatus(true);
@@ -478,57 +596,7 @@ export default function Layout() {
       document.removeEventListener('visibilitychange', handleVisibilityChange);
       window.removeEventListener('focus', handleWindowFocus);
     };
-  }, [canManageUpdates, flocksproStatusReady, refreshUpdateStatus]);
-
-  useEffect(() => {
-    let cancelled = false;
-    setFlocksproStatusReady(false);
-    if (!user?.id) {
-      setIsFlocksproActive(false);
-      setFlocksproVersion(null);
-      setFlocksproStatusReady(true);
-      return () => {
-        cancelled = true;
-      };
-    }
-    const refreshFlocksproStatus = () => {
-      setFlocksproStatusReady(false);
-      void Promise.all([
-        flocksproUsersApi.getLicenseStatus().catch(() => null),
-        consoleUpgradeApi.getProPackageStatus().catch(() => null),
-      ])
-        .then(([licenseStatus, packageStatus]) => {
-          if (cancelled) return;
-          const active = licenseStatus?.pro_enabled === true || packageStatus?.pro_enabled === true;
-          setIsFlocksproActive(active);
-          const version = active
-            ? formatProVersion(
-                packageStatus?.bundle_version ||
-                  packageStatus?.installed_version ||
-                  packageStatus?.flockspro_component_version,
-              )
-            : null;
-          setFlocksproVersion(version);
-        })
-        .catch(() => {
-          if (!cancelled) {
-            setIsFlocksproActive(false);
-            setFlocksproVersion(null);
-          }
-        })
-        .finally(() => {
-          if (!cancelled) {
-            setFlocksproStatusReady(true);
-          }
-        });
-    };
-    refreshFlocksproStatus();
-    window.addEventListener('flockspro-license-status-changed', refreshFlocksproStatus);
-    return () => {
-      cancelled = true;
-      window.removeEventListener('flockspro-license-status-changed', refreshFlocksproStatus);
-    };
-  }, [user?.id]);
+  }, [canManageUpdates, refreshUpdateStatus]);
 
   useEffect(() => {
     if (!user?.id) {
@@ -611,7 +679,7 @@ export default function Layout() {
   const allNotifications = updateNotification
     ? [...notifications, updateNotification].sort((a, b) => a.priority - b.priority)
     : notifications;
-  const visibleNotifications = backendNotificationsReady && updateNotificationReady && !showOnboarding && !showUpdate && allNotifications.length > 0
+  const visibleNotifications = tokenPolicy.ready && !tokenPolicy.notice && backendNotificationsReady && updateNotificationReady && !showOnboarding && updateState === 'idle' && allNotifications.length > 0
     ? allNotifications
     : [];
 
@@ -646,87 +714,253 @@ export default function Layout() {
   // stable as long as the language doesn't change. Without this, every route
   // switch rebuilt the whole nav structure and cascaded re-renders down to
   // every <Link>, contributing to perceptible navigation lag.
+  const { groups: settingsGroups } = useSettingsSectionGroups();
+
   const navigation = useMemo<LayoutNavSection[]>(
     () => {
-      const sceneWorkspaceItems = webuiContractWorkspaces
-        .filter((workspace) => workspace.enabled && (workspace.placement === 'sceneWorkspace' || workspace.placement === 'aiWorkbench'))
-        .map((workspace) => ({
-          name: getLocalizedWebUIContractTitle(workspace, i18n.language),
-          href: workspace.route,
-          icon: resolveWebUIContractPageIcon(workspace.icon),
-          opensWorkspaceMenu: true,
-          workspaceId: workspace.id,
+      const enabledWorkspaces = webuiContractWorkspaces.filter((workspace) => workspace.enabled);
+      const workspacePageItems = (workspace: WebUIContractWorkspaceListItem): LayoutNavItem[] => (
+        workspacePageOrders
+          .apply(workspace.id, buildWebUIContractWorkspacePageList(workspace, i18n.language)
+            .filter((page) => page.enabled && page.buildStatus === 'ready'))
+          .map((page) => ({
+            pageId: page.id,
+            name: page.title,
+            href: `${workspace.route}/${page.id}`,
+            icon: resolveWebUIContractPageIcon(page.icon),
+          }))
+      );
+      const workbenchWorkspaceItems = enabledWorkspaces
+        .filter((workspace) => workspace.placement === 'aiWorkbench')
+        .flatMap(workspacePageItems);
+      // Built-in groups can be reordered by dragging too; the order is stored per group.
+      const navItemKey = (item: LayoutNavItem) => item.pageId ?? item.href;
+      const orderedGroup = (sectionId: string, items: LayoutNavItem[]) => workspacePageOrders.applyNav(sectionId, items, navItemKey);
+      // The SOC workspace partition holds every installed scene. A scene's
+      // workspace.json sections (SOC: 态势 / 告警运营) are the first-level
+      // groups and their pages the second level, so the menu keeps the
+      // hierarchy the suite declares; a scene without sections is one group
+      // named after the scene (代码审计). Groups collapse independently.
+      const pageItem = (workspace: WebUIContractWorkspaceListItem) => (page: WebUIContractWorkspaceListItem['pages'][number]): LayoutNavItem => ({
+        pageId: page.id,
+        name: page.title,
+        href: `${workspace.route}/${page.id}`,
+        icon: resolveWebUIContractPageIcon(page.icon),
+      });
+      const readyPage = (page: WebUIContractWorkspaceListItem['pages'][number]) => page.enabled && page.buildStatus === 'ready';
+      const sceneWorkspaceSections: LayoutNavSection[] = enabledWorkspaces
+        .filter((workspace) => workspace.placement === 'sceneWorkspace')
+        .flatMap((workspace) => {
+          const groups = (workspace.sections?.length ?? 0) > 0
+            ? buildWebUIContractWorkspaceSections(workspace, i18n.language).map((section) => ({
+              id: `${workspaceNavSectionId(workspace.id)}:${section.id}`,
+              name: section.label,
+              pages: section.pages,
+            }))
+            : [{
+              id: workspaceNavSectionId(workspace.id),
+              name: getLocalizedWebUIContractTitle(workspace, i18n.language),
+              pages: buildWebUIContractWorkspacePageList(workspace, i18n.language),
+            }];
+          return groups
+            .map((group) => ({ ...group, items: orderedGroup(group.id, group.pages.filter(readyPage).map(pageItem(workspace))) }))
+            .filter((group) => group.items.length > 0)
+            .map(({ id, name, items }): LayoutNavSection => ({ id, name, partition: 'scene', collapsible: true, workspace, items }));
+        });
+      // 自定义页面 / 自定义标题 belong to the SOC scene; they follow its last group.
+      for (let index = sceneWorkspaceSections.length - 1; index >= 0; index -= 1) {
+        const workspace = sceneWorkspaceSections[index].workspace;
+        if (workspace && isSocWorkspace(workspace)) {
+          sceneWorkspaceSections[index] = { ...sceneWorkspaceSections[index], actionsWorkspace: workspace };
+          break;
+        }
+      }
+      // Custom pages that do not belong to a workspace sit next to the scene
+      // workspaces rather than under the home entry.
+      const customPageItems: LayoutNavItem[] = webuiContractPages
+        .filter((page) => !page.workspaceId && page.enabled && page.placement === 'home.after' && page.buildStatus === 'ready')
+        .map((page) => ({
+          name: getLocalizedWebUIContractTitle(page, i18n.language),
+          href: page.route,
+          icon: resolveWebUIContractPageIcon(page.icon),
         }));
+      // The system-settings partition reuses the settings page sections.
+      const settingsSections: LayoutNavSection[] = settingsGroups.map((group) => ({
+        id: `settings:${group.id}`,
+        name: group.name,
+        partition: 'settings' as const,
+        items: [
+          ...group.items.map((item) => ({
+            name: item.name,
+            href: `/settings/${item.id}`,
+            icon: item.icon,
+          })),
+          // The usage portal lives outside the app but belongs to this menu.
+          ...(group.id === 'system'
+            ? [{ name: t('flocksLlmUsageQuota'), href: FLOCKS_LLM_USAGE_URL, icon: IconGauge, external: true }]
+            : []),
+        ],
+      }));
 
-      return [
+      // Sidebar entries an extension registered, grouped by the section they
+      // asked for (default agentHub); admin-only ones dropped for members.
+      // `home` and `aiWorkbench` both land in the workbench group now that the
+      // home entry lives there; `sceneWorkspaces` joins the scene partition.
+      const extensionSidebarItems = new Map<string, LayoutNavItem[]>();
+      for (const item of registry.navItems
+        .filter((entry) => (entry.placement ?? 'sidebar') === 'sidebar')
+        .filter((entry) => !entry.adminOnly || user?.role === 'admin')
+        .filter((entry) => !registry.hideDefault?.(entry.id))
+        .sort((a, b) => (a.order ?? 0) - (b.order ?? 0))) {
+        const sectionId = item.section === 'home' ? 'aiWorkbench' : (item.section ?? 'agentHub');
+        const list = extensionSidebarItems.get(sectionId) ?? [];
+        list.push({
+          id: item.id,
+          name: t(item.labelKey, { ns: item.ns ?? 'nav', productName }),
+          href: item.href,
+          icon: item.icon,
+        });
+        extensionSidebarItems.set(sectionId, list);
+      }
+      const hidden = (id: string) => registry.hideDefault?.(id) === true;
+      const extensionSceneItems = extensionSidebarItems.get('sceneWorkspaces') ?? [];
+
+      const sections: LayoutNavSection[] = [
         {
-          name: '',
-          items: [
-            { name: t('flocksHome'), href: '/', icon: Home },
-            ...webuiContractPages
-              .filter((page) => !page.workspaceId && page.enabled && page.placement === 'home.after' && page.buildStatus === 'ready')
-              .map((page) => ({
-                name: getLocalizedWebUIContractTitle(page, i18n.language),
-                href: page.route,
-                icon: resolveWebUIContractPageIcon(page.icon),
-              })),
-          ],
-        },
-        {
-          id: 'aiWorkbench',
+          id: AI_WORKBENCH_NAV_SECTION_ID,
           name: t('aiWorkbench'),
+          partition: 'agent',
           collapsible: true,
-          items: [
-            { name: t('sessions'), href: '/sessions', icon: MessageSquare },
-            { name: t('workspace'), href: '/workspace', icon: FolderOpen },
-            { name: t('tasks'), href: '/tasks', icon: ListTodo },
-            { name: t('workflows'), href: '/workflows', icon: Workflow },
-          ],
-        },
-        {
-          id: 'sceneWorkspaces',
-          name: t('sceneWorkspaces'),
-          collapsible: true,
-          items: [
-            ...sceneWorkspaceItems,
-            { name: t('deviceIntegration'), href: '/devices', icon: ServerCog },
-          ],
+          accordionGroup: 'primary',
+          // 首页归 Agent 分区并算作本组入口之一（xlsx D01 + TC-02 的 5 个入口）。
+          items: orderedGroup(AI_WORKBENCH_NAV_SECTION_ID, [
+            { id: 'flocksHome', name: t('flocksHome'), href: '/', icon: IconHome },
+            { id: 'sessions', name: t('sessions'), href: '/sessions', icon: IconMessageCircle },
+            { id: 'workspace', name: t('workspace'), href: '/workspace', icon: IconFolderOpen },
+            { id: 'tasks', name: t('tasks'), href: '/tasks', icon: IconListCheck },
+            { id: 'workflows', name: t('workflows'), href: '/workflows', icon: IconRouteSquare2 },
+            ...workbenchWorkspaceItems,
+            ...(extensionSidebarItems.get('aiWorkbench') ?? []),
+          ]),
         },
         {
           id: 'agentHub',
           name: t('agentHub'),
+          partition: 'agent',
           collapsible: true,
-          items: [
-            { name: t('agents'), href: '/agents', icon: Bot },
-            { name: t('skills'), href: '/skills', icon: BookOpen },
-            { name: t('tools'), href: '/tools', icon: Wrench },
-            { name: t('hub', { productName }), href: '/hub', icon: Archive },
-            { name: t('models'), href: '/models', icon: Brain },
-            { name: t('channels'), href: '/channels', icon: Radio },
-          ],
+          items: orderedGroup('agentHub', [
+            { id: 'agents', name: t('agents'), href: '/agents', icon: IconRobot },
+            { id: 'skills', name: t('skills'), href: '/skills', icon: IconBook },
+            { id: 'tools', name: t('tools'), href: '/tools', icon: IconTool },
+            { id: 'deviceIntegration', name: t('deviceIntegration'), href: '/devices', icon: IconServerCog },
+            { id: 'hub', name: t('hub', { productName }), href: '/hub', icon: IconArchive },
+            { id: 'models', name: t('models'), href: '/models', icon: IconCpu },
+            { id: 'channels', name: t('channels'), href: '/channels', icon: IconBroadcast },
+            ...(extensionSidebarItems.get('agentHub') ?? []),
+          ]),
         },
+        ...sceneWorkspaceSections,
+        ...(customPageItems.length > 0 || extensionSceneItems.length > 0
+          ? [{
+              id: 'customPages',
+              name: t('customPages'),
+              partition: 'scene' as const,
+              collapsible: true,
+              items: [...customPageItems, ...extensionSceneItems],
+            }]
+          : []),
+        ...settingsSections,
       ];
+      // `hideDefault` lets a private build drop a whole default section or a
+      // single default entry; sections emptied by that are dropped too.
+      return sections
+        .filter((section) => !section.id || !hidden(section.id))
+        .map((section) => ({ ...section, items: section.items.filter((item) => !item.id || !hidden(item.id)) }))
+        .filter((section) => section.items.length > 0);
     },
-    [i18n.language, productName, webuiContractPages, webuiContractWorkspaces, t],
+    [i18n.language, productName, settingsGroups, user?.role, webuiContractPages, webuiContractWorkspaces, workspacePageOrders, t],
   );
 
-  const isFullScreenPage =
-    matchPath('/workflows/create', location.pathname) ||
-    matchPath('/workflows/:id/edit', location.pathname) ||
-    matchPath('/workflows/:id', location.pathname) ||
-    matchPath('/sessions', location.pathname) ||
-    matchPath('/devices', location.pathname) ||
-    matchPath('/contracts/webui/*', location.pathname);
-  const displayVersion = isFlocksproActive
-    ? updateInfo?.edition === 'flockspro'
-      ? formatProVersion(currentProductVersion(updateInfo, true))
-      : flocksproVersion || (currentVersion ? formatProVersion(currentVersion) : null)
-    : formatUpdateVersion(currentVersion);
+  // Selection comes from the live route, so a failed/empty navigation cannot
+  // highlight the scene partition while another partition's content stays visible.
+  const sceneWorkspaces = useMemo(
+    () => webuiContractWorkspaces.filter((workspace) => workspace.placement === 'sceneWorkspace'),
+    [webuiContractWorkspaces],
+  );
+  const requestedWorkspace = viewingScenes ? new URLSearchParams(location.search).get('workspace') : null;
+  const routePartition = resolveNavPartition(location.pathname, webuiContractWorkspaces);
+  const selectedPartition = routePartition;
+  // The suite manager highlights the scene tab only while it manages one of its scenes.
+  const managingScene = viewingScenes && sceneWorkspaces.some((workspace) => workspace.id === requestedWorkspace);
+
+  // Where the scene tab lands when the scene it should show has no page to
+  // open: the manager, targeted at that scene so its state is explained.
+  const sceneManagementPath = useCallback((workspace: WebUIContractWorkspaceListItem | undefined): string => (
+    workspace
+      ? `${SCENE_SUITES_PATH}?workspace=${encodeURIComponent(workspace.id)}${workspace.enabled ? '&reason=pages-unavailable' : ''}`
+      : SCENE_SUITES_PATH
+  ), []);
+
+  // A scene route whose workspace is gone, disabled or without a built page
+  // cannot stay on screen: it goes to the suite manager instead.
+  const routeWorkspaceId = workspaceIdFromPath(location.pathname);
+  useEffect(() => {
+    if (webuiContractNavLoading || webuiContractNavError || viewingScenes || !routeWorkspaceId || routePartition !== 'scene') return;
+    const workspace = sceneWorkspaces.find((item) => item.id === routeWorkspaceId);
+    const hasPages = navigation.some((section) => section.workspace?.id === routeWorkspaceId && section.items.length > 0);
+    if (!workspace || !workspace.enabled || !hasPages) navigate(sceneManagementPath(workspace), { replace: true });
+  }, [navigate, navigation, routePartition, routeWorkspaceId, sceneManagementPath, sceneWorkspaces, viewingScenes, webuiContractNavError, webuiContractNavLoading]);
+
+  const visibleNavigation = useMemo(
+    () => navigation.filter((section) => section.partition === selectedPartition),
+    [navigation, selectedPartition],
+  );
+
+  // One SOC workspace tab for every installed scene (and the custom pages);
+  // it only disappears when there is nothing at all to show in it.
+  const hasScenePartition = sceneWorkspaces.length > 0 || navigation.some((section) => section.id === 'customPages');
+  const partitionItems = useMemo<PartitionTopBarItem[]>(() => [
+    { id: 'agent', name: t('partitionAgent'), icon: IconSparkles },
+    ...(hasScenePartition ? [{ id: 'scene' as const, name: t('partitionScene'), icon: IconShieldCheck }] : []),
+  ], [hasScenePartition, t]);
+  const topBarSettings = useMemo(() => navigation.filter((section) => section.partition === 'settings'), [navigation]);
+
+  // Remember where each partition was left so the top bar returns to it.
+  const partitionPathsRef = useRef<NavPartitionPaths>(readPartitionPaths());
+  useEffect(() => {
+    if (viewingScenes) return;
+    const next = { ...partitionPathsRef.current, [routePartition]: `${location.pathname}${location.search}` };
+    partitionPathsRef.current = next;
+    savePartitionPaths(next);
+  }, [location.pathname, location.search, routePartition, viewingScenes]);
+
+  const partitionTargetPath = useCallback((id: NavPartitionId): string | null => {
+    const hrefs = navigation
+      .filter((section) => section.partition === id)
+      .flatMap((section) => section.items)
+      .filter((item) => !item.external)
+      .map((item) => item.href);
+    const stored = partitionPathsRef.current[id];
+    // Only reuse the stored page while it still exists in that partition.
+    if (stored && findActiveTabHref(hrefs, stored.split('?')[0])) return stored;
+    if (id === 'agent') return AGENT_PARTITION_DEFAULT_PATH;
+    if (id === 'settings') return SETTINGS_PARTITION_DEFAULT_PATH;
+    if (hrefs.length > 0) return hrefs[0];
+    return sceneManagementPath(sceneWorkspaces[0]);
+  }, [navigation, sceneManagementPath, sceneWorkspaces]);
+
+  const selectPartition = useCallback((id: NavPartitionId) => {
+    setSidebarOpen(false);
+    if (id === routePartition && !viewingScenes) return;
+    const target = partitionTargetPath(id);
+    if (target) navigate(target);
+  }, [navigate, partitionTargetPath, routePartition, viewingScenes]);
+
+  const displayVersion = formatUpdateVersion(currentVersion);
   const accountInitial = (user?.username || productName || 'F').trim().charAt(0).toUpperCase();
   const accountRoleLabel = user?.role === 'admin' ? tAuth('admin.roleAdmin') : tAuth('admin.roleMember');
   const hasVisibleUpdate = hasUpdate && canManageUpdates;
   const hasVisibleProductUpdate = hasVisibleUpdate && !hasCustomDisplayName;
-  const showFlocksproUpgradeEntry = canManageUpdates;
   const productUpdateTitle = hasVisibleProductUpdate
     ? t('hasNewVersion', { version: formatUpdateVersion(latestVersion) || '' })
     : productName;
@@ -737,54 +971,110 @@ export default function Layout() {
       hash: location.hash,
     },
   };
-  const activeWorkspaceMenu = useMemo(
-    () => webuiContractWorkspaces.find((workspace) => workspace.id === openWorkspaceMenuId && workspace.enabled) ?? null,
-    [openWorkspaceMenuId, webuiContractWorkspaces],
+  const isNavItemActive = useCallback((href: string) => (
+    location.pathname === href || (href !== '/' && location.pathname.startsWith(`${href}/`))
+  ), [location.pathname]);
+
+  // Browser-style tabs above the content: every sidebar entry visited becomes
+  // a tab (home, AI workbench pages, agent studio pages, SOC pages alike).
+  const navItemsFlat = useMemo(() => navigation.flatMap((section) => section.items), [navigation]);
+  const activeTabHref = useMemo(
+    () => findActiveTabHref(navItemsFlat.map((item) => item.href), location.pathname),
+    [location.pathname, navItemsFlat],
   );
-  const ActiveWorkspaceMenuIcon = activeWorkspaceMenu
-    ? resolveWebUIContractPageIcon(activeWorkspaceMenu.icon)
-    : null;
-  const activeWorkspaceSections = useMemo(
-    () => (activeWorkspaceMenu ? buildWebUIContractWorkspaceSections(activeWorkspaceMenu, i18n.language) : []),
-    [activeWorkspaceMenu, i18n.language],
-  );
-  const activeWorkspaceMenuTitle = activeWorkspaceMenu
-    ? getLocalizedWebUIContractTitle(activeWorkspaceMenu, i18n.language)
-    : '';
-  const showWorkspaceCustomPageAction = canCreateWorkspaceCustomPage && isSocWorkspace(activeWorkspaceMenu);
-  const showSocDashboardTitleAction = isSocWorkspace(activeWorkspaceMenu);
-
-  const cancelWorkspaceMenuClose = useCallback(() => {
-    if (workspaceMenuCloseTimerRef.current === null) return;
-    window.clearTimeout(workspaceMenuCloseTimerRef.current);
-    workspaceMenuCloseTimerRef.current = null;
-  }, []);
-
-  const openWorkspaceMenu = useCallback((workspaceId?: string) => {
-    if (!workspaceId) return;
-    cancelWorkspaceMenuClose();
-    setOpenWorkspaceMenuId(workspaceId);
-  }, [cancelWorkspaceMenuClose]);
-
-  const scheduleWorkspaceMenuClose = useCallback(() => {
-    cancelWorkspaceMenuClose();
-    workspaceMenuCloseTimerRef.current = window.setTimeout(() => {
-      setOpenWorkspaceMenuId(null);
-      workspaceMenuCloseTimerRef.current = null;
-    }, 120);
-  }, [cancelWorkspaceMenuClose]);
-
-  useEffect(() => () => cancelWorkspaceMenuClose(), [cancelWorkspaceMenuClose]);
+  const currentLocationPath = `${location.pathname}${location.search}`;
 
   useEffect(() => {
-    setCollapsedWorkspaceSectionIds(new Set());
-  }, [openWorkspaceMenuId]);
+    if (!activeTabHref) return;
+    const stored = openTabRecordsRef.current;
+    const existing = stored.find((record) => record.href === activeTabHref);
+    if (existing && existing.path === currentLocationPath) return;
+    setOpenTabRecords(existing
+      ? stored.map((record) => (record.href === activeTabHref ? { ...record, path: currentLocationPath } : record))
+      : [...stored, { href: activeTabHref, path: currentLocationPath }]);
+  }, [activeTabHref, currentLocationPath, setOpenTabRecords]);
 
-  useEffect(() => {
-    if (openWorkspaceMenuId && !activeWorkspaceMenu) {
-      setOpenWorkspaceMenuId(null);
+  // Every menu entry that has been visited keeps its own pane, in any
+  // partition, so coming back to it restores the page as it was left.
+  const openTabs = useMemo(() => {
+    const tabs = resolveOpenTabs(navItemsFlat, openTabRecords)
+      .map((tab) => ({ href: tab.href, path: tab.path, name: tab.name, icon: tab.icon }));
+    if (activeTabHref && !tabs.some((tab) => tab.href === activeTabHref)) {
+      const item = navItemsFlat.find((entry) => entry.href === activeTabHref);
+      if (item) tabs.push({ href: item.href, path: currentLocationPath, name: item.name, icon: item.icon });
     }
-  }, [activeWorkspaceMenu, openWorkspaceMenuId]);
+    return tabs;
+  }, [activeTabHref, currentLocationPath, navItemsFlat, openTabRecords]);
+
+  // One pane per visited entry stays mounted; a route that is not a menu entry
+  // gets a transient pane that goes away when it is left.
+  const keepAlivePanes = useMemo(() => {
+    const panes = openTabs.map((tab) => ({ href: tab.href }));
+    return activeTabHref ? panes : [...panes, { href: TRANSIENT_PANE_HREF }];
+  }, [activeTabHref, openTabs]);
+  const activePaneHref = activeTabHref ?? TRANSIENT_PANE_HREF;
+
+  const openTabPathByHref = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const tab of openTabs) map.set(tab.href, tab.path);
+    return map;
+  }, [openTabs]);
+  const navItemPath = useCallback(
+    (href: string) => openTabPathByHref.get(href) ?? href,
+    [openTabPathByHref],
+  );
+
+  const primaryNavSectionIds = useMemo(
+    () => visibleNavigation
+      .filter((section) => section.accordionGroup === 'primary' && section.id)
+      .map((section) => section.id as string),
+    [visibleNavigation],
+  );
+
+  // The accordion section that owns the current route (null for home, settings, agent studio...).
+  const routePrimaryNavSectionId = useMemo(() => {
+    const owner = visibleNavigation.find((section) => (
+      section.accordionGroup === 'primary'
+      && section.id
+      && section.items.some((item) => isNavItemActive(item.href))
+    ));
+    return owner?.id ?? null;
+  }, [isNavItemActive, visibleNavigation]);
+
+  const effectiveExpandedPrimaryNavSectionId = useMemo(() => {
+    if (expandedPrimaryNavSectionId === null) return null;
+    if (expandedPrimaryNavSectionId !== undefined && primaryNavSectionIds.includes(expandedPrimaryNavSectionId)) {
+      return expandedPrimaryNavSectionId;
+    }
+    // Fall back to the first accordion section of the partition on screen, so
+    // switching partitions never lands on an all-collapsed menu.
+    return routePrimaryNavSectionId ?? primaryNavSectionIds[0] ?? null;
+  }, [expandedPrimaryNavSectionId, primaryNavSectionIds, routePrimaryNavSectionId]);
+
+  // Mirrors the explicit (stored) choice so the route effect below can compare
+  // against it without re-running on every render.
+  const explicitExpandedPrimaryNavSectionRef = useRef(expandedPrimaryNavSectionId);
+  useEffect(() => {
+    explicitExpandedPrimaryNavSectionRef.current = expandedPrimaryNavSectionId;
+  }, [expandedPrimaryNavSectionId]);
+
+  // Entering a route owned by one accordion section opens that section and
+  // closes the others. The choice is persisted so leaving for the home page
+  // keeps the last group open.
+  useEffect(() => {
+    if (!routePrimaryNavSectionId) return;
+    if (explicitExpandedPrimaryNavSectionRef.current === routePrimaryNavSectionId) return;
+    explicitExpandedPrimaryNavSectionRef.current = routePrimaryNavSectionId;
+    setExpandedPrimaryNavSectionId(routePrimaryNavSectionId);
+    saveExpandedPrimaryNavSectionId(routePrimaryNavSectionId);
+  }, [routePrimaryNavSectionId]);
+
+  const togglePrimaryNavSection = useCallback((sectionId: string) => {
+    const next = effectiveExpandedPrimaryNavSectionId === sectionId ? null : sectionId;
+    explicitExpandedPrimaryNavSectionRef.current = next;
+    setExpandedPrimaryNavSectionId(next);
+    saveExpandedPrimaryNavSectionId(next);
+  }, [effectiveExpandedPrimaryNavSectionId]);
 
   const toggleNavSection = useCallback((sectionId: string) => {
     setCollapsedNavSectionIds((current) => {
@@ -799,34 +1089,84 @@ export default function Layout() {
     });
   }, []);
 
-  const toggleWorkspaceSection = useCallback((sectionId: string) => {
-    setCollapsedWorkspaceSectionIds((current) => {
-      const next = new Set(current);
-      if (next.has(sectionId)) {
-        next.delete(sectionId);
-      } else {
-        next.add(sectionId);
-      }
-      return next;
-    });
+  // Second-level menu order is customisable in every group: workspace pages are
+  // keyed by page id, built-in entries by href, each stored per group.
+  const sectionItemKeys = (section: LayoutNavSection) => section.items.map((item) => item.pageId ?? item.href);
+
+  const reorderSectionItems = useCallback((section: LayoutNavSection, fromKey: string, toKey: string) => {
+    if (fromKey === toKey) return;
+    const keys = sectionItemKeys(section);
+    const fromIndex = keys.indexOf(fromKey);
+    const toIndex = keys.indexOf(toKey);
+    if (fromIndex < 0 || toIndex < 0) return;
+    const nextKeys = moveItem(keys, fromIndex, toIndex);
+    if (section.id) saveNavItemOrder(section.id, nextKeys);
   }, []);
 
-  const handleCreateWorkspaceCustomPage = useCallback(async () => {
-    if (!activeWorkspaceMenu || creatingWorkspaceCustomPageSession) return;
+  const handleNavItemDragStart = useCallback((event: ReactDragEvent<HTMLDivElement>, sectionId: string, key: string) => {
+    setDraggingNavItem({ sectionId, key });
+    setDragOverNavItemKey(null);
+    try {
+      event.dataTransfer.effectAllowed = 'move';
+      event.dataTransfer.setData('text/plain', key);
+    } catch {
+      // Some environments restrict dataTransfer; dragging still works through state.
+    }
+  }, []);
+
+  const handleNavItemDragOver = useCallback((event: ReactDragEvent<HTMLDivElement>, sectionId: string, key: string) => {
+    if (!draggingNavItem || draggingNavItem.sectionId !== sectionId) return;
+    event.preventDefault();
+    try {
+      event.dataTransfer.dropEffect = 'move';
+    } catch {
+      // Ignore dataTransfer restrictions.
+    }
+    if (dragOverNavItemKey !== key) {
+      setDragOverNavItemKey(key);
+    }
+  }, [dragOverNavItemKey, draggingNavItem]);
+
+  const handleNavItemDrop = useCallback((event: ReactDragEvent<HTMLDivElement>, section: LayoutNavSection, key: string) => {
+    if (!draggingNavItem || draggingNavItem.sectionId !== (section.id ?? '')) return;
+    event.preventDefault();
+    reorderSectionItems(section, draggingNavItem.key, key);
+    setDraggingNavItem(null);
+    setDragOverNavItemKey(null);
+  }, [draggingNavItem, reorderSectionItems]);
+
+  const handleNavItemDragEnd = useCallback(() => {
+    setDraggingNavItem(null);
+    setDragOverNavItemKey(null);
+  }, []);
+
+  // Keyboard alternative to dragging: Alt+ArrowUp / Alt+ArrowDown moves the focused entry.
+  const handleNavItemReorderKeyDown = useCallback((event: ReactKeyboardEvent<HTMLAnchorElement>, section: LayoutNavSection, key: string) => {
+    if (!event.altKey || (event.key !== 'ArrowUp' && event.key !== 'ArrowDown')) return;
+    const keys = sectionItemKeys(section);
+    const index = keys.indexOf(key);
+    const targetIndex = index + (event.key === 'ArrowUp' ? -1 : 1);
+    if (index < 0 || targetIndex < 0 || targetIndex >= keys.length) return;
+    event.preventDefault();
+    reorderSectionItems(section, key, keys[targetIndex]);
+  }, [reorderSectionItems]);
+
+  const handleCreateWorkspaceCustomPage = useCallback(async (workspace: WebUIContractWorkspaceListItem) => {
+    if (creatingWorkspaceCustomPageSession) return;
+    const workspaceTitle = getLocalizedWebUIContractTitle(workspace, i18n.language);
     setCreatingWorkspaceCustomPageSession(true);
     try {
       const session = await sessionApi.create({
         title: tWebUIContractPage('workspace.customPageSessionTitle', {
-          workspace: activeWorkspaceMenuTitle,
+          workspace: workspaceTitle,
         }),
       });
       const message = tWebUIContractPage('workspace.socCustomPageInitialMessage', {
-        workspaceId: activeWorkspaceMenu.id,
-        workspaceTitle: activeWorkspaceMenuTitle,
-        workspaceRoute: activeWorkspaceMenu.route,
+        workspaceId: workspace.id,
+        workspaceTitle,
+        workspaceRoute: workspace.route,
       });
       const displayLabel = tWebUIContractPage('workspace.socCustomPageDisplayLabel');
-      setOpenWorkspaceMenuId(null);
       setSidebarOpen(false);
       navigate(
         `/sessions?session=${session.id}&message=${encodeURIComponent(message)}&display=${encodeURIComponent(displayLabel)}`,
@@ -838,9 +1178,8 @@ export default function Layout() {
       setCreatingWorkspaceCustomPageSession(false);
     }
   }, [
-    activeWorkspaceMenu,
-    activeWorkspaceMenuTitle,
     creatingWorkspaceCustomPageSession,
+    i18n.language,
     navigate,
     tWebUIContractPage,
     toast,
@@ -849,7 +1188,6 @@ export default function Layout() {
   const openSocTitleDialog = useCallback(() => {
     setSocTitleDraft(readSocDashboardTitle());
     setSocTitleDialogOpen(true);
-    setOpenWorkspaceMenuId(null);
   }, []);
 
   const closeSocTitleDialog = useCallback(() => {
@@ -876,8 +1214,9 @@ export default function Layout() {
   const openManualUpdateCheck = useCallback(() => {
     setAccountMenuOpen(false);
     setUpdateInfo(null);
-    setShowUpdate(true);
-  }, []);
+    setUpdateCheckForced(true);
+    requestUpdate();
+  }, [requestUpdate]);
 
   return (
     <div className="min-h-screen bg-gray-50 text-gray-900 dark:bg-zinc-950 dark:text-zinc-100">
@@ -890,25 +1229,47 @@ export default function Layout() {
               onClose={() => setShowOnboarding(false)}
             />
           )}
-          {showUpdate && (
+          {tokenPolicy.notice && !showOnboarding && updateState !== 'visible' && (
+            <TokenPolicyNotice onClose={tokenPolicy.close} onPresented={tokenPolicy.onPresented} />
+          )}
+        </Suspense>
+        {/* One boundary per modal. Sharing a single Suspense meant that whenever
+            one of these chunks started loading, the fallback replaced the others
+            -- so a notification arriving while the update dialog was open blanked
+            the dialog out from under the reader. */}
+        <Suspense fallback={null}>
+          {updateState !== 'idle' && (updateState === 'visible' || (tokenPolicy.ready && !tokenPolicy.notice && !showOnboarding)) && (
             <UpdateModal
               initialInfo={updateInfo}
-              forceInitialCheck={updateInfo === null}
-              edition={isFlocksproActive ? 'flockspro' : 'flocks'}
+              forceInitialCheck={updateCheckForced || updateInfo === null}
               canUpgrade={canManageUpdates}
-              onClose={() => setShowUpdate(false)}
-              onDismiss={() => setShowUpdate(false)}
+              onPresented={handleUpdatePresented}
+              onClose={closeUpdate}
+              onDismiss={closeUpdate}
             />
           )}
-          {visibleNotifications.length > 0 && (
-            <NotificationModal
-              notifications={visibleNotifications}
-              acknowledgingIds={acknowledgingNotificationIds}
-              onAcknowledge={closeVisibleNotification}
-              onClose={closeVisibleNotification}
-              onDismissForever={dismissVisibleNotificationForever}
-            />
-          )}
+        </Suspense>
+        <Suspense fallback={null}>
+          <ExtensionSlot
+            name="layout.notifications"
+            context={{
+              notifications: visibleNotifications,
+              acknowledgingIds: acknowledgingNotificationIds,
+              onAcknowledge: closeVisibleNotification,
+              onClose: closeVisibleNotification,
+              onDismissForever: dismissVisibleNotificationForever,
+            }}
+          >
+            {visibleNotifications.length > 0 && (
+              <NotificationModal
+                notifications={visibleNotifications}
+                acknowledgingIds={acknowledgingNotificationIds}
+                onAcknowledge={closeVisibleNotification}
+                onClose={closeVisibleNotification}
+                onDismissForever={dismissVisibleNotificationForever}
+              />
+            )}
+          </ExtensionSlot>
         </Suspense>
       </LazyLoadErrorBoundary>
 
@@ -960,7 +1321,7 @@ export default function Layout() {
                 </button>
                 <button
                   type="submit"
-                  className="inline-flex h-9 items-center rounded-md bg-zinc-950 px-3 text-sm font-semibold text-white transition-colors hover:bg-zinc-800 dark:bg-zinc-100 dark:text-zinc-950 dark:hover:bg-zinc-200"
+                  className="ui-btn ui-btn-primary"
                 >
                   {tWebUIContractPage('workspace.customTitleSave')}
                 </button>
@@ -995,11 +1356,11 @@ export default function Layout() {
                 className="relative flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg border border-zinc-200 bg-white shadow-sm dark:border-zinc-800 dark:bg-zinc-900"
                 title={productName}
               >
-                <Sparkles className="w-4 h-4 text-zinc-500 dark:text-zinc-300" />
+                <IconSparkles aria-hidden="true" className="w-4 h-4 text-zinc-500 dark:text-zinc-300" />
                 {hasVisibleProductUpdate && (
                   <button
                     type="button"
-                    onClick={() => setShowUpdate(true)}
+                    onClick={requestUpdate}
                     className="absolute -right-0.5 -top-0.5 h-2.5 w-2.5 rounded-full bg-amber-400 ring-2 ring-zinc-100 transition-colors hover:bg-amber-500 dark:ring-zinc-950"
                     title={productUpdateTitle}
                     aria-label={productUpdateTitle}
@@ -1018,7 +1379,7 @@ export default function Layout() {
                   {hasVisibleProductUpdate && (
                     <button
                       type="button"
-                      onClick={() => setShowUpdate(true)}
+                      onClick={requestUpdate}
                       title={productUpdateTitle}
                       aria-label={productUpdateTitle}
                       className="relative inline-flex h-4 shrink-0 items-center rounded-sm bg-amber-50 px-1 text-[10px] font-bold leading-none text-amber-600 transition-colors hover:bg-amber-100 dark:bg-amber-950/70 dark:text-amber-300 dark:hover:bg-amber-900"
@@ -1032,7 +1393,7 @@ export default function Layout() {
                   onClick={() => setSidebarOpen(false)}
                   className="lg:hidden p-1 text-zinc-400 hover:text-zinc-600 rounded flex-shrink-0 dark:hover:text-zinc-100"
                 >
-                  <X className="w-5 h-5" />
+                  <IconX aria-hidden="true" className="w-5 h-5" />
                 </button>
               </>
             )}
@@ -1040,10 +1401,20 @@ export default function Layout() {
 
           {/* Navigation */}
           <nav className={`flex-1 overflow-y-auto overflow-x-hidden py-4 ${collapsed ? 'px-2' : 'px-3'}`}>
-            {navigation.map((section, sectionIndex) => {
+            {visibleNavigation.map((section, sectionIndex) => {
               const sectionId = (section.id ?? section.name) || `section-${sectionIndex}`;
               const sectionContentId = `layout-nav-section-${sectionId}`;
-              const sectionCollapsed = Boolean(section.collapsible && collapsedNavSectionIds.has(sectionId));
+              const isPrimarySection = section.accordionGroup === 'primary';
+              // In icon-only mode there are no labels to declutter, so every
+              // section stays reachable regardless of the accordion state.
+              const sectionCollapsed = !collapsed && Boolean(section.collapsible) && (
+                isPrimarySection
+                  ? effectiveExpandedPrimaryNavSectionId !== sectionId
+                  : collapsedNavSectionIds.has(sectionId)
+              );
+              const reorderable = Boolean(section.collapsible) && section.items.length > 1;
+              const actionsWorkspace = section.actionsWorkspace ?? null;
+              const showSocWorkspaceActions = !collapsed && isSocWorkspace(actionsWorkspace);
               return (
                 <div key={sectionId} className="mb-6">
                   {!collapsed && section.name && (
@@ -1051,13 +1422,13 @@ export default function Layout() {
                       {section.collapsible ? (
                         <button
                           type="button"
-                          onClick={() => toggleNavSection(sectionId)}
+                          onClick={() => (isPrimarySection ? togglePrimaryNavSection(sectionId) : toggleNavSection(sectionId))}
                           className="flex h-6 w-full items-center justify-between text-left transition-colors hover:text-zinc-600 focus:outline-none focus-visible:text-zinc-600 dark:hover:text-zinc-300 dark:focus-visible:text-zinc-300"
                           aria-expanded={!sectionCollapsed}
                           aria-controls={sectionContentId}
                         >
                           <span className="min-w-0 truncate">{section.name}</span>
-                          <ChevronRight className={`ml-2 h-3.5 w-3.5 shrink-0 transition-transform ${sectionCollapsed ? '' : 'rotate-90'}`} />
+                          <IconChevronRight aria-hidden="true" className={`ml-2 h-3.5 w-3.5 shrink-0 transition-transform ${sectionCollapsed ? '' : 'rotate-90'}`} />
                         </button>
                       ) : (
                         section.name
@@ -1068,33 +1439,32 @@ export default function Layout() {
                   {!sectionCollapsed && (
                     <div id={sectionContentId} className="space-y-0.5">
                       {section.items.map((item) => {
-                        const isActive = location.pathname === item.href
-                          || (item.href !== '/' && location.pathname.startsWith(`${item.href}/`));
-                        return (
+                        const isActive = isNavItemActive(item.href);
+                        const itemKey = reorderable ? (item.pageId ?? item.href) : undefined;
+                        const isDragging = Boolean(itemKey && draggingNavItem?.sectionId === sectionId && draggingNavItem.key === itemKey);
+                        const isDropTarget = Boolean(itemKey && !isDragging && draggingNavItem?.sectionId === sectionId && dragOverNavItemKey === itemKey);
+                        const link = item.external ? (
+                          <a
+                            href={item.href}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            onClick={() => setSidebarOpen(false)}
+                            title={collapsed ? item.name : undefined}
+                            className={`
+                              flex items-center rounded-lg transition-all duration-150
+                              ${collapsed ? 'justify-center p-2.5' : 'px-3 py-2 text-sm font-medium'}
+                              text-zinc-600 hover:bg-white/60 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-900 dark:hover:text-zinc-50
+                            `}
+                          >
+                            <item.icon aria-hidden="true" className={`flex-shrink-0 w-5 h-5 ${collapsed ? '' : 'mr-3'} text-zinc-400 dark:text-zinc-500`} />
+                            {!collapsed && <span className="min-w-0 flex-1 truncate">{item.name}</span>}
+                          </a>
+                        ) : (
                           <Link
-                            key={item.href}
-                            to={item.href}
-                            onMouseEnter={() => {
-                              if (item.opensWorkspaceMenu) {
-                                openWorkspaceMenu(item.workspaceId);
-                              } else {
-                                scheduleWorkspaceMenuClose();
-                              }
-                            }}
-                            onMouseLeave={() => {
-                              if (item.opensWorkspaceMenu) {
-                                scheduleWorkspaceMenuClose();
-                              }
-                            }}
-                            onClick={(event) => {
-                              if (item.opensWorkspaceMenu) {
-                                event.preventDefault();
-                                openWorkspaceMenu(item.workspaceId);
-                                return;
-                              }
-                              setOpenWorkspaceMenuId(null);
-                              setSidebarOpen(false);
-                            }}
+                            to={navItemPath(item.href)}
+                            draggable={itemKey ? false : undefined}
+                            onClick={() => setSidebarOpen(false)}
+                            onKeyDown={itemKey ? (event) => handleNavItemReorderKeyDown(event, section, itemKey) : undefined}
                             title={collapsed ? item.name : undefined}
                             className={`
                               flex items-center rounded-lg transition-all duration-150
@@ -1105,22 +1475,70 @@ export default function Layout() {
                               }
                             `}
                           >
-                            <item.icon
+                            <item.icon aria-hidden="true"
                               className={`flex-shrink-0 w-5 h-5 ${collapsed ? '' : 'mr-3'} ${isActive ? 'text-zinc-700 dark:text-zinc-100' : 'text-zinc-400 dark:text-zinc-500'}`}
                             />
                             {!collapsed && (
                               <>
                                 <span className="min-w-0 flex-1 truncate">{item.name}</span>
-                                {item.opensWorkspaceMenu && (
-                                  <ChevronRight
-                                    className={`ml-2 h-4 w-4 flex-shrink-0 ${openWorkspaceMenuId === item.workspaceId ? 'text-zinc-500 dark:text-zinc-300' : 'text-zinc-400 dark:text-zinc-500'}`}
+                                {itemKey && (
+                                  <IconGripVertical
+                                    aria-hidden="true"
+                                    className="ml-2 h-4 w-4 flex-shrink-0 text-zinc-300 opacity-0 transition-opacity group-hover:opacity-100 dark:text-zinc-600"
                                   />
                                 )}
                               </>
                             )}
                           </Link>
                         );
+                        if (!itemKey) {
+                          return <div key={item.href}>{link}</div>;
+                        }
+                        return (
+                          <div
+                            key={item.href}
+                            draggable
+                            data-nav-item-key={itemKey}
+                            data-nav-page-id={item.pageId}
+                            onDragStart={(event) => handleNavItemDragStart(event, sectionId, itemKey)}
+                            onDragOver={(event) => handleNavItemDragOver(event, sectionId, itemKey)}
+                            onDragLeave={() => {
+                              if (dragOverNavItemKey === itemKey) setDragOverNavItemKey(null);
+                            }}
+                            onDrop={(event) => handleNavItemDrop(event, section, itemKey)}
+                            onDragEnd={handleNavItemDragEnd}
+                            className={`group rounded-lg ${collapsed ? '' : 'cursor-grab active:cursor-grabbing'} ${isDragging ? 'opacity-50' : ''} ${isDropTarget ? 'ring-2 ring-inset ring-zinc-400/70 dark:ring-zinc-500/70' : ''}`}
+                          >
+                            {link}
+                          </div>
+                        );
                       })}
+                      {showSocWorkspaceActions && actionsWorkspace && (
+                        <div className="space-y-0.5 pt-1">
+                          {canCreateWorkspaceCustomPage && (
+                            <button
+                              type="button"
+                              onClick={() => void handleCreateWorkspaceCustomPage(actionsWorkspace)}
+                              disabled={creatingWorkspaceCustomPageSession}
+                              className="flex w-full items-center rounded-lg px-3 py-1.5 text-left text-xs font-medium text-zinc-400 transition-colors hover:bg-white/60 hover:text-zinc-700 disabled:cursor-not-allowed disabled:opacity-60 dark:text-zinc-500 dark:hover:bg-zinc-900 dark:hover:text-zinc-200"
+                            >
+                              <IconPlus aria-hidden="true" className="ml-0.5 mr-3.5 h-4 w-4 flex-shrink-0" />
+                              <span className="min-w-0 flex-1 truncate">{tWebUIContractPage('workspace.customPage')}</span>
+                              {creatingWorkspaceCustomPageSession ? (
+                                <IconLoader2 aria-hidden="true" className="ml-2 h-3.5 w-3.5 shrink-0 animate-spin" />
+                              ) : null}
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            onClick={openSocTitleDialog}
+                            className="flex w-full items-center rounded-lg px-3 py-1.5 text-left text-xs font-medium text-zinc-400 transition-colors hover:bg-white/60 hover:text-zinc-700 dark:text-zinc-500 dark:hover:bg-zinc-900 dark:hover:text-zinc-200"
+                          >
+                            <IconPencil aria-hidden="true" className="ml-0.5 mr-3.5 h-4 w-4 flex-shrink-0" />
+                            <span className="min-w-0 flex-1 truncate">{tWebUIContractPage('workspace.customTitle')}</span>
+                          </button>
+                        </div>
+                      )}
                     </div>
                   )}
                 </div>
@@ -1134,12 +1552,16 @@ export default function Layout() {
             className={`relative border-t border-zinc-200 flex-shrink-0 dark:border-zinc-800 ${collapsed ? 'p-2' : 'p-3'}`}
           >
             {accountMenuOpen && (
-              <div className={`absolute z-50 overflow-hidden rounded-lg border border-zinc-200 bg-white py-1.5 shadow-lg dark:border-zinc-800 dark:bg-zinc-900 ${
-                collapsed ? 'bottom-2 left-full ml-2 w-48' : 'bottom-full left-3 right-3 mb-2'
-              }`}>
-                {showFlocksproUpgradeEntry && (
+              <div
+                data-account-menu
+                className={`absolute z-50 overflow-hidden rounded-lg border border-zinc-200 bg-white py-1.5 shadow-lg dark:border-zinc-800 dark:bg-zinc-900 ${
+                  collapsed ? 'bottom-2 left-full ml-2 w-56' : 'bottom-full left-3 right-3 mb-2 min-w-56'
+                }`}
+              >
+                {accountMenuExtensions.map(({ id, href, labelKey, ns, icon: ItemIcon }) => (
                   <Link
-                    to="/settings/flockspro"
+                    key={id}
+                    to={href}
                     state={settingsReturnState}
                     onClick={() => {
                       setAccountMenuOpen(false);
@@ -1147,30 +1569,20 @@ export default function Layout() {
                     }}
                     className="flex items-center gap-2 px-3 py-2 text-sm font-medium text-zinc-700 transition-colors hover:bg-zinc-50 hover:text-zinc-950 dark:text-zinc-200 dark:hover:bg-zinc-800 dark:hover:text-zinc-50"
                   >
-                    <ArrowUpCircle className="h-4 w-4 text-zinc-400" />
-                    {proProductName}
+                    <ItemIcon aria-hidden="true" className="h-4 w-4 text-zinc-400" />
+                    {i18n.exists(labelKey, { ns: ns || 'nav' })
+                      ? t(labelKey, { ns: ns || 'nav', productName })
+                      : labelKey}
                   </Link>
-                )}
+                ))}
                 <button
                   type="button"
                   onClick={openManualUpdateCheck}
                   className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm font-medium text-zinc-700 transition-colors hover:bg-zinc-50 hover:text-zinc-950 dark:text-zinc-200 dark:hover:bg-zinc-800 dark:hover:text-zinc-50"
                 >
-                  <RefreshCw className="h-4 w-4 text-zinc-400" />
+                  <IconRefresh aria-hidden="true" className="h-4 w-4 text-zinc-400" />
                   {t('checkUpdate')}
                 </button>
-                <Link
-                  to="/settings/preferences"
-                  state={settingsReturnState}
-                  onClick={() => {
-                    setAccountMenuOpen(false);
-                    setSidebarOpen(false);
-                  }}
-                  className="flex items-center gap-2 px-3 py-2 text-sm font-medium text-zinc-700 transition-colors hover:bg-zinc-50 hover:text-zinc-950 dark:text-zinc-200 dark:hover:bg-zinc-800 dark:hover:text-zinc-50"
-                >
-                  <Settings className="h-4 w-4 text-zinc-400" />
-                  {t('settings')}
-                </Link>
                 <button
                   type="button"
                   onClick={() => {
@@ -1179,7 +1591,7 @@ export default function Layout() {
                   }}
                   className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm font-medium text-zinc-700 transition-colors hover:bg-zinc-50 hover:text-zinc-950 dark:text-zinc-200 dark:hover:bg-zinc-800 dark:hover:text-zinc-50"
                 >
-                  <LogOut className="h-4 w-4 text-zinc-400" />
+                  <IconLogout aria-hidden="true" className="h-4 w-4 text-zinc-400" />
                   {t('logout')}
                 </button>
               </div>
@@ -1208,14 +1620,27 @@ export default function Layout() {
                   {accountInitial}
                 </span>
                 <span className="min-w-0 flex-1">
+                  {/* The role label ("Administrator" in en-US) is the wider of the
+                      two, so it is the one that truncates; the username keeps at
+                      least a few characters visible instead of collapsing to "a…". */}
                   <span className="flex min-w-0 items-baseline gap-1.5">
-                    <span className="min-w-0 truncate text-sm font-semibold text-zinc-800 dark:text-zinc-100">
+                    <span
+                      className="min-w-[4ch] shrink-0 truncate text-sm font-semibold text-zinc-800 dark:text-zinc-100"
+                      title={user?.username || productName}
+                    >
                       {user?.username || productName}
                     </span>
-                    <span className="shrink-0 whitespace-nowrap text-xs text-zinc-400 dark:text-zinc-500">
+                    <span
+                      className="min-w-0 truncate text-xs text-zinc-400 dark:text-zinc-500"
+                      title={accountRoleLabel}
+                    >
                       {accountRoleLabel}
                     </span>
                   </span>
+                  <ExtensionSlot
+                    name="layout.version"
+                    context={{ version: displayVersion, currentVersion, latestVersion, hasUpdate: hasVisibleUpdate }}
+                  >
                   {displayVersion && (
                     <span
                       className="mt-1 inline-flex w-fit rounded border border-zinc-200 bg-white px-1.5 py-0.5 text-[10px] font-semibold leading-none text-zinc-400 dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-500"
@@ -1224,8 +1649,9 @@ export default function Layout() {
                       {displayVersion}
                     </span>
                   )}
+                  </ExtensionSlot>
                 </span>
-                <ChevronUp className={`absolute right-2 top-1/2 h-4 w-4 -translate-y-1/2 text-zinc-400 transition-transform ${accountMenuOpen ? 'rotate-180' : ''}`} />
+                <IconChevronUp aria-hidden="true" className={`absolute right-2 top-1/2 h-4 w-4 -translate-y-1/2 text-zinc-400 transition-transform ${accountMenuOpen ? 'rotate-180' : ''}`} />
               </button>
             )}
           </div>
@@ -1260,158 +1686,19 @@ export default function Layout() {
           "
           title={collapsed ? t('expandNav') : t('collapseNav')}
         >
-          {collapsed ? <ChevronRight className="w-2.5 h-2.5" /> : <ChevronLeft className="w-2.5 h-2.5" />}
+          {collapsed ? <IconChevronRight aria-hidden="true" className="w-2.5 h-2.5" /> : <IconChevronLeft aria-hidden="true" className="w-2.5 h-2.5" />}
         </button>
       </aside>
 
-      {activeWorkspaceMenu && (
-        <nav
-          aria-label={tWebUIContractPage('workspace.sectionNavigation')}
-          onMouseEnter={cancelWorkspaceMenuClose}
-          onMouseLeave={scheduleWorkspaceMenuClose}
-          className={`fixed inset-y-0 z-[60] flex w-52 max-w-[calc(100vw-4rem)] flex-col border-r border-zinc-200 bg-zinc-100 text-zinc-600 shadow-2xl shadow-zinc-900/10 transition-[left] duration-300 ease-in-out dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-300 dark:shadow-black/30 ${
-            collapsed ? 'left-16' : 'left-52 lg:left-[var(--layout-sidebar-width)]'
-          }`}
-          style={sidebarOffsetStyle}
-        >
-          <div className="flex h-16 items-center gap-3 border-b border-zinc-200 px-4 dark:border-white/10">
-            {ActiveWorkspaceMenuIcon && (
-              <ActiveWorkspaceMenuIcon className="h-5 w-5 shrink-0 text-zinc-500 dark:text-zinc-300" />
-            )}
-            <div className="min-w-0 flex-1 truncate text-base font-bold text-zinc-950 dark:text-white" title={activeWorkspaceMenuTitle}>
-              {activeWorkspaceMenuTitle}
-            </div>
-            <button
-              type="button"
-              onClick={() => setOpenWorkspaceMenuId(null)}
-              className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-zinc-400 transition-colors hover:bg-white/70 hover:text-zinc-900 focus:outline-none focus:ring-2 focus:ring-zinc-200 dark:hover:bg-white/10 dark:hover:text-white dark:focus:ring-zinc-700"
-              title={tWebUIContractPage('workspace.collapseSidebar')}
-              aria-label={tWebUIContractPage('workspace.collapseSidebar')}
-            >
-              <ChevronLeft className="h-4 w-4" />
-            </button>
-          </div>
-
-          <div className="flex-1 space-y-2 overflow-y-auto px-3 py-4">
-            {activeWorkspaceSections.length > 0 ? (
-              activeWorkspaceSections.map((workspaceSection) => {
-                const sectionActive = workspaceSection.pages.some((page) => location.pathname === `${activeWorkspaceMenu.route}/${page.id}`);
-                const showPageChildren = workspaceSection.pages.length > 1;
-                const sectionCollapsed = collapsedWorkspaceSectionIds.has(workspaceSection.id);
-                return (
-                  <div key={workspaceSection.id} className="space-y-1">
-                    <div
-                      className={`flex h-8 items-center rounded-md px-3 text-xs font-semibold uppercase tracking-wider transition-colors ${
-                        sectionActive
-                          ? 'text-zinc-500 dark:text-zinc-400'
-                          : 'text-zinc-400 hover:text-zinc-600 dark:text-zinc-500 dark:hover:text-zinc-300'
-                      }`}
-                    >
-                      {showPageChildren ? (
-                        <button
-                          type="button"
-                          onClick={() => toggleWorkspaceSection(workspaceSection.id)}
-                          className="min-w-0 flex-1 truncate text-left"
-                        >
-                          {workspaceSection.label}
-                        </button>
-                      ) : (
-                        <Link
-                          to={`${activeWorkspaceMenu.route}/${workspaceSection.defaultPageId}`}
-                          onClick={() => {
-                            setOpenWorkspaceMenuId(null);
-                            setSidebarOpen(false);
-                          }}
-                          title={workspaceSection.label}
-                          className="min-w-0 flex-1 truncate"
-                        >
-                          {workspaceSection.label}
-                        </Link>
-                      )}
-                      {showPageChildren ? (
-                        <button
-                          type="button"
-                          onClick={() => toggleWorkspaceSection(workspaceSection.id)}
-                          className="ml-2 inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-zinc-400 transition-colors hover:bg-white/60 hover:text-zinc-700 dark:text-zinc-500 dark:hover:bg-white/10 dark:hover:text-zinc-200"
-                          aria-label={sectionCollapsed ? tWebUIContractPage('workspace.expandSidebar') : tWebUIContractPage('workspace.collapseSidebar')}
-                          title={sectionCollapsed ? tWebUIContractPage('workspace.expandSidebar') : tWebUIContractPage('workspace.collapseSidebar')}
-                        >
-                          <ChevronRight className={`h-3.5 w-3.5 transition-transform ${sectionCollapsed ? '' : 'rotate-90'}`} />
-                        </button>
-                      ) : null}
-                    </div>
-
-                    {showPageChildren && !sectionCollapsed ? (
-                      <div className="space-y-1">
-                        {workspaceSection.pages.map((page) => {
-                          const pageActive = location.pathname === `${activeWorkspaceMenu.route}/${page.id}`;
-                          return (
-                            <Link
-                              key={page.id}
-                              to={`${activeWorkspaceMenu.route}/${page.id}`}
-                              onClick={() => {
-                                setOpenWorkspaceMenuId(null);
-                                setSidebarOpen(false);
-                              }}
-                              className={`flex h-10 items-center rounded-md px-3 text-sm font-semibold transition-colors ${
-                                pageActive
-                                  ? 'bg-white text-zinc-950 shadow-sm dark:bg-white/10 dark:text-white'
-                                  : 'text-zinc-500 hover:bg-white/60 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-white/10 dark:hover:text-zinc-100'
-                              }`}
-                            >
-                              <span className="truncate">{page.title}</span>
-                            </Link>
-                          );
-                        })}
-                      </div>
-                    ) : null}
-                  </div>
-                );
-              })
-            ) : (
-              <div className="px-3 py-2 text-sm text-zinc-400 dark:text-zinc-500">
-                {tWebUIContractPage('workspace.empty')}
-              </div>
-            )}
-
-            {showWorkspaceCustomPageAction ? (
-              <div className="space-y-1">
-                <button
-                  type="button"
-                  onClick={() => void handleCreateWorkspaceCustomPage()}
-                  disabled={creatingWorkspaceCustomPageSession}
-                  className="flex h-8 w-full items-center rounded-md px-3 text-left text-xs font-semibold uppercase tracking-wider text-zinc-400 transition-colors hover:text-zinc-600 disabled:cursor-not-allowed disabled:opacity-60 dark:text-zinc-500 dark:hover:text-zinc-300"
-                >
-                  <span className="min-w-0 flex-1 truncate">{tWebUIContractPage('workspace.customPage')}</span>
-                  {creatingWorkspaceCustomPageSession ? (
-                    <Loader2 className="ml-2 h-3.5 w-3.5 shrink-0 animate-spin" />
-                  ) : null}
-                </button>
-              </div>
-            ) : null}
-
-            {showSocDashboardTitleAction ? (
-              <div className="space-y-1">
-                <button
-                  type="button"
-                  onClick={openSocTitleDialog}
-                  className="flex h-8 w-full items-center rounded-md px-3 text-left text-xs font-semibold uppercase tracking-wider text-zinc-400 transition-colors hover:text-zinc-600 dark:text-zinc-500 dark:hover:text-zinc-300"
-                >
-                  <span className="min-w-0 flex-1 truncate">{tWebUIContractPage('workspace.customTitle')}</span>
-                </button>
-              </div>
-            ) : null}
-          </div>
-        </nav>
-      )}
-
       {/* Mobile top menu button */}
-      <div className={`lg:hidden fixed top-0 left-0 z-30 flex items-center h-16 px-4 ${sidebarOpen ? 'hidden' : ''}`}>
+      {/* z-[36]: above the partition top bar (z-[35], opaque, leaves pl-16 for this button) and
+          below the drawer backdrop (z-40); hidden while the drawer is open. */}
+      <div data-mobile-menu-button className={`lg:hidden fixed top-0 left-0 z-[36] flex items-center h-11 px-3 pointer-events-none ${sidebarOpen ? 'hidden' : ''}`}>
         <button
           onClick={() => setSidebarOpen(true)}
-          className="p-2 text-gray-500 hover:text-gray-700 bg-white rounded-lg shadow-sm border border-gray-200 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-300 dark:hover:text-zinc-50"
+          className="pointer-events-auto p-2 text-gray-500 hover:text-gray-700 bg-white rounded-lg shadow-sm border border-gray-200 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-300 dark:hover:text-zinc-50"
         >
-          <Menu className="w-5 h-5" />
+          <IconMenu2 aria-hidden="true" className="w-5 h-5" />
         </button>
       </div>
 
@@ -1420,16 +1707,26 @@ export default function Layout() {
         className={`flex flex-col h-screen ${resizingSidebar ? '' : 'transition-all duration-300'} ${collapsed ? 'lg:pl-16' : 'lg:pl-[var(--layout-sidebar-width)]'}`}
         style={sidebarOffsetStyle}
       >
-        <main className="flex-1 overflow-hidden bg-gray-50 dark:bg-zinc-950">
-          {isFullScreenPage ? (
-            <Outlet />
-          ) : (
-            <div className="h-full overflow-y-auto">
-              <div className="min-h-full p-6">
-                <Outlet />
-              </div>
-            </div>
-          )}
+        <PartitionTopBar
+          items={partitionItems}
+          activeId={viewingScenes && !managingScene ? null : selectedPartition}
+          onSelect={selectPartition}
+          action={{
+              href: SCENE_SUITES_PATH,
+              name: t('sceneSuiteManager'),
+              icon: IconPlus,
+              active: viewingScenes && !managingScene,
+              badge: hasUnseenSuites,
+            }}
+          settingsGroups={topBarSettings}
+        />
+        <main className="relative flex-1 overflow-hidden bg-gray-50 dark:bg-zinc-950">
+          <KeepAlivePanes
+            panes={keepAlivePanes}
+            activeHref={activePaneHref}
+            location={location}
+            routes={contentRoutes}
+          />
         </main>
       </div>
     </div>

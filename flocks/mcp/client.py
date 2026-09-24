@@ -22,6 +22,20 @@ from mcp.client.streamable_http import streamable_http_client
 from flocks.mcp.types import McpResource, McpToolDef
 from flocks.mcp.utils import build_mcp_headers, build_mcp_url
 from flocks.utils.log import Log
+from flocks.config.config import get_user_plugins_root
+from flocks.net.http import async_client
+
+
+def _policy_http_client(headers=None, timeout=None, auth=None):
+    """``McpHttpClientFactory`` twin of ``mcp.shared._httpx_utils.create_mcp_http_client`` on the proxy policy."""
+    import httpx
+
+    kwargs = {"follow_redirects": True, "timeout": timeout if timeout is not None else httpx.Timeout(30.0, read=300.0)}
+    if headers is not None:
+        kwargs["headers"] = headers
+    if auth is not None:
+        kwargs["auth"] = auth
+    return async_client(**kwargs)
 
 log = Log.create(service="mcp.client")
 
@@ -46,6 +60,11 @@ def _extract_root_cause(exc: BaseException) -> str:
             url = url.split('?')[0] + '?...'
         return f"HTTP {status} from {url}"
     return str(exc)
+
+
+# Bounded wait for owner-task cancellation (see McpClient._cancel_owner_task).
+_OWNER_CANCEL_GRACE_SECONDS = 3.0
+_OWNER_CANCEL_ATTEMPTS = 3
 
 
 def _normalize_timeout(timeout: object) -> float:
@@ -204,21 +223,54 @@ class McpClient:
             })
 
     async def _cancel_owner_task(self) -> None:
-        """Cancel and await the owner task if it is still running."""
+        """Cancel and await the owner task if it is still running.
+
+        The wait is bounded: a stdio server that never exits can leave the
+        transport cleanup blocked in ``Process.wait()`` after the first cancel
+        (anyio only kills the child when a *second* cancellation arrives), and
+        an unbounded ``await owner_task`` here would then wedge the caller —
+        and the MCP manager lock — forever.
+        """
         owner_task = self._owner_task
         if owner_task is None:
             return
-        if not owner_task.done():
+        for attempt in range(1, _OWNER_CANCEL_ATTEMPTS + 1):
+            if owner_task.done():
+                self._record_owner_error(owner_task)
+                return
             owner_task.cancel()
-        try:
-            await owner_task
-        except asyncio.CancelledError:
+            try:
+                await asyncio.wait_for(asyncio.shield(owner_task), timeout=_OWNER_CANCEL_GRACE_SECONDS)
+            except asyncio.TimeoutError:
+                log.warn("mcp.client.owner_cancel_timeout", {
+                    "server": self.name,
+                    "attempt": attempt,
+                })
+                continue
+            except asyncio.CancelledError:
+                if owner_task.done():
+                    # The owner task itself finished with CancelledError: normal.
+                    return
+                # We were cancelled from outside while waiting; make sure the
+                # owner task still gets its second cancel so the child is killed.
+                owner_task.cancel()
+                raise
+            except Exception:
+                # Connection startup may already have failed; preserve the error so
+                # callers can finish cleanup and still surface the root cause.
+                self._record_owner_error(owner_task)
             return
-        except Exception as exc:
-            # Connection startup may already have failed; preserve the error so
-            # callers can finish cleanup and still surface the root cause.
-            if self._owner_error is None:
-                self._owner_error = exc
+        if not owner_task.done():
+            log.error("mcp.client.owner_task_stuck", {"server": self.name})
+
+    def _record_owner_error(self, owner_task: asyncio.Task[None]) -> None:
+        """Keep the owner task's failure (if any) as the connection root cause."""
+        try:
+            owner_error = owner_task.exception()
+        except asyncio.CancelledError:
+            owner_error = None
+        if owner_error is not None and self._owner_error is None:
+            self._owner_error = owner_error
 
     def _reset_runtime_state(self, clear_owner_error: bool = False) -> None:
         """Reset local state after disconnects or failed startups."""
@@ -379,7 +431,7 @@ class McpClient:
     ):
         """Create a modern Streamable HTTP transport context."""
         timeout = httpx.Timeout(self.timeout, read=60 * 5)
-        async with httpx.AsyncClient(headers=headers, timeout=timeout) as http_client:
+        async with async_client(headers=headers, timeout=timeout) as http_client:
             async with streamable_http_client(full_url, http_client=http_client) as streams:
                 yield streams
 
@@ -390,7 +442,9 @@ class McpClient:
         headers: Optional[Dict[str, str]],
     ):
         """Create an SSE transport context."""
-        async with sse_client(full_url, headers=headers, timeout=self.timeout) as streams:
+        # httpx_client_factory: the SDK's default client trusts the environment, i.e.
+        # NO_PROXY by name only; ours applies the CIDR / port whitelist too.
+        async with sse_client(full_url, headers=headers, timeout=self.timeout, httpx_client_factory=_policy_http_client) as streams:
             yield streams
 
     async def _run_connected_session(
@@ -479,7 +533,8 @@ class McpClient:
             resources = [
                 McpResource(
                     name=resource.name,
-                    uri=resource.uri,
+                    # SDK returns ``AnyUrl``; McpResource.uri is a plain str.
+                    uri=str(resource.uri),
                     description=getattr(resource, "description", None),
                     mime_type=getattr(resource, "mimeType", None),
                     server=self.name,
@@ -534,7 +589,7 @@ class McpClient:
         All npx-based MCP servers share a single prefix so packages are
         cached on first use and reused offline afterwards.
         """
-        prefix = Path.home() / ".flocks" / "plugins" / "mcp"
+        prefix = get_user_plugins_root() / "mcp"
         prefix.mkdir(parents=True, exist_ok=True)
         return str(prefix)
 

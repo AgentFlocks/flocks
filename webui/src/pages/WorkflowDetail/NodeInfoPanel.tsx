@@ -4,7 +4,7 @@
  */
 import { useState, useEffect, useMemo, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
-import { X, AlertCircle, Save, Loader2, ChevronDown, ChevronRight, Play, RotateCcw, Maximize2 } from 'lucide-react';
+import { IconX, IconAlertCircle, IconDeviceFloppy, IconLoader2, IconChevronDown, IconChevronRight, IconPlayerPlay, IconRotate, IconArrowsDiagonal } from '@tabler/icons-react';
 import {
   workflowAPI,
   Workflow,
@@ -143,7 +143,7 @@ function JsonField({ label, value, onChange, placeholder }: {
         placeholder={placeholder || '{}'}
         spellCheck={false}
       />
-      {err && <p className="mt-1 text-[11px] text-red-500 flex items-center gap-1"><AlertCircle className="w-3 h-3" />{err}</p>}
+      {err && <p className="mt-1 text-[11px] text-red-500 flex items-center gap-1"><IconAlertCircle aria-hidden="true" className="w-3 h-3" />{err}</p>}
     </div>
   );
 }
@@ -289,7 +289,7 @@ export interface NodeInfoPanelProps {
   node: WorkflowNode;
   workflow: Workflow;
   latestExecution?: WorkflowExecution | null;
-  width?: number;
+  width?: number | string;
   onClose: () => void;
   onSaved: (updated: Workflow) => void;
 }
@@ -322,8 +322,8 @@ function RuntimeJsonBlock({ label, value, tone, copyable = true }: {
             className="inline-flex items-center gap-1 rounded-md px-1.5 py-1 text-[11px] text-gray-400 transition-colors hover:bg-white/70 hover:text-gray-600"
           >
             {expanded
-              ? <ChevronDown className="w-3 h-3" />
-              : <ChevronRight className="w-3 h-3" />}
+              ? <IconChevronDown aria-hidden="true" className="w-3 h-3" />
+              : <IconChevronRight aria-hidden="true" className="w-3 h-3" />}
           </button>
         </div>
       </div>
@@ -362,8 +362,8 @@ function RuntimeSection({ nodeId, latestExecution }: { nodeId: string; latestExe
           )}
         </div>
         {expanded
-          ? <ChevronDown className="w-3.5 h-3.5 text-slate-400 flex-shrink-0" />
-          : <ChevronRight className="w-3.5 h-3.5 text-slate-400 flex-shrink-0" />}
+          ? <IconChevronDown aria-hidden="true" className="w-3.5 h-3.5 text-slate-400 flex-shrink-0" />
+          : <IconChevronRight aria-hidden="true" className="w-3.5 h-3.5 text-slate-400 flex-shrink-0" />}
       </button>
 
       {expanded && (
@@ -474,8 +474,8 @@ function NodeRunSection({
           </span>
         </div>
         {expanded
-          ? <ChevronDown className="w-3.5 h-3.5 text-gray-400 flex-shrink-0" />
-          : <ChevronRight className="w-3.5 h-3.5 text-gray-400 flex-shrink-0" />}
+          ? <IconChevronDown aria-hidden="true" className="w-3.5 h-3.5 text-gray-400 flex-shrink-0" />
+          : <IconChevronRight aria-hidden="true" className="w-3.5 h-3.5 text-gray-400 flex-shrink-0" />}
       </button>
 
       {expanded && (
@@ -502,7 +502,7 @@ function NodeRunSection({
                       onClick={() => setRawInputs(JSON.stringify(suggestedInputs, null, 2))}
                       className="inline-flex items-center gap-1 text-[11px] text-gray-500 hover:text-gray-700"
                     >
-                      <RotateCcw className="w-3 h-3" />
+                      <IconRotate aria-hidden="true" className="w-3 h-3" />
                       {t('detail.nodeInfo.restoreSuggestedInputs')}
                     </button>
                   </div>
@@ -524,7 +524,7 @@ function NodeRunSection({
                 </div>
                 {inputError && (
                   <p className="text-[11px] text-red-500 flex items-center gap-1">
-                    <AlertCircle className="w-3 h-3" />
+                    <IconAlertCircle aria-hidden="true" className="w-3 h-3" />
                     {inputError}
                   </p>
                 )}
@@ -534,9 +534,9 @@ function NodeRunSection({
                 type="button"
                 onClick={handleRun}
                 disabled={running}
-                className="w-full flex items-center justify-center gap-1.5 py-2 rounded-lg text-xs font-semibold transition-colors bg-gray-900 text-white hover:bg-black disabled:opacity-50"
+                className="ui-btn ui-btn-primary ui-btn-sm w-full"
               >
-                {running ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Play className="w-3.5 h-3.5" />}
+                {running ? <IconLoader2 aria-hidden="true" className="w-3.5 h-3.5 animate-spin" /> : <IconPlayerPlay aria-hidden="true" className="w-3.5 h-3.5" />}
                 {running ? t('detail.nodeInfo.runningNode') : t('detail.nodeInfo.runNodeAction')}
               </button>
 
@@ -666,7 +666,7 @@ export default function NodeInfoPanel({ node, workflow, latestExecution, width =
           <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded bg-orange-50 text-orange-500 border border-orange-200 flex-shrink-0">{t('detail.nodeInfo.startBadge')}</span>
         )}
         <button onClick={onClose} className="p-1 rounded hover:bg-gray-100 text-gray-400 hover:text-gray-600 transition-colors flex-shrink-0" title={t('detail.nodeInfo.close')}>
-          <X className="w-3.5 h-3.5" />
+          <IconX aria-hidden="true" className="w-3.5 h-3.5" />
         </button>
       </div>
 
@@ -698,7 +698,7 @@ export default function NodeInfoPanel({ node, workflow, latestExecution, width =
                   onClick={() => setCodeEditorOpen(true)}
                   className="inline-flex items-center gap-1 rounded-md border border-gray-200 px-2 py-1 text-[11px] text-gray-600 hover:bg-gray-50 hover:text-gray-900"
                 >
-                  <Maximize2 className="w-3 h-3" />
+                  <IconArrowsDiagonal aria-hidden="true" className="w-3 h-3" />
                   {t('detail.nodeInfo.expandCodeEditor')}
                 </button>
               </div>
@@ -820,16 +820,16 @@ export default function NodeInfoPanel({ node, workflow, latestExecution, width =
       {/* Footer */}
       <div className="flex-shrink-0 px-3 py-3 border-t border-gray-100 space-y-1.5">
         {saveErr && (
-          <p className="text-[11px] text-red-500 flex items-center gap-1"><AlertCircle className="w-3 h-3 flex-shrink-0" />{saveErr}</p>
+          <p className="text-[11px] text-red-500 flex items-center gap-1"><IconAlertCircle aria-hidden="true" className="w-3 h-3 flex-shrink-0" />{saveErr}</p>
         )}
         <button
           onClick={handleSave}
           disabled={saving}
-          className="w-full flex items-center justify-center gap-1.5 py-2 rounded-lg text-xs font-semibold transition-colors bg-red-600 text-white hover:bg-red-700 disabled:opacity-50"
+          className="ui-btn ui-btn-primary ui-btn-sm w-full"
         >
-          {saving ? <><Loader2 className="w-3.5 h-3.5 animate-spin" />{t('detail.nodeInfo.saving')}</>
+          {saving ? <><IconLoader2 aria-hidden="true" className="w-3.5 h-3.5 animate-spin" />{t('detail.nodeInfo.saving')}</>
             : savedOk ? t('detail.nodeInfo.saved')
-            : <><Save className="w-3.5 h-3.5" />{t('detail.nodeInfo.saveNode')}</>}
+            : <><IconDeviceFloppy aria-hidden="true" className="w-3.5 h-3.5" />{t('detail.nodeInfo.saveNode')}</>}
         </button>
       </div>
 
@@ -851,7 +851,7 @@ export default function NodeInfoPanel({ node, workflow, latestExecution, width =
                 onClick={() => setCodeEditorOpen(false)}
                 className="inline-flex items-center gap-1 rounded-md border border-gray-200 px-2.5 py-1.5 text-xs text-gray-600 hover:bg-gray-50 hover:text-gray-900"
               >
-                <X className="w-3.5 h-3.5" />
+                <IconX aria-hidden="true" className="w-3.5 h-3.5" />
                 {t('detail.nodeInfo.closeExpandedEditor')}
               </button>
             </div>

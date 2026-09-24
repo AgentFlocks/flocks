@@ -1,12 +1,18 @@
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useAuth } from '@/contexts/AuthContext';
+import { authApi } from '@/api/auth';
 import PasswordInput from '@/components/common/PasswordInput';
 import AuthLayout from '@/components/layout/AuthLayout';
 
+// Keep the success notice on screen briefly before the auth refresh swaps this
+// page out for the normal layout; otherwise the message is set on an already
+// unmounted component and the user never sees it.
+const SUCCESS_NOTICE_MS = 800;
+
 export default function ForceChangePasswordPage() {
   const { t } = useTranslation('auth');
-  const { user, changePassword, logout } = useAuth();
+  const { user, refresh, logout } = useAuth();
   const [currentPassword, setCurrentPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
@@ -25,11 +31,16 @@ export default function ForceChangePasswordPage() {
     setError(null);
     setSuccess(null);
     try {
-      await changePassword(currentPassword, newPassword);
+      await authApi.changePassword({
+        current_password: currentPassword,
+        new_password: newPassword,
+      });
       setCurrentPassword('');
       setNewPassword('');
       setConfirmPassword('');
       setSuccess(t('forceChange.success'));
+      await new Promise((resolve) => setTimeout(resolve, SUCCESS_NOTICE_MS));
+      await refresh();
     } catch (err: any) {
       setError(
         err?.response?.data?.message ||
@@ -108,7 +119,7 @@ export default function ForceChangePasswordPage() {
         <button
           type="submit"
           disabled={submitting}
-          className="w-full bg-slate-900 text-white rounded-lg py-2.5 font-medium hover:bg-slate-800 disabled:opacity-60"
+          className="ui-btn ui-btn-primary ui-btn-lg w-full"
         >
           {submitting ? t('forceChange.submitting') : t('forceChange.submitButton')}
         </button>

@@ -17,6 +17,18 @@ dedicated daemon thread. ``run_sync`` submits coroutines to it via
 the loop never closes during the process lifetime, any late async cleanup
 (stream ``aclose``, GC, etc.) always runs on a live loop.
 
+Loop affinity with the server:
+    Hook pipelines run inside these coroutines (``llm.before`` redaction,
+    ``tool.execute.before`` gates) and may hold resources bound to the loop
+    that created them -- the commercial extension keeps one ``grpc.aio``
+    channel on the server's main loop. Awaiting such a resource from a
+    different loop fails with "attached to a different loop", so when the
+    server has registered its loop (:func:`register_primary_loop`) workflow
+    coroutines are submitted there instead of to the private loop. The
+    private loop remains the fallback for CLI / test processes without a
+    running server loop, and for callers already executing on the primary
+    loop's thread (submitting there would self-deadlock).
+
 Design notes:
     * Lazy initialization guarded by a module-level ``threading.Lock`` so
       concurrent first-callers cannot start multiple loops.
@@ -35,12 +47,60 @@ import concurrent.futures
 import threading
 from typing import Any, Callable, Coroutine
 
-__all__ = ["run_sync", "run_sync_cancellable", "_get_loop_for_testing"]
+__all__ = [
+    "run_sync",
+    "run_sync_cancellable",
+    "register_primary_loop",
+    "primary_loop",
+    "_get_loop_for_testing",
+]
 
 
 _lock = threading.Lock()
 _loop: asyncio.AbstractEventLoop | None = None
 _thread: threading.Thread | None = None
+_primary_loop: asyncio.AbstractEventLoop | None = None
+
+
+def register_primary_loop(loop: asyncio.AbstractEventLoop | None = None) -> asyncio.AbstractEventLoop:
+    """Record the server's main event loop as the preferred target for workflow coroutines.
+
+    Called from async server entry points (startup sync, run/trigger/poller
+    dispatch). Idempotent; the latest registered loop wins so a restarted
+    in-process server replaces a stale, closed loop.
+    """
+    global _primary_loop
+    if loop is None:
+        loop = asyncio.get_running_loop()
+    _primary_loop = loop
+    return loop
+
+
+def primary_loop() -> asyncio.AbstractEventLoop | None:
+    """Return the registered server loop when it is still usable, else ``None``."""
+    loop = _primary_loop
+    if loop is None or loop.is_closed() or not loop.is_running():
+        return None
+    return loop
+
+
+def _current_loop() -> asyncio.AbstractEventLoop | None:
+    try:
+        return asyncio.get_running_loop()
+    except RuntimeError:
+        return None
+
+
+def _select_loop() -> asyncio.AbstractEventLoop:
+    """Prefer the server loop; fall back to the private loop when unusable.
+
+    The private loop is also used when the caller is *on* the server loop's
+    thread: blocking there on a future that needs the same loop would hang.
+    """
+    primary = primary_loop()
+    if primary is not None and _current_loop() is not primary:
+        return primary
+    return _ensure_loop()
 
 
 def _ensure_loop() -> asyncio.AbstractEventLoop:
@@ -111,7 +171,7 @@ def run_sync(coro: Coroutine[Any, Any, Any]) -> Any:
             self-deadlock). Call sites from inside the loop should simply
             ``await`` the coroutine directly.
     """
-    loop = _ensure_loop()
+    loop = _select_loop()
     _assert_not_workflow_loop(coro, loop)
 
     future = asyncio.run_coroutine_threadsafe(coro, loop)
@@ -136,20 +196,34 @@ def run_sync_cancellable(
     poll_interval_s: float = 0.1,
 ) -> Any:
     """Run *coro* on the shared loop while polling a sync cancellation hook."""
-    loop = _ensure_loop()
+    loop = _select_loop()
     _assert_not_workflow_loop(coro, loop)
 
     future = asyncio.run_coroutine_threadsafe(coro, loop)
-    while True:
-        if cancel_checker():
-            future.cancel()
-            raise asyncio.CancelledError()
-        try:
-            return future.result(timeout=poll_interval_s)
-        except concurrent.futures.TimeoutError:
-            continue
-        except concurrent.futures.CancelledError as exc:
-            raise asyncio.CancelledError() from exc
+    try:
+        while True:
+            if cancel_checker():
+                future.cancel()
+                raise asyncio.CancelledError()
+            try:
+                return future.result(timeout=poll_interval_s)
+            except concurrent.futures.TimeoutError:
+                # A completed coroutine can itself raise TimeoutError (also
+                # used by asyncio.wait_for). It is indistinguishable by type
+                # from an unfinished Future's polling timeout. Retrying a
+                # failed Future spins without waiting and keeps extending the
+                # same exception's traceback, consuming unbounded memory.
+                if future.done():
+                    # Resolve outside the polling try/except. This also handles
+                    # success or cancellation racing the timed-out wait.
+                    return future.result()
+    except concurrent.futures.CancelledError as exc:
+        raise asyncio.CancelledError() from exc
+
+
+def _clear_primary_loop_for_testing() -> None:
+    global _primary_loop
+    _primary_loop = None
 
 
 def _get_loop_for_testing() -> tuple[asyncio.AbstractEventLoop | None, threading.Thread | None]:

@@ -24,7 +24,7 @@ describe('chunkLoadRecovery', () => {
 
   it('does not reload when session storage cannot guard against a loop', () => {
     const reload = vi.fn();
-    const getItem = vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => {
+    const getItem = vi.spyOn(Object.getPrototypeOf(window.sessionStorage), 'getItem').mockImplementation(() => {
       throw new Error('storage unavailable');
     });
 

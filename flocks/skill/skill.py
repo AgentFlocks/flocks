@@ -216,6 +216,20 @@ class Skill:
         return Path(__file__).resolve().parents[2]
 
     @staticmethod
+    def _global_flocks_root() -> str:
+        """Runtime root holding user-level skills: ``FLOCKS_ROOT`` → ``~/.flocks``.
+
+        Same resolution as ``flocks.config.config.get_flocks_root``. User skills
+        are created and installed under ``<root>/plugins/skills`` (routes,
+        installer, hub), so discovery must read the same root or an instance
+        started with ``FLOCKS_ROOT`` never lists what it just wrote.
+        """
+        root = os.getenv("FLOCKS_ROOT")
+        if root:
+            return root
+        return os.path.join(os.path.expanduser("~"), ".flocks")
+
+    @staticmethod
     def _cache_context() -> tuple[str, str]:
         """Return the normalized request context that scopes discovery."""
         current_dir = Instance.get_directory() or os.getcwd()
@@ -490,7 +504,7 @@ class Skill:
             "plugins/skill/**/SKILL.md",
             "plugins/skills/**/SKILL.md",
         )
-        global_flocks = os.path.join(home_dir, ".flocks")
+        global_flocks = cls._global_flocks_root()
         source_flocks = str(cls._source_root() / ".flocks")
 
         # 1) .claude directories — lowest priority
@@ -627,7 +641,9 @@ class Skill:
     @staticmethod
     def settings_path() -> Path:
         """Path to the user-level skill settings file."""
-        return Path.home() / ".flocks" / "config" / "skill_settings.json"
+        from flocks.config.config import _get_config_dir
+
+        return _get_config_dir() / "skill_settings.json"
 
     @classmethod
     @contextmanager
@@ -954,7 +970,7 @@ class SkillFileWatcher:
             worktree = current_dir
 
         flocks_roots = Skill._find_dirs_up(".flocks", current_dir, worktree)
-        global_flocks = os.path.join(home, ".flocks")
+        global_flocks = Skill._global_flocks_root()
         if os.path.isdir(global_flocks):
             flocks_roots.append(global_flocks)
         for root in flocks_roots:

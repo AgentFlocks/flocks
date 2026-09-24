@@ -1,0 +1,24 @@
+[Unit]
+Description=Flocks AI-Native SecOps platform (offline installation)
+Documentation=https://agentflocks.github.io/flocks-docs/
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# `flocks start` forks a supervisor and returns; the updater's restart handoff stops and
+# re-spawns that supervisor by itself, so systemd must not treat the exit as a failure.
+Type=oneshot
+RemainAfterExit=yes
+User=@SERVICE_USER@
+Group=@SERVICE_USER@
+EnvironmentFile=@ENV_FILE@
+WorkingDirectory=@INSTALL_ROOT@/flocks
+ExecStart=@INSTALL_ROOT@/flocks/.venv/bin/flocks start --no-browser --skip-webui-build
+ExecStop=@INSTALL_ROOT@/flocks/.venv/bin/flocks stop
+TimeoutStartSec=300
+TimeoutStopSec=90
+KillMode=mixed
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

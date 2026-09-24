@@ -22,6 +22,7 @@ from flocks.channel.builtin.dingtalk.config import (
     resolve_account_credentials,
 )
 from flocks.utils.log import Log
+from flocks.net.http import async_client
 
 log = Log.create(service="channel.dingtalk.client")
 
@@ -39,7 +40,7 @@ async def _get_http_client() -> httpx.AsyncClient:
     async with _http_lock:
         if _http_client is not None and not _http_client.is_closed:
             return _http_client
-        _http_client = httpx.AsyncClient(
+        _http_client = async_client(
             timeout=30,
             limits=httpx.Limits(
                 max_connections=20,

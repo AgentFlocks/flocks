@@ -80,7 +80,7 @@ export default function SetupAdminPage() {
         <button
           type="submit"
           disabled={submitting}
-          className="w-full bg-slate-900 text-white rounded-lg py-2.5 font-medium hover:bg-slate-800 disabled:opacity-60"
+          className="ui-btn ui-btn-primary ui-btn-lg w-full"
         >
           {submitting ? t('setup.submitting') : t('setup.submitButton')}
         </button>

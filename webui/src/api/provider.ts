@@ -122,10 +122,24 @@ export const providerAPI = {
   getServiceCredentials: (id: string) =>
     client.get<ProviderCredentials>(`/api/provider/${id}/service-credentials`),
 
+  revealServiceCredentials: (id: string) =>
+    client.post<ProviderCredentials>(`/api/provider/${id}/service-credentials/reveal`),
+
   setServiceCredentials: (id: string, credentials: ProviderCredentialInput) =>
     client.post<{ success: boolean; message: string }>(`/api/provider/${id}/service-credentials`, credentials)
       .then((response) => {
         invalidateApiServicesListCache();
+        return response;
+      }),
+
+  configureServiceCredentials: (id: string, credentials: ProviderCredentialInput) =>
+    client.post<{
+      success: boolean; message: string; latency_ms?: number; error?: string;
+    }>(`/api/provider/${id}/service-credentials/configure`, credentials)
+      .then((response) => {
+        if (response.data.success) {
+          invalidateApiServicesListCache();
+        }
         return response;
       }),
 

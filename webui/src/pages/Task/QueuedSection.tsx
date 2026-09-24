@@ -1,9 +1,16 @@
 import { lazy, Suspense, useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
-  ListTodo, Play, RotateCcw, XCircle, Trash2,
-  ChevronLeft, ChevronRight, GripVertical, X,
-} from 'lucide-react';
+  IconListCheck,
+  IconPlayerPlay,
+  IconRotate,
+  IconCircleX,
+  IconTrash,
+  IconChevronLeft,
+  IconChevronRight,
+  IconGripVertical,
+  IconX,
+} from '@tabler/icons-react';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
 import EmptyState from '@/components/common/EmptyState';
 import { useToast } from '@/components/common/Toast';
@@ -13,6 +20,7 @@ import { taskAPI, TaskExecution, TaskListParams } from '@/api/task';
 import { copyText } from '@/utils/clipboard';
 import { StatusBadge, PriorityBadge, SourceBadge, ModeBadge, ActionButton } from './components';
 import { formatTime, formatDuration, PAGE_SIZE } from './helpers';
+import { extractErrorMessage } from '@/utils/error';
 
 const DETAIL_POLL_INTERVAL_MS = 30000;
 const LazySessionChat = lazy(() => import('@/components/common/SessionChat'));
@@ -173,7 +181,7 @@ export default function QueuedSection({ onRefreshGlobal }: { onRefreshGlobal: ()
         fetchDetailTask(taskId);
       }
     } catch (err: unknown) {
-      toast.error(t('queued.actionFailed'), err instanceof Error ? err.message : String(err));
+      toast.error(t('queued.actionFailed'), extractErrorMessage(err));
     }
   };
 
@@ -194,7 +202,7 @@ export default function QueuedSection({ onRefreshGlobal }: { onRefreshGlobal: ()
       setSelectedTasks(new Set());
       refresh();
     } catch (err: unknown) {
-      toast.error(t('queued.actionFailed'), err instanceof Error ? err.message : String(err));
+      toast.error(t('queued.actionFailed'), extractErrorMessage(err));
     }
   };
 
@@ -213,7 +221,7 @@ export default function QueuedSection({ onRefreshGlobal }: { onRefreshGlobal: ()
       if (selectedId && selectedTasks.has(selectedId)) closeDetail();
       refresh();
     } catch (err: unknown) {
-      toast.error(t('queued.actionFailed'), err instanceof Error ? err.message : String(err));
+      toast.error(t('queued.actionFailed'), extractErrorMessage(err));
     }
   };
 
@@ -246,7 +254,8 @@ export default function QueuedSection({ onRefreshGlobal }: { onRefreshGlobal: ()
 
   return (
     <div className="space-y-3">
-      <div className="flex items-center justify-between">
+      {/* 窄屏下「已选 N 项 / 批量取消 / 批量删除」换到下一行，按钮文案不逐字竖排 */}
+      <div className="flex flex-wrap items-center justify-between gap-2 whitespace-nowrap">
         <div className="flex gap-1 bg-gray-100 rounded-lg p-1">
           {QUEUED_FILTERS.map(f => (
             <button
@@ -272,13 +281,16 @@ export default function QueuedSection({ onRefreshGlobal }: { onRefreshGlobal: ()
       <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
         {effectiveTasks.length === 0 ? (
           <EmptyState
-            icon={<ListTodo className="w-8 h-8" />}
+            icon={<IconListCheck aria-hidden="true" className="w-8 h-8" />}
             title={t('queued.emptyTitle')}
             description={t('queued.emptyDescription')}
           />
         ) : (
           <>
-            <table className="w-full text-sm">
+            {/* 窄屏（375px）下表格比容器宽，overflow-hidden 会把后几列裁掉且无法滚动；改为容器内横向滚动。
+                whitespace-nowrap 让单元格保持自然宽度靠容器滚动，而不是把「已完成」「用户」逐字竖排 */}
+            <div className="overflow-x-auto">
+            <table className="w-full text-sm whitespace-nowrap">
               <thead className="bg-gray-50 border-b border-gray-200">
                 <tr>
                   <th className="w-10 px-3 py-3">
@@ -328,16 +340,17 @@ export default function QueuedSection({ onRefreshGlobal }: { onRefreshGlobal: ()
                 ))}
               </tbody>
             </table>
+            </div>
             <div className="flex items-center justify-between px-4 py-3 border-t border-gray-200 bg-gray-50">
               <span className="text-sm text-gray-500">
                 {t('queued.pagination', { total, page: page + 1, totalPages })}
               </span>
               <div className="flex gap-2">
                 <button onClick={() => handlePageChange(Math.max(0, page - 1))} disabled={page === 0} className="p-1.5 rounded hover:bg-gray-200 disabled:opacity-30 disabled:cursor-not-allowed">
-                  <ChevronLeft className="w-4 h-4" />
+                  <IconChevronLeft aria-hidden="true" className="w-4 h-4" />
                 </button>
                 <button onClick={() => handlePageChange(Math.min(totalPages - 1, page + 1))} disabled={page >= totalPages - 1} className="p-1.5 rounded hover:bg-gray-200 disabled:opacity-30 disabled:cursor-not-allowed">
-                  <ChevronRight className="w-4 h-4" />
+                  <IconChevronRight aria-hidden="true" className="w-4 h-4" />
                 </button>
               </div>
             </div>
@@ -415,13 +428,13 @@ function QueuedDetailPanel({ task, onClose, onAction, onRefresh }: {
             isDragging ? 'bg-red-500' : 'bg-gray-200'
           }`} />
           <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2">
-            <GripVertical className={`w-3 h-6 ${isDragging ? 'text-red-500' : 'text-gray-300 hover:text-gray-500'}`} />
+            <IconGripVertical aria-hidden="true" className={`w-3 h-6 ${isDragging ? 'text-red-500' : 'text-gray-300 hover:text-gray-500'}`} />
           </div>
         </div>
         <div className="flex items-center justify-between px-6 py-4 border-b border-gray-200 flex-shrink-0">
           <h3 className="font-semibold text-gray-900 truncate pr-2">{task.title}</h3>
           <button onClick={onClose} className="p-1 rounded hover:bg-gray-100 flex-shrink-0">
-            <X className="w-4 h-4 text-gray-400" />
+            <IconX aria-hidden="true" className="w-4 h-4 text-gray-400" />
           </button>
         </div>
 
@@ -447,15 +460,15 @@ function QueuedDetailPanel({ task, onClose, onAction, onRefresh }: {
 
           <div className="flex flex-wrap gap-1.5">
             {!['completed', 'cancelled', 'failed'].includes(task.status) && (
-              <ActionButton icon={<XCircle className="w-3 h-3" />} label={t('queued.actionCancel')} onClick={() => onAction('cancel', task.id)} color="gray" />
+              <ActionButton icon={<IconCircleX aria-hidden="true" className="w-3 h-3" />} label={t('queued.actionCancel')} onClick={() => onAction('cancel', task.id)} color="gray" />
             )}
             {task.status === 'failed' && (
-              <ActionButton icon={<RotateCcw className="w-3 h-3" />} label={t('queued.actionRetry')} onClick={() => onAction('retry', task.id)} color="blue" />
+              <ActionButton icon={<IconRotate aria-hidden="true" className="w-3 h-3" />} label={t('queued.actionRetry')} onClick={() => onAction('retry', task.id)} color="blue" />
             )}
             {['completed', 'cancelled', 'failed'].includes(task.status) && (
-              <ActionButton icon={<Play className="w-3 h-3" />} label={t('queued.actionRerun')} onClick={() => onAction('rerun', task.id)} color="green" />
+              <ActionButton icon={<IconPlayerPlay aria-hidden="true" className="w-3 h-3" />} label={t('queued.actionRerun')} onClick={() => onAction('rerun', task.id)} color="green" />
             )}
-            <ActionButton icon={<Trash2 className="w-3 h-3" />} label={t('queued.actionDelete')} onClick={() => onAction('delete', task.id)} color="red" />
+            <ActionButton icon={<IconTrash aria-hidden="true" className="w-3 h-3" />} label={t('queued.actionDelete')} onClick={() => onAction('delete', task.id)} color="red" />
           </div>
         </div>
 

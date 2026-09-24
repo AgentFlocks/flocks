@@ -8,6 +8,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from typing import Any, TypeVar
 
 from flocks.auth.context import API_TOKEN_SERVICE_USER_ID
+from flocks.hooks.execution import current_execution_context
 from flocks.hooks.contracts import (
     ToolExecutionActor,
     ToolExecutionActorAgent,
@@ -23,6 +24,9 @@ from flocks.hooks.contracts import (
     utc_now_iso,
 )
 from flocks.session.execution_profile import get_session_execution_profile
+from flocks.utils.log import Log
+
+log = Log.create(service="session.tool_lifecycle")
 
 
 T = TypeVar("T")
@@ -64,35 +68,19 @@ async def run_tool_execution_lifecycle(
     Non-Registry tool entry points use this adapter to share decision and
     terminal-outcome semantics without repurposing generic action hooks.
     """
-    from flocks.hooks.contracts import HookDecisionAction, ToolDecision, ToolExecutionOutcome
-    from flocks.hooks.execution import execution_stop_error
+    from flocks.hooks.contracts import HookDecisionAction, ToolExecutionOutcome
     from flocks.hooks.pipeline import HookPipeline
+    from flocks.hooks.tool_gate import run_tool_gate
 
     started = time.perf_counter()
     result: T | None = None
     status = "error"
     error: BaseException | None = None
     try:
-        ctx = await HookPipeline.run_tool_before(payload)
-        raw_decision = ctx.output.get("decision")
-        normalized_decision = (
-            {
-                key: value
-                for key, value in raw_decision.items()
-                if key in {"action", "reason", "labels", "validated_input_patch"}
-            }
-            if isinstance(raw_decision, Mapping)
-            else {}
-        )
-        decision = ToolDecision.model_validate(
-            normalized_decision
-        )
-        legacy_stop = execution_stop_error(ctx)
-        if legacy_stop is not None:
-            decision = ToolDecision(
-                action=HookDecisionAction.DENY,
-                reason=str(legacy_stop),
-            )
+        # Same gate the registry path uses, so a handler's decision means the
+        # same thing regardless of which entry point the tool came through.
+        verdict = await run_tool_gate(payload)
+        decision = verdict.decision
         if decision.action is HookDecisionAction.DENY:
             status = "deny"
             raise PermissionError(decision.reason or "Tool execution denied by hook")
@@ -135,10 +123,16 @@ async def run_tool_execution_lifecycle(
                 **payload,
                 "outcome": outcome.model_dump(mode="json"),
             })
-        except Exception:
+        except Exception as after_exc:
             # An after hook is observational; it must never replace the
-            # operation's terminal success, denial, or cancellation.
-            pass
+            # operation's terminal success, denial, or cancellation. It is
+            # logged rather than swallowed, because a silent except here hides
+            # the difference between "no handler cared" and "the stage never
+            # ran".
+            log.warn(
+                "tool.lifecycle.after_hook_failed",
+                {"error": str(after_exc), "status": status},
+            )
 
 
 async def build_session_tool_execution_payload(
@@ -224,10 +218,15 @@ async def build_session_tool_execution_payload(
             permission_mode=permission_mode,
             network_mode=network_mode,
         ),
+        # The opaque ingress carrier (e.g. a Pro identity transfer token) must
+        # ride along with the tool contract: tool calls run in child tasks of
+        # the request, so the gate can only restore the verified identity from
+        # this field. Callers rarely fill it explicitly, so default to the
+        # current scoped context instead of silently dropping it.
         extension_context=redact_sensitive(
             dict(extra.get("extension_context"))
             if isinstance(extra.get("extension_context"), Mapping)
-            else {}
+            else current_execution_context()
         ),
     )
     return {

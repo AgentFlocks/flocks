@@ -11,15 +11,17 @@ from flocks.hooks.execution import current_execution_context, execute_with_hooks
 from flocks.hooks.pipeline import HookPipeline
 from flocks.utils.log import Log
 from flocks.workflow.execution_store import (
-    compact_history_for_storage,
+    ExecutionStepRecorder,
     compact_outputs_for_storage,
     create_execution_record,
     record_execution_result,
     resolve_execution_outcome,
 )
 from flocks.workflow.fs_store import read_workflow_dir, workflow_scan_dirs
+from flocks.workflow._async_runtime import register_primary_loop
 from flocks.workflow.runner import run_workflow
 from flocks.workflow.store import WorkflowStore
+from flocks.workflow.ownership import abandon_execution, execution_cancelled
 from flocks.workflow.tool_context import (
     build_workflow_tool_context,
     cleanup_workflow_tool_context,
@@ -218,12 +220,24 @@ class TriggerRuntime:
         trigger: TriggerDefinition,
         mapped_inputs: Dict[str, Any],
     ) -> Dict[str, Any]:
+        auth_scheme = str(getattr(trigger.auth, "type", "") or "").strip().lower() or "trigger"
         action_payload = {
             "operation": "workflow.trigger.execute",
             "transport": "headless",
             "workflow_id": workflow_id,
             "trigger": trigger,
             "inputs": mapped_inputs,
+            # The delivery was already authenticated by this runtime (trigger
+            # api_key/hmac, or an operator-issued test call). Ingress policies
+            # treat it as the explicit legacy compatibility carrier instead of
+            # demanding a managed API-key identity it cannot present.
+            "legacy_compat": True,
+            "evidence": {
+                "auth_scheme": auth_scheme,
+                "trigger_id": trigger.id,
+                "trigger_type": trigger.type,
+            },
+            "metadata": {"legacy_compat": True, "trigger_type": trigger.type},
         }
         return await execute_with_hooks(
             action_payload,
@@ -250,6 +264,7 @@ class TriggerRuntime:
             input_params=mapped_inputs,
         )
         exec_id = exec_data["id"]
+        step_recorder = ExecutionStepRecorder()
         started_at = time.time()
         tool_context = None
         try:
@@ -262,14 +277,21 @@ class TriggerRuntime:
                 action_name=f"trigger:{trigger.type}",
                 **context_kwargs,
             )
+            register_primary_loop()
             result = await asyncio.to_thread(
                 run_workflow,
                 workflow=workflow_json,
                 inputs=mapped_inputs,
+                run_id=exec_id,
                 trace=False,
+                execution_profile="high_frequency",
+                cancel=lambda: execution_cancelled(exec_id),
+                on_step_complete=step_recorder.on_step_complete,
                 tool_context=tool_context,
             )
             status_value, error_message = resolve_execution_outcome(result)
+            step_count = step_recorder.step_count or result.steps
+            exec_data.update(step_recorder.summary)
             exec_data.update(
                 {
                     "status": status_value,
@@ -277,10 +299,11 @@ class TriggerRuntime:
                     "finishedAt": _now_ms(),
                     "duration": time.time() - started_at,
                     "errorMessage": error_message,
-                    "executionLog": compact_history_for_storage(result.history),
+                    "executionLog": [],
+                    "stepCount": step_count,
                     "currentNodeId": result.last_node_id,
                     "currentPhase": status_value,
-                    "currentStepIndex": result.steps,
+                    "currentStepIndex": step_count,
                     "triggerId": trigger.id,
                     "triggerType": trigger.type,
                     "deliveryId": mapped_inputs.get("_flocks", {}).get("trigger", {}).get("deliveryId"),
@@ -288,13 +311,22 @@ class TriggerRuntime:
                     "triggerSource": mapped_inputs.get("_flocks", {}).get("trigger", {}).get("source"),
                 }
             )
+        except asyncio.CancelledError:
+            await abandon_execution(exec_id)
+            raise
         except Exception as exc:
+            step_count = step_recorder.step_count
+            exec_data.update(step_recorder.summary)
             exec_data.update(
                 {
                     "status": "error",
                     "finishedAt": _now_ms(),
                     "duration": time.time() - started_at,
                     "errorMessage": str(exc),
+                    "executionLog": [],
+                    "stepCount": step_count,
+                    "currentPhase": "error",
+                    "currentStepIndex": step_count,
                     "triggerId": trigger.id,
                     "triggerType": trigger.type,
                     "deliveryId": mapped_inputs.get("_flocks", {}).get("trigger", {}).get("deliveryId"),
@@ -304,7 +336,12 @@ class TriggerRuntime:
             )
         finally:
             await cleanup_workflow_tool_context(tool_context)
-        await record_execution_result(workflow_id, exec_id, exec_data)
+        await record_execution_result(
+            workflow_id,
+            exec_id,
+            exec_data,
+            steps=step_recorder.take_steps(),
+        )
         return exec_data
 
     async def dispatch_event(
@@ -340,6 +377,14 @@ class TriggerRuntime:
             task.cancel()
             try:
                 await task
+            except asyncio.CancelledError:
+                # Awaiting the adapter task we just cancelled re-raises its
+                # CancelledError here; only propagate when *this* task is the
+                # one being cancelled, otherwise the request handler dies with
+                # "No response returned".
+                current = asyncio.current_task()
+                if current is not None and current.cancelling():
+                    raise
             except Exception:
                 pass
         self._custom_adapter_signatures.pop(key, None)

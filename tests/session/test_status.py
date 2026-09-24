@@ -16,6 +16,7 @@ from flocks.session.core.status import (
     SessionStatusCompacting,
     SessionStatusDreaming,
     SessionStatusIdle,
+    SessionStatusQueued,
     SessionStatusRetry,
 )
 
@@ -42,6 +43,10 @@ class TestSessionStatusDefaults:
         result = SessionStatus.list()
         assert isinstance(result, dict)
         assert len(result) == 0
+
+    def test_get_for_session_defaults_to_idle(self):
+        status = SessionStatus.get_for_session("nonexistent_session")
+        assert isinstance(status, SessionStatusIdle)
 
 
 # ---------------------------------------------------------------------------
@@ -95,6 +100,19 @@ class TestSessionStatusSetGet:
         SessionStatus.set("ses_6", SessionStatusCompacting())
         status = SessionStatus.get("ses_6")
         assert isinstance(status, SessionStatusCompacting)
+
+    def test_get_for_session_searches_instance_states(self):
+        SessionStatus._state["/project/a"] = {"ses_cross_instance": SessionStatusBusy()}
+
+        try:
+            status = SessionStatus.get_for_session(
+                "ses_cross_instance",
+                preferred_instance_id="/project/b",
+            )
+        finally:
+            SessionStatus._state.pop("/project/a", None)
+
+        assert isinstance(status, SessionStatusBusy)
 
 
 # ---------------------------------------------------------------------------
@@ -167,6 +185,10 @@ class TestStatusModels:
     def test_busy_type_literal(self):
         busy = SessionStatusBusy()
         assert busy.type == "busy"
+
+    def test_queued_type_literal(self):
+        queued = SessionStatusQueued()
+        assert queued.type == "queued"
 
     def test_retry_required_fields(self):
         retry = SessionStatusRetry(attempt=3, message="Overloaded", next=9999)

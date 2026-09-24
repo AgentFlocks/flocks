@@ -1294,22 +1294,25 @@ def test_redaction_handles_nested_keys_and_inline_secrets() -> None:
 
 
 @pytest.mark.asyncio
-async def test_evolution_schema_removes_legacy_skill_tables(
+async def test_evolution_schema_preserves_legacy_skill_tables(
     tmp_path: Path,
 ) -> None:
     await Storage.init(tmp_path / "legacy-schema.db")
     async with Storage.connect() as db:
         await db.execute("CREATE TABLE memory_skill_proposals (id TEXT PRIMARY KEY)")
         await db.execute("CREATE TABLE memory_skill_evolution_state (session_id TEXT PRIMARY KEY)")
+        await db.execute("INSERT INTO memory_skill_proposals(id) VALUES (?)", ("preserved",))
         await db.commit()
 
     await EvolutionCheckpointStore.ensure_schema()
 
     async with Storage.connect() as db:
-        cursor = await db.execute("SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'memory_skill_%'")
+        cursor = await db.execute("SELECT table_name FROM information_schema.tables WHERE table_schema = current_schema() AND table_name LIKE 'memory_skill_%' ORDER BY table_name")
         rows = await cursor.fetchall()
+        marker = await db.fetch_one("SELECT id FROM memory_skill_proposals WHERE id = ?", ("preserved",))
 
-    assert rows == []
+    assert [row[0] for row in rows] == ["memory_skill_evolution_state", "memory_skill_proposals"]
+    assert marker == ("preserved",)
 
 
 @pytest.mark.asyncio

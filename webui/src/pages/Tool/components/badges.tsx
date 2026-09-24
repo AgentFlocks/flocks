@@ -1,5 +1,5 @@
 import { useTranslation } from 'react-i18next';
-import { CheckCircle, XCircle } from 'lucide-react';
+import { IconCircleCheck, IconCircleX } from '@tabler/icons-react';
 
 interface BadgeConfig {
   labelKey: string;
@@ -44,11 +44,11 @@ export function EnabledBadge({ enabled }: { enabled: boolean }) {
   const { t } = useTranslation('tool');
   return enabled ? (
     <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800">
-      <CheckCircle className="w-3 h-3 mr-1" />{t('enabledBadge.enabled')}
+      <IconCircleCheck aria-hidden="true" className="w-3 h-3 mr-1" />{t('enabledBadge.enabled')}
     </span>
   ) : (
     <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-600">
-      <XCircle className="w-3 h-3 mr-1" />{t('enabledBadge.disabled')}
+      <IconCircleX aria-hidden="true" className="w-3 h-3 mr-1" />{t('enabledBadge.disabled')}
     </span>
   );
 }

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import shutil
@@ -27,6 +28,7 @@ from flocks.contracts.webui.models import (
     WebUIWorkspaceListItem,
 )
 from flocks.contracts.webui.store import WebUIPagesStore, webui_contract_page_route
+from flocks.hub.catalog import scene_suite_workspace_owners
 from flocks.server.routes.event import publish_event
 from flocks.utils.log import Log
 
@@ -44,6 +46,14 @@ _IMPORT_DIST_FILES = {"dist/page.js", "dist/meta.json", "dist/api-meta.json"}
 _store = WebUIPagesStore()
 _builder = WebUIPageBuilder(_store)
 _api_runtime = WebUIPageApiRuntime(_store)
+
+
+def _page_id_or_400(page_id: str) -> str:
+    """Validate a page id from the URL; a malformed id is a client error, not a 500."""
+    try:
+        return _store.validate_page_id(page_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
 
 class WebUIPageCreateRequest(BaseModel):
@@ -155,7 +165,64 @@ async def list_webui_pages(enabled_only: bool = Query(False, alias="enabledOnly"
 
 @router.get("/contracts/webui/workspaces", response_model=list[WebUIWorkspaceListItem])
 async def list_webui_workspaces(enabled_only: bool = Query(False, alias="enabledOnly")):
-    return _store.list_workspaces(enabled_only=enabled_only)
+    # Directory scans plus the hub catalog signature: keep them off the event loop.
+    return await asyncio.to_thread(
+        lambda: _attach_scene_suites(_store.list_workspaces(enabled_only=enabled_only))
+    )
+
+
+def _attach_scene_suites(workspaces: list[WebUIWorkspaceListItem]) -> list[WebUIWorkspaceListItem]:
+    """Tag each workspace with the scene suite that ships it and drop
+    user-root scene workspaces no suite knows about.
+
+    Scenes reach the user root (~/.flocks/plugins/contracts/webui) only through
+    the suite manager, so a ``sceneWorkspace`` directory there without a suite
+    in the catalog is a leftover (typically from a build of another branch)
+    whose backend is not here; the navigation must not open it. Scenes checked
+    into the project root are development work and stay, as do workbench pages,
+    which are not scenes.
+    """
+    try:
+        owners = scene_suite_workspace_owners()
+    except Exception as exc:
+        # Without the catalog nothing can be verified; keep everything reachable.
+        log.warning("webui.workspaces.suite_lookup_failed", {"error": str(exc)})
+        return workspaces
+    result: list[WebUIWorkspaceListItem] = []
+    for workspace in workspaces:
+        suite_id = owners.get(workspace.id)
+        if suite_id is None and workspace.placement == "sceneWorkspace" and not workspace.native:
+            # The list is fetched on every navigation refresh; say it once.
+            if workspace.id not in _hidden_scene_workspaces_logged:
+                _hidden_scene_workspaces_logged.add(workspace.id)
+                log.info("webui.workspaces.unmanaged_scene_hidden", {"workspaceId": workspace.id})
+            continue
+        result.append(workspace.model_copy(update={"suiteId": suite_id}))
+    return result
+
+
+_hidden_scene_workspaces_logged: set[str] = set()
+
+
+class WebUIWorkspaceEnabledRequest(BaseModel):
+    enabled: bool = Field(..., description="Whether the workspace appears in navigation")
+
+
+@router.patch("/contracts/webui/workspaces/{workspace_id}", response_model=WebUIWorkspaceListItem)
+async def set_webui_workspace_enabled(
+    workspace_id: str,
+    req: WebUIWorkspaceEnabledRequest,
+    _admin: object = Depends(require_admin),
+):
+    """Turn a scene workspace off or back on without uninstalling its suite."""
+    try:
+        workspace = _store.set_workspace_enabled(workspace_id, req.enabled)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    await publish_event("contracts.webui.pages.nav_changed", {"workspaceId": workspace_id, "enabled": req.enabled})
+    return workspace
 
 
 @router.post("/contracts/webui/pages", response_model=WebUIPageDetail, status_code=status.HTTP_201_CREATED)
@@ -190,6 +257,7 @@ async def create_webui_page(req: WebUIPageCreateRequest, _admin: object = Depend
 
 @router.get("/contracts/webui/pages/{page_id}", response_model=WebUIPageDetail)
 async def get_webui_page(page_id: str):
+    page_id = _page_id_or_400(page_id)
     try:
         return _store.get_page(page_id)
     except FileNotFoundError as exc:
@@ -198,6 +266,7 @@ async def get_webui_page(page_id: str):
 
 @router.put("/contracts/webui/pages/{page_id}", response_model=WebUIPageSaveResponse)
 async def save_webui_page(page_id: str, req: WebUIPageSaveRequest, _admin: object = Depends(require_admin)):
+    page_id = _page_id_or_400(page_id)
     nav_changed = False
     try:
         if req.manifest is not None:
@@ -253,6 +322,7 @@ async def save_webui_page(page_id: str, req: WebUIPageSaveRequest, _admin: objec
 
 @router.post("/contracts/webui/pages/{page_id}/build", response_model=WebUIPageBuildMeta)
 async def build_webui_page(page_id: str, _admin: object = Depends(require_admin)):
+    page_id = _page_id_or_400(page_id)
     try:
         build = _builder.build(page_id)
     except FileNotFoundError as exc:
@@ -300,11 +370,13 @@ async def get_webui_page_asset(page_id: str, asset_path: str):
 
 @router.get("/contracts/webui/pages/{page_id}/api")
 async def list_webui_page_api_routes(page_id: str):
+    page_id = _page_id_or_400(page_id)
     return await _api_runtime.list_routes(page_id)
 
 
 @router.post("/contracts/webui/pages/{page_id}/api/reload")
 async def reload_webui_page_api(page_id: str, _admin: object = Depends(require_admin)):
+    page_id = _page_id_or_400(page_id)
     routes = await _api_runtime.reload_page(page_id)
     await publish_event("contracts.webui.pages.api_changed", {"id": page_id, "routes": routes})
     return {"routes": routes}
@@ -316,11 +388,13 @@ async def reload_webui_page_api(page_id: str, _admin: object = Depends(require_a
 )
 async def dispatch_webui_page_api(page_id: str, api_path: str, request: Request):
     user = require_user(request)
+    page_id = _page_id_or_400(page_id)
     return await _api_runtime.dispatch(page_id, api_path, request, user)
 
 
 @router.get("/contracts/webui/pages/{page_id}/export")
 async def export_webui_page(page_id: str, _admin: object = Depends(require_admin)):
+    page_id = _page_id_or_400(page_id)
     page_path = _store.page_dir(page_id)
     if not page_path.is_dir():
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"page not found: {page_id}")
@@ -332,7 +406,13 @@ async def export_webui_page(page_id: str, _admin: object = Depends(require_admin
             for file_path in page_path.rglob("*"):
                 if not file_path.is_file():
                     continue
-                arc_name = str(file_path.relative_to(page_path)).replace("\\", "/")
+                rel_parts = file_path.relative_to(page_path).parts
+                # Bytecode caches are produced when the page API is loaded and
+                # are not importable page content; shipping them would make the
+                # archive fail the import allow-list on the way back in.
+                if "__pycache__" in rel_parts or file_path.suffix == ".pyc" or any(part.startswith(".") for part in rel_parts):
+                    continue
+                arc_name = "/".join(rel_parts)
                 zf.write(file_path, arcname=f"{page_id}/{arc_name}")
     except Exception:
         if os.path.exists(archive_path):
@@ -371,7 +451,7 @@ async def import_webui_page(
                 root_parts = {name.split("/", 1)[0] for name in names}
                 if len(root_parts) != 1:
                     raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="archive must contain a single page root directory")
-                page_id = _store.validate_page_id(next(iter(root_parts)))
+                page_id = _page_id_or_400(next(iter(root_parts)))
                 extracted_root = temp_root / page_id
                 total_uncompressed = 0
                 for member, member_name in zip(members, names):

@@ -8,6 +8,7 @@ from typing import Optional
 
 from flocks.memory.paths import path_is_within
 from flocks.skill.skill import Skill
+from flocks.config.config import get_user_plugins_root
 
 
 EVOLUTION_MANAGED_BY = "flocks"
@@ -16,7 +17,7 @@ SELF_IMPROVE_AGENT = "self-improve"
 
 def user_skill_root() -> Path:
     """Return the only Skill root writable by self-improvement."""
-    return Path.home() / ".flocks" / "plugins" / "skills"
+    return get_user_plugins_root() / "skills"
 
 
 def is_evolution_managed(content: str) -> bool:

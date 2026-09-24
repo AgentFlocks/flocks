@@ -4,14 +4,14 @@ PTY routes - API endpoints for PTY session management
 Matches Flocks' ported src/server/routes/pty.ts
 """
 
-from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect, status
+from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect, status
 from pydantic import BaseModel, Field
 
-from flocks.server.auth import apply_auth_for_request, clear_auth_context
+from flocks.server.auth import apply_auth_for_request, clear_auth_context, require_admin
 from flocks.hooks.execution import execution_context_scope, execution_lifecycle_scope
 from flocks.identity import reset_current_subject, set_current_subject
 from flocks.utils.log import Log
-from flocks.pty.pty import Pty, PtyInfo, CreateInput, UpdateInput, PtyStatus
+from flocks.pty.pty import Pty, PtyInfo, PtyLimitExceeded, CreateInput, UpdateInput, PtyStatus
 
 
 router = APIRouter()
@@ -64,11 +64,19 @@ async def list_sessions():
     summary="Create PTY session",
     description="Create a new pseudo-terminal (PTY) session for running shell commands.",
 )
-async def create_session(input_data: CreateInput):
+async def create_session(input_data: CreateInput, _admin: object = Depends(require_admin)):
     """Create a new PTY session - operationId: pty.create"""
     try:
         info = await Pty.create(input_data)
         return _to_response(info)
+    except PtyLimitExceeded as e:
+        # Not a bad request: the caller has to close a session (or the operator
+        # raise FLOCKS_PTY_MAX_SESSIONS) before this can succeed.
+        log.warn("pty.create.limit", {"error": str(e)})
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=str(e)
+        )
     except Exception as e:
         log.error("pty.create.error", {"error": str(e)})
         raise HTTPException(
@@ -100,7 +108,7 @@ async def get_session(pty_id: str):
     summary="Update PTY session",
     description="Update properties of an existing PTY session.",
 )
-async def update_session(pty_id: str, input_data: UpdateInput):
+async def update_session(pty_id: str, input_data: UpdateInput, _admin: object = Depends(require_admin)):
     """Update PTY session - operationId: pty.update"""
     info = await Pty.update(pty_id, input_data)
     if not info:
@@ -117,7 +125,7 @@ async def update_session(pty_id: str, input_data: UpdateInput):
     summary="Remove PTY session",
     description="Remove and terminate a specific PTY session.",
 )
-async def remove_session(pty_id: str):
+async def remove_session(pty_id: str, _admin: object = Depends(require_admin)):
     """Remove PTY session - operationId: pty.remove"""
     if not Pty.get(pty_id):
         raise HTTPException(

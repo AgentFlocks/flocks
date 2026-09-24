@@ -56,6 +56,13 @@ RATE_LIMIT_COOLDOWN_SECONDS = 60.0
 CHAIN_EXHAUSTION_COOLDOWN_SECONDS = 5.0
 
 
+def _part_field(part: Any, name: str, default: Any = None) -> Any:
+    """消息 part 既可能是 pydantic 对象也可能是 dict（旧存储），统一取字段。"""
+    if isinstance(part, dict):
+        return part.get(name, default)
+    return getattr(part, name, default)
+
+
 @dataclass(frozen=True)
 class RuntimeModel:
     """Concrete provider/model candidate used by Auto failover."""
@@ -455,6 +462,111 @@ class SessionLoop:
             aborted += cls.abort_children(sid)
         return aborted
 
+    # ------------------------------------------------------------------
+    # 文件快照：用户轮次起点 snapshot part → 每步 patch part → 轮次结束 diff
+    # ------------------------------------------------------------------
+    @classmethod
+    def _snapshot_worktree(cls, ctx: LoopContext) -> Optional[str]:
+        import os
+
+        worktree = getattr(ctx.session, "directory", None)
+        if not worktree or not os.path.isdir(worktree):
+            return None
+        return worktree
+
+    @classmethod
+    async def _track_turn_snapshot(cls, ctx: LoopContext, last_user: MessageInfo) -> Optional[str]:
+        """步开始前记录 git tree 快照；用户消息还没有 snapshot part 时补上（轮次起点）。"""
+        worktree = cls._snapshot_worktree(ctx)
+        if not worktree:
+            return None
+        try:
+            from flocks.snapshot.snapshot import Snapshot
+
+            snapshot = await Snapshot.track(ctx.session.project_id, worktree)
+        except Exception as exc:
+            log.debug("loop.snapshot.track_failed", {"session_id": ctx.session.id, "error": str(exc)})
+            return None
+        if not snapshot:
+            return None
+        try:
+            parts = await Message.parts(last_user.id, ctx.session.id)
+            if not any(_part_field(part, "type") == "snapshot" for part in parts):
+                from flocks.session.message import SnapshotPart
+
+                await Message.add_part(
+                    ctx.session.id,
+                    last_user.id,
+                    SnapshotPart(sessionID=ctx.session.id, messageID=last_user.id, snapshot=snapshot),
+                )
+        except Exception as exc:
+            log.warn("loop.snapshot.part_failed", {"session_id": ctx.session.id, "error": str(exc)})
+        return snapshot
+
+    @classmethod
+    async def _record_step_patch(
+        cls,
+        ctx: LoopContext,
+        callbacks: LoopCallbacks,
+        last_user: MessageInfo,
+        snapshot: Optional[str],
+    ) -> None:
+        """步结束后把本步改动过的文件记成 assistant 消息的 patch part（hash=改动前快照）。"""
+        worktree = cls._snapshot_worktree(ctx)
+        if not snapshot or not worktree:
+            return
+        try:
+            from flocks.snapshot.snapshot import Snapshot
+
+            patch = await Snapshot.patch(ctx.session.project_id, worktree, snapshot)
+        except Exception as exc:
+            log.debug("loop.snapshot.patch_failed", {"session_id": ctx.session.id, "error": str(exc)})
+            return
+        if not patch.files:
+            return
+        try:
+            messages = await Message.list(ctx.session.id)
+            assistant = next(
+                (
+                    msg
+                    for msg in reversed(messages)
+                    if msg.role == MessageRole.ASSISTANT and getattr(msg, "parentID", None) == last_user.id
+                ),
+                None,
+            )
+            if assistant is None:
+                return
+            from flocks.session.message import PatchPart
+
+            part = PatchPart(sessionID=ctx.session.id, messageID=assistant.id, hash=snapshot, files=patch.files)
+            await Message.add_part(ctx.session.id, assistant.id, part)
+            await cls._publish_runtime_event(callbacks, "message.part.updated", {"part": part.model_dump(by_alias=True)})
+            log.info("loop.snapshot.patch_recorded", {
+                "session_id": ctx.session.id,
+                "message_id": assistant.id,
+                "files": len(patch.files),
+            })
+        except Exception as exc:
+            log.warn("loop.snapshot.patch_part_failed", {"session_id": ctx.session.id, "error": str(exc)})
+
+    @classmethod
+    async def _record_turn_diffs(cls, ctx: LoopContext, last_user: MessageInfo) -> None:
+        """轮次结束：按快照算出会话/消息级文件 diff 存起来（GET /session/{id}/diff 读的就是它）。"""
+        worktree = cls._snapshot_worktree(ctx)
+        if not worktree:
+            return
+        try:
+            from flocks.session.lifecycle.summary import SessionSummary
+
+            await SessionSummary.record_turn_diffs(
+                session_id=ctx.session.id,
+                user_message_id=last_user.id,
+                project_id=ctx.session.project_id,
+                worktree=worktree,
+            )
+        except Exception as exc:
+            log.warn("loop.snapshot.diff_failed", {"session_id": ctx.session.id, "error": str(exc)})
+
     @classmethod
     async def _publish_runtime_event(
         cls,
@@ -573,6 +685,35 @@ class SessionLoop:
     
     @classmethod
     async def run(
+        cls,
+        session_id: str,
+        provider_id: Optional[str] = None,
+        model_id: Optional[str] = None,
+        agent_name: Optional[str] = None,
+        callbacks: Optional[LoopCallbacks] = None,
+        working_directory: Optional[str] = None,
+        auto_failover: bool = False,
+    ) -> LoopResult:
+        """One live runner per session across every process sharing PostgreSQL."""
+        from flocks.session.ownership import SessionExecutionLease, SessionOwnershipLost
+
+        kwargs = dict(provider_id=provider_id, model_id=model_id, agent_name=agent_name,
+                      callbacks=callbacks, working_directory=working_directory, auto_failover=auto_failover)
+        if cls.is_running(session_id):
+            return await cls._run_owned(session_id, **kwargs)
+        lease = await SessionExecutionLease.acquire(session_id)
+        if lease is None:
+            return LoopResult(action="queued", error="Loop already running")
+        try:
+            async with lease:
+                result = await cls._run_owned(session_id, **kwargs)
+                lease.require_owned()
+                return result
+        except SessionOwnershipLost as exc:
+            return LoopResult(action="error", error=str(exc))
+
+    @classmethod
+    async def _run_owned(
         cls,
         session_id: str,
         provider_id: Optional[str] = None,
@@ -788,18 +929,26 @@ class SessionLoop:
             
             # Set status to idle
             SessionStatus.set(session_id, SessionStatusIdle())
-            await cls._publish_session_status(callbacks or LoopCallbacks(), session_id, "idle")
-            
-            # Touch session (update timestamp)
-            await Session.touch(session.project_id, session_id)
-
-            # Publish idle event
+            from flocks.session.ownership import require_execution_allowed, SessionOwnershipLost
+            from flocks.task.lease import ExecutionOwnershipError
             try:
-                from flocks.bus.bus import Bus
-                from flocks.bus.events import SessionIdle
-                await Bus.publish(SessionIdle, {"sessionID": session_id})
-            except Exception as exc:
-                log.warn("loop.idle.event_error", {"error": str(exc)})
+                require_execution_allowed(session_id)
+                can_publish_idle = True
+            except (SessionOwnershipLost, ExecutionOwnershipError):
+                can_publish_idle = False
+            if can_publish_idle:
+                await cls._publish_session_status(callbacks or LoopCallbacks(), session_id, "idle")
+            
+                # Touch session (update timestamp)
+                await Session.touch(session.project_id, session_id)
+
+                # Publish idle event
+                try:
+                    from flocks.bus.bus import Bus
+                    from flocks.bus.events import SessionIdle
+                    await Bus.publish(SessionIdle, {"sessionID": session_id})
+                except Exception as exc:
+                    log.warn("loop.idle.event_error", {"error": str(exc)})
     
     @staticmethod
     async def _resolve_model(
@@ -1319,7 +1468,7 @@ class SessionLoop:
         1. Get messages and analyze (lastUser, lastAssistant, lastFinished)
         2. Check exit conditions
         3. Generate title on first step
-        4. Check for pending tasks (subtask/compaction)
+        4. Check for pending compaction
         5. Check context overflow (compaction before step)
         6. Process step (call LLM + tools)
         7. Loop until complete
@@ -1328,6 +1477,8 @@ class SessionLoop:
         loop_error: Optional[str] = None
         
         while not ctx.should_abort():
+            from flocks.session.ownership import require_execution_allowed
+            require_execution_allowed(ctx.session.id)
             # Set status to busy
             SessionStatus.set(ctx.session.id, SessionStatusBusy())
             
@@ -1374,7 +1525,7 @@ class SessionLoop:
             last_user: Optional[MessageInfo] = None
             last_assistant: Optional[MessageInfo] = None
             last_finished: Optional[MessageInfo] = None
-            tasks: List[tuple[str, Any]] = []  # (type, part) - compaction or subtask
+            tasks: List[tuple[str, Any]] = []  # (type, part) - compaction only
             
             scan_started_at = asyncio.get_event_loop().time()
             for msg in reversed(messages):
@@ -1394,14 +1545,12 @@ class SessionLoop:
                 if last_user and last_finished:
                     break
                 
-                # Collect pending tasks before lastFinished
+                # Collect pending compaction before lastFinished
                 if not last_finished:
                     parts = await Message.parts(msg.id, ctx.session.id)
                     for part in parts:
                         if part.type == "compaction":
                             tasks.append(("compaction", part))
-                        elif part.type == "subtask":
-                            tasks.append(("subtask", part))
             log.debug("loop.message_scan_complete", {
                 "session_id": ctx.session.id,
                 "step": ctx.step,
@@ -1497,25 +1646,11 @@ class SessionLoop:
                 except Exception as e:
                     log.error("loop.title_generation.error", {"error": str(e)})
             
-            # Check for pending tasks (matching TUI lines 314-493)
+            # Check for pending compaction
             if tasks:
                 task_type, task_part = tasks.pop()
-                
-                # Handle pending subtask (matching TUI lines 316-481)
-                if task_type == "subtask":
-                    log.info("loop.subtask_detected", {
-                        "session_id": ctx.session.id,
-                        "step": ctx.step,
-                    })
-                    
-                    # Execute subtask using tool execution
-                    await cls._execute_subtask(ctx, last_user, task_part)
-                    
-                    # Continue to next iteration
-                    continue
-                
-                # Handle pending compaction (matching TUI lines 483-494)
-                elif task_type == "compaction":
+
+                if task_type == "compaction":
                     log.info("loop.compaction_pending", {
                         "session_id": ctx.session.id,
                         "step": ctx.step,
@@ -2050,6 +2185,10 @@ class SessionLoop:
                     except Exception as e:
                         log.error("loop.compaction_overflow_check_error", {"error": str(e)})
             
+            # 步开始前记录工作区快照（首步时把 snapshot part 挂到用户消息上），
+            # 步结束后据此生成 patch part，revert / diff 都靠它
+            step_snapshot = await cls._track_turn_snapshot(ctx, last_user)
+
             # Process single step — wrap in a Task so abort() can cancel it immediately
             # rather than waiting for the current tool call to finish.
             step_task = asyncio.create_task(
@@ -2078,6 +2217,8 @@ class SessionLoop:
             # Callback: step end
             if callbacks.on_step_end:
                 await callbacks.on_step_end(ctx.step)
+
+            await cls._record_step_patch(ctx, callbacks, last_user, step_snapshot)
             
             # Handle result
             if step_result.action == "stop":
@@ -2100,6 +2241,8 @@ class SessionLoop:
                     ),
                     None,
                 )
+
+                await cls._record_turn_diffs(ctx, last_user)
 
                 queued_user = await cls._detect_queued_user_message(
                     ctx.session.id,
@@ -2382,192 +2525,6 @@ class SessionLoop:
             if reminder_msg and callbacks.on_reminder:
                 await callbacks.on_reminder(await Message.get_text_content(reminder_msg))
     
-    @classmethod
-    async def _execute_subtask(
-        cls,
-        ctx: LoopContext,
-        last_user: MessageInfo,
-        task_part: Any,
-    ) -> None:
-        """
-        Execute subtask (matching TUI lines 316-481)
-        
-        完全匹配 TUI 的 subtask 执行流程:
-        1. 创建 assistant message
-        2. 创建 tool part (Task tool)
-        3. 执行 Task tool
-        4. 更新 part 状态
-        5. 创建 synthetic user message
-        """
-        from flocks.tool.registry import ToolRegistry
-        from flocks.agent.registry import Agent
-        
-        # Extract subtask information from part
-        agent_name = getattr(task_part, 'agent', 'hephaestus')
-        prompt = getattr(task_part, 'prompt', '')
-        description = getattr(task_part, 'description', '')
-        command = getattr(task_part, 'command', None)
-        model_info = getattr(task_part, 'model', None)
-        
-        # Get agent
-        agent = await Agent.get(agent_name) or await Agent.get("rex")
-        
-        # Determine model
-        if model_info:
-            provider_id = model_info.get('providerID', ctx.provider_id)
-            model_id = model_info.get('modelID', ctx.model_id)
-        else:
-            provider_id = ctx.provider_id
-            model_id = ctx.model_id
-        
-        # Create assistant message for subtask
-        assistant_msg = await Message.create(
-            session_id=ctx.session.id,
-            role=MessageRole.ASSISTANT,
-            content="",
-            agent=agent_name,
-            model=model_id,
-            provider=provider_id,
-            parent_id=last_user.id,
-        )
-        
-        # Create tool part for Task
-        tool_call_id = Identifier.create("call")
-        from flocks.session.message import ToolPart, ToolStateRunning
-        
-        tool_part = ToolPart(
-            id=Identifier.ascending("part"),
-            sessionID=ctx.session.id,
-            messageID=assistant_msg.id,
-            type="tool",
-            callID=tool_call_id,
-            tool="task",
-            state=ToolStateRunning(
-                status="running",
-                input={
-                    "prompt": prompt,
-                    "description": description,
-                    "subagent_type": agent_name,
-                    "command": command,
-                },
-                time={"start": int(datetime.now().timestamp() * 1000)},
-            ),
-        )
-        
-        # Add part to message
-        await Message.add_part(ctx.session.id, assistant_msg.id, tool_part)
-        
-        # Get Task tool
-        task_tool = ToolRegistry.get("task")
-        if not task_tool:
-            log.error("loop.subtask.task_tool_not_found", {"session_id": ctx.session.id})
-            return
-        
-        # Execute Task tool
-        task_args = {
-            "prompt": prompt,
-            "description": description,
-            "subagent_type": agent_name,
-            "command": command,
-        }
-        
-        # Create tool context
-        from flocks.tool.registry import ToolContext
-        
-        tool_ctx = ToolContext(
-            session_id=ctx.session.id,
-            message_id=assistant_msg.id,
-            agent=agent_name,
-            abort_event=ctx.abort_event,
-        )
-        
-        execution_error: Optional[Exception] = None
-        result = None
-        
-        try:
-            result = await task_tool.execute(tool_ctx, **task_args)
-        except Exception as e:
-            execution_error = e
-            log.error("loop.subtask.execution_failed", {
-                "error": str(e),
-                "agent": agent_name,
-                "description": description,
-            })
-        
-        # Update message finish
-        await Message.update(ctx.session.id, assistant_msg.id, finish="tool-calls")
-        
-        # Update tool part status
-        from flocks.session.message import ToolStateCompleted, ToolStateError
-        
-        if result:
-            # Create completed state
-            completed_state = ToolStateCompleted(
-                status="completed",
-                input={
-                    "prompt": prompt,
-                    "description": description,
-                    "subagent_type": agent_name,
-                    "command": command,
-                },
-                output=result.output if hasattr(result, 'output') else str(result),
-                title=result.title if hasattr(result, 'title') else None,
-                metadata=result.metadata if hasattr(result, 'metadata') else {},
-                time={
-                    "start": tool_part.state.time.get("start"),
-                    "end": int(datetime.now().timestamp() * 1000),
-                },
-            )
-            await Message.update_part(
-                session_id=ctx.session.id,
-                message_id=assistant_msg.id,
-                part_id=tool_part.id,
-                state=completed_state,
-            )
-        else:
-            # Create error state
-            error_msg = str(execution_error) if execution_error else "Tool execution failed"
-            error_state = ToolStateError(
-                status="error",
-                error=f"Tool execution failed: {error_msg}",
-                time={
-                    "start": tool_part.state.time.get("start"),
-                    "end": int(datetime.now().timestamp() * 1000),
-                },
-                metadata={},
-                input={
-                    "prompt": prompt,
-                    "description": description,
-                    "subagent_type": agent_name,
-                    "command": command,
-                },
-            )
-            await Message.update_part(
-                session_id=ctx.session.id,
-                message_id=assistant_msg.id,
-                part_id=tool_part.id,
-                state=error_state,
-            )
-        
-        # Create synthetic user message (matching TUI lines 457-478)
-        # This prevents reasoning models from erroring due to missing user messages
-        synthetic_user_msg = await Message.create(
-            session_id=ctx.session.id,
-            role=MessageRole.USER,
-            content="Summarize the task tool output above and continue with your task.",
-            agent=last_user.agent if hasattr(last_user, 'agent') else agent_name,
-            model=last_user.model if hasattr(last_user, 'model') else model_id,
-            provider=last_user.provider if hasattr(last_user, 'provider') else provider_id,
-            synthetic=True,
-        )
-        
-        log.info("loop.subtask.completed", {
-            "session_id": ctx.session.id,
-            "agent": agent_name,
-            "success": result is not None,
-        })
-    
-
 
 # Export
 __all__ = [

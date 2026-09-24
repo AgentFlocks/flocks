@@ -9,6 +9,8 @@ Reads files from the local filesystem, supporting:
 """
 
 import os
+import asyncio
+import time
 import base64
 import mimetypes
 from pathlib import Path
@@ -35,6 +37,58 @@ log = Log.create(service="tool.read")
 DEFAULT_READ_LIMIT = 2000
 MAX_LINE_LENGTH = 2000
 MAX_BYTES = 50 * 1024  # 50 KB
+
+
+# Attachments are encoded in one off-loop operation, with a fixed memory cap.
+MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024
+MAX_TEXT_SCAN_CHARS = 16 * 1024 * 1024
+MAX_TEXT_SCAN_SECONDS = 5.0
+
+
+def _read_text_window(filepath, offset, limit, max_bytes, max_line_length):
+    """Read a bounded window without materializing the rest of the file."""
+    lines = []
+    index = 0
+    consumed = 0
+    output_bytes = 0
+    shortened = False
+    deadline = time.monotonic() + MAX_TEXT_SCAN_SECONDS
+    with open(filepath, "r", encoding="utf-8", errors="replace") as stream:
+        while True:
+            if time.monotonic() >= deadline or consumed >= MAX_TEXT_SCAN_CHARS:
+                raise ValueError("Requested offset/window exceeds the read scan budget; use search or a smaller file")
+            # Bounded readline also handles a single enormous line safely.
+            segment = stream.readline(min(65536, MAX_TEXT_SCAN_CHARS - consumed))
+            consumed += len(segment)
+            if not segment:
+                return lines, False, index, False, shortened
+            if index >= offset + limit:
+                return lines, True, None, False, shortened
+            prefix = segment[:max_line_length]
+            line_shortened = len(segment.rstrip("\n")) > max_line_length
+            while not segment.endswith("\n"):
+                if time.monotonic() >= deadline or consumed >= MAX_TEXT_SCAN_CHARS:
+                    raise ValueError("A line exceeds the read scan budget; use a text search for this file")
+                segment = stream.readline(min(65536, MAX_TEXT_SCAN_CHARS - consumed))
+                consumed += len(segment)
+                if not segment:
+                    break
+                if len(prefix) < max_line_length:
+                    prefix += segment[:max_line_length - len(prefix)]
+                line_shortened = True
+            if index >= offset:
+                line = prefix.rstrip("\n") + ("..." if line_shortened else "")
+                remaining = max_bytes - output_bytes - (1 if lines else 0)
+                encoded = line.encode("utf-8")
+                if len(encoded) > remaining:
+                    if not lines and remaining > 0:
+                        lines.append(encoded[:remaining].decode("utf-8", errors="ignore"))
+                    return lines, True, None, True, True
+                lines.append(line)
+                output_bytes += len(encoded) + (1 if len(lines) > 1 else 0)
+                shortened = shortened or line_shortened
+            index += 1
+
 
 # Binary file extensions
 BINARY_EXTENSIONS = {
@@ -213,6 +267,10 @@ async def read_tool(
     filepath = resolution.resolved_path
     title = resolution.display_path
     
+    return await asyncio.to_thread(_read_resolved, ctx, filepath, title, offset, limit)
+
+
+def _read_resolved(ctx, filepath, title, offset, limit):
     # Check file exists
     if not os.path.exists(filepath):
         directory = os.path.dirname(filepath)
@@ -243,7 +301,9 @@ async def read_tool(
     if is_image:
         try:
             with open(filepath, 'rb') as f:
-                content = f.read()
+                content = f.read(MAX_ATTACHMENT_BYTES + 1)
+            if len(content) > MAX_ATTACHMENT_BYTES:
+                raise ValueError(f'Attachment exceeds {MAX_ATTACHMENT_BYTES} bytes; use a smaller file')
             
             data_url = f"data:{mime_type};base64,{base64.b64encode(content).decode('utf-8')}"
             
@@ -275,7 +335,9 @@ async def read_tool(
     if mime_type == 'application/pdf':
         try:
             with open(filepath, 'rb') as f:
-                content = f.read()
+                content = f.read(MAX_ATTACHMENT_BYTES + 1)
+            if len(content) > MAX_ATTACHMENT_BYTES:
+                raise ValueError(f'Attachment exceeds {MAX_ATTACHMENT_BYTES} bytes; use a smaller file')
             
             data_url = f"data:{mime_type};base64,{base64.b64encode(content).decode('utf-8')}"
             
@@ -311,49 +373,30 @@ async def read_tool(
             title=title
         )
     
-    # Read text file
-    try:
-        with open(filepath, 'r', encoding='utf-8', errors='replace') as f:
-            all_lines = f.read().split('\n')
-    except Exception as e:
+    if (offset is not None and offset < 0) or (limit is not None and limit < 0):
         return ToolResult(
             success=False,
-            error=f"Failed to read file: {str(e)}",
-            title=title
+            error=(
+                f"Invalid offset/limit: offset={offset}, limit={limit}. "
+                "Both must be non-negative integers (offset is 0-based)."
+            ),
+            title=title,
         )
-    
-    # Apply offset and limit — resolve at call time so flocks.json overrides
-    # take effect without restarting the server.
+
+    # Output and input are bounded independently; a small result must not
+    # require allocating or scanning an arbitrarily large source file.
     effective_max_lines = get_read_max_lines()
     effective_max_bytes = get_read_max_bytes()
     effective_max_line_length = get_read_max_line_length()
-
-    read_limit = limit if limit is not None else effective_max_lines
+    read_limit = min(limit if limit is not None else effective_max_lines, effective_max_lines)
     read_offset = offset if offset is not None else 0
+    try:
+        raw_lines, has_more_lines, total_lines, truncated_by_bytes, long_lines = _read_text_window(
+            filepath, read_offset, read_limit, effective_max_bytes, effective_max_line_length,
+        )
+    except Exception as exc:
+        return ToolResult(success=False, error=f"Failed to read file: {exc}", title=title)
 
-    # Read lines with byte limit
-    raw_lines: List[str] = []
-    total_bytes = 0
-    truncated_by_bytes = False
-
-    end_line = min(len(all_lines), read_offset + read_limit)
-
-    for i in range(read_offset, end_line):
-        line = all_lines[i]
-
-        # Truncate long lines
-        if len(line) > effective_max_line_length:
-            line = line[:effective_max_line_length] + "..."
-
-        # Check byte limit
-        line_bytes = len(line.encode('utf-8')) + (1 if raw_lines else 0)
-        if total_bytes + line_bytes > effective_max_bytes:
-            truncated_by_bytes = True
-            break
-        
-        raw_lines.append(line)
-        total_bytes += line_bytes
-    
     # Format with the read tool's stable "00001| " line prefix.
     content_lines = [
         f"{str(i + read_offset + 1).zfill(5)}| {line}"
@@ -361,29 +404,20 @@ async def read_tool(
     ]
     
     # Build output
-    total_lines = len(all_lines)
     last_read_line = read_offset + len(raw_lines)
-    has_more_lines = total_lines > last_read_line
-    truncated = has_more_lines or truncated_by_bytes
-    
-    output = "<file>\n"
-    output += "\n".join(content_lines)
-    
-    if truncated_by_bytes:
-        remaining = total_lines - last_read_line
+    truncated = has_more_lines or truncated_by_bytes or long_lines
+    output = "<file>\n" + "\n".join(content_lines)
+    if has_more_lines or truncated_by_bytes:
+        reason = f"Output truncated at {effective_max_bytes} bytes. " if truncated_by_bytes else ""
         output += (
-            f"\n\n(Output truncated at {effective_max_bytes} bytes — showed lines {read_offset + 1}-{last_read_line} of {total_lines}. "
-            f"{remaining} lines remaining. To continue reading, call read with offset={last_read_line})"
-        )
-    elif has_more_lines:
-        remaining = total_lines - last_read_line
-        output += (
-            f"\n\n(Showed lines {read_offset + 1}-{last_read_line} of {total_lines}. "
-            f"{remaining} lines remaining. To continue reading, call read with offset={last_read_line})"
+            f"\n\n({reason}Showed lines {read_offset + 1}-{last_read_line}. "
+            f"More content is available. To continue reading, call read with offset={last_read_line})"
         )
     else:
         output += f"\n\n(End of file — total {total_lines} lines)"
-    
+    if long_lines:
+        output += "\n(Long lines were shortened to fit the configured output limit.)"
+
     output += "\n</file>"
     
     # Preview is first 20 lines

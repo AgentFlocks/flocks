@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo } from 'react';
-import { Bot, Plus, Cpu, RefreshCw, Pencil, Trash2, Shield, Zap, Loader2 } from 'lucide-react';
+import { IconRobot, IconPlus, IconCpu, IconRefresh, IconPencil, IconTrash, IconShield, IconBolt, IconLoader2 } from '@tabler/icons-react';
 import { useTranslation } from 'react-i18next';
 import PageHeader from '@/components/common/PageHeader';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
@@ -101,7 +101,7 @@ export default function AgentPage() {
       <PageHeader
         title={t('pageTitle')}
         description={t('pageDescription')}
-        icon={<Bot className="w-8 h-8" />}
+        icon={<IconRobot aria-hidden="true" className="w-8 h-8" />}
       />
 
       {/* Toolbar — mirrors the Skill page toolbar style */}
@@ -120,13 +120,13 @@ export default function AgentPage() {
                 : 'border-gray-200 text-gray-400 hover:bg-gray-50 hover:text-gray-600 disabled:opacity-50'
             }`}
           >
-            <RefreshCw className={`w-3.5 h-3.5 ${refreshing ? 'animate-spin' : ''}`} />
+            <IconRefresh aria-hidden="true" className={`w-3.5 h-3.5 ${refreshing ? 'animate-spin' : ''}`} />
           </button>
           <button
             onClick={() => setShowCreateSheet(true)}
             className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors text-sm"
           >
-            <Plus className="w-4 h-4" />
+            <IconPlus aria-hidden="true" className="w-4 h-4" />
             {t('createSubAgent')}
           </button>
         </div>
@@ -138,7 +138,7 @@ export default function AgentPage() {
       <div className="flex-1 overflow-y-auto px-4 py-4 space-y-6" style={{ scrollbarGutter: 'stable' }}>
         {agents.length === 0 ? (
           <EmptyState
-            icon={<Bot className="w-16 h-16" />}
+            icon={<IconRobot aria-hidden="true" className="w-16 h-16" />}
             title={t('emptyState.title')}
             description={t('emptyState.description')}
             action={
@@ -146,7 +146,7 @@ export default function AgentPage() {
                 onClick={() => setShowCreateSheet(true)}
                 className="inline-flex items-center gap-2 px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors"
               >
-                <Plus className="w-5 h-5" />
+                <IconPlus aria-hidden="true" className="w-5 h-5" />
                 {t('createSubAgent')}
               </button>
             }
@@ -157,7 +157,7 @@ export default function AgentPage() {
               <AgentSection
                 title={t('section.primary.title')}
                 subtitle={t('section.primary.subtitle')}
-                icon={<Shield className="w-4 h-4" />}
+                icon={<IconShield aria-hidden="true" className="w-4 h-4" />}
                 agents={primaryAgents}
                 displayLang={i18n.language}
                 selectedAgent={editingAgent}
@@ -171,7 +171,7 @@ export default function AgentPage() {
               <AgentSection
                 title={t('section.sub.title')}
                 subtitle={t('section.sub.subtitle')}
-                icon={<Zap className="w-4 h-4" />}
+                icon={<IconBolt aria-hidden="true" className="w-4 h-4" />}
                 agents={subAgents}
                 displayLang={i18n.language}
                 selectedAgent={editingAgent}
@@ -259,6 +259,7 @@ function PaginationBar({
             key={p}
             type="button"
             onClick={() => onPageChange(p)}
+            aria-current={p === page ? 'page' : undefined}
             className={`w-6 h-5 rounded text-[11px] font-medium transition-colors ${
               p === page
                 ? 'bg-slate-700 text-white'
@@ -415,7 +416,7 @@ function AgentSection({
             {t(`filter.${sourceFilter}` as any)} — {t('emptyState.title')}
           </p>
         ) : (
-          <div className="grid gap-3 grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+          <div className="grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
             {displayed.map((agent) => (
               <AgentCard
                 key={agent.name}
@@ -479,8 +480,8 @@ function AgentCard({
         group relative bg-white rounded-xl border flex flex-col overflow-hidden
         cursor-pointer transition-all duration-150
         ${isSelected
-          ? 'border-slate-400 shadow-md ring-2 ring-slate-200'
-          : 'border-gray-200 hover:border-gray-300 hover:shadow-md'
+          ? 'border-slate-400 ring-2 ring-slate-200'
+          : 'border-gray-200 hover:border-gray-300'
         }
       `}
       onClick={onClick}
@@ -490,7 +491,7 @@ function AgentCard({
         {/* Avatar + Name row */}
         <div className="flex items-start gap-2.5 min-w-0">
           <div className="w-8 h-8 rounded-lg flex items-center justify-center shrink-0 mt-0.5 bg-gray-100">
-            <Bot className="w-4 h-4 text-gray-500" />
+            <IconRobot aria-hidden="true" className="w-4 h-4 text-gray-500" />
           </div>
 
           <div className="min-w-0 flex-1">
@@ -531,7 +532,7 @@ function AgentCard({
         {/* Model chip */}
         {agent.model && (
           <div className="self-start inline-flex items-center gap-1 text-[10px] text-gray-400">
-            <Cpu className="w-3 h-3 shrink-0" />
+            <IconCpu aria-hidden="true" className="w-3 h-3 shrink-0" />
             <span className="truncate max-w-[120px]">
               {agent.model.modelID}
             </span>
@@ -550,10 +551,10 @@ function AgentCard({
             type="button"
             disabled
             title={t('badge.nativeDeleteDisabled')}
-            className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium
-                       text-gray-300 cursor-not-allowed select-none"
+            className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-xs font-medium
+                       text-fg-disabled cursor-not-allowed select-none"
           >
-            <Trash2 className="w-3 h-3" />
+            <IconTrash aria-hidden="true" className="w-3 h-3" />
             {t('badge.delete')}
           </button>
         ) : (
@@ -564,7 +565,7 @@ function AgentCard({
             className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium
                        text-gray-400 hover:text-red-600 hover:bg-red-50 transition-colors"
           >
-            <Trash2 className="w-3 h-3" />
+            <IconTrash aria-hidden="true" className="w-3 h-3" />
             {t('badge.delete')}
           </button>
         )}
@@ -572,7 +573,7 @@ function AgentCard({
         <div className="flex items-center gap-2">
           {showDelegatableToggle && (
             <div className="flex items-center gap-1.5">
-              <span className="text-[11px] font-medium text-gray-400">
+              <span className="text-xs font-medium text-fg-secondary">
                 {t('form.enabled')}
               </span>
               <ToggleSwitch
@@ -592,10 +593,10 @@ function AgentCard({
             onClick={onClick}
             title={t('badge.edit')}
             aria-label={t('badge.edit')}
-            className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium text-gray-400
+            className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-xs font-medium text-fg-secondary
                        hover:text-slate-700 hover:bg-gray-50 transition-colors"
           >
-            <Pencil className="w-3 h-3" />
+            <IconPencil aria-hidden="true" className="w-3 h-3" />
             {t('badge.edit')}
           </button>
         </div>
@@ -623,7 +624,7 @@ function ToggleSwitch({ enabled, loading, title, onChange }: {
         ${enabled ? 'bg-slate-500' : 'bg-gray-200'}`}
     >
       {loading
-        ? <Loader2 className="absolute inset-0 m-auto w-3 h-3 text-white animate-spin" />
+        ? <IconLoader2 aria-hidden="true" className="absolute inset-0 m-auto w-3 h-3 text-white animate-spin" />
         : (
           <span className={`pointer-events-none inline-block h-4 w-4 rounded-full bg-white shadow
             transform transition-transform duration-150

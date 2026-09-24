@@ -1,8 +1,7 @@
-"""Session transcript FTS lifecycle tests."""
+"""PostgreSQL transcript search lifecycle, recovery, and access tests."""
 
 from datetime import UTC, datetime
 from pathlib import Path
-import sqlite3
 from unittest.mock import AsyncMock, Mock
 import uuid
 
@@ -21,7 +20,6 @@ from flocks.session.message import Message, MessageRole
 from flocks.session.session import Session, SessionInfo
 from flocks.storage.session_search import (
     SessionSearchUnavailableError,
-    _is_fts5_unavailable_error,
     ensure_session_index_ready,
     ensure_session_search_tables,
     reconcile_session_index,
@@ -92,66 +90,88 @@ async def _create_session(
     return session
 
 
-def test_only_explicit_missing_fts5_errors_are_classified() -> None:
-    assert _is_fts5_unavailable_error(
-        sqlite3.OperationalError("no such module: fts5")
-    )
-    assert _is_fts5_unavailable_error(
-        sqlite3.OperationalError("unknown module: fts5")
-    )
-    assert not _is_fts5_unavailable_error(
-        sqlite3.OperationalError("database is locked")
-    )
-    assert not _is_fts5_unavailable_error(
-        RuntimeError("no such module: fts5")
-    )
+@pytest.mark.asyncio
+async def test_postgres_schema_has_generated_vector_and_application_ids(tmp_path: Path) -> None:
+    assert await ensure_session_search_tables(tmp_path / "ignored-legacy.db")
+    async with Storage.transaction() as db:
+        columns = await db.fetch_all(
+            "SELECT column_name, udt_name, is_generated, column_default FROM information_schema.columns "
+            "WHERE table_schema = current_schema() AND table_name = ?",
+            ("session_transcript_search",),
+        )
+        metadata = {row[0]: row[1:] for row in columns}
+        assert metadata["text_search"][:2] == ("tsvector", "ALWAYS")
+        assert metadata["row_id"][2] is None
+        indexes = await db.fetch_all(
+            "SELECT indexdef FROM pg_indexes WHERE schemaname = current_schema() AND tablename = ?",
+            ("session_transcript_search",),
+        )
+        assert any("USING gin (text_search)" in row[0] for row in indexes)
+    assert not (tmp_path / "ignored-legacy.db").exists()
 
 
 @pytest.mark.asyncio
-async def test_session_schema_probe_degrades_when_fts5_module_is_missing(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    class MissingFtsConnection:
-        def __init__(self):
-            self.statements: list[str] = []
-            self.committed = False
-
-        async def executescript(self, sql: str):
-            self.statements.append(sql)
-
-        async def execute(self, sql: str, _parameters=()):
-            self.statements.append(sql)
-            if "_flocks_session_fts5_probe" in sql:
-                raise sqlite3.OperationalError("no such module: fts5")
-            return None
-
-        async def commit(self):
-            self.committed = True
-
-    class MissingFtsContext:
-        def __init__(self):
-            self.connection = MissingFtsConnection()
-
-        async def __aenter__(self):
-            return self.connection
-
-        async def __aexit__(self, *_args):
-            return None
-
-    context = MissingFtsContext()
-    monkeypatch.setattr(
-        Storage,
-        "connect",
-        classmethod(lambda _cls, _path=None: context),
+async def test_postgres_schema_reinitialization_preserves_search_and_backfill(tmp_path: Path) -> None:
+    session = await _create_session(tmp_path)
+    message = await Message.create(session.id, MessageRole.USER, "schema reinitialization marker")
+    assert await ensure_session_index_ready(batch_size=1)
+    assert await ensure_session_search_tables(Storage.get_db_path())
+    assert await ensure_session_search_tables(Storage.get_db_path())
+    assert not await ensure_session_index_ready(batch_size=1)
+    results = await session_fts_search(
+        db_path=Storage.get_db_path(), project_id=session.project_id, query="reinitialization", max_results=10,
     )
+    assert [row["path"] for row in results] == [f"sessions/{session.id}/messages/{message.id}"]
 
-    assert not await ensure_session_search_tables(tmp_path / "missing-fts.db")
-    assert context.connection.committed
-    assert any(
-        "DELETE FROM session_transcript_meta" in statement
-        for statement in context.connection.statements
+
+@pytest.mark.asyncio
+async def test_missing_postgres_search_config_fails_clearly(monkeypatch, tmp_path: Path) -> None:
+    import asyncpg
+
+    session = await _create_session(tmp_path)
+    message = await Message.create(session.id, MessageRole.USER, "invalid configuration marker")
+    monkeypatch.setenv("FLOCKS_DB_FTS_CONFIG", "missing_" + uuid.uuid4().hex)
+    with pytest.raises(asyncpg.UndefinedObjectError, match="text search configuration"):
+        await session_fts_search(
+            db_path=Storage.get_db_path(), project_id=session.project_id, query="configuration", max_results=10,
+        )
+    # A search configuration error does not damage the authoritative message.
+    assert (await Message.get(session.id, message.id)).id == message.id
+
+
+@pytest.mark.asyncio
+async def test_recreated_postgres_index_requires_backfill_and_retains_old_table(tmp_path: Path) -> None:
+    session = await _create_session(tmp_path)
+    message = await Message.create(session.id, MessageRole.USER, "retained index recovery marker")
+    assert await ensure_session_index_ready(batch_size=1)
+    async with Storage.transaction() as db:
+        await db.execute("ALTER TABLE session_transcript_search RENAME TO retained_transcript_search")
+        await db.execute("ALTER INDEX session_transcript_search_vector RENAME TO retained_transcript_vector")
+    assert await ensure_session_search_tables(Storage.get_db_path())
+    assert await ensure_session_index_ready(batch_size=1)
+    results = await session_fts_search(
+        db_path=Storage.get_db_path(), project_id=session.project_id, query="recovery", max_results=10,
     )
+    assert [row["path"] for row in results] == [f"sessions/{session.id}/messages/{message.id}"]
+    async with Storage.transaction() as db:
+        retained = await db.fetch_one("SELECT count(*) FROM retained_transcript_search WHERE text = ?",
+                                      ("retained index recovery marker",))
+        assert retained == (1,)
+
+
+async def _remove_derived_message_index(message_ids: list[str], *, remove_state: bool = True) -> None:
+    """Simulate missing derived rows without touching authoritative messages."""
+    async with Storage.transaction() as db:
+        await db.execute(
+            "DELETE FROM session_transcript_search WHERE row_id IN "
+            "(SELECT id FROM session_transcript_index_state WHERE message_id = ANY(?::text[]))",
+            (message_ids,),
+        )
+        if remove_state:
+            await db.execute(
+                "DELETE FROM session_transcript_index_state WHERE message_id = ANY(?::text[])",
+                (message_ids,),
+            )
 
 
 @pytest.mark.asyncio
@@ -173,27 +193,27 @@ async def test_messages_persist_when_session_search_is_disabled(
     message = await Message.create(
         session.id,
         MessageRole.USER,
-        "canonical message survives without FTS5",
+        "canonical message survives without search",
     )
 
     stored = await Message.get(session.id, message.id)
     assert stored is not None
     parts = await Message.parts(message.id, session.id)
     assert [part.text for part in parts if part.type == "text"] == [
-        "canonical message survives without FTS5"
+        "canonical message survives without search"
     ]
     index_message.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_session_search_reports_fts5_unavailable(
+async def test_session_search_reports_postgres_index_unavailable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(Storage, "_session_search_available", False)
 
     with pytest.raises(
         SessionSearchUnavailableError,
-        match="SQLite runtime does not support FTS5",
+        match="PostgreSQL session search index is not initialized",
     ):
         await session_fts_search(
             db_path=Storage.get_db_path(),
@@ -204,7 +224,7 @@ async def test_session_search_reports_fts5_unavailable(
 
 
 @pytest.mark.asyncio
-async def test_memory_manager_starts_without_fts5_and_session_search_fails_clearly(
+async def test_memory_manager_starts_without_index_and_session_search_fails_clearly(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -223,7 +243,7 @@ async def test_memory_manager_starts_without_fts5_and_session_search_fails_clear
     assert manager._initialized
     with pytest.raises(
         SessionSearchUnavailableError,
-        match="SQLite runtime does not support FTS5",
+        match="PostgreSQL session search index is not initialized",
     ):
         await manager.search(
             query="anything",
@@ -398,10 +418,7 @@ async def test_session_search_is_limited_to_current_project(
         f"sessions/{alpha.id}/messages/{alpha_message.id}",
     }
 
-    async with Storage.connect(Storage.get_db_path()) as db:
-        await db.execute("DELETE FROM session_transcript_fts")
-        await db.execute("DELETE FROM session_transcript_index_state")
-        await db.commit()
+    await _remove_derived_message_index([alpha_message.id, beta_message.id])
     stats = await reconcile_session_index(batch_size=1)
     rebuilt = await session_fts_search(
         db_path=Storage.get_db_path(),
@@ -781,10 +798,10 @@ async def test_reconciliation_restores_history_and_removes_orphans(
         "historical reconciliation marker",
     )
 
-    async with Storage.connect(Storage.get_db_path()) as db:
-        await db.execute("DELETE FROM session_transcript_fts")
+    await _remove_derived_message_index([message.id], remove_state=False)
+    async with Storage.transaction() as db:
         await db.execute(
-            "INSERT INTO session_transcript_fts(rowid, text) VALUES (999, 'orphan')"
+            "INSERT INTO session_transcript_search(row_id, text) VALUES (999, 'orphan')"
         )
         await db.commit()
 
@@ -803,7 +820,7 @@ async def test_reconciliation_restores_history_and_removes_orphans(
 
     async with Storage.connect(Storage.get_db_path()) as db:
         cursor = await db.execute(
-            "SELECT count(*) FROM session_transcript_fts WHERE rowid = 999"
+            "SELECT count(*) FROM session_transcript_search WHERE row_id = 999"
         )
         assert (await cursor.fetchone())[0] == 0
 
@@ -819,10 +836,7 @@ async def test_session_history_backfill_runs_only_once(
         MessageRole.USER,
         "legacy transcript backfill marker",
     )
-    async with Storage.connect(Storage.get_db_path()) as db:
-        await db.execute("DELETE FROM session_transcript_fts")
-        await db.execute("DELETE FROM session_transcript_index_state")
-        await db.commit()
+    await _remove_derived_message_index([message.id])
 
     reconcile = AsyncMock(
         wraps=session_search_module._reconcile_session_index_unlocked

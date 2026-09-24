@@ -17,7 +17,8 @@ export const { use: useExit, provider: ExitProvider } = createSimpleContext({
           process.stderr.write(formatted + "\n")
         }
       }
-      process.exit(0)
+      // 带错误原因退出（如 bootstrap 失败）时退出码为 1，脚本/上层 CLI 才能感知失败
+      process.exit(reason ? 1 : 0)
     }
   },
 })

@@ -91,7 +91,7 @@ async def test_legacy_blob_reads_without_migration() -> None:
 
 
 @pytest.mark.asyncio
-async def test_recent_legacy_page_reads_legacy_blob_once(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_recent_legacy_page_does_not_transfer_the_whole_legacy_blob(monkeypatch: pytest.MonkeyPatch) -> None:
     session_id = "ses_parts_legacy_recent_page"
     await _write_legacy_session(
         session_id,
@@ -119,7 +119,7 @@ async def test_recent_legacy_page_reads_legacy_blob_once(monkeypatch: pytest.Mon
     assert [message.parts[0].text for message in messages] == ["legacy a", "legacy b", "legacy c"]
     assert has_more is False
     assert next_before is None
-    assert legacy_blob_reads == 1
+    assert legacy_blob_reads == 0
 
 
 @pytest.mark.asyncio
@@ -193,10 +193,11 @@ async def test_delete_restores_caches_when_message_persistence_fails(
         id="msg_a",
         part_id="part_a",
     )
-    mutate_many = AsyncMock(
+    from flocks.session import message_pages
+    sync_document = AsyncMock(
         side_effect=RuntimeError("message storage unavailable")
     )
-    monkeypatch.setattr(Storage, "mutate_many", mutate_many)
+    monkeypatch.setattr(message_pages, "sync_document", sync_document)
 
     with pytest.raises(RuntimeError, match="message storage unavailable"):
         await Message.delete(session_id, "msg_a")
@@ -246,7 +247,8 @@ async def test_clear_removes_legacy_blob_and_per_message_keys() -> None:
 
 
 @pytest.mark.asyncio
-async def test_clear_tolerates_cache_invalidation_during_full_parts_load(monkeypatch) -> None:
+async def test_clear_skips_full_parts_load_and_keeps_empty_cache(monkeypatch) -> None:
+    """clear() only needs message metadata; afterwards the session stays cached as empty."""
     session_id = "ses_parts_clear_lru_race"
     Message.invalidate_cache()
     Message._lru[session_id] = True
@@ -259,14 +261,7 @@ async def test_clear_tolerates_cache_invalidation_during_full_parts_load(monkeyp
     Message._parts_fully_loaded.discard(session_id)
 
     async def fake_load_all_parts_locked(cls, sid: str, *, message_times: dict) -> None:
-        assert sid == session_id
-        Message.invalidate_cache(sid)
-        await asyncio.sleep(0)
-        Message._parts_cache[sid] = {}
-        Message._parts_revision_cache[sid] = {}
-        Message._parts_serialized_cache[sid] = {}
-        Message._parts_storage_format[sid] = "per_message"
-        Message._parts_persisted_mids[sid] = set()
+        raise AssertionError("clear() must not deserialize every part just to discard it")
 
     monkeypatch.setattr(
         Message,
@@ -275,8 +270,10 @@ async def test_clear_tolerates_cache_invalidation_during_full_parts_load(monkeyp
     )
 
     assert await Message.clear(session_id) == 0
-    assert session_id not in Message._lru
-    assert session_id not in Message._parts_fully_loaded
+    assert session_id in Message._lru
+    assert Message._messages_cache[session_id] == []
+    assert Message._parts_cache[session_id] == {}
+    assert session_id in Message._parts_fully_loaded
 
 
 @pytest.mark.asyncio
@@ -596,3 +593,42 @@ async def test_ensure_cache_skips_invalid_part_keeps_siblings() -> None:
 
     assert len(messages) == 1
     assert [part.text for part in messages[0].parts] == ["still here"]
+
+
+@pytest.mark.asyncio
+async def test_delete_keeps_owner_and_sibling_caches_warm() -> None:
+    from flocks.session.message import _session_locks
+
+    session_id = "ses_parts_delete_cache_scope"
+    sibling_id = "ses_parts_delete_cache_scope_sibling"
+    await Message.create(session_id, MessageRole.USER, "a", id="msg_a", part_id="part_a")
+    await Message.create(session_id, MessageRole.USER, "b", id="msg_b", part_id="part_b")
+    await Message.create(sibling_id, MessageRole.USER, "c", id="msg_c", part_id="part_c")
+    epoch_before = Message._cache_epoch
+
+    assert await Message.delete(session_id, "msg_a") is True
+
+    # Message maintains its own cache; the storage write must not evict it.
+    assert Message._cache_epoch == epoch_before
+    assert [m.id for m in Message._messages_cache[session_id]] == ["msg_b"]
+    assert session_id in Message._parts_fully_loaded
+    assert [m.id for m in Message._messages_cache[sibling_id]] == ["msg_c"]
+    assert sibling_id in _session_locks._locks
+
+
+@pytest.mark.asyncio
+async def test_clear_keeps_sibling_caches_warm() -> None:
+    from flocks.session.message import _session_locks
+
+    session_id = "ses_parts_clear_cache_scope"
+    sibling_id = "ses_parts_clear_cache_scope_sibling"
+    await Message.create(session_id, MessageRole.USER, "a", id="msg_a", part_id="part_a")
+    await Message.create(sibling_id, MessageRole.USER, "c", id="msg_c", part_id="part_c")
+    epoch_before = Message._cache_epoch
+
+    assert await Message.clear(session_id) == 1
+
+    assert Message._cache_epoch == epoch_before
+    assert Message._messages_cache[session_id] == []
+    assert [m.id for m in Message._messages_cache[sibling_id]] == ["msg_c"]
+    assert sibling_id in _session_locks._locks

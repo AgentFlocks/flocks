@@ -21,13 +21,110 @@ def _run_coro_sync(
     """Run async provider calls from sync workflow code on the shared workflow loop.
 
     All workflow-triggered async work (config loading, provider.apply_config,
-    provider.chat) is routed through a single persistent background loop so
-    that loop-bound resources (httpx.AsyncClient, OpenAI streams) never
-    outlive their owning loop. See ``flocks.workflow._async_runtime``.
+    provider.chat, the llm.before/after hook stages) is routed through one
+    persistent loop -- the server's own loop when it registered itself, else
+    a private background loop -- so loop-bound resources (httpx.AsyncClient,
+    OpenAI streams, hook gRPC channels) are always used from the loop that
+    owns them. See ``flocks.workflow._async_runtime``.
     """
     if cancel_checker is not None:
         return _run_sync_cancellable_on_shared_loop(coro, cancel_checker)
     return _run_sync_on_shared_loop(coro)
+
+
+_DEFAULT_LLM_HOOK_CONTEXT: Dict[str, Any] = {
+    "sessionID": "workflow",
+    "messageID": "",
+    "agent": "workflow",
+    "workspace": None,
+    "step": 0,
+}
+
+
+def llm_hook_context_from_registry(registry: Any) -> Dict[str, Any]:
+    """Derive LLM hook metadata (session/message/agent) from a workflow tool registry.
+
+    ``messageID`` is deliberately left empty: hook implementations restore
+    redaction placeholders by rewriting the session message with that id,
+    and a workflow must never overwrite a parent chat message. Placeholder
+    restoration for workflow responses is applied locally from the
+    ``llm.before`` output instead.
+    """
+    meta = dict(_DEFAULT_LLM_HOOK_CONTEXT)
+    # ``workspace`` lets the pipeline resolve project hooks without a session
+    # lookup (the runner passes the session directory the same way).
+    try:
+        import os
+
+        meta["workspace"] = os.getcwd()
+    except OSError:
+        pass
+    ctx = getattr(registry, "_ctx", None)
+    session_id = str(getattr(ctx, "session_id", "") or "").strip()
+    if session_id:
+        meta["sessionID"] = session_id
+    agent = str(getattr(ctx, "agent", "") or "").strip()
+    if agent:
+        meta["agent"] = agent
+    return meta
+
+
+async def _run_llm_before_stage(
+    hook_meta: Dict[str, Any],
+    messages: list,
+) -> tuple[list, list]:
+    """Run ``llm.before`` hooks (Pro registers prompt redaction here).
+
+    Returns the (possibly rewritten) messages plus placeholder→value
+    replacements to restore in the response. Mirrors the session runner so a
+    hook sees the same request shape regardless of the call site.
+    """
+    from flocks.hooks.pipeline import HookPipeline, HookStage
+    from flocks.session.llm_hook_utils import (
+        apply_hook_request_output,
+        serialize_chat_message,
+        stream_text_replacements_from_hook_output,
+    )
+
+    if not await HookPipeline.has_stage_handlers(HookStage.LLM_BEFORE, hook_meta):
+        return messages, []
+    hook_ctx = await HookPipeline.run_llm_before(
+        {
+            **hook_meta,
+            "request": {
+                "messageCount": len(messages),
+                "messages": [serialize_chat_message(message) for message in messages],
+                "toolCount": 0,
+                "tools": [],
+                "providerOptions": {},
+                "providerToolsEnabled": False,
+            },
+        }
+    )
+    hook_output = getattr(hook_ctx, "output", None) or {}
+    updated_messages, _options = apply_hook_request_output(messages, {}, hook_output)
+    return updated_messages, stream_text_replacements_from_hook_output(hook_output)
+
+
+async def _run_llm_after_stage(
+    hook_meta: Dict[str, Any],
+    *,
+    content: str,
+    duration_ms: int,
+    error: Optional[BaseException] = None,
+) -> None:
+    from flocks.hooks.pipeline import HookPipeline, HookStage
+
+    if not await HookPipeline.has_stage_handlers(HookStage.LLM_AFTER, hook_meta):
+        return
+    payload: Dict[str, Any] = {
+        "durationMs": duration_ms,
+        "response": {"role": "assistant", "content": content, "reasoning": "", "toolCalls": []},
+        "usage": None,
+    }
+    if error is not None:
+        payload["error"] = {"type": type(error).__name__, "message": str(error)}
+    await HookPipeline.run_llm_after(hook_meta, payload)
 
 
 def _coerce_bool(value: Any, default: bool) -> bool:
@@ -58,6 +155,7 @@ class LLMClient:
         *,
         provider_id: Optional[str] = None,
         cancel_checker: Optional[Callable[[], bool]] = None,
+        hook_context: Optional[Dict[str, Any]] = None,
     ):
         # NOTE: This module is intentionally synchronous at the edges (workflow runtime),
         # but uses flocks Provider (async) internally for consistency with the rest of flocks.
@@ -69,6 +167,7 @@ class LLMClient:
         self.api_key = (api_key or "").strip() or None
         self.base_url = (base_url or "").strip() or None
         self.cancel_checker = cancel_checker
+        self.hook_context = {**_DEFAULT_LLM_HOOK_CONTEXT, **(hook_context or {})}
         workflow_llm_cfg = self._load_workflow_llm_config()
         # Only treat ``trust_env`` as user-specified when it actually appears
         # in workflow.llm config. Otherwise we leave the provider's existing
@@ -382,6 +481,7 @@ class LLMClient:
                 model=model if model is not None else self.model,
                 provider_id=provider_id if provider_id is not None else self.provider_id,
                 cancel_checker=self.cancel_checker,
+                hook_context=self.hook_context,
             ).ask(
                 prompt,
                 temperature=temperature,
@@ -405,15 +505,71 @@ class LLMClient:
 
             provider = self._prepare_provider(target.provider_id)
 
+            hook_meta = {
+                **self.hook_context,
+                "model": {"providerID": target.provider_id, "modelID": target.model_id},
+            }
+            if not hook_meta.get("workspace"):
+                try:
+                    import os
+
+                    hook_meta["workspace"] = os.getcwd()
+                except OSError:
+                    pass
+
             async def _call():
-                coro = provider.chat(
-                    model_id=target.model_id,
-                    messages=[ChatMessage(role="user", content=prompt + "请使用中文输出。")],
-                    temperature=temperature,
+                from flocks.session.response_rewriter import transform_complete_response
+
+                messages = [ChatMessage(role="user", content=prompt + "请使用中文输出。")]
+                # ``llm.before`` is the redaction call point; a failing hook must
+                # not let the raw prompt through (same fail-closed rule as sessions).
+                messages, replacements = await _run_llm_before_stage(hook_meta, messages)
+                started = time.perf_counter()
+                try:
+                    coro = provider.chat(
+                        model_id=target.model_id,
+                        messages=messages,
+                        temperature=temperature,
+                    )
+                    if timeout_s is not None and float(timeout_s) > 0:
+                        response = await asyncio.wait_for(coro, timeout=float(timeout_s))
+                    else:
+                        response = await coro
+                except Exception as exc:
+                    try:
+                        await _run_llm_after_stage(
+                            hook_meta,
+                            content="",
+                            duration_ms=int((time.perf_counter() - started) * 1000),
+                            error=exc,
+                        )
+                    except Exception:
+                        pass
+                    raise
+                raw_content = str(getattr(response, "content", "") or "")
+                # Same post-processing as every other model call site: a
+                # registered response transform (Pro placeholder restoration /
+                # rewriting) wins, otherwise the llm.before replacements are
+                # restored locally.
+                content = await transform_complete_response(
+                    raw_content,
+                    hook_meta,
+                    legacy_replacements=replacements,
                 )
-                if timeout_s is not None and float(timeout_s) > 0:
-                    return await asyncio.wait_for(coro, timeout=float(timeout_s))
-                return await coro
+                if content != raw_content:
+                    try:
+                        response.content = content
+                    except Exception:
+                        pass
+                try:
+                    await _run_llm_after_stage(
+                        hook_meta,
+                        content=content,
+                        duration_ms=int((time.perf_counter() - started) * 1000),
+                    )
+                except Exception:
+                    pass
+                return response
 
             last_exc: Optional[Exception] = None
             for attempt in range(retry_count + 1):
@@ -459,6 +615,7 @@ def get_llm_client(
     model: Optional[str] = None,
     provider_id: Optional[str] = None,
     cancel_checker: Optional[Callable[[], bool]] = None,
+    hook_context: Optional[Dict[str, Any]] = None,
 ) -> LLMClient:
     return LLMClient(
         api_key=api_key,
@@ -466,6 +623,7 @@ def get_llm_client(
         model=model,
         provider_id=provider_id,
         cancel_checker=cancel_checker,
+        hook_context=hook_context,
     )
 
 
@@ -476,8 +634,10 @@ class LazyLLM:
         self,
         *,
         cancel_checker: Optional[Callable[[], bool]] = None,
+        hook_context: Optional[Dict[str, Any]] = None,
     ):
         self.cancel_checker = cancel_checker
+        self.hook_context = hook_context
 
     def ask(
         self,
@@ -494,6 +654,7 @@ class LazyLLM:
             model=model,
             provider_id=provider_id,
             cancel_checker=self.cancel_checker,
+            hook_context=self.hook_context,
         ).ask(
             prompt,
             temperature=temperature,
@@ -509,9 +670,10 @@ _lazy_llm_singleton: Optional[LazyLLM] = None
 def get_lazy_llm(
     *,
     cancel_checker: Optional[Callable[[], bool]] = None,
+    hook_context: Optional[Dict[str, Any]] = None,
 ) -> LazyLLM:
-    if cancel_checker is not None:
-        return LazyLLM(cancel_checker=cancel_checker)
+    if cancel_checker is not None or hook_context is not None:
+        return LazyLLM(cancel_checker=cancel_checker, hook_context=hook_context)
     global _lazy_llm_singleton
     if _lazy_llm_singleton is None:
         _lazy_llm_singleton = LazyLLM()

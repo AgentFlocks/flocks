@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sqlite3
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -29,6 +30,7 @@ async def isolated_task_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     data_dir = tmp_path / "flocks_data"
     data_dir.mkdir(parents=True, exist_ok=True)
     monkeypatch.setenv("FLOCKS_DATA_DIR", str(data_dir))
+    monkeypatch.setenv("FLOCKS_ROOT", str(tmp_path / "flocks-root"))
 
     Config._global_config = None
     Config._cached_config = None
@@ -37,7 +39,7 @@ async def isolated_task_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     TaskManager._instance = None
     TaskManager._startup_error = None
     TaskStore._initialized = False
-    TaskStore._conn = None
+    TaskStore._handle = None
 
     await Storage.init()
     await TaskStore.init()
@@ -53,7 +55,39 @@ async def isolated_task_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     TaskManager._instance = None
     TaskManager._startup_error = None
     TaskStore._initialized = False
-    TaskStore._conn = None
+    TaskStore._handle = None
+
+
+@pytest.fixture
+def legacy_db(tmp_path):
+    """Only the explicit offline source uses SQLite; runtime reads use PG."""
+    db = sqlite3.connect(tmp_path / "legacy.db")
+    try:
+        yield db
+    finally:
+        db.close()
+
+
+async def _import_legacy_task_snapshot(tmp_path: Path) -> None:
+    from flocks.db.migrate import migrate
+
+    source = tmp_path / "legacy.db"
+    before = await asyncio.to_thread(source.read_bytes)
+    target = tmp_path / "normalized-tasks.db"
+    script = Path(__file__).resolve().parents[2] / "scripts" / "migrate_legacy_task_tables.py"
+    proc = await asyncio.create_subprocess_exec(
+        sys.executable, str(script), "--db", str(source),
+        "--target-db", str(target),
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
+    assert proc.returncode == 0, (stdout or b"").decode() + (stderr or b"").decode()
+    assert await asyncio.to_thread(source.read_bytes) == before
+    report = await migrate([target], report_dir=tmp_path / "migration-evidence", apply=True)
+    assert report.ok and report.applied, report.errors
+    assert report.verified > 0
+    await TaskStore.close()
+    await TaskStore.init()
 
 
 async def _wait_for_execution(execution_id: str, *, status: TaskStatus, timeout: float = 2.0):
@@ -64,6 +98,14 @@ async def _wait_for_execution(execution_id: str, *, status: TaskStatus, timeout:
             return execution
         await asyncio.sleep(0.02)
     raise AssertionError(f"execution {execution_id} did not reach {status.value}")
+
+
+@pytest.fixture
+def manual_task_manager(monkeypatch: pytest.MonkeyPatch) -> TaskManager:
+    """Drive queue transitions without a competing background consumer."""
+    manager = TaskManager(max_concurrent=1)
+    monkeypatch.setattr(TaskManager, "_instance", manager)
+    return manager
 
 
 @pytest.mark.asyncio
@@ -178,8 +220,9 @@ async def test_dispatch_timeout_releases_queue_for_following_execution(
 
 
 @pytest.mark.asyncio
-async def test_delete_scheduler_releases_claimed_queue_slot(tmp_path: Path):
-    await TaskManager.start(max_concurrent=1, poll_interval=999, scheduler_interval=999)
+async def test_delete_scheduler_releases_claimed_queue_slot(
+    tmp_path: Path, manual_task_manager: TaskManager,
+):
 
     scheduler = await TaskManager.create_scheduler(
         title="删除释放槽位",
@@ -193,8 +236,7 @@ async def test_delete_scheduler_releases_claimed_queue_slot(tmp_path: Path):
         enqueue=True,
     )
 
-    manager = TaskManager.get()
-    assert manager is not None
+    manager = manual_task_manager
 
     claimed = await manager.queue.dequeue()
 
@@ -231,12 +273,12 @@ async def test_delete_scheduler_releases_claimed_queue_slot(tmp_path: Path):
 async def test_cancelled_worker_requeues_execution_instead_of_losing_queue_ref(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    manual_task_manager: TaskManager,
 ):
     async def fake_dispatch(_execution, _scheduler):
         raise asyncio.CancelledError()
 
     monkeypatch.setattr(TaskExecutor, "dispatch", fake_dispatch)
-    await TaskManager.start(max_concurrent=1, poll_interval=999, scheduler_interval=999)
 
     scheduler = await TaskManager.create_scheduler(
         title="取消后回队",
@@ -250,8 +292,7 @@ async def test_cancelled_worker_requeues_execution_instead_of_losing_queue_ref(
         enqueue=True,
     )
 
-    manager = TaskManager.get()
-    assert manager is not None
+    manager = manual_task_manager
 
     claimed = await manager.queue.dequeue()
     assert claimed is not None
@@ -330,9 +371,9 @@ async def test_workflow_timeout_signals_cancel_and_stops_before_next_node(
 
 
 @pytest.mark.asyncio
-async def test_standalone_legacy_migration_script_migrates_existing_tables(tmp_path: Path):
-    db = await TaskStore.raw_db()
-    await db.executescript(
+async def test_standalone_legacy_migration_script_migrates_existing_tables(tmp_path: Path, legacy_db):
+    db = legacy_db
+    db.executescript(
         """
         CREATE TABLE tasks (
             id TEXT PRIMARY KEY,
@@ -386,7 +427,7 @@ async def test_standalone_legacy_migration_script_migrates_existing_tables(tmp_p
     created_at = (now - timedelta(minutes=5)).isoformat()
     started_at = (now - timedelta(minutes=4)).isoformat()
     completed_at = (now - timedelta(minutes=3)).isoformat()
-    await db.execute(
+    db.execute(
         """
         INSERT INTO tasks (
             id, title, description, type, status, priority, source, schedule,
@@ -414,7 +455,7 @@ async def test_standalone_legacy_migration_script_migrates_existing_tables(tmp_p
             "migration",
         ),
     )
-    await db.execute(
+    db.execute(
         """
         INSERT INTO task_execution_records (
             id, task_id, status, delivery_status, started_at, completed_at,
@@ -434,7 +475,7 @@ async def test_standalone_legacy_migration_script_migrates_existing_tables(tmp_p
             None,
         ),
     )
-    await db.execute(
+    db.execute(
         """
         INSERT INTO task_queue_refs (
             id, task_id, execution_record_id, status, created_at, started_at
@@ -449,22 +490,8 @@ async def test_standalone_legacy_migration_script_migrates_existing_tables(tmp_p
             started_at,
         ),
     )
-    await db.commit()
-
-    script_path = Path(__file__).resolve().parents[2] / "scripts" / "migrate_legacy_task_tables.py"
-    state_path = tmp_path / "task_migration_state.json"
-    proc = await asyncio.create_subprocess_exec(
-        sys.executable,
-        str(script_path),
-        "--db",
-        str(Storage.get_db_path()),
-        "--state-file",
-        str(state_path),
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    stdout, stderr = await proc.communicate()
-    assert proc.returncode == 0, (stdout or b"").decode() + (stderr or b"").decode()
+    db.commit()
+    await _import_legacy_task_snapshot(tmp_path)
 
     scheduler = await TaskManager.get_scheduler("task_legacy_1")
     execution = await TaskManager.get_execution("texec_legacy_1")
@@ -475,19 +502,21 @@ async def test_standalone_legacy_migration_script_migrates_existing_tables(tmp_p
     assert execution.scheduler_id == "task_legacy_1"
     assert execution.status == TaskStatus.COMPLETED
     assert execution.session_id == "ses_123"
-    assert TaskManager._legacy_tables_exist() is False
-    assert state_path.exists() is False
+    assert db.execute("SELECT title FROM tasks WHERE id = ?", ("task_legacy_1",)).fetchone() == ("旧计划任务",)
+    assert db.execute("SELECT name FROM sqlite_master WHERE name = 'task_schedulers'").fetchone() is None
+    assert not Storage.get_db_path().exists()
+    assert not TaskStore.get_db_path().exists()
 
 
 @pytest.mark.asyncio
 async def test_standalone_legacy_migration_preserves_paused_scheduled_task_history(
-    tmp_path: Path,
+    tmp_path: Path, legacy_db,
 ):
-    db = await TaskStore.raw_db()
+    db = legacy_db
     now = datetime.now(timezone.utc)
     created_at = (now - timedelta(minutes=5)).isoformat()
 
-    await db.executescript(
+    db.executescript(
         """
         CREATE TABLE tasks (
             id TEXT PRIMARY KEY,
@@ -536,7 +565,7 @@ async def test_standalone_legacy_migration_preserves_paused_scheduled_task_histo
         );
         """
     )
-    await db.execute(
+    db.execute(
         """
         INSERT INTO tasks (
             id, title, description, type, status, priority, source, schedule,
@@ -564,22 +593,8 @@ async def test_standalone_legacy_migration_preserves_paused_scheduled_task_histo
             "migration",
         ),
     )
-    await db.commit()
-
-    script_path = Path(__file__).resolve().parents[2] / "scripts" / "migrate_legacy_task_tables.py"
-    state_path = tmp_path / "task_migration_state.json"
-    proc = await asyncio.create_subprocess_exec(
-        sys.executable,
-        str(script_path),
-        "--db",
-        str(Storage.get_db_path()),
-        "--state-file",
-        str(state_path),
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    stdout, stderr = await proc.communicate()
-    assert proc.returncode == 0, (stdout or b"").decode() + (stderr or b"").decode()
+    db.commit()
+    await _import_legacy_task_snapshot(tmp_path)
 
     scheduler = await TaskManager.get_scheduler("task_paused_sched")
     execution = await TaskManager.get_execution("legacy_exec_task_paused_sched")

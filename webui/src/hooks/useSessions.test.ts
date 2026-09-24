@@ -116,6 +116,22 @@ describe('applyMessagePartUpdate', () => {
       expect(parts[0].text).toBe('hello world');
     });
 
+    it('is idempotent when the same part snapshot is delivered again (SSE reconnect / re-delivery)', () => {
+      // The part carries the full text; the delta is only an append hint. Replaying the
+      // identical event must neither duplicate the part nor double the text.
+      const partInfo = { id: 'p1', messageID: 'msg-1', sessionID: 'sess-1', type: 'text', text: 'hello world' };
+      const first = applyMessagePartUpdate([makeMsg({ id: 'msg-1', parts: [] })], partInfo, 'hello world');
+      const replayed = applyMessagePartUpdate(first, partInfo, 'hello world');
+      const again = applyMessagePartUpdate(replayed, { ...partInfo }, ' world');
+      for (const state of [first, replayed, again]) {
+        const parts = state[0].parts as any[];
+        expect(parts).toHaveLength(1);
+        expect(parts[0].id).toBe('p1');
+        expect(parts[0].text).toBe('hello world');
+      }
+      expect(replayed).toHaveLength(1);
+    });
+
     it('replaces existing part without delta for non-text types', () => {
       const existing = { id: 'p1', messageID: 'msg-1', type: 'tool', state: { status: 'pending' } };
       const partInfo = { id: 'p1', messageID: 'msg-1', sessionID: 'sess-1', type: 'tool', state: { status: 'completed' } };
@@ -702,7 +718,7 @@ describe('updateMessagePart scheduling', () => {
     expect((msg?.parts as any[])[0].state.status).toBe('completed');
   });
 
-  it('fetches the complete message history in one request', async () => {
+  it('fetches the latest bounded message page in one request', async () => {
     vi.mocked(client.get).mockResolvedValueOnce({
       data: [
         {
@@ -732,8 +748,63 @@ describe('updateMessagePart scheduling', () => {
     expect(result.current.messages.map((msg) => msg.id)).toEqual(['msg-old', 'msg-new']);
     expect(client.get).toHaveBeenCalledOnce();
     expect(client.get).toHaveBeenCalledWith('/api/session/sess-1/message', {
-      params: { include_archived: true },
+      params: { page: true, limit: 50, include_archived: true },
     });
+  });
+
+  it('keeps the oldest loaded cursor across a latest-page refresh', async () => {
+    const row = (n: number) => ({ info: { id: `msg-${n}`, sessionID: 'sess-1', role: 'user', time: { created: n } }, parts: [] });
+    vi.mocked(client.get)
+      .mockResolvedValueOnce({ data: { items: [row(5), row(6)], hasMore: true, nextBefore: 'msg-5' } })
+      .mockResolvedValueOnce({ data: { items: [row(3), row(4)], hasMore: true, nextBefore: 'msg-3', hasNewer: true, nextAfter: 'msg-4' } })
+      .mockResolvedValueOnce({ data: { items: [row(5), row(6)], hasMore: true, nextBefore: 'msg-5' } })
+      .mockResolvedValueOnce({ data: { items: [row(1), row(2)], hasMore: false, nextBefore: null, hasNewer: true, nextAfter: 'msg-2' } });
+    const { result } = renderHook(() => useSessionMessages('sess-1'));
+    await act(async () => {});
+    await act(async () => { await result.current.loadOlder(); });
+    await act(async () => { await result.current.refetch(); });
+    await act(async () => { await result.current.loadOlder(); });
+    expect(vi.mocked(client.get).mock.calls[3][1]?.params).toMatchObject({ before: 'msg-3' });
+    expect(result.current.messages.map(item => item.id)).toEqual(['msg-1', 'msg-2', 'msg-3', 'msg-4', 'msg-5', 'msg-6']);
+    expect(result.current.hasOlder).toBe(false);
+    expect(result.current.hasNewer).toBe(false);
+  });
+
+  it('loads an absent search target and keeps incoming tail events outside a historical window', async () => {
+    const row = (n: number) => ({ info: { id: `msg-${n}`, sessionID: 'sess-1', role: 'user', time: { created: n } }, parts: [] });
+    vi.mocked(client.get)
+      .mockResolvedValueOnce({ data: { items: [row(99)], hasMore: true, nextBefore: 'msg-99' } })
+      .mockResolvedValueOnce({ data: { items: [row(10), row(11)], hasMore: true, nextBefore: 'msg-10', hasNewer: true, nextAfter: 'msg-11' } })
+      .mockResolvedValueOnce({ data: { items: [row(12)], hasMore: true, nextBefore: 'msg-12', hasNewer: true, nextAfter: 'msg-12' } })
+      .mockResolvedValueOnce({ data: { items: [row(99), row(100)], hasMore: true, nextBefore: 'msg-99' } });
+    const { result } = renderHook(() => useSessionMessages('sess-1'));
+    await act(async () => {});
+    await act(async () => { await result.current.focusMessage('msg-10'); });
+    expect(vi.mocked(client.get).mock.calls[1][1]?.params).toMatchObject({ around: 'msg-10' });
+    act(() => result.current.updateMessage({ id: 'msg-100', sessionID: 'sess-1', role: 'assistant', time: { created: 100 } }));
+    expect(result.current.messages.map(item => item.id)).toEqual(['msg-10', 'msg-11']);
+    await act(async () => { await result.current.loadNewer(); });
+    expect(result.current.messages.map(item => item.id)).toEqual(['msg-10', 'msg-11', 'msg-12']);
+    await act(async () => { await result.current.loadLatest(); });
+    expect(result.current.messages.map(item => item.id)).toEqual(['msg-99', 'msg-100']);
+    expect(result.current.hasNewer).toBe(false);
+  });
+
+  it('deduplicates in-flight older pages and ignores them after switching sessions', async () => {
+    const pending = deferred<any>();
+    vi.mocked(client.get)
+      .mockResolvedValueOnce({ data: { items: [{ info: { id: 'old', role: 'user', time: { created: 5 } }, parts: [] }], hasMore: true, nextBefore: 'old' } })
+      .mockReturnValueOnce(pending.promise)
+      .mockResolvedValueOnce({ data: { items: [{ info: { id: 'new', role: 'user', time: { created: 6 } }, parts: [] }], hasMore: false } });
+    const { result, rerender } = renderHook(({ id }) => useSessionMessages(id), { initialProps: { id: 'sess-1' } });
+    await act(async () => {});
+    act(() => { void result.current.loadOlder(); void result.current.loadOlder(); });
+    expect(client.get).toHaveBeenCalledTimes(2);
+    rerender({ id: 'sess-2' });
+    await act(async () => {});
+    await act(async () => { pending.resolve({ data: { items: [], hasMore: false } }); });
+    expect(result.current.messages.map(item => item.id)).toEqual(['new']);
+    expect(result.current.loadingOlder).toBe(false);
   });
 
   it('removes messages that are absent from a complete refetch', async () => {
@@ -980,6 +1051,135 @@ describe('updateMessagePart scheduling', () => {
 
 });
 
+describe('message page refresh and deletion races', () => {
+  const row = (n: number) => ({
+    info: { id: `msg-${n}`, sessionID: 'sess-1', role: 'user', time: { created: n } }, parts: [],
+  });
+  const page = (first: number, last: number, total: number) => ({ data: {
+    items: Array.from({ length: last - first + 1 }, (_, index) => row(first + index)),
+    hasMore: first > 1, nextBefore: first > 1 ? `msg-${first}` : null,
+    hasNewer: last < total, nextAfter: last < total ? `msg-${last}` : null,
+  } });
+
+  afterEach(() => {
+    vi.mocked(client.get).mockReset();
+    vi.mocked(client.get).mockResolvedValue({ data: [] });
+  });
+
+  it('restarts a contiguous latest window after reconnect misses more than one page', async () => {
+    vi.mocked(client.get)
+      .mockResolvedValueOnce(page(1, 50, 50))
+      .mockResolvedValueOnce(page(61, 110, 110))
+      .mockResolvedValueOnce(page(11, 60, 110))
+      .mockResolvedValueOnce(page(1, 10, 110));
+    const { result } = renderHook(() => useSessionMessages('sess-1'));
+    await act(async () => {});
+    await act(async () => { await result.current.refetch(); });
+    expect(result.current.hasOlder).toBe(true);
+    expect(result.current.messages.map(message => message.id)).toEqual(
+      Array.from({ length: 50 }, (_, index) => `msg-${index + 61}`),
+    );
+    await act(async () => { await result.current.loadOlder(); });
+    expect(vi.mocked(client.get).mock.calls[2][1]?.params).toMatchObject({ before: 'msg-61' });
+    await act(async () => { await result.current.loadOlder(); });
+    expect(result.current.messages.map(message => message.id)).toEqual(
+      Array.from({ length: 110 }, (_, index) => `msg-${index + 1}`),
+    );
+    expect(result.current.hasOlder).toBe(false);
+  });
+
+  it('keeps a newer older-page request pending when a superseded response arrives', async () => {
+    const stale = deferred<any>();
+    const current = deferred<any>();
+    vi.mocked(client.get)
+      .mockResolvedValueOnce(page(51, 100, 100))
+      .mockReturnValueOnce(stale.promise)
+      .mockResolvedValueOnce(page(151, 200, 200))
+      .mockReturnValueOnce(current.promise);
+    const { result } = renderHook(() => useSessionMessages('sess-1'));
+    await act(async () => {});
+    act(() => { void result.current.loadOlder(); });
+    await act(async () => { await result.current.refetch(); });
+    act(() => { void result.current.loadOlder(); });
+    expect(client.get).toHaveBeenCalledTimes(4);
+    await act(async () => { stale.resolve(page(1, 50, 100)); });
+    expect(result.current.loadingOlder).toBe(true);
+    expect(result.current.messages[0].id).toBe('msg-151');
+    await act(async () => { current.resolve(page(101, 150, 200)); });
+    expect(result.current.loadingOlder).toBe(false);
+    expect(result.current.messages).toHaveLength(100);
+  });
+
+  it('does not mistake a newly received SSE tail message for contiguous loaded history', async () => {
+    vi.mocked(client.get).mockResolvedValueOnce(page(1, 50, 50)).mockResolvedValueOnce(page(61, 110, 110));
+    const { result } = renderHook(() => useSessionMessages('sess-1'));
+    await act(async () => {});
+    act(() => result.current.updateMessage(row(110).info));
+    await act(async () => { await result.current.refetch(); });
+    expect(result.current.hasOlder).toBe(true);
+    expect(result.current.messages).toHaveLength(50);
+    expect(result.current.messages[0].id).toBe('msg-61');
+  });
+
+  it('does not resurrect a deleted message from an older refresh snapshot', async () => {
+    const stale = deferred<any>();
+    vi.mocked(client.get).mockResolvedValueOnce(page(1, 2, 2)).mockReturnValueOnce(stale.promise);
+    const { result } = renderHook(() => useSessionMessages('sess-1'));
+    await act(async () => {});
+    act(() => { void result.current.refetch(); });
+    act(() => result.current.removeMessage('msg-2'));
+    expect(result.current.messages.map(message => message.id)).toEqual(['msg-1']);
+    await act(async () => { stale.resolve(page(1, 2, 2)); });
+    expect(result.current.messages.map(message => message.id)).toEqual(['msg-1']);
+  });
+
+  it('retains deletion protection until both concurrent directional pages settle', async () => {
+    const older = deferred<any>();
+    const newer = deferred<any>();
+    vi.mocked(client.get).mockResolvedValueOnce(page(5, 6, 10))
+      .mockReturnValueOnce(older.promise).mockReturnValueOnce(newer.promise);
+    const { result } = renderHook(() => useSessionMessages('sess-1'));
+    await act(async () => {});
+    act(() => { void result.current.loadOlder(); void result.current.loadNewer(); });
+    act(() => { result.current.removeMessage('msg-4'); result.current.removeMessage('msg-7'); });
+    await act(async () => { newer.resolve(page(7, 10, 10)); });
+    await act(async () => { older.resolve(page(1, 4, 10)); });
+    expect(result.current.messages.map(message => message.id)).toEqual(
+      ['msg-1', 'msg-2', 'msg-3', 'msg-5', 'msg-6', 'msg-8', 'msg-9', 'msg-10'],
+    );
+  });
+
+  it('allows a failed older page to be retried without losing the current window', async () => {
+    vi.mocked(client.get).mockResolvedValueOnce(page(3, 4, 4))
+      .mockRejectedValueOnce(new Error('offline')).mockResolvedValueOnce(page(1, 2, 4));
+    const { result } = renderHook(() => useSessionMessages('sess-1'));
+    await act(async () => {});
+    await act(async () => { await result.current.loadOlder(); });
+    expect(result.current.error).toBe('offline');
+    expect(result.current.messages).toHaveLength(2);
+    await act(async () => { await result.current.loadOlder(); });
+    expect(result.current.error).toBeNull();
+    expect(result.current.messages).toHaveLength(4);
+  });
+
+  it('keeps SSE update protection when a later page finishes before an earlier refresh', async () => {
+    const refresh = deferred<any>();
+    const older = deferred<any>();
+    vi.mocked(client.get).mockResolvedValueOnce(page(5, 6, 6))
+      .mockReturnValueOnce(refresh.promise).mockReturnValueOnce(older.promise);
+    const { result } = renderHook(() => useSessionMessages('sess-1'));
+    await act(async () => {});
+    act(() => { void result.current.refetch(); });
+    act(() => result.current.updateMessagePart({
+      id: 'part-6', messageID: 'msg-6', sessionID: 'sess-1', type: 'text', text: 'new stream content',
+    }));
+    act(() => { void result.current.loadOlder(); });
+    await act(async () => { older.resolve(page(1, 4, 6)); });
+    await act(async () => { refresh.resolve(page(5, 6, 6)); });
+    expect(result.current.messages.find(message => message.id === 'msg-6')?.parts[0]?.text).toBe('new stream content');
+  });
+});
+
 describe('useSessions list loading', () => {
   afterEach(() => {
     vi.clearAllMocks();
@@ -1094,6 +1294,22 @@ describe('useSessions list loading', () => {
       resolveSearch([]);
     });
     expect(result.current.refreshing).toBe(false);
+  });
+
+  it('ignores an older search response after the current filter has completed', async () => {
+    const olderSearch = deferred<any>();
+    vi.mocked(sessionApi.list)
+      .mockReturnValueOnce(olderSearch.promise)
+      .mockResolvedValueOnce([{ id: 'current-result', title: 'Current', category: 'user', time: { created: 2, updated: 2 } }] as any);
+    const { result, rerender } = renderHook(({ search }) => useSessions(search), { initialProps: { search: 'old' } });
+    await act(async () => {});
+    rerender({ search: 'current' });
+    await act(async () => {});
+    expect(result.current.sessions.map(session => session.id)).toEqual(['current-result']);
+    await act(async () => {
+      olderSearch.resolve([{ id: 'old-result', title: 'Old', category: 'user', time: { created: 1, updated: 1 } }]);
+    });
+    expect(result.current.sessions.map(session => session.id)).toEqual(['current-result']);
   });
 
   it('loads and tracks pages independently for each project', async () => {

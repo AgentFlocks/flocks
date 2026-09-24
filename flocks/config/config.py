@@ -29,22 +29,41 @@ class PermissionAction(str, Enum):
 PermissionRule = Union[PermissionAction, Dict[str, Union[PermissionAction, Dict[str, PermissionAction]]]]
 
 
-_LEGACY_TODO_TOOL_NAMES = {"todowrite", "todoread"}
+_LEGACY_TODO_TOOL_NAMES = ("todowrite", "todoread")
+_LEGACY_PERMISSION_TOOL_NAMES = {
+    **{name: "todo" for name in _LEGACY_TODO_TOOL_NAMES},
+    "task": "delegate_task",
+}
 
 
 def _canonical_permission_tool_name(tool: str) -> str:
-    if tool in _LEGACY_TODO_TOOL_NAMES:
-        return "todo"
-    return tool
+    return _LEGACY_PERMISSION_TOOL_NAMES.get(tool, tool)
 
 
 def _merge_permission_action(existing: Any, incoming: Any) -> Any:
     """Merge duplicate legacy permission names conservatively."""
-    existing_value = existing.value if hasattr(existing, "value") else existing
-    incoming_value = incoming.value if hasattr(incoming, "value") else incoming
-    if existing_value == PermissionAction.DENY.value or incoming_value == PermissionAction.DENY.value:
-        return PermissionAction.DENY
-    return existing if existing is not None else incoming
+    if isinstance(existing, dict) and not isinstance(incoming, dict):
+        incoming = {"*": incoming}
+    elif not isinstance(existing, dict) and isinstance(incoming, dict):
+        existing = {"*": existing}
+
+    if isinstance(existing, dict) and isinstance(incoming, dict):
+        merged = dict(existing)
+        for pattern, action in incoming.items():
+            if pattern in merged:
+                merged[pattern] = _merge_permission_action(
+                    merged[pattern], action,
+                )
+            else:
+                merged[pattern] = action
+        return merged
+
+    priority = {"allow": 0, "ask": 1, "deny": 2}
+    existing_value = getattr(existing, "value", existing)
+    incoming_value = getattr(incoming, "value", incoming)
+    if priority.get(incoming_value, -1) > priority.get(existing_value, -1):
+        return incoming
+    return existing
 
 
 def _assign_permission(permission_dict: Dict[str, Any], tool: str, action: Any) -> None:
@@ -56,6 +75,31 @@ def _assign_permission(permission_dict: Dict[str, Any], tool: str, action: Any) 
         )
         return
     permission_dict[canonical_tool] = action
+
+
+def _canonicalize_permission_dict(config: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalize legacy permission aliases within one config layer."""
+    canonical: Dict[str, Any] = {}
+    for tool, action in config.items():
+        _assign_permission(canonical, tool, action)
+    return canonical
+
+
+def _merge_permission_layers(target: Dict[str, Any], source: Dict[str, Any]) -> Dict[str, Any]:
+    """Merge normalized permission layers while preserving source priority."""
+    merged = dict(target)
+    for tool, source_action in source.items():
+        if tool not in merged:
+            merged[tool] = source_action
+            continue
+        target_action = merged[tool]
+        if isinstance(target_action, dict) and isinstance(source_action, dict):
+            merged[tool] = {**target_action, **source_action}
+        elif not isinstance(target_action, dict) and isinstance(source_action, dict):
+            merged[tool] = {"*": target_action, **source_action}
+        else:
+            merged[tool] = source_action
+    return merged
 
 
 class PermissionConfig(BaseModel):
@@ -79,11 +123,11 @@ class PermissionConfig(BaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def migrate_legacy_todo_permissions(cls, data):
+    def migrate_legacy_permissions(cls, data):
         if not isinstance(data, dict):
             return data
         migrated = dict(data)
-        for legacy_name in _LEGACY_TODO_TOOL_NAMES:
+        for legacy_name in _LEGACY_PERMISSION_TOOL_NAMES:
             if legacy_name in migrated:
                 _assign_permission(migrated, legacy_name, migrated.pop(legacy_name))
         return migrated
@@ -121,6 +165,13 @@ class AgentConfig(BaseModel):
     delegatable: Optional[bool] = Field(None, description="Whether this agent can be called via delegate_task")
     strategy: Optional[Literal["react", "plan_and_execute", "read_only", "explore"]] = None
     tools: Optional[Dict[str, bool]] = Field(None, description="@deprecated Use 'permission'")
+
+    @field_validator("permission", mode="before")
+    @classmethod
+    def normalize_permission_aliases(cls, value: Any) -> Any:
+        if isinstance(value, dict):
+            return _canonicalize_permission_dict(value)
+        return value
     
     @model_validator(mode='after')
     def process_agent(self):
@@ -158,7 +209,6 @@ class CommandConfig(BaseModel):
     description: Optional[str] = None
     agent: Optional[str] = None
     model: Optional[str] = None
-    subtask: Optional[bool] = None
 
 
 # ==================== Provider Configuration ====================
@@ -698,6 +748,50 @@ def normalize_fallback_provider_entries(value: Any) -> List[Dict[str, str]]:
     return normalized
 
 
+class NetworkProxyConfig(BaseModel):
+    """Outbound proxy policy (see flocks/net/proxy.py for the routing rules)."""
+    model_config = {"extra": "allow", "populate_by_name": True}
+
+    mode: Literal["off", "system", "manual"] = Field(
+        "system",
+        description=(
+            "off: never proxy; system: follow HTTP_PROXY / HTTPS_PROXY / ALL_PROXY / NO_PROXY; "
+            "manual: use the URLs below (also exported to the environment)."
+        ),
+    )
+    http: Optional[str] = Field(None, description="Proxy for http:// targets, e.g. http://127.0.0.1:7890")
+    https: Optional[str] = Field(None, description="Proxy for https:// targets; http://, socks5:// and socks5h:// accepted")
+    all: Optional[str] = Field(None, description="Fallback proxy when http / https are empty")
+    username: Optional[str] = Field(None, description="Proxy credentials (optional)")
+    password: Optional[str] = Field(None, description="Proxy password; stored as {secret:network_proxy_password}")
+    bypass: List[str] = Field(
+        default_factory=list,
+        description=(
+            "Direct-connection whitelist: hosts, .suffix / *.suffix domains, host:port, "
+            "IPs and CIDR blocks (e.g. *.corp.example, 10.0.0.0/8, gitlab.internal:8443)."
+        ),
+    )
+    bypass_private: bool = Field(
+        True,
+        alias="bypassPrivate",
+        description="Loopback, link-local, RFC1918 / ULA addresses and *.local / *.internal names always go direct.",
+    )
+
+
+class NetworkConfig(BaseModel):
+    """Network policy for outbound connections."""
+    model_config = {"extra": "allow"}
+
+    proxy: Optional[NetworkProxyConfig] = None
+
+
+class TokenPolicyNoticeConfig(BaseModel):
+    """Enable or disable the built-in, one-month token policy notice."""
+
+    model_config = {"extra": "forbid"}
+    enabled: bool = True
+
+
 class ConfigInfo(BaseModel):
     """
     Main configuration schema
@@ -707,6 +801,9 @@ class ConfigInfo(BaseModel):
     model_config = {"extra": "allow", "populate_by_name": True}  # Allow extra fields for flexibility
     
     schema_: Optional[str] = Field(None, alias="$schema")
+    token_policy_notice: TokenPolicyNoticeConfig | None = Field(
+        default=None, alias="tokenPolicyNotice"
+    )
     theme: Optional[str] = None
     keybinds: Optional[KeybindsConfig] = None
     log_level: Optional[str] = Field(None, alias="logLevel")
@@ -750,6 +847,13 @@ class ConfigInfo(BaseModel):
             "enter the registry. Unset means all built-in agents are active."
         ),
     )
+
+    @field_validator("permission", mode="before")
+    @classmethod
+    def normalize_permission_aliases(cls, value: Any) -> Any:
+        if isinstance(value, dict):
+            return _canonicalize_permission_dict(value)
+        return value
     agent_logic: Optional[Literal["base", "rex"]] = Field(None, alias="agentLogic")
     flockspro: Optional[FlocksProConfig] = None
     ui: Optional[UIConfig] = None
@@ -765,6 +869,10 @@ class ConfigInfo(BaseModel):
         description="Repeated tool-failure handling.",
     )
     experimental: Optional[ExperimentalConfig] = None
+    network: Optional[NetworkConfig] = Field(
+        None,
+        description="Outbound network policy (proxy mode, proxy URLs, direct-connection whitelist).",
+    )
     
     # Memory system configuration (added for memory system integration)
     memory: Optional[Any] = Field(
@@ -930,6 +1038,21 @@ def _get_flocks_root() -> Path:
     
     # Default: ~/.flocks
     return Path.home() / ".flocks"
+
+
+def get_flocks_root() -> Path:
+    """Public alias of the runtime root resolver (``FLOCKS_ROOT`` → ``~/.flocks``).
+
+    Every runtime directory (config/data/logs/plugins) hangs off this root;
+    modules must not rebuild ``Path.home() / ".flocks"`` themselves, or an
+    instance started with ``FLOCKS_ROOT`` would write into the default one.
+    """
+    return _get_flocks_root()
+
+
+def get_user_plugins_root() -> Path:
+    """User-level plugin root: ``<flocks root>/plugins`` (agents/skills/tools/workflows/...)."""
+    return _get_flocks_root() / "plugins"
 
 
 def _get_config_dir() -> Path:
@@ -1116,6 +1239,14 @@ class Config:
         
         # Deep merge
         merged = cls.merge_deep(target_dict, source_dict)
+
+        target_permission = target_dict.get("permission")
+        source_permission = source_dict.get("permission")
+        if isinstance(target_permission, dict) and isinstance(source_permission, dict):
+            merged["permission"] = _merge_permission_layers(
+                _canonicalize_permission_dict(target_permission),
+                _canonicalize_permission_dict(source_permission),
+            )
         
         # Special handling for arrays - concatenate instead of replace
         if target.plugin and source.plugin:
@@ -1250,7 +1381,7 @@ class Config:
         return text
     
     @classmethod
-    async def load_file(cls, filepath: Path) -> ConfigInfo:
+    async def load_file(cls, filepath: Path, *, resolve_refs: bool = True) -> ConfigInfo:
         """
         Load configuration from a file
         
@@ -1259,6 +1390,9 @@ class Config:
         
         Args:
             filepath: Path to config file
+            resolve_refs: substitute {env:}/{secret:}/{file:} references.
+                ``False`` keeps the references verbatim (used when the config
+                is shown to clients or written back to disk).
             
         Returns:
             ConfigInfo instance
@@ -1275,15 +1409,21 @@ class Config:
         except Exception as e:
             raise ValueError(f"Failed to read config file {filepath}: {e}")
         
-        return await cls.load_text(text, filepath)
+        return await cls.load_text(text, filepath, resolve_refs=resolve_refs)
 
     @staticmethod
     def parse_jsonc(text: str, filepath: Path) -> Dict[str, Any]:
-        """Parse JSONC text without resolving environment or secret references."""
+        """Parse JSONC text without resolving environment or secret references.
+
+        JSONC here means JSON plus ``//`` / ``/* */`` comments and trailing
+        commas before ``}`` / ``]`` (what editors such as VS Code accept).
+        """
         output: List[str] = []
         index = 0
         in_string = False
         escaped = False
+        # Position in ``output`` of a comma that may turn out to be trailing.
+        pending_comma: Optional[int] = None
 
         while index < len(text):
             char = text[index]
@@ -1302,6 +1442,7 @@ class Config:
 
             if char == '"':
                 in_string = True
+                pending_comma = None
                 output.append(char)
                 index += 1
                 continue
@@ -1325,6 +1466,14 @@ class Config:
                 index += 2
                 continue
 
+            if char == ",":
+                pending_comma = len(output)
+            elif char in "}]":
+                if pending_comma is not None:
+                    output[pending_comma] = ""  # trailing comma: drop it
+                pending_comma = None
+            elif not char.isspace():
+                pending_comma = None
             output.append(char)
             index += 1
 
@@ -1339,25 +1488,33 @@ class Config:
         return data
     
     @classmethod
-    async def load_text(cls, text: str, filepath: Path) -> ConfigInfo:
+    async def load_text(
+        cls,
+        text: str,
+        filepath: Path,
+        *,
+        resolve_refs: bool = True,
+    ) -> ConfigInfo:
         """
         Load configuration from text
         
         Args:
             text: Config text (JSON/JSONC)
             filepath: Source file path (for error messages and relative paths)
+            resolve_refs: substitute {env:}/{secret:}/{file:} references
             
         Returns:
             ConfigInfo instance
         """
-        # Replace environment variables
-        text = cls.replace_env_vars(text)
-        
-        # Replace secret references {secret:SECRET_ID}
-        text = cls.replace_secret_refs(text)
-        
-        # Replace file references
-        text = await cls.replace_file_refs(text, filepath.parent)
+        if resolve_refs:
+            # Replace environment variables
+            text = cls.replace_env_vars(text)
+            
+            # Replace secret references {secret:SECRET_ID}
+            text = cls.replace_secret_refs(text)
+            
+            # Replace file references
+            text = await cls.replace_file_refs(text, filepath.parent)
         
         data = cls.parse_jsonc(text, filepath)
         
@@ -1372,7 +1529,7 @@ class Config:
         return config
     
     @classmethod
-    async def load_global_config(cls) -> ConfigInfo:
+    async def load_global_config(cls, *, resolve_refs: bool = True) -> ConfigInfo:
         """
         Load global user configuration
         
@@ -1388,7 +1545,7 @@ class Config:
         for filename in ["flocks.json", "flocks.jsonc", "config.json"]:
             filepath = global_cfg.config_dir / filename
             if filepath.exists():
-                loaded = await cls.load_file(filepath)
+                loaded = await cls.load_file(filepath, resolve_refs=resolve_refs)
                 result = cls.merge_config_concat_arrays(result, loaded)
         
         return result
@@ -1411,11 +1568,30 @@ class Config:
         if cls._cached_config is not None:
             return cls._cached_config
         
+        result = await cls._load_merged(resolve_refs=True)
+        cls._cached_config = result
+        return result
+
+    @classmethod
+    async def get_unresolved(cls) -> ConfigInfo:
+        """Merged configuration with {secret:}/{env:}/{file:} references kept verbatim.
+
+        This is what config APIs hand to clients: it never contains resolved
+        secret values, and a client that round-trips it through ``update``
+        keeps the references intact. Not cached.
+        """
+        return await cls._load_merged(resolve_refs=False)
+
+    @classmethod
+    async def _load_merged(cls, *, resolve_refs: bool) -> ConfigInfo:
         global_cfg = cls.get_global()
         result = ConfigInfo()
         
         # 1. Global user config
-        result = cls.merge_config_concat_arrays(result, await cls.load_global_config())
+        result = cls.merge_config_concat_arrays(
+            result,
+            await cls.load_global_config(resolve_refs=resolve_refs),
+        )
         
         # 2. Custom config path
         if global_cfg.config_path:
@@ -1423,7 +1599,7 @@ class Config:
             if custom_path.exists():
                 result = cls.merge_config_concat_arrays(
                     result,
-                    await cls.load_file(custom_path)
+                    await cls.load_file(custom_path, resolve_refs=resolve_refs)
                 )
         
         # 3. Inline config content
@@ -1454,11 +1630,13 @@ class Config:
                 if result.permission is None:
                     result.permission = {}
                 if isinstance(result.permission, dict):
-                    result.permission = cls.merge_deep(result.permission, permission_data)
+                    result.permission = _merge_permission_layers(
+                        _canonicalize_permission_dict(result.permission),
+                        _canonicalize_permission_dict(permission_data),
+                    )
             except Exception:
                 pass
         
-        cls._cached_config = result
         return result
     
     @classmethod
@@ -1530,14 +1708,35 @@ class Config:
         # Ensure parent directory exists
         config_file.parent.mkdir(parents=True, exist_ok=True)
         
-        # Load existing
-        existing = await cls.load_file(config_file) if config_file.exists() else ConfigInfo()
+        # Load existing *without* resolving {secret:}/{env:} references, so the
+        # merged file keeps the references instead of the resolved plaintext.
+        existing: Optional[ConfigInfo] = ConfigInfo()
+        existing_data: Dict[str, Any] = {}
+        if config_file.exists():
+            try:
+                existing = await cls.load_file(config_file, resolve_refs=False)
+            except ValueError:
+                # A typed field holds an unresolved reference (e.g. "{env:PORT}"
+                # in an int field). Merge on the raw dict instead of resolving.
+                existing = None
+                existing_data = cls.parse_jsonc(
+                    config_file.read_text(encoding="utf-8"), config_file
+                )
         
         # Merge
-        merged = cls.merge_config_concat_arrays(existing, config)
+        if existing is not None:
+            merged = cls.merge_config_concat_arrays(existing, config)
+            config_data = merged.model_dump(by_alias=True, exclude_none=True, mode="json")
+        else:
+            incoming = config.model_dump(by_alias=True, exclude_none=True, mode="json")
+            config_data = cls.merge_deep(existing_data, incoming)
+            for key in ("plugin", "instructions"):
+                old_values = existing_data.get(key)
+                new_values = incoming.get(key)
+                if isinstance(old_values, list) and isinstance(new_values, list):
+                    config_data[key] = list(set(old_values + new_values))
         
         # Write
-        config_data = merged.model_dump(by_alias=True, exclude_none=True, mode="json")
         if channel_allow_from_deletions:
             channels = config_data.get("channels")
             if isinstance(channels, dict):

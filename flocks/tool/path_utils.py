@@ -14,6 +14,7 @@ from typing import Optional
 
 from flocks.project.instance import Instance
 from flocks.tool.registry import ToolContext
+from flocks.config.config import get_user_plugins_root
 
 
 @dataclass(frozen=True)
@@ -129,9 +130,7 @@ def _resolve_host_skill_path(
 
     from flocks.memory.paths import path_is_within
 
-    skill_root = (
-        Path.home() / ".flocks" / "plugins" / "skills"
-    ).resolve(strict=False)
+    skill_root = (get_user_plugins_root() / "skills").resolve(strict=False)
     candidate = expanded.resolve(strict=False)
     if not path_is_within(skill_root, candidate):
         return None

@@ -1,88 +1,24 @@
-from __future__ import annotations
-
-import aiosqlite
+"""Legacy connection arguments must stay on the PostgreSQL runtime."""
 import pytest
 
-from flocks.config.config import Config
 from flocks.storage.storage import Storage
-from flocks.task.manager import TaskManager
-
-
-@pytest.fixture(autouse=True)
-async def isolated_storage(tmp_path: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch):
-    data_dir = tmp_path / "flocks_data"
-    data_dir.mkdir(parents=True, exist_ok=True)
-    monkeypatch.setenv("FLOCKS_DATA_DIR", str(data_dir))
-
-    Config._global_config = None
-    Config._cached_config = None
-    Storage._initialized = False
-    Storage._db_path = None
-
-    yield
-
-    Storage._initialized = False
-    Storage._db_path = None
-    Config._global_config = None
-    Config._cached_config = None
+from flocks.task.store import TaskStore
 
 
 @pytest.mark.asyncio
-async def test_storage_init_enables_wal_for_fresh_database() -> None:
-    await Storage.init()
-
-    async with aiosqlite.connect(Storage.get_db_path()) as db:
-        async with db.execute("PRAGMA journal_mode") as cursor:
-            journal_mode = (await cursor.fetchone())[0]
-
-    assert journal_mode == "wal"
-
-
-@pytest.mark.asyncio
-async def test_storage_connect_applies_runtime_sqlite_pragmas() -> None:
-    await Storage.init()
-
-    async with Storage.connect() as db:
-        async with db.execute("PRAGMA busy_timeout") as cursor:
-            busy_timeout = (await cursor.fetchone())[0]
-        async with db.execute("PRAGMA foreign_keys") as cursor:
-            foreign_keys = (await cursor.fetchone())[0]
-        async with db.execute("PRAGMA synchronous") as cursor:
-            synchronous = (await cursor.fetchone())[0]
-
-    assert busy_timeout == Storage._sqlite_busy_timeout_ms
-    assert foreign_keys == 1
-    # ``synchronous=NORMAL`` resolves to integer 1; we assert the explicit
-    # mode so the durability contract for WAL mode does not silently weaken.
-    assert synchronous == 1
-
-
-def test_storage_connect_sync_applies_runtime_sqlite_pragmas() -> None:
-    import asyncio
-
-    asyncio.run(Storage.init())
-
-    with Storage.connect_sync() as db:
-        busy_timeout = db.execute("PRAGMA busy_timeout").fetchone()[0]
-        foreign_keys = db.execute("PRAGMA foreign_keys").fetchone()[0]
-        synchronous = db.execute("PRAGMA synchronous").fetchone()[0]
-
-    assert busy_timeout == Storage._sqlite_busy_timeout_ms
-    assert foreign_keys == 1
-    assert synchronous == 1
+async def test_legacy_paths_do_not_create_database_files(tmp_path):
+    path = tmp_path / "old-storage.db"
+    await Storage.init(path)
+    async with Storage.connect(path) as db:
+        assert db.dialect.name == "postgres"
+        assert await db.fetch_one("SELECT current_schema()") is not None
+    assert not path.exists()
 
 
 @pytest.mark.asyncio
-async def test_task_manager_sync_connection_uses_storage_sqlite_contract() -> None:
-    await Storage.init()
-
-    with TaskManager._with_db_connection() as db:
-        row = db.execute(
-            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'storage'"
-        ).fetchone()
-        busy_timeout = db.execute("PRAGMA busy_timeout").fetchone()[0]
-        foreign_keys = db.execute("PRAGMA foreign_keys").fetchone()[0]
-
-    assert row is not None
-    assert busy_timeout == Storage._sqlite_busy_timeout_ms
-    assert foreign_keys == 1
+async def test_task_store_connection_uses_postgres():
+    await TaskStore.init()
+    db = await TaskStore.raw_db()
+    assert db.dialect.name == "postgres"
+    columns = await db.fetch_all("SELECT column_name FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = ?", ("task_executions",))
+    assert {"owner_node_id", "owner_generation", "lease_expires_at"} <= {row[0] for row in columns}

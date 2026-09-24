@@ -17,6 +17,7 @@ from flocks.provider.provider import (
     StreamChunk,
 )
 from flocks.utils.log import Log
+from flocks.net.http import async_client
 
 log = Log.create(service="provider.gateway")
 
@@ -241,9 +242,8 @@ class GatewayProvider(BaseProvider):
     async def list_available_models(self) -> List[Dict[str, Any]]:
         """Query the gateway for available models"""
         try:
-            import httpx
             
-            async with httpx.AsyncClient() as client:
+            async with async_client() as client:
                 headers = {}
                 if self.api_key:
                     headers["Authorization"] = f"Bearer {self.api_key}"
@@ -282,9 +282,8 @@ class GatewayProvider(BaseProvider):
     async def health_check(self) -> Dict[str, Any]:
         """Check gateway health"""
         try:
-            import httpx
             
-            async with httpx.AsyncClient() as client:
+            async with async_client() as client:
                 headers = {}
                 if self.api_key:
                     headers["Authorization"] = f"Bearer {self.api_key}"

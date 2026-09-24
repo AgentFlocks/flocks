@@ -39,6 +39,14 @@ from flocks.config.config import ChannelAccountConfig, ChannelConfig, ConfigInfo
 from flocks.utils.rate_limiter import AsyncTokenBucket
 
 
+async def _persist_inbound_session(session_id):
+    from flocks.session.session import SessionInfo
+    from flocks.storage.storage import Storage
+
+    session = SessionInfo(id=session_id, project_id="channel-test", directory="/tmp")
+    await Storage.set(f"session:channel-test:{session_id}", session, "session")
+
+
 # =====================================================================
 # Helpers — minimal concrete ChannelPlugin for testing
 # =====================================================================
@@ -80,6 +88,28 @@ class TestAsyncTokenBucket:
         await limiter.acquire()
         elapsed = time.monotonic() - t0
         assert elapsed < 0.1  # high rate → very short wait
+
+    async def test_no_double_spend_at_rate_boundary(self):
+        """After the burst is spent, exactly one token per 1/rate elapses.
+
+        Zeroing the balance while sleeping let the refill earned during that
+        sleep be spent again by the next caller, so two sends slipped through
+        on every rate boundary.
+        """
+        import time as _time
+        from flocks.utils.rate_limiter import AsyncTokenBucket
+
+        bucket = AsyncTokenBucket(rate=20.0, burst=2)
+        t0 = _time.perf_counter()
+        stamps = []
+        for _ in range(5):
+            await bucket.acquire()
+            stamps.append(_time.perf_counter() - t0)
+        # burst of 2 immediately, then 3 more spaced by ~50ms each
+        assert stamps[1] < 0.02
+        assert 0.035 <= stamps[2] <= 0.09
+        assert 0.085 <= stamps[3] <= 0.14
+        assert 0.135 <= stamps[4] <= 0.2
 
     async def test_tokens_refill_over_time(self):
         limiter = AsyncTokenBucket(rate=1000.0, burst=2)
@@ -1073,6 +1103,7 @@ class TestFeishuNativeCommands:
             ),
         )
 
+        await _persist_inbound_session("session_1")
         await InboundDispatcher._append_user_message(
             "session_1",
             "",
@@ -1122,6 +1153,7 @@ class TestFeishuNativeCommands:
         )
         monkeypatch.setattr("os.path.isfile", fake_isfile)
 
+        await _persist_inbound_session("session_1")
         await InboundDispatcher._append_user_message(
             "session_1",
             "[图片消息]",
@@ -1832,11 +1864,11 @@ class TestChannelPolicySecurityConfig:
         await Storage.init(tmp_path / "channel-binding-visible-agent.db")
         monkeypatch.setattr(
             "flocks.session.session.Session.create",
-            AsyncMock(return_value=SimpleNamespace(id="session_1")),
+            AsyncMock(return_value=SimpleNamespace(id="session_1", status="active")),
         )
         monkeypatch.setattr(
             "flocks.session.session.Session.get_by_id",
-            AsyncMock(return_value=SimpleNamespace(id="session_1")),
+            AsyncMock(return_value=SimpleNamespace(id="session_1", status="active")),
         )
         service = SessionBindingService()
         msg = InboundMessage(
@@ -2120,6 +2152,7 @@ class TestAppendUserMessagePerChannel:
             )
         monkeypatch.setattr(wecom_inb, "download_inbound_media", fake_download)
 
+        await _persist_inbound_session("s1")
         await InboundDispatcher._append_user_message(
             "s1",
             "[文件消息: report.pdf]",
@@ -2162,6 +2195,7 @@ class TestAppendUserMessagePerChannel:
             )
         monkeypatch.setattr(dt_inb, "download_inbound_media", fake_download)
 
+        await _persist_inbound_session("s1")
         await InboundDispatcher._append_user_message(
             "s1",
             "[图片消息]",
@@ -2202,6 +2236,7 @@ class TestAppendUserMessagePerChannel:
             )
         monkeypatch.setattr(tg_inb, "download_inbound_media", fake_download)
 
+        await _persist_inbound_session("s1")
         await InboundDispatcher._append_user_message(
             "s1",
             "[图片]",

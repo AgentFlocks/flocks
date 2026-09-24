@@ -73,3 +73,46 @@ async def test_http_5xx_logs_error(monkeypatch):
         {"path": "/unavailable", "status": 503, "detail": "Unavailable"},
     )
     warning.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_validation_error_with_raw_bytes_input_stays_422():
+    """A non-JSON body makes pydantic echo the raw ``bytes`` back in
+    ``errors()[0]["input"]``; the handler must still render a 422 instead of
+    blowing up with ``TypeError: Object of type bytes is not JSON serializable``.
+    """
+    from fastapi.exceptions import RequestValidationError
+
+    exc = RequestValidationError(
+        [
+            {
+                "type": "json_invalid",
+                "loc": ("body", 0),
+                "msg": "JSON decode error",
+                "input": b"username=admin",
+                "ctx": {"error": "Expecting value"},
+            }
+        ]
+    )
+
+    response = await app_module.validation_exception_handler(_request("/api/auth/login"), exc)
+    body = json.loads(response.body)
+
+    assert response.status_code == 422
+    assert body["error"] == "ValidationError"
+    assert body["details"][0]["type"] == "json_invalid"
+    assert body["details"][0]["input"] == "username=admin"
+
+
+@pytest.mark.asyncio
+async def test_http_exception_headers_are_preserved():
+    """A route that attaches headers to its HTTPException (Retry-After on a
+    login 429) must see them on the rendered response."""
+    response = await app_module.http_exception_handler(
+        _request("/api/auth/login"),
+        HTTPException(status_code=429, detail="登录失败次数过多，请稍后再试", headers={"Retry-After": "900"}),
+    )
+
+    assert response.status_code == 429
+    assert response.headers["retry-after"] == "900"
+    assert json.loads(response.body) == {"error": "HTTPException", "message": "登录失败次数过多，请稍后再试"}

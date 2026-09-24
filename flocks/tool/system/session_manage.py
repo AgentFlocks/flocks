@@ -217,6 +217,11 @@ async def session_manage(
     if action == "delete":
         if not session_id:
             return ToolResult(success=False, error="action=delete 需要 session_id")
+        if session_id == getattr(ctx, "session_id", None):
+            return ToolResult(
+                success=False,
+                error="不能在当前会话的工具调用尚未结束时删除自身，请从工作台删除该会话",
+            )
         await ctx.ask(
             permission="session_manage",
             patterns=[f"delete:{session_id}"],
@@ -320,10 +325,17 @@ async def _session_list_impl(
     limit: Optional[int] = None,
     offset: Optional[int] = None,
 ) -> ToolResult:
+    from flocks.session.policy import SessionPolicy
     from flocks.session.session import SessionInfo
     from flocks.storage.storage import Storage
 
-    # 直接扫描 Storage，支持 active/archived 双状态，且 project_id 过滤始终生效
+    off = offset or 0
+    lim = limit or 50
+    if off < 0 or lim <= 0:
+        return ToolResult(success=False, error="offset 必须 ≥ 0 且 limit 必须 > 0")
+
+    # 直接扫描 Storage，支持 active/archived 双状态，且 project_id 过滤始终生效；
+    # 可见性与 Session.get_by_id 一致（当前用户看不到别人的会话）
     try:
         prefix = f"session:{project_id}:" if project_id else "session:"
         keys = await Storage.list_keys(prefix=prefix)
@@ -331,7 +343,7 @@ async def _session_list_impl(
         for key in keys:
             try:
                 s = await Storage.get(key, SessionInfo)
-                if s and s.status != "deleted":
+                if s and s.status != "deleted" and SessionPolicy.can_read(s):
                     sessions.append(s)
             except Exception:
                 continue
@@ -346,8 +358,6 @@ async def _session_list_impl(
         sessions = [s for s in sessions if s.category == category]
 
     total = len(sessions)
-    off = offset or 0
-    lim = limit or 50
     page = sessions[off: off + lim]
 
     sessions_dict = await _enrich_with_channels([_session_to_dict(s) for s in page])

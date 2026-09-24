@@ -1,5 +1,5 @@
 import { useState, useEffect, createContext, useContext, useCallback, ReactNode } from 'react';
-import { X, CheckCircle, AlertCircle, AlertTriangle, Info } from 'lucide-react';
+import { IconX, IconCircleCheck, IconAlertCircle, IconAlertTriangle, IconInfoCircle } from '@tabler/icons-react';
 import { useTranslation } from 'react-i18next';
 
 // Toast 类型
@@ -82,21 +82,21 @@ export function useToast() {
 }
 
 // Toast 配置
-const toastConfig: Record<ToastType, { icon: typeof CheckCircle; className: string }> = {
+const toastConfig: Record<ToastType, { icon: typeof IconCircleCheck; className: string }> = {
   success: {
-    icon: CheckCircle,
+    icon: IconCircleCheck,
     className: 'bg-green-50 border-green-200 text-green-800',
   },
   error: {
-    icon: AlertCircle,
+    icon: IconAlertCircle,
     className: 'bg-red-50 border-red-200 text-red-800',
   },
   warning: {
-    icon: AlertTriangle,
+    icon: IconAlertTriangle,
     className: 'bg-yellow-50 border-yellow-200 text-yellow-800',
   },
   info: {
-    icon: Info,
+    icon: IconInfoCircle,
     className: 'bg-red-50 border-red-200 text-red-800',
   },
 };
@@ -119,7 +119,7 @@ function Toast({ toast, onRemove }: { toast: ToastMessage; onRemove: () => void 
       className={`flex items-start gap-3 p-4 rounded-lg border shadow-lg animate-slide-in ${config.className}`}
       role="alert"
     >
-      <Icon className="w-5 h-5 flex-shrink-0 mt-0.5" />
+      <Icon aria-hidden="true" className="w-5 h-5 flex-shrink-0 mt-0.5" />
       <div className="flex-1 min-w-0">
         <p className="font-medium text-sm">{toast.title}</p>
         {toast.description && (
@@ -131,7 +131,7 @@ function Toast({ toast, onRemove }: { toast: ToastMessage; onRemove: () => void 
         className="flex-shrink-0 p-1 rounded hover:bg-black/10 transition-colors"
         aria-label={t('button.close')}
       >
-        <X className="w-4 h-4" />
+        <IconX aria-hidden="true" className="w-4 h-4" />
       </button>
     </div>
   );

@@ -177,8 +177,27 @@ def read_workflow_dir(
         return None
 
 
+def is_safe_workflow_id(workflow_id: Any) -> bool:
+    """Return True when *workflow_id* can only address ``<root>/<id>/``.
+
+    Workflow ids are used verbatim as directory names under the scan roots, so
+    path separators, ``.``/``..`` and NUL bytes must never reach the
+    filesystem (``<root>/..`` would resolve to the parent directory).
+    """
+    if not isinstance(workflow_id, str):
+        return False
+    value = workflow_id.strip()
+    if not value or value in {".", ".."}:
+        return False
+    if "/" in value or "\\" in value or "\x00" in value or os.sep in value:
+        return False
+    return True
+
+
 def read_workflow_from_fs(workflow_id: str) -> Optional[Dict[str, Any]]:
     """Resolve a workflow by ID from workflow directories on disk."""
+    if not is_safe_workflow_id(workflow_id):
+        return None
     result = None
     for root, source in workflow_scan_dirs():
         data = read_workflow_dir(root / workflow_id, workflow_id, source)

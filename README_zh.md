@@ -261,6 +261,17 @@ flocks start --server-host 0.0.0.0 --webui-host 0.0.0.0
   curl -H "Authorization: Bearer <token>" https://flocks.example.com/api/health
   ```
 
+  查询指定会话的实时运行状态：
+
+  ```bash
+  curl -H "Authorization: Bearer <token>" \
+    https://flocks.example.com/api/session/<sessionID>/status
+  ```
+
+  `status.type` 可能为 `idle`、`queued`、`busy`、`retry`、`compacting` 或
+  `dreaming`。自动化调用可通过 `isProcessing` 判断是否仍有已接收的工作正在执行或等待执行；
+  `idle` 只表示当前空闲，不代表上一次执行成功。
+
 反向代理部署：
 
 - 反代必须主动注入 `X-Forwarded-For`。若缺失该头，且前方存在代理，中间件会拒绝信任回环地址，避免任何直连本机的请求被自动提升为 `admin`。
@@ -282,6 +293,44 @@ flocks start --server-host 0.0.0.0 --webui-host 0.0.0.0
   ```
 
   命令会汇总 `scanned / orphaned / reassigned / failed` 计数；`failed` 非零时以退出码 2 结束，便于 CI / 脚本发现部分写入并在修复底层原因（通常为临时存储错误）后重试。
+
+### 4.5 出站代理（HTTP / HTTPS / SOCKS）与直连白名单
+
+后端所有出站请求——模型接口、IM 平台（Slack、Telegram、飞书、钉钉、企微、微信）、插件广场、更新检查、
+远端 MCP、网页抓取 / 搜索、无头 Chrome，以及 `git` / `uv` / `npm` 这类子进程——都走同一套策略。
+可以在 WebUI 的 **设置 → 网络代理**（仅管理员）里配，也可以写 `flocks.json` 或用环境变量：
+
+```jsonc
+"network": {
+  "proxy": {
+    "mode": "manual",                      // off | system（默认）| manual
+    "http": "http://127.0.0.1:7890",       // http:// 目标
+    "https": "socks5h://127.0.0.1:7891",   // https:// 与 wss:// 目标
+    "all": "",                             // http / https 留空时的兜底
+    "username": "",
+    "password": "{secret:network_proxy_password}",   // 由密钥管理保存，不落明文
+    "bypass": ["*.corp.example", "10.0.0.0/8", "gitlab.internal:8443"],
+    "bypassPrivate": true
+  }
+}
+```
+
+- `system` 完全跟随启动时导出的 `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` / `NO_PROXY`；`manual` 用上面填的地址，
+  并同时写进进程环境，信任环境变量的库和子进程看到的是同一份；`off` 隐藏这些变量、全部直连。
+- 支持的 scheme：`http`、`https`、`socks5`、`socks5h`（`socks5h` 由代理解析域名）；地址不带端口时按 80 / 443 / 1080 补。
+- 白名单规则（在 DNS 解析之前判断）：`*.corp.example` / `.corp.example`（域名及其子域）、`host`、`host:port`、IP、
+  CIDR（`10.0.0.0/8`、`fd00::/8`）、`<local>`（不带点的主机名）、`*`（全部直连）。`bypassPrivate` 打开时，
+  链路本地、RFC1918、IPv6 ULA 以及 `*.local` / `*.internal` / `*.lan` / `*.home.arpa` 不用写也直连。
+  `localhost` / `127.0.0.0/8` / `::1` 任何时候都直连（确实要代理回环地址时在列表里加 `<-loopback>`）。
+- 给 systemd 单元和容器用的环境变量覆盖：`FLOCKS_PROXY_MODE`、`FLOCKS_PROXY_URL`（同时作用于 http / https / all）、
+  `FLOCKS_PROXY_BYPASS`（逗号分隔）。这一段只从用户级 `flocks.json` 读（`FLOCKS_CONFIG` 指向的文件和 `FLOCKS_CONFIG_CONTENT` 里写了不生效）。
+- `POST /api/config/network/proxy/test`（页面上的 **测试** 按钮）会告诉你某个地址是直连还是走了哪个代理，附 HTTP 状态和耗时。
+
+已知边界：只认环境变量的库（litellm、lark-oapi、python-telegram-bot、`git`、`pip`）对 `NO_PROXY` 只按主机名 / 后缀匹配，不认 CIDR，
+经它们访问的内网地址要把主机名（或 `.后缀`）写进白名单；flocks 自己的客户端在 DNS 之前按 CIDR 和端口规则判。WhatsApp 桥接的 websocket 和媒体上传按策略走（http、socks 都行），但媒体*下载*用的是 Node 原生 `fetch`，
+只有 Node ≥ 24 才认 `HTTP_PROXY`，且只支持 http 代理——策略只配了 SOCKS 时下载会直连。TUI（Bun）同理：
+认 `HTTP_PROXY` / `NO_PROXY` 但遇到 `socks://` 直接报错，所以启动它时不传 SOCKS 条目。
+无头 Chrome 只接受不带账号密码的代理（`--proxy-server` 没有鉴权）。
 
 ## 5. 加入社区
 

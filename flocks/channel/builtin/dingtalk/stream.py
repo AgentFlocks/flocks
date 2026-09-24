@@ -43,6 +43,7 @@ import httpx
 
 from flocks.channel.base import ChatType, InboundMessage
 from flocks.utils.log import Log
+from flocks.net.http import async_client
 
 log = Log.create(service="channel.dingtalk.stream")
 
@@ -196,7 +197,7 @@ async def _preflight_open_connection(
             f"Python/{platform.python_version()}"
         ),
     }
-    async with httpx.AsyncClient(timeout=timeout) as client:
+    async with async_client(timeout=timeout) as client:
         resp = await client.post(_GATEWAY_OPEN_URL, json=payload, headers=headers)
 
     if resp.status_code < 400:
@@ -289,11 +290,14 @@ def _install_bounded_open_connection(client: Any) -> None:
 
         response_text = ""
         try:
+            from flocks.net import requests_proxies
+
             response = requests.post(
                 api,
                 headers=request_headers,
                 data=request_body,
                 timeout=_SDK_OPEN_CONNECTION_TIMEOUT,
+                proxies=requests_proxies(api),
             )
             response_text = response.text
             response.raise_for_status()
@@ -797,7 +801,10 @@ class DingTalkStreamRunner:
 
         uri = f"{endpoint}?ticket={quote_plus(str(ticket))}"
         keepalive_task: Optional[asyncio.Task] = None
-        async with websockets.connect(uri) as websocket:
+        from flocks.net import proxy_url_for
+
+        # explicit: websockets would otherwise read HTTPS_PROXY itself and skip the CIDR whitelist
+        async with websockets.connect(uri, proxy=proxy_url_for(uri)) as websocket:
             client.websocket = websocket
             keepalive_task = asyncio.create_task(client.keepalive(websocket))
             try:

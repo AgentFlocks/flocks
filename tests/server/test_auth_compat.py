@@ -319,6 +319,21 @@ class TestAuthMiddlewareExempt:
         assert auth_module.auth_middleware_exempt("/health") is True
         assert auth_module.auth_middleware_exempt("/api/auth/login") is True
 
+    def test_auth_endpoints_are_exempt_only_for_their_verb(self):
+        # ``PUT /auth/login`` would otherwise reach the TUI-compatible
+        # ``PUT /auth/{provider_id}`` route in routes/misc.py unauthenticated.
+        assert auth_module.auth_middleware_exempt("/auth/login", "POST") is True
+        assert auth_module.auth_middleware_exempt("/auth/login", "post") is True
+        assert auth_module.auth_middleware_exempt("/auth/login", "PUT") is False
+        assert auth_module.auth_middleware_exempt("/auth/bootstrap-admin", "PUT") is False
+        assert auth_module.auth_middleware_exempt("/auth/bootstrap-status", "PUT") is False
+        assert auth_module.auth_middleware_exempt("/auth/bootstrap-status", "GET") is True
+        # /api/auth/* has no colliding route, so it stays public for every
+        # method and an unmapped verb gets the router's 405.
+        assert auth_module.auth_middleware_exempt("/api/auth/login", "PUT") is True
+        assert auth_module.auth_middleware_exempt("/api/auth/bootstrap-status", "POST") is True
+        assert auth_module.auth_middleware_exempt("/api/health", "PUT") is True
+
     def test_static_prefix_is_exempt(self):
         assert auth_module.auth_middleware_exempt("/assets/main.js") is True
         assert auth_module.auth_middleware_exempt("/static/img/logo.png") is True
@@ -428,3 +443,79 @@ async def test_apply_auth_for_request_allows_password_reset_endpoints_when_requi
         assert user.must_reset_password is True
     finally:
         auth_module.clear_auth_context(token)
+
+
+@pytest.mark.asyncio
+async def test_apply_auth_for_request_put_on_login_path_is_not_public(monkeypatch):
+    """``PUT /auth/login`` hits the provider-auth route, not login — it must be guarded."""
+    monkeypatch.setattr(
+        auth_module,
+        "get_secret_manager",
+        lambda: _FakeSecrets({auth_module.API_TOKEN_SECRET_ID: "abc123"}),
+    )
+    request = _make_request(headers={"user-agent": "curl/8.0"}, path="/auth/login")
+    request.scope["method"] = "PUT"
+    with pytest.raises(HTTPException) as exc_info:
+        await auth_module.apply_auth_for_request(request)
+    assert exc_info.value.status_code == 401
+
+    request.scope["method"] = "POST"
+    blocked, token, user = await auth_module.apply_auth_for_request(request)
+    auth_module.clear_auth_context(token)
+    assert blocked is None and user is None
+
+
+@pytest.mark.asyncio
+async def test_apply_auth_for_request_blank_cookie_is_treated_as_not_logged_in(monkeypatch):
+    """A whitespace-only ``flocks_session`` must read as "no cookie" (请先登录),
+    not as an unknown session (登录已过期)."""
+    monkeypatch.setattr(
+        auth_module,
+        "get_secret_manager",
+        lambda: _FakeSecrets({auth_module.API_TOKEN_SECRET_ID: "abc123"}),
+    )
+
+    async def has_users():
+        return True
+
+    monkeypatch.setattr(auth_module.AuthService, "has_users", has_users)
+    request = _make_request(
+        headers={"sec-fetch-mode": "cors", "cookie": 'flocks_session="  "'},
+    )
+    with pytest.raises(HTTPException) as exc_info:
+        await auth_module.apply_auth_for_request(request)
+    assert exc_info.value.status_code == 401
+    assert exc_info.value.detail == "请先登录"
+
+
+@pytest.mark.asyncio
+async def test_auth_context_adapters_may_reregister_while_awaited(monkeypatch):
+    """An adapter that re-registers adapters mid-request (plugin hot reload)
+    must not break the iteration in apply_auth_for_request."""
+    monkeypatch.setattr(
+        auth_module,
+        "get_secret_manager",
+        lambda: _FakeSecrets({auth_module.API_TOKEN_SECRET_ID: "abc123"}),
+    )
+
+    async def second(_request, _user):
+        return {"second": True}
+
+    async def reloading(_request, _user):
+        # Mutates the registry while the loop in apply_auth_for_request is suspended here.
+        auth_module.unregister_auth_context_adapter("second")
+        auth_module.register_auth_context_adapter("second", second)
+        return {"first": True}
+
+    auth_module.register_auth_context_adapter("first", reloading)
+    auth_module.register_auth_context_adapter("second", second)
+    try:
+        request = _make_request(headers={"user-agent": "curl/8.0", "authorization": "Bearer abc123"})
+        for _ in range(3):
+            _blocked, token, user = await auth_module.apply_auth_for_request(request)
+            auth_module.clear_auth_context(token)
+            assert user is not None
+            assert request.state.extension_context == {"first": True, "second": True}
+    finally:
+        auth_module.unregister_auth_context_adapter("first")
+        auth_module.unregister_auth_context_adapter("second")

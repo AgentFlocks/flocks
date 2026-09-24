@@ -2,10 +2,17 @@ import React from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
+import { Link, MemoryRouter, Route, Routes, useLocation, useNavigate, type RouteObject } from 'react-router-dom';
 import Layout from './Layout';
 import Home from '@/pages/Home';
 import { UPDATE_DISMISSED_KEY } from '@/utils/updateDismissal';
+import { getTokenPolicyStatus, claimTokenPolicy, confirmTokenPolicyDisplay } from '@/api/tokenPolicy';
+
+vi.mock('@/api/tokenPolicy', () => ({
+  getTokenPolicyStatus: vi.fn(),
+  claimTokenPolicy: vi.fn(),
+  confirmTokenPolicyDisplay: vi.fn(),
+}));
 
 const {
   catalogAPI,
@@ -18,13 +25,12 @@ const {
   getActiveNotifications,
   ackNotification,
   getNotificationAckStatus,
-  flocksproUsersApi,
-  consoleUpgradeApi,
   productNameContextValue,
   updateModalMock,
   useAuth,
   useStats,
   useWebUIContractPages,
+  useSceneSuiteUpdates,
 } = vi.hoisted(() => ({
   catalogAPI: {
     list: vi.fn(),
@@ -37,6 +43,7 @@ const {
     getCredentials: vi.fn(),
   },
   onboardingAPI: {
+    getStatus: vi.fn(),
     validate: vi.fn(),
     apply: vi.fn(),
   },
@@ -49,16 +56,8 @@ const {
   getActiveNotifications: vi.fn(),
   ackNotification: vi.fn(),
   getNotificationAckStatus: vi.fn(),
-  flocksproUsersApi: {
-    hasCapability: vi.fn(),
-    getLicenseStatus: vi.fn(),
-  },
-  consoleUpgradeApi: {
-    getProPackageStatus: vi.fn(),
-  },
   productNameContextValue: {
     productName: 'Flocks',
-    proProductName: 'Flocks Pro',
     configuredDisplayName: null as string | null,
     faviconUrl: '/favicon.svg',
     hasCustomFavicon: false,
@@ -69,6 +68,7 @@ const {
     resetProductFavicon: vi.fn(),
   },
   updateModalMock: vi.fn(() => null),
+  useSceneSuiteUpdates: vi.fn(() => ({ hasUnseenSuites: false })),
   useAuth: vi.fn(),
   useStats: vi.fn(),
   useWebUIContractPages: vi.fn(() => ({
@@ -111,20 +111,13 @@ vi.mock('@/api/session', () => ({
 
 vi.mock('@/api/update', () => ({
   checkUpdate,
+  DEFAULT_UPDATE_CHANNEL: 'default',
 }));
 
 vi.mock('@/api/notifications', () => ({
   getActiveNotifications,
   ackNotification,
   getNotificationAckStatus,
-}));
-
-vi.mock('@/api/flocksproUsers', () => ({
-  flocksproUsersApi,
-}));
-
-vi.mock('@/api/consoleUpgrade', () => ({
-  consoleUpgradeApi,
 }));
 
 vi.mock('@/contexts/AuthContext', () => ({
@@ -134,6 +127,8 @@ vi.mock('@/contexts/AuthContext', () => ({
 vi.mock('@/contexts/ProductNameContext', () => ({
   useProductName: () => productNameContextValue,
 }));
+
+vi.mock('@/hooks/useSceneSuiteUpdates', () => ({ useSceneSuiteUpdates }));
 
 vi.mock('@/hooks/useStats', () => ({
   useStats,
@@ -155,7 +150,8 @@ vi.mock('@/components/common/LanguageSwitcher', () => ({
 
 vi.mock('@/components/common/UpdateModal', () => ({
   UPDATE_DISMISSED_KEY: 'update-dismissed',
-  default: (props: Record<string, unknown>) => {
+  default: function MockUpdateModal(props: Record<string, unknown>) {
+    React.useEffect(() => { (props.onPresented as (() => void) | undefined)?.(); }, [props.onPresented]);
     updateModalMock(props);
     return <div role="dialog" aria-label="update-modal" />;
   },
@@ -206,34 +202,234 @@ function makeProvider(id: string, name: string, models: Array<{ id: string; name
   };
 }
 
-function renderHomeWithLayout() {
-  return render(
-    <MemoryRouter initialEntries={['/']}>
-      <Routes>
-        <Route path="/" element={<Layout />}>
-          <Route index element={<Home />} />
-        </Route>
-      </Routes>
-    </MemoryRouter>,
-  );
+function makeOnboardingStatus(overrides: Record<string, any> = {}) {
+  return {
+    completed: true,
+    has_default_model: true,
+    default_model: {
+      provider_id: 'threatbook-cn-llm',
+      model_id: 'minimax-m2.7',
+    },
+    threatbook_intel: {
+      configured: false,
+      region: null,
+      api_configured: false,
+      api_service_id: 'threatbook-cn',
+      mcp_configured: false,
+      mcp_connected: false,
+      mcp_status: 'not_configured',
+      mcp_name: 'threatbook_mcp',
+      service_matrix: {
+        cn: ['api', 'mcp'],
+        global: ['api'],
+      },
+    },
+    ...overrides,
+  };
 }
 
-function LocationProbe() {
-  const location = useLocation();
-  return <div data-testid="location-probe">{`${location.pathname}${location.search}`}</div>;
+// Pages rendered inside the layout under test: Home plus a probe for every
+// other path. The layout keeps one pane per open tab mounted, so the probe
+// also carries local state to prove a hidden tab survives untouched.
+const defaultCustomPage = {
+  id: 'dash-1',
+  title: '自定义仪表盘',
+  route: '/contracts/webui/dash-1',
+  icon: 'LayoutDashboard',
+  order: 10,
+  enabled: true,
+  placement: 'home.after',
+  buildHash: 'abc',
+  buildStatus: 'ready' as const,
+};
+
+const testContentRoutes: RouteObject[] = [
+  { index: true, element: <Home /> },
+  { path: 'sessions', element: <RouteProbe /> },
+  { path: 'workflows/*', element: <RouteProbe /> },
+  { path: 'contracts/webui/workspaces/:workspaceId/:pageId?', element: <RouteProbe /> },
+  { path: 'settings/system-logs', element: <div>system logs page</div> },
+  { path: 'settings/account', element: <div>account page</div> },
+  { path: '*', element: <RouteProbe /> },
+];
+
+function renderHomeWithLayout() {
+  return renderLayoutAt('/');
 }
 
 function renderHomeWithLayoutAndSessionsRoute() {
-  return render(
-    <MemoryRouter initialEntries={['/']}>
-      <Routes>
-        <Route path="/" element={<Layout />}>
-          <Route index element={<Home />} />
-          <Route path="sessions" element={<LocationProbe />} />
-        </Route>
-      </Routes>
-    </MemoryRouter>,
+  return renderLayoutAt('/');
+}
+
+/** The location probe of the visible (active) pane; hidden panes keep their own. */
+function activeProbe(): HTMLElement {
+  const probe = screen.getAllByTestId('location-probe')
+    .find((element) => element.closest('[data-keep-alive-pane="active"]'));
+  if (!probe) throw new Error('no active location probe');
+  return probe;
+}
+
+function RouteProbe() {
+  const location = useLocation();
+  const navigate = useNavigate();
+  const [count, setCount] = React.useState(0);
+  return (
+    <div>
+      <div data-testid="location-probe">{`${location.pathname}${location.search}`}</div>
+      <button type="button" onClick={() => setCount((value) => value + 1)}>count-up</button>
+      <span data-testid="probe-count">{count}</span>
+      <Link to="/contracts/webui/workspaces/soc_ui/soc-alerts">go-soc-alerts</Link>
+      <Link to="/sessions">go-sessions</Link>
+      <Link to="/workflows/wf-1">go-workflow-detail</Link>
+      <button type="button" onClick={() => navigate(-1)}>go-back</button>
+      <button type="button" onClick={() => navigate(1)}>go-forward</button>
+    </div>
   );
+}
+
+function layoutTree(path: string) {
+  return (
+    <MemoryRouter initialEntries={[path]}>
+      <Routes>
+        <Route path="/*" element={<Layout contentRoutes={testContentRoutes} />} />
+      </Routes>
+    </MemoryRouter>
+  );
+}
+
+function renderLayoutAt(path: string) {
+  return render(layoutTree(path));
+}
+
+function makeSocPage(id: string, title: string, icon: string, order: number) {
+  return {
+    id,
+    title,
+    route: `/contracts/webui/${id}`,
+    icon,
+    order,
+    enabled: true,
+    placement: 'home.after',
+    buildHash: 'ready',
+    buildStatus: 'ready' as const,
+    workspaceId: 'soc_ui',
+    workspaceTitle: 'SOC 工作区',
+    workspaceRoute: '/contracts/webui/workspaces/soc_ui',
+  };
+}
+
+function makeSceneWorkspace(id: string, title: string, pages: Array<{ id: string; title: string }>) {
+  return {
+    id,
+    title,
+    titleEn: title,
+    route: `/contracts/webui/workspaces/${id}`,
+    icon: 'ShieldCheck',
+    order: 20,
+    enabled: true,
+    placement: 'sceneWorkspace',
+    defaultPageId: pages[0]?.id ?? '',
+    sections: [],
+    pages: pages.map((page, index) => ({
+      id: page.id,
+      title: page.title,
+      route: `/contracts/webui/${page.id}`,
+      icon: 'LayoutDashboard',
+      order: 10 + index,
+      enabled: true,
+      placement: 'home.after',
+      buildHash: 'ready',
+      buildStatus: 'ready' as const,
+      workspaceId: id,
+      workspaceTitle: title,
+      workspaceRoute: `/contracts/webui/workspaces/${id}`,
+    })),
+  };
+}
+
+function mockSocWorkspaceNav() {
+  const socPages = [
+    makeSocPage('soc-dashboard', '告警态势', 'Activity', 10),
+    makeSocPage('soc-overview', 'SOC 总览', 'ShieldCheck', 15),
+    makeSocPage('soc-alerts', '告警调查', 'AlertTriangle', 20),
+  ];
+  useWebUIContractPages.mockReturnValue({
+    pages: socPages,
+    workspaces: [
+      {
+        id: 'soc_ui',
+        title: 'SOC 工作区',
+        titleEn: 'SOC Workspace',
+        route: '/contracts/webui/workspaces/soc_ui',
+        icon: 'ShieldCheck',
+        order: 10,
+        enabled: true,
+        placement: 'sceneWorkspace',
+        defaultPageId: 'soc-overview',
+        sections: [
+          {
+            id: 'posture',
+            label: '态势',
+            pageIds: ['soc-dashboard'],
+            defaultPageId: 'soc-dashboard',
+            contentPadding: 'none',
+            themeOverride: 'dark',
+          },
+          {
+            id: 'operations',
+            label: '告警运营',
+            pageIds: ['soc-overview', 'soc-alerts'],
+            defaultPageId: 'soc-overview',
+            contentPadding: 'none',
+          },
+        ],
+        pages: socPages,
+      },
+    ],
+    loading: false,
+    error: null,
+    refetch: vi.fn(),
+  });
+  return socPages;
+}
+
+function partitionNames(): string[] {
+  return within(screen.getByRole('tablist', { name: 'partitions' }))
+    .getAllByRole('tab')
+    .map((tab) => tab.textContent ?? '');
+}
+
+function activePartitionName(): string {
+  return within(screen.getByRole('tablist', { name: 'partitions' }))
+    .getAllByRole('tab')
+    .find((tab) => tab.getAttribute('aria-selected') === 'true')?.textContent ?? '';
+}
+
+/** All page links of the sidebar on screen, in menu order. */
+function sceneMenuLinks(): string[] {
+  const nav = document.querySelector('aside nav') as HTMLElement;
+  return Array.from(nav.querySelectorAll('a')).map((link) => link.textContent ?? '');
+}
+
+function sceneMenuHrefs(): (string | null)[] {
+  const nav = document.querySelector('aside nav') as HTMLElement;
+  return Array.from(nav.querySelectorAll('a')).map((link) => link.getAttribute('href'));
+}
+
+/** The sidebar group whose heading toggle carries `name`. */
+function navGroup(name: string): HTMLElement {
+  const group = screen.getByRole('button', { name }).closest('div.mb-6');
+  if (!group) throw new Error(`group ${name} not rendered`);
+  return group as HTMLElement;
+}
+
+function sectionHeadings(container: HTMLElement): string[] {
+  const nav = container.querySelector('aside nav') as HTMLElement;
+  return Array.from(nav.querySelectorAll('h3')).map((element) => element.textContent ?? '');
+}
+
+function navPageOrder(container: HTMLElement): string[] {
+  return Array.from(container.querySelectorAll('[data-nav-page-id]')).map((element) => element.getAttribute('data-nav-page-id') ?? '');
 }
 
 async function flushEffects() {
@@ -258,9 +454,11 @@ describe('Layout onboarding entry', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.useRealTimers();
+    vi.mocked(confirmTokenPolicyDisplay).mockResolvedValue(true);
+    vi.mocked(getTokenPolicyStatus).mockResolvedValue({ state: 'active', waiting_for_display: false, lease_expires_at: null, notice: null, server_now: new Date().toISOString(), next_check_at: null });
+    vi.mocked(claimTokenPolicy).mockResolvedValue({ state: 'active', waiting_for_display: false, lease_expires_at: null, notice: null, server_now: new Date().toISOString(), next_check_at: null });
     localStorage.clear();
     productNameContextValue.productName = 'Flocks';
-    productNameContextValue.proProductName = 'Flocks Pro';
     productNameContextValue.configuredDisplayName = null;
 
     checkUpdate.mockResolvedValue({
@@ -311,6 +509,9 @@ describe('Layout onboarding entry', () => {
         model_id: 'minimax-m2.7',
       },
     });
+    onboardingAPI.getStatus.mockResolvedValue({
+      data: makeOnboardingStatus(),
+    });
 
     catalogAPI.list.mockResolvedValue({
       data: {
@@ -334,13 +535,6 @@ describe('Layout onboarding entry', () => {
     providerAPI.getServiceCredentials.mockResolvedValue({
       data: { has_credential: false },
     });
-    flocksproUsersApi.hasCapability.mockResolvedValue(false);
-    flocksproUsersApi.getLicenseStatus.mockRejectedValue(new Error('Flocks Pro unavailable'));
-    consoleUpgradeApi.getProPackageStatus.mockResolvedValue({
-      installed: false,
-      installed_version: null,
-      flockspro_component_version: null,
-    });
 
     mcpAPI.getCredentials.mockResolvedValue({
       data: { has_credential: false },
@@ -353,6 +547,102 @@ describe('Layout onboarding entry', () => {
     sessionApi.create.mockResolvedValue({ id: 'session-1' });
   });
 
+  it.each(['gotIt', 'close'])('shows the policy before a pending update, then resumes the update on %s', async (action) => {
+    const policyStatus = {
+      state: 'active' as const, waiting_for_display: false, lease_expires_at: new Date(Date.now() + 15000).toISOString(),
+      notice: { id: 'policy', occurrence_id: 'a'.repeat(64), expires_at: new Date(Date.now() + 86400000).toISOString() },
+      server_now: new Date().toISOString(),
+      next_check_at: null,
+    };
+    const pending = deferred<typeof policyStatus>();
+    vi.mocked(getTokenPolicyStatus).mockReturnValueOnce(pending.promise);
+    vi.mocked(claimTokenPolicy).mockResolvedValueOnce(policyStatus);
+    checkUpdate.mockResolvedValue({ has_update: true, current_version: '0.2.0', latest_version: '0.3.0', error: null });
+    renderHomeWithLayout();
+    await waitFor(() => expect(checkUpdate).toHaveBeenCalled());
+    expect(screen.queryByRole('dialog', { name: 'update-modal' })).not.toBeInTheDocument();
+    await act(async () => pending.resolve(policyStatus));
+    expect(await screen.findByRole('dialog', { name: 'tokenPolicyTitle' })).toBeInTheDocument();
+    expect(screen.queryByRole('dialog', { name: 'update-modal' })).not.toBeInTheDocument();
+    await userEvent.setup().click(screen.getByRole('button', { name: action }));
+    expect(await screen.findByRole('dialog', { name: 'update-modal' })).toBeInTheDocument();
+    expect(ackNotification).not.toHaveBeenCalled();
+    expect(localStorage.getItem(UPDATE_DISMISSED_KEY)).toBeNull();
+  });
+
+  it('does not replace an already presented upgrade when a policy becomes due', async () => {
+    checkUpdate.mockResolvedValue({ has_update: true, current_version: '0.2.0', latest_version: '0.3.0', error: null });
+    renderHomeWithLayout();
+    const update = await screen.findByRole('dialog', { name: 'update-modal' });
+    await flushEffects();
+    const policyStatus = {
+      state: 'active' as const, waiting_for_display: false, lease_expires_at: new Date(Date.now() + 15000).toISOString(),
+      notice: { id: 'policy', occurrence_id: 'a'.repeat(64), expires_at: new Date(Date.now() + 86400000).toISOString() },
+      server_now: new Date().toISOString(), next_check_at: null,
+    };
+    vi.mocked(getTokenPolicyStatus).mockResolvedValue(policyStatus);
+    vi.mocked(claimTokenPolicy).mockResolvedValue(policyStatus);
+    fireEvent.focus(window);
+    await flushEffects();
+    expect(claimTokenPolicy).not.toHaveBeenCalled();
+    expect(screen.getByRole('dialog', { name: 'update-modal' })).toBe(update);
+    const props = updateModalMock.mock.calls.at(-1)![0] as unknown as { onClose: () => void };
+    act(() => props.onClose());
+    expect(await screen.findByRole('dialog', { name: 'tokenPolicyTitle' })).toBeInTheDocument();
+  });
+
+  it('keeps background upgrades pending and shows policy first on return', async () => {
+    const visibility = vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('hidden');
+    const policyStatus = {
+      state: 'active' as const, waiting_for_display: false, lease_expires_at: new Date(Date.now() + 15000).toISOString(),
+      notice: { id: 'policy', occurrence_id: 'a'.repeat(64), expires_at: new Date(Date.now() + 86400000).toISOString() },
+      server_now: new Date().toISOString(), next_check_at: null,
+    };
+    vi.mocked(getTokenPolicyStatus).mockResolvedValue(policyStatus);
+    vi.mocked(claimTokenPolicy).mockResolvedValue(policyStatus);
+    checkUpdate.mockResolvedValue({ has_update: true, current_version: '0.2.0', latest_version: '0.3.0', error: null });
+    try {
+      renderHomeWithLayout();
+      await waitFor(() => expect(checkUpdate).toHaveBeenCalled());
+      expect(screen.queryByRole('dialog', { name: 'update-modal' })).not.toBeInTheDocument();
+      expect(getTokenPolicyStatus).not.toHaveBeenCalled();
+      visibility.mockReturnValue('visible');
+      fireEvent(document, new Event('visibilitychange'));
+      expect(await screen.findByRole('dialog', { name: 'tokenPolicyTitle' })).toBeInTheDocument();
+      expect(screen.queryByRole('dialog', { name: 'update-modal' })).not.toBeInTheDocument();
+      await userEvent.setup().click(screen.getByRole('button', { name: 'gotIt' }));
+      expect(await screen.findByRole('dialog', { name: 'update-modal' })).toBeInTheDocument();
+    } finally {
+      visibility.mockRestore();
+    }
+  });
+
+  it('waits for an abandoned reservation to expire before allowing an upgrade', async () => {
+    const policyStatus = {
+      state: 'active' as const, waiting_for_display: false, lease_expires_at: new Date(Date.now() + 15000).toISOString(),
+      notice: { id: 'policy', occurrence_id: 'a'.repeat(64), expires_at: new Date(Date.now() + 86400000).toISOString() },
+      server_now: new Date().toISOString(), next_check_at: null,
+    };
+    vi.mocked(getTokenPolicyStatus).mockResolvedValueOnce({
+      ...policyStatus, notice: null, lease_expires_at: null, waiting_for_display: true,
+      next_check_at: new Date(Date.now() + 600).toISOString(),
+    }).mockResolvedValue(policyStatus);
+    vi.mocked(claimTokenPolicy).mockResolvedValue(policyStatus);
+    checkUpdate.mockResolvedValue({ has_update: true, current_version: '0.2.0', latest_version: '0.3.0', error: null });
+    renderHomeWithLayout();
+    await waitFor(() => expect(checkUpdate).toHaveBeenCalled());
+    expect(screen.queryByRole('dialog', { name: 'update-modal' })).not.toBeInTheDocument();
+    expect(await screen.findByRole('dialog', { name: 'tokenPolicyTitle' })).toBeInTheDocument();
+    expect(screen.queryByRole('dialog', { name: 'update-modal' })).not.toBeInTheDocument();
+  });
+
+  it('still displays an upgrade when the policy status request fails', async () => {
+    vi.mocked(getTokenPolicyStatus).mockRejectedValue(new Error('timeout'));
+    checkUpdate.mockResolvedValue({ has_update: true, current_version: '0.2.0', latest_version: '0.3.0', error: null });
+    renderHomeWithLayout();
+    expect(await screen.findByRole('dialog', { name: 'update-modal' })).toBeInTheDocument();
+  });
+
   it('opens onboarding from the home entry and shows configured details for an existing default model', async () => {
     const user = userEvent.setup();
     localStorage.setItem('flocks_onboarding_dismissed', 'true');
@@ -363,12 +653,46 @@ describe('Layout onboarding entry', () => {
 
     await screen.findByText('onboarding.bootstrap.primaryConfiguredSummary');
 
-    await user.click(screen.getByText('onboarding.bootstrap.primaryTitle'));
-
     expect(screen.getByText('onboarding.bootstrap.configuredDetailsTitle')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'onboarding.bootstrap.editPrimary' })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'onboarding.bootstrap.savePrimary' })).not.toBeInTheDocument();
-    expect(screen.queryByPlaceholderText('onboarding.bootstrap.tbPlaceholder')).not.toBeInTheDocument();
+    expect(screen.queryByPlaceholderText('onboarding.bootstrap.modelKeyPlaceholder')).not.toBeInTheDocument();
+  });
+
+  it('allows member users to open onboarding from the home entry', async () => {
+    const user = userEvent.setup();
+    localStorage.setItem('flocks_onboarding_dismissed', 'true');
+    useAuth.mockReturnValue({
+      user: {
+        id: 'user-2',
+        username: 'member',
+        role: 'member',
+        status: 'active',
+        must_reset_password: false,
+      },
+      logout: vi.fn(),
+    });
+
+    renderHomeWithLayout();
+    await user.click(screen.getByRole('button', { name: 'getStarted' }));
+
+    expect(await screen.findByText('onboarding.bootstrap.modelPageTitle')).toBeInTheDocument();
+  });
+
+  it('auto-opens onboarding from backend status even when the old dismissed flag exists', async () => {
+    localStorage.setItem('flocks_onboarding_dismissed', 'true');
+    onboardingAPI.getStatus.mockResolvedValue({
+      data: makeOnboardingStatus({
+        completed: false,
+        has_default_model: false,
+        default_model: null,
+      }),
+    });
+
+    renderHomeWithLayout();
+
+    expect(await screen.findByText('onboarding.bootstrap.modelPageTitle')).toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: 'onboarding.bootstrap.savePrimary' })).toBeInTheDocument();
   });
 
   it('keeps standard pages out of a flex column content wrapper', async () => {
@@ -382,6 +706,49 @@ describe('Layout onboarding entry', () => {
     expect(contentWrapper).not.toBeNull();
     expect(contentWrapper).not.toHaveClass('flex');
     expect(contentWrapper).not.toHaveClass('flex-col');
+  });
+
+  it('keeps the mobile menu button above the partition top bar', async () => {
+    // The top bar is opaque and sits above page toolbars (z-[35]); the fixed
+    // hamburger that opens the drawer on narrow screens lives in the same
+    // stacking context and must stay clickable above it.
+    localStorage.setItem('flocks_onboarding_dismissed', 'true');
+    const { container } = renderHomeWithLayout();
+    await flushEffects();
+
+    const level = (el: Element | null) => Number((el?.className.toString().match(/\bz-\[(\d+)\]/) || [])[1]);
+    const hamburger = container.querySelector('[data-mobile-menu-button]');
+    const topBar = container.querySelector('[data-partition-top-bar]');
+    expect(hamburger).not.toBeNull();
+    expect(topBar).not.toBeNull();
+    expect(level(hamburger)).toBeGreaterThan(level(topBar));
+    expect(level(hamburger)).toBeLessThan(40);
+  });
+
+  // The system log section is a fixed-height viewer (its <pre> scrolls
+  // internally and auto-scroll relies on that), so the keep-alive pane gives
+  // it a bounded flex box; the long-form sections keep the min-h-full wrapper.
+  it('gives the system log section a bounded flex box instead of the min-h-full wrapper', async () => {
+    localStorage.setItem('flocks_onboarding_dismissed', 'true');
+    renderLayoutAt('/settings/system-logs');
+
+    const wrapper = (await screen.findByText('system logs page')).parentElement as HTMLElement;
+    expect(wrapper.className).toContain('flex-1');
+    expect(wrapper.className).toContain('min-h-0');
+    expect(wrapper.className).not.toContain('min-h-full');
+    expect(wrapper.parentElement?.className).toContain('flex-col');
+  });
+
+  it('keeps the min-h-full wrapper for long-form sections', async () => {
+    localStorage.setItem('flocks_onboarding_dismissed', 'true');
+    renderLayoutAt('/settings/account');
+
+    const wrapper = (await screen.findByText('account page')).parentElement as HTMLElement;
+    expect(wrapper.className).toContain('min-h-full');
+    expect(wrapper.className).not.toContain('min-h-0');
+    // The wrapper sits in a column that scrolls; without shrink-0 the column
+    // squeezes it to the viewport height and its content overflows the box.
+    expect(wrapper.className).toContain('shrink-0');
   });
 
   it('polls update checks hourly', async () => {
@@ -404,174 +771,6 @@ describe('Layout onboarding entry', () => {
       await vi.advanceTimersByTimeAsync(1);
     });
     expect(checkUpdate).toHaveBeenCalledTimes(2);
-  });
-
-  it('checks Flocks Pro bundle updates when Flocks Pro is active', async () => {
-    localStorage.setItem('flocks_onboarding_dismissed', 'true');
-    checkUpdate.mockResolvedValue({
-      has_update: true,
-      latest_version: '2026.6.22',
-      current_version: '2026.6.21',
-      current_bundle_version: '2026.6.21',
-      latest_bundle_version: '2026.6.22',
-      current_core_version: '2026.6.21',
-      latest_core_version: '2026.6.21',
-      current_pro_component_version: '2026.6.20',
-      latest_pro_component_version: '2026.6.22',
-      error: null,
-    });
-    flocksproUsersApi.getLicenseStatus.mockResolvedValue({
-      pro_enabled: true,
-      active: true,
-      status: 'active',
-      license_status: 'active',
-    });
-    consoleUpgradeApi.getProPackageStatus.mockResolvedValue({
-      installed: true,
-      installed_version: '2026.05.13-3',
-      flockspro_component_version: '2026.05.13-3',
-    });
-
-    renderHomeWithLayout();
-
-    await waitFor(() => expect(checkUpdate).toHaveBeenCalledWith('zh-CN', 'flockspro'));
-    expect(await screen.findByRole('button', { name: 'hasNewVersion v2026.6.22' })).toBeInTheDocument();
-  });
-
-  it('shows the Pro update modal when only the Pro component changed after dismissal', async () => {
-    localStorage.setItem('flocks_onboarding_dismissed', 'true');
-    localStorage.setItem(UPDATE_DISMISSED_KEY, 'flockspro:v2026.6.18:v2026.6.18:v2026.6.1');
-    checkUpdate.mockResolvedValue({
-      has_update: true,
-      latest_version: 'v2026.6.18',
-      current_version: 'v2026.6.18',
-      current_bundle_version: 'v2026.6.18',
-      latest_bundle_version: 'v2026.6.18',
-      current_core_version: 'v2026.6.18',
-      latest_core_version: 'v2026.6.18',
-      current_pro_component_version: 'v2026.6.1',
-      latest_pro_component_version: 'v2026.6.2',
-      edition: 'flockspro',
-      error: null,
-    });
-    flocksproUsersApi.getLicenseStatus.mockResolvedValue({
-      pro_enabled: true,
-      active: true,
-      status: 'active',
-      license_status: 'active',
-    });
-    consoleUpgradeApi.getProPackageStatus.mockResolvedValue({
-      installed: true,
-      runtime_importable: true,
-      installed_version: 'v2026.6.18',
-      flockspro_component_version: 'v2026.6.1',
-    });
-
-    renderHomeWithLayout();
-
-    await waitFor(() => expect(checkUpdate).toHaveBeenCalledWith('zh-CN', 'flockspro'));
-    await waitFor(() => expect(updateModalMock).toHaveBeenCalled());
-  });
-
-  it('shows configured product branding and Pro version for member users', async () => {
-    localStorage.setItem('flocks_onboarding_dismissed', 'true');
-    useAuth.mockReturnValue({
-      user: {
-        id: 'user-2',
-        username: 'member',
-        role: 'member',
-        status: 'active',
-        must_reset_password: false,
-      },
-      logout: vi.fn(),
-    });
-    flocksproUsersApi.getLicenseStatus.mockResolvedValue({
-      pro_enabled: true,
-      active: true,
-      status: 'active',
-      license_status: 'active',
-    });
-    consoleUpgradeApi.getProPackageStatus.mockResolvedValue({
-      installed: true,
-      installed_version: '2026.6.21',
-      flockspro_component_version: '2026.6.20',
-    });
-
-    const { container } = renderHomeWithLayout();
-
-    expect(await screen.findByText('admin.roleMember')).toBeInTheDocument();
-    expect(await screen.findByText('v2026.6.21')).toBeInTheDocument();
-    expect(screen.queryByRole('link', { name: 'Flocks Pro' })).not.toBeInTheDocument();
-    expect(checkUpdate).not.toHaveBeenCalled();
-    await waitFor(() => {
-      expect(getActiveNotifications).toHaveBeenCalledWith('zh-CN');
-    });
-
-    const sidebarShell = container.querySelector('aside > div');
-    const logoRow = sidebarShell?.firstElementChild as HTMLElement | null;
-    const accountRow = sidebarShell?.children.item(2) as HTMLElement | null;
-    expect(logoRow).not.toBeNull();
-    expect(accountRow).not.toBeNull();
-    expect(within(logoRow!).getByText('Flocks')).toBeInTheDocument();
-    expect(within(logoRow!).queryByText('v2026.6.21')).not.toBeInTheDocument();
-    expect(within(accountRow!).getByText('v2026.6.21')).toBeInTheDocument();
-  });
-
-  it('keeps Pro account actions and version placement aligned with the standard layout', async () => {
-    const user = userEvent.setup();
-    localStorage.setItem('flocks_onboarding_dismissed', 'true');
-    checkUpdate.mockResolvedValue({
-      has_update: false,
-      latest_version: null,
-      current_version: '2026.6.20',
-      current_bundle_version: '2026.6.22',
-      latest_bundle_version: null,
-      current_core_version: '2026.6.20',
-      latest_core_version: '2026.6.20',
-      current_pro_component_version: '2026.6.22',
-      latest_pro_component_version: '2026.6.22',
-      edition: 'flockspro',
-      error: null,
-    });
-    flocksproUsersApi.getLicenseStatus.mockResolvedValue({
-      pro_enabled: true,
-      active: true,
-      status: 'active',
-      license_status: 'active',
-    });
-    consoleUpgradeApi.getProPackageStatus.mockResolvedValue({
-      installed: true,
-      installed_version: '2026.6.21',
-      flockspro_component_version: '2026.6.21',
-    });
-
-    const { container } = renderHomeWithLayout();
-
-    expect(await screen.findByText('v2026.6.22')).toBeInTheDocument();
-
-    const sidebarShell = container.querySelector('aside > div');
-    const logoRow = sidebarShell?.firstElementChild as HTMLElement | null;
-    const accountRow = sidebarShell?.children.item(2) as HTMLElement | null;
-    expect(logoRow).not.toBeNull();
-    expect(accountRow).not.toBeNull();
-    expect(within(logoRow!).getByText('Flocks')).toBeInTheDocument();
-    expect(within(logoRow!).queryByText('v2026.6.22')).not.toBeInTheDocument();
-    expect(within(accountRow!).getByText('v2026.6.22')).toBeInTheDocument();
-
-    await user.click(screen.getByRole('button', { name: 'admin settings' }));
-
-    expect(screen.getByRole('link', { name: 'Flocks Pro' })).toHaveAttribute('href', '/settings/flockspro');
-    expect(screen.getByRole('button', { name: 'checkUpdate' })).toBeInTheDocument();
-    expect(screen.getByRole('link', { name: 'settings' })).toHaveAttribute('href', '/settings/preferences');
-
-    await user.click(screen.getByRole('button', { name: 'checkUpdate' }));
-
-    expect(screen.getByRole('dialog', { name: 'update-modal' })).toBeInTheDocument();
-    expect(updateModalMock).toHaveBeenLastCalledWith(
-      expect.objectContaining({
-        edition: 'flockspro',
-      }),
-    );
   });
 
   it('keeps new version reminder on the product mark while showing current version in the account area', async () => {
@@ -614,7 +813,6 @@ describe('Layout onboarding entry', () => {
     const customName = '超长的威胁研判自动化工作台名称用于验证左侧菜单栏不会溢出';
     localStorage.setItem('flocks_onboarding_dismissed', 'true');
     productNameContextValue.productName = customName;
-    productNameContextValue.proProductName = customName;
     productNameContextValue.configuredDisplayName = customName;
     checkUpdate.mockResolvedValue({
       has_update: true,
@@ -686,8 +884,17 @@ describe('Layout onboarding entry', () => {
 
     await user.click(screen.getByRole('button', { name: 'admin settings' }));
 
-    expect(screen.getByRole('link', { name: 'Flocks Pro' })).toHaveAttribute('href', '/settings/flockspro');
-    expect(screen.getByRole('link', { name: 'settings' })).toHaveAttribute('href', '/settings/preferences');
+    // The Pro upgrade entry is registered by the private build through @ext/registry;
+    // a stock build has no extension entries in the account menu.
+    expect(screen.queryAllByRole('link').filter((link) => link.closest('[data-account-menu]'))).toHaveLength(0);
+    const updateEntry = screen.getByRole('button', { name: 'checkUpdate' });
+    // 系统设置是顶栏分区，账号菜单里不再重复给一个入口。
+    expect(screen.queryByRole('link', { name: 'settings' })).not.toBeInTheDocument();
+    // D02: 检查更新与退出登录都留在左下角，检查更新在前。
+    const logoutEntry = screen.getByRole('button', { name: 'logout' });
+    expect(updateEntry.compareDocumentPosition(logoutEntry) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    // D02: the usage portal moved into the system settings menu.
+    expect(screen.queryByRole('link', { name: 'flocksLlmUsageQuota' })).not.toBeInTheDocument();
 
     await user.click(screen.getByRole('button', { name: 'logout' }));
     expect(logout).toHaveBeenCalledTimes(1);
@@ -704,7 +911,9 @@ describe('Layout onboarding entry', () => {
     await user.click(screen.getByRole('button', { name: 'admin settings' }));
     await user.click(screen.getByRole('button', { name: 'checkUpdate' }));
 
-    expect(screen.getByRole('dialog', { name: 'update-modal' })).toBeInTheDocument();
+    // The dialog is a lazily loaded chunk, so wait for it rather than asserting
+    // on the render pass that started the load.
+    expect(await screen.findByRole('dialog', { name: 'update-modal' })).toBeInTheDocument();
     expect(updateModalMock).toHaveBeenLastCalledWith(
       expect.objectContaining({
         forceInitialCheck: true,
@@ -755,7 +964,7 @@ describe('Layout onboarding entry', () => {
     await user.click(screen.getByRole('button', { name: 'admin settings' }));
 
     expect(container.querySelector('aside > div')).toHaveClass('overflow-visible');
-    expect(screen.getByRole('link', { name: 'settings' })).toHaveAttribute('href', '/settings/preferences');
+    expect(screen.queryByRole('link', { name: 'settings' })).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'logout' })).toBeInTheDocument();
   });
 
@@ -955,6 +1164,7 @@ describe('Layout onboarding entry', () => {
 describe('Layout WebUI contract pages navigation', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    useSceneSuiteUpdates.mockReturnValue({ hasUnseenSuites: false });
     localStorage.clear();
     checkUpdate.mockResolvedValue({
       has_update: false,
@@ -986,79 +1196,277 @@ describe('Layout WebUI contract pages navigation', () => {
       loading: false,
       error: null,
     });
-    flocksproUsersApi.hasCapability.mockResolvedValue(false);
-    flocksproUsersApi.getLicenseStatus.mockResolvedValue({ pro_enabled: false });
-    consoleUpgradeApi.getProPackageStatus.mockResolvedValue({ pro_enabled: false });
+    onboardingAPI.getStatus.mockResolvedValue({ data: makeOnboardingStatus() });
+    useWebUIContractPages.mockReturnValue({
+      pages: [defaultCustomPage],
+      workspaces: [],
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
   });
 
-  it('renders custom WebUI contract page links under the home section', async () => {
+  it('shows the SOC workspace tab with the scene sections and opens system settings from the top-right menu', async () => {
+    const user = userEvent.setup();
+    localStorage.setItem('flocks_onboarding_dismissed', 'true');
+    mockSocWorkspaceNav();
+
+    const { container } = renderHomeWithLayout();
+
+    await screen.findByRole('button', { name: 'aiWorkbench' });
+    // One fixed SOC workspace tab, never one tab per scene.
+    expect(partitionNames()).toEqual(['partitionAgent', 'partitionScene']);
+    expect(activePartitionName()).toBe('partitionAgent');
+    expect(sectionHeadings(container)).toEqual(['aiWorkbench', 'agentHub']);
+    expect(screen.getByRole('link', { name: 'flocksHome' })).toHaveAttribute('href', '/');
+    expect(screen.getByRole('link', { name: 'sessions' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '告警运营' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: 'settingsPreferences' })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole('tab', { name: 'partitionScene' }));
+    // The workspace sections are the first level, their pages the second.
+    await waitFor(() => expect(sceneMenuLinks()).toEqual(['告警态势', 'SOC 总览', '告警调查']));
+    expect(sectionHeadings(container)).toEqual(['态势', '告警运营']);
+    expect(screen.getByRole('button', { name: '态势' })).toHaveAttribute('aria-expanded', 'true');
+    expect(screen.getByRole('button', { name: '告警运营' })).toHaveAttribute('aria-expanded', 'true');
+    expect(within(navGroup('告警运营')).getAllByRole('link').map((link) => link.textContent)).toEqual(['SOC 总览', '告警调查']);
+    expect(activePartitionName()).toBe('partitionScene');
+    expect(screen.queryByRole('link', { name: 'sessions' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: 'deviceIntegration' })).not.toBeInTheDocument();
+    // The suite manager is a top-bar entry, not a sidebar menu item.
+    expect(screen.getByRole('link', { name: 'sceneSuiteManager' })).toHaveAttribute('href', '/scenes/suites');
+    await waitFor(() => expect(activeProbe()).toHaveTextContent('/contracts/webui/workspaces/soc_ui/soc-dashboard'));
+
+    await user.click(screen.getByRole('button', { name: 'partitionSettings' }));
+    const settingsMenu = screen.getByRole('menu', { name: 'partitionSettings' });
+    expect(within(settingsMenu).getByRole('menuitem', { name: 'flocksLlmUsageQuota' }))
+      .toHaveAttribute('href', 'https://portal.agentflocks.com');
+    expect(within(settingsMenu).getByRole('menuitem', { name: 'accountManagement' })).toHaveAttribute('href', '/settings/account');
+    await user.click(within(settingsMenu).getByRole('menuitem', { name: 'settingsPreferences' }));
+    await waitFor(() => expect(sectionHeadings(container)).toEqual([
+      'settingsGroupPreferences',
+      'settingsGroupData',
+      'settingsGroupSystem',
+    ]));
+    expect(screen.getByRole('link', { name: 'settingsPreferences' })).toHaveAttribute('href', '/settings/preferences');
+    expect(screen.getByRole('link', { name: 'accountManagement' })).toHaveAttribute('href', '/settings/account');
+    expect(screen.queryByRole('link', { name: '告警调查' })).not.toBeInTheDocument();
+    await waitFor(() => expect(activeProbe()).toHaveTextContent('/settings/preferences'));
+    expect(screen.queryByRole('menu')).not.toBeInTheDocument();
+    expect(activePartitionName()).toBe('');
+  });
+
+  it('returns each partition to the page it was left on', async () => {
+    const user = userEvent.setup();
+    localStorage.setItem('flocks_onboarding_dismissed', 'true');
+    mockSocWorkspaceNav();
+
+    renderLayoutAt('/sessions');
+    await screen.findByRole('button', { name: 'aiWorkbench' });
+
+    await user.click(screen.getByRole('tab', { name: 'partitionScene' }));
+    await waitFor(() => expect(activeProbe()).toHaveTextContent('/contracts/webui/workspaces/soc_ui/soc-dashboard'));
+
+    await user.click(screen.getByRole('link', { name: '告警调查' }));
+    await waitFor(() => expect(activeProbe()).toHaveTextContent('/contracts/webui/workspaces/soc_ui/soc-alerts'));
+
+    await user.click(screen.getByRole('tab', { name: 'partitionAgent' }));
+    await waitFor(() => expect(activeProbe()).toHaveTextContent('/sessions'));
+    expect(activePartitionName()).toBe('partitionAgent');
+
+    await user.click(screen.getByRole('tab', { name: 'partitionScene' }));
+    await waitFor(() => expect(activeProbe()).toHaveTextContent('/contracts/webui/workspaces/soc_ui/soc-alerts'));
+    expect(JSON.parse(localStorage.getItem('flocks_layout_partition_paths') ?? '{}')).toMatchObject({
+      agent: '/sessions',
+      scene: '/contracts/webui/workspaces/soc_ui/soc-alerts',
+    });
+  });
+
+  it('follows the route into the partition that owns it', async () => {
+    const user = userEvent.setup();
+    localStorage.setItem('flocks_onboarding_dismissed', 'true');
+    mockSocWorkspaceNav();
+
+    renderLayoutAt('/sessions');
+    await screen.findByRole('button', { name: 'aiWorkbench' });
+    expect(activePartitionName()).toBe('partitionAgent');
+
+    await user.click(screen.getByRole('link', { name: 'go-soc-alerts' }));
+    await waitFor(() => expect(activePartitionName()).toBe('partitionScene'));
+    expect(screen.getByRole('link', { name: '告警调查' })).toHaveClass('bg-white');
+
+    await user.click(screen.getByRole('link', { name: 'go-sessions' }));
+    await waitFor(() => expect(activePartitionName()).toBe('partitionAgent'));
+    expect(screen.getByRole('button', { name: 'aiWorkbench' })).toHaveAttribute('aria-expanded', 'true');
+  });
+
+  it('follows browser back and forward when selecting the active scene and sidebar', async () => {
+    const user = userEvent.setup();
+    mockSocWorkspaceNav();
+    renderLayoutAt('/sessions');
+    await user.click(screen.getByRole('link', { name: 'go-soc-alerts' }));
+    expect(activePartitionName()).toBe('partitionScene');
+    await user.click(screen.getByRole('button', { name: 'go-back' }));
+    await waitFor(() => expect(activeProbe().textContent).toBe('/sessions'));
+    expect(activePartitionName()).toBe('partitionAgent');
+    expect(screen.queryByRole('link', { name: '告警调查' })).not.toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'go-forward' }));
+    await waitFor(() => expect(activeProbe().textContent).toBe('/contracts/webui/workspaces/soc_ui/soc-alerts'));
+    expect(activePartitionName()).toBe('partitionScene');
+    expect(screen.getByRole('link', { name: '告警调查' })).toHaveClass('bg-white');
+  });
+
+  it('keeps privileged settings out of the member top-right menu', async () => {
+    const user = userEvent.setup();
+    useAuth.mockReturnValue({ user: { id: 'member-1', username: 'member', role: 'member', status: 'active' }, logout: vi.fn() });
+    renderLayoutAt('/sessions');
+    await user.click(screen.getByRole('button', { name: 'partitionSettings' }));
+    const menu = screen.getByRole('menu');
+    expect(within(menu).getByRole('menuitem', { name: 'accountManagement' })).toBeInTheDocument();
+    expect(within(menu).queryByRole('menuitem', { name: 'securityConfig' })).not.toBeInTheDocument();
+    expect(within(menu).queryByRole('menuitem', { name: 'auditLogs' })).not.toBeInTheDocument();
+    // Extension-registered admin sections (a private build's upgrade entry) never reach a member's menu.
+    expect(within(menu).getAllByRole('menuitem').map((item) => item.textContent)).not.toContain('securityConfig');
+  });
+
+  it('keeps the suite manager reachable when no scene workspace is installed', async () => {
+    const user = userEvent.setup();
+    localStorage.setItem('flocks_onboarding_dismissed', 'true');
+    useWebUIContractPages.mockReturnValue({
+      pages: [],
+      workspaces: [],
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
     renderHomeWithLayout();
+    await screen.findByRole('button', { name: 'aiWorkbench' });
+
+    expect(partitionNames()).toEqual(['partitionAgent']);
+    expect(await screen.findByRole('link', { name: 'sceneSuiteManager' }))
+      .toHaveAttribute('href', '/scenes/suites');
+    await user.click(screen.getByRole('link', { name: 'sceneSuiteManager' }));
+    await waitFor(() => expect(activeProbe()).toHaveTextContent('/scenes/suites'));
+    expect(activePartitionName()).toBe('');
+    expect(screen.queryByRole('button', { name: 'SOC 工作区' })).not.toBeInTheDocument();
+    // Agent and settings stay usable while no scene workspace exists.
+    await user.click(screen.getByRole('tab', { name: 'partitionAgent' }));
+    expect(await screen.findByRole('link', { name: 'sessions' })).toBeInTheDocument();
+  });
+
+  it('renders custom WebUI contract page links in the scene partition', async () => {
+    const user = userEvent.setup();
+    localStorage.setItem('flocks_onboarding_dismissed', 'true');
+    renderHomeWithLayout();
+
+    await screen.findByRole('button', { name: 'aiWorkbench' });
+    expect(screen.queryByRole('link', { name: '自定义仪表盘' })).not.toBeInTheDocument();
+
+    // Custom pages alone are enough for the SOC workspace tab to exist.
+    await user.click(screen.getByRole('tab', { name: 'partitionScene' }));
     expect(await screen.findByRole('link', { name: '自定义仪表盘' })).toHaveAttribute(
       'href',
       '/contracts/webui/dash-1',
     );
+    expect(screen.getByRole('button', { name: 'customPages' })).toHaveAttribute('aria-expanded', 'true');
+    expect(activePartitionName()).toBe('partitionScene');
+    await user.click(screen.getByRole('link', { name: 'sceneSuiteManager' }));
+    await waitFor(() => expect(activeProbe()).toHaveTextContent('/scenes/suites'));
+    expect(activePartitionName()).toBe('');
   });
 
-  it('keeps sidebar workspace groups expanded by default and allows collapsing each group', async () => {
+  it('shows the SOC workspace tab after install, leaves an uninstalled active scene safely, and uses fresh pages after reinstall', async () => {
     const user = userEvent.setup();
-    localStorage.setItem('flocks_onboarding_dismissed', 'true');
+    const emptyNav = { pages: [], workspaces: [], loading: false, error: null, refetch: vi.fn() };
+    useWebUIContractPages.mockReturnValue(emptyNav);
+    const view = renderLayoutAt('/sessions');
+    await screen.findByRole('button', { name: 'aiWorkbench' });
+    expect(partitionNames()).toEqual(['partitionAgent']);
 
-    renderHomeWithLayout();
+    const installed = makeSceneWorkspace('code_audit_ui', '代码审计', [
+      { id: 'audit-overview', title: '审计总览' },
+      { id: 'old-findings', title: '旧缺陷清单' },
+    ]);
+    useWebUIContractPages.mockReturnValue({ ...emptyNav, pages: installed.pages, workspaces: [installed] });
+    view.rerender(layoutTree('/sessions'));
+    expect(partitionNames()).toEqual(['partitionAgent', 'partitionScene']);
+    await user.click(screen.getByRole('tab', { name: 'partitionScene' }));
+    // A scene without sections is one group named after the scene.
+    expect(screen.getByRole('button', { name: '代码审计' })).toHaveAttribute('aria-expanded', 'true');
+    await user.click(screen.getByRole('link', { name: '旧缺陷清单' }));
+    expect(activeProbe()).toHaveTextContent('/contracts/webui/workspaces/code_audit_ui/old-findings');
+    expect(activePartitionName()).toBe('partitionScene');
 
-    const aiWorkbenchToggle = await screen.findByRole('button', { name: 'aiWorkbench' });
-    const sceneWorkspacesToggle = screen.getByRole('button', { name: 'sceneWorkspaces' });
-    const agentHubToggle = screen.getByRole('button', { name: 'agentHub' });
+    useWebUIContractPages.mockReturnValue(emptyNav);
+    view.rerender(layoutTree('/sessions'));
+    await waitFor(() => expect(activeProbe()).toHaveTextContent('/scenes/suites'));
+    expect(partitionNames()).toEqual(['partitionAgent']);
+    expect(screen.queryByRole('link', { name: '旧缺陷清单' })).not.toBeInTheDocument();
+    expect(Array.from(document.querySelectorAll('[data-keep-alive-pane]')).some((pane) => pane.textContent?.includes('/old-findings'))).toBe(false);
 
-    expect(aiWorkbenchToggle).toHaveAttribute('aria-expanded', 'true');
-    expect(sceneWorkspacesToggle).toHaveAttribute('aria-expanded', 'true');
-    expect(agentHubToggle).toHaveAttribute('aria-expanded', 'true');
-    expect(screen.getByRole('link', { name: 'sessions' })).toBeInTheDocument();
-    expect(screen.getByRole('link', { name: 'deviceIntegration' })).toBeInTheDocument();
-    expect(screen.getByRole('link', { name: 'agents' })).toBeInTheDocument();
-
-    await user.click(aiWorkbenchToggle);
-    expect(aiWorkbenchToggle).toHaveAttribute('aria-expanded', 'false');
-    expect(localStorage.getItem('flocks_layout_collapsed_nav_sections')).toBe(JSON.stringify(['aiWorkbench']));
-    expect(screen.queryByRole('link', { name: 'sessions' })).not.toBeInTheDocument();
-    expect(screen.getByRole('link', { name: 'deviceIntegration' })).toBeInTheDocument();
-    await user.click(aiWorkbenchToggle);
-    expect(localStorage.getItem('flocks_layout_collapsed_nav_sections')).toBeNull();
-    expect(screen.getByRole('link', { name: 'sessions' })).toBeInTheDocument();
-
-    await user.click(sceneWorkspacesToggle);
-    expect(sceneWorkspacesToggle).toHaveAttribute('aria-expanded', 'false');
-    expect(localStorage.getItem('flocks_layout_collapsed_nav_sections')).toBe(JSON.stringify(['sceneWorkspaces']));
-    expect(screen.queryByRole('link', { name: 'deviceIntegration' })).not.toBeInTheDocument();
-    expect(screen.getByRole('link', { name: 'agents' })).toBeInTheDocument();
-    await user.click(sceneWorkspacesToggle);
-    expect(localStorage.getItem('flocks_layout_collapsed_nav_sections')).toBeNull();
-    expect(screen.getByRole('link', { name: 'deviceIntegration' })).toBeInTheDocument();
-
-    await user.click(agentHubToggle);
-    expect(agentHubToggle).toHaveAttribute('aria-expanded', 'false');
-    expect(localStorage.getItem('flocks_layout_collapsed_nav_sections')).toBe(JSON.stringify(['agentHub']));
-    expect(screen.queryByRole('link', { name: 'agents' })).not.toBeInTheDocument();
-    expect(screen.getByRole('link', { name: 'sessions' })).toBeInTheDocument();
-    await user.click(agentHubToggle);
-    expect(localStorage.getItem('flocks_layout_collapsed_nav_sections')).toBeNull();
-    expect(screen.getByRole('link', { name: 'agents' })).toBeInTheDocument();
+    const reinstalled = makeSceneWorkspace('code_audit_ui', '代码审计', [
+      { id: 'new-overview', title: '新审计总览' },
+    ]);
+    useWebUIContractPages.mockReturnValue({ ...emptyNav, pages: reinstalled.pages, workspaces: [reinstalled] });
+    view.rerender(layoutTree('/sessions'));
+    await user.click(screen.getByRole('tab', { name: 'partitionScene' }));
+    await waitFor(() => expect(activeProbe()).toHaveTextContent('/contracts/webui/workspaces/code_audit_ui/new-overview'));
+    expect(screen.getByRole('link', { name: '新审计总览' })).toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: '旧缺陷清单' })).not.toBeInTheDocument();
+    expect(JSON.parse(localStorage.getItem('flocks_layout_partition_paths') ?? '{}').scene)
+      .toBe('/contracts/webui/workspaces/code_audit_ui/new-overview');
   });
 
-  it('restores collapsed sidebar workspace groups after refresh', async () => {
-    localStorage.setItem('flocks_onboarding_dismissed', 'true');
-    localStorage.setItem('flocks_layout_collapsed_nav_sections', JSON.stringify(['sceneWorkspaces']));
+  it.each(['disabled', 'empty'] as const)('keeps the SOC workspace tab for an installed %s scene and routes it to its management state', async (state) => {
+    const user = userEvent.setup();
+    const workspace = makeSceneWorkspace('code_audit_ui', '代码审计', state === 'empty' ? [] : [
+      { id: 'audit-overview', title: '审计总览' },
+    ]);
+    workspace.enabled = state !== 'disabled';
+    useWebUIContractPages.mockReturnValue({ pages: workspace.pages, workspaces: [workspace], loading: false, error: null, refetch: vi.fn() });
+    const view = renderLayoutAt('/sessions');
+    await screen.findByRole('button', { name: 'aiWorkbench' });
+    expect(partitionNames()).toEqual(['partitionAgent', 'partitionScene']);
+    await user.click(screen.getByRole('tab', { name: 'partitionScene' }));
+    await waitFor(() => expect(activeProbe().textContent).toBe(
+      `/scenes/suites?workspace=code_audit_ui${state === 'empty' ? '&reason=pages-unavailable' : ''}`,
+    ));
+    expect(activePartitionName()).toBe('partitionScene');
+    expect(screen.queryByRole('link', { name: '审计总览' })).not.toBeInTheDocument();
 
-    renderHomeWithLayout();
+    const ready = makeSceneWorkspace('code_audit_ui', '代码审计', [{ id: 'audit-overview', title: '审计总览' }]);
+    useWebUIContractPages.mockReturnValue({ pages: ready.pages, workspaces: [ready], loading: false, error: null, refetch: vi.fn() });
+    view.rerender(layoutTree('/sessions'));
+    await user.click(screen.getByRole('tab', { name: 'partitionScene' }));
+    await waitFor(() => expect(activeProbe()).toHaveTextContent('/contracts/webui/workspaces/code_audit_ui/audit-overview'));
+    expect(activePartitionName()).toBe('partitionScene');
+  });
 
-    expect(await screen.findByRole('button', { name: 'sceneWorkspaces' })).toHaveAttribute('aria-expanded', 'false');
-    expect(screen.queryByRole('link', { name: 'deviceIntegration' })).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'aiWorkbench' })).toHaveAttribute('aria-expanded', 'true');
-    expect(screen.getByRole('link', { name: 'sessions' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'agentHub' })).toHaveAttribute('aria-expanded', 'true');
-    expect(screen.getByRole('link', { name: 'agents' })).toBeInTheDocument();
+  it('waits for navigation loading and redirects a removed workspace only after fresh data arrives', async () => {
+    useWebUIContractPages.mockReturnValue({ pages: [], workspaces: [], loading: true, error: null, refetch: vi.fn() });
+    const view = renderLayoutAt('/contracts/webui/workspaces/removed/page');
+    await flushEffects();
+    expect(activeProbe()).toHaveTextContent('/contracts/webui/workspaces/removed/page');
+    useWebUIContractPages.mockReturnValue({ pages: [], workspaces: [], loading: false, error: null, refetch: vi.fn() });
+    view.rerender(layoutTree('/contracts/webui/workspaces/removed/page'));
+    await waitFor(() => expect(activeProbe()).toHaveTextContent('/scenes/suites'));
+    expect(activePartitionName()).toBe('');
+  });
+
+  it('shows the new-scene badge from the update hook and marks the suite manager as viewed', async () => {
+    const user = userEvent.setup();
+    useSceneSuiteUpdates.mockReturnValue({ hasUnseenSuites: true });
+    renderLayoutAt('/sessions');
+    const manager = screen.getByRole('link', { name: 'sceneSuiteManager' });
+    expect(within(manager).getByText('NEW')).toBeInTheDocument();
+    expect(useSceneSuiteUpdates).toHaveBeenLastCalledWith({ viewingScenes: false, userId: 'user-1' });
+    await user.click(manager);
+    await waitFor(() => expect(useSceneSuiteUpdates).toHaveBeenLastCalledWith({ viewingScenes: true, userId: 'user-1' }));
   });
 
   it('does not render WebUI contract page links until their build is ready', async () => {
+    const user = userEvent.setup();
     useWebUIContractPages.mockReturnValue({
       pages: [
         {
@@ -1090,257 +1498,262 @@ describe('Layout WebUI contract pages navigation', () => {
     });
 
     renderHomeWithLayout();
+    await screen.findByRole('button', { name: 'aiWorkbench' });
+    await user.click(screen.getByRole('tab', { name: 'partitionScene' }));
 
     expect(await screen.findByRole('link', { name: '可用页面' })).toBeInTheDocument();
     expect(screen.queryByRole('link', { name: '失败页面' })).not.toBeInTheDocument();
   });
 
-  it('renders WebUI workspaces and device integration in the scene workspace group', async () => {
+  it.each(['sceneWorkspace', 'aiWorkbench'] as const)('only exposes enabled, ready pages inside a %s workspace', async (placement) => {
     const user = userEvent.setup();
-    const workspacePages = [
-      {
-        id: 'risk-dashboard',
-        title: '态势看板',
-        route: '/contracts/webui/risk-dashboard',
-        icon: 'Activity',
-        order: 30,
-        enabled: true,
-        placement: 'home.after',
-        buildHash: 'ready',
-        buildStatus: 'ready' as const,
-        workspaceId: 'scene_workspace',
-        workspaceTitle: '场景工作区',
-        workspaceRoute: '/contracts/webui/workspaces/scene_workspace',
-      },
-      {
-        id: 'ops-overview',
-        title: '运营总览',
-        route: '/contracts/webui/ops-overview',
-        icon: 'ShieldCheck',
-        order: 10,
-        enabled: true,
-        placement: 'home.after',
-        buildHash: 'ready',
-        buildStatus: 'ready' as const,
-        workspaceId: 'scene_workspace',
-        workspaceTitle: '场景工作区',
-        workspaceRoute: '/contracts/webui/workspaces/scene_workspace',
-      },
-      {
-        id: 'investigation-list',
-        title: '调查列表',
-        route: '/contracts/webui/investigation-list',
-        icon: 'AlertTriangle',
-        order: 20,
-        enabled: true,
-        placement: 'home.after',
-        buildHash: 'ready',
-        buildStatus: 'ready' as const,
-        workspaceId: 'scene_workspace',
-        workspaceTitle: '场景工作区',
-        workspaceRoute: '/contracts/webui/workspaces/scene_workspace',
-      },
-    ];
-    useWebUIContractPages.mockReturnValue({
-      pages: workspacePages,
-      workspaces: [
-        {
-          id: 'scene_workspace',
-          title: '场景工作区',
-          route: '/contracts/webui/workspaces/scene_workspace',
-          icon: 'ShieldCheck',
-          order: 10,
-          enabled: true,
-          placement: 'sceneWorkspace',
-          defaultPageId: 'ops-overview',
-          sections: [
-            {
-              id: 'posture',
-              label: '态势',
-              pageIds: ['risk-dashboard'],
-              defaultPageId: 'risk-dashboard',
-              contentPadding: 'none',
-              themeOverride: 'dark',
-            },
-            {
-              id: 'operations',
-              label: '调查列表',
-              pageIds: ['ops-overview', 'investigation-list'],
-              defaultPageId: 'ops-overview',
-              contentPadding: 'comfortable',
-            },
-          ],
-          pages: workspacePages,
-        },
-      ],
-      loading: false,
-      error: null,
-      refetch: vi.fn(),
-    });
+    const base = makeSceneWorkspace('mixed_ui', '混合工作区', [
+      { id: 'disabled-page', title: '已禁用页面' },
+      { id: 'failed-page', title: '构建失败页面' },
+      { id: 'ready-page', title: '可用工作区页面' },
+    ]);
+    const workspace = {
+      ...base,
+      placement,
+      pages: base.pages.map((page) => ({
+        ...page,
+        enabled: page.id !== 'disabled-page',
+        buildStatus: page.id === 'failed-page' ? 'failed' as const : 'ready' as const,
+      })),
+    };
+    localStorage.setItem('flocks_layout_workspace_page_order:mixed_ui', JSON.stringify(['failed-page', 'disabled-page', 'ready-page']));
+    useWebUIContractPages.mockReturnValue({ pages: workspace.pages, workspaces: [workspace], loading: false, error: null, refetch: vi.fn() });
+    const { container } = renderLayoutAt('/sessions');
+    await screen.findByRole('button', { name: 'aiWorkbench' });
+    if (placement === 'sceneWorkspace') {
+      await user.click(screen.getByRole('tab', { name: 'partitionScene' }));
+      await waitFor(() => expect(activeProbe().textContent).toBe('/contracts/webui/workspaces/mixed_ui/ready-page'));
+    } else {
+      expect(partitionNames()).toEqual(['partitionAgent']);
+    }
+    expect(screen.getByRole('link', { name: '可用工作区页面' })).toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: '已禁用页面' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: '构建失败页面' })).not.toBeInTheDocument();
+    expect(Array.from(container.querySelectorAll('aside nav a'))
+      .filter((link) => link.getAttribute('href')?.startsWith('/contracts/webui/workspaces/mixed_ui/'))
+      .map((link) => link.getAttribute('href')))
+      .toEqual(['/contracts/webui/workspaces/mixed_ui/ready-page']);
+  });
+
+  it('routes a workspace with only unavailable pages to the page-recovery state', async () => {
+    const user = userEvent.setup();
+    const base = makeSceneWorkspace('unavailable_ui', '页面不可用工作区', [
+      { id: 'idle-page', title: '待构建页面' },
+      { id: 'building-page', title: '构建中页面' },
+      { id: 'failed-page', title: '构建失败页面' },
+    ]);
+    const workspace = {
+      ...base,
+      pages: base.pages.map((page) => ({
+        ...page,
+        buildStatus: page.id === 'failed-page' ? 'failed' as const
+          : page.id === 'building-page' ? 'building' as const : 'idle' as const,
+      })),
+    };
+    useWebUIContractPages.mockReturnValue({ pages: workspace.pages, workspaces: [workspace], loading: false, error: null, refetch: vi.fn() });
+    renderLayoutAt('/sessions');
+    await user.click(screen.getByRole('tab', { name: 'partitionScene' }));
+    await waitFor(() => expect(activeProbe().textContent).toBe('/scenes/suites?workspace=unavailable_ui&reason=pages-unavailable'));
+    expect(activePartitionName()).toBe('partitionScene');
+    expect(screen.queryByRole('link', { name: '待构建页面' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: '构建中页面' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: '构建失败页面' })).not.toBeInTheDocument();
+  });
+
+  it('collapses the scene sections independently of the agent accordion', async () => {
+    const user = userEvent.setup();
+    localStorage.setItem('flocks_onboarding_dismissed', 'true');
+    mockSocWorkspaceNav();
+
+    renderHomeWithLayout();
+
+    const aiWorkbenchToggle = await screen.findByRole('button', { name: 'aiWorkbench' });
+    const agentHubToggle = screen.getByRole('button', { name: 'agentHub' });
+    expect(screen.queryByRole('button', { name: 'sceneWorkspaces' })).not.toBeInTheDocument();
+    expect(aiWorkbenchToggle).toHaveAttribute('aria-expanded', 'true');
+    expect(agentHubToggle).toHaveAttribute('aria-expanded', 'true');
+
+    await user.click(agentHubToggle);
+    expect(agentHubToggle).toHaveAttribute('aria-expanded', 'false');
+    expect(localStorage.getItem('flocks_layout_collapsed_nav_sections')).toBe(JSON.stringify(['agentHub']));
+    expect(screen.queryByRole('link', { name: 'agents' })).not.toBeInTheDocument();
+
+    // Both SOC sections open by default; folding one leaves the other alone.
+    await user.click(screen.getByRole('tab', { name: 'partitionScene' }));
+    expect(await screen.findByRole('link', { name: '告警调查' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '态势' })).toHaveAttribute('aria-expanded', 'true');
+    expect(screen.getByRole('button', { name: '告警运营' })).toHaveAttribute('aria-expanded', 'true');
+    expect(sceneMenuLinks()).toEqual(['告警态势', 'SOC 总览', '告警调查']);
+
+    await user.click(screen.getByRole('button', { name: '告警运营' }));
+    expect(screen.getByRole('button', { name: '告警运营' })).toHaveAttribute('aria-expanded', 'false');
+    expect(screen.getByRole('button', { name: '态势' })).toHaveAttribute('aria-expanded', 'true');
+    expect(sceneMenuLinks()).toEqual(['告警态势']);
+    expect(JSON.parse(localStorage.getItem('flocks_layout_collapsed_nav_sections') ?? '[]'))
+      .toEqual(['agentHub', 'workspace:soc_ui:operations']);
+
+    await user.click(screen.getByRole('button', { name: '告警运营' }));
+    expect(sceneMenuLinks()).toEqual(['告警态势', 'SOC 总览', '告警调查']);
+  });
+
+  it('restores collapsed scene sections and the collapsed agent studio after refresh', async () => {
+    localStorage.setItem('flocks_onboarding_dismissed', 'true');
+    localStorage.setItem('flocks_layout_expanded_primary_nav_section', 'workspace:soc_ui');
+    localStorage.setItem('flocks_layout_collapsed_nav_sections', JSON.stringify(['agentHub', 'workspace:soc_ui:posture']));
+    mockSocWorkspaceNav();
+
+    renderLayoutAt('/contracts/webui/workspaces/soc_ui/soc-overview');
+
+    expect(await screen.findByRole('link', { name: '告警调查' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '态势' })).toHaveAttribute('aria-expanded', 'false');
+    expect(screen.queryByRole('link', { name: '告警态势' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '告警运营' })).toHaveAttribute('aria-expanded', 'true');
+    expect(activePartitionName()).toBe('partitionScene');
+  });
+
+  it('renders the SOC sections in the scene partition and keeps device integration in the agent studio', async () => {
+    const user = userEvent.setup();
+    localStorage.setItem('flocks_onboarding_dismissed', 'true');
+    mockSocWorkspaceNav();
 
     const { container } = renderHomeWithLayout();
 
-    const workspaceLink = await screen.findByRole('link', { name: '场景工作区' });
-    expect(workspaceLink).toHaveAttribute(
-      'href',
-      '/contracts/webui/workspaces/scene_workspace',
-    );
-    expect(workspaceLink.querySelectorAll('svg')).toHaveLength(2);
-    expect(screen.queryByRole('link', { name: '调查列表' })).not.toBeInTheDocument();
+    await screen.findByRole('button', { name: 'aiWorkbench' });
+    const agentSection = screen.getByRole('button', { name: 'agentHub' }).closest('div.mb-6') as HTMLElement;
+    expect(Array.from(agentSection.querySelectorAll('a')).map((link) => link.getAttribute('href'))).toEqual([
+      '/agents',
+      '/skills',
+      '/tools',
+      '/devices',
+      '/hub',
+      '/models',
+      '/channels',
+    ]);
+    expect(screen.getByRole('link', { name: 'deviceIntegration' })).toHaveAttribute('href', '/devices');
 
-    const sectionHeadings = Array.from(container.querySelectorAll('h3')).map((element) => element.textContent);
-    expect(sectionHeadings.indexOf('sceneWorkspaces')).toBeGreaterThanOrEqual(0);
-    expect(sectionHeadings.indexOf('sceneWorkspaces')).toBeLessThan(sectionHeadings.indexOf('agentHub'));
-    expect(sectionHeadings).not.toContain('systemCenter');
+    await user.click(screen.getByRole('tab', { name: 'partitionScene' }));
+    await screen.findByRole('link', { name: 'SOC 总览' });
+    // The workspace.json sections (态势 / 告警运营) are the first-level
+    // headings; the scene title is the tab, not a heading of its own.
+    expect(sectionHeadings(container)).toEqual(['态势', '告警运营']);
+    expect(screen.queryByRole('button', { name: 'SOC 工作区' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('navigation', { name: 'workspace.sectionNavigation' })).not.toBeInTheDocument();
+    expect(sceneMenuHrefs()).toEqual([
+      '/contracts/webui/workspaces/soc_ui/soc-dashboard',
+      '/contracts/webui/workspaces/soc_ui/soc-overview',
+      '/contracts/webui/workspaces/soc_ui/soc-alerts',
+    ]);
+    expect(within(navGroup('态势')).getAllByRole('link').map((link) => link.getAttribute('href')))
+      .toEqual(['/contracts/webui/workspaces/soc_ui/soc-dashboard']);
+    // Device integration is not duplicated into the scene partition.
+    expect(screen.queryByRole('link', { name: 'deviceIntegration' })).not.toBeInTheDocument();
+  });
 
-    const sceneSection = Array.from(container.querySelectorAll('h3'))
-      .find((heading) => heading.textContent === 'sceneWorkspaces')
-      ?.parentElement;
-    expect(sceneSection?.querySelector('a[href="/contracts/webui/workspaces/scene_workspace"]')).not.toBeNull();
-    expect(sceneSection?.querySelector('a[href="/devices"]')).not.toBeNull();
+  it('reorders the pages of one SOC section by dragging and keeps the order after refresh', async () => {
+    localStorage.setItem('flocks_onboarding_dismissed', 'true');
+    mockSocWorkspaceNav();
 
-    const agentSection = Array.from(container.querySelectorAll('h3'))
-      .find((heading) => heading.textContent === 'agentHub')
-      ?.parentElement;
-    expect(agentSection?.querySelector('a[href="/devices"]')).toBeNull();
-    expect(agentSection?.querySelector('a[href="/models"]')).not.toBeNull();
-    expect(agentSection?.querySelector('a[href="/channels"]')).not.toBeNull();
+    const first = renderLayoutAt('/contracts/webui/workspaces/soc_ui/soc-overview');
+    await screen.findByRole('link', { name: '告警调查' });
+    // Only 告警运营 has more than one page, so only its pages can be dragged;
+    // the single page of 态势 has no drag handle and stays where it is.
+    expect(navPageOrder(first.container)).toEqual(['soc-overview', 'soc-alerts']);
+    expect(first.container.querySelector('[data-nav-page-id="soc-dashboard"]')).toBeNull();
 
-    await user.click(workspaceLink);
+    const itemFor = (pageId: string) => first.container.querySelector(`[data-nav-page-id="${pageId}"]`) as HTMLElement;
+    fireEvent.dragStart(itemFor('soc-alerts'));
+    fireEvent.dragOver(itemFor('soc-overview'));
+    expect(itemFor('soc-overview').className).toContain('ring-2');
+    fireEvent.drop(itemFor('soc-overview'));
+    fireEvent.dragEnd(itemFor('soc-alerts'));
 
-    const workspaceMenu = screen.getByRole('navigation', { name: 'workspace.sectionNavigation' });
-    expect(workspaceMenu).toBeInTheDocument();
-    expect(workspaceMenu).toHaveClass('w-52');
-    expect(workspaceMenu).toHaveClass('bg-zinc-100');
-    expect(screen.getByRole('link', { name: '态势' })).toHaveAttribute(
-      'href',
-      '/contracts/webui/workspaces/scene_workspace/risk-dashboard',
-    );
-    expect(screen.getByRole('link', { name: '运营总览' })).toHaveAttribute(
-      'href',
-      '/contracts/webui/workspaces/scene_workspace/ops-overview',
-    );
-    expect(screen.getAllByRole('link', { name: '调查列表' }).find((link) => link.getAttribute('href')?.endsWith('/investigation-list'))).toHaveAttribute(
-      'href',
-      '/contracts/webui/workspaces/scene_workspace/investigation-list',
-    );
+    expect(JSON.parse(localStorage.getItem('flocks_layout_nav_item_order:workspace:soc_ui:operations') ?? '[]')).toEqual([
+      'soc-alerts',
+      'soc-overview',
+    ]);
+    expect(navPageOrder(first.container)).toEqual(['soc-alerts', 'soc-overview']);
+    expect(sceneMenuLinks()).toEqual(['告警态势', '告警调查', 'SOC 总览']);
+    expect(itemFor('soc-overview').className).not.toContain('ring-2');
 
-    const workspaceMenuScope = within(workspaceMenu);
-    const collapseButtons = workspaceMenuScope.getAllByTitle('workspace.collapseSidebar');
-    await user.click(collapseButtons[collapseButtons.length - 1]);
-    expect(screen.queryByRole('link', { name: '运营总览' })).not.toBeInTheDocument();
+    first.unmount();
+    const second = renderLayoutAt('/contracts/webui/workspaces/soc_ui/soc-overview');
+    await screen.findByRole('link', { name: '告警调查' });
+    expect(navPageOrder(second.container)).toEqual(['soc-alerts', 'soc-overview']);
+    expect(sceneMenuLinks()).toEqual(['告警态势', '告警调查', 'SOC 总览']);
+  });
 
-    await user.click(workspaceMenuScope.getByTitle('workspace.expandSidebar'));
-    expect(screen.getByRole('link', { name: '运营总览' })).toBeInTheDocument();
+  it('moves a SOC workspace page with Alt+Arrow keys inside its section', async () => {
+    localStorage.setItem('flocks_onboarding_dismissed', 'true');
+    mockSocWorkspaceNav();
 
-    await user.click(workspaceMenuScope.getByRole('button', { name: '调查列表' }));
-    expect(screen.queryByRole('link', { name: '运营总览' })).not.toBeInTheDocument();
+    const { container } = renderLayoutAt('/contracts/webui/workspaces/soc_ui/soc-overview');
+    const alertsLink = await screen.findByRole('link', { name: '告警调查' });
 
-    await user.click(workspaceMenuScope.getByRole('button', { name: '调查列表' }));
-    expect(screen.getByRole('link', { name: '运营总览' })).toBeInTheDocument();
+    fireEvent.keyDown(alertsLink, { key: 'ArrowUp', altKey: true });
+    expect(navPageOrder(container)).toEqual(['soc-alerts', 'soc-overview']);
+    expect(sceneMenuLinks()).toEqual(['告警态势', '告警调查', 'SOC 总览']);
 
-    await user.unhover(workspaceLink);
+    // The top of 告警运营 is the top: 态势 is another section.
+    fireEvent.keyDown(screen.getByRole('link', { name: '告警调查' }), { key: 'ArrowUp', altKey: true });
+    expect(sceneMenuLinks()).toEqual(['告警态势', '告警调查', 'SOC 总览']);
 
-    await waitFor(() => {
-      expect(screen.queryByRole('navigation', { name: 'workspace.sectionNavigation' })).not.toBeInTheDocument();
-    });
+    // Without Alt the arrow keys are left alone and nothing moves.
+    fireEvent.keyDown(screen.getByRole('link', { name: 'SOC 总览' }), { key: 'ArrowUp' });
+    expect(sceneMenuLinks()).toEqual(['告警态势', '告警调查', 'SOC 总览']);
   });
 
   it('starts a SOC-scoped custom page session from the SOC workspace menu', async () => {
     const user = userEvent.setup();
     localStorage.setItem('flocks_onboarding_dismissed', 'true');
     sessionApi.create.mockResolvedValueOnce({ id: 'session-soc-custom-page' });
+    mockSocWorkspaceNav();
 
-    const socPages = [
-      {
-        id: 'soc-dashboard',
-        title: '告警态势',
-        route: '/contracts/webui/soc-dashboard',
-        icon: 'Activity',
-        order: 10,
-        enabled: true,
-        placement: 'home.after',
-        buildHash: 'ready',
-        buildStatus: 'ready' as const,
-        workspaceId: 'soc_ui',
-        workspaceTitle: 'SOC 工作区',
-        workspaceRoute: '/contracts/webui/workspaces/soc_ui',
-      },
-      {
-        id: 'soc-alerts',
-        title: '告警调查',
-        route: '/contracts/webui/soc-alerts',
-        icon: 'AlertTriangle',
-        order: 20,
-        enabled: true,
-        placement: 'home.after',
-        buildHash: 'ready',
-        buildStatus: 'ready' as const,
-        workspaceId: 'soc_ui',
-        workspaceTitle: 'SOC 工作区',
-        workspaceRoute: '/contracts/webui/workspaces/soc_ui',
-      },
-    ];
-    useWebUIContractPages.mockReturnValue({
-      pages: socPages,
-      workspaces: [
-        {
-          id: 'soc_ui',
-          title: 'SOC 工作区',
-          route: '/contracts/webui/workspaces/soc_ui',
-          icon: 'ShieldCheck',
-          order: 10,
-          enabled: true,
-          placement: 'sceneWorkspace',
-          defaultPageId: 'soc-alerts',
-          sections: [
-            {
-              id: 'posture',
-              label: '态势',
-              pageIds: ['soc-dashboard'],
-              defaultPageId: 'soc-dashboard',
-              contentPadding: 'none',
-              themeOverride: 'dark',
-            },
-            {
-              id: 'operations',
-              label: '告警运营',
-              pageIds: ['soc-alerts'],
-              defaultPageId: 'soc-alerts',
-              contentPadding: 'none',
-            },
-          ],
-          pages: socPages,
-        },
-      ],
-      loading: false,
-      error: null,
-      refetch: vi.fn(),
-    });
+    renderLayoutAt('/contracts/webui/workspaces/soc_ui/soc-overview');
 
-    renderHomeWithLayoutAndSessionsRoute();
-
-    await user.click(await screen.findByRole('link', { name: 'SOC 工作区' }));
-
-    const workspaceMenu = screen.getByRole('navigation', { name: 'workspace.sectionNavigation' });
-    const workspaceMenuScope = within(workspaceMenu);
-    expect(workspaceMenuScope.getByRole('link', { name: '态势' })).toHaveAttribute(
+    await screen.findByRole('link', { name: '告警态势' });
+    expect(within(navGroup('态势')).getByRole('link', { name: '告警态势' })).toHaveAttribute(
       'href',
       '/contracts/webui/workspaces/soc_ui/soc-dashboard',
     );
-    expect(workspaceMenuScope.getByRole('link', { name: '告警运营' })).toHaveAttribute(
-      'href',
-      '/contracts/webui/workspaces/soc_ui/soc-alerts',
-    );
+    // The actions close the SOC menu: they sit under its last section only.
+    expect(within(navGroup('态势')).queryByRole('button', { name: 'workspace.customPage' })).not.toBeInTheDocument();
+    const socSection = navGroup('告警运营');
 
-    await user.click(workspaceMenuScope.getByRole('button', { name: 'workspace.customPage' }));
+    await user.click(within(socSection).getByRole('button', { name: 'workspace.customPage' }));
 
     await waitFor(() => {
       expect(sessionApi.create).toHaveBeenCalledWith({ title: 'workspace.customPageSessionTitle' });
     });
-    expect(await screen.findByTestId('location-probe')).toHaveTextContent(
+    await waitFor(() => expect(activeProbe()).toHaveTextContent(
       `/sessions?session=session-soc-custom-page&message=${encodeURIComponent('workspace.socCustomPageInitialMessage')}&display=${encodeURIComponent('workspace.socCustomPageDisplayLabel')}`,
-    );
+    ));
+  });
+
+  it('hides the SOC custom page action from members', async () => {
+    localStorage.setItem('flocks_onboarding_dismissed', 'true');
+    useAuth.mockReturnValue({
+      user: {
+        id: 'user-2',
+        username: 'member',
+        role: 'member',
+        status: 'active',
+        must_reset_password: false,
+      },
+      logout: vi.fn(),
+    });
+    mockSocWorkspaceNav();
+
+    renderLayoutAt('/contracts/webui/workspaces/soc_ui/soc-overview');
+
+    await screen.findByRole('link', { name: '告警态势' });
+    const socSection = navGroup('告警运营');
+    expect(within(socSection).queryByRole('button', { name: 'workspace.customPage' })).not.toBeInTheDocument();
+    expect(within(socSection).getByRole('button', { name: 'workspace.customTitle' })).toBeInTheDocument();
   });
 
   it('customizes the SOC dashboard title from the SOC workspace menu', async () => {
@@ -1348,59 +1761,14 @@ describe('Layout WebUI contract pages navigation', () => {
     localStorage.setItem('flocks_onboarding_dismissed', 'true');
     const titleChanged = vi.fn();
     window.addEventListener('soc-dashboard:title-changed', titleChanged);
-
-    const socPages = [
-      {
-        id: 'soc-dashboard',
-        title: '告警态势',
-        route: '/contracts/webui/soc-dashboard',
-        icon: 'Activity',
-        order: 10,
-        enabled: true,
-        placement: 'home.after',
-        buildHash: 'ready',
-        buildStatus: 'ready' as const,
-        workspaceId: 'soc_ui',
-        workspaceTitle: 'SOC 工作区',
-        workspaceRoute: '/contracts/webui/workspaces/soc_ui',
-      },
-    ];
-    useWebUIContractPages.mockReturnValue({
-      pages: socPages,
-      workspaces: [
-        {
-          id: 'soc_ui',
-          title: 'SOC 工作区',
-          route: '/contracts/webui/workspaces/soc_ui',
-          icon: 'ShieldCheck',
-          order: 10,
-          enabled: true,
-          placement: 'sceneWorkspace',
-          defaultPageId: 'soc-dashboard',
-          sections: [
-            {
-              id: 'posture',
-              label: '态势',
-              pageIds: ['soc-dashboard'],
-              defaultPageId: 'soc-dashboard',
-              contentPadding: 'none',
-              themeOverride: 'dark',
-            },
-          ],
-          pages: socPages,
-        },
-      ],
-      loading: false,
-      error: null,
-      refetch: vi.fn(),
-    });
+    mockSocWorkspaceNav();
 
     try {
-      renderHomeWithLayout();
+      renderLayoutAt('/contracts/webui/workspaces/soc_ui/soc-overview');
 
-      await user.click(await screen.findByRole('link', { name: 'SOC 工作区' }));
-      const workspaceMenu = screen.getByRole('navigation', { name: 'workspace.sectionNavigation' });
-      await user.click(within(workspaceMenu).getByRole('button', { name: 'workspace.customTitle' }));
+      await screen.findByRole('link', { name: '告警态势' });
+      const socSection = navGroup('告警运营');
+      await user.click(within(socSection).getByRole('button', { name: 'workspace.customTitle' }));
 
       const input = screen.getByLabelText('workspace.customTitle');
       await user.clear(input);
@@ -1415,5 +1783,198 @@ describe('Layout WebUI contract pages navigation', () => {
     } finally {
       window.removeEventListener('soc-dashboard:title-changed', titleChanged);
     }
+  });
+
+  it('returns a menu entry to the page it was last left on', async () => {
+    const user = userEvent.setup();
+    localStorage.setItem('flocks_onboarding_dismissed', 'true');
+    mockSocWorkspaceNav();
+
+    renderLayoutAt('/workflows/wf-1');
+
+    await screen.findByRole('button', { name: 'aiWorkbench' });
+    expect(screen.getByRole('link', { name: 'workflows' })).toHaveAttribute('href', '/workflows/wf-1');
+
+    await user.click(screen.getByRole('link', { name: 'go-sessions' }));
+    await waitFor(() => expect(activeProbe()).toHaveTextContent('/sessions'));
+
+    await user.click(screen.getByRole('link', { name: 'workflows' }));
+    await waitFor(() => expect(activeProbe()).toHaveTextContent('/workflows/wf-1'));
+    expect(JSON.parse(localStorage.getItem('flocks_layout_open_tabs') ?? '[]')).toEqual([
+      { href: '/workflows', path: '/workflows/wf-1' },
+      { href: '/sessions', path: '/sessions' },
+    ]);
+  });
+
+  it('restores visited panes after refresh and drops entries that no longer exist', async () => {
+    localStorage.setItem('flocks_onboarding_dismissed', 'true');
+    localStorage.setItem('flocks_layout_open_tabs', JSON.stringify([
+      { href: '/workflows', path: '/workflows/wf-9' },
+      { href: '/contracts/webui/workspaces/soc_ui/soc-alerts', path: '/contracts/webui/workspaces/soc_ui/soc-alerts' },
+      { href: '/contracts/webui/workspaces/old_ws/gone', path: '/contracts/webui/workspaces/old_ws/gone' },
+    ]));
+    mockSocWorkspaceNav();
+
+    renderLayoutAt('/sessions');
+
+    const user = userEvent.setup();
+    await screen.findByRole('button', { name: 'aiWorkbench' });
+    // A stored entry keeps the path it was left on.
+    expect(screen.getByRole('link', { name: 'workflows' })).toHaveAttribute('href', '/workflows/wf-9');
+
+    await user.click(screen.getByRole('tab', { name: 'partitionScene' }));
+    await screen.findByRole('link', { name: '告警态势' });
+    // The entry of a workspace that no longer exists is simply not there.
+    expect(screen.queryByRole('link', { name: /old_ws/ })).not.toBeInTheDocument();
+  });
+
+  it('reorders AI workbench entries by dragging and keeps the order after refresh', async () => {
+    localStorage.setItem('flocks_onboarding_dismissed', 'true');
+    mockSocWorkspaceNav();
+
+    const first = renderHomeWithLayout();
+    await screen.findByRole('button', { name: 'aiWorkbench' });
+    const keysIn = (container: HTMLElement, sectionName: string) => {
+      const section = within(container).getByRole('button', { name: sectionName }).closest('div.mb-6') as HTMLElement;
+      return Array.from(section.querySelectorAll('[data-nav-item-key]')).map((element) => element.getAttribute('data-nav-item-key'));
+    };
+    expect(keysIn(first.container, 'aiWorkbench')).toEqual(['/', '/sessions', '/workspace', '/tasks', '/workflows']);
+    expect(keysIn(first.container, 'agentHub')).toEqual(['/agents', '/skills', '/tools', '/devices', '/hub', '/models', '/channels']);
+
+    const itemFor = (key: string) => first.container.querySelector(`[data-nav-item-key="${key}"]`) as HTMLElement;
+    fireEvent.dragStart(itemFor('/workflows'));
+    fireEvent.dragOver(itemFor('/sessions'));
+    fireEvent.drop(itemFor('/sessions'));
+    fireEvent.dragEnd(itemFor('/workflows'));
+
+    expect(keysIn(first.container, 'aiWorkbench')).toEqual(['/', '/workflows', '/sessions', '/workspace', '/tasks']);
+    expect(JSON.parse(localStorage.getItem('flocks_layout_nav_item_order:aiWorkbench') ?? '[]'))
+      .toEqual(['/', '/workflows', '/sessions', '/workspace', '/tasks']);
+    // Other groups are untouched.
+    expect(keysIn(first.container, 'agentHub')).toEqual(['/agents', '/skills', '/tools', '/devices', '/hub', '/models', '/channels']);
+
+    // Keyboard works for built-in entries as well.
+    fireEvent.keyDown(within(first.container).getByRole('link', { name: 'tasks' }), { key: 'ArrowUp', altKey: true });
+    expect(keysIn(first.container, 'aiWorkbench')).toEqual(['/', '/workflows', '/sessions', '/tasks', '/workspace']);
+
+    first.unmount();
+    const second = renderHomeWithLayout();
+    await screen.findByRole('button', { name: 'aiWorkbench' });
+    expect(keysIn(second.container, 'aiWorkbench')).toEqual(['/', '/workflows', '/sessions', '/tasks', '/workspace']);
+  });
+
+  it('lists every installed scene inside the one SOC workspace tab', async () => {
+    const user = userEvent.setup();
+    localStorage.setItem('flocks_onboarding_dismissed', 'true');
+    const socPages = mockSocWorkspaceNav();
+    const previous = useWebUIContractPages();
+    const codeAudit = makeSceneWorkspace('code_audit_ui', '代码审计', [
+      { id: 'code-audit-overview', title: '审计总览' },
+      { id: 'code-audit-findings', title: '缺陷清单' },
+    ]);
+    useWebUIContractPages.mockReturnValue({
+      pages: [...socPages, ...codeAudit.pages],
+      workspaces: [...previous.workspaces, codeAudit],
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    const { container } = renderLayoutAt('/contracts/webui/workspaces/soc_ui/soc-overview');
+    await screen.findByRole('link', { name: '告警调查' });
+
+    // No tab per scene: the SOC workspace holds 态势, 告警运营 and 代码审计 together.
+    expect(partitionNames()).toEqual(['partitionAgent', 'partitionScene']);
+    expect(activePartitionName()).toBe('partitionScene');
+    expect(sectionHeadings(container)).toEqual(['态势', '告警运营', '代码审计']);
+    expect(sceneMenuLinks()).toEqual(['告警态势', 'SOC 总览', '告警调查', '审计总览', '缺陷清单']);
+    expect(screen.getByRole('link', { name: '审计总览' })).toHaveAttribute('href', '/contracts/webui/workspaces/code_audit_ui/code-audit-overview');
+    // Workspace actions belong to the SOC scene only, after its last section.
+    expect(within(navGroup('告警运营')).getByRole('button', { name: 'workspace.customPage' })).toBeInTheDocument();
+    expect(within(navGroup('代码审计')).queryByRole('button', { name: 'workspace.customPage' })).not.toBeInTheDocument();
+    expect(within(navGroup('态势')).queryByRole('button', { name: 'workspace.customTitle' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('tablist', { name: 'scenes' })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole('link', { name: '缺陷清单' }));
+    await waitFor(() => expect(activeProbe()).toHaveTextContent('/contracts/webui/workspaces/code_audit_ui/code-audit-findings'));
+    expect(activePartitionName()).toBe('partitionScene');
+    expect(screen.getByRole('link', { name: '告警调查' })).toBeInTheDocument();
+
+    await user.click(screen.getByRole('tab', { name: 'partitionAgent' }));
+    await waitFor(() => expect(activePartitionName()).toBe('partitionAgent'));
+    await user.click(screen.getByRole('tab', { name: 'partitionScene' }));
+    await waitFor(() => expect(activeProbe()).toHaveTextContent('/contracts/webui/workspaces/code_audit_ui/code-audit-findings'));
+    expect(JSON.parse(localStorage.getItem('flocks_layout_partition_paths') ?? '{}')).toMatchObject({
+      scene: '/contracts/webui/workspaces/code_audit_ui/code-audit-findings',
+    });
+  });
+
+  it('keeps every scene section on screen when a page of another scene is opened directly', async () => {
+    localStorage.setItem('flocks_onboarding_dismissed', 'true');
+    const socPages = mockSocWorkspaceNav();
+    const previous = useWebUIContractPages();
+    const redteam = makeSceneWorkspace('ai_redteam_ui', 'AI 红队', [
+      { id: 'ai-redteam-overview', title: '演练总览' },
+      { id: 'ai-redteam-surface', title: '攻击面' },
+    ]);
+    useWebUIContractPages.mockReturnValue({
+      pages: [...socPages, ...redteam.pages],
+      workspaces: [...previous.workspaces, redteam],
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    const { container } = renderLayoutAt('/contracts/webui/workspaces/ai_redteam_ui/ai-redteam-surface');
+    await screen.findByRole('link', { name: '攻击面' });
+
+    expect(sectionHeadings(container)).toEqual(['态势', '告警运营', 'AI 红队']);
+    expect(screen.getByRole('button', { name: 'AI 红队' })).toHaveAttribute('aria-expanded', 'true');
+    expect(screen.getByRole('link', { name: '攻击面' })).toHaveClass('bg-white');
+    expect(screen.getByRole('link', { name: '告警调查' })).not.toHaveClass('bg-white');
+    expect(activePartitionName()).toBe('partitionScene');
+  });
+
+  it('keeps the SOC sections as the first-level headings of a single installed scene', async () => {
+    localStorage.setItem('flocks_onboarding_dismissed', 'true');
+    mockSocWorkspaceNav();
+
+    const { container } = renderLayoutAt('/contracts/webui/workspaces/soc_ui/soc-overview');
+    await screen.findByRole('link', { name: '告警调查' });
+
+    expect(sectionHeadings(container)).toEqual(['态势', '告警运营']);
+    expect(screen.queryByRole('tablist', { name: 'scenes' })).not.toBeInTheDocument();
+    expect(sceneMenuLinks()).toEqual(['告警态势', 'SOC 总览', '告警调查']);
+  });
+
+  it('keeps a page mounted with its state across a partition switch', async () => {
+    const user = userEvent.setup();
+    localStorage.setItem('flocks_onboarding_dismissed', 'true');
+    mockSocWorkspaceNav();
+
+    renderLayoutAt('/sessions');
+    await screen.findByRole('button', { name: 'aiWorkbench' });
+
+    await user.click(screen.getByRole('button', { name: 'count-up' }));
+    await user.click(screen.getByRole('button', { name: 'count-up' }));
+    expect(within(activeProbe().parentElement as HTMLElement).getByTestId('probe-count')).toHaveTextContent('2');
+
+    await user.click(screen.getByRole('link', { name: 'go-soc-alerts' }));
+    await waitFor(() => {
+      expect(activeProbe()).toHaveTextContent('/contracts/webui/workspaces/soc_ui/soc-alerts');
+    });
+    // The sessions pane is still mounted, just hidden.
+    const panes = document.querySelectorAll('[data-keep-alive-pane]');
+    expect(Array.from(panes).map((pane) => pane.getAttribute('data-keep-alive-pane'))).toEqual(['inactive', 'active']);
+    expect(panes[0]).toHaveAttribute('aria-hidden', 'true');
+    expect(within(panes[0] as HTMLElement).getByTestId('probe-count')).toHaveTextContent('2');
+    expect(within(activeProbe().parentElement as HTMLElement).getByTestId('probe-count')).toHaveTextContent('0');
+
+    // Coming back through the top bar finds the page exactly as it was left.
+    await user.click(screen.getByRole('tab', { name: 'partitionAgent' }));
+    await waitFor(() => {
+      expect(activeProbe()).toHaveTextContent('/sessions');
+    });
+    expect(within(activeProbe().parentElement as HTMLElement).getByTestId('probe-count')).toHaveTextContent('2');
   });
 });

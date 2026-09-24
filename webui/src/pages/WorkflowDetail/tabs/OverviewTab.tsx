@@ -1,7 +1,7 @@
 import { useState, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Workflow, WorkflowExecution } from '@/api/workflow';
-import { Calendar, User, Tag, Activity, Clock, CheckCircle, XCircle, Layers, ChevronDown, ChevronRight, FileText } from 'lucide-react';
+import { IconCalendar, IconUser, IconTag, IconActivity, IconClock, IconCircleCheck, IconCircleX, IconStack2, IconChevronDown, IconChevronRight, IconFileText } from '@tabler/icons-react';
 import RunTab from './RunTab';
 
 interface OverviewTabProps {
@@ -81,9 +81,9 @@ function CollapsibleSection({
           )}
         </div>
         {expanded ? (
-          <ChevronDown className="w-4 h-4 text-gray-400 flex-shrink-0" />
+          <IconChevronDown aria-hidden="true" className="w-4 h-4 text-gray-400 flex-shrink-0" />
         ) : (
-          <ChevronRight className="w-4 h-4 text-gray-400 flex-shrink-0" />
+          <IconChevronRight aria-hidden="true" className="w-4 h-4 text-gray-400 flex-shrink-0" />
         )}
       </button>
       {expanded && (
@@ -144,7 +144,7 @@ export default function OverviewTab({
         <div className="space-y-4">
           <div className="divide-y divide-gray-100">
             <MetaRow
-              icon={<Layers className="w-3.5 h-3.5" />}
+              icon={<IconStack2 aria-hidden="true" className="w-3.5 h-3.5" />}
               label={t('detail.overview.nodeCount')}
               value={t('detail.overview.nodesAndEdges', {
                 nodes: workflow.workflowJson.nodes.length,
@@ -152,36 +152,36 @@ export default function OverviewTab({
               })}
             />
             <MetaRow
-              icon={<Tag className="w-3.5 h-3.5" />}
+              icon={<IconTag aria-hidden="true" className="w-3.5 h-3.5" />}
               label={t('detail.overview.category')}
               value={workflow.category}
             />
             {workflow.workflowJson.version && (
               <MetaRow
-                icon={<Activity className="w-3.5 h-3.5" />}
+                icon={<IconActivity aria-hidden="true" className="w-3.5 h-3.5" />}
                 label={t('detail.overview.version')}
                 value={workflow.workflowJson.version}
               />
             )}
             {workflow.createdBy && (
               <MetaRow
-                icon={<User className="w-3.5 h-3.5" />}
+                icon={<IconUser aria-hidden="true" className="w-3.5 h-3.5" />}
                 label={t('detail.overview.createdBy')}
                 value={workflow.createdBy}
               />
             )}
             <MetaRow
-              icon={<Calendar className="w-3.5 h-3.5" />}
+              icon={<IconCalendar aria-hidden="true" className="w-3.5 h-3.5" />}
               label={t('detail.overview.createdAt')}
               value={createdAt}
             />
             <MetaRow
-              icon={<Clock className="w-3.5 h-3.5" />}
+              icon={<IconClock aria-hidden="true" className="w-3.5 h-3.5" />}
               label={t('detail.overview.updatedAt')}
               value={updatedAt}
             />
             <MetaRow
-              icon={<FileText className="w-3.5 h-3.5" />}
+              icon={<IconFileText aria-hidden="true" className="w-3.5 h-3.5" />}
               label={t('detail.overview.workflowFiles')}
               value={(
                 <WorkflowFileList
@@ -212,9 +212,9 @@ export default function OverviewTab({
           </div>
           {stats.callCount > 0 && (
             <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-gray-500">
-              <CheckCircle className="h-3 w-3 text-green-500" />
+              <IconCircleCheck aria-hidden="true" className="h-3 w-3 text-green-500" />
               <span>{t('detail.overview.successTimes', { count: stats.successCount })}</span>
-              <XCircle className="h-3 w-3 text-red-400" />
+              <IconCircleX aria-hidden="true" className="h-3 w-3 text-red-400" />
               <span>{t('detail.overview.errorTimes', { count: stats.errorCount })}</span>
             </div>
           )}

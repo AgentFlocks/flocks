@@ -15,7 +15,6 @@ These tests pin the behavioural contract:
 """
 from __future__ import annotations
 
-import sqlite3
 from pathlib import Path
 from typing import List
 
@@ -26,18 +25,20 @@ from flocks.tool.device import startup
 
 
 @pytest.mark.asyncio
-async def test_heal_stale_service_ids_reads_named_sqlite_rows(tmp_path, monkeypatch):
+async def test_heal_stale_service_ids_reads_named_postgres_rows(tmp_path, monkeypatch):
     db_path = tmp_path / "devices.db"
-    with sqlite3.connect(db_path) as db:
-        db.execute(
-            "CREATE TABLE device_integrations (id TEXT, storage_key TEXT, service_id TEXT)"
-        )
-        db.execute(
-            "INSERT INTO device_integrations VALUES (?, ?, ?)",
-            ("dev-1", "onesec_api_v2_8_2", "stale_service_id"),
-        )
+    monkeypatch.setenv("FLOCKS_ROOT", str(tmp_path / "root"))
+    monkeypatch.setenv("FLOCKS_DATA_DIR", str(tmp_path / "data"))
+    from flocks.tool.device.store import ensure_default_group, insert_device
 
-    monkeypatch.setattr(startup.Storage, "get_db_path", staticmethod(lambda: db_path))
+    await startup.Storage.init(db_path)
+    await ensure_default_group()
+    await insert_device(
+        device_id="dev-1", group_id="default-room", name="retained device",
+        storage_key="onesec_api_v2_8_2", service_id="stale_service_id",
+        enabled=True, verify_ssl=False, db_fields={},
+    )
+
     monkeypatch.setattr(
         "flocks.tool.device.store.storage_key_to_service_id",
         lambda storage_key: "onesec_api" if storage_key == "onesec_api_v2_8_2" else storage_key,
@@ -45,11 +46,12 @@ async def test_heal_stale_service_ids_reads_named_sqlite_rows(tmp_path, monkeypa
 
     await startup._heal_stale_service_ids()
 
-    with sqlite3.connect(db_path) as db:
-        row = db.execute(
+    async with startup.Storage.transaction() as db:
+        row = await (await db.execute(
             "SELECT service_id FROM device_integrations WHERE id = ?", ("dev-1",)
-        ).fetchone()
-    assert row == ("onesec_api",)
+        )).fetchone()
+    assert row["service_id"] == "onesec_api"
+    assert not db_path.exists()
 
 
 @pytest.fixture
@@ -191,9 +193,8 @@ class TestSyncAllScope:
         ``sync_service_tool_state`` for storage_keys whose plugin is
         pure-API.
 
-        We stub ``sync_service_tool_state`` to record invocations and
-        also stub ``Storage.connect`` + ``ConfigWriter.list_api_services_raw``
-        so we don't need a real DB or config file to drive the test.
+        A real empty PostgreSQL table drives the database branch. The config
+        and final tool synchronization are stubbed to isolate their effects.
         """
         device_sk = _drop_plugin(
             isolated_plugins,
@@ -222,34 +223,8 @@ class TestSyncAllScope:
             staticmethod(lambda: {device_sk: {"enabled": True}, api_sk: {"enabled": True}}),
         )
 
-        # No DB rows exist (simulating: user deleted the last device of the
-        # device-type service, and the api-type service never had any rows).
-        class _FakeCursor:
-            def __init__(self, rows):
-                self._rows = rows
-
-            async def fetchall(self):
-                return self._rows
-
-        class _FakeDB:
-            async def execute(self, *_args, **_kwargs):
-                return _FakeCursor([])
-
-        class _CtxMgr:
-            async def __aenter__(self):
-                return _FakeDB()
-
-            async def __aexit__(self, *_args):
-                return False
-
-        monkeypatch.setattr(
-            "flocks.tool.device.startup.Storage.connect",
-            staticmethod(lambda *_a, **_kw: _CtxMgr()),
-        )
-        monkeypatch.setattr(
-            "flocks.tool.device.startup.Storage.get_db_path",
-            staticmethod(lambda: ":memory:"),
-        )
+        # No DB rows exist (the API service never had a device row).
+        await startup.Storage.init(isolated_plugins / "devices.db")
 
         called_with: List[str] = []
 

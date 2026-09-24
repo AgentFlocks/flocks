@@ -1,4 +1,4 @@
-import { screen, waitFor } from '@testing-library/react';
+import { screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -72,6 +72,7 @@ const translations: Record<string, string> = {
   'files.preview.htmlSandbox': 'HTML sandboxed',
   'files.preview.jsonParseFailed': 'JSON parse failed',
   'files.preview.jsonlParseFailed': '{{count}} JSONL lines failed',
+  'files.preview.csvTruncated': 'Preview limited to {{rows}} rows and {{columns}} columns.',
   'files.preview.pdfLoading': 'Loading PDF',
   'files.preview.pdfRendering': 'Rendering page',
   'files.preview.pdfLoadFailed': 'Failed to load PDF preview',
@@ -99,6 +100,7 @@ const translations: Record<string, string> = {
   'files.toast.loadDirFailed': 'Load directory failed',
   'files.toast.saveSuccess': 'Saved successfully',
   'files.toast.saveFailed': 'Failed to save',
+  'files.toast.createDirFailed': 'Failed to create directory',
 };
 
 vi.mock('react-i18next', () => ({
@@ -113,6 +115,9 @@ vi.mock('react-i18next', () => ({
       }
       if (key === 'files.preview.jsonlParseFailed') {
         return `${params?.count ?? ''} JSONL lines failed`;
+      }
+      if (key === 'files.preview.csvTruncated') {
+        return `Preview limited to ${params?.rows ?? ''} rows and ${params?.columns ?? ''} columns.`;
       }
       if (key === 'files.preview.pageIndicator') {
         return `${params?.page ?? ''} / ${params?.total ?? ''}`;
@@ -196,7 +201,7 @@ function directory(name: string, path: string) {
   };
 }
 
-function file(name: string, path: string, isTextFile = true) {
+function file(name: string, path: string, isTextFile = true, editable = isTextFile) {
   return {
     name,
     path,
@@ -204,6 +209,7 @@ function file(name: string, path: string, isTextFile = true) {
     size: 24,
     modified_at: 1710000000,
     is_text_file: isTextFile,
+    editable,
   };
 }
 
@@ -261,6 +267,33 @@ describe('WorkspacePage', () => {
     expect(mocks.list.mock.calls.filter(([path]) => path === '')).toHaveLength(1);
     expect(mocks.list.mock.calls.filter(([path]) => path === 'reports')).toHaveLength(2);
     expect(mocks.toastSuccess).toHaveBeenCalledWith('Deleted');
+  });
+
+  it('进入 outputs 后默认按名称倒序显示目录', async () => {
+    mocks.list.mockImplementation((path = '') => {
+      if (path === '') {
+        return Promise.resolve({ data: [directory('outputs', 'outputs')] });
+      }
+      if (path === 'outputs') {
+        return Promise.resolve({
+          data: [
+            directory('2026-09-06', 'outputs/2026-09-06'),
+            directory('2026-09-07', 'outputs/2026-09-07'),
+          ],
+        });
+      }
+      return Promise.resolve({ data: [] });
+    });
+
+    const user = userEvent.setup();
+    renderWithRouter(<WorkspacePage />);
+
+    await user.click(await screen.findByText('outputs'));
+
+    await waitFor(() => {
+      const rows = screen.getAllByText(/2026-09-0[67]/);
+      expect(rows.map((row) => row.textContent)).toEqual(['2026-09-07', '2026-09-06']);
+    });
   });
 
   it('大文件预览被截断时显示提示并禁用编辑', async () => {
@@ -362,6 +395,27 @@ describe('WorkspacePage', () => {
     expect(screen.getByText(/name,count/)).toBeInTheDocument();
   });
 
+  it('limits large CSV previews to a bounded number of rows', async () => {
+    mocks.list.mockResolvedValue({
+      data: [file('large.csv', 'large.csv')],
+    });
+    const content = ['name,count', ...Array.from({ length: 1_100 }, (_, index) => `row-${index},${index}`)].join('\n');
+    mocks.readFile.mockResolvedValue({
+      data: { path: 'large.csv', content, truncated: false },
+    });
+
+    const user = userEvent.setup();
+    renderWithRouter(<WorkspacePage />);
+    await user.click(await screen.findByText('large.csv'));
+
+    expect(await screen.findByText('Preview limited to 1000 rows and 100 columns.')).toBeInTheDocument();
+    const previewTable = screen.getAllByRole('table').find(
+      (table) => within(table).queryByText('row-0'),
+    );
+    expect(previewTable).toBeDefined();
+    expect(within(previewTable!).getAllByRole('row')).toHaveLength(1_000);
+  });
+
   it('PDF 文件使用 inline preview 地址展示', async () => {
     mocks.list.mockResolvedValue({
       data: [file('report.pdf', 'report.pdf', false)],
@@ -383,6 +437,119 @@ describe('WorkspacePage', () => {
     expect(pdfMocks.renderPage).toHaveBeenCalled();
     expect(screen.getByTitle('Previous page')).toBeDisabled();
     expect(screen.getByTitle('Next page')).toBeEnabled();
+  });
+
+  it('文本文件保存后预览面板保持打开并显示新内容', async () => {
+    mocks.list.mockResolvedValue({
+      data: [file('notes.txt', 'notes.txt')],
+    });
+    mocks.readFile.mockResolvedValue({
+      data: { path: 'notes.txt', content: 'old text', truncated: false },
+    });
+
+    const user = userEvent.setup();
+    renderWithRouter(<WorkspacePage />);
+
+    await user.click(await screen.findByText('notes.txt'));
+    await user.click(await screen.findByTitle('Edit'));
+
+    const editor = screen.getAllByRole('textbox').find(
+      (element) => element.tagName === 'TEXTAREA',
+    );
+    if (!editor) throw new Error('File editor not found');
+    await user.clear(editor);
+    await user.type(editor, 'new text');
+    await user.click(screen.getByTitle('Save'));
+
+    await waitFor(() => {
+      expect(mocks.writeFile).toHaveBeenCalledWith('notes.txt', 'new text');
+    });
+    expect(mocks.toastSuccess).toHaveBeenCalledWith('Saved successfully');
+    // The directory is reloaded for fresh sizes, but the saved file stays open.
+    await waitFor(() => {
+      expect(mocks.list.mock.calls).toHaveLength(2);
+    });
+    expect(screen.getByTitle('Close')).toBeInTheDocument();
+    expect(screen.getByTitle('Edit')).toBeInTheDocument();
+    expect(screen.getByText('new text')).toBeInTheDocument();
+    expect(screen.getByText('8 B')).toBeInTheDocument();
+  });
+
+  it('新建目录失败时 toast 展示服务端 message（HTTPException 错误体）', async () => {
+    mocks.list.mockResolvedValue({ data: [] });
+    mocks.createDir.mockRejectedValue({
+      message: 'Request failed with status code 400',
+      response: { status: 400, data: { error: 'HTTPException', message: 'Path traversal detected: ../x' } },
+    });
+
+    const user = userEvent.setup();
+    renderWithRouter(<WorkspacePage />);
+
+    await user.click(await screen.findByTitle('New directory'));
+    await user.type(screen.getByPlaceholderText('Folder name'), '../x');
+    await user.click(screen.getByRole('button', { name: 'Create' }));
+
+    await waitFor(() => {
+      expect(mocks.createDir).toHaveBeenCalledWith('../x');
+    });
+    expect(mocks.toastError).toHaveBeenCalledWith('Failed to create directory', 'Path traversal detected: ../x');
+  });
+
+  it('窄屏（375px）下预览面板改为堆叠在文件列表下方而不是固定 420px 并排', async () => {
+    const originalWidth = window.innerWidth;
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 375 });
+    try {
+      mocks.list.mockResolvedValue({ data: [file('notes.txt', 'notes.txt')] });
+      mocks.readFile.mockResolvedValue({ data: { path: 'notes.txt', content: 'hello', truncated: false } });
+
+      const user = userEvent.setup();
+      renderWithRouter(<WorkspacePage />);
+      await user.click(await screen.findByText('notes.txt'));
+
+      const panel = (await screen.findByTitle('Close')).closest('div.rounded-xl') as HTMLElement;
+      expect(panel).not.toBeNull();
+      expect(panel.className).toContain('w-full');
+      expect(panel.style.minWidth).toBe('');
+      expect(panel.parentElement?.className).toContain('flex-col');
+      // No horizontal resize handle when stacked.
+      expect(screen.queryByTitle('Drag to resize preview')).not.toBeInTheDocument();
+    } finally {
+      Object.defineProperty(window, 'innerWidth', { configurable: true, value: originalWidth });
+    }
+  });
+
+  it('宽屏下预览面板与文件列表并排且带最小宽度', async () => {
+    mocks.list.mockResolvedValue({ data: [file('notes.txt', 'notes.txt')] });
+    mocks.readFile.mockResolvedValue({ data: { path: 'notes.txt', content: 'hello', truncated: false } });
+
+    const user = userEvent.setup();
+    renderWithRouter(<WorkspacePage />);
+    await user.click(await screen.findByText('notes.txt'));
+
+    const panel = (await screen.findByTitle('Close')).closest('div.rounded-xl') as HTMLElement;
+    expect(panel.style.minWidth).toBe('420px');
+    expect(panel.parentElement?.className).not.toContain('flex-col');
+  });
+
+  it('mounts only the active PDF page window for very large documents', async () => {
+    pdfMocks.getDocument.mockReturnValueOnce({
+      promise: Promise.resolve({
+        numPages: 2_000,
+        getPage: pdfMocks.getPage,
+        destroy: pdfMocks.destroyDocument,
+      }),
+      destroy: pdfMocks.destroyTask,
+    });
+    mocks.list.mockResolvedValue({
+      data: [file('large.pdf', 'large.pdf', false)],
+    });
+
+    const user = userEvent.setup();
+    const { container } = renderWithRouter(<WorkspacePage />);
+    await user.click(await screen.findByText('large.pdf'));
+    await screen.findByText('1 / 2000');
+
+    expect(container.querySelectorAll('canvas').length).toBeLessThanOrEqual(5);
   });
 
   it('Memory Markdown 文件复用预览渲染和全屏预览', async () => {
@@ -452,7 +619,7 @@ describe('WorkspacePage', () => {
     expect(mocks.toastSuccess).toHaveBeenCalledWith('Saved successfully');
   });
 
-  it('Memory 文件按 USER、Global、Project 和 Daily 层级展示', async () => {
+  it('Memory 文件按核心记忆、Project、Daily、其他根文件层级展示', async () => {
     mocks.listVisibleProjects.mockResolvedValue({
       data: [{
         id: 'prj_example',
@@ -496,27 +663,37 @@ describe('WorkspacePage', () => {
     expect(daily).toBeInTheDocument();
     expect(screen.queryByText('projects')).not.toBeInTheDocument();
     expect(screen.queryByText('prj_stale/MEMORY.md')).not.toBeInTheDocument();
-    expect(screen.queryByText('2026-04-07.md')).not.toBeInTheDocument();
-    expect(screen.queryByText('test.md')).not.toBeInTheDocument();
+    expect(screen.getByText('2026-04-07.md')).toBeInTheDocument();
+    expect(screen.getByText('test.md')).toBeInTheDocument();
     expect(
       projectMemory.compareDocumentPosition(daily) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(
+      daily.compareDocumentPosition(screen.getByText('2026-04-07.md')) & Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
     expect(screen.queryByText('2026-08-03.md')).not.toBeInTheDocument();
 
     await user.click(projectMemory);
     expect(await screen.findByText('/Users/test/workspace/flocks-raven')).toBeInTheDocument();
-
-    await user.click(screen.getByRole('button', { name: /daily/ }));
-    expect(await screen.findByText('2026-08-03.md')).toBeInTheDocument();
   });
 
-  it('Memory 根目录的非规范文件不显示', async () => {
+  it('Memory 根目录的其他文件和目录会显示但默认只读', async () => {
     mocks.listMemory.mockResolvedValue({
       data: [
-        file('profile.pdf', 'profile.pdf', false),
-        file('logo.svg', 'logo.svg', false),
-        file('legacy.md', 'legacy.md'),
+        file('SHORT_MEMORY.md', 'SHORT_MEMORY.md', true, false),
+        file('bak.txt', 'bak.txt', true, false),
+        {
+          ...directory('archive', 'archive'),
+          children: [file('2026-08-18.md', 'archive/2026-08-18.md', true, false)],
+        },
       ],
+    });
+    mocks.readMemoryFile.mockResolvedValue({
+      data: {
+        path: 'bak.txt',
+        content: 'backup memory',
+        truncated: false,
+      },
     });
 
     const user = userEvent.setup();
@@ -526,11 +703,20 @@ describe('WorkspacePage', () => {
     await waitFor(() => {
       expect(mocks.listMemory).toHaveBeenCalled();
     });
-    expect(screen.queryByText('profile.pdf')).not.toBeInTheDocument();
-    expect(screen.queryByText('logo.svg')).not.toBeInTheDocument();
-    expect(screen.queryByText('legacy.md')).not.toBeInTheDocument();
+    expect(screen.getByText('SHORT_MEMORY.md')).toBeInTheDocument();
+    expect(screen.getByText('archive')).toBeInTheDocument();
+    expect(screen.getByText('bak.txt')).toBeInTheDocument();
+
+    const archiveButton = screen.getByText('archive').closest('button');
+    if (!archiveButton) throw new Error('Archive memory row button not found');
+    await user.click(archiveButton);
+    expect(await screen.findByText('2026-08-18.md')).toBeInTheDocument();
+
+    await user.click(screen.getByText('bak.txt'));
+    expect(await screen.findByText('backup memory')).toBeInTheDocument();
+    expect(mocks.readMemoryFile).toHaveBeenCalledWith('bak.txt');
+    expect(screen.queryByTitle('Edit')).not.toBeInTheDocument();
     expect(pdfMocks.getDocument).not.toHaveBeenCalled();
-    expect(mocks.readMemoryFile).not.toHaveBeenCalled();
   });
 
   it('Memory 文本文件快速切换时忽略过期读取结果', async () => {

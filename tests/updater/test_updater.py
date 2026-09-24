@@ -666,7 +666,7 @@ async def test_fetch_gitee_release_returns_web_archive_urls(monkeypatch: pytest.
             assert follow_redirects is True
             return _FakeResponse()
 
-    monkeypatch.setattr(updater.httpx, "AsyncClient", lambda timeout=15: _FakeClient())
+    monkeypatch.setattr(updater.httpx, "AsyncClient", lambda **_kw: _FakeClient())
 
     tag, notes, html_url, zip_url, tar_url = await updater._fetch_gitee_release("flocks/flocks", "token")
 
@@ -716,7 +716,7 @@ async def test_download_archive_uses_curl_user_agent_for_gitee_web_archive(
     monkeypatch.setattr(
         updater.httpx,
         "AsyncClient",
-        lambda timeout, follow_redirects=True: _FakeClient(),
+        lambda **_kw: _FakeClient(),
     )
 
     archive_path = await updater._download_archive(
@@ -771,7 +771,7 @@ async def test_download_archive_keeps_auth_header_for_non_gitee_sources(
     monkeypatch.setattr(
         updater.httpx,
         "AsyncClient",
-        lambda timeout, follow_redirects=True: _FakeClient(),
+        lambda **_kw: _FakeClient(),
     )
 
     archive_path = await updater._download_archive(

@@ -1,5 +1,5 @@
 import { Link } from 'react-router-dom';
-import { ArrowLeft, PanelRight, PanelRightClose } from 'lucide-react';
+import { IconArrowLeft, IconLayoutSidebarRight, IconLayoutSidebarRightCollapse } from '@tabler/icons-react';
 import { useTranslation } from 'react-i18next';
 import { Workflow, WorkflowExecution } from '@/api/workflow';
 import { getWorkflowDisplayName } from '@/utils/workflowDisplay';
@@ -30,13 +30,13 @@ export default function TopBar({ workflow, latestExecution, panelOpen, onToggleP
   const isRunning = latestExecution?.status === 'running';
 
   return (
-    <div className="min-h-14 bg-white border-b border-gray-200 px-4 py-2 flex items-center gap-3 flex-shrink-0 z-10">
+    <div className="min-h-14 bg-white border-b border-gray-200 pl-14 pr-4 py-2 flex items-center gap-3 flex-shrink-0 z-10 lg:pl-4">
       {/* Back button */}
       <Link
         to="/workflows"
         className="flex items-center gap-1.5 text-gray-500 hover:text-gray-800 transition-colors text-sm font-medium"
       >
-        <ArrowLeft className="w-4 h-4" />
+        <IconArrowLeft aria-hidden="true" className="w-4 h-4" />
         {t('pageTitle')}
       </Link>
 
@@ -71,9 +71,9 @@ export default function TopBar({ workflow, latestExecution, panelOpen, onToggleP
           title={panelOpen ? t('detail.topBar.collapsePanel') : t('detail.topBar.expandPanel')}
         >
           {panelOpen ? (
-            <PanelRightClose className="w-4 h-4" />
+            <IconLayoutSidebarRightCollapse aria-hidden="true" className="w-4 h-4" />
           ) : (
-            <PanelRight className="w-4 h-4" />
+            <IconLayoutSidebarRight aria-hidden="true" className="w-4 h-4" />
           )}
         </button>
       </div>

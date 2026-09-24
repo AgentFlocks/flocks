@@ -28,6 +28,19 @@ agent_app = typer.Typer(
 console = Console()
 
 
+async def _run_registry(coro):
+    """Await registry work, then release its workflow-store handle.
+
+    The command's event-loop shutdown also closes its shared PostgreSQL pool.
+    """
+    try:
+        return await coro
+    finally:
+        from flocks.workflow.store import WorkflowStore
+
+        await WorkflowStore.close()
+
+
 def _format_mode(mode: str) -> str:
     """Format agent mode for display"""
     mode_colors = {
@@ -36,6 +49,14 @@ def _format_mode(mode: str) -> str:
         "all": "[green]all[/green]",
     }
     return mode_colors.get(mode, mode)
+
+
+def _rule_action(rule) -> str:
+    """Return the rule decision as text (``level`` on current PermissionRule, ``action`` on legacy ones)."""
+    value = getattr(rule, "level", None)
+    if value is None:
+        value = getattr(rule, "action", "")
+    return str(getattr(value, "value", value) or "")
 
 
 def _format_permission_rules(agent: AgentInfo) -> str:
@@ -53,11 +74,12 @@ def _format_permission_rules(agent: AgentInfo) -> str:
         if rule.pattern and rule.pattern != "*":
             target = f"{target}:{rule.pattern}"
         
-        if rule.action == "allow":
+        action = _rule_action(rule)
+        if action == "allow":
             allow.append(target)
-        elif rule.action == "deny":
+        elif action == "deny":
             deny.append(target)
-        elif rule.action == "ask":
+        elif action == "ask":
             ask.append(target)
     
     parts = []
@@ -94,9 +116,9 @@ def agent_list(
     """
     # Get agents
     if all_agents:
-        agents = Agent.list()
+        agents = asyncio.run(_run_registry(Agent.list()))
     else:
-        agents = Agent.list_visible()
+        agents = asyncio.run(_run_registry(Agent.list_visible()))
     
     # Filter by mode
     if mode:
@@ -122,7 +144,8 @@ def agent_list(
             }
             for a in agents
         ]
-        console.print(json.dumps(json_data, indent=2))
+        # Plain stdout: Rich would soft-wrap long lines and break the JSON for consumers.
+        print(json.dumps(json_data, indent=2))
     
     elif format == "tree":
         # Tree format grouped by mode
@@ -186,7 +209,7 @@ def agent_show(
     """
     Show details of a specific agent
     """
-    agent = Agent.get(name)
+    agent = asyncio.run(_run_registry(Agent.get(name)))
     
     if not agent:
         console.print(f"[red]Agent not found: {name}[/red]")
@@ -225,14 +248,15 @@ def agent_show(
     
     if agent.permission:
         for rule in agent.permission:
+            action = _rule_action(rule)
             action_color = {
                 "allow": "green",
                 "deny": "red",
                 "ask": "yellow",
-            }.get(rule.action, "white")
+            }.get(action, "white")
             
             pattern_str = f" ({rule.pattern})" if rule.pattern and rule.pattern != "*" else ""
-            console.print(f"  [{action_color}]{rule.action:5}[/{action_color}] {rule.permission}{pattern_str}")
+            console.print(f"  [{action_color}]{action:5}[/{action_color}] {rule.permission}{pattern_str}")
     else:
         console.print("  [dim]No rules defined[/dim]")
     
@@ -259,13 +283,13 @@ def agent_permissions(
     """
     Check whether an agent declares a specific tool.
     """
-    agent = Agent.get(name)
+    agent = asyncio.run(_run_registry(Agent.get(name)))
     
     if not agent:
         console.print(f"[red]Agent not found: {name}[/red]")
         raise typer.Exit(1)
     
     _ = pattern
-    result = asyncio.run(Agent.has_tool(name, tool))
+    result = asyncio.run(_run_registry(Agent.has_tool(name, tool)))
     color = "green" if result else "red"
     console.print(f"[{color}]{'allow' if result else 'deny'}[/{color}]")

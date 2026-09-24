@@ -9,12 +9,12 @@ import {
 } from 'react';
 import { useTranslation } from 'react-i18next';
 import i18n from '@/i18n';
-import { AlertCircle, Loader2 } from 'lucide-react';
+import { IconAlertCircle, IconLoader2 } from '@tabler/icons-react';
 import { getApiBase } from '@/api/client';
 import { webuiContractPagesAPI } from '@/api/webuiContractPages';
 import { useSSE } from '@/hooks/useSSE';
 import { useDelayedVisible } from '@/hooks/useDelayedVisible';
-import { installWebUIContractPageRuntime, loadWebUIContractPageBundle } from './runtime';
+import { loadWebUIContractPageBundle } from './runtime';
 
 interface WebUIContractPageErrorBoundaryProps {
   children: ReactNode;
@@ -48,7 +48,7 @@ class WebUIContractPageErrorBoundary extends Component<
       const message = this.state.message || this.props.fallbackMessage;
       return (
         <div className="flex items-start gap-3 rounded-xl border border-rose-200 bg-rose-50 p-4 text-rose-800">
-          <AlertCircle className="mt-0.5 h-5 w-5 flex-shrink-0" />
+          <IconAlertCircle aria-hidden="true" className="mt-0.5 h-5 w-5 flex-shrink-0" />
           <div>
             <div className="font-medium">{this.props.errorTitle}</div>
             <div className="mt-1 text-sm">{message}</div>
@@ -78,10 +78,10 @@ export default function PageRuntimeHost({ pageId }: PageRuntimeHostProps) {
 
   const loadBundle = useCallback(async (hash: string) => {
     if (!pageId || !hash) return;
-    installWebUIContractPageRuntime(pageId);
     const base = getApiBase();
     const url = `${base}/api/contracts/webui/pages/${encodeURIComponent(pageId)}/bundle.js?v=${encodeURIComponent(hash)}`;
-    const component = await loadWebUIContractPageBundle(url, tr('host.bundleMissingExport'));
+    // The runtime is installed right before the bundle evaluates, inside the loader.
+    const component = await loadWebUIContractPageBundle(url, tr('host.bundleMissingExport'), pageId);
     setPageComponent(() => component);
     setError(null);
   }, [pageId, tr]);
@@ -137,15 +137,20 @@ export default function PageRuntimeHost({ pageId }: PageRuntimeHostProps) {
     reconnect: { maxRetries: 5, initialDelay: 2000 },
   });
 
+  // Contract pages render full-bleed (no layout padding) and the mobile layout
+  // floats its menu button over the top-left corner, so the host's own status
+  // views keep clear of it; custom page components manage their own layout.
+  const statusClassName = 'p-4 pt-20 lg:p-6';
+
   if (!pageId) {
-    return <div className="text-sm text-zinc-500">{t('host.missingPageId')}</div>;
+    return <div className={`${statusClassName} text-sm text-zinc-500`}>{t('host.missingPageId')}</div>;
   }
 
   if (loading) {
     if (!showLoading) return null;
     return (
-      <div className="flex items-center gap-2 text-sm text-zinc-500">
-        <Loader2 className="h-4 w-4 animate-spin" />
+      <div className={`${statusClassName} flex items-center gap-2 text-sm text-zinc-500`}>
+        <IconLoader2 aria-hidden="true" className="h-4 w-4 animate-spin" />
         {t('host.loading')}
       </div>
     );
@@ -153,25 +158,27 @@ export default function PageRuntimeHost({ pageId }: PageRuntimeHostProps) {
 
   if (error) {
     return (
-      <div className="flex items-start gap-3 rounded-xl border border-amber-200 bg-amber-50 p-4 text-amber-900">
-        <AlertCircle className="mt-0.5 h-5 w-5 flex-shrink-0" />
-        <div>
-          <div className="font-medium">{t('host.unavailableTitle')}</div>
-          <div className="mt-1 text-sm">{error}</div>
-          <button
-            type="button"
-            onClick={() => void refreshPage(buildHash)}
-            className="mt-3 rounded-lg border border-amber-300 bg-white px-3 py-1.5 text-sm hover:bg-amber-100"
-          >
-            {t('host.retry')}
-          </button>
+      <div className={statusClassName}>
+        <div className="flex items-start gap-3 rounded-xl border border-amber-200 bg-amber-50 p-4 text-amber-900">
+          <IconAlertCircle aria-hidden="true" className="mt-0.5 h-5 w-5 flex-shrink-0" />
+          <div>
+            <div className="font-medium">{t('host.unavailableTitle')}</div>
+            <div className="mt-1 text-sm">{error}</div>
+            <button
+              type="button"
+              onClick={() => void refreshPage(buildHash)}
+              className="mt-3 rounded-lg border border-amber-300 bg-white px-3 py-1.5 text-sm hover:bg-amber-100"
+            >
+              {t('host.retry')}
+            </button>
+          </div>
         </div>
       </div>
     );
   }
 
   if (!PageComponent) {
-    return <div className="text-sm text-zinc-500">{t('host.emptyComponent')}</div>;
+    return <div className={`${statusClassName} text-sm text-zinc-500`}>{t('host.emptyComponent')}</div>;
   }
 
   return (

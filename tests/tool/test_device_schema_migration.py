@@ -1,6 +1,5 @@
 """Device integration schema migration tests."""
 
-import sqlite3
 from pathlib import Path
 from typing import Any
 
@@ -23,14 +22,20 @@ async def _shutdown_storage() -> None:
 
 async def _device_columns(db_path: Path) -> set[str]:
     async with Storage.connect(db_path) as db:
-        cursor = await db.execute("PRAGMA table_info(device_integrations)")
-        return {str(row[1]) for row in await cursor.fetchall()}
+        cursor = await db.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_schema = current_schema() AND table_name = 'device_integrations'"
+        )
+        return {str(row[0]) for row in await cursor.fetchall()}
 
 
 async def _device_indexes(db_path: Path) -> set[str]:
     async with Storage.connect(db_path) as db:
-        cursor = await db.execute("PRAGMA index_list(device_integrations)")
-        return {str(row[1]) for row in await cursor.fetchall()}
+        cursor = await db.execute(
+            "SELECT indexname FROM pg_indexes "
+            "WHERE schemaname = current_schema() AND tablename = 'device_integrations'"
+        )
+        return {str(row[0]) for row in await cursor.fetchall()}
 
 
 def _capture_storage_warnings(monkeypatch) -> list[tuple[Any, Any]]:
@@ -56,6 +61,7 @@ async def test_device_schema_fresh_init_does_not_warn_duplicate_group_id(monkeyp
         assert "group_id" in await _device_columns(db_path)
         assert "idx_device_group" in await _device_indexes(db_path)
         assert _extension_ddl_warnings(warnings) == []
+        assert not db_path.exists()
     finally:
         await _shutdown_storage()
 
@@ -64,8 +70,8 @@ async def test_device_schema_fresh_init_does_not_warn_duplicate_group_id(monkeyp
 async def test_device_schema_old_integrations_table_gets_group_id(monkeypatch, tmp_path: Path) -> None:
     warnings = _capture_storage_warnings(monkeypatch)
     db_path = tmp_path / "old.db"
-    with sqlite3.connect(db_path) as db:
-        db.executescript("""
+    async with Storage.transaction(ensure_init=False) as db:
+        await db.executescript("""
         CREATE TABLE device_integrations (
             id          TEXT PRIMARY KEY,
             name        TEXT NOT NULL,
@@ -82,6 +88,12 @@ async def test_device_schema_old_integrations_table_gets_group_id(monkeypatch, t
             updated_at  INTEGER NOT NULL
         );
         """)
+        await db.execute(
+            "INSERT INTO device_integrations "
+            "(id, name, storage_key, service_id, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            ("old-device", "old name", "old_api_v1", "old_api", 1000, 1000),
+        )
 
     _reset_storage_state()
     try:
@@ -90,5 +102,16 @@ async def test_device_schema_old_integrations_table_gets_group_id(monkeypatch, t
         assert "group_id" in await _device_columns(db_path)
         assert "idx_device_group" in await _device_indexes(db_path)
         assert _extension_ddl_warnings(warnings) == []
+        async with Storage.transaction() as db:
+            await db.execute(
+                "UPDATE device_integrations SET checked_at = ?, updated_at = ? WHERE id = ?",
+                (1_700_000_000_000, 1_700_000_000_000, "old-device"),
+            )
+            row = await (await db.execute(
+                "SELECT name, group_id, checked_at, updated_at FROM device_integrations WHERE id = ?",
+                ("old-device",),
+            )).fetchone()
+        assert tuple(row) == ("old name", "", 1_700_000_000_000, 1_700_000_000_000)
+        assert not db_path.exists()
     finally:
         await _shutdown_storage()

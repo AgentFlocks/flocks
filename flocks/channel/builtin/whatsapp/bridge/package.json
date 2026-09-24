@@ -11,10 +11,11 @@
     "@hapi/boom": "^10.0.1",
     "@whiskeysockets/baileys": "7.0.0-rc13",
     "express": "^4.21.2",
-    "pino": "^9.6.0"
+    "https-proxy-agent": "^7.0.6",
+    "pino": "^9.6.0",
+    "socks-proxy-agent": "^8.0.5"
   },
   "overrides": {
     "protobufjs": "^7.5.5"
   }
 }
-

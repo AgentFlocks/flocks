@@ -109,6 +109,17 @@ def _local_debugging_setup_lines(system: str | None = None) -> list[str]:
             "After the endpoint responds, rerun `flocks browser --setup`.",
         ]
     )
+    try:
+        from flocks.net import chromium_proxy_args
+
+        proxy_args = chromium_proxy_args()
+    except Exception:  # pragma: no cover - policy unreadable
+        proxy_args = []
+    if proxy_args:
+        lines.append(
+            "Flocks routes its own traffic through a proxy (flocks.json network.proxy); add the same to the browser: "
+            + " ".join(proxy_args)
+        )
     return lines
 
 
@@ -135,14 +146,32 @@ def _probe_cdp_websocket(url: str, timeout: float = 3.0) -> tuple[bool, str]:
     if parsed.scheme not in {"ws", "wss"} or not parsed.hostname:
         return False, "invalid WebSocket URL"
     try:
-        with websocket_connect(url, open_timeout=timeout, close_timeout=timeout) as websocket:
+        # the DevTools endpoint is the operator's own browser (loopback / LAN): never through the proxy
+        with websocket_connect(url, open_timeout=timeout, close_timeout=timeout, proxy=None) as websocket:  # outbound: loopback
             websocket.send(json.dumps({"id": 1, "method": "Browser.getVersion"}))
             response = json.loads(websocket.recv(timeout=timeout))
         if not isinstance(response, dict) or response.get("id") != 1 or not isinstance(response.get("result"), dict):
             return False, "Browser.getVersion returned an invalid response"
     except Exception as error:
-        return False, f"connection failed ({type(error).__name__})"
+        return False, _connection_failure_reason(error)
     return True, "CDP handshake succeeded"
+
+
+def _connection_failure_reason(error: BaseException) -> str:
+    """Name the failure the operator has to fix, not just the exception class.
+
+    ``URLError`` alone does not tell a refused port from a DNS miss or a
+    timeout; the doctor output is where that distinction is needed.
+    """
+    detail = str(getattr(error, "reason", None) or error).strip()
+    if not detail or detail == type(error).__name__:
+        return f"connection failed ({type(error).__name__})"
+    return f"connection failed ({type(error).__name__}: {detail[:160]})"
+
+
+def _open_direct(url: str, timeout: float):
+    """``urlopen`` that never goes through HTTP_PROXY: DevTools endpoints are loopback / LAN."""
+    return urllib.request.build_opener(urllib.request.ProxyHandler({})).open(url, timeout=timeout)
 
 
 def _probe_cdp_endpoint(name: str, value: str, timeout: float = 3.0) -> tuple[bool, str]:
@@ -153,13 +182,14 @@ def _probe_cdp_endpoint(name: str, value: str, timeout: float = 3.0) -> tuple[bo
     if parsed.scheme not in {"http", "https"} or not parsed.hostname:
         return False, "invalid HTTP URL"
     try:
-        with urllib.request.urlopen(f"{value.rstrip('/')}/json/version", timeout=timeout) as response:
+        # A DevTools endpoint is the operator's own browser (loopback or LAN): probe it directly.
+        with _open_direct(f"{value.rstrip('/')}/json/version", timeout=timeout) as response:
             payload = json.loads(response.read())
         websocket_url = payload.get("webSocketDebuggerUrl")
         if not isinstance(websocket_url, str):
             return False, "/json/version did not return webSocketDebuggerUrl"
     except Exception as error:
-        return False, f"connection failed ({type(error).__name__})"
+        return False, _connection_failure_reason(error)
     return _probe_cdp_websocket(websocket_url, timeout)
 
 
@@ -386,8 +416,14 @@ def _latest_release_tag(force: bool = False) -> str | None:
 
 
 def _version_tuple(value: str) -> tuple[int, ...]:
+    # Release tags carry a leading "v" (v2026.8.17) while the installed
+    # version does not; without stripping it the tag compares as 0.x and an
+    # update is never reported.
+    value = (value or "").strip()
+    if value[:1] in {"v", "V"}:
+        value = value[1:]
     parts = []
-    for section in (value or "").split("."):
+    for section in value.split("."):
         prefix = ""
         for char in section:
             if char.isdigit():

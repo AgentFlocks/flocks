@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
-import { AlertCircle, Bot, Clock, Plus } from 'lucide-react';
+import { IconAlertCircle, IconRobot, IconClock, IconPlus } from '@tabler/icons-react';
 import SessionChat, {
   NodeRef,
   buildInstructionDisplayText,
@@ -533,7 +533,7 @@ export default function ChatTab({
           className="flex items-center gap-1 px-1.5 py-1 rounded text-[10px] text-gray-400 hover:text-gray-600 hover:bg-gray-100 transition-colors"
           title={t('detail.chat.newSession')}
         >
-          <Plus className="w-3 h-3" />
+          <IconPlus aria-hidden="true" className="w-3 h-3" />
           <span>{t('detail.chat.newSession')}</span>
         </button>
         {sessions.length > 0 && (
@@ -547,7 +547,7 @@ export default function ChatTab({
               }`}
               title={t('detail.chat.historyLabel')}
             >
-              <Clock className="w-3 h-3" />
+              <IconClock aria-hidden="true" className="w-3 h-3" />
               <span>{sessions.length}</span>
             </button>
             {showHistory && (
@@ -686,7 +686,7 @@ function WorkflowWelcome({
       <div className="flex max-h-[min(560px,calc(100vh-260px))] w-full max-w-[420px] flex-col overflow-hidden rounded-xl border border-gray-200 bg-white px-5 py-5 text-center shadow-sm">
         <div className="flex-shrink-0">
           <div className="mx-auto flex h-11 w-11 items-center justify-center rounded-xl border border-red-100 bg-red-50 text-red-500">
-            <Bot className="h-5 w-5" />
+            <IconRobot aria-hidden="true" className="h-5 w-5" />
           </div>
           <h3 className="mt-4 text-sm font-semibold text-gray-900">
             {t('detail.chat.welcome.editPanelTitle')}
@@ -719,7 +719,7 @@ function WorkflowWelcome({
 
       {error && (
         <div className="mt-4 flex w-full max-w-[420px] items-center gap-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-600">
-          <AlertCircle className="w-4 h-4 flex-shrink-0" />
+          <IconAlertCircle aria-hidden="true" className="w-4 h-4 flex-shrink-0" />
           <span className="flex-1">{error}</span>
           <button onClick={onRetry} className="underline hover:no-underline flex-shrink-0">
             {t('detail.chat.welcome.retry')}

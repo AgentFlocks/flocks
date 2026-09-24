@@ -1,6 +1,6 @@
 import React from 'react';
 import { useTranslation } from 'react-i18next';
-import { Code2, Zap, GitBranch, RotateCw, Plus, Wrench, Sparkles, Globe, Workflow } from 'lucide-react';
+import { IconCode, IconBolt, IconGitBranch, IconRotateClockwise, IconPlus, IconTool, IconSparkles, IconWorld, IconRouteSquare2 } from '@tabler/icons-react';
 import { WorkflowNodeType } from '@/api/workflow';
 
 interface NodeToolbarProps {
@@ -28,20 +28,22 @@ export default function NodeToolbar({ onAddNode }: NodeToolbarProps) {
     descKey: string;
     color: string;
   }> = [
-    { type: 'python', icon: Code2, label: 'Python', descKey: 'editor.toolbar.pythonDesc', color: 'blue' },
-    { type: 'logic', icon: Zap, label: 'Logic', descKey: 'editor.toolbar.logicDesc', color: 'green' },
-    { type: 'branch', icon: GitBranch, label: 'Branch', descKey: 'editor.toolbar.branchDesc', color: 'yellow' },
-    { type: 'loop', icon: RotateCw, label: 'Loop', descKey: 'editor.toolbar.loopDesc', color: 'purple' },
-    { type: 'tool', icon: Wrench, label: 'Tool', descKey: 'editor.toolbar.toolDesc', color: 'violet' },
-    { type: 'llm', icon: Sparkles, label: 'LLM', descKey: 'editor.toolbar.llmDesc', color: 'pink' },
-    { type: 'http_request', icon: Globe, label: 'HTTP', descKey: 'editor.toolbar.httpDesc', color: 'teal' },
-    { type: 'subworkflow', icon: Workflow, label: 'SubWorkflow', descKey: 'editor.toolbar.subworkflowDesc', color: 'orange' },
+    { type: 'python', icon: IconCode, label: 'Python', descKey: 'editor.toolbar.pythonDesc', color: 'blue' },
+    { type: 'logic', icon: IconBolt, label: 'Logic', descKey: 'editor.toolbar.logicDesc', color: 'green' },
+    { type: 'branch', icon: IconGitBranch, label: 'Branch', descKey: 'editor.toolbar.branchDesc', color: 'yellow' },
+    { type: 'loop', icon: IconRotateClockwise, label: 'Loop', descKey: 'editor.toolbar.loopDesc', color: 'purple' },
+    { type: 'tool', icon: IconTool, label: 'Tool', descKey: 'editor.toolbar.toolDesc', color: 'violet' },
+    { type: 'llm', icon: IconSparkles, label: 'LLM', descKey: 'editor.toolbar.llmDesc', color: 'pink' },
+    { type: 'http_request', icon: IconWorld, label: 'HTTP', descKey: 'editor.toolbar.httpDesc', color: 'teal' },
+    { type: 'subworkflow', icon: IconRouteSquare2, label: 'SubWorkflow', descKey: 'editor.toolbar.subworkflowDesc', color: 'orange' },
   ];
 
+  // Positioned inside the canvas container (not the viewport): with ``fixed``
+  // it landed underneath the app sidebar and could not be clicked.
   return (
-    <div className="fixed left-4 top-24 bg-white rounded-lg shadow-lg border border-gray-200 p-4 w-64 z-10">
+    <div className="absolute left-4 top-4 bg-white rounded-lg shadow-lg border border-gray-200 p-4 w-64 max-w-[calc(100%-2rem)] z-10 max-h-[calc(100%-9rem)] overflow-y-auto">
       <div className="flex items-center gap-2 mb-4">
-        <Plus className="w-5 h-5 text-gray-700" />
+        <IconPlus aria-hidden="true" className="w-5 h-5 text-gray-700" />
         <h3 className="text-sm font-semibold text-gray-900">{t('editor.toolbar.addNode')}</h3>
       </div>
 
@@ -52,9 +54,9 @@ export default function NodeToolbar({ onAddNode }: NodeToolbarProps) {
             <button
               key={type}
               onClick={() => onAddNode(type)}
-              className={`w-full flex items-center gap-3 p-2.5 rounded-lg border-2 ${colors.bg} ${colors.border} transition-all duration-200 hover:shadow-md`}
+              className={`w-full flex items-center gap-3 p-2.5 rounded-lg border-2 ${colors.bg} ${colors.border} transition-all duration-200`}
             >
-              <Icon className={`w-4 h-4 flex-shrink-0 ${colors.icon}`} />
+              <Icon aria-hidden="true" className={`w-4 h-4 flex-shrink-0 ${colors.icon}`} />
               <div className="flex-1 text-left">
                 <div className={`text-xs font-semibold ${colors.text}`}>{label}</div>
                 <div className="text-xs text-gray-500">{t(descKey)}</div>

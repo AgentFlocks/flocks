@@ -1,0 +1,12 @@
+{
+  "id": "ai-redteam-overview",
+  "title": "演练总览",
+  "titleEn": "Campaign Overview",
+  "route": "/contracts/webui/ai-redteam-overview",
+  "icon": "Crosshair",
+  "order": 10,
+  "enabled": true,
+  "placement": "home.after",
+  "entry": "src/index.tsx",
+  "updatedAt": 1788900000000
+}

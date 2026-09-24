@@ -295,6 +295,12 @@ class TestUpdateTool:
         _set_service(enabled=True)
         delete_override = AsyncMock(return_value=True)
         set_override = AsyncMock()
+        # The per-device path now checks the device exists (unknown ids used to
+        # surface as an IntegrityError 500 and are a 404 today); "dev-a" has no row.
+        monkeypatch.setattr(
+            "flocks.tool.device.store.fetch_device",
+            AsyncMock(return_value={"id": "dev-a"}),
+        )
         monkeypatch.setattr(
             "flocks.tool.device.store.delete_device_tool_setting",
             delete_override,
@@ -325,6 +331,10 @@ class TestUpdateTool:
         delete_override = AsyncMock()
         set_override = AsyncMock()
         monkeypatch.setattr(
+            "flocks.tool.device.store.fetch_device",
+            AsyncMock(return_value={"id": "dev-a"}),
+        )
+        monkeypatch.setattr(
             "flocks.tool.device.store.delete_device_tool_setting",
             delete_override,
         )
@@ -345,6 +355,23 @@ class TestUpdateTool:
         assert _read_settings() == {}
         set_override.assert_awaited_once_with("dev-a", enabled_tool.info.name, False)
         delete_override.assert_not_awaited()
+
+
+    def test_device_unknown_returns_404(self, tool_client, monkeypatch: pytest.MonkeyPatch):
+        client, enabled_tool, _ = tool_client
+        _set_service(enabled=True)
+        set_override = AsyncMock()
+        monkeypatch.setattr("flocks.tool.device.store.fetch_device", AsyncMock(return_value=None))
+        monkeypatch.setattr("flocks.tool.device.store.set_device_tool_enabled", set_override)
+
+        res = client.patch(
+            f"/api/tools/{enabled_tool.info.name}?device_id=dev-missing",
+            json={"enabled": False},
+        )
+
+        assert res.status_code == 404
+        assert "dev-missing" in res.json().get("detail", "") or "dev-missing" in res.text
+        set_override.assert_not_awaited()
 
 
 class TestApiServiceToolSync:

@@ -5,17 +5,19 @@ Validates todo CRUD operations and event publishing.
 """
 
 import pytest
+from collections import defaultdict
 from flocks.session.features.todo import Todo, TodoInfo, TodoStatus, TodoPriority
 from flocks.bus.bus import Bus
 from flocks.storage.storage import Storage
 
 
 @pytest.fixture(autouse=True)
-async def cleanup():
+async def cleanup(monkeypatch):
     """Clear storage and subscriptions before/after each test"""
     from flocks.storage.storage import Storage
     
-    Bus.clear_subscriptions()
+    monkeypatch.setattr(Bus, "_subscriptions", defaultdict(list))
+    monkeypatch.setattr(Bus, "_global_callback", None)
     
     # Clear storage before test
     await Storage.init()
@@ -29,7 +31,6 @@ async def cleanup():
     keys = await Storage.list_keys(prefix="todo:")
     for key in keys:
         await Storage.delete(key)
-    Bus.clear_subscriptions()
 
 
 @pytest.mark.asyncio
@@ -85,6 +86,30 @@ async def test_get_empty_todos():
     """Test getting todos when none exist"""
     todos = await Todo.get("nonexistent_session")
     assert todos == []
+
+
+@pytest.mark.asyncio
+async def test_snapshot_distinguishes_missing_state_and_explicit_clear():
+    session_id = "test_snapshot"
+    assert await Todo.get_snapshot(session_id) is None
+    assert await Todo.get(session_id) == []
+    await Todo.update(session_id, [TodoInfo(id="1", content="Task")])
+    assert (await Todo.get_snapshot(session_id))[0].content == "Task"
+    await Todo.clear(session_id)
+    assert await Todo.get_snapshot(session_id) == []
+    assert await Todo.get(session_id) == []
+
+
+@pytest.mark.asyncio
+async def test_snapshot_reads_storage_once():
+    from unittest.mock import AsyncMock, patch
+
+    with patch.object(Storage, "get", new=AsyncMock(return_value=[])) as get:
+        assert await Todo.get_snapshot("test_snapshot") == []
+    get.assert_awaited_once_with("todo:test_snapshot")
+    with patch.object(Storage, "get", new=AsyncMock(return_value=None)) as get:
+        assert await Todo.get("test_snapshot") == []
+    get.assert_awaited_once_with("todo:test_snapshot")
 
 
 @pytest.mark.asyncio
@@ -242,3 +267,28 @@ async def test_todo_event_published():
     assert received[0]["type"] == "todo.updated"
     assert received[0]["properties"]["sessionID"] == session_id
     assert len(received[0]["properties"]["todos"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_todo_update_publishes_web_event_without_affecting_storage():
+    """WebUI progress receives todo.updated after the durable write succeeds."""
+    from unittest.mock import AsyncMock, patch
+
+    publish_event = AsyncMock()
+    todos = [TodoInfo(id="1", content="Test", status="in_progress")]
+    with patch("flocks.server.routes.event.publish_event", new=publish_event):
+        await Todo.update("test_web_event", todos)
+
+    publish_event.assert_awaited_once_with(
+        "todo.updated",
+        {
+            "sessionID": "test_web_event",
+            "todos": [{
+                "id": "1",
+                "content": "Test",
+                "status": "in_progress",
+                "priority": "medium",
+            }],
+        },
+    )
+    assert await Todo.get("test_web_event") == todos

@@ -284,6 +284,12 @@ class McpServerManager:
         """
         registered = 0
 
+        # Built-in tools must be loaded before MCP tools are added, otherwise
+        # name-conflict detection in the adapter cannot see them and a later
+        # registry init would silently replace the MCP tools.
+        from flocks.tool import ToolRegistry
+        await ToolRegistry.init_async()
+
         for mcp_tool in tools:
             try:
                 # Convert to Flocks Tool
@@ -339,6 +345,25 @@ class McpServerManager:
         """Return current status without triggering MCP initialization."""
         return self._status.copy(), self._initialized
 
+    async def resources(self) -> Dict[str, McpResource]:
+        """Aggregate resources across all connected servers, keyed by URI.
+
+        Used by ``GET /api/mcp/resources``. Keys are the resource URIs; when the
+        same URI is exposed by more than one server it is namespaced as
+        ``<server>:<uri>`` so entries never overwrite each other.
+        """
+        if not self._initialized:
+            await self.init()
+
+        aggregated: Dict[str, McpResource] = {}
+        for resources in self._resources_cache.values():
+            for resource in resources:
+                key = str(resource.uri)
+                if key in aggregated:
+                    key = f"{resource.server}:{key}"
+                aggregated[key] = resource
+        return aggregated
+
     async def get_server_info(self, name: str) -> Optional[McpServerInfo]:
         """
         Get detailed server information
@@ -373,6 +398,10 @@ class McpServerManager:
         """
         async with self._lock:
             try:
+                if name in self._clients:
+                    # Re-connect: tear down the previous client first so its
+                    # subprocess / session and registered tools are not leaked.
+                    await self._disconnect_locked(name)
                 self._configs[name] = config  # save for potential retry
                 await self._connect_and_register(name, config)
                 return True
@@ -394,36 +423,40 @@ class McpServerManager:
             True if disconnection successful
         """
         async with self._lock:
-            if name not in self._clients:
-                return False
+            return await self._disconnect_locked(name)
 
-            try:
-                # Unregister tools
-                tool_names = McpToolRegistry.untrack_server(name)
-                from flocks.tool import ToolRegistry
-                for tool_name in tool_names:
-                    ToolRegistry.unregister(tool_name)
+    async def _disconnect_locked(self, name: str) -> bool:
+        """Disconnect ``name``; caller must hold ``self._lock``."""
+        if name not in self._clients:
+            return False
 
-                # Disconnect client
-                client = self._clients.pop(name)
-                await client.disconnect()
+        try:
+            # Unregister tools
+            tool_names = McpToolRegistry.untrack_server(name)
+            from flocks.tool import ToolRegistry
+            for tool_name in tool_names:
+                ToolRegistry.unregister(tool_name)
 
-                # Clear cache
-                self._tools_cache.pop(name, None)
-                self._resources_cache.pop(name, None)
+            # Disconnect client
+            client = self._clients.pop(name)
+            await client.disconnect()
 
-                # Update status
-                self._status[name] = McpStatusInfo(status=McpStatus.DISCONNECTED)
+            # Clear cache
+            self._tools_cache.pop(name, None)
+            self._resources_cache.pop(name, None)
 
-                log.info("mcp.disconnected", {"server": name})
-                return True
+            # Update status
+            self._status[name] = McpStatusInfo(status=McpStatus.DISCONNECTED)
 
-            except Exception as e:
-                log.error("mcp.disconnect_error", {
-                    "server": name,
-                    "error": str(e)
-                })
-                return False
+            log.info("mcp.disconnected", {"server": name})
+            return True
+
+        except Exception as e:
+            log.error("mcp.disconnect_error", {
+                "server": name,
+                "error": str(e)
+            })
+            return False
 
     async def remove(self, name: str) -> bool:
         """

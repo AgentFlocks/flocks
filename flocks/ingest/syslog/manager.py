@@ -23,6 +23,7 @@ from flocks.workflow.fs_store import read_workflow_from_fs
 from flocks.workflow.models import Workflow
 from flocks.workflow.runner import run_workflow
 from flocks.workflow.store import WorkflowStore
+from flocks.workflow.ownership import execution_cancelled
 from flocks.workflow.tool_context import (
     build_workflow_tool_context,
     cleanup_workflow_tool_context,
@@ -41,7 +42,7 @@ from flocks.workflow.triggers.models import (
 log = Log.create(service="syslog.manager")
 
 
-# Maximum concurrent workflow executions per workflow to avoid FD exhaustion and SQLite write contention
+# Maximum concurrent workflow executions per workflow to avoid FD exhaustion and database contention
 _MAX_CONCURRENT_EXECUTIONS = 8
 # Maximum number of buffered syslog messages per workflow; excess messages are dropped with a warning.
 # Increased from 200 to 1000 to absorb larger inbound bursts before the worker pool catches up.
@@ -335,10 +336,13 @@ class SyslogManager:
             err = "workflow_not_found"
             if startup:
                 self._listener_status[workflow_id] = {"state": "stopped", "error": err}
-                log.info("syslog.workflow_not_found_on_start", {
-                    "workflow_id": workflow_id,
-                    "action": "stale_config_skipped",
-                })
+                log.info(
+                    "syslog.workflow_not_found_on_start",
+                    {
+                        "workflow_id": workflow_id,
+                        "action": "stale_config_skipped",
+                    },
+                )
                 return {"state": "stopped", "error": err}
             self._listener_status[workflow_id] = {"state": "failed", "error": err}
             log.warning("syslog.workflow_not_found", {"workflow_id": workflow_id})
@@ -466,39 +470,35 @@ class SyslogManager:
                 throttle.maybe_flush()
 
         async def _bind_and_serve() -> None:
-            """Bind the socket synchronously then mark the listener ready.
+            """Serve the socket and flip ``ready`` once the bind really happened.
 
-            ``run_udp_syslog_server`` / ``run_tcp_syslog_server`` create the
-            endpoint at the top of their body and then await abort; we wrap
-            them with a tiny helper so we can flip the ``ready`` flag
-            *after* the bind has succeeded.  Bind failures are caught by the
-            outer ``try`` below and reported back as ``state="failed"``.
+            ``run_udp_syslog_server`` / ``run_tcp_syslog_server`` invoke
+            ``on_bound`` right after the endpoint exists.  Guessing with "one
+            event-loop tick" was wrong whenever the loop had to resolve the
+            host first (hostnames, malformed literals such as ``999.1.1.1``):
+            the bind result arrived later than the tick and the route
+            reported ``listening`` for a socket that then failed.  Bind
+            failures are caught by the outer ``try`` below and reported back
+            as ``state="failed"``.
             """
-            # We rely on the underlying asyncio APIs raising OSError before
-            # they yield control, so wrapping the call alone is enough.  We
-            # additionally schedule a single-shot "mark ready" task that
-            # runs on the next event-loop tick — by which point the bind has
-            # either succeeded or raised.
-            mark_task = asyncio.create_task(_mark_ready_after_bind())
             flush_task = asyncio.create_task(_periodic_drop_flush())
             try:
                 if protocol == "tcp":
-                    await run_tcp_syslog_server(host, port, format_hint, on_msg, abort_event=abort)
+                    await run_tcp_syslog_server(
+                        host, port, format_hint, on_msg, abort_event=abort, on_bound=_mark_listening
+                    )
                 else:
-                    await run_udp_syslog_server(host, port, format_hint, on_msg, abort_event=abort)
+                    await run_udp_syslog_server(
+                        host, port, format_hint, on_msg, abort_event=abort, on_bound=_mark_listening
+                    )
             finally:
-                if not mark_task.done():
-                    mark_task.cancel()
                 if not flush_task.done():
                     flush_task.cancel()
                 # Best-effort: emit any leftover drop count on shutdown so a
                 # tail of dropped messages isn't silently lost.
                 throttle.flush_remaining()
 
-        async def _mark_ready_after_bind() -> None:
-            # Give the bind one event-loop tick to complete (or raise) so we
-            # don't claim "listening" before the socket actually exists.
-            await asyncio.sleep(0)
+        def _mark_listening() -> None:
             if not ready.is_set():
                 self._listener_status[workflow_id] = {
                     "state": "listening",
@@ -553,9 +553,7 @@ class SyslogManager:
         of in-flight workflow runs is exactly ``_MAX_CONCURRENT_EXECUTIONS``.
         """
         run_cancel_event = (
-            generation_cancel_event
-            or self._generation_cancel_events.get(workflow_id)
-            or threading.Event()
+            generation_cancel_event or self._generation_cancel_events.get(workflow_id) or threading.Event()
         )
         while not abort.is_set():
             try:
@@ -620,13 +618,7 @@ class SyslogManager:
                 input_params=summarized_inputs,
             )
             exec_id = exec_data["id"]
-            loop = asyncio.get_running_loop()
-            step_recorder = ExecutionStepRecorder(
-                exec_id=exec_id,
-                loop=loop,
-                logger=log,
-                log_event="syslog.execution_step.write_failed",
-            )
+            step_recorder = ExecutionStepRecorder()
             start_time = time.time()
             trigger_meta = mapped_inputs.get("_flocks", {}).get("trigger", {})
             tool_context = None
@@ -642,7 +634,7 @@ class SyslogManager:
                     run_id=exec_id,
                     trace=False,
                     execution_profile="high_frequency",
-                    cancel=run_cancel_event.is_set,
+                    cancel=lambda: run_cancel_event.is_set() or execution_cancelled(exec_id),
                     on_step_complete=step_recorder.on_step_complete,
                     tool_context=tool_context,
                 )
@@ -692,9 +684,15 @@ class SyslogManager:
                     }
                 )
             finally:
+                steps = step_recorder.take_steps()
                 await cleanup_workflow_tool_context(tool_context)
                 try:
-                    await record_execution_result(workflow_id, exec_id, exec_data)
+                    await record_execution_result(
+                        workflow_id,
+                        exec_id,
+                        exec_data,
+                        steps=steps,
+                    )
                 except Exception as exc:
                     log.warning("syslog.exec_record_failed", {"exec_id": exec_id, "error": str(exc)})
             return exec_data
@@ -706,6 +704,15 @@ class SyslogManager:
                 "workflow_id": workflow_id,
                 "trigger": trigger,
                 "event": event,
+                # The listener itself is the authenticated ingress here; ingress
+                # policies read the legacy-compat carrier from the top level
+                # (the metadata copy feeds the action recheck), so keep both.
+                "legacy_compat": True,
+                "evidence": {
+                    "auth_scheme": "syslog",
+                    "trigger_id": trigger.id,
+                    "trigger_type": trigger.type,
+                },
                 "metadata": {
                     "legacy_compat": True,
                     "trigger_type": "syslog",

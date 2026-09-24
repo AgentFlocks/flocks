@@ -249,6 +249,14 @@ class LSPClient:
                 del client._pending_requests[request_id]
             return
         
+        # Server -> client request: it carries an id and the server blocks on
+        # the reply. pyright, for one, sends workspace/configuration right
+        # after initialize and will not answer textDocument/hover until it
+        # gets a response, so silently dropping these hangs every later call.
+        if "method" in message and "id" in message:
+            await cls._handle_server_request(client, message)
+            return
+        
         # Notification
         if "method" in message:
             method = message["method"]
@@ -256,12 +264,37 @@ class LSPClient:
             
             if method == "textDocument/publishDiagnostics":
                 await cls._handle_diagnostics(client, params)
-            elif method == "window/workDoneProgress/create":
-                # Acknowledge progress creation
-                pass
-            elif method == "workspace/configuration":
-                # Return empty config
-                pass
+    
+    @classmethod
+    async def _handle_server_request(cls, client: LSPClientInfo, message: Dict[str, Any]) -> None:
+        """Answer a request the server made of us (JSON-RPC requires a reply)."""
+        method = message["method"]
+        params = message.get("params") or {}
+        request_id = message["id"]
+        
+        if method == "workspace/configuration":
+            # One entry per requested item; null means "no client-side setting,
+            # use your defaults". Anything we do want the server to know went
+            # out as initializationOptions / didChangeConfiguration already.
+            items = params.get("items") or []
+            result: Any = [None] * len(items)
+        elif method in ("client/registerCapability", "client/unregisterCapability",
+                        "window/workDoneProgress/create", "window/showMessageRequest"):
+            result = None
+        elif method == "workspace/workspaceFolders":
+            result = [{"name": "workspace", "uri": f"file://{quote(client.root)}"}]
+        elif method == "workspace/applyEdit":
+            result = {"applied": False}
+        else:
+            log.warn("lsp.client.unhandled_request", {"server_id": client.server_id, "method": method})
+            await cls._send(client, {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "error": {"code": -32601, "message": f"Method not found: {method}"},
+            })
+            return
+        
+        await cls._send(client, {"jsonrpc": "2.0", "id": request_id, "result": result})
     
     @classmethod
     async def _handle_diagnostics(cls, client: LSPClientInfo, params: Dict[str, Any]) -> None:

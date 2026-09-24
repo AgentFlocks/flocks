@@ -21,16 +21,16 @@ import {
   applyEdgeChanges,
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
-import { 
-  Save, 
-  Play, 
-  ArrowLeft, 
-  Layout, 
-  FileJson,
-  AlertCircle,
-  CheckCircle,
-  Trash2,
-} from 'lucide-react';
+import {
+  IconDeviceFloppy,
+  IconPlayerPlay,
+  IconArrowLeft,
+  IconLayout,
+  IconFileCode,
+  IconAlertCircle,
+  IconCircleCheck,
+  IconTrash,
+} from '@tabler/icons-react';
 import { workflowAPI, Workflow, WorkflowExecution, WorkflowJSON, WorkflowNode as APINode } from '@/api/workflow';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
 import { ThemeContext } from '@/contexts/ThemeContext';
@@ -57,6 +57,7 @@ import SubworkflowNode from './nodes/SubworkflowNode';
 import PropertyPanel from './components/PropertyPanel';
 import EdgePropertyPanel from './components/EdgePropertyPanel';
 import NodeToolbar from './components/NodeToolbar';
+import { isTextEditingTarget, removeNodesWithEdges } from './graphEditing';
 import ExecutionPanel from './components/ExecutionPanel';
 import ExecuteDialog from './components/ExecuteDialog';
 
@@ -602,12 +603,31 @@ export default function WorkflowEditor() {
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Delete' || event.key === 'Backspace') {
-        // 删除选中的节点
+        // 在属性面板的输入框里退格是在改文字，不是删节点
+        if (isTextEditingTarget(event.target)) {
+          return;
+        }
+        // 删除选中的节点，连带删掉挂在它上面的边（否则保存时会带上指向已删节点的悬空边）
         const selectedNodes = nodes.filter((node) => node.selected);
         if (selectedNodes.length > 0) {
-          setNodes((nds) => nds.filter((node) => !node.selected));
+          const { nodes: remainingNodes, edges: remainingEdges } = removeNodesWithEdges(
+            nodes,
+            edges,
+            selectedNodes.map((node) => node.id),
+          );
+          if (workflow) {
+            const refreshed = applyGraphSemantics(remainingNodes, remainingEdges, workflow, edgeTheme);
+            setNodes(refreshed.nodes);
+            setEdges(refreshed.edges);
+          } else {
+            setNodes(remainingNodes);
+            setEdges(remainingEdges);
+          }
           setShowPropertyPanel(false);
           setSelectedNode(null);
+          setShowEdgePropertyPanel(false);
+          setSelectedEdge(null);
+          return;
         }
 
         // 删除选中的边
@@ -789,7 +809,7 @@ export default function WorkflowEditor() {
     return (
       <div className="flex items-center justify-center h-screen">
         <div className="text-center">
-          <AlertCircle className="w-16 h-16 text-red-500 mx-auto mb-4" />
+          <IconAlertCircle aria-hidden="true" className="w-16 h-16 text-red-500 mx-auto mb-4" />
           <p className="text-gray-600">{t('editor.notFound')}</p>
           <button
             onClick={() => navigate('/workflows')}
@@ -805,13 +825,13 @@ export default function WorkflowEditor() {
   return (
     <div className="h-screen flex flex-col bg-gray-50 dark:bg-zinc-950">
       {/* 顶部工具栏 */}
-      <div className="bg-white border-b border-gray-200 px-6 py-4 flex items-center justify-between dark:border-zinc-800 dark:bg-zinc-950">
-        <div className="flex items-center gap-4">
+      <div className="bg-white border-b border-gray-200 pl-14 pr-6 py-4 flex flex-wrap items-center justify-between gap-y-2 dark:border-zinc-800 dark:bg-zinc-950 lg:pl-6">
+        <div className="flex items-center gap-4 min-w-0">
           <button
             onClick={() => navigate('/workflows')}
             className="p-2 hover:bg-gray-100 rounded-lg transition-colors dark:text-zinc-300 dark:hover:bg-zinc-800"
           >
-            <ArrowLeft className="w-5 h-5" />
+            <IconArrowLeft aria-hidden="true" className="w-5 h-5" />
           </button>
           <div>
             <h1 className="text-xl font-semibold text-gray-900 dark:text-zinc-100">{getWorkflowDisplayName(workflow, i18n.language)}</h1>
@@ -820,9 +840,9 @@ export default function WorkflowEditor() {
           {validationResult && (
             <div className="flex items-center gap-2">
               {validationResult.valid ? (
-                <CheckCircle className="w-5 h-5 text-green-600" />
+                <IconCircleCheck aria-hidden="true" className="w-5 h-5 text-green-600" />
               ) : (
-                <AlertCircle className="w-5 h-5 text-red-600" />
+                <IconAlertCircle aria-hidden="true" className="w-5 h-5 text-red-600" />
               )}
               <span className={`text-sm ${validationResult.valid ? 'text-green-600' : 'text-red-600'}`}>
                 {validationResult.valid ? t('editor.validPass') : t('editor.validFail')}
@@ -831,35 +851,35 @@ export default function WorkflowEditor() {
           )}
         </div>
 
-        <div className="flex items-center gap-3">
+        <div className="flex flex-wrap items-center gap-3">
           <button
             onClick={() => setShowNodeToolbar(!showNodeToolbar)}
             className={`flex items-center gap-2 px-4 py-2 border border-gray-300 rounded-lg transition-colors ${
               showNodeToolbar ? 'bg-red-50 text-red-700 border-red-500 dark:bg-red-950/30 dark:text-red-200 dark:border-red-500/40' : 'text-gray-700 bg-white hover:bg-gray-50 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200 dark:hover:bg-zinc-800'
             }`}
           >
-            <Trash2 className="w-4 h-4" />
+            <IconTrash aria-hidden="true" className="w-4 h-4" />
             {showNodeToolbar ? t('editor.hideToolbar') : t('editor.showToolbar')}
           </button>
           <button
             onClick={handleAutoLayout}
             className="flex items-center gap-2 px-4 py-2 text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200 dark:hover:bg-zinc-800"
           >
-            <Layout className="w-4 h-4" />
+            <IconLayout aria-hidden="true" className="w-4 h-4" />
             {t('editor.autoLayout')}
           </button>
           <button
             onClick={handleValidate}
             className="flex items-center gap-2 px-4 py-2 text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200 dark:hover:bg-zinc-800"
           >
-            <CheckCircle className="w-4 h-4" />
+            <IconCircleCheck aria-hidden="true" className="w-4 h-4" />
             {t('editor.validate')}
           </button>
           <button
             onClick={handleExport}
             className="flex items-center gap-2 px-4 py-2 text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200 dark:hover:bg-zinc-800"
           >
-            <FileJson className="w-4 h-4" />
+            <IconFileCode aria-hidden="true" className="w-4 h-4" />
             {t('editor.export')}
           </button>
           <button
@@ -867,14 +887,14 @@ export default function WorkflowEditor() {
             disabled={saving}
             className="flex items-center gap-2 px-4 py-2 text-white bg-red-600 rounded-lg hover:bg-red-700 transition-colors disabled:opacity-50"
           >
-            <Save className="w-4 h-4" />
+            <IconDeviceFloppy aria-hidden="true" className="w-4 h-4" />
             {saving ? t('editor.saving') : t('common:button.save')}
           </button>
           <button
             onClick={handleRun}
-            className="flex items-center gap-2 px-4 py-2 text-white bg-green-600 rounded-lg hover:bg-green-700 transition-colors"
+            className="ui-btn"
           >
-            <Play className="w-4 h-4" />
+            <IconPlayerPlay aria-hidden="true" className="w-4 h-4" />
             {t('editor.execute')}
           </button>
         </div>
@@ -960,7 +980,8 @@ export default function WorkflowEditor() {
             style={{ backgroundColor: isDark ? '#303842' : '#f9fafb' }}
           />
           
-          {/* 图例 */}
+          {/* 图例（工具栏展开时由工具栏的节点类型列表替代，避免两者叠在左上角） */}
+          {!showNodeToolbar && (
           <Panel position="top-left" className="bg-white rounded-lg shadow-lg p-4 dark:border dark:border-zinc-800 dark:bg-zinc-900 dark:shadow-xl dark:shadow-black/30">
             <h3 className="text-sm font-semibold text-gray-900 mb-3 dark:text-zinc-100">{t('editor.nodeTypesLabel')}</h3>
             <div className="space-y-2">
@@ -972,6 +993,7 @@ export default function WorkflowEditor() {
               ))}
             </div>
           </Panel>
+          )}
 
           {/* 统计信息 */}
           <Panel position="top-right" className="bg-white rounded-lg shadow-lg p-4 dark:border dark:border-zinc-800 dark:bg-zinc-900 dark:shadow-xl dark:shadow-black/30">

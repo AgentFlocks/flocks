@@ -26,6 +26,11 @@ from flocks.utils.log import Log
 log = Log.create(service="security.secrets")
 
 
+def get_mcp_secret_id(server_name: str) -> str:
+    """Return the canonical MCP secret ID without duplicating an `_mcp` suffix."""
+    return f"{server_name}_key" if server_name.endswith("_mcp") else f"{server_name}_mcp_key"
+
+
 class SecretManager:
     """
     Flat KV secret manager using plain JSON file

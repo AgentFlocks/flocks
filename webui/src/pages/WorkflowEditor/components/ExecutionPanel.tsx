@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { X, Play, CheckCircle, XCircle, Clock, Code, FileText, StopCircle } from 'lucide-react';
+import { IconX, IconPlayerPlay, IconCircleCheck, IconCircleX, IconClock, IconCode, IconFileText, IconPlayerStop } from '@tabler/icons-react';
 import { WorkflowExecution } from '@/api/workflow';
 
 interface ExecutionPanelProps {
@@ -27,35 +27,35 @@ export default function ExecutionPanel({
 
   const statusConfig = {
     running: {
-      icon: Clock,
+      icon: IconClock,
       color: 'text-red-600',
       bg: 'bg-red-50',
       border: 'border-red-500',
       label: t('editor.execution.statusRunning'),
     },
     success: {
-      icon: CheckCircle,
+      icon: IconCircleCheck,
       color: 'text-green-600',
       bg: 'bg-green-50',
       border: 'border-green-500',
       label: t('editor.execution.statusSuccess'),
     },
     error: {
-      icon: XCircle,
+      icon: IconCircleX,
       color: 'text-red-600',
       bg: 'bg-red-50',
       border: 'border-red-500',
       label: t('editor.execution.statusError'),
     },
     timeout: {
-      icon: Clock,
+      icon: IconClock,
       color: 'text-yellow-600',
       bg: 'bg-yellow-50',
       border: 'border-yellow-500',
       label: t('editor.execution.statusTimeout'),
     },
     cancelled: {
-      icon: StopCircle,
+      icon: IconPlayerStop,
       color: 'text-gray-600',
       bg: 'bg-gray-100',
       border: 'border-gray-400',
@@ -75,7 +75,7 @@ export default function ExecutionPanel({
           <h2 className="text-lg font-semibold text-gray-900">{t('editor.execution.title')}</h2>
           
           <div className={`flex items-center gap-2 px-3 py-1 rounded-full border ${config.bg} ${config.border}`}>
-            <Icon className={`w-4 h-4 ${config.color}`} />
+            <Icon aria-hidden="true" className={`w-4 h-4 ${config.color}`} />
             <span className={`text-sm font-medium ${config.color}`}>{config.label}</span>
           </div>
 
@@ -93,7 +93,7 @@ export default function ExecutionPanel({
               disabled={stopping}
               className="flex items-center gap-2 px-3 py-1 text-sm text-red-600 hover:bg-red-50 rounded-lg transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
             >
-              <StopCircle className="w-4 h-4" />
+              <IconPlayerStop aria-hidden="true" className="w-4 h-4" />
               {stopping ? t('detail.run.stopping') : t('editor.execution.stop')}
             </button>
           )}
@@ -102,7 +102,7 @@ export default function ExecutionPanel({
               onClick={onRunAgain}
               className="flex items-center gap-2 px-3 py-1 text-sm text-red-600 hover:bg-red-50 rounded-lg transition-colors"
             >
-              <Play className="w-4 h-4" />
+              <IconPlayerPlay aria-hidden="true" className="w-4 h-4" />
               {t('editor.execution.runAgain')}
             </button>
           )}
@@ -110,7 +110,7 @@ export default function ExecutionPanel({
             onClick={onClose}
             className="p-2 hover:bg-gray-200 rounded-lg transition-colors"
           >
-            <X className="w-5 h-5" />
+            <IconX aria-hidden="true" className="w-5 h-5" />
           </button>
         </div>
       </div>
@@ -125,7 +125,7 @@ export default function ExecutionPanel({
               : 'text-gray-600 hover:text-gray-900'
           }`}
         >
-          <Code className="w-4 h-4 inline mr-2" />
+          <IconCode aria-hidden="true" className="w-4 h-4 inline mr-2" />
           {t('editor.execution.tabResult')}
         </button>
         <button
@@ -136,7 +136,7 @@ export default function ExecutionPanel({
               : 'text-gray-600 hover:text-gray-900'
           }`}
         >
-          <FileText className="w-4 h-4 inline mr-2" />
+          <IconFileText aria-hidden="true" className="w-4 h-4 inline mr-2" />
           {t('editor.execution.tabLog')}
         </button>
       </div>
@@ -214,7 +214,7 @@ export default function ExecutionPanel({
               </div>
             ) : (
               <div className="text-center py-8 text-gray-500">
-                <FileText className="w-12 h-12 mx-auto mb-2 opacity-50" />
+                <IconFileText aria-hidden="true" className="w-12 h-12 mx-auto mb-2 opacity-50" />
                 <p className="text-sm">{t('editor.execution.noLog')}</p>
               </div>
             )}

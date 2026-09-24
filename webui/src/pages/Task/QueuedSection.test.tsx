@@ -216,6 +216,21 @@ describe('QueuedSection', () => {
     });
   });
 
+  it('窄屏下列表靠容器横向滚动，单元格不逐字换行', () => {
+    render(<QueuedSection onRefreshGlobal={vi.fn()} />);
+
+    const table = screen.getByRole('table');
+    // 375px 时 w-full 表格被压缩，状态/来源等短文案会逐字竖排；nowrap 让表格保持自然宽度，
+    // 由 overflow-x-auto 的容器负责横向滚动
+    expect(table.className).toContain('whitespace-nowrap');
+    expect(table.parentElement?.className).toContain('overflow-x-auto');
+
+    // 筛选/批量操作行：窄屏时批量按钮组换行，而不是把「批量取消」逐字竖排
+    const filterRow = screen.getByRole('button', { name: '全部' }).parentElement?.parentElement as HTMLElement;
+    expect(filterRow.className).toContain('flex-wrap');
+    expect(filterRow.className).toContain('whitespace-nowrap');
+  });
+
   it('切换到其他筛选时不会错误保留表头全选状态', async () => {
     const user = userEvent.setup();
 

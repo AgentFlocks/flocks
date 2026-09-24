@@ -15,7 +15,6 @@ async def isolate_session_storage(monkeypatch: pytest.MonkeyPatch, tmp_path: Pat
     data_dir = flocks_root / "data"
     log_dir = flocks_root / "logs"
     record_dir = data_dir / "records"
-    db_path = data_dir / "session-tests.db"
 
     monkeypatch.setenv("FLOCKS_ROOT", str(flocks_root))
     monkeypatch.setenv("FLOCKS_DATA_DIR", str(data_dir))
@@ -29,11 +28,11 @@ async def isolate_session_storage(monkeypatch: pytest.MonkeyPatch, tmp_path: Pat
     Storage._initialized = False
     Storage._db_path = None
 
-    await Storage.init(db_path)
+    await Storage.init()
 
     yield
 
-    await Storage.clear()
+    await Storage.shutdown()
     Config._global_config = None
     Config.clear_cache()
     Storage._initialized = False

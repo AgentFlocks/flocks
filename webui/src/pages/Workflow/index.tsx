@@ -2,14 +2,14 @@ import { useState, useMemo, useEffect, useId, useCallback, useRef } from 'react'
 import { createPortal } from 'react-dom';
 import { useNavigate } from 'react-router-dom';
 import {
-  Workflow as WorkflowIcon,
-  Plus,
-  RefreshCw,
-  Sparkles,
-  FolderOpen,
-  Clock,
-  ChevronRight,
-} from 'lucide-react';
+  IconRouteSquare2 as WorkflowIcon,
+  IconPlus,
+  IconRefresh,
+  IconSparkles,
+  IconFolderOpen,
+  IconClock,
+  IconChevronRight,
+} from '@tabler/icons-react';
 import { useTranslation } from 'react-i18next';
 import PageHeader from '@/components/common/PageHeader';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
@@ -151,15 +151,21 @@ export default function WorkflowPage() {
       <PageHeader
         title={t('pageTitle')}
         description={t('pageDescription')}
-        icon={<WorkflowIcon className="w-8 h-8" />}
+        icon={<WorkflowIcon aria-hidden="true" className="w-8 h-8" />}
         // Refresh / create actions intentionally moved to the toolbar below so
         // the page header stays uniform with Skill/Agent pages and the
         // segmented source filter shares a row with its primary actions.
       />
 
       {/* Toolbar */}
-      <div className="px-4 py-2 border-b border-gray-100 flex items-center gap-3">
-        {/* Source filter — same segmented-control style as Skill / Agent pages */}
+      {/* min-w-0 + overflow-x-auto on the filter: at phone widths the three chips
+          would otherwise squeeze the actions column and wrap the create button
+          character by character. */}
+      <div className="px-4 py-2 border-b border-gray-100 flex flex-wrap items-center gap-3 min-w-0">
+        {/* Source filter — same segmented-control style as Skill / Agent pages.
+            flex-auto keeps the chips on one full-width row (actions wrap below
+            them on phones); the scroll container only kicks in below ~300px. */}
+        <div className="min-w-0 flex-auto overflow-x-auto">
         <div
           role="tablist"
           aria-label={t('filter.aria')}
@@ -190,8 +196,9 @@ export default function WorkflowPage() {
             );
           })}
         </div>
+        </div>
 
-        <div className="ml-auto flex items-center gap-2">
+        <div className="ml-auto flex items-center gap-2 shrink-0">
           <button
             onClick={handleRefresh}
             disabled={refreshing}
@@ -202,13 +209,13 @@ export default function WorkflowPage() {
                 : 'border-gray-200 text-gray-400 hover:bg-gray-50 hover:text-gray-600 disabled:opacity-50'
             }`}
           >
-            <RefreshCw className={`w-3.5 h-3.5 ${refreshing ? 'animate-spin' : ''}`} />
+            <IconRefresh aria-hidden="true" className={`w-3.5 h-3.5 ${refreshing ? 'animate-spin' : ''}`} />
           </button>
           <button
             onClick={openFreshCreate}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors text-sm"
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors text-sm whitespace-nowrap"
           >
-            <Plus className="w-4 h-4" />
+            <IconPlus aria-hidden="true" className="w-4 h-4" />
             {t('createWorkflow')}
           </button>
         </div>
@@ -221,7 +228,7 @@ export default function WorkflowPage() {
       >
         {isEmpty ? (
           <EmptyState
-            icon={<WorkflowIcon className="w-16 h-16" />}
+            icon={<WorkflowIcon aria-hidden="true" className="w-16 h-16" />}
             title={t('emptyState.title')}
             description={t('emptyState.description')}
             action={
@@ -229,7 +236,7 @@ export default function WorkflowPage() {
                 onClick={openFreshCreate}
                 className="inline-flex items-center gap-2 px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700"
               >
-                <Plus className="w-5 h-5" />
+                <IconPlus aria-hidden="true" className="w-5 h-5" />
                 {t('createWorkflow')}
               </button>
             }
@@ -239,14 +246,14 @@ export default function WorkflowPage() {
             {showCustom && (
               <WorkflowSection
                 title={t('section.custom')}
-                icon={<FolderOpen className="w-4 h-4" />}
+                icon={<IconFolderOpen aria-hidden="true" className="w-4 h-4" />}
                 workflows={customWorkflows}
               />
             )}
             {showBuiltin && (
               <WorkflowSection
                 title={t('section.builtin')}
-                icon={<Sparkles className="w-4 h-4" />}
+                icon={<IconSparkles aria-hidden="true" className="w-4 h-4" />}
                 workflows={builtinWorkflows}
               />
             )}
@@ -299,7 +306,7 @@ function WorkflowSection({
 
       {/* Grid — min-height anchors layout to avoid jump when pagination hides rows */}
       <div style={{ minHeight: totalPages > 1 ? 540 : undefined }}>
-        <div className="grid gap-3 grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+        <div className="grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
           {displayed.map(workflow => (
             <WorkflowCard key={workflow.id} workflow={workflow} />
           ))}
@@ -323,6 +330,7 @@ function WorkflowSection({
                 key={p}
                 type="button"
                 onClick={() => setPage(p)}
+                aria-current={p === page ? 'page' : undefined}
                 className={`w-6 h-5 rounded text-[11px] font-medium transition-colors ${
                   p === page ? 'bg-slate-700 text-white' : 'hover:bg-gray-100 text-gray-500'
                 }`}
@@ -371,14 +379,14 @@ function WorkflowCard({ workflow }: { workflow: WorkflowSummary }) {
       onClick={() => navigate(`/workflows/${workflow.id}`)}
       className="group relative bg-white rounded-xl border border-gray-200 flex flex-col
                  overflow-hidden cursor-pointer transition-all duration-150
-                 hover:border-gray-300 hover:shadow-md"
+                 hover:border-gray-300"
     >
       {/* Card body */}
       <div className="flex-1 px-4 pt-3 pb-2 flex flex-col gap-2 min-w-0">
         {/* Avatar + name row */}
         <div className="flex items-start gap-2.5">
           <div className="w-8 h-8 rounded-lg flex items-center justify-center shrink-0 mt-0.5 bg-gray-100">
-            <WorkflowIcon className="w-4 h-4 text-gray-500" />
+            <WorkflowIcon aria-hidden="true" className="w-4 h-4 text-gray-500" />
           </div>
 
           <div className="min-w-0 flex-1">
@@ -405,7 +413,7 @@ function WorkflowCard({ workflow }: { workflow: WorkflowSummary }) {
             </div>
           </div>
 
-          <ChevronRight className="w-4 h-4 text-gray-300 shrink-0 mt-1 group-hover:text-gray-500 transition-colors" />
+          <IconChevronRight aria-hidden="true" className="w-4 h-4 text-gray-300 shrink-0 mt-1 group-hover:text-gray-500 transition-colors" />
         </div>
 
         {/* Description */}
@@ -461,7 +469,7 @@ function WorkflowCard({ workflow }: { workflow: WorkflowSummary }) {
         </div>
         <div>
           <div className="text-base font-bold text-gray-900 tabular-nums flex items-center gap-0.5">
-            <Clock className="w-3 h-3 text-gray-400 shrink-0" />
+            <IconClock aria-hidden="true" className="w-3 h-3 text-gray-400 shrink-0" />
             {workflow.stats.avgRuntime > 0 ? `${workflow.stats.avgRuntime.toFixed(1)}s` : '—'}
           </div>
           <div className="text-[10px] text-gray-500">{t('stats.avgRuntime')}</div>

@@ -6,13 +6,17 @@ import json
 import os
 import pickle
 import re
-import sqlite3
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
+
+from flocks.db import sync_query
+from flocks.workflow.soc_store import SOCWriteCapability, ensure_schema, persist_triage_alerts
+
+requires_pg = pytest.mark.skipif(not os.getenv("FLOCKS_TEST_PG_DSN"), reason="requires isolated PostgreSQL")
 
 
 WORKFLOW_PATH = (
@@ -46,6 +50,7 @@ def _load_functions(*names: str) -> dict[str, object]:
     namespace: dict[str, object] = {
         "_datetime": datetime_module,
         "inputs": {"loaded_files": []},
+        "soc": SOCWriteCapability(),
         "json": json,
         "os": os,
         "pickle": pickle,
@@ -234,8 +239,8 @@ def test_soc_db_persistence_uses_filtered_first_seen_alerts() -> None:
     ]
 
     assert len(write_calls) == 1
-    assert isinstance(write_calls[0].args[1], ast.Name)
-    assert write_calls[0].args[1].id == "first_seen_soc_alerts"
+    assert isinstance(write_calls[0].args[0], ast.Name)
+    assert write_calls[0].args[0].id == "first_seen_soc_alerts"
 
 
 def test_apply_triage_fields_preserves_original_alert_fields() -> None:
@@ -306,18 +311,14 @@ def test_cache_save_failure_is_reraised_and_cleans_unique_temp_file(tmp_path: Pa
     assert not list(tmp_path.glob("cache-target.*.tmp"))
 
 
+@requires_pg
 def test_soc_db_merge_preserves_original_attack_fields_and_updates_triage_fields() -> None:
-    merge_record = _load_functions("_merge_triage_record")["_merge_triage_record"]
-
-    merged = merge_record(
-        {
-            "attack_success": True,
-            "attack_verdict": "attack_success",
-            "threat_result": "success",
-        },
-        {"triage_attack_success": "unknown", "triage_attack_verdict": "non_attack"},
-    )
-
+    original = {"dedup_key": "original", "is_duplicate": False, "attack_success": True,
+                "attack_verdict": "attack_success", "threat_result": "success"}
+    persist_triage_alerts([original], "original")
+    persist_triage_alerts([{**original, "triage_attack_success": "unknown", "triage_attack_verdict": "non_attack"}], "updated")
+    with sync_query.connect(readonly=True) as connection:
+        merged = json.loads(connection.execute("SELECT record_json FROM alert_records WHERE dedup_key=?", ("original",)).fetchone()[0])
     assert merged["attack_success"] is True
     assert merged["attack_verdict"] == "attack_success"
     assert merged["threat_result"] == "success"
@@ -425,22 +426,9 @@ def test_current_triage_cache_requires_the_two_field_schema() -> None:
     )
 
 
-def test_soc_db_writer_receives_only_selected_first_seen_alerts(tmp_path: Path) -> None:
-    functions = _load_functions(
-        "_input_bool",
-        "_select_first_seen_soc_alerts",
-        "_ensure_soc_db_schema",
-        "_event_time_value",
-        "_asset_date_value",
-        "_source_type_value",
-        "_record_id_value",
-        "_stable_row_id",
-        "_load_existing_soc_rows",
-        "_merge_triage_record",
-        "_triage_write_soc_db",
-    )
-    select_alerts = functions["_select_first_seen_soc_alerts"]
-    write_soc_db = functions["_triage_write_soc_db"]
+@requires_pg
+def test_soc_db_writer_receives_only_selected_first_seen_alerts() -> None:
+    functions = _load_functions("_input_bool", "_select_first_seen_soc_alerts", "_triage_write_soc_db")
     alerts = [
         {"dedup_key": "first", "is_duplicate": False, "id": "1", "time": 1784026800},
         {"dedup_key": "first", "is_duplicate": False, "id": "2", "time": 1784026801},
@@ -448,255 +436,68 @@ def test_soc_db_writer_receives_only_selected_first_seen_alerts(tmp_path: Path) 
         {"dedup_key": "second", "is_duplicate": False, "id": "4", "time": 1784026803},
         {"is_duplicate": False, "id": "missing-key", "time": 1784026804},
     ]
-
-    selected, stats = select_alerts(alerts)
-    db_path = tmp_path / "soc.db"
-    result = write_soc_db(str(db_path), selected, "first-seen-test")
-
-    with sqlite3.connect(db_path) as connection:
-        records = connection.execute(
-            "SELECT is_duplicate, json_extract(record_json, '$.dedup_key') "
-            "FROM alert_records ORDER BY event_time"
-        ).fetchall()
-
+    selected, stats = functions["_select_first_seen_soc_alerts"](alerts)
+    result = functions["_triage_write_soc_db"](selected, "first-seen-test")
+    with sync_query.connect(readonly=True) as connection:
+        records = connection.execute("SELECT is_duplicate, record_json->>'dedup_key' FROM alert_records ORDER BY event_time").fetchall()
     assert stats["first_seen_rows"] == 2
     assert result["rows"] == 2
-    assert records == [(0, "first"), (0, "second")]
+    assert [tuple(row) for row in records] == [(0, "first"), (0, "second")]
 
 
-def test_soc_db_keeps_one_dedup_key_across_runs_and_preserves_first_event(tmp_path: Path) -> None:
-    functions = _load_functions(
-        "_input_bool",
-        "_select_first_seen_soc_alerts",
-        "_ensure_soc_db_schema",
-        "_event_time_value",
-        "_asset_date_value",
-        "_source_type_value",
-        "_record_id_value",
-        "_stable_row_id",
-        "_load_existing_soc_rows",
-        "_merge_triage_record",
-        "_triage_write_soc_db",
-    )
-    select_alerts = functions["_select_first_seen_soc_alerts"]
-    write_soc_db = functions["_triage_write_soc_db"]
-    db_path = tmp_path / "soc.db"
-    first = {
-        "dedup_key": "same-key",
-        "is_duplicate": False,
-        "id": "same-id",
-        "time": 1784026800,
-        "source_file": "/source/first.jsonl",
-        "triage_report": "first report",
-        "triage_status": "ok",
-    }
-    replay = {
-        **first,
-        "time": 1784027800,
-        "source_file": "/source/replay.jsonl",
-        "triage_report": "updated report",
-    }
-
-    first_result = write_soc_db(str(db_path), select_alerts([first])[0], "first-run")
-    replay_result = write_soc_db(str(db_path), select_alerts([replay])[0], "replay-run")
-
-    with sqlite3.connect(db_path) as connection:
-        row = connection.execute(
-            "SELECT COUNT(*), event_time, source_file, "
-            "json_extract(record_json, '$.time'), "
-            "json_extract(record_json, '$.triage_report'), "
-            "json_extract(record_json, '$._triage_run_id') "
-            "FROM alert_records WHERE dedup_key = 'same-key'"
-        ).fetchone()
-        indexes = {item[1] for item in connection.execute("PRAGMA index_list(alert_records)")}
-
-    assert row == (
-        1,
-        1784026800,
-        "/source/first.jsonl",
-        1784026800,
-        "updated report",
-        "replay-run",
-    )
-    assert first_result["inserted_rows"] == 1
-    assert first_result["updated_rows"] == 0
-    assert replay_result["inserted_rows"] == 0
-    assert replay_result["updated_rows"] == 1
+@requires_pg
+def test_soc_db_keeps_one_dedup_key_across_runs_and_preserves_first_event() -> None:
+    write_soc_db = _load_functions("_triage_write_soc_db")["_triage_write_soc_db"]
+    first = {"dedup_key": "same-key", "is_duplicate": False, "id": "same-id", "time": 1784026800,
+             "source_file": "/source/first.jsonl", "triage_report": "first report", "triage_status": "ok"}
+    replay = {**first, "time": 1784027800, "source_file": "/source/replay.jsonl", "triage_report": "updated report"}
+    first_result = write_soc_db([first], "first-run")
+    replay_result = write_soc_db([replay], "replay-run")
+    with sync_query.connect(readonly=True) as connection:
+        rows = connection.execute("SELECT event_time, source_file, (record_json->>'time')::bigint, record_json->>'triage_report', record_json->>'_triage_run_id' FROM alert_records WHERE dedup_key=?", ("same-key",)).fetchall()
+        indexes = {row[0] for row in connection.execute("SELECT indexname FROM pg_indexes WHERE schemaname=current_schema() AND tablename=?", ("alert_records",)).fetchall()}
+    assert [tuple(row) for row in rows] == [(1784026800, "/source/first.jsonl", 1784026800, "updated report", "replay-run")]
+    assert first_result["inserted_rows"] == 1 and first_result["updated_rows"] == 0
+    assert replay_result["inserted_rows"] == 0 and replay_result["updated_rows"] == 1
     assert "idx_alert_records_first_seen_dedup_key" in indexes
 
 
-def test_soc_db_schema_migrates_legacy_rows_and_removes_duplicate_keys(tmp_path: Path) -> None:
-    ensure_schema = _load_functions("_ensure_soc_db_schema")["_ensure_soc_db_schema"]
-    db_path = tmp_path / "legacy-soc.db"
-    follower_record = json.dumps(
-        {"dedup_key": "legacy-key", "is_duplicate": True, "marker": "follower"}
-    )
-    first_seen_record = json.dumps(
-        {"dedup_key": "legacy-key", "is_duplicate": False, "marker": "first-seen"}
-    )
-    orphan_duplicate_record = json.dumps(
-        {"dedup_key": "orphan-key", "is_duplicate": True, "marker": "orphan-duplicate"}
-    )
-
-    with sqlite3.connect(db_path) as connection:
-        connection.execute(
-            """
-            CREATE TABLE alert_records (
-                row_id TEXT PRIMARY KEY,
-                record_id TEXT,
-                asset_date TEXT NOT NULL,
-                source_file TEXT NOT NULL,
-                line_number INTEGER NOT NULL,
-                event_time INTEGER,
-                source_type TEXT,
-                threat_name TEXT,
-                is_duplicate INTEGER NOT NULL DEFAULT 0,
-                record_json TEXT NOT NULL
-            )
-            """
-        )
-        connection.executemany(
-            """
-            INSERT INTO alert_records (
-                row_id, record_id, asset_date, source_file, line_number,
-                event_time, source_type, threat_name, is_duplicate, record_json
-            ) VALUES (?, '', '2026-07-14', ?, 1, ?, '', '', ?, ?)
-            """,
-            [
-                ("follower-row", "/source/follower.jsonl", 100, 1, follower_record),
-                ("first-seen-row", "/source/first-seen.jsonl", 200, 0, first_seen_record),
-                (
-                    "orphan-duplicate-row",
-                    "/source/orphan-duplicate.jsonl",
-                    300,
-                    1,
-                    orphan_duplicate_record,
-                ),
-            ],
-        )
-
-        ensure_schema(connection)
-        connection.commit()
-
-        rows = connection.execute(
-            "SELECT row_id, dedup_key, is_duplicate, json_extract(record_json, '$.marker') "
-            "FROM alert_records"
-        ).fetchall()
-        indexes = {item[1] for item in connection.execute("PRAGMA index_list(alert_records)")}
-
-    assert rows == [("first-seen-row", "legacy-key", 0, "first-seen")]
-    assert "idx_alert_records_first_seen_dedup_key" in indexes
+@requires_pg
+def test_soc_db_schema_refuses_conflicts_without_removing_rows() -> None:
+    import asyncpg
+    with sync_query.connect() as connection:
+        connection.execute("CREATE TABLE alert_records (row_id TEXT PRIMARY KEY, dedup_key TEXT, asset_date TEXT, event_time BIGINT)")
+        connection.executemany("INSERT INTO alert_records(row_id,dedup_key) VALUES(?,?)", [("first", "same"), ("second", "same")])
+    with pytest.raises(asyncpg.UniqueViolationError):
+        ensure_schema()
+    with sync_query.connect(readonly=True) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM alert_records WHERE dedup_key=?", ("same",)).fetchone()[0] == 2
 
 
-def test_soc_db_schema_removes_duplicate_survivors_from_prior_migration(tmp_path: Path) -> None:
-    ensure_schema = _load_functions("_ensure_soc_db_schema")["_ensure_soc_db_schema"]
-    db_path = tmp_path / "previously-migrated-soc.db"
-
-    with sqlite3.connect(db_path) as connection:
-        connection.execute(
-            """
-            CREATE TABLE alert_records (
-                row_id TEXT PRIMARY KEY,
-                record_id TEXT,
-                asset_date TEXT NOT NULL,
-                source_file TEXT NOT NULL,
-                line_number INTEGER NOT NULL,
-                event_time INTEGER,
-                source_type TEXT,
-                threat_name TEXT,
-                dedup_key TEXT,
-                is_duplicate INTEGER NOT NULL DEFAULT 0,
-                record_json TEXT NOT NULL
-            )
-            """
-        )
-        connection.executemany(
-            """
-            INSERT INTO alert_records (
-                row_id, record_id, asset_date, source_file, line_number,
-                event_time, source_type, threat_name, dedup_key,
-                is_duplicate, record_json
-            ) VALUES (?, '', '2026-07-14', ?, 1, ?, '', '', ?, 1, ?)
-            """,
-            [
-                (
-                    "follower-survivor",
-                    "/source/follower.jsonl",
-                    100,
-                    "legacy-key",
-                    json.dumps({"dedup_key": "legacy-key", "is_duplicate": True}),
-                ),
-                (
-                    "orphan-survivor",
-                    "/source/orphan.jsonl",
-                    200,
-                    "orphan-key",
-                    json.dumps({"dedup_key": "orphan-key", "is_duplicate": True}),
-                ),
-            ],
-        )
-        connection.execute(
-            "CREATE UNIQUE INDEX idx_alert_records_first_seen_dedup_key "
-            "ON alert_records(dedup_key) "
-            "WHERE dedup_key IS NOT NULL AND dedup_key <> ''"
-        )
-
-        ensure_schema(connection)
-        connection.commit()
-
-        rows = connection.execute("SELECT row_id FROM alert_records").fetchall()
-        indexes = {item[1] for item in connection.execute("PRAGMA index_list(alert_records)")}
-
-    assert rows == []
-    assert "idx_alert_records_first_seen_dedup_key" in indexes
+@requires_pg
+def test_soc_db_schema_is_idempotent_and_retains_existing_rows() -> None:
+    from flocks.workflow import soc_store
+    ensure_schema()
+    with sync_query.connect() as connection:
+        connection.execute("INSERT INTO alert_records(row_id,dedup_key,asset_date,source_file,line_number,is_duplicate,record_json) VALUES(?,?,?,?,?,?,?::jsonb)",
+                           ("historical-follower", "legacy-key", "2026-07-14", "legacy.jsonl", 1, 1, '{"is_duplicate":true}'))
+    soc_store._schema_ready.discard(sync_query.identity())
+    ensure_schema()
+    with sync_query.connect(readonly=True) as connection:
+        row = connection.execute("SELECT row_id,is_duplicate FROM alert_records WHERE dedup_key=?", ("legacy-key",)).fetchone()
+    assert tuple(row) == ("historical-follower", 1)
 
 
-def test_soc_db_serializes_concurrent_writes_for_the_same_dedup_key(tmp_path: Path) -> None:
-    functions = _load_functions(
-        "_ensure_soc_db_schema",
-        "_event_time_value",
-        "_asset_date_value",
-        "_source_type_value",
-        "_record_id_value",
-        "_stable_row_id",
-        "_load_existing_soc_rows",
-        "_merge_triage_record",
-        "_triage_write_soc_db",
-    )
-    write_soc_db = functions["_triage_write_soc_db"]
-    db_path = tmp_path / "concurrent-soc.db"
-    alerts = [
-        {
-            "dedup_key": "concurrent-key",
-            "is_duplicate": False,
-            "id": "first",
-            "time": 1784026800,
-            "source_file": "/source/first.jsonl",
-            "triage_report": "first report",
-        },
-        {
-            "dedup_key": "concurrent-key",
-            "is_duplicate": False,
-            "id": "second",
-            "time": 1784027800,
-            "source_file": "/source/second.jsonl",
-            "triage_report": "second report",
-        },
-    ]
-
+@requires_pg
+def test_soc_db_serializes_concurrent_writes_for_the_same_dedup_key() -> None:
+    write_soc_db = _load_functions("_triage_write_soc_db")["_triage_write_soc_db"]
+    alerts = [{"dedup_key": "concurrent-key", "is_duplicate": False, "id": str(index),
+               "time": 1784026800 + index, "source_file": f"/source/{index}.jsonl", "triage_report": f"report {index}"}
+              for index in range(2)]
     with ThreadPoolExecutor(max_workers=2) as executor:
-        results = list(
-            executor.map(
-                lambda item: write_soc_db(str(db_path), [item[1]], item[0]),
-                [("first-run", alerts[0]), ("second-run", alerts[1])],
-            )
-        )
-
-    with sqlite3.connect(db_path) as connection:
-        row_count = connection.execute(
-            "SELECT COUNT(*) FROM alert_records WHERE dedup_key = 'concurrent-key'"
-        ).fetchone()[0]
-
+        results = list(executor.map(lambda index: write_soc_db([alerts[index]], f"run-{index}"), range(2)))
+    with sync_query.connect(readonly=True) as connection:
+        row_count = connection.execute("SELECT COUNT(*) FROM alert_records WHERE dedup_key=?", ("concurrent-key",)).fetchone()[0]
     assert row_count == 1
     assert sum(result["inserted_rows"] for result in results) == 1
     assert sum(result["updated_rows"] for result in results) == 1

@@ -1,4 +1,5 @@
-from unittest.mock import MagicMock, patch
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -6,6 +7,130 @@ from flocks.security.secrets import SecretManager
 
 
 class TestAPIServiceCredentials:
+    @pytest.mark.asyncio
+    async def test_isolated_provider_probe_does_not_mutate_registered_instance(self):
+        from flocks.provider.provider import ProviderConfig
+        from flocks.server.routes import provider as provider_routes
+
+        class FakeProvider:
+            def __init__(self):
+                self._config = ProviderConfig(
+                    provider_id="openai",
+                    api_key="saved-key",
+                    base_url="https://saved.example/v1",
+                )
+                self._base_url = "https://default.example/v1"
+                self._client = object()
+
+            def configure(self, config):
+                self._config = config
+                self._client = None
+
+            async def chat(self, *_args, **_kwargs):
+                return SimpleNamespace(content="Paris")
+
+        shared_provider = FakeProvider()
+        original_client = shared_provider._client
+
+        with (
+            patch.object(provider_routes, "_ensure_provider_initialized", AsyncMock()),
+            patch.object(provider_routes, "_load_dynamic_providers", AsyncMock()),
+            patch.object(provider_routes.Provider, "get", return_value=shared_provider),
+            patch.object(
+                provider_routes.Provider,
+                "list_models",
+                return_value=[SimpleNamespace(id="gpt-test")],
+            ),
+            patch.object(provider_routes.Config, "get", side_effect=AssertionError("must not load config")),
+        ):
+            result = await provider_routes._test_provider_credentials_impl(
+                "openai",
+                provider_routes.TestCredentialRequest(model_id="gpt-test"),
+                api_key_override="candidate-key",
+                isolated_provider=True,
+                base_url_override="https://candidate.example/v1",
+            )
+
+        assert result["success"] is True
+        assert shared_provider._config.api_key == "saved-key"
+        assert shared_provider._config.base_url == "https://saved.example/v1"
+        assert shared_provider._client is original_client
+
+    @pytest.mark.asyncio
+    async def test_temporary_api_probe_does_not_enable_tools_or_persist_status(self):
+        from flocks.server.routes import provider as provider_routes
+        from flocks.tool.credential_context import activate_credential_overrides
+        from flocks.tool.registry import ToolCategory, ToolInfo, ToolResult
+
+        tool_info = ToolInfo(
+            name="threatbook_cn_probe",
+            description="Read-only connectivity probe",
+            category=ToolCategory.CUSTOM,
+            parameters=[],
+            enabled=False,
+        )
+
+        with (
+            patch.object(provider_routes, "_ensure_provider_initialized", AsyncMock()),
+            patch.object(provider_routes, "_load_dynamic_providers", AsyncMock()),
+            patch.object(provider_routes.Provider, "get", return_value=None),
+            patch("flocks.tool.registry.ToolRegistry.init_async", AsyncMock()),
+            patch("flocks.tool.registry.ToolRegistry.list_tools", return_value=[tool_info]),
+            patch(
+                "flocks.tool.registry.ToolRegistry.get_dynamic_tools_by_module",
+                return_value={},
+            ),
+            patch(
+                "flocks.tool.registry.ToolRegistry.execute",
+                AsyncMock(return_value=ToolResult(success=False, error="invalid key")),
+            ) as execute,
+            patch(
+                "flocks.server.routes.tool._get_tool_source",
+                return_value=("api", "threatbook-cn"),
+            ),
+            patch(
+                "flocks.tool.probe_loader.get_connectivity_spec",
+                return_value=None,
+            ),
+            patch.object(provider_routes, "_set_api_service_tools_enabled") as set_enabled,
+            patch.object(provider_routes.Storage, "write", AsyncMock()) as write_status,
+        ):
+            async with activate_credential_overrides(
+                secret_values={"threatbook_cn_api_key": "candidate-key"},
+                service_id="threatbook-cn",
+                config_values={"enabled": True},
+            ):
+                result = await provider_routes._test_provider_credentials_impl(
+                    "threatbook-cn",
+                    api_key_override="candidate-key",
+                )
+
+        assert result["success"] is False
+        execute.assert_awaited_once()
+        set_enabled.assert_not_called()
+        write_status.assert_not_awaited()
+        assert tool_info.enabled is False
+
+    @pytest.mark.asyncio
+    async def test_base_url_alone_is_not_a_configured_credential(self):
+        from flocks.server.routes.provider import get_service_credentials
+
+        mock_secrets = MagicMock()
+        mock_secrets.get.return_value = None
+
+        with (
+            patch("flocks.security.get_secret_manager", return_value=mock_secrets),
+            patch(
+                "flocks.config.config_writer.ConfigWriter.get_api_service_raw",
+                return_value={"base_url": "https://api.threatbook.cn"},
+            ),
+        ):
+            result = await get_service_credentials("threatbook-cn")
+
+        assert result.base_url == "https://api.threatbook.cn"
+        assert result.api_key_masked is None
+        assert result.has_credential is False
+
     @pytest.mark.asyncio
     async def test_get_service_credentials_returns_base_url_and_username(self):
         from flocks.server.routes.provider import get_service_credentials
@@ -68,6 +193,58 @@ class TestAPIServiceCredentials:
             },
         )
         assert result["success"] is True
+
+    @pytest.mark.asyncio
+    async def test_configure_service_credentials_does_not_save_failed_key(self):
+        from flocks.server.routes import provider as provider_routes
+
+        validation = {"success": False, "message": "invalid key"}
+        test_credentials = AsyncMock(return_value=validation)
+        save_credentials = AsyncMock()
+
+        with (
+            patch.object(provider_routes, "_test_provider_credentials_impl", test_credentials),
+            patch.object(provider_routes, "set_service_credentials", save_credentials),
+            patch.object(
+                provider_routes.ConfigWriter,
+                "get_api_service_raw",
+                return_value={"enabled": True},
+            ),
+        ):
+            result = await provider_routes.configure_service_credentials(
+                "threatbook-cn",
+                provider_routes.ProviderCredentialRequest(api_key="bad-key"),
+            )
+
+        assert result == validation
+        save_credentials.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_configure_service_credentials_saves_key_after_validation(self):
+        from flocks.server.routes import provider as provider_routes
+
+        validation = {"success": True, "message": "connected", "latency_ms": 12}
+        test_credentials = AsyncMock(return_value=validation)
+        save_credentials = AsyncMock(return_value={"success": True})
+        request = provider_routes.ProviderCredentialRequest(api_key="valid-key")
+
+        with (
+            patch.object(provider_routes, "_test_provider_credentials_impl", test_credentials),
+            patch.object(provider_routes, "set_service_credentials", save_credentials),
+            patch.object(
+                provider_routes.ConfigWriter,
+                "get_api_service_raw",
+                return_value={"enabled": True},
+            ),
+        ):
+            result = await provider_routes.configure_service_credentials(
+                "threatbook-cn",
+                request,
+            )
+
+        assert result == validation
+        test_credentials.assert_awaited_once()
+        save_credentials.assert_awaited_once_with("threatbook-cn", request)
 
     @pytest.mark.asyncio
     async def test_set_service_credentials_uses_metadata_secret_for_hyphenated_service(self):

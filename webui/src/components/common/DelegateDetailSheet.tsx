@@ -7,7 +7,7 @@
  */
 
 import { useEffect, useRef, useState, useCallback } from 'react';
-import { X } from 'lucide-react';
+import { IconX } from '@tabler/icons-react';
 import { useTranslation } from 'react-i18next';
 import SessionChat from './SessionChat';
 
@@ -168,7 +168,7 @@ export default function DelegateDetailSheet({
             onClick={onClose}
             className="p-1.5 rounded-md text-gray-400 hover:text-gray-600 hover:bg-gray-200/60 transition-colors"
           >
-            <X className="w-4 h-4" />
+            <IconX aria-hidden="true" className="w-4 h-4" />
           </button>
         </div>
 

@@ -6,6 +6,55 @@ from flocks.permission.rule import PermissionRule, PermissionLevel, PermissionSc
 
 Ruleset = List[PermissionRule]
 
+_LEGACY_PERMISSION_NAMES = {
+    "task": "delegate_task",
+    "todowrite": "todo",
+    "todoread": "todo",
+}
+
+
+def _merge_legacy_permission(existing: Any, incoming: Any) -> Any:
+    """Merge a legacy alias into an existing canonical permission."""
+    if isinstance(existing, dict) and not isinstance(incoming, dict):
+        incoming = {"*": incoming}
+    elif not isinstance(existing, dict) and isinstance(incoming, dict):
+        existing = {"*": existing}
+
+    if isinstance(existing, dict) and isinstance(incoming, dict):
+        merged = dict(existing)
+        for pattern, action in incoming.items():
+            if pattern in merged:
+                merged[pattern] = _merge_legacy_permission(
+                    merged[pattern], action,
+                )
+            else:
+                merged[pattern] = action
+        return merged
+
+    priority = {"allow": 0, "ask": 1, "deny": 2}
+    existing_value = getattr(existing, "value", existing)
+    incoming_value = getattr(incoming, "value", incoming)
+    if priority.get(incoming_value, -1) > priority.get(existing_value, -1):
+        return incoming
+    return existing
+
+
+def _canonicalize_permission_config(config: Dict[str, Any]) -> Dict[str, Any]:
+    canonical = {
+        key: value
+        for key, value in config.items()
+        if key not in _LEGACY_PERMISSION_NAMES
+    }
+    for key, value in config.items():
+        if key not in _LEGACY_PERMISSION_NAMES:
+            continue
+        name = _LEGACY_PERMISSION_NAMES.get(key, key)
+        if name in canonical:
+            canonical[name] = _merge_legacy_permission(canonical[name], value)
+        else:
+            canonical[name] = value
+    return canonical
+
 
 def from_config(permission_config: Union[Dict[str, Any], BaseModel]) -> Ruleset:
     """
@@ -21,6 +70,8 @@ def from_config(permission_config: Union[Dict[str, Any], BaseModel]) -> Ruleset:
         config_dict = permission_config
     else:
         return ruleset
+
+    config_dict = _canonicalize_permission_config(config_dict)
 
     for key, value in config_dict.items():
         if isinstance(value, str) or isinstance(value, PermissionLevel):

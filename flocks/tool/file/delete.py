@@ -26,6 +26,17 @@ async def delete_tool(ctx: ToolContext, path: str) -> ToolResult:
     except ValueError as exc:
         return ToolResult(success=False, error=str(exc), title=path)
     source = resolution.resolved_path
+    sandbox = ctx.extra.get("sandbox") if ctx.extra else None
+    if isinstance(sandbox, dict) and sandbox.get("workspace_access") == "ro":
+        # same gate as write/edit/apply_patch: a read-only workspace must not be mutated
+        return ToolResult(
+            success=False,
+            error=(
+                "Delete is blocked in sandbox read-only workspace mode. "
+                "Set sandbox.workspace_access to 'rw' to allow deletes."
+            ),
+            title=resolution.display_path,
+        )
     if not os.path.exists(source):
         return ToolResult(success=False, error=f"Path not found: {source}", title=resolution.display_path)
     if os.path.isdir(source):

@@ -18,6 +18,16 @@ from flocks.session.runner import RunnerCallbacks
 from flocks.session.session_loop import LoopCallbacks
 
 
+async def _persist_session_fixture(value):
+    """Keep lifecycle checks real while provider/message calls stay isolated."""
+    from flocks.session.session import SessionInfo
+    from flocks.storage.storage import Storage
+
+    session = SessionInfo.model_validate(vars(value))
+    await Storage.set(f"session:{session.project_id}:{session.id}", session, "session")
+    return session
+
+
 class TestRunnerCallbacksEventPublish:
     """RunnerCallbacks should carry event_publish_callback."""
 
@@ -267,6 +277,7 @@ class TestResolveModel:
             AsyncMock(),
         )
 
+        session = await _persist_session_fixture(session)
         result = await session_routes._process_session_message(
             "ses_test",
             session,
@@ -380,6 +391,7 @@ class TestResolveModel:
             title_generation,
         )
 
+        session = await _persist_session_fixture(session)
         response = await session_routes._process_session_message(
             session.id,
             session,
@@ -485,6 +497,7 @@ class TestResolveModel:
             context_usage,
         )
 
+        session = await _persist_session_fixture(session)
         await session_routes._process_session_message(
             session.id,
             session,
@@ -546,6 +559,7 @@ class TestResolveModel:
         monkeypatch.setattr("flocks.session.message.Message.create", message_create)
         monkeypatch.setattr("flocks.server.routes.event.publish_event", publish_event)
 
+        session = await _persist_session_fixture(session)
         await session_routes._process_session_message(
             "ses_test",
             session,

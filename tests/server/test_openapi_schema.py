@@ -20,3 +20,8 @@ def test_session_router_openapi_schema_generates_successfully():
     schema = response.json()
     assert schema["openapi"].startswith("3.")
     assert "/api/session/{sessionID}/prompt_async" in schema["paths"]
+    assert "/api/session/{sessionID}/status" in schema["paths"]
+    operation = schema["paths"]["/api/session/{sessionID}/status"]["get"]
+    assert operation["operationId"] == "session.statusById"
+    response_schema = schema["components"]["schemas"]["SessionRuntimeStatusResponse"]
+    assert response_schema["properties"]["lifecycleStatus"]["enum"] == ["active", "archived"]

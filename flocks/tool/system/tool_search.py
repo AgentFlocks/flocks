@@ -118,7 +118,7 @@ async def tool_search(
     category: Optional[str] = None,
     limit: int = 8,
 ) -> ToolResult:
-    limit = max(1, min(limit or 8, 20))
+    limit = max(1, min(8 if limit is None else limit, 20))
     matches, matched_tags = search_tool_catalog(query, category=category, limit=limit)
     device_hints = await _build_device_tool_hints(matches)
     enriched_matches: List[Dict[str, Any]] = []

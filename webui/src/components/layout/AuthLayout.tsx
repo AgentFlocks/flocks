@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react';
-import { Globe } from 'lucide-react';
+import { IconWorld } from '@tabler/icons-react';
 import { useTranslation } from 'react-i18next';
 import ThemeToggle from '@/components/common/ThemeToggle';
 
@@ -24,12 +24,13 @@ export default function AuthLayout({ children }: AuthLayoutProps) {
           role="group"
           aria-label={t('switchLanguage')}
         >
-          <Globe className="mx-1 h-3.5 w-3.5 text-gray-400 dark:text-[#9aa7b4]" aria-hidden />
+          <IconWorld className="mx-1 h-3.5 w-3.5 text-gray-400 dark:text-[#9aa7b4]" aria-hidden />
           {LANGUAGES.map(({ code, label }) => (
             <button
               key={code}
               type="button"
               onClick={() => i18n.changeLanguage(code)}
+              aria-pressed={currentLang === code}
               className={`px-2.5 py-1 text-xs font-medium rounded-full transition-colors ${
                 currentLang === code
                   ? 'bg-slate-900 text-white dark:bg-[#46515e] dark:text-white'

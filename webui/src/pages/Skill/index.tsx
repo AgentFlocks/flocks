@@ -1,19 +1,21 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import {
-  BookOpen,
-  Search,
-  Plus,
-  RefreshCw,
-  Sparkles,
-  FolderOpen,
-  CloudDownload,
-  AlertTriangle,
-  Loader2,
-  Pencil,
-  ChevronLeft,
-  ChevronRight,
-  Filter,
-} from 'lucide-react';
+  IconBook,
+  IconSearch,
+  IconPlus,
+  IconRefresh,
+  IconSparkles,
+  IconFolderOpen,
+  IconCloudDownload,
+  IconAlertTriangle,
+  IconLoader2,
+  IconPencil,
+  IconChevronLeft,
+  IconChevronRight,
+  IconFilter,
+  IconCircleCheck,
+  IconCircleX,
+} from '@tabler/icons-react';
 import { useTranslation } from 'react-i18next';
 import PageHeader from '@/components/common/PageHeader';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
@@ -298,14 +300,14 @@ export default function SkillPage() {
       <PageHeader
         title={t('pageTitle')}
         description={t('pageDescription')}
-        icon={<BookOpen className="w-8 h-8" />}
+        icon={<IconBook aria-hidden="true" className="w-8 h-8" />}
       />
 
       {/* Toolbar: 搜索 · 来源 chips · 刷新/安装/创建 */}
       <div className="px-4 py-2 border-b border-gray-100 flex flex-wrap items-center gap-3">
         {/* 搜索 */}
-        <div className="relative w-64">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400 pointer-events-none" />
+        <div className="relative w-full sm:w-64 min-w-0">
+          <IconSearch aria-hidden="true" className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400 pointer-events-none" />
           <input
             type="text"
             placeholder={t('searchPlaceholder')}
@@ -336,20 +338,20 @@ export default function SkillPage() {
                 : 'border-gray-200 text-gray-400 hover:bg-gray-50 hover:text-gray-600 disabled:opacity-50'
             }`}
           >
-            <RefreshCw className={`w-3.5 h-3.5 ${refreshing ? 'animate-spin' : ''}`} />
+            <IconRefresh aria-hidden="true" className={`w-3.5 h-3.5 ${refreshing ? 'animate-spin' : ''}`} />
           </button>
           <button
             onClick={() => setShowInstallDialog(true)}
             className="inline-flex items-center gap-1.5 px-3 py-1.5 border border-gray-300 text-gray-700 bg-white rounded-lg hover:bg-gray-50 transition-colors text-sm"
           >
-            <CloudDownload className="w-4 h-4" />
+            <IconCloudDownload aria-hidden="true" className="w-4 h-4" />
             {t('installSkill')}
           </button>
           <button
             onClick={() => setShowCreateSheet(true)}
             className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors text-sm"
           >
-            <Plus className="w-4 h-4" />
+            <IconPlus aria-hidden="true" className="w-4 h-4" />
             {t('createSkill')}
           </button>
         </div>
@@ -359,7 +361,7 @@ export default function SkillPage() {
         {visibleSkills.length === 0 ? (
           // Truly empty inventory — show big EmptyState with CTAs
           <EmptyState
-            icon={<BookOpen className="w-16 h-16" />}
+            icon={<IconBook aria-hidden="true" className="w-16 h-16" />}
             title={t('emptyState.noSkills')}
             description={t('emptyState.createFirst')}
             action={
@@ -368,14 +370,14 @@ export default function SkillPage() {
                   onClick={() => setShowInstallDialog(true)}
                   className="inline-flex items-center gap-2 px-4 py-2 border border-gray-300 text-gray-700 bg-white rounded-lg hover:bg-gray-50"
                 >
-                  <CloudDownload className="w-5 h-5" />
+                  <IconCloudDownload aria-hidden="true" className="w-5 h-5" />
                   {t('installSkill')}
                 </button>
                 <button
                   onClick={() => setShowCreateSheet(true)}
                   className="inline-flex items-center gap-2 px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700"
                 >
-                  <Plus className="w-5 h-5" />
+                  <IconPlus aria-hidden="true" className="w-5 h-5" />
                   {t('createSkill')}
                 </button>
               </div>
@@ -508,20 +510,18 @@ function SkillTable({
   const { t } = useTranslation('skill');
 
   return (
-    <div className="bg-white border border-gray-200 rounded-xl overflow-hidden">
-      <table className="min-w-full table-fixed text-xs">
-        <colgroup>
-          <col style={{ width: '8%' }} />
-          <col style={{ width: '46%' }} />
-          <col style={{ width: '18%' }} />
-          <col style={{ width: '14%' }} />
-          <col style={{ width: '14%' }} />
-        </colgroup>
+    <div className="bg-white border border-gray-200 rounded-xl overflow-x-auto">
+      {/* Below md the table keeps only name / enabled / actions so it fits a phone
+          without horizontal scrolling (the type badge moves into the name cell and
+          the action buttons stay on screen). From md up the 640px floor keeps the
+          five columns usable; widths live on the header cells because table-fixed
+          reads them from the first row and a hidden <col> cannot be dropped. */}
+      <table className="w-full table-fixed text-xs md:min-w-[640px]">
         <thead className="bg-gray-50 text-gray-500 border-b border-gray-200">
           <tr>
-            <th className="text-left px-4 py-2.5 font-medium">{t('table.type')}</th>
-            <th className="text-left px-4 py-2.5 font-medium">{t('table.name')}</th>
-            <th className="text-left px-4 py-2.5 font-medium">
+            <th className="hidden md:table-cell md:w-[104px] text-left px-4 py-2.5 font-medium whitespace-nowrap">{t('table.type')}</th>
+            <th className="text-left px-3 md:px-4 py-2.5 font-medium whitespace-nowrap">{t('table.name')}</th>
+            <th className="hidden md:table-cell md:w-[18%] text-left px-4 py-2.5 font-medium">
               <ColumnFilterHeader
                 label={t('table.source')}
                 values={allSources}
@@ -530,7 +530,7 @@ function SkillTable({
                 onClear={onClearSourceColFilter}
               />
             </th>
-            <th className="text-left px-4 py-2.5 font-medium">
+            <th className="hidden md:table-cell md:w-[14%] text-left px-4 py-2.5 font-medium">
               <ColumnFilterHeader
                 label={t('table.enabled')}
                 values={['enabled', 'disabled']}
@@ -540,7 +540,8 @@ function SkillTable({
                 renderLabel={(v) => v === 'enabled' ? t('filter.enabled') : t('filter.disabled')}
               />
             </th>
-            <th className="text-right px-4 py-2.5 font-medium">{t('table.actions')}</th>
+            {/* phone: the enable switch (icon-only) joins the action buttons here */}
+            <th className="w-[112px] md:w-[14%] text-right px-2 md:px-4 py-2.5 font-medium">{t('table.actions')}</th>
           </tr>
         </thead>
         <tbody className="divide-y divide-gray-100">
@@ -560,7 +561,7 @@ function SkillTable({
             <tr>
               <td colSpan={5} className="px-4 py-12">
                 <div className="flex flex-col items-center justify-center gap-3 text-gray-400">
-                  <BookOpen className="w-10 h-10 text-gray-300" />
+                  <IconBook aria-hidden="true" className="w-10 h-10 text-gray-300" />
                   <div className="text-sm">{t('emptyState.noResults')}</div>
                   {hasActiveFilter && (
                     <button
@@ -609,14 +610,14 @@ function SkillRow({ skill, isSelected, installingDeps, toggling, onSelect, onIns
         skill.disabled ? 'bg-gray-50/40 dark:bg-zinc-900/30' : 'hover:bg-gray-50 dark:hover:bg-zinc-900/60'
       } ${isSelected ? 'bg-slate-50 dark:bg-zinc-900/80' : ''}`}
     >
-      {/* 类型列 */}
-      <td className="px-4 py-3">
+      {/* 类型列（phone 宽度下并入名称列） */}
+      <td className="hidden md:table-cell px-4 py-3">
         <SourceTypeBadge isUser={isUser} />
       </td>
 
       {/* 名称 + 描述列（含内嵌的缺依赖警告）— 整块作为打开 SkillSheet 的点击区，
           mirrors the Hub catalog row pattern (`Hub/index.tsx` HubTable). */}
-      <td className="max-w-0 px-4 py-3">
+      <td className="max-w-0 px-3 md:px-4 py-3">
         <button
           type="button"
           onClick={() => onSelect(skill)}
@@ -625,8 +626,8 @@ function SkillRow({ skill, isSelected, installingDeps, toggling, onSelect, onIns
         >
           <span className="w-7 h-7 rounded-lg flex items-center justify-center shrink-0 bg-gray-100 text-gray-400 mt-0.5">
             {isUser
-              ? <FolderOpen className="w-3.5 h-3.5" />
-              : <Sparkles className="w-3.5 h-3.5" />
+              ? <IconFolderOpen aria-hidden="true" className="w-3.5 h-3.5" />
+              : <IconSparkles aria-hidden="true" className="w-3.5 h-3.5" />
             }
           </span>
           <span className="min-w-0 flex-1">
@@ -636,6 +637,9 @@ function SkillRow({ skill, isSelected, installingDeps, toggling, onSelect, onIns
             <span className="block text-[11px] text-gray-400 truncate mt-0.5">
               {skill.description || t('sheet.noDescription')}
             </span>
+            <span className="md:hidden block mt-1 text-[10px]">
+              <SourceTypeBadge isUser={isUser} />
+            </span>
             {/* The old "Status" column collapsed to this single inline
                 warning — only rendered when the skill is actually
                 missing dependencies, so the row stays quiet by default. */}
@@ -644,7 +648,7 @@ function SkillRow({ skill, isSelected, installingDeps, toggling, onSelect, onIns
                 className="text-[11px] text-amber-600 truncate mt-0.5 flex items-center gap-1"
                 title={(skill.missing ?? []).join(', ')}
               >
-                <AlertTriangle className="w-3 h-3 shrink-0" />
+                <IconAlertTriangle aria-hidden="true" className="w-3 h-3 shrink-0" />
                 <span className="truncate">
                   {t('eligibility.missingDepsInline', {
                     list: (skill.missing ?? []).join(', '),
@@ -656,15 +660,15 @@ function SkillRow({ skill, isSelected, installingDeps, toggling, onSelect, onIns
         </button>
       </td>
 
-      {/* 来源列 */}
-      <td className="max-w-0 px-4 py-3">
+      {/* 来源列（phone 宽度下隐藏，详情在编辑抽屉里） */}
+      <td className="hidden md:table-cell max-w-0 px-4 py-3">
         <span className="text-[11px] text-gray-400 font-mono truncate block" title={skill.location}>
           {skill.source ?? '-'}
         </span>
       </td>
 
-      {/* 启用开关列：控制 skill 是否注入 Agent System Prompt */}
-      <td className="px-4 py-3">
+      {/* 启用开关列：控制 skill 是否注入 Agent System Prompt（phone 宽度下并入操作列） */}
+      <td className="hidden md:table-cell px-4 py-3">
         <SkillEnabledControl
           enabled={enabled}
           loading={toggling}
@@ -674,21 +678,32 @@ function SkillRow({ skill, isSelected, installingDeps, toggling, onSelect, onIns
       </td>
 
       {/* 操作列：编辑（+ 缺依赖时的安装按钮）；删除操作在编辑面板内 */}
-      <td className="px-4 py-3 text-right">
+      <td className="px-2 md:px-4 py-3 text-right">
         <div className="flex items-center justify-end gap-1">
+          <span className="md:hidden inline-flex">
+            <SkillEnabledControl
+              enabled={enabled}
+              loading={toggling}
+              compact
+              title={enabled ? t('toggle.enabledTip') : t('toggle.disabledTip')}
+              onChange={(e) => onToggle(skill, e)}
+            />
+          </span>
           {hasMissingDeps && (
             <button
               onClick={(e) => onInstallDeps(skill, e)}
               disabled={installingDeps}
               title={t('eligibility.installDeps')}
+              aria-label={t('eligibility.installDeps')}
               className="inline-flex items-center gap-1 px-2 py-1 rounded border border-gray-200
                          bg-white text-gray-600 hover:bg-gray-50 transition-colors disabled:opacity-50"
             >
               {installingDeps
-                ? <Loader2 className="w-3 h-3 animate-spin" />
-                : <CloudDownload className="w-3 h-3" />
+                ? <IconLoader2 aria-hidden="true" className="w-3 h-3 animate-spin" />
+                : <IconCloudDownload aria-hidden="true" className="w-3 h-3" />
               }
-              {installingDeps ? t('eligibility.installing') : t('eligibility.installDeps')}
+              {/* label only from md up: on a phone the icon button keeps the column narrow */}
+              <span className="hidden md:inline">{installingDeps ? t('eligibility.installing') : t('eligibility.installDeps')}</span>
             </button>
           )}
           <button
@@ -700,7 +715,7 @@ function SkillRow({ skill, isSelected, installingDeps, toggling, onSelect, onIns
                        hover:border-slate-300 hover:text-slate-700 hover:bg-gray-50
                        transition-colors"
           >
-            <Pencil className="w-3.5 h-3.5" />
+            <IconPencil aria-hidden="true" className="w-3.5 h-3.5" />
           </button>
         </div>
       </td>
@@ -710,11 +725,13 @@ function SkillRow({ skill, isSelected, installingDeps, toggling, onSelect, onIns
 
 // ─── Sub-components ───────────────────────────────────────────────────────────
 
-function SkillEnabledControl({ enabled, loading, title, onChange }: {
+function SkillEnabledControl({ enabled, loading, title, onChange, compact = false }: {
   enabled: boolean;
   loading: boolean;
   title?: string;
   onChange: (e: React.MouseEvent) => void;
+  /** Icon-only pill for phone widths, where the text pill does not fit next to the action buttons. */
+  compact?: boolean;
 }) {
   return (
     <button
@@ -727,10 +744,16 @@ function SkillEnabledControl({ enabled, loading, title, onChange }: {
       title={title}
       className="relative inline-flex rounded-full transition-opacity focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-300 focus-visible:ring-offset-2 disabled:cursor-wait disabled:opacity-75"
     >
-      <EnabledBadge enabled={enabled} />
+      {compact ? (
+        <span className={`inline-flex h-7 w-7 items-center justify-center rounded-full ${enabled ? 'bg-green-100 text-green-800' : 'bg-gray-100 text-gray-600'}`}>
+          {enabled ? <IconCircleCheck aria-hidden="true" className="w-3.5 h-3.5" /> : <IconCircleX aria-hidden="true" className="w-3.5 h-3.5" />}
+        </span>
+      ) : (
+        <EnabledBadge enabled={enabled} />
+      )}
       {loading && (
         <span className="absolute inset-0 inline-flex items-center justify-center rounded-full bg-white/70 dark:bg-zinc-900/70">
-          <Loader2 className="w-3 h-3 animate-spin text-gray-500 dark:text-zinc-300" />
+          <IconLoader2 aria-hidden="true" className="w-3 h-3 animate-spin text-gray-500 dark:text-zinc-300" />
         </span>
       )}
     </button>
@@ -742,14 +765,14 @@ function SourceTypeBadge({ isUser }: { isUser: boolean }) {
   if (isUser) {
     return (
       <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded border border-gray-200 bg-white text-gray-500 whitespace-nowrap">
-        <FolderOpen className="w-3 h-3" />
+        <IconFolderOpen aria-hidden="true" className="w-3 h-3" />
         {t('table.custom')}
       </span>
     );
   }
   return (
     <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded border border-gray-200 bg-gray-50 text-gray-500 whitespace-nowrap">
-      <Sparkles className="w-3 h-3" />
+      <IconSparkles aria-hidden="true" className="w-3 h-3" />
       {t('table.builtin')}
     </span>
   );
@@ -862,7 +885,7 @@ function ColumnFilterHeader({
           }`}
           aria-label={`${label} ${t('filter.aria')}`}
         >
-          <Filter className="w-3 h-3" />
+          <IconFilter aria-hidden="true" className="w-3 h-3" />
         </button>
       </div>
       {open && (
@@ -919,7 +942,7 @@ function PaginationBar({ total, page, totalPages, onPageChange }: {
           disabled={page <= 1}
           className="p-1 rounded border border-gray-200 hover:bg-gray-50 disabled:opacity-40"
         >
-          <ChevronLeft className="w-3.5 h-3.5" />
+          <IconChevronLeft aria-hidden="true" className="w-3.5 h-3.5" />
         </button>
         <span className="min-w-16 text-center">{page} / {totalPages}</span>
         <button
@@ -927,7 +950,7 @@ function PaginationBar({ total, page, totalPages, onPageChange }: {
           disabled={page >= totalPages}
           className="p-1 rounded border border-gray-200 hover:bg-gray-50 disabled:opacity-40"
         >
-          <ChevronRight className="w-3.5 h-3.5" />
+          <IconChevronRight aria-hidden="true" className="w-3.5 h-3.5" />
         </button>
       </div>
     </div>

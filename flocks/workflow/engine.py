@@ -20,6 +20,7 @@ from .execution_plan import WorkflowExecutionPlan
 from .execution_state import ExecutionResult, StepResult, WorkflowExecutionState
 from .models import Edge, Workflow, Node
 from .repl_runtime import HostProcessPythonExecRuntime, PythonExecRuntime, Runtime
+from flocks.net.http import sync_client
 
 
 _logger = logging.getLogger("flocks.workflow.engine")
@@ -43,6 +44,10 @@ class _ExecOutcome(NamedTuple):
     is_cancelled: bool = False
 
 
+_OBSERVABILITY_DICT_KEY_LIMIT = 50
+DEFAULT_PREVIEW_ITEMS_FOR_DICT = 3
+
+
 def _summarize_for_observability(value: Any, *, depth: int = 0) -> Any:
     """Return a bounded, non-retaining summary for logs and lightweight history."""
     if depth >= 2:
@@ -54,7 +59,19 @@ def _summarize_for_observability(value: Any, *, depth: int = 0) -> Any:
             return {"_type": "string", "chars": len(value), "preview": value[:200]}
         return value
     if isinstance(value, dict):
-        return {key: _summarize_for_observability(item, depth=depth + 1) for key, item in islice(value.items(), 50)}
+        if len(value) > _OBSERVABILITY_DICT_KEY_LIMIT:
+            # Mark the truncation instead of silently returning a 50-key dict
+            # that reads like the whole payload.
+            return {
+                "_type": "dict",
+                "key_count": len(value),
+                "keys": list(islice(value.keys(), _OBSERVABILITY_DICT_KEY_LIMIT)),
+                "preview": {
+                    key: _summarize_for_observability(item, depth=depth + 1)
+                    for key, item in islice(value.items(), DEFAULT_PREVIEW_ITEMS_FOR_DICT)
+                },
+            }
+        return {key: _summarize_for_observability(item, depth=depth + 1) for key, item in value.items()}
     if isinstance(value, (list, tuple, set)):
         if isinstance(value, (list, tuple)):
             preview_items = value[:3]
@@ -138,6 +155,16 @@ def _default_workflow_loader(workflow_id: str) -> "Workflow":
         setattr(_default_workflow_loader, "_executor", executor)
     fut = executor.submit(lambda: asyncio.run(_load()))
     return fut.result()
+
+
+_HTTP_REQUEST_TOOL_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "url": {"type": "string"},
+        "method": {"type": "string"},
+    },
+    "required": ["url", "method"],
+}
 
 
 @dataclass
@@ -231,6 +258,14 @@ class WorkflowEngine:
         state = WorkflowExecutionState(run_id=rid, history_mode=self.history_mode, retain_history=retain_history)
         edge_resolver = EdgeResolver(dataflow_mode=self.dataflow_mode, trace=self.trace)
         run_t0 = time.perf_counter()
+        run_deadline_s = float(timeout_s) if timeout_s is not None and timeout_s > 0 else None
+
+        def _run_deadline_exceeded() -> bool:
+            # Also consulted by the runtime's cooperative ``cancelled()`` helper so
+            # a long-running node stops at the run timeout instead of only
+            # being checked between steps.
+            return run_deadline_s is not None and (time.perf_counter() - run_t0) > run_deadline_s
+
         # Dedup: track (node_id -> last_input_hash) to skip identical re-executions.
         _dedup_hashes: Dict[str, str] = {}
         step_timeout_s = self.node_timeout_s if (self.node_timeout_s is not None and self.node_timeout_s > 0) else None
@@ -245,10 +280,12 @@ class WorkflowEngine:
             previous_enable_cancel_trace = self.runtime.enable_cancel_trace
 
             def _runtime_cancel_requested() -> bool:
-                return timeout_cancel_event.is_set() or bool(cancel and cancel())
+                return timeout_cancel_event.is_set() or _run_deadline_exceeded() or bool(cancel and cancel())
 
             self.runtime.cancel_checker = (
-                _runtime_cancel_requested if step_timeout_s is not None or cancel is not None else None
+                _runtime_cancel_requested
+                if step_timeout_s is not None or cancel is not None or run_deadline_s is not None
+                else None
             )
             # A timeout-only checker is consumed by isolated-process RPC calls.
             # Enabling sys.settrace for every ordinary workflow line would add
@@ -262,14 +299,16 @@ class WorkflowEngine:
                 err.execution_context = state.build_context()
                 raise err
 
+            def _raise_timed_out() -> None:
+                err = RunTimeoutError(rid, float(run_deadline_s or 0.0))
+                err.execution_context = state.build_context()
+                raise err
+
             while q:
                 if cancel is not None and cancel():
                     _raise_cancelled()
-                if timeout_s is not None and timeout_s > 0:
-                    if (time.perf_counter() - run_t0) > float(timeout_s):
-                        err = RunTimeoutError(rid, float(timeout_s))
-                        err.execution_context = state.build_context()
-                        raise err
+                if _run_deadline_exceeded():
+                    _raise_timed_out()
                 if state.steps >= self.max_steps:
                     err = MaxStepsExceededError(self.max_steps)
                     err.execution_context = state.build_context()
@@ -504,6 +543,10 @@ class WorkflowEngine:
                                 thread_name_prefix="wf-node",
                             )
                         except RunCancelledError as _ce:
+                            if _run_deadline_exceeded() and not (cancel is not None and cancel()):
+                                # The cooperative interrupt came from the run
+                                # deadline, not from a caller cancellation.
+                                _raise_timed_out()
                             _ce.execution_context = state.build_context()
                             raise
                         except Exception as _e:
@@ -538,6 +581,7 @@ class WorkflowEngine:
                         if self.history_mode == "summary":
                             return StepResult(
                                 node_id=_nid,
+                                node_type=_nd.type,
                                 inputs=_summarize_for_observability(_inp),
                                 outputs=_summarize_for_observability(outputs),
                                 stdout=stdout,
@@ -547,6 +591,7 @@ class WorkflowEngine:
                             )
                         return StepResult(
                             node_id=_nid,
+                            node_type=_nd.type,
                             inputs=_inp,
                             outputs=outputs,
                             stdout=stdout,
@@ -777,6 +822,10 @@ class WorkflowEngine:
                     raise _stop_exc
                 if cancel is not None and cancel():
                     _raise_cancelled()
+                if _run_deadline_exceeded():
+                    # A node interrupted by the deadline returns partial output;
+                    # the run must not read as succeeded.
+                    _raise_timed_out()
 
             pending_joins = []
             for nid, buf in state.join_inputs.items():
@@ -818,6 +867,7 @@ class WorkflowEngine:
             outputs, stdout = self._execute_node(node, inputs)
             return StepResult(
                 node_id=node_id,
+                node_type=node.type,
                 inputs=inputs,
                 outputs=outputs,
                 stdout=stdout,
@@ -827,6 +877,7 @@ class WorkflowEngine:
             tb = traceback.format_exc()
             return StepResult(
                 node_id=node_id,
+                node_type=node.type,
                 inputs=inputs,
                 outputs={},
                 error=str(e),
@@ -956,12 +1007,16 @@ class WorkflowEngine:
                 node_id=node.id,
                 message=f"Prompt template render failed: {type(e).__name__}: {e}",
             ) from e
-        from .llm import get_llm_client
+        from .llm import get_llm_client, llm_hook_context_from_registry
 
         _rt = _runtime or self.runtime
         cancel_checker = getattr(_rt, "cancel_checker", None)
         try:
-            client = get_llm_client(model=node.model, cancel_checker=cancel_checker)
+            client = get_llm_client(
+                model=node.model,
+                cancel_checker=cancel_checker,
+                hook_context=llm_hook_context_from_registry(getattr(_rt, "tool_registry", None)),
+            )
             text = client.ask(rendered)
         except RunCancelledError:
             raise
@@ -972,6 +1027,68 @@ class WorkflowEngine:
             ) from e
         output_k = node.output_key or "result"
         return {output_k: text}, ""
+
+    def _gate_http_request(self, node: Node, *, url: str, method: str) -> None:
+        """Pass the outbound request through the tool-execution gate.
+
+        The engine has no network policy of its own; ``tool.execute.before``
+        handlers (e.g. the commercial network policy) decide whether the
+        target is allowed. Without handlers the request proceeds unchanged.
+        """
+        from flocks.hooks.pipeline import HookPipeline, HookStage
+        from flocks.workflow._async_runtime import run_sync as _run_sync_on_shared_loop
+
+        registry = getattr(self.runtime, "tool_registry", None)
+        tool_input = {"url": url, "method": method}
+
+        async def _gate():
+            if not await HookPipeline.has_stage_handlers(HookStage.TOOL_BEFORE, {"tool": {"name": "http_request"}}):
+                return None
+            from flocks.hooks.tool_gate import run_tool_gate
+            from flocks.session.tool_execution import build_session_tool_execution_payload
+            from flocks.tool import ToolContext
+
+            ctx = None
+            resolver = getattr(registry, "_tool_context", None)
+            if callable(resolver):
+                try:
+                    ctx = resolver()
+                except Exception:
+                    ctx = None
+            if ctx is None:
+                ctx = ToolContext(session_id="workflow", message_id="workflow")
+            # Audit sinks record the attempt under the call id; give this
+            # request one of its own like any tool invocation.
+            call_id = getattr(ctx, "call_id", None) or f"wf-http-{uuid.uuid4().hex}"
+            payload = await build_session_tool_execution_payload(
+                session_id=ctx.session_id,
+                message_id=ctx.message_id,
+                agent=ctx.agent or "workflow",
+                tool_name="http_request",
+                tool_input=tool_input,
+                tool_schema=_HTTP_REQUEST_TOOL_SCHEMA,
+                tool_context_extra={
+                    **dict(ctx.extra or {}),
+                    "tool_call_id": call_id,
+                    "tool_source": "workflow",
+                    "tool_category": "network",
+                    "workflow_node_id": node.id,
+                },
+                validated_input=tool_input,
+            )
+            return await run_tool_gate(payload, call_id=call_id, tool_input=tool_input)
+
+        verdict = _run_sync_on_shared_loop(_gate())
+        if verdict is None or verdict.allowed:
+            return
+        reason = verdict.reason or ("tool-before hook failed" if verdict.stage_failed else "denied by policy")
+        if verdict.needs_confirmation:
+            reason = reason or "requires confirmation"
+            reason = f"requires confirmation, which a headless workflow cannot grant: {reason}"
+        raise NodeExecutionError(
+            node_id=node.id,
+            message=f"HTTP request blocked by policy: {reason}",
+        )
 
     def _execute_http_request_node(self, node: Node, inputs: Dict[str, Any]) -> Tuple[Dict[str, Any], str]:
         """Execute an HTTP request node using httpx (synchronous)."""
@@ -992,10 +1109,10 @@ class WorkflowEngine:
                 node_id=node.id,
                 message=f"HTTP request template render failed: {type(e).__name__}: {e}",
             ) from e
+        self._gate_http_request(node, url=url, method=method)
         try:
-            import httpx
 
-            with httpx.Client(timeout=30.0) as client:
+            with sync_client(timeout=30.0) as client:
                 if method in {"GET", "DELETE", "HEAD"}:
                     resp = client.request(method, url, headers=headers)
                 elif isinstance(body, dict):

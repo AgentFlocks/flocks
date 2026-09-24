@@ -37,10 +37,14 @@ function getStoredApiToken(): string | undefined {
   }
 }
 
+function hasAuthHeader(headers: Headers) {
+  return headers.has("authorization") || headers.has("x-flocks-api-token")
+}
+
 export function getFlocksAuthHeaders(headersInit?: HeadersInit) {
   const headers = new Headers(headersInit)
   const apiToken = getStoredApiToken()
-  const hasAuth = headers.has("authorization") || headers.has("x-flocks-api-token")
+  const hasAuth = hasAuthHeader(headers)
   if (apiToken && !hasAuth) {
     headers.set("Authorization", `Bearer ${apiToken}`)
   }
@@ -60,6 +64,7 @@ export function createFlocksClient(config?: Config & { directory?: string }) {
     }
   }
 
+  const callerHasAuth = hasAuthHeader(new Headers(config?.headers as HeadersInit | undefined))
   const headers = getFlocksAuthHeaders(config?.headers as HeadersInit | undefined)
 
   if (config?.directory) {
@@ -70,5 +75,14 @@ export function createFlocksClient(config?: Config & { directory?: string }) {
   config = { ...config, headers: Object.fromEntries(headers.entries()) }
 
   const client = createClient(config)
+  if (!callerHasAuth) {
+    // token 轮换（.secret.json 被改写、mtime 变化）后新请求要带新 token：
+    // 创建 client 时只读一次会让运行中的 TUI 一直用旧 token 报 401，直到重启
+    client.interceptors.request.use((request) => {
+      const apiToken = getStoredApiToken()
+      if (apiToken) request.headers.set("Authorization", `Bearer ${apiToken}`)
+      return request
+    })
+  }
   return new FlocksClient({ client })
 }

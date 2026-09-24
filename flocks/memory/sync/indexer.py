@@ -22,6 +22,7 @@ from flocks.memory.config import MemoryConfig
 from flocks.memory.paths import classify_memory_path
 from flocks.memory.utils.hash import compute_text_hash
 from flocks.memory.sync.chunking import TextChunker
+from flocks.memory.sync.ownership import MemoryIndexOwnership, MemoryOwnershipConflict
 from flocks.utils.log import Log
 
 log = Log.create(service="memory.indexer")
@@ -54,6 +55,7 @@ class MemoryIndexer:
         self.embedding_model = embedding_model
         self.config = config
         self.chunker = TextChunker(config.chunking)
+        self._ownership: MemoryIndexOwnership | None = None
     
     async def sync(
         self,
@@ -82,12 +84,16 @@ class MemoryIndexer:
         }
         
         try:
+            from flocks.config import Config
+            self._ownership = await MemoryIndexOwnership.begin(Config.get_data_path() / "memory")
             content_cache: Dict[str, str] = {}
             indexed_files = await self._get_indexed_files()
             memory_files = await self._scan_memory_files(
                 _content_cache=content_cache,
                 _indexed_files=None if force else indexed_files,
             )
+            if memory_files and self._ownership is None:
+                raise MemoryOwnershipConflict("Memory root appeared during this scan; retry with a stable root")
             stats["files_scanned"] = len(memory_files)
             
             if progress_callback:
@@ -285,7 +291,15 @@ class MemoryIndexer:
 
     async def _update_file_metadata(self, file_entry: MemoryFileEntry) -> None:
         """Refresh metadata after a content-preserving filesystem change."""
-        async with Storage.connect(Storage.get_db_path()) as db:
+        async with Storage.transaction(Storage.get_db_path()) as db:
+            await db.execute("SELECT pg_advisory_xact_lock(hashtext(?))",
+                             (f"memory:{file_entry.scope.value}:{file_entry.scope_id}:{file_entry.path}",))
+            if self._ownership is not None:
+                await self._ownership.claim(db, {
+                    "scope": file_entry.scope.value, "scope_id": file_entry.scope_id,
+                    "path": file_entry.path, "hash": file_entry.hash,
+                    "mtime": file_entry.mtime_ms / 1000, "size": file_entry.size,
+                })
             await db.execute(
                 """
                 UPDATE memory_files
@@ -314,14 +328,16 @@ class MemoryIndexer:
             Dict mapping path to file info
         """
         indexed: Dict[tuple[str, str, str], Dict[str, Any]] = {}
+        if self._ownership is None:
+            return indexed
         
         try:
-            async with Storage.connect(Storage.get_db_path()) as db:
+            async with Storage.transaction(Storage.get_db_path()) as db:
                 cursor = await db.execute("""
-                    SELECT scope, scope_id, path, hash, mtime, size
-                    FROM memory_files
-                    WHERE source = 'memory'
-                """)
+                    SELECT f.scope, f.scope_id, f.path, f.hash, o.mtime, o.size
+                    FROM memory_files f JOIN memory_index_owners o USING(scope,scope_id,path)
+                    WHERE f.source = 'memory' AND o.root_id=? AND o.hash=f.hash
+                """, (self._ownership.root_id,))
                 
                 rows = await cursor.fetchall()
                 for scope, scope_id, path, hash_val, mtime, size in rows:
@@ -398,6 +414,7 @@ class MemoryIndexer:
                     "size": file_entry.size,
                 },
                 chunks=chunk_records,
+                before_replace=self._ownership.claim if self._ownership is not None else None,
             )
             
             log.info("indexer.file.indexed", {
@@ -571,52 +588,6 @@ class MemoryIndexer:
         Returns:
             Number of deleted files
         """
-        try:
-            async with Storage.connect(Storage.get_db_path()) as db:
-                cursor = await db.execute("""
-                    SELECT scope, scope_id, path FROM memory_files
-                    WHERE source = 'memory'
-                """)
-                
-                indexed_paths = [tuple(row) for row in await cursor.fetchall()]
-                
-                # Find deleted files
-                deleted = [p for p in indexed_paths if p not in current_files]
-                
-                if not deleted:
-                    return 0
-                
-                for scope, scope_id, path in deleted:
-                    params = (scope, scope_id, path)
-                    await db.execute(
-                        """
-                        DELETE FROM memory_fts
-                        WHERE scope = ? AND scope_id = ?
-                            AND source = 'memory' AND path = ?
-                        """,
-                        params,
-                    )
-                    await db.execute(
-                        """
-                        DELETE FROM memory_chunks
-                        WHERE scope = ? AND scope_id = ?
-                            AND source = 'memory' AND path = ?
-                        """,
-                        params,
-                    )
-                    await db.execute(
-                        """
-                        DELETE FROM memory_files
-                        WHERE scope = ? AND scope_id = ?
-                            AND source = 'memory' AND path = ?
-                        """,
-                        params,
-                    )
-                
-                await db.commit()
-                
-                return len(deleted)
-        
-        except Exception as e:
-            log.error("indexer.clean.failed", {"error": str(e)})
+        if self._ownership is None:
             return 0
+        return await self._ownership.clean(current_files)

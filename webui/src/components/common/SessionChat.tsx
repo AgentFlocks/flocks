@@ -16,16 +16,20 @@
  * - Support optional copy actions, timestamps, and related affordances
  */
 
-import { useState, useCallback, useRef, useEffect, useMemo, memo } from 'react';
-import { Send, Loader2, ChevronDown, Square, Copy, User, FileText, AlertCircle, X, RefreshCw, Pencil, Save, ImageIcon, Paperclip, Plus, ArrowUp, Clock, CheckCircle2, XCircle, Brain, Trash2, Bot, Check, Eye, ListTree, BookOpen, Workflow as WorkflowIcon } from 'lucide-react';
+import { useState, useCallback, useRef, useEffect, useLayoutEffect, useMemo, memo, type RefObject } from 'react';
+import { useVirtualizer } from '@tanstack/react-virtual';
+import { IconSend, IconLoader2, IconChevronDown, IconSquare, IconCopy, IconUser, IconFileText, IconDownload, IconAlertCircle, IconX, IconRefresh, IconPencil, IconDeviceFloppy, IconPhoto, IconPaperclip, IconPlus, IconArrowUp, IconClock, IconCircleCheck, IconCircleX, IconBrain, IconTrash, IconRobot, IconCheck, IconEye, IconListTree, IconBook, IconRouteSquare2 as WorkflowIcon } from '@tabler/icons-react';
 import { StreamingMarkdown, useStreamingContent } from './StreamingMarkdown';
 import { useTranslation } from 'react-i18next';
 import LoadingSpinner from './LoadingSpinner';
+import ExtensionSlot from '@/components/extensions/ExtensionSlot';
 import { QuestionTool, type QuestionItem } from './QuestionTool';
 import { PermissionApprovalDialog, type PermissionDecision } from './PermissionApprovalDialog';
 import DelegateTaskCard, { isDelegateTool, shouldRenderDelegateTaskCard } from './DelegateTaskCard';
 import CommandDropdown, { isSlashCommandName, parseSlashCommand } from './CommandDropdown';
 import ImageLightbox from './ImageLightbox';
+import { TodoList, buildTodoSummary, pickTodoEntries } from './TodoList';
+export { buildTodoSummary } from './TodoList';
 import { useSessionMessages } from '@/hooks/useSessions';
 import { useSSE, type SSEConnectionStatus } from '@/hooks/useSSE';
 import { useReasoningToggle } from '@/hooks/useReasoningToggle';
@@ -51,6 +55,7 @@ import {
   getFileExtension,
   isImageFile,
   readFileAsDataUrl,
+  type FilePartData,
   type ImagePartData,
 } from '@/utils/imageUpload';
 import type { Message, MessagePart, SessionGoalState, ToolState } from '@/types';
@@ -171,6 +176,10 @@ export interface SessionChatProps {
   focusMessageId?: string | null;
   /** Called after focusMessageId is consumed. */
   onFocusMessageConsumed?: () => void;
+  /** Open one message file in the parent Session Context preview. */
+  onOpenContextFile?: (resourceId: string) => void;
+  /** Open the parent Session Context panel. */
+  onOpenContext?: () => void;
   /** Agent name to include in prompt_async requests */
   agentName?: string;
   /** Model override to include in prompt_async requests */
@@ -212,10 +221,12 @@ export interface SessionChatProps {
   /**
    * Called when the user sends a message but sessionId is not yet available.
    * The parent should create a session and dispatch the prompt (with the
-   * provided text and any image attachments) to the new session.
+   * provided text and any file attachments) to the new session.
    *
-   * `imageParts` carries inline image data URLs — parents that don't yet
-   * support image input can ignore the second argument.
+   * `fileParts` carries inline image data URLs or staged document upload IDs.
+   * Completion must mean the prompt was accepted, not just the session created.
+   * Propagate explicit non-acceptance errors with their original response status;
+   * timeouts and server errors are treated as unknown acceptance for upload cleanup.
    *
    * The return value is intentionally typed as ``unknown`` so callers can
    * pass ``useSessionChat().createAndSend`` (which resolves to the new
@@ -224,7 +235,7 @@ export interface SessionChatProps {
    */
   onCreateAndSend?: (
     text: string,
-    imageParts?: ImagePartData[],
+    fileParts?: FilePartData[],
     agentOverride?: string,
     modelOverride?: { providerID: string; modelID: string } | null,
     options?: PromptDisplayOptions,
@@ -240,27 +251,29 @@ export interface SessionChatProps {
 }
 
 type AttachmentStatus = 'uploading' | 'success' | 'error';
+type UploadOwnership = 'draft' | 'submitting' | 'submitted' | 'unknown';
+
+interface UploadSubmission {
+  start: () => void;
+  accept: () => void;
+  reject: (error: unknown) => void;
+}
 
 interface ComposerAttachment {
   id: string;
   file: File;
   name: string;
   status: AttachmentStatus;
-  /** For document attachments: the workspace-relative path after upload */
-  workspacePath?: string;
+  /** For document attachments: the opaque staging ID returned by chat upload. */
+  uploadID?: string;
+  /** MIME type returned by the server for a staged document. */
+  mime?: string;
   /** For image attachments: the base64 data URL (no server upload needed) */
   dataUrl?: string;
   /** True if this attachment is an image file */
   isImage?: boolean;
   error?: string;
 }
-
-type UploadedDocumentAttachmentLike = {
-  id?: string;
-  status?: AttachmentStatus;
-  workspacePath?: string;
-  isImage?: boolean;
-};
 
 const APPROX_CHARS_PER_TOKEN = 4;
 
@@ -311,24 +324,81 @@ function getProcessPartTime(part: MessagePart): { start: number; end?: number } 
   return part.type === 'tool' ? part.state?.time : part.time;
 }
 
+type ProcessTimeInterval = {
+  start: number;
+  end: number;
+};
+
+function getProcessPartInterval(part: MessagePart, activeNowMs?: number): ProcessTimeInterval | null {
+  const time = getProcessPartTime(part);
+  if (!time || !Number.isFinite(time.start)) return null;
+
+  const end = Number.isFinite(time.end) ? time.end : activeNowMs;
+  if (end === undefined || !Number.isFinite(end) || end < time.start) return null;
+
+  return { start: time.start, end };
+}
+
+function sumMergedProcessIntervals(intervals: ProcessTimeInterval[]): number {
+  if (intervals.length === 0) return 0;
+
+  const sorted = [...intervals].sort((a, b) => a.start - b.start);
+  let total = 0;
+  let currentStart = sorted[0].start;
+  let currentEnd = sorted[0].end;
+
+  for (let index = 1; index < sorted.length; index += 1) {
+    const interval = sorted[index];
+    if (interval.start <= currentEnd) {
+      currentEnd = Math.max(currentEnd, interval.end);
+      continue;
+    }
+
+    total += currentEnd - currentStart;
+    currentStart = interval.start;
+    currentEnd = interval.end;
+  }
+
+  return total + currentEnd - currentStart;
+}
+
 export function getProcessGroupDurationMs(
   parts: readonly MessagePart[],
   activeNowMs?: number,
+  activePartId?: string,
 ): number | null {
-  let firstStart = Number.POSITIVE_INFINITY;
-  let lastEnd = Number.NEGATIVE_INFINITY;
-
-  for (const part of parts) {
-    const time = getProcessPartTime(part);
-    if (!time || !Number.isFinite(time.start)) continue;
-    const end = Number.isFinite(time.end) ? time.end : activeNowMs;
-    if (end === undefined || !Number.isFinite(end)) continue;
-    firstStart = Math.min(firstStart, time.start);
-    lastEnd = Math.max(lastEnd, end);
+  let activeIntervalIndex = -1;
+  if (activeNowMs !== undefined) {
+    const startIndex = activePartId
+      ? parts.findIndex((part) => part.id === activePartId)
+      : parts.length - 1;
+    const endIndex = activePartId ? startIndex : 0;
+    for (let index = startIndex; index >= endIndex; index -= 1) {
+      const part = parts[index];
+      if (!part) continue;
+      const time = getProcessPartTime(part);
+      if (
+        !!time
+        && Number.isFinite(time.start)
+        && !Number.isFinite(time.end)
+        && time.start <= activeNowMs
+        && (part.type !== 'tool' || isActiveToolPart(part))
+      ) {
+        activeIntervalIndex = index;
+        break;
+      }
+    }
   }
 
-  if (!Number.isFinite(firstStart) || !Number.isFinite(lastEnd)) return null;
-  return Math.max(0, lastEnd - firstStart);
+  const intervals = parts
+    .map((part, index) => getProcessPartInterval(
+      part,
+      index === activeIntervalIndex ? activeNowMs : undefined,
+    ))
+    .filter((interval): interval is ProcessTimeInterval => interval !== null);
+
+  if (intervals.length === 0) return null;
+  return sumMergedProcessIntervals(intervals);
 }
 
 export function formatProcessDuration(durationMs: number): string {
@@ -930,52 +1000,6 @@ function ContextUsageRing({
   );
 }
 
-function isSuccessfulUploadedDocumentAttachment(
-  attachment: UploadedDocumentAttachmentLike,
-): attachment is UploadedDocumentAttachmentLike & { status: 'success'; workspacePath: string; isImage?: false } {
-  return (
-    attachment.status === 'success'
-    && !attachment.isImage
-    && typeof attachment.workspacePath === 'string'
-    && attachment.workspacePath.length > 0
-  );
-}
-
-export function dedupeUploadedDocumentAttachments<T extends UploadedDocumentAttachmentLike>(items: T[]): T[] {
-  const latestIndexByPath = new Map<string, number>();
-
-  items.forEach((attachment, index) => {
-    if (isSuccessfulUploadedDocumentAttachment(attachment)) {
-      latestIndexByPath.set(attachment.workspacePath, index);
-    }
-  });
-
-  return items.filter((attachment, index) => {
-    if (!isSuccessfulUploadedDocumentAttachment(attachment)) {
-      return true;
-    }
-    return latestIndexByPath.get(attachment.workspacePath) === index;
-  });
-}
-
-export function listUploadedDocumentPaths(items: UploadedDocumentAttachmentLike[]): string[] {
-  const seen = new Set<string>();
-  const paths: string[] = [];
-
-  items.forEach((attachment) => {
-    if (!isSuccessfulUploadedDocumentAttachment(attachment)) {
-      return;
-    }
-    if (seen.has(attachment.workspacePath)) {
-      return;
-    }
-    seen.add(attachment.workspacePath);
-    paths.push(attachment.workspacePath);
-  });
-
-  return paths;
-}
-
 // Composer drafts are persisted to ``localStorage`` so navigating away from
 // the page (e.g. clicking the sidebar to open Agents / Workflows) and coming
 // back doesn't lose the half-typed message. Keyed per session so two sessions
@@ -1527,27 +1551,27 @@ function getGoalBannerTone(status: GoalBannerStatus): {
     return {
       root: 'border-emerald-200 bg-emerald-50 text-emerald-900',
       dot: 'bg-emerald-500',
-      icon: <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600" />,
+      icon: <IconCircleCheck aria-hidden="true" className="h-3.5 w-3.5 text-emerald-600" />,
     };
   }
   if (status === 'blocked') {
     return {
       root: 'border-red-200 bg-red-50 text-red-900',
       dot: 'bg-red-500',
-      icon: <AlertCircle className="h-3.5 w-3.5 text-red-600" />,
+      icon: <IconAlertCircle aria-hidden="true" className="h-3.5 w-3.5 text-red-600" />,
     };
   }
   if (status === 'paused') {
     return {
       root: 'border-amber-200 bg-amber-50 text-amber-900',
       dot: 'bg-amber-500',
-      icon: <Clock className="h-3.5 w-3.5 text-amber-600" />,
+      icon: <IconClock aria-hidden="true" className="h-3.5 w-3.5 text-amber-600" />,
     };
   }
   return {
     root: 'border-sky-200 bg-sky-50 text-sky-950',
     dot: 'bg-sky-500',
-    icon: <ListTree className="h-3.5 w-3.5 text-sky-600" />,
+    icon: <IconListTree aria-hidden="true" className="h-3.5 w-3.5 text-sky-600" />,
   };
 }
 
@@ -1580,7 +1604,7 @@ function GoalBanner({
         title={t('chat.goal.dismiss')}
         aria-label={t('chat.goal.dismiss')}
       >
-        <X className="h-3.5 w-3.5" />
+        <IconX aria-hidden="true" className="h-3.5 w-3.5" />
       </button>
     </div>
   );
@@ -1626,7 +1650,7 @@ function QueuedPromptPanel({
         onClick={onToggle}
         className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs font-medium text-zinc-600 transition-colors hover:bg-zinc-100/70 dark:text-zinc-300 dark:hover:bg-zinc-800"
       >
-        <ChevronDown className={`h-3.5 w-3.5 transition-transform ${expanded ? '' : '-rotate-90'}`} />
+        <IconChevronDown aria-hidden="true" className={`h-3.5 w-3.5 transition-transform ${expanded ? '' : '-rotate-90'}`} />
         <span>{t('chat.queue.count', { count: items.length })}</span>
       </button>
       {expanded && (
@@ -1667,7 +1691,7 @@ function QueuedPromptPanel({
                         className="rounded p-1 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-800 disabled:opacity-40 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
                         title={t('chat.save')}
                       >
-                        <Save className="h-3.5 w-3.5" />
+                        <IconDeviceFloppy aria-hidden="true" className="h-3.5 w-3.5" />
                       </button>
                       <button
                         type="button"
@@ -1676,7 +1700,7 @@ function QueuedPromptPanel({
                         className="rounded p-1 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-800 disabled:opacity-40 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
                         title={t('chat.cancel')}
                       >
-                        <X className="h-3.5 w-3.5" />
+                        <IconX aria-hidden="true" className="h-3.5 w-3.5" />
                       </button>
                     </>
                   ) : (
@@ -1688,7 +1712,7 @@ function QueuedPromptPanel({
                         className="rounded p-1 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-800 disabled:opacity-40 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
                         title={t('chat.queue.edit')}
                       >
-                        <Pencil className="h-3.5 w-3.5" />
+                        <IconPencil aria-hidden="true" className="h-3.5 w-3.5" />
                       </button>
                       <button
                         type="button"
@@ -1697,7 +1721,7 @@ function QueuedPromptPanel({
                         className="rounded p-1 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-800 disabled:opacity-40 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
                         title={t('chat.queue.runNow')}
                       >
-                        <ArrowUp className="h-3.5 w-3.5" />
+                        <IconArrowUp aria-hidden="true" className="h-3.5 w-3.5" />
                       </button>
                       <button
                         type="button"
@@ -1706,7 +1730,7 @@ function QueuedPromptPanel({
                         className="rounded p-1 text-zinc-500 hover:bg-red-50 hover:text-red-600 disabled:opacity-40 dark:text-zinc-400 dark:hover:bg-red-950/40 dark:hover:text-red-300"
                         title={t('chat.queue.remove')}
                       >
-                        <Trash2 className="h-3.5 w-3.5" />
+                        <IconTrash aria-hidden="true" className="h-3.5 w-3.5" />
                       </button>
                     </>
                   )}
@@ -1784,6 +1808,8 @@ export default function SessionChat({
   onInitialOptimisticMessageConsumed,
   focusMessageId,
   onFocusMessageConsumed,
+  onOpenContextFile,
+  onOpenContext,
   supportsVision,
   toolbarSlot,
   composerAddMenuSlot,
@@ -1824,6 +1850,13 @@ export default function SessionChat({
   // sidebar → Agents → back to Sessions) doesn't wipe the user's half-typed
   // message. Subsequent session changes are re-hydrated by the effect below.
   const [input, setInput] = useState<string>(() => readChatDraft(sessionId));
+  const composerBusyOwners = useRef(new Set<string>());
+  const [composerBusy, setComposerBusy] = useState(false);
+  const setComposerExtensionBusy = useCallback((owner: string, busy: boolean) => {
+    if (busy) composerBusyOwners.current.add(owner);
+    else composerBusyOwners.current.delete(owner);
+    setComposerBusy(composerBusyOwners.current.size > 0);
+  }, []);
   const [submittedModelPromptSessionId, setSubmittedModelPromptSessionId] = useState<string | null>(null);
   const [pendingContextUsage, setPendingContextUsage] = useState<PendingContextUsageState>({
     sessionId: null,
@@ -1847,7 +1880,53 @@ export default function SessionChat({
   const [sending, setSending] = useState(false);
   const [isStreaming, setIsStreaming] = useState(false);
   const activeToolPartIdsRef = useRef<Set<string>>(new Set());
-  const [attachments, setAttachments] = useState<ComposerAttachment[]>([]);
+  const [attachments, setAttachmentState] = useState<ComposerAttachment[]>([]);
+  const attachmentsRef = useRef<ComposerAttachment[]>([]);
+  const attachmentsMountedRef = useRef(true);
+  const attachmentScopeRef = useRef(0);
+  const uploadOwnershipRef = useRef(new Map<string, UploadOwnership>());
+  // Update the live draft synchronously, not on the next render. Upload responses,
+  // cancellation and unmount can all run before React commits the tray update.
+  const setAttachments = useCallback((next: ComposerAttachment[] | ((current: ComposerAttachment[]) => ComposerAttachment[])) => {
+    attachmentsRef.current = typeof next === 'function' ? next(attachmentsRef.current) : next;
+    if (attachmentsMountedRef.current) setAttachmentState(attachmentsRef.current);
+  }, []);
+  const disposeUpload = useCallback((uploadID: string) => {
+    if (uploadOwnershipRef.current.get(uploadID) !== 'draft') return;
+    uploadOwnershipRef.current.delete(uploadID);
+    void workspaceAPI.removeChatUpload(uploadID).catch(() => undefined);
+  }, []);
+  const discardAttachments = useCallback(() => {
+    setAttachments([]);
+    uploadOwnershipRef.current.forEach((_ownership, uploadID) => disposeUpload(uploadID));
+  }, [disposeUpload, setAttachments]);
+  const beginUploadSubmission = useCallback((documents: ComposerAttachment[]): UploadSubmission => {
+    const previous = documents.map(({ uploadID }) => [uploadID!, uploadOwnershipRef.current.get(uploadID!)] as const);
+    previous.forEach(([uploadID]) => uploadOwnershipRef.current.set(uploadID, 'submitting'));
+    let started = false;
+    let accepted = false;
+    return {
+      start: () => { started = true; },
+      accept: () => {
+        accepted = true;
+        previous.forEach(([uploadID]) => uploadOwnershipRef.current.set(uploadID, 'submitted'));
+      },
+      reject: (error) => {
+        if (accepted) return;
+        const status = (error as { response?: { status?: number } })?.response?.status;
+        // Timeouts (including gateway/client timeouts) and 5xx do not prove that
+        // the backend rejected the prompt. A later retry cannot undo that doubt.
+        const notAccepted = !started || (typeof status === 'number'
+          && status >= 400 && status < 500 && status !== 408 && status !== 499);
+        previous.forEach(([uploadID, ownership]) => {
+          uploadOwnershipRef.current.set(uploadID, notAccepted && ownership !== 'unknown' ? 'draft' : 'unknown');
+          if (!attachmentsMountedRef.current || !attachmentsRef.current.some((item) => item.uploadID === uploadID)) {
+            disposeUpload(uploadID);
+          }
+        });
+      },
+    };
+  }, [disposeUpload]);
   const [isDragOver, setIsDragOver] = useState(false);
   const [showComposerAddMenu, setShowComposerAddMenu] = useState(false);
   // Lightbox preview for composer thumbnails. Shares the same overlay
@@ -1860,6 +1939,14 @@ export default function SessionChat({
   const [dreamingMessage, setDreamingMessage] = useState('');
   const [goalBanner, setGoalBanner] = useState<GoalBannerState | null>(null);
   const [dismissedGoalKey, setDismissedGoalKey] = useState(() => readDismissedGoalKey(sessionId));
+  useEffect(() => {
+    attachmentsMountedRef.current = true;
+    return () => {
+      attachmentsMountedRef.current = false;
+      attachmentScopeRef.current += 1;
+      discardAttachments();
+    };
+  }, [discardAttachments]);
   const {
     items: queuedPrompts,
     expanded: queueExpanded,
@@ -1870,7 +1957,6 @@ export default function SessionChat({
     actionId: queueActionId,
     refresh: fetchPromptQueue,
     applyItems: applyPromptQueueItems,
-    enqueue: enqueuePrompt,
     startEdit: startQueuedEdit,
     cancelEdit: cancelQueuedEdit,
     saveEdit: saveQueuedEdit,
@@ -2052,6 +2138,7 @@ export default function SessionChat({
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const focusedMessageRef = useRef('');
   const isAtBottomRef = useRef(true);
+  const historyScrollLockRef = useRef(false);
   const scrollToBottomRafRef = useRef<number | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -2108,7 +2195,7 @@ export default function SessionChat({
   const [selectedMentionIndex, setSelectedMentionIndex] = useState(0);
   const [pendingAgentName, setPendingAgentName] = useState(agentName || 'rex');
   const successfulDocAttachments = useMemo(
-    () => attachments.filter((a) => a.status === 'success' && a.workspacePath && !a.isImage),
+    () => attachments.filter((a) => a.status === 'success' && a.uploadID && !a.isImage),
     [attachments],
   );
   const successfulImageAttachments = useMemo(
@@ -2136,10 +2223,11 @@ export default function SessionChat({
   }, [mentionAgents, mentionQuery]);
 
   const scrollToBottom = useCallback(() => {
-    if (!isAtBottomRef.current) return;
+    if (!isAtBottomRef.current || historyScrollLockRef.current) return;
     if (scrollToBottomRafRef.current !== null) return;
     scrollToBottomRafRef.current = requestAnimationFrame(() => {
       scrollToBottomRafRef.current = null;
+      if (!isAtBottomRef.current || historyScrollLockRef.current) return;
       messagesEndRef.current?.scrollIntoView({ behavior: 'instant' });
     });
   }, []);
@@ -2157,12 +2245,13 @@ export default function SessionChat({
     rafScheduledRef.current = true;
     requestAnimationFrame(() => {
       const el = scrollContainerRef.current;
-      if (el) {
+      if (el && !historyScrollLockRef.current) {
         isAtBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight <= SCROLL_BOTTOM_THRESHOLD_PX;
       }
       rafScheduledRef.current = false;
     });
   }, []);
+
 
   const {
     messages,
@@ -2177,8 +2266,31 @@ export default function SessionChat({
     replaceMessageText,
     markMessageStopped,
     truncateAfterMessage,
+    hasOlder = false,
+    hasNewer = false,
+    loadingOlder = false,
+    loadingNewer = false,
+    loadOlder,
+    loadNewer,
+    loadLatest,
+    focusMessage,
   } =
     useSessionMessages(sessionId || undefined);
+
+  const loadHistoryPage = useCallback(async (direction: 'older' | 'newer') => {
+    historyScrollLockRef.current = true;
+    isAtBottomRef.current = false;
+    try {
+      await (direction === 'older' ? loadOlder?.() : loadNewer?.());
+    } finally {
+      // Keep the scroll listener from re-enabling tail-follow while React and
+      // the virtualizer measure the newly appended/prepended rows.
+      requestAnimationFrame(() => requestAnimationFrame(() => {
+        historyScrollLockRef.current = false;
+      }));
+    }
+  }, [loadOlder, loadNewer]);
+
 
   useEffect(() => {
     setSubmittedModelPromptSessionId(null);
@@ -2212,14 +2324,31 @@ export default function SessionChat({
 
   useEffect(() => {
     const targetId = String(focusMessageId || '').trim();
-    if (!targetId || focusedMessageRef.current === targetId) return;
+    if (!targetId) {
+      focusedMessageRef.current = '';
+      return;
+    }
+    if (focusedMessageRef.current === targetId) return;
     if (loading) return;
+    isAtBottomRef.current = false;
+    const loadedMessage = messages.find(message => message.id === targetId || message.parts.some(part => part.messageID === targetId));
     const target = messagesContentRef.current?.querySelector<HTMLElement>(
-      `[data-message-id="${CSS.escape(targetId)}"]`,
+      `[data-message-id="${CSS.escape(loadedMessage?.id || targetId)}"]`,
     );
     if (!target) {
-      focusedMessageRef.current = targetId;
-      onFocusMessageConsumed?.();
+      // A virtualized row can be loaded without having a DOM node. Its
+      // timeline scrolls it into the viewport; only fetch if it is absent.
+      if (loadedMessage) return;
+      if (focusMessage) {
+        focusedMessageRef.current = targetId;
+        void focusMessage(targetId).then(success => {
+          focusedMessageRef.current = '';
+          if (success === false) onFocusMessageConsumed?.();
+        });
+      } else {
+        focusedMessageRef.current = targetId;
+        onFocusMessageConsumed?.();
+      }
       return;
     }
     focusedMessageRef.current = targetId;
@@ -2229,7 +2358,7 @@ export default function SessionChat({
       target.classList.remove('ring-2', 'ring-sky-400', 'ring-offset-2', 'ring-offset-white', 'dark:ring-offset-zinc-950');
     }, 1800);
     onFocusMessageConsumed?.();
-  }, [focusMessageId, loading, messages.length, onFocusMessageConsumed]);
+  }, [focusMessageId, loading, messages, focusMessage, onFocusMessageConsumed]);
 
   const sessionMessagesForContextUsage = useMemo(
     () => messages.filter((message) => !message.sessionID || message.sessionID === sessionId),
@@ -2377,11 +2506,11 @@ export default function SessionChat({
       setPendingPermissions((previous) => previous.filter((item) => item.id !== request.id));
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : String(error);
-      setPermissionError(message || '提交确认失败，请重试。');
+      setPermissionError(message || t('chat.permission.replyFailed'));
     } finally {
       setPermissionSubmitting(false);
     }
-  }, [pendingPermissions, permissionSubmitting]);
+  }, [pendingPermissions, permissionSubmitting, t]);
 
   const sseEnabled = Boolean(sessionId) && (live || isStreaming || !hideInput);
 
@@ -2523,6 +2652,7 @@ export default function SessionChat({
           }
           return;
         case 'message-updated': {
+          sessionStatusRevisionRef.current += 1;
           const { info } = action;
           updateMessage(info);
           if (
@@ -2565,6 +2695,7 @@ export default function SessionChat({
           return;
         }
         case 'message-removed': {
+          sessionStatusRevisionRef.current += 1;
           const removedMessage = messagesRef.current.find((message) => message.id === action.messageID);
           removedMessage?.parts.forEach((part) => {
             if (part.id) activeToolPartIdsRef.current.delete(part.id);
@@ -2578,6 +2709,7 @@ export default function SessionChat({
           return;
         }
         case 'message-part-updated': {
+          sessionStatusRevisionRef.current += 1;
           const part = action.part as Pick<MessagePart, 'id' | 'type' | 'state'>;
           if (part.id) {
             if (isActiveToolPart(part)) {
@@ -2823,7 +2955,8 @@ export default function SessionChat({
   // Reset state on session change
   useEffect(() => {
     setIsStreaming(false);
-    setAttachments([]);
+    attachmentScopeRef.current += 1;
+    discardAttachments();
     setIsDragOver(false);
     setIsCompacting(false);
     setCompactingMessage('');
@@ -2851,7 +2984,7 @@ export default function SessionChat({
     setInput(readChatDraft(sessionId));
     setComposerReferences([]);
     setProcessGroupOpenState(readProcessGroupOpenState(sessionId));
-  }, [sessionId, clearPendingQuestions]);
+  }, [sessionId, clearPendingQuestions, discardAttachments]);
 
   const handleProcessGroupOpenChange = useCallback((key: string, open: boolean) => {
     setProcessGroupOpenState(prev => {
@@ -2989,32 +3122,18 @@ export default function SessionChat({
     }
   }, []);
 
-  const buildAttachmentBlock = useCallback((items: ComposerAttachment[]) => {
-    if (items.length === 0) return '';
-    const lines = listUploadedDocumentPaths(items).map((path) => `- ${path}`);
-    if (lines.length === 0) return '';
-    return `Attached files:\n${lines.join('\n')}`;
-  }, []);
-
-  const buildMessageText = useCallback((rawText: string, items: ComposerAttachment[]) => {
-    const attachmentBlock = buildAttachmentBlock(items);
-    const content = rawText
-      ? attachmentBlock
-        ? `${rawText}\n\n${attachmentBlock}`
-        : rawText
-      : attachmentBlock;
-
-    if (!content) return '';
+  const buildMessageText = useCallback((rawText: string) => {
+    if (!rawText) return '';
     return nodeRef
-      ? `@@node:${nodeRef.id}|${nodeRef.type}\n${content}`
-      : content;
-  }, [buildAttachmentBlock, nodeRef]);
+      ? `@@node:${nodeRef.id}|${nodeRef.type}\n${rawText}`
+      : rawText;
+  }, [nodeRef]);
 
   const updateAttachment = useCallback((id: string, updater: (attachment: ComposerAttachment) => ComposerAttachment) => {
     setAttachments((prev) => prev.map((attachment) => (
       attachment.id === id ? updater(attachment) : attachment
     )));
-  }, []);
+  }, [setAttachments]);
 
   const uploadSelectedFiles = useCallback(async (entries: Array<{ id: string; file: File }>) => {
     if (entries.length === 0) return;
@@ -3025,25 +3144,34 @@ export default function SessionChat({
         'chat',
       );
       const uploaded = response.data.uploaded ?? [];
-      setAttachments((prev) => dedupeUploadedDocumentAttachments(prev.map((attachment) => {
-        const entryIndex = entries.findIndex((entry) => entry.id === attachment.id);
-        if (entryIndex < 0) return attachment;
-        const result = uploaded[entryIndex];
-        if (!result || result.error || !result.path) {
-          return {
-            ...attachment,
-            status: 'error',
-            error: result?.error || t('chat.upload.errorGeneric'),
-          };
+      entries.forEach(({ id }, index) => {
+        const result = uploaded[index];
+        const attachment = attachmentsRef.current.find((item) => item.id === id);
+        // Register every returned ID, even if its chip was cancelled or the
+        // component unmounted while this batch was in flight. Dispose per item,
+        // outside React state updaters (which may be replayed or never run).
+        if (result?.uploadID) {
+          if (!uploadOwnershipRef.current.has(result.uploadID)) {
+            uploadOwnershipRef.current.set(result.uploadID, 'draft');
+          }
+          if (!attachmentsMountedRef.current || !attachment || result.error) disposeUpload(result.uploadID);
         }
-        return {
-          ...attachment,
-          name: result.name || attachment.name,
+        if (!attachmentsMountedRef.current || !attachment) return;
+        if (attachment.uploadID && attachment.uploadID !== result?.uploadID) disposeUpload(attachment.uploadID);
+        updateAttachment(id, (current) => !result || result.error || !result.uploadID ? {
+          ...current,
+          status: 'error',
+          uploadID: undefined,
+          error: result?.error || t('chat.upload.errorGeneric'),
+        } : {
+          ...current,
+          name: result.name || current.name,
           status: 'success',
-          workspacePath: result.abs_path ?? result.path,
+          uploadID: result.uploadID,
+          mime: result.mime || current.file.type || 'application/octet-stream',
           error: undefined,
-        };
-      })));
+        });
+      });
     } catch (err: any) {
       const detail = err?.response?.data?.detail ?? err?.message ?? t('chat.upload.errorGeneric');
       setAttachments((prev) => prev.map((attachment) => (
@@ -3052,7 +3180,7 @@ export default function SessionChat({
           : attachment
       )));
     }
-  }, [t]);
+  }, [disposeUpload, setAttachments, updateAttachment, t]);
 
   const queueFilesForUpload = useCallback((files: File[], { imageBlocked = false }: { imageBlocked?: boolean } = {}) => {
     if (files.length === 0) return;
@@ -3143,7 +3271,7 @@ export default function SessionChat({
           });
       });
     }
-  }, [t, toast, uploadSelectedFiles, supportsVision]);
+  }, [t, toast, uploadSelectedFiles, supportsVision, setAttachments]);
 
   const handleFileSelection = useCallback((fileList: FileList | null) => {
     if (!fileList || fileList.length === 0) return;
@@ -3151,8 +3279,8 @@ export default function SessionChat({
   }, [queueFilesForUpload]);
 
   const handleRetryAttachment = useCallback((attachmentId: string) => {
-    const attachment = attachments.find((item) => item.id === attachmentId);
-    if (!attachment) return;
+    const attachment = attachmentsRef.current.find((item) => item.id === attachmentId);
+    if (!attachment || attachment.status !== 'error') return;
     updateAttachment(attachmentId, (current) => ({
       ...current,
       status: 'uploading',
@@ -3178,11 +3306,13 @@ export default function SessionChat({
     } else {
       void uploadSelectedFiles([{ id: attachment.id, file: attachment.file }]);
     }
-  }, [attachments, updateAttachment, uploadSelectedFiles, t]);
+  }, [setAttachments, updateAttachment, uploadSelectedFiles, t]);
 
   const handleRemoveAttachment = useCallback((attachmentId: string) => {
-    setAttachments((prev) => prev.filter((attachment) => attachment.id !== attachmentId));
-  }, []);
+    const attachment = attachmentsRef.current.find((item) => item.id === attachmentId);
+    setAttachments((prev) => prev.filter((item) => item.id !== attachmentId));
+    if (attachment?.uploadID && !attachment.isImage) disposeUpload(attachment.uploadID);
+  }, [disposeUpload, setAttachments]);
 
   const handleComposerPaste = useCallback((event: React.ClipboardEvent<HTMLTextAreaElement>) => {
     const files = Array.from(event.clipboardData?.files ?? []);
@@ -3221,6 +3351,7 @@ export default function SessionChat({
    */
   const sendCommand = async (command: string, args: string) => {
     if (!sessionId) return;
+    sessionStatusRevisionRef.current += 1;
 
     abortingRef.current = false;
     abortedMessageIdRef.current = null;
@@ -3271,12 +3402,14 @@ export default function SessionChat({
   /** Core send logic */
   const sendText = async (
     text: string,
-    imageParts: ImagePartData[] = [],
+    fileParts: FilePartData[] = [],
     agentOverride?: string,
     options?: PromptDisplayOptions,
+    uploadSubmission?: UploadSubmission,
   ) => {
     if (!sessionId) return;
     const effectiveAgent = agentOverride || agentName;
+    sessionStatusRevisionRef.current += 1;
     // Clear abort state immediately so SSE events for the new stream are not suppressed
     abortingRef.current = false;
     abortedMessageIdRef.current = null;
@@ -3296,8 +3429,14 @@ export default function SessionChat({
       ...(options?.displayText ? { metadata: { displayText: options.displayText } } : {}),
     };
     if (text || options?.displayText) tempParts.push(optimisticTextPart);
-    imageParts.forEach((img, i) => {
-      tempParts.push({ id: `temp-${messageId}-img-${i}`, type: 'file', url: img.url, mime: img.mime, filename: img.filename });
+    fileParts.forEach((file, i) => {
+      tempParts.push({
+        id: file.id || `temp-${messageId}-file-${i}`,
+        type: 'file',
+        url: file.url,
+        mime: file.mime,
+        filename: file.filename,
+      });
     });
 
     const optimisticMessage = {
@@ -3317,7 +3456,7 @@ export default function SessionChat({
     try {
       await ensureAutoModelSession();
       const payload: Record<string, unknown> = {
-        parts: buildPromptParts(text, imageParts),
+        parts: buildPromptParts(text, fileParts),
         messageID: messageId,
       };
       if (effectiveAgent) payload.agent = effectiveAgent;
@@ -3325,7 +3464,9 @@ export default function SessionChat({
       if (options?.displayText) payload.displayText = options.displayText;
       payload.executionMode = executionMode;
 
+      uploadSubmission?.start();
       await client.post(`/api/session/${sessionId}/prompt_async`, payload);
+      uploadSubmission?.accept();
       if (executionMode === 'goal' && text.trim()) {
         goalHydrationVersionRef.current += 1;
         writeDismissedGoalKey(sessionId, '');
@@ -3346,7 +3487,13 @@ export default function SessionChat({
       if (axiosErr?.response?.status === 404) {
         onError?.(`Session not found. Please start a new session.`);
       } else {
-        alert(`Send failed: ${err instanceof Error ? err.message : String(err)}`);
+        // Same surface as the new-session path in pages/Session (toast with the
+        // backend message); a blocking alert() hid the composer draft the user
+        // needs to retry.
+        toast.error(
+          t('chat.sendFailed'),
+          axiosErr?.response?.data?.message || axiosErr?.response?.data?.detail || (err instanceof Error ? err.message : String(err)),
+        );
       }
       throw err;
     } finally {
@@ -3356,21 +3503,28 @@ export default function SessionChat({
 
   const enqueueText = async (
     text: string,
-    imageParts: ImagePartData[] = [],
+    fileParts: FilePartData[] = [],
     agentOverride?: string,
     options?: PromptDisplayOptions,
+    uploadSubmission?: UploadSubmission,
   ) => {
     if (!sessionId) return;
     const effectiveAgent = agentOverride || agentName;
     try {
       await ensureAutoModelSession();
-      await enqueuePrompt({
-        parts: buildPromptParts(text, imageParts),
+      uploadSubmission?.start();
+      await sessionApi.enqueuePrompt(sessionId, {
+        parts: buildPromptParts(text, fileParts),
         ...(effectiveAgent ? { agent: effectiveAgent } : {}),
         ...(model ? { model } : {}),
         ...(options?.displayText ? { displayText: options.displayText } : {}),
         executionMode,
       });
+      // Acceptance transfers ownership before the queue refresh or a parent
+      // callback can switch/unmount this composer.
+      uploadSubmission?.accept();
+      await fetchPromptQueue();
+      setQueueExpanded(true);
       onExecutionModeAccepted?.(executionMode);
     } catch (err: any) {
       const statusCode = err?.response?.status;
@@ -3390,7 +3544,7 @@ export default function SessionChat({
     setInput('');
     setShowCommandDropdown(false);
     setMentionRange(null);
-    setAttachments([]);
+    discardAttachments();
 
     if (sessionId && isStreaming) {
       try {
@@ -3435,33 +3589,59 @@ export default function SessionChat({
   };
 
   const handleSend = async () => {
-    if (!canSend) return;
+    if (!canSend || composerBusyOwners.current.size > 0) return;
     const draftText = input.trim();
     const referencesToSend = [...composerReferences];
     const referenceText = referencesToSend.map(formatComposerReference).join(' ');
     const rawText = [referenceText, draftText].filter(Boolean).join(' ');
-    const docAttachmentsToSend = [...successfulDocAttachments];
-    const imageAttachmentsToSend = [...successfulImageAttachments];
-    const text = buildMessageText(rawText, docAttachmentsToSend);
+    const docAttachmentsToSend = attachmentsRef.current.filter((item) => item.status === 'success' && item.uploadID && !item.isImage);
+    const imageAttachmentsToSend = attachmentsRef.current.filter((item) => item.status === 'success' && item.isImage && item.dataUrl);
+    if (docAttachmentsToSend.some(({ uploadID }) => {
+      const ownership = uploadOwnershipRef.current.get(uploadID!);
+      return ownership === 'submitting' || ownership === 'submitted';
+    })) return;
+    const text = buildMessageText(rawText);
     const mentionedAgent = resolveReferencedAgentName(rawText, mentionAgents);
+    const scope = attachmentScopeRef.current;
     const restoreDraft = () => {
+      if (!attachmentsMountedRef.current || scope !== attachmentScopeRef.current) return;
       setInput(draftText);
       setComposerReferences(referencesToSend);
     };
 
-    // Need either text content or image attachments
-    if (!text && imageAttachmentsToSend.length === 0) return;
+    // Need either text content or at least one uploaded file.
+    if (!text && docAttachmentsToSend.length === 0 && imageAttachmentsToSend.length === 0) return;
+
+    // Reserve IDs synchronously, before create, model selection or enqueue can
+    // yield. Tray removal/unmount must never DELETE a possibly accepted upload.
+    const uploadSubmission = beginUploadSubmission(docAttachmentsToSend);
+    const sentAttachmentIds = new Set([...docAttachmentsToSend, ...imageAttachmentsToSend].map(({ id }) => id));
+    const clearSentAttachments = () => setAttachments((current) => current.filter(({ id }) => !sentAttachmentIds.has(id)));
+    const rejectSubmission = (error: unknown) => {
+      uploadSubmission.reject(error);
+      restoreDraft();
+      // The live tray still owns retryable attachments. Do not resurrect chips
+      // explicitly removed in flight or replace uploads added during the send.
+    };
 
     setInput('');
     setComposerReferences([]);
     setShowCommandDropdown(false);
     setMentionRange(null);
 
-    const imageParts: ImagePartData[] = imageAttachmentsToSend.map((a) => ({
-      url: a.dataUrl!,
-      mime: a.file.type,
-      filename: a.name,
+    const documentParts: FilePartData[] = docAttachmentsToSend.map((attachment) => ({
+      id: attachment.id,
+      uploadID: attachment.uploadID!,
+      mime: attachment.mime || attachment.file.type || 'application/octet-stream',
+      filename: attachment.name,
     }));
+    const imageParts: ImagePartData[] = imageAttachmentsToSend.map((attachment) => ({
+      id: attachment.id,
+      url: attachment.dataUrl!,
+      mime: attachment.file.type,
+      filename: attachment.name,
+    }));
+    const fileParts: FilePartData[] = [...documentParts, ...imageParts];
 
     // Keep client-side commands local even while Rex is streaming.
     const parsed = docAttachmentsToSend.length === 0 && imageAttachmentsToSend.length === 0
@@ -3475,11 +3655,10 @@ export default function SessionChat({
 
     if (sessionId && isStreaming) {
       try {
-        await enqueueText(text, imageParts, mentionedAgent || undefined);
-        setAttachments([]);
-      } catch {
-        restoreDraft();
-        setAttachments([...docAttachmentsToSend, ...imageAttachmentsToSend]);
+        await enqueueText(text, fileParts, mentionedAgent || undefined, undefined, uploadSubmission);
+        clearSentAttachments();
+      } catch (error) {
+        rejectSubmission(error);
       }
       return;
     }
@@ -3505,35 +3684,36 @@ export default function SessionChat({
         try {
           const effectiveAgent = mentionedAgent || agentName;
           setPendingAgentName(effectiveAgent || 'rex');
+          // The parent's opaque create-and-send promise must resolve only after
+          // acceptance and propagate explicit rejection errors unchanged.
+          uploadSubmission.start();
           await onCreateAndSend(
             text,
-            imageParts,
+            fileParts,
             effectiveAgent || undefined,
             model,
             undefined,
             executionMode,
           );
+          uploadSubmission.accept();
           onExecutionModeAccepted?.(executionMode);
-          setAttachments([]);
-        } catch {
-          // Restore both the text and the attachment list so the user can
-          // retry without re-uploading images. Image data URLs are already
-          // in memory, so restoring the array is safe and cheap.
-          restoreDraft();
-          setAttachments(imageAttachmentsToSend);
+          clearSentAttachments();
+        } catch (error) {
+          rejectSubmission(error);
         } finally {
           setSending(false);
         }
+      } else {
+        rejectSubmission(undefined);
       }
       return;
     }
 
     try {
-      await sendText(text, imageParts, mentionedAgent || undefined);
-      setAttachments([]);
-    } catch {
-      restoreDraft();
-      setAttachments(imageAttachmentsToSend);
+      await sendText(text, fileParts, mentionedAgent || undefined, undefined, uploadSubmission);
+      clearSentAttachments();
+    } catch (error) {
+      rejectSubmission(error);
     }
   };
 
@@ -3688,6 +3868,7 @@ export default function SessionChat({
 
   const handleAbort = useCallback(async () => {
     if (!sessionId) return;
+    sessionStatusRevisionRef.current += 1;
     // Record the ID of the message being aborted so we can ignore its finish event later.
     const lastAsstMsg = [...messagesRef.current].reverse().find(
       (m) => m.role === 'assistant' && !m.finish,
@@ -3743,6 +3924,7 @@ export default function SessionChat({
   }, [removeQueuedPrompt, t, toast]);
 
   const handleQueuedRunNow = useCallback(async (item: QueuedPrompt) => {
+    sessionStatusRevisionRef.current += 1;
     try {
       const didRun = await runQueuedPromptNow(item);
       if (!didRun) return;
@@ -3766,12 +3948,20 @@ export default function SessionChat({
   // Fallback polling to detect completion when SSE events are missed
   useEffect(() => {
     if (!isStreaming || !sessionId) return;
-    let questionRecoveryInFlight = false;
+    const controller = new AbortController();
+    let pollInFlight = false;
     const timer = setInterval(async () => {
+      if (pollInFlight) return;
+      pollInFlight = true;
+      const statusRevision = sessionStatusRevisionRef.current;
+      const isCurrentPoll = () => !controller.signal.aborted
+        && statusRevision === sessionStatusRevisionRef.current;
       try {
         const res = await client.get(`/api/session/${sessionId}/message`, {
           params: { page: true, limit: 50, include_archived: true },
+          signal: controller.signal,
         });
+        if (!isCurrentPoll()) return;
         const msgs: FetchedMessageWithParts[] = Array.isArray(res.data)
           ? res.data
           : (res.data?.items || []);
@@ -3810,13 +4000,9 @@ export default function SessionChat({
               )
             ))
           ));
-          if (hasMissingFetchedQuestion && !questionRecoveryInFlight) {
-            questionRecoveryInFlight = true;
-            try {
-              await refetch();
-            } finally {
-              questionRecoveryInFlight = false;
-            }
+          if (hasMissingFetchedQuestion) {
+            await refetch();
+            if (!isCurrentPoll()) return;
           }
         }
 
@@ -3836,17 +4022,22 @@ export default function SessionChat({
           ));
           if (hasFetchedActiveTool) return;
 
-          activeToolPartIdsRef.current.clear();
-          const statusRes = await client.get('/api/session/status');
+          const statusRes = await client.get('/api/session/status', { signal: controller.signal });
+          if (!isCurrentPoll()) return;
           const status = statusRes.data?.[sessionId];
           if (isActiveSessionStatus(status)) return;
 
+          activeToolPartIdsRef.current.clear();
           refetch();
           setIsStreaming(false);
         }
-      } catch { /* ignore */ }
+      } catch { /* retry on the next interval while this effect remains active */ }
+      finally { pollInFlight = false; }
     }, FALLBACK_POLL_MS);
-    return () => clearInterval(timer);
+    return () => {
+      controller.abort();
+      clearInterval(timer);
+    };
   }, [isStreaming, sessionId, refetch]);
 
   // Copy text to clipboard
@@ -3957,6 +4148,7 @@ export default function SessionChat({
       localTokenDeltas,
     );
     replaceMessageText(editingMessageId, editingPartId, text);
+    sessionStatusRevisionRef.current += 1;
     try {
       await sessionApi.resendMessage(sessionId, editingMessageId, editingPartId, text);
       truncateAfterMessage(editingMessageId);
@@ -3993,6 +4185,7 @@ export default function SessionChat({
 
   const handleRegenerateMessage = useCallback(async (messageId: string) => {
     if (!sessionId) return;
+    sessionStatusRevisionRef.current += 1;
 
     abortingRef.current = false;
     abortedMessageIdRef.current = null;
@@ -4059,7 +4252,9 @@ export default function SessionChat({
     : fullWidth
       ? 'space-y-5 w-full px-12'
       : pageCanvas
-        ? 'space-y-[18px] w-full max-w-[760px] mx-auto px-7'
+        // Both avatars extend 40px beyond the message column. Reserve space
+        // on both edges below sm so virtual rows cannot widen the viewport.
+        ? 'space-y-[18px] w-full max-w-[760px] mx-auto px-12 sm:px-7'
         : 'space-y-5 w-[min(76%,64rem)] mx-auto px-6';
   const visibleGoalBanner = goalBanner && getGoalBannerKey(goalBanner) !== dismissedGoalKey
     ? goalBanner
@@ -4118,8 +4313,19 @@ export default function SessionChat({
           )
         ) : (
           <div ref={messagesContentRef} className={msgListClass}>
+            {hasOlder && (
+              <div className="flex justify-center py-2">
+                <button type="button" disabled={loadingOlder} onClick={() => void loadHistoryPage('older')}
+                  className="rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm text-zinc-600 disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300">
+                  {loadingOlder ? t('chat.history.loading') : t('chat.history.older')}
+                </button>
+              </div>
+            )}
             <ChatMessageTimeline
               items={historyItems}
+              scrollContainerRef={scrollContainerRef}
+              focusMessageId={focusMessageId}
+              onFocusMessageConsumed={onFocusMessageConsumed}
               pendingQuestions={pendingQuestions}
               onQuestionAnswer={handleQuestionAnswer}
               onQuestionReject={handleQuestionReject}
@@ -4142,6 +4348,8 @@ export default function SessionChat({
               onEditSave={handleSaveEditedMessage}
               onEditSend={handleSendEditedUserMessage}
               onRegenerate={handleRegenerateMessage}
+              onOpenContextFile={onOpenContextFile}
+              onOpenContext={onOpenContext}
             />
             <ChatMessageTimeline
               items={tailItems}
@@ -4167,7 +4375,22 @@ export default function SessionChat({
               onEditSave={handleSaveEditedMessage}
               onEditSend={handleSendEditedUserMessage}
               onRegenerate={handleRegenerateMessage}
+              onOpenContextFile={onOpenContextFile}
+              onOpenContext={onOpenContext}
             />
+
+            {hasNewer && (
+              <div className="flex flex-wrap justify-center gap-2 py-2">
+                <button type="button" disabled={loadingNewer} onClick={() => void loadHistoryPage('newer')}
+                  className="rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm text-zinc-600 disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300">
+                  {loadingNewer ? t('chat.history.loading') : t('chat.history.newer')}
+                </button>
+                <button type="button" onClick={() => { isAtBottomRef.current = true; void loadLatest?.(); }}
+                  className="rounded-lg bg-zinc-800 px-3 py-2 text-sm text-white dark:bg-zinc-200 dark:text-zinc-900">
+                  {t('chat.history.latest')}
+                </button>
+              </div>
+            )}
 
             {/* Compacting indicator with live progress stages */}
             {isCompacting && (
@@ -4187,7 +4410,7 @@ export default function SessionChat({
                     <div className="flex flex-col min-w-0 w-full">
                       <div className={`${compact ? 'w-full max-w-full px-4 py-3 rounded-[20px]' : 'w-full px-5 py-4 rounded-[24px]'} text-sm break-words shadow-sm bg-amber-50 border border-amber-200 dark:border-amber-500/35 dark:bg-amber-950/30 dark:shadow-none`}>
                         <div className="flex items-center gap-2 text-sm text-amber-700">
-                          <Loader2 className="w-4 h-4 animate-spin text-amber-500" />
+                          <IconLoader2 aria-hidden="true" className="w-4 h-4 animate-spin text-amber-500" />
                           <span>{compactingMessage || t('chat.compacting')}</span>
                         </div>
                         {compactionPercent !== null && (
@@ -4246,7 +4469,7 @@ export default function SessionChat({
                       <div className={getStandaloneThinkingBubbleClassName(compact)}>
                         {isDreaming ? (
                           <div className="flex items-center gap-2 text-sm text-violet-600 dark:text-violet-300">
-                            <Loader2 className="w-4 h-4 animate-spin" />
+                            <IconLoader2 aria-hidden="true" className="w-4 h-4 animate-spin" />
                             <span>{dreamingMessage || t('chat.dreaming')}</span>
                           </div>
                         ) : (
@@ -4440,7 +4663,6 @@ export default function SessionChat({
                     {attachments.map((attachment) => {
                       const isUploading = attachment.status === 'uploading';
                       const isError = attachment.status === 'error';
-                      const attachmentPath = attachment.workspacePath ?? null;
 
                       // Image thumbnail display
                       if (attachment.isImage && attachment.dataUrl && !isError) {
@@ -4453,7 +4675,7 @@ export default function SessionChat({
                           >
                             {isUploading ? (
                               <div className="w-16 h-16 flex items-center justify-center">
-                                <Loader2 className="w-5 h-5 animate-spin text-sky-500" />
+                                <IconLoader2 aria-hidden="true" className="w-5 h-5 animate-spin text-sky-500" />
                               </div>
                             ) : (
                               <img
@@ -4472,7 +4694,7 @@ export default function SessionChat({
                               className="absolute top-0.5 right-0.5 rounded-full bg-black/50 p-0.5 text-white hover:bg-black/70 transition-colors"
                               title={t('chat.upload.remove')}
                             >
-                              <X className="w-3 h-3" />
+                              <IconX aria-hidden="true" className="w-3 h-3" />
                             </button>
                           </div>
                         );
@@ -4490,19 +4712,16 @@ export default function SessionChat({
                           }`}
                         >
                           {isUploading ? (
-                            <Loader2 className="w-3.5 h-3.5 animate-spin flex-shrink-0" />
+                            <IconLoader2 aria-hidden="true" className="w-3.5 h-3.5 animate-spin flex-shrink-0" />
                           ) : isError ? (
-                            <AlertCircle className="w-3.5 h-3.5 flex-shrink-0" />
+                            <IconAlertCircle aria-hidden="true" className="w-3.5 h-3.5 flex-shrink-0" />
                           ) : attachment.isImage ? (
-                            <ImageIcon className="w-3.5 h-3.5 flex-shrink-0" />
+                            <IconPhoto aria-hidden="true" className="w-3.5 h-3.5 flex-shrink-0" />
                           ) : (
-                            <FileText className="w-3.5 h-3.5 flex-shrink-0" />
+                            <IconFileText aria-hidden="true" className="w-3.5 h-3.5 flex-shrink-0" />
                           )}
                           <div className="min-w-0">
                             <div className="truncate font-medium">{attachment.name}</div>
-                            {attachmentPath && (
-                              <div className="truncate text-[11px] opacity-70">{attachmentPath}</div>
-                            )}
                             {attachment.error && (
                               <div className="truncate text-[11px]">{attachment.error}</div>
                             )}
@@ -4514,7 +4733,7 @@ export default function SessionChat({
                               className="rounded p-0.5 hover:bg-white/70 transition-colors"
                               title={t('chat.upload.retry')}
                             >
-                              <RefreshCw className="w-3.5 h-3.5" />
+                              <IconRefresh aria-hidden="true" className="w-3.5 h-3.5" />
                             </button>
                           )}
                           <button
@@ -4523,7 +4742,7 @@ export default function SessionChat({
                             className="rounded p-0.5 hover:bg-white/70 transition-colors"
                             title={t('chat.upload.remove')}
                           >
-                            <X className="w-3.5 h-3.5" />
+                            <IconX aria-hidden="true" className="w-3.5 h-3.5" />
                           </button>
                         </div>
                       );
@@ -4547,16 +4766,16 @@ export default function SessionChat({
                           ? 'border-emerald-200/80 bg-emerald-50 text-emerald-700 dark:border-emerald-400/20 dark:bg-emerald-400/[0.10] dark:text-emerald-200'
                           : 'border-amber-200/80 bg-amber-50 text-amber-700 dark:border-amber-400/20 dark:bg-amber-400/[0.10] dark:text-amber-200';
                       const ReferenceIcon = reference.kind === 'subagent'
-                        ? Bot
+                        ? IconRobot
                         : reference.kind === 'skill'
-                          ? BookOpen
+                          ? IconBook
                           : WorkflowIcon;
                       return (
                         <span
                           key={`${reference.kind}:${reference.value}`}
                           className={`inline-flex h-7 max-w-full items-center gap-1.5 rounded-lg border px-2 text-[11px] font-medium shadow-[0_1px_2px_rgba(22,27,34,0.03)] ${referenceStyle}`}
                         >
-                          <ReferenceIcon className="h-3 w-3 shrink-0" />
+                          <ReferenceIcon aria-hidden="true" className="h-3 w-3 shrink-0" />
                           <span className="shrink-0 opacity-65">
                             {t(`chat.references.${reference.kind}`)}
                           </span>
@@ -4578,7 +4797,7 @@ export default function SessionChat({
                               name: reference.value,
                             })}
                           >
-                            <X className="h-3 w-3" />
+                            <IconX aria-hidden="true" className="h-3 w-3" />
                           </button>
                         </span>
                       );
@@ -4589,6 +4808,7 @@ export default function SessionChat({
                   <textarea
                     ref={textareaRef}
                     value={input}
+                    readOnly={composerBusy}
                     onChange={(e) => {
                       const val = e.target.value;
                       const cursor = e.target.selectionStart ?? val.length;
@@ -4657,7 +4877,7 @@ export default function SessionChat({
                 </div>
 
                 {/* Bottom toolbar inside the composer card */}
-                <div className="flex items-center gap-1 px-2 pb-2">
+                <div className="flex flex-wrap items-center gap-1 gap-y-1 px-2 pb-2 [&>*]:shrink-0">
                   <div className="relative" data-composer-add-menu>
                     <button
                       type="button"
@@ -4673,7 +4893,7 @@ export default function SessionChat({
                           : 'text-zinc-500 hover:bg-white hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-white/[0.07] dark:hover:text-white'
                       }`}
                     >
-                      <Plus className="h-[17px] w-[17px]" strokeWidth={2} />
+                      <IconPlus aria-hidden="true" className="h-[17px] w-[17px]" stroke={2} />
                     </button>
 
                     {showComposerAddMenu && (
@@ -4695,7 +4915,7 @@ export default function SessionChat({
                           className="group flex h-10 w-full items-center gap-2.5 rounded-[9px] px-2 text-left text-[13px] font-medium text-zinc-700 transition-colors hover:bg-zinc-100/90 hover:text-zinc-950 dark:text-zinc-200 dark:hover:bg-white/[0.07] dark:hover:text-white"
                         >
                           <span className="grid h-7 w-7 shrink-0 place-items-center text-zinc-500 transition-colors group-hover:text-zinc-800 dark:text-zinc-400 dark:group-hover:text-white">
-                            <Paperclip className="h-3.5 w-3.5" />
+                            <IconPaperclip aria-hidden="true" className="h-3.5 w-3.5" />
                           </span>
                           <span className="min-w-0 flex-1 truncate">{t('chat.addMenu.files')}</span>
                         </button>
@@ -4718,8 +4938,19 @@ export default function SessionChat({
 
                   {toolbarSlot}
 
+                  <ExtensionSlot
+                    name="chat.composer"
+                    context={{
+                      sessionId,
+                      input,
+                      setInput,
+                      disabled: sending || isCompacting,
+                      setBusy: setComposerExtensionBusy,
+                    }}
+                  />
+
                   {centerToolbarSlot && (
-                    <div className="ml-1">
+                    <div className="ml-1 max-w-full">
                       {centerToolbarSlot}
                     </div>
                   )}
@@ -4738,35 +4969,35 @@ export default function SessionChat({
 
                   {isStreaming ? (
                     <>
-                      {canSend && (
+                      {canSend && !composerBusy && (
                         <button
                           onClick={handleSend}
                           title={hasUploadingFiles ? t('chat.upload.waiting') : t('chat.queue.enqueue')}
-                          className="inline-flex h-8 w-8 items-center justify-center rounded-full bg-sky-500 text-white shadow-sm transition-all hover:bg-sky-600 hover:shadow"
+                          className="inline-flex h-8 w-8 items-center justify-center rounded-full bg-action text-action-fg transition-colors hover:bg-action-hover"
                         >
-                          {sending || hasUploadingFiles ? <Loader2 className="w-4 h-4 animate-spin" /> : <ArrowUp className="w-4 h-4" strokeWidth={2.5} />}
+                          {sending || hasUploadingFiles ? <IconLoader2 aria-hidden="true" className="w-4 h-4 animate-spin" /> : <IconArrowUp aria-hidden="true" className="w-4 h-4" stroke={2.5} />}
                         </button>
                       )}
                       <button
                         onClick={handleAbort}
                         title={t('chat.stopTitle')}
-                        className="inline-flex h-8 w-8 items-center justify-center rounded-full bg-zinc-800 text-white hover:bg-zinc-900 shadow-sm transition-all"
+                        className="inline-flex h-8 w-8 items-center justify-center rounded-full border border-line-control bg-surface text-fg transition-colors hover:bg-hover"
                       >
-                        <Square className="w-3 h-3 fill-current" />
+                        <IconSquare aria-hidden="true" className="w-3 h-3 fill-current" />
                       </button>
                     </>
                   ) : (
                     <button
                       onClick={handleSend}
-                      disabled={!canSend}
+                      disabled={!canSend || composerBusy}
                       title={hasUploadingFiles ? t('chat.upload.waiting') : undefined}
                       className={`inline-flex h-8 w-8 items-center justify-center rounded-full transition-all ${
-                        canSend
-                          ? 'bg-sky-500 text-white hover:bg-sky-600 shadow-sm hover:shadow'
-                          : 'cursor-not-allowed border border-zinc-300 bg-zinc-200 text-zinc-400 dark:border-[#5a6573] dark:bg-[#46515e] dark:text-[#b8c2cc]'
+                        canSend && !composerBusy
+                          ? 'bg-action text-action-fg hover:bg-action-hover'
+                          : 'cursor-not-allowed border border-line bg-disabled text-fg-disabled'
                       }`}
                     >
-                      {sending || hasUploadingFiles ? <Loader2 className="w-4 h-4 animate-spin" /> : <ArrowUp className="w-4 h-4" strokeWidth={2.5} />}
+                      {sending || hasUploadingFiles ? <IconLoader2 aria-hidden="true" className="w-4 h-4 animate-spin" /> : <IconArrowUp aria-hidden="true" className="w-4 h-4" stroke={2.5} />}
                     </button>
                   )}
                 </div>
@@ -4829,7 +5060,7 @@ function AgentMentionDropdown({
                 idx === selectedIndex ? 'bg-sky-50 text-sky-800 dark:bg-sky-950/45 dark:text-sky-100' : 'text-gray-800 hover:bg-gray-50 dark:text-zinc-200 dark:hover:bg-zinc-800'
               }`}
             >
-              <Bot className="h-3.5 w-3.5 shrink-0 text-gray-400 dark:text-zinc-500" />
+              <IconRobot aria-hidden="true" className="h-3.5 w-3.5 shrink-0 text-gray-400 dark:text-zinc-500" />
               <span className="shrink-0 font-mono text-sm font-semibold">@{agent.name}</span>
               <span className="min-w-0 truncate text-xs text-gray-500 dark:text-zinc-400">{desc}</span>
             </button>
@@ -4847,6 +5078,68 @@ function AgentMentionDropdown({
 // ============================================================================
 // ChatMessageBubble
 // ============================================================================
+
+function ContextFileCard({
+  sessionId,
+  resourceId,
+  filename,
+  mime,
+  onOpen,
+}: {
+  sessionId: string;
+  resourceId?: string | null;
+  filename: string;
+  mime?: string;
+  onOpen?: (resourceId: string) => void;
+}) {
+  const { t } = useTranslation('session');
+  const previewUrl = resourceId ? sessionApi.contextFilePreviewUrl(sessionId, resourceId) : null;
+  const downloadUrl = resourceId ? sessionApi.contextFileDownloadUrl(sessionId, resourceId) : null;
+  const label = mime?.split('/').pop()?.toUpperCase();
+  const content = (
+    <>
+      <IconFileText aria-hidden="true" className="h-4 w-4 flex-shrink-0 text-slate-500" />
+      <span className="min-w-0 flex-1 truncate font-medium">{filename}</span>
+      {label && <span className="shrink-0 text-[10px] text-slate-400">{label}</span>}
+    </>
+  );
+  return (
+    <div className="flex min-w-0 max-w-full items-center gap-1 rounded-lg border border-slate-200 bg-slate-50 px-2 py-1.5 text-xs text-slate-700 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200">
+      {onOpen && resourceId ? (
+        <button
+          type="button"
+          onClick={() => onOpen(resourceId)}
+          className="flex min-w-0 flex-1 items-center gap-2 text-left hover:text-slate-900 dark:hover:text-white"
+          title={t('context.preview', 'Preview')}
+        >
+          {content}
+        </button>
+      ) : previewUrl ? (
+        <a
+          href={previewUrl}
+          target="_blank"
+          rel="noreferrer"
+          className="flex min-w-0 flex-1 items-center gap-2 hover:text-slate-900 dark:hover:text-white"
+        >
+          {content}
+        </a>
+      ) : (
+        <span className="flex min-w-0 flex-1 items-center gap-2">{content}</span>
+      )}
+      {downloadUrl && (
+        <a
+          href={downloadUrl}
+          download={filename}
+          onClick={(event) => event.stopPropagation()}
+          className="rounded p-1 text-slate-400 hover:bg-white hover:text-slate-700 dark:hover:bg-zinc-800 dark:hover:text-white"
+          title={t('context.download', 'Download')}
+        >
+          <IconDownload aria-hidden="true" className="h-3.5 w-3.5" />
+        </a>
+      )}
+    </div>
+  );
+}
 
 export interface ChatMessageBubbleProps {
   message: MergedMessage;
@@ -4873,14 +5166,22 @@ export interface ChatMessageBubbleProps {
   onEditSave?: () => Promise<void>;
   onEditSend?: () => Promise<void>;
   onRegenerate?: (messageId: string) => Promise<void>;
+  onOpenContextFile?: (resourceId: string) => void;
+  onOpenContext?: () => void;
 }
 
 interface ChatMessageTimelineProps extends Omit<ChatMessageBubbleProps, 'message' | 'isActive'> {
   items: ChatTimelineItem[];
+  scrollContainerRef?: RefObject<HTMLDivElement | null>;
+  focusMessageId?: string | null;
+  onFocusMessageConsumed?: () => void;
 }
 
 function ChatMessageTimelineInner({
   items,
+  scrollContainerRef,
+  focusMessageId,
+  onFocusMessageConsumed,
   pendingQuestions,
   onQuestionAnswer,
   onQuestionReject,
@@ -4903,11 +5204,80 @@ function ChatMessageTimelineInner({
   onEditSave,
   onEditSend,
   onRegenerate,
+  onOpenContextFile,
+  onOpenContext,
 }: ChatMessageTimelineProps) {
+  const listRef = useRef<HTMLDivElement>(null);
+  const [scrollMargin, setScrollMargin] = useState(0);
+  const virtual = !!scrollContainerRef && items.length > 30;
+  const getItemKey = useCallback((index: number) => items[index].message.id, [items]);
+  const virtualizer = useVirtualizer({
+    count: items.length,
+    getScrollElement: () => scrollContainerRef?.current ?? null,
+    getItemKey,
+    estimateSize: () => 180,
+    overscan: 5,
+    gap: compact ? 12 : 20,
+    scrollMargin,
+    anchorTo: 'end',
+    followOnAppend: false,
+    enabled: virtual,
+  });
+  useLayoutEffect(() => {
+    if (!virtual || !listRef.current || !scrollContainerRef?.current) return;
+    const measure = () => {
+      const list = listRef.current;
+      const scroll = scrollContainerRef.current;
+      if (list && scroll) setScrollMargin(list.getBoundingClientRect().top - scroll.getBoundingClientRect().top + scroll.scrollTop);
+    };
+    measure();
+    const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(measure);
+    observer?.observe(scrollContainerRef.current);
+    return () => observer?.disconnect();
+  }, [virtual, scrollContainerRef, items[0]?.message.id]);
+  const focusedRef = useRef('');
+  const focusHighlightRef = useRef<{ row: HTMLElement; timer: number } | null>(null);
+  useEffect(() => () => {
+    const highlight = focusHighlightRef.current;
+    if (highlight) {
+      window.clearTimeout(highlight.timer);
+      highlight.row.classList.remove('ring-2', 'ring-sky-400');
+    }
+  }, []);
+  useEffect(() => { if (!focusMessageId) focusedRef.current = ''; }, [focusMessageId]);
+  const focusIndex = focusMessageId ? items.findIndex(({message}) => message.id === focusMessageId || message.parts.some(part => part.messageID === focusMessageId)) : -1;
+  useLayoutEffect(() => {
+    if (!virtual || focusIndex < 0 || !focusMessageId || focusedRef.current === focusMessageId) return;
+    virtualizer.scrollToIndex(focusIndex, { align: 'center' });
+  }, [virtual, focusIndex, focusMessageId, virtualizer]);
+  const virtualItems = virtualizer.getVirtualItems();
+  useEffect(() => {
+    if (!virtual || focusIndex < 0 || !focusMessageId || focusedRef.current === focusMessageId) return;
+    const row = listRef.current?.querySelector<HTMLElement>(`[data-message-id="${CSS.escape(items[focusIndex].message.id)}"]`);
+    if (!row) return;
+    focusedRef.current = focusMessageId;
+    const previous = focusHighlightRef.current;
+    if (previous) {
+      window.clearTimeout(previous.timer);
+      previous.row.classList.remove('ring-2', 'ring-sky-400');
+    }
+    row.classList.add('ring-2', 'ring-sky-400');
+    const timer = window.setTimeout(() => {
+      row.classList.remove('ring-2', 'ring-sky-400');
+      focusHighlightRef.current = null;
+    }, 1800);
+    focusHighlightRef.current = { row, timer };
+    onFocusMessageConsumed?.();
+  }, [virtual, focusIndex, focusMessageId, items, virtualItems, onFocusMessageConsumed]);
+  const rendered = virtual ? virtualItems.map(row => ({ ...row, item: items[row.index] })) : items.map((item, index) => ({ item, index, key: item.message.id, start: 0 }));
   return (
-    <>
-      {items.map(({ message, isActive }) => (
-        <div key={message.id} data-message-id={message.id} className="rounded-md transition-shadow duration-300">
+    <div ref={listRef} data-chat-virtual={virtual ? 'true' : undefined}
+      className={virtual ? 'relative w-full' : compact ? 'space-y-3' : 'space-y-5'}
+      style={virtual ? { height: virtualizer.getTotalSize() } : undefined}>
+      {rendered.map(({ item: {message, isActive}, index, start }) => (
+        <div key={message.id} data-index={index} ref={virtual ? virtualizer.measureElement : undefined}
+          data-message-id={message.id} className="rounded-md transition-shadow duration-300"
+          style={virtual ? { position: 'absolute', top: 0, left: 0, width: '100%', transform: `translateY(${start - scrollMargin}px)` } : undefined}>
           <ChatMessageBubble
             message={message}
             isActive={isActive}
@@ -4933,10 +5303,12 @@ function ChatMessageTimelineInner({
             onEditSave={onEditSave}
             onEditSend={onEditSend}
             onRegenerate={onRegenerate}
+            onOpenContextFile={onOpenContextFile}
+            onOpenContext={onOpenContext}
           />
         </div>
       ))}
-    </>
+    </div>
   );
 }
 
@@ -4985,7 +5357,7 @@ function ProcessGroupDetails({
         className="flex min-h-7 cursor-pointer list-none items-center gap-2 text-sm font-medium transition-colors hover:text-zinc-900 dark:hover:text-zinc-100 [&::-webkit-details-marker]:hidden"
       >
         {summary}
-        <ChevronDown className="ml-0.5 h-3 w-3 flex-shrink-0 text-[#9da29f] transition-transform group-open/process:rotate-180 dark:text-zinc-500" />
+        <IconChevronDown aria-hidden="true" className="ml-0.5 h-3 w-3 flex-shrink-0 text-[#9da29f] transition-transform group-open/process:rotate-180 dark:text-zinc-500" />
       </summary>
       {children}
     </details>
@@ -5017,6 +5389,8 @@ function ChatMessageBubbleInner({
   onEditSave,
   onEditSend,
   onRegenerate,
+  onOpenContextFile,
+  onOpenContext,
 }: ChatMessageBubbleProps) {
   const { t, i18n } = useTranslation('session');
   const isUser = message.role === 'user';
@@ -5087,11 +5461,17 @@ function ChatMessageBubbleInner({
   const shouldRenderAssistantErrorState = !isUser && !!messageErrorText && (
     parts.length === 0 || hasOnlyBlankTextParts
   );
+  const outputAttachments = isUser ? [] : parts.flatMap((part) => {
+    if (part.type !== 'tool' || part.tool !== 'write' || part.state?.status !== 'completed') return [];
+    return (part.state.attachments || []).filter(
+      (attachment) => attachment.origin === 'agent_output' && attachment.id,
+    );
+  });
 
   const avatarSize = compact ? 'w-7 h-7 text-xs' : 'w-8 h-8 text-sm';
   const avatar = isUser ? (
     <span className={`inline-flex items-center justify-center rounded-full bg-gradient-to-b from-sky-400 to-blue-500 text-white shadow-sm ring-2 ring-white flex-shrink-0 dark:ring-zinc-950 ${avatarSize}`}>
-      <User className={compact ? 'w-3 h-3' : 'w-3.5 h-3.5'} />
+      <IconUser aria-hidden="true" className={compact ? 'w-3 h-3' : 'w-3.5 h-3.5'} />
     </span>
   ) : (
     <span className={`inline-flex items-center justify-center rounded-full bg-red-500 text-white font-bold shadow-sm ring-2 ring-white flex-shrink-0 dark:ring-zinc-950 ${avatarSize}`}>
@@ -5117,7 +5497,7 @@ function ChatMessageBubbleInner({
         ) : (
           messageErrorText ? (
             <div className="flex items-start gap-2 py-1 text-sm text-red-700" role="alert">
-              <AlertCircle className="mt-0.5 h-4 w-4 flex-shrink-0 text-red-500" />
+              <IconAlertCircle aria-hidden="true" className="mt-0.5 h-4 w-4 flex-shrink-0 text-red-500" />
               <span className="whitespace-pre-wrap break-words">{messageErrorText}</span>
             </div>
           ) : (
@@ -5133,6 +5513,11 @@ function ChatMessageBubbleInner({
       {/* Parts */}
       {isEditing ? (
         <div className="space-y-3">
+          {/* The editor shows the stored markdown/raw text, not the rendered
+              bubble; say so, since saving overwrites that text directly. */}
+          <p className="text-xs text-blue-700 dark:text-blue-300" data-testid="chat-edit-raw-hint">
+            {t('chat.editRawHint')}
+          </p>
           <textarea
             value={editingText}
             onChange={(event) => onEditChange?.(event.target.value)}
@@ -5264,9 +5649,9 @@ function ChatMessageBubbleInner({
                       >
                         <span className="inline-grid h-[18px] w-[18px] flex-[0_0_18px] place-items-center text-violet-500">
                           {isThinking ? (
-                            <Loader2 className="h-[15px] w-[15px] animate-spin" />
+                            <IconLoader2 aria-hidden="true" className="h-[15px] w-[15px] animate-spin" />
                           ) : (
-                            <Brain className="h-[15px] w-[15px]" />
+                            <IconBrain aria-hidden="true" className="h-[15px] w-[15px]" />
                           )}
                         </span>
                         <span className="shrink-0">{t('chat.process.deepThinking')}</span>
@@ -5278,7 +5663,7 @@ function ChatMessageBubbleInner({
                             {getThinkingFirstSentence(thinkingText)}
                           </span>
                         )}
-                        <ChevronDown className={`ml-0.5 h-3 w-3 flex-shrink-0 text-[#9da29f] transition-transform dark:text-zinc-500 ${isExpanded ? 'rotate-180' : ''}`} />
+                        <IconChevronDown aria-hidden="true" className={`ml-0.5 h-3 w-3 flex-shrink-0 text-[#9da29f] transition-transform dark:text-zinc-500 ${isExpanded ? 'rotate-180' : ''}`} />
                       </button>
                       {isExpanded && isVisible && (
                         <div className="mb-[9px] ml-2 mt-[3px] max-h-52 overflow-y-auto whitespace-pre-wrap border-l border-[#e3e6e3] py-1.5 pl-[26px] pr-0 text-sm leading-7 text-[#686e6c] dark:border-zinc-700 dark:text-zinc-400">
@@ -5309,16 +5694,16 @@ function ChatMessageBubbleInner({
                       }`}>
                         {isThinking ? (
                           <>
-                            <Brain className="w-3.5 h-3.5 flex-shrink-0 text-violet-500" />
+                            <IconBrain aria-hidden="true" className="w-3.5 h-3.5 flex-shrink-0 text-violet-500" />
                             <span className="text-violet-600">{t('chat.thinking')}</span>
                           </>
                         ) : (
                           <>
-                            <Brain className="w-3.5 h-3.5 flex-shrink-0 text-violet-500" />
+                            <IconBrain aria-hidden="true" className="w-3.5 h-3.5 flex-shrink-0 text-violet-500" />
                             <span className="text-zinc-500 truncate min-w-0">
                               {thinkingText.slice(0, 80)}{thinkingText.length > 80 ? '…' : ''}
                             </span>
-                            <ChevronDown className={`w-3 h-3 ml-auto text-zinc-400 flex-shrink-0 transition-transform ${isExpanded ? '' : '-rotate-90'}`} />
+                            <IconChevronDown aria-hidden="true" className={`w-3 h-3 ml-auto text-zinc-400 flex-shrink-0 transition-transform ${isExpanded ? '' : '-rotate-90'}`} />
                           </>
                         )}
                       </div>
@@ -5336,13 +5721,24 @@ function ChatMessageBubbleInner({
               })()}
             </div>
           );
-          const renderProcessGroup = (group: Array<{ part: MessagePart; index: number }>, groupIndex: number) => {
+          const renderProcessGroup = (
+            group: Array<{ part: MessagePart; index: number }>,
+            groupIndex: number,
+            activeTimingPart?: MessagePart,
+          ) => {
             const processGroupOpen = processGroupsDefaultOpen || (processGroupsOpenWhileActive && isActive);
             const processGroupKey = `${message.id}:process:${groupIndex}`;
-            const processGroupActive = isActive && group.some(({ part }) => part === activeTailPart);
+            const groupParts = group.map(({ part }) => part);
+            const groupActivePart = groupParts.find((part) => part === activeTailPart);
+            const timedActivePart = groupActivePart || activeTimingPart;
+            const durationParts = timedActivePart && !groupParts.includes(timedActivePart)
+              ? [...groupParts, timedActivePart]
+              : groupParts;
+            const processGroupActive = isActive && !!timedActivePart;
             const processDurationMs = getProcessGroupDurationMs(
-              group.map(({ part }) => part),
+              durationParts,
               processGroupActive ? processElapsedClock : undefined,
+              processGroupActive ? timedActivePart?.id : undefined,
             );
             const hasStoredOpenState = !!processGroupOpenState
               && Object.prototype.hasOwnProperty.call(processGroupOpenState, processGroupKey);
@@ -5358,7 +5754,7 @@ function ChatMessageBubbleInner({
                 summary={(
                   <>
                     <span className="inline-grid h-[18px] w-[18px] flex-[0_0_18px] place-items-center text-[#8d9a95] dark:text-zinc-500">
-                      <Eye className="h-4 w-4" />
+                      <IconEye aria-hidden="true" className="h-4 w-4" />
                     </span>
                     <span className="min-w-0">
                       {t('chat.process.title', { count: group.length })}
@@ -5390,9 +5786,9 @@ function ChatMessageBubbleInner({
             const lastIntermediateProcessIndex = displayParts.reduce((lastIndex, part, index) => (
               isIntermediateProcessPart(part) ? index : lastIndex
             ), -1);
-            const flushProcessGroup = () => {
+            const flushProcessGroup = (activeTimingPart?: MessagePart) => {
               if (processGroup.length === 0) return;
-              nodes.push(renderProcessGroup(processGroup, processGroupIndex));
+              nodes.push(renderProcessGroup(processGroup, processGroupIndex, activeTimingPart));
               processGroup = [];
               processGroupIndex += 1;
             };
@@ -5403,7 +5799,7 @@ function ChatMessageBubbleInner({
               }
               if (!isRenderableDisplayPart(part)) return;
               if (isPendingQuestionToolPart(part) || isRenderableTextPart(part)) {
-                flushProcessGroup();
+                flushProcessGroup(isActive && part === activeTailPart && isRenderableTextPart(part) ? part : undefined);
               }
               nodes.push(renderPart(part, index));
             });
@@ -5418,29 +5814,97 @@ function ChatMessageBubbleInner({
                     const isImage = (part.mime || '').startsWith('image/');
                     if (isImage && part.url) {
                       const imageUrl = getRenderableFileUrl(part.url);
+                      const messageSessionId = part.sessionID || message.sessionID;
+                      const resourceId = part.resourceID || null;
                       return (
-                        <img
+                        <div key={part.id || `file-${i}`} className="group/image relative h-24 w-24 flex-shrink-0">
+                          <img
+                            src={imageUrl}
+                            alt={part.filename || ''}
+                            className="h-24 w-24 rounded-lg border border-gray-200 bg-gray-50 object-cover cursor-zoom-in transition-transform hover:scale-[1.02]"
+                            onClick={() => (
+                              onOpenContextFile && resourceId
+                                ? onOpenContextFile(resourceId)
+                                : setPreviewImage({ url: imageUrl, alt: part.filename })
+                            )}
+                          />
+                          {messageSessionId && resourceId && (
+                            <a
+                              href={sessionApi.contextFileDownloadUrl(messageSessionId, resourceId)}
+                              download={part.filename || 'image'}
+                              className="absolute bottom-1 right-1 rounded bg-black/55 p-1 text-white opacity-0 transition-opacity hover:bg-black/75 group-hover/image:opacity-100"
+                              title={t('context.download', 'Download')}
+                            >
+                              <IconDownload aria-hidden="true" className="h-3.5 w-3.5" />
+                            </a>
+                          )}
+                        </div>
+                      );
+                    }
+                    const messageSessionId = part.sessionID || message.sessionID;
+                    const resourceId = part.resourceID || null;
+                    if (!messageSessionId || !resourceId) {
+                      // Not a Session upload (channel attachments, for one):
+                      // there is no context resource to open, so show the
+                      // plain chip, downloadable through the file route.
+                      const href = part.url ? getRenderableFileUrl(part.url) : null;
+                      const chipClassName = 'inline-flex items-center gap-2 rounded-lg border border-gray-200 bg-gray-50 px-2.5 py-1.5 text-xs text-gray-700';
+                      const chipBody = (
+                        <>
+                          <IconFileText aria-hidden="true" className="w-3.5 h-3.5 flex-shrink-0" />
+                          <span className="truncate max-w-[240px]">{part.filename || 'file'}</span>
+                        </>
+                      );
+                      return href ? (
+                        <a
                           key={part.id || `file-${i}`}
-                          src={imageUrl}
-                          alt={part.filename || ''}
-                          className="h-24 w-24 flex-shrink-0 rounded-lg border border-gray-200 object-cover bg-gray-50 cursor-zoom-in transition-transform hover:scale-[1.02]"
-                          onClick={() => setPreviewImage({ url: imageUrl, alt: part.filename })}
-                        />
+                          href={href}
+                          download={part.filename || 'file'}
+                          className={`${chipClassName} hover:bg-gray-100`}
+                        >
+                          {chipBody}
+                        </a>
+                      ) : (
+                        <div key={part.id || `file-${i}`} className={chipClassName}>{chipBody}</div>
                       );
                     }
                     return (
-                      <div
+                      <ContextFileCard
                         key={part.id || `file-${i}`}
-                        className="inline-flex items-center gap-2 rounded-lg border border-gray-200 bg-gray-50 px-2.5 py-1.5 text-xs text-gray-700"
-                      >
-                        <FileText className="w-3.5 h-3.5 flex-shrink-0" />
-                        <span className="truncate max-w-[240px]">{part.filename || 'file'}</span>
-                      </div>
+                        sessionId={messageSessionId}
+                        resourceId={resourceId}
+                        filename={part.filename || 'file'}
+                        mime={part.mime}
+                        onOpen={onOpenContextFile}
+                      />
                     );
                     })}
                   </div>
                 )}
                 {renderDisplayParts()}
+                {message.sessionID && outputAttachments.length > 0 && (
+                  <div className="mt-2 space-y-1.5" data-testid="chat-output-files">
+                    {outputAttachments.slice(0, 3).map((attachment) => (
+                      <ContextFileCard
+                        key={attachment.id}
+                        sessionId={message.sessionID}
+                        resourceId={attachment.resourceID}
+                        filename={attachment.filename || 'file'}
+                        mime={attachment.mime}
+                        onOpen={onOpenContextFile}
+                      />
+                    ))}
+                    {outputAttachments.length > 3 && onOpenContext && (
+                      <button
+                        type="button"
+                        onClick={onOpenContext}
+                        className="text-xs font-medium text-slate-500 hover:text-slate-800 dark:text-zinc-400 dark:hover:text-zinc-200"
+                      >
+                        {t('context.viewAll', 'View all in Context')}
+                      </button>
+                    )}
+                  </div>
+                )}
               </>
             );
         })()
@@ -5448,11 +5912,6 @@ function ChatMessageBubbleInner({
 
       {/* Streaming indicator */}
       {isActive && !isUser && parts.length > 0 && (() => {
-        const lastPart = parts[parts.length - 1];
-        const isDelegating = lastPart?.type === 'tool'
-          && isDelegateTool(lastPart.tool || '')
-          && lastPart.state?.status === 'running';
-        if (isDelegating) return null;
         return (
           <div className="flex items-center gap-2 mt-2.5 pt-2 border-t border-gray-100 text-xs text-gray-400">
             <div className="flex gap-0.5">
@@ -5476,7 +5935,7 @@ function ChatMessageBubbleInner({
               className={iconButtonClass}
               aria-label={t('chat.save')}
             >
-              <Save className="w-3 h-3" />
+              <IconDeviceFloppy aria-hidden="true" className="w-3 h-3" />
               <span className={tooltipClass}>{t('chat.save')}</span>
             </button>
             {isUser && (
@@ -5486,7 +5945,7 @@ function ChatMessageBubbleInner({
                 className={iconButtonClass}
                 aria-label={t('chat.sendEdited')}
               >
-                <Send className="w-3 h-3" />
+                <IconSend aria-hidden="true" className="w-3 h-3" />
                 <span className={tooltipClass}>{t('chat.sendEdited')}</span>
               </button>
             )}
@@ -5496,7 +5955,7 @@ function ChatMessageBubbleInner({
               className={iconButtonClass}
               aria-label={t('chat.cancel')}
             >
-              <X className="w-3 h-3" />
+              <IconX aria-hidden="true" className="w-3 h-3" />
               <span className={tooltipClass}>{t('chat.cancel')}</span>
             </button>
           </>
@@ -5522,7 +5981,7 @@ function ChatMessageBubbleInner({
                 className={iconButtonClass}
                 aria-label={t('chat.edit')}
               >
-                <Pencil className="w-3 h-3" />
+                <IconPencil aria-hidden="true" className="w-3 h-3" />
                 <span className={tooltipClass}>{t('chat.edit')}</span>
               </button>
             )}
@@ -5532,7 +5991,7 @@ function ChatMessageBubbleInner({
               className={iconButtonClass}
               aria-label={t('chat.copy')}
             >
-              <Copy className="w-3 h-3" />
+              <IconCopy aria-hidden="true" className="w-3 h-3" />
               <span className={tooltipClass}>{t('chat.copy')}</span>
             </button>
           </>
@@ -5544,7 +6003,7 @@ function ChatMessageBubbleInner({
               className={iconButtonClass}
               aria-label={t('chat.regenerate')}
             >
-              <RefreshCw className={`w-3 h-3 ${isActionPending ? 'animate-spin' : ''}`} />
+              <IconRefresh aria-hidden="true" className={`w-3 h-3 ${isActionPending ? 'animate-spin' : ''}`} />
               <span className={tooltipClass}>{t('chat.regenerate')}</span>
             </button>
             <button
@@ -5553,7 +6012,7 @@ function ChatMessageBubbleInner({
               className={iconButtonClass}
               aria-label={t('chat.copy')}
             >
-              <Copy className="w-3 h-3" />
+              <IconCopy aria-hidden="true" className="w-3 h-3" />
               <span className={tooltipClass}>{t('chat.copy')}</span>
             </button>
           </>
@@ -5683,138 +6142,6 @@ function buildToolInputSummary(input: Record<string, unknown>): string {
     .join(', ');
 }
 
-type TodoSummaryEntry = {
-  id?: string;
-  content: string;
-  status?: string;
-  activeForm?: string;
-};
-type TodoTranslator = (key: string) => string;
-
-function isTodoSummaryEntry(value: unknown): value is TodoSummaryEntry {
-  if (!value || typeof value !== 'object') return false;
-  const candidate = value as Record<string, unknown>;
-  return typeof candidate.content === 'string';
-}
-
-function readTodoEntries(value: unknown): TodoSummaryEntry[] {
-  if (!Array.isArray(value)) return [];
-  return value
-    .filter(isTodoSummaryEntry)
-    .map((todo) => ({
-      id: typeof todo.id === 'string' ? todo.id : undefined,
-      content: todo.content.trim(),
-      status: typeof todo.status === 'string' ? todo.status : undefined,
-      activeForm: typeof todo.activeForm === 'string' ? todo.activeForm : undefined,
-    }))
-    .filter((todo) => todo.content.length > 0);
-}
-
-function pickTodoEntries(...candidates: unknown[]): TodoSummaryEntry[] {
-  for (const candidate of candidates) {
-    const todos = readTodoEntries(candidate);
-    if (todos.length > 0) return todos;
-  }
-  return [];
-}
-
-function getTodoActionLabel(action: unknown): string {
-  if (action === 'read') return 'Read todos';
-  if (action === 'write') return 'Update todos';
-  return 'Todos';
-}
-
-export function buildTodoSummary(state: Partial<ToolState>, t?: TodoTranslator): string {
-  const metadata = state.metadata ?? {};
-  const currentTodos = pickTodoEntries(metadata.newTodos, metadata.todos, state.input?.todos);
-  if (currentTodos.length === 0) return getTodoActionLabel(state.input?.action);
-  const totalCount = currentTodos.length;
-  const terminalCount = currentTodos.filter(
-    (todo) => todo.status === 'completed' || todo.status === 'cancelled',
-  ).length;
-  const inProgressCount = currentTodos.filter((todo) => todo.status === 'in_progress').length;
-  const hasCancelled = currentTodos.some((todo) => todo.status === 'cancelled');
-
-  let summary =
-    terminalCount === totalCount
-      ? hasCancelled
-        ? `${t?.('chat.tool.todoSummary.done') ?? 'Done'} ${terminalCount}/${totalCount}`
-        : `${t?.('chat.tool.todoSummary.completed') ?? 'Completed'} ${terminalCount}/${totalCount}`
-      : `${t?.('chat.tool.todoSummary.progress') ?? 'Progress'} ${terminalCount}/${totalCount}`;
-
-  if (inProgressCount > 0 && terminalCount < totalCount) {
-    summary += ` · ${t?.('chat.tool.todoSummary.inProgress') ?? 'In progress'} ${inProgressCount}`;
-  }
-
-  return summary;
-}
-
-function todoStatusLabel(status: string | undefined, t: TodoTranslator): string {
-  switch (status) {
-    case 'completed':
-      return t('chat.tool.todoStatus.completed');
-    case 'in_progress':
-      return t('chat.tool.todoStatus.inProgress');
-    case 'cancelled':
-      return t('chat.tool.todoStatus.cancelled');
-    case 'pending':
-      return t('chat.tool.todoStatus.pending');
-    default:
-      return status || 'pending';
-  }
-}
-
-function todoStatusIcon(status: string | undefined): React.ReactNode {
-  switch (status) {
-    case 'completed':
-      return (
-        <span className="flex h-4 w-4 items-center justify-center rounded-full bg-emerald-500 text-white">
-          <Check className="h-3 w-3" strokeWidth={3} />
-        </span>
-      );
-    case 'in_progress':
-      return (
-        <span className="flex h-4 w-4 items-center justify-center rounded-full border border-sky-400 bg-white">
-          <span className="h-1.5 w-1.5 rounded-full bg-sky-500" />
-        </span>
-      );
-    case 'cancelled':
-      return (
-        <span className="flex h-4 w-4 items-center justify-center rounded-full bg-zinc-200 text-zinc-500">
-          <X className="h-2.5 w-2.5" strokeWidth={2.5} />
-        </span>
-      );
-    default:
-      return <span className="h-4 w-4 rounded-full border border-zinc-300 bg-white" />;
-  }
-}
-
-function todoTextClass(status: string | undefined): string {
-  switch (status) {
-    case 'completed':
-      return 'text-zinc-500';
-    case 'in_progress':
-      return 'font-medium text-zinc-800';
-    case 'cancelled':
-      return 'text-zinc-400 line-through decoration-zinc-300';
-    default:
-      return 'text-zinc-600';
-  }
-}
-
-function todoStatusLabelClass(status: string | undefined): string {
-  switch (status) {
-    case 'completed':
-      return 'text-emerald-600';
-    case 'in_progress':
-      return 'text-sky-600';
-    case 'cancelled':
-      return 'text-zinc-400';
-    default:
-      return 'text-zinc-400';
-  }
-}
-
 function isQuestionToolName(toolName: string): boolean {
   const normalized = toolName.toLowerCase();
   return normalized === 'question' || normalized === 'request_user_input' || normalized.includes('question');
@@ -5846,6 +6173,8 @@ function readQuestionItems(value: unknown): QuestionItem[] {
     .filter((item) => item.question.trim().length > 0);
 }
 
+type ToolTranslator = (key: string, options?: Record<string, unknown>) => string;
+
 function normalizeQuestionAnswer(value: unknown): string[] {
   if (Array.isArray(value)) {
     return value
@@ -5857,7 +6186,7 @@ function normalizeQuestionAnswer(value: unknown): string[] {
   return text ? [text] : [];
 }
 
-function formatQuestionAnswerValue(question: QuestionItem, value: string, t: TodoTranslator): string {
+function formatQuestionAnswerValue(question: QuestionItem, value: string, t: ToolTranslator): string {
   const normalized = value.trim().toLowerCase();
   if (question.type === 'confirm') {
     if (normalized === 'yes' || normalized === 'true') return t('chat.questionResult.yes');
@@ -5881,7 +6210,7 @@ function ChatQuestionResult({
   statusIcon: React.ReactNode;
   statusIconColor: string;
   processStep?: boolean;
-  t: TodoTranslator;
+  t: ToolTranslator;
 }) {
   const questions = readQuestionItems(state.input?.questions);
   if (questions.length === 0) return null;
@@ -5950,7 +6279,12 @@ function ChatQuestionResult({
     return (
       <details data-testid="chat-process-tool-step" className="group/tool min-w-0">
         <summary className="flex min-h-7 cursor-pointer list-none items-center gap-2 text-sm font-medium text-[#747a78] transition-colors hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-200 [&::-webkit-details-marker]:hidden">
-          <span className={`inline-grid h-[18px] w-[18px] flex-[0_0_18px] place-items-center ${statusIconColor}`}>
+          <span
+            className={`inline-grid h-[18px] w-[18px] flex-[0_0_18px] place-items-center ${statusIconColor}`}
+            title={statusLabel}
+            aria-label={statusLabel}
+            role="img"
+          >
             {statusIcon}
           </span>
           <span className="min-w-0 flex-shrink-0">{actionLabel}</span>
@@ -5959,7 +6293,7 @@ function ChatQuestionResult({
               {firstQuestion}
             </span>
           )}
-          <ChevronDown className="ml-0.5 h-3 w-3 flex-shrink-0 text-[#9da29f] transition-transform group-open/tool:rotate-180 dark:text-zinc-500" />
+          <IconChevronDown aria-hidden="true" className="ml-0.5 h-3 w-3 flex-shrink-0 text-[#9da29f] transition-transform group-open/tool:rotate-180 dark:text-zinc-500" />
         </summary>
         <div className="mb-[9px] ml-2 mt-[3px] space-y-1.5 border-l border-[#e3e6e3] py-1.5 pl-[26px] pr-0 text-xs text-[#686e6c] dark:border-zinc-700 dark:text-zinc-400">
           {questionDetails}
@@ -5986,7 +6320,7 @@ function ChatQuestionResult({
           <span className={`rounded-md px-1.5 py-0.5 text-[11px] font-medium ${statusPillClass}`}>
             {displayStatus}
           </span>
-          <ChevronDown className="w-3 h-3 text-zinc-400 transition-transform group-open/tool:rotate-180" />
+          <IconChevronDown aria-hidden="true" className="w-3 h-3 text-zinc-400 transition-transform group-open/tool:rotate-180" />
         </div>
       </summary>
       <div className="border-t border-zinc-200/60 px-2.5 py-2 space-y-1.5 text-xs">
@@ -6122,7 +6456,7 @@ function ChatBashPayload({
   t,
 }: {
   state: Partial<ToolState>;
-  t: TodoTranslator;
+  t: ToolTranslator;
 }) {
   const command = pickStringValue(state.input, 'command', 'cmd', 'shell') || state.title || '';
   const workdir = pickStringValue(state.input, 'workdir', 'cwd', 'directory');
@@ -6226,7 +6560,13 @@ export interface ChatToolPartProps {
   processStep?: boolean;
 }
 
-export function ChatToolPart({ part, pendingQuestion, onAnswer, onReject, processStep = false }: ChatToolPartProps) {
+export function ChatToolPart({
+  part,
+  pendingQuestion,
+  onAnswer,
+  onReject,
+  processStep = false,
+}: ChatToolPartProps) {
   const { t } = useTranslation('session');
   const toolName = part.tool || 'unknown';
 
@@ -6238,7 +6578,6 @@ export function ChatToolPart({ part, pendingQuestion, onAnswer, onReject, proces
 
   const state: Partial<ToolState> = part.state || {};
   const status = state.status || 'pending';
-
   // Pending question state is the source of truth. Tool status can briefly
   // arrive as completed after reconnects or transport races, but the user
   // still needs the answer UI while the question request exists.
@@ -6252,25 +6591,25 @@ export function ChatToolPart({ part, pendingQuestion, onAnswer, onReject, proces
   };
   const statusConfig: Record<string, StatusCfg> = {
     pending:   {
-      icon: <Clock className="w-3.5 h-3.5 flex-shrink-0" />,
+      icon: <IconClock aria-hidden="true" className="w-3.5 h-3.5 flex-shrink-0" />,
       iconColor: 'text-zinc-400',
       pill: 'bg-zinc-100 text-zinc-500',
       label: t('chat.tool.pending'),
     },
     running:   {
-      icon: <Loader2 className="w-3.5 h-3.5 flex-shrink-0 animate-spin" />,
+      icon: <IconLoader2 aria-hidden="true" className="w-3.5 h-3.5 flex-shrink-0 animate-spin" />,
       iconColor: 'text-sky-500',
       pill: 'bg-sky-50 text-sky-600',
       label: t('chat.tool.running'),
     },
     completed: {
-      icon: <CheckCircle2 className="w-3.5 h-3.5 flex-shrink-0" />,
+      icon: <IconCircleCheck aria-hidden="true" className="w-3.5 h-3.5 flex-shrink-0" />,
       iconColor: 'text-green-500',
       pill: 'bg-green-50 text-green-600',
       label: t('chat.tool.completed'),
     },
     error:     {
-      icon: <XCircle className="w-3.5 h-3.5 flex-shrink-0" />,
+      icon: <IconCircleX aria-hidden="true" className="w-3.5 h-3.5 flex-shrink-0" />,
       iconColor: 'text-red-400',
       pill: 'bg-red-50 text-red-500',
       label: t('chat.tool.error'),
@@ -6330,7 +6669,7 @@ export function ChatToolPart({ part, pendingQuestion, onAnswer, onReject, proces
     || inputSummary
     || displayTitle;
   const processStepIcon = isTodoTool
-    ? <ListTree className="h-[15px] w-[15px]" />
+    ? <IconListTree aria-hidden="true" className="h-[15px] w-[15px]" />
     : config.icon;
   const processStepIconColor = isTodoTool ? 'text-slate-500' : config.iconColor;
   const statusBadgeClass = isTodoTool
@@ -6373,26 +6712,7 @@ export function ChatToolPart({ part, pendingQuestion, onAnswer, onReject, proces
             <span>{t('chat.tool.todoStages')}</span>
             <span className="font-normal text-zinc-400">{todoEntries.length}</span>
           </div>
-          <div className="divide-y divide-zinc-100 dark:divide-zinc-800">
-            {todoEntries.map((todo, index) => (
-              <div
-                key={todo.id || index}
-                className="grid grid-cols-[16px_minmax(0,1fr)_auto] items-start gap-2 py-1.5 text-[11px] first:pt-0 last:pb-0"
-              >
-                <span className="mt-0.5 flex h-4 w-4 flex-shrink-0 items-center justify-center">
-                  {todoStatusIcon(todo.status)}
-                </span>
-                <span className={`min-w-0 leading-5 ${todoTextClass(todo.status)}`}>
-                  {todo.activeForm && todo.status === 'in_progress' ? todo.activeForm : todo.content}
-                </span>
-                <span
-                  className={`flex-shrink-0 whitespace-nowrap leading-5 ${todoStatusLabelClass(todo.status)}`}
-                >
-                  {todoStatusLabel(todo.status, t)}
-                </span>
-              </div>
-            ))}
-          </div>
+          <TodoList items={todoEntries} />
         </div>
       )}
 
@@ -6452,32 +6772,41 @@ export function ChatToolPart({ part, pendingQuestion, onAnswer, onReject, proces
 
   if (processStep) {
     return (
-      <details data-testid="chat-process-tool-step" className="group/tool min-w-0">
-        <summary className="flex min-h-7 cursor-pointer list-none items-center gap-2 text-sm font-medium text-[#747a78] transition-colors hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-200 [&::-webkit-details-marker]:hidden">
-          <span className={`inline-grid h-[18px] w-[18px] flex-[0_0_18px] place-items-center ${processStepIconColor}`}>
-            {processStepIcon}
-          </span>
-          <span className="min-w-0 flex-shrink-0">{processStepLabel}</span>
-          {processStepDetail && (
-            <span className="ml-0.5 min-w-0 truncate font-normal text-[#9a9f9c] dark:text-zinc-500">
-              {processStepDetail}
+      <>
+        <details data-testid="chat-process-tool-step" data-tool-status={status} className="group/tool min-w-0">
+          <summary className="flex min-h-7 cursor-pointer list-none items-center gap-2 text-sm font-medium text-[#747a78] transition-colors hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-200 [&::-webkit-details-marker]:hidden">
+            {/* The timeline shows the status as an icon only; keep the text for
+                assistive tech (and hover) so pending/running/completed/error stay
+                distinguishable without colour. */}
+            <span
+              className={`inline-grid h-[18px] w-[18px] flex-[0_0_18px] place-items-center ${processStepIconColor}`}
+              title={config.label}
+              aria-label={config.label}
+              role="img"
+            >
+              {processStepIcon}
             </span>
-          )}
-          <ChevronDown className="ml-0.5 h-3 w-3 flex-shrink-0 text-[#9da29f] transition-transform group-open/tool:rotate-180 dark:text-zinc-500" />
-        </summary>
-        <div className="mb-[9px] ml-2 mt-[3px] space-y-1.5 border-l border-[#e3e6e3] py-1.5 pl-[26px] pr-0 text-xs text-[#686e6c] dark:border-zinc-700 dark:text-zinc-400">
-          {toolDetails}
-        </div>
-      </details>
+            <span className="min-w-0 flex-shrink-0">{processStepLabel}</span>
+            {processStepDetail && (
+              <span className="ml-0.5 min-w-0 truncate font-normal text-[#9a9f9c] dark:text-zinc-500">
+                {processStepDetail}
+              </span>
+            )}
+            <IconChevronDown aria-hidden="true" className="ml-0.5 h-3 w-3 flex-shrink-0 text-[#9da29f] transition-transform group-open/tool:rotate-180 dark:text-zinc-500" />
+          </summary>
+          <div className="mb-[9px] ml-2 mt-[3px] space-y-1.5 border-l border-[#e3e6e3] py-1.5 pl-[26px] pr-0 text-xs text-[#686e6c] dark:border-zinc-700 dark:text-zinc-400">
+            {toolDetails}
+          </div>
+        </details>
+      </>
     );
   }
 
   return (
-    // No top margin here — the part wrapper in SessionChat owns vertical
-    // spacing so every adjacent tool / thinking / text part is separated by a
-    // single, uniform 8px gap. See the comment on the wrapper in `parts.map`.
-    <details className="group/tool rounded-lg bg-zinc-50 overflow-hidden">
-      <summary className="px-2.5 py-2 cursor-pointer list-none flex items-start gap-2 min-w-0 select-none hover:bg-zinc-50 transition-colors">
+    <>
+      {/* The part wrapper owns vertical spacing between process rows. */}
+      <details className="group/tool rounded-lg bg-zinc-50 overflow-hidden">
+        <summary className="px-2.5 py-2 cursor-pointer list-none flex items-start gap-2 min-w-0 select-none hover:bg-zinc-50 transition-colors">
         <span className={`${config.iconColor} flex-shrink-0 mt-0.5`}>{config.icon}</span>
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2 min-w-0">
@@ -6497,14 +6826,15 @@ export function ChatToolPart({ part, pendingQuestion, onAnswer, onReject, proces
           <span className={statusBadgeClass}>
             {config.label}
           </span>
-          <ChevronDown className="w-3 h-3 text-zinc-400 transition-transform group-open/tool:rotate-180" />
+          <IconChevronDown aria-hidden="true" className="w-3 h-3 text-zinc-400 transition-transform group-open/tool:rotate-180" />
         </div>
       </summary>
 
-      <div className="space-y-1.5 border-t border-zinc-200/60 px-2.5 py-2 text-xs">
-        {toolDetails}
-      </div>
-    </details>
+        <div className="space-y-1.5 border-t border-zinc-200/60 px-2.5 py-2 text-xs">
+          {toolDetails}
+        </div>
+      </details>
+    </>
   );
 }
 
@@ -6529,6 +6859,8 @@ export const ChatMessageBubble = memo(ChatMessageBubbleInner, (prev, next) => {
   if (prev.editingText !== next.editingText) return false;
   if (prev.actionsDisabled !== next.actionsDisabled) return false;
   if (prev.actionMessageId !== next.actionMessageId) return false;
+  if (prev.onOpenContextFile !== next.onOpenContextFile) return false;
+  if (prev.onOpenContext !== next.onOpenContext) return false;
   if (prev.message.finish !== next.message.finish) return false;
   const prevParts = prev.message.parts as any[] | undefined;
   const nextParts = next.message.parts as any[] | undefined;

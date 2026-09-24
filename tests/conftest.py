@@ -7,6 +7,54 @@ from pathlib import Path
 
 import pytest
 
+
+@pytest.fixture(autouse=True)
+async def _postgres_test_database(monkeypatch, tmp_path, _isolate_runtime_root_from_shell):
+    """Use a retained, unique PG schema when the integration DSN is supplied.
+
+    Tests cannot inherit the application's production connection string.
+    Specialized PG fixtures may install their own schema after this fixture.
+    """
+    from flocks.db import registry
+
+    dsn = os.environ.get("FLOCKS_TEST_PG_DSN", "")
+    monkeypatch.delenv("FLOCKS_DB_DSN", raising=False)
+    monkeypatch.delenv("FLOCKS_DB_DSN_FILE", raising=False)
+    monkeypatch.setenv("FLOCKS_DB_BACKEND", "postgres")
+    registry.reset()
+    if not dsn:
+        yield
+        registry.reset()
+        return
+
+    from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+    from uuid import uuid4
+    import asyncpg
+
+    schema = "test_" + uuid4().hex
+    connection = await asyncpg.connect(dsn, timeout=10)
+    try:
+        await connection.execute(f'CREATE SCHEMA "{schema}"')
+    finally:
+        await connection.close()
+    parts = urlsplit(dsn)
+    query = dict(parse_qsl(parts.query))
+    query["search_path"] = schema + ",public"
+    monkeypatch.setenv("FLOCKS_DB_DSN", urlunsplit(parts._replace(query=urlencode(query))))
+    from flocks.db.active import reset
+    from flocks.db.connect import close_pools
+    from flocks.db.sync_store import close_sync_reader
+    import asyncio
+
+    await reset()
+    try:
+        yield
+    finally:
+        await close_pools()
+        await asyncio.to_thread(close_sync_reader)
+        await reset()
+        registry.reset()
+
 _API_KEY_MARKERS = {
     "requires_anthropic_key": ("ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY not set"),
     "requires_openai_key": ("OPENAI_API_KEY", "OPENAI_API_KEY not set"),
@@ -107,6 +155,14 @@ async def _cleanup_runtime_singletons_after_test():
     except Exception:
         pass
 
+    # Session listing can also open the independent channel-binding database.
+    try:
+        from flocks.channel.inbound.session_binding import close_binding_db
+
+        await close_binding_db()
+    except Exception:
+        pass
+
     # Then run storage shutdown (idempotent when not initialized).
     try:
         from flocks.storage.storage import Storage
@@ -115,3 +171,66 @@ async def _cleanup_runtime_singletons_after_test():
     except Exception:
         pass
 
+
+
+@pytest.fixture(autouse=True)
+def _default_source_deploy_mode(monkeypatch):
+    """Run the updater as a plain source install unless a test opts into another mode.
+
+    ``flocks.updater.deploy.detect_deploy_mode`` treats a process in which a
+    license-enforcement extension replaced the OSS default (or a runtime root
+    carrying a ``config/deployment.json`` descriptor) as a *managed* release
+    package and refuses in-place upgrades. Developer machines and CI runners that
+    carry such an extension would otherwise flip every updater test into that
+    refusal path, so pin the default to ``source`` here; tests covering
+    docker/managed behaviour set ``FLOCKS_DEPLOY_MODE`` themselves (after this
+    fixture) and clear the detection cache.
+    """
+    from flocks.updater.deploy import detect_deploy_mode
+
+    if not os.environ.get("FLOCKS_DEPLOY_MODE"):
+        monkeypatch.setenv("FLOCKS_DEPLOY_MODE", "source")
+    detect_deploy_mode.cache_clear()
+    yield
+    detect_deploy_mode.cache_clear()
+
+
+@pytest.fixture(autouse=True)
+def _isolate_runtime_root_from_shell(monkeypatch):
+    """Drop a ``FLOCKS_ROOT`` (and its sibling overrides) inherited from the shell.
+
+    Suites isolate the runtime tree by ``monkeypatch.setenv("HOME", tmp)`` and
+    expect the plugin root / config dir / data dir to follow ``~/.flocks``.
+    Those paths now resolve from ``FLOCKS_ROOT`` first, so a developer shell
+    that exports it (e.g. to drive a test instance) would make dozens of
+    HOME-isolated tests read the *real* instance's plugins and config.
+    Tests that need a runtime root set it themselves; this fixture runs before
+    per-directory conftests (``tests/server/conftest.py`` sets its own root).
+    """
+    for name in ("FLOCKS_ROOT", "FLOCKS_CONFIG_DIR", "FLOCKS_DATA_DIR", "FLOCKS_WORKSPACE_DIR"):
+        monkeypatch.delenv(name, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_outbound_proxy_from_shell(monkeypatch):
+    """Start every test with no proxy: no ``HTTP_PROXY`` family from the shell,
+    no macOS / Windows system proxy, no leftover process-wide override.
+
+    ``flocks.net.proxy`` makes HTTP clients follow the environment (``system``
+    mode) and, failing that, the OS proxy settings. A developer running the
+    suite behind Clash would otherwise see declarative HTTP tools, MCP clients
+    and the fetch helpers pick a ``ProxyConnector`` / proxied transport that the
+    tests never asked for. Tests that exercise the proxy set their own
+    variables or ``set_proxy_settings_override`` on top of this.
+    """
+    from flocks.net import proxy as proxy_mod
+
+    for name in proxy_mod.PROXY_ENV_NAMES + ("FLOCKS_PROXY_MODE", "FLOCKS_PROXY_URL", "FLOCKS_PROXY_BYPASS", proxy_mod.STARTUP_ENV_VAR):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(proxy_mod, "_os_proxy_settings", lambda: (None, None, []))
+    monkeypatch.setattr(proxy_mod, "_startup_env", None)
+    proxy_mod.set_proxy_settings_override(None)
+    proxy_mod._drop_cache()
+    yield
+    proxy_mod.set_proxy_settings_override(None)
+    proxy_mod._drop_cache()

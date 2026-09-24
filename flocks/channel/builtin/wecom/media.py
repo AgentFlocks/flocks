@@ -11,9 +11,9 @@ from pathlib import Path
 from typing import Literal
 from urllib.parse import unquote, urlparse
 
-import httpx
 
 from flocks.channel.media_filename import sanitize_filename
+from flocks.net.http import async_client
 
 _DEFAULT_MAX_MEDIA_BYTES = 50 * 1024 * 1024
 WeComOutboundMediaType = Literal["file", "image", "voice", "video"]
@@ -66,7 +66,7 @@ def _read_local_file_limited(path: Path, max_bytes: int) -> bytes:
 
 
 async def _fetch_http_file_limited(url: str, max_bytes: int) -> tuple[bytes, str]:
-    async with httpx.AsyncClient(timeout=60) as client:
+    async with async_client(timeout=60) as client:
         async with client.stream("GET", url, follow_redirects=True) as resp:
             resp.raise_for_status()
             content_length = resp.headers.get("content-length")

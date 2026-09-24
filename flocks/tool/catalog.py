@@ -37,7 +37,6 @@ TOOL_TAGS: Dict[str, List[str]] = {
     "webfetch": ["web", "http-fetch"],
     "websearch": ["web", "research"],
     "delegate_task": ["agent", "delegation"],
-    "task": ["agent", "delegation"],
     "schedule_task": ["scheduled-task", "scheduler-management"],
     "todo": ["task-management", "progress-tracking"],
     "run_workflow": ["workflow", "execution"],
@@ -184,6 +183,10 @@ def _score_tool_catalog_match(query: str, category: Optional[str], tool_info: An
         score += 60
     if q and q in tool_category:
         score += 20
+    if q and score <= 0:
+        # Nothing matched the query; the always_load / confirmation nudges
+        # below only order real matches and must not manufacture one.
+        return 0, matched_tags
     if metadata.always_load:
         score += 5
     if getattr(tool_info, "requires_confirmation", False):
@@ -236,7 +239,7 @@ def search_tool_catalog(
     category: Optional[str] = None,
     limit: int = 8,
 ) -> Tuple[List[Dict[str, Any]], List[str]]:
-    limit = max(1, min(limit or 8, 20))
+    limit = max(1, min(8 if limit is None else limit, 20))
     selected = _select_tool_catalog(query or "", category=category, limit=limit)
     if selected is not None:
         return selected

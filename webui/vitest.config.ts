@@ -1,6 +1,9 @@
 import { defineConfig } from 'vitest/config';
 import react from '@vitejs/plugin-react';
 import path from 'path';
+import { EXTENSION_DEDUPE_PACKAGES, extensionAliases, resolveExtensionRegistry } from './src/config/extensionRegistry';
+
+const extensionRegistry = resolveExtensionRegistry(process.env, __dirname);
 
 export default defineConfig({
   plugins: [react()],
@@ -15,8 +18,10 @@ export default defineConfig({
     },
   },
   resolve: {
-    alias: {
-      '@': path.resolve(__dirname, './src'),
-    },
+    alias: [
+      ...extensionAliases(extensionRegistry),
+      { find: '@', replacement: path.resolve(__dirname, './src') },
+    ],
+    dedupe: EXTENSION_DEDUPE_PACKAGES,
   },
 });

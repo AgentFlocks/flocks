@@ -1,4 +1,4 @@
-import { AlertCircle, RefreshCw, CheckCircle, WifiOff } from 'lucide-react';
+import { IconAlertCircle, IconRefresh, IconCircleCheck, IconWifiOff } from '@tabler/icons-react';
 import { useTranslation } from 'react-i18next';
 import { useBackendStatus } from '@/hooks/useBackendStatus';
 
@@ -26,13 +26,13 @@ export function BackendStatusBanner() {
   const getIcon = () => {
     switch (status) {
       case 'connecting':
-        return <RefreshCw className="w-5 h-5 animate-spin" />;
+        return <IconRefresh aria-hidden="true" className="w-5 h-5 animate-spin" />;
       case 'disconnected':
-        return <WifiOff className="w-5 h-5" />;
+        return <IconWifiOff aria-hidden="true" className="w-5 h-5" />;
       case 'error':
-        return <AlertCircle className="w-5 h-5" />;
+        return <IconAlertCircle aria-hidden="true" className="w-5 h-5" />;
       default:
-        return <CheckCircle className="w-5 h-5" />;
+        return <IconCircleCheck aria-hidden="true" className="w-5 h-5" />;
     }
   };
 
@@ -74,7 +74,7 @@ export function BackendStatusBanner() {
             onClick={checkHealth}
             className="px-4 py-2 bg-white/50 hover:bg-white/80 rounded-lg text-sm font-medium transition-colors duration-200 flex items-center space-x-2 dark:bg-[#46515e]/70 dark:hover:bg-[#5a6573]"
           >
-            <RefreshCw className="w-4 h-4" />
+            <IconRefresh aria-hidden="true" className="w-4 h-4" />
             <span>{t('backend.retry')}</span>
           </button>
         </div>

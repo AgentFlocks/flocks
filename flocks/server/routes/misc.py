@@ -11,6 +11,7 @@ from pydantic import BaseModel
 
 from flocks.utils.log import Log
 from flocks.provider.provider import Provider, ProviderConfig
+from flocks.server.auth import require_admin
 from flocks.tool.skill.skill_load import get_all_skills, get_skill
 from flocks.command.command import Command
 
@@ -53,6 +54,8 @@ async def flocks_auth(request: Request) -> Dict[str, Any]:
 )
 async def set_provider_auth(provider_id: str, request: Request) -> Dict[str, Any]:
     """Set provider authentication"""
+    # Overwrites the provider's runtime API key for every user: admin only.
+    require_admin(request)
     try:
         body = await request.json()
         auth = body.get("auth", {})
@@ -151,7 +154,6 @@ async def list_commands() -> List[Dict[str, Any]]:
                 "template": cmd.template,
                 "agent": cmd.agent,
                 "model": cmd.model,
-                "subtask": cmd.subtask,
                 "hidden": cmd.hidden,
                 "aliases": list(cmd.aliases),
                 "visible_surfaces": list(cmd.visible_surfaces),
@@ -192,7 +194,6 @@ async def get_command(name: str) -> Dict[str, Any]:
             "template": cmd.template,
             "agent": cmd.agent,
             "model": cmd.model,
-            "subtask": cmd.subtask,
             "hidden": cmd.hidden,
             "aliases": list(cmd.aliases),
             "visible_surfaces": list(cmd.visible_surfaces),
@@ -240,5 +241,4 @@ async def list_experimental_resources() -> Dict[str, Any]:
     """Get experimental resources"""
     # Return empty dict - resources are not implemented yet
     return {}
-
 

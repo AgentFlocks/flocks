@@ -123,6 +123,10 @@ def _normalize_todos(raw_todos: Any) -> List[TodoInfo]:
             raise ValueError(
                 f"todos[{index}] must be an object with id, content, status"
             )
+        # TodoInfo defaults status to "pending"; the tool schema marks it
+        # required, so a missing status must fail loudly like other fields.
+        if "status" not in todo:
+            raise ValueError(f"todos[{index}].status: field required")
         try:
             item = TodoInfo(**todo)
         except ValidationError as exc:

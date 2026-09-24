@@ -16,6 +16,7 @@ import pytest
 from openai import AsyncOpenAI
 
 import flocks.provider.sdk.openai_base as openai_base_module
+from flocks.net.http import ProxyRoutingTransport
 from flocks.provider.sdk.openai_base import (
     OpenAIBaseProvider,
     LLMResponseTooLargeError,
@@ -501,8 +502,11 @@ class TestOpenAIBaseProviderConfiguration:
         # See ``OpenAIBaseProvider._get_client``.
         assert mock_http_client.call_count == 1
         kwargs = mock_http_client.call_args.kwargs
-        assert kwargs["verify"] is False
-        assert kwargs["trust_env"] is True
+        # verify_ssl lands on the routing transport (one direct + one per proxy), and
+        # the client runs with trust_env=False: the outbound proxy policy decides.
+        assert kwargs["trust_env"] is False
+        assert isinstance(kwargs["transport"], ProxyRoutingTransport)
+        assert kwargs["transport"].verify is False
         timeout_arg = kwargs["timeout"]
         # Either an httpx.Timeout instance or compatible object: assert the
         # connect/read/write components rather than equality so future tweaks
@@ -828,7 +832,7 @@ async def _stream_from_chunks(*chunks):
 
 class TestOpenAIBaseProviderStreamingToolCalls:
     @pytest.mark.asyncio
-    async def test_chat_stream_emits_name_only_marker_before_complete_tool_input(self):
+    async def test_chat_stream_forwards_tool_argument_fragments_as_they_arrive(self):
         provider = MockProviderWithoutCatalog()
         create = AsyncMock()
         provider._client = MagicMock()
@@ -904,9 +908,32 @@ class TestOpenAIBaseProviderStreamingToolCalls:
             )
         ]
 
-        assert len(chunks) == 2
+        # Each fragment must leave the adapter as it arrives: buffering the whole
+        # argument JSON until finish_reason starved the runner's mid-stream chunk
+        # watchdog on long write calls.
+        assert len(chunks) == 3
         assert chunks[0].finish_reason is None
         assert chunks[0].tool_calls == [
+            {
+                "index": 0,
+                "id": "call_write",
+                "type": "function",
+                "function": {"name": "write", "arguments": first_arguments},
+            }
+        ]
+        assert chunks[1].finish_reason is None
+        assert chunks[1].tool_calls == [
+            {
+                "index": 0,
+                "id": "call_write",
+                "type": "function",
+                "function": {"name": "write", "arguments": remaining_arguments},
+            }
+        ]
+        # The terminal chunk carries only what has not been forwarded yet, so the
+        # accumulator downstream does not append the arguments a second time.
+        assert chunks[2].finish_reason == "tool_calls"
+        assert chunks[2].tool_calls == [
             {
                 "index": 0,
                 "id": "call_write",
@@ -914,18 +941,12 @@ class TestOpenAIBaseProviderStreamingToolCalls:
                 "function": {"name": "write", "arguments": ""},
             }
         ]
-        assert chunks[1].finish_reason == "tool_calls"
-        assert chunks[1].tool_calls == [
-            {
-                "index": 0,
-                "id": "call_write",
-                "type": "function",
-                "function": {
-                    "name": "write",
-                    "arguments": first_arguments + remaining_arguments,
-                },
-            }
-        ]
+        streamed = "".join(
+            tc["function"]["arguments"]
+            for chunk in chunks
+            for tc in (chunk.tool_calls or [])
+        )
+        assert streamed == first_arguments + remaining_arguments
 
 
 class TestOpenAIBaseProviderStreamingUsage:

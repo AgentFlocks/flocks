@@ -1,13 +1,21 @@
 import { useMemo, useState, useCallback, useEffect } from 'react';
 import type { MouseEvent } from 'react';
-import { Code, Wrench, Settings, Power, PowerOff, AlertTriangle } from 'lucide-react';
+import { IconCode, IconTool, IconSettings, IconPower, IconPlugOff, IconAlertTriangle } from '@tabler/icons-react';
 import { useTranslation } from 'react-i18next';
+import { extractErrorMessage } from '@/utils/error';
 import { toolAPI } from '@/api/tool';
 import type { Tool } from '@/api/tool';
 import EmptyState from '@/components/common/EmptyState';
 import { CATEGORY_LABEL_KEY } from '../constants';
 import { getLocalizedToolDescription } from '../toolDisplay';
-import { SERVICE_TAB_GRID_COLS } from './gridLayout';
+import {
+  SERVICE_TAB_ACTIONS_CELL,
+  SERVICE_TAB_BADGE_CELL,
+  SERVICE_TAB_GRID_COLS,
+  SERVICE_TAB_NAME_CELL,
+  SERVICE_TAB_ROW_CLASS,
+  SERVICE_TAB_STATS_CELL,
+} from './gridLayout';
 
 interface LocalTabContentProps {
   tools: Tool[];
@@ -58,8 +66,8 @@ export default function LocalTabContent({
       setToggling(tool.name);
       await toolAPI.setEnabled(tool.name, enabled);
       await onRefreshTools();
-    } catch (err: any) {
-      alert(err.response?.data?.detail || err.message);
+    } catch (err: unknown) {
+      alert(extractErrorMessage(err, t('alert.unknownError')));
     } finally {
       setToggling(null);
     }
@@ -87,12 +95,12 @@ export default function LocalTabContent({
 
       {filteredTools.length === 0 ? (
         <EmptyState
-          icon={<Code className="w-16 h-16" />}
+          icon={<IconCode aria-hidden="true" className="w-16 h-16" />}
           title={t('local.noTools')}
           description={searchQuery ? t('empty.tryOtherKeywords') : t('local.noToolsDesc')}
         />
       ) : (
-        <div className="bg-white border border-gray-200 rounded-lg overflow-hidden divide-y divide-gray-100">
+        <div className="bg-white border border-gray-200 rounded-lg overflow-x-auto divide-y divide-gray-100">
           {filteredTools.map((tool) => {
             const isSelected = selectedToolName === tool.name;
             const description = getLocalizedToolDescription(tool, i18n.language);
@@ -100,12 +108,12 @@ export default function LocalTabContent({
             return (
               <div
                 key={tool.name}
-                className={`grid items-center gap-3 px-4 py-3 transition-colors ${isSelected ? 'bg-blue-50' : 'hover:bg-gray-50'}`}
+                className={`${SERVICE_TAB_ROW_CLASS} transition-colors ${isSelected ? 'bg-blue-50' : 'hover:bg-gray-50'}`}
                 style={{ gridTemplateColumns: SERVICE_TAB_GRID_COLS }}
               >
                 {/* Icon */}
                 <div className={`w-8 h-8 flex items-center justify-center rounded-lg ${tool.enabled ? 'bg-blue-50' : 'bg-gray-50'}`}>
-                  <Code className={`w-4 h-4 ${tool.enabled ? 'text-blue-600' : 'text-gray-400'}`} />
+                  <IconCode aria-hidden="true" className={`w-4 h-4 ${tool.enabled ? 'text-blue-600' : 'text-gray-400'}`} />
                 </div>
 
                 {/* Name + description.
@@ -115,7 +123,7 @@ export default function LocalTabContent({
                 <button
                   type="button"
                   onClick={() => onSelectTool(tool)}
-                  className="min-w-0 text-left group/name focus:outline-none"
+                  className={`${SERVICE_TAB_NAME_CELL} text-left group/name focus:outline-none`}
                 >
                   <div className="flex items-center gap-1.5">
                     <span className="text-sm font-semibold text-gray-900 truncate font-mono transition-colors group-hover/name:text-blue-700 group-focus-visible/name:underline">{tool.name}</span>
@@ -132,7 +140,7 @@ export default function LocalTabContent({
                     )}
                     {tool.requires_confirmation && (
                       <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 bg-amber-50 text-amber-700 text-[10px] font-medium rounded border border-amber-200 shrink-0">
-                        <AlertTriangle className="w-2.5 h-2.5" />{t('local.requiresConfirmation')}
+                        <IconAlertTriangle aria-hidden="true" className="w-2.5 h-2.5" />{t('local.requiresConfirmation')}
                       </span>
                     )}
                   </div>
@@ -140,32 +148,32 @@ export default function LocalTabContent({
                 </button>
 
                 {/* Type column */}
-                <div className="text-center">
+                <div className={SERVICE_TAB_BADGE_CELL}>
                   <span className="px-1.5 py-0.5 bg-blue-100 text-blue-700 text-[10px] font-medium rounded">{t('source.local')}</span>
                 </div>
 
                 {/* Status column */}
-                <div className="text-center">
+                <div className={SERVICE_TAB_BADGE_CELL}>
                   <span className={`px-1.5 py-0.5 text-[10px] font-medium rounded ${tool.enabled ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-500'}`}>
                     {tool.enabled ? t('enabledBadge.enabled') : t('enabledBadge.disabled')}
                   </span>
                 </div>
 
                 {/* Stats column */}
-                <div className="flex items-center justify-end gap-1.5 text-xs text-gray-400">
-                  <Wrench className="w-3 h-3" />
+                <div className={`${SERVICE_TAB_STATS_CELL} gap-1.5 text-xs text-gray-400`}>
+                  <IconTool aria-hidden="true" className="w-3 h-3" />
                   <span>{t('local.paramsCount', { count: tool.parameters_count ?? tool.parameters?.length ?? 0 })}</span>
                 </div>
 
                 {/* Actions column */}
-                <div className="flex items-center justify-end gap-1.5">
+                <div className={`${SERVICE_TAB_ACTIONS_CELL} gap-1.5`}>
                   {tool.enabled ? (
                     <>
                       <button
                         onClick={() => onSelectTool(tool)}
                         className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border text-xs font-medium transition-colors ${isSelected ? 'border-blue-300 text-blue-700 bg-blue-50' : 'border-gray-200 text-gray-600 hover:bg-gray-100'}`}
                       >
-                        <Settings className="w-3 h-3" />{t('local.manage')}
+                        <IconSettings aria-hidden="true" className="w-3 h-3" />{t('local.manage')}
                       </button>
                       <button
                         onClick={(e) => handleToggleEnabled(tool, false, e)}
@@ -173,7 +181,7 @@ export default function LocalTabContent({
                         className="p-1.5 rounded-lg border border-red-200 text-red-400 hover:bg-red-50 transition-colors disabled:opacity-50"
                         title={t('detail.disableServer')}
                       >
-                        <PowerOff className="w-3.5 h-3.5" />
+                        <IconPlugOff aria-hidden="true" className="w-3.5 h-3.5" />
                       </button>
                     </>
                   ) : (
@@ -183,14 +191,14 @@ export default function LocalTabContent({
                         disabled={toggling === tool.name}
                         className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-green-600 text-white text-xs font-medium hover:bg-green-700 disabled:opacity-50 transition-colors"
                       >
-                        <Power className="w-3 h-3" />{toggling === tool.name ? t('local.configuring') : t('detail.enableServer')}
+                        <IconPower aria-hidden="true" className="w-3 h-3" />{toggling === tool.name ? t('local.configuring') : t('detail.enableServer')}
                       </button>
                       <button
                         onClick={() => onSelectTool(tool)}
                         className={`p-1.5 rounded-lg border transition-colors ${isSelected ? 'border-blue-300 text-blue-700 bg-blue-50' : 'border-gray-200 text-gray-400 hover:bg-gray-100'}`}
                         title={t('local.manage')}
                       >
-                        <Settings className="w-3.5 h-3.5" />
+                        <IconSettings aria-hidden="true" className="w-3.5 h-3.5" />
                       </button>
                     </>
                   )}

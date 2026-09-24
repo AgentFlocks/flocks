@@ -1,7 +1,7 @@
 """
 Workspace routes
 
-Generic file-manager API for ~/.flocks/workspace/ plus a read-only view
+Generic file-manager API for ~/.flocks/workspace/ plus a managed view
 of the agent memory directory (~/.flocks/data/memory/).
 
 All `path` query/body parameters are **relative** to the respective root.
@@ -26,9 +26,10 @@ File operations (workspace only)
   POST   /api/workspace/move          move / rename
   POST   /api/workspace/reveal        open containing folder in system file manager
 
-Memory view (read-only, points to data/memory/)
+Memory view (points to data/memory/)
   GET /api/workspace/memory/list      list memory files
   GET /api/workspace/memory/file      read memory file content
+  PUT /api/workspace/memory/file      update editable memory files
   GET /api/workspace/memory/preview   preview single memory file inline
   GET /api/workspace/memory/download  download single memory file
 
@@ -40,6 +41,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import json
 import mimetypes
 import os
 import shutil
@@ -49,11 +51,15 @@ import sys
 import zipfile
 from pathlib import Path
 from typing import List, Optional, Literal
+from urllib.parse import unquote
 
-from fastapi import APIRouter, HTTPException, Query, UploadFile, File
+from fastapi import APIRouter, HTTPException, Query, UploadFile, File, Request, status
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
+from flocks.channel.media_filename import sanitize_filename
+from flocks.project.project import Project
+from flocks.server.auth import get_optional_user, require_user
 from flocks.workspace.manager import WorkspaceManager
 from flocks.workspace.models import WorkspaceNode, WorkspaceStats
 from flocks.utils.log import Log
@@ -82,12 +88,25 @@ _ALLOWED_PREVIEW_MEDIA_TYPES = {
 }
 
 
+def _env_int(name: str, default: int) -> int:
+    """Read a positive integer setting; a bad value falls back instead of 500-ing."""
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        log.warn("workspace.env.invalid_int", {"name": name, "value": raw, "default": default})
+        return default
+    return value if value >= 0 else default
+
+
 def _max_upload_bytes() -> int:
-    return int(os.getenv("FLOCKS_WORKSPACE_MAX_UPLOAD_MB", str(_DEFAULT_MAX_UPLOAD_MB))) * 1024 * 1024
+    return _env_int("FLOCKS_WORKSPACE_MAX_UPLOAD_MB", _DEFAULT_MAX_UPLOAD_MB) * 1024 * 1024
 
 
 def _max_read_bytes() -> int:
-    return int(os.getenv("FLOCKS_WORKSPACE_MAX_READ_BYTES", str(_DEFAULT_MAX_READ_BYTES)))
+    return _env_int("FLOCKS_WORKSPACE_MAX_READ_BYTES", _DEFAULT_MAX_READ_BYTES)
 
 
 # ─── helpers ────────────────────────────────────────────────────────────────
@@ -96,6 +115,11 @@ def _get_manager() -> WorkspaceManager:
     mgr = WorkspaceManager.get_instance()
     mgr.ensure_dirs()
     return mgr
+
+
+def _workspace_root(mgr: WorkspaceManager) -> Path:
+    """Return the canonical workspace root used for relative path rendering."""
+    return mgr.get_workspace_dir().resolve()
 
 
 def _is_allowed_upload_filename(filename: str) -> bool:
@@ -134,12 +158,32 @@ def _node_from_path(path: Path, root: Path) -> WorkspaceNode:
     )
 
 
+def _is_outputs_directory(directory: Path, root: Path) -> bool:
+    """Return whether *directory* is outputs or one of its descendants."""
+    return directory.relative_to(root).parts[:1] == ("outputs",)
+
+
+def _visible_children(directory: Path, root: Path) -> list[Path]:
+    """List displayable children, hiding dot-prefixed filesystem entries.
+
+    Output directories are organized by date, so show their folders newest-first
+    while retaining the normal name order for files.
+    """
+    children = [child for child in directory.iterdir() if not child.name.startswith(".")]
+    if not _is_outputs_directory(directory, root):
+        return sorted(children)
+
+    directories = sorted((child for child in children if child.is_dir()), reverse=True)
+    files = sorted(child for child in children if not child.is_dir())
+    return directories + files
+
+
 def _build_tree_sync(directory: Path, root: Path, depth: int, current: int = 0) -> WorkspaceNode:
     """Blocking recursive tree build — call via asyncio.to_thread."""
     node = _node_from_path(directory, root)
     if current < depth:
         node.children = []
-        for child in sorted(directory.iterdir()):
+        for child in _visible_children(directory, root):
             if child.is_dir():
                 node.children.append(_build_tree_sync(child, root, depth, current + 1))
             else:
@@ -149,7 +193,7 @@ def _build_tree_sync(directory: Path, root: Path, depth: int, current: int = 0) 
 
 def _list_dir_sync(directory: Path, root: Path) -> list[WorkspaceNode]:
     """Blocking single-level directory listing — call via asyncio.to_thread."""
-    return [_node_from_path(child, root) for child in sorted(directory.iterdir())]
+    return [_node_from_path(child, root) for child in _visible_children(directory, root)]
 
 
 def _dir_stats_sync(root: Path):
@@ -200,11 +244,12 @@ def _inline_preview_response(target: Path) -> FileResponse:
     )
 
 
-def _download_response(target: Path) -> FileResponse:
+def _download_response(target: Path, *, filename: Optional[str] = None) -> FileResponse:
     return FileResponse(
         path=str(target),
-        filename=target.name,
+        filename=filename or target.name,
         media_type="application/octet-stream",
+        headers={"X-Content-Type-Options": "nosniff"},
     )
 
 
@@ -247,15 +292,16 @@ async def list_tree(
     depth: int = Query(2, ge=1, le=5, description="Tree depth"),
 ):
     mgr = _get_manager()
+    workspace_root = _workspace_root(mgr)
     try:
-        base = mgr.resolve_workspace_path(path) if path else mgr.get_workspace_dir()
+        base = mgr.resolve_workspace_path(path) if path else workspace_root
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     if not base.exists():
         raise HTTPException(status_code=404, detail=f"Path not found: {path}")
     if not base.is_dir():
         raise HTTPException(status_code=400, detail=f"Not a directory: {path}")
-    return await asyncio.to_thread(_build_tree_sync, base, mgr.get_workspace_dir(), depth)
+    return await asyncio.to_thread(_build_tree_sync, base, workspace_root, depth)
 
 
 @router.get("/list", response_model=List[WorkspaceNode], summary="List directory")
@@ -263,15 +309,16 @@ async def list_dir(
     path: str = Query("", description="Relative path from workspace root"),
 ):
     mgr = _get_manager()
+    workspace_root = _workspace_root(mgr)
     try:
-        base = mgr.resolve_workspace_path(path) if path else mgr.get_workspace_dir()
+        base = mgr.resolve_workspace_path(path) if path else workspace_root
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     if not base.exists():
         raise HTTPException(status_code=404, detail=f"Path not found: {path}")
     if not base.is_dir():
         raise HTTPException(status_code=400, detail=f"Not a directory: {path}")
-    return await asyncio.to_thread(_list_dir_sync, base, mgr.get_workspace_dir())
+    return await asyncio.to_thread(_list_dir_sync, base, workspace_root)
 
 
 class DirCreateRequest(BaseModel):
@@ -281,10 +328,17 @@ class DirCreateRequest(BaseModel):
 @router.post("/dir", summary="Create directory")
 async def create_dir(body: DirCreateRequest):
     mgr = _get_manager()
+    if not body.path.strip() or body.path.strip() in (".", "./"):
+        # The root already exists; "create" with no name is a client bug.
+        raise HTTPException(status_code=422, detail="path must name a directory inside the workspace")
     try:
         target = mgr.resolve_workspace_path(body.path)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    if target.exists() and not target.is_dir():
+        raise HTTPException(status_code=409, detail=f"A file already exists at: {body.path}")
+    if target.is_dir():
+        return {"path": body.path, "created": False}
     target.mkdir(parents=True, exist_ok=True)
     log.info("workspace.dir.created", {"path": body.path})
     return {"path": body.path, "created": True}
@@ -317,13 +371,17 @@ async def delete_dir(
 
 @router.post("/upload", summary="Upload file(s)")
 async def upload_files(
+    request: Request,
     dest: str = Query("", description="Destination directory (relative)"),
     purpose: Optional[Literal["chat"]] = Query(None, description="Upload purpose"),
     files: List[UploadFile] = File(...),
 ):
+    current_user = require_user(request) if purpose == "chat" else None
     mgr = _get_manager()
+    workspace_root = _workspace_root(mgr)
     try:
         dest_dir = mgr.resolve_workspace_path(dest) if dest else mgr.get_workspace_dir()
+        relative_dest_dir = dest_dir.resolve().relative_to(workspace_root)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     dest_dir.mkdir(parents=True, exist_ok=True)
@@ -338,16 +396,73 @@ async def upload_files(
             results.append({"name": "", "error": "Filename is missing"})
             continue
 
-        filename = Path(raw_name).name  # strip any dir component from client
-        if purpose == "chat" and not _is_allowed_upload_filename(filename):
-            results.append({
+        if purpose == "chat":
+            from flocks.session.files import create_chat_upload_target, remove_staged_chat_upload
+            from flocks.utils.id import Identifier
+
+            filename = sanitize_filename(unquote(raw_name), fallback="")
+            if not filename:
+                results.append({"name": "", "error": "Filename is invalid"})
+                continue
+            if not _is_allowed_upload_filename(filename):
+                results.append({
+                    "name": filename,
+                    "error": f"Unsupported file type (allowed: {_ALLOWED_UPLOAD_LABEL})",
+                })
+                continue
+
+            upload_id = Identifier.ascending("part")
+            target = None
+            completed = False
+            total = 0
+            try:
+                target = create_chat_upload_target(current_user.id, upload_id, filename)
+                # Stream directly to this upload's exclusive staging file.
+                # Keep writes bounded and synchronous so cancellation cannot
+                # leave a background writer racing with close/cleanup.
+                with target.open("xb") as handle:
+                    while True:
+                        chunk = await upload.read(65536)
+                        if not chunk:
+                            break
+                        total += len(chunk)
+                        if total > max_bytes:
+                            break
+                        handle.write(chunk)
+                if total > max_bytes:
+                    results.append({"name": filename, "error": f"File too large (max {max_mb} MB)"})
+                    continue
+                completed = True
+            except Exception as exc:
+                results.append({"name": filename, "error": f"Failed to stage upload: {exc}"})
+                continue
+            finally:
+                # Also runs for CancelledError. A failed create must never
+                # remove an existing upload with the same ID.
+                if target is not None and not completed:
+                    remove_staged_chat_upload(current_user.id, upload_id)
+
+            is_text = WorkspaceManager.is_text_file(target)
+            mime_type = upload.content_type or mimetypes.guess_type(filename)[0] or "application/octet-stream"
+            log.info("workspace.chat_file.staged", {
+                "upload_id": upload_id,
                 "name": filename,
-                "error": f"Unsupported file type (allowed: {_ALLOWED_UPLOAD_LABEL})",
+                "size": total,
+                "is_text": is_text,
+            })
+            results.append({
+                "uploadID": upload_id,
+                "name": filename,
+                "mime": mime_type,
+                "size": total,
+                "is_text_file": is_text,
+                "preview_warning": None if is_text else "Binary file — download only",
             })
             continue
 
-        # Read file in chunks to enforce size limit without loading entire
-        # content into memory before checking.
+        filename = Path(raw_name).name  # strip any dir component from client
+        # Read regular Workspace uploads in chunks before overwriting the
+        # destination, so an oversized upload leaves existing content intact.
         chunks: list[bytes] = []
         total = 0
         too_large = False
@@ -366,8 +481,8 @@ async def upload_files(
             continue
 
         content = b"".join(chunks)
-        # Keep attachment paths stable across repeated uploads by overwriting the
-        # existing file instead of auto-renaming to "name (1).ext".
+        # Keep regular Workspace paths stable across repeated uploads by
+        # overwriting the existing file instead of auto-renaming it.
         target = dest_dir / filename
         target.write_bytes(content)
 
@@ -381,7 +496,7 @@ async def upload_files(
         })
         results.append({
             "name": target.name,
-            "path": str(target.relative_to(mgr.get_workspace_dir())),
+            "path": str(relative_dest_dir / filename),
             "abs_path": str(target),
             "size": total,
             "is_text_file": is_text,
@@ -389,6 +504,18 @@ async def upload_files(
         })
 
     return {"uploaded": results}
+
+
+@router.delete("/upload/chat/{upload_id}", summary="Discard staged chat upload")
+async def discard_chat_upload(upload_id: str, request: Request):
+    from flocks.session.files import remove_staged_chat_upload
+
+    current_user = require_user(request)
+    try:
+        removed = remove_staged_chat_upload(current_user.id, upload_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"uploadID": upload_id, "removed": removed}
 
 
 @router.get("/file", summary="Read text file content")
@@ -439,6 +566,8 @@ async def write_file(body: FileWriteRequest):
         target = mgr.resolve_workspace_path(body.path)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    if target.is_dir():
+        raise HTTPException(status_code=400, detail=f"Not a file: {body.path}")
     target.parent.mkdir(parents=True, exist_ok=True)
     try:
         target.write_text(body.content, encoding="utf-8")
@@ -503,24 +632,52 @@ class ZipDownloadRequest(BaseModel):
     archive_name: str = "workspace_files.zip"
 
 
+_DEFAULT_ARCHIVE_NAME = "workspace_files.zip"
+
+
+def _safe_archive_name(name: str) -> str:
+    """Reduce a client-supplied archive name to something safe in a header.
+
+    The value is interpolated into Content-Disposition; control characters or
+    quotes there let a caller inject or truncate response headers.
+    """
+    base = Path(name.replace("\\", "/")).name
+    cleaned = "".join(ch for ch in base if ch.isprintable() and ch not in '"\\;')
+    cleaned = cleaned.strip().strip(".")
+    if not cleaned:
+        return _DEFAULT_ARCHIVE_NAME
+    if not cleaned.lower().endswith(".zip"):
+        cleaned += ".zip"
+    return cleaned
+
+
 @router.post("/download/zip", summary="Batch download as zip")
 async def download_zip(body: ZipDownloadRequest):
     mgr = _get_manager()
+    targets: list[tuple[str, Path]] = []
+    skipped: list[str] = []
+    for rel_path in body.paths:
+        try:
+            target = mgr.resolve_workspace_path(rel_path)
+        except ValueError:
+            skipped.append(rel_path)
+            continue
+        if target.is_file():
+            targets.append((rel_path, target))
+        else:
+            skipped.append(rel_path)
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        for rel_path in body.paths:
-            try:
-                target = mgr.resolve_workspace_path(rel_path)
-            except ValueError:
-                continue
-            if target.is_file():
-                zf.write(target, arcname=rel_path)
+        for rel_path, target in targets:
+            zf.write(target, arcname=rel_path)
     buf.seek(0)
-    return StreamingResponse(
-        buf,
-        media_type="application/zip",
-        headers={"Content-Disposition": f'attachment; filename="{body.archive_name}"'},
-    )
+    headers = {"Content-Disposition": f'attachment; filename="{_safe_archive_name(body.archive_name)}"'}
+    if skipped:
+        # Paths outside the workspace, missing files and directories are left
+        # out of the archive; the header tells the client which ones, so an
+        # empty zip is never silent.
+        headers["X-Skipped-Paths"] = json.dumps(skipped, ensure_ascii=True)
+    return StreamingResponse(buf, media_type="application/zip", headers=headers)
 
 
 class MoveRequest(BaseModel):
@@ -544,6 +701,11 @@ async def move_item(body: MoveRequest):
         raise HTTPException(status_code=404, detail=f"Source not found: {body.src}")
     if dst.exists():
         raise HTTPException(status_code=409, detail=f"Destination already exists: {body.dst}")
+    if src.is_dir() and dst.is_relative_to(src):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot move a directory into itself: {body.src} -> {body.dst}",
+        )
     dst.parent.mkdir(parents=True, exist_ok=True)
     shutil.move(str(src), str(dst))
     log.info("workspace.item.moved", {"src": body.src, "dst": body.dst})
@@ -585,9 +747,39 @@ def _memory_child_sort_key(path: Path) -> tuple[int, str]:
     return (0 if path.is_dir() else 1, path.name.casefold())
 
 
-def _build_memory_node_sync(path: Path, memory_dir: Path) -> WorkspaceNode:
+def _memory_path_parts(rel_path: str) -> list[str]:
+    return [part for part in rel_path.replace("\\", "/").split("/") if part]
+
+
+def _is_editable_memory_path(
+    rel_path: str,
+    writable_project_ids: Optional[set[str]] = None,
+) -> bool:
+    """Return whether the current user may edit a memory file path."""
+    path_parts = _memory_path_parts(rel_path)
+    if len(path_parts) == 1:
+        return path_parts[0] in {"USER.md", "MEMORY.md"}
+    if len(path_parts) == 2:
+        return path_parts[0] == "daily" and path_parts[1].endswith(".md")
+    if len(path_parts) == 3:
+        return (
+            path_parts[0] == "projects"
+            and path_parts[2] == "MEMORY.md"
+            and writable_project_ids is not None
+            and path_parts[1] in writable_project_ids
+        )
+    return False
+
+
+def _build_memory_node_sync(
+    path: Path,
+    memory_dir: Path,
+    writable_project_ids: Optional[set[str]],
+) -> WorkspaceNode:
     """Build one recursive node for the Memory tree."""
     node = _node_from_path(path, memory_dir)
+    if node.type == "file":
+        node.editable = _is_editable_memory_path(node.path, writable_project_ids)
     if node.type == "directory":
         children = (
             child
@@ -595,13 +787,16 @@ def _build_memory_node_sync(path: Path, memory_dir: Path) -> WorkspaceNode:
             if not child.is_symlink()
         )
         node.children = [
-            _build_memory_node_sync(child, memory_dir)
+            _build_memory_node_sync(child, memory_dir, writable_project_ids)
             for child in sorted(children, key=_memory_child_sort_key)
         ]
     return node
 
 
-def _list_memory_sync(memory_dir: Path) -> List[WorkspaceNode]:
+def _list_memory_sync(
+    memory_dir: Path,
+    writable_project_ids: Optional[set[str]],
+) -> List[WorkspaceNode]:
     """Build the USER/global/daily/project Memory hierarchy."""
     children = (
         child
@@ -615,16 +810,21 @@ def _list_memory_sync(memory_dir: Path) -> List[WorkspaceNode]:
             child.name.casefold(),
         ),
     )
-    return [_build_memory_node_sync(child, memory_dir) for child in ordered]
+    return [
+        _build_memory_node_sync(child, memory_dir, writable_project_ids)
+        for child in ordered
+    ]
 
 
 @router.get("/memory/list", response_model=List[WorkspaceNode], summary="List memory files")
-async def list_memory():
+async def list_memory(request: Request):
     mgr = _get_manager()
     memory_dir = mgr.get_memory_dir()
     if not memory_dir.exists():
         return []
-    return await asyncio.to_thread(_list_memory_sync, memory_dir)
+    user = get_optional_user(request)
+    writable_project_ids = Project.registered_project_ids(user.id) if user else set()
+    return await asyncio.to_thread(_list_memory_sync, memory_dir, writable_project_ids)
 
 
 @router.get("/memory/file", summary="Read memory file content")
@@ -664,12 +864,21 @@ async def read_memory_file(
 
 
 @router.put("/memory/file", summary="Write memory file content")
-async def write_memory_file(body: FileWriteRequest):
+async def write_memory_file(request: Request, body: FileWriteRequest):
+    user = require_user(request)
     mgr = _get_manager()
     try:
         target = mgr.resolve_memory_path(body.path)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    if target.is_dir():
+        raise HTTPException(status_code=400, detail=f"Not a file: {body.path}")
+    writable_project_ids = Project.registered_project_ids(user.id)
+    if not _is_editable_memory_path(body.path, writable_project_ids):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Memory file is read-only",
+        )
     target.parent.mkdir(parents=True, exist_ok=True)
     try:
         target.write_text(body.content, encoding="utf-8")

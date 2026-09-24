@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Shield, Plus, Trash2 } from 'lucide-react';
+import { IconShield, IconPlus, IconTrash } from '@tabler/icons-react';
 import { useTranslation } from 'react-i18next';
 import PageHeader from '@/components/common/PageHeader';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
@@ -11,12 +11,23 @@ interface Permission {
   permission: string;
   action: 'allow' | 'deny';
   pattern: string;
-  createdAt: number;
+  createdAt: number | null;
+}
+
+// A tool call waiting for a human decision (GET /api/permission).
+interface PendingRequest {
+  id: string;
+  sessionID: string;
+  toolID: string;
+  permission: string;
+  patterns: string[];
+  time: { created: number };
 }
 
 export default function PermissionPage() {
   const { t } = useTranslation('permission');
   const [permissions, setPermissions] = useState<Permission[]>([]);
+  const [pending, setPending] = useState<PendingRequest[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [showAddDialog, setShowAddDialog] = useState(false);
@@ -28,8 +39,13 @@ export default function PermissionPage() {
   const fetchPermissions = async () => {
     try {
       setLoading(true);
-      const response = await client.get('/api/permission');
-      setPermissions(response.data);
+      setError(null);
+      const [rulesRes, pendingRes] = await Promise.all([
+        client.get('/api/permission/rules'),
+        client.get('/api/permission'),
+      ]);
+      setPermissions(rulesRes.data);
+      setPending(pendingRes.data);
     } catch (err: any) {
       setError(err.message);
     } finally {
@@ -41,10 +57,19 @@ export default function PermissionPage() {
     if (!confirm(t('confirmDelete'))) return;
 
     try {
-      await client.delete(`/api/permission/${id}`);
+      await client.delete(`/api/permission/rules/${encodeURIComponent(id)}`);
       fetchPermissions();
     } catch (err: any) {
       alert(`${t('deleteFailed')}: ${err.message}`);
+    }
+  };
+
+  const handleReply = async (id: string, allow: boolean) => {
+    try {
+      await client.post(`/api/permission/${id}/reply`, { allow });
+      fetchPermissions();
+    } catch (err: any) {
+      alert(`${t('replyFailed')}: ${err.message}`);
     }
   };
 
@@ -77,7 +102,7 @@ export default function PermissionPage() {
       <PageHeader
         title={t('pageTitle')}
         description={t('pageDescription')}
-        icon={<Shield className="w-8 h-8" />}
+        icon={<IconShield aria-hidden="true" className="w-8 h-8" />}
       />
 
       <div className="flex items-center justify-between mb-6">
@@ -88,15 +113,49 @@ export default function PermissionPage() {
           onClick={() => setShowAddDialog(true)}
           className="flex items-center gap-2 px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700"
         >
-          <Plus className="w-5 h-5" />
+          <IconPlus aria-hidden="true" className="w-5 h-5" />
           {t('addRule')}
         </button>
       </div>
 
       <div className="flex-1 overflow-y-auto">
+        {pending.length > 0 && (
+          <div className="mb-6" data-testid="pending-requests">
+            <div className="text-sm font-medium text-gray-700 mb-2">
+              {t('pending.title', { count: pending.length })}
+            </div>
+            <div className="bg-white rounded-lg shadow-sm border border-amber-200 overflow-x-auto">
+              <table className="min-w-full divide-y divide-gray-200">
+                <thead className="bg-amber-50">
+                  <tr>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">{t('pending.session')}</th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">{t('table.tool')}</th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">{t('table.pattern')}</th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">{t('table.createdAt')}</th>
+                    <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">{t('table.operations')}</th>
+                  </tr>
+                </thead>
+                <tbody className="bg-white divide-y divide-gray-200">
+                  {pending.map((req) => (
+                    <tr key={req.id}>
+                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-600 font-mono">{req.sessionID}</td>
+                      <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">{req.toolID}</td>
+                      <td className="px-6 py-4 text-sm text-gray-600 break-all">{req.patterns.join(', ')}</td>
+                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-600">{new Date(req.time.created).toLocaleString()}</td>
+                      <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-medium space-x-3">
+                        <button onClick={() => handleReply(req.id, true)} className="text-green-700 hover:text-green-900">{t('action.allow')}</button>
+                        <button onClick={() => handleReply(req.id, false)} className="text-red-600 hover:text-red-900">{t('action.deny')}</button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
         {permissions.length === 0 ? (
           <EmptyState
-            icon={<Shield className="w-16 h-16" />}
+            icon={<IconShield aria-hidden="true" className="w-16 h-16" />}
             title={t('emptyTitle')}
             description={t('emptyDescription')}
             action={
@@ -104,13 +163,13 @@ export default function PermissionPage() {
                 onClick={() => setShowAddDialog(true)}
                 className="inline-flex items-center gap-2 px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700"
               >
-                <Plus className="w-5 h-5" />
+                <IconPlus aria-hidden="true" className="w-5 h-5" />
                 {t('addRule')}
               </button>
             }
           />
         ) : (
-          <div className="bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden">
+          <div className="bg-white rounded-lg shadow-sm border border-gray-200 overflow-x-auto">
             <table className="min-w-full divide-y divide-gray-200">
               <thead className="bg-gray-50">
                 <tr>
@@ -152,7 +211,7 @@ export default function PermissionPage() {
                       {perm.pattern}
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-600">
-                      {new Date(perm.createdAt).toLocaleString()}
+                      {perm.createdAt ? new Date(perm.createdAt).toLocaleString() : '-'}
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
                       <button
@@ -206,7 +265,7 @@ function AddPermissionDialog({
 
     try {
       setLoading(true);
-      await client.post('/api/permission', formData);
+      await client.post('/api/permission/rules', formData);
       onAdded();
     } catch (err: any) {
       alert(`${t('addFailed')}: ${err.message}`);

@@ -17,11 +17,15 @@ from rich.console import Console
 
 from flocks.project.project import Project
 from flocks.storage.storage import Storage
+from flocks.net.http import async_client
 
 
 import_app = typer.Typer(
     name="import",
     help="Import session data",
+    # No subcommands: `flocks import file.json -p proj` must parse `-p` as an
+    # option of the callback rather than a command name.
+    context_settings={"allow_interspersed_args": True},
 )
 
 console = Console()
@@ -98,6 +102,17 @@ def _normalize_part_data(
     metadata = normalized.get("metadata")
     metadata_dict = metadata if isinstance(metadata, dict) else {}
 
+    if part_type == "subtask":
+        normalized["type"] = "text"
+        normalized["text"] = ""
+        normalized["ignored"] = True
+        normalized["metadata"] = {
+            **metadata_dict,
+            "legacyPartType": "subtask",
+        }
+        part_type = "text"
+        metadata_dict = normalized["metadata"]
+
     if "content" in normalized and "text" not in normalized:
         normalized["text"] = normalized.get("content", "")
 
@@ -135,10 +150,6 @@ def _normalize_part_data(
         )
     elif part_type == "agent":
         normalized.setdefault("name", metadata_dict.get("name") or normalized.get("content") or "agent")
-    elif part_type == "subtask":
-        normalized.setdefault("prompt", metadata_dict.get("prompt") or normalized.get("content", ""))
-        normalized.setdefault("description", metadata_dict.get("description") or "")
-        normalized.setdefault("agent", metadata_dict.get("agent") or "agent")
     elif part_type == "retry":
         normalized.setdefault("attempt", metadata_dict.get("attempt") or 1)
         normalized.setdefault("error", metadata_dict.get("error") or {})
@@ -156,6 +167,18 @@ def import_session(
         None, "-p", "--project",
         help="Project ID (uses current project if not specified)"
     ),
+    force: bool = typer.Option(
+        False, "-f", "--force",
+        help="Overwrite an existing session with the same ID instead of refusing",
+    ),
+    new_id: bool = typer.Option(
+        False, "--new-id",
+        help="Import as a new session with a freshly generated ID (never collides)",
+    ),
+    keep_directory: bool = typer.Option(
+        False, "--keep-directory",
+        help="Keep the exporting machine's session directory instead of relocating it to the current project directory",
+    ),
 ):
     """
     Import session data from JSON file or URL
@@ -163,17 +186,39 @@ def import_session(
     Supports:
     - Local JSON files exported with 'flocks export'
     - Share URLs (https://opncd.ai/share/<slug> or https://flocks.ai/share/<slug>)
+
+    An existing session with the same ID is not overwritten unless --force is
+    given; --new-id imports the data under a fresh session ID instead. The
+    session directory is relocated to the current project directory so the
+    imported session shows up in session lists here (--keep-directory opts out).
     """
-    asyncio.run(_import_session(file_or_url, project))
+    asyncio.run(_import_session(file_or_url, project, force=force, new_id=new_id, keep_directory=keep_directory))
 
 
-async def _import_session(file_or_url: str, project_id: Optional[str]):
+def _relocate_session_directory(session_info: dict, target_directory: str) -> Optional[str]:
+    """Point the imported session at *target_directory*; return the previous value when it changed."""
+    previous = session_info.get("directory")
+    if previous == target_directory:
+        return None
+    session_info["directory"] = target_directory
+    return previous
+
+
+async def _import_session(
+    file_or_url: str,
+    project_id: Optional[str],
+    *,
+    force: bool = False,
+    new_id: bool = False,
+    keep_directory: bool = False,
+):
     """Internal import implementation"""
     await Storage.init()
     
     # Get project
+    target_directory = os.getcwd()
     if not project_id:
-        result = await Project.from_directory(os.getcwd())
+        result = await Project.from_directory(target_directory)
         project_id = result["project"].id
     
     export_data = None
@@ -183,7 +228,7 @@ async def _import_session(file_or_url: str, project_id: Optional[str]):
     
     if is_url:
         # Handle share URL
-        match = SHARE_URL_PATTERN.match(file_or_url)
+        match = SHARE_URL_PATTERN.fullmatch(file_or_url)
         if not match:
             console.print(f"[red]Invalid URL format. Expected: https://opncd.ai/share/<slug> or https://flocks.ai/share/<slug>[/red]")
             raise typer.Exit(1)
@@ -194,7 +239,7 @@ async def _import_session(file_or_url: str, project_id: Optional[str]):
         
         try:
             import httpx
-            async with httpx.AsyncClient() as client:
+            async with async_client() as client:
                 # Try opncd.ai first
                 response = await client.get(f"https://opncd.ai/api/share/{slug}")
                 
@@ -270,10 +315,30 @@ async def _import_session(file_or_url: str, project_id: Optional[str]):
         
         # Ensure project_id matches
         session_info["projectID"] = project_id
-        
+
+        original_id = session_info["id"]
+        if new_id:
+            from flocks.utils.id import Identifier
+
+            session_info["id"] = Identifier.descending("session")
+
+        # Sessions exported elsewhere carry that machine's working directory;
+        # lists here filter by the current worktree, so an imported session
+        # would be invisible (only reachable by ID) unless it is relocated.
+        previous_directory = None
+        if not keep_directory:
+            previous_directory = _relocate_session_directory(session_info, target_directory)
+
         # Store session
         session_key = f"session:{project_id}:{session_info['id']}"
-        await Storage.set(session_key, session_info, "session")
+        existing = await Storage.get(session_key)
+        if existing is not None and not force and not new_id:
+            existing_title = existing.get("title", "Untitled") if isinstance(existing, dict) else "Untitled"
+            console.print(
+                f"[red]Session already exists: {session_info['id']} ('{existing_title}'). "
+                "Re-run with --force to overwrite it or --new-id to import as a new session.[/red]"
+            )
+            raise typer.Exit(1)
         
         # Store messages using the runtime's per-message parts format.
         # WebUI/back-end still returns the same export JSON shape through
@@ -284,6 +349,8 @@ async def _import_session(file_or_url: str, project_id: Optional[str]):
         for msg_data in export_data["messages"]:
             msg_info = msg_data.get("info", {})
             parts = msg_data.get("parts", [])
+            if new_id and msg_info.get("sessionID") == original_id:
+                msg_info["sessionID"] = session_info["id"]
 
             serialized_messages.append(msg_info)
             if "id" in msg_info:
@@ -295,14 +362,47 @@ async def _import_session(file_or_url: str, project_id: Optional[str]):
             message_count += 1
 
         session_id = session_info["id"]
-        await Storage.set(f"message:{session_id}", serialized_messages, "message")
-        for message_id, parts in serialized_parts.items():
-            await Storage.set(f"message_parts:{session_id}:{message_id}", parts, "message_part")
+        from flocks.session.message_pages import (
+            SessionMessagesDeletedError, bump_revision, lock_session, replace_metadata,
+        )
+
+        async def lock_message_projection(db):
+            try:
+                await lock_session(db, session_id)
+            except SessionMessagesDeletedError as exc:
+                raise ValueError("Session was deleted; use --new-id to import a new session") from exc
+            if not force:
+                row = await db.fetch_one("SELECT 1 FROM runtime_state WHERE key = ?", (session_key,))
+                if row is not None:
+                    raise ValueError("Session already exists; use --new-id to import a new session")
+
+        async def update_message_projection(db):
+            await replace_metadata(db, session_id, serialized_messages)
+            await bump_revision(db, session_id)
+
+        await Storage.mutate_many(
+            set_entries=[
+                (session_key, session_info, "session"),
+                (f"message:{session_id}", serialized_messages, "message"),
+                *[
+                    (f"message_parts:{session_id}:{message_id}", parts, "message_part")
+                    for message_id, parts in serialized_parts.items()
+                ],
+            ],
+            pre_transaction_hook=lock_message_projection,
+            transaction_hook=update_message_projection,
+        )
         
         console.print(f"[green]Imported session: {session_info['id']}[/green]")
+        if new_id and session_info["id"] != original_id:
+            console.print(f"  Original ID: {original_id}")
         console.print(f"  Title: {session_info.get('title', 'Untitled')}")
         console.print(f"  Messages: {message_count}")
+        if previous_directory is not None:
+            console.print(f"  Directory: {session_info['directory']} (was {previous_directory})")
     
+    except typer.Exit:
+        raise
     except Exception as e:
         console.print(f"[red]Failed to import session: {e}[/red]")
         raise typer.Exit(1)

@@ -150,6 +150,7 @@ macOS / Linux
 docker run -d \
   --name flocks \
   -p 5173:5173 \
+  -e TZ=Asia/Shanghai \
   --shm-size 4gb \
   -v "${HOME}/.flocks:/home/flocks/.flocks" \
   ghcr.io/agentflocks/flocks:latest
@@ -160,12 +161,15 @@ Windows PowerShell
 docker run -d `
   --name flocks `
   -p 5173:5173 `
+  -e TZ=Asia/Shanghai `
   --shm-size 4gb `
   -v "${env:USERPROFILE}\.flocks:/home/flocks/.flocks" `
   ghcr.io/agentflocks/flocks:latest
 ```
 
 `EXPOSE` in the image only documents container ports. You still need `-p 5173:5173` to access the service from the host browser.
+
+The image does not set a time zone (containers default to UTC), so pass `-e TZ=<your zone>` if scheduled tasks should display local times.
 
 ## 4. FAQ
 
@@ -270,6 +274,18 @@ Non-browser clients (TUI, SDKs, scripts):
   curl -H "Authorization: Bearer <token>" https://flocks.example.com/api/health
   ```
 
+  Query the live runtime status of a specific session:
+
+  ```bash
+  curl -H "Authorization: Bearer <token>" \
+    https://flocks.example.com/api/session/<sessionID>/status
+  ```
+
+  `status.type` is one of `idle`, `queued`, `busy`, `retry`, `compacting`, or
+  `dreaming`. Automation clients can use `isProcessing` to determine whether
+  accepted work is still running or waiting. `idle` only means that the session
+  is currently inactive; it does not indicate whether the previous run succeeded.
+
 Reverse-proxy deployments:
 
 - Always set `X-Forwarded-For` on the proxy. Without it, any direct
@@ -308,6 +324,54 @@ Orphan sessions (CLI / background / inbound channels):
   counts; a non-zero `failed` exits with code 2 so CI / scripts can
   detect partial-write situations and re-run after fixing the underlying
   cause (typically a transient storage error).
+
+### 4.5 Outbound Proxy (HTTP / HTTPS / SOCKS) and Direct-Connection Whitelist
+
+Every outbound request the backend makes — model APIs, IM platforms (Slack, Telegram,
+Feishu, DingTalk, WeCom, WeChat), the plugin hub, update checks, remote MCP servers,
+web fetch / search, headless Chrome and child processes such as `git` / `uv` / `npm` —
+follows one policy. Configure it in the WebUI under **Settings → Network proxy**
+(admin only), in `flocks.json`, or with environment variables:
+
+```jsonc
+"network": {
+  "proxy": {
+    "mode": "manual",                      // off | system (default) | manual
+    "http": "http://127.0.0.1:7890",       // for http:// targets
+    "https": "socks5h://127.0.0.1:7891",   // for https:// and wss:// targets
+    "all": "",                             // fallback when http / https are empty
+    "username": "",
+    "password": "{secret:network_proxy_password}",   // stored via the secret manager, never in plain text
+    "bypass": ["*.corp.example", "10.0.0.0/8", "gitlab.internal:8443"],
+    "bypassPrivate": true
+  }
+}
+```
+
+- `system` follows `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` / `NO_PROXY` exactly as exported.
+  `manual` uses the URLs above and exports them to the process, so libraries that trust the
+  environment and child processes see the same thing. `off` hides those variables and connects directly.
+- Accepted schemes: `http`, `https`, `socks5`, `socks5h` (`socks5h` lets the proxy resolve names). A URL without a port gets the conventional one (80 / 443 / 1080).
+- Whitelist rules (checked before any DNS lookup): `*.corp.example` / `.corp.example` (domain and
+  subdomains), `host`, `host:port`, an IP, a CIDR block (`10.0.0.0/8`, `fd00::/8`), `<local>`
+  (hostnames without a dot) and `*` (everything direct). With `bypassPrivate` on, link-local,
+  RFC1918, IPv6 ULA and `*.local` / `*.internal` / `*.lan` / `*.home.arpa` go direct without being
+  listed. `localhost` / `127.0.0.0/8` / `::1` always connect directly (add `<-loopback>` to the
+  list only if you really want loopback proxied).
+- Environment overrides for systemd units and containers: `FLOCKS_PROXY_MODE`, `FLOCKS_PROXY_URL`
+  (used for http, https and all) and `FLOCKS_PROXY_BYPASS` (comma separated). The section is read from
+  the user-level `flocks.json` only (not from a `FLOCKS_CONFIG` file or `FLOCKS_CONFIG_CONTENT`).
+- `POST /api/config/network/proxy/test` (or the **Test** button) reports whether a URL went direct
+  or through which proxy, with the HTTP status and latency.
+
+Known limits: libraries that only read the environment (litellm, lark-oapi, python-telegram-bot, `git`, `pip`)
+understand `NO_PROXY` by host name and suffix, not by CIDR block, so an intranet target reached through
+them needs its host name (or `.suffix`) in the whitelist; flocks' own clients apply CIDR and port rules
+before DNS. The WhatsApp bridge's websocket and media uploads follow the policy (http and socks),
+but media *downloads* use Node's native `fetch`, which honours `HTTP_PROXY` only on Node ≥ 24 and
+only for http proxies — with a SOCKS-only policy they go direct. The same goes for the TUI (Bun):
+it follows `HTTP_PROXY` / `NO_PROXY` but rejects `socks://`, so it is started without SOCKS entries.
+Headless Chrome takes the proxy without credentials (`--proxy-server` has no auth).
 
 ## 5. Join our community
 

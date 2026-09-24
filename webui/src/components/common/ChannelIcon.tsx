@@ -1,4 +1,4 @@
-import { MessageSquare } from 'lucide-react';
+import { IconMessage } from '@tabler/icons-react';
 
 type ChannelIconSize = 'xs' | 'sm' | 'md';
 
@@ -39,7 +39,7 @@ export default function ChannelIcon({
       : `${containerSize} flex shrink-0 items-center justify-center rounded-xl bg-gray-100`;
     return (
       <span className={fallbackClass} data-channel-icon={id}>
-        <MessageSquare
+        <IconMessage
           aria-label={id}
           className={compact ? 'h-3.5 w-3.5 text-gray-400' : 'h-5 w-5 text-gray-400'}
         />

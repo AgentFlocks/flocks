@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
-import { Code2, FileText, GitBranch, Workflow as WorkflowIcon } from 'lucide-react';
+import { IconCode, IconFileText, IconGitBranch, IconRouteSquare2 as WorkflowIcon } from '@tabler/icons-react';
 import { useTranslation } from 'react-i18next';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { workflowAPI, Workflow, WorkflowJSON } from '@/api/workflow';
@@ -17,11 +17,7 @@ import { extractErrorMessage } from '@/utils/error';
 import FlowCanvas from '../WorkflowDetail/FlowCanvas';
 import CreateTopBar from './CreateTopBar';
 import CreateRightPanel from './CreateRightPanel';
-import {
-  SIDE_PANEL_MIN_WIDTH,
-  getInitialSidePanelWidth,
-  getMaxSidePanelWidth,
-} from '@/components/common/sidePanelSizing';
+import { SIDE_PANEL_MIN_WIDTH, getInitialSidePanelWidth, getMaxSidePanelWidth, useNarrowViewport, isNarrowViewport } from '@/components/common/sidePanelSizing';
 
 type CreateCanvasTab = 'flow' | 'md' | 'json';
 
@@ -128,7 +124,8 @@ export default function WorkflowCreate() {
   }
   const initialCreateDraft = initialCreateDraftRef.current;
   const [workflow, setWorkflow] = useState<Workflow | null>(null);
-  const [panelOpen, setPanelOpen] = useState(initialCreateDraft?.panelOpen ?? true);
+  const narrowViewport = useNarrowViewport();
+  const [panelOpen, setPanelOpen] = useState(initialCreateDraft?.panelOpen ?? !isNarrowViewport());
   const [panelWidth, setPanelWidth] = useState(initialCreateDraft?.panelWidth ?? getInitialSidePanelWidth);
   const [canvasTab, setCanvasTab] = useState<CreateCanvasTab>(
     isValidCanvasTab(initialCreateDraft?.canvasTab) ? initialCreateDraft.canvasTab : 'md',
@@ -163,9 +160,9 @@ export default function WorkflowCreate() {
   ));
 
   const CANVAS_TABS = [
-    { id: 'flow' as const, label: t('detail.canvasTabs.flow'), icon: <GitBranch className="w-3.5 h-3.5" /> },
-    { id: 'md' as const, label: t('detail.canvasTabs.md'), icon: <FileText className="w-3.5 h-3.5" /> },
-    { id: 'json' as const, label: t('detail.canvasTabs.json'), icon: <Code2 className="w-3.5 h-3.5" /> },
+    { id: 'flow' as const, label: t('detail.canvasTabs.flow'), icon: <IconGitBranch aria-hidden="true" className="w-3.5 h-3.5" /> },
+    { id: 'md' as const, label: t('detail.canvasTabs.md'), icon: <IconFileText aria-hidden="true" className="w-3.5 h-3.5" /> },
+    { id: 'json' as const, label: t('detail.canvasTabs.json'), icon: <IconCode aria-hidden="true" className="w-3.5 h-3.5" /> },
   ];
 
   useEffect(() => {
@@ -552,13 +549,13 @@ export default function WorkflowCreate() {
       <div className="relative isolate flex flex-1 min-h-0 overflow-hidden">
         {/* 左侧编辑/预览区 */}
         <div className="relative z-0 flex flex-1 min-w-0 flex-col overflow-hidden">
-          <div className="flex flex-shrink-0 items-center border-b border-gray-200 bg-white px-2">
+          <div className="flex flex-shrink-0 items-center border-b border-gray-200 bg-white px-2 overflow-x-auto">
             {CANVAS_TABS.map((tab) => (
               <button
                 key={tab.id}
                 type="button"
                 onClick={() => setCanvasTab(tab.id)}
-                className={`relative flex items-center gap-1.5 px-3 py-2.5 text-xs font-medium transition-colors ${
+                className={`relative flex flex-shrink-0 items-center gap-1.5 whitespace-nowrap px-3 py-2.5 text-xs font-medium transition-colors ${
                   canvasTab === tab.id
                     ? 'text-red-600'
                     : 'text-gray-500 hover:text-gray-700'
@@ -583,7 +580,7 @@ export default function WorkflowCreate() {
                 <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center gap-4">
                   <div className="flex flex-col items-center gap-3 rounded-2xl border border-dashed border-gray-300 bg-white/90 px-10 py-8 shadow-sm backdrop-blur-sm">
                     <div className="flex h-14 w-14 items-center justify-center rounded-xl border border-gray-200 bg-gray-50">
-                      <WorkflowIcon className="h-7 w-7 text-gray-300" />
+                      <WorkflowIcon aria-hidden="true" className="h-7 w-7 text-gray-300" />
                     </div>
                     <div className="text-center">
                       <p className="text-sm font-medium text-gray-500">{t('create.canvasTitle')}</p>
@@ -647,7 +644,7 @@ export default function WorkflowCreate() {
         </div>
 
         {/* 拖动分隔条 */}
-        {panelOpen && (
+        {panelOpen && !narrowViewport && (
           <div
             onMouseDown={onDragStart}
             className="w-1 flex-shrink-0 bg-gray-200 hover:bg-red-400 active:bg-red-500 cursor-col-resize transition-colors duration-150 relative group"
@@ -662,6 +659,7 @@ export default function WorkflowCreate() {
           workflow={workflow}
           open={panelOpen}
           width={panelWidth}
+          overlay={narrowViewport}
           onWorkflowCreated={handleWorkflowCreated}
           onWorkflowUpdated={handleWorkflowUpdated}
           initialChatSessionId={chatSessionId}

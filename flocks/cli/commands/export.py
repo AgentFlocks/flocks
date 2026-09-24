@@ -21,6 +21,10 @@ from flocks.storage.storage import Storage
 export_app = typer.Typer(
     name="export",
     help="Export session data",
+    # The group has no subcommands: options given after SESSION_ID
+    # (`flocks export ses_1 --no-pretty`) must reach the callback instead of
+    # being looked up as a command name.
+    context_settings={"allow_interspersed_args": True},
 )
 
 console = Console(stderr=True)  # Use stderr for prompts
@@ -79,7 +83,8 @@ async def _export_session(
         if len(sessions) > 20:
             console.print(f"  [dim]... and {len(sessions) - 20} more[/dim]")
         
-        choice = Prompt.ask("\nEnter number or session ID")
+        # Prompt on stderr too: stdout must stay a clean JSON stream for pipes.
+        choice = Prompt.ask("\nEnter number or session ID", console=console)
         
         # Check if it's a number
         try:
@@ -122,9 +127,13 @@ async def _export_session(
     json_output = json.dumps(export_data, indent=indent, ensure_ascii=False)
     
     if output_path:
-        with open(output_path, "w", encoding="utf-8") as f:
-            f.write(json_output)
-            f.write("\n")
+        try:
+            with open(output_path, "w", encoding="utf-8") as f:
+                f.write(json_output)
+                f.write("\n")
+        except OSError as error:
+            console.print(f"[red]Failed to write export file {output_path}: {error.strerror or error}[/red]")
+            raise typer.Exit(1) from error
         console.print(f"[green]Exported to {output_path}[/green]")
     else:
         # Write to stdout (not stderr)

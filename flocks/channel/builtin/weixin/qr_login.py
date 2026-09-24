@@ -65,9 +65,10 @@ async def _api_get(base_url: str, endpoint: str) -> dict:
 
     url = f"{base_url.rstrip('/')}/{endpoint}"
     timeout = aiohttp.ClientTimeout(total=QR_TIMEOUT_MS / 1000)
-    connector = aiohttp.TCPConnector(ssl=_make_ssl_ctx())
+    from flocks.net.aio import session_kwargs
+
     async with aiohttp.ClientSession(
-        trust_env=True, connector=connector
+        **session_kwargs(target_url=url, ssl=_make_ssl_ctx())
     ) as session:
         async with session.get(
             url, headers=_login_headers(), timeout=timeout

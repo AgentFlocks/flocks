@@ -628,7 +628,7 @@ def test_process_rpc_bridge_cancels_llm_when_child_exits(monkeypatch):
     monkeypatch.setattr(
         repl_runtime_module,
         "get_lazy_llm",
-        lambda *, cancel_checker=None: LLM(cancel_checker),
+        lambda *, cancel_checker=None, **_kwargs: LLM(cancel_checker),
     )
 
     with pytest.raises(NodeExecutionError, match="exited with code 17"):

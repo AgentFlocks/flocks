@@ -4,7 +4,6 @@ Log viewing routes for WebUI.
 Provides endpoints to list and read log files from ~/.flocks/logs.
 """
 
-from collections import deque
 from datetime import date, datetime
 from pathlib import Path
 from typing import List
@@ -46,10 +45,13 @@ async def list_logs():
     if not log_dir.is_dir():
         return LogListResponse(files=[], log_dir=str(log_dir))
 
-    files: List[LogFileInfo] = []
-    for p in sorted(_iter_log_files(log_dir), key=lambda f: f.stat().st_mtime, reverse=True):
-        stat = p.stat()
-        files.append(LogFileInfo(name=p.relative_to(log_dir).as_posix(), size=stat.st_size, modified=stat.st_mtime))
+    # One stat per file: it feeds both the sort key and the response.
+    stats = [(p, p.stat()) for p in _iter_log_files(log_dir)]
+    stats.sort(key=lambda item: item[1].st_mtime, reverse=True)
+    files = [
+        LogFileInfo(name=p.relative_to(log_dir).as_posix(), size=st.st_size, modified=st.st_mtime)
+        for p, st in stats
+    ]
     return LogListResponse(files=files, log_dir=str(log_dir))
 
 
@@ -104,12 +106,16 @@ async def read_log(
     return _read_log_file(log_path, tail, filename=filename)
 
 
-def _is_date_dir(path: Path) -> bool:
+def _is_date_name(name: str) -> bool:
+    """Strict ``YYYY-MM-DD`` — strptime alone also accepts ``2026-9-13``."""
     try:
-        datetime.strptime(path.name, "%Y-%m-%d")
+        return datetime.strptime(name, "%Y-%m-%d").strftime("%Y-%m-%d") == name
     except ValueError:
         return False
-    return path.is_dir()
+
+
+def _is_date_dir(path: Path) -> bool:
+    return _is_date_name(path.name) and path.is_dir()
 
 
 def _iter_date_dirs(log_dir: Path) -> List[Path]:
@@ -126,9 +132,7 @@ def _is_allowed_log_path(log_dir: Path, path: Path) -> bool:
         return parts[0] in {"backend.log", "webui.log"}
     if len(parts) == 2:
         day, filename = parts
-        try:
-            datetime.strptime(day, "%Y-%m-%d")
-        except ValueError:
+        if not _is_date_name(day):
             return False
         return filename in {"flocks.log", "errors.log"}
     return False
@@ -152,14 +156,52 @@ def _relative_log_name(log_dir: Path, path: Path) -> str:
     return path.relative_to(log_dir).as_posix()
 
 
+_COUNT_CHUNK = 1 << 20
+_TAIL_CHUNK = 1 << 16
+
+
+def _count_lines(path: Path) -> int:
+    """Count lines the way text-mode iteration would, without decoding."""
+    total = 0
+    last = b""
+    with path.open("rb") as handle:
+        while True:
+            buf = handle.read(_COUNT_CHUNK)
+            if not buf:
+                break
+            total += buf.count(b"\n")
+            last = buf[-1:]
+    if last and last != b"\n":
+        total += 1
+    return total
+
+
+def _tail_lines(path: Path, tail: int) -> list[str]:
+    """Return the last ``tail`` lines by reading blocks from the end of the file.
+
+    Log files grow to hundreds of MB; walking the whole file line by line just
+    to keep the last 200 made the request time linear in file size.
+    """
+    with path.open("rb") as handle:
+        handle.seek(0, 2)
+        pos = handle.tell()
+        data = b""
+        # ``tail`` complete lines need ``tail + 1`` newlines (or the file start).
+        while pos > 0 and data.count(b"\n") <= tail:
+            step = min(_TAIL_CHUNK, pos)
+            pos -= step
+            handle.seek(pos)
+            data = handle.read(step) + data
+    lines = data.decode("utf-8", errors="replace").split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()
+    return [line.rstrip("\r") for line in lines[-tail:]]
+
+
 def _read_log_file(path: Path, tail: int, filename: str | None = None) -> LogContentResponse:
     try:
-        lines: deque[str] = deque(maxlen=tail)
-        total = 0
-        with path.open("r", encoding="utf-8", errors="replace") as handle:
-            for line in handle:
-                total += 1
-                lines.append(line.rstrip("\n"))
+        total = _count_lines(path)
+        lines = _tail_lines(path, tail)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to read log: {e}")
 

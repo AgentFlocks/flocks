@@ -110,7 +110,8 @@ def fallback_glob(
     full_pattern = os.path.join(cwd, pattern)
     
     matches = []
-    for filepath in python_glob.glob(full_pattern, recursive=True):
+    # include_hidden mirrors ripgrep's --hidden so both paths agree
+    for filepath in python_glob.glob(full_pattern, recursive=True, include_hidden=True):
         if os.path.isfile(filepath):
             rel_path = os.path.relpath(filepath, cwd)
             matches.append(rel_path)

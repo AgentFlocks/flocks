@@ -1,4 +1,4 @@
-import { Grid, Database, Cloud, Code } from 'lucide-react';
+import { IconLayoutGrid, IconDatabase, IconCloud, IconCode } from '@tabler/icons-react';
 import { createElement } from 'react';
 import type { TabKey } from './types';
 
@@ -16,11 +16,11 @@ export const TABS: TabOption[] = [
   { key: 'local', labelKey: 'tabs.local', sourceFilter: 'plugin_py' },
 ];
 
-export const TAB_ICONS = { Grid, Database, Cloud, Code };
+export const TAB_ICONS = { Grid: IconLayoutGrid, Database: IconDatabase, Cloud: IconCloud, Code: IconCode };
 export function getTabIcon(key: TabKey) {
-  const icons = [Grid, Database, Cloud, Code];
+  const icons = [IconLayoutGrid, IconDatabase, IconCloud, IconCode];
   const i = ['all', 'mcp', 'api', 'local'].indexOf(key);
-  return createElement(icons[i] ?? Grid, { className: 'w-5 h-5' });
+  return createElement(icons[i] ?? IconLayoutGrid, { className: 'w-5 h-5', 'aria-hidden': 'true' });
 }
 
 /** Source badge: labelKey for i18n (tool.source.*) for builtin/custom; label for proper nouns MCP/API. */

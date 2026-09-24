@@ -1,7 +1,12 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import {
-  Shield, Info, CheckCircle, XCircle, RefreshCw, Activity,
-} from 'lucide-react';
+  IconShield,
+  IconInfoCircle,
+  IconCircleCheck,
+  IconCircleX,
+  IconRefresh,
+  IconActivity,
+} from '@tabler/icons-react';
 import { useTranslation } from 'react-i18next';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
 import { useToast } from '@/components/common/Toast';
@@ -157,7 +162,7 @@ export default function CredentialsCard({
     <div className="bg-white rounded-lg border border-gray-200 p-4">
       <div className="flex items-center justify-between mb-3">
         <h4 className="text-sm font-semibold text-gray-900 flex items-center">
-          <Shield className="w-4 h-4 mr-2 text-gray-500" />
+          <IconShield aria-hidden="true" className="w-4 h-4 mr-2 text-gray-500" />
           {t('credentials.title')}
         </h4>
         {credentials?.has_credential && !editing && !showDeleteConfirm && (
@@ -207,9 +212,9 @@ export default function CredentialsCard({
                 }`}
               >
                 {testing ? (
-                  <><RefreshCw className="w-3.5 h-3.5 animate-spin" />{t('credentials.testing')}</>
+                  <><IconRefresh aria-hidden="true" className="w-3.5 h-3.5 animate-spin" />{t('credentials.testing')}</>
                 ) : (
-                  <><Activity className="w-3.5 h-3.5" />{t('credentials.testConn')}</>
+                  <><IconActivity aria-hidden="true" className="w-3.5 h-3.5" />{t('credentials.testConn')}</>
                 )}
               </button>
             )}
@@ -248,8 +253,8 @@ export default function CredentialsCard({
             }`}>
               <div className="flex items-start">
                 {testResult.success
-                  ? <CheckCircle className="w-3.5 h-3.5 mr-1.5 mt-0.5 flex-shrink-0" />
-                  : <XCircle className="w-3.5 h-3.5 mr-1.5 mt-0.5 flex-shrink-0" />}
+                  ? <IconCircleCheck aria-hidden="true" className="w-3.5 h-3.5 mr-1.5 mt-0.5 flex-shrink-0" />
+                  : <IconCircleX aria-hidden="true" className="w-3.5 h-3.5 mr-1.5 mt-0.5 flex-shrink-0" />}
                 <div className="flex-1">
                   <div>{testResult.message}</div>
                   {testResult.latency_ms != null && (
@@ -292,7 +297,7 @@ export default function CredentialsCard({
           </div>
           <div className="p-2 bg-amber-50 border border-amber-200 rounded text-xs text-amber-700">
             <div className="flex items-start">
-              <Info className="w-3.5 h-3.5 mr-1.5 mt-0.5 flex-shrink-0" />
+              <IconInfoCircle aria-hidden="true" className="w-3.5 h-3.5 mr-1.5 mt-0.5 flex-shrink-0" />
               <div>{t('credentials.storageNote')}</div>
             </div>
           </div>

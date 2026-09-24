@@ -19,6 +19,7 @@ Source scheme routing:
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import io
 import os
 import platform
@@ -35,6 +36,8 @@ from typing import Any, List, Optional
 
 from flocks.skill.skill import Skill, SkillInfo, SkillInstallSpec
 from flocks.utils.log import Log
+from flocks.config.config import get_user_plugins_root
+from flocks.net.http import async_client
 
 
 log = Log.create(service="skill.installer")
@@ -42,6 +45,8 @@ log = Log.create(service="skill.installer")
 _NETWORK_TIMEOUT_SEC = 20
 _SKILLS_SH_CLI_TIMEOUT_SEC = 45
 _INSTALL_TIMEOUT_SEC = 90
+# Set per install_from_source() call; read by _save_skill_content().
+_OVERWRITE_ALLOWED: contextvars.ContextVar[bool] = contextvars.ContextVar("skill_install_overwrite", default=False)
 
 # ---------------------------------------------------------------------------
 # Result Types
@@ -73,7 +78,7 @@ class DepInstallResult:
 # ---------------------------------------------------------------------------
 
 def _user_skills_root() -> Path:
-    return Path.home() / ".flocks" / "plugins" / "skills"
+    return get_user_plugins_root() / "skills"
 
 
 def _resolve_install_root(scope: str) -> Path:
@@ -292,6 +297,7 @@ class SkillInstaller:
         source: str,
         scope: str = "global",
         yes: bool = False,
+        overwrite: bool = False,
     ) -> SkillInstallResult:
         """
         Install a skill from an external source.
@@ -311,6 +317,9 @@ class SkillInstaller:
         value = resolved["value"]
 
         log.info("skill.install.start", {"source": source, "kind": kind, "scope": scope, "yes": yes})
+        # ``_save_skill_content`` consults this flag so an existing skill is not
+        # silently replaced unless the caller explicitly asked for it.
+        token = _OVERWRITE_ALLOWED.set(bool(overwrite))
 
         async def _install() -> SkillInstallResult:
             if kind == "skills_sh":
@@ -337,6 +346,8 @@ class SkillInstaller:
                 success=False,
                 error=f"Skill install timed out after {_INSTALL_TIMEOUT_SEC}s: {source}",
             )
+        finally:
+            _OVERWRITE_ALLOWED.reset(token)
 
     @classmethod
     async def _install_from_skills_sh(
@@ -542,7 +553,7 @@ class SkillInstaller:
             return None
 
         try:
-            async with httpx.AsyncClient(timeout=_NETWORK_TIMEOUT_SEC, follow_redirects=True) as client:
+            async with async_client(timeout=_NETWORK_TIMEOUT_SEC, follow_redirects=True) as client:
                 resp = await client.get(f"https://skills.sh/{normalized}")
                 if resp.status_code != 200:
                     return None
@@ -631,7 +642,7 @@ class SkillInstaller:
 
         zip_url = f"https://wry-manatee-359.convex.site/api/v1/download?slug={name}"
         try:
-            async with httpx.AsyncClient(timeout=_NETWORK_TIMEOUT_SEC, follow_redirects=True) as client:
+            async with async_client(timeout=_NETWORK_TIMEOUT_SEC, follow_redirects=True) as client:
                 resp = await client.get(zip_url)
                 if resp.status_code == 404:
                     return SkillInstallResult(
@@ -773,7 +784,7 @@ class SkillInstaller:
 
         errors: List[str] = []
         try:
-            async with httpx.AsyncClient(
+            async with async_client(
                 timeout=_NETWORK_TIMEOUT_SEC,
                 follow_redirects=True,
                 headers={"Accept": "application/vnd.github+json"},
@@ -1120,8 +1131,23 @@ class SkillInstaller:
                 error="httpx is required to download skills. Run: uv add httpx",
             )
 
+        # Only https (plain http is allowed just for hosts explicitly allow-listed
+        # for local testing) and never internal / link-local / metadata targets.
+        from urllib.parse import urlparse
+        from flocks.tool.web.webfetch import _internal_allowlist, _ssrf_error
+
+        parsed = urlparse(url)
+        if parsed.scheme.lower() != "https" and (parsed.hostname or "").lower() not in _internal_allowlist():
+            return SkillInstallResult(
+                success=False,
+                error=f"Skill source URL must use https:// (got {parsed.scheme}://): {url}",
+            )
+        ssrf_error = _ssrf_error(url)
+        if ssrf_error:
+            return SkillInstallResult(success=False, error=ssrf_error)
+
         try:
-            async with httpx.AsyncClient(timeout=_NETWORK_TIMEOUT_SEC, follow_redirects=True) as client:
+            async with async_client(timeout=_NETWORK_TIMEOUT_SEC, follow_redirects=True) as client:
                 resp = await client.get(url)
                 if resp.status_code != 200:
                     return SkillInstallResult(
@@ -1142,6 +1168,12 @@ class SkillInstaller:
                         error=f"URL returned an HTML page instead of a SKILL.md file: {url}",
                     )
                 content = resp.text
+        except httpx.TimeoutException:
+            # httpx timeout exceptions carry an empty message.
+            return SkillInstallResult(
+                success=False,
+                error=f"Download timed out after {_NETWORK_TIMEOUT_SEC}s: {url}",
+            )
         except Exception as exc:
             return SkillInstallResult(success=False, error=f"Download failed: {exc}")
 
@@ -1205,8 +1237,13 @@ class SkillInstaller:
             )
 
         skill_dir = _resolve_install_root(scope) / name
-        skill_dir.mkdir(parents=True, exist_ok=True)
         skill_path = skill_dir / "SKILL.md"
+        if skill_path.exists() and not _OVERWRITE_ALLOWED.get():
+            return SkillInstallResult(
+                success=False,
+                error=f"Skill already exists: {name}. Pass overwrite=true to replace it.",
+            )
+        skill_dir.mkdir(parents=True, exist_ok=True)
         skill_path.write_text(content, encoding="utf-8")
 
         Skill.clear_cache()

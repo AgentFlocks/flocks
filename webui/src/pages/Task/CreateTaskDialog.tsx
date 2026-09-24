@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { X, Calendar, Loader2 } from 'lucide-react';
+import { IconX, IconCalendar, IconLoader2 } from '@tabler/icons-react';
 import { useToast } from '@/components/common/Toast';
 import {
   taskAPI,
@@ -10,6 +10,7 @@ import {
   ExecutionMode,
 } from '@/api/task';
 import { describeCron, CRON_PRESETS } from './helpers';
+import { extractErrorMessage } from '@/utils/error';
 
 export default function CreateTaskDialog({ onClose, onCreated }: { onClose: () => void; onCreated: () => void }) {
   const [form, setForm] = useState<TaskCreateParams>({
@@ -44,7 +45,7 @@ export default function CreateTaskDialog({ onClose, onCreated }: { onClose: () =
       await taskAPI.createScheduler(params);
       onCreated();
     } catch (err: unknown) {
-      toast.error(t('taskSheet.createFailed'), err instanceof Error ? err.message : String(err));
+      toast.error(t('taskSheet.createFailed'), extractErrorMessage(err));
     } finally {
       setSubmitting(false);
     }
@@ -57,7 +58,7 @@ export default function CreateTaskDialog({ onClose, onCreated }: { onClose: () =
       <div className="bg-white rounded-2xl shadow-xl w-full max-w-lg mx-4 max-h-[90vh] overflow-y-auto">
         <div className="flex items-center justify-between px-6 py-4 border-b border-gray-200">
           <h2 className="text-lg font-semibold text-gray-900">{t('form.createTitle')}</h2>
-          <button onClick={onClose} className="p-1 rounded hover:bg-gray-100"><X className="w-5 h-5 text-gray-400" /></button>
+          <button onClick={onClose} className="p-1 rounded hover:bg-gray-100"><IconX aria-hidden="true" className="w-5 h-5 text-gray-400" /></button>
         </div>
 
         <form onSubmit={handleSubmit} className="px-6 py-4 space-y-4">
@@ -105,7 +106,7 @@ export default function CreateTaskDialog({ onClose, onCreated }: { onClose: () =
           {isScheduled && (
             <div className={`rounded-xl p-4 space-y-3 border ${isOnce ? 'bg-orange-50/60 border-orange-100' : 'bg-purple-50/60 border-purple-100'}`}>
               <p className={`text-sm font-semibold flex items-center gap-1.5 ${isOnce ? 'text-orange-800' : 'text-purple-800'}`}>
-                <Calendar className="w-4 h-4" /> {t('form.scheduleConfig')}
+                <IconCalendar aria-hidden="true" className="w-4 h-4" /> {t('form.scheduleConfig')}
               </p>
 
               <div>
@@ -218,10 +219,8 @@ export default function CreateTaskDialog({ onClose, onCreated }: { onClose: () =
           <div className="flex justify-end gap-3 pt-2">
             <button type="button" onClick={onClose} className="px-4 py-2 text-gray-700 bg-gray-100 rounded-lg hover:bg-gray-200">{t('common:button.cancel')}</button>
             <button type="submit" disabled={submitting || !canSubmit}
-              className={`px-4 py-2 text-white rounded-lg disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2 ${
-                isOnce ? 'bg-orange-500 hover:bg-orange-600' : 'bg-slate-700 hover:bg-slate-800'
-              }`}>
-              {submitting && <Loader2 className="w-4 h-4 animate-spin" />}
+              className="ui-btn ui-btn-primary">
+              {submitting && <IconLoader2 aria-hidden="true" className="w-4 h-4 animate-spin" />}
               {t('common:button.create')}
             </button>
           </div>

@@ -184,3 +184,60 @@ def test_tui_starts_hidden_serve_command(monkeypatch, tmp_path) -> None:
     assert popen_calls["args"][:4] == [cli_main.sys.executable, "-m", "flocks.cli.main", "serve"]
     assert ["bun", "--version"] == run_calls[0][0]
     assert saved_secrets["server_api_token"]
+
+
+def test_start_on_unwritable_flocks_root_reports_readable_error(monkeypatch, tmp_path) -> None:
+    """OPS-0322：挂载卷属主为 root / 只读 FLOCKS_ROOT 时不能 traceback，要说清目录与权限并非 0 退出。"""
+    ro_root = tmp_path / "ro-root"
+    ro_root.mkdir()
+    ro_root.chmod(0o555)
+    monkeypatch.setenv("FLOCKS_ROOT", str(ro_root))
+    monkeypatch.setenv("FLOCKS_LOG_DIR", str(ro_root / "logs"))
+    try:
+        result = runner.invoke(cli_main.app, ["start", "--no-browser", "--skip-webui-build"])
+    finally:
+        ro_root.chmod(0o755)
+
+    flat = result.stdout.replace("\n", "")  # rich 按终端宽度折行
+    assert result.exit_code == 1
+    assert "[flocks] error: 无法创建日志目录" in flat
+    assert str(ro_root / "logs") in flat
+    assert "属主/权限" in flat and "chown" in flat
+    assert "Traceback" not in result.stdout
+
+
+def test_runtime_dir_permission_error_is_reported_by_service_commands(monkeypatch, tmp_path) -> None:
+    """日志目录可写但 run/ 目录建不了（同样是权限问题）时，start/stop/status 都走 [flocks] error 而不是 traceback。"""
+    from flocks.cli import service_manager
+
+    monkeypatch.setenv("FLOCKS_ROOT", str(tmp_path))
+    monkeypatch.setattr(cli_main.Log, "init", _noop_log_init)
+    ro_root = tmp_path / "ro-root"
+    ro_root.mkdir()
+    paths = service_manager.RuntimePaths(
+        root=ro_root,
+        run_dir=ro_root / "run",
+        log_dir=tmp_path / "logs",
+        backend_pid=ro_root / "run" / "backend.pid",
+        frontend_pid=ro_root / "run" / "frontend.pid",
+        backend_log=tmp_path / "logs" / "backend.log",
+        frontend_log=tmp_path / "logs" / "frontend.log",
+    )
+    ro_root.chmod(0o555)
+    try:
+        with __import__("pytest").raises(service_manager.ServiceError) as info:
+            service_manager.ensure_runtime_dirs(paths)
+    finally:
+        ro_root.chmod(0o755)
+    message = str(info.value)
+    assert "无法创建运行时目录" in message and str(ro_root / "run") in message
+    assert "Permission denied" in message and "chown" in message and ":Z" in message
+
+    error = info.value
+    for command, target in (("stop", "stop_all"), ("status", "show_status"), ("start", "start_all")):
+        monkeypatch.setattr(cli_main, target, lambda *_args, **_kwargs: (_ for _ in ()).throw(error))
+        args = [command] if command != "start" else ["start", "--no-browser", "--skip-webui-build"]
+        result = runner.invoke(cli_main.app, args)
+        assert result.exit_code == 1, command
+        assert "[flocks] error: 无法创建运行时目录" in result.stdout.replace("\n", ""), command
+        assert "Traceback" not in result.stdout, command

@@ -3,7 +3,9 @@ from __future__ import annotations
 import importlib.util
 import json
 import re
-import sqlite3
+import asyncio
+from types import SimpleNamespace
+from flocks.db import sync_query as database
 import sys
 from collections import Counter
 from datetime import datetime, time as dt_time
@@ -21,29 +23,29 @@ from flocks.tool.registry import (
 )
 
 
-SOC_DB = Path.home() / ".flocks" / "data" / "soc.db"
-WORKFLOW_DB = Path.home() / ".flocks" / "data" / "workflow.db"
+SOC_DB = "alert_records"
+WORKFLOW_DB = "workflow_executions"
 SOC_UI_ROOT = Path.home() / ".flocks" / "plugins" / "contracts" / "webui" / "soc_ui"
 SOC_TZ = ZoneInfo("Asia/Shanghai")
 
 ALERT_FIELDS = {
     "row_id": "row_id",
     "record_id": "record_id",
-    "source_type": "COALESCE(source_type, json_extract(record_json, '$._source_type'), json_extract(record_json, '$.source_type'))",
-    "threat_name": "COALESCE(threat_name, json_extract(record_json, '$.threat_name'))",
-    "threat_type": "json_extract(record_json, '$.threat_type')",
-    "threat_phase": "json_extract(record_json, '$.threat_phase')",
-    "attack_result": "COALESCE(json_extract(record_json, '$.attach_result'), json_extract(record_json, '$.threat_result'), json_extract(record_json, '$.attack_verdict'))",
-    "attack_verdict": "json_extract(record_json, '$.attack_verdict')",
-    "direction": "json_extract(record_json, '$.direction')",
-    "sip": "json_extract(record_json, '$.sip')",
-    "dip": "json_extract(record_json, '$.dip')",
-    "sport": "json_extract(record_json, '$.sport')",
-    "dport": "json_extract(record_json, '$.dport')",
-    "req_host": "json_extract(record_json, '$.req_host')",
-    "req_http_url": "json_extract(record_json, '$.req_http_url')",
-    "rsp_status_code": "json_extract(record_json, '$.rsp_status_code')",
-    "threat_rule_id": "json_extract(record_json, '$.threat_rule_id')",
+    "source_type": "COALESCE(source_type, (record_json ->> '_source_type'), (record_json ->> 'source_type'))",
+    "threat_name": "COALESCE(threat_name, (record_json ->> 'threat_name'))",
+    "threat_type": "(record_json ->> 'threat_type')",
+    "threat_phase": "(record_json ->> 'threat_phase')",
+    "attack_result": "COALESCE((record_json ->> 'attach_result'), (record_json ->> 'threat_result'), (record_json ->> 'attack_verdict'))",
+    "attack_verdict": "(record_json ->> 'attack_verdict')",
+    "direction": "(record_json ->> 'direction')",
+    "sip": "(record_json ->> 'sip')",
+    "dip": "(record_json ->> 'dip')",
+    "sport": "(record_json ->> 'sport')",
+    "dport": "(record_json ->> 'dport')",
+    "req_host": "(record_json ->> 'req_host')",
+    "req_http_url": "(record_json ->> 'req_http_url')",
+    "rsp_status_code": "(record_json ->> 'rsp_status_code')",
+    "threat_rule_id": "(record_json ->> 'threat_rule_id')",
 }
 
 PAGE_VALUES = ["all", "dashboard", "overview", "alerts", "alert_detail", "workflow", "schema"]
@@ -128,18 +130,18 @@ def _parameters() -> list[ToolParameter]:
         "Query information rendered by Flocks' own SOC workspace pages: dashboard, overview, "
         "alert investigation list, alert detail/triage report, and workflow status. This tool "
         "is for inspecting the local Flocks SOC workspace itself, not for querying an external "
-        "SOC product. It reads only local Flocks databases: ~/.flocks/data/soc.db and "
-        "~/.flocks/data/workflow.db."
+        "SOC product. It reads only local Flocks databases: PostgreSQL alert_records and "
+        "PostgreSQL workflow tables."
     ),
     description_cn=(
         "查询 Flocks 自身 SOC 工作区页面信息，包括 dashboard、overview、告警调查列表、"
         "单条告警详情、研判报告和工作流状态。这个工具用于查看本机 Flocks 自身的 SOC "
-        "工作区数据，不是查询外部 SOC 系统；只读取 ~/.flocks/data/soc.db 和 "
-        "~/.flocks/data/workflow.db。"
+        "工作区数据，不是查询外部 SOC 系统；只读取 PostgreSQL alert_records 和 "
+        "PostgreSQL workflow tables。"
     ),
     category=ToolCategory.CUSTOM,
     parameters=_parameters(),
-    tags=["soc", "flocks", "workspace", "dashboard", "overview", "alerts", "sqlite"],
+    tags=["soc", "flocks", "workspace", "dashboard", "overview", "alerts", "postgres"],
 )
 async def soc_workspace_query(
     ctx: ToolContext,
@@ -161,7 +163,7 @@ async def soc_workspace_query(
     safe_order = "asc" if str(order).lower() == "asc" else "desc"
 
     try:
-        output = _query_page(
+        output = await asyncio.to_thread(_query_page,
             page=page,
             filters=safe_filters,
             limit=safe_limit,
@@ -235,8 +237,8 @@ def _schema() -> dict[str, Any]:
         "alertRecordFields": _record_field_sample(),
         "notes": [
             "dashboard and overview reuse the installed SOC WebUI API handlers.",
-            "alerts and alert_detail read alert_records from ~/.flocks/data/soc.db.",
-            "workflow reads workflow_stats and workflow_executions from ~/.flocks/data/workflow.db.",
+            "alerts and alert_detail read alert_records from PostgreSQL alert_records.",
+            "workflow reads workflow_stats and workflow_executions from PostgreSQL workflow tables.",
         ],
     }
 
@@ -255,7 +257,7 @@ def _page_stats(page_dir_name: str, filters: dict[str, Any]) -> dict[str, Any]:
     spec.loader.exec_module(module)
 
     query = _page_query_params(filters)
-    return module.get_stats(None, _Request(query))
+    return module.get_stats(SimpleNamespace(database=database), _Request(query))
 
 
 def _safe_page_stats(page_dir_name: str, filters: dict[str, Any]) -> dict[str, Any]:
@@ -313,8 +315,7 @@ def _query_alerts(
     """
     count_query = f"SELECT COUNT(*) FROM alert_records WHERE {where}"
 
-    with sqlite3.connect(SOC_DB) as conn:
-        conn.row_factory = sqlite3.Row
+    with database.connect(readonly=True) as conn:
         total = int(conn.execute(count_query, params).fetchone()[0])
         rows = conn.execute(query, [*params, limit, offset]).fetchall()
 
@@ -397,8 +398,7 @@ def _query_workflow(filters: dict[str, Any], limit: int) -> dict[str, Any]:
         exec_params.append(end_ms)
     exec_where_sql = " AND ".join(exec_where) if exec_where else "1=1"
 
-    with sqlite3.connect(WORKFLOW_DB) as conn:
-        conn.row_factory = sqlite3.Row
+    with database.connect(readonly=True) as conn:
         stats_rows = conn.execute(
             f"""
             SELECT workflow_id, call_count, success_count, error_count, total_runtime,
@@ -473,7 +473,7 @@ def _alert_where(filters: dict[str, Any]) -> tuple[str, list[Any], list[dict[str
 
     keyword = _clean(filters.get("keyword"))
     if keyword:
-        clauses.append("(record_json LIKE ? OR threat_name LIKE ? OR record_id LIKE ? OR row_id LIKE ?)")
+        clauses.append("(record_json::text LIKE ? OR threat_name LIKE ? OR record_id LIKE ? OR row_id LIKE ?)")
         like = f"%{keyword}%"
         params.extend([like, like, like, like])
         applied.append({"field": "keyword", "value": keyword})
@@ -504,35 +504,34 @@ def _alert_where(filters: dict[str, Any]) -> tuple[str, list[Any], list[dict[str
 def _alert_facets(where: str, params: list[Any]) -> dict[str, list[dict[str, Any]]]:
     facets: dict[str, list[dict[str, Any]]] = {}
     facet_fields = {
-        "source_type": "COALESCE(source_type, json_extract(record_json, '$._source_type'), json_extract(record_json, '$.source_type'))",
-        "threat_name": "COALESCE(threat_name, json_extract(record_json, '$.threat_name'))",
-        "threat_type": "json_extract(record_json, '$.threat_type')",
-        "threat_phase": "json_extract(record_json, '$.threat_phase')",
-        "attack_result": "COALESCE(json_extract(record_json, '$.attach_result'), json_extract(record_json, '$.threat_result'), json_extract(record_json, '$.attack_verdict'))",
-        "direction": "json_extract(record_json, '$.direction')",
+        "source_type": "COALESCE(source_type, (record_json ->> '_source_type'), (record_json ->> 'source_type'))",
+        "threat_name": "COALESCE(threat_name, (record_json ->> 'threat_name'))",
+        "threat_type": "(record_json ->> 'threat_type')",
+        "threat_phase": "(record_json ->> 'threat_phase')",
+        "attack_result": "COALESCE((record_json ->> 'attach_result'), (record_json ->> 'threat_result'), (record_json ->> 'attack_verdict'))",
+        "direction": "(record_json ->> 'direction')",
     }
-    with sqlite3.connect(SOC_DB) as conn:
-        for key, expression in facet_fields.items():
-            rows = conn.execute(
-                f"""
-                SELECT {expression} AS value, COUNT(*) AS count
-                FROM alert_records
-                WHERE {where}
-                GROUP BY value
-                ORDER BY count DESC
-                LIMIT 20
-                """,
-                params,
-            ).fetchall()
-            facets[key] = [
-                {"value": _clean(value) or "unknown", "count": int(count or 0)}
-                for value, count in rows
-                if value not in (None, "")
-            ]
+    entries = ",".join(f"('{key}', ({expression})::text)" for key, expression in facet_fields.items())
+    query = f"""
+        WITH counts AS (
+            SELECT facet.key, facet.value, COUNT(*) AS count
+            FROM alert_records CROSS JOIN LATERAL (VALUES {entries}) facet(key,value)
+            WHERE {where} GROUP BY facet.key, facet.value
+        ), ranked AS (
+            SELECT key,value,count,ROW_NUMBER() OVER(PARTITION BY key ORDER BY count DESC,value) AS position FROM counts
+        ) SELECT key,value,count FROM ranked WHERE position <= 20 ORDER BY key,count DESC,value
+    """
+    facets = {key: [] for key in facet_fields}
+    with database.connect(readonly=True) as conn:
+        rows = conn.execute(query, params).fetchall()
+    for key, value, count in rows:
+        if value not in (None, ""):
+            facets[key].append({"value": _clean(value) or "unknown", "count": int(count or 0)})
+
     return facets
 
 
-def _normalize_alert_row(row: sqlite3.Row, include_raw: bool, include_reports: bool) -> dict[str, Any]:
+def _normalize_alert_row(row: Any, include_raw: bool, include_reports: bool) -> dict[str, Any]:
     record = _loads(row["record_json"])
     event_time = _safe_int(record.get("time"), _safe_int(row["event_time"]))
     threat_name = _clean(record.get("threat_name") or row["threat_name"] or "未知告警")
@@ -587,7 +586,7 @@ def _normalize_alert_row(row: sqlite3.Row, include_raw: bool, include_reports: b
     return normalized
 
 
-def _normalize_workflow_stat(row: sqlite3.Row) -> dict[str, Any]:
+def _normalize_workflow_stat(row: Any) -> dict[str, Any]:
     updated_at = _safe_int(row["updated_at"])
     return {
         "workflowId": row["workflow_id"],
@@ -603,7 +602,7 @@ def _normalize_workflow_stat(row: sqlite3.Row) -> dict[str, Any]:
     }
 
 
-def _normalize_workflow_execution(row: sqlite3.Row) -> dict[str, Any]:
+def _normalize_workflow_execution(row: Any) -> dict[str, Any]:
     started_at = _safe_int(row["started_at"])
     finished_at = _safe_int(row["finished_at"])
     return {
@@ -628,10 +627,10 @@ def _normalize_workflow_execution(row: sqlite3.Row) -> dict[str, Any]:
 
 
 def _record_field_sample() -> list[str]:
-    if not SOC_DB.is_file():
+    if not _table_exists(SOC_DB):
         return []
     try:
-        with sqlite3.connect(SOC_DB) as conn:
+        with database.connect(readonly=True) as conn:
             row = conn.execute("SELECT record_json FROM alert_records LIMIT 1").fetchone()
         if not row:
             return []
@@ -642,10 +641,10 @@ def _record_field_sample() -> list[str]:
 
 
 def _latest_asset_date() -> str:
-    if not SOC_DB.is_file():
+    if not _table_exists(SOC_DB):
         return ""
     try:
-        with sqlite3.connect(SOC_DB) as conn:
+        with database.connect(readonly=True) as conn:
             row = conn.execute("SELECT MAX(asset_date) FROM alert_records").fetchone()
         return str(row[0] or "")
     except Exception:
@@ -656,9 +655,9 @@ def _source_info() -> dict[str, Any]:
     return {
         "type": "flocks-local-soc-workspace",
         "socDb": _display_path(SOC_DB),
-        "socDbExists": SOC_DB.is_file(),
+        "socDbExists": _table_exists(SOC_DB),
         "workflowDb": _display_path(WORKFLOW_DB),
-        "workflowDbExists": WORKFLOW_DB.is_file(),
+        "workflowDbExists": _table_exists(WORKFLOW_DB),
         "jsonlEnabled": False,
         "externalSoc": False,
     }
@@ -768,6 +767,11 @@ def _display_path(path: Path) -> str:
         return str(path)
 
 
-def _require_db(path: Path, label: str) -> None:
-    if not path.is_file():
+def _table_exists(table: str) -> bool:
+    with database.connect(readonly=True) as connection:
+        return connection.table_exists(table)
+
+
+def _require_db(path: str, label: str) -> None:
+    if not _table_exists(path):
         raise FileNotFoundError(f"{label} does not exist: {path}")

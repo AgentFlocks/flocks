@@ -22,6 +22,7 @@ from flocks.provider.provider import (
 )
 from flocks.provider.interleaved import is_kimi_k27_code_model, is_kimi_k3_model
 from flocks.utils.log import Log
+from flocks.net.http import async_client
 
 log = Log.create(service="provider.openai_base")
 
@@ -135,10 +136,15 @@ def create_openai_http_client(
     timeout: httpx.Timeout = DEFAULT_HTTP_TIMEOUT,
     custom_settings: Any = None,
 ) -> httpx.AsyncClient:
-    """Build the shared OpenAI-compatible client with an ingress size cap."""
+    """Build the shared OpenAI-compatible client with an ingress size cap.
+
+    ``trust_env`` keeps its historical meaning — "follow the outbound proxy policy"
+    (``flocks.json`` → ``network.proxy``, or the HTTP_PROXY family in ``system`` mode);
+    ``False`` forces a direct connection for this provider.
+    """
     max_response_bytes = resolve_max_response_bytes(custom_settings)
-    return httpx.AsyncClient(
-        trust_env=trust_env,
+    return async_client(
+        use_proxy=trust_env,
         verify=verify,
         timeout=timeout,
         headers={"Accept-Encoding": "identity"},
@@ -1004,7 +1010,6 @@ class OpenAIBaseProvider(BaseProvider):
         """Get or create AsyncOpenAI client."""
         if self._client is None:
             from openai import AsyncOpenAI
-            import httpx
 
             api_key = self._config.api_key if self._config else self._api_key
             if not api_key:
@@ -1246,6 +1251,7 @@ class OpenAIBaseProvider(BaseProvider):
         )
         tool_calls: Dict[int, Dict[str, Any]] = {}
         started_tool_inputs: set[int] = set()
+        forwarded_args_len: Dict[int, int] = {}
         emitted_substantive_chunk = False
         stream_usage: Optional[Dict[str, int]] = None
         usage_emitted = False
@@ -1329,7 +1335,7 @@ class OpenAIBaseProvider(BaseProvider):
                 delta_tcs = getattr(delta, "tool_calls", None)
                 if delta_tcs:
                     emitted_substantive_chunk = True
-                    tool_input_markers: List[Dict[str, Any]] = []
+                    tool_call_deltas: List[Dict[str, Any]] = []
                     for tc in delta_tcs:
                         idx = tc.index
                         if idx not in tool_calls:
@@ -1348,26 +1354,40 @@ class OpenAIBaseProvider(BaseProvider):
                                     tc.function.arguments
                                 )
                         accumulated_name = tool_calls[idx]["function"]["name"]
-                        if accumulated_name and idx not in started_tool_inputs:
-                            tool_input_markers.append({
-                                "index": idx,
-                                "id": tool_calls[idx]["id"],
-                                "type": "function",
-                                "function": {
-                                    "name": accumulated_name,
-                                    "arguments": "",
-                                },
-                            })
-                            started_tool_inputs.add(idx)
+                        if not accumulated_name:
+                            # Arguments can precede the name; they stay buffered
+                            # and are forwarded once the name is known.
+                            continue
+                        accumulated_args = tool_calls[idx]["function"]["arguments"]
+                        already_sent = forwarded_args_len.get(idx, 0)
+                        pending_args = accumulated_args[already_sent:]
+                        is_first = idx not in started_tool_inputs
+                        if not is_first and not pending_args:
+                            continue
+                        started_tool_inputs.add(idx)
+                        forwarded_args_len[idx] = len(accumulated_args)
+                        tool_call_deltas.append({
+                            "index": idx,
+                            "id": tool_calls[idx]["id"],
+                            "type": "function",
+                            "function": {
+                                "name": accumulated_name,
+                                "arguments": pending_args,
+                            },
+                        })
 
-                    # Surface the tool as soon as its name is known, but keep
-                    # partial JSON private. The terminal chunk below publishes
-                    # the complete input once the model finishes generating it.
-                    if tool_input_markers:
+                    # Forward every argument fragment as it arrives. Holding the
+                    # partial JSON back until finish_reason left this adapter
+                    # silent for the whole generation, which starved the runner's
+                    # mid-stream chunk watchdog on long write/edit calls even
+                    # though the upstream was streaming the entire time. The
+                    # downstream ToolCallAccumulator already appends fragments,
+                    # and the terminal chunk below only carries the remainder.
+                    if tool_call_deltas:
                         yield StreamChunk(
                             delta="",
                             finish_reason=None,
-                            tool_calls=tool_input_markers,
+                            tool_calls=tool_call_deltas,
                         )
 
             if choice.finish_reason:
@@ -1394,11 +1414,25 @@ class OpenAIBaseProvider(BaseProvider):
                         yield StreamChunk(delta=seg_text, finish_reason=None)
 
                 if tool_calls:
-                    sorted_calls = [
-                        {"index": i, **tool_calls[i]}
-                        for i in sorted(tool_calls.keys())
-                    ]
+                    # Only the not-yet-forwarded tail goes out here; resending
+                    # the whole argument string would duplicate everything the
+                    # accumulator already appended from the deltas above.
+                    sorted_calls = []
+                    for i in sorted(tool_calls.keys()):
+                        call = tool_calls[i]
+                        sent = forwarded_args_len.get(i, 0)
+                        fn = call["function"]
+                        sorted_calls.append({
+                            "index": i,
+                            "id": call["id"],
+                            "type": call["type"],
+                            "function": {
+                                "name": fn["name"],
+                                "arguments": fn["arguments"][sent:],
+                            },
+                        })
                     tool_calls.clear()
+                    forwarded_args_len.clear()
                     # Preserve real finish_reason (e.g. "length" when max_tokens
                     # hit) so the runner can detect truncated tool arguments.
                     terminal_chunk = StreamChunk(

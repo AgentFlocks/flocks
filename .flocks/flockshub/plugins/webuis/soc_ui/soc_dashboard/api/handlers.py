@@ -1,27 +1,40 @@
-import asyncio
 import base64
 import json
 import math
 import re
-import sqlite3
+from contextvars import ContextVar
 import time
 from collections import Counter, OrderedDict
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from threading import RLock
+from threading import Lock, RLock
+
+_database = ContextVar("soc_dashboard_database")
+
+
+def _connect(*, timeout=5.0, readonly=False):
+    return _database.get().connect(timeout=timeout, readonly=readonly)
+
+
+def _available(table):
+    try:
+        with _connect(readonly=True) as conn:
+            return conn.table_exists(table)
+    except Exception:
+        return False
 
 
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
-DEFAULT_SQLITE_DB = Path.home() / ".flocks" / "data" / "soc.db"
-DEFAULT_SQLITE_TABLE = "alert_records"
-DEFAULT_SQLITE_RECORD_COLUMN = "record_json"
-DEFAULT_SQLITE_DATE_COLUMN = "asset_date"
-DEFAULT_SQLITE_EVENT_TIME_COLUMN = "event_time"
+DEFAULT_POSTGRES_DB = Path("postgres/alert_records")
+DEFAULT_POSTGRES_TABLE = "alert_records"
+DEFAULT_POSTGRES_RECORD_COLUMN = "record_json"
+DEFAULT_POSTGRES_DATE_COLUMN = "asset_date"
+DEFAULT_POSTGRES_EVENT_TIME_COLUMN = "event_time"
 FACTS_TABLE = "soc_dashboard_alert_facts"
-ACTIVITY_TABLE = "soc_dashboard_activity"
+ACTIVITY_TABLE = "soc_dashboard_activity_events"
 META_TABLE = "soc_dashboard_meta"
-SCHEMA_VERSION = "4"
+SCHEMA_VERSION = "postgres-1"
 ACTIVITY_DEFAULT_LIMIT = 20
 ACTIVITY_MAX_LIMIT = 50
 ACTIVITY_WINDOW_MS = 3000
@@ -30,10 +43,10 @@ ACTIVITY_SURGE_LIMIT = 100
 ACTIVITY_RETENTION_ROWS = 100_000
 ACTIVITY_PRUNE_INTERVAL = 3600.0
 
-WORKFLOW_DB = Path.home() / ".flocks" / "data" / "workflow.db"
+WORKFLOW_DB = Path("postgres/workflow_executions")
 WORKFLOW_SNAPSHOT_TABLE = "soc_dashboard_workflow_stats_samples"
-TASK_DB = Path.home() / ".flocks" / "data" / "tasks.db"
-USAGE_DB = Path.home() / ".flocks" / "data" / "flocks.db"
+TASK_DB = Path("postgres/task_schedulers")
+USAGE_DB = Path("postgres/usage_records")
 SOC_PINNED_WORKFLOW_NAMES = {
     "stream_alert_denoise": "告警降噪工作流",
     "stream_alert_triage": "告警研判工作流",
@@ -75,7 +88,11 @@ _STATS_RESPONSE_CACHE_TTL = 300.0
 _STATS_RESPONSE_CACHE_MAX = 32
 _token_usage_cache = {"updatedAt": 0.0, "mtimeNs": 0, "value": None}
 _TOKEN_USAGE_CACHE_TTL = 30.0
+_workflow_file_cache: OrderedDict = OrderedDict()
+_WORKFLOW_FILE_CACHE_MAX = 64
+_WORKFLOW_FILE_CACHE_TTL = 30.0
 _cache_lock = RLock()
+_workflow_activity_read_lock = Lock()
 _schema_lock = RLock()
 _schema_ready: set = set()
 _activity_pruned_at: float = 0
@@ -120,11 +137,106 @@ _FACT_COLUMNS = (
 
 
 def _json_value(prefix, path):
-    return (
-        f"CASE WHEN json_valid({prefix}.record_json) "
-        f"THEN json_extract({prefix}.record_json, '$.{path}') END"
-    )
+    return f"({prefix}.record_json #>> '{{{path.replace('.', ',')}}}')"
 
+
+def _fact_backfill_sql():
+    columns = ", ".join(_FACT_COLUMNS)
+    values = ", ".join(_fact_expressions("source"))
+    updates = ", ".join(f"{name} = EXCLUDED.{name}" for name in _FACT_COLUMNS[1:])
+    return (f"INSERT INTO {FACTS_TABLE} ({columns}) SELECT {values} FROM {DEFAULT_POSTGRES_TABLE} AS source "
+            f"ON CONFLICT (alert_row_id) DO UPDATE SET {updates}")
+
+
+def _ensure_postgres_schema():
+    identity = _database.get().identity()
+    if identity in _schema_ready:
+        return True
+    with _schema_lock:
+        if identity in _schema_ready:
+            return True
+        with _connect(timeout=30) as conn:
+            conn.execute("SELECT pg_advisory_xact_lock(hashtext(current_schema() || ':soc-dashboard'))").fetchone()
+            if not conn.table_exists(DEFAULT_POSTGRES_TABLE):
+                return False
+            conn.execute(f"CREATE TABLE IF NOT EXISTS {META_TABLE} (meta_key TEXT PRIMARY KEY, meta_value TEXT NOT NULL)")
+            conn.execute(f"""CREATE TABLE IF NOT EXISTS {FACTS_TABLE} (
+                alert_row_id BIGINT PRIMARY KEY, row_key TEXT NOT NULL UNIQUE, asset_date TEXT NOT NULL,
+                event_time BIGINT, source_type TEXT, threat_name TEXT, threat_type TEXT,
+                is_duplicate INTEGER NOT NULL DEFAULT 0, phase TEXT, direction TEXT, result TEXT,
+                protocol TEXT, severity TEXT, response_code TEXT, port TEXT,
+                has_triage INTEGER NOT NULL DEFAULT 0, triage_persisted_at TEXT, triage_status TEXT,
+                triage_source TEXT, triage_attack_verdict TEXT, risk_level TEXT,
+                triage_ms BIGINT NOT NULL DEFAULT 0, triage_attack_success TEXT NOT NULL DEFAULT 'unknown')""")
+            existing_columns = conn.columns(FACTS_TABLE)
+            schema_updates = []
+            for column in _FACT_COLUMNS:
+                if column in existing_columns:
+                    continue
+                definition = (
+                    'BIGINT' if column in {'alert_row_id', 'event_time', 'triage_ms'}
+                    else 'INTEGER NOT NULL DEFAULT 0' if column in {'is_duplicate', 'has_triage'}
+                    else 'TEXT'
+                )
+                schema_updates.append(f"ALTER TABLE {FACTS_TABLE} ADD COLUMN {column} {definition}")
+            for column in ('alert_row_id', 'event_time', 'triage_ms'):
+                schema_updates.append(f"ALTER TABLE {FACTS_TABLE} ALTER COLUMN {column} TYPE BIGINT")
+            for name, columns in (
+                ('asset_event', 'asset_date, event_time'), ('event', 'event_time, asset_date'),
+                ('triage_event', 'has_triage, asset_date, event_time'), ('triage_time', 'has_triage, event_time, asset_date'),
+            ):
+                schema_updates.append(f"CREATE INDEX IF NOT EXISTS idx_soc_dashboard_facts_{name} ON {FACTS_TABLE}({columns})")
+            conn.execute(";\n".join(schema_updates))
+            # The primary key is the event key. The separate identity column is
+            # a monotonic polling cursor, matching alert_records.rowid.
+            conn.execute(f"""CREATE TABLE IF NOT EXISTS {ACTIVITY_TABLE} (
+                event_key TEXT PRIMARY KEY, activity_id BIGINT GENERATED BY DEFAULT AS IDENTITY UNIQUE,
+                alert_row_id BIGINT NOT NULL, record_row_id TEXT NOT NULL, asset_date TEXT NOT NULL,
+                event_time BIGINT, record_json JSONB NOT NULL)""")
+            conn.execute(f"CREATE INDEX IF NOT EXISTS idx_soc_dashboard_activity_pg_event ON {ACTIVITY_TABLE}(asset_date, event_time, activity_id)")
+            conn.execute(f"CREATE INDEX IF NOT EXISTS idx_soc_dashboard_activity_pg_time ON {ACTIVITY_TABLE}(event_time, activity_id)")
+            version = conn.execute(f"SELECT meta_value FROM {META_TABLE} WHERE meta_key = 'schema_version'").fetchone()
+            if not version or version[0] != SCHEMA_VERSION:
+                conn.execute(_fact_backfill_sql())
+                conn.execute(f"DELETE FROM {FACTS_TABLE} WHERE NOT EXISTS (SELECT 1 FROM {DEFAULT_POSTGRES_TABLE} source WHERE source.rowid = {FACTS_TABLE}.alert_row_id)")
+                if conn.table_exists('soc_dashboard_activity'):
+                    conn.execute(f"""INSERT INTO {ACTIVITY_TABLE}(event_key, activity_id, alert_row_id, record_row_id, asset_date, event_time, record_json)
+                        SELECT event_key, activity_id, alert_row_id, record_row_id, asset_date, event_time, record_json::jsonb
+                        FROM soc_dashboard_activity ON CONFLICT (event_key) DO NOTHING""")
+                    conn.execute(f"SELECT setval(pg_get_serial_sequence('{ACTIVITY_TABLE}', 'activity_id'), GREATEST(COALESCE((SELECT MAX(activity_id) FROM {ACTIVITY_TABLE}), 1), COALESCE(pg_sequence_last_value(pg_get_serial_sequence('{ACTIVITY_TABLE}', 'activity_id')::regclass), 1)), true)").fetchone()
+                conn.execute(f"""INSERT INTO {ACTIVITY_TABLE}(event_key, alert_row_id, record_row_id, asset_date, event_time, record_json)
+                    SELECT source.row_id || ':bootstrap', source.rowid, source.row_id, source.asset_date,
+                        source.event_time, source.record_json FROM {DEFAULT_POSTGRES_TABLE} source
+                    WHERE {_triage_marker('source')} ON CONFLICT (event_key) DO NOTHING""")
+                conn.execute(f"INSERT INTO {META_TABLE}(meta_key, meta_value) VALUES('schema_version', ?) ON CONFLICT (meta_key) DO UPDATE SET meta_value = EXCLUDED.meta_value", (SCHEMA_VERSION,))
+            columns = ', '.join(_FACT_COLUMNS)
+            values = ', '.join(_fact_expressions('NEW'))
+            updates = ', '.join(f'{name} = EXCLUDED.{name}' for name in _FACT_COLUMNS[1:])
+            conn.execute(f"""CREATE OR REPLACE FUNCTION soc_dashboard_project_alert() RETURNS trigger LANGUAGE plpgsql AS $$
+                BEGIN
+                    IF TG_OP = 'DELETE' THEN
+                        DELETE FROM {FACTS_TABLE} WHERE alert_row_id = OLD.rowid;
+                        RETURN OLD;
+                    END IF;
+                    INSERT INTO {FACTS_TABLE} ({columns}) VALUES ({values})
+                        ON CONFLICT (alert_row_id) DO UPDATE SET {updates};
+                    IF {_triage_marker('NEW')} AND
+                        (TG_OP = 'INSERT' OR NEW.record_json IS DISTINCT FROM OLD.record_json) THEN
+                        INSERT INTO {ACTIVITY_TABLE}(event_key, alert_row_id, record_row_id, asset_date, event_time, record_json)
+                        VALUES (NEW.row_id || ':' || md5(NEW.record_json::text), NEW.rowid, NEW.row_id,
+                            NEW.asset_date, NEW.event_time, NEW.record_json) ON CONFLICT (event_key) DO NOTHING;
+                    END IF;
+                    RETURN NEW;
+                END $$""")
+            conn.execute(f"""DO $$ BEGIN
+                IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'soc_dashboard_project_alert_trigger'
+                    AND tgrelid = '{DEFAULT_POSTGRES_TABLE}'::regclass) THEN
+                    CREATE TRIGGER soc_dashboard_project_alert_trigger AFTER INSERT OR UPDATE OR DELETE
+                        ON {DEFAULT_POSTGRES_TABLE} FOR EACH ROW EXECUTE FUNCTION soc_dashboard_project_alert();
+                END IF;
+                END $$""")
+        _schema_ready.add(identity)
+    return True
 
 def _fact_expressions(prefix):
     source_type = _json_value(prefix, "_source_type")
@@ -210,24 +322,11 @@ def _fact_expressions(prefix):
         f"COALESCE({triage_source}, '')",
         normalized_triage_verdict,
         f"COALESCE(NULLIF({risk_level}, ''), 'unknown')",
-        f"COALESCE(CAST({triage_ms} AS INTEGER), 0)",
+        f"COALESCE(CAST(CASE WHEN {triage_ms} ~ '^[0-9]+$' THEN {triage_ms} ELSE '0' END AS BIGINT), 0)",
         normalized_triage_success,
     )
 
 
-def _fact_upsert_sql(prefix):
-    columns = ", ".join(_FACT_COLUMNS)
-    values = ", ".join(_fact_expressions(prefix))
-    return f"INSERT OR REPLACE INTO {FACTS_TABLE} ({columns}) VALUES ({values})"
-
-
-def _fact_backfill_sql():
-    columns = ", ".join(_FACT_COLUMNS)
-    values = ", ".join(_fact_expressions("source"))
-    return (
-        f"INSERT OR REPLACE INTO {FACTS_TABLE} ({columns}) "
-        f"SELECT {values} FROM {DEFAULT_SQLITE_TABLE} AS source"
-    )
 
 
 def _triage_marker(prefix):
@@ -241,268 +340,12 @@ def _triage_marker(prefix):
     )
 
 
-def _column_exists(conn, table_name, column_name):
-    return any(
-        str(row[1]) == column_name
-        for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()
-    )
 
 
-def _add_column_if_missing(conn, table_name, column_name, column_definition):
-    if not _column_exists(conn, table_name, column_name):
-        conn.execute(
-            f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_definition}"
-        )
 
 
-def _drop_dashboard_triggers(conn):
-    for trigger_name in (
-        "soc_dashboard_fact_insert",
-        "soc_dashboard_fact_update",
-        "soc_dashboard_fact_delete",
-    ):
-        conn.execute(f"DROP TRIGGER IF EXISTS {trigger_name}")
 
 
-def _ensure_alert_record_columns(conn):
-    for column_name, column_definition in (
-        ("row_id", "TEXT"),
-        ("record_id", "TEXT"),
-        ("source_file", "TEXT"),
-        ("line_number", "INTEGER"),
-        ("source_type", "TEXT"),
-        ("threat_name", "TEXT"),
-        ("is_duplicate", "INTEGER DEFAULT 0"),
-    ):
-        _add_column_if_missing(
-            conn,
-            DEFAULT_SQLITE_TABLE,
-            column_name,
-            column_definition,
-        )
-    conn.execute(
-        f"UPDATE {DEFAULT_SQLITE_TABLE} "
-        f"SET row_id = CAST(rowid AS TEXT) "
-        f"WHERE row_id IS NULL OR row_id = ''"
-    )
-
-
-def _create_dashboard_triggers(conn):
-    insert_fact = _fact_upsert_sql("NEW")
-    new_row_key = _fact_expressions("NEW")[1]
-    new_persisted = _json_value("NEW", "_triage_persisted_at")
-    old_persisted = _json_value("OLD", "_triage_persisted_at")
-    new_status = _json_value("NEW", "triage_status")
-    old_status = _json_value("OLD", "triage_status")
-    new_report = _json_value("NEW", "triage_report")
-    old_report = _json_value("OLD", "triage_report")
-    conn.execute(
-        f"""
-        CREATE TRIGGER IF NOT EXISTS soc_dashboard_fact_insert
-        AFTER INSERT ON {DEFAULT_SQLITE_TABLE}
-        BEGIN
-            {insert_fact};
-            INSERT OR IGNORE INTO {ACTIVITY_TABLE} (
-                event_key, alert_row_id, record_row_id, asset_date, event_time, record_json
-            )
-            SELECT COALESCE(NULLIF(NEW.row_id, ''), CAST(NEW.rowid AS TEXT)) ||
-                       ':insert:' || COALESCE({new_persisted}, {new_status}, CAST(NEW.rowid AS TEXT)),
-                   NEW.rowid, COALESCE(NULLIF(NEW.row_id, ''), CAST(NEW.rowid AS TEXT)),
-                   NEW.asset_date, NEW.event_time, NEW.record_json
-            WHERE {_triage_marker('NEW')};
-        END
-        """
-    )
-    conn.execute(
-        f"""
-        CREATE TRIGGER IF NOT EXISTS soc_dashboard_fact_update
-        AFTER UPDATE OF row_id, asset_date, event_time, source_type, threat_name, is_duplicate, record_json
-        ON {DEFAULT_SQLITE_TABLE}
-        BEGIN
-            DELETE FROM {FACTS_TABLE}
-            WHERE alert_row_id = NEW.rowid OR row_key = {new_row_key};
-            {insert_fact};
-            INSERT OR IGNORE INTO {ACTIVITY_TABLE} (
-                event_key, alert_row_id, record_row_id, asset_date, event_time, record_json
-            )
-            SELECT COALESCE(NULLIF(NEW.row_id, ''), CAST(NEW.rowid AS TEXT)) ||
-                       ':update:' || strftime('%s', 'now') || ':' || lower(hex(randomblob(6))),
-                   NEW.rowid, COALESCE(NULLIF(NEW.row_id, ''), CAST(NEW.rowid AS TEXT)),
-                   NEW.asset_date, NEW.event_time, NEW.record_json
-            WHERE {_triage_marker('NEW')}
-              AND NEW.record_json <> OLD.record_json
-              AND (
-                  COALESCE({new_persisted}, '') <> COALESCE({old_persisted}, '')
-                  OR COALESCE({new_status}, '') <> COALESCE({old_status}, '')
-                  OR COALESCE({new_report}, '') <> COALESCE({old_report}, '')
-              );
-        END
-        """
-    )
-    conn.execute(
-        f"""
-        CREATE TRIGGER IF NOT EXISTS soc_dashboard_fact_delete
-        AFTER DELETE ON {DEFAULT_SQLITE_TABLE}
-        BEGIN
-            DELETE FROM {FACTS_TABLE} WHERE alert_row_id = OLD.rowid;
-        END
-        """
-    )
-
-
-def _ensure_sqlite_schema():
-    db_path = DEFAULT_SQLITE_DB
-    if not db_path.is_file():
-        return False
-    stat = db_path.stat()
-    identity = (str(db_path), getattr(stat, "st_ino", 0))
-    if identity in _schema_ready:
-        return True
-    with _schema_lock:
-        if identity in _schema_ready:
-            return True
-        with sqlite3.connect(db_path, timeout=30) as conn:
-            conn.execute("PRAGMA busy_timeout = 5000")
-            exists = conn.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
-                (DEFAULT_SQLITE_TABLE,),
-            ).fetchone()
-            if not exists:
-                return False
-            _drop_dashboard_triggers(conn)
-            _ensure_alert_record_columns(conn)
-            conn.execute(
-                f"CREATE INDEX IF NOT EXISTS idx_alert_records_asset_event "
-                f"ON {DEFAULT_SQLITE_TABLE}(asset_date, event_time)"
-            )
-            conn.execute(
-                f"CREATE INDEX IF NOT EXISTS idx_alert_records_event_time "
-                f"ON {DEFAULT_SQLITE_TABLE}(event_time)"
-            )
-            conn.execute(
-                f"CREATE INDEX IF NOT EXISTS idx_alert_records_asset_date "
-                f"ON {DEFAULT_SQLITE_TABLE}(asset_date)"
-            )
-            conn.execute(
-                f"CREATE INDEX IF NOT EXISTS idx_alert_records_source_type "
-                f"ON {DEFAULT_SQLITE_TABLE}(source_type)"
-            )
-            conn.execute(
-                f"CREATE INDEX IF NOT EXISTS idx_alert_records_threat_name "
-                f"ON {DEFAULT_SQLITE_TABLE}(threat_name)"
-            )
-            conn.execute(
-                f"CREATE UNIQUE INDEX IF NOT EXISTS idx_alert_records_row_id "
-                f"ON {DEFAULT_SQLITE_TABLE}(row_id)"
-            )
-            conn.execute(
-                f"""
-                CREATE TABLE IF NOT EXISTS {META_TABLE} (
-                    meta_key TEXT PRIMARY KEY,
-                    meta_value TEXT NOT NULL
-                )
-                """
-            )
-            version_row = conn.execute(
-                f"SELECT meta_value FROM {META_TABLE} WHERE meta_key='schema_version'"
-            ).fetchone()
-            needs_rebuild = not version_row or str(version_row[0]) != SCHEMA_VERSION
-            if needs_rebuild:
-                conn.execute(f"DROP TABLE IF EXISTS {FACTS_TABLE}")
-            conn.execute(
-                f"""
-                CREATE TABLE IF NOT EXISTS {FACTS_TABLE} (
-                    alert_row_id INTEGER PRIMARY KEY,
-                    row_key TEXT NOT NULL UNIQUE,
-                    asset_date TEXT NOT NULL,
-                    event_time INTEGER,
-                    source_type TEXT,
-                    threat_name TEXT,
-                    threat_type TEXT,
-                    is_duplicate INTEGER NOT NULL DEFAULT 0,
-                    phase TEXT,
-                    direction TEXT,
-                    result TEXT,
-                    protocol TEXT,
-                    severity TEXT,
-                    response_code TEXT,
-                    port TEXT,
-                    has_triage INTEGER NOT NULL DEFAULT 0,
-                    triage_persisted_at TEXT,
-                    triage_status TEXT,
-                    triage_source TEXT,
-                    triage_attack_verdict TEXT,
-                    risk_level TEXT,
-                    triage_ms INTEGER NOT NULL DEFAULT 0,
-                    triage_attack_success TEXT NOT NULL DEFAULT 'unknown'
-                )
-                """
-            )
-            conn.execute(
-                f"CREATE INDEX IF NOT EXISTS idx_soc_dashboard_facts_asset_event "
-                f"ON {FACTS_TABLE}(asset_date, event_time)"
-            )
-            conn.execute(
-                f"CREATE INDEX IF NOT EXISTS idx_soc_dashboard_facts_event "
-                f"ON {FACTS_TABLE}(event_time, asset_date)"
-            )
-            conn.execute(
-                f"CREATE INDEX IF NOT EXISTS idx_soc_dashboard_facts_triage_event "
-                f"ON {FACTS_TABLE}(has_triage, asset_date, event_time)"
-            )
-            conn.execute(
-                f"CREATE INDEX IF NOT EXISTS idx_soc_dashboard_facts_triage_time "
-                f"ON {FACTS_TABLE}(has_triage, event_time, asset_date)"
-            )
-            conn.execute(
-                f"""
-                CREATE TABLE IF NOT EXISTS {ACTIVITY_TABLE} (
-                    activity_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    event_key TEXT NOT NULL UNIQUE,
-                    alert_row_id INTEGER NOT NULL,
-                    record_row_id TEXT NOT NULL,
-                    asset_date TEXT NOT NULL,
-                    event_time INTEGER,
-                    record_json TEXT NOT NULL
-                )
-                """
-            )
-            conn.execute(
-                f"CREATE INDEX IF NOT EXISTS idx_soc_dashboard_activity_event "
-                f"ON {ACTIVITY_TABLE}(asset_date, event_time, activity_id)"
-            )
-            conn.execute(
-                f"CREATE INDEX IF NOT EXISTS idx_soc_dashboard_activity_time "
-                f"ON {ACTIVITY_TABLE}(event_time, activity_id)"
-            )
-            if needs_rebuild:
-                conn.execute(_fact_backfill_sql())
-                persisted = _json_value("source", "_triage_persisted_at")
-                status_value = _json_value("source", "triage_status")
-                conn.execute(
-                    f"""
-                    INSERT OR IGNORE INTO {ACTIVITY_TABLE} (
-                        event_key, alert_row_id, record_row_id, asset_date, event_time, record_json
-                    )
-                    SELECT COALESCE(NULLIF(source.row_id, ''), CAST(source.rowid AS TEXT)) || ':bootstrap:' ||
-                           COALESCE({persisted}, {status_value}, CAST(source.rowid AS TEXT)),
-                           source.rowid,
-                           COALESCE(NULLIF(source.row_id, ''), CAST(source.rowid AS TEXT)),
-                           source.asset_date,
-                           source.event_time, source.record_json
-                    FROM {DEFAULT_SQLITE_TABLE} AS source
-                    WHERE {_triage_marker('source')}
-                    """
-                )
-                conn.execute(
-                    f"INSERT OR REPLACE INTO {META_TABLE}(meta_key, meta_value) "
-                    f"VALUES('schema_version', ?)",
-                    (SCHEMA_VERSION,),
-                )
-            _create_dashboard_triggers(conn)
-            conn.commit()
-        _schema_ready.add(identity)
-    return True
 
 
 def _maybe_prune_activity():
@@ -514,13 +357,13 @@ def _maybe_prune_activity():
         if now - _activity_pruned_at < ACTIVITY_PRUNE_INTERVAL:
             return
         try:
-            with sqlite3.connect(DEFAULT_SQLITE_DB, timeout=5) as conn:
+            with _connect() as conn:
                 conn.execute(
                     f"DELETE FROM {ACTIVITY_TABLE} WHERE activity_id <= "
                     f"(SELECT COALESCE(MAX(activity_id), 0) - ? FROM {ACTIVITY_TABLE})",
                     (ACTIVITY_RETENTION_ROWS,),
                 )
-                conn.commit()
+
         except Exception:
             pass
         _activity_pruned_at = now
@@ -547,11 +390,8 @@ def _read_token_usage():
         "dailyLabels": [],
         "source": "usage_records",
     }
-    if not USAGE_DB.is_file():
-        return empty
-
     try:
-        mtime_ns = USAGE_DB.stat().st_mtime_ns
+        mtime_ns = _database.get().identity()
     except Exception:
         mtime_ns = 0
     now_monotonic = time.monotonic()
@@ -575,8 +415,8 @@ def _read_token_usage():
     }
 
     try:
-        with sqlite3.connect(f"file:{USAGE_DB}?mode=ro", uri=True, timeout=1.0) as conn:
-            conn.execute("PRAGMA query_only = ON")
+        with _connect() as conn:
+
             if not _table_exists(conn, "usage_records"):
                 return {**empty, "dailyLabels": labels, "dailySeries": [0] * 7}
             total_tokens = _safe_int(
@@ -590,7 +430,7 @@ def _read_token_usage():
                 (_usage_iso(today_start), _usage_iso(tomorrow_start)),
             ).fetchone()
             series_rows = conn.execute(
-                "SELECT date(created_at, 'localtime') AS usage_day, "
+                "SELECT to_char(created_at::timestamptz AT TIME ZONE current_setting('TIMEZONE'), 'YYYY-MM-DD') AS usage_day, "
                 "COALESCE(SUM(total_tokens), 0) AS token_count "
                 "FROM usage_records WHERE created_at >= ? AND created_at < ? "
                 "GROUP BY usage_day",
@@ -618,14 +458,10 @@ def _read_token_usage():
 
 
 def _workflow_stats_sample_deltas(conn, workflow_name, start_time=0, end_time=0):
-    stats_exists = conn.execute(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='workflow_stats'"
-    ).fetchone()
+    stats_exists = conn.table_exists("workflow_stats")
     if not stats_exists:
         return None
-    columns = {
-        row[1] for row in conn.execute("PRAGMA table_info(workflow_stats)").fetchall()
-    }
+    columns = conn.columns("workflow_stats")
     success_expr = "success_count" if "success_count" in columns else "0"
     error_expr = "error_count" if "error_count" in columns else "0"
     updated_expr = "updated_at" if "updated_at" in columns else "0"
@@ -641,7 +477,7 @@ def _workflow_stats_sample_deltas(conn, workflow_name, start_time=0, end_time=0)
         f"""
         CREATE TABLE IF NOT EXISTS {WORKFLOW_SNAPSHOT_TABLE} (
             workflow_id   TEXT NOT NULL,
-            sampled_at    INTEGER NOT NULL,
+            sampled_at    BIGINT NOT NULL,
             call_count    INTEGER NOT NULL,
             success_count INTEGER NOT NULL DEFAULT 0,
             error_count   INTEGER NOT NULL DEFAULT 0,
@@ -676,7 +512,7 @@ def _workflow_stats_sample_deltas(conn, workflow_name, start_time=0, end_time=0)
                 "VALUES (?, ?, ?, ?, ?)",
                 (workflow_name, sampled_at, current_count, success_count, error_count),
             )
-        conn.commit()
+
         last = (sampled_at, current_count, success_count, error_count)
 
     if not (start_time > 0 and end_time > 0):
@@ -924,11 +760,11 @@ def _get_workflow_denoise_stats(
             return cached["value"]
 
     empty = _empty_workflow_denoise_stats()
-    if not WORKFLOW_DB.is_file():
+    if not _available("workflow_executions"):
         return empty
 
     try:
-        with sqlite3.connect(WORKFLOW_DB) as conn:
+        with _connect() as conn:
             sample_deltas = _workflow_stats_sample_deltas(
                 conn,
                 workflow_name,
@@ -1008,11 +844,11 @@ def _get_workflow_progress(
     end_time: int = 0,
 ) -> dict:
     unavailable = {"callCount": None, "latestStartedAt": None}
-    if not WORKFLOW_DB.is_file():
-        return unavailable
-
     try:
-        with sqlite3.connect(WORKFLOW_DB) as conn:
+        with _connect() as conn:
+            table = "workflow_executions" if start_time > 0 and end_time > 0 else "workflow_stats"
+            if not conn.table_exists(table):
+                return unavailable
             if start_time > 0 and end_time > 0:
                 sample_deltas = _workflow_stats_sample_deltas(
                     conn,
@@ -1054,45 +890,147 @@ def _get_workflow_progress(
     }
 
 
+def _dashboard_execution_detail(output_text, input_text):
+    """Read a bounded preview for this execution only; never open result files.
+
+    Kept separate from metric aggregation and task-center/workflow contracts.
+    A missing count is not zero (nor an assumed single-alert batch).
+    """
+    output = _safe_json_object(output_text)
+    inputs = _safe_json_object(input_text)
+    def text(*values):
+        return _first_text(*(value[:512] for value in values if isinstance(value, str)))
+
+    queue = [(value, 0) for value in (
+        output.get("enriched_alerts_with_triage"), output.get("triage_results"),
+        output.get("unique_alerts"), output.get("enriched_alerts"),
+        inputs.get("_soc_alert_preview"), inputs.get("alerts"),
+        inputs.get("alert_list"), inputs.get("syslog_message"), inputs.get("syslog"),
+    ) if value is not None]
+    best, best_score = {}, 0
+    for _ in range(48):
+        if not queue:
+            break
+        value, depth = queue.pop(0)
+        if depth > 6:
+            continue
+        if isinstance(value, str):
+            if len(value) > 65536:
+                continue
+            # Syslog prefixes can precede a vendor JSON envelope.
+            start = value.find("{")
+            parsed = _safe_json_object(value[start:] if start >= 0 else value)
+            if parsed:
+                queue.append((parsed, depth + 1))
+        elif isinstance(value, list):
+            queue.extend((item, depth + 1) for item in value[:3])
+        elif isinstance(value, dict):
+            if value.get("_type") == "dict":
+                continue  # Persisted key-only summary, not an alert.
+            alert = {
+                "id": text(value.get("id"), value.get("alert_id"), value.get("uuid")),
+                "threatName": text(value.get("threat_name"), value.get("alert_name"), value.get("attack_name")),
+                "sourceType": text(value.get("_source_type"), value.get("source_type"), value.get("device_type")),
+                "srcIp": text(value.get("sip"), value.get("src_ip"), value.get("source_ip"), value.get("net_real_src_ip")),
+                "dstIp": text(value.get("dip"), value.get("dst_ip"), value.get("destination_ip"), value.get("net_dest_ip")),
+            }
+            score = sum(bool(alert[key]) for key in ("threatName", "srcIp", "dstIp"))
+            if score > best_score:
+                best, best_score = alert, score
+            for key in ("preview", "data", "alert", "alerts", "message", "msg", "log", "event", "payload"):
+                if key in value:
+                    queue.append((value[key], depth + 1))
+    stats = output.get("stats") if isinstance(output.get("stats"), dict) else {}
+    raw = stats.get("raw_count", inputs.get("_soc_alert_count"))
+    try:
+        count = int(raw) if raw is not None and not isinstance(raw, bool) else None
+        if count is not None and (count < 0 or str(raw).strip() != str(count)):
+            count = None
+    except (ValueError, TypeError, OverflowError):
+        count = None
+    if count is None:
+        alerts = inputs.get("alerts", inputs.get("alert_list"))
+        if isinstance(alerts, list):
+            count = len(alerts)
+    if best:
+        best["sourceType"] = best["sourceType"] or text(
+            inputs.get("source_log_type"), output.get("source_log_type")
+        )
+    return best, count
+
+
 def _get_workflow_recent_events(
     workflow_name: str,
     start_time: int = 0,
     end_time: int = 0,
     limit: int = 10,
+    snapshot=None,
 ) -> list:
-    if not WORKFLOW_DB.is_file():
+    # Polling must not multiply payload reads across dashboard tabs.
+    # The worker owns this lock until its reads/parsing actually finish, even if
+    # the HTTP request awaiting the bounded plugin executor is cancelled.
+    if not _workflow_activity_read_lock.acquire(blocking=False):
+        if snapshot is not None:
+            snapshot.update(complete=False, available=False)
+        return []
+    try:
+        return _read_workflow_recent_events(workflow_name, start_time, end_time, limit, snapshot)
+    finally:
+        _workflow_activity_read_lock.release()
+
+
+def _read_workflow_recent_events(workflow_name, start_time, end_time, limit, snapshot):
+    if not _available("workflow_executions"):
+        if snapshot is not None:
+            snapshot.update(complete=False, available=False)
         return []
     workflow_stage = "triage" if workflow_name in TRIAGE_WORKFLOW_IDS else "denoise"
-    query_params = [workflow_name]
     try:
-        with sqlite3.connect(WORKFLOW_DB) as conn:
-            execution_columns = {
-                row[1]
-                for row in conn.execute("PRAGMA table_info(workflow_executions)").fetchall()
-            }
+        with _connect(timeout=0.2, readonly=True) as conn:
+            deadline = time.monotonic() + 0.2
+
+            execution_columns = conn.columns("workflow_executions")
+            def preview_column(name):
+                if name not in execution_columns:
+                    return f"'{{}}' AS {name}"
+                return f"CASE WHEN octet_length({name}) <= 262144 THEN {name} ELSE '{{}}' END AS {name}"
+
+            metadata_select = ", ".join([
+                "id", "status", "started_at",
+                _workflow_execution_column_expr(execution_columns, "updated_at", "started_at"),
+            ])
+            query = f"SELECT {metadata_select} FROM workflow_executions WHERE workflow_id = ?"
+            query_params = [workflow_name]
+            if start_time > 0 and end_time > 0:
+                query += " AND started_at >= ? AND started_at <= ?"
+                query_params.extend((int(start_time * 1000), int(end_time * 1000)))
+            row_limit = max(1, min(_safe_int(limit), 10))
+            active_rows = conn.execute(
+                query + " AND status IN ('running', 'queued', 'pending') ORDER BY started_at DESC LIMIT ?",
+                [*query_params, row_limit],
+            ).fetchall()
+            recent_rows = conn.execute(query + " ORDER BY started_at DESC LIMIT ?", [*query_params, row_limit]).fetchall()
+            ids = list(dict.fromkeys(row["id"] for row in [*active_rows, *recent_rows]))
+            if time.monotonic() > deadline:
+                raise RuntimeError("activity read budget exceeded")
+            # Select payloads only AFTER bounding IDs; a sorting query must not
+            # materialize previews for every matching execution before LIMIT.
+            rows = []
+            if ids:
+                previews = ", ".join(preview_column(name) for name in ("output_results", "input_params", "payload"))
+                placeholders = ",".join("?" for _ in ids)
+                by_id = {row["id"]: row for row in conn.execute(
+                    f"SELECT {metadata_select}, {previews} FROM workflow_executions WHERE id IN ({placeholders})",
+                    ids,
+                ).fetchall()}
+                rows = [by_id[key] for key in ids]
+            if time.monotonic() > deadline:
+                raise RuntimeError("activity read budget exceeded")
+            if snapshot is not None and len(active_rows) == row_limit:
+                snapshot["complete"] = False
     except Exception:
-        return []
-    latest_select = ", ".join(
-        [
-            "id",
-            "status",
-            "started_at",
-            _workflow_execution_column_expr(execution_columns, "output_results", "'{}'"),
-            _workflow_execution_column_expr(execution_columns, "input_params", "'{}'"),
-            _workflow_execution_column_expr(execution_columns, "payload", "'{}'"),
-        ]
-    )
-    query = f"SELECT {latest_select} FROM workflow_executions WHERE workflow_id = ?"
-    if start_time > 0 and end_time > 0:
-        query += " AND started_at >= ? AND started_at <= ?"
-        query_params.extend((int(start_time * 1000), int(end_time * 1000)))
-    query += " ORDER BY started_at DESC LIMIT ?"
-    query_params.append(max(1, min(_safe_int(limit), 10)))
-    try:
-        with sqlite3.connect(WORKFLOW_DB) as conn:
-            conn.row_factory = sqlite3.Row
-            rows = conn.execute(query, query_params).fetchall()
-    except Exception:
+        if snapshot is not None:
+            snapshot.update(complete=False, available=False)
         return []
 
     events = []
@@ -1104,24 +1042,20 @@ def _get_workflow_recent_events(
         input_text = row["input_params"]
         payload_text = row["payload"]
         metrics = _workflow_execution_metrics(output_text, input_text)
-        preview = metrics["preview"]
-        raw_count = metrics["rawCount"]
+        alert, raw_count = _dashboard_execution_detail(output_text, input_text)
+        if workflow_stage == "denoise" and raw_count == 0 and not alert:
+            continue  # No alert work; keep the execution itself untouched.
         unique_count = metrics["uniqueCount"]
-        threat_name = ""
-        if workflow_stage == "triage":
+        threat_name = alert.get("threatName", "")
+        if not threat_name and workflow_stage == "triage":
             threat_name = _workflow_latest_alert_name(workflow_name, output_text, input_text)
         if not threat_name:
-            threat_name = str(
-                preview.get("threat_name")
-                or preview.get("_threat_type")
-                or preview.get("threat_type")
-                or f"降噪批次 · 原始 {raw_count} 条"
-            )
+            threat_name = f"降噪批次 · 原始 {raw_count} 条" if raw_count and raw_count > 0 else "降噪批次 · 数量未提供"
         normalized_status = str(status or "").lower()
         event_status = (
             "completed"
             if normalized_status in {"success", "completed"}
-            else "running"
+            else normalized_status
             if normalized_status in {"running", "queued", "pending"}
             else "failed"
         )
@@ -1139,17 +1073,18 @@ def _get_workflow_recent_events(
                 "occurredAt": datetime.fromtimestamp(
                     _safe_int(started_at) / 1000
                 ).astimezone().isoformat(timespec="seconds"),
+                "updatedAt": datetime.fromtimestamp(
+                    _safe_int(row["updated_at"] or started_at) / 1000
+                ).astimezone().isoformat(timespec="milliseconds"),
                 "triggerSource": "workflow_execution",
                 "workflowId": workflow_name,
                 "sessionId": session_id,
                 "messageId": message_id,
                 "sampleCount": max(unique_count, 1),
                 "alert": {
-                    "id": str(preview.get("id") or execution_id),
-                    "sourceType": metrics["sourceType"],
+                    **alert,
+                    "id": alert.get("id") or "",
                     "threatName": threat_name,
-                    "srcIp": preview.get("sip") or preview.get("src_ip") or preview.get("net_real_src_ip"),
-                    "dstIp": preview.get("dip") or preview.get("dst_ip") or preview.get("net_dest_ip"),
                 },
                 "result": {
                     "isDuplicate": metrics["isDuplicate"],
@@ -1159,6 +1094,7 @@ def _get_workflow_recent_events(
                         for key, value in metrics.items()
                         if key not in {"preview", "sourceCounts", "sourceType"}
                     },
+                    "rawCount": raw_count,
                 },
             }
         )
@@ -1239,25 +1175,21 @@ def _triage_attack_success_value(record):
     return "unknown"
 
 
-async def get_activity(ctx, request):
+def get_activity(ctx, request):
+    _database.set(ctx.database)
     params = dict(request.query_params)
-    return await asyncio.to_thread(_get_activity, params)
+    return _get_activity(params)
 
 
-async def get_task_center(ctx, request):
+def get_task_center(ctx, request):
+    _database.set(ctx.database)
     params = dict(request.query_params)
     include_mock = _truthy(params.get("mockActivity")) or _truthy(params.get("mockTaskCenter"))
-    return await asyncio.to_thread(_get_task_center, include_mock)
+    return _get_task_center(include_mock)
 
 
 def _table_exists(conn, table_name):
-    return bool(
-        conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
-            (table_name,),
-        ).fetchone()
-    )
-
+    return conn.table_exists(table_name)
 
 def _task_center_empty():
     return {
@@ -1271,8 +1203,8 @@ def _task_center_empty():
         "sourceStatus": {
             "tasksDb": str(TASK_DB),
             "workflowDb": str(WORKFLOW_DB),
-            "tasksAvailable": TASK_DB.is_file(),
-            "workflowAvailable": WORKFLOW_DB.is_file(),
+            "tasksAvailable": _available("task_schedulers"),
+            "workflowAvailable": _available("workflow_executions"),
         },
     }
 
@@ -1294,12 +1226,12 @@ def _today_bounds():
 
 
 def _task_center_task_rows(limit=12):
-    if not TASK_DB.is_file():
+    if not _available("task_schedulers"):
         return 0, [], 0, 0, 0
     try:
-        with sqlite3.connect(f"file:{TASK_DB}?mode=ro", uri=True, timeout=1.0) as conn:
-            conn.row_factory = sqlite3.Row
-            conn.execute("PRAGMA query_only = ON")
+        with _connect() as conn:
+
+
             if not (
                 _table_exists(conn, "task_schedulers")
                 and _table_exists(conn, "task_executions")
@@ -1319,26 +1251,29 @@ def _task_center_task_rows(limit=12):
                 "FROM task_schedulers WHERE status <> 'archived' "
                 "ORDER BY updated_at DESC"
             ).fetchall()
-            tasks = []
-            for scheduler in scheduler_rows:
-                summary = conn.execute(
-                    "SELECT COUNT(*) AS execution_count, "
+            summaries = {
+                row["scheduler_id"]: row for row in conn.execute(
+                    "SELECT scheduler_id, COUNT(*) AS execution_count, "
                     "SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) AS success_count, "
                     "SUM(CASE WHEN status IN ('pending', 'queued', 'running') THEN 1 ELSE 0 END) AS active_count, "
-                    "SUM(CASE WHEN "
-                    "julianday(COALESCE(started_at, queued_at, created_at)) >= julianday(?) "
-                    "AND julianday(COALESCE(started_at, queued_at, created_at)) < julianday(?) "
+                    "SUM(CASE WHEN COALESCE(started_at, queued_at, created_at)::timestamptz >= ?::text::timestamptz "
+                    "AND COALESCE(started_at, queued_at, created_at)::timestamptz < ?::text::timestamptz "
                     "THEN 1 ELSE 0 END) AS today_execution_count "
-                    "FROM task_executions WHERE scheduler_id = ?",
-                    (today_start_iso, tomorrow_start_iso, scheduler["id"]),
-                ).fetchone()
-                latest = conn.execute(
-                    "SELECT status, queued_at, started_at, completed_at, updated_at "
-                    "FROM task_executions WHERE scheduler_id = ? "
-                    "ORDER BY julianday(COALESCE(completed_at, updated_at, started_at, queued_at, created_at)) DESC "
-                    "LIMIT 1",
-                    (scheduler["id"],),
-                ).fetchone()
+                    "FROM task_executions GROUP BY scheduler_id", (today_start_iso, tomorrow_start_iso),
+                ).fetchall()
+            }
+            latest_rows = {
+                row["scheduler_id"]: row for row in conn.execute(
+                    "SELECT DISTINCT ON (scheduler_id) scheduler_id, status, queued_at, started_at, completed_at, updated_at "
+                    "FROM task_executions ORDER BY scheduler_id, "
+                    "COALESCE(completed_at, updated_at, started_at, queued_at, created_at)::timestamptz DESC, id DESC"
+                ).fetchall()
+            }
+            empty_summary = {"execution_count": 0, "success_count": 0, "active_count": 0, "today_execution_count": 0}
+            tasks = []
+            for scheduler in scheduler_rows:
+                summary = summaries.get(scheduler["id"], empty_summary)
+                latest = latest_rows.get(scheduler["id"])
                 trigger = _safe_json_object(scheduler["trigger"])
                 execution_count = max(_safe_int(summary["execution_count"]), 0)
                 success_count = max(_safe_int(summary["success_count"]), 0)
@@ -1386,7 +1321,28 @@ def _task_center_task_rows(limit=12):
         return 0, [], 0, 0, 0
 
 
+def _cached_workflow_files(key, read):
+    # Display metadata tolerates a short refresh interval; duplicate dashboard
+    # polls must not reopen every local manifest and workflow definition.
+    now = time.monotonic()
+    with _cache_lock:
+        entry = _workflow_file_cache.get(key)
+        if entry and now - entry[0] < _WORKFLOW_FILE_CACHE_TTL:
+            _workflow_file_cache.move_to_end(key)
+            return entry[1]
+        value = read()
+        _workflow_file_cache[key] = (now, value)
+        _workflow_file_cache.move_to_end(key)
+        while len(_workflow_file_cache) > _WORKFLOW_FILE_CACHE_MAX:
+            _workflow_file_cache.popitem(last=False)
+        return value
+
+
 def _workflow_manifest_name_map():
+    return _cached_workflow_files(("names", str(Path.home())), _read_workflow_manifest_names)
+
+
+def _read_workflow_manifest_names():
     roots = [
         Path.home() / ".flocks" / "plugins" / "workflows",
         Path.home() / ".flocks" / "workspace" / "workflows",
@@ -1415,26 +1371,14 @@ def _workflow_manifest_name_map():
     return names
 
 
-def _workflow_config_name_map(conn):
-    if not _table_exists(conn, "workflow_configs"):
-        return {}
+def _workflow_config_name_map(conn, rows=None):
+    rows = _workflow_config_projection_rows(conn) if rows is None else rows
     names = {}
-    for row in conn.execute(
-        "SELECT workflow_id, config FROM workflow_configs WHERE kind = ?",
-        ("workflow.integration-config",),
-    ).fetchall():
-        workflow_id = row["workflow_id"] if isinstance(row, sqlite3.Row) else row[0]
-        config_raw = row["config"] if isinstance(row, sqlite3.Row) else row[1]
-        if not workflow_id:
-            continue
-        config = _safe_json_object(config_raw)
-        workflow = config.get("workflow")
-        if not isinstance(workflow, dict):
-            continue
-        name = workflow.get("name") or workflow.get("title") or workflow.get("id")
-        if name:
-            names.setdefault(str(workflow_id), str(name))
+    for row in rows:
+        if row["kind"] == "workflow.integration-config" and row["workflow_id"] and row["workflow_name"]:
+            names.setdefault(str(row["workflow_id"]), str(row["workflow_name"]))
     return names
+
 
 
 def _truthy_config_value(value):
@@ -1448,44 +1392,23 @@ def _truthy_config_value(value):
     return text in {"1", "true", "yes", "on", "enabled"}
 
 
-def _workflow_trigger_state(conn, workflow_id):
-    state = {
-        "hasConfig": False,
-        "enabled": True,
-        "timeoutSeconds": WORKFLOW_DEFAULT_ACTIVE_TIMEOUT_SECONDS,
-    }
-    if not _table_exists(conn, "workflow_configs"):
-        return state
-
-    placeholders = ",".join("?" for _ in WORKFLOW_TRIGGER_CONFIG_KINDS)
-    rows = conn.execute(
-        "SELECT kind, config FROM workflow_configs WHERE workflow_id = ? "
-        f"AND (kind IN ({placeholders}) OR kind LIKE ? OR kind LIKE ? OR kind LIKE ?)",
-        (
-            workflow_id,
-            *WORKFLOW_TRIGGER_CONFIG_KINDS,
-            "workflow_kafka_config/%",
-            "workflow_poller_config/%",
-            "workflow_syslog_config/%",
-        ),
-    ).fetchall()
-    if not rows:
-        return state
-
-    enabled = False
-    timeout_seconds = WORKFLOW_DEFAULT_ACTIVE_TIMEOUT_SECONDS
-    for row in rows:
-        config = _safe_json_object(row["config"] if isinstance(row, sqlite3.Row) else row[1])
-        if "enabled" not in config or _truthy_config_value(config.get("enabled")):
-            enabled = True
-        timeout_seconds = max(
-            timeout_seconds,
-            _safe_int(config.get("timeoutSeconds") or config.get("timeout_seconds")),
+def _workflow_trigger_state(conn, workflow_id, rows=None):
+    rows = _workflow_config_projection_rows(conn) if rows is None else rows
+    matching = [row for row in rows if row["workflow_id"] == workflow_id and (
+        row["kind"] in WORKFLOW_TRIGGER_CONFIG_KINDS or any(
+            str(row["kind"]).startswith(prefix + "/") for prefix in WORKFLOW_TRIGGER_CONFIG_KINDS
         )
-    state["hasConfig"] = True
-    state["enabled"] = enabled
-    state["timeoutSeconds"] = max(timeout_seconds, WORKFLOW_MIN_ACTIVE_TIMEOUT_SECONDS)
-    return state
+    )]
+    return {
+        "hasConfig": bool(matching),
+        "enabled": (any(not row["enabled_present"] or _workflow_config_enabled(row["enabled"]) for row in matching)
+                    if matching else True),
+        "timeoutSeconds": max(
+            WORKFLOW_DEFAULT_ACTIVE_TIMEOUT_SECONDS, WORKFLOW_MIN_ACTIVE_TIMEOUT_SECONDS,
+            max((_safe_int(row["timeout_seconds"]) for row in matching), default=0),
+        ),
+    }
+
 
 
 def _workflow_effective_status(latest, active_count, trigger_state):
@@ -1506,6 +1429,11 @@ def _workflow_execution_column_expr(columns, column_name, fallback):
 
 
 def _workflow_node_count(workflow_id):
+    return _cached_workflow_files(("nodes", str(Path.home()), str(workflow_id)),
+                                  lambda: _read_workflow_node_count(workflow_id))
+
+
+def _read_workflow_node_count(workflow_id):
     roots = [
         Path.home() / ".flocks" / "plugins" / "workflows",
         Path.home() / ".flocks" / "workspace" / "workflows",
@@ -1628,257 +1556,126 @@ def _workflow_link_context(latest):
 
 
 def _task_center_workflow_rows(limit=12, include_mock=False):
-    if not WORKFLOW_DB.is_file():
-        return [], 0, 0, 0
     try:
-        with sqlite3.connect(f"file:{WORKFLOW_DB}?mode=ro", uri=True, timeout=1.0) as conn:
-            conn.row_factory = sqlite3.Row
-            conn.execute("PRAGMA query_only = ON")
-            if not (
-                _table_exists(conn, "workflow_stats")
-                or _table_exists(conn, "workflow_executions")
-            ):
+        with _connect() as conn:
+            has_executions = _table_exists(conn, "workflow_executions")
+            has_stats = _table_exists(conn, "workflow_stats")
+            if not (has_executions or has_stats):
                 return [], 0, 0, 0
             today_start, tomorrow_start = _today_bounds()
-            today_start_ms = int(today_start.timestamp() * 1000)
-            tomorrow_start_ms = int(tomorrow_start.timestamp() * 1000)
-            workflow_ids = set()
-            if _table_exists(conn, "workflow_stats"):
-                workflow_ids.update(
-                    row[0]
-                    for row in conn.execute("SELECT workflow_id FROM workflow_stats").fetchall()
-                    if row[0]
-                )
-            if _table_exists(conn, "workflow_executions"):
-                workflow_ids.update(
-                    row[0]
-                    for row in conn.execute(
-                        "SELECT DISTINCT workflow_id FROM workflow_executions"
-                    ).fetchall()
-                    if row[0]
-                )
-            names = {
-                **_workflow_manifest_name_map(),
-                **_workflow_config_name_map(conn),
-                **WORKFLOW_DISPLAY_NAMES,
-            }
+            today_start_ms, tomorrow_start_ms = int(today_start.timestamp() * 1000), int(tomorrow_start.timestamp() * 1000)
+            now_ms = int(time.time() * 1000)
+            configs = _workflow_config_projection_rows(conn)
+            configs_by_id = {}
+            for row in configs:
+                configs_by_id.setdefault(row["workflow_id"], []).append(row)
+            states = {workflow_id: _workflow_trigger_state(conn, workflow_id, rows)
+                      for workflow_id, rows in configs_by_id.items()}
+            names = {**_workflow_manifest_name_map(), **_workflow_config_name_map(conn, configs), **WORKFLOW_DISPLAY_NAMES}
+            stats_by_id = {}
+            if has_stats:
+                columns = conn.columns("workflow_stats")
+                success_expr = "success_count" if "success_count" in columns else "0 AS success_count"
+                stats_by_id = {row["workflow_id"]: row for row in conn.execute(
+                    f"SELECT workflow_id, call_count, {success_expr} FROM workflow_stats"
+                ).fetchall()}
+            daily_counts = _workflow_daily_count_map(conn, today_start_ms, tomorrow_start_ms)
+            summaries, latest_by_id = {}, {}
+            execution_columns = conn.columns("workflow_executions") if has_executions else set()
+            if has_executions:
+                finished = "finished_at" if "finished_at" in execution_columns else "NULL"
+                updated = "updated_at" if "updated_at" in execution_columns else "NULL"
+                active_time = f"COALESCE({updated}, started_at, 0)"
+                effective_time = f"COALESCE({finished}, {updated}, started_at, 0)"
+                default_cutoff = now_ms - WORKFLOW_DEFAULT_ACTIVE_TIMEOUT_SECONDS * 1000 if "updated_at" in execution_columns else 0
+                bounds = {workflow_id: {
+                    "enabled": state["enabled"],
+                    "cutoff": now_ms - state["timeoutSeconds"] * 1000,
+                } for workflow_id, state in states.items() if state["hasConfig"]}
+                rows = conn.execute(
+                    "WITH bounds AS (SELECT key AS workflow_id, (value ->> 'enabled')::boolean AS enabled, "
+                    "(value ->> 'cutoff')::bigint AS cutoff FROM jsonb_each(?::jsonb)) "
+                    "SELECT e.workflow_id, COUNT(*) AS execution_count, "
+                    "COUNT(*) FILTER (WHERE status IN ('success','completed')) AS success_count, "
+                    "COUNT(*) FILTER (WHERE started_at >= ? AND started_at < ?) AS today_execution_count, "
+                    "COUNT(*) FILTER (WHERE status IN ('running','queued','pending') "
+                    f"AND COALESCE(b.enabled, TRUE) AND {active_time} >= COALESCE(b.cutoff, ?)) AS active_count "
+                    "FROM workflow_executions e LEFT JOIN bounds b ON b.workflow_id = e.workflow_id GROUP BY e.workflow_id",
+                    (json.dumps(bounds), today_start_ms, tomorrow_start_ms, default_cutoff),
+                ).fetchall()
+                summaries = {row["workflow_id"]: row for row in rows}
+                metadata_columns = ["workflow_id", "id", "status", "started_at"] + [
+                    _workflow_execution_column_expr(execution_columns, column, fallback)
+                    for column, fallback in (("finished_at", "NULL"), ("updated_at", "0"),
+                        ("current_phase", "''"), ("current_step_index", "0"), ("step_count", "0"))
+                ]
+                latest_by_id = {row["workflow_id"]: row for row in conn.execute(
+                    f"SELECT DISTINCT ON (workflow_id) {', '.join(metadata_columns)} "
+                    f"FROM workflow_executions ORDER BY workflow_id, {effective_time} DESC, id DESC"
+                ).fetchall()}
+            workflow_ids = set(stats_by_id) | set(summaries)
             if include_mock:
                 workflow_ids.update(SOC_PINNED_WORKFLOW_NAMES)
-            stats_columns = (
-                {
-                    row[1]
-                    for row in conn.execute("PRAGMA table_info(workflow_stats)").fetchall()
-                }
-                if _table_exists(conn, "workflow_stats")
-                else set()
-            )
-            stats_success_expr = "success_count" if "success_count" in stats_columns else "0"
-            stats_error_expr = "error_count" if "error_count" in stats_columns else "0"
-            stats_updated_expr = "updated_at" if "updated_at" in stats_columns else "0"
-            execution_columns = (
-                {
-                    row[1]
-                    for row in conn.execute("PRAGMA table_info(workflow_executions)").fetchall()
-                }
-                if _table_exists(conn, "workflow_executions")
-                else set()
-            )
-            finished_at_expr = "finished_at" if "finished_at" in execution_columns else "NULL"
-            updated_at_expr = "updated_at" if "updated_at" in execution_columns else "NULL"
-            execution_time_expr = f"COALESCE({finished_at_expr}, {updated_at_expr}, started_at, 0)"
-            execution_start_expr = "started_at"
-            active_time_expr = f"COALESCE({updated_at_expr}, started_at, 0)"
-            latest_select = ", ".join(
-                [
-                    "id",
-                    "status",
-                    "started_at",
-                    _workflow_execution_column_expr(execution_columns, "finished_at", "NULL"),
-                    _workflow_execution_column_expr(execution_columns, "updated_at", "0"),
-                    _workflow_execution_column_expr(execution_columns, "current_phase", "''"),
-                    _workflow_execution_column_expr(execution_columns, "current_step_index", "0"),
-                    _workflow_execution_column_expr(execution_columns, "step_count", "0"),
-                    _workflow_execution_column_expr(execution_columns, "input_params", "'{}'"),
-                    _workflow_execution_column_expr(execution_columns, "output_results", "'{}'"),
-                    _workflow_execution_column_expr(execution_columns, "payload", "'{}'"),
-                    _workflow_execution_column_expr(execution_columns, "error_message", "''"),
-                ]
-            )
             workflows = []
-            total_execution_count = 0
-            total_today_execution_count = 0
-            total_active_count = 0
-            now_ms = int(time.time() * 1000)
+            total_execution_count = total_today_execution_count = total_active_count = 0
             for workflow_id in workflow_ids:
-                workflow_name = names.get(workflow_id, workflow_id)
-                hidden_workflow = UUID_RE.match(str(workflow_id)) and workflow_name == workflow_id
-                trigger_state = _workflow_trigger_state(conn, workflow_id)
-                stats = None
-                if _table_exists(conn, "workflow_stats"):
-                    stats = conn.execute(
-                        f"SELECT call_count, {stats_success_expr}, {stats_error_expr}, {stats_updated_expr} "
-                        "FROM workflow_stats WHERE workflow_id = ?",
-                        (workflow_id,),
-                    ).fetchone()
-                latest = None
-                exec_summary = None
-                if _table_exists(conn, "workflow_executions"):
-                    exec_summary = conn.execute(
-                        "SELECT COUNT(*) AS execution_count, "
-                        "SUM(CASE WHEN status IN ('success', 'completed') THEN 1 ELSE 0 END) AS success_count, "
-                        f"SUM(CASE WHEN {execution_start_expr} >= ? "
-                        f"AND {execution_start_expr} < ? THEN 1 ELSE 0 END) "
-                        "AS today_execution_count "
-                        "FROM workflow_executions WHERE workflow_id = ?",
-                        (today_start_ms, tomorrow_start_ms, workflow_id),
-                    ).fetchone()
-                    latest = conn.execute(
-                        f"SELECT {latest_select} "
-                        "FROM workflow_executions WHERE workflow_id = ? "
-                        f"ORDER BY {execution_time_expr} DESC LIMIT 1",
-                        (workflow_id,),
-                    ).fetchone()
-                active_count = 0
-                if _table_exists(conn, "workflow_executions"):
-                    if trigger_state["hasConfig"] and trigger_state["enabled"]:
-                        active_since_ms = now_ms - trigger_state["timeoutSeconds"] * 1000
-                        active_summary = conn.execute(
-                            "SELECT COUNT(*) AS active_count "
-                            "FROM workflow_executions WHERE workflow_id = ? "
-                            "AND status IN ('running', 'queued', 'pending') "
-                            f"AND {active_time_expr} >= ?",
-                            (workflow_id, active_since_ms),
-                        ).fetchone()
-                    elif not trigger_state["hasConfig"] and "updated_at" in execution_columns:
-                        active_since_ms = now_ms - WORKFLOW_DEFAULT_ACTIVE_TIMEOUT_SECONDS * 1000
-                        active_summary = conn.execute(
-                            "SELECT COUNT(*) AS active_count "
-                            "FROM workflow_executions WHERE workflow_id = ? "
-                            "AND status IN ('running', 'queued', 'pending') "
-                            f"AND {active_time_expr} >= ?",
-                            (workflow_id, active_since_ms),
-                        ).fetchone()
-                    elif not trigger_state["hasConfig"]:
-                        active_summary = conn.execute(
-                            "SELECT COUNT(*) AS active_count "
-                            "FROM workflow_executions WHERE workflow_id = ? "
-                            "AND status IN ('running', 'queued', 'pending')",
-                            (workflow_id,),
-                        ).fetchone()
-                    else:
-                        active_summary = None
-                    active_count = max(
-                        _safe_int(active_summary["active_count"] if active_summary else 0),
-                        0,
-                    )
-                exec_execution_count = max(
-                    _safe_int(exec_summary["execution_count"] if exec_summary else 0),
-                    0,
-                )
-                exec_today_execution_count = max(
-                    _safe_int(exec_summary["today_execution_count"] if exec_summary else 0),
-                    0,
-                )
-                if stats is not None:
-                    execution_count = max(_safe_int(stats["call_count"]), 0)
-                    stats_today_count = _workflow_stats_call_delta_from_samples(
-                        conn,
-                        workflow_id,
-                        today_start_ms,
-                        tomorrow_start_ms,
-                    )
-                    today_execution_count = (
-                        max(_safe_int(stats_today_count), 0)
-                        if stats_today_count is not None
-                        else exec_today_execution_count
-                    )
-                    success_count = max(_safe_int(stats["success_count"]), 0)
-                else:
-                    execution_count = exec_execution_count
-                    today_execution_count = exec_today_execution_count
-                    success_count = max(
-                        _safe_int(exec_summary["success_count"] if exec_summary else 0),
-                        0,
-                    )
+                stats, summary = stats_by_id.get(workflow_id), summaries.get(workflow_id, {})
+                latest = latest_by_id.get(workflow_id)
+                state = states.get(workflow_id) or _workflow_trigger_state(conn, workflow_id, [])
+                execution_count = max(_safe_int(stats["call_count"] if stats else summary.get("execution_count")), 0)
+                today_count = max(_safe_int(daily_counts.get(workflow_id, summary.get("today_execution_count", 0))
+                                           if stats else summary.get("today_execution_count", 0)), 0)
+                success_count = max(_safe_int(stats["success_count"] if stats else summary.get("success_count")), 0)
+                active_count = max(_safe_int(summary.get("active_count")), 0)
                 total_execution_count += execution_count
-                total_today_execution_count += today_execution_count
+                total_today_execution_count += today_count
                 total_active_count += active_count
-                if hidden_workflow:
+                name = names.get(workflow_id, workflow_id)
+                if UUID_RE.match(str(workflow_id)) and name == workflow_id:
                     continue
-                last_run_at = 0
+                last_run_at = (_safe_int(latest["finished_at"]) or _safe_int(latest["updated_at"])
+                               or _safe_int(latest["started_at"])) if latest else 0
+                workflows.append({
+                    "id": workflow_id, "name": name, "executionCount": execution_count,
+                    "todayExecutionCount": today_count, "successCount": success_count,
+                    "successRate": _ratio(success_count, execution_count), "activeCount": active_count,
+                    "lastStatus": _workflow_effective_status(latest, active_count, state),
+                    "lastRunAt": last_run_at, "latestExecutionHash": str(latest["id"] if latest else ""),
+                    "latestAlertName": "", "progressPercent": 0, "progressLabel": "待执行",
+                    "currentPhase": "", "sessionId": "", "messageId": "",
+                })
+            soc_order = {"stream_alert_denoise": 3, "stream_alert_triage": 2,
+                         "onesec_kafka_investigation": 1, "tdp_alert_triage": 1, "sec_alert_unified_ops": 1}
+            workflows.sort(key=lambda item: (item["activeCount"] > 0, item["lastRunAt"],
+                                              item["executionCount"], soc_order.get(item["id"], 0)), reverse=True)
+            selected = workflows[:min(max(int(limit), 0), 12)]
+            selected_ids = [item["latestExecutionHash"] for item in selected if item["latestExecutionHash"]]
+            payloads = {}
+            if selected_ids:
+                bounded = [f"CASE WHEN octet_length({column}) <= 262144 THEN {column} ELSE '{{}}' END AS {column}"
+                           if column in execution_columns else f"'{{}}' AS {column}"
+                           for column in ("input_params", "output_results", "payload")]
+                payloads = {row["id"]: row for row in conn.execute(
+                    f"SELECT id, {', '.join(bounded)} FROM workflow_executions WHERE id = ANY(?::text[])",
+                    (selected_ids,),
+                ).fetchall()}
+            for item in selected:
+                latest = latest_by_id.get(item["id"])
                 if latest:
-                    last_run_at = (
-                        _safe_int(latest["finished_at"])
-                        or _safe_int(latest["updated_at"])
-                        or _safe_int(latest["started_at"])
+                    payload = payloads.get(latest["id"], {})
+                    steps = max(_workflow_node_count(item["id"]), _safe_int(latest["step_count"]))
+                    item["progressPercent"], item["progressLabel"] = _workflow_progress(
+                        item["lastStatus"], latest["current_step_index"], latest["step_count"], steps,
                     )
-                workflow_total_steps = _workflow_node_count(workflow_id)
-                latest_alert_name = ""
-                progress_percent = 0
-                progress_label = "待执行"
-                current_phase = ""
-                session_id = ""
-                message_id = ""
-                effective_status = _workflow_effective_status(latest, active_count, trigger_state)
-                if latest:
-                    workflow_total_steps = max(workflow_total_steps, _safe_int(latest["step_count"]))
-                    latest_alert_name = _workflow_latest_alert_name(
-                        workflow_id,
-                        latest["output_results"],
-                        latest["input_params"],
+                    item["latestAlertName"] = _workflow_latest_alert_name(
+                        item["id"], payload.get("output_results", "{}"), payload.get("input_params", "{}"),
                     )
-                    progress_percent, progress_label = _workflow_progress(
-                        effective_status,
-                        latest["current_step_index"],
-                        latest["step_count"],
-                        workflow_total_steps,
-                    )
-                    current_phase = str(latest["current_phase"] or "")
-                    session_id, message_id = _workflow_link_context(latest)
-                workflows.append(
-                    {
-                        "id": workflow_id,
-                        "name": workflow_name,
-                        "executionCount": execution_count,
-                        "todayExecutionCount": today_execution_count,
-                        "successCount": success_count,
-                        "successRate": _ratio(success_count, execution_count),
-                        "activeCount": active_count,
-                        "lastStatus": effective_status,
-                        "lastRunAt": last_run_at,
-                        "latestExecutionHash": str(latest["id"] if latest else ""),
-                        "latestAlertName": latest_alert_name,
-                        "progressPercent": progress_percent,
-                        "progressLabel": progress_label,
-                        "currentPhase": current_phase,
-                        "sessionId": session_id,
-                        "messageId": message_id,
-                    }
-                )
-            soc_order = {
-                "stream_alert_denoise": 3,
-                "stream_alert_triage": 2,
-                "onesec_kafka_investigation": 1,
-                "tdp_alert_triage": 1,
-                "sec_alert_unified_ops": 1,
-            }
-            workflows.sort(
-                key=lambda item: (
-                    item["activeCount"] > 0,
-                    item["lastRunAt"],
-                    item["executionCount"],
-                    soc_order.get(item["id"], 0),
-                ),
-                reverse=True,
-            )
-            return (
-                workflows[:limit],
-                total_execution_count,
-                total_today_execution_count,
-                total_active_count,
-            )
+                    item["currentPhase"] = str(latest["current_phase"] or "")
+                    item["sessionId"], item["messageId"] = _workflow_link_context(payload)
+            return selected, total_execution_count, total_today_execution_count, total_active_count
     except Exception:
         return [], 0, 0, 0
+
 
 
 def _get_task_center(include_mock=False):
@@ -1913,9 +1710,9 @@ def _get_task_center(include_mock=False):
 
 
 def _get_activity(params):
-    _ensure_sqlite_schema()
+    _ensure_postgres_schema()
     _maybe_prune_activity()
-    settings = _sqlite_settings()
+    settings = _postgres_settings()
     db_path = settings["db_path"]
     time_window = _normalize_time_window(
         params.get("startTime"),
@@ -1927,15 +1724,16 @@ def _get_activity(params):
         start_time,
         end_time,
     )
+    workflow_snapshot = {"complete": True, "available": True}
     workflow_events = [
-        *_get_workflow_recent_events("stream_alert_denoise", start_time, end_time),
-        *_get_workflow_recent_events("stream_alert_triage", start_time, end_time),
+        *_get_workflow_recent_events("stream_alert_denoise", start_time, end_time, snapshot=workflow_snapshot),
+        *_get_workflow_recent_events("stream_alert_triage", start_time, end_time, snapshot=workflow_snapshot),
     ]
     raw_cursor = str(params.get("cursor") or "").strip()
     bootstrap = str(params.get("bootstrap") or "").strip().lower() == "latest"
     limit = max(1, min(_safe_int(params.get("limit") or ACTIVITY_DEFAULT_LIMIT), ACTIVITY_MAX_LIMIT))
 
-    if not db_path.is_file():
+    if not _available(DEFAULT_POSTGRES_TABLE):
         return _activity_response(
             [],
             0,
@@ -1943,17 +1741,18 @@ def _get_activity(params):
             cursor_reset=bool(raw_cursor),
             workflow_stats=workflow_stats,
             workflow_events=workflow_events,
+            workflow_snapshot=workflow_snapshot,
         )
 
     cursor = _decode_activity_cursor(raw_cursor) if raw_cursor else None
     cursor_reset = bool(raw_cursor and cursor is None)
 
     try:
-        with sqlite3.connect(db_path) as conn:
-            conn.row_factory = sqlite3.Row
-            conn.execute("PRAGMA query_only = ON")
+        with _connect() as conn:
+
+
             if not (
-                _table_exists(conn, DEFAULT_SQLITE_TABLE)
+                _table_exists(conn, DEFAULT_POSTGRES_TABLE)
                 and _table_exists(conn, ACTIVITY_TABLE)
             ):
                 return _activity_response(
@@ -1963,6 +1762,7 @@ def _get_activity(params):
                     cursor_reset=cursor_reset,
                     workflow_stats=workflow_stats,
                     workflow_events=workflow_events,
+                    workflow_snapshot=workflow_snapshot,
                 )
             latest_row_id, latest_activity_id = _activity_latest_cursor(conn, settings)
 
@@ -1982,6 +1782,7 @@ def _get_activity(params):
                     recent_events=recent_events,
                     workflow_stats=workflow_stats,
                     workflow_events=workflow_events,
+                    workflow_snapshot=workflow_snapshot,
                 )
 
             last_row_id = max(_safe_int(cursor.get("lastRowId")), 0)
@@ -2007,6 +1808,7 @@ def _get_activity(params):
                 "",
                 workflow_stats=workflow_stats,
                 workflow_events=workflow_events,
+                workflow_snapshot=workflow_snapshot,
             ),
             "error": f"activity query failed: {exc}",
         }
@@ -2029,6 +1831,7 @@ def _get_activity(params):
             batch=batch,
             workflow_stats=workflow_stats,
             workflow_events=workflow_events,
+            workflow_snapshot=workflow_snapshot,
         ),
         "overflowCount": overflow_count,
     }
@@ -2044,6 +1847,7 @@ def _activity_response(
     batch=None,
     workflow_stats=None,
     workflow_events=None,
+    workflow_snapshot=None,
 ):
     return {
         "cursor": _encode_activity_cursor(last_row_id, last_activity_id),
@@ -2055,6 +1859,8 @@ def _activity_response(
         "cursorReset": cursor_reset,
         "workflowStats": workflow_stats or {"callCount": None, "latestStartedAt": None},
         "workflowEvents": workflow_events or [],
+        "workflowSnapshotComplete": bool(workflow_snapshot and workflow_snapshot["complete"]),
+        "workflowSnapshotAvailable": bool(workflow_snapshot and workflow_snapshot.get("available", True)),
         "tokenUsage": _read_token_usage(),
     }
 
@@ -2168,11 +1974,7 @@ def _activity_rows(
 
 
 def _activity_table_columns(conn, settings):
-    return {
-        str(row[1])
-        for row in conn.execute(f"PRAGMA table_info({settings['table']})").fetchall()
-    }
-
+    return conn.columns(settings["table"].strip(chr(34)))
 
 def _activity_insert_summary(conn, settings, last_row_id, latest_row_id):
     columns = _activity_table_columns(conn, settings)
@@ -2222,12 +2024,15 @@ def _activity_insert_samples(conn, settings, *, last_row_id, latest_row_id, rece
     columns = _activity_table_columns(conn, settings)
     if {"is_duplicate", "threat_name", "source_type"}.issubset(columns):
         return conn.execute(
-            f"SELECT MAX(rowid) AS activity_row_id, MAX({settings['event_time_column']}) AS activity_event_time, "
-            f"{record_column} AS record_json, COUNT(*) AS sample_count "
+            f"WITH samples AS (SELECT MAX(rowid) AS activity_row_id, MAX({settings['event_time_column']}) AS activity_event_time, "
+            f"COUNT(*) AS sample_count "
             f"FROM {table} WHERE rowid > ? AND rowid <= ? "
             f"GROUP BY COALESCE(NULLIF(\"source_type\", ''), 'unknown'), "
             f"COALESCE(NULLIF(\"threat_name\", ''), 'unknown'), \"is_duplicate\" "
-            f"ORDER BY sample_count DESC, activity_row_id DESC LIMIT ?",
+            f"ORDER BY sample_count DESC, activity_row_id DESC LIMIT ?) "
+            f"SELECT samples.*, source.{record_column} AS record_json FROM samples "
+            f"JOIN {table} source ON source.rowid = samples.activity_row_id "
+            f"ORDER BY sample_count DESC, activity_row_id DESC",
             (last_row_id, latest_row_id, limit),
         ).fetchall()
     return conn.execute(
@@ -2358,12 +2163,7 @@ def _first_activity_text(record, *keys):
 
 
 def _file_revision(path):
-    try:
-        stat = path.stat()
-        return stat.st_size, stat.st_mtime_ns
-    except Exception:
-        return 0, 0
-
+    return _database.get().identity(), int(time.monotonic() // 15)
 
 def _stats_cache_ttl(start_time, end_time):
     span = max(end_time - start_time, 0)
@@ -2400,13 +2200,14 @@ def _stats_cache_put(cache_key, value):
             _stats_response_cache.popitem(last=False)
 
 
-async def get_stats(ctx, request):
+def get_stats(ctx, request):
+    _database.set(ctx.database)
     params = dict(request.query_params)
-    return await asyncio.to_thread(_get_stats, params)
+    return _get_stats(params)
 
 
 def _get_stats(params):
-    _ensure_sqlite_schema()
+    _ensure_postgres_schema()
     time_window = _normalize_time_window(
         params.get("startTime"),
         params.get("endTime"),
@@ -2518,10 +2319,10 @@ def _get_stats(params):
         "latencyMs": round((time.time() - started) * 1000),
         "sourceStatus": {
             "dataPolicy": {
-                "mode": "sqlite-only",
+                "mode": "postgres",
                 "jsonlEnabled": False,
                 "allowedDatabases": [
-                    _display_path(DEFAULT_SQLITE_DB),
+                    _display_path(DEFAULT_POSTGRES_DB),
                     _display_path(WORKFLOW_DB),
                     _display_path(USAGE_DB),
                 ],
@@ -2623,7 +2424,7 @@ def _date_span(start_date, end_date):
 
 
 def _find_asset_files(start_date, end_date, start_time=0, end_time=0):
-    return _find_sqlite_sources(start_date, end_date, start_time, end_time)
+    return _find_postgres_sources(start_date, end_date, start_time, end_time)
 
 
 def _asset_file_date(path):
@@ -2638,38 +2439,38 @@ def _latest_asset_date():
 
 
 def _available_asset_dates():
-    return _available_sqlite_dates()
+    return _available_postgres_dates()
 
 
 def _active_data_source():
-    return "sqlite"
+    return "postgres"
 
 
-def _sqlite_settings():
+def _postgres_settings():
     return {
-        "db_path": DEFAULT_SQLITE_DB,
-        "table": f'"{DEFAULT_SQLITE_TABLE}"',
+        "db_path": DEFAULT_POSTGRES_DB,
+        "table": f'"{DEFAULT_POSTGRES_TABLE}"',
         "facts_table": f'"{FACTS_TABLE}"',
         "activity_table": f'"{ACTIVITY_TABLE}"',
-        "record_column": f'"{DEFAULT_SQLITE_RECORD_COLUMN}"',
-        "date_column": f'"{DEFAULT_SQLITE_DATE_COLUMN}"',
-        "event_time_column": f'"{DEFAULT_SQLITE_EVENT_TIME_COLUMN}"',
+        "record_column": f'"{DEFAULT_POSTGRES_RECORD_COLUMN}"',
+        "date_column": f'"{DEFAULT_POSTGRES_DATE_COLUMN}"',
+        "event_time_column": f'"{DEFAULT_POSTGRES_EVENT_TIME_COLUMN}"',
     }
 
 
 def _active_source_path():
-    return _sqlite_settings()["db_path"]
+    return _postgres_settings()["db_path"]
 
 
 def _active_source_exists():
     path = _active_source_path()
-    return path.is_file()
+    return _available(DEFAULT_POSTGRES_TABLE)
 
 
-def _find_sqlite_sources(start_date, end_date, start_time=0, end_time=0):
-    settings = _sqlite_settings()
+def _find_postgres_sources(start_date, end_date, start_time=0, end_time=0):
+    settings = _postgres_settings()
     db_path = settings["db_path"]
-    if not db_path.is_file():
+    if not _available(DEFAULT_POSTGRES_TABLE):
         return []
 
     time_clause = ""
@@ -2685,7 +2486,7 @@ def _find_sqlite_sources(start_date, end_date, start_time=0, end_time=0):
         f"ORDER BY {settings['date_column']}"
     )
     try:
-        with sqlite3.connect(db_path) as conn:
+        with _connect() as conn:
             rows = conn.execute(query, query_params).fetchall()
     except Exception:
         return []
@@ -2700,7 +2501,7 @@ def _find_sqlite_sources(start_date, end_date, start_time=0, end_time=0):
                 path=db_path,
                 role="denoise",
                 date=asset_date,
-                data_source="sqlite",
+                data_source="postgres",
                 record_count=int(record_count or 0),
                 start_time=start_time,
                 end_time=end_time,
@@ -2709,10 +2510,10 @@ def _find_sqlite_sources(start_date, end_date, start_time=0, end_time=0):
     return sources
 
 
-def _available_sqlite_dates():
-    settings = _sqlite_settings()
+def _available_postgres_dates():
+    settings = _postgres_settings()
     db_path = settings["db_path"]
-    if not db_path.is_file():
+    if not _available(DEFAULT_POSTGRES_TABLE):
         return []
     query = (
         f"SELECT DISTINCT {settings['date_column']} AS asset_date "
@@ -2721,7 +2522,7 @@ def _available_sqlite_dates():
         f"ORDER BY {settings['date_column']}"
     )
     try:
-        with sqlite3.connect(db_path) as conn:
+        with _connect() as conn:
             rows = conn.execute(query).fetchall()
     except Exception:
         return []
@@ -2782,8 +2583,8 @@ def _asset_file_role(path):
 
 
 def _read_denoise(paths, workflow_call_count: int = 0):
-    if paths and all(isinstance(path, _RecordSource) and path.data_source == "sqlite" for path in paths):
-        optimized = _read_sqlite_denoise(paths, workflow_call_count)
+    if paths and all(isinstance(path, _RecordSource) and path.data_source == "postgres" for path in paths):
+        optimized = _read_postgres_denoise(paths, workflow_call_count)
         if optimized is not None:
             return optimized
 
@@ -2845,8 +2646,8 @@ def _read_denoise(paths, workflow_call_count: int = 0):
     }
 
 
-def _read_sqlite_denoise(paths, workflow_call_count):
-    settings = _sqlite_settings()
+def _read_postgres_denoise(paths, workflow_call_count):
+    settings = _postgres_settings()
     dates = sorted({path.date for path in paths})
     if not dates:
         return None
@@ -2862,7 +2663,7 @@ def _read_sqlite_denoise(paths, workflow_call_count):
         where_clause += f" AND {event_time_column} BETWEEN ? AND ?"
         query_params.extend((start_time, end_time))
     try:
-        with sqlite3.connect(settings["db_path"]) as conn:
+        with _connect() as conn:
             rows = conn.execute(
                 f"SELECT {date_column}, COUNT(*), "
                 f"COALESCE(SUM(CASE WHEN \"is_duplicate\" = 1 THEN 1 ELSE 0 END), 0), "
@@ -2876,13 +2677,13 @@ def _read_sqlite_denoise(paths, workflow_call_count):
                 f"WHERE {where_clause} GROUP BY \"source_type\"",
                 query_params,
             ).fetchall()
-            profile_counters, threat_type_counter = _sqlite_detail_counters(
+            profile_counters, threat_type_counter = _postgres_detail_counters(
                 conn,
                 settings,
                 where_clause,
                 query_params,
             )
-            timeline = _sqlite_timeline(
+            timeline = _postgres_timeline(
                 conn,
                 settings,
                 where_clause,
@@ -2962,7 +2763,7 @@ def _timeline_spec(dates, start_time, end_time):
     return bucket_start, bucket_seconds, bucket_count, labels, window
 
 
-def _sqlite_timeline(conn, settings, where_clause, query_params, dates, start_time, end_time):
+def _postgres_timeline(conn, settings, where_clause, query_params, dates, start_time, end_time):
     bucket_start, bucket_seconds, bucket_count, labels, window = _timeline_spec(
         dates,
         start_time,
@@ -3002,7 +2803,7 @@ def _sqlite_timeline(conn, settings, where_clause, query_params, dates, start_ti
     }
 
 
-def _sqlite_detail_counters(conn, settings, where_clause, query_params):
+def _postgres_detail_counters(conn, settings, where_clause, query_params):
     table = settings["facts_table"]
     cache_key = (
         str(settings["db_path"]),
@@ -3071,8 +2872,8 @@ def _sqlite_detail_counters(conn, settings, where_clause, query_params):
     return profile_counters, threat_type_counter
 
 
-def _read_sqlite_triage(paths):
-    settings = _sqlite_settings()
+def _read_postgres_triage(paths):
+    settings = _postgres_settings()
     dates = sorted({path.date for path in paths})
     if not dates:
         return None
@@ -3095,7 +2896,7 @@ def _read_sqlite_triage(paths):
         f"NOT {cache_condition} AND NOT {follower_condition} AND NOT ({failed_condition})"
     )
     try:
-        with sqlite3.connect(settings["db_path"]) as conn:
+        with _connect() as conn:
             row = conn.execute(
                 f"SELECT COUNT(*), "
                 f"COALESCE(SUM(CASE WHEN {cache_condition} THEN 1 ELSE 0 END), 0), "
@@ -3214,8 +3015,8 @@ def _read_sqlite_triage(paths):
 
 
 def _read_triage(paths):
-    if paths and all(isinstance(path, _RecordSource) and path.data_source == "sqlite" for path in paths):
-        optimized = _read_sqlite_triage(paths)
+    if paths and all(isinstance(path, _RecordSource) and path.data_source == "postgres" for path in paths):
+        optimized = _read_postgres_triage(paths)
         if optimized is not None:
             return optimized
     total_records = 0
@@ -3523,13 +3324,13 @@ def _port_label(value):
 
 
 def _iter_source_records(path, *, triage_only=False):
-    if isinstance(path, _RecordSource) and path.data_source == "sqlite":
-        yield from _iter_sqlite_records(path, triage_only=triage_only)
+    if isinstance(path, _RecordSource) and path.data_source == "postgres":
+        yield from _iter_postgres_records(path, triage_only=triage_only)
     return
 
 
-def _iter_sqlite_records(source, *, triage_only=False):
-    settings = _sqlite_settings()
+def _iter_postgres_records(source, *, triage_only=False):
+    settings = _postgres_settings()
     time_filter = ""
     query_params = [source.date]
     if source.start_time > 0 and source.end_time > 0:
@@ -3538,9 +3339,9 @@ def _iter_sqlite_records(source, *, triage_only=False):
     triage_filter = ""
     if triage_only:
         triage_filter = (
-            f" AND (NULLIF(json_extract({settings['record_column']}, '$.triage_status'), '') IS NOT NULL "
-            f"OR NULLIF(json_extract({settings['record_column']}, '$._triage_persisted_at'), '') IS NOT NULL "
-            f"OR json_extract({settings['record_column']}, '$.triage_report') IS NOT NULL)"
+            f" AND (NULLIF(({settings['record_column']}->>'triage_status'), '') IS NOT NULL "
+            f"OR NULLIF(({settings['record_column']}->>'_triage_persisted_at'), '') IS NOT NULL "
+            f"OR ({settings['record_column']}->>'triage_report') IS NOT NULL)"
         )
     query = (
         f"SELECT {settings['record_column']} AS record_json "
@@ -3549,7 +3350,7 @@ def _iter_sqlite_records(source, *, triage_only=False):
         f"ORDER BY {settings['event_time_column']}, rowid"
     )
     try:
-        with sqlite3.connect(settings["db_path"]) as conn:
+        with _connect() as conn:
             cursor = conn.execute(query, query_params)
             for row in cursor:
                 try:
@@ -3618,7 +3419,7 @@ def _counter_items(counter, limit):
 
 def _file_brief(path):
     if isinstance(path, _RecordSource):
-        stat = path.path.stat() if path.path.exists() else None
+        stat = None
         return {
             "name": f"{path.path.name}:{path.date}",
             "path": _display_path(path.path),
@@ -3722,3 +3523,50 @@ def _norm(value):
     if not text:
         return "unknown"
     return text.lower()
+
+
+def _workflow_config_projection_rows(conn):
+    if not _table_exists(conn, "workflow_configs"):
+        return []
+    return conn.execute(
+        "SELECT workflow_id, kind, "
+        "jsonb_exists(config::jsonb, 'enabled') AS enabled_present, "
+        "config::jsonb -> 'enabled' AS enabled, "
+        "COALESCE(NULLIF(config::jsonb ->> 'timeoutSeconds', ''), "
+        "config::jsonb ->> 'timeout_seconds') AS timeout_seconds, "
+        "COALESCE(NULLIF(config::jsonb #>> '{workflow,name}', ''), "
+        "NULLIF(config::jsonb #>> '{workflow,title}', ''), "
+        "config::jsonb #>> '{workflow,id}') AS workflow_name "
+        "FROM workflow_configs"
+    ).fetchall()
+
+
+
+def _workflow_config_enabled(value):
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except (TypeError, ValueError):
+            pass
+    return _truthy_config_value(value)
+
+
+
+def _workflow_daily_count_map(conn, start_ms, end_ms):
+    if not _table_exists(conn, WORKFLOW_SNAPSHOT_TABLE):
+        return {}
+    rows = conn.execute(
+        f"WITH previous AS (SELECT DISTINCT ON (workflow_id) workflow_id, "
+        f"GREATEST(COALESCE(call_count, 0), 0) AS previous_count FROM {WORKFLOW_SNAPSHOT_TABLE} "
+        "WHERE sampled_at < ? ORDER BY workflow_id, sampled_at DESC), "
+        f"daily AS (SELECT s.workflow_id, s.sampled_at, GREATEST(COALESCE(s.call_count, 0), 0) AS current_count, "
+        "LAG(GREATEST(COALESCE(s.call_count, 0), 0), 1, p.previous_count) "
+        "OVER (PARTITION BY s.workflow_id ORDER BY s.sampled_at) AS previous_count "
+        f"FROM {WORKFLOW_SNAPSHOT_TABLE} s JOIN previous p USING(workflow_id) "
+        "WHERE s.sampled_at >= ? AND s.sampled_at < ?) "
+        "SELECT p.workflow_id, COALESCE(SUM(CASE WHEN d.current_count >= d.previous_count "
+        "THEN d.current_count - d.previous_count ELSE d.current_count END), 0) AS today_count "
+        "FROM previous p LEFT JOIN daily d USING(workflow_id) GROUP BY p.workflow_id",
+        (start_ms, start_ms, end_ms),
+    ).fetchall()
+    return {row["workflow_id"]: max(_safe_int(row["today_count"]), 0) for row in rows}

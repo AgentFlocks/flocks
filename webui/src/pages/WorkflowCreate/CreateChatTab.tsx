@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
-import { AlertCircle, Bot } from 'lucide-react';
+import { IconAlertCircle, IconRobot } from '@tabler/icons-react';
 import { useTranslation } from 'react-i18next';
 import SessionChat, {
   buildInstructionDisplayText,
@@ -327,7 +327,7 @@ export default function CreateChatTab({
     return (
       <div className="flex flex-col items-center justify-center h-full gap-4 p-6 text-center">
         <div className="flex items-center gap-2 text-xs text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2 w-full">
-          <AlertCircle className="w-4 h-4 flex-shrink-0" />
+          <IconAlertCircle aria-hidden="true" className="w-4 h-4 flex-shrink-0" />
           {error}
         </div>
         <button
@@ -361,7 +361,7 @@ export default function CreateChatTab({
       welcomeContent={!sessionId ? (
         <GuidedCreatePanel
           emptyTitle={t('create.chat.emptyStateTitle')}
-          icon={<Bot className="h-5 w-5" />}
+          icon={<IconRobot aria-hidden="true" className="h-5 w-5" />}
           title={t('create.chat.guidePanelTitle')}
           description={t('create.chat.guidePanelDesc')}
           groups={[

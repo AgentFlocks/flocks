@@ -53,13 +53,18 @@ export const IMAGE_QUALITY = 0.82;
 /** Files smaller than this are passed through untouched (default path). */
 export const IMAGE_PASSTHROUGH_BYTES = 180 * 1024;
 
-/** Wire-format payload for an image part sent in ``prompt_async``. */
-export interface ImagePartData {
-  /** ``data:<mime>;base64,<bytes>`` URL produced by {@link readFileAsDataUrl}. */
-  url: string;
+/** Wire-format payload for a file part sent in ``prompt_async``. */
+export interface FilePartData {
+  id?: string;
+  /** Inline images use a data URL; staged documents use uploadID instead. */
+  url?: string;
+  uploadID?: string;
   mime: string;
   filename: string;
 }
+
+/** Backward-compatible alias used by existing image-only callers. */
+export type ImagePartData = FilePartData;
 
 /** A single ``parts[]`` entry in the ``prompt_async`` request body. */
 export type PromptPart = Record<string, unknown>;
@@ -80,17 +85,19 @@ export type PromptPart = Record<string, unknown>;
  */
 export function buildPromptParts(
   text: string,
-  imageParts?: ImagePartData[],
+  fileParts?: FilePartData[],
 ): PromptPart[] {
   const parts: PromptPart[] = [];
   if (text) parts.push({ type: 'text', text });
-  if (imageParts && imageParts.length > 0) {
-    for (const img of imageParts) {
+  if (fileParts && fileParts.length > 0) {
+    for (const file of fileParts) {
       parts.push({
         type: 'file',
-        url: img.url,
-        mime: img.mime,
-        filename: img.filename,
+        ...(file.id ? { id: file.id } : {}),
+        ...(file.url ? { url: file.url } : {}),
+        ...(file.uploadID ? { uploadID: file.uploadID } : {}),
+        mime: file.mime,
+        filename: file.filename,
       });
     }
   }

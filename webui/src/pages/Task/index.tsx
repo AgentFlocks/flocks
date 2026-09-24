@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { ListTodo, Plus, Clock, Calendar, Globe } from 'lucide-react';
+import { IconListCheck, IconPlus, IconClock, IconCalendar, IconWorld } from '@tabler/icons-react';
 import { useTranslation } from 'react-i18next';
 import PageHeader from '@/components/common/PageHeader';
 import { useTaskDashboard, useTaskSystemNotice } from '@/hooks/useTasks';
@@ -15,9 +15,9 @@ type TabKey = 'queued' | 'scheduled' | 'services';
 export default function TaskPage() {
   const { t } = useTranslation('task');
   const MAIN_TABS: { key: TabKey; label: string; icon: React.ElementType; countKey: keyof DashboardCounts | null }[] = [
-    { key: 'queued',    label: t('tabs.queued'),    icon: Clock,     countKey: 'queued' },
-    { key: 'scheduled', label: t('tabs.scheduled'), icon: Calendar,  countKey: 'scheduled_active' },
-    { key: 'services',  label: t('tabs.services'),  icon: Globe,     countKey: null },
+    { key: 'queued',    label: t('tabs.queued'),    icon: IconClock,     countKey: 'queued' },
+    { key: 'scheduled', label: t('tabs.scheduled'), icon: IconCalendar,  countKey: 'scheduled_active' },
+    { key: 'services',  label: t('tabs.services'),  icon: IconWorld,     countKey: null },
   ];
   const [activeTab, setActiveTab] = useState<TabKey>('queued');
   const [showCreateDialog, setShowCreateDialog] = useState(false);
@@ -38,14 +38,14 @@ export default function TaskPage() {
       <PageHeader
         title={t('pageTitle')}
         description={t('pageDescription')}
-        icon={<ListTodo className="w-8 h-8" />}
+        icon={<IconListCheck aria-hidden="true" className="w-8 h-8" />}
         action={
           activeTab !== 'services' ? (
             <button
               onClick={() => setShowCreateDialog(true)}
               className="flex items-center gap-2 px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors"
             >
-              <Plus className="w-4 h-4" /> {t('createTask')}
+              <IconPlus aria-hidden="true" className="w-4 h-4" /> {t('createTask')}
             </button>
           ) : null
         }
@@ -59,7 +59,8 @@ export default function TaskPage() {
         )}
         {activeTab !== 'services' && <DashboardCards counts={counts} />}
 
-        <div className="flex gap-1 bg-gray-100 rounded-lg p-1 w-fit">
+        {/* 窄屏（375px）三个页签放不下时整个页签换行，而不是把「任务队列」逐字竖排 */}
+        <div className="flex flex-wrap gap-1 bg-gray-100 rounded-lg p-1 w-fit max-w-full whitespace-nowrap">
           {MAIN_TABS.map(tab => {
             const Icon = tab.icon;
             const count = tab.countKey ? (counts?.[tab.countKey] as number | undefined) : undefined;
@@ -73,7 +74,7 @@ export default function TaskPage() {
                     : 'text-gray-600 hover:text-gray-900'
                 }`}
               >
-                <Icon className="w-4 h-4" />
+                <Icon aria-hidden="true" className="w-4 h-4" />
                 {tab.label}
                 {count != null && count > 0 && (
                   <span className={`text-xs px-1.5 py-0.5 rounded-full font-medium ${

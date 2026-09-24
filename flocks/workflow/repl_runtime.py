@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, ClassVar, Dict, Optional, TextIO, Tuple
 
 from .errors import NodeExecutionError, RunCancelledError
-from .llm import get_lazy_llm
+from .llm import get_lazy_llm, llm_hook_context_from_registry
 from .tools import ToolFacade, get_tool_registry
 
 
@@ -236,6 +236,7 @@ class PythonExecRuntime(Runtime):
             "is_cancelled",
             "llm",
             "tool",
+            "soc",
             "get_path",
         }
     )
@@ -265,7 +266,10 @@ class PythonExecRuntime(Runtime):
         # a line tracer so simple Python loops can be interrupted by UI stop.
         g["cancelled"] = _cancel_requested
         g["is_cancelled"] = _cancel_requested
-        g["llm"] = get_lazy_llm(cancel_checker=self.cancel_checker)
+        g["llm"] = get_lazy_llm(
+            cancel_checker=self.cancel_checker,
+            hook_context=llm_hook_context_from_registry(self.tool_registry),
+        )
         reg = self.tool_registry or get_tool_registry()
         if hasattr(reg, "cancel_checker"):
             try:
@@ -273,6 +277,9 @@ class PythonExecRuntime(Runtime):
             except Exception:
                 pass
         g.setdefault("tool", ToolFacade(reg) if not isinstance(reg, ToolFacade) else reg)
+        from flocks.workflow.soc_store import SOCWriteCapability
+
+        g["soc"] = SOCWriteCapability(self.cancel_checker)
 
         def get_path(path: str, data: Any = None) -> Any:
             if data is None:
@@ -630,7 +637,7 @@ def _read_rpc_responses():
     except Exception as exc:
         _fail_rpc_waiters(str(exc))
 
-def _rpc_call(payload):
+def _rpc_call(payload, timeout_s=None):
     global _rpc_seq
     with _rpc_seq_lock:
         _rpc_seq += 1
@@ -651,7 +658,8 @@ def _rpc_call(payload):
         with _rpc_write_lock:
             _out.write(json.dumps(req, ensure_ascii=False, default=str) + "\\n")
             _out.flush()
-        waiter["event"].wait()
+        if not waiter["event"].wait(timeout_s):
+            raise TimeoutError("Workflow host capability timed out")
         resp = waiter["response"] or {{}}
     finally:
         with _rpc_waiters_lock:
@@ -695,6 +703,11 @@ class _ToolProxy:
 
     def run_safe(self, name, **kwargs):
         return _rpc_call({{"kind": "tool_safe", "name": name, "kwargs": kwargs}})
+
+class _SOCProxy:
+    def write_alerts(self, alerts, run_id, source_file=""):
+        return _rpc_call({{"kind": "soc_alerts_write", "alerts": alerts,
+                          "run_id": run_id, "source_file": source_file}}, timeout_s=60.0)
 
 class _LLMProxy:
     def ask(
@@ -757,6 +770,7 @@ g = {{
     "is_cancelled": _cancel_requested,
     "get_path": get_path,
     "tool": _ToolProxy(),
+    "soc": _SOCProxy(),
     "llm": _LLMProxy(),
 }}
 
@@ -850,6 +864,14 @@ sys.stdout.flush()
                 output = bool(effective_cancel_checker and effective_cancel_checker())
                 return {"type": "rpc_result", "token": token, "id": req_id, "ok": True, "output": output}
 
+            if kind == "soc_alerts_write":
+                from flocks.workflow.soc_store import SOCWriteCapability
+
+                output = SOCWriteCapability(effective_cancel_checker).write_alerts(
+                    rpc.get("alerts"), rpc.get("run_id"), rpc.get("source_file", ""),
+                )
+                return {"type": "rpc_result", "token": token, "id": req_id, "ok": True, "output": output}
+
             if kind in ("tool", "tool_safe"):
                 name = str(rpc.get("name") or "").strip()
                 if not name:
@@ -908,7 +930,10 @@ sys.stdout.flush()
                     retry_delay_s = float(retry_delay_raw)
                 except Exception as exc:
                     raise RuntimeError("LLM retry_delay_s must be a number when provided") from exc
-                output = get_lazy_llm(cancel_checker=effective_cancel_checker).ask(
+                output = get_lazy_llm(
+                    cancel_checker=effective_cancel_checker,
+                    hook_context=llm_hook_context_from_registry(self.tool_registry),
+                ).ask(
                     prompt,
                     temperature=temperature,
                     model=model,
@@ -1420,6 +1445,14 @@ class HostProcessPythonExecRuntime(SandboxPythonExecRuntime):
                 os.killpg(proc.pid, signal.SIGTERM)
             except ProcessLookupError:
                 return
+            except PermissionError as signal_error:
+                # macOS can report EPERM after the last group member exits.
+                # Confirm and reap that exit; a live child must still fail.
+                try:
+                    proc.wait(timeout=0.05)
+                except subprocess.TimeoutExpired:
+                    raise signal_error from None
+                return
         else:
             proc.terminate()
         try:
@@ -1430,6 +1463,11 @@ class HostProcessPythonExecRuntime(SandboxPythonExecRuntime):
                     os.killpg(proc.pid, signal.SIGKILL)
                 except ProcessLookupError:
                     pass
+                except PermissionError as signal_error:
+                    try:
+                        proc.wait(timeout=0.05)
+                    except subprocess.TimeoutExpired:
+                        raise signal_error from None
             else:
                 proc.kill()
             proc.wait()

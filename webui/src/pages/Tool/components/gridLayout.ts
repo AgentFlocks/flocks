@@ -26,3 +26,27 @@
  */
 export const SERVICE_TAB_GRID_COLS =
   '32px minmax(220px, 3fr) minmax(56px, 0.4fr) minmax(80px, 0.5fr) minmax(110px, 0.9fr) minmax(180px, 1.2fr)';
+
+/**
+ * Responsive row classes shared by the same four row renderers.
+ *
+ * From ``sm`` up the row is the grid above (min-w keeps the six columns
+ * intact; the wrapper scrolls horizontally when the viewport is narrower).
+ * Below ``sm`` (phones, 375px) a 760px grid only shows the icon + name and
+ * clips the type/status badges and the actions off the right edge, so the
+ * row becomes a two-line flex layout instead:
+ *
+ *   line 1: icon · name+description (fills, truncates) · type · status
+ *   line 2: stats (natural width) · actions (fills the rest, right-aligned)
+ */
+export const SERVICE_TAB_ROW_CLASS = 'flex flex-wrap sm:grid sm:min-w-[760px] items-center gap-3 px-4 py-3';
+// basis-2/5 (not 0) so the line-1 hypothetical width always exceeds what is left once
+// stats/actions try to join it; the name then grows into the remaining line-1 space.
+export const SERVICE_TAB_NAME_CELL = 'min-w-0 flex-1 basis-2/5 sm:flex-none sm:basis-auto';
+export const SERVICE_TAB_BADGE_CELL = 'shrink-0 text-center';
+// Line 2: stats keep their natural width, the actions cluster takes the rest so
+// wide buttons ("启用服务器" + icon buttons) stay on one line.
+// basis-1/4 keeps stats off line 1 even when they are a single short counter,
+// so every row has the same two-line shape.
+export const SERVICE_TAB_STATS_CELL = 'flex items-center justify-start sm:justify-end shrink-0 basis-1/4 sm:basis-auto';
+export const SERVICE_TAB_ACTIONS_CELL = 'flex items-center justify-end flex-1 basis-0 sm:flex-none sm:basis-auto';

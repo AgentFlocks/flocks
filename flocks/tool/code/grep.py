@@ -38,7 +38,7 @@ DESCRIPTION = """- Fast content search tool that works with any codebase size
 - Returns file paths and line numbers with at least one match sorted by modification time
 - Use this tool when you need to find files containing specific patterns
 - If you need to identify/count the number of matches within files, use the Bash tool with `rg` (ripgrep) directly. Do NOT use `grep`.
-- When you are doing an open-ended search that may require multiple rounds of globbing and grepping, use the Task tool instead"""
+- When you are doing an open-ended search that may require multiple rounds of globbing and grepping, use delegate_task instead"""
 
 
 def find_ripgrep() -> Optional[str]:
@@ -172,7 +172,15 @@ async def ripgrep_search(
     output = stdout.decode('utf-8', errors='replace')
     
     # Exit codes: 0 = matches found, 1 = no matches, 2 = errors
-    if proc.returncode == 1 or (proc.returncode == 2 and not output.strip()):
+    if proc.returncode == 1:
+        return []
+    if proc.returncode == 2 and not output.strip():
+        # ``--no-messages`` silences per-file errors (unreadable paths) but a
+        # regex parse error still lands on stderr; report it instead of
+        # pretending nothing matched.
+        err = stderr.decode('utf-8', errors='replace')
+        if 'regex parse error' in err or 'error parsing' in err.lower() or 'unclosed' in err.lower():
+            raise ValueError(f"Invalid regex pattern: {pattern} ({err.strip().splitlines()[-1] if err.strip() else 'ripgrep exit 2'})")
         return []
     
     matches = []

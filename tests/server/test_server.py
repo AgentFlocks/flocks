@@ -9,6 +9,7 @@ from httpx import AsyncClient, ASGITransport
 from fastapi import status
 
 from flocks.server.app import app
+from flocks.task.manager import TaskManager
 from flocks.task.store import TaskStore
 from flocks.task.models import (
     DeliveryStatus,
@@ -21,17 +22,36 @@ from flocks.task.models import (
 
 
 @pytest.fixture
-async def client():
-    """Create test client"""
+async def anonymous_client(tmp_path, monkeypatch):
+    """Use the real middleware with a test-owned project and idle task manager."""
+    monkeypatch.setattr(TaskManager, "_instance", TaskManager())
+    monkeypatch.setattr(TaskManager, "_startup_error", None)
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+    async with AsyncClient(
+        transport=transport,
+        base_url="http://testserver",
+        headers={"x-flocks-directory": str(tmp_path)},
+    ) as ac:
         yield ac
 
 
+@pytest.fixture
+async def client(anonymous_client):
+    """Bootstrap a real local account and retain its issued session cookie."""
+    response = await anonymous_client.post(
+        "/api/auth/bootstrap-admin",
+        json={"username": "test-admin", "password": "test-only-password"},
+    )
+    assert response.status_code == status.HTTP_200_OK, response.text
+    assert response.json()["role"] == "admin"
+    assert anonymous_client.cookies.get("flocks_session")
+    return anonymous_client
+
+
 @pytest.mark.asyncio
-async def test_root_endpoint(client):
+async def test_root_endpoint(anonymous_client):
     """Test root endpoint - returns HTML (webui) or JSON API info"""
-    response = await client.get("/")
+    response = await anonymous_client.get("/")
     assert response.status_code == status.HTTP_200_OK
     # When webui dist exists, returns HTML; otherwise returns JSON API info
     content_type = response.headers.get("content-type", "")
@@ -45,9 +65,9 @@ async def test_root_endpoint(client):
 
 
 @pytest.mark.asyncio
-async def test_health_check(client):
+async def test_health_check(anonymous_client):
     """Test health check endpoint"""
-    response = await client.get("/api/health")
+    response = await anonymous_client.get("/api/health")
     assert response.status_code == status.HTTP_200_OK
     data = response.json()
     assert data["status"] == "healthy"
@@ -67,14 +87,21 @@ async def test_health_check(client):
 
 
 @pytest.mark.asyncio
-async def test_security_headers_present(client):
+async def test_security_headers_present(anonymous_client):
     """Baseline browser security headers should be present on HTTP responses."""
-    response = await client.get("/api/health")
+    response = await anonymous_client.get("/api/health")
 
     assert response.headers["x-content-type-options"] == "nosniff"
     assert response.headers["referrer-policy"] == "no-referrer"
     assert response.headers["content-security-policy"] == "frame-ancestors 'self'"
-    assert response.headers["permissions-policy"] == "camera=(), microphone=(), geolocation=()"
+    assert response.headers["permissions-policy"] == "camera=(), microphone=(self), geolocation=()"
+
+
+@pytest.mark.asyncio
+async def test_protected_routes_require_login(anonymous_client):
+    for path in ("/api/session", "/api/task-system/queue/status", "/api/provider"):
+        response = await anonymous_client.get(path)
+        assert response.status_code == status.HTTP_401_UNAUTHORIZED
 
 
 @pytest.mark.asyncio
@@ -201,7 +228,6 @@ async def test_task_schedulers_list_excludes_archived_builtin_after_delete(clien
 
 @pytest.mark.asyncio
 async def test_delete_scheduler_cleans_queue_state_for_non_builtin(client):
-    await TaskManager.start(max_concurrent=1, poll_interval=999, scheduler_interval=999)
     scheduler = await TaskManager.create_scheduler(
         title="普通计划任务",
         mode=SchedulerMode.ONCE,
@@ -332,8 +358,7 @@ async def test_create_session(client):
     response = await client.post(
         "/api/session",
         json={
-            "projectID": "proj_123",  # camelCase
-            "directory": "/test/dir",
+            "projectID": "default",  # current request's project, camelCase
             "title": "Test Session",
             "agent": "rex",
         }
@@ -343,6 +368,7 @@ async def test_create_session(client):
     assert data["title"] == "Test Session"
     assert "projectID" in data  # auto-computed from directory hash
     assert "directory" in data
+    assert data["directory"] == client.headers["x-flocks-directory"]
     assert "id" in data
     assert data["id"].startswith("ses_")
 
@@ -354,8 +380,7 @@ async def test_list_sessions(client):
     create_response = await client.post(
         "/api/session",
         json={
-            "projectID": "proj_123",  # camelCase
-            "directory": "/test/dir",
+            "projectID": "default",
         }
     )
     assert create_response.status_code == status.HTTP_200_OK  # TypeScript returns 200
@@ -375,11 +400,11 @@ async def test_get_session(client):
     create_response = await client.post(
         "/api/session",
         json={
-            "projectID": "proj_123",  # camelCase
-            "directory": "/test/dir",
+            "projectID": "default",
             "title": "Test Session",
         }
     )
+    assert create_response.status_code == status.HTTP_200_OK, create_response.text
     session_id = create_response.json()["id"]
     
     # Get the session - TypeScript path: /{sessionID}
@@ -397,10 +422,10 @@ async def test_update_session(client):
     create_response = await client.post(
         "/api/session",
         json={
-            "projectID": "proj_123",  # camelCase
-            "directory": "/test/dir",
+            "projectID": "default",
         }
     )
+    assert create_response.status_code == status.HTTP_200_OK, create_response.text
     session_id = create_response.json()["id"]
     
     # Update the session - TypeScript path: /{sessionID}, body with title
@@ -422,10 +447,10 @@ async def test_delete_session(client):
     create_response = await client.post(
         "/api/session",
         json={
-            "projectID": "proj_123",  # camelCase
-            "directory": "/test/dir",
+            "projectID": "default",
         }
     )
+    assert create_response.status_code == status.HTTP_200_OK, create_response.text
     session_id = create_response.json()["id"]
     
     # Delete the session - TypeScript path: /{sessionID}, returns 200 with true
@@ -544,15 +569,21 @@ async def test_question_pending_route_lists_session_requests(client):
     """Pending question list should return only the current session's requests."""
     from flocks.server.routes.question import clear_request_state, store_question_request
 
+    session_ids = []
+    for title in ("Question session A", "Question session B"):
+        response = await client.post("/api/session", json={"title": title})
+        assert response.status_code == status.HTTP_200_OK, response.text
+        session_ids.append(response.json()["id"])
+
     req1 = {
         "id": "question_req_1",
-        "sessionID": "session_a",
+        "sessionID": session_ids[0],
         "questions": [{"question": "A?"}],
         "tool": {"callID": "call_a", "messageID": "msg_a"},
     }
     req2 = {
         "id": "question_req_2",
-        "sessionID": "session_b",
+        "sessionID": session_ids[1],
         "questions": [{"question": "B?"}],
         "tool": {"callID": "call_b", "messageID": "msg_b"},
     }
@@ -560,7 +591,7 @@ async def test_question_pending_route_lists_session_requests(client):
     store_question_request(req2["id"], req2)
 
     try:
-        response = await client.get("/api/question/session/session_a/pending")
+        response = await client.get(f"/api/question/session/{session_ids[0]}/pending")
         assert response.status_code == status.HTTP_200_OK
         assert response.json() == [req1]
     finally:

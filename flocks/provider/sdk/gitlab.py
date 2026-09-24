@@ -17,6 +17,7 @@ from flocks.provider.provider import (
     StreamChunk,
 )
 from flocks.utils.log import Log
+from flocks.net.http import async_client
 
 log = Log.create(service="provider.gitlab")
 
@@ -170,9 +171,8 @@ class GitLabProvider(BaseProvider):
         prompt = self._messages_to_prompt(messages_dict)
         
         try:
-            import httpx
             
-            async with httpx.AsyncClient() as client:
+            async with async_client() as client:
                 response = await client.post(
                     f"{self._base_url}/duo_chat/completions",
                     headers=self.get_headers(),
@@ -230,10 +230,9 @@ class GitLabProvider(BaseProvider):
         prompt = self._messages_to_prompt(messages_dict)
         
         try:
-            import httpx
             import json
             
-            async with httpx.AsyncClient() as client:
+            async with async_client() as client:
                 async with client.stream(
                     "POST",
                     f"{self._base_url}/duo_chat/completions",
@@ -291,7 +290,6 @@ class GitLabProvider(BaseProvider):
             Code suggestions response
         """
         try:
-            import httpx
             
             payload = {
                 "content": content,
@@ -303,7 +301,7 @@ class GitLabProvider(BaseProvider):
             if cursor_position is not None:
                 payload["cursor_position"] = cursor_position
             
-            async with httpx.AsyncClient() as client:
+            async with async_client() as client:
                 response = await client.post(
                     f"{self._base_url}/code_suggestions/completions",
                     headers=self.get_headers(),
@@ -326,9 +324,8 @@ class GitLabProvider(BaseProvider):
     async def health_check(self) -> Dict[str, Any]:
         """Check GitLab AI service health"""
         try:
-            import httpx
             
-            async with httpx.AsyncClient() as client:
+            async with async_client() as client:
                 response = await client.get(
                     f"{self.gitlab_url}/api/v4/version",
                     headers=self.get_headers(),

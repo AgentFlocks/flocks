@@ -1,11 +1,34 @@
 import { lazy, Suspense, useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
-  Shield, CheckCircle, XCircle, AlertTriangle, RefreshCw,
-  Plug, PlugZap, WifiOff, Plus, Settings, Loader2,
-  Eye, EyeOff, Save, Trash2, Activity, X, Server, Pencil, Check,
-  Wrench, ChevronRight, ChevronLeft, ChevronDown, Building2, ServerCog, Sparkles,
-} from 'lucide-react';
+  IconShield,
+  IconCircleCheck,
+  IconCircleX,
+  IconAlertTriangle,
+  IconRefresh,
+  IconPlug,
+  IconPlugConnected,
+  IconWifiOff,
+  IconPlus,
+  IconSettings,
+  IconLoader2,
+  IconEye,
+  IconEyeOff,
+  IconDeviceFloppy,
+  IconTrash,
+  IconActivity,
+  IconX,
+  IconServer,
+  IconPencil,
+  IconCheck,
+  IconTool,
+  IconChevronRight,
+  IconChevronLeft,
+  IconChevronDown,
+  IconBuilding,
+  IconServerCog,
+  IconSparkles,
+} from '@tabler/icons-react';
 import PageHeader from '@/components/common/PageHeader';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
 import { useToast } from '@/components/common/Toast';
@@ -139,16 +162,16 @@ function formatTemplateVersion(version: string): string {
 function StatusBadge({ status, enabled }: { status: string; enabled: boolean }) {
   const { t } = useTranslation('device');
   if (!enabled) return (
-    <span className="inline-flex items-center gap-1 text-xs text-zinc-400"><WifiOff className="w-3 h-3" />{t('status.disabled')}</span>
+    <span className="inline-flex items-center gap-1 text-xs text-zinc-400"><IconWifiOff aria-hidden="true" className="w-3 h-3" />{t('status.disabled')}</span>
   );
   if (status === 'ok' || status === 'connected') return (
-    <span className="inline-flex items-center gap-1 text-xs text-green-600"><CheckCircle className="w-3 h-3" />{t('status.connected')}</span>
+    <span className="inline-flex items-center gap-1 text-xs text-green-600"><IconCircleCheck aria-hidden="true" className="w-3 h-3" />{t('status.connected')}</span>
   );
   if (status === 'error') return (
-    <span className="inline-flex items-center gap-1 text-xs text-red-500"><XCircle className="w-3 h-3" />{t('status.error')}</span>
+    <span className="inline-flex items-center gap-1 text-xs text-red-500"><IconCircleX aria-hidden="true" className="w-3 h-3" />{t('status.error')}</span>
   );
   return (
-    <span className="inline-flex items-center gap-1 text-xs text-zinc-400"><AlertTriangle className="w-3 h-3" />{t('status.unknown')}</span>
+    <span className="inline-flex items-center gap-1 text-xs text-zinc-400"><IconAlertTriangle aria-hidden="true" className="w-3 h-3" />{t('status.unknown')}</span>
   );
 }
 
@@ -178,12 +201,12 @@ function ActiveCard({ device, vendorKey, selected, onClick }: {
         <div className={`w-9 h-9 rounded-xl flex items-center justify-center flex-shrink-0 ${
           selected ? 'bg-blue-100' : 'bg-zinc-50 group-hover:bg-zinc-100'
         }`}>
-          <PlugZap className={`w-4 h-4 ${selected ? 'text-blue-600' : 'text-zinc-500'}`} />
+          <IconPlugConnected aria-hidden="true" className={`w-4 h-4 ${selected ? 'text-blue-600' : 'text-zinc-500'}`} />
         </div>
         <div className="flex-1 min-w-0">
           <div className="flex items-center justify-between gap-2">
             <p className="text-sm font-semibold text-zinc-800 truncate">{device.name}</p>
-            <Settings className={`w-3.5 h-3.5 flex-shrink-0 ${selected ? 'text-blue-400' : 'text-zinc-300 group-hover:text-zinc-400'}`} />
+            <IconSettings aria-hidden="true" className={`w-3.5 h-3.5 flex-shrink-0 ${selected ? 'text-blue-400' : 'text-zinc-300 group-hover:text-zinc-400'}`} />
           </div>
           <p className="text-xs text-zinc-400 mt-0.5 truncate">{device.storage_key}</p>
           {device.fields.base_url && (
@@ -743,7 +766,7 @@ function DeviceAddRexPanel({
                   <>
                     <div className="flex-shrink-0">
                       <div className="mx-auto flex h-11 w-11 items-center justify-center rounded-xl border border-red-100 bg-red-50 text-red-500">
-                        <ServerCog className="h-5 w-5" />
+                        <IconServerCog aria-hidden="true" className="h-5 w-5" />
                       </div>
                       <h3 className="mt-4 text-sm font-semibold text-gray-900">{t('wizard.guide.title')}</h3>
                       <p className="mx-auto mt-2 max-w-[300px] text-xs leading-relaxed text-gray-500">
@@ -792,7 +815,7 @@ function DeviceAddRexPanel({
                         onClick={() => setShowBuiltInTemplates(false)}
                         className="mb-3 inline-flex items-center gap-1 text-xs font-medium text-gray-500 transition-colors hover:text-gray-800"
                       >
-                        <ChevronLeft className="h-3.5 w-3.5" />
+                        <IconChevronLeft aria-hidden="true" className="h-3.5 w-3.5" />
                         {t('wizard.supportedList.back')}
                       </button>
                       <h3 className="text-sm font-semibold text-gray-900">{t('wizard.supportedList.title')}</h3>
@@ -821,7 +844,7 @@ function DeviceAddRexPanel({
                                 {t('wizard.supportedList.deviceCount', { count: vendorTemplates.length })}
                                 {integratedCount > 0 ? ` / ${t('wizard.supportedList.integratedCount', { count: integratedCount })}` : ''}
                               </span>
-                              <ChevronDown className={`h-3.5 w-3.5 flex-shrink-0 text-gray-400 transition-transform ${expanded ? '' : '-rotate-90'}`} />
+                              <IconChevronDown aria-hidden="true" className={`h-3.5 w-3.5 flex-shrink-0 text-gray-400 transition-transform ${expanded ? '' : '-rotate-90'}`} />
                             </button>
                             {expanded && (
                               <div className="border-t border-gray-100 px-2 pb-2">
@@ -859,7 +882,7 @@ function DeviceAddRexPanel({
                                         <span>{installing ? t(action === 'update' ? 'wizard.installState.updating' : 'wizard.installState.installing') : stateBadge}</span>
                                       </span>
                                       {installing
-                                        ? <Loader2 className="h-4 w-4 flex-shrink-0 animate-spin text-rose-400" />
+                                        ? <IconLoader2 aria-hidden="true" className="h-4 w-4 flex-shrink-0 animate-spin text-rose-400" />
                                         : (
                                           <GuideInfoIcon
                                             label={tpl.name}
@@ -1013,7 +1036,7 @@ function AddDeviceWizardPanel({
               <h3 className="truncate text-lg font-semibold text-zinc-900">{t('wizard.title')}</h3>
             </div>
             <button onClick={onClose} className="p-1.5 rounded-lg hover:bg-zinc-100 text-zinc-400 hover:text-zinc-600">
-              <X className="w-4 h-4" />
+              <IconX aria-hidden="true" className="w-4 h-4" />
             </button>
           </div>
           <div className="mt-5 flex justify-center border-b border-red-500">
@@ -1022,7 +1045,7 @@ function AddDeviceWizardPanel({
               onClick={handleWorkbenchClick}
               className="flex items-center gap-2 px-4 pb-3 text-sm font-semibold text-red-600 transition-colors hover:text-red-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-red-200"
             >
-              <ServerCog className="h-4 w-4" />
+              <IconServerCog aria-hidden="true" className="h-4 w-4" />
               {t('wizard.guide.workbenchTab')}
             </button>
           </div>
@@ -1076,8 +1099,10 @@ function Toggle({ on, onToggle }: { on: boolean; onToggle: () => void }) {
   return (
     <button
       type="button"
+      role="switch"
+      aria-checked={on}
       onClick={onToggle}
-      className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${on ? 'bg-blue-500' : 'bg-zinc-300'}`}
+      className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${on ? 'bg-switch-on' : 'bg-hover'}`}
     >
       <span className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white shadow transition-transform ${on ? 'translate-x-4' : 'translate-x-0.5'}`} />
     </button>
@@ -1332,11 +1357,11 @@ function DeviceConfigPanel({
   };
 
   const TABS: { key: PanelTab; label: string; icon: React.ReactNode }[] = [
-    { key: 'config', label: t('config.tabConfig'), icon: <Settings className="w-3.5 h-3.5" /> },
+    { key: 'config', label: t('config.tabConfig'), icon: <IconSettings aria-hidden="true" className="w-3.5 h-3.5" /> },
     ...(device
-      ? [{ key: 'tools' as PanelTab, label: serviceTools.length ? t('config.tabToolsCount', { count: serviceTools.length }) : t('config.tabTools'), icon: <Wrench className="w-3.5 h-3.5" /> }]
+      ? [{ key: 'tools' as PanelTab, label: serviceTools.length ? t('config.tabToolsCount', { count: serviceTools.length }) : t('config.tabTools'), icon: <IconTool aria-hidden="true" className="w-3.5 h-3.5" /> }]
       : []),
-    { key: 'overview', label: t('config.tabOverview'), icon: <AlertTriangle className="w-3.5 h-3.5 opacity-60" /> },
+    { key: 'overview', label: t('config.tabOverview'), icon: <IconAlertTriangle aria-hidden="true" className="w-3.5 h-3.5 opacity-60" /> },
   ];
 
   return (
@@ -1358,11 +1383,11 @@ function DeviceConfigPanel({
             <div className="flex items-center gap-2.5 min-w-0">
               {onBack && (
                 <button onClick={onBack} className="p-1.5 rounded-lg hover:bg-zinc-100 text-zinc-500 hover:text-zinc-700 transition-colors flex-shrink-0">
-                  <ChevronLeft className="w-4 h-4" />
+                  <IconChevronLeft aria-hidden="true" className="w-4 h-4" />
                 </button>
               )}
               <div className={`w-9 h-9 rounded-xl flex items-center justify-center flex-shrink-0 ${device ? 'bg-blue-50' : 'bg-zinc-50'}`}>
-                {device ? <PlugZap className="w-4 h-4 text-blue-500" /> : <Plus className="w-4 h-4 text-zinc-400" />}
+                {device ? <IconPlugConnected aria-hidden="true" className="w-4 h-4 text-blue-500" /> : <IconPlus aria-hidden="true" className="w-4 h-4 text-zinc-400" />}
               </div>
               <div className="min-w-0">
                 <h3 className="text-sm font-semibold text-zinc-900 truncate">{device ? device.name : t('config.newDeviceTitle')}</h3>
@@ -1373,7 +1398,7 @@ function DeviceConfigPanel({
               </div>
             </div>
             <button onClick={onClose} className="p-1.5 rounded-lg hover:bg-zinc-100 text-zinc-400 hover:text-zinc-600 flex-shrink-0">
-              <X className="w-4 h-4" />
+              <IconX aria-hidden="true" className="w-4 h-4" />
             </button>
           </div>
 
@@ -1408,7 +1433,7 @@ function DeviceConfigPanel({
                     className="flex items-center justify-between gap-3 rounded-lg border border-blue-100 bg-blue-50 px-3 py-2 text-sm font-medium text-blue-700 transition-colors hover:border-blue-200 hover:bg-blue-100"
                   >
                     <span>{t('overview.viewDocs')}</span>
-                    <ChevronRight className="h-4 w-4 flex-shrink-0" />
+                    <IconChevronRight aria-hidden="true" className="h-4 w-4 flex-shrink-0" />
                   </a>
                 )}
 
@@ -1435,7 +1460,7 @@ function DeviceConfigPanel({
                     </label>
                     {groupLocked ? (
                       <div className="flex items-center gap-2 rounded-lg border border-zinc-100 bg-zinc-50 px-3 py-2">
-                        <Server className="w-3.5 h-3.5 text-zinc-400 flex-shrink-0" />
+                        <IconServer aria-hidden="true" className="w-3.5 h-3.5 text-zinc-400 flex-shrink-0" />
                         <span className="truncate text-sm text-zinc-600">
                           {groups.find((g) => g.id === groupId)?.name ?? groupId}
                         </span>
@@ -1493,7 +1518,7 @@ function DeviceConfigPanel({
                                 title={show ? t('config.hideSecretAction') : t('config.showSecretAction')}
                                 className="absolute right-2.5 top-1/2 -translate-y-1/2 text-zinc-400 hover:text-zinc-600 disabled:opacity-60"
                               >
-                                {revealing ? <Loader2 className="w-4 h-4 animate-spin" /> : show ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                                {revealing ? <IconLoader2 aria-hidden="true" className="w-4 h-4 animate-spin" /> : show ? <IconEyeOff aria-hidden="true" className="w-4 h-4" /> : <IconEye aria-hidden="true" className="w-4 h-4" />}
                               </button>
                             )}
                           </div>
@@ -1526,14 +1551,14 @@ function DeviceConfigPanel({
                     <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
                       <div className="flex min-w-0 items-center gap-2">
                         <div className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-lg bg-red-50 text-red-500">
-                          <Sparkles className="h-3.5 w-3.5" />
+                          <IconSparkles aria-hidden="true" className="h-3.5 w-3.5" />
                         </div>
                         <p className="truncate text-sm font-semibold text-zinc-800">{t('config.aiAssistTitle')}</p>
                       </div>
                       <div className="grid grid-cols-2 gap-1.5 sm:w-auto sm:flex sm:flex-shrink-0">
                         {([
-                          ['test', t('config.aiAssistTest'), Activity],
-                          ['troubleshoot', t('config.aiAssistTroubleshoot'), AlertTriangle],
+                          ['test', t('config.aiAssistTest'), IconActivity],
+                          ['troubleshoot', t('config.aiAssistTroubleshoot'), IconAlertTriangle],
                         ] as const).map(([action, label, Icon]) => {
                           const disabled = action === 'test' && !device;
                           const loading = rexAssistAction === action;
@@ -1546,7 +1571,7 @@ function DeviceConfigPanel({
                               title={disabled ? t('config.aiAssistSaveFirst') : undefined}
                               className="flex h-8 items-center justify-center gap-1.5 rounded-lg border border-zinc-200 bg-white px-2.5 text-xs font-medium text-zinc-700 transition-colors hover:border-red-200 hover:bg-red-50 hover:text-red-600 disabled:cursor-not-allowed disabled:border-zinc-100 disabled:bg-zinc-50 disabled:text-zinc-300"
                             >
-                              {loading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Icon className="h-3.5 w-3.5 flex-shrink-0" />}
+                              {loading ? <IconLoader2 aria-hidden="true" className="h-3.5 w-3.5 animate-spin" /> : <Icon aria-hidden="true" className="h-3.5 w-3.5 flex-shrink-0" />}
                               <span className="truncate">{label}</span>
                             </button>
                           );
@@ -1564,7 +1589,7 @@ function DeviceConfigPanel({
                       disabled={saving}
                       className="w-full flex items-center justify-center gap-1.5 px-3 py-2 text-sm rounded-lg bg-red-600 text-white hover:bg-red-700 disabled:opacity-50 transition-colors"
                     >
-                      {saving ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5" />}
+                      {saving ? <IconLoader2 aria-hidden="true" className="w-3.5 h-3.5 animate-spin" /> : <IconDeviceFloppy aria-hidden="true" className="w-3.5 h-3.5" />}
                       {device ? t('config.saveBtn') : t('config.addBtn')}
                     </button>
                   </div>
@@ -1574,7 +1599,7 @@ function DeviceConfigPanel({
                       disabled={deleting}
                       className="w-full flex items-center justify-center gap-1.5 py-2 text-sm rounded-lg border border-red-100 text-red-500 hover:bg-red-50 disabled:opacity-50 transition-colors"
                     >
-                      {deleting ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Trash2 className="w-3.5 h-3.5" />}
+                      {deleting ? <IconLoader2 aria-hidden="true" className="w-3.5 h-3.5 animate-spin" /> : <IconTrash aria-hidden="true" className="w-3.5 h-3.5" />}
                       {confirmDelete ? t('config.confirmDelete') : t('config.deleteBtn')}
                     </button>
                   )}
@@ -1587,7 +1612,7 @@ function DeviceConfigPanel({
               <div className="px-5 py-4">
                 {serviceTools.length === 0 ? (
                   <div className="flex flex-col items-center justify-center py-16 text-zinc-400 gap-2">
-                    <Wrench className="w-8 h-8 opacity-30" />
+                    <IconTool aria-hidden="true" className="w-8 h-8 opacity-30" />
                     <p className="text-sm">{t('tools.empty')}</p>
                   </div>
                 ) : (
@@ -1670,7 +1695,7 @@ function DeviceConfigPanel({
                     rel="noopener noreferrer"
                     className="flex items-center gap-2 text-sm text-blue-600 hover:text-blue-800 px-1"
                   >
-                    <ChevronRight className="w-4 h-4" />
+                    <IconChevronRight aria-hidden="true" className="w-4 h-4" />
                     {t('overview.viewDocs')}
                   </a>
                 )}
@@ -1799,7 +1824,13 @@ function GroupSidebar({ groups, devices, selectedGroupId, onSelect, onRename, on
   return (
     // self-stretch ensures the panel fills the full flex-row height so the
     // right border reaches the bottom even when there are few rooms.
-    <div className="w-52 flex-shrink-0 border-r border-zinc-200 flex flex-col h-full bg-zinc-50">
+    // Below md the room list cannot share the row with the device cards
+    // (375px leaves ~120px for the cards), so it stacks above them as a
+    // capped-height block and only becomes the 208px side column from md up.
+    <div
+      data-testid="device-room-sidebar"
+      className="w-full max-h-48 flex-shrink-0 border-b border-zinc-200 flex flex-col bg-zinc-50 md:h-full md:max-h-none md:w-52 md:border-b-0 md:border-r"
+    >
       {/* Header */}
       <div className="px-3 py-2.5 flex items-center justify-between flex-shrink-0">
         <span className="text-[11px] font-semibold text-zinc-400 uppercase tracking-wider">{t('sidebar.heading')}</span>
@@ -1808,7 +1839,7 @@ function GroupSidebar({ groups, devices, selectedGroupId, onSelect, onRename, on
           className="p-1 rounded text-zinc-400 hover:text-zinc-700 transition-colors"
           title={t('sidebar.addRoom')}
         >
-          <Plus className="w-3.5 h-3.5" />
+          <IconPlus aria-hidden="true" className="w-3.5 h-3.5" />
         </button>
       </div>
 
@@ -1826,7 +1857,7 @@ function GroupSidebar({ groups, devices, selectedGroupId, onSelect, onRename, on
               : 'text-zinc-500 hover:bg-zinc-100 hover:text-zinc-700'
           }`}
         >
-          <Building2 className="w-3.5 h-3.5 flex-shrink-0" />
+          <IconBuilding aria-hidden="true" className="w-3.5 h-3.5 flex-shrink-0" />
           <span className="text-sm flex-1 font-medium truncate">{t('sidebar.allRooms')}</span>
           <span className={`text-[11px] font-semibold tabular-nums ${
             selectedGroupId === null ? 'text-blue-500' : 'text-zinc-400'
@@ -1880,10 +1911,10 @@ function GroupSidebar({ groups, devices, selectedGroupId, onSelect, onRename, on
                       disabled={busy}
                       className="p-1 rounded text-blue-600 hover:bg-blue-100 disabled:opacity-50"
                     >
-                      {busy ? <Loader2 className="w-3 h-3 animate-spin" /> : <Check className="w-3 h-3" />}
+                      {busy ? <IconLoader2 aria-hidden="true" className="w-3 h-3 animate-spin" /> : <IconCheck aria-hidden="true" className="w-3 h-3" />}
                     </button>
                     <button onClick={cancelEdit} className="p-1 rounded text-zinc-400 hover:bg-zinc-200">
-                      <X className="w-3 h-3" />
+                      <IconX aria-hidden="true" className="w-3 h-3" />
                     </button>
                   </div>
                 </>
@@ -1906,7 +1937,7 @@ function GroupSidebar({ groups, devices, selectedGroupId, onSelect, onRename, on
                       className="p-1 rounded text-zinc-400 hover:text-zinc-600 transition-colors"
                       title={t('sidebar.rename')}
                     >
-                      <Pencil className="w-3 h-3" />
+                      <IconPencil aria-hidden="true" className="w-3 h-3" />
                     </button>
                     {!isDefault && (
                       <button
@@ -1918,7 +1949,7 @@ function GroupSidebar({ groups, devices, selectedGroupId, onSelect, onRename, on
                         }`}
                         title={count > 0 ? t('sidebar.deleteDisabled', { count }) : t('sidebar.deleteRoom')}
                       >
-                        <Trash2 className="w-3 h-3" />
+                        <IconTrash aria-hidden="true" className="w-3 h-3" />
                       </button>
                     )}
                   </div>
@@ -1931,7 +1962,7 @@ function GroupSidebar({ groups, devices, selectedGroupId, onSelect, onRename, on
         {/* Inline new room form */}
         {creating && (
           <div className="flex items-center gap-2 px-2.5 py-2 rounded bg-blue-50 mt-0.5">
-            <Server className="w-3.5 h-3.5 text-blue-400 flex-shrink-0" />
+            <IconServer aria-hidden="true" className="w-3.5 h-3.5 text-blue-400 flex-shrink-0" />
             <input
               autoFocus
               value={createDraft}
@@ -1951,10 +1982,10 @@ function GroupSidebar({ groups, devices, selectedGroupId, onSelect, onRename, on
                 disabled={busy}
                 className="p-1 rounded text-blue-600 hover:bg-blue-100 disabled:opacity-50"
               >
-                {busy ? <Loader2 className="w-3 h-3 animate-spin" /> : <Check className="w-3 h-3" />}
+                {busy ? <IconLoader2 aria-hidden="true" className="w-3 h-3 animate-spin" /> : <IconCheck aria-hidden="true" className="w-3 h-3" />}
               </button>
               <button onClick={cancelCreate} className="p-1 rounded text-zinc-400 hover:bg-zinc-200">
-                <X className="w-3 h-3" />
+                <IconX aria-hidden="true" className="w-3 h-3" />
               </button>
             </div>
           </div>
@@ -2183,9 +2214,9 @@ export default function DeviceIntegrationPage() {
       const res = await deviceAPI.createGroup({ name });
       await fetchData(true);
       setSelectedGroupId(res.data.id); // auto-select the newly created room
-      toast.success(`机房「${name}」已创建`);
+      toast.success(t('sidebar.groupCreated', { name }));
     } catch (err: unknown) {
-      toast.error(errDetail(err, '创建机房失败'));
+      toast.error(errDetail(err, t('sidebar.groupCreateFailed')));
       throw err;
     }
   };
@@ -2194,9 +2225,9 @@ export default function DeviceIntegrationPage() {
     try {
       await deviceAPI.updateGroup(id, { name: newName });
       await fetchData(true);
-      toast.success('机房名称已更新');
+      toast.success(t('sidebar.groupRenamed'));
     } catch (err: unknown) {
-      toast.error(errDetail(err, '重命名失败'));
+      toast.error(errDetail(err, t('sidebar.groupRenameFailed')));
       throw err;
     }
   };
@@ -2206,9 +2237,9 @@ export default function DeviceIntegrationPage() {
       await deviceAPI.deleteGroup(id);
       if (selectedGroupId === id) setSelectedGroupId(null);
       await fetchData(true);
-      toast.success('机房已删除');
+      toast.success(t('sidebar.groupDeleted'));
     } catch (err: unknown) {
-      toast.error(errDetail(err, '删除失败'));
+      toast.error(errDetail(err, t('sidebar.groupDeleteFailed')));
     }
   };
 
@@ -2363,11 +2394,13 @@ export default function DeviceIntegrationPage() {
   // ──────────────────────────────────────────────────────────────────────────
 
   return (
-    <div className="h-full flex flex-col p-6 bg-gray-50 overflow-hidden">
+    // Full-screen page (Layout skips its padded wrapper): clear the floating
+    // mobile menu button the same way the shared wrapper does below lg.
+    <div className="h-full flex flex-col p-6 pt-16 lg:pt-6 bg-gray-50 overflow-hidden">
       <PageHeader
         title={t('pageTitle')}
         description={t('pageDescription')}
-        icon={<ServerCog className="w-8 h-8" />}
+        icon={<IconServerCog aria-hidden="true" className="w-8 h-8" />}
         action={
           <div className="flex items-center gap-2">
             <button
@@ -2376,21 +2409,21 @@ export default function DeviceIntegrationPage() {
               title={t('toolbar.refresh')}
               className="p-1.5 rounded-lg border border-zinc-200 text-zinc-500 hover:bg-zinc-50 hover:text-zinc-700 disabled:opacity-50 transition-colors"
             >
-              <RefreshCw className={`w-3.5 h-3.5 ${refreshing ? 'animate-spin' : ''}`} />
+              <IconRefresh aria-hidden="true" className={`w-3.5 h-3.5 ${refreshing ? 'animate-spin' : ''}`} />
             </button>
             <button
               onClick={() => setPanel({ kind: 'wizard' })}
               className="flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-lg bg-red-600 text-white hover:bg-red-700 transition-colors font-medium"
             >
-              <Plus className="w-3.5 h-3.5" />
+              <IconPlus aria-hidden="true" className="w-3.5 h-3.5" />
               {t('toolbar.addDevice')}
             </button>
           </div>
         }
       />
 
-      {/* Content: sidebar + main area */}
-      <div className="flex-1 min-h-0 flex overflow-hidden">
+      {/* Content: sidebar + main area (stacked below md, side by side from md up) */}
+      <div className="flex-1 min-h-0 flex flex-col md:flex-row overflow-hidden">
         {/* Left: room sidebar */}
         {!loading && (
           <GroupSidebar
@@ -2411,10 +2444,10 @@ export default function DeviceIntegrationPage() {
           ) : (
             <>
               {/* Room / aggregate header bar */}
-              <div className="px-6 py-3 border-b border-zinc-100 flex items-center gap-3 flex-shrink-0">
+              <div className="px-6 py-3 border-b border-zinc-100 flex flex-wrap items-center gap-3 flex-shrink-0">
                 {selectedGroup ? (
                   <>
-                    <Server className="w-4 h-4 text-zinc-400 flex-shrink-0" />
+                    <IconServer aria-hidden="true" className="w-4 h-4 text-zinc-400 flex-shrink-0" />
                     <span className="text-sm font-semibold text-zinc-800">{selectedGroup.name}</span>
                     <span className="text-xs text-zinc-400">{t('header.devices', { count: filteredDevices.length })}</span>
                     {connectedCount > 0 && (
@@ -2432,7 +2465,7 @@ export default function DeviceIntegrationPage() {
                   </>
                 ) : (
                   <>
-                    <Building2 className="w-4 h-4 text-zinc-400 flex-shrink-0" />
+                    <IconBuilding aria-hidden="true" className="w-4 h-4 text-zinc-400 flex-shrink-0" />
                     <span className="text-sm font-semibold text-zinc-800">{t('header.allRooms')}</span>
                     <span className="text-xs text-zinc-400">
                       {t('header.deviceCount', { count: devices.length, rooms: groups.length })}
@@ -2457,7 +2490,7 @@ export default function DeviceIntegrationPage() {
                         }
                         className="ml-auto flex items-center gap-1 text-xs text-zinc-400 hover:text-zinc-700 transition-colors"
                       >
-                        <ChevronDown className={`w-3.5 h-3.5 transition-transform ${allCollapsed ? '-rotate-90' : ''}`} />
+                        <IconChevronDown aria-hidden="true" className={`w-3.5 h-3.5 transition-transform ${allCollapsed ? '-rotate-90' : ''}`} />
                         {allCollapsed ? t('toolbar.expandAll') : t('toolbar.collapseAll')}
                       </button>
                     )}
@@ -2471,7 +2504,7 @@ export default function DeviceIntegrationPage() {
                   /* Global empty state — no devices at all */
                   <div className="flex flex-col items-center justify-center py-24 gap-4">
                     <div className="w-16 h-16 rounded-2xl bg-zinc-100 flex items-center justify-center">
-                      <PlugZap className="w-7 h-7 text-zinc-300" />
+                      <IconPlugConnected aria-hidden="true" className="w-7 h-7 text-zinc-300" />
                     </div>
                     <div className="text-center">
                       <p className="text-sm font-semibold text-zinc-700">{t('empty.noDevices')}</p>
@@ -2481,7 +2514,7 @@ export default function DeviceIntegrationPage() {
                       onClick={() => setPanel({ kind: 'wizard' })}
                       className="flex items-center gap-1.5 px-4 py-2 text-sm rounded-lg bg-blue-600 text-white hover:bg-blue-700 transition-colors font-medium"
                     >
-                      <Plus className="w-3.5 h-3.5" />
+                      <IconPlus aria-hidden="true" className="w-3.5 h-3.5" />
                       {t('empty.addNow')}
                     </button>
                   </div>
@@ -2503,10 +2536,10 @@ export default function DeviceIntegrationPage() {
                             className="w-full flex items-center gap-2 mb-4 group/sec text-left"
                             aria-expanded={!collapsed}
                           >
-                            <ChevronDown
+                            <IconChevronDown aria-hidden="true"
                               className={`w-3.5 h-3.5 text-zinc-400 transition-transform ${collapsed ? '-rotate-90' : ''}`}
                             />
-                            <Server className="w-4 h-4 text-zinc-400" />
+                            <IconServer aria-hidden="true" className="w-4 h-4 text-zinc-400" />
                             <h3 className="text-sm font-semibold text-zinc-700 group-hover/sec:text-zinc-900">{group.name}</h3>
                             <span className="text-xs text-zinc-400 bg-zinc-100 px-1.5 py-0.5 rounded-md">
                               {gDevices.length}
@@ -2542,7 +2575,7 @@ export default function DeviceIntegrationPage() {
                       return (
                         <section>
                           <div className="flex items-center gap-2 mb-4">
-                            <AlertTriangle className="w-4 h-4 text-yellow-500" />
+                            <IconAlertTriangle aria-hidden="true" className="w-4 h-4 text-yellow-500" />
                             <h3 className="text-sm font-semibold text-zinc-700">{t('section.ungrouped')}</h3>
                             <span className="text-xs text-zinc-400 bg-zinc-100 px-1.5 py-0.5 rounded-md">
                               {orphans.length}
@@ -2568,7 +2601,7 @@ export default function DeviceIntegrationPage() {
                   /* ── Specific room, no devices ── */
                   <div className="flex flex-col items-center justify-center py-24 gap-4">
                     <div className="w-16 h-16 rounded-2xl bg-zinc-100 flex items-center justify-center">
-                      <Server className="w-7 h-7 text-zinc-300" />
+                      <IconServer aria-hidden="true" className="w-7 h-7 text-zinc-300" />
                     </div>
                     <div className="text-center">
                       <p className="text-sm font-semibold text-zinc-700">{t('empty.roomEmpty')}</p>
@@ -2578,7 +2611,7 @@ export default function DeviceIntegrationPage() {
                       onClick={() => setPanel({ kind: 'wizard' })}
                       className="flex items-center gap-1.5 px-4 py-2 text-sm rounded-lg bg-blue-600 text-white hover:bg-blue-700 transition-colors font-medium"
                     >
-                      <Plus className="w-3.5 h-3.5" />
+                      <IconPlus aria-hidden="true" className="w-3.5 h-3.5" />
                       {t('empty.addNow')}
                     </button>
                   </div>
@@ -2586,7 +2619,7 @@ export default function DeviceIntegrationPage() {
                   /* ── Specific room, has devices ── */
                   <section>
                     <div className="flex items-center gap-2 mb-4">
-                      <PlugZap className="w-4 h-4 text-blue-600" />
+                      <IconPlugConnected aria-hidden="true" className="w-4 h-4 text-blue-600" />
                       <h3 className="text-sm font-semibold text-zinc-800">{t('section.activeDevices')}</h3>
                       <span className="text-xs text-zinc-400 bg-zinc-100 px-1.5 py-0.5 rounded-md">
                         {filteredDevices.length}

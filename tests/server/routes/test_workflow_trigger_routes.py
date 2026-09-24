@@ -1248,3 +1248,109 @@ async def test_sync_workflow_config_preserves_existing_template(
     assert config_path.read_text(encoding="utf-8") == before
     stored = await workflow_routes.WorkflowStore.get_config(workflow_id)
     assert stored == body["config"]
+
+
+# ---------------------------------------------------------------------------
+# syslog trigger port range (WFL-0316 backend half)
+# ---------------------------------------------------------------------------
+
+def _install_syslog_trigger_env(monkeypatch: pytest.MonkeyPatch, *, existing_triggers: list[dict[str, Any]] | None = None):
+    base_workflow = {
+        "id": "wf-1",
+        "name": "demo",
+        "workflowJson": {
+            "start": "n1",
+            "nodes": [{"id": "n1", "type": "python", "code": "result = {'ok': True}"}],
+            "edges": [],
+            **({"triggers": existing_triggers} if existing_triggers is not None else {}),
+        },
+    }
+    monkeypatch.setattr(
+        workflow_routes,
+        "_read_workflow_from_fs",
+        lambda workflow_id: base_workflow if workflow_id == "wf-1" else None,
+    )
+    persisted: list[list[Any]] = []
+
+    async def _fake_persist(workflow_id: str, workflow_data: dict[str, Any], triggers: list[Any]) -> dict[str, Any]:
+        persisted.append(triggers)
+        return {
+            **workflow_data,
+            "workflowJson": {
+                **workflow_data["workflowJson"],
+                "triggers": [trigger.model_dump(mode="json") for trigger in triggers],
+            },
+        }
+
+    async def _fake_restart(workflow_id: str, workflow_json: dict[str, Any]) -> dict[str, Any]:
+        return {}
+
+    async def _fake_status(workflow_id: str, trigger: Any) -> dict[str, Any]:
+        return {"workflowId": workflow_id, "triggerId": trigger.id, "state": "stopped"}
+
+    monkeypatch.setattr(workflow_routes, "_persist_workflow_triggers", _fake_persist)
+    monkeypatch.setattr(
+        workflow_routes,
+        "default_trigger_runtime",
+        SimpleNamespace(restart_workflow=_fake_restart, get_trigger_status=_fake_status),
+    )
+    return persisted
+
+
+def _syslog_trigger_body(port: Any, trigger_id: str = "syslog-default") -> dict[str, Any]:
+    return {
+        "id": trigger_id,
+        "type": "syslog",
+        "enabled": False,
+        "source": {"protocol": "udp", "host": "127.0.0.1", "port": port, "format": "auto"},
+        "mapping": {"syslog_message": "$.body"},
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("port", [0, 70000, -1, "abc"])
+async def test_create_syslog_trigger_rejects_out_of_range_port(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+    port: Any,
+) -> None:
+    persisted = _install_syslog_trigger_env(monkeypatch)
+
+    response = await client.post("/api/workflow/wf-1/triggers", json=_syslog_trigger_body(port))
+
+    assert response.status_code == 422, response.text
+    body = response.json()
+    assert body["error"] == "ValidationError"
+    messages = " | ".join(str(item.get("msg")) for item in body["details"])
+    assert "source.port must be an integer between 1 and 65535" in messages, body
+    assert f"got {port!r}" in messages, body
+    assert persisted == []  # nothing written, no listener restarted
+
+
+@pytest.mark.asyncio
+async def test_create_syslog_trigger_accepts_boundary_port(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    persisted = _install_syslog_trigger_env(monkeypatch)
+
+    response = await client.post("/api/workflow/wf-1/triggers", json=_syslog_trigger_body(65535))
+
+    assert response.status_code == 200, response.text
+    assert response.json()["trigger"]["source"]["port"] == 65535
+    assert [trigger.id for trigger in persisted[0]] == ["syslog-default"]
+
+
+@pytest.mark.asyncio
+async def test_update_syslog_trigger_rejects_out_of_range_port(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    existing = [_syslog_trigger_body(5140)]
+    persisted = _install_syslog_trigger_env(monkeypatch, existing_triggers=existing)
+
+    response = await client.put("/api/workflow/wf-1/triggers/syslog-default", json=_syslog_trigger_body(70000))
+
+    assert response.status_code == 422, response.text
+    assert "got 70000" in response.text
+    assert persisted == []

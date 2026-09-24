@@ -28,8 +28,8 @@ export async function createFlocksServer(options?: ServerOptions) {
     options ?? {},
   )
 
-  const args = [`serve`, `--hostname=${options.hostname}`, `--port=${options.port}`]
-  if (options.config?.logLevel) args.push(`--log-level=${options.config.logLevel}`)
+  // Python CLI 的 serve 只接受 --host/--port（无 --hostname、无 --log-level）
+  const args = [`serve`, `--host`, `${options.hostname}`, `--port`, `${options.port}`]
 
   const proc = spawn(`flocks`, args, {
     signal: options.signal,
@@ -40,21 +40,28 @@ export async function createFlocksServer(options?: ServerOptions) {
   })
 
   const url = await new Promise<string>((resolve, reject) => {
+    const deadline = Date.now() + options.timeout!
     const id = setTimeout(() => {
       reject(new Error(`Timeout waiting for server to start after ${options.timeout}ms`))
     }, options.timeout)
     let output = ""
+    let polling = false
     proc.stdout?.on("data", (chunk) => {
       output += chunk.toString()
       const lines = output.split("\n")
       for (const line of lines) {
-        if (line.startsWith("flocks server listening")) {
-          const match = line.match(/on\s+(https?:\/\/[^\s]+)/)
-          if (!match) {
-            throw new Error(`Failed to parse server url from output: ${line}`)
-          }
-          clearTimeout(id)
-          resolve(match[1]!)
+        // Python serve 打印 "Starting server on: http://host:port"（可能带 rich 颜色码）
+        const match = line.match(/Starting server on:\s*(?:\x1b\[[0-9;]*m)*\s*(https?:\/\/[^\s\x1b]+)/)
+        if (match && !polling) {
+          // 这行在 uvicorn 绑定端口之前打印，等 /api/ready 通了再返回
+          polling = true
+          waitReady(match[1]!, deadline, () => proc.exitCode !== null || !!options.signal?.aborted).then(
+            (url) => {
+              clearTimeout(id)
+              resolve(url)
+            },
+            () => {},
+          )
           return
         }
       }
@@ -88,6 +95,18 @@ export async function createFlocksServer(options?: ServerOptions) {
       proc.kill()
     },
   }
+}
+
+/** 每 250ms 探一次 /api/ready，直到就绪、超过 deadline 或 stop()（进程退出/被中止）为止 */
+async function waitReady(url: string, deadline: number, stop: () => boolean): Promise<string> {
+  while (Date.now() < deadline && !stop()) {
+    const ok = await fetch(`${url}/api/ready`)
+      .then((r) => r.ok)
+      .catch(() => false)
+    if (ok) return url
+    await new Promise((r) => setTimeout(r, 250))
+  }
+  throw new Error("Server did not become ready")
 }
 
 export function createFlocksTui(options?: TuiOptions) {

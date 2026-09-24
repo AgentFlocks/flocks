@@ -16,6 +16,7 @@ export interface OnboardingRequest {
   threatbook_api_key?: string | null;
   third_party_llm?: ThirdPartyLLMInput | null;
   threatbook_services_only?: boolean;
+  threatbook_model_only?: boolean;
 }
 
 export interface ResourceValidationResult {
@@ -61,6 +62,17 @@ export interface OnboardingStatusResponse {
     provider_id: string;
     model_id: string;
   } | null;
+  threatbook_intel?: {
+    configured: boolean;
+    region?: OnboardingRegion | null;
+    api_configured: boolean;
+    api_service_id?: string | null;
+    mcp_configured: boolean;
+    mcp_connected: boolean;
+    mcp_status: string;
+    mcp_name?: string | null;
+    service_matrix: Record<string, string[]>;
+  };
 }
 
 export const onboardingAPI = {

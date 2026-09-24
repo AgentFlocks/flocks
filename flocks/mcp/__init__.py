@@ -95,6 +95,12 @@ class MCP:
         return manager.status_snapshot()
     
     @classmethod
+    async def resources(cls) -> Dict[str, McpResource]:
+        """Aggregate resources across all connected MCP servers, keyed by URI."""
+        manager = get_manager()
+        return await manager.resources()
+
+    @classmethod
     async def get_server_info(cls, name: str) -> Optional[McpServerInfo]:
         """
         Get detailed server information

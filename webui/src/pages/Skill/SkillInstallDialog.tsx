@@ -1,6 +1,7 @@
 import { useState } from 'react';
-import { CloudDownload, X, Info } from 'lucide-react';
+import { IconCloudDownload, IconX, IconInfoCircle } from '@tabler/icons-react';
 import { useTranslation } from 'react-i18next';
+import { extractErrorMessage } from '@/utils/error';
 import { skillAPI, Skill } from '@/api/skill';
 import { useToast } from '@/components/common/Toast';
 
@@ -65,9 +66,10 @@ export default function SkillInstallDialog({ onClose, onInstalled }: SkillInstal
 
       onClose();
     } catch (err: unknown) {
+      // 422/409 carry the installer's reason in the response body; err.message is only axios' status line
       toast.error(
         t('installFailed'),
-        err instanceof Error ? err.message : String(err),
+        extractErrorMessage(err, err instanceof Error ? err.message : String(err)),
       );
     } finally {
       setInstalling(false);
@@ -88,7 +90,7 @@ export default function SkillInstallDialog({ onClose, onInstalled }: SkillInstal
         {/* Header */}
         <div className="flex items-center gap-3 px-6 py-4 border-b border-gray-100">
           <div className="w-8 h-8 rounded-lg bg-red-100 flex items-center justify-center">
-            <CloudDownload className="w-4 h-4 text-red-600" />
+            <IconCloudDownload aria-hidden="true" className="w-4 h-4 text-red-600" />
           </div>
           <h2 className="text-lg font-semibold text-gray-900 flex-1">
             {t('installDialog.title')}
@@ -97,7 +99,7 @@ export default function SkillInstallDialog({ onClose, onInstalled }: SkillInstal
             onClick={onClose}
             className="p-1.5 hover:bg-gray-100 rounded-lg transition-colors"
           >
-            <X className="w-4 h-4 text-gray-500" />
+            <IconX aria-hidden="true" className="w-4 h-4 text-gray-500" />
           </button>
         </div>
 
@@ -135,7 +137,7 @@ export default function SkillInstallDialog({ onClose, onInstalled }: SkillInstal
 
           {/* Hint */}
           <div className="flex gap-2 p-3 bg-red-50 rounded-lg">
-            <Info className="w-4 h-4 text-red-500 shrink-0 mt-0.5" />
+            <IconInfoCircle aria-hidden="true" className="w-4 h-4 text-red-500 shrink-0 mt-0.5" />
             <p className="text-xs text-red-700 leading-relaxed">
               {t('installDialog.sourceHint')}
             </p>
@@ -159,7 +161,7 @@ export default function SkillInstallDialog({ onClose, onInstalled }: SkillInstal
                        bg-red-600 hover:bg-red-700 rounded-lg transition-colors
                        disabled:opacity-50 disabled:cursor-not-allowed"
           >
-            <CloudDownload className="w-4 h-4" />
+            <IconCloudDownload aria-hidden="true" className="w-4 h-4" />
             {installing ? t('installDialog.installing') : t('installDialog.install')}
           </button>
         </div>

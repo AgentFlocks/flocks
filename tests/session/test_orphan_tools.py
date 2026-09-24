@@ -9,6 +9,7 @@ from flocks.session.message import (
     ToolStateRunning,
 )
 from flocks.session.orphan_tools import (
+    INTERRUPTED_MESSAGE_ERROR,
     INTERRUPTED_TOOL_ERROR,
     abort_all_orphan_running_parts,
     abort_orphan_running_parts,
@@ -21,7 +22,8 @@ from flocks.session.session import Session
 @pytest.mark.asyncio
 async def test_abort_orphan_running_parts_marks_running_tools_error():
     session = await Session.create(project_id="proj_orphan", directory="/tmp")
-    msg = await Message.create(session.id, MessageRole.ASSISTANT, "")
+    # 助手消息已收尾（finish=stop），这里只看 running 工具 part 的修复计数
+    msg = await Message.create(session.id, MessageRole.ASSISTANT, "", finish="stop")
     part = ToolPart(
         id="part_orphan_running",
         sessionID=session.id,
@@ -55,7 +57,8 @@ async def test_abort_orphan_running_parts_marks_running_tools_error():
 @pytest.mark.asyncio
 async def test_abort_orphan_running_parts_leaves_terminal_tools_unchanged():
     session = await Session.create(project_id="proj_orphan_terminal", directory="/tmp")
-    msg = await Message.create(session.id, MessageRole.ASSISTANT, "")
+    # 助手消息已收尾（finish=stop），这里只看 running 工具 part 的修复计数
+    msg = await Message.create(session.id, MessageRole.ASSISTANT, "", finish="stop")
     completed = ToolPart(
         id="part_orphan_completed",
         sessionID=session.id,
@@ -85,7 +88,8 @@ async def test_abort_orphan_running_parts_leaves_terminal_tools_unchanged():
 @pytest.mark.asyncio
 async def test_abort_orphan_running_parts_in_messages_reuses_loaded_parts():
     session = await Session.create(project_id="proj_orphan_loaded", directory="/tmp")
-    msg = await Message.create(session.id, MessageRole.ASSISTANT, "")
+    # 助手消息已收尾（finish=stop），这里只看 running 工具 part 的修复计数
+    msg = await Message.create(session.id, MessageRole.ASSISTANT, "", finish="stop")
     running = ToolPart(
         id="part_orphan_loaded_running",
         sessionID=session.id,
@@ -133,7 +137,8 @@ async def test_abort_orphan_running_parts_in_messages_reuses_loaded_parts():
 @pytest.mark.asyncio
 async def test_abort_all_orphan_running_parts_scans_persisted_sessions():
     session = await Session.create(project_id="proj_orphan_all", directory="/tmp")
-    msg = await Message.create(session.id, MessageRole.ASSISTANT, "")
+    # 助手消息已收尾（finish=stop），这里只看 running 工具 part 的修复计数
+    msg = await Message.create(session.id, MessageRole.ASSISTANT, "", finish="stop")
     part = ToolPart(
         id="part_orphan_all",
         sessionID=session.id,
@@ -184,3 +189,30 @@ async def test_abort_all_orphan_running_parts_skips_busy_sessions():
 
     assert repaired == 0
     assert running_part.state.status == "running"
+
+
+@pytest.mark.asyncio
+async def test_abort_orphan_running_parts_marks_unfinished_assistant_reply_interrupted():
+    """进程重启留下的没有 finish/error 的助手回复也要收尾，否则前端一直显示生成中。"""
+    session = await Session.create(project_id="proj_orphan_reply", directory="/tmp")
+    msg = await Message.create(session.id, MessageRole.ASSISTANT, "partial answer")
+    part = ToolPart(
+        id="part_orphan_reply_running",
+        sessionID=session.id,
+        messageID=msg.id,
+        callID="call_orphan_reply_running",
+        tool="bash",
+        state=ToolStateRunning(input={"cmd": "sleep 60"}, time={"start": 7000}),
+    )
+    await Message.store_part(session.id, msg.id, part)
+
+    repaired = await abort_orphan_running_parts(session.id)
+    info = next(m for m in await Message.list(session.id) if m.id == msg.id)
+
+    assert repaired == 2  # 1 个 running 工具 part + 1 条未收尾助手回复
+    assert info.finish == "error"
+    assert info.error["name"] == "MessageAbortedError"
+    assert info.error["message"] == INTERRUPTED_MESSAGE_ERROR
+
+    # 再跑一次是幂等的
+    assert await abort_orphan_running_parts(session.id) == 0

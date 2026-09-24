@@ -131,8 +131,13 @@ async def test_archive_session_resolves_project_from_session(monkeypatch) -> Non
 
 @pytest.mark.asyncio
 async def test_restore_session_resolves_project_from_session(monkeypatch) -> None:
+    # Only archived sessions can be restored; model that precondition explicitly.
     session = _build_session(project_id="proj_restore").model_copy(
-        update={"owner_user_id": "usr_cli"}
+        update={
+            "owner_user_id": "usr_cli",
+            "status": "archived",
+            "time": SessionTime(created=1_000, updated=2_000, archived=3_000),
+        }
     )
 
     async def fake_get_by_id(session_id: str):

@@ -1,8 +1,15 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import {
-  Loader2, ChevronDown, ChevronRight, StopCircle,
-  Clock, CheckCircle, XCircle, AlertCircle, FlaskConical,
-} from 'lucide-react';
+  IconLoader2,
+  IconChevronDown,
+  IconChevronRight,
+  IconPlayerStop,
+  IconClock,
+  IconCircleCheck,
+  IconCircleX,
+  IconAlertCircle,
+  IconFlask,
+} from '@tabler/icons-react';
 import { useTranslation } from 'react-i18next';
 import {
   workflowAPI,
@@ -78,9 +85,9 @@ function SectionHeader({
         {badge}
       </span>
       {expanded ? (
-        <ChevronDown className="w-3.5 h-3.5 text-gray-400" />
+        <IconChevronDown aria-hidden="true" className="w-3.5 h-3.5 text-gray-400" />
       ) : (
-        <ChevronRight className="w-3.5 h-3.5 text-gray-400" />
+        <IconChevronRight aria-hidden="true" className="w-3.5 h-3.5 text-gray-400" />
       )}
     </button>
   );
@@ -677,10 +684,10 @@ function TestSection({
             className="w-full flex items-center justify-center gap-2 py-2 bg-red-600 text-white text-xs font-medium rounded-lg hover:bg-red-700 disabled:opacity-60 disabled:cursor-not-allowed transition-colors"
           >
             {stopping || isCancelling
-              ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              ? <IconLoader2 aria-hidden="true" className="w-3.5 h-3.5 animate-spin" />
               : running
-                ? <StopCircle className="w-3.5 h-3.5" />
-                : <FlaskConical className="w-3.5 h-3.5" />}
+                ? <IconPlayerStop aria-hidden="true" className="w-3.5 h-3.5" />
+                : <IconFlask aria-hidden="true" className="w-3.5 h-3.5" />}
             {stopping || isCancelling ? t('detail.run.stopping') : running ? t('detail.run.stopRun') : t('detail.run.testRun')}
           </button>
 
@@ -690,7 +697,7 @@ function TestSection({
                 <WorkflowStatusBadge status={displayStatus} />
                 {execution.duration != null && (
                   <span className="text-xs text-gray-400 flex items-center gap-1">
-                    <Clock className="w-3 h-3" />
+                    <IconClock aria-hidden="true" className="w-3 h-3" />
                     {execution.duration.toFixed(2)}s
                   </span>
                 )}
@@ -716,7 +723,7 @@ function TestSection({
                       className="flex items-center rounded p-0.5 hover:bg-gray-100"
                       aria-label={t('detail.run.outputResults')}
                     >
-                      {outputExpanded ? <ChevronDown className="w-3 h-3 text-gray-400" /> : <ChevronRight className="w-3 h-3 text-gray-400" />}
+                      {outputExpanded ? <IconChevronDown aria-hidden="true" className="w-3 h-3 text-gray-400" /> : <IconChevronRight aria-hidden="true" className="w-3 h-3 text-gray-400" />}
                     </button>
                   </div>
                   {outputExpanded && (
@@ -738,7 +745,7 @@ function TestSection({
                     <span className="text-xs font-medium text-gray-600">
                       {t('detail.run.executionLog', { count: execution.executionLog.length })}
                     </span>
-                    {logExpanded ? <ChevronDown className="w-3 h-3 text-gray-400" /> : <ChevronRight className="w-3 h-3 text-gray-400" />}
+                    {logExpanded ? <IconChevronDown aria-hidden="true" className="w-3 h-3 text-gray-400" /> : <IconChevronRight aria-hidden="true" className="w-3 h-3 text-gray-400" />}
                   </button>
                   {logExpanded && (
                     <div className="p-3 space-y-2 max-h-96 overflow-y-auto bg-gray-50">
@@ -791,7 +798,7 @@ function StepDetail({ step, index, hasInputs, hasOutputs }: {
           onClick={onToggle}
           className="w-full flex items-center gap-1 px-3 py-1.5 hover:bg-gray-50 transition-colors text-left"
         >
-          {open ? <ChevronDown className="w-3 h-3 text-gray-400 flex-shrink-0" /> : <ChevronRight className="w-3 h-3 text-gray-400 flex-shrink-0" />}
+          {open ? <IconChevronDown aria-hidden="true" className="w-3 h-3 text-gray-400 flex-shrink-0" /> : <IconChevronRight aria-hidden="true" className="w-3 h-3 text-gray-400 flex-shrink-0" />}
           <span className="text-xs text-gray-500 font-medium">{label}</span>
           <span className="text-xs text-gray-400 ml-1">({entries.length})</span>
         </button>
@@ -820,8 +827,8 @@ function StepDetail({ step, index, hasInputs, hasOutputs }: {
       <div className="flex items-center justify-between px-3 py-2 bg-gray-50">
         <div className="flex items-center gap-2 min-w-0">
           {isError
-            ? <XCircle className="w-3.5 h-3.5 text-red-500 flex-shrink-0" />
-            : <CheckCircle className="w-3.5 h-3.5 text-green-500 flex-shrink-0" />}
+            ? <IconCircleX aria-hidden="true" className="w-3.5 h-3.5 text-red-500 flex-shrink-0" />
+            : <IconCircleCheck aria-hidden="true" className="w-3.5 h-3.5 text-green-500 flex-shrink-0" />}
           <span className="text-xs font-semibold text-gray-800 truncate">
             {step.node_id || `Step ${index + 1}`}
           </span>
@@ -887,7 +894,7 @@ function HistoryExecDetail({ exec: ex }: { exec: WorkflowExecution }) {
     <div className="border-t border-gray-200 bg-gray-50">
       {isRunning && (
         <div className="px-4 py-2 flex items-center gap-2 border-b border-gray-200">
-          <Loader2 className={`w-3 h-3 animate-spin ${isCancelling ? 'text-amber-500' : 'text-red-500'}`} />
+          <IconLoader2 aria-hidden="true" className={`w-3 h-3 animate-spin ${isCancelling ? 'text-amber-500' : 'text-red-500'}`} />
           <span className={`text-xs ${isCancelling ? 'text-amber-700' : 'text-red-600'}`}>
             {isCancelling ? t('detail.run.stopping') : t('detail.run.running')}
             {hasLog && ` (${ex.executionLog.length} ${t('detail.run.stepsCompleted')})`}
@@ -915,7 +922,7 @@ function HistoryExecDetail({ exec: ex }: { exec: WorkflowExecution }) {
             <span className="text-xs font-medium text-gray-600">
               {t('detail.run.executionLog', { count: ex.executionLog.length })}
             </span>
-            {logExpanded ? <ChevronDown className="w-3 h-3 text-gray-400" /> : <ChevronRight className="w-3 h-3 text-gray-400" />}
+            {logExpanded ? <IconChevronDown aria-hidden="true" className="w-3 h-3 text-gray-400" /> : <IconChevronRight aria-hidden="true" className="w-3 h-3 text-gray-400" />}
           </button>
           {logExpanded && (
             <div className="p-3 space-y-2 max-h-96 overflow-y-auto bg-gray-50">
@@ -1064,11 +1071,11 @@ function HistorySection({
   };
 
   const statusIcon = (status: string) => {
-    if (status === 'cancelling') return <Loader2 className="w-3.5 h-3.5 text-amber-500 animate-spin" />;
-    if (status === 'success' || status === 'SUCCEEDED') return <CheckCircle className="w-3.5 h-3.5 text-green-500" />;
-    if (status === 'running') return <Loader2 className="w-3.5 h-3.5 text-red-500 animate-spin" />;
-    if (status === 'error' || status === 'FAILED') return <XCircle className="w-3.5 h-3.5 text-red-500" />;
-    return <AlertCircle className="w-3.5 h-3.5 text-orange-500" />;
+    if (status === 'cancelling') return <IconLoader2 aria-hidden="true" className="w-3.5 h-3.5 text-amber-500 animate-spin" />;
+    if (status === 'success' || status === 'SUCCEEDED') return <IconCircleCheck aria-hidden="true" className="w-3.5 h-3.5 text-green-500" />;
+    if (status === 'running') return <IconLoader2 aria-hidden="true" className="w-3.5 h-3.5 text-red-500 animate-spin" />;
+    if (status === 'error' || status === 'FAILED') return <IconCircleX aria-hidden="true" className="w-3.5 h-3.5 text-red-500" />;
+    return <IconAlertCircle aria-hidden="true" className="w-3.5 h-3.5 text-orange-500" />;
   };
   const bodyExpanded = hideSectionHeader || expanded;
 
@@ -1104,16 +1111,16 @@ function HistorySection({
         <div>
           {loading ? (
             <div className="flex items-center justify-center py-6">
-              <Loader2 className="w-4 h-4 animate-spin text-gray-400" />
+              <IconLoader2 aria-hidden="true" className="w-4 h-4 animate-spin text-gray-400" />
             </div>
           ) : focusedExecutionError ? (
             <div className="py-6 text-center">
-              <AlertCircle className="w-8 h-8 text-orange-300 mx-auto mb-2" />
+              <IconAlertCircle aria-hidden="true" className="w-8 h-8 text-orange-300 mx-auto mb-2" />
               <p className="text-xs text-gray-400">{focusedExecutionError}</p>
             </div>
           ) : history.length === 0 ? (
             <div className="py-6 text-center">
-              <Clock className="w-8 h-8 text-gray-300 mx-auto mb-2" />
+              <IconClock aria-hidden="true" className="w-8 h-8 text-gray-300 mx-auto mb-2" />
               <p className="text-xs text-gray-400">{t('detail.run.noHistory')}</p>
             </div>
           ) : (
@@ -1133,9 +1140,9 @@ function HistorySection({
                         <span className="text-xs text-gray-400 flex-shrink-0">{exec.duration.toFixed(1)}s</span>
                       )}
                       {selectedExec?.id === exec.id ? (
-                        <ChevronDown className="w-3 h-3 text-gray-400 flex-shrink-0" />
+                        <IconChevronDown aria-hidden="true" className="w-3 h-3 text-gray-400 flex-shrink-0" />
                       ) : (
-                        <ChevronRight className="w-3 h-3 text-gray-400 flex-shrink-0" />
+                        <IconChevronRight aria-hidden="true" className="w-3 h-3 text-gray-400 flex-shrink-0" />
                       )}
                     </button>
                     {selectedExec?.id === exec.id && (

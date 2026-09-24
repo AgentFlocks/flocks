@@ -15,6 +15,7 @@ class TestWorkspaceNode:
         assert node.size is None
         assert node.modified_at is None
         assert node.is_text_file is False
+        assert node.editable is False
         assert node.children is None
 
     def test_directory_node_with_children(self):
@@ -37,10 +38,12 @@ class TestWorkspaceNode:
             size=204800,
             modified_at=1741900000.0,
             is_text_file=False,
+            editable=True,
         )
         assert node.size == 204800
         assert node.modified_at == pytest.approx(1741900000.0)
         assert node.is_text_file is False
+        assert node.editable is True
 
     def test_invalid_type_raises(self):
         with pytest.raises(Exception):

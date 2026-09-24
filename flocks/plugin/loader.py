@@ -34,11 +34,14 @@ from typing import Any, Callable, Dict, List, Optional, Set, FrozenSet
 
 import yaml
 
+from flocks.config.config import get_user_plugins_root
 from flocks.utils.log import Log
 
 log = Log.create(service="plugin")
 
-DEFAULT_PLUGIN_ROOT = Path.home() / ".flocks" / "plugins"
+# Resolved once at import for backward compatibility; call-time readers use
+# ``get_user_plugins_root()`` so a ``FLOCKS_ROOT`` override is always honored.
+DEFAULT_PLUGIN_ROOT = get_user_plugins_root()
 _PLUGIN_ENTRYPOINT_GROUP = "flocks.plugins"
 _CRITICAL_PLUGIN_ENTRYPOINT_GROUP = "flocks.plugins.critical"
 
@@ -154,6 +157,23 @@ def load_module(source: str, base_dir: Path) -> ModuleType:
     return importlib.import_module(source)
 
 
+def _error_source_path(source: str, base_dir: Path) -> str:
+    """Absolute path (or package name) used to attribute a load error to its source.
+
+    ``ToolRegistry.refresh_plugin_tools`` scopes failures by comparing this
+    prefix with the changed path, so file sources must be absolute.
+    """
+    candidate = Path(source)
+    if source.startswith("./") or source.startswith("/") or source.endswith((".py", ".yaml", ".yml")):
+        if not candidate.is_absolute():
+            candidate = base_dir / candidate
+        try:
+            return str(candidate.resolve())
+        except OSError:
+            return str(candidate.absolute())
+    return source
+
+
 # ---------------------------------------------------------------------------
 # ExtensionPoint & PluginLoader
 # ---------------------------------------------------------------------------
@@ -214,6 +234,12 @@ class PluginLoader:
     _extension_points: Dict[str, ExtensionPoint] = {}
     _plugin_root: Path = DEFAULT_PLUGIN_ROOT
     _runtime_critical_entrypoint_failure = False
+    # Source-level failures of the most recent scoped load, reported back to the
+    # caller of ``load_extension`` (``<absolute source path>: <error>`` for plugin
+    # files, ``entry point <name>: <error>`` / ``entry point scan: <error>`` for
+    # installed packages, ``extension point not found: <attr>``).  Logging alone
+    # left ``ToolRegistry.refresh_plugin_tools`` reporting success for broken files.
+    _last_load_errors: List[str] = []
 
     # ------------------------------------------------------------------
     # Extension-point registration
@@ -235,6 +261,20 @@ class PluginLoader:
     def clear_extension_points(cls) -> None:
         """Reset all extension points (useful for testing)."""
         cls._extension_points.clear()
+
+    @classmethod
+    def _record_load_error(cls, source: object, error: object) -> None:
+        if isinstance(error, BaseException):
+            error = f"{type(error).__name__}: {error}"
+        cls._last_load_errors.append(f"{source}: {error}")
+
+    @classmethod
+    def _record_consumer_errors(cls, error_source: str, returned: Any) -> None:
+        """Consumers may return a list of error strings for items they rejected."""
+        if isinstance(returned, (list, tuple)):
+            for item in returned:
+                if isinstance(item, str) and item:
+                    cls._record_load_error(error_source, item)
 
     @classmethod
     def has_runtime_critical_entrypoint_failure(cls) -> bool:
@@ -291,7 +331,7 @@ class PluginLoader:
         project_dir: Optional[Path] = None,
         *,
         load_entry_points: bool = False,
-    ) -> None:
+    ) -> List[str]:
         """Load one registered extension point using normal plugin scan rules.
 
         This is the scoped counterpart to :meth:`load_all`. It scans the same
@@ -301,11 +341,16 @@ class PluginLoader:
         Set ``load_entry_points`` only for compatibility paths that still need
         legacy package plugins from the global ``flocks.plugins`` entry-point
         group.
+
+        Returns the source-level load errors of this pass (empty when every
+        source loaded) so callers such as ``ToolRegistry.refresh_plugin_tools``
+        can report partial refreshes instead of silently succeeding.
         """
         ext = cls._extension_points.get(attr_name)
         if ext is None:
             log.warn("plugin.ext_point.not_found", {"attr": attr_name})
-            return
+            cls._last_load_errors = [f"extension point not found: {attr_name}"]
+            return list(cls._last_load_errors)
 
         cls._load_extension_point(
             ext,
@@ -318,6 +363,7 @@ class PluginLoader:
             cls._runtime_critical_entrypoint_failure = (
                 result.has_critical_entrypoint_failure
             )
+        return list(cls._last_load_errors)
 
     @classmethod
     def load_for_extension(
@@ -393,6 +439,8 @@ class PluginLoader:
         log_scope: str,
     ) -> None:
         """Scan and load one registered extension point."""
+        # Fresh error list per pass; a load_once skip must not replay stale errors.
+        cls._last_load_errors = []
         if ext.load_once and ext._loaded:
             log.debug(
                 f"plugin.{log_scope}.skip_load_once",
@@ -481,6 +529,7 @@ class PluginLoader:
                 "plugin.entrypoints.scan_failed",
                 {"error": str(e)},
             )
+            cls._record_load_error("entry point scan", e)
             return result
 
         for group, declared_critical in (
@@ -518,6 +567,7 @@ class PluginLoader:
                             "plugin.entrypoint.load_failed",
                             {"name": ep.name, "error": str(exc)},
                         )
+                    cls._record_load_error(f"entry point {ep.name}", exc)
                     continue
 
                 if not callable(target):
@@ -529,6 +579,7 @@ class PluginLoader:
                         )
                     else:
                         log.warning("plugin.entrypoint.not_callable", {"name": ep.name})
+                    cls._record_load_error(f"entry point {ep.name}", "target is not callable")
                     continue
 
                 try:
@@ -550,6 +601,7 @@ class PluginLoader:
                             "plugin.entrypoint.invoke_failed",
                             {"name": ep.name, "error": str(exc)},
                         )
+                    cls._record_load_error(f"entry point {ep.name}", exc)
         return result
 
     @classmethod
@@ -577,6 +629,7 @@ class PluginLoader:
                         "type": type(e).__name__,
                     },
                 )
+                cls._record_load_error(_error_source_path(source, base_dir), e)
                 continue
 
             raw = getattr(module, ext.attr_name, None)
@@ -593,9 +646,10 @@ class PluginLoader:
                 )
                 continue
 
-            items = cls._validate_and_dedup(ext, list(raw), source)
+            error_source = _error_source_path(source, base_dir)
+            items = cls._validate_and_dedup(ext, list(raw), source, error_source=error_source)
             if items:
-                ext.consumer(items, source)
+                cls._record_consumer_errors(error_source, ext.consumer(items, source))
                 log.info(
                     "plugin.dispatched",
                     {
@@ -623,21 +677,25 @@ class PluginLoader:
             raw = yaml.safe_load(yaml_path.read_text(encoding="utf-8"))
         except Exception as e:
             log.error("plugin.yaml_parse_failed", {"path": str(yaml_path), "error": str(e)})
+            cls._record_load_error(_error_source_path(str(yaml_path), yaml_path.parent), e)
             return
 
         if not isinstance(raw, dict):
             log.warn("plugin.yaml_invalid", {"path": str(yaml_path), "hint": "Expected a YAML mapping"})
+            cls._record_load_error(_error_source_path(str(yaml_path), yaml_path.parent), "Expected a YAML mapping")
             return
 
         try:
             item = ext.yaml_item_factory(raw, yaml_path)
         except Exception as e:
             log.error("plugin.yaml_factory_failed", {"path": str(yaml_path), "error": str(e)})
+            cls._record_load_error(_error_source_path(str(yaml_path), yaml_path.parent), e)
             return
 
-        items = cls._validate_and_dedup(ext, [item], str(yaml_path))
+        error_source = _error_source_path(str(yaml_path), yaml_path.parent)
+        items = cls._validate_and_dedup(ext, [item], str(yaml_path), error_source=error_source)
         if items:
-            ext.consumer(items, str(yaml_path))
+            cls._record_consumer_errors(error_source, ext.consumer(items, str(yaml_path)))
             log.debug(
                 "plugin.yaml_dispatched",
                 {
@@ -653,19 +711,26 @@ class PluginLoader:
         ext: ExtensionPoint,
         raw_items: List[Any],
         source: str,
+        *,
+        error_source: Optional[str] = None,
     ) -> List[Any]:
         """Type-check and deduplicate items for an extension point."""
         if ext.item_type is not None:
             valid = [it for it in raw_items if isinstance(it, ext.item_type)]
             if len(valid) < len(raw_items):
+                invalid_count = len(raw_items) - len(valid)
                 log.warn(
                     "plugin.invalid_entries",
                     {
                         "source": source,
                         "attr": ext.attr_name,
                         "expected_type": ext.item_type.__name__,
-                        "invalid_count": len(raw_items) - len(valid),
+                        "invalid_count": invalid_count,
                     },
+                )
+                cls._record_load_error(
+                    error_source or source,
+                    f"{invalid_count} invalid {ext.attr_name} entries (expected {ext.item_type.__name__})",
                 )
         else:
             valid = raw_items

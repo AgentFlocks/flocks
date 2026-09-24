@@ -4,6 +4,7 @@ import path from 'path'
 import fs from 'fs'
 import { createApiProxy, getApiProxyTarget } from './src/config/apiProxy'
 import { getAdditionalAllowedHosts } from './src/config/viteHosts'
+import { EXTENSION_DEDUPE_PACKAGES, extensionAliases, resolveExtensionRegistry } from './src/config/extensionRegistry'
 
 const apiProxyTarget = getApiProxyTarget(process.env)
 const allowedHosts = getAdditionalAllowedHosts(process.env)
@@ -12,13 +13,19 @@ const allowedHosts = getAdditionalAllowedHosts(process.env)
 // 内部 path.relative() 计算出错，需规范化为完整长路径
 const root = fs.realpathSync.native(__dirname)
 
+// Build-time extension registry: `@ext/registry` resolves to the bundled empty
+// registry unless WEBUI_EXTENSION_REGISTRY points at another implementation.
+const extensionRegistry = resolveExtensionRegistry(process.env, root)
+
 export default defineConfig({
   root,
   plugins: [react()],
   resolve: {
-    alias: {
-      '@': path.resolve(root, './src'),
-    },
+    alias: [
+      ...extensionAliases(extensionRegistry),
+      { find: '@', replacement: path.resolve(root, './src') },
+    ],
+    dedupe: EXTENSION_DEDUPE_PACKAGES,
   },
   build: {
     rollupOptions: {
@@ -66,7 +73,7 @@ export default defineConfig({
             return 'flow-vendor';
           }
 
-          if (id.includes('/lucide-react/')) {
+          if (id.includes('/@tabler/icons-react/')) {
             return 'icons-vendor';
           }
         },
@@ -77,6 +84,7 @@ export default defineConfig({
     port: 5173,
     host: '127.0.0.1',
     ...(allowedHosts ? { allowedHosts } : {}),
+    ...(extensionRegistry.external ? { fs: { allow: [root, extensionRegistry.registryDir] } } : {}),
     proxy: createApiProxy(apiProxyTarget),
   },
   preview: {

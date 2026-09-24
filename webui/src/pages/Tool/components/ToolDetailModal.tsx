@@ -1,9 +1,18 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
-  Wrench, X, Info, TestTube, Play, RefreshCw,
-  CheckCircle, XCircle, AlertTriangle, BookOpen, ChevronDown,
-} from 'lucide-react';
+  IconTool,
+  IconX,
+  IconInfoCircle,
+  IconTestPipe,
+  IconPlayerPlay,
+  IconRefresh,
+  IconCircleCheck,
+  IconCircleX,
+  IconAlertTriangle,
+  IconBook,
+  IconChevronDown,
+} from '@tabler/icons-react';
 import type { Tool, ToolFixture } from '@/api/tool';
 import { canDirectlyTestTool, toolAPI } from '@/api/tool';
 import { SOURCE_BADGE, CATEGORY_LABEL_KEY } from '../constants';
@@ -90,7 +99,7 @@ export default function ToolDetailModal({ tool, initialSection, deviceId, onClos
           <div className="flex items-center justify-between">
             <div className="flex items-center space-x-3">
               <div className="w-10 h-10 bg-gray-50 rounded-lg flex items-center justify-center">
-                <Wrench className="w-5 h-5 text-gray-600" />
+                <IconTool aria-hidden="true" className="w-5 h-5 text-gray-600" />
               </div>
               <div>
                 <h2 className="text-lg font-semibold text-gray-900 font-mono">{tool.name}</h2>
@@ -104,7 +113,7 @@ export default function ToolDetailModal({ tool, initialSection, deviceId, onClos
               </div>
             </div>
             <button onClick={onClose} className="text-gray-400 hover:text-gray-600 p-1 rounded-lg hover:bg-gray-100">
-              <X className="w-5 h-5" />
+              <IconX aria-hidden="true" className="w-5 h-5" />
             </button>
           </div>
           <div className="flex space-x-4 mt-4">
@@ -114,7 +123,7 @@ export default function ToolDetailModal({ tool, initialSection, deviceId, onClos
                 section === 'info' ? 'border-red-500 text-red-600' : 'border-transparent text-gray-500 hover:text-gray-700'
               }`}
             >
-              <Info className="w-4 h-4 mr-1.5" />{t('toolDetail.tabInfo')}
+              <IconInfoCircle aria-hidden="true" className="w-4 h-4 mr-1.5" />{t('toolDetail.tabInfo')}
             </button>
             <button
               onClick={() => setSection('test')}
@@ -122,7 +131,7 @@ export default function ToolDetailModal({ tool, initialSection, deviceId, onClos
                 section === 'test' ? 'border-red-500 text-red-600' : 'border-transparent text-gray-500 hover:text-gray-700'
               }`}
             >
-              <TestTube className="w-4 h-4 mr-1.5" />{t('toolDetail.tabTest')}
+              <IconTestPipe aria-hidden="true" className="w-4 h-4 mr-1.5" />{t('toolDetail.tabTest')}
             </button>
           </div>
         </div>
@@ -144,7 +153,7 @@ export default function ToolDetailModal({ tool, initialSection, deviceId, onClos
                   <div>
                     <label className="block text-sm font-medium text-gray-700 mb-1.5">{t('toolDetail.security')}</label>
                     <span className="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium bg-amber-100 text-amber-800">
-                      <AlertTriangle className="w-3.5 h-3.5 mr-1" />{t('toolDetail.requiresConfirmation')}
+                      <IconAlertTriangle aria-hidden="true" className="w-3.5 h-3.5 mr-1" />{t('toolDetail.requiresConfirmation')}
                     </span>
                   </div>
                 )}
@@ -204,10 +213,10 @@ export default function ToolDetailModal({ tool, initialSection, deviceId, onClos
                     className="w-full flex items-center justify-between px-4 py-2.5 text-sm font-medium text-blue-700 hover:bg-blue-100 transition-colors"
                   >
                     <span className="flex items-center gap-1.5">
-                      <BookOpen className="w-3.5 h-3.5" />
+                      <IconBook aria-hidden="true" className="w-3.5 h-3.5" />
                       测试示例 ({fixtures.length})
                     </span>
-                    <ChevronDown className={`w-3.5 h-3.5 transition-transform ${fixturesOpen ? 'rotate-180' : ''}`} />
+                    <IconChevronDown aria-hidden="true" className={`w-3.5 h-3.5 transition-transform ${fixturesOpen ? 'rotate-180' : ''}`} />
                   </button>
                   {fixturesOpen && (
                     <div className="border-t border-blue-100 divide-y divide-blue-100">
@@ -244,7 +253,7 @@ export default function ToolDetailModal({ tool, initialSection, deviceId, onClos
               )}
               {fixtures.length === 0 && canDirectTest && (
                 <p className="text-xs text-zinc-400 flex items-center gap-1">
-                  <BookOpen className="w-3 h-3" />
+                  <IconBook aria-hidden="true" className="w-3 h-3" />
                   此工具暂无预置测试示例，请手动填写参数
                 </p>
               )}
@@ -271,9 +280,9 @@ export default function ToolDetailModal({ tool, initialSection, deviceId, onClos
                 className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-red-600 text-white rounded-lg hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed font-medium text-sm"
               >
                 {testing ? (
-                  <><RefreshCw className="w-4 h-4 animate-spin" />{t('toolDetail.executing')}</>
+                  <><IconRefresh aria-hidden="true" className="w-4 h-4 animate-spin" />{t('toolDetail.executing')}</>
                 ) : (
-                  <><Play className="w-4 h-4" />{t('toolDetail.runTest')}</>
+                  <><IconPlayerPlay aria-hidden="true" className="w-4 h-4" />{t('toolDetail.runTest')}</>
                 )}
               </button>
               {!tool.enabled && (
@@ -288,8 +297,8 @@ export default function ToolDetailModal({ tool, initialSection, deviceId, onClos
                   <div className={`rounded-lg border p-4 ${testResult.success ? 'bg-green-50 border-green-200' : 'bg-red-50 border-red-200'}`}>
                     <div className="flex items-center mb-2">
                       {testResult.success
-                        ? <CheckCircle className="w-4 h-4 text-green-600 mr-2" />
-                        : <XCircle className="w-4 h-4 text-red-600 mr-2" />}
+                        ? <IconCircleCheck aria-hidden="true" className="w-4 h-4 text-green-600 mr-2" />
+                        : <IconCircleX aria-hidden="true" className="w-4 h-4 text-red-600 mr-2" />}
                       <span className={`text-sm font-medium ${testResult.success ? 'text-green-800' : 'text-red-800'}`}>
                         {testResult.success ? t('toolDetail.execSuccess') : t('toolDetail.execFailed')}
                       </span>
@@ -319,7 +328,7 @@ export default function ToolDetailModal({ tool, initialSection, deviceId, onClos
               disabled={!canDirectTest}
               title={canDirectTest ? undefined : t('toolDetail.sessionTestOnly')}
             >
-              <TestTube className="w-4 h-4 mr-1.5" />{t('toolDetail.testTool')}
+              <IconTestPipe aria-hidden="true" className="w-4 h-4 mr-1.5" />{t('toolDetail.testTool')}
             </button>
           )}
         </div>

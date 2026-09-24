@@ -300,7 +300,7 @@ function AgentFormModal({
           <button
             onClick={onSubmit}
             disabled={isSubmitDisabled}
-            className="px-4 py-2 text-sm bg-slate-800 text-white rounded-lg hover:bg-slate-900 disabled:opacity-50"
+            className="ui-btn ui-btn-primary"
           >
             {loading ? loadingLabel : submitLabel}
           </button>

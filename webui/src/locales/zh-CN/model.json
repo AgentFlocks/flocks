@@ -111,6 +111,7 @@
     "apiKeyOptionalHint": "若 Base URL 指向无需鉴权的内网网关或自建服务，可留空，系统会自动使用占位符。",
     "apiKeyOptionalPlaceholder": "可留空（无鉴权网关）",
     "apiKeyKeepExisting": "留空以保留现有 API Key",
+    "claimFreeKey": "领取免费key",
     "hide": "隐藏",
     "show": "查看",
     "availableModels": "可用模型",
@@ -161,7 +162,18 @@
     "azureDeploymentRequired": "请至少选择一个预设模型，或填写 Azure deployment name",
     "azureModelIdHint": "对于 Azure OpenAI，模型 ID 请填写 Azure Portal 中的 deployment name。",
     "azureCustomDeployments": "自定义 Azure Deployments",
-    "azureNoCustomDeployments": "尚未添加自定义 Azure deployment。"
+    "azureNoCustomDeployments": "尚未添加自定义 Azure deployment。",
+    "selectProviderRequired": "请先选择 Provider",
+    "providerNameRequired": "请填写 Provider 名称",
+    "apiKeyRequired": "请填写 API Key",
+    "apiKeyRequiredFirst": "请先填写 API Key",
+    "save": "保存",
+    "configure": "配置",
+    "delete": "删除",
+    "providerName": "Provider 名称",
+    "retry": "重试",
+    "compatCreateFirst": "OpenAI-compatible Provider 需要先创建，创建后可在配置弹窗中测试连接",
+    "providerNameHint": "用于创建独立的 OpenAI-compatible Provider 实例，不会覆盖已有配置。"
   },
   "wizard": {
     "providerSaved": "Provider 已保存",

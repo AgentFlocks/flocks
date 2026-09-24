@@ -31,8 +31,8 @@ CREATE TABLE IF NOT EXISTS device_groups (
     name        TEXT NOT NULL UNIQUE,
     description TEXT,
     sort_order  INTEGER NOT NULL DEFAULT 0,
-    created_at  INTEGER NOT NULL,
-    updated_at  INTEGER NOT NULL
+    created_at  BIGINT NOT NULL,
+    updated_at  BIGINT NOT NULL
 );
 """)
 
@@ -49,9 +49,9 @@ CREATE TABLE IF NOT EXISTS device_integrations (
     status      TEXT NOT NULL DEFAULT 'unknown',
     message     TEXT,
     latency_ms  INTEGER,
-    checked_at  INTEGER,
-    created_at  INTEGER NOT NULL,
-    updated_at  INTEGER NOT NULL
+    checked_at  BIGINT,
+    created_at  BIGINT NOT NULL,
+    updated_at  BIGINT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_device_storage_key ON device_integrations(storage_key);
 """)
@@ -59,11 +59,15 @@ CREATE INDEX IF NOT EXISTS idx_device_storage_key ON device_integrations(storage
 
 # Upgrade hook for installations created before group_id was added.
 async def _ensure_device_integrations_group_id(db: Any) -> None:
-    cursor = await db.execute("PRAGMA table_info(device_integrations)")
-    columns = {str(row[1]) for row in await cursor.fetchall()}
-    if "group_id" in columns:
-        return
-    await db.execute("ALTER TABLE device_integrations ADD COLUMN group_id TEXT NOT NULL DEFAULT '';")
+    await db.execute("ALTER TABLE device_integrations ADD COLUMN IF NOT EXISTS group_id TEXT NOT NULL DEFAULT ''")
+    # Existing PostgreSQL installations may still have the early 32-bit schema.
+    await db.executescript("""
+        ALTER TABLE device_groups ALTER COLUMN created_at TYPE BIGINT;
+        ALTER TABLE device_groups ALTER COLUMN updated_at TYPE BIGINT;
+        ALTER TABLE device_integrations ALTER COLUMN checked_at TYPE BIGINT;
+        ALTER TABLE device_integrations ALTER COLUMN created_at TYPE BIGINT;
+        ALTER TABLE device_integrations ALTER COLUMN updated_at TYPE BIGINT;
+    """)
 
 
 Storage.register_ddl(_ensure_device_integrations_group_id)
@@ -87,10 +91,11 @@ CREATE TABLE IF NOT EXISTS device_tool_settings (
     device_id  TEXT NOT NULL REFERENCES device_integrations(id) ON DELETE CASCADE,
     tool_name  TEXT NOT NULL,
     enabled    INTEGER NOT NULL DEFAULT 1,
-    updated_at INTEGER NOT NULL,
+    updated_at BIGINT NOT NULL,
     PRIMARY KEY (device_id, tool_name)
 );
 CREATE INDEX IF NOT EXISTS idx_dts_device ON device_tool_settings(device_id);
+ALTER TABLE device_tool_settings ALTER COLUMN updated_at TYPE BIGINT;
 """)
 
 

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { ChevronUp, ChevronsLeft, ChevronsRight } from 'lucide-react';
+import { IconChevronUp, IconChevronsLeft, IconChevronsRight } from '@tabler/icons-react';
 import GuideInfoIcon from './GuideInfoIcon';
 
 export interface ChatGuideAction {
@@ -130,7 +130,7 @@ export default function ChatGuideDock({
         aria-label={collapsed ? expandTitle : collapseTitle}
         aria-expanded={!collapsed}
       >
-        {collapsed ? <ChevronsRight className="h-3.5 w-3.5" /> : <ChevronsLeft className="h-3.5 w-3.5" />}
+        {collapsed ? <IconChevronsRight aria-hidden="true" className="h-3.5 w-3.5" /> : <IconChevronsLeft aria-hidden="true" className="h-3.5 w-3.5" />}
       </button>
 
       <div
@@ -164,7 +164,7 @@ export default function ChatGuideDock({
           aria-label={panelOpen ? collapseTitle : expandTitle}
           aria-expanded={panelOpen}
         >
-          <ChevronUp className={`h-3.5 w-3.5 transition-transform ${panelOpen ? 'rotate-180' : ''}`} />
+          <IconChevronUp aria-hidden="true" className={`h-3.5 w-3.5 transition-transform ${panelOpen ? 'rotate-180' : ''}`} />
         </button>
       )}
     </div>

@@ -4,7 +4,9 @@ File operation routes
 Routes for file reading, searching, and listing
 """
 
+import asyncio
 import mimetypes
+import os
 from pathlib import Path
 from typing import List, Optional, Dict
 from fastapi import APIRouter, HTTPException, Query
@@ -18,6 +20,10 @@ from flocks.utils.log import Log
 
 router = APIRouter()
 log = Log.create(service="routes.file")
+
+# ``/api/file/content`` returns the whole file in one JSON body (base64 for
+# binary, +33%), so it is capped; larger files go through ``/download``.
+_CONTENT_MAX_BYTES = int(os.environ.get("FLOCKS_HTTP_FILE_CONTENT_MAX_BYTES", str(50 * 1024 * 1024)))
 
 
 @router.get("/list", response_model=List[FileNode], summary="List files")
@@ -36,8 +42,9 @@ async def list_files(path: str = Query(..., description="Directory path")):
         log.warning("http_file.list.denied", {"path": path})
         raise HTTPException(status_code=403, detail="Access denied")
     except Exception as e:
+        # Internal error text (paths, driver messages) stays in the log.
         log.error("file.list.error", {"error": str(e), "path": path})
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.get("/content", response_model=FileContent, summary="Read file")
@@ -50,16 +57,35 @@ async def read_file(path: str = Query(..., description="File path")):
     try:
         cfg = await Config.get()
         safe_path = await resolve_path_for_http_file_access(path, cfg)
+        try:
+            size = os.stat(safe_path).st_size
+        except FileNotFoundError:
+            raise HTTPException(status_code=404, detail=f"File not found: {path}")
+        if size > _CONTENT_MAX_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail=f"File too large for inline read ({size} bytes > {_CONTENT_MAX_BYTES}); use /api/file/download",
+            )
         content = await File.read(safe_path)
         return content
-    except FileNotFoundError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+    except HTTPException:
+        raise
+    except FileNotFoundError:
+        # Echo the path as the caller wrote it, not the resolved server path.
+        raise HTTPException(status_code=404, detail=f"File not found: {path}")
+    except IsADirectoryError:
+        raise HTTPException(status_code=400, detail=f"Not a file: {path}")
+    except ValueError as e:
+        if "Not a file" in str(e):
+            raise HTTPException(status_code=400, detail=f"Not a file: {path}")
+        log.error("file.read.error", {"error": str(e), "path": path})
+        raise HTTPException(status_code=500, detail="Internal server error")
     except PermissionError:
         log.warning("http_file.read.denied", {"path": path})
         raise HTTPException(status_code=403, detail="Access denied")
     except Exception as e:
         log.error("file.read.error", {"error": str(e), "path": path})
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.get("/download", summary="Download file")
@@ -77,14 +103,14 @@ async def download_file(path: str = Query(..., description="File path")):
         )
     except HTTPException:
         raise
-    except FileNotFoundError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"File not found: {path}")
     except PermissionError:
         log.warning("http_file.download.denied", {"path": path})
         raise HTTPException(status_code=403, detail="Access denied")
     except Exception as e:
         log.error("file.download.error", {"error": str(e), "path": path})
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.get("/search", response_model=List[str], summary="Search files")
@@ -112,7 +138,7 @@ async def search_files(
         return results
     except Exception as e:
         log.error("file.search.error", {"error": str(e), "query": query})
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.get("/status", response_model=List[FileInfo], summary="Get file status")
@@ -127,7 +153,7 @@ async def get_file_status():
         return status
     except Exception as e:
         log.error("file.status.error", {"error": str(e)})
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 # Additional route for text search (ripgrep-like functionality)
@@ -197,13 +223,21 @@ async def find_text(pattern: str = Query(..., description="Search pattern")):
             ".",
         ]
         
-        result = subprocess.run(
-            cmd,
-            cwd=cwd,
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
+        try:
+            # Off the event loop: grep over a project tree can run for seconds.
+            result = await asyncio.to_thread(
+                subprocess.run,
+                cmd,
+                cwd=cwd,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+        except subprocess.TimeoutExpired:
+            # Same contract as ``/find``: a search that does not finish in
+            # time is an empty result, not a server error.
+            log.warning("text.search.timeout", {"pattern": pattern, "cwd": cwd})
+            return []
         
         matches = []
         
@@ -229,4 +263,4 @@ async def find_text(pattern: str = Query(..., description="Search pattern")):
         raise
     except Exception as e:
         log.error("text.search.error", {"error": str(e), "pattern": pattern})
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")

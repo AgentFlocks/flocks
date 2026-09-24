@@ -9,21 +9,21 @@ import {
   type TextareaHTMLAttributes,
 } from 'react';
 import {
-  AlertCircle,
-  CalendarClock,
-  Check,
-  ChevronDown,
-  ChevronRight,
-  Bot,
-  Globe,
-  Loader2,
-  Play,
-  Rocket,
-  Server,
-  Square,
-  Trash2,
-  Workflow as WorkflowIcon,
-} from 'lucide-react';
+  IconAlertCircle,
+  IconCalendarClock,
+  IconCheck,
+  IconChevronDown,
+  IconChevronRight,
+  IconRobot,
+  IconWorld,
+  IconLoader2,
+  IconPlayerPlay,
+  IconRocket,
+  IconServer,
+  IconSquare,
+  IconTrash,
+  IconRouteSquare2 as WorkflowIcon,
+} from '@tabler/icons-react';
 import { useTranslation } from 'react-i18next';
 import {
   resolveWorkflowServicePort,
@@ -407,7 +407,7 @@ function CardGuidePanel({
       <div className="flex items-center justify-between gap-3">
         <div className="flex min-w-0 items-start gap-2">
           <span className="mt-0.5 inline-flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-lg border border-gray-200 bg-white text-gray-600">
-            <Bot className="h-3.5 w-3.5" />
+            <IconRobot aria-hidden="true" className="h-3.5 w-3.5" />
           </span>
           <div className="min-w-0">
             <div className="text-xs font-semibold text-zinc-800">{t('detail.run.cardGuideTitle')}</div>
@@ -419,7 +419,7 @@ function CardGuidePanel({
           onClick={() => onGuidePrompt(action.prompt, action.displayLabel)}
           className="inline-flex h-8 flex-shrink-0 items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-3 text-xs font-semibold text-gray-700 hover:border-gray-300 hover:bg-gray-50"
         >
-          <Bot className="h-3.5 w-3.5" />
+          <IconRobot aria-hidden="true" className="h-3.5 w-3.5" />
           {action.label}
         </button>
       </div>
@@ -454,7 +454,7 @@ function PublishGuidePanel({
           : 'mb-2 flex items-start gap-2'
       }>
         <span className={`${isEmpty ? 'h-9 w-9' : 'mt-0.5 h-7 w-7'} inline-flex flex-shrink-0 items-center justify-center rounded-lg border border-rose-100 bg-rose-50 text-rose-500`}>
-          <Bot className="h-3.5 w-3.5" />
+          <IconRobot aria-hidden="true" className="h-3.5 w-3.5" />
         </span>
         <div className="min-w-0">
           <div className={`${isEmpty ? 'text-sm' : 'text-xs'} font-semibold text-zinc-800`}>
@@ -514,9 +514,9 @@ function SectionHeader({
         {badge}
       </span>
       {expanded ? (
-        <ChevronDown className="w-3.5 h-3.5 text-gray-400" />
+        <IconChevronDown aria-hidden="true" className="w-3.5 h-3.5 text-gray-400" />
       ) : (
-        <ChevronRight className="w-3.5 h-3.5 text-gray-400" />
+        <IconChevronRight aria-hidden="true" className="w-3.5 h-3.5 text-gray-400" />
       )}
     </button>
   );
@@ -586,6 +586,15 @@ function TextArea(props: TextareaHTMLAttributes<HTMLTextAreaElement>) {
   );
 }
 
+// Syslog 监听端口：1~65535 的整数。字段与保存流程共用同一校验，越界/非整数时字段内报错、保存按钮禁用
+export const SYSLOG_PORT_RANGE_ERROR = '端口范围错误（1-65535）';
+export function validateSyslogPort(raw: unknown): string {
+  const text = String(raw ?? '').trim();
+  if (!/^\d+$/.test(text)) return SYSLOG_PORT_RANGE_ERROR;
+  const port = Number(text);
+  return port >= 1 && port <= 65535 ? '' : SYSLOG_PORT_RANGE_ERROR;
+}
+
 function SyslogTriggerFields({
   source,
   inputKey,
@@ -597,6 +606,7 @@ function SyslogTriggerFields({
   onSourceChange: (patch: JsonObject) => void;
   onInputKeyChange: (key: string) => void;
 }) {
+  const portError = validateSyslogPort(source.port ?? 5140);
   return (
     <div className="grid grid-cols-1 gap-3">
       <div className="grid grid-cols-2 gap-3">
@@ -621,11 +631,19 @@ function SyslogTriggerFields({
         </Field>
         <Field label="Port">
           <Input
-            type="number"
-            min={1}
+            type="text"
+            inputMode="numeric"
+            aria-label="Port"
+            aria-invalid={portError ? true : undefined}
             value={String(source.port ?? 5140)}
-            onChange={(e) => onSourceChange({ port: Math.max(1, Number.parseInt(e.target.value || '5140', 10)) })}
+            onChange={(e) => {
+              const raw = e.target.value;
+              // 合法时存数字（后端契约），非法时保留原文让用户看到所填内容，由 validateSyslogPort 统一判定
+              onSourceChange({ port: validateSyslogPort(raw) ? raw : Number(raw) });
+            }}
+            className={portError ? 'border-red-300 focus:ring-red-400' : ''}
           />
+          {portError ? <p className="text-[11px] text-red-600">{portError}</p> : null}
         </Field>
       </div>
       <Field label="Input Key">
@@ -1069,7 +1087,7 @@ function PublishSection({
       title={t('detail.run.deleteService')}
       className={CARD_ACTION_DANGER_BUTTON_CLASS}
     >
-      <Trash2 className="h-3.5 w-3.5" />
+      <IconTrash aria-hidden="true" className="h-3.5 w-3.5" />
       <span>{deleting ? '删除中' : '删除'}</span>
     </button>
   );
@@ -1081,7 +1099,7 @@ function PublishSection({
       aria-expanded={configExpanded}
       className={CARD_ACTION_NEUTRAL_BUTTON_CLASS}
     >
-      {configExpanded ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
+      {configExpanded ? <IconChevronDown aria-hidden="true" className="h-3.5 w-3.5" /> : <IconChevronRight aria-hidden="true" className="h-3.5 w-3.5" />}
       <span>配置</span>
     </button>
   );
@@ -1105,7 +1123,7 @@ function PublishSection({
                     : 'text-gray-500 hover:text-gray-800'
                 }`}
               >
-                {selected ? <Check className="h-3.5 w-3.5 text-gray-700" /> : null}
+                {selected ? <IconCheck aria-hidden="true" className="h-3.5 w-3.5 text-gray-700" /> : null}
                 <span>{item === 'local' ? t('detail.run.driverLocal') : t('detail.run.driverDocker')}</span>
               </button>
             );
@@ -1118,7 +1136,7 @@ function PublishSection({
             disabled={publishing || stopping || deleting}
             className="inline-flex h-8 items-center justify-center gap-1.5 whitespace-nowrap rounded-lg border border-gray-200 bg-white px-3 text-xs font-medium text-gray-700 hover:border-gray-300 hover:bg-gray-50 disabled:opacity-60"
           >
-            <Rocket className="h-3.5 w-3.5" />
+            <IconRocket aria-hidden="true" className="h-3.5 w-3.5" />
             {publishing ? t('detail.run.publishing') : t('detail.run.applyPublishConfig')}
           </button>
         ) : null}
@@ -1161,7 +1179,7 @@ function PublishSection({
         <div className="p-4 space-y-3">
           {loading ? (
             <div className="flex items-center gap-2 text-xs text-gray-500">
-              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              <IconLoader2 aria-hidden="true" className="w-3.5 h-3.5 animate-spin" />
               加载中...
             </div>
           ) : service ? (
@@ -1201,7 +1219,7 @@ function PublishSection({
                         disabled={publishing || deleting}
                         className={CARD_ACTION_NEUTRAL_BUTTON_CLASS}
                       >
-                        <Play className="h-3.5 w-3.5" />
+                        <IconPlayerPlay aria-hidden="true" className="h-3.5 w-3.5" />
                         {publishing ? t('detail.run.publishing') : '启用'}
                       </button>
                     ) : (
@@ -1211,7 +1229,7 @@ function PublishSection({
                         disabled={stopping || deleting}
                         className={CARD_ACTION_NEUTRAL_BUTTON_CLASS}
                       >
-                        <Square className="h-3.5 w-3.5" />
+                        <IconSquare aria-hidden="true" className="h-3.5 w-3.5" />
                         {stopping ? t('detail.run.stopping') : '停用'}
                       </button>
                     )}
@@ -1283,7 +1301,7 @@ function PublishSection({
                       disabled={publishing}
                       className={CARD_ACTION_NEUTRAL_BUTTON_CLASS}
                     >
-                      <Rocket className="h-3.5 w-3.5" />
+                      <IconRocket aria-hidden="true" className="h-3.5 w-3.5" />
                       {publishing ? t('detail.run.publishing') : '发布'}
                     </button>
                   </div>
@@ -1299,7 +1317,7 @@ function PublishSection({
           )}
           {error ? (
             <div className="flex items-start gap-1.5 rounded-lg bg-red-50 px-3 py-2 text-xs text-red-600">
-              <AlertCircle className="w-3.5 h-3.5 mt-0.5 flex-shrink-0" />
+              <IconAlertCircle aria-hidden="true" className="w-3.5 h-3.5 mt-0.5 flex-shrink-0" />
               <span>{error}</span>
             </div>
           ) : null}
@@ -1365,6 +1383,8 @@ function TriggerEditor({
 
   const source = draft.source ?? {};
   const runtime = draft.runtime ?? {};
+  // Syslog 端口越界/非整数 → 表单无效：保存按钮禁用，共享保存流程 syncJsonEditors 也拦截
+  const portError = draft.type === 'syslog' ? validateSyslogPort(source.port ?? 5140) : '';
   const auth = draft.auth ?? { type: 'none' };
   const isWebhook = draft.type === 'webhook' || draft.type === 'custom_webhook';
   const isSchedule = draft.type === 'schedule';
@@ -1413,6 +1433,10 @@ function TriggerEditor({
   };
 
   const syncJsonEditors = (): WorkflowTrigger | null => {
+    if (portError) {
+      setJsonError(portError);
+      return null;
+    }
     const inputsParsed = parseJsonObject(inputsText, 'Inputs');
     if (!inputsParsed.ok) {
       setJsonError(inputsParsed.error);
@@ -1465,7 +1489,7 @@ function TriggerEditor({
               disabled={deleting}
               className="inline-flex items-center gap-1 rounded-lg border border-red-200 px-2.5 py-1.5 text-xs font-medium text-red-600 hover:bg-red-50 disabled:opacity-60"
             >
-              <Trash2 className="w-3.5 h-3.5" />
+              <IconTrash aria-hidden="true" className="w-3.5 h-3.5" />
               {deleting ? '删除中...' : '删除'}
             </button>
           </div>
@@ -1615,7 +1639,8 @@ function TriggerEditor({
           onClick={() => {
             void persistCurrentDraft();
           }}
-          disabled={saving}
+          disabled={saving || !!portError}
+          title={portError || undefined}
           className="rounded-lg border border-gray-200 px-3 py-2 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-60"
         >
           {saving ? '保存中...' : '保存'}
@@ -1624,19 +1649,19 @@ function TriggerEditor({
 
       {jsonError ? (
         <div className="flex items-start gap-1.5 rounded-lg bg-red-50 px-3 py-2 text-xs text-red-600">
-          <AlertCircle className="w-3.5 h-3.5 mt-0.5 flex-shrink-0" />
+          <IconAlertCircle aria-hidden="true" className="w-3.5 h-3.5 mt-0.5 flex-shrink-0" />
           <span>{jsonError}</span>
         </div>
       ) : null}
       {error ? (
         <div className="flex items-start gap-1.5 rounded-lg bg-red-50 px-3 py-2 text-xs text-red-600">
-          <AlertCircle className="w-3.5 h-3.5 mt-0.5 flex-shrink-0" />
+          <IconAlertCircle aria-hidden="true" className="w-3.5 h-3.5 mt-0.5 flex-shrink-0" />
           <span>{error}</span>
         </div>
       ) : null}
       {success ? (
         <div className="flex items-start gap-1.5 rounded-lg bg-green-50 px-3 py-2 text-xs text-green-700">
-          <Check className="w-3.5 h-3.5 mt-0.5 flex-shrink-0" />
+          <IconCheck aria-hidden="true" className="w-3.5 h-3.5 mt-0.5 flex-shrink-0" />
           <span>{success}</span>
         </div>
       ) : null}
@@ -1932,7 +1957,7 @@ function TriggersSection({
               title={getCreateDisabledReason('schedule')}
               className="inline-flex items-center gap-1 rounded-lg border border-gray-200 px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
             >
-              <CalendarClock className="w-3.5 h-3.5" />
+              <IconCalendarClock aria-hidden="true" className="w-3.5 h-3.5" />
               Schedule
             </button>
             <button
@@ -1942,7 +1967,7 @@ function TriggersSection({
               }}
               className="inline-flex items-center gap-1 rounded-lg border border-gray-200 px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50"
             >
-              <Globe className="w-3.5 h-3.5" />
+              <IconWorld aria-hidden="true" className="w-3.5 h-3.5" />
               Webhook
             </button>
             <button
@@ -1954,7 +1979,7 @@ function TriggersSection({
               title={getCreateDisabledReason('syslog')}
               className="inline-flex items-center gap-1 rounded-lg border border-gray-200 px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
             >
-              <Server className="w-3.5 h-3.5" />
+              <IconServer aria-hidden="true" className="w-3.5 h-3.5" />
               Syslog
             </button>
             <button
@@ -1966,7 +1991,7 @@ function TriggersSection({
               title={getCreateDisabledReason('kafka')}
               className="inline-flex items-center gap-1 rounded-lg border border-gray-200 px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
             >
-              <WorkflowIcon className="w-3.5 h-3.5" />
+              <WorkflowIcon aria-hidden="true" className="w-3.5 h-3.5" />
               Kafka
             </button>
           </div>
@@ -1979,7 +2004,7 @@ function TriggersSection({
 
           {loading ? (
             <div className="flex items-center gap-2 text-xs text-gray-500">
-              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              <IconLoader2 aria-hidden="true" className="w-3.5 h-3.5 animate-spin" />
               正在加载 Trigger...
             </div>
           ) : (
@@ -2022,7 +2047,7 @@ function TriggersSection({
                               aria-expanded={isSelected}
                               className={CARD_ACTION_NEUTRAL_BUTTON_CLASS}
                             >
-                              {isSelected ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
+                              {isSelected ? <IconChevronDown aria-hidden="true" className="h-3.5 w-3.5" /> : <IconChevronRight aria-hidden="true" className="h-3.5 w-3.5" />}
                               配置
                             </button>
                             <button
@@ -2033,7 +2058,7 @@ function TriggersSection({
                               disabled={saving}
                               className={CARD_ACTION_NEUTRAL_BUTTON_CLASS}
                             >
-                              {trigger.enabled ? <Square className="h-3.5 w-3.5" /> : <Play className="h-3.5 w-3.5" />}
+                              {trigger.enabled ? <IconSquare aria-hidden="true" className="h-3.5 w-3.5" /> : <IconPlayerPlay aria-hidden="true" className="h-3.5 w-3.5" />}
                               {trigger.enabled ? '停用' : '启用'}
                             </button>
                             <button
@@ -2045,7 +2070,7 @@ function TriggersSection({
                               disabled={deleting}
                               className={CARD_ACTION_DANGER_BUTTON_CLASS}
                             >
-                              <Trash2 className="h-3.5 w-3.5" />
+                              <IconTrash aria-hidden="true" className="h-3.5 w-3.5" />
                               删除
                             </button>
                           </div>
@@ -2129,7 +2154,7 @@ export default function IntegrationTab({ workflow, onWorkflowUpdated, onGuidePro
     return (
       <div className="flex-1 min-h-0 overflow-y-auto">
         <div className="p-4 flex items-center gap-2 text-xs text-gray-500">
-          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+          <IconLoader2 aria-hidden="true" className="w-3.5 h-3.5 animate-spin" />
           正在读取发布配置...
         </div>
       </div>
@@ -2144,7 +2169,7 @@ export default function IntegrationTab({ workflow, onWorkflowUpdated, onGuidePro
     <div className="flex-1 min-h-0 overflow-y-auto divide-y divide-gray-100">
       {configError ? (
         <div className="flex items-start gap-1.5 bg-red-50 px-4 py-3 text-xs text-red-600">
-          <AlertCircle className="w-3.5 h-3.5 mt-0.5 flex-shrink-0" />
+          <IconAlertCircle aria-hidden="true" className="w-3.5 h-3.5 mt-0.5 flex-shrink-0" />
           <span>{configError}</span>
         </div>
       ) : null}

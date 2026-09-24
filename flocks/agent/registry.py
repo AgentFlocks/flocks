@@ -40,6 +40,7 @@ from flocks.agent.agent import (
 )
 import flocks.agent.delegatable_settings as delegatable_settings
 from flocks.agent.toolset import agent_declares_tool
+from flocks.agent.tool_permissions import permission_items_to_ruleset
 from flocks.agent.prompt_utils import categorize_tools
 from flocks.agent.agent_factory import (
     scan_and_load,
@@ -172,6 +173,7 @@ def _storage_custom_agent_to_info(agent_data: Dict[str, Any]) -> Optional[AgentI
         native=False,
         hidden=agent_data.get("hidden", False),
         delegatable=agent_data.get("delegatable"),
+        permission=permission_items_to_ruleset(agent_data.get("permission")),
         tools=agent_data.get("tools", []),
         tags=agent_data.get("tags", []),
     )
@@ -482,11 +484,23 @@ class Agent:
         except Exception:
             pass
 
+    # Agent plugin files are process-global, but ``_state_accessor`` keys its
+    # cache by the *current* instance directory.  ``invalidate_cache`` can run
+    # without an instance context (the file watcher fires from a timer thread),
+    # so it also bumps a generation counter and :meth:`state` drops any
+    # per-instance cache that was built under an older generation.
+    _cache_generation: int = 0
+    _state_generations: Dict[str, int] = {}
+
     @staticmethod
     async def state() -> Dict[str, AgentInfo]:
         # Detect cross-worker skill-settings changes before serving cached state.
         Agent._sync_skill_settings_cache()
         Agent._sync_delegatable_settings_cache()
+        key = Instance.get_directory() or "default"
+        if Agent._state_generations.get(key) != Agent._cache_generation:
+            Agent._state_accessor.invalidate()  # type: ignore[attr-defined]
+            Agent._state_generations[key] = Agent._cache_generation
         return await Agent._state_accessor()
 
     @classmethod
@@ -501,6 +515,7 @@ class Agent:
         Dynamic agent prompts depend on the current tool registry, so tool
         plugin refreshes also need a lightweight way to invalidate agents.
         """
+        cls._cache_generation += 1
         cls._state_accessor.invalidate()  # type: ignore[attr-defined]
 
     # ── Lookup ──────────────────────────────────────────────────────────────
@@ -714,6 +729,10 @@ def _agent_event_should_reload(event: object) -> bool:
     if dest:
         candidates.append(dest)
     for path in candidates:
+        # 监听的是 plugins 根目录（和工具监听器一样，这样启动后才创建的 agents/ 也能覆盖），
+        # 所以只认 agents/ 之下的文件，skills/tools 里的 .md 改动不能触发 agent 重载
+        if "agents" not in Path(path).parts:
+            continue
         fname = os.path.basename(path)
         if fname == "agent.yaml" or path.endswith(".md"):
             return True
@@ -824,21 +843,33 @@ class AgentFileWatcher:
         log.info("agent.watcher.cache_invalidated", {"reason": "agent plugin file changed on disk"})
 
     def _collect_watch_dirs(self) -> Set[str]:
-        """Return all plugin agent directories that exist and should be watched."""
+        """Return the plugin roots to watch.
+
+        Watch ``<plugins>`` rather than ``<plugins>/agents`` (mirrors
+        ``ToolFileWatcher``): an ``agents/`` directory that only appears after
+        startup — the first custom agent saved from the WebUI — is then still
+        covered instead of silently unwatched until the next restart.
+        """
         dirs: Set[str] = set()
         try:
             from flocks.plugin.loader import DEFAULT_PLUGIN_ROOT
-            user_dir = str(DEFAULT_PLUGIN_ROOT / "agents")
+            user_root = Path(DEFAULT_PLUGIN_ROOT)
         except Exception:
-            user_dir = str(Path.home() / ".flocks" / "plugins" / "agents")
+            from flocks.config.config import get_user_plugins_root
 
-        if os.path.isdir(user_dir):
-            dirs.add(user_dir)
+            user_root = Path(get_user_plugins_root())
 
         try:
-            project_dir = str(Path.cwd() / ".flocks" / "plugins" / "agents")
-            if project_dir != user_dir and os.path.isdir(project_dir):
-                dirs.add(project_dir)
+            (user_root / "agents").mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
+        if os.path.isdir(user_root):
+            dirs.add(str(user_root))
+
+        try:
+            project_root = Path.cwd() / ".flocks" / "plugins"
+            if str(project_root) != str(user_root) and os.path.isdir(project_root):
+                dirs.add(str(project_root))
         except Exception:
             pass
 

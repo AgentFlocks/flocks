@@ -192,7 +192,23 @@ def _extract_with_markitdown(file_path: Path) -> str:
     markitdown_cls = getattr(markitdown, "MarkItDown")
 
     result = markitdown_cls().convert(str(file_path))
-    return _normalize_markdown(result.text_content or "")
+    text = result.text_content or ""
+    # Without the format-specific converter installed markitdown falls back
+    # to its plain-text converter and hands the raw bytes back as "text"
+    # (a broken PDF comes out as ``%PDF-1.4 garbage``). Treat that as a
+    # failure so the next parser gets a chance and garbage is never
+    # reported as a successful parse.
+    if file_path.suffix.lower() in _BINARY_CONTAINER_SUFFIXES:
+        try:
+            head = file_path.read_bytes()[:64].decode("utf-8", errors="replace")
+        except OSError:
+            head = ""
+        if head and text.lstrip().startswith(head[:8].strip()):
+            raise RuntimeError("markitdown returned the raw file bytes (no converter for this format)")
+    return _normalize_markdown(text)
+
+
+_BINARY_CONTAINER_SUFFIXES = {".pdf", ".docx", ".pptx", ".xlsx", ".doc", ".ppt", ".xls"}
 
 
 def _extract_pdf_with_pymupdf(file_path: Path) -> str:
@@ -577,10 +593,12 @@ def _run_extractors(file_path: Path) -> tuple[str, str, list[str]]:
     extractors: list[tuple[str, Callable[[Path], str]]]
     suffix = file_path.suffix.lower()
     if suffix == ".pdf":
+        # real PDF parsers first; markitdown last (it needs pdfminer and
+        # otherwise degrades to plain text)
         extractors = [
-            ("markitdown", _extract_with_markitdown),
             ("pymupdf", _extract_pdf_with_pymupdf),
             ("pypdf", _extract_pdf_with_pypdf),
+            ("markitdown", _extract_with_markitdown),
         ]
     elif suffix == ".docx":
         extractors = [

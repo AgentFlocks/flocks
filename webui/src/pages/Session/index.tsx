@@ -1,20 +1,56 @@
-import { memo, useState, useEffect, useMemo, useCallback, useRef, type RefObject } from 'react';
+import { memo, useContext, useState, useEffect, useLayoutEffect, useMemo, useCallback, useRef, type RefObject } from 'react';
 import {
-  Plus, Trash2, Archive,
-  ChevronDown, ChevronLeft, ChevronRight, Sparkles, Shield, Search, AlertTriangle,
-  PanelLeftClose, PanelLeft, Bot, Loader2,
-  Workflow as WorkflowIcon, Settings2, CheckSquare,
-  MoreHorizontal, PencilLine, Download, Share2, Cpu, Info, X, Check,
-  FolderGit2, FolderPlus, FolderOpen, Copy, ArrowUp, HardDrive, BookOpen,
-  Hammer, ClipboardList, Target, UserRound, UsersRound,
-} from 'lucide-react';
+  IconPlus,
+  IconTrash,
+  IconArchive,
+  IconChevronDown,
+  IconChevronLeft,
+  IconChevronRight,
+  IconSparkles,
+  IconShield,
+  IconSearch,
+  IconAlertTriangle,
+  IconLayoutSidebarLeftCollapse,
+  IconLayoutSidebar,
+  IconRobot,
+  IconLoader2,
+  IconRouteSquare2 as WorkflowIcon,
+  IconAdjustmentsHorizontal,
+  IconSquareCheck,
+  IconDots,
+  IconEdit,
+  IconDownload,
+  IconShare,
+  IconCpu,
+  IconInfoCircle,
+  IconX,
+  IconCheck,
+  IconFolderCode,
+  IconFolderPlus,
+  IconFolderOpen,
+  IconCopy,
+  IconArrowUp,
+  IconServer,
+  IconBook,
+  IconHammer,
+  IconClipboardList,
+  IconTarget,
+  IconUser,
+  IconUsers,
+} from '@tabler/icons-react';
 import { useTranslation } from 'react-i18next';
-import { useLocation, useNavigate, useSearchParams } from 'react-router-dom';
-import { getAnchoredMenuLeftOffset } from '@/components/common/ChatPromptSelectors';
+import { useLocation, useNavigate, useSearchParams, useParams } from 'react-router-dom';
+import SessionComposerMenu, { SessionComposerMenuHeader, SessionModeOption } from './SessionComposerMenu';
+import { sessionPath } from '@/utils/sessionUrl';
+import { PaneActiveContext } from '@/components/layout/PaneActiveContext';
+import CopyButton from '@/components/common/CopyButton';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
+import { isNarrowViewport, useNarrowViewport } from '@/components/common/sidePanelSizing';
 import ChannelIcon from '@/components/common/ChannelIcon';
 import { useToast } from '@/components/common/Toast';
 import SessionChat, { buildInstructionDisplayText, type PromptDisplayOptions, type SSEChatEvent, type SSEConnectionStatus } from '@/components/common/SessionChat';
+import SessionContextPanel from './SessionContextPanel';
+import { getInitialSidePanelWidth, getMaxSidePanelWidth, SIDE_PANEL_MIN_WIDTH } from '@/components/common/sidePanelSizing';
 import { useSSE } from '@/hooks/useSSE';
 import SuiteInstallProgressPanel, {
   applySuiteInstallProgressEvent,
@@ -22,7 +58,7 @@ import SuiteInstallProgressPanel, {
   failSuiteInstallProgress,
   type SuiteInstallProgressState,
 } from '@/components/hub/SuiteInstallProgressPanel';
-import { sessionApi } from '@/api/session';
+import { sessionApi, type SessionContextFile, type SessionContextSnapshot } from '@/api/session';
 import {
   flocksproPolicyApi,
   isSessionExecutionSettingsUnsupported,
@@ -44,13 +80,14 @@ import {
 } from '@/hooks/useChatModelResources';
 import client, { getApiBase } from '@/api/client';
 import { useDefaultModelVision } from '@/hooks/useDefaultModelVision';
-import { buildPromptParts, type ImagePartData } from '@/utils/imageUpload';
+import { buildPromptParts, type FilePartData } from '@/utils/imageUpload';
 import { getAgentDisplayDescription, getAgentDisplayName, isAgentUsableInChat } from '@/utils/agentDisplay';
 import { formatRelativeTime, formatSessionDate } from '@/utils/time';
 import { getWorkflowDisplayName } from '@/utils/workflowDisplay';
 import { formatPricingPerMillion, isPricingFree } from '@/utils/modelPricing';
 import type { Message, ModelDefinitionV2, Session } from '@/types';
 import { createMessageId } from '@/utils/messageId';
+import { extractErrorMessage } from '@/utils/error';
 import { useAuth } from '@/contexts/AuthContext';
 import {
   DEFAULT_SESSION_EXECUTION_MODE,
@@ -87,7 +124,7 @@ function ChannelChatTypeBadge({
   chatType: NonNullable<Session['channelChatType']>;
   label: string;
 }) {
-  const Icon = chatType === 'direct' ? UserRound : UsersRound;
+  const Icon = chatType === 'direct' ? IconUser : IconUsers;
   return (
     <span
       role="img"
@@ -120,9 +157,9 @@ function ExecutionModeIcon({
   mode: SessionExecutionMode;
   className?: string;
 }) {
-  if (mode === 'plan') return <ClipboardList className={className} />;
-  if (mode === 'goal') return <Target className={className} />;
-  return <Hammer className={className} />;
+  if (mode === 'plan') return <IconClipboardList aria-hidden="true" className={className} />;
+  if (mode === 'goal') return <IconTarget aria-hidden="true" className={className} />;
+  return <IconHammer aria-hidden="true" className={className} />;
 }
 type ProjectSummary = {
   id: string;
@@ -205,10 +242,10 @@ function ComposerResourcePicker({
         aria-expanded={open}
       >
         <span className="grid h-7 w-7 shrink-0 place-items-center text-zinc-500 transition-colors group-hover:text-zinc-800 dark:text-zinc-400 dark:group-hover:text-white">
-          <Icon className="h-3.5 w-3.5" />
+          <Icon aria-hidden="true" className="h-3.5 w-3.5" />
         </span>
         <span className="min-w-0 flex-1 truncate">{label}</span>
-        <ChevronRight className={`h-3.5 w-3.5 shrink-0 text-zinc-400 transition-transform ${open ? '-rotate-90' : ''}`} />
+        <IconChevronRight aria-hidden="true" className={`h-3.5 w-3.5 shrink-0 text-zinc-400 transition-transform ${open ? '-rotate-90' : ''}`} />
       </button>
       {open && (
         <div className="absolute bottom-0 left-[calc(100%+0.5rem)] z-[60] w-[300px] max-w-[calc(100vw-2rem)] overflow-hidden rounded-[14px] border border-black/[0.09] bg-white/95 shadow-[0_18px_46px_rgba(22,27,34,0.14),0_2px_8px_rgba(22,27,34,0.06)] backdrop-blur-xl dark:border-white/[0.11] dark:bg-[#252c35]/95 dark:shadow-[0_20px_48px_rgba(8,10,13,0.44)]">
@@ -236,7 +273,7 @@ function ComposerResourcePicker({
           <div className="h-64 space-y-0.5 overflow-y-auto p-1.5">
             {loading ? (
               <div className="flex h-full items-center justify-center text-zinc-400">
-                <Loader2 className="h-4 w-4 animate-spin" />
+                <IconLoader2 aria-hidden="true" className="h-4 w-4 animate-spin" />
               </div>
             ) : filteredItems.length > 0 ? (
               filteredItems.map((item) => (
@@ -248,7 +285,7 @@ function ComposerResourcePicker({
                   className="flex w-full min-w-0 items-center gap-2 rounded-lg px-2.5 py-2 text-left text-zinc-700 transition-colors hover:bg-zinc-50 hover:text-zinc-950 dark:text-zinc-300 dark:hover:bg-white/[0.06] dark:hover:text-white"
                 >
                   <span className="grid h-6 w-6 shrink-0 place-items-center rounded-md bg-zinc-100 text-zinc-400 dark:bg-white/[0.05] dark:text-zinc-500">
-                    <Icon className="h-3 w-3" />
+                    <Icon aria-hidden="true" className="h-3 w-3" />
                   </span>
                   <span className="min-w-0 flex-1 truncate text-xs font-medium">{item.name}</span>
                   <span className={`shrink-0 rounded px-1.5 py-0.5 text-[9px] font-medium ${
@@ -475,12 +512,12 @@ function SessionSidebarItemInner({
         )}
         {session.category === 'workflow' && (
           <span title={t('workflowSession')} className="flex-shrink-0">
-            <WorkflowIcon className="h-3.5 w-3.5 text-orange-400" />
+            <WorkflowIcon aria-hidden="true" className="h-3.5 w-3.5 text-orange-400" />
           </span>
         )}
         {session.category === 'entity-config' && (
           <span title={t('configSession')} className="flex-shrink-0">
-            <Settings2 className="h-3.5 w-3.5 text-purple-400" />
+            <IconAdjustmentsHorizontal aria-hidden="true" className="h-3.5 w-3.5 text-purple-400" />
           </span>
         )}
         {renaming ? (
@@ -534,7 +571,7 @@ function SessionSidebarItemInner({
                   : 'opacity-100 group-hover:opacity-0 group-focus-within:opacity-0'
               }`}
             >
-              <Loader2 className="h-[14px] w-[14px] animate-spin" />
+              <IconLoader2 aria-hidden="true" className="h-[14px] w-[14px] animate-spin" />
             </span>
           )}
           <button
@@ -551,7 +588,7 @@ function SessionSidebarItemInner({
                 : 'opacity-0 group-hover:opacity-100'
             }`}
           >
-            <MoreHorizontal className="h-[15px] w-[15px]" />
+            <IconDots aria-hidden="true" className="h-[15px] w-[15px]" />
           </button>
         </div>
       )}
@@ -580,6 +617,41 @@ const SessionSidebarItem = memo(SessionSidebarItemInner, (prev, next) => (
   prev.relativeTimeClock === next.relativeTimeClock &&
   prev.t === next.t
 ));
+
+/**
+ * Live-connection indicator for the chat header. Only the two states a user
+ * can act on are shown: reconnecting (transient) and failed (retries exhausted,
+ * reload to resume). ``connected`` renders nothing.
+ */
+function SSEStatusIndicator({ status, t }: { status: SSEConnectionStatus; t: (key: string) => string }) {
+  if (status !== 'reconnecting' && status !== 'failed') return null;
+  const failed = status === 'failed';
+  return (
+    <div
+      role="status"
+      aria-live="polite"
+      data-testid="sse-status"
+      data-sse-status={status}
+      className={`flex min-w-0 items-center gap-2 rounded-full border px-2.5 py-1 text-[11px] font-medium ${
+        failed
+          ? 'border-red-200 bg-red-50 text-red-700 dark:border-red-400/30 dark:bg-red-500/15 dark:text-red-200'
+          : 'border-amber-200 bg-amber-50 text-amber-800 dark:border-amber-500/35 dark:bg-amber-500/15 dark:text-amber-100'
+      }`}
+    >
+      <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${failed ? 'bg-red-500' : 'animate-pulse bg-amber-500'}`} />
+      <span className="truncate">{failed ? t('connectionFailed') : t('reconnecting')}</span>
+      {failed && (
+        <button
+          type="button"
+          onClick={() => window.location.reload()}
+          className="rounded px-1.5 py-0.5 text-[11px] font-medium underline-offset-2 hover:underline"
+        >
+          {t('chat.retry')}
+        </button>
+      )}
+    </div>
+  );
+}
 
 function WorkbenchRefreshStatus({ label }: { label: string }) {
   return (
@@ -655,6 +727,64 @@ function SessionChatSkeleton() {
   );
 }
 
+function mergeSessionContext(
+  current: SessionContextSnapshot | null,
+  incoming: SessionContextSnapshot,
+  older: boolean,
+): SessionContextSnapshot {
+  const newest = older && current ? current : incoming;
+  const previous = older ? incoming : current;
+  const incomingIDs = new Set(incoming.messageIDs);
+  const incomingFiles = [...incoming.outputs, ...incoming.contextFiles];
+  // A fetched page replaces descriptors for its messages, including deletions.
+  // A complete head is authoritative for the whole Session, even when empty.
+  const retainedFiles = current && (older || incoming.hasMore)
+    ? [...current.outputs, ...current.contextFiles].filter((file) => !incomingIDs.has(file.sourceMessageID))
+    : [];
+  const filesByKey = new Map<string, SessionContextFile>();
+  for (const file of (older ? [...retainedFiles, ...incomingFiles] : [...incomingFiles, ...retainedFiles])) {
+    const key = file.fileKey || file.resourceID;
+    const existing = filesByKey.get(key);
+    // A page filling a gap can be newer than retained historical descriptors.
+    if (!existing || (
+      typeof file.createdAt === 'number' && typeof existing.createdAt === 'number'
+      && file.createdAt > existing.createdAt
+    )) filesByKey.set(key, file);
+  }
+  const files = [...filesByKey.values()];
+  const outputs = files.filter((file) => file.section === 'outputs');
+  const contextFiles = files.filter((file) => file.section === 'context');
+  const progressSource = (newest.progressKnown ?? newest.progress.length > 0) ? newest : previous;
+  const progress = progressSource?.progress ?? [];
+  const progressKnown = progressSource?.progressKnown ?? progress.length > 0;
+  const progressCount = Number(progress.length > 0);
+  const skills = [...new Map([
+    ...(previous?.skills ?? []).map((skill) => [skill.name, skill] as const),
+    ...newest.skills.map((skill) => [skill.name, skill] as const),
+  ]).values()];
+  // Retain the old boundary only for an overlapping partial head; otherwise
+  // use the fetched page's boundary to fill gaps or finish a complete refresh.
+  const overlapsHead = current?.messageIDs?.some((id) => incomingIDs.has(id));
+  const pagination = older || !current || !incoming.hasMore || !overlapsHead ? incoming : current;
+  return {
+    ...newest,
+    outputs,
+    contextFiles,
+    progress,
+    progressKnown,
+    skills,
+    hasMore: pagination.hasMore,
+    nextBefore: pagination.nextBefore ?? null,
+    counts: {
+      total: outputs.length + contextFiles.length + newest.roots.length + progressCount,
+      outputs: outputs.length,
+      contextFiles: contextFiles.length,
+      roots: newest.roots.length,
+      progress: progressCount,
+    },
+  };
+}
+
 export default function SessionPage() {
   const { t, i18n } = useTranslation('session');
   const { user } = useAuth();
@@ -663,10 +793,53 @@ export default function SessionPage() {
   const projectsSectionCollapsedStorageKey = `flocks:sessions:projects-section-collapsed:${user?.id ?? 'anonymous'}`;
   const location = useLocation();
   const navigate = useNavigate();
-  const [searchParams, setSearchParams] = useSearchParams();
-  const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
+  const [searchParams] = useSearchParams();
+  const { sessionId: routeSessionId } = useParams();
+  const selectedSessionId = routeSessionId || searchParams.get('session') || null;
+  const navigationRef = useRef({ key: location.key, sessionId: selectedSessionId });
+  navigationRef.current = { key: location.key, sessionId: selectedSessionId };
+  const mountedRef = useRef(false);
+  useLayoutEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      // Once this page leaves the route, its pending mutations may finish,
+      // but must not navigate or overwrite the next page's selection.
+      mountedRef.current = false;
+    };
+  }, []);
+  // Inside the layout this page lives in a keep-alive pane: switching tabs
+  // hides it instead of unmounting it, and its location stays pinned, so the
+  // unmount / location-key guards above never fire. A hidden pane must not
+  // navigate either, or a finishing create/archive would drag the whole app
+  // back to the session it belongs to.
+  const paneActive = useContext(PaneActiveContext);
+  const paneActiveRef = useRef(paneActive);
+  paneActiveRef.current = paneActive;
+  const restoreAttemptRef = useRef<string | null>(null);
+  const legacyNavigationRef = useRef<string | null>(null);
+  const previousActionSessionRef = useRef(selectedSessionId);
+  const [sessionLoadError, setSessionLoadError] = useState<{ sessionId: string; kind: 'unavailable' | 'forbidden' | 'failed' } | null>(null);
+  const [sessionLoadAttempt, setSessionLoadAttempt] = useState(0);
+  const [pendingInitialSessionId, setPendingInitialSessionId] = useState<string | null>(null);
+  const selectSession = useCallback((id: string | null, replace = false) => {
+    if (!mountedRef.current || !paneActiveRef.current) return;
+    if (!id) writeLastSelectedSessionId(null);
+    if (id && navigationRef.current.sessionId === id) return;
+    navigate(id ? sessionPath(id) : '/sessions', {
+      replace,
+      state: id ? null : { skipLastSelectedSessionRestore: true },
+    });
+  }, [navigate]);
+  const legacyNavigationPending = Boolean(selectedSessionId) && (searchParams.has('session') || searchParams.has('message') || searchParams.has('display'));
   const [pendingFocusMessageId, setPendingFocusMessageId] = useState<string | null>(null);
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  // On phone widths (< 768px) the 282px task list would leave the chat pane
+  // ~90px wide, so it starts collapsed there and, when opened, overlays the
+  // chat instead of sharing the row with it.
+  const narrowViewport = useNarrowViewport();
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => isNarrowViewport());
+  useEffect(() => {
+    if (narrowViewport) setSidebarCollapsed(true);
+  }, [narrowViewport]);
   const [selectedAgent, setSelectedAgent] = useState('rex');
   const [showAgentOptions, setShowAgentOptions] = useState(false);
   const [showWorkflowOptions, setShowWorkflowOptions] = useState(false);
@@ -678,6 +851,7 @@ export default function SessionPage() {
     () => readSessionExecutionMode(null),
   );
   const [showExecutionModeOptions, setShowExecutionModeOptions] = useState(false);
+  const executionModeSelectorRef = useRef<HTMLDivElement>(null);
   const executionModeHandoffRef = useRef<{
     sessionId: string;
     mode: SessionExecutionMode;
@@ -686,8 +860,8 @@ export default function SessionPage() {
   const [selectedModelKey, setSelectedModelKey] = useState<string | null>(null);
   const [showModelOptions, setShowModelOptions] = useState(false);
   const modelSelectorRef = useRef<HTMLDivElement>(null);
-  const [modelMenuLeftOffset, setModelMenuLeftOffset] = useState(0);
   const [showPermissionModeOptions, setShowPermissionModeOptions] = useState(false);
+  const permissionModeSelectorRef = useRef<HTMLDivElement>(null);
   const [proPolicyEnabled, setProPolicyEnabled] = useState(false);
   const [sessionPermissionMode, setSessionPermissionMode] = useState<PermissionMode | null>(null);
   const [draftPermissionMode, setDraftPermissionMode] = useState<PermissionMode>('require-confirm');
@@ -708,6 +882,28 @@ export default function SessionPage() {
   const [pendingInitialMessage, setPendingInitialMessage] = useState<string | null>(null);
   const [pendingInitialDisplayText, setPendingInitialDisplayText] = useState<string | null>(null);
   const [pendingOptimisticMessage, setPendingOptimisticMessage] = useState<Message | null>(null);
+  const [contextPanelOpen, setContextPanelOpen] = useState(false);
+  const [contextPanelWidth, setContextPanelWidth] = useState(() => getInitialSidePanelWidth());
+  const [contextSnapshot, setContextSnapshot] = useState<SessionContextSnapshot | null>(null);
+  const [contextLoading, setContextLoading] = useState(false);
+  const [contextLoadingMore, setContextLoadingMore] = useState(false);
+  const [contextError, setContextError] = useState<string | null>(null);
+  const contextScope = useMemo(() => ({
+    sessionId: selectedSessionId,
+    open: contextPanelOpen,
+    active: false,
+    skillSignatures: new Map<string, string>(),
+  }), [selectedSessionId, contextPanelOpen]);
+  const contextScopeRef = useRef(contextScope);
+  contextScopeRef.current = contextScope;
+  const contextSnapshotRef = useRef<SessionContextSnapshot | null>(null);
+  const contextFlightRef = useRef<{
+    scope: typeof contextScope;
+    controller: AbortController;
+    dirty: boolean;
+    promise: Promise<void>;
+  } | null>(null);
+  const [requestedContextResource, setRequestedContextResource] = useState<{ sessionId: string | null; resourceID: string } | null>(null);
   const [selectMode, setSelectMode] = useState(false);
   const [checkedIds, setCheckedIds] = useState<Set<string>>(new Set());
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
@@ -756,20 +952,16 @@ export default function SessionPage() {
   const [agentSourceFilter, setAgentSourceFilter] = useState<AgentSourceFilter>('all');
   const [selectedSessionFallback, setSelectedSessionFallback] = useState<Session | null>(null);
   const [selectorTooltip, setSelectorTooltip] = useState<SelectorTooltip | null>(null);
-  const updateModelMenuLeftOffset = useCallback(() => {
-    const selector = modelSelectorRef.current;
-    if (!selector) return;
-    setModelMenuLeftOffset(getAnchoredMenuLeftOffset(
-      selector.getBoundingClientRect().left,
-      window.innerWidth,
-    ));
-  }, []);
   const renameInputRef = useRef<HTMLInputElement | null>(null);
   const renameSubmitInFlightRef = useRef(false);
   const projectSubmitInFlightRef = useRef(false);
   const folderBrowserRequestIdRef = useRef(0);
   const folderBrowserInputPathRef = useRef<string | null>(null);
   const sessionUpdateRefetchTimerRef = useRef<number | null>(null);
+  const contextRefetchTimerRef = useRef<number | null>(null);
+  const selectedSessionIdRef = useRef(selectedSessionId);
+  selectedSessionIdRef.current = selectedSessionId;
+  const previousSseStatusRef = useRef<SSEConnectionStatus | null>(null);
   const sessionStatusEventVersionRef = useRef(0);
   const projectListRequestSeqRef = useRef(0);
   const composerResourcesLoadedRef = useRef(false);
@@ -931,8 +1123,9 @@ export default function SessionPage() {
   );
   const selectedSession = listedSelectedSession
     ?? (selectedSessionFallback?.id === selectedSessionId ? selectedSessionFallback : null);
-  const activeChatSessionId = selectedSession ? selectedSessionId : null;
-  const resolvingSelectedSession = Boolean(selectedSessionId && !selectedSession);
+  const activeSessionError = sessionLoadError?.sessionId === selectedSessionId ? sessionLoadError : null;
+  const activeChatSessionId = selectedSession && !activeSessionError ? selectedSessionId : null;
+  const resolvingSelectedSession = legacyNavigationPending || Boolean(selectedSessionId && !selectedSession && !activeSessionError);
   const pinnedModelKey = selectedSession?.model_pinned && selectedSession.provider && selectedSession.model
     ? makeModelKey(selectedSession.provider, selectedSession.model)
     : null;
@@ -1159,6 +1352,76 @@ export default function SessionPage() {
     }
   }, []);
 
+  const fetchSessionContext = useCallback((older = false): Promise<void> => {
+    const { sessionId, open } = contextScope;
+    // A stale callback must not invalidate another session, including A -> B -> A.
+    if (contextScopeRef.current !== contextScope || !contextScope.active || !sessionId || !open) return Promise.resolve();
+    if (!older && contextRefetchTimerRef.current !== null) {
+      window.clearTimeout(contextRefetchTimerRef.current);
+      contextRefetchTimerRef.current = null;
+    }
+    const existing = contextFlightRef.current;
+    if (existing?.scope === contextScope) {
+      if (!older) existing.dirty = true;
+      return existing.promise;
+    }
+    const snapshot = contextSnapshotRef.current;
+    let before = older ? snapshot?.nextBefore : undefined;
+    if (older && (!snapshot?.hasMore || !before)) return Promise.resolve();
+    const flight = {
+      scope: contextScope,
+      controller: new AbortController(),
+      dirty: false,
+      promise: Promise.resolve(),
+    };
+    const isCurrent = () => contextScopeRef.current === contextScope
+      && contextFlightRef.current === flight && !flight.controller.signal.aborted;
+    contextFlightRef.current = flight;
+    setContextLoading(true);
+    setContextLoadingMore(older);
+    flight.promise = (async () => {
+      try {
+        do {
+          flight.dirty = false;
+          try {
+            const page = await sessionApi.getContext(sessionId, before ? { before } : {}, flight.controller.signal);
+            if (!isCurrent()) return;
+            const merged = mergeSessionContext(contextSnapshotRef.current, page, Boolean(before));
+            contextSnapshotRef.current = merged;
+            setContextSnapshot(merged);
+            setContextError(null);
+          } catch (error) {
+            if (!isCurrent()) return;
+            setContextError(extractErrorMessage(error, 'Failed to load Session Context'));
+          }
+          // All refreshes received during this flight coalesce into one trailing head read.
+          before = undefined;
+          if (isCurrent()) setContextLoadingMore(false);
+        } while (isCurrent() && flight.dirty);
+      } finally {
+        if (isCurrent()) {
+          contextFlightRef.current = null;
+          setContextLoading(false);
+          setContextLoadingMore(false);
+        }
+      }
+    })();
+    return flight.promise;
+  }, [contextScope]);
+
+  const scheduleContextRefetch = useCallback(() => {
+    if (contextScopeRef.current !== contextScope || !contextScope.active || !contextScope.open || !contextScope.sessionId) return;
+    if (contextFlightRef.current?.scope === contextScope) {
+      void fetchSessionContext();
+      return;
+    }
+    if (contextRefetchTimerRef.current !== null) return;
+    contextRefetchTimerRef.current = window.setTimeout(() => {
+      contextRefetchTimerRef.current = null;
+      void fetchSessionContext();
+    }, 250);
+  }, [contextScope, fetchSessionContext]);
+
   const scheduleSessionListRefetch = useCallback(() => {
     if (sessionUpdateRefetchTimerRef.current !== null) return;
     sessionUpdateRefetchTimerRef.current = window.setTimeout(() => {
@@ -1175,9 +1438,52 @@ export default function SessionPage() {
       window.clearTimeout(sessionUpdateRefetchTimerRef.current);
       sessionUpdateRefetchTimerRef.current = null;
     }
+    if (contextRefetchTimerRef.current !== null) {
+      window.clearTimeout(contextRefetchTimerRef.current);
+      contextRefetchTimerRef.current = null;
+    }
   }, []);
 
   const handleSSEEvent = useCallback((event: SSEChatEvent) => {
+    const eventSessionId = event.properties?.sessionID
+      || event.properties?.part?.sessionID
+      || event.properties?.info?.sessionID;
+    if (
+      contextScopeRef.current === contextScope
+      && contextScope.active
+      && contextScope.open
+      && eventSessionId === contextScope.sessionId
+    ) {
+      const updatedPart = event.properties?.part;
+      let contextPartUpdated = event.type === 'message.part.updated' && (
+        updatedPart?.type === 'file'
+        || (
+          updatedPart?.type === 'tool'
+          && updatedPart?.tool === 'write'
+          && (updatedPart?.state?.status === 'completed' || updatedPart?.state?.status === 'error')
+        )
+      );
+      if (
+        event.type === 'message.part.updated'
+        && updatedPart?.type === 'tool'
+        && (updatedPart.tool === 'skill_load' || updatedPart.tool === 'load_skill')
+        && ['pending', 'running', 'completed', 'error'].includes(updatedPart.state?.status)
+      ) {
+        const { input, status, error } = updatedPart.state;
+        const partID = updatedPart.id || event.properties?.partID;
+        const key = JSON.stringify([updatedPart.messageID || event.properties?.messageID, partID]);
+        const signature = JSON.stringify([input?.name || input?.skill || null, status, error ?? null]);
+        // Only descriptor changes matter, not streamed output. Keep this cache
+        // inside the open/session scope so closed, foreign, or stale events cannot seed it.
+        if (!partID || contextScope.skillSignatures.get(key) !== signature) {
+          if (partID) contextScope.skillSignatures.set(key, signature);
+          contextPartUpdated = true;
+        }
+      }
+      if (contextPartUpdated || event.type === 'todo.updated' || event.type === 'session.context.updated') {
+        scheduleContextRefetch();
+      }
+    }
     if (
       event.type === 'session.execution_mode.changed'
       && event.properties?.sessionID === selectedSessionId
@@ -1211,12 +1517,56 @@ export default function SessionPage() {
       scheduleSessionListRefetch();
     }
   }, [
+    contextScope,
+    scheduleContextRefetch,
     scheduleSessionListRefetch,
     selectedSessionId,
     t,
     toast,
     updateSessionTitle,
   ]);
+
+  useEffect(() => {
+    // Opening the panel must not consume the resource ID set by the message card.
+    setRequestedContextResource(null);
+    contextSnapshotRef.current = null;
+    setContextSnapshot(null);
+    setContextError(null);
+  }, [selectedSessionId]);
+
+  useEffect(() => {
+    contextScope.active = true;
+    setContextLoading(false);
+    setContextLoadingMore(false);
+    if (contextScope.open && contextScope.sessionId) void fetchSessionContext();
+    return () => {
+      contextScope.active = false;
+      contextScope.skillSignatures.clear();
+      if (contextRefetchTimerRef.current !== null) {
+        window.clearTimeout(contextRefetchTimerRef.current);
+        contextRefetchTimerRef.current = null;
+      }
+      const flight = contextFlightRef.current;
+      if (flight?.scope === contextScope) {
+        flight.controller.abort();
+        contextFlightRef.current = null;
+      }
+    };
+  }, [contextScope, fetchSessionContext]);
+
+  useEffect(() => {
+    const previous = previousSseStatusRef.current;
+    previousSseStatusRef.current = sseStatus;
+    if (
+      contextPanelOpen
+      && previous
+      && previous !== 'connected'
+      && sseStatus === 'connected'
+      && selectedSessionId
+    ) {
+      void fetchSessionContext();
+    }
+  }, [contextPanelOpen, fetchSessionContext, selectedSessionId, sseStatus]);
 
   useEffect(() => {
     void fetchProjects(undefined, searchQuery);
@@ -1278,48 +1628,55 @@ export default function SessionPage() {
     return () => window.removeEventListener('click', closeMenu);
   }, [openProjectMenuId]);
 
-  // Keep the selected session in sync with URL query params (e.g. onboarding
-  // or other in-app navigation to `/sessions?session=...`). Clear the params
-  // after consuming them so refreshes don't re-send the initial message.
+  // A pending action belongs only to its original session. Clear it before
+  // consuming a new legacy navigation; canonicalization keeps the same ID.
   useEffect(() => {
-    const sessionParam = searchParams.get('session');
-    const messageParam = searchParams.get('message');
-    const focusMessageParam = searchParams.get('focusMessage');
-    const displayParam = searchParams.get('display');
-    if (!sessionParam) return;
-
-    if (sessionParam !== selectedSessionId) {
-      setSelectedSessionId(sessionParam);
-    }
-    if (sessionParam) {
-      if (messageParam) {
-        setPendingInitialMessage(messageParam);
-        setPendingInitialDisplayText(displayParam ? buildInstructionDisplayText(displayParam) : null);
-      } else {
-        setPendingInitialMessage(null);
-        setPendingInitialDisplayText(null);
-      }
-      setPendingFocusMessageId(focusMessageParam || null);
-      setSearchParams({}, { replace: true });
-    }
-  }, [searchParams, selectedSessionId, setSearchParams]);
+    if (previousActionSessionRef.current === selectedSessionId) return;
+    previousActionSessionRef.current = selectedSessionId;
+    setPendingInitialMessage(null);
+    setPendingInitialDisplayText(null);
+    setPendingInitialSessionId(null);
+  }, [selectedSessionId]);
 
   useEffect(() => {
-    if (loadingSessions) return;
+    if (!selectedSessionId || !legacyNavigationPending || legacyNavigationRef.current === location.key) return;
+    legacyNavigationRef.current = location.key;
+    const legacyId = searchParams.get('session');
+    const conflictingTarget = Boolean(routeSessionId && legacyId && routeSessionId !== legacyId);
+    const message = searchParams.get('message');
+    if (message && !conflictingTarget) {
+      setPendingInitialSessionId(selectedSessionId);
+      setPendingInitialMessage(message);
+      const display = searchParams.get('display');
+      setPendingInitialDisplayText(display ? buildInstructionDisplayText(display) : null);
+    }
+    if (!message || conflictingTarget) {
+      setPendingInitialSessionId(null);
+      setPendingInitialMessage(null);
+      setPendingInitialDisplayText(null);
+    }
+    if (conflictingTarget) toast.error(t('linkTargetMismatch'));
+    const next = new URLSearchParams(searchParams);
+    next.delete('session');
+    next.delete('message');
+    next.delete('display');
+    navigate({ pathname: sessionPath(selectedSessionId), search: next.toString(), hash: location.hash }, { replace: true });
+  }, [legacyNavigationPending, location.key, location.hash, navigate, routeSessionId, searchParams, selectedSessionId, t, toast]);
 
+  useEffect(() => {
+    setPendingFocusMessageId(searchParams.get('focusMessage'));
+  }, [selectedSessionId, searchParams]);
+
+  useEffect(() => {
+    // A hidden pane waits: the restore runs once the tab is back on screen.
+    if (!paneActive || loadingSessions || restoreAttemptRef.current === location.key) return;
+    restoreAttemptRef.current = location.key;
     const alreadyVisited = hasVisitedSessionPage();
     markSessionPageVisited();
-
-    if (selectedSessionId) return;
-    if (searchParams.get('session')) return;
-    if (!alreadyVisited) return;
-    if (shouldSkipLastSelectedSessionRestore(location.state)) return;
-
+    if (selectedSessionId || !alreadyVisited || shouldSkipLastSelectedSessionRestore(location.state)) return;
     const lastSelectedSessionId = readLastSelectedSessionId();
-    if (lastSelectedSessionId) {
-      setSelectedSessionId(lastSelectedSessionId);
-    }
-  }, [loadingSessions, location.state, searchParams, selectedSessionId]);
+    if (lastSelectedSessionId) selectSession(lastSelectedSessionId, true);
+  }, [loadingSessions, location.key, location.state, paneActive, selectedSessionId, selectSession]);
 
   useEffect(() => {
     if (!selectedSessionId || selectedSession?.id !== selectedSessionId) return;
@@ -1337,38 +1694,40 @@ export default function SessionPage() {
   }, [selectedSessionId]);
 
   useEffect(() => {
-    if (!selectedSessionId) {
-      setSelectedSessionFallback(null);
-      return;
-    }
+    // Do not reuse a list-external detail after leaving its route (it may
+    // have been archived or its sharing permissions may have changed).
+    setSelectedSessionFallback(current => current?.id === selectedSessionId ? current : null);
+  }, [selectedSessionId]);
+
+  useEffect(() => {
+    setSessionLoadError(null);
+    // Keep a newly created session cached while React commits navigation.
+    // Clearing it on the old route can discard the creation handoff.
+    if (!selectedSessionId) return;
     if (listedSelectedSession) {
-      setSelectedSessionFallback(null);
+      if (selectedSessionFallback?.id === selectedSessionId) setSelectedSessionFallback(null);
       return;
     }
     if (selectedSessionFallback?.id === selectedSessionId) return;
-    if (loadingSessions) return;
-
+    // Direct links must not wait for a failed/slow sidebar request.
     let cancelled = false;
     sessionApi.get(selectedSessionId)
       .then((session) => {
         if (cancelled) return;
+        if (session.id !== selectedSessionId) throw new Error('Unexpected session response');
         setSelectedSessionFallback(session as unknown as Session);
       })
       .catch((err: any) => {
         if (cancelled) return;
-        const statusCode = err?.response?.status ?? err?.status;
-        if (statusCode === 403 || statusCode === 404) {
-          setSelectedSessionId((current) => (current === selectedSessionId ? null : current));
-          setSelectedSessionFallback(null);
-          setPendingInitialMessage(null);
-          setPendingInitialDisplayText(null);
-          writeLastSelectedSessionId(null);
-        }
+        const status = err?.response?.status ?? err?.status;
+        setSelectedSessionFallback(null);
+        setSessionLoadError({ sessionId: selectedSessionId, kind: status === 403 ? 'forbidden' : status === 404 ? 'unavailable' : 'failed' });
+        setPendingInitialMessage(null);
+        setPendingInitialDisplayText(null);
+        if (status === 403 || status === 404) writeLastSelectedSessionId(null);
       });
-    return () => {
-      cancelled = true;
-    };
-  }, [listedSelectedSession, loadingSessions, selectedSessionFallback?.id, selectedSessionId]);
+    return () => { cancelled = true; };
+  }, [listedSelectedSession, selectedSessionId, selectedSessionFallback?.id, sessionLoadAttempt]);
 
   // Close agent dropdown on outside click
   useEffect(() => {
@@ -1412,13 +1771,6 @@ export default function SessionPage() {
 
   useEffect(() => {
     if (!showModelOptions) return;
-    updateModelMenuLeftOffset();
-    window.addEventListener('resize', updateModelMenuLeftOffset);
-    return () => window.removeEventListener('resize', updateModelMenuLeftOffset);
-  }, [showModelOptions, updateModelMenuLeftOffset]);
-
-  useEffect(() => {
-    if (!showModelOptions) return;
     const handle = (e: MouseEvent) => {
       const target = e.target as HTMLElement;
       if (!target.closest('[data-model-selector]')) setShowModelOptions(false);
@@ -1453,8 +1805,10 @@ export default function SessionPage() {
       setSessionExecutionRevision(null);
       return;
     }
+    let cancelled = false;
     void flocksproPolicyApi.getSessionExecutionSettings(selectedSessionId)
       .then((result) => {
+        if (cancelled) return;
         setSessionPermissionMode(result.permissionMode);
         setSessionRuntimeMode(result.runtimeMode);
         setSessionNetworkMode(result.networkMode);
@@ -1464,6 +1818,7 @@ export default function SessionPage() {
         setSessionExecutionRevision(result.revision);
       })
       .catch(() => {
+        if (cancelled) return;
         setSessionPermissionMode(null);
         setSessionRuntimeMode(null);
         setSessionNetworkMode(null);
@@ -1472,6 +1827,7 @@ export default function SessionPage() {
         setSessionEntry('unknown');
         setSessionExecutionRevision(null);
       });
+    return () => { cancelled = true; };
   }, [proPolicyEnabled, selectedSessionId]);
 
   const handlePermissionModeChange = useCallback(async (permissionMode: PermissionMode) => {
@@ -1736,25 +2092,56 @@ export default function SessionPage() {
     );
   }, [selectedSessionId]);
 
+  const handleOpenContextFile = useCallback((resourceId: string) => {
+    setRequestedContextResource({ sessionId: selectedSessionIdRef.current, resourceID: resourceId });
+    setContextPanelOpen(true);
+  }, []);
+
+  const handleResizeContextPanel = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+    if (window.innerWidth < 1024) return;
+    const startX = event.clientX;
+    const startWidth = contextPanelWidth;
+    const handle = event.currentTarget;
+    handle.setPointerCapture(event.pointerId);
+    const onMove = (moveEvent: PointerEvent) => {
+      const next = startWidth + startX - moveEvent.clientX;
+      setContextPanelWidth(Math.min(getMaxSidePanelWidth(), Math.max(SIDE_PANEL_MIN_WIDTH, next)));
+    };
+    const onEnd = () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onEnd);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    };
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onEnd, { once: true });
+  }, [contextPanelWidth]);
+
   const handleStartNewSession = useCallback(() => {
     writeLastSelectedSessionId(null);
-    setSelectedSessionId(null);
+    selectSession(null);
     setSelectedSessionFallback(null);
     setPendingInitialMessage(null);
     setPendingInitialDisplayText(null);
+    setContextPanelOpen(false);
+    setContextSnapshot(null);
+    setRequestedContextResource(null);
     setSelectedAgent('rex');
     setSelectedModelKey(null);
     setSseStatus('disconnected');
     setShowAgentOptions(false);
     setShowModelOptions(false);
     setShowProjectOptions(false);
-  }, []);
+  }, [selectSession]);
 
   const handleCreateSession = useCallback(async (projectIdOverride?: string) => {
     if (creating) return;
     const targetGroupId = projectIdOverride ?? selectedProjectId ?? TASK_SESSION_GROUP_ID;
     const projectID = targetGroupId === TASK_SESSION_GROUP_ID ? null : targetGroupId;
     const carryAutoSelection = !selectedSessionId && selectedModelAuto;
+    const navigationKey = navigationRef.current.key;
     setCreating(true);
     try {
       const response = await client.post('/api/session', {
@@ -1764,6 +2151,7 @@ export default function SessionPage() {
       });
       addSession(response.data);
       await fetchProjects(undefined, searchQuery);
+      if (!mountedRef.current || navigationRef.current.key !== navigationKey) return;
       setSelectedSessionFallback(response.data);
       setSelectedProjectId(targetGroupId);
       setCollapsedProjectIds(prev => {
@@ -1784,13 +2172,13 @@ export default function SessionPage() {
       setSelectedExecutionMode(DEFAULT_SESSION_EXECUTION_MODE);
       setShowExecutionModeOptions(false);
       setSelectedModelKey(carryAutoSelection ? AUTO_MODEL_KEY : null);
-      setSelectedSessionId(response.data.id);
+      selectSession(response.data.id);
     } catch (err: any) {
       toast.error(t('createFailed'), err.message);
     } finally {
       setCreating(false);
     }
-  }, [creating, selectedProjectId, selectedSessionId, selectedModelAuto, addSession, fetchProjects, searchQuery, toast, t]);
+  }, [creating, selectedProjectId, selectedSessionId, selectedModelAuto, addSession, fetchProjects, searchQuery, toast, t, selectSession]);
 
   const handleCreateSessionInProject = useCallback((projectId: string) => {
     void handleCreateSession(projectId);
@@ -1837,12 +2225,13 @@ export default function SessionPage() {
 
   const handleCreateAndSend = useCallback(async (
     text: string,
-    imageParts?: ImagePartData[],
+    fileParts?: FilePartData[],
     agentOverride?: string,
     modelOverride?: { providerID: string; modelID: string } | null,
     options?: PromptDisplayOptions,
     executionModeOverride?: SessionExecutionMode,
   ) => {
+    const navigationKey = navigationRef.current.key;
     try {
       const effectiveExecutionMode = executionModeOverride || selectedExecutionMode;
       const response = await client.post('/api/session', {
@@ -1862,18 +2251,18 @@ export default function SessionPage() {
           ...(options?.displayText ? { metadata: { displayText: options.displayText } } : {}),
         });
       }
-      imageParts?.forEach((image, index) => {
+      fileParts?.forEach((file, index) => {
         optimisticParts.push({
-          id: `temp-${messageId}-img-${index}`,
+          id: file.id || `temp-${messageId}-file-${index}`,
           type: 'file',
-          url: image.url,
-          mime: image.mime,
-          filename: image.filename,
+          url: file.url,
+          mime: file.mime,
+          filename: file.filename,
         });
       });
 
       const payload: Record<string, unknown> = {
-        parts: buildPromptParts(text, imageParts),
+        parts: buildPromptParts(text, fileParts),
         messageID: messageId,
       };
       if (effectiveAgent) payload.agent = effectiveAgent;
@@ -1888,13 +2277,15 @@ export default function SessionPage() {
             runtimeMode: draftRuntimeMode,
             networkMode: draftNetworkMode,
           });
-          setSessionPermissionMode(updated.permissionMode);
-          setSessionRuntimeMode(updated.runtimeMode);
-          setSessionNetworkMode(updated.networkMode);
-          setSessionNetworkModeDefault(updated.networkModeDefault);
-          setSessionNetworkModeOverridden(updated.networkModeOverridden);
-          setSessionEntry(updated.entry);
-          setSessionExecutionRevision(updated.revision);
+          if (mountedRef.current && navigationRef.current.key === navigationKey) {
+            setSessionPermissionMode(updated.permissionMode);
+            setSessionRuntimeMode(updated.runtimeMode);
+            setSessionNetworkMode(updated.networkMode);
+            setSessionNetworkModeDefault(updated.networkModeDefault);
+            setSessionNetworkModeOverridden(updated.networkModeOverridden);
+            setSessionEntry(updated.entry);
+            setSessionExecutionRevision(updated.revision);
+          }
         } catch (error: unknown) {
           if (isSessionExecutionSettingsUnsupported(error)) {
             // Backward compatibility: older backends may not expose execution-settings yet.
@@ -1910,6 +2301,7 @@ export default function SessionPage() {
 
       addSession(response.data);
       void fetchProjects(undefined, searchQuery).catch(() => {});
+      if (!mountedRef.current || navigationRef.current.key !== navigationKey) return;
       setSelectedSessionFallback(response.data);
       executionModeHandoffRef.current = {
         sessionId: newSessionId,
@@ -1938,7 +2330,7 @@ export default function SessionPage() {
         timestamp: Date.now(),
         agent: effectiveAgent,
       });
-      setSelectedSessionId(newSessionId);
+      selectSession(newSessionId);
       if (effectiveExecutionMode === 'goal') {
         setSelectedExecutionMode(DEFAULT_SESSION_EXECUTION_MODE);
         writeSessionExecutionMode(
@@ -1951,6 +2343,7 @@ export default function SessionPage() {
       throw err;
     }
   }, [
+    selectSession,
     addSession,
     fetchProjects,
     searchQuery,
@@ -2042,7 +2435,8 @@ export default function SessionPage() {
     }
     // The mutation is complete. A secondary project-count refresh must not
     // turn a successful archive into an error or re-enable the removed row.
-    if (selectedSessionId === sessionId) setSelectedSessionId(null);
+    if (navigationRef.current.sessionId === sessionId) selectSession(null, true);
+    setSelectedSessionFallback(current => current?.id === sessionId ? null : current);
     removeSession(sessionId);
     toast.success(t('archiveSuccess'));
     try {
@@ -2050,7 +2444,7 @@ export default function SessionPage() {
     } catch {
       // SSE/reconnect refreshes will reconcile project counts later.
     }
-  }, [fetchProjects, removeSession, searchQuery, selectedSessionId, toast, t]);
+  }, [fetchProjects, removeSession, searchQuery, selectedSessionId, toast, t, selectSession]);
 
   const handleStartRename = useCallback((sessionId: string, currentTitle: string) => {
     setOpenMenuSessionId(null);
@@ -2398,9 +2792,10 @@ export default function SessionPage() {
     if (selectMode) {
       handleToggleCheck(sessionId);
     } else {
-      setSelectedSessionId(sessionId);
+      selectSession(sessionId);
+      if (narrowViewport) setSidebarCollapsed(true);
     }
-  }, [handleToggleCheck, selectMode]);
+  }, [handleToggleCheck, narrowViewport, selectMode, selectSession]);
   const handleCloseSessionSearch = useCallback(() => {
     setSessionSearchOpen(false);
     setSearchQuery('');
@@ -2447,9 +2842,10 @@ export default function SessionPage() {
         }
       }));
       if (succeeded.length > 0) {
+        setSelectedSessionFallback(current => current && succeeded.includes(current.id) ? null : current);
         removeSessions(succeeded);
-        if (selectedSessionId && succeeded.includes(selectedSessionId)) {
-          setSelectedSessionId(null);
+        if (navigationRef.current.sessionId && succeeded.includes(navigationRef.current.sessionId)) {
+          selectSession(null, true);
         }
         try {
           await fetchProjects(undefined, searchQuery);
@@ -2467,12 +2863,12 @@ export default function SessionPage() {
     } finally {
       setBatchArchiving(false);
     }
-  }, [batchArchiving, checkedIds, fetchProjects, removeSessions, searchQuery, selectedSessionId, toast, t]);
+  }, [batchArchiving, checkedIds, fetchProjects, removeSessions, searchQuery, selectedSessionId, toast, t, selectSession]);
 
   const renderSessionListItem = (session: Session) => (
     <div
       key={session.id}
-      onClick={() => selectMode ? handleToggleCheck(session.id) : setSelectedSessionId(session.id)}
+      onClick={() => handleSelectSessionRow(session.id)}
       className={`group relative mx-2 mb-1 px-3 py-2.5 rounded-xl border cursor-pointer transition-all duration-150 ${
         !selectMode && selectedSessionId === session.id
           ? 'bg-gray-100 border-gray-300 shadow-sm dark:border-zinc-700 dark:bg-zinc-900 dark:shadow-none'
@@ -2493,12 +2889,12 @@ export default function SessionPage() {
         )}
         {session.category === 'workflow' && (
           <span title={t('workflowSession')} className="flex-shrink-0">
-            <WorkflowIcon className="w-3 h-3 text-orange-400" />
+            <WorkflowIcon aria-hidden="true" className="w-3 h-3 text-orange-400" />
           </span>
         )}
         {session.category === 'entity-config' && (
           <span title={t('configSession')} className="flex-shrink-0">
-            <Settings2 className="w-3 h-3 text-purple-400" />
+            <IconAdjustmentsHorizontal aria-hidden="true" className="w-3 h-3 text-purple-400" />
           </span>
         )}
         {renamingSessionId === session.id ? (
@@ -2556,7 +2952,7 @@ export default function SessionPage() {
               openMenuSessionId === session.id ? 'opacity-100 text-gray-600 bg-gray-200 dark:bg-zinc-800 dark:text-zinc-200' : 'opacity-0 group-hover:opacity-100'
             }`}
           >
-            <MoreHorizontal className="w-3.5 h-3.5" />
+            <IconDots aria-hidden="true" className="w-3.5 h-3.5" />
           </button>
         </div>
       )}
@@ -2570,18 +2966,21 @@ export default function SessionPage() {
   const showSessionListSkeleton = loadingSessions && sessions.length === 0;
 
   return (
-    <div className="flex h-full w-full overflow-hidden bg-[#fcfcfd] text-[#202328] dark:bg-[#303842] dark:text-[#d7dee8]">
+    <div className="relative flex h-full w-full overflow-hidden bg-[#fcfcfd] text-[#202328] dark:bg-[#303842] dark:text-[#d7dee8]">
       {/* ── Sidebar ── */}
       <div
-        className={`relative flex h-full flex-shrink-0 flex-col overflow-hidden border-r bg-gray-50 transition-[width,opacity] duration-200 dark:bg-[#252c35] ${
+        className={`flex h-full flex-shrink-0 flex-col overflow-hidden border-r bg-gray-50 transition-[width,opacity] duration-200 dark:bg-[#252c35] ${
+          narrowViewport ? 'absolute inset-y-0 left-0 z-30 shadow-2xl' : 'relative'
+        } ${
           sidebarCollapsed
             ? 'w-0 border-transparent opacity-0'
             : 'w-[282px] border-black/[0.10] opacity-100 dark:border-white/[0.10]'
         }`}
         aria-label={t('managementTitle')}
+        data-session-sidebar
       >
-        {/* Header */}
-        <div className="flex-shrink-0 px-3 pb-2 pt-3.5">
+        {/* Header (left padding below lg clears the layout's floating menu button) */}
+        <div className="flex-shrink-0 px-3 pb-2 pt-3.5 pl-14 lg:pl-3">
           <div className="mb-2 flex h-8 items-center justify-between px-1">
             <div className="min-w-0">
               <strong className="text-sm font-semibold text-[#202328] dark:text-[#f0f3f7]">
@@ -2599,15 +2998,15 @@ export default function SessionPage() {
               aria-label={t('openTaskSearch')}
               aria-expanded={sessionSearchOpen}
             >
-              <Search className="h-3.5 w-3.5" />
+              <IconSearch aria-hidden="true" className="h-3.5 w-3.5" />
             </button>
           </div>
 
           <div>
             <div className="relative h-[34px] rounded-lg transition-colors hover:bg-black/[0.04] dark:hover:bg-white/[0.06]">
               {creating
-                ? <Loader2 className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 animate-spin text-[#7b8087]" />
-                : <PencilLine className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[#7b8087] dark:text-[#9aa7b4]" />}
+                ? <IconLoader2 aria-hidden="true" className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 animate-spin text-[#7b8087]" />
+                : <IconEdit aria-hidden="true" className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[#7b8087] dark:text-[#9aa7b4]" />}
               <button
                 onClick={handleStartNewSession}
                 disabled={creating}
@@ -2632,7 +3031,7 @@ export default function SessionPage() {
               className="w-full max-w-[620px] overflow-hidden rounded-2xl border border-black/[0.12] bg-[#fdfdfc] shadow-[0_24px_70px_rgba(22,27,34,0.24)] dark:border-white/[0.11] dark:bg-[#303030] dark:shadow-[0_28px_80px_rgba(0,0,0,0.55)]"
             >
               <div className="relative h-[52px] border-b border-black/[0.07] dark:border-white/[0.08]">
-                <Search className="pointer-events-none absolute left-4 top-1/2 h-[18px] w-[18px] -translate-y-1/2 text-[#7b8087] dark:text-[#a7adb5]" />
+                <IconSearch aria-hidden="true" className="pointer-events-none absolute left-4 top-1/2 h-[18px] w-[18px] -translate-y-1/2 text-[#7b8087] dark:text-[#a7adb5]" />
                 <input
                   autoFocus
                   value={searchQuery}
@@ -2653,7 +3052,7 @@ export default function SessionPage() {
                   title={t('closeTaskSearch')}
                   aria-label={t('closeTaskSearch')}
                 >
-                  <X className="h-4 w-4" />
+                  <IconX aria-hidden="true" className="h-4 w-4" />
                 </button>
               </div>
               <div className="max-h-[420px] overflow-y-auto p-2">
@@ -2709,8 +3108,8 @@ export default function SessionPage() {
                       ({managedProjectSessionGroups.length})
                     </span>
                     {projectsSectionCollapsed
-                      ? <ChevronRight className="h-3.5 w-3.5 shrink-0" />
-                      : <ChevronDown className="h-3.5 w-3.5 shrink-0" />}
+                      ? <IconChevronRight aria-hidden="true" className="h-3.5 w-3.5 shrink-0" />
+                      : <IconChevronDown aria-hidden="true" className="h-3.5 w-3.5 shrink-0" />}
                   </button>
                   <button
                     type="button"
@@ -2719,7 +3118,7 @@ export default function SessionPage() {
                     title={t('projectDialog.createTitle')}
                     aria-label={t('projectDialog.createTitle')}
                   >
-                    <FolderPlus className="h-3.5 w-3.5" />
+                    <IconFolderPlus aria-hidden="true" className="h-3.5 w-3.5" />
                   </button>
                 </div>
                 {!projectsSectionCollapsed && (
@@ -2760,7 +3159,7 @@ export default function SessionPage() {
                           aria-label={t('selectProject', { project: group.label })}
                           aria-expanded={!collapsed}
                         >
-                          <FolderGit2 className="h-3.5 w-3.5 shrink-0 text-[#6f757c] dark:text-[#9aa7b4]" />
+                          <IconFolderCode aria-hidden="true" className="h-3.5 w-3.5 shrink-0 text-[#6f757c] dark:text-[#9aa7b4]" />
                           <span className="min-w-0 flex-1 truncate">{group.label}</span>
                           {group.isShared && (
                             <span className="inline-flex shrink-0 items-center rounded-full border border-blue-200 bg-blue-50 px-1.5 py-0.5 text-[10px] font-medium text-blue-700 dark:border-blue-500/30 dark:bg-blue-950/30 dark:text-blue-300">
@@ -2768,7 +3167,7 @@ export default function SessionPage() {
                             </span>
                           )}
                           {group.pathStatus !== 'available' && (
-                            <AlertTriangle
+                            <IconAlertTriangle
                               className="h-3.5 w-3.5 shrink-0 text-amber-500"
                               aria-label={t('projectPathUnavailable')}
                             />
@@ -2790,7 +3189,7 @@ export default function SessionPage() {
                             aria-label={t('projectActions')}
                             aria-expanded={openProjectMenuId === group.id}
                           >
-                            <MoreHorizontal className="h-3.5 w-3.5" />
+                            <IconDots aria-hidden="true" className="h-3.5 w-3.5" />
                           </button>
                         )}
                         <button
@@ -2807,8 +3206,8 @@ export default function SessionPage() {
                           aria-label={t('createSessionInProject', { project: group.label })}
                         >
                           {creating && isSelectedProject
-                            ? <Loader2 className="h-3 w-3 animate-spin" />
-                            : <Plus className="h-3 w-3" />}
+                            ? <IconLoader2 aria-hidden="true" className="h-3 w-3 animate-spin" />
+                            : <IconPlus aria-hidden="true" className="h-3 w-3" />}
                         </button>
                       </div>
                       {persistedProject && openProjectMenuId === group.id && (
@@ -2823,7 +3222,7 @@ export default function SessionPage() {
                             onClick={() => void handleCopyProjectPath(group)}
                             className="flex h-[30px] w-full items-center gap-2 rounded-lg px-2 text-left text-xs text-[#4e5359] transition-colors hover:bg-black/[0.04] hover:text-[#202328] dark:text-[#c3ccd6] dark:hover:bg-white/[0.06] dark:hover:text-white"
                           >
-                            <Copy className="h-3.5 w-3.5" />
+                            <IconCopy aria-hidden="true" className="h-3.5 w-3.5" />
                             {t('projectDialog.copyPathAction')}
                           </button>
                           {group.canWrite && (
@@ -2833,7 +3232,7 @@ export default function SessionPage() {
                               onClick={() => void handleShareProject(group, !group.isShared)}
                               className="flex h-[30px] w-full items-center gap-2 rounded-lg px-2 text-left text-xs text-[#4e5359] transition-colors hover:bg-black/[0.04] hover:text-[#202328] dark:text-[#c3ccd6] dark:hover:bg-white/[0.06] dark:hover:text-white"
                             >
-                              <Share2 className="h-3.5 w-3.5" />
+                              <IconShare aria-hidden="true" className="h-3.5 w-3.5" />
                               {t(group.isShared ? 'unshareAction' : 'shareAction')}
                             </button>
                           )}
@@ -2844,7 +3243,7 @@ export default function SessionPage() {
                               onClick={() => handleOpenRenameProject(group)}
                               className="flex h-[30px] w-full items-center gap-2 rounded-lg px-2 text-left text-xs text-[#4e5359] transition-colors hover:bg-black/[0.04] hover:text-[#202328] dark:text-[#c3ccd6] dark:hover:bg-white/[0.06] dark:hover:text-white"
                             >
-                              <PencilLine className="h-3.5 w-3.5" />
+                              <IconEdit aria-hidden="true" className="h-3.5 w-3.5" />
                               {t('projectDialog.renameAction')}
                             </button>
                           )}
@@ -2858,7 +3257,7 @@ export default function SessionPage() {
                               onClick={() => handleOpenDeleteProject(group)}
                               className="flex h-[30px] w-full items-center gap-2 rounded-lg px-2 text-left text-xs text-[#c33c36] transition-colors hover:bg-[#fff0ef] hover:text-[#a92520] disabled:cursor-not-allowed disabled:opacity-40 dark:text-red-300 dark:hover:bg-red-500/10 dark:hover:text-red-200"
                             >
-                              <Trash2 className="h-3.5 w-3.5" />
+                              <IconTrash aria-hidden="true" className="h-3.5 w-3.5" />
                               {t('projectDialog.deleteAction')}
                             </button>
                           )}
@@ -2913,7 +3312,7 @@ export default function SessionPage() {
                                 className="flex h-7 items-center justify-center gap-1 rounded-lg px-2 text-[11px] text-[#969aa0] transition-colors hover:bg-black/[0.04] hover:text-[#474b51] disabled:cursor-not-allowed disabled:opacity-50 dark:text-[#8f9ba8] dark:hover:bg-white/[0.06] dark:hover:text-white"
                               >
                                 {loadingMoreProjectIds.has(group.id) && (
-                                  <Loader2 className="h-3 w-3 animate-spin" />
+                                  <IconLoader2 aria-hidden="true" className="h-3 w-3 animate-spin" />
                                 )}
                                 {t('loadMore')}
                               </button>
@@ -2954,8 +3353,8 @@ export default function SessionPage() {
                         ({taskSessionGroup.sessionCount})
                       </span>
                       {taskGroupCollapsed
-                        ? <ChevronRight className="h-3.5 w-3.5 shrink-0" />
-                        : <ChevronDown className="h-3.5 w-3.5 shrink-0" />}
+                        ? <IconChevronRight aria-hidden="true" className="h-3.5 w-3.5 shrink-0" />
+                        : <IconChevronDown aria-hidden="true" className="h-3.5 w-3.5 shrink-0" />}
                     </button>
                     <button
                       type="button"
@@ -2969,8 +3368,8 @@ export default function SessionPage() {
                       aria-label={t('createTaskSession')}
                     >
                       {creating && taskGroupSelected
-                        ? <Loader2 className="h-3 w-3 animate-spin" />
-                        : <Plus className="h-3 w-3" />}
+                        ? <IconLoader2 aria-hidden="true" className="h-3 w-3 animate-spin" />
+                        : <IconPlus aria-hidden="true" className="h-3 w-3" />}
                     </button>
                   </div>
                   {!taskGroupCollapsed && (
@@ -3015,7 +3414,7 @@ export default function SessionPage() {
                             className="flex h-7 items-center justify-center gap-1 rounded-lg px-2 text-[11px] text-[#969aa0] transition-colors hover:bg-black/[0.04] hover:text-[#474b51] disabled:cursor-not-allowed disabled:opacity-50 dark:text-[#8f9ba8] dark:hover:bg-white/[0.06] dark:hover:text-white"
                           >
                             {loadingMoreProjectIds.has(taskSessionGroup.id) && (
-                              <Loader2 className="h-3 w-3 animate-spin" />
+                              <IconLoader2 aria-hidden="true" className="h-3 w-3 animate-spin" />
                             )}
                             {t('loadMore')}
                           </button>
@@ -3050,7 +3449,7 @@ export default function SessionPage() {
                   title={checkedIds.size === sessions.length && sessions.length > 0 ? t('deselectAll') : t('selectAll')}
                   aria-label={checkedIds.size === sessions.length && sessions.length > 0 ? t('deselectAll') : t('selectAll')}
                 >
-                  <CheckSquare className="h-[15px] w-[15px]" />
+                  <IconSquareCheck aria-hidden="true" className="h-[15px] w-[15px]" />
                 </button>
                 <button
                   onClick={handleExitSelectMode}
@@ -3058,7 +3457,7 @@ export default function SessionPage() {
                   title={t('cancelSelect')}
                   aria-label={t('cancelSelect')}
                 >
-                  <X className="h-[15px] w-[15px]" />
+                  <IconX aria-hidden="true" className="h-[15px] w-[15px]" />
                 </button>
                 <button
                   onClick={handleBatchArchive}
@@ -3067,7 +3466,7 @@ export default function SessionPage() {
                   title={t('archiveSelected', { count: checkedIds.size })}
                   aria-label={t('archiveSelected', { count: checkedIds.size })}
                 >
-                  {batchArchiving ? <Loader2 className="h-[15px] w-[15px] animate-spin" /> : <Archive className="h-[15px] w-[15px]" />}
+                  {batchArchiving ? <IconLoader2 aria-hidden="true" className="h-[15px] w-[15px] animate-spin" /> : <IconArchive aria-hidden="true" className="h-[15px] w-[15px]" />}
                 </button>
               </div>
             ) : (
@@ -3077,7 +3476,7 @@ export default function SessionPage() {
                 title={t('selectMode')}
                 aria-label={t('selectMode')}
               >
-                <CheckSquare className="h-[15px] w-[15px]" />
+                <IconSquareCheck aria-hidden="true" className="h-[15px] w-[15px]" />
               </button>
             )}
           </div>
@@ -3087,7 +3486,7 @@ export default function SessionPage() {
       {/* ── Main area ── */}
       <div className="flex h-full min-w-0 flex-1 flex-col overflow-hidden bg-[#fcfcfd] dark:bg-[#303842]">
         {/* Header */}
-        <header className="relative flex h-[52px] flex-shrink-0 items-center gap-2 px-4 text-[13px]">
+        <header className="relative flex h-[52px] flex-shrink-0 items-center gap-2 px-4 pl-14 text-[13px] lg:pl-4">
           <div className="shrink-0">
             <button
               onClick={() => setSidebarCollapsed(!sidebarCollapsed)}
@@ -3095,7 +3494,7 @@ export default function SessionPage() {
               title={sidebarCollapsed ? t('showHistory') : t('hideHistory')}
               aria-label={sidebarCollapsed ? t('showHistory') : t('hideHistory')}
             >
-              {sidebarCollapsed ? <PanelLeft className="h-4 w-4" /> : <PanelLeftClose className="h-4 w-4" />}
+              {sidebarCollapsed ? <IconLayoutSidebar aria-hidden="true" className="h-4 w-4" /> : <IconLayoutSidebarLeftCollapse aria-hidden="true" className="h-4 w-4" />}
             </button>
           </div>
 
@@ -3105,13 +3504,50 @@ export default function SessionPage() {
             </h2>
           </div>
 
+          {selectedSessionId && selectedSession && !activeSessionError && (
+            <CopyButton text={new URL(sessionPath(selectedSessionId), window.location.origin).href} label={t('copyLink')} />
+          )}
+
           {workbenchRefreshing && (
             <WorkbenchRefreshStatus label={workbenchRefreshLabel} />
           )}
+          {activeChatSessionId && <SSEStatusIndicator status={sseStatus} t={t} />}
+
+          <div className="ml-auto flex items-center">
+            <button
+              type="button"
+              disabled={!activeChatSessionId}
+              onClick={() => setContextPanelOpen((open) => !open)}
+              className={`flex h-8 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg px-2.5 text-xs font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
+                contextPanelOpen
+                  ? 'bg-ai-soft text-ai'
+                  : 'text-fg-secondary hover:bg-hover hover:text-fg'
+              }`}
+              aria-label={t('context.title')}
+              title={t('context.title')}
+            >
+              <IconSparkles aria-hidden="true" className="h-3.5 w-3.5" />
+              <span>{t('context.title')}</span>
+              {(contextSnapshot?.counts.total || 0) > 0 && (
+                <span className="rounded-full bg-current/10 px-1.5 py-0.5 text-[10px]">
+                  {contextSnapshot!.counts.total}
+                </span>
+              )}
+            </button>
+          </div>
         </header>
 
+        <div className="flex min-h-0 flex-1 overflow-hidden">
         {/* Chat — powered by unified SessionChat */}
-        {resolvingSelectedSession ? (
+        {activeSessionError ? (
+          <div role="alert" className="flex flex-1 flex-col items-center justify-center gap-4 p-6 text-center">
+            <p>{t(`sessionAccess.${activeSessionError.kind}`)}</p>
+            <div className="flex gap-4">
+              <button onClick={() => { setSessionLoadError(null); setSessionLoadAttempt(value => value + 1); }}>{t('sessionAccess.retry')}</button>
+              <button onClick={() => selectSession(null)}>{t('sessionAccess.back')}</button>
+            </div>
+          </div>
+        ) : resolvingSelectedSession ? (
           <SessionChatSkeleton />
         ) : (
           <SessionChat
@@ -3134,11 +3570,13 @@ export default function SessionPage() {
           mentionAgents={chatAgents}
           className="flex-1 min-h-0"
           composerTextareaMinHeight={56}
-          initialMessage={pendingInitialMessage}
-          initialDisplayText={pendingInitialDisplayText}
+          initialMessage={pendingInitialSessionId === activeChatSessionId && selectedSession?.canWrite !== false ? pendingInitialMessage : null}
+          initialDisplayText={pendingInitialSessionId === activeChatSessionId ? pendingInitialDisplayText : null}
           initialOptimisticMessage={pendingOptimisticMessage}
           focusMessageId={pendingFocusMessageId}
           onFocusMessageConsumed={() => setPendingFocusMessageId(null)}
+          onOpenContextFile={handleOpenContextFile}
+          onOpenContext={() => setContextPanelOpen(true)}
           onInitialMessageConsumed={() => {
             setPendingInitialMessage(null);
             setPendingInitialDisplayText(null);
@@ -3195,10 +3633,10 @@ export default function SessionPage() {
                 aria-expanded={showAgentOptions}
               >
                 <span className="grid h-7 w-7 shrink-0 place-items-center text-zinc-500 transition-colors group-hover:text-zinc-800 dark:text-zinc-400 dark:group-hover:text-white">
-                  <Bot className="h-3.5 w-3.5" />
+                  <IconRobot aria-hidden="true" className="h-3.5 w-3.5" />
                 </span>
                 <span className="min-w-0 flex-1 truncate">{t('chat.addMenu.agent')}</span>
-                <ChevronRight className={`h-3.5 w-3.5 shrink-0 text-zinc-400 transition-transform ${showAgentOptions ? '-rotate-90' : ''}`} />
+                <IconChevronRight aria-hidden="true" className={`h-3.5 w-3.5 shrink-0 text-zinc-400 transition-transform ${showAgentOptions ? '-rotate-90' : ''}`} />
               </button>
               {showAgentOptions && (
                 <div className="absolute bottom-0 left-[calc(100%+0.5rem)] z-[60] w-[300px] max-w-[calc(100vw-2rem)] overflow-hidden rounded-[14px] border border-black/[0.09] bg-white/95 shadow-[0_18px_46px_rgba(22,27,34,0.14),0_2px_8px_rgba(22,27,34,0.06)] backdrop-blur-xl dark:border-white/[0.11] dark:bg-[#252c35]/95 dark:shadow-[0_20px_48px_rgba(8,10,13,0.44)]">
@@ -3261,7 +3699,7 @@ export default function SessionPage() {
                                   ? 'bg-white text-zinc-700 shadow-[0_1px_3px_rgba(22,27,34,0.08)] dark:bg-white/[0.10] dark:text-white'
                                   : 'bg-zinc-100 text-zinc-400 dark:bg-white/[0.05] dark:text-zinc-500'
                               }`}>
-                                <Bot className="h-3 w-3" />
+                                <IconRobot aria-hidden="true" className="h-3 w-3" />
                               </span>
                               <span className="min-w-0 flex-1 truncate text-xs font-medium text-zinc-900 dark:text-zinc-100">
                                 {displayName}
@@ -3290,10 +3728,10 @@ export default function SessionPage() {
                                   onMouseLeave={() => setSelectorTooltip(null)}
                                   onPointerLeave={() => setSelectorTooltip(null)}
                                 >
-                                  <Info className="h-3 w-3 text-zinc-300 transition-colors group-hover:text-zinc-500 dark:text-zinc-600 dark:group-hover:text-zinc-300" />
+                                  <IconInfoCircle aria-hidden="true" className="h-3 w-3 text-zinc-300 transition-colors group-hover:text-zinc-500 dark:text-zinc-600 dark:group-hover:text-zinc-300" />
                                 </span>
                               )}
-                              {selectedAgent === agent.name && <Check className="h-3.5 w-3.5 shrink-0 text-blue-600 dark:text-blue-300" />}
+                              {selectedAgent === agent.name && <IconCheck aria-hidden="true" className="h-3.5 w-3.5 shrink-0 text-blue-600 dark:text-blue-300" />}
                             </div>
                           </button>
                         );
@@ -3309,7 +3747,7 @@ export default function SessionPage() {
               label={t('chat.addMenu.skills')}
               title={t('chat.addMenu.selectSkill')}
               emptyText={t('chat.addMenu.noSkills')}
-              icon={BookOpen}
+              icon={IconBook}
               items={composerSkills.map((skill) => ({
                 id: skill.name,
                 name: skill.name,
@@ -3356,7 +3794,7 @@ export default function SessionPage() {
           )}
           toolbarSlot={
             <div className="flex min-w-0 items-center gap-0.5">
-              <div className="relative" data-execution-mode-selector>
+              <div ref={executionModeSelectorRef} className="relative" data-execution-mode-selector>
                 <button
                   type="button"
                   onClick={() => {
@@ -3375,61 +3813,35 @@ export default function SessionPage() {
                   <span className="font-medium">
                     {t(`executionMode.options.${selectedExecutionMode}.label`)}
                   </span>
-                  <ChevronDown className={`h-3 w-3 shrink-0 transition-transform ${showExecutionModeOptions ? 'rotate-180' : ''}`} />
+                  <IconChevronDown aria-hidden="true" className={`h-3 w-3 shrink-0 transition-transform ${showExecutionModeOptions ? 'rotate-180' : ''}`} />
                 </button>
                 {showExecutionModeOptions && (
-                  <div
+                  <SessionComposerMenu
+                    anchorRef={executionModeSelectorRef}
+                    data-execution-mode-selector
                     role="menu"
                     aria-label={t('executionMode.title')}
-                    className="absolute bottom-full left-0 z-50 mb-2 w-64 overflow-hidden rounded-lg border border-zinc-200 bg-white shadow-sm dark:border-zinc-800 dark:bg-zinc-900 dark:shadow-xl dark:shadow-black/30"
+                    header={(
+                      <SessionComposerMenuHeader
+                        title={t('executionMode.title')}
+                        hint={t('executionMode.hint')}
+                      />
+                    )}
+                    contentClassName="space-y-0.5 p-1.5"
                   >
-                    <div className="border-b border-zinc-100 px-3 py-2 dark:border-zinc-800">
-                      <div className="text-xs font-semibold text-zinc-700 dark:text-zinc-100">
-                        {t('executionMode.title')}
-                      </div>
-                      <div className="mt-0.5 text-[10px] text-zinc-400 dark:text-zinc-500">
-                        {t('executionMode.hint')}
-                      </div>
-                    </div>
-                    <div className="space-y-0.5 p-1.5">
-                      {SESSION_EXECUTION_MODES.map((mode) => {
-                        const selected = selectedExecutionMode === mode;
-                        return (
-                          <button
-                            key={mode}
-                            type="button"
-                            role="menuitemradio"
-                            aria-checked={selected}
-                            onClick={() => handleSelectExecutionMode(mode)}
-                            className={`flex w-full items-center gap-3 rounded-lg border px-2.5 py-1.5 text-left transition-colors ${
-                              selected
-                                ? 'border-blue-300 bg-blue-50 text-zinc-950 shadow-sm dark:border-blue-500/60 dark:bg-blue-500/15 dark:text-zinc-50'
-                                : 'border-transparent text-zinc-700 hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-zinc-800 dark:hover:text-zinc-50'
-                            }`}
-                          >
-                            <div className="flex w-20 shrink-0 items-center gap-1.5 text-sm font-medium">
-                              <ExecutionModeIcon
-                                mode={mode}
-                                className={`h-3.5 w-3.5 shrink-0 ${
-                                  selected
-                                    ? 'text-zinc-700 dark:text-zinc-100'
-                                    : 'text-zinc-400 dark:text-zinc-500'
-                                }`}
-                              />
-                              <span>{t(`executionMode.options.${mode}.label`)}</span>
-                            </div>
-                            <div className={`min-w-0 flex-1 truncate text-[11px] ${
-                              selected ? 'text-zinc-700 dark:text-zinc-200' : 'text-zinc-500 dark:text-zinc-400'
-                            }`}
-                            >
-                              {t(`executionMode.options.${mode}.description`)}
-                            </div>
-                            {selected && <Check className="h-3.5 w-3.5 shrink-0 text-blue-600 dark:text-blue-300" />}
-                          </button>
-                        );
-                      })}
-                    </div>
-                  </div>
+                    {SESSION_EXECUTION_MODES.map((mode) => (
+                      <SessionModeOption
+                        key={mode}
+                        role="menuitemradio"
+                        aria-checked={selectedExecutionMode === mode}
+                        selected={selectedExecutionMode === mode}
+                        label={t(`executionMode.options.${mode}.label`)}
+                        description={t(`executionMode.options.${mode}.description`)}
+                        icon={<ExecutionModeIcon mode={mode} className="h-3.5 w-3.5 shrink-0" />}
+                        onClick={() => handleSelectExecutionMode(mode)}
+                      />
+                    ))}
+                  </SessionComposerMenu>
                 )}
               </div>
               {!activeChatSessionId && (
@@ -3447,9 +3859,9 @@ export default function SessionPage() {
                   aria-label={t('projectPicker.title')}
                   aria-expanded={showProjectOptions}
                 >
-                  <FolderGit2 className="h-3 w-3 shrink-0" />
+                  <IconFolderCode aria-hidden="true" className="h-3 w-3 shrink-0" />
                   <span className="truncate font-medium">{selectedProjectContextLabel}</span>
-                  <ChevronDown className={`h-3 w-3 shrink-0 transition-transform ${showProjectOptions ? 'rotate-180' : ''}`} />
+                  <IconChevronDown aria-hidden="true" className={`h-3 w-3 shrink-0 transition-transform ${showProjectOptions ? 'rotate-180' : ''}`} />
                 </button>
                 {showProjectOptions && (
                   <div
@@ -3473,9 +3885,9 @@ export default function SessionPage() {
                             : 'border-transparent text-[#4e5359] hover:bg-black/[0.04] hover:text-[#202328] dark:text-[#c3ccd6] dark:hover:bg-white/[0.06] dark:hover:text-white'
                         }`}
                       >
-                        <FolderGit2 className={`h-3.5 w-3.5 shrink-0 ${selectedProjectId === group.id ? 'text-blue-600 dark:text-blue-300' : 'text-[#7b8087] dark:text-[#9aa7b4]'}`} />
+                        <IconFolderCode aria-hidden="true" className={`h-3.5 w-3.5 shrink-0 ${selectedProjectId === group.id ? 'text-blue-600 dark:text-blue-300' : 'text-[#7b8087] dark:text-[#9aa7b4]'}`} />
                         <span className="min-w-0 flex-1 truncate">{group.label}</span>
-                        {selectedProjectId === group.id && <Check className="h-3.5 w-3.5 shrink-0 text-blue-600 dark:text-blue-300" />}
+                        {selectedProjectId === group.id && <IconCheck aria-hidden="true" className="h-3.5 w-3.5 shrink-0 text-blue-600 dark:text-blue-300" />}
                       </button>
                     ))}
                     <div className="mx-2 my-0.5 border-t border-black/[0.07] dark:border-white/[0.08]" />
@@ -3493,9 +3905,9 @@ export default function SessionPage() {
                           : 'border-transparent text-[#4e5359] hover:bg-black/[0.04] hover:text-[#202328] dark:text-[#c3ccd6] dark:hover:bg-white/[0.06] dark:hover:text-white'
                       }`}
                     >
-                      <X className={`h-3.5 w-3.5 shrink-0 ${selectedProjectId === TASK_SESSION_GROUP_ID ? 'text-blue-600 dark:text-blue-300' : 'text-[#7b8087] dark:text-[#9aa7b4]'}`} />
+                      <IconX aria-hidden="true" className={`h-3.5 w-3.5 shrink-0 ${selectedProjectId === TASK_SESSION_GROUP_ID ? 'text-blue-600 dark:text-blue-300' : 'text-[#7b8087] dark:text-[#9aa7b4]'}`} />
                       <span className="min-w-0 flex-1 truncate">{t('projectPicker.none')}</span>
-                      {selectedProjectId === TASK_SESSION_GROUP_ID && <Check className="h-3.5 w-3.5 shrink-0 text-blue-600 dark:text-blue-300" />}
+                      {selectedProjectId === TASK_SESSION_GROUP_ID && <IconCheck aria-hidden="true" className="h-3.5 w-3.5 shrink-0 text-blue-600 dark:text-blue-300" />}
                     </button>
                     <button
                       type="button"
@@ -3506,7 +3918,7 @@ export default function SessionPage() {
                       }}
                       className="flex h-8 w-full items-center gap-2 rounded-lg px-2 text-left text-xs text-[#4e5359] transition-colors hover:bg-black/[0.04] hover:text-[#202328] dark:text-[#c3ccd6] dark:hover:bg-white/[0.06] dark:hover:text-white"
                     >
-                      <FolderPlus className="h-3.5 w-3.5 shrink-0 text-[#7b8087] dark:text-[#9aa7b4]" />
+                      <IconFolderPlus aria-hidden="true" className="h-3.5 w-3.5 shrink-0 text-[#7b8087] dark:text-[#9aa7b4]" />
                       <span>{t('projectPicker.create')}</span>
                     </button>
                   </div>
@@ -3521,7 +3933,6 @@ export default function SessionPage() {
               <button
                 type="button"
                 onClick={() => {
-                  if (!showModelOptions) updateModelMenuLeftOffset();
                   setShowModelOptions(!showModelOptions);
                   setShowExecutionModeOptions(false);
                   setShowProjectOptions(false);
@@ -3536,25 +3947,44 @@ export default function SessionPage() {
                     : t('modelPicker.empty')}
               >
                 {selectedModelAuto
-                  ? <Sparkles className="h-3 w-3 shrink-0" />
-                  : <Cpu className="h-3 w-3 shrink-0" />}
+                  ? <IconSparkles aria-hidden="true" className="h-3 w-3 shrink-0" />
+                  : <IconCpu aria-hidden="true" className="h-3 w-3 shrink-0" />}
                 <span className="truncate font-medium">
                   {selectedModelAuto
                     ? t('modelPicker.auto')
                     : selectedModelOption?.label ?? (loadingProviders || loadingEnabledModels ? t('loading') : t('modelPicker.empty'))}
                 </span>
-                <ChevronDown className={`h-3 w-3 shrink-0 transition-transform ${showModelOptions ? 'rotate-180' : ''}`} />
+                <IconChevronDown aria-hidden="true" className={`h-3 w-3 shrink-0 transition-transform ${showModelOptions ? 'rotate-180' : ''}`} />
               </button>
               {showModelOptions && (
-                <div
-                  className="absolute left-0 bottom-full z-50 mb-2 w-80 max-w-[calc(100vw-2rem)] rounded-lg border border-zinc-200 bg-white shadow-sm dark:border-zinc-800 dark:bg-zinc-900 dark:shadow-xl dark:shadow-black/30"
-                  style={{ transform: `translateX(${modelMenuLeftOffset}px)` }}
+                <SessionComposerMenu
+                  anchorRef={modelSelectorRef}
+                  data-model-selector
+                  aria-label={t('modelPicker.title')}
+                  header={(
+                    <SessionComposerMenuHeader
+                      title={t('modelPicker.title')}
+                      hint={t('modelPicker.hint')}
+                    />
+                  )}
+                  contentClassName="p-1.5"
+                  footer={(
+                    <div className="border-t border-zinc-100 p-1.5 dark:border-zinc-800">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setShowModelOptions(false);
+                          setSelectorTooltip(null);
+                          navigate('/models');
+                        }}
+                        className="flex w-full items-center justify-center gap-1.5 rounded-md px-2 py-1.5 text-xs font-medium text-zinc-600 transition-colors hover:bg-zinc-50 hover:text-zinc-900 dark:text-zinc-300 dark:hover:bg-zinc-800 dark:hover:text-zinc-50"
+                      >
+                        <IconPlus aria-hidden="true" className="h-3 w-3" />
+                        {t('modelPicker.addModel')}
+                      </button>
+                    </div>
+                  )}
                 >
-                  <div className="border-b border-zinc-100 px-2.5 py-1.5 dark:border-zinc-800">
-                    <div className="text-xs font-semibold text-zinc-700 dark:text-zinc-100">{t('modelPicker.title')}</div>
-                    <div className="truncate text-[10px] text-zinc-400 dark:text-zinc-500">{t('modelPicker.hint')}</div>
-                  </div>
-                  <div className="h-[15.5rem] overflow-y-auto p-1.5">
                     {loadingProviders || loadingEnabledModels ? (
                       <div className="p-3 text-center text-xs text-zinc-500">{t('loading')}</div>
                     ) : (
@@ -3563,6 +3993,7 @@ export default function SessionPage() {
                           <button
                             type="button"
                             onClick={() => void handleSelectAutoModel()}
+                            title={`${t('modelPicker.auto')}\n${autoStatusLabel}`}
                             disabled={!canSelectAuto}
                             className={`w-full rounded-md border px-2 py-1.5 text-left transition-colors disabled:cursor-not-allowed disabled:opacity-45 ${
                               selectedModelAuto
@@ -3571,7 +4002,7 @@ export default function SessionPage() {
                             }`}
                           >
                             <div className="flex min-w-0 items-center gap-2">
-                              <Sparkles className={`h-3 w-3 shrink-0 ${selectedModelAuto ? 'text-zinc-600 dark:text-zinc-200' : 'text-zinc-400 dark:text-zinc-500'}`} />
+                              <IconSparkles aria-hidden="true" className={`h-3 w-3 shrink-0 ${selectedModelAuto ? 'text-zinc-600 dark:text-zinc-200' : 'text-zinc-400 dark:text-zinc-500'}`} />
                               <span className="min-w-0 flex-1 truncate text-xs font-medium text-zinc-900 dark:text-zinc-100">
                                 {t('modelPicker.auto')}
                               </span>
@@ -3585,16 +4016,16 @@ export default function SessionPage() {
                                 onMouseLeave={() => setSelectorTooltip(null)}
                                 onPointerLeave={() => setSelectorTooltip(null)}
                               >
-                                <Info className="h-3 w-3 text-zinc-300 transition-colors group-hover:text-zinc-500 dark:text-zinc-600 dark:group-hover:text-zinc-300" />
+                                <IconInfoCircle aria-hidden="true" className="h-3 w-3 text-zinc-300 transition-colors group-hover:text-zinc-500 dark:text-zinc-600 dark:group-hover:text-zinc-300" />
                               </span>
-                              {selectedModelAuto && <Check className="h-3.5 w-3.5 shrink-0 text-blue-600 dark:text-blue-300" />}
+                              <IconCheck aria-hidden="true" className={`h-3.5 w-3.5 shrink-0 text-blue-600 dark:text-blue-300 ${selectedModelAuto ? '' : 'invisible'}`} />
                             </div>
                           </button>
                         </div>
                         {groupedChatModelOptions.length > 0 ? groupedChatModelOptions.map((group) => (
                         <div key={group.providerID} className="py-1 first:pt-0 last:pb-0">
                           <div className="sticky top-0 z-10 flex items-center justify-between gap-2 bg-white/95 px-1.5 py-1 text-[10px] font-semibold text-zinc-500 backdrop-blur dark:bg-zinc-900/95 dark:text-zinc-400">
-                            <span className="truncate">{group.providerName}</span>
+                            <span className="min-w-0 truncate" title={group.providerName}>{group.providerName}</span>
                             <span className="shrink-0 rounded bg-zinc-50 px-1.5 py-0.5 text-[9px] text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400">
                               {t('modelPicker.count', { count: group.models.length })}
                             </span>
@@ -3605,14 +4036,15 @@ export default function SessionPage() {
                                 key={option.key}
                                 type="button"
                                 onClick={() => void handleSelectModel(option)}
-                            className={`w-full rounded-md border px-2 py-1.5 text-left transition-colors ${
+                                title={`${option.label}\n${option.providerName} / ${option.modelID}\n${option.pricingLabel}\n${option.contextLabel}`}
+                                className={`w-full rounded-md border px-2 py-1.5 text-left transition-colors ${
                                   selectedModelOption?.key === option.key
                                     ? 'border-blue-300 bg-blue-50 text-zinc-950 shadow-sm dark:border-blue-500/60 dark:bg-blue-500/15 dark:text-zinc-50'
                                     : 'border-transparent text-zinc-700 hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-zinc-800 dark:hover:text-zinc-50'
                                 }`}
                               >
                                 <div className="flex min-w-0 items-center gap-2">
-                                  <Cpu className={`h-3 w-3 shrink-0 ${selectedModelOption?.key === option.key ? 'text-zinc-600 dark:text-zinc-200' : 'text-zinc-400 dark:text-zinc-500'}`} />
+                                  <IconCpu aria-hidden="true" className={`h-3 w-3 shrink-0 ${selectedModelOption?.key === option.key ? 'text-zinc-600 dark:text-zinc-200' : 'text-zinc-400 dark:text-zinc-500'}`} />
                                   <span className="min-w-0 flex-1 truncate text-xs font-medium text-zinc-900 dark:text-zinc-100">{option.label}</span>
                                   {option.supportsVision === true && (
                                     <span className="shrink-0 rounded bg-zinc-100 px-1.5 py-0.5 text-[9px] font-medium text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">
@@ -3630,10 +4062,10 @@ export default function SessionPage() {
                                       onMouseLeave={() => setSelectorTooltip(null)}
                                       onPointerLeave={() => setSelectorTooltip(null)}
                                     >
-                                      <Info className="h-3 w-3 text-zinc-300 transition-colors group-hover:text-zinc-500 dark:text-zinc-600 dark:group-hover:text-zinc-300" />
+                                      <IconInfoCircle aria-hidden="true" className="h-3 w-3 text-zinc-300 transition-colors group-hover:text-zinc-500 dark:text-zinc-600 dark:group-hover:text-zinc-300" />
                                     </span>
                                   </div>
-                                  {selectedModelOption?.key === option.key && <Check className="h-3.5 w-3.5 shrink-0 text-blue-600 dark:text-blue-300" />}
+                                  <IconCheck aria-hidden="true" className={`h-3.5 w-3.5 shrink-0 text-blue-600 dark:text-blue-300 ${selectedModelOption?.key === option.key ? '' : 'invisible'}`} />
                                 </div>
                               </button>
                             ))}
@@ -3644,44 +4076,36 @@ export default function SessionPage() {
                         )}
                       </>
                     )}
-                  </div>
-                  <div className="border-t border-zinc-100 p-1.5 dark:border-zinc-800">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setShowModelOptions(false);
-                        setSelectorTooltip(null);
-                        navigate('/models');
-                      }}
-                      className="flex w-full items-center justify-center gap-1.5 rounded-md px-2 py-1.5 text-xs font-medium text-zinc-600 transition-colors hover:bg-zinc-50 hover:text-zinc-900 dark:text-zinc-300 dark:hover:bg-zinc-800 dark:hover:text-zinc-50"
-                    >
-                      <Plus className="h-3 w-3" />
-                      {t('modelPicker.addModel')}
-                    </button>
-                  </div>
-                </div>
+                </SessionComposerMenu>
               )}
               </div>
               {proPolicyEnabled && (
-                <div className="relative" data-permission-mode-selector>
+                <div ref={permissionModeSelectorRef} className="relative" data-permission-mode-selector>
                   <button
                     type="button"
                     onClick={() => setShowPermissionModeOptions((open) => !open)}
                     className="flex h-7 items-center gap-1.5 rounded-lg px-2 text-xs text-zinc-600 transition-colors hover:bg-zinc-200/60 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
                     title={t('permissionMode.executionControlTitle')}
                   >
-                    <Shield className="h-3 w-3 shrink-0" />
+                    <IconShield aria-hidden="true" className="h-3 w-3 shrink-0" />
                     <span className="max-w-[116px] truncate font-medium">
                       {permissionModeLabels[currentPermissionMode]}
                     </span>
-                    <ChevronDown className={`h-3 w-3 shrink-0 transition-transform ${showPermissionModeOptions ? 'rotate-180' : ''}`} />
+                    <IconChevronDown aria-hidden="true" className={`h-3 w-3 shrink-0 transition-transform ${showPermissionModeOptions ? 'rotate-180' : ''}`} />
                   </button>
                   {showPermissionModeOptions && (
-                    <div className="absolute bottom-full left-0 z-50 mb-2 w-[520px] max-w-[calc(100vw-2rem)] rounded-lg border border-zinc-200 bg-white shadow-sm dark:border-zinc-800 dark:bg-zinc-900 dark:shadow-xl dark:shadow-black/30">
-                      <div className="space-y-3 p-2">
-                        <section className="rounded-lg border border-zinc-200 bg-zinc-50/50 p-2 dark:border-zinc-800 dark:bg-zinc-900/50">
-                        <div className="flex items-center justify-between px-1">
-                          <div className="text-[11px] font-semibold text-zinc-500 dark:text-zinc-400">
+                    <SessionComposerMenu
+                      anchorRef={permissionModeSelectorRef}
+                      data-permission-mode-selector
+                      aria-label={t('permissionMode.executionControlTitle')}
+                      contentClassName="space-y-3 p-1.5"
+                    >
+                      <section>
+                        <div className="flex min-w-0 items-center justify-between gap-3 px-2.5 py-1.5">
+                          <div
+                            className="min-w-0 truncate text-xs font-semibold text-zinc-500 dark:text-zinc-400"
+                            title={t('permissionMode.runtimeTitle', '平台开发模式')}
+                          >
                             {t('permissionMode.runtimeTitle', '平台开发模式')}
                           </div>
                           <button
@@ -3690,108 +4114,71 @@ export default function SessionPage() {
                               setShowPermissionModeOptions(false);
                               navigate('/settings/security-config');
                             }}
-                            className="text-[11px] font-medium text-blue-600 hover:underline dark:text-blue-400"
+                            className="shrink-0 whitespace-nowrap text-xs font-medium text-blue-600 hover:underline dark:text-blue-400"
                           >
                             {t('permissionMode.viewDetails')}
                           </button>
                         </div>
-                        <div className="mt-1 space-y-1">
-                        {runtimeModeOptions.map(({ value: mode, label, description }) => (
-                          <button
-                            key={mode}
-                            type="button"
-                            onClick={() => {
-                              void handleRuntimeModeChange(mode);
-                              setShowPermissionModeOptions(false);
-                            }}
-                            className={`flex w-full items-center gap-3 rounded-lg border px-2.5 py-1.5 text-left transition-colors ${
-                              currentRuntimeMode === mode
-                                ? 'border-blue-300 bg-blue-50 text-zinc-950 shadow-sm dark:border-blue-500/60 dark:bg-blue-500/15 dark:text-zinc-50'
-                                : 'border-transparent text-zinc-700 hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-zinc-800'
-                            }`}
-                          >
-                            <div className="w-24 shrink-0 whitespace-nowrap text-sm font-medium">{label}</div>
-                            <div className={`min-w-0 flex-1 truncate text-[11px] ${
-                              currentRuntimeMode === mode
-                                ? 'text-zinc-700 dark:text-zinc-200'
-                                : 'text-zinc-500 dark:text-zinc-400'
-                            }`}
-                            >
-                              {description}
-                            </div>
-                            {currentRuntimeMode === mode && <Check className="h-3.5 w-3.5 shrink-0 text-blue-600 dark:text-blue-300" />}
-                          </button>
-                        ))}
+                        <div className="space-y-0.5">
+                          {runtimeModeOptions.map(({ value: mode, label, description }) => (
+                            <SessionModeOption
+                              key={mode}
+                              selected={currentRuntimeMode === mode}
+                              label={label}
+                              description={description}
+                              onClick={() => {
+                                void handleRuntimeModeChange(mode);
+                                setShowPermissionModeOptions(false);
+                              }}
+                            />
+                          ))}
                         </div>
-                        </section>
-                        <section className="rounded-lg border border-zinc-200 bg-zinc-50/50 p-2 dark:border-zinc-800 dark:bg-zinc-900/50">
-                          <div className="px-1 text-[11px] font-semibold text-zinc-500 dark:text-zinc-400">
-                            {t('permissionMode.networkTitle', '网络访问模式')}
-                          </div>
-                          <div className="mt-1 space-y-1">
-                            {networkModeOptions.map(({ value: mode, label, description }) => (
-                              <button
-                                key={mode}
-                                type="button"
-                                onClick={() => {
-                                  void handleNetworkModeChange(mode);
-                                  setShowPermissionModeOptions(false);
-                                }}
-                                className={`flex w-full items-center gap-3 rounded-lg border px-2.5 py-1.5 text-left transition-colors ${
-                                  currentNetworkMode === mode
-                                    ? 'border-blue-300 bg-blue-50 text-zinc-950 shadow-sm dark:border-blue-500/60 dark:bg-blue-500/15 dark:text-zinc-50'
-                                    : 'border-transparent text-zinc-700 hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-zinc-800'
-                                }`}
-                              >
-                                <div className="w-24 shrink-0 whitespace-nowrap text-sm font-medium">{label}</div>
-                                <div className={`min-w-0 flex-1 truncate text-[11px] ${
-                                  currentNetworkMode === mode
-                                    ? 'text-zinc-700 dark:text-zinc-200'
-                                    : 'text-zinc-500 dark:text-zinc-400'
-                                }`}
-                                >
-                                  {description}
-                                </div>
-                                {currentNetworkMode === mode && <Check className="h-3.5 w-3.5 shrink-0 text-blue-600 dark:text-blue-300" />}
-                              </button>
-                            ))}
-                          </div>
-                        </section>
-                        <section className="rounded-lg border border-zinc-200 bg-zinc-50/50 p-2 dark:border-zinc-800 dark:bg-zinc-900/50">
-                          <div className="px-1 text-[11px] font-semibold text-zinc-500 dark:text-zinc-400">
-                            {t('permissionMode.title')}
-                          </div>
-                          <div className="mt-1 space-y-1">
-                            {permissionModeOptions.map(({ value: mode, label, description }) => (
-                              <button
-                                key={mode}
-                                type="button"
-                                onClick={() => {
-                                  void handlePermissionModeChange(mode);
-                                  setShowPermissionModeOptions(false);
-                                }}
-                                className={`flex w-full items-center gap-3 rounded-lg border px-2.5 py-1.5 text-left transition-colors ${
-                                  currentPermissionMode === mode
-                                    ? 'border-blue-300 bg-blue-50 text-zinc-950 shadow-sm dark:border-blue-500/60 dark:bg-blue-500/15 dark:text-zinc-50'
-                                    : 'border-transparent text-zinc-700 hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-zinc-800'
-                                }`}
-                              >
-                                <div className="w-24 shrink-0 whitespace-nowrap text-sm font-medium">{label}</div>
-                                <div className={`min-w-0 flex-1 truncate text-[11px] ${
-                                  currentPermissionMode === mode
-                                    ? 'text-zinc-700 dark:text-zinc-200'
-                                    : 'text-zinc-500 dark:text-zinc-400'
-                                }`}
-                                >
-                                  {description}
-                                </div>
-                                {currentPermissionMode === mode && <Check className="h-3.5 w-3.5 shrink-0 text-blue-600 dark:text-blue-300" />}
-                              </button>
-                            ))}
-                          </div>
-                        </section>
-                      </div>
-                    </div>
+                      </section>
+                      <section className="border-t border-zinc-100 pt-1.5 dark:border-zinc-800">
+                        <div
+                          className="truncate px-2.5 py-1.5 text-xs font-semibold text-zinc-500 dark:text-zinc-400"
+                          title={t('permissionMode.networkTitle', '网络访问模式')}
+                        >
+                          {t('permissionMode.networkTitle', '网络访问模式')}
+                        </div>
+                        <div className="space-y-0.5">
+                          {networkModeOptions.map(({ value: mode, label, description }) => (
+                            <SessionModeOption
+                              key={mode}
+                              selected={currentNetworkMode === mode}
+                              label={label}
+                              description={description}
+                              onClick={() => {
+                                void handleNetworkModeChange(mode);
+                                setShowPermissionModeOptions(false);
+                              }}
+                            />
+                          ))}
+                        </div>
+                      </section>
+                      <section className="border-t border-zinc-100 pt-1.5 dark:border-zinc-800">
+                        <div
+                          className="truncate px-2.5 py-1.5 text-xs font-semibold text-zinc-500 dark:text-zinc-400"
+                          title={t('permissionMode.title')}
+                        >
+                          {t('permissionMode.title')}
+                        </div>
+                        <div className="space-y-0.5">
+                          {permissionModeOptions.map(({ value: mode, label, description }) => (
+                            <SessionModeOption
+                              key={mode}
+                              selected={currentPermissionMode === mode}
+                              label={label}
+                              description={description}
+                              onClick={() => {
+                                void handlePermissionModeChange(mode);
+                                setShowPermissionModeOptions(false);
+                              }}
+                            />
+                          ))}
+                        </div>
+                      </section>
+                    </SessionComposerMenu>
                   )}
                 </div>
               )}
@@ -3799,6 +4186,39 @@ export default function SessionPage() {
           }
           />
         )}
+        {contextPanelOpen && activeChatSessionId && (
+          <>
+            <div
+              role="separator"
+              aria-orientation="vertical"
+              onPointerDown={handleResizeContextPanel}
+              className="hidden w-1 flex-shrink-0 cursor-col-resize bg-zinc-200/70 transition-colors hover:bg-violet-300 lg:block dark:bg-zinc-700 dark:hover:bg-violet-500"
+            />
+            <aside
+              className="fixed inset-0 z-50 h-full w-screen flex-shrink-0 overflow-hidden border-l border-zinc-200 lg:static lg:z-auto lg:w-[var(--session-context-width)] dark:border-zinc-700"
+              style={{ '--session-context-width': `${contextPanelWidth}px` } as React.CSSProperties}
+            >
+              <SessionContextPanel
+                key={activeChatSessionId}
+                sessionId={activeChatSessionId}
+                snapshot={contextSnapshot?.sessionID === activeChatSessionId ? contextSnapshot : null}
+                loading={contextLoading}
+                loadingMore={contextLoadingMore}
+                error={contextError}
+                requestedResourceID={requestedContextResource?.sessionId === activeChatSessionId ? requestedContextResource.resourceID : null}
+                onRequestedResourceConsumed={() => setRequestedContextResource(null)}
+                onClose={() => {
+                  setContextPanelOpen(false);
+                  setRequestedContextResource(null);
+                }}
+                onRefresh={() => fetchSessionContext()}
+                onLoadMore={() => fetchSessionContext(true)}
+                onFocusMessage={(messageId) => setPendingFocusMessageId(messageId)}
+              />
+            </aside>
+          </>
+        )}
+        </div>
       </div>
 
       {projectDialogMode && (
@@ -3871,7 +4291,7 @@ export default function SessionPage() {
                       disabled={projectSubmitting || folderBrowserLoading}
                       className="inline-flex h-9 shrink-0 items-center gap-1.5 rounded-[10px] border border-black/[0.11] px-3 text-xs font-medium text-[#60656b] transition-colors hover:bg-black/[0.04] disabled:cursor-not-allowed disabled:opacity-50 dark:border-white/[0.10] dark:text-[#c3ccd6] dark:hover:bg-white/[0.06]"
                     >
-                      {folderBrowserLoading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <FolderOpen className="h-3.5 w-3.5" />}
+                      {folderBrowserLoading ? <IconLoader2 aria-hidden="true" className="h-3.5 w-3.5 animate-spin" /> : <IconFolderOpen aria-hidden="true" className="h-3.5 w-3.5" />}
                       {t('projectDialog.chooseFolder')}
                     </button>
                   </div>
@@ -3885,7 +4305,7 @@ export default function SessionPage() {
                           className="rounded p-1 text-zinc-500 hover:bg-zinc-200 disabled:opacity-30 dark:hover:bg-zinc-800"
                           title={t('projectDialog.parentFolder')}
                         >
-                          <ArrowUp className="h-3.5 w-3.5" />
+                          <IconArrowUp aria-hidden="true" className="h-3.5 w-3.5" />
                         </button>
                         <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-zinc-500" title={folderBrowser.path}>
                           {folderBrowser.path}
@@ -3907,7 +4327,7 @@ export default function SessionPage() {
                             className="inline-flex shrink-0 items-center gap-1 rounded px-1.5 py-1 text-[11px] text-zinc-500 hover:bg-zinc-100 hover:text-zinc-800 dark:hover:bg-zinc-900 dark:hover:text-zinc-200"
                             title={root.path}
                           >
-                            <HardDrive className="h-3 w-3" />
+                            <IconServer aria-hidden="true" className="h-3 w-3" />
                             {root.name}
                           </button>
                         ))}
@@ -3921,7 +4341,7 @@ export default function SessionPage() {
                             className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs text-zinc-700 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-900"
                             title={entry.path}
                           >
-                            <FolderOpen className="h-3.5 w-3.5 shrink-0 text-zinc-400" />
+                            <IconFolderOpen aria-hidden="true" className="h-3.5 w-3.5 shrink-0 text-zinc-400" />
                             <span className="truncate">{entry.name}</span>
                           </button>
                         )) : (
@@ -3950,7 +4370,7 @@ export default function SessionPage() {
                 disabled={projectSubmitting}
                 className="inline-flex h-8 min-w-[66px] items-center justify-center rounded-[10px] bg-[#24272b] px-3 text-xs font-medium text-white transition-colors hover:bg-[#35393e] disabled:cursor-not-allowed disabled:opacity-60 dark:bg-[#eef2f6] dark:text-[#252c35] dark:hover:bg-white"
               >
-                {projectSubmitting ? <Loader2 className="h-4 w-4 animate-spin" /> : t('save')}
+                {projectSubmitting ? <IconLoader2 aria-hidden="true" className="h-4 w-4 animate-spin" /> : t('save')}
               </button>
             </div>
           </div>
@@ -3983,7 +4403,7 @@ export default function SessionPage() {
                 disabled={projectDeleting}
                 className="inline-flex h-8 min-w-[66px] items-center justify-center gap-1.5 rounded-[10px] bg-[#dc3f39] px-3 text-xs font-medium text-white transition-colors hover:bg-[#c9342f] disabled:cursor-not-allowed disabled:opacity-60"
               >
-                {projectDeleting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
+                {projectDeleting ? <IconLoader2 aria-hidden="true" className="h-4 w-4 animate-spin" /> : <IconTrash aria-hidden="true" className="h-4 w-4" />}
                 {t('projectDialog.confirmDelete')}
               </button>
             </div>
@@ -3993,6 +4413,7 @@ export default function SessionPage() {
 
       {selectorTooltip && (
         <div
+          role="tooltip"
           className="pointer-events-none fixed z-[80] w-56 -translate-x-full -translate-y-1/2 rounded-lg border border-zinc-200 bg-white px-3 py-2 text-[11px] leading-relaxed text-zinc-700 shadow-md dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-300 dark:shadow-xl dark:shadow-black/30"
           style={{ left: selectorTooltip.x, top: selectorTooltip.y }}
         >
@@ -4056,7 +4477,7 @@ export default function SessionPage() {
                     className="grid h-6 w-6 shrink-0 place-items-center rounded-md text-[#6f757c] transition-colors hover:bg-black/[0.05] hover:text-[#202328] dark:text-[#aeb8c3] dark:hover:bg-white/[0.07] dark:hover:text-white"
                     aria-label={t('moveToProjectBack')}
                   >
-                    <ChevronLeft className="h-3.5 w-3.5" />
+                    <IconChevronLeft aria-hidden="true" className="h-3.5 w-3.5" />
                   </button>
                   <span className="min-w-0 truncate text-xs font-semibold text-[#34383d] dark:text-[#e3e8ee]">
                     {t('moveToProjectTitle')}
@@ -4083,10 +4504,10 @@ export default function SessionPage() {
                         title={project.worktree}
                         className="flex min-h-[34px] w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-xs text-[#4e5359] transition-colors hover:bg-black/[0.04] hover:text-[#202328] disabled:cursor-default disabled:opacity-60 dark:text-[#c3ccd6] dark:hover:bg-white/[0.06] dark:hover:text-white"
                       >
-                        <FolderGit2 className="h-3.5 w-3.5 shrink-0 text-[#7b8087] dark:text-[#9aa7b4]" />
+                        <IconFolderCode aria-hidden="true" className="h-3.5 w-3.5 shrink-0 text-[#7b8087] dark:text-[#9aa7b4]" />
                         <span className="min-w-0 flex-1 truncate">{getProjectLabel(project)}</span>
-                        {isCurrent && <Check className="h-3.5 w-3.5 shrink-0 text-blue-500" />}
-                        {!isCurrent && isMovingHere && <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-blue-500" />}
+                        {isCurrent && <IconCheck aria-hidden="true" className="h-3.5 w-3.5 shrink-0 text-blue-500" />}
+                        {!isCurrent && isMovingHere && <IconLoader2 aria-hidden="true" className="h-3.5 w-3.5 shrink-0 animate-spin text-blue-500" />}
                       </button>
                     );
                   })}
@@ -4098,7 +4519,7 @@ export default function SessionPage() {
               onClick={(e) => { e.stopPropagation(); handleStartRename(session.id, session.title); setOpenMenuSessionId(null); setMenuAnchor(null); }}
               className="flex h-[30px] w-full items-center gap-2 rounded-lg px-2 text-left text-xs text-[#4e5359] transition-colors hover:bg-black/[0.04] hover:text-[#202328] dark:text-[#c3ccd6] dark:hover:bg-white/[0.06] dark:hover:text-white"
             >
-              <PencilLine className="w-3.5 h-3.5" />
+              <IconEdit aria-hidden="true" className="w-3.5 h-3.5" />
               <span>{t('rename')}</span>
             </button>
             <button
@@ -4106,7 +4527,7 @@ export default function SessionPage() {
               disabled={downloadingSessionId === session.id}
               className="flex h-[30px] w-full items-center gap-2 rounded-lg px-2 text-left text-xs text-[#4e5359] transition-colors hover:bg-black/[0.04] hover:text-[#202328] disabled:cursor-not-allowed disabled:opacity-50 dark:text-[#c3ccd6] dark:hover:bg-white/[0.06] dark:hover:text-white"
             >
-              <Download className="w-3.5 h-3.5" />
+              <IconDownload aria-hidden="true" className="w-3.5 h-3.5" />
               <span>{t('downloadJson')}</span>
             </button>
             <button
@@ -4114,7 +4535,7 @@ export default function SessionPage() {
               disabled={session.canWrite === false}
               className="flex h-[30px] w-full items-center gap-2 rounded-lg px-2 text-left text-xs text-[#4e5359] transition-colors hover:bg-black/[0.04] hover:text-[#202328] disabled:cursor-not-allowed disabled:opacity-50 dark:text-[#c3ccd6] dark:hover:bg-white/[0.06] dark:hover:text-white"
             >
-              <Share2 className="w-3.5 h-3.5" />
+              <IconShare aria-hidden="true" className="w-3.5 h-3.5" />
               <span>{session.isShared ? t('unshareAction') : t('shareAction')}</span>
             </button>
             <button
@@ -4123,7 +4544,7 @@ export default function SessionPage() {
               title={runningSessionIds.has(session.id) ? t('moveToProjectRunning') : undefined}
               className="flex h-[30px] w-full items-center gap-2 rounded-lg px-2 text-left text-xs text-[#4e5359] transition-colors hover:bg-black/[0.04] hover:text-[#202328] disabled:cursor-not-allowed disabled:opacity-50 dark:text-[#c3ccd6] dark:hover:bg-white/[0.06] dark:hover:text-white"
             >
-              <FolderOpen className="h-3.5 w-3.5" />
+              <IconFolderOpen aria-hidden="true" className="h-3.5 w-3.5" />
               <span className="truncate">{t('moveToProjectAction')}</span>
             </button>
             <div className="mx-2 my-0.5 border-t border-black/[0.07] dark:border-white/[0.08]" />
@@ -4132,7 +4553,7 @@ export default function SessionPage() {
               disabled={session.canDelete === false}
               className="flex h-[30px] w-full items-center gap-2 rounded-lg px-2 text-left text-xs text-[#c33c36] transition-colors hover:bg-[#fff0ef] hover:text-[#a92520] disabled:cursor-not-allowed disabled:opacity-50 dark:text-red-300 dark:hover:bg-red-500/10 dark:hover:text-red-200"
             >
-              <Archive className="w-3.5 h-3.5" />
+              <IconArchive aria-hidden="true" className="w-3.5 h-3.5" />
               <span>{t('archiveAction')}</span>
             </button>
               </>
@@ -4159,7 +4580,7 @@ function WelcomeScreen({
   return (
     <div className="w-full max-w-[660px] px-9 text-center">
       <div className="mx-auto mb-5 flex h-16 w-16 items-center justify-center rounded-full bg-slate-800 text-white shadow-[0_3px_10px_rgba(30,41,59,0.10)] dark:bg-[#46515e]">
-        <Sparkles className="h-[30px] w-[30px]" strokeWidth={1.7} />
+        <IconSparkles aria-hidden="true" className="h-[30px] w-[30px]" stroke={1.7} />
       </div>
       <h3 className="text-[22px] font-semibold tracking-[-0.01em] text-[#1f2937] dark:text-[#f0f3f7]">{t('welcome.title')}</h3>
       <p className="mt-3 text-sm leading-6 text-[#647084] dark:text-[#aeb9c5]">{t('welcome.description')}</p>
@@ -4171,9 +4592,9 @@ function WelcomeScreen({
           className="inline-flex h-11 items-center gap-2.5 rounded-[10px] border border-black/[0.11] bg-zinc-50 px-4 text-sm font-semibold text-[#374151] transition-colors hover:border-[#c2c9d2] hover:bg-white hover:text-[#111827] disabled:cursor-not-allowed disabled:opacity-70 dark:border-white/[0.10] dark:bg-[#303842] dark:text-[#d7dee8] dark:hover:border-white/[0.18] dark:hover:bg-[#3a434e] dark:hover:text-white"
         >
           {alertOperationsBusy ? (
-            <Loader2 className="h-[18px] w-[18px] animate-spin text-[#657489] dark:text-[#aeb9c5]" />
+            <IconLoader2 aria-hidden="true" className="h-[18px] w-[18px] animate-spin text-[#657489] dark:text-[#aeb9c5]" />
           ) : (
-            <Shield className="h-[18px] w-[18px] text-[#657489] dark:text-[#aeb9c5]" />
+            <IconShield aria-hidden="true" className="h-[18px] w-[18px] text-[#657489] dark:text-[#aeb9c5]" />
           )}
           <span>{t('welcome.alertOperations')}</span>
         </button>
@@ -4181,14 +4602,14 @@ function WelcomeScreen({
           onClick={() => onSuggestion(t('welcome.threatHuntingSuggestion'))}
           className="inline-flex h-11 items-center gap-2.5 rounded-[10px] border border-black/[0.11] bg-zinc-50 px-4 text-sm font-semibold text-[#374151] transition-colors hover:border-[#c2c9d2] hover:bg-white hover:text-[#111827] dark:border-white/[0.10] dark:bg-[#303842] dark:text-[#d7dee8] dark:hover:border-white/[0.18] dark:hover:bg-[#3a434e] dark:hover:text-white"
         >
-          <Search className="h-[18px] w-[18px] text-[#f4511e]" />
+          <IconSearch aria-hidden="true" className="h-[18px] w-[18px] text-[#f4511e]" />
           <span>{t('welcome.threatHunting')}</span>
         </button>
         <button
           onClick={() => onSuggestion(t('welcome.incidentResponseSuggestion'))}
           className="inline-flex h-11 items-center gap-2.5 rounded-[10px] border border-black/[0.11] bg-zinc-50 px-4 text-sm font-semibold text-[#374151] transition-colors hover:border-[#c2c9d2] hover:bg-white hover:text-[#111827] dark:border-white/[0.10] dark:bg-[#303842] dark:text-[#d7dee8] dark:hover:border-white/[0.18] dark:hover:bg-[#3a434e] dark:hover:text-white"
         >
-          <AlertTriangle className="h-[18px] w-[18px] text-amber-500" />
+          <IconAlertTriangle aria-hidden="true" className="h-[18px] w-[18px] text-amber-500" />
           <span>{t('welcome.incidentResponse')}</span>
         </button>
       </div>

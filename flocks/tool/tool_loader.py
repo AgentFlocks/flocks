@@ -41,6 +41,9 @@ log = Log.create(service="tool.loader")
 
 _TOOLS_SUBDIR = DEFAULT_PLUGIN_ROOT / "tools"
 _PROVIDER_FILENAME = "_provider.yaml"
+# Tool / provider names become path segments under the plugin root; anything
+# with separators or ``..`` could land outside ``tools/<type>/``.
+_SAFE_PATH_SEGMENT = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.\-]*$")
 _SECRET_PATTERN = re.compile(r"\{secret:([^}]+)\}")
 _PARAM_PATTERN = re.compile(r"\{([^}]+)\}")
 
@@ -336,6 +339,19 @@ def _build_tcp_connector(verify_ssl: bool) -> "Any":
     return aiohttp.TCPConnector(**kwargs)
 
 
+def _build_session_kwargs(verify_ssl: bool, target_url: str) -> Dict[str, Any]:
+    """Connector for ``target_url`` under the outbound proxy policy, same socket hygiene as above."""
+    from flocks.net.aio import session_kwargs
+
+    connector_kwargs: Dict[str, Any] = {"force_close": True}
+    if sys.version_info < (3, 12, 7):
+        connector_kwargs["enable_cleanup_closed"] = True
+    kwargs = session_kwargs(target_url=target_url, ssl=verify_ssl, connector_kwargs=connector_kwargs)
+    if "connector" not in kwargs:
+        kwargs["connector"] = _build_tcp_connector(verify_ssl)
+    return kwargs
+
+
 def _build_http_handler(cfg: dict) -> ToolHandler:
     """Build an async HTTP request handler from declarative config."""
     method = cfg.get("method", "GET").upper()
@@ -391,8 +407,7 @@ def _build_http_handler(cfg: dict) -> ToolHandler:
 
         try:
             client_timeout = aiohttp.ClientTimeout(total=timeout)
-            connector = _build_tcp_connector(verify_ssl)
-            async with aiohttp.ClientSession(timeout=client_timeout, connector=connector) as session:
+            async with aiohttp.ClientSession(timeout=client_timeout, **_build_session_kwargs(verify_ssl, url)) as session:
                 req_kwargs: Dict[str, Any] = {"headers": headers}
                 if query_params:
                     req_kwargs["params"] = query_params
@@ -804,6 +819,35 @@ def read_yaml_tool(name: str) -> Optional[Dict[str, Any]]:
         return None
 
 
+def validate_plugin_path_segment(value: str, *, field: str) -> str:
+    """Reject a tool/provider name that cannot be used as one path segment."""
+    text = str(value or "").strip()
+    if not text or ".." in text or not _SAFE_PATH_SEGMENT.match(text):
+        raise ValueError(
+            f"Invalid {field} {value!r}: use letters, digits, '_', '-' or '.' only"
+        )
+    return text
+
+
+def yaml_tool_target_path(
+    name: str,
+    *,
+    provider: Optional[str] = None,
+    tool_type: str = TOOL_TYPE_API,
+) -> Path:
+    """Return where ``create_yaml_tool`` would write ``name`` (validated, not created)."""
+    safe_name = validate_plugin_path_segment(name, field="tool name")
+    if tool_type not in ALL_TOOL_TYPES:
+        raise ValueError(f"Invalid tool type {tool_type!r}")
+    base_dir = _TOOLS_SUBDIR / tool_type
+    if provider:
+        base_dir = base_dir / validate_plugin_path_segment(provider, field="provider")
+    target_path = (base_dir / f"{safe_name}.yaml").resolve(strict=False)
+    if _TOOLS_SUBDIR.resolve(strict=False) not in target_path.parents:
+        raise ValueError(f"Invalid tool name {name!r}: resolves outside the plugin tools directory")
+    return target_path
+
+
 def create_yaml_tool(
     data: Dict[str, Any],
     provider: Optional[str] = None,
@@ -839,16 +883,10 @@ def create_yaml_tool(
     if not name:
         raise ValueError("Tool data missing required 'name' field")
 
+    target_path = yaml_tool_target_path(name, provider=provider, tool_type=tool_type)
     if _find_yaml_file(name):
         raise ValueError(f"Tool '{name}' already exists")
 
-    base_dir = _TOOLS_SUBDIR / tool_type
-    if provider:
-        target_dir = base_dir / provider
-    else:
-        target_dir = base_dir
-
-    target_path = target_dir / f"{name}.yaml"
     _write_yaml(target_path, data)
     log.info("tool.yaml.created", {"name": name, "tool_type": tool_type, "path": str(target_path)})
     return target_path
@@ -1003,6 +1041,21 @@ def _find_python_tool_block(tool_name: str) -> tuple[Optional[Path], Optional[in
     return None, None, None
 
 
+def _python_source_is_import_only(source: str) -> bool:
+    """True when ``source`` holds no statements besides imports and docstrings."""
+    try:
+        module = ast.parse(source)
+    except SyntaxError:
+        return False
+    for node in module.body:
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            continue
+        if isinstance(node, ast.Expr) and isinstance(getattr(node, "value", None), ast.Constant) and isinstance(node.value.value, str):
+            continue
+        return False
+    return True
+
+
 def delete_python_tool(name: str) -> bool:
     """Delete a Python plugin tool definition by tool name.
 
@@ -1024,9 +1077,13 @@ def delete_python_tool(name: str) -> bool:
             end_idx += 1
 
         remaining = lines[:start_idx] + lines[end_idx:]
-        if "".join(remaining).strip():
-            path.write_text("".join(remaining), encoding="utf-8")
+        remaining_source = "".join(remaining)
+        if remaining_source.strip() and not _python_source_is_import_only(remaining_source):
+            path.write_text(remaining_source, encoding="utf-8")
         else:
+            # Nothing but imports/docstrings is left: the file no longer
+            # registers any tool, so keeping it would only leave a dead module
+            # for the plugin scanner to import on every refresh.
             path.unlink()
         log.info("tool.python.deleted", {"name": name, "path": str(path)})
         return True

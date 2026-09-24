@@ -671,8 +671,17 @@ class TestPromptQueueRoutes:
         monkeypatch.setattr(session_routes, "_wait_for_session_idle", wait_mock)
         monkeypatch.setattr(session_routes, "_schedule_prompt_queue_drain", drain_mock)
         monkeypatch.setattr(session_routes, "_publish_prompt_queue", AsyncMock())
+        # 路由已收紧鉴权：run_now 现在要求 http_request，并做 require_user + 写权限校验
+        session_stub = SimpleNamespace(id=session_id, directory=str(tmp_path), status="active")
+        monkeypatch.setattr(
+            session_routes,
+            "_get_session_by_id_unfiltered",
+            AsyncMock(return_value=session_stub),
+        )
+        monkeypatch.setattr(session_routes, "require_user", lambda _request: SimpleNamespace(id="usr_admin", role="admin"))
+        monkeypatch.setattr(session_routes, "_require_session_write_access", lambda _session, _user: None)
 
-        resp = await session_routes.run_prompt_queue_item_now(session_id, item.id)
+        resp = await session_routes.run_prompt_queue_item_now(session_id, item.id, SimpleNamespace())
 
         assert resp["status"] == "accepted"
         abort_mock.assert_awaited_once_with(session_id)

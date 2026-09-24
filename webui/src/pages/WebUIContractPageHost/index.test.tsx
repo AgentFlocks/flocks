@@ -86,10 +86,12 @@ describe('WebUIContractPageHost', () => {
     await waitFor(() => {
       expect(screen.getByText('契约页面内容')).toBeInTheDocument();
     });
-    expect(installMock).toHaveBeenCalledWith('dash-1');
+    // The loader installs the page runtime itself, right before the bundle evaluates.
+    expect(installMock).not.toHaveBeenCalled();
     expect(loadBundleMock).toHaveBeenCalledWith(
       'https://api.example.test/api/contracts/webui/pages/dash-1/bundle.js?v=abc123',
       'host.bundleMissingExport',
+      'dash-1',
     );
   });
 

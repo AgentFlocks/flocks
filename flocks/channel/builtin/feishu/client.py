@@ -18,6 +18,7 @@ import httpx
 
 from flocks.channel.builtin.feishu.config import resolve_api_base, resolve_token_url
 from flocks.utils.log import Log
+from flocks.net.http import async_client
 
 log = Log.create(service="channel.feishu.client")
 
@@ -35,7 +36,7 @@ async def _get_http_client() -> httpx.AsyncClient:
     async with _http_lock:
         if _http_client is not None and not _http_client.is_closed:
             return _http_client
-        _http_client = httpx.AsyncClient(
+        _http_client = async_client(
             timeout=30,
             limits=httpx.Limits(
                 max_connections=20,

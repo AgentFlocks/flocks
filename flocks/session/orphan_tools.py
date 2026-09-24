@@ -1,10 +1,11 @@
 """Recovery helpers for tool calls left running by interrupted processes."""
 
 import time
-from typing import Iterable, Optional
+from typing import Any, Dict, Iterable, Optional
 
 from flocks.session.message import Message, MessageWithParts, ToolPart, ToolStateError
 from flocks.session.session import SessionInfo
+from flocks.session.ownership import SessionExecutionLease, current_lease
 from flocks.storage.storage import Storage
 from flocks.utils.log import Log
 
@@ -13,6 +14,7 @@ log = Log.create(service="session.orphan_tools")
 
 
 INTERRUPTED_TOOL_ERROR = "Interrupted by server restart"
+INTERRUPTED_MESSAGE_ERROR = "Message generation was interrupted by a server restart."
 
 
 def _build_interrupted_error_state(state: object, now_ms: int) -> ToolStateError:
@@ -29,11 +31,37 @@ def _build_interrupted_error_state(state: object, now_ms: int) -> ToolStateError
     )
 
 
+def _build_interrupted_message_error() -> Dict[str, Any]:
+    """Error payload for assistant replies cut off by a restart (same shape as an abort)."""
+    return {
+        "name": "MessageAbortedError",
+        "message": INTERRUPTED_MESSAGE_ERROR,
+        "data": {"message": INTERRUPTED_MESSAGE_ERROR},
+    }
+
+
+def _is_unfinished_assistant(info: object) -> bool:
+    """An assistant message the runner never closed: no finish reason and no error."""
+    return (
+        getattr(info, "role", None) == "assistant"
+        and getattr(info, "finish", None) is None
+        and getattr(info, "error", None) is None
+    )
+
+
 async def abort_orphan_running_parts_in_messages(
     session_id: str,
     messages_with_parts: Iterable[MessageWithParts],
 ) -> int:
-    """Mark running tool parts as interrupted using preloaded message parts."""
+    """Repair only while holding the same shared lease used by live runners."""
+    lease = current_lease(session_id)
+    if lease is None:
+        lease = await SessionExecutionLease.acquire(session_id)
+        if lease is None:
+            return 0
+        async with lease:
+            return await abort_orphan_running_parts_in_messages(session_id, messages_with_parts)
+    lease.require_owned()
     now_ms = int(time.time() * 1000)
     repaired = 0
 
@@ -50,6 +78,18 @@ async def abort_orphan_running_parts_in_messages(
             await Message.store_part(session_id, message_id, part)
             repaired += 1
 
+        if _is_unfinished_assistant(msg_with_parts.info):
+            updated = await Message.update(
+                session_id,
+                message_id,
+                error=_build_interrupted_message_error(),
+                finish="error",
+            )
+            if updated is not None:
+                # callers serialize the preloaded objects, keep them in sync
+                msg_with_parts.info = updated
+            repaired += 1
+
     if repaired:
         log.info("session.orphan_tools.aborted", {
             "session_id": session_id,
@@ -60,6 +100,12 @@ async def abort_orphan_running_parts_in_messages(
 
 async def abort_orphan_running_parts(session_id: str) -> int:
     """Mark persisted running tool parts as interrupted errors."""
+    if current_lease(session_id) is None:
+        lease = await SessionExecutionLease.acquire(session_id)
+        if lease is None:
+            return 0
+        async with lease:
+            return await abort_orphan_running_parts(session_id)
     messages_with_parts = await Message.list_with_parts(session_id)
     return await abort_orphan_running_parts_in_messages(session_id, messages_with_parts)
 

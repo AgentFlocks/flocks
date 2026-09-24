@@ -2,7 +2,7 @@ import type { ReactNode } from 'react';
 import ReactMarkdown from 'react-markdown';
 import { useTranslation } from 'react-i18next';
 import remarkGfm from 'remark-gfm';
-import { Download, Eye, FileText, Pencil, Save, Sparkles, Workflow as WorkflowIcon } from 'lucide-react';
+import { IconDownload, IconEye, IconFileText, IconPencil, IconDeviceFloppy, IconSparkles, IconRouteSquare2 as WorkflowIcon } from '@tabler/icons-react';
 
 import WorkflowMarkdownEditor from './WorkflowMarkdownEditor';
 
@@ -53,7 +53,7 @@ export default function WorkflowDocumentPanel({
       <div className="flex flex-shrink-0 items-center justify-between gap-3 overflow-hidden border-b border-gray-200 px-4 py-2.5">
         <div className="min-w-0">
           <div className="flex items-center gap-2">
-            <FileText className="h-4 w-4 flex-shrink-0 text-gray-500" />
+            <IconFileText aria-hidden="true" className="h-4 w-4 flex-shrink-0 text-gray-500" />
             <h2 className="truncate text-sm font-semibold text-gray-900">{t('detail.editDocTitle')}</h2>
             {dirty ? (
               <span className="rounded bg-amber-50 px-1.5 py-0.5 text-[10px] font-medium text-amber-700">
@@ -81,7 +81,7 @@ export default function WorkflowDocumentPanel({
               }`}
               title={t('detail.editDocModeEdit')}
             >
-              <Pencil className="h-3.5 w-3.5" />
+              <IconPencil aria-hidden="true" className="h-3.5 w-3.5" />
               <span className="max-[560px]:hidden">{t('detail.editDocModeEdit')}</span>
             </button>
             <button
@@ -94,7 +94,7 @@ export default function WorkflowDocumentPanel({
               }`}
               title={t('detail.editDocModePreview')}
             >
-              <Eye className="h-3.5 w-3.5" />
+              <IconEye aria-hidden="true" className="h-3.5 w-3.5" />
               <span className="max-[560px]:hidden">{t('detail.editDocModePreview')}</span>
             </button>
           </div>
@@ -106,7 +106,7 @@ export default function WorkflowDocumentPanel({
             className="inline-flex h-9 flex-shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg border border-gray-200 bg-white px-3 text-xs font-medium text-gray-600 shadow-sm transition-colors hover:bg-gray-50 hover:text-gray-900 disabled:cursor-not-allowed disabled:opacity-40 max-[560px]:px-2.5"
             title={hasContent ? t('detail.regenerateEditDocTitle') : t('detail.generateEditDocTitle')}
           >
-            <Sparkles className="h-3.5 w-3.5" />
+            <IconSparkles aria-hidden="true" className="h-3.5 w-3.5" />
             <span className="max-[680px]:hidden">{hasContent ? t('detail.regenerateEditDoc') : t('detail.generateEditDoc')}</span>
           </button>
           <button
@@ -116,17 +116,17 @@ export default function WorkflowDocumentPanel({
             className="inline-flex h-9 flex-shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg bg-red-600 px-3 text-xs font-semibold text-white shadow-sm transition-colors hover:bg-red-700 disabled:cursor-not-allowed disabled:bg-gray-200 disabled:text-gray-400 disabled:shadow-none max-[560px]:px-2.5"
             title={saving ? t('detail.editDocSaving') : t('detail.editDocSave')}
           >
-            <Save className="h-3.5 w-3.5" />
+            <IconDeviceFloppy aria-hidden="true" className="h-3.5 w-3.5" />
             <span className="max-[680px]:hidden">{saving ? t('detail.editDocSaving') : t('detail.editDocSave')}</span>
           </button>
           <button
             type="button"
             onClick={onGenerateWorkflow}
             disabled={generateWorkflowDisabled}
-            className="inline-flex h-9 flex-shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg bg-slate-900 px-3 text-xs font-semibold text-white shadow-sm transition-colors hover:bg-slate-800 disabled:cursor-not-allowed disabled:bg-gray-200 disabled:text-gray-400 disabled:shadow-none max-[560px]:px-2.5"
+            className="ui-btn ui-btn-primary flex-shrink-0 max-[560px]:px-2.5"
             title={t('detail.generateWorkflowTitle')}
           >
-            <WorkflowIcon className="h-3.5 w-3.5" />
+            <WorkflowIcon aria-hidden="true" className="h-3.5 w-3.5" />
             <span className="max-[760px]:hidden">{t('detail.generateWorkflow')}</span>
           </button>
         </div>
@@ -158,7 +158,7 @@ export default function WorkflowDocumentPanel({
         </div>
       ) : (
         <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-3 bg-gray-50 text-gray-400">
-          <FileText className="h-10 w-10 opacity-40" />
+          <IconFileText aria-hidden="true" className="h-10 w-10 opacity-40" />
           <p className="text-sm font-medium text-gray-500">{t('detail.editDocEmpty')}</p>
           <p className="max-w-sm text-center text-xs leading-relaxed">{t('detail.editDocEmptyHint')}</p>
           <button
@@ -167,7 +167,7 @@ export default function WorkflowDocumentPanel({
             disabled={resetDisabled}
             className="mt-1 inline-flex items-center gap-1.5 rounded-lg bg-red-600 px-3 py-1.5 text-xs font-semibold text-white shadow-sm transition-colors hover:bg-red-700 disabled:cursor-not-allowed disabled:bg-gray-200 disabled:text-gray-400 disabled:shadow-none"
           >
-            <Sparkles className="h-3.5 w-3.5" />
+            <IconSparkles aria-hidden="true" className="h-3.5 w-3.5" />
             {t('detail.generateEditDoc')}
           </button>
         </div>
@@ -196,7 +196,7 @@ function FloatingDownloadButton({
       }
       title={t('detail.downloadMdTitle')}
     >
-      <Download className="h-3.5 w-3.5" />
+      <IconDownload aria-hidden="true" className="h-3.5 w-3.5" />
       {t('detail.downloadMd')}
     </button>
   );

@@ -1,5 +1,6 @@
 import type { BoxRenderable, TextareaRenderable, KeyEvent, ScrollBoxRenderable } from "@opentui/core"
 import fuzzysort from "fuzzysort"
+import { isExactSlashMatch } from "./slash-match"
 import { firstBy } from "remeda"
 import { createMemo, createResource, createEffect, onMount, onCleanup, Index, Show, createSignal } from "solid-js"
 import { createStore } from "solid-js/store"
@@ -409,6 +410,10 @@ export function Autocomplete(props: {
         let score = objResults.score
         if (displayResult && displayResult.target.startsWith(store.visible + currentFilter)) {
           score *= 2
+        }
+        // 精确命中命令名或别名（如 /q 是 /exit 的别名）要排在其它命令的前缀匹配（/queue）之前
+        if (isExactSlashMatch(objResults.obj, store.visible + currentFilter)) {
+          score *= 4
         }
         const frecencyScore = objResults.obj.path ? frecency.getFrecency(objResults.obj.path) : 0
         return score * (1 + frecencyScore)
