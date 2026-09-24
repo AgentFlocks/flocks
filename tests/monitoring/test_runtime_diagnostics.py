@@ -37,7 +37,10 @@ def captured(monkeypatch):
 def adapter(monkeypatch, result):
     policy = SimpleNamespace(owner='owner', devices=['private-device'], tool='sangfor_xdr_incidents')
     monkeypatch.setattr(ToolRegistry, 'get', lambda *a: SimpleNamespace(info=SimpleNamespace(enabled=True, requires_confirmation=False)))
-    monkeypatch.setattr(ToolRegistry, 'execute', AsyncMock(return_value=result))
+    async def execute(name, ctx, **params):
+        ctx._output_capture.accept(name, result)
+        return result
+    monkeypatch.setattr(ToolRegistry, 'execute', execute)
     return XdrAdapter(policy, 'private-session')
 
 
@@ -64,30 +67,31 @@ async def test_response_failures_are_distinct_without_body_leak(monkeypatch, cap
     assert failure['call'] == 1
 
 
-async def test_real_registry_truncation_is_visible_before_json_failure(monkeypatch, tmp_path, captured):
+async def test_real_tool_display_truncation_preserves_machine_result(monkeypatch, tmp_path, captured):
     from flocks.tool import truncation
     output_dir = tmp_path / 'truncated'
     output_dir.mkdir()
     monkeypatch.setattr(truncation, '_OUTPUT_DIR', output_dir)
     monkeypatch.setattr(truncation, '_last_cleanup_ts', 0)
-    payload = {'data': {'list': [{'uuId': str(i), 'name': 'CUSTOMER_SECRET' * 200} for i in range(100)]}}
+    payload = {'code': 'Success', 'data': {'list': [{'uuId': str(i), 'name': 'CUSTOMER_SECRET' * 200} for i in range(100)]}}
     async def handler(ctx):
         return ToolResult(success=True, output=payload)
-    tool = Tool(ToolInfo(name='fixture_incidents', description='Fixture'), handler)
+    tool = Tool(ToolInfo(name='sangfor_xdr_incidents', description='Fixture'), handler)
     client = adapter(monkeypatch, None)
     async def execute(name, ctx, **params):
         return await tool.execute(ctx)
     monkeypatch.setattr(ToolRegistry, 'execute', execute)
     async with diag.trace_scope('owner', COMPONENT_ID, 'execution'):
-        with pytest.raises(ContractError, match='非 JSON'):
-            await client.call('private-device', {'action': 'list'}, 'message')
+        value = await client.call('private-device', {'action': 'list'}, 'message')
+    assert value == payload
     raw = next(r for r in captured if r['event'] == 'tool.raw')
     normalized = next(r for r in captured if r['event'] == 'tool.normalized')
-    failure = next(r for r in captured if r['event'] == 'adapter.failure')
+    structured = next(r for r in captured if r['event'] == 'adapter.structured')
     assert raw['value_type'] == 'dict' and raw['items'] == 100 and not raw['truncated']
     assert normalized['value_type'] == 'str' and normalized['truncated'] and normalized['has_saved_output']
-    assert failure['reason'] == 'non_json' and failure['truncated']
-    assert raw['call'] == normalized['call'] == failure['call']
+    assert structured['value_type'] == 'dict' and structured['items'] == 100
+    assert not any(r['event'] == 'adapter.failure' for r in captured)
+    assert raw['call'] == normalized['call'] == structured['call']
     assert 'CUSTOMER_SECRET' not in json.dumps(captured)
     assert str(output_dir) not in json.dumps(captured)
 

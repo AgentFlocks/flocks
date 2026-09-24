@@ -15,7 +15,7 @@ from flocks.utils.id import Identifier
 from .models import MonitoringPolicy
 from .sessions import ensure_daily
 from .store import rows, write, connection, encode
-from .adapter import XdrAdapter, ContractError, normalize, page_items
+from .adapter import XdrAdapter, ContractError, normalize, page_items, response_items
 from . import diagnostics as diag
 
 _running: dict[str, asyncio.Task] = {}
@@ -177,7 +177,7 @@ async def run(execution, policy, adapter_factory=XdrAdapter):
                             raise ContractError('关联实体响应缺失')
                         # Retain only whitelisted stable host identifiers; no raw
                         # credential-bearing HTTP response is rendered/persisted.
-                        items = data if isinstance(data, list) else data.get('list')
+                        items = data if isinstance(data, list) else response_items(data)
                         if not isinstance(items, list):
                             raise ContractError('关联实体列表无效')
                         hosts = [{k: x[k] for k in ('id', 'hostId', 'hostIp', 'ip', 'name') if k in x and isinstance(x[k], (str, int))}

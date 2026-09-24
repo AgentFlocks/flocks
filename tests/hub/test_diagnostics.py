@@ -194,7 +194,7 @@ async def test_rejects_arbitrary_correlation_header(events):
 def test_cache_hit_is_distinct_from_signature_scan(events, monkeypatch):
     from flocks.hub import catalog
     monkeypatch.setattr(catalog, '_catalog_entries_cache_key', lambda: ())
-    monkeypatch.setattr(catalog, '_cached_catalog_entries', __import__('functools').lru_cache()(lambda key: ()))
+    monkeypatch.setattr(catalog, '_build_catalog_entries', __import__('functools').lru_cache()(lambda key: ()))
     trace = diag.Trace('/api/hub/catalog')
     token = diag._current.set(trace)
     try:

@@ -797,6 +797,8 @@ class Tool:
 
             from flocks.monitoring import diagnostics as monitor_diag
             monitor_diag.tool_result('tool.raw', result)
+            from flocks.tool.structured_output import capture_output
+            capture_output(ctx, self.info.name, result)
 
             with monitor_diag.span('tool.normalize'):
                 # Auto-truncate output unless the tool already handled it

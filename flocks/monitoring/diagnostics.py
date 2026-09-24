@@ -59,24 +59,33 @@ def shape(value):
             if key in value:
                 name = type(value[key]).__name__
                 fields[key + '_type'] = name if name in _TYPES else 'other'
-        if isinstance(value.get('data'), dict) and isinstance(value['data'].get('list'), list):
-            fields['items'] = len(value['data']['list'])
+        if isinstance(value.get('data'), dict):
+            data = value['data']
+            present = [key for key in ('list', 'item') if key in data]
+            fields['list_field'] = 'both' if len(present) == 2 else present[0] if present else 'none'
+            for key in present:
+                name = type(data[key]).__name__
+                fields['data_' + key + '_type'] = name if name in _TYPES else 'other'
+            if len(present) == 1 and isinstance(data[present[0]], list):
+                fields['items'] = len(data[present[0]])
     return fields
 
 
 _TYPES = {'str', 'dict', 'list', 'int', 'float', 'bool', 'bytes', 'NoneType', 'other'}
 _ENUMS = {
     'event': {'trace.start', 'trace.end', 'progress', 'stage.start', 'stage.end', 'query.window',
-              'tool.raw', 'tool.normalized', 'adapter.result', 'adapter.decoded', 'adapter.failure',
+              'tool.raw', 'tool.normalized', 'adapter.result', 'adapter.structured', 'adapter.decoded', 'adapter.failure',
               'page.validated', 'run.result', 'dispatch.result', 'background.result'},
     'stage': {'dispatch', 'run', 'session.prepare', 'query.device', 'query.events', 'query.entities',
               'correlate', 'tool.execute', 'tool.handler', 'tool.normalize', 'report.export', 'step.other'},
     'action': {'list', 'get_entities', 'get_proof', 'other'},
     'outcome': {'ok', 'error', 'cancelled', 'completed', 'failed', 'partial', 'interrupted', 'running', 'unknown'},
-    'reason': {'unavailable', 'permission', 'tool_failed', 'non_json', 'not_object', 'business_error'},
+    'reason': {'unavailable', 'permission', 'tool_failed', 'non_json', 'not_object', 'business_error', 'structured_output'},
     'text_kind': {'empty', 'html', 'json_like', 'fenced', 'text'},
     'code_kind': {'absent', 'zero', 'http_ok', 'xdr_success', 'other'},
-    **{key: _TYPES for key in ('value_type', 'data_type', 'list_type', 'total_type', 'code_type', 'success_type')},
+    'list_field': {'list', 'item', 'both', 'none'},
+    'structured_reason': {'limit', 'unsupported', 'already_truncated', 'unavailable', 'tool_failed'},
+    **{key: _TYPES for key in ('value_type', 'data_type', 'data_list_type', 'data_item_type', 'list_type', 'total_type', 'code_type', 'success_type')},
 }
 _NUMBERS = {'schema', 'pid', 'seq', 'elapsed_ms', 'duration_ms', 'length', 'items', 'page', 'page_size',
             'window_seconds', 'devices', 'max_pages', 'timeout_seconds', 'json_position', 'json_line',

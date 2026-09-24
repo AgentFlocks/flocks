@@ -81,7 +81,7 @@ class Trace:
 
 
 @contextmanager
-def span(name: str, *, detail: bool = False, target: str | None = None):
+def span(name: str, *, detail: bool = False, target: str | None = None, build_id: str | None = None):
     trace = _current.get()
     if trace is None:
         yield {}
@@ -93,10 +93,14 @@ def span(name: str, *, detail: bool = False, target: str | None = None):
         span_id = trace.sequence
         trace.active[span_id] = {"span_id": span_id, "parent_id": parent,
                                  "stage": name, "started": started}
+        if build_id is not None:
+            trace.active[span_id]['build_id'] = build_id
         if target is not None and trace.detailed:
             trace.active[span_id]["target"] = target[:600]
     token = _parent.set(span_id)
     fields: dict = {}
+    if build_id is not None:
+        fields['build_id'] = build_id
     if target is not None and trace.detailed:
         fields["target"] = target[:600]
     if trace.detailed and not detail:
@@ -143,6 +147,33 @@ def timed(name: str, *, detail: bool = False):
                 return result
         return wrapped
     return decorate
+
+
+@contextmanager
+def catalog_build_trace(build_id: str, signature_count: int):
+    """Cold builders may originate outside a Hub HTTP request (e.g. nav).
+
+    Always identify the builder, so waits can be linked to its phases even
+    when detailed logging is off. Never include the signature's path content.
+    """
+    trace = _current.get()
+    token = None
+    if trace is None:
+        trace = Trace('catalog-build')
+        token = _current.set(trace)
+    started = time.monotonic()
+    trace.emit('catalog.build.begin', build_id=build_id, signature_count=signature_count)
+    outcome, error_type = 'ok', None
+    try:
+        yield
+    except BaseException as exc:
+        outcome, error_type = 'error', type(exc).__name__
+        raise
+    finally:
+        trace.emit('catalog.build.end', build_id=build_id, outcome=outcome, error_type=error_type,
+                   duration_ms=round((time.monotonic() - started) * 1000, 2), **trace.summary())
+        if token is not None:
+            _current.reset(token)
 
 
 def record_handled_error(stage: str, error: Exception):
