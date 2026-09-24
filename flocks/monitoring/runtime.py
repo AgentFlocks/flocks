@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 from flocks.auth.context import set_current_auth_user, reset_current_auth_user
 from flocks.auth.service import AuthService
-from flocks.session.message import Message, MessageRole, ToolPart, ToolStateRunning, ToolStateCompleted, ToolStateError
+from flocks.session.message import Message, MessageRole, TextPart, ToolPart, ToolStateRunning, ToolStateCompleted, ToolStateError
 from flocks.session.session_loop import LoopResult
 from flocks.session.interaction_policy import unattended_scope, monitoring_read_scope
 from flocks.task.background import get_background_manager
@@ -17,6 +17,7 @@ from .sessions import ensure_daily
 from .store import rows, write, connection, encode
 from .adapter import XdrAdapter, ContractError, normalize, page_items, response_items
 from . import diagnostics as diag
+from .summaries import Summary, page_summary, hosts_summary, analysis_summary, event_label
 
 _running: dict[str, asyncio.Task] = {}
 
@@ -50,12 +51,12 @@ class Recorder:
         self.on_start = on_start
         self.parent_id = parent_id
 
-    async def call(self, name, params, operation):
+    async def call(self, name, params, operation, *, failure_context=""):
         stage = {'查询 XDR 事件': 'query.events', '查询关联主机': 'query.entities', '关联分析': 'correlate'}.get(name, 'step.other')
         with diag.span(stage, page=params.get('page_num'), page_size=params.get('page_size')):
-            return await self._call(name, params, operation)
+            return await self._call(name, params, operation, failure_context=failure_context)
 
-    async def _call(self, name, params, operation):
+    async def _call(self, name, params, operation, *, failure_context=""):
         message = await emit_message(self.session_id, name, finished=False, parent_id=self.parent_id)
         step_id = Identifier.ascending('part')
         start = now()
@@ -71,7 +72,9 @@ class Recorder:
             if self.on_start:
                 callback, self.on_start = self.on_start, None
                 await callback()
-            result, display = await operation(message.id)
+            outcome = await operation(message.id)
+            result, display = outcome[:2]
+            summary = outcome[2] if len(outcome) > 2 else Summary(f'{name}已完成。')
             state = ToolStateCompleted(input=params, output=display, title=name, metadata={},
                                        time={'start': ms, 'end': int(now().timestamp() * 1000)})
             await write("UPDATE monitor_steps SET status='completed',finished_at=?,output=? WHERE id=?", (now().isoformat(), encode(display), step_id))
@@ -79,14 +82,23 @@ class Recorder:
             error = str(exc) if isinstance(exc, ContractError) else ('执行已中断' if isinstance(exc, asyncio.CancelledError) else '步骤执行失败')
             state = ToolStateError(input=params, error=error, time={'start': ms, 'end': int(now().timestamp() * 1000)})
             await write("UPDATE monitor_steps SET status='failed',finished_at=?,error=? WHERE id=?", (now().isoformat(), error, step_id))
-            await self.finish_part(message.id, part.id, state)
+            explanation = f'{failure_context}{name}未完成：{error}。'
+            if name == '查询 XDR 事件':
+                explanation += '本设备本轮事件批次未提交，查询水位不推进；不能把失败视为 0 条事件。'
+            elif name == '查询关联主机':
+                explanation += '已查询的事件保留，本次关联数据不完整。'
+            await self.finish_part(message.id, part.id, state, Summary(explanation))
             raise
-        await self.finish_part(message.id, part.id, state)
+        await self.finish_part(message.id, part.id, state, summary)
         return result
 
-    async def finish_part(self, message, part_id, state):
+    async def finish_part(self, message, part_id, state, summary):
         part = await Message.update_part(self.session_id, message, part_id, state=state.model_dump())
         await publish('message.part.updated', {'sessionID': self.session_id, 'part': part.model_dump(mode='json', by_alias=True)})
+        text = TextPart(sessionID=self.session_id, messageID=message, text=summary.text,
+                        metadata={'monitoringSummary': True, 'toolPartID': part_id, 'details': summary.details})
+        await Message.add_part(self.session_id, message, text)
+        await publish('message.part.updated', {'sessionID': self.session_id, 'part': text.model_dump(mode='json', by_alias=True)})
         info = await Message.get(self.session_id, message)
         if info:
             info = await Message.update(self.session_id, message, finish='error' if state.status == 'error' else 'stop', time={**info.time, 'completed': int(now().timestamp() * 1000)})
@@ -98,27 +110,31 @@ async def query_device(adapter, device, start, end, recorder):
     for page in range(1, adapter.policy.max_pages + 1):
         params = {'action': 'list', 'start_time': start, 'end_time': end, 'page_num': page, 'page_size': 100}
         async def query(message_id):
+            nonlocal total_expected
             value = await adapter.call(device, params, message_id)
             items, total = page_items(value)
-            return (items, total), {'device': device, 'page': page, 'received': len(items), 'total': total}
-        items, total = await recorder.call('查询 XDR 事件', {'device': device, **params}, query)
-        signature = tuple(sorted(x['uuId'] for x in items))
-        if items and signature in seen_pages:
-            raise ContractError('分页重复，查询完整性无法确认')
-        seen_pages.add(signature)
-        if total is not None:
-            if total_expected is not None and total != total_expected:
-                raise ContractError('分页总数变化，保留水位等待重试')
-            total_expected = total
-        for raw in items:
-            events[raw['uuId']] = normalize(device, raw)
-        if total_expected is not None and len(events) > total_expected:
-            raise ContractError('分页总数与去重记录不一致')
-        if total_expected is not None and len(events) == total_expected:
-            return list(events.values())
-        if len(items) < 100:
-            if total_expected is not None:
-                raise ContractError('分页提前结束；不推进查询水位')
+            signature = tuple(sorted(x['uuId'] for x in items))
+            if items and signature in seen_pages:
+                raise ContractError('分页重复，查询完整性无法确认')
+            seen_pages.add(signature)
+            if total is not None:
+                if total_expected is not None and total != total_expected:
+                    raise ContractError('分页总数变化，保留水位等待重试')
+                total_expected = total
+            for raw in items:
+                events[raw['uuId']] = normalize(device, raw)
+            if total_expected is not None and len(events) > total_expected:
+                raise ContractError('分页总数与去重记录不一致')
+            complete = total_expected is not None and len(events) == total_expected
+            if not complete and len(items) < 100:
+                if total_expected is not None:
+                    raise ContractError('分页提前结束；不推进查询水位')
+                complete = True
+            if not complete and page == adapter.policy.max_pages:
+                raise ContractError('达到分页预算，查询未完成')
+            return complete, {'device': device, 'page': page, 'received': len(items), 'total': total}, page_summary(page, items, len(events), complete)
+        complete = await recorder.call('查询 XDR 事件', {'device': device, **params}, query)
+        if complete:
             return list(events.values())
     raise ContractError('达到分页预算，查询未完成')
 
@@ -178,13 +194,13 @@ async def run(execution, policy, adapter_factory=XdrAdapter):
                         # Retain only whitelisted stable host identifiers; no raw
                         # credential-bearing HTTP response is rendered/persisted.
                         items = data if isinstance(data, list) else response_items(data)
-                        if not isinstance(items, list):
-                            raise ContractError('关联实体列表无效')
-                        hosts = [{k: x[k] for k in ('id', 'hostId', 'hostIp', 'ip', 'name') if k in x and isinstance(x[k], (str, int))}
+                        if not isinstance(items, list) or any(not isinstance(item, dict) for item in items):
+                            raise ContractError('关联实体列表或记录结构无效')
+                        hosts = [{k: x[k] for k in ('id', 'hostId', 'hostIp', 'ip', 'name') if k in x and type(x[k]) in (str, int)}
                                  for x in items if isinstance(x, dict)]
-                        return hosts, {'event': event['id'], 'hosts': hosts}
+                        return hosts, {'event': event['id'], 'hosts': hosts}, hosts_summary(event, hosts)
                     try:
-                        event['entities'] = await recorder.call('查询关联主机', {'device': device, **params}, entities)
+                        event['entities'] = await recorder.call('查询关联主机', {'device': device, **params}, entities, failure_context=f'针对事件 {event_label(event)}，')
                     except ContractError:
                         event['enrichment'] = '关联主机查询失败'
                         errors.append('关联数据不完整')
@@ -204,7 +220,7 @@ async def run(execution, policy, adapter_factory=XdrAdapter):
             result = {'events': len(observed), 'risk': sum(e['risk'] == 'risk' for e in observed),
                       'unknown': sum(e['risk'] == 'unknown' for e in observed), 'ignored': 0,
                       'errors': errors, 'disposition': '未启用', 'closure': 'open'}
-            return result, result
+            return result, result, analysis_summary(result, observed, groups)
         result = await recorder.call('关联分析', {'policy': 'xdr-risk-v1'}, analyze)
         status = 'partial' if errors and observed else 'failed' if errors else 'completed'
         summary = f"本轮{ {'completed': '完成', 'partial': '部分完成', 'failed': '失败'}[status]}：{len(observed)} 个事件，{result['risk']} 个风险，{result['unknown']} 个待判定。处置未启用，风险保持未闭环。"

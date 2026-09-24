@@ -6422,3 +6422,32 @@ describe('process duration across model/tool boundaries', () => {
     ])).toBe(7_000);
   });
 });
+
+
+describe('monitoring native step summaries', () => {
+  it.each([false, true])('keeps each result visible and details plain text (collapse=%s)', async (collapse) => {
+    const parts = [
+      { id: 'tool-monitor-1', type: 'tool', tool: '查询 XDR 事件', callID: 'monitor-1', state: { status: 'completed', input: {}, output: { received: 2 }, time: { start: 1, end: 2 } } },
+      { id: 'summary-monitor-1', type: 'text', text: '本轮 XDR 安全事件查询到 2 条事件。', metadata: { monitoringSummary: true, toolPartID: 'tool-monitor-1', details: '1. <img src=x onerror=alert(1)>\n2. [恶意标题](https://example.invalid)' } },
+      { id: 'tool-monitor-2', type: 'tool', tool: '查询关联主机', callID: 'monitor-2', state: { status: 'completed', input: {}, output: { hosts: [] }, time: { start: 3, end: 4 } } },
+      { id: 'summary-monitor-2', type: 'text', text: '查询到 0 条关联主机记录。', metadata: { monitoringSummary: true, toolPartID: 'tool-monitor-2', details: '' } },
+    ].map(part => ({ ...part, messageID: 'monitor-msg', sessionID: 'sess-1' }));
+    useSessionMessagesMock.mockReturnValue({
+      messages: [makeMessage({ id: 'monitor-msg', role: 'assistant', finish: 'stop', parts: parts as any })],
+      loading: false, refetch: vi.fn(), addMessage: vi.fn(), updateMessage: vi.fn(), updateMessagePart: vi.fn(), replaceMessageText: vi.fn(), truncateAfterMessage: vi.fn(),
+    });
+    const { container, unmount } = render(React.createElement(SessionChat, { sessionId: 'sess-1', display: { collapseIntermediateSteps: collapse } }));
+    const summaries = screen.getAllByTestId('monitor-step-summary');
+    expect(summaries).toHaveLength(2);
+    summaries.forEach(summary => expect(summary.closest('[data-testid="chat-process-group"]')).toBeNull());
+    expect(screen.getByText('本轮 XDR 安全事件查询到 2 条事件。')).toBeVisible();
+    expect(screen.getByText('查询到 0 条关联主机记录。')).toBeVisible();
+    await userEvent.click(screen.getByText('查看本步骤明细'));
+    expect(summaries[0]).toHaveTextContent('<img src=x onerror=alert(1)>');
+    expect(summaries[0].querySelector('img')).toBeNull();
+    expect(container.querySelector('a[href="https://example.invalid"]')).toBeNull();
+    unmount();
+    render(React.createElement(SessionChat, { sessionId: 'sess-1', display: { collapseIntermediateSteps: collapse } }));
+    expect(screen.getAllByTestId('monitor-step-summary')).toHaveLength(2);
+  });
+});

@@ -122,10 +122,9 @@ def span(name: str, *, detail: bool = False, target: str | None = None, build_id
             stats["total_ms"] = round(stats["total_ms"] + duration, 2)
             stats["max_ms"] = max(stats["max_ms"], duration)
             stats["errors"] += int(outcome != "ok")
-            if "cache_hit" in fields:
-                stats["cache_hit"] = fields["cache_hit"]
-                stats["entry_count"] = fields["entry_count"]
-                stats["signature_count"] = fields["signature_count"]
+            for key in ("cache_hit", "entry_count", "signature_count", "directories", "entries", "candidates"):
+                if key in fields:
+                    stats[key] = fields[key]
         if (trace.detailed and not detail) or duration >= 500 or outcome != "ok":
             trace.stage_event("stage.end", span_id=span_id, parent_id=parent, stage=name,
                               duration_ms=duration, outcome=outcome, **fields)
@@ -150,7 +149,7 @@ def timed(name: str, *, detail: bool = False):
 
 
 @contextmanager
-def catalog_build_trace(build_id: str, signature_count: int):
+def catalog_build_trace(build_id: str, signature_count: int, **identity):
     """Cold builders may originate outside a Hub HTTP request (e.g. nav).
 
     Always identify the builder, so waits can be linked to its phases even
@@ -162,7 +161,7 @@ def catalog_build_trace(build_id: str, signature_count: int):
         trace = Trace('catalog-build')
         token = _current.set(trace)
     started = time.monotonic()
-    trace.emit('catalog.build.begin', build_id=build_id, signature_count=signature_count)
+    trace.emit('catalog.build.begin', build_id=build_id, signature_count=signature_count, **identity)
     outcome, error_type = 'ok', None
     try:
         yield
@@ -171,9 +170,37 @@ def catalog_build_trace(build_id: str, signature_count: int):
         raise
     finally:
         trace.emit('catalog.build.end', build_id=build_id, outcome=outcome, error_type=error_type,
+                   duration_ms=round((time.monotonic() - started) * 1000, 2), **identity, **trace.summary())
+        if token is not None:
+            _current.reset(token)
+
+
+@contextmanager
+def installation_scan_trace(root_id):
+    trace = _current.get()
+    token = None
+    if trace is None:
+        trace = Trace('installed-discovery')
+        token = _current.set(trace)
+    scan_id = uuid.uuid4().hex
+    started = time.monotonic()
+    trace.emit('install_scan.begin', scan_id=scan_id, root_id=root_id)
+    outcome = 'ok'
+    try:
+        yield
+    except BaseException:
+        outcome = 'error'
+        raise
+    finally:
+        trace.emit('install_scan.end', scan_id=scan_id, root_id=root_id, outcome=outcome,
                    duration_ms=round((time.monotonic() - started) * 1000, 2), **trace.summary())
         if token is not None:
             _current.reset(token)
+
+
+def cache_invalidated(generation, builds):
+    trace = _current.get() or Trace('catalog-refresh')
+    trace.emit('catalog.invalidate', generation=generation, superseded_builds=builds)
 
 
 def record_handled_error(stage: str, error: Exception):

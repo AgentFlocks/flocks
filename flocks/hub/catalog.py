@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import platform
 import re
@@ -14,8 +15,8 @@ from functools import lru_cache, wraps
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
-from flocks.hub.diagnostics import path_snapshot, record_handled_error, span, timed, catalog_build_trace
-from flocks.hub import local
+from flocks.hub.diagnostics import path_snapshot, record_handled_error, span, timed, catalog_build_trace, cache_invalidated
+from flocks.hub import local, tool_tree
 from flocks.hub.models import HubCatalogEntry, HubIndex, HubIndexEntry, HubPluginManifest, HubTaxonomy, PluginType
 from flocks.hub.paths import get_bundled_hub_root
 
@@ -719,6 +720,7 @@ def _catalog_entries_cache_key() -> tuple[tuple[str, int, int], ...]:
         _path_signature(root / "index.json"),
         _path_signature(root / "taxonomy.json"),
         *_installed_plugins_cache_key(),
+        *local.tool_discovery_signature(),
         *_system_plugin_roots_cache_key(),
         *_bundled_tool_roots_cache_key(),
     )
@@ -841,12 +843,18 @@ def _catalog_entries_snapshot() -> tuple[HubCatalogEntry, ...]:
             # serving anything. Ordinary joined reads need not scan twice.
             continue
         try:
-            with catalog_build_trace(build_id, len(signature)):
+            with catalog_build_trace(build_id, len(signature), generation=generation,
+                                     roots_id=hashlib.sha256(repr((str(get_bundled_hub_root()), str(local.install_root('tool', 'global')), str(local.install_root('tool', 'project')))).encode()).hexdigest()[:20],
+                                     signature_id=hashlib.sha256(repr(signature).encode()).hexdigest()[:20]):
                 token = _BUILD_MEMO.set({})
                 generation_token = _BUILD_GENERATION.set(generation)
                 try:
                     with span('catalog.cache_lookup') as metrics:
-                        entries = _build_catalog_entries(signature)
+                        def check_current():
+                            if generation != _CATALOG_GENERATION:
+                                raise tool_tree.Superseded()
+                        with tool_tree.checking(check_current), local.discovery_scope():
+                            entries = _build_catalog_entries(signature)
                         metrics.update(cache_hit=False, entry_count=len(entries), signature_count=len(signature))
                 finally:
                     _BUILD_GENERATION.reset(generation_token)
@@ -861,6 +869,11 @@ def _catalog_entries_snapshot() -> tuple[HubCatalogEntry, ...]:
             _finish_build(future, value=entries)
             if generation == _CATALOG_GENERATION:
                 return entries
+        except tool_tree.Superseded:
+            with _CATALOG_ENTRIES_LOCK:
+                _CATALOG_BUILDS.pop(key, None)
+            _finish_build(future)
+            continue
         except BaseException as exc:
             with _CATALOG_ENTRIES_LOCK:
                 _CATALOG_BUILDS.pop(key, None)
@@ -876,6 +889,7 @@ def clear_catalog_caches() -> None:
         _CATALOG_SNAPSHOTS.clear()
         superseded = list(_CATALOG_BUILDS.values())
         _CATALOG_BUILDS.clear()
+    tool_tree.clear()
     for future, _ in superseded:
         _finish_build(future)
     load_index.cache_clear()
@@ -883,6 +897,7 @@ def clear_catalog_caches() -> None:
     _manifest_path_lookup.cache_clear()
     _cached_system_plugin_roots.cache_clear()
     _cached_bundled_tool_roots.cache_clear()
+    cache_invalidated(_CATALOG_GENERATION, len(superseded))
 
 
 def system_plugin_root(plugin_type: PluginType, plugin_id: str) -> Optional[Path]:

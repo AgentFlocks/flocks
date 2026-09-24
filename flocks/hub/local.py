@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from flocks.hub.diagnostics import record_handled_error, timed
 
+from contextlib import contextmanager
+from contextvars import ContextVar
+
 import time
 from pathlib import Path
 from typing import Optional
@@ -11,6 +14,27 @@ from typing import Optional
 from flocks.config.config import Config
 from flocks.hub.models import InstalledPluginRecord, PluginType
 from flocks.project.instance import Instance
+
+
+_payload_cache = ContextVar("hub_payload_snapshot", default=None)
+
+
+@contextmanager
+def discovery_scope():
+    token = _payload_cache.set({})
+    try:
+        yield
+    finally:
+        _payload_cache.reset(token)
+
+
+def _remember_tree(tree):
+    cache = _payload_cache.get()
+    if cache is not None:
+        for kind in ("tool", "device"):
+            cache.update(((kind, path), found) for path, found in tree.payload.items())
+            cache.update(((kind, path), True) for path in tree.files)
+    return tree
 
 
 def _user_plugins_root() -> Path:
@@ -100,6 +124,17 @@ def remove_installed_record(plugin_type: PluginType, plugin_id: str) -> None:
 
 @timed("local.has_install_payload", detail=True)
 def has_install_payload(plugin_type: PluginType, path: Path) -> bool:
+    cache = _payload_cache.get()
+    key = (plugin_type, path)
+    if cache is not None and key in cache:
+        return cache[key]
+    found = _probe_install_payload(plugin_type, path)
+    if cache is not None:
+        cache[key] = found
+    return found
+
+
+def _probe_install_payload(plugin_type: PluginType, path: Path) -> bool:
     if not path.exists():
         return False
     if plugin_type == "skill":
@@ -228,46 +263,59 @@ def infer_local_installs() -> dict[tuple[PluginType, str], Path]:
                 if child.is_dir() and has_install_payload(plugin_type, child):
                     result.setdefault((plugin_type, child.name), child)
 
+    from flocks.hub import tool_tree
     for scope in ("global", "project"):
         base = install_root("tool", scope)
-        if not base.is_dir():
-            continue
-        for child in base.iterdir():
-            if child.is_dir() and has_install_payload("tool", child):
+        tree = _remember_tree(tool_tree.get(base))
+
+        def present(path):
+            # rglob does not follow nested directory symlinks. Explicit
+            # canonical plugin roots, including linked roots, remain supported.
+            if path in tree.links:
+                return _remember_tree(tool_tree.get(path)).payload.get(path, False)
+            return tree.payload.get(path, False)
+
+        for child, is_dir, _ in tree.children.get(base, []):
+            if is_dir and present(child):
                 result.setdefault(("tool", child.name), child)
-        # Tools live under ``<tools>/<group>/<id>/`` where ``group`` is
-        # one of api/device/mcp/generated. ``device`` is a first-class
-        # plugin type on the Hub layer (driven by ``integration_type:
-        # device`` in ``_provider.yaml``), so we surface those entries
-        # keyed as ``("device", id)`` instead of ``("tool", id)`` to keep
-        # the catalog state in sync with the runtime install path.
         for group in ("api", "device", "mcp", "generated", "python"):
             group_dir = base / group
-            if not group_dir.is_dir():
-                continue
-            entry_type: PluginType = "device" if group == "device" else "tool"
-            for child in group_dir.iterdir():
-                if child.is_dir() and has_install_payload("tool", child):
+            group_tree = _remember_tree(tool_tree.get(group_dir)) if group_dir in tree.links else tree
+            entry_type = "device" if group == "device" else "tool"
+            for child, is_dir, is_file in group_tree.children.get(group_dir, []):
+                has_payload = (_remember_tree(tool_tree.get(child)).payload.get(child, False)
+                               if child in group_tree.links else group_tree.payload.get(child, False))
+                if is_dir and has_payload:
                     result.setdefault((entry_type, child.name), child)
-                elif (
-                    child.is_file()
-                    and child.suffix in {".yaml", ".yml", ".py"}
-                    and has_install_payload("tool", child)
-                ):
+                elif is_file and child.suffix in {".yaml", ".yml", ".py"}:
                     result.setdefault(("tool", child.stem), child)
-        for candidate in base.rglob("*"):
-            if not candidate.is_file() or candidate.name == "__init__.py":
+        for candidate in tree.files:
+            if candidate.name == "__init__.py" or not tree.payload.get(candidate.parent, False):
                 continue
-            if candidate.suffix not in {".yaml", ".yml", ".py"}:
-                continue
-            if has_install_payload("tool", candidate.parent):
-                # Preserve the directory-derived classification populated
-                # above; never downgrade a previously-classified device
-                # entry back to tool just because we found another yaml
-                # in the same package.
-                stem_key = candidate.stem
-                if (("device", stem_key) in result) or (("tool", stem_key) in result):
-                    continue
-                result.setdefault(("tool", stem_key), candidate.parent)
+            stem = candidate.stem
+            if ("device", stem) not in result:
+                result.setdefault(("tool", stem), candidate.parent)
 
     return result
+
+
+@timed("local.tool_discovery_signature", detail=False)
+def tool_discovery_signature():
+    """Watch nested install directories, including canonical linked roots."""
+    from flocks.hub import tool_tree
+    signatures = []
+    for scope in ("global", "project"):
+        base = install_root("tool", scope)
+        tree = tool_tree.get(base)
+        signatures.append(tree.signature)
+        for child, is_dir, _ in tree.children.get(base, []):
+            if not is_dir:
+                continue
+            subtree = tool_tree.get(child) if child in tree.links else tree
+            if child in tree.links:
+                signatures.append(subtree.signature)
+            if child.name in {"api", "device", "mcp", "generated", "python"}:
+                for nested, nested_dir, _ in subtree.children.get(child, []):
+                    if nested_dir and nested in subtree.links:
+                        signatures.append(tool_tree.get(nested).signature)
+    return tuple(signatures)

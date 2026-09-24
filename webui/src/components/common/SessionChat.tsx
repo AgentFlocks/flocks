@@ -5399,6 +5399,20 @@ function ChatMessageBubbleInner({
             <div key={part.id || i} className={processStep ? 'min-w-0' : 'mt-2 first:mt-0'}>
               {/* Text */}
               {part.type === 'text' && (() => {
+                if (part.metadata?.monitoringSummary === true) {
+                  const details = typeof part.metadata.details === 'string' ? part.metadata.details : '';
+                  return (
+                    <div data-testid="monitor-step-summary" className="text-sm leading-7">
+                      <p className="whitespace-pre-wrap break-words">{part.text}</p>
+                      {details && (
+                        <details className="mt-1">
+                          <summary className="cursor-pointer text-gray-500">查看本步骤明细</summary>
+                          <div className="mt-1 whitespace-pre-wrap break-words">{details}</div>
+                        </details>
+                      )}
+                    </div>
+                  );
+                }
                 const rawText = part.text || '';
                 const nodeRefMatch = isUser
                   ? rawText.match(/^@@node:([^|\n]+)\|([^\n]+)\n([\s\S]*)$/)
@@ -5632,7 +5646,7 @@ function ChatMessageBubbleInner({
                 else pendingTiming.push(part);
                 return;
               }
-              if (isIntermediateProcessPart(part) || (isRenderableTextPart(part) && index <= lastIntermediateProcessIndex)) {
+              if (part.metadata?.monitoringSummary !== true && (isIntermediateProcessPart(part) || (isRenderableTextPart(part) && index <= lastIntermediateProcessIndex))) {
                 if (!processGroup) {
                   processGroup = { steps: [], timing: pendingTiming, index: processGroupIndex++ };
                   pendingTiming = [];
