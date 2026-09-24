@@ -172,39 +172,45 @@ class Instance:
         Returns:
             Result of fn()
         """
-        async with cls._lock:
-            if directory not in cls._cache:
-                log.info("creating_instance", {"directory": directory})
+        from flocks.hub.diagnostics import span
+
+        with span("instance.cache_access"):
+            async with cls._lock:
+                if directory not in cls._cache:
+                    log.info("creating_instance", {"directory": directory})
                 
-                async def create_context():
-                    result = await Project.from_directory(directory)
-                    project = result["project"]
-                    sandbox = result["sandbox"]
+                    async def create_context():
+                        with span("instance.project_discovery"):
+                            result = await Project.from_directory(directory)
+                        project = result["project"]
+                        sandbox = result["sandbox"]
                     
-                    ctx = InstanceContext(
-                        directory=directory,
-                        worktree=sandbox,
-                        project=project
-                    )
+                        ctx = InstanceContext(
+                            directory=directory,
+                            worktree=sandbox,
+                            project=project
+                        )
                     
-                    # Run init within context
-                    if init:
-                        token = _current_instance.set(ctx)
-                        try:
-                            await init()
-                        finally:
-                            _current_instance.reset(token)
+                        # Run init within context
+                        if init:
+                            token = _current_instance.set(ctx)
+                            try:
+                                with span("instance.bootstrap"):
+                                    await init()
+                            finally:
+                                _current_instance.reset(token)
                     
-                    return ctx
+                        return ctx
                 
-                cls._cache[directory] = asyncio.create_task(create_context())
+                    cls._cache[directory] = asyncio.create_task(create_context())
         
         # Wait for context to be ready.  If initialization fails, drop the
         # failed task so a later request can retry after transient storage or
         # startup recovery completes.
         task = cls._cache[directory]
         try:
-            ctx = await task
+            with span("instance.context_wait"):
+                ctx = await task
         except Exception:
             async with cls._lock:
                 if cls._cache.get(directory) is task:

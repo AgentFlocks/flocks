@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
+from flocks.hub.diagnostics import run_in_thread, timed
 from flocks.hub.catalog import (
     category_counts,
     clear_catalog_caches,
@@ -107,6 +108,7 @@ def _count_hub_catalog_facet(
     return counts
 
 
+@timed("catalog.facets")
 def _build_hub_catalog_facets_for_filters(
     all_entries: list[HubCatalogEntry],
     filters: dict[str, object],
@@ -165,7 +167,7 @@ async def hub_catalog(
         "q": q,
     }
     if limit is None and offset == 0:
-        entries = await asyncio.to_thread(list_catalog, **filters)
+        entries = await run_in_thread(list_catalog, **filters)
         return _prioritize_installed_catalog_entries(entries) if prioritizeInstalled else entries
 
     def load_page() -> tuple[list[HubCatalogEntry], HubCatalogFacets]:
@@ -176,7 +178,7 @@ async def hub_catalog(
         facets = _build_hub_catalog_facets_for_filters(all_entries, filters)
         return entries, facets
 
-    entries, facets = await asyncio.to_thread(load_page)
+    entries, facets = await run_in_thread(load_page)
 
     page_limit = limit or 25
     total = len(entries)
@@ -193,7 +195,7 @@ async def hub_catalog(
 async def hub_categories(include_counts: bool = Query(True)):
     if not include_counts:
         return load_taxonomy().model_dump(mode="json")
-    return await asyncio.to_thread(category_counts)
+    return await run_in_thread(category_counts)
 
 
 @router.get("/hub/plugins/{plugin_type}/{plugin_id}", response_model=HubPluginManifest)
@@ -265,9 +267,10 @@ def _suite_workspace_id(plugin_id: str) -> Optional[str]:
 @router.get("/hub/scene-suites", response_model=list[SceneSuiteEntry])
 async def hub_scene_suites(_user: object = Depends(require_user)):
     """Scene suites with the same install state exposed in the Hub catalog."""
-    return await asyncio.to_thread(_load_scene_suites)
+    return await run_in_thread(_load_scene_suites)
 
 
+@timed("scene_suites.load")
 def _load_scene_suites() -> list[SceneSuiteEntry]:
     from flocks.contracts.webui.store import WebUIPagesStore, webui_contract_workspace_route
 

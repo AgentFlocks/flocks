@@ -98,6 +98,7 @@ def test_production_http_middleware_is_pure_asgi_and_keeps_order() -> None:
 
     assert BaseHTTPMiddleware not in middleware_classes
     assert middleware_classes == [
+        server_app.HubDiagnosticsMiddleware,
         server_app._DeferredCORSMiddleware,
         server_app._StaticWebUIMiddleware,
         server_app._AuthGuardMiddleware,

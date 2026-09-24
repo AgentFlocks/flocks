@@ -10,6 +10,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
+from flocks.hub.diagnostics import path_snapshot, record_handled_error, span, timed
 from flocks.hub import local
 from flocks.hub.models import HubCatalogEntry, HubIndex, HubIndexEntry, HubPluginManifest, HubTaxonomy, PluginType
 from flocks.hub.paths import get_bundled_hub_root
@@ -35,24 +36,29 @@ _PATH_SIGNATURE_MISSING = -1
 _CATALOG_ENTRIES_LOCK = threading.Lock()
 
 
+@timed("catalog.read_json", detail=True)
 def _read_json(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+@timed("catalog.read_yaml", detail=True)
 def _read_yaml(path: Path) -> dict[str, Any]:
     try:
         import yaml
 
         data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
         return data if isinstance(data, dict) else {}
-    except Exception:
+    except Exception as exc:
+        record_handled_error("catalog.read_yaml", exc)
         return {}
 
 
+@timed("catalog.path_signature", detail=True)
 def _path_signature(path: Path) -> tuple[str, int, int]:
     try:
         stat = path.stat()
-    except OSError:
+    except OSError as exc:
+        record_handled_error("catalog.path_signature", exc)
         return (str(path), _PATH_SIGNATURE_MISSING, _PATH_SIGNATURE_MISSING)
     return (str(path), stat.st_mtime_ns, stat.st_size)
 
@@ -79,6 +85,7 @@ def _iter_tool_plugin_dirs(tools_root: Path) -> Iterable[Path]:
         yield child
 
 
+@timed("catalog.plugin_manifest_signature", detail=True)
 def _plugin_manifest_signature(plugin_type: PluginType, root: Path) -> tuple[tuple[str, int, int], ...]:
     if plugin_type == "skill":
         candidates = [root / "SKILL.md"]
@@ -184,6 +191,7 @@ def manifest_path(plugin_type: PluginType, plugin_id: str) -> Path:
     return direct
 
 
+@timed("catalog.load_manifest", detail=True)
 def load_manifest(plugin_type: PluginType, plugin_id: str) -> HubPluginManifest:
     path = manifest_path(plugin_type, plugin_id)
     if path.is_file():
@@ -265,6 +273,7 @@ def _base_manifest(
     )
 
 
+@timed("catalog.skill_manifest", detail=True)
 def _skill_manifest(plugin_id: str, root: Path) -> Optional[HubPluginManifest]:
     skill_file = root / "SKILL.md"
     if not skill_file.is_file():
@@ -285,6 +294,7 @@ def _skill_manifest(plugin_id: str, root: Path) -> Optional[HubPluginManifest]:
     )
 
 
+@timed("catalog.agent_manifest", detail=True)
 def _agent_manifest(plugin_id: str, root: Path) -> Optional[HubPluginManifest]:
     agent_file = root / "agent.yaml"
     if not agent_file.is_file():
@@ -314,6 +324,7 @@ def _agent_manifest(plugin_id: str, root: Path) -> Optional[HubPluginManifest]:
     )
 
 
+@timed("catalog.workflow_manifest", detail=True)
 def _workflow_manifest(plugin_id: str, root: Path) -> Optional[HubPluginManifest]:
     workflow_file = root / "workflow.json"
     if not workflow_file.is_file() and not (root / "workflow.md").is_file():
@@ -420,6 +431,7 @@ def _provider_integration_type(provider: dict[str, Any]) -> Optional[str]:
     return cleaned or None
 
 
+@timed("catalog.tool_manifest", detail=True)
 def _tool_manifest(plugin_id: str, root: Path) -> Optional[HubPluginManifest]:
     if not _has_direct_tool_payload(root):
         return None
@@ -468,6 +480,7 @@ def _tool_manifest(plugin_id: str, root: Path) -> Optional[HubPluginManifest]:
     )
 
 
+@timed("catalog.system_plugin_roots_cache_key", detail=False)
 def _system_plugin_roots_cache_key() -> tuple[tuple[str, int, int], ...]:
     signature: list[tuple[str, int, int]] = []
 
@@ -491,6 +504,7 @@ def _system_plugin_roots_cache_key() -> tuple[tuple[str, int, int], ...]:
     return tuple(signature)
 
 
+@timed("catalog.discover_system_plugin_roots", detail=False)
 def _discover_system_plugin_roots() -> dict[tuple[PluginType, str], Path]:
     roots: dict[tuple[PluginType, str], Path] = {}
 
@@ -535,6 +549,7 @@ def _system_plugin_roots() -> dict[tuple[PluginType, str], Path]:
     }
 
 
+@timed("catalog.bundled_tool_roots_cache_key", detail=False)
 def _bundled_tool_roots_cache_key() -> tuple[tuple[str, int, int], ...]:
     from flocks.hub.paths import bundled_tool_plugin_roots
 
@@ -547,6 +562,7 @@ def _bundled_tool_roots_cache_key() -> tuple[tuple[str, int, int], ...]:
     return tuple(signature)
 
 
+@timed("catalog.discover_bundled_tool_roots", detail=False)
 def _discover_bundled_tool_roots() -> dict[tuple[PluginType, str], Path]:
     """Tool plugin directories shipped pre-bundled inside flockshub.
 
@@ -598,6 +614,7 @@ def _bundled_tool_roots() -> dict[tuple[PluginType, str], Path]:
     }
 
 
+@timed("catalog.installed_plugins_cache_key", detail=False)
 def _installed_plugins_cache_key() -> tuple[tuple[str, int, int], ...]:
     signature: list[tuple[str, int, int]] = [_path_signature(local._record_path())]
 
@@ -625,6 +642,7 @@ def _installed_plugins_cache_key() -> tuple[tuple[str, int, int], ...]:
     return tuple(signature)
 
 
+@timed("catalog.catalog_entries_cache_key", detail=False)
 def _catalog_entries_cache_key() -> tuple[tuple[str, int, int], ...]:
     root = get_bundled_hub_root()
     return (
@@ -637,6 +655,7 @@ def _catalog_entries_cache_key() -> tuple[tuple[str, int, int], ...]:
 
 
 @lru_cache(maxsize=8)
+@timed("catalog.cached_catalog_entries", detail=False)
 def _cached_catalog_entries(
     _signature: tuple[tuple[str, int, int], ...],
 ) -> tuple[HubCatalogEntry, ...]:
@@ -714,9 +733,21 @@ def _cached_catalog_entries(
 
 
 def _catalog_entries_snapshot() -> tuple[HubCatalogEntry, ...]:
+    path_snapshot()
     signature = _catalog_entries_cache_key()
-    with _CATALOG_ENTRIES_LOCK:
-        return _cached_catalog_entries(signature)
+    with span("catalog.lock_wait"):
+        _CATALOG_ENTRIES_LOCK.acquire()
+    try:
+        with span("catalog.cache_lookup") as metrics:
+            before = _cached_catalog_entries.cache_info()
+            entries = _cached_catalog_entries(signature)
+            after = _cached_catalog_entries.cache_info()
+            metrics["cache_hit"] = after.hits > before.hits
+            metrics["entry_count"] = len(entries)
+            metrics["signature_count"] = len(signature)
+            return entries
+    finally:
+        _CATALOG_ENTRIES_LOCK.release()
 
 
 def clear_catalog_caches() -> None:
@@ -783,6 +814,7 @@ def _version_tuple(value: str) -> tuple[int, ...]:
     return tuple(int(part) for part in parts) if parts else (0,)
 
 
+@timed("catalog.catalog_install_state", detail=True)
 def _catalog_install_state(
     plugin_type: PluginType,
     install_path: Optional[Path],
@@ -883,6 +915,7 @@ def _resolve_install_path(
     return local.infer_local_install(plugin_type, plugin_id), record
 
 
+@timed("catalog.entry_from_index", detail=True)
 def _entry_from_index(
     item: HubIndexEntry,
     records: dict[str, local.InstalledPluginRecord],
@@ -926,6 +959,7 @@ def _entry_from_index(
     )
 
 
+@timed("catalog.entry_from_system_manifest", detail=True)
 def _entry_from_system_manifest(manifest: HubPluginManifest, root: Path) -> HubCatalogEntry:
     return HubCatalogEntry(
         id=manifest.id,
@@ -952,6 +986,7 @@ def _entry_from_system_manifest(manifest: HubPluginManifest, root: Path) -> HubC
     )
 
 
+@timed("catalog.entry_from_bundled_tool", detail=True)
 def _entry_from_bundled_tool(
     manifest: HubPluginManifest,
     root: Path,
@@ -1110,6 +1145,7 @@ def filter_catalog_entries(
     return [entry for entry in entries if keep(entry)]
 
 
+@timed("catalog.list_catalog", detail=False)
 def list_catalog(
     *,
     plugin_type: Optional[PluginType] = None,
@@ -1134,6 +1170,7 @@ def list_catalog(
     )
 
 
+@timed("catalog.category_counts", detail=False)
 def category_counts() -> dict:
     taxonomy = load_taxonomy().model_dump(mode="json")
     entries = list_catalog()
