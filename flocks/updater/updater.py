@@ -2399,6 +2399,81 @@ async def get_latest_release(
     raise RuntimeError("No sources configured and git fallback failed")
 
 
+async def _fetch_installed_release_source(
+    client: httpx.AsyncClient,
+    source: str,
+    config: Any,
+    encoded_tag: str,
+) -> dict[str, Any] | None:
+    if source == "github":
+        url = f"{_github_api_url(config.base_url, config.repo).removesuffix('/latest')}/tags/{encoded_tag}"
+        headers = {"Accept": "application/vnd.github+json"}
+        if config.token:
+            headers["Authorization"] = f"Bearer {config.token}"
+        params = None
+    elif source == "gitee":
+        repo = config.gitee_repo or config.repo
+        url = f"https://gitee.com/api/v5/repos/{repo}/releases/tags/{encoded_tag}"
+        headers = {}
+        params = {"access_token": config.gitee_token} if config.gitee_token else None
+    else:
+        return None
+
+    try:
+        response = await client.get(url, headers=headers, params=params, follow_redirects=True, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+        return data if isinstance(data, dict) else None
+    except (httpx.HTTPError, ValueError, TypeError) as exc:
+        log.warning("updater.installed_release.source_failed", {
+            "source": source,
+            "error_type": type(exc).__name__,
+        })
+        return None
+
+
+async def get_installed_release(version: str) -> VersionInfo:
+    """Read the published notes for an installed Core version, not the latest mirror tag."""
+    current = version.strip().removeprefix("v")
+    result = VersionInfo(current_version=current, latest_version=current or None)
+    if not re.fullmatch(r"\d{4}\.\d{1,2}\.\d{1,2}", current):
+        return result
+
+    ucfg = await _get_updater_config()
+    from flocks.updater.deploy import detect_deploy_mode
+
+    if not ucfg.enabled or detect_deploy_mode() == "offline":
+        return result
+
+    tag = f"v{current}"
+    encoded_tag = quote(tag, safe="")
+    sources = [source for source in ucfg.sources if source in {"github", "gitee"}]
+    async with httpx.AsyncClient(timeout=10) as client:
+        tasks = [
+            asyncio.create_task(_fetch_installed_release_source(client, source, ucfg, encoded_tag))
+            for source in sources
+        ]
+        try:
+            for completed in asyncio.as_completed(tasks):
+                data = await completed
+                if not isinstance(data, dict):
+                    continue
+                returned_tag = str(data.get("tag_name") or "").strip().removeprefix("v")
+                notes = data.get("body")
+                if returned_tag != current or not isinstance(notes, str) or not notes.strip():
+                    continue
+                return result.model_copy(update={
+                    "release_notes": notes,
+                    "release_url": data.get("html_url"),
+                })
+        finally:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    return result
+
+
 async def check_update(
     *,
     locale: str | None = None,

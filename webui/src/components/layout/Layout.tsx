@@ -157,7 +157,7 @@ const OnboardingModal = lazyLayoutComponent(() => import('@/components/common/On
 const UpdateModal = lazyLayoutComponent(() => import('@/components/common/UpdateModal'), ['update']);
 const NotificationModal = lazyLayoutComponent(() => import('@/components/common/NotificationModal'), ['notification']);
 const TokenPolicyNotice = lazyLayoutComponent(() => import('@/components/common/TokenPolicyNotice'), ['notification']);
-import { checkUpdate, type VersionInfo } from '@/api/update';
+import { checkUpdate, getCurrentRelease, type VersionInfo } from '@/api/update';
 import { consoleUpgradeApi } from '@/api/consoleUpgrade';
 import {
   ackNotification,
@@ -327,6 +327,7 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
   const [latestVersion, setLatestVersion] = useState<string | null>(null);
   const [currentVersion, setCurrentVersion] = useState<string | null>(null);
   const [updateInfo, setUpdateInfo] = useState<VersionInfo | null>(null);
+  const [currentRelease, setCurrentRelease] = useState<{ userId: string; info: VersionInfo | null } | null>(null);
   const [hasCompletedUpdateCheck, setHasCompletedUpdateCheck] = useState(false);
   const lastUpdateCheckAtRef = useRef(0);
   const checkingUpdateRef = useRef(false);
@@ -343,6 +344,7 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
   const canManageUpdates = user?.role === 'admin';
   const notificationGateReady = flocksproStatusReady
     && (!canManageUpdates || hasCompletedUpdateCheck);
+  const currentReleaseReady = !!user?.id && currentRelease?.userId === user.id;
   const canCreateWorkspaceCustomPage = user?.role === 'admin';
   const {
     pages: webuiContractPages,
@@ -659,15 +661,36 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
   }, [i18n.language, user?.id]);
 
   useEffect(() => {
+    const userId = user?.id;
+    if (!userId) {
+      setCurrentRelease(null);
+      return;
+    }
+
+    let cancelled = false;
+    void getCurrentRelease()
+      .then((info) => {
+        if (!cancelled) setCurrentRelease({ userId, info });
+      })
+      .catch(() => {
+        if (!cancelled) setCurrentRelease({ userId, info: null });
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [user?.id]);
+
+  useEffect(() => {
     if (!user?.id) {
       setUpdateNotification(null);
       setUpdateNotificationReady(false);
       return;
     }
-    if (!notificationGateReady) return;
+    if (!notificationGateReady || !currentReleaseReady) return;
 
     setUpdateNotificationReady(false);
-    const notification = buildUpdateNotification(updateInfo, i18n.language);
+    const notification = buildUpdateNotification(currentRelease?.info ?? null, i18n.language);
     if (!notification) {
       setUpdateNotification(null);
       setUpdateNotificationReady(true);
@@ -690,12 +713,12 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
     return () => {
       cancelled = true;
     };
-  }, [i18n.language, notificationGateReady, updateInfo, user?.id]);
+  }, [currentRelease, currentReleaseReady, i18n.language, notificationGateReady, user?.id]);
 
   const allNotifications = updateNotification
     ? [...notifications, updateNotification].sort((a, b) => a.priority - b.priority)
     : notifications;
-  const visibleNotifications = tokenPolicy.ready && !tokenPolicy.notice && backendNotificationsReady && updateNotificationReady && !showOnboarding && updateState === 'idle' && allNotifications.length > 0
+  const visibleNotifications = tokenPolicy.ready && !tokenPolicy.notice && backendNotificationsReady && currentReleaseReady && updateNotificationReady && !showOnboarding && updateState === 'idle' && allNotifications.length > 0
     ? allNotifications
     : [];
 
