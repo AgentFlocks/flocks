@@ -2,7 +2,7 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import { MemoryRouter } from 'react-router-dom';
 import { beforeEach, expect, it, vi } from 'vitest';
 import SecurityMonitor from './index';
-const mocks = vi.hoisted(() => ({ overview: vi.fn(), report: vi.fn(), start: vi.fn(), pause: vi.fn(), diagnostics: vi.fn() }));
+const mocks = vi.hoisted(() => ({ overview: vi.fn(), report: vi.fn(), start: vi.fn(), pause: vi.fn(), diagnostics: vi.fn(), setInvestigationEngine: vi.fn() }));
 vi.mock('@/api/securityMonitoring', async importOriginal => ({ ...(await importOriginal<any>()), monitoringApi: mocks }));
 vi.mock('@/hooks/useSSE', () => ({ useSSE: () => ({}) }));
 vi.mock('@/components/common/SessionChat', () => ({ default: ({ sessionId, hideInput, live }: any) => <div data-testid="native-chat">{sessionId} {hideInput && 'readonly'} {live && 'live'}</div> }));
@@ -83,7 +83,7 @@ it('pauses monitoring and clears the next execution time', async () => {
  expect(await screen.findByRole('button', { name: '检查接入并启动' })).toBeEnabled();
  expect(mocks.pause).toHaveBeenCalledTimes(1);
  expect(screen.getByRole('region', { name: '监测控制' })).toHaveTextContent('监测：已暂停');
- expect(screen.getByRole('region', { name: '监测控制' })).toHaveTextContent('下次 —');
+ expect(screen.getByRole('region', { name: '监测控制' })).toHaveTextContent('下次检查 —');
 });
 
 it('downloads one diagnostic file without starting another monitoring round', async () => {
@@ -123,4 +123,22 @@ it('switches between two reports for the selected business day', async () => {
  fireEvent.click(screen.getByRole('button', { name: '当日告警总结' }));
  expect(await screen.findByText('当日汇总内容')).toBeInTheDocument();
  expect(mocks.report).toHaveBeenLastCalledWith('2026-09-23', 'summary');
+});
+
+it('only switches investigation engine while paused and shows bounded waiting', async () => {
+ const paused = { ...data, investigationEngine: 'rules', installation: { ...data.installation, status: 'disabled' } };
+ mocks.overview.mockResolvedValue({ data: paused });
+ mocks.setInvestigationEngine.mockImplementation(async () => {
+   mocks.overview.mockResolvedValue({ data: { ...paused, investigationEngine: 'agent-v1', roundTimeoutSeconds: 1200 } });
+ });
+ render(<MemoryRouter><SecurityMonitor /></MemoryRouter>);
+ fireEvent.change(await screen.findByLabelText('调查方式'), { target: { value: 'agent-v1' } });
+ await waitFor(() => expect(mocks.setInvestigationEngine).toHaveBeenCalledWith('agent-v1'));
+ expect(await screen.findByRole('status')).toHaveTextContent('已有邮件和处置记录保留');
+ expect(screen.getByRole('region', { name: '监测控制' })).toHaveTextContent('单轮上限 20 分钟');
+ expect(mocks.start).not.toHaveBeenCalled();
+});
+it('does not permit engine changes during an active round', async () => {
+ render(<MemoryRouter><SecurityMonitor /></MemoryRouter>);
+ expect(await screen.findByLabelText('调查方式')).toBeDisabled();
 });

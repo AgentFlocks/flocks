@@ -148,6 +148,13 @@ def round_summary(status, result, observed, feedback, notification, enabled, dev
     if not observed:
         text += ('查询未完整成功，不能据此说没有告警；请检查失败步骤后重试。' if result['errors'] else
                  '当前时间范围和筛选条件下没有可分析事件，因此未生成新的告警通知；后续轮次继续查询。')
+    for event in observed[:5]:
+        investigation = event.get('investigation')
+        if investigation:
+            state = {'ready': '已形成调查结论', 'pending': '已保存，待续查', 'needs_review': '需人工核对'}.get(investigation['state'], '待核对')
+            text += f"\n智能体调查：{event_label(event)} · {state}。{investigation.get('reason', '')}"
+            if investigation['state'] == 'pending':
+                text += '下一轮优先读取已有证据继续调查。'
     if enabled:
         text += f"\n邮件：发送 {notification['sent']} 封；处理回信 {feedback['processed']} 封，{feedback['verified']} 封已回查确认，{feedback['pending']} 封待跟进。"
         text += '\n' + '\n'.join(notification.get('explanations', [])[:5]) if notification.get('explanations') else ''

@@ -1,0 +1,9 @@
+name: security-monitor
+group: 安全运营
+name_cn: 监测运营智能体
+description: Investigates monitoring cases using the bounded monitoring capability adapter.
+mode: primary
+hidden: true
+delegatable: false
+tags: [security]
+tools: []

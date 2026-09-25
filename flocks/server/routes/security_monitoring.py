@@ -4,6 +4,8 @@ from zoneinfo import ZoneInfo
 import asyncio
 import json
 from uuid import UUID
+from typing import Literal
+from pydantic import BaseModel
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import PlainTextResponse, JSONResponse
 from flocks.server.auth import require_user
@@ -127,6 +129,18 @@ async def start(user=Depends(require_user)):
 async def pause(user=Depends(require_user)):
     from flocks.monitoring.lifecycle import pause_monitoring
     return await _control(pause_monitoring, user.id)
+
+
+class InvestigationEngineRequest(BaseModel):
+    engine: Literal['rules', 'agent-v1']
+
+
+@router.put('/investigation-engine')
+async def investigation_engine(body: InvestigationEngineRequest, user=Depends(require_user)):
+    from flocks.monitoring.lifecycle import set_investigation_engine
+    async def change(owner):
+        await set_investigation_engine(owner, body.engine)
+    return await _control(change, user.id)
 
 
 @router.get('/state')

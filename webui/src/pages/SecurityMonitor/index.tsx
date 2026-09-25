@@ -56,6 +56,22 @@ export default function SecurityMonitor() {
       controlPending.current = false; setControlBusy(false);
     }
   };
+  const changeEngine = async (engine: 'rules' | 'agent-v1') => {
+    if (controlPending.current) return;
+    controlPending.current = true;
+    setControlBusy(true); setControlError(''); setControlMessage('');
+    refreshSequence.current++;
+    try {
+      await monitoringApi.setInvestigationEngine(engine);
+      setControlMessage('调查方式已保存，点击启动后生效；已有邮件和处置记录保留。');
+    } catch (err: unknown) {
+      const payload = (err as { response?: { data?: { detail?: unknown; message?: unknown } } })?.response?.data;
+      const detail = payload?.detail ?? payload?.message;
+      setControlError(typeof detail === 'string' ? detail : '调查方式保存失败，请刷新后重试。');
+    } finally {
+      await refresh(); controlPending.current = false; setControlBusy(false);
+    }
+  };
   useEffect(() => {
     if (view !== 'report' || !data) return;
     let active = true;
@@ -90,7 +106,7 @@ export default function SecurityMonitor() {
   const monitoringStatus = !data?.installation.installed ? '尚未安装' : !data.installation.ready ? '未就绪' : monitoringEnabled ? '已启动' : '已暂停';
   return <div className="flex h-full min-h-0 flex-col overflow-hidden bg-gray-50 text-gray-900 dark:bg-gray-900 dark:text-gray-100">
     <div className="shrink-0 border-b border-gray-200 px-6 pt-3 dark:border-gray-700">
-      <PageHeader title="安全运营监测" description="定时监测 · 邮件协同处置 · 回查确认" icon={<ShieldCheck size={24} />} action={<div className="flex items-center gap-2"><button disabled={exportBusy} onClick={() => void downloadDiagnostics()} title="导出近期运行步骤、耗时与错误类型，不含凭据或事件正文" className="inline-flex items-center gap-1 rounded border px-3 py-2 text-sm disabled:opacity-50"><Download size={16} />{exportBusy ? '正在导出…' : '导出诊断日志'}</button><button onClick={() => void refresh()} aria-label="刷新" className="p-2"><RefreshCw size={18} /></button></div>} />
+      <PageHeader title="安全运营监测" description={data?.investigationEngine === 'agent-v1' ? '监测运营智能体 · 邮件协同处置 · 回查确认' : '定时监测 · 邮件协同处置 · 回查确认'} icon={<ShieldCheck size={24} />} action={<div className="flex items-center gap-2"><button disabled={exportBusy} onClick={() => void downloadDiagnostics()} title="导出近期运行步骤、耗时与错误类型，不含凭据或事件正文" className="inline-flex items-center gap-1 rounded border px-3 py-2 text-sm disabled:opacity-50"><Download size={16} />{exportBusy ? '正在导出…' : '导出诊断日志'}</button><button onClick={() => void refresh()} aria-label="刷新" className="p-2"><RefreshCw size={18} /></button></div>} />
       <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1"><nav className="flex shrink-0 gap-4 whitespace-nowrap sm:gap-6" aria-label="监测工作区">
         {([['session', '监测对话'], ['mail', '邮件跟进'], ['dashboard', '总结看板'], ['report', '每日报告']] as const).map(([id, label]) => <Link key={id} to={`${MONITOR_PATH}/${id}`} className={`border-b-2 py-3 text-sm ${view === id ? 'border-blue-600 text-blue-600' : 'border-transparent text-gray-500'}`}>{label}</Link>)}
       </nav><input aria-label="业务日期" type="date" disabled={controlBusy || view === 'mail'} value={day || data?.businessDate || ''} onChange={e => setDay(e.target.value)} className="rounded border bg-transparent px-2 py-1 text-sm" /></div>
@@ -99,13 +115,14 @@ export default function SecurityMonitor() {
     {exportError && <p role="alert" className="bg-amber-50 px-6 py-2 text-sm text-amber-800">{exportError}</p>}
     {data && <section aria-label="监测控制" className="mx-6 mt-2 shrink-0 rounded-lg border border-gray-200 bg-white px-4 py-2 dark:border-gray-700 dark:bg-gray-800">
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <p className="text-sm"><strong>监测：{monitoringStatus}</strong> · 每 10 分钟 · 下次 {fmt(data.scheduledNextRun, data.timezone)}{data.developmentSample && <span className="ml-2 text-amber-700 dark:text-amber-300">开发联调 · 不限处置状态 · 优先中危及以上 · 每轮随机 1 条 · 发测试邮件（无需恶意结论）· 反馈完成后标记忽略</span>}</p>
+        <select aria-label="调查方式" title="暂停监测后可切换；原有通知、回信和处置记录均保留" disabled={controlBusy || !!monitoringEnabled || !data.installation.installed} value={data.investigationEngine || 'rules'} onChange={e => void changeEngine(e.target.value as 'rules' | 'agent-v1')} className="rounded border bg-transparent px-2 py-1 text-sm"><option value="agent-v1">智能体调查</option><option value="rules">固定规则调查</option></select>
+        <p className="text-sm"><strong>监测：{monitoringStatus}</strong> · 每 10 分钟触发 · 下次检查 {fmt(data.scheduledNextRun, data.timezone)}{data.developmentSample && <span className="ml-2 text-amber-700 dark:text-amber-300">开发联调 · 不限处置状态 · 优先中危及以上 · 每轮随机 1 条 · 发测试邮件（无需恶意结论）· 反馈完成后标记忽略</span>}</p>
         <button disabled={controlBusy || !data.installation.installed} onClick={() => void control(monitoringEnabled ? 'pause' : 'start')} className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50">
           {controlBusy ? <Loader2 size={16} className="animate-spin" /> : monitoringEnabled ? <Pause size={16} /> : <Play size={16} />}
           {controlBusy ? '正在处理…' : monitoringEnabled ? '暂停监测' : '检查接入并启动'}
         </button>
       </div>
-      <div className="mt-1 flex flex-wrap items-center justify-between gap-2 text-sm"><span>邮件跟进：{data.mail?.enabled ? '已启用' : '未启用'} · 待处理回复 {data.mail?.pending || 0} · 待确认 {data.mail?.needsReview || 0}</span><div className="flex gap-4"><Link className="text-blue-600" to={`${MONITOR_PATH}/mail`}>查看邮件记录</Link><button className="text-blue-600" onClick={() => setShowSettings(true)}>配置</button></div></div>
+      <div className="mt-1 flex flex-wrap items-center justify-between gap-2 text-sm"><span title="同一监测串行执行；忙碌时多次触发合并为一次待执行任务。">{active ? '调查执行中 · ' : ''}{data.queued.some(q => q.status === 'queued') ? '已有一轮等待 · ' : ''}{data.investigationEngine === 'agent-v1' ? `单轮上限 ${Math.round((data.roundTimeoutSeconds || 1200) / 60)} 分钟 · ` : ''}邮件跟进：{data.mail?.enabled ? '已启用' : '未启用'} · 待处理回复 {data.mail?.pending || 0} · 待确认 {data.mail?.needsReview || 0}</span><div className="flex gap-4"><Link className="text-blue-600" to={`${MONITOR_PATH}/mail`}>查看邮件记录</Link><button className="text-blue-600" onClick={() => setShowSettings(true)}>配置</button></div></div>
       {controlError && <p role="alert" className="mt-2 text-sm text-red-600">{controlError}</p>}
       {controlMessage && <p role="status" className="mt-2 text-sm text-blue-600">{controlMessage}</p>}
     </section>}
@@ -121,7 +138,7 @@ export default function SecurityMonitor() {
           <div className="grid gap-5 lg:grid-cols-2"><div className={card}><h2 className="mb-4 font-semibold">执行趋势</h2><div className="flex h-20 items-end gap-1" aria-label="实际轮次状态">{data.runs.map(r => <button title={`${fmt(r.started_at, data.timezone)} ${labels[r.status]}`} key={r.id} onClick={() => drill(r.session_id, r.message_id)} className={`min-w-2 flex-1 rounded-t ${r.status === 'completed' ? 'h-14 bg-blue-500' : r.status === 'running' ? 'h-10 bg-blue-300' : 'h-8 bg-amber-400'}`} />)}</div><p className="mt-2 text-xs text-gray-500">点击轮次查看对话；仅展示实际尝试，缺失时隙不计成功。</p></div><div className={card}><h2 className="mb-3 font-semibold">事件风险分布</h2>{(['risk', 'unknown', 'ignored'] as const).map(key => <button key={key} onClick={() => setFilter(key)} className="mb-3 block w-full text-left text-sm"><span>{labels[key]} · {data.metrics[key]}</span><span className="mt-1 block h-2 rounded bg-gray-100 dark:bg-gray-700"><span className="block h-full rounded bg-blue-500" style={{ width: `${data.metrics.events ? 100 * data.metrics[key] / data.metrics.events : 0}%` }} /></span></button>)}</div></div>
           <div className={card}><h2 className="mb-3 font-semibold">轮次明细</h2><div className="overflow-x-auto"><table className="w-full text-left text-sm"><thead><tr>{['计划 / 实际开始', '状态', '当前步骤', '对话'].map(x => <th key={x} className="pb-3 font-medium text-gray-500">{x}</th>)}</tr></thead><tbody>{data.runs.map(r => <tr key={r.id} className="border-t dark:border-gray-700"><td className="py-3">{fmt(r.scheduled_for, data.timezone)}<br />{fmt(r.started_at, data.timezone)}</td><td>{labels[r.status] || r.status}</td><td>{r.steps.find(s => s.status === 'running')?.tool || r.error || '—'}</td><td><button className="text-blue-600" onClick={() => drill(r.session_id, r.message_id)}>查看本轮</button></td></tr>)}</tbody></table></div>{data.runs.length === 0 && <p className="py-4 text-sm text-gray-500">当天尚无实际启动轮次。</p>}</div>
           <div className={card}><div className="mb-3 flex justify-between"><h2 className="font-semibold">事件明细 · 状态标记与回查</h2><select aria-label="风险筛选" value={filter} onChange={e => setFilter(e.target.value)} className="bg-transparent text-sm"><option value="all">全部事件</option>{['risk', 'unknown', 'ignored'].map(x => <option key={x} value={x}>{labels[x]}</option>)}</select></div><table className="w-full text-left text-sm"><thead><tr>{['事件 / 主机', '风险判定', '闭环', '关联'].map(x => <th key={x} className="pb-3 font-medium text-gray-500">{x}</th>)}</tr></thead><tbody>{data.events.filter(e => filter === 'all' || e.risk === filter).map(e => <tr key={e.key} className="border-t dark:border-gray-700"><td className="py-3">{e.name}<div className="text-xs text-gray-500">{e.host || '主机未知'} · {e.device}</div></td><td title={e.reason}>{labels[e.risk]}</td><td className="py-3"><EventDisposition event={e} enabled={data.installation.installed && data.installation.ready} refresh={refresh} /></td><td><button className="text-blue-600" onClick={() => drill(e.sessionID, e.messageID)}>查看关联对话</button></td></tr>)}</tbody></table></div>
-          {data.queued.length > 0 && <div className={card}><h2 className="font-semibold">排队与缺失记录</h2>{data.queued.map(q => <p key={q.id} className="mt-2 text-sm text-gray-500">{fmt(q.scheduled_for, data.timezone)} · {labels[q.status] || q.status} {q.error}</p>)}</div>}
+          {data.queued.length > 0 && <div className={card}><h2 className="font-semibold">调度、合并与缺失记录</h2>{data.queued.map(q => <p key={q.id} className="mt-2 text-sm text-gray-500">{fmt(q.scheduled_for, data.timezone)} · {q.slot_status === 'coalesced' ? '已合并到下一轮' : labels[q.status] || q.status} {q.error}</p>)}</div>}
         </div>}
       </div>}
     </>}

@@ -33,6 +33,11 @@ CREATE TABLE IF NOT EXISTS monitor_observations (
 CREATE TABLE IF NOT EXISTS monitor_cursors (
  owner TEXT NOT NULL, scope TEXT NOT NULL, device TEXT NOT NULL, through_time INTEGER NOT NULL,
  PRIMARY KEY(owner, scope, device));
+CREATE TABLE IF NOT EXISTS monitor_investigations (
+ owner TEXT NOT NULL, project TEXT NOT NULL, event_key TEXT NOT NULL,
+ event TEXT NOT NULL, evidence TEXT NOT NULL DEFAULT '[]', result TEXT NOT NULL DEFAULT '{}',
+ state TEXT NOT NULL DEFAULT 'pending', attempts INTEGER NOT NULL DEFAULT 0,
+ updated_at TEXT NOT NULL, PRIMARY KEY(owner,project,event_key));
 CREATE TABLE IF NOT EXISTS monitor_dispositions (
  id TEXT NOT NULL, owner TEXT NOT NULL, scope TEXT NOT NULL, event_key TEXT NOT NULL,
  comment TEXT NOT NULL, status TEXT NOT NULL, observed_status INTEGER, error TEXT,

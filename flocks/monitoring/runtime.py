@@ -1,4 +1,4 @@
-"""Deterministic monitoring with opt-in evidence-based status marking, carried by native sessions/background jobs."""
+"""Scheduled investigation and durable mail follow-up in native daily sessions."""
 import asyncio
 import json
 from datetime import datetime, timezone
@@ -35,9 +35,9 @@ async def publish(kind, payload):
         pass  # All facts precede notification; snapshot polling repairs loss.
 
 
-async def emit_message(session_id, text, *, message_id=None, finished=True, role=MessageRole.ASSISTANT, parent_id=None):
+async def emit_message(session_id, text, *, message_id=None, finished=True, role=MessageRole.ASSISTANT, parent_id=None, agent='rex'):
     message = await Message.create(session_id=session_id, role=role,
-                                   content=text, id=message_id or Identifier.ascending('message'), agent='rex', parentID=parent_id or '')
+                                   content=text, id=message_id or Identifier.ascending('message'), agent=agent, parentID=parent_id or '')
     if finished and role == MessageRole.ASSISTANT:
         message = await Message.update(session_id, message.id, finish='stop', time={**message.time, 'completed': int(now().timestamp() * 1000)})
     await publish('message.updated', {'sessionID': session_id, 'info': message.model_dump(mode='json', by_alias=True)})
@@ -47,10 +47,11 @@ async def emit_message(session_id, text, *, message_id=None, finished=True, role
 
 
 class Recorder:
-    def __init__(self, session_id, attempt_id, on_start=None, parent_id=None):
+    def __init__(self, session_id, attempt_id, on_start=None, parent_id=None, agent='rex'):
         self.session_id, self.attempt_id = session_id, attempt_id
         self.on_start = on_start
         self.parent_id = parent_id
+        self.agent = agent
 
     async def call(self, name, params, operation, *, failure_context=""):
         from .disposition import operation_recorder
@@ -63,7 +64,7 @@ class Recorder:
             operation_recorder.reset(token)
 
     async def _call(self, name, params, operation, *, failure_context=""):
-        message = await emit_message(self.session_id, name, finished=False, parent_id=self.parent_id)
+        message = await emit_message(self.session_id, name, finished=False, parent_id=self.parent_id, agent=self.agent)
         step_id = Identifier.ascending('part')
         start = now()
         ms = int(start.timestamp() * 1000)
@@ -156,11 +157,12 @@ async def run(execution, policy, adapter_factory=XdrAdapter):
                 (attempt_id, execution.id, policy.owner, policy.project, policy.scope, day, session.id, message_id,
                  execution.execution_input_snapshot.get('scheduledFor'), started.isoformat(), 'running'))
     automatic_enabled = bool((await settings(policy.owner))['enabled'])
+    agent_name = 'security-monitor' if policy.investigation_engine == 'agent-v1' else 'rex'
     mode_label = '邮件协同跟进' if automatic_enabled else '只读任务'
     trigger_message = await emit_message(session.id, f'系统自动监测 · {started.astimezone(ZoneInfo(policy.timezone)).strftime("%H:%M:%S")} · {mode_label}', role=MessageRole.USER)
     query_description = (sampling.DESCRIPTION + '查询最近 24 小时且未加白或部分加白的事件。' if sampling.enabled(policy)
                          else '查询待处置、处置中且未加白或部分加白的 XDR 事件，并关联分析。')
-    await emit_message(session.id, '本轮安全运营监测开始。' + query_description + ('先处理此前收到的回信，再查询新事件并逐条邮件通知责任人。' if automatic_enabled else '邮件跟进未启用，本轮只查询分析。'), message_id=message_id, parent_id=trigger_message.id)
+    await emit_message(session.id, '本轮安全运营监测开始。' + query_description + ('先处理此前收到的回信，再查询新事件并逐条邮件通知责任人。' if automatic_enabled else '邮件跟进未启用，本轮只查询分析。'), message_id=message_id, parent_id=trigger_message.id, agent=agent_name)
     sequence = (await rows('SELECT sequence FROM monitor_attempts WHERE id=?', (attempt_id,)))[0]['sequence']
     from flocks.session.core.status import SessionStatus, SessionStatusBusy, SessionStatusIdle
     SessionStatus.set(session.id, SessionStatusBusy())
@@ -169,7 +171,7 @@ async def run(execution, policy, adapter_factory=XdrAdapter):
         await write('UPDATE monitor_attempts SET navigation_confirmed=1 WHERE id=?', (attempt_id,))
         await publish('monitor.execution.started', {'sessionID': session.id, 'executionID': execution.id,
                       'attemptID': attempt_id, 'sequence': sequence, 'businessDate': day, 'startedAt': started.isoformat()})
-    recorder = Recorder(session.id, attempt_id, confirm_start, trigger_message.id)
+    recorder = Recorder(session.id, attempt_id, confirm_start, trigger_message.id, agent=agent_name)
     adapter = adapter_factory(policy, session.id)
     errors, observed = [], []
     status, summary = 'failed', ''
@@ -177,6 +179,18 @@ async def run(execution, policy, adapter_factory=XdrAdapter):
         if not policy.devices:
             raise ContractError('未绑定可用数据源')
         feedback = await process_replies(policy, session.id, reply_high, recorder)
+        if policy.investigation_engine == 'agent-v1':
+            from . import investigation
+            budget = investigation.Budget()
+            backlog = await investigation.pending(policy)
+            if sampling.enabled(policy) and backlog:
+                # A resumed case takes this round's single development sample;
+                # do not select a second root while the first is unfinished.
+                observed = backlog[:1]
+                await write('INSERT OR IGNORE INTO monitor_observations VALUES(?,?,?)',
+                            (attempt_id, observed[0]['key'], encode(observed[0])))
+                await emit_message(session.id, '本轮优先续查此前未完成的事件：' + event_label(observed[0])
+                                   + '。继续使用已保存的证据，不额外抽取新样本。', parent_id=trigger_message.id, agent=agent_name)
         for device in policy.devices:
             if sampling.enabled(policy) and observed:
                 break  # One new sample per round, not one per device.
@@ -190,11 +204,16 @@ async def run(execution, policy, adapter_factory=XdrAdapter):
                 # A sample is not a complete scan: leave the normal cursor intact.
                 async with connection() as db:
                     for event in events:
+                        if policy.investigation_engine == 'agent-v1':
+                            event['investigationWindow'] = {'start': max(start, end-86400), 'end': end}
+                            await investigation.enqueue(db, policy, event, started.isoformat())
                         await db.execute('INSERT INTO monitor_observations VALUES(?,?,?)', (attempt_id, event['key'], encode(event)))
                     if not sampling.enabled(policy):
                         await db.execute('INSERT INTO monitor_cursors VALUES(?,?,?,?) ON CONFLICT(owner,scope,device) DO UPDATE SET through_time=MAX(through_time,excluded.through_time)',
                                          (policy.owner, policy.scope, device, end))
                 observed.extend(events)
+                if policy.investigation_engine == 'agent-v1':
+                    continue  # The model chooses which evidence to query next.
                 for event in events:
                     params = {'action': 'get_entities', 'uuid': event['id'], 'entity_type': 'host'}
                     async def entities(message_id):
@@ -218,6 +237,25 @@ async def run(execution, policy, adapter_factory=XdrAdapter):
                     await write('UPDATE monitor_observations SET data=? WHERE attempt_id=? AND event_key=?', (encode(event), attempt_id, event['key']))
             except ContractError as exc:
                 errors.append(str(exc))
+        if policy.investigation_engine == 'agent-v1':
+            if not sampling.enabled(policy):
+                current_events = {event['key']: event for event in observed}
+                resumed = []
+                for event in backlog:
+                    resumed.append(current_events.get(event['key'], event))
+                    if event['key'] not in current_events:
+                        await write('INSERT OR IGNORE INTO monitor_observations VALUES(?,?,?)',
+                                    (attempt_id, event['key'], encode(event)))
+                resumed_keys = {event['key'] for event in resumed}
+                observed = resumed + [event for event in observed if event['key'] not in resumed_keys]
+            for event in observed[:1 if sampling.enabled(policy) else 20]:
+                await investigation.investigate(policy, event, recorder, budget)
+                if event['investigation']['state'] != 'ready':
+                    errors.append('智能体调查尚未完成，证据和待办已保存')
+                await write('UPDATE monitor_observations SET data=? WHERE attempt_id=? AND event_key=?',
+                            (encode(event), attempt_id, event['key']))
+            if len(observed) > 20:
+                errors.append('本轮事件超过调查批次上限，其余事件已保存待后续调查')
         async def analyze(_):
             groups = {}
             for event in observed:
@@ -234,7 +272,12 @@ async def run(execution, policy, adapter_factory=XdrAdapter):
             return result, result, analysis_summary(result, observed, groups)
         result = await recorder.call('关联分析', {'policy': 'xdr-risk-v1'}, analyze)
         result['development_sample'] = sampling.enabled(policy)
-        notification = await notify_batch(policy, session.id, observed, recorder)
+        # Development mail validates transport even for incomplete evidence.
+        # Normal monitoring waits for a completed investigation before queuing
+        # a new notification. Existing delivery/write intents remain authoritative.
+        mail_events = (observed if sampling.enabled(policy) or policy.investigation_engine == 'rules' else
+                       [event for event in observed if event.get('investigation', {}).get('state') == 'ready'])
+        notification = await notify_batch(policy, session.id, mail_events, recorder)
         result['mail'] = {'feedback': feedback, 'notification': notification, 'enabled': automatic_enabled}
         result['disposition'] = '责任人邮件反馈后标记并回查' if automatic_enabled else '只读监测'
         status = 'partial' if errors and observed or feedback['pending'] or notification['pending'] else 'failed' if errors else 'completed'
@@ -242,14 +285,21 @@ async def run(execution, policy, adapter_factory=XdrAdapter):
         await write('UPDATE monitor_attempts SET result=? WHERE id=?', (encode(result), attempt_id))
     except BaseException as exc:
         status = 'interrupted' if isinstance(exc, asyncio.CancelledError) else 'failed'
-        errors.append(str(exc) if isinstance(exc, ContractError) else '运行中断或内部错误')
+        timed_out = execution.execution_input_snapshot.get('monitorStopReason') == 'timeout'
+        errors.append(f'达到本轮 {policy.timeout_seconds} 秒执行上限，已请求停止并保存进度' if timed_out else
+                      str(exc) if isinstance(exc, ContractError) else '运行中断或内部错误')
         summary = ('本轮未完成：' + '；'.join(errors) + f'。已读取 {len(observed)} 条事件，不能将中断视为无风险。'
                    '已保存的通知和回信保留在邮件跟进中；请检查失败步骤或导出诊断日志。再次运行会核对已有记录，发送或写入结果未知时不会直接重复执行。')
+        if policy.investigation_engine == 'agent-v1':
+            for event in observed:
+                await write('UPDATE monitor_observations SET data=? WHERE attempt_id=? AND event_key=?',
+                            (encode(event), attempt_id, event['key']))
+            summary += '已保存的调查证据和原事件编号会保留，后续轮次优先续查未完成事件；连续三轮未完成的事件保留待人工核对。'
         raise
     finally:
         diag.result(status, events=len(observed), errors=len(errors))
         await write('UPDATE monitor_attempts SET status=?,finished_at=?,error=? WHERE id=?', (status, now().isoformat(), '；'.join(errors) or None, attempt_id))
-        await emit_message(session.id, summary or '本轮已中断，未记录为成功。', parent_id=trigger_message.id)
+        await emit_message(session.id, summary or '本轮已中断，未记录为成功。', parent_id=trigger_message.id, agent=agent_name)
         await write("INSERT INTO monitor_reports(owner,scope,business_date,status) VALUES(?,?,?,'pending') ON CONFLICT(owner,scope,business_date) DO UPDATE SET status='pending'", (policy.owner, policy.scope, day))
         SessionStatus.set(session.id, SessionStatusIdle())
         await publish('session.status', {'sessionID': session.id, 'status': {'type': 'idle'}})
@@ -284,7 +334,8 @@ async def dispatch(execution, scheduler, *, adapter_factory=XdrAdapter):
             async def runner():
                 return await run(execution, policy, adapter_factory)
             background = await manager.run_existing_session(
-                session_id=execution.session_id or '', description=execution.title, agent='rex',
+                session_id=execution.session_id or '', description=execution.title,
+                agent='security-monitor' if policy.investigation_engine == 'agent-v1' else 'rex',
                 allow_user_questions=False, runner=runner)
             try:
                 result = await manager.wait_for(background.id, timeout_ms=policy.timeout_seconds * 1000)
@@ -295,6 +346,7 @@ async def dispatch(execution, scheduler, *, adapter_factory=XdrAdapter):
                     await asyncio.gather(handle, return_exceptions=True)
                 raise
             if result is None:
+                execution.execution_input_snapshot['monitorStopReason'] = 'timeout'
                 manager.cancel(background.id)
                 handle = manager._task_handles.get(background.id)
                 if handle:

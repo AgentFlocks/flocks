@@ -30,6 +30,26 @@ async def require_interactive(session_id: str | None = None) -> None:
 _read_only = ContextVar('flocks_read_only_monitor', default=None)
 _monitoring_call_scope = ContextVar('flocks_monitoring_call_scope', default=None)
 _automatic_mark = ContextVar('flocks_automatic_mark', default=None)
+_investigation_call = ContextVar('flocks_investigation_call', default=None)
+
+
+@contextmanager
+def investigation_call_scope(tool: str, device: str, params: dict, session_id: str):
+    """Internal, exact-call grant issued by the monitoring capability adapter.
+
+    This is not a model-exposed permission API. The adapter validates current
+    installation, registered device, read action and budgets before entering.
+    """
+    import copy
+    grant = (tool, device, copy.deepcopy(params), session_id)
+    previous = _investigation_call.get()
+    if previous is not None and previous != grant:
+        raise PermissionError('Investigation scope cannot be widened')
+    token = _investigation_call.set(grant)
+    try:
+        yield
+    finally:
+        _investigation_call.reset(token)
 
 
 @contextmanager
@@ -77,6 +97,14 @@ async def require_monitor_read(tool: str, params: dict, session_id: str | None =
         if (tool != expected_tool or (resolved_device or params.get('device_id')) != expected_device
                 or actual != expected_params):
             raise PermissionError('Confirmed monitoring operation cannot change target or parameters')
+    investigation = _investigation_call.get()
+    if investigation is not None:
+        expected_tool, expected_device, expected_params, expected_session = investigation
+        actual = {key: value for key, value in params.items() if key != 'device_id' and value is not None}
+        if (tool != expected_tool or (resolved_device or params.get('device_id')) != expected_device
+                or actual != expected_params or session_id != expected_session):
+            raise PermissionError('Investigation query cannot change device, action or parameters')
+        return
     policy = _read_only.get()
     if policy is None and session_id:
         from flocks.session.session import Session

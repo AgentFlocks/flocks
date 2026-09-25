@@ -78,8 +78,12 @@ async def snapshot(owner, scope, day):
     today = datetime.now(timezone.utc).astimezone(tz).date().isoformat()
     queued = [entry for entry in queued if datetime.fromisoformat(entry['scheduled_for'] or entry['created_at']).astimezone(tz).date().isoformat() == day]
 
-    development = bool(installation and sampling.enabled(MonitoringPolicy.model_validate_json(installation['policy'])))
-    return {'businessDate': day, 'developmentSample': development, 'installation': {'installed': bool(installation and installation['installed']),
+    policy = MonitoringPolicy.model_validate_json(installation['policy']) if installation else None
+    development = bool(policy and sampling.enabled(policy))
+    return {'businessDate': day, 'developmentSample': development,
+            'investigationEngine': policy.investigation_engine if policy else 'rules',
+            'roundTimeoutSeconds': policy.timeout_seconds if policy else None,
+            'installation': {'installed': bool(installation and installation['installed']),
             'ready': bool(installation and installation['ready']), 'reason': installation['reason'] if installation else '请从添加场景安装安全运营监测',
             'status': scheduler[0]['status'] if scheduler else 'not_installed',
             'projectID': installation['project'] if installation else None},
@@ -109,7 +113,7 @@ async def snapshot(owner, scope, day):
 
 def render(data):
     metrics = data['metrics']
-    lines = [f"# 安全运营监测执行时间线 · {data['businessDate']}", '', f"业务时区：{data['timezone']}。每十分钟执行一轮；逐条邮件通知责任人，下一轮解读回信、标记并回查。状态标记不代表组件执行了主机隔离或修复。", '',
+    lines = [f"# 安全运营监测执行时间线 · {data['businessDate']}", '', f"业务时区：{data['timezone']}。每十分钟触发检查；同一监测串行执行，忙碌时只保留一次待执行任务。逐条邮件通知责任人，下一轮解读回信、标记并回查。状态标记不代表组件执行了主机隔离或修复。", '',
              f"启动轮次：{metrics['started']}；尝试：{metrics['attempts']}；去重事件：{metrics['events']}；风险：{metrics['risk']}；待判定：{metrics['unknown']}。", '']
     lines += [f"未闭环风险：{metrics['openRisk']}；处置完成：{metrics['closed']}；已遏制：{metrics['contained']}；已忽略：{metrics['ignored']}。", '']
     if any(r['result'].get('development_sample') for r in data['runs']):

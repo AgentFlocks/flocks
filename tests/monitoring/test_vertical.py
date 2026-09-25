@@ -22,6 +22,15 @@ from flocks.workspace.manager import WorkspaceManager
 @pytest.mark.parametrize('symlinked_workspace', [False, True])
 @pytest.mark.parametrize('manual_start', [False, True])
 async def test_full_installed_path_no_direct_ready_or_result_seeding(monkeypatch, tmp_path, symlinked_workspace, manual_start):
+    from flocks.monitoring import investigation
+    # Exercise the real installed agent path and ToolRegistry without contacting
+    # a configured external model. The model chooses, the adapter executes.
+    async def choice(agent, data):
+        if not data['evidence']:
+            return investigation.Choice(action='query', capability=data['capabilities'][0]['id'], entity='host', reason='核对原事件主机')
+        return investigation.Choice(action='finish', verdict='unknown', evidence_ids=['evidence-1'], reason='主机列表为空，仍待核查')
+    monkeypatch.setattr(investigation, 'choose', choice)
+    monkeypatch.setattr(investigation.Agent, 'list', AsyncMock(return_value=[]))
     if symlinked_workspace:
         home, storage = tmp_path / 'home', tmp_path / 'storage'
         home.mkdir()

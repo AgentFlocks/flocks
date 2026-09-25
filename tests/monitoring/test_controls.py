@@ -141,6 +141,24 @@ async def test_controls_are_owner_scoped_and_cannot_enable_a_disabled_scene(monk
     assert error.value.status_code == 409 and '场景已停用' in error.value.detail
 
 
+async def test_engine_switch_requires_pause_preserves_records_and_updates_both_policies(monkeypatch):
+    discovery, entry = await install_unready(monkeypatch)
+    discovery.return_value = (['configured-xdr'], 'sangfor_xdr_incidents', None)
+    await api.start(user=OWNER)
+    with pytest.raises(HTTPException) as error:
+        await api.investigation_engine(api.InvestigationEngineRequest(engine='rules'), user=OWNER)
+    assert error.value.status_code == 409
+    await api.pause(user=OWNER)
+    reply = await api.investigation_engine(api.InvestigationEngineRequest(engine='rules'), user=OWNER)
+    assert reply['investigationEngine'] == 'rules' and reply['roundTimeoutSeconds'] == 480
+    installation = (await rows('SELECT * FROM monitor_installations'))[0]
+    scheduler = await TaskStore.get_scheduler(entry['scheduler_id'])
+    assert scheduler.context['monitoring'] == json.loads(installation['policy'])
+    with pytest.raises(HTTPException) as error:
+        await api.investigation_engine(api.InvestigationEngineRequest(engine='agent-v1'), user=SimpleNamespace(id='other'))
+    assert error.value.status_code == 404
+
+
 @pytest.mark.asyncio
 async def test_start_failure_stays_paused_and_does_not_expose_internal_error(monkeypatch):
     discovery, entry = await install_unready(monkeypatch)

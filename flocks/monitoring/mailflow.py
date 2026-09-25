@@ -250,6 +250,11 @@ async def notify_one(policy, notice, session_id, adapter_factory=MailAdapter):
         await recorder.call('说明分析结论与发信原因', {'event': event['id']}, explain)
     event['notified_end_time'] = raw.get('endTime')
     advice = assessment.text + '\n' + assessment.details
+    if event.get('investigation'):
+        investigation = event['investigation']
+        advice += ('\n智能体调查参考（不等于已处置）：' + str(investigation.get('reason', '待续查'))[:1200]
+                   + '\n调查记录状态：' + str(investigation.get('state', 'pending'))
+                   + '\n证据引用：' + ', '.join(investigation.get('evidence_ids', [])))
     event['analysis'] = advice
     event['notified_status'] = raw.get('dealStatus')
     event['notified_host'] = raw.get('hostIp')
@@ -572,6 +577,12 @@ async def diagnostic_state(owner):
               'mailbox_matches': bool(cfg and config['mailbox'] == transport.mailbox_key(cfg)),
               'model_configured': bool(await Config.resolve_default_llm()),
               'development_sample': bool(installed and sampling.enabled(MonitoringPolicy.model_validate_json(installed[0]['policy'])))}
+    if installed:
+        policy = MonitoringPolicy.model_validate_json(installed[0]['policy'])
+        result['investigation_engine'] = policy.investigation_engine
+        result['round_timeout_seconds'] = policy.timeout_seconds
+        investigations = await rows('SELECT state,COUNT(*) AS count FROM monitor_investigations WHERE owner=? AND project=? GROUP BY state', (owner, config['project']))
+        result['investigations'] = {r['state']: r['count'] for r in investigations if r['state'] in {'pending', 'ready', 'needs_review'}}
     for name, table in (('notices', 'monitor_mail_notices'), ('replies', 'monitor_mail_replies')):
         counts = await rows(f'SELECT state,COUNT(*) AS count FROM {table} WHERE owner=? AND project=? GROUP BY state', (owner, config['project']))
         result[name] = {r['state']: r['count'] for r in counts if r['state'] in diag._ENUMS['mail_state']}

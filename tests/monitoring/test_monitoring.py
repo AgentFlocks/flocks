@@ -85,9 +85,13 @@ async def test_atomic_slots_queue_and_serial_scope(policy):
     assert len(await rows('SELECT * FROM monitor_slots')) == 1
     await admit_slots(scheduler, stamp + timedelta(minutes=20))
     assert len(await rows('SELECT * FROM monitor_slots')) == 3
+    assert len(await rows("SELECT * FROM monitor_slots WHERE status='coalesced'")) == 2
     queue = TaskQueue()
     first = await queue.dequeue()
     assert first and await queue.dequeue() is None
+    await admit_slots(scheduler, stamp + timedelta(minutes=40))
+    assert len(await rows("SELECT * FROM task_execution_queue_refs WHERE status='queued'")) == 1
+    assert await queue.dequeue() is None
     await TaskStore.finish_queue_ref(first.id)
     queue.mark_finished(first.id)
     assert await queue.dequeue()
@@ -230,7 +234,8 @@ async def test_144_online_slots_and_downtime_missing(policy):
     await TaskStore.update_scheduler(scheduler)
     for n in range(144): await admit_slots(scheduler, stamp + timedelta(minutes=10*n))
     assert len(await rows('SELECT * FROM monitor_slots')) == 144
-    assert len(await rows('SELECT * FROM task_execution_queue_refs')) == 144
+    assert len(await rows('SELECT * FROM task_execution_queue_refs')) == 1
+    assert len(await rows("SELECT * FROM monitor_slots WHERE status='coalesced'")) == 143
     await admit_slots(scheduler, stamp + timedelta(days=2))
     missed = await rows("SELECT * FROM monitor_slots WHERE status='missed'")
     assert missed

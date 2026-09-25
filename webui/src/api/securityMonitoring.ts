@@ -20,6 +20,8 @@ export interface MonitorDisposition {
 }
 export interface MonitorSnapshot {
   developmentSample?: boolean;
+  investigationEngine?: 'rules' | 'agent-v1';
+  roundTimeoutSeconds?: number;
   mail?: { enabled: boolean; sentToday: number; receivedToday: number; pending: number; needsReview: number; sendUnknown: number };
   automatic?: { enabled: boolean; rule: string; queued: number };
   businessDate: string; timezone: string; sessionID: string | null; nextRun: string | null; scheduledNextRun: string | null;
@@ -38,6 +40,7 @@ export interface MailHistory {
   replies: { id: string; sender: string; state: string; error: string | null; received_at: string; targets?: { event_id: string; name: string; state: string; target: number }[]; payload: { subject: string; text: string; authenticated_sender?: boolean; sender_verification_bypassed?: boolean }; result: { items?: { notice_id: string; outcome: string; evidence: string; reason: string }[] } | null }[];
 }
 export const monitoringApi = {
+  setInvestigationEngine: (engine: 'rules' | 'agent-v1') => client.put<MonitorSnapshot>(`${MONITOR_API}/investigation-engine`, { engine }),
   mail: (offset = 0) => client.get<MailHistory>(`${MONITOR_API}/mail`, { params: { offset } }),
   saveMail: (body: { enabled: boolean; recipient_email: string; responsible_name: string }) => client.put<MonitorSnapshot>(`${MONITOR_API}/mail/settings`, body),
   setAutomaticStatus: (enabled: boolean) => client.put<MonitorSnapshot>(`${MONITOR_API}/automatic-status`, { enabled }),

@@ -431,7 +431,8 @@ async def test_reply_with_partial_review_keeps_other_item_readback_alive(auto, m
 
 @pytest.mark.parametrize('authenticated', [True, False])
 @pytest.mark.parametrize('development', [False, True])
-async def test_native_two_round_mail_feedback_flow(auto, actual_tool, connected_email, monkeypatch, authenticated, development):
+@pytest.mark.parametrize('agent_engine', [False, True])
+async def test_native_two_round_mail_feedback_flow(auto, actual_tool, connected_email, monkeypatch, authenticated, development, agent_engine):
     from email.mime.text import MIMEText
     from flocks.channel.inbound.dispatcher import InboundDispatcher
     from flocks.config.config import ChannelConfig
@@ -449,6 +450,22 @@ async def test_native_two_round_mail_feedback_flow(auto, actual_tool, connected_
         await development_mode(auto)
         auto.raw.update(dealStatus=40, gptResult=170, hostIp='192.0.2.1')
         auto.responses['ip'] = {'data': {'item': None}}
+    if agent_engine:
+        from flocks.monitoring import investigation, capabilities
+        from flocks.task.store import TaskStore
+        auto.policy.investigation_engine = 'agent-v1'
+        auto.policy.timeout_seconds = 1200
+        auto.scheduler.context['monitoring'] = auto.policy.model_dump()
+        await TaskStore.update_scheduler(auto.scheduler)
+        await write('UPDATE monitor_installations SET policy=? WHERE owner=?', (encode(auto.policy.model_dump()), 'owner'))
+        catalog = [capabilities.Capability('cap-1', 'device', auto.policy.tool, 'xdr', 'Synthetic XDR', 'unknown')]
+        monkeypatch.setattr(capabilities, 'discover', AsyncMock(return_value=(catalog, [])))
+        monkeypatch.setattr(investigation.Agent, 'list', AsyncMock(return_value=[]))
+        async def choose(agent, data):
+            if not data['evidence']:
+                return investigation.Choice(action='query', capability='cap-1', entity='host', reason='核对事件关联主机')
+            return investigation.Choice(action='finish', verdict='unknown', evidence_ids=['evidence-1'], reason='保留主机查询事实，仍需负责人核查')
+        monkeypatch.setattr(investigation, 'choose', choose)
     if not authenticated:
         connected_email._resolved.update(authservId='', requireAuthenticatedSender=False)
     await m.configure('owner', m.MailSettingsRequest(enabled=True, recipient_email='person@example.com'))
@@ -459,6 +476,9 @@ async def test_native_two_round_mail_feedback_flow(auto, actual_tool, connected_
     await tick()
     notices = await rows('SELECT * FROM monitor_mail_notices')
     assert len(notices) == 1 and notices[0]['state'] == 'sent'
+    if agent_engine:
+        assert (await rows('SELECT state FROM monitor_investigations'))[0]['state'] == 'ready'
+        assert '智能体调查参考' in notices[0]['body']
     assert len(outbound) == 1 and outbound[0]['Message-ID'] == notices[0]['message_id']
     assert outbound[0]['To'] == 'person@example.com'
     assert not outbound[0]['In-Reply-To']
