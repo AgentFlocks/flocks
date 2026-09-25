@@ -21,12 +21,17 @@ from .scheduling import IMMEDIATE_START_PENDING, start_immediately
 _lock = asyncio.Lock()
 CORE_CAPABILITIES = {'monitor.daily.v1', 'monitor.readonly.v1', 'monitor.native-messages.v1', 'monitor.confirmed-disposition.v1', 'monitor.automatic-status.v1', 'monitor.mail-feedback.v1'}
 CORE_CAPABILITIES.add('monitor.investigation.v1')
+CORE_CAPABILITIES.add('monitor.agent-component.v1')
 
 
 def validate_manifest(manifest, package=None):
     required = set((manifest.model_extra or {}).get('requiredCoreCapabilities', []))
     if not required or not required <= CORE_CAPABILITIES:
         raise ValueError('Monitoring component requires unsupported core capabilities')
+    if 'monitor.agent-component.v1' in required:
+        from .agent_component import AGENT_ID
+        if not any(ref.type == 'agent' and ref.id == AGENT_ID and not ref.optional for ref in manifest.components):
+            raise ValueError('监测套件必须包含监测智能体组件')
     import os
     if int(os.environ.get('WEB_CONCURRENCY', '1')) != 1:
         raise ValueError('安全运营监测阶段一仅支持单后端执行进程')
@@ -60,6 +65,8 @@ async def install(manifest):
             project = exc.project
         directory = Path(project.worktree)
         devices, tool, reason = await discover()
+        from .agent_component import unavailable_reason
+        reason = reason or await unavailable_reason()
         policy = MonitoringPolicy(owner=user.id, project=project.id, directory=str(directory),
                                   investigation_engine='agent-v1', timeout_seconds=1200,
                                   devices=devices, tool=tool or 'sangfor_xdr_incidents')
@@ -69,7 +76,7 @@ async def install(manifest):
         policy.correlation_notes = notes
         key = f'monitor:{user.id}:{project.id}:{COMPONENT_ID}'
         existing = await TaskStore.get_scheduler_by_dedup_key(key)
-        was_disabled = bool(old and old[0]['installed'] and old[0]['ready'] and existing
+        was_disabled = bool(old and old[0]['installed'] and existing
                             and existing.status != SchedulerStatus.ACTIVE)
         if existing:
             await TaskManager.disable_scheduler(existing.id)
@@ -169,6 +176,18 @@ async def _pause_monitor(entry):
         await TaskManager.cancel_execution(execution.id)
 
 
+async def pause_for_agent_change(*, removing=False):
+    """Drain active users before replacing/removing the shared role payload."""
+    async with _lock:
+        for entry in await rows('SELECT * FROM monitor_installations WHERE installed=1'):
+            if MonitoringPolicy.model_validate_json(entry['policy']).investigation_engine != 'agent-v1':
+                continue
+            await _pause_monitor(entry)
+            if removing:
+                await write('UPDATE monitor_installations SET ready=0,reason=? WHERE owner=? AND scope=?',
+                            ('监测智能体组件已卸载，请更新套件后重新启动', entry['owner'], COMPONENT_ID))
+
+
 async def start_monitoring(owner):
     """Recheck capabilities, queue the first round now, then resume cron slots."""
     async with _lock:
@@ -178,6 +197,14 @@ async def start_monitoring(owner):
         if not record.enabled:
             raise ValueError('场景已停用，请先在添加场景中启用')
         entry, scheduler, policy = await _owned_installation(owner)
+        if policy.investigation_engine == 'agent-v1':
+            from .agent_component import unavailable_reason
+            reason = await unavailable_reason()
+            if reason:
+                await _pause_monitor(entry)
+                await write('UPDATE monitor_installations SET ready=0,reason=? WHERE owner=? AND scope=?',
+                            (reason, owner, COMPONENT_ID))
+                raise ValueError(reason)
         if entry['ready'] and scheduler.status == SchedulerStatus.ACTIVE:
             return  # Retries cannot reset the schedule or duplicate work.
         await _pause_monitor(entry)
@@ -218,6 +245,8 @@ async def set_investigation_engine(owner, engine):
         policy.investigation_engine = engine
         policy.timeout_seconds = 1200 if engine == 'agent-v1' else 480
         if engine == 'agent-v1':
+            from .agent_component import resolve
+            await resolve()
             from .capabilities import discover as discover_investigation
             catalog, notes = await discover_investigation(policy, include_unbound=True)
             policy.correlation_devices = sorted({cap.device for cap in catalog if cap.kind != 'xdr'})
@@ -259,6 +288,14 @@ async def reconcile():
         if not entry['ready']:
             continue  # missing capability remains explicitly not ready
         policy = MonitoringPolicy.model_validate_json(entry['policy'])
+        if policy.investigation_engine == 'agent-v1':
+            from .agent_component import unavailable_reason
+            reason = await unavailable_reason()
+            if reason:
+                await _pause_monitor(entry)
+                await write('UPDATE monitor_installations SET ready=0,reason=? WHERE owner=? AND scope=?',
+                            (reason, policy.owner, policy.scope))
+                continue
         if not Path(policy.directory).is_dir():
             await TaskManager.disable_scheduler(entry['scheduler_id'])
             await write('UPDATE monitor_installations SET ready=0,reason=? WHERE owner=? AND scope=?',

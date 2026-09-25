@@ -2,5 +2,11 @@
   "schemaVersion": "hub.component.v1",
   "id": "host-security-monitor",
   "nameCn": "安全运营监测",
-  "components": []
+  "components": [
+    {
+      "type": "agent",
+      "id": "security-monitor",
+      "optional": false
+    }
+  ]
 }

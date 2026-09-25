@@ -45,7 +45,7 @@ async def auto(tmp_path, monkeypatch):
     await write('INSERT INTO monitor_observations VALUES(?,?,?)', ('attempt', event['key'], encode(event)))
     await write('INSERT INTO monitor_auto_settings VALUES(?,?,?,?,?,?)', ('owner', policy.scope, project.id, 1, 'revision', d.stamp()))
     await write('INSERT INTO monitor_auto_queue(owner,scope,project,event_key) VALUES(?,?,?,?)', ('owner', policy.scope, project.id, event['key']))
-    monkeypatch.setattr('flocks.hub.local.get_record', lambda *_: SimpleNamespace(enabled=True))
+    monkeypatch.setattr('flocks.hub.local.get_record', lambda kind, _id: SimpleNamespace(enabled=True) if kind == 'component' else None)
     state = SimpleNamespace(policy=policy, event=event, raw=raw, session=session, day=day, calls=[], scheduler=scheduler,
                             responses={kind: {'data': {'item': []}} for kind in ENTITY_TYPES}, lose_write=False,
                             leave_scope=False, before_write=None)

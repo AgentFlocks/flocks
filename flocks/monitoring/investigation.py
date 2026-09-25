@@ -96,7 +96,14 @@ async def pending(policy):
 
 
 async def choose(agent_name, data):
-    agent = await Agent.get(agent_name)
+    from .agent_component import AGENT_ID, resolve
+    if agent_name == AGENT_ID:
+        try:
+            agent = await resolve()
+        except ValueError as exc:
+            raise ContractError(str(exc)) from None
+    else:
+        agent = await Agent.get(agent_name)
     if agent is None:
         raise ContractError('监测或协作智能体不可用')
     model = ({'provider_id': agent.model.provider_id, 'model_id': agent.model.model_id}

@@ -1,0 +1,65 @@
+{
+  "schemaVersion": "hub.plugin.v1",
+  "id": "security-monitor",
+  "type": "agent",
+  "name": "Security Monitoring Agent",
+  "nameCn": "监测运营智能体",
+  "description": "A suite-managed investigation role using the bounded monitoring runtime.",
+  "descriptionCn": "安全运营监测套件的调查智能体：按原事件选择只读证据，解释关联、判断与缺口。",
+  "version": "1.0.0",
+  "author": "Flocks Team",
+  "license": "MIT",
+  "category": "workflow-automation",
+  "tags": [
+    "xdr",
+    "monitoring"
+  ],
+  "useCases": [
+    "alert-triage",
+    "security-reporting"
+  ],
+  "domains": [
+    "security-ops"
+  ],
+  "capabilities": [
+    "llm-agent"
+  ],
+  "trust": "official",
+  "edition": "oss",
+  "source": {
+    "kind": "bundled",
+    "path": "plugins/agents/security-monitor"
+  },
+  "compatibility": {
+    "flocks": ">=0.8.0",
+    "os": [
+      "darwin",
+      "linux",
+      "windows"
+    ]
+  },
+  "dependencies": {
+    "skills": [],
+    "tools": [],
+    "python": [],
+    "external": []
+  },
+  "permissions": {
+    "tools": [],
+    "network": false,
+    "shell": false,
+    "filesystem": "none"
+  },
+  "risk": {
+    "level": "low",
+    "reasons": [
+      "角色只提交调查决策；工具、邮件和状态写入由主程序的受控服务执行"
+    ]
+  },
+  "entrypoints": [
+    "agent.yaml",
+    "prompt.md"
+  ],
+  "checksums": {},
+  "monitorInvestigationContract": 1
+}

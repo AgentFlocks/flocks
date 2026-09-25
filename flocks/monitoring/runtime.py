@@ -317,6 +317,9 @@ async def dispatch(execution, scheduler, *, adapter_factory=XdrAdapter):
     record = local.get_record('component', policy.scope)
     if not record or not record.enabled:
         raise PermissionError('监测场景未启用')
+    if policy.investigation_engine == 'agent-v1':
+        from .agent_component import resolve
+        await resolve()
     installed = await rows('SELECT * FROM monitor_installations WHERE owner=? AND scope=? AND installed=1 AND ready=1', (policy.owner, policy.scope))
     if (not installed or scheduler.status.value != 'active'
             or installed[0]['scheduler_id'] != scheduler.id

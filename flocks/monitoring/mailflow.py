@@ -578,6 +578,8 @@ async def diagnostic_state(owner):
               'model_configured': bool(await Config.resolve_default_llm()),
               'development_sample': bool(installed and sampling.enabled(MonitoringPolicy.model_validate_json(installed[0]['policy'])))}
     if installed:
+        from .agent_component import diagnostic_state as agent_state
+        result['agent_component'] = agent_state()
         policy = MonitoringPolicy.model_validate_json(installed[0]['policy'])
         result['investigation_engine'] = policy.investigation_engine
         result['round_timeout_seconds'] = policy.timeout_seconds

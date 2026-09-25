@@ -274,11 +274,12 @@ async def test_specialist_shares_query_budget_and_only_uses_declared_tools(case,
     assert case.query.call_args.args[3].kind == 'tdp'
 
 
-async def test_model_uses_configured_provider_and_native_agent_contract(monkeypatch):
-    from flocks.agent.agent_factory import scan_and_load
-    agent = scan_and_load()['security-monitor']
+async def test_model_uses_configured_provider_and_installed_agent_contract(monkeypatch):
+    from flocks.hub.installer import install_plugin
+    from flocks.monitoring.agent_component import resolve
+    await install_plugin('agent', 'security-monitor')
+    agent = await resolve()
     assert agent.prompt and '同 IP' in agent.prompt and agent.tools == []
-    monkeypatch.setattr(i.Agent, 'get', AsyncMock(return_value=agent))
     monkeypatch.setattr(i.Config, 'resolve_default_llm', AsyncMock(return_value={'provider_id': 'fixture', 'model_id': 'fixture-model'}))
     monkeypatch.setattr(i.Provider, 'apply_config', AsyncMock())
     chat = AsyncMock(return_value=SimpleNamespace(tool_calls=[], finish_reason='stop', content='```json\n' +

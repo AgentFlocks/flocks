@@ -7,3 +7,5 @@ hidden: true
 delegatable: false
 tags: [security]
 tools: []
+options:
+  monitorInvestigationContract: 1

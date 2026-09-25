@@ -819,7 +819,12 @@ async def _install_component_refs(
                     item.status = "installing"
                     await _emit_component_progress(progress, manifest, "item", item=item)
                     try:
-                        await _install_plugin(ref.type, ref.id, scope=scope, installed_by=component_key, protection_plan=protection_plan)
+                        # Updating a shared dependency must not silently adopt
+                        # it and later remove it with this suite's uninstall.
+                        owner = component_key
+                        if existing_record is not None and not _can_adopt_existing_ref(ref, existing_record, component_key, existing_path):
+                            owner = existing_record.installedBy
+                        await _install_plugin(ref.type, ref.id, scope=scope, installed_by=owner, protection_plan=protection_plan)
                     except Exception as exc:
                         if ref.optional:
                             item.status = "skipped"
@@ -1034,6 +1039,9 @@ async def _install_plugin(
     package_backup: Path | None = None
     package_replaced = False
     access_replacement: tuple[Path, Path | None] | None = None
+    if plugin_type == "agent" and plugin_id == "security-monitor":
+        from flocks.monitoring.lifecycle import pause_for_agent_change
+        await pause_for_agent_change()
     try:
         if plugin_type == "component":
             component_ref_installs = await _install_component_refs(manifest, scope=scope, progress=progress, protection_plan=protection_plan)
@@ -1196,6 +1204,9 @@ async def _uninstall_plugin(
     scope = record.scope if record else "global"
     if install_path is not None:
         await asyncio.to_thread(_validate_uninstall_target, plugin_type, plugin_id, install_path, scope)
+    if plugin_type == "agent" and plugin_id == "security-monitor":
+        from flocks.monitoring.lifecycle import pause_for_agent_change
+        await pause_for_agent_change(removing=True)
     if plugin_type == "webui" and scope != "project":
         await asyncio.to_thread(_validate_access_uninstall_target, plugin_id, scope)
     if install_path is None or not install_path.exists():
