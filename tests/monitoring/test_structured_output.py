@@ -169,7 +169,7 @@ async def test_business_selection_after_real_tool_capture(setup, monkeypatch, mo
         assert counts['source_unique'] == 201 and counts['matched_unique'] == len(expected_ids)
     else:
         assert attempt['status'] == 'failed'
-        assert any('加白状态缺失或未识别' in text and '水位不推进' in text for text in summaries)
+        assert any('加白状态缺失或未识别' in text and '上次查询进度保持不变' in text for text in summaries)
         assert not any('本轮 XDR 安全事件符合条件' in text for text in summaries)
 
 

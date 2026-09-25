@@ -38,7 +38,7 @@ async def read_event(adapter, event, *, eligible=False):
               'end_time': int(d.datetime.now(d.timezone.utc).timestamp()), 'time_field': 'endTime',
               'page_num': 1, 'page_size': 5, 'white_status': ['未加白', '部分加白'] if eligible else [],
               'deal_statuses': [0, 10] if eligible and not (getattr(adapter.policy, 'development_sample', False) and event.get('development_sample')) else []}
-    value = await d.operation(adapter, event, params, '重新核对事件及自动标记范围' if eligible else '回查事件当前状态')
+    value = await d.operation(adapter, event, params, '发信前按编号确认原事件' if eligible else '回查事件当前状态')
     items, total = page_items(value)
     if eligible and not items and total in (None, 0):
         return None

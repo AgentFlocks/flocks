@@ -2,7 +2,7 @@
 import secrets
 
 from .adapter import ContractError, normalize, page_items
-from .summaries import Summary, page_summary
+from .summaries import Summary, page_summary, event_label, STATUS_LABELS
 from . import diagnostics as diag
 
 PAGE_SIZE = 5  # XDR list contract minimum, not the number admitted to monitoring.
@@ -28,7 +28,9 @@ async def query_sample(adapter, device, start, end, recorder):
             if severities and any(type(item.get('incidentSeverity')) is not int or item['incidentSeverity'] not in severities for item in items):
                 raise ContractError('XDR 等级筛选未生效，未提交样本')
             return (items, total), {'page': page, 'received': len(items), 'total': total, 'development_sample': True}, Summary(
-                f'联调抽样定位：候选 {total} 条，本页读取 {len(items)} 条；仅选 1 条进入分析，不推进查询水位。')
+                f'联调抽样定位：候选 {total} 条，本页读取 {len(items)} 条；' +
+                ('只随机选取 1 条进入分析，其余不会在本轮逐条处理。' if total else '本次筛选没有候选事件。') +
+                '每轮重新查看最近 24 小时，上次正常查询进度保持不变。')
         return await recorder.call('查询 XDR 事件', {'device': device, **params}, operation)
 
     severities = [2, 3, 4]
@@ -53,6 +55,6 @@ async def query_sample(adapter, device, start, end, recorder):
     async def selected(_):
         details = page_summary(page + 1, [raw], 1, False).details
         return [event], {'event': event['id'], 'development_sample': True}, Summary(
-            f'本轮随机选中事件「{event["name"]}」，只分析这一条。原处置状态不影响抽样；'
-            '关联证据支持恶意时发送联调邮件，收到明确处理反馈后标记忽略并回查。', details)
+            f'本轮随机选中事件：{event_label(event)}。\n当前 XDR 状态：{STATUS_LABELS.get(raw.get("dealStatus"), "未知")}；只分析这一条。'
+            '\n原处置状态不影响抽样；本次测试邮件不要求事件必须恶意，分析结果会如实写入邮件。收到明确完成反馈后标记忽略并回查。', details)
     return await recorder.call('选取联调样本', {'development_sample': True}, selected)

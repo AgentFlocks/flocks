@@ -17,7 +17,7 @@ from .sessions import ensure_daily
 from .store import rows, write, connection, encode
 from .adapter import XdrAdapter, ContractError, page_items, response_items
 from . import diagnostics as diag
-from .summaries import Summary, page_summary, hosts_summary, analysis_summary, event_label
+from .summaries import Summary, page_summary, hosts_summary, analysis_summary, event_label, round_summary
 from . import sampling
 
 _running: dict[str, asyncio.Task] = {}
@@ -53,9 +53,14 @@ class Recorder:
         self.parent_id = parent_id
 
     async def call(self, name, params, operation, *, failure_context=""):
+        from .disposition import operation_recorder
         stage = {'查询 XDR 事件': 'query.events', '查询关联主机': 'query.entities', '关联分析': 'correlate', '自动研判与状态标记': 'automatic.mark', '发送告警通知': 'mail.send', '解读回信并跟进状态': 'mail.interpret'}.get(name, 'step.other')
-        with diag.span(stage, page=params.get('page_num'), page_size=params.get('page_size')):
-            return await self._call(name, params, operation, failure_context=failure_context)
+        token = operation_recorder.set(self)
+        try:
+            with diag.span(stage, page=params.get('page_num'), page_size=params.get('page_size')):
+                return await self._call(name, params, operation, failure_context=failure_context)
+        finally:
+            operation_recorder.reset(token)
 
     async def _call(self, name, params, operation, *, failure_context=""):
         message = await emit_message(self.session_id, name, finished=False, parent_id=self.parent_id)
@@ -85,7 +90,7 @@ class Recorder:
             await write("UPDATE monitor_steps SET status='failed',finished_at=?,error=? WHERE id=?", (now().isoformat(), error, step_id))
             explanation = f'{failure_context}{name}未完成：{error}。'
             if name == '查询 XDR 事件':
-                explanation += '本设备本轮事件批次未提交，查询水位不推进；不能把失败视为 0 条事件。'
+                explanation += '本设备本轮事件批次未提交，上次查询进度保持不变；不能把失败视为 0 条事件。'
             elif name == '查询关联主机':
                 explanation += '已查询的事件保留，本次关联数据不完整。'
             await self.finish_part(message.id, part.id, state, Summary(explanation))
@@ -233,13 +238,13 @@ async def run(execution, policy, adapter_factory=XdrAdapter):
         result['mail'] = {'feedback': feedback, 'notification': notification, 'enabled': automatic_enabled}
         result['disposition'] = '责任人邮件反馈后标记并回查' if automatic_enabled else '只读监测'
         status = 'partial' if errors and observed or feedback['pending'] or notification['pending'] else 'failed' if errors else 'completed'
-        marking_summary = (f"邮件发送 {notification['sent']} 封；处理回信 {feedback['processed']} 封，{feedback['verified']} 封反馈已回查确认，{feedback['pending']} 封待跟进。" if automatic_enabled else '邮件跟进未启用，事件保持未闭环。')
-        summary = f"本轮{ {'completed': '完成', 'partial': '部分完成', 'failed': '失败'}[status]}：{len(observed)} 个事件，{result['risk']} 个风险，{result['unknown']} 个待判定。{marking_summary}" + ('本轮为开发联调抽样，不代表全部告警。' if sampling.enabled(policy) else '')
+        summary = round_summary(status, result, observed, feedback, notification, automatic_enabled, sampling.enabled(policy))
         await write('UPDATE monitor_attempts SET result=? WHERE id=?', (encode(result), attempt_id))
     except BaseException as exc:
         status = 'interrupted' if isinstance(exc, asyncio.CancelledError) else 'failed'
         errors.append(str(exc) if isinstance(exc, ContractError) else '运行中断或内部错误')
-        summary = '本轮未完成：' + '；'.join(errors)
+        summary = ('本轮未完成：' + '；'.join(errors) + f'。已读取 {len(observed)} 条事件，不能将中断视为无风险。'
+                   '已保存的通知和回信保留在邮件跟进中；请检查失败步骤或导出诊断日志。再次运行会核对已有记录，发送或写入结果未知时不会直接重复执行。')
         raise
     finally:
         diag.result(status, events=len(observed), errors=len(errors))

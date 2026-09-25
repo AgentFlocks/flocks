@@ -13,6 +13,7 @@ import yaml
 from flocks.monitoring import automatic as a, disposition as d, mailflow as m
 from flocks.monitoring.adapter import normalize, ContractError
 from flocks.monitoring.models import MonitoringPolicy
+from flocks.monitoring.mail_transport import send as send_through_email_channel
 from flocks.monitoring.reports import snapshot
 from flocks.monitoring.sessions import ensure_daily
 from flocks.monitoring.status_rules import ENTITY_TYPES
@@ -438,9 +439,16 @@ async def test_native_two_round_mail_feedback_flow(auto, actual_tool, connected_
     from flocks.monitoring.runtime import run
     from flocks.monitoring import mail_interpreter
     from flocks.task.models import ExecutionTriggerType
+    outbound = []
+    smtp = SimpleNamespace(send_message=outbound.append, quit=lambda: None, close=lambda: None)
+    monkeypatch.setattr(connected_email, '_connect_smtp', lambda: smtp)
+    monkeypatch.setattr(connected_email, '_authenticate_smtp', lambda _: None)
+    auto.send = AsyncMock(wraps=send_through_email_channel)
+    monkeypatch.setattr(m.transport, 'send', auto.send)
     if development:
         await development_mode(auto)
-        auto.raw.update(dealStatus=40, gptResult=10, hostIp='192.0.2.1')
+        auto.raw.update(dealStatus=40, gptResult=170, hostIp='192.0.2.1')
+        auto.responses['ip'] = {'data': {'item': None}}
     if not authenticated:
         connected_email._resolved.update(authservId='', requireAuthenticatedSender=False)
     await m.configure('owner', m.MailSettingsRequest(enabled=True, recipient_email='person@example.com'))
@@ -451,6 +459,20 @@ async def test_native_two_round_mail_feedback_flow(auto, actual_tool, connected_
     await tick()
     notices = await rows('SELECT * FROM monitor_mail_notices')
     assert len(notices) == 1 and notices[0]['state'] == 'sent'
+    assert len(outbound) == 1 and outbound[0]['Message-ID'] == notices[0]['message_id']
+    assert outbound[0]['To'] == 'person@example.com'
+    assert not outbound[0]['In-Reply-To']
+    if development:
+        assert json.loads(notices[0]['event'])['assessment']['malicious'] is False
+        assert '空值（null）' in notices[0]['body']
+    from flocks.session.message import Message, MessageRole
+    messages = await Message.list_with_parts(auto.session.id)
+    assert all(message.info.parentID for message in messages if message.info.role == MessageRole.ASSISTANT)
+    summaries = [part for message in messages for part in message.parts if part.type == 'text' and (part.metadata or {}).get('monitoringSummary')]
+    assert any('ID：event' in part.text for part in summaries)
+    assert any('本次为邮件链路测试' in part.text for part in summaries) is development
+    assert all('重新核对事件及自动标记范围' not in part.text for part in summaries)
+    assert any(part.text.startswith('本轮完成') for part in messages[-1].parts if part.type == 'text')
     assert not any(path.endswith('/dealstatus') for path, _ in actual_tool)
     original = MIMEText('文件已清理，复查正常。', 'plain', 'utf-8')
     original['From'] = 'person@example.com'
@@ -479,6 +501,7 @@ async def test_native_two_round_mail_feedback_flow(auto, actual_tool, connected_
     monkeypatch.setattr(mail_interpreter, 'interpret', AsyncMock(return_value=interpretation(notices[0], msg.text)))
     await tick()
     assert auto.send.await_count == 1
+    assert len(outbound) == 1
     updates = [data for path, data in actual_tool if path.endswith('/dealstatus')]
     assert len(updates) == 1 and updates[0]['uuIds'] == ['event']
     assert updates[0]['dealStatus'] == (60 if development else 40)
@@ -489,6 +512,9 @@ async def test_native_two_round_mail_feedback_flow(auto, actual_tool, connected_
         queries = [data for data in listed if not data.get('uuIds')]
         assert all(data['severities'] == [2, 3, 4] and data['pageSize'] == 5 for data in queries)
     assert (await rows('SELECT state FROM monitor_mail_replies'))[0]['state'] == 'verified'
+    messages = await Message.list_with_parts(auto.session.id)
+    assert all(message.info.parentID for message in messages if message.info.role == MessageRole.ASSISTANT)
+    assert any(part.text.startswith('本轮完成') for part in messages[-1].parts if part.type == 'text')
     report = (await rows('SELECT * FROM monitor_reports'))[0]
     assert '当日告警总结' in report['summary_content'] and '执行时间线' in report['content']
     if development:
@@ -528,12 +554,14 @@ async def test_sample_feedback_ignores_only_sample_and_is_idempotent(auto, initi
 
 
 @pytest.mark.parametrize('gpt,malicious', [(170, False), (40, False), (160, False), (10, True), (20, True)])
-async def test_sample_severity_alone_does_not_send(auto, gpt, malicious):
+async def test_sample_sends_explicit_test_mail_without_inventing_maliciousness(auto, gpt, malicious):
     await development_mode(auto)
     auto.raw['gptResult'] = gpt
     n = await notice(auto)
-    assert n['state'] == ('sent' if malicious else 'skipped')
-    assert auto.send.await_count == int(malicious)
+    assert n['state'] == 'sent'
+    assert auto.send.await_count == 1
+    assert json.loads(n['event'])['assessment']['malicious'] is malicious
+    assert '即使无需处置或证据不足也发送' in n['body']
     assert not writes(auto)
 
 
@@ -542,18 +570,68 @@ async def test_sample_uses_entity_evidence_and_does_not_drain_old_backlog(auto):
     await development_mode(auto)
     auto.responses['file']['data']['item'] = [{'threatLevel': 3}]
     result = await m.notify_batch(auto.policy, auto.session.id, [auto.event], Recorder(), auto.adapter)
-    assert result == {'sent': 1, 'pending': 0} and auto.send.await_count == 1
+    assert result['sent'] == 1 and result['pending'] == 0 and auto.send.await_count == 1
     old = (await rows("SELECT state FROM monitor_mail_notices WHERE event_key='device:incident:old'"))[0]
     assert old['state'] == 'queued'
 
 
-async def test_sample_partial_entity_evidence_does_not_send(auto):
+async def test_sample_partial_evidence_is_explained_but_test_mail_still_sends(auto):
     await development_mode(auto)
     auto.raw['gptResult'] = 10
     auto.responses['file'] = {'data': {}}
     result = await m.notify_batch(auto.policy, auto.session.id, [auto.event], Recorder(), auto.adapter)
-    assert result == {'sent': 0, 'pending': 0} and not auto.send.called
-    assert (await rows('SELECT state FROM monitor_mail_notices'))[0]['state'] == 'skipped'
+    assert result['sent'] == 1 and result['pending'] == 0 and auto.send.called
+    n = (await rows('SELECT * FROM monitor_mail_notices'))[0]
+    assert n['state'] == 'sent'
+    assert '证据不完整' in n['body'] and '文件：证据未取得' in n['body']
+    assert not writes(auto)
+
+
+@pytest.mark.parametrize('old_state,reason,expected', [
+    ('skipped', '本次联调未取得充分且一致的恶意证据，不发送测试邮件。旧依据', 1),
+    ('skipped', '事件已离开通知查询范围', 0),
+    ('sent', None, 0), ('send_unknown', '发件结果未知', 0), ('needs_review', '配置已变化', 0),
+])
+async def test_reopens_only_never_sent_old_development_gate(auto, old_state, reason, expected):
+    await development_mode(auto)
+    await m.queue_notices(auto.policy, [auto.event], auto.session.id)
+    n = (await rows('SELECT * FROM monitor_mail_notices'))[0]
+    await write('UPDATE monitor_mail_notices SET state=?,error=? WHERE id=?', (old_state, reason, n['id']))
+    result = await m.notify_batch(auto.policy, auto.session.id, [auto.event], Recorder(), auto.adapter)
+    assert result['sent'] == expected and auto.send.await_count == expected
+    assert (await rows('SELECT * FROM monitor_mail_notices'))[0]['id'] == n['id']
+    await m.notify_batch(auto.policy, auto.session.id, [auto.event], Recorder(), auto.adapter)
+    assert auto.send.await_count == expected and not writes(auto)
+    if not expected:
+        assert '本项目同设备、同事件编号' in result['explanations'][0]
+
+
+async def test_old_skipped_other_config_or_normal_notice_not_reopened(auto):
+    await development_mode(auto)
+    await m.queue_notices(auto.policy, [auto.event], auto.session.id)
+    await write("UPDATE monitor_mail_notices SET state='skipped',revision='old',error=?",
+                ('本次联调未取得充分且一致的恶意证据，不发送测试邮件。旧依据',))
+    await m.notify_batch(auto.policy, auto.session.id, [auto.event], Recorder(), auto.adapter)
+    assert not auto.send.called
+
+
+async def test_proven_no_smtp_attempt_is_retryable_but_unknown_send_is_not(auto):
+    await development_mode(auto)
+    auto.send.side_effect = m.transport.TransportNotReady('请先连接 Flocks 邮件通道')
+    n = await notice(auto)
+    assert n['state'] == 'queued' and '连接' in n['error']
+    auto.send.side_effect = None
+    assert (await notice(auto))['state'] == 'sent'
+    await notice(auto)
+    assert auto.send.await_count == 2 and not writes(auto)
+
+
+async def test_empty_scope_never_sends_even_in_development(auto):
+    await development_mode(auto)
+    auto.leave_scope = True
+    n = await notice(auto)
+    assert n['state'] == 'skipped' and n['error'] == '事件已离开通知查询范围'
+    assert not auto.send.called and not writes(auto)
 
 
 @pytest.mark.parametrize('change', ['end_time', 'status', 'host', 'in_progress', 'mode'])

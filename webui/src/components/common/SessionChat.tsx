@@ -5405,8 +5405,8 @@ function ChatMessageBubbleInner({
                     <div data-testid="monitor-step-summary" className="text-sm leading-7">
                       <p className="whitespace-pre-wrap break-words">{part.text}</p>
                       {details && (
-                        <details className="mt-1">
-                          <summary className="cursor-pointer text-gray-500">查看本步骤明细</summary>
+                        <details className="mt-1" open={isActive || undefined}>
+                          <summary className="cursor-pointer text-gray-500">查看本步骤的结果与依据</summary>
                           <div className="mt-1 whitespace-pre-wrap break-words">{details}</div>
                         </details>
                       )}

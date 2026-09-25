@@ -99,7 +99,7 @@ export default function SecurityMonitor() {
     {exportError && <p role="alert" className="bg-amber-50 px-6 py-2 text-sm text-amber-800">{exportError}</p>}
     {data && <section aria-label="监测控制" className="mx-6 mt-2 shrink-0 rounded-lg border border-gray-200 bg-white px-4 py-2 dark:border-gray-700 dark:bg-gray-800">
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <p className="text-sm"><strong>监测：{monitoringStatus}</strong> · 每 10 分钟 · 下次 {fmt(data.scheduledNextRun, data.timezone)}{data.developmentSample && <span className="ml-2 text-amber-700 dark:text-amber-300">开发联调 · 不限处置状态 · 优先中危及以上 · 每轮随机 1 条 · 反馈完成后标记忽略</span>}</p>
+        <p className="text-sm"><strong>监测：{monitoringStatus}</strong> · 每 10 分钟 · 下次 {fmt(data.scheduledNextRun, data.timezone)}{data.developmentSample && <span className="ml-2 text-amber-700 dark:text-amber-300">开发联调 · 不限处置状态 · 优先中危及以上 · 每轮随机 1 条 · 发测试邮件（无需恶意结论）· 反馈完成后标记忽略</span>}</p>
         <button disabled={controlBusy || !data.installation.installed} onClick={() => void control(monitoringEnabled ? 'pause' : 'start')} className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50">
           {controlBusy ? <Loader2 size={16} className="animate-spin" /> : monitoringEnabled ? <Pause size={16} /> : <Play size={16} />}
           {controlBusy ? '正在处理…' : monitoringEnabled ? '暂停监测' : '检查接入并启动'}

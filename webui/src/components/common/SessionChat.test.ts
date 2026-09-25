@@ -6425,6 +6425,16 @@ describe('process duration across model/tool boundaries', () => {
 
 
 describe('monitoring native step summaries', () => {
+  it('opens evidence while running and allows it to fold after completion', () => {
+    const message = makeMessage({ role: 'assistant', parts: [
+      { id: 'evidence', type: 'text', text: '核对关联证据', metadata: { monitoringSummary: true, details: '本次返回三条文件记录' } },
+    ] as any });
+    const { container, rerender } = render(React.createElement(ChatMessageBubble, { message, isActive: true }));
+    expect(container.querySelector('details')).toHaveAttribute('open');
+    rerender(React.createElement(ChatMessageBubble, { message: { ...message, finish: 'stop' }, isActive: false }));
+    expect(container.querySelector('details')).not.toHaveAttribute('open');
+  });
+
   it.each([false, true])('keeps each result visible and details plain text (collapse=%s)', async (collapse) => {
     const parts = [
       { id: 'tool-monitor-1', type: 'tool', tool: '查询 XDR 事件', callID: 'monitor-1', state: { status: 'completed', input: {}, output: { received: 2 }, time: { start: 1, end: 2 } } },
@@ -6442,7 +6452,7 @@ describe('monitoring native step summaries', () => {
     summaries.forEach(summary => expect(summary.closest('[data-testid="chat-process-group"]')).toBeNull());
     expect(screen.getByText('本轮 XDR 安全事件查询到 2 条事件。')).toBeVisible();
     expect(screen.getByText('查询到 0 条关联主机记录。')).toBeVisible();
-    await userEvent.click(screen.getByText('查看本步骤明细'));
+    await userEvent.click(screen.getByText('查看本步骤的结果与依据'));
     expect(summaries[0]).toHaveTextContent('<img src=x onerror=alert(1)>');
     expect(summaries[0].querySelector('img')).toBeNull();
     expect(container.querySelector('a[href="https://example.invalid"]')).toBeNull();

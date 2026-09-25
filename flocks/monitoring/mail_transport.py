@@ -15,6 +15,10 @@ from flocks.task.store import TaskStore
 REQUIRE_AUTHENTICATED_FEEDBACK = False
 
 
+class TransportNotReady(ValueError):
+    """A known preflight failure; no SMTP request has been attempted."""
+
+
 def mailbox_key(cfg):
     return hashlib.sha256(json.dumps([cfg.get(k, '') for k in ('imapHost', 'imapPort', 'username', 'address')]).encode()).hexdigest()
 
@@ -32,9 +36,12 @@ def transport(recipient=None):
 
 
 async def send(notice, session_id):
-    _, cfg = transport(notice['recipient'])
+    try:
+        _, cfg = transport(notice['recipient'])
+    except ValueError as exc:
+        raise TransportNotReady(str(exc)) from exc
     if mailbox_key(cfg) != notice['mailbox']:
-        raise ValueError('邮件账号已变化，请重新保存邮件跟进配置')
+        raise TransportNotReady('邮件账号已变化，请重新保存邮件跟进配置')
     ctx = OutboundContext(channel_id='email', to=notice['recipient'], text=notice['body'],
                           subject=notice['subject'], message_id=notice['message_id'],
                           new_thread=True, single_message=True, format_hint='plain')

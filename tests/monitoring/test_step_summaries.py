@@ -13,6 +13,16 @@ from flocks.task.manager import TaskManager
 from flocks.task.models import ExecutionTriggerType
 
 
+def test_entity_explanations_are_bounded_and_exclude_sensitive_fields():
+    value = {'data': {'item': [{'id': f'file-{i}', 'fileName': '<script>' + 'x' * 400,
+                              'threatLevel': 3, 'commandLine': 'PRIVATE_COMMAND', 'token': 'PRIVATE_TOKEN'} for i in range(200)]}}
+    data, summary = summaries.operation_summary({'id': 'sample', 'name': '样本'}, {'action': 'get_entities', 'entity_type': 'file'}, value)
+    assert data['count'] == 200 and 'file-0' in summary.details
+    assert '威胁判定：恶意' in summary.details and '控制成功证据：未确认' in summary.details
+    assert 'PRIVATE_COMMAND' not in summary.details and 'PRIVATE_TOKEN' not in summary.details
+    assert len(summary.details) <= summaries.MAX_DETAILS + 150
+
+
 async def execute(tmp_path, monkeypatch, mode):
     directory = tmp_path / '.flocks/workspace/summaries'
     directory.mkdir(parents=True)
@@ -71,6 +81,13 @@ async def execute(tmp_path, monkeypatch, mode):
 async def test_persisted_step_results_and_order(tmp_path, monkeypatch, mode):
     attempt, steps, texts, calls = await execute(tmp_path, monkeypatch, mode)
     combined = '\n'.join(text.text for text in texts)
+    messages = await Message.list_with_parts(attempt['session_id'])
+    ending = '\n'.join(part.text for part in messages[-1].parts if part.type == 'text')
+    assert '本轮' in ending and '邮件跟进未启用' in ending
+    if mode == 'empty':
+        assert '当前时间范围和筛选条件下没有可分析事件' in ending
+    if mode in ('query_failure', 'late_failure'):
+        assert '不能据此说没有告警' in ending
     if mode == 'empty':
         assert '本轮 XDR 安全事件查询到 0 条事件' in combined
         assert len(calls) == 1 and len(texts) == 2
@@ -80,7 +97,7 @@ async def test_persisted_step_results_and_order(tmp_path, monkeypatch, mode):
         assert not await rows('SELECT * FROM monitor_observations')
         assert not await rows('SELECT * FROM monitor_cursors')
         assert '关联分析已跳过' in combined
-        assert '水位不推进' in combined
+        assert '上次查询进度保持不变' in combined
         assert '本轮 XDR 安全事件查询到 0 条事件' not in combined
         assert any(step['status'] == 'failed' for step in steps)
         if mode == 'late_failure':
@@ -105,7 +122,7 @@ async def test_persisted_step_results_and_order(tmp_path, monkeypatch, mode):
             assert '第 1 页查询到 100 条' in texts[0].text and '分页尚未结束' in texts[0].text
             assert '第 2 页查询到 5 条' in texts[1].text
             assert 'event-104' in texts[1].metadata['details']
-    assert '状态标记' in texts[-1].text
+    assert '回查' in texts[-1].text
     assert '已闭环' not in texts[-1].text
 
 

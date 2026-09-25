@@ -43,9 +43,13 @@ def active_control(info, successes, timestamp):
 
 def entities(kind, value, timestamp):
     data = value.get('data')
+    if isinstance(data, dict) and 'item' in data and data['item'] is None:
+        raise ContractError('实体列表 item 返回空值（null），不能当作已确认的空列表')
     items = response_items(data)
-    if len(items) > 200 or any(not isinstance(item, dict) for item in items):
-        raise ContractError('实体证据结构无效或超过分析预算')
+    if len(items) > 200:
+        raise ContractError(f'返回 {len(items)} 条实体，超过单类 200 条的分析上限；未作全量判定')
+    if any(not isinstance(item, dict) for item in items):
+        raise ContractError('实体证据包含无效记录，无法判定')
     # No names, command lines, payloads or arbitrary prose enter the decision.
     if kind == 'host':
         return {'count': len(items), 'isolated': bool(items) and active_control(
@@ -63,13 +67,14 @@ def entities(kind, value, timestamp):
 def select_status(raw, responses, *, timestamp=None, failures=()):
     timestamp = int(time()) if timestamp is None else timestamp
     evidence = {'gptResult': raw.get('gptResult') if type(raw.get('gptResult')) is int else None,
-                'failedQueries': list(failures), 'entities': {}}
+                'failedQueries': list(failures), 'failedReasons': {}, 'entities': {}}
     for kind in ENTITY_TYPES:
         try:
             evidence['entities'][kind] = entities(kind, responses[kind], timestamp)
-        except (KeyError, ContractError, AttributeError):
+        except (KeyError, ContractError, AttributeError) as exc:
             if kind not in evidence['failedQueries']:
                 evidence['failedQueries'].append(kind)
+            evidence['failedReasons'][kind] = str(exc) if isinstance(exc, ContractError) else '未取得可用实体结果'
     if evidence['failedQueries']:
         return Decision(10, '实体证据不完整，标为处置中并继续跟进', evidence)
     groups = evidence['entities']

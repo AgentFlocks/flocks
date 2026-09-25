@@ -75,3 +75,15 @@ def test_tmg_read_write_conversion_is_specific():
     assert matches_status(70, 30) and matches_status(70, 70)
     assert not matches_status(40, 30) and not matches_status(40, '40')
     assert matches_status(60, 60) and not matches_status(60, 5)
+
+
+@pytest.mark.parametrize('items,reason', [(None, '空值（null）'), ([{}] * 707, '707 条实体')])
+def test_target_diagnostics_evidence_failures_have_specific_explanations(items, reason):
+    from flocks.monitoring.summaries import evidence_summary
+    result = evidence()
+    result['ip']['data']['item'] = items
+    decision = select_status({'gptResult': 10}, result)
+    summary = evidence_summary({'id': 'sample', 'name': '测试事件'}, decision, development=True)
+    assert decision.target == 10 and 'ip' in decision.evidence['failedQueries']
+    assert reason in summary.details and '证据不完整' in summary.text
+    assert '都向已配置的责任人发送一封测试通知' in summary.text

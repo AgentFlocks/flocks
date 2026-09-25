@@ -5,6 +5,7 @@ owner-bound sessions and a per-call guard before and after tool hooks.
 """
 import asyncio
 import json
+from contextvars import ContextVar
 from functools import wraps
 from datetime import datetime, timezone
 from uuid import UUID
@@ -19,6 +20,7 @@ from .store import connection, rows, write
 from . import diagnostics as diag
 
 _locks: dict[tuple, asyncio.Lock] = {}
+operation_recorder = ContextVar('monitor_operation_recorder', default=None)
 # Read contract for incidents/list; 30 is 已防护 and is never a writable target
 # or closure evidence. incidents/status_list uses a different 1–6 enum.
 LIST_RESPONSE_STATUSES = {0, 10, 30, 40, 50, 60, 70}
@@ -114,6 +116,14 @@ async def target(owner, event_key):
 
 
 async def operation(adapter, event, params, text):
+    recorder = operation_recorder.get()
+    if recorder is not None:
+        from .summaries import operation_summary
+        async def execute(message_id):
+            value = await asyncio.wait_for(adapter.call(event['device'], params, message_id), timeout=30)
+            display, summary = operation_summary(event, params, value)
+            return value, display, summary
+        return await recorder.call(text, {'device': event['device'], **params}, execute)
     from .runtime import emit_message
     message = await emit_message(adapter.session_id, text)
     return await asyncio.wait_for(adapter.call(event['device'], params, message.id), timeout=30)
@@ -149,7 +159,7 @@ async def finish(owner, request_id, status, observed=None, error=None, *, defer_
                 'pending': '处置结果待确认，请回查状态；不要重复写回。',
                 'failed': '处置未执行。',
                 'mismatch': 'XDR 回查状态与目标不匹配，保持待确认。',
-            }[status] + (f' {error}' if error else ''))
+            }[status] + (f' {error}' if error else ''), parent_id=getattr(operation_recorder.get(), 'parent_id', None))
         except Exception:
             pass  # Durable audit and report remain available if message persistence fails.
     from .reports import export_report

@@ -46,7 +46,7 @@ class IncidentPages:
         self.seen_pages.add(signature)
         if total is not None:
             if self.total is not None and total != self.total:
-                raise ContractError('分页总数变化，保留水位等待重试')
+                raise ContractError('分页总数变化，保持上次查询进度，等待重试')
             self.total = total
 
         selected = []
@@ -56,7 +56,7 @@ class IncidentPages:
                 raise ContractError('事件筛选结果无效，不能将未知状态视为符合条件')
             key = raw['uuId']
             if key in self.decisions and included != self.decisions[key]:
-                raise ContractError('重复事件筛选状态变化，保留水位等待重试')
+                raise ContractError('重复事件筛选状态变化，保持上次查询进度，等待重试')
             self.decisions[key] = included
             if included:
                 self.events[key] = normalize(self.device, raw)
@@ -67,6 +67,6 @@ class IncidentPages:
         complete = self.total is not None and len(self.decisions) == self.total
         if not complete and len(items) < page_size:
             if self.total is not None:
-                raise ContractError('分页提前结束；不推进查询水位')
+                raise ContractError('分页提前结束；上次查询进度保持不变')
             complete = True
         return selected, complete
