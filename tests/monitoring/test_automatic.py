@@ -456,6 +456,54 @@ async def test_diagnostic_state_contains_only_flags_and_counts(auto, monkeypatch
     assert (await m.diagnostic_state('other'))['notices'] == {}
 
 
+@pytest.fixture
+def connected_email(monkeypatch):
+    from flocks.channel.builtin.email.channel import EmailChannel
+    from flocks.channel.builtin.email.config import resolved_config
+    from flocks.channel.registry import default_registry
+    from flocks.config.config import Config
+    plugin = EmailChannel()
+    plugin._resolved = resolved_config({'address': 'agent@example.com', 'imapHost': 'imap.example.com',
+        'authservId': 'mx.example.com', 'allowFrom': ['person@example.com']})
+    plugin.mark_connected()
+    monkeypatch.setattr(default_registry, '_channels', {'email': plugin})
+    monkeypatch.setattr(Config, 'resolve_default_llm', AsyncMock(return_value={'model_id': 'fixture'}))
+    return plugin
+
+
+async def test_save_with_real_email_channel_and_export_snapshot(auto, actual_tool, connected_email):
+    from flocks.server.routes import security_monitoring as api
+    await api.mail_settings(m.MailSettingsRequest(enabled=True, recipient_email='person@example.com'),
+                            user=SimpleNamespace(id='owner'))
+    saved = await m.settings('owner')
+    assert saved['enabled'] and saved['recipient'] == 'person@example.com'
+    assert saved['mailbox'] == m.transport.mailbox_key(connected_email._resolved)
+    response = await api.diagnostics(user=SimpleNamespace(id='owner'))
+    data = json.loads(response.body)['mail']
+    assert data['channel_connected'] and data['mailbox_matches'] and data['sender_verification_configured']
+    assert 'example.com' not in json.dumps(data)
+    assert not auto.send.called and not actual_tool
+
+
+@pytest.mark.parametrize('condition,message', [
+    ('disconnected', '请先连接 Flocks 邮件通道'),
+    ('no_authserv', '可信 authservId'),
+    ('not_allowed', '允许收件人列表'),
+])
+async def test_real_email_channel_validation_preserves_saved_settings(auto, actual_tool, connected_email, condition, message):
+    if condition == 'disconnected':
+        connected_email.mark_disconnected()
+    elif condition == 'no_authserv':
+        connected_email._resolved['authservId'] = ''
+    else:
+        connected_email._resolved['allowFrom'] = ['other@example.com']
+    before = await m.settings('owner')
+    with pytest.raises(ValueError, match=message):
+        await m.configure('owner', m.MailSettingsRequest(enabled=True, recipient_email='person@example.com'))
+    assert await m.settings('owner') == before
+    assert not auto.send.called and not actual_tool
+
+
 async def test_manual_readback_cannot_rebind_old_mail_write_to_new_project(auto):
     n = await notice(auto); msg = await reply(auto, n)
     await consume(auto, interpretation(n, msg.text))

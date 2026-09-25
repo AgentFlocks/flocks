@@ -41,7 +41,7 @@ async def recheck_disposition(request_id: UUID, user=Depends(require_user)):
 
 @router.get('/diagnostics')
 async def diagnostics(user=Depends(require_user)):
-    from flocks.monitoring.diagnostics import export_bundle
+    from flocks.monitoring.diagnostics import export_bundle, safe_record
     try:
         bundle = await asyncio.wait_for(asyncio.to_thread(export_bundle, user.id, COMPONENT_ID), timeout=15)
     except (TimeoutError, RuntimeError, OSError):
@@ -49,8 +49,8 @@ async def diagnostics(user=Depends(require_user)):
     from flocks.monitoring.mailflow import diagnostic_state
     try:
         bundle['mail'] = await asyncio.wait_for(diagnostic_state(user.id), timeout=5)
-    except Exception:
-        bundle['mail'] = {'snapshot_available': False}
+    except Exception as exc:
+        bundle['mail'] = {'snapshot_available': False, **safe_record({'error_type': type(exc).__name__})}
     stamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
     return JSONResponse(bundle, headers={
         'Content-Disposition': f'attachment; filename="security-monitor-diagnostics-{stamp}.json"',
@@ -101,8 +101,11 @@ async def mail_history(offset: int = Query(default=0, ge=0), user=Depends(requir
 @router.put('/mail/settings')
 async def mail_settings(body: MailSettingsRequest, user=Depends(require_user)):
     from flocks.monitoring.mailflow import configure
+    from flocks.monitoring import diagnostics as diag
     async def change(owner):
-        await configure(owner, body)
+        async with diag.trace_scope(owner, COMPONENT_ID, 'mail-settings'):
+            with diag.span('mail.configure'):
+                await configure(owner, body)
     return await _control(change, user.id)
 
 

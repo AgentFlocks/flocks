@@ -17,7 +17,7 @@ def mailbox_key(cfg):
 def transport(recipient=None):
     plugin = default_registry.get('email')
     cfg = getattr(plugin, '_resolved', {})
-    if not plugin or not plugin.status().connected or not cfg:
+    if not plugin or not plugin.status.connected or not cfg:
         raise ValueError('请先连接 Flocks 邮件通道')
     if not cfg.get('authservId'):
         raise ValueError('邮件通道需配置可信 authservId，以核验责任人回信身份')

@@ -453,7 +453,7 @@ async def diagnostic_state(owner):
     plugin = default_registry.get('email')
     cfg = getattr(plugin, '_resolved', {})
     result = {'enabled': bool(config['enabled']), 'recipient_configured': bool(config['recipient']),
-              'channel_connected': bool(plugin and plugin.status().connected),
+              'channel_connected': bool(plugin and plugin.status.connected),
               'sender_verification_configured': bool(cfg.get('authservId')),
               'mailbox_matches': bool(cfg and config['mailbox'] == transport.mailbox_key(cfg)),
               'model_configured': bool(await Config.resolve_default_llm())}

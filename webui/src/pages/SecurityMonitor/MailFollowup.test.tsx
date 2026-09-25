@@ -28,11 +28,15 @@ it('saves recipient settings and closes after the refreshed state', async () => 
  expect(mocks.saveMail).toHaveBeenCalledWith({ enabled: true, recipient_email: 'new@example.com', responsible_name: '值班' });
  expect(refresh).toHaveBeenCalledTimes(1);
 });
-it('keeps configuration open when channel validation fails', async () => {
- mocks.saveMail.mockRejectedValue({ response: { data: { detail: '请先连接 Flocks 邮件通道' } } });
+it.each([
+ [{ error: 'HTTPException', message: '请先连接 Flocks 邮件通道' }, '请先连接 Flocks 邮件通道'],
+ [{ detail: '请先连接 Flocks 邮件通道' }, '请先连接 Flocks 邮件通道'],
+ [{ message: { invalid: true }, detail: [] }, '邮件配置保存失败'],
+])('keeps configuration open and displays the server error %j', async (data, expected) => {
+ mocks.saveMail.mockRejectedValue({ response: { data } });
  const close = vi.fn(); render(<MailSettings close={close} refresh={vi.fn()} />);
  fireEvent.click(await screen.findByRole('button', { name: '保存配置' }));
- expect(await screen.findByRole('alert')).toHaveTextContent('请先连接 Flocks 邮件通道'); expect(close).not.toHaveBeenCalled();
+ expect(await screen.findByRole('alert')).toHaveTextContent(expected); expect(close).not.toHaveBeenCalled();
 });
 it('shows the related alert and verified status', async () => {
  mocks.mail.mockResolvedValue({ data: { ...data, replies: [{ ...data.replies[0], state: 'verified', targets: [{ event_id: 'event', name: '待跟进告警', state: 'verified', target: 40 }] }] } });

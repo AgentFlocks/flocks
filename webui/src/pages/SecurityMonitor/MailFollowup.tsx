@@ -14,7 +14,11 @@ export function MailSettings({ close, refresh }: { close: () => void; refresh: (
     if (!form || busy) return;
     setBusy(true); setError('');
     try { await monitoringApi.saveMail(form); await refresh(); close(); }
-    catch (e: unknown) { const detail = (e as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail; setError(typeof detail === 'string' ? detail : '邮件配置保存失败'); }
+    catch (e: unknown) {
+      const data = (e as { response?: { data?: { message?: unknown; detail?: unknown } } })?.response?.data;
+      const message = typeof data?.message === 'string' ? data.message : data?.detail;
+      setError(typeof message === 'string' && message.trim() ? message : '邮件配置保存失败');
+    }
     finally { setBusy(false); }
   }
   return <div className="fixed inset-0 z-50 flex justify-end bg-black/20" onClick={close}>

@@ -246,3 +246,37 @@ def test_export_schema_discards_body_and_unknown_fields(tmp_path, monkeypatch, c
     (root / 'diagnostics.jsonl').write_text(json.dumps(row) + '\n' + '{invalid\n')
     bundle = diag.export_bundle('owner', COMPONENT_ID)
     assert bundle['record_count'] == 1 and 'SECRET' not in json.dumps(bundle)
+
+
+@pytest.mark.parametrize('failure', [False, True])
+async def test_mail_configuration_diagnostics_capture_result_without_form_data(monkeypatch, captured, failure):
+    from fastapi import HTTPException
+    from flocks.monitoring import mailflow
+    configure = AsyncMock(side_effect=TypeError('SECRET_MAIL_CONTENT') if failure else None)
+    monkeypatch.setattr(mailflow, 'configure', configure)
+    monkeypatch.setattr(api, 'snapshot', AsyncMock(return_value={}))
+    monkeypatch.setattr(api, 'resolve_day', AsyncMock(return_value='2026-09-25'))
+    request = mailflow.MailSettingsRequest(enabled=True, recipient_email='secret@example.com', responsible_name='SECRET_NAME')
+    if failure:
+        with pytest.raises(HTTPException) as exc:
+            await api.mail_settings(request, user=SimpleNamespace(id='owner'))
+        assert exc.value.status_code == 500
+    else:
+        await api.mail_settings(request, user=SimpleNamespace(id='owner'))
+    bundle = diag.export_bundle('owner', COMPONENT_ID)
+    stage = next(r for r in bundle['records'] if r.get('stage') == 'mail.configure' and r['event'] == 'stage.end')
+    assert stage['outcome'] == ('error' if failure else 'ok')
+    if failure:
+        assert stage['error_type'] == 'TypeError'
+    assert not diag.export_bundle('other', COMPONENT_ID)['records']
+    raw = json.dumps(bundle)
+    assert 'SECRET' not in raw and 'secret@example.com' not in raw
+
+
+async def test_mail_snapshot_failure_exports_only_exception_type(monkeypatch, captured):
+    from flocks.monitoring import mailflow
+    monkeypatch.setattr(mailflow, 'diagnostic_state', AsyncMock(side_effect=TypeError('SECRET_MAIL_CONTENT')))
+    response = await api.diagnostics(user=SimpleNamespace(id='owner'))
+    data = json.loads(response.body)
+    assert data['mail'] == {'snapshot_available': False, 'error_type': 'TypeError'}
+    assert 'SECRET' not in json.dumps(data)
