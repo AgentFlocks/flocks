@@ -151,4 +151,5 @@ export const FULL_SCREEN_PATH_PATTERNS = [
   '/sessions/:sessionId?',
   '/devices',
   '/contracts/webui/*',
+  '/suites/host-security-monitor/*',
 ];

@@ -95,7 +95,7 @@ async def test_native_rounds_dashboard_report_idempotence(policy):
     second = (await rows('SELECT * FROM monitor_reports'))[0]
     assert first['version'] == second['version']
     assert second['content'].count('## 轮次') == 2
-    assert len(list((Path.home() / '.flocks/workspace/outputs' / day).glob('*.md'))) == 1
+    assert len(list((Path.home() / '.flocks/workspace/outputs' / day).glob('*.md'))) == 2
     foreign = await snapshot('other', policy.scope, day)
     assert not foreign['runs'] and not foreign['events']
 

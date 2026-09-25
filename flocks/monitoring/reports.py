@@ -23,6 +23,9 @@ async def snapshot(owner, scope, day):
         runs = await select('SELECT * FROM monitor_attempts WHERE owner=? AND scope=? AND business_date=? ORDER BY sequence', (owner, scope, day))
         observations = await select('SELECT o.*,a.sequence,a.session_id,a.message_id,a.started_at,a.project FROM monitor_observations o JOIN monitor_attempts a ON a.id=o.attempt_id WHERE a.owner=? AND a.scope=? AND a.business_date=? ORDER BY a.sequence', (owner, scope, day))
         dispositions = await select('SELECT * FROM monitor_dispositions WHERE owner=? AND scope=? ORDER BY created_at', (owner, scope))
+        mail_notices = await select('SELECT id,state,created_at,updated_at FROM monitor_mail_notices WHERE owner=? AND project=(SELECT project FROM monitor_installations WHERE owner=? AND scope=?)', (owner, owner, scope))
+        mail_replies = await select('SELECT state,received_at FROM monitor_mail_replies WHERE owner=? AND project=(SELECT project FROM monitor_installations WHERE owner=? AND scope=?)', (owner, owner, scope))
+        mail_settings = await select('SELECT enabled FROM monitor_mail_settings WHERE owner=? AND project=(SELECT project FROM monitor_installations WHERE owner=? AND scope=?)', (owner, owner, scope))
         auto_settings = await select('SELECT * FROM monitor_auto_settings WHERE owner=? AND scope=?', (owner, scope))
         auto_queue = await select('SELECT * FROM monitor_auto_queue WHERE owner=? AND scope=?', (owner, scope))
         steps = await select('SELECT s.* FROM monitor_steps s JOIN monitor_attempts a ON a.id=s.attempt_id WHERE a.owner=? AND a.scope=? AND a.business_date=? ORDER BY s.started_at', (owner, scope, day))
@@ -40,7 +43,7 @@ async def snapshot(owner, scope, day):
         events[item['event_key']] = event
     for disposition in dispositions:
         event = events.get(disposition['event_key'])
-        if event is None or disposition['mode'] == 'automatic' and disposition['project'] != event['projectID']:
+        if event is None or disposition['mode'] in ('automatic', 'mail') and disposition['project'] != event['projectID']:
             continue
         event['dispositionRecord'] = disposition
         # A later monitoring observation belongs to the active 0/10 query and
@@ -54,8 +57,7 @@ async def snapshot(owner, scope, day):
             event['originalRisk'] = event['risk']
             event['risk'] = 'ignored'
     installation = installations[0] if installations else None
-    automatic = bool(auto_settings and auto_settings[0]['enabled'] and installation and installation['installed']
-                     and auto_settings[0]['project'] == installation['project'])
+    automatic = False  # Legacy evidence-only writes are retired.
     queue = [entry for entry in auto_queue if installation and entry['project'] == installation['project']]
     for entry in queue:
         if entry['event_key'] in events:
@@ -89,12 +91,18 @@ async def snapshot(owner, scope, day):
                         'contained': sum(e['closure'] == 'contained' for e in events.values()),
                         'unknown': sum(e['risk'] == 'unknown' for e in events.values()),
                         'ignored': sum(e['risk'] == 'ignored' for e in events.values())},
-            'disposition': '按证据自动标记并回查' if automatic else '自动标记关闭，可人工确认'}
+            'mail': {'enabled': bool(mail_settings and mail_settings[0]['enabled']),
+                     'sentToday': sum(n['state']=='sent' and datetime.fromisoformat(n['updated_at']).astimezone(tz).date().isoformat()==day for n in mail_notices),
+                     'receivedToday': sum(datetime.fromisoformat(r['received_at']).astimezone(tz).date().isoformat()==day for r in mail_replies),
+                     'pending': sum(r['state'] in ('pending','interpreted') for r in mail_replies),
+                     'needsReview': sum(r['state']=='needs_review' for r in mail_replies),
+                     'sendUnknown': sum(n['state']=='send_unknown' for n in mail_notices)},
+            'disposition': '责任人邮件反馈后标记并回查'}
 
 
 def render(data):
     metrics = data['metrics']
-    lines = [f"# 安全运营监测 · {data['businessDate']}", '', f"业务时区：{data['timezone']}。自动标记：{'已启用' if data['automatic']['enabled'] else '已关闭'}。按结构化证据选择事件状态，写回后回查确认；保留人工确认入口。状态标记不代表组件执行了主机隔离或修复。", '',
+    lines = [f"# 安全运营监测执行时间线 · {data['businessDate']}", '', f"业务时区：{data['timezone']}。每十分钟执行一轮；逐条邮件通知责任人，下一轮解读回信、标记并回查。状态标记不代表组件执行了主机隔离或修复。", '',
              f"启动轮次：{metrics['started']}；尝试：{metrics['attempts']}；去重事件：{metrics['events']}；风险：{metrics['risk']}；待判定：{metrics['unknown']}。", '']
     lines += [f"未闭环风险：{metrics['openRisk']}；处置完成：{metrics['closed']}；已遏制：{metrics['contained']}；已忽略：{metrics['ignored']}。", '']
     if data['events']:
@@ -122,12 +130,36 @@ def render(data):
     return '\n'.join(lines)
 
 
+def render_summary(data):
+    m, mail = data['metrics'], data.get('mail', {})
+    lines = [f"# 当日告警总结 · {data['businessDate']}", '',
+             f"当天执行 {m['started']} 轮，查询到 {m['events']} 条去重事件。风险 {m['risk']} 条，待判定 {m['unknown']} 条。",
+             f"处置完成 {m['closed']} 条，已遏制 {m['contained']} 条，已忽略 {m['ignored']} 条，仍未闭环风险 {m['openRisk']} 条。", '',
+             '## 邮件与处置进展', '',
+             f"当天确认发送 {mail.get('sentToday', 0)} 封，收到 {mail.get('receivedToday', 0)} 封回复。",
+             f"截至当前，待处理回复 {mail.get('pending', 0)} 封，待确认 {mail.get('needsReview', 0)} 封，发件结果未知 {mail.get('sendUnknown', 0)} 封。", '',
+             '## 需要继续跟进', '']
+    for event in data['events']:
+        if event['closure'] not in ('closed', 'ignored'):
+            name = str(event['name']).replace('\n', ' ')
+            for char in ('\\', '[', ']', '*', '_', '`', '<', '>'):
+                name = name.replace(char, '\\' + char)
+            lines.append(f"- {name}：{event['disposition']}。")
+    if not data['events']:
+        lines.append('当天没有已提交的事件；查询失败不能视为没有告警。')
+    failed = sum(r['status'] not in ('completed', 'running') for r in data['runs'])
+    lines += ['', '## 数据完整性', '', f"未完整完成的轮次：{failed}。统计以已提交事实及回查结果为准，发信和收到回信不等于处置完成。",
+              '当天持续更新；跨日收到的反馈归入实际收到当天，原事件保留关联。邮件存量统计反映生成报告时的进度。']
+    return '\n'.join(lines)
+
+
 async def export_report(owner, scope, day):
     lock = _locks.setdefault((owner, scope, day), asyncio.Lock())
     async with lock:
         try:
             data = await snapshot(owner, scope, day)
             content = render(data)
+            summary_content = render_summary(data)
             digest = hashlib.sha256(f'{owner}:{scope}'.encode()).hexdigest()[:16]
             directory = WorkspaceManager.get_instance().get_workspace_dir().expanduser() / 'outputs' / day
             directory.mkdir(parents=True, exist_ok=True)
@@ -142,7 +174,18 @@ async def export_report(owner, scope, day):
             finally:
                 if os.path.exists(temp):
                     os.unlink(temp)
-            await write("UPDATE monitor_reports SET status='updated',version=version+CASE WHEN content IS ? THEN 0 ELSE 1 END,content=?,error=NULL WHERE owner=? AND scope=? AND business_date=?", (content, content, owner, scope, day))
+            summary_target = directory / f'host-security-monitor-{digest}-summary.md'
+            fd, temp = tempfile.mkstemp(prefix='.monitor-summary-', dir=directory)
+            try:
+                with os.fdopen(fd, 'w', encoding='utf-8') as handle:
+                    handle.write(summary_content)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.replace(temp, summary_target)
+            finally:
+                if os.path.exists(temp):
+                    os.unlink(temp)
+            await write("UPDATE monitor_reports SET status='updated',version=version+CASE WHEN content IS ? AND summary_content IS ? THEN 0 ELSE 1 END,content=?,summary_content=?,error=NULL WHERE owner=? AND scope=? AND business_date=?", (content, summary_content, content, summary_content, owner, scope, day))
         except Exception:
             await write("UPDATE monitor_reports SET status='failed',error=? WHERE owner=? AND scope=? AND business_date=?", ('日报导出失败，等待独立重试', owner, scope, day))
 

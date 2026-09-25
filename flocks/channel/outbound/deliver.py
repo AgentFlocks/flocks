@@ -81,6 +81,9 @@ class OutboundDelivery:
                 text = hook_ctx.output["text"]
         except Exception as e:
             log.warning("channel.delivery.hook_before_failed", {"error": str(e)})
+            if ctx.single_message:
+                return [DeliveryResult(channel_id=ctx.channel_id, message_id="", success=False,
+                                       error="Notification hook failed")]
 
         formatted_text = plugin.format_message(text) if text else ""
 
@@ -98,6 +101,9 @@ class OutboundDelivery:
 
         # Chunk text
         chunks = plugin.chunk_text(formatted_text, plugin.text_chunk_limit)
+        if ctx.single_message and len(chunks) != 1:
+            return [DeliveryResult(channel_id=ctx.channel_id, message_id="", success=False,
+                                   error="Notification must fit in one message")]
         if not chunks:
             return [DeliveryResult(
                 channel_id=ctx.channel_id, message_id="", success=True,
@@ -113,6 +119,8 @@ class OutboundDelivery:
                 media_url=ctx.media_url if (i == len(chunks) - 1) else None,
                 reply_to_id=ctx.reply_to_id, thread_id=ctx.thread_id,
                 silent=ctx.silent,
+                subject=ctx.subject, message_id=ctx.message_id,
+                new_thread=ctx.new_thread, single_message=ctx.single_message,
             )
 
             await limiter.acquire()

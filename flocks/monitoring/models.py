@@ -27,7 +27,7 @@ class MonitoringPolicy(BaseModel):
 
 
 class MonitoringDeclaration(BaseModel):
-    """Base reads plus a versioned, separately enabled automatic status policy."""
+    """Base reads plus an explicitly enabled, versioned mail feedback policy."""
     schemaVersion: Literal[1]
     scope: Literal['host-security-monitor']
     cron: Literal['*/10 * * * *']
@@ -37,3 +37,4 @@ class MonitoringDeclaration(BaseModel):
     # This declaration governs unattended scheduling, never the confirmed UI path.
     dispositionEnabled: Literal[False]
     automaticStatusPolicy: Literal['xdr-evidence-v1'] | None = None
+    mailFollowupPolicy: Literal['mail-feedback-v1'] | None = None

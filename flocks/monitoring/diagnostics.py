@@ -75,13 +75,14 @@ _TYPES = {'str', 'dict', 'list', 'int', 'float', 'bool', 'bytes', 'NoneType', 'o
 _ENUMS = {
     'event': {'trace.start', 'trace.end', 'progress', 'stage.start', 'stage.end', 'query.window',
               'tool.raw', 'tool.normalized', 'adapter.result', 'adapter.structured', 'adapter.decoded', 'adapter.failure',
-              'page.validated', 'run.result', 'dispatch.result', 'background.result'},
+              'mail.received', 'mail.result', 'mail.interpreted', 'page.validated', 'run.result', 'dispatch.result', 'background.result'},
     'stage': {'dispatch', 'run', 'session.prepare', 'query.device', 'query.events', 'query.entities',
               'correlate', 'tool.execute', 'tool.handler', 'tool.normalize', 'report.export', 'step.other',
-              'disposition.confirm', 'disposition.recheck', 'automatic.mark'},
+              'disposition.confirm', 'disposition.recheck', 'automatic.mark', 'mail.send', 'mail.receive', 'mail.interpret', 'mail.resolve', 'mail.mark', 'mail.readback'},
     'action': {'list', 'get_entities', 'get_proof', 'update_status', 'other'},
     'outcome': {'ok', 'error', 'cancelled', 'completed', 'failed', 'partial', 'interrupted', 'running', 'unknown'},
-    'reason': {'unavailable', 'permission', 'tool_failed', 'non_json', 'not_object', 'business_error', 'structured_output'},
+    'reason': {'unavailable', 'permission', 'tool_failed', 'non_json', 'not_object', 'business_error', 'structured_output', 'ambiguous_reply', 'model_failed', 'send_unknown', 'write_unknown'},
+    'mail_state': {'queued','sending','sent','send_unknown','pending','interpreted','needs_review','verified','failed','mismatch','skipped','unrelated'},
     'text_kind': {'empty', 'html', 'json_like', 'fenced', 'text'},
     'code_kind': {'absent', 'zero', 'http_ok', 'xdr_success', 'other'},
     'list_field': {'list', 'item', 'both', 'none'},
@@ -92,7 +93,7 @@ _NUMBERS = {'schema', 'pid', 'seq', 'elapsed_ms', 'duration_ms', 'length', 'item
             'window_seconds', 'devices', 'max_pages', 'timeout_seconds', 'json_position', 'json_line',
             'json_column', 'events', 'errors', 'suppressed', 'calls', 'call', 'loop_lag_ms', 'total'}
 _BOOLS = {'success', 'truncated', 'has_error', 'has_saved_output', 'cursor_present'}
-_IDS = {'trace', 'owner', 'scope', 'execution', 'device'}
+_IDS = {'trace', 'owner', 'scope', 'execution', 'device', 'notice', 'reply', 'project'}
 
 
 def safe_record(fields):
@@ -356,7 +357,7 @@ def export_bundle(owner, scope):
         selected = sorted(records.values(), key=lambda r: (r.get('timestamp', ''), r.get('seq', 0)))
         capped = len(selected) > 5000
         selected = selected[-5000:]
-        return {'schema': 1, 'component': 'host-security-monitor', 'version': __version__,
+        return {'schema': 1, 'component': 'host-security-monitor', 'version': __version__, 'component_version': '1.3.0', 'mail_policy': 'mail-feedback-v1',
                 'exported_at': datetime.now(timezone.utc).isoformat(),
                 'coverage': 'recent_rotating_logs', 'record_count': len(selected), 'capped': capped,
                 'health': {**health, 'read_errors': read_errors}, 'records': selected}

@@ -74,6 +74,11 @@ class OutboundContext:
     thread_id: Optional[str] = None
     silent: bool = False
     format_hint: str = "markdown"
+    # Optional transport metadata for a durable, independent notification.
+    subject: Optional[str] = None
+    message_id: Optional[str] = None
+    new_thread: bool = False
+    single_message: bool = False
 
 
 @dataclass

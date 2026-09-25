@@ -1,4 +1,4 @@
-import AutomaticStatusControl from './AutomaticStatusControl';
+import MailFollowup, { MailSettings } from './MailFollowup';
 import { StreamingMarkdown } from '@/components/common/StreamingMarkdown';
 import { getApiBase } from '@/api/client';
 import { useCallback, useEffect, useRef, useState } from 'react';
@@ -16,12 +16,14 @@ const card = 'rounded-xl border border-gray-200 bg-white p-5 dark:border-gray-70
 
 export default function SecurityMonitor() {
   const location = useLocation(), navigate = useNavigate();
-  const view = location.pathname.endsWith('/dashboard') ? 'dashboard' : location.pathname.endsWith('/report') ? 'report' : 'session';
+  const view = location.pathname.endsWith('/mail') ? 'mail' : location.pathname.endsWith('/dashboard') ? 'dashboard' : location.pathname.endsWith('/report') ? 'report' : 'session';
   const [day, setDay] = useState('');
   const [data, setData] = useState<MonitorSnapshot | null>(null);
   const [error, setError] = useState('');
   const [filter, setFilter] = useState('all');
   const [report, setReport] = useState('');
+  const [reportKind, setReportKind] = useState<'timeline' | 'summary'>('timeline');
+  const [showSettings, setShowSettings] = useState(false);
   const [controlBusy, setControlBusy] = useState(false);
   const [controlError, setControlError] = useState('');
   const [controlMessage, setControlMessage] = useState('');
@@ -58,13 +60,13 @@ export default function SecurityMonitor() {
     if (view !== 'report' || !data) return;
     let active = true;
     setReport('');
-    monitoringApi.report(data.businessDate).then(r => { if (active) setReport(r.data); }).catch(() => { if (active) setReport('当日报告尚未生成，或导出失败。'); });
+    monitoringApi.report(data.businessDate, reportKind).then(r => { if (active) setReport(r.data); }).catch(() => { if (active) setReport('当日报告尚未生成，或导出失败。'); });
     return () => { active = false; };
-  }, [view, data?.businessDate, data?.report.version]);
+  }, [view, reportKind, data?.businessDate, data?.report.version]);
   const drill = (session: string, message: string) => navigate(`/sessions?session=${encodeURIComponent(session)}&focusMessage=${encodeURIComponent(message)}`);
   const download = () => {
     const url = URL.createObjectURL(new Blob([report], { type: 'text/markdown;charset=utf-8' }));
-    const link = document.createElement('a'); link.href = url; link.download = `安全运营监测-${data?.businessDate}.md`; link.click(); URL.revokeObjectURL(url);
+    const link = document.createElement('a'); link.href = url; link.download = `安全运营监测-${reportKind === 'summary' ? '当日总结' : '执行时间线'}-${data?.businessDate}.md`; link.click(); URL.revokeObjectURL(url);
   };
   const downloadDiagnostics = async () => {
     if (exportPending.current) return;
@@ -86,35 +88,34 @@ export default function SecurityMonitor() {
   const active = data?.runs.find(r => r.status === 'running');
   const monitoringEnabled = data?.installation.installed && data.installation.status === 'active';
   const monitoringStatus = !data?.installation.installed ? '尚未安装' : !data.installation.ready ? '未就绪' : monitoringEnabled ? '已启动' : '已暂停';
-  return <div className="flex h-full min-h-0 flex-col bg-gray-50 text-gray-900 dark:bg-gray-900 dark:text-gray-100">
-    <div className="border-b border-gray-200 px-6 pt-5 dark:border-gray-700">
-      <PageHeader title="安全运营监测" description="定时监测 · 按证据自动标记 · 回查确认" icon={<ShieldCheck size={24} />} action={<div className="flex items-center gap-2"><button disabled={exportBusy} onClick={() => void downloadDiagnostics()} title="导出近期运行步骤、耗时与错误类型，不含凭据或事件正文" className="inline-flex items-center gap-1 rounded border px-3 py-2 text-sm disabled:opacity-50"><Download size={16} />{exportBusy ? '正在导出…' : '导出诊断日志'}</button><button onClick={() => void refresh()} aria-label="刷新" className="p-2"><RefreshCw size={18} /></button></div>} />
-      <div className="flex items-center justify-between gap-4"><nav className="flex gap-6" aria-label="监测工作区">
-        {([['session', '监测对话'], ['dashboard', '总结看板'], ['report', '累计报告']] as const).map(([id, label]) => <Link key={id} to={`${MONITOR_PATH}/${id}`} className={`border-b-2 py-3 text-sm ${view === id ? 'border-blue-600 text-blue-600' : 'border-transparent text-gray-500'}`}>{label}</Link>)}
-      </nav><input aria-label="业务日期" type="date" disabled={controlBusy} value={day || data?.businessDate || ''} onChange={e => setDay(e.target.value)} className="rounded border bg-transparent px-2 py-1 text-sm" /></div>
+  return <div className="flex h-full min-h-0 flex-col overflow-hidden bg-gray-50 text-gray-900 dark:bg-gray-900 dark:text-gray-100">
+    <div className="shrink-0 border-b border-gray-200 px-6 pt-3 dark:border-gray-700">
+      <PageHeader title="安全运营监测" description="定时监测 · 邮件协同处置 · 回查确认" icon={<ShieldCheck size={24} />} action={<div className="flex items-center gap-2"><button disabled={exportBusy} onClick={() => void downloadDiagnostics()} title="导出近期运行步骤、耗时与错误类型，不含凭据或事件正文" className="inline-flex items-center gap-1 rounded border px-3 py-2 text-sm disabled:opacity-50"><Download size={16} />{exportBusy ? '正在导出…' : '导出诊断日志'}</button><button onClick={() => void refresh()} aria-label="刷新" className="p-2"><RefreshCw size={18} /></button></div>} />
+      <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1"><nav className="flex shrink-0 gap-4 whitespace-nowrap sm:gap-6" aria-label="监测工作区">
+        {([['session', '监测对话'], ['mail', '邮件跟进'], ['dashboard', '总结看板'], ['report', '每日报告']] as const).map(([id, label]) => <Link key={id} to={`${MONITOR_PATH}/${id}`} className={`border-b-2 py-3 text-sm ${view === id ? 'border-blue-600 text-blue-600' : 'border-transparent text-gray-500'}`}>{label}</Link>)}
+      </nav><input aria-label="业务日期" type="date" disabled={controlBusy || view === 'mail'} value={day || data?.businessDate || ''} onChange={e => setDay(e.target.value)} className="rounded border bg-transparent px-2 py-1 text-sm" /></div>
     </div>
     {error && <p role="alert" className="bg-amber-50 px-6 py-2 text-sm text-amber-800">{error}</p>}
     {exportError && <p role="alert" className="bg-amber-50 px-6 py-2 text-sm text-amber-800">{exportError}</p>}
-    {data && <section aria-label="监测控制" className="mx-6 mt-4 rounded-lg border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-800">
+    {data && <section aria-label="监测控制" className="mx-6 mt-2 shrink-0 rounded-lg border border-gray-200 bg-white px-4 py-2 dark:border-gray-700 dark:bg-gray-800">
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="text-sm"><p className="font-semibold">监测状态：{monitoringStatus}</p><p className="mt-1 text-gray-500">每 10 分钟执行 · 下次执行：{fmt(data.scheduledNextRun, data.timezone)}</p></div>
+        <p className="text-sm"><strong>监测：{monitoringStatus}</strong> · 每 10 分钟 · 下次 {fmt(data.scheduledNextRun, data.timezone)}</p>
         <button disabled={controlBusy || !data.installation.installed} onClick={() => void control(monitoringEnabled ? 'pause' : 'start')} className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50">
           {controlBusy ? <Loader2 size={16} className="animate-spin" /> : monitoringEnabled ? <Pause size={16} /> : <Play size={16} />}
           {controlBusy ? '正在处理…' : monitoringEnabled ? '暂停监测' : '检查接入并启动'}
         </button>
       </div>
-      <p className="mt-2 text-xs text-gray-500">查询范围：待处置、处置中，且未加白或部分加白。启动前检查接入配置，连接与查询结果以实际监测为准。</p>
-      <AutomaticStatusControl enabled={data.automatic?.enabled ?? false} ready={data.installation.installed && data.installation.ready} refresh={refresh} />
+      <div className="mt-1 flex flex-wrap items-center justify-between gap-2 text-sm"><span>邮件跟进：{data.mail?.enabled ? '已启用' : '未启用'} · 待处理回复 {data.mail?.pending || 0} · 待确认 {data.mail?.needsReview || 0}</span><div className="flex gap-4"><Link className="text-blue-600" to={`${MONITOR_PATH}/mail`}>查看邮件记录</Link><button className="text-blue-600" onClick={() => setShowSettings(true)}>配置</button></div></div>
       {controlError && <p role="alert" className="mt-2 text-sm text-red-600">{controlError}</p>}
       {controlMessage && <p role="status" className="mt-2 text-sm text-blue-600">{controlMessage}</p>}
     </section>}
     {!data ? <p className="p-6">正在加载监测事实…</p> : <>
       {!data.installation.installed || !data.installation.ready ? <div className="mx-6 mt-4 rounded-lg border border-amber-300 p-4 text-sm">{data.installation.installed ? '已安装但未就绪' : '尚未安装'}：{data.installation.reason}。<Link className="ml-2 text-blue-600" to="/scenes/suites?workspace=host-security-monitor">管理场景</Link></div> : null}
-      {view === 'session' ? <div className="flex min-h-0 flex-1 flex-col">
+      {view === 'mail' ? <MailFollowup /> : view === 'session' ? <div className="flex min-h-0 flex-1 flex-col">
         <div className="flex justify-between px-6 py-3 text-sm text-gray-500"><span>{data.businessDate} · {data.timezone} · {active ? '执行中' : monitoringEnabled ? '等待下一轮' : '监测未启动'} · 下次 {fmt(data.nextRun, data.timezone)}</span>{data.sessionID && <Link className="flex items-center gap-1 text-blue-600" to={`/sessions?session=${data.sessionID}`}>在工作台打开 <ArrowUpRight size={15} /></Link>}</div>
         {data.sessionID ? <SessionChat sessionId={data.sessionID} hideInput display={{ compact: false, showActions: false, showTimestamp: true, collapseIntermediateSteps: false, processGroupsDefaultOpen: true, processGroupsOpenWhileActive: true }} live className="min-h-0 flex-1" /> : <p className="p-8 text-gray-500">当天首次实际启动后，将在这里显示原生监测会话。</p>}
       </div> : <div className="min-h-0 flex-1 overflow-auto p-6">
-        {view === 'report' ? <div className={card}><div className="mb-4 flex items-center justify-between"><h2 className="font-semibold">每日累计报告 · {labels[data.report.status] || data.report.status}</h2><button disabled={data.report.status !== 'updated'} onClick={download} className="text-sm text-blue-600 disabled:opacity-40">下载 Markdown</button></div>{data.report.error && <p role="alert">{data.report.error}</p>}<div className="prose max-w-none dark:prose-invert"><StreamingMarkdown content={report} isStreaming={false} /></div></div> : <div className="space-y-5">
+        {view === 'report' ? <div className={card}><div className="mb-4 flex gap-3"><button className="rounded border px-3 py-1 text-sm" aria-pressed={reportKind === 'timeline'} onClick={() => setReportKind('timeline')}>执行时间线</button><button className="rounded border px-3 py-1 text-sm" aria-pressed={reportKind === 'summary'} onClick={() => setReportKind('summary')}>当日告警总结</button></div><div className="mb-4 flex items-center justify-between"><h2 className="font-semibold">{reportKind === 'summary' ? '当日告警总结' : '执行时间线'} · {labels[data.report.status] || data.report.status}</h2><button disabled={data.report.status !== 'updated'} onClick={download} className="text-sm text-blue-600 disabled:opacity-40">下载 Markdown</button></div>{data.report.error && <p role="alert">{data.report.error}</p>}<div className="prose max-w-none dark:prose-invert"><StreamingMarkdown content={report} isStreaming={false} /></div></div> : <div className="space-y-5">
           <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-5">{[['任务定义', data.metrics.definitions], ['实际启动轮次', data.metrics.started], ['去重事件', data.metrics.events], ['待处置风险', data.metrics.openRisk ?? data.metrics.risk], ['处置完成', data.metrics.closed ?? 0], ['已遏制', data.metrics.contained ?? 0], ['已忽略', data.metrics.ignored], ['待判定', data.metrics.unknown]].map(([title, value]) => <div className={card} key={title}><div className="text-sm text-gray-500">{title}</div><div className="mt-2 text-3xl font-semibold tabular-nums">{value}</div></div>)}</div>
           <div className={`${card} flex flex-wrap items-center justify-between gap-4`}><div><h2 className="font-semibold">当天会话 · {active ? '执行中' : '空闲'} / {labels[data.installation.status] || data.installation.status}</h2><p className="mt-1 text-sm text-gray-500">当前步骤：{active?.steps.find(s => s.status === 'running')?.tool || '—'} · 下次调度：{fmt(data.nextRun, data.timezone)} · 尝试 {data.metrics.attempts} 次</p></div><Link to={`${MONITOR_PATH}/report`} className="text-sm text-blue-600">查看累计报告</Link></div>
           <div className="grid gap-5 lg:grid-cols-2"><div className={card}><h2 className="mb-4 font-semibold">执行趋势</h2><div className="flex h-20 items-end gap-1" aria-label="实际轮次状态">{data.runs.map(r => <button title={`${fmt(r.started_at, data.timezone)} ${labels[r.status]}`} key={r.id} onClick={() => drill(r.session_id, r.message_id)} className={`min-w-2 flex-1 rounded-t ${r.status === 'completed' ? 'h-14 bg-blue-500' : r.status === 'running' ? 'h-10 bg-blue-300' : 'h-8 bg-amber-400'}`} />)}</div><p className="mt-2 text-xs text-gray-500">点击轮次查看对话；仅展示实际尝试，缺失时隙不计成功。</p></div><div className={card}><h2 className="mb-3 font-semibold">事件风险分布</h2>{(['risk', 'unknown', 'ignored'] as const).map(key => <button key={key} onClick={() => setFilter(key)} className="mb-3 block w-full text-left text-sm"><span>{labels[key]} · {data.metrics[key]}</span><span className="mt-1 block h-2 rounded bg-gray-100 dark:bg-gray-700"><span className="block h-full rounded bg-blue-500" style={{ width: `${data.metrics.events ? 100 * data.metrics[key] / data.metrics.events : 0}%` }} /></span></button>)}</div></div>
@@ -124,5 +125,6 @@ export default function SecurityMonitor() {
         </div>}
       </div>}
     </>}
+    {showSettings && <MailSettings close={() => setShowSettings(false)} refresh={refresh} />}
   </div>;
 }

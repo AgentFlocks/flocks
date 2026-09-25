@@ -15,10 +15,10 @@ const data = {
  queued: [], report: { status: 'updated', version: 1 },
 };
 beforeEach(() => { vi.resetAllMocks(); mocks.overview.mockResolvedValue({ data }); mocks.report.mockResolvedValue({ data: '# 安全运营监测\n[查看本轮对话](/sessions?session=real-session&focusMessage=anchor)' }); });
-it('uses one native readonly live session and exactly three tabs', async () => {
+it('uses one native readonly live session and four workspace tabs', async () => {
  render(<MemoryRouter initialEntries={['/suites/host-security-monitor/session']}><SecurityMonitor /></MemoryRouter>);
  expect(await screen.findByTestId('native-chat')).toHaveTextContent('real-session readonly live');
- expect(within(screen.getByRole('navigation')).getAllByRole('link')).toHaveLength(3);
+ expect(within(screen.getByRole('navigation')).getAllByRole('link')).toHaveLength(4);
  expect(screen.getByText('在工作台打开')).toHaveAttribute('href', '/sessions?session=real-session');
 });
 it('uses fact metrics, filters risks and never claims disposition', async () => {
@@ -73,8 +73,8 @@ it('pauses monitoring and clears the next execution time', async () => {
  fireEvent.click(await screen.findByRole('button', { name: '暂停监测' }));
  expect(await screen.findByRole('button', { name: '检查接入并启动' })).toBeEnabled();
  expect(mocks.pause).toHaveBeenCalledTimes(1);
- expect(screen.getByRole('region', { name: '监测控制' })).toHaveTextContent('监测状态：已暂停');
- expect(screen.getByRole('region', { name: '监测控制' })).toHaveTextContent('下次执行：—');
+ expect(screen.getByRole('region', { name: '监测控制' })).toHaveTextContent('监测：已暂停');
+ expect(screen.getByRole('region', { name: '监测控制' })).toHaveTextContent('下次 —');
 });
 
 it('downloads one diagnostic file without starting another monitoring round', async () => {
@@ -105,4 +105,13 @@ it('deduplicates diagnostic downloads and keeps retry available after failure', 
  expect(await screen.findByRole('alert')).toHaveTextContent('诊断日志导出失败，请稍后重试。');
  expect(screen.getByRole('button', { name: '导出诊断日志' })).toBeEnabled();
  expect(screen.queryByText('private path')).not.toBeInTheDocument();
+});
+
+it('switches between two reports for the selected business day', async () => {
+ mocks.report.mockImplementation(async (_day, kind) => ({ data: kind === 'summary' ? '# 当日汇总内容' : '# 分轮次内容' }));
+ render(<MemoryRouter initialEntries={['/suites/host-security-monitor/report']}><SecurityMonitor /></MemoryRouter>);
+ expect(await screen.findByText('分轮次内容')).toBeInTheDocument();
+ fireEvent.click(screen.getByRole('button', { name: '当日告警总结' }));
+ expect(await screen.findByText('当日汇总内容')).toBeInTheDocument();
+ expect(mocks.report).toHaveBeenLastCalledWith('2026-09-23', 'summary');
 });

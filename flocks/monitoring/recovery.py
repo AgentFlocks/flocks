@@ -6,6 +6,8 @@ from .reports import retry_exports
 
 
 async def recover():
+    from .mailflow import recover as recover_mail
+    await recover_mail()
     stamp = datetime.now(timezone.utc).isoformat()
     for attempt in await rows("SELECT * FROM monitor_attempts WHERE status='running'"):
         for step in await rows("SELECT * FROM monitor_steps WHERE attempt_id=? AND status='running'", (attempt['id'],)):

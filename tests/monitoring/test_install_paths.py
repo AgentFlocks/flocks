@@ -69,7 +69,7 @@ async def test_configured_workspace_used_for_project_and_report(tmp_path, monkey
     assert Path(policy['directory']).is_relative_to(workspace / 'monitoring')
     await write("INSERT INTO monitor_reports(owner,scope,business_date,status) VALUES(?,?,?,'pending')", ('owner', COMPONENT_ID, '2026-01-01'))
     await export_report('owner', COMPONENT_ID, '2026-01-01')
-    assert len(list((workspace / 'outputs/2026-01-01').glob('host-security-monitor-*.md'))) == 1
+    assert len(list((workspace / 'outputs/2026-01-01').glob('host-security-monitor-*.md'))) == 2
     assert not (home / '.flocks/workspace/outputs').exists()
 
 

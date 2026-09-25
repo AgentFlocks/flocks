@@ -10,5 +10,5 @@
     "get_proof"
   ],
   "dispositionEnabled": false,
-  "automaticStatusPolicy": "xdr-evidence-v1"
+  "mailFollowupPolicy": "mail-feedback-v1"
 }

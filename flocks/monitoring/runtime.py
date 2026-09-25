@@ -52,7 +52,7 @@ class Recorder:
         self.parent_id = parent_id
 
     async def call(self, name, params, operation, *, failure_context=""):
-        stage = {'查询 XDR 事件': 'query.events', '查询关联主机': 'query.entities', '关联分析': 'correlate', '自动研判与状态标记': 'automatic.mark'}.get(name, 'step.other')
+        stage = {'查询 XDR 事件': 'query.events', '查询关联主机': 'query.entities', '关联分析': 'correlate', '自动研判与状态标记': 'automatic.mark', '发送告警通知': 'mail.send', '解读回信并跟进状态': 'mail.interpret'}.get(name, 'step.other')
         with diag.span(stage, page=params.get('page_num'), page_size=params.get('page_size')):
             return await self._call(name, params, operation, failure_context=failure_context)
 
@@ -133,6 +133,8 @@ async def query_device(adapter, device, start, end, recorder, *, selection=None)
 @diag.traced('run')
 async def run(execution, policy, adapter_factory=XdrAdapter):
     started = now()  # actual semaphore admission, not scheduled/queued time
+    from .mailflow import settings, process_replies, notify_batch, cutoff
+    reply_high = await cutoff(policy.owner, policy.project, before=started.isoformat())
     with diag.span('session.prepare', devices=len(policy.devices), max_pages=policy.max_pages, timeout_seconds=policy.timeout_seconds):
         session, day = await ensure_daily(policy, started)
     execution.session_id = session.id
@@ -143,11 +145,10 @@ async def run(execution, policy, adapter_factory=XdrAdapter):
     await write('INSERT INTO monitor_attempts(id,execution_id,owner,project,scope,business_date,session_id,message_id,scheduled_for,started_at,status) VALUES(?,?,?,?,?,?,?,?,?,?,?)',
                 (attempt_id, execution.id, policy.owner, policy.project, policy.scope, day, session.id, message_id,
                  execution.execution_input_snapshot.get('scheduledFor'), started.isoformat(), 'running'))
-    from .automatic import settings, process_batch
     automatic_enabled = bool((await settings(policy.owner))['enabled'])
-    mode_label = '自动研判标记' if automatic_enabled else '只读任务'
+    mode_label = '邮件协同跟进' if automatic_enabled else '只读任务'
     trigger_message = await emit_message(session.id, f'系统自动监测 · {started.astimezone(ZoneInfo(policy.timezone)).strftime("%H:%M:%S")} · {mode_label}', role=MessageRole.USER)
-    await emit_message(session.id, '本轮安全运营监测开始。查询待处置、处置中且未加白或部分加白的 XDR 事件，并关联分析。' + ('随后按结构化证据自动标记状态并回查。' if automatic_enabled else '自动标记未启用。'), message_id=message_id, parent_id=trigger_message.id)
+    await emit_message(session.id, '本轮安全运营监测开始。查询待处置、处置中且未加白或部分加白的 XDR 事件，并关联分析。' + ('先处理此前收到的回信，再查询新事件并逐条邮件通知责任人。' if automatic_enabled else '邮件跟进未启用，本轮只查询分析。'), message_id=message_id, parent_id=trigger_message.id)
     sequence = (await rows('SELECT sequence FROM monitor_attempts WHERE id=?', (attempt_id,)))[0]['sequence']
     from flocks.session.core.status import SessionStatus, SessionStatusBusy, SessionStatusIdle
     SessionStatus.set(session.id, SessionStatusBusy())
@@ -163,6 +164,7 @@ async def run(execution, policy, adapter_factory=XdrAdapter):
     try:
         if not policy.devices:
             raise ContractError('未绑定可用数据源')
+        feedback = await process_replies(policy, session.id, reply_high, recorder)
         for device in policy.devices:
             cursor = await rows('SELECT through_time FROM monitor_cursors WHERE owner=? AND scope=? AND device=?', (policy.owner, policy.scope, device))
             end = int(started.timestamp())
@@ -216,11 +218,11 @@ async def run(execution, policy, adapter_factory=XdrAdapter):
                       'errors': errors, 'disposition': '待人工确认', 'closure': 'open'}
             return result, result, analysis_summary(result, observed, groups)
         result = await recorder.call('关联分析', {'policy': 'xdr-risk-v1'}, analyze)
-        automatic = await process_batch(policy, session.id, observed, recorder)
-        result['automatic'] = automatic
-        result['disposition'] = '自动研判标记并回查' if automatic['enabled'] else '待人工确认'
-        status = 'partial' if errors and observed or automatic['pending'] else 'failed' if errors else 'completed'
-        marking_summary = (f"自动标记处理 {automatic['processed']} 个事件，{automatic['verified']} 个目标状态已回查确认，{automatic['pending']} 个待跟进。状态确认不等于风险已消除。" if automatic['enabled'] else '自动标记未启用，事件处置结果以看板回查事实为准。')
+        notification = await notify_batch(policy, session.id, observed, recorder)
+        result['mail'] = {'feedback': feedback, 'notification': notification, 'enabled': automatic_enabled}
+        result['disposition'] = '责任人邮件反馈后标记并回查' if automatic_enabled else '只读监测'
+        status = 'partial' if errors and observed or feedback['pending'] or notification['pending'] else 'failed' if errors else 'completed'
+        marking_summary = (f"邮件发送 {notification['sent']} 封；处理回信 {feedback['processed']} 封，{feedback['verified']} 封反馈已回查确认，{feedback['pending']} 封待跟进。" if automatic_enabled else '邮件跟进未启用，事件保持未闭环。')
         summary = f"本轮{ {'completed': '完成', 'partial': '部分完成', 'failed': '失败'}[status]}：{len(observed)} 个事件，{result['risk']} 个风险，{result['unknown']} 个待判定。{marking_summary}"
         await write('UPDATE monitor_attempts SET result=? WHERE id=?', (encode(result), attempt_id))
     except BaseException as exc:

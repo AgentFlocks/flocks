@@ -332,9 +332,18 @@ class InboundDispatcher:
             "evidence": msg.raw,
             "raw": msg.raw if isinstance(msg.raw, dict) else {},
         }
+        async def route():
+            if msg.channel_id == "email":
+                from flocks.identity.entry import verify_channel_ingress_provenance
+                from flocks.monitoring.mailflow import receive
+                if verify_channel_ingress_provenance(ingress_payload) is not None:
+                    config = await self._get_channel_config(msg.channel_id)
+                    if _check_allowlist(msg, config) and await receive(msg):
+                        return
+            return await self._dispatch(msg)
         return await execute_with_hooks(
             ingress_payload,
-            lambda: self._dispatch(msg),
+            route,
             before=HookPipeline.run_ingress_before,
             after=HookPipeline.run_ingress_after,
         )

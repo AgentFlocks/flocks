@@ -218,7 +218,7 @@ async def recheck(owner, request_id, adapter_factory=DispositionAdapter):
     async with _locks.setdefault((owner, item['event_key']), asyncio.Lock()):
         policy, event = await target(owner, item['event_key'])
         item = await record(owner, request_id)
-        if item['mode'] == 'automatic' and item['project'] != policy.project:
+        if item['mode'] in ('automatic', 'mail') and item['project'] != policy.project:
             raise ValueError('自动标记记录不属于当前监测项目')
         # Another process may still be sending the original request. Recovery
         # after a crash is read-only and becomes available after its call budget.

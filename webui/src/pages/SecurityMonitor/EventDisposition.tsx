@@ -42,8 +42,8 @@ export default function EventDisposition({ event, enabled, refresh }: { event: M
   };
   return <div className="space-y-1">
     <p>{event.closure === 'closed' ? '已闭环（XDR 回查确认）' : event.closure === 'contained' ? '已遏制（仍需跟进）' : event.closure === 'ignored' ? '已忽略（XDR 回查确认）' : '未闭环'}</p>
-      {record && <><p className="text-xs text-gray-500">{record.mode === 'automatic' ? '自动标记 · ' : ''}{states[record.status]}{record.target_status !== undefined ? ` · 目标：${xdrStates[record.target_status] || '未知状态'}` : ''}{record.observed_status !== null ? ` · XDR ${xdrStates[record.observed_status] || '未知状态'}（${record.observed_status}）` : ''}</p>
-      {record.mode === 'automatic' && <p className="text-xs text-gray-500">{record.comment}</p>}
+      {record && <><p className="text-xs text-gray-500">{record.mode === 'mail' ? '邮件反馈 · ' : record.mode === 'automatic' ? '历史自动标记 · ' : ''}{states[record.status]}{record.target_status !== undefined ? ` · 目标：${xdrStates[record.target_status] || '未知状态'}` : ''}{record.observed_status !== null ? ` · XDR ${xdrStates[record.observed_status] || '未知状态'}（${record.observed_status}）` : ''}</p>
+      {(record.mode === 'automatic' || record.mode === 'mail') && <p className="text-xs text-gray-500">{record.comment}</p>}
       {record.error && <p className="text-xs text-amber-700">{record.error}</p>}
       {record.session_id && <a className="block text-xs text-blue-600" href={`/sessions?session=${encodeURIComponent(record.session_id)}`}>处置记录</a>}
       <button disabled={busy || !enabled} className="mr-3 text-blue-600 disabled:opacity-40" onClick={() => void execute(true)}>回查状态</button></>}

@@ -4,7 +4,7 @@ from zoneinfo import ZoneInfo
 import asyncio
 import json
 from uuid import UUID
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import PlainTextResponse, JSONResponse
 from flocks.server.auth import require_user
 from flocks.monitoring.models import COMPONENT_ID
@@ -46,6 +46,11 @@ async def diagnostics(user=Depends(require_user)):
         bundle = await asyncio.wait_for(asyncio.to_thread(export_bundle, user.id, COMPONENT_ID), timeout=15)
     except (TimeoutError, RuntimeError, OSError):
         raise HTTPException(503, '诊断日志暂时无法读取，请稍后重试') from None
+    from flocks.monitoring.mailflow import diagnostic_state
+    try:
+        bundle['mail'] = await asyncio.wait_for(diagnostic_state(user.id), timeout=5)
+    except Exception:
+        bundle['mail'] = {'snapshot_available': False}
     stamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
     return JSONResponse(bundle, headers={
         'Content-Disposition': f'attachment; filename="security-monitor-diagnostics-{stamp}.json"',
@@ -84,6 +89,23 @@ async def _control(action, owner):
     return await snapshot(owner, COMPONENT_ID, await resolve_day(owner))
 
 
+from flocks.monitoring.mailflow import MailSettingsRequest
+
+
+@router.get('/mail')
+async def mail_history(offset: int = Query(default=0, ge=0), user=Depends(require_user)):
+    from flocks.monitoring.mailflow import history
+    return await history(user.id, offset=offset)
+
+
+@router.put('/mail/settings')
+async def mail_settings(body: MailSettingsRequest, user=Depends(require_user)):
+    from flocks.monitoring.mailflow import configure
+    async def change(owner):
+        await configure(owner, body)
+    return await _control(change, user.id)
+
+
 @router.put('/automatic-status')
 async def automatic_status(body: AutomaticRequest, user=Depends(require_user)):
     from flocks.monitoring.automatic import configure
@@ -116,9 +138,12 @@ async def state(user=Depends(require_user)):
 
 
 @router.get('/reports/{day}', response_class=PlainTextResponse)
-async def report(day: str, user=Depends(require_user)):
+async def report(day: str, kind: str = 'timeline', user=Depends(require_user)):
     day = await resolve_day(user.id, day)
-    result = await rows('SELECT content FROM monitor_reports WHERE owner=? AND scope=? AND business_date=?', (user.id, COMPONENT_ID, day))
-    if not result or result[0]['content'] is None:
+    if kind not in ('timeline', 'summary'):
+        raise HTTPException(422, '报告类型必须为 timeline 或 summary')
+    result = await rows('SELECT content,summary_content FROM monitor_reports WHERE owner=? AND scope=? AND business_date=?', (user.id, COMPONENT_ID, day))
+    content = result[0]['summary_content' if kind == 'summary' else 'content'] if result else None
+    if content is None:
         raise HTTPException(404, '当日报告尚未生成')
-    return PlainTextResponse(result[0]['content'], headers={'Content-Disposition': f'inline; filename="security-monitor-{day}.md"'})
+    return PlainTextResponse(content, headers={'Content-Disposition': f'inline; filename="security-monitor-{day}.md"'})

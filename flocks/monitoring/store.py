@@ -46,6 +46,31 @@ CREATE TABLE IF NOT EXISTS monitor_auto_settings (
 CREATE TABLE IF NOT EXISTS monitor_auto_queue (
  owner TEXT NOT NULL, scope TEXT NOT NULL, project TEXT NOT NULL, event_key TEXT NOT NULL,
  checked_at TEXT NOT NULL DEFAULT '', reason TEXT, PRIMARY KEY(owner,scope,project,event_key));
+CREATE TABLE IF NOT EXISTS monitor_mail_settings (
+ owner TEXT NOT NULL, scope TEXT NOT NULL, project TEXT NOT NULL, recipient TEXT NOT NULL,
+ responsible_name TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 0, revision TEXT NOT NULL,
+ mailbox TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY(owner,scope));
+CREATE TABLE IF NOT EXISTS monitor_mail_notices (
+ id TEXT PRIMARY KEY, owner TEXT NOT NULL, scope TEXT NOT NULL, project TEXT NOT NULL,
+ event_key TEXT NOT NULL, recipient TEXT NOT NULL, revision TEXT NOT NULL, mailbox TEXT NOT NULL,
+ message_id TEXT NOT NULL UNIQUE, subject TEXT NOT NULL, body TEXT NOT NULL,
+ event TEXT NOT NULL, state TEXT NOT NULL, error TEXT, session_id TEXT, created_at TEXT NOT NULL,
+ updated_at TEXT NOT NULL, UNIQUE(owner,scope,project,event_key));
+CREATE TABLE IF NOT EXISTS monitor_mail_replies (
+ sequence INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, owner TEXT NOT NULL,
+ project TEXT NOT NULL, mailbox TEXT NOT NULL, message_id TEXT NOT NULL, sender TEXT NOT NULL,
+ payload TEXT NOT NULL, state TEXT NOT NULL, result TEXT, error TEXT, received_at TEXT NOT NULL,
+ updated_at TEXT NOT NULL, UNIQUE(mailbox,message_id));
+CREATE TABLE IF NOT EXISTS monitor_mail_items (
+ id TEXT PRIMARY KEY, reply_id TEXT NOT NULL, notice_id TEXT NOT NULL, owner TEXT NOT NULL,
+ project TEXT NOT NULL, target INTEGER NOT NULL, reason TEXT NOT NULL, state TEXT NOT NULL,
+ error TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+ UNIQUE(reply_id,notice_id));
+CREATE TABLE IF NOT EXISTS monitor_mail_cursors (
+ mailbox TEXT PRIMARY KEY, validity TEXT NOT NULL, last_uid INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS monitor_mail_unparsed (
+ mailbox TEXT NOT NULL, validity TEXT NOT NULL, uid INTEGER NOT NULL, recorded_at TEXT NOT NULL,
+ PRIMARY KEY(mailbox,validity,uid));
 CREATE TABLE IF NOT EXISTS monitor_reports (
  owner TEXT NOT NULL, scope TEXT NOT NULL, business_date TEXT NOT NULL,
  status TEXT NOT NULL DEFAULT 'pending', version INTEGER NOT NULL DEFAULT 0,
@@ -72,6 +97,9 @@ async def connection():
                                     ('project', 'TEXT'), ('decision', "TEXT NOT NULL DEFAULT '{}'")]:
             if column not in existing:
                 await db.execute(f'ALTER TABLE monitor_dispositions ADD COLUMN {column} {declaration}')
+        columns = await db.execute('PRAGMA table_info(monitor_reports)')
+        if 'summary_content' not in {r['name'] for r in await columns.fetchall()}:
+            await db.execute('ALTER TABLE monitor_reports ADD COLUMN summary_content TEXT')
         await db.commit()
         try:
             yield db

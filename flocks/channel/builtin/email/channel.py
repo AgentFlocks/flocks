@@ -158,20 +158,31 @@ class EmailChannel(ChannelPlugin):
         while not abort.is_set():
             try:
                 messages = await loop.run_in_executor(None, self._fetch_new_messages)
+                if getattr(self, '_monitor_unparsed', 0):
+                    from flocks.monitoring.mail_transport import diagnose_poll
+                    await diagnose_poll(self._resolved, 'UnparsedMessage')
+                complete = True
                 for uid, message in messages:
                     if abort.is_set():
+                        complete = False
                         break
                     try:
                         await on_message(message)
                         self._mark_seen(uid)
                     except Exception as exc:
-                        log.warning("email.message.dispatch_failed", {"error": str(exc), "uid": uid.decode(errors="replace")})
+                        complete = False
+                        log.warning("email.message.dispatch_failed", {"error": type(exc).__name__, "uid": uid.decode(errors="replace")})
+                if complete:
+                    from flocks.monitoring.mail_transport import checkpoint
+                    await asyncio.to_thread(checkpoint, getattr(self, "_monitor_poll", None), getattr(self, "_monitor_high", None))
                 self.mark_connected()
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
                 self.mark_disconnected(str(exc))
                 log.warning("email.poll.failed", {"error": str(exc)})
+                from flocks.monitoring.mail_transport import diagnose_poll
+                await diagnose_poll(self._resolved, type(exc).__name__)
 
             try:
                 await asyncio.wait_for(
@@ -204,6 +215,7 @@ class EmailChannel(ChannelPlugin):
                 ctx.reply_to_id,
                 ctx.thread_id,
                 None,
+                ctx.subject, ctx.message_id, ctx.new_thread,
             )
             self.record_message()
             return DeliveryResult(
@@ -315,29 +327,53 @@ class EmailChannel(ChannelPlugin):
             self._authenticate_imap(imap)
             self._identify_imap_client(imap)
             self._select_inbox(imap)
-            status, data = imap.uid("search", None, "UNSEEN")
+            from flocks.monitoring.mail_transport import poll_range, record_unparsed
+            self._monitor_poll = poll_range(cfg, imap)
+            self._monitor_high = None
+            self._monitor_unparsed = 0
+            if self._monitor_poll and getattr(self, "_monitor_validity", None) != self._monitor_poll[1]:
+                self._seen_uids.clear()
+                self._monitor_validity = self._monitor_poll[1]
+            search = self._monitor_poll[2] if self._monitor_poll else ["UNSEEN"]
+            status, data = imap.uid("search", None, *search)
             if status != "OK" or not data or not data[0]:
                 return parsed_messages
 
-            for uid in data[0].split():
+            uids = data[0].split()
+            if self._monitor_poll:
+                uids = sorted((u for u in uids if int(u) > self._monitor_poll[3]), key=int)[:100]
+            for uid in uids:
+                if self._monitor_poll:
+                    self._monitor_high = int(uid)
                 if uid in self._seen_uids:
                     continue
                 status, msg_data = imap.uid("fetch", uid, "(BODY.PEEK[])")
                 if status != "OK":
+                    self._monitor_high = None
+                    if self._monitor_poll:
+                        raise RuntimeError("IMAP fetch failed")
                     continue
                 try:
                     raw_email = msg_data[0][1]
                 except (IndexError, TypeError):
                     log.warning("email.imap.malformed_response", {"uid": uid.decode(errors="replace")})
+                    if self._monitor_poll:
+                        raise RuntimeError("Malformed IMAP record")
                     continue
                 if not isinstance(raw_email, (bytes, bytearray)):
                     log.warning("email.imap.non_bytes_payload", {"uid": uid.decode(errors="replace")})
+                    if self._monitor_poll:
+                        raise RuntimeError("Malformed IMAP payload")
                     continue
 
                 try:
                     message = email_lib.message_from_bytes(raw_email)
                 except Exception:
                     log.warning("email.imap.parse_failed", {"uid": uid.decode(errors="replace")})
+                    if self._monitor_poll:
+                        record_unparsed(self._monitor_poll, uid)
+                        self._monitor_unparsed += 1
+                        self._mark_seen(uid)
                     continue
 
                 parsed, should_mark_seen = self._parse_and_authorize_with_tracking(
@@ -347,7 +383,13 @@ class EmailChannel(ChannelPlugin):
                 if parsed is None:
                     if should_mark_seen:
                         self._mark_seen(uid)
+                    elif self._monitor_poll:
+                        record_unparsed(self._monitor_poll, uid)
+                        self._monitor_unparsed += 1
+                        self._mark_seen(uid)
                     continue
+                if self._monitor_poll:
+                    parsed.raw["uidvalidity"] = self._monitor_poll[1]
                 parsed_messages.append((uid, parsed))
         finally:
             try:
@@ -445,6 +487,13 @@ class EmailChannel(ChannelPlugin):
                 })
                 return None, True
 
+        # Monitoring requires authenticated sender evidence even in allowAll mode.
+        authenticated = False
+        if cfg.get("authservId"):
+            authenticated, _ = verify_sender_authentication(message, sender, authserv_id=str(cfg["authservId"]))
+        from flocks.monitoring.mail_transport import mailbox_key
+        inbound.raw.update(authenticated_sender=authenticated, mailbox_key=mailbox_key(cfg),
+                           references=parsed.references, body=parsed.text if hasattr(parsed, "text") else inbound.text)
         context = {
             "subject": parsed.subject,
             "message_id": parsed.message_id,
@@ -529,27 +578,33 @@ class EmailChannel(ChannelPlugin):
         reply_to_msg_id: Optional[str],
         thread_id: Optional[str],
         attachment_path: Optional[Path],
+        subject_override: Optional[str] = None,
+        stable_message_id: Optional[str] = None,
+        new_thread: bool = False,
     ) -> str:
         cfg = self._resolved
         msg = MIMEMultipart()
         msg["From"] = cfg["address"]
         msg["To"] = to_addr
 
-        ctx = self._resolve_thread_context(to_addr, reply_to_msg_id, thread_id)
-        subject = ctx.get("subject") or cfg["defaultSubject"]
-        if not subject.lower().startswith("re:"):
+        for header in (subject_override, stable_message_id):
+            if header and any(c in header for c in "\r\n"):
+                raise ValueError("Invalid notification header")
+        ctx = {} if new_thread else self._resolve_thread_context(to_addr, reply_to_msg_id, thread_id)
+        subject = subject_override or ctx.get("subject") or cfg["defaultSubject"]
+        if not new_thread and not subject.lower().startswith("re:"):
             subject = f"Re: {subject}"
         msg["Subject"] = subject
 
-        original_id = reply_to_msg_id or ctx.get("message_id")
-        references = thread_id or ctx.get("references") or original_id
+        original_id = None if new_thread else (reply_to_msg_id or ctx.get("message_id"))
+        references = None if new_thread else (thread_id or ctx.get("references") or original_id)
         if original_id:
             msg["In-Reply-To"] = original_id
         if references:
             msg["References"] = references
 
         msg["Date"] = formatdate(localtime=True)
-        message_id = f"<flocks-{uuid.uuid4().hex[:12]}@{self._message_id_domain()}>"
+        message_id = stable_message_id or f"<flocks-{uuid.uuid4().hex[:12]}@{self._message_id_domain()}>"
         msg["Message-ID"] = message_id
         msg.attach(MIMEText(body or "", "plain", "utf-8"))
 

@@ -855,7 +855,8 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
           items: [
             { name: i18n.language.startsWith('zh') ? '监测对话' : 'Monitoring conversation', href: '/suites/host-security-monitor/session', icon: MessageSquare },
             { name: i18n.language.startsWith('zh') ? '总结看板' : 'Dashboard', href: '/suites/host-security-monitor/dashboard', icon: ShieldCheck },
-            { name: i18n.language.startsWith('zh') ? '累计报告' : 'Reports', href: '/suites/host-security-monitor/report', icon: ShieldCheck },
+            { name: i18n.language.startsWith('zh') ? '邮件跟进' : 'Mail follow-up', href: '/suites/host-security-monitor/mail', icon: MessageSquare },
+            { name: i18n.language.startsWith('zh') ? '每日报告' : 'Reports', href: '/suites/host-security-monitor/report', icon: ShieldCheck },
           ],
         }] : []),
         ...(customPageItems.length > 0

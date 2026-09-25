@@ -924,3 +924,40 @@ async def test_start_keeps_uid_unseen_when_dispatch_fails(
     await plugin.start({}, on_message, abort_event)
 
     assert b"2" not in plugin._seen_uids
+
+
+def test_independent_notification_headers_do_not_reuse_previous_recipient_thread(monkeypatch):
+    plugin = EmailChannel()
+    plugin._resolved = resolved_config({'address':'agent@example.com','password':'pw','imapHost':'imap.example.com','smtpHost':'smtp.example.com'})
+    plugin._thread_context['person@example.com'] = {'subject':'old incident','message_id':'<old@example.com>','references':'<old@example.com>'}
+    sent=[]
+    class SMTP:
+        def send_message(self,msg): sent.append(msg)
+        def quit(self): pass
+    monkeypatch.setattr(plugin,'_connect_smtp',lambda:SMTP())
+    monkeypatch.setattr(plugin,'_authenticate_smtp',lambda *_:None)
+    assert plugin._send_email('person@example.com','one event',None,None,None,'事件 A','<stable-a@example.com>',True)=='<stable-a@example.com>'
+    assert sent[0]['Subject']=='事件 A'
+    assert sent[0]['In-Reply-To'] is None and sent[0]['References'] is None
+
+
+@pytest.mark.asyncio
+async def test_single_notification_survives_delivery_metadata_and_cannot_split(monkeypatch):
+    from flocks.channel.base import OutboundContext, DeliveryResult
+    from flocks.channel.outbound.deliver import OutboundDelivery
+    from flocks.channel.registry import default_registry
+    from unittest.mock import AsyncMock
+    plugin=EmailChannel()
+    send=AsyncMock(return_value=DeliveryResult(channel_id='email',message_id='<stable@example.com>'))
+    monkeypatch.setattr(plugin,'send_text',send)
+    monkeypatch.setattr(default_registry,'get',lambda *_:plugin)
+    monkeypatch.setattr(OutboundDelivery,'_rate_limiters',{})
+    context=OutboundContext(channel_id='email',to='person@example.com',text='one',subject='single',message_id='<stable@example.com>',new_thread=True,single_message=True)
+    result=await OutboundDelivery.deliver(context,max_retries=1)
+    assert result[0].success
+    sent=send.call_args.args[0]
+    assert sent.subject=='single' and sent.new_thread and sent.message_id=='<stable@example.com>'
+    send.reset_mock()
+    monkeypatch.setattr(plugin,'chunk_text',lambda *_:['a','b'])
+    assert not (await OutboundDelivery.deliver(context,max_retries=1))[0].success
+    assert not send.called
