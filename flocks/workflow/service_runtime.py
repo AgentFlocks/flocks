@@ -40,14 +40,20 @@ def api_key_fingerprint(api_key: str) -> str:
 
 def _load_runtime_plugins() -> str | None:
     """Load generic plugins, returning only a generic critical error marker."""
-    try:
-        from flocks.plugin import PluginLoader
+    from flocks.plugin import PluginLoader
 
+    try:
         result = PluginLoader.load_all(project_dir=Path.cwd())
-        if result.has_critical_entrypoint_failure:
-            return "critical plugin entrypoint failure"
     except Exception as exc:
+        # Same rule as the main server: without a fail-closed plugin, skip
+        # the unreadable source and keep serving.
+        if PluginLoader.interruption_is_critical(exc):
+            log.error("workflow_service.plugins.load_failed", {"error": str(exc)})
+            return "critical plugin entrypoint failure"
         log.warning("workflow_service.plugins.load_failed", {"error": str(exc)})
+        return None
+    if result.has_critical_entrypoint_failure:
+        return "critical plugin entrypoint failure"
     return None
 
 

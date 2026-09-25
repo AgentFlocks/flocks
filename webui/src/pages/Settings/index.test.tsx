@@ -42,6 +42,10 @@ vi.mock('@/pages/SystemLog', () => ({
   default: () => <div>system logs page</div>,
 }));
 
+vi.mock('@/pages/VoiceSettings', () => ({
+  default: () => <div>voice settings page</div>,
+}));
+
 vi.mock('./ArchivedDataPanel', () => ({
   default: () => <div>archived data page</div>,
 }));
@@ -182,6 +186,18 @@ describe('SettingsPage', () => {
     renderSettings('/settings/archived-data');
 
     expect(await screen.findByText('archived data page')).toBeInTheDocument();
+  });
+
+  it('renders shared voice settings for an administrator without any extension or license', async () => {
+    renderSettings('/settings/voice-input');
+    expect(await screen.findByText('voice settings page')).toBeInTheDocument();
+  });
+
+  it('keeps shared voice configuration restricted to administrators', async () => {
+    useAuth.mockReturnValue({ user: { id: 'member', role: 'user' } });
+    renderSettings('/settings/voice-input');
+    expect(await screen.findByRole('heading', { name: 'settingsPreferences' })).toBeInTheDocument();
+    expect(screen.queryByText('voice settings page')).not.toBeInTheDocument();
   });
 
 });

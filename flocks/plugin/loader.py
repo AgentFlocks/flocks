@@ -286,6 +286,41 @@ class PluginLoader:
         """Clear the generic runtime failure signal before an explicit reload."""
         cls._runtime_critical_entrypoint_failure = False
 
+    @classmethod
+    def critical_entrypoints_declared(cls) -> bool:
+        """Return whether an installed package opted into fail-closed startup.
+
+        Unreadable package metadata counts as declared: it could hide one.
+        """
+        try:
+            return bool(tuple(importlib.metadata.entry_points().select(
+                group=_CRITICAL_PLUGIN_ENTRYPOINT_GROUP,
+            )))
+        except Exception:
+            return True
+
+    @classmethod
+    def interruption_is_critical(cls, error: BaseException) -> bool:
+        """Return whether an interrupted load pass must fail closed.
+
+        An explicit :class:`CriticalPluginEntrypointFailure` always does. Any
+        other interruption does only when an installed package declared a
+        critical entrypoint; without one there are no required guards to miss.
+        """
+        return isinstance(error, CriticalPluginEntrypointFailure) or cls.critical_entrypoints_declared()
+
+    @classmethod
+    def _publish_pass_outcome(
+        cls, result: PluginLoadResult | None, error: BaseException | None,
+    ) -> None:
+        """Update the runtime failure signal once an entrypoint pass has ended."""
+        if error is None and result is not None:
+            cls._runtime_critical_entrypoint_failure = result.has_critical_entrypoint_failure
+        elif error is not None and cls.interruption_is_critical(error):
+            cls._runtime_critical_entrypoint_failure = True
+        # Otherwise keep the verdict of the last completed pass: an interrupted
+        # pass proves nothing either way.
+
     # ------------------------------------------------------------------
     # Loading
     # ------------------------------------------------------------------
@@ -306,21 +341,30 @@ class PluginLoader:
         """
         project_dir = project_dir or Path.cwd()
         result = PluginLoadResult()
+        # The failure signal changes only when a pass ends, never while one is
+        # running: reloads (tool warm-up, Hub installs) run in worker threads
+        # while the server keeps handling requests under the previously loaded
+        # guards. An interrupted pass that must fail closed (see
+        # interruption_is_critical) sets the signal; only a completed pass
+        # clears it.
+        try:
+            for ext in tuple(cls._extension_points.values()):
+                cls._load_extension_point(
+                    ext,
+                    extra_sources=extra_sources,
+                    project_dir=project_dir,
+                    log_scope="load_all",
+                )
 
-        for ext in cls._extension_points.values():
-            cls._load_extension_point(
-                ext,
-                extra_sources=extra_sources,
-                project_dir=project_dir,
-                log_scope="load_all",
-            )
+                if ext.load_once:
+                    ext._loaded = True
 
-            if ext.load_once:
-                ext._loaded = True
-
-        # 4. Installed package entry-points
-        cls._load_entry_points(result)
-        cls._runtime_critical_entrypoint_failure = result.has_critical_entrypoint_failure
+            # 4. Installed package entry-points
+            cls._load_entry_points(result)
+        except BaseException as exc:
+            cls._publish_pass_outcome(None, exc)
+            raise
+        cls._publish_pass_outcome(result, None)
         return result
 
     @classmethod
@@ -352,17 +396,23 @@ class PluginLoader:
             cls._last_load_errors = [f"extension point not found: {attr_name}"]
             return list(cls._last_load_errors)
 
-        cls._load_extension_point(
-            ext,
-            extra_sources=extra_sources,
-            project_dir=project_dir or Path.cwd(),
-            log_scope="load_extension",
-        )
-        if load_entry_points:
-            result = cls._load_entry_points()
-            cls._runtime_critical_entrypoint_failure = (
-                result.has_critical_entrypoint_failure
+        # Same signal contract as load_all() for a pass that loads entrypoints.
+        result = None
+        try:
+            cls._load_extension_point(
+                ext,
+                extra_sources=extra_sources,
+                project_dir=project_dir or Path.cwd(),
+                log_scope="load_extension",
             )
+            if load_entry_points:
+                result = cls._load_entry_points()
+        except BaseException as exc:
+            if load_entry_points:
+                cls._publish_pass_outcome(None, exc)
+            raise
+        if load_entry_points:
+            cls._publish_pass_outcome(result, None)
         return list(cls._last_load_errors)
 
     @classmethod
@@ -647,17 +697,7 @@ class PluginLoader:
                 continue
 
             error_source = _error_source_path(source, base_dir)
-            items = cls._validate_and_dedup(ext, list(raw), source, error_source=error_source)
-            if items:
-                cls._record_consumer_errors(error_source, ext.consumer(items, source))
-                log.info(
-                    "plugin.dispatched",
-                    {
-                        "source": source,
-                        "attr": ext.attr_name,
-                        "count": len(items),
-                    },
-                )
+            cls._dispatch_items(ext, list(raw), source, error_source)
 
     @classmethod
     def _load_yaml_source(cls, ext: ExtensionPoint, yaml_path: Path) -> None:
@@ -693,17 +733,36 @@ class PluginLoader:
             return
 
         error_source = _error_source_path(str(yaml_path), yaml_path.parent)
-        items = cls._validate_and_dedup(ext, [item], str(yaml_path), error_source=error_source)
-        if items:
-            cls._record_consumer_errors(error_source, ext.consumer(items, str(yaml_path)))
-            log.debug(
-                "plugin.yaml_dispatched",
-                {
-                    "source": str(yaml_path),
-                    "attr": ext.attr_name,
-                    "count": len(items),
-                },
+        cls._dispatch_items(ext, [item], str(yaml_path), error_source, yaml_source=True)
+
+    @classmethod
+    def _dispatch_items(
+        cls, ext: ExtensionPoint, raw_items: List[Any], source: str, error_source: str,
+        *, yaml_source: bool = False,
+    ) -> None:
+        """Isolate one contribution without skipping later security entrypoints."""
+        try:
+            items = cls._validate_and_dedup(
+                ext, raw_items, source, error_source=error_source,
             )
+            if items:
+                cls._record_consumer_errors(error_source, ext.consumer(items, source))
+                # One YAML file per item makes these dispatches high volume; keep
+                # them at debug level as before the dispatch path was shared.
+                emit, event = (
+                    (log.debug, "plugin.yaml_dispatched") if yaml_source
+                    else (log.info, "plugin.dispatched")
+                )
+                emit(event, {
+                    "source": source, "attr": ext.attr_name, "count": len(items),
+                })
+        except CriticalPluginEntrypointFailure:
+            raise
+        except Exception as exc:
+            cls._record_load_error(error_source, exc)
+            log.error("plugin.dispatch_failed", {
+                "source": source, "attr": ext.attr_name, "error": str(exc),
+            })
 
     @classmethod
     def _validate_and_dedup(

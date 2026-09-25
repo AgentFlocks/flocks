@@ -53,10 +53,11 @@
     @apply cursor-not-allowed border-line bg-disabled text-fg-disabled;
   }
   .ui-btn-primary { @apply border-transparent bg-action text-action-fg; }
-  .ui-btn-primary:hover { background-color: var(--action-hover); }
-  .ui-btn-primary:active { background-color: var(--action-pressed); }
+  /* Disabled keeps the disabled colours under the pointer (same specificity, later rule). */
+  .ui-btn-primary:hover:not(:disabled, [aria-disabled='true']) { background-color: var(--action-hover); }
+  .ui-btn-primary:active:not(:disabled, [aria-disabled='true']) { background-color: var(--action-pressed); }
   .ui-btn-danger { @apply border-transparent bg-action-danger text-action-danger-fg; }
-  .ui-btn-danger:hover { background-color: var(--action-pressed); }
+  .ui-btn-danger:hover:not(:disabled, [aria-disabled='true']) { background-color: var(--action-pressed); }
   .ui-btn-ghost { @apply border-transparent bg-transparent; }
   .ui-btn-sm { min-height: var(--control-sm); @apply px-2.5 text-xs; }
   .ui-btn-lg { min-height: var(--control-lg); @apply px-4; }

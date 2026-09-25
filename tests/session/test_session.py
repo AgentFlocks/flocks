@@ -182,7 +182,7 @@ async def test_session_update():
 
 
 @pytest.mark.asyncio
-async def test_session_accessible_to_recreated_user_with_same_username():
+async def test_recreated_username_cannot_claim_existing_session():
     session = await Session.create(
         project_id="test_project_username_owner",
         directory="/test/dir",
@@ -200,10 +200,18 @@ async def test_session_accessible_to_recreated_user_with_same_username():
         )
     )
     try:
-        sessions = await Session.list_all()
-        assert any(item.id == session.id for item in sessions)
+        assert all(item.id != session.id for item in await Session.list_all())
+        assert all(item.id != session.id for item in await Session.list(session.project_id))
+        assert await Session.get(session.project_id, session.id) is None
+        assert await Session.get_by_id(session.id) is None
+        assert await Session.update(session.project_id, session.id, title="Reclaimed") is None
+        assert await Session.delete(session.project_id, session.id) is False
     finally:
         reset_current_auth_user(token)
+    original = await Session.get(session.project_id, session.id)
+    assert original is not None
+    assert original.title == "Owned by Username"
+    assert original.owner_user_id == "usr_old_owner"
 
 
 @pytest.mark.asyncio

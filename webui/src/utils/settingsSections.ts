@@ -6,6 +6,7 @@ import {
   IconSettings as SettingsIcon,
   IconUserCog,
   IconNetwork,
+  IconMicrophone,
   type TablerIcon,
 } from '@tabler/icons-react';
 import registry, { type ExtensionSettingsSection } from '@ext/registry';
@@ -21,6 +22,7 @@ export const BUILT_IN_SETTINGS_SECTION_IDS: readonly SettingsSectionId[] = [
   'account',
   'system-logs',
   'network-proxy',
+  'voice-input',
 ] as const;
 
 export function isSettingsSectionId(value: string | undefined): value is SettingsSectionId {
@@ -148,6 +150,7 @@ export function useSettingsSectionGroups(): { groups: SettingsGroup[]; ready: bo
       system: [
         { id: 'account', name: t('accountManagement'), icon: IconUserCog },
         { id: 'network-proxy', name: t('networkProxy'), icon: IconNetwork, adminOnly: true },
+        { id: 'voice-input', name: t('voiceInput'), icon: IconMicrophone, adminOnly: true },
         { id: 'system-logs', name: t('systemLog'), icon: IconScript },
       ],
     };

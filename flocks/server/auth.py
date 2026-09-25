@@ -148,19 +148,19 @@ def get_request_user_agent(request: Request) -> Optional[str]:
     return request.headers.get("user-agent")
 
 
-def get_optional_user(request: Request) -> Optional[AuthUser]:
+def get_optional_user(request: HTTPConnection) -> Optional[AuthUser]:
     user = getattr(request.state, "auth_user", None)
     return user
 
 
-def require_user(request: Request) -> AuthUser:
+def require_user(request: HTTPConnection) -> AuthUser:
     user = get_optional_user(request)
     if not user:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="请先登录")
     return user
 
 
-def require_admin(request: Request) -> AuthUser:
+def require_admin(request: HTTPConnection) -> AuthUser:
     user = require_user(request)
     if user.role != "admin":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="仅管理员可执行该操作")
@@ -280,6 +280,19 @@ def _build_api_token_user() -> AuthUser:
 
 async def apply_auth_for_request(request: HTTPConnection):
     """Resolve auth for the HTTP request."""
+    from flocks.plugin import PluginLoader
+
+    # The same loader signal already stops Channel/tool execution. HTTP and
+    # WebSocket ingress must also stop, including public mutation/webhook
+    # routes that otherwise bypass authentication. Keep probes reachable.
+    if (
+        PluginLoader.has_runtime_critical_entrypoint_failure()
+        and request.url.path not in {"/health", "/ready", "/api/health", "/api/ready"}
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="关键扩展初始化失败，服务暂不可用",
+        )
     auth_token = None
 
     try:

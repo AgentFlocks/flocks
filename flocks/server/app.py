@@ -1310,6 +1310,7 @@ from flocks.server.routes.console_upgrade import router as console_upgrade_route
 from flocks.server.routes.license import router as license_router
 from flocks.server.routes.webui import router as webui_pages_router
 from flocks.server.routes.contracts import router as contracts_router
+from flocks.server.routes.voice import router as voice_router
 # Original routes with /api/ prefix
 app.include_router(health_router, prefix="/api", tags=["Health"])
 app.include_router(public_health_router, tags=["Health"])
@@ -1375,6 +1376,10 @@ app.include_router(device_router, prefix="/api/devices", tags=["Device"])
 app.include_router(console_upgrade_router, prefix="/api/console", tags=["ConsoleUpgrade"])
 app.include_router(webui_pages_router, prefix="/api", tags=["WebUI"])
 app.include_router(contracts_router, prefix="/api", tags=["AccessContracts"])
+app.include_router(voice_router, prefix="/api/voice", tags=["Voice"])
+# Permission to ask is separate from the user's browser permission and the
+# authenticated, explicitly enabled voice endpoint.
+app.state.browser_microphone_allowed = True
 
 # ============================================================
 # TUI Compatible Routes (without /api/ prefix)
@@ -1460,7 +1465,23 @@ def _load_installed_package_plugins() -> None:
         else:
             log.info("plugins.installed.loaded")
     except Exception as e:
-        log.warning("plugins.installed.load_failed", {"error": str(e)})
+        from flocks.plugin import PluginLoader
+        from flocks.plugin.loader import CriticalPluginEntrypointFailure
+
+        if not PluginLoader.interruption_is_critical(e):
+            # No installed package opted into fail-closed startup and nothing
+            # reported a critical failure, so there are no required guards to
+            # wait for. An unreadable plugin directory keeps its previous
+            # meaning: skip it and keep serving. The loader has already kept
+            # the failure signal of the last completed pass.
+            log.warning("plugins.installed.load_failed", {"error": str(e)})
+        else:
+            app.state.critical_plugin_entrypoint_failure = True
+            app.state.critical_plugin_entrypoint_failures = ("plugin_loader",)
+            log.error("plugins.installed.load_failed", {"error": str(e)})
+            raise CriticalPluginEntrypointFailure(
+                "plugin loading did not complete; refusing to serve without verified extensions"
+            ) from e
 
     _enforce_startup_requirements()
 

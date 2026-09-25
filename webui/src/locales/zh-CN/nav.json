@@ -85,5 +85,6 @@
   "updateAvailable": "发现新版本",
   "updateNow": "立即升级",
   "currentVersionLabel": "当前 v{{version}}",
-  "currentProductVersionLabel": "当前 {{version}}"
+  "currentProductVersionLabel": "当前 {{version}}",
+  "voiceInput": "语音输入"
 }

@@ -184,7 +184,12 @@ async def resolve_path_for_http_file_access(
 
     from flocks.workspace.manager import WorkspaceManager
 
-    ws_dir = WorkspaceManager.get_instance().get_workspace_dir().resolve()
+    manager = WorkspaceManager.get_instance()
+    ws_dir = manager.get_workspace_dir().resolve()
+    # Apply the workspace's ownership policy before broader project/data or
+    # allowReadPaths roots can authorize the same file. Resolve symlinks first
+    # so an alias outside the workspace cannot bypass that policy.
+    assert_http_workspace_path_access(abs_guess, manager=manager)
     if not _is_filesystem_root(ws_dir):
         roots.append(str(ws_dir))
 
@@ -222,4 +227,21 @@ async def resolve_path_for_http_file_access(
     raise PermissionError("Path is not allowed for remote file access")
 
 
-__all__ = ["resolve_path_for_http_file_access"]
+def assert_http_workspace_path_access(path: str, *, manager=None, workspace: Path | None = None) -> None:
+    """Honor the workspace resolver's policy for a canonical file/search hit.
+
+    Core's resolver only checks containment. Extensions may add per-user
+    ownership checks there; every HTTP file entry point must retain them.
+    Paths outside the workspace still use the calling endpoint's read roots.
+    Callers checking many hits may pass the already resolved ``workspace``.
+    """
+    from flocks.workspace.manager import WorkspaceManager
+
+    manager = manager or WorkspaceManager.get_instance()
+    workspace = workspace if workspace is not None else manager.get_workspace_dir().resolve()
+    target = Path(path).resolve()
+    if target.is_relative_to(workspace):
+        manager.resolve_workspace_path(target.relative_to(workspace).as_posix())
+
+
+__all__ = ["resolve_path_for_http_file_access", "assert_http_workspace_path_access"]

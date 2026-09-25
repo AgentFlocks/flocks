@@ -305,7 +305,12 @@ def _portable_default(value, kind):
     if re.fullmatch(r"(?:[-+]?\d+(?:\.\d+)?|NULL|TRUE|FALSE|'(?:[^']|'')*')", value, re.IGNORECASE):
         return value
     if value.upper() == "CURRENT_TIMESTAMP":
-        return "(CURRENT_TIMESTAMP::text)" if kind == "TEXT" else "CURRENT_TIMESTAMP"
+        if kind == "TEXT":
+            from flocks.db.dialect import PostgresDialect
+
+            # Preserve SQLite's UTC second format, including for audit filters.
+            return PostgresDialect().now_text()
+        return "CURRENT_TIMESTAMP"
     # Source trigger/default SQL is retained in the snapshot; extensions own
     # its PostgreSQL replacement. It is never run as arbitrary target SQL.
     return None

@@ -172,6 +172,7 @@ async def test_pty_websocket_keeps_authenticated_context_for_full_connection(
                 raise WebSocketDisconnect() from exc
 
     async def _authenticate(websocket: _FakeWebSocket):
+        websocket.state.auth_user = SimpleNamespace(id="websocket-user", role="admin")
         websocket.state.subject = Subject(
             subject_id="websocket-user",
             subject_type="human",

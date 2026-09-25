@@ -110,14 +110,20 @@ async def _find_completed_delegate(
     current_message_id: str,
     agent_key: Optional[str],
     description: str,
+    *,
+    prompt: str,
+    model: Optional[str] = None,
+    load_skills: Optional[list[str]] = None,
 ) -> Optional[ToolResult]:
-    """Return a previous ToolResult if an identical delegate_task already completed."""
+    """Reuse identical completed work only within the current user turn."""
     try:
         from flocks.session.message import ToolPart
         messages = await Message.list(session_id)
-        for msg in messages:
+        for msg in reversed(messages):
             if msg.id == current_message_id:
                 continue
+            if msg.role == MessageRole.USER:
+                break
             parts = await Message.parts(msg.id, session_id)
             for p in parts:
                 if not isinstance(p, ToolPart):
@@ -129,7 +135,13 @@ async def _find_completed_delegate(
                     continue
                 inp = getattr(state, "input", {})
                 prev_key = inp.get("subagent_type")
-                if prev_key == agent_key and inp.get("description") == description:
+                if (
+                    prev_key == agent_key
+                    and inp.get("description") == description
+                    and inp.get("prompt") == prompt
+                    and inp.get("model") == model
+                    and (inp.get("load_skills") or []) == (load_skills or [])
+                ):
                     output = getattr(state, "output", "")
                     if isinstance(output, dict):
                         import json as _json
@@ -320,11 +332,13 @@ async def delegate_task_tool(
         },
     )
 
-    # Dedup: if an identical delegate_task already completed in this session,
-    # return the previous result to prevent the LLM from re-delegating.
+    # Reuse identical work only within this user turn.
     if not session_id:
         agent_key = subagent_type
-        prev = await _find_completed_delegate(ctx.session_id, ctx.message_id, agent_key, description)
+        prev = await _find_completed_delegate(
+            ctx.session_id, ctx.message_id, agent_key, description,
+            prompt=prompt, model=model, load_skills=load_skills,
+        )
         if prev is not None:
             log.info("delegate_task.dedup_hit", {
                 "session_id": ctx.session_id,
@@ -361,6 +375,8 @@ async def delegate_task_tool(
             prompt=prompt,
             description=description,
             resumed=True,
+            provider_id=(explicit_model or {}).get("providerID"),
+            model_id=(explicit_model or {}).get("modelID"),
             callbacks=LoopCallbacks(
                 event_publish_callback=ctx.event_publish_callback,
             ),
@@ -517,6 +533,9 @@ async def delegate_task_tool(
         loop_result=result["loop_result"],
         metadata=final_metadata,
     )
-    result_status = "completed" if tool_result.success else "error"
+    result_status = (
+        "interrupted" if tool_result.metadata.get("status") == "interrupted"
+        else "completed" if tool_result.success else "error"
+    )
     ctx.metadata({"title": description, "metadata": {**final_metadata, "status": result_status}})
     return tool_result

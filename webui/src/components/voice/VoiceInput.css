@@ -1,0 +1,80 @@
+/* Shared chat toolbar voice control. */
+
+.flocks-voice-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 28px;
+  padding: 0 9px;
+  border: 0;
+  border-radius: 8px;
+  background: var(--bg-subtle);
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background-color 150ms, color 150ms;
+}
+
+.flocks-voice-button:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.flocks-voice-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.flocks-voice-button:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+/* Recording is the one state that must be unmistakable at a glance: red, and
+   a pulsing dot so it reads as live even where colour alone does not. */
+.flocks-voice-button[data-state='recording'] {
+  background: var(--status-dangerBg);
+  color: var(--status-danger);
+}
+
+.flocks-voice-button[data-state='recording']:hover:not(:disabled) {
+  background: var(--accent-brandBg);
+  color: var(--accent-brand);
+}
+
+.flocks-voice-button__icon {
+  display: inline-flex;
+  flex: 0 0 auto;
+}
+
+.flocks-voice-button__pulse {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: currentColor;
+  animation: flocks-voice-pulse 1.1s ease-in-out infinite;
+}
+
+@keyframes flocks-voice-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.35; transform: scale(0.72); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .flocks-voice-button__pulse {
+    animation: none;
+  }
+}
+
+/* A finger needs a bigger target than a mouse pointer. */
+@media (pointer: coarse) {
+  .flocks-voice-button {
+    height: 40px;
+    padding: 0 13px;
+    font-size: 13px;
+    gap: 6px;
+  }
+}

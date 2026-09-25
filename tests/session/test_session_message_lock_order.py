@@ -24,6 +24,7 @@ from flocks.storage.storage import Storage
 from flocks.session.message import Message, MessageRole
 from flocks.session.session import Session
 from flocks.session import message_pages
+from flocks.auth.context import AuthUser, set_current_auth_user
 
 async def main():
     home = Path(os.environ['HOME'])
@@ -53,6 +54,10 @@ async def main():
         operation = (Message.update(sid, mid, finish='stop') if cmd['order'] == 'writer_first'
                      else Message.create(sid, MessageRole.USER, 'late write', id='late_message'))
     else:
+        if cmd['authenticated']:
+            set_current_auth_user(AuthUser(
+                id='usr_delete_owner', username='delete_owner', role='member', status='active',
+            ))
         original = message_pages.remove_sessions
         async def gate(db, session_ids):
             print('EVENT ready', flush=True)
@@ -85,8 +90,12 @@ async def _line(process, prefix):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("order", ["writer_first", "deleter_first"])
-async def test_message_write_and_session_delete_follow_one_lock_order(tmp_path, order):
-    session = await Session.create(project_id="message_lock_order", directory=str(tmp_path))
+@pytest.mark.parametrize("authenticated", [False, True], ids=["internal", "authenticated-owner"])
+async def test_message_write_and_session_delete_follow_one_lock_order(tmp_path, order, authenticated):
+    session = await Session.create(
+        project_id="message_lock_order", directory=str(tmp_path),
+        owner_user_id="usr_delete_owner", owner_username="delete_owner",
+    )
     message = await Message.create(session.id, MessageRole.ASSISTANT, "synthetic")
     processes, handles = [], []
     try:
@@ -108,7 +117,10 @@ async def test_message_write_and_session_delete_follow_one_lock_order(tmp_path, 
             assert await _line(process, "EVENT ") == "boot"
         # Finish bootstrap in both processes before deliberately holding row locks.
         for role, process in zip(("writer", "deleter"), processes):
-            command = dict(sid=session.id, mid=message.id, project=session.project_id, role=role, order=order)
+            command = dict(
+                sid=session.id, mid=message.id, project=session.project_id,
+                role=role, order=order, authenticated=authenticated,
+            )
             process.stdin.write((json.dumps(command) + "\n").encode())
             await process.stdin.drain()
             if role == "writer":

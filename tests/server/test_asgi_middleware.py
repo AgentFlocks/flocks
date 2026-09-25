@@ -531,3 +531,58 @@ async def test_auth_guard_rejection_carries_security_headers_and_request_log(
         assert headers.get(name.lower()) == value, name
     assert logged and logged[0][0] == "request.complete"
     assert logged[0][1]["path"] == "/api/session" and logged[0][1]["status"] == 401
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path, expected_status", [
+    ("/api/session", 503),
+    ("/api/channel/example/webhook", 503),
+    ("/api/auth/bootstrap-admin", 503),
+    ("/health", 200),
+    ("/ready", 200),
+])
+async def test_critical_plugin_failure_blocks_http_effects_but_keeps_health(
+    monkeypatch, path, expected_status,
+) -> None:
+    import httpx
+    from starlette.responses import JSONResponse
+    from flocks.plugin import PluginLoader
+    from flocks.server import auth
+
+    effects = []
+
+    async def endpoint(scope, receive, send):
+        effects.append(scope["path"])
+        await JSONResponse({"ok": True})(scope, receive, send)
+
+    async def hook(_request, _context):
+        return None
+
+    monkeypatch.setattr(PluginLoader, "_runtime_critical_entrypoint_failure", True)
+    monkeypatch.setattr(auth, "_auth_context_adapters", {})
+    monkeypatch.setattr(auth, "_is_valid_api_token", lambda _token: True)
+    monkeypatch.setattr(server_app, "_run_http_middleware_hooks", hook)
+    transport = httpx.ASGITransport(app=server_app._AuthGuardMiddleware(endpoint))
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get(path, headers={"Authorization": "Bearer valid"})
+
+    assert response.status_code == expected_status
+    assert effects == ([path] if expected_status == 200 else [])
+
+
+@pytest.mark.asyncio
+async def test_critical_plugin_failure_blocks_websocket_auth(monkeypatch) -> None:
+    from fastapi import HTTPException
+    from starlette.requests import HTTPConnection
+    from flocks.plugin import PluginLoader
+    from flocks.server import auth
+
+    scope = _http_scope("/api/voice/stream")
+    scope.update(type="websocket", scheme="ws", headers=[(b"authorization", b"Bearer valid")])
+    monkeypatch.setattr(PluginLoader, "_runtime_critical_entrypoint_failure", True)
+    monkeypatch.setattr(auth, "_auth_context_adapters", {})
+    monkeypatch.setattr(auth, "_is_valid_api_token", lambda _token: True)
+    with pytest.raises(HTTPException) as caught:
+        _blocked, token, _user = await auth.apply_auth_for_request(HTTPConnection(scope))
+        auth.clear_auth_context(token)
+    assert caught.value.status_code == 503

@@ -23,6 +23,7 @@ import { StreamingMarkdown, useStreamingContent } from './StreamingMarkdown';
 import { useTranslation } from 'react-i18next';
 import LoadingSpinner from './LoadingSpinner';
 import ExtensionSlot from '@/components/extensions/ExtensionSlot';
+import VoiceInput from '@/components/voice/VoiceInput';
 import { QuestionTool, type QuestionItem } from './QuestionTool';
 import { PermissionApprovalDialog, type PermissionDecision } from './PermissionApprovalDialog';
 import DelegateTaskCard, { isDelegateTool, shouldRenderDelegateTaskCard } from './DelegateTaskCard';
@@ -4937,6 +4938,16 @@ export default function SessionChat({
                   <div className="mx-1 h-4 w-px shrink-0 bg-zinc-200 dark:bg-zinc-800" />
 
                   {toolbarSlot}
+
+                  <VoiceInput
+                    context={{
+                      sessionId,
+                      input,
+                      setInput,
+                      disabled: sending || isCompacting,
+                      setBusy: setComposerExtensionBusy,
+                    }}
+                  />
 
                   <ExtensionSlot
                     name="chat.composer"

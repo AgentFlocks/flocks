@@ -6,8 +6,17 @@ import enSession from './locales/en-US/session.json';
 import zhHome from './locales/zh-CN/home.json';
 import zhNav from './locales/zh-CN/nav.json';
 import zhSession from './locales/zh-CN/session.json';
+import enVoice from './locales/en-US/voice.json';
+import zhVoice from './locales/zh-CN/voice.json';
 
 describe('i18n lazy namespaces', () => {
+  it('loads shared voice translations without an enterprise registry', async () => {
+    await i18n.changeLanguage('zh-CN');
+    await preloadI18nNamespaces(['voice']);
+    expect(i18n.t('settings.title', { ns: 'voice' })).toBe(zhVoice.settings.title);
+    expect(i18n.t('errors.audio_too_quiet', { ns: 'voice', lng: 'en-US' })).toBe(enVoice.errors.audio_too_quiet);
+  });
+
   it('loads route namespaces on demand instead of bundling them up front', async () => {
     await i18n.changeLanguage('en-US');
     i18n.removeResourceBundle('en-US', 'workflow');

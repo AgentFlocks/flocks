@@ -21,6 +21,7 @@ import asyncio
 import inspect
 from dataclasses import dataclass, field
 from pathlib import Path
+from threading import RLock
 import time
 import warnings
 from typing import Any, Dict, List, Optional, Callable, Awaitable
@@ -187,6 +188,7 @@ class HookPipeline:
     _initialized: bool = False
     _loaded_project_dir: Optional[str] = None
     _plugin_hook_names: set[str] = set()
+    _registry_lock = RLock()
 
     @classmethod
     def register(
@@ -200,40 +202,44 @@ class HookPipeline:
         fail_policy: FailPolicy | str | None = None,
         critical: bool = False,
     ) -> None:
-        cls.unregister(name)
-        if plugin_managed:
-            cls._plugin_hook_names.add(name)
-        else:
-            cls._plugin_hook_names.discard(name)
-        cls._hooks.append(_HookEntry(
-            order=order,
-            name=name,
-            hook=hook,
-            timeout_seconds=normalize_timeout(timeout_seconds),
-            fail_policy=normalize_fail_policy(fail_policy, critical=critical),
-        ))
-        cls._hooks.sort()
+        with cls._registry_lock:
+            cls.unregister(name)
+            if plugin_managed:
+                cls._plugin_hook_names.add(name)
+            else:
+                cls._plugin_hook_names.discard(name)
+            cls._hooks.append(_HookEntry(
+                order=order,
+                name=name,
+                hook=hook,
+                timeout_seconds=normalize_timeout(timeout_seconds),
+                fail_policy=normalize_fail_policy(fail_policy, critical=critical),
+            ))
+            cls._hooks.sort()
         log.info("hook.registered", {"name": name, "order": order})
 
     @classmethod
     def unregister(cls, name: str) -> None:
-        before = len(cls._hooks)
-        cls._hooks = [h for h in cls._hooks if h.name != name]
-        cls._plugin_hook_names.discard(name)
+        with cls._registry_lock:
+            before = len(cls._hooks)
+            cls._hooks = [h for h in cls._hooks if h.name != name]
+            cls._plugin_hook_names.discard(name)
         if len(cls._hooks) != before:
             log.info("hook.unregistered", {"name": name})
 
     @classmethod
     def list_hooks(cls) -> List[str]:
-        return [h.name for h in cls._hooks]
+        with cls._registry_lock:
+            return [h.name for h in cls._hooks]
 
     @classmethod
     def reset(cls) -> None:
         """Reset pipeline state (primarily for tests)."""
-        cls._hooks = []
-        cls._initialized = False
-        cls._loaded_project_dir = None
-        cls._plugin_hook_names = set()
+        with cls._registry_lock:
+            cls._hooks = []
+            cls._initialized = False
+            cls._loaded_project_dir = None
+            cls._plugin_hook_names = set()
 
     @staticmethod
     def _normalize_project_dir(project_dir: Optional[Path]) -> Optional[str]:
@@ -244,9 +250,10 @@ class HookPipeline:
     @classmethod
     def _clear_plugin_hooks(cls) -> None:
         """Remove previously loaded plugin hooks before reloading another project."""
-        for name in list(cls._plugin_hook_names):
-            cls.unregister(name)
-        cls._plugin_hook_names = set()
+        with cls._registry_lock:
+            for name in list(cls._plugin_hook_names):
+                cls.unregister(name)
+            cls._plugin_hook_names = set()
 
     @classmethod
     async def _resolve_project_dir(cls, input_data: Dict[str, Any]) -> Optional[Path]:
@@ -271,34 +278,60 @@ class HookPipeline:
         return None
 
     @classmethod
-    async def ensure_initialized(cls, project_dir: Optional[Path] = None) -> None:
-        """Lazily load hooks and reload project hooks when workspace changes."""
+    async def ensure_initialized(cls, project_dir: Optional[Path] = None) -> tuple[_HookEntry, ...]:
+        """Load project hooks and return the snapshot owned by this invocation."""
         resolved_project_dir = cls._normalize_project_dir(project_dir)
-        if cls._initialized and (
-            resolved_project_dir is None or resolved_project_dir == cls._loaded_project_dir
-        ):
-            return
+        with cls._registry_lock:
+            if cls._initialized and (
+                resolved_project_dir == cls._loaded_project_dir
+                or (
+                    resolved_project_dir is None
+                    and cls._normalize_project_dir(Path.cwd()) == cls._loaded_project_dir
+                )
+            ):
+                return tuple(cls._hooks)
 
-        cls._register_plugin_extension_point()
+        # An ingress event without project metadata belongs to the host's
+        # default project, never to whichever session last loaded its hooks.
         load_project_dir = Path(resolved_project_dir) if resolved_project_dir else Path.cwd()
-        if cls._initialized:
-            cls._clear_plugin_hooks()
+        loaded_project_dir = str(load_project_dir.resolve(strict=False))
 
+        from flocks.config.config import Config
+        from flocks.plugin import PluginLoader
+
+        load_error = None
         try:
-            from flocks.config.config import Config
-            from flocks.plugin import PluginLoader
-
             cfg = await Config.get()
-            PluginLoader.load_extension(
-                "HOOKS",
-                extra_sources=cfg.plugin or [],
-                project_dir=load_project_dir,
-            )
         except Exception as exc:
-            log.warn("hook.plugin_load_failed", {"error": str(exc)})
-        finally:
-            cls._initialized = True
-            cls._loaded_project_dir = str(load_project_dir.resolve(strict=False))
+            load_error = exc
+
+        # Server and workflow execution use different event loops and threads.
+        # The lock is never held across configuration or handler awaits; it
+        # protects the synchronous replacement and capture as one operation.
+        with cls._registry_lock:
+            if cls._initialized and cls._loaded_project_dir == loaded_project_dir:
+                return tuple(cls._hooks)
+            try:
+                if load_error is not None:
+                    raise load_error
+                cls._register_plugin_extension_point()
+                cls._clear_plugin_hooks()
+                PluginLoader.load_extension(
+                    "HOOKS",
+                    extra_sources=cfg.plugin or [],
+                    project_dir=load_project_dir,
+                )
+            except Exception as exc:
+                # A failed switch must not run the previous project's hooks or
+                # cache a partial load as ready; a later request can retry.
+                cls._clear_plugin_hooks()
+                cls._initialized = False
+                cls._loaded_project_dir = None
+                log.warn("hook.plugin_load_failed", {"error": str(exc)})
+            else:
+                cls._initialized = True
+                cls._loaded_project_dir = loaded_project_dir
+            return tuple(cls._hooks)
 
     @classmethod
     async def run_user_prompt_before(
@@ -574,10 +607,10 @@ class HookPipeline:
         """Return True when at least one hook can handle the stage."""
         started_at = time.perf_counter()
         project_dir = await cls._resolve_project_dir(input_data or {})
-        await cls.ensure_initialized(project_dir)
+        hooks = await cls.ensure_initialized(project_dir)
         has_handlers = any(
             cls._resolve_handler(entry.hook, stage) is not None
-            for entry in cls._hooks
+            for entry in hooks
         )
         log.debug("hook.stage_probe", {
             "stage": stage,
@@ -595,11 +628,13 @@ class HookPipeline:
     ) -> HookContext:
         stage_started_at = time.perf_counter()
         project_dir = await cls._resolve_project_dir(input_data)
-        await cls.ensure_initialized(project_dir)
+        hooks = await cls.ensure_initialized(project_dir)
         ctx = HookContext(stage=stage, input=input_data, output=output_data or {})
         cls._latch_execution_stop(ctx)
         handler_count = 0
-        for entry in cls._hooks:
+        # Handlers can await while another request changes the active project.
+        # This invocation must finish with the same project's hook set.
+        for entry in hooks:
             handler = cls._resolve_handler(entry.hook, stage)
             if not handler:
                 continue

@@ -592,6 +592,7 @@ dependencies = [
     { name = "defusedxml" },
     { name = "dingtalk-stream" },
     { name = "fastapi" },
+    { name = "filelock" },
     { name = "gitpython" },
     { name = "google-genai" },
     { name = "httpx", extra = ["socks"] },
@@ -671,6 +672,7 @@ requires-dist = [
     { name = "defusedxml", specifier = ">=0.7.1" },
     { name = "dingtalk-stream", specifier = ">=0.20" },
     { name = "fastapi", specifier = ">=0.109.0" },
+    { name = "filelock", specifier = ">=3.16.0" },
     { name = "gitpython", specifier = ">=3.1.41" },
     { name = "google-genai", specifier = ">=0.3.0" },
     { name = "httpx", extras = ["socks"], specifier = ">=0.26.0" },
@@ -712,7 +714,7 @@ requires-dist = [
     { name = "ulid-py", specifier = ">=1.1.0" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.27.0" },
     { name = "watchdog", specifier = ">=4.0.0" },
-    { name = "websockets", specifier = ">=14.0" },
+    { name = "websockets", specifier = ">=15.0" },
     { name = "wecom-aibot-sdk", specifier = ">=1.0.0" },
 ]
 provides-extras = ["postgres"]

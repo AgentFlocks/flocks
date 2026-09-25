@@ -111,6 +111,8 @@
   --switch-on: #047857;
   --switch-thumb: #ffffff;
   --shadow-overlay: 0 12px 32px rgba(15, 23, 42, 0.16);
+  /* 弹层遮罩（= bg-black/40，深浅色相同），给 ::backdrop 这类没法加类名的地方用 */
+  --overlay-backdrop: rgb(0 0 0 / 40%);
 
   color-scheme: light;
 }

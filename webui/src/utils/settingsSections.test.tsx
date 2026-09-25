@@ -58,7 +58,7 @@ describe('useSettingsSectionGroups gates', () => {
     await act(async () => { answer(false); });
     await waitFor(() => expect(result.current.ready).toBe(true));
     expect(sectionIds(result.current.groups)).not.toContain('ext-gated');
-    expect(sectionIds(result.current.groups)).toEqual(['preferences', 'archived-data', 'account', 'network-proxy', 'system-logs']);
+    expect(sectionIds(result.current.groups)).toEqual(['preferences', 'archived-data', 'account', 'network-proxy', 'voice-input', 'system-logs']);
   });
 
   it('runs the check once for several mounted instances and re-runs on refreshOn', async () => {

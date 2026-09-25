@@ -52,6 +52,10 @@ async def test_lifespan_cleans_replaced_files_without_upgrade_recovery(
     monkeypatch.setattr(app_module.Log, "create", lambda service: _DummyLogger())
     monkeypatch.setattr(app_module, "init_observability", lambda: None)
     monkeypatch.setattr(app_module, "shutdown_observability", lambda: None)
+    # This lifecycle test stubs config creation below; proxy startup has its
+    # own tests and must not read that deliberately minimal config module.
+    monkeypatch.setattr("flocks.net.apply_process_environment", lambda: {})
+    monkeypatch.setattr("flocks.net.describe_for_log", lambda: {})
     monkeypatch.setattr(app_module.Storage, "init", fake_storage_init)
     monkeypatch.setattr(app_module.Config, "get", fake_config_get)
     monkeypatch.setattr(app_module.asyncio, "to_thread", fake_to_thread)

@@ -1,6 +1,7 @@
 """Workflow execution engine."""
 
 from collections import deque
+from contextlib import nullcontext
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError, as_completed
 from dataclasses import dataclass, field
 import hashlib
@@ -19,7 +20,10 @@ from .errors import MaxStepsExceededError, NodeExecutionError, NodeTimeoutError,
 from .execution_plan import WorkflowExecutionPlan
 from .execution_state import ExecutionResult, StepResult, WorkflowExecutionState
 from .models import Edge, Workflow, Node
-from .repl_runtime import HostProcessPythonExecRuntime, PythonExecRuntime, Runtime
+from .repl_runtime import (
+    HostProcessPythonExecRuntime, PythonExecRuntime, Runtime,
+    SandboxPythonExecRuntime, _legacy_registry_cancel_scope,
+)
 from flocks.net.http import sync_client
 
 
@@ -275,9 +279,9 @@ class WorkflowEngine:
         timeout_cancel_event = threading.Event()
         previous_cancel_checker = None
         previous_enable_cancel_trace = None
-        if isinstance(self.runtime, PythonExecRuntime):
+        if isinstance(self.runtime, (PythonExecRuntime, SandboxPythonExecRuntime)):
             previous_cancel_checker = self.runtime.cancel_checker
-            previous_enable_cancel_trace = self.runtime.enable_cancel_trace
+            previous_enable_cancel_trace = getattr(self.runtime, "enable_cancel_trace", None)
 
             def _runtime_cancel_requested() -> bool:
                 return timeout_cancel_event.is_set() or _run_deadline_exceeded() or bool(cancel and cancel())
@@ -291,7 +295,8 @@ class WorkflowEngine:
             # Enabling sys.settrace for every ordinary workflow line would add
             # a large steady-state cost; host-thread timeouts keep their legacy
             # nonfatal, best-effort semantics.
-            self.runtime.enable_cancel_trace = cancel is not None
+            if isinstance(self.runtime, PythonExecRuntime):
+                self.runtime.enable_cancel_trace = cancel is not None
         try:
 
             def _raise_cancelled() -> None:
@@ -846,9 +851,10 @@ class WorkflowEngine:
                     timeout_executor.shutdown(wait=False, cancel_futures=True)
                 except TypeError:
                     timeout_executor.shutdown(wait=False)
-            if isinstance(self.runtime, PythonExecRuntime):
+            if isinstance(self.runtime, (PythonExecRuntime, SandboxPythonExecRuntime)):
                 self.runtime.cancel_checker = previous_cancel_checker
-                self.runtime.enable_cancel_trace = bool(previous_enable_cancel_trace)
+                if isinstance(self.runtime, PythonExecRuntime):
+                    self.runtime.enable_cancel_trace = bool(previous_enable_cancel_trace)
 
     def run_node(self, node_id: str, inputs: Dict[str, Any]) -> "StepResult":
         """Public API: execute a single node by id and return a StepResult.
@@ -964,21 +970,19 @@ class WorkflowEngine:
         from .tools import ToolFacade, get_tool_registry
 
         _rt = _runtime or self.runtime
-        cancel_checker = None
-        if isinstance(_rt, PythonExecRuntime):
-            reg = _rt.tool_registry or get_tool_registry()
-            cancel_checker = _rt.cancel_checker
+        reg = getattr(_rt, "tool_registry", None) or get_tool_registry()
+        cancel_checker = getattr(_rt, "cancel_checker", None)
+        cancel_scope = nullcontext()
+        with_cancel_checker = getattr(reg, "with_cancel_checker", None)
+        if callable(with_cancel_checker):
+            reg = with_cancel_checker(cancel_checker)
         else:
-            reg = get_tool_registry()
-        if hasattr(reg, "cancel_checker"):
-            try:
-                reg.cancel_checker = cancel_checker
-            except Exception:
-                pass
+            cancel_scope = _legacy_registry_cancel_scope(reg, cancel_checker)
         facade = ToolFacade(reg)
         merged_args = {**(node.tool_args or {}), **inputs}
         try:
-            result = facade.run(node.tool_name, **merged_args)
+            with cancel_scope:
+                result = facade.run(node.tool_name, **merged_args)
         except RunCancelledError:
             raise
         except Exception as e:

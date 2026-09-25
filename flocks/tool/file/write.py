@@ -130,28 +130,28 @@ def _looks_like_filename_only_intent(raw_path: str, resolved_path: str, base_dir
         return False
 
 
-async def _resolve_owner_username(ctx: ToolContext) -> Optional[str]:
-    """Resolve owner username from auth context, then session ownership."""
+async def _resolve_output_owner(ctx: ToolContext) -> tuple[Optional[str], Optional[str]]:
+    """Resolve a trusted output writer's username and immutable account id."""
     try:
         from flocks.auth.context import get_current_auth_user
         auth_user = get_current_auth_user()
         if auth_user and getattr(auth_user, "username", None):
-            return str(auth_user.username)
+            return str(auth_user.username), str(auth_user.id)
     except Exception:
         pass
 
     session_id = getattr(ctx, "session_id", None)
     if not session_id or session_id == "default":
-        return None
+        return None, None
     try:
         from flocks.session.session import Session
 
         session = await Session.get_by_id(session_id)
-        if session and getattr(session, "owner_username", None):
-            return str(session.owner_username)
+        if session:
+            return session.owner_username, session.owner_user_id
     except Exception:
         pass
-    return None
+    return None, None
 
 
 async def _build_output_attachment(
@@ -163,9 +163,9 @@ async def _build_output_attachment(
     try:
         from flocks.workspace.manager import WorkspaceManager
 
-        owner_username = await _resolve_owner_username(ctx)
+        owner_username, owner_user_id = await _resolve_output_owner(ctx)
         scope = WorkspaceManager.get_instance().resolve_output_scope(
-            filepath, username=owner_username,
+            filepath, username=owner_username, user_id=owner_user_id,
         )
         if scope is None or not scope.path.is_file():
             return None
@@ -187,6 +187,7 @@ async def _build_output_attachment(
                 "root": "workspace-output",
                 "path": scope.relative_path,
                 "username": scope.username,
+                "userID": scope.user_id,
             },
         }
     except (OSError, RuntimeError, ValueError) as exc:
@@ -220,9 +221,9 @@ async def _maybe_redirect_to_default_outputs(
     try:
         from flocks.workspace.manager import WorkspaceManager
 
-        owner_username = await _resolve_owner_username(ctx)
+        owner_username, owner_user_id = await _resolve_output_owner(ctx)
         outputs_dir = WorkspaceManager.get_instance().get_default_outputs_dir(
-            username=owner_username
+            username=owner_username, user_id=owner_user_id,
         )
         redirected = str((outputs_dir / filename).resolve())
         if redirected != resolved_path:

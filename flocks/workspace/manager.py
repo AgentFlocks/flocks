@@ -88,6 +88,7 @@ class WorkspaceOutputScope:
     root: Path
     relative_path: str
     username: Optional[str]
+    user_id: Optional[str] = None
 
 
 class WorkspaceManager:
@@ -101,6 +102,10 @@ class WorkspaceManager:
     """
 
     _instance: Optional["WorkspaceManager"] = None
+    #: Set by an extension that isolates accounts inside one workspace. Output
+    #: directories then must never be redirected by a symlink, including the
+    #: shared workspace outputs, which a single-user install may relocate.
+    isolates_accounts: bool = False
 
     def __init__(self) -> None:
         self._workspace_dir: Optional[Path] = None
@@ -150,17 +155,22 @@ class WorkspaceManager:
             value = f"user_{value}"
         return value
 
-    def get_user_workspace_dir(self, username: str) -> Path:
+    def get_user_workspace_dir(self, username: Optional[str], *, user_id: Optional[str] = None) -> Path:
         """
         Return per-username workspace root under ``workspace/users/<username>``.
         """
         root = self.get_workspace_dir()
+        # The OSS layout remains username-based. Extensions can use the
+        # authenticated immutable id without inferring ownership from a name.
+        if not username:
+            return root
         return root / "users" / self.normalize_username_for_path(username)
 
     def get_default_outputs_dir(
         self,
         *,
         username: Optional[str] = None,
+        user_id: Optional[str] = None,
         today: Optional[dt.date] = None,
         include_today: bool = True,
     ) -> Path:
@@ -171,14 +181,22 @@ class WorkspaceManager:
         - Pro-style override when username provided:
           ``workspace/users/<username>/outputs/<today>``
         """
-        self.ensure_dirs()
-        if username:
-            base = self.get_user_workspace_dir(username) / "outputs"
+        if username or user_id:
+            scope_root = self.get_user_workspace_dir(username, user_id=user_id)
         else:
-            base = self.get_workspace_dir() / "outputs"
+            scope_root = self.get_workspace_dir()
+        base = scope_root / "outputs"
         if include_today:
             day = (today or dt.date.today()).isoformat()
             base = base / day
+        # Where accounts are separated, check the final target before mkdir:
+        # outputs/ or today's directory can be a symlink even when the account
+        # root itself is legitimate. The shared workspace outputs of a
+        # single-user install may be relocated with a symlink.
+        scoped = self.isolates_accounts or scope_root != self.get_workspace_dir()
+        if scoped and not base.resolve().is_relative_to(scope_root.resolve()):
+            raise PermissionError("Output directory escapes its workspace scope")
+        self.ensure_dirs()
         base.mkdir(parents=True, exist_ok=True)
         return base
 
@@ -252,6 +270,7 @@ class WorkspaceManager:
         filepath: str | Path,
         *,
         username: Optional[str] = None,
+        user_id: Optional[str] = None,
     ) -> Optional[WorkspaceOutputScope]:
         """Classify an absolute host path in the supplied user's or global outputs.
 
@@ -270,13 +289,14 @@ class WorkspaceManager:
             workspace = lexical_workspace.resolve(strict=False)
             target = candidate.resolve(strict=False)
             roots = []
-            if username:
+            if username or user_id:
                 roots.append((
-                    self.get_user_workspace_dir(username) / "outputs",
-                    self.normalize_username_for_path(username),
+                    self.get_user_workspace_dir(username, user_id=user_id) / "outputs",
+                    self.normalize_username_for_path(username) if username else None,
+                    user_id,
                 ))
-            roots.append((self.get_workspace_dir() / "outputs", None))
-            for output_root, scope_username in roots:
+            roots.append((self.get_workspace_dir() / "outputs", None, None))
+            for output_root, scope_username, scope_user_id in roots:
                 lexical_root = output_root.expanduser().absolute()
                 expected_root = workspace / lexical_root.relative_to(lexical_workspace)
                 if not (
@@ -296,6 +316,7 @@ class WorkspaceManager:
                     root=root,
                     relative_path=target.relative_to(root).as_posix(),
                     username=scope_username,
+                    user_id=scope_user_id,
                 )
         except (OSError, RuntimeError, TypeError, ValueError):
             return None

@@ -83,3 +83,41 @@ async def test_preexisting_target_generated_column_fails_explicitly_without_over
     report = await migrate([source], report_dir=tmp_path / "report", apply=True)
     assert not report.ok and not report.applied and report.verified == 0
     assert source.read_bytes() == original
+
+
+@pytest.mark.parametrize("timezone", ["UTC", "Asia/Shanghai", "America/Los_Angeles"])
+async def test_migrated_text_timestamp_default_preserves_utc_second_filters(tmp_path, timezone):
+    source = tmp_path / "audit.db"
+    historical = "2024-01-02 03:04:05"
+    with sqlite3.connect(source) as connection:
+        connection.execute("CREATE TABLE audit_events_v1(id TEXT PRIMARY KEY,"
+                           "created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)")
+        connection.execute("INSERT INTO audit_events_v1 VALUES (?, ?)", ("historical", historical))
+    original = source.read_bytes()
+
+    report = await migrate([source], report_dir=tmp_path / "report", apply=True)
+
+    assert report.ok and report.verified == 1, report.errors
+    connection = await asyncpg.connect(os.environ["FLOCKS_DB_DSN"])
+    try:
+        await connection.execute("SELECT set_config('TimeZone', $1, false)", timezone)
+        async with connection.transaction():
+            # NOW() is stable inside this transaction. Audit time filters use
+            # these UTC, second-precision bounds regardless of the PG timezone.
+            bound = await connection.fetchval(
+                "SELECT to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS')"
+            )
+            created = await connection.fetchval(
+                "INSERT INTO audit_events_v1(id) VALUES ('new-event') RETURNING created_at"
+            )
+            assert created == bound
+            assert await connection.fetchval(
+                "SELECT COUNT(*) FROM audit_events_v1 WHERE id='new-event' "
+                "AND created_at >= $1 AND created_at <= $1", bound,
+            ) == 1
+            assert await connection.fetchval(
+                "SELECT created_at FROM audit_events_v1 WHERE id='historical'"
+            ) == historical
+    finally:
+        await connection.close()
+    assert source.read_bytes() == original

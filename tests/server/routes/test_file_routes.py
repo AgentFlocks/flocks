@@ -45,6 +45,52 @@ def test_download_file_returns_binary_from_data_dir(file_client):
     assert response.headers["content-type"].startswith("image/png")
 
 
+def test_oss_workspace_access_keeps_core_containment_policy(file_client):
+    client, _data, workspace = file_client
+    file = workspace / "users" / "local-user" / "note.txt"
+    file.parent.mkdir(parents=True)
+    file.write_text("OSS workspace content", encoding="utf-8")
+    assert client.get("/api/file/content", params={"path": str(file)}).json()["content"] == "OSS workspace content"
+    assert client.get("/api/file/download", params={"path": str(file)}).text == "OSS workspace content"
+    assert client.get("/api/file/list", params={"path": str(workspace)}).status_code == 200
+
+
+def test_list_skips_symlink_loop_instead_of_failing(file_client):
+    client, _data, workspace = file_client
+    (workspace / "note.txt").write_text("ok", encoding="utf-8")
+    (workspace / "a").symlink_to(workspace / "b")
+    (workspace / "b").symlink_to(workspace / "a")
+
+    response = client.get("/api/file/list", params={"path": str(workspace)})
+
+    assert response.status_code == 200
+    names = {node["name"] for node in response.json()}
+    assert "note.txt" in names
+    assert not names & {"a", "b"}
+
+
+def test_hit_checker_resolves_workspace_once_and_decides_each_path_once(
+    file_client, monkeypatch: pytest.MonkeyPatch,
+):
+    _client, _data, workspace = file_client
+    from flocks.server.routes import file as file_routes
+
+    note = workspace / "note.txt"
+    note.write_text("ok", encoding="utf-8")
+    original = file_routes.assert_http_workspace_path_access
+    calls = []
+
+    def spy(path, **kwargs):
+        calls.append((path, kwargs.get("workspace")))
+        return original(path, **kwargs)
+
+    monkeypatch.setattr(file_routes, "assert_http_workspace_path_access", spy)
+    readable = file_routes._workspace_hit_checker()
+
+    assert readable(str(note)) and readable(str(note))
+    assert calls == [(str(note), workspace.resolve())]
+
+
 def test_download_file_rejects_unallowed_path(file_client, tmp_path: Path):
     client, _data, _workspace = file_client
     secret = tmp_path / "outside.png"

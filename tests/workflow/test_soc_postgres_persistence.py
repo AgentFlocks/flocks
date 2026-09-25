@@ -87,9 +87,9 @@ def test_two_host_process_batches_share_dedup_and_activity(dashboard):
     assert registry.current().dsn not in json.dumps(frames)
     assert all(frame["kind"] in {"soc_alerts_write", "cancelled"} for frame in frames)
     with sync_query.connect(readonly=True) as db:
-        assert db.execute("SELECT COUNT(*), COUNT(DISTINCT dedup_key), COUNT(DISTINCT rowid) FROM alert_records").fetchone() == (200, 200, 200)
+        assert tuple(db.execute("SELECT COUNT(*), COUNT(DISTINCT dedup_key), COUNT(DISTINCT rowid) FROM alert_records").fetchone()) == (200, 200, 200)
         assert db.execute("SELECT COUNT(*) FROM soc_dashboard_alert_facts").fetchone()[0] == 200
-        assert db.execute("SELECT COUNT(*), COUNT(DISTINCT event_key) FROM soc_dashboard_activity_events").fetchone() == (400, 400)
+        assert tuple(db.execute("SELECT COUNT(*), COUNT(DISTINCT event_key) FROM soc_dashboard_activity_events").fetchone()) == (400, 400)
     print(json.dumps({"case": "two_host_process_batches", "inputs": 400, "stored": 200,
                       "activity_events": 400, "elapsed_ms": elapsed_ms}))
 

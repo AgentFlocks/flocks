@@ -191,6 +191,14 @@ class Session:
         return SessionPolicy.can_read(session)
 
     @staticmethod
+    def _is_writable_to_current_user(session: SessionInfo) -> bool:
+        """Keep trusted internal maintenance while enforcing user mutations."""
+        from flocks.session.policy import SessionPolicy
+
+        user = get_current_auth_user()
+        return user is None or SessionPolicy.can_write(session, user)
+
+    @staticmethod
     def _is_owned_by_auth_user(session: SessionInfo, auth_user) -> bool:
         """Delegate to the unified SessionPolicy (kept for backward compatibility)."""
         from flocks.session.policy import SessionPolicy
@@ -472,10 +480,12 @@ class Session:
             }
         kwargs["metadata"] = metadata
         
-        async def persist(parent: Optional[SessionInfo] = None) -> SessionInfo:
+        async def persist(parent: Optional[SessionInfo] = None, *, transaction=None) -> SessionInfo:
             if parent_id is not None:
                 if parent is None:
                     raise ValueError(f"Parent session {parent_id} not found")
+                if not cls._is_writable_to_current_user(parent):
+                    raise PermissionError("Cannot attach a child to another user's session")
                 child_owner_id = kwargs.get("owner_user_id")
                 child_owner_username = kwargs.get("owner_username")
                 if parent.owner_user_id and child_owner_id and parent.owner_user_id != child_owner_id:
@@ -497,11 +507,17 @@ class Session:
             )
 
             # The parent status check and child row creation share the archive
-            # lock, so an archive cannot commit between them in this process.
+            # guard and one PG transaction. Another process cannot change the
+            # locked parent's owner/status between validation and child insert.
             storage_key = f"session:{project_id}:{created.id}"
-            await Storage.set(storage_key, created, "session")
-            cls._remember_key(created.id, storage_key)
-            cls._sync_list_cache(created)
+            if transaction is None:
+                await Storage.set(storage_key, created, "session")
+            else:
+                await transaction.execute(
+                    "INSERT INTO runtime_state (key, value, value_type, updated_at) "
+                    "VALUES (?, ?::jsonb, 'session', now())",
+                    (storage_key, created.model_dump_json(by_alias=True)),
+                )
             return created
 
         from flocks.project.project import Project, ProjectDeletionError
@@ -518,19 +534,24 @@ class Session:
             else:
                 async with cls._tree_lock:
                     async with cls.lifecycle_lock(parent_id):
-                        parent = await Storage.get(
-                            f"session:{project_id}:{parent_id}",
-                            SessionInfo,
-                        )
-                        if parent is None or parent.status == "deleted":
-                            raise ValueError(f"Parent session {parent_id} not found")
                         if cls.is_lifecycle_transitioning(parent_id):
                             raise ValueError(
                                 f"Parent session {parent_id} is changing lifecycle state"
                             )
-                        if parent.status != "active":
-                            raise ValueError(f"Parent session {parent_id} is not active")
-                        session = await persist(parent)
+                        async with Storage.transaction() as transaction:
+                            row = await transaction.fetch_one(
+                                "SELECT value FROM runtime_state WHERE key = ? FOR UPDATE",
+                                (f"session:{project_id}:{parent_id}",),
+                            )
+                            parent = SessionInfo.model_validate_json(row[0]) if row else None
+                            if parent is None or parent.status == "deleted":
+                                raise ValueError(f"Parent session {parent_id} not found")
+                            if parent.status != "active":
+                                raise ValueError(f"Parent session {parent_id} is not active")
+                            session = await persist(parent, transaction=transaction)
+
+        cls._remember_key(session.id, f"session:{project_id}:{session.id}")
+        cls._sync_list_cache(session)
 
         try:
             from flocks.agent.registry import Agent
@@ -773,16 +794,39 @@ class Session:
                         elif key in update_data:
                             update_data[key] = value
 
-            return SessionInfo(**update_data)
+            changed = SessionInfo(**update_data)
+            if get_current_auth_user() is not None and (
+                changed.id != session.id
+                or changed.project_id != session.project_id
+                or changed.parent_id != session.parent_id
+            ):
+                raise PermissionError("Session topology cannot be changed through generic update")
+            return changed
 
-        async with cls.lifecycle_lock(session_id):
-            if cls.is_lifecycle_transitioning(session_id):
-                return None
-            updated_session = await cls._mutate_document_locked(
-                project_id, session_id, apply_updates, allow_inactive=allow_inactive,
-            )
-            if updated_session is None:
-                return None
+        async def update_locked():
+            async with cls.lifecycle_lock(session_id):
+                if cls.is_lifecycle_transitioning(session_id):
+                    return None
+                return await cls._mutate_document_locked(
+                    project_id, session_id, apply_updates, allow_inactive=allow_inactive,
+                )
+
+        identity_fields = {
+            "id", "project_id", "projectID", "parent_id", "parentID",
+            "owner_user_id", "ownerUserID", "owner_username", "ownerUsername",
+        }
+        if identity_fields.intersection(updates):
+            from flocks.project.project import Project
+
+            # Identity/topology changes share the lifecycle linearization point.
+            # Ordinary runner metadata writes must remain free of this guard:
+            # stop/archive may wait for those writes while owning the project.
+            async with Project.lifecycle_guard(project_id):
+                updated_session = await update_locked()
+        else:
+            updated_session = await update_locked()
+        if updated_session is None:
+            return None
         
         log.info("session.updated", {
             "id": session_id,
@@ -868,7 +912,7 @@ class Session:
             if any(
                 session.status == "deleted"
                 or (session.status != "active" and not allow_inactive)
-                or (check_access and not cls._is_accessible_to_current_user(session))
+                or (check_access and not cls._is_writable_to_current_user(session))
                 for session in latest.values()
             ):
                 return None
@@ -1021,6 +1065,9 @@ class Session:
         Returns:
             True if deleted
         """
+        from flocks.session.policy import SessionPolicy
+
+        actor = get_current_auth_user()
         sessions = await cls._begin_lifecycle_transition(project_id, session_id)
         if not sessions:
             return False
@@ -1032,7 +1079,10 @@ class Session:
                 await Message.quiesce_parts(session.id, persist=False)
 
             refreshed = await cls.collect_tree(project_id, session_id)
-            if not refreshed:
+            if not refreshed or (
+                actor is not None
+                and any(not SessionPolicy.can_delete(item, actor) for item in refreshed)
+            ):
                 return False
             sessions = refreshed
             session_ids = [session.id for session in sessions]
@@ -1058,6 +1108,20 @@ class Session:
                     "WHERE session_id = ANY(?::text[]) ORDER BY session_id FOR UPDATE",
                     (ordered_ids,),
                 )
+                if actor is not None:
+                    # Check the actual locked rows in the deletion transaction;
+                    # a prior tree snapshot is insufficient after reassignment.
+                    keys = [f"session:{item.project_id}:{item.id}" for item in sessions]
+                    rows = await db.fetch_all(
+                        "SELECT key, value FROM runtime_state "
+                        "WHERE key = ANY(?::text[]) ORDER BY key FOR UPDATE",
+                        (keys,),
+                    )
+                    if len(rows) != len(keys) or any(
+                        not SessionPolicy.can_delete(SessionInfo.model_validate_json(row[1]), actor)
+                        for row in rows
+                    ):
+                        raise PermissionError("Session delete permission changed")
 
             async def _delete_search_index(db) -> None:
                 from flocks.session.message_pages import remove_sessions
@@ -1147,6 +1211,8 @@ class Session:
             })
             deleted = True
             return True
+        except PermissionError:
+            return False
         finally:
             await cls._end_lifecycle_transition(sessions)
             if deleted:
@@ -1156,10 +1222,10 @@ class Session:
     @classmethod
     async def retain_deleted_user_sessions(cls, user_id: str, username: str) -> int:
         """
-        Detach session ownership from a deleted user id while preserving username ownership.
+        Preserve deleted-account sessions for administrator review.
 
-        This allows a newly created account with the same username to regain access
-        to historical private sessions.
+        The retained username is historical metadata, not an ownership grant
+        for a later account that happens to reuse the same name.
         """
         entries = await Storage.list_entries(prefix="session:", model=SessionInfo)
         migrated = 0
@@ -1169,14 +1235,15 @@ class Session:
                 continue
             if session.owner_user_id != user_id:
                 continue
-            await cls.update(
+            updated = await cls.update(
                 project_id=session.project_id,
                 session_id=session.id,
                 allow_inactive=True,
                 owner_user_id=_UNSET,
                 owner_username=username,
             )
-            migrated += 1
+            if updated is not None:
+                migrated += 1
 
         return migrated
 
@@ -1429,6 +1496,9 @@ class Session:
         )
 
         async with Project.lifecycle_guard(project_id):
+            tree = await cls.collect_tree(project_id, session_id)
+            if not tree or any(not cls._is_writable_to_current_user(item) for item in tree):
+                return False
             project_state = (
                 Project.registry_state(project_id, owner_id=project_owner_id)
                 if project_owner_id
@@ -1509,7 +1579,7 @@ class Session:
         """Claim a complete tree so ordinary writes cannot overtake its transition."""
         async with cls._tree_lock:
             sessions = await cls.collect_tree(project_id, session_id)
-            if not sessions:
+            if not sessions or any(not cls._is_writable_to_current_user(item) for item in sessions):
                 return []
             if require_root and sessions[0].parent_id is not None:
                 log.warn("session.lifecycle.non_root_rejected", {"id": session_id})
@@ -1525,6 +1595,7 @@ class Session:
                 ids = {session.id for session in sessions}
                 if (
                     not sessions
+                    or any(not cls._is_writable_to_current_user(item) for item in sessions)
                     or ids & cls._lifecycle_transition_ids
                     or any(cls.has_active_operations(item_id) for item_id in ids)
                 ):

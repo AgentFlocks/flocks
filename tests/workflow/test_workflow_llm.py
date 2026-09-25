@@ -1,6 +1,8 @@
 import asyncio
 import threading
 import time
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -351,3 +353,182 @@ def test_get_llm_client_does_not_stick_to_old_default(monkeypatch):
 
     assert out1 == "first:first-model"
     assert out2 == "second:second-model"
+
+
+def test_workflow_options_are_rebuilt_for_actual_fallback_model(monkeypatch):
+    from flocks.provider import options
+    from flocks.workflow import llm as workflow_llm_mod
+
+    first = _FakeProvider("first", "error", models=["requested"])
+    fallback = _FakeProvider("fallback", "ok", models=["default"])
+    _patch_provider(monkeypatch, {"first": first, "fallback": fallback})
+
+    async def resolve_default():
+        return {"provider_id": "fallback", "model_id": "default"}
+
+    monkeypatch.setattr(workflow_llm_mod.Config, "resolve_default_llm", resolve_default)
+    built, sent = [], []
+
+    def build(provider_id, model_id, **kwargs):
+        # Workflow chat() is non-streaming: no session reasoning or max_tokens defaults.
+        assert kwargs == {"reasoning_enabled": False, "resolve_max_tokens": False}
+        built.append((provider_id, model_id))
+        return {"reasoning_effort": f"mapped-for-{provider_id}/{model_id}", "max_tokens": 1234}
+
+    original = _FakeProvider.chat
+
+    async def capture(self, model_id, messages, **kwargs):
+        sent.append((self.id, model_id, kwargs))
+        return await original(self, model_id, messages, **kwargs)
+
+    monkeypatch.setattr(options, "build_provider_options", build)
+    monkeypatch.setattr(_FakeProvider, "chat", capture)
+    assert LLMClient(provider_id="first", model="requested").ask("hello") == "fallback:default"
+    assert built == [("first", "requested"), ("fallback", "default")]
+    for provider_id, model_id, kwargs in sent:
+        assert kwargs == {"temperature": 0.2, "max_tokens": 1234,
+                          "reasoning_effort": f"mapped-for-{provider_id}/{model_id}"}
+
+
+def test_workflow_hooks_receive_and_transform_effective_options(monkeypatch):
+    from flocks.hooks.pipeline import HookPipeline, HookStage
+    from flocks.provider import options
+
+    provider = _FakeProvider("demo", "ok", models=["m"])
+    _patch_provider(monkeypatch, {"demo": provider})
+    monkeypatch.setattr(options, "build_provider_options", lambda *_, **__: {"max_tokens": 100})
+    seen = []
+
+    async def before(payload):
+        assert payload["request"]["providerOptions"] == {"max_tokens": 100, "temperature": 0.2}
+        return SimpleNamespace(output={"request": {"providerOptions": {"max_tokens": 50, "temperature": 0.1}}})
+
+    async def chat(self, model_id, messages, **kwargs):
+        seen.append(kwargs)
+        return _FakeResponse("ok")
+
+    monkeypatch.setattr(HookPipeline, "has_stage_handlers", AsyncMock(side_effect=lambda stage, *_: stage == HookStage.LLM_BEFORE))
+    monkeypatch.setattr(HookPipeline, "run_llm_before", before)
+    monkeypatch.setattr(_FakeProvider, "chat", chat)
+    assert LLMClient(provider_id="demo", model="m").ask("hello") == "ok"
+    assert seen == [{"max_tokens": 50, "temperature": 0.1}]
+
+
+@pytest.mark.parametrize("provider_id, model_id", [
+    ("anthropic", "claude-sonnet-4-5"),
+    ("google", "gemini-2.5-pro"),
+])
+def test_workflow_chat_does_not_inherit_session_streaming_options(monkeypatch, provider_id, model_id):
+    """Uses the real option builder. Session defaults would enable extended
+    thinking with max_tokens 24192 for Claude, which the Anthropic SDK refuses
+    to send without streaming (limit 21333), and would mix Gemini thought
+    summaries into the answer of the non-streaming chat() call."""
+    provider = _FakeProvider(provider_id, "ok", models=[model_id])
+    _patch_provider(monkeypatch, {provider_id: provider})
+    sent = []
+
+    async def chat(self, model_id, messages, **kwargs):
+        sent.append(kwargs)
+        return _FakeResponse("ok")
+
+    monkeypatch.setattr(_FakeProvider, "chat", chat)
+    assert LLMClient(provider_id=provider_id, model=model_id).ask("hello") == "ok"
+    (kwargs,) = sent
+    assert "thinking" not in kwargs and "thinkingConfig" not in kwargs
+    assert kwargs.get("max_tokens", 0) <= 21333
+
+
+@pytest.mark.parametrize("behavior", ["ok", "error", "timeout", "retry", "cancel"])
+def test_workflow_closes_private_client_on_owning_loop(monkeypatch, behavior):
+    provider = _FakeProvider("demo", "ok", models=["m"])
+    shared_client = SimpleNamespace(close=AsyncMock())
+    provider._client = shared_client
+    _patch_provider(monkeypatch, {"demo": provider})
+    clients = []
+    cancelled = threading.Event()
+    closed = threading.Event()
+
+    async def chat(self, model_id, messages, **kwargs):
+        loop = asyncio.get_running_loop()
+        client = SimpleNamespace(closed=False)
+
+        async def close():
+            assert asyncio.get_running_loop() is loop
+            client.closed = True
+            closed.set()
+
+        client.close = close
+        clients.append(client)
+        self._client = client
+        if behavior == "error" or behavior == "retry" and len(clients) == 1:
+            raise RuntimeError("simulated failure")
+        if behavior == "cancel":
+            cancelled.set()
+        if behavior in {"timeout", "cancel"}:
+            await asyncio.sleep(5)
+        return _FakeResponse("ok")
+
+    monkeypatch.setattr(_FakeProvider, "chat", chat)
+    client = LLMClient(provider_id="demo", model="m", cancel_checker=cancelled.is_set if behavior == "cancel" else None)
+    kwargs = {"timeout_s": 0.01} if behavior == "timeout" else {"max_retries": 1, "retry_delay_s": 0}
+    if behavior in {"error", "timeout", "cancel"}:
+        with pytest.raises(RunCancelledError if behavior == "cancel" else ValueError):
+            client.ask("hello", **kwargs)
+    else:
+        assert client.ask("hello", **kwargs) == "ok"
+    # Cancellation returns from the worker before the loop finishes its finally.
+    assert closed.wait(1)
+    assert clients and all(item.closed for item in clients)
+    if behavior == "retry":
+        assert len(clients) == 2
+    assert provider._client is shared_client
+    shared_client.close.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_failure", [False, True])
+async def test_workflow_closes_both_google_client_pools(monkeypatch, async_failure):
+    from flocks.workflow import llm as workflow_llm_mod
+
+    async def close_async():
+        if async_failure:
+            await asyncio.sleep(5)
+
+    client = SimpleNamespace(aio=SimpleNamespace(aclose=AsyncMock(side_effect=close_async)), close=Mock())
+    provider = SimpleNamespace(_client=client)
+    monkeypatch.setattr(workflow_llm_mod, "_CLIENT_CLOSE_TIMEOUT_S", 0.01)
+    await workflow_llm_mod._close_provider_client(provider)
+    assert provider._client is None
+    client.aio.aclose.assert_awaited_once()
+    client.close.assert_called_once()
+
+
+@pytest.mark.parametrize("failure", ["returns-self", "copy-error", "readonly-client"])
+def test_workflow_refuses_clone_that_cannot_isolate_client(monkeypatch, failure):
+    shared_client = SimpleNamespace(close=AsyncMock())
+    if failure == "readonly-client":
+        class ReadOnlyProvider(_FakeProvider):
+            @property
+            def _client(self):
+                return shared_client
+
+            def __copy__(self):
+                return ReadOnlyProvider(self.id, self._behavior)
+
+        provider = ReadOnlyProvider("demo", "ok")
+    else:
+        provider = _FakeProvider("demo", "ok")
+        provider._client = shared_client
+
+        def invalid_copy(self):
+            if failure == "copy-error":
+                raise RuntimeError("Cannot copy provider")
+            return self
+
+        monkeypatch.setattr(_FakeProvider, "__copy__", invalid_copy)
+    _patch_provider(monkeypatch, {"demo": provider})
+    client = LLMClient(provider_id="demo", model="m")
+    with pytest.raises(RuntimeError):
+        client._prepare_provider("demo")
+    assert provider._client is shared_client
+    shared_client.close.assert_not_awaited()

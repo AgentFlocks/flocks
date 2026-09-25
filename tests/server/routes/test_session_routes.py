@@ -2963,6 +2963,7 @@ class TestSessionContext:
         assert result.attachments and len(result.attachments) == 1
         assert result.attachments[0]["source"] == {
             "root": "workspace-output", "path": relative, "username": output_username,
+            "userID": user.id if scope == "user" else None,
         }
         assert result.attachments[0]["sessionID"] == session.id
         assert result.attachments[0]["messageID"] == message.id
@@ -3211,13 +3212,13 @@ class TestSessionContext:
         assert history.json() == []
 
     @pytest.mark.asyncio
-    async def test_legacy_username_owner_binds_upload_from_authenticated_user(
+    async def test_legacy_username_cannot_claim_session_or_bind_upload(
         self,
         client: AsyncClient,
         tmp_path,
         monkeypatch: pytest.MonkeyPatch,
     ):
-        from flocks.session.files import create_chat_upload_target
+        from flocks.session.files import create_chat_upload_target, session_uploads_dir
 
         owner = AuthUser(id="usr_legacy_owner", username="legacy", role="member", status="active")
         monkeypatch.setattr(session_routes, "require_user", lambda _request: owner)
@@ -3231,6 +3232,7 @@ class TestSessionContext:
         upload_id = "prt_legacy_upload_1234"
         staged = create_chat_upload_target(owner.id, upload_id, "legacy.md")
         staged.write_text("legacy", encoding="utf-8")
+        assert not session_uploads_dir(session.id).exists()
 
         response = await client.post(
             f"/api/session/{session.id}/message",
@@ -3248,7 +3250,10 @@ class TestSessionContext:
                 "noReply": True,
             },
         )
-        assert response.status_code == status.HTTP_200_OK
+        assert response.status_code == status.HTTP_403_FORBIDDEN
+        assert staged.read_text(encoding="utf-8") == "legacy"
+        assert not session_uploads_dir(session.id).exists()
+        assert await Message.list(session.id) == []
 
     @pytest.mark.asyncio
     async def test_shared_reader_cannot_mutate_or_run_prompt_queue(
@@ -3493,7 +3498,7 @@ class TestSessionContextRegressions:
         assert part.state.attachments[0]["url"] == large
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("mutation", ["source", "remove", "metadata", "tool", "type"])
+    @pytest.mark.parametrize("mutation", ["source", "source_user_id", "remove", "metadata", "tool", "type"])
     async def test_patch_cannot_change_write_provenance(self, client: AsyncClient, session_id: str, mutation):
         message = await Message.create(session_id, MessageRole.ASSISTANT, "")
         part = ToolPart(
@@ -3511,6 +3516,8 @@ class TestSessionContextRegressions:
         body = session_routes._part_to_response_info(part, session_id=session_id, message_id=message.id).model_dump()
         if mutation == "source":
             body["state"]["attachments"][0]["source"]["username"] = "another-user"
+        elif mutation == "source_user_id":
+            body["state"]["attachments"][0]["source"]["userID"] = "another-user-id"
         elif mutation == "remove":
             body["state"].pop("attachments")
         elif mutation == "metadata":

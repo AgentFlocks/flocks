@@ -298,6 +298,13 @@ def output_file_attachments(tool_name: str, attachments: Any) -> list[dict[str, 
             ):
                 continue
             safe_source["username"] = username
+        if "userID" in source:
+            user_id = source["userID"]
+            if "username" not in source or (user_id is not None and (
+                not isinstance(user_id, str) or not user_id or len(user_id) > 128
+            )):
+                continue
+            safe_source["userID"] = user_id
         identifiers = {
             key: item[key]
             for key in ("sessionID", "messageID")
@@ -328,6 +335,7 @@ def session_outputs_root(session: Any) -> Path:
     username = str(getattr(session, "owner_username", "") or "").strip() or None
     return WorkspaceManager.get_instance().get_default_outputs_dir(
         username=username,
+        user_id=getattr(session, "owner_user_id", None),
         include_today=False,
     ).resolve(strict=False)
 
@@ -364,21 +372,32 @@ def _attachment_source_path(
     source = attachment["source"]
     relative = Path(source["path"])
     try:
+        manager = WorkspaceManager.get_instance()
+        lexical_workspace = manager.get_workspace_dir().expanduser().absolute()
+        workspace = lexical_workspace.resolve(strict=False)
         if "username" in source:
             # New descriptors capture the write scope; downloaders cannot select it.
             if attachment.get("sessionID") != session.id or attachment.get("messageID") != message_id:
                 return None
-            manager = WorkspaceManager.get_instance()
-            workspace = manager.get_workspace_dir().resolve(strict=False)
-            root = (
-                manager.get_user_workspace_dir(source["username"]) / "outputs"
-                if source["username"] is not None
-                else manager.get_workspace_dir() / "outputs"
-            ).resolve(strict=False)
-            if not _is_within(workspace, root):
-                return None
+            username = source["username"]
+            user_id = source.get("userID", getattr(session, "owner_user_id", None)) if username is not None else source.get("userID")
         else:
-            root = session_outputs_root(session)
+            username = getattr(session, "owner_username", None)
+            user_id = getattr(session, "owner_user_id", None)
+        output_root = (
+            manager.get_user_workspace_dir(username, user_id=user_id) / "outputs"
+            if username or user_id else manager.get_workspace_dir() / "outputs"
+        ).expanduser().absolute()
+        expected_root = workspace / output_root.relative_to(lexical_workspace)
+        root = output_root.resolve(strict=False)
+        # A persisted descriptor must not switch to another output root when
+        # outputs/ is rebound after the write. Both source and filepath would
+        # otherwise follow the same replacement symlink and appear to agree.
+        # Same scope rule as get_default_outputs_dir: the shared workspace
+        # outputs of a single-user install may be relocated with a symlink.
+        scoped = manager.isolates_accounts or output_root.parent != lexical_workspace
+        if scoped and root != expected_root:
+            return None
         target = (root / relative).resolve(strict=False)
         if not _is_within(root, target):
             return None
@@ -407,7 +426,9 @@ def _legacy_output_scope(session: Any, part: Any) -> WorkspaceOutputScope | None
     if not filepath:
         return None
     username = str(getattr(session, "owner_username", "") or "").strip() or None
-    return WorkspaceManager.get_instance().resolve_output_scope(filepath, username=username)
+    return WorkspaceManager.get_instance().resolve_output_scope(
+        filepath, username=username, user_id=getattr(session, "owner_user_id", None),
+    )
 
 
 def _message_created_at(message: Any) -> int | None:
@@ -724,13 +745,13 @@ async def _messages_with_parts(
     )
 
 
-def _output_logical_path(relative_path: str, username: str | None) -> str:
+def _output_logical_path(relative_path: str, username: str | None, user_id: str | None = None) -> str:
     """Show an output's path relative to the Workspace root, including its user scope."""
 
     manager = WorkspaceManager.get_instance()
     workspace = manager.get_workspace_dir()
     username = str(username or "").strip()
-    root = manager.get_user_workspace_dir(username) if username else workspace
+    root = manager.get_user_workspace_dir(username, user_id=user_id) if username or user_id else workspace
     return (root / "outputs" / relative_path).relative_to(workspace).as_posix()
 
 
@@ -759,6 +780,7 @@ def _message_resources(session: Any, message: Any) -> Iterable[ResolvedSessionFi
                 source = attachment["source"]
                 logical_path = _output_logical_path(
                     source["path"], source.get("username", getattr(session, "owner_username", None)),
+                    source.get("userID", getattr(session, "owner_user_id", None)),
                 )
                 yield ResolvedSessionFile(
                     public_resource_id(message_id, attachment["id"]), path, filename,
@@ -774,7 +796,7 @@ def _message_resources(session: Any, message: Any) -> Iterable[ResolvedSessionFi
                         public_resource_id(message_id, str(part.id)), scope.path, scope.path.name,
                         mimetypes.guess_type(scope.path.name)[0] or "application/octet-stream",
                         "agent_output", message_id,
-                        _output_logical_path(scope.relative_path, scope.username), created_at,
+                        _output_logical_path(scope.relative_path, scope.username, scope.user_id), created_at,
                     )
 
 

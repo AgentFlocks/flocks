@@ -85,5 +85,6 @@
   "updateAvailable": "Update available",
   "updateNow": "Upgrade now",
   "currentVersionLabel": "Current v{{version}}",
-  "currentProductVersionLabel": "Current {{version}}"
+  "currentProductVersionLabel": "Current {{version}}",
+  "voiceInput": "Voice input"
 }

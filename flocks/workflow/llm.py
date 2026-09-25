@@ -1,6 +1,8 @@
 import asyncio
 from copy import copy
 from dataclasses import dataclass
+import inspect
+import logging
 import time
 from typing import Any, Callable, Dict, Optional
 
@@ -12,6 +14,31 @@ from flocks.workflow._async_runtime import (
     run_sync_cancellable as _run_sync_cancellable_on_shared_loop,
 )
 from flocks.workflow.errors import RunCancelledError
+
+
+_log = logging.getLogger(__name__)
+_CLIENT_CLOSE_TIMEOUT_S = 5.0
+
+
+async def _close_provider_client(provider: Any) -> None:
+    """Release the SDK client owned by one isolated workflow attempt."""
+    client = getattr(provider, "_client", None)
+    if client is None:
+        return
+    provider._client = None  # A retry must not reuse a closed client.
+    # Google owns separate async and sync clients; OpenAI/Anthropic expose
+    # async close() on the client itself. Close them on the request's loop.
+    owners = (getattr(client, "aio", None), client)
+    for owner in owners:
+        close = getattr(owner, "aclose", None) or getattr(owner, "close", None)
+        if not callable(close):
+            continue
+        try:
+            result = close()
+            if inspect.isawaitable(result):
+                await asyncio.wait_for(result, timeout=_CLIENT_CLOSE_TIMEOUT_S)
+        except Exception:
+            _log.warning("Failed to close workflow provider client", exc_info=True)
 
 
 def _run_coro_sync(
@@ -60,6 +87,10 @@ def llm_hook_context_from_registry(registry: Any) -> Dict[str, Any]:
     except OSError:
         pass
     ctx = getattr(registry, "_ctx", None)
+    extra = getattr(ctx, "extra", None)
+    workspace = extra.get("workspace_dir") if isinstance(extra, dict) else None
+    if isinstance(workspace, str) and workspace.strip():
+        meta["workspace"] = workspace
     session_id = str(getattr(ctx, "session_id", "") or "").strip()
     if session_id:
         meta["sessionID"] = session_id
@@ -72,12 +103,12 @@ def llm_hook_context_from_registry(registry: Any) -> Dict[str, Any]:
 async def _run_llm_before_stage(
     hook_meta: Dict[str, Any],
     messages: list,
-) -> tuple[list, list]:
+    provider_options: Dict[str, Any],
+) -> tuple[list, list, Dict[str, Any]]:
     """Run ``llm.before`` hooks (Pro registers prompt redaction here).
 
-    Returns the (possibly rewritten) messages plus placeholder→value
-    replacements to restore in the response. Mirrors the session runner so a
-    hook sees the same request shape regardless of the call site.
+    Returns rewritten messages, placeholder replacements, and effective
+    provider options. Mirrors the session runner's request shape.
     """
     from flocks.hooks.pipeline import HookPipeline, HookStage
     from flocks.session.llm_hook_utils import (
@@ -87,7 +118,7 @@ async def _run_llm_before_stage(
     )
 
     if not await HookPipeline.has_stage_handlers(HookStage.LLM_BEFORE, hook_meta):
-        return messages, []
+        return messages, [], provider_options
     hook_ctx = await HookPipeline.run_llm_before(
         {
             **hook_meta,
@@ -96,14 +127,14 @@ async def _run_llm_before_stage(
                 "messages": [serialize_chat_message(message) for message in messages],
                 "toolCount": 0,
                 "tools": [],
-                "providerOptions": {},
+                "providerOptions": dict(provider_options),
                 "providerToolsEnabled": False,
             },
         }
     )
     hook_output = getattr(hook_ctx, "output", None) or {}
-    updated_messages, _options = apply_hook_request_output(messages, {}, hook_output)
-    return updated_messages, stream_text_replacements_from_hook_output(hook_output)
+    updated_messages, options = apply_hook_request_output(messages, provider_options, hook_output)
+    return updated_messages, stream_text_replacements_from_hook_output(hook_output), options
 
 
 async def _run_llm_after_stage(
@@ -349,6 +380,9 @@ class LLMClient:
         except Exception:
             isolated_provider = copy(shared_provider)
 
+        if isolated_provider is shared_provider:
+            raise RuntimeError("Provider cannot create an isolated workflow instance")
+
         for attr in ("id", "name", "_api_key", "_base_url", "_endpoint"):
             if hasattr(shared_provider, attr):
                 try:
@@ -368,8 +402,8 @@ class LLMClient:
         if hasattr(isolated_provider, "_client"):
             try:
                 setattr(isolated_provider, "_client", None)
-            except Exception:
-                pass
+            except Exception as exc:
+                raise RuntimeError("Cannot isolate workflow provider client") from exc
 
         return isolated_provider
 
@@ -517,19 +551,36 @@ class LLMClient:
                 except OSError:
                     pass
 
-            async def _call():
+            async def _call_inner():
                 from flocks.session.response_rewriter import transform_complete_response
+                from flocks.provider.options import build_provider_options
 
                 messages = [ChatMessage(role="user", content=prompt + "请使用中文输出。")]
+                # Options belong to the actual attempt's target. The common
+                # hook pipeline must see and be able to transform them too.
+                # Workflow nodes call the non-streaming chat(); the session
+                # defaults (extended thinking, catalog max_tokens) target the
+                # streaming path. Anthropic's SDK rejects non-streaming calls
+                # whose max_tokens may run past ten minutes, and Gemini thought
+                # summaries would be mixed into the answer text.
+                provider_options = build_provider_options(
+                    target.provider_id,
+                    target.model_id,
+                    reasoning_enabled=False,
+                    resolve_max_tokens=False,
+                )
+                provider_options["temperature"] = temperature
                 # ``llm.before`` is the redaction call point; a failing hook must
                 # not let the raw prompt through (same fail-closed rule as sessions).
-                messages, replacements = await _run_llm_before_stage(hook_meta, messages)
+                messages, replacements, provider_options = await _run_llm_before_stage(
+                    hook_meta, messages, provider_options,
+                )
                 started = time.perf_counter()
                 try:
                     coro = provider.chat(
                         model_id=target.model_id,
                         messages=messages,
-                        temperature=temperature,
+                        **provider_options,
                     )
                     if timeout_s is not None and float(timeout_s) > 0:
                         response = await asyncio.wait_for(coro, timeout=float(timeout_s))
@@ -570,6 +621,12 @@ class LLMClient:
                 except Exception:
                     pass
                 return response
+
+            async def _call():
+                try:
+                    return await _call_inner()
+                finally:
+                    await _close_provider_client(provider)
 
             last_exc: Optional[Exception] = None
             for attempt in range(retry_count + 1):

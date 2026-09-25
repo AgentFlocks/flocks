@@ -52,7 +52,7 @@ def _to_response(info: PtyInfo) -> PtyInfoResponse:
     summary="List PTY sessions",
     description="Get a list of all active pseudo-terminal (PTY) sessions.",
 )
-async def list_sessions():
+async def list_sessions(_admin: object = Depends(require_admin)):
     """List all PTY sessions - operationId: pty.list"""
     sessions = Pty.list()
     return [_to_response(s) for s in sessions]
@@ -91,7 +91,7 @@ async def create_session(input_data: CreateInput, _admin: object = Depends(requi
     summary="Get PTY session",
     description="Retrieve detailed information about a specific PTY session.",
 )
-async def get_session(pty_id: str):
+async def get_session(pty_id: str, _admin: object = Depends(require_admin)):
     """Get PTY session info - operationId: pty.get"""
     info = Pty.get(pty_id)
     if not info:
@@ -152,11 +152,19 @@ async def connect_session(websocket: WebSocket, pty_id: str):
         with execution_lifecycle_scope():
             try:
                 _blocked, token, _user = await apply_auth_for_request(websocket)
+                # PTYs are process-wide and have no per-user owner. Match the
+                # administrator boundary of create/update/delete before lookup
+                # or acceptance; login alone must not grant shell access.
+                require_admin(websocket)
             except HTTPException as exc:
                 close_code = (
                     4403 if exc.status_code == status.HTTP_403_FORBIDDEN else 4401
                 )
                 await websocket.close(code=close_code, reason=str(exc.detail))
+                return
+            except Exception as exc:
+                log.error("pty.ws.auth.error", {"error": str(exc)})
+                await websocket.close(code=1011, reason="Authentication unavailable")
                 return
 
             subject = getattr(websocket.state, "subject", None)

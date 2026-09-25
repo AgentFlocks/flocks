@@ -54,7 +54,7 @@ def _run(workflow: dict[str, Any], inputs: dict[str, Any] | None = None, **kwarg
 def hook_pipeline(monkeypatch: pytest.MonkeyPatch):
     """An empty hook pipeline that never loads plugin hooks (Pro or project ones)."""
     HookPipeline.reset()
-    monkeypatch.setattr(HookPipeline, "ensure_initialized", AsyncMock(return_value=None))
+    monkeypatch.setattr(HookPipeline, "ensure_initialized", AsyncMock(side_effect=lambda *args, **kwargs: tuple(HookPipeline._hooks)))
     yield HookPipeline
     HookPipeline.reset()
 

@@ -4,8 +4,9 @@ from enum import Enum
 import time
 from typing import List, Optional, Type
 
-from fastapi import APIRouter, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+from flocks.server.auth import require_admin
 from flocks.server.routes._timing import log_route_timing
 from flocks.utils.log import Log
 
@@ -202,7 +203,7 @@ async def task_queue_status():
 
 
 @router.post("/task-system/queue/pause")
-async def pause_task_queue():
+async def pause_task_queue(_admin: object = Depends(require_admin)):
     from flocks.task.manager import TaskManager
 
     TaskManager.pause_queue()
@@ -210,7 +211,7 @@ async def pause_task_queue():
 
 
 @router.post("/task-system/queue/resume")
-async def resume_task_queue():
+async def resume_task_queue(_admin: object = Depends(require_admin)):
     from flocks.task.manager import TaskManager
 
     TaskManager.resume_queue()
@@ -529,5 +530,4 @@ async def delete_execution(execution_id: str):
     if not await TaskManager.delete_execution(execution_id):
         raise HTTPException(404, "Task execution not found")
     return {"ok": True}
-
 

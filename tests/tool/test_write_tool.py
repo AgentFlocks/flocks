@@ -214,6 +214,7 @@ async def test_filename_only_redirects_to_default_outputs(tmp_path, monkeypatch)
         "root": "workspace-output",
         "path": f"{dt.date.today().isoformat()}/hello.txt",
         "username": None,
+        "userID": None,
     }
     assert str(tmp_path) not in str(attachment)
 
@@ -313,7 +314,7 @@ async def test_output_attachment_matches_written_scope(
     ctx = _make_ctx(extra={"workspace_dir": str(tmp_path / "project")})
     auth_user = AuthUser(id="writer", username=auth_username, role=role) if auth_username else None
     session = SimpleNamespace(
-        id=ctx.session_id, project_id="global", owner_user_id="test-owner",
+        id=ctx.session_id, project_id="global", owner_user_id="test-owner" if session_owner else None,
         owner_username=session_owner, directory="", metadata={},
     )
     content = "Correct output: café\n"
@@ -344,6 +345,7 @@ async def test_output_attachment_matches_written_scope(
     assert attachment["modifiedAt"] == int(target.stat().st_mtime * 1000)
     assert attachment["source"] == {
         "root": "workspace-output", "path": relative, "username": scope_username,
+        "userID": ("writer" if auth_user else "test-owner") if scope_username else None,
     }
     assert str(tmp_path) not in str(attachment)
 
@@ -515,7 +517,7 @@ async def test_output_attachment_requires_existing_regular_file(tmp_path, kind):
     target = tmp_path / "workspace" / "outputs" / "not-a-file"
     if kind == "directory":
         target.mkdir(parents=True)
-    with patch("flocks.tool.file.write._resolve_owner_username", new=AsyncMock(return_value=None)):
+    with patch("flocks.tool.file.write._resolve_output_owner", new=AsyncMock(return_value=(None, None))):
         assert await _build_output_attachment(_make_ctx(), str(target)) is None
     if kind == "missing":
         assert not (tmp_path / "workspace").exists()
@@ -559,6 +561,7 @@ async def test_output_scope_tracks_authenticated_writer_not_session_owner(tmp_pa
         "root": "workspace-output",
         "path": relative,
         "username": "admin_team",
+        "userID": "admin",
     }
     target = tmp_path / "workspace" / "users" / "admin_team" / "outputs" / relative
     assert target.read_text() == "admin output"
@@ -603,3 +606,34 @@ async def test_output_scope_tracks_authenticated_writer_not_session_owner(tmp_pa
         assert (await build_session_context(session, include_roots=False))["outputs"] == []
         with pytest.raises(FileNotFoundError):
             await resolve_session_resource(session, resource_id)
+
+
+@pytest.mark.parametrize("isolated", [False, True])
+async def test_shared_outputs_moved_to_another_disk_follow_account_isolation(tmp_path, monkeypatch, isolated):
+    """A single-user install may move workspace/outputs to another disk and
+    link it back; earlier output attachments stay readable. Once an extension
+    isolates accounts, a symlinked shared outputs/ could be rebound into
+    another account's root, so its descriptors no longer resolve."""
+    from flocks.session.files import _attachment_source_path
+    from flocks.tool.file.write import _build_output_attachment
+
+    outputs = WorkspaceManager.get_instance().get_workspace_dir() / "outputs"
+    outputs.mkdir(parents=True, exist_ok=True)
+    target = outputs / "report.md"
+    target.write_text("report", encoding="utf-8")
+    session = SimpleNamespace(id="test-session", owner_user_id=None, owner_username=None)
+    with (
+        patch("flocks.auth.context.get_current_auth_user", return_value=None),
+        patch("flocks.session.session.Session.get_by_id", new=AsyncMock(return_value=session)),
+    ):
+        attachment = await _build_output_attachment(_make_ctx(), str(target))
+    assert attachment is not None and attachment["source"]["username"] is None
+
+    other_disk = tmp_path / "other-disk" / "outputs"
+    other_disk.parent.mkdir()
+    outputs.rename(other_disk)
+    outputs.symlink_to(other_disk, target_is_directory=True)
+    monkeypatch.setattr(WorkspaceManager, "isolates_accounts", isolated)
+    part = SimpleNamespace(state=SimpleNamespace(metadata={"filepath": str(target)}))
+    resolved = _attachment_source_path(session, attachment, message_id="msg-1", part=part)
+    assert resolved == (None if isolated else other_disk / "report.md")
