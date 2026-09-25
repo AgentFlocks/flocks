@@ -105,10 +105,10 @@ export default function MonitoringPage() {
     return (
       <div className="flex items-center justify-center h-full">
         <div className="text-center">
-          <p className="text-red-600 mb-4">{error}</p>
+          <p className="text-danger mb-4">{error}</p>
           <button
             onClick={fetchData}
-            className="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700"
+            className="px-4 py-2 bg-action text-action-fg rounded-control hover:bg-action-hover"
           >
             {t('common:button.retry')}
           </button>
@@ -141,16 +141,16 @@ export default function MonitoringPage() {
 
       {/* System Status Cards */}
       <div className="grid grid-cols-1 md:grid-cols-4 gap-6 mb-6">
-        <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
+        <div className="bg-surface rounded-card border border-line p-4">
           <div className="flex items-center justify-between mb-2">
-            <IconActivity aria-hidden="true" className="w-8 h-8 text-green-600" />
+            <IconActivity aria-hidden="true" className="w-8 h-8 text-success" />
             <span
-              className={`px-2 py-1 rounded-full text-xs font-medium ${
+              className={`px-2 py-1 rounded-pill text-xs font-medium ${
                 status?.status === 'healthy'
-                  ? 'bg-green-100 text-green-800'
+                  ? 'bg-success-soft text-success'
                   : status?.status === 'degraded'
-                  ? 'bg-yellow-100 text-yellow-800'
-                  : 'bg-red-100 text-red-800'
+                  ? 'bg-warning-soft text-warning'
+                  : 'bg-danger-soft text-danger'
               }`}
             >
               {status?.status === 'healthy' && t('status.healthy')}
@@ -158,81 +158,81 @@ export default function MonitoringPage() {
               {status?.status === 'down' && t('status.down')}
             </span>
           </div>
-          <div className="text-xl font-bold text-gray-900">{t('systemStatus')}</div>
-          <div className="text-sm text-gray-600 mt-1">
+          <div className="text-3xl tabular-nums font-bold text-fg">{t('systemStatus')}</div>
+          <div className="text-sm text-fg-secondary mt-1">
             {t('uptime')}: {status ? formatUptime(status.uptime) : '-'}
           </div>
         </div>
 
-        <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
+        <div className="bg-surface rounded-card border border-line p-4">
           <div className="flex items-center justify-between mb-2">
-            <IconActivity aria-hidden="true" className="w-8 h-8 text-red-600" />
+            <IconActivity aria-hidden="true" className="w-8 h-8 text-danger" />
           </div>
-          <div className="text-xl font-bold text-gray-900">
+          <div className="text-3xl tabular-nums font-bold text-fg">
             {status?.activeSessions ?? t('unavailable')}
           </div>
-          <div className="text-sm text-gray-600 mt-1">{t('activeSessions')}</div>
+          <div className="text-sm text-fg-secondary mt-1">{t('activeSessions')}</div>
         </div>
 
-        <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
+        <div className="bg-surface rounded-card border border-line p-4">
           <div className="flex items-center justify-between mb-2">
-            <IconBolt aria-hidden="true" className="w-8 h-8 text-purple-600" />
+            <IconBolt aria-hidden="true" className="w-8 h-8 text-ai" />
           </div>
-          <div className="text-xl font-bold text-gray-900">
+          <div className="text-3xl tabular-nums font-bold text-fg">
             {status?.activeAgents ?? t('unavailable')}
           </div>
-          <div className="text-sm text-gray-600 mt-1">{t('activeAgents')}</div>
+          <div className="text-sm text-fg-secondary mt-1">{t('activeAgents')}</div>
         </div>
 
-        <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
+        <div className="bg-surface rounded-card border border-line p-4">
           <div className="flex items-center justify-between mb-2">
-            <IconTrendingUp aria-hidden="true" className="w-8 h-8 text-orange-600" />
+            <IconTrendingUp aria-hidden="true" className="w-8 h-8 text-fg-muted" />
           </div>
-          <div className="text-xl font-bold text-gray-900">
+          <div className="text-3xl tabular-nums font-bold text-fg">
             {metrics?.messageRate == null ? t('unavailable') : metrics.messageRate.toFixed(1)}
           </div>
-          <div className="text-sm text-gray-600 mt-1">{t('messagesPerMin')}</div>
+          <div className="text-sm text-fg-secondary mt-1">{t('messagesPerMin')}</div>
         </div>
       </div>
 
       {/* Real-time Metrics */}
       {metrics && (
-        <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6 mb-6">
-          <h3 className="text-lg font-semibold text-gray-900 mb-4">{t('realTimeMetrics')}</h3>
+        <div className="bg-surface rounded-card border border-line p-4 mb-6">
+          <h3 className="text-title-card font-semibold text-fg mb-4">{t('realTimeMetrics')}</h3>
           <div className="grid grid-cols-1 md:grid-cols-3 xl:grid-cols-6 gap-6">
             <div>
-              <div className="text-sm text-gray-600 mb-1">{t('metrics.messageRate')}</div>
-              <div className="text-xl font-bold text-gray-900">
+              <div className="text-sm text-fg-secondary mb-1">{t('metrics.messageRate')}</div>
+              <div className="text-3xl tabular-nums font-bold text-fg">
                 {formatRate(metrics.messageRate)}
               </div>
             </div>
             <div>
-              <div className="text-sm text-gray-600 mb-1">{t('metrics.toolCallRate')}</div>
-              <div className="text-xl font-bold text-gray-900">
+              <div className="text-sm text-fg-secondary mb-1">{t('metrics.toolCallRate')}</div>
+              <div className="text-3xl tabular-nums font-bold text-fg">
                 {formatRate(metrics.toolCallRate)}
               </div>
             </div>
             <div>
-              <div className="text-sm text-gray-600 mb-1">{t('metrics.errorRate')}</div>
-              <div className="text-xl font-bold text-red-600">
+              <div className="text-sm text-fg-secondary mb-1">{t('metrics.errorRate')}</div>
+              <div className="text-3xl tabular-nums font-bold text-danger">
                 {formatRate(metrics.errorRate)}
               </div>
             </div>
             <div>
-              <div className="text-sm text-gray-600 mb-1">{t('metrics.toolParseFailureRate')}</div>
-              <div className="text-xl font-bold text-red-600">
+              <div className="text-sm text-fg-secondary mb-1">{t('metrics.toolParseFailureRate')}</div>
+              <div className="text-3xl tabular-nums font-bold text-danger">
                 {formatRate(metrics.toolParseFailureRate)}
               </div>
             </div>
             <div>
-              <div className="text-sm text-gray-600 mb-1">{t('metrics.avgResponse')}</div>
-              <div className="text-xl font-bold text-gray-900">
+              <div className="text-sm text-fg-secondary mb-1">{t('metrics.avgResponse')}</div>
+              <div className="text-3xl tabular-nums font-bold text-fg">
                 {metrics.avgResponseTime == null ? t('unavailable') : `${metrics.avgResponseTime.toFixed(0)}ms`}
               </div>
             </div>
             <div>
-              <div className="text-sm text-gray-600 mb-1">{t('metrics.activeRequests')}</div>
-              <div className="text-xl font-bold text-gray-900">
+              <div className="text-sm text-fg-secondary mb-1">{t('metrics.activeRequests')}</div>
+              <div className="text-3xl tabular-nums font-bold text-fg">
                 {metrics.activeRequests ?? t('unavailable')}
               </div>
             </div>
@@ -243,29 +243,29 @@ export default function MonitoringPage() {
       {/* Performance Data */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
         {/* LLM Performance */}
-        <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
-          <h3 className="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
+        <div className="bg-surface rounded-card border border-line p-4">
+          <h3 className="text-title-card font-semibold text-fg mb-4 flex items-center gap-2">
             <IconClock aria-hidden="true" className="w-5 h-5" />
             {t('llmPerformance')}
           </h3>
           {llmPerformance.length === 0 ? (
-            <p className="text-sm text-gray-600">{t('noData')}</p>
+            <p className="text-sm text-fg-secondary">{t('noData')}</p>
           ) : (
             <div className="space-y-3">
               {llmPerformance.slice(0, 10).map((perf, index) => (
                 <div key={index} className="flex items-center justify-between">
                   <div className="flex-1">
-                    <div className="text-sm font-medium text-gray-900">{perf.name}</div>
-                    <div className="text-xs text-gray-600">
+                    <div className="text-sm font-medium text-fg">{perf.name}</div>
+                    <div className="text-xs text-fg-secondary">
                       {perf.count} {t('calls')} · {perf.errors} {t('errors')}
                     </div>
                   </div>
                   <div className="text-right">
-                    <div className="text-sm font-bold text-gray-900">
+                    <div className="text-sm font-bold text-fg">
                       {perf.avgDuration.toFixed(0)}ms
                     </div>
                     {perf.p95 && (
-                      <div className="text-xs text-gray-600">
+                      <div className="text-xs text-fg-secondary">
                         P95: {perf.p95.toFixed(0)}ms
                       </div>
                     )}
@@ -277,29 +277,29 @@ export default function MonitoringPage() {
         </div>
 
         {/* Tool Performance */}
-        <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
-          <h3 className="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
+        <div className="bg-surface rounded-card border border-line p-4">
+          <h3 className="text-title-card font-semibold text-fg mb-4 flex items-center gap-2">
             <IconBolt aria-hidden="true" className="w-5 h-5" />
             {t('toolPerformance')}
           </h3>
           {toolPerformance.length === 0 ? (
-            <p className="text-sm text-gray-600">{t('noData')}</p>
+            <p className="text-sm text-fg-secondary">{t('noData')}</p>
           ) : (
             <div className="space-y-3">
               {toolPerformance.slice(0, 10).map((perf, index) => (
                 <div key={index} className="flex items-center justify-between">
                   <div className="flex-1">
-                    <div className="text-sm font-medium text-gray-900">{perf.name}</div>
-                    <div className="text-xs text-gray-600">
+                    <div className="text-sm font-medium text-fg">{perf.name}</div>
+                    <div className="text-xs text-fg-secondary">
                       {perf.count} {t('calls')} · {perf.errors} {t('errors')}
                     </div>
                   </div>
                   <div className="text-right">
-                    <div className="text-sm font-bold text-gray-900">
+                    <div className="text-sm font-bold text-fg">
                       {perf.avgDuration.toFixed(0)}ms
                     </div>
                     {perf.p95 && (
-                      <div className="text-xs text-gray-600">
+                      <div className="text-xs text-fg-secondary">
                         P95: {perf.p95.toFixed(0)}ms
                       </div>
                     )}
@@ -312,11 +312,11 @@ export default function MonitoringPage() {
       </div>
 
       {/* Chart Placeholder */}
-      <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
-        <h3 className="text-lg font-semibold text-gray-900 mb-4">{t('performanceTrend')}</h3>
-        <div className="h-64 flex items-center justify-center border-2 border-dashed border-gray-300 rounded-lg">
-          <div className="text-center text-gray-500">
-            <IconChartBar aria-hidden="true" className="w-12 h-12 mx-auto mb-2 text-gray-400" />
+      <div className="bg-surface rounded-card border border-line p-4">
+        <h3 className="text-title-card font-semibold text-fg mb-4">{t('performanceTrend')}</h3>
+        <div className="h-64 flex items-center justify-center border-2 border-dashed border-line-control rounded-control">
+          <div className="text-center text-fg-muted">
+            <IconChartBar aria-hidden="true" className="w-8 h-8 mx-auto mb-2 text-fg-muted" />
             <p>{t('chartHint')}</p>
             <p className="text-sm mt-1">{t('chartInstall')}</p>
           </div>

@@ -17,16 +17,16 @@ export type { WorkflowChatLaunchRequest };
 function ErrorDisplay({ error, onRetry }: { error: Error; onRetry: () => void }) {
   const { t } = useTranslation('workflow');
   return (
-    <div className="p-4 text-xs text-red-600 space-y-2">
+    <div className="p-4 text-xs text-danger space-y-2">
       <p className="font-semibold">{t('detail.rightPanel.renderError')}</p>
-      <pre className="whitespace-pre-wrap bg-red-50 rounded p-2 overflow-auto max-h-60">
+      <pre className="whitespace-pre-wrap bg-danger-soft rounded-tag p-2 overflow-auto max-h-60">
         {error.message}
         {'\n'}
         {error.stack}
       </pre>
       <button
         onClick={onRetry}
-        className="text-red-600 underline"
+        className="text-danger underline"
       >
         {t('common:button.retry')}
       </button>
@@ -146,24 +146,24 @@ export default function RightPanel({
       className={
         overlay
           // Phone widths: cover the canvas area instead of sharing the row.
-          ? `absolute inset-0 z-40 flex min-w-0 flex-col bg-white overflow-hidden ${open ? '' : 'hidden'}`
-          : 'relative z-10 flex min-w-0 flex-col bg-white border-l border-gray-200 flex-shrink-0 overflow-hidden transition-[width] duration-300 ease-in-out'
+          ? `absolute inset-0 z-40 flex min-w-0 flex-col bg-surface overflow-hidden ${open ? '' : 'hidden'}`
+          : 'relative z-10 flex min-w-0 flex-col bg-surface border-l border-line flex-shrink-0 overflow-hidden transition-[width] duration-300 ease-in-out'
       }
       style={overlay ? undefined : { width: open ? width : 0 }}
     >
       {/* Tab bar */}
-      <div className="flex border-b border-gray-100 flex-shrink-0">
+      <div className="flex border-b border-line flex-shrink-0">
         {TABS.map((tab) => (
           <button
             key={tab.id}
             onClick={() => handleTabChange(tab.id)}
             className={`flex-1 py-3 text-xs font-medium transition-colors relative ${
-              currentActiveTab === tab.id ? 'text-red-600' : 'text-gray-500 hover:text-gray-700'
+              currentActiveTab === tab.id ? 'text-danger' : 'text-fg-muted hover:text-fg-secondary'
             }`}
           >
             {tab.label}
             {currentActiveTab === tab.id && (
-              <span className="absolute bottom-0 left-0 right-0 h-0.5 bg-red-600 rounded-full" />
+              <span className="absolute bottom-0 left-0 right-0 h-0.5 bg-danger rounded-pill" />
             )}
           </button>
         ))}
@@ -208,13 +208,13 @@ export default function RightPanel({
 
       {/* 底部删除按钮：仅概览页展示，避免编辑/集成流程中出现破坏性操作入口 */}
       {onDelete && currentActiveTab === 'overview' && (
-        <div className="flex items-center justify-end gap-2 px-4 py-3 border-t border-gray-100 flex-shrink-0">
+        <div className="flex items-center justify-end gap-2 px-4 py-3 border-t border-line flex-shrink-0">
           <button
             onClick={handleDelete}
             disabled={deleting}
-            className="flex items-center gap-1.5 px-3 py-1.5 text-xs text-red-600 border border-red-200 rounded-lg hover:bg-red-50 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+            className="flex items-center gap-1.5 px-3 py-1.5 text-xs text-danger border border-danger rounded-control hover:bg-danger-soft disabled:bg-disabled disabled:text-fg-disabled disabled:cursor-not-allowed transition-colors"
           >
-            <IconTrash aria-hidden="true" className="w-3.5 h-3.5" />
+            <IconTrash aria-hidden="true" className="w-4 h-4" />
             {deleting ? t('detail.rightPanel.deleting') : t('detail.rightPanel.deleteWorkflow')}
           </button>
         </div>

@@ -1,3 +1,4 @@
+import { pageActionLabel } from '../pageActionLabel';
 import { useState, useEffect, useCallback, useMemo, useRef, useReducer } from 'react';
 import {
   IconFolderOpen,
@@ -150,7 +151,7 @@ export default function WorkspacePage() {
         icon={<IconFolderOpen aria-hidden="true" className="w-8 h-8" />}
       />
 
-      <div className="flex gap-1 px-1 mb-4 border-b border-gray-200">
+      <div className="flex gap-1 px-1 mb-4 border-b border-line">
         <TabButton active={activeTab === 'files'} onClick={() => setActiveTab('files')} icon={<IconFolderOpen aria-hidden="true" className="w-4 h-4" />} label={t('tabs.files')} />
         <TabButton active={activeTab === 'memory'} onClick={() => setActiveTab('memory')} icon={<IconBrain aria-hidden="true" className="w-4 h-4" />} label={t('tabs.memory')} />
       </div>
@@ -169,7 +170,7 @@ function TabButton({ active, onClick, icon, label }: {
     <button
       onClick={onClick}
       className={`flex items-center gap-2 px-4 py-2 text-sm font-medium border-b-2 transition-colors -mb-px ${
-        active ? 'border-slate-700 text-slate-800' : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+        active ? 'border-line-control text-fg' : 'border-transparent text-fg-muted hover:text-fg-secondary hover:border-line-control'
       }`}
     >
       {icon}
@@ -198,12 +199,12 @@ function SortHeaderButton({
     <button
       type="button"
       onClick={() => onClick(field)}
-      className={`inline-flex items-center gap-1 rounded px-1 py-0.5 transition-colors hover:bg-gray-100 hover:text-gray-700 dark:hover:bg-zinc-800 ${
+      className={`inline-flex items-center gap-1 rounded-tag px-1 py-0.5 transition-colors hover:bg-hover hover:text-fg-secondary ${
         align === 'right' ? 'justify-end' : 'justify-start'
       }`}
     >
       <span>{label}</span>
-      <Icon aria-hidden="true" className={`w-3 h-3 ${active ? 'opacity-100' : 'opacity-0'}`} />
+      <Icon aria-hidden="true" className={`w-4 h-4 ${active ? 'opacity-100' : 'opacity-0'}`} />
     </button>
   );
 }
@@ -496,19 +497,19 @@ function FilesTab() {
   return (
     <div ref={workspaceSplitRef} className={`flex h-full min-h-0 gap-4 ${stackPreview ? 'flex-col' : ''}`}>
       {/* File list */}
-      <div ref={fileListRef} className="flex h-full min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-xl border border-gray-200 bg-white">
+      <div ref={fileListRef} className="flex h-full min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-card border border-line bg-surface">
         {/* Toolbar */}
-        <div className="flex items-center gap-2 px-4 py-2 border-b border-gray-100 flex-shrink-0">
-          <div className="flex items-center gap-1 flex-1 min-w-0 text-sm text-gray-600">
+        <div className="flex items-center gap-2 px-4 py-2 border-b border-line flex-shrink-0">
+          <div className="flex items-center gap-1 flex-1 min-w-0 text-sm text-fg-secondary">
             {breadcrumbs.map((crumb, i) => {
               const path = breadcrumbs.slice(1, i + 1).join('/');
               const isLast = i === breadcrumbs.length - 1;
               return (
                 <span key={i} className="flex items-center gap-1">
-                  {i > 0 && <IconChevronRight aria-hidden="true" className="w-3 h-3 text-gray-300 flex-shrink-0" />}
+                  {i > 0 && <IconChevronRight aria-hidden="true" className="w-4 h-4 text-fg-placeholder flex-shrink-0" />}
                   <button
                     onClick={() => !isLast && loadDir(path)}
-                    className={`truncate ${isLast ? 'text-gray-900 font-medium' : 'text-sky-700 hover:underline'}`}
+                    className={`truncate ${isLast ? 'text-fg font-medium' : 'text-info hover:underline'}`}
                   >
                     {crumb === '' ? 'workspace' : crumb}
                   </button>
@@ -518,7 +519,7 @@ function FilesTab() {
           </div>
           <div className="flex items-center gap-1 flex-shrink-0">
             {currentPath && (
-              <button onClick={() => loadDir(currentPath.split('/').slice(0, -1).join('/'))} title={t('files.back')} className="p-1.5 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded">
+              <button onClick={() => loadDir(currentPath.split('/').slice(0, -1).join('/'))} title={t('files.back')} className="ui-btn-icon inline-flex items-center justify-center p-1.5 text-fg-muted hover:text-fg-secondary hover:bg-hover rounded-control">
                 <IconArrowLeft aria-hidden="true" className="w-4 h-4" />
               </button>
             )}
@@ -526,18 +527,18 @@ function FilesTab() {
               onClick={handleRefresh}
               disabled={loading}
               title={t('files.refresh')}
-              className="p-1.5 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded disabled:opacity-50 disabled:cursor-not-allowed"
+              className="ui-btn-icon inline-flex items-center justify-center p-1.5 text-fg-muted hover:text-fg-secondary hover:bg-hover rounded-control disabled:bg-disabled disabled:text-fg-disabled disabled:cursor-not-allowed"
             >
               <IconRefresh aria-hidden="true" className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
             </button>
-            <button onClick={() => setNewDir({ show: true, name: '' })} title={t('files.newDir')} className="p-1.5 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded">
+            <button onClick={() => setNewDir({ show: true, name: '' })} title={t('files.newDir')} className="ui-btn-icon inline-flex items-center justify-center p-1.5 text-fg-muted hover:text-fg-secondary hover:bg-hover rounded-control">
               <IconFolderPlus aria-hidden="true" className="w-4 h-4" />
             </button>
             <button
               onClick={() => fileInputRef.current?.click()}
               disabled={uploading}
               title={t('files.upload')}
-              className="p-1.5 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded"
+              className="ui-btn-icon inline-flex items-center justify-center p-1.5 text-fg-muted hover:text-fg-secondary hover:bg-hover rounded-control"
             >
               <IconUpload aria-hidden="true" className="w-4 h-4" />
             </button>
@@ -546,8 +547,8 @@ function FilesTab() {
         </div>
 
         {newDir.show && (
-          <div className="flex items-center gap-2 px-4 py-2 bg-slate-50 border-b border-slate-100">
-            <IconFolderPlus aria-hidden="true" className="w-4 h-4 text-slate-600 flex-shrink-0" />
+          <div className="flex items-center gap-2 px-4 py-2 bg-subtle border-b border-line">
+            <IconFolderPlus aria-hidden="true" className="w-4 h-4 text-fg-secondary flex-shrink-0" />
             <input
               autoFocus
               value={newDir.name}
@@ -557,24 +558,24 @@ function FilesTab() {
                 if (e.key === 'Escape') setNewDir({ show: false, name: '' });
               }}
               placeholder={t('files.dirNamePlaceholder')}
-              className="flex-1 text-sm bg-transparent border-none outline-none text-gray-800"
+              className="ui-input flex-1 text-sm bg-transparent border-none text-fg"
             />
-            <button onClick={handleCreateDir} className="text-xs px-2 py-1 bg-slate-700 text-white rounded hover:bg-slate-800">{t('files.create')}</button>
-            <button onClick={() => setNewDir({ show: false, name: '' })} className="text-gray-400 hover:text-gray-600">
+            <button onClick={handleCreateDir} className="text-xs px-2 py-1 bg-subtle text-fg rounded-tag hover:bg-hover">{t('files.create')}</button>
+            <button aria-label={pageActionLabel('close')} onClick={() => setNewDir({ show: false, name: '' })} className="ui-btn-icon inline-flex items-center justify-center text-fg-muted hover:text-fg-secondary">
               <IconX aria-hidden="true" className="w-4 h-4" />
             </button>
           </div>
         )}
 
         <div
-          className={`flex-1 overflow-y-auto relative ${dragOver ? 'ring-2 ring-sky-400 ring-inset bg-sky-50/80' : ''}`}
+          className={`flex-1 overflow-y-auto relative ${dragOver ? 'ring-2 ring-focus ring-inset bg-info-soft' : ''}`}
           onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
           onDragLeave={() => setDragOver(false)}
           onDrop={(e) => { e.preventDefault(); setDragOver(false); handleUpload(e.dataTransfer.files); }}
         >
           {dragOver && (
             <div className="absolute inset-0 flex items-center justify-center z-10 pointer-events-none">
-              <div className="flex flex-col items-center gap-2 text-sky-700">
+              <div className="flex flex-col items-center gap-2 text-info">
                 <IconUpload aria-hidden="true" className="w-8 h-8" />
                 <span className="text-sm font-medium">{t('files.dropHere')}</span>
               </div>
@@ -584,25 +585,25 @@ function FilesTab() {
           {loading ? (
             <div className="flex items-center justify-center h-32"><LoadingSpinner /></div>
           ) : items.length === 0 ? (
-            <div className="flex flex-col items-center justify-center h-32 text-gray-400">
-              <IconFolderOpen aria-hidden="true" className="w-8 h-8 mb-2 opacity-40" />
+            <div className="flex flex-col items-center justify-center h-32 text-fg-muted">
+              <IconFolderOpen aria-hidden="true" className="w-8 h-8 mb-2 text-fg-muted" />
               <p className="text-sm">{t('files.emptyDir')}</p>
             </div>
           ) : (
             <table className="w-full text-sm">
-              <thead className="sticky top-0 bg-gray-50 dark:bg-zinc-900/95">
+              <thead className="sticky top-0 bg-subtle ">
                 <tr>
-                  <th className="w-8 px-4 py-2 text-left text-xs font-medium text-gray-500 dark:text-zinc-500"></th>
-                  <th className="px-2 py-2 text-left text-xs font-medium text-gray-500 dark:text-zinc-500" aria-sort={sort.field === 'name' ? (sort.direction === 'asc' ? 'ascending' : 'descending') : 'none'}>
+                  <th className="w-8 px-4 py-2 text-left text-xs font-medium text-fg-muted "></th>
+                  <th className="px-2 py-2 text-left text-xs font-medium text-fg-muted " aria-sort={sort.field === 'name' ? (sort.direction === 'asc' ? 'ascending' : 'descending') : 'none'}>
                     <SortHeaderButton label={t('files.columns.name')} field="name" sort={sort} onClick={handleSort} />
                   </th>
                   {showSizeColumn && (
-                    <th className="w-24 px-4 py-2 text-right text-xs font-medium text-gray-500 dark:text-zinc-500" aria-sort={sort.field === 'size' ? (sort.direction === 'asc' ? 'ascending' : 'descending') : 'none'}>
+                    <th className="w-24 px-4 py-2 text-right text-xs font-medium text-fg-muted " aria-sort={sort.field === 'size' ? (sort.direction === 'asc' ? 'ascending' : 'descending') : 'none'}>
                       <SortHeaderButton label={t('files.columns.size')} field="size" sort={sort} onClick={handleSort} align="right" />
                     </th>
                   )}
                   {showModifiedColumn && (
-                    <th className="w-36 px-4 py-2 text-right text-xs font-medium text-gray-500 dark:text-zinc-500" aria-sort={sort.field === 'modified' ? (sort.direction === 'asc' ? 'ascending' : 'descending') : 'none'}>
+                    <th className="w-36 px-4 py-2 text-right text-xs font-medium text-fg-muted " aria-sort={sort.field === 'modified' ? (sort.direction === 'asc' ? 'ascending' : 'descending') : 'none'}>
                       <SortHeaderButton label={t('files.columns.modified')} field="modified" sort={sort} onClick={handleSort} align="right" />
                     </th>
                   )}
@@ -614,38 +615,38 @@ function FilesTab() {
                   <tr
                     key={item.path}
                     onClick={() => handleSelectNode(item)}
-                    className={`group border-t border-gray-50 cursor-pointer transition-colors ${
+                    className={`group border-t border-line cursor-pointer transition-colors ${
                       panel.node?.path === item.path
-                        ? 'bg-slate-100 dark:bg-zinc-800/70'
-                        : 'hover:bg-gray-50 dark:hover:bg-zinc-900/70'
+                        ? 'bg-subtle '
+                        : 'hover:bg-hover '
                     }`}
                   >
                     <td className="px-4 py-2 text-sm">{fileIcon(item)}</td>
-                    <td className="max-w-0 truncate px-2 py-2 font-medium text-gray-800 dark:text-zinc-100">
+                    <td className="max-w-0 truncate px-2 py-2 font-medium text-fg ">
                       <span className="block truncate">{item.name}</span>
                     </td>
                     {showSizeColumn && (
-                      <td className="whitespace-nowrap px-4 py-2 text-right tabular-nums text-gray-400 dark:text-zinc-500">
+                      <td className="whitespace-nowrap px-4 py-2 text-right tabular-nums text-fg-muted ">
                         {item.type === 'file' ? formatBytes(item.size ?? 0) : '—'}
                       </td>
                     )}
                     {showModifiedColumn && (
-                      <td className="whitespace-nowrap px-4 py-2 text-right text-xs text-gray-400 dark:text-zinc-500">
+                      <td className="whitespace-nowrap px-4 py-2 text-right text-xs text-fg-muted ">
                         {formatDate(item.modified_at)}
                       </td>
                     )}
                     <td className="px-2 py-2">
                       <div className="flex items-center justify-end gap-1 opacity-0 group-hover:opacity-100" onClick={(e) => e.stopPropagation()}>
                         {item.type === 'file' && (
-                          <a href={workspaceAPI.downloadUrl(item.path)} download={item.name} title={t('files.download')} className="p-1 text-gray-400 hover:text-gray-600 rounded hover:bg-gray-100">
-                            <IconDownload aria-hidden="true" className="w-3.5 h-3.5" />
+                          <a href={workspaceAPI.downloadUrl(item.path)} download={item.name} title={t('files.download')} className="p-1 text-fg-muted hover:text-fg-secondary rounded-tag hover:bg-hover">
+                            <IconDownload aria-hidden="true" className="w-4 h-4" />
                           </a>
                         )}
-                        <button onClick={() => handleReveal(item)} title={t('files.reveal')} className="p-1 text-gray-400 hover:text-gray-600 rounded hover:bg-gray-100">
-                          <IconFolderOpen aria-hidden="true" className="w-3.5 h-3.5" />
+                        <button onClick={() => handleReveal(item)} title={t('files.reveal')} className="ui-btn-icon inline-flex items-center justify-center p-1 text-fg-muted hover:text-fg-secondary rounded-control hover:bg-hover">
+                          <IconFolderOpen aria-hidden="true" className="w-4 h-4" />
                         </button>
-                        <button onClick={() => handleDelete(item)} title={t('files.delete')} className="p-1 text-gray-400 hover:text-slate-700 rounded hover:bg-slate-100">
-                          <IconTrash aria-hidden="true" className="w-3.5 h-3.5" />
+                        <button onClick={() => handleDelete(item)} title={t('files.delete')} className="ui-btn-icon inline-flex items-center justify-center p-1 text-fg-muted hover:text-fg-secondary rounded-control hover:bg-hover">
+                          <IconTrash aria-hidden="true" className="w-4 h-4" />
                         </button>
                       </div>
                     </td>
@@ -657,8 +658,8 @@ function FilesTab() {
         </div>
 
         {uploading && (
-          <div className="px-4 py-2 bg-slate-50 text-sm text-slate-700 flex items-center gap-2 border-t border-slate-100">
-            <IconRefresh aria-hidden="true" className="w-3.5 h-3.5 animate-spin" />
+          <div className="px-4 py-2 bg-subtle text-sm text-fg-secondary flex items-center gap-2 border-t border-line">
+            <IconRefresh aria-hidden="true" className="w-4 h-4 animate-spin" />
             {t('files.uploading')}
           </div>
         )}
@@ -667,7 +668,8 @@ function FilesTab() {
       {/* Right: preview / edit panel */}
       {panel.node && (
         <div
-          className={`relative flex flex-shrink-0 flex-col overflow-hidden rounded-xl border border-gray-200 bg-white ${
+          data-workspace-preview="true"
+          className={`relative flex flex-shrink-0 flex-col overflow-hidden rounded-card border border-line bg-surface ${
             stackPreview ? 'h-[60%] min-h-0 w-full' : 'h-full'
           }`}
           style={stackPreview ? undefined : { width: previewPanelWidth, minWidth: PREVIEW_PANEL_MIN_WIDTH }}
@@ -678,44 +680,44 @@ function FilesTab() {
               aria-label={t('files.preview.resize')}
               title={t('files.preview.resize')}
               onPointerDown={handlePreviewResizeStart}
-              className="absolute left-0 top-0 z-10 h-full w-2 cursor-col-resize border-l border-transparent transition-colors hover:border-sky-300 hover:bg-sky-50/70 active:border-sky-400 active:bg-sky-100"
+              className="absolute left-0 top-0 z-10 h-full w-2 cursor-col-resize border-l border-transparent transition-colors hover:border-info hover:bg-info-soft active:border-info active:bg-info-soft"
             />
           )}
-          <div className="flex items-center gap-2 px-4 py-2.5 border-b border-gray-100 flex-shrink-0">
+          <div className="flex items-center gap-2 px-4 py-2.5 border-b border-line flex-shrink-0">
             <span className="text-sm flex-shrink-0">{fileIcon(panel.node)}</span>
-            <span className="flex-1 text-sm font-medium text-gray-800 truncate">{panel.node.name}</span>
+            <span className="flex-1 text-sm font-medium text-fg truncate">{panel.node.name}</span>
             <div className="flex items-center gap-1 flex-shrink-0">
               {panel.node.is_text_file && !panel.editing && !panel.truncated && (
-                <button onClick={() => dispatchPanel({ type: 'start_edit' })} title={t('files.edit')} className="p-1.5 text-gray-400 hover:text-slate-700 hover:bg-slate-100 rounded">
+                <button onClick={() => dispatchPanel({ type: 'start_edit' })} title={t('files.edit')} className="ui-btn-icon inline-flex items-center justify-center p-1.5 text-fg-muted hover:text-fg-secondary hover:bg-hover rounded-control">
                   <IconEdit aria-hidden="true" className="w-4 h-4" />
                 </button>
               )}
               {panel.editing && (
                 <>
-                  <button onClick={handleSave} disabled={panel.saving} title={t('files.save')} className="p-1.5 text-green-600 hover:bg-green-50 rounded">
+                  <button onClick={handleSave} disabled={panel.saving} title={t('files.save')} className="ui-btn-icon inline-flex items-center justify-center p-1.5 text-success hover:bg-success-soft rounded-control">
                     <IconDeviceFloppy aria-hidden="true" className="w-4 h-4" />
                   </button>
-                  <button onClick={() => dispatchPanel({ type: 'cancel_edit' })} title={t('files.cancel')} className="p-1.5 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded">
+                  <button onClick={() => dispatchPanel({ type: 'cancel_edit' })} title={t('files.cancel')} className="ui-btn-icon inline-flex items-center justify-center p-1.5 text-fg-muted hover:text-fg-secondary hover:bg-hover rounded-control">
                     <IconX aria-hidden="true" className="w-4 h-4" />
                   </button>
                 </>
               )}
-              <a href={workspaceAPI.downloadUrl(panel.node.path)} download={panel.node.name} title={t('files.download')} className="p-1.5 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded">
+              <a href={workspaceAPI.downloadUrl(panel.node.path)} download={panel.node.name} title={t('files.download')} className="p-1.5 text-fg-muted hover:text-fg-secondary hover:bg-hover rounded-tag">
                 <IconDownload aria-hidden="true" className="w-4 h-4" />
               </a>
-              <button onClick={() => handleReveal(panel.node!)} title={t('files.reveal')} className="p-1.5 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded">
+              <button onClick={() => handleReveal(panel.node!)} title={t('files.reveal')} className="ui-btn-icon inline-flex items-center justify-center p-1.5 text-fg-muted hover:text-fg-secondary hover:bg-hover rounded-control">
                 <IconFolderOpen aria-hidden="true" className="w-4 h-4" />
               </button>
-              <button onClick={() => setPreviewModalOpen(true)} title={t('files.preview.fullscreen')} className="p-1.5 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded">
+              <button onClick={() => setPreviewModalOpen(true)} title={t('files.preview.fullscreen')} className="ui-btn-icon inline-flex items-center justify-center p-1.5 text-fg-muted hover:text-fg-secondary hover:bg-hover rounded-control">
                 <IconArrowsDiagonal aria-hidden="true" className="w-4 h-4" />
               </button>
-              <button onClick={() => dispatchPanel({ type: 'close' })} title={t('files.close')} className="p-1.5 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded">
+              <button onClick={() => dispatchPanel({ type: 'close' })} title={t('files.close')} className="ui-btn-icon inline-flex items-center justify-center p-1.5 text-fg-muted hover:text-fg-secondary hover:bg-hover rounded-control">
                 <IconX aria-hidden="true" className="w-4 h-4" />
               </button>
             </div>
           </div>
 
-          <div className="px-4 py-1.5 bg-gray-50 border-b border-gray-100 flex gap-4 text-xs text-gray-400 flex-shrink-0">
+          <div className="px-4 py-1.5 bg-subtle border-b border-line flex gap-4 text-xs text-fg-muted flex-shrink-0">
             <span>{formatBytes(panel.node.size ?? 0)}</span>
             <span>{formatDate(panel.node.modified_at)}</span>
           </div>
@@ -868,15 +870,15 @@ function MemoryTreeNode({
         type="button"
         aria-expanded={isDirectory ? isExpanded : undefined}
         onClick={() => (isDirectory ? onToggle(node.path) : onSelect(node))}
-        className={`w-full flex items-center gap-2 py-2.5 pr-3 border-t border-gray-50 text-left transition-colors ${
-          selectedPath === node.path ? 'bg-purple-50 text-purple-700' : 'hover:bg-gray-50 text-gray-700'
+        className={`w-full flex items-center gap-2 py-2.5 pr-3 border-t border-line text-left transition-colors ${
+          selectedPath === node.path ? 'bg-ai-soft text-ai' : 'hover:bg-hover text-fg-secondary'
         }`}
         style={{ paddingLeft: `${12 + depth * 16}px` }}
       >
         {isDirectory ? (
           isExpanded
-            ? <IconChevronDown aria-hidden="true" className="w-3.5 h-3.5 flex-shrink-0 text-gray-400" />
-            : <IconChevronRight aria-hidden="true" className="w-3.5 h-3.5 flex-shrink-0 text-gray-400" />
+            ? <IconChevronDown aria-hidden="true" className="w-4 h-4 flex-shrink-0 text-fg-muted" />
+            : <IconChevronRight aria-hidden="true" className="w-4 h-4 flex-shrink-0 text-fg-muted" />
         ) : (
           <span className="w-3.5 flex-shrink-0" />
         )}
@@ -884,11 +886,11 @@ function MemoryTreeNode({
         <div className="flex-1 min-w-0">
           <div className="text-sm font-medium truncate">{memoryNodeLabel(node)}</div>
           {isDirectory ? (
-            <div className="text-xs text-gray-400">
+            <div className="text-xs text-fg-muted">
               {t('memory.fileCount', { count: countMemoryFiles(node.children ?? []) })}
             </div>
           ) : (
-            <div className="text-xs text-gray-400">{formatDate(node.modified_at)} · {formatBytes(node.size ?? 0)}</div>
+            <div className="text-xs text-fg-muted">{formatDate(node.modified_at)} · {formatBytes(node.size ?? 0)}</div>
           )}
         </div>
       </button>
@@ -1029,24 +1031,24 @@ function MemoryTab() {
 
   return (
     <div className="flex h-full gap-4">
-      <div className="w-72 flex-shrink-0 bg-white rounded-xl border border-gray-200 flex flex-col overflow-hidden">
-        <div className="px-3 py-2.5 border-b border-gray-100 flex items-center gap-2">
-          <IconBrain aria-hidden="true" className="w-4 h-4 text-purple-500 flex-shrink-0" />
-          <span className="text-sm font-medium text-gray-700">{t('memory.title')}</span>
-          <span className="ml-auto text-xs text-gray-400 bg-gray-100 px-1.5 py-0.5 rounded-full">{fileCount}</span>
-          <button onClick={load} title={t('memory.refresh')} className="text-gray-400 hover:text-gray-600">
-            <IconRefresh aria-hidden="true" className="w-3.5 h-3.5" />
+      <div className="w-72 flex-shrink-0 bg-surface rounded-card border border-line flex flex-col overflow-hidden">
+        <div className="px-3 py-2.5 border-b border-line flex items-center gap-2">
+          <IconBrain aria-hidden="true" className="w-4 h-4 text-ai flex-shrink-0" />
+          <span className="text-sm font-medium text-fg-secondary">{t('memory.title')}</span>
+          <span className="ml-auto text-xs text-fg-muted bg-subtle px-1.5 py-0.5 rounded-pill">{fileCount}</span>
+          <button onClick={load} title={t('memory.refresh')} className="ui-btn-icon inline-flex items-center justify-center text-fg-muted hover:text-fg-secondary">
+            <IconRefresh aria-hidden="true" className="w-4 h-4" />
           </button>
         </div>
 
-        <div className="px-3 py-2 border-b border-gray-100">
+        <div className="px-3 py-2 border-b border-line">
           <div className="relative">
-            <IconSearch aria-hidden="true" className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-400" />
+            <IconSearch aria-hidden="true" className="absolute left-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-fg-muted" />
             <input
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               placeholder={t('memory.searchPlaceholder')}
-              className="w-full pl-8 pr-3 py-1.5 text-sm border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-300"
+              className="ui-input w-full pl-8 pr-3  text-sm border border-line rounded-control"
             />
           </div>
         </div>
@@ -1055,14 +1057,14 @@ function MemoryTab() {
           {loadState === 'loading' ? (
             <div className="flex items-center justify-center h-24"><LoadingSpinner /></div>
           ) : loadState === 'error' ? (
-            <div className="flex flex-col items-center justify-center h-24 text-gray-400 text-sm gap-2">
-              <IconAlertTriangle aria-hidden="true" className="w-5 h-5 text-orange-400" />
+            <div className="flex flex-col items-center justify-center h-24 text-fg-muted text-sm gap-2">
+              <IconAlertTriangle aria-hidden="true" className="w-5 h-5 text-warning" />
               <span>{t('memory.loadFailed')}</span>
-              <button onClick={load} className="text-xs text-sky-700 hover:underline">{t('memory.retry')}</button>
+              <button onClick={load} className="text-xs text-info hover:underline">{t('memory.retry')}</button>
             </div>
           ) : filtered.length === 0 ? (
-            <div className="flex flex-col items-center justify-center h-24 text-gray-400 text-sm">
-              <IconBrain aria-hidden="true" className="w-6 h-6 mb-1 opacity-40" />
+            <div className="flex flex-col items-center justify-center h-24 text-fg-muted text-sm">
+              <IconBrain aria-hidden="true" className="w-6 h-6 mb-1 text-fg-muted" />
               {memoryView.length === 0 ? t('memory.noFiles') : t('memory.noMatch')}
             </div>
           ) : (
@@ -1083,23 +1085,23 @@ function MemoryTab() {
 
       </div>
 
-      <div className="flex-1 min-w-0 bg-white rounded-xl border border-gray-200 flex flex-col overflow-hidden">
+      <div className="flex-1 min-w-0 bg-surface rounded-card border border-line flex flex-col overflow-hidden">
         {selected ? (
           <>
-            <div className="flex items-center gap-3 px-4 py-2.5 border-b border-gray-100 flex-shrink-0">
+            <div className="flex items-center gap-3 px-4 py-2.5 border-b border-line flex-shrink-0">
               <span className="text-sm flex-shrink-0">{fileIcon(selected)}</span>
               <div className="flex-1 min-w-0">
-                <div className="text-sm font-medium text-gray-800 truncate">
+                <div className="text-sm font-medium text-fg truncate">
                   {memoryNodeLabel(selected)}
                 </div>
                 {selected.project_worktree && (
-                  <div className="text-xs text-gray-400 truncate" title={selected.project_worktree}>
+                  <div className="text-xs text-fg-muted truncate" title={selected.project_worktree}>
                     {selected.project_worktree}
                   </div>
                 )}
               </div>
-              <span className="text-xs text-gray-400">{formatBytes(selected.size ?? 0)}</span>
-              <span className="text-xs text-gray-400">{formatDate(selected.modified_at)}</span>
+              <span className="text-xs text-fg-muted">{formatBytes(selected.size ?? 0)}</span>
+              <span className="text-xs text-fg-muted">{formatDate(selected.modified_at)}</span>
               {selected.is_text_file && selected.editable === true && !editing && !truncated && contentState === 'ready' && (
                 <button
                   onClick={() => {
@@ -1107,14 +1109,14 @@ function MemoryTab() {
                     setEditing(true);
                   }}
                   title={t('files.edit')}
-                  className="p-1.5 text-gray-400 hover:text-slate-700 hover:bg-slate-100 rounded"
+                  className="ui-btn-icon inline-flex items-center justify-center p-1.5 text-fg-muted hover:text-fg-secondary hover:bg-hover rounded-control"
                 >
                   <IconEdit aria-hidden="true" className="w-4 h-4" />
                 </button>
               )}
               {editing && (
                 <>
-                  <button onClick={handleSave} disabled={saving} title={t('files.save')} className="p-1.5 text-green-600 hover:bg-green-50 rounded">
+                  <button onClick={handleSave} disabled={saving} title={t('files.save')} className="ui-btn-icon inline-flex items-center justify-center p-1.5 text-success hover:bg-success-soft rounded-control">
                     <IconDeviceFloppy aria-hidden="true" className="w-4 h-4" />
                   </button>
                   <button
@@ -1123,16 +1125,16 @@ function MemoryTab() {
                       setEditContent(null);
                     }}
                     title={t('files.cancel')}
-                    className="p-1.5 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded"
+                    className="ui-btn-icon inline-flex items-center justify-center p-1.5 text-fg-muted hover:text-fg-secondary hover:bg-hover rounded-control"
                   >
                     <IconX aria-hidden="true" className="w-4 h-4" />
                   </button>
                 </>
               )}
-              <a href={workspaceAPI.memoryDownloadUrl(selected.path)} download={selected.name} title={t('files.download')} className="p-1.5 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded">
+              <a href={workspaceAPI.memoryDownloadUrl(selected.path)} download={selected.name} title={t('files.download')} className="p-1.5 text-fg-muted hover:text-fg-secondary hover:bg-hover rounded-tag">
                 <IconDownload aria-hidden="true" className="w-4 h-4" />
               </a>
-              <button onClick={() => setPreviewModalOpen(true)} title={t('files.preview.fullscreen')} className="p-1.5 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded">
+              <button onClick={() => setPreviewModalOpen(true)} title={t('files.preview.fullscreen')} className="ui-btn-icon inline-flex items-center justify-center p-1.5 text-fg-muted hover:text-fg-secondary hover:bg-hover rounded-control">
                 <IconArrowsDiagonal aria-hidden="true" className="w-4 h-4" />
               </button>
             </div>
@@ -1141,10 +1143,10 @@ function MemoryTab() {
                 <div className="flex items-center justify-center h-24"><LoadingSpinner /></div>
               )}
               {contentState === 'error' && (
-                <div className="flex flex-col items-center justify-center h-24 gap-2 text-gray-400">
-                  <IconAlertTriangle aria-hidden="true" className="w-5 h-5 text-orange-400" />
+                <div className="flex flex-col items-center justify-center h-24 gap-2 text-fg-muted">
+                  <IconAlertTriangle aria-hidden="true" className="w-5 h-5 text-warning" />
                   <span className="text-sm">{t('memory.readFailed')}</span>
-                  <button onClick={() => handleSelect(selected)} className="text-xs text-sky-700 hover:underline">{t('memory.retry')}</button>
+                  <button onClick={() => handleSelect(selected)} className="text-xs text-info hover:underline">{t('memory.retry')}</button>
                 </div>
               )}
               {contentState === 'ready' && (
@@ -1172,8 +1174,8 @@ function MemoryTab() {
             )}
           </>
         ) : (
-          <div className="flex-1 flex flex-col items-center justify-center gap-3 text-gray-400">
-            <IconBrain aria-hidden="true" className="w-12 h-12 opacity-20" />
+          <div className="flex-1 flex flex-col items-center justify-center gap-3 text-fg-muted">
+            <IconBrain aria-hidden="true" className="w-8 h-8 text-fg-muted" />
             <p className="text-sm">{t('memory.selectPrompt')}</p>
             <p className="text-xs text-center px-8">{t('memory.selectDesc')}</p>
           </div>

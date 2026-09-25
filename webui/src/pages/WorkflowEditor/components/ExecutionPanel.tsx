@@ -1,3 +1,4 @@
+import { pageActionLabel } from '../../pageActionLabel';
 import React, { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { IconX, IconPlayerPlay, IconCircleCheck, IconCircleX, IconClock, IconCode, IconFileText, IconPlayerStop } from '@tabler/icons-react';
@@ -28,37 +29,37 @@ export default function ExecutionPanel({
   const statusConfig = {
     running: {
       icon: IconClock,
-      color: 'text-red-600',
-      bg: 'bg-red-50',
-      border: 'border-red-500',
+      color: 'text-danger',
+      bg: 'bg-danger-soft',
+      border: 'border-danger',
       label: t('editor.execution.statusRunning'),
     },
     success: {
       icon: IconCircleCheck,
-      color: 'text-green-600',
-      bg: 'bg-green-50',
-      border: 'border-green-500',
+      color: 'text-success',
+      bg: 'bg-success-soft',
+      border: 'border-success',
       label: t('editor.execution.statusSuccess'),
     },
     error: {
       icon: IconCircleX,
-      color: 'text-red-600',
-      bg: 'bg-red-50',
-      border: 'border-red-500',
+      color: 'text-danger',
+      bg: 'bg-danger-soft',
+      border: 'border-danger',
       label: t('editor.execution.statusError'),
     },
     timeout: {
       icon: IconClock,
-      color: 'text-yellow-600',
-      bg: 'bg-yellow-50',
-      border: 'border-yellow-500',
+      color: 'text-warning',
+      bg: 'bg-warning-soft',
+      border: 'border-warning',
       label: t('editor.execution.statusTimeout'),
     },
     cancelled: {
       icon: IconPlayerStop,
-      color: 'text-gray-600',
-      bg: 'bg-gray-100',
-      border: 'border-gray-400',
+      color: 'text-fg-secondary',
+      bg: 'bg-subtle',
+      border: 'border-line-control',
       label: t('editor.execution.statusCancelled'),
     },
   };
@@ -68,18 +69,18 @@ export default function ExecutionPanel({
   const duration = execution.duration ? (execution.duration / 1000).toFixed(2) : 'N/A';
 
   return (
-    <div className="fixed bottom-0 left-0 right-0 h-96 bg-white shadow-2xl border-t-2 border-gray-200 z-50 flex flex-col">
+    <div className="fixed bottom-0 left-0 right-0 h-96 bg-surface shadow-overlay border-t-2 border-line z-50 flex flex-col">
       {/* Header */}
-      <div className="flex items-center justify-between p-4 border-b border-gray-200 bg-gray-50">
+      <div className="flex items-center justify-between p-4 border-b border-line bg-subtle">
         <div className="flex items-center gap-4">
-          <h2 className="text-lg font-semibold text-gray-900">{t('editor.execution.title')}</h2>
+          <h2 className="text-title-section font-semibold text-fg">{t('editor.execution.title')}</h2>
           
-          <div className={`flex items-center gap-2 px-3 py-1 rounded-full border ${config.bg} ${config.border}`}>
+          <div className={`flex items-center gap-2 px-3 py-1 rounded-pill border ${config.bg} ${config.border}`}>
             <Icon aria-hidden="true" className={`w-4 h-4 ${config.color}`} />
             <span className={`text-sm font-medium ${config.color}`}>{config.label}</span>
           </div>
 
-          <div className="flex items-center gap-4 text-sm text-gray-600">
+          <div className="flex items-center gap-4 text-sm text-fg-secondary">
             <span>ID: {execution.id.slice(0, 8)}...</span>
             <span>{t('editor.execution.duration', { duration })}</span>
             <span>{t('editor.execution.startTime', { time: new Date(execution.startedAt).toLocaleTimeString() })}</span>
@@ -91,7 +92,7 @@ export default function ExecutionPanel({
             <button
               onClick={onStop}
               disabled={stopping}
-              className="flex items-center gap-2 px-3 py-1 text-sm text-red-600 hover:bg-red-50 rounded-lg transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
+              className="flex items-center gap-2 px-3 py-1 text-sm text-danger hover:bg-danger-soft rounded-control transition-colors disabled:bg-disabled disabled:text-fg-disabled disabled:cursor-not-allowed"
             >
               <IconPlayerStop aria-hidden="true" className="w-4 h-4" />
               {stopping ? t('detail.run.stopping') : t('editor.execution.stop')}
@@ -100,15 +101,15 @@ export default function ExecutionPanel({
           {onRunAgain && (
             <button
               onClick={onRunAgain}
-              className="flex items-center gap-2 px-3 py-1 text-sm text-red-600 hover:bg-red-50 rounded-lg transition-colors"
+              className="flex items-center gap-2 px-3 py-1 text-sm text-danger hover:bg-danger-soft rounded-control transition-colors"
             >
               <IconPlayerPlay aria-hidden="true" className="w-4 h-4" />
               {t('editor.execution.runAgain')}
             </button>
           )}
-          <button
+          <button aria-label={pageActionLabel('close')}
             onClick={onClose}
-            className="p-2 hover:bg-gray-200 rounded-lg transition-colors"
+            className="ui-btn-icon inline-flex items-center justify-center p-2 hover:bg-hover rounded-control transition-colors"
           >
             <IconX aria-hidden="true" className="w-5 h-5" />
           </button>
@@ -116,13 +117,13 @@ export default function ExecutionPanel({
       </div>
 
       {/* Tabs */}
-      <div className="flex items-center gap-4 px-4 py-2 border-b border-gray-200 bg-gray-50">
+      <div className="flex items-center gap-4 px-4 py-2 border-b border-line bg-subtle">
         <button
           onClick={() => setActiveTab('result')}
-          className={`px-4 py-2 text-sm font-medium rounded-lg transition-colors ${
+          className={`px-4 py-2 text-sm font-medium rounded-control transition-colors ${
             activeTab === 'result'
-              ? 'bg-white text-red-600 shadow-sm'
-              : 'text-gray-600 hover:text-gray-900'
+              ? 'bg-surface text-danger shadow-sm'
+              : 'text-fg-secondary hover:text-fg'
           }`}
         >
           <IconCode aria-hidden="true" className="w-4 h-4 inline mr-2" />
@@ -130,10 +131,10 @@ export default function ExecutionPanel({
         </button>
         <button
           onClick={() => setActiveTab('log')}
-          className={`px-4 py-2 text-sm font-medium rounded-lg transition-colors ${
+          className={`px-4 py-2 text-sm font-medium rounded-control transition-colors ${
             activeTab === 'log'
-              ? 'bg-white text-red-600 shadow-sm'
-              : 'text-gray-600 hover:text-gray-900'
+              ? 'bg-surface text-danger shadow-sm'
+              : 'text-fg-secondary hover:text-fg'
           }`}
         >
           <IconFileText aria-hidden="true" className="w-4 h-4 inline mr-2" />
@@ -148,8 +149,8 @@ export default function ExecutionPanel({
             {/* Input Parameters */}
             {execution.inputParams && Object.keys(execution.inputParams).length > 0 && (
               <div>
-                <h3 className="text-sm font-semibold text-gray-700 mb-2">{t('editor.execution.inputParams')}</h3>
-                <pre className="p-4 bg-gray-900 text-gray-300 rounded-lg text-xs overflow-x-auto font-mono">
+                <h3 className="text-sm font-semibold text-fg-secondary mb-2">{t('editor.execution.inputParams')}</h3>
+                <pre className="p-4 bg-subtle text-fg-placeholder rounded-control text-xs overflow-x-auto font-mono">
                   {JSON.stringify(execution.inputParams, null, 2)}
                 </pre>
               </div>
@@ -158,8 +159,8 @@ export default function ExecutionPanel({
             {/* Output Results */}
             {execution.status === 'success' && execution.outputResults && (
               <div>
-                <h3 className="text-sm font-semibold text-gray-700 mb-2">{t('editor.execution.outputResults')}</h3>
-                <pre className="p-4 bg-gray-900 text-gray-300 rounded-lg text-xs overflow-x-auto font-mono">
+                <h3 className="text-sm font-semibold text-fg-secondary mb-2">{t('editor.execution.outputResults')}</h3>
+                <pre className="p-4 bg-subtle text-fg-placeholder rounded-control text-xs overflow-x-auto font-mono">
                   {JSON.stringify(execution.outputResults, null, 2)}
                 </pre>
               </div>
@@ -168,9 +169,9 @@ export default function ExecutionPanel({
             {/* Error Message */}
             {execution.status === 'error' && execution.errorMessage && (
               <div>
-                <h3 className="text-sm font-semibold text-red-700 mb-2">{t('editor.execution.errorMessage')}</h3>
-                <div className="p-4 bg-red-50 border border-red-200 rounded-lg">
-                  <p className="text-sm text-red-800 font-mono whitespace-pre-wrap">
+                <h3 className="text-sm font-semibold text-danger mb-2">{t('editor.execution.errorMessage')}</h3>
+                <div className="p-4 bg-danger-soft border border-danger rounded-control">
+                  <p className="text-sm text-danger font-mono whitespace-pre-wrap">
                     {execution.errorMessage}
                   </p>
                 </div>
@@ -179,9 +180,9 @@ export default function ExecutionPanel({
 
             {execution.status === 'cancelled' && (
               <div>
-                <h3 className="text-sm font-semibold text-gray-700 mb-2">{t('editor.execution.statusCancelled')}</h3>
-                <div className="p-4 bg-gray-50 border border-gray-200 rounded-lg">
-                  <p className="text-sm text-gray-700">{t('editor.execution.cancelledMessage')}</p>
+                <h3 className="text-sm font-semibold text-fg-secondary mb-2">{t('editor.execution.statusCancelled')}</h3>
+                <div className="p-4 bg-subtle border border-line rounded-control">
+                  <p className="text-sm text-fg-secondary">{t('editor.execution.cancelledMessage')}</p>
                 </div>
               </div>
             )}
@@ -190,31 +191,31 @@ export default function ExecutionPanel({
 
         {activeTab === 'log' && (
           <div>
-            <h3 className="text-sm font-semibold text-gray-700 mb-2">{t('editor.execution.tabLog')}</h3>
+            <h3 className="text-sm font-semibold text-fg-secondary mb-2">{t('editor.execution.tabLog')}</h3>
             {execution.executionLog && execution.executionLog.length > 0 ? (
               <div className="space-y-2">
                 {execution.executionLog.map((log: any, index: number) => (
                   <div
                     key={index}
-                    className="p-3 bg-gray-50 border border-gray-200 rounded-lg"
+                    className="p-3 bg-subtle border border-line rounded-control"
                   >
                     <div className="flex items-center justify-between mb-1">
-                      <span className="text-xs font-medium text-gray-700">
+                      <span className="text-xs font-medium text-fg-secondary">
                         {log.node || t('editor.execution.stepLabel', { num: index + 1 })}
                       </span>
-                      <span className="text-xs text-gray-500">
+                      <span className="text-xs text-fg-muted">
                         {log.timestamp ? new Date(log.timestamp).toLocaleTimeString() : ''}
                       </span>
                     </div>
-                    <pre className="text-xs text-gray-600 font-mono whitespace-pre-wrap">
+                    <pre className="text-xs text-fg-secondary font-mono whitespace-pre-wrap">
                       {typeof log === 'string' ? log : JSON.stringify(log, null, 2)}
                     </pre>
                   </div>
                 ))}
               </div>
             ) : (
-              <div className="text-center py-8 text-gray-500">
-                <IconFileText aria-hidden="true" className="w-12 h-12 mx-auto mb-2 opacity-50" />
+              <div className="text-center py-8 text-fg-muted">
+                <IconFileText aria-hidden="true" className="w-8 h-8 mx-auto mb-2 text-fg-muted" />
                 <p className="text-sm">{t('editor.execution.noLog')}</p>
               </div>
             )}

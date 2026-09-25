@@ -49,6 +49,7 @@
   --motion-easing: cubic-bezier(0.2, 0, 0, 1);
 
   /* 间距（4px 步长） */
+  --space-0: 0px;
   --space-4: 4px;
   --space-8: 8px;
   --space-12: 12px;

@@ -50,28 +50,28 @@ export function PermissionApprovalDialog({
 
   return (
     <div
-      className="mb-2 flex min-w-0 items-center gap-3 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2.5 shadow-sm dark:border-amber-500/35 dark:bg-amber-950/25"
+      className="mb-2 flex min-w-0 flex-wrap items-center gap-3 rounded-card border border-warning bg-warning-soft px-3 py-2.5"
       role="alertdialog"
       aria-labelledby="permission-approval-title"
     >
-      <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-amber-100 dark:bg-amber-950/50">
-        <IconAlertTriangle aria-hidden="true" className="h-4 w-4 text-amber-700 dark:text-amber-300" />
+      <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-control bg-warning-soft">
+        <IconAlertTriangle aria-hidden="true" className="h-4 w-4 text-warning dark:text-warning" />
       </div>
       <div className="min-w-0 flex-1">
-        <div id="permission-approval-title" className="text-sm font-medium text-zinc-900 dark:text-zinc-100">
+        <div id="permission-approval-title" className="text-sm font-medium text-fg dark:text-fg">
           {t('chat.permission.title')}
         </div>
-        <code className="mt-0.5 block truncate font-mono text-xs text-zinc-700 dark:text-zinc-200" title={description}>
+        <code className="mt-0.5 block truncate font-mono text-xs text-fg-secondary dark:text-fg-secondary" title={description}>
           $ {description}
         </code>
       </div>
-      <div className="flex shrink-0 items-center gap-1.5">
+      <div className="flex flex-wrap items-center gap-2">
         <button
           type="button"
           autoFocus
           disabled={submitting}
           onClick={() => onReply('deny')}
-          className="rounded-lg px-3 py-1.5 text-xs font-medium text-zinc-700 transition-colors hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-60 dark:text-zinc-200 dark:hover:bg-amber-900/40"
+          className="rounded-lg px-3 py-1.5 text-xs font-medium text-fg-secondary transition-colors hover:bg-warning-soft disabled:cursor-not-allowed disabled:bg-disabled disabled:text-fg-disabled dark:text-fg-secondary dark:hover:bg-warning-soft"
         >
           {t('chat.permission.deny')}
         </button>
@@ -79,9 +79,9 @@ export function PermissionApprovalDialog({
           type="button"
           disabled={submitting}
           onClick={() => onReply(networkTargetTrustEnabled ? 'trust_network_target' : 'always')}
-          className="inline-flex items-center gap-1 rounded-lg border border-amber-400 px-3 py-1.5 text-xs font-medium text-amber-800 transition-colors hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-60 dark:text-amber-200 dark:hover:bg-amber-900/40"
+          className="inline-flex items-center gap-1 rounded-lg border border-warning px-3 py-1.5 text-xs font-medium text-warning transition-colors hover:bg-warning-soft disabled:cursor-not-allowed disabled:bg-disabled disabled:text-fg-disabled dark:text-warning dark:hover:bg-warning-soft"
         >
-          <IconShieldCheck aria-hidden="true" className="h-3.5 w-3.5" />
+          <IconShieldCheck aria-hidden="true" className="h-4 w-4" />
           {networkTargetTrustEnabled ? t('chat.permission.alwaysTarget') : t('chat.permission.always')}
         </button>
         {networkTrustEnabled && (
@@ -89,7 +89,7 @@ export function PermissionApprovalDialog({
             type="button"
             disabled={submitting}
             onClick={() => onReply('trust_tool_network')}
-            className="inline-flex items-center gap-1 rounded-lg border border-zinc-300 px-3 py-1.5 text-xs font-medium text-zinc-700 transition-colors hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-60 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-800"
+            className="inline-flex items-center gap-1 rounded-lg border border-line-control px-3 py-1.5 text-xs font-medium text-fg-secondary transition-colors hover:bg-hover disabled:cursor-not-allowed disabled:bg-disabled disabled:text-fg-disabled dark:border-line dark:text-fg-secondary dark:hover:bg-hover"
           >
             {t('chat.permission.trustToolNetwork')}
           </button>
@@ -98,14 +98,14 @@ export function PermissionApprovalDialog({
           type="button"
           disabled={submitting}
           onClick={() => onReply('allow')}
-          className="inline-flex items-center gap-1 rounded-lg bg-amber-600 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-amber-700 disabled:cursor-not-allowed disabled:opacity-60"
+          className="inline-flex items-center gap-1 rounded-control bg-action px-3 py-1.5 text-xs font-medium text-action-fg transition-colors hover:bg-action-hover disabled:cursor-not-allowed disabled:bg-disabled disabled:text-fg-disabled"
         >
-          {submitting && <IconLoader2 aria-hidden="true" className="h-3.5 w-3.5 animate-spin" />}
+          {submitting && <IconLoader2 aria-hidden="true" className="h-4 w-4 animate-spin" />}
           {t('chat.permission.allowOnce')}
         </button>
       </div>
       {error && (
-        <p role="alert" className="basis-full pl-11 text-xs text-red-700 dark:text-red-300">
+        <p role="alert" className="basis-full pl-11 text-xs text-danger dark:text-danger">
           {error}
         </p>
       )}

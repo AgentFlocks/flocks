@@ -1,7 +1,8 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback, useId } from 'react';
 import { IconX, IconRefresh, IconChevronDown, IconFileText } from '@tabler/icons-react';
 import { useTranslation } from 'react-i18next';
 import { logsAPI, type LogFileInfo, type LogContentResponse } from '@/api/logs';
+import { useDialogFocus } from '@/hooks/useDialogFocus';
 
 interface LogViewerModalProps {
   open: boolean;
@@ -10,6 +11,9 @@ interface LogViewerModalProps {
 
 export default function LogViewerModal({ open, onClose }: LogViewerModalProps) {
   const { t } = useTranslation('tool');
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const titleId = useId();
+  useDialogFocus(dialogRef, open, onClose);
   const [files, setFiles] = useState<LogFileInfo[]>([]);
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
   const [logContent, setLogContent] = useState<LogContentResponse | null>(null);
@@ -70,17 +74,18 @@ export default function LogViewerModal({ open, onClose }: LogViewerModalProps) {
 
   return (
     <>
-      <div className="fixed inset-0 bg-black/40 z-40" onClick={onClose} />
-      <div className="fixed inset-4 md:inset-8 lg:inset-12 z-50 flex flex-col bg-white rounded-2xl shadow-2xl overflow-hidden">
-        <div className="flex items-center gap-3 px-6 py-4 border-b border-gray-200 bg-gray-50 flex-shrink-0">
-          <IconFileText aria-hidden="true" className="w-5 h-5 text-purple-600" />
-          <h2 className="text-lg font-semibold text-gray-900 flex-1">{t('logs.title')}</h2>
-          <div className="flex items-center gap-2">
+      <div className="fixed inset-0 bg-overlay-backdrop z-40" onClick={onClose} />
+      <div ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby={titleId} tabIndex={-1} data-ui-overlay="dialog" className="fixed inset-x-4 top-4 bottom-4 mx-auto max-w-modal z-50 flex flex-col bg-surface rounded-overlay shadow-overlay overflow-hidden">
+        <div className="flex flex-wrap items-center gap-3 px-4 sm:px-6 py-4 border-b border-line bg-canvas flex-shrink-0">
+          <IconFileText aria-hidden="true" className="w-5 h-5 text-ai" />
+          <h2 id={titleId} className="text-title-section text-fg flex-1">{t('logs.title')}</h2>
+          <div className="flex flex-wrap items-center gap-2">
             <select
               value={selectedFile || ''}
               onChange={(e) => handleFileSelect(e.target.value)}
               disabled={files.length === 0}
-              className="text-sm border border-gray-300 rounded-lg px-2 py-1.5 bg-white focus:outline-none focus:ring-2 focus:ring-purple-500 disabled:opacity-50"
+              aria-label={t('logs.file')}
+              className="ui-select w-auto max-w-full"
             >
               {files.length === 0 && <option value="">{t('logs.noFiles')}</option>}
               {files.map((f) => (
@@ -90,22 +95,23 @@ export default function LogViewerModal({ open, onClose }: LogViewerModalProps) {
             <button
               onClick={handleRefresh}
               disabled={loading}
-              className="p-2 text-gray-500 hover:text-gray-700 hover:bg-gray-200 rounded-lg transition-colors disabled:opacity-50"
+              className="ui-btn ui-btn-ghost ui-btn-icon text-fg-muted"
               title={t('logs.refresh')}
+              aria-label={t('logs.refresh')}
             >
               <IconRefresh aria-hidden="true" className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
             </button>
-            <label className="flex items-center gap-1.5 text-xs text-gray-500 cursor-pointer select-none">
+            <label className="flex items-center gap-1.5 text-xs text-fg-muted cursor-pointer select-none">
               <input
                 type="checkbox"
                 checked={autoScroll}
                 onChange={(e) => setAutoScroll(e.target.checked)}
-                className="rounded text-purple-600 focus:ring-purple-500"
+                className="rounded text-ai focus:ring-focus"
               />
-              <IconChevronDown aria-hidden="true" className="w-3 h-3" />
+              <IconChevronDown aria-hidden="true" className="w-4 h-4" />
               {t('logs.autoScroll')}
             </label>
-            <button onClick={onClose} className="p-2 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-lg transition-colors">
+            <button onClick={onClose} aria-label={t('common:button.close')} className="ui-btn ui-btn-ghost ui-btn-icon text-fg-muted">
               <IconX aria-hidden="true" className="w-5 h-5" />
             </button>
           </div>
@@ -114,18 +120,18 @@ export default function LogViewerModal({ open, onClose }: LogViewerModalProps) {
         <div className="flex-1 overflow-hidden relative">
           {loading && !logContent && (
             <div className="flex items-center justify-center h-full">
-              <IconRefresh aria-hidden="true" className="w-6 h-6 text-gray-400 animate-spin" />
+              <IconRefresh aria-hidden="true" className="w-6 h-6 text-fg-muted animate-spin" />
             </div>
           )}
           {error && (
             <div className="flex items-center justify-center h-full">
-              <p className="text-sm text-red-500">{error}</p>
+              <p className="text-sm text-danger">{error}</p>
             </div>
           )}
           {logContent && (
             <pre
               ref={contentRef}
-              className="h-full overflow-auto p-4 text-xs font-mono bg-gray-900 text-green-400 leading-relaxed whitespace-pre-wrap break-words"
+              className="h-full overflow-auto p-4 text-xs font-mono bg-subtle text-fg whitespace-pre-wrap break-words"
             >
               {logContent.content}
             </pre>
@@ -133,10 +139,10 @@ export default function LogViewerModal({ open, onClose }: LogViewerModalProps) {
         </div>
 
         {logContent && (
-          <div className="flex-shrink-0 px-6 py-2 border-t border-gray-200 bg-gray-50 flex items-center gap-4 text-xs text-gray-500">
+          <div className="flex-shrink-0 px-6 py-2 border-t border-line bg-canvas flex items-center gap-4 text-xs text-fg-muted">
             <span>{t('logs.file')}: {logContent.filename}</span>
             <span>{t('logs.totalLines')}: {logContent.total_lines}</span>
-            {logContent.truncated && <span className="text-amber-600">{t('logs.truncated')}</span>}
+            {logContent.truncated && <span className="text-warning">{t('logs.truncated')}</span>}
           </div>
         )}
       </div>

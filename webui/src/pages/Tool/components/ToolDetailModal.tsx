@@ -1,4 +1,6 @@
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { pageActionLabel } from '../../pageActionLabel';
+import PageDialog from '../../PageDialog';
+import { useState, useEffect, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
   IconTool,
@@ -64,15 +66,6 @@ export default function ToolDetailModal({ tool, initialSection, deviceId, onClos
     }
   }, [tool.name, canDirectTest]);
 
-  const handleKeyDown = useCallback((e: KeyboardEvent) => {
-    if (e.key === 'Escape') onClose();
-  }, [onClose]);
-
-  useEffect(() => {
-    document.addEventListener('keydown', handleKeyDown);
-    return () => document.removeEventListener('keydown', handleKeyDown);
-  }, [handleKeyDown]);
-
   const sb = SOURCE_BADGE[tool.source] ?? SOURCE_BADGE.custom;
   const sourceLabel = sb.labelKey ? t(sb.labelKey) : (sb.label ?? tool.source);
 
@@ -92,27 +85,27 @@ export default function ToolDetailModal({ tool, initialSection, deviceId, onClos
   };
 
   return (
-    <div className="fixed inset-0 bg-gray-600 bg-opacity-75 flex items-center justify-center z-50" onClick={onClose}>
-      <div className="bg-white rounded-xl shadow-2xl max-w-2xl w-full mx-4 max-h-[85vh] min-h-0 flex flex-col" onClick={(e) => e.stopPropagation()}>
+    <PageDialog onClose={onClose} className="fixed inset-0 bg-overlay-backdrop flex items-center justify-center z-50" >
+      <div className="bg-surface rounded-card shadow-overlay max-w-modal w-full mx-4 max-h-[85vh] min-h-0 flex flex-col" onClick={(e) => e.stopPropagation()}>
         {/* Header */}
-        <div className="px-6 py-4 border-b border-gray-200 flex-shrink-0">
+        <div className="px-6 py-4 border-b border-line flex-shrink-0">
           <div className="flex items-center justify-between">
             <div className="flex items-center space-x-3">
-              <div className="w-10 h-10 bg-gray-50 rounded-lg flex items-center justify-center">
-                <IconTool aria-hidden="true" className="w-5 h-5 text-gray-600" />
+              <div className="w-10 h-10 bg-subtle rounded-control flex items-center justify-center">
+                <IconTool aria-hidden="true" className="w-5 h-5 text-fg-secondary" />
               </div>
               <div>
-                <h2 className="text-lg font-semibold text-gray-900 font-mono">{tool.name}</h2>
+                <h2 className="text-title-section font-semibold text-fg font-mono">{tool.name}</h2>
                 <div className="flex items-center gap-2 mt-0.5">
-                  <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${sb.className}`}>
+                  <span className={`inline-flex items-center px-2 py-0.5 rounded-tag text-xs font-medium ${sb.className}`}>
                     {sourceLabel}
                   </span>
-                  <span className="text-xs text-gray-500">{tool.source_name || 'Flocks'}</span>
-                  <span className="text-xs text-gray-400">{t(CATEGORY_LABEL_KEY[tool.category] ?? 'category.custom')}</span>
+                  <span className="text-xs text-fg-muted">{tool.source_name || 'Flocks'}</span>
+                  <span className="text-xs text-fg-muted">{t(CATEGORY_LABEL_KEY[tool.category] ?? 'category.custom')}</span>
                 </div>
               </div>
             </div>
-            <button onClick={onClose} className="text-gray-400 hover:text-gray-600 p-1 rounded-lg hover:bg-gray-100">
+            <button aria-label={pageActionLabel('close')} onClick={onClose} className="ui-btn-icon inline-flex items-center justify-center text-fg-muted hover:text-fg-secondary p-1 rounded-control hover:bg-hover">
               <IconX aria-hidden="true" className="w-5 h-5" />
             </button>
           </div>
@@ -120,7 +113,7 @@ export default function ToolDetailModal({ tool, initialSection, deviceId, onClos
             <button
               onClick={() => setSection('info')}
               className={`flex items-center text-sm font-medium pb-2 border-b-2 transition-colors ${
-                section === 'info' ? 'border-red-500 text-red-600' : 'border-transparent text-gray-500 hover:text-gray-700'
+                section === 'info' ? 'border-danger text-danger' : 'border-transparent text-fg-muted hover:text-fg-secondary'
               }`}
             >
               <IconInfoCircle aria-hidden="true" className="w-4 h-4 mr-1.5" />{t('toolDetail.tabInfo')}
@@ -128,7 +121,7 @@ export default function ToolDetailModal({ tool, initialSection, deviceId, onClos
             <button
               onClick={() => setSection('test')}
               className={`flex items-center text-sm font-medium pb-2 border-b-2 transition-colors ${
-                section === 'test' ? 'border-red-500 text-red-600' : 'border-transparent text-gray-500 hover:text-gray-700'
+                section === 'test' ? 'border-danger text-danger' : 'border-transparent text-fg-muted hover:text-fg-secondary'
               }`}
             >
               <IconTestPipe aria-hidden="true" className="w-4 h-4 mr-1.5" />{t('toolDetail.tabTest')}
@@ -141,50 +134,50 @@ export default function ToolDetailModal({ tool, initialSection, deviceId, onClos
           {section === 'info' ? (
             <div className="space-y-5">
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1.5">{t('toolDetail.description')}</label>
-                <p className="text-sm text-gray-600 leading-relaxed whitespace-pre-wrap break-words [overflow-wrap:anywhere]">{tool.description}</p>
+                <label className="block text-sm font-medium text-fg-secondary mb-1.5">{t('toolDetail.description')}</label>
+                <p className="text-sm text-fg-secondary whitespace-pre-wrap break-words [overflow-wrap:anywhere]">{tool.description}</p>
               </div>
               <div className="flex flex-wrap gap-4">
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1.5">{t('toolDetail.status')}</label>
+                  <label className="block text-sm font-medium text-fg-secondary mb-1.5">{t('toolDetail.status')}</label>
                   <EnabledBadge enabled={tool.enabled} />
                 </div>
                 {tool.requires_confirmation && (
                   <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1.5">{t('toolDetail.security')}</label>
-                    <span className="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium bg-amber-100 text-amber-800">
-                      <IconAlertTriangle aria-hidden="true" className="w-3.5 h-3.5 mr-1" />{t('toolDetail.requiresConfirmation')}
+                    <label className="block text-sm font-medium text-fg-secondary mb-1.5">{t('toolDetail.security')}</label>
+                    <span className="inline-flex items-center px-2.5 py-1 rounded-pill text-xs font-medium bg-warning-soft text-warning">
+                      <IconAlertTriangle aria-hidden="true" className="w-4 h-4 mr-1" />{t('toolDetail.requiresConfirmation')}
                     </span>
                   </div>
                 )}
               </div>
               {tool.parameters && tool.parameters.length > 0 && (
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-2">{t('toolDetail.params', { count: tool.parameters.length })}</label>
-                  <div className="bg-gray-50 rounded-lg border border-gray-200 overflow-hidden">
+                  <label className="block text-sm font-medium text-fg-secondary mb-2">{t('toolDetail.params', { count: tool.parameters.length })}</label>
+                  <div className="bg-subtle rounded-control border border-line overflow-hidden">
                     <div className="overflow-x-auto">
-                      <table className="min-w-full table-fixed divide-y divide-gray-200">
-                      <thead className="bg-gray-100">
+                      <table className="min-w-full table-fixed divide-y divide-line">
+                      <thead className="bg-subtle">
                         <tr>
-                          <th className="w-[28%] px-4 py-2 text-left text-xs font-medium text-gray-500">{t('toolDetail.paramName')}</th>
-                          <th className="w-[16%] px-4 py-2 text-left text-xs font-medium text-gray-500">{t('toolDetail.paramType')}</th>
-                          <th className="w-[14%] px-4 py-2 text-left text-xs font-medium text-gray-500">{t('toolDetail.paramRequired')}</th>
-                          <th className="w-[42%] px-4 py-2 text-left text-xs font-medium text-gray-500">{t('toolDetail.paramDesc')}</th>
+                          <th className="w-[28%] px-4 py-2 text-left text-xs font-medium text-fg-muted">{t('toolDetail.paramName')}</th>
+                          <th className="w-[16%] px-4 py-2 text-left text-xs font-medium text-fg-muted">{t('toolDetail.paramType')}</th>
+                          <th className="w-[14%] px-4 py-2 text-left text-xs font-medium text-fg-muted">{t('toolDetail.paramRequired')}</th>
+                          <th className="w-[42%] px-4 py-2 text-left text-xs font-medium text-fg-muted">{t('toolDetail.paramDesc')}</th>
                         </tr>
                       </thead>
-                      <tbody className="divide-y divide-gray-200">
+                      <tbody className="divide-y divide-line">
                         {tool.parameters.map((param, idx) => (
                           <tr key={idx}>
                             <td className="px-4 py-2 align-top">
-                              <code className="text-xs font-mono text-gray-900 bg-white px-1.5 py-0.5 rounded border border-gray-200 break-all">{param.name}</code>
+                              <code className="text-xs font-mono text-fg bg-surface px-1.5 py-0.5 rounded-tag border border-line break-all">{param.name}</code>
                             </td>
-                            <td className="px-4 py-2 align-top text-xs text-gray-600 whitespace-pre-wrap break-words [overflow-wrap:anywhere]">{param.type}</td>
+                            <td className="px-4 py-2 align-top text-xs text-fg-secondary whitespace-pre-wrap break-words [overflow-wrap:anywhere]">{param.type}</td>
                             <td className="px-4 py-2 align-top">
                               {param.required
-                                ? <span className="text-xs text-red-600 font-medium">{t('toolDetail.yes')}</span>
-                                : <span className="text-xs text-gray-400">{t('toolDetail.no')}</span>}
+                                ? <span className="text-xs text-danger font-medium">{t('toolDetail.yes')}</span>
+                                : <span className="text-xs text-fg-muted">{t('toolDetail.no')}</span>}
                             </td>
-                            <td className="px-4 py-2 align-top text-xs text-gray-600 whitespace-pre-wrap break-words [overflow-wrap:anywhere]">{param.description}</td>
+                            <td className="px-4 py-2 align-top text-xs text-fg-secondary whitespace-pre-wrap break-words [overflow-wrap:anywhere]">{param.description}</td>
                           </tr>
                         ))}
                       </tbody>
@@ -194,9 +187,9 @@ export default function ToolDetailModal({ tool, initialSection, deviceId, onClos
                 </div>
               )}
               {tool.source === 'mcp' && (
-                <div className="bg-red-50 border border-red-200 rounded-lg p-4">
-                  <h4 className="text-sm font-medium text-red-900 mb-1">{t('toolDetail.mcpToolTitle')}</h4>
-                  <p className="text-sm text-red-800">
+                <div className="bg-danger-soft border border-danger rounded-control p-4">
+                  <h4 className="text-sm font-medium text-danger mb-1">{t('toolDetail.mcpToolTitle')}</h4>
+                  <p className="text-sm text-danger">
                     {t('toolDetail.mcpToolDesc', { server: tool.source_name })}
                   </p>
                 </div>
@@ -206,20 +199,20 @@ export default function ToolDetailModal({ tool, initialSection, deviceId, onClos
             <div className="space-y-4">
               {/* Fixtures quick-fill */}
               {fixtures.length > 0 && (
-                <div className="rounded-lg border border-blue-100 bg-blue-50 overflow-hidden">
+                <div className="rounded-control border border-info bg-info-soft overflow-hidden">
                   <button
                     type="button"
                     onClick={() => setFixturesOpen((v) => !v)}
-                    className="w-full flex items-center justify-between px-4 py-2.5 text-sm font-medium text-blue-700 hover:bg-blue-100 transition-colors"
+                    className="w-full flex items-center justify-between px-4 py-2.5 text-sm font-medium text-info hover:bg-info-soft transition-colors"
                   >
                     <span className="flex items-center gap-1.5">
-                      <IconBook aria-hidden="true" className="w-3.5 h-3.5" />
+                      <IconBook aria-hidden="true" className="w-4 h-4" />
                       测试示例 ({fixtures.length})
                     </span>
-                    <IconChevronDown aria-hidden="true" className={`w-3.5 h-3.5 transition-transform ${fixturesOpen ? 'rotate-180' : ''}`} />
+                    <IconChevronDown aria-hidden="true" className={`w-4 h-4 transition-transform ${fixturesOpen ? 'rotate-180' : ''}`} />
                   </button>
                   {fixturesOpen && (
-                    <div className="border-t border-blue-100 divide-y divide-blue-100">
+                    <div className="border-t border-info divide-y divide-info">
                       {fixtures.map((fx, idx) => {
                         const label = (i18n.language.startsWith('zh') && fx.label_cn) ? fx.label_cn : fx.label;
                         return (
@@ -233,16 +226,16 @@ export default function ToolDetailModal({ tool, initialSection, deviceId, onClos
                               setTestParams(JSON.stringify(merged, null, 2));
                               setFixturesOpen(false);
                             }}
-                            className="w-full flex items-start gap-3 px-4 py-2.5 hover:bg-blue-100 transition-colors text-left"
+                            className="w-full flex items-start gap-3 px-4 py-2.5 hover:bg-info-soft transition-colors text-left"
                           >
                             <div className="flex-1 min-w-0">
-                              <p className="text-sm font-medium text-blue-800 truncate">{label}</p>
-                              <p className="text-xs text-blue-500 font-mono truncate mt-0.5">
+                              <p className="text-sm font-medium text-info truncate">{label}</p>
+                              <p className="text-xs text-info font-mono truncate mt-0.5">
                                 {JSON.stringify(fx.params)}
                               </p>
                             </div>
                             {fx.has_assertion && (
-                              <span className="text-[10px] bg-green-100 text-green-700 px-1.5 py-0.5 rounded flex-shrink-0 mt-0.5">断言</span>
+                              <span className="text-xs bg-success-soft text-success px-1.5 py-0.5 rounded-tag flex-shrink-0 mt-0.5">断言</span>
                             )}
                           </button>
                         );
@@ -252,17 +245,17 @@ export default function ToolDetailModal({ tool, initialSection, deviceId, onClos
                 </div>
               )}
               {fixtures.length === 0 && canDirectTest && (
-                <p className="text-xs text-zinc-400 flex items-center gap-1">
-                  <IconBook aria-hidden="true" className="w-3 h-3" />
+                <p className="text-xs text-fg-muted flex items-center gap-1">
+                  <IconBook aria-hidden="true" className="w-4 h-4" />
                   此工具暂无预置测试示例，请手动填写参数
                 </p>
               )}
 
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">{t('toolDetail.testParams')}</label>
+                <label className="block text-sm font-medium text-fg-secondary mb-2">{t('toolDetail.testParams')}</label>
                 {deviceId && (
-                  <p className="text-xs text-blue-600 mb-1.5 flex items-center gap-1">
-                    <span className="inline-block w-1.5 h-1.5 rounded-full bg-blue-400 flex-shrink-0" />
+                  <p className="text-xs text-info mb-1.5 flex items-center gap-1">
+                    <span className="inline-block w-1.5 h-1.5 rounded-pill bg-info flex-shrink-0" />
                     已自动填入当前设备 ID（<code className="font-mono">{deviceId}</code>）
                   </p>
                 )}
@@ -271,13 +264,13 @@ export default function ToolDetailModal({ tool, initialSection, deviceId, onClos
                   onChange={(e) => setTestParams(e.target.value)}
                   placeholder='{"param": "value"}'
                   rows={6}
-                  className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-red-500 focus:border-transparent font-mono text-sm bg-gray-50"
+                  className="ui-textarea w-full px-4  border border-line-control rounded-control focus:border-transparent font-mono text-sm bg-subtle"
                 />
               </div>
               <button
                 onClick={handleTest}
                 disabled={testing || !tool.enabled || !canDirectTest}
-                className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-red-600 text-white rounded-lg hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed font-medium text-sm"
+                className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-action text-action-fg rounded-control hover:bg-action-hover disabled:bg-disabled disabled:text-fg-disabled disabled:cursor-not-allowed font-medium text-sm"
               >
                 {testing ? (
                   <><IconRefresh aria-hidden="true" className="w-4 h-4 animate-spin" />{t('toolDetail.executing')}</>
@@ -286,26 +279,26 @@ export default function ToolDetailModal({ tool, initialSection, deviceId, onClos
                 )}
               </button>
               {!tool.enabled && (
-                <p className="text-xs text-amber-600 text-center">{t('toolDetail.disabledNote')}</p>
+                <p className="text-xs text-warning text-center">{t('toolDetail.disabledNote')}</p>
               )}
               {canDirectTest ? null : (
-                <p className="text-xs text-amber-600 text-center">{t('toolDetail.sessionTestOnly')}</p>
+                <p className="text-xs text-warning text-center">{t('toolDetail.sessionTestOnly')}</p>
               )}
               {testResult && (
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-2">{t('toolDetail.testResult')}</label>
-                  <div className={`rounded-lg border p-4 ${testResult.success ? 'bg-green-50 border-green-200' : 'bg-red-50 border-red-200'}`}>
+                  <label className="block text-sm font-medium text-fg-secondary mb-2">{t('toolDetail.testResult')}</label>
+                  <div className={`rounded-control border p-4 ${testResult.success ? 'bg-success-soft border-success' : 'bg-danger-soft border-danger'}`}>
                     <div className="flex items-center mb-2">
                       {testResult.success
-                        ? <IconCircleCheck aria-hidden="true" className="w-4 h-4 text-green-600 mr-2" />
-                        : <IconCircleX aria-hidden="true" className="w-4 h-4 text-red-600 mr-2" />}
-                      <span className={`text-sm font-medium ${testResult.success ? 'text-green-800' : 'text-red-800'}`}>
+                        ? <IconCircleCheck aria-hidden="true" className="w-4 h-4 text-success mr-2" />
+                        : <IconCircleX aria-hidden="true" className="w-4 h-4 text-danger mr-2" />}
+                      <span className={`text-sm font-medium ${testResult.success ? 'text-success' : 'text-danger'}`}>
                         {testResult.success ? t('toolDetail.execSuccess') : t('toolDetail.execFailed')}
                       </span>
                     </div>
-                    {testResult.error && <p className="text-sm text-red-700 mb-2">{testResult.error}</p>}
+                    {testResult.error && <p className="text-sm text-danger mb-2">{testResult.error}</p>}
                     {testResult.output != null && (
-                      <pre className="text-xs bg-white bg-opacity-60 p-3 rounded-md overflow-x-auto max-h-60 font-mono">
+                      <pre className="text-xs bg-surface p-3 rounded-control overflow-x-auto max-h-60 font-mono">
                         {typeof testResult.output === 'string' ? testResult.output : JSON.stringify(testResult.output, null, 2)}
                       </pre>
                     )}
@@ -317,14 +310,14 @@ export default function ToolDetailModal({ tool, initialSection, deviceId, onClos
         </div>
 
         {/* Footer */}
-        <div className="px-6 py-4 border-t border-gray-200 flex justify-end space-x-3 flex-shrink-0">
-          <button onClick={onClose} className="px-4 py-2 border border-gray-300 rounded-lg text-sm font-medium text-gray-700 hover:bg-gray-50">
+        <div className="px-6 py-4 border-t border-line flex justify-end space-x-3 flex-shrink-0">
+          <button onClick={onClose} className="px-4 py-2 border border-line-control rounded-control text-sm font-medium text-fg-secondary hover:bg-hover">
             {t('toolDetail.close')}
           </button>
           {section === 'info' && (
             <button
               onClick={() => setSection('test')}
-              className="px-4 py-2 bg-red-600 rounded-lg text-sm font-medium text-white hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center"
+              className="px-4 py-2 bg-action rounded-control text-sm font-medium text-action-fg hover:bg-action-hover disabled:bg-disabled disabled:text-fg-disabled disabled:cursor-not-allowed flex items-center"
               disabled={!canDirectTest}
               title={canDirectTest ? undefined : t('toolDetail.sessionTestOnly')}
             >
@@ -333,6 +326,6 @@ export default function ToolDetailModal({ tool, initialSection, deviceId, onClos
           )}
         </div>
       </div>
-    </div>
+    </PageDialog>
   );
 }

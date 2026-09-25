@@ -103,13 +103,13 @@ export default function PartitionTopBar({
           aria-label={action.name}
           className={`inline-flex h-7 shrink-0 items-center gap-1 rounded-md border border-dashed px-2 text-xs font-normal transition-colors ${
             action.active
-              ? 'border-zinc-400 text-zinc-800 dark:border-zinc-600 dark:text-zinc-100'
-              : 'border-zinc-300 text-zinc-500 hover:bg-white/60 hover:text-zinc-800 dark:border-zinc-700 dark:text-zinc-400 dark:hover:bg-zinc-800/60 dark:hover:text-zinc-100'
+              ? 'border-line-control text-fg dark:border-line dark:text-fg'
+              : 'border-line-control text-fg-secondary hover:bg-hover hover:text-fg dark:border-line dark:text-fg-secondary dark:hover:bg-hover dark:hover:text-fg'
           }`}
         >
-          <action.icon aria-hidden="true" className="h-3.5 w-3.5 shrink-0" />
+          <action.icon aria-hidden="true" className="h-4 w-4 shrink-0" />
           <span className="whitespace-nowrap">{action.name}</span>
-          {action.badge && <span className="rounded bg-emerald-100 px-1 text-[9px] font-semibold leading-4 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300">NEW</span>}
+          {action.badge && <span className="rounded bg-success-soft px-1 text-xs font-semibold leading-4 text-success dark:bg-success-soft dark:text-success">NEW</span>}
         </Link>
       )}
       </div>
@@ -126,7 +126,7 @@ export default function PartitionTopBar({
             if (settingsOpen) settingsRef.current?.querySelector<HTMLElement>('[role="menuitem"]')?.focus();
             else { keyboardOpen.current = true; setSettingsOpen(true); }
           }}
-          className={`flex h-8 w-8 items-center justify-center rounded-lg transition-colors ${activeId === 'settings' ? 'bg-white text-zinc-900 dark:bg-zinc-800 dark:text-zinc-50' : 'text-zinc-500 hover:bg-white/60 dark:text-zinc-400 dark:hover:bg-zinc-800'}`}>
+          className={`ui-btn-icon flex h-8 w-8 items-center justify-center rounded-lg transition-colors ${activeId === 'settings' ? 'bg-surface text-fg dark:bg-subtle dark:text-fg' : 'text-fg-muted hover:bg-hover dark:text-fg-muted dark:hover:bg-hover'}`}>
           <IconSettings aria-hidden="true" className="h-4 w-4" />
         </button>
         {settingsOpen && <div className="absolute right-0 top-full z-30 pt-1">
@@ -139,11 +139,11 @@ export default function PartitionTopBar({
               const next = event.key === 'Home' ? 0 : event.key === 'End' ? entries.length - 1 : (index + (event.key === 'ArrowUp' ? -1 : 1) + entries.length) % entries.length;
               entries[next]?.focus();
             }}
-            className="max-h-[calc(100dvh-3.5rem)] w-60 max-w-[calc(100vw-1rem)] overflow-y-auto rounded-xl border border-zinc-200 bg-white p-1.5 shadow-lg dark:border-zinc-700 dark:bg-zinc-900">
+            className="max-h-[calc(100dvh-3.5rem)] w-60 max-w-[calc(100vw-1rem)] overflow-y-auto rounded-xl border border-line bg-surface p-1.5 shadow-lg dark:border-line dark:bg-surface">
             {settingsGroups.map((group) => <div key={group.name} role="group" aria-label={group.name}>
-              <p className="px-2 py-1.5 text-xs text-zinc-400">{group.name}</p>
+              <p className="px-2 py-1.5 text-xs text-fg-muted">{group.name}</p>
               {group.items.map((item) => <Link key={item.href} to={item.href} role="menuitem" target={item.external ? '_blank' : undefined} rel={item.external ? 'noopener noreferrer' : undefined}
-                onClick={() => setSettingsOpen(false)} className="flex items-center gap-2 rounded-lg px-2 py-2 text-sm text-zinc-700 hover:bg-zinc-100 focus:bg-zinc-100 dark:text-zinc-200 dark:hover:bg-zinc-800 dark:focus:bg-zinc-800">
+                onClick={() => setSettingsOpen(false)} className="flex items-center gap-2 rounded-lg px-2 py-2 text-sm text-fg-secondary hover:bg-hover focus:bg-hover dark:text-fg-secondary dark:hover:bg-hover dark:focus:bg-hover">
                 <item.icon aria-hidden="true" className="h-4 w-4 shrink-0" /><span>{item.name}</span>
               </Link>)}
             </div>)}

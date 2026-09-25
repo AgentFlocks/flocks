@@ -85,19 +85,19 @@ export function useToast() {
 const toastConfig: Record<ToastType, { icon: typeof IconCircleCheck; className: string }> = {
   success: {
     icon: IconCircleCheck,
-    className: 'bg-green-50 border-green-200 text-green-800',
+    className: 'bg-success-soft border-success text-success',
   },
   error: {
     icon: IconAlertCircle,
-    className: 'bg-red-50 border-red-200 text-red-800',
+    className: 'bg-danger-soft border-danger text-danger',
   },
   warning: {
     icon: IconAlertTriangle,
-    className: 'bg-yellow-50 border-yellow-200 text-yellow-800',
+    className: 'bg-warning-soft border-warning text-warning',
   },
   info: {
     icon: IconInfoCircle,
-    className: 'bg-red-50 border-red-200 text-red-800',
+    className: 'bg-info-soft border-info text-info',
   },
 };
 
@@ -116,19 +116,20 @@ function Toast({ toast, onRemove }: { toast: ToastMessage; onRemove: () => void 
 
   return (
     <div
-      className={`flex items-start gap-3 p-4 rounded-lg border shadow-lg animate-slide-in ${config.className}`}
+      data-ui-toast
+      className={`flex items-start gap-3 p-4 rounded-overlay border shadow-overlay animate-slide-in ${config.className}`}
       role="alert"
     >
       <Icon aria-hidden="true" className="w-5 h-5 flex-shrink-0 mt-0.5" />
       <div className="flex-1 min-w-0">
         <p className="font-medium text-sm">{toast.title}</p>
         {toast.description && (
-          <p className="mt-1 text-sm opacity-80">{toast.description}</p>
+          <p className="mt-1 text-sm">{toast.description}</p>
         )}
       </div>
       <button
         onClick={onRemove}
-        className="flex-shrink-0 p-1 rounded hover:bg-black/10 transition-colors"
+        className="ui-btn ui-btn-ghost ui-btn-icon flex-shrink-0"
         aria-label={t('button.close')}
       >
         <IconX aria-hidden="true" className="w-4 h-4" />
@@ -148,7 +149,7 @@ function ToastContainer({
   if (toasts.length === 0) return null;
 
   return (
-    <div className="fixed bottom-4 right-4 z-50 flex flex-col gap-2 max-w-sm w-full pointer-events-none">
+    <div className="fixed inset-x-4 bottom-4 z-50 flex flex-col gap-2 sm:left-auto sm:w-full sm:max-w-sm pointer-events-none">
       {toasts.map((toast) => (
         <div key={toast.id} className="pointer-events-auto">
           <Toast toast={toast} onRemove={() => removeToast(toast.id)} />
@@ -172,7 +173,8 @@ style.textContent = `
     }
   }
   .animate-slide-in {
-    animation: slide-in 0.3s ease-out;
+    animation: slide-in var(--motion-overlay) var(--motion-easing);
   }
+  @media (prefers-reduced-motion: reduce) { .animate-slide-in { animation: none; } }
 `;
 document.head.appendChild(style);

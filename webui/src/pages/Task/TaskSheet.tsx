@@ -365,23 +365,23 @@ function TaskFormContent({
     <div className="space-y-4">
       {/* Title */}
       <div>
-        <label className="block text-sm font-medium text-gray-700 mb-1">{t('form.titleLabel')}</label>
+        <label className="block text-sm font-medium text-fg-secondary mb-1">{t('form.titleLabel')}</label>
         <input
           type="text"
           value={formData.title}
           onChange={(e) => update({ title: e.target.value })}
-          className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-slate-400 outline-none text-sm"
+          className="ui-input w-full px-3  border border-line-control rounded-control text-sm"
           placeholder={t('form.titlePlaceholder')}
         />
       </div>
 
       {/* Description */}
       <div>
-        <label className="block text-sm font-medium text-gray-700 mb-1">{t('form.descLabel')}</label>
+        <label className="block text-sm font-medium text-fg-secondary mb-1">{t('form.descLabel')}</label>
         <textarea
           value={formData.description}
           onChange={(e) => update({ description: e.target.value })}
-          className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-slate-400 outline-none resize-none text-sm"
+          className="ui-textarea w-full px-3  border border-line-control rounded-control resize-none text-sm"
           rows={2}
           placeholder={t('form.descPlaceholder')}
         />
@@ -390,30 +390,30 @@ function TaskFormContent({
       {/* Priority + Scheduling */}
       <div className="space-y-2.5">
         <div className="flex items-center gap-3">
-          <span className="w-14 shrink-0 text-sm font-medium text-gray-700">{t('form.priorityLabel')}</span>
+          <span className="w-14 shrink-0 text-sm font-medium text-fg-secondary">{t('form.priorityLabel')}</span>
           <PillGroup
             options={[
-              { value: 'urgent', label: t('form.urgentLabel'), activeClass: 'bg-amber-500 text-white border-amber-500' },
-              { value: 'high', label: t('form.highLabel'), activeClass: 'bg-orange-500 text-white border-orange-500' },
-              { value: 'normal', label: t('form.normalLabel'), activeClass: 'bg-slate-500 text-white border-slate-500' },
-              { value: 'low', label: t('form.lowLabel'), activeClass: 'bg-gray-500 text-white border-gray-500' },
+              { value: 'urgent', label: t('form.urgentLabel'), activeClass: 'bg-warning-soft text-warning border-warning' },
+              { value: 'high', label: t('form.highLabel'), activeClass: 'bg-warning-soft text-warning border-warning' },
+              { value: 'normal', label: t('form.normalLabel'), activeClass: 'bg-selected text-fg border-line-control' },
+              { value: 'low', label: t('form.lowLabel'), activeClass: 'bg-selected text-fg border-line-control' },
             ]}
             value={formData.priority}
             onChange={(v) => update({ priority: v })}
           />
         </div>
         <div className="flex items-center gap-3">
-          <span className="w-14 shrink-0 text-sm font-medium text-gray-700">{t('form.scheduleKindLabel')}</span>
+          <span className="w-14 shrink-0 text-sm font-medium text-fg-secondary">{t('form.scheduleKindLabel')}</span>
           {isEdit ? (
-            <span className="px-3 py-1.5 bg-gray-50 border border-gray-200 rounded-lg text-sm text-gray-700">
+            <span className="px-3 py-1.5 bg-subtle border border-line rounded-control text-sm text-fg-secondary">
               {isRunOnce ? t('form.onceAtTimeOption') : t('form.recurringOption')}
             </span>
           ) : (
             <PillGroup
               options={[
-                { value: 'immediate', label: t('form.immediateOption'), activeClass: 'bg-sky-600 text-white border-sky-600' },
-                { value: 'once', label: t('form.onceAtTimeOption'), activeClass: 'bg-orange-500 text-white border-orange-500' },
-                { value: 'recurring', label: t('form.recurringOption'), activeClass: 'bg-purple-600 text-white border-purple-600' },
+                { value: 'immediate', label: t('form.immediateOption'), activeClass: 'bg-info-soft text-info border-info' },
+                { value: 'once', label: t('form.onceAtTimeOption'), activeClass: 'bg-warning-soft text-warning border-warning' },
+                { value: 'recurring', label: t('form.recurringOption'), activeClass: 'bg-ai-soft text-ai border-ai' },
               ]}
               value={formData.scheduleKind}
               onChange={(v) => update({ scheduleKind: v, cron: '', runAt: '' })}
@@ -425,15 +425,15 @@ function TaskFormContent({
       {/* Scheduling config */}
       {!isImmediate && (
         <div
-          className={`rounded-xl p-4 space-y-3 border ${
+          className={`rounded-card p-4 space-y-3 border ${
             isOnce || isRunOnce
-              ? 'bg-orange-50/60 border-orange-100'
-              : 'bg-purple-50/60 border-purple-100'
+              ? 'bg-warning-soft border-warning'
+              : 'bg-ai-soft border-ai'
           }`}
         >
           <p
             className={`text-sm font-semibold flex items-center gap-1.5 ${
-              isOnce || isRunOnce ? 'text-orange-800' : 'text-purple-800'
+              isOnce || isRunOnce ? 'text-warning' : 'text-ai'
             }`}
           >
             <IconCalendar aria-hidden="true" className="w-4 h-4" /> {t('form.scheduleConfig')}
@@ -441,7 +441,7 @@ function TaskFormContent({
 
           {/* Run-once mode: locked badge (edit) */}
           {isEdit && isRunOnce && (
-            <div className="flex items-center gap-2 px-3 py-2 bg-white border border-orange-200 rounded-lg text-sm text-orange-700 font-medium">
+            <div className="flex items-center gap-2 px-3 py-2 bg-surface border border-warning rounded-control text-sm text-warning font-medium">
               <IconClock aria-hidden="true" className="w-4 h-4" /> {t('form.runOnce')}
             </div>
           )}
@@ -449,12 +449,12 @@ function TaskFormContent({
           {/* Once: datetime picker */}
           {(isOnce || isRunOnce) && (
             <div>
-              <label className="block text-xs font-medium text-gray-600 mb-1">{t('form.execTimeLabel')}</label>
+              <label className="block text-xs font-medium text-fg-secondary mb-1">{t('form.execTimeLabel')}</label>
               <input
                 type="datetime-local"
                 value={formData.runAt}
                 onChange={(e) => update({ runAt: e.target.value })}
-                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-orange-400 outline-none text-sm bg-white"
+                className="ui-input w-full px-3  border border-line-control rounded-control text-sm bg-surface"
               />
             </div>
           )}
@@ -463,7 +463,7 @@ function TaskFormContent({
           {!isOnce && !isRunOnce && isRecurring && (
             <>
               <div>
-                <label className="block text-xs font-medium text-gray-600 mb-1.5">
+                <label className="block text-xs font-medium text-fg-secondary mb-1.5">
                   {t('form.freqRecurringLabel')}
                 </label>
                 <select
@@ -481,7 +481,7 @@ function TaskFormContent({
                       update({ cron: '' });
                     }
                   }}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg outline-none text-sm bg-white focus:ring-2 focus:ring-purple-500"
+                  className="ui-select w-full px-3  border border-line-control rounded-control text-sm bg-surface"
                 >
                   {!isEdit && <option value="">{t('form.selectFrequency')}</option>}
                   {CRON_PRESETS.filter((p) => p.value !== '__custom__').map((p) => (
@@ -498,22 +498,22 @@ function TaskFormContent({
                   type="text"
                   value={formData.cron}
                   onChange={(e) => update({ cron: e.target.value })}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500 outline-none font-mono text-sm"
+                  className="ui-input w-full px-3  border border-line-control rounded-control font-mono text-sm"
                   placeholder="0 9 * * 1-5"
                 />
               )}
 
               {effectiveCron && (
-                <p className="text-xs text-purple-600 font-medium">{describeCron(effectiveCron)}</p>
+                <p className="text-xs text-ai font-medium">{describeCron(effectiveCron)}</p>
               )}
 
               {/* Timezone + custom description */}
               <div>
-                <label className="block text-xs font-medium text-gray-600 mb-1">{t('form.timezoneLabel')}</label>
+                <label className="block text-xs font-medium text-fg-secondary mb-1">{t('form.timezoneLabel')}</label>
                 <select
                   value={formData.timezone}
                   onChange={(e) => update({ timezone: e.target.value })}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg outline-none text-sm bg-white"
+                  className="ui-select w-full px-3  border border-line-control rounded-control text-sm bg-surface"
                 >
                   <option value="Asia/Shanghai">{t('form.timezoneShanghai')}</option>
                   <option value="UTC">UTC</option>
@@ -523,16 +523,16 @@ function TaskFormContent({
                 </select>
               </div>
               <div>
-                <label className="block text-xs font-medium text-gray-600 mb-1">
+                <label className="block text-xs font-medium text-fg-secondary mb-1">
                   {t('form.cronDescLabel')}
-                  <span className="text-gray-400 font-normal ml-1">{t('form.cronDescHint')}</span>
+                  <span className="text-fg-muted font-normal ml-1">{t('form.cronDescHint')}</span>
                 </label>
                 <input
                   type="text"
                   value={formData.cronDescription}
                   onChange={(e) => update({ cronDescription: e.target.value })}
                   placeholder={effectiveCron ? describeCron(effectiveCron) : t('form.cronDescPlaceholder')}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500 outline-none text-sm bg-white"
+                  className="ui-input w-full px-3  border border-line-control rounded-control text-sm bg-surface"
                 />
               </div>
             </>
@@ -543,11 +543,11 @@ function TaskFormContent({
       {/* Execution mode + Agent/Workflow selector */}
       <div className="space-y-2.5">
         <div className="flex items-center gap-3">
-          <span className="w-14 shrink-0 text-sm font-medium text-gray-700">{t('form.modeLabel')}</span>
+          <span className="w-14 shrink-0 text-sm font-medium text-fg-secondary">{t('form.modeLabel')}</span>
           <PillGroup
             options={[
-              { value: 'agent', label: 'Agent', activeClass: 'bg-slate-600 text-white border-slate-600' },
-              { value: 'workflow', label: 'Workflow', activeClass: 'bg-purple-600 text-white border-purple-600' },
+              { value: 'agent', label: 'Agent', activeClass: 'bg-selected text-fg border-line-control' },
+              { value: 'workflow', label: 'Workflow', activeClass: 'bg-ai-soft text-ai border-ai' },
             ]}
             value={formData.executionMode}
             onChange={(v) => update({ executionMode: v })}
@@ -555,11 +555,11 @@ function TaskFormContent({
         </div>
         {formData.executionMode === 'agent' ? (
           <div className="flex items-center gap-3">
-            <span className="w-14 shrink-0 text-sm font-medium text-gray-700">Agent</span>
+            <span className="w-14 shrink-0 text-sm font-medium text-fg-secondary">Agent</span>
             <select
               value={formData.agentName}
               onChange={(e) => update({ agentName: e.target.value })}
-              className="flex-1 px-3 py-1.5 border border-gray-300 rounded-lg outline-none text-sm focus:ring-2 focus:ring-slate-400"
+              className="ui-select flex-1 px-3  border border-line-control rounded-control text-sm"
             >
               {agents.length === 0 && (
                 <option value={formData.agentName}>{formData.agentName || 'rex'}</option>
@@ -577,11 +577,11 @@ function TaskFormContent({
         ) : (
           <div className="space-y-3">
             <div className="flex items-center gap-3">
-              <span className="w-14 shrink-0 text-sm font-medium text-gray-700">Workflow</span>
+              <span className="w-14 shrink-0 text-sm font-medium text-fg-secondary">Workflow</span>
               <select
                 value={formData.workflowID}
                 onChange={(e) => update({ workflowID: e.target.value })}
-                className="flex-1 px-3 py-1.5 border border-gray-300 rounded-lg outline-none text-sm focus:ring-2 focus:ring-purple-500"
+                className="ui-select flex-1 px-3  border border-line-control rounded-control text-sm"
               >
                 <option value="">{t('form.selectWorkflow')}</option>
                 {workflows.length === 0 && formData.workflowID && (
@@ -595,14 +595,14 @@ function TaskFormContent({
               </select>
             </div>
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">
+              <label className="block text-sm font-medium text-fg-secondary mb-1">
                 {t('form.workflowParamsLabel')}
-                <span className="text-gray-400 font-normal text-xs ml-1">{t('form.workflowParamsHint')}</span>
+                <span className="text-fg-muted font-normal text-xs ml-1">{t('form.workflowParamsHint')}</span>
               </label>
               <textarea
                 value={formData.workflowContext}
                 onChange={(e) => update({ workflowContext: e.target.value })}
-                className="w-full min-h-[120px] px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500 outline-none resize-y text-sm font-mono"
+                className="ui-textarea w-full min-h-[120px] px-3  border border-line-control rounded-control resize-y text-sm font-mono"
                 spellCheck={false}
                 placeholder={t('form.workflowParamsPlaceholder')}
               />
@@ -614,9 +614,9 @@ function TaskFormContent({
       {/* User prompt with Rex assist */}
       <div>
         <div className="flex items-center justify-between mb-1">
-          <label className="text-sm font-medium text-gray-700">
+          <label className="text-sm font-medium text-fg-secondary">
             {t('form.additionalInfoLabel')}
-            <span className="text-gray-400 font-normal text-xs ml-1">{t('form.additionalInfoHint')}</span>
+            <span className="text-fg-muted font-normal text-xs ml-1">{t('form.additionalInfoHint')}</span>
           </label>
           <button
             type="button"
@@ -627,53 +627,53 @@ function TaskFormContent({
                   : '帮我描述这个任务的具体执行指令，请先问我任务的目标和要求。',
               )
             }
-            className="flex items-center gap-1 text-xs text-sky-600 hover:text-sky-700 transition-colors"
+            className="flex items-center gap-1 text-xs text-info hover:text-info transition-colors"
           >
-            <IconSparkles aria-hidden="true" className="w-3.5 h-3.5" />
+            <IconSparkles aria-hidden="true" className="w-4 h-4" />
             {t('form.rexAssist')}
           </button>
         </div>
         <textarea
           value={formData.userPrompt}
           onChange={(e) => update({ userPrompt: e.target.value })}
-          className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-slate-400 outline-none resize-none text-sm"
+          className="ui-textarea w-full px-3  border border-line-control rounded-control resize-none text-sm"
           rows={3}
           placeholder={t('form.additionalInfoPlaceholder')}
         />
       </div>
 
       {task && (
-        <div className="rounded-xl border border-slate-200 bg-slate-50/70 p-4 space-y-3">
-          <p className="text-xs text-slate-600 leading-5">{t('taskSheet.selfContainedHint')}</p>
+        <div className="rounded-card border border-line bg-subtle p-4 space-y-3">
+          <p className="text-xs text-fg-secondary ">{t('taskSheet.selfContainedHint')}</p>
           <div className="space-y-2">
-            <div className="text-sm font-medium text-slate-800">{t('taskSheet.recentRuns')}</div>
+            <div className="text-sm font-medium text-fg">{t('taskSheet.recentRuns')}</div>
             {recordsLoading ? (
-              <div className="text-sm text-slate-500">{t('taskSheet.recentRunsLoading')}</div>
+              <div className="text-sm text-fg-muted">{t('taskSheet.recentRunsLoading')}</div>
             ) : records.length === 0 ? (
-              <div className="text-sm text-slate-500">{t('taskSheet.recentRunsEmpty')}</div>
+              <div className="text-sm text-fg-muted">{t('taskSheet.recentRunsEmpty')}</div>
             ) : (
               <div className="space-y-2">
                 {records.map((record) => (
-                  <div key={record.id} className="rounded-lg border border-slate-200 bg-white px-3 py-2">
+                  <div key={record.id} className="rounded-control border border-line bg-surface px-3 py-2">
                     <div className="flex items-center justify-between gap-3">
                       <StatusBadge status={record.status} />
-                      <div className="text-xs text-slate-400">
+                      <div className="text-xs text-fg-muted">
                         {record.startedAt ? formatTime(record.startedAt) : '--'}
                       </div>
                     </div>
-                    <div className="mt-1 flex flex-wrap items-center gap-3 text-xs text-slate-500">
+                    <div className="mt-1 flex flex-wrap items-center gap-3 text-xs text-fg-muted">
                       {record.durationMs != null && (
                         <span>{formatDuration(record.durationMs)}</span>
                       )}
                       {record.sessionID && (
-                        <span className="font-mono text-[11px] text-slate-400">{record.sessionID}</span>
+                        <span className="font-mono text-xs text-fg-muted">{record.sessionID}</span>
                       )}
                     </div>
                     {record.resultSummary && (
-                      <div className="mt-1 text-xs text-slate-600 line-clamp-2">{record.resultSummary}</div>
+                      <div className="mt-1 text-xs text-fg-secondary line-clamp-2">{record.resultSummary}</div>
                     )}
                     {record.error && (
-                      <div className="mt-1 text-xs text-red-500 line-clamp-2">{record.error}</div>
+                      <div className="mt-1 text-xs text-danger line-clamp-2">{record.error}</div>
                     )}
                   </div>
                 ))}

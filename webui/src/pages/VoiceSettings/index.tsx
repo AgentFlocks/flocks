@@ -78,8 +78,9 @@ export default function VoiceSettingsPage() {
                 aria-checked={settings.enabled}
                 disabled={saving || !settings.configured}
                 onClick={() => { void update({ enabled: !settings.enabled }); }}
-                className="ui-switch"
-              />
+                className="ui-btn-icon inline-flex shrink-0 items-center justify-center rounded-control disabled:cursor-not-allowed">
+<span className="ui-switch" aria-hidden="true" aria-checked={settings.enabled} aria-disabled={saving || !settings.configured} />
+</button>
             </div>
           </div>
           <form onSubmit={(event) => { event.preventDefault(); if (apiKey.trim()) void update({ api_key: apiKey.trim() }); }} className="space-y-3 border-t border-line pt-5">

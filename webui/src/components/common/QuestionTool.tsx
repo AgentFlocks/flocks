@@ -259,7 +259,7 @@ function ChoiceInput({
   return (
     <div>
       {/* Mode hint */}
-      <div className={`mb-1.5 ${compact ? 'text-[10px]' : 'text-xs'} font-medium text-zinc-400`}>
+      <div className={`mb-1.5 ${compact ? 'text-xs' : 'text-xs'} font-medium text-fg-muted`}>
         {multiple ? t('question.multiSelect') : t('question.singleSelect')}
       </div>
       <div className="space-y-1.5">
@@ -280,38 +280,38 @@ function ChoiceInput({
                 disabled={disabled}
                 className={`w-full text-left rounded-lg border px-3 py-2 text-sm transition-all flex items-start gap-2.5 ${
                   selected
-                    ? 'border-emerald-300 bg-emerald-50 text-emerald-900'
-                    : 'border-zinc-200 bg-white text-zinc-700 hover:border-zinc-300 hover:bg-zinc-50'
+                    ? 'border-focus bg-selected text-fg'
+                    : 'border-line bg-surface text-fg-secondary hover:border-line-control hover:bg-hover'
                 }`}
               >
                 {multiple ? (
                   <span
                     className={`mt-0.5 flex-shrink-0 w-4 h-4 rounded border-2 flex items-center justify-center ${
-                      selected ? 'border-emerald-500 bg-emerald-500' : 'border-zinc-300 bg-transparent'
+                      selected ? 'border-action bg-action' : 'border-line-control bg-transparent'
                     }`}
                   >
-                    {selected && <IconCheck aria-hidden="true" className="w-2.5 h-2.5 text-white" stroke={3} />}
+                    {selected && <IconCheck aria-hidden="true" className="w-4 h-4 text-action-fg" />}
                   </span>
                 ) : (
                   <span
                     className={`mt-0.5 flex-shrink-0 w-4 h-4 rounded-full border-2 flex items-center justify-center ${
-                      selected ? 'border-emerald-500' : 'border-zinc-300'
+                      selected ? 'border-focus' : 'border-line-control'
                     }`}
                   >
-                    {selected && <span className="w-2 h-2 rounded-full bg-emerald-500 block" />}
+                    {selected && <span className="w-2 h-2 rounded-full bg-action block" />}
                   </span>
                 )}
                 <span>
                   <span className={`font-medium ${compact ? 'text-xs' : 'text-sm'}`}>{label}</span>
                   {desc && (
-                    <span className={`block mt-0.5 ${compact ? 'text-[11px]' : 'text-xs'} ${selected ? 'text-emerald-700/80' : 'text-zinc-400'}`}>
+                    <span className="block mt-0.5 text-xs text-fg-muted">
                       {desc}
                     </span>
                   )}
                 </span>
               </button>
               {opt.custom && selected && (
-                <div className="mt-1.5 rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-2">
+                <div className="mt-1.5 rounded-lg border border-line bg-canvas px-3 py-2">
                   <TextInput
                     q={{ ...q, type: 'text', placeholder: q.placeholder || t('question.textPlaceholder'), multiline: q.multiline ?? true }}
                     answer={[customText]}
@@ -326,7 +326,7 @@ function ChoiceInput({
         })}
       </div>
       {multiple && answer.length > 0 && (
-        <div className={`mt-1.5 ${compact ? 'text-[10px]' : 'text-xs'} text-zinc-500`}>
+        <div className={`mt-1.5 ${compact ? 'text-xs' : 'text-xs'} text-fg-muted`}>
           {t('question.selectedCount', { count: answer.length })}
         </div>
       )}
@@ -348,7 +348,7 @@ function TextInput({
   compact: boolean;
 }) {
   const { t } = useTranslation('common');
-  const cls = `w-full border border-zinc-300 rounded-lg px-3 py-2 ${compact ? 'text-xs' : 'text-sm'} text-zinc-900 placeholder-zinc-400 outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-100`;
+  const cls = `w-full border border-line-control rounded-lg px-3 py-2 ${compact ? 'text-xs' : 'text-sm'} text-fg placeholder-fg-placeholder outline-none focus:border-focus`;
   if (q.multiline) {
     return (
       <textarea
@@ -397,7 +397,7 @@ function NumberInput({
       max={q.max_value}
       step={q.step}
       disabled={disabled}
-      className={`w-full border border-zinc-300 rounded-lg px-3 py-2 ${compact ? 'text-xs' : 'text-sm'} text-zinc-900 placeholder-zinc-400 outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-100`}
+      className={`w-full border border-line-control rounded-lg px-3 py-2 ${compact ? 'text-xs' : 'text-sm'} text-fg placeholder-fg-placeholder outline-none focus:border-focus`}
     />
   );
 }
@@ -425,12 +425,12 @@ function PasswordInput({
         onChange={e => onChange([e.target.value])}
         placeholder={q.placeholder || t('question.passwordPlaceholder')}
         disabled={disabled}
-        className={`w-full border border-zinc-300 rounded-lg px-3 pr-10 py-2 ${compact ? 'text-xs' : 'text-sm'} text-zinc-900 placeholder-zinc-400 outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-100`}
+        className={`w-full border border-line-control rounded-lg px-3 pr-10 py-2 ${compact ? 'text-xs' : 'text-sm'} text-fg placeholder-fg-placeholder outline-none focus:border-focus`}
       />
       <button
         type="button"
         onClick={() => setShow(s => !s)}
-        className="absolute right-2 top-1/2 -translate-y-1/2 text-zinc-400 hover:text-zinc-600"
+        className="absolute right-2 top-1/2 -translate-y-1/2 text-fg-muted hover:text-fg-secondary"
         tabIndex={-1}
       >
         {show ? <IconEyeOff aria-hidden="true" className="w-4 h-4" /> : <IconEye aria-hidden="true" className="w-4 h-4" />}
@@ -487,8 +487,8 @@ function FileInput({
         disabled={disabled}
         className={`flex items-center gap-2 px-4 py-2.5 border-2 border-dashed rounded-lg ${compact ? 'text-xs' : 'text-sm'} transition-all ${
           filename
-            ? 'border-emerald-300 bg-emerald-50 text-emerald-700'
-            : 'border-zinc-300 text-zinc-500 hover:border-emerald-300 hover:bg-emerald-50 hover:text-emerald-700'
+            ? 'border-focus bg-selected text-fg'
+            : 'border-line-control text-fg-muted hover:border-line-control hover:bg-hover hover:text-fg'
         }`}
       >
         <IconUpload aria-hidden="true" className="w-4 h-4 flex-shrink-0" />
@@ -497,7 +497,7 @@ function FileInput({
         </span>
       </button>
       {filename && (
-        <p className={`mt-1 ${compact ? 'text-[11px]' : 'text-xs'} text-emerald-600`}>
+        <p className={`mt-1 ${compact ? 'text-xs' : 'text-xs'} text-success`}>
           {t('question.fileSelected', { filename })}
         </p>
       )}
@@ -525,8 +525,8 @@ function ConfirmInput({
         disabled={disabled}
         className={`flex-1 py-2 rounded-lg border ${compact ? 'text-xs' : 'text-sm'} font-medium transition-all ${
           selected === 'yes'
-            ? 'border-emerald-300 bg-emerald-50 text-emerald-700'
-            : 'border-zinc-200 bg-white text-zinc-700 hover:border-zinc-300 hover:bg-zinc-50'
+            ? 'border-focus bg-selected text-fg'
+            : 'border-line bg-surface text-fg-secondary hover:border-line-control hover:bg-hover'
         }`}
       >
         {t('question.yes')}
@@ -536,8 +536,8 @@ function ConfirmInput({
         disabled={disabled}
         className={`flex-1 py-2 rounded-lg border ${compact ? 'text-xs' : 'text-sm'} font-medium transition-all ${
           selected === 'no'
-            ? 'border-emerald-300 bg-emerald-50 text-emerald-700'
-            : 'border-zinc-200 bg-white text-zinc-700 hover:border-zinc-300 hover:bg-zinc-50'
+            ? 'border-focus bg-selected text-fg'
+            : 'border-line bg-surface text-fg-secondary hover:border-line-control hover:bg-hover'
         }`}
       >
         {t('question.no')}
@@ -586,11 +586,11 @@ export function QuestionTool({ questions, onAnswer, onReject, compact = false }:
   const textSm = compact ? 'text-xs' : 'text-sm';
 
   return (
-    <div className="overflow-hidden rounded-lg border border-zinc-200 bg-white">
+    <div className="overflow-hidden rounded-lg border border-line bg-surface">
       {/* Header */}
-      <div className={`${px} flex items-center gap-2 border-b border-zinc-100 bg-white py-2`}>
-        <IconHelpCircle aria-hidden="true" className={`${compact ? 'h-3.5 w-3.5' : 'h-4 w-4'} flex-shrink-0 text-emerald-500`} />
-        <span className={`${textSm} font-medium text-zinc-700`}>{t('question.needsAnswer')}</span>
+      <div className={`${px} flex items-center gap-2 border-b border-line bg-surface py-2`}>
+        <IconHelpCircle aria-hidden="true" className={`${compact ? 'h-4 w-4' : 'h-4 w-4'} flex-shrink-0 text-success`} />
+        <span className={`${textSm} font-medium text-fg-secondary`}>{t('question.needsAnswer')}</span>
       </div>
 
       {/* Questions */}
@@ -611,19 +611,19 @@ export function QuestionTool({ questions, onAnswer, onReject, compact = false }:
           return (
             <div key={qIdx}>
               {q.header && (
-                <div className={`${compact ? 'text-[11px]' : 'text-xs'} mb-0.5 font-medium text-zinc-500`}>
+                <div className={`${compact ? 'text-xs' : 'text-xs'} mb-0.5 font-medium text-fg-muted`}>
                   {q.header}
                 </div>
               )}
-              <div className={`${textSm} mb-2 font-medium text-zinc-800`}>{q.question}</div>
+              <div className={`${textSm} mb-2 font-medium text-fg`}>{q.question}</div>
 
               {type === 'choice'   && <ChoiceInput   {...inputProps} />}
               {inlineFollowUp && (
-                <div className="mt-2 rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-2.5">
-                  <div className={`${compact ? 'text-[11px]' : 'text-xs'} font-medium text-zinc-700`}>
+                <div className="mt-2 rounded-lg border border-line bg-canvas px-3 py-2.5">
+                  <div className={`${compact ? 'text-xs' : 'text-xs'} font-medium text-fg-secondary`}>
                     {inlineTextHeader(inlineFollowUp, t('question.customAnswer'))}
                   </div>
-                  <div className={`${compact ? 'text-[11px]' : 'text-xs'} mt-1 leading-relaxed text-zinc-500`}>
+                  <div className={`${compact ? 'text-xs' : 'text-xs'} mt-1 leading-relaxed text-fg-muted`}>
                     {inlineFollowUp.question}
                   </div>
                   <div className="mt-2">
@@ -651,11 +651,11 @@ export function QuestionTool({ questions, onAnswer, onReject, compact = false }:
           <button
             onClick={handleSubmit}
             disabled={submitting || !canSubmit}
-            className={`flex flex-1 items-center justify-center gap-1.5 rounded-lg bg-emerald-600 py-2 ${textSm} font-medium text-white transition-colors hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-40`}
+            className={`flex flex-1 items-center justify-center gap-1.5 rounded-lg bg-action py-2 ${textSm} font-medium text-action-fg transition-colors hover:bg-action-hover disabled:cursor-not-allowed disabled:bg-disabled disabled:text-fg-disabled`}
           >
             {submitting
-              ? <IconLoader2 aria-hidden="true" className={`${compact ? 'w-3 h-3' : 'w-4 h-4'} animate-spin`} />
-              : <IconCheck aria-hidden="true" className={`${compact ? 'w-3 h-3' : 'w-4 h-4'}`} />
+              ? <IconLoader2 aria-hidden="true" className={`${compact ? 'w-4 h-4' : 'w-4 h-4'} animate-spin`} />
+              : <IconCheck aria-hidden="true" className={`${compact ? 'w-4 h-4' : 'w-4 h-4'}`} />
             }
             {t('question.confirm')}
           </button>
@@ -663,7 +663,7 @@ export function QuestionTool({ questions, onAnswer, onReject, compact = false }:
             <button
               onClick={handleReject}
               disabled={submitting}
-              className={`rounded-lg border border-zinc-200 px-4 py-2 ${textSm} text-zinc-600 transition-colors hover:bg-zinc-50 disabled:opacity-40`}
+              className={`rounded-lg border border-line px-4 py-2 ${textSm} text-fg-secondary transition-colors hover:bg-hover disabled:bg-disabled disabled:text-fg-disabled`}
             >
               {t('question.skip')}
             </button>

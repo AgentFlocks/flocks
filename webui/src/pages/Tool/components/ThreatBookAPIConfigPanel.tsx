@@ -33,7 +33,7 @@ type OperationResult = { success: boolean; message: string } | null;
 function ResultMessage({ result }: { result: Exclude<OperationResult, null> }) {
   return (
     <div
-      className={`flex items-start gap-2 rounded-lg border px-3 py-2.5 text-sm ${result.success ? "border-green-200 bg-green-50 text-green-700" : "border-red-200 bg-red-50 text-red-700"}`}
+      className={`flex items-start gap-2 rounded-control border px-3 py-2.5 text-sm ${result.success ? "border-success bg-success-soft text-success" : "border-danger bg-danger-soft text-danger"}`}
     >
       {result.success ? (
         <IconCircleCheck aria-hidden="true" className="mt-0.5 h-4 w-4 flex-shrink-0" />
@@ -198,26 +198,26 @@ export default function ThreatBookAPIConfigPanel({
   return (
     <div className="space-y-5">
       <div>
-        <h3 className="text-base font-semibold text-gray-900">
+        <h3 className="text-base font-semibold text-fg">
           {t("detail.threatbookApi.title", { service: serviceName })}
         </h3>
-        <p className="mt-1 text-sm leading-6 text-gray-600">
+        <p className="mt-1 text-sm text-fg-secondary">
           {t(`detail.threatbookApi.descriptions.${region}`)}
         </p>
       </div>
 
       {isConfigured && !editing ? (
-        <div className="rounded-lg border border-green-200 bg-green-50/60 p-4">
+        <div className="rounded-control border border-success bg-success-soft p-4">
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div className="flex items-start gap-3">
-              <IconCircleCheck aria-hidden="true" className="mt-0.5 h-5 w-5 text-green-600" />
+              <IconCircleCheck aria-hidden="true" className="mt-0.5 h-5 w-5 text-success" />
               <div>
-                <p className="text-sm font-semibold text-gray-900">
+                <p className="text-sm font-semibold text-fg">
                   {t("detail.threatbookApi.configuredTitle", {
                     region: regionLabel,
                   })}
                 </p>
-                <p className="mt-1 text-xs text-gray-600">
+                <p className="mt-1 text-xs text-fg-secondary">
                   {statusConnected
                     ? t("detail.threatbookApi.connected")
                     : t("detail.threatbookApi.saved")}
@@ -229,7 +229,7 @@ export default function ThreatBookAPIConfigPanel({
                 type="button"
                 onClick={handleRetest}
                 disabled={testing}
-                className="inline-flex h-9 items-center gap-1.5 rounded-md border border-gray-300 bg-white px-3 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+                className="inline-flex h-9 items-center gap-1.5 rounded-control border border-line-control bg-surface px-3 text-sm font-medium text-fg-secondary hover:bg-hover disabled:bg-disabled disabled:text-fg-disabled"
               >
                 <IconRefresh aria-hidden="true"
                   className={`h-4 w-4 ${testing ? "animate-spin" : ""}`}
@@ -244,7 +244,7 @@ export default function ThreatBookAPIConfigPanel({
                   resetEditor();
                   setEditing(true);
                 }}
-                className="inline-flex h-9 items-center gap-1.5 rounded-md border border-gray-300 bg-white px-3 text-sm font-medium text-gray-700 hover:bg-gray-50"
+                className="inline-flex h-9 items-center gap-1.5 rounded-control border border-line-control bg-surface px-3 text-sm font-medium text-fg-secondary hover:bg-hover"
               >
                 <IconPencil aria-hidden="true" className="h-4 w-4" />
                 {t("detail.threatbookApi.edit")}
@@ -253,13 +253,13 @@ export default function ThreatBookAPIConfigPanel({
           </div>
           <dl className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-3">
             <div>
-              <dt className="text-xs text-gray-500">
+              <dt className="text-xs text-fg-muted">
                 {t("detail.threatbookApi.region")}
               </dt>
               <dd className="mt-1 text-sm font-medium">{regionLabel}</dd>
             </div>
             <div>
-              <dt className="text-xs text-gray-500">
+              <dt className="text-xs text-fg-muted">
                 {t("detail.threatbookApi.apiKey")}
               </dt>
               <dd className="mt-1 text-sm font-medium">
@@ -269,7 +269,7 @@ export default function ThreatBookAPIConfigPanel({
               </dd>
             </div>
             <div className="min-w-0">
-              <dt className="text-xs text-gray-500">
+              <dt className="text-xs text-fg-muted">
                 {t("detail.threatbookApi.endpoint")}
               </dt>
               <dd
@@ -282,28 +282,28 @@ export default function ThreatBookAPIConfigPanel({
           </dl>
         </div>
       ) : (
-        <div className="space-y-5 border-t border-gray-200 pt-5">
+        <div className="space-y-5 border-t border-line pt-5">
           <div>
-            <p className="text-sm font-semibold text-gray-900">
+            <p className="text-sm font-semibold text-fg">
               {t("detail.threatbookApi.region")}
             </p>
-            <p className="mt-1 text-xs text-gray-500">
+            <p className="mt-1 text-xs text-fg-muted">
               {t("detail.threatbookApi.regionHint")}
             </p>
-            <div className="mt-3 inline-flex rounded-md border border-green-200 bg-green-50 px-4 py-2 text-sm font-semibold text-green-700">
+            <div className="mt-3 inline-flex rounded-control border border-success bg-success-soft px-4 py-2 text-sm font-semibold text-success">
               {regionLabel}
             </div>
           </div>
-          <div className="inline-flex rounded-full bg-green-50 px-3 py-1.5 text-xs font-semibold text-green-700 ring-1 ring-green-100">
+          <div className="inline-flex rounded-pill bg-success-soft px-3 py-1.5 text-xs font-semibold text-success ring-1 ring-focus">
             {t("detail.threatbookApi.freeService")}
           </div>
           <div>
             <label
               htmlFor={`${serviceName}-api-key`}
-              className="mb-1.5 block text-sm font-medium text-gray-700"
+              className="mb-1.5 block text-sm font-medium text-fg-secondary"
             >
               {t("detail.threatbookApi.apiKey")}{" "}
-              <span className="text-red-500">*</span>
+              <span className="text-danger">*</span>
             </label>
             <div className="flex flex-col gap-2 sm:flex-row">
               <div className="relative min-w-0 flex-1">
@@ -320,14 +320,14 @@ export default function ThreatBookAPIConfigPanel({
                     region: regionLabel,
                   })}
                   autoComplete="off"
-                  className="h-10 w-full rounded-lg border border-gray-300 bg-white px-3 pr-10 text-sm focus:border-red-400 focus:outline-none focus:ring-2 focus:ring-red-400/30"
+                  className="ui-input h-10 w-full rounded-control border border-line-control bg-surface px-3 pr-10 text-sm focus:border-action"
                 />
                 <button
                   type="button"
                   onClick={handleVisibility}
                   disabled={revealing || (!isConfigured && !apiKey)}
                   title={showApiKey ? t("detail.hide") : t("detail.show")}
-                  className="absolute inset-y-0 right-0 flex w-10 items-center justify-center text-gray-400 hover:text-gray-600 disabled:opacity-50"
+                  className="absolute inset-y-0 right-0 flex w-10 items-center justify-center text-fg-muted hover:text-fg-secondary disabled:bg-disabled disabled:text-fg-disabled"
                 >
                   {revealing ? (
                     <IconLoader2 aria-hidden="true" className="h-4 w-4 animate-spin" />
@@ -342,7 +342,7 @@ export default function ThreatBookAPIConfigPanel({
                 href={config.activationUrl}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="inline-flex h-10 items-center justify-center gap-1.5 rounded-lg border border-green-200 bg-green-50 px-4 text-sm font-semibold text-green-700 hover:bg-green-100"
+                className="inline-flex h-10 items-center justify-center gap-1.5 rounded-control border border-success bg-success-soft px-4 text-sm font-semibold text-success hover:bg-success-soft"
               >
                 <IconExternalLink aria-hidden="true" className="h-4 w-4" />
                 {t("detail.threatbookApi.claimFreeKey", {
@@ -350,14 +350,14 @@ export default function ThreatBookAPIConfigPanel({
                 })}
               </a>
             </div>
-            <p className="mt-1.5 text-xs text-gray-500">
+            <p className="mt-1.5 text-xs text-fg-muted">
               {t("detail.threatbookApi.keyHint")}
             </p>
           </div>
           <div>
             <label
               htmlFor={`${serviceName}-endpoint`}
-              className="mb-1.5 block text-sm font-medium text-gray-700"
+              className="mb-1.5 block text-sm font-medium text-fg-secondary"
             >
               {t("detail.threatbookApi.endpoint")}
             </label>
@@ -365,9 +365,9 @@ export default function ThreatBookAPIConfigPanel({
               id={`${serviceName}-endpoint`}
               readOnly
               value={config.apiEndpoint}
-              className="h-10 w-full cursor-default rounded-lg border border-gray-200 bg-gray-50 px-3 font-mono text-sm text-gray-700"
+              className="ui-input h-10 w-full cursor-default rounded-control border border-line bg-subtle px-3 font-mono text-sm text-fg-secondary"
             />
-            <p className="mt-1.5 text-xs text-gray-500">
+            <p className="mt-1.5 text-xs text-fg-muted">
               {t("detail.threatbookApi.endpointHint")}
             </p>
           </div>
@@ -381,7 +381,7 @@ export default function ThreatBookAPIConfigPanel({
                   setEditing(false);
                 }}
                 disabled={saving}
-                className="h-10 rounded-lg border border-gray-300 bg-white px-4 text-sm font-medium text-gray-700 hover:bg-gray-50"
+                className="h-10 rounded-control border border-line-control bg-surface px-4 text-sm font-medium text-fg-secondary hover:bg-hover"
               >
                 {t("button.cancel")}
               </button>
@@ -390,7 +390,7 @@ export default function ThreatBookAPIConfigPanel({
               type="button"
               onClick={handleSave}
               disabled={saving || !apiKey.trim()}
-              className="inline-flex h-10 items-center gap-2 rounded-lg bg-red-600 px-4 text-sm font-semibold text-white hover:bg-red-700 disabled:opacity-40"
+              className="inline-flex h-10 items-center gap-2 rounded-control bg-action px-4 text-sm font-semibold text-action-fg hover:bg-action-hover disabled:bg-disabled disabled:text-fg-disabled"
             >
               {saving && <IconLoader2 aria-hidden="true" className="h-4 w-4 animate-spin" />}
               {saving

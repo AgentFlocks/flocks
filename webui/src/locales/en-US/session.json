@@ -199,6 +199,7 @@
     "retry": "Retry",
     "suggestions": "Example questions",
     "stopTitle": "Stop execution",
+    "sendTitle": "Send message",
     "contextUsageTitle": "Context used: {{used}} / {{total}} ({{percent}}%)",
     "contextUsageUnknown": "Context usage unknown",
     "contextUsage": {

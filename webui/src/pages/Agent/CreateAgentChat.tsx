@@ -1,3 +1,5 @@
+import { pageActionLabel } from '../pageActionLabel';
+import PageDialog from '../PageDialog';
 import { useEffect } from 'react';
 import { IconX, IconRobot } from '@tabler/icons-react';
 import { useTranslation } from 'react-i18next';
@@ -71,25 +73,25 @@ export default function CreateAgentChat({ open, onClose }: CreateAgentChatProps)
   if (!open) return null;
 
   return (
-    <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50">
+    <PageDialog onClose={onClose} className="fixed inset-0 bg-overlay-backdrop backdrop-blur-sm flex items-center justify-center z-50">
       <div
-        className="bg-white rounded-2xl shadow-2xl w-full mx-4 flex flex-col overflow-hidden max-w-2xl"
+        className="bg-surface rounded-card shadow-overlay w-full mx-4 flex flex-col overflow-hidden max-w-modal"
         style={{ height: '80vh' }}
       >
         {/* Header */}
-        <div className="px-5 py-4 border-b border-gray-100 flex items-center justify-between flex-shrink-0 bg-gradient-to-r from-purple-50 to-slate-50">
+        <div className="px-5 py-4 border-b border-line flex items-center justify-between flex-shrink-0 bg-gradient-to-r from-ai-soft to-subtle">
           <div className="flex items-center gap-3">
-            <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-purple-600 to-slate-700 flex items-center justify-center shadow-sm">
-              <IconRobot aria-hidden="true" className="w-5 h-5 text-white" />
+            <div className="w-9 h-9 rounded-card bg-ai-soft text-ai flex items-center justify-center shadow-sm">
+              <IconRobot aria-hidden="true" className="w-5 h-5" />
             </div>
             <div>
-              <h2 className="text-lg font-semibold text-gray-900">{t('agent:chat.createTitle')}</h2>
-              <p className="text-xs text-gray-500 mt-0.5">{t('agent:chat.subtitle')}</p>
+              <h2 className="text-title-section font-semibold text-fg">{t('agent:chat.createTitle')}</h2>
+              <p className="text-xs text-fg-muted mt-0.5">{t('agent:chat.subtitle')}</p>
             </div>
           </div>
-          <button
+          <button aria-label={pageActionLabel('close')}
             onClick={onClose}
-            className="text-gray-400 hover:text-gray-600 p-1.5 rounded-lg hover:bg-white/80 transition-colors"
+            className="ui-btn-icon inline-flex items-center justify-center text-fg-muted hover:text-fg-secondary p-1.5 rounded-control hover:bg-surface transition-colors"
           >
             <IconX aria-hidden="true" className="w-5 h-5" />
           </button>
@@ -108,13 +110,13 @@ export default function CreateAgentChat({ open, onClose }: CreateAgentChatProps)
           onCreateAndSend={!sessionId ? (text, imageParts) => createAndSend({ text, imageParts }) : undefined}
           welcomeContent={!sessionId ? (
             <div className="text-center max-w-md">
-              <IconRobot aria-hidden="true" className="w-10 h-10 text-purple-500 mx-auto mb-3" />
-              <h3 className="text-lg font-semibold text-gray-900 mb-2">{t('agent:chat.createTitle')}</h3>
-              <p className="text-sm text-gray-500">{t('agent:chat.subtitle')}</p>
+              <IconRobot aria-hidden="true" className="w-8 h-8 text-ai mx-auto mb-3" />
+              <h3 className="text-title-card font-semibold text-fg mb-2">{t('agent:chat.createTitle')}</h3>
+              <p className="text-sm text-fg-muted">{t('agent:chat.subtitle')}</p>
             </div>
           ) : undefined}
         />
       </div>
-    </div>
+    </PageDialog>
   );
 }

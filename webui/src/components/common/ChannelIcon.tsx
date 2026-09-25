@@ -31,24 +31,24 @@ export default function ChannelIcon({
   const maskIcon = CHANNEL_MASK_ICON[id];
   const containerClass = compact
     ? `${containerSize} inline-flex shrink-0 items-center justify-center`
-    : `${containerSize} flex shrink-0 items-center justify-center rounded-xl border border-gray-100 shadow-sm`;
+    : `${containerSize} flex shrink-0 items-center justify-center rounded-xl border border-line shadow-sm`;
 
   if (!src && !maskIcon) {
     const fallbackClass = compact
       ? containerClass
-      : `${containerSize} flex shrink-0 items-center justify-center rounded-xl bg-gray-100`;
+      : `${containerSize} flex shrink-0 items-center justify-center rounded-xl bg-subtle`;
     return (
       <span className={fallbackClass} data-channel-icon={id}>
         <IconMessage
           aria-label={id}
-          className={compact ? 'h-3.5 w-3.5 text-gray-400' : 'h-5 w-5 text-gray-400'}
+          className={compact ? 'h-4 w-4 text-fg-muted' : 'h-5 w-5 text-fg-muted'}
         />
       </span>
     );
   }
 
   return (
-    <span className={compact ? containerClass : `${containerClass} bg-white`} data-channel-icon={id}>
+    <span className={compact ? containerClass : `${containerClass} bg-surface`} data-channel-icon={id}>
       {maskIcon ? (
         <span
           role="img"

@@ -1,3 +1,4 @@
+import PageSelectionGroup from '../PageSelectionGroup';
 import { useState } from 'react';
 import { IconListCheck, IconPlus, IconClock, IconCalendar, IconWorld } from '@tabler/icons-react';
 import { useTranslation } from 'react-i18next';
@@ -43,7 +44,7 @@ export default function TaskPage() {
           activeTab !== 'services' ? (
             <button
               onClick={() => setShowCreateDialog(true)}
-              className="flex items-center gap-2 px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors"
+              className="flex items-center gap-2 px-4 py-2 bg-action text-action-fg rounded-control hover:bg-action-hover transition-colors"
             >
               <IconPlus aria-hidden="true" className="w-4 h-4" /> {t('createTask')}
             </button>
@@ -53,38 +54,38 @@ export default function TaskPage() {
 
       <div className="flex-1 overflow-auto px-6 pb-6 space-y-4">
         {notice?.message && (
-          <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+          <div className="rounded-card border border-warning bg-warning-soft px-4 py-3 text-sm text-warning">
             {notice.message}
           </div>
         )}
         {activeTab !== 'services' && <DashboardCards counts={counts} />}
 
         {/* 窄屏（375px）三个页签放不下时整个页签换行，而不是把「任务队列」逐字竖排 */}
-        <div className="flex flex-wrap gap-1 bg-gray-100 rounded-lg p-1 w-fit max-w-full whitespace-nowrap">
+        <PageSelectionGroup className="flex flex-wrap gap-1 w-fit max-w-full whitespace-nowrap">
           {MAIN_TABS.map(tab => {
             const Icon = tab.icon;
             const count = tab.countKey ? (counts?.[tab.countKey] as number | undefined) : undefined;
             return (
-              <button
+              <button aria-pressed={activeTab === tab.key}
                 key={tab.key}
                 onClick={() => setActiveTab(tab.key)}
-                className={`flex items-center gap-2 px-4 py-2 text-sm rounded-md transition-colors ${
+                className={`flex items-center gap-2 px-4 py-2 text-sm rounded-segment transition-colors ${
                   activeTab === tab.key
-                    ? 'bg-white text-slate-800 shadow-sm font-medium'
-                    : 'text-gray-600 hover:text-gray-900'
+                    ? 'bg-selected text-fg font-medium'
+                    : 'text-fg-secondary hover:text-fg'
                 }`}
               >
                 <Icon aria-hidden="true" className="w-4 h-4" />
                 {tab.label}
                 {count != null && count > 0 && (
-                  <span className={`text-xs px-1.5 py-0.5 rounded-full font-medium ${
-                    activeTab === tab.key ? 'bg-slate-200 text-slate-700' : 'bg-gray-200 text-gray-600'
+                  <span className={`text-xs px-1.5 py-0.5 rounded-pill font-medium ${
+                    activeTab === tab.key ? 'bg-selected text-fg-secondary' : 'bg-selected text-fg-secondary'
                   }`}>{count}</span>
                 )}
               </button>
             );
           })}
-        </div>
+        </PageSelectionGroup>
 
         {activeTab === 'queued' && (
           <QueuedSection key={sectionRefreshKey} onRefreshGlobal={refreshGlobal} />

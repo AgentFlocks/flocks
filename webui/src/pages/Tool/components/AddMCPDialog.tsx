@@ -1,3 +1,6 @@
+import { pageActionLabel } from '../../pageActionLabel';
+import PageSelectionGroup from '../../PageSelectionGroup';
+import PageDialog from '../../PageDialog';
 import { useState } from 'react';
 import {
   IconDatabase,
@@ -70,57 +73,57 @@ export default function AddMCPDialog({ onClose, onSuccess, onSwitchToChat }: Add
   };
 
   return (
-    <div className="fixed inset-0 bg-gray-600/75 flex items-center justify-center z-50">
-      <div className="bg-white rounded-xl shadow-2xl max-w-lg w-full mx-4 max-h-[85vh] flex flex-col">
+    <PageDialog onClose={submitting ? undefined : onClose} className="fixed inset-0 bg-overlay-backdrop flex items-center justify-center z-50">
+      <div className="bg-surface rounded-card shadow-overlay max-w-modal w-full mx-4 max-h-[85vh] flex flex-col">
         {/* Header */}
-        <div className="px-6 py-4 border-b border-gray-200 flex-shrink-0">
+        <div className="px-6 py-4 border-b border-line flex-shrink-0">
           <div className="flex items-center justify-between mb-3">
             <div className="flex items-center gap-3">
-              <div className="w-10 h-10 rounded-lg bg-red-50 flex items-center justify-center">
-                <IconDatabase aria-hidden="true" className="w-5 h-5 text-red-600" />
+              <div className="w-10 h-10 rounded-control bg-danger-soft flex items-center justify-center">
+                <IconDatabase aria-hidden="true" className="w-5 h-5 text-danger" />
               </div>
               <div>
-                <h2 className="text-lg font-semibold text-gray-900">{t('addMCP.title')}</h2>
-                <p className="text-xs text-gray-500">{t('addMCP.subtitle')}</p>
+                <h2 className="text-title-section font-semibold text-fg">{t('addMCP.title')}</h2>
+                <p className="text-xs text-fg-muted">{t('addMCP.subtitle')}</p>
               </div>
             </div>
-            <button onClick={onClose} className="text-gray-400 hover:text-gray-600 p-1 rounded-lg hover:bg-gray-100">
+            <button aria-label={pageActionLabel('close')} onClick={onClose} className="ui-btn-icon inline-flex items-center justify-center text-fg-muted hover:text-fg-secondary p-1 rounded-control hover:bg-hover">
               <IconX aria-hidden="true" className="w-5 h-5" />
             </button>
           </div>
-          <div className="flex space-x-1 bg-gray-100 rounded-lg p-1">
-            <button className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 rounded-md text-sm font-medium bg-white text-gray-900 shadow-sm">
+          <PageSelectionGroup className="flex space-x-1 ">
+            <button aria-pressed={true} className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 rounded-segment text-sm font-medium bg-selected text-fg">
               <IconSettings aria-hidden="true" className="w-4 h-4" />
               {t('addMCP.formConfig')}
             </button>
-            <button
+            <button aria-pressed={false}
               onClick={openChat}
-              className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 rounded-md text-sm font-medium text-gray-500 hover:text-gray-700"
+              className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 rounded-segment text-sm font-medium text-fg-muted hover:text-fg-secondary"
             >
               <IconMessage aria-hidden="true" className="w-4 h-4" />
               {t('addMCP.chatAssistant')}
             </button>
-          </div>
+          </PageSelectionGroup>
         </div>
 
         {/* Body */}
         <div className="flex-1 overflow-y-auto p-6">
           <div className="space-y-4">
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1.5">
-                {t('addMCP.serviceName')} <span className="text-red-500">*</span>
+              <label className="block text-sm font-medium text-fg-secondary mb-1.5">
+                {t('addMCP.serviceName')} <span className="text-danger">*</span>
               </label>
               <input
                 type="text"
                 value={name}
                 onChange={(e) => setName(e.target.value)}
                 placeholder={t('addMCP.serviceNamePlaceholder')}
-                className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-red-500 focus:border-transparent"
+                className="ui-input w-full px-3  border border-line-control rounded-control text-sm focus:border-transparent"
               />
             </div>
 
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1.5">{t('addMCP.connectionType')}</label>
+              <label className="block text-sm font-medium text-fg-secondary mb-1.5">{t('addMCP.connectionType')}</label>
               <div className="flex gap-3">
                 <label className="flex items-center gap-2 cursor-pointer">
                   <input
@@ -128,9 +131,9 @@ export default function AddMCPDialog({ onClose, onSuccess, onSwitchToChat }: Add
                     value="stdio"
                     checked={connType === 'stdio'}
                     onChange={() => setConnType('stdio')}
-                    className="w-4 h-4 text-red-600 focus:ring-red-500"
+                    className="w-4 h-4 text-danger "
                   />
-                  <span className="text-sm text-gray-700">{t('addMCP.stdioLocal')}</span>
+                  <span className="text-sm text-fg-secondary">{t('addMCP.stdioLocal')}</span>
                 </label>
                 <label className="flex items-center gap-2 cursor-pointer">
                   <input
@@ -138,9 +141,9 @@ export default function AddMCPDialog({ onClose, onSuccess, onSwitchToChat }: Add
                     value="sse"
                     checked={connType === 'sse'}
                     onChange={() => setConnType('sse')}
-                    className="w-4 h-4 text-red-600 focus:ring-red-500"
+                    className="w-4 h-4 text-danger "
                   />
-                  <span className="text-sm text-gray-700">{t('addMCP.remoteSSE')}</span>
+                  <span className="text-sm text-fg-secondary">{t('addMCP.remoteSSE')}</span>
                 </label>
               </div>
             </div>
@@ -148,48 +151,48 @@ export default function AddMCPDialog({ onClose, onSuccess, onSwitchToChat }: Add
             {connType === 'stdio' ? (
               <>
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1.5">
-                    {t('addMCP.startCommand')} <span className="text-red-500">*</span>
+                  <label className="block text-sm font-medium text-fg-secondary mb-1.5">
+                    {t('addMCP.startCommand')} <span className="text-danger">*</span>
                   </label>
                   <input
                     type="text"
                     value={command}
                     onChange={(e) => setCommand(e.target.value)}
                     placeholder={t('addMCP.startCommandPlaceholder')}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm font-mono focus:outline-none focus:ring-2 focus:ring-red-500 focus:border-transparent"
+                    className="ui-input w-full px-3  border border-line-control rounded-control text-sm font-mono focus:border-transparent"
                   />
                 </div>
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1.5">{t('addMCP.commandArgs')}</label>
+                  <label className="block text-sm font-medium text-fg-secondary mb-1.5">{t('addMCP.commandArgs')}</label>
                   <textarea
                     value={args}
                     onChange={(e) => setArgs(e.target.value)}
                     placeholder={t('addMCP.commandArgsPlaceholder')}
                     rows={3}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm font-mono focus:outline-none focus:ring-2 focus:ring-red-500 focus:border-transparent"
+                    className="ui-textarea w-full px-3  border border-line-control rounded-control text-sm font-mono focus:border-transparent"
                   />
-                  <p className="mt-1 text-xs text-gray-500">{t('addMCP.oneArgPerLine')}</p>
+                  <p className="mt-1 text-xs text-fg-muted">{t('addMCP.oneArgPerLine')}</p>
                 </div>
               </>
             ) : (
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1.5">
-                  {t('addMCP.serviceUrl')} <span className="text-red-500">*</span>
+                <label className="block text-sm font-medium text-fg-secondary mb-1.5">
+                  {t('addMCP.serviceUrl')} <span className="text-danger">*</span>
                 </label>
                 <input
                   type="text"
                   value={url}
                   onChange={(e) => setUrl(e.target.value)}
                   placeholder={t('addMCP.serviceUrlPlaceholder')}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm font-mono focus:outline-none focus:ring-2 focus:ring-red-500 focus:border-transparent"
+                  className="ui-input w-full px-3  border border-line-control rounded-control text-sm font-mono focus:border-transparent"
                 />
               </div>
             )}
 
-            <div className="p-3 bg-red-50 border border-red-200 rounded-lg">
+            <div className="p-3 bg-danger-soft border border-danger rounded-control">
               <div className="flex items-start gap-2">
-                <IconInfoCircle aria-hidden="true" className="w-4 h-4 text-red-600 mt-0.5 flex-shrink-0" />
-                <div className="text-xs text-red-800">
+                <IconInfoCircle aria-hidden="true" className="w-4 h-4 text-danger mt-0.5 flex-shrink-0" />
+                <div className="text-xs text-danger">
                   <p className="font-medium mb-1">{t('addMCP.hintTitle')}</p>
                   <p>{t('addMCP.hintDesc')}</p>
                 </div>
@@ -199,19 +202,19 @@ export default function AddMCPDialog({ onClose, onSuccess, onSwitchToChat }: Add
         </div>
 
         {/* Footer */}
-        <div className="px-6 py-4 border-t border-gray-200 flex justify-between flex-shrink-0">
-          <button onClick={openChat} className="inline-flex items-center px-4 py-2 border border-gray-300 rounded-lg text-sm font-medium text-gray-700 hover:bg-gray-50 transition-colors">
+        <div className="px-6 py-4 border-t border-line flex justify-between flex-shrink-0">
+          <button onClick={openChat} className="inline-flex items-center px-4 py-2 border border-line-control rounded-control text-sm font-medium text-fg-secondary hover:bg-hover transition-colors">
             <IconMessage aria-hidden="true" className="w-4 h-4 mr-1.5" />
             {t('addMCP.chatIntegration')}
           </button>
           <div className="flex gap-2">
-            <button onClick={onClose} className="px-4 py-2 border border-gray-300 rounded-lg text-sm font-medium text-gray-700 hover:bg-gray-50">
+            <button onClick={onClose} className="px-4 py-2 border border-line-control rounded-control text-sm font-medium text-fg-secondary hover:bg-hover">
               {t('button.cancel')}
             </button>
             <button
               onClick={handleSubmit}
               disabled={submitting || !canSubmit}
-              className="px-4 py-2 bg-red-600 text-white rounded-lg text-sm font-medium hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center"
+              className="px-4 py-2 bg-action text-action-fg rounded-control text-sm font-medium hover:bg-action-hover disabled:bg-disabled disabled:text-fg-disabled disabled:cursor-not-allowed flex items-center"
             >
               {submitting ? (
                 <><IconRefresh aria-hidden="true" className="w-4 h-4 mr-1.5 animate-spin" />{t('addMCP.adding')}</>
@@ -222,6 +225,6 @@ export default function AddMCPDialog({ onClose, onSuccess, onSwitchToChat }: Add
           </div>
         </div>
       </div>
-    </div>
+    </PageDialog>
   );
 }

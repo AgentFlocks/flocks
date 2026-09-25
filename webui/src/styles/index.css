@@ -47,8 +47,9 @@
     @apply inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-control border border-line-control bg-surface px-3 text-sm font-medium text-fg transition-colors duration-fast;
     min-height: var(--control-md);
     line-height: 20px;
+    align-self: center;
   }
-  .ui-btn:hover { background-color: var(--bg-hover); }
+  .ui-btn:hover:not(:disabled, [aria-disabled='true']) { background-color: var(--bg-hover); }
   .ui-btn:disabled, .ui-btn[aria-disabled='true'] {
     @apply cursor-not-allowed border-line bg-disabled text-fg-disabled;
   }
@@ -61,8 +62,8 @@
   .ui-btn-ghost { @apply border-transparent bg-transparent; }
   .ui-btn-sm { min-height: var(--control-sm); @apply px-2.5 text-xs; }
   .ui-btn-lg { min-height: var(--control-lg); @apply px-4; }
-  .ui-btn-icon { @apply px-0; width: var(--control-md); }
-  .ui-btn-icon.ui-btn-sm { width: var(--control-sm); }
+  .ui-btn-icon { @apply px-0; width: 44px; min-height: 44px; }
+  .ui-btn-icon.ui-btn-sm { width: 44px; min-height: 44px; }
 
   .ui-input {
     @apply w-full rounded-control border border-line-control bg-surface px-3 text-sm text-fg placeholder:text-fg-placeholder;
@@ -108,10 +109,11 @@
   .ui-switch::before { content: ''; @apply absolute rounded-full transition-transform duration-fast; width: 12px; height: 12px; left: 2px; top: 2px; background-color: var(--text-muted); }
   .ui-switch[aria-checked='true'] { background-color: var(--switch-on); border-color: var(--switch-on); }
   .ui-switch[aria-checked='true']::before { background-color: var(--switch-thumb); transform: translateX(14px); }
-  .ui-switch:disabled { @apply cursor-not-allowed opacity-45; }
+  .ui-switch:disabled, .ui-switch[aria-disabled='true'] { @apply cursor-not-allowed border-line bg-disabled; }
+  .ui-switch:disabled::before, .ui-switch[aria-disabled='true']::before { background-color: var(--disabled-text); }
 
   /* 弹层：弹窗 560、抽屉 480，标题 20/28，内容内边距 24 */
-  .ui-overlay-backdrop { @apply fixed inset-0 z-50 bg-black/40; }
+  .ui-overlay-backdrop { @apply fixed inset-0 z-50 bg-overlay-backdrop; }
   .ui-modal { @apply w-full max-w-modal rounded-overlay border border-line bg-surface p-6 shadow-overlay; }
   .ui-drawer { @apply flex h-full w-full max-w-drawer flex-col border-l border-line bg-surface shadow-overlay; }
   .ui-overlay-title { @apply text-xl font-semibold text-fg; }
@@ -124,7 +126,60 @@
   .ui-table th { @apply border-b border-line bg-subtle px-3 py-2 text-left text-xs font-medium text-fg-secondary; }
   .ui-table td { @apply border-b border-line px-3 py-2 text-fg; }
   .ui-table tbody tr:hover { background-color: var(--bg-hover); }
+
+  @media (max-width: 767px), (pointer: coarse) {
+    .ui-btn, .ui-btn-sm, .ui-btn-lg, .ui-btn-icon, .ui-btn-icon.ui-btn-sm,
+    .ui-input, .ui-select, .ui-tab, .ui-segmented > * {
+      min-height: var(--control-touch);
+    }
+    .ui-btn-icon, .ui-btn-icon.ui-btn-sm { min-width: var(--control-touch); }
+  }
 }
+
+/* Apply the shared control contract to existing forms as they adopt ui-* classes. */
+button:where(:not([role='switch'], .ui-switch, .ui-btn-sm, .ui-segmented > button)) {
+  min-height: var(--control-md);
+}
+button.ui-btn-icon {
+  min-height: 44px;
+  min-width: 44px;
+}
+:where(input:not([type='checkbox']):not([type='radio']):not([type='range']):not([type='color']):not([type='file']), select) {
+  min-height: var(--control-md);
+}
+:where(a, button, [role='button'], [role='tab'], [role='menuitem'], [role='option'], summary, [tabindex]:not([tabindex='-1'])):focus-visible {
+  outline: var(--focus-width) solid var(--focus-ring);
+  outline-offset: var(--focus-offset);
+}
+:where(input:not([type='checkbox']):not([type='radio']):not([type='range']), textarea, select):focus-visible {
+  outline: none;
+  box-shadow: none;
+  border-color: var(--action-primary);
+}
+button:disabled:not([role='switch']):not(.ui-switch) {
+  opacity: 1;
+  background-color: var(--disabled-bg);
+  color: var(--disabled-text);
+  cursor: not-allowed;
+}
+@media (max-width: 767px), (pointer: coarse) {
+  :where(button):not([role='switch']):not(.ui-switch),
+  button.ui-btn-icon,
+  :where(input:not([type='checkbox']):not([type='radio']):not([type='range']):not([type='color']):not([type='file']), select) {
+    min-height: var(--control-touch);
+  }
+  button.ui-btn-icon { min-width: var(--control-touch); }
+  [data-partition-top-bar] { min-height: var(--control-touch); }
+}
+
+/* Syntax colours are readable in either theme, including lazy-loaded Markdown. */
+.prose .hljs { color: var(--text-primary); }
+.prose .hljs-comment, .prose .hljs-quote { color: var(--text-muted); }
+.prose .hljs-keyword, .prose .hljs-selector-tag, .prose .hljs-type { color: var(--accent-ai); }
+.prose .hljs-string, .prose .hljs-regexp, .prose .hljs-addition { color: var(--accent-data); }
+.prose .hljs-number, .prose .hljs-literal, .prose .hljs-symbol { color: var(--status-warning); }
+.prose .hljs-title, .prose .hljs-built_in, .prose .hljs-section { color: var(--text-link); }
+.prose .hljs-attr, .prose .hljs-attribute, .prose .hljs-deletion { color: var(--accent-brand); }
 
 @layer utilities {
   .scrollbar-hide::-webkit-scrollbar {
@@ -140,11 +195,12 @@
 /* Markdown 渲染样式 */
 @layer components {
   .prose {
-    line-height: 1.75;
+    font-size: var(--font-body);
+    line-height: var(--line-body);
     /* 覆盖 @tailwindcss/typography 插件的 CSS 变量，避免插件样式污染自定义样式 */
     --tw-prose-code: inherit;
-    --tw-prose-pre-code: #e5e7eb;
-    --tw-prose-pre-bg: #1f2937;
+    --tw-prose-pre-code: var(--text-primary);
+    --tw-prose-pre-bg: var(--bg-subtle);
   }
   
   .prose h1, .prose h2, .prose h3, .prose h4 {
@@ -152,7 +208,7 @@
   }
   
   .prose h2 {
-    @apply text-lg border-b border-gray-200 pb-1;
+    @apply text-title-section border-b border-line pb-1;
   }
   
   .prose h3 {
@@ -188,20 +244,20 @@
   }
   
   .prose hr {
-    @apply my-4 border-gray-300;
+    @apply my-4 border-line-control;
   }
   
   .prose a {
-    @apply text-red-600 hover:underline;
+    @apply text-fg-link hover:underline;
   }
   
   .prose code {
-    @apply bg-gray-100 px-1 py-0.5 rounded text-sm font-mono;
+    @apply bg-subtle px-1 py-0.5 rounded text-sm font-mono;
   }
   
   .prose pre {
-    @apply bg-gray-800 text-gray-100 p-3 rounded overflow-x-auto my-2;
-    color: #e5e7eb;
+    @apply bg-subtle text-fg p-3 rounded overflow-x-auto my-2;
+    color: var(--text-primary);
   }
   
   .prose pre code {
@@ -214,7 +270,7 @@
   }
   
   .prose blockquote {
-    @apply border-l-4 border-gray-300 pl-4 italic my-2;
+    @apply border-l-4 border-line-control pl-4 italic my-2;
   }
 
   /* GFM 表格样式 */
@@ -223,33 +279,33 @@
   }
 
   .prose thead {
-    @apply bg-gray-100;
+    @apply bg-subtle;
   }
 
   .prose th {
-    @apply border border-gray-200 px-3 py-2 text-left font-semibold text-gray-700;
+    @apply border border-line px-3 py-2 text-left font-semibold text-fg-secondary;
   }
 
   .prose td {
-    @apply border border-gray-200 px-3 py-2 text-gray-700;
+    @apply border border-line px-3 py-2 text-fg-secondary;
   }
 
   .prose tr:nth-child(even) td {
-    @apply bg-gray-50;
+    @apply bg-canvas;
   }
 
   /* 用户消息里的表格反色 */
   .prose-invert thead {
-    @apply bg-white/10;
+    @apply bg-subtle;
   }
 
   .prose-invert th,
   .prose-invert td {
-    @apply border-white/20 text-red-50;
+    @apply border-line text-fg;
   }
 
   .prose-invert tr:nth-child(even) td {
-    @apply bg-white/5;
+    @apply bg-subtle;
   }
   
   /* 让 highlight.js 主题不覆盖我们的 pre 背景 */
@@ -261,28 +317,28 @@
 
   /* 用户消息反色 */
   .prose-invert h2, .prose-invert h3 {
-    @apply border-red-400;
+    @apply border-line;
   }
   
   .prose-invert a {
-    @apply text-red-200;
+    @apply text-fg-link;
   }
   
   .prose-invert code {
-    @apply bg-white/10;
+    @apply bg-subtle;
   }
   
   .prose-invert hr {
-    @apply border-red-400;
+    @apply border-line;
   }
 
   /* <details> / <summary> 折叠样式 */
   .prose details {
-    @apply border border-gray-200 rounded-lg my-2 overflow-hidden;
+    @apply border border-line rounded-lg my-2 overflow-hidden;
   }
 
   .prose details summary {
-    @apply px-3 py-2 cursor-pointer text-sm font-medium text-gray-700 bg-gray-50 hover:bg-gray-100 transition-colors select-none list-none;
+    @apply px-3 py-2 cursor-pointer text-sm font-medium text-fg-secondary bg-canvas hover:bg-subtle transition-colors select-none list-none;
   }
 
   .prose details summary::-webkit-details-marker {
@@ -290,7 +346,7 @@
   }
 
   .prose details[open] summary {
-    @apply border-b border-gray-200;
+    @apply border-b border-line;
   }
 
   .prose details > *:not(summary) {
@@ -299,33 +355,33 @@
 
   /* 用户消息里的 details 反色 */
   .prose-invert details {
-    @apply border-white/20;
+    @apply border-line;
   }
 
   .prose-invert details summary {
-    @apply text-red-100 bg-white/10 hover:bg-white/20;
+    @apply text-fg bg-subtle hover:bg-hover;
   }
 
   .prose-invert details[open] summary {
-    @apply border-white/20;
+    @apply border-line;
   }
 }
 
 /* VS Code / GitHub Dark Dimmed inspired compatibility for existing Tailwind utilities.
    这张表按类名把历史工具类映射到深色 token，天然要点名色板类与色值，对规范检查关闭：ui-spec-check: off */
 .dark {
-  --flocks-dark-accent: #539bf5;
-  --flocks-dark-app: #252c35;
-  --flocks-dark-surface: #303842;
-  --flocks-dark-surface-soft: #39434f; /* = --bg-subtle */
-  --flocks-dark-surface-raised: #46515e;
-  --flocks-dark-border: #4a5563;
-  --flocks-dark-border-strong: #5a6573;
-  --flocks-dark-text: #d7dee8;
-  --flocks-dark-text-muted: #bcc6d0; /* = --text-secondary */
-  --flocks-dark-text-subtle: #9aa7b4;
-  --flocks-dark-placeholder: #9aa7b4; /* = --text-placeholder */
-  --flocks-dark-shadow: 0 18px 48px rgb(28 33 40 / 0.38);
+  --flocks-dark-accent: var(--text-link);
+  --flocks-dark-app: var(--bg-canvas);
+  --flocks-dark-surface: var(--bg-surface);
+  --flocks-dark-surface-soft: var(--bg-subtle); /* = --bg-subtle */
+  --flocks-dark-surface-raised: var(--bg-hover);
+  --flocks-dark-border: var(--border-subtle);
+  --flocks-dark-border-strong: var(--border-control);
+  --flocks-dark-text: var(--text-primary);
+  --flocks-dark-text-muted: var(--text-secondary); /* = --text-secondary */
+  --flocks-dark-text-subtle: var(--text-muted);
+  --flocks-dark-placeholder: var(--text-muted); /* = --text-placeholder */
+  --flocks-dark-shadow: var(--shadow-overlay);
   background-color: var(--bg-canvas);
   color: var(--text-primary);
 }
@@ -453,7 +509,7 @@
 .dark .hover\:bg-slate-900:hover,
 .dark .hover\:bg-gray-900:hover,
 .dark .hover\:bg-zinc-900:hover {
-  background-color: #46515e;
+  background-color: var(--bg-hover);
 }
 
 .dark pre.bg-gray-900,
@@ -466,7 +522,7 @@
 .dark .bg-zinc-950.text-green-400,
 .dark .bg-gray-900.text-gray-300,
 .dark .bg-zinc-950.text-zinc-300 {
-  background-color: #20262d;
+  background-color: var(--bg-subtle);
 }
 
 .dark .bg-zinc-900\/70,
@@ -1158,11 +1214,11 @@
 .dark .text-blue-600,
 .dark .text-blue-700,
 .dark .text-blue-800 {
-  color: #6cb6ff;
+  color: var(--text-link);
 }
 
 /* 状态徽标（bg-*-50 + text-*-700 同一元素，如 Hub 的 可安装/已安装/可更新）：
-   上面的映射把 700 级文字压到 #6cb6ff 这类中亮度，叠在 16% 的同色底上只有 4.3:1，
+   上面的映射把 700 级文字压到 var(--text-link) 这类中亮度，叠在 16% 的同色底上只有 4.3:1，
    行 hover 时更低到 3.2:1（WCAG AA 要求 4.5:1）。徽标单独提亮文字、加深底色。 */
 .dark .bg-blue-50.text-blue-700,
 .dark .bg-blue-100.text-blue-700,
@@ -1530,7 +1586,7 @@
 }
 
 .dark * {
-  scrollbar-color: #5a6573 #252c35 !important;
+  scrollbar-color: var(--border-control) var(--bg-canvas) !important;
 }
 
 .dark *::-webkit-scrollbar {
@@ -1539,12 +1595,12 @@
 }
 
 .dark *::-webkit-scrollbar-track {
-  background: #252c35;
+  background: var(--bg-canvas);
 }
 
 .dark *::-webkit-scrollbar-thumb {
-  background: #5a6573;
-  border: 2px solid #252c35;
+  background: var(--border-control);
+  border: 2px solid var(--bg-canvas);
   border-radius: 999px;
 }
 
@@ -1554,7 +1610,7 @@
 
 /* ui-spec-check: on（下面是普通样式，继续检查） */
 .session-sidebar-scrollbar {
-  scrollbar-color: #c4c8cc transparent;
+  scrollbar-color: var(--border-subtle) transparent;
   scrollbar-width: thin;
 }
 
@@ -1567,19 +1623,19 @@
 }
 
 .session-sidebar-scrollbar::-webkit-scrollbar-thumb {
-  background: #c4c8cc;
+  background: var(--border-subtle);
   border: 2px solid transparent;
   border-radius: 999px;
   background-clip: padding-box;
 }
 
 .session-sidebar-scrollbar::-webkit-scrollbar-thumb:hover {
-  background: #a9aeb4;
+  background: var(--text-muted);
   background-clip: padding-box;
 }
 
 .dark .session-sidebar-scrollbar {
-  scrollbar-color: #626e7c transparent !important;
+  scrollbar-color: var(--border-control) transparent !important;
 }
 
 .dark .session-sidebar-scrollbar::-webkit-scrollbar {
@@ -1591,13 +1647,13 @@
 }
 
 .dark .session-sidebar-scrollbar::-webkit-scrollbar-thumb {
-  background: #626e7c;
+  background: var(--border-control);
   border-color: transparent;
   background-clip: padding-box;
 }
 
 .dark .session-sidebar-scrollbar::-webkit-scrollbar-thumb:hover {
-  background: #758292;
+  background: var(--text-muted);
   background-clip: padding-box;
 }
 
@@ -1610,9 +1666,7 @@
   background-color: var(--flocks-dark-surface-soft);
 }
 
-.dark tbody tr:hover,
-.dark .hover\:bg-gray-50:hover,
-.dark .hover\:bg-zinc-50:hover {
+.dark tbody tr:hover {
   background-color: var(--flocks-dark-surface-raised);
 }
 
@@ -1624,7 +1678,7 @@
 
 .dark pre,
 .dark .prose pre {
-  background-color: #20262d;
+  background-color: var(--bg-subtle);
   border: 1px solid var(--flocks-dark-border);
   color: var(--flocks-dark-text);
 }
@@ -1633,7 +1687,7 @@
   --tw-prose-body: var(--flocks-dark-text-muted);
   --tw-prose-headings: var(--flocks-dark-text);
   --tw-prose-lead: var(--flocks-dark-text-muted);
-  --tw-prose-links: #6cb6ff;
+  --tw-prose-links: var(--text-link);
   --tw-prose-bold: var(--flocks-dark-text);
   --tw-prose-counters: var(--flocks-dark-text-subtle);
   --tw-prose-bullets: var(--flocks-dark-text-subtle);
@@ -1643,7 +1697,7 @@
   --tw-prose-captions: var(--flocks-dark-text-subtle);
   --tw-prose-code: var(--flocks-dark-text);
   --tw-prose-pre-code: var(--flocks-dark-text);
-  --tw-prose-pre-bg: #20262d;
+  --tw-prose-pre-bg: var(--bg-subtle);
   --tw-prose-th-borders: var(--flocks-dark-border-strong);
   --tw-prose-td-borders: var(--flocks-dark-border);
   color: var(--flocks-dark-text-muted);
@@ -1685,7 +1739,7 @@
 }
 
 .dark .prose a {
-  color: #6cb6ff;
+  color: var(--text-link);
 }
 
 .dark .react-flow,
@@ -1700,7 +1754,7 @@
 }
 
 .dark .react-flow__attribution {
-  background-color: rgb(48 56 66 / 0.86);
+  background-color: var(--bg-surface);
   color: var(--flocks-dark-text-subtle);
 }
 
@@ -1732,12 +1786,12 @@
 }
 
 .device-room-actions-fade {
-  --device-room-action-fade: #f4f4f5;
+  --device-room-action-fade: var(--bg-subtle);
   background: linear-gradient(to right, transparent, var(--device-room-action-fade) 35%);
 }
 
 .device-room-actions-fade[data-selected='true'] {
-  --device-room-action-fade: #eff6ff;
+  --device-room-action-fade: var(--bg-selected);
 }
 
 .dark .device-room-actions-fade {
@@ -1745,7 +1799,7 @@
 }
 
 .dark .device-room-actions-fade[data-selected='true'] {
-  --device-room-action-fade: rgb(37 99 235 / 0.16);
+  --device-room-action-fade: var(--bg-selected);
 }
 
 /* ---------------------------------------------------------------------------

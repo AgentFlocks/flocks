@@ -192,7 +192,7 @@ export default function NetworkProxyPanel() {
         <div className="flex flex-wrap items-center gap-3">
           <span className="text-title-card text-fg">{t('effective')}</span>
           <span className={effective.active ? 'ui-badge ui-badge-info' : 'ui-badge ui-badge-success'}>
-            {effective.active ? <IconPlugConnected aria-hidden="true" className="h-3.5 w-3.5" /> : <IconCircleCheck aria-hidden="true" className="h-3.5 w-3.5" />}
+            {effective.active ? <IconPlugConnected aria-hidden="true" className="h-4 w-4" /> : <IconCircleCheck aria-hidden="true" className="h-4 w-4" />}
             {effective.active ? t('effectiveActive') : t('effectiveDirect')}
           </span>
           <SourceLabel source={view.effective.source ?? view.source} t={t} />
@@ -243,7 +243,7 @@ export default function NetworkProxyPanel() {
       </section>
 
       {/* 代理地址 */}
-      <section className={`ui-card space-y-4 ${manual ? '' : 'opacity-60'}`} aria-disabled={!manual}>
+      <section className={`ui-card space-y-4 ${manual ? '' : 'text-fg-muted'}`} aria-disabled={!manual}>
         {(['http', 'https', 'all'] as const).map((field) => (
           <div key={field}>
             <label htmlFor={`proxy-${field}`} className="ui-label">
@@ -331,9 +331,10 @@ export default function NetworkProxyPanel() {
             role="switch"
             aria-checked={form.bypassPrivate}
             aria-label={t('bypassPrivate')}
-            className="ui-switch mt-1"
-            onClick={() => update({ bypassPrivate: !form.bypassPrivate })}
-          />
+            className="ui-btn-icon inline-flex shrink-0 items-center justify-center rounded-control disabled:cursor-not-allowed mt-1"
+            onClick={() => update({ bypassPrivate: !form.bypassPrivate })}>
+<span className="ui-switch" aria-hidden="true" aria-checked={form.bypassPrivate} />
+</button>
         </div>
       </section>
 

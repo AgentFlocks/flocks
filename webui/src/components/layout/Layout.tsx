@@ -1219,7 +1219,7 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
   }, [requestUpdate]);
 
   return (
-    <div className="min-h-screen bg-gray-50 text-gray-900 dark:bg-zinc-950 dark:text-zinc-100">
+    <div className="min-h-screen bg-canvas text-fg dark:bg-canvas dark:text-fg">
       {/* Modals render lazily — fallback={null} keeps the chunk download
           invisible to the user (they're already triggering an async UI). */}
       <LazyLoadErrorBoundary mode="overlay">
@@ -1275,7 +1275,7 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
 
       {socTitleDialogOpen && (
         <div
-          className="fixed inset-0 z-[80] flex items-center justify-center bg-black/40 px-4"
+          className="fixed inset-0 z-[80] flex items-center justify-center bg-overlay-backdrop px-4"
           onMouseDown={(event) => {
             if (event.target === event.currentTarget) {
               closeSocTitleDialog();
@@ -1283,16 +1283,16 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
           }}
         >
           <form
-            className="w-full max-w-sm rounded-lg border border-zinc-200 bg-white p-4 shadow-xl dark:border-zinc-800 dark:bg-zinc-900"
+            className="w-full max-w-sm rounded-lg border border-line bg-surface p-4 shadow-xl dark:border-line dark:bg-surface"
             onSubmit={(event) => {
               event.preventDefault();
               handleSaveSocTitle();
             }}
           >
-            <h2 className="text-base font-semibold text-zinc-950 dark:text-zinc-50">
+            <h2 className="text-base font-semibold text-fg dark:text-fg">
               {tWebUIContractPage('workspace.customTitleDialogTitle')}
             </h2>
-            <label className="mt-4 block text-sm font-medium text-zinc-700 dark:text-zinc-200">
+            <label className="mt-4 block text-sm font-medium text-fg-secondary dark:text-fg-secondary">
               {tWebUIContractPage('workspace.customTitle')}
               <input
                 autoFocus
@@ -1300,14 +1300,14 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
                 onChange={(event) => setSocTitleDraft(event.target.value)}
                 maxLength={SOC_DASHBOARD_TITLE_MAX_LENGTH}
                 placeholder={tWebUIContractPage('workspace.customTitlePlaceholder')}
-                className="mt-2 h-10 w-full rounded-md border border-zinc-200 bg-white px-3 text-sm text-zinc-900 outline-none transition-colors placeholder:text-zinc-400 focus:border-zinc-400 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100 dark:placeholder:text-zinc-500 dark:focus:border-zinc-500"
+                className="mt-2 h-10 w-full rounded-md border border-line bg-surface px-3 text-sm text-fg outline-none transition-colors placeholder:text-fg-muted focus:border-line-control dark:border-line dark:bg-canvas dark:text-fg dark:placeholder:text-fg-muted dark:focus:border-line-control"
               />
             </label>
             <div className="mt-4 flex items-center justify-between gap-2">
               <button
                 type="button"
                 onClick={handleResetSocTitle}
-                className="inline-flex h-9 items-center rounded-md px-3 text-sm font-semibold text-zinc-500 transition-colors hover:bg-zinc-100 hover:text-zinc-950 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-50"
+                className="inline-flex h-9 items-center rounded-md px-3 text-sm font-semibold text-fg-muted transition-colors hover:bg-hover hover:text-fg dark:text-fg-muted dark:hover:bg-hover dark:hover:text-fg"
               >
                 {tWebUIContractPage('workspace.customTitleReset')}
               </button>
@@ -1315,7 +1315,7 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
                 <button
                   type="button"
                   onClick={closeSocTitleDialog}
-                  className="inline-flex h-9 items-center rounded-md border border-zinc-200 px-3 text-sm font-semibold text-zinc-600 transition-colors hover:bg-zinc-50 hover:text-zinc-950 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800 dark:hover:text-zinc-50"
+                  className="inline-flex h-9 items-center rounded-md border border-line px-3 text-sm font-semibold text-fg-secondary transition-colors hover:bg-hover hover:text-fg dark:border-line dark:text-fg-secondary dark:hover:bg-hover dark:hover:text-fg"
                 >
                   {tWebUIContractPage('workspace.customTitleCancel')}
                 </button>
@@ -1333,17 +1333,17 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
 
       {sidebarOpen && (
         <div
-          className="fixed inset-0 bg-gray-600 bg-opacity-75 z-40 lg:hidden dark:bg-black dark:bg-opacity-75"
+          className="fixed inset-0 bg-overlay-backdrop z-40 lg:hidden"
           onClick={() => setSidebarOpen(false)}
         />
       )}
 
       <aside
         className={`
-          fixed inset-y-0 left-0 z-50 max-w-[calc(100vw-2rem)] bg-zinc-100 border-r border-zinc-200 dark:bg-zinc-950 dark:border-zinc-800
+          fixed inset-y-0 left-0 z-50 max-w-[calc(100vw-2rem)] bg-subtle border-r border-line dark:bg-canvas dark:border-line
           ${resizingSidebar ? '' : 'transition-all duration-300 ease-in-out'}
           lg:translate-x-0
-          ${sidebarOpen ? 'translate-x-0' : '-translate-x-full'}
+          ${sidebarOpen ? 'visible translate-x-0' : 'invisible -translate-x-full lg:visible'}
           ${collapsed ? 'w-16' : ''}
         `}
         style={collapsed ? undefined : { width: expandedSidebarWidth }}
@@ -1353,15 +1353,15 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
           <div className={`flex min-h-16 items-center flex-shrink-0 ${collapsed ? 'h-16 justify-center px-2' : 'px-4 py-3'}`}>
             {collapsed ? (
               <div
-                className="relative flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg border border-zinc-200 bg-white shadow-sm dark:border-zinc-800 dark:bg-zinc-900"
+                className="relative flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg border border-line bg-surface shadow-sm dark:border-line dark:bg-surface"
                 title={productName}
               >
-                <IconSparkles aria-hidden="true" className="w-4 h-4 text-zinc-500 dark:text-zinc-300" />
+                <IconSparkles aria-hidden="true" className="w-4 h-4 text-fg-muted dark:text-fg-secondary" />
                 {hasVisibleProductUpdate && (
                   <button
                     type="button"
                     onClick={requestUpdate}
-                    className="absolute -right-0.5 -top-0.5 h-2.5 w-2.5 rounded-full bg-amber-400 ring-2 ring-zinc-100 transition-colors hover:bg-amber-500 dark:ring-zinc-950"
+                    className="absolute -right-0.5 -top-0.5 h-2.5 w-2.5 rounded-full bg-warning ring-2 ring-focus transition-colors hover:bg-warning dark:ring-focus"
                     title={productUpdateTitle}
                     aria-label={productUpdateTitle}
                   />
@@ -1371,7 +1371,7 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
               <>
                 <div className="flex min-w-0 flex-1 items-center gap-2">
                   <span
-                    className={`min-w-0 text-xl font-bold leading-tight text-zinc-900 dark:text-zinc-50 ${hasCustomDisplayName ? 'whitespace-normal [overflow-wrap:anywhere]' : 'truncate'}`}
+                    className={`min-w-0 text-xl font-bold leading-tight text-fg dark:text-fg ${hasCustomDisplayName ? 'whitespace-normal [overflow-wrap:anywhere]' : 'truncate'}`}
                     title={productName}
                   >
                     {productName}
@@ -1382,16 +1382,18 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
                       onClick={requestUpdate}
                       title={productUpdateTitle}
                       aria-label={productUpdateTitle}
-                      className="relative inline-flex h-4 shrink-0 items-center rounded-sm bg-amber-50 px-1 text-[10px] font-bold leading-none text-amber-600 transition-colors hover:bg-amber-100 dark:bg-amber-950/70 dark:text-amber-300 dark:hover:bg-amber-900"
+                      className="relative inline-flex h-4 shrink-0 items-center rounded-sm bg-warning-soft px-1 text-xs font-bold leading-none text-warning transition-colors hover:bg-warning-soft dark:bg-warning-soft dark:text-warning dark:hover:bg-warning-soft"
                     >
                       {t('newVersion')}
-                      <span className="absolute -right-0.5 -top-0.5 h-1.5 w-1.5 rounded-full bg-amber-400 ring-1 ring-zinc-100 dark:ring-zinc-950" />
+                      <span className="absolute -right-0.5 -top-0.5 h-1.5 w-1.5 rounded-full bg-warning ring-1 ring-focus dark:ring-focus" />
                     </button>
                   )}
                 </div>
                 <button
+                  type="button"
+                  aria-label={t('collapseNav')}
                   onClick={() => setSidebarOpen(false)}
-                  className="lg:hidden p-1 text-zinc-400 hover:text-zinc-600 rounded flex-shrink-0 dark:hover:text-zinc-100"
+                  className="ui-btn-icon lg:hidden p-1 text-fg-muted hover:text-fg-secondary rounded flex-shrink-0 dark:hover:text-fg"
                 >
                   <IconX aria-hidden="true" className="w-5 h-5" />
                 </button>
@@ -1418,24 +1420,24 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
               return (
                 <div key={sectionId} className="mb-6">
                   {!collapsed && section.name && (
-                    <h3 className="px-3 mb-2 text-xs font-semibold text-zinc-400 uppercase tracking-wider whitespace-nowrap dark:text-zinc-500">
+                    <h3 className="px-3 mb-2 text-xs font-semibold text-fg-secondary whitespace-nowrap">
                       {section.collapsible ? (
                         <button
                           type="button"
                           onClick={() => (isPrimarySection ? togglePrimaryNavSection(sectionId) : toggleNavSection(sectionId))}
-                          className="flex h-6 w-full items-center justify-between text-left transition-colors hover:text-zinc-600 focus:outline-none focus-visible:text-zinc-600 dark:hover:text-zinc-300 dark:focus-visible:text-zinc-300"
+                          className="flex h-6 w-full items-center justify-between text-left transition-colors hover:text-fg-secondary focus:outline-none focus-visible:text-fg-secondary dark:hover:text-fg-secondary dark:focus-visible:text-fg-secondary"
                           aria-expanded={!sectionCollapsed}
                           aria-controls={sectionContentId}
                         >
                           <span className="min-w-0 truncate">{section.name}</span>
-                          <IconChevronRight aria-hidden="true" className={`ml-2 h-3.5 w-3.5 shrink-0 transition-transform ${sectionCollapsed ? '' : 'rotate-90'}`} />
+                          <IconChevronRight aria-hidden="true" className={`ml-2 h-4 w-4 shrink-0 transition-transform ${sectionCollapsed ? '' : 'rotate-90'}`} />
                         </button>
                       ) : (
                         section.name
                       )}
                     </h3>
                   )}
-                  {collapsed && <div className="mb-1 border-t border-zinc-200 first:border-none dark:border-zinc-800" />}
+                  {collapsed && <div className="mb-1 border-t border-line first:border-none dark:border-line" />}
                   {!sectionCollapsed && (
                     <div id={sectionContentId} className="space-y-0.5">
                       {section.items.map((item) => {
@@ -1453,10 +1455,10 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
                             className={`
                               flex items-center rounded-lg transition-all duration-150
                               ${collapsed ? 'justify-center p-2.5' : 'px-3 py-2 text-sm font-medium'}
-                              text-zinc-600 hover:bg-white/60 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-900 dark:hover:text-zinc-50
+                              text-fg-secondary hover:bg-hover hover:text-fg dark:text-fg-muted dark:hover:bg-hover dark:hover:text-fg
                             `}
                           >
-                            <item.icon aria-hidden="true" className={`flex-shrink-0 w-5 h-5 ${collapsed ? '' : 'mr-3'} text-zinc-400 dark:text-zinc-500`} />
+                            <item.icon aria-hidden="true" className={`flex-shrink-0 w-5 h-5 ${collapsed ? '' : 'mr-3'} text-fg-muted dark:text-fg-muted`} />
                             {!collapsed && <span className="min-w-0 flex-1 truncate">{item.name}</span>}
                           </a>
                         ) : (
@@ -1470,13 +1472,13 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
                               flex items-center rounded-lg transition-all duration-150
                               ${collapsed ? 'justify-center p-2.5' : 'px-3 py-2 text-sm font-medium'}
                               ${isActive
-                                ? 'bg-white text-zinc-900 shadow-sm dark:bg-zinc-800 dark:text-zinc-50'
-                                : 'text-zinc-600 hover:bg-white/60 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-900 dark:hover:text-zinc-50'
+                                ? 'bg-surface text-fg shadow-sm dark:bg-subtle dark:text-fg'
+                                : 'text-fg-secondary hover:bg-hover hover:text-fg dark:text-fg-muted dark:hover:bg-hover dark:hover:text-fg'
                               }
                             `}
                           >
                             <item.icon aria-hidden="true"
-                              className={`flex-shrink-0 w-5 h-5 ${collapsed ? '' : 'mr-3'} ${isActive ? 'text-zinc-700 dark:text-zinc-100' : 'text-zinc-400 dark:text-zinc-500'}`}
+                              className={`flex-shrink-0 w-5 h-5 ${collapsed ? '' : 'mr-3'} ${isActive ? 'text-fg-secondary dark:text-fg' : 'text-fg-muted dark:text-fg-muted'}`}
                             />
                             {!collapsed && (
                               <>
@@ -1484,7 +1486,7 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
                                 {itemKey && (
                                   <IconGripVertical
                                     aria-hidden="true"
-                                    className="ml-2 h-4 w-4 flex-shrink-0 text-zinc-300 opacity-0 transition-opacity group-hover:opacity-100 dark:text-zinc-600"
+                                    className="ml-2 h-4 w-4 flex-shrink-0 text-fg opacity-0 transition-opacity group-hover:opacity-100 dark:text-fg"
                                   />
                                 )}
                               </>
@@ -1507,7 +1509,7 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
                             }}
                             onDrop={(event) => handleNavItemDrop(event, section, itemKey)}
                             onDragEnd={handleNavItemDragEnd}
-                            className={`group rounded-lg ${collapsed ? '' : 'cursor-grab active:cursor-grabbing'} ${isDragging ? 'opacity-50' : ''} ${isDropTarget ? 'ring-2 ring-inset ring-zinc-400/70 dark:ring-zinc-500/70' : ''}`}
+                            className={`group rounded-lg ${collapsed ? '' : 'cursor-grab active:cursor-grabbing'} ${isDragging ? 'opacity-50' : ''} ${isDropTarget ? 'ring-2 ring-inset ring-focus dark:ring-focus' : ''}`}
                           >
                             {link}
                           </div>
@@ -1520,19 +1522,19 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
                               type="button"
                               onClick={() => void handleCreateWorkspaceCustomPage(actionsWorkspace)}
                               disabled={creatingWorkspaceCustomPageSession}
-                              className="flex w-full items-center rounded-lg px-3 py-1.5 text-left text-xs font-medium text-zinc-400 transition-colors hover:bg-white/60 hover:text-zinc-700 disabled:cursor-not-allowed disabled:opacity-60 dark:text-zinc-500 dark:hover:bg-zinc-900 dark:hover:text-zinc-200"
+                              className="flex w-full items-center rounded-lg px-3 py-1.5 text-left text-xs font-medium text-fg-muted transition-colors hover:bg-hover hover:text-fg-secondary disabled:cursor-not-allowed disabled:bg-disabled disabled:text-fg-disabled dark:text-fg-muted dark:hover:bg-hover dark:hover:text-fg-secondary"
                             >
                               <IconPlus aria-hidden="true" className="ml-0.5 mr-3.5 h-4 w-4 flex-shrink-0" />
                               <span className="min-w-0 flex-1 truncate">{tWebUIContractPage('workspace.customPage')}</span>
                               {creatingWorkspaceCustomPageSession ? (
-                                <IconLoader2 aria-hidden="true" className="ml-2 h-3.5 w-3.5 shrink-0 animate-spin" />
+                                <IconLoader2 aria-hidden="true" className="ml-2 h-4 w-4 shrink-0 animate-spin" />
                               ) : null}
                             </button>
                           )}
                           <button
                             type="button"
                             onClick={openSocTitleDialog}
-                            className="flex w-full items-center rounded-lg px-3 py-1.5 text-left text-xs font-medium text-zinc-400 transition-colors hover:bg-white/60 hover:text-zinc-700 dark:text-zinc-500 dark:hover:bg-zinc-900 dark:hover:text-zinc-200"
+                            className="flex w-full items-center rounded-lg px-3 py-1.5 text-left text-xs font-medium text-fg-muted transition-colors hover:bg-hover hover:text-fg-secondary dark:text-fg-muted dark:hover:bg-hover dark:hover:text-fg-secondary"
                           >
                             <IconPencil aria-hidden="true" className="ml-0.5 mr-3.5 h-4 w-4 flex-shrink-0" />
                             <span className="min-w-0 flex-1 truncate">{tWebUIContractPage('workspace.customTitle')}</span>
@@ -1549,12 +1551,12 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
           {/* Bottom account entry */}
           <div
             ref={accountMenuRef}
-            className={`relative border-t border-zinc-200 flex-shrink-0 dark:border-zinc-800 ${collapsed ? 'p-2' : 'p-3'}`}
+            className={`relative border-t border-line flex-shrink-0 dark:border-line ${collapsed ? 'p-2' : 'p-3'}`}
           >
             {accountMenuOpen && (
               <div
                 data-account-menu
-                className={`absolute z-50 overflow-hidden rounded-lg border border-zinc-200 bg-white py-1.5 shadow-lg dark:border-zinc-800 dark:bg-zinc-900 ${
+                className={`absolute z-50 overflow-hidden rounded-lg border border-line bg-surface py-1.5 shadow-lg dark:border-line dark:bg-surface ${
                   collapsed ? 'bottom-2 left-full ml-2 w-56' : 'bottom-full left-3 right-3 mb-2 min-w-56'
                 }`}
               >
@@ -1567,9 +1569,9 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
                       setAccountMenuOpen(false);
                       setSidebarOpen(false);
                     }}
-                    className="flex items-center gap-2 px-3 py-2 text-sm font-medium text-zinc-700 transition-colors hover:bg-zinc-50 hover:text-zinc-950 dark:text-zinc-200 dark:hover:bg-zinc-800 dark:hover:text-zinc-50"
+                    className="flex items-center gap-2 px-3 py-2 text-sm font-medium text-fg-secondary transition-colors hover:bg-hover hover:text-fg dark:text-fg-secondary dark:hover:bg-hover dark:hover:text-fg"
                   >
-                    <ItemIcon aria-hidden="true" className="h-4 w-4 text-zinc-400" />
+                    <ItemIcon aria-hidden="true" className="h-4 w-4 text-fg-muted" />
                     {i18n.exists(labelKey, { ns: ns || 'nav' })
                       ? t(labelKey, { ns: ns || 'nav', productName })
                       : labelKey}
@@ -1578,9 +1580,9 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
                 <button
                   type="button"
                   onClick={openManualUpdateCheck}
-                  className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm font-medium text-zinc-700 transition-colors hover:bg-zinc-50 hover:text-zinc-950 dark:text-zinc-200 dark:hover:bg-zinc-800 dark:hover:text-zinc-50"
+                  className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm font-medium text-fg-secondary transition-colors hover:bg-hover hover:text-fg dark:text-fg-secondary dark:hover:bg-hover dark:hover:text-fg"
                 >
-                  <IconRefresh aria-hidden="true" className="h-4 w-4 text-zinc-400" />
+                  <IconRefresh aria-hidden="true" className="h-4 w-4 text-fg-muted" />
                   {t('checkUpdate')}
                 </button>
                 <button
@@ -1589,9 +1591,9 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
                     setAccountMenuOpen(false);
                     void logout();
                   }}
-                  className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm font-medium text-zinc-700 transition-colors hover:bg-zinc-50 hover:text-zinc-950 dark:text-zinc-200 dark:hover:bg-zinc-800 dark:hover:text-zinc-50"
+                  className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm font-medium text-fg-secondary transition-colors hover:bg-hover hover:text-fg dark:text-fg-secondary dark:hover:bg-hover dark:hover:text-fg"
                 >
-                  <IconLogout aria-hidden="true" className="h-4 w-4 text-zinc-400" />
+                  <IconLogout aria-hidden="true" className="h-4 w-4 text-fg-muted" />
                   {t('logout')}
                 </button>
               </div>
@@ -1602,9 +1604,9 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
                 onClick={() => setAccountMenuOpen((value) => !value)}
                 title={user?.username || t('settings')}
                 aria-label={user?.username ? `${user.username} ${t('settings')}` : t('settings')}
-                className="flex h-9 w-full items-center justify-center rounded-lg text-zinc-500 transition-colors hover:bg-white/70 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-900 dark:hover:text-zinc-100"
+                className="flex h-9 w-full items-center justify-center rounded-lg text-fg-muted transition-colors hover:bg-hover hover:text-fg dark:text-fg-muted dark:hover:bg-hover dark:hover:text-fg"
               >
-                <span className="flex h-7 w-7 items-center justify-center rounded-full bg-zinc-200 text-xs font-bold text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">
+                <span className="flex h-7 w-7 items-center justify-center rounded-full bg-selected text-xs font-bold text-fg-secondary dark:bg-subtle dark:text-fg-secondary">
                   {accountInitial}
                 </span>
               </button>
@@ -1612,11 +1614,11 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
               <button
                 type="button"
                 onClick={() => setAccountMenuOpen((value) => !value)}
-                className="relative flex min-h-[62px] w-full items-center gap-2 rounded-lg px-2 py-2 pr-7 text-left transition-colors hover:bg-white/70 dark:hover:bg-zinc-900"
+                className="relative flex min-h-[62px] w-full items-center gap-2 rounded-lg px-2 py-2 pr-7 text-left transition-colors hover:bg-hover dark:hover:bg-hover"
                 aria-expanded={accountMenuOpen}
                 aria-label={user?.username ? `${user.username} ${t('settings')}` : t('settings')}
               >
-                <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-zinc-200 text-xs font-bold text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">
+                <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-selected text-xs font-bold text-fg-secondary dark:bg-subtle dark:text-fg-secondary">
                   {accountInitial}
                 </span>
                 <span className="min-w-0 flex-1">
@@ -1625,13 +1627,13 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
                       least a few characters visible instead of collapsing to "a…". */}
                   <span className="flex min-w-0 items-baseline gap-1.5">
                     <span
-                      className="min-w-[4ch] shrink-0 truncate text-sm font-semibold text-zinc-800 dark:text-zinc-100"
+                      className="min-w-[4ch] shrink-0 truncate text-sm font-semibold text-fg dark:text-fg"
                       title={user?.username || productName}
                     >
                       {user?.username || productName}
                     </span>
                     <span
-                      className="min-w-0 truncate text-xs text-zinc-400 dark:text-zinc-500"
+                      className="min-w-0 truncate text-xs text-fg-muted dark:text-fg-muted"
                       title={accountRoleLabel}
                     >
                       {accountRoleLabel}
@@ -1643,7 +1645,7 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
                   >
                   {displayVersion && (
                     <span
-                      className="mt-1 inline-flex w-fit rounded border border-zinc-200 bg-white px-1.5 py-0.5 text-[10px] font-semibold leading-none text-zinc-400 dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-500"
+                      className="mt-1 inline-flex w-fit rounded border border-line bg-surface px-1.5 py-0.5 text-xs font-semibold leading-none text-fg-muted dark:border-line dark:bg-canvas dark:text-fg-muted"
                       title={t('versionInfo')}
                     >
                       {displayVersion}
@@ -1651,7 +1653,7 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
                   )}
                   </ExtensionSlot>
                 </span>
-                <IconChevronUp aria-hidden="true" className={`absolute right-2 top-1/2 h-4 w-4 -translate-y-1/2 text-zinc-400 transition-transform ${accountMenuOpen ? 'rotate-180' : ''}`} />
+                <IconChevronUp aria-hidden="true" className={`absolute right-2 top-1/2 h-4 w-4 -translate-y-1/2 text-fg-muted transition-transform ${accountMenuOpen ? 'rotate-180' : ''}`} />
               </button>
             )}
           </div>
@@ -1668,7 +1670,7 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
             tabIndex={0}
             onPointerDown={handleSidebarResizePointerDown}
             onKeyDown={handleSidebarResizeKeyDown}
-            className="absolute inset-y-0 right-0 hidden w-1 cursor-col-resize touch-none outline-none transition-colors hover:bg-zinc-300 focus-visible:bg-zinc-400 lg:block dark:hover:bg-zinc-700 dark:focus-visible:bg-zinc-600"
+            className="absolute inset-y-0 right-0 hidden w-1 cursor-col-resize touch-none outline-none transition-colors hover:bg-hover focus-visible:bg-selected lg:block dark:hover:bg-hover dark:focus-visible:bg-selected"
             title={t('resizeNav')}
           />
         )}
@@ -1679,14 +1681,14 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
           className="
             hidden lg:flex absolute top-1/2 -translate-y-1/2 right-0 z-10
             w-3 h-20 items-center justify-center
-            bg-zinc-200 hover:bg-zinc-300 border border-r-0 border-zinc-200 rounded-l-lg
-            text-zinc-400 hover:text-zinc-600
-            dark:bg-zinc-900 dark:hover:bg-zinc-800 dark:border-zinc-800 dark:text-zinc-500 dark:hover:text-zinc-100
+            bg-selected hover:bg-hover border border-r-0 border-line rounded-l-lg
+            text-fg-muted hover:text-fg-secondary
+            dark:bg-surface dark:hover:bg-hover dark:border-line dark:text-fg-muted dark:hover:text-fg
             transition-all duration-200
           "
           title={collapsed ? t('expandNav') : t('collapseNav')}
         >
-          {collapsed ? <IconChevronRight aria-hidden="true" className="w-2.5 h-2.5" /> : <IconChevronLeft aria-hidden="true" className="w-2.5 h-2.5" />}
+          {collapsed ? <IconChevronRight aria-hidden="true" className="w-4 h-4" /> : <IconChevronLeft aria-hidden="true" className="w-4 h-4" />}
         </button>
       </aside>
 
@@ -1695,8 +1697,11 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
           below the drawer backdrop (z-40); hidden while the drawer is open. */}
       <div data-mobile-menu-button className={`lg:hidden fixed top-0 left-0 z-[36] flex items-center h-11 px-3 pointer-events-none ${sidebarOpen ? 'hidden' : ''}`}>
         <button
+          type="button"
+          aria-label={t('expandNav')}
+          aria-expanded={sidebarOpen}
           onClick={() => setSidebarOpen(true)}
-          className="pointer-events-auto p-2 text-gray-500 hover:text-gray-700 bg-white rounded-lg shadow-sm border border-gray-200 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-300 dark:hover:text-zinc-50"
+          className="ui-btn-icon pointer-events-auto p-2 text-fg-muted hover:text-fg-secondary bg-surface rounded-lg shadow-sm border border-line dark:border-line dark:bg-surface dark:text-fg-secondary dark:hover:text-fg"
         >
           <IconMenu2 aria-hidden="true" className="w-5 h-5" />
         </button>
@@ -1720,7 +1725,7 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
             }}
           settingsGroups={topBarSettings}
         />
-        <main className="relative flex-1 overflow-hidden bg-gray-50 dark:bg-zinc-950">
+        <main className="relative flex-1 overflow-hidden bg-canvas dark:bg-canvas">
           <KeepAlivePanes
             panes={keepAlivePanes}
             activeHref={activePaneHref}

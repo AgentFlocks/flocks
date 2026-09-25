@@ -82,52 +82,52 @@ function statusIcon(status: string | undefined): React.ReactNode {
   switch (status) {
     case 'completed':
       return (
-        <span className="flex h-4 w-4 items-center justify-center rounded-full bg-emerald-500 text-white">
-          <IconCheck aria-hidden="true" className="h-3 w-3" stroke={3} />
+        <span className="flex h-4 w-4 items-center justify-center rounded-full bg-success-soft text-success">
+          <IconCheck aria-hidden="true" className="h-4 w-4" stroke={2} />
         </span>
       );
     case 'in_progress':
       return (
-        <span className="flex h-4 w-4 items-center justify-center rounded-full border border-sky-400 bg-white">
-          <span className="h-1.5 w-1.5 rounded-full bg-sky-500" />
+        <span className="flex h-4 w-4 items-center justify-center rounded-full border border-info bg-surface">
+          <span className="h-1.5 w-1.5 rounded-full bg-info" />
         </span>
       );
     case 'cancelled':
       return (
-        <span className="flex h-4 w-4 items-center justify-center rounded-full bg-zinc-200 text-zinc-500">
-          <IconX aria-hidden="true" className="h-2.5 w-2.5" stroke={2.5} />
+        <span className="flex h-4 w-4 items-center justify-center rounded-full bg-selected text-fg-muted">
+          <IconX aria-hidden="true" className="h-4 w-4" stroke={2} />
         </span>
       );
     default:
-      return <span className="h-4 w-4 rounded-full border border-zinc-300 bg-white" />;
+      return <span className="h-4 w-4 rounded-full border border-line-control bg-surface" />;
   }
 }
 
 function textClass(status: string | undefined): string {
   switch (status) {
-    case 'completed': return 'text-zinc-500';
-    case 'in_progress': return 'font-medium text-zinc-800 dark:text-zinc-100';
-    case 'cancelled': return 'text-zinc-400 line-through decoration-zinc-300';
-    default: return 'text-zinc-600 dark:text-zinc-300';
+    case 'completed': return 'text-fg-muted';
+    case 'in_progress': return 'font-medium text-fg dark:text-fg';
+    case 'cancelled': return 'text-fg-muted line-through decoration-line-control';
+    default: return 'text-fg-secondary dark:text-fg-secondary';
   }
 }
 
 function labelClass(status: string | undefined): string {
   switch (status) {
-    case 'completed': return 'text-emerald-600';
-    case 'in_progress': return 'text-sky-600';
-    default: return 'text-zinc-400';
+    case 'completed': return 'text-success';
+    case 'in_progress': return 'text-info';
+    default: return 'text-fg-muted';
   }
 }
 
 export function TodoList({ items }: { items: TodoSummaryEntry[] }) {
   const { t } = useTranslation('session');
   return (
-    <div className="divide-y divide-zinc-100 dark:divide-zinc-800">
+    <div className="divide-y divide-line dark:divide-line">
       {items.map((todo, index) => (
         <div
           key={todo.id || index}
-          className="grid grid-cols-[16px_minmax(0,1fr)_auto] items-start gap-2 py-1.5 text-[11px] first:pt-0 last:pb-0"
+          className="grid grid-cols-[16px_minmax(0,1fr)_auto] items-start gap-2 py-1.5 text-xs first:pt-0 last:pb-0"
         >
           <span className="mt-0.5 flex h-4 w-4 flex-shrink-0 items-center justify-center">
             {statusIcon(todo.status)}

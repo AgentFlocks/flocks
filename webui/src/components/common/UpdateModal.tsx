@@ -18,6 +18,7 @@ import { useTranslation } from 'react-i18next';
 import { checkUpdate, applyUpdate, IncompleteUpdateError, UpdateStreamTimeoutError, VersionInfo, UpdateProgress, DEFAULT_UPDATE_CHANNEL } from '@/api/update';
 import { checkRestartReadiness } from '@/utils/restartPolling';
 import { UPDATE_DISMISSED_KEY, buildUpdateDismissalKey } from '@/utils/updateDismissal';
+import { useDialogFocus } from '@/hooks/useDialogFocus';
 
 // ------------------------------------------------------------------ //
 
@@ -157,6 +158,10 @@ export default function UpdateModal({
   const isBusy = upgrading || restarting;
   const completed = !isBusy && !error && steps.some((step) => step.stage === 'done');
   const showProgressDialog = upgradeAttempted || upgrading || restarting || steps.length > 0;
+  const dialogRef = useRef<HTMLDivElement>(null);
+  useDialogFocus(dialogRef, showProgressDialog, isBusy ? undefined : onClose);
+  const progressTone = isBusy ? 'bg-warning-soft text-warning' : completed ? 'bg-success-soft text-success' : 'bg-danger-soft text-danger';
+  const ProgressIcon = isBusy ? IconCircleArrowUp : completed ? IconCircleCheck : IconCircleX;
   const safeClose = () => {
     if (!isBusy) onClose();
   };
@@ -199,21 +204,21 @@ export default function UpdateModal({
     return (
       <div key={index} className="flex items-start gap-2.5 py-1 text-sm">
         {isError
-          ? <IconCircleX aria-hidden="true" className="mt-0.5 w-4 h-4 text-red-500 flex-shrink-0" />
+          ? <IconCircleX aria-hidden="true" className="mt-0.5 w-4 h-4 text-danger flex-shrink-0" />
           : isSpinning
-          ? <IconLoader2 aria-hidden="true" className="mt-0.5 w-4 h-4 text-blue-500 animate-spin flex-shrink-0" />
-          : <IconCircleCheck aria-hidden="true" className="mt-0.5 w-4 h-4 text-green-500 flex-shrink-0" />
+          ? <IconLoader2 aria-hidden="true" className="mt-0.5 w-4 h-4 text-info animate-spin flex-shrink-0" />
+          : <IconCircleCheck aria-hidden="true" className="mt-0.5 w-4 h-4 text-success flex-shrink-0" />
         }
         <div className="min-w-0 flex-1">
           <div className="flex min-w-0 items-center gap-2">
-            <span className={isError ? 'text-red-600' : 'text-gray-700'}>{label}</span>
+            <span className={isError ? 'text-danger' : 'text-fg-secondary'}>{label}</span>
             {!isError && !isSpinning && (
-              <span className="min-w-0 truncate text-xs text-gray-400">{detail}</span>
+              <span className="min-w-0 truncate text-xs text-fg-muted">{detail}</span>
             )}
           </div>
           {hasDownloadProgress && (
             <div className="mt-1.5 max-w-xs space-y-1">
-              <div className="text-xs text-gray-500">
+              <div className="text-xs text-fg-muted">
                 {downloadPercent === null
                   ? t('downloadProgressUnknown', { downloaded: formatBytes(step.downloaded_bytes) })
                   : t('downloadProgressLabel', {
@@ -222,9 +227,9 @@ export default function UpdateModal({
                       total: formatBytes(step.total_bytes),
                     })}
               </div>
-              <div className="h-1.5 overflow-hidden rounded-full bg-gray-100">
+              <div className="h-1.5 overflow-hidden rounded-full bg-subtle">
                 <div
-                  className={`h-full rounded-full bg-amber-500 transition-all ${downloadPercent === null ? 'w-1/2 animate-pulse' : ''}`}
+                  className={`h-full rounded-full bg-warning transition-all ${downloadPercent === null ? 'w-1/2 animate-pulse' : ''}`}
                   style={downloadPercent === null ? undefined : { width: `${downloadPercent}%` }}
                   role="progressbar"
                   aria-valuemin={0}
@@ -243,49 +248,53 @@ export default function UpdateModal({
     showProgressDialog ? (
       <>
         <div
-          className="fixed inset-0 z-[90] bg-black/30"
+          className="fixed inset-0 z-[90] bg-overlay-backdrop"
           onClick={safeClose}
         />
 
         <div className="fixed inset-0 z-[100] flex items-center justify-center pointer-events-none">
           <div
+            ref={dialogRef}
             role="dialog"
             aria-modal="true"
             aria-label={modalTitle}
-            className="pointer-events-auto w-full max-w-md max-h-[calc(100dvh-2rem)] mx-4 bg-white rounded-2xl shadow-2xl border border-gray-200 overflow-y-auto"
+            tabIndex={-1}
+            data-ui-overlay="dialog"
+            className="pointer-events-auto flex w-full max-w-modal max-h-[calc(100dvh-2rem)] mx-4 flex-col bg-surface rounded-overlay shadow-overlay border border-line overflow-hidden"
             onClick={(e) => e.stopPropagation()}
           >
-            <div className="flex items-center justify-between px-4 py-3 border-b border-gray-100">
+            <div className="flex shrink-0 items-center justify-between px-4 sm:px-6 py-4 border-b border-line">
               <div className="flex items-center gap-2">
-                <IconSparkles aria-hidden="true" className="w-4 h-4 text-gray-500" />
-                <span className="text-sm font-semibold text-gray-800">{modalTitle}</span>
+                <IconSparkles aria-hidden="true" className="w-4 h-4 text-fg-muted" />
+                <h2 className="text-title-section text-fg">{modalTitle}</h2>
               </div>
               <button
                 aria-label={t('closeAction')}
                 onClick={safeClose}
                 disabled={isBusy}
-                className="p-1 text-gray-400 hover:text-gray-600 rounded transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                className="ui-btn ui-btn-ghost ui-btn-icon text-fg-muted"
               >
                 <IconX aria-hidden="true" className="w-4 h-4" />
               </button>
             </div>
 
-            <div className="px-4 pt-4 pb-2">
-              <div className="rounded-2xl border border-amber-200 bg-gradient-to-br from-amber-50 via-orange-50 to-rose-50 p-4 shadow-sm">
+            <div className="min-h-0 flex-1 overflow-y-auto">
+            <div className="px-4 sm:px-6 pt-4 pb-2">
+              <div className={`rounded-card border border-line p-4 ${progressTone}`}>
                 <div className="flex items-start gap-3">
-                  <span className="flex h-10 w-10 items-center justify-center rounded-full bg-amber-500 text-white shadow-sm">
-                    <IconCircleArrowUp aria-hidden="true" className="h-5 w-5" />
+                  <span className="flex h-8 w-8 items-center justify-center rounded-control">
+                    <ProgressIcon aria-hidden="true" className="h-5 w-5" />
                   </span>
                   <div className="min-w-0 flex-1">
-                    <div className="text-sm font-semibold text-amber-950">
+                    <div className="text-sm font-semibold">
                       {isBusy ? t('upgrading') : completed ? t('upgradeComplete') : t('upgradeFailed')}
                     </div>
                     {latestDisplayVersion && (
-                      <div className="mt-1 text-2xl font-bold text-amber-900 dark:text-amber-100">
+                      <div className="mt-1 text-2xl font-bold">
                         {formatUpdateVersion(latestDisplayVersion)}
                       </div>
                     )}
-                    <p className="mt-2 text-sm leading-6 text-amber-800">
+                    <p className="mt-2 text-sm">
                       {t(isBusy ? 'confirmUpgradeDesc' : completed ? 'upgradeCompleteDesc' : 'upgradeFailedDesc')}
                     </p>
                   </div>
@@ -299,31 +308,32 @@ export default function UpdateModal({
                   {steps.map((s, i) => renderStep(s, i))}
                 </div>
                 {restarting && (
-                  <p className="mt-2 text-xs text-gray-400">{t('restarting')}</p>
+                  <p className="mt-2 text-xs text-fg-muted">{t('restarting')}</p>
                 )}
               </div>
             )}
 
             {error && (
               <div className="px-4 pb-3">
-                <div className="flex items-start gap-2 text-xs text-red-600 bg-red-50 rounded-lg p-2.5">
-                  <IconCircleX aria-hidden="true" className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
+                <div className="flex items-start gap-2 text-xs text-danger bg-danger-soft rounded-lg p-2.5">
+                  <IconCircleX aria-hidden="true" className="w-4 h-4 flex-shrink-0 mt-0.5" />
                   <span className="min-w-0 break-words">{error}</span>
                 </div>
               </div>
             )}
 
-            <div className="px-4 pb-4 flex items-center gap-2 flex-wrap">
+            </div>
+            <div className="px-4 sm:px-6 py-4 shrink-0 flex items-center gap-2 flex-wrap">
               {upgrading && !restarting && (
-                <span className="flex items-center gap-1.5 text-xs text-gray-500">
-                  <IconLoader2 aria-hidden="true" className="w-3.5 h-3.5 animate-spin" />
+                <span className="flex items-center gap-1.5 text-xs text-fg-muted">
+                  <IconLoader2 aria-hidden="true" className="w-4 h-4 animate-spin" />
                   {t('upgrading')}
                 </span>
               )}
 
               {restarting && (
-                <span className="flex items-center gap-1.5 text-xs text-blue-600">
-                  <IconLoader2 aria-hidden="true" className="w-3.5 h-3.5 animate-spin" />
+                <span className="flex items-center gap-1.5 text-xs text-info">
+                  <IconLoader2 aria-hidden="true" className="w-4 h-4 animate-spin" />
                   {t('waitingRestart')}
                 </span>
               )}
@@ -331,7 +341,7 @@ export default function UpdateModal({
               {!isBusy && (
                 <button
                   onClick={safeClose}
-                  className="ml-auto flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-gray-600 bg-gray-100 hover:bg-gray-200 rounded-lg transition-colors"
+                  className="ui-btn ui-btn-primary ml-auto"
                 >
                   {t('closeAction')}
                 </button>
@@ -350,14 +360,14 @@ export default function UpdateModal({
       >
           <div className="px-4 py-4">
             {info?.has_update ? (
-              <div className="rounded-xl border border-amber-100 bg-amber-50/70 px-3 py-2 text-xs text-amber-800">
+              <div className="rounded-xl border border-warning bg-warning-soft px-3 py-2 text-xs text-warning">
                 <div className="font-medium">
                   {t('confirmUpgrade', { version: formatUpdateVersion(latestDisplayVersion) })}
                 </div>
-                <div className="mt-1 leading-5">{t('newVersionDesc')}</div>
+                <div className="mt-1">{t('newVersionDesc')}</div>
               </div>
             ) : (
-              <div className="rounded-xl border border-gray-100 bg-gray-50 px-3 py-2 text-xs text-gray-600">
+              <div className="rounded-xl border border-line bg-canvas px-3 py-2 text-xs text-fg-secondary">
                 {checking
                   ? t('checkUpdate')
                   : error ?? (info?.deploy_mode === 'offline' && !info.latest_version ? t('offlineNotChecked') : t('upToDate'))}
@@ -369,28 +379,28 @@ export default function UpdateModal({
             {info?.update_allowed === false && info.deploy_mode === 'managed' && (
               // Managed (commercial-core supervised) install: the core owns
               // package upgrades, so the Docker guidance would be misleading.
-              <div className="mt-2 rounded-xl border border-blue-200 bg-blue-50 px-3 py-2.5 text-xs text-blue-800">
+              <div className="mt-2 rounded-xl border border-info bg-info-soft px-3 py-2.5 text-xs text-info">
                 <div className="flex items-center gap-1.5 font-medium">
-                  <IconShieldCheck aria-hidden="true" className="w-3.5 h-3.5 flex-shrink-0" />
+                  <IconShieldCheck aria-hidden="true" className="w-4 h-4 flex-shrink-0" />
                   {t('managedModeTitle')}
                 </div>
-                <p className="mt-1 leading-5">{t('managedModeDesc')}</p>
+                <p className="mt-1">{t('managedModeDesc')}</p>
               </div>
             )}
             {info?.update_allowed === false && info.deploy_mode !== 'managed' && (
-              <div className="mt-2 rounded-xl border border-blue-200 bg-blue-50 px-3 py-2.5 text-xs text-blue-800">
+              <div className="mt-2 rounded-xl border border-info bg-info-soft px-3 py-2.5 text-xs text-info">
                 <div className="flex items-center gap-1.5 font-medium">
                   {info.deploy_mode === 'offline' ? (
-                    <IconServer aria-hidden="true" className="w-3.5 h-3.5 flex-shrink-0" />
+                    <IconServer aria-hidden="true" className="w-4 h-4 flex-shrink-0" />
                   ) : (
-                    <IconContainer aria-hidden="true" className="w-3.5 h-3.5 flex-shrink-0" />
+                    <IconContainer aria-hidden="true" className="w-4 h-4 flex-shrink-0" />
                   )}
                   {t(info.deploy_mode === 'offline' ? 'offlineModeTitle' : 'dockerModeTitle')}
                 </div>
-                <p className="mt-1 leading-5">
+                <p className="mt-1">
                   {t(info.deploy_mode === 'offline' ? 'offlineModeDesc' : 'dockerModeDesc')}
                 </p>
-                <code className="mt-1.5 block rounded bg-blue-100 px-2 py-1 text-xs text-blue-900 select-all">
+                <code className="mt-1.5 block rounded bg-info-soft px-2 py-1 text-xs text-info select-all">
                   {t(info.deploy_mode === 'offline' ? 'offlineUpgradeHint' : 'dockerUpgradeHint')}
                 </code>
               </div>
@@ -399,25 +409,25 @@ export default function UpdateModal({
 
           <div className="px-4 pb-3 space-y-3">
             <div className="flex items-center justify-between text-xs">
-              <span className="text-gray-400">{t('currentVersion')}</span>
-              <span className="font-medium text-gray-700">{formatUpdateVersion(currentDisplayVersion)}</span>
+              <span className="text-fg-muted">{t('currentVersion')}</span>
+              <span className="font-medium text-fg-secondary">{formatUpdateVersion(currentDisplayVersion)}</span>
             </div>
             <div className="flex items-center justify-between text-xs">
-              <span className="text-gray-400">{t('latestVersion')}</span>
+              <span className="text-fg-muted">{t('latestVersion')}</span>
               <div className="flex items-center gap-1.5">
                 {checking ? (
-                  <IconLoader2 aria-hidden="true" className="w-3 h-3 text-gray-400 animate-spin" />
+                  <IconLoader2 aria-hidden="true" className="w-4 h-4 text-fg-muted animate-spin" />
                 ) : latestDisplayVersion ? (
                   <>
-                    <span className="font-medium text-gray-700">{formatUpdateVersion(latestDisplayVersion)}</span>
+                    <span className="font-medium text-fg-secondary">{formatUpdateVersion(latestDisplayVersion)}</span>
                     {info?.has_update ? (
-                      <span className="px-1.5 py-0.5 rounded text-xs font-medium bg-amber-100 text-amber-700">{t('hasUpdate')}</span>
+                      <span className="px-1.5 py-0.5 rounded text-xs font-medium bg-warning-soft text-warning">{t('hasUpdate')}</span>
                     ) : (
-                      <span className="px-1.5 py-0.5 rounded text-xs font-medium bg-green-100 text-green-700">{t('upToDate')}</span>
+                      <span className="px-1.5 py-0.5 rounded text-xs font-medium bg-success-soft text-success">{t('upToDate')}</span>
                     )}
                   </>
                 ) : (
-                  <span className="text-gray-400">—</span>
+                  <span className="text-fg-muted">—</span>
                 )}
               </div>
             </div>
@@ -427,15 +437,15 @@ export default function UpdateModal({
             <button
               onClick={() => void fetchVersion(true)}
               disabled={checking}
-              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-gray-600 bg-gray-100 hover:bg-gray-200 rounded-lg disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-fg-secondary bg-subtle hover:bg-hover rounded-lg disabled:bg-disabled disabled:text-fg-disabled disabled:cursor-not-allowed transition-colors"
             >
-              <IconRefresh aria-hidden="true" className={`w-3.5 h-3.5 ${checking ? 'animate-spin' : ''}`} />
+              <IconRefresh aria-hidden="true" className={`w-4 h-4 ${checking ? 'animate-spin' : ''}`} />
               {t('checkUpdate')}
             </button>
 
             <button
               onClick={safeClose}
-              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-gray-600 bg-gray-100 hover:bg-gray-200 rounded-lg transition-colors"
+              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-fg-secondary bg-subtle hover:bg-hover rounded-lg transition-colors"
             >
               {t('laterAction')}
             </button>
@@ -449,17 +459,17 @@ export default function UpdateModal({
                   }
                   onDismiss();
                 }}
-                className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-gray-400 hover:text-gray-600 transition-colors"
+                className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-fg-muted hover:text-fg-secondary transition-colors"
                 title={t('dismissAction')}
               >
-                <IconBellOff aria-hidden="true" className="w-3.5 h-3.5" />
+                <IconBellOff aria-hidden="true" className="w-4 h-4" />
                 {t('dismissAction')}
               </button>
             )}
 
             {canUpgrade && info?.has_update && info.update_allowed !== false && (
               <NoticePrimaryAction onClick={handleUpgrade} className="ml-auto">
-                <IconCircleArrowUp aria-hidden="true" className="w-3.5 h-3.5" />
+                <IconCircleArrowUp aria-hidden="true" className="w-4 h-4" />
                 {t('confirmAction')}
               </NoticePrimaryAction>
             )}

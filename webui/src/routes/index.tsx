@@ -43,15 +43,15 @@ export function Routes() {
   if (error) {
     return (
       <AuthLayout>
-        <div className="w-full max-w-lg bg-white border border-gray-200 rounded-xl p-6 shadow-sm space-y-4 dark:border-[#4a5563] dark:bg-[#303842] dark:shadow-xl dark:shadow-black/20">
+        <div className="w-full max-w-lg bg-surface border border-line rounded-xl p-6 shadow-sm space-y-4 dark:border-line dark:bg-surface dark:shadow-xl ">
           <div>
-            <h1 className="text-xl font-semibold text-gray-900 dark:text-[#d7dee8]">{t('error.systemUnknownTitle')}</h1>
-            <p className="text-sm text-gray-500 mt-1 dark:text-[#b8c2cc]">{error}</p>
+            <h1 className="text-xl font-semibold text-fg dark:text-fg">{t('error.systemUnknownTitle')}</h1>
+            <p className="text-sm text-fg-muted mt-1 dark:text-fg-secondary">{error}</p>
           </div>
           <button
             type="button"
             onClick={() => void refresh()}
-            className="bg-slate-900 text-white rounded-lg px-4 py-2 font-medium hover:bg-slate-800 dark:bg-[#46515e] dark:hover:bg-[#5a6573]"
+            className="bg-selected text-action-fg rounded-lg px-4 py-2 font-medium hover:bg-hover dark:bg-subtle dark:hover:bg-hover"
           >
             {t('error.retry')}
           </button>

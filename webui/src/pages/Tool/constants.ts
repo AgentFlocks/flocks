@@ -25,13 +25,13 @@ export function getTabIcon(key: TabKey) {
 
 /** Source badge: labelKey for i18n (tool.source.*) for builtin/custom; label for proper nouns MCP/API. */
 export const SOURCE_BADGE: Record<string, { label?: string; labelKey?: string; className: string }> = {
-  mcp: { label: 'MCP', className: 'bg-red-100 text-red-800' },
-  api: { label: 'API', className: 'bg-purple-100 text-purple-800' },
-  device: { label: 'Device', className: 'bg-amber-100 text-amber-800' },
-  plugin_py: { labelKey: 'source.local', className: 'bg-blue-100 text-blue-800' },
-  plugin_yaml: { label: 'API Plugin', className: 'bg-violet-100 text-violet-800' },
-  builtin: { labelKey: 'source.builtin', className: 'bg-green-100 text-green-800' },
-  custom: { labelKey: 'source.custom', className: 'bg-orange-100 text-orange-800' },
+  mcp: { label: 'MCP', className: 'bg-data-soft text-data' },
+  api: { label: 'API', className: 'bg-data-soft text-data' },
+  device: { label: 'Device', className: 'bg-data-soft text-data' },
+  plugin_py: { labelKey: 'source.local', className: 'bg-subtle text-fg-secondary' },
+  plugin_yaml: { label: 'API Plugin', className: 'bg-data-soft text-data' },
+  builtin: { labelKey: 'source.builtin', className: 'bg-subtle text-fg-secondary' },
+  custom: { labelKey: 'source.custom', className: 'bg-subtle text-fg-secondary' },
 };
 
 /** Category key -> i18n key (tool.category.*). */

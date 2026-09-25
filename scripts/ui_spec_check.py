@@ -2,6 +2,10 @@
 """
 Check the WebUI source against the Flocks UI spec (webui/UI_SPEC.md).
 
+The canonical theme tokens must match the explicit light/dark values in the
+design HTML. This contract is always checked, including for Pro overlay scans,
+and cannot be waived by the legacy-usage baseline.
+
 New interface code must use the semantic tokens (bg-surface, text-fg-secondary,
 border-line, bg-action, text-success ...) instead of raw Tailwind palette
 classes, literal colours, ad-hoc font sizes, off-spec radii or a second icon
@@ -9,6 +13,8 @@ set.  Existing pages carry a lot of the old style, so this works as a ratchet:
 every occurrence is counted per file and compared with a recorded baseline.
 A new file with any hit, or an old file whose count went up, fails the check;
 lowering the baseline is how the pages get migrated.
+Semantic colour utilities cannot use opacity suffixes (bg-surface/50); use a
+dedicated token such as bg-overlay-backdrop when translucency is required.
 
 Usage:
     python3 scripts/ui_spec_check.py              # check webui/src against the baseline
@@ -28,17 +34,21 @@ import json
 import re
 import sys
 from dataclasses import dataclass
+from decimal import Decimal
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Dict, Iterable, List, Sequence
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_ROOTS = ("webui/src",)
 DEFAULT_BASELINE = REPO_ROOT / "scripts" / "ui_spec_baseline.json"
+DESIGN_SOURCE = REPO_ROOT / "webui" / "design" / "flocks-ui-spec-v1.4.html"
+TOKEN_FILE = REPO_ROOT / "webui" / "src" / "styles" / "tokens.css"
 
 SCAN_SUFFIXES = {".ts", ".tsx", ".js", ".jsx", ".css"}
 SKIP_DIR_NAMES = {"node_modules", "dist", "build", ".git", "coverage"}
-#: The token file is where the literal colours are supposed to live.
-SKIP_FILE_NAMES = {"tokens.css"}
+# Only the canonical token file may contain unchecked literal colours. A second
+# file named tokens.css in an overlay must not bypass the source rules.
 
 _PALETTES = (
     "gray|zinc|slate|neutral|stone|red|rose|pink|fuchsia|purple|violet|indigo|"
@@ -48,9 +58,24 @@ _UTILITIES = (
     "bg|text|border|ring|divide|placeholder|from|to|via|fill|stroke|outline|"
     "shadow|accent|caret|decoration|ring-offset|border-[trblxy]|border-[se]"
 )
+_SEMANTIC_COLOURS = (
+    "canvas|surface|subtle|hover|selected|focus|disabled|overlay-backdrop|"
+    "fg(?:-(?:secondary|muted|placeholder|link|disabled))?|line(?:-control)?|"
+    "action(?:-(?:hover|pressed|fg|danger|danger-fg))?|switch-(?:on|thumb)|"
+    "(?:success|warning|danger|info|ai|data|brand)(?:-soft)?"
+)
 
 #: rule name -> (pattern, applies to css files, applies to script files)
 RULES = {
+    # These variables contain complete CSS colours, not an RGB channel tuple.
+    # Tailwind cannot apply /50 to var(--bg-surface); the utility is not emitted.
+    "semantic-opacity": (
+        re.compile(
+            rf"(?<![\w/-])(?:[\w-]+:)*(?:{_UTILITIES})-(?:{_SEMANTIC_COLOURS})/(?:\d{{1,3}}|\[[^\]]+\])(?![\w-])"
+        ),
+        True,
+        True,
+    ),
     # bg-gray-100, dark:hover:text-red-600, border-t-zinc-800/50 ...
     "palette": (
         re.compile(
@@ -61,7 +86,7 @@ RULES = {
     ),
     # literal colours outside tokens.css
     "hex-colour": (
-        re.compile(r"(?<![\w&])#(?:[0-9a-fA-F]{8}|[0-9a-fA-F]{6}|[0-9a-fA-F]{3,4})(?![\w-])"),
+        re.compile(r"(?<![\w&])#(?:[0-9a-fA-F]{8}|[0-9a-fA-F]{6}|[0-9a-fA-F]{3,4})(?![a-zA-Z0-9-])"),
         True,
         True,
     ),
@@ -100,15 +125,128 @@ class Occurrence:
     text: str
 
 
+class _DesignStyles(HTMLParser):
+    """Read actual style elements, never colour examples in the document body."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.in_style = False
+        self.parts: List[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list) -> None:
+        if tag == "style":
+            self.in_style = True
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "style":
+            self.in_style = False
+
+    def handle_data(self, data: str) -> None:
+        if self.in_style:
+            self.parts.append(data)
+
+
+def _top_level_css_blocks(css: str) -> Iterable[tuple[str, str]]:
+    """Do not treat a token under @media/@supports as an unconditional value."""
+    depth = 0
+    selector_start = body_start = 0
+    selector = ""
+    # Quoted braces belong to a value/selector, not the stylesheet structure.
+    for match in re.finditer(r'''"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[{}]''', css):
+        if match.group() == "{":
+            if depth == 0:
+                selector = css[selector_start:match.start()]
+                body_start = match.end()
+            depth += 1
+        elif match.group() == "}":
+            depth -= 1
+            if depth == 0:
+                yield selector, css[body_start:match.start()]
+                selector_start = match.end()
+
+
+def theme_tokens(css: str, *, design: bool) -> Dict[str, Dict[str, str]]:
+    """Read the explicit theme token blocks in source order.
+
+    This is deliberately a token-block reader, not a CSS cascade evaluator. The
+    design's system-theme media fallback, component overrides and presentation
+    helpers are not the explicit light/dark contract used by html.dark.
+    """
+    css = re.sub(r"/\*.*?\*/", "", css, flags=re.DOTALL)
+    light: Dict[str, str] = {}
+    dark: Dict[str, str] = {}
+    light_selectors = {":root"}
+    dark_selectors = {".dark", "html.dark"}
+    if design:
+        light_selectors.update({'[data-theme="light"]', '.pane[data-theme="light"]'})
+        dark_selectors = {'[data-theme="dark"]', '.pane[data-theme="dark"]'}
+    for selector, body in _top_level_css_blocks(css):
+        selectors = {part.strip().replace("'", '"') for part in selector.split(",")}
+        declarations = {
+            name: value.strip()
+            for name, value in re.findall(r"(--[\w-]+)\s*:\s*([^;{}]+)", body)
+            if not name.startswith("--spec-")
+        }
+        if selectors & light_selectors:
+            light.update(declarations)
+        if selectors & dark_selectors:
+            dark.update(declarations)
+    # Fonts and geometry are intentionally inherited in dark mode. A missing
+    # dark colour still fails whenever the required value differs from light.
+    return {"light": light, "dark": {**light, **dark}}
+
+
+def normalized_css_value(value: str) -> str:
+    """Ignore formatting, hex case and equivalent decimal spellings (.40/.4)."""
+    value = re.sub(r"\s+", " ", value.strip()).replace("'", '"')
+    value = re.sub(r"\s*([(),])\s*", r"\1", value)
+    value = re.sub(r"#[0-9a-fA-F]+", lambda match: match.group().lower(), value)
+    return re.sub(
+        r"(?<![\w.-])(?:\d+\.\d+|\.\d+)(?![\w.-])",
+        lambda match: format(Decimal(match.group()).normalize(), "f"),
+        value,
+    )
+
+
+def check_design_tokens(design_path: Path, token_path: Path) -> List[str]:
+    """The design is authoritative; a palette baseline can never waive drift."""
+    try:
+        design = _DesignStyles()
+        design.feed(design_path.read_text(encoding="utf-8"))
+        expected = theme_tokens("\n".join(design.parts), design=True)
+        actual = theme_tokens(token_path.read_text(encoding="utf-8"), design=False)
+    except (OSError, UnicodeDecodeError) as exc:
+        return [f"cannot read design token contract: {exc}"]
+
+    required = {"--font-sans", "--control-md", "--bg-canvas", "--text-primary", "--accent-ai"}
+    missing = required - expected["light"].keys()
+    if missing:
+        return ["design source is missing required tokens: " + ", ".join(sorted(missing))]
+    if expected["dark"].get("--bg-canvas") == expected["light"].get("--bg-canvas"):
+        return ["design source is missing the explicit dark theme contract"]
+
+    problems: List[str] = []
+    for theme in ("light", "dark"):
+        for name, expected_value in sorted(expected[theme].items()):
+            actual_value = actual[theme].get(name)
+            if actual_value is None or normalized_css_value(actual_value) != normalized_css_value(expected_value):
+                problems.append(
+                    f"{token_path.name} [{theme}] {name}: expected {expected_value}, "
+                    f"found {actual_value if actual_value is not None else '<missing>'}"
+                )
+    return problems
+
+
 def iter_files(roots: Sequence[Path]) -> Iterable[tuple[Path, Path]]:
     for root in roots:
         if root.is_file():
-            yield root, root
+            if root.resolve() != TOKEN_FILE:
+                yield root, root
             continue
         for path in sorted(root.rglob("*")):
             if not path.is_file() or path.suffix not in SCAN_SUFFIXES:
                 continue
-            if path.name in SKIP_FILE_NAMES:
+            if path.resolve() == TOKEN_FILE:
                 continue
             if any(part in SKIP_DIR_NAMES for part in path.relative_to(root).parts):
                 continue
@@ -220,6 +358,14 @@ def main() -> int:
     if missing:
         print("scan root not found: " + ", ".join(missing), file=sys.stderr)
         return 2
+
+    contract_problems = check_design_tokens(DESIGN_SOURCE, TOKEN_FILE)
+    if contract_problems:
+        print("UI design token contract failed (webui/design/flocks-ui-spec-v1.4.html):")
+        for problem in contract_problems:
+            print("  " + problem)
+        print("Fix the token implementation; baseline updates cannot waive design drift.")
+        return 1
 
     occurrences: List[Occurrence] = []
     for path, root in iter_files(roots):

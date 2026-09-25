@@ -1,3 +1,4 @@
+import PageDialog from '../PageDialog';
 import { memo, useContext, useState, useEffect, useLayoutEffect, useMemo, useCallback, useRef, type RefObject } from 'react';
 import {
   IconPlus,
@@ -130,11 +131,11 @@ function ChannelChatTypeBadge({
       role="img"
       aria-label={label}
       data-channel-chat-type={chatType}
-      className={`absolute -bottom-1 -right-1 flex h-2.5 w-2.5 items-center justify-center rounded-full bg-white ring-1 ring-white dark:bg-[#252c35] dark:ring-[#252c35] ${
-        chatType === 'direct' ? 'text-zinc-500' : 'text-blue-500'
+      className={`absolute -bottom-1 -right-1 flex h-2.5 w-2.5 items-center justify-center rounded-pill bg-surface ring-1 ring-focus ${
+        chatType === 'direct' ? 'text-fg-muted' : 'text-info'
       }`}
     >
-      <Icon aria-hidden="true" className="h-2 w-2 stroke-[2.5]" />
+      <Icon aria-hidden="true" className="h-4 w-4 stroke-[2.5]" />
     </span>
   );
 }
@@ -236,33 +237,33 @@ function ComposerResourcePicker({
       <button
         type="button"
         onClick={onToggle}
-        className="group flex h-10 w-full items-center gap-2.5 rounded-[9px] px-2 text-left text-[13px] font-medium text-zinc-700 transition-colors hover:bg-zinc-100/90 hover:text-zinc-950 dark:text-zinc-200 dark:hover:bg-white/[0.07] dark:hover:text-white"
+        className="group flex h-10 w-full items-center gap-2.5 rounded-card px-2 text-left text-xs font-medium text-fg-secondary transition-colors hover:bg-hover hover:text-fg "
         aria-label={label}
         aria-haspopup="menu"
         aria-expanded={open}
       >
-        <span className="grid h-7 w-7 shrink-0 place-items-center text-zinc-500 transition-colors group-hover:text-zinc-800 dark:text-zinc-400 dark:group-hover:text-white">
-          <Icon aria-hidden="true" className="h-3.5 w-3.5" />
+        <span className="grid h-7 w-7 shrink-0 place-items-center text-fg-muted transition-colors group-hover:text-fg ">
+          <Icon aria-hidden="true" className="h-4 w-4" />
         </span>
         <span className="min-w-0 flex-1 truncate">{label}</span>
-        <IconChevronRight aria-hidden="true" className={`h-3.5 w-3.5 shrink-0 text-zinc-400 transition-transform ${open ? '-rotate-90' : ''}`} />
+        <IconChevronRight aria-hidden="true" className={`h-4 w-4 shrink-0 text-fg-muted transition-transform ${open ? '-rotate-90' : ''}`} />
       </button>
       {open && (
-        <div className="absolute bottom-0 left-[calc(100%+0.5rem)] z-[60] w-[300px] max-w-[calc(100vw-2rem)] overflow-hidden rounded-[14px] border border-black/[0.09] bg-white/95 shadow-[0_18px_46px_rgba(22,27,34,0.14),0_2px_8px_rgba(22,27,34,0.06)] backdrop-blur-xl dark:border-white/[0.11] dark:bg-[#252c35]/95 dark:shadow-[0_20px_48px_rgba(8,10,13,0.44)]">
-          <div className="flex min-h-12 items-center justify-between gap-3 border-b border-zinc-100 px-3 py-2 dark:border-white/[0.08]">
-            <span className="min-w-0 truncate text-[12px] font-semibold text-zinc-800 dark:text-zinc-100">
+        <div className="absolute bottom-0 left-[calc(100%+0.5rem)] z-[60] w-[300px] max-w-[calc(100vw-2rem)] overflow-hidden rounded-card border border-line bg-surface shadow-overlay backdrop-blur-xl ">
+          <div className="flex min-h-12 items-center justify-between gap-3 border-b border-line px-3 py-2 ">
+            <span className="min-w-0 truncate text-xs font-semibold text-fg ">
               {title}
             </span>
-            <div className="inline-flex shrink-0 items-center rounded-lg bg-zinc-100 p-0.5 text-[10px] dark:bg-black/15">
+            <div className="inline-flex shrink-0 items-center rounded-control bg-subtle p-0.5 text-xs ">
               {(['all', 'builtin', 'custom'] as AgentSourceFilter[]).map((filter) => (
                 <button
                   key={filter}
                   type="button"
                   onClick={() => setSourceFilter(filter)}
-                  className={`rounded-md px-2 py-1 transition-colors ${
+                  className={`rounded-control px-2 py-1 transition-colors ${
                     sourceFilter === filter
-                      ? 'bg-white text-zinc-900 shadow-[0_1px_3px_rgba(22,27,34,0.08)] dark:bg-white/[0.12] dark:text-zinc-50'
-                      : 'text-zinc-500 hover:text-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-100'
+                      ? 'bg-surface text-fg shadow-overlay '
+                      : 'text-fg-muted hover:text-fg '
                   }`}
                 >
                   {t(`agentPicker.filter.${filter}`)}
@@ -272,7 +273,7 @@ function ComposerResourcePicker({
           </div>
           <div className="h-64 space-y-0.5 overflow-y-auto p-1.5">
             {loading ? (
-              <div className="flex h-full items-center justify-center text-zinc-400">
+              <div className="flex h-full items-center justify-center text-fg-muted">
                 <IconLoader2 aria-hidden="true" className="h-4 w-4 animate-spin" />
               </div>
             ) : filteredItems.length > 0 ? (
@@ -282,28 +283,28 @@ function ComposerResourcePicker({
                   type="button"
                   onClick={() => onSelect(item)}
                   title={item.description}
-                  className="flex w-full min-w-0 items-center gap-2 rounded-lg px-2.5 py-2 text-left text-zinc-700 transition-colors hover:bg-zinc-50 hover:text-zinc-950 dark:text-zinc-300 dark:hover:bg-white/[0.06] dark:hover:text-white"
+                  className="flex w-full min-w-0 items-center gap-2 rounded-control px-2.5 py-2 text-left text-fg-secondary transition-colors hover:bg-hover hover:text-fg "
                 >
-                  <span className="grid h-6 w-6 shrink-0 place-items-center rounded-md bg-zinc-100 text-zinc-400 dark:bg-white/[0.05] dark:text-zinc-500">
-                    <Icon aria-hidden="true" className="h-3 w-3" />
+                  <span className="grid h-6 w-6 shrink-0 place-items-center rounded-control bg-subtle text-fg-muted ">
+                    <Icon aria-hidden="true" className="h-4 w-4" />
                   </span>
                   <span className="min-w-0 flex-1 truncate text-xs font-medium">{item.name}</span>
-                  <span className={`shrink-0 rounded px-1.5 py-0.5 text-[9px] font-medium ${
+                  <span className={`shrink-0 rounded-tag px-1.5 py-0.5 text-xs font-medium ${
                     item.source === 'builtin'
-                      ? 'bg-zinc-100 text-zinc-600 dark:bg-white/[0.08] dark:text-zinc-300'
-                      : 'bg-teal-50 text-teal-600 dark:bg-teal-950/40 dark:text-teal-300'
+                      ? 'bg-subtle text-fg-secondary '
+                      : 'bg-data-soft text-data '
                   }`}>
                     {t(`agentPicker.badge.${item.source}`)}
                   </span>
                   {item.badge && (
-                    <span className="max-w-20 shrink-0 truncate rounded bg-zinc-100 px-1.5 py-0.5 text-[9px] font-medium text-zinc-500 dark:bg-white/[0.07] dark:text-zinc-400">
+                    <span className="max-w-20 shrink-0 truncate rounded-tag bg-subtle px-1.5 py-0.5 text-xs font-medium text-fg-muted ">
                       {item.badge}
                     </span>
                   )}
                 </button>
               ))
             ) : (
-              <div className="flex h-full items-center justify-center px-4 text-center text-xs text-zinc-400">
+              <div className="flex h-full items-center justify-center px-4 text-center text-xs text-fg-muted">
                 {emptyText}
               </div>
             )}
@@ -476,14 +477,14 @@ function SessionSidebarItemInner({
   return (
     <div
       onClick={() => onSelect(session.id)}
-      className={`group relative mb-0.5 min-h-[34px] cursor-pointer rounded-lg border px-3 py-1 transition-colors duration-100 ${
+      className={`group relative mb-0.5 min-h-[34px] cursor-pointer rounded-control border px-3 py-1 transition-colors duration-100 ${
         nested ? 'ml-5' : ''
       } ${
         !selectMode && selected
-          ? 'border-transparent bg-zinc-200/70 text-[#202328] dark:bg-[#3a434e] dark:text-white'
+          ? 'border-transparent bg-selected text-fg '
           : selectMode && checked
-          ? 'border-blue-200 bg-blue-50 text-[#202328] dark:border-blue-400/40 dark:bg-blue-500/10 dark:text-white'
-          : 'border-transparent text-[#5b6067] hover:bg-black/[0.04] hover:text-[#202328] dark:text-[#b8c2cc] dark:hover:bg-white/[0.06] dark:hover:text-white'
+          ? 'border-info bg-info-soft text-fg '
+          : 'border-transparent text-fg-secondary hover:bg-hover hover:text-fg '
       }`}
     >
       <div className="flex min-w-0 items-center gap-1.5 pr-6">
@@ -493,7 +494,7 @@ function SessionSidebarItemInner({
             checked={checked}
             onChange={() => onToggleCheck(session.id)}
             onClick={(e) => e.stopPropagation()}
-            className="flex-shrink-0 w-3.5 h-3.5 accent-blue-500 cursor-pointer rounded"
+            className="flex-shrink-0 w-3.5 h-3.5 accent-info cursor-pointer rounded-tag"
           />
         )}
         {session.channelID && (
@@ -512,12 +513,12 @@ function SessionSidebarItemInner({
         )}
         {session.category === 'workflow' && (
           <span title={t('workflowSession')} className="flex-shrink-0">
-            <WorkflowIcon aria-hidden="true" className="h-3.5 w-3.5 text-orange-400" />
+            <WorkflowIcon aria-hidden="true" className="h-4 w-4 text-ai" />
           </span>
         )}
         {session.category === 'entity-config' && (
           <span title={t('configSession')} className="flex-shrink-0">
-            <IconAdjustmentsHorizontal aria-hidden="true" className="h-3.5 w-3.5 text-purple-400" />
+            <IconAdjustmentsHorizontal aria-hidden="true" className="h-4 w-4 text-ai" />
           </span>
         )}
         {renaming ? (
@@ -533,7 +534,7 @@ function SessionSidebarItemInner({
             }}
             placeholder={t('renamePlaceholder')}
             disabled={renameSubmitting}
-            className="h-6 w-full min-w-0 rounded-md border border-blue-300 bg-white px-1.5 text-sm text-gray-900 outline-none focus:border-blue-400 dark:border-blue-500/50 dark:bg-[#252c35] dark:text-white"
+            className="ui-input h-6 w-full min-w-0 rounded-control border border-info bg-surface px-1.5 text-sm text-fg focus:border-action"
             aria-label={t('rename')}
             data-session-rename-input
           />
@@ -541,7 +542,7 @@ function SessionSidebarItemInner({
           <h3 className="flex min-w-0 flex-1 items-center gap-1.5 truncate text-sm font-medium">
             <span className="truncate">{getSessionDisplayTitle(session)}</span>
             {session.isShared && (
-              <span className="inline-flex shrink-0 items-center rounded-full border border-blue-200 bg-blue-50 px-1.5 py-0.5 text-[10px] font-medium text-blue-700 dark:border-blue-400/35 dark:bg-blue-500/10 dark:text-blue-200">
+              <span className="inline-flex shrink-0 items-center rounded-pill border border-info bg-info-soft px-1.5 py-0.5 text-xs font-medium text-info ">
                 {t('sharedTag')}
               </span>
             )}
@@ -551,7 +552,7 @@ function SessionSidebarItemInner({
           <time
             dateTime={new Date(session.time.updated).toISOString()}
             title={formatSessionDate(session.time.updated)}
-            className="ml-1 shrink-0 whitespace-nowrap text-[11px] font-normal tabular-nums text-zinc-500 dark:text-[#8f9ba8]"
+            className="ml-1 shrink-0 whitespace-nowrap text-xs font-normal tabular-nums text-fg-muted "
           >
             {formatRelativeTime(session.time.updated, language)}
           </time>
@@ -565,13 +566,13 @@ function SessionSidebarItemInner({
               aria-label={t('chat.tool.running')}
               title={t('chat.tool.running')}
               data-session-running={session.id}
-              className={`pointer-events-none absolute inset-0 grid place-items-center text-[#5f8fcb] transition-opacity dark:text-[#8ab4e8] ${
+              className={`pointer-events-none absolute inset-0 grid place-items-center text-info transition-opacity ${
                 menuOpen
                   ? 'opacity-0'
                   : 'opacity-100 group-hover:opacity-0 group-focus-within:opacity-0'
               }`}
             >
-              <IconLoader2 aria-hidden="true" className="h-[14px] w-[14px] animate-spin" />
+              <IconLoader2 aria-hidden="true" className="h-4 w-4 animate-spin" />
             </span>
           )}
           <button
@@ -582,13 +583,13 @@ function SessionSidebarItemInner({
             title={t('moreActions')}
             aria-label={t('moreActions')}
             aria-expanded={menuOpen}
-            className={`absolute inset-0 grid h-6 w-6 place-items-center rounded-lg text-[#989ca1] transition-[color,opacity,background-color] hover:bg-white hover:text-[#202328] dark:text-[#8f9ba8] dark:hover:bg-white/[0.08] dark:hover:text-white ${
+            className={`ui-btn-icon inline-flex items-center justify-center absolute inset-0 grid   place-items-center rounded-control text-fg-placeholder transition-[color,opacity,background-color] hover:bg-hover hover:text-fg ${
               menuOpen || (selected && !running)
-                ? 'text-[#202328] opacity-100 dark:text-white'
+                ? 'text-fg opacity-100 '
                 : 'opacity-0 group-hover:opacity-100'
             }`}
           >
-            <IconDots aria-hidden="true" className="h-[15px] w-[15px]" />
+            <IconDots aria-hidden="true" className="h-4 w-4" />
           </button>
         </div>
       )}
@@ -632,19 +633,19 @@ function SSEStatusIndicator({ status, t }: { status: SSEConnectionStatus; t: (ke
       aria-live="polite"
       data-testid="sse-status"
       data-sse-status={status}
-      className={`flex min-w-0 items-center gap-2 rounded-full border px-2.5 py-1 text-[11px] font-medium ${
+      className={`flex min-w-0 items-center gap-2 rounded-pill border px-2.5 py-1 text-xs font-medium ${
         failed
-          ? 'border-red-200 bg-red-50 text-red-700 dark:border-red-400/30 dark:bg-red-500/15 dark:text-red-200'
-          : 'border-amber-200 bg-amber-50 text-amber-800 dark:border-amber-500/35 dark:bg-amber-500/15 dark:text-amber-100'
+          ? 'border-danger bg-danger-soft text-danger '
+          : 'border-warning bg-warning-soft text-warning '
       }`}
     >
-      <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${failed ? 'bg-red-500' : 'animate-pulse bg-amber-500'}`} />
+      <span className={`h-1.5 w-1.5 shrink-0 rounded-pill ${failed ? 'bg-danger' : 'animate-pulse bg-warning'}`} />
       <span className="truncate">{failed ? t('connectionFailed') : t('reconnecting')}</span>
       {failed && (
         <button
           type="button"
           onClick={() => window.location.reload()}
-          className="rounded px-1.5 py-0.5 text-[11px] font-medium underline-offset-2 hover:underline"
+          className="rounded-tag px-1.5 py-0.5 text-xs font-medium underline-offset-2 hover:underline"
         >
           {t('chat.retry')}
         </button>
@@ -659,12 +660,12 @@ function WorkbenchRefreshStatus({ label }: { label: string }) {
       role="status"
       aria-live="polite"
       data-testid="workbench-refresh-status"
-      className="ml-auto flex min-w-0 items-center gap-2 rounded-full border border-black/[0.06] bg-white/55 px-2.5 py-1 text-[11px] font-medium text-[#737980] shadow-[0_1px_2px_rgba(22,27,34,0.03)] dark:border-white/[0.08] dark:bg-white/[0.04] dark:text-[#aeb8c3]"
+      className="ml-auto flex min-w-0 items-center gap-2 rounded-pill border border-line bg-surface px-2.5 py-1 text-xs font-medium text-fg-muted shadow-overlay "
     >
-      <span className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-[#4f92e8]" />
+      <span className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-pill bg-info" />
       <span className="truncate">{label}</span>
-      <span className="h-px w-8 shrink-0 overflow-hidden rounded-full bg-[#d9e5f4] dark:bg-[#46515e]">
-        <span className="block h-full w-1/2 animate-pulse rounded-full bg-[#4f92e8]" />
+      <span className="h-px w-8 shrink-0 overflow-hidden rounded-pill bg-info-soft ">
+        <span className="block h-full w-1/2 animate-pulse rounded-pill bg-info" />
       </span>
     </div>
   );
@@ -677,31 +678,31 @@ function SessionListSkeleton() {
       aria-hidden="true"
       className="animate-pulse px-2 pt-1"
     >
-      <div className="mb-2 h-3 w-16 rounded-full bg-black/[0.07] dark:bg-white/[0.08]" />
+      <div className="mb-2 h-3 w-16 rounded-pill bg-hover " />
       <div className="space-y-1.5">
         {[72, 88, 64].map((width, index) => (
           <div
             key={`${width}-${index}`}
-            className="flex h-[34px] items-center gap-2 rounded-lg px-2"
+            className="flex h-[34px] items-center gap-2 rounded-control px-2"
           >
-            <div className="h-3.5 w-3.5 shrink-0 rounded bg-black/[0.06] dark:bg-white/[0.07]" />
+            <div className="h-3.5 w-3.5 shrink-0 rounded-tag bg-hover " />
             <div
-              className="h-3 rounded-full bg-black/[0.06] dark:bg-white/[0.07]"
+              className="h-3 rounded-pill bg-hover "
               style={{ width: `${width}%` }}
             />
           </div>
         ))}
       </div>
-      <div className="mb-2 mt-5 h-3 w-12 rounded-full bg-black/[0.07] dark:bg-white/[0.08]" />
+      <div className="mb-2 mt-5 h-3 w-12 rounded-pill bg-hover " />
       <div className="space-y-1.5">
         {[82, 68, 76, 58].map((width, index) => (
           <div
             key={`${width}-${index}`}
-            className="flex h-[34px] items-center gap-2 rounded-lg px-2"
+            className="flex h-[34px] items-center gap-2 rounded-control px-2"
           >
-            <div className="h-3.5 w-3.5 shrink-0 rounded-full bg-black/[0.06] dark:bg-white/[0.07]" />
+            <div className="h-3.5 w-3.5 shrink-0 rounded-pill bg-hover " />
             <div
-              className="h-3 rounded-full bg-black/[0.06] dark:bg-white/[0.07]"
+              className="h-3 rounded-pill bg-hover "
               style={{ width: `${width}%` }}
             />
           </div>
@@ -721,7 +722,7 @@ function SessionChatSkeleton() {
       <LoadingSpinner
         size="sm"
         delayMs={180}
-        className="opacity-60 [&_svg]:text-zinc-400 dark:[&_svg]:text-zinc-500"
+        className="text-fg-muted [&_svg]:text-fg-muted "
       />
     </div>
   );
@@ -2869,12 +2870,12 @@ export default function SessionPage() {
     <div
       key={session.id}
       onClick={() => handleSelectSessionRow(session.id)}
-      className={`group relative mx-2 mb-1 px-3 py-2.5 rounded-xl border cursor-pointer transition-all duration-150 ${
+      className={`group relative mx-2 mb-1 px-3 py-2.5 rounded-card border cursor-pointer transition-all duration-150 ${
         !selectMode && selectedSessionId === session.id
-          ? 'bg-gray-100 border-gray-300 shadow-sm dark:border-zinc-700 dark:bg-zinc-900 dark:shadow-none'
+          ? 'bg-subtle border-line-control shadow-sm '
           : selectMode && checkedIds.has(session.id)
-          ? 'bg-blue-50 border-blue-200 dark:border-blue-500/40 dark:bg-blue-950/30'
-          : 'border-gray-100 hover:border-gray-200 hover:bg-gray-50 hover:shadow-sm dark:border-transparent dark:hover:border-zinc-800 dark:hover:bg-zinc-900 dark:hover:shadow-none'
+          ? 'bg-info-soft border-info '
+          : 'border-line hover:border-line hover:bg-hover hover:shadow-sm '
       }`}
     >
       <div className="flex items-center gap-1.5 min-w-0 pr-7">
@@ -2884,17 +2885,17 @@ export default function SessionPage() {
             checked={checkedIds.has(session.id)}
             onChange={() => handleToggleCheck(session.id)}
             onClick={(e) => e.stopPropagation()}
-            className="flex-shrink-0 w-3.5 h-3.5 accent-blue-500 cursor-pointer rounded"
+            className="flex-shrink-0 w-3.5 h-3.5 accent-info cursor-pointer rounded-tag"
           />
         )}
         {session.category === 'workflow' && (
           <span title={t('workflowSession')} className="flex-shrink-0">
-            <WorkflowIcon aria-hidden="true" className="w-3 h-3 text-orange-400" />
+            <WorkflowIcon aria-hidden="true" className="w-4 h-4 text-ai" />
           </span>
         )}
         {session.category === 'entity-config' && (
           <span title={t('configSession')} className="flex-shrink-0">
-            <IconAdjustmentsHorizontal aria-hidden="true" className="w-3 h-3 text-purple-400" />
+            <IconAdjustmentsHorizontal aria-hidden="true" className="w-4 h-4 text-ai" />
           </span>
         )}
         {renamingSessionId === session.id ? (
@@ -2910,15 +2911,15 @@ export default function SessionPage() {
             }}
             placeholder={t('renamePlaceholder')}
             disabled={renameSubmitting}
-            className="w-full min-w-0 rounded border border-blue-300 bg-white px-1.5 py-0.5 text-sm text-gray-900 outline-none focus:border-blue-400 dark:border-blue-500/50 dark:bg-zinc-950 dark:text-zinc-100"
+            className="ui-input w-full min-w-0 rounded-tag border border-info bg-surface px-1.5  text-sm text-fg focus:border-action"
             aria-label={t('rename')}
             data-session-rename-input
           />
         ) : (
-          <h3 className="font-semibold text-gray-900 truncate text-sm flex items-center gap-1.5 dark:text-zinc-100">
+          <h3 className="font-semibold text-fg truncate text-sm flex items-center gap-1.5 ">
             <span className="truncate">{session.title}</span>
             {session.isShared && (
-              <span className="inline-flex items-center rounded-full border border-blue-200 bg-blue-50 px-1.5 py-0.5 text-[10px] font-medium text-blue-700">
+              <span className="inline-flex items-center rounded-pill border border-info bg-info-soft px-1.5 py-0.5 text-xs font-medium text-info">
                 {t('sharedTag')}
               </span>
             )}
@@ -2926,7 +2927,7 @@ export default function SessionPage() {
         )}
       </div>
       {session.time?.updated && renamingSessionId !== session.id && (
-        <p className="mt-1 text-xs text-gray-400 truncate pl-0.5 dark:text-zinc-500">
+        <p className="mt-1 text-xs text-fg-muted truncate pl-0.5 ">
           {formatSessionDate(session.time.updated)}
         </p>
       )}
@@ -2948,11 +2949,11 @@ export default function SessionPage() {
             title={t('moreActions')}
             aria-label={t('moreActions')}
             aria-expanded={openMenuSessionId === session.id}
-            className={`p-1 rounded text-gray-400 hover:text-gray-600 hover:bg-gray-200 transition-all dark:text-zinc-500 dark:hover:bg-zinc-800 dark:hover:text-zinc-200 ${
-              openMenuSessionId === session.id ? 'opacity-100 text-gray-600 bg-gray-200 dark:bg-zinc-800 dark:text-zinc-200' : 'opacity-0 group-hover:opacity-100'
+            className={`ui-btn-icon inline-flex items-center justify-center p-1 rounded-control text-fg-muted hover:text-fg-secondary hover:bg-hover transition-all ${
+              openMenuSessionId === session.id ? 'opacity-100 text-fg-secondary bg-selected ' : 'opacity-0 group-hover:opacity-100'
             }`}
           >
-            <IconDots aria-hidden="true" className="w-3.5 h-3.5" />
+            <IconDots aria-hidden="true" className="w-4 h-4" />
           </button>
         </div>
       )}
@@ -2966,15 +2967,15 @@ export default function SessionPage() {
   const showSessionListSkeleton = loadingSessions && sessions.length === 0;
 
   return (
-    <div className="relative flex h-full w-full overflow-hidden bg-[#fcfcfd] text-[#202328] dark:bg-[#303842] dark:text-[#d7dee8]">
+    <div className="relative flex h-full w-full overflow-hidden bg-canvas text-fg ">
       {/* ── Sidebar ── */}
       <div
-        className={`flex h-full flex-shrink-0 flex-col overflow-hidden border-r bg-gray-50 transition-[width,opacity] duration-200 dark:bg-[#252c35] ${
-          narrowViewport ? 'absolute inset-y-0 left-0 z-30 shadow-2xl' : 'relative'
+        className={`flex h-full flex-shrink-0 flex-col overflow-hidden border-r bg-subtle transition-[width,opacity] duration-200 ${
+          narrowViewport ? 'absolute inset-y-0 left-0 z-30 shadow-overlay' : 'relative'
         } ${
           sidebarCollapsed
             ? 'w-0 border-transparent opacity-0'
-            : 'w-[282px] border-black/[0.10] opacity-100 dark:border-white/[0.10]'
+            : 'w-sidebar border-line opacity-100 '
         }`}
         aria-label={t('managementTitle')}
         data-session-sidebar
@@ -2983,34 +2984,34 @@ export default function SessionPage() {
         <div className="flex-shrink-0 px-3 pb-2 pt-3.5 pl-14 lg:pl-3">
           <div className="mb-2 flex h-8 items-center justify-between px-1">
             <div className="min-w-0">
-              <strong className="text-sm font-semibold text-[#202328] dark:text-[#f0f3f7]">
+              <strong className="text-sm font-semibold text-fg ">
                 {t('managementTitle')}
               </strong>
-              <span className="ml-2 text-[11px] text-[#7b8087] dark:text-[#9aa7b4]">
+              <span className="ml-2 text-xs text-fg-muted ">
                 {t('sessionCount', { count: sessions.length })}
               </span>
             </div>
             <button
               type="button"
               onClick={() => setSessionSearchOpen(true)}
-              className="grid h-7 w-7 shrink-0 place-items-center rounded-lg text-[#7b8087] transition-colors hover:bg-black/[0.05] hover:text-[#202328] dark:text-[#9aa7b4] dark:hover:bg-white/[0.07] dark:hover:text-white"
+              className="ui-btn-icon inline-flex items-center justify-center grid   shrink-0 place-items-center rounded-control text-fg-muted transition-colors hover:bg-hover hover:text-fg "
               title={t('openTaskSearch')}
               aria-label={t('openTaskSearch')}
               aria-expanded={sessionSearchOpen}
             >
-              <IconSearch aria-hidden="true" className="h-3.5 w-3.5" />
+              <IconSearch aria-hidden="true" className="h-4 w-4" />
             </button>
           </div>
 
           <div>
-            <div className="relative h-[34px] rounded-lg transition-colors hover:bg-black/[0.04] dark:hover:bg-white/[0.06]">
+            <div className="relative h-[34px] rounded-control transition-colors hover:bg-hover ">
               {creating
-                ? <IconLoader2 aria-hidden="true" className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 animate-spin text-[#7b8087]" />
-                : <IconEdit aria-hidden="true" className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[#7b8087] dark:text-[#9aa7b4]" />}
+                ? <IconLoader2 aria-hidden="true" className="pointer-events-none absolute left-2 top-1/2 h-4 w-4 -translate-y-1/2 animate-spin text-fg-muted" />
+                : <IconEdit aria-hidden="true" className="pointer-events-none absolute left-2 top-1/2 h-4 w-4 -translate-y-1/2 text-fg-muted " />}
               <button
                 onClick={handleStartNewSession}
                 disabled={creating}
-                className="h-full w-full rounded-lg border-0 bg-transparent pl-9 pr-3 text-left text-sm font-medium text-[#474b51] transition-colors hover:text-[#202328] disabled:cursor-not-allowed disabled:opacity-60 dark:text-[#c3ccd6] dark:hover:text-white"
+                className="h-full w-full rounded-control border-0 bg-transparent pl-9 pr-3 text-left text-sm font-medium text-fg-secondary transition-colors hover:text-fg disabled:cursor-not-allowed disabled:bg-disabled disabled:text-fg-disabled "
               >
                 {t('newSession')}
               </button>
@@ -3019,19 +3020,19 @@ export default function SessionPage() {
         </div>
 
         {sessionSearchOpen && (
-          <div
-            role="dialog"
+          <PageDialog onClose={handleCloseSessionSearch}
+
             aria-label={t('taskSearchDialog')}
-            aria-modal="true"
-            onClick={handleCloseSessionSearch}
-            className="fixed inset-0 z-[80] flex items-start justify-center bg-black/20 px-4 pt-[18vh] backdrop-blur-[1px] dark:bg-black/45"
+
+
+            className="fixed inset-0 z-[80] flex items-start justify-center bg-overlay-backdrop px-4 pt-[18vh] backdrop-blur-[1px] "
           >
             <div
               onClick={(event) => event.stopPropagation()}
-              className="w-full max-w-[620px] overflow-hidden rounded-2xl border border-black/[0.12] bg-[#fdfdfc] shadow-[0_24px_70px_rgba(22,27,34,0.24)] dark:border-white/[0.11] dark:bg-[#303030] dark:shadow-[0_28px_80px_rgba(0,0,0,0.55)]"
+              className="w-full max-w-modal overflow-hidden rounded-card border border-line bg-surface shadow-overlay "
             >
-              <div className="relative h-[52px] border-b border-black/[0.07] dark:border-white/[0.08]">
-                <IconSearch aria-hidden="true" className="pointer-events-none absolute left-4 top-1/2 h-[18px] w-[18px] -translate-y-1/2 text-[#7b8087] dark:text-[#a7adb5]" />
+              <div className="relative h-[52px] border-b border-line ">
+                <IconSearch aria-hidden="true" className="pointer-events-none absolute left-4 top-1/2 h-5 w-5 -translate-y-1/2 text-fg-muted " />
                 <input
                   autoFocus
                   value={searchQuery}
@@ -3043,12 +3044,12 @@ export default function SessionPage() {
                     }
                   }}
                   placeholder={t('filterConversations', 'Search tasks')}
-                  className="h-full w-full border-0 bg-transparent pl-12 pr-12 text-[15px] font-medium text-[#3f444a] outline-none placeholder:text-[#858a91] dark:text-[#e1e5ea] dark:placeholder:text-[#9298a0]"
+                  className="ui-input h-full w-full border-0 bg-transparent pl-12 pr-12 text-sm font-medium text-fg-secondary placeholder:text-fg-muted"
                 />
                 <button
                   type="button"
                   onClick={handleCloseSessionSearch}
-                  className="absolute right-3 top-1/2 grid h-7 w-7 -translate-y-1/2 place-items-center rounded-lg text-[#7b8087] transition-colors hover:bg-black/[0.06] hover:text-[#202328] dark:text-[#9aa7b4] dark:hover:bg-white/[0.08] dark:hover:text-white"
+                  className="ui-btn-icon inline-flex items-center justify-center absolute right-3 top-1/2 grid   -translate-y-1/2 place-items-center rounded-control text-fg-muted transition-colors hover:bg-hover hover:text-fg "
                   title={t('closeTaskSearch')}
                   aria-label={t('closeTaskSearch')}
                 >
@@ -3056,7 +3057,7 @@ export default function SessionPage() {
                 </button>
               </div>
               <div className="max-h-[420px] overflow-y-auto p-2">
-                <div className="px-2 pb-1.5 pt-1 text-[11px] font-medium text-[#969aa0] dark:text-[#8f9ba8]">
+                <div className="px-2 pb-1.5 pt-1 text-xs font-medium text-fg-placeholder ">
                   {t(searchQuery.trim() ? 'searchResults' : 'recentTasks')}
                 </div>
                 {searchPanelSessions.length > 0 ? (
@@ -3066,24 +3067,24 @@ export default function SessionPage() {
                         key={session.id}
                         type="button"
                         onClick={() => handleSelectSearchResult(session.id)}
-                        className="flex h-10 w-full min-w-0 items-center gap-2.5 rounded-xl px-3 text-left text-sm text-[#4e5359] transition-colors hover:bg-black/[0.055] hover:text-[#202328] focus:bg-black/[0.055] focus:outline-none dark:text-[#d1d5da] dark:hover:bg-white/[0.09] dark:hover:text-white dark:focus:bg-white/[0.09]"
+                        className="flex h-10 w-full min-w-0 items-center gap-2.5 rounded-card px-3 text-left text-sm text-fg-secondary transition-colors hover:bg-hover hover:text-fg focus:bg-hover "
                       >
-                        <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-[#6aa7ee]" />
+                        <span className="h-1.5 w-1.5 shrink-0 rounded-pill bg-info" />
                         <span className="min-w-0 flex-1 truncate font-medium">{session.title}</span>
-                        <span className="max-w-[110px] shrink-0 truncate text-xs text-[#969aa0] dark:text-[#8f9ba8]">
+                        <span className="max-w-[110px] shrink-0 truncate text-xs text-fg-placeholder ">
                           {session.projectName || getPathBasename(session.directory)}
                         </span>
                       </button>
                     ))}
                   </div>
                 ) : (
-                  <div className="px-3 py-10 text-center text-sm text-[#969aa0] dark:text-[#8f9ba8]">
+                  <div className="px-3 py-10 text-center text-sm text-fg-placeholder ">
                     {t('noResults')}
                   </div>
                 )}
               </div>
             </div>
-          </div>
+          </PageDialog>
         )}
 
         {/* Session list */}
@@ -3096,29 +3097,29 @@ export default function SessionPage() {
           ) : (
           <div>
             <section className="group/projects-section">
-                <div className="flex h-7 select-none items-center gap-1.5 px-2 text-xs font-semibold uppercase tracking-[0.02em] text-zinc-500 dark:text-[#8f9ba8]">
+                <div className="flex h-7 select-none items-center gap-1.5 px-2 text-xs font-semibold uppercase tracking-[0.02em] text-fg-muted ">
                   <button
                     type="button"
                     onClick={() => setProjectsSectionCollapsed((collapsed) => !collapsed)}
-                    className="flex h-6 items-center gap-1 rounded-lg px-1 text-left transition-colors hover:bg-black/[0.04] hover:text-[#474b51] dark:hover:bg-white/[0.06] dark:hover:text-white"
+                    className="flex h-6 items-center gap-1 rounded-control px-1 text-left transition-colors hover:bg-hover hover:text-fg-secondary "
                     aria-label={t('toggleProjects')}
                   >
                     <span>{t('projectsSection')}</span>
-                    <span className="font-normal tabular-nums text-[#858a91] dark:text-[#8f9ba8]">
+                    <span className="font-normal tabular-nums text-fg-muted ">
                       ({managedProjectSessionGroups.length})
                     </span>
                     {projectsSectionCollapsed
-                      ? <IconChevronRight aria-hidden="true" className="h-3.5 w-3.5 shrink-0" />
-                      : <IconChevronDown aria-hidden="true" className="h-3.5 w-3.5 shrink-0" />}
+                      ? <IconChevronRight aria-hidden="true" className="h-4 w-4 shrink-0" />
+                      : <IconChevronDown aria-hidden="true" className="h-4 w-4 shrink-0" />}
                   </button>
                   <button
                     type="button"
                     onClick={handleOpenCreateProject}
-                    className="ml-auto grid h-6 w-6 place-items-center rounded-lg text-[#8a8e94] transition-colors hover:bg-black/[0.04] hover:text-[#474b51] dark:text-[#8f9ba8] dark:hover:bg-white/[0.06] dark:hover:text-white"
+                    className="ui-btn-icon inline-flex items-center justify-center ml-auto grid   place-items-center rounded-control text-fg-muted transition-colors hover:bg-hover hover:text-fg-secondary "
                     title={t('projectDialog.createTitle')}
                     aria-label={t('projectDialog.createTitle')}
                   >
-                    <IconFolderPlus aria-hidden="true" className="h-3.5 w-3.5" />
+                    <IconFolderPlus aria-hidden="true" className="h-4 w-4" />
                   </button>
                 </div>
                 {!projectsSectionCollapsed && (
@@ -3142,10 +3143,10 @@ export default function SessionPage() {
                   return (
                     <div key={group.id} className="group/project relative">
                       <div
-                        className={`flex h-[34px] items-center gap-1 rounded-lg px-3 text-sm transition-colors ${
+                        className={`flex h-[34px] items-center gap-1 rounded-control px-3 text-sm transition-colors ${
                           isSelectedProject
-                            ? 'font-semibold text-[#202328] dark:text-white'
-                            : 'font-medium text-[#474b51] hover:bg-black/[0.04] hover:text-[#202328] dark:text-[#c3ccd6] dark:hover:bg-white/[0.06] dark:hover:text-white'
+                            ? 'font-semibold text-fg '
+                            : 'font-medium text-fg-secondary hover:bg-hover hover:text-fg '
                         }`}
                         title={group.worktree}
                       >
@@ -3155,20 +3156,20 @@ export default function SessionPage() {
                             setSelectedProjectId(group.id);
                             toggleProjectCollapsed(group.id);
                           }}
-                          className="flex h-full min-w-0 flex-1 items-center gap-2 rounded-lg text-left"
+                          className="flex h-full min-w-0 flex-1 items-center gap-2 rounded-control text-left"
                           aria-label={t('selectProject', { project: group.label })}
                           aria-expanded={!collapsed}
                         >
-                          <IconFolderCode aria-hidden="true" className="h-3.5 w-3.5 shrink-0 text-[#6f757c] dark:text-[#9aa7b4]" />
+                          <IconFolderCode aria-hidden="true" className="h-4 w-4 shrink-0 text-fg-muted " />
                           <span className="min-w-0 flex-1 truncate">{group.label}</span>
                           {group.isShared && (
-                            <span className="inline-flex shrink-0 items-center rounded-full border border-blue-200 bg-blue-50 px-1.5 py-0.5 text-[10px] font-medium text-blue-700 dark:border-blue-500/30 dark:bg-blue-950/30 dark:text-blue-300">
+                            <span className="inline-flex shrink-0 items-center rounded-pill border border-info bg-info-soft px-1.5 py-0.5 text-xs font-medium text-info ">
                               {t('sharedTag')}
                             </span>
                           )}
                           {group.pathStatus !== 'available' && (
                             <IconAlertTriangle
-                              className="h-3.5 w-3.5 shrink-0 text-amber-500"
+                              className="h-4 w-4 shrink-0 text-warning"
                               aria-label={t('projectPathUnavailable')}
                             />
                           )}
@@ -3180,7 +3181,7 @@ export default function SessionPage() {
                               event.stopPropagation();
                               setOpenProjectMenuId((current) => current === group.id ? null : group.id);
                             }}
-                            className={`grid h-[26px] w-[26px] place-items-center rounded-lg text-[#7b8087] transition-all hover:bg-black/[0.065] hover:text-[#202328] dark:text-[#9aa7b4] dark:hover:bg-white/[0.08] dark:hover:text-white ${
+                            className={`ui-btn-icon inline-flex items-center justify-center grid   place-items-center rounded-control text-fg-muted transition-all hover:bg-hover hover:text-fg ${
                               openProjectMenuId === group.id || isSelectedProject
                                 ? 'opacity-100'
                                 : 'opacity-0 group-hover/project:opacity-100 group-focus-within/project:opacity-100'
@@ -3189,7 +3190,7 @@ export default function SessionPage() {
                             aria-label={t('projectActions')}
                             aria-expanded={openProjectMenuId === group.id}
                           >
-                            <IconDots aria-hidden="true" className="h-3.5 w-3.5" />
+                            <IconDots aria-hidden="true" className="h-4 w-4" />
                           </button>
                         )}
                         <button
@@ -3199,20 +3200,20 @@ export default function SessionPage() {
                             handleCreateSessionInProject(group.id);
                           }}
                           disabled={creating || !group.canWrite || group.pathStatus !== 'available'}
-                          className={`grid h-[26px] w-[26px] place-items-center rounded-lg text-[#7b8087] transition-all hover:bg-black/[0.065] hover:text-[#202328] disabled:cursor-not-allowed disabled:opacity-40 dark:text-[#9aa7b4] dark:hover:bg-white/[0.08] dark:hover:text-white ${
+                          className={`ui-btn-icon inline-flex items-center justify-center grid   place-items-center rounded-control text-fg-muted transition-all hover:bg-hover hover:text-fg disabled:cursor-not-allowed disabled:bg-disabled disabled:text-fg-disabled ${
                             isSelectedProject ? 'opacity-100' : 'opacity-0 group-hover/project:opacity-100 group-focus-within/project:opacity-100'
                           }`}
                           title={t('createSessionInProject', { project: group.label })}
                           aria-label={t('createSessionInProject', { project: group.label })}
                         >
                           {creating && isSelectedProject
-                            ? <IconLoader2 aria-hidden="true" className="h-3 w-3 animate-spin" />
-                            : <IconPlus aria-hidden="true" className="h-3 w-3" />}
+                            ? <IconLoader2 aria-hidden="true" className="h-4 w-4 animate-spin" />
+                            : <IconPlus aria-hidden="true" className="h-4 w-4" />}
                         </button>
                       </div>
                       {persistedProject && openProjectMenuId === group.id && (
                         <div
-                          className="absolute right-7 top-8 z-30 grid w-[140px] gap-0.5 rounded-[10px] border border-black/[0.11] bg-[#fdfdfc] p-1 shadow-[0_8px_24px_rgba(22,27,34,0.10)] dark:border-white/[0.10] dark:bg-[#303842] dark:shadow-[0_12px_32px_rgba(15,18,22,0.35)]"
+                          className="absolute right-7 top-8 z-30 grid w-[140px] gap-0.5 rounded-card border border-line bg-surface p-1 shadow-overlay "
                           role="menu"
                           onClick={(event) => event.stopPropagation()}
                         >
@@ -3220,9 +3221,9 @@ export default function SessionPage() {
                             type="button"
                             role="menuitem"
                             onClick={() => void handleCopyProjectPath(group)}
-                            className="flex h-[30px] w-full items-center gap-2 rounded-lg px-2 text-left text-xs text-[#4e5359] transition-colors hover:bg-black/[0.04] hover:text-[#202328] dark:text-[#c3ccd6] dark:hover:bg-white/[0.06] dark:hover:text-white"
+                            className="flex h-[30px] w-full items-center gap-2 rounded-control px-2 text-left text-xs text-fg-secondary transition-colors hover:bg-hover hover:text-fg "
                           >
-                            <IconCopy aria-hidden="true" className="h-3.5 w-3.5" />
+                            <IconCopy aria-hidden="true" className="h-4 w-4" />
                             {t('projectDialog.copyPathAction')}
                           </button>
                           {group.canWrite && (
@@ -3230,9 +3231,9 @@ export default function SessionPage() {
                               type="button"
                               role="menuitem"
                               onClick={() => void handleShareProject(group, !group.isShared)}
-                              className="flex h-[30px] w-full items-center gap-2 rounded-lg px-2 text-left text-xs text-[#4e5359] transition-colors hover:bg-black/[0.04] hover:text-[#202328] dark:text-[#c3ccd6] dark:hover:bg-white/[0.06] dark:hover:text-white"
+                              className="flex h-[30px] w-full items-center gap-2 rounded-control px-2 text-left text-xs text-fg-secondary transition-colors hover:bg-hover hover:text-fg "
                             >
-                              <IconShare aria-hidden="true" className="h-3.5 w-3.5" />
+                              <IconShare aria-hidden="true" className="h-4 w-4" />
                               {t(group.isShared ? 'unshareAction' : 'shareAction')}
                             </button>
                           )}
@@ -3241,23 +3242,23 @@ export default function SessionPage() {
                               type="button"
                               role="menuitem"
                               onClick={() => handleOpenRenameProject(group)}
-                              className="flex h-[30px] w-full items-center gap-2 rounded-lg px-2 text-left text-xs text-[#4e5359] transition-colors hover:bg-black/[0.04] hover:text-[#202328] dark:text-[#c3ccd6] dark:hover:bg-white/[0.06] dark:hover:text-white"
+                              className="flex h-[30px] w-full items-center gap-2 rounded-control px-2 text-left text-xs text-fg-secondary transition-colors hover:bg-hover hover:text-fg "
                             >
-                              <IconEdit aria-hidden="true" className="h-3.5 w-3.5" />
+                              <IconEdit aria-hidden="true" className="h-4 w-4" />
                               {t('projectDialog.renameAction')}
                             </button>
                           )}
                           {group.canDelete && (
-                            <div className="mx-2 my-0.5 border-t border-black/[0.07] dark:border-white/[0.08]" />
+                            <div className="mx-2 my-0.5 border-t border-line " />
                           )}
                           {group.canDelete && (
                             <button
                               type="button"
                               role="menuitem"
                               onClick={() => handleOpenDeleteProject(group)}
-                              className="flex h-[30px] w-full items-center gap-2 rounded-lg px-2 text-left text-xs text-[#c33c36] transition-colors hover:bg-[#fff0ef] hover:text-[#a92520] disabled:cursor-not-allowed disabled:opacity-40 dark:text-red-300 dark:hover:bg-red-500/10 dark:hover:text-red-200"
+                              className="flex h-[30px] w-full items-center gap-2 rounded-control px-2 text-left text-xs text-danger transition-colors hover:bg-danger-soft hover:text-danger disabled:cursor-not-allowed disabled:bg-disabled disabled:text-fg-disabled "
                             >
-                              <IconTrash aria-hidden="true" className="h-3.5 w-3.5" />
+                              <IconTrash aria-hidden="true" className="h-4 w-4" />
                               {t('projectDialog.deleteAction')}
                             </button>
                           )}
@@ -3292,7 +3293,7 @@ export default function SessionPage() {
                               />
                             ))
                           ) : (
-                            <div className="ml-[19px] px-2.5 py-2 text-[11px] text-[#a0a4aa] dark:text-[#8f9ba8]">
+                            <div className="ml-[19px] px-2.5 py-2 text-xs text-fg-placeholder ">
                               {t('noProjectSessions')}
                             </div>
                           )}
@@ -3309,10 +3310,10 @@ export default function SessionPage() {
                                   void loadMoreSessions(group.id);
                                 }}
                                 disabled={loadingMoreProjectIds.has(group.id)}
-                                className="flex h-7 items-center justify-center gap-1 rounded-lg px-2 text-[11px] text-[#969aa0] transition-colors hover:bg-black/[0.04] hover:text-[#474b51] disabled:cursor-not-allowed disabled:opacity-50 dark:text-[#8f9ba8] dark:hover:bg-white/[0.06] dark:hover:text-white"
+                                className="flex h-7 items-center justify-center gap-1 rounded-control px-2 text-xs text-fg-placeholder transition-colors hover:bg-hover hover:text-fg-secondary disabled:cursor-not-allowed disabled:bg-disabled disabled:text-fg-disabled "
                               >
                                 {loadingMoreProjectIds.has(group.id) && (
-                                  <IconLoader2 aria-hidden="true" className="h-3 w-3 animate-spin" />
+                                  <IconLoader2 aria-hidden="true" className="h-4 w-4 animate-spin" />
                                 )}
                                 {t('loadMore')}
                               </button>
@@ -3321,7 +3322,7 @@ export default function SessionPage() {
                                 <button
                                   type="button"
                                   onClick={() => setLoadedSessionGroupCollapsed(group.id, true)}
-                                  className="flex h-7 items-center justify-center rounded-lg px-2 text-[11px] text-[#969aa0] transition-colors hover:bg-black/[0.04] hover:text-[#474b51] dark:text-[#8f9ba8] dark:hover:bg-white/[0.06] dark:hover:text-white"
+                                  className="flex h-7 items-center justify-center rounded-control px-2 text-xs text-fg-placeholder transition-colors hover:bg-hover hover:text-fg-secondary "
                                 >
                                   {t('collapseLoaded')}
                                 </button>
@@ -3338,23 +3339,23 @@ export default function SessionPage() {
               </section>
               {taskSessionGroup && (
                 <section className="group/tasks-section mt-3">
-                  <div className="flex h-7 select-none items-center gap-1 px-2 text-xs font-semibold uppercase tracking-[0.02em] text-zinc-500 dark:text-[#8f9ba8]">
+                  <div className="flex h-7 select-none items-center gap-1 px-2 text-xs font-semibold uppercase tracking-[0.02em] text-fg-muted ">
                     <button
                       type="button"
                       onClick={() => {
                         setSelectedProjectId(taskSessionGroup.id);
                         toggleProjectCollapsed(taskSessionGroup.id);
                       }}
-                      className="flex h-6 items-center gap-1 rounded-lg px-1 text-left transition-colors hover:bg-black/[0.04] hover:text-[#474b51] dark:hover:bg-white/[0.06] dark:hover:text-white"
+                      className="flex h-6 items-center gap-1 rounded-control px-1 text-left transition-colors hover:bg-hover hover:text-fg-secondary "
                       aria-label={t('toggleTasks')}
                     >
                       <span>{t('tasksSection')}</span>
-                      <span className="font-normal tabular-nums text-[#858a91] dark:text-[#8f9ba8]">
+                      <span className="font-normal tabular-nums text-fg-muted ">
                         ({taskSessionGroup.sessionCount})
                       </span>
                       {taskGroupCollapsed
-                        ? <IconChevronRight aria-hidden="true" className="h-3.5 w-3.5 shrink-0" />
-                        : <IconChevronDown aria-hidden="true" className="h-3.5 w-3.5 shrink-0" />}
+                        ? <IconChevronRight aria-hidden="true" className="h-4 w-4 shrink-0" />
+                        : <IconChevronDown aria-hidden="true" className="h-4 w-4 shrink-0" />}
                     </button>
                     <button
                       type="button"
@@ -3363,13 +3364,13 @@ export default function SessionPage() {
                         void handleCreateSession(TASK_SESSION_GROUP_ID);
                       }}
                       disabled={creating}
-                      className="ml-auto grid h-6 w-6 place-items-center rounded-lg text-[#8a8e94] opacity-0 transition-all hover:bg-black/[0.04] hover:text-[#474b51] group-hover/tasks-section:opacity-100 group-focus-within/tasks-section:opacity-100 disabled:cursor-not-allowed disabled:opacity-50 dark:text-[#8f9ba8] dark:hover:bg-white/[0.06] dark:hover:text-white"
+                      className="ui-btn-icon inline-flex items-center justify-center ml-auto grid   place-items-center rounded-control text-fg-muted opacity-0 transition-all hover:bg-hover hover:text-fg-secondary group-hover/tasks-section:opacity-100 group-focus-within/tasks-section:opacity-100 disabled:cursor-not-allowed disabled:bg-disabled disabled:text-fg-disabled "
                       title={t('createTaskSession')}
                       aria-label={t('createTaskSession')}
                     >
                       {creating && taskGroupSelected
-                        ? <IconLoader2 aria-hidden="true" className="h-3 w-3 animate-spin" />
-                        : <IconPlus aria-hidden="true" className="h-3 w-3" />}
+                        ? <IconLoader2 aria-hidden="true" className="h-4 w-4 animate-spin" />
+                        : <IconPlus aria-hidden="true" className="h-4 w-4" />}
                     </button>
                   </div>
                   {!taskGroupCollapsed && (
@@ -3411,10 +3412,10 @@ export default function SessionPage() {
                               void loadMoreSessions(taskSessionGroup.id);
                             }}
                             disabled={loadingMoreProjectIds.has(taskSessionGroup.id)}
-                            className="flex h-7 items-center justify-center gap-1 rounded-lg px-2 text-[11px] text-[#969aa0] transition-colors hover:bg-black/[0.04] hover:text-[#474b51] disabled:cursor-not-allowed disabled:opacity-50 dark:text-[#8f9ba8] dark:hover:bg-white/[0.06] dark:hover:text-white"
+                            className="flex h-7 items-center justify-center gap-1 rounded-control px-2 text-xs text-fg-placeholder transition-colors hover:bg-hover hover:text-fg-secondary disabled:cursor-not-allowed disabled:bg-disabled disabled:text-fg-disabled "
                           >
                             {loadingMoreProjectIds.has(taskSessionGroup.id) && (
-                              <IconLoader2 aria-hidden="true" className="h-3 w-3 animate-spin" />
+                              <IconLoader2 aria-hidden="true" className="h-4 w-4 animate-spin" />
                             )}
                             {t('loadMore')}
                           </button>
@@ -3423,7 +3424,7 @@ export default function SessionPage() {
                             <button
                               type="button"
                               onClick={() => setLoadedSessionGroupCollapsed(taskSessionGroup.id, true)}
-                              className="flex h-7 items-center justify-center rounded-lg px-2 text-[11px] text-[#969aa0] transition-colors hover:bg-black/[0.04] hover:text-[#474b51] dark:text-[#8f9ba8] dark:hover:bg-white/[0.06] dark:hover:text-white"
+                              className="flex h-7 items-center justify-center rounded-control px-2 text-xs text-fg-placeholder transition-colors hover:bg-hover hover:text-fg-secondary "
                             >
                               {t('collapseLoaded')}
                             </button>
@@ -3440,43 +3441,43 @@ export default function SessionPage() {
 
         {/* Bottom：批量操作栏 / 批量选择入口 */}
         {sessions.length > 0 && (
-          <div className="flex min-h-11 flex-shrink-0 items-center justify-center border-t border-black/[0.07] px-3 dark:border-white/[0.08]">
+          <div className="flex min-h-11 flex-shrink-0 items-center justify-center border-t border-line px-3 ">
             {selectMode ? (
               <div className="grid grid-cols-3 gap-1.5">
                 <button
                   onClick={handleSelectAll}
-                  className="grid h-[30px] w-[30px] place-items-center rounded-lg text-blue-600 transition-colors hover:bg-blue-50 dark:text-blue-300 dark:hover:bg-blue-500/10"
+                  className="ui-btn-icon inline-flex items-center justify-center grid   place-items-center rounded-control text-info transition-colors hover:bg-info-soft "
                   title={checkedIds.size === sessions.length && sessions.length > 0 ? t('deselectAll') : t('selectAll')}
                   aria-label={checkedIds.size === sessions.length && sessions.length > 0 ? t('deselectAll') : t('selectAll')}
                 >
-                  <IconSquareCheck aria-hidden="true" className="h-[15px] w-[15px]" />
+                  <IconSquareCheck aria-hidden="true" className="h-4 w-4" />
                 </button>
                 <button
                   onClick={handleExitSelectMode}
-                  className="grid h-[30px] w-[30px] place-items-center rounded-lg text-[#60656b] transition-colors hover:bg-black/[0.04] dark:text-[#b8c2cc] dark:hover:bg-white/[0.06]"
+                  className="ui-btn-icon inline-flex items-center justify-center grid   place-items-center rounded-control text-fg-secondary transition-colors hover:bg-hover "
                   title={t('cancelSelect')}
                   aria-label={t('cancelSelect')}
                 >
-                  <IconX aria-hidden="true" className="h-[15px] w-[15px]" />
+                  <IconX aria-hidden="true" className="h-4 w-4" />
                 </button>
                 <button
                   onClick={handleBatchArchive}
                   disabled={checkedIds.size === 0 || batchArchiving}
-                  className="grid h-[30px] w-[30px] place-items-center rounded-lg text-red-600 transition-colors hover:bg-red-50 disabled:cursor-default disabled:opacity-35 dark:text-red-300 dark:hover:bg-red-500/10"
+                  className="ui-btn-icon inline-flex items-center justify-center grid   place-items-center rounded-control text-danger transition-colors hover:bg-danger-soft disabled:cursor-default disabled:bg-disabled disabled:text-fg-disabled "
                   title={t('archiveSelected', { count: checkedIds.size })}
                   aria-label={t('archiveSelected', { count: checkedIds.size })}
                 >
-                  {batchArchiving ? <IconLoader2 aria-hidden="true" className="h-[15px] w-[15px] animate-spin" /> : <IconArchive aria-hidden="true" className="h-[15px] w-[15px]" />}
+                  {batchArchiving ? <IconLoader2 aria-hidden="true" className="h-4 w-4 animate-spin" /> : <IconArchive aria-hidden="true" className="h-4 w-4" />}
                 </button>
               </div>
             ) : (
               <button
                 onClick={handleEnterSelectMode}
-                className="grid h-[30px] w-[30px] place-items-center rounded-lg text-[#7b8087] transition-colors hover:bg-black/[0.04] hover:text-[#202328] dark:text-[#9aa7b4] dark:hover:bg-white/[0.06] dark:hover:text-white"
+                className="ui-btn-icon inline-flex items-center justify-center grid   place-items-center rounded-control text-fg-muted transition-colors hover:bg-hover hover:text-fg "
                 title={t('selectMode')}
                 aria-label={t('selectMode')}
               >
-                <IconSquareCheck aria-hidden="true" className="h-[15px] w-[15px]" />
+                <IconSquareCheck aria-hidden="true" className="h-4 w-4" />
               </button>
             )}
           </div>
@@ -3484,13 +3485,13 @@ export default function SessionPage() {
       </div>
 
       {/* ── Main area ── */}
-      <div className="flex h-full min-w-0 flex-1 flex-col overflow-hidden bg-[#fcfcfd] dark:bg-[#303842]">
+      <div className="flex h-full min-w-0 flex-1 flex-col overflow-hidden bg-canvas ">
         {/* Header */}
-        <header className="relative flex h-[52px] flex-shrink-0 items-center gap-2 px-4 pl-14 text-[13px] lg:pl-4">
+        <header className="relative flex h-[52px] flex-shrink-0 items-center gap-2 px-4 pl-14 text-xs lg:pl-4">
           <div className="shrink-0">
             <button
               onClick={() => setSidebarCollapsed(!sidebarCollapsed)}
-              className="grid h-[30px] w-[30px] place-items-center rounded-lg border-0 bg-transparent text-[#7b8087] transition-colors hover:bg-black/[0.04] hover:text-[#202328] dark:text-[#9aa7b4] dark:hover:bg-white/[0.06] dark:hover:text-white"
+              className="ui-btn-icon inline-flex items-center justify-center grid   place-items-center rounded-control border-0 bg-transparent text-fg-muted transition-colors hover:bg-hover hover:text-fg "
               title={sidebarCollapsed ? t('showHistory') : t('hideHistory')}
               aria-label={sidebarCollapsed ? t('showHistory') : t('hideHistory')}
             >
@@ -3499,7 +3500,7 @@ export default function SessionPage() {
           </div>
 
           <div className="flex min-w-0 items-center">
-            <h2 className="truncate text-sm font-semibold text-[#555a61] dark:text-[#c3ccd6]">
+            <h2 className="truncate text-sm font-semibold text-fg-secondary ">
               {selectedSession?.title || t('newSession')}
             </h2>
           </div>
@@ -3518,7 +3519,7 @@ export default function SessionPage() {
               type="button"
               disabled={!activeChatSessionId}
               onClick={() => setContextPanelOpen((open) => !open)}
-              className={`flex h-8 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg px-2.5 text-xs font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
+              className={`flex h-8 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-control px-2.5 text-xs font-medium transition-colors disabled:cursor-not-allowed disabled:bg-disabled disabled:text-fg-disabled ${
                 contextPanelOpen
                   ? 'bg-ai-soft text-ai'
                   : 'text-fg-secondary hover:bg-hover hover:text-fg'
@@ -3526,10 +3527,10 @@ export default function SessionPage() {
               aria-label={t('context.title')}
               title={t('context.title')}
             >
-              <IconSparkles aria-hidden="true" className="h-3.5 w-3.5" />
+              <IconSparkles aria-hidden="true" className="h-4 w-4" />
               <span>{t('context.title')}</span>
               {(contextSnapshot?.counts.total || 0) > 0 && (
-                <span className="rounded-full bg-current/10 px-1.5 py-0.5 text-[10px]">
+                <span className="rounded-pill bg-current/10 px-1.5 py-0.5 text-xs">
                   {contextSnapshot!.counts.total}
                 </span>
               )}
@@ -3626,25 +3627,25 @@ export default function SessionPage() {
                   setShowProjectOptions(false);
                   setShowModelOptions(false);
                 }}
-                className="group flex h-10 w-full items-center gap-2.5 rounded-[9px] px-2 text-left text-[13px] font-medium text-zinc-700 transition-colors hover:bg-zinc-100/90 hover:text-zinc-950 dark:text-zinc-200 dark:hover:bg-white/[0.07] dark:hover:text-white"
+                className="group flex h-10 w-full items-center gap-2.5 rounded-card px-2 text-left text-xs font-medium text-fg-secondary transition-colors hover:bg-hover hover:text-fg "
                 title={t('agentPicker.title')}
                 aria-label={t('chat.addMenu.agent')}
                 aria-haspopup="menu"
                 aria-expanded={showAgentOptions}
               >
-                <span className="grid h-7 w-7 shrink-0 place-items-center text-zinc-500 transition-colors group-hover:text-zinc-800 dark:text-zinc-400 dark:group-hover:text-white">
-                  <IconRobot aria-hidden="true" className="h-3.5 w-3.5" />
+                <span className="grid h-7 w-7 shrink-0 place-items-center text-fg-muted transition-colors group-hover:text-fg ">
+                  <IconRobot aria-hidden="true" className="h-4 w-4" />
                 </span>
                 <span className="min-w-0 flex-1 truncate">{t('chat.addMenu.agent')}</span>
-                <IconChevronRight aria-hidden="true" className={`h-3.5 w-3.5 shrink-0 text-zinc-400 transition-transform ${showAgentOptions ? '-rotate-90' : ''}`} />
+                <IconChevronRight aria-hidden="true" className={`h-4 w-4 shrink-0 text-fg-muted transition-transform ${showAgentOptions ? '-rotate-90' : ''}`} />
               </button>
               {showAgentOptions && (
-                <div className="absolute bottom-0 left-[calc(100%+0.5rem)] z-[60] w-[300px] max-w-[calc(100vw-2rem)] overflow-hidden rounded-[14px] border border-black/[0.09] bg-white/95 shadow-[0_18px_46px_rgba(22,27,34,0.14),0_2px_8px_rgba(22,27,34,0.06)] backdrop-blur-xl dark:border-white/[0.11] dark:bg-[#252c35]/95 dark:shadow-[0_20px_48px_rgba(8,10,13,0.44)]">
-                  <div className="flex min-h-12 items-center justify-between gap-3 border-b border-zinc-100 px-3 py-2 dark:border-white/[0.08]">
+                <div className="absolute bottom-0 left-[calc(100%+0.5rem)] z-[60] w-[300px] max-w-[calc(100vw-2rem)] overflow-hidden rounded-card border border-line bg-surface shadow-overlay backdrop-blur-xl ">
+                  <div className="flex min-h-12 items-center justify-between gap-3 border-b border-line px-3 py-2 ">
                     <div className="min-w-0">
-                      <div className="text-[12px] font-semibold text-zinc-800 dark:text-zinc-100">{t('agentPicker.title')}</div>
+                      <div className="text-xs font-semibold text-fg ">{t('agentPicker.title')}</div>
                       <div
-                        className="truncate text-[10px] text-zinc-400 dark:text-zinc-500"
+                        className="truncate text-xs text-fg-muted "
                         onPointerEnter={(event) => showSelectorTooltip(event.currentTarget, t('agentPicker.title'), [t('agentPicker.hint')])}
                         onMouseEnter={(event) => showSelectorTooltip(event.currentTarget, t('agentPicker.title'), [t('agentPicker.hint')])}
                         onMouseOver={(event) => showSelectorTooltip(event.currentTarget, t('agentPicker.title'), [t('agentPicker.hint')])}
@@ -3654,16 +3655,16 @@ export default function SessionPage() {
                         {t('agentPicker.hint')}
                       </div>
                     </div>
-                    <div className="inline-flex shrink-0 items-center rounded-lg bg-zinc-100 p-0.5 text-[10px] dark:bg-black/15">
+                    <div className="inline-flex shrink-0 items-center rounded-control bg-subtle p-0.5 text-xs ">
                       {(['all', 'builtin', 'custom'] as AgentSourceFilter[]).map((filter) => (
                         <button
                           key={filter}
                           type="button"
                           onClick={() => setAgentSourceFilter(filter)}
-                          className={`rounded-md px-2 py-1 transition-colors ${
+                          className={`rounded-control px-2 py-1 transition-colors ${
                             agentSourceFilter === filter
-                              ? 'bg-white text-zinc-900 shadow-[0_1px_3px_rgba(22,27,34,0.08)] dark:bg-white/[0.12] dark:text-zinc-50'
-                              : 'text-zinc-500 hover:text-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-100'
+                              ? 'bg-surface text-fg shadow-overlay '
+                              : 'text-fg-muted hover:text-fg '
                           }`}
                         >
                           {t(`agentPicker.filter.${filter}`)}
@@ -3673,7 +3674,7 @@ export default function SessionPage() {
                   </div>
                   <div className="h-64 space-y-0.5 overflow-y-auto p-1.5">
                     {loadingAgents ? (
-                      <div className="p-3 text-center text-xs text-zinc-500">{t('loading')}</div>
+                      <div className="p-3 text-center text-xs text-fg-muted">{t('loading')}</div>
                     ) : filteredChatAgents.length > 0 ? (
                       filteredChatAgents.map((agent) => {
                         const displayName = getAgentDisplayName(agent, i18n.language);
@@ -3687,29 +3688,29 @@ export default function SessionPage() {
                               insertMention(agent.name);
                               closeMenu();
                             }}
-                            className={`w-full min-w-0 rounded-lg border px-2.5 py-2 text-left transition-colors ${
+                            className={`w-full min-w-0 rounded-control border px-2.5 py-2 text-left transition-colors ${
                               selectedAgent === agent.name
-                                ? 'border-blue-300 bg-blue-50 text-zinc-950 shadow-sm dark:border-blue-500/60 dark:bg-blue-500/15 dark:text-zinc-50'
-                                : 'border-transparent text-zinc-700 hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-white/[0.06] dark:hover:text-zinc-50'
+                                ? 'border-info bg-info-soft text-fg shadow-sm '
+                                : 'border-transparent text-fg-secondary hover:bg-hover '
                             }`}
                           >
                             <div className="flex min-w-0 items-center gap-2">
-                              <span className={`grid h-6 w-6 shrink-0 place-items-center rounded-md ${
+                              <span className={`grid h-6 w-6 shrink-0 place-items-center rounded-control ${
                                 selectedAgent === agent.name
-                                  ? 'bg-white text-zinc-700 shadow-[0_1px_3px_rgba(22,27,34,0.08)] dark:bg-white/[0.10] dark:text-white'
-                                  : 'bg-zinc-100 text-zinc-400 dark:bg-white/[0.05] dark:text-zinc-500'
+                                  ? 'bg-surface text-fg-secondary shadow-overlay '
+                                  : 'bg-subtle text-fg-muted '
                               }`}>
-                                <IconRobot aria-hidden="true" className="h-3 w-3" />
+                                <IconRobot aria-hidden="true" className="h-4 w-4" />
                               </span>
-                              <span className="min-w-0 flex-1 truncate text-xs font-medium text-zinc-900 dark:text-zinc-100">
+                              <span className="min-w-0 flex-1 truncate text-xs font-medium text-fg ">
                                 {displayName}
                               </span>
-                              <span className={`shrink-0 rounded px-1.5 py-0.5 text-[9px] font-medium ${
+                              <span className={`shrink-0 rounded-tag px-1.5 py-0.5 text-xs font-medium ${
                                 agent.mode === 'primary'
-                                  ? 'bg-zinc-100 text-zinc-600 dark:bg-white/[0.08] dark:text-zinc-300'
+                                  ? 'bg-subtle text-fg-secondary '
                                   : agent.native
-                                    ? 'bg-zinc-100 text-zinc-600 dark:bg-white/[0.08] dark:text-zinc-300'
-                                    : 'bg-teal-50 text-teal-600 dark:bg-teal-950/40 dark:text-teal-300'
+                                    ? 'bg-subtle text-fg-secondary '
+                                    : 'bg-data-soft text-data '
                               }`}>
                                 {agent.mode === 'primary'
                                   ? t('agentPicker.badge.primary')
@@ -3719,7 +3720,7 @@ export default function SessionPage() {
                               </span>
                               {primaryDesc && (
                                 <span
-                                  className="group relative rounded p-0.5 transition-colors hover:bg-zinc-200 dark:hover:bg-white/[0.08]"
+                                  className="group relative rounded-tag p-0.5 transition-colors hover:bg-hover "
                                   onMouseDown={(event) => { event.preventDefault(); event.stopPropagation(); }}
                                   onClick={(event) => { event.preventDefault(); event.stopPropagation(); }}
                                   onPointerEnter={(event) => showSelectorTooltip(event.currentTarget, displayName, [primaryDesc])}
@@ -3728,16 +3729,16 @@ export default function SessionPage() {
                                   onMouseLeave={() => setSelectorTooltip(null)}
                                   onPointerLeave={() => setSelectorTooltip(null)}
                                 >
-                                  <IconInfoCircle aria-hidden="true" className="h-3 w-3 text-zinc-300 transition-colors group-hover:text-zinc-500 dark:text-zinc-600 dark:group-hover:text-zinc-300" />
+                                  <IconInfoCircle aria-hidden="true" className="h-4 w-4 text-fg-placeholder transition-colors group-hover:text-fg-muted " />
                                 </span>
                               )}
-                              {selectedAgent === agent.name && <IconCheck aria-hidden="true" className="h-3.5 w-3.5 shrink-0 text-blue-600 dark:text-blue-300" />}
+                              {selectedAgent === agent.name && <IconCheck aria-hidden="true" className="h-4 w-4 shrink-0 text-info " />}
                             </div>
                           </button>
                         );
                       })
                     ) : (
-                      <div className="p-3 text-center text-xs text-zinc-500">{t('noAgents')}</div>
+                      <div className="p-3 text-center text-xs text-fg-muted">{t('noAgents')}</div>
                     )}
                   </div>
                 </div>
@@ -3803,7 +3804,7 @@ export default function SessionPage() {
                     setShowModelOptions(false);
                     setShowProjectOptions(false);
                   }}
-                  className="flex h-7 items-center gap-1.5 rounded-lg px-2 text-xs text-zinc-600 transition-colors hover:bg-zinc-200/60 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
+                  className="flex h-7 items-center gap-1.5 rounded-control px-2 text-xs text-fg-secondary transition-colors hover:bg-hover hover:text-fg "
                   title={t(`executionMode.options.${selectedExecutionMode}.description`)}
                   aria-label={t('executionMode.title')}
                   aria-haspopup="menu"
@@ -3813,7 +3814,7 @@ export default function SessionPage() {
                   <span className="font-medium">
                     {t(`executionMode.options.${selectedExecutionMode}.label`)}
                   </span>
-                  <IconChevronDown aria-hidden="true" className={`h-3 w-3 shrink-0 transition-transform ${showExecutionModeOptions ? 'rotate-180' : ''}`} />
+                  <IconChevronDown aria-hidden="true" className={`h-4 w-4 shrink-0 transition-transform ${showExecutionModeOptions ? 'rotate-180' : ''}`} />
                 </button>
                 {showExecutionModeOptions && (
                   <SessionComposerMenu
@@ -3854,18 +3855,18 @@ export default function SessionPage() {
                     setShowExecutionModeOptions(false);
                     setShowModelOptions(false);
                   }}
-                  className="flex h-7 max-w-[160px] min-w-0 items-center gap-1.5 rounded-lg px-2 text-xs text-[#5e646b] transition-colors hover:bg-black/[0.04] hover:text-[#202328] dark:text-[#b8c2cc] dark:hover:bg-white/[0.06] dark:hover:text-white"
+                  className="flex h-7 max-w-[160px] min-w-0 items-center gap-1.5 rounded-control px-2 text-xs text-fg-secondary transition-colors hover:bg-hover hover:text-fg "
                   title={t('projectPicker.title')}
                   aria-label={t('projectPicker.title')}
                   aria-expanded={showProjectOptions}
                 >
-                  <IconFolderCode aria-hidden="true" className="h-3 w-3 shrink-0" />
+                  <IconFolderCode aria-hidden="true" className="h-4 w-4 shrink-0" />
                   <span className="truncate font-medium">{selectedProjectContextLabel}</span>
-                  <IconChevronDown aria-hidden="true" className={`h-3 w-3 shrink-0 transition-transform ${showProjectOptions ? 'rotate-180' : ''}`} />
+                  <IconChevronDown aria-hidden="true" className={`h-4 w-4 shrink-0 transition-transform ${showProjectOptions ? 'rotate-180' : ''}`} />
                 </button>
                 {showProjectOptions && (
                   <div
-                    className="absolute bottom-full left-0 z-50 mb-2 grid w-64 gap-0.5 rounded-[10px] border border-black/[0.11] bg-[#fdfdfc] p-1 shadow-[0_8px_24px_rgba(22,27,34,0.10)] dark:border-white/[0.10] dark:bg-[#303842] dark:shadow-[0_12px_32px_rgba(15,18,22,0.35)]"
+                    className="absolute bottom-full left-0 z-50 mb-2 grid w-64 gap-0.5 rounded-card border border-line bg-surface p-1 shadow-overlay "
                     role="menu"
                     aria-label={t('projectPicker.title')}
                   >
@@ -3879,18 +3880,18 @@ export default function SessionPage() {
                           setSelectedProjectId(group.id);
                           setShowProjectOptions(false);
                         }}
-                        className={`flex h-8 w-full items-center gap-2 rounded-lg border px-2 text-left text-xs transition-colors ${
+                        className={`flex h-8 w-full items-center gap-2 rounded-control border px-2 text-left text-xs transition-colors ${
                           selectedProjectId === group.id
-                            ? 'border-blue-300 bg-blue-50 text-zinc-950 shadow-sm dark:border-blue-500/60 dark:bg-blue-500/15 dark:text-zinc-50'
-                            : 'border-transparent text-[#4e5359] hover:bg-black/[0.04] hover:text-[#202328] dark:text-[#c3ccd6] dark:hover:bg-white/[0.06] dark:hover:text-white'
+                            ? 'border-info bg-info-soft text-fg shadow-sm '
+                            : 'border-transparent text-fg-secondary hover:bg-hover hover:text-fg '
                         }`}
                       >
-                        <IconFolderCode aria-hidden="true" className={`h-3.5 w-3.5 shrink-0 ${selectedProjectId === group.id ? 'text-blue-600 dark:text-blue-300' : 'text-[#7b8087] dark:text-[#9aa7b4]'}`} />
+                        <IconFolderCode aria-hidden="true" className={`h-4 w-4 shrink-0 ${selectedProjectId === group.id ? 'text-info ' : 'text-fg-muted '}`} />
                         <span className="min-w-0 flex-1 truncate">{group.label}</span>
-                        {selectedProjectId === group.id && <IconCheck aria-hidden="true" className="h-3.5 w-3.5 shrink-0 text-blue-600 dark:text-blue-300" />}
+                        {selectedProjectId === group.id && <IconCheck aria-hidden="true" className="h-4 w-4 shrink-0 text-info " />}
                       </button>
                     ))}
-                    <div className="mx-2 my-0.5 border-t border-black/[0.07] dark:border-white/[0.08]" />
+                    <div className="mx-2 my-0.5 border-t border-line " />
                     <button
                       type="button"
                       role="menuitemradio"
@@ -3899,15 +3900,15 @@ export default function SessionPage() {
                         setSelectedProjectId(TASK_SESSION_GROUP_ID);
                         setShowProjectOptions(false);
                       }}
-                      className={`flex h-8 w-full items-center gap-2 rounded-lg border px-2 text-left text-xs transition-colors ${
+                      className={`flex h-8 w-full items-center gap-2 rounded-control border px-2 text-left text-xs transition-colors ${
                         selectedProjectId === TASK_SESSION_GROUP_ID
-                          ? 'border-blue-300 bg-blue-50 text-zinc-950 shadow-sm dark:border-blue-500/60 dark:bg-blue-500/15 dark:text-zinc-50'
-                          : 'border-transparent text-[#4e5359] hover:bg-black/[0.04] hover:text-[#202328] dark:text-[#c3ccd6] dark:hover:bg-white/[0.06] dark:hover:text-white'
+                          ? 'border-info bg-info-soft text-fg shadow-sm '
+                          : 'border-transparent text-fg-secondary hover:bg-hover hover:text-fg '
                       }`}
                     >
-                      <IconX aria-hidden="true" className={`h-3.5 w-3.5 shrink-0 ${selectedProjectId === TASK_SESSION_GROUP_ID ? 'text-blue-600 dark:text-blue-300' : 'text-[#7b8087] dark:text-[#9aa7b4]'}`} />
+                      <IconX aria-hidden="true" className={`h-4 w-4 shrink-0 ${selectedProjectId === TASK_SESSION_GROUP_ID ? 'text-info ' : 'text-fg-muted '}`} />
                       <span className="min-w-0 flex-1 truncate">{t('projectPicker.none')}</span>
-                      {selectedProjectId === TASK_SESSION_GROUP_ID && <IconCheck aria-hidden="true" className="h-3.5 w-3.5 shrink-0 text-blue-600 dark:text-blue-300" />}
+                      {selectedProjectId === TASK_SESSION_GROUP_ID && <IconCheck aria-hidden="true" className="h-4 w-4 shrink-0 text-info " />}
                     </button>
                     <button
                       type="button"
@@ -3916,9 +3917,9 @@ export default function SessionPage() {
                         setShowProjectOptions(false);
                         handleOpenCreateProject();
                       }}
-                      className="flex h-8 w-full items-center gap-2 rounded-lg px-2 text-left text-xs text-[#4e5359] transition-colors hover:bg-black/[0.04] hover:text-[#202328] dark:text-[#c3ccd6] dark:hover:bg-white/[0.06] dark:hover:text-white"
+                      className="flex h-8 w-full items-center gap-2 rounded-control px-2 text-left text-xs text-fg-secondary transition-colors hover:bg-hover hover:text-fg "
                     >
-                      <IconFolderPlus aria-hidden="true" className="h-3.5 w-3.5 shrink-0 text-[#7b8087] dark:text-[#9aa7b4]" />
+                      <IconFolderPlus aria-hidden="true" className="h-4 w-4 shrink-0 text-fg-muted " />
                       <span>{t('projectPicker.create')}</span>
                     </button>
                   </div>
@@ -3939,7 +3940,7 @@ export default function SessionPage() {
                   setShowAgentOptions(false);
                 }}
                 disabled={loadingProviders || loadingEnabledModels || chatModelOptions.length === 0}
-                className="flex h-7 w-[132px] min-w-0 items-center gap-1.5 rounded-lg px-2 text-xs text-zinc-600 transition-colors hover:bg-zinc-200/60 hover:text-zinc-900 disabled:cursor-not-allowed disabled:opacity-50 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
+                className="flex h-7 w-[132px] min-w-0 items-center gap-1.5 rounded-control px-2 text-xs text-fg-secondary transition-colors hover:bg-hover hover:text-fg disabled:cursor-not-allowed disabled:bg-disabled disabled:text-fg-disabled "
                 title={selectedModelAuto
                   ? `${t('modelPicker.auto')}: ${autoStatusLabel}`
                   : selectedModelOption
@@ -3947,14 +3948,14 @@ export default function SessionPage() {
                     : t('modelPicker.empty')}
               >
                 {selectedModelAuto
-                  ? <IconSparkles aria-hidden="true" className="h-3 w-3 shrink-0" />
-                  : <IconCpu aria-hidden="true" className="h-3 w-3 shrink-0" />}
+                  ? <IconSparkles aria-hidden="true" className="h-4 w-4 shrink-0" />
+                  : <IconCpu aria-hidden="true" className="h-4 w-4 shrink-0" />}
                 <span className="truncate font-medium">
                   {selectedModelAuto
                     ? t('modelPicker.auto')
                     : selectedModelOption?.label ?? (loadingProviders || loadingEnabledModels ? t('loading') : t('modelPicker.empty'))}
                 </span>
-                <IconChevronDown aria-hidden="true" className={`h-3 w-3 shrink-0 transition-transform ${showModelOptions ? 'rotate-180' : ''}`} />
+                <IconChevronDown aria-hidden="true" className={`h-4 w-4 shrink-0 transition-transform ${showModelOptions ? 'rotate-180' : ''}`} />
               </button>
               {showModelOptions && (
                 <SessionComposerMenu
@@ -3969,7 +3970,7 @@ export default function SessionPage() {
                   )}
                   contentClassName="p-1.5"
                   footer={(
-                    <div className="border-t border-zinc-100 p-1.5 dark:border-zinc-800">
+                    <div className="border-t border-line p-1.5 ">
                       <button
                         type="button"
                         onClick={() => {
@@ -3977,37 +3978,37 @@ export default function SessionPage() {
                           setSelectorTooltip(null);
                           navigate('/models');
                         }}
-                        className="flex w-full items-center justify-center gap-1.5 rounded-md px-2 py-1.5 text-xs font-medium text-zinc-600 transition-colors hover:bg-zinc-50 hover:text-zinc-900 dark:text-zinc-300 dark:hover:bg-zinc-800 dark:hover:text-zinc-50"
+                        className="flex w-full items-center justify-center gap-1.5 rounded-control px-2 py-1.5 text-xs font-medium text-fg-secondary transition-colors hover:bg-hover hover:text-fg "
                       >
-                        <IconPlus aria-hidden="true" className="h-3 w-3" />
+                        <IconPlus aria-hidden="true" className="h-4 w-4" />
                         {t('modelPicker.addModel')}
                       </button>
                     </div>
                   )}
                 >
                     {loadingProviders || loadingEnabledModels ? (
-                      <div className="p-3 text-center text-xs text-zinc-500">{t('loading')}</div>
+                      <div className="p-3 text-center text-xs text-fg-muted">{t('loading')}</div>
                     ) : (
                       <>
-                        <div className="mb-1 border-b border-zinc-100 pb-1.5 dark:border-zinc-800">
+                        <div className="mb-1 border-b border-line pb-1.5 ">
                           <button
                             type="button"
                             onClick={() => void handleSelectAutoModel()}
                             title={`${t('modelPicker.auto')}\n${autoStatusLabel}`}
                             disabled={!canSelectAuto}
-                            className={`w-full rounded-md border px-2 py-1.5 text-left transition-colors disabled:cursor-not-allowed disabled:opacity-45 ${
+                            className={`w-full rounded-control border px-2 py-1.5 text-left transition-colors disabled:cursor-not-allowed disabled:bg-disabled disabled:text-fg-disabled ${
                               selectedModelAuto
-                                ? 'border-blue-300 bg-blue-50 text-zinc-950 shadow-sm dark:border-blue-500/60 dark:bg-blue-500/15 dark:text-zinc-50'
-                                : 'border-transparent text-zinc-700 hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-zinc-800 dark:hover:text-zinc-50'
+                                ? 'border-info bg-info-soft text-fg shadow-sm '
+                                : 'border-transparent text-fg-secondary hover:bg-hover '
                             }`}
                           >
                             <div className="flex min-w-0 items-center gap-2">
-                              <IconSparkles aria-hidden="true" className={`h-3 w-3 shrink-0 ${selectedModelAuto ? 'text-zinc-600 dark:text-zinc-200' : 'text-zinc-400 dark:text-zinc-500'}`} />
-                              <span className="min-w-0 flex-1 truncate text-xs font-medium text-zinc-900 dark:text-zinc-100">
+                              <IconSparkles aria-hidden="true" className={`h-4 w-4 shrink-0 ${selectedModelAuto ? 'text-fg-secondary ' : 'text-fg-muted '}`} />
+                              <span className="min-w-0 flex-1 truncate text-xs font-medium text-fg ">
                                 {t('modelPicker.auto')}
                               </span>
                               <span
-                                className="group relative rounded p-0.5 transition-colors hover:bg-zinc-200 dark:hover:bg-zinc-700"
+                                className="group relative rounded-tag p-0.5 transition-colors hover:bg-hover "
                                 onMouseDown={(event) => { event.preventDefault(); event.stopPropagation(); }}
                                 onClick={(event) => { event.preventDefault(); event.stopPropagation(); }}
                                 onPointerEnter={(event) => showSelectorTooltip(event.currentTarget, t('modelPicker.auto'), [autoStatusLabel])}
@@ -4016,17 +4017,17 @@ export default function SessionPage() {
                                 onMouseLeave={() => setSelectorTooltip(null)}
                                 onPointerLeave={() => setSelectorTooltip(null)}
                               >
-                                <IconInfoCircle aria-hidden="true" className="h-3 w-3 text-zinc-300 transition-colors group-hover:text-zinc-500 dark:text-zinc-600 dark:group-hover:text-zinc-300" />
+                                <IconInfoCircle aria-hidden="true" className="h-4 w-4 text-fg-placeholder transition-colors group-hover:text-fg-muted " />
                               </span>
-                              <IconCheck aria-hidden="true" className={`h-3.5 w-3.5 shrink-0 text-blue-600 dark:text-blue-300 ${selectedModelAuto ? '' : 'invisible'}`} />
+                              <IconCheck aria-hidden="true" className={`h-4 w-4 shrink-0 text-info ${selectedModelAuto ? '' : 'invisible'}`} />
                             </div>
                           </button>
                         </div>
                         {groupedChatModelOptions.length > 0 ? groupedChatModelOptions.map((group) => (
                         <div key={group.providerID} className="py-1 first:pt-0 last:pb-0">
-                          <div className="sticky top-0 z-10 flex items-center justify-between gap-2 bg-white/95 px-1.5 py-1 text-[10px] font-semibold text-zinc-500 backdrop-blur dark:bg-zinc-900/95 dark:text-zinc-400">
+                          <div className="sticky top-0 z-10 flex items-center justify-between gap-2 bg-surface px-1.5 py-1 text-xs font-semibold text-fg-muted backdrop-blur ">
                             <span className="min-w-0 truncate" title={group.providerName}>{group.providerName}</span>
-                            <span className="shrink-0 rounded bg-zinc-50 px-1.5 py-0.5 text-[9px] text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400">
+                            <span className="shrink-0 rounded-tag bg-subtle px-1.5 py-0.5 text-xs text-fg-muted ">
                               {t('modelPicker.count', { count: group.models.length })}
                             </span>
                           </div>
@@ -4037,23 +4038,23 @@ export default function SessionPage() {
                                 type="button"
                                 onClick={() => void handleSelectModel(option)}
                                 title={`${option.label}\n${option.providerName} / ${option.modelID}\n${option.pricingLabel}\n${option.contextLabel}`}
-                                className={`w-full rounded-md border px-2 py-1.5 text-left transition-colors ${
+                                className={`w-full rounded-control border px-2 py-1.5 text-left transition-colors ${
                                   selectedModelOption?.key === option.key
-                                    ? 'border-blue-300 bg-blue-50 text-zinc-950 shadow-sm dark:border-blue-500/60 dark:bg-blue-500/15 dark:text-zinc-50'
-                                    : 'border-transparent text-zinc-700 hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-zinc-800 dark:hover:text-zinc-50'
+                                    ? 'border-info bg-info-soft text-fg shadow-sm '
+                                    : 'border-transparent text-fg-secondary hover:bg-hover '
                                 }`}
                               >
                                 <div className="flex min-w-0 items-center gap-2">
-                                  <IconCpu aria-hidden="true" className={`h-3 w-3 shrink-0 ${selectedModelOption?.key === option.key ? 'text-zinc-600 dark:text-zinc-200' : 'text-zinc-400 dark:text-zinc-500'}`} />
-                                  <span className="min-w-0 flex-1 truncate text-xs font-medium text-zinc-900 dark:text-zinc-100">{option.label}</span>
+                                  <IconCpu aria-hidden="true" className={`h-4 w-4 shrink-0 ${selectedModelOption?.key === option.key ? 'text-fg-secondary ' : 'text-fg-muted '}`} />
+                                  <span className="min-w-0 flex-1 truncate text-xs font-medium text-fg ">{option.label}</span>
                                   {option.supportsVision === true && (
-                                    <span className="shrink-0 rounded bg-zinc-100 px-1.5 py-0.5 text-[9px] font-medium text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">
+                                    <span className="shrink-0 rounded-tag bg-subtle px-1.5 py-0.5 text-xs font-medium text-fg-secondary ">
                                       {t('modelPicker.vision')}
                                     </span>
                                   )}
                                   <div className="ml-auto flex shrink-0 items-center gap-1">
                                     <span
-                                      className="group relative rounded p-0.5 transition-colors hover:bg-zinc-200 dark:hover:bg-zinc-700"
+                                      className="group relative rounded-tag p-0.5 transition-colors hover:bg-hover "
                                       onMouseDown={(event) => { event.preventDefault(); event.stopPropagation(); }}
                                       onClick={(event) => { event.preventDefault(); event.stopPropagation(); }}
                                       onPointerEnter={(event) => showSelectorTooltip(event.currentTarget, option.label, [option.pricingLabel, option.contextLabel])}
@@ -4062,17 +4063,17 @@ export default function SessionPage() {
                                       onMouseLeave={() => setSelectorTooltip(null)}
                                       onPointerLeave={() => setSelectorTooltip(null)}
                                     >
-                                      <IconInfoCircle aria-hidden="true" className="h-3 w-3 text-zinc-300 transition-colors group-hover:text-zinc-500 dark:text-zinc-600 dark:group-hover:text-zinc-300" />
+                                      <IconInfoCircle aria-hidden="true" className="h-4 w-4 text-fg-placeholder transition-colors group-hover:text-fg-muted " />
                                     </span>
                                   </div>
-                                  <IconCheck aria-hidden="true" className={`h-3.5 w-3.5 shrink-0 text-blue-600 dark:text-blue-300 ${selectedModelOption?.key === option.key ? '' : 'invisible'}`} />
+                                  <IconCheck aria-hidden="true" className={`h-4 w-4 shrink-0 text-info ${selectedModelOption?.key === option.key ? '' : 'invisible'}`} />
                                 </div>
                               </button>
                             ))}
                           </div>
                         </div>
                         )) : (
-                          <div className="p-3 text-center text-xs text-zinc-500">{t('modelPicker.empty')}</div>
+                          <div className="p-3 text-center text-xs text-fg-muted">{t('modelPicker.empty')}</div>
                         )}
                       </>
                     )}
@@ -4084,14 +4085,14 @@ export default function SessionPage() {
                   <button
                     type="button"
                     onClick={() => setShowPermissionModeOptions((open) => !open)}
-                    className="flex h-7 items-center gap-1.5 rounded-lg px-2 text-xs text-zinc-600 transition-colors hover:bg-zinc-200/60 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
+                    className="flex h-7 items-center gap-1.5 rounded-control px-2 text-xs text-fg-secondary transition-colors hover:bg-hover hover:text-fg "
                     title={t('permissionMode.executionControlTitle')}
                   >
-                    <IconShield aria-hidden="true" className="h-3 w-3 shrink-0" />
+                    <IconShield aria-hidden="true" className="h-4 w-4 shrink-0" />
                     <span className="max-w-[116px] truncate font-medium">
                       {permissionModeLabels[currentPermissionMode]}
                     </span>
-                    <IconChevronDown aria-hidden="true" className={`h-3 w-3 shrink-0 transition-transform ${showPermissionModeOptions ? 'rotate-180' : ''}`} />
+                    <IconChevronDown aria-hidden="true" className={`h-4 w-4 shrink-0 transition-transform ${showPermissionModeOptions ? 'rotate-180' : ''}`} />
                   </button>
                   {showPermissionModeOptions && (
                     <SessionComposerMenu
@@ -4103,7 +4104,7 @@ export default function SessionPage() {
                       <section>
                         <div className="flex min-w-0 items-center justify-between gap-3 px-2.5 py-1.5">
                           <div
-                            className="min-w-0 truncate text-xs font-semibold text-zinc-500 dark:text-zinc-400"
+                            className="min-w-0 truncate text-xs font-semibold text-fg-muted "
                             title={t('permissionMode.runtimeTitle', '平台开发模式')}
                           >
                             {t('permissionMode.runtimeTitle', '平台开发模式')}
@@ -4114,7 +4115,7 @@ export default function SessionPage() {
                               setShowPermissionModeOptions(false);
                               navigate('/settings/security-config');
                             }}
-                            className="shrink-0 whitespace-nowrap text-xs font-medium text-blue-600 hover:underline dark:text-blue-400"
+                            className="shrink-0 whitespace-nowrap text-xs font-medium text-info hover:underline "
                           >
                             {t('permissionMode.viewDetails')}
                           </button>
@@ -4134,9 +4135,9 @@ export default function SessionPage() {
                           ))}
                         </div>
                       </section>
-                      <section className="border-t border-zinc-100 pt-1.5 dark:border-zinc-800">
+                      <section className="border-t border-line pt-1.5 ">
                         <div
-                          className="truncate px-2.5 py-1.5 text-xs font-semibold text-zinc-500 dark:text-zinc-400"
+                          className="truncate px-2.5 py-1.5 text-xs font-semibold text-fg-muted "
                           title={t('permissionMode.networkTitle', '网络访问模式')}
                         >
                           {t('permissionMode.networkTitle', '网络访问模式')}
@@ -4156,9 +4157,9 @@ export default function SessionPage() {
                           ))}
                         </div>
                       </section>
-                      <section className="border-t border-zinc-100 pt-1.5 dark:border-zinc-800">
+                      <section className="border-t border-line pt-1.5 ">
                         <div
-                          className="truncate px-2.5 py-1.5 text-xs font-semibold text-zinc-500 dark:text-zinc-400"
+                          className="truncate px-2.5 py-1.5 text-xs font-semibold text-fg-muted "
                           title={t('permissionMode.title')}
                         >
                           {t('permissionMode.title')}
@@ -4192,10 +4193,10 @@ export default function SessionPage() {
               role="separator"
               aria-orientation="vertical"
               onPointerDown={handleResizeContextPanel}
-              className="hidden w-1 flex-shrink-0 cursor-col-resize bg-zinc-200/70 transition-colors hover:bg-violet-300 lg:block dark:bg-zinc-700 dark:hover:bg-violet-500"
+              className="hidden w-1 flex-shrink-0 cursor-col-resize bg-selected transition-colors hover:bg-ai lg:block "
             />
             <aside
-              className="fixed inset-0 z-50 h-full w-screen flex-shrink-0 overflow-hidden border-l border-zinc-200 lg:static lg:z-auto lg:w-[var(--session-context-width)] dark:border-zinc-700"
+              className="fixed inset-0 z-50 h-full w-screen flex-shrink-0 overflow-hidden border-l border-line lg:static lg:z-auto lg:w-[var(--session-context-width)] "
               style={{ '--session-context-width': `${contextPanelWidth}px` } as React.CSSProperties}
             >
               <SessionContextPanel
@@ -4222,15 +4223,15 @@ export default function SessionPage() {
       </div>
 
       {projectDialogMode && (
-        <div className="fixed inset-0 z-[70] flex items-center justify-center bg-[#1e23283d] px-6 backdrop-blur-[2px]">
-          <div className="w-full max-w-[420px] overflow-hidden rounded-2xl border border-black/[0.11] bg-[#fdfdfc] shadow-[0_8px_24px_rgba(22,27,34,0.10)] dark:border-white/[0.10] dark:bg-[#303842] dark:shadow-[0_12px_32px_rgba(15,18,22,0.35)]">
-            <div className="border-b border-black/[0.07] px-4 py-[13px] dark:border-white/[0.08]">
-              <h3 className="text-sm font-semibold text-[#202328] dark:text-[#f0f3f7]">
+        <PageDialog onClose={projectSubmitting ? undefined : handleCloseProjectDialog} className="fixed inset-0 z-[70] flex items-center justify-center bg-overlay-backdrop px-6 backdrop-blur-[2px]">
+          <div className="w-full max-w-modal overflow-hidden rounded-card border border-line bg-surface shadow-overlay ">
+            <div className="border-b border-line px-4 py-[13px] ">
+              <h3 className="text-sm font-semibold text-fg ">
                 {projectDialogMode === 'create' ? t('projectDialog.createTitle') : t('projectDialog.renameTitle')}
               </h3>
             </div>
-            <div className="space-y-3 px-4 py-4 text-[13px] text-[#676c73] dark:text-[#b8c2cc]">
-              <label className="block text-[11px] font-semibold text-[#777c82] dark:text-[#9aa7b4]" htmlFor="session-project-name">
+            <div className="space-y-3 px-4 py-4 text-xs text-fg-secondary ">
+              <label className="block text-xs font-semibold text-fg-muted " htmlFor="session-project-name">
                 {t('projectDialog.nameLabel')}
               </label>
               <input
@@ -4253,19 +4254,16 @@ export default function SessionPage() {
                     }
                     void handleSubmitProject();
                   }
-                  if (event.key === 'Escape') {
-                    event.preventDefault();
-                    handleCloseProjectDialog();
-                  }
+
                 }}
                 disabled={projectSubmitting}
                 placeholder={t('projectDialog.namePlaceholder')}
-                className="h-9 w-full rounded-[10px] border border-black/[0.11] bg-white px-2.5 text-[13px] text-[#202328] outline-none transition-colors placeholder:text-[#969aa0] focus:border-[#4f92e8] dark:border-white/[0.10] dark:bg-[#252c35] dark:text-white dark:placeholder:text-[#8f9ba8]"
+                className="ui-input h-9 w-full rounded-card border border-line bg-surface px-2.5 text-xs text-fg transition-colors placeholder:text-fg focus:border-info"
                 autoFocus
               />
               {projectDialogMode === 'create' && (
                 <>
-                  <label className="block pt-1 text-[11px] font-semibold text-[#777c82] dark:text-[#9aa7b4]" htmlFor="session-project-worktree">
+                  <label className="block pt-1 text-xs font-semibold text-fg-muted " htmlFor="session-project-worktree">
                     {t('projectDialog.folderLabel')}
                   </label>
                   <div className="flex gap-2">
@@ -4283,51 +4281,51 @@ export default function SessionPage() {
                       }}
                       disabled={projectSubmitting}
                       placeholder={t('projectDialog.folderPlaceholder')}
-                      className="h-9 min-w-0 flex-1 rounded-[10px] border border-black/[0.11] bg-white px-2.5 font-mono text-xs text-[#202328] outline-none transition-colors placeholder:text-[#969aa0] focus:border-[#4f92e8] dark:border-white/[0.10] dark:bg-[#252c35] dark:text-white dark:placeholder:text-[#8f9ba8]"
+                      className="ui-input h-9 min-w-0 flex-1 rounded-card border border-line bg-surface px-2.5 font-mono text-xs text-fg transition-colors placeholder:text-fg focus:border-info"
                     />
                     <button
                       type="button"
                       onClick={() => void loadFolderBrowser(projectWorktreeValue)}
                       disabled={projectSubmitting || folderBrowserLoading}
-                      className="inline-flex h-9 shrink-0 items-center gap-1.5 rounded-[10px] border border-black/[0.11] px-3 text-xs font-medium text-[#60656b] transition-colors hover:bg-black/[0.04] disabled:cursor-not-allowed disabled:opacity-50 dark:border-white/[0.10] dark:text-[#c3ccd6] dark:hover:bg-white/[0.06]"
+                      className="inline-flex h-9 shrink-0 items-center gap-1.5 rounded-card border border-line px-3 text-xs font-medium text-fg-secondary transition-colors hover:bg-hover disabled:cursor-not-allowed disabled:bg-disabled disabled:text-fg-disabled "
                     >
-                      {folderBrowserLoading ? <IconLoader2 aria-hidden="true" className="h-3.5 w-3.5 animate-spin" /> : <IconFolderOpen aria-hidden="true" className="h-3.5 w-3.5" />}
+                      {folderBrowserLoading ? <IconLoader2 aria-hidden="true" className="h-4 w-4 animate-spin" /> : <IconFolderOpen aria-hidden="true" className="h-4 w-4" />}
                       {t('projectDialog.chooseFolder')}
                     </button>
                   </div>
                   {folderBrowser && (
-                    <div className="overflow-hidden rounded-lg border border-zinc-200 dark:border-zinc-800">
-                      <div className="flex items-center gap-1 border-b border-zinc-100 bg-zinc-50 px-2 py-1.5 dark:border-zinc-800 dark:bg-zinc-900">
+                    <div className="overflow-hidden rounded-control border border-line ">
+                      <div className="flex items-center gap-1 border-b border-line bg-subtle px-2 py-1.5 ">
                         <button
                           type="button"
                           onClick={() => folderBrowser.parent && void loadFolderBrowser(folderBrowser.parent)}
                           disabled={!folderBrowser.parent || folderBrowserLoading}
-                          className="rounded p-1 text-zinc-500 hover:bg-zinc-200 disabled:opacity-30 dark:hover:bg-zinc-800"
+                          className="ui-btn-icon inline-flex items-center justify-center rounded-control p-1 text-fg-muted hover:bg-hover disabled:bg-disabled disabled:text-fg-disabled "
                           title={t('projectDialog.parentFolder')}
                         >
-                          <IconArrowUp aria-hidden="true" className="h-3.5 w-3.5" />
+                          <IconArrowUp aria-hidden="true" className="h-4 w-4" />
                         </button>
-                        <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-zinc-500" title={folderBrowser.path}>
+                        <span className="min-w-0 flex-1 truncate font-mono text-xs text-fg-muted" title={folderBrowser.path}>
                           {folderBrowser.path}
                         </span>
                         <button
                           type="button"
                           onClick={() => handleSelectProjectFolder(folderBrowser.path)}
-                          className="rounded bg-zinc-900 px-2 py-1 text-[11px] font-medium text-white hover:bg-zinc-700 dark:bg-zinc-100 dark:text-zinc-950 dark:hover:bg-zinc-300"
+                          className="rounded-tag bg-subtle px-2 py-1 text-xs font-medium text-fg hover:bg-hover "
                         >
                           {t('projectDialog.selectCurrentFolder')}
                         </button>
                       </div>
-                      <div className="flex gap-1 overflow-x-auto border-b border-zinc-100 px-2 py-1 dark:border-zinc-800">
+                      <div className="flex gap-1 overflow-x-auto border-b border-line px-2 py-1 ">
                         {folderBrowser.roots.map((root) => (
                           <button
                             key={root.path}
                             type="button"
                             onClick={() => void loadFolderBrowser(root.path)}
-                            className="inline-flex shrink-0 items-center gap-1 rounded px-1.5 py-1 text-[11px] text-zinc-500 hover:bg-zinc-100 hover:text-zinc-800 dark:hover:bg-zinc-900 dark:hover:text-zinc-200"
+                            className="inline-flex shrink-0 items-center gap-1 rounded-tag px-1.5 py-1 text-xs text-fg-muted hover:bg-hover hover:text-fg "
                             title={root.path}
                           >
-                            <IconServer aria-hidden="true" className="h-3 w-3" />
+                            <IconServer aria-hidden="true" className="h-4 w-4" />
                             {root.name}
                           </button>
                         ))}
@@ -4338,14 +4336,14 @@ export default function SessionPage() {
                             key={entry.path}
                             type="button"
                             onClick={() => void loadFolderBrowser(entry.path)}
-                            className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs text-zinc-700 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-900"
+                            className="flex w-full items-center gap-2 rounded-tag px-2 py-1.5 text-left text-xs text-fg-secondary hover:bg-hover "
                             title={entry.path}
                           >
-                            <IconFolderOpen aria-hidden="true" className="h-3.5 w-3.5 shrink-0 text-zinc-400" />
+                            <IconFolderOpen aria-hidden="true" className="h-4 w-4 shrink-0 text-fg-muted" />
                             <span className="truncate">{entry.name}</span>
                           </button>
                         )) : (
-                          <div className="px-2 py-5 text-center text-xs text-zinc-400">
+                          <div className="px-2 py-5 text-center text-xs text-fg-muted">
                             {t('projectDialog.noSubfolders')}
                           </div>
                         )}
@@ -4355,12 +4353,12 @@ export default function SessionPage() {
                 </>
               )}
             </div>
-            <div className="flex items-center justify-end gap-2 border-t border-black/[0.07] px-4 py-[13px] dark:border-white/[0.08]">
+            <div className="flex items-center justify-end gap-2 border-t border-line px-4 py-[13px] ">
               <button
                 type="button"
                 onClick={handleCloseProjectDialog}
                 disabled={projectSubmitting}
-                className="h-8 min-w-[66px] rounded-[10px] bg-[#f1f1ef] px-3 text-xs text-[#5d6269] transition-colors hover:bg-[#e8e8e5] disabled:cursor-not-allowed disabled:opacity-50 dark:bg-white/[0.07] dark:text-[#c3ccd6] dark:hover:bg-white/[0.10]"
+                className="h-8 min-w-[66px] rounded-card bg-subtle px-3 text-xs text-fg-secondary transition-colors hover:bg-hover disabled:cursor-not-allowed disabled:bg-disabled disabled:text-fg-disabled "
               >
                 {t('cancel')}
               </button>
@@ -4368,32 +4366,32 @@ export default function SessionPage() {
                 type="button"
                 onClick={() => void handleSubmitProject()}
                 disabled={projectSubmitting}
-                className="inline-flex h-8 min-w-[66px] items-center justify-center rounded-[10px] bg-[#24272b] px-3 text-xs font-medium text-white transition-colors hover:bg-[#35393e] disabled:cursor-not-allowed disabled:opacity-60 dark:bg-[#eef2f6] dark:text-[#252c35] dark:hover:bg-white"
+                className="inline-flex h-8 min-w-[66px] items-center justify-center rounded-card bg-action px-3 text-xs font-medium text-action-fg transition-colors hover:bg-action-hover disabled:cursor-not-allowed disabled:bg-disabled disabled:text-fg-disabled "
               >
                 {projectSubmitting ? <IconLoader2 aria-hidden="true" className="h-4 w-4 animate-spin" /> : t('save')}
               </button>
             </div>
           </div>
-        </div>
+        </PageDialog>
       )}
 
       {projectPendingDelete && (
-        <div className="fixed inset-0 z-[70] flex items-center justify-center bg-[#1e23283d] px-6 backdrop-blur-[2px]">
-          <div className="w-full max-w-[420px] overflow-hidden rounded-2xl border border-black/[0.11] bg-[#fdfdfc] shadow-[0_8px_24px_rgba(22,27,34,0.10)] dark:border-white/[0.10] dark:bg-[#303842] dark:shadow-[0_12px_32px_rgba(15,18,22,0.35)]">
-            <div className="border-b border-black/[0.07] px-4 py-[13px] dark:border-white/[0.08]">
-              <h3 className="text-sm font-semibold text-[#202328] dark:text-[#f0f3f7]">
+        <PageDialog onClose={projectDeleting ? undefined : () => setProjectPendingDelete(null)} className="fixed inset-0 z-[70] flex items-center justify-center bg-overlay-backdrop px-6 backdrop-blur-[2px]">
+          <div className="w-full max-w-modal overflow-hidden rounded-card border border-line bg-surface shadow-overlay ">
+            <div className="border-b border-line px-4 py-[13px] ">
+              <h3 className="text-sm font-semibold text-fg ">
                 {t('projectDialog.deleteTitle')}
               </h3>
             </div>
-            <div className="px-4 py-4 text-[13px] leading-6 text-[#676c73] dark:text-[#b8c2cc]">
+            <div className="px-4 py-4 text-xs text-fg-secondary ">
               {t('projectDialog.deleteDescription', { project: projectPendingDelete.label })}
             </div>
-            <div className="flex items-center justify-end gap-2 border-t border-black/[0.07] px-4 py-[13px] dark:border-white/[0.08]">
+            <div className="flex items-center justify-end gap-2 border-t border-line px-4 py-[13px] ">
               <button
                 type="button"
                 onClick={() => setProjectPendingDelete(null)}
                 disabled={projectDeleting}
-                className="h-8 min-w-[66px] rounded-[10px] bg-[#f1f1ef] px-3 text-xs text-[#5d6269] transition-colors hover:bg-[#e8e8e5] disabled:cursor-not-allowed disabled:opacity-50 dark:bg-white/[0.07] dark:text-[#c3ccd6] dark:hover:bg-white/[0.10]"
+                className="h-8 min-w-[66px] rounded-card bg-subtle px-3 text-xs text-fg-secondary transition-colors hover:bg-hover disabled:cursor-not-allowed disabled:bg-disabled disabled:text-fg-disabled "
               >
                 {t('cancel')}
               </button>
@@ -4401,29 +4399,29 @@ export default function SessionPage() {
                 type="button"
                 onClick={() => void handleDeleteProject()}
                 disabled={projectDeleting}
-                className="inline-flex h-8 min-w-[66px] items-center justify-center gap-1.5 rounded-[10px] bg-[#dc3f39] px-3 text-xs font-medium text-white transition-colors hover:bg-[#c9342f] disabled:cursor-not-allowed disabled:opacity-60"
+                className="inline-flex h-8 min-w-[66px] items-center justify-center gap-1.5 rounded-control bg-action-danger px-3 text-xs font-medium text-action-fg transition-colors hover:bg-action-hover disabled:cursor-not-allowed disabled:bg-disabled disabled:text-fg-disabled"
               >
                 {projectDeleting ? <IconLoader2 aria-hidden="true" className="h-4 w-4 animate-spin" /> : <IconTrash aria-hidden="true" className="h-4 w-4" />}
                 {t('projectDialog.confirmDelete')}
               </button>
             </div>
           </div>
-        </div>
+        </PageDialog>
       )}
 
       {selectorTooltip && (
         <div
           role="tooltip"
-          className="pointer-events-none fixed z-[80] w-56 -translate-x-full -translate-y-1/2 rounded-lg border border-zinc-200 bg-white px-3 py-2 text-[11px] leading-relaxed text-zinc-700 shadow-md dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-300 dark:shadow-xl dark:shadow-black/30"
+          className="pointer-events-none fixed z-[80] w-56 -translate-x-full -translate-y-1/2 rounded-control border border-line bg-surface px-3 py-2 text-xs text-fg-secondary shadow-md "
           style={{ left: selectorTooltip.x, top: selectorTooltip.y }}
         >
-          <div className="mb-0.5 font-semibold text-zinc-800 dark:text-zinc-100">{selectorTooltip.title}</div>
+          <div className="mb-0.5 font-semibold text-fg ">{selectorTooltip.title}</div>
           {selectorTooltip.lines.map((line, index) => (
-            <div key={`${selectorTooltip.title}-${index}`} className={index === 0 ? '' : 'mt-1 break-all text-zinc-500 dark:text-zinc-400'}>
+            <div key={`${selectorTooltip.title}-${index}`} className={index === 0 ? '' : 'mt-1 break-all text-fg-muted '}>
               {line}
             </div>
           ))}
-          <div className="absolute left-full top-1/2 -translate-y-1/2 border-4 border-transparent border-l-zinc-200 dark:border-l-zinc-800" />
+          <div className="absolute left-full top-1/2 -translate-y-1/2 border-4 border-transparent border-l-line " />
         </div>
       )}
 
@@ -4457,7 +4455,7 @@ export default function SessionPage() {
           : menuAnchor.top;
         return (
           <div
-            className={`fixed z-50 grid gap-0.5 overflow-hidden rounded-[10px] border border-black/[0.11] bg-[#fdfdfc] p-1 shadow-[0_8px_24px_rgba(22,27,34,0.10)] dark:border-white/[0.10] dark:bg-[#303842] dark:shadow-[0_12px_32px_rgba(15,18,22,0.35)] ${
+            className={`fixed z-50 grid gap-0.5 overflow-hidden rounded-card border border-line bg-surface p-1 shadow-overlay ${
               showMovePicker ? 'w-[220px]' : 'w-[132px]'
             }`}
             style={{
@@ -4470,22 +4468,22 @@ export default function SessionPage() {
           >
             {showMovePicker ? (
               <>
-                <div className="flex h-8 items-center gap-1 border-b border-black/[0.07] px-1 pb-1 dark:border-white/[0.08]">
+                <div className="flex h-8 items-center gap-1 border-b border-line px-1 pb-1 ">
                   <button
                     type="button"
                     onClick={() => setMovePickerSessionId(null)}
-                    className="grid h-6 w-6 shrink-0 place-items-center rounded-md text-[#6f757c] transition-colors hover:bg-black/[0.05] hover:text-[#202328] dark:text-[#aeb8c3] dark:hover:bg-white/[0.07] dark:hover:text-white"
+                    className="ui-btn-icon inline-flex items-center justify-center grid   shrink-0 place-items-center rounded-control text-fg-muted transition-colors hover:bg-hover hover:text-fg "
                     aria-label={t('moveToProjectBack')}
                   >
-                    <IconChevronLeft aria-hidden="true" className="h-3.5 w-3.5" />
+                    <IconChevronLeft aria-hidden="true" className="h-4 w-4" />
                   </button>
-                  <span className="min-w-0 truncate text-xs font-semibold text-[#34383d] dark:text-[#e3e8ee]">
+                  <span className="min-w-0 truncate text-xs font-semibold text-fg ">
                     {t('moveToProjectTitle')}
                   </span>
                 </div>
                 <div className="session-sidebar-scrollbar min-h-0 max-h-56 overflow-y-auto py-0.5" role="menu" aria-label={t('moveToProjectTitle')}>
                   {moveTargetProjects.length === 0 ? (
-                    <div className="px-2 py-3 text-center text-xs leading-5 text-[#858a91] dark:text-[#8f9ba8]">
+                    <div className="px-2 py-3 text-center text-xs text-fg-muted ">
                       {t('moveToProjectEmpty')}
                     </div>
                   ) : moveTargetProjects.map((project) => {
@@ -4502,12 +4500,12 @@ export default function SessionPage() {
                         onClick={() => void handleMoveSessionToProject(session.id, project)}
                         disabled={isCurrent || Boolean(movingSessionId)}
                         title={project.worktree}
-                        className="flex min-h-[34px] w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-xs text-[#4e5359] transition-colors hover:bg-black/[0.04] hover:text-[#202328] disabled:cursor-default disabled:opacity-60 dark:text-[#c3ccd6] dark:hover:bg-white/[0.06] dark:hover:text-white"
+                        className="flex min-h-[34px] w-full items-center gap-2 rounded-control px-2 py-1.5 text-left text-xs text-fg-secondary transition-colors hover:bg-hover hover:text-fg disabled:cursor-default disabled:bg-disabled disabled:text-fg-disabled "
                       >
-                        <IconFolderCode aria-hidden="true" className="h-3.5 w-3.5 shrink-0 text-[#7b8087] dark:text-[#9aa7b4]" />
+                        <IconFolderCode aria-hidden="true" className="h-4 w-4 shrink-0 text-fg-muted " />
                         <span className="min-w-0 flex-1 truncate">{getProjectLabel(project)}</span>
-                        {isCurrent && <IconCheck aria-hidden="true" className="h-3.5 w-3.5 shrink-0 text-blue-500" />}
-                        {!isCurrent && isMovingHere && <IconLoader2 aria-hidden="true" className="h-3.5 w-3.5 shrink-0 animate-spin text-blue-500" />}
+                        {isCurrent && <IconCheck aria-hidden="true" className="h-4 w-4 shrink-0 text-info" />}
+                        {!isCurrent && isMovingHere && <IconLoader2 aria-hidden="true" className="h-4 w-4 shrink-0 animate-spin text-info" />}
                       </button>
                     );
                   })}
@@ -4517,43 +4515,43 @@ export default function SessionPage() {
               <>
             <button
               onClick={(e) => { e.stopPropagation(); handleStartRename(session.id, session.title); setOpenMenuSessionId(null); setMenuAnchor(null); }}
-              className="flex h-[30px] w-full items-center gap-2 rounded-lg px-2 text-left text-xs text-[#4e5359] transition-colors hover:bg-black/[0.04] hover:text-[#202328] dark:text-[#c3ccd6] dark:hover:bg-white/[0.06] dark:hover:text-white"
+              className="flex h-[30px] w-full items-center gap-2 rounded-control px-2 text-left text-xs text-fg-secondary transition-colors hover:bg-hover hover:text-fg "
             >
-              <IconEdit aria-hidden="true" className="w-3.5 h-3.5" />
+              <IconEdit aria-hidden="true" className="w-4 h-4" />
               <span>{t('rename')}</span>
             </button>
             <button
               onClick={(e) => { e.stopPropagation(); void handleDownloadSession(session.id, session.title); setOpenMenuSessionId(null); setMenuAnchor(null); }}
               disabled={downloadingSessionId === session.id}
-              className="flex h-[30px] w-full items-center gap-2 rounded-lg px-2 text-left text-xs text-[#4e5359] transition-colors hover:bg-black/[0.04] hover:text-[#202328] disabled:cursor-not-allowed disabled:opacity-50 dark:text-[#c3ccd6] dark:hover:bg-white/[0.06] dark:hover:text-white"
+              className="flex h-[30px] w-full items-center gap-2 rounded-control px-2 text-left text-xs text-fg-secondary transition-colors hover:bg-hover hover:text-fg disabled:cursor-not-allowed disabled:bg-disabled disabled:text-fg-disabled "
             >
-              <IconDownload aria-hidden="true" className="w-3.5 h-3.5" />
+              <IconDownload aria-hidden="true" className="w-4 h-4" />
               <span>{t('downloadJson')}</span>
             </button>
             <button
               onClick={(e) => { e.stopPropagation(); setOpenMenuSessionId(null); setMenuAnchor(null); void handleShareSession(session.id, !session.isShared); }}
               disabled={session.canWrite === false}
-              className="flex h-[30px] w-full items-center gap-2 rounded-lg px-2 text-left text-xs text-[#4e5359] transition-colors hover:bg-black/[0.04] hover:text-[#202328] disabled:cursor-not-allowed disabled:opacity-50 dark:text-[#c3ccd6] dark:hover:bg-white/[0.06] dark:hover:text-white"
+              className="flex h-[30px] w-full items-center gap-2 rounded-control px-2 text-left text-xs text-fg-secondary transition-colors hover:bg-hover hover:text-fg disabled:cursor-not-allowed disabled:bg-disabled disabled:text-fg-disabled "
             >
-              <IconShare aria-hidden="true" className="w-3.5 h-3.5" />
+              <IconShare aria-hidden="true" className="w-4 h-4" />
               <span>{session.isShared ? t('unshareAction') : t('shareAction')}</span>
             </button>
             <button
               onClick={(e) => { e.stopPropagation(); setMovePickerSessionId(session.id); }}
               disabled={session.canWrite === false || runningSessionIds.has(session.id)}
               title={runningSessionIds.has(session.id) ? t('moveToProjectRunning') : undefined}
-              className="flex h-[30px] w-full items-center gap-2 rounded-lg px-2 text-left text-xs text-[#4e5359] transition-colors hover:bg-black/[0.04] hover:text-[#202328] disabled:cursor-not-allowed disabled:opacity-50 dark:text-[#c3ccd6] dark:hover:bg-white/[0.06] dark:hover:text-white"
+              className="flex h-[30px] w-full items-center gap-2 rounded-control px-2 text-left text-xs text-fg-secondary transition-colors hover:bg-hover hover:text-fg disabled:cursor-not-allowed disabled:bg-disabled disabled:text-fg-disabled "
             >
-              <IconFolderOpen aria-hidden="true" className="h-3.5 w-3.5" />
+              <IconFolderOpen aria-hidden="true" className="h-4 w-4" />
               <span className="truncate">{t('moveToProjectAction')}</span>
             </button>
-            <div className="mx-2 my-0.5 border-t border-black/[0.07] dark:border-white/[0.08]" />
+            <div className="mx-2 my-0.5 border-t border-line " />
             <button
               onClick={(e) => { e.stopPropagation(); setOpenMenuSessionId(null); setMenuAnchor(null); void handleArchiveSession(session.id); }}
               disabled={session.canDelete === false}
-              className="flex h-[30px] w-full items-center gap-2 rounded-lg px-2 text-left text-xs text-[#c33c36] transition-colors hover:bg-[#fff0ef] hover:text-[#a92520] disabled:cursor-not-allowed disabled:opacity-50 dark:text-red-300 dark:hover:bg-red-500/10 dark:hover:text-red-200"
+              className="flex h-[30px] w-full items-center gap-2 rounded-control px-2 text-left text-xs text-danger transition-colors hover:bg-danger-soft hover:text-danger disabled:cursor-not-allowed disabled:bg-disabled disabled:text-fg-disabled "
             >
-              <IconArchive aria-hidden="true" className="w-3.5 h-3.5" />
+              <IconArchive aria-hidden="true" className="w-4 h-4" />
               <span>{t('archiveAction')}</span>
             </button>
               </>
@@ -4579,37 +4577,37 @@ function WelcomeScreen({
   const { t } = useTranslation('session');
   return (
     <div className="w-full max-w-[660px] px-9 text-center">
-      <div className="mx-auto mb-5 flex h-16 w-16 items-center justify-center rounded-full bg-slate-800 text-white shadow-[0_3px_10px_rgba(30,41,59,0.10)] dark:bg-[#46515e]">
-        <IconSparkles aria-hidden="true" className="h-[30px] w-[30px]" stroke={1.7} />
+      <div className="mx-auto mb-5 flex h-16 w-16 items-center justify-center rounded-pill bg-subtle text-fg shadow-overlay ">
+        <IconSparkles aria-hidden="true" className="h-8 w-8" stroke={2} />
       </div>
-      <h3 className="text-[22px] font-semibold tracking-[-0.01em] text-[#1f2937] dark:text-[#f0f3f7]">{t('welcome.title')}</h3>
-      <p className="mt-3 text-sm leading-6 text-[#647084] dark:text-[#aeb9c5]">{t('welcome.description')}</p>
+      <h3 className="text-title-page font-semibold tracking-[-0.01em] text-fg ">{t('welcome.title')}</h3>
+      <p className="mt-3 text-sm text-fg-secondary ">{t('welcome.description')}</p>
 
       <div className="mt-6 flex flex-wrap justify-center gap-2.5">
         <button
           onClick={onAlertOperationsSetup}
           disabled={alertOperationsBusy}
-          className="inline-flex h-11 items-center gap-2.5 rounded-[10px] border border-black/[0.11] bg-zinc-50 px-4 text-sm font-semibold text-[#374151] transition-colors hover:border-[#c2c9d2] hover:bg-white hover:text-[#111827] disabled:cursor-not-allowed disabled:opacity-70 dark:border-white/[0.10] dark:bg-[#303842] dark:text-[#d7dee8] dark:hover:border-white/[0.18] dark:hover:bg-[#3a434e] dark:hover:text-white"
+          className="inline-flex h-11 items-center gap-2.5 rounded-card border border-line bg-subtle px-4 text-sm font-semibold text-fg-secondary transition-colors hover:border-line-control hover:bg-surface hover:text-fg disabled:cursor-not-allowed disabled:bg-disabled disabled:text-fg-disabled "
         >
           {alertOperationsBusy ? (
-            <IconLoader2 aria-hidden="true" className="h-[18px] w-[18px] animate-spin text-[#657489] dark:text-[#aeb9c5]" />
+            <IconLoader2 aria-hidden="true" className="h-5 w-5 animate-spin text-fg-secondary " />
           ) : (
-            <IconShield aria-hidden="true" className="h-[18px] w-[18px] text-[#657489] dark:text-[#aeb9c5]" />
+            <IconShield aria-hidden="true" className="h-5 w-5 text-fg-secondary " />
           )}
           <span>{t('welcome.alertOperations')}</span>
         </button>
         <button
           onClick={() => onSuggestion(t('welcome.threatHuntingSuggestion'))}
-          className="inline-flex h-11 items-center gap-2.5 rounded-[10px] border border-black/[0.11] bg-zinc-50 px-4 text-sm font-semibold text-[#374151] transition-colors hover:border-[#c2c9d2] hover:bg-white hover:text-[#111827] dark:border-white/[0.10] dark:bg-[#303842] dark:text-[#d7dee8] dark:hover:border-white/[0.18] dark:hover:bg-[#3a434e] dark:hover:text-white"
+          className="inline-flex h-11 items-center gap-2.5 rounded-card border border-line bg-subtle px-4 text-sm font-semibold text-fg-secondary transition-colors hover:border-line-control hover:bg-surface hover:text-fg "
         >
-          <IconSearch aria-hidden="true" className="h-[18px] w-[18px] text-[#f4511e]" />
+          <IconSearch aria-hidden="true" className="h-5 w-5 text-brand" />
           <span>{t('welcome.threatHunting')}</span>
         </button>
         <button
           onClick={() => onSuggestion(t('welcome.incidentResponseSuggestion'))}
-          className="inline-flex h-11 items-center gap-2.5 rounded-[10px] border border-black/[0.11] bg-zinc-50 px-4 text-sm font-semibold text-[#374151] transition-colors hover:border-[#c2c9d2] hover:bg-white hover:text-[#111827] dark:border-white/[0.10] dark:bg-[#303842] dark:text-[#d7dee8] dark:hover:border-white/[0.18] dark:hover:bg-[#3a434e] dark:hover:text-white"
+          className="inline-flex h-11 items-center gap-2.5 rounded-card border border-line bg-subtle px-4 text-sm font-semibold text-fg-secondary transition-colors hover:border-line-control hover:bg-surface hover:text-fg "
         >
-          <IconAlertTriangle aria-hidden="true" className="h-[18px] w-[18px] text-amber-500" />
+          <IconAlertTriangle aria-hidden="true" className="h-5 w-5 text-warning" />
           <span>{t('welcome.incidentResponse')}</span>
         </button>
       </div>

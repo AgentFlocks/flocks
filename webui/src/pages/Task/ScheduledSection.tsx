@@ -50,11 +50,11 @@ export default function ScheduledSection({ onRefreshGlobal }: { onRefreshGlobal:
   };
 
   if (loading && tasks.length === 0) return <div className="flex justify-center py-12"><LoadingSpinner delayMs={180} /></div>;
-  if (error) return <div className="text-center py-12 text-red-500">{error}</div>;
+  if (error) return <div className="text-center py-12 text-danger">{error}</div>;
 
   return (
     <>
-      <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
+      <div className="bg-surface rounded-card border border-line overflow-hidden">
         {tasks.length === 0 ? (
           <div className="p-8">
             <EmptyState
@@ -68,18 +68,18 @@ export default function ScheduledSection({ onRefreshGlobal }: { onRefreshGlobal:
             {/* 窄屏（375px）下表格比容器宽，overflow-hidden 会把后几列裁掉且无法滚动；改为容器内横向滚动 */}
             <div className="overflow-x-auto">
             <table className="w-full text-sm">
-              <thead className="bg-gray-50 border-b border-gray-200">
+              <thead className="bg-subtle border-b border-line">
                 <tr>
-                  <th className="text-left px-4 py-3 font-medium text-gray-600 w-24">{t('scheduled.colStatus')}</th>
-                  <th className="text-left px-4 py-3 font-medium text-gray-600">{t('scheduled.colName')}</th>
-                  <th className="text-left px-4 py-3 font-medium text-gray-600">{t('scheduled.colFrequency')}</th>
-                  <th className="text-left px-4 py-3 font-medium text-gray-600">{t('scheduled.colNextRun')}</th>
-                  <th className="text-left px-4 py-3 font-medium text-gray-600">{t('scheduled.colMode')}</th>
-                  <th className="text-left px-4 py-3 font-medium text-gray-600">{t('scheduled.colPriority')}</th>
-                  <th className="text-right px-4 py-3 font-medium text-gray-600">{t('scheduled.colActions')}</th>
+                  <th className="text-left px-4 py-3 font-medium text-fg-secondary w-24">{t('scheduled.colStatus')}</th>
+                  <th className="text-left px-4 py-3 font-medium text-fg-secondary">{t('scheduled.colName')}</th>
+                  <th className="text-left px-4 py-3 font-medium text-fg-secondary">{t('scheduled.colFrequency')}</th>
+                  <th className="text-left px-4 py-3 font-medium text-fg-secondary">{t('scheduled.colNextRun')}</th>
+                  <th className="text-left px-4 py-3 font-medium text-fg-secondary">{t('scheduled.colMode')}</th>
+                  <th className="text-left px-4 py-3 font-medium text-fg-secondary">{t('scheduled.colPriority')}</th>
+                  <th className="text-right px-4 py-3 font-medium text-fg-secondary">{t('scheduled.colActions')}</th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-gray-100">
+              <tbody className="divide-y divide-line">
                 {[...tasks].sort((a, b) => {
                   const ae = a.status === 'active' ? 1 : 0;
                   const be = b.status === 'active' ? 1 : 0;
@@ -94,42 +94,42 @@ export default function ScheduledSection({ onRefreshGlobal }: { onRefreshGlobal:
                   const nextRun = task.trigger?.nextRun ?? (runOnce ? task.trigger?.runAt : undefined);
 
                   return (
-                    <tr key={task.id} onClick={() => setEditingTask(task)} className="hover:bg-gray-50 transition-colors cursor-pointer">
+                    <tr key={task.id} onClick={() => setEditingTask(task)} className="hover:bg-hover transition-colors cursor-pointer">
                       <td className="px-4 py-3 whitespace-nowrap">
-                        <span className={`inline-flex items-center gap-1.5 text-xs font-medium ${enabled ? 'text-green-700' : 'text-gray-400'}`}>
-                          <span className={`w-2 h-2 rounded-full flex-shrink-0 ${enabled ? 'bg-green-500' : 'bg-gray-300'}`} />
+                        <span className={`inline-flex items-center gap-1.5 text-xs font-medium ${enabled ? 'text-success' : 'text-fg-muted'}`}>
+                          <span className={`w-2 h-2 rounded-pill flex-shrink-0 ${enabled ? 'bg-success' : 'bg-selected'}`} />
                           {enabled ? t('scheduled.statusEnabled') : t('scheduled.statusDisabled')}
                         </span>
                       </td>
                       <td className="px-4 py-3">
-                        <div className="font-medium text-gray-900">{task.title}</div>
+                        <div className="font-medium text-fg">{task.title}</div>
                         {task.description && (
-                          <div className="text-xs text-gray-400 truncate max-w-[220px]" title={task.description}>
+                          <div className="text-xs text-fg-muted truncate max-w-[220px]" title={task.description}>
                             {task.description}
                           </div>
                         )}
                         {task.tags.length > 0 && (
                           <div className="flex gap-1 mt-1 flex-wrap">
                             {task.tags.map(tag => (
-                              <span key={tag} className="px-1.5 py-0.5 bg-gray-100 text-gray-500 rounded text-xs">{tag}</span>
+                              <span key={tag} className="px-1.5 py-0.5 bg-subtle text-fg-muted rounded-tag text-xs">{tag}</span>
                             ))}
                           </div>
                         )}
                       </td>
                       <td className="px-4 py-3 font-medium whitespace-nowrap">
                         {runOnce ? (
-                          <span className="inline-flex items-center gap-1 text-gray-500">
-                            <IconClock aria-hidden="true" className="w-3.5 h-3.5" /> {t('scheduled.runOnce')}
+                          <span className="inline-flex items-center gap-1 text-fg-muted">
+                            <IconClock aria-hidden="true" className="w-4 h-4" /> {t('scheduled.runOnce')}
                           </span>
                         ) : (
-                          <span className="text-purple-700">{cronDesc}</span>
+                          <span className="text-ai">{cronDesc}</span>
                         )}
                       </td>
-                      <td className="px-4 py-3 text-gray-500 text-xs whitespace-nowrap">
+                      <td className="px-4 py-3 text-fg-muted text-xs whitespace-nowrap">
                         {nextRun ? (
-                          <span className={enabled ? 'text-gray-700' : 'text-gray-400'}>{formatTime(nextRun)}</span>
+                          <span className={enabled ? 'text-fg-secondary' : 'text-fg-muted'}>{formatTime(nextRun)}</span>
                         ) : (
-                          <span className="text-gray-300">&mdash;</span>
+                          <span className="text-fg-placeholder">&mdash;</span>
                         )}
                       </td>
                       <td className="px-4 py-3">
@@ -143,10 +143,10 @@ export default function ScheduledSection({ onRefreshGlobal }: { onRefreshGlobal:
                           <button
                             onClick={(e) => { e.stopPropagation(); handleToggle(task); }}
                             title={enabled ? t('scheduled.toggleDisable') : t('scheduled.toggleEnable')}
-                            className={`p-1.5 rounded transition-colors ${
+                            className={`ui-btn-icon inline-flex items-center justify-center p-1.5 rounded-control transition-colors ${
                               enabled
-                                ? 'text-green-600 hover:bg-green-50'
-                                : 'text-gray-400 hover:bg-gray-100'
+                                ? 'text-success hover:bg-success-soft'
+                                : 'text-fg-muted hover:bg-hover'
                             }`}
                           >
                             {enabled
@@ -157,7 +157,7 @@ export default function ScheduledSection({ onRefreshGlobal }: { onRefreshGlobal:
                           <button
                             onClick={(e) => { e.stopPropagation(); handleDelete(task.id); }}
                             title={t('common:button.delete')}
-                            className="p-1.5 text-gray-300 hover:text-slate-600 hover:bg-slate-100 rounded transition-colors"
+                            className="ui-btn-icon inline-flex items-center justify-center p-1.5 text-fg-placeholder hover:text-fg-secondary hover:bg-hover rounded-control transition-colors"
                           >
                             <IconTrash aria-hidden="true" className="w-4 h-4" />
                           </button>
@@ -169,7 +169,7 @@ export default function ScheduledSection({ onRefreshGlobal }: { onRefreshGlobal:
               </tbody>
             </table>
             </div>
-            <div className="px-4 py-3 border-t border-gray-200 bg-gray-50 text-sm text-gray-500">
+            <div className="px-4 py-3 border-t border-line bg-subtle text-sm text-fg-muted">
               {t('scheduled.totalCount', { count: tasks.length })}
             </div>
           </>

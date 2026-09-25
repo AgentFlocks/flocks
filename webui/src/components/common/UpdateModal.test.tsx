@@ -193,6 +193,19 @@ describe('UpdateModal terminal states', () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
+  it('cannot dismiss an in-progress upgrade using Escape or the backdrop', async () => {
+    applyUpdate.mockImplementationOnce(() => new Promise(() => {}));
+    const onClose = vi.fn();
+    render(<UpdateModal initialInfo={initialInfo} onClose={onClose} />);
+    fireEvent.click(screen.getByRole('button', { name: 'confirmAction' }));
+    const dialog = screen.getByRole('dialog', { name: 'title' });
+    expect(dialog).toHaveAttribute('aria-modal', 'true');
+    expect(screen.getByRole('button', { name: 'closeAction' })).toBeDisabled();
+    fireEvent.keyDown(dialog, { key: 'Escape' });
+    fireEvent.click(document.querySelector('.bg-overlay-backdrop')!);
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
   it('reports early EOF and releases the close controls', async () => {
     const { IncompleteUpdateError } = await import('@/api/update');
     applyUpdate.mockRejectedValue(new IncompleteUpdateError());

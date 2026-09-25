@@ -1147,12 +1147,14 @@ describe('DeviceIntegrationPage', () => {
     const cardTitle = await screen.findByText('TDP-test-02');
     await user.click(cardTitle);
 
-    expect(await screen.findByRole('button', { name: '关闭设备配置面板' })).toBeInTheDocument();
+    const backdrop = await screen.findByLabelText('关闭设备配置面板');
+    expect(backdrop).toHaveAttribute('tabindex', '-1');
+    expect(backdrop).not.toHaveFocus();
 
-    await user.click(screen.getByRole('button', { name: '关闭设备配置面板' }));
+    await user.click(backdrop);
 
     await waitFor(() => {
-      expect(screen.queryByRole('button', { name: '关闭设备配置面板' })).not.toBeInTheDocument();
+      expect(screen.queryByLabelText('关闭设备配置面板')).not.toBeInTheDocument();
     });
   });
 

@@ -440,27 +440,27 @@ function AgentFormContent({
     <div className="space-y-4">
       {/* Native read-only banner */}
       {nativeReadOnly && (
-        <div className="flex items-center gap-2 px-3 py-2 bg-amber-50 border border-amber-200 rounded-lg text-xs text-amber-700">
-          <IconLock aria-hidden="true" className="w-3.5 h-3.5 shrink-0" />
+        <div className="flex items-center gap-2 px-3 py-2 bg-warning-soft border border-warning rounded-control text-xs text-warning">
+          <IconLock aria-hidden="true" className="w-4 h-4 shrink-0" />
           {t('form.nativeReadOnlyMessage')}
         </div>
       )}
 
       {/* Name */}
       <div>
-        <label className="block text-sm font-medium text-gray-700 mb-1">
-          {t('form.name')} {nameEditable && <span className="text-slate-500">*</span>}
+        <label className="block text-sm font-medium text-fg-secondary mb-1">
+          {t('form.name')} {nameEditable && <span className="text-fg-muted">*</span>}
         </label>
         {nameEditable ? (
           <input
             type="text"
             value={formData.name}
             onChange={(e) => update({ name: e.target.value })}
-            className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-400 text-sm"
+            className="ui-input w-full px-4  border border-line-control rounded-control text-sm"
             placeholder="my-agent"
           />
         ) : (
-          <div className="px-4 py-2 bg-gray-50 border border-gray-200 rounded-lg text-sm text-gray-700 font-mono">
+          <div className="px-4 py-2 bg-subtle border border-line rounded-control text-sm text-fg-secondary font-mono">
             {formData.name}
           </div>
         )}
@@ -468,7 +468,7 @@ function AgentFormContent({
 
       {/* Chinese display name */}
       <div>
-        <label className={`block text-sm font-medium mb-1 ${nativeReadOnly ? 'text-gray-500' : 'text-gray-700'}`}>
+        <label className={`block text-sm font-medium mb-1 ${nativeReadOnly ? 'text-fg-muted' : 'text-fg-secondary'}`}>
           {t('form.nameCn')}
         </label>
         <input
@@ -476,10 +476,10 @@ function AgentFormContent({
           value={formData.nameCn}
           onChange={(e) => update({ nameCn: e.target.value })}
           disabled={nativeReadOnly}
-          className={`w-full px-4 py-2 border rounded-lg text-sm ${
+          className={`w-full px-4 py-2 border rounded-control text-sm ${
             nativeReadOnly
-              ? 'border-gray-300 bg-gray-100 text-gray-500 cursor-not-allowed'
-              : 'border-gray-300 focus:outline-none focus:ring-2 focus:ring-slate-400'
+              ? 'border-line-control bg-subtle text-fg-muted cursor-not-allowed'
+              : 'border-line-control '
           }`}
           placeholder={t('form.nameCnPlaceholder')}
         />
@@ -487,32 +487,32 @@ function AgentFormContent({
 
       {/* Description (English) + Chinese UI */}
       <div>
-        <label className={`block text-sm font-medium mb-1 ${nativeReadOnly ? 'text-gray-500' : 'text-gray-700'}`}>{t('form.description')}</label>
-        <p className="text-xs text-gray-500 mb-1">{t('form.descriptionHint')}</p>
+        <label className={`block text-sm font-medium mb-1 ${nativeReadOnly ? 'text-fg-muted' : 'text-fg-secondary'}`}>{t('form.description')}</label>
+        <p className="text-xs text-fg-muted mb-1">{t('form.descriptionHint')}</p>
         <input
           type="text"
           value={formData.description}
           onChange={(e) => update({ description: e.target.value })}
           disabled={nativeReadOnly}
-          className={`w-full px-4 py-2 border rounded-lg text-sm ${
+          className={`w-full px-4 py-2 border rounded-control text-sm ${
             nativeReadOnly
-              ? 'border-gray-300 bg-gray-100 text-gray-500 cursor-not-allowed'
-              : 'border-gray-300 focus:outline-none focus:ring-2 focus:ring-slate-400'
+              ? 'border-line-control bg-subtle text-fg-muted cursor-not-allowed'
+              : 'border-line-control '
           }`}
           placeholder={t('form.descriptionPlaceholder')}
         />
       </div>
       <div>
-        <label className={`block text-sm font-medium mb-1 ${nativeReadOnly ? 'text-gray-500' : 'text-gray-700'}`}>{t('form.descriptionCn')}</label>
+        <label className={`block text-sm font-medium mb-1 ${nativeReadOnly ? 'text-fg-muted' : 'text-fg-secondary'}`}>{t('form.descriptionCn')}</label>
         <input
           type="text"
           value={formData.descriptionCn}
           onChange={(e) => update({ descriptionCn: e.target.value })}
           disabled={nativeReadOnly}
-          className={`w-full px-4 py-2 border rounded-lg text-sm ${
+          className={`w-full px-4 py-2 border rounded-control text-sm ${
             nativeReadOnly
-              ? 'border-gray-300 bg-gray-100 text-gray-500 cursor-not-allowed'
-              : 'border-gray-300 focus:outline-none focus:ring-2 focus:ring-slate-400'
+              ? 'border-line-control bg-subtle text-fg-muted cursor-not-allowed'
+              : 'border-line-control '
           }`}
           placeholder={t('form.descriptionCnPlaceholder')}
         />
@@ -521,16 +521,16 @@ function AgentFormContent({
       {/* System Prompt with Rex assist */}
       <div>
         <div className="flex items-center justify-between mb-1">
-          <label className={`text-sm font-medium ${nativeReadOnly ? 'text-gray-500' : 'text-gray-700'}`}>
-            System Prompt {!nativeReadOnly && <span className="text-slate-500">*</span>}
+          <label className={`text-sm font-medium ${nativeReadOnly ? 'text-fg-muted' : 'text-fg-secondary'}`}>
+            System Prompt {!nativeReadOnly && <span className="text-fg-muted">*</span>}
           </label>
           {!nativeReadOnly && (
             <button
               type="button"
               onClick={() => openRex()}
-              className="flex items-center gap-1 text-xs text-sky-700 hover:text-sky-900 transition-colors"
+              className="flex items-center gap-1 text-xs text-info hover:text-info transition-colors"
             >
-              <IconSparkles aria-hidden="true" className="w-3.5 h-3.5" />
+              <IconSparkles aria-hidden="true" className="w-4 h-4" />
               {t('form.rexAssistWrite')}
             </button>
           )}
@@ -539,10 +539,10 @@ function AgentFormContent({
           value={formData.prompt}
           onChange={(e) => update({ prompt: e.target.value })}
           disabled={nativeReadOnly}
-          className={`w-full h-40 px-4 py-3 border rounded-lg resize-none font-mono text-sm ${
+          className={`w-full h-40 px-4 py-3 border rounded-control resize-none font-mono text-sm ${
             nativeReadOnly
-              ? 'border-gray-300 bg-gray-100 text-gray-500 cursor-not-allowed'
-              : 'border-gray-300 focus:outline-none focus:ring-2 focus:ring-slate-400'
+              ? 'border-line-control bg-subtle text-fg-muted cursor-not-allowed'
+              : 'border-line-control '
           }`}
           placeholder="You are a helpful assistant..."
         />
@@ -553,11 +553,11 @@ function AgentFormContent({
         {/* Mode: 创建时固定为 subagent，编辑时显示当前模式（只读） */}
         {!nameEditable && (
           <div className="flex items-center gap-3">
-            <span className="w-14 shrink-0 text-sm font-medium text-gray-700">{t('form.mode')}</span>
+            <span className="w-14 shrink-0 text-sm font-medium text-fg-secondary">{t('form.mode')}</span>
             <PillGroup
               options={[
-                { value: 'primary', label: t('form.primaryModeLabel'), activeClass: 'bg-sky-600 text-white border-sky-600' },
-                { value: 'subagent', label: t('form.subagentModeLabel'), activeClass: 'bg-purple-600 text-white border-purple-600' },
+                { value: 'primary', label: t('form.primaryModeLabel'), activeClass: 'bg-info-soft text-info border-info' },
+                { value: 'subagent', label: t('form.subagentModeLabel'), activeClass: 'bg-ai-soft text-ai border-ai' },
               ]}
               value={formData.mode}
               onChange={() => {}}
@@ -567,11 +567,11 @@ function AgentFormContent({
         )}
 
         <div className="flex items-center gap-3">
-          <span className="w-14 shrink-0 text-sm font-medium text-gray-700">{t('form.model')}</span>
+          <span className="w-14 shrink-0 text-sm font-medium text-fg-secondary">{t('form.model')}</span>
           <select
             value={formData.modelKey}
             onChange={(e) => update({ modelKey: e.target.value })}
-            className="flex-1 px-3 py-1.5 border border-gray-300 rounded-lg outline-none text-sm focus:ring-2 focus:ring-slate-400"
+            className="ui-select flex-1 px-3  border border-line-control rounded-control text-sm"
           >
             <option value="">— {defaultModelLabel} —</option>
             {Object.entries(modelsByProvider).map(([pID, pModels]) => (
@@ -587,7 +587,7 @@ function AgentFormContent({
         </div>
 
         <div className="flex items-center gap-3">
-          <span className="w-14 shrink-0 text-sm font-medium text-gray-700">{t('form.temperature')}</span>
+          <span className="w-14 shrink-0 text-sm font-medium text-fg-secondary">{t('form.temperature')}</span>
           <input
             type="number"
             min="0"
@@ -595,7 +595,7 @@ function AgentFormContent({
             step="0.1"
             value={formData.temperature}
             onChange={(e) => update({ temperature: parseFloat(e.target.value) })}
-            className="w-28 px-3 py-1.5 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-400 text-sm"
+            className="ui-input w-28 px-3  border border-line-control rounded-control text-sm"
           />
         </div>
 
@@ -604,10 +604,10 @@ function AgentFormContent({
       {/* Tools */}
       <div>
         <div className="flex items-center justify-between mb-2">
-          <label className={`text-sm font-medium ${nativeReadOnly ? 'text-gray-500' : 'text-gray-700'}`}>
+          <label className={`text-sm font-medium ${nativeReadOnly ? 'text-fg-muted' : 'text-fg-secondary'}`}>
             Tools
             {formData.tools.length > 0 && (
-              <span className={`ml-2 px-1.5 py-0.5 text-xs rounded-full font-normal ${nativeReadOnly ? 'bg-gray-200 text-gray-500' : 'bg-slate-100 text-slate-700'}`}>
+              <span className={`ml-2 px-1.5 py-0.5 text-xs rounded-pill font-normal ${nativeReadOnly ? 'bg-selected text-fg-muted' : 'bg-subtle text-fg-secondary'}`}>
                 {t('form.selected', { count: formData.tools.length })}
               </span>
             )}
@@ -616,19 +616,19 @@ function AgentFormContent({
             <button
               type="button"
               onClick={() => update({ tools: [] })}
-              className="text-xs text-gray-400 hover:text-gray-600 transition-colors"
+              className="text-xs text-fg-muted hover:text-fg-secondary transition-colors"
             >
               {t('form.clearSelection')}
             </button>
           )}
         </div>
         {toolsLoading ? (
-          <p className="text-sm text-gray-400 py-2 animate-pulse">{t('form.loadingTools')}</p>
+          <p className="text-sm text-fg-muted py-2 animate-pulse">{t('form.loadingTools')}</p>
         ) : allTools.length === 0 ? (
-          <p className="text-sm text-gray-400 py-2">{t('form.noTools')}</p>
+          <p className="text-sm text-fg-muted py-2">{t('form.noTools')}</p>
         ) : (
-          <div className={`border rounded-lg divide-y max-h-80 overflow-y-auto pr-3 ${nativeReadOnly ? 'border-gray-300 bg-gray-100 select-none divide-gray-200' : 'border-gray-200 divide-gray-100'}`}>
-            <label className={`flex items-center gap-3 px-3 py-2 sticky top-0 z-10 ${nativeReadOnly ? 'bg-gray-100 cursor-not-allowed' : 'bg-gray-50 cursor-pointer hover:bg-gray-100 transition-colors'}`}>
+          <div className={`border rounded-control divide-y max-h-80 overflow-y-auto pr-3 ${nativeReadOnly ? 'border-line-control bg-subtle select-none divide-line' : 'border-line divide-line'}`}>
+            <label className={`flex items-center gap-3 px-3 py-2 sticky top-0 z-10 ${nativeReadOnly ? 'bg-subtle cursor-not-allowed' : 'bg-subtle cursor-pointer hover:bg-hover transition-colors'}`}>
               <input
                 type="checkbox"
                 checked={formData.tools.length === allTools.length}
@@ -639,13 +639,13 @@ function AgentFormContent({
                 onChange={() => {
                   update({ tools: formData.tools.length === allTools.length ? [] : allTools.map((tool) => tool.name) });
                 }}
-                className="h-4 w-4 rounded border-gray-300 text-slate-600 focus:ring-slate-400 shrink-0"
+                className="h-4 w-4 rounded-tag border-line-control text-fg-secondary shrink-0"
               />
-              <span className={`text-sm font-medium ${nativeReadOnly ? 'text-gray-500' : 'text-gray-600'}`}>{t('form.selectAll')}</span>
+              <span className={`text-sm font-medium ${nativeReadOnly ? 'text-fg-muted' : 'text-fg-secondary'}`}>{t('form.selectAll')}</span>
             </label>
             {Object.entries(toolsByCategory).map(([category, tools]) => (
               <div key={category}>
-                <div className={`px-3 py-1.5 text-xs font-medium uppercase tracking-wide ${nativeReadOnly ? 'bg-gray-100 text-gray-400' : 'bg-gray-50 text-gray-500'}`}>
+                <div className={`px-3 py-1.5 text-xs font-medium uppercase tracking-wide ${nativeReadOnly ? 'bg-subtle text-fg-muted' : 'bg-subtle text-fg-muted'}`}>
                   {category}
                 </div>
                 {tools.map((tool) => {
@@ -655,8 +655,8 @@ function AgentFormContent({
                       key={tool.name}
                       className={`flex items-start gap-3 px-3 py-2 ${
                         nativeReadOnly
-                          ? 'cursor-not-allowed bg-gray-100'
-                          : `cursor-pointer hover:bg-gray-50 transition-colors ${checked ? 'bg-sky-50/60' : ''}`
+                          ? 'cursor-not-allowed bg-subtle'
+                          : `cursor-pointer hover:bg-hover transition-colors ${checked ? 'bg-info-soft' : ''}`
                       }`}
                     >
                       <input
@@ -664,12 +664,12 @@ function AgentFormContent({
                         checked={checked}
                         disabled={nativeReadOnly}
                         onChange={() => toggleTool(tool.name)}
-                        className="mt-0.5 h-4 w-4 rounded border-gray-300 text-slate-600 focus:ring-slate-400 shrink-0"
+                        className="mt-0.5 h-4 w-4 rounded-tag border-line-control text-fg-secondary shrink-0"
                       />
                       <div className="min-w-0">
-                        <span className={`text-sm font-medium ${nativeReadOnly ? 'text-gray-500' : 'text-gray-800'}`}>{tool.name}</span>
+                        <span className={`text-sm font-medium ${nativeReadOnly ? 'text-fg-muted' : 'text-fg'}`}>{tool.name}</span>
                         {tool.description && (
-                          <p className={`text-xs mt-0.5 leading-snug line-clamp-1 ${nativeReadOnly ? 'text-gray-400' : 'text-gray-500'}`}>
+                          <p className={`text-xs mt-0.5 line-clamp-1 ${nativeReadOnly ? 'text-fg-muted' : 'text-fg-muted'}`}>
                             {tool.description}
                           </p>
                         )}
@@ -687,10 +687,10 @@ function AgentFormContent({
       {isPrimary && (
         <div>
           <div className="flex items-center justify-between mb-2">
-            <label className={`text-sm font-medium ${nativeReadOnly ? 'text-gray-500' : 'text-gray-700'}`}>
+            <label className={`text-sm font-medium ${nativeReadOnly ? 'text-fg-muted' : 'text-fg-secondary'}`}>
               Skills
               {formData.skills.length > 0 && (
-                <span className={`ml-2 px-1.5 py-0.5 text-xs rounded-full font-normal ${nativeReadOnly ? 'bg-gray-200 text-gray-500' : 'bg-purple-100 text-purple-700'}`}>
+                <span className={`ml-2 px-1.5 py-0.5 text-xs rounded-pill font-normal ${nativeReadOnly ? 'bg-selected text-fg-muted' : 'bg-ai-soft text-ai'}`}>
                   {t('form.selected', { count: formData.skills.length })}
                 </span>
               )}
@@ -699,19 +699,19 @@ function AgentFormContent({
               <button
                 type="button"
                 onClick={() => update({ skills: [] })}
-                className="text-xs text-gray-400 hover:text-gray-600 transition-colors"
+                className="text-xs text-fg-muted hover:text-fg-secondary transition-colors"
               >
                 {t('form.clearSelection')}
               </button>
             )}
           </div>
           {skillsLoading ? (
-            <p className="text-sm text-gray-400 py-2 animate-pulse">{t('form.loadingSkills')}</p>
+            <p className="text-sm text-fg-muted py-2 animate-pulse">{t('form.loadingSkills')}</p>
           ) : allSkills.length === 0 ? (
-            <p className="text-sm text-gray-400 py-2">{t('form.noSkills')}</p>
+            <p className="text-sm text-fg-muted py-2">{t('form.noSkills')}</p>
           ) : (
-            <div className={`border rounded-lg divide-y max-h-64 overflow-y-auto pr-3 ${nativeReadOnly ? 'border-gray-300 bg-gray-100 select-none divide-gray-200' : 'border-gray-200 divide-gray-100'}`}>
-              <label className={`flex items-center gap-3 px-3 py-2 sticky top-0 z-10 ${nativeReadOnly ? 'bg-gray-100 cursor-not-allowed' : 'bg-gray-50 cursor-pointer hover:bg-gray-100 transition-colors'}`}>
+            <div className={`border rounded-control divide-y max-h-64 overflow-y-auto pr-3 ${nativeReadOnly ? 'border-line-control bg-subtle select-none divide-line' : 'border-line divide-line'}`}>
+              <label className={`flex items-center gap-3 px-3 py-2 sticky top-0 z-10 ${nativeReadOnly ? 'bg-subtle cursor-not-allowed' : 'bg-subtle cursor-pointer hover:bg-hover transition-colors'}`}>
                 <input
                   type="checkbox"
                   checked={formData.skills.length === allSkills.length}
@@ -722,9 +722,9 @@ function AgentFormContent({
                   onChange={() => {
                     update({ skills: formData.skills.length === allSkills.length ? [] : allSkills.map((s) => s.name) });
                   }}
-                  className="h-4 w-4 rounded border-gray-300 text-purple-600 focus:ring-purple-500 shrink-0"
+                  className="h-4 w-4 rounded-tag border-line-control text-ai shrink-0"
                 />
-                <span className={`text-sm font-medium ${nativeReadOnly ? 'text-gray-500' : 'text-gray-600'}`}>{t('form.selectAll')}</span>
+                <span className={`text-sm font-medium ${nativeReadOnly ? 'text-fg-muted' : 'text-fg-secondary'}`}>{t('form.selectAll')}</span>
               </label>
               {allSkills.map((skill) => {
                 const checked = formData.skills.includes(skill.name);
@@ -733,8 +733,8 @@ function AgentFormContent({
                     key={skill.name}
                     className={`flex items-start gap-3 px-3 py-2 ${
                       nativeReadOnly
-                        ? 'cursor-not-allowed bg-gray-100'
-                        : `cursor-pointer hover:bg-gray-50 transition-colors ${checked ? 'bg-purple-50/50' : ''}`
+                        ? 'cursor-not-allowed bg-subtle'
+                        : `cursor-pointer hover:bg-hover transition-colors ${checked ? 'bg-ai-soft' : ''}`
                     }`}
                   >
                     <input
@@ -742,12 +742,12 @@ function AgentFormContent({
                       checked={checked}
                       disabled={nativeReadOnly}
                       onChange={() => toggleSkill(skill.name)}
-                      className="mt-0.5 h-4 w-4 rounded border-gray-300 text-purple-600 focus:ring-purple-500 shrink-0"
+                      className="mt-0.5 h-4 w-4 rounded-tag border-line-control text-ai shrink-0"
                     />
                     <div className="min-w-0">
-                      <span className={`text-sm font-medium ${nativeReadOnly ? 'text-gray-500' : 'text-gray-800'}`}>{skill.name}</span>
+                      <span className={`text-sm font-medium ${nativeReadOnly ? 'text-fg-muted' : 'text-fg'}`}>{skill.name}</span>
                       {skill.description && (
-                        <p className={`text-xs mt-0.5 leading-snug line-clamp-2 ${nativeReadOnly ? 'text-gray-400' : 'text-gray-500'}`}>
+                        <p className={`text-xs mt-0.5 line-clamp-2 ${nativeReadOnly ? 'text-fg-muted' : 'text-fg-muted'}`}>
                           {skill.description}
                         </p>
                       )}

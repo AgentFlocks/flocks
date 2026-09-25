@@ -3,19 +3,19 @@
 .flocks-voice-button {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
-  height: 28px;
-  padding: 0 9px;
+  gap: 8px;
+  min-height: var(--control-md);
+  padding: 6px 12px;
   border: 0;
-  border-radius: 8px;
+  border-radius: var(--radius-control);
   background: var(--bg-subtle);
   color: var(--text-secondary);
-  font-size: 12px;
+  font-size: var(--font-body);
   font-weight: 500;
-  line-height: 1;
+  line-height: 20px;
   white-space: nowrap;
   cursor: pointer;
-  transition: background-color 150ms, color 150ms;
+  transition: background-color var(--motion-fast) var(--motion-easing), color var(--motion-fast) var(--motion-easing);
 }
 
 .flocks-voice-button:hover:not(:disabled) {
@@ -25,7 +25,8 @@
 
 .flocks-voice-button:disabled {
   cursor: not-allowed;
-  opacity: 0.5;
+  background: var(--disabled-bg);
+  color: var(--disabled-text);
 }
 
 .flocks-voice-button:focus-visible {
@@ -70,11 +71,8 @@
 }
 
 /* A finger needs a bigger target than a mouse pointer. */
-@media (pointer: coarse) {
+@media (max-width: 767px), (pointer: coarse) {
   .flocks-voice-button {
-    height: 40px;
-    padding: 0 13px;
-    font-size: 13px;
-    gap: 6px;
+    min-height: var(--control-touch);
   }
 }

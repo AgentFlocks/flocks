@@ -39,23 +39,23 @@ export default function SetupAdminPage() {
     <AuthLayout>
       <form
         onSubmit={onSubmit}
-        className="w-full max-w-lg bg-white border border-gray-200 rounded-xl p-6 shadow-sm space-y-4"
+        className="w-full max-w-lg bg-surface border border-line rounded-card p-6 shadow-sm space-y-4"
       >
         <div>
-          <h1 className="text-xl font-semibold text-gray-900">{t('setup.title')}</h1>
-          <p className="text-sm text-gray-500 mt-1">{t('setup.description')}</p>
+          <h1 className="text-title-page font-bold text-fg">{t('setup.title')}</h1>
+          <p className="text-sm text-fg-muted mt-1">{t('setup.description')}</p>
         </div>
         <div>
-          <label className="text-sm text-gray-700 block mb-1">{t('setup.adminUsername')}</label>
+          <label className="text-sm text-fg-secondary block mb-1">{t('setup.adminUsername')}</label>
           <input
             value={username}
             onChange={(e) => setUsername(e.target.value)}
-            className="w-full border border-gray-300 rounded-lg px-3 py-2 outline-none focus:border-blue-500"
+            className="ui-input w-full border border-line-control rounded-control px-3  focus:border-action"
             required
           />
         </div>
         <div>
-          <label className="text-sm text-gray-700 block mb-1">{t('setup.adminPassword')}</label>
+          <label className="text-sm text-fg-secondary block mb-1">{t('setup.adminPassword')}</label>
           <PasswordInput
             value={password}
             onChange={(e) => setPassword(e.target.value)}
@@ -64,7 +64,7 @@ export default function SetupAdminPage() {
           />
         </div>
         <div>
-          <label className="text-sm text-gray-700 block mb-1">{t('fields.confirmPassword')}</label>
+          <label className="text-sm text-fg-secondary block mb-1">{t('fields.confirmPassword')}</label>
           <PasswordInput
             value={confirmPassword}
             onChange={(e) => setConfirmPassword(e.target.value)}
@@ -73,7 +73,7 @@ export default function SetupAdminPage() {
           />
         </div>
         {error && (
-          <div className="text-sm text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2">
+          <div className="text-sm text-danger bg-danger-soft border border-danger rounded-control px-3 py-2">
             {error}
           </div>
         )}

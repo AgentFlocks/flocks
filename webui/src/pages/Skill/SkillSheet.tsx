@@ -20,7 +20,7 @@ const ReactMarkdown = lazy(() => import('react-markdown'));
 
 function MarkdownFallback() {
   return (
-    <div className="flex min-h-[160px] items-center justify-center text-gray-400">
+    <div className="flex min-h-[160px] items-center justify-center text-fg-muted">
       <IconLoader2 aria-hidden="true" className="h-4 w-4 animate-spin" />
     </div>
   );
@@ -213,13 +213,13 @@ export default function SkillSheet({ skill, onClose, onSaved, onDeleted }: Skill
           onClick={handleDelete}
           disabled={deleting || !isUserSkill}
           title={!isUserSkill ? t('sheet.deleteBuiltinTip') : undefined}
-          className={`flex items-center gap-1.5 px-3 py-1.5 text-sm border rounded-lg transition-colors
-            ${isUserSkill
-              ? 'text-red-500 border-red-200 hover:bg-red-50 disabled:opacity-50 disabled:cursor-not-allowed'
-              : 'text-gray-300 border-gray-200 cursor-not-allowed'
+          className={`flex items-center gap-1.5 px-3 py-1.5 text-sm border rounded-control transition-colors
+ ${isUserSkill
+              ? 'text-danger border-danger hover:bg-danger-soft disabled:bg-disabled disabled:text-fg-disabled disabled:cursor-not-allowed'
+              : 'text-fg-placeholder border-line cursor-not-allowed'
             }`}
         >
-          {deleting ? <IconLoader2 aria-hidden="true" className="w-3.5 h-3.5 animate-spin" /> : <IconTrash aria-hidden="true" className="w-3.5 h-3.5" />}
+          {deleting ? <IconLoader2 aria-hidden="true" className="w-4 h-4 animate-spin" /> : <IconTrash aria-hidden="true" className="w-4 h-4" />}
           {deleting ? t('sheet.deleting') : t('sheet.delete')}
         </button>
       ) : undefined}
@@ -227,19 +227,19 @@ export default function SkillSheet({ skill, onClose, onSaved, onDeleted }: Skill
       <div className="space-y-4">
         {/* Read-only banner */}
         {isReadonly && (
-          <div className="flex items-center gap-2 px-3 py-2 bg-amber-50 border border-amber-200 rounded-lg text-xs text-amber-700">
-            <IconLock aria-hidden="true" className="w-3.5 h-3.5 shrink-0" />
+          <div className="flex items-center gap-2 px-3 py-2 bg-warning-soft border border-warning rounded-control text-xs text-warning">
+            <IconLock aria-hidden="true" className="w-4 h-4 shrink-0" />
             {t('sheet.readonlyNote')}
           </div>
         )}
 
         {/* Name */}
         <div>
-          <label className="block text-sm font-medium text-gray-700 mb-1">
-            {t('sheet.skillName')} {!isEdit && <span className="text-red-500">*</span>}
+          <label className="block text-sm font-medium text-fg-secondary mb-1">
+            {t('sheet.skillName')} {!isEdit && <span className="text-danger">*</span>}
           </label>
           {isReadonly ? (
-            <div className="px-4 py-2 bg-gray-50 border border-gray-200 rounded-lg text-sm text-gray-700 font-mono">
+            <div className="px-4 py-2 bg-subtle border border-line rounded-control text-sm text-fg-secondary font-mono">
               {formData.name}
             </div>
           ) : (
@@ -247,30 +247,30 @@ export default function SkillSheet({ skill, onClose, onSaved, onDeleted }: Skill
               type="text"
               value={formData.name}
               onChange={(e) => setFormData({ ...formData, name: e.target.value })}
-              className={`w-full px-4 py-2 border rounded-lg focus:outline-none focus:ring-2 text-sm font-mono ${showNameHint ? 'border-red-400 focus:ring-red-500' : 'border-gray-300 focus:ring-red-500'}`}
+              className={`w-full px-4 py-2 border rounded-control text-sm font-mono ${showNameHint ? 'border-danger ' : 'border-line-control '}`}
               placeholder="my-skill"
               aria-invalid={showNameHint || undefined}
             />
           )}
           {showNameHint && (
-            <p className="mt-1 text-xs text-red-600" data-testid="skill-name-hint">{t('sheet.nameFormatHint')}</p>
+            <p className="mt-1 text-xs text-danger" data-testid="skill-name-hint">{t('sheet.nameFormatHint')}</p>
           )}
         </div>
 
         {/* Description */}
         <div>
-          <label className={`block text-sm font-medium mb-1 ${isReadonly ? 'text-gray-500' : 'text-gray-700'}`}>
-            {t('sheet.description')} {!isEdit && <span className="text-red-500">*</span>}
+          <label className={`block text-sm font-medium mb-1 ${isReadonly ? 'text-fg-muted' : 'text-fg-secondary'}`}>
+            {t('sheet.description')} {!isEdit && <span className="text-danger">*</span>}
           </label>
           {isReadonly ? (
-            <div className="px-4 py-3 bg-gray-50 border border-gray-200 rounded-lg text-sm text-gray-600 leading-relaxed whitespace-pre-wrap">
+            <div className="px-4 py-3 bg-subtle border border-line rounded-control text-sm text-fg-secondary whitespace-pre-wrap">
               {formData.description || t('sheet.noDescription')}
             </div>
           ) : (
             <textarea
               value={formData.description}
               onChange={(e) => setFormData({ ...formData, description: e.target.value })}
-              className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-red-500 text-sm resize-none leading-relaxed"
+              className="ui-textarea w-full px-4  border border-line-control rounded-control text-sm resize-none"
               placeholder={t('sheet.descriptionPlaceholder')}
               rows={3}
             />
@@ -279,13 +279,13 @@ export default function SkillSheet({ skill, onClose, onSaved, onDeleted }: Skill
 
         {/* Path (edit/view mode, shown above content) */}
         {isEdit && relativePath && (
-          <div className="flex items-center gap-2 px-3 py-2 bg-gray-50 border border-gray-100 rounded-lg text-xs text-gray-500">
-            <span className="text-gray-400 shrink-0">{t('sheet.path')}</span>
-            <code className="font-mono text-gray-600 truncate">{relativePath}</code>
+          <div className="flex items-center gap-2 px-3 py-2 bg-subtle border border-line rounded-control text-xs text-fg-muted">
+            <span className="text-fg-muted shrink-0">{t('sheet.path')}</span>
+            <code className="font-mono text-fg-secondary truncate">{relativePath}</code>
             {skill?.source && (
               <>
-                <span className="text-gray-300">·</span>
-                <span className="text-gray-400 shrink-0">{skill.source}</span>
+                <span className="text-fg-placeholder">·</span>
+                <span className="text-fg-muted shrink-0">{skill.source}</span>
               </>
             )}
           </div>
@@ -294,9 +294,9 @@ export default function SkillSheet({ skill, onClose, onSaved, onDeleted }: Skill
         {/* Content */}
         <div>
           <div className="flex items-center justify-between mb-1">
-            <label className="text-sm font-medium text-gray-700">
+            <label className="text-sm font-medium text-fg-secondary">
               {t('sheet.content')}
-              {!isEdit && <span className="text-red-500"> *</span>}
+              {!isEdit && <span className="text-danger"> *</span>}
             </label>
             {/* Edit/preview toggle (only for editable skills) */}
             {isEdit && !isReadonly && (
@@ -304,18 +304,18 @@ export default function SkillSheet({ skill, onClose, onSaved, onDeleted }: Skill
                 <button
                   type="button"
                   onClick={() => setContentEditing(false)}
-                  className="flex items-center gap-1 text-xs text-gray-500 hover:text-gray-700 transition-colors"
+                  className="flex items-center gap-1 text-xs text-fg-muted hover:text-fg-secondary transition-colors"
                 >
-                  <IconEye aria-hidden="true" className="w-3.5 h-3.5" />
+                  <IconEye aria-hidden="true" className="w-4 h-4" />
                   {t('sheet.preview')}
                 </button>
               ) : (
                 <button
                   type="button"
                   onClick={() => setContentEditing(true)}
-                  className="flex items-center gap-1 text-xs text-red-600 hover:text-red-700 transition-colors"
+                  className="flex items-center gap-1 text-xs text-danger hover:text-danger transition-colors"
                 >
-                  <IconPencil aria-hidden="true" className="w-3.5 h-3.5" />
+                  <IconPencil aria-hidden="true" className="w-4 h-4" />
                   {t('sheet.edit')}
                 </button>
               )
@@ -328,7 +328,7 @@ export default function SkillSheet({ skill, onClose, onSaved, onDeleted }: Skill
               <textarea
                 value={formData.content}
                 onChange={(e) => setFormData({ ...formData, content: e.target.value })}
-                className="w-full px-4 py-3 border border-red-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-red-500 resize-none font-mono text-sm"
+                className="ui-textarea w-full px-4  border border-danger rounded-control resize-none font-mono text-sm"
                 style={{ minHeight: '400px', maxHeight: '65vh' }}
                 placeholder={t('sheet.contentPlaceholder')}
                 autoFocus
@@ -340,7 +340,7 @@ export default function SkillSheet({ skill, onClose, onSaved, onDeleted }: Skill
                     setFormData({ ...formData, content: stripFrontMatter(skill?.content ?? '') });
                     setContentEditing(false);
                   }}
-                  className="px-3 py-1.5 text-sm text-gray-600 bg-gray-100 rounded-lg hover:bg-gray-200 transition-colors"
+                  className="px-3 py-1.5 text-sm text-fg-secondary bg-subtle rounded-control hover:bg-hover transition-colors"
                 >
                   {t('common:button.cancel')}
                 </button>
@@ -348,9 +348,9 @@ export default function SkillSheet({ skill, onClose, onSaved, onDeleted }: Skill
                   type="button"
                   onClick={handleSaveContent}
                   disabled={saving || !formData.content.trim()}
-                  className="flex items-center gap-1.5 px-3 py-1.5 text-sm bg-red-600 text-white rounded-lg hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                  className="flex items-center gap-1.5 px-3 py-1.5 text-sm bg-action text-action-fg rounded-control hover:bg-action-hover disabled:bg-disabled disabled:text-fg-disabled disabled:cursor-not-allowed transition-colors"
                 >
-                  {saving ? <IconLoader2 aria-hidden="true" className="w-3.5 h-3.5 animate-spin" /> : <IconDeviceFloppy aria-hidden="true" className="w-3.5 h-3.5" />}
+                  {saving ? <IconLoader2 aria-hidden="true" className="w-4 h-4 animate-spin" /> : <IconDeviceFloppy aria-hidden="true" className="w-4 h-4" />}
                   {saving ? t('sheet.saving') : t('common:button.save')}
                 </button>
               </div>
@@ -358,7 +358,7 @@ export default function SkillSheet({ skill, onClose, onSaved, onDeleted }: Skill
           ) : (
             /* Preview mode: render Markdown */
             <div
-              className="px-4 py-3 bg-gray-50 border border-gray-200 rounded-lg text-sm prose prose-sm max-w-none overflow-y-auto"
+              className="px-4 py-3 bg-subtle border border-line rounded-control text-sm prose prose-sm max-w-none overflow-y-auto"
               style={{ minHeight: '320px', maxHeight: '65vh' }}
             >
               <Suspense fallback={<MarkdownFallback />}>

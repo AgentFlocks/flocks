@@ -369,7 +369,7 @@ describe('RunTab', () => {
     );
 
     expect(await screen.findByText(/"marker": "embedded-focused"/)).toBeInTheDocument();
-    expect(screen.getAllByRole('button', { name: '执行历史' })[0]).toHaveClass('bg-white');
+    expect(screen.getAllByRole('button', { name: '执行历史' })[0]).toHaveClass('bg-selected');
   });
 
   it('uses dashboard mock execution fallback with the same execution id as task-center data', async () => {

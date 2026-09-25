@@ -1,3 +1,4 @@
+import PageDialog from '../PageDialog';
 import { useState, useEffect, useMemo, useCallback, useRef, useId } from 'react';
 import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
@@ -496,8 +497,8 @@ export default function ModelPage() {
     return (
       <div className="flex items-center justify-center h-full">
         <div className="text-center">
-          <p className="text-red-600 mb-4">{error}</p>
-          <button onClick={refetch} className="px-4 py-2 bg-slate-800 text-white rounded-lg hover:bg-slate-900">
+          <p className="text-danger mb-4">{error}</p>
+          <button onClick={refetch} className="px-4 py-2 bg-subtle text-fg rounded-control hover:bg-hover">
             {t('form.retry')}
           </button>
         </div>
@@ -508,7 +509,7 @@ export default function ModelPage() {
   return (
     <div className="h-full flex flex-col">
       {/* Header */}
-      <PageHeader
+      <PageHeader tone="ai"
         title={t('pageTitle')}
         description={t('pageDescription')}
         icon={<IconCpu aria-hidden="true" className="w-8 h-8" />}
@@ -516,7 +517,7 @@ export default function ModelPage() {
           <div className="flex items-center gap-2">
             <button
               onClick={() => setShowAddProvider(true)}
-              className="flex items-center gap-2 px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 transition-colors"
+              className="flex items-center gap-2 px-4 py-2 border border-line-control text-fg-secondary rounded-control hover:bg-hover transition-colors"
             >
               <IconPlus aria-hidden="true" className="w-4 h-4" />
               {t('addProvider')}
@@ -524,7 +525,7 @@ export default function ModelPage() {
             {selectedProvider && (
               <button
                 onClick={() => setShowAddModel(true)}
-                className="flex items-center gap-2 px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors"
+                className="flex items-center gap-2 px-4 py-2 bg-action text-action-fg rounded-control hover:bg-action-hover transition-colors"
               >
                 <IconPlus aria-hidden="true" className="w-4 h-4" />
                 {t('addModel')}
@@ -554,16 +555,16 @@ export default function ModelPage() {
           <div className="flex-1 overflow-y-auto space-y-1.5 pr-1">
             {configuredProviders.length === 0 ? (
               <div className="flex flex-col items-center justify-center py-12 text-center">
-                <div className="w-16 h-16 rounded-full bg-gray-100 flex items-center justify-center mb-3">
-                  <IconCpu aria-hidden="true" className="w-8 h-8 text-gray-400" />
+                <div className="w-16 h-16 rounded-pill bg-subtle flex items-center justify-center mb-3">
+                  <IconCpu aria-hidden="true" className="w-8 h-8 text-fg-muted" />
                 </div>
-                <p className="text-sm font-medium text-gray-700 mb-1">{t('providerList.empty')}</p>
-                <p className="text-xs text-gray-500 mb-4">{t('providerList.emptyHint')}</p>
+                <p className="text-sm font-medium text-fg-secondary mb-1">{t('providerList.empty')}</p>
+                <p className="text-xs text-fg-muted mb-4">{t('providerList.emptyHint')}</p>
                 <button
                   onClick={() => setShowAddProvider(true)}
                   className="ui-btn ui-btn-primary ui-btn-sm"
                 >
-                  <IconPlus aria-hidden="true" className="w-3.5 h-3.5" />
+                  <IconPlus aria-hidden="true" className="w-4 h-4" />
                   {t('providerList.addProvider')}
                 </button>
               </div>
@@ -596,7 +597,7 @@ export default function ModelPage() {
         </div>
 
         {/* Detail Panel */}
-        <div className="flex-1 min-h-0 bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden">
+        <div className="flex-1 min-h-0 bg-surface rounded-control shadow-sm border border-line overflow-hidden">
           {selectedProvider ? (
             <ProviderDetail
               key={selectedProvider.id}
@@ -616,7 +617,7 @@ export default function ModelPage() {
           ) : (
             <div className="h-full flex items-center justify-center">
               <EmptyState
-                icon={<IconCpu aria-hidden="true" className="w-16 h-16" />}
+                icon={<IconCpu aria-hidden="true" className="w-8 h-8" />}
                 title={configuredProviders.length === 0 ? t('emptyDetail.addFirst') : t('emptyDetail.selectProvider')}
                 description={
                   configuredProviders.length === 0
@@ -764,25 +765,25 @@ function DashboardStrip({
   return (
     <div className="grid grid-cols-2 gap-3 mb-4 lg:grid-cols-6">
       {/* Default Model Card */}
-      <div className="rounded-lg border p-3 bg-purple-50 text-purple-700 border-purple-200">
-        <div className="flex items-center justify-between mb-1 opacity-70">
+      <div className="rounded-card border p-4 bg-ai-soft text-ai border-ai">
+        <div className="flex items-center justify-between mb-1 text-fg-muted">
           <div className="flex items-center gap-2">
             <IconStar aria-hidden="true" className="w-5 h-5" />
             <span className="text-xs font-medium">{t('dashboard.defaultModel')}</span>
           </div>
           <button
             onClick={onEditDefault}
-            className="hover:opacity-100 opacity-60 transition-opacity"
+            className="ui-btn-icon inline-flex items-center justify-center hover:text-fg transition-colors"
             title={t('dashboard.setDefaultModel')}
           >
-            <IconPencil aria-hidden="true" className="w-3.5 h-3.5" />
+            <IconPencil aria-hidden="true" className="w-4 h-4" />
           </button>
         </div>
         <div className="text-lg font-bold truncate" title={defaultModel ? `${defaultModel.provider_id}/${defaultModel.model_id}` : undefined}>
           {defaultModel ? defaultModel.model_id : t('dashboard.noDefaultModel')}
         </div>
         {defaultModel && (
-          <div className="text-xs opacity-60 truncate" title={defaultModel.provider_id}>{defaultModel.provider_id}</div>
+          <div className="text-xs text-fg-muted truncate" title={defaultModel.provider_id}>{defaultModel.provider_id}</div>
         )}
       </div>
       <StatCard
@@ -826,14 +827,14 @@ function StatCard({ icon, label, value, color, small, onClick, title }: {
   title?: string;
 }) {
   const colorMap: Record<string, string> = {
-    green: 'bg-green-50 text-green-700 border-green-200',
-    blue: 'bg-sky-50 text-sky-800 border-sky-200',
-    purple: 'bg-purple-50 text-purple-700 border-purple-200',
-    amber: 'bg-amber-50 text-amber-700 border-amber-200',
+    green: 'bg-success-soft text-success border-success',
+    blue: 'bg-ai-soft text-ai border-line',
+    purple: 'bg-ai-soft text-ai border-ai',
+    amber: 'bg-subtle text-fg-secondary border-line',
   };
   return (
     <div
-      className={`rounded-lg border p-3 ${colorMap[color] || colorMap.blue} ${onClick ? 'cursor-pointer transition-opacity hover:opacity-90' : ''}`}
+      className={`rounded-card border p-4 ${colorMap[color] || colorMap.blue} ${onClick ? 'cursor-pointer transition-colors hover:bg-hover' : ''}`}
       onClick={onClick}
       title={title}
       role={onClick ? 'button' : undefined}
@@ -845,11 +846,11 @@ function StatCard({ icon, label, value, color, small, onClick, title }: {
         }
       } : undefined}
     >
-      <div className="flex items-center gap-2 mb-1 opacity-70">
+      <div className="flex items-center gap-2 mb-1 text-fg-muted">
         {icon}
         <span className="text-xs font-medium">{label}</span>
       </div>
-      <div className={`font-bold break-words ${small ? 'text-sm' : 'text-lg'}`}>{value}</div>
+      <div className={`font-bold break-words ${small ? 'text-sm' : 'text-3xl tabular-nums'}`}>{value}</div>
     </div>
   );
 }
@@ -863,39 +864,39 @@ function ProviderCard({ provider, isSelected, connStatus, onClick, onConfigure }
   onConfigure: () => void;
 }) {
   const { t } = useTranslation('model');
-  const dotColor = connStatus === 'connected' ? 'bg-green-500'
-    : connStatus === 'failed' ? 'bg-red-500'
-    : 'bg-amber-400';
+  const dotColor = connStatus === 'connected' ? 'bg-success'
+    : connStatus === 'failed' ? 'bg-danger'
+    : 'bg-warning';
 
   return (
     <div
       onClick={onClick}
-      className={`px-3 py-2.5 rounded-lg cursor-pointer transition-all flex items-center gap-2 ${
+      className={`px-3 py-2.5 rounded-control cursor-pointer transition-all flex items-center gap-2 ${
         isSelected
-          ? 'bg-gray-50 border-2 border-gray-400'
-          : 'bg-white border border-gray-200 hover:border-gray-300 hover:shadow-sm'
+          ? 'bg-subtle border-2 border-line-control'
+          : 'bg-surface border border-line hover:border-line-control hover:shadow-sm'
       }`}
     >
-      <div className={`w-2.5 h-2.5 rounded-full flex-shrink-0 ${dotColor}`} title={
+      <div className={`w-2.5 h-2.5 rounded-pill flex-shrink-0 ${dotColor}`} title={
         connStatus === 'connected' ? t('status.connected') : connStatus === 'failed' ? t('status.connectionFailed') : t('status.notTested')
       } />
       <div className="flex-1 min-w-0">
         <div className="flex items-center gap-1.5">
-          <span className="font-medium text-gray-900 text-sm truncate">{provider.name}</span>
+          <span className="font-medium text-fg text-sm truncate">{provider.name}</span>
         </div>
         <div className="text-xs mt-0.5">
           {connStatus === 'failed'
-            ? <span className="text-red-500">{t('status.connectionFailed')}</span>
-            : <span className="text-gray-500">{t('status.models', { count: provider.modelCount })}</span>
+            ? <span className="text-danger">{t('status.connectionFailed')}</span>
+            : <span className="text-fg-muted">{t('status.models', { count: provider.modelCount })}</span>
           }
         </div>
       </div>
       <button
         onClick={(e) => { e.stopPropagation(); onConfigure(); }}
-        className="p-1.5 rounded text-gray-400 hover:text-gray-700 hover:bg-gray-100 flex-shrink-0"
+        className="ui-btn-icon inline-flex items-center justify-center p-1.5 rounded-control text-fg-muted hover:text-fg-secondary hover:bg-hover flex-shrink-0"
         title={t('form.configure')}
       >
-        <IconSettings aria-hidden="true" className="w-3.5 h-3.5" />
+        <IconSettings aria-hidden="true" className="w-4 h-4" />
       </button>
     </div>
   );
@@ -1001,16 +1002,16 @@ function ProviderDetail({
     <div className="h-full flex flex-col">
       <div className="flex-1 overflow-y-auto px-4 py-3">
         <div className="flex items-center justify-between gap-3 mb-2">
-          <h3 className="text-sm font-medium text-gray-800 shrink-0">
-            {t('detail.modelList')}{!loadingModels && <span className="text-gray-400 font-normal"> ({models.length})</span>}
+          <h3 className="text-sm font-medium text-fg shrink-0">
+            {t('detail.modelList')}{!loadingModels && <span className="text-fg-muted font-normal"> ({models.length})</span>}
           </h3>
           <div className="flex items-center gap-1.5 shrink-0">
             {testedCount > 0 && (
-              <span className="text-[11px] text-gray-500">
-                <span className="text-green-600">{successCount} {t('detail.success')}</span>
-                {failedCount > 0 && <span className="text-red-600 ml-1">{failedCount} {t('detail.failed')}</span>}
+              <span className="text-xs text-fg-muted">
+                <span className="text-success">{successCount} {t('detail.success')}</span>
+                {failedCount > 0 && <span className="text-danger ml-1">{failedCount} {t('detail.failed')}</span>}
                 {batchTesting && (
-                  <span className="text-red-600 ml-1">
+                  <span className="text-danger ml-1">
                     {t('detail.testing')} {testedCount}/{models.filter(m => modelEnabledMap[`${provider.id}/${m.id}`] !== false).length}
                   </span>
                 )}
@@ -1019,9 +1020,9 @@ function ProviderDetail({
             <button
               onClick={handleBatchTest}
               disabled={batchTesting || loadingModels || models.length === 0}
-              className="flex items-center gap-1 px-2 py-1 text-xs border border-gray-300 text-gray-600 rounded hover:border-slate-400 hover:text-slate-800 hover:bg-slate-50 disabled:opacity-50"
+              className="flex items-center gap-1 px-2 py-1 text-xs border border-line-control text-fg-secondary rounded-tag hover:border-line-control hover:text-fg hover:bg-hover disabled:bg-disabled disabled:text-fg-disabled"
             >
-              {batchTesting ? <IconLoader2 aria-hidden="true" className="w-3 h-3 animate-spin" /> : <IconTestPipe aria-hidden="true" className="w-3 h-3" />}
+              {batchTesting ? <IconLoader2 aria-hidden="true" className="w-4 h-4 animate-spin" /> : <IconTestPipe aria-hidden="true" className="w-4 h-4" />}
               {batchTesting ? t('detail.testing') : t('detail.batchTest')}
             </button>
           </div>
@@ -1033,7 +1034,7 @@ function ProviderDetail({
           </div>
         ) : models.length === 0 ? (
           <EmptyState
-            icon={<IconCpu aria-hidden="true" className="w-10 h-10" />}
+            icon={<IconCpu aria-hidden="true" className="w-8 h-8" />}
             title={t('detail.noModels')}
             description={provider.configured ? t('detail.addModelHint') : t('detail.configureFirst')}
           />
@@ -1088,10 +1089,10 @@ function ModelCard({ model, enabled, testStatus, onOpenDetail, onTestModel, onTo
   const pricing = model.pricing;
 
   return (
-    <div className={`rounded border px-2.5 py-1.5 transition-colors ${
+    <div className={`rounded-tag border px-2.5 py-1.5 transition-colors ${
       !enabled
-        ? 'bg-gray-100 border-gray-200 opacity-60'
-        : 'bg-gray-50 border-gray-200 hover:border-gray-300'
+        ? 'bg-subtle border-line text-fg-muted'
+        : 'bg-subtle border-line hover:border-line-control'
     }`}>
       <div className="flex items-center gap-2 min-w-0">
         <div
@@ -1101,46 +1102,46 @@ function ModelCard({ model, enabled, testStatus, onOpenDetail, onTestModel, onTo
           tabIndex={onOpenDetail ? 0 : undefined}
           onKeyDown={onOpenDetail ? (e) => e.key === 'Enter' && onOpenDetail() : undefined}
         >
-          <h4 className={`font-medium text-sm break-words ${enabled ? 'text-gray-900' : 'text-gray-500 line-through'}`}>
+          <h4 className={`font-medium text-sm break-words ${enabled ? 'text-fg' : 'text-fg-muted line-through'}`}>
             {model.name}
           </h4>
           {!enabled && (
-            <span className="px-1 py-0.5 bg-gray-200 text-gray-500 text-[10px] rounded shrink-0">{t('status.disabled')}</span>
+            <span className="px-1 py-0.5 bg-selected text-fg-muted text-xs rounded-tag shrink-0">{t('status.disabled')}</span>
           )}
           {model.status === 'deprecated' && (
-            <span className="px-1 py-0.5 bg-gray-200 text-gray-600 text-[10px] rounded shrink-0">{t('status.deprecated')}</span>
+            <span className="px-1 py-0.5 bg-selected text-fg-secondary text-xs rounded-tag shrink-0">{t('status.deprecated')}</span>
           )}
           {testStatus?.status === 'testing' && (
-            <span className="inline-flex items-center gap-0.5 px-1 py-0.5 bg-amber-100 text-amber-800 text-[10px] rounded shrink-0">
-              <IconLoader2 aria-hidden="true" className="w-2.5 h-2.5 animate-spin" /> {t('status.testingModel')}
+            <span className="inline-flex items-center gap-0.5 px-1 py-0.5 bg-warning-soft text-warning text-xs rounded-tag shrink-0">
+              <IconLoader2 aria-hidden="true" className="w-4 h-4 animate-spin" /> {t('status.testingModel')}
             </span>
           )}
           {testStatus?.status === 'success' && (
-            <span className="inline-flex items-center gap-0.5 px-1 py-0.5 bg-green-100 text-green-700 text-[10px] rounded shrink-0" title={t('testSuccess')}>
-              <IconLink aria-hidden="true" className="w-2.5 h-2.5" /> {testStatus.latency ? `${testStatus.latency}ms` : t('status.available')}
+            <span className="inline-flex items-center gap-0.5 px-1 py-0.5 bg-success-soft text-success text-xs rounded-tag shrink-0" title={t('testSuccess')}>
+              <IconLink aria-hidden="true" className="w-4 h-4" /> {testStatus.latency ? `${testStatus.latency}ms` : t('status.available')}
             </span>
           )}
           {testStatus?.status === 'failed' && (
-            <span className="inline-flex items-center gap-0.5 px-1 py-0.5 bg-red-100 text-red-700 text-[10px] rounded shrink-0" title={testStatus.message ?? ''}>
-              <IconAlertCircle aria-hidden="true" className="w-2.5 h-2.5" /> {t('detail.failed')}
+            <span className="inline-flex items-center gap-0.5 px-1 py-0.5 bg-danger-soft text-danger text-xs rounded-tag shrink-0" title={testStatus.message ?? ''}>
+              <IconAlertCircle aria-hidden="true" className="w-4 h-4" /> {t('detail.failed')}
             </span>
           )}
-          <span className="text-[11px] text-gray-400 font-mono break-all" title={`${model.provider_id}/${model.id}`}>
+          <span className="text-xs text-fg-muted font-mono break-all" title={`${model.provider_id}/${model.id}`}>
             {model.id}
           </span>
-          {contextK && <span className="text-[11px] text-gray-500 shrink-0">{contextK}</span>}
+          {contextK && <span className="text-xs text-fg-muted shrink-0">{contextK}</span>}
           {pricing && !isPricingFree(pricing) && (
-            <span className="text-[11px] text-gray-500 shrink-0">{formatPricingPerMillion(pricing)}</span>
+            <span className="text-xs text-fg-muted shrink-0">{formatPricingPerMillion(pricing)}</span>
           )}
           {pricing && isPricingFree(pricing) && (
-            <span className="text-[11px] text-green-600 font-medium shrink-0">{t('status.free')}</span>
+            <span className="text-xs text-success font-medium shrink-0">{t('status.free')}</span>
           )}
           {enabled && (
             <span className="flex items-center gap-0.5 shrink-0">
-              {hasTools && <span className="text-slate-600" title={t('form.toolCall')}><IconTool aria-hidden="true" className="w-3 h-3" /></span>}
-              {hasVision && <span className="text-purple-500" title={t('form.vision')}><IconEye aria-hidden="true" className="w-3 h-3" /></span>}
-              {hasReasoning && <span className="text-amber-500" title={t('form.reasoning')}><IconBolt aria-hidden="true" className="w-3 h-3" /></span>}
-              {model.capabilities?.supports_streaming && <span className="text-gray-400" title={t('form.streaming')}><IconMessage aria-hidden="true" className="w-3 h-3" /></span>}
+              {hasTools && <span className="text-fg-secondary" title={t('form.toolCall')}><IconTool aria-hidden="true" className="w-4 h-4" /></span>}
+              {hasVision && <span className="text-ai" title={t('form.vision')}><IconEye aria-hidden="true" className="w-4 h-4" /></span>}
+              {hasReasoning && <span className="text-warning" title={t('form.reasoning')}><IconBolt aria-hidden="true" className="w-4 h-4" /></span>}
+              {model.capabilities?.supports_streaming && <span className="text-fg-muted" title={t('form.streaming')}><IconMessage aria-hidden="true" className="w-4 h-4" /></span>}
             </span>
           )}
         </div>
@@ -1150,21 +1151,21 @@ function ModelCard({ model, enabled, testStatus, onOpenDetail, onTestModel, onTo
             <button
               onClick={(e) => { e.stopPropagation(); onTestModel(); }}
               disabled={testStatus?.status === 'testing'}
-              className="p-1 rounded text-gray-400 hover:text-slate-700 hover:bg-slate-100 disabled:opacity-50"
+              className="ui-btn-icon inline-flex items-center justify-center p-1 rounded-control text-fg-muted hover:text-fg-secondary hover:bg-hover disabled:bg-disabled disabled:text-fg-disabled"
               title={t('form.testConnection')}
             >
-              {testStatus?.status === 'testing' ? <IconLoader2 aria-hidden="true" className="w-4 h-4 animate-spin text-amber-600" /> : <IconTestPipe aria-hidden="true" className="w-4 h-4" />}
+              {testStatus?.status === 'testing' ? <IconLoader2 aria-hidden="true" className="w-4 h-4 animate-spin text-warning" /> : <IconTestPipe aria-hidden="true" className="w-4 h-4" />}
             </button>
           )}
           <button
             onClick={(e) => { e.stopPropagation(); onToggle(); }}
-            className={`p-1 rounded ${enabled ? 'text-green-600 hover:text-slate-600' : 'text-gray-400 hover:text-green-600'}`}
+            className={`ui-btn-icon inline-flex items-center justify-center p-1 rounded-control ${enabled ? 'text-success hover:text-fg-secondary' : 'text-fg-muted hover:text-success'}`}
             title={enabled ? t('status.disabled') : t('status.available')}
           >
             {enabled ? <IconToggleRight aria-hidden="true" className="w-4 h-4" /> : <IconToggleLeft aria-hidden="true" className="w-4 h-4" />}
           </button>
           {onDelete && (
-            <button onClick={(e) => { e.stopPropagation(); onDelete(); }} className="p-1 rounded text-gray-400 hover:text-slate-700 hover:bg-slate-100" title={t('form.delete')}>
+            <button onClick={(e) => { e.stopPropagation(); onDelete(); }} className="ui-btn-icon inline-flex items-center justify-center p-1 rounded-control text-fg-muted hover:text-fg-secondary hover:bg-hover" title={t('form.delete')}>
               <IconTrash aria-hidden="true" className="w-4 h-4" />
             </button>
           )}
@@ -1172,8 +1173,8 @@ function ModelCard({ model, enabled, testStatus, onOpenDetail, onTestModel, onTo
       </div>
 
       {testStatus?.status === 'failed' && testStatus.message && (
-        <div className="mt-1.5 flex items-start gap-1.5 px-2 py-1 bg-red-50 border border-red-200 rounded text-[11px] text-red-700">
-          <IconAlertCircle aria-hidden="true" className="w-3 h-3 mt-0.5 flex-shrink-0" />
+        <div className="mt-1.5 flex items-start gap-1.5 px-2 py-1 bg-danger-soft border border-danger rounded-tag text-xs text-danger">
+          <IconAlertCircle aria-hidden="true" className="w-4 h-4 mt-0.5 flex-shrink-0" />
           <span className="break-all">{testStatus.message}</span>
         </div>
       )}
@@ -1183,14 +1184,14 @@ function ModelCard({ model, enabled, testStatus, onOpenDetail, onTestModel, onTo
 
 function CapBadge({ icon, label, color }: { icon: React.ReactNode; label: string; color: string }) {
   const colorMap: Record<string, string> = {
-    blue: 'bg-sky-100 text-sky-800',
-    purple: 'bg-purple-100 text-purple-700',
-    amber: 'bg-amber-100 text-amber-700',
-    gray: 'bg-gray-100 text-gray-600',
-    green: 'bg-green-100 text-green-700',
+    blue: 'bg-ai-soft text-ai',
+    purple: 'bg-ai-soft text-ai',
+    amber: 'bg-ai-soft text-ai',
+    gray: 'bg-subtle text-fg-secondary',
+    green: 'bg-ai-soft text-ai',
   };
   return (
-    <span className={`inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] font-medium ${colorMap[color] || colorMap.gray}`}>
+    <span className={`inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-tag text-xs font-medium ${colorMap[color] || colorMap.gray}`}>
       {icon} {label}
     </span>
   );
@@ -1513,7 +1514,7 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
           footerLeft: (
             <button
               onClick={() => setStep('add-model')}
-              className="flex items-center gap-1.5 px-4 py-2 text-sm text-slate-700 border border-slate-300 rounded-lg hover:bg-slate-50 transition-colors"
+              className="flex items-center gap-1.5 px-4 py-2 text-sm text-fg-secondary border border-line-control rounded-control hover:bg-hover transition-colors"
             >
               <IconPlus aria-hidden="true" className="w-4 h-4" />
               {t('wizard.addCustomModel')}
@@ -1530,7 +1531,7 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
             footerLeft: (
               <button
                 onClick={resetModelFormState}
-                className="flex items-center gap-1.5 px-4 py-2 text-sm text-slate-700 border border-slate-300 rounded-lg hover:bg-slate-50 transition-colors"
+                className="flex items-center gap-1.5 px-4 py-2 text-sm text-fg-secondary border border-line-control rounded-control hover:bg-hover transition-colors"
               >
                 <IconPlus aria-hidden="true" className="w-4 h-4" />
                 {t('wizard.addAnother')}
@@ -1546,7 +1547,7 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
           footerLeft: (
             <button
               onClick={handleComplete}
-              className="flex items-center gap-1.5 px-4 py-2 text-sm text-red-600 border border-red-200 rounded-lg hover:bg-red-50 transition-colors"
+              className="flex items-center gap-1.5 px-4 py-2 text-sm text-danger border border-danger rounded-control hover:bg-danger-soft transition-colors"
             >
               {t('wizard.skipForNow')}
             </button>
@@ -1606,49 +1607,49 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
                 <>
                   {/* Provider Selector Dropdown */}
                   <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1.5">
-                      {t('form.providerType')} <span className="text-slate-500">*</span>
+                    <label className="block text-sm font-medium text-fg-secondary mb-1.5">
+                      {t('form.providerType')} <span className="text-fg-muted">*</span>
                     </label>
                     <div className="relative">
                       <button
                         type="button"
                         onClick={() => setShowDropdown(!showDropdown)}
-                        className="w-full flex items-center justify-between px-3 py-2.5 border border-gray-300 rounded-lg text-left text-sm hover:border-gray-400 focus:outline-none focus:ring-2 focus:ring-slate-400 bg-white"
+                        className="w-full flex items-center justify-between px-3 py-2.5 border border-line-control rounded-control text-left text-sm hover:border-line-control bg-surface"
                       >
                         {selectedCatalog ? (
                           <div className="flex items-center gap-2">
                             <span className="font-medium">{selectedCatalog.name}</span>
-                            <span className="text-gray-400 text-xs">
+                            <span className="text-fg-muted text-xs">
                               {t('status.models', { count: selectedCatalog.model_count })}
                             </span>
                             {connectedSet.has(selectedCatalog.id) && !selectedCatalog.allow_multiple && (
-                              <span className="text-amber-600 text-xs">({t('form.alreadyAdded')})</span>
+                              <span className="text-warning text-xs">({t('form.alreadyAdded')})</span>
                             )}
                           </div>
                         ) : (
-                          <span className="text-gray-400">{t('form.selectProvider')}</span>
+                          <span className="text-fg-muted">{t('form.selectProvider')}</span>
                         )}
-                        <IconChevronDown aria-hidden="true" className={`w-4 h-4 text-gray-400 transition-transform ${showDropdown ? 'rotate-180' : ''}`} />
+                        <IconChevronDown aria-hidden="true" className={`w-4 h-4 text-fg-muted transition-transform ${showDropdown ? 'rotate-180' : ''}`} />
                       </button>
 
                       {showDropdown && (
-                        <div className="absolute z-20 mt-1 w-full bg-white border border-gray-200 rounded-lg shadow-lg max-h-[50vh] overflow-hidden">
-                          <div className="p-2 border-b border-gray-100">
+                        <div className="absolute z-20 mt-1 w-full bg-surface border border-line rounded-control shadow-lg max-h-[50vh] overflow-hidden">
+                          <div className="p-2 border-b border-line">
                             <div className="relative">
-                              <IconSearch aria-hidden="true" className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-400" />
+                              <IconSearch aria-hidden="true" className="absolute left-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-fg-muted" />
                               <input
                                 type="text"
                                 value={dropdownSearch}
                                 onChange={e => setDropdownSearch(e.target.value)}
                                 placeholder={t('form.searchProvider')}
-                                className="w-full pl-8 pr-3 py-1.5 text-sm border border-gray-200 rounded focus:outline-none focus:ring-1 focus:ring-slate-400"
+                                className="ui-input w-full pl-8 pr-3  text-sm border border-line rounded-tag"
                                 autoFocus
                               />
                             </div>
                           </div>
                           <div className="overflow-y-auto max-h-[calc(50vh-3rem)]">
                             {filteredDropdownItems.length === 0 ? (
-                              <div className="px-3 py-4 text-center text-sm text-gray-500">{t('form.noResults')}</div>
+                              <div className="px-3 py-4 text-center text-sm text-fg-muted">{t('form.noResults')}</div>
                             ) : (
                               filteredDropdownItems.map(p => {
                                 const alreadyAdded = connectedSet.has(p.id) && !p.allow_multiple;
@@ -1658,23 +1659,23 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
                                     type="button"
                                     disabled={alreadyAdded}
                                     onClick={() => handleSelectCatalogProvider(p.id)}
-                                    className={`w-full flex items-center gap-3 px-3 py-2.5 text-left text-sm hover:bg-slate-50 transition-colors ${
-                                      alreadyAdded ? 'opacity-40 cursor-not-allowed' : ''
-                                    } ${selectedCatalogId === p.id ? 'bg-slate-100' : ''}`}
+                                    className={`w-full flex items-center gap-3 px-3 py-2.5 text-left text-sm hover:bg-hover transition-colors ${
+                                      alreadyAdded ? 'text-fg-muted cursor-not-allowed' : ''
+                                    } ${selectedCatalogId === p.id ? 'bg-subtle' : ''}`}
                                   >
                                     <div className="flex-1 min-w-0">
                                       <div className="flex items-center gap-2">
-                                        <span className="font-medium text-gray-900">{p.name}</span>
+                                        <span className="font-medium text-fg">{p.name}</span>
                                         {alreadyAdded && (
-                                          <span className="px-1.5 py-0.5 bg-gray-100 text-gray-500 text-[9px] rounded font-medium">
+                                          <span className="px-1.5 py-0.5 bg-subtle text-fg-muted text-xs rounded-tag font-medium">
                                             {t('form.alreadyAdded')}
                                           </span>
                                         )}
                                       </div>
-                                      <p className="text-xs text-gray-500 mt-0.5 truncate">{p.description}</p>
+                                      <p className="text-xs text-fg-muted mt-0.5 truncate">{p.description}</p>
                                     </div>
-                                    <span className="text-xs text-gray-400 flex-shrink-0">{t('status.models', { count: p.model_count })}</span>
-                                    {selectedCatalogId === p.id && <IconCheck aria-hidden="true" className="w-4 h-4 text-slate-700 flex-shrink-0" />}
+                                    <span className="text-xs text-fg-muted flex-shrink-0">{t('status.models', { count: p.model_count })}</span>
+                                    {selectedCatalogId === p.id && <IconCheck aria-hidden="true" className="w-4 h-4 text-fg-secondary flex-shrink-0" />}
                                   </button>
                                 );
                               })
@@ -1690,48 +1691,48 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
                     <>
                       {selectedCatalogId === 'openai-compatible' && (
                         <div>
-                          <label className="block text-sm font-medium text-gray-700 mb-1">
+                          <label className="block text-sm font-medium text-fg-secondary mb-1">
                             {t('form.providerName')}
-                            <span className="text-slate-500 ml-1">*</span>
+                            <span className="text-fg-muted ml-1">*</span>
                           </label>
                           <input
                             type="text"
                             value={providerName}
                             onChange={e => setProviderName(e.target.value)}
-                            className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-400 text-sm"
+                            className="ui-input w-full px-3  border border-line-control rounded-control text-sm"
                             placeholder="e.g. SiliconFlow, LM Studio, My API"
                           />
-                          <p className="mt-1 text-xs text-gray-500">
+                          <p className="mt-1 text-xs text-fg-muted">
                             {t('form.providerNameHint')}
                           </p>
                         </div>
                       )}
 
                       <div className="col-span-2">
-                        <label className="block text-sm font-medium text-gray-700 mb-1">
+                        <label className="block text-sm font-medium text-fg-secondary mb-1">
                           Base URL
                           {isCatalogBaseUrlRequired(selectedCatalogId) ? (
-                            <span className="text-slate-500 ml-1">*</span>
+                            <span className="text-fg-muted ml-1">*</span>
                           ) : (
-                            <span className="text-gray-400 font-normal ml-1">{t('form.baseUrlOptional')}</span>
+                            <span className="text-fg-muted font-normal ml-1">{t('form.baseUrlOptional')}</span>
                           )}
                         </label>
                         <input
                           type="text"
                           value={baseUrl}
                           onChange={e => setBaseUrl(e.target.value)}
-                          className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-400 text-sm"
+                          className="ui-input w-full px-3  border border-line-control rounded-control text-sm"
                           placeholder={selectedCatalog.default_base_url || 'https://api.example.com/v1'}
                         />
                       </div>
 
                       <div>
-                        <label className="block text-sm font-medium text-gray-700 mb-1">
+                        <label className="block text-sm font-medium text-fg-secondary mb-1">
                           API Key
-                          {!providerAllowsEmptyApiKey(selectedCatalogId) && <span className="text-slate-500"> *</span>}
-                          {selectedCatalogId === 'ollama' && <span className="text-gray-400 font-normal ml-1">{t('form.ollamaNoKey')}</span>}
+                          {!providerAllowsEmptyApiKey(selectedCatalogId) && <span className="text-fg-muted"> *</span>}
+                          {selectedCatalogId === 'ollama' && <span className="text-fg-muted font-normal ml-1">{t('form.ollamaNoKey')}</span>}
                           {selectedCatalogId !== 'ollama' && providerAllowsEmptyApiKey(selectedCatalogId) && (
-                            <span className="text-gray-400 font-normal ml-1">{t('form.apiKeyOptional')}</span>
+                            <span className="text-fg-muted font-normal ml-1">{t('form.apiKeyOptional')}</span>
                           )}
                         </label>
                         <div className="relative">
@@ -1739,7 +1740,7 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
                             type={showApiKey ? 'text' : 'password'}
                             value={apiKey}
                             onChange={e => setApiKey(e.target.value)}
-                            className="w-full px-3 py-2 pr-10 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-400 text-sm"
+                            className="ui-input w-full px-3  pr-10 border border-line-control rounded-control text-sm"
                             placeholder={
                               providerAllowsEmptyApiKey(selectedCatalogId) && selectedCatalogId !== 'ollama'
                                 ? t('form.apiKeyOptionalPlaceholder')
@@ -1749,7 +1750,7 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
                           <button
                             type="button"
                             onClick={() => setShowApiKey(!showApiKey)}
-                            className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-gray-400 hover:text-gray-600 rounded"
+                            className="ui-btn-icon inline-flex items-center justify-center absolute right-2 top-1/2 -translate-y-1/2 p-1 text-fg-muted hover:text-fg-secondary rounded-control"
                             title={showApiKey ? t('form.hide') : t('form.show')}
                           >
                             {showApiKey ? <IconEyeOff aria-hidden="true" className="w-4 h-4" /> : <IconEye aria-hidden="true" className="w-4 h-4" />}
@@ -1760,20 +1761,20 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
                             href={THREATBOOK_FREE_KEY_URL}
                             target="_blank"
                             rel="noopener noreferrer"
-                            className="mt-2 inline-flex items-center gap-1.5 rounded-lg border border-green-200 bg-green-50 px-3 py-2 text-sm font-medium text-green-700 transition-colors hover:border-green-300 hover:bg-green-100"
+                            className="mt-2 inline-flex items-center gap-1.5 rounded-control border border-success bg-success-soft px-3 py-2 text-sm font-medium text-success transition-colors hover:border-success hover:bg-success-soft"
                           >
                             <IconExternalLink aria-hidden="true" className="h-4 w-4" />
                             {t('form.claimFreeKey')}
                           </a>
                         )}
                         {selectedCatalogId !== 'ollama' && providerAllowsEmptyApiKey(selectedCatalogId) && (
-                          <p className="text-xs text-gray-500 mt-1">{t('form.apiKeyOptionalHint')}</p>
+                          <p className="text-xs text-fg-muted mt-1">{t('form.apiKeyOptionalHint')}</p>
                         )}
                       </div>
 
                       {testResult && (
-                        <div className={`flex items-start gap-2 p-3 rounded-lg text-sm ${
-                          testResult.success ? 'bg-green-50 text-green-800 border border-green-200' : 'bg-red-50 text-red-800 border border-red-200'
+                        <div className={`flex items-start gap-2 p-3 rounded-control text-sm ${
+                          testResult.success ? 'bg-success-soft text-success border border-success' : 'bg-danger-soft text-danger border border-danger'
                         }`}>
                           {testResult.success ? <IconCheck aria-hidden="true" className="w-4 h-4 mt-0.5 flex-shrink-0" /> : <IconAlertCircle aria-hidden="true" className="w-4 h-4 mt-0.5 flex-shrink-0" />}
                           <span>{testResult.message}</span>
@@ -1781,29 +1782,29 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
                       )}
 
                       {isAzureProviderId(selectedCatalogId) && (
-                        <div className="space-y-3 p-3 bg-blue-50 border border-blue-200 rounded-lg">
+                        <div className="space-y-3 p-3 bg-info-soft border border-info rounded-control">
                           <div>
-                            <label className="block text-sm font-medium text-gray-700 mb-1">
+                            <label className="block text-sm font-medium text-fg-secondary mb-1">
                               {t('form.azureDeploymentName')}
                             </label>
                             <input
                               type="text"
                               value={azureDeploymentName}
                               onChange={e => setAzureDeploymentName(e.target.value)}
-                              className="w-full px-3 py-2 border border-blue-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-300 text-sm bg-white"
+                              className="ui-input w-full px-3  border border-info rounded-control text-sm bg-surface"
                               placeholder={t('form.azureDeploymentPlaceholder')}
                             />
-                            <p className="mt-1 text-xs text-blue-800">{t('form.azureDeploymentHint')}</p>
+                            <p className="mt-1 text-xs text-info">{t('form.azureDeploymentHint')}</p>
                           </div>
                           <div>
-                            <label className="block text-sm font-medium text-gray-700 mb-1">
+                            <label className="block text-sm font-medium text-fg-secondary mb-1">
                               {t('form.azureDeploymentDisplayName')}
                             </label>
                             <input
                               type="text"
                               value={azureDeploymentDisplayName}
                               onChange={e => setAzureDeploymentDisplayName(e.target.value)}
-                              className="w-full px-3 py-2 border border-blue-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-300 text-sm bg-white"
+                              className="ui-input w-full px-3  border border-info rounded-control text-sm bg-surface"
                               placeholder={azureDeploymentName.trim() || t('form.azureDeploymentDisplayPlaceholder')}
                             />
                           </div>
@@ -1813,31 +1814,31 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
                       {selectedCatalog.models.length > 0 && (
                         <div>
                           <div className="flex items-center justify-between mb-2">
-                            <label className="text-sm font-medium text-gray-700">
+                            <label className="text-sm font-medium text-fg-secondary">
                               {t('form.availableModels')}
-                              <span className="text-gray-400 font-normal ml-1">
+                              <span className="text-fg-muted font-normal ml-1">
                                 ({selectedModelIds.size}/{selectedCatalog.models.length} {t('form.selected')})
                               </span>
                             </label>
-                            <button type="button" onClick={handleToggleAllModels} className="text-xs text-slate-600 hover:text-slate-800">
+                            <button type="button" onClick={handleToggleAllModels} className="text-xs text-fg-secondary hover:text-fg">
                               {selectedModelIds.size === selectedCatalog.models.length ? t('form.deselectAll') : t('form.selectAll')}
                             </button>
                           </div>
-                          <div className="border border-gray-200 rounded-lg max-h-64 overflow-y-auto divide-y divide-gray-100">
+                          <div className="border border-line rounded-control max-h-64 overflow-y-auto divide-y divide-line">
                             {selectedCatalog.models.map(model => (
-                              <label key={model.id} className="flex items-center gap-3 px-3 py-2 hover:bg-gray-50 cursor-pointer">
+                              <label key={model.id} className="flex items-center gap-3 px-3 py-2 hover:bg-hover cursor-pointer">
                                 <input
                                   type="checkbox"
                                   checked={selectedModelIds.has(model.id)}
                                   onChange={() => handleToggleModel(model.id)}
-                                  className="w-4 h-4 text-slate-600 rounded border-gray-300 focus:ring-slate-400"
+                                  className="w-4 h-4 text-fg-secondary rounded-tag border-line-control "
                                 />
                                 <div className="flex-1 min-w-0">
                                   <div className="flex items-center gap-2">
-                                    <span className="text-sm font-medium text-gray-900">{model.name}</span>
+                                    <span className="text-sm font-medium text-fg">{model.name}</span>
                                     <CatalogModelBadges model={model} />
                                   </div>
-                                  <div className="flex items-center gap-3 text-xs text-gray-500 mt-0.5">
+                                  <div className="flex items-center gap-3 text-xs text-fg-muted mt-0.5">
                                     <span className="font-mono">{model.id}</span>
                                     {model.limits && (
                                       <span>
@@ -1850,7 +1851,7 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
                                       <span>{formatPricingPerMillion(model.pricing)}</span>
                                     )}
                                     {model.pricing && isPricingFree(model.pricing) && (
-                                      <span className="text-green-600">{t('status.free')}</span>
+                                      <span className="text-success">{t('status.free')}</span>
                                     )}
                                   </div>
                                 </div>
@@ -1860,9 +1861,9 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
                         </div>
                       )}
 
-                      <div className="flex items-start gap-2 p-3 bg-slate-50 border border-slate-200 rounded-lg">
-                        <IconShield aria-hidden="true" className="w-4 h-4 text-slate-600 mt-0.5 flex-shrink-0" />
-                        <p className="text-xs text-slate-700">
+                      <div className="flex items-start gap-2 p-3 bg-subtle border border-line rounded-control">
+                        <IconShield aria-hidden="true" className="w-4 h-4 text-fg-secondary mt-0.5 flex-shrink-0" />
+                        <p className="text-xs text-fg-secondary">
                           {t('form.credentialNote')}
                         </p>
                       </div>
@@ -1877,7 +1878,7 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
             <button
               onClick={handleTest}
               disabled={!canTest || testing || saving}
-              className="flex items-center gap-2 px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 disabled:opacity-50 text-sm"
+              className="flex items-center gap-2 px-4 py-2 border border-line-control text-fg-secondary rounded-control hover:bg-hover disabled:bg-disabled disabled:text-fg-disabled text-sm"
             >
               {testing ? <IconLoader2 aria-hidden="true" className="w-4 h-4 animate-spin" /> : <IconTestPipe aria-hidden="true" className="w-4 h-4" />}
               {testing ? t('form.testingConnection') : t('form.testConnection')}
@@ -1889,15 +1890,15 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
       {/* ── Step: Success (catalog providers with predefined models) ── */}
       {step === 'success' && (
         <div className="flex flex-col items-center justify-center py-8 text-center">
-          <div className="w-16 h-16 rounded-full bg-green-100 flex items-center justify-center mb-4">
-            <IconCircleCheck aria-hidden="true" className="w-8 h-8 text-green-600" />
+          <div className="w-16 h-16 rounded-pill bg-success-soft flex items-center justify-center mb-4">
+            <IconCircleCheck aria-hidden="true" className="w-8 h-8 text-success" />
           </div>
-          <h3 className="text-lg font-semibold text-gray-900 mb-2">{t('wizard.providerSaved')}</h3>
-          <p className="text-sm text-gray-500 max-w-xs">
+          <h3 className="text-title-card font-semibold text-fg mb-2">{t('wizard.providerSaved')}</h3>
+          <p className="text-sm text-fg-muted max-w-xs">
             {t('wizard.providerSavedHint', { name: savedProviderName })}
           </p>
           {addedModelCount > 0 && (
-            <p className="mt-3 text-sm text-green-600 font-medium">
+            <p className="mt-3 text-sm text-success font-medium">
               {t('wizard.modelsAdded', { count: addedModelCount })}
             </p>
           )}
@@ -1908,15 +1909,15 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
       {step === 'add-model' && (
         <div className="space-y-4">
           {addedModelCount === 0 && (
-            <div className="flex items-start gap-2 p-3 bg-amber-50 border border-amber-200 rounded-lg">
-              <IconAlertTriangle aria-hidden="true" className="w-4 h-4 text-amber-600 mt-0.5 flex-shrink-0" />
-              <p className="text-xs text-amber-800">{t('wizard.noModelsNote')}</p>
+            <div className="flex items-start gap-2 p-3 bg-warning-soft border border-warning rounded-control">
+              <IconAlertTriangle aria-hidden="true" className="w-4 h-4 text-warning mt-0.5 flex-shrink-0" />
+              <p className="text-xs text-warning">{t('wizard.noModelsNote')}</p>
             </div>
           )}
           {addedModelCount > 0 && !modelTestResult && (
-            <div className="flex items-center gap-2 p-3 bg-green-50 border border-green-200 rounded-lg">
-              <IconCircleCheck aria-hidden="true" className="w-4 h-4 text-green-600 flex-shrink-0" />
-              <p className="text-xs text-green-800">{t('wizard.modelsAdded', { count: addedModelCount })}</p>
+            <div className="flex items-center gap-2 p-3 bg-success-soft border border-success rounded-control">
+              <IconCircleCheck aria-hidden="true" className="w-4 h-4 text-success flex-shrink-0" />
+              <p className="text-xs text-success">{t('wizard.modelsAdded', { count: addedModelCount })}</p>
             </div>
           )}
           <ModelFormFields
@@ -1936,18 +1937,18 @@ function CatalogModelBadges({ model }: { model: CatalogModel }) {
   return (
     <div className="flex items-center gap-1">
       {model.capabilities.supports_tools && (
-        <span className="inline-flex items-center px-1 py-0.5 bg-slate-100 text-slate-700 text-[9px] rounded">
-          <IconTool aria-hidden="true" className="w-2.5 h-2.5" />
+        <span className="inline-flex items-center px-1 py-0.5 bg-subtle text-fg-secondary text-xs rounded-tag">
+          <IconTool aria-hidden="true" className="w-4 h-4" />
         </span>
       )}
       {model.capabilities.supports_vision && (
-        <span className="inline-flex items-center px-1 py-0.5 bg-purple-100 text-purple-700 text-[9px] rounded">
-          <IconEye aria-hidden="true" className="w-2.5 h-2.5" />
+        <span className="inline-flex items-center px-1 py-0.5 bg-ai-soft text-ai text-xs rounded-tag">
+          <IconEye aria-hidden="true" className="w-4 h-4" />
         </span>
       )}
       {model.capabilities.supports_reasoning && (
-        <span className="inline-flex items-center px-1 py-0.5 bg-amber-100 text-amber-700 text-[9px] rounded">
-          <IconBolt aria-hidden="true" className="w-2.5 h-2.5" />
+        <span className="inline-flex items-center px-1 py-0.5 bg-warning-soft text-warning text-xs rounded-tag">
+          <IconBolt aria-hidden="true" className="w-4 h-4" />
         </span>
       )}
     </div>
@@ -2040,27 +2041,27 @@ function ModelFormFields({ form, testResult, testing, modelIdPlaceholder, modelI
     <>
       <div className="grid grid-cols-2 gap-3">
         <div>
-          <label className="block text-sm font-medium text-gray-700 mb-1">
-            {t('form.modelId')} <span className="text-slate-500">*</span>
+          <label className="block text-sm font-medium text-fg-secondary mb-1">
+            {t('form.modelId')} <span className="text-fg-muted">*</span>
           </label>
           <input
             type="text"
             value={form.modelId}
             onChange={e => form.setModelId(e.target.value)}
-            className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-400 text-sm"
+            className="ui-input w-full px-3  border border-line-control rounded-control text-sm"
             placeholder={modelIdPlaceholder || 'model-id'}
           />
-          {modelIdHint && <p className="mt-1 text-xs text-gray-500">{modelIdHint}</p>}
+          {modelIdHint && <p className="mt-1 text-xs text-fg-muted">{modelIdHint}</p>}
         </div>
         <div>
-          <label className="block text-sm font-medium text-gray-700 mb-1">
-            {t('form.displayName')} <span className="text-slate-500">*</span>
+          <label className="block text-sm font-medium text-fg-secondary mb-1">
+            {t('form.displayName')} <span className="text-fg-muted">*</span>
           </label>
           <input
             type="text"
             value={form.name}
             onChange={e => form.setName(e.target.value)}
-            className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-400 text-sm"
+            className="ui-input w-full px-3  border border-line-control rounded-control text-sm"
             placeholder="model-name"
           />
         </div>
@@ -2068,29 +2069,29 @@ function ModelFormFields({ form, testResult, testing, modelIdPlaceholder, modelI
 
       <div className="grid grid-cols-2 gap-3">
         <div>
-          <label className="block text-sm font-medium text-gray-700 mb-1">{t('form.contextWindow')}</label>
+          <label className="block text-sm font-medium text-fg-secondary mb-1">{t('form.contextWindow')}</label>
           <input
             type="number"
             value={form.contextWindow}
             onChange={e => form.setContextWindow(e.target.value)}
-            className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-400 text-sm"
+            className="ui-input w-full px-3  border border-line-control rounded-control text-sm"
             placeholder="Auto"
           />
         </div>
         <div>
-          <label className="block text-sm font-medium text-gray-700 mb-1">{t('form.maxOutput')}</label>
+          <label className="block text-sm font-medium text-fg-secondary mb-1">{t('form.maxOutput')}</label>
           <input
             type="number"
             value={form.maxOutput}
             onChange={e => form.setMaxOutput(e.target.value)}
-            className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-400 text-sm"
+            className="ui-input w-full px-3  border border-line-control rounded-control text-sm"
             placeholder="Auto"
           />
         </div>
       </div>
 
       <div>
-        <label className="block text-sm font-medium text-gray-700 mb-2">{t('form.capabilities')}</label>
+        <label className="block text-sm font-medium text-fg-secondary mb-2">{t('form.capabilities')}</label>
         <div className="grid grid-cols-2 gap-2">
           <ToggleField label={t('form.toolCall')} checked={form.supportsTools} onChange={form.setSupportsTools} />
           <ToggleField label={t('form.vision')} checked={form.supportsVision} onChange={form.setSupportsVision} />
@@ -2100,45 +2101,45 @@ function ModelFormFields({ form, testResult, testing, modelIdPlaceholder, modelI
       </div>
 
       <div>
-        <label className="block text-sm font-medium text-gray-700 mb-2">{t('form.pricing')}</label>
+        <label className="block text-sm font-medium text-fg-secondary mb-2">{t('form.pricing')}</label>
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
           <div>
-            <label className="block text-xs text-gray-500 mb-1">{t('form.input')}</label>
+            <label className="block text-xs text-fg-muted mb-1">{t('form.input')}</label>
             <input
               type="number"
               step="0.01"
               value={form.inputPrice}
               onChange={e => form.setInputPrice(e.target.value)}
-              className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-400 text-sm"
+              className="ui-input w-full px-3  border border-line-control rounded-control text-sm"
             />
           </div>
           <div>
-            <label className="block text-xs text-gray-500 mb-1">{t('form.output')}</label>
+            <label className="block text-xs text-fg-muted mb-1">{t('form.output')}</label>
             <input
               type="number"
               step="0.01"
               value={form.outputPrice}
               onChange={e => form.setOutputPrice(e.target.value)}
-              className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-400 text-sm"
+              className="ui-input w-full px-3  border border-line-control rounded-control text-sm"
             />
           </div>
           <div>
-            <label className="block text-xs text-gray-500 mb-1">{t('form.cacheRead')}</label>
+            <label className="block text-xs text-fg-muted mb-1">{t('form.cacheRead')}</label>
             <input
               type="number"
               step="0.01"
               value={form.cacheReadPrice}
               onChange={e => form.setCacheReadPrice(e.target.value)}
-              className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-400 text-sm"
+              className="ui-input w-full px-3  border border-line-control rounded-control text-sm"
               placeholder="—"
             />
           </div>
           <div>
-            <label className="block text-xs text-gray-500 mb-1">{t('form.currency')}</label>
+            <label className="block text-xs text-fg-muted mb-1">{t('form.currency')}</label>
             <select
               value={form.currency}
               onChange={e => form.setCurrency(e.target.value)}
-              className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-400 text-sm"
+              className="ui-select w-full px-3  border border-line-control rounded-control text-sm"
             >
               <option value="USD">USD</option>
               <option value="CNY">CNY</option>
@@ -2148,12 +2149,12 @@ function ModelFormFields({ form, testResult, testing, modelIdPlaceholder, modelI
       </div>
 
       {(testing || testResult) && (
-        <div className={`flex items-start gap-2 p-3 rounded-lg text-sm ${
+        <div className={`flex items-start gap-2 p-3 rounded-control text-sm ${
           testing
-            ? 'bg-slate-50 text-slate-800 border border-slate-200'
+            ? 'bg-subtle text-fg border border-line'
             : testResult?.success
-              ? 'bg-green-50 text-green-800 border border-green-200'
-              : 'bg-red-50 text-red-800 border border-red-200'
+              ? 'bg-success-soft text-success border border-success'
+              : 'bg-danger-soft text-danger border border-danger'
         }`}>
           {testing ? (
             <IconLoader2 aria-hidden="true" className="w-4 h-4 mt-0.5 flex-shrink-0 animate-spin" />
@@ -2258,12 +2259,12 @@ Provider: ${provider.name} (${provider.id})
     >
       <div className="space-y-4">
         <div>
-          <label className="block text-sm font-medium text-gray-700 mb-1">Provider</label>
+          <label className="block text-sm font-medium text-fg-secondary mb-1">Provider</label>
           <input
             type="text"
             readOnly
             value={provider.name}
-            className="w-full px-3 py-2 border border-gray-300 rounded-lg bg-gray-50 text-sm text-gray-900 cursor-default"
+            className="ui-input w-full px-3  border border-line-control rounded-control bg-subtle text-sm text-fg cursor-default"
           />
         </div>
         <ModelFormFields
@@ -2286,32 +2287,18 @@ function ToggleField({ label, checked, onChange, disabled, disabledHint }: {
   /** Tooltip text shown when the toggle is disabled. */
   disabledHint?: string;
 }) {
+  const { t } = useTranslation('common');
   return (
-    <label
-      className={`flex items-center gap-3 w-full min-w-0 ${disabled ? 'cursor-not-allowed' : 'cursor-pointer'}`}
-      title={disabled ? disabledHint : undefined}
-    >
-      <button
-        type="button"
-        role="switch"
-        aria-checked={checked}
-        disabled={disabled}
-        onClick={() => !disabled && onChange(!checked)}
-        className={`relative w-10 h-6 rounded-full transition-colors flex-shrink-0 ${
-          disabled
-            ? checked
-              ? 'bg-green-200 cursor-not-allowed'   // locked-ON: muted green
-              : 'bg-gray-200 cursor-not-allowed'    // locked-OFF: light gray
-            : checked ? 'bg-green-600' : 'bg-gray-400'
-        }`}
-      >
-        <span className={`absolute top-1 w-4 h-4 rounded-full shadow-sm transition-transform ${
-          disabled
-            ? checked ? 'bg-white' : 'bg-gray-400'
-            : 'bg-white'
-        } ${checked ? 'translate-x-5 left-0' : 'translate-x-1 left-0'}`} />
-      </button>
-      <span className={`text-sm ${disabled ? 'text-gray-400' : 'text-gray-700'}`}>{label}</span>
+    <label className={`flex items-center gap-2 w-full min-w-0 ${disabled ? 'cursor-not-allowed' : 'cursor-pointer'}`}
+      title={disabled ? disabledHint : undefined}>
+      <button type="button" role="switch" aria-checked={checked} aria-label={label}
+        disabled={disabled} onClick={() => !disabled && onChange(!checked)} className="ui-btn-icon inline-flex shrink-0 items-center justify-center rounded-control disabled:cursor-not-allowed">
+<span className="ui-switch" aria-hidden="true" aria-checked={checked} aria-disabled={disabled} />
+</button>
+      <span className={`text-sm ${disabled ? 'text-fg-disabled' : 'text-fg-secondary'}`}>{label}</span>
+      <span className={`text-xs ${disabled ? 'text-fg-disabled' : 'text-fg-muted'}`}>
+        {t(checked ? 'status.enabled' : 'status.disabled')}
+      </span>
     </label>
   );
 }
@@ -2573,7 +2560,7 @@ ${hasExisting ? '你已有凭证配置，可以更新或测试连接。' : '请�
       footerLeft={
         <button
           onClick={onDelete}
-          className="flex items-center gap-1.5 px-3 py-2 text-sm text-red-600 hover:text-red-700 hover:bg-red-50 rounded-lg transition-colors"
+          className="flex items-center gap-1.5 px-3 py-2 text-sm text-danger hover:text-danger hover:bg-danger-soft rounded-control transition-colors"
         >
           <IconTrash aria-hidden="true" className="w-4 h-4" />
           {t('form.removeProvider')}
@@ -2583,21 +2570,21 @@ ${hasExisting ? '你已有凭证配置，可以更新或测试连接。' : '请�
       <div className="space-y-5">
         {/* openai-compatible badge */}
         {(provider.id === 'openai-compatible' || provider.id.startsWith('custom-')) && (
-          <div className="flex items-center gap-1.5 px-2.5 py-1.5 bg-slate-100 border border-slate-200 rounded-md w-fit">
-            <span className="text-[11px] font-medium text-slate-700">openai-compatible</span>
+          <div className="flex items-center gap-1.5 px-2.5 py-1.5 bg-subtle border border-line rounded-control w-fit">
+            <span className="text-xs font-medium text-fg-secondary">openai-compatible</span>
           </div>
         )}
 
         {(provider.id === 'openai-compatible' || provider.id.startsWith('custom-')) && (
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1.5">
+            <label className="block text-sm font-medium text-fg-secondary mb-1.5">
               {t('form.providerName')}
             </label>
             <input
               type="text"
               value={providerName}
               onChange={(e) => setProviderName(e.target.value)}
-              className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-400 text-sm"
+              className="ui-input w-full px-3  border border-line-control rounded-control text-sm"
               placeholder="e.g. SiliconFlow, LM Studio, My API"
             />
           </div>
@@ -2605,27 +2592,27 @@ ${hasExisting ? '你已有凭证配置，可以更新或测试连接。' : '请�
 
         {/* Base URL */}
         <div>
-          <label className="block text-sm font-medium text-gray-700 mb-1.5">
+          <label className="block text-sm font-medium text-fg-secondary mb-1.5">
             Base URL
-            <span className="text-gray-400 font-normal ml-1">{t('form.baseUrlOptional')}</span>
+            <span className="text-fg-muted font-normal ml-1">{t('form.baseUrlOptional')}</span>
           </label>
           <input
             type="text"
             value={baseUrl}
             onChange={(e) => setBaseUrl(e.target.value)}
-            className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-400 text-sm"
+            className="ui-input w-full px-3  border border-line-control rounded-control text-sm"
             placeholder="https://api.example.com/v1"
           />
         </div>
 
         {/* API Key */}
         <div>
-          <label className="block text-sm font-medium text-gray-700 mb-1.5">
+          <label className="block text-sm font-medium text-fg-secondary mb-1.5">
             API Key
-            {!hasExisting && !providerAllowsEmptyApiKey(provider.id) && <span className="text-slate-500"> *</span>}
-            {provider.id === 'ollama' && <span className="text-gray-400 font-normal ml-1">{t('form.ollamaNoKey')}</span>}
+            {!hasExisting && !providerAllowsEmptyApiKey(provider.id) && <span className="text-fg-muted"> *</span>}
+            {provider.id === 'ollama' && <span className="text-fg-muted font-normal ml-1">{t('form.ollamaNoKey')}</span>}
             {provider.id !== 'ollama' && providerAllowsEmptyApiKey(provider.id) && (
-              <span className="text-gray-400 font-normal ml-1">{t('form.apiKeyOptional')}</span>
+              <span className="text-fg-muted font-normal ml-1">{t('form.apiKeyOptional')}</span>
             )}
           </label>
           <div className="relative">
@@ -2633,7 +2620,7 @@ ${hasExisting ? '你已有凭证配置，可以更新或测试连接。' : '请�
               type={showApiKey ? 'text' : 'password'}
               value={apiKey}
               onChange={(e) => setApiKey(e.target.value)}
-              className="w-full px-3 py-2 pr-10 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-400 text-sm"
+              className="ui-input w-full px-3  pr-10 border border-line-control rounded-control text-sm"
               placeholder={
                 hasExisting
                   ? t('form.apiKeyKeepExisting')
@@ -2650,7 +2637,7 @@ ${hasExisting ? '你已有凭证配置，可以更新或测试连接。' : '请�
             <button
               type="button"
               onClick={() => setShowApiKey(!showApiKey)}
-              className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-gray-400 hover:text-gray-600 rounded"
+              className="ui-btn-icon inline-flex items-center justify-center absolute right-2 top-1/2 -translate-y-1/2 p-1 text-fg-muted hover:text-fg-secondary rounded-control"
               title={showApiKey ? t('form.hide') : t('form.show')}
             >
               {showApiKey ? <IconEyeOff aria-hidden="true" className="w-4 h-4" /> : <IconEye aria-hidden="true" className="w-4 h-4" />}
@@ -2661,14 +2648,14 @@ ${hasExisting ? '你已有凭证配置，可以更新或测试连接。' : '请�
               href={THREATBOOK_FREE_KEY_URL}
               target="_blank"
               rel="noopener noreferrer"
-              className="mt-2 inline-flex items-center gap-1.5 rounded-lg border border-green-200 bg-green-50 px-3 py-2 text-sm font-medium text-green-700 transition-colors hover:border-green-300 hover:bg-green-100"
+              className="mt-2 inline-flex items-center gap-1.5 rounded-control border border-success bg-success-soft px-3 py-2 text-sm font-medium text-success transition-colors hover:border-success hover:bg-success-soft"
             >
               <IconExternalLink aria-hidden="true" className="h-4 w-4" />
               {t('form.claimFreeKey')}
             </a>
           )}
           {provider.id !== 'ollama' && providerAllowsEmptyApiKey(provider.id) && (
-            <p className="text-xs text-gray-500 mt-1">{t('form.apiKeyOptionalHint')}</p>
+            <p className="text-xs text-fg-muted mt-1">{t('form.apiKeyOptionalHint')}</p>
           )}
         </div>
 
@@ -2676,31 +2663,31 @@ ${hasExisting ? '你已有凭证配置，可以更新或测试连接。' : '请�
         {catalogModels.length > 0 && (
           <div>
             <div className="flex items-center justify-between mb-2">
-              <label className="text-sm font-medium text-gray-700">
+              <label className="text-sm font-medium text-fg-secondary">
                 {t('form.availableModels')}
-                <span className="text-gray-400 font-normal ml-1">
+                <span className="text-fg-muted font-normal ml-1">
                   ({selectedCatalogModelCount}/{catalogModels.length} {t('form.selected')})
                 </span>
               </label>
-              <button type="button" onClick={handleToggleAllCatalogModels} className="text-xs text-slate-600 hover:text-slate-800">
+              <button type="button" onClick={handleToggleAllCatalogModels} className="text-xs text-fg-secondary hover:text-fg">
                 {catalogModels.every(m => selectedModelIds.has(m.id)) ? t('form.deselectAll') : t('form.selectAll')}
               </button>
             </div>
-            <div className="border border-gray-200 rounded-lg max-h-48 overflow-y-auto divide-y divide-gray-100">
+            <div className="border border-line rounded-control max-h-48 overflow-y-auto divide-y divide-line">
               {catalogModels.map(model => (
-                <label key={model.id} className="flex items-center gap-3 px-3 py-2 hover:bg-gray-50 cursor-pointer">
+                <label key={model.id} className="flex items-center gap-3 px-3 py-2 hover:bg-hover cursor-pointer">
                   <input
                     type="checkbox"
                     checked={selectedModelIds.has(model.id)}
                     onChange={() => handleToggleCatalogModel(model.id)}
-                    className="w-4 h-4 text-slate-600 rounded border-gray-300 focus:ring-slate-400"
+                    className="w-4 h-4 text-fg-secondary rounded-tag border-line-control "
                   />
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2">
-                      <span className="text-sm font-medium text-gray-900">{model.name}</span>
+                      <span className="text-sm font-medium text-fg">{model.name}</span>
                       <CatalogModelBadges model={model} />
                     </div>
-                    <div className="flex items-center gap-3 text-xs text-gray-500 mt-0.5">
+                    <div className="flex items-center gap-3 text-xs text-fg-muted mt-0.5">
                       <span className="font-mono truncate">{model.id}</span>
                       {model.limits && (
                         <span>
@@ -2718,47 +2705,47 @@ ${hasExisting ? '你已有凭证配置，可以更新或测试连接。' : '请�
         )}
 
         {isAzureProvider && catalogModelsLoaded && (
-          <div className="space-y-3 p-3 bg-blue-50 border border-blue-200 rounded-lg">
+          <div className="space-y-3 p-3 bg-info-soft border border-info rounded-control">
             <div>
-              <h4 className="text-sm font-medium text-gray-900">{t('form.azureCustomDeployments')}</h4>
-              <p className="mt-1 text-xs text-blue-800">{t('form.azureDeploymentHint')}</p>
+              <h4 className="text-sm font-medium text-fg">{t('form.azureCustomDeployments')}</h4>
+              <p className="mt-1 text-xs text-info">{t('form.azureDeploymentHint')}</p>
             </div>
 
             {azureCustomModels.length > 0 ? (
               <div className="space-y-2">
                 {azureCustomModels.map(model => (
-                  <div key={model.id} className="px-3 py-2 bg-white border border-blue-100 rounded-lg">
-                    <div className="text-sm font-medium text-gray-900">{model.name || model.id}</div>
-                    <div className="text-xs text-gray-500 font-mono mt-0.5">{model.id}</div>
+                  <div key={model.id} className="px-3 py-2 bg-surface border border-info rounded-control">
+                    <div className="text-sm font-medium text-fg">{model.name || model.id}</div>
+                    <div className="text-xs text-fg-muted font-mono mt-0.5">{model.id}</div>
                   </div>
                 ))}
               </div>
             ) : (
-              <p className="text-xs text-gray-500">{t('form.azureNoCustomDeployments')}</p>
+              <p className="text-xs text-fg-muted">{t('form.azureNoCustomDeployments')}</p>
             )}
 
             <div className="grid grid-cols-2 gap-3">
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
+                <label className="block text-sm font-medium text-fg-secondary mb-1">
                   {t('form.azureDeploymentName')}
                 </label>
                 <input
                   type="text"
                   value={newAzureDeploymentName}
                   onChange={e => setNewAzureDeploymentName(e.target.value)}
-                  className="w-full px-3 py-2 border border-blue-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-300 text-sm bg-white"
+                  className="ui-input w-full px-3  border border-info rounded-control text-sm bg-surface"
                   placeholder={t('form.azureDeploymentPlaceholder')}
                 />
               </div>
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
+                <label className="block text-sm font-medium text-fg-secondary mb-1">
                   {t('form.azureDeploymentDisplayName')}
                 </label>
                 <input
                   type="text"
                   value={newAzureDeploymentDisplayName}
                   onChange={e => setNewAzureDeploymentDisplayName(e.target.value)}
-                  className="w-full px-3 py-2 border border-blue-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-300 text-sm bg-white"
+                  className="ui-input w-full px-3  border border-info rounded-control text-sm bg-surface"
                   placeholder={newAzureDeploymentName.trim() || t('form.azureDeploymentDisplayPlaceholder')}
                 />
               </div>
@@ -2769,24 +2756,24 @@ ${hasExisting ? '你已有凭证配置，可以更新或测试连接。' : '请�
         {/* Test connection — 与添加模型抽屉一致 */}
         <div>
           <div className="flex items-center gap-2 mb-2">
-            <label className="block text-sm font-medium text-gray-700 flex-shrink-0">{t('form.testConnection2')}</label>
+            <label className="block text-sm font-medium text-fg-secondary flex-shrink-0">{t('form.testConnection2')}</label>
             {models.length > 0 ? (
               <select
                 value={testModelId}
                 onChange={(e) => setTestModelId(e.target.value)}
-                className="flex-1 text-sm border border-gray-300 rounded-lg px-3 py-2 bg-white focus:outline-none focus:ring-2 focus:ring-slate-400"
+                className="ui-select flex-1 text-sm border border-line-control rounded-control px-3  bg-surface"
               >
                 {models.map(m => (
                   <option key={m.id} value={m.id}>{m.name || m.id}</option>
                 ))}
               </select>
             ) : (
-              <span className="text-sm text-gray-400 flex-1">{t('form.noAvailableModel')}</span>
+              <span className="text-sm text-fg-muted flex-1">{t('form.noAvailableModel')}</span>
             )}
             <button
               onClick={handleTest}
               disabled={models.length === 0 || loading || testing}
-              className="flex items-center gap-2 px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 disabled:opacity-50 text-sm flex-shrink-0"
+              className="flex items-center gap-2 px-4 py-2 border border-line-control text-fg-secondary rounded-control hover:bg-hover disabled:bg-disabled disabled:text-fg-disabled text-sm flex-shrink-0"
             >
               {testing ? <IconLoader2 aria-hidden="true" className="w-4 h-4 animate-spin" /> : <IconTestPipe aria-hidden="true" className="w-4 h-4" />}
               {testing ? t('form.testingConnection') : t('form.testConnection2')}
@@ -2794,30 +2781,30 @@ ${hasExisting ? '你已有凭证配置，可以更新或测试连接。' : '请�
           </div>
 
           {testChat && (
-            <div className="p-3 rounded-lg border border-green-200 bg-green-50 space-y-1.5">
+            <div className="p-3 rounded-control border border-success bg-success-soft space-y-1.5">
               <div className="flex items-start gap-2">
-                <span className="text-xs font-medium text-slate-600 flex-shrink-0 mt-0.5">Q:</span>
-                <p className="text-sm text-gray-700">{testChat.question}</p>
+                <span className="text-xs font-medium text-fg-secondary flex-shrink-0 mt-0.5">Q:</span>
+                <p className="text-sm text-fg-secondary">{testChat.question}</p>
               </div>
               <div className="flex items-start gap-2">
-                <span className="text-xs font-medium text-green-600 flex-shrink-0 mt-0.5">A:</span>
-                <p className="text-sm text-gray-900 font-medium">{testChat.answer}</p>
+                <span className="text-xs font-medium text-success flex-shrink-0 mt-0.5">A:</span>
+                <p className="text-sm text-fg font-medium">{testChat.answer}</p>
               </div>
-              <p className="text-xs text-gray-400">{t('form.latencyMs', { model: testChat.model, latency: testChat.latency })}</p>
+              <p className="text-xs text-fg-muted">{t('form.latencyMs', { model: testChat.model, latency: testChat.latency })}</p>
             </div>
           )}
           {testError && (
-            <div className="flex items-start gap-2 p-3 rounded-lg border border-red-200 bg-red-50">
-              <IconAlertCircle aria-hidden="true" className="w-4 h-4 text-red-500 flex-shrink-0 mt-0.5" />
-              <span className="text-sm text-red-700">{testError}</span>
+            <div className="flex items-start gap-2 p-3 rounded-control border border-danger bg-danger-soft">
+              <IconAlertCircle aria-hidden="true" className="w-4 h-4 text-danger flex-shrink-0 mt-0.5" />
+              <span className="text-sm text-danger">{testError}</span>
             </div>
           )}
         </div>
 
         {/* 凭证说明 — 与添加模型抽屉一致 */}
-        <div className="flex items-start gap-2 p-3 bg-slate-50 border border-slate-200 rounded-lg">
-          <IconShield aria-hidden="true" className="w-4 h-4 text-slate-600 mt-0.5 flex-shrink-0" />
-          <p className="text-xs text-slate-700">
+        <div className="flex items-start gap-2 p-3 bg-subtle border border-line rounded-control">
+          <IconShield aria-hidden="true" className="w-4 h-4 text-fg-secondary mt-0.5 flex-shrink-0" />
+          <p className="text-xs text-fg-secondary">
             {t('form.credentialNote')}
           </p>
         </div>
@@ -2829,8 +2816,8 @@ ${hasExisting ? '你已有凭证配置，可以更新或测试连接。' : '请�
 
 // ==================== Model Detail Sheet ====================
 
-const inputCls = "w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-400 text-sm";
-const inputClsReadOnly = inputCls + " bg-gray-50 text-gray-900 cursor-default";
+const inputCls = "w-full px-3 py-2 border border-line-control rounded-control text-sm";
+const inputClsReadOnly = inputCls + " bg-subtle text-fg cursor-default";
 
 function ModelDetailSheet({
   provider,
@@ -2962,18 +2949,18 @@ function ModelDetailSheet({
           <>
             {/* Provider — 只读 */}
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Provider</label>
+              <label className="block text-sm font-medium text-fg-secondary mb-1">Provider</label>
               <input type="text" readOnly value={provider.name} className={inputClsReadOnly} />
             </div>
 
             {/* 模型 ID + 显示名称：模型 ID 只读，显示名称可编辑 */}
             <div className="grid grid-cols-2 gap-3">
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">{t('form.modelId')}</label>
+                <label className="block text-sm font-medium text-fg-secondary mb-1">{t('form.modelId')}</label>
                 <input type="text" readOnly value={model.id} className={inputClsReadOnly} />
               </div>
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">{t('form.displayName')}</label>
+                <label className="block text-sm font-medium text-fg-secondary mb-1">{t('form.displayName')}</label>
                 <input
                   type="text"
                   value={name}
@@ -2986,7 +2973,7 @@ function ModelDetailSheet({
             {/* 上下文窗口 + 最大输出 — 可编辑 */}
             <div className="grid grid-cols-2 gap-3">
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">{t('form.contextWindow')}</label>
+                <label className="block text-sm font-medium text-fg-secondary mb-1">{t('form.contextWindow')}</label>
                 <input
                   type="number"
                   value={contextWindow}
@@ -2995,7 +2982,7 @@ function ModelDetailSheet({
                 />
               </div>
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">{t('form.maxOutput')}</label>
+                <label className="block text-sm font-medium text-fg-secondary mb-1">{t('form.maxOutput')}</label>
                 <input
                   type="number"
                   value={maxOutput}
@@ -3007,7 +2994,7 @@ function ModelDetailSheet({
 
             {/* 能力 — 可编辑，与添加模型同款开关（绿色/灰色醒目） */}
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">{t('form.capabilities')}</label>
+              <label className="block text-sm font-medium text-fg-secondary mb-2">{t('form.capabilities')}</label>
               <div className="grid grid-cols-2 gap-2">
                 <ToggleField label={t('form.toolCall')} checked={supportsTools} onChange={setSupportsTools} />
                 <ToggleField
@@ -3024,18 +3011,18 @@ function ModelDetailSheet({
 
             {/* 价格 — 可编辑 */}
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">{t('form.pricing')}</label>
+              <label className="block text-sm font-medium text-fg-secondary mb-2">{t('form.pricing')}</label>
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
                 <div>
-                  <label className="block text-xs text-gray-500 mb-1">{t('form.input')}</label>
+                  <label className="block text-xs text-fg-muted mb-1">{t('form.input')}</label>
                   <input type="number" step="0.01" value={inputPrice} onChange={e => setInputPrice(e.target.value)} className={inputCls} />
                 </div>
                 <div>
-                  <label className="block text-xs text-gray-500 mb-1">{t('form.output')}</label>
+                  <label className="block text-xs text-fg-muted mb-1">{t('form.output')}</label>
                   <input type="number" step="0.01" value={outputPrice} onChange={e => setOutputPrice(e.target.value)} className={inputCls} />
                 </div>
                 <div>
-                  <label className="block text-xs text-gray-500 mb-1">{t('form.cacheRead')}</label>
+                  <label className="block text-xs text-fg-muted mb-1">{t('form.cacheRead')}</label>
                   <input
                     type="number"
                     step="0.01"
@@ -3046,7 +3033,7 @@ function ModelDetailSheet({
                   />
                 </div>
                 <div>
-                  <label className="block text-xs text-gray-500 mb-1">{t('form.currency')}</label>
+                  <label className="block text-xs text-fg-muted mb-1">{t('form.currency')}</label>
                   <select value={currency} onChange={e => handleCurrencyChange(e.target.value)} className={inputCls}>
                     {currency !== 'USD' && currency !== 'CNY' && (
                       <option value={currency}>{currency}</option>
@@ -3059,16 +3046,18 @@ function ModelDetailSheet({
             </div>
 
             {/* 启用此模型 — 可编辑 */}
-            <div className="flex items-center justify-between py-2 border-t border-gray-200">
-              <label className="text-sm font-medium text-gray-700">{t('form.enableModel')}</label>
+            <div className="flex items-center justify-between py-2 border-t border-line">
+              <label className="text-sm font-medium text-fg-secondary">{t('form.enableModel')}</label>
               <button
                 type="button"
                 onClick={() => setEnabled(!enabled)}
-                className="transition-colors"
+                role="switch"
+                aria-label={t('form.enableModel')}
+                className="ui-btn-icon inline-flex shrink-0 items-center justify-center rounded-control disabled:cursor-not-allowed"
                 aria-checked={enabled}
               >
-                {enabled ? <IconToggleRight aria-hidden="true" className="w-8 h-8 text-green-500" /> : <IconToggleLeft aria-hidden="true" className="w-8 h-8 text-gray-300" />}
-              </button>
+<span className="ui-switch" aria-hidden="true" aria-checked={enabled} />
+</button>
             </div>
           </>
         )}
@@ -3170,7 +3159,7 @@ function ModelSelectionInfo({ model }: { model: ModelDefinitionV2 }) {
         onPointerLeave={hide}
         onMouseEnter={event => show(event.currentTarget)}
         onMouseLeave={hide}
-        className="mr-3 inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-gray-300 transition-colors hover:bg-gray-100 hover:text-gray-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-400 focus-visible:ring-offset-1"
+        className="ui-btn-icon inline-flex items-center justify-center mr-3 inline-flex   shrink-0 items-center justify-center rounded-control text-fg-placeholder transition-colors hover:bg-hover hover:text-fg-secondary "
       >
         <IconInfoCircle className="h-4 w-4" aria-hidden="true" />
       </button>
@@ -3178,27 +3167,27 @@ function ModelSelectionInfo({ model }: { model: ModelDefinitionV2 }) {
         <div
           id={tooltipId}
           role="tooltip"
-          className="pointer-events-none fixed z-[1000] w-64 -translate-x-1/2 -translate-y-full rounded-lg border border-gray-200 bg-white px-3 py-2.5 text-xs leading-relaxed text-gray-600 shadow-lg"
+          className="pointer-events-none fixed z-[1000] w-64 -translate-x-1/2 -translate-y-full rounded-control border border-line bg-surface px-3 py-2.5 text-xs text-fg-secondary shadow-lg"
           style={{ left: position.x, top: position.y }}
         >
-          <div className="mb-1.5 truncate font-semibold text-gray-900">{model.name || model.id}</div>
+          <div className="mb-1.5 truncate font-semibold text-fg">{model.name || model.id}</div>
           <dl className="space-y-1">
             <div className="flex gap-2">
-              <dt className="shrink-0 text-gray-400">{t('form.modelId')}</dt>
-              <dd className="min-w-0 flex-1 break-all text-right font-mono text-[11px] text-gray-700">{model.id}</dd>
+              <dt className="shrink-0 text-fg-muted">{t('form.modelId')}</dt>
+              <dd className="min-w-0 flex-1 break-all text-right font-mono text-xs text-fg-secondary">{model.id}</dd>
             </div>
             <div className="flex gap-2">
-              <dt className="shrink-0 text-gray-400">{t('form.contextWindow')}</dt>
-              <dd className="min-w-0 flex-1 text-right text-gray-700">{formatModelContextWindow(model)}</dd>
+              <dt className="shrink-0 text-fg-muted">{t('form.contextWindow')}</dt>
+              <dd className="min-w-0 flex-1 text-right text-fg-secondary">{formatModelContextWindow(model)}</dd>
             </div>
             <div className="flex gap-2">
-              <dt className="shrink-0 text-gray-400">{t('form.pricing')}</dt>
-              <dd className="min-w-0 flex-1 text-right text-gray-700">
+              <dt className="shrink-0 text-fg-muted">{t('form.pricing')}</dt>
+              <dd className="min-w-0 flex-1 text-right text-fg-secondary">
                 {formatModelPricing(model, t('modelSelection.free'), t('modelSelection.unavailable'))}
               </dd>
             </div>
           </dl>
-          <div className="absolute left-1/2 top-full -translate-x-1/2 border-4 border-transparent border-t-gray-200" />
+          <div className="absolute left-1/2 top-full -translate-x-1/2 border-4 border-transparent border-t-line" />
         </div>,
         document.body,
       )}
@@ -3222,10 +3211,10 @@ function ModelSelectionList({
   const { t } = useTranslation('model');
 
   return (
-    <div className="overflow-hidden rounded-xl border border-gray-200 bg-white">
+    <div className="overflow-hidden rounded-card border border-line bg-surface">
       {groups.map(group => (
         <div key={group.providerId}>
-          <div className="border-b border-gray-100 bg-gray-50 px-4 py-2 text-xs font-semibold uppercase tracking-wide text-gray-500">
+          <div className="border-b border-line bg-subtle px-4 py-2 text-xs font-semibold uppercase tracking-wide text-fg-muted">
             {group.providerName}
           </div>
           {group.models.map(model => {
@@ -3234,8 +3223,8 @@ function ModelSelectionList({
             return (
               <div
                 key={key}
-                className={`flex min-w-0 items-center border-b border-gray-100 transition-colors last:border-0 ${
-                  selected ? 'bg-slate-50' : 'bg-white hover:bg-gray-50'
+                className={`flex min-w-0 items-center border-b border-line transition-colors last:border-0 ${
+                  selected ? 'bg-subtle' : 'bg-surface hover:bg-hover'
                 }`}
               >
                 <button
@@ -3243,26 +3232,26 @@ function ModelSelectionList({
                   onClick={() => onSelect(model)}
                   disabled={disabled}
                   aria-pressed={selected}
-                  className="flex min-w-0 flex-1 items-center gap-3 px-4 py-3 text-left text-sm text-gray-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-slate-400 disabled:cursor-not-allowed disabled:opacity-50"
+                  className="flex min-w-0 flex-1 items-center gap-3 px-4 py-3 text-left text-sm text-fg-secondary disabled:cursor-not-allowed disabled:bg-disabled disabled:text-fg-disabled"
                 >
-                  <span className={`min-w-0 flex-1 truncate ${selected ? 'font-semibold text-slate-900' : 'font-medium text-gray-800'}`}>
+                  <span className={`min-w-0 flex-1 truncate ${selected ? 'font-semibold text-fg' : 'font-medium text-fg'}`}>
                     {model.name || model.id}
                   </span>
                   {modelSupportsVision(model) && (
                     <span
                       title={t('form.vision')}
-                      className="shrink-0 rounded-md bg-gray-100 px-2 py-0.5 text-[10px] font-semibold text-gray-600"
+                      className="shrink-0 rounded-control bg-subtle px-2 py-0.5 text-xs font-semibold text-fg-secondary"
                     >
                       {t('form.vision')}
                     </span>
                   )}
-                  <span className="max-w-[42%] shrink-0 truncate text-xs text-gray-400" title={model.id}>
+                  <span className="max-w-[42%] shrink-0 truncate text-xs text-fg-muted" title={model.id}>
                     {model.id}
                   </span>
                   {pendingKey === key ? (
-                    <IconLoader2 aria-hidden="true" className="h-4 w-4 shrink-0 animate-spin text-gray-400" />
+                    <IconLoader2 aria-hidden="true" className="h-4 w-4 shrink-0 animate-spin text-fg-muted" />
                   ) : selected ? (
-                    <IconCheck aria-hidden="true" className="h-4 w-4 shrink-0 text-slate-700" />
+                    <IconCheck aria-hidden="true" className="h-4 w-4 shrink-0 text-fg-secondary" />
                   ) : null}
                 </button>
                 <ModelSelectionInfo model={model} />
@@ -3297,24 +3286,6 @@ function SetDefaultModelDialog({
   const [saving, setSaving] = useState<string | null>(null);
   const [invalidWarning, setInvalidWarning] = useState<string | null>(null);
   const closeButtonRef = useRef<HTMLButtonElement>(null);
-
-  useEffect(() => {
-    const previouslyFocused = document.activeElement instanceof HTMLElement
-      ? document.activeElement
-      : null;
-    closeButtonRef.current?.focus();
-    return () => previouslyFocused?.focus();
-  }, []);
-
-  useEffect(() => {
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== 'Escape' || saving) return;
-      event.preventDefault();
-      onClose();
-    };
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [onClose, saving]);
 
   useEffect(() => {
     setLoading(true);
@@ -3370,28 +3341,26 @@ function SetDefaultModelDialog({
   };
 
   return (
-    <div
-      className="fixed inset-0 bg-black/50 flex items-center justify-center z-50"
-      onClick={() => {
-        if (!saving) onClose();
-      }}
+    <PageDialog aria-labelledby="default-model-dialog-title" onClose={saving ? undefined : onClose}
+      className="fixed inset-0 bg-overlay-backdrop flex items-center justify-center z-50"
+
     >
       <div
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="default-model-dialog-title"
-        className="bg-white rounded-xl shadow-xl w-full max-w-xl max-h-[78vh] flex flex-col"
+
+
+
+        className="bg-surface rounded-card shadow-xl w-full max-w-xl max-h-[78vh] flex flex-col"
         onClick={e => e.stopPropagation()}
       >
-        <div className="flex items-center justify-between px-5 py-4 border-b border-gray-200">
-          <h2 id="default-model-dialog-title" className="text-lg font-semibold text-gray-900">{t('dashboard.setDefaultModel')}</h2>
+        <div className="flex items-center justify-between px-5 py-4 border-b border-line">
+          <h2 id="default-model-dialog-title" className="text-title-section font-semibold text-fg">{t('dashboard.setDefaultModel')}</h2>
           <button
             ref={closeButtonRef}
             type="button"
             onClick={onClose}
             disabled={saving !== null}
             aria-label={t('modelSelection.closeDefault')}
-            className="text-gray-400 hover:text-gray-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-400 disabled:opacity-50"
+            className="ui-btn-icon inline-flex items-center justify-center text-fg-muted hover:text-fg-secondary disabled:bg-disabled disabled:text-fg-disabled"
           >
             <IconX aria-hidden="true" className="w-5 h-5" />
           </button>
@@ -3399,17 +3368,17 @@ function SetDefaultModelDialog({
 
         <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
           {invalidWarning && (
-            <div className="mb-3 flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-700">
-              <IconAlertTriangle aria-hidden="true" className="mt-0.5 w-3.5 h-3.5 flex-shrink-0" />
+            <div className="mb-3 flex items-start gap-2 rounded-control border border-warning bg-warning-soft px-3 py-2 text-xs text-warning">
+              <IconAlertTriangle aria-hidden="true" className="mt-0.5 w-4 h-4 flex-shrink-0" />
               <span>{invalidWarning}</span>
             </div>
           )}
           {loading ? (
             <div className="flex justify-center py-10">
-              <IconLoader2 aria-hidden="true" className="w-6 h-6 animate-spin text-gray-400" />
+              <IconLoader2 aria-hidden="true" className="w-6 h-6 animate-spin text-fg-muted" />
             </div>
           ) : grouped.length === 0 ? (
-            <div className="py-10 text-center text-sm text-gray-500">{t('detail.noModels')}</div>
+            <div className="py-10 text-center text-sm text-fg-muted">{t('detail.noModels')}</div>
           ) : (
             <ModelSelectionList
               groups={grouped}
@@ -3421,7 +3390,7 @@ function SetDefaultModelDialog({
           )}
         </div>
       </div>
-    </div>
+    </PageDialog>
   );
 }
 
@@ -3537,24 +3506,6 @@ function FallbackModelsDialog({
   );
   const closeButtonRef = useRef<HTMLButtonElement>(null);
 
-  useEffect(() => {
-    const previouslyFocused = document.activeElement instanceof HTMLElement
-      ? document.activeElement
-      : null;
-    closeButtonRef.current?.focus();
-    return () => previouslyFocused?.focus();
-  }, []);
-
-  useEffect(() => {
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== 'Escape' || saving) return;
-      event.preventDefault();
-      onClose();
-    };
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [onClose, saving]);
-
   const move = (index: number, direction: -1 | 1) => {
     const target = index + direction;
     if (target < 0 || target >= draft.length) return;
@@ -3583,25 +3534,23 @@ function FallbackModelsDialog({
   };
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 px-4"
-      onClick={() => {
-        if (!saving) onClose();
-      }}
+    <PageDialog aria-labelledby="fallback-models-dialog-title" onClose={saving ? undefined : onClose}
+      className="fixed inset-0 z-50 flex items-center justify-center bg-overlay-backdrop px-4"
+
     >
       <div
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="fallback-models-dialog-title"
-        className="flex max-h-[78vh] w-full max-w-xl flex-col rounded-xl bg-white shadow-xl"
+
+
+
+        className="flex max-h-[78vh] w-full max-w-xl flex-col rounded-card bg-surface shadow-xl"
         onClick={event => event.stopPropagation()}
       >
-        <div className="flex items-start justify-between border-b border-gray-200 px-5 py-4">
+        <div className="flex items-start justify-between border-b border-line px-5 py-4">
           <div>
-            <h2 id="fallback-models-dialog-title" className="text-lg font-semibold text-gray-900">
+            <h2 id="fallback-models-dialog-title" className="text-title-section font-semibold text-fg">
               {t('fallbacks.title')}
             </h2>
-            <p className="mt-0.5 text-xs text-gray-500">{t('fallbacks.description')}</p>
+            <p className="mt-0.5 text-xs text-fg-muted">{t('fallbacks.description')}</p>
           </div>
           <button
             ref={closeButtonRef}
@@ -3609,7 +3558,7 @@ function FallbackModelsDialog({
             onClick={onClose}
             disabled={saving}
             aria-label={t('fallbacks.close')}
-            className="text-gray-400 hover:text-gray-600 disabled:opacity-50"
+            className="ui-btn-icon inline-flex items-center justify-center text-fg-muted hover:text-fg-secondary disabled:bg-disabled disabled:text-fg-disabled"
           >
             <IconX aria-hidden="true" className="h-5 w-5" />
           </button>
@@ -3618,17 +3567,17 @@ function FallbackModelsDialog({
         <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
           {routingDataLoading ? (
             <div className="flex justify-center py-10">
-              <IconLoader2 aria-hidden="true" className="h-6 w-6 animate-spin text-gray-400" />
+              <IconLoader2 aria-hidden="true" className="h-6 w-6 animate-spin text-fg-muted" />
             </div>
           ) : loadFailed ? (
-            <div role="alert" className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-6 text-center">
-              <IconAlertCircle aria-hidden="true" className="mx-auto mb-2 h-6 w-6 text-amber-500" />
-              <p className="text-sm font-medium text-amber-800">{t('fallbacks.loadFailed')}</p>
-              <p className="mt-1 text-xs text-amber-700">{currentLoadError || modelsLoadError}</p>
+            <div role="alert" className="rounded-control border border-warning bg-warning-soft px-4 py-6 text-center">
+              <IconAlertCircle aria-hidden="true" className="mx-auto mb-2 h-6 w-6 text-warning" />
+              <p className="text-sm font-medium text-warning">{t('fallbacks.loadFailed')}</p>
+              <p className="mt-1 text-xs text-warning">{currentLoadError || modelsLoadError}</p>
               <button
                 type="button"
                 onClick={() => void handleRetryLoad()}
-                className="mt-3 rounded-md border border-amber-300 bg-white px-3 py-1.5 text-xs font-medium text-amber-800 hover:bg-amber-100"
+                className="mt-3 rounded-control border border-warning bg-surface px-3 py-1.5 text-xs font-medium text-warning hover:bg-warning-soft"
               >
                 {t('fallbacks.retry')}
               </button>
@@ -3636,10 +3585,10 @@ function FallbackModelsDialog({
           ) : (
             <div className="space-y-3">
               {draft.length === 0 ? (
-                <div className="rounded-lg border border-dashed border-gray-300 px-4 py-8 text-center">
-                  <IconListNumbers aria-hidden="true" className="mx-auto mb-2 h-6 w-6 text-gray-300" />
-                  <p className="text-sm font-medium text-gray-600">{t('fallbacks.empty')}</p>
-                  <p className="mt-1 text-xs text-gray-400">{t('fallbacks.emptyHint')}</p>
+                <div className="rounded-control border border-dashed border-line-control px-4 py-8 text-center">
+                  <IconListNumbers aria-hidden="true" className="mx-auto mb-2 h-6 w-6 text-fg-placeholder" />
+                  <p className="text-sm font-medium text-fg-secondary">{t('fallbacks.empty')}</p>
+                  <p className="mt-1 text-xs text-fg-muted">{t('fallbacks.emptyHint')}</p>
                 </div>
               ) : (
                 <div className="space-y-2">
@@ -3650,22 +3599,22 @@ function FallbackModelsDialog({
                       && primary.model_id === fallback.model_id;
                     const available = Boolean(definition) && !isPrimary;
                     return (
-                      <div key={`${key}-${index}`} className="flex items-center gap-3 rounded-lg border border-gray-200 bg-white px-3 py-2.5">
-                        <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-gray-100 text-xs font-semibold text-gray-500">
+                      <div key={`${key}-${index}`} className="flex items-center gap-3 rounded-control border border-line bg-surface px-3 py-2.5">
+                        <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-control bg-subtle text-xs font-semibold text-fg-muted">
                           {index + 1}
                         </span>
                         <div className="min-w-0 flex-1">
                           <div className="flex min-w-0 items-center gap-2">
-                            <span className="truncate text-sm font-medium text-gray-800">
+                            <span className="truncate text-sm font-medium text-fg">
                               {definition?.name || fallback.model_id}
                             </span>
                             {!available && (
-                              <span className="shrink-0 rounded bg-amber-50 px-1.5 py-0.5 text-[10px] font-medium text-amber-700">
+                              <span className="shrink-0 rounded-tag bg-warning-soft px-1.5 py-0.5 text-xs font-medium text-warning">
                                 {t('fallbacks.unavailable')}
                               </span>
                             )}
                           </div>
-                          <div className="truncate text-xs text-gray-400">
+                          <div className="truncate text-xs text-fg-muted">
                             {providerNames.get(fallback.provider_id) || fallback.provider_id} / {fallback.model_id}
                           </div>
                         </div>
@@ -3676,9 +3625,9 @@ function FallbackModelsDialog({
                             disabled={index === 0 || saving}
                             title={t('fallbacks.moveUp')}
                             aria-label={t('fallbacks.moveUp')}
-                            className="rounded p-1.5 text-gray-400 hover:bg-gray-100 hover:text-gray-700 disabled:cursor-not-allowed disabled:opacity-30"
+                            className="ui-btn-icon inline-flex items-center justify-center rounded-control p-1.5 text-fg-muted hover:bg-hover hover:text-fg-secondary disabled:cursor-not-allowed disabled:bg-disabled disabled:text-fg-disabled"
                           >
-                            <IconArrowUp aria-hidden="true" className="h-3.5 w-3.5" />
+                            <IconArrowUp aria-hidden="true" className="h-4 w-4" />
                           </button>
                           <button
                             type="button"
@@ -3686,9 +3635,9 @@ function FallbackModelsDialog({
                             disabled={index === draft.length - 1 || saving}
                             title={t('fallbacks.moveDown')}
                             aria-label={t('fallbacks.moveDown')}
-                            className="rounded p-1.5 text-gray-400 hover:bg-gray-100 hover:text-gray-700 disabled:cursor-not-allowed disabled:opacity-30"
+                            className="ui-btn-icon inline-flex items-center justify-center rounded-control p-1.5 text-fg-muted hover:bg-hover hover:text-fg-secondary disabled:cursor-not-allowed disabled:bg-disabled disabled:text-fg-disabled"
                           >
-                            <IconArrowDown aria-hidden="true" className="h-3.5 w-3.5" />
+                            <IconArrowDown aria-hidden="true" className="h-4 w-4" />
                           </button>
                           <button
                             type="button"
@@ -3696,9 +3645,9 @@ function FallbackModelsDialog({
                             disabled={saving}
                             title={t('fallbacks.remove')}
                             aria-label={t('fallbacks.remove')}
-                            className="rounded p-1.5 text-gray-400 hover:bg-red-50 hover:text-red-600 disabled:opacity-30"
+                            className="ui-btn-icon inline-flex items-center justify-center rounded-control p-1.5 text-fg-muted hover:bg-danger-soft hover:text-danger disabled:bg-disabled disabled:text-fg-disabled"
                           >
-                            <IconTrash aria-hidden="true" className="h-3.5 w-3.5" />
+                            <IconTrash aria-hidden="true" className="h-4 w-4" />
                           </button>
                         </div>
                       </div>
@@ -3708,7 +3657,7 @@ function FallbackModelsDialog({
               )}
 
               {hasInvalidDraft && (
-                <p className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                <p className="rounded-control border border-warning bg-warning-soft px-3 py-2 text-xs text-warning">
                   {t('fallbacks.removeInvalidHint')}
                 </p>
               )}
@@ -3717,7 +3666,7 @@ function FallbackModelsDialog({
                 type="button"
                 onClick={() => setAdding(value => !value)}
                 disabled={saving || selectableGroups.length === 0}
-                className="flex w-full items-center justify-center gap-1.5 rounded-lg border border-gray-300 px-3 py-2 text-sm font-medium text-gray-700 transition-colors hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+                className="flex w-full items-center justify-center gap-1.5 rounded-control border border-line-control px-3 py-2 text-sm font-medium text-fg-secondary transition-colors hover:bg-hover disabled:cursor-not-allowed disabled:bg-disabled disabled:text-fg-disabled"
               >
                 <IconPlus aria-hidden="true" className="h-4 w-4" />
                 {selectableGroups.length === 0 ? t('fallbacks.noModelsToAdd') : t('fallbacks.add')}
@@ -3743,12 +3692,12 @@ function FallbackModelsDialog({
           )}
         </div>
 
-        <div className="flex items-center justify-end gap-2 border-t border-gray-200 px-5 py-3">
+        <div className="flex items-center justify-end gap-2 border-t border-line px-5 py-3">
           <button
             type="button"
             onClick={onClose}
             disabled={saving}
-            className="rounded-lg border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+            className="rounded-control border border-line-control px-4 py-2 text-sm font-medium text-fg-secondary hover:bg-hover disabled:bg-disabled disabled:text-fg-disabled"
           >
             {t('fallbacks.cancel')}
           </button>
@@ -3763,6 +3712,6 @@ function FallbackModelsDialog({
           </button>
         </div>
       </div>
-    </div>
+    </PageDialog>
   );
 }

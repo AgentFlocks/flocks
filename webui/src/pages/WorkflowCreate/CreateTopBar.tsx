@@ -16,27 +16,27 @@ export default function CreateTopBar({ workflow, panelOpen, onTogglePanel }: Cre
   const displayName = workflow ? getWorkflowDisplayName(workflow, i18n?.language) : '';
 
   return (
-    <div className="h-14 bg-white border-b border-gray-200 flex items-center pl-14 pr-4 gap-3 flex-shrink-0 z-10 lg:pl-4">
+    <div className="h-14 bg-surface border-b border-line flex items-center pl-14 pr-4 gap-3 flex-shrink-0 z-10 lg:pl-4">
       <Link
         to="/workflows"
-        className="flex items-center gap-1.5 text-gray-500 hover:text-gray-800 transition-colors text-sm font-medium"
+        className="flex items-center gap-1.5 text-fg-muted hover:text-fg transition-colors text-sm font-medium"
       >
         <IconArrowLeft aria-hidden="true" className="w-4 h-4" />
         {t('pageTitle')}
       </Link>
 
-      <div className="w-px h-5 bg-gray-200" />
+      <div className="w-px h-5 bg-selected" />
 
       <div className="flex items-center gap-2 flex-1 min-w-0">
-        <h1 className="text-sm font-semibold text-gray-900 truncate">
+        <h1 className="text-title-page font-bold text-fg truncate">
           {workflow ? displayName : t('create.topBar.newWorkflow')}
         </h1>
         {!workflow ? (
-          <span className="px-2 py-0.5 rounded-full text-xs font-medium bg-red-50 text-red-600 flex-shrink-0 border border-red-200">
+          <span className="px-2 py-0.5 rounded-pill text-xs font-medium bg-danger-soft text-danger flex-shrink-0 border border-danger">
             {t('create.topBar.creating')}
           </span>
         ) : (
-          <span className="px-2 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800 flex-shrink-0">
+          <span className="px-2 py-0.5 rounded-pill text-xs font-medium bg-success-soft text-success flex-shrink-0">
             {t('create.topBar.generated')}
           </span>
         )}
@@ -46,15 +46,15 @@ export default function CreateTopBar({ workflow, panelOpen, onTogglePanel }: Cre
         {workflow && (
           <button
             onClick={() => navigate(`/workflows/${workflow.id}`)}
-            className="flex items-center gap-1.5 px-3 py-1.5 bg-red-600 text-white text-sm rounded-lg hover:bg-red-700 transition-colors"
+            className="flex items-center gap-1.5 px-3 py-1.5 bg-action text-action-fg text-sm rounded-control hover:bg-action-hover transition-colors"
           >
-            <IconExternalLink aria-hidden="true" className="w-3.5 h-3.5" />
+            <IconExternalLink aria-hidden="true" className="w-4 h-4" />
             {t('create.topBar.viewDetail')}
           </button>
         )}
         <button
           onClick={onTogglePanel}
-          className="flex items-center justify-center w-8 h-8 border border-gray-200 text-gray-600 rounded-lg hover:bg-gray-50 transition-colors"
+          className="flex items-center justify-center w-8 h-8 border border-line text-fg-secondary rounded-control hover:bg-hover transition-colors"
           title={panelOpen ? t('detail.topBar.collapsePanel') : t('detail.topBar.expandPanel')}
         >
           {panelOpen ? (

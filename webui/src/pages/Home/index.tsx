@@ -39,7 +39,7 @@ function StatCard({
   icon,
   to,
   interactiveClassName,
-  valueClassName = 'text-gray-900',
+  valueClassName = 'text-fg',
   children,
 }: {
   title: string;
@@ -127,12 +127,12 @@ export default function Home() {
         <div className="relative z-10 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-6">
           <div className="flex-1 min-w-0">
             <div className="ui-badge ui-badge-brand mb-3">
-              <IconSparkles aria-hidden="true" className="w-3.5 h-3.5" />
+              <IconSparkles aria-hidden="true" className="w-4 h-4" />
               {t('badge')}
             </div>
 
             <h1 className="text-title-page mb-2 text-fg">
-              <span className="text-action">{productName}</span>
+              <span className="text-brand">{productName}</span>
             </h1>
 
             <p className="text-sm text-fg font-semibold mb-1">
@@ -202,7 +202,7 @@ export default function Home() {
                     <img
                       src={GITEE_LOGO_URL}
                       alt="Gitee"
-                      className="mr-2 w-4 h-4 rounded-sm"
+                      className="mr-2 w-4 h-4 rounded-tag"
                     />
                     Gitee
                   </a>
@@ -279,51 +279,51 @@ export default function Home() {
       ) : (
         <>
           {error && (
-            <div className="bg-red-50 border border-red-200 rounded-xl p-4 mb-6 flex items-center gap-3">
-              <IconAlertCircle aria-hidden="true" className="w-5 h-5 text-red-500 shrink-0" />
+            <div className="bg-danger-soft border border-danger rounded-card p-4 mb-6 flex items-center gap-3">
+              <IconAlertCircle aria-hidden="true" className="w-5 h-5 text-danger shrink-0" />
               <div>
-                <span className="text-sm font-medium text-red-900">
+                <span className="text-sm font-medium text-danger">
                   {t('stats.abnormal')}
                 </span>
-                <span className="text-sm text-red-600 ml-2">
+                <span className="text-sm text-danger ml-2">
                   {statsErrorHint}
                 </span>
               </div>
             </div>
           )}
-          <div className="grid md:grid-cols-4 gap-6">
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
             <StatCard
               title={t('stats.agentCount')}
               value={stats?.agents.total ?? 0}
-              icon={<IconRobot aria-hidden="true" className="w-5 h-5 text-purple-500" />}
+              icon={<IconRobot aria-hidden="true" className="w-5 h-5 text-ai" />}
               to="/agents"
             />
 
             <StatCard
               title={t('stats.workflowCount')}
               value={stats?.workflows.total ?? 0}
-              icon={<IconRouteSquare2 aria-hidden="true" className="w-5 h-5 text-teal-500" />}
+              icon={<IconRouteSquare2 aria-hidden="true" className="w-5 h-5 text-data" />}
               to="/workflows"
             />
 
             <StatCard
               title={t('stats.skillCount')}
               value={stats?.skills.total ?? 0}
-              icon={<IconBook aria-hidden="true" className="w-5 h-5 text-green-500" />}
+              icon={<IconBook aria-hidden="true" className="w-5 h-5 text-ai" />}
               to="/skills"
             />
 
             <StatCard
               title={t('stats.toolCount')}
               value={stats?.tools.total ?? 0}
-              icon={<IconTool aria-hidden="true" className="w-5 h-5 text-orange-500" />}
+              icon={<IconTool aria-hidden="true" className="w-5 h-5 text-data" />}
               to="/tools"
             />
 
             <StatCard
               title={t('stats.weeklyTasks')}
               value={stats?.tasks.week ?? 0}
-              icon={<IconBolt aria-hidden="true" className="w-5 h-5 text-amber-500" />}
+              icon={<IconBolt aria-hidden="true" className="w-5 h-5 text-data" />}
               to="/tasks"
             />
 
@@ -337,7 +337,7 @@ export default function Home() {
             <StatCard
               title={t('stats.modelCount')}
               value={stats?.models.total ?? 0}
-              icon={<IconCpu aria-hidden="true" className="w-5 h-5 text-pink-500" />}
+              icon={<IconCpu aria-hidden="true" className="w-5 h-5 text-ai" />}
               to="/models"
             />
 
@@ -350,20 +350,20 @@ export default function Home() {
               }
               valueClassName={
                 stats?.system.status === 'healthy'
-                  ? 'text-green-600'
-                  : 'text-red-600'
+                  ? 'text-success'
+                  : 'text-danger'
               }
               icon={
                 <IconChartBar aria-hidden="true"
                   className={`w-5 h-5 ${
                     stats?.system.status === 'healthy'
-                      ? 'text-green-500'
-                      : 'text-red-500'
+                      ? 'text-success'
+                      : 'text-danger'
                   }`}
                 />
               }
             >
-              <div className="text-xs text-gray-500 mt-1">
+              <div className="text-xs text-fg-muted mt-1">
                 {stats?.system.status
                   ? t(`stats.statusMessage.${stats.system.status}`)
                   : ''}

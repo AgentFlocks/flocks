@@ -160,9 +160,9 @@ export default function WorkflowCreate() {
   ));
 
   const CANVAS_TABS = [
-    { id: 'flow' as const, label: t('detail.canvasTabs.flow'), icon: <IconGitBranch aria-hidden="true" className="w-3.5 h-3.5" /> },
-    { id: 'md' as const, label: t('detail.canvasTabs.md'), icon: <IconFileText aria-hidden="true" className="w-3.5 h-3.5" /> },
-    { id: 'json' as const, label: t('detail.canvasTabs.json'), icon: <IconCode aria-hidden="true" className="w-3.5 h-3.5" /> },
+    { id: 'flow' as const, label: t('detail.canvasTabs.flow'), icon: <IconGitBranch aria-hidden="true" className="w-4 h-4" /> },
+    { id: 'md' as const, label: t('detail.canvasTabs.md'), icon: <IconFileText aria-hidden="true" className="w-4 h-4" /> },
+    { id: 'json' as const, label: t('detail.canvasTabs.json'), icon: <IconCode aria-hidden="true" className="w-4 h-4" /> },
   ];
 
   useEffect(() => {
@@ -539,7 +539,7 @@ export default function WorkflowCreate() {
   }, [editDocReviewing, persistWorkflowMarkdown, workflow, workflowMdDiff]);
 
   return (
-    <div className="flex flex-col h-full bg-gray-50 overflow-hidden">
+    <div className="flex flex-col h-full bg-subtle overflow-hidden">
       <CreateTopBar
         workflow={workflow}
         panelOpen={panelOpen}
@@ -549,7 +549,7 @@ export default function WorkflowCreate() {
       <div className="relative isolate flex flex-1 min-h-0 overflow-hidden">
         {/* 左侧编辑/预览区 */}
         <div className="relative z-0 flex flex-1 min-w-0 flex-col overflow-hidden">
-          <div className="flex flex-shrink-0 items-center border-b border-gray-200 bg-white px-2 overflow-x-auto">
+          <div className="flex flex-shrink-0 items-center border-b border-line bg-surface px-2 overflow-x-auto">
             {CANVAS_TABS.map((tab) => (
               <button
                 key={tab.id}
@@ -557,14 +557,14 @@ export default function WorkflowCreate() {
                 onClick={() => setCanvasTab(tab.id)}
                 className={`relative flex flex-shrink-0 items-center gap-1.5 whitespace-nowrap px-3 py-2.5 text-xs font-medium transition-colors ${
                   canvasTab === tab.id
-                    ? 'text-red-600'
-                    : 'text-gray-500 hover:text-gray-700'
+                    ? 'text-danger'
+                    : 'text-fg-muted hover:text-fg-secondary'
                 }`}
               >
                 {tab.icon}
                 {tab.label}
                 {canvasTab === tab.id && (
-                  <span className="absolute bottom-0 left-0 right-0 h-0.5 rounded-full bg-red-600" />
+                  <span className="absolute bottom-0 left-0 right-0 h-0.5 rounded-pill bg-danger" />
                 )}
               </button>
             ))}
@@ -578,13 +578,13 @@ export default function WorkflowCreate() {
               />
               {!workflow && (
                 <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center gap-4">
-                  <div className="flex flex-col items-center gap-3 rounded-2xl border border-dashed border-gray-300 bg-white/90 px-10 py-8 shadow-sm backdrop-blur-sm">
-                    <div className="flex h-14 w-14 items-center justify-center rounded-xl border border-gray-200 bg-gray-50">
-                      <WorkflowIcon aria-hidden="true" className="h-7 w-7 text-gray-300" />
+                  <div className="flex flex-col items-center gap-3 rounded-card border border-dashed border-line-control bg-surface px-10 py-8 shadow-sm backdrop-blur-sm">
+                    <div className="flex h-14 w-14 items-center justify-center rounded-card border border-line bg-subtle">
+                      <WorkflowIcon aria-hidden="true" className="h-8 w-8 text-fg-placeholder" />
                     </div>
                     <div className="text-center">
-                      <p className="text-sm font-medium text-gray-500">{t('create.canvasTitle')}</p>
-                      <p className="mt-1 max-w-[200px] text-xs leading-relaxed text-gray-400">
+                      <p className="text-sm font-medium text-fg-muted">{t('create.canvasTitle')}</p>
+                      <p className="mt-1 max-w-[200px] text-xs text-fg-muted">
                         {t('create.canvasHint')}
                       </p>
                     </div>
@@ -634,8 +634,8 @@ export default function WorkflowCreate() {
             )}
 
             {canvasTab === 'json' && (
-              <div className="absolute inset-0 overflow-y-auto bg-gray-900 p-4">
-                <pre className="font-mono text-xs leading-relaxed text-gray-200 whitespace-pre">
+              <div className="absolute inset-0 overflow-y-auto bg-subtle p-4">
+                <pre className="font-mono text-xs text-fg-placeholder whitespace-pre">
                   {workflow ? JSON.stringify(workflow.workflowJson, null, 2) : ''}
                 </pre>
               </div>
@@ -647,7 +647,7 @@ export default function WorkflowCreate() {
         {panelOpen && !narrowViewport && (
           <div
             onMouseDown={onDragStart}
-            className="w-1 flex-shrink-0 bg-gray-200 hover:bg-red-400 active:bg-red-500 cursor-col-resize transition-colors duration-150 relative group"
+            className="w-1 flex-shrink-0 bg-selected hover:bg-danger active:bg-danger cursor-col-resize transition-colors duration-150 relative group"
             title={t('detail.dragAdjust')}
           >
             <div className="absolute inset-y-0 -left-1.5 -right-1.5" />

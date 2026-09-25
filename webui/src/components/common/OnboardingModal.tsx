@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import {
@@ -26,6 +26,7 @@ import {
 } from '@/api/onboarding';
 import type { CatalogProvider } from '@/types';
 import { getDefaultThreatBookRegion, THREATBOOK_REGION_CONFIG } from '@/constants/threatbook';
+import { useDialogFocus } from '@/hooks/useDialogFocus';
 
 const MODEL_KEY_LINK = 'https://portal.agentflocks.com';
 
@@ -69,22 +70,22 @@ function regionForProvider(providerId: string | null | undefined): OnboardingReg
 function statusStyles(tone: SectionTone) {
   if (tone === 'success') {
     return {
-      wrapper: 'border-green-200 bg-green-50',
-      icon: 'text-green-600',
-      text: 'text-green-700',
+      wrapper: 'border-success bg-success-soft',
+      icon: 'text-success',
+      text: 'text-success',
     };
   }
   if (tone === 'warning') {
     return {
-      wrapper: 'border-amber-200 bg-amber-50',
-      icon: 'text-amber-600',
-      text: 'text-amber-700',
+      wrapper: 'border-warning bg-warning-soft',
+      icon: 'text-warning',
+      text: 'text-warning',
     };
   }
   return {
-    wrapper: 'border-red-200 bg-red-50',
-    icon: 'text-red-500',
-    text: 'text-red-600',
+    wrapper: 'border-danger bg-danger-soft',
+    icon: 'text-danger',
+    text: 'text-danger',
   };
 }
 
@@ -123,12 +124,12 @@ function ValidationPanel({
           )
         )}
         <div className="min-w-0 flex-1">
-          <p className={`${minimal ? 'text-[11px]' : 'text-xs'} font-medium ${styles.text}`}>{status.message}</p>
+          <p className={`${minimal ? 'text-xs' : 'text-xs'} font-medium ${styles.text}`}>{status.message}</p>
 
           {status.validation?.error_code === 'region_mismatch' && onSwitchRegion && (
             <button
               onClick={onSwitchRegion}
-              className="mt-2 inline-flex items-center gap-1 text-xs text-amber-700 hover:underline"
+              className="mt-2 inline-flex items-center gap-1 text-xs text-warning hover:underline"
             >
               {status.validation.suggested_region === 'cn'
                 ? t('onboarding.bootstrap.switchToChina')
@@ -143,19 +144,19 @@ function ValidationPanel({
                   <div
                     key={key}
                     className={minimal
-                      ? 'flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px]'
-                      : 'border-t border-white/70 pt-2 first:border-t-0 first:pt-0'}
+                      ? 'flex flex-wrap items-center gap-x-2 gap-y-1 text-xs'
+                      : 'border-t border-line pt-2 first:border-t-0 first:pt-0'}
                   >
                     <div className={`${minimal ? 'contents' : 'flex items-center justify-between gap-2'}`}>
-                      <span className="font-medium text-gray-700">
+                      <span className="font-medium text-fg-secondary">
                         {t(`onboarding.bootstrap.resourceLabels.${key}`)}
                       </span>
-                      <span className={`${minimal ? 'text-[11px]' : 'text-[10px]'} font-medium ${
+                      <span className={`${minimal ? 'text-xs' : 'text-xs'} font-medium ${
                         result.success === true
-                          ? 'text-green-600'
+                          ? 'text-success'
                           : result.success === false
-                            ? 'text-red-500'
-                            : 'text-gray-400'
+                            ? 'text-danger'
+                            : 'text-fg-muted'
                       }`}>
                         {result.success === true
                           ? t('onboarding.bootstrap.statusPassed')
@@ -165,7 +166,7 @@ function ValidationPanel({
                       </span>
                     </div>
                     {result.message && (
-                      <p className={`${minimal ? 'text-[11px] text-gray-500' : 'mt-1 text-[10px] text-gray-500'}`}>
+                      <p className={`${minimal ? 'text-xs text-fg-muted' : 'mt-1 text-xs text-fg-muted'}`}>
                         {result.message}
                       </p>
                     )}
@@ -175,17 +176,17 @@ function ValidationPanel({
             ) : (
               <div className="mt-3 grid grid-cols-1 md:grid-cols-2 gap-2">
                 {entries.map(([key, result]) => (
-                  <div key={key} className="rounded-lg bg-white/70 border border-white/80 px-3 py-2">
+                  <div key={key} className="rounded-lg bg-surface border border-line px-3 py-2">
                     <div className="flex items-center justify-between gap-2">
-                      <span className="text-[11px] font-medium text-gray-700">
+                      <span className="text-xs font-medium text-fg-secondary">
                         {t(`onboarding.bootstrap.resourceLabels.${key}`)}
                       </span>
-                      <span className={`text-[10px] font-medium ${
+                      <span className={`text-xs font-medium ${
                         result.success === true
-                          ? 'text-green-600'
+                          ? 'text-success'
                           : result.success === false
-                            ? 'text-red-500'
-                            : 'text-gray-400'
+                            ? 'text-danger'
+                            : 'text-fg-muted'
                       }`}>
                         {result.success === true
                           ? t('onboarding.bootstrap.statusPassed')
@@ -195,7 +196,7 @@ function ValidationPanel({
                       </span>
                     </div>
                     {result.message && (
-                      <p className="mt-1 text-[10px] text-gray-500">{result.message}</p>
+                      <p className="mt-1 text-xs text-fg-muted">{result.message}</p>
                     )}
                   </div>
                 ))}
@@ -216,8 +217,8 @@ function StepPill({
   label: string;
 }) {
   return (
-    <div className={`text-base sm:text-lg ${
-      active ? 'font-bold text-green-600' : 'font-medium text-gray-400'
+    <div className={`text-base sm:text-title-card ${
+      active ? 'font-bold text-success' : 'font-medium text-fg-muted'
     }`}>
       {label}
     </div>
@@ -226,9 +227,9 @@ function StepPill({
 
 function StatusMetric({ label, value }: { label: string; value: string }) {
   return (
-    <div className="rounded-lg border border-gray-100 bg-white px-3 py-2">
-      <p className="text-[11px] text-gray-500">{label}</p>
-      <p className="mt-1 break-words text-sm font-medium text-gray-900">{value}</p>
+    <div className="rounded-lg border border-line bg-surface px-3 py-2">
+      <p className="text-xs text-fg-muted">{label}</p>
+      <p className="mt-1 break-words text-sm font-medium text-fg">{value}</p>
     </div>
   );
 }
@@ -247,7 +248,7 @@ function RegionChooser({
   disabled?: boolean;
 }) {
   return (
-    <div className="inline-flex rounded-xl border border-gray-200 bg-white p-1.5 shadow-sm">
+    <div className="inline-flex rounded-xl border border-line bg-surface p-1.5 shadow-sm">
       {([
         ['cn', chinaLabel],
         ['global', globalLabel],
@@ -259,9 +260,9 @@ function RegionChooser({
           disabled={disabled}
           className={`rounded-lg px-5 py-2 text-sm font-semibold transition-colors ${
             value === candidate
-              ? 'bg-green-50 text-green-700 ring-1 ring-green-200'
-              : 'text-gray-500 hover:bg-gray-50 hover:text-gray-700'
-          } disabled:cursor-not-allowed disabled:opacity-50`}
+              ? 'bg-success-soft text-success ring-1 ring-focus'
+              : 'text-fg-muted hover:bg-hover hover:text-fg-secondary'
+          } disabled:cursor-not-allowed disabled:bg-disabled disabled:text-fg-disabled`}
         >
           {label}
         </button>
@@ -302,14 +303,16 @@ function OnboardingSecretInput({
         onChange={(event) => onChange(event.target.value)}
         placeholder={placeholder}
         autoComplete="off"
-        className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 pr-10 text-xs transition-all placeholder-gray-300 focus:border-red-400 focus:outline-none focus:ring-2 focus:ring-red-400/50"
+        aria-label={placeholder}
+        className="ui-input pr-14"
       />
       <button
         type="button"
         onClick={onToggleVisibility}
         disabled={revealing || (!hasStoredKey && !value)}
         title={visible ? hideLabel : showLabel}
-        className="absolute inset-y-0 right-0 flex w-10 items-center justify-center text-gray-400 transition-colors hover:text-gray-600 disabled:cursor-not-allowed disabled:opacity-50"
+        aria-label={visible ? hideLabel : showLabel}
+        className="ui-btn ui-btn-ghost ui-btn-icon absolute top-1/2 right-0 -translate-y-1/2 text-fg-muted"
       >
         {revealing
           ? <IconLoader2 aria-hidden="true" className="h-4 w-4 animate-spin" />
@@ -332,20 +335,23 @@ function SkipConfirmDialog({
   onCancel: () => void;
   onConfirm: () => void;
 }) {
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const titleId = useId();
+  useDialogFocus(dialogRef, Boolean(target), onCancel);
   if (!target) return null;
 
   const isModel = target === 'model';
 
   return (
-    <div className="absolute inset-0 z-10 flex items-center justify-center bg-black/25 px-4">
-      <div className="w-full max-w-md rounded-xl border border-gray-200 bg-white p-5 shadow-2xl">
+    <div className="absolute inset-0 z-10 flex items-center justify-center bg-overlay-backdrop px-4" onClick={(event) => { if (event.target === event.currentTarget) onCancel(); }}>
+      <div ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby={titleId} tabIndex={-1} data-ui-overlay="dialog" className="w-full max-w-modal rounded-overlay border border-line bg-surface p-6 shadow-overlay">
         <div className="flex items-start gap-3">
-          <IconAlertTriangle aria-hidden="true" className="mt-0.5 h-5 w-5 flex-shrink-0 text-amber-500" />
+          <IconAlertTriangle aria-hidden="true" className="mt-0.5 h-5 w-5 flex-shrink-0 text-warning" />
           <div className="min-w-0 flex-1">
-            <h3 className="text-sm font-semibold text-gray-900">
+            <h3 id={titleId} className="text-title-section text-fg">
               {isModel ? t('onboarding.bootstrap.skipModelTitle') : t('onboarding.bootstrap.skipIntelTitle')}
             </h3>
-            <p className="mt-2 text-sm leading-6 text-gray-600">
+            <p className="mt-2 text-sm text-fg-secondary">
               {isModel ? t('onboarding.bootstrap.skipModelDescription') : t('onboarding.bootstrap.skipIntelDescription')}
             </p>
           </div>
@@ -354,14 +360,14 @@ function SkipConfirmDialog({
           <button
             type="button"
             onClick={onCancel}
-            className="rounded-lg border border-gray-200 bg-white px-4 py-2 text-sm font-medium text-gray-700 transition-colors hover:bg-gray-50"
+            className="ui-btn"
           >
             {t('onboarding.bootstrap.returnToConfig')}
           </button>
           <button
             type="button"
             onClick={onConfirm}
-            className="rounded-lg bg-red-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-red-700"
+            className="ui-btn ui-btn-primary"
           >
             {t('onboarding.bootstrap.confirmSkip')}
           </button>
@@ -373,6 +379,8 @@ function SkipConfirmDialog({
 
 export default function OnboardingModal({ onClose }: OnboardingModalProps) {
   const { t, i18n } = useTranslation('common');
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const titleId = useId();
   const navigate = useNavigate();
   const defaultIntelRegion = useMemo(() => getDefaultThreatBookRegion(i18n.language), [i18n.language]);
 
@@ -410,6 +418,8 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
   const [intelKeyRevealing, setIntelKeyRevealing] = useState(false);
   const [intelSkipped, setIntelSkipped] = useState(false);
   const [intelRuntimeStatus, setIntelRuntimeStatus] = useState<ThreatBookIntelStatus | null>(null);
+  const isBusy = starting || primarySaving || intelSaving || primaryKeyRevealing || intelKeyRevealing;
+  useDialogFocus(dialogRef, true, isBusy ? undefined : onClose);
 
   const refreshOnboardingStatus = useCallback(async (silent = false) => {
     if (!silent) setStatusLoading(true);
@@ -941,22 +951,22 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
   const renderModelStep = () => (
     <div className="space-y-5">
       <div>
-        <h3 className="text-base font-semibold text-gray-900">{t('onboarding.bootstrap.modelPageTitle')}</h3>
-        <p className="mt-2 text-sm leading-6 text-gray-600">{t('onboarding.bootstrap.modelPageDescription')}</p>
+        <h3 className="text-base font-semibold text-fg">{t('onboarding.bootstrap.modelPageTitle')}</h3>
+        <p className="mt-2 text-sm text-fg-secondary">{t('onboarding.bootstrap.modelPageDescription')}</p>
       </div>
 
       {statusLoading && (
-        <div className="rounded-xl border border-dashed border-gray-200 bg-gray-50/70 px-4 py-3">
-          <p className="text-xs text-gray-500">{t('status.loading')}</p>
+        <div className="rounded-xl border border-dashed border-line bg-canvas px-4 py-3">
+          <p className="text-xs text-fg-muted">{t('status.loading')}</p>
         </div>
       )}
 
       {!statusLoading && showPrimaryConfiguredDetails && (
-        <div className="rounded-xl border border-green-200 bg-green-50/50 p-4 space-y-4">
+        <div className="rounded-xl border border-success bg-success-soft p-4 space-y-4">
           <div className="flex items-start justify-between gap-3">
             <div>
-              <p className="text-xs font-semibold text-gray-800">{t('onboarding.bootstrap.configuredDetailsTitle')}</p>
-              <p className="mt-1 text-[11px] text-gray-600">{primaryConfiguredSummary}</p>
+              <p className="text-xs font-semibold text-fg">{t('onboarding.bootstrap.configuredDetailsTitle')}</p>
+              <p className="mt-1 text-xs text-fg-secondary">{primaryConfiguredSummary}</p>
             </div>
             <button
               type="button"
@@ -967,7 +977,7 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
                 setPrimaryEditing(true);
                 setPrimaryStatus(null);
               }}
-              className="inline-flex items-center justify-center rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 transition-colors hover:bg-gray-50"
+              className="inline-flex items-center justify-center rounded-lg border border-line bg-surface px-3 py-1.5 text-xs font-medium text-fg-secondary transition-colors hover:bg-hover"
             >
               {t('onboarding.bootstrap.editPrimary')}
             </button>
@@ -994,16 +1004,17 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
       )}
 
       {!statusLoading && !showPrimaryConfiguredDetails && (
-        <div className="rounded-xl border border-gray-200 p-4 space-y-4">
+        <div className="rounded-xl border border-line p-4 space-y-4">
           <div>
-            <label className="mb-1.5 block text-xs font-medium text-gray-600">
+            <label className="mb-1.5 block text-xs font-medium text-fg-secondary">
               {t('onboarding.bootstrap.providerLabel')}
             </label>
             <select
               value={primaryProviderIsThreatBook ? THREATBOOK_FREE_PROVIDER_OPTION : primaryProviderId}
               onChange={(event) => handlePrimaryProviderChange(event.target.value)}
               disabled={primaryKeyRevealing || primarySaving}
-              className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-xs transition-all focus:border-red-400 focus:outline-none focus:ring-2 focus:ring-red-400/50"
+              aria-label={t('onboarding.bootstrap.providerLabel')}
+              className="ui-select"
             >
               {providerOptions.hasThreatBook && (
                 <option value={THREATBOOK_FREE_PROVIDER_OPTION}>
@@ -1020,7 +1031,7 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
 
           {!primaryProviderIsThreatBook && (selectedPrimaryProvider?.models?.length ? (
             <div>
-              <label className="mb-1.5 block text-xs font-medium text-gray-600">
+              <label className="mb-1.5 block text-xs font-medium text-fg-secondary">
                 {t('onboarding.bootstrap.modelLabel')}
               </label>
               <select
@@ -1029,7 +1040,8 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
                   setPrimaryModelId(event.target.value);
                   setPrimaryStatus(null);
                 }}
-                className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-xs transition-all focus:border-red-400 focus:outline-none focus:ring-2 focus:ring-red-400/50"
+                aria-label={t('onboarding.bootstrap.modelLabel')}
+                className="ui-select"
               >
                 {selectedPrimaryProvider.models.map((model) => (
                   <option key={model.id} value={model.id}>
@@ -1047,7 +1059,8 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
                 setPrimaryStatus(null);
               }}
               placeholder={t('onboarding.bootstrap.thirdPartyModelIdPlaceholder')}
-              className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-xs transition-all placeholder-gray-300 focus:border-red-400 focus:outline-none focus:ring-2 focus:ring-red-400/50"
+              aria-label={t('onboarding.bootstrap.modelLabel')}
+              className="ui-input"
             />
           ))}
 
@@ -1060,7 +1073,8 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
                 setPrimaryStatus(null);
               }}
               placeholder={t('onboarding.bootstrap.thirdPartyBaseUrlPlaceholder')}
-              className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-xs transition-all placeholder-gray-300 focus:border-red-400 focus:outline-none focus:ring-2 focus:ring-red-400/50"
+              aria-label={t('onboarding.bootstrap.thirdPartyBaseUrlPlaceholder')}
+              className="ui-input"
             />
           )}
 
@@ -1082,7 +1096,7 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
                   setPrimaryEditing(false);
                 }}
                 disabled={primaryKeyRevealing || primarySaving}
-                className="inline-flex items-center justify-center rounded-lg border border-gray-200 bg-white px-4 py-2 text-sm font-medium text-gray-700 transition-colors hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+                className="ui-btn"
               >
                 {t('onboarding.bootstrap.backToConfiguredDetails')}
               </button>
@@ -1106,9 +1120,9 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
                 href={MODEL_KEY_LINK}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-amber-300 bg-white px-3 py-2 text-xs font-medium text-amber-700 transition-colors hover:border-amber-400 hover:bg-amber-50"
+                className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-warning bg-surface px-3 py-2 text-xs font-medium text-warning transition-colors hover:border-warning hover:bg-warning-soft"
               >
-                <IconExternalLink aria-hidden="true" className="h-3 w-3" />
+                <IconExternalLink aria-hidden="true" className="h-4 w-4" />
                 {t('onboarding.bootstrap.modelKeyLink')}
               </a>
             )}
@@ -1116,7 +1130,7 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
               type="button"
               onClick={handleSavePrimary}
               disabled={!canSavePrimary || primarySaving}
-              className="inline-flex items-center justify-center gap-2 rounded-lg bg-red-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-40"
+              className="ui-btn ui-btn-primary"
             >
               {primarySaving && (
                 <span className="h-4 w-4 animate-spin rounded-full border-2 border-current border-t-transparent" />
@@ -1138,16 +1152,16 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
   const renderIntelStep = () => (
     <div className="space-y-5">
       <div>
-        <h3 className="text-base font-semibold text-gray-900">{t('onboarding.bootstrap.intelPageTitle')}</h3>
-        <p className="mt-2 text-sm leading-6 text-gray-600">{t('onboarding.bootstrap.intelPageDescription')}</p>
+        <h3 className="text-base font-semibold text-fg">{t('onboarding.bootstrap.intelPageTitle')}</h3>
+        <p className="mt-2 text-sm text-fg-secondary">{t('onboarding.bootstrap.intelPageDescription')}</p>
       </div>
 
       {showIntelConfiguredDetails && (
-        <div className="rounded-xl border border-green-200 bg-green-50/50 p-4 space-y-4">
+        <div className="rounded-xl border border-success bg-success-soft p-4 space-y-4">
           <div className="flex items-start justify-between gap-3">
             <div>
-              <p className="text-xs font-semibold text-gray-800">{t('onboarding.bootstrap.configuredDetailsTitle')}</p>
-              <p className="mt-1 text-[11px] text-gray-600">{t('onboarding.bootstrap.intelConfiguredHint')}</p>
+              <p className="text-xs font-semibold text-fg">{t('onboarding.bootstrap.configuredDetailsTitle')}</p>
+              <p className="mt-1 text-xs text-fg-secondary">{t('onboarding.bootstrap.intelConfiguredHint')}</p>
             </div>
             <button
               type="button"
@@ -1158,7 +1172,7 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
                 setIntelEditing(true);
                 setIntelStatus(null);
               }}
-              className="inline-flex items-center justify-center rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 transition-colors hover:bg-gray-50"
+              className="inline-flex items-center justify-center rounded-lg border border-line bg-surface px-3 py-1.5 text-xs font-medium text-fg-secondary transition-colors hover:bg-hover"
             >
               {t('onboarding.bootstrap.editIntel')}
             </button>
@@ -1198,11 +1212,11 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
       )}
 
       {!showIntelConfiguredDetails && (
-        <div className="rounded-xl border border-gray-200 p-4 space-y-4">
+        <div className="rounded-xl border border-line p-4 space-y-4">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
-              <p className="text-sm font-semibold text-gray-800">{t('onboarding.bootstrap.intelRegionTitle')}</p>
-              <p className="mt-1 text-xs text-gray-500">{t('onboarding.bootstrap.intelRegionHint')}</p>
+              <p className="text-sm font-semibold text-fg">{t('onboarding.bootstrap.intelRegionTitle')}</p>
+              <p className="mt-1 text-xs text-fg-muted">{t('onboarding.bootstrap.intelRegionHint')}</p>
             </div>
             <RegionChooser
               value={intelRegion}
@@ -1222,12 +1236,12 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
 
           <div className="flex flex-wrap gap-2">
             {currentIntelCapabilities.includes('api') && (
-              <span className="rounded-full bg-green-50 px-3 py-1.5 text-xs font-semibold text-green-700 ring-1 ring-green-100">
+              <span className="rounded-full bg-success-soft px-3 py-1.5 text-xs font-semibold text-success ring-1 ring-focus">
                 {t('onboarding.bootstrap.intelApiCapability')}
               </span>
             )}
             {currentIntelCapabilities.includes('mcp') && (
-              <span className="rounded-full bg-green-50 px-3 py-1.5 text-xs font-semibold text-green-700 ring-1 ring-green-100">
+              <span className="rounded-full bg-success-soft px-3 py-1.5 text-xs font-semibold text-success ring-1 ring-focus">
                 {t('onboarding.bootstrap.intelMcpCapability')}
               </span>
             )}
@@ -1246,7 +1260,7 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
                   setIntelEditing(false);
                 }}
                 disabled={intelKeyRevealing || intelSaving}
-                className="inline-flex items-center justify-center rounded-lg border border-gray-200 bg-white px-4 py-2 text-sm font-medium text-gray-700 transition-colors hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+                className="ui-btn"
               >
                 {t('onboarding.bootstrap.backToConfiguredDetails')}
               </button>
@@ -1269,16 +1283,16 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
               href={THREATBOOK_REGION_CONFIG[intelRegion].activationUrl}
               target="_blank"
               rel="noopener noreferrer"
-              className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-amber-300 bg-white px-3 py-2 text-xs font-medium text-amber-700 transition-colors hover:border-amber-400 hover:bg-amber-50"
+              className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-warning bg-surface px-3 py-2 text-xs font-medium text-warning transition-colors hover:border-warning hover:bg-warning-soft"
             >
-              <IconExternalLink aria-hidden="true" className="h-3 w-3" />
+              <IconExternalLink aria-hidden="true" className="h-4 w-4" />
               {t('onboarding.bootstrap.intelKeyLink')}
             </a>
             <button
               type="button"
               onClick={handleSaveIntel}
               disabled={!canSaveIntel || intelSaving}
-              className="inline-flex items-center justify-center gap-2 rounded-lg bg-red-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-40"
+              className="ui-btn ui-btn-primary"
             >
               {intelSaving && (
                 <span className="h-4 w-4 animate-spin rounded-full border-2 border-current border-t-transparent" />
@@ -1306,8 +1320,8 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
         </div>
       )}
 
-      <div className="rounded-xl border border-gray-200 bg-gray-50/70 p-4">
-        <p className="text-xs font-semibold text-gray-700">{t('onboarding.bootstrap.summaryTitle')}</p>
+      <div className="rounded-xl border border-line bg-canvas p-4">
+        <p className="text-xs font-semibold text-fg-secondary">{t('onboarding.bootstrap.summaryTitle')}</p>
         <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-3">
           <StatusMetric
             label={t('onboarding.bootstrap.summaryModel')}
@@ -1347,28 +1361,30 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
       };
 
   return (
-    <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/40 backdrop-blur-[2px]">
-      <div className="relative mx-4 flex max-h-[90vh] w-full max-w-3xl flex-col overflow-hidden rounded-2xl bg-white shadow-2xl">
+    <div className="fixed inset-0 z-[70] flex items-center justify-center bg-overlay-backdrop backdrop-blur-[2px]" onClick={(event) => { if (event.target === event.currentTarget && !isBusy && !skipConfirm) onClose(); }}>
+      <div ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby={titleId} tabIndex={-1} data-ui-overlay="dialog" className="relative mx-4 flex max-h-[calc(100dvh-2rem)] w-full max-w-onboarding flex-col overflow-hidden rounded-overlay bg-surface shadow-overlay">
         <div className="relative px-6 pb-4 pt-5">
-          <div className="absolute left-0 right-0 top-0 h-1 bg-green-500" />
+          <div className="absolute left-0 right-0 top-0 h-0.5 bg-action" />
           <button
             onClick={onClose}
-            className="absolute right-4 top-4 rounded-lg p-1 text-gray-300 transition-colors hover:bg-gray-100 hover:text-gray-500"
+            aria-label={t('button.close')}
+            disabled={isBusy}
+            className="ui-btn ui-btn-ghost ui-btn-icon absolute right-4 top-4 text-fg-muted"
           >
             <IconX aria-hidden="true" className="h-4 w-4" />
           </button>
-          <h2 className="pr-8 text-lg font-bold text-gray-900">{t('onboarding.title')}</h2>
+          <h2 id={titleId} className="pr-12 text-title-section text-fg">{t('onboarding.title')}</h2>
           <div className="mt-5 flex flex-wrap items-center gap-3">
             <StepPill
               active={step === 'model'}
               label={t('onboarding.bootstrap.stepModel')}
             />
-            <span className="text-lg font-semibold text-gray-300 sm:text-xl">》</span>
+            <span className="text-title-card font-semibold text-fg sm:text-xl">》</span>
             <StepPill
               active={step === 'intel'}
               label={t('onboarding.bootstrap.stepIntel')}
             />
-            <span className="text-lg font-semibold text-gray-300 sm:text-xl">》</span>
+            <span className="text-title-card font-semibold text-fg sm:text-xl">》</span>
             <StepPill active={false} label={t('onboarding.bootstrap.stepRex')} />
           </div>
         </div>
@@ -1379,7 +1395,7 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
           </div>
         </div>
 
-        <div className="border-t border-gray-100 bg-gray-50/80 px-6 py-4">
+        <div className="border-t border-line bg-canvas px-6 py-4">
           {startStatus && (
             <div className="mb-3">
               <ValidationPanel t={t} status={startStatus} />
@@ -1392,7 +1408,7 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
                 type="button"
                 onClick={() => setSkipConfirm(step)}
                 disabled={starting || primarySaving || intelSaving || primaryKeyRevealing || intelKeyRevealing || statusLoading}
-                className="rounded-lg border border-gray-200 bg-white px-4 py-2 text-sm font-medium text-gray-700 transition-colors hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-40"
+                className="ui-btn"
               >
                 {t('onboarding.bootstrap.skipPage')}
               </button>
@@ -1401,7 +1417,7 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
                   type="button"
                   onClick={() => setStep('model')}
                   disabled={starting || primarySaving || intelSaving || primaryKeyRevealing || intelKeyRevealing}
-                  className="rounded-lg border border-gray-200 bg-white px-4 py-2 text-sm font-medium text-gray-700 transition-colors hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-40"
+                  className="ui-btn"
                 >
                   {t('onboarding.bootstrap.previousStep')}
                 </button>
@@ -1410,7 +1426,7 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
                 type="button"
                 onClick={footerPrimaryAction.onClick}
                 disabled={footerPrimaryAction.disabled}
-                className="flex items-center gap-2 rounded-lg bg-gradient-to-r from-red-600 to-red-600 px-5 py-2 text-sm font-medium text-white shadow-sm shadow-red-500/25 transition-all hover:from-red-700 hover:to-red-700 hover:shadow-red-500/30 disabled:cursor-not-allowed disabled:opacity-40"
+                className="ui-btn ui-btn-primary"
               >
                 {starting && (
                   <span className="h-4 w-4 animate-spin rounded-full border-2 border-current border-t-transparent" />

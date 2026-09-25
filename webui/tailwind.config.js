@@ -54,6 +54,7 @@ export default {
         subtle: token('--bg-subtle'),
         hover: token('--bg-hover'),
         selected: token('--bg-selected'),
+        'overlay-backdrop': token('--overlay-backdrop'),
         fg: {
           DEFAULT: token('--text-primary'),
           secondary: token('--text-secondary'),

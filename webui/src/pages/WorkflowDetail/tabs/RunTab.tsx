@@ -1,3 +1,4 @@
+import PageSelectionGroup from '../../PageSelectionGroup';
 import { useState, useEffect, useCallback, useRef } from 'react';
 import {
   IconLoader2,
@@ -76,18 +77,18 @@ function SectionHeader({
       onClick={onToggle}
       className={`w-full flex items-center justify-between transition-colors text-left ${
         embedded
-          ? 'px-3 py-2.5 bg-white border-b border-gray-100 hover:bg-gray-50'
-          : 'px-4 py-3 bg-gray-50 border-b border-gray-100 hover:bg-gray-100'
+          ? 'px-3 py-2.5 bg-surface border-b border-line hover:bg-hover'
+          : 'px-4 py-3 bg-subtle border-b border-line hover:bg-hover'
       }`}
     >
-      <span className={`${embedded ? 'text-sm text-gray-900' : 'text-xs text-gray-700'} font-semibold flex items-center gap-2`}>
+      <span className={`${embedded ? 'text-sm text-fg' : 'text-xs text-fg-secondary'} font-semibold flex items-center gap-2`}>
         {title}
         {badge}
       </span>
       {expanded ? (
-        <IconChevronDown aria-hidden="true" className="w-3.5 h-3.5 text-gray-400" />
+        <IconChevronDown aria-hidden="true" className="w-4 h-4 text-fg-muted" />
       ) : (
-        <IconChevronRight aria-hidden="true" className="w-3.5 h-3.5 text-gray-400" />
+        <IconChevronRight aria-hidden="true" className="w-4 h-4 text-fg-muted" />
       )}
     </button>
   );
@@ -645,7 +646,7 @@ function TestSection({
   const bodyExpanded = hideSectionHeader || expanded;
 
   return (
-    <div className={embedded ? 'bg-white' : 'border-b border-gray-100'}>
+    <div className={embedded ? 'bg-surface' : 'border-b border-line'}>
       {!hideSectionHeader && (
         <SectionHeader
           title={t('detail.run.testSection')}
@@ -658,9 +659,9 @@ function TestSection({
         <div className={`${embedded ? 'p-3' : 'p-4'} space-y-3`}>
           <div>
             <div className="flex items-center justify-between gap-2 mb-1">
-              <label className="block text-xs text-gray-500">{t('detail.run.inputParams')}</label>
+              <label className="block text-xs text-fg-muted">{t('detail.run.inputParams')}</label>
               {showSampleSaveHint && (
-                <span className="text-[11px] text-gray-400">
+                <span className="text-xs text-fg-muted">
                   {sampleSaveState === 'saving' ? t('detail.run.savingSampleInputs') : t('detail.run.sampleInputsSaved')}
                 </span>
               )}
@@ -669,35 +670,35 @@ function TestSection({
               value={inputs}
               onChange={e => handleInputChange(e.target.value)}
               rows={5}
-              className={`w-full text-xs font-mono border rounded-lg px-3 py-2 resize-none focus:outline-none focus:ring-1 focus:ring-red-500 ${
-                inputError ? 'border-red-300' : 'border-gray-200'
+              className={`w-full text-xs font-mono border rounded-control px-3 py-2 resize-none ${
+                inputError ? 'border-danger' : 'border-line'
               }`}
               placeholder='{}'
               spellCheck={false}
             />
-            {inputError && <p className="text-xs text-red-500 mt-1">{inputError}</p>}
-            {!inputError && sampleSaveError && <p className="text-xs text-red-500 mt-1">{sampleSaveError}</p>}
+            {inputError && <p className="text-xs text-danger mt-1">{inputError}</p>}
+            {!inputError && sampleSaveError && <p className="text-xs text-danger mt-1">{sampleSaveError}</p>}
           </div>
           <button
             onClick={running ? handleStop : handleRun}
             disabled={stopping || isCancelling}
-            className="w-full flex items-center justify-center gap-2 py-2 bg-red-600 text-white text-xs font-medium rounded-lg hover:bg-red-700 disabled:opacity-60 disabled:cursor-not-allowed transition-colors"
+            className="w-full flex items-center justify-center gap-2 py-2 bg-action text-action-fg text-xs font-medium rounded-control hover:bg-action-hover disabled:bg-disabled disabled:text-fg-disabled disabled:cursor-not-allowed transition-colors"
           >
             {stopping || isCancelling
-              ? <IconLoader2 aria-hidden="true" className="w-3.5 h-3.5 animate-spin" />
+              ? <IconLoader2 aria-hidden="true" className="w-4 h-4 animate-spin" />
               : running
-                ? <IconPlayerStop aria-hidden="true" className="w-3.5 h-3.5" />
-                : <IconFlask aria-hidden="true" className="w-3.5 h-3.5" />}
+                ? <IconPlayerStop aria-hidden="true" className="w-4 h-4" />
+                : <IconFlask aria-hidden="true" className="w-4 h-4" />}
             {stopping || isCancelling ? t('detail.run.stopping') : running ? t('detail.run.stopRun') : t('detail.run.testRun')}
           </button>
 
           {execution && (
-            <div className="border border-gray-200 rounded-lg overflow-hidden">
-              <div className="flex items-center justify-between px-3 py-2 bg-gray-50 border-b border-gray-200">
+            <div className="border border-line rounded-control overflow-hidden">
+              <div className="flex items-center justify-between px-3 py-2 bg-subtle border-b border-line">
                 <WorkflowStatusBadge status={displayStatus} />
                 {execution.duration != null && (
-                  <span className="text-xs text-gray-400 flex items-center gap-1">
-                    <IconClock aria-hidden="true" className="w-3 h-3" />
+                  <span className="text-xs text-fg-muted flex items-center gap-1">
+                    <IconClock aria-hidden="true" className="w-4 h-4" />
                     {execution.duration.toFixed(2)}s
                   </span>
                 )}
@@ -705,30 +706,30 @@ function TestSection({
 
               {displayMessage && (
                 <div className={`px-3 py-2 border-b ${
-                  isCancelling ? 'bg-amber-50 border-amber-100' : 'bg-red-50 border-red-100'
+                  isCancelling ? 'bg-warning-soft border-warning' : 'bg-danger-soft border-danger'
                 }`}>
-                  <p className={`text-xs ${isCancelling ? 'text-amber-700' : 'text-red-600'}`}>{displayMessage}</p>
+                  <p className={`text-xs ${isCancelling ? 'text-warning' : 'text-danger'}`}>{displayMessage}</p>
                 </div>
               )}
 
               {execution.outputResults && (
                 <div>
-                  <div className="flex items-center justify-between gap-2 px-3 py-2 hover:bg-gray-50 transition-colors">
+                  <div className="flex items-center justify-between gap-2 px-3 py-2 hover:bg-hover transition-colors">
                     <div className="flex items-center gap-2 min-w-0">
-                      <span className="text-xs font-medium text-gray-600">{t('detail.run.outputResults')}</span>
+                      <span className="text-xs font-medium text-fg-secondary">{t('detail.run.outputResults')}</span>
                       <CopyButton text={JSON.stringify(execution.outputResults, null, 2)} size="w-3 h-3" />
                     </div>
                     <button
                       onClick={() => setOutputExpanded(v => !v)}
-                      className="flex items-center rounded p-0.5 hover:bg-gray-100"
+                      className="ui-btn-icon inline-flex items-center justify-center flex items-center rounded-control p-0.5 hover:bg-hover"
                       aria-label={t('detail.run.outputResults')}
                     >
-                      {outputExpanded ? <IconChevronDown aria-hidden="true" className="w-3 h-3 text-gray-400" /> : <IconChevronRight aria-hidden="true" className="w-3 h-3 text-gray-400" />}
+                      {outputExpanded ? <IconChevronDown aria-hidden="true" className="w-4 h-4 text-fg-muted" /> : <IconChevronRight aria-hidden="true" className="w-4 h-4 text-fg-muted" />}
                     </button>
                   </div>
                   {outputExpanded && (
-                    <div className="bg-gray-900 px-3 py-2 max-h-48 overflow-y-auto">
-                      <pre className="text-xs text-green-300 font-mono whitespace-pre-wrap">
+                    <div className="bg-subtle px-3 py-2 max-h-48 overflow-y-auto">
+                      <pre className="text-xs text-success font-mono whitespace-pre-wrap">
                         {JSON.stringify(execution.outputResults, null, 2)}
                       </pre>
                     </div>
@@ -740,15 +741,15 @@ function TestSection({
                 <div>
                   <button
                     onClick={() => setLogExpanded(v => !v)}
-                    className="w-full flex items-center justify-between px-3 py-2 hover:bg-gray-50 transition-colors border-t border-gray-100"
+                    className="w-full flex items-center justify-between px-3 py-2 hover:bg-hover transition-colors border-t border-line"
                   >
-                    <span className="text-xs font-medium text-gray-600">
+                    <span className="text-xs font-medium text-fg-secondary">
                       {t('detail.run.executionLog', { count: execution.executionLog.length })}
                     </span>
-                    {logExpanded ? <IconChevronDown aria-hidden="true" className="w-3 h-3 text-gray-400" /> : <IconChevronRight aria-hidden="true" className="w-3 h-3 text-gray-400" />}
+                    {logExpanded ? <IconChevronDown aria-hidden="true" className="w-4 h-4 text-fg-muted" /> : <IconChevronRight aria-hidden="true" className="w-4 h-4 text-fg-muted" />}
                   </button>
                   {logExpanded && (
-                    <div className="p-3 space-y-2 max-h-96 overflow-y-auto bg-gray-50">
+                    <div className="p-3 space-y-2 max-h-96 overflow-y-auto bg-subtle">
                       {execution.executionLog.map((step, i: number) => {
                         const hasInputs = step.inputs && Object.keys(step.inputs).length > 0;
                         const hasOutputs = step.outputs && Object.keys(step.outputs).length > 0;
@@ -783,8 +784,8 @@ function StepDetail({ step, index, hasInputs, hasOutputs }: {
 
   // Left accent bar color: green = ok, red = error
   const accentClass = isError
-    ? 'border-l-red-400'
-    : 'border-l-green-400';
+    ? 'border-l-danger'
+    : 'border-l-success';
 
   // Render a dict as key: value rows (top-level keys only), with a JSON fallback toggle
   const KVRows = ({ data, open, onToggle, label, valueClass }: {
@@ -793,14 +794,14 @@ function StepDetail({ step, index, hasInputs, hasOutputs }: {
   }) => {
     const entries = Object.entries(data);
     return (
-      <div className="border-t border-gray-100">
+      <div className="border-t border-line">
         <button
           onClick={onToggle}
-          className="w-full flex items-center gap-1 px-3 py-1.5 hover:bg-gray-50 transition-colors text-left"
+          className="w-full flex items-center gap-1 px-3 py-1.5 hover:bg-hover transition-colors text-left"
         >
-          {open ? <IconChevronDown aria-hidden="true" className="w-3 h-3 text-gray-400 flex-shrink-0" /> : <IconChevronRight aria-hidden="true" className="w-3 h-3 text-gray-400 flex-shrink-0" />}
-          <span className="text-xs text-gray-500 font-medium">{label}</span>
-          <span className="text-xs text-gray-400 ml-1">({entries.length})</span>
+          {open ? <IconChevronDown aria-hidden="true" className="w-4 h-4 text-fg-muted flex-shrink-0" /> : <IconChevronRight aria-hidden="true" className="w-4 h-4 text-fg-muted flex-shrink-0" />}
+          <span className="text-xs text-fg-muted font-medium">{label}</span>
+          <span className="text-xs text-fg-muted ml-1">({entries.length})</span>
         </button>
         {open && (
           <div className="px-3 pb-2 space-y-0.5">
@@ -808,7 +809,7 @@ function StepDetail({ step, index, hasInputs, hasOutputs }: {
               const isSimple = v === null || typeof v !== 'object';
               return (
                 <div key={k} className="flex gap-2 text-xs font-mono">
-                  <span className="text-gray-500 flex-shrink-0 min-w-0">{k}:</span>
+                  <span className="text-fg-muted flex-shrink-0 min-w-0">{k}:</span>
                   <span className={`${valueClass} break-all`}>
                     {isSimple ? String(v) : JSON.stringify(v)}
                   </span>
@@ -822,24 +823,24 @@ function StepDetail({ step, index, hasInputs, hasOutputs }: {
   };
 
   return (
-    <div className={`bg-white border border-gray-200 rounded-lg overflow-hidden border-l-4 ${accentClass}`}>
+    <div className={`bg-surface border border-line rounded-control overflow-hidden border-l-4 ${accentClass}`}>
       {/* Header */}
-      <div className="flex items-center justify-between px-3 py-2 bg-gray-50">
+      <div className="flex items-center justify-between px-3 py-2 bg-subtle">
         <div className="flex items-center gap-2 min-w-0">
           {isError
-            ? <IconCircleX aria-hidden="true" className="w-3.5 h-3.5 text-red-500 flex-shrink-0" />
-            : <IconCircleCheck aria-hidden="true" className="w-3.5 h-3.5 text-green-500 flex-shrink-0" />}
-          <span className="text-xs font-semibold text-gray-800 truncate">
+            ? <IconCircleX aria-hidden="true" className="w-4 h-4 text-danger flex-shrink-0" />
+            : <IconCircleCheck aria-hidden="true" className="w-4 h-4 text-success flex-shrink-0" />}
+          <span className="text-xs font-semibold text-fg truncate">
             {step.node_id || `Step ${index + 1}`}
           </span>
           {nodeType && (
-            <span className="text-xs bg-gray-200 text-gray-600 px-1.5 py-0.5 rounded flex-shrink-0">
+            <span className="text-xs bg-selected text-fg-secondary px-1.5 py-0.5 rounded-tag flex-shrink-0">
               {nodeType}
             </span>
           )}
         </div>
         {step.duration_ms != null && (
-          <span className="text-xs text-gray-400 flex-shrink-0 ml-2">
+          <span className="text-xs text-fg-muted flex-shrink-0 ml-2">
             {(step.duration_ms / 1000).toFixed(2)}s
           </span>
         )}
@@ -847,8 +848,8 @@ function StepDetail({ step, index, hasInputs, hasOutputs }: {
 
       {/* Error banner */}
       {isError && (
-        <div className="px-3 py-2 bg-red-50 border-t border-red-100">
-          <p className="text-xs text-red-700 font-mono break-all">{step.error}</p>
+        <div className="px-3 py-2 bg-danger-soft border-t border-danger">
+          <p className="text-xs text-danger font-mono break-all">{step.error}</p>
         </div>
       )}
 
@@ -859,7 +860,7 @@ function StepDetail({ step, index, hasInputs, hasOutputs }: {
           open={inputsOpen}
           onToggle={() => setInputsOpen(v => !v)}
           label={t('detail.run.stepInputs')}
-          valueClass="text-amber-700"
+          valueClass="text-warning"
         />
       )}
 
@@ -870,7 +871,7 @@ function StepDetail({ step, index, hasInputs, hasOutputs }: {
           open={outputsOpen}
           onToggle={() => setOutputsOpen(v => !v)}
           label={t('detail.run.stepOutputs')}
-          valueClass="text-green-700"
+          valueClass="text-success"
         />
       )}
     </div>
@@ -891,24 +892,24 @@ function HistoryExecDetail({ exec: ex }: { exec: WorkflowExecution }) {
   const displayMessage = getExecutionDisplayMessage(ex, t);
 
   return (
-    <div className="border-t border-gray-200 bg-gray-50">
+    <div className="border-t border-line bg-subtle">
       {isRunning && (
-        <div className="px-4 py-2 flex items-center gap-2 border-b border-gray-200">
-          <IconLoader2 aria-hidden="true" className={`w-3 h-3 animate-spin ${isCancelling ? 'text-amber-500' : 'text-red-500'}`} />
-          <span className={`text-xs ${isCancelling ? 'text-amber-700' : 'text-red-600'}`}>
+        <div className="px-4 py-2 flex items-center gap-2 border-b border-line">
+          <IconLoader2 aria-hidden="true" className={`w-4 h-4 animate-spin ${isCancelling ? 'text-warning' : 'text-danger'}`} />
+          <span className={`text-xs ${isCancelling ? 'text-warning' : 'text-danger'}`}>
             {isCancelling ? t('detail.run.stopping') : t('detail.run.running')}
             {hasLog && ` (${ex.executionLog.length} ${t('detail.run.stepsCompleted')})`}
           </span>
         </div>
       )}
       {displayMessage && (
-        <div className="px-4 py-2 border-b border-gray-200">
-          <p className={`text-xs ${isCancelling ? 'text-amber-700' : 'text-red-600'}`}>{displayMessage}</p>
+        <div className="px-4 py-2 border-b border-line">
+          <p className={`text-xs ${isCancelling ? 'text-warning' : 'text-danger'}`}>{displayMessage}</p>
         </div>
       )}
       {hasOutput && (
-        <div className="bg-gray-900 max-h-40 overflow-y-auto">
-          <pre className="text-xs text-green-300 font-mono px-4 py-2 whitespace-pre-wrap">
+        <div className="bg-subtle max-h-40 overflow-y-auto">
+          <pre className="text-xs text-success font-mono px-4 py-2 whitespace-pre-wrap">
             {JSON.stringify(ex.outputResults, null, 2)}
           </pre>
         </div>
@@ -917,15 +918,15 @@ function HistoryExecDetail({ exec: ex }: { exec: WorkflowExecution }) {
         <div>
           <button
             onClick={() => setLogExpanded(v => !v)}
-            className="w-full flex items-center justify-between px-4 py-2 hover:bg-gray-100 transition-colors"
+            className="w-full flex items-center justify-between px-4 py-2 hover:bg-hover transition-colors"
           >
-            <span className="text-xs font-medium text-gray-600">
+            <span className="text-xs font-medium text-fg-secondary">
               {t('detail.run.executionLog', { count: ex.executionLog.length })}
             </span>
-            {logExpanded ? <IconChevronDown aria-hidden="true" className="w-3 h-3 text-gray-400" /> : <IconChevronRight aria-hidden="true" className="w-3 h-3 text-gray-400" />}
+            {logExpanded ? <IconChevronDown aria-hidden="true" className="w-4 h-4 text-fg-muted" /> : <IconChevronRight aria-hidden="true" className="w-4 h-4 text-fg-muted" />}
           </button>
           {logExpanded && (
-            <div className="p-3 space-y-2 max-h-96 overflow-y-auto bg-gray-50">
+            <div className="p-3 space-y-2 max-h-96 overflow-y-auto bg-subtle">
               {ex.executionLog.map((step: any, i: number) => {
                 const hasInputs = step.inputs && Object.keys(step.inputs).length > 0;
                 const hasOutputs = step.outputs && Object.keys(step.outputs).length > 0;
@@ -938,7 +939,7 @@ function HistoryExecDetail({ exec: ex }: { exec: WorkflowExecution }) {
         </div>
       )}
       {!isRunning && !hasOutput && !hasLog && !ex.errorMessage && (
-        <p className="text-xs text-gray-400 px-4 py-2">{t('detail.run.noOutput')}</p>
+        <p className="text-xs text-fg-muted px-4 py-2">{t('detail.run.noOutput')}</p>
       )}
     </div>
   );
@@ -1071,11 +1072,11 @@ function HistorySection({
   };
 
   const statusIcon = (status: string) => {
-    if (status === 'cancelling') return <IconLoader2 aria-hidden="true" className="w-3.5 h-3.5 text-amber-500 animate-spin" />;
-    if (status === 'success' || status === 'SUCCEEDED') return <IconCircleCheck aria-hidden="true" className="w-3.5 h-3.5 text-green-500" />;
-    if (status === 'running') return <IconLoader2 aria-hidden="true" className="w-3.5 h-3.5 text-red-500 animate-spin" />;
-    if (status === 'error' || status === 'FAILED') return <IconCircleX aria-hidden="true" className="w-3.5 h-3.5 text-red-500" />;
-    return <IconAlertCircle aria-hidden="true" className="w-3.5 h-3.5 text-orange-500" />;
+    if (status === 'cancelling') return <IconLoader2 aria-hidden="true" className="w-4 h-4 text-warning animate-spin" />;
+    if (status === 'success' || status === 'SUCCEEDED') return <IconCircleCheck aria-hidden="true" className="w-4 h-4 text-success" />;
+    if (status === 'running') return <IconLoader2 aria-hidden="true" className="w-4 h-4 text-danger animate-spin" />;
+    if (status === 'error' || status === 'FAILED') return <IconCircleX aria-hidden="true" className="w-4 h-4 text-danger" />;
+    return <IconAlertCircle aria-hidden="true" className="w-4 h-4 text-warning" />;
   };
   const bodyExpanded = hideSectionHeader || expanded;
 
@@ -1098,7 +1099,7 @@ function HistorySection({
   };
 
   return (
-    <div className={embedded ? 'bg-white' : undefined}>
+    <div className={embedded ? 'bg-surface' : undefined}>
       {!hideSectionHeader && (
         <SectionHeader
           title={t('detail.run.historySection')}
@@ -1111,38 +1112,38 @@ function HistorySection({
         <div>
           {loading ? (
             <div className="flex items-center justify-center py-6">
-              <IconLoader2 aria-hidden="true" className="w-4 h-4 animate-spin text-gray-400" />
+              <IconLoader2 aria-hidden="true" className="w-4 h-4 animate-spin text-fg-muted" />
             </div>
           ) : focusedExecutionError ? (
             <div className="py-6 text-center">
-              <IconAlertCircle aria-hidden="true" className="w-8 h-8 text-orange-300 mx-auto mb-2" />
-              <p className="text-xs text-gray-400">{focusedExecutionError}</p>
+              <IconAlertCircle aria-hidden="true" className="w-8 h-8 text-warning mx-auto mb-2" />
+              <p className="text-xs text-fg-muted">{focusedExecutionError}</p>
             </div>
           ) : history.length === 0 ? (
             <div className="py-6 text-center">
-              <IconClock aria-hidden="true" className="w-8 h-8 text-gray-300 mx-auto mb-2" />
-              <p className="text-xs text-gray-400">{t('detail.run.noHistory')}</p>
+              <IconClock aria-hidden="true" className="w-8 h-8 text-fg-placeholder mx-auto mb-2" />
+              <p className="text-xs text-fg-muted">{t('detail.run.noHistory')}</p>
             </div>
           ) : (
             <div>
               <div>
                 {history.map((exec) => (
-                  <div key={exec.id} className="border-b border-gray-100 last:border-b-0">
+                  <div key={exec.id} className="border-b border-line last:border-b-0">
                     <button
                       onClick={() => void toggleExecutionDetail(exec)}
-                      className="w-full flex items-center gap-2 px-4 py-2.5 hover:bg-gray-50 transition-colors text-left"
+                      className="w-full flex items-center gap-2 px-4 py-2.5 hover:bg-hover transition-colors text-left"
                     >
                       {statusIcon(getExecutionDisplayStatus(exec))}
                       <div className="flex-1 min-w-0">
-                        <p className="text-xs text-gray-700 truncate">{formatTime(exec.startedAt)}</p>
+                        <p className="text-xs text-fg-secondary truncate">{formatTime(exec.startedAt)}</p>
                       </div>
                       {exec.duration != null && (
-                        <span className="text-xs text-gray-400 flex-shrink-0">{exec.duration.toFixed(1)}s</span>
+                        <span className="text-xs text-fg-muted flex-shrink-0">{exec.duration.toFixed(1)}s</span>
                       )}
                       {selectedExec?.id === exec.id ? (
-                        <IconChevronDown aria-hidden="true" className="w-3 h-3 text-gray-400 flex-shrink-0" />
+                        <IconChevronDown aria-hidden="true" className="w-4 h-4 text-fg-muted flex-shrink-0" />
                       ) : (
-                        <IconChevronRight aria-hidden="true" className="w-3 h-3 text-gray-400 flex-shrink-0" />
+                        <IconChevronRight aria-hidden="true" className="w-4 h-4 text-fg-muted flex-shrink-0" />
                       )}
                     </button>
                     {selectedExec?.id === exec.id && (
@@ -1198,23 +1199,23 @@ export default function RunTab({
   if (embeddedTabs) {
     return (
       <div className={embedded ? 'space-y-3' : 'flex-1 min-h-0 overflow-y-auto space-y-3'}>
-        <div className="flex rounded-md bg-gray-100 p-1">
+        <PageSelectionGroup className="flex ">
           {embeddedTabItems.map((item) => (
-            <button
+            <button aria-pressed={activeSection === item.id}
               key={item.id}
               type="button"
               onClick={() => setActiveEmbeddedSection(item.id)}
-              className={`flex-1 rounded px-2 py-1.5 text-xs font-medium transition-colors ${
+              className={`flex-1 rounded-segment px-2 py-1.5 text-xs font-medium transition-colors ${
                 activeSection === item.id
-                  ? 'bg-white text-red-600 shadow-sm'
-                  : 'text-gray-500 hover:text-gray-800'
+                  ? 'bg-selected text-fg'
+                  : 'text-fg-muted hover:text-fg'
               }`}
             >
               {item.label}
             </button>
           ))}
-        </div>
-        <div className="overflow-hidden rounded-md border border-gray-200 bg-white">
+        </PageSelectionGroup>
+        <div className="overflow-hidden rounded-control border border-line bg-surface">
           {showTest && (
             <div className={activeSection === 'test' ? 'block' : 'hidden'}>
               <TestSection
@@ -1245,7 +1246,7 @@ export default function RunTab({
   }
 
   return (
-    <div className={embedded ? 'space-y-3' : 'flex-1 min-h-0 overflow-y-auto divide-y divide-gray-100'}>
+    <div className={embedded ? 'space-y-3' : 'flex-1 min-h-0 overflow-y-auto divide-y divide-line'}>
       {showTest && (
         <TestSection
           workflow={workflow}

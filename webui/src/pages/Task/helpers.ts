@@ -1,26 +1,27 @@
 import { TaskStatus } from '@/api/task';
 import i18n from '@/i18n';
+import { IconClock, IconList, IconLoader2, IconCircleCheck, IconCircleX, IconBan, type TablerIcon } from '@tabler/icons-react';
 
-export const STATUS_CONFIG: Record<TaskStatus, { icon: string; color: string }> = {
-  pending:   { icon: '\u23f3', color: 'text-gray-500' },
-  queued:    { icon: '\ud83d\udccb', color: 'text-sky-600' },
-  running:   { icon: '\ud83d\udfe2', color: 'text-green-600' },
-  completed: { icon: '\u2705', color: 'text-green-500' },
-  failed:    { icon: '\u274c', color: 'text-red-500' },
-  cancelled: { icon: '\ud83d\udeab', color: 'text-gray-400' },
+export const STATUS_CONFIG: Record<TaskStatus, { icon: TablerIcon; color: string }> = {
+  pending:   { icon: IconClock, color: 'bg-subtle text-fg-secondary' },
+  queued:    { icon: IconList, color: 'bg-info-soft text-info' },
+  running:   { icon: IconLoader2, color: 'bg-info-soft text-info' },
+  completed: { icon: IconCircleCheck, color: 'bg-success-soft text-success' },
+  failed:    { icon: IconCircleX, color: 'bg-danger-soft text-danger' },
+  cancelled: { icon: IconBan, color: 'bg-subtle text-fg-muted' },
 };
 
 export const PRIORITY_CONFIG: Record<string, { color: string }> = {
-  urgent: { color: 'bg-amber-100 text-amber-800' },
-  high:   { color: 'bg-orange-100 text-orange-700' },
-  normal: { color: 'bg-slate-100 text-slate-700' },
-  low:    { color: 'bg-gray-100 text-gray-600' },
+  urgent: { color: 'bg-warning-soft text-warning' },
+  high:   { color: 'bg-warning-soft text-warning' },
+  normal: { color: 'bg-subtle text-fg-secondary' },
+  low:    { color: 'bg-subtle text-fg-secondary' },
 };
 
 export const SOURCE_CONFIG: Record<string, { color: string }> = {
-  user_conversation: { color: 'bg-slate-100 text-slate-700' },
-  scheduled_trigger: { color: 'bg-purple-50 text-purple-700' },
-  system_evolution:  { color: 'bg-orange-50 text-orange-700' },
+  user_conversation: { color: 'bg-subtle text-fg-secondary' },
+  scheduled_trigger: { color: 'bg-data-soft text-data' },
+  system_evolution:  { color: 'bg-ai-soft text-ai' },
 };
 
 const t = (key: string, opts?: Record<string, unknown>) => i18n.t(`task:${key}`, opts);

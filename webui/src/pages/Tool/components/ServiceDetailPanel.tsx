@@ -54,13 +54,13 @@ function KvRowValue({ value }: { value: string }) {
         onBlur={() => setShowTooltip(false)}
       >
         <span
-          className="block max-w-full text-sm text-gray-900 truncate text-right cursor-help"
+          className="block max-w-full text-sm text-fg truncate text-right cursor-help"
           tabIndex={0}
         >
           {value}
         </span>
         {showTooltip && (
-          <div className="absolute right-0 top-full z-20 mt-2 w-max max-w-[360px] rounded-lg bg-gray-900 px-3 py-2 text-left text-xs leading-relaxed text-white shadow-lg break-words">
+          <div className="absolute right-0 top-full z-20 mt-2 w-max max-w-[360px] rounded-control bg-subtle px-3 py-2 text-left text-xs text-fg shadow-lg break-words">
             {value}
           </div>
         )}
@@ -72,7 +72,7 @@ function KvRowValue({ value }: { value: string }) {
 function KvRow({ label, value }: { label: string; value: string }) {
   return (
     <div className="flex justify-between items-center py-2.5 px-4 gap-4">
-      <span className="text-sm text-gray-500 shrink-0">{label}</span>
+      <span className="text-sm text-fg-muted shrink-0">{label}</span>
       <KvRowValue value={value} />
     </div>
   );
@@ -228,17 +228,17 @@ export function MCPServerDetailPanel({
   };
 
   return (
-    <div className="bg-white" onClick={(e) => e.stopPropagation()}>
-      <div className="flex items-center border-b border-gray-200 px-5">
+    <div className="bg-surface" onClick={(e) => e.stopPropagation()}>
+      <div className="flex items-center border-b border-line px-5">
         {([
-          { key: 'overview' as const, label: t('detail.tabs.overview'), icon: <IconInfoCircle aria-hidden="true" className="w-3.5 h-3.5" /> },
-          { key: 'tools' as const, label: t('detail.tabs.tools', { count: serverTools.length }), icon: <IconTool aria-hidden="true" className="w-3.5 h-3.5" /> },
-          { key: 'resources' as const, label: t('detail.tabs.resources', { count: serverDetail?.resources?.length || 0 }), icon: <IconFileText aria-hidden="true" className="w-3.5 h-3.5" /> },
+          { key: 'overview' as const, label: t('detail.tabs.overview'), icon: <IconInfoCircle aria-hidden="true" className="w-4 h-4" /> },
+          { key: 'tools' as const, label: t('detail.tabs.tools', { count: serverTools.length }), icon: <IconTool aria-hidden="true" className="w-4 h-4" /> },
+          { key: 'resources' as const, label: t('detail.tabs.resources', { count: serverDetail?.resources?.length || 0 }), icon: <IconFileText aria-hidden="true" className="w-4 h-4" /> },
         ]).map((tab) => (
           <button
             key={tab.key}
             onClick={() => setDetailTab(tab.key)}
-            className={`flex items-center gap-1.5 px-4 py-3 text-sm font-medium border-b-2 transition-colors ${detailTab === tab.key ? 'border-red-500 text-red-600' : 'border-transparent text-gray-500 hover:text-gray-700'}`}
+            className={`flex items-center gap-1.5 px-4 py-3 text-sm font-medium border-b-2 transition-colors ${detailTab === tab.key ? 'border-danger text-danger' : 'border-transparent text-fg-muted hover:text-fg-secondary'}`}
           >
             {tab.icon}
             {tab.label}
@@ -284,23 +284,23 @@ export function MCPServerDetailPanel({
             )}
 
             <div className="grid grid-cols-2 gap-3">
-              <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 flex items-center justify-between">
+              <div className="rounded-control border border-line bg-subtle px-3 py-2 flex items-center justify-between">
                 <div>
-                  <div className="text-xs text-gray-500">{t('detail.registeredTools')}</div>
-                  <div className="text-lg font-semibold text-gray-900">{serverDetail?.status?.tools_count ?? serverTools.length}</div>
+                  <div className="text-xs text-fg-muted">{t('detail.registeredTools')}</div>
+                  <div className="text-lg font-semibold text-fg">{serverDetail?.status?.tools_count ?? serverTools.length}</div>
                 </div>
                 <button
                   onClick={handleRefreshTools}
                   disabled={refreshing || server.status !== 'connected'}
                   title={t('detail.refreshTools')}
-                  className="p-1.5 text-gray-400 hover:text-gray-600 hover:bg-gray-200 rounded-md disabled:opacity-40 transition-colors"
+                  className="ui-btn-icon inline-flex items-center justify-center p-1.5 text-fg-muted hover:text-fg-secondary hover:bg-hover rounded-control disabled:bg-disabled disabled:text-fg-disabled transition-colors"
                 >
                   <IconRefresh aria-hidden="true" className={`w-4 h-4 ${refreshing ? 'animate-spin' : ''}`} />
                 </button>
               </div>
-              <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2">
-                <div className="text-xs text-gray-500">{t('detail.availableResources')}</div>
-                <div className="text-lg font-semibold text-gray-900">{serverDetail?.status?.resources_count ?? serverDetail?.resources?.length ?? 0}</div>
+              <div className="rounded-control border border-line bg-subtle px-3 py-2">
+                <div className="text-xs text-fg-muted">{t('detail.availableResources')}</div>
+                <div className="text-lg font-semibold text-fg">{serverDetail?.status?.resources_count ?? serverDetail?.resources?.length ?? 0}</div>
               </div>
             </div>
 
@@ -310,14 +310,14 @@ export function MCPServerDetailPanel({
                   <button
                     onClick={handleResetConfig}
                     disabled={savingConfig}
-                    className="inline-flex items-center gap-2 px-4 py-2.5 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 text-sm font-medium transition-colors disabled:opacity-50"
+                    className="inline-flex items-center gap-2 px-4 py-2.5 border border-line-control text-fg-secondary rounded-control hover:bg-hover text-sm font-medium transition-colors disabled:bg-disabled disabled:text-fg-disabled"
                   >
                     {t('button.cancel')}
                   </button>
                   <button
                     onClick={handleSaveConfig}
                     disabled={savingConfig}
-                    className="inline-flex items-center gap-2 px-4 py-2.5 bg-red-600 text-white rounded-lg hover:bg-red-700 text-sm font-medium transition-colors disabled:opacity-50"
+                    className="inline-flex items-center gap-2 px-4 py-2.5 bg-action text-action-fg rounded-control hover:bg-action-hover text-sm font-medium transition-colors disabled:bg-disabled disabled:text-fg-disabled"
                   >
                     {savingConfig ? <IconRefresh aria-hidden="true" className="w-4 h-4 animate-spin" /> : <IconDeviceFloppy aria-hidden="true" className="w-4 h-4" />}
                     {savingConfig ? t('button.saving') : t('button.save')}
@@ -325,25 +325,25 @@ export function MCPServerDetailPanel({
                 </>
               )}
               {server.status === 'connected' ? (
-                <button onClick={onDisconnect} className="inline-flex items-center gap-2 px-4 py-2.5 border border-red-300 text-red-700 rounded-lg hover:bg-red-50 text-sm font-medium transition-colors">
+                <button onClick={onDisconnect} className="inline-flex items-center gap-2 px-4 py-2.5 border border-danger text-danger rounded-control hover:bg-danger-soft text-sm font-medium transition-colors">
                   <IconPlugOff aria-hidden="true" className="w-4 h-4" />{t('detail.disconnectConn')}
                 </button>
               ) : server.status === 'disabled' ? (
-                <button onClick={handleToggleEnabled} disabled={savingConfig} className="inline-flex items-center gap-2 px-4 py-2.5 bg-green-600 text-white rounded-lg hover:bg-green-700 text-sm font-medium transition-colors disabled:opacity-50">
+                <button onClick={handleToggleEnabled} disabled={savingConfig} className="inline-flex items-center gap-2 px-4 py-2.5 bg-action text-action-fg rounded-control hover:bg-action-hover text-sm font-medium transition-colors disabled:bg-disabled disabled:text-fg-disabled">
                   <IconPower aria-hidden="true" className="w-4 h-4" />{t('detail.enableServer')}
                 </button>
               ) : (
-                <button onClick={onConnect} className="inline-flex items-center gap-2 px-4 py-2.5 bg-red-600 text-white rounded-lg hover:bg-red-700 text-sm font-medium transition-colors">
+                <button onClick={onConnect} className="inline-flex items-center gap-2 px-4 py-2.5 bg-action text-action-fg rounded-control hover:bg-action-hover text-sm font-medium transition-colors">
                   <IconPower aria-hidden="true" className="w-4 h-4" />{t('detail.connectConn')}
                 </button>
               )}
               {server.status !== 'disabled' && (
-                <button onClick={handleToggleEnabled} disabled={savingConfig} className="inline-flex items-center gap-2 px-4 py-2.5 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 text-sm font-medium transition-colors disabled:opacity-50">
+                <button onClick={handleToggleEnabled} disabled={savingConfig} className="inline-flex items-center gap-2 px-4 py-2.5 border border-line-control text-fg-secondary rounded-control hover:bg-hover text-sm font-medium transition-colors disabled:bg-disabled disabled:text-fg-disabled">
                   <IconPlugOff aria-hidden="true" className="w-4 h-4" />{t('detail.disableServer')}
                 </button>
               )}
               {onRemove && (
-                <button onClick={onRemove} className="inline-flex items-center gap-2 px-4 py-2.5 border border-red-300 text-red-700 rounded-lg hover:bg-red-50 text-sm font-medium transition-colors">
+                <button onClick={onRemove} className="inline-flex items-center gap-2 px-4 py-2.5 border border-danger text-danger rounded-control hover:bg-danger-soft text-sm font-medium transition-colors">
                   <IconTrash aria-hidden="true" className="w-4 h-4" />{t('detail.removeServer')}
                 </button>
               )}
@@ -351,21 +351,21 @@ export function MCPServerDetailPanel({
           </div>
         ) : detailTab === 'tools' ? (
           serverTools.length === 0 ? (
-            <div className="text-center py-8 text-sm text-gray-500">{t('detail.noRegisteredTools')}</div>
+            <div className="text-center py-8 text-sm text-fg-muted">{t('detail.noRegisteredTools')}</div>
           ) : (
-            <div className="rounded-lg border border-gray-200 overflow-hidden">
-              <table className="w-full table-fixed divide-y divide-gray-100">
-                <thead className="bg-gray-50">
+            <div className="rounded-control border border-line overflow-hidden">
+              <table className="w-full table-fixed divide-y divide-line">
+                <thead className="bg-subtle">
                   <tr>
-                    <th className="w-2/5 px-4 py-2.5 text-left text-xs font-medium text-gray-500 uppercase">{t('detail.tableToolName')}</th>
-                    <th className="px-4 py-2.5 text-left text-xs font-medium text-gray-500 uppercase">{t('detail.tableDesc')}</th>
+                    <th className="w-2/5 px-4 py-2.5 text-left text-xs font-medium text-fg-muted uppercase">{t('detail.tableToolName')}</th>
+                    <th className="px-4 py-2.5 text-left text-xs font-medium text-fg-muted uppercase">{t('detail.tableDesc')}</th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-gray-100">
+                <tbody className="divide-y divide-line">
                   {serverTools.map((tool) => (
-                    <tr key={tool.name} onClick={() => onSelectTool(tool)} className="hover:bg-red-50 cursor-pointer transition-colors">
-                      <td className="px-4 py-3"><span className="text-sm font-medium text-gray-900 font-mono break-all">{tool.name}</span></td>
-                      <td className="px-4 py-3"><span className="text-sm text-gray-600 line-clamp-2 leading-relaxed">{tool.description}</span></td>
+                    <tr key={tool.name} onClick={() => onSelectTool(tool)} className="hover:bg-danger-soft cursor-pointer transition-colors">
+                      <td className="px-4 py-3"><span className="text-sm font-medium text-fg font-mono break-all">{tool.name}</span></td>
+                      <td className="px-4 py-3"><span className="text-sm text-fg-secondary line-clamp-2 ">{tool.description}</span></td>
                     </tr>
                   ))}
                 </tbody>
@@ -373,26 +373,26 @@ export function MCPServerDetailPanel({
             </div>
           )
         ) : (!serverDetail?.resources || serverDetail.resources.length === 0) ? (
-          <div className="text-center py-8 text-sm text-gray-500">{t('detail.noResources')}</div>
+          <div className="text-center py-8 text-sm text-fg-muted">{t('detail.noResources')}</div>
         ) : (
-          <div className="bg-white rounded-lg border border-gray-200 overflow-hidden">
+          <div className="bg-surface rounded-control border border-line overflow-hidden">
             <div className="overflow-x-auto">
-              <table className="min-w-full divide-y divide-gray-100 table-fixed">
-                <thead className="bg-gray-50">
+              <table className="min-w-full divide-y divide-line table-fixed">
+                <thead className="bg-subtle">
                   <tr>
-                    <th className="w-[25%] px-5 py-2.5 text-left text-xs font-medium text-gray-500 uppercase">{t('detail.tableResourceName')}</th>
-                    <th className="w-[35%] px-5 py-2.5 text-left text-xs font-medium text-gray-500 uppercase">URI</th>
-                    <th className="px-5 py-2.5 text-left text-xs font-medium text-gray-500 uppercase">{t('detail.tableDesc')}</th>
-                    <th className="w-[100px] px-5 py-2.5 text-left text-xs font-medium text-gray-500 uppercase whitespace-nowrap">{t('detail.tableType')}</th>
+                    <th className="w-[25%] px-5 py-2.5 text-left text-xs font-medium text-fg-muted uppercase">{t('detail.tableResourceName')}</th>
+                    <th className="w-[35%] px-5 py-2.5 text-left text-xs font-medium text-fg-muted uppercase">URI</th>
+                    <th className="px-5 py-2.5 text-left text-xs font-medium text-fg-muted uppercase">{t('detail.tableDesc')}</th>
+                    <th className="w-[100px] px-5 py-2.5 text-left text-xs font-medium text-fg-muted uppercase whitespace-nowrap">{t('detail.tableType')}</th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-gray-100">
+                <tbody className="divide-y divide-line">
                   {serverDetail.resources.map((res) => (
-                    <tr key={res.uri} className="hover:bg-gray-50">
-                      <td className="px-5 py-2.5 truncate"><span className="text-sm font-medium text-gray-900">{res.name}</span></td>
-                      <td className="px-5 py-2.5 truncate"><span className="text-sm text-gray-600 font-mono">{res.uri}</span></td>
-                      <td className="px-5 py-2.5"><span className="text-sm text-gray-600 line-clamp-1">{res.description || '-'}</span></td>
-                      <td className="px-5 py-2.5 whitespace-nowrap"><span className="text-xs text-gray-500 font-mono">{res.mime_type || '-'}</span></td>
+                    <tr key={res.uri} className="hover:bg-hover">
+                      <td className="px-5 py-2.5 truncate"><span className="text-sm font-medium text-fg">{res.name}</span></td>
+                      <td className="px-5 py-2.5 truncate"><span className="text-sm text-fg-secondary font-mono">{res.uri}</span></td>
+                      <td className="px-5 py-2.5"><span className="text-sm text-fg-secondary line-clamp-1">{res.description || '-'}</span></td>
+                      <td className="px-5 py-2.5 whitespace-nowrap"><span className="text-xs text-fg-muted font-mono">{res.mime_type || '-'}</span></td>
                     </tr>
                   ))}
                 </tbody>
@@ -452,42 +452,42 @@ export function CatalogAPIDetailPanel({
   };
 
   return (
-    <div className="bg-white" onClick={(e) => e.stopPropagation()}>
+    <div className="bg-surface" onClick={(e) => e.stopPropagation()}>
       <div className="p-5">
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
           <div className="space-y-5">
-            <div className="bg-white rounded-lg border border-gray-200 p-4">
-              <h4 className="text-sm font-semibold text-gray-900 mb-3 flex items-center">
-                <IconActivity aria-hidden="true" className="w-4 h-4 mr-2 text-purple-500" />
+            <div className="bg-surface rounded-control border border-line p-4">
+              <h4 className="text-sm font-semibold text-fg mb-3 flex items-center">
+                <IconActivity aria-hidden="true" className="w-4 h-4 mr-2 text-ai" />
                 {t('serviceInfo.title')}
               </h4>
               <div className="space-y-3">
-                <div className="flex items-center justify-between"><span className="text-sm text-gray-500">{t('serviceInfo.name')}</span><span className="text-sm text-gray-900 font-medium">{entry.name}</span></div>
-                <div className="flex items-center justify-between"><span className="text-sm text-gray-500">{t('serviceInfo.type')}</span><span className="px-2 py-0.5 rounded-full text-xs font-medium bg-purple-100 text-purple-800">{t('serviceInfo.apiType')}</span></div>
-                <div className="flex items-center justify-between"><span className="text-sm text-gray-500">{t('serviceInfo.category')}</span><span className="text-sm text-gray-900">{catalogCategories[entry.category]?.label || entry.category}</span></div>
-                <div className="flex items-center justify-between"><span className="text-sm text-gray-500">{t('serviceInfo.language')}</span><span className="text-sm text-gray-900">{entry.language}</span></div>
-                <div className="pt-2"><span className="text-sm text-gray-500 block mb-1">{t('serviceInfo.description')}</span><p className="text-sm text-gray-900">{getCatalogDescription(entry, i18n.language)}</p></div>
+                <div className="flex items-center justify-between"><span className="text-sm text-fg-muted">{t('serviceInfo.name')}</span><span className="text-sm text-fg font-medium">{entry.name}</span></div>
+                <div className="flex items-center justify-between"><span className="text-sm text-fg-muted">{t('serviceInfo.type')}</span><span className="px-2 py-0.5 rounded-pill text-xs font-medium bg-ai-soft text-ai">{t('serviceInfo.apiType')}</span></div>
+                <div className="flex items-center justify-between"><span className="text-sm text-fg-muted">{t('serviceInfo.category')}</span><span className="text-sm text-fg">{catalogCategories[entry.category]?.label || entry.category}</span></div>
+                <div className="flex items-center justify-between"><span className="text-sm text-fg-muted">{t('serviceInfo.language')}</span><span className="text-sm text-fg">{entry.language}</span></div>
+                <div className="pt-2"><span className="text-sm text-fg-muted block mb-1">{t('serviceInfo.description')}</span><p className="text-sm text-fg">{getCatalogDescription(entry, i18n.language)}</p></div>
                 <div className="flex items-center justify-between">
-                  <span className="text-sm text-gray-500">{t('serviceInfo.github')}</span>
-                  <a href={`https://github.com/${entry.github}`} target="_blank" rel="noopener noreferrer" className="text-sm text-red-600 hover:text-red-800">{entry.github}</a>
+                  <span className="text-sm text-fg-muted">{t('serviceInfo.github')}</span>
+                  <a href={`https://github.com/${entry.github}`} target="_blank" rel="noopener noreferrer" className="text-sm text-danger hover:text-danger">{entry.github}</a>
                 </div>
                 {entry.requires_auth && (
-                  <div className="pt-2 border-t border-gray-100">
-                    <span className="text-sm text-gray-500 block mb-2">{t('serviceInfo.requiredKeys')}</span>
+                  <div className="pt-2 border-t border-line">
+                    <span className="text-sm text-fg-muted block mb-2">{t('serviceInfo.requiredKeys')}</span>
                     {Object.entries(entry.env_vars).filter(([, spec]) => spec.secret).map(([key, spec]) => (
                       <div key={key} className="flex items-center justify-between py-1">
-                        <code className="text-xs bg-gray-100 px-1.5 py-0.5 rounded">{key}</code>
-                        <span className="text-xs text-gray-500">{spec.description}</span>
+                        <code className="text-xs bg-subtle px-1.5 py-0.5 rounded-tag">{key}</code>
+                        <span className="text-xs text-fg-muted">{spec.description}</span>
                       </div>
                     ))}
                   </div>
                 )}
                 {entry.tags && entry.tags.length > 0 && (
-                  <div className="pt-2 border-t border-gray-100">
-                    <span className="text-sm text-gray-500 block mb-2">{t('serviceInfo.tags')}</span>
+                  <div className="pt-2 border-t border-line">
+                    <span className="text-sm text-fg-muted block mb-2">{t('serviceInfo.tags')}</span>
                     <div className="flex flex-wrap gap-1.5">
                       {entry.tags.map((tag) => (
-                        <span key={tag} className="px-2 py-0.5 bg-gray-100 text-gray-700 text-xs rounded">#{tag}</span>
+                        <span key={tag} className="px-2 py-0.5 bg-subtle text-fg-secondary text-xs rounded-tag">#{tag}</span>
                       ))}
                     </div>
                   </div>
@@ -497,59 +497,59 @@ export function CatalogAPIDetailPanel({
           </div>
 
           <div className="space-y-5">
-            <div className="bg-white rounded-lg border border-gray-200 p-4">
-              <h4 className="text-sm font-semibold text-gray-900 mb-3 flex items-center">
-                <IconBolt aria-hidden="true" className="w-4 h-4 mr-2 text-amber-500" />
+            <div className="bg-surface rounded-control border border-line p-4">
+              <h4 className="text-sm font-semibold text-fg mb-3 flex items-center">
+                <IconBolt aria-hidden="true" className="w-4 h-4 mr-2 text-warning" />
                 {t('detail.quickActions')}
               </h4>
               <div className="space-y-2.5">
                 <button
                   onClick={handleTestConnect}
                   disabled={testing}
-                  className={`w-full flex items-center justify-center gap-2 px-4 py-2.5 border rounded-lg text-sm font-medium transition-colors ${testing ? 'border-red-300 bg-red-50 text-red-600 cursor-not-allowed' : 'bg-white border-gray-300 text-gray-700 hover:bg-gray-50'}`}
+                  className={`w-full flex items-center justify-center gap-2 px-4 py-2.5 border rounded-control text-sm font-medium transition-colors ${testing ? 'border-danger bg-danger-soft text-danger cursor-not-allowed' : 'bg-surface border-line-control text-fg-secondary hover:bg-hover'}`}
                 >
                   {testing ? <><IconRefresh aria-hidden="true" className="w-4 h-4 animate-spin" />{t('button.testing')}</> : <><IconActivity aria-hidden="true" className="w-4 h-4" />{t('button.testConnectivity')}</>}
                 </button>
-                <button onClick={handleConnect} className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-red-600 text-white rounded-lg text-sm font-medium hover:bg-red-700 transition-colors">
+                <button onClick={handleConnect} className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-action text-action-fg rounded-control text-sm font-medium hover:bg-action-hover transition-colors">
                   <IconPower aria-hidden="true" className="w-4 h-4" />{t('detail.connectConn')}
                 </button>
               </div>
             </div>
 
             {testing && (
-              <div className="p-3 rounded-lg border border-red-200 bg-red-50 text-red-700">
+              <div className="p-3 rounded-control border border-danger bg-danger-soft text-danger">
                 <div className="flex items-center">
                   <div className="relative mr-3">
-                    <div className="w-8 h-8 rounded-full border-2 border-red-200 border-t-red-600 animate-spin" />
+                    <div className="w-8 h-8 rounded-pill border-2 border-danger border-t-danger animate-spin" />
                   </div>
                   <div className="flex-1">
                     <div className="text-sm font-medium">{t('testing.connectivityTitle')}</div>
-                    <div className="text-xs mt-0.5 text-red-600">
+                    <div className="text-xs mt-0.5 text-danger">
                       {t('testing.connectivityDesc')}
                       <span className="ml-2 font-mono tabular-nums">{testElapsed.toFixed(1)}s</span>
                     </div>
                   </div>
                 </div>
-                <div className="mt-2.5 h-1 bg-red-100 rounded-full overflow-hidden">
-                  <div className="h-full bg-red-500 rounded-full animate-pulse" style={{ width: `${Math.min(95, testElapsed * 8)}%`, transition: 'width 0.3s ease-out' }} />
+                <div className="mt-2.5 h-1 bg-danger-soft rounded-pill overflow-hidden">
+                  <div className="h-full bg-danger rounded-pill animate-pulse" style={{ width: `${Math.min(95, testElapsed * 8)}%`, transition: 'width 0.3s ease-out' }} />
                 </div>
               </div>
             )}
 
             {!testing && testResult && (
-              <div className={`p-3 rounded-lg border ${testResult.success ? 'bg-green-50 border-green-200' : 'bg-red-50 border-red-200'}`}>
+              <div className={`p-3 rounded-control border ${testResult.success ? 'bg-success-soft border-success' : 'bg-danger-soft border-danger'}`}>
                 <div className="flex items-start">
-                  {testResult.success ? <IconCircleCheck aria-hidden="true" className="w-4 h-4 text-green-600 mr-2 mt-0.5 flex-shrink-0" /> : <IconCircleX aria-hidden="true" className="w-4 h-4 text-red-600 mr-2 mt-0.5 flex-shrink-0" />}
+                  {testResult.success ? <IconCircleCheck aria-hidden="true" className="w-4 h-4 text-success mr-2 mt-0.5 flex-shrink-0" /> : <IconCircleX aria-hidden="true" className="w-4 h-4 text-danger mr-2 mt-0.5 flex-shrink-0" />}
                   <div className="flex-1">
-                    <div className={`text-sm font-medium ${testResult.success ? 'text-green-800' : 'text-red-800'}`}>
+                    <div className={`text-sm font-medium ${testResult.success ? 'text-success' : 'text-danger'}`}>
                       {testResult.success ? t('testing.testSuccess') : t('testing.testFailed')}
                     </div>
-                    <div className={`text-xs mt-0.5 ${testResult.success ? 'text-green-700' : 'text-red-700'}`}>{testResult.message}</div>
+                    <div className={`text-xs mt-0.5 ${testResult.success ? 'text-success' : 'text-danger'}`}>{testResult.message}</div>
                     {testResult.latency_ms != null && (
-                      <div className={`text-xs mt-1 ${testResult.success ? 'text-green-600' : 'text-red-600'} opacity-75`}>{t('testing.responseLatency', { latency: testResult.latency_ms })}</div>
+                      <div className={`text-xs mt-1 ${testResult.success ? 'text-success' : 'text-danger'} text-fg-muted`}>{t('testing.responseLatency', { latency: testResult.latency_ms })}</div>
                     )}
                     {testResult.tool_tested && (
-                      <div className={`text-xs mt-0.5 ${testResult.success ? 'text-green-600' : 'text-red-600'} opacity-75`}>{t('testing.testToolLabel', { tool: testResult.tool_tested })}</div>
+                      <div className={`text-xs mt-0.5 ${testResult.success ? 'text-success' : 'text-danger'} text-fg-muted`}>{t('testing.testToolLabel', { tool: testResult.tool_tested })}</div>
                     )}
                   </div>
                 </div>
@@ -808,16 +808,16 @@ export function APIServiceDetailPanel({
   };
 
   return (
-    <div className="bg-white" onClick={(e) => e.stopPropagation()}>
-      <div className="flex items-center border-b border-gray-200 px-5">
+    <div className="bg-surface" onClick={(e) => e.stopPropagation()}>
+      <div className="flex items-center border-b border-line px-5">
         {([
-          { key: 'overview' as const, label: t('detail.tabs.overview'), icon: <IconInfoCircle aria-hidden="true" className="w-3.5 h-3.5" /> },
-          { key: 'tools' as const, label: t('detail.tabs.tools', { count: serviceTools.length }), icon: <IconTool aria-hidden="true" className="w-3.5 h-3.5" /> },
+          { key: 'overview' as const, label: t('detail.tabs.overview'), icon: <IconInfoCircle aria-hidden="true" className="w-4 h-4" /> },
+          { key: 'tools' as const, label: t('detail.tabs.tools', { count: serviceTools.length }), icon: <IconTool aria-hidden="true" className="w-4 h-4" /> },
         ]).map((tab) => (
           <button
             key={tab.key}
             onClick={() => setDetailTab(tab.key)}
-            className={`flex items-center gap-1.5 px-4 py-3 text-sm font-medium border-b-2 transition-colors ${detailTab === tab.key ? 'border-purple-500 text-purple-600' : 'border-transparent text-gray-500 hover:text-gray-700'}`}
+            className={`flex items-center gap-1.5 px-4 py-3 text-sm font-medium border-b-2 transition-colors ${detailTab === tab.key ? 'border-ai text-ai' : 'border-transparent text-fg-muted hover:text-fg-secondary'}`}
           >
             {tab.icon}
             {tab.label}
@@ -839,7 +839,7 @@ export function APIServiceDetailPanel({
                 onTestResult={onTestResult}
               />
             ) : (
-            <div className="rounded-lg border border-gray-200 divide-y divide-gray-100">
+            <div className="rounded-control border border-line divide-y divide-line">
               {(() => {
                 const status = quickTesting
                   ? 'testing'
@@ -847,20 +847,20 @@ export function APIServiceDetailPanel({
                     ? (quickTestResult.success ? 'connected' : 'error')
                     : (initialStatus?.status || 'unknown');
                 const cfg: Record<string, { label: string; cls: string; dot: string }> = {
-                  connected: { label: t('statusBadge.connected'), cls: 'bg-green-100 text-green-800', dot: 'bg-green-500' },
-                  healthy: { label: t('statusBadge.connected'), cls: 'bg-green-100 text-green-800', dot: 'bg-green-500' },
-                  testing: { label: t('button.testing'), cls: 'bg-red-100 text-red-800', dot: 'bg-red-500 animate-pulse' },
-                  error: { label: t('statusBadge.error'), cls: 'bg-red-100 text-red-800', dot: 'bg-red-500' },
-                  unknown: { label: t('statusBadge.unknown'), cls: 'bg-gray-100 text-gray-600', dot: 'bg-gray-400' },
+                  connected: { label: t('statusBadge.connected'), cls: 'bg-success-soft text-success', dot: 'bg-success' },
+                  healthy: { label: t('statusBadge.connected'), cls: 'bg-success-soft text-success', dot: 'bg-success' },
+                  testing: { label: t('button.testing'), cls: 'bg-danger-soft text-danger', dot: 'bg-danger animate-pulse' },
+                  error: { label: t('statusBadge.error'), cls: 'bg-danger-soft text-danger', dot: 'bg-danger' },
+                  unknown: { label: t('statusBadge.unknown'), cls: 'bg-subtle text-fg-secondary', dot: 'bg-subtle' },
                 };
                 const c = cfg[status] || cfg.unknown;
                 return (
                   <div className="flex justify-between items-center py-2.5 px-4 gap-4">
-                    <span className="text-sm text-gray-500 shrink-0">{t('detail.connectionStatus')}</span>
-                    <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium ${c.cls}`}>
-                      <span className={`w-1.5 h-1.5 rounded-full ${c.dot}`} />
+                    <span className="text-sm text-fg-muted shrink-0">{t('detail.connectionStatus')}</span>
+                    <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-pill text-xs font-medium ${c.cls}`}>
+                      <span className={`w-1.5 h-1.5 rounded-pill ${c.dot}`} />
                       {c.label}
-                      {quickTestResult?.success && quickTestResult.latency_ms != null && <span className="opacity-75">· {quickTestResult.latency_ms}ms</span>}
+                      {quickTestResult?.success && quickTestResult.latency_ms != null && <span className="text-fg-muted">· {quickTestResult.latency_ms}ms</span>}
                     </span>
                   </div>
                 );
@@ -874,14 +874,14 @@ export function APIServiceDetailPanel({
               {metadata?.category && <KvRow label={t('serviceInfo.category')} value={metadata.category} />}
               {metadata?.docs_url && (
                 <div className="flex justify-between items-center py-2.5 px-4 gap-4">
-                  <span className="text-sm text-gray-500 shrink-0">{t('serviceInfo.documentation')}</span>
-                  <a href={metadata.docs_url} target="_blank" rel="noopener noreferrer" className="text-sm text-red-600 hover:text-red-800">{t('serviceInfo.viewDocs')} →</a>
+                  <span className="text-sm text-fg-muted shrink-0">{t('serviceInfo.documentation')}</span>
+                  <a href={metadata.docs_url} target="_blank" rel="noopener noreferrer" className="text-sm text-danger hover:text-danger">{t('serviceInfo.viewDocs')} →</a>
                 </div>
               )}
               {credentials?.secret_id && (
                 <div className="flex justify-between items-center py-2.5 px-4 gap-4">
-                  <span className="text-sm text-gray-500 shrink-0">Secret ID</span>
-                  <code className="text-sm font-mono bg-gray-100 px-2 py-1 rounded truncate">{credentials.secret_id}</code>
+                  <span className="text-sm text-fg-muted shrink-0">Secret ID</span>
+                  <code className="text-sm font-mono bg-subtle px-2 py-1 rounded-tag truncate">{credentials.secret_id}</code>
                 </div>
               )}
               {credentials !== null && credentialSchema.length > 0 && (
@@ -895,23 +895,23 @@ export function APIServiceDetailPanel({
 
                     return (
                       <div key={field.key} className="flex items-center gap-3">
-                        <span className="text-sm text-gray-500 shrink-0 w-20">{label}</span>
+                        <span className="text-sm text-fg-muted shrink-0 w-20">{label}</span>
                         <div className="flex-1 flex items-center gap-1.5 min-w-0">
                           <input
                             type={isSensitive && !visible ? 'password' : 'text'}
                             value={value}
                             onChange={(e) => setFormValues((prev) => ({ ...prev, [field.key]: e.target.value }))}
                             placeholder={placeholder}
-                            className="flex-1 min-w-0 px-2 py-1 border border-gray-200 rounded text-sm bg-gray-50 focus:outline-none focus:ring-1 focus:ring-red-400 focus:bg-white focus:border-red-400 transition-colors"
+                            className="ui-input flex-1 min-w-0 px-2  border border-line rounded-tag text-sm bg-subtle focus:bg-surface focus:border-action transition-colors"
                           />
                           {isSensitive && (
                             <button
                               type="button"
                               onClick={() => setFieldVisibility((prev) => ({ ...prev, [field.key]: !prev[field.key] }))}
-                              className="shrink-0 text-gray-400 hover:text-gray-600 p-1 rounded transition-colors"
+                              className="ui-btn-icon inline-flex items-center justify-center shrink-0 text-fg-muted hover:text-fg-secondary p-1 rounded-control transition-colors"
                               title={visible ? t('detail.hide') : t('detail.show')}
                             >
-                              {visible ? <IconEyeOff aria-hidden="true" className="w-3.5 h-3.5" /> : <IconEye aria-hidden="true" className="w-3.5 h-3.5" />}
+                              {visible ? <IconEyeOff aria-hidden="true" className="w-4 h-4" /> : <IconEye aria-hidden="true" className="w-4 h-4" />}
                             </button>
                           )}
                         </div>
@@ -924,15 +924,15 @@ export function APIServiceDetailPanel({
                         type="button"
                         onClick={handleSaveCredentials}
                         disabled={apiKeySaving}
-                        className="shrink-0 inline-flex items-center gap-1 px-2 py-1 bg-red-600 text-white rounded text-xs font-medium hover:bg-red-700 disabled:opacity-50 transition-colors"
+                        className="shrink-0 inline-flex items-center gap-1 px-2 py-1 bg-action text-action-fg rounded-tag text-xs font-medium hover:bg-action-hover disabled:bg-disabled disabled:text-fg-disabled transition-colors"
                       >
-                        {apiKeySaving ? <IconRefresh aria-hidden="true" className="w-3 h-3 animate-spin" /> : <IconDeviceFloppy aria-hidden="true" className="w-3 h-3" />}
+                        {apiKeySaving ? <IconRefresh aria-hidden="true" className="w-4 h-4 animate-spin" /> : <IconDeviceFloppy aria-hidden="true" className="w-4 h-4" />}
                         {t('button.save')}
                       </button>
                       <button
                         type="button"
                         onClick={() => setFormValues({ ...formValuesOrigRef.current })}
-                        className="shrink-0 px-2 py-1 border border-gray-300 text-gray-600 rounded text-xs hover:bg-gray-50 transition-colors"
+                        className="shrink-0 px-2 py-1 border border-line-control text-fg-secondary rounded-tag text-xs hover:bg-hover transition-colors"
                       >
                         {t('button.cancel')}
                       </button>
@@ -943,32 +943,31 @@ export function APIServiceDetailPanel({
               <KvRow label={t('serviceInfo.toolCount')} value={String(serviceTools.length)} />
               <div className="flex justify-between items-center py-2.5 px-4 gap-4">
                 <div>
-                  <span className="text-sm text-gray-500 shrink-0">{t('serviceInfo.sslVerify', { defaultValue: 'SSL 验证' })}</span>
-                  <p className="text-xs text-gray-400 mt-0.5">{t('serviceInfo.sslVerifyDesc', { defaultValue: '关闭可访问内网 IP 部署的服务' })}</p>
+                  <span className="text-sm text-fg-muted shrink-0">{t('serviceInfo.sslVerify', { defaultValue: 'SSL 验证' })}</span>
+                  <p className="text-xs text-fg-muted mt-0.5">{t('serviceInfo.sslVerifyDesc', { defaultValue: '关闭可访问内网 IP 部署的服务' })}</p>
                 </div>
                 <button
                   type="button"
                   role="switch"
                   aria-checked={!!verifySsl}
+                  aria-label={t('serviceInfo.sslVerify', { defaultValue: 'SSL 验证' })}
                   onClick={() => onToggleVerifySsl?.(!verifySsl)}
-                  className={`relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer items-center rounded-full transition-colors duration-200 focus:outline-none focus:ring-2 focus:ring-purple-500 focus:ring-offset-1 ${verifySsl ? 'bg-purple-600' : 'bg-gray-300'}`}
-                >
-                  <span
-                    className={`inline-block h-3.5 w-3.5 rounded-full bg-white shadow transition-transform duration-200 ${verifySsl ? 'translate-x-4' : 'translate-x-1'}`}
-                  />
-                </button>
+                  className="ui-btn-icon inline-flex shrink-0 items-center justify-center rounded-control disabled:cursor-not-allowed">
+<span className="ui-switch" aria-hidden="true" aria-checked={!!verifySsl} />
+</button>
+                <span className="text-xs text-fg-secondary">{t(verifySsl ? 'enabledBadge.enabled' : 'enabledBadge.disabled')}</span>
               </div>
             </div>
             )}
 
             <div className="flex flex-col gap-2">
-              <button onClick={handleQuickTestConnectivity} disabled={quickTesting} className="inline-flex items-center justify-center gap-2 px-4 py-2.5 bg-white border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 disabled:opacity-50 text-sm font-medium transition-colors">
+              <button onClick={handleQuickTestConnectivity} disabled={quickTesting} className="inline-flex items-center justify-center gap-2 px-4 py-2.5 bg-surface border border-line-control text-fg-secondary rounded-control hover:bg-hover disabled:bg-disabled disabled:text-fg-disabled text-sm font-medium transition-colors">
                 {quickTesting ? <><IconRefresh aria-hidden="true" className="w-4 h-4 animate-spin" />{t('button.testing')}</> : <><IconActivity aria-hidden="true" className="w-4 h-4" />{t('button.testConnectivity')}</>}
               </button>
               <div className="flex gap-2">
                 <button
                   onClick={() => onToggleEnabled?.(!enabled)}
-                  className={`flex-1 inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg text-sm font-medium transition-colors ${enabled ? 'border border-gray-300 text-gray-700 bg-white hover:bg-gray-50' : 'bg-green-600 text-white hover:bg-green-700'}`}
+                  className={`flex-1 inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-control text-sm font-medium transition-colors ${enabled ? 'border border-line-control text-fg-secondary bg-surface hover:bg-hover' : 'bg-action text-action-fg hover:bg-action-hover'}`}
                 >
                   {enabled ? <IconPlugOff aria-hidden="true" className="w-4 h-4" /> : <IconPower aria-hidden="true" className="w-4 h-4" />}
                   {enabled ? t('detail.disableServer') : t('detail.enableServer')}
@@ -976,7 +975,7 @@ export function APIServiceDetailPanel({
                 <button
                   onClick={() => { if (!builtin) onDelete?.(); }}
                   disabled={!!builtin}
-                  className={`inline-flex items-center justify-center gap-2 px-4 py-2.5 border rounded-lg text-sm font-medium transition-colors ${builtin ? 'border-gray-200 text-gray-400 bg-gray-50 cursor-not-allowed' : 'border-red-200 text-red-600 bg-white hover:bg-red-50'}`}
+                  className={`inline-flex items-center justify-center gap-2 px-4 py-2.5 border rounded-control text-sm font-medium transition-colors ${builtin ? 'border-line text-fg-muted bg-subtle cursor-not-allowed' : 'border-danger text-danger bg-surface hover:bg-danger-soft'}`}
                   title={builtin ? t('api.builtinCannotDelete') : t('button.delete')}
                 >
                   <IconTrash aria-hidden="true" className="w-4 h-4" />
@@ -984,35 +983,35 @@ export function APIServiceDetailPanel({
                 </button>
               </div>
               {!quickTesting && quickTestResult && (
-                <div className={`flex items-start gap-2 rounded-lg border p-3 text-sm ${quickTestResult.success ? 'bg-green-50 border-green-200 text-green-800' : 'bg-red-50 border-red-200 text-red-800'}`}>
+                <div className={`flex items-start gap-2 rounded-control border p-3 text-sm ${quickTestResult.success ? 'bg-success-soft border-success text-success' : 'bg-danger-soft border-danger text-danger'}`}>
                   {quickTestResult.success ? <IconCircleCheck aria-hidden="true" className="w-4 h-4 mt-0.5 flex-shrink-0" /> : <IconCircleX aria-hidden="true" className="w-4 h-4 mt-0.5 flex-shrink-0" />}
                   <span>{quickTestResult.message}</span>
-                  {quickTestResult.latency_ms != null && <span className="text-xs opacity-90"> · {quickTestResult.latency_ms}ms</span>}
+                  {quickTestResult.latency_ms != null && <span className="text-xs text-fg-muted"> · {quickTestResult.latency_ms}ms</span>}
                 </div>
               )}
             </div>
           </div>
         ) : serviceTools.length === 0 ? (
-          <div className="text-center py-8 text-sm text-gray-500">{t('serviceInfo.noServiceTools')}</div>
+          <div className="text-center py-8 text-sm text-fg-muted">{t('serviceInfo.noServiceTools')}</div>
         ) : (
-          <div className="bg-white rounded-lg border border-gray-200 overflow-hidden">
+          <div className="bg-surface rounded-control border border-line overflow-hidden">
             <div className="overflow-x-auto">
-              <table className="min-w-full divide-y divide-gray-100 table-fixed">
-                <thead className="bg-gray-50">
+              <table className="min-w-full divide-y divide-line table-fixed">
+                <thead className="bg-subtle">
                   <tr>
-                    <th className="w-[30%] px-5 py-2.5 text-left text-xs font-medium text-gray-500 uppercase">{t('detail.tableToolName')}</th>
-                    <th className="px-5 py-2.5 text-left text-xs font-medium text-gray-500 uppercase">{t('detail.tableDesc')}</th>
-                    <th className="w-[100px] px-5 py-2.5 text-left text-xs font-medium text-gray-500 uppercase whitespace-nowrap">{t('detail.tableStatus')}</th>
-                    <th className="w-[120px] px-5 py-2.5 text-left text-xs font-medium text-gray-500 uppercase whitespace-nowrap">{t('detail.tableActions')}</th>
+                    <th className="w-[30%] px-5 py-2.5 text-left text-xs font-medium text-fg-muted uppercase">{t('detail.tableToolName')}</th>
+                    <th className="px-5 py-2.5 text-left text-xs font-medium text-fg-muted uppercase">{t('detail.tableDesc')}</th>
+                    <th className="w-[100px] px-5 py-2.5 text-left text-xs font-medium text-fg-muted uppercase whitespace-nowrap">{t('detail.tableStatus')}</th>
+                    <th className="w-[120px] px-5 py-2.5 text-left text-xs font-medium text-fg-muted uppercase whitespace-nowrap">{t('detail.tableActions')}</th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-gray-100">
+                <tbody className="divide-y divide-line">
                   {serviceTools.map((tool) => (
-                    <tr key={tool.name} className="hover:bg-gray-50">
-                      <td className="px-5 py-2.5 truncate"><span className="text-sm font-medium text-gray-900 font-mono">{tool.name}</span></td>
-                      <td className="px-5 py-2.5"><span className="text-sm text-gray-600 line-clamp-1">{tool.description}</span></td>
+                    <tr key={tool.name} className="hover:bg-hover">
+                      <td className="px-5 py-2.5 truncate"><span className="text-sm font-medium text-fg font-mono">{tool.name}</span></td>
+                      <td className="px-5 py-2.5"><span className="text-sm text-fg-secondary line-clamp-1">{tool.description}</span></td>
                       <td className="px-5 py-2.5 whitespace-nowrap"><EnabledBadge enabled={tool.enabled} /></td>
-                      <td className="px-5 py-2.5 whitespace-nowrap"><button onClick={() => onSelectTool(tool)} className="text-sm text-red-600 hover:text-red-800">{t('detail.testDetail')}</button></td>
+                      <td className="px-5 py-2.5 whitespace-nowrap"><button onClick={() => onSelectTool(tool)} className="text-sm text-danger hover:text-danger">{t('detail.testDetail')}</button></td>
                     </tr>
                   ))}
                 </tbody>

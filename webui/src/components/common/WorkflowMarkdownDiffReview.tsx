@@ -38,14 +38,14 @@ export default function WorkflowMarkdownDiffReview({
   }, [hunks]);
 
   const rowClass = (line: TextDiffLine) => {
-    if (line.type === 'add') return 'bg-emerald-950/40 text-emerald-50';
-    if (line.type === 'remove') return 'bg-red-950/45 text-red-50';
-    return 'bg-slate-950 text-slate-200';
+    if (line.type === 'add') return 'bg-success-soft text-success';
+    if (line.type === 'remove') return 'bg-danger-soft text-danger';
+    return 'bg-canvas text-fg';
   };
   const gutterClass = (line: TextDiffLine) => {
-    if (line.type === 'add') return 'bg-emerald-950/70 text-emerald-300';
-    if (line.type === 'remove') return 'bg-red-950/70 text-red-300';
-    return 'bg-slate-900/70 text-slate-500';
+    if (line.type === 'add') return 'bg-success-soft text-success';
+    if (line.type === 'remove') return 'bg-danger-soft text-danger';
+    return 'bg-selected text-fg-muted';
   };
   const marker = (line: TextDiffLine) => {
     if (line.type === 'add') return '+';
@@ -56,26 +56,26 @@ export default function WorkflowMarkdownDiffReview({
   return (
     <div
       data-testid="workflow-md-diff-review"
-      className="flex min-h-0 flex-1 flex-col bg-slate-950 text-slate-100"
+      className="flex min-h-0 flex-1 flex-col bg-canvas text-fg"
     >
-      <div className="flex flex-shrink-0 flex-wrap items-center justify-between gap-3 border-b border-slate-800 bg-slate-900 px-4 py-2.5">
+      <div className="flex flex-shrink-0 flex-wrap items-center justify-between gap-3 border-b border-line-control bg-selected px-4 py-2.5">
         <div className="min-w-0">
-          <div className="flex min-w-0 items-center gap-2 text-xs text-slate-300">
-            <IconGitCompare aria-hidden="true" className="h-3.5 w-3.5 flex-shrink-0 text-slate-400" />
-            <span className="font-medium text-slate-100">{t('detail.editDocDiffTitle')}</span>
-            <span className="text-slate-500">workflow.md</span>
+          <div className="flex min-w-0 items-center gap-2 text-xs text-fg">
+            <IconGitCompare aria-hidden="true" className="h-4 w-4 flex-shrink-0 text-fg-muted" />
+            <span className="font-medium text-fg">{t('detail.editDocDiffTitle')}</span>
+            <span className="text-fg-muted">workflow.md</span>
           </div>
-          <p className="mt-1 text-[11px] text-slate-400">
+          <p className="mt-1 text-xs text-fg-muted">
             {t('detail.editDocDiffReviewDesc')}
           </p>
         </div>
 
         <div className="flex flex-shrink-0 flex-wrap items-center justify-end gap-2">
-          <div className="flex items-center gap-2 text-[11px] font-medium">
-            <span className="rounded bg-emerald-500/15 px-1.5 py-0.5 text-emerald-300">
+          <div className="flex items-center gap-2 text-xs font-medium">
+            <span className="rounded bg-success-soft px-1.5 py-0.5 text-success">
               +{added} {t('detail.editDocDiffAdded')}
             </span>
-            <span className="rounded bg-red-500/15 px-1.5 py-0.5 text-red-300">
+            <span className="rounded bg-danger-soft px-1.5 py-0.5 text-danger">
               -{removed} {t('detail.editDocDiffRemoved')}
             </span>
           </div>
@@ -83,24 +83,24 @@ export default function WorkflowMarkdownDiffReview({
             type="button"
             onClick={onAccept}
             disabled={disabled}
-            className="inline-flex items-center gap-1.5 rounded-md bg-emerald-500 px-2.5 py-1.5 text-xs font-semibold text-emerald-950 shadow-sm transition-colors hover:bg-emerald-400 disabled:cursor-not-allowed disabled:opacity-50"
+            className="inline-flex items-center gap-1.5 ui-btn ui-btn-primary disabled:cursor-not-allowed disabled:bg-disabled disabled:text-fg-disabled"
           >
-            <IconCheck aria-hidden="true" className="h-3.5 w-3.5" />
+            <IconCheck aria-hidden="true" className="h-4 w-4" />
             {t('detail.editDocDiffAccept')}
           </button>
           <button
             type="button"
             onClick={onReject}
             disabled={disabled}
-            className="inline-flex items-center gap-1.5 rounded-md border border-red-400/40 bg-red-500/10 px-2.5 py-1.5 text-xs font-semibold text-red-200 shadow-sm transition-colors hover:bg-red-500/20 disabled:cursor-not-allowed disabled:opacity-50"
+            className="inline-flex items-center gap-1.5 rounded-md border border-danger bg-danger-soft px-2.5 py-1.5 text-xs font-semibold text-danger shadow-sm transition-colors hover:bg-danger-soft disabled:cursor-not-allowed disabled:bg-disabled disabled:text-fg-disabled"
           >
-            <IconArrowBackUp aria-hidden="true" className="h-3.5 w-3.5" />
+            <IconArrowBackUp aria-hidden="true" className="h-4 w-4" />
             {reviewingId === 'reject' ? t('detail.editDocDiffRejecting') : t('detail.editDocDiffReject')}
           </button>
         </div>
       </div>
 
-      <div className="min-h-0 flex-1 overflow-auto bg-slate-950">
+      <div className="min-h-0 flex-1 overflow-auto bg-canvas">
         <div className="min-w-[720px] font-mono text-sm leading-6">
           {lines.length > 0 ? lines.map((line, index) => {
             const hunk = hunkByStart.get(index);
@@ -108,15 +108,15 @@ export default function WorkflowMarkdownDiffReview({
             return (
               <div key={`${line.type}-${line.oldLine ?? ''}-${line.newLine ?? ''}-${index}`}>
                 {hunk && (
-                  <div className="flex flex-wrap items-center justify-between gap-2 border-y border-slate-800 bg-slate-900/95 px-4 py-2">
-                    <div className="flex min-w-0 items-center gap-2 text-xs text-slate-300">
-                      <span className="font-semibold text-slate-100">
+                  <div className="flex flex-wrap items-center justify-between gap-2 border-y border-line-control bg-selected px-4 py-2">
+                    <div className="flex min-w-0 items-center gap-2 text-xs text-fg">
+                      <span className="font-semibold text-fg">
                         {t('detail.editDocDiffHunkTitle', { index: hunkIndex + 1 })}
                       </span>
-                      <span className="rounded bg-emerald-500/15 px-1.5 py-0.5 text-[11px] font-medium text-emerald-300">
+                      <span className="rounded bg-success-soft px-1.5 py-0.5 text-xs font-medium text-success">
                         +{hunk.added}
                       </span>
-                      <span className="rounded bg-red-500/15 px-1.5 py-0.5 text-[11px] font-medium text-red-300">
+                      <span className="rounded bg-danger-soft px-1.5 py-0.5 text-xs font-medium text-danger">
                         -{hunk.removed}
                       </span>
                     </div>
@@ -125,18 +125,18 @@ export default function WorkflowMarkdownDiffReview({
                         type="button"
                         onClick={() => onAcceptHunk(hunk)}
                         disabled={disabled}
-                        className="inline-flex items-center gap-1 rounded-md bg-emerald-500/15 px-2 py-1 text-[11px] font-semibold text-emerald-200 transition-colors hover:bg-emerald-500/25 disabled:cursor-not-allowed disabled:opacity-50"
+                        className="inline-flex items-center gap-1 rounded-md bg-success-soft px-2 py-1 text-xs font-semibold text-success transition-colors hover:bg-success-soft disabled:cursor-not-allowed disabled:bg-disabled disabled:text-fg-disabled"
                       >
-                        <IconCheck aria-hidden="true" className="h-3 w-3" />
+                        <IconCheck aria-hidden="true" className="h-4 w-4" />
                         {t('detail.editDocDiffAcceptHunk')}
                       </button>
                       <button
                         type="button"
                         onClick={() => onRejectHunk(hunk)}
                         disabled={disabled}
-                        className="inline-flex items-center gap-1 rounded-md bg-red-500/15 px-2 py-1 text-[11px] font-semibold text-red-200 transition-colors hover:bg-red-500/25 disabled:cursor-not-allowed disabled:opacity-50"
+                        className="inline-flex items-center gap-1 rounded-md bg-danger-soft px-2 py-1 text-xs font-semibold text-danger transition-colors hover:bg-danger-soft disabled:cursor-not-allowed disabled:bg-disabled disabled:text-fg-disabled"
                       >
-                        <IconArrowBackUp aria-hidden="true" className="h-3 w-3" />
+                        <IconArrowBackUp aria-hidden="true" className="h-4 w-4" />
                         {reviewingId === `reject:${hunk.id}`
                           ? t('detail.editDocDiffRejecting')
                           : t('detail.editDocDiffRejectHunk')}
@@ -145,7 +145,7 @@ export default function WorkflowMarkdownDiffReview({
                   </div>
                 )}
                 <div
-                  className={`grid grid-cols-[56px_56px_28px_minmax(0,1fr)] border-b border-slate-900/70 ${rowClass(line)}`}
+                  className={`grid grid-cols-[56px_56px_28px_minmax(0,1fr)] border-b border-line-control ${rowClass(line)}`}
                 >
                   <div className={`select-none px-2 py-0.5 text-right ${gutterClass(line)}`}>
                     {line.oldLine ?? ''}
@@ -163,7 +163,7 @@ export default function WorkflowMarkdownDiffReview({
               </div>
             );
           }) : (
-            <div className="px-4 py-8 text-center text-sm text-slate-400">
+            <div className="px-4 py-8 text-center text-sm text-fg-muted">
               {t('detail.editDocDiffEmpty')}
             </div>
           )}

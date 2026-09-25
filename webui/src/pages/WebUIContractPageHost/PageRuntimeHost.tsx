@@ -47,7 +47,7 @@ class WebUIContractPageErrorBoundary extends Component<
     if (this.state.hasError) {
       const message = this.state.message || this.props.fallbackMessage;
       return (
-        <div className="flex items-start gap-3 rounded-xl border border-rose-200 bg-rose-50 p-4 text-rose-800">
+        <div className="flex items-start gap-3 rounded-card border border-danger bg-danger-soft p-4 text-danger">
           <IconAlertCircle aria-hidden="true" className="mt-0.5 h-5 w-5 flex-shrink-0" />
           <div>
             <div className="font-medium">{this.props.errorTitle}</div>
@@ -143,13 +143,13 @@ export default function PageRuntimeHost({ pageId }: PageRuntimeHostProps) {
   const statusClassName = 'p-4 pt-20 lg:p-6';
 
   if (!pageId) {
-    return <div className={`${statusClassName} text-sm text-zinc-500`}>{t('host.missingPageId')}</div>;
+    return <div className={`${statusClassName} text-sm text-fg-muted`}>{t('host.missingPageId')}</div>;
   }
 
   if (loading) {
     if (!showLoading) return null;
     return (
-      <div className={`${statusClassName} flex items-center gap-2 text-sm text-zinc-500`}>
+      <div className={`${statusClassName} flex items-center gap-2 text-sm text-fg-muted`}>
         <IconLoader2 aria-hidden="true" className="h-4 w-4 animate-spin" />
         {t('host.loading')}
       </div>
@@ -159,7 +159,7 @@ export default function PageRuntimeHost({ pageId }: PageRuntimeHostProps) {
   if (error) {
     return (
       <div className={statusClassName}>
-        <div className="flex items-start gap-3 rounded-xl border border-amber-200 bg-amber-50 p-4 text-amber-900">
+        <div className="flex items-start gap-3 rounded-card border border-warning bg-warning-soft p-4 text-warning">
           <IconAlertCircle aria-hidden="true" className="mt-0.5 h-5 w-5 flex-shrink-0" />
           <div>
             <div className="font-medium">{t('host.unavailableTitle')}</div>
@@ -167,7 +167,7 @@ export default function PageRuntimeHost({ pageId }: PageRuntimeHostProps) {
             <button
               type="button"
               onClick={() => void refreshPage(buildHash)}
-              className="mt-3 rounded-lg border border-amber-300 bg-white px-3 py-1.5 text-sm hover:bg-amber-100"
+              className="mt-3 rounded-control border border-warning bg-surface px-3 py-1.5 text-sm hover:bg-warning-soft"
             >
               {t('host.retry')}
             </button>
@@ -178,7 +178,7 @@ export default function PageRuntimeHost({ pageId }: PageRuntimeHostProps) {
   }
 
   if (!PageComponent) {
-    return <div className={`${statusClassName} text-sm text-zinc-500`}>{t('host.emptyComponent')}</div>;
+    return <div className={`${statusClassName} text-sm text-fg-muted`}>{t('host.emptyComponent')}</div>;
   }
 
   return (

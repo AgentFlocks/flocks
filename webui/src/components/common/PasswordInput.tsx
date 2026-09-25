@@ -11,7 +11,7 @@ const PasswordInput = forwardRef<HTMLInputElement, PasswordInputProps>(
     const { t } = useTranslation('auth');
 
     const baseClass =
-      'w-full border border-gray-300 rounded-lg px-3 py-2 pr-10 outline-none focus:border-blue-500';
+      'w-full border border-line-control rounded-lg px-3 py-2 pr-10 outline-none focus:border-info';
 
     return (
       <div className="relative">
@@ -26,7 +26,7 @@ const PasswordInput = forwardRef<HTMLInputElement, PasswordInputProps>(
           tabIndex={-1}
           onClick={() => setVisible((v) => !v)}
           aria-label={visible ? t('fields.hidePassword') : t('fields.showPassword')}
-          className="absolute inset-y-0 right-0 flex items-center px-3 text-gray-400 hover:text-gray-600 focus:outline-none"
+          className="absolute inset-y-0 right-0 flex items-center px-3 text-fg-muted hover:text-fg-secondary focus:outline-none"
         >
           {visible ? <IconEyeOff aria-hidden="true" className="h-4 w-4" /> : <IconEye aria-hidden="true" className="h-4 w-4" />}
         </button>

@@ -76,7 +76,7 @@ export default function ChatGuideDock({
   const renderActionButton = (action: ChatGuideAction, variant: 'rail' | 'panel') => (
     <div
       key={action.label}
-      className={`group inline-flex h-8 max-w-full items-center rounded-lg border border-zinc-200 bg-white text-zinc-700 transition-colors hover:border-rose-200 hover:bg-rose-50/70 hover:text-rose-600 ${
+      className={`group inline-flex h-8 max-w-full items-center rounded-lg border border-line bg-surface text-fg-secondary transition-colors hover:border-ai hover:bg-ai-soft hover:text-ai ${
         variant === 'rail' ? 'flex-shrink-0' : 'min-w-0'
       }`}
     >
@@ -84,7 +84,7 @@ export default function ChatGuideDock({
         type="button"
         disabled={disabled}
         onClick={() => handleStartPrompt(action)}
-        className="flex h-full min-w-0 flex-1 items-center truncate whitespace-nowrap rounded-l-lg pl-2.5 pr-1 text-left text-xs font-semibold leading-none disabled:cursor-not-allowed disabled:opacity-50"
+        className="flex h-full min-w-0 flex-1 items-center truncate whitespace-nowrap rounded-l-lg pl-2.5 pr-1 text-left text-xs font-semibold leading-none disabled:cursor-not-allowed disabled:bg-disabled disabled:text-fg-disabled"
       >
         {action.label}
       </button>
@@ -97,13 +97,13 @@ export default function ChatGuideDock({
       {panelOpen && !collapsed && (
         <div
           data-testid="chat-guide-expanded-panel"
-          className="absolute bottom-full left-0 right-0 z-30 mb-2 h-56 max-h-[calc(100vh-12rem)] overflow-hidden rounded-xl border border-zinc-200 bg-white/95 p-2 shadow-lg backdrop-blur"
+          className="absolute bottom-full left-0 right-0 z-30 mb-2 h-56 max-h-[calc(100vh-12rem)] overflow-hidden rounded-xl border border-line bg-surface p-2 shadow-lg backdrop-blur"
         >
-          <div className="flex h-full flex-col gap-3 overflow-y-auto pr-1 [scrollbar-width:thin] [scrollbar-color:#d4d4d8_transparent] dark:[scrollbar-color:#545d68_transparent]">
+          <div className="flex h-full flex-col gap-3 overflow-y-auto pr-1 [scrollbar-width:thin] [scrollbar-color:var(--border-control)_transparent]">
             {actionGroups.map((group, groupIndex) => (
               <section key={group.title || `group-${groupIndex}`} className="min-w-0">
                 {shouldShowGroupTitle && group.title && (
-                  <div className="mb-1.5 px-1 text-[11px] font-semibold leading-none text-zinc-400">
+                  <div className="mb-1.5 px-1 text-xs font-semibold leading-none text-fg-muted">
                     {group.title}
                   </div>
                 )}
@@ -125,12 +125,12 @@ export default function ChatGuideDock({
             return next;
           });
         }}
-        className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg border border-zinc-200 bg-white text-zinc-400 transition-colors hover:border-rose-200 hover:bg-rose-50/70 hover:text-rose-500"
+        className="ui-btn-icon flex flex-shrink-0 items-center justify-center rounded-lg border border-line bg-surface text-fg-muted transition-colors hover:border-ai hover:bg-ai-soft hover:text-ai"
         title={collapsed ? expandTitle : collapseTitle}
         aria-label={collapsed ? expandTitle : collapseTitle}
         aria-expanded={!collapsed}
       >
-        {collapsed ? <IconChevronsRight aria-hidden="true" className="h-3.5 w-3.5" /> : <IconChevronsLeft aria-hidden="true" className="h-3.5 w-3.5" />}
+        {collapsed ? <IconChevronsRight aria-hidden="true" className="h-4 w-4" /> : <IconChevronsLeft aria-hidden="true" className="h-4 w-4" />}
       </button>
 
       <div
@@ -155,16 +155,16 @@ export default function ChatGuideDock({
         <button
           type="button"
           onClick={() => setPanelOpen((value) => !value)}
-          className={`inline-flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg border bg-white transition-colors ${
+          className={`ui-btn-icon inline-flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg border bg-surface transition-colors ${
             panelOpen
-              ? 'border-rose-200 text-rose-500'
-              : 'border-zinc-200 text-zinc-400 hover:border-rose-200 hover:bg-rose-50/70 hover:text-rose-500'
+              ? 'border-ai text-ai'
+              : 'border-line text-fg-muted hover:border-ai hover:bg-ai-soft hover:text-ai'
           }`}
           title={panelOpen ? collapseTitle : expandTitle}
           aria-label={panelOpen ? collapseTitle : expandTitle}
           aria-expanded={panelOpen}
         >
-          <IconChevronUp aria-hidden="true" className={`h-3.5 w-3.5 transition-transform ${panelOpen ? 'rotate-180' : ''}`} />
+          <IconChevronUp aria-hidden="true" className={`h-4 w-4 transition-transform ${panelOpen ? 'rotate-180' : ''}`} />
         </button>
       )}
     </div>

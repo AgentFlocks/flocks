@@ -506,7 +506,7 @@ describe('WorkspacePage', () => {
       renderWithRouter(<WorkspacePage />);
       await user.click(await screen.findByText('notes.txt'));
 
-      const panel = (await screen.findByTitle('Close')).closest('div.rounded-xl') as HTMLElement;
+      const panel = (await screen.findByTitle('Close')).closest('[data-workspace-preview]') as HTMLElement;
       expect(panel).not.toBeNull();
       expect(panel.className).toContain('w-full');
       expect(panel.style.minWidth).toBe('');
@@ -526,7 +526,7 @@ describe('WorkspacePage', () => {
     renderWithRouter(<WorkspacePage />);
     await user.click(await screen.findByText('notes.txt'));
 
-    const panel = (await screen.findByTitle('Close')).closest('div.rounded-xl') as HTMLElement;
+    const panel = (await screen.findByTitle('Close')).closest('[data-workspace-preview]') as HTMLElement;
     expect(panel.style.minWidth).toBe('420px');
     expect(panel.parentElement?.className).not.toContain('flex-col');
   });

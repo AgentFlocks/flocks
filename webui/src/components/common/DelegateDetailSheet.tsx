@@ -6,10 +6,11 @@
  * 左边缘可拖拽调整宽度，交互风格与 workflow RightPanel 一致。
  */
 
-import { useEffect, useRef, useState, useCallback } from 'react';
+import { useId, useRef, useState, useCallback } from 'react';
 import { IconX } from '@tabler/icons-react';
 import { useTranslation } from 'react-i18next';
 import SessionChat from './SessionChat';
+import { useDialogFocus } from '@/hooks/useDialogFocus';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -29,10 +30,10 @@ export interface DelegateDetailSheetProps {
 // ---------------------------------------------------------------------------
 
 const STATUS_DOT: Record<string, string> = {
-  pending:   'bg-gray-400',
-  running:   'bg-sky-500 animate-pulse',
-  completed: 'bg-emerald-500',
-  error:     'bg-red-500',
+  pending:   'bg-selected',
+  running:   'bg-info animate-pulse',
+  completed: 'bg-success',
+  error:     'bg-action',
 };
 
 // ---------------------------------------------------------------------------
@@ -40,7 +41,7 @@ const STATUS_DOT: Record<string, string> = {
 // ---------------------------------------------------------------------------
 
 const MIN_WIDTH = 360;
-const DEFAULT_WIDTH_RATIO = 0.55;
+const DEFAULT_WIDTH = 480;
 const STORAGE_KEY = 'delegate-sheet-width';
 
 function getInitialWidth(): number {
@@ -51,7 +52,7 @@ function getInitialWidth(): number {
       if (w >= MIN_WIDTH && w <= window.innerWidth) return w;
     }
   } catch { /* ignore */ }
-  return Math.max(MIN_WIDTH, Math.round(window.innerWidth * DEFAULT_WIDTH_RATIO));
+  return Math.min(DEFAULT_WIDTH, window.innerWidth);
 }
 
 // ---------------------------------------------------------------------------
@@ -67,6 +68,9 @@ export default function DelegateDetailSheet({
   status,
 }: DelegateDetailSheetProps) {
   const { t } = useTranslation('common');
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const titleId = useId();
+  useDialogFocus(dialogRef, open, onClose);
   const dot = STATUS_DOT[status] ?? STATUS_DOT.pending;
   const statusLabel = t(`delegate.${status}`, { defaultValue: status });
 
@@ -106,67 +110,56 @@ export default function DelegateDetailSheet({
     window.addEventListener('mouseup', onUp);
   }, [width]);
 
-  // Close on Escape
-  useEffect(() => {
-    if (!open) return;
-    const handler = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
-    };
-    document.addEventListener('keydown', handler);
-    return () => document.removeEventListener('keydown', handler);
-  }, [open, onClose]);
-
-  // Prevent body scroll when open
-  useEffect(() => {
-    if (open) {
-      document.body.style.overflow = 'hidden';
-      return () => { document.body.style.overflow = ''; };
-    }
-  }, [open]);
-
   if (!open) return null;
 
   return (
     <div className="fixed inset-0 z-50 flex justify-end">
       {/* Backdrop */}
       <div
-        className="absolute inset-0 bg-black/30 backdrop-blur-[2px] transition-opacity"
+        className="absolute inset-0 bg-overlay-backdrop backdrop-blur-[2px] transition-opacity"
         onClick={onClose}
       />
 
       {/* Drag separator — matching workflow RightPanel style */}
       <div
         onMouseDown={onDragStart}
-        className="relative w-1 flex-shrink-0 bg-gray-200 hover:bg-red-400 active:bg-red-500 cursor-col-resize transition-colors duration-150 z-[51]"
+        className="relative w-1 flex-shrink-0 bg-selected hover:bg-action-hover active:bg-action-pressed cursor-col-resize transition-colors duration-150 z-[51]"
       >
         <div className="absolute inset-y-0 -left-1.5 -right-1.5" />
       </div>
 
       {/* Sheet */}
       <div
-        className="relative bg-white shadow-2xl flex flex-col border-l border-gray-200 overflow-hidden z-[51]"
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        tabIndex={-1}
+        data-ui-overlay="drawer"
+        className="relative max-w-full bg-surface shadow-overlay flex flex-col border-l border-line overflow-hidden z-[51]"
         style={{ width }}
       >
         {/* Header */}
-        <div className="flex items-center gap-3 px-5 py-4 border-b border-gray-200 bg-gray-50/80 flex-shrink-0">
-          <span className="inline-flex items-center justify-center w-8 h-8 rounded-full bg-gradient-to-br from-violet-500 to-red-500 text-white text-sm font-bold shadow-sm">
+        <div className="flex items-center gap-3 px-4 sm:px-6 py-4 border-b border-line bg-canvas flex-shrink-0">
+          <span className="inline-flex items-center justify-center w-8 h-8 rounded-control bg-ai-soft text-ai text-sm font-semibold">
             {agentName.charAt(0)}
           </span>
 
           <div className="flex-1 min-w-0">
             <div className="flex items-center gap-2">
-              <h2 className="text-sm font-semibold text-gray-900 truncate">{agentName}</h2>
-              <span className="flex items-center gap-1 text-[10px] font-medium text-gray-500">
+              <h2 id={titleId} className="text-title-section text-fg truncate">{agentName}</h2>
+              <span className="flex items-center gap-1 text-xs font-medium text-fg-muted">
                 <span className={`inline-block w-1.5 h-1.5 rounded-full ${dot}`} />
                 {statusLabel}
               </span>
             </div>
-            <p className="text-xs text-gray-500 truncate mt-0.5">{description}</p>
+            <p className="text-xs text-fg-muted truncate mt-0.5">{description}</p>
           </div>
 
           <button
             onClick={onClose}
-            className="p-1.5 rounded-md text-gray-400 hover:text-gray-600 hover:bg-gray-200/60 transition-colors"
+            aria-label={t('button.close')}
+            className="ui-btn ui-btn-ghost ui-btn-icon shrink-0 text-fg-muted"
           >
             <IconX aria-hidden="true" className="w-4 h-4" />
           </button>

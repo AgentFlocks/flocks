@@ -1,4 +1,4 @@
-import { render } from '@testing-library/react';
+import { fireEvent, render, screen } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 
 import DelegateDetailSheet from './DelegateDetailSheet';
@@ -21,6 +21,24 @@ vi.mock('./SessionChat', () => ({
 }));
 
 describe('DelegateDetailSheet', () => {
+  it('uses the default drawer width and restores focus after one Escape close', () => {
+    localStorage.removeItem('delegate-sheet-width');
+    const trigger = document.createElement('button');
+    document.body.appendChild(trigger);
+    trigger.focus();
+    const onClose = vi.fn();
+    const props = { onClose, sessionId: 'child', agentName: 'Agent', description: 'Task', status: 'running' };
+    const { rerender } = render(<DelegateDetailSheet {...props} open />);
+    expect(screen.getByRole('dialog', { name: 'Agent' })).toHaveStyle({ width: '480px' });
+    const close = screen.getByRole('button', { name: 'button.close' });
+    expect(close).toHaveFocus();
+    fireEvent.keyDown(close, { key: 'Escape' });
+    expect(onClose).toHaveBeenCalledTimes(1);
+    rerender(<DelegateDetailSheet {...props} open={false} />);
+    expect(trigger).toHaveFocus();
+    trigger.remove();
+  });
+
   it('uses the session-management process timeline inside the child conversation', () => {
     render(
       <DelegateDetailSheet

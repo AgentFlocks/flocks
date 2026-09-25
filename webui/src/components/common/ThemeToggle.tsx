@@ -21,10 +21,8 @@ export default function ThemeToggle({ collapsed = false }: ThemeToggleProps) {
       aria-label={isDark ? t('switchToLightTheme') : t('switchToDarkTheme')}
       aria-pressed={isDark}
       className={`
-        flex items-center justify-center rounded-lg transition-colors
-        text-zinc-500 hover:bg-white/70 hover:text-zinc-900
-        dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100
-        ${collapsed ? 'h-8 w-8' : 'h-8 w-8'}
+        ui-btn ui-btn-ghost ui-btn-icon text-fg-secondary
+        ${collapsed ? 'shrink-0' : ''}
       `}
     >
       <Icon aria-hidden="true" className="h-4 w-4" />

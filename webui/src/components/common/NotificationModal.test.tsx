@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react';
+import { fireEvent, render, screen } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import NotificationModal from './NotificationModal';
 
@@ -7,6 +7,36 @@ vi.mock('react-i18next', () => ({
 }));
 
 describe('NotificationModal', () => {
+  const notice = { id: 'notice', kind: 'benefit' as const, title: 'Benefit', highlights: [], priority: 100 };
+
+  it('traps focus and refuses Escape or backdrop closure while acknowledging', () => {
+    const onClose = vi.fn();
+    const props = { notifications: [notice], onAcknowledge: vi.fn(), onDismissForever: vi.fn(), onClose };
+    const { rerender } = render(<NotificationModal {...props} />);
+    const close = screen.getByRole('button', { name: 'close' });
+    const confirm = screen.getByRole('button', { name: 'gotIt' });
+    expect(close).toHaveFocus();
+    fireEvent.keyDown(close, { key: 'Tab', shiftKey: true });
+    expect(confirm).toHaveFocus();
+    fireEvent.keyDown(confirm, { key: 'Tab' });
+    expect(close).toHaveFocus();
+
+    rerender(<NotificationModal {...props} acknowledgingIds={['notice']} />);
+    fireEvent.keyDown(document, { key: 'Escape' });
+    fireEvent.click(document.querySelector('.bg-overlay-backdrop')!);
+    expect(onClose).not.toHaveBeenCalled();
+    expect(close).toBeDisabled();
+
+    rerender(<NotificationModal {...props} />);
+    fireEvent.keyDown(document, { key: 'Escape' });
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not mount or lock focus when there are no notifications', () => {
+    render(<NotificationModal notifications={[]} onAcknowledge={vi.fn()} onDismissForever={vi.fn()} onClose={vi.fn()} />);
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+  });
+
   it('renders release notes as Markdown with safe links', () => {
     render(
       <NotificationModal

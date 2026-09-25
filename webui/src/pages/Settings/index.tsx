@@ -1,3 +1,4 @@
+import PageSelectionGroup from '../PageSelectionGroup';
 import { Suspense, lazy, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import type { ChangeEvent, ComponentType, ReactNode } from 'react';
 import { Navigate, useParams } from 'react-router-dom';
@@ -60,14 +61,14 @@ function PreferenceRow({
   children: ReactNode;
 }) {
   return (
-    <section className="flex flex-col gap-4 border-b border-zinc-200 py-6 last:border-b-0 dark:border-zinc-800 md:grid md:grid-cols-[minmax(0,1fr)_20rem] md:items-center md:gap-8">
+    <section className="flex flex-col gap-4 border-b border-line py-6 last:border-b-0 md:grid md:grid-cols-[minmax(0,1fr)_20rem] md:items-center md:gap-8">
       <div className="flex min-w-0 items-start gap-3">
-        <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-zinc-100 text-zinc-500 dark:bg-zinc-900 dark:text-zinc-400">
+        <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-control bg-subtle text-fg-muted ">
           <Icon aria-hidden="true" className="h-5 w-5" />
         </span>
         <div className="min-w-0">
-          <h3 className="text-sm font-semibold text-zinc-950 dark:text-zinc-100">{title}</h3>
-          <p className="mt-1 text-sm text-zinc-500 dark:text-zinc-400">{description}</p>
+          <h3 className="text-sm font-semibold text-fg ">{title}</h3>
+          <p className="mt-1 text-sm text-fg-muted ">{description}</p>
         </div>
       </div>
       <div className="flex w-full justify-start md:justify-end">
@@ -93,15 +94,15 @@ function SegmentedOption({
       type="button"
       aria-pressed={active}
       onClick={onClick}
-      className={`inline-flex h-9 min-w-0 flex-1 items-center justify-center gap-2 whitespace-nowrap rounded-md px-3 text-sm font-semibold transition-colors ${
+      className={`inline-flex h-control-sm min-w-0 flex-1 items-center justify-center gap-2 whitespace-nowrap rounded-segment px-3 text-sm font-semibold transition-colors ${
         active
-          ? 'bg-zinc-950 text-white dark:bg-zinc-100 dark:text-zinc-950'
-          : 'text-zinc-600 hover:bg-zinc-100 hover:text-zinc-950 dark:text-zinc-300 dark:hover:bg-zinc-800 dark:hover:text-white'
+          ? 'bg-selected text-fg '
+          : 'text-fg-secondary hover:bg-selected hover:text-fg '
       }`}
     >
       <Icon aria-hidden="true" className="h-4 w-4" />
       {children}
-      {active && <IconCheck aria-hidden="true" className="h-3.5 w-3.5" />}
+      {active && <IconCheck aria-hidden="true" className="h-4 w-4" />}
     </button>
   );
 }
@@ -117,24 +118,23 @@ function PreferenceSwitch({
   label: string;
   onChange: () => void;
 }) {
+  const { t } = useTranslation('common');
   return (
-    <button
+    <span className="inline-flex items-center gap-2">
+      <button
       type="button"
       role="switch"
       aria-checked={checked}
       aria-label={label}
       disabled={disabled}
       onClick={onChange}
-      className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-zinc-400 focus-visible:ring-offset-2 disabled:cursor-wait disabled:opacity-60 ${
-        checked ? 'bg-zinc-950 dark:bg-zinc-100' : 'bg-zinc-300 dark:bg-zinc-700'
-      }`}
-    >
-      <span
-        className={`pointer-events-none inline-block h-5 w-5 rounded-full bg-white shadow transition-transform dark:bg-zinc-950 ${
-          checked ? 'translate-x-5' : 'translate-x-0.5'
-        }`}
-      />
-    </button>
+        className="ui-btn-icon inline-flex shrink-0 items-center justify-center rounded-control disabled:cursor-not-allowed">
+<span className="ui-switch" aria-hidden="true" aria-checked={checked} aria-disabled={disabled} />
+</button>
+      <span className={disabled ? 'text-sm text-fg-disabled' : 'text-sm text-fg-secondary'}>
+        {t(checked ? 'status.enabled' : 'status.disabled')}
+      </span>
+    </span>
   );
 }
 
@@ -266,9 +266,9 @@ function PreferencesPanel() {
 
   return (
     <div className="mx-auto w-full max-w-5xl">
-      <header className="border-b border-zinc-200 pb-6 dark:border-zinc-800">
-        <h1 className="text-2xl font-bold tracking-normal text-zinc-950 dark:text-zinc-50">{t('settingsPreferences')}</h1>
-        <p className="mt-2 text-sm text-zinc-500 dark:text-zinc-400">{t('settingsPreferencesDescription')}</p>
+      <header className="border-b border-line pb-6 ">
+        <h1 className="text-title-page font-bold tracking-normal text-fg">{t('settingsPreferences')}</h1>
+        <p className="mt-2 text-sm text-fg-muted ">{t('settingsPreferencesDescription')}</p>
       </header>
 
       <div className="mt-2">
@@ -283,9 +283,9 @@ function PreferencesPanel() {
               onChange={(event) => setDisplayNameDraft(event.target.value)}
               maxLength={48}
               placeholder={t('displayNamePlaceholder')}
-              className="h-9 w-full rounded-lg border border-zinc-200 bg-white px-3 text-sm text-zinc-900 outline-none transition-colors placeholder:text-zinc-400 focus:border-zinc-400 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-100 dark:placeholder:text-zinc-500 dark:focus:border-zinc-600"
+              className="ui-input h-9 w-full rounded-control border border-line bg-surface px-3 text-sm text-fg transition-colors placeholder:text-fg-muted focus:border-line-control"
             />
-            <div className="text-xs text-zinc-500 dark:text-zinc-400">
+            <div className="text-xs text-fg-muted ">
               {t('displayNameCurrent', { name: productName })}
             </div>
             <div className="flex gap-2">
@@ -304,7 +304,7 @@ function PreferencesPanel() {
                 disabled={savingDisplayName || !configuredDisplayName}
                 title={t('resetDisplayName')}
                 aria-label={t('resetDisplayName')}
-                className="inline-flex h-9 w-10 items-center justify-center rounded-md border border-zinc-200 text-zinc-500 transition-colors hover:bg-zinc-100 hover:text-zinc-950 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-800 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-50"
+                className="ui-btn-icon inline-flex items-center justify-center inline-flex   items-center justify-center rounded-control border border-line text-fg-muted transition-colors hover:bg-hover hover:text-fg disabled:cursor-not-allowed disabled:bg-disabled disabled:text-fg-disabled "
               >
                 <IconRotate aria-hidden="true" className="h-4 w-4" />
               </button>
@@ -319,10 +319,10 @@ function PreferencesPanel() {
         >
           <div className="flex w-full flex-col gap-3 md:max-w-64">
             <div className="flex items-center gap-3">
-              <span className="flex h-11 w-11 items-center justify-center rounded-lg border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900">
-                <img src={faviconUrl} alt="" className="h-7 w-7 rounded-sm object-contain" />
+              <span className="flex h-11 w-11 items-center justify-center rounded-control border border-line bg-surface ">
+                <img src={faviconUrl} alt="" className="h-7 w-7 rounded-tag object-contain" />
               </span>
-              <div className="min-w-0 text-xs text-zinc-500 dark:text-zinc-400">
+              <div className="min-w-0 text-xs text-fg-muted ">
                 {hasCustomFavicon ? t('faviconCustom') : t('faviconDefault')}
               </div>
             </div>
@@ -349,7 +349,7 @@ function PreferencesPanel() {
                 disabled={savingFavicon || !hasCustomFavicon}
                 title={t('resetFavicon')}
                 aria-label={t('resetFavicon')}
-                className="inline-flex h-9 w-10 items-center justify-center rounded-md border border-zinc-200 text-zinc-500 transition-colors hover:bg-zinc-100 hover:text-zinc-950 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-800 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-50"
+                className="ui-btn-icon inline-flex items-center justify-center inline-flex   items-center justify-center rounded-control border border-line text-fg-muted transition-colors hover:bg-hover hover:text-fg disabled:cursor-not-allowed disabled:bg-disabled disabled:text-fg-disabled "
               >
                 <IconRotate aria-hidden="true" className="h-4 w-4" />
               </button>
@@ -362,7 +362,7 @@ function PreferencesPanel() {
           title={t('language')}
           description={t('languageDescription')}
         >
-          <div className="grid w-56 grid-cols-2 rounded-lg border border-zinc-200 bg-white p-1 dark:border-zinc-800 dark:bg-zinc-900">
+          <PageSelectionGroup className="grid w-56 grid-cols-2">
             <SegmentedOption
               active={language === 'en-US'}
               icon={IconLanguage}
@@ -377,7 +377,7 @@ function PreferencesPanel() {
             >
               中
             </SegmentedOption>
-          </div>
+          </PageSelectionGroup>
         </PreferenceRow>
 
         <PreferenceRow
@@ -385,7 +385,7 @@ function PreferencesPanel() {
           title={t('theme')}
           description={t('themeDescription')}
         >
-          <div className="grid w-full grid-cols-3 rounded-lg border border-zinc-200 bg-white p-1 dark:border-zinc-800 dark:bg-zinc-900">
+          <PageSelectionGroup className="grid w-full grid-cols-3">
             <SegmentedOption
               active={themeMode === 'system'}
               icon={IconDeviceDesktop}
@@ -407,7 +407,7 @@ function PreferencesPanel() {
             >
               {t('darkTheme')}
             </SegmentedOption>
-          </div>
+          </PageSelectionGroup>
         </PreferenceRow>
 
         <PreferenceRow

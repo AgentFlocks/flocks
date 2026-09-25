@@ -177,7 +177,7 @@ describe('ToolDetailDrawer', () => {
     const alertSpy = vi.spyOn(window, 'alert').mockImplementation(() => {});
     render(<ToolDetailDrawer {...drawerProps} />);
 
-    const toggle = screen.getAllByRole('button').find((b) => b.className.includes('rounded-full'))!;
+    const toggle = screen.getByRole('switch');
     fireEvent.click(toggle);
     await waitFor(() => expect(alertSpy).toHaveBeenCalledWith('仅管理员可执行该操作'));
     expect(screen.getByText('启用')).toBeInTheDocument();

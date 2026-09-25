@@ -78,7 +78,7 @@ export default function LocalTabContent({
       <div className="flex items-center gap-1.5 flex-wrap">
         <button
           onClick={() => setSelectedCategory('all')}
-          className={`px-2.5 py-1 rounded-full text-xs font-medium transition-colors ${selectedCategory === 'all' ? 'bg-blue-50 text-blue-700' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}
+          className={`px-2.5 py-1 rounded-pill text-xs font-medium transition-colors ${selectedCategory === 'all' ? 'bg-info-soft text-info' : 'bg-subtle text-fg-secondary hover:bg-hover'}`}
         >
           {t('local.filterAll')}
         </button>
@@ -86,7 +86,7 @@ export default function LocalTabContent({
           <button
             key={category}
             onClick={() => setSelectedCategory(category)}
-            className={`px-2.5 py-1 rounded-full text-xs font-medium transition-colors ${selectedCategory === category ? 'bg-blue-50 text-blue-700' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}
+            className={`px-2.5 py-1 rounded-pill text-xs font-medium transition-colors ${selectedCategory === category ? 'bg-info-soft text-info' : 'bg-subtle text-fg-secondary hover:bg-hover'}`}
           >
             {t(CATEGORY_LABEL_KEY[category] ?? 'category.custom')} ({categoryCounts[category]})
           </button>
@@ -95,12 +95,12 @@ export default function LocalTabContent({
 
       {filteredTools.length === 0 ? (
         <EmptyState
-          icon={<IconCode aria-hidden="true" className="w-16 h-16" />}
+          icon={<IconCode aria-hidden="true" className="w-8 h-8" />}
           title={t('local.noTools')}
           description={searchQuery ? t('empty.tryOtherKeywords') : t('local.noToolsDesc')}
         />
       ) : (
-        <div className="bg-white border border-gray-200 rounded-lg overflow-x-auto divide-y divide-gray-100">
+        <div className="bg-surface border border-line rounded-control overflow-x-auto divide-y divide-line">
           {filteredTools.map((tool) => {
             const isSelected = selectedToolName === tool.name;
             const description = getLocalizedToolDescription(tool, i18n.language);
@@ -108,12 +108,12 @@ export default function LocalTabContent({
             return (
               <div
                 key={tool.name}
-                className={`${SERVICE_TAB_ROW_CLASS} transition-colors ${isSelected ? 'bg-blue-50' : 'hover:bg-gray-50'}`}
+                className={`${SERVICE_TAB_ROW_CLASS} transition-colors ${isSelected ? 'bg-info-soft' : 'hover:bg-hover'}`}
                 style={{ gridTemplateColumns: SERVICE_TAB_GRID_COLS }}
               >
                 {/* Icon */}
-                <div className={`w-8 h-8 flex items-center justify-center rounded-lg ${tool.enabled ? 'bg-blue-50' : 'bg-gray-50'}`}>
-                  <IconCode aria-hidden="true" className={`w-4 h-4 ${tool.enabled ? 'text-blue-600' : 'text-gray-400'}`} />
+                <div className={`w-8 h-8 flex items-center justify-center rounded-control ${tool.enabled ? 'bg-info-soft' : 'bg-subtle'}`}>
+                  <IconCode aria-hidden="true" className={`w-4 h-4 ${tool.enabled ? 'text-info' : 'text-fg-muted'}`} />
                 </div>
 
                 {/* Name + description.
@@ -123,45 +123,45 @@ export default function LocalTabContent({
                 <button
                   type="button"
                   onClick={() => onSelectTool(tool)}
-                  className={`${SERVICE_TAB_NAME_CELL} text-left group/name focus:outline-none`}
+                  className={`${SERVICE_TAB_NAME_CELL} text-left group/name `}
                 >
                   <div className="flex items-center gap-1.5">
-                    <span className="text-sm font-semibold text-gray-900 truncate font-mono transition-colors group-hover/name:text-blue-700 group-focus-visible/name:underline">{tool.name}</span>
+                    <span className="text-sm font-semibold text-fg truncate font-mono transition-colors group-hover/name:text-info group-focus-visible/name:underline">{tool.name}</span>
                     {tool.enabled_customized && (
                       <span
                         title={t('toolDetail.customizedTooltip', {
                           defaultValue: '当前状态来自用户自定义，YAML 默认值为 {{def}}',
                           def: (tool.enabled_default ?? tool.enabled) ? t('enabledBadge.enabled') : t('enabledBadge.disabled'),
                         })}
-                        className="px-1.5 py-0.5 bg-amber-100 text-amber-700 text-[10px] font-medium rounded shrink-0"
+                        className="px-1.5 py-0.5 bg-warning-soft text-warning text-xs font-medium rounded-tag shrink-0"
                       >
                         {t('toolDetail.customized', { defaultValue: '已自定义' })}
                       </span>
                     )}
                     {tool.requires_confirmation && (
-                      <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 bg-amber-50 text-amber-700 text-[10px] font-medium rounded border border-amber-200 shrink-0">
-                        <IconAlertTriangle aria-hidden="true" className="w-2.5 h-2.5" />{t('local.requiresConfirmation')}
+                      <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 bg-warning-soft text-warning text-xs font-medium rounded-tag border border-warning shrink-0">
+                        <IconAlertTriangle aria-hidden="true" className="w-4 h-4" />{t('local.requiresConfirmation')}
                       </span>
                     )}
                   </div>
-                  <p className="text-xs text-gray-500 truncate mt-0.5">{description || t('detail.noDescription')}</p>
+                  <p className="text-xs text-fg-muted truncate mt-0.5">{description || t('detail.noDescription')}</p>
                 </button>
 
                 {/* Type column */}
                 <div className={SERVICE_TAB_BADGE_CELL}>
-                  <span className="px-1.5 py-0.5 bg-blue-100 text-blue-700 text-[10px] font-medium rounded">{t('source.local')}</span>
+                  <span className="px-1.5 py-0.5 bg-info-soft text-info text-xs font-medium rounded-tag">{t('source.local')}</span>
                 </div>
 
                 {/* Status column */}
                 <div className={SERVICE_TAB_BADGE_CELL}>
-                  <span className={`px-1.5 py-0.5 text-[10px] font-medium rounded ${tool.enabled ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-500'}`}>
+                  <span className={`px-1.5 py-0.5 text-xs font-medium rounded-tag ${tool.enabled ? 'bg-success-soft text-success' : 'bg-subtle text-fg-muted'}`}>
                     {tool.enabled ? t('enabledBadge.enabled') : t('enabledBadge.disabled')}
                   </span>
                 </div>
 
                 {/* Stats column */}
-                <div className={`${SERVICE_TAB_STATS_CELL} gap-1.5 text-xs text-gray-400`}>
-                  <IconTool aria-hidden="true" className="w-3 h-3" />
+                <div className={`${SERVICE_TAB_STATS_CELL} gap-1.5 text-xs text-fg-muted`}>
+                  <IconTool aria-hidden="true" className="w-4 h-4" />
                   <span>{t('local.paramsCount', { count: tool.parameters_count ?? tool.parameters?.length ?? 0 })}</span>
                 </div>
 
@@ -171,17 +171,17 @@ export default function LocalTabContent({
                     <>
                       <button
                         onClick={() => onSelectTool(tool)}
-                        className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border text-xs font-medium transition-colors ${isSelected ? 'border-blue-300 text-blue-700 bg-blue-50' : 'border-gray-200 text-gray-600 hover:bg-gray-100'}`}
+                        className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-control border text-xs font-medium transition-colors ${isSelected ? 'border-info text-info bg-info-soft' : 'border-line text-fg-secondary hover:bg-hover'}`}
                       >
-                        <IconSettings aria-hidden="true" className="w-3 h-3" />{t('local.manage')}
+                        <IconSettings aria-hidden="true" className="w-4 h-4" />{t('local.manage')}
                       </button>
                       <button
                         onClick={(e) => handleToggleEnabled(tool, false, e)}
                         disabled={toggling === tool.name}
-                        className="p-1.5 rounded-lg border border-red-200 text-red-400 hover:bg-red-50 transition-colors disabled:opacity-50"
+                        className="ui-btn-icon inline-flex items-center justify-center p-1.5 rounded-control border border-danger text-danger hover:bg-danger-soft transition-colors disabled:bg-disabled disabled:text-fg-disabled"
                         title={t('detail.disableServer')}
                       >
-                        <IconPlugOff aria-hidden="true" className="w-3.5 h-3.5" />
+                        <IconPlugOff aria-hidden="true" className="w-4 h-4" />
                       </button>
                     </>
                   ) : (
@@ -189,16 +189,16 @@ export default function LocalTabContent({
                       <button
                         onClick={(e) => handleToggleEnabled(tool, true, e)}
                         disabled={toggling === tool.name}
-                        className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-green-600 text-white text-xs font-medium hover:bg-green-700 disabled:opacity-50 transition-colors"
+                        className="inline-flex items-center gap-1 px-2.5 py-1 rounded-control bg-action text-action-fg text-xs font-medium hover:bg-action-hover disabled:bg-disabled disabled:text-fg-disabled transition-colors"
                       >
-                        <IconPower aria-hidden="true" className="w-3 h-3" />{toggling === tool.name ? t('local.configuring') : t('detail.enableServer')}
+                        <IconPower aria-hidden="true" className="w-4 h-4" />{toggling === tool.name ? t('local.configuring') : t('detail.enableServer')}
                       </button>
                       <button
                         onClick={() => onSelectTool(tool)}
-                        className={`p-1.5 rounded-lg border transition-colors ${isSelected ? 'border-blue-300 text-blue-700 bg-blue-50' : 'border-gray-200 text-gray-400 hover:bg-gray-100'}`}
+                        className={`ui-btn-icon inline-flex items-center justify-center p-1.5 rounded-control border transition-colors ${isSelected ? 'border-info text-info bg-info-soft' : 'border-line text-fg-muted hover:bg-hover'}`}
                         title={t('local.manage')}
                       >
-                        <IconSettings aria-hidden="true" className="w-3.5 h-3.5" />
+                        <IconSettings aria-hidden="true" className="w-4 h-4" />
                       </button>
                     </>
                   )}

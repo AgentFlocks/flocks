@@ -19,16 +19,16 @@ function LazyLoadErrorFallback({
 }: Required<Pick<LazyLoadErrorBoundaryProps, 'mode' | 'onRetry'>>) {
   const { t } = useTranslation('common');
   const containerClassName = mode === 'overlay'
-    ? 'fixed inset-0 z-[120] flex items-center justify-center bg-black/30 p-6'
+    ? 'fixed inset-0 z-[120] flex items-center justify-center bg-overlay-backdrop p-6'
     : 'flex min-h-64 items-center justify-center p-6';
 
   return (
     <div className={containerClassName} role="alert">
-      <div className="max-w-md rounded-xl border border-gray-200 bg-white p-6 text-center shadow-lg dark:border-zinc-700 dark:bg-zinc-900">
-        <h2 className="text-base font-semibold text-gray-900 dark:text-zinc-100">
+      <div className="max-w-md rounded-xl border border-line bg-surface p-6 text-center shadow-lg dark:border-line dark:bg-surface">
+        <h2 className="text-base font-semibold text-fg dark:text-fg">
           {t('error.chunkLoadFailed')}
         </h2>
-        <p className="mt-2 text-sm text-gray-500 dark:text-zinc-400">
+        <p className="mt-2 text-sm text-fg-muted dark:text-fg-muted">
           {t('error.chunkLoadHint')}
         </p>
         <button

@@ -42,7 +42,7 @@ export default function GuideInfoIcon({
     <>
       <span
         tabIndex={interactive ? 0 : undefined}
-        className={`inline-flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-md text-zinc-300 transition-colors hover:bg-white/80 hover:text-rose-500 ${className}`}
+        className={`inline-flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-md text-fg transition-colors hover:bg-hover hover:text-danger ${className}`}
         aria-label={interactive ? `${label}说明` : undefined}
         aria-hidden={interactive ? undefined : true}
         aria-describedby={interactive && tooltip ? tooltipId : undefined}
@@ -63,18 +63,18 @@ export default function GuideInfoIcon({
         onBlur={interactive ? hideTooltip : undefined}
         onMouseLeave={hideTooltip}
       >
-        <IconInfoCircle className="h-3.5 w-3.5" aria-hidden="true" />
+        <IconInfoCircle className="h-4 w-4" aria-hidden="true" />
       </span>
       {tooltip && canPortal && createPortal(
         <div
           id={tooltipId}
           role="tooltip"
-          className="pointer-events-none fixed z-[1000] w-52 -translate-x-1/2 -translate-y-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-[11px] leading-relaxed text-zinc-600 shadow-md"
+          className="pointer-events-none fixed z-[1000] w-52 -translate-x-1/2 -translate-y-full rounded-lg border border-line bg-surface px-3 py-2 text-xs leading-relaxed text-fg-secondary shadow-md"
           style={{ left: tooltip.x, top: tooltip.y }}
         >
-          <div className="mb-0.5 font-semibold text-zinc-800">{tooltip.title}</div>
+          <div className="mb-0.5 font-semibold text-fg">{tooltip.title}</div>
           <div>{tooltip.description}</div>
-          <div className="absolute left-1/2 top-full -translate-x-1/2 border-4 border-transparent border-t-zinc-200" />
+          <div className="absolute left-1/2 top-full -translate-x-1/2 border-4 border-transparent border-t-line" />
         </div>,
         document.body,
       )}
