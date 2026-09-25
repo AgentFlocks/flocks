@@ -14833,7 +14833,7 @@
       "name": "Security Operations Monitoring",
       "nameCn": "安全运营监测",
       "description": "包含监测运营智能体组件的安全运营套件；邮件协同、串行调查与回查确认",
-      "version": "1.5.0",
+      "version": "1.6.0",
       "category": "workflow-automation",
       "trust": "official",
       "riskLevel": "medium",

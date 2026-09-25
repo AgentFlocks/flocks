@@ -9,7 +9,7 @@ from flocks.hooks.pipeline import HookPipeline
 from flocks.monitoring.adapter import XdrAdapter, ContractError
 from flocks.monitoring.models import MonitoringPolicy
 from flocks.monitoring.runtime import run
-from flocks.monitoring.store import rows
+from flocks.monitoring.store import rows, write
 from flocks.project.project import Project
 from flocks.session.interaction_policy import monitoring_read_scope, unattended_scope
 from flocks.task.manager import TaskManager
@@ -62,6 +62,15 @@ async def setup(monkeypatch, tmp_path):
     state.tool = tool
     state.after = AsyncMock()
     monkeypatch.setattr(HookPipeline, 'run_tool_after', state.after)
+    # Model reasoning is isolated; entity lookups still exercise the actual
+    # ToolRegistry, hooks, permission gate and structured capture under test.
+    async def investigate(policy, event, recorder, budget):
+        await XdrAdapter(policy, recorder.session_id).call(event['device'],
+            {'action': 'get_entities', 'uuid': event['id'], 'entity_type': 'host'}, 'fixture')
+        event['investigation'] = {'state': 'ready', 'verdict': 'unknown', 'reason': 'Synthetic read complete'}
+        await write("UPDATE monitor_investigations SET state='ready' WHERE owner=? AND project=? AND event_key=?",
+                    (policy.owner, policy.project, event['key']))
+    monkeypatch.setattr('flocks.monitoring.investigation.investigate', investigate)
     return state
 
 
@@ -100,7 +109,14 @@ async def test_large_pages_real_registry_complete_round_and_cursor(setup, list_f
     assert [p['page_num'] for p in setup.calls if p['action'] == 'list'] == [1, 2]
     assert all(p['deal_statuses'] == [0, 10] and p['white_status'] == ['未加白', '部分加白']
                and p['time_field'] == 'endTime' for p in setup.calls if p['action'] == 'list')
-    assert len(setup.calls) == 107 and setup.after.await_count == 107
+    assert len(setup.calls) == 22 and setup.after.await_count == 22
+    # Full collection commits progress; uninvestigated events are durable work,
+    # not a failed query or falsely completed investigation.
+    pending = await rows("SELECT * FROM monitor_investigations WHERE state='pending'")
+    assert len(pending) == 85
+    assert {json.loads(row['event'])['id'] for row in pending} == {str(i) for i in range(20, 105)}
+    outcome = json.loads((await rows('SELECT result FROM monitor_attempts'))[0]['result'])
+    assert outcome['analyzed'] == 20 and outcome['deferred'] == 85 and outcome['errors'] == []
     first = setup.display[0]
     assert first.truncated and isinstance(first.output, str)
     with pytest.raises(json.JSONDecodeError):
@@ -152,9 +168,11 @@ async def test_business_selection_after_real_tool_capture(setup, monkeypatch, mo
     expected_ids = {str(i) for i in range(100) if i % 6 in {0, 1}} | {'200'} if mode == 'mixed' else set()
     assert {event['id'] for event in projection['events']} == expected_ids
     assert projection['metrics']['events'] == len(expected_ids)
-    assert {call['uuid'] for call in setup.calls if call['action'] == 'get_entities'} == expected_ids
+    admitted_ids = {str(i) for i in range(100) if i % 6 in {0, 1}}
+    admitted_ids = set(sorted(admitted_ids, key=int)[:20]) if expected_ids else set()
+    assert {call['uuid'] for call in setup.calls if call['action'] == 'get_entities'} == admitted_ids
     assert [call['page_num'] for call in setup.calls if call['action'] == 'list'] == [1, 2, 3]
-    assert setup.after.await_count == len(setup.calls) == 3 + len(expected_ids)
+    assert setup.after.await_count == len(setup.calls) == 3 + len(admitted_ids)
     assert setup.display[0].truncated and setup.display[1].truncated
     assert result.action == ('error' if mode == 'unknown' else 'stop')
     assert bool(await rows('SELECT * FROM monitor_cursors')) is (mode != 'unknown')

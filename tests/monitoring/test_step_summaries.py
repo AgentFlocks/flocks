@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 import pytest
+from unittest.mock import AsyncMock
 
 from flocks.monitoring import runtime, summaries
 from flocks.monitoring.adapter import ContractError
@@ -27,7 +28,7 @@ async def execute(tmp_path, monkeypatch, mode):
     directory = tmp_path / '.flocks/workspace/summaries'
     directory.mkdir(parents=True)
     project = await Project.create(owner_id='owner', name='summary-fixture', worktree=str(directory))
-    policy = MonitoringPolicy(development_sample=False, owner='owner', project=project.id, directory=str(directory), devices=['fixture'])
+    policy = MonitoringPolicy(owner='owner', project=project.id, directory=str(directory), devices=['fixture'], investigation_calls=24)
     count = 0 if mode == 'empty' else 105 if mode in ('pages', 'late_failure') else 2
     items = [{'uuId': f'event-{i}', 'name': f'事件 {i}', 'riskLevel': 1 if i % 2 == 0 else 9, 'hostIp': '192.0.2.1', 'type': '检测'} for i in range(count)]
     if items:
@@ -49,6 +50,18 @@ async def execute(tmp_path, monkeypatch, mode):
             if mode == 'partial' and params['uuid'] == 'event-0':
                 raise ContractError('关联实体响应缺失')
             return {'data': {'list': [{'hostId': 'host-a', 'ip': '192.0.2.1'}] if params['uuid'] == 'event-0' else []}}
+    from flocks.monitoring import capabilities as c, investigation as i
+    monkeypatch.setattr(c, 'discover', AsyncMock(return_value=([c.Capability('fixture-cap', 'fixture', policy.tool, 'xdr', 'Fixture XDR', 'unknown')], [])))
+    monkeypatch.setattr(i.Agent, 'list', AsyncMock(return_value=[]))
+    async def choose(agent, data):
+        if not data['evidence']:
+            return i.Choice(action='query', capability='fixture-cap', reason='核对原主机', entity='host')
+        return i.Choice(action='finish', verdict='unknown', evidence_ids=['evidence-1'], reason='查询证据已保存，仍需负责人核对')
+    async def query(policy, session, message, capability, event, entity):
+        params = {'action': 'get_entities', 'uuid': event['id'], 'entity_type': entity}
+        return await Adapter(policy, session).call(capability.device, params, message), params
+    monkeypatch.setattr(i, 'choose', choose)
+    monkeypatch.setattr(c, 'query', query)
     scheduler = await TaskManager.create_scheduler(title='summary fixture', context={'monitoring': policy.model_dump()})
     execution = await TaskManager.create_execution_from_scheduler(scheduler, trigger_type=ExecutionTriggerType.RUN_ONCE, enqueue=False)
     await runtime.run(execution, policy, Adapter)
@@ -83,6 +96,12 @@ async def test_persisted_step_results_and_order(tmp_path, monkeypatch, mode):
     combined = '\n'.join(text.text for text in texts)
     messages = await Message.list_with_parts(attempt['session_id'])
     ending = '\n'.join(part.text for part in messages[-1].parts if part.type == 'text')
+    marker = next(part for part in messages[-1].parts if part.type == 'text')
+    assert marker.metadata['monitoringRoundEnd'] is True
+    assert marker.metadata['roundStatus'] == attempt['status']
+    assert marker.metadata['roundId'] == attempt['id']
+    assert marker.metadata['nextStep'] == attempt['next_step']
+    assert messages[-1].info.id == attempt['end_message_id']
     assert '本轮' in ending and '邮件跟进未启用' in ending
     if mode == 'empty':
         assert '当前时间范围和筛选条件下没有可分析事件' in ending
@@ -91,7 +110,7 @@ async def test_persisted_step_results_and_order(tmp_path, monkeypatch, mode):
     if mode == 'empty':
         assert '本轮 XDR 安全事件查询到 0 条事件' in combined
         assert len(calls) == 1 and len(texts) == 2
-        assert '分析 0 条事件' in texts[-1].text
+        assert '读取 0 条事件' in texts[-1].text
     elif mode in ('query_failure', 'late_failure'):
         assert attempt['status'] == 'failed'
         assert not await rows('SELECT * FROM monitor_observations')
@@ -109,19 +128,22 @@ async def test_persisted_step_results_and_order(tmp_path, monkeypatch, mode):
         assert '名称未提供' in texts[0].metadata['details'] and 'event-0' in texts[0].metadata['details']
         assert '<img src=x>' in texts[0].metadata['details']  # rendered as plain text, not Markdown/HTML
         assert f'涉及 {count} 条事件' in texts[-1].text
-        assert len(calls) == count + (2 if mode == 'pages' else 1)
-        assert '0 条关联主机记录' in combined
+        assert len(calls) == min(count, 20) + (2 if mode == 'pages' else 1)
+        assert any(step['tool'] == '调查取证：Fixture XDR' for step in steps)
+        assert '原事件' in combined
         result = json.loads(attempt['result'])
-        assert f"{result['risk']} 条风险，{result['unknown']} 条待判定" in texts[-1].text
+        assert f"风险 {result['risk']} 条、待判定 {result['unknown']} 条" in texts[-1].text
         if mode == 'partial':
-            assert attempt['status'] == 'partial'
-            assert '针对事件' in combined and '关联数据不完整' in combined
+            assert attempt['status'] == 'failed'
+            assert '关联实体响应缺失' in combined
+            assert any(step['tool'] == '智能体调查结果' and step['status'] == 'failed' for step in steps)
         else:
             assert attempt['status'] == 'completed'
         if mode == 'pages':
             assert '第 1 页查询到 100 条' in texts[0].text and '分页尚未结束' in texts[0].text
             assert '第 2 页查询到 5 条' in texts[1].text
             assert 'event-104' in texts[1].metadata['details']
+            assert result['analyzed'] == 20 and result['deferred'] == 85
     assert '回查' in texts[-1].text
     assert '已闭环' not in texts[-1].text
 

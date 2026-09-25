@@ -104,6 +104,9 @@ async def test_timeout_awaits_background_cancellation_before_scope_release(monke
     from flocks.hub import local
     monkeypatch.setattr(local, 'get_record', lambda *_: SimpleNamespace(enabled=True))
     from flocks.monitoring import runtime
+    # This test owns only dispatch cancellation ordering. Agent loading is
+    # covered by the installed-component tests, not a global execution bypass.
+    monkeypatch.setattr('flocks.monitoring.agent_component.resolve', AsyncMock())
     from flocks.monitoring.models import MonitoringPolicy
     from flocks.monitoring.store import write, encode
     from flocks.task.manager import TaskManager

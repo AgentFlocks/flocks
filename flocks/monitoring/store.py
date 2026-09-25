@@ -102,6 +102,15 @@ async def connection():
                                     ('project', 'TEXT'), ('decision', "TEXT NOT NULL DEFAULT '{}'")]:
             if column not in existing:
                 await db.execute(f'ALTER TABLE monitor_dispositions ADD COLUMN {column} {declaration}')
+        for table, additions in (
+            ('monitor_attempts', [('summary', 'TEXT'), ('next_step', 'TEXT'), ('end_message_id', 'TEXT'), ('end_published', 'INTEGER NOT NULL DEFAULT 0')]),
+            ('monitor_mail_notices', [('sent_at', 'TEXT')]),
+        ):
+            columns = await db.execute(f'PRAGMA table_info({table})')
+            existing = {row['name'] for row in await columns.fetchall()}
+            for column, declaration in additions:
+                if column not in existing:
+                    await db.execute(f'ALTER TABLE {table} ADD COLUMN {column} {declaration}')
         columns = await db.execute('PRAGMA table_info(monitor_reports)')
         if 'summary_content' not in {r['name'] for r in await columns.fetchall()}:
             await db.execute('ALTER TABLE monitor_reports ADD COLUMN summary_content TEXT')

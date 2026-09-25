@@ -19,7 +19,7 @@ from flocks.provider.provider import Provider, ChatMessage
 from . import capabilities, diagnostics as diag
 from .adapter import ContractError
 from .store import rows, write, encode
-from .summaries import Summary, event_label
+from .summaries import Summary, event_label, label, ENTITY_LABELS
 
 ENGINE = 'agent-v1'
 
@@ -41,6 +41,30 @@ class Budget:
         self.calls = 0
         self.models = 0
         self.consults = 0
+
+
+def evidence_description(proof):
+    """Readable excerpts of the same bounded, whitelisted facts used by the agent."""
+    names = {'hostIp': '主机', 'fileName': '文件', 'processName': '进程', 'domain': '域名',
+             'ip': 'IP', 'srcIp': '源地址', 'destIp': '目的地址', 'name': '名称',
+             'threatLevel': '威胁判定值', 'gptResult': 'XDR研判值', 'dealStatus': '处置状态值'}
+    examples = []
+    def visit(value):
+        if len(examples) >= 4:
+            return
+        if isinstance(value, dict):
+            fields = [f'{title}：{label(value[key], limit=120)}' for key, title in names.items()
+                      if key in value and type(value[key]) in (str, int)]
+            if fields:
+                examples.append('；'.join(fields))
+            for nested in value.values():
+                if isinstance(nested, (dict, list)):
+                    visit(nested)
+        elif isinstance(value, list):
+            for nested in value:
+                visit(nested)
+    visit(proof['facts'])
+    return '\n'.join(examples) or '本次没有可展示的实体名称或判定字段；不能据此判断无风险。'
 
 
 def has_benign_facts(evidence):
@@ -121,8 +145,18 @@ async def choose(agent_name, data):
     response = await asyncio.wait_for(provider.chat(model['model_id'], [
         ChatMessage(role='system', content=(agent.prompt or '') + '\n' + contract),
         ChatMessage(role='user', content=encode(data))], temperature=0, max_tokens=2500), 90)
-    if response.tool_calls or response.finish_reason not in ('stop', 'end_turn'):
-        raise ContractError('调查模型没有返回完整决策')
+    finish_reason = response.finish_reason
+    diag.event('investigation.model', model_stop=finish_reason if finish_reason in
+               {'stop', 'end_turn', 'completed', 'length', 'max_tokens', 'tool_calls', 'content_filter'} else 'other',
+               has_tool_calls=bool(response.tool_calls), length=len(response.content or ''))
+    if response.tool_calls:
+        raise ContractError('调查模型返回了未开放的工具调用，未执行；已有证据保留待续查')
+    if finish_reason in ('length', 'max_tokens'):
+        raise ContractError('调查模型输出达到长度上限，决策被截断；已有证据保留待续查')
+    if finish_reason not in ('stop', 'end_turn', 'completed'):
+        raise ContractError('调查模型未正常结束，未采用不完整决策；请导出诊断日志核对模型返回状态')
+    if not isinstance(response.content, str) or not response.content.strip():
+        raise ContractError('调查模型返回空决策，未执行操作')
     try:
         content = response.content.strip()
         if content.startswith('```'):
@@ -158,7 +192,11 @@ class Investigator:
                 details += '\n' + '\n'.join(self.unavailable)
                 return None, {'capabilities': [cap.json() for cap in allowed_catalog],
                               'unavailable': self.unavailable, 'specialists': [a.name for a in agents]}, Summary(
-                    f'本项目发现 {len(allowed_catalog)} 项受控查询能力，{len(agents)} 个可协作智能体。配置存在不代表连接已验证；后续以实际查询结果为准。', details)
+                    f'本项目发现 {len(allowed_catalog)} 项受控查询能力，{len(agents)} 个可协作智能体。配置存在不代表连接已验证；后续以实际查询结果为准。', details, sections=[
+                        {'label': '调查对象', 'text': event_label(self.event)},
+                        {'label': '可用方法', 'text': details.strip() or '未发现可用来源，无法开始取证。'},
+                        {'label': '下一步', 'text': '结合原事件和已有证据选择需要补查的来源；工具返回成功后才计入证据。'},
+                    ])
             await self.recorder.call('确认数据源与协作能力', {'event': self.event['id']}, describe)
         for _ in range(4 if depth else self.policy.investigation_calls + 3):
             if self.budget.models >= self.policy.investigation_calls * 2 + 3:
@@ -171,10 +209,18 @@ class Investigator:
                     'agents': [{'name': a.name, 'description': (a.description or '')[:300]} for a in agents],
                     'evidence': self.evidence, 'remaining_calls': self.policy.investigation_calls - self.budget.calls,
                     'specialist_assessments': self.advice,
-                    'purpose': '开发邮件链路联调；不需要伪造恶意结论' if self.policy.development_sample else '真实事件调查',
+                    'purpose': '真实事件调查',
                 })
+                source = next((c for c in allowed_catalog if c.id == choice.capability), None)
+                method = (f"建议使用 {source.name if source else '待核验的数据源'} 查询{ENTITY_LABELS.get(choice.entity, {'proof': '举证', 'related': '关联'}.get(choice.entity, choice.entity))}证据。" if choice.action == 'query' else
+                          f'建议请 {label(choice.agent)} 协助核对证据。' if choice.action == 'consult' else '模型提出调查结论，接下来核验引用的证据与完整性。')
                 return choice, choice.model_dump(), Summary(f'智能体建议（待核验）：{choice.reason}',
-                    f'下一步：{choice.action}；引用证据：{", ".join(choice.evidence_ids) or "尚无"}。程序随后核验引用和结果完整性。')
+                    f'下一步：{choice.action}；引用证据：{", ".join(choice.evidence_ids) or "尚无"}。程序随后核验引用和结果完整性。', sections=[
+                        {'label': '采用的方法', 'text': method},
+                        {'label': '选择依据', 'text': choice.reason},
+                        {'label': '已引用证据', 'text': '、'.join(choice.evidence_ids) or '尚未引用成功的查询证据，当前不能作为最终结论。'},
+                        {'label': '下一步', 'text': '核对所选来源、权限和证据；通过后执行该建议。本步骤尚未发信或修改状态。'},
+                    ])
             choice = await self.recorder.call('协作智能体分析' if depth else '监测运营智能体：选择下一步',
                                                {'event': self.event['id'], 'agent': agent_name}, think)
             if choice.action == 'finish':
@@ -232,13 +278,19 @@ class Investigator:
                 await self.save(self.evidence, {'specialists': self.advice}, 'pending')
                 diag.event('investigation.query', success=proof['success'], truncated=proof['partial'],
                            device=diag.opaque(capability.device), calls=self.budget.calls)
-                text = (f"{capability.name}：查询原事件 {self.event['id']} 的{choice.entity}依据。"
+                entity = ENTITY_LABELS.get(choice.entity, {'proof': '举证', 'related': '跨设备关联'}.get(choice.entity, choice.entity))
+                text = (f"{capability.name}：查询原事件 {self.event['id']} 的{entity}依据。"
                         + ('结果已保存。' if proof['success'] else proof['error'] + '。')
                         + ('结果不完整，不能据此排除风险。' if proof['partial'] else '')
                         + ('跨设备结果仅为候选，仍需核对资产身份和时间，不能只凭同 IP 合并。' if capability.kind != 'xdr' else ''))
                 if not proof['success']:
                     raise ContractError(proof['error'])
-                return proof, proof, Summary(text, encode(proof))
+                return proof, proof, Summary(text, encode(proof), sections=[
+                    {'label': '查询对象', 'text': event_label(self.event) + f'；来源：{label(capability.name)}；工具：{label(capability.tool)}；内容：{entity}。'},
+                    {'label': '实际发现', 'text': evidence_description(proof)},
+                    {'label': '证据与缺口', 'text': f"证据编号：{proof['id']}；查询时间：{proof['retrieved_at']}。" + ('返回经过裁剪或存在缺失，只能作为部分依据，不能据此排除风险。' if proof['partial'] else '已保存本次查询返回的可用事实。') + ('跨设备记录仍是候选，须核对资产身份和时间。' if capability.kind != 'xdr' else '')},
+                    {'label': '下一步', 'text': '将这项证据交回调查智能体，决定继续补查、请求协作或形成有依据的结论。'},
+                ])
             try:
                 await self.recorder.call('调查取证：' + capability.name, {'event': self.event['id'], 'tool': capability.tool,
                                         'entity': choice.entity}, query)
@@ -294,6 +346,11 @@ async def investigate(policy, event, recorder, budget=None):
     summary += ('调查结论已保存；邮件和 XDR 状态仍由统一跟进服务处理。' if state == 'ready' else
                 '连续三轮未完成，保留待人工核对。' if state == 'needs_review' else '证据已保存，下轮优先续查此事件。')
     async def finish(_):
-        return None, event['investigation'], Summary(summary, encode({'conclusion': result, 'evidence': evidence}))
+        return None, event['investigation'], Summary(summary, encode({'conclusion': result, 'evidence': evidence}), success=state == 'ready', sections=[
+            {'label': '调查对象', 'text': event_label(event)},
+            {'label': '调查结论' if state == 'ready' else '未完成原因', 'text': result.get('reason', '尚未形成调查结论')},
+            {'label': '证据与缺口', 'text': f"保存 {len(evidence)} 项查询记录，其中 {sum(bool(e['success']) for e in evidence)} 项返回成功。引用：{'、'.join(result.get('evidence_ids', [])) or '暂无'}。" + ('仍需核对：' + '；'.join(result['gaps']) if result.get('gaps') else '证据完整性与每项查询记录一起保存，成功返回不等于已排除风险。')},
+            {'label': '下一步', 'text': '进入发信前核对，由统一邮件服务决定是否通知；当前未修改XDR。' if state == 'ready' else '连续三次未完成，转人工核对；已有证据保留。' if state == 'needs_review' else '本次调查结束，证据保存为待办；后续轮次优先续查。'},
+        ])
     await recorder.call('智能体调查结果', {'event': event['id']}, finish)
     return event

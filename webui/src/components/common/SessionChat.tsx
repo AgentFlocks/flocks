@@ -91,7 +91,7 @@ export {
 // Types
 // ============================================================================
 
-export type MergedMessage = Message & { _merged?: boolean };
+export type MergedMessage = Message & { _merged?: boolean; _sourceMessageIds?: string[] };
 
 /** Node reference shown above the chat input as a dismissible chip */
 export interface NodeRef {
@@ -1099,10 +1099,11 @@ export function mergeConsecutiveAssistantMessages(messages: Message[]): MergedMe
       !!last.compacted === !!msg.compacted
     ) {
       last.parts = [...last.parts, ...msg.parts];
+      last._sourceMessageIds = [...(last._sourceMessageIds || [last.id]), msg.id];
       // The last constituent message owns the live state, including an unset finish.
       last.finish = msg.finish;
     } else {
-      result.push({ ...msg, parts: [...msg.parts], _merged: true });
+      result.push({ ...msg, parts: [...msg.parts], _merged: true, _sourceMessageIds: [msg.id] });
     }
   }
 
@@ -2130,7 +2131,13 @@ export default function SessionChat({
   const messagesContentRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const focusedMessageRef = useRef('');
-  const isAtBottomRef = useRef(true);
+  const pendingFocusRef = useRef(focusMessageId);
+  pendingFocusRef.current = focusMessageId;
+  // A programmatic jump can itself emit a scroll event. Keep follow-latest
+  // suspended until the reader deliberately scrolls or returns to the tail.
+  const focusedViewportRef = useRef(!!focusMessageId);
+  const focusHighlightRef = useRef<{ target: HTMLElement; timeout: number } | null>(null);
+  const isAtBottomRef = useRef(!focusMessageId);
   const [showScrollToLatest, setShowScrollToLatest] = useState(false);
   const scrollToBottomRafRef = useRef<number | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -2216,11 +2223,13 @@ export default function SessionChat({
   }, [mentionAgents, mentionQuery]);
 
   const scrollToBottom = useCallback(() => {
-    if (!isAtBottomRef.current) return;
+    if (pendingFocusRef.current || focusedViewportRef.current || !isAtBottomRef.current) return;
     if (scrollToBottomRafRef.current !== null) return;
     scrollToBottomRafRef.current = requestAnimationFrame(() => {
       scrollToBottomRafRef.current = null;
-      messagesEndRef.current?.scrollIntoView({ behavior: 'instant' });
+      if (!pendingFocusRef.current && !focusedViewportRef.current && isAtBottomRef.current) {
+        messagesEndRef.current?.scrollIntoView({ behavior: 'instant' });
+      }
     });
   }, []);
 
@@ -2229,6 +2238,7 @@ export default function SessionChat({
       cancelAnimationFrame(scrollToBottomRafRef.current);
       scrollToBottomRafRef.current = null;
     }
+    if (focusHighlightRef.current) window.clearTimeout(focusHighlightRef.current.timeout);
   }, []);
 
   const rafScheduledRef = useRef(false);
@@ -2237,12 +2247,16 @@ export default function SessionChat({
     rafScheduledRef.current = true;
     requestAnimationFrame(() => {
       const el = scrollContainerRef.current;
-      if (el) {
+      if (el && !pendingFocusRef.current && !focusedViewportRef.current) {
         isAtBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight <= SCROLL_BOTTOM_THRESHOLD_PX;
         setShowScrollToLatest(!isAtBottomRef.current);
       }
       rafScheduledRef.current = false;
     });
+  }, []);
+
+  const releaseFocusedViewport = useCallback(() => {
+    focusedViewportRef.current = false;
   }, []);
 
   const {
@@ -2291,26 +2305,7 @@ export default function SessionChat({
     sessionId,
   ]);
 
-  useEffect(() => {
-    const targetId = String(focusMessageId || '').trim();
-    if (!targetId || focusedMessageRef.current === targetId) return;
-    if (loading) return;
-    const target = messagesContentRef.current?.querySelector<HTMLElement>(
-      `[data-message-id="${CSS.escape(targetId)}"]`,
-    );
-    if (!target) {
-      focusedMessageRef.current = targetId;
-      onFocusMessageConsumed?.();
-      return;
-    }
-    focusedMessageRef.current = targetId;
-    target.scrollIntoView({ block: 'center', behavior: 'smooth' });
-    target.classList.add('ring-2', 'ring-sky-400', 'ring-offset-2', 'ring-offset-white', 'dark:ring-offset-zinc-950');
-    window.setTimeout(() => {
-      target.classList.remove('ring-2', 'ring-sky-400', 'ring-offset-2', 'ring-offset-white', 'dark:ring-offset-zinc-950');
-    }, 1800);
-    onFocusMessageConsumed?.();
-  }, [focusMessageId, loading, messages.length, onFocusMessageConsumed]);
+
 
   const sessionMessagesForContextUsage = useMemo(
     () => messages.filter((message) => !message.sessionID || message.sessionID === sessionId),
@@ -2923,7 +2918,10 @@ export default function SessionChat({
     sessionBusyRef.current = false;
     sessionStatusRevisionRef.current += 1;
     statusCheckedRef.current = null;
-    isAtBottomRef.current = true;
+    isAtBottomRef.current = !pendingFocusRef.current;
+    focusedViewportRef.current = !!pendingFocusRef.current;
+    focusedMessageRef.current = '';
+    setShowScrollToLatest(!!pendingFocusRef.current);
     clearPendingQuestions();
     setPendingPermissions([]);
     setPermissionError(null);
@@ -3304,6 +3302,7 @@ export default function SessionChat({
     abortingRef.current = false;
     abortedMessageIdRef.current = null;
     suppressStreamingUntilIdleRef.current = false;
+    focusedViewportRef.current = false;
     isAtBottomRef.current = true;
     setSending(true);
     setIsStreaming(true);
@@ -3362,6 +3361,7 @@ export default function SessionChat({
     abortedMessageIdRef.current = null;
     suppressStreamingUntilIdleRef.current = false;
     // Force scroll to bottom when user sends a new message
+    focusedViewportRef.current = false;
     isAtBottomRef.current = true;
     setSending(true);
     setIsStreaming(true);
@@ -4045,6 +4045,7 @@ export default function SessionChat({
     abortingRef.current = false;
     abortedMessageIdRef.current = null;
     suppressStreamingUntilIdleRef.current = false;
+    focusedViewportRef.current = false;
     isAtBottomRef.current = true;
     setActionMessageId(editingMessageId);
     const sourceMessage = messagesRef.current.find((message) => message.id === editingMessageId);
@@ -4118,6 +4119,7 @@ export default function SessionChat({
     abortingRef.current = false;
     abortedMessageIdRef.current = null;
     suppressStreamingUntilIdleRef.current = false;
+    focusedViewportRef.current = false;
     isAtBottomRef.current = true;
     setActionMessageId(messageId);
     try {
@@ -4168,6 +4170,45 @@ export default function SessionChat({
   ), [isStreaming, merged, skipIndices]);
   const { historyItems, tailItems } = useStableChatTimelineSegments(timelineItems);
 
+  useEffect(() => {
+    const targetId = String(focusMessageId || '').trim();
+    if (!targetId) { focusedMessageRef.current = ''; return; }
+    const focusKey = `${sessionId}:${targetId}`;
+    if (focusedMessageRef.current === focusKey) return;
+    if (loading) return;
+    // The fetch hook can briefly retain the previous session's messages.
+    if (!messages.some((message) => message.id === targetId && (!message.sessionID || message.sessionID === sessionId))) return;
+    const renderedId = merged.find((message) => (
+      message.id === targetId || message._sourceMessageIds?.includes(targetId)
+    ))?.id || targetId;
+    const target = messagesContentRef.current?.querySelector<HTMLElement>(
+      `[data-message-id="${CSS.escape(renderedId)}"]`,
+    );
+    // Loading/SSE may deliver the target after the first render. Only consume
+    // an anchor once it actually exists, and suspend follow-latest scrolling.
+    if (!target) return;
+    focusedMessageRef.current = focusKey;
+    focusedViewportRef.current = true;
+    isAtBottomRef.current = false;
+    setShowScrollToLatest(true);
+    if (scrollToBottomRafRef.current !== null) {
+      cancelAnimationFrame(scrollToBottomRafRef.current);
+      scrollToBottomRafRef.current = null;
+    }
+    const highlightClasses = ['ring-2', 'ring-sky-400', 'ring-offset-2', 'ring-offset-white', 'dark:ring-offset-zinc-950'];
+    if (focusHighlightRef.current) {
+      window.clearTimeout(focusHighlightRef.current.timeout);
+      focusHighlightRef.current.target.classList.remove(...highlightClasses);
+    }
+    target.scrollIntoView({ block: 'start', behavior: 'instant' });
+    target.classList.add(...highlightClasses);
+    focusHighlightRef.current = { target, timeout: window.setTimeout(() => {
+      target.classList.remove(...highlightClasses);
+      focusHighlightRef.current = null;
+    }, 2400) };
+    onFocusMessageConsumed?.();
+  }, [sessionId, focusMessageId, loading, messages, merged, onFocusMessageConsumed]);
+
   // ── Styling based on compact mode ──
   const msgAreaClass = compact
     ? 'relative flex flex-col flex-1 min-h-0 overflow-y-auto bg-gray-50 px-4 py-4 dark:bg-zinc-950'
@@ -4198,6 +4239,16 @@ export default function SessionChat({
         ref={scrollContainerRef}
         className={msgAreaClass}
         onScroll={handleScroll}
+        onWheel={releaseFocusedViewport}
+        onTouchMove={releaseFocusedViewport}
+        onPointerDown={(event) => {
+          // Dragging the scrollbar is a deliberate navigation gesture; opening
+          // a tool/evidence card in the historical round is not.
+          if (event.target === event.currentTarget) releaseFocusedViewport();
+        }}
+        onKeyDownCapture={(event) => {
+          if (['ArrowDown', 'ArrowUp', 'PageDown', 'PageUp', 'Home', 'End', ' '].includes(event.key)) releaseFocusedViewport();
+        }}
         style={{ scrollbarGutter: 'stable' }}
       >
         {loading && messages.length === 0 ? (
@@ -4396,7 +4447,7 @@ export default function SessionChat({
 
       {showScrollToLatest && (
         <div className="flex shrink-0 justify-center py-1">
-          <button type="button" onClick={() => { isAtBottomRef.current = true; setShowScrollToLatest(false); scrollToBottom(); }} className="flex items-center gap-1 rounded-full border border-zinc-200 bg-white px-3 py-1 text-xs text-zinc-600 shadow-sm dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300">
+          <button type="button" onClick={() => { focusedViewportRef.current = false; isAtBottomRef.current = true; setShowScrollToLatest(false); scrollToBottom(); }} className="flex items-center gap-1 rounded-full border border-zinc-200 bg-white px-3 py-1 text-xs text-zinc-600 shadow-sm dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300">
             <ChevronDown className="h-3 w-3" />{t('chat.backToLatest', '回到最新')}
           </button>
         </div>
@@ -4977,6 +5028,102 @@ function AgentMentionDropdown({
 // ChatMessageBubble
 // ============================================================================
 
+function isMonitoringRoundEnd(part: MessagePart): boolean {
+  return part.type === 'text'
+    && part.metadata?.monitoringRoundEnd === true
+    && ['completed', 'failed'].includes(String(part.metadata.roundStatus));
+}
+
+function MonitoringStepSummary({ part, toolPart, isActive }: { part: MessagePart; toolPart?: MessagePart; isActive: boolean }) {
+  const details = typeof part.metadata?.details === 'string' ? part.metadata.details : '';
+  const rawSections: unknown = part.metadata?.monitoringSections;
+  const sections = Array.isArray(rawSections) ? rawSections.flatMap(section => {
+    if (!section || typeof section !== 'object' || typeof section.label !== 'string' || typeof section.text !== 'string') return [];
+    const label = section.label.trim();
+    return label && section.text.trim() ? [{ label, text: section.text }] : [];
+  }) : [];
+  // Older messages keep their original narrative. Structured labels describe
+  // published actions and evidence only, never hidden model reasoning.
+  if (!sections.length) return (
+    <div data-testid="monitor-step-summary" className="text-sm leading-7">
+      <p className="whitespace-pre-wrap break-words">{part.text}</p>
+      {details && <details className="mt-1" open={isActive || undefined}>
+        <summary className="cursor-pointer text-gray-500">查看本步骤的结果与依据</summary>
+        <div className="mt-1 whitespace-pre-wrap break-words">{details}</div>
+      </details>}
+    </div>
+  );
+  const status = toolPart?.state?.status;
+  const failed = status === 'error';
+  const running = status === 'running' || status === 'pending';
+  const statusLabel = failed ? '步骤未完成' : running ? '步骤执行中' : status === 'completed' ? '步骤已完成' : '';
+  return (
+    <section aria-label="本步骤解读" data-testid="monitor-step-summary" className="my-3 rounded-xl border border-zinc-200/80 bg-white/80 px-4 py-3 text-sm leading-7 dark:border-zinc-700 dark:bg-zinc-900/50">
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-x-4 gap-y-1 border-b border-zinc-100 pb-2 dark:border-zinc-800">
+        <h4 className="inline-flex items-center gap-2 font-semibold text-zinc-700 dark:text-zinc-200"><ListTree className="h-4 w-4 text-blue-500" aria-hidden="true" />步骤解读{toolPart?.tool && <span className="font-normal text-zinc-500">· {toolPart.tool}</span>}</h4>
+        {statusLabel && <span className={`inline-flex items-center gap-1.5 text-xs ${failed ? 'text-rose-600 dark:text-rose-300' : running ? 'text-blue-600 dark:text-blue-300' : 'text-emerald-700 dark:text-emerald-300'}`}>
+          {failed ? <XCircle className="h-3.5 w-3.5" aria-hidden="true" /> : running ? <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" /> : <CheckCircle2 className="h-3.5 w-3.5" aria-hidden="true" />}{statusLabel}
+        </span>}
+      </div>
+      <dl className="space-y-3">
+        {sections.map((section, index) => {
+          const gap = section.label === '证据与缺口';
+          const next = section.label === '下一步';
+          return <div key={`${section.label}-${index}`} className={gap ? 'rounded-lg bg-amber-50/70 px-3 py-2 dark:bg-amber-950/20' : next ? 'rounded-lg bg-blue-50/70 px-3 py-2 dark:bg-blue-950/20' : ''}>
+            <dt className={`mb-0.5 text-xs font-semibold ${gap ? 'text-amber-800 dark:text-amber-300' : next ? 'text-blue-700 dark:text-blue-300' : 'text-zinc-500 dark:text-zinc-400'}`}>{section.label}</dt>
+            <dd className="whitespace-pre-wrap break-words text-zinc-700 dark:text-zinc-200">{section.text}</dd>
+          </div>;
+        })}
+      </dl>
+      {details && <details className="mt-3 border-t border-zinc-100 pt-2 dark:border-zinc-800" open={isActive || undefined}>
+        <summary className="cursor-pointer text-xs font-medium text-zinc-500 hover:text-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-200">查看本步骤的结果与依据</summary>
+        <div className="mt-2 whitespace-pre-wrap break-words rounded-lg bg-zinc-50 p-3 text-sm dark:bg-zinc-950/60">{details}</div>
+      </details>}
+    </section>
+  );
+}
+
+function MonitoringRoundEndCard({ part }: { part: MessagePart }) {
+  const failed = part.metadata?.roundStatus === 'failed';
+  const title = `本轮已结束 · ${failed ? '失败' : '完成'}`;
+  const nextStep = typeof part.metadata?.nextStep === 'string' ? part.metadata.nextStep : '';
+  const details = typeof part.metadata?.details === 'string' ? part.metadata.details : '';
+  const Icon = failed ? XCircle : CheckCircle2;
+
+  return (
+    <section
+      aria-label={title}
+      data-testid="monitor-round-end"
+      data-round-id={typeof part.metadata?.roundId === 'string' ? part.metadata.roundId : undefined}
+      className={`my-4 overflow-hidden rounded-xl border shadow-sm ${failed
+        ? 'border-rose-200 bg-rose-50/60 dark:border-rose-900 dark:bg-rose-950/20'
+        : 'border-emerald-200 bg-emerald-50/50 dark:border-emerald-900 dark:bg-emerald-950/20'}`}
+    >
+      <div className={`flex items-center gap-2.5 border-b px-4 py-3 ${failed
+        ? 'border-rose-200/70 text-rose-800 dark:border-rose-900 dark:text-rose-200'
+        : 'border-emerald-200/70 text-emerald-800 dark:border-emerald-900 dark:text-emerald-200'}`}>
+        <Icon aria-hidden="true" className="h-5 w-5 shrink-0" />
+        <h3 className="text-base font-semibold">{title}</h3>
+      </div>
+      <div className="space-y-3 px-4 py-3 text-sm leading-7 text-zinc-700 dark:text-zinc-200">
+        <div className="whitespace-pre-wrap break-words">{part.text}</div>
+        {nextStep && (
+          <div className="rounded-lg bg-white/80 px-3 py-2 dark:bg-zinc-900/70">
+            <span className="mr-2 font-semibold">下一步</span>
+            <span className="whitespace-pre-wrap break-words">{nextStep}</span>
+          </div>
+        )}
+        {details && (
+          <details>
+            <summary className="cursor-pointer text-zinc-500 dark:text-zinc-400">查看本轮详细依据</summary>
+            <div className="mt-2 whitespace-pre-wrap break-words">{details}</div>
+          </details>
+        )}
+      </div>
+    </section>
+  );
+}
+
 function ContextFileCard({
   sessionId,
   resourceId,
@@ -5371,7 +5518,7 @@ function ChatMessageBubbleInner({
             return true;
           };
           const isRenderableTextPart = (part: MessagePart): boolean => (
-            part.type === 'text' && !!getMessagePartDisplayText(part, !isUser).trim()
+            part.type === 'text' && (isMonitoringRoundEnd(part) || !!getMessagePartDisplayText(part, !isUser).trim())
           );
           const isRenderableDisplayPart = (part: MessagePart): boolean => {
             if (isIntermediateProcessPart(part)) return true;
@@ -5399,19 +5546,10 @@ function ChatMessageBubbleInner({
             <div key={part.id || i} className={processStep ? 'min-w-0' : 'mt-2 first:mt-0'}>
               {/* Text */}
               {part.type === 'text' && (() => {
+                if (!isUser && isMonitoringRoundEnd(part)) return <MonitoringRoundEndCard part={part} />;
                 if (part.metadata?.monitoringSummary === true) {
-                  const details = typeof part.metadata.details === 'string' ? part.metadata.details : '';
-                  return (
-                    <div data-testid="monitor-step-summary" className="text-sm leading-7">
-                      <p className="whitespace-pre-wrap break-words">{part.text}</p>
-                      {details && (
-                        <details className="mt-1" open={isActive || undefined}>
-                          <summary className="cursor-pointer text-gray-500">查看本步骤的结果与依据</summary>
-                          <div className="mt-1 whitespace-pre-wrap break-words">{details}</div>
-                        </details>
-                      )}
-                    </div>
-                  );
+                  const toolPart = parts.find(candidate => candidate.type === 'tool' && candidate.id === part.metadata?.toolPartID);
+                  return <MonitoringStepSummary part={part} toolPart={toolPart} isActive={isActive} />;
                 }
                 const rawText = part.text || '';
                 const nodeRefMatch = isUser
@@ -5469,6 +5607,7 @@ function ChatMessageBubbleInner({
                     ? () => onQuestionReject(part.callID!, pendingQuestions![part.callID!].requestId)
                     : undefined}
                   processStep={processStep}
+                  openWhileActive={rawAgentName === 'security-monitor' && isActive}
                 />
               )}
 
@@ -5646,7 +5785,7 @@ function ChatMessageBubbleInner({
                 else pendingTiming.push(part);
                 return;
               }
-              if (part.metadata?.monitoringSummary !== true && (isIntermediateProcessPart(part) || (isRenderableTextPart(part) && index <= lastIntermediateProcessIndex))) {
+              if (!isMonitoringRoundEnd(part) && part.metadata?.monitoringSummary !== true && (isIntermediateProcessPart(part) || (isRenderableTextPart(part) && index <= lastIntermediateProcessIndex))) {
                 if (!processGroup) {
                   processGroup = { steps: [], timing: pendingTiming, index: processGroupIndex++ };
                   pendingTiming = [];
@@ -6421,6 +6560,7 @@ export interface ChatToolPartProps {
   onAnswer?: (answers: string[][]) => Promise<void>;
   onReject?: () => Promise<void>;
   processStep?: boolean;
+  openWhileActive?: boolean;
 }
 
 export function ChatToolPart({
@@ -6429,6 +6569,7 @@ export function ChatToolPart({
   onAnswer,
   onReject,
   processStep = false,
+  openWhileActive = false,
 }: ChatToolPartProps) {
   const { t } = useTranslation('session');
   const toolName = part.tool || 'unknown';
@@ -6636,7 +6777,7 @@ export function ChatToolPart({
   if (processStep) {
     return (
       <>
-        <details data-testid="chat-process-tool-step" className="group/tool min-w-0">
+        <details data-testid="chat-process-tool-step" className="group/tool min-w-0" open={openWhileActive || undefined}>
           <summary className="flex min-h-7 cursor-pointer list-none items-center gap-2 text-sm font-medium text-[#747a78] transition-colors hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-200 [&::-webkit-details-marker]:hidden">
             <span className={`inline-grid h-[18px] w-[18px] flex-[0_0_18px] place-items-center ${processStepIconColor}`}>
               {processStepIcon}
@@ -6660,7 +6801,7 @@ export function ChatToolPart({
   return (
     <>
       {/* The part wrapper owns vertical spacing between process rows. */}
-      <details className="group/tool rounded-lg bg-zinc-50 overflow-hidden">
+      <details className="group/tool rounded-lg bg-zinc-50 overflow-hidden" open={openWhileActive || undefined}>
         <summary className="px-2.5 py-2 cursor-pointer list-none flex items-start gap-2 min-w-0 select-none hover:bg-zinc-50 transition-colors">
         <span className={`${config.iconColor} flex-shrink-0 mt-0.5`}>{config.icon}</span>
         <div className="min-w-0 flex-1">

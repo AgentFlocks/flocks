@@ -73,9 +73,10 @@ def shape(value):
 
 _TYPES = {'str', 'dict', 'list', 'int', 'float', 'bool', 'bytes', 'NoneType', 'other'}
 _ENUMS = {
+    'model_stop': {'stop', 'end_turn', 'completed', 'length', 'max_tokens', 'tool_calls', 'content_filter', 'other'},
     'event': {'trace.start', 'trace.end', 'progress', 'stage.start', 'stage.end', 'query.window',
               'tool.raw', 'tool.normalized', 'adapter.result', 'adapter.structured', 'adapter.decoded', 'adapter.failure',
-              'mail.received', 'mail.result', 'mail.interpreted', 'mail.analyzed', 'mail.evidence', 'investigation.query', 'query.sample', 'page.validated', 'run.result', 'dispatch.result', 'background.result'},
+              'mail.received', 'mail.result', 'mail.interpreted', 'mail.analyzed', 'mail.evidence', 'investigation.query', 'investigation.model', 'query.sample', 'page.validated', 'run.result', 'dispatch.result', 'background.result'},
     'entity_type': {'host', 'file', 'process', 'ip', 'innerip', 'dns'},
     'stage': {'dispatch', 'run', 'session.prepare', 'query.device', 'query.events', 'query.entities',
               'correlate', 'tool.execute', 'tool.handler', 'tool.normalize', 'report.export', 'step.other',
@@ -94,6 +95,7 @@ _NUMBERS = {'schema', 'pid', 'seq', 'elapsed_ms', 'duration_ms', 'length', 'item
             'window_seconds', 'devices', 'max_pages', 'timeout_seconds', 'json_position', 'json_line',
             'json_column', 'events', 'errors', 'suppressed', 'calls', 'call', 'loop_lag_ms', 'total'}
 _BOOLS = {'success', 'truncated', 'has_error', 'has_saved_output', 'cursor_present',
+          'has_tool_calls',
           'authenticated_sender', 'sender_verification_bypassed', 'development_sample', 'preferred_severity', 'malicious'}
 _IDS = {'trace', 'owner', 'scope', 'execution', 'device', 'notice', 'reply', 'project', 'event_id'}
 

@@ -25,7 +25,7 @@ async def snapshot(owner, scope, day):
         runs = await select('SELECT * FROM monitor_attempts WHERE owner=? AND scope=? AND business_date=? ORDER BY sequence', (owner, scope, day))
         observations = await select('SELECT o.*,a.sequence,a.session_id,a.message_id,a.started_at,a.project FROM monitor_observations o JOIN monitor_attempts a ON a.id=o.attempt_id WHERE a.owner=? AND a.scope=? AND a.business_date=? ORDER BY a.sequence', (owner, scope, day))
         dispositions = await select('SELECT * FROM monitor_dispositions WHERE owner=? AND scope=? ORDER BY created_at', (owner, scope))
-        mail_notices = await select('SELECT id,state,created_at,updated_at FROM monitor_mail_notices WHERE owner=? AND project=(SELECT project FROM monitor_installations WHERE owner=? AND scope=?)', (owner, owner, scope))
+        mail_notices = await select('SELECT id,state,created_at,updated_at,sent_at FROM monitor_mail_notices WHERE owner=? AND project=(SELECT project FROM monitor_installations WHERE owner=? AND scope=?)', (owner, owner, scope))
         mail_replies = await select('SELECT state,received_at FROM monitor_mail_replies WHERE owner=? AND project=(SELECT project FROM monitor_installations WHERE owner=? AND scope=?)', (owner, owner, scope))
         mail_settings = await select('SELECT enabled FROM monitor_mail_settings WHERE owner=? AND project=(SELECT project FROM monitor_installations WHERE owner=? AND scope=?)', (owner, owner, scope))
         auto_settings = await select('SELECT * FROM monitor_auto_settings WHERE owner=? AND scope=?', (owner, scope))
@@ -72,6 +72,8 @@ async def snapshot(owner, scope, day):
     for run in runs:
         run['result'] = json.loads(run['result'])
         run['steps'] = [step for step in steps if step['attempt_id'] == run['id']]
+        # Project older records without rewriting their stored audit facts.
+        run['status'] = {'partial': 'completed', 'interrupted': 'failed', 'cancelled': 'failed'}.get(run['status'], run['status'])
     trigger = json.loads(scheduler[0]['trigger']) if scheduler else {}
     business_timezone = json.loads(installation['policy'])['timezone'] if installation else 'Asia/Shanghai'
     tz = ZoneInfo(business_timezone)
@@ -81,7 +83,7 @@ async def snapshot(owner, scope, day):
     policy = MonitoringPolicy.model_validate_json(installation['policy']) if installation else None
     development = bool(policy and sampling.enabled(policy))
     return {'businessDate': day, 'developmentSample': development,
-            'investigationEngine': policy.investigation_engine if policy else 'rules',
+            'investigationEngine': 'agent-v1',
             'roundTimeoutSeconds': policy.timeout_seconds if policy else None,
             'installation': {'installed': bool(installation and installation['installed']),
             'ready': bool(installation and installation['ready']), 'reason': installation['reason'] if installation else '请从添加场景安装安全运营监测',
@@ -103,7 +105,7 @@ async def snapshot(owner, scope, day):
                         'unknown': sum(e['risk'] == 'unknown' for e in events.values()),
                         'ignored': sum(e['risk'] == 'ignored' for e in events.values())},
             'mail': {'enabled': bool(mail_settings and mail_settings[0]['enabled']),
-                     'sentToday': sum(n['state']=='sent' and datetime.fromisoformat(n['updated_at']).astimezone(tz).date().isoformat()==day for n in mail_notices),
+                     'sentToday': sum(n['state']=='sent' and datetime.fromisoformat(n['sent_at'] or n['updated_at']).astimezone(tz).date().isoformat()==day for n in mail_notices),
                      'receivedToday': sum(datetime.fromisoformat(r['received_at']).astimezone(tz).date().isoformat()==day for r in mail_replies),
                      'pending': sum(r['state'] in ('pending','interpreted') for r in mail_replies),
                      'needsReview': sum(r['state']=='needs_review' for r in mail_replies),
@@ -133,8 +135,10 @@ def render(data):
         lines += ['']
     for run in data['runs']:
         lines += [f"## 轮次 {run['execution_id']} · 尝试 {run['id']}", '',
-                  f"状态：{run['status']}；计划：{run['scheduled_for'] or '手动'}；开始：{run['started_at']}；结束：{run['finished_at'] or '执行中'}。", '',
+                  f"状态：{ {'completed': '完成', 'failed': '失败', 'running': '执行中'}.get(run['status'], run['status'])}；计划：{run['scheduled_for'] or '手动'}；开始：{run['started_at']}；结束：{run['finished_at'] or '执行中'}。", '',
                   f"[查看本轮对话](/sessions?session={run['session_id']}&focusMessage={run['message_id']})", '']
+        if run.get('summary'):
+            lines += [run['summary'], run.get('next_step') or '', '']
         if run['error']:
             lines += [f"异常：{run['error']}", '']
         for step in run['steps']:
@@ -161,7 +165,7 @@ def render_summary(data):
     if not data['events']:
         lines.append('当天没有已提交的事件；查询失败不能视为没有告警。')
     failed = sum(r['status'] not in ('completed', 'running') for r in data['runs'])
-    lines += ['', '## 数据完整性', '', f"未完整完成的轮次：{failed}。统计以已提交事实及回查结果为准，发信和收到回信不等于处置完成。",
+    lines += ['', '## 数据完整性', '', f"失败轮次：{failed}。统计以已提交事实及回查结果为准，发信和收到回信不等于处置完成。",
               '当天持续更新；跨日收到的反馈归入实际收到当天，原事件保留关联。邮件存量统计反映生成报告时的进度。']
     if any(r['result'].get('development_sample') for r in data['runs']):
         lines += ['', sampling.DESCRIPTION, '含联调抽样轮次，不能视为全天全量告警统计。测试忽略不代表消除威胁或确认误报。']

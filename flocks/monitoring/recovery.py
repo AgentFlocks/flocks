@@ -17,6 +17,12 @@ async def recover():
             if message:
                 await Message.update(attempt['session_id'], step['message_id'], finish='error', time={**message.time, 'completed': int(datetime.now(timezone.utc).timestamp() * 1000)})
         await write("UPDATE monitor_steps SET status='failed',error='服务重启，步骤已中断',finished_at=? WHERE attempt_id=? AND status='running'", (stamp, attempt['id']))
-        await write("UPDATE monitor_attempts SET status='interrupted',error='服务重启，保留原尝试',finished_at=? WHERE id=?", (stamp, attempt['id']))
+        await write("UPDATE monitor_attempts SET status='failed',error='服务重启中断本轮，保留原尝试',finished_at=? WHERE id=?", (stamp, attempt['id']))
         await write("INSERT INTO monitor_reports(owner,scope,business_date,status) VALUES(?,?,?,'pending') ON CONFLICT(owner,scope,business_date) DO UPDATE SET status='pending'", (attempt['owner'], attempt['scope'], attempt['business_date']))
+    from .rounds import finish_round
+    for attempt in await rows("SELECT id FROM monitor_attempts WHERE status='failed' AND end_published=0 AND (summary IS NOT NULL OR error LIKE '服务重启%')"):
+        await finish_round(attempt['id'])
+    # Resume a persisted ending interrupted between reservation and publication.
+    for attempt in await rows("SELECT id FROM monitor_attempts WHERE summary IS NOT NULL AND end_published=0 AND status='completed'"):
+        await finish_round(attempt['id'])
     await retry_exports()

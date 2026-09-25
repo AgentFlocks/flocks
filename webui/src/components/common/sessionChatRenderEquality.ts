@@ -67,6 +67,10 @@ export function areChatMessagePartsRenderEqual(
     }
 
     if (!areToolStatesRenderEqual(prevPart.state, nextPart.state)) return false;
+    // Text metadata drives monitoring summaries/end cards and display aliases.
+    // It can arrive in a later SSE update without changing the text itself.
+    if (prevPart.metadata !== nextPart.metadata
+      && JSON.stringify(prevPart.metadata) !== JSON.stringify(nextPart.metadata)) return false;
     if (!areLegacyToolPayloadsRenderEqual(prevPart.toolCall, nextPart.toolCall)) return false;
     if (!areLegacyToolPayloadsRenderEqual(prevPart.toolResult, nextPart.toolResult)) return false;
   }

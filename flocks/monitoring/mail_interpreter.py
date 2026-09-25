@@ -7,6 +7,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 from flocks.config.config import Config
 from flocks.provider.provider import Provider, ChatMessage
+from .adapter import ContractError
 
 VERSION = 'mail-feedback-v1'
 MAX_BODY = 20000
@@ -61,12 +62,21 @@ contained 要明确已控制；false_positive 要明确已核实误报；进度�
     response = await asyncio.wait_for(provider.chat(model['model_id'], [ChatMessage(role='system', content=prompt),
                        ChatMessage(role='user', content=json.dumps(data, ensure_ascii=False))],
                        temperature=0, max_tokens=2500), timeout=45)
-    if response.tool_calls or response.finish_reason not in ('stop', 'end_turn'):
-        raise ValueError('邮件解读结果不完整')
+    if response.tool_calls:
+        raise ContractError('邮件解读模型返回未开放的工具调用，未执行；下轮重试')
+    if response.finish_reason in ('length', 'max_tokens'):
+        raise ContractError('邮件解读模型输出被截断，未采用不完整结果；下轮重试')
+    if response.finish_reason not in ('stop', 'end_turn', 'completed'):
+        raise ContractError('邮件解读模型未正常结束，未采用不完整结果；下轮重试')
+    if not isinstance(response.content, str) or not response.content.strip():
+        raise ContractError('邮件解读模型返回空结果；下轮重试')
     content = response.content.strip()
     if content.startswith('```'):
         content = re.sub(r'^```(?:json)?\s*|\s*```$', '', content)
-    result = Interpretation.model_validate_json(content, strict=True)
+    try:
+        result = Interpretation.model_validate_json(content, strict=True)
+    except ValueError:
+        raise ContractError('邮件解读模型返回无效格式，未执行状态标记；下轮重试') from None
     return {'version': VERSION, 'model': f"{model['provider_id']}/{model['model_id']}",
             'input_hash': hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest(),
             **result.model_dump()}

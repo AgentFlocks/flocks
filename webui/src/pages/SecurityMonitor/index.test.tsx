@@ -1,5 +1,5 @@
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter, useLocation } from 'react-router-dom';
 import { beforeEach, expect, it, vi } from 'vitest';
 import SecurityMonitor from './index';
 const mocks = vi.hoisted(() => ({ overview: vi.fn(), report: vi.fn(), start: vi.fn(), pause: vi.fn(), diagnostics: vi.fn(), setInvestigationEngine: vi.fn() }));
@@ -15,13 +15,16 @@ const data = {
  queued: [], report: { status: 'updated', version: 1 },
 };
 beforeEach(() => { vi.resetAllMocks(); mocks.overview.mockResolvedValue({ data }); mocks.report.mockResolvedValue({ data: '# 安全运营监测\n[查看本轮对话](/sessions?session=real-session&focusMessage=anchor)' }); });
-it('identifies sample monitoring and the development feedback target', async () => {
- mocks.overview.mockResolvedValue({ data: { ...data, developmentSample: true } });
+it('shows only agent investigation and removes development instructions, including legacy snapshots', async () => {
+ mocks.overview.mockResolvedValue({ data: { ...data, developmentSample: true, investigationEngine: 'rules' } });
  render(<MemoryRouter><SecurityMonitor /></MemoryRouter>);
  const controls = await screen.findByRole('region', { name: '监测控制' });
- expect(controls).toHaveTextContent('不限处置状态');
- expect(controls).toHaveTextContent('每轮随机 1 条');
- expect(controls).toHaveTextContent('反馈完成后标记忽略');
+ expect(controls).toHaveTextContent('智能体调查');
+ expect(screen.queryByLabelText('调查方式')).not.toBeInTheDocument();
+ expect(controls).not.toHaveTextContent('开发联调');
+ expect(controls).not.toHaveTextContent('每轮随机');
+ expect(controls).not.toHaveTextContent('固定规则调查');
+ expect(mocks.setInvestigationEngine).not.toHaveBeenCalled();
 });
 it('uses one native readonly live session and four workspace tabs', async () => {
  render(<MemoryRouter initialEntries={['/suites/host-security-monitor/session']}><SecurityMonitor /></MemoryRouter>);
@@ -38,6 +41,7 @@ it('uses fact metrics, filters risks and never claims disposition', async () => 
 });
 it('report links point to original message', async () => {
  render(<MemoryRouter initialEntries={['/suites/host-security-monitor/report']}><SecurityMonitor /></MemoryRouter>);
+ fireEvent.click(await screen.findByRole('button', { name: /第 1 轮/ }));
  const link = await screen.findByText('查看本轮对话'); expect(link.closest('a')).toHaveAttribute('href', '/sessions?session=real-session&focusMessage=anchor');
 });
 it('marks fetch errors stale', async () => {
@@ -119,26 +123,124 @@ it('deduplicates diagnostic downloads and keeps retry available after failure', 
 it('switches between two reports for the selected business day', async () => {
  mocks.report.mockImplementation(async (_day, kind) => ({ data: kind === 'summary' ? '# 当日汇总内容' : '# 分轮次内容' }));
  render(<MemoryRouter initialEntries={['/suites/host-security-monitor/report']}><SecurityMonitor /></MemoryRouter>);
- expect(await screen.findByText('分轮次内容')).toBeInTheDocument();
+ expect(await screen.findByRole('list', { name: '执行轮次时间线' })).toBeInTheDocument();
+ expect(screen.queryByText('分轮次内容')).not.toBeInTheDocument();
+ await waitFor(() => expect(mocks.report).toHaveBeenCalledWith('2026-09-23', 'timeline'));
  fireEvent.click(screen.getByRole('button', { name: '当日告警总结' }));
  expect(await screen.findByText('当日汇总内容')).toBeInTheDocument();
  expect(mocks.report).toHaveBeenLastCalledWith('2026-09-23', 'summary');
 });
 
-it('only switches investigation engine while paused and shows bounded waiting', async () => {
- const paused = { ...data, investigationEngine: 'rules', installation: { ...data.installation, status: 'disabled' } };
- mocks.overview.mockResolvedValue({ data: paused });
- mocks.setInvestigationEngine.mockImplementation(async () => {
-   mocks.overview.mockResolvedValue({ data: { ...paused, investigationEngine: 'agent-v1', roundTimeoutSeconds: 1200 } });
- });
- render(<MemoryRouter><SecurityMonitor /></MemoryRouter>);
- fireEvent.change(await screen.findByLabelText('调查方式'), { target: { value: 'agent-v1' } });
- await waitFor(() => expect(mocks.setInvestigationEngine).toHaveBeenCalledWith('agent-v1'));
- expect(await screen.findByRole('status')).toHaveTextContent('已有邮件和处置记录保留');
- expect(screen.getByRole('region', { name: '监测控制' })).toHaveTextContent('单轮上限 20 分钟');
- expect(mocks.start).not.toHaveBeenCalled();
+it('normalizes legacy round endings and retains explanatory results without claiming event closure', async () => {
+ mocks.overview.mockResolvedValue({ data: { ...data, runs: [
+   { ...data.runs[0], summary: '查询完成，未发现符合条件的事件。' },
+   { ...data.runs[0], id: 'interrupted', status: 'interrupted', error: '设备连接失败' },
+   { ...data.runs[0], id: 'cancelled', status: 'cancelled', error: '用户暂停了监测' },
+ ] } });
+ render(<MemoryRouter initialEntries={['/suites/host-security-monitor/dashboard']}><SecurityMonitor /></MemoryRouter>);
+ expect(await screen.findByText('查询完成，未发现符合条件的事件。')).toBeInTheDocument();
+ expect(screen.getByText('完成')).toBeInTheDocument();
+ expect(screen.getAllByText('失败')).toHaveLength(2);
+ expect(screen.queryByText('部分完成')).not.toBeInTheDocument();
+ expect(screen.getByText('设备连接失败')).toBeInTheDocument();
+ expect(screen.getByText(/轮次完成不代表告警已闭环/)).toBeInTheDocument();
 });
-it('does not permit engine changes during an active round', async () => {
- render(<MemoryRouter><SecurityMonitor /></MemoryRouter>);
- expect(await screen.findByLabelText('调查方式')).toBeDisabled();
+
+it('opens the exact original round message instead of just the daily session', async () => {
+ function RouteObserver() { const location = useLocation(); return <output data-testid="location">{location.pathname}{location.search}</output>; }
+ render(<MemoryRouter initialEntries={['/suites/host-security-monitor/dashboard']}><SecurityMonitor /><RouteObserver /></MemoryRouter>);
+ fireEvent.click(await screen.findByRole('button', { name: '查看本轮' }));
+ expect(screen.getByTestId('location')).toHaveTextContent('/sessions?session=real-session&focusMessage=anchor');
+});
+
+it('loads and downloads both reports for the selected historical day', async () => {
+ mocks.overview.mockImplementation(async (day) => ({ data: { ...data, businessDate: day || data.businessDate } }));
+ mocks.report.mockImplementation(async (day, kind) => ({ data: `# ${day} ${kind}` }));
+ Object.defineProperty(URL, 'createObjectURL', { configurable: true, value: vi.fn(() => 'blob:report') });
+ Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: vi.fn() });
+ let filename = '';
+ const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function (this: HTMLAnchorElement) { filename = this.download; });
+ render(<MemoryRouter initialEntries={['/suites/host-security-monitor/report']}><SecurityMonitor /></MemoryRouter>);
+ fireEvent.change(await screen.findByLabelText('报告日期'), { target: { value: '2026-09-21' } });
+ await waitFor(() => expect(mocks.report).toHaveBeenLastCalledWith('2026-09-21', 'timeline'));
+ await waitFor(() => expect(screen.getByRole('button', { name: '下载 Markdown' })).toBeEnabled());
+ expect(screen.getByRole('list', { name: '执行轮次时间线' })).toBeInTheDocument();
+ expect(mocks.overview).toHaveBeenLastCalledWith('2026-09-21');
+ fireEvent.click(screen.getByRole('button', { name: '下载 Markdown' }));
+ expect(filename).toBe('安全运营监测-执行时间线-2026-09-21.md');
+ fireEvent.click(screen.getByRole('button', { name: '当日告警总结' }));
+ expect(await screen.findByText('2026-09-21 summary')).toBeInTheDocument();
+ fireEvent.click(screen.getByRole('button', { name: '下载 Markdown' }));
+ expect(mocks.report).toHaveBeenLastCalledWith('2026-09-21', 'summary');
+ expect(filename).toBe('安全运营监测-当日总结-2026-09-21.md');
+ click.mockRestore();
+});
+
+it('hides the old report and disables downloading until the newly selected date is loaded', async () => {
+ mocks.report.mockResolvedValue({ data: '# 旧日期报告' });
+ render(<MemoryRouter initialEntries={['/suites/host-security-monitor/report']}><SecurityMonitor /></MemoryRouter>);
+ fireEvent.click(await screen.findByRole('button', { name: '当日告警总结' }));
+ expect(await screen.findByText('旧日期报告')).toBeInTheDocument();
+ let finish!: (value: unknown) => void;
+ mocks.overview.mockImplementation(() => new Promise(resolve => { finish = resolve; }));
+ fireEvent.change(screen.getByLabelText('报告日期'), { target: { value: '2026-09-20' } });
+ expect(screen.queryByText('旧日期报告')).not.toBeInTheDocument();
+ expect(screen.getByRole('button', { name: '下载 Markdown' })).toBeDisabled();
+ expect(screen.getByText('正在读取所选日期的报告…')).toBeInTheDocument();
+ await act(async () => finish({ data: { ...data, businessDate: '2026-09-20', runs: [], report: { status: 'pending', version: 0 } } }));
+ expect(await screen.findByText('所选日期暂无监测记录')).toBeInTheDocument();
+ expect(screen.queryByText('旧日期报告')).not.toBeInTheDocument();
+ expect(screen.getByRole('button', { name: '下载 Markdown' })).toBeDisabled();
+});
+
+it('provides today and yesterday shortcuts in the monitoring timezone', async () => {
+ vi.useFakeTimers({ toFake: ['Date'] });
+ vi.setSystemTime(new Date('2026-09-24T18:00:00Z'));
+ mocks.overview.mockImplementation(async (day) => ({ data: { ...data, businessDate: day || '2026-09-25' } }));
+ render(<MemoryRouter initialEntries={['/suites/host-security-monitor/report']}><SecurityMonitor /></MemoryRouter>);
+ fireEvent.click(await screen.findByRole('button', { name: '昨天' }));
+ await waitFor(() => expect(mocks.overview).toHaveBeenLastCalledWith('2026-09-24'));
+ expect(screen.getByLabelText('报告日期')).toHaveValue('2026-09-24');
+ fireEvent.click(screen.getByRole('button', { name: '今天' }));
+ await waitFor(() => expect(mocks.overview).toHaveBeenLastCalledWith('2026-09-25'));
+ expect(screen.getByLabelText('报告日期')).toHaveValue('2026-09-25');
+ vi.useRealTimers();
+});
+
+it('keeps saved timeline nodes readable when the Markdown export cannot load', async () => {
+ mocks.report.mockRejectedValue(new Error('download unavailable'));
+ mocks.overview.mockResolvedValue({ data: { ...data, runs: [{ ...data.runs[0], status: 'completed', result: { events: 0 }, summary: '本轮查询完成，零条新事件。' }] } });
+ render(<MemoryRouter initialEntries={['/suites/host-security-monitor/report']}><SecurityMonitor /></MemoryRouter>);
+ expect(await screen.findByRole('alert')).toHaveTextContent('当前仍可查看已保存的执行记录');
+ fireEvent.click(screen.getByRole('button', { name: /零事件 · 无需新通知/ }));
+ expect(screen.getByText('本轮查询完成，零条新事件。')).toBeInTheDocument();
+ expect(screen.getByRole('button', { name: '下载 Markdown' })).toBeDisabled();
+});
+
+it('shows live execution facts even before the report is generated', async () => {
+ mocks.overview.mockResolvedValue({ data: { ...data, report: { status: 'pending', version: 0 }, runs: [{ ...data.runs[0], status: 'running' }] } });
+ render(<MemoryRouter initialEntries={['/suites/host-security-monitor/report']}><SecurityMonitor /></MemoryRouter>);
+ expect(await screen.findByRole('button', { name: /第 1 轮：调查执行中/ })).toBeInTheDocument();
+ expect(screen.getByRole('button', { name: '下载 Markdown' })).toBeDisabled();
+ expect(mocks.report).not.toHaveBeenCalled();
+ fireEvent.click(screen.getByRole('button', { name: '当日告警总结' }));
+ expect(screen.getByText('所选日期的报告尚未生成')).toBeInTheDocument();
+});
+
+it('clears previous timeline details while loading another date and starts its nodes collapsed', async () => {
+ mocks.overview.mockResolvedValue({ data: { ...data, runs: [{ ...data.runs[0], summary: '此前日期的详细报告' }] } });
+ render(<MemoryRouter initialEntries={['/suites/host-security-monitor/report']}><SecurityMonitor /></MemoryRouter>);
+ fireEvent.click(await screen.findByRole('button', { name: /第 1 轮/ }));
+ expect(screen.getByText('此前日期的详细报告')).toBeInTheDocument();
+ let finish!: (value: unknown) => void;
+ mocks.overview.mockImplementation(() => new Promise(resolve => { finish = resolve; }));
+ fireEvent.change(screen.getByLabelText('报告日期'), { target: { value: '2026-09-20' } });
+ expect(screen.queryByText('此前日期的详细报告')).not.toBeInTheDocument();
+ expect(screen.queryByRole('list', { name: '执行轮次时间线' })).not.toBeInTheDocument();
+ expect(screen.getByRole('button', { name: '下载 Markdown' })).toBeDisabled();
+ await act(async () => finish({ data: { ...data, businessDate: '2026-09-20', runs: [{ ...data.runs[0], summary: '当前日期的详细报告' }] } }));
+ expect(await screen.findByRole('button', { name: /第 1 轮/ })).toHaveAttribute('aria-expanded', 'false');
+ expect(screen.queryByText('当前日期的详细报告')).not.toBeInTheDocument();
+ fireEvent.click(screen.getByRole('button', { name: /第 1 轮/ }));
+ expect(screen.getByText('当前日期的详细报告')).toBeInTheDocument();
 });

@@ -192,9 +192,13 @@ async def test_unknown_smtp_result_not_resent_after_restart(auto):
 async def test_uncertain_write_only_readback_next_round(auto):
     n = await notice(auto); msg = await reply(auto, n)
     auto.lose_write = True
-    assert (await consume(auto, interpretation(n, msg.text)))['pending'] == 1
+    failed = await consume(auto, interpretation(n, msg.text))
+    assert failed['pending'] == 1 and failed['errors']
+    assert (await rows('SELECT status FROM monitor_dispositions'))[0]['status'] == 'pending'
+    assert (await rows('SELECT state FROM monitor_mail_items'))[0]['state'] == 'pending'
     await m.recover()
-    assert (await consume(auto, interpretation(n, msg.text)))['verified'] == 1
+    recovered = await consume(auto, interpretation(n, msg.text))
+    assert recovered['verified'] == 1 and not recovered['errors']
     assert len(writes(auto)) == 1
 
 
@@ -430,9 +434,8 @@ async def test_reply_with_partial_review_keeps_other_item_readback_alive(auto, m
 
 
 @pytest.mark.parametrize('authenticated', [True, False])
-@pytest.mark.parametrize('development', [False, True])
-@pytest.mark.parametrize('agent_engine', [False, True])
-async def test_native_two_round_mail_feedback_flow(auto, actual_tool, connected_email, monkeypatch, authenticated, development, agent_engine):
+@pytest.mark.parametrize('outcome,target', [('completed', 40), ('false_positive', 60)])
+async def test_native_two_round_mail_feedback_flow(auto, actual_tool, connected_email, monkeypatch, authenticated, outcome, target):
     from email.mime.text import MIMEText
     from flocks.channel.inbound.dispatcher import InboundDispatcher
     from flocks.config.config import ChannelConfig
@@ -446,26 +449,21 @@ async def test_native_two_round_mail_feedback_flow(auto, actual_tool, connected_
     monkeypatch.setattr(connected_email, '_authenticate_smtp', lambda _: None)
     auto.send = AsyncMock(wraps=send_through_email_channel)
     monkeypatch.setattr(m.transport, 'send', auto.send)
-    if development:
-        await development_mode(auto)
-        auto.raw.update(dealStatus=40, gptResult=170, hostIp='192.0.2.1')
-        auto.responses['ip'] = {'data': {'item': None}}
-    if agent_engine:
-        from flocks.monitoring import investigation, capabilities
-        from flocks.task.store import TaskStore
-        auto.policy.investigation_engine = 'agent-v1'
-        auto.policy.timeout_seconds = 1200
-        auto.scheduler.context['monitoring'] = auto.policy.model_dump()
-        await TaskStore.update_scheduler(auto.scheduler)
-        await write('UPDATE monitor_installations SET policy=? WHERE owner=?', (encode(auto.policy.model_dump()), 'owner'))
-        catalog = [capabilities.Capability('cap-1', 'device', auto.policy.tool, 'xdr', 'Synthetic XDR', 'unknown')]
-        monkeypatch.setattr(capabilities, 'discover', AsyncMock(return_value=(catalog, [])))
-        monkeypatch.setattr(investigation.Agent, 'list', AsyncMock(return_value=[]))
-        async def choose(agent, data):
-            if not data['evidence']:
-                return investigation.Choice(action='query', capability='cap-1', entity='host', reason='核对事件关联主机')
-            return investigation.Choice(action='finish', verdict='unknown', evidence_ids=['evidence-1'], reason='保留主机查询事实，仍需负责人核查')
-        monkeypatch.setattr(investigation, 'choose', choose)
+    from flocks.monitoring import investigation, capabilities
+    from flocks.task.store import TaskStore
+    auto.policy.investigation_engine = 'agent-v1'
+    auto.policy.timeout_seconds = 1200
+    auto.scheduler.context['monitoring'] = auto.policy.model_dump()
+    await TaskStore.update_scheduler(auto.scheduler)
+    await write('UPDATE monitor_installations SET policy=? WHERE owner=?', (encode(auto.policy.model_dump()), 'owner'))
+    catalog = [capabilities.Capability('cap-1', 'device', auto.policy.tool, 'xdr', 'Synthetic XDR', 'unknown')]
+    monkeypatch.setattr(capabilities, 'discover', AsyncMock(return_value=(catalog, [])))
+    monkeypatch.setattr(investigation.Agent, 'list', AsyncMock(return_value=[]))
+    async def choose(agent, data):
+        if not data['evidence']:
+            return investigation.Choice(action='query', capability='cap-1', entity='host', reason='核对事件关联主机')
+        return investigation.Choice(action='finish', verdict='unknown', evidence_ids=['evidence-1'], reason='保留主机查询事实，仍需负责人核查')
+    monkeypatch.setattr(investigation, 'choose', choose)
     if not authenticated:
         connected_email._resolved.update(authservId='', requireAuthenticatedSender=False)
     await m.configure('owner', m.MailSettingsRequest(enabled=True, recipient_email='person@example.com'))
@@ -476,23 +474,21 @@ async def test_native_two_round_mail_feedback_flow(auto, actual_tool, connected_
     await tick()
     notices = await rows('SELECT * FROM monitor_mail_notices')
     assert len(notices) == 1 and notices[0]['state'] == 'sent'
-    if agent_engine:
-        assert (await rows('SELECT state FROM monitor_investigations'))[0]['state'] == 'ready'
-        assert '智能体调查参考' in notices[0]['body']
+    assert (await rows('SELECT state FROM monitor_investigations'))[0]['state'] == 'ready'
+    assert '智能体调查参考' in notices[0]['body']
     assert len(outbound) == 1 and outbound[0]['Message-ID'] == notices[0]['message_id']
     assert outbound[0]['To'] == 'person@example.com'
     assert not outbound[0]['In-Reply-To']
-    if development:
-        assert json.loads(notices[0]['event'])['assessment']['malicious'] is False
-        assert '空值（null）' in notices[0]['body']
+    assert '[开发联调]' not in notices[0]['subject']
+    assert '测试邮件' not in notices[0]['body']
     from flocks.session.message import Message, MessageRole
     messages = await Message.list_with_parts(auto.session.id)
     assert all(message.info.parentID for message in messages if message.info.role == MessageRole.ASSISTANT)
     summaries = [part for message in messages for part in message.parts if part.type == 'text' and (part.metadata or {}).get('monitoringSummary')]
     assert any('ID：event' in part.text for part in summaries)
-    assert any('本次为邮件链路测试' in part.text for part in summaries) is development
+    assert not any('本次为邮件链路测试' in part.text for part in summaries)
     assert all('重新核对事件及自动标记范围' not in part.text for part in summaries)
-    assert any(part.text.startswith('本轮完成') for part in messages[-1].parts if part.type == 'text')
+    assert any((part.metadata or {}).get('monitoringRoundEnd') and part.metadata['roundStatus'] == 'completed' for part in messages[-1].parts if part.type == 'text')
     assert not any(path.endswith('/dealstatus') for path, _ in actual_tool)
     original = MIMEText('文件已清理，复查正常。', 'plain', 'utf-8')
     original['From'] = 'person@example.com'
@@ -518,125 +514,133 @@ async def test_native_two_round_mail_feedback_flow(auto, actual_tool, connected_
     assert (await m.diagnostic_state('owner'))['sender_verification_required'] is False
     dispatcher._dispatch.assert_not_called()
     assert not any(path.endswith('/dealstatus') for path, _ in actual_tool)
-    monkeypatch.setattr(mail_interpreter, 'interpret', AsyncMock(return_value=interpretation(notices[0], msg.text)))
+    monkeypatch.setattr(mail_interpreter, 'interpret', AsyncMock(return_value=interpretation(notices[0], msg.text, outcome)))
     await tick()
     assert auto.send.await_count == 1
     assert len(outbound) == 1
     updates = [data for path, data in actual_tool if path.endswith('/dealstatus')]
     assert len(updates) == 1 and updates[0]['uuIds'] == ['event']
-    assert updates[0]['dealStatus'] == (60 if development else 40)
-    if development:
-        assert '[开发联调]' in notices[0]['subject']
-        listed = [data for path, data in actual_tool if path.endswith('/list')]
-        assert listed and all(data['dealStatus'] == [] for data in listed)
-        queries = [data for data in listed if not data.get('uuIds')]
-        assert all(data['severities'] == [2, 3, 4] and data['pageSize'] == 5 for data in queries)
+    assert updates[0]['dealStatus'] == target
+    listed = [data for path, data in actual_tool if path.endswith('/list')]
+    queries = [data for data in listed if not data.get('uuIds')]
+    assert queries and all(data['dealStatus'] == [0, 10] and data['whiteStatus'] == ['未加白', '部分加白'] for data in queries)
+    assert all(not data.get('severities') and data['pageSize'] == 100 for data in queries)
     assert (await rows('SELECT state FROM monitor_mail_replies'))[0]['state'] == 'verified'
     messages = await Message.list_with_parts(auto.session.id)
     assert all(message.info.parentID for message in messages if message.info.role == MessageRole.ASSISTANT)
-    assert any(part.text.startswith('本轮完成') for part in messages[-1].parts if part.type == 'text')
+    assert any((part.metadata or {}).get('monitoringRoundEnd') and part.metadata['roundStatus'] == 'completed' for part in messages[-1].parts if part.type == 'text')
     report = (await rows('SELECT * FROM monitor_reports'))[0]
     assert '当日告警总结' in report['summary_content'] and '执行时间线' in report['content']
-    if development:
-        await tick()
-        data = await snapshot('owner', auto.policy.scope, auto.day)
-        assert data['developmentSample'] and data['metrics']['ignored'] == 1
-        assert auto.send.await_count == 1
-        assert len([1 for path, _ in actual_tool if path.endswith('/dealstatus')]) == 1
+    await tick()
+    current = await snapshot('owner', auto.policy.scope, auto.day)
+    assert current['developmentSample'] is False
+    assert auto.send.await_count == 1
+    assert len([1 for path, _ in actual_tool if path.endswith('/dealstatus')]) == 1
 
 
-async def development_mode(auto):
-    from flocks.task.store import TaskStore
-    auto.policy.development_sample = True
-    auto.event['development_sample'] = True
-    auto.scheduler.context['monitoring'] = auto.policy.model_dump()
-    await TaskStore.update_scheduler(auto.scheduler)
-    await write('UPDATE monitor_installations SET policy=? WHERE owner=?', (encode(auto.policy.model_dump()), 'owner'))
+async def legacy_notice(auto, state='queued'):
+    """Seed a persisted pre-upgrade notification, not a current test-mode policy."""
+    await m.queue_notices(auto.policy, [auto.event], auto.session.id)
+    n = (await rows('SELECT * FROM monitor_mail_notices'))[0]
+    old_event = {**json.loads(n['event']), 'development_sample': True,
+                 'notified_end_time': auto.raw['endTime'], 'notified_status': auto.raw['dealStatus'],
+                 'notified_host': auto.raw.get('hostIp')}
+    await write('UPDATE monitor_mail_notices SET state=?,event=?,subject=? WHERE id=?',
+                (state, encode(old_event), '[开发联调] 历史邮件', n['id']))
+    return (await rows('SELECT * FROM monitor_mail_notices WHERE id=?', (n['id'],)))[0]
 
 
-@pytest.mark.parametrize('initial,expected_writes', [(0, 1), (40, 1), (60, 0)])
-async def test_sample_feedback_ignores_only_sample_and_is_idempotent(auto, initial, expected_writes):
-    await development_mode(auto)
-    auto.raw.update(dealStatus=initial, gptResult=10)
-    n = await notice(auto)
-    assert n['state'] == 'sent' and '[开发联调]' in n['subject']
-    assert all(c['deal_statuses'] == [] for c in auto.calls if c['action'] == 'list')
+@pytest.mark.parametrize('state', ['queued', 'skipped', 'sent', 'send_unknown', 'needs_review'])
+async def test_retired_sample_notices_never_send_again(auto, state):
+    n = await legacy_notice(auto, state)
+    result = await m.notify_batch(auto.policy, auto.session.id, [], Recorder(), auto.adapter)
+    saved = (await rows('SELECT * FROM monitor_mail_notices WHERE id=?', (n['id'],)))[0]
+    assert result['sent'] == 0 and not auto.send.called and not writes(auto)
+    assert saved['state'] == ('skipped' if state == 'queued' else state)
+    assert json.loads(saved['event'])['development_sample'] is True
+
+
+async def test_historical_sample_observation_never_creates_notice(auto):
+    event = {**auto.event, 'development_sample': True}
+    await m.notify_batch(auto.policy, auto.session.id, [event], Recorder(), auto.adapter)
+    assert not await rows('SELECT * FROM monitor_mail_notices')
+    assert not auto.send.called and not writes(auto)
+
+
+@pytest.mark.parametrize('state', ['queued', 'skipped', 'sent', 'send_unknown'])
+async def test_current_event_dedup_is_separate_from_retired_sample_notice(auto, state):
+    old = await legacy_notice(auto, state)
+    await m.notify_batch(auto.policy, auto.session.id, [auto.event], Recorder(), auto.adapter)
+    await m.notify_batch(auto.policy, auto.session.id, [auto.event], Recorder(), auto.adapter)
+    notices = await rows('SELECT * FROM monitor_mail_notices ORDER BY created_at,id')
+    assert len(notices) == 2 and auto.send.await_count == 1
+    legacy = next(n for n in notices if n['id'] == old['id'])
+    current = next(n for n in notices if n['id'] != old['id'])
+    assert legacy['event_key'] == 'legacy-sample:' + old['id']
+    assert legacy['state'] == ('skipped' if state == 'queued' else state)
+    assert current['event_key'] == auto.event['key'] and current['state'] == 'sent'
+    assert '[开发联调]' not in current['subject'] and not writes(auto)
+
+
+@pytest.mark.parametrize('initial', [0, 40, 60])
+async def test_historical_test_feedback_does_not_create_new_write(auto, initial):
+    auto.raw['dealStatus'] = initial
+    n = await legacy_notice(auto, 'sent')
     msg = await reply(auto, n, text='本次联调处理已完成，请标记忽略。', authenticated=False)
-    result = interpretation(n, msg.text)
-    await consume(auto, result)
-    await consume(auto, result)
-    await notice(auto)
-    assert auto.send.await_count == 1
-    assert auto.raw['dealStatus'] == 60 and len(writes(auto)) == expected_writes
-    assert (await rows('SELECT state FROM monitor_mail_replies'))[0]['state'] == 'verified'
-    if writes(auto):
-        assert '开发联调' in writes(auto)[0]['deal_comment']
+    await consume(auto, interpretation(n, msg.text))
+    await consume(auto, interpretation(n, msg.text))
+    assert not auto.send.called and not writes(auto)
+    assert auto.raw['dealStatus'] == initial
+    assert (await rows('SELECT state FROM monitor_mail_replies'))[0]['state'] == 'needs_review'
+    assert not await rows('SELECT * FROM monitor_dispositions')
 
 
-@pytest.mark.parametrize('gpt,malicious', [(170, False), (40, False), (160, False), (10, True), (20, True)])
-async def test_sample_sends_explicit_test_mail_without_inventing_maliciousness(auto, gpt, malicious):
-    await development_mode(auto)
-    auto.raw['gptResult'] = gpt
+@pytest.mark.parametrize('migrated', [False, True])
+async def test_historical_attempted_write_only_finishes_readback(auto, migrated):
     n = await notice(auto)
-    assert n['state'] == 'sent'
-    assert auto.send.await_count == 1
-    assert json.loads(n['event'])['assessment']['malicious'] is malicious
-    assert '即使无需处置或证据不足也发送' in n['body']
+    msg = await reply(auto, n)
+    auto.lose_write = True
+    assert (await consume(auto, interpretation(n, msg.text)))['pending'] == 1
+    current = (await rows('SELECT * FROM monitor_mail_notices'))[0]
+    old_event = {**json.loads(current['event']), 'development_sample': True}
+    await write('UPDATE monitor_mail_notices SET event=? WHERE id=?', (encode(old_event), n['id']))
+    if migrated:
+        await m.queue_notices(auto.policy, [auto.event], auto.session.id)
+        assert (await rows('SELECT event_key FROM monitor_mail_notices WHERE id=?', (n['id'],)))[0]['event_key'].startswith('legacy-sample:')
+    await m.recover()
+    assert (await consume(auto, interpretation(n, msg.text)))['verified'] == 1
+    assert len(writes(auto)) == 1 and auto.send.await_count == 1
+
+
+@pytest.mark.parametrize('gpt,definition,threat,sent', [
+    (170, [], None, True),  # Unknown evidence still needs the responsible person.
+    (40, ['业务行为'], 1, False),
+    (160, ['业务行为'], 1, False),
+    (10, [], 3, True),
+    (20, [], 3, True),
+])
+async def test_formal_mail_only_notifies_when_followup_needed(auto, gpt, definition, threat, sent):
+    auto.raw.update(gptResult=gpt, threatDefineName=definition)
+    if threat is not None:
+        auto.responses['file']['data']['item'] = [{'threatLevel': threat}]
+    n = await notice(auto)
+    assert n['state'] == ('sent' if sent else 'skipped')
+    assert auto.send.await_count == int(sent)
+    assert '即使无需处置或证据不足也发送' not in n['body']
     assert not writes(auto)
 
 
-async def test_sample_uses_entity_evidence_and_does_not_drain_old_backlog(auto):
-    await m.queue_notices(auto.policy, [{**auto.event, 'key': 'device:incident:old', 'id': 'old'}], auto.session.id)
-    await development_mode(auto)
-    auto.responses['file']['data']['item'] = [{'threatLevel': 3}]
-    result = await m.notify_batch(auto.policy, auto.session.id, [auto.event], Recorder(), auto.adapter)
-    assert result['sent'] == 1 and result['pending'] == 0 and auto.send.await_count == 1
-    old = (await rows("SELECT state FROM monitor_mail_notices WHERE event_key='device:incident:old'"))[0]
-    assert old['state'] == 'queued'
-
-
-async def test_sample_partial_evidence_is_explained_but_test_mail_still_sends(auto):
-    await development_mode(auto)
+async def test_partial_evidence_can_request_investigation_without_claiming_safety(auto):
     auto.raw['gptResult'] = 10
     auto.responses['file'] = {'data': {}}
     result = await m.notify_batch(auto.policy, auto.session.id, [auto.event], Recorder(), auto.adapter)
     assert result['sent'] == 1 and result['pending'] == 0 and auto.send.called
     n = (await rows('SELECT * FROM monitor_mail_notices'))[0]
-    assert n['state'] == 'sent'
     assert '证据不完整' in n['body'] and '文件：证据未取得' in n['body']
-    assert not writes(auto)
-
-
-@pytest.mark.parametrize('old_state,reason,expected', [
-    ('skipped', '本次联调未取得充分且一致的恶意证据，不发送测试邮件。旧依据', 1),
-    ('skipped', '事件已离开通知查询范围', 0),
-    ('sent', None, 0), ('send_unknown', '发件结果未知', 0), ('needs_review', '配置已变化', 0),
-])
-async def test_reopens_only_never_sent_old_development_gate(auto, old_state, reason, expected):
-    await development_mode(auto)
-    await m.queue_notices(auto.policy, [auto.event], auto.session.id)
-    n = (await rows('SELECT * FROM monitor_mail_notices'))[0]
-    await write('UPDATE monitor_mail_notices SET state=?,error=? WHERE id=?', (old_state, reason, n['id']))
-    result = await m.notify_batch(auto.policy, auto.session.id, [auto.event], Recorder(), auto.adapter)
-    assert result['sent'] == expected and auto.send.await_count == expected
-    assert (await rows('SELECT * FROM monitor_mail_notices'))[0]['id'] == n['id']
-    await m.notify_batch(auto.policy, auto.session.id, [auto.event], Recorder(), auto.adapter)
-    assert auto.send.await_count == expected and not writes(auto)
-    if not expected:
-        assert '本项目同设备、同事件编号' in result['explanations'][0]
-
-
-async def test_old_skipped_other_config_or_normal_notice_not_reopened(auto):
-    await development_mode(auto)
-    await m.queue_notices(auto.policy, [auto.event], auto.session.id)
-    await write("UPDATE monitor_mail_notices SET state='skipped',revision='old',error=?",
-                ('本次联调未取得充分且一致的恶意证据，不发送测试邮件。旧依据',))
-    await m.notify_batch(auto.policy, auto.session.id, [auto.event], Recorder(), auto.adapter)
-    assert not auto.send.called
+    assert '[开发联调]' not in n['subject'] and not writes(auto)
 
 
 async def test_proven_no_smtp_attempt_is_retryable_but_unknown_send_is_not(auto):
-    await development_mode(auto)
     auto.send.side_effect = m.transport.TransportNotReady('请先连接 Flocks 邮件通道')
     n = await notice(auto)
     assert n['state'] == 'queued' and '连接' in n['error']
@@ -646,29 +650,11 @@ async def test_proven_no_smtp_attempt_is_retryable_but_unknown_send_is_not(auto)
     assert auto.send.await_count == 2 and not writes(auto)
 
 
-async def test_empty_scope_never_sends_even_in_development(auto):
-    await development_mode(auto)
+async def test_empty_scope_never_sends(auto):
     auto.leave_scope = True
     n = await notice(auto)
     assert n['state'] == 'skipped' and n['error'] == '事件已离开通知查询范围'
     assert not auto.send.called and not writes(auto)
-
-
-@pytest.mark.parametrize('change', ['end_time', 'status', 'host', 'in_progress', 'mode'])
-async def test_sample_changed_evidence_or_unfinished_feedback_never_writes(auto, change):
-    await development_mode(auto)
-    auto.raw.update(dealStatus=40, gptResult=10)
-    n = await notice(auto)
-    msg = await reply(auto, n)
-    if change == 'end_time': auto.raw['endTime'] += 1
-    if change == 'status': auto.raw['dealStatus'] = 10
-    if change == 'host': auto.raw['hostIp'] = '192.0.2.2'
-    if change == 'mode':
-        auto.policy.development_sample = False
-        await write('UPDATE monitor_installations SET policy=? WHERE owner=?', (encode(auto.policy.model_dump()), 'owner'))
-    await consume(auto, interpretation(n, msg.text, outcome='in_progress' if change == 'in_progress' else 'completed'))
-    assert not writes(auto)
-    assert (await rows('SELECT state FROM monitor_mail_replies'))[0]['state'] == 'needs_review'
 
 
 async def test_development_feedback_cannot_escape_to_generic_agent(auto, monkeypatch):
@@ -781,3 +767,116 @@ async def test_unparsed_message_is_recorded_without_blocking_other_mail(auto, mo
     assert (await m.diagnostic_state('owner'))['unparsed_messages'] == 2
     assert plugin._fetch_new_messages() == []
     assert len(await rows('SELECT * FROM monitor_mail_unparsed')) == 2
+
+
+async def test_old_benign_investigation_cannot_hide_fresh_malicious_evidence(auto):
+    auto.event['investigation'] = {'verdict': 'benign', 'state': 'ready', 'reason': '之前实体为安全', 'evidence_ids': []}
+    auto.raw['gptResult'] = 10
+    auto.responses['file']['data']['item'] = [{'threatLevel': 3}]
+    n = await notice(auto)
+    assert n['state'] == 'sent' and auto.send.await_count == 1
+    assert json.loads(n['event'])['assessment']['malicious'] is True
+    assert not writes(auto)
+
+
+async def test_mail_history_filters_sent_before_pagination_and_uses_actual_send_time(auto):
+    states = ['sent', 'queued', 'sent', 'skipped', 'send_unknown', 'sent']
+    sent_ids = []
+    for index, state in enumerate(states):
+        event = {**auto.event, 'key': f'device:incident:event-{index}', 'id': f'event-{index}'}
+        await m.queue_notices(auto.policy, [event], auto.session.id)
+        n = (await rows('SELECT * FROM monitor_mail_notices WHERE event_key=?', (event['key'],)))[0]
+        stamp = f'2026-09-25T{index:02d}:00:00+00:00'
+        await write('UPDATE monitor_mail_notices SET state=?,created_at=?,updated_at=?,sent_at=? WHERE id=?',
+                    (state, '2026-09-24T00:00:00+00:00', stamp, stamp if state == 'sent' else None, n['id']))
+        if state == 'sent': sent_ids.append(n['id'])
+    first = await m.history('owner', limit=2, tab='sent')
+    second = await m.history('owner', limit=2, offset=2, tab='sent')
+    assert [n['id'] for n in first['notices']] == sent_ids[::-1][:2]
+    assert [n['id'] for n in second['notices']] == sent_ids[::-1][2:]
+    assert first['has_more'] is True and second['has_more'] is False
+    assert first['notices'][0]['sent_at'] == '2026-09-25T05:00:00+00:00'
+    assert first['replies'] == second['replies'] == []
+    assert first['counts']['sent'] == 3
+    assert not auto.send.called and not writes(auto)
+
+
+async def test_mail_reply_history_keeps_unmatched_feedback_and_does_not_mix_sent_pagination(auto):
+    n = await notice(auto)
+    for index in range(3):
+        await reply(auto, n, text='处理结果待核对', headers=False, message_id=f'<history-{index}@example.com>')
+        await write('UPDATE monitor_mail_replies SET received_at=? WHERE message_id=?',
+                    (f'2026-09-25T0{index}:00:00+00:00', f'<history-{index}@example.com>'))
+    first = await m.history('owner', limit=2, tab='received')
+    second = await m.history('owner', limit=2, offset=2, tab='received')
+    assert [r['message_id'] for r in first['replies']] == ['<history-2@example.com>', '<history-1@example.com>']
+    assert [r['message_id'] for r in second['replies']] == ['<history-0@example.com>']
+    assert all(r['targets'] == [] and r['state'] == 'pending' for r in first['replies'])
+    assert first['has_more'] is True and second['has_more'] is False
+    assert first['notices'] == second['notices'] == []
+    # A full final page is not evidence of another page.
+    assert (await m.history('owner', limit=3, tab='received'))['has_more'] is False
+    assert (await m.history('owner', limit=1, tab='sent'))['has_more'] is False
+
+
+@pytest.mark.parametrize('failure', ['truncated', 'tools', 'abnormal_stop', 'empty', 'invalid_json', 'invalid_schema'])
+async def test_reply_model_contract_failure_is_retryable_service_error(auto, monkeypatch, failure):
+    from flocks.config.config import Config
+    from flocks.provider.provider import Provider
+    n = await notice(auto)
+    msg = await reply(auto, n)
+    response = SimpleNamespace(content=json.dumps(interpretation(n, msg.text)), finish_reason='stop', tool_calls=[])
+    if failure == 'truncated': response.finish_reason = 'length'
+    if failure == 'tools': response.tool_calls = [{'name': 'not_allowed'}]
+    if failure == 'abnormal_stop': response.finish_reason = 'content_filter'
+    if failure == 'empty': response.content = None
+    if failure == 'invalid_json': response.content = '{invalid'
+    if failure == 'invalid_schema': response.content = '{"classification":"feedback","items":[{"unexpected":"field"}]}'
+    chat = AsyncMock(return_value=response)
+    monkeypatch.setattr(Config, 'resolve_default_llm', AsyncMock(return_value={'provider_id': 'fixture', 'model_id': 'fixture'}))
+    monkeypatch.setattr(Provider, 'apply_config', AsyncMock())
+    monkeypatch.setattr(Provider, 'get', lambda *_: SimpleNamespace(chat=chat))
+    async def process():
+        with unattended_scope(), monitoring_read_scope(auto.policy.tool, auto.policy.devices):
+            return await m.process_replies(auto.policy, auto.session.id, await m.cutoff('owner', auto.policy.project), Recorder(), auto.adapter)
+    failed = await process()
+    assert failed['errors'] and failed['pending'] == 1
+    assert (await rows('SELECT state FROM monitor_mail_replies'))[0]['state'] == 'pending'
+    assert not writes(auto) and not await rows('SELECT * FROM monitor_mail_items')
+    response.content = json.dumps(interpretation(n, msg.text))
+    response.finish_reason, response.tool_calls = 'completed', []
+    recovered = await process()
+    assert recovered['verified'] == 1 and not recovered['errors']
+    assert len(writes(auto)) == 1
+
+
+async def test_ambiguous_feedback_is_human_review_not_service_failure(auto):
+    n = await notice(auto)
+    msg = await reply(auto, n, '目前情况还不确定。')
+    result = await consume(auto, interpretation(n, msg.text, 'unknown'))
+    assert not result['errors'] and result['pending'] == 1
+    assert (await rows('SELECT state FROM monitor_mail_replies'))[0]['state'] == 'needs_review'
+    assert not writes(auto)
+
+
+async def test_reply_body_budget_remains_business_review_before_model_call(auto, monkeypatch):
+    from flocks.monitoring import mail_interpreter
+    provider = AsyncMock()
+    monkeypatch.setattr(mail_interpreter.Config, 'resolve_default_llm', provider)
+    with pytest.raises(ValueError, match='超过解读预算'):
+        await mail_interpreter.interpret({'text': 'x' * 20001}, [])
+    provider.assert_not_called()
+
+
+async def test_daily_sent_count_uses_delivery_date_not_later_record_update(auto):
+    n = await notice(auto)
+    await write('UPDATE monitor_mail_notices SET sent_at=?,updated_at=? WHERE id=?',
+                ('2026-09-24T12:00:00+00:00', '2026-09-25T12:00:00+00:00', n['id']))
+    previous = await snapshot('owner', auto.policy.scope, '2026-09-24')
+    current = await snapshot('owner', auto.policy.scope, '2026-09-25')
+    assert previous['mail']['sentToday'] == 1
+    assert current['mail']['sentToday'] == 0
+    # Pre-upgrade notices retain a documented fallback until a real sent_at exists.
+    await write('UPDATE monitor_mail_notices SET sent_at=NULL WHERE id=?', (n['id'],))
+    legacy = await snapshot('owner', auto.policy.scope, '2026-09-25')
+    assert legacy['mail']['sentToday'] == 1

@@ -19,8 +19,12 @@ OWNER = SimpleNamespace(id='owner')
 
 
 async def install_unready(monkeypatch):
+    from flocks.monitoring import capabilities
     discovery = AsyncMock(return_value=([], None, '未配置 XDR'))
     monkeypatch.setattr(lifecycle, 'discover', discovery)
+    # Controls use synthetic devices; capability discovery has its own real
+    # registry integration tests and must not depend on earlier test order.
+    monkeypatch.setattr(capabilities, 'discover', AsyncMock(return_value=([], [])))
     await installer.install_plugin('component', COMPONENT_ID)
     entry = (await rows('SELECT * FROM monitor_installations'))[0]
     return discovery, entry
@@ -141,16 +145,38 @@ async def test_controls_are_owner_scoped_and_cannot_enable_a_disabled_scene(monk
     assert error.value.status_code == 409 and '场景已停用' in error.value.detail
 
 
-async def test_engine_switch_requires_pause_preserves_records_and_updates_both_policies(monkeypatch):
+async def test_only_agent_engine_is_supported_and_legacy_policy_migrates_atomically(monkeypatch):
+    from pydantic import ValidationError
+    from flocks.monitoring.models import MonitoringPolicy
+    from flocks.monitoring.store import write, encode
     discovery, entry = await install_unready(monkeypatch)
+    old = json.loads(entry['policy'])
+    old.update(investigation_engine='rules', development_sample=True, timeout_seconds=480)
+    await write('UPDATE monitor_installations SET policy=? WHERE owner=?', (encode(old), OWNER.id))
+    scheduler = await TaskStore.get_scheduler(entry['scheduler_id'])
+    scheduler.context['monitoring'] = old
+    await TaskStore.update_scheduler(scheduler)
+    await lifecycle.reconcile()
+    migrated = (await rows('SELECT * FROM monitor_installations'))[0]
+    saved_policy = json.loads(migrated['policy'])
+    assert saved_policy['investigation_engine'] == 'agent-v1'
+    assert saved_policy['development_sample'] is False
+    assert saved_policy['timeout_seconds'] == 1200
+    assert (await TaskStore.get_scheduler(scheduler.id)).context['monitoring'] == saved_policy
+    assert MonitoringPolicy.model_validate(old).model_dump() == saved_policy
+    assert migrated['project'] == entry['project'] and not migrated['ready']
+    with pytest.raises(ValidationError):
+        api.InvestigationEngineRequest(engine='rules')
+    with pytest.raises(ValueError, match='仅支持智能体调查'):
+        await lifecycle.set_investigation_engine(OWNER.id, 'rules')
     discovery.return_value = (['configured-xdr'], 'sangfor_xdr_incidents', None)
     await api.start(user=OWNER)
     with pytest.raises(HTTPException) as error:
-        await api.investigation_engine(api.InvestigationEngineRequest(engine='rules'), user=OWNER)
+        await api.investigation_engine(api.InvestigationEngineRequest(engine='agent-v1'), user=OWNER)
     assert error.value.status_code == 409
     await api.pause(user=OWNER)
-    reply = await api.investigation_engine(api.InvestigationEngineRequest(engine='rules'), user=OWNER)
-    assert reply['investigationEngine'] == 'rules' and reply['roundTimeoutSeconds'] == 480
+    reply = await api.investigation_engine(api.InvestigationEngineRequest(engine='agent-v1'), user=OWNER)
+    assert reply['investigationEngine'] == 'agent-v1' and reply['roundTimeoutSeconds'] == 1200
     installation = (await rows('SELECT * FROM monitor_installations'))[0]
     scheduler = await TaskStore.get_scheduler(entry['scheduler_id'])
     assert scheduler.context['monitoring'] == json.loads(installation['policy'])

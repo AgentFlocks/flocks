@@ -1,8 +1,8 @@
 """Selection plumbing only: synthetic flags are NOT an XDR field contract.
 
-Production runtime does not select statuses until the appliance's whitelist
-field/enum is verified. These tests isolate completeness/counting from that
-missing external contract, without connecting to a device or shared storage.
+Production queries send verified XDR status and whitelist filters to the device.
+These tests inject synthetic local selection to isolate completeness/counting,
+without connecting to a device or shared storage.
 """
 import json
 from types import SimpleNamespace
@@ -158,6 +158,13 @@ async def test_injected_selection_persists_only_matches_and_keeps_cursor_atomic(
     async def selected(*args):
         return await original(*args, selection=RULE)
     monkeypatch.setattr(runtime, 'query_device', selected)
+    # Investigation is a separate bounded contract. This test preserves the
+    # real query transaction and injects only its model-driven continuation.
+    async def investigate(policy, event, recorder, budget):
+        await Adapter(policy, recorder.session_id).call(event['device'],
+            {'action': 'get_entities', 'uuid': event['id'], 'entity_type': 'host'}, 'fixture')
+        event['investigation'] = {'state': 'ready', 'verdict': 'unknown', 'reason': 'Synthetic read complete'}
+    monkeypatch.setattr('flocks.monitoring.investigation.investigate', investigate)
     calls = []
     class Adapter:
         def __init__(self, policy, session):

@@ -47,8 +47,9 @@ async def test_full_installed_path_no_direct_ready_or_result_seeding(monkeypatch
         calls.append(action)
         assert action in {'list', 'get_entities'}
         if action == 'list':
-            assert kwargs['deal_statuses'] == [] and kwargs['api_params']['severities'] == [2, 3, 4]
-            return ToolResult(success=True, output={'code': 0, 'data': {'list': [{'uuId': 'fixture-event', 'incidentSeverity': 2, 'name': '隔离测试数据'}], 'total': 1}})
+            assert kwargs['deal_statuses'] == [0, 10] and kwargs['white_status'] == ['未加白', '部分加白']
+            assert not kwargs.get('api_params', {}).get('severities')
+            return ToolResult(success=True, output={'code': 0, 'data': {'list': [{'uuId': 'fixture-event', 'incidentSeverity': 2, 'name': '隔离测试数据', 'dealStatus': 0, 'whiteStatus': '未加白'}], 'total': 1}})
         return ToolResult(success=True, output={'code': 0, 'data': {'list': []}})
     parameters = [ToolParameter(name=k, type=ParameterType.STRING if k in {'action','uuid','entity_type'} else ParameterType.INTEGER, required=k == 'action')
                   for k in ('action','start_time','end_time','page_num','page_size','uuid','entity_type')]

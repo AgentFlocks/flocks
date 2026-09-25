@@ -2,11 +2,25 @@ import client from './client';
 
 export const MONITOR_PATH = '/suites/host-security-monitor';
 export const MONITOR_API = '/api/monitoring/host-security-monitor';
-export interface MonitorStep { id: string; tool: string; status: string; }
+export interface MonitorStep {
+  id: string; tool: string; status: string;
+  input?: unknown; output?: unknown; error?: string | null;
+  started_at?: string; finished_at?: string | null;
+}
+export interface MonitorRunResult {
+  events?: number; risk?: number; unknown?: number; analyzed?: number; deferred?: number;
+  errors?: string[];
+  mail?: {
+    enabled?: boolean;
+    notification?: { sent?: number; pending?: number; errors?: string[] };
+    feedback?: { processed?: number; verified?: number; pending?: number; errors?: string[] };
+  };
+}
 export interface MonitorRun {
   id: string; execution_id: string; session_id: string; message_id: string;
   started_at: string; scheduled_for: string | null; finished_at: string | null;
-  status: string; error: string | null; steps: MonitorStep[];
+  status: string; error: string | null; summary?: string; next_step?: string;
+  result?: MonitorRunResult; steps: MonitorStep[];
 }
 export interface MonitorEvent {
   key: string; name: string; device: string; host: string; risk: string; reason: string;
@@ -36,12 +50,12 @@ export interface MailHistory {
   sender_verification_required?: boolean;
   settings: { enabled: boolean; recipient_email: string; responsible_name: string };
   counts: Record<string, number>; reply_counts: Record<string, number>; has_more: boolean;
-  notices: { id: string; recipient: string; state: string; subject: string; body: string; error: string | null; created_at: string; event: { id: string; name: string; host: string }; items: { id: string; reply_id: string; reply_excerpt?: string; target: number; state: string; reason: string; error: string | null }[] }[];
+  notices: { id: string; recipient: string; state: string; subject: string; body: string; error: string | null; created_at: string; sent_at?: string; event: { id: string; name: string; host: string }; items: { id: string; reply_id: string; reply_excerpt?: string; target: number; state: string; reason: string; error: string | null }[] }[];
   replies: { id: string; sender: string; state: string; error: string | null; received_at: string; targets?: { event_id: string; name: string; state: string; target: number }[]; payload: { subject: string; text: string; authenticated_sender?: boolean; sender_verification_bypassed?: boolean }; result: { items?: { notice_id: string; outcome: string; evidence: string; reason: string }[] } | null }[];
 }
 export const monitoringApi = {
-  setInvestigationEngine: (engine: 'rules' | 'agent-v1') => client.put<MonitorSnapshot>(`${MONITOR_API}/investigation-engine`, { engine }),
-  mail: (offset = 0) => client.get<MailHistory>(`${MONITOR_API}/mail`, { params: { offset } }),
+  setInvestigationEngine: (engine: 'agent-v1') => client.put<MonitorSnapshot>(`${MONITOR_API}/investigation-engine`, { engine }),
+  mail: (offset = 0, tab?: 'sent' | 'received') => client.get<MailHistory>(`${MONITOR_API}/mail`, { params: { offset, tab } }),
   saveMail: (body: { enabled: boolean; recipient_email: string; responsible_name: string }) => client.put<MonitorSnapshot>(`${MONITOR_API}/mail/settings`, body),
   setAutomaticStatus: (enabled: boolean) => client.put<MonitorSnapshot>(`${MONITOR_API}/automatic-status`, { enabled }),
   confirmDisposition: (body: { request_id: string; event_key: string; comment: string; confirmed: true }) => client.post<MonitorDisposition>(`${MONITOR_API}/dispositions`, body),

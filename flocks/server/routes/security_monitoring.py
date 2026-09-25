@@ -95,9 +95,9 @@ from flocks.monitoring.mailflow import MailSettingsRequest
 
 
 @router.get('/mail')
-async def mail_history(offset: int = Query(default=0, ge=0), user=Depends(require_user)):
+async def mail_history(offset: int = Query(default=0, ge=0), tab: Literal['sent', 'received'] | None = None, user=Depends(require_user)):
     from flocks.monitoring.mailflow import history
-    return await history(user.id, offset=offset)
+    return await history(user.id, offset=offset, tab=tab)
 
 
 @router.put('/mail/settings')
@@ -132,7 +132,7 @@ async def pause(user=Depends(require_user)):
 
 
 class InvestigationEngineRequest(BaseModel):
-    engine: Literal['rules', 'agent-v1']
+    engine: Literal['agent-v1']
 
 
 @router.put('/investigation-engine')

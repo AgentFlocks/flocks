@@ -6,7 +6,7 @@
   "nameCn": "安全运营监测",
   "description": "Model-directed monitoring investigation with persistent evidence, bounded serial scheduling and verified mail follow-up.",
   "descriptionCn": "套件内置可安装的监测运营智能体；按证据查询关联，串行调度、邮件协同与回查由主程序保障。",
-  "version": "1.5.0",
+  "version": "1.6.0",
   "author": "Flocks Team",
   "license": "MIT",
   "homepage": "",
@@ -82,7 +82,8 @@
     "monitor.automatic-status.v1",
     "monitor.mail-feedback.v1",
     "monitor.investigation.v1",
-    "monitor.agent-component.v1"
+    "monitor.agent-component.v1",
+    "monitor.production-investigation.v1"
   ],
   "edition": "oss"
 }

@@ -1,5 +1,5 @@
 """Deterministic, bounded plain-text step summaries from already queried facts."""
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import unicodedata
 
 MAX_DETAILS = 48_000
@@ -11,6 +11,35 @@ STATUS_LABELS = {0: '待处置', 10: '处置中', 30: '已防护', 40: '处置�
 class Summary:
     text: str
     details: str = ''
+    success: bool = True
+    sections: list[dict[str, str]] = field(default_factory=list)
+
+
+def step_purpose(name, params):
+    """Explain the actual requested operation, never invent model reasoning."""
+    event = f"事件 {label(params['event'], limit=100)}：" if params.get('event') else ''
+    if name == '查询 XDR 事件':
+        return f"查询第 {label(params.get('page_num'), '1')} 页待处置、处置中且未加白或部分加白的事件，核对分页完整性与重复记录。"
+    if name == '确认数据源与协作能力':
+        return event + '检查本项目已接入且允许使用的查询工具、设备和安全协作智能体。'
+    if name in ('监测运营智能体：选择下一步', '协作智能体分析'):
+        return event + '根据已取得的证据选择补查、协作或总结；建议须经程序核验后才执行。'
+    if name.startswith('调查取证：'):
+        kind = ENTITY_LABELS.get(params.get('entity'), {'proof': '举证', 'related': '跨设备关联'}.get(params.get('entity'), '关联'))
+        return event + f"通过 {label(params.get('tool'))} 查询{kind}证据，并保存来源、时间及完整性。"
+    if name == '智能体调查结果':
+        return event + '汇总已经查询到的事实、调查结论和未解决的问题。'
+    if name == '关联分析':
+        return '整理本轮事件的设备与主机关联，分别统计已完成调查、待办和初筛结果。'
+    if name == '发送告警通知':
+        return event + '将这一条事件及核对依据发给配置的责任人，并记录本次投递结果。'
+    if name == '解读回信并跟进状态':
+        return '读取此前保存的责任人回信，定位原通知和事件，按实际反馈核对状态；含糊内容留待人工确认。'
+    if name == '按责任人回信标记 XDR 状态':
+        return event + '按已核验的反馈写入目标状态，随后重新查询确认。'
+    if name == '回查事件当前状态':
+        return event + '按原事件编号重新查询 XDR，核对实际状态是否与反馈目标一致。'
+    return event + name + '；结果以下方实际返回的事实为准。'
 
 
 def label(value, fallback='未提供', limit=160):
@@ -59,7 +88,11 @@ def page_summary(page, items, cumulative, complete, *, selection=None, received=
         text += '分页尚未结束，暂不保存本批事件和上次查询进度。'
     lines = (f"{i}. {event_label(event)}；类型：{incident_type(event)}；主机：{label(event.get('hostIp'), '未提供', 100)}。"
              for i, event in enumerate(items, 1))
-    return Summary(text, detail_lines(lines, len(items)))
+    return Summary(text, detail_lines(lines, len(items)), sections=[
+        {'label': '本步目的', 'text': '获取符合查询条件的事件，并检查本页与已读页面是否重复。'},
+        {'label': '实际发现', 'text': text},
+        {'label': '下一步', 'text': '本批查询完整，可以保存事件及查询进度，进入调查。' if complete else '继续查询下一页；本批尚不提交事件或推进查询进度。'},
+    ])
 
 
 def hosts_summary(event, hosts):
@@ -78,11 +111,12 @@ def analysis_summary(result, events, groups):
     related = [keys for keys in groups.values() if len(keys) > 1]
     if not events and result['errors']:
         return Summary('关联分析已跳过：事件查询未完整成功，没有可分析的完整事件批次。不能将此次失败理解为查询到 0 条事件。此前收到的回信是否完成跟进，以本轮回信及回查记录为准。')
-    text = f"关联分析完成：分析 {len(events)} 条事件，形成 {len(related)} 个同设备、同主机关联组，涉及 {sum(map(len, related))} 条事件；{result['risk']} 条风险，{result['unknown']} 条待判定。"
+    text = f"关联结果已整理：读取 {len(events)} 条事件，形成 {len(related)} 个同设备、同主机关联组，涉及 {sum(map(len, related))} 条事件；按等级初筛风险 {result['risk']} 条、待判定 {result['unknown']} 条。"
+    text += f"智能体已完成调查 {result.get('analyzed', 0)} 条。"
     if result['errors']:
-        text += f"有 {len(result['errors'])} 项查询或主机补查错误，结果不完整。"
+        text += f"有 {len(result['errors'])} 项查询或调查未完成，结果不完整；请查看对应失败步骤。"
     if len(events) == 1:
-        text += '本轮只有一条样本，因此没有多事件关联组；这不表示没有关联主机。'
+        text += '本轮只有一条事件，因此没有多事件关联组；这不表示没有关联主机。'
     text += '这里按事件等级做初筛，不等于已经确认恶意；是否需要处置还须结合具体实体证据核对。状态标记与闭环结果以回查事实为准。'
     by_key = {event['key']: event for event in events}
     lines = (f"{i}. 主机：{label(by_key[keys[0]].get('host'), limit=100)}；关联事件：" + '；'.join(event_label(by_key[key]) for key in keys[:20]) + (f'；另 {len(keys)-20} 条事件见上方各页查询明细' if len(keys) > 20 else '') + '。'
@@ -144,7 +178,14 @@ def operation_summary(event, params, value):
 
 
 def round_summary(status, result, observed, feedback, notification, enabled, development):
-    text = f"本轮{ {'completed': '完成', 'partial': '部分完成', 'failed': '失败'}[status]}：读取 {len(observed)} 条事件，初筛风险 {result['risk']} 条，待判定 {result['unknown']} 条。"
+    text = f"本轮{ {'completed': '完成', 'failed': '失败'}[status]}：读取 {len(observed)} 条事件，初筛风险 {result['risk']} 条，待判定 {result['unknown']} 条。"
+    if status == 'completed':
+        text += '本轮执行已结束；告警是否需要跟进、是否已闭环分别记录。'
+    text += f"已完成调查 {result.get('analyzed', 0)} 条。"
+    if result.get('deferred'):
+        text += f"另有 {result['deferred']} 条已保存待后续轮次调查。"
+    if result['errors'] and observed:
+        text += '\n待跟进事项：' + '；'.join(result['errors']) + '。已有证据和待办保留，不据此判定无风险。'
     if not observed:
         text += ('查询未完整成功，不能据此说没有告警；请检查失败步骤后重试。' if result['errors'] else
                  '当前时间范围和筛选条件下没有可分析事件，因此未生成新的告警通知；后续轮次继续查询。')
@@ -165,7 +206,7 @@ def round_summary(status, result, observed, feedback, notification, enabled, dev
         elif observed:
             text += '\n未新增邮件不等于没有风险；请按上方通知判断查看去重或未发送原因。'
     else:
-        text += '\n邮件跟进未启用，本轮只做查询和分析，没有发信或修改状态。需要联调时先配置责任人邮箱并启用邮件跟进。'
+        text += '\n邮件跟进未启用，本轮只做查询和分析，没有发信或修改状态。需要邮件协同时，请配置责任人邮箱并启用邮件跟进。'
     if development:
         text += '\n本轮仅统计随机样本，不代表全部告警；测试标记忽略不代表威胁已消除。'
     return text

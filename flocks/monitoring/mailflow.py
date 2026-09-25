@@ -195,23 +195,25 @@ async def queue_notices(policy, observed, session_id):
     stamp = d.stamp()
     async with connection() as db:
         for event in observed:
+            if event.get('development_sample') is True:
+                continue  # Retained historical samples cannot issue new mail.
+            await db.execute("UPDATE monitor_mail_notices SET event_key='legacy-sample:' || id, "
+                             "state=CASE WHEN state='queued' THEN 'skipped' ELSE state END, "
+                             "error=CASE WHEN state='queued' THEN '已退出联调，历史测试通知不再发送' ELSE error END "
+                             "WHERE owner=? AND project=? AND event_key=? AND json_extract(event,'$.development_sample')=1",
+                             (policy.owner, policy.project, event['key']))
             nid = str(uuid4())
-            await db.execute('INSERT OR IGNORE INTO monitor_mail_notices VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+            await db.execute('INSERT OR IGNORE INTO monitor_mail_notices(id,owner,scope,project,event_key,recipient,revision,mailbox,message_id,subject,body,event,state,error,session_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
                              (nid, policy.owner, policy.scope, policy.project, event['key'], config['recipient'], config['revision'], config['mailbox'],
                               f'<flocks-monitor-{nid}@flocks.local>', '', '', encode(event), 'queued', None, session_id, stamp, stamp))
-            # Old development gates never attempted SMTP. Re-open only the
-            # currently selected sample, with the same configuration/identity.
-            if sampling.enabled(policy) and event.get('development_sample') is True:
-                await db.execute("UPDATE monitor_mail_notices SET state='queued',error=NULL,event=?,updated_at=? "
-                                 "WHERE owner=? AND project=? AND event_key=? AND revision=? AND state='skipped' "
-                                 "AND subject='' AND body='' AND error LIKE '本次联调未取得充分且一致的恶意证据，不发送测试邮件。%' "
-                                 "AND json_extract(event,'$.development_sample')=1",
-                                 (encode(event), stamp, policy.owner, policy.project, event['key'], config['revision']))
 
 
 async def notify_one(policy, notice, session_id, adapter_factory=MailAdapter):
     config = await authorized(policy, notice['revision'])
     event = json.loads(notice['event'])
+    if event.get('development_sample') is True:
+        await write("UPDATE monitor_mail_notices SET state='skipped',error='已退出联调，历史测试通知不再发送',updated_at=? WHERE id=? AND state='queued'", (d.stamp(), notice['id']))
+        return 'skipped'
     if event['device'] not in policy.devices:
         raise ContractError('事件设备不在当前项目中')
     adapter = adapter_factory(policy, session_id, notice['revision'])
@@ -231,7 +233,7 @@ async def notify_one(policy, notice, session_id, adapter_factory=MailAdapter):
             failure_reasons[kind] = '实体查询超时，未取得可用结果'
     decision = select_status(raw, responses, failures=failures)
     decision.evidence['failedReasons'].update(failure_reasons)
-    development = sampling.enabled(policy) and event.get('development_sample') is True
+    development = False
     malicious = malicious_evidence(decision)
     diag.event('mail.analyzed', notice=diag.opaque(notice['id']), development_sample=development,
                malicious=malicious, errors=len(decision.evidence['failedQueries']))
@@ -248,6 +250,13 @@ async def notify_one(policy, notice, session_id, adapter_factory=MailAdapter):
             return None, {'malicious': malicious, 'failed_entities': decision.evidence['failedQueries'],
                           'development_sample': development, 'writes': 0}, assessment
         await recorder.call('说明分析结论与发信原因', {'event': event['id']}, explain)
+    # Recheck current XDR evidence: an older model opinion must not hide a new
+    # malicious finding or incomplete query returned immediately before sending.
+    if decision.target in (40, 60):
+        reason = '分析未发现需要责任人继续处置的事项；不发送通知，不自动修改 XDR 状态。' + assessment.text
+        await write("UPDATE monitor_mail_notices SET state='skipped',event=?,error=?,updated_at=? WHERE id=? AND state='queued'",
+                    (encode(event), reason, d.stamp(), notice['id']))
+        return 'skipped'
     event['notified_end_time'] = raw.get('endTime')
     advice = assessment.text + '\n' + assessment.details
     if event.get('investigation'):
@@ -265,12 +274,6 @@ async def notify_one(policy, notice, session_id, adapter_factory=MailAdapter):
             "请核查并处理这条告警。完成后用自己的话说明处理结果和措施；可以回复本邮件，也可以新写邮件提供上述事件编号。\n"
             "Flocks 会在下一轮监测中读取反馈，核对后标记事件状态并回查。\n"
             f"通知编号：{notice['id']}")
-    if development:
-        subject = '[开发联调] 邮件链路测试 · ' + subject
-        body = ('【开发联调邮件】这是随机抽取的历史事件，原状态可能已处置或已忽略。\n'
-                '本邮件用于测试发信、回信及 XDR 状态回写；即使无需处置或证据不足也发送，不表示出现了新的告警或已确认恶意。\n'
-                '请核对该事件，用自己的话回复联调处理结果。明确反馈已完成后，Flocks 将把这条事件标记为忽略并回查；'
-                '若原本已忽略，则只回查，不重复写入。状态标记不代表消除了威胁。\n\n' + body)
     async with lock(policy.owner):
         await authorized(policy, notice['revision'])
         # Commit the intent before network I/O. Unknown outcomes never auto-resend.
@@ -291,9 +294,9 @@ async def notify_one(policy, notice, session_id, adapter_factory=MailAdapter):
                 state, error = 'queued', str(exc)
             finally:
                 diag.event('mail.result', notice=diag.opaque(notice['id']), mail_state=state, failure=state!='sent', reason='unavailable' if state=='queued' else 'send_unknown' if state!='sent' else None)
-                await write('UPDATE monitor_mail_notices SET state=?,error=?,updated_at=? WHERE id=?', (state, error, d.stamp(), notice['id']))
-            return state, {'state': state, 'reason': error}, Summary(error or '邮件服务已接受这一封通知，等待责任人回信；当前没有修改 XDR 状态。')
-        state = (await recorder.call('发送联调测试邮件' if development else '发送告警通知', {'notice': notice['id'], 'event': event['id']}, send_once)
+                await write("UPDATE monitor_mail_notices SET state=?,error=?,updated_at=?,sent_at=CASE WHEN ?='sent' THEN COALESCE(sent_at,?) ELSE sent_at END WHERE id=?", (state, error, d.stamp(), state, d.stamp(), notice['id']))
+            return state, {'state': state, 'reason': error}, Summary(error or '邮件服务已接受这一封通知，等待责任人回信；当前没有修改 XDR 状态。', success=state == 'sent')
+        state = (await recorder.call('发送告警通知', {'notice': notice['id'], 'event': event['id']}, send_once)
                  if recorder else (await send_once(None))[0])
     return state
 
@@ -303,15 +306,8 @@ async def notify_batch(policy, session_id, observed, recorder, adapter_factory=M
     if not config['enabled'] or config['project'] != policy.project:
         return {'sent': 0, 'pending': 0}
     await queue_notices(policy, observed, session_id)
-    if sampling.enabled(policy):
-        # Never drain an older full-monitoring backlog as part of a one-event test.
-        sample_keys = {event['key'] for event in observed if event.get('development_sample') is True}
-        pending = await rows("SELECT * FROM monitor_mail_notices WHERE owner=? AND project=? AND state='queued' AND event_key=? LIMIT 1",
-                             (policy.owner, policy.project, next(iter(sample_keys)))) if sample_keys else []
-        pending = [n for n in pending if json.loads(n['event']).get('development_sample') is True]
-    else:
-        pending = await rows("SELECT * FROM monitor_mail_notices WHERE owner=? AND project=? AND state='queued' ORDER BY created_at LIMIT 20", (policy.owner, policy.project))
-    result = {'sent': 0, 'pending': 0, 'explanations': []}
+    pending = await rows("SELECT * FROM monitor_mail_notices WHERE owner=? AND project=? AND state='queued' ORDER BY created_at LIMIT 20", (policy.owner, policy.project))
+    result = {'sent': 0, 'pending': 0, 'explanations': [], 'errors': []}
     pending_ids = {n['id'] for n in pending}
     for event in observed[:20]:
         previous = await rows('SELECT * FROM monitor_mail_notices WHERE owner=? AND project=? AND event_key=?',
@@ -350,7 +346,10 @@ async def notify_batch(policy, session_id, observed, recorder, adapter_factory=M
             reason = current['error'] or error or ('邮件服务已接受发送，等待责任人回信；尚未修改 XDR。' if state == 'sent' else '请在邮件跟进中核对记录。')
             text = f"邮件通知：{event_label(stored_event)} · {STATE_LABELS.get(state, state)}。{reason}"
             result['explanations'].append(stored_event.get('assessment', {}).get('text', '') + '\n' + text)
-            return state, {'notice': notice['id'], 'state': state, 'reason': reason}, Summary(text, stored_event.get('assessment', {}).get('details', ''))
+            success = state not in ('pending', 'queued', 'send_unknown')
+            if not success:
+                result['errors'].append(text)
+            return state, {'notice': notice['id'], 'state': state, 'reason': reason}, Summary(text, stored_event.get('assessment', {}).get('details', ''), success=success)
         # Evidence calls finish in chronological order before the mail result.
         # All messages share this round's parent instead of becoming detached
         # assistant groups after the final round summary.
@@ -373,7 +372,7 @@ async def mark_item(policy, item, session_id, adapter_factory=MailAdapter):
         await authorized(policy, notice['revision'])
         event = json.loads(notice['event'])
         # The current observed object and device must still belong to this installation.
-        actual, _ = await d.target(policy.owner, notice['event_key'])
+        actual, _ = await d.target(policy.owner, event['key'])
         if actual != policy:
             raise ContractError('监测安装已变化')
         adapter = adapter_factory(policy, session_id, notice['revision'])
@@ -384,7 +383,7 @@ async def mark_item(policy, item, session_id, adapter_factory=MailAdapter):
             state = 'verified' if d.matches_status(item['target'], current) else 'mismatch'
             await d.finish(policy.owner, item['id'], state, current, defer_exports=True)
             return state
-        if event.get('development_sample') is True and not sampling.enabled(policy):
+        if event.get('development_sample') is True:
             raise ValueError('已退出联调模式，旧测试回信不能发起新的状态写入')
         unresolved = await rows("SELECT * FROM monitor_dispositions WHERE owner=? AND scope=? AND event_key=? AND status IN ('writing','pending','mismatch')",
                                 (policy.owner, policy.scope, notice['event_key']))
@@ -399,20 +398,14 @@ async def mark_item(policy, item, session_id, adapter_factory=MailAdapter):
             raise ValueError('通知后出现新的事件活动，需要重新核对')
         if raw.get('hostIp') != event.get('notified_host'):
             raise ValueError('通知后事件主机变化，需要重新核对')
-        development = sampling.enabled(policy) and event.get('development_sample') is True
-        test_ignore = development and item['target'] == 60 and current == event.get('notified_status')
-        if development and (item['target'] != 60 or current != event.get('notified_status') and current != 60):
-            raise ValueError('联调仅允许明确完成后标记忽略，事件状态已变化需核对')
-        if not test_ignore and (current in {40, 60} and current != item['target'] or current in {30, 70} and item['target'] == 10):
+        if current in {40, 60} and current != item['target'] or current in {30, 70} and item['target'] == 10:
             raise ValueError('迟到反馈不能覆盖已有处置结果')
         stamp = d.stamp()
         comment = f"Flocks 责任人邮件反馈：{item['reason'][:500]}（通知 {notice['id']}）"
-        if development:
-            comment = '【开发联调：状态回写测试，不代表消除威胁】' + comment
         await write('INSERT INTO monitor_dispositions(id,owner,scope,event_key,comment,status,session_id,created_at,updated_at,mode,target_status,project,decision) '
                     'VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)', (item['id'], policy.owner, policy.scope, notice['event_key'], comment, 'writing', session_id,
                      stamp, stamp, 'mail', item['target'], policy.project, encode({'notice': notice['id'], 'reply': item['reply_id'],
-                         'development_sample': development, 'observed_end_time': notified, 'observed_host': raw.get('hostIp')})))
+                         'development_sample': False, 'observed_end_time': notified, 'observed_host': raw.get('hostIp')})))
         attempted = False
         try:
             if not d.matches_status(item['target'], current):
@@ -428,8 +421,11 @@ async def mark_item(policy, item, session_id, adapter_factory=MailAdapter):
         except (Exception, asyncio.CancelledError) as exc:
             state = 'pending' if attempted else 'failed'
             await d.finish(policy.owner, item['id'], state, error='回信处置待回查' if attempted else '写入前校验未通过', defer_exports=True)
-            if isinstance(exc, asyncio.CancelledError):
+            if isinstance(exc, (asyncio.CancelledError, ValueError)):
                 raise
+            # Preserve the write intent for readback, but report this attempt's
+            # transport failure separately from ordinary feedback waiting.
+            raise ContractError('XDR 状态写入或回查未完成，已保存执行记录；后续只回查，不重复写入') from None
         return state
 
 
@@ -439,7 +435,7 @@ async def process_replies(policy, session_id, high, recorder, adapter_factory=Ma
     config = await settings(policy.owner)
     if not config['enabled'] or config['project'] != policy.project:
         return {'processed': 0, 'verified': 0, 'pending': 0}
-    result = {'processed': 0, 'verified': 0, 'pending': 0}
+    result = {'processed': 0, 'verified': 0, 'pending': 0, 'errors': []}
     async with _round_locks.setdefault(policy.owner, asyncio.Lock()):
         replies = await rows("SELECT * FROM monitor_mail_replies WHERE owner=? AND project=? AND sequence<=? AND state IN ('pending','interpreted') ORDER BY sequence LIMIT 20", (policy.owner, policy.project, high))
         deadline = monotonic()+120
@@ -447,20 +443,25 @@ async def process_replies(policy, session_id, high, recorder, adapter_factory=Ma
             if monotonic() >= deadline:
                 break
             async def perform(_):
+                success = True
                 try:
                     await asyncio.wait_for(process_reply(policy, reply, session_id, adapter_factory, interpreter, validate), max(1, deadline-monotonic()))
                 except (ContractError, TimeoutError, RuntimeError):
+                    success = False
                     await write('UPDATE monitor_mail_replies SET error=?,updated_at=? WHERE id=?', ('暂未处理完成，下一轮重试或回查', d.stamp(), reply['id']))
                 except ValueError as exc:
                     diag.event('mail.result', failure=True, reply=diag.opaque(reply['id']), mail_state='needs_review', reason='ambiguous_reply', error_type=type(exc).__name__)
                     await write("UPDATE monitor_mail_replies SET state='needs_review',error=?,updated_at=? WHERE id=?", ('解读或事件核验不明确，请人工核对', d.stamp(), reply['id']))
                 except Exception as exc:
+                    success = False
                     diag.event('mail.result', failure=True, reply=diag.opaque(reply['id']), mail_state='pending', reason='model_failed', error_type=type(exc).__name__)
                     await write('UPDATE monitor_mail_replies SET error=?,updated_at=? WHERE id=?', ('邮件处理服务暂不可用，下轮重试', d.stamp(), reply['id']))
                 data = (await rows('SELECT state,error FROM monitor_mail_replies WHERE id=?', (reply['id'],)))[0]
+                if not success:
+                    result['errors'].append('责任人回信处理失败：' + data['error'])
                 items = await rows('SELECT i.target,i.state,i.reason,n.event FROM monitor_mail_items i JOIN monitor_mail_notices n ON n.id=i.notice_id WHERE i.reply_id=?', (reply['id'],))
                 details = '\n'.join(f"{event_label(json.loads(item['event']))}；反馈依据：{label(item['reason'], limit=500)}；目标状态：{STATUS_LABELS.get(item['target'], '未知')}；结果：{STATE_LABELS.get(item['state'], item['state'])}。" for item in items[:20])
-                return data, data, Summary(f"已读取责任人回信：{STATE_LABELS.get(data['state'], data['state'])}。{data['error'] or ''}" + ('已重新查询 XDR 确认目标状态；联调忽略不表示威胁已消除。' if data['state'] == 'verified' else '未确认前保留待跟进，不把收到回信直接当作闭环。'), details)
+                return data, data, Summary(f"已读取责任人回信：{STATE_LABELS.get(data['state'], data['state'])}。{data['error'] or ''}" + ('已重新查询 XDR 确认目标状态。' if data['state'] == 'verified' else '未确认前保留待跟进，不把收到回信直接当作闭环。'), details, success=success)
             data = await recorder.call('解读回信并跟进状态', {'reply': reply['id']}, perform)
             result['processed'] += 1
             result['verified' if data['state'] == 'verified' else 'pending'] += 1
@@ -509,9 +510,7 @@ async def process_reply(policy, reply, session_id, adapter_factory, interpreter,
                 identity = str(uuid5(NAMESPACE_URL, reply['id']+notice['id']))
                 target = TARGETS[item.outcome]
                 if json.loads(notice['event']).get('development_sample') is True:
-                    if not sampling.enabled(policy) or item.outcome not in ('completed', 'false_positive'):
-                        raise ValueError('联调回信尚未明确完成，或当前已退出联调模式')
-                    target = 60  # Explicitly authorized development workflow, not a benign verdict.
+                    raise ValueError('已退出联调，旧测试回信保留人工核对，不发起状态写入')
                 await db.execute('INSERT OR IGNORE INTO monitor_mail_items VALUES(?,?,?,?,?,?,?,?,?,?,?)',
                                  (identity, reply['id'], notice['id'], policy.owner, policy.project, target,
                                   item.reason, 'pending', None, d.stamp(), d.stamp()))
@@ -534,12 +533,15 @@ async def process_reply(policy, reply, session_id, adapter_factory, interpreter,
     await write('UPDATE monitor_mail_replies SET state=?,updated_at=? WHERE id=?', (state, d.stamp(), reply['id']))
 
 
-async def history(owner, limit=100, offset=0):
+async def history(owner, limit=100, offset=0, tab=None):
     config = await settings(owner)
     project = config['project']
-    notices = await rows('SELECT * FROM monitor_mail_notices WHERE owner=? AND project=? ORDER BY created_at DESC,id DESC LIMIT ? OFFSET ?', (owner, project, limit, offset))
-    replies = await rows('SELECT * FROM monitor_mail_replies WHERE owner=? AND project=? ORDER BY sequence DESC LIMIT ? OFFSET ?', (owner, project, limit, offset))
+    notices = await rows("SELECT * FROM monitor_mail_notices WHERE owner=? AND project=? AND state='sent' ORDER BY COALESCE(sent_at,updated_at) DESC,id DESC LIMIT ? OFFSET ?", (owner, project, limit + 1, offset)) if tab != 'received' else []
+    replies = await rows('SELECT * FROM monitor_mail_replies WHERE owner=? AND project=? ORDER BY received_at DESC,sequence DESC LIMIT ? OFFSET ?', (owner, project, limit + 1, offset)) if tab != 'sent' else []
+    has_more = len(notices) > limit or len(replies) > limit
+    notices, replies = notices[:limit], replies[:limit]
     for n in notices:
+        n['sent_at'] = n['sent_at'] or n['updated_at']
         n['event'] = json.loads(n['event'])
         n['items'] = await rows('SELECT i.*,r.payload AS reply_payload FROM monitor_mail_items i JOIN monitor_mail_replies r ON r.id=i.reply_id WHERE i.notice_id=? AND i.owner=? ORDER BY i.created_at LIMIT 100', (n['id'], owner))
         for item in n['items']:
@@ -558,7 +560,7 @@ async def history(owner, limit=100, offset=0):
             'sender_verification_required': transport.REQUIRE_AUTHENTICATED_FEEDBACK,
             'unparsed_count': unparsed[0]['count'],
             'counts': {x['state']: x['count'] for x in counts}, 'reply_counts': {x['state']: x['count'] for x in reply_counts},
-            'has_more': len(replies) == limit or len(notices) == limit}
+            'has_more': has_more}
 
 
 async def diagnostic_state(owner):

@@ -20,11 +20,24 @@ from flocks.session.message import Message, MessageRole
 from flocks.project.project import Project
 
 @pytest.fixture
-async def policy(tmp_path):
+async def policy(tmp_path, monkeypatch):
     directory = tmp_path / '.flocks/workspace/monitor'
     directory.mkdir(parents=True)
     project = await Project.create(owner_id='owner', name='安全运营监测', worktree=str(directory))
-    return MonitoringPolicy(development_sample=False, owner='owner', project=project.id, directory=str(directory), devices=['xdr-1'])
+    # Exercise the real checkpointed investigator with deterministic model and
+    # device responses; no external provider or device is contacted.
+    from flocks.monitoring import capabilities as c, investigation as i
+    async def discover(policy):
+        return [c.Capability(device, device, policy.tool, 'xdr', 'Fixture XDR', 'unknown') for device in policy.devices], []
+    async def choose(agent, data):
+        if not data['evidence']:
+            return i.Choice(action='query', capability=data['event']['device'], reason='核对主机', entity='host')
+        return i.Choice(action='finish', verdict='risk', evidence_ids=['evidence-1'], reason='有主机证据，需负责人跟进')
+    monkeypatch.setattr(c, 'discover', discover)
+    monkeypatch.setattr(i.Agent, 'list', AsyncMock(return_value=[]))
+    monkeypatch.setattr(i, 'choose', choose)
+    monkeypatch.setattr(c, 'query', AsyncMock(return_value=({'data': {'item': [{'hostIp': '192.0.2.1', 'threatLevel': 3}]}}, {'action': 'get_entities'})))
+    return MonitoringPolicy(owner='owner', project=project.id, directory=str(directory), devices=['xdr-1'])
 
 async def scheduler_for(policy):
     return await TaskManager.create_scheduler(title='安全运营监测', mode=SchedulerMode.CRON,
@@ -42,23 +55,27 @@ class FixtureAdapter:
 
 
 @pytest.mark.parametrize('has_cursor', [False, True])
-async def test_development_round_caps_all_devices_and_preserves_cursor(policy, has_cursor):
-    policy = policy.model_copy(update={'development_sample': True, 'devices': ['xdr-1', 'xdr-2']})
+async def test_legacy_development_policy_queries_all_devices_with_production_filters(policy, has_cursor):
+    policy = MonitoringPolicy.model_validate({**policy.model_dump(), 'development_sample': True, 'devices': ['xdr-1', 'xdr-2']})
+    assert policy.development_sample is False
     if has_cursor:
         await write('INSERT INTO monitor_cursors VALUES(?,?,?,?)', (policy.owner, policy.scope, 'xdr-1', 123456))
-    before = await rows('SELECT * FROM monitor_cursors')
     FixtureAdapter.calls = []
     scheduler = await scheduler_for(policy)
     execution = await TaskManager.create_execution_from_scheduler(scheduler, trigger_type=ExecutionTriggerType.RUN_ONCE, enqueue=False)
     await run(execution, policy, FixtureAdapter)
-    assert await rows('SELECT * FROM monitor_cursors') == before
+    cursors = await rows('SELECT * FROM monitor_cursors')
+    assert len(cursors) == 2 and all(row['through_time'] > 123456 for row in cursors)
     observations = await rows('SELECT * FROM monitor_observations')
-    assert len(observations) == 1
-    assert json.loads(observations[0]['data'])['device'] == 'xdr-1'
+    assert len(observations) == 2
+    assert {json.loads(row['data'])['device'] for row in observations} == {'xdr-1', 'xdr-2'}
     calls = [c for c in FixtureAdapter.calls if c['action'] == 'list']
-    assert len(calls) == 1 and calls[0]['end_time'] - calls[0]['start_time'] == 86400
+    assert len(calls) == 2
+    assert calls[0]['start_time'] == (123456 - 600 if has_cursor else calls[0]['end_time'] - 86400)
+    assert all(call['deal_statuses'] == [0, 10] and call['white_status'] == ['未加白', '部分加白'] for call in calls)
+    assert all(call['page_size'] == 100 for call in calls)
     report = (await rows('SELECT * FROM monitor_reports'))[0]
-    assert '仅统计样本' in report['content'] and '联调抽样轮次' in report['summary_content']
+    assert '仅统计样本' not in report['content'] and '联调抽样轮次' not in report['summary_content']
 
 @pytest.mark.asyncio
 async def test_daily_reservation_concurrent_recovery_midnight(policy):
@@ -112,7 +129,8 @@ async def test_native_rounds_dashboard_report_idempotence(policy):
     assert data['events'][0]['closure'] == 'open'
     messages = await Message.list_with_parts(attempts[0]['session_id'])
     tools = [p for m in messages for p in m.parts if p.type == 'tool']
-    assert len(tools) == 6 and all(p.state.status == 'completed' for p in tools)
+    assert len(tools) == 10 and all(p.state.status == 'completed' for p in tools)
+    assert len(await rows("SELECT * FROM monitor_investigations WHERE state='ready'")) == 1
     await export_report(policy.owner, policy.scope, day)
     first = (await rows('SELECT * FROM monitor_reports'))[0]
     await export_report(policy.owner, policy.scope, day)
@@ -211,19 +229,17 @@ async def test_full_pagination_missing_page_does_not_advance_cursor(policy):
     assert not await rows('SELECT * FROM monitor_observations')
 
 @pytest.mark.asyncio
-async def test_empty_events_success_and_entity_failure_partial(policy):
+async def test_empty_events_complete_but_entity_failure_fails(policy, monkeypatch):
+    from flocks.monitoring import capabilities
     class Empty(FixtureAdapter):
         async def call(self, *args): return {'data': {'list': [], 'total': 0}}
-    class Partial(FixtureAdapter):
-        async def call(self, device, params, message):
-            if params['action'] == 'get_entities': raise ContractError('entity unavailable')
-            return await super().call(device, params, message)
     scheduler = await scheduler_for(policy)
-    for factory in (Empty, Partial):
+    monkeypatch.setattr(capabilities, 'query', AsyncMock(side_effect=ContractError('entity unavailable')))
+    for factory, expected in ((Empty, 'stop'), (FixtureAdapter, 'error')):
         execution = await TaskManager.create_execution_from_scheduler(scheduler, trigger_type=ExecutionTriggerType.RUN_ONCE, enqueue=False)
-        assert (await run(execution, policy, factory)).action == 'stop'
+        assert (await run(execution, policy, factory)).action == expected
     attempts = await rows('SELECT status,result FROM monitor_attempts ORDER BY sequence')
-    assert [r['status'] for r in attempts] == ['completed','partial']
+    assert [r['status'] for r in attempts] == ['completed','failed']
     assert json.loads(attempts[0]['result'])['events'] == 0
 
 @pytest.mark.asyncio
@@ -252,7 +268,7 @@ async def test_recovery_closes_running_steps_preserves_attempt(policy):
     await write("UPDATE monitor_attempts SET status='running'")
     await write("UPDATE monitor_steps SET status='running'")
     await recover()
-    assert (await rows('SELECT status FROM monitor_attempts'))[0]['status'] == 'interrupted'
+    assert (await rows('SELECT status FROM monitor_attempts'))[0]['status'] == 'failed'
     assert all(r['status'] == 'failed' for r in await rows('SELECT status FROM monitor_steps'))
     await run(execution, policy, FixtureAdapter)
     attempts = await rows('SELECT * FROM monitor_attempts ORDER BY sequence')

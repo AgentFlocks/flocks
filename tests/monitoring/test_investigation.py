@@ -29,7 +29,7 @@ async def case(tmp_path, monkeypatch):
     policy = MonitoringPolicy(owner='owner', project='project', directory=str(tmp_path), devices=['xdr'],
                               investigation_engine='agent-v1', timeout_seconds=1200)
     event = {'key': 'xdr:incident:original', 'id': 'original', 'device': 'xdr', 'name': 'Synthetic',
-             'host': '192.0.2.1', 'endTime': 100, 'dealStatus': 40, 'development_sample': True,
+             'host': '192.0.2.1', 'endTime': 100, 'dealStatus': 0, 'development_sample': False,
              'investigationWindow': {'start': 1, 'end': 101}}
     async with connection() as db:
         await i.enqueue(db, policy, event, datetime.now(timezone.utc).isoformat())
@@ -118,7 +118,7 @@ async def test_case_change_invalidates_evidence_but_project_and_mode_remain_scop
     saved = (await rows('SELECT * FROM monitor_investigations'))[0]
     assert saved['state'] == 'pending' and saved['evidence'] == '[]'
     assert not await i.pending(case.policy.model_copy(update={'project': 'other'}))
-    assert not await i.pending(case.policy.model_copy(update={'development_sample': False}))
+    assert not await i.pending(case.policy.model_copy(update={'development_sample': True}))
 
 
 async def test_pending_batch_filters_old_device_and_mode_before_limiting(case):
@@ -126,7 +126,7 @@ async def test_pending_batch_filters_old_device_and_mode_before_limiting(case):
         for index in range(25):
             event = {**case.event, 'key': f'old-{index}', 'device': 'removed-device'}
             await i.enqueue(db, case.policy, event, '2000-01-01T00:00:00+00:00')
-            event = {**case.event, 'key': f'normal-{index}', 'development_sample': False}
+            event = {**case.event, 'key': f'legacy-sample-{index}', 'development_sample': True}
             await i.enqueue(db, case.policy, event, '2000-01-01T00:00:00+00:00')
     assert [event['key'] for event in await i.pending(case.policy)] == [case.event['key']]
     assert not await i.pending(case.policy.model_copy(update={'devices': []}))
@@ -303,3 +303,61 @@ async def test_empty_lookup_cannot_establish_benign_case(case, monkeypatch):
     assert case.event['investigation']['state'] == 'ready'
     assert case.event['investigation']['verdict'] == 'unknown'
     assert '保留待判定' in case.event['investigation']['reason']
+
+
+@pytest.fixture
+async def configured_model(monkeypatch):
+    from flocks.hub.installer import install_plugin
+    await install_plugin('agent', 'security-monitor')
+    monkeypatch.setattr(i.Config, 'resolve_default_llm', AsyncMock(return_value={'provider_id': 'fixture', 'model_id': 'fixture-model'}))
+    monkeypatch.setattr(i.Provider, 'apply_config', AsyncMock())
+    response = SimpleNamespace(tool_calls=[], finish_reason='stop', content=i.Choice(action='query', capability='cap-1', reason='read original event').model_dump_json())
+    chat = AsyncMock(return_value=response)
+    monkeypatch.setattr(i.Provider, 'get', lambda _: SimpleNamespace(chat=chat))
+    diagnostics = []
+    monkeypatch.setattr(i.diag, 'event', lambda stage, **fields: diagnostics.append({'stage': stage, **fields}))
+    return response, diagnostics
+
+
+@pytest.mark.parametrize('finish', ['stop', 'end_turn', 'completed'])
+async def test_supported_provider_completion_reasons_are_validated(configured_model, finish):
+    response, diagnostics = configured_model
+    response.finish_reason = finish
+    choice = await i.choose('security-monitor', {})
+    assert choice.action == 'query' and choice.capability == 'cap-1'
+    assert diagnostics == [{'stage': 'investigation.model', 'model_stop': finish,
+                            'has_tool_calls': False, 'length': len(response.content)}]
+
+
+@pytest.mark.parametrize('kind,message', [
+    ('length', '长度上限'), ('max_tokens', '长度上限'),
+    ('tool_calls', '未开放的工具调用'), ('tool_stop', '未正常结束'),
+    ('empty', '空决策'), ('null', '空决策'), ('empty_json', '格式无效'),
+    ('malformed', '格式无效'), ('unknown_stop', '未正常结束'),
+])
+async def test_incomplete_decisions_fail_with_safe_diagnostics(configured_model, kind, message):
+    response, diagnostics = configured_model
+    if kind in {'length', 'max_tokens'}:
+        response.finish_reason = kind
+    elif kind == 'tool_calls':
+        response.tool_calls = [{'name': 'unauthorized', 'arguments': {'private': 'sensitive'}}]
+        response.finish_reason = 'tool_calls'
+    elif kind == 'tool_stop':
+        response.finish_reason = 'tool_calls'
+    elif kind == 'empty':
+        response.content = '  '
+    elif kind == 'null':
+        response.content = None
+    elif kind == 'empty_json':
+        response.content = '{}'
+    elif kind == 'malformed':
+        response.content = 'sensitive: malformed response'
+    else:
+        response.finish_reason = 'sensitive: provider detail'
+    with pytest.raises(ContractError, match=message) as failure:
+        await i.choose('security-monitor', {'input': 'sensitive'})
+    assert 'sensitive' not in str(failure.value)
+    assert len(diagnostics) == 1
+    assert set(diagnostics[0]) == {'stage', 'model_stop', 'has_tool_calls', 'length'}
+    assert 'sensitive' not in json.dumps(diagnostics)
+    assert not await rows('SELECT * FROM monitor_dispositions')

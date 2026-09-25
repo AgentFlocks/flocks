@@ -1,11 +1,20 @@
 from typing import Literal
 from zoneinfo import ZoneInfo
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 COMPONENT_ID = 'host-security-monitor'
 
 
 class MonitoringPolicy(BaseModel):
+    @model_validator(mode='before')
+    @classmethod
+    def migrate_legacy_executor(cls, value):
+        if isinstance(value, dict) and value.get('investigation_engine', 'rules') == 'rules':
+            value = dict(value)
+            if value.get('timeout_seconds') == 480:
+                value['timeout_seconds'] = 1200
+        return value
+
     version: Literal[1] = 1
     scope: Literal['host-security-monitor'] = COMPONENT_ID
     session_policy: Literal['daily'] = 'daily'
@@ -16,15 +25,24 @@ class MonitoringPolicy(BaseModel):
     timezone: str = 'Asia/Shanghai'
     devices: list[str] = Field(default_factory=list)
     tool: str = 'sangfor_xdr_incidents'
-    timeout_seconds: int = Field(default=480, ge=1, le=1800)
-    investigation_engine: Literal['rules', 'agent-v1'] = 'rules'
+    timeout_seconds: int = Field(default=1200, ge=1, le=1800)
+    investigation_engine: Literal['agent-v1'] = 'agent-v1'
+
+    @field_validator('investigation_engine', mode='before')
+    @classmethod
+    def retire_rules_engine(cls, value):
+        return 'agent-v1' if value == 'rules' else value
     investigation_calls: int = Field(default=12, ge=1, le=24)
     correlation_devices: list[str] = Field(default_factory=list)
     correlation_notes: list[str] = Field(default_factory=list)
     max_pages: int = Field(default=1000, ge=1, le=10000)
-    # Development branch default, including policies saved before this field existed.
-    # Disable explicitly to restore the normal complete incremental query.
-    development_sample: bool = True
+    # Accept older saved policies but retire the development execution mode.
+    development_sample: Literal[False] = False
+
+    @field_validator('development_sample', mode='before')
+    @classmethod
+    def retire_development_sample(cls, value):
+        return False
 
     @field_validator('timezone')
     @classmethod

@@ -14,7 +14,7 @@ from flocks.task.plugin_sync import upsert_task_specs
 from flocks.task.store import TaskStore
 from flocks.workspace.manager import WorkspaceManager
 from .models import COMPONENT_ID, MonitoringPolicy, MonitoringDeclaration
-from .store import rows, write, encode
+from .store import rows, write, encode, connection
 from .adapter import discover
 from .scheduling import IMMEDIATE_START_PENDING, start_immediately
 
@@ -22,6 +22,7 @@ _lock = asyncio.Lock()
 CORE_CAPABILITIES = {'monitor.daily.v1', 'monitor.readonly.v1', 'monitor.native-messages.v1', 'monitor.confirmed-disposition.v1', 'monitor.automatic-status.v1', 'monitor.mail-feedback.v1'}
 CORE_CAPABILITIES.add('monitor.investigation.v1')
 CORE_CAPABILITIES.add('monitor.agent-component.v1')
+CORE_CAPABILITIES.add('monitor.production-investigation.v1')
 
 
 def validate_manifest(manifest, package=None):
@@ -166,7 +167,25 @@ async def _owned_installation(owner):
     policy = MonitoringPolicy.model_validate_json(entry['policy'])
     if policy.owner != owner:
         raise ValueError('监测任务归属不一致，请重新安装场景')
+    await _migrate_policy(entry, scheduler, policy)
     return entry, scheduler, policy
+
+
+async def _migrate_policy(entry, scheduler, policy):
+    """Persist the sole supported policy in both stores, preserving history."""
+    current = policy.model_dump()
+    if json.loads(entry['policy']) == current and scheduler.context.get('monitoring') == current:
+        return
+    context = {**scheduler.context, 'monitoring': current}
+    # tasks.db owns both tables. Commit together so a crash cannot leave the
+    # scheduler and installation disagreeing about the authorized policy.
+    async with connection() as db:
+        await db.execute('UPDATE monitor_installations SET policy=? WHERE owner=? AND scope=?',
+                         (encode(current), policy.owner, policy.scope))
+        await db.execute('UPDATE task_schedulers SET context=? WHERE id=?',
+                         (encode(context), scheduler.id))
+    entry['policy'] = encode(current)
+    scheduler.context = context
 
 
 async def _pause_monitor(entry):
@@ -235,25 +254,21 @@ async def pause_monitoring(owner):
 
 async def set_investigation_engine(owner, engine):
     """Change the executor only while paused; preserve all cases/mail ledgers."""
-    if engine not in {'rules', 'agent-v1'}:
-        raise ValueError('不支持的调查方式')
+    if engine != 'agent-v1':
+        raise ValueError('仅支持智能体调查，请更新页面')
     async with _lock:
         entry, scheduler, policy = await _owned_installation(owner)
         if scheduler.status == SchedulerStatus.ACTIVE:
             raise ValueError('请先暂停监测，再切换调查方式')
         await _pause_monitor(entry)
         policy.investigation_engine = engine
-        policy.timeout_seconds = 1200 if engine == 'agent-v1' else 480
-        if engine == 'agent-v1':
-            from .agent_component import resolve
-            await resolve()
-            from .capabilities import discover as discover_investigation
-            catalog, notes = await discover_investigation(policy, include_unbound=True)
-            policy.correlation_devices = sorted({cap.device for cap in catalog if cap.kind != 'xdr'})
-            policy.correlation_notes = notes
-        else:
-            policy.correlation_devices = []
-            policy.correlation_notes = []
+        policy.timeout_seconds = 1200
+        from .agent_component import resolve
+        await resolve()
+        from .capabilities import discover as discover_investigation
+        catalog, notes = await discover_investigation(policy, include_unbound=True)
+        policy.correlation_devices = sorted({cap.device for cap in catalog if cap.kind != 'xdr'})
+        policy.correlation_notes = notes
         from .store import connection
         async with connection() as db:
             await db.execute('UPDATE task_schedulers SET context=? WHERE id=?',
@@ -285,9 +300,12 @@ async def reconcile():
         return
     # Never scan bundled source for runnable tasks. Recheck installed records.
     for entry in await rows('SELECT * FROM monitor_installations WHERE installed=1'):
+        policy = MonitoringPolicy.model_validate_json(entry['policy'])
+        scheduler = await TaskStore.get_scheduler(entry['scheduler_id'])
+        if scheduler:
+            await _migrate_policy(entry, scheduler, policy)
         if not entry['ready']:
             continue  # missing capability remains explicitly not ready
-        policy = MonitoringPolicy.model_validate_json(entry['policy'])
         if policy.investigation_engine == 'agent-v1':
             from .agent_component import unavailable_reason
             reason = await unavailable_reason()

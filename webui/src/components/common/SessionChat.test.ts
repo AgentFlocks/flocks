@@ -484,6 +484,36 @@ describe('SessionChat message loading state', () => {
 });
 
 describe('SessionChat focused message deep links', () => {
+  let frames: Map<number, FrameRequestCallback>;
+  beforeEach(() => {
+    frames = new Map();
+    let frameId = 0;
+    vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
+      const id = ++frameId;
+      frames.set(id, callback);
+      return id;
+    });
+    vi.stubGlobal('cancelAnimationFrame', (id: number) => frames.delete(id));
+  });
+  afterEach(() => vi.unstubAllGlobals());
+  function flushFrames() {
+    act(() => {
+      const pending = [...frames.values()];
+      frames.clear();
+      pending.forEach((callback) => callback(performance.now()));
+    });
+  }
+  const roundStart = (id: string, sessionID = 'sess-1') => makeMessage({
+    id, sessionID, role: 'user', parts: [{ id: `${id}-text`, type: 'text', text: `${id}开始` }],
+  });
+  function setHistory(messages: Message[], loading = false) {
+    useSessionMessagesMock.mockReturnValue({
+      messages, loading, error: null, refetch: vi.fn(), addMessage: vi.fn(), updateMessage: vi.fn(),
+      updateMessagePart: vi.fn(), removeMessage: vi.fn(), clearMessages: vi.fn(),
+      replaceMessageText: vi.fn(), markMessageStopped: vi.fn(), truncateAfterMessage: vi.fn(),
+    });
+  }
+
   it('scrolls to and consumes a rendered focus target', async () => {
     const onFocusMessageConsumed = vi.fn();
     useSessionMessagesMock.mockReturnValue({
@@ -514,6 +544,115 @@ describe('SessionChat focused message deep links', () => {
 
     await waitFor(() => expect(window.HTMLElement.prototype.scrollIntoView).toHaveBeenCalled());
     expect(onFocusMessageConsumed).toHaveBeenCalledTimes(1);
+  });
+
+  it('waits for a late target and highlights the selected round among a full day of messages', () => {
+    const onFocusMessageConsumed = vi.fn();
+    const props = { sessionId: 'sess-1', focusMessageId: 'round-76', onFocusMessageConsumed };
+    setHistory([], true);
+    const view = render(React.createElement(SessionChat, props));
+    flushFrames();
+    expect(onFocusMessageConsumed).not.toHaveBeenCalled();
+    setHistory([roundStart('round-1')]);
+    view.rerender(React.createElement(SessionChat, props));
+    flushFrames();
+    expect(onFocusMessageConsumed).not.toHaveBeenCalled();
+    expect(window.HTMLElement.prototype.scrollIntoView).not.toHaveBeenCalled();
+
+    setHistory(Array.from({ length: 144 }, (_, i) => roundStart(`round-${i + 1}`)));
+    view.rerender(React.createElement(SessionChat, props));
+    flushFrames();
+    const target = view.container.querySelector('[data-message-id="round-76"]');
+    expect(onFocusMessageConsumed).toHaveBeenCalledTimes(1);
+    expect(target).toHaveClass('ring-2', 'ring-sky-400');
+    expect(vi.mocked(window.HTMLElement.prototype.scrollIntoView).mock.contexts).toEqual([target]);
+  });
+
+  it('keeps a historical round in view after focus consumption, scroll events, refetch and streamed messages', () => {
+    mockStatefulSessionMessages([roundStart('round-1'), roundStart('round-2')]);
+    const onFocusMessageConsumed = vi.fn();
+    const view = render(React.createElement(SessionChat, {
+      sessionId: 'sess-1', focusMessageId: 'round-1', onFocusMessageConsumed,
+    }));
+    flushFrames();
+    const target = view.container.querySelector('[data-message-id="round-1"]');
+    view.rerender(React.createElement(SessionChat, { sessionId: 'sess-1', onFocusMessageConsumed }));
+    // scrollIntoView emits scroll even when the viewport happens to be short.
+    fireEvent.scroll(view.container.querySelector('[style*="scrollbar-gutter"]')!);
+    flushFrames();
+    act(() => {
+      useSSEOptionsRef.current.onReconnect();
+      useSSEOptionsRef.current.onEvent({ type: 'session.status', properties: { sessionID: 'sess-1', status: { type: 'busy' } } });
+      useSSEOptionsRef.current.onEvent({ type: 'message.updated', properties: { info: {
+        id: 'new-round-result', sessionID: 'sess-1', role: 'assistant',
+        parts: [{ id: 'new-text', type: 'text', text: '最新一轮正在查询' }],
+      } } });
+      useSSEOptionsRef.current.onEvent({ type: 'message.part.updated', properties: { part: {
+        id: 'new-text', messageID: 'new-round-result', sessionID: 'sess-1', type: 'text', text: '继续查询',
+      } } });
+    });
+    flushFrames();
+    expect(screen.getByText('最新一轮正在查询')).toBeInTheDocument();
+    expect(vi.mocked(window.HTMLElement.prototype.scrollIntoView).mock.contexts).toEqual([target]);
+  });
+
+  it('supports selecting the same round again after the parent consumes focus', () => {
+    setHistory([roundStart('round-1'), roundStart('round-2')]);
+    const onFocusMessageConsumed = vi.fn();
+    const props = { sessionId: 'sess-1', onFocusMessageConsumed };
+    const view = render(React.createElement(SessionChat, { ...props, focusMessageId: 'round-1' }));
+    view.rerender(React.createElement(SessionChat, props));
+    view.rerender(React.createElement(SessionChat, { ...props, focusMessageId: 'round-1' }));
+    flushFrames();
+    expect(onFocusMessageConsumed).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(window.HTMLElement.prototype.scrollIntoView).mock.contexts).toEqual([
+      view.container.querySelector('[data-message-id="round-1"]'),
+      view.container.querySelector('[data-message-id="round-1"]'),
+    ]);
+  });
+
+  it('resumes follow-latest only when the reader chooses to return there', () => {
+    setHistory([roundStart('round-1'), roundStart('round-2')]);
+    const view = render(React.createElement(SessionChat, { sessionId: 'sess-1', focusMessageId: 'round-1' }));
+    view.rerender(React.createElement(SessionChat, { sessionId: 'sess-1' }));
+    fireEvent.click(screen.getByRole('button', { name: 'chat.backToLatest' }));
+    flushFrames();
+    expect(vi.mocked(window.HTMLElement.prototype.scrollIntoView).mock.calls.at(-1)).toEqual([{ behavior: 'instant' }]);
+    expect(screen.queryByRole('button', { name: 'chat.backToLatest' })).not.toBeInTheDocument();
+    setHistory([roundStart('round-1'), roundStart('round-2'), roundStart('round-3')]);
+    view.rerender(React.createElement(SessionChat, { sessionId: 'sess-1' }));
+    flushFrames();
+    expect(window.HTMLElement.prototype.scrollIntoView).toHaveBeenCalledTimes(3);
+  });
+
+  it('releases the history lock on session change and does not consume a previous-session target', () => {
+    const onFocusMessageConsumed = vi.fn();
+    setHistory([roundStart('shared-round')]);
+    const view = render(React.createElement(SessionChat, { sessionId: 'sess-1', focusMessageId: 'shared-round', onFocusMessageConsumed }));
+    view.rerender(React.createElement(SessionChat, { sessionId: 'sess-2', focusMessageId: 'shared-round', onFocusMessageConsumed }));
+    expect(onFocusMessageConsumed).toHaveBeenCalledTimes(1);
+    setHistory([roundStart('shared-round', 'sess-2')]);
+    view.rerender(React.createElement(SessionChat, { sessionId: 'sess-2', focusMessageId: 'shared-round', onFocusMessageConsumed }));
+    expect(onFocusMessageConsumed).toHaveBeenCalledTimes(2);
+
+    setHistory([roundStart('third-session', 'sess-3')]);
+    view.rerender(React.createElement(SessionChat, { sessionId: 'sess-3' }));
+    setHistory([roundStart('third-session', 'sess-3'), roundStart('latest', 'sess-3')]);
+    view.rerender(React.createElement(SessionChat, { sessionId: 'sess-3' }));
+    flushFrames();
+    expect(vi.mocked(window.HTMLElement.prototype.scrollIntoView).mock.calls.at(-1)).toEqual([{ behavior: 'instant' }]);
+  });
+
+  it('resolves an assistant message folded into a preceding display bubble', () => {
+    setHistory(['assistant-1', 'assistant-2'].map((id) => makeMessage({
+      id, role: 'assistant', parts: [{ id: `${id}-text`, type: 'text', text: id }],
+    })));
+    const onFocusMessageConsumed = vi.fn();
+    const view = render(React.createElement(SessionChat, { sessionId: 'sess-1', focusMessageId: 'assistant-2', onFocusMessageConsumed }));
+    expect(onFocusMessageConsumed).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(window.HTMLElement.prototype.scrollIntoView).mock.contexts).toEqual([
+      view.container.querySelector('[data-message-id="assistant-1"]'),
+    ]);
   });
 });
 
@@ -6459,5 +6598,135 @@ describe('monitoring native step summaries', () => {
     unmount();
     render(React.createElement(SessionChat, { sessionId: 'sess-1', display: { collapseIntermediateSteps: collapse } }));
     expect(screen.getAllByTestId('monitor-step-summary')).toHaveLength(2);
+  });
+});
+
+describe('structured monitoring step narration', () => {
+  const tool = { id: 'narrative-tool', type: 'tool', tool: '查询关联主机', state: { status: 'completed', input: { uuid: 'incident-1', entity_type: 'host' }, output: { count: 1 } } };
+  const sections = [
+    { label: '本步目的', text: '核对这条事件涉及的原主机。' },
+    { label: '采用的方法', text: '使用事件编号查询主机实体，限定原设备。' },
+    { label: '实际发现', text: '已返回 1 条主机实体记录。' },
+    { label: '证据与缺口', text: '尚未查询进程与网络证据，不能仅据此判断已消除威胁。' },
+    { label: '下一步', text: '依据原事件范围继续核对关联进程。' },
+  ];
+  const narrative = (value: unknown = sections) => ({ id: 'narrative-result', type: 'text', text: '旧版兼容摘要，不应重复显示', metadata: { monitoringSummary: true, toolPartID: tool.id, monitoringSections: value, details: '原主机标识：fixture-host' } });
+
+  it('separates purpose, method, facts, gaps and next action without duplicating the fallback summary', () => {
+    const message = makeMessage({ agent: 'security-monitor', parts: [tool, narrative()] as any, finish: 'stop' });
+    const { container } = render(React.createElement(ChatMessageBubble, { message, collapseIntermediateSteps: true }));
+    const card = screen.getByRole('region', { name: '本步骤解读' });
+    expect(within(card).getByRole('heading')).toHaveTextContent('步骤解读');
+    expect(card).toHaveTextContent('步骤已完成');
+    sections.forEach(section => {
+      expect(within(card).getByText(section.label).tagName).toBe('DT');
+      expect(within(card).getByText(section.text)).toBeVisible();
+    });
+    expect(screen.queryByText('旧版兼容摘要，不应重复显示')).not.toBeInTheDocument();
+    expect(card.closest('[data-testid="chat-process-group"]')).toBeNull();
+    expect(container.querySelector('[data-testid="monitor-step-summary"] details')).not.toHaveAttribute('open');
+  });
+
+  it('uses real tool execution state and opens tool payload and evidence during the active investigation', () => {
+    const message = makeMessage({ agent: 'security-monitor', parts: [{ ...tool, state: { ...tool.state, status: 'running' } }, narrative()] as any });
+    const { rerender } = render(React.createElement(ChatMessageBubble, { message, isActive: true, collapseIntermediateSteps: true, processGroupsDefaultOpen: true }));
+    expect(screen.getByRole('region', { name: '本步骤解读' })).toHaveTextContent('步骤执行中');
+    expect(screen.getByTestId('chat-process-tool-step')).toHaveAttribute('open');
+    expect(screen.getByTestId('monitor-step-summary').querySelector('details')).toHaveAttribute('open');
+    rerender(React.createElement(ChatMessageBubble, { message: { ...message, finish: 'error', parts: [{ ...tool, state: { ...tool.state, status: 'error', error: '设备连接失败' } }, narrative()] as any }, isActive: false, collapseIntermediateSteps: true, processGroupsDefaultOpen: true }));
+    expect(screen.getByRole('region', { name: '本步骤解读' })).toHaveTextContent('步骤未完成');
+    expect(screen.getByTestId('chat-process-tool-step')).not.toHaveAttribute('open');
+    expect(screen.getByTestId('monitor-step-summary').querySelector('details')).not.toHaveAttribute('open');
+  });
+
+  it('keeps regular workbench tool expansion unchanged', () => {
+    const message = makeMessage({ agent: 'rex', parts: [{ ...tool, state: { ...tool.state, status: 'running' } }] as any });
+    render(React.createElement(ChatMessageBubble, { message, isActive: true, collapseIntermediateSteps: true, processGroupsDefaultOpen: true }));
+    expect(screen.getByTestId('chat-process-tool-step')).not.toHaveAttribute('open');
+  });
+
+  it.each([null, {}, [{ label: '缺口', text: {} }], [{ label: '', text: 'value' }]])('falls back to old summary when sections are invalid: %j', (invalid) => {
+    render(React.createElement(ChatMessageBubble, { message: makeMessage({ parts: [narrative(invalid)] as any, finish: 'stop' }) }));
+    expect(screen.getByText('旧版兼容摘要，不应重复显示')).toBeVisible();
+    expect(screen.queryByRole('region', { name: '本步骤解读' })).not.toBeInTheDocument();
+  });
+
+  it('updates late section metadata and renders evidence as text rather than executable markup', () => {
+    const message = makeMessage({ parts: [tool, narrative([])] as any, finish: 'stop' });
+    const { rerender, container } = render(React.createElement(ChatMessageBubble, { message }));
+    const text = '<img src=x onerror=alert(1)> [external](https://example.invalid)';
+    rerender(React.createElement(ChatMessageBubble, { message: { ...message, parts: [tool, narrative([{ label: '实际发现', text }])] as any } }));
+    expect(screen.getByRole('region', { name: '本步骤解读' })).toHaveTextContent(text);
+    expect(container.querySelector('img')).toBeNull();
+    expect(container.querySelector('a[href="https://example.invalid"]')).toBeNull();
+    expect(screen.queryByText('旧版兼容摘要，不应重复显示')).not.toBeInTheDocument();
+  });
+});
+
+describe('monitoring round end cards', () => {
+  const summary = '读取 0 条事件，无需处置。本轮未发送邮件，告警闭环状态未改变。';
+  const nextStep = '等待下一轮定时监测。';
+  const resultPart = (status: 'completed' | 'failed') => ({
+    id: 'round-end', type: 'text', text: summary,
+    metadata: { monitoringRoundEnd: true, roundStatus: status, roundId: 'round-1', nextStep },
+  } as Message['parts'][number]);
+
+  it.each(['completed', 'failed'] as const)('keeps the %s ending visible outside collapsed process steps', (status) => {
+    const message = makeMessage({ id: 'round-result', finish: 'stop', parts: [
+      { id: 'step-before', type: 'tool', tool: 'query', state: { status: 'completed' } } as any,
+      resultPart(status),
+      { id: 'next-step', type: 'tool', tool: 'query', state: { status: 'completed' } } as any,
+    ] });
+    const view = render(React.createElement(ChatMessageBubble, { message, collapseIntermediateSteps: true }));
+    const card = screen.getByRole('region', { name: `本轮已结束 · ${status === 'completed' ? '完成' : '失败'}` });
+    expect(card).toBeVisible();
+    expect(card.closest('[data-testid="chat-process-group"]')).toBeNull();
+    expect(within(card).getByRole('heading')).toBeVisible();
+    expect(card.querySelector('svg')).not.toBeNull();
+    expect(within(card).getByText(summary)).toBeVisible();
+    expect(within(card).getByText(nextStep)).toBeVisible();
+    expect(card).toHaveAttribute('data-round-id', 'round-1');
+    view.unmount();
+    render(React.createElement(ChatMessageBubble, { message: JSON.parse(JSON.stringify(message)), collapseIntermediateSteps: true }));
+    expect(screen.getByTestId('monitor-round-end')).toBeVisible();
+  });
+
+  it('renders late end metadata even when the persisted summary text does not change', () => {
+    const message = makeMessage({ id: 'round-result', finish: 'stop', parts: [{ id: 'round-end', type: 'text', text: summary }] });
+    const view = render(React.createElement(ChatMessageBubble, { message }));
+    expect(screen.queryByTestId('monitor-round-end')).not.toBeInTheDocument();
+    const part = resultPart('completed');
+    view.rerender(React.createElement(ChatMessageBubble, { message: { ...message, parts: [part] } }));
+    expect(screen.getByRole('heading', { name: '本轮已结束 · 完成' })).toBeVisible();
+    view.rerender(React.createElement(ChatMessageBubble, { message: { ...message, parts: [{ ...part,
+      metadata: { ...part.metadata, roundStatus: 'failed', nextStep: '监测已暂停，重新启动后继续调查。' },
+    }] } }));
+    expect(screen.getByRole('heading', { name: '本轮已结束 · 失败' })).toBeVisible();
+    expect(screen.getByText('监测已暂停，重新启动后继续调查。')).toBeVisible();
+  });
+
+  it('keeps the ending title visible while evidence is folded and treats evidence as plain text', async () => {
+    const part = resultPart('failed');
+    const message = makeMessage({ id: 'round-result', finish: 'stop', parts: [{ ...part,
+      metadata: { ...part.metadata, details: '<img src=x onerror=alert(1)> 原始查询未返回完整结果' },
+    }] });
+    render(React.createElement(ChatMessageBubble, { message }));
+    const card = screen.getByTestId('monitor-round-end');
+    expect(card.querySelector('details')).not.toHaveAttribute('open');
+    expect(within(card).getByRole('heading')).toBeVisible();
+    await userEvent.click(screen.getByText('查看本轮详细依据'));
+    expect(card.querySelector('details')).toHaveAttribute('open');
+    expect(within(card).getByRole('heading')).toBeVisible();
+    expect(card.querySelector('img')).toBeNull();
+  });
+
+  it('does not invent a completed status for an unknown terminal status', () => {
+    const part = resultPart('completed');
+    const message = makeMessage({ id: 'round-result', parts: [{ ...part,
+      metadata: { ...part.metadata, roundStatus: 'running' },
+    }] });
+    render(React.createElement(ChatMessageBubble, { message }));
+    expect(screen.queryByTestId('monitor-round-end')).not.toBeInTheDocument();
+    expect(screen.getByText(summary)).toBeInTheDocument();
   });
 });
