@@ -30,10 +30,11 @@ export interface MonitorSnapshot {
 }
 export interface MailHistory {
   unparsed_count?: number;
+  sender_verification_required?: boolean;
   settings: { enabled: boolean; recipient_email: string; responsible_name: string };
   counts: Record<string, number>; reply_counts: Record<string, number>; has_more: boolean;
   notices: { id: string; recipient: string; state: string; subject: string; body: string; error: string | null; created_at: string; event: { id: string; name: string; host: string }; items: { id: string; reply_id: string; reply_excerpt?: string; target: number; state: string; reason: string; error: string | null }[] }[];
-  replies: { id: string; sender: string; state: string; error: string | null; received_at: string; targets?: { event_id: string; name: string; state: string; target: number }[]; payload: { subject: string; text: string }; result: { items?: { notice_id: string; outcome: string; evidence: string; reason: string }[] } | null }[];
+  replies: { id: string; sender: string; state: string; error: string | null; received_at: string; targets?: { event_id: string; name: string; state: string; target: number }[]; payload: { subject: string; text: string; authenticated_sender?: boolean; sender_verification_bypassed?: boolean }; result: { items?: { notice_id: string; outcome: string; evidence: string; reason: string }[] } | null }[];
 }
 export const monitoringApi = {
   mail: (offset = 0) => client.get<MailHistory>(`${MONITOR_API}/mail`, { params: { offset } }),

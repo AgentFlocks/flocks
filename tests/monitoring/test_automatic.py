@@ -215,7 +215,9 @@ async def test_completed_not_downgraded_by_late_progress(auto):
 
 
 @pytest.mark.parametrize('change', ['unauthenticated','ambiguous','unknown','quoted','wrong_id','new_activity','new_config','paused'])
-async def test_uncertain_or_revoked_feedback_never_writes(auto, change):
+async def test_uncertain_or_revoked_feedback_never_writes(auto, change, monkeypatch):
+    if change == 'unauthenticated':
+        monkeypatch.setattr(m.transport, 'REQUIRE_AUTHENTICATED_FEEDBACK', True)
     n = await notice(auto)
     text = '文件已清理，复查正常。'
     msg = await reply(auto,n, '还未完成。\n> '+text if change=='quoted' else text, authenticated=change!='unauthenticated')
@@ -277,20 +279,24 @@ async def test_full_device_tool_contract_writes_single_incident(auto,actual_tool
     assert len(updates)==1 and updates[0]['uuIds']==['event'] and updates[0]['dealStatus']==40
 
 
-async def test_diagnostic_export_has_mail_stages_not_mail_text(auto):
+@pytest.mark.parametrize('authenticated', [True, False])
+async def test_diagnostic_export_has_mail_stages_not_mail_text(auto, authenticated):
     from flocks.monitoring import diagnostics as diag
     captured=[]
     original=diag._sink.submit
     diag._sink.submit=lambda fields: captured.append(diag.safe_record(fields))
     try:
         async with diag.trace_scope('owner',auto.policy.scope,'test'):
-            n=await notice(auto); msg=await reply(auto,n)
+            n=await notice(auto); msg=await reply(auto,n,authenticated=authenticated)
             await consume(auto,interpretation(n,msg.text))
     finally:
         diag._sink.submit=original
     raw=json.dumps(captured,ensure_ascii=False)
     assert 'mail.received' in raw and 'mail.interpret' in raw and 'mail.mark' in raw
     assert 'person@example.com' not in raw and msg.text not in raw and n['id'] not in raw
+    received = next(r for r in captured if r['event'] == 'mail.received')
+    assert received['authenticated_sender'] is authenticated
+    assert received['sender_verification_bypassed'] is (not authenticated)
 
 
 async def test_ingress_requires_gateway_capability_before_receipt(auto,monkeypatch):
@@ -422,10 +428,18 @@ async def test_reply_with_partial_review_keeps_other_item_readback_alive(auto, m
     assert (await rows('SELECT state FROM monitor_mail_replies'))[0]['state'] == 'needs_review'
 
 
-async def test_native_two_round_mail_feedback_flow(auto, actual_tool, monkeypatch):
+@pytest.mark.parametrize('authenticated', [True, False])
+async def test_native_two_round_mail_feedback_flow(auto, actual_tool, connected_email, monkeypatch, authenticated):
+    from email.mime.text import MIMEText
+    from flocks.channel.inbound.dispatcher import InboundDispatcher
+    from flocks.config.config import ChannelConfig
+    from flocks.identity.entry import mint_channel_ingress_provenance
     from flocks.monitoring.runtime import run
     from flocks.monitoring import mail_interpreter
     from flocks.task.models import ExecutionTriggerType
+    if not authenticated:
+        connected_email._resolved.update(authservId='', requireAuthenticatedSender=False)
+    await m.configure('owner', m.MailSettingsRequest(enabled=True, recipient_email='person@example.com'))
     async def tick():
         execution = await TaskManager.create_execution_from_scheduler(auto.scheduler, trigger_type=ExecutionTriggerType.RUN_ONCE, enqueue=False)
         with unattended_scope(), monitoring_read_scope(auto.policy.tool, auto.policy.devices):
@@ -434,7 +448,30 @@ async def test_native_two_round_mail_feedback_flow(auto, actual_tool, monkeypatc
     notices = await rows('SELECT * FROM monitor_mail_notices')
     assert len(notices) == 1 and notices[0]['state'] == 'sent'
     assert not any(path.endswith('/dealstatus') for path, _ in actual_tool)
-    msg = await reply(auto, notices[0])
+    original = MIMEText('文件已清理，复查正常。', 'plain', 'utf-8')
+    original['From'] = 'person@example.com'
+    original['Subject'] = 'Re: 处置反馈'
+    original['Message-ID'] = '<native-feedback@example.com>'
+    original['In-Reply-To'] = notices[0]['message_id']
+    if authenticated:
+        original['Authentication-Results'] = 'mx.example.com; dmarc=pass header.from=example.com'
+    msg = connected_email._parse_and_authorize(original, '1')
+    assert msg is not None and msg.raw['authenticated_sender'] is authenticated
+    dispatcher = InboundDispatcher()
+    monkeypatch.setattr(dispatcher, '_get_channel_config', AsyncMock(return_value=ChannelConfig(enabled=True, allowFrom=['person@example.com'])))
+    monkeypatch.setattr(dispatcher, '_dispatch', AsyncMock())
+    provenance = mint_channel_ingress_provenance(channel_id='email', account_id=msg.account_id, message_id=msg.message_id,
+        sender_id=msg.sender_id, chat_type=msg.chat_type.value, message=msg, evidence=msg.raw)
+    await dispatcher.dispatch(msg, provenance=provenance)
+    received = (await rows('SELECT * FROM monitor_mail_replies'))[0]
+    assert received['state'] == 'pending'
+    payload = json.loads(received['payload'])
+    assert payload['authenticated_sender'] is authenticated
+    assert payload['sender_verification_bypassed'] is (not authenticated)
+    assert (await m.history('owner'))['sender_verification_required'] is False
+    assert (await m.diagnostic_state('owner'))['sender_verification_required'] is False
+    dispatcher._dispatch.assert_not_called()
+    assert not any(path.endswith('/dealstatus') for path, _ in actual_tool)
     monkeypatch.setattr(mail_interpreter, 'interpret', AsyncMock(return_value=interpretation(notices[0], msg.text)))
     await tick()
     assert auto.send.await_count == 1
@@ -443,6 +480,27 @@ async def test_native_two_round_mail_feedback_flow(auto, actual_tool, monkeypatc
     assert (await rows('SELECT state FROM monitor_mail_replies'))[0]['state'] == 'verified'
     report = (await rows('SELECT * FROM monitor_reports'))[0]
     assert '当日告警总结' in report['summary_content'] and '执行时间线' in report['content']
+
+
+async def test_development_feedback_cannot_escape_to_generic_agent(auto, monkeypatch):
+    from flocks.channel.inbound.dispatcher import InboundDispatcher
+    dispatch = AsyncMock()
+    monkeypatch.setattr(InboundDispatcher, '_dispatch', dispatch)
+    n = await notice(auto)
+    await reply(auto, n, authenticated=False)
+    await consume(auto, {'classification': 'unrelated', 'items': []})
+    assert (await rows('SELECT state FROM monitor_mail_replies'))[0]['state'] == 'needs_review'
+    dispatch.assert_not_called()
+    assert not writes(auto)
+
+
+async def test_restoring_authentication_blocks_pending_development_feedback(auto, monkeypatch):
+    n = await notice(auto)
+    msg = await reply(auto, n, authenticated=False)
+    monkeypatch.setattr(m.transport, 'REQUIRE_AUTHENTICATED_FEEDBACK', True)
+    await consume(auto, interpretation(n, msg.text))
+    assert not writes(auto)
+    assert (await rows('SELECT state FROM monitor_mail_replies'))[0]['state'] == 'needs_review'
 
 
 async def test_diagnostic_state_contains_only_flags_and_counts(auto, monkeypatch):
@@ -490,10 +548,11 @@ async def test_save_with_real_email_channel_and_export_snapshot(auto, actual_too
     ('no_authserv', '可信 authservId'),
     ('not_allowed', '允许收件人列表'),
 ])
-async def test_real_email_channel_validation_preserves_saved_settings(auto, actual_tool, connected_email, condition, message):
+async def test_real_email_channel_validation_preserves_saved_settings(auto, actual_tool, connected_email, condition, message, monkeypatch):
     if condition == 'disconnected':
         connected_email.mark_disconnected()
     elif condition == 'no_authserv':
+        monkeypatch.setattr(m.transport, 'REQUIRE_AUTHENTICATED_FEEDBACK', True)
         connected_email._resolved['authservId'] = ''
     else:
         connected_email._resolved['allowFrom'] = ['other@example.com']

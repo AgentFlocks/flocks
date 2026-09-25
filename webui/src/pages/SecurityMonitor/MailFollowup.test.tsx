@@ -51,3 +51,21 @@ it('surfaces unsupported mail without hiding normal follow-up records', async ()
  expect(await screen.findByRole('alert')).toHaveTextContent('2 封邮件未能解析');
  expect(screen.getByText('待跟进告警')).toBeInTheDocument();
 });
+
+it('shows the development authentication risk in settings before saving', async () => {
+ mocks.mail.mockResolvedValue({ data: { ...data, sender_verification_required: false } });
+ render(<MailSettings close={vi.fn()} refresh={vi.fn()} />);
+ expect(await screen.findByText(/开发联调模式：暂不要求回信身份认证/)).toBeInTheDocument();
+ expect(screen.getByText(/伪造回信触发状态标记的风险/)).toBeInTheDocument();
+});
+
+it('labels unverified feedback separately from the disposition result', async () => {
+ mocks.mail.mockResolvedValue({ data: { ...data, sender_verification_required: false, replies: [{
+  ...data.replies[0], payload: { ...data.replies[0].payload, authenticated_sender: false, sender_verification_bypassed: true },
+ }] } });
+ render(<MailFollowup />);
+ fireEvent.click(await screen.findByRole('tab', { name: '回信记录' }));
+ expect(screen.getByText('此回信未验证发件人身份，按开发联调规则处理。')).toBeInTheDocument();
+ expect(screen.getByText(/已收到，待下轮处理/)).toBeInTheDocument();
+ expect(screen.queryByText(/目标状态已回查确认/)).not.toBeInTheDocument();
+});

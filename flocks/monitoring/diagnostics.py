@@ -92,7 +92,8 @@ _ENUMS = {
 _NUMBERS = {'schema', 'pid', 'seq', 'elapsed_ms', 'duration_ms', 'length', 'items', 'page', 'page_size',
             'window_seconds', 'devices', 'max_pages', 'timeout_seconds', 'json_position', 'json_line',
             'json_column', 'events', 'errors', 'suppressed', 'calls', 'call', 'loop_lag_ms', 'total'}
-_BOOLS = {'success', 'truncated', 'has_error', 'has_saved_output', 'cursor_present'}
+_BOOLS = {'success', 'truncated', 'has_error', 'has_saved_output', 'cursor_present',
+          'authenticated_sender', 'sender_verification_bypassed'}
 _IDS = {'trace', 'owner', 'scope', 'execution', 'device', 'notice', 'reply', 'project'}
 
 
@@ -357,7 +358,7 @@ def export_bundle(owner, scope):
         selected = sorted(records.values(), key=lambda r: (r.get('timestamp', ''), r.get('seq', 0)))
         capped = len(selected) > 5000
         selected = selected[-5000:]
-        return {'schema': 1, 'component': 'host-security-monitor', 'version': __version__, 'component_version': '1.3.0', 'mail_policy': 'mail-feedback-v1',
+        return {'schema': 1, 'component': 'host-security-monitor', 'version': __version__, 'component_version': '1.3.1', 'mail_policy': 'mail-feedback-v1',
                 'exported_at': datetime.now(timezone.utc).isoformat(),
                 'coverage': 'recent_rotating_logs', 'record_count': len(selected), 'capped': capped,
                 'health': {**health, 'read_errors': read_errors}, 'records': selected}

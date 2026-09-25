@@ -9,6 +9,11 @@ from flocks.channel.registry import default_registry
 from flocks.channel.builtin.email.config import parse_allowed_senders
 from flocks.task.store import TaskStore
 
+# Temporary development policy, explicitly requested for target-machine testing.
+# From/allowlist matching does not authenticate a sender. Restore this to True
+# before production; saved unverified feedback must not authorize new writes.
+REQUIRE_AUTHENTICATED_FEEDBACK = False
+
 
 def mailbox_key(cfg):
     return hashlib.sha256(json.dumps([cfg.get(k, '') for k in ('imapHost', 'imapPort', 'username', 'address')]).encode()).hexdigest()
@@ -19,7 +24,7 @@ def transport(recipient=None):
     cfg = getattr(plugin, '_resolved', {})
     if not plugin or not plugin.status.connected or not cfg:
         raise ValueError('请先连接 Flocks 邮件通道')
-    if not cfg.get('authservId'):
+    if REQUIRE_AUTHENTICATED_FEEDBACK and not cfg.get('authservId'):
         raise ValueError('邮件通道需配置可信 authservId，以核验责任人回信身份')
     if recipient and not cfg.get('allowAll') and recipient not in parse_allowed_senders(cfg):
         raise ValueError('责任人邮箱不在邮件通道允许收件人列表中')

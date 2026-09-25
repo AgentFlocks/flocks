@@ -142,7 +142,7 @@ async def receive(msg):
     })
     if hook.output.get('blocked'):
         return True
-    # Preserve the authenticated original as feedback evidence. Hook rewrites
+    # Preserve the received original as feedback evidence. Hook rewrites
     # belong to the generic chat flow, not evidence authorizing an XDR write.
     # Route across reinstallations only by known references; quarantine ambiguous
     # replies in the same owner's current project without stalling the mailbox.
@@ -162,8 +162,11 @@ async def receive(msg):
         identity = encode([raw.get('uidvalidity'), raw.get('uid')])
     payload = {k: getattr(msg, k) for k in ('text', 'reply_to_id', 'thread_id', 'account_id', 'sender_id', 'chat_id')}
     payload.update({k: raw.get(k) for k in ('subject', 'references', 'date')})
+    authenticated = raw.get('authenticated_sender') is True
+    bypassed = not authenticated and not transport.REQUIRE_AUTHENTICATED_FEEDBACK
+    payload.update(authenticated_sender=authenticated, sender_verification_bypassed=bypassed)
     stamp = d.stamp()
-    state, error = ('pending', None) if raw.get('authenticated_sender') is True else ('needs_review', '回信身份未通过邮件通道核验')
+    state, error = ('pending', None) if authenticated or bypassed else ('needs_review', '回信身份未通过邮件通道核验')
     if ambiguous_project:
         state, error = 'needs_review', '回信涉及多个监测项目，需人工核对'
     if len(msg.text) > 20000:
@@ -174,7 +177,8 @@ async def receive(msg):
                 'VALUES(?,?,?,?,?,?,?,?,?,?,?)', (str(uuid4()), owner, project, mailbox, identity, msg.sender_id,
                                                  encode(payload), state, error, stamp, stamp))
     async with diag.trace_scope(owner, COMPONENT_ID, 'mail:' + identity):
-        diag.event('mail.received', project=diag.opaque(project), reply=diag.opaque(identity), mail_state=state, success=state=='pending')
+        diag.event('mail.received', project=diag.opaque(project), reply=diag.opaque(identity), mail_state=state,
+                   success=state=='pending', authenticated_sender=authenticated, sender_verification_bypassed=bypassed)
     return True
 
 
@@ -364,6 +368,8 @@ async def process_replies(policy, session_id, high, recorder, adapter_factory=Ma
 async def process_reply(policy, reply, session_id, adapter_factory, interpreter, validator):
     payload = json.loads(reply['payload'])
     config = await authorized(policy, (await settings(policy.owner))['revision'])
+    if transport.REQUIRE_AUTHENTICATED_FEEDBACK and payload.get('authenticated_sender') is not True:
+        raise ValueError('回信身份未核验，不能在严格模式下自动处置')
     notices = await rows("SELECT * FROM monitor_mail_notices WHERE owner=? AND project=? AND mailbox=? AND recipient=? AND state IN ('sent','send_unknown','sending') ORDER BY created_at DESC",
                         (policy.owner, policy.project, reply['mailbox'], reply['sender']))
     if reply['state'] == 'pending':
@@ -381,6 +387,8 @@ async def process_reply(policy, reply, session_id, adapter_factory, interpreter,
             accepted = validator(parsed, payload, notices)
         diag.event('mail.interpreted', reply=diag.opaque(reply['id']), items=len(accepted))
         if parsed['classification'] == 'unrelated':
+            if payload.get('sender_verification_bypassed'):
+                raise ValueError('未认证的联调回信不转交普通 Agent，请人工核对')
             # Durable handoff intention prevents repeated generic agent dispatch after crashes.
             await write("UPDATE monitor_mail_replies SET state='forwarding',result=?,updated_at=? WHERE id=?", (encode(parsed), d.stamp(), reply['id']))
             from flocks.channel.inbound.dispatcher import InboundDispatcher
@@ -440,6 +448,7 @@ async def history(owner, limit=100, offset=0):
     reply_counts = await rows('SELECT state,COUNT(*) AS count FROM monitor_mail_replies WHERE owner=? AND project=? GROUP BY state', (owner, project))
     unparsed = await rows('SELECT COUNT(*) AS count FROM monitor_mail_unparsed WHERE mailbox=?', (config['mailbox'],))
     return {'settings': {**config, 'recipient_email': config['recipient']}, 'notices': notices, 'replies': replies,
+            'sender_verification_required': transport.REQUIRE_AUTHENTICATED_FEEDBACK,
             'unparsed_count': unparsed[0]['count'],
             'counts': {x['state']: x['count'] for x in counts}, 'reply_counts': {x['state']: x['count'] for x in reply_counts},
             'has_more': len(replies) == limit or len(notices) == limit}
@@ -454,6 +463,8 @@ async def diagnostic_state(owner):
     cfg = getattr(plugin, '_resolved', {})
     result = {'enabled': bool(config['enabled']), 'recipient_configured': bool(config['recipient']),
               'channel_connected': bool(plugin and plugin.status.connected),
+              'sender_verification_required': transport.REQUIRE_AUTHENTICATED_FEEDBACK,
+              'channel_requires_authenticated_sender': bool(cfg.get('requireAuthenticatedSender')),
               'sender_verification_configured': bool(cfg.get('authservId')),
               'mailbox_matches': bool(cfg and config['mailbox'] == transport.mailbox_key(cfg)),
               'model_configured': bool(await Config.resolve_default_llm())}
