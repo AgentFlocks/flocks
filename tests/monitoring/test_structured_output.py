@@ -58,7 +58,7 @@ async def setup(monkeypatch, tmp_path):
     directory = tmp_path / '.flocks/workspace/structured'
     directory.mkdir(parents=True)
     project = await Project.create(owner_id='owner', name='fixture', worktree=str(directory))
-    state.policy = MonitoringPolicy(owner='owner', project=project.id, directory=str(directory), devices=['device-1'], tool=tool.info.name)
+    state.policy = MonitoringPolicy(development_sample=False, owner='owner', project=project.id, directory=str(directory), devices=['device-1'], tool=tool.info.name)
     state.tool = tool
     state.after = AsyncMock()
     monkeypatch.setattr(HookPipeline, 'run_tool_after', state.after)

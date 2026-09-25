@@ -19,6 +19,7 @@ export interface MonitorDisposition {
   observed_status: number | null; error: string | null; comment: string; updated_at: string; session_id: string | null;
 }
 export interface MonitorSnapshot {
+  developmentSample?: boolean;
   mail?: { enabled: boolean; sentToday: number; receivedToday: number; pending: number; needsReview: number; sendUnknown: number };
   automatic?: { enabled: boolean; rule: string; queued: number };
   businessDate: string; timezone: string; sessionID: string | null; nextRun: string | null; scheduledNextRun: string | null;

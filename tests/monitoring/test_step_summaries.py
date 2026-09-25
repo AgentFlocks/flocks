@@ -17,7 +17,7 @@ async def execute(tmp_path, monkeypatch, mode):
     directory = tmp_path / '.flocks/workspace/summaries'
     directory.mkdir(parents=True)
     project = await Project.create(owner_id='owner', name='summary-fixture', worktree=str(directory))
-    policy = MonitoringPolicy(owner='owner', project=project.id, directory=str(directory), devices=['fixture'])
+    policy = MonitoringPolicy(development_sample=False, owner='owner', project=project.id, directory=str(directory), devices=['fixture'])
     count = 0 if mode == 'empty' else 105 if mode in ('pages', 'late_failure') else 2
     items = [{'uuId': f'event-{i}', 'name': f'事件 {i}', 'riskLevel': 1 if i % 2 == 0 else 9, 'hostIp': '192.0.2.1', 'type': '检测'} for i in range(count)]
     if items:

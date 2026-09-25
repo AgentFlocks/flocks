@@ -8,6 +8,8 @@ from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 from flocks.workspace.manager import WorkspaceManager
 from .store import rows, write, connection
+from . import sampling
+from .models import MonitoringPolicy
 
 _locks: dict[tuple, asyncio.Lock] = {}
 
@@ -46,9 +48,13 @@ async def snapshot(owner, scope, day):
         if event is None or disposition['mode'] in ('automatic', 'mail') and disposition['project'] != event['projectID']:
             continue
         event['dispositionRecord'] = disposition
-        # A later monitoring observation belongs to the active 0/10 query and
-        # therefore reopens an event. Absence from that query never closes it.
-        verified = disposition['status'] == 'verified' and disposition['updated_at'] >= event['observedAt']
+        # Re-sampling an unchanged terminal event must not undo a verified test.
+        decision = json.loads(disposition['decision'] or '{}')
+        same_sample = (event.get('development_sample') is True and decision.get('development_sample') is True
+                       and event.get('dealStatus') == disposition['target_status']
+                       and event.get('endTime') is not None and event['endTime'] == decision.get('observed_end_time')
+                       and event.get('host') == decision.get('observed_host'))
+        verified = disposition['status'] == 'verified' and (disposition['updated_at'] >= event['observedAt'] or same_sample)
         event['closure'] = {40: 'closed', 60: 'ignored', 70: 'contained'}.get(disposition['target_status'], 'open') if verified else 'open'
         from .disposition import status_label
         event['disposition'] = f"{status_label(disposition['target_status'])}，回查确认" if verified else '待确认处置结果' if disposition['status'] in ('writing', 'pending', 'mismatch') else '待跟进'
@@ -72,7 +78,8 @@ async def snapshot(owner, scope, day):
     today = datetime.now(timezone.utc).astimezone(tz).date().isoformat()
     queued = [entry for entry in queued if datetime.fromisoformat(entry['scheduled_for'] or entry['created_at']).astimezone(tz).date().isoformat() == day]
 
-    return {'businessDate': day, 'installation': {'installed': bool(installation and installation['installed']),
+    development = bool(installation and sampling.enabled(MonitoringPolicy.model_validate_json(installation['policy'])))
+    return {'businessDate': day, 'developmentSample': development, 'installation': {'installed': bool(installation and installation['installed']),
             'ready': bool(installation and installation['ready']), 'reason': installation['reason'] if installation else '请从添加场景安装安全运营监测',
             'status': scheduler[0]['status'] if scheduler else 'not_installed',
             'projectID': installation['project'] if installation else None},
@@ -105,6 +112,8 @@ def render(data):
     lines = [f"# 安全运营监测执行时间线 · {data['businessDate']}", '', f"业务时区：{data['timezone']}。每十分钟执行一轮；逐条邮件通知责任人，下一轮解读回信、标记并回查。状态标记不代表组件执行了主机隔离或修复。", '',
              f"启动轮次：{metrics['started']}；尝试：{metrics['attempts']}；去重事件：{metrics['events']}；风险：{metrics['risk']}；待判定：{metrics['unknown']}。", '']
     lines += [f"未闭环风险：{metrics['openRisk']}；处置完成：{metrics['closed']}；已遏制：{metrics['contained']}；已忽略：{metrics['ignored']}。", '']
+    if any(r['result'].get('development_sample') for r in data['runs']):
+        lines += [sampling.DESCRIPTION, '联调中的忽略标记仅验证回写链路，不代表事件被判定为误报或威胁已消除。', '']
     if data['events']:
         lines += ['## 去重事件', '']
         for event in data['events']:
@@ -150,6 +159,8 @@ def render_summary(data):
     failed = sum(r['status'] not in ('completed', 'running') for r in data['runs'])
     lines += ['', '## 数据完整性', '', f"未完整完成的轮次：{failed}。统计以已提交事实及回查结果为准，发信和收到回信不等于处置完成。",
               '当天持续更新；跨日收到的反馈归入实际收到当天，原事件保留关联。邮件存量统计反映生成报告时的进度。']
+    if any(r['result'].get('development_sample') for r in data['runs']):
+        lines += ['', sampling.DESCRIPTION, '含联调抽样轮次，不能视为全天全量告警统计。测试忽略不代表消除威胁或确认误报。']
     return '\n'.join(lines)
 
 

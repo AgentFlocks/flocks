@@ -24,7 +24,7 @@ async def policy(tmp_path):
     directory = tmp_path / '.flocks/workspace/monitor'
     directory.mkdir(parents=True)
     project = await Project.create(owner_id='owner', name='安全运营监测', worktree=str(directory))
-    return MonitoringPolicy(owner='owner', project=project.id, directory=str(directory), devices=['xdr-1'])
+    return MonitoringPolicy(development_sample=False, owner='owner', project=project.id, directory=str(directory), devices=['xdr-1'])
 
 async def scheduler_for(policy):
     return await TaskManager.create_scheduler(title='安全运营监测', mode=SchedulerMode.CRON,
@@ -39,6 +39,26 @@ class FixtureAdapter:
         if params['action'] == 'get_entities':
             return {'code': 0, 'data': {'list': [{'hostId': 'host-1', 'ip': '192.0.2.1'}]}}
         return {'code': 0, 'data': {'list': [{'uuId': 'event-1', 'name': 'Synthetic event', 'incidentSeverity': 4, 'hostIp': '192.0.2.1'}], 'total': 1}}
+
+
+@pytest.mark.parametrize('has_cursor', [False, True])
+async def test_development_round_caps_all_devices_and_preserves_cursor(policy, has_cursor):
+    policy = policy.model_copy(update={'development_sample': True, 'devices': ['xdr-1', 'xdr-2']})
+    if has_cursor:
+        await write('INSERT INTO monitor_cursors VALUES(?,?,?,?)', (policy.owner, policy.scope, 'xdr-1', 123456))
+    before = await rows('SELECT * FROM monitor_cursors')
+    FixtureAdapter.calls = []
+    scheduler = await scheduler_for(policy)
+    execution = await TaskManager.create_execution_from_scheduler(scheduler, trigger_type=ExecutionTriggerType.RUN_ONCE, enqueue=False)
+    await run(execution, policy, FixtureAdapter)
+    assert await rows('SELECT * FROM monitor_cursors') == before
+    observations = await rows('SELECT * FROM monitor_observations')
+    assert len(observations) == 1
+    assert json.loads(observations[0]['data'])['device'] == 'xdr-1'
+    calls = [c for c in FixtureAdapter.calls if c['action'] == 'list']
+    assert len(calls) == 1 and calls[0]['end_time'] - calls[0]['start_time'] == 86400
+    report = (await rows('SELECT * FROM monitor_reports'))[0]
+    assert '仅统计样本' in report['content'] and '联调抽样轮次' in report['summary_content']
 
 @pytest.mark.asyncio
 async def test_daily_reservation_concurrent_recovery_midnight(policy):

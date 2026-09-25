@@ -153,7 +153,7 @@ async def test_injected_selection_persists_only_matches_and_keeps_cursor_atomic(
     directory = tmp_path / 'monitor-project'
     directory.mkdir()
     project = await Project.create(owner_id='owner', name='selection-fixture', worktree=str(directory))
-    policy = MonitoringPolicy(owner='owner', project=project.id, directory=str(directory), devices=['fixture'])
+    policy = MonitoringPolicy(development_sample=False, owner='owner', project=project.id, directory=str(directory), devices=['fixture'])
     original = runtime.query_device
     async def selected(*args):
         return await original(*args, selection=RULE)

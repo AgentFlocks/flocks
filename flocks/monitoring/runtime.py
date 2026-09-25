@@ -18,6 +18,7 @@ from .store import rows, write, connection, encode
 from .adapter import XdrAdapter, ContractError, page_items, response_items
 from . import diagnostics as diag
 from .summaries import Summary, page_summary, hosts_summary, analysis_summary, event_label
+from . import sampling
 
 _running: dict[str, asyncio.Task] = {}
 
@@ -106,6 +107,10 @@ class Recorder:
 
 
 async def query_device(adapter, device, start, end, recorder, *, selection=None):
+    if sampling.enabled(adapter.policy):
+        if selection is not None:
+            raise ContractError('联调抽样不能叠加其他本地筛选规则')
+        return await sampling.query_sample(adapter, device, start, end, recorder)
     from .pagination import IncidentPages
     batch = IncidentPages(device, selection)
     for page in range(1, adapter.policy.max_pages + 1):
@@ -148,7 +153,9 @@ async def run(execution, policy, adapter_factory=XdrAdapter):
     automatic_enabled = bool((await settings(policy.owner))['enabled'])
     mode_label = '邮件协同跟进' if automatic_enabled else '只读任务'
     trigger_message = await emit_message(session.id, f'系统自动监测 · {started.astimezone(ZoneInfo(policy.timezone)).strftime("%H:%M:%S")} · {mode_label}', role=MessageRole.USER)
-    await emit_message(session.id, '本轮安全运营监测开始。查询待处置、处置中且未加白或部分加白的 XDR 事件，并关联分析。' + ('先处理此前收到的回信，再查询新事件并逐条邮件通知责任人。' if automatic_enabled else '邮件跟进未启用，本轮只查询分析。'), message_id=message_id, parent_id=trigger_message.id)
+    query_description = (sampling.DESCRIPTION + '查询最近 24 小时且未加白或部分加白的事件。' if sampling.enabled(policy)
+                         else '查询待处置、处置中且未加白或部分加白的 XDR 事件，并关联分析。')
+    await emit_message(session.id, '本轮安全运营监测开始。' + query_description + ('先处理此前收到的回信，再查询新事件并逐条邮件通知责任人。' if automatic_enabled else '邮件跟进未启用，本轮只查询分析。'), message_id=message_id, parent_id=trigger_message.id)
     sequence = (await rows('SELECT sequence FROM monitor_attempts WHERE id=?', (attempt_id,)))[0]['sequence']
     from flocks.session.core.status import SessionStatus, SessionStatusBusy, SessionStatusIdle
     SessionStatus.set(session.id, SessionStatusBusy())
@@ -166,19 +173,22 @@ async def run(execution, policy, adapter_factory=XdrAdapter):
             raise ContractError('未绑定可用数据源')
         feedback = await process_replies(policy, session.id, reply_high, recorder)
         for device in policy.devices:
+            if sampling.enabled(policy) and observed:
+                break  # One new sample per round, not one per device.
             cursor = await rows('SELECT through_time FROM monitor_cursors WHERE owner=? AND scope=? AND device=?', (policy.owner, policy.scope, device))
             end = int(started.timestamp())
-            start = (cursor[0]['through_time'] - 600) if cursor else end - 86400
-            diag.event('query.window', device=diag.opaque(device), window_seconds=max(0, end - start), cursor_present=bool(cursor))
+            start = (cursor[0]['through_time'] - 600) if cursor and not sampling.enabled(policy) else end - 86400
+            diag.event('query.window', device=diag.opaque(device), window_seconds=max(0, end - start), cursor_present=bool(cursor), development_sample=sampling.enabled(policy))
             try:
                 with diag.span('query.device', device=diag.opaque(device)):
                     events = await query_device(adapter, device, start, end, recorder)
-                # Persist all normalized records and cursor in one transaction.
+                # A sample is not a complete scan: leave the normal cursor intact.
                 async with connection() as db:
                     for event in events:
                         await db.execute('INSERT INTO monitor_observations VALUES(?,?,?)', (attempt_id, event['key'], encode(event)))
-                    await db.execute('INSERT INTO monitor_cursors VALUES(?,?,?,?) ON CONFLICT(owner,scope,device) DO UPDATE SET through_time=MAX(through_time,excluded.through_time)',
-                                     (policy.owner, policy.scope, device, end))
+                    if not sampling.enabled(policy):
+                        await db.execute('INSERT INTO monitor_cursors VALUES(?,?,?,?) ON CONFLICT(owner,scope,device) DO UPDATE SET through_time=MAX(through_time,excluded.through_time)',
+                                         (policy.owner, policy.scope, device, end))
                 observed.extend(events)
                 for event in events:
                     params = {'action': 'get_entities', 'uuid': event['id'], 'entity_type': 'host'}
@@ -218,12 +228,13 @@ async def run(execution, policy, adapter_factory=XdrAdapter):
                       'errors': errors, 'disposition': '待人工确认', 'closure': 'open'}
             return result, result, analysis_summary(result, observed, groups)
         result = await recorder.call('关联分析', {'policy': 'xdr-risk-v1'}, analyze)
+        result['development_sample'] = sampling.enabled(policy)
         notification = await notify_batch(policy, session.id, observed, recorder)
         result['mail'] = {'feedback': feedback, 'notification': notification, 'enabled': automatic_enabled}
         result['disposition'] = '责任人邮件反馈后标记并回查' if automatic_enabled else '只读监测'
         status = 'partial' if errors and observed or feedback['pending'] or notification['pending'] else 'failed' if errors else 'completed'
         marking_summary = (f"邮件发送 {notification['sent']} 封；处理回信 {feedback['processed']} 封，{feedback['verified']} 封反馈已回查确认，{feedback['pending']} 封待跟进。" if automatic_enabled else '邮件跟进未启用，事件保持未闭环。')
-        summary = f"本轮{ {'completed': '完成', 'partial': '部分完成', 'failed': '失败'}[status]}：{len(observed)} 个事件，{result['risk']} 个风险，{result['unknown']} 个待判定。{marking_summary}"
+        summary = f"本轮{ {'completed': '完成', 'partial': '部分完成', 'failed': '失败'}[status]}：{len(observed)} 个事件，{result['risk']} 个风险，{result['unknown']} 个待判定。{marking_summary}" + ('本轮为开发联调抽样，不代表全部告警。' if sampling.enabled(policy) else '')
         await write('UPDATE monitor_attempts SET result=? WHERE id=?', (encode(result), attempt_id))
     except BaseException as exc:
         status = 'interrupted' if isinstance(exc, asyncio.CancelledError) else 'failed'

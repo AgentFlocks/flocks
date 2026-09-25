@@ -72,6 +72,10 @@ class XdrAdapter:
             raise ContractError('只读查询能力不可用或需要确认')
         if params.get('action') == 'list' and QUERY_FIELDS.intersection(params):
             require_query_contract(tool.info)
+        if 'severities' in params.get('api_params', {}):
+            properties = tool.info.get_schema().to_json_schema().get('properties', {})
+            if 'severities' not in properties.get('api_params', {}).get('properties', {}):
+                raise ContractError('请更新 XDR API 工具：联调抽样需要事件等级筛选能力')
         ctx = ToolContext(session_id=self.session_id, message_id=message_id, agent='rex')
         capture = OutputCapture(self.policy.tool)
         ctx._output_capture = capture
@@ -172,5 +176,6 @@ def normalize(device, raw):
         'alertIds': [str(x)[:200] for x in raw.get('alertIds', [])] if isinstance(raw.get('alertIds'), list) else [],
         'closure': 'open', 'disposition': '待人工确认',
         'dealStatus': raw.get('dealStatus') if type(raw.get('dealStatus')) is int else None,
+        'endTime': raw.get('endTime') if type(raw.get('endTime')) is int else None,
         'reason': ('XDR 事件等级 incidentSeverity 2–4（中危、高危、严重）' if native else 'XDR 旧版 riskLevel 0–2') if risk == 'risk' else '缺少明确忽略依据，保持待判定',
     }

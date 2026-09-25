@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState, useRef } from 'react';
 import { monitoringApi, type MailHistory } from '@/api/securityMonitoring';
 
-const states: Record<string, string> = { queued: '等待发送', sending: '正在发送', sent: '已发送', send_unknown: '发送结果待确认', skipped: '已离开通知范围', pending: '已收到，待下轮处理', interpreted: '已解读，等待标记或回查', needs_review: '待人工确认', verified: '目标状态已回查确认', mismatch: '回查不一致', failed: '未执行', unrelated: '已转回普通邮件会话', forwarding: '正在转交普通会话' };
+const states: Record<string, string> = { queued: '等待发送', sending: '正在发送', sent: '已发送', send_unknown: '发送结果待确认', skipped: '不发送（见原因）', pending: '已收到，待下轮处理', interpreted: '已解读，等待标记或回查', needs_review: '待人工确认', verified: '目标状态已回查确认', mismatch: '回查不一致', failed: '未执行', unrelated: '已转回普通邮件会话', forwarding: '正在转交普通会话' };
 const label = (s: string) => states[s] || s;
 const date = (s: string) => new Date(s).toLocaleString('zh-CN', { hour12: false });
 const button = 'rounded border px-3 py-1.5 text-sm disabled:opacity-40';

@@ -75,7 +75,7 @@ _TYPES = {'str', 'dict', 'list', 'int', 'float', 'bool', 'bytes', 'NoneType', 'o
 _ENUMS = {
     'event': {'trace.start', 'trace.end', 'progress', 'stage.start', 'stage.end', 'query.window',
               'tool.raw', 'tool.normalized', 'adapter.result', 'adapter.structured', 'adapter.decoded', 'adapter.failure',
-              'mail.received', 'mail.result', 'mail.interpreted', 'page.validated', 'run.result', 'dispatch.result', 'background.result'},
+              'mail.received', 'mail.result', 'mail.interpreted', 'mail.analyzed', 'query.sample', 'page.validated', 'run.result', 'dispatch.result', 'background.result'},
     'stage': {'dispatch', 'run', 'session.prepare', 'query.device', 'query.events', 'query.entities',
               'correlate', 'tool.execute', 'tool.handler', 'tool.normalize', 'report.export', 'step.other',
               'disposition.confirm', 'disposition.recheck', 'automatic.mark', 'mail.configure', 'mail.send', 'mail.receive', 'mail.interpret', 'mail.resolve', 'mail.mark', 'mail.readback'},
@@ -93,8 +93,8 @@ _NUMBERS = {'schema', 'pid', 'seq', 'elapsed_ms', 'duration_ms', 'length', 'item
             'window_seconds', 'devices', 'max_pages', 'timeout_seconds', 'json_position', 'json_line',
             'json_column', 'events', 'errors', 'suppressed', 'calls', 'call', 'loop_lag_ms', 'total'}
 _BOOLS = {'success', 'truncated', 'has_error', 'has_saved_output', 'cursor_present',
-          'authenticated_sender', 'sender_verification_bypassed'}
-_IDS = {'trace', 'owner', 'scope', 'execution', 'device', 'notice', 'reply', 'project'}
+          'authenticated_sender', 'sender_verification_bypassed', 'development_sample', 'preferred_severity', 'malicious'}
+_IDS = {'trace', 'owner', 'scope', 'execution', 'device', 'notice', 'reply', 'project', 'event_id'}
 
 
 def safe_record(fields):
@@ -358,7 +358,7 @@ def export_bundle(owner, scope):
         selected = sorted(records.values(), key=lambda r: (r.get('timestamp', ''), r.get('seq', 0)))
         capped = len(selected) > 5000
         selected = selected[-5000:]
-        return {'schema': 1, 'component': 'host-security-monitor', 'version': __version__, 'component_version': '1.3.1', 'mail_policy': 'mail-feedback-v1',
+        return {'schema': 1, 'component': 'host-security-monitor', 'version': __version__, 'component_version': '1.3.2', 'mail_policy': 'mail-feedback-v1',
                 'exported_at': datetime.now(timezone.utc).isoformat(),
                 'coverage': 'recent_rotating_logs', 'record_count': len(selected), 'capped': capped,
                 'health': {**health, 'read_errors': read_errors}, 'records': selected}

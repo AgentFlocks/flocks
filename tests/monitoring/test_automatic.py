@@ -30,7 +30,7 @@ async def auto(tmp_path, monkeypatch):
     directory = tmp_path / '.flocks/workspace/monitor'
     directory.mkdir(parents=True)
     project = await Project.create(owner_id='owner', name='monitor', worktree=str(directory))
-    policy = MonitoringPolicy(owner='owner', project=project.id, directory=str(directory), devices=['device'])
+    policy = MonitoringPolicy(development_sample=False, owner='owner', project=project.id, directory=str(directory), devices=['device'])
     scheduler = await TaskManager.create_scheduler(title='monitor', mode=SchedulerMode.CRON,
         trigger=TaskTrigger(cron='*/10 * * * *'), context={'monitoring': policy.model_dump()})
     raw = {'uuId': 'event', 'name': 'fixture', 'incidentSeverity': 4, 'dealStatus': 0,
@@ -429,7 +429,8 @@ async def test_reply_with_partial_review_keeps_other_item_readback_alive(auto, m
 
 
 @pytest.mark.parametrize('authenticated', [True, False])
-async def test_native_two_round_mail_feedback_flow(auto, actual_tool, connected_email, monkeypatch, authenticated):
+@pytest.mark.parametrize('development', [False, True])
+async def test_native_two_round_mail_feedback_flow(auto, actual_tool, connected_email, monkeypatch, authenticated, development):
     from email.mime.text import MIMEText
     from flocks.channel.inbound.dispatcher import InboundDispatcher
     from flocks.config.config import ChannelConfig
@@ -437,6 +438,9 @@ async def test_native_two_round_mail_feedback_flow(auto, actual_tool, connected_
     from flocks.monitoring.runtime import run
     from flocks.monitoring import mail_interpreter
     from flocks.task.models import ExecutionTriggerType
+    if development:
+        await development_mode(auto)
+        auto.raw.update(dealStatus=40, gptResult=10, hostIp='192.0.2.1')
     if not authenticated:
         connected_email._resolved.update(authservId='', requireAuthenticatedSender=False)
     await m.configure('owner', m.MailSettingsRequest(enabled=True, recipient_email='person@example.com'))
@@ -477,9 +481,96 @@ async def test_native_two_round_mail_feedback_flow(auto, actual_tool, connected_
     assert auto.send.await_count == 1
     updates = [data for path, data in actual_tool if path.endswith('/dealstatus')]
     assert len(updates) == 1 and updates[0]['uuIds'] == ['event']
+    assert updates[0]['dealStatus'] == (60 if development else 40)
+    if development:
+        assert '[开发联调]' in notices[0]['subject']
+        listed = [data for path, data in actual_tool if path.endswith('/list')]
+        assert listed and all(data['dealStatus'] == [] for data in listed)
+        queries = [data for data in listed if not data.get('uuIds')]
+        assert all(data['severities'] == [2, 3, 4] and data['pageSize'] == 5 for data in queries)
     assert (await rows('SELECT state FROM monitor_mail_replies'))[0]['state'] == 'verified'
     report = (await rows('SELECT * FROM monitor_reports'))[0]
     assert '当日告警总结' in report['summary_content'] and '执行时间线' in report['content']
+    if development:
+        await tick()
+        data = await snapshot('owner', auto.policy.scope, auto.day)
+        assert data['developmentSample'] and data['metrics']['ignored'] == 1
+        assert auto.send.await_count == 1
+        assert len([1 for path, _ in actual_tool if path.endswith('/dealstatus')]) == 1
+
+
+async def development_mode(auto):
+    from flocks.task.store import TaskStore
+    auto.policy.development_sample = True
+    auto.event['development_sample'] = True
+    auto.scheduler.context['monitoring'] = auto.policy.model_dump()
+    await TaskStore.update_scheduler(auto.scheduler)
+    await write('UPDATE monitor_installations SET policy=? WHERE owner=?', (encode(auto.policy.model_dump()), 'owner'))
+
+
+@pytest.mark.parametrize('initial,expected_writes', [(0, 1), (40, 1), (60, 0)])
+async def test_sample_feedback_ignores_only_sample_and_is_idempotent(auto, initial, expected_writes):
+    await development_mode(auto)
+    auto.raw.update(dealStatus=initial, gptResult=10)
+    n = await notice(auto)
+    assert n['state'] == 'sent' and '[开发联调]' in n['subject']
+    assert all(c['deal_statuses'] == [] for c in auto.calls if c['action'] == 'list')
+    msg = await reply(auto, n, text='本次联调处理已完成，请标记忽略。', authenticated=False)
+    result = interpretation(n, msg.text)
+    await consume(auto, result)
+    await consume(auto, result)
+    await notice(auto)
+    assert auto.send.await_count == 1
+    assert auto.raw['dealStatus'] == 60 and len(writes(auto)) == expected_writes
+    assert (await rows('SELECT state FROM monitor_mail_replies'))[0]['state'] == 'verified'
+    if writes(auto):
+        assert '开发联调' in writes(auto)[0]['deal_comment']
+
+
+@pytest.mark.parametrize('gpt,malicious', [(170, False), (40, False), (160, False), (10, True), (20, True)])
+async def test_sample_severity_alone_does_not_send(auto, gpt, malicious):
+    await development_mode(auto)
+    auto.raw['gptResult'] = gpt
+    n = await notice(auto)
+    assert n['state'] == ('sent' if malicious else 'skipped')
+    assert auto.send.await_count == int(malicious)
+    assert not writes(auto)
+
+
+async def test_sample_uses_entity_evidence_and_does_not_drain_old_backlog(auto):
+    await m.queue_notices(auto.policy, [{**auto.event, 'key': 'device:incident:old', 'id': 'old'}], auto.session.id)
+    await development_mode(auto)
+    auto.responses['file']['data']['item'] = [{'threatLevel': 3}]
+    result = await m.notify_batch(auto.policy, auto.session.id, [auto.event], Recorder(), auto.adapter)
+    assert result == {'sent': 1, 'pending': 0} and auto.send.await_count == 1
+    old = (await rows("SELECT state FROM monitor_mail_notices WHERE event_key='device:incident:old'"))[0]
+    assert old['state'] == 'queued'
+
+
+async def test_sample_partial_entity_evidence_does_not_send(auto):
+    await development_mode(auto)
+    auto.raw['gptResult'] = 10
+    auto.responses['file'] = {'data': {}}
+    result = await m.notify_batch(auto.policy, auto.session.id, [auto.event], Recorder(), auto.adapter)
+    assert result == {'sent': 0, 'pending': 0} and not auto.send.called
+    assert (await rows('SELECT state FROM monitor_mail_notices'))[0]['state'] == 'skipped'
+
+
+@pytest.mark.parametrize('change', ['end_time', 'status', 'host', 'in_progress', 'mode'])
+async def test_sample_changed_evidence_or_unfinished_feedback_never_writes(auto, change):
+    await development_mode(auto)
+    auto.raw.update(dealStatus=40, gptResult=10)
+    n = await notice(auto)
+    msg = await reply(auto, n)
+    if change == 'end_time': auto.raw['endTime'] += 1
+    if change == 'status': auto.raw['dealStatus'] = 10
+    if change == 'host': auto.raw['hostIp'] = '192.0.2.2'
+    if change == 'mode':
+        auto.policy.development_sample = False
+        await write('UPDATE monitor_installations SET policy=? WHERE owner=?', (encode(auto.policy.model_dump()), 'owner'))
+    await consume(auto, interpretation(n, msg.text, outcome='in_progress' if change == 'in_progress' else 'completed'))
+    assert not writes(auto)
+    assert (await rows('SELECT state FROM monitor_mail_replies'))[0]['state'] == 'needs_review'
 
 
 async def test_development_feedback_cannot_escape_to_generic_agent(auto, monkeypatch):

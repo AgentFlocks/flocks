@@ -15,6 +15,14 @@ const data = {
  queued: [], report: { status: 'updated', version: 1 },
 };
 beforeEach(() => { vi.resetAllMocks(); mocks.overview.mockResolvedValue({ data }); mocks.report.mockResolvedValue({ data: '# 安全运营监测\n[查看本轮对话](/sessions?session=real-session&focusMessage=anchor)' }); });
+it('identifies sample monitoring and the development feedback target', async () => {
+ mocks.overview.mockResolvedValue({ data: { ...data, developmentSample: true } });
+ render(<MemoryRouter><SecurityMonitor /></MemoryRouter>);
+ const controls = await screen.findByRole('region', { name: '监测控制' });
+ expect(controls).toHaveTextContent('不限处置状态');
+ expect(controls).toHaveTextContent('每轮随机 1 条');
+ expect(controls).toHaveTextContent('反馈完成后标记忽略');
+});
 it('uses one native readonly live session and four workspace tabs', async () => {
  render(<MemoryRouter initialEntries={['/suites/host-security-monitor/session']}><SecurityMonitor /></MemoryRouter>);
  expect(await screen.findByTestId('native-chat')).toHaveTextContent('real-session readonly live');

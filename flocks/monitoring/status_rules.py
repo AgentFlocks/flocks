@@ -22,6 +22,16 @@ class Decision:
         return asdict(self)
 
 
+def malicious_evidence(decision):
+    """Severity alone and a prior disposition do not establish maliciousness."""
+    evidence = decision.evidence
+    if evidence['failedQueries'] or evidence['gptResult'] in {40, 160}:
+        return False
+    return evidence['gptResult'] in {10, 20, 110, 115, 120} or any(
+        item['level'] == 3 for kind in ('file', 'process', 'ip', 'dns')
+        for item in evidence['entities'][kind]['items'])
+
+
 def active_control(info, successes, timestamp):
     if not isinstance(info, dict) or info.get('status') not in successes:
         return False

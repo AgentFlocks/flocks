@@ -27,7 +27,7 @@ async def setup(tmp_path, monkeypatch):
     directory = tmp_path / '.flocks/workspace/monitor'
     directory.mkdir(parents=True)
     project = await Project.create(owner_id='owner', name='monitor', worktree=str(directory))
-    policy = MonitoringPolicy(owner='owner', project=project.id, directory=str(directory), devices=['device'])
+    policy = MonitoringPolicy(development_sample=False, owner='owner', project=project.id, directory=str(directory), devices=['device'])
     event = normalize('device', {'uuId': 'event', 'name': 'fixture', 'incidentSeverity': 4, 'dealStatus': 0})
     await write('INSERT INTO monitor_installations(owner,scope,project,policy,ready) VALUES(?,?,?,?,1)',
                 ('owner', policy.scope, project.id, encode(policy.model_dump())))

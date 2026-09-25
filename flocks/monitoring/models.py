@@ -18,6 +18,9 @@ class MonitoringPolicy(BaseModel):
     tool: str = 'sangfor_xdr_incidents'
     timeout_seconds: int = Field(default=480, ge=1, le=540)
     max_pages: int = Field(default=1000, ge=1, le=10000)
+    # Development branch default, including policies saved before this field existed.
+    # Disable explicitly to restore the normal complete incremental query.
+    development_sample: bool = True
 
     @field_validator('timezone')
     @classmethod

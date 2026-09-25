@@ -37,11 +37,13 @@ async def test_full_installed_path_no_direct_ready_or_result_seeding(monkeypatch
         calls.append(action)
         assert action in {'list', 'get_entities'}
         if action == 'list':
-            return ToolResult(success=True, output={'code': 0, 'data': {'list': [{'uuId': 'fixture-event', 'riskLevel': 2, 'name': '隔离测试数据'}], 'total': 1}})
+            assert kwargs['deal_statuses'] == [] and kwargs['api_params']['severities'] == [2, 3, 4]
+            return ToolResult(success=True, output={'code': 0, 'data': {'list': [{'uuId': 'fixture-event', 'incidentSeverity': 2, 'name': '隔离测试数据'}], 'total': 1}})
         return ToolResult(success=True, output={'code': 0, 'data': {'list': []}})
     parameters = [ToolParameter(name=k, type=ParameterType.STRING if k in {'action','uuid','entity_type'} else ParameterType.INTEGER, required=k == 'action')
                   for k in ('action','start_time','end_time','page_num','page_size','uuid','entity_type')]
     parameters += [ToolParameter(name='time_field', type=ParameterType.STRING, required=False)] + [ToolParameter(name=n, type=ParameterType.ARRAY, required=False) for n in ('white_status', 'deal_statuses')]
+    parameters += [ToolParameter(name='api_params', type=ParameterType.OBJECT, required=False, json_schema={'type': 'object', 'properties': {'severities': {'type': 'array', 'items': {'type': 'integer'}}}})]
     tool = Tool(info=ToolInfo(name='sangfor_xdr_incidents', description='Isolated synthetic device', source='device', provider='sangfor_xdr_v2_2', parameters=parameters), handler=handler)
     monkeypatch.setattr(ToolRegistry, '_tools', {tool.info.name: tool})
     monkeypatch.setattr(ToolRegistry, '_initialized', True)
