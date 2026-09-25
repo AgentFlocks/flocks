@@ -1,33 +1,31 @@
 """Catalog contention, invalidation and root isolation without live user data."""
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager
 import json
 from pathlib import Path
 import threading
 
 import pytest
 
-from flocks.hub import catalog, diagnostics
+from flocks.hub import catalog
 
 
 @pytest.fixture(autouse=True)
-def isolated(monkeypatch):
+def isolated():
     catalog.clear_catalog_caches()
-    monkeypatch.setattr(diagnostics.log, 'info', lambda *args: None)
     yield
     catalog.clear_catalog_caches()
 
 
 def track_wait(monkeypatch):
     waiting = threading.Event()
-    original = catalog.span
-    @contextmanager
-    def wrapped(name, **kwargs):
-        if name == 'catalog.build_wait':
+    original = catalog.Future
+
+    class ObservedFuture(original):
+        def result(self, timeout=None):
             waiting.set()
-        with original(name, **kwargs) as fields:
-            yield fields
-    monkeypatch.setattr(catalog, 'span', wrapped)
+            return super().result(timeout=timeout)
+
+    monkeypatch.setattr(catalog, 'Future', ObservedFuture)
     return waiting
 
 
@@ -193,20 +191,13 @@ def test_build_memo_is_local_and_safe_yaml_rejects_python_tags(tmp_path):
         catalog._safe_yaml('!!python/object/apply:os.system ["false"]')
 
 
-def test_background_builder_is_logged_and_never_holds_global_lock(monkeypatch):
-    records = []
-    def log(name, fields):
+def test_background_builder_never_holds_global_lock(monkeypatch):
+    def build(_):
         acquired = catalog._CATALOG_ENTRIES_LOCK.acquire(blocking=False)
-        assert acquired, 'diagnostic IO must run outside the cache lock'
+        assert acquired, 'catalog construction must run outside the cache lock'
         catalog._CATALOG_ENTRIES_LOCK.release()
-        records.append((name, fields))
-    monkeypatch.setattr(diagnostics.log, 'info', log)
+        return ()
+
     monkeypatch.setattr(catalog, '_catalog_entries_cache_key', lambda: ())
-    monkeypatch.setattr(catalog, '_build_catalog_entries', lambda _: ())
-    catalog._catalog_entries_snapshot()
-    begins = [fields for name, fields in records if name == 'hub.diag.catalog.build.begin']
-    ends = [fields for name, fields in records if name == 'hub.diag.catalog.build.end']
-    assert len(begins) == len(ends) == 1
-    assert begins[0]['build_id'] == ends[0]['build_id']
-    assert begins[0]['endpoint'] == 'catalog-build'
-    assert diagnostics._current.get() is None
+    monkeypatch.setattr(catalog, '_build_catalog_entries', build)
+    assert catalog._catalog_entries_snapshot() == ()

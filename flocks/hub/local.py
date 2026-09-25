@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from flocks.hub.diagnostics import record_handled_error, timed
 
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -74,7 +73,6 @@ def _record_path() -> Path:
     return Config.get_data_path() / "hub" / "installed.json"
 
 
-@timed("local.load_installed_records", detail=False)
 def load_installed_records() -> dict[str, InstalledPluginRecord]:
     import json
 
@@ -84,7 +82,6 @@ def load_installed_records() -> dict[str, InstalledPluginRecord]:
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except Exception as exc:
-        record_handled_error("local.load_installed_records", exc)
         return {}
     records = raw.get("plugins", raw)
     if not isinstance(records, dict):
@@ -122,7 +119,6 @@ def remove_installed_record(plugin_type: PluginType, plugin_id: str) -> None:
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
-@timed("local.has_install_payload", detail=True)
 def has_install_payload(plugin_type: PluginType, path: Path) -> bool:
     cache = _payload_cache.get()
     key = (plugin_type, path)
@@ -162,7 +158,6 @@ def _probe_install_payload(plugin_type: PluginType, path: Path) -> bool:
     return path.exists()
 
 
-@timed("local.installed_payload_version", detail=True)
 def installed_payload_version(plugin_type: PluginType, path: Path) -> Optional[str]:
     """Read a version embedded in an installed payload when one is available."""
     if plugin_type != "webui" or not path.is_dir():
@@ -211,7 +206,6 @@ def make_record(
     )
 
 
-@timed("local.infer_local_install", detail=True)
 def infer_local_install(plugin_type: PluginType, plugin_id: str) -> Optional[Path]:
     for scope in ("global", "project"):
         path = install_dir(plugin_type, plugin_id, scope)
@@ -249,7 +243,6 @@ def infer_local_install(plugin_type: PluginType, plugin_id: str) -> Optional[Pat
     return None
 
 
-@timed("local.infer_local_installs", detail=False)
 def infer_local_installs() -> dict[tuple[PluginType, str], Path]:
     """Scan installed plugin roots once and return plugin id -> install path."""
     result: dict[tuple[PluginType, str], Path] = {}
@@ -299,7 +292,6 @@ def infer_local_installs() -> dict[tuple[PluginType, str], Path]:
     return result
 
 
-@timed("local.tool_discovery_signature", detail=False)
 def tool_discovery_signature():
     """Watch nested install directories, including canonical linked roots."""
     from flocks.hub import tool_tree

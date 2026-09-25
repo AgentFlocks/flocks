@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from flocks.hub.diagnostics import timed
 
 import os
 from pathlib import Path
@@ -10,7 +9,6 @@ from pathlib import Path
 from flocks.project.instance import Instance
 
 
-@timed("paths._candidate_roots", detail=True)
 def _candidate_roots() -> list[Path]:
     roots: list[Path] = []
     env_root = os.getenv("FLOCKS_HUB_ROOT")
@@ -31,7 +29,6 @@ def _candidate_roots() -> list[Path]:
     return roots
 
 
-@timed("paths.get_bundled_hub_root", detail=True)
 def get_bundled_hub_root() -> Path:
     for root in _candidate_roots():
         if root.is_dir():

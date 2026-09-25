@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from flocks.hub.diagnostics import timed
 
 import json
 import os
@@ -224,7 +223,6 @@ class WebUIPagesStore:
     def _workspace_state_path(self) -> Path:
         return self._root / WORKSPACE_STATE_FILE
 
-    @timed("workspaces.read_workspace_enabled_overrides", detail=True)
     def read_workspace_enabled_overrides(self) -> dict[str, bool]:
         """Operator overrides of `enabled`, keyed by workspace id."""
         try:
@@ -307,7 +305,6 @@ class WebUIPagesStore:
         items.sort(key=lambda item: (item.order, item.title))
         return items
 
-    @timed("workspaces.list")
     def list_workspaces(self, *, enabled_only: bool = False) -> list[WebUIWorkspaceListItem]:
         self.ensure_root()
         workspaces: list[WebUIWorkspaceListItem] = []
@@ -538,7 +535,6 @@ class WebUIPagesStore:
     def _read_manifest(self, page_id: str) -> Optional[WebUIPageManifest]:
         return self._read_manifest_at(self.page_dir(page_id), page_id)
 
-    @timed("workspaces.read_manifest_at", detail=True)
     def _read_manifest_at(self, page_dir: Path, page_id: str) -> Optional[WebUIPageManifest]:
         path = page_dir / "manifest.json"
         if not path.is_file():
@@ -561,7 +557,6 @@ class WebUIPagesStore:
         return self._read_build_meta_at(self.page_dir(page_id))
 
     @staticmethod
-    @timed("workspaces.read_build_meta_at", detail=True)
     def _read_build_meta_at(page_dir: Path) -> WebUIPageBuildMeta:
         path = page_dir / "dist" / "meta.json"
         if not path.is_file():
@@ -769,7 +764,6 @@ class WebUIPagesStore:
         except Exception:
             return None
 
-    @timed("workspaces.iter_workspace_dirs", detail=True)
     def _iter_workspace_dirs(self, root: Path) -> list[tuple[Path, WebUIWorkspaceManifest]]:
         workspaces: list[tuple[Path, WebUIWorkspaceManifest]] = []
         for manifest_path in sorted(

@@ -14,7 +14,6 @@ from pathlib import Path
 import stat
 import threading
 
-from flocks.hub.diagnostics import span, installation_scan_trace
 
 _lock = threading.Lock()
 _epoch = 0
@@ -93,44 +92,40 @@ def _scan(root, checkpoint):
     # computes subtree payload presence, replacing per-file parent.rglob().
     stack = [root]
     order = []
-    entries_seen = 0
-    with installation_scan_trace(hashlib.sha256(str(root).encode()).hexdigest()[:20]), span('local.tool_tree.scan') as metrics:
-        while stack:
-            checkpoint()
-            directory = stack.pop()
-            stamp = _stamp(directory)
-            tree.stamps[directory] = stamp
-            if stamp is None or not stat.S_ISDIR(stamp[2]):
-                continue
-            order.append(directory)
-            children = []
-            direct = False
-            try:
-                with os.scandir(directory) as entries:
-                    for entry in entries:
-                        checkpoint()
-                        entries_seen += 1
-                        path = directory / entry.name
-                        linked = entry.is_symlink()
-                        is_dir = entry.is_dir(follow_symlinks=False)
-                        is_file = entry.is_file()  # file symlinks retain existing semantics
-                        children.append((path, is_dir or (linked and entry.is_dir()), is_file))
-                        if linked:
-                            tree.links.add(path)
-                            tree.stamps[path] = _stamp(path)
-                        if is_file and path.suffix in {'.yaml', '.yml', '.py'}:
-                            tree.files.append(path)
-                            if path.suffix == '.yaml' or (path.suffix == '.py' and path.name != '__init__.py'):
-                                direct = True
-            except (FileNotFoundError, NotADirectoryError):
-                raise Superseded() from None  # changed mid-scan; never publish half a tree
-            stack.extend(path for path, is_dir, _ in reversed(children) if is_dir and path not in tree.links)
-            tree.children[directory] = children
-            tree.payload[directory] = direct
-        for directory in reversed(order):
-            tree.payload[directory] |= any(tree.payload.get(path, False)
-                                           for path, is_dir, _ in tree.children[directory] if is_dir)
-        metrics.update(directories=len(order), entries=entries_seen, candidates=len(tree.files))
+    while stack:
+        checkpoint()
+        directory = stack.pop()
+        stamp = _stamp(directory)
+        tree.stamps[directory] = stamp
+        if stamp is None or not stat.S_ISDIR(stamp[2]):
+            continue
+        order.append(directory)
+        children = []
+        direct = False
+        try:
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    checkpoint()
+                    path = directory / entry.name
+                    linked = entry.is_symlink()
+                    is_dir = entry.is_dir(follow_symlinks=False)
+                    is_file = entry.is_file()  # file symlinks retain existing semantics
+                    children.append((path, is_dir or (linked and entry.is_dir()), is_file))
+                    if linked:
+                        tree.links.add(path)
+                        tree.stamps[path] = _stamp(path)
+                    if is_file and path.suffix in {'.yaml', '.yml', '.py'}:
+                        tree.files.append(path)
+                        if path.suffix == '.yaml' or (path.suffix == '.py' and path.name != '__init__.py'):
+                            direct = True
+        except (FileNotFoundError, NotADirectoryError):
+            raise Superseded() from None  # changed mid-scan; never publish half a tree
+        stack.extend(path for path, is_dir, _ in reversed(children) if is_dir and path not in tree.links)
+        tree.children[directory] = children
+        tree.payload[directory] = direct
+    for directory in reversed(order):
+        tree.payload[directory] |= any(tree.payload.get(path, False)
+                                       for path, is_dir, _ in tree.children[directory] if is_dir)
     return tree
 
 
@@ -156,8 +151,7 @@ def get(root, checkpoint=None):
                 _flights[key] = future
             previous = _cache.get(root)
         if not owner:
-            with span('local.tool_tree.wait'):
-                value = future.result()
+            value = future.result()
             checkpoint()
             if value is not None and epoch == _epoch:
                 return value
@@ -167,9 +161,7 @@ def get(root, checkpoint=None):
             if epoch != _epoch:
                 raise Superseded()
         try:
-            with span('local.tool_tree.validate') as metrics:
-                reusable = previous is not None and previous.valid(current)
-                metrics.update(cache_hit=reusable, directories=len(previous.stamps) if previous else 0)
+            reusable = previous is not None and previous.valid(current)
             value = previous if reusable else _scan(root, current)
             if not reusable and not value.valid(current):
                 raise Superseded()

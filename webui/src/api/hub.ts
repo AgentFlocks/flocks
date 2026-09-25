@@ -1,4 +1,3 @@
-import { diagnosticHubGet } from './hubDiagnostics';
 import client, { getApiBase } from './client';
 
 export type HubPluginType = 'skill' | 'agent' | 'tool' | 'device' | 'workflow' | 'webui' | 'component';
@@ -175,17 +174,17 @@ export interface HubUpdatePlan {
 }
 
 export const hubAPI = {
-  sceneSuites: () => diagnosticHubGet<HubSceneSuite[]>('/api/hub/scene-suites'),
+  sceneSuites: () => client.get<HubSceneSuite[]>('/api/hub/scene-suites'),
   setNativeSceneEnabled: (suiteId: string, enabled: boolean) => client.put(`/api/hub/scene-suites/${encodeURIComponent(suiteId)}/enabled`, { enabled }),
 
   catalog: (params?: HubCatalogParams) =>
-    diagnosticHubGet<HubCatalogEntry[]>('/api/hub/catalog', { params }),
+    client.get<HubCatalogEntry[]>('/api/hub/catalog', { params }),
 
   catalogPage: (params?: HubCatalogPageParams) =>
-    diagnosticHubGet<HubCatalogPageResponse>('/api/hub/catalog', { params }),
+    client.get<HubCatalogPageResponse>('/api/hub/catalog', { params }),
 
   categories: (params?: { includeCounts?: boolean }) =>
-    diagnosticHubGet('/api/hub/categories', {
+    client.get('/api/hub/categories', {
       params: params ? { include_counts: params.includeCounts } : undefined,
     }),
 

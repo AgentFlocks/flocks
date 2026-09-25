@@ -1061,10 +1061,8 @@ class _AuthGuardMiddleware:
         # where the Pro gate must be able to restore that verified identity.
         with execution_lifecycle_scope():
             try:
-                with hub_diagnostic_span("request.before_auth_hooks"):
-                    await _run_http_middleware_hooks(request, {"stage": "before_auth"})
-                with hub_diagnostic_span("request.authentication"):
-                    _blocked, token, _user = await apply_auth_for_request(request)
+                await _run_http_middleware_hooks(request, {"stage": "before_auth"})
+                _blocked, token, _user = await apply_auth_for_request(request)
             except StarletteHTTPException as exc:
                 response = JSONResponse(
                     status_code=exc.status_code,
@@ -1180,9 +1178,6 @@ async def general_exception_handler(request: Request, exc: Exception):
 # _DeferredCORSMiddleware for rationale).
 app.add_middleware(_DeferredCORSMiddleware)
 
-# Outer boundary: include auth/config waits for Hub and scene-list requests.
-from flocks.hub.diagnostics import HubDiagnosticsMiddleware, span as hub_diagnostic_span
-app.add_middleware(HubDiagnosticsMiddleware)
 
 
 # Import and include routers

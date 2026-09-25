@@ -2,12 +2,10 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import platform
 import re
 import threading
-import uuid
 from collections import OrderedDict
 from concurrent.futures import Future, InvalidStateError
 from contextvars import ContextVar
@@ -15,7 +13,6 @@ from functools import lru_cache, wraps
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
-from flocks.hub.diagnostics import path_snapshot, record_handled_error, span, timed, catalog_build_trace, cache_invalidated
 from flocks.hub import local, tool_tree
 from flocks.hub.models import HubCatalogEntry, HubIndex, HubIndexEntry, HubPluginManifest, HubTaxonomy, PluginType
 from flocks.hub.paths import get_bundled_hub_root
@@ -81,29 +78,24 @@ def _safe_yaml(text):
     return yaml.load(text, Loader=getattr(yaml, 'CSafeLoader', yaml.SafeLoader))
 
 
-@timed("catalog.read_json", detail=True)
 @_once_per_build
 def _read_json(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-@timed("catalog.read_yaml", detail=True)
 @_once_per_build
 def _read_yaml(path: Path) -> dict[str, Any]:
     try:
         data = _safe_yaml(path.read_text(encoding="utf-8")) or {}
         return data if isinstance(data, dict) else {}
     except Exception as exc:
-        record_handled_error("catalog.read_yaml", exc)
         return {}
 
 
-@timed("catalog.path_signature", detail=True)
 def _path_signature(path: Path) -> tuple[str, int, int]:
     try:
         stat = path.stat()
     except OSError as exc:
-        record_handled_error("catalog.path_signature", exc)
         return (str(path), _PATH_SIGNATURE_MISSING, _PATH_SIGNATURE_MISSING)
     return (str(path), stat.st_mtime_ns, stat.st_size)
 
@@ -130,7 +122,6 @@ def _iter_tool_plugin_dirs(tools_root: Path) -> Iterable[Path]:
         yield child
 
 
-@timed("catalog.plugin_manifest_signature", detail=True)
 def _plugin_manifest_signature(plugin_type: PluginType, root: Path) -> tuple[tuple[str, int, int], ...]:
     if plugin_type == "skill":
         candidates = [root / "SKILL.md"]
@@ -254,7 +245,6 @@ def manifest_path(plugin_type: PluginType, plugin_id: str) -> Path:
     return direct
 
 
-@timed("catalog.load_manifest", detail=True)
 def load_manifest(plugin_type: PluginType, plugin_id: str) -> HubPluginManifest:
     path = manifest_path(plugin_type, plugin_id)
     if path.is_file():
@@ -336,7 +326,6 @@ def _base_manifest(
     )
 
 
-@timed("catalog.skill_manifest", detail=True)
 @_once_per_build
 def _skill_manifest(plugin_id: str, root: Path) -> Optional[HubPluginManifest]:
     skill_file = root / "SKILL.md"
@@ -358,7 +347,6 @@ def _skill_manifest(plugin_id: str, root: Path) -> Optional[HubPluginManifest]:
     )
 
 
-@timed("catalog.agent_manifest", detail=True)
 @_once_per_build
 def _agent_manifest(plugin_id: str, root: Path) -> Optional[HubPluginManifest]:
     agent_file = root / "agent.yaml"
@@ -389,7 +377,6 @@ def _agent_manifest(plugin_id: str, root: Path) -> Optional[HubPluginManifest]:
     )
 
 
-@timed("catalog.workflow_manifest", detail=True)
 @_once_per_build
 def _workflow_manifest(plugin_id: str, root: Path) -> Optional[HubPluginManifest]:
     workflow_file = root / "workflow.json"
@@ -497,7 +484,6 @@ def _provider_integration_type(provider: dict[str, Any]) -> Optional[str]:
     return cleaned or None
 
 
-@timed("catalog.tool_manifest", detail=True)
 @_once_per_build
 def _tool_manifest(plugin_id: str, root: Path) -> Optional[HubPluginManifest]:
     if not _has_direct_tool_payload(root):
@@ -547,7 +533,6 @@ def _tool_manifest(plugin_id: str, root: Path) -> Optional[HubPluginManifest]:
     )
 
 
-@timed("catalog.system_plugin_roots_cache_key", detail=False)
 def _system_plugin_roots_cache_key() -> tuple[tuple[str, int, int], ...]:
     signature: list[tuple[str, int, int]] = []
 
@@ -571,7 +556,6 @@ def _system_plugin_roots_cache_key() -> tuple[tuple[str, int, int], ...]:
     return tuple(signature)
 
 
-@timed("catalog.discover_system_plugin_roots", detail=False)
 def _discover_system_plugin_roots() -> dict[tuple[PluginType, str], Path]:
     roots: dict[tuple[PluginType, str], Path] = {}
 
@@ -618,7 +602,6 @@ def _system_plugin_roots() -> dict[tuple[PluginType, str], Path]:
     }
 
 
-@timed("catalog.bundled_tool_roots_cache_key", detail=False)
 def _bundled_tool_roots_cache_key() -> tuple[tuple[str, int, int], ...]:
     from flocks.hub.paths import bundled_tool_plugin_roots
 
@@ -631,7 +614,6 @@ def _bundled_tool_roots_cache_key() -> tuple[tuple[str, int, int], ...]:
     return tuple(signature)
 
 
-@timed("catalog.discover_bundled_tool_roots", detail=False)
 def _discover_bundled_tool_roots() -> dict[tuple[PluginType, str], Path]:
     """Tool plugin directories shipped pre-bundled inside flockshub.
 
@@ -685,7 +667,6 @@ def _bundled_tool_roots() -> dict[tuple[PluginType, str], Path]:
     }
 
 
-@timed("catalog.installed_plugins_cache_key", detail=False)
 def _installed_plugins_cache_key() -> tuple[tuple[str, int, int], ...]:
     signature: list[tuple[str, int, int]] = [_path_signature(local._record_path())]
 
@@ -713,7 +694,6 @@ def _installed_plugins_cache_key() -> tuple[tuple[str, int, int], ...]:
     return tuple(signature)
 
 
-@timed("catalog.catalog_entries_cache_key", detail=False)
 def _catalog_entries_cache_key() -> tuple[tuple[str, int, int], ...]:
     root = get_bundled_hub_root()
     return (
@@ -726,7 +706,6 @@ def _catalog_entries_cache_key() -> tuple[tuple[str, int, int], ...]:
     )
 
 
-@timed("catalog.build_entries", detail=False)
 def _build_catalog_entries(
     _signature: tuple[tuple[str, int, int], ...],
 ) -> tuple[HubCatalogEntry, ...]:
@@ -804,61 +783,48 @@ def _build_catalog_entries(
 
 
 def _catalog_entries_snapshot() -> tuple[HubCatalogEntry, ...]:
-    path_snapshot()
     while True:
         generation = _CATALOG_GENERATION
         signature = _catalog_entries_cache_key()
         key = (generation, signature)
-        candidate_build_id = uuid.uuid4().hex
         # The global lock protects only in-memory bookkeeping. No filesystem
         # work, parsing, logging or waits for other builders happen under it.
-        with span('catalog.lock_wait'):
-            _CATALOG_ENTRIES_LOCK.acquire()
-            try:
-                if generation != _CATALOG_GENERATION:
-                    continue
-                entries = _CATALOG_SNAPSHOTS.get(key)
-                if entries is not None:
-                    _CATALOG_SNAPSHOTS.move_to_end(key)
-                build = _CATALOG_BUILDS.get(key)
-                owner = entries is None and build is None
-                if owner:
-                    build = (Future(), candidate_build_id)
-                    _CATALOG_BUILDS[key] = build
-            finally:
-                _CATALOG_ENTRIES_LOCK.release()
+        _CATALOG_ENTRIES_LOCK.acquire()
+        try:
+            if generation != _CATALOG_GENERATION:
+                continue
+            entries = _CATALOG_SNAPSHOTS.get(key)
+            if entries is not None:
+                _CATALOG_SNAPSHOTS.move_to_end(key)
+            build = _CATALOG_BUILDS.get(key)
+            owner = entries is None and build is None
+            if owner:
+                build = Future()
+                _CATALOG_BUILDS[key] = build
+        finally:
+            _CATALOG_ENTRIES_LOCK.release()
         if entries is not None:
-            with span('catalog.cache_lookup') as metrics:
-                metrics.update(cache_hit=True, entry_count=len(entries), signature_count=len(signature))
             return entries
-        future, build_id = build
+        future = build
         if not owner:
-            with span('catalog.build_wait', build_id=build_id):
-                shared = future.result()
+            shared = future.result()
             if shared is not None and generation == _CATALOG_GENERATION:
-                with span('catalog.cache_lookup') as metrics:
-                    metrics.update(cache_hit=True, entry_count=len(shared), signature_count=len(signature))
                 return shared
             # Refresh superseded the builder; recompute the signature before
             # serving anything. Ordinary joined reads need not scan twice.
             continue
         try:
-            with catalog_build_trace(build_id, len(signature), generation=generation,
-                                     roots_id=hashlib.sha256(repr((str(get_bundled_hub_root()), str(local.install_root('tool', 'global')), str(local.install_root('tool', 'project')))).encode()).hexdigest()[:20],
-                                     signature_id=hashlib.sha256(repr(signature).encode()).hexdigest()[:20]):
-                token = _BUILD_MEMO.set({})
-                generation_token = _BUILD_GENERATION.set(generation)
-                try:
-                    with span('catalog.cache_lookup') as metrics:
-                        def check_current():
-                            if generation != _CATALOG_GENERATION:
-                                raise tool_tree.Superseded()
-                        with tool_tree.checking(check_current), local.discovery_scope():
-                            entries = _build_catalog_entries(signature)
-                        metrics.update(cache_hit=False, entry_count=len(entries), signature_count=len(signature))
-                finally:
-                    _BUILD_GENERATION.reset(generation_token)
-                    _BUILD_MEMO.reset(token)
+            token = _BUILD_MEMO.set({})
+            generation_token = _BUILD_GENERATION.set(generation)
+            try:
+                def check_current():
+                    if generation != _CATALOG_GENERATION:
+                        raise tool_tree.Superseded()
+                with tool_tree.checking(check_current), local.discovery_scope():
+                    entries = _build_catalog_entries(signature)
+            finally:
+                _BUILD_GENERATION.reset(generation_token)
+                _BUILD_MEMO.reset(token)
             with _CATALOG_ENTRIES_LOCK:
                 if generation == _CATALOG_GENERATION:
                     _CATALOG_SNAPSHOTS[key] = entries
@@ -890,14 +856,13 @@ def clear_catalog_caches() -> None:
         superseded = list(_CATALOG_BUILDS.values())
         _CATALOG_BUILDS.clear()
     tool_tree.clear()
-    for future, _ in superseded:
+    for future in superseded:
         _finish_build(future)
     load_index.cache_clear()
     load_taxonomy.cache_clear()
     _manifest_path_lookup.cache_clear()
     _cached_system_plugin_roots.cache_clear()
     _cached_bundled_tool_roots.cache_clear()
-    cache_invalidated(_CATALOG_GENERATION, len(superseded))
 
 
 def system_plugin_root(plugin_type: PluginType, plugin_id: str) -> Optional[Path]:
@@ -954,7 +919,6 @@ def _version_tuple(value: str) -> tuple[int, ...]:
     return tuple(int(part) for part in parts) if parts else (0,)
 
 
-@timed("catalog.catalog_install_state", detail=True)
 def _catalog_install_state(
     plugin_type: PluginType,
     install_path: Optional[Path],
@@ -1055,7 +1019,6 @@ def _resolve_install_path(
     return local.infer_local_install(plugin_type, plugin_id), record
 
 
-@timed("catalog.entry_from_index", detail=True)
 def _entry_from_index(
     item: HubIndexEntry,
     records: dict[str, local.InstalledPluginRecord],
@@ -1099,7 +1062,6 @@ def _entry_from_index(
     )
 
 
-@timed("catalog.entry_from_system_manifest", detail=True)
 def _entry_from_system_manifest(manifest: HubPluginManifest, root: Path) -> HubCatalogEntry:
     return HubCatalogEntry(
         id=manifest.id,
@@ -1126,7 +1088,6 @@ def _entry_from_system_manifest(manifest: HubPluginManifest, root: Path) -> HubC
     )
 
 
-@timed("catalog.entry_from_bundled_tool", detail=True)
 def _entry_from_bundled_tool(
     manifest: HubPluginManifest,
     root: Path,
@@ -1285,7 +1246,6 @@ def filter_catalog_entries(
     return [entry for entry in entries if keep(entry)]
 
 
-@timed("catalog.list_catalog", detail=False)
 def list_catalog(
     *,
     plugin_type: Optional[PluginType] = None,
@@ -1310,7 +1270,6 @@ def list_catalog(
     )
 
 
-@timed("catalog.category_counts", detail=False)
 def category_counts() -> dict:
     taxonomy = load_taxonomy().model_dump(mode="json")
     entries = list_catalog()
