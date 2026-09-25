@@ -46,7 +46,7 @@ export default function SecurityMonitor() {
     refreshSequence.current++;
     try {
       const result = await monitoringApi[action]();
-      setControlMessage(action === 'start' ? `监测已启动，下次执行：${fmt(result.data.scheduledNextRun, result.data.timezone)}` : '监测已暂停，未完成轮次已取消。');
+      setControlMessage(action === 'start' ? `监测已启动，首轮立即进入执行队列；下次定时执行：${fmt(result.data.scheduledNextRun, result.data.timezone)}` : '监测已暂停，未完成轮次已取消。');
     } catch (err: unknown) {
       const payload = (err as { response?: { data?: { detail?: unknown; message?: unknown } } })?.response?.data;
       const detail = payload?.detail ?? payload?.message;

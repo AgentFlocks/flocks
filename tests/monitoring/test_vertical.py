@@ -20,7 +20,8 @@ from flocks.workspace.manager import WorkspaceManager
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('symlinked_workspace', [False, True])
-async def test_full_installed_path_no_direct_ready_or_result_seeding(monkeypatch, tmp_path, symlinked_workspace):
+@pytest.mark.parametrize('manual_start', [False, True])
+async def test_full_installed_path_no_direct_ready_or_result_seeding(monkeypatch, tmp_path, symlinked_workspace, manual_start):
     if symlinked_workspace:
         home, storage = tmp_path / 'home', tmp_path / 'storage'
         home.mkdir()
@@ -54,10 +55,18 @@ async def test_full_installed_path_no_direct_ready_or_result_seeding(monkeypatch
         installed = (await rows('SELECT * FROM monitor_installations'))[0]
         assert installed['ready'] == 1, installed['reason']
         scheduler = await TaskStore.get_scheduler(installed['scheduler_id'])
-        stamp = datetime.now(timezone.utc)
-        scheduler.trigger.next_run = stamp
-        await TaskStore.update_scheduler(scheduler)
-        await admit_slots(scheduler, stamp)
+        if manual_start:
+            from flocks.monitoring.lifecycle import pause_monitoring, start_monitoring
+            await pause_monitoring(user.id)
+            await start_monitoring(user.id)
+            scheduler = await TaskStore.get_scheduler(installed['scheduler_id'])
+            assert scheduler.trigger.next_run > datetime.now(timezone.utc)
+            assert not await rows('SELECT * FROM monitor_slots')
+        else:
+            stamp = datetime.now(timezone.utc)
+            scheduler.trigger.next_run = stamp
+            await TaskStore.update_scheduler(scheduler)
+            await admit_slots(scheduler, stamp)
         execution = await TaskQueue().dequeue()
         assert execution
         result = await TaskExecutor.dispatch(execution, scheduler)

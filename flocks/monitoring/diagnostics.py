@@ -358,7 +358,7 @@ def export_bundle(owner, scope):
         selected = sorted(records.values(), key=lambda r: (r.get('timestamp', ''), r.get('seq', 0)))
         capped = len(selected) > 5000
         selected = selected[-5000:]
-        return {'schema': 1, 'component': 'host-security-monitor', 'version': __version__, 'component_version': '1.3.2', 'mail_policy': 'mail-feedback-v1',
+        return {'schema': 1, 'component': 'host-security-monitor', 'version': __version__, 'component_version': '1.3.3', 'mail_policy': 'mail-feedback-v1',
                 'exported_at': datetime.now(timezone.utc).isoformat(),
                 'coverage': 'recent_rotating_logs', 'record_count': len(selected), 'capped': capped,
                 'health': {**health, 'read_errors': read_errors}, 'records': selected}

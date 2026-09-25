@@ -16,6 +16,7 @@ from flocks.workspace.manager import WorkspaceManager
 from .models import COMPONENT_ID, MonitoringPolicy, MonitoringDeclaration
 from .store import rows, write, encode
 from .adapter import discover
+from .scheduling import IMMEDIATE_START_PENDING, start_immediately
 
 _lock = asyncio.Lock()
 CORE_CAPABILITIES = {'monitor.daily.v1', 'monitor.readonly.v1', 'monitor.native-messages.v1', 'monitor.confirmed-disposition.v1', 'monitor.automatic-status.v1', 'monitor.mail-feedback.v1'}
@@ -163,7 +164,7 @@ async def _pause_monitor(entry):
 
 
 async def start_monitoring(owner):
-    """Recheck local capabilities and arm the next slot; never probe a device here."""
+    """Recheck capabilities, queue the first round now, then resume cron slots."""
     async with _lock:
         record = local.get_record('component', COMPONENT_ID)
         if not record:
@@ -188,9 +189,9 @@ async def start_monitoring(owner):
         scheduler.status = SchedulerStatus.DISABLED
         scheduler.context = {**scheduler.context, 'monitoring': policy.model_dump()}
         await TaskStore.update_scheduler(scheduler)
-        await write('UPDATE monitor_installations SET policy=?,ready=1,reason=NULL,activation_pending=1 WHERE owner=? AND scope=?', (encode(policy.model_dump()), owner, COMPONENT_ID))
-        await TaskManager.enable_scheduler(scheduler.id)
-        await write('UPDATE monitor_installations SET activation_pending=0 WHERE owner=? AND scope=?', (owner, COMPONENT_ID))
+        await write('UPDATE monitor_installations SET policy=?,ready=1,reason=NULL,activation_pending=? WHERE owner=? AND scope=?',
+                    (encode(policy.model_dump()), IMMEDIATE_START_PENDING, owner, COMPONENT_ID))
+        await start_immediately(scheduler)
 
 
 async def pause_monitoring(owner):
@@ -225,15 +226,19 @@ async def reconcile():
         if not entry['ready']:
             continue  # missing capability remains explicitly not ready
         policy = MonitoringPolicy.model_validate_json(entry['policy'])
-        if entry['activation_pending']:
-            scheduler = await TaskStore.get_scheduler(entry['scheduler_id'])
-            if scheduler:
-                await TaskManager.enable_scheduler(scheduler.id)
-                await write('UPDATE monitor_installations SET activation_pending=0 WHERE owner=? AND scope=?', (policy.owner, policy.scope))
         if not Path(policy.directory).is_dir():
             await TaskManager.disable_scheduler(entry['scheduler_id'])
             await write('UPDATE monitor_installations SET ready=0,reason=? WHERE owner=? AND scope=?',
                         ('专用项目路径不可用', policy.owner, policy.scope))
+            continue
+        if entry['activation_pending']:
+            scheduler = await TaskStore.get_scheduler(entry['scheduler_id'])
+            if scheduler:
+                if entry['activation_pending'] == IMMEDIATE_START_PENDING:
+                    await start_immediately(scheduler)
+                else:
+                    await TaskManager.enable_scheduler(scheduler.id)
+                    await write('UPDATE monitor_installations SET activation_pending=0 WHERE owner=? AND scope=?', (policy.owner, policy.scope))
 
 
 async def compensate_install_failure(was_installed):

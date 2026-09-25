@@ -61,6 +61,7 @@ it('rechecks an unready installation on Start and displays the next execution', 
  await act(async () => finish({ data }));
  expect(await screen.findByRole('button', { name: '暂停监测' })).toBeEnabled();
  expect(screen.getByRole('status')).toHaveTextContent('监测已启动');
+ expect(screen.getByRole('status')).toHaveTextContent('首轮立即进入执行队列');
  expect(screen.getByRole('region', { name: '监测控制' })).toHaveTextContent('10:10:00');
 });
 
