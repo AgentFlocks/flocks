@@ -518,6 +518,7 @@ async def delegate_task_tool(
         loop_result=result["loop_result"],
         metadata=final_metadata,
     )
-    result_status = "completed" if tool_result.success else "error"
+    reported_status = tool_result.metadata.get("status") if isinstance(tool_result.metadata, dict) else None
+    result_status = "completed" if tool_result.success else (reported_status or "error")
     ctx.metadata({"title": description, "metadata": {**final_metadata, "status": result_status}})
     return tool_result

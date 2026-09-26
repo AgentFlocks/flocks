@@ -1,0 +1,11 @@
+/deploy/.env
+/deploy/.env.*
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+/dist/
+/data/
+ragflow-api-token

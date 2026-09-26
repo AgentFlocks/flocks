@@ -90,7 +90,7 @@ PATHSPEC=(
   ':(exclude).git' ':(exclude).venv' ':(exclude)webui/node_modules' ':(exclude)webui/dist'
   ':(exclude)tui/node_modules' ':(exclude)temp' ':(exclude)tests' ':(exclude)dist'
   ':(exclude)packaging' ':(exclude)npm-wrapper' ':(exclude)docs' ':(exclude)assets'
-  ':(exclude).github' ':(exclude).claude'
+  ':(exclude).github' ':(exclude).claude' ':(exclude)services/knowledgebase'
   ':(exclude,glob)**/__pycache__/**' ':(exclude,glob)**/.pytest_cache/**'
   ':(exclude,glob)**/.mypy_cache/**' ':(exclude,glob)**/.ruff_cache/**' ':(exclude,glob)**/*.pyc'
 )

@@ -43,7 +43,6 @@ async def test_delegation_emits_child_lifecycle_with_parent_and_child_ids() -> N
     try:
         with (
             patch("flocks.tool.agent.delegate_task._find_completed_delegate", AsyncMock(return_value=None)),
-            patch("flocks.tool.agent.delegate_task.Config.get", AsyncMock(return_value=SimpleNamespace(categories=None))),
             patch("flocks.tool.agent.delegate_task.is_delegatable", return_value=True),
             patch("flocks.tool.agent.delegate_task.Session.get_by_id", AsyncMock(return_value=parent)),
             patch("flocks.tool.agent.delegate_task.Session.create", AsyncMock(return_value=child)),

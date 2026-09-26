@@ -1,8 +1,10 @@
 import { useState, useEffect, useCallback, useMemo, useRef, useReducer } from 'react';
+import { useLocation } from 'react-router-dom';
+import KnowledgeTab from './KnowledgeTab';
 import {
   FolderOpen, Upload, Download, Trash2, Edit3, Save,
   X, ChevronRight, ChevronDown, ChevronUp, RefreshCw, FolderPlus,
-  Brain, AlertTriangle, Search, ArrowLeft, Maximize2,
+  Brain, AlertTriangle, Search, ArrowLeft, Maximize2, Database,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import PageHeader from '@/components/common/PageHeader';
@@ -16,7 +18,7 @@ import { FilePreviewRenderer, PreviewModal, type PreviewFileAccess } from '@/com
 
 // ─── Types ────────────────────────────────────────────────────────────────
 
-type Tab = 'files' | 'memory';
+type Tab = 'files' | 'memory' | 'knowledge';
 type SortField = 'name' | 'size' | 'modified';
 type SortDirection = 'asc' | 'desc';
 const WORKSPACE_PREVIEW_FILE_ACCESS: PreviewFileAccess = {
@@ -109,8 +111,12 @@ function panelReducer(state: PanelState, action: PanelAction): PanelState {
 // ─── Main Page ────────────────────────────────────────────────────────────
 
 export default function WorkspacePage() {
-  const [activeTab, setActiveTab] = useState<Tab>('files');
+  const location = useLocation();
+  const [activeTab, setActiveTab] = useState<Tab>(() => new URLSearchParams(location.search).get('tab') === 'knowledge' ? 'knowledge' : 'files');
   const { t } = useTranslation('workspace');
+  useEffect(() => {
+    if (new URLSearchParams(location.search).get('tab') === 'knowledge') setActiveTab('knowledge');
+  }, [location.key, location.search]);
 
   return (
     <div className="flex h-[calc(100vh-3rem)] min-h-[560px] flex-col">
@@ -123,10 +129,12 @@ export default function WorkspacePage() {
       <div className="flex gap-1 px-1 mb-4 border-b border-gray-200">
         <TabButton active={activeTab === 'files'} onClick={() => setActiveTab('files')} icon={<FolderOpen className="w-4 h-4" />} label={t('tabs.files')} />
         <TabButton active={activeTab === 'memory'} onClick={() => setActiveTab('memory')} icon={<Brain className="w-4 h-4" />} label={t('tabs.memory')} />
+        <TabButton active={activeTab === 'knowledge'} onClick={() => setActiveTab('knowledge')} icon={<Database className="w-4 h-4" />} label={t('tabs.knowledge')} />
       </div>
 
       <div className="min-h-0 flex-1 overflow-hidden">
-        {activeTab === 'files' ? <FilesTab /> : <MemoryTab />}
+        {activeTab === 'files' ? <FilesTab /> : activeTab === 'memory' ? <MemoryTab /> : null}
+        <KnowledgeTab active={activeTab === 'knowledge'} />
       </div>
     </div>
   );

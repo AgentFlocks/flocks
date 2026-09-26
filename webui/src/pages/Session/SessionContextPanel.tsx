@@ -22,6 +22,7 @@ import {
 import LoadingSpinner from '@/components/common/LoadingSpinner';
 import { TodoList } from '@/components/common/TodoList';
 import { extractErrorMessage } from '@/utils/error';
+import SessionDatasetSection from './SessionDatasetSection';
 
 interface PreviewState {
   node: WorkspaceNode;
@@ -595,6 +596,7 @@ export default function SessionContextPanel({
                 </div>
               </Section>
             )}
+            <SessionDatasetSection sessionId={sessionId} />
           </>
         )}
       </div>

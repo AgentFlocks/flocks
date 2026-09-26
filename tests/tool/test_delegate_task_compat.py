@@ -236,6 +236,7 @@ class TestDelegateTaskTolerance:
     async def test_delegate_task_sync_continue_fails_when_last_message_missing(self):
         session = SimpleNamespace(
             id="ses-child",
+            project_id="proj",
             agent="asset-survey",
         )
 
@@ -262,6 +263,7 @@ class TestDelegateTaskTolerance:
     async def test_delegate_task_sync_continue_reports_normalized_abort(self):
         session = SimpleNamespace(
             id="ses-child-aborted",
+            project_id="proj",
             agent="asset-survey",
         )
 

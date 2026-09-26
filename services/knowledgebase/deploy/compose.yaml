@@ -1,0 +1,33 @@
+name: flocks-knowledgebase
+
+services:
+  api:
+    image: flocks-knowledgebase:local
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    user: "10001:10001"
+    init: true
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs:
+      - /tmp:mode=1777,size=64m
+    command: [python, -m, flocks_knowledgebase]
+    environment:
+      KB_API_TOKEN: ${KB_API_TOKEN:?Set the knowledgebase service token}
+      KB_RAGFLOW_BASE_URL: ${KB_RAGFLOW_BASE_URL:?Set the independent RAGFlow base URL}
+      KB_RAGFLOW_API_KEY: ${KB_RAGFLOW_API_KEY:?Set the RAGFlow API token}
+      KB_HOST: 0.0.0.0
+      KB_PORT: "8767"
+    ports:
+      - "127.0.0.1:18767:8767"
+    mem_limit: 512m
+    cpus: 1
+    restart: unless-stopped
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8767/healthz', timeout=5).close()"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 10s

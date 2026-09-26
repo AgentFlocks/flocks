@@ -493,6 +493,16 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         log.warning("workflow.trigger_runtime.start_failed", {"error": str(e)})
 
+    # Connecting the knowledge service only records configuration. It does not
+    # call the remote service, so an unreachable knowledge API cannot delay startup.
+    try:
+        from flocks.knowledgebase.runtime import start_from_environment
+
+        knowledgebase_status = await start_from_environment()
+        log.info("knowledgebase.integration.start", {"status": knowledgebase_status.get("status", "disabled")})
+    except Exception as exc:
+        log.warning("knowledgebase.integration.start_failed", {"error_type": type(exc).__name__})
+
     blocking_startup_ms = int((time.perf_counter() - startup_started_at) * 1000)
     log.info("server.startup.ready", {
         "blocking_duration_ms": blocking_startup_ms,
@@ -500,6 +510,13 @@ async def lifespan(app: FastAPI):
     })
 
     yield
+
+    try:
+        from flocks.knowledgebase.runtime import stop as stop_knowledgebase
+
+        await stop_knowledgebase()
+    except Exception as exc:
+        log.warning("knowledgebase.integration.stop_failed", {"error_type": type(exc).__name__})
 
     background_tasks = list(getattr(app.state, "startup_background_tasks", []))
     for task in background_tasks:
@@ -1228,6 +1245,7 @@ from flocks.server.routes.background_task import router as background_task_route
 # Channel routes (webhook + status)
 from flocks.server.routes.channel import router as channel_router
 # Workspace routes (file manager)
+from flocks.server.routes.knowledgebase import create_router as create_knowledgebase_router
 from flocks.server.routes.workspace import router as workspace_router
 # Update (self-upgrade)
 from flocks.server.routes.update import router as update_router
@@ -1292,6 +1310,7 @@ app.include_router(channel_router, prefix="/api/channel", tags=["Channel"])
 app.include_router(channel_router, prefix="/channel", tags=["Channel"])
 # Workspace (file manager)
 app.include_router(workspace_router, prefix="/api/workspace", tags=["Workspace"])
+app.include_router(create_knowledgebase_router(), prefix="/api")
 # Self-upgrade routes
 app.include_router(update_router, prefix="/api/update", tags=["Update"])
 # Log viewing routes

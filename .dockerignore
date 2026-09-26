@@ -86,3 +86,6 @@ site/
 CHANGELOG.md
 changelog.md
 tests/integration_ssh_*.py
+
+# The knowledgebase service has its own image and build context.
+services/knowledgebase/

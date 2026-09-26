@@ -1,0 +1,12 @@
+# Only the standalone package and its metadata enter the build context.
+**
+!Dockerfile
+!pyproject.toml
+!src/
+!src/flocks_knowledgebase/
+!src/flocks_knowledgebase/**
+**/__pycache__/
+**/*.pyc
+**/.env
+**/.env.*
+**/ragflow-api-token

@@ -861,6 +861,8 @@ class ToolRegistry:
         ("flocks.tool.code", ["bash", "grep", "lsp_tool"]),
         # web/ — internet access
         ("flocks.tool.web", ["webfetch", "websearch"]),
+        # Owner-scoped, read-only Knowledgebase retrieval (connection is lazy).
+        ("flocks.tool", ["knowledgebase"]),
         # agent/ — agent delegation/coordination
         ("flocks.tool.agent", ["delegate_task", "task"]),
         # task/ — task/workflow
