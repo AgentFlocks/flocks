@@ -493,12 +493,12 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         log.warning("workflow.trigger_runtime.start_failed", {"error": str(e)})
 
-    # Connecting the knowledge service only records configuration. It does not
-    # call the remote service, so an unreachable knowledge API cannot delay startup.
+    # Configure the direct knowledge client without contacting the engine.
+    # An unreachable engine must not delay Core startup.
     try:
-        from flocks.knowledgebase.runtime import start_from_environment
+        from flocks.knowledgebase.runtime import start_from_config
 
-        knowledgebase_status = await start_from_environment()
+        knowledgebase_status = await start_from_config()
         log.info("knowledgebase.integration.start", {"status": knowledgebase_status.get("status", "disabled")})
     except Exception as exc:
         log.warning("knowledgebase.integration.start_failed", {"error_type": type(exc).__name__})

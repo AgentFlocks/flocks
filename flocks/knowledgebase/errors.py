@@ -32,6 +32,21 @@ class KnowledgebaseError(Exception):
 
 
 def unavailable(code: str = "knowledgebase_unavailable") -> KnowledgebaseError:
-    return KnowledgebaseError(
-        503, code, "Knowledgebase integration is unavailable. No request was redirected to RAGFlow."
-    )
+    return KnowledgebaseError(503, code, "Knowledgebase integration is unavailable.")
+
+
+class KBError(Exception):
+    """Internal engine error, translated at the Core client boundary."""
+
+    def __init__(self, status: int, code: str, message: str, details: dict[str, Any] | None = None):
+        super().__init__(message)
+        self.status = status
+        self.code = code
+        self.message = message
+        self.details = details or {}
+
+
+class UpstreamError(KBError):
+    def __init__(self, code: str = "upstream_unavailable", *, upstream_code: int | str | None = None):
+        details = {"upstream_code": upstream_code} if upstream_code is not None else {}
+        super().__init__(502, code, "The knowledge engine could not complete this operation.", details)

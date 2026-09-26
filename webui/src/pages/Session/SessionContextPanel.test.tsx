@@ -48,7 +48,7 @@ vi.mock('react-i18next', () => ({
   }),
 }));
 
-const knowledgeApi = vi.hoisted(() => ({ status: vi.fn(), sessionDatasets: vi.fn() }));
+const knowledgeApi = vi.hoisted(() => ({ status: vi.fn(), sessionDatasets: vi.fn(), datasets: vi.fn() }));
 const datasetRenderIssue = vi.hoisted(() => ({ current: null as Promise<void> | Error | null, attempts: 0 }));
 vi.mock('@/api/knowledgebase', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/api/knowledgebase')>();
@@ -135,6 +135,7 @@ describe('SessionContextPanel', () => {
   beforeEach(() => {
     vi.resetAllMocks();
     knowledgeApi.status.mockResolvedValue({ configured: false, ready: false, reason: 'integration_pending' });
+    knowledgeApi.datasets.mockResolvedValue({ items: [], total: 0, page: 1 });
     datasetRenderIssue.current = null;
     datasetRenderIssue.attempts = 0;
     previewSuspension.current = null;

@@ -1,11 +1,14 @@
-"""Optional knowledgebase client. Importing this module does not connect anywhere."""
+"""Optional direct knowledgebase client; startup never contacts the engine."""
 
 from __future__ import annotations
 
-import os
 from typing import Any
 
-from .client import Connection, KnowledgebaseClient
+from flocks.config.config import Config
+from flocks.security.secrets import get_secret_manager
+
+from .client import Connection, KnowledgebaseClient, validate_connection_options
+from .flocksrag import FlocksragAdapter
 
 _client: KnowledgebaseClient | None = None
 
@@ -14,28 +17,55 @@ def get_client() -> KnowledgebaseClient | None:
     return _client
 
 
-def _connection_from_environment(environment: dict[str, str]) -> Connection | None:
-    base_url = environment.get("FLOCKS_KNOWLEDGEBASE_URL", "")
-    token = environment.get("FLOCKS_KNOWLEDGEBASE_API_TOKEN", "")
-    if not base_url and not token:
-        return None
-    if not base_url or not token:
-        raise ValueError("Knowledgebase connection is incomplete")
-    return Connection(base_url=base_url, api_token=token)
-
-
-async def start_from_environment(*, environment: dict[str, str] | None = None) -> dict[str, Any]:
-    """Record an explicit connection. This does not call RAGFlow or the knowledge service."""
+async def start_from_config() -> dict[str, Any]:
+    """Resolve the deployment connection once, without probing the remote engine."""
     global _client
     if _client is not None:
         return {"status": "already_started"}
     try:
-        connection = _connection_from_environment(dict(os.environ) if environment is None else environment)
-    except ValueError:
+        config = await Config.get()
+        services = getattr(config, "api_services", None)
+        if services is None:
+            return {"status": "disabled"}
+        if not isinstance(services, dict):
+            raise ValueError("Invalid API service configuration")
+        settings = services.get("knowledgebase")
+        if settings is None:
+            return {"status": "disabled"}
+        if not isinstance(settings, dict) or type(settings.get("enabled", False)) is not bool:
+            raise ValueError("Invalid knowledgebase configuration")
+        if not settings.get("enabled", False):
+            return {"status": "disabled"}
+
+        provider = settings.get("provider")
+        if provider == "flocksrag" and not FlocksragAdapter.implemented:
+            return {"status": "disabled", "reason": "not_implemented"}
+        if provider != "ragflow":
+            raise ValueError("Unsupported knowledgebase provider")
+
+        base_url = settings.get("base_url")
+        credential_id = settings.get("credential_id")
+        timeout = settings.get("timeout_seconds", 30.0)
+        upload_limit = settings.get("max_upload_bytes", 32 * 1024 * 1024)
+        if (
+            not isinstance(base_url, str)
+            or not isinstance(credential_id, str)
+            or not credential_id
+            or credential_id != credential_id.strip()
+            or "{" in credential_id
+            or "}" in credential_id
+            or type(timeout) not in {int, float}
+        ):
+            raise ValueError("Knowledgebase connection is incomplete")
+        validate_connection_options(base_url, timeout, upload_limit)
+
+        # Resolve only the selected credential in the service startup context.
+        token = get_secret_manager().get(credential_id)
+        connection = Connection(base_url, token, timeout, upload_limit)
+        client = KnowledgebaseClient(connection)
+    except Exception:
         return {"status": "disabled", "reason": "incomplete"}
-    if connection is None:
-        return {"status": "disabled"}
-    _client = KnowledgebaseClient(connection)
+    _client = client
     return {"status": "configured"}
 
 

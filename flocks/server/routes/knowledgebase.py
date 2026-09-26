@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, File, Query, Request, UploadFile
 from fastapi.responses import JSONResponse, Response
+from fastapi.routing import APIRoute
 from pydantic import BaseModel, Field
+from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.formparsers import MultiPartException
 
 from flocks.knowledgebase.errors import KnowledgebaseError
 from flocks.knowledgebase.retrieval import retrieve_for_session
@@ -89,6 +92,46 @@ def create_router() -> APIRouter:
     def _error(exc: KnowledgebaseError) -> JSONResponse:
         return JSONResponse(exc.public(), status_code=exc.status)
 
+    class UploadLimitRoute(APIRoute):
+        def get_route_handler(self):
+            handler = super().get_route_handler()
+
+            async def limited_upload(request: Request):
+                try:
+                    limit = client().connection.max_upload_bytes
+                    declared = request.headers.get("content-length")
+                    if declared is not None:
+                        try:
+                            if int(declared) > limit:
+                                raise KnowledgebaseError(413, "request_too_large", "The file exceeds the upload limit.")
+                        except ValueError:
+                            raise KnowledgebaseError(400, "invalid_request", "The upload length is invalid.") from None
+                except KnowledgebaseError as exc:
+                    return _error(exc)
+
+                received = 0
+                overflow = False
+
+                async def bounded_receive():
+                    nonlocal received, overflow
+                    message = await request.receive()
+                    if message["type"] == "http.request":
+                        received += len(message.get("body", b""))
+                        if received > limit + 512 * 1024:
+                            overflow = True
+                            # This exception makes the multipart parser close partial files.
+                            raise MultiPartException("The file exceeds the upload limit.")
+                    return message
+
+                try:
+                    return await handler(Request(request.scope, receive=bounded_receive))
+                except StarletteHTTPException:
+                    if not overflow:
+                        raise
+                    return _error(KnowledgebaseError(413, "request_too_large", "The file exceeds the upload limit."))
+
+            return limited_upload
+
     @router.get("/status")
     async def status(_user=Depends(require_user)):
         configured = get_client() is not None
@@ -106,18 +149,10 @@ def create_router() -> APIRouter:
         except KnowledgebaseError as exc:
             return _error(exc)
 
-    @router.post("/files", status_code=201)
     async def upload(request: Request, file: UploadFile = File(...), _user=Depends(require_user)):
         try:
             current = client()
             limit = current.connection.max_upload_bytes
-            declared = request.headers.get("content-length")
-            if declared is not None:
-                try:
-                    if int(declared) > limit:
-                        raise KnowledgebaseError(413, "request_too_large", "The file exceeds the upload limit.")
-                except ValueError:
-                    raise KnowledgebaseError(400, "invalid_request", "The upload length is invalid.") from None
             chunks: list[bytes] = []
             size = 0
             while True:
@@ -136,6 +171,8 @@ def create_router() -> APIRouter:
             return {"data": created}
         except KnowledgebaseError as exc:
             return _error(exc)
+
+    router.add_api_route("/files", upload, methods=["POST"], status_code=201, route_class_override=UploadLimitRoute)
 
     @router.get("/files/{file_id}/content")
     async def download(

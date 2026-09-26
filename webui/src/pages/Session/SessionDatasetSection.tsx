@@ -29,6 +29,17 @@ function rows(binding: SessionDatasets, catalog: Dataset[]): Dataset[] {
   });
 }
 
+function pickerRows(binding: SessionDatasets | null, catalog: Dataset[], draft: string[]): Dataset[] {
+  const options = new Map(catalog.map(item => [item.id, item]));
+  const metadata = new Map((binding?.datasets ?? []).map(item => [item.id, item]));
+  for (const id of [...(binding?.dataset_ids ?? []), ...draft]) {
+    if (!options.has(id)) options.set(id, metadata.get(id) ?? {
+      id, name: id, description: '', document_count: null, chunk_count: null,
+    });
+  }
+  return [...options.values()];
+}
+
 function DatasetBody({ sessionId }: { sessionId: string }) {
   const { t } = useTranslation('session');
   const toast = useOptionalToast();
@@ -52,10 +63,15 @@ function DatasetBody({ sessionId }: { sessionId: string }) {
       if (!status.ready) { setBinding(null); return; }
       const next = await knowledgebaseAPI.sessionDatasets(sessionId);
       if (request.current !== ticket) return;
-      const page = next.datasets ? null : await knowledgebaseAPI.datasets({ page_size: 100 });
-      if (request.current !== ticket) return;
+      const available = new Map<string, Dataset>();
+      for (let page = 1; ; page += 1) {
+        const result = await knowledgebaseAPI.datasets({ page, page_size: 100 });
+        if (request.current !== ticket) return;
+        result.items.forEach(item => available.set(item.id, item));
+        if (result.items.length === 0 || page * 100 >= result.total) break;
+      }
       setBinding(next);
-      setCatalog(page?.items ?? []);
+      setCatalog([...available.values()]);
       setDraft(next.dataset_ids);
     } catch (failure) {
       if (request.current !== ticket) return;
@@ -84,6 +100,7 @@ function DatasetBody({ sessionId }: { sessionId: string }) {
     void load();
   }, [sessionId]);
   const selected = binding ? rows(binding, catalog) : [];
+  const options = picking ? pickerRows(binding, catalog, draft) : [];
   return <section aria-label={t('dataset.title')} className="space-y-2 border-t border-zinc-200 px-3 py-3 text-sm dark:border-zinc-800">
     <div className="flex items-center gap-2">
       <h3 className="font-medium">{t('dataset.title')}</h3>
@@ -99,7 +116,7 @@ function DatasetBody({ sessionId }: { sessionId: string }) {
       <button type="button" className={buttonClass} onClick={() => { setDraft(binding.dataset_ids); setPicking(true); }}>{t('dataset.select')}</button>
     </>}
     {picking && <div className="space-y-2">
-      {catalog.map(item => <label key={item.id} className="flex items-center gap-2 text-xs"><input type="checkbox" checked={draft.includes(item.id)} onChange={() => setDraft(current => current.includes(item.id) ? current.filter(id => id !== item.id) : [...current, item.id])} />{item.name}</label>)}
+      {options.map(item => <label key={item.id} className="flex items-center gap-2 text-xs"><input type="checkbox" checked={draft.includes(item.id)} onChange={() => setDraft(current => current.includes(item.id) ? current.filter(id => id !== item.id) : [...current, item.id])} />{item.name}</label>)}
       <div className="flex gap-2"><button type="button" className={buttonClass} onClick={() => void apply()}>{t('dataset.apply')}</button><button type="button" className={buttonClass} onClick={() => setPicking(false)}>{t('dataset.cancel')}</button></div>
     </div>}
   </section>;
