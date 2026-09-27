@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from contextvars import ContextVar
 
 from fastapi import APIRouter, Depends, File, Query, Request, UploadFile
 from fastapi.responses import JSONResponse, Response
@@ -14,7 +15,7 @@ from starlette.formparsers import MultiPartException
 from flocks.knowledgebase.connection_settings import get_connection, save_connection
 from flocks.knowledgebase.errors import KnowledgebaseError
 from flocks.knowledgebase.retrieval import retrieve_for_session
-from flocks.knowledgebase.runtime import get_client
+from flocks.knowledgebase.runtime import get_client, lease_client
 from flocks.knowledgebase.session_datasets import detach_dataset, get_selection, set_selection
 from flocks.server.auth import require_user
 
@@ -84,10 +85,31 @@ def file_content_response(body: bytes, media: str, *, inline: bool) -> Response:
 
 
 def create_router() -> APIRouter:
-    router = APIRouter(prefix="/knowledgebase", tags=["knowledgebase"])
+    borrowed: ContextVar = ContextVar("knowledgebase_client", default=None)
+
+    class ClientLeaseRoute(APIRoute):
+        def wrap_handler(self, handler):
+            return handler
+
+        def get_route_handler(self):
+            handler = self.wrap_handler(super().get_route_handler())
+            if self.name in {"status", "connection", "set_connection", "session_datasets", "set_session_datasets"}:
+                return handler
+
+            async def leased(request: Request):
+                async with lease_client() as current:
+                    token = borrowed.set(current)
+                    try:
+                        return await handler(request)
+                    finally:
+                        borrowed.reset(token)
+
+            return leased
+
+    router = APIRouter(prefix="/knowledgebase", tags=["knowledgebase"], route_class=ClientLeaseRoute)
 
     def client():
-        current = get_client()
+        current = borrowed.get()
         if current is None:
             raise KnowledgebaseError(503, "knowledgebase_not_configured", "Knowledgebase is not configured.")
         return current
@@ -95,10 +117,8 @@ def create_router() -> APIRouter:
     def _error(exc: KnowledgebaseError) -> JSONResponse:
         return JSONResponse(exc.public(), status_code=exc.status)
 
-    class UploadLimitRoute(APIRoute):
-        def get_route_handler(self):
-            handler = super().get_route_handler()
-
+    class UploadLimitRoute(ClientLeaseRoute):
+        def wrap_handler(self, handler):
             async def limited_upload(request: Request):
                 try:
                     limit = client().connection.max_upload_bytes

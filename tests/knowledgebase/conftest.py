@@ -53,7 +53,10 @@ async def _knowledgebase_state(monkeypatch, _knowledgebase_no_network):
     monkeypatch.setattr(Config, "_global_config", None)
     monkeypatch.setattr(Config, "_cached_config", None)
     monkeypatch.setattr(secrets, "_secret_manager", None)
-    monkeypatch.setattr(runtime, "_client", None)
+    monkeypatch.setattr(runtime, "_current", None)
+    monkeypatch.setattr(runtime, "_stopping", False)
+    monkeypatch.setattr(runtime, "_epoch", 0)
+    monkeypatch.setattr(runtime, "_closing_tasks", set())
     yield
     await runtime.stop()
 

@@ -12,9 +12,15 @@ export default function KnowledgeTab({ active = true }: { active?: boolean }) {
   const [page, setPage] = useState<'files' | 'datasets'>('files');
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [revision, setRevision] = useState(0);
+  const [connectionRevision, setConnectionRevision] = useState(0);
   const status = useKnowledgeQuery(active ? 'integration-status' : null, signal => knowledgebaseAPI.status(signal));
   const ready = status.data?.ready === true;
   const changed = () => setRevision(value => value + 1);
+  const connectionSaved = () => {
+    // Reset detail state even if a fast status response batches away the loading view.
+    setConnectionRevision(value => value + 1);
+    status.reload();
+  };
   if (!active) return null;
   return <div className="space-y-4">
     <div className="flex items-center justify-between gap-3">
@@ -33,9 +39,9 @@ export default function KnowledgeTab({ active = true }: { active?: boolean }) {
           <Button onClick={status.reload}>{t('knowledge.unavailable.check')}</Button>
         </div>
       </div>}
-      {ready && page === 'files' && <FilesPage revision={revision} onChanged={changed} />}
-      {ready && page === 'datasets' && <DatasetsPage revision={revision} onChanged={changed} />}
+      {ready && page === 'files' && <FilesPage key={connectionRevision} revision={revision} onChanged={changed} />}
+      {ready && page === 'datasets' && <DatasetsPage key={connectionRevision} revision={revision} onChanged={changed} />}
     </LoadState>
-    {settingsOpen && <ConnectionSettingsSheet onClose={() => setSettingsOpen(false)} />}
+    {settingsOpen && <ConnectionSettingsSheet onClose={() => setSettingsOpen(false)} onSaved={connectionSaved} />}
   </div>;
 }

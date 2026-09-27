@@ -1,4 +1,8 @@
+from unittest.mock import AsyncMock
+
 from fastapi import FastAPI
+
+from flocks.knowledgebase import runtime
 from httpx import ASGITransport, AsyncClient
 
 from flocks.server.auth import require_user
@@ -38,10 +42,9 @@ def test_inline_preview_keeps_workspace_media_types():
 
 
 async def test_content_route_uses_the_safe_download_response(monkeypatch):
-    monkeypatch.setattr(
-        "flocks.server.routes.knowledgebase.get_client",
-        lambda: _Files(b"<script>alert(1)</script>", "text/html"),
-    )
+    current = _Files(b"<script>alert(1)</script>", "text/html")
+    current.close = AsyncMock()
+    runtime.publish(current, runtime.publication_epoch())
     app = FastAPI()
     app.include_router(create_router(), prefix="/api")
     app.dependency_overrides[require_user] = lambda: object()

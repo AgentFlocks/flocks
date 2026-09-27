@@ -104,7 +104,9 @@
       "loading": "正在加载连接设置…",
       "loadFailed": "无法加载连接设置，请重试。",
       "saveFailed": "保存失败，请检查连接设置并重试。",
-      "restartRequired": "已保存，重启 Flocks Core 后生效",
+      "saved": "已保存并生效",
+      "notApplied": "服务端未应用连接设置，当前视图未刷新。",
+      "keyConfiguredPlaceholder": "••••••••（已配置）",
       "errors": {
         "invalid_request": "连接设置无效，请检查地址与 API Key。",
         "api_key_required": "请输入 API Key；更改地址时不能沿用原有密钥。",
@@ -121,7 +123,7 @@
       "integration_pending": "知识库接入尚未完成",
       "integration_pendingHint": "当前安装尚未挂载知识库后端。请联系管理员完成后端接入后重新检查。此时未加载文件或知识集。",
       "knowledgebase_not_configured": "知识库尚未配置",
-      "knowledgebase_not_configuredHint": "请在连接设置中配置 RAGFlow。保存后需重启 Flocks Core；服务就绪前，文件和知识集操作保持禁用。",
+      "knowledgebase_not_configuredHint": "请在连接设置中配置 RAGFlow，保存后即生效。服务就绪前，文件和知识集操作保持禁用。",
       "knowledgebase_unavailable": "知识库服务不可用",
       "knowledgebase_unavailableHint": "请联系管理员检查知识库服务连接和后端状态，然后重新检查。此状态不代表知识库为空。",
       "check": "重新检查连接"

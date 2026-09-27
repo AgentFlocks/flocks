@@ -1,3 +1,4 @@
+import asyncio
 import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -6,6 +7,7 @@ import pytest
 from fastapi import FastAPI
 from starlette import formparsers
 
+from flocks.knowledgebase import runtime
 from flocks.server.routes import knowledgebase
 
 _BOUNDARY = b"knowledgebase-upload-test"
@@ -22,10 +24,12 @@ def make_app(monkeypatch, *, limit=1024, configured=True):
     created = {"id": "f1", "name": "note.txt", "size": 3, "parent_id": None}
     client = SimpleNamespace(
         connection=SimpleNamespace(max_upload_bytes=limit),
+        close=AsyncMock(),
         upload=AsyncMock(return_value=created),
         link_files=AsyncMock(return_value={"dataset_id": "d1", "file_ids": ["f1"]}),
     )
-    monkeypatch.setattr(knowledgebase, "get_client", lambda: client if configured else None)
+    if configured:
+        runtime.publish(client, runtime.publication_epoch())
     app = FastAPI()
     app.include_router(knowledgebase.create_router(), prefix="/api")
     app.dependency_overrides[knowledgebase.require_user] = lambda: "owner"
@@ -178,3 +182,58 @@ async def test_other_routes_do_not_gain_the_upload_body_limit(monkeypatch):
     assert body == {"data": {"dataset_id": "d1", "file_ids": ["f1"]}}
     assert reads == 1
     client.link_files.assert_awaited_once_with("d1", ["f1"])
+
+
+@pytest.mark.parametrize("stage", ["multipart", "file_read", "upload"])
+@pytest.mark.parametrize("cancel", [False, True])
+async def test_upload_pins_generation_and_limit_through_all_awaits(monkeypatch, stage, cancel):
+    from starlette.datastructures import UploadFile
+
+    app, old = make_app(monkeypatch, limit=1024)
+    entered, finish = asyncio.Event(), asyncio.Event()
+
+    async def pause():
+        entered.set()
+        await finish.wait()
+
+    if stage == "multipart":
+        original = formparsers.MultiPartParser.parse
+
+        async def parse(self):
+            await pause()
+            return await original(self)
+
+        monkeypatch.setattr(formparsers.MultiPartParser, "parse", parse)
+    elif stage == "file_read":
+        original = UploadFile.read
+
+        async def read(self, *args, **kwargs):
+            await pause()
+            return await original(self, *args, **kwargs)
+
+        monkeypatch.setattr(UploadFile, "read", read)
+    else:
+        async def upload(*args):
+            await pause()
+            return {"id": "old-generation"}
+
+        old.upload.side_effect = upload
+
+    pending = asyncio.create_task(request(app, [_HEADER, b"abc", _END]))
+    await asyncio.wait_for(entered.wait(), 1)
+    new = SimpleNamespace(connection=SimpleNamespace(max_upload_bytes=1), close=AsyncMock(), upload=AsyncMock())
+    runtime.publish(new, runtime.publication_epoch())
+    old.close.assert_not_awaited()
+    if cancel:
+        pending.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await pending
+    else:
+        finish.set()
+        status, _, _ = await pending
+        assert status == 201  # Old limit, not the replacement's one-byte limit.
+        old.upload.assert_awaited_once_with("note.txt", b"abc", "text/plain")
+    old.close.assert_awaited_once()
+    new.upload.assert_not_awaited()
+    assert runtime.get_client() is new
+    new.close.assert_not_awaited()

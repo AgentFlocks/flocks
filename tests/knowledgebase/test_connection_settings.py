@@ -11,6 +11,7 @@ from fastapi import FastAPI
 
 from flocks.config.config import Config
 from flocks.knowledgebase import connection_settings, runtime
+from flocks.knowledgebase.client import KnowledgebaseClient
 from flocks.knowledgebase.ragflow import RagflowAdapter
 from flocks.security.secrets import SecretManager
 from flocks.server.auth import require_user
@@ -107,6 +108,45 @@ def probe(monkeypatch, responder=None):
     return calls, adapters
 
 
+@pytest.fixture
+def candidates(monkeypatch):
+    clients = []
+
+    def construct(connection):
+        client = KnowledgebaseClient(connection, transport=httpx.MockTransport(
+            lambda request: httpx.Response(200, json={
+                "code": 0, "data": {"files": [], "total": 0, "parent_folder": None},
+            })
+        ))
+        client.close = AsyncMock(wraps=client.close)
+        clients.append(client)
+        return client
+
+    monkeypatch.setattr(connection_settings, "KnowledgebaseClient", construct)
+    return clients
+
+
+def slow_probe(monkeypatch):
+    entered, finish = asyncio.Event(), asyncio.Event()
+    adapters = []
+
+    class Adapter:
+        def __init__(self, *args, **kwargs):
+            self.close = AsyncMock()
+            adapters.append(self)
+
+        async def list_datasets(self, *, page, page_size):
+            entered.set()
+            await finish.wait()
+            return {"datasets": [], "total": 0}
+
+        async def list_files(self, *, page, page_size, keywords=None):
+            return {"files": [], "total": 0, "parent_folder": None}
+
+    monkeypatch.setattr(connection_settings, "RagflowAdapter", Adapter)
+    return entered, finish, adapters
+
+
 def assert_error(response, status, code, *private_values):
     assert response.status_code == status
     assert response.json()["error"]["code"] == code
@@ -135,7 +175,7 @@ async def test_save_probes_both_endpoints_then_writes_only_knowledgebase_service
     assert saved.status_code == 200
     assert saved.json() == {"data": {
         "provider": "ragflow", "base_url": URL, "has_api_key": True,
-        "applied": False, "restart_required": True,
+        "applied": True, "restart_required": False,
     }}
     assert [str(req.url) for req in calls] == [
         f"{URL}/datasets?page=1&page_size=1", f"{URL}/files?page=1&page_size=1"
@@ -221,7 +261,7 @@ async def test_failed_probes_do_not_change_config_or_secrets(app, files, monkeyp
 
 
 @pytest.mark.asyncio
-async def test_blank_key_requires_unchanged_url_and_still_requires_restart(app, files, monkeypatch):
+async def test_blank_key_requires_unchanged_url_and_applies_immediately(app, files, monkeypatch):
     configured(files)
     before_secrets = files.secrets.read_bytes()
     calls, _ = probe(monkeypatch)
@@ -229,7 +269,7 @@ async def test_blank_key_requires_unchanged_url_and_still_requires_restart(app, 
     assert response.status_code == 200
     assert response.json()["data"] == {
         "provider": "ragflow", "base_url": URL, "has_api_key": True,
-        "applied": False, "restart_required": True,
+        "applied": True, "restart_required": False,
     }
     assert len(calls) == 2
     assert all(req.headers["authorization"] == f"Bearer {OLD_KEY}" for req in calls)
@@ -512,14 +552,182 @@ async def test_save_rejects_config_changes_that_win_while_probing(app, files, mo
 
 
 @pytest.mark.asyncio
-async def test_read_and_save_leave_the_running_client_untouched(app, files, monkeypatch):
+async def test_read_keeps_and_save_replaces_the_running_client(app, files, monkeypatch):
     active = SimpleNamespace(close=AsyncMock())
-    monkeypatch.setattr(runtime, "_client", active)
+    runtime.publish(active, runtime.publication_epoch())
     calls, _ = probe(monkeypatch)
     assert (await request(app, "GET")).status_code == 200
     assert runtime.get_client() is active
     response = await request(app, "PUT", json=put(files))
-    assert response.status_code == 200 and response.json()["data"]["restart_required"] is True
+    assert response.status_code == 200 and response.json()["data"]["restart_required"] is False
     assert len(calls) == 2
+    assert runtime.get_client() is not active
+    assert runtime.get_client().connection.base_url == URL
+    assert not runtime.get_client()._http.is_closed
+    await asyncio.sleep(0)
+    active.close.assert_awaited_once()
+
+
+async def test_first_save_is_ready_and_uses_fresh_formal_client(app, files, monkeypatch, candidates):
+    calls, adapters = probe(monkeypatch)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as http:
+        assert (await http.get("/api/knowledgebase/status")).json()["data"]["ready"] is False
+        saved = await http.put(PATH, json=put(files))
+        assert saved.json()["data"]["applied"] is True
+        assert (await http.get("/api/knowledgebase/status")).json()["data"] == {"ready": True, "configured": True}
+        assert (await http.get("/api/knowledgebase/files")).status_code == 200
+    client = runtime.get_client()
+    assert client is candidates[0]
+    assert client.connection.timeout_seconds == 30
+    assert client.connection.max_upload_bytes == 32 * 1024 * 1024
+    assert client._adapter is not adapters[0] and adapters[0]._client.is_closed
+    assert not client._http.is_closed and len(calls) == 2
+
+
+async def test_save_publishes_without_closing_a_borrowed_client(app, files, monkeypatch, candidates):
+    active = SimpleNamespace(close=AsyncMock())
+    runtime.publish(active, runtime.publication_epoch())
+    probe(monkeypatch)
+    async with runtime.lease_client() as borrowed:
+        response = await request(app, "PUT", json=put(files))
+        assert response.status_code == 200 and response.json()["data"]["applied"] is True
+        assert borrowed is active
+        assert runtime.get_client() is candidates[0]
+        active.close.assert_not_awaited()
+        async with runtime.lease_client() as latest:
+            assert latest is candidates[0]
+    active.close.assert_awaited_once()
+    candidates[0].close.assert_not_awaited()
+
+
+async def test_replacement_preserves_formal_limits_not_probe_timeout(app, files, monkeypatch, candidates):
+    data = configured(files)
+    data["api_services"]["knowledgebase"].update(timeout_seconds=73, max_upload_bytes=123456)
+    files.config.write_text(json.dumps(data), encoding="utf-8")
+    probe(monkeypatch)
+    assert (await request(app, "PUT", json=put(files))).status_code == 200
+    assert candidates[0].connection.timeout_seconds == 73
+    assert candidates[0].connection.max_upload_bytes == 123456
+
+
+@pytest.mark.parametrize("failure", ["construct", "probe", "write", "secret", "conflict"])
+async def test_failed_save_preserves_live_client_and_closes_candidate(app, files, monkeypatch, candidates, failure):
+    configured(files)
+    active = SimpleNamespace(close=AsyncMock())
+    runtime.publish(active, runtime.publication_epoch())
+    before = files.config.read_bytes()
+
+    def fail(*args, **kwargs):
+        raise OSError(KEY)
+
+    if failure == "probe":
+        probe(monkeypatch, lambda req: httpx.Response(401))
+        status, code = 502, "connection_test_failed"
+    else:
+        probe(monkeypatch)
+        status, code = 500, "knowledgebase_save_failed"
+    if failure == "construct":
+        monkeypatch.setattr(connection_settings, "KnowledgebaseClient", fail)
+    elif failure == "write":
+        monkeypatch.setattr(connection_settings.ConfigWriter, "_write_raw", fail)
+    elif failure == "secret":
+        monkeypatch.setattr(SecretManager, "set", fail)
+    elif failure == "conflict":
+        original = connection_settings._load_settings
+        count = 0
+
+        def changed():
+            nonlocal count
+            count += 1
+            path, data, settings = original()
+            if count == 2:
+                data["theme"] = "concurrent"
+            return path, data, settings
+
+        monkeypatch.setattr(connection_settings, "_load_settings", changed)
+        status, code = 409, "knowledgebase_config_changed"
+    response = await request(app, "PUT", json=put(files))
+    assert_error(response, status, code, KEY, OLD_KEY)
     assert runtime.get_client() is active
     active.close.assert_not_awaited()
+    assert files.config.read_bytes() == before
+    assert len(candidates) == (0 if failure == "construct" else 1)
+    for client in candidates:
+        assert client._http.is_closed
+        client.close.assert_awaited_once()
+
+
+@pytest.mark.parametrize("close_error", [False, True])
+async def test_save_does_not_wait_for_or_fail_on_old_close(app, files, monkeypatch, candidates, close_error, caplog):
+    finish = asyncio.Event()
+
+    async def close():
+        await finish.wait()
+        if close_error:
+            raise RuntimeError(KEY)
+
+    active = SimpleNamespace(close=AsyncMock(side_effect=close))
+    runtime.publish(active, runtime.publication_epoch())
+    probe(monkeypatch)
+    try:
+        response = await asyncio.wait_for(request(app, "PUT", json=put(files)), 1)
+        assert response.status_code == 200 and response.json()["data"]["applied"] is True
+        assert runtime.get_client() is candidates[0]
+        assert not candidates[0]._http.is_closed
+        assert runtime._closing_tasks
+    finally:
+        finish.set()
+        await asyncio.gather(*tuple(runtime._closing_tasks))
+    active.close.assert_awaited_once()
+    assert KEY not in caplog.text
+    if close_error:
+        assert "Knowledgebase client cleanup failed." in caplog.text
+
+
+@pytest.mark.parametrize("action", ["cancel", "stop", "stop_and_start"])
+async def test_late_probe_cannot_publish_after_cancel_or_shutdown(app, files, monkeypatch, candidates, action):
+    active = SimpleNamespace(close=AsyncMock())
+    runtime.publish(active, runtime.publication_epoch())
+    entered, finish, adapters = slow_probe(monkeypatch)
+    pending = asyncio.create_task(request(app, "PUT", json=put(files)))
+    await asyncio.wait_for(entered.wait(), 1)
+    if action == "cancel":
+        pending.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await pending
+        assert runtime.get_client() is active
+        active.close.assert_not_awaited()
+    else:
+        await runtime.stop()
+        if action == "stop_and_start":
+            monkeypatch.setattr(Config, "get", AsyncMock(return_value=SimpleNamespace(api_services=None)))
+            assert await runtime.start_from_config() == {"status": "disabled"}
+        finish.set()
+        assert_error(await pending, 503, "knowledgebase_stopping", KEY)
+        assert runtime.get_client() is None
+        active.close.assert_awaited_once()
+    assert not files.config.exists() and not files.secrets.exists()
+    adapters[0].close.assert_awaited_once()
+    candidates[0].close.assert_awaited_once()
+    assert candidates[0]._http.is_closed
+
+
+async def test_concurrent_saves_publish_only_the_persisted_winner(app, files, monkeypatch, candidates):
+    entered, finish, _ = slow_probe(monkeypatch)
+    first = asyncio.create_task(request(app, "PUT", json=put(files)))
+    await asyncio.wait_for(entered.wait(), 1)
+    entered.clear()
+    second = asyncio.create_task(request(app, "PUT", json=put(files, url="https://second.test", key=OLD_KEY)))
+    await asyncio.wait_for(entered.wait(), 1)
+    finish.set()
+    responses = await asyncio.gather(first, second)
+    assert sorted(response.status_code for response in responses) == [200, 409]
+    winner = runtime.get_client()
+    saved = json.loads(files.config.read_text(encoding="utf-8"))["api_services"]["knowledgebase"]
+    stored = json.loads(files.secrets.read_text(encoding="utf-8"))
+    assert winner.connection.base_url == saved["base_url"]
+    assert winner.connection.api_token == stored[saved["credential_id"]]
+    winner.close.assert_not_awaited()
+    loser = next(client for client in candidates if client is not winner)
+    loser.close.assert_awaited_once()
+    assert loser._http.is_closed

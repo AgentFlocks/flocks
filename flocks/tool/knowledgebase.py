@@ -6,7 +6,7 @@ from flocks.agent.toolset import resolve_agent_initial_tools
 from flocks.auth.context import get_current_auth_user
 from flocks.knowledgebase.errors import KnowledgebaseError
 from flocks.knowledgebase.retrieval import retrieve_for_session
-from flocks.knowledgebase.runtime import get_client
+from flocks.knowledgebase.runtime import lease_client
 from flocks.tool.registry import (
     ParameterType,
     ToolCategory,
@@ -74,20 +74,20 @@ async def rag_retrieve_tool(
         )
         if "rag_retrieve" not in names:
             raise KnowledgebaseError(403, "tool_not_allowed_for_agent", "Knowledge retrieval is not available to this agent.")
-        client = get_client()
-        if client is None:
-            raise KnowledgebaseError(503, "knowledgebase_not_configured", "Knowledge retrieval is not configured.")
-        await ctx.ask(permission="rag_retrieve", patterns=["*"])
-        result = await retrieve_for_session(
-            ctx.session_id,
-            get_current_auth_user(),
-            keywords,
-            client=client,
-            dataset=dataset,
-            top_k=top_k,
-            similarity_threshold=similarity_threshold,
-            vector_similarity_weight=vector_similarity_weight,
-        )
-        return ToolResult(success=True, output=result)
+        async with lease_client() as client:
+            if client is None:
+                raise KnowledgebaseError(503, "knowledgebase_not_configured", "Knowledge retrieval is not configured.")
+            await ctx.ask(permission="rag_retrieve", patterns=["*"])
+            result = await retrieve_for_session(
+                ctx.session_id,
+                get_current_auth_user(),
+                keywords,
+                client=client,
+                dataset=dataset,
+                top_k=top_k,
+                similarity_threshold=similarity_threshold,
+                vector_similarity_weight=vector_similarity_weight,
+            )
+            return ToolResult(success=True, output=result)
     except KnowledgebaseError as error:
         return ToolResult(success=False, error=error.message, metadata={"code": error.code})

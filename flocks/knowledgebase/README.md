@@ -45,17 +45,11 @@ Open **Workspace → Knowledge Base → Connection settings** (the unconfigured 
 
 - **Knowledge engine:** RAGFlow is currently the only option.
 - **RAGFlow URL:** An address reachable from the **Flocks backend**. On the same machine, this may be `http://127.0.0.1:9380`. If Flocks runs in a container or on another host, use an address it can actually reach.
-- **API Key:** The key from RAGFlow's **API** page. An existing key is never filled into the form. You may leave the field empty only when keeping the same URL; changing the URL (including its path) requires a new key.
+- **API Key:** The key from RAGFlow's **API** page. When a key is already saved, the field shows a masked **configured** placeholder, not the actual key. Leave it unchanged to keep the saved key, or enter a replacement. Changing the URL (including its path) requires entering a key again.
 
-Click **Save**. Flocks first performs two authenticated, **read-only checks**: listing Knowledge Sets and listing files. It saves the settings only when both succeed. A failed check leaves the edited settings unsaved. The key is stored in Flocks' credential store and is not displayed again in the drawer.
+Click **Save**. Flocks first performs two authenticated, **read-only checks**: listing Knowledge Sets and listing files. Successful saves **take effect immediately, without restarting Core**, and refresh the connection status and lists. If validation or saving fails, the existing connection remains active. The key is stored in Flocks' credential store; its actual value is not sent back to the browser.
 
-After saving, **restart Flocks Core** to apply the settings. For an installation started with `flocks start`, run:
-
-```bash
-flocks restart --server-only
-```
-
-With another launch method, restart its backend accordingly. Clicking **Check connection again** on the page does **not** reload newly saved settings. A successful save checks those two list APIs, not the full upload-and-retrieval flow below.
+Requests already using the previous connection can finish before it is closed. A successful save checks those two list APIs, not the full upload-and-retrieval flow below.
 
 ## 4. Upload a file and build a Knowledge Set
 
@@ -84,7 +78,7 @@ A Workflow can invoke `rag_retrieve` in a **tool node** with `keywords` (the que
 
 | Symptom | What to check |
 |---|---|
-| “Knowledge Base is not configured” | Confirm that saving succeeded, then **restart Flocks Core**. The page's Check button is not a restart. |
+| “Knowledge Base is not configured” | Open Connection settings and save a valid connection. A successful save applies immediately; if the page is stale, click Check connection again. |
 | Saving reports a connection-check failure | Check reachability from the Flocks backend, the RAGFlow API Key and tenant permissions, and RAGFlow's dataset and file-list APIs. An anonymous health response does not validate the key. |
 | An uploaded file cannot be found in chat | Link it to a set, wait for the document to appear, start parsing, confirm indexing completes, select the set in the **current session**, and check that the Agent may use `rag_retrieve`. |
 | An upload is rejected | Check its file name and size; multipart request overhead also matters close to the limit. |

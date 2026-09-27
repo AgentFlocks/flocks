@@ -27,7 +27,7 @@ export interface Page<T> { items: T[]; total: number; page: number }
 export interface SessionDatasets { session_id: string; dataset_ids: string[]; datasets?: Dataset[] }
 export interface IntegrationStatus { configured: boolean; ready: boolean }
 export interface ConnectionSettings { provider: 'ragflow' | null; base_url: string; has_api_key: boolean }
-export interface ConnectionSaveResult { provider: 'ragflow'; base_url: string; has_api_key: boolean; applied: false; restart_required: true }
+export interface ConnectionSaveResult { provider: 'ragflow'; base_url: string; has_api_key: boolean; applied: true; restart_required: false }
 export interface ListOptions { q?: string; page?: number; page_size?: number }
 
 interface Envelope<T> { data: T }

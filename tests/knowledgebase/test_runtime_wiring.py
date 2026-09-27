@@ -1,3 +1,5 @@
+import asyncio
+
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
@@ -7,13 +9,6 @@ import pytest
 from flocks.knowledgebase import runtime
 from flocks.knowledgebase.errors import KnowledgebaseError
 from flocks.knowledgebase.flocksrag import FlocksragAdapter
-
-
-@pytest.fixture(autouse=True)
-async def reset_client():
-    await runtime.stop()
-    yield
-    await runtime.stop()
 
 
 def configured(**overrides):
@@ -169,8 +164,157 @@ async def test_config_and_secret_errors_stay_sanitized(monkeypatch):
 @pytest.mark.asyncio
 async def test_stop_clears_the_singleton_even_if_close_fails(monkeypatch):
     client = SimpleNamespace(close=AsyncMock(side_effect=RuntimeError("close failed")))
-    monkeypatch.setattr(runtime, "_client", client)
-    with pytest.raises(RuntimeError, match="close failed"):
-        await runtime.stop()
+    runtime.publish(client, runtime.publication_epoch())
+    await runtime.stop()
     assert runtime.get_client() is None
     client.close.assert_awaited_once()
+
+
+async def test_retired_generation_closes_once_after_last_lease():
+    old = SimpleNamespace(close=AsyncMock())
+    new = SimpleNamespace(close=AsyncMock())
+    epoch = runtime.publication_epoch()
+    runtime.publish(old, epoch)
+    async with runtime.lease_client() as first:
+        async with runtime.lease_client() as second:
+            assert first is second is old
+            runtime.publish(new, epoch)
+            assert runtime.get_client() is new
+            async with runtime.lease_client() as latest:
+                assert latest is new
+            old.close.assert_not_awaited()
+        old.close.assert_not_awaited()
+    old.close.assert_awaited_once()
+    await runtime.stop()
+    await runtime.stop()
+    old.close.assert_awaited_once()
+    new.close.assert_awaited_once()
+
+
+@pytest.mark.parametrize("outcome", ["error", "cancel"])
+async def test_failed_inflight_operation_releases_retired_client(outcome):
+    entered = asyncio.Event()
+    finish = asyncio.Event()
+    old = SimpleNamespace(close=AsyncMock())
+    runtime.publish(old, runtime.publication_epoch())
+
+    async def operation():
+        async with runtime.lease_client():
+            entered.set()
+            await finish.wait()
+            raise ValueError("operation failed")
+
+    pending = asyncio.create_task(operation())
+    await asyncio.wait_for(entered.wait(), 1)
+    runtime.publish(SimpleNamespace(close=AsyncMock()), runtime.publication_epoch())
+    old.close.assert_not_awaited()
+    if outcome == "cancel":
+        pending.cancel()
+        expected = asyncio.CancelledError
+    else:
+        finish.set()
+        expected = ValueError
+    with pytest.raises(expected):
+        await pending
+    old.close.assert_awaited_once()
+
+
+async def test_repeated_cancellation_does_not_cancel_retired_cleanup():
+    entered, closing, finish = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+    async def close():
+        closing.set()
+        await finish.wait()
+
+    old = SimpleNamespace(close=AsyncMock(side_effect=close))
+    runtime.publish(old, runtime.publication_epoch())
+
+    async def operation():
+        async with runtime.lease_client():
+            entered.set()
+            await asyncio.Event().wait()
+
+    pending = asyncio.create_task(operation())
+    await asyncio.wait_for(entered.wait(), 1)
+    runtime.publish(SimpleNamespace(close=AsyncMock()), runtime.publication_epoch())
+    pending.cancel()
+    await asyncio.wait_for(closing.wait(), 1)
+    pending.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await pending
+    tasks = tuple(runtime._closing_tasks)
+    assert len(tasks) == 1 and not tasks[0].done()
+    finish.set()
+    await asyncio.wait_for(asyncio.gather(*tasks), 1)
+    old.close.assert_awaited_once()
+
+
+async def test_shutdown_retires_but_does_not_close_inflight_generation():
+    old = SimpleNamespace(close=AsyncMock())
+    epoch = runtime.publication_epoch()
+    runtime.publish(old, epoch)
+    async with runtime.lease_client() as borrowed:
+        await runtime.stop()
+        assert borrowed is old and runtime.get_client() is None
+        old.close.assert_not_awaited()
+        with pytest.raises(KnowledgebaseError, match="shutting down"):
+            runtime.publish(SimpleNamespace(close=AsyncMock()), epoch)
+    old.close.assert_awaited_once()
+
+
+async def test_shutdown_prevents_late_startup_publication(monkeypatch):
+    entered, finish = asyncio.Event(), asyncio.Event()
+
+    async def load():
+        entered.set()
+        await finish.wait()
+        return SimpleNamespace(api_services={"knowledgebase": configured()})
+
+    candidate = SimpleNamespace(close=AsyncMock())
+    monkeypatch.setattr(runtime.Config, "get", load)
+    monkeypatch.setattr(runtime, "KnowledgebaseClient", lambda connection: candidate)
+    monkeypatch.setattr(runtime, "get_secret_manager", lambda: SimpleNamespace(get=lambda key: "x" * 32))
+    pending = asyncio.create_task(runtime.start_from_config())
+    await asyncio.wait_for(entered.wait(), 1)
+    await runtime.stop()
+    finish.set()
+    assert await pending == {"status": "disabled"}
+    assert runtime.get_client() is None
+    candidate.close.assert_awaited_once()
+
+
+@pytest.mark.parametrize("cancel", [False, True])
+async def test_retrieval_route_lease_covers_session_read(monkeypatch, cancel):
+    from fastapi import FastAPI
+    from flocks.server.routes import knowledgebase
+
+    entered, finish = asyncio.Event(), asyncio.Event()
+
+    async def selection(*args):
+        entered.set()
+        await finish.wait()
+        return {"dataset_ids": ["dataset-1"]}
+
+    old = SimpleNamespace(close=AsyncMock(), retrieve=AsyncMock(return_value={"chunks": [], "total": 0}))
+    new = SimpleNamespace(close=AsyncMock(), retrieve=AsyncMock())
+    runtime.publish(old, runtime.publication_epoch())
+    monkeypatch.setattr("flocks.knowledgebase.retrieval.get_selection", selection)
+    monkeypatch.setattr(knowledgebase, "require_user", lambda request: "owner")
+    app = FastAPI()
+    app.include_router(knowledgebase.create_router())
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as http:
+        pending = asyncio.create_task(http.post("/knowledgebase/sessions/s1/retrieval", json={"keywords": "hello"}))
+        await asyncio.wait_for(entered.wait(), 1)
+        runtime.publish(new, runtime.publication_epoch())
+        old.close.assert_not_awaited()
+        if cancel:
+            pending.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await pending
+            old.retrieve.assert_not_awaited()
+        else:
+            finish.set()
+            assert (await pending).status_code == 200
+            old.retrieve.assert_awaited_once()
+    old.close.assert_awaited_once()
+    new.retrieve.assert_not_awaited()

@@ -22,7 +22,7 @@ describe('knowledgebaseAPI', () => {
     await expect(knowledgebaseAPI.connection()).resolves.toEqual(settings);
     expect(client.get).toHaveBeenCalledWith('/api/knowledgebase/connection', { signal: undefined });
 
-    const saved = { ...settings, applied: false, restart_required: true };
+    const saved = { ...settings, applied: true, restart_required: false };
     client.put.mockResolvedValueOnce({ data: { data: saved } });
     const body = { provider: 'ragflow' as const, base_url: settings.base_url, api_key: '' };
     await expect(knowledgebaseAPI.saveConnection(body)).resolves.toEqual(saved);

@@ -76,6 +76,61 @@ describe('KnowledgeTab', () => {
     expect(api.status).toHaveBeenCalledTimes(1);
   });
 
+  it('applies a new connection, reloads readiness and the list, removes the old preview, and reopens with metadata only', async () => {
+    const user = userEvent.setup();
+    api.status.mockResolvedValue({ configured: true, ready: true });
+    api.files.mockResolvedValueOnce({ items: [{ id: 'old', name: 'old.pdf', size: 10, parent_id: null }], total: 1, page: 1 })
+      .mockResolvedValue({ items: [{ id: 'new', name: 'new.pdf', size: 20, parent_id: null }], total: 1, page: 1 });
+    api.connection.mockResolvedValueOnce({ provider: 'ragflow', base_url: 'https://old.example', has_api_key: true })
+      .mockResolvedValue({ provider: 'ragflow', base_url: 'https://new.example', has_api_key: true });
+    api.saveConnection.mockResolvedValue({ provider: 'ragflow', base_url: 'https://new.example', has_api_key: true, applied: true, restart_required: false });
+    render(<KnowledgeTab />, { wrapper: Providers });
+    await user.click(await screen.findByRole('button', { name: 'old.pdf' }));
+    expect(await screen.findByTestId('preview')).toHaveTextContent('old.pdf');
+    await user.click(screen.getByRole('button', { name: workspace.knowledge.connection.title }));
+    const url = await screen.findByLabelText(workspace.knowledge.connection.baseUrl);
+    await user.clear(url);
+    await user.type(url, 'https://new.example');
+    await user.type(screen.getByLabelText(workspace.knowledge.connection.apiKey), 'replacement-key');
+    await user.click(screen.getByRole('button', { name: common.entity.defaultSave }));
+    expect(await screen.findByText(workspace.knowledge.connection.saved)).toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: 'new.pdf' })).toBeInTheDocument();
+    expect(screen.queryByTestId('preview')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'old.pdf' })).not.toBeInTheDocument();
+    expect(api.status).toHaveBeenCalledTimes(2);
+    expect(api.files).toHaveBeenCalledTimes(2);
+    await user.click(screen.getByRole('button', { name: workspace.knowledge.connection.title }));
+    expect(await screen.findByLabelText(workspace.knowledge.connection.baseUrl)).toHaveValue('https://new.example');
+    expect(screen.getByLabelText(workspace.knowledge.connection.apiKey)).toHaveValue('');
+    expect(screen.getByLabelText(workspace.knowledge.connection.apiKey)).toHaveAttribute('placeholder', workspace.knowledge.connection.keyConfiguredPlaceholder);
+    expect(api.connection).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps the current preview and draft without refreshing when saving fails', async () => {
+    const user = userEvent.setup();
+    api.status.mockResolvedValue({ configured: true, ready: true });
+    api.files.mockResolvedValue({ items: [{ id: 'old', name: 'old.pdf', size: 10, parent_id: null }], total: 1, page: 1 });
+    api.connection.mockResolvedValue({ provider: 'ragflow', base_url: 'https://old.example', has_api_key: true });
+    api.saveConnection.mockRejectedValue(new Error('private connection details'));
+    render(<KnowledgeTab />, { wrapper: Providers });
+    await user.click(await screen.findByRole('button', { name: 'old.pdf' }));
+    expect(await screen.findByTestId('preview')).toHaveTextContent('old.pdf');
+    await user.click(screen.getByRole('button', { name: workspace.knowledge.connection.title }));
+    const url = await screen.findByLabelText(workspace.knowledge.connection.baseUrl);
+    await user.clear(url);
+    await user.type(url, 'https://draft.example');
+    const key = screen.getByLabelText(workspace.knowledge.connection.apiKey);
+    await user.type(key, 'draft-key');
+    await user.click(screen.getByRole('button', { name: common.entity.defaultSave }));
+    expect(await screen.findByRole('alert')).toHaveTextContent(workspace.knowledge.connection.saveFailed);
+    expect(url).toHaveValue('https://draft.example');
+    expect(key).toHaveValue('draft-key');
+    expect(screen.getByTestId('preview')).toHaveTextContent('old.pdf');
+    expect(api.status).toHaveBeenCalledTimes(1);
+    expect(api.files).toHaveBeenCalledTimes(1);
+    expect(screen.queryByText(workspace.knowledge.connection.saved)).not.toBeInTheDocument();
+  });
+
   it('lists files and previews a PDF through the existing renderer without a text fetch', async () => {
     const user = userEvent.setup();
     api.status.mockResolvedValue({ configured: true, ready: true });

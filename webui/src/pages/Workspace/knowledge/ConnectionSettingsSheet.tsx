@@ -17,7 +17,7 @@ const safeSaveErrorCodes = new Set([
   'request_too_large',
 ]);
 
-export default function ConnectionSettingsSheet({ onClose }: { onClose: () => void }) {
+export default function ConnectionSettingsSheet({ onClose, onSaved }: { onClose: () => void; onSaved: () => void }) {
   const { t } = useTranslation('workspace');
   const toast = useToast();
   const [settings, setSettings] = useState<ConnectionSettings | null>(null);
@@ -69,9 +69,14 @@ export default function ConnectionSettingsSheet({ onClose }: { onClose: () => vo
     savingRef.current = true;
     setSaving(true);
     try {
-      await knowledgebaseAPI.saveConnection({ provider: 'ragflow', base_url: url, api_key: key });
-      toast.success(t('knowledge.connection.restartRequired'));
-      onClose(); // The request has settled; do not refresh or assume integration status is ready.
+      const result = await knowledgebaseAPI.saveConnection({ provider: 'ragflow', base_url: url, api_key: key });
+      if (result.applied !== true) {
+        setSaveError(t('knowledge.connection.notApplied'));
+        return;
+      }
+      toast.success(t('knowledge.connection.saved'));
+      onClose();
+      onSaved();
     } catch (error) {
       const code = error instanceof KnowledgebaseError ? error.code : '';
       setSaveError(safeSaveErrorCodes.has(code)
@@ -114,7 +119,7 @@ export default function ConnectionSettingsSheet({ onClose }: { onClose: () => vo
       </div>
       <div>
         <label htmlFor="knowledge-api-key" className="mb-1 block text-sm font-medium text-gray-700">{t('knowledge.connection.apiKey')}</label>
-        <PasswordInput id="knowledge-api-key" value={apiKey} onChange={event => { setApiKey(event.target.value); setSaveError(null); }} disabled={saving} autoComplete="off" className="text-sm" />
+        <PasswordInput id="knowledge-api-key" placeholder={settings.has_api_key ? t('knowledge.connection.keyConfiguredPlaceholder') : undefined} value={apiKey} onChange={event => { setApiKey(event.target.value); setSaveError(null); }} disabled={saving} autoComplete="off" className="text-sm" />
         <p className="mt-1 text-xs text-gray-500">{t(settings.has_api_key ? 'knowledge.connection.keyExistingHint' : 'knowledge.connection.keyNewHint')}</p>
       </div>
       {saveError && <p role="alert" className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">{saveError}</p>}

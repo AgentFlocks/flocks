@@ -30,8 +30,8 @@ function Providers({ children }: { children: ReactNode }) {
   return <I18nextProvider i18n={i18n}><ToastProvider>{children}</ToastProvider></I18nextProvider>;
 }
 
-function mount(onClose = vi.fn()) {
-  render(<ConnectionSettingsSheet onClose={onClose} />, { wrapper: Providers });
+function mount(onClose = vi.fn(), onSaved = vi.fn()) {
+  render(<ConnectionSettingsSheet onClose={onClose} onSaved={onSaved} />, { wrapper: Providers });
   return onClose;
 }
 
@@ -43,17 +43,19 @@ describe('ConnectionSettingsSheet', () => {
     expect(screen.getByRole('option', { name: 'RAGFlow' })).toBeInTheDocument();
     expect(screen.getByRole('textbox', { name: workspace.knowledge.connection.baseUrl })).toHaveValue('https://ragflow.example');
     expect(screen.getByLabelText(workspace.knowledge.connection.apiKey)).toHaveValue('');
+    expect(screen.getByLabelText(workspace.knowledge.connection.apiKey)).toHaveAttribute('placeholder', workspace.knowledge.connection.keyConfiguredPlaceholder);
     expect(screen.getByText(workspace.knowledge.connection.keyExistingHint)).toBeInTheDocument();
     expect(api.connection).toHaveBeenCalledTimes(1);
   });
 
-  it('keeps the old key for the same URL, blocks dismissal and duplicate saves while pending, and shows restart notice', async () => {
+  it('submits an empty key rather than the placeholder, blocks dismissal while saving, and notifies after applying', async () => {
     const user = userEvent.setup();
     let finishSave!: () => void;
     api.saveConnection.mockImplementationOnce(() => new Promise(resolve => {
-      finishSave = () => resolve({ provider: 'ragflow', base_url: 'https://ragflow.example', has_api_key: true, applied: false, restart_required: true });
+      finishSave = () => resolve({ provider: 'ragflow', base_url: 'https://ragflow.example', has_api_key: true, applied: true, restart_required: false });
     }));
-    const onClose = mount();
+    const onSaved = vi.fn();
+    const onClose = mount(vi.fn(), onSaved);
     await screen.findByRole('combobox', { name: workspace.knowledge.connection.provider });
     await user.click(screen.getByRole('button', { name: common.entity.defaultSave }));
     expect(api.saveConnection).toHaveBeenCalledExactlyOnceWith({ provider: 'ragflow', base_url: 'https://ragflow.example', api_key: '' });
@@ -61,10 +63,28 @@ describe('ConnectionSettingsSheet', () => {
     await user.click(document.querySelector('.fixed.inset-0') as Element);
     await user.click(screen.getByRole('heading', { level: 2 }).parentElement!.querySelector('button')!);
     expect(onClose).not.toHaveBeenCalled();
+    expect(onSaved).not.toHaveBeenCalled();
     await act(async () => finishSave());
     await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
-    expect(screen.getByText(workspace.knowledge.connection.restartRequired)).toBeInTheDocument();
+    expect(onSaved).toHaveBeenCalledTimes(1);
+    expect(screen.getByText(workspace.knowledge.connection.saved)).toBeInTheDocument();
     expect(api.status).not.toHaveBeenCalled();
+  });
+
+  it('does not close, refresh, or claim success for a legacy response that was not applied', async () => {
+    const user = userEvent.setup();
+    // Deliberately simulate an older backend outside the current success contract.
+    api.saveConnection.mockResolvedValueOnce({ provider: 'ragflow', base_url: 'https://ragflow.example', has_api_key: true, applied: false, restart_required: true } as unknown as Awaited<ReturnType<typeof knowledgebaseAPI.saveConnection>>);
+    const onSaved = vi.fn();
+    const onClose = mount(vi.fn(), onSaved);
+    const key = await screen.findByLabelText(workspace.knowledge.connection.apiKey);
+    await user.type(key, 'draft-key');
+    await user.click(screen.getByRole('button', { name: common.entity.defaultSave }));
+    expect(await screen.findByRole('alert')).toHaveTextContent(workspace.knowledge.connection.notApplied);
+    expect(key).toHaveValue('draft-key');
+    expect(onClose).not.toHaveBeenCalled();
+    expect(onSaved).not.toHaveBeenCalled();
+    expect(screen.queryByText(workspace.knowledge.connection.saved)).not.toBeInTheDocument();
   });
 
   it('keeps the edited draft and shows a safe code-specific error if the server rejects the probe', async () => {
