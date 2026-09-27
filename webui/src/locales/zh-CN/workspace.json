@@ -92,12 +92,36 @@
     "pagination": "第 {{page}} 页 · 共 {{total}} 项",
     "previousPage": "上一页",
     "nextPage": "下一页",
+    "connection": {
+      "title": "连接设置",
+      "provider": "知识库引擎",
+      "baseUrl": "RAGFlow 地址",
+      "apiKey": "API Key",
+      "keyExistingHint": "已有 API Key。地址不变时留空可沿用原密钥；修改地址请重新输入。",
+      "keyNewHint": "请输入 RAGFlow 的 API Key。密钥不会在此显示。",
+      "keyRequired": "请输入 API Key。",
+      "urlRequired": "请输入 RAGFlow 地址。",
+      "loading": "正在加载连接设置…",
+      "loadFailed": "无法加载连接设置，请重试。",
+      "saveFailed": "保存失败，请检查连接设置并重试。",
+      "restartRequired": "已保存，重启 Flocks Core 后生效",
+      "errors": {
+        "invalid_request": "连接设置无效，请检查地址与 API Key。",
+        "api_key_required": "请输入 API Key；更改地址时不能沿用原有密钥。",
+        "connection_test_failed": "RAGFlow 连接验证失败，请检查地址、API Key 和服务状态。未保存更改。",
+        "knowledgebase_config_overridden": "当前连接由其他配置管理，无法在此保存。",
+        "knowledgebase_config_invalid": "现有知识库配置或凭据无法读取，请先检查配置文件。",
+        "knowledgebase_config_changed": "连接设置已被其他操作修改，请重新打开后重试。",
+        "knowledgebase_save_failed": "连接验证通过，但保存失败，请稍后重试。",
+        "request_too_large": "请求内容过长，请检查输入。"
+      }
+    },
     "unavailable": {
       "title": "知识库接入状态",
       "integration_pending": "知识库接入尚未完成",
       "integration_pendingHint": "当前安装尚未挂载知识库后端。请联系管理员完成后端接入后重新检查。此时未加载文件或知识集。",
       "knowledgebase_not_configured": "知识库尚未配置",
-      "knowledgebase_not_configuredHint": "请联系管理员配置知识库服务连接。服务就绪前，文件和知识集操作保持禁用。",
+      "knowledgebase_not_configuredHint": "请在连接设置中配置 RAGFlow。保存后需重启 Flocks Core；服务就绪前，文件和知识集操作保持禁用。",
       "knowledgebase_unavailable": "知识库服务不可用",
       "knowledgebase_unavailableHint": "请联系管理员检查知识库服务连接和后端状态，然后重新检查。此状态不代表知识库为空。",
       "check": "重新检查连接"

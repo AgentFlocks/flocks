@@ -1,6 +1,8 @@
-"""BFF for the knowledgebase service. Flocks authenticates the user; the service token stays here."""
+"""BFF for knowledgebase operations and the selected engine connection."""
 
 from __future__ import annotations
+
+import json
 
 from fastapi import APIRouter, Depends, File, Query, Request, UploadFile
 from fastapi.responses import JSONResponse, Response
@@ -9,6 +11,7 @@ from pydantic import BaseModel, Field
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.formparsers import MultiPartException
 
+from flocks.knowledgebase.connection_settings import get_connection, save_connection
 from flocks.knowledgebase.errors import KnowledgebaseError
 from flocks.knowledgebase.retrieval import retrieve_for_session
 from flocks.knowledgebase.runtime import get_client
@@ -136,6 +139,47 @@ def create_router() -> APIRouter:
     async def status(_user=Depends(require_user)):
         configured = get_client() is not None
         return {"data": {"configured": configured, "ready": configured}}
+
+    @router.get("/connection")
+    async def connection(_user=Depends(require_user)):
+        try:
+            return {"data": get_connection()}
+        except KnowledgebaseError as exc:
+            return _error(exc)
+
+    @router.put("/connection")
+    async def set_connection(request: Request, _user=Depends(require_user)):
+        try:
+            declared = request.headers.get("content-length")
+            if declared is not None:
+                try:
+                    if int(declared) > 8192:
+                        raise KnowledgebaseError(413, "request_too_large", "Invalid connection settings.")
+                except ValueError:
+                    raise KnowledgebaseError(400, "invalid_request", "Invalid connection settings.") from None
+            parts: list[bytes] = []
+            size = 0
+            async for chunk in request.stream():
+                size += len(chunk)
+                if size > 8192:
+                    raise KnowledgebaseError(413, "request_too_large", "Invalid connection settings.")
+                parts.append(chunk)
+            try:
+                payload = json.loads(b"".join(parts))
+            except (ValueError, UnicodeError):
+                raise KnowledgebaseError(400, "invalid_request", "Invalid connection settings.") from None
+            if (
+                not isinstance(payload, dict)
+                or set(payload) - {"provider", "base_url", "api_key"}
+                or not isinstance(payload.get("provider"), str)
+                or not isinstance(payload.get("base_url"), str)
+                or not isinstance(payload.get("api_key", ""), str)
+            ):
+                raise KnowledgebaseError(400, "invalid_request", "Invalid connection settings.")
+            saved = await save_connection(payload["provider"], payload["base_url"], payload.get("api_key", ""))
+            return {"data": saved}
+        except KnowledgebaseError as exc:
+            return _error(exc)
 
     @router.get("/files")
     async def files(

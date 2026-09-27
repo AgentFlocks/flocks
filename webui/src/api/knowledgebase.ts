@@ -26,6 +26,8 @@ export interface KnowledgeDocument {
 export interface Page<T> { items: T[]; total: number; page: number }
 export interface SessionDatasets { session_id: string; dataset_ids: string[]; datasets?: Dataset[] }
 export interface IntegrationStatus { configured: boolean; ready: boolean }
+export interface ConnectionSettings { provider: 'ragflow' | null; base_url: string; has_api_key: boolean }
+export interface ConnectionSaveResult { provider: 'ragflow'; base_url: string; has_api_key: boolean; applied: false; restart_required: true }
 export interface ListOptions { q?: string; page?: number; page_size?: number }
 
 interface Envelope<T> { data: T }
@@ -64,6 +66,13 @@ export const knowledgebaseAPI = {
       if (failure.code === 'knowledgebase_not_configured') return { configured: false, ready: false };
       throw failure;
     }
+  },
+  connection(signal?: AbortSignal) {
+    return unwrap<ConnectionSettings>(apiClient.get(`${ROOT}/connection`, { signal }));
+  },
+  saveConnection(data: { provider: 'ragflow'; base_url: string; api_key: string }) {
+    // Another configuration save may finish its probe before this one acquires the write lock.
+    return unwrap<ConnectionSaveResult>(apiClient.put(`${ROOT}/connection`, data, { timeout: 60_000 }));
   },
   files(params: ListOptions = {}, signal?: AbortSignal) {
     return unwrap<Page<KnowledgeFile>>(apiClient.get(`${ROOT}/files`, { params, signal }));

@@ -16,6 +16,26 @@ describe('knowledgebaseAPI', () => {
     await expect(knowledgebaseAPI.status()).resolves.toEqual({ configured: false, ready: false });
   });
 
+  it('loads only non-secret connection metadata and saves through one PUT', async () => {
+    const settings = { provider: 'ragflow' as const, base_url: 'https://ragflow.example', has_api_key: true };
+    client.get.mockResolvedValueOnce({ data: { data: settings } });
+    await expect(knowledgebaseAPI.connection()).resolves.toEqual(settings);
+    expect(client.get).toHaveBeenCalledWith('/api/knowledgebase/connection', { signal: undefined });
+
+    const saved = { ...settings, applied: false, restart_required: true };
+    client.put.mockResolvedValueOnce({ data: { data: saved } });
+    const body = { provider: 'ragflow' as const, base_url: settings.base_url, api_key: '' };
+    await expect(knowledgebaseAPI.saveConnection(body)).resolves.toEqual(saved);
+    expect(client.put).toHaveBeenCalledTimes(1);
+    expect(client.put).toHaveBeenCalledWith('/api/knowledgebase/connection', body, { timeout: 60_000 });
+  });
+
+  it('surfaces connection-save errors through the standard envelope', async () => {
+    client.put.mockRejectedValueOnce({ response: { status: 502, data: { error: { code: 'connection_test_failed', message: 'private backend details' } } } });
+    await expect(knowledgebaseAPI.saveConnection({ provider: 'ragflow', base_url: 'https://ragflow.example', api_key: '' }))
+      .rejects.toMatchObject({ code: 'connection_test_failed', status: 502 });
+  });
+
   it('creates a dataset without a model selection and encodes resource ids', async () => {
     client.post.mockResolvedValue({ data: { data: { id: 'ds-1', name: 'Notes', description: '', document_count: 0, chunk_count: 0 } } });
     await knowledgebaseAPI.createDataset({ name: 'Notes' });

@@ -92,12 +92,36 @@
     "pagination": "Page {{page}} · Items: {{total}}",
     "previousPage": "Previous page",
     "nextPage": "Next page",
+    "connection": {
+      "title": "Connection settings",
+      "provider": "Knowledge engine",
+      "baseUrl": "RAGFlow URL",
+      "apiKey": "API Key",
+      "keyExistingHint": "An API Key is saved. Leave blank to keep it when the URL is unchanged; enter it again if you change the URL.",
+      "keyNewHint": "Enter your RAGFlow API Key. Stored keys are never shown here.",
+      "keyRequired": "Enter an API Key.",
+      "urlRequired": "Enter the RAGFlow URL.",
+      "loading": "Loading connection settings…",
+      "loadFailed": "Could not load connection settings. Try again.",
+      "saveFailed": "Could not save the connection. Check your settings and try again.",
+      "restartRequired": "Saved. Restart Flocks Core to apply the changes.",
+      "errors": {
+        "invalid_request": "Invalid connection settings. Check the URL and API Key.",
+        "api_key_required": "Enter an API Key. A saved key cannot be reused when the URL changes.",
+        "connection_test_failed": "RAGFlow connection check failed. Check the URL, API Key and service status. Changes were not saved.",
+        "knowledgebase_config_overridden": "This connection is managed by another configuration and cannot be saved here.",
+        "knowledgebase_config_invalid": "Existing knowledgebase settings or credentials cannot be read; check the configuration files.",
+        "knowledgebase_config_changed": "Connection settings changed elsewhere. Reopen the drawer and try again.",
+        "knowledgebase_save_failed": "Connection check passed but saving failed. Try again later.",
+        "request_too_large": "Request content is too long. Check your inputs."
+      }
+    },
     "unavailable": {
       "title": "Knowledge integration status",
       "integration_pending": "Knowledge integration is pending",
       "integration_pendingHint": "The knowledge backend is not mounted in this installation. Ask an administrator to complete the backend integration, then check again. No files or Knowledge Sets have been loaded.",
       "knowledgebase_not_configured": "Knowledge base is not configured",
-      "knowledgebase_not_configuredHint": "Ask an administrator to configure the knowledge service connection. File and Knowledge Set actions remain disabled until the service reports ready.",
+      "knowledgebase_not_configuredHint": "Configure RAGFlow in Connection settings, then restart Flocks Core. File and Knowledge Set actions remain disabled until the service reports ready.",
       "knowledgebase_unavailable": "Knowledge service is unavailable",
       "knowledgebase_unavailableHint": "Check the knowledge service connection and backend availability with an administrator, then check again. This is not an empty knowledge base.",
       "check": "Check connection again"

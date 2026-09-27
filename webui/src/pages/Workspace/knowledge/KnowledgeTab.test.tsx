@@ -19,6 +19,7 @@ vi.mock('@/api/knowledgebase', async importOriginal => {
     knowledgebaseAPI: Object.fromEntries(Object.keys(actual.knowledgebaseAPI).map(key => [key, vi.fn()])),
   };
 });
+vi.mock('@/hooks/useDefaultModelVision', () => ({ useDefaultModelVision: () => null }));
 vi.mock('@/components/common/FilePreview', () => ({
   getPreviewKind: (node: { name: string }) => node.name.endsWith('.pdf') ? 'pdf' : 'text',
   FilePreviewRenderer: ({ node, content }: { node: { name: string }; content: string | null }) => (
@@ -45,6 +46,34 @@ describe('KnowledgeTab', () => {
     render(<KnowledgeTab />, { wrapper: Providers });
     expect(await screen.findByText(workspace.knowledge.unavailable.knowledgebase_not_configured)).toBeInTheDocument();
     expect(api.files).not.toHaveBeenCalled();
+  });
+
+  it('opens the same connection settings from the header and not-configured message', async () => {
+    const user = userEvent.setup();
+    api.status.mockResolvedValue({ configured: false, ready: false });
+    api.connection.mockResolvedValue({ provider: null, base_url: '', has_api_key: false });
+    render(<KnowledgeTab />, { wrapper: Providers });
+    await screen.findByText(workspace.knowledge.unavailable.knowledgebase_not_configured);
+    expect(screen.getAllByRole('button', { name: workspace.knowledge.connection.title })).toHaveLength(2);
+    await user.click(screen.getAllByRole('button', { name: workspace.knowledge.connection.title })[1]);
+    expect(await screen.findByRole('combobox', { name: workspace.knowledge.connection.provider })).toHaveValue('ragflow');
+    expect(screen.getAllByRole('option')).toHaveLength(1);
+    expect(api.files).not.toHaveBeenCalled();
+    await user.click(screen.getByRole('button', { name: common.entity.cancelButton }));
+    await user.click(screen.getAllByRole('button', { name: workspace.knowledge.connection.title })[0]);
+    expect(await screen.findByRole('textbox', { name: workspace.knowledge.connection.baseUrl })).toHaveValue('');
+    expect(api.connection).toHaveBeenCalledTimes(2);
+  });
+
+  it('shows connection settings to a ready knowledge tab without changing readiness', async () => {
+    const user = userEvent.setup();
+    api.status.mockResolvedValue({ configured: true, ready: true });
+    api.files.mockResolvedValue({ items: [], total: 0, page: 1 });
+    api.connection.mockResolvedValue({ provider: 'ragflow', base_url: 'https://ragflow.example', has_api_key: true });
+    render(<KnowledgeTab />, { wrapper: Providers });
+    await user.click(screen.getByRole('button', { name: workspace.knowledge.connection.title }));
+    expect(await screen.findByRole('textbox', { name: workspace.knowledge.connection.baseUrl })).toHaveValue('https://ragflow.example');
+    expect(api.status).toHaveBeenCalledTimes(1);
   });
 
   it('lists files and previews a PDF through the existing renderer without a text fetch', async () => {
