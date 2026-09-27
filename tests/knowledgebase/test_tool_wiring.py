@@ -42,4 +42,4 @@ def test_tool_is_registered():
     from flocks.tool.registry import ToolRegistry
 
     ToolRegistry.init()
-    assert any(tool.name == "rag_retrieve" for tool in ToolRegistry.list_tools())
+    assert any(tool.name == "rag_retrieve" and tool.group == "检索" for tool in ToolRegistry.list_tools())

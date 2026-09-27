@@ -37,12 +37,12 @@ vi.mock('react-i18next', () => ({
       'context.failed': 'Failed',
       'context.unknown': 'Unknown',
       'context.download': 'Download',
-      'dataset.title': 'Datasets',
-      'dataset.loading': 'Loading Datasets',
-      'dataset.select': 'Select Datasets',
-      'dataset.refresh': 'Refresh Datasets',
-      'dataset.retry': 'Retry Datasets',
-      'dataset.renderFailed': 'Dataset section unavailable',
+      'dataset.title': 'Knowledge Sets',
+      'dataset.loading': 'Loading Knowledge Sets',
+      'dataset.select': 'Select Knowledge Sets',
+      'dataset.refresh': 'Refresh Knowledge Sets',
+      'dataset.retry': 'Retry Knowledge Sets',
+      'dataset.renderFailed': 'Knowledge Set section unavailable',
       'chat.tool.todoStatus.inProgress': 'in progress',
     }[key] || key),
   }),
@@ -169,7 +169,7 @@ describe('SessionContextPanel', () => {
     renderPanel();
     await user.click(screen.getByRole('button', { name: /Skills/ }));
     const skills = screen.getByRole('button', { name: /Skills/ });
-    const datasets = screen.getByRole('region', { name: 'Datasets' });
+    const datasets = screen.getByRole('region', { name: 'Knowledge Sets' });
     expect(skills.compareDocumentPosition(datasets) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     const output = screen.getByText('report.md');
     const progress = screen.getByText('Write report');
@@ -182,11 +182,11 @@ describe('SessionContextPanel', () => {
     await user.type(folderInput, '/preserve/draft');
     knowledgeApi.status.mockResolvedValue({ configured: true, ready: true });
     knowledgeApi.sessionDatasets.mockRejectedValue(new Error('Dataset GET failed'));
-    await user.click(screen.getByRole('button', { name: 'Refresh Datasets' }));
+    await user.click(screen.getByRole('button', { name: 'Refresh Knowledge Sets' }));
     expect(await screen.findByRole('alert')).toHaveTextContent('Dataset GET failed');
     knowledgeApi.sessionDatasets.mockResolvedValue({ session_id: 'sess-1', source_session_id: 'sess-1', inherited: false, editable: true, dataset_ids: [], datasets: [], unavailable_ids: [] });
-    await user.click(screen.getByRole('button', { name: 'Retry Datasets' }));
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Select Datasets' })).toBeEnabled());
+    await user.click(screen.getByRole('button', { name: 'Retry Knowledge Sets' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Select Knowledge Sets' })).toBeEnabled());
     expect(screen.getByPlaceholderText('context.searchPlaceholder')).toBe(search);
     expect(search).toHaveValue('report');
     expect(screen.getByPlaceholderText('context.folderPathPlaceholder')).toBe(folderInput);
@@ -241,8 +241,8 @@ describe('SessionContextPanel', () => {
       datasetRenderIssue.current = null;
       if (failure === 'suspension') await act(async () => suspension.resolve());
       else {
-        expect(screen.getByRole('alert')).toHaveTextContent('Dataset section unavailable');
-        await user.click(screen.getByRole('button', { name: 'Retry Datasets' }));
+        expect(screen.getByRole('alert')).toHaveTextContent('Knowledge Set section unavailable');
+        await user.click(screen.getByRole('button', { name: 'Retry Knowledge Sets' }));
       }
       expect(await screen.findByText('Research Dataset')).toBeVisible();
       expect(screen.getByPlaceholderText('context.searchPlaceholder')).toBe(search);

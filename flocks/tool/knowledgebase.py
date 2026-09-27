@@ -19,9 +19,9 @@ from flocks.tool.registry import (
 
 @ToolRegistry.register_function(
     name="rag_retrieve",
-    group="知识检索",
+    group="检索",
     description=(
-        "Read-only retrieval from this Session's selected Datasets. "
+        "Read-only retrieval from this Session's selected Knowledge Sets. "
         "Omit dataset or pass an empty list to search that whole selection. "
         "A non-empty dataset list may only narrow it."
     ),
@@ -36,7 +36,7 @@ from flocks.tool.registry import (
             name="dataset",
             type=ParameterType.ARRAY,
             required=False,
-            description="Optional subset of this Session's Dataset IDs. Leave empty to search every selected Dataset.",
+            description="Optional subset of this Session's Knowledge Set IDs. Leave empty to search every selected Knowledge Set.",
         ),
         ToolParameter(name="top_k", type=ParameterType.INTEGER, required=False, default=5, description="Maximum chunks."),
         ToolParameter(
