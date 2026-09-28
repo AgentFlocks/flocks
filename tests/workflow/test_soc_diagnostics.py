@@ -233,3 +233,21 @@ def test_long_running_snapshot_has_locations_without_locals():
     assert result['thread_locations']
     assert secret not in json.dumps(result)
     assert set(result['thread_locations'][0]['frames'][0]) == {'file', 'function', 'line'}
+
+
+@pytest.mark.asyncio
+async def test_sqlite_extended_error_is_exported_without_raw_payload():
+    import sqlite3
+    class Manager:
+        @diag.traced('syslog.dispatch')
+        async def execute(self, workflow_id):
+            error = sqlite3.OperationalError('sensitive SQL text')
+            error.sqlite_errorcode = 517
+            error.sqlite_errorname = 'SQLITE_BUSY_SNAPSHOT'
+            raise error
+    with pytest.raises(sqlite3.OperationalError):
+        await Manager().execute(diag.WORKFLOWS[0])
+    event = diag._events[-1]
+    assert event['sqlite_errorcode'] == 517
+    assert event['sqlite_errorname'] == 'SQLITE_BUSY_SNAPSHOT'
+    assert 'sensitive SQL text' not in json.dumps(diag.export_bundle())

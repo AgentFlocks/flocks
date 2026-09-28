@@ -3944,11 +3944,12 @@ async def export_soc_workspace_diagnostics(user=Depends(require_admin)):
         listener = syslog.get_listener_status(wf)
         schedule = poller.get_status(wf)
         states[wf] = {
-            "syslog": {k: listener.get(k) for k in ("state", "port", "protocol", "queueSize", "queueCapacity", "workerCount")},
+            "syslog": {k: listener.get(k) for k in ("state", "port", "protocol", "queueSize", "queueCapacity", "workerCount", "dispatchState", "dispatchRetryAt", "sqlite_errorcode", "sqlite_errorname")},
             "schedule": {k: schedule.get(k) for k in ("state", "activeRuns", "lastRunAt", "lastStatus", "lastDurationMs", "nextRunAt", "lastRunId")},
             "listener_task_alive": bool(syslog._tasks.get(wf) and not syslog._tasks[wf].done()),
             "poller_task_alive": bool(poller._tasks.get(wf) and not poller._tasks[wf].done()),
             "listener_has_error": bool(listener.get("error")),
+            "dispatch_has_error": bool(listener.get("dispatchError")),
             "schedule_has_error": bool(schedule.get("error") or schedule.get("lastError")),
             "previous_run_still_active": schedule.get("lastError") == "previous_run_still_active",
         }

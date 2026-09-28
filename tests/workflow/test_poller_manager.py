@@ -4,11 +4,18 @@ import asyncio
 import threading
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 
 from flocks.workflow import poller_manager
 from flocks.workflow.runner import RunWorkflowResult
+
+
+@pytest.fixture(autouse=True)
+def isolated_tool_context(monkeypatch):
+    monkeypatch.setattr(poller_manager, "build_workflow_tool_context", AsyncMock(return_value=None))
+    monkeypatch.setattr(poller_manager, "cleanup_workflow_tool_context", AsyncMock())
 
 
 @pytest.mark.asyncio
@@ -116,7 +123,7 @@ async def test_run_once_injects_dynamic_inputs_and_summary(monkeypatch: pytest.M
     monkeypatch.setattr(
         poller_manager,
         "record_execution_result",
-        lambda workflow_id, exec_id, exec_data: asyncio.sleep(0),
+        lambda workflow_id, exec_id, exec_data, *, steps=None: asyncio.sleep(0),
     )
     monkeypatch.setattr(poller_manager, "run_workflow", _fake_run_workflow)
 
@@ -319,7 +326,7 @@ async def test_no_overlap_skips_when_previous_run_is_still_active(
     monkeypatch.setattr(
         poller_manager,
         "record_execution_result",
-        lambda workflow_id, exec_id, exec_data: asyncio.sleep(0),
+        lambda workflow_id, exec_id, exec_data, *, steps=None: asyncio.sleep(0),
     )
     monkeypatch.setattr(
         poller_manager,
@@ -482,3 +489,52 @@ async def test_restart_workflow_replaces_existing_task(monkeypatch: pytest.Monke
     assert first_task.cancelled() or first_task.done()
 
     await manager.stop_workflow("wf-restart")
+
+
+@pytest.mark.asyncio
+async def test_creation_failure_replaces_stale_success_and_cleans_run(monkeypatch):
+    import sqlite3
+    manager = poller_manager.WorkflowPollerManager()
+    manager._status["wf"] = {"lastStatus": "success", "lastRunAt": 1, "lastRunId": "old"}
+    create = AsyncMock(side_effect=sqlite3.OperationalError("database is locked"))
+    persist = AsyncMock()
+    monkeypatch.setattr(poller_manager, "create_execution_record", create)
+    monkeypatch.setattr(poller_manager, "record_execution_result", persist)
+    result = await manager._execute_run("wf", {}, {"inputs": {}})
+    assert result["lastStatus"] == "error"
+    assert result["lastRunAt"] > 1
+    assert result["lastRunId"] is None
+    assert result["lastError"] == "database is locked"
+    assert not manager._run_cancel_events
+    persist.assert_not_awaited()
+    poller_manager.build_workflow_tool_context.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_cancel_during_creation_cleans_run_registration(monkeypatch):
+    manager = poller_manager.WorkflowPollerManager()
+    entered = asyncio.Event()
+    async def create(*args, **kwargs):
+        entered.set()
+        await asyncio.Event().wait()
+    monkeypatch.setattr(poller_manager, "create_execution_record", create)
+    task = asyncio.create_task(manager._execute_run("wf", {}, {"inputs": {}}))
+    await entered.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert not manager._run_cancel_events
+    assert manager.get_status("wf")["lastStatus"] == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_persistence_failure_does_not_report_success(monkeypatch):
+    import sqlite3
+    manager = poller_manager.WorkflowPollerManager()
+    monkeypatch.setattr(poller_manager, "create_execution_record", AsyncMock(return_value={"id": "exec"}))
+    monkeypatch.setattr(poller_manager, "record_execution_result", AsyncMock(side_effect=sqlite3.OperationalError("database is locked")))
+    monkeypatch.setattr(poller_manager, "run_workflow", lambda **kwargs: RunWorkflowResult(status="success", outputs={}))
+    result = await manager._execute_run("wf", {}, {"inputs": {}, "timeoutSeconds": 10})
+    assert result["lastStatus"] == "error"
+    assert result["lastError"].startswith("execution_persist_failed:")
+    assert not manager._run_cancel_events

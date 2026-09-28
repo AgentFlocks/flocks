@@ -29,7 +29,7 @@ from flocks.workflow.execution_plan import build_workflow_execution_plan
 from flocks.workflow.fs_store import read_workflow_from_fs
 from flocks.workflow.models import Workflow
 from flocks.workflow.runner import RunWorkflowResult, run_workflow
-from flocks.workflow.store import WorkflowStore
+from flocks.workflow.store import WorkflowStore, sqlite_error_fields
 from flocks.workflow.tool_context import (
     build_workflow_tool_context,
     cleanup_workflow_tool_context,
@@ -98,6 +98,13 @@ class WorkflowPollerManager:
         task_set.add(task)
 
         def _discard(done_task: asyncio.Task[Any]) -> None:
+            if not done_task.cancelled():
+                exc = done_task.exception()
+                if exc is not None:
+                    current = self._status.get(workflow_id) or self._base_status(workflow_id)
+                    current.update(lastStatus="error", lastError=str(exc))
+                    self._status[workflow_id] = current
+                    log.warning("poller.background_run_failed", {"workflow_id": workflow_id, **sqlite_error_fields(exc)})
             tasks = self._run_tasks.get(workflow_id)
             if tasks is not None:
                 tasks.discard(done_task)
@@ -453,21 +460,21 @@ class WorkflowPollerManager:
         cancel_event = threading.Event()
         cancel_events = self._run_cancel_events.setdefault(workflow_id, set())
         cancel_events.add(cancel_event)
-        inputs = self._build_inputs(config)
-        soc_diag.progress("execution.create")
-        exec_data = await create_execution_record(
-            workflow_id,
-            input_params=inputs,
-        )
-        exec_id = str(exec_data["id"])
+        inputs = {}
+        exec_data = {}
+        exec_id = None
         step_recorder = ExecutionStepRecorder()
         current = self._status.get(workflow_id) or self._base_status(workflow_id)
-        current["lastRunAt"] = started_at_ms
+        current.update(lastRunAt=started_at_ms, lastStatus="running", lastError=None, lastRunId=None)
         current["activeRuns"] = self._cleanup_done_runs(workflow_id)
         self._status[workflow_id] = current
 
         tool_context = None
         try:
+            inputs = self._build_inputs(config)
+            soc_diag.progress("execution.create")
+            exec_data = await create_execution_record(workflow_id, input_params=inputs)
+            exec_id = str(exec_data["id"])
             soc_diag.progress("context.prepare", execution=exec_id)
             tool_context = await build_workflow_tool_context(
                 workflow_id=workflow_id,
@@ -528,6 +535,13 @@ class WorkflowPollerManager:
                 current["state"] = "running"
                 current["error"] = None
             self._status[workflow_id] = current
+        except asyncio.CancelledError:
+            current = self._status.get(workflow_id) or self._base_status(workflow_id)
+            current.update(lastRunAt=started_at_ms, lastStatus="cancelled", lastError="run_cancelled")
+            self._status[workflow_id] = current
+            if exec_id:
+                exec_data.update(status="cancelled", currentPhase="cancelled", finishedAt=_now_ms())
+            raise
         except Exception as exc:
             duration_ms = _now_ms() - started_at_ms
             duration_s = max(0.0, time.time() - started_at_s)
@@ -559,22 +573,23 @@ class WorkflowPollerManager:
                 current["state"] = "running"
                 current["error"] = None
             self._status[workflow_id] = current
-            soc_diag.progress("execution.error", error_type=type(exc).__name__)
+            soc_diag.progress("execution.error", **sqlite_error_fields(exc))
             log.warning("poller.run_failed", {"workflow_id": workflow_id, "error": str(exc)})
         finally:
             steps = step_recorder.take_steps()
             soc_diag.progress("context.cleanup", execution=exec_id)
             await cleanup_workflow_tool_context(tool_context)
             try:
-                soc_diag.progress("execution.persist", execution=exec_id)
-                await record_execution_result(
-                    workflow_id,
-                    exec_id,
-                    exec_data,
-                    steps=steps,
-                )
+                if exec_id:
+                    soc_diag.progress("execution.persist", execution=exec_id)
+                    await record_execution_result(
+                        workflow_id, exec_id, exec_data, steps=steps,
+                    )
             except Exception as exc:
-                soc_diag.progress("execution.persist_failed", error_type=type(exc).__name__)
+                soc_diag.progress("execution.persist_failed", **sqlite_error_fields(exc))
+                current = self._status.get(workflow_id) or self._base_status(workflow_id)
+                current.update(lastStatus="error", lastError=f"execution_persist_failed: {exc}")
+                self._status[workflow_id] = current
                 log.warning(
                     "poller.exec_record_failed",
                     {"workflow_id": workflow_id, "exec_id": exec_id, "error": str(exc)},

@@ -6,6 +6,8 @@ import asyncio
 import json
 import os
 import sqlite3
+from contextvars import ContextVar
+from functools import wraps
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -46,10 +48,88 @@ _EXECUTION_UPSERT_SQL = """
 """
 
 
+# All mutations use the dedicated writer; read cursors never share its snapshot.
+# Context only lives for a store operation (no workflow/model work runs under it).
+_writer_connection = ContextVar("workflow_store_writer", default=None)
+_WRITE_BEGIN_ATTEMPTS = 3
+
+
+def sqlite_error_fields(exc: BaseException) -> Dict[str, Any]:
+    fields = {"error_type": type(exc).__name__}
+    code = getattr(exc, "sqlite_errorcode", None)
+    name = getattr(exc, "sqlite_errorname", None)
+    if isinstance(code, int):
+        fields["sqlite_errorcode"] = code
+    if isinstance(name, str) and name.startswith("SQLITE_"):
+        fields["sqlite_errorname"] = name
+    return fields
+
+
+def is_sqlite_busy(exc: BaseException) -> bool:
+    return isinstance(exc, sqlite3.OperationalError) and (
+        (getattr(exc, "sqlite_errorcode", 0) & 255) in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)
+        or str(exc).lower() in {"database is locked", "database table is locked"}
+    )
+
+
+async def _rollback_owned(db: aiosqlite.Connection) -> None:
+    # Keep ownership until rollback finishes, even if shutdown cancels us again.
+    task = asyncio.create_task(db.rollback())
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            continue
+    await task
+
+
+def _write_transaction(fn):
+    @wraps(fn)
+    async def wrapped(cls, *args, **kwargs):
+        db = await cls._completion_db()
+        lock = cls._completion_lock
+        async with lock:
+            token = _writer_connection.set(db)
+            try:
+                # Recovery is safe here: every writer uses this ownership lock.
+                if db.in_transaction:
+                    await _rollback_owned(db)
+                for attempt in range(_WRITE_BEGIN_ATTEMPTS):
+                    try:
+                        await db.execute("BEGIN IMMEDIATE")
+                        break
+                    except sqlite3.OperationalError as exc:
+                        from flocks.workflow import soc_diagnostics
+                        soc_diagnostics.progress("storage.begin_failed", **sqlite_error_fields(exc))
+                        await _rollback_owned(db)
+                        if not is_sqlite_busy(exc) or attempt + 1 == _WRITE_BEGIN_ATTEMPTS:
+                            raise
+                        await asyncio.sleep(0.05 * (2 ** attempt))
+                result = await fn(cls, *args, **kwargs)
+                # Empty/no-op methods may return without their existing commit.
+                if db.in_transaction:
+                    await db.commit()
+                return result
+            except BaseException as exc:
+                from flocks.workflow import soc_diagnostics
+                soc_diagnostics.progress("storage.write_failed", **sqlite_error_fields(exc))
+                try:
+                    await _rollback_owned(db)
+                except BaseException as rollback_exc:
+                    log.error("workflow.store.rollback_failed", sqlite_error_fields(rollback_exc))
+                # Do not replay a body/commit whose outcome may be uncertain.
+                raise
+            finally:
+                _writer_connection.reset(token)
+    return wrapped
+
+
 class WorkflowStore:
     """Workflow-domain store backed by ``workflow.db`` tables."""
 
     _initialized = False
+    _init_lock: Optional[asyncio.Lock] = None
+    _init_lock_pid: Optional[int] = None
     _conn: Optional[aiosqlite.Connection] = None
     _completion_conn: Optional[aiosqlite.Connection] = None
     _init_pid: Optional[int] = None
@@ -62,6 +142,16 @@ class WorkflowStore:
 
     @classmethod
     async def init(cls) -> None:
+        # Concurrent first dispatches must share one writer and ownership lock.
+        pid = os.getpid()
+        if cls._init_lock is None or cls._init_lock_pid != pid:
+            cls._init_lock = asyncio.Lock()
+            cls._init_lock_pid = pid
+        async with cls._init_lock:
+            await cls._initialize()
+
+    @classmethod
+    async def _initialize(cls) -> None:
         current_pid = os.getpid()
         db_path = cls.get_db_path()
         if cls._initialized and cls._init_pid == current_pid and cls._db_path == db_path:
@@ -96,6 +186,7 @@ class WorkflowStore:
             cls._conn = await aiosqlite.connect(
                 db_path,
                 timeout=Storage._sqlite_timeout_s,
+                isolation_level=None,
             )
             cls._conn.row_factory = aiosqlite.Row
             await Storage.configure_connection(cls._conn)
@@ -106,6 +197,7 @@ class WorkflowStore:
             cls._completion_conn = await aiosqlite.connect(
                 db_path,
                 timeout=Storage._sqlite_timeout_s,
+                isolation_level=None,
             )
             cls._completion_conn.row_factory = aiosqlite.Row
             await Storage.configure_connection(cls._completion_conn)
@@ -151,9 +243,14 @@ class WorkflowStore:
         cls._init_pid = None
         cls._db_path = None
         cls._completion_lock = None
+        cls._init_lock = None
+        cls._init_lock_pid = None
 
     @classmethod
     async def _db(cls) -> aiosqlite.Connection:
+        writer = _writer_connection.get()
+        if writer is not None:
+            return writer
         if cls._initialized and cls._init_pid is not None and cls._init_pid != os.getpid():
             await cls.init()
         if not cls._conn or not cls._initialized:
@@ -355,6 +452,7 @@ class WorkflowStore:
         )
 
     @classmethod
+    @_write_transaction
     async def upsert_execution(cls, exec_data: Dict[str, Any]) -> None:
         db = await cls._db()
         _, _, row = cls._execution_row(exec_data)
@@ -411,6 +509,7 @@ class WorkflowStore:
         return items
 
     @classmethod
+    @_write_transaction
     async def delete_execution(cls, exec_id: str) -> bool:
         db = await cls._db()
         await db.execute("DELETE FROM workflow_execution_steps WHERE exec_id = ?", (exec_id,))
@@ -419,6 +518,7 @@ class WorkflowStore:
         return cur.rowcount > 0
 
     @classmethod
+    @_write_transaction
     async def delete_executions_for_workflow(cls, workflow_id: str) -> int:
         db = await cls._db()
         async with db.execute(
@@ -433,6 +533,7 @@ class WorkflowStore:
         return cur.rowcount
 
     @classmethod
+    @_write_transaction
     async def trim_executions(cls, workflow_id: str, *, keep: int) -> List[str]:
         db = await cls._db()
         async with db.execute(
@@ -481,6 +582,7 @@ class WorkflowStore:
         await cls.record_steps(exec_id, [(step_index, step_payload)])
 
     @classmethod
+    @_write_transaction
     async def record_steps(
         cls,
         exec_id: str,
@@ -501,47 +603,27 @@ class WorkflowStore:
         await db.commit()
 
     @classmethod
+    @_write_transaction
     async def complete_execution(
         cls,
         exec_data: Dict[str, Any],
         steps: Iterable[Tuple[int, Dict[str, Any]]],
     ) -> None:
         """Atomically persist one final execution summary and its step batch."""
-        db = await cls._completion_db()
-        exec_id, workflow_id, execution_row = cls._execution_row(exec_data)
-        step_rows = cls._step_rows(exec_id, steps)
-        lock = cls._completion_lock
-        if lock is None:
-            lock = asyncio.Lock()
-            cls._completion_lock = lock
-
-        async with lock:
-            try:
-                await db.execute("BEGIN IMMEDIATE")
-                if step_rows:
-                    await db.executemany(
-                        """
-                        INSERT OR REPLACE INTO workflow_execution_steps
-                        (exec_id, step_index, node_id, node_type, inputs, outputs, error, payload)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                        """,
-                        step_rows,
-                    )
-                await db.execute(_EXECUTION_UPSERT_SQL, execution_row)
-                await db.commit()
-            except BaseException:
-                try:
-                    await db.rollback()
-                except BaseException as rollback_exc:
-                    log.error(
-                        "workflow.store.completion_rollback_failed",
-                        {
-                            "workflow_id": workflow_id,
-                            "exec_id": exec_id,
-                            "error": str(rollback_exc),
-                        },
-                    )
-                raise
+        db = await cls._db()
+        _, _, execution_row = cls._execution_row(exec_data)
+        step_rows = cls._step_rows(steps=steps, exec_id=str(exec_data["id"]))
+        if step_rows:
+            await db.executemany(
+                """
+                INSERT OR REPLACE INTO workflow_execution_steps
+                (exec_id, step_index, node_id, node_type, inputs, outputs, error, payload)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                step_rows,
+            )
+        await db.execute(_EXECUTION_UPSERT_SQL, execution_row)
+        await db.commit()
 
     @classmethod
     async def list_steps(
@@ -580,6 +662,7 @@ class WorkflowStore:
         return steps, total
 
     @classmethod
+    @_write_transaction
     async def clear_steps(cls, exec_id: str) -> int:
         db = await cls._db()
         cur = await db.execute("DELETE FROM workflow_execution_steps WHERE exec_id = ?", (exec_id,))
@@ -607,6 +690,7 @@ class WorkflowStore:
         }
 
     @classmethod
+    @_write_transaction
     async def put_stats(cls, workflow_id: str, stats: Dict[str, Any]) -> None:
         db = await cls._db()
         await db.execute(
@@ -631,6 +715,7 @@ class WorkflowStore:
         await db.commit()
 
     @classmethod
+    @_write_transaction
     async def delete_stats(cls, workflow_id: str) -> bool:
         db = await cls._db()
         cur = await db.execute("DELETE FROM workflow_stats WHERE workflow_id = ?", (workflow_id,))
@@ -638,6 +723,7 @@ class WorkflowStore:
         return cur.rowcount > 0
 
     @classmethod
+    @_write_transaction
     async def increment_stats(cls, workflow_id: str, *, success: bool, duration: float) -> None:
         db = await cls._db()
         runtime = float(duration)
@@ -680,6 +766,7 @@ class WorkflowStore:
         await db.commit()
 
     @classmethod
+    @_write_transaction
     async def put_config(
         cls,
         workflow_id: str,
@@ -734,6 +821,7 @@ class WorkflowStore:
         return items
 
     @classmethod
+    @_write_transaction
     async def delete_config(cls, workflow_id: str, *, kind: Optional[str] = None) -> int:
         db = await cls._db()
         if kind:
@@ -747,6 +835,7 @@ class WorkflowStore:
         return cur.rowcount
 
     @classmethod
+    @_write_transaction
     async def kv_put(cls, key: str, value: Any, value_type: str = _JSON_TYPE) -> None:
         db = await cls._db()
         now = cls._now_iso()
@@ -771,6 +860,7 @@ class WorkflowStore:
         return cls._json_loads(row["value"], None)
 
     @classmethod
+    @_write_transaction
     async def kv_remove(cls, key: str) -> bool:
         db = await cls._db()
         cur = await db.execute("DELETE FROM workflow_kv WHERE key = ?", (key,))
@@ -805,6 +895,7 @@ class WorkflowStore:
         return entries
 
     @classmethod
+    @_write_transaction
     async def kv_clear(cls, prefix: str) -> int:
         db = await cls._db()
         cur = await db.execute(

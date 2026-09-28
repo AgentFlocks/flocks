@@ -452,3 +452,72 @@ async def test_trigger_workflow_applies_mapping_and_filter(
         source="udp://0.0.0.0:5514",
     )
     assert captured_run_kwargs == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure,expected", [("creation", 3), ("started", 1), ("recover", 2)])
+async def test_worker_retries_only_pre_execution_failure_with_bounded_backoff(monkeypatch, failure, expected):
+    import sqlite3
+    manager = syslog_manager.SyslogManager()
+    trigger = TriggerDefinition.model_validate({"id": "t", "type": "syslog"})
+    messages = []
+    class FastAbort:
+        stopped = False
+        waits = 0
+        def is_set(self):
+            return self.stopped
+        async def wait(self):
+            self.waits += 1
+            if self.waits == expected:
+                self.stopped = True
+            raise asyncio.TimeoutError
+    abort = FastAbort()
+    async def trigger_run(*args, **kwargs):
+        messages.append(args[2])
+        if failure == "recover" and len(messages) == 2:
+            abort.stopped = True
+            return
+        if failure == "started":
+            raise RuntimeError("execution_persist_failed")
+        raise syslog_manager._ExecutionCreateFailed(sqlite3.OperationalError("database is locked"))
+    monkeypatch.setattr(manager, "_trigger_workflow", trigger_run)
+    queue = asyncio.Queue()
+    message = {"message": "one"}
+    queue.put_nowait(message)
+    await asyncio.wait_for(manager._worker_loop("wf", {}, trigger, queue, abort), 2)
+    assert len(messages) == expected
+    assert all(item is message for item in messages)
+    assert manager._dispatch_status["wf"]["dispatchState"] == ("ready" if failure == "recover" else "error")
+
+
+@pytest.mark.asyncio
+async def test_shutdown_interrupts_database_backoff(monkeypatch):
+    import sqlite3
+    manager = syslog_manager.SyslogManager()
+    trigger = TriggerDefinition.model_validate({"id": "t", "type": "syslog"})
+    abort = asyncio.Event()
+    called = asyncio.Event()
+    async def fail(*args, **kwargs):
+        called.set()
+        raise syslog_manager._ExecutionCreateFailed(sqlite3.OperationalError("database is locked"))
+    monkeypatch.setattr(manager, "_trigger_workflow", fail)
+    queue = asyncio.Queue()
+    queue.put_nowait({})
+    task = asyncio.create_task(manager._worker_loop("wf", {}, trigger, queue, abort))
+    await called.wait()
+    abort.set()
+    await asyncio.wait_for(task, .5)
+
+
+@pytest.mark.asyncio
+async def test_persistence_failure_is_propagated_without_retrying_nodes(monkeypatch):
+    import sqlite3
+    from unittest.mock import Mock
+    manager = syslog_manager.SyslogManager()
+    monkeypatch.setattr(syslog_manager, "create_execution_record", AsyncMock(return_value={"id": "exec"}))
+    monkeypatch.setattr(syslog_manager, "record_execution_result", AsyncMock(side_effect=sqlite3.OperationalError("database is locked")))
+    run = Mock(return_value=SimpleNamespace(status="SUCCEEDED", outputs={}, steps=0, last_node_id=None, error=None))
+    monkeypatch.setattr(syslog_manager, "run_workflow", run)
+    with pytest.raises(RuntimeError, match="execution_persist_failed"):
+        await manager._trigger_workflow("wf", {}, {"message": "one"}, "message")
+    run.assert_called_once()

@@ -32,7 +32,7 @@ _queue = queue.Queue(maxsize=2048)
 _writer = None
 _health = Counter()
 _boot = uuid.uuid4().hex
-_FIELDS = {"trace", "execution", "node", "phase", "status", "error_type", "step", "duration_ms",
+_FIELDS = {"trace", "execution", "node", "phase", "status", "error_type", "sqlite_errorcode", "sqlite_errorname", "backoff_seconds", "step", "duration_ms",
            "queue_size", "queue_capacity", "active_runs", "matched", "executed", "count",
            "thread", "parent", "worker_count", "listener_alive", "raw_count", "after_filter_count", "unique_key_count",
            "dedup_removed_count", "selected_count", "processed_count", "has_error",
@@ -165,7 +165,8 @@ def traced(phase):
                 record(workflow_id, "trace.end", trace=trace, status="returned")
                 return result
             except BaseException as exc:
-                record(workflow_id, "trace.end", trace=trace, status="cancelled" if isinstance(exc, asyncio.CancelledError) else "error", error_type=type(exc).__name__)
+                from flocks.workflow.store import sqlite_error_fields
+                record(workflow_id, "trace.end", trace=trace, status="cancelled" if isinstance(exc, asyncio.CancelledError) else "error", **sqlite_error_fields(exc))
                 raise
             finally:
                 with _lock:

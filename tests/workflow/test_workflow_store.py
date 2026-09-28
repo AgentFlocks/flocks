@@ -321,3 +321,118 @@ async def test_pid_change_drops_inherited_connections_without_closing(
     finally:
         await original_db_close()
         await original_completion_db_close()
+
+
+@pytest.mark.asyncio
+async def test_open_history_snapshot_does_not_poison_new_execution_writes():
+    for i in range(4):
+        await WorkflowStore.upsert_execution({"id": f"seed-{i}", "workflowId": "wf", "status": "running"})
+    reader = await WorkflowStore.raw_db()
+    cursor = await reader.execute("SELECT payload FROM workflow_executions")
+    await cursor.fetchone()
+    try:
+        await WorkflowStore.complete_execution({"id": "seed-0", "workflowId": "wf", "status": "success"}, [])
+        for i in range(3):
+            await WorkflowStore.upsert_execution({"id": f"new-{i}", "workflowId": "wf", "status": "running"})
+    finally:
+        await cursor.close()
+    assert len(await WorkflowStore.list_executions("wf")) == 7
+    assert not reader.in_transaction
+    assert not (await WorkflowStore.raw_completion_db()).in_transaction
+
+
+@pytest.mark.asyncio
+async def test_cancelled_writer_rolls_back_only_its_transaction(monkeypatch):
+    await WorkflowStore.init()
+    writer = await WorkflowStore.raw_completion_db()
+    entered = asyncio.Event()
+    original = writer.commit
+    calls = 0
+    async def blocked_commit():
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            entered.set()
+            await asyncio.Event().wait()
+        await original()
+    monkeypatch.setattr(writer, "commit", blocked_commit)
+    first = asyncio.create_task(WorkflowStore.kv_put("first", {"value": 1}))
+    await entered.wait()
+    second = asyncio.create_task(WorkflowStore.kv_put("second", {"value": 2}))
+    await asyncio.sleep(0)
+    first.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first
+    await asyncio.wait_for(second, 2)
+    assert await WorkflowStore.kv_get("first") is None
+    assert await WorkflowStore.kv_get("second") == {"value": 2}
+    assert not writer.in_transaction
+
+
+@pytest.mark.asyncio
+async def test_external_writer_lock_is_bounded_and_store_recovers():
+    import sqlite3
+    await WorkflowStore.init()
+    writer = await WorkflowStore.raw_completion_db()
+    await writer.execute("PRAGMA busy_timeout=1")
+    blocker = sqlite3.connect(WorkflowStore.get_db_path(), isolation_level=None)
+    try:
+        blocker.execute("BEGIN IMMEDIATE")
+        with pytest.raises(sqlite3.OperationalError, match="locked"):
+            await asyncio.wait_for(WorkflowStore.kv_put("blocked", 1), 2)
+        assert not writer.in_transaction
+        blocker.rollback()
+        await WorkflowStore.kv_put("recovered", 2)
+        assert await WorkflowStore.kv_get("blocked") is None
+        assert await WorkflowStore.kv_get("recovered") == 2
+    finally:
+        blocker.close()
+
+
+@pytest.mark.asyncio
+async def test_temporary_external_lock_retries_before_body():
+    import sqlite3
+    await WorkflowStore.init()
+    writer = await WorkflowStore.raw_completion_db()
+    await writer.execute("PRAGMA busy_timeout=1")
+    blocker = sqlite3.connect(WorkflowStore.get_db_path(), isolation_level=None)
+    try:
+        blocker.execute("BEGIN IMMEDIATE")
+        task = asyncio.create_task(WorkflowStore.kv_put("retry", 1))
+        await asyncio.sleep(.025)
+        blocker.rollback()
+        await asyncio.wait_for(task, 2)
+        assert await WorkflowStore.kv_get("retry") == 1
+    finally:
+        blocker.close()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_first_writes_share_initialized_writer():
+    await asyncio.wait_for(asyncio.gather(*(
+        WorkflowStore.kv_put(f"cold-{i}", i) for i in range(20)
+    )), 5)
+    assert len(await WorkflowStore.kv_list_keys("cold-")) == 20
+    assert not (await WorkflowStore.raw_completion_db()).in_transaction
+
+
+@pytest.mark.asyncio
+async def test_mixed_history_reads_and_parallel_writers_keep_all_results():
+    await WorkflowStore.init()
+    async def run_batch(worker):
+        for n in range(40):
+            row = {"id": f"{worker}-{n}", "workflowId": "wf", "status": "running"}
+            await WorkflowStore.upsert_execution(row)
+            row["status"] = "success"
+            await WorkflowStore.complete_execution(row, [(1, {"node_id": "done"})])
+            await WorkflowStore.increment_stats("wf", success=True, duration=1)
+    async def history():
+        for _ in range(100):
+            await WorkflowStore.list_executions("wf", limit=1000)
+            await WorkflowStore.get_stats("wf")
+            await WorkflowStore.put_config("wf", {"enabled": True}, kind="workflow_poller_config")
+    await asyncio.wait_for(asyncio.gather(history(), *(run_batch(i) for i in range(5))), 20)
+    records = await WorkflowStore.list_executions("wf", limit=1000)
+    assert len(records) == 200
+    assert all(item["status"] == "success" for item in records)
+    assert (await WorkflowStore.get_stats("wf"))["successCount"] == 200

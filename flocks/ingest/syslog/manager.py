@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+import sqlite3
 import time
 import uuid
 from typing import Any, Dict, List, Optional
@@ -22,7 +23,7 @@ from flocks.workflow.execution_plan import build_workflow_execution_plan
 from flocks.workflow.fs_store import read_workflow_from_fs
 from flocks.workflow.models import Workflow
 from flocks.workflow.runner import run_workflow
-from flocks.workflow.store import WorkflowStore
+from flocks.workflow.store import WorkflowStore, sqlite_error_fields
 from flocks.workflow.tool_context import (
     build_workflow_tool_context,
     cleanup_workflow_tool_context,
@@ -125,6 +126,14 @@ class _DropWarningThrottle:
         self._last_log = time.monotonic()
 
 
+class _ExecutionCreateFailed(Exception):
+    """Only this failure is safe to retry: no workflow node has run yet."""
+    def __init__(self, cause):
+        super().__init__(str(cause))
+        self.sqlite_errorcode = getattr(cause, "sqlite_errorcode", None)
+        self.sqlite_errorname = getattr(cause, "sqlite_errorname", None)
+
+
 class SyslogManager:
     """One async listener task per workflow id (when enabled).
 
@@ -161,6 +170,7 @@ class SyslogManager:
         # save endpoint can report bind failures synchronously.
         self._listener_ready: dict[str, asyncio.Event] = {}
         self._dispatcher = EventDispatcher()
+        self._dispatch_status: dict[str, Dict[str, Any]] = {}
 
     @staticmethod
     def _config_key(workflow_id: str) -> str:
@@ -245,6 +255,7 @@ class SyslogManager:
         pool = self._worker_pools.get(workflow_id)
         if pool is not None:
             status["workerCount"] = sum(1 for t in pool if not t.done())
+        status.update(self._dispatch_status.get(workflow_id, {}))
         return status
 
     def _track_draining_workers(
@@ -576,23 +587,39 @@ class SyslogManager:
                 continue
             except asyncio.CancelledError:
                 return
-            try:
-                await self._trigger_workflow(
-                    workflow_id,
-                    workflow_plan,
-                    msg,
-                    next(iter(trigger.mapping or {}), "syslog_message"),
-                    trigger=trigger,
-                    source=f"{(trigger.source or {}).get('protocol', 'udp')}://{(trigger.source or {}).get('host', '0.0.0.0')}:{(trigger.source or {}).get('port', 5140)}",
-                    generation_cancel_event=run_cancel_event,
-                )
-            except asyncio.CancelledError:
-                return
-            except Exception as exc:
-                log.warning(
-                    "syslog.worker_dispatch_failed",
-                    {"workflow_id": workflow_id, "error": str(exc)},
-                )
+            for attempt in range(3):
+                try:
+                    await self._trigger_workflow(
+                        workflow_id, workflow_plan, msg,
+                        next(iter(trigger.mapping or {}), "syslog_message"),
+                        trigger=trigger,
+                        source=f"{(trigger.source or {}).get('protocol', 'udp')}://{(trigger.source or {}).get('host', '0.0.0.0')}:{(trigger.source or {}).get('port', 5140)}",
+                        generation_cancel_event=run_cancel_event,
+                    )
+                    self._dispatch_status[workflow_id] = {"dispatchState": "ready", "dispatchError": None}
+                    break
+                except asyncio.CancelledError:
+                    return
+                except Exception as exc:
+                    # Never replay a workflow after nodes may have started. Only
+                    # creation failures retain this message for a bounded retry.
+                    delay = min(30.0, 2.0 ** (attempt + 1)) if isinstance(exc, _ExecutionCreateFailed) else 2.0
+                    self._dispatch_status[workflow_id] = {
+                        "dispatchState": "backoff", "dispatchError": str(exc),
+                        "dispatchRetryAt": time.time() + delay,
+                        **sqlite_error_fields(exc),
+                    }
+                    soc_diag.record(workflow_id, "dispatch.backoff", backoff_seconds=delay, **sqlite_error_fields(exc))
+                    log.warning("syslog.worker_dispatch_failed", {"workflow_id": workflow_id, "error": str(exc), "retry_seconds": delay, **sqlite_error_fields(exc)})
+                    try:
+                        await asyncio.wait_for(abort.wait(), timeout=delay)
+                        return
+                    except asyncio.TimeoutError:
+                        pass
+                    if not isinstance(exc, _ExecutionCreateFailed) or attempt == 2:
+                        soc_diag.record(workflow_id, "dispatch.abandoned", count=1, **sqlite_error_fields(exc))
+                        self._dispatch_status[workflow_id]["dispatchState"] = "error"
+                        break
 
     @soc_diag.traced("syslog.dispatch")
     async def _trigger_workflow(
@@ -629,10 +656,10 @@ class SyslogManager:
             summarized_inputs.update(mapped_inputs)
 
             soc_diag.progress("execution.create")
-            exec_data = await create_execution_record(
-                workflow_id,
-                input_params=summarized_inputs,
-            )
+            try:
+                exec_data = await create_execution_record(workflow_id, input_params=summarized_inputs)
+            except sqlite3.Error as exc:
+                raise _ExecutionCreateFailed(exc) from exc
             exec_id = exec_data["id"]
             step_recorder = ExecutionStepRecorder()
             start_time = time.time()
@@ -681,7 +708,7 @@ class SyslogManager:
                 )
             except Exception as exc:
                 duration = time.time() - start_time
-                soc_diag.progress("execution.error", error_type=type(exc).__name__)
+                soc_diag.progress("execution.error", **sqlite_error_fields(exc))
                 log.error(
                     "syslog.workflow_run_failed",
                     {"workflow_id": workflow_id, "exec_id": exec_id, "error": str(exc)},
@@ -715,8 +742,9 @@ class SyslogManager:
                         steps=steps,
                     )
                 except Exception as exc:
-                    soc_diag.progress("execution.persist_failed", error_type=type(exc).__name__)
+                    soc_diag.progress("execution.persist_failed", **sqlite_error_fields(exc))
                     log.warning("syslog.exec_record_failed", {"exec_id": exec_id, "error": str(exc)})
+                    raise RuntimeError(f"execution_persist_failed: {exc}") from exc
             soc_diag.progress("ingress.after", execution=exec_id)
             return exec_data
 
