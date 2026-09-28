@@ -59,6 +59,25 @@
   animation: flocks-voice-pulse 1.1s ease-in-out infinite;
 }
 
+/* Whole-utterance recognition may stay blank while the user is speaking. */
+.flocks-voice-status {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 8px);
+  z-index: 1;
+  width: min(280px, calc(100vw - 64px));
+  padding: 8px 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-control);
+  background: var(--bg-surface);
+  color: var(--text-secondary);
+  box-shadow: var(--shadow-overlay);
+  font-size: var(--font-body);
+  line-height: var(--line-body);
+  white-space: normal;
+  pointer-events: none;
+}
+
 @keyframes flocks-voice-pulse {
   0%, 100% { opacity: 1; transform: scale(1); }
   50% { opacity: 0.35; transform: scale(0.72); }
@@ -74,5 +93,12 @@
 @media (max-width: 767px), (pointer: coarse) {
   .flocks-voice-button {
     min-height: var(--control-touch);
+  }
+}
+
+@media (max-width: 767px) {
+  .flocks-voice-status {
+    right: auto;
+    left: 0;
   }
 }

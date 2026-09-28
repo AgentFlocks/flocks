@@ -83,9 +83,81 @@ describe('voice settings opt-in', () => {
       fireEvent.change(mode, { target: { value: 'raw' } });
       fireEvent.change(hotwords, { target: { value: ' Flocks\n张伟，项目名称\nFlocks\n' } });
       fireEvent.click(screen.getByRole('button', { name: 'settings.saveRecognition' }));
-      await waitFor(() => expect(api.updateSettings).toHaveBeenCalledWith({ capture_mode: 'raw', hotwords: ['Flocks', '张伟', '项目名称'] }));
+      await waitFor(() => expect(api.updateSettings).toHaveBeenCalledWith({ recognition_scene: 'general', capture_mode: 'raw', hotwords: ['Flocks', '张伟', '项目名称'] }));
       await waitFor(() => expect(changed).toHaveBeenCalledOnce());
       expect(hotwords).toHaveValue('Flocks\n张伟\n项目名称');
+    } finally {
+      window.removeEventListener('flocks-voice-status-changed', changed);
+    }
+  });
+
+  it.each([
+    { response: {}, expected: 'general' },
+    { response: { recognition_scene: 'general' }, expected: 'general' },
+    { response: { recognition_scene: 'security_internet' }, expected: 'security_internet' },
+  ])('loads scene $expected with compatibility for older responses', async ({ response, expected }) => {
+    api.settings.mockResolvedValue({ ...disabled, ...response, hotwords: ['内部产品'] });
+    render(<VoiceSettings />);
+
+    const scene = await screen.findByRole('combobox', { name: 'settings.recognitionScene' });
+    expect(scene).toHaveValue(expected);
+    expect(scene).toHaveClass('ui-select');
+    expect(scene).toHaveAccessibleDescription(expect.stringContaining('settings.recognitionSceneHelp'));
+    expect(scene).toHaveAccessibleDescription(expect.stringContaining(
+      expected === 'security_internet' ? 'settings.sceneSecurityInternetHelp' : 'settings.sceneGeneralHelp',
+    ));
+    expect(screen.getByLabelText('settings.hotwords')).toHaveValue('内部产品');
+    expect(api.updateSettings).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { initial: 'general', selected: 'security_internet' },
+    { initial: 'security_internet', selected: 'general' },
+  ])('saves scene $selected while preserving user vocabulary and raw capture', async ({ initial, selected }) => {
+    const current = { ...disabled, recognition_scene: initial, capture_mode: 'raw', hotwords: ['内部产品', 'NDR'] };
+    api.settings.mockResolvedValue(current);
+    api.updateSettings.mockResolvedValue({ ...current, recognition_scene: selected });
+    render(<VoiceSettings />);
+
+    const scene = await screen.findByLabelText('settings.recognitionScene');
+    fireEvent.change(scene, { target: { value: selected } });
+    expect(screen.getByLabelText('settings.captureMode')).toHaveValue('raw');
+    expect(screen.getByLabelText('settings.hotwords')).toHaveValue('内部产品\nNDR');
+    expect(api.updateSettings).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole('button', { name: 'settings.saveRecognition' }));
+    await waitFor(() => expect(api.updateSettings).toHaveBeenCalledWith({
+      recognition_scene: selected,
+      capture_mode: 'raw',
+      hotwords: ['内部产品', 'NDR'],
+    }));
+    expect(await screen.findByRole('status')).toHaveTextContent('settings.saved');
+    expect(scene).toHaveValue(selected);
+    expect(screen.getByLabelText('settings.hotwords')).toHaveValue('内部产品\nNDR');
+    expect(screen.getByLabelText('settings.captureMode')).toHaveValue('raw');
+  });
+
+  it('keeps the unsaved scene, vocabulary and capture mode available to retry after save failure', async () => {
+    api.settings.mockResolvedValue({ ...disabled, recognition_scene: 'general', hotwords: ['内部产品'] });
+    api.updateSettings.mockRejectedValue(new Error('network'));
+    const changed = vi.fn();
+    window.addEventListener('flocks-voice-status-changed', changed);
+    try {
+      render(<VoiceSettings />);
+      const scene = await screen.findByLabelText('settings.recognitionScene');
+      fireEvent.change(scene, { target: { value: 'security_internet' } });
+      fireEvent.change(screen.getByLabelText('settings.captureMode'), { target: { value: 'raw' } });
+      fireEvent.change(screen.getByLabelText('settings.hotwords'), { target: { value: '内部产品\n自有术语' } });
+      fireEvent.click(screen.getByRole('button', { name: 'settings.saveRecognition' }));
+
+      expect(await screen.findByRole('alert')).toHaveTextContent('settings.saveError');
+      expect(scene).toHaveValue('security_internet');
+      expect(scene).not.toBeDisabled();
+      expect(screen.getByLabelText('settings.captureMode')).toHaveValue('raw');
+      expect(screen.getByLabelText('settings.hotwords')).toHaveValue('内部产品\n自有术语');
+      expect(screen.getByRole('button', { name: 'settings.saveRecognition' })).not.toBeDisabled();
+      expect(screen.queryByRole('status')).not.toBeInTheDocument();
+      expect(changed).not.toHaveBeenCalled();
     } finally {
       window.removeEventListener('flocks-voice-status-changed', changed);
     }

@@ -160,7 +160,9 @@ export default function VoiceInput({ context: composer }: { context: VoiceInputC
         </span>
         <span>{caption}</span>
       </button>}
-      <span className="sr-only" role="status">{active ? t(`${phase}`) : ''}</span>
+      <span className={active ? 'flocks-voice-status' : 'sr-only'} role="status">
+        {active ? t(`${phase}`) : ''}
+      </span>
       {error && (
         <VoiceErrorDialog message={error} onClose={() => setError('')} returnFocusRef={microphoneRef} />
       )}

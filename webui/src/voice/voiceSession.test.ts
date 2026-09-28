@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { VoiceSession } from './voiceSession';
 
 const audio = vi.hoisted(() => ({
-  prepare: vi.fn(), start: vi.fn(), stop: vi.fn(), cancel: vi.fn(), captureMode: vi.fn(),
+  prepare: vi.fn(), start: vi.fn(), stop: vi.fn(), cancel: vi.fn(), captureMode: vi.fn(), captureInfo: vi.fn(),
   onPacket: null as ((packet: ArrayBuffer) => void) | null,
   onError: null as ((code: string) => void) | null,
 }));
@@ -16,6 +16,7 @@ vi.mock('./pcmRecorder', () => ({
     start = audio.start;
     stop = audio.stop;
     cancel = audio.cancel;
+    captureInfo = audio.captureInfo;
   },
 }));
 
@@ -50,6 +51,7 @@ describe('voice WebSocket lifecycle', () => {
   beforeEach(() => {
     vi.useFakeTimers();
     vi.clearAllMocks();
+    audio.captureInfo.mockReturnValue(null);
     audio.prepare.mockResolvedValue(undefined);
     audio.start.mockResolvedValue(undefined);
     audio.stop.mockResolvedValue(undefined);
@@ -413,4 +415,25 @@ describe('voice WebSocket lifecycle', () => {
       expect(audio.cancel).toHaveBeenCalledOnce();
     },
   );
+});
+
+describe('capture parameters on the voice socket', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    audio.prepare.mockResolvedValue(undefined);
+    audio.start.mockResolvedValue(undefined);
+    MockSocket.instances = [];
+    vi.stubGlobal('WebSocket', MockSocket);
+  });
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('opens the socket with what the microphone was granted', async () => {
+    audio.captureInfo.mockReturnValue({ contextRate: 16000, trackRate: 48000, worklet: true, mode: 'voice' });
+    const { session } = setup();
+    await session.start();
+    const url = new URL(MockSocket.instances[0].url);
+    expect(url.searchParams.get('ctx_rate')).toBe('16000');
+    expect(url.searchParams.get('track_rate')).toBe('48000');
+    session.cancel();
+  });
 });

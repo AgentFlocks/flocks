@@ -24,7 +24,7 @@ def _packet(message_type: int, payload: bytes, sequence: int, *, json_body: bool
     return header + struct.pack(">iI", sequence, len(body)) + body
 
 
-def start_packet(connection_id: str, *, hotwords: tuple[str, ...] = ()) -> bytes:
+def start_packet(connection_id: str, *, hotwords: tuple[str, ...] = (), context: str = "") -> bytes:
     payload = {
         "user": {"uid": connection_id},
         "audio": {"format": "pcm", "codec": "raw", "rate": 16000, "bits": 16, "channel": 1},
@@ -32,19 +32,17 @@ def start_packet(connection_id: str, *, hotwords: tuple[str, ...] = ()) -> bytes
             "model_name": "bigmodel",
             "enable_itn": True, "enable_punc": True, "show_utterances": True,
             "result_type": "full",
-            # Two-pass: partial text still streams live, and each finished
-            # sentence is re-recognised by the non-streaming model, which
-            # replaces it. The streaming pass alone re-anchors its hypothesis
-            # after a pause and drops what came before, so dictation with
-            # pauses lost whole clauses; the documented option fixes the final
-            # text without changing the model (still Seed ASR 2.0).
-            "enable_nonstream": True,
         },
     }
+    hints: dict = {}
     if hotwords:
+        hints["hotwords"] = [{"word": word} for word in hotwords]
+    if context:
+        hints.update(context_type="dialog_ctx", context_data=[{"text": context}])
+    if hints:
         # SAUC expects corpus.context to be a JSON string, not a nested object.
         payload["request"]["corpus"] = {
-            "context": json.dumps({"hotwords": [{"word": word} for word in hotwords]}, ensure_ascii=False),
+            "context": json.dumps(hints, ensure_ascii=False),
         }
     return _packet(1, json.dumps(payload).encode(), 1, json_body=True)
 

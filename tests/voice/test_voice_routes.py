@@ -8,6 +8,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
+from flocks.config.config import Config
 from flocks.voice.settings import KEY_ENV, update_settings
 from flocks.server.routes import voice as voice_routes
 
@@ -15,6 +16,10 @@ from flocks.server.routes import voice as voice_routes
 @pytest.fixture
 def client(tmp_path, monkeypatch):
     monkeypatch.setenv("FLOCKS_ROOT", str(tmp_path))
+    monkeypatch.delenv("FLOCKS_CONFIG_DIR", raising=False)
+    # Stream sessions resolve the diagnostics directory through a per-process
+    # config cache; follow this test's root, never a developer's real one.
+    monkeypatch.setattr(Config, "_global_config", None)
     from flocks.voice import settings
     monkeypatch.setattr(settings, "_legacy_path", None)
     monkeypatch.setattr(settings, "_legacy_key", None)
@@ -198,14 +203,79 @@ def test_open_runtime_settings_and_socket_need_no_enterprise_license(client, mon
     assert client.get("/api/voice/status").json()["capture_mode"] == "raw"
     with client.websocket_connect("/api/voice/stream", headers={"origin": "http://testserver"}) as socket:
         assert socket.receive_json() == {"type": "ready"}
-    assert options == [{"hotwords": ("Flocks", "海淀")}]
+    assert options == [{"hotwords": ("Flocks", "海淀"), "context": ""}]
+
+
+def test_saved_scene_is_used_by_next_socket_and_can_be_disabled(client, monkeypatch):
+    from flocks.voice.settings import RECOGNITION_CONTEXTS
+
+    options = []
+
+    async def serve(socket, key, authorize=None, **kwargs):
+        options.append(kwargs)
+        await socket.send_json({"type": "ready"})
+        await socket.close()
+
+    monkeypatch.setattr(voice_routes, "serve", serve)
+    for scene in ("security_internet", "general"):
+        saved = client.put("/api/voice/config", json={
+            "api_key": "test", "enabled": True, "hotwords": ["Flocks", "NDR", "EDR"],
+            "recognition_scene": scene,
+        })
+        assert saved.status_code == 200
+        assert client.get("/api/voice/config").json()["recognition_scene"] == scene
+        with client.websocket_connect("/api/voice/stream", headers={"origin": "http://testserver"}) as socket:
+            assert socket.receive_json() == {"type": "ready"}
+        assert options[-1] == {
+            "hotwords": ("Flocks", "NDR", "EDR"), "context": RECOGNITION_CONTEXTS[scene],
+        }
 
 
 @pytest.mark.parametrize("payload", [
     {"hotwords": ["a"] * 101}, {"hotwords": ["a" * 65]}, {"hotwords": [""]},
     {"capture_mode": "invalid"},
+    {"recognition_scene": "unknown"}, {"recognition_scene": None},
 ])
 def test_bad_recognition_settings_do_not_mutate_config(client, payload):
     assert client.put("/api/voice/config", json={"api_key": "test", "enabled": True}).status_code == 200
     assert client.put("/api/voice/config", json=payload).status_code == 400
     assert client.get("/api/voice/status").json()["available"]
+
+
+@pytest.mark.parametrize("scene", [[], {}, 1, True])
+def test_scene_type_validation_does_not_echo_credentials(client, scene):
+    original = client.get("/api/voice/config").json()
+    result = client.put("/api/voice/config", json={"api_key": "do-not-echo", "recognition_scene": scene})
+    assert result.status_code == 422 and "do-not-echo" not in result.text
+    assert client.get("/api/voice/config").json() == original
+
+
+def test_socket_records_capture_parameters_only_while_diagnostics_are_on(client, monkeypatch, tmp_path):
+    seen = []
+
+    async def serve(websocket, api_key, authorize=None, **options):
+        seen.append(options.get("diagnostics"))
+        await websocket.send_json({"type": "ready"})
+        await websocket.close()
+
+    monkeypatch.setattr(voice_routes, "serve", serve)
+    update_settings({"api_key": "test", "enabled": True})
+    url = "/api/voice/stream?ctx_rate=16000&track_rate=48000&aec=1&mode=voice&bogus=1"
+    headers = {"origin": "http://testserver", "x-test-role": "member", "user-agent": "FlocksProAndroid/1.0.1"}
+    with client.websocket_connect(url, headers=headers) as socket:
+        assert socket.receive_json() == {"type": "ready"}
+    assert seen == [None]  # the relay is called exactly as before while diagnostics are off
+
+    from flocks.config.config import Config
+
+    monkeypatch.setattr(Config, "_global_config", None)
+    (tmp_path / "config" / "voice-diagnostics").mkdir(mode=0o700, parents=True)
+    (tmp_path / "config" / "voice-diagnostics" / "enabled").write_text("")
+    with client.websocket_connect(url, headers=headers) as socket:
+        assert socket.receive_json() == {"type": "ready"}
+    recorder = seen[-1]
+    assert recorder.client == {
+        "ctx_rate": 16000, "track_rate": 48000, "aec": True, "mode": "voice",
+        "user_agent": "FlocksProAndroid/1.0.1",
+    }
+    assert recorder.config["hotwords"] == 0 and recorder.config["recognition_scene"] == "general"

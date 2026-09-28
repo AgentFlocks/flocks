@@ -10,7 +10,8 @@ from fastapi import APIRouter, HTTPException, Request, WebSocket
 from pydantic import BaseModel, ConfigDict, SecretStr, StrictBool, ValidationError
 
 from flocks.server.auth import apply_auth_for_request, clear_auth_context, require_admin, require_user
-from flocks.voice.settings import MAX_CONFIG_BYTES, read_settings, update_settings
+from flocks.voice import diagnostics
+from flocks.voice.settings import MAX_CONFIG_BYTES, RESOURCE_ID, read_settings, update_settings
 from flocks.voice.stream import serve
 
 router = APIRouter(tags=["Voice"])
@@ -22,6 +23,7 @@ class VoiceSettingsPayload(BaseModel):
     enabled: StrictBool | None = None
     hotwords: list[str] | None = None
     capture_mode: str | None = None
+    recognition_scene: str | None = None
 
 
 async def _public_status(*, admin: bool = False) -> dict:
@@ -117,7 +119,19 @@ async def voice_stream(websocket: WebSocket) -> None:
             current = await asyncio.to_thread(read_settings)
             return current.enabled and current.api_key == settings.api_key
 
-        await serve(websocket, settings.api_key, authorize=still_allowed, hotwords=settings.hotwords)
+        options: dict = {"hotwords": settings.hotwords, "context": settings.recognition_context}
+        # Off unless an operator created the marker file on the server.
+        recorder = await asyncio.to_thread(
+            diagnostics.start_session, websocket.query_params, websocket.headers.get("user-agent"),
+            {
+                "resource_id": RESOURCE_ID, "capture_mode": settings.capture_mode,
+                "recognition_scene": settings.recognition_scene,
+                "hotwords": len(settings.hotwords), "context_chars": len(settings.recognition_context),
+            },
+        )
+        if recorder is not None:
+            options["diagnostics"] = recorder
+        await serve(websocket, settings.api_key, authorize=still_allowed, **options)
     finally:
         if token is not None:
             clear_auth_context(token)

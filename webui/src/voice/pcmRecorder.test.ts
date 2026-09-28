@@ -116,6 +116,30 @@ describe('microphone resource cleanup', () => {
     });
   });
 
+  it('reports the granted capture path, and nothing before the microphone is open', async () => {
+    const recorder = new PcmRecorder(vi.fn(), vi.fn());
+    expect(recorder.captureInfo()).toBeNull();
+    Object.assign(track, { getSettings: () => ({
+      sampleRate: 48000, channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: false,
+    }) });
+    await recorder.prepare();
+    expect(recorder.captureInfo()).toEqual({
+      contextRate: 16000, trackRate: 48000, channels: 1,
+      echoCancellation: true, noiseSuppression: true, autoGainControl: false,
+      worklet: false, mode: 'voice',
+    });
+    recorder.cancel();
+    expect(recorder.captureInfo()).toBeNull();
+  });
+
+  it('reports nothing instead of failing when a WebView cannot describe the track', async () => {
+    Object.assign(track, { getSettings: () => { throw new Error('unsupported'); } });
+    const recorder = new PcmRecorder(vi.fn(), vi.fn());
+    await recorder.prepare();
+    expect(recorder.captureInfo()).toBeNull();
+    recorder.cancel();
+  });
+
   it('disables browser voice processing only when raw capture is explicitly selected', async () => {
     await new PcmRecorder(vi.fn(), vi.fn(), 'raw').prepare();
     expect(getUserMedia).toHaveBeenCalledWith({
@@ -177,6 +201,193 @@ describe('AudioWorklet bounded delivery', () => {
     expect(postMessage.mock.calls[0][0].samples).toEqual(new Float32Array(128).fill(0.25));
     expect(postMessage).toHaveBeenLastCalledWith({ flushed: true });
     expect(capture.process([[new Float32Array(128)]])).toBe(false);
+  });
+});
+
+describe('AudioWorklet stop handshake', () => {
+  type CaptureMessage = { samples?: Float32Array; flushed?: boolean; overflow?: boolean };
+  const track = { stop: vi.fn(), onended: null as null | (() => void) };
+  const source = { connect: vi.fn(), disconnect: vi.fn() };
+  const close = vi.fn();
+  const addModule = vi.fn();
+  const revokeObjectURL = vi.fn();
+  let replyDelay: number;
+  let capture: { process: (inputs: Float32Array[][]) => boolean; port: { onmessage: null | ((event: { data: string }) => void) } };
+  let node: {
+    port: { onmessage: null | ((event: { data: CaptureMessage }) => void); postMessage: ReturnType<typeof vi.fn>; close: ReturnType<typeof vi.fn> };
+    onprocessorerror: null | (() => void);
+    disconnect: ReturnType<typeof vi.fn>;
+  } | undefined;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.clearAllMocks();
+    replyDelay = 0;
+    node = undefined;
+    track.onended = null;
+    close.mockResolvedValue(undefined);
+    addModule.mockResolvedValue(undefined);
+    vi.stubGlobal('isSecureContext', true);
+    vi.stubGlobal('URL', { createObjectURL: () => 'blob:worklet', revokeObjectURL });
+    Object.defineProperty(navigator, 'mediaDevices', {
+      value: { getUserMedia: async () => ({ getTracks: () => [track], getAudioTracks: () => [track] }) },
+      configurable: true,
+    });
+    vi.stubGlobal('AudioContext', class {
+      sampleRate = PCM_SAMPLE_RATE;
+      state = 'running';
+      destination = {};
+      audioWorklet = { addModule };
+      resume = () => Promise.resolve();
+      close = close;
+      createMediaStreamSource = () => source;
+    });
+    vi.stubGlobal('AudioWorkletNode', class {
+      port = {
+        onmessage: null as null | ((event: { data: CaptureMessage }) => void),
+        postMessage: vi.fn((data: string) => {
+          window.setTimeout(() => capture.port.onmessage?.({ data }), 0);
+        }),
+        close: vi.fn(),
+      };
+      onprocessorerror = null;
+      connect = vi.fn();
+      disconnect = vi.fn();
+      constructor() {
+        node = this;
+        class Processor {
+          port = {
+            onmessage: null as null | ((event: { data: string }) => void),
+            postMessage: (data: CaptureMessage, transfer: Transferable[] = []) => {
+              // Match MessagePort ownership: transferred buffers are detached
+              // at the sender, and replies keep FIFO order at the receiver.
+              const received = structuredClone(data, { transfer });
+              window.setTimeout(() => node?.port.onmessage?.({ data: received }), replyDelay);
+            },
+          };
+        }
+        let Capture!: new () => Processor & { process: (inputs: Float32Array[][]) => boolean };
+        new Function('AudioWorkletProcessor', 'registerProcessor', PCM_WORKLET_SOURCE)(
+          Processor, (_name: string, value: typeof Capture) => { Capture = value; },
+        );
+        capture = new Capture();
+      }
+    });
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  async function recording() {
+    const packets: ArrayBuffer[] = [];
+    const onError = vi.fn();
+    const recorder = new PcmRecorder((packet) => packets.push(packet), onError);
+    await recorder.prepare();
+    await recorder.start();
+    // Two full worklet blocks and a 100 ms tail still inside the processor.
+    const samples = Float32Array.from({ length: 4096 + 1600 }, (_, index) => 0.25 * Math.sin(index / 20));
+    for (let offset = 0; offset < samples.length; offset += 128) {
+      capture.process([[samples.slice(offset, offset + 128)]]);
+    }
+    await vi.advanceTimersByTimeAsync(0);
+    return { recorder, packets, onError, samples };
+  }
+
+  it.each([0, 600])('keeps the exact tail when the flush reply takes %s ms', async (delay) => {
+    const { recorder, packets, onError, samples } = await recording();
+    replyDelay = delay;
+    let finished = false;
+    const stopping = recorder.stop().then(() => { finished = true; });
+    if (delay) {
+      await vi.advanceTimersByTimeAsync(500);
+      expect(finished).toBe(false);
+    }
+    await vi.advanceTimersByTimeAsync(delay || 1);
+    await stopping;
+    expect(packets.map((packet) => [...new Uint8Array(packet)])).toEqual(
+      encode(PCM_SAMPLE_RATE, [samples]).map((packet) => [...new Uint8Array(packet)]),
+    );
+    expect(onError).not.toHaveBeenCalled();
+    expect(node?.port.close).toHaveBeenCalledOnce();
+    expect(close).toHaveBeenCalledOnce();
+  });
+
+  it('reports a missing flush reply and rejects late audio instead of completing a truncated take', async () => {
+    const { recorder, packets, onError } = await recording();
+    replyDelay = 5000;
+    const stopping = recorder.stop();
+    await vi.advanceTimersByTimeAsync(2100);
+    await stopping;
+    expect(onError).toHaveBeenCalledExactlyOnceWith('microphone');
+    // Only the already transmitted complete packet survives; no false final tail.
+    expect(packets.map((packet) => packet.byteLength)).toEqual([6400]);
+    expect(node?.port.close).toHaveBeenCalledOnce();
+    expect(source.disconnect).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(packets.map((packet) => packet.byteLength)).toEqual([6400]);
+    expect(onError).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['cancel', 'processor error'] as const)('cleans up %s during a pending flush', async (reason) => {
+    const { recorder, packets, onError } = await recording();
+    replyDelay = 600;
+    const stopping = recorder.stop();
+    await vi.advanceTimersByTimeAsync(1);
+    if (reason === 'cancel') recorder.cancel();
+    else node?.onprocessorerror?.();
+    await stopping;
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(packets.map((packet) => packet.byteLength)).toEqual([6400]);
+    expect(onError.mock.calls).toEqual(reason === 'cancel' ? [] : [['microphone']]);
+    expect(node?.port.onmessage).toBeNull();
+    expect(node?.onprocessorerror).toBeNull();
+    expect(node?.port.close).toHaveBeenCalledOnce();
+    expect(close).toHaveBeenCalledOnce();
+  });
+
+  it('shares one flush and cleanup between concurrent stop calls', async () => {
+    const { recorder, packets, onError } = await recording();
+    replyDelay = 600;
+    const first = recorder.stop();
+    expect(recorder.stop()).toBe(first);
+    await vi.advanceTimersByTimeAsync(700);
+    await first;
+    expect(node?.port.postMessage.mock.calls.filter(([data]) => data === 'flush')).toHaveLength(1);
+    expect(packets.reduce((total, packet) => total + packet.byteLength / 2, 0)).toBe(5696);
+    expect(onError).not.toHaveBeenCalled();
+    expect(close).toHaveBeenCalledOnce();
+  });
+
+  it('cancels cleanly when stop arrives while the worklet module is loading', async () => {
+    let loaded!: () => void;
+    addModule.mockReturnValue(new Promise<void>((resolve) => { loaded = resolve; }));
+    const onPacket = vi.fn();
+    const onError = vi.fn();
+    const recorder = new PcmRecorder(onPacket, onError);
+    await recorder.prepare();
+    const starting = recorder.start();
+    await recorder.stop();
+    loaded();
+    await starting;
+    expect(node).toBeUndefined();
+    expect(onPacket).not.toHaveBeenCalled();
+    expect(onError).not.toHaveBeenCalled();
+    expect(track.stop).toHaveBeenCalled();
+    expect(source.disconnect).toHaveBeenCalledOnce();
+    expect(close).toHaveBeenCalledOnce();
+    expect(revokeObjectURL).toHaveBeenCalledExactlyOnceWith('blob:worklet');
+  });
+
+  it('reports a broken flush port and releases the pending wait', async () => {
+    const { recorder, packets, onError } = await recording();
+    node!.port.postMessage.mockImplementation(() => { throw new Error('closed port'); });
+    await recorder.stop();
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(onError).toHaveBeenCalledExactlyOnceWith('microphone');
+    expect(packets.map((packet) => packet.byteLength)).toEqual([6400]);
+    expect(node?.port.close).toHaveBeenCalledOnce();
+    expect(close).toHaveBeenCalledOnce();
   });
 });
 

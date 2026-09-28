@@ -12,7 +12,7 @@ const PUMP_INTERVAL_MS = 50;
 const MAX_TRANSCRIPT_CHARS = 32000;
 // Allow the relay's 10 s handshake plus 15 s each for its start packet and reply.
 const CONNECT_TIMEOUT_MS = 45000;
-// Stop includes recorder flush (0.5 s), upstream send (15 s), final response
+// Stop includes recorder flush (2 s), upstream send (15 s), final response
 // handling (15 s), and a possible error response (15 s), plus transport margin.
 const FINAL_TIMEOUT_MS = 50000;
 const MAX_RECORDING_MS = 120000;
@@ -96,7 +96,7 @@ export class VoiceSession {
 
   private connect(): void {
     this.connectTimer = window.setTimeout(() => this.fail('timeout'), CONNECT_TIMEOUT_MS);
-    const socket = new WebSocket(voiceStreamUrl());
+    const socket = new WebSocket(voiceStreamUrl(this.recorder?.captureInfo()));
     this.socket = socket;
     socket.onmessage = (event) => {
       if (this.ended) return;

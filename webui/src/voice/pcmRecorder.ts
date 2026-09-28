@@ -1,9 +1,10 @@
-import type { VoiceCaptureMode } from '@/api/voice';
+import type { VoiceCaptureInfo, VoiceCaptureMode } from '@/api/voice';
 import { StreamingResampler } from './resampler';
 import { QuietSpeechGain } from './quietSpeechGain';
 
 export const PCM_SAMPLE_RATE = 16000;
 export const PCM_PACKET_SAMPLES = 3200;
+const WORKLET_FLUSH_TIMEOUT_MS = 2000;
 
 /** Little-endian PCM16 packetization after anti-aliased streaming resampling. */
 export class Pcm16Encoder {
@@ -108,12 +109,37 @@ export class PcmRecorder {
   private encoder: Pcm16Encoder | null = null;
   private cancelled = false;
   private finishFlush: (() => void) | null = null;
+  private stopPromise: Promise<void> | null = null;
 
   constructor(
     private readonly onPacket: (packet: ArrayBuffer) => void,
     private readonly onError: (code: string) => void,
     private readonly captureMode: VoiceCaptureMode = 'voice',
   ) {}
+
+  /** What the browser actually granted; only known after prepare(). */
+  captureInfo(): VoiceCaptureInfo | null {
+    const context = this.context;
+    const track = this.stream?.getAudioTracks()[0];
+    if (!context || !track) return null;
+    let settings: MediaTrackSettings;
+    try {
+      settings = track.getSettings();
+    } catch {
+      // Diagnostics only; an odd WebView must not fail the recording.
+      return null;
+    }
+    return {
+      contextRate: context.sampleRate,
+      trackRate: settings.sampleRate,
+      channels: settings.channelCount,
+      echoCancellation: typeof settings.echoCancellation === 'boolean' ? settings.echoCancellation : undefined,
+      noiseSuppression: settings.noiseSuppression,
+      autoGainControl: settings.autoGainControl,
+      worklet: Boolean(context.audioWorklet) && typeof AudioWorkletNode !== 'undefined',
+      mode: this.captureMode,
+    };
+  }
 
   /** Called directly from the click gesture, before the WebSocket handshake. */
   async prepare(): Promise<void> {
@@ -177,12 +203,12 @@ export class PcmRecorder {
           if (this.cancelled) return;
           if (data.samples) {
             this.encoder?.push(data.samples);
-            node.port.postMessage('ack');
+            if (!this.cancelled) node.port.postMessage('ack');
           }
-          if (data.overflow) this.onError('backpressure');
+          if (data.overflow) this.fail('backpressure');
           if (data.flushed) this.finishFlush?.();
         };
-        node.onprocessorerror = () => this.onError('microphone');
+        node.onprocessorerror = () => this.fail('microphone');
         this.node = node;
       } finally {
         URL.revokeObjectURL(url);
@@ -197,25 +223,56 @@ export class PcmRecorder {
     }
     if (this.cancelled || !this.node) return;
     stream.getAudioTracks().forEach((track) => {
-      track.onended = () => { if (!this.cancelled) this.onError('microphone'); };
+      track.onended = () => this.fail('microphone');
     });
     this.source.connect(this.node);
     this.node.connect(context.destination);
   }
 
-  async stop(): Promise<void> {
-    if (this.cancelled) return;
+  stop(): Promise<void> {
+    if (this.cancelled) return Promise.resolve();
+    this.stopPromise ??= this.finishRecording();
+    return this.stopPromise;
+  }
+
+  private async finishRecording(): Promise<void> {
     this.stream?.getTracks().forEach((track) => { track.onended = null; track.stop(); });
     if (this.node && 'port' in this.node) {
       const node = this.node;
-      await new Promise<void>((resolve) => {
-        const timer = window.setTimeout(resolve, 500);
-        this.finishFlush = () => { window.clearTimeout(timer); resolve(); };
-        node.port.postMessage('flush');
-      });
+      try {
+        await new Promise<void>((resolve, reject) => {
+          const timer = window.setTimeout(() => {
+            this.finishFlush = null;
+            reject(new Error('microphone'));
+          }, WORKLET_FLUSH_TIMEOUT_MS);
+          this.finishFlush = () => {
+            window.clearTimeout(timer);
+            this.finishFlush = null;
+            resolve();
+          };
+          try {
+            node.port.postMessage('flush');
+          } catch (error) {
+            window.clearTimeout(timer);
+            this.finishFlush = null;
+            reject(error);
+          }
+        });
+      } catch {
+        // A deadline is a failed capture, never proof that the final samples
+        // arrived. Do not submit the encoder's partial tail as a complete take.
+        this.fail('microphone');
+        return;
+      }
     }
     if (!this.cancelled) this.encoder?.flush();
     this.cancel();
+  }
+
+  private fail(code: string): void {
+    if (this.cancelled) return;
+    this.cancel();
+    this.onError(code);
   }
 
   cancel(): void {
@@ -227,6 +284,7 @@ export class PcmRecorder {
     this.source?.disconnect();
     this.source = null;
     if (this.node && 'port' in this.node) {
+      this.node.onprocessorerror = null;
       this.node.port.onmessage = null;
       this.node.port.close();
     } else if (this.node) this.node.onaudioprocess = null;

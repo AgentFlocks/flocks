@@ -2,13 +2,14 @@ import { useEffect, useState } from 'react';
 import { IconCircleCheck, IconCircleX, IconLoader2, IconMicrophone } from '@tabler/icons-react';
 import { useTranslation } from 'react-i18next';
 import PageHeader from '@/components/common/PageHeader';
-import { voiceApi, VOICE_STATUS_CHANGED, type VoiceCaptureMode, type VoiceSettings, type VoiceSettingsUpdate } from '@/api/voice';
+import { voiceApi, VOICE_STATUS_CHANGED, type VoiceCaptureMode, type VoiceRecognitionScene, type VoiceSettings, type VoiceSettingsUpdate } from '@/api/voice';
 
 export default function VoiceSettingsPage() {
   const { t } = useTranslation('voice');
   const [settings, setSettings] = useState<VoiceSettings | null>(null);
   const [apiKey, setApiKey] = useState('');
   const [captureMode, setCaptureMode] = useState<VoiceCaptureMode>('voice');
+  const [recognitionScene, setRecognitionScene] = useState<VoiceRecognitionScene>('general');
   const [hotwords, setHotwords] = useState('');
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -21,6 +22,7 @@ export default function VoiceSettingsPage() {
       if (!mounted) return;
       setSettings(value);
       setCaptureMode(value.capture_mode ?? 'voice');
+      setRecognitionScene(value.recognition_scene ?? 'general');
       setHotwords((value.hotwords ?? []).join('\n'));
     })
       .catch(() => { if (mounted) setError(t('settings.loadError')); })
@@ -43,6 +45,7 @@ export default function VoiceSettingsPage() {
       if ('api_key' in payload) setApiKey('');
       if ('hotwords' in payload) setHotwords(value.hotwords.join('\n'));
       if ('capture_mode' in payload) setCaptureMode(value.capture_mode);
+      if ('recognition_scene' in payload) setRecognitionScene(value.recognition_scene ?? 'general');
       setNotice(t('settings.saved'));
       window.dispatchEvent(new Event(VOICE_STATUS_CHANGED));
     } catch {
@@ -109,10 +112,28 @@ export default function VoiceSettingsPage() {
           <form
             onSubmit={(event) => {
               event.preventDefault();
-              if (!hotwordError) void update({ capture_mode: captureMode, hotwords: normalizedHotwords });
+              if (!hotwordError) void update({ recognition_scene: recognitionScene, capture_mode: captureMode, hotwords: normalizedHotwords });
             }}
             className="space-y-4 border-t border-line pt-5"
           >
+            <div className="space-y-2">
+              <label htmlFor="voice-recognition-scene" className="block text-sm font-medium text-fg">{t('settings.recognitionScene')}</label>
+              <select
+                id="voice-recognition-scene"
+                value={recognitionScene}
+                disabled={saving}
+                aria-describedby="voice-recognition-scene-help voice-recognition-scene-detail"
+                onChange={(event) => setRecognitionScene(event.target.value as VoiceRecognitionScene)}
+                className="ui-select"
+              >
+                <option value="general">{t('settings.sceneGeneral')}</option>
+                <option value="security_internet">{t('settings.sceneSecurityInternet')}</option>
+              </select>
+              <p id="voice-recognition-scene-help" className="text-sm text-fg-secondary">{t('settings.recognitionSceneHelp')}</p>
+              <p id="voice-recognition-scene-detail" className="text-sm text-fg-secondary">
+                {t(recognitionScene === 'security_internet' ? 'settings.sceneSecurityInternetHelp' : 'settings.sceneGeneralHelp')}
+              </p>
+            </div>
             <div className="space-y-2">
               <label htmlFor="voice-capture-mode" className="block text-sm font-medium text-fg">{t('settings.captureMode')}</label>
               <select

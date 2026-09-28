@@ -73,6 +73,50 @@ async def test_real_upstream_socket_roundtrip(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_sentence_recognition_handshake_and_final_only_transcript(monkeypatch):
+    captured = []
+    pcm = b"\x00\x10" * 3200
+
+    class ReadyBrowser(Browser):
+        async def send_json(self, payload):
+            await super().send_json(payload)
+            if payload["type"] == "ready":
+                for message in (
+                    {"type": "websocket.receive", "bytes": pcm},
+                    {"type": "websocket.receive", "bytes": pcm},
+                    {"type": "websocket.receive", "text": '{"type":"stop"}'},
+                ):
+                    self.messages.put_nowait(message)
+
+    async def upstream(socket):
+        captured.append(await socket.recv())
+        # nostream acknowledges initialization and audio before any text exists.
+        await socket.send(response_packet(""))
+        captured.append(await socket.recv())
+        await socket.send(response_packet(""))
+        captured.append(await socket.recv())
+        await socket.send(response_packet("Flocks 的运行环境要求", final=True, sequence=3))
+
+    async with upstream_server(upstream, "127.0.0.1", 0) as server:
+        monkeypatch.setattr(stream, "ENDPOINT", f"ws://127.0.0.1:{server.sockets[0].getsockname()[1]}")
+        browser = ReadyBrowser([])
+        await asyncio.wait_for(stream.serve(browser, "test-only-credential"), timeout=2)
+
+    request = json.loads(gzip.decompress(captured[0][12:]))["request"]
+    assert "enable_nonstream" not in request and request["result_type"] == "full"
+    assert browser.output == [
+        {"type": "ready"},
+        {"type": "transcript", "text": "", "is_final": False},
+        {"type": "transcript", "text": "", "is_final": False},
+        {"type": "transcript", "text": "Flocks 的运行环境要求", "is_final": True},
+        {"type": "done"},
+    ]
+    assert browser.closed
+    assert captured[-1][1] == 0x23
+    assert b"".join(gzip.decompress(packet[12:]) for packet in captured[1:]) == pcm * 2
+
+
+@pytest.mark.asyncio
 async def test_session_logs_loudness_and_length_but_not_what_was_said(monkeypatch):
     logged = []
 
@@ -423,6 +467,34 @@ async def test_empty_final_is_explained_and_hotwords_are_forwarded(monkeypatch, 
     assert browser.output[-1]["code"] == code
     assert {"type": "done"} not in browser.output
     assert json.loads(requests[0]["request"]["corpus"]["context"]) == {"hotwords": [{"word": "Flocks"}]}
+
+
+@pytest.mark.asyncio
+async def test_scene_and_terminology_are_forwarded_on_real_upstream_socket(monkeypatch):
+    from flocks.voice.settings import VoiceSettings
+
+    captured = []
+    context = VoiceSettings(recognition_scene="security_internet").recognition_context
+
+    async def upstream(socket):
+        captured.append(json.loads(gzip.decompress((await socket.recv())[12:])))
+        await socket.send(response_packet())
+        await socket.recv()
+        await socket.send(response_packet("Flocks 的 NDR 和 EDR 告警", final=True))
+
+    async with upstream_server(upstream, "127.0.0.1", 0) as server:
+        monkeypatch.setattr(stream, "ENDPOINT", f"ws://127.0.0.1:{server.sockets[0].getsockname()[1]}")
+        browser = Browser([
+            {"type": "websocket.receive", "bytes": b"\x00\x10" * 3200},
+            {"type": "websocket.receive", "text": '{"type":"stop"}'},
+        ])
+        await stream.serve(browser, "test", hotwords=("Flocks", "NDR", "EDR"), context=context)
+    hints = json.loads(captured[0]["request"]["corpus"]["context"])
+    assert hints == {
+        "hotwords": [{"word": word} for word in ("Flocks", "NDR", "EDR")],
+        "context_type": "dialog_ctx", "context_data": [{"text": context}],
+    }
+    assert browser.output[-1] == {"type": "done"} and browser.closed
 
 
 @pytest.mark.asyncio

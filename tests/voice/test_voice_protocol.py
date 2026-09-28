@@ -11,12 +11,14 @@ from flocks.voice.protocol import (
 )
 
 
-def response_packet(text=None, *, final=False, compressed=True):
+def response_packet(text=None, *, final=False, compressed=True, sequence=None):
     payload = {"result": {"text": text}} if text is not None else {}
     body = json.dumps(payload).encode()
     if compressed:
         body = gzip.compress(body)
-    return bytes((0x11, 0x93 if final else 0x91, 0x11 if compressed else 0x10, 0)) + struct.pack(">iI", -3 if final else 2, len(body)) + body
+    if sequence is None:
+        sequence = -3 if final else 2
+    return bytes((0x11, 0x93 if final else 0x91, 0x11 if compressed else 0x10, 0)) + struct.pack(">iI", sequence, len(body)) + body
 
 
 def test_initial_packet_matches_documented_audio_and_model():
@@ -28,13 +30,12 @@ def test_initial_packet_matches_documented_audio_and_model():
     assert payload["audio"] == {"format": "pcm", "codec": "raw", "rate": 16000, "bits": 16, "channel": 1}
     assert payload["request"]["model_name"] == "bigmodel"
     assert "model_version" not in payload["request"]
+    assert "corpus" not in payload["request"]
 
 
-def test_initial_packet_asks_for_second_pass_recognition():
-    # Streaming-only results drop earlier clauses once the speaker pauses; the
-    # second (non-streaming) pass is what makes the final transcript complete.
+def test_initial_packet_uses_sentence_recognition_options():
     request = json.loads(gzip.decompress(start_packet("connection-id")[12:]))["request"]
-    assert request["enable_nonstream"] is True
+    assert "enable_nonstream" not in request  # Only the async endpoint needs this switch.
     assert request["result_type"] == "full" and request["show_utterances"] is True
     assert request["enable_itn"] is True and request["enable_punc"] is True
     assert "enable_ddc" not in request
@@ -50,9 +51,10 @@ def test_audio_and_final_packets_preserve_pcm_and_sequence():
 
 
 @pytest.mark.parametrize("compressed", [True, False])
-def test_cumulative_text_and_terminal_result(compressed):
+@pytest.mark.parametrize("final_sequence", [-3, 3])
+def test_cumulative_text_and_terminal_result(compressed, final_sequence):
     assert parse_response(response_packet("你好", compressed=compressed)).text == "你好"
-    result = parse_response(response_packet("你好世界", final=True, compressed=compressed))
+    result = parse_response(response_packet("你好世界", final=True, compressed=compressed, sequence=final_sequence))
     assert result.text == "你好世界" and result.final
     assert parse_response(response_packet()).text is None
 
@@ -84,4 +86,18 @@ def test_hotwords_reach_documented_provider_context_without_changing_model():
     assert isinstance(context, str)
     assert json.loads(context) == {"hotwords": [{"word": "Flocks"}, {"word": "海淀"}, {"word": "PostgreSQL"}]}
     assert payload["request"]["model_name"] == "bigmodel"
-    assert payload["request"]["enable_nonstream"] is True
+    assert "enable_nonstream" not in payload["request"]
+
+
+@pytest.mark.parametrize("hotwords", [(), ("Flocks", "NDR", "EDR")])
+def test_scene_context_reaches_provider_with_or_without_hotwords(hotwords):
+    from flocks.voice.settings import VoiceSettings
+
+    context = VoiceSettings(recognition_scene="security_internet").recognition_context
+    packet = start_packet("connection-id", hotwords=hotwords, context=context)
+    request = json.loads(gzip.decompress(packet[12:]))["request"]
+    hints = json.loads(request["corpus"]["context"])
+    assert hints["context_type"] == "dialog_ctx"
+    assert hints["context_data"] == [{"text": context}]
+    assert hints.get("hotwords", []) == [{"word": word} for word in hotwords]
+    assert request["model_name"] == "bigmodel" and "enable_nonstream" not in request

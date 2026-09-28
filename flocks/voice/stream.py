@@ -15,13 +15,15 @@ from websockets.exceptions import ConnectionClosed, InvalidStatus
 
 from flocks.utils.log import Log
 
+from flocks.voice.diagnostics import SessionRecorder, prune
 from flocks.voice.protocol import (
     MAX_RESPONSE_BYTES, LevelMeter, QuietSpeechGain, VoiceProtocolError, audio_packet, parse_response,
     start_packet,
 )
 from flocks.voice.settings import RESOURCE_ID
 
-ENDPOINT = "wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async"
+# Keep Seed ASR 2.0, with stable sentence results for accuracy-first dictation.
+ENDPOINT = "wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_nostream"
 MAX_AUDIO_SECONDS = 300
 MAX_FRAME_BYTES = 32_000  # One second of PCM; the browser normally sends 200 ms.
 IO_TIMEOUT = 15
@@ -87,7 +89,8 @@ async def _send_json(browser: WebSocket, payload: dict) -> None:
 async def relay(
     browser: WebSocket, api_key: str,
     authorize: Callable[[], Awaitable[bool]] | None = None,
-    *, hotwords: tuple[str, ...] = (),
+    *, hotwords: tuple[str, ...] = (), context: str = "",
+    diagnostics: SessionRecorder | None = None,
 ) -> None:
     connection_id = str(uuid.uuid4())
     headers = {
@@ -110,10 +113,15 @@ async def relay(
             max_size=MAX_RESPONSE_BYTES, max_queue=8, compression=None,
             logger=_TRANSPORT_LOGGER,
         ) as upstream:
-            await asyncio.wait_for(upstream.send(start_packet(connection_id, hotwords=hotwords)), timeout=IO_TIMEOUT)
+            await asyncio.wait_for(
+                upstream.send(start_packet(connection_id, hotwords=hotwords, context=context)),
+                timeout=IO_TIMEOUT,
+            )
             initial = parse_response(await asyncio.wait_for(upstream.recv(), timeout=IO_TIMEOUT))
             await _send_json(browser, {"type": "ready"})
             if initial.text is not None:
+                if diagnostics is not None:
+                    diagnostics.add_transcript(initial.text, initial.final)
                 await _send_json(browser, {"type": "transcript", "text": initial.text, "is_final": initial.final})
             if initial.final:
                 if not initial.text or not initial.text.strip():
@@ -140,7 +148,11 @@ async def relay(
                             raise VoiceProtocolError("音频帧无效，请重新开始录音")
                         total += len(pcm)
                         meter.add(pcm)  # what the browser sent, before the gain
+                        if diagnostics is not None:
+                            diagnostics.add_input(pcm)
                         pcm = gain.process(pcm)
+                        if diagnostics is not None:
+                            diagnostics.add_upstream(pcm)
                         if total > MAX_AUDIO_SECONDS * 32_000:
                             raise VoiceProtocolError("单次语音输入最多 5 分钟")
                         if pending_pcm:
@@ -164,12 +176,14 @@ async def relay(
 
             async def download() -> None:
                 while True:
-                    # bigmodel_async emits only changed results. Silence is not a
-                    # stalled connection: ping/pong, total duration and stop-to-final
+                    # Sentence recognition may wait for a complete phrase before
+                    # returning text. Ping/pong, total duration and stop-to-final
                     # deadlines bound this read without rejecting quiet recordings.
                     packet = await upstream.recv()
                     result = parse_response(packet)
                     if result.text is not None:
+                        if diagnostics is not None:
+                            diagnostics.add_transcript(result.text, result.final)
                         transcript["chars"] = len(result.text.strip())
                         await _send_json(browser, {"type": "transcript", "text": result.text, "is_final": result.final})
                     if result.final:
@@ -223,19 +237,44 @@ async def relay(
                     "voice.stream.audio",
                     {**meter.summary(), **gain.summary(), "text_chars": transcript["chars"]},
                 )
+                if diagnostics is not None:
+                    diagnostics.levels = {**meter.summary(), **gain.summary()}
+
+
+async def _save_diagnostics(diagnostics: SessionRecorder, outcome: str) -> None:
+    # Diagnostics must never change what the user sees; failures only log a name.
+    try:
+        saved = await asyncio.to_thread(diagnostics.finish, outcome)
+    except Exception as exc:
+        _LOG.warning("voice.stream.diagnostics_failed error=%s", type(exc).__name__)
+        return
+    if saved is None:
+        return  # switched off during the session: nothing was written
+    _AUDIO_LOG.info("voice.stream.diagnostics", {"session": diagnostics.name, "outcome": outcome})
+    try:
+        await asyncio.to_thread(prune, saved.parent)
+    except Exception as exc:
+        _LOG.warning("voice.stream.diagnostics_prune_failed error=%s", type(exc).__name__)
 
 
 async def serve(
     browser: WebSocket, api_key: str,
     authorize: Callable[[], Awaitable[bool]] | None = None,
-    *, hotwords: tuple[str, ...] = (),
+    *, hotwords: tuple[str, ...] = (), context: str = "",
+    diagnostics: SessionRecorder | None = None,
 ) -> None:
+    outcome = "ok"
     try:
-        await relay(browser, api_key, authorize, hotwords=hotwords)
+        await relay(browser, api_key, authorize, hotwords=hotwords, context=context, diagnostics=diagnostics)
     except WebSocketDisconnect:
+        outcome = "client_disconnected"
         return
+    except asyncio.CancelledError:
+        outcome = "cancelled"
+        raise
     except Exception as exc:
         code, message, status = _public_error(exc)
+        outcome = code
         # Never log repr(exc), traceback, upstream headers/body or close reason.
         _LOG.warning("voice.stream.failed code=%s http_status=%s", code, status)
         with contextlib.suppress(Exception):
@@ -243,3 +282,5 @@ async def serve(
     finally:
         with contextlib.suppress(Exception):
             await asyncio.wait_for(browser.close(), timeout=3)
+        if diagnostics is not None:
+            await _save_diagnostics(diagnostics, outcome)

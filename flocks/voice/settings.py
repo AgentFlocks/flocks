@@ -17,6 +17,15 @@ KEY_ENV = "FLOCKS_DOUBAO_ASR_API_KEY"
 MAX_HOTWORDS = 100
 MAX_HOTWORD_CHARS = 64
 MAX_CONFIG_BYTES = 65_536
+RECOGNITION_CONTEXTS = {
+    "general": "",
+    "security_internet": (
+        "这是一段网络安全与互联网技术讨论，会中英文混说。"
+        "Flocks、FlocksPro 是智能体平台；Flux 是另一款用于 GitOps 的持续交付工具。"
+        "NDR 是网络检测与响应，EDR 是终端检测与响应；SIEM、SOAR 用于安全运营。"
+        "内容涉及安全产品、协议缩写和开源组件。"
+    ),
+}
 _legacy_path: Callable[[], Path] | None = None
 _legacy_key: Callable[[], str] | None = None
 
@@ -28,6 +37,12 @@ class VoiceSettings:
     credential_source: str = "none"
     hotwords: tuple[str, ...] = ()
     capture_mode: str = "voice"
+    recognition_scene: str = "general"
+
+    @property
+    def recognition_context(self) -> str:
+        # Only a fixed topic description is sent, never conversation history.
+        return RECOGNITION_CONTEXTS.get(self.recognition_scene, "")
 
     def public(self, *, admin: bool = False) -> dict:
         configured = bool(self.api_key)
@@ -40,7 +55,7 @@ class VoiceSettings:
         if admin:
             result.update(resource_id=RESOURCE_ID, model=MODEL,
                           credential_source=self.credential_source,  # secret-guard: allow
-                          hotwords=list(self.hotwords))
+                          hotwords=list(self.hotwords), recognition_scene=self.recognition_scene)
         return result
 
 
@@ -113,12 +128,16 @@ def _resolve(data: dict) -> VoiceSettings:
         hotwords = _hotwords(data.get("hotwords", []))
     except ValueError:
         hotwords = ()
+    scene = data.get("recognition_scene")
+    if not isinstance(scene, str) or scene not in RECOGNITION_CONTEXTS:
+        scene = "general"
     return VoiceSettings(
         enabled=data.get("enabled") is True and bool(key),
         api_key=key,
         credential_source="environment" if environment else "stored" if stored else "none",  # secret-guard: allow
         hotwords=hotwords,
         capture_mode="raw" if data.get("capture_mode") == "raw" else "voice",
+        recognition_scene=scene,
     )
 
 
@@ -128,7 +147,7 @@ def read_settings() -> VoiceSettings:
 
 def update_settings(changes: dict) -> VoiceSettings:
     """Atomically update core settings, leaving any legacy file as a backup."""
-    if set(changes) - {"enabled", "api_key", "hotwords", "capture_mode"}:
+    if set(changes) - {"enabled", "api_key", "hotwords", "capture_mode", "recognition_scene"}:
         raise ValueError("语音配置字段无效")
     path = settings_path()
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -137,7 +156,8 @@ def update_settings(changes: dict) -> VoiceSettings:
         resolved = _resolve(previous)
         data = {"enabled": resolved.enabled,
                 "api_key": _valid_key(previous.get("api_key")),
-                "hotwords": list(resolved.hotwords), "capture_mode": resolved.capture_mode}
+                "hotwords": list(resolved.hotwords), "capture_mode": resolved.capture_mode,
+                "recognition_scene": resolved.recognition_scene}
         deleting = False
         if "api_key" in changes:
             raw = changes["api_key"]
@@ -158,6 +178,11 @@ def update_settings(changes: dict) -> VoiceSettings:
             if changes["capture_mode"] not in ("voice", "raw"):
                 raise ValueError("录音模式无效")
             data["capture_mode"] = changes["capture_mode"]
+        if "recognition_scene" in changes:
+            scene = changes["recognition_scene"]
+            if not isinstance(scene, str) or scene not in RECOGNITION_CONTEXTS:
+                raise ValueError("识别场景无效")
+            data["recognition_scene"] = scene
         if deleting:
             data["enabled"] = False
         if data["enabled"] and not _resolve(data).api_key:
