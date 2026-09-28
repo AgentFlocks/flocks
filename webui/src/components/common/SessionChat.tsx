@@ -144,7 +144,7 @@ const MonitoringViewContext = createContext(false);
 
 export interface SessionChatProps {
   /** Dedicated monitoring surface; ordinary workbench rendering is unchanged. */
-  monitoring?: { running: boolean; paused: boolean; historical?: boolean };
+  monitoring?: { running: boolean; paused: boolean; historical?: boolean; hidePageNotices?: boolean; onPageNotice?: (notice: string) => void };
   /** When null/undefined, only welcomeContent + input are rendered (lazy session). */
   sessionId?: string | null;
   /** Subscribe to SSE for live streaming updates */
@@ -4258,10 +4258,14 @@ export default function SessionChat({
     setDismissedGoalKey(goalKey);
   }, [sessionId, visibleGoalBanner]);
 
+  useEffect(() => {
+    monitoring?.onPageNotice?.(messagesError ? '监测对话读取失败，请刷新后重试。' : live && ['disconnected', 'reconnecting', 'failed'].includes(sseStatus) ? '对话实时连接中断，正在尝试恢复；当前显示已保存的记录。' : '');
+  }, [messagesError, live, sseStatus, monitoring?.onPageNotice]);
+
   return (
     <MonitoringViewContext.Provider value={!!monitoring}><div className={`flex flex-col min-h-0 ${className}`}>
-      {monitoring && monitoringPresentation.pending && <div role="status" className="flex shrink-0 items-center justify-between gap-3 border-b border-sky-100 bg-[#eaf4ff] px-5 py-1.5 text-xs text-[#17212b] dark:border-sky-900 dark:bg-sky-950 dark:text-sky-100"><span>{latestRoundEnded ? '本轮已结束，正在展示本轮记录' : '正在按执行顺序展示新步骤'}</span><button className="shrink-0 font-semibold underline" onClick={monitoringPresentation.skip}>直接查看全部</button></div>}
-      {monitoring && live && ['disconnected', 'reconnecting', 'failed'].includes(sseStatus) && <p role="status" className="shrink-0 border-b border-slate-200 px-5 py-2 text-xs dark:border-slate-700">对话实时连接中断，正在尝试恢复；当前显示已保存的记录。</p>}
+      {monitoring && !monitoring.hidePageNotices && monitoringPresentation.pending && <div role="status" className="flex shrink-0 items-center justify-between gap-3 border-b border-sky-100 bg-[#eaf4ff] px-5 py-1.5 text-xs text-[#17212b] dark:border-sky-900 dark:bg-sky-950 dark:text-sky-100"><span>{latestRoundEnded ? '本轮已结束，正在展示本轮记录' : '正在按执行顺序展示新步骤'}</span><button className="shrink-0 font-semibold underline" onClick={monitoringPresentation.skip}>直接查看全部</button></div>}
+      {monitoring && !monitoring.hidePageNotices && live && ['disconnected', 'reconnecting', 'failed'].includes(sseStatus) && <p role="status" className="shrink-0 border-b border-slate-200 px-5 py-2 text-xs dark:border-slate-700">对话实时连接中断，正在尝试恢复；当前显示已保存的记录。</p>}
       {/* Messages area */}
       <div
         ref={scrollContainerRef}
@@ -4287,7 +4291,7 @@ export default function SessionChat({
               className="opacity-60 [&_svg]:text-zinc-400 dark:[&_svg]:text-zinc-500"
             />
           </div>
-        ) : messagesError && messages.length === 0 ? (
+        ) : messagesError && messages.length === 0 ? monitoring?.hidePageNotices ? null : (
           <div className="flex min-h-40 items-center justify-center px-6" role="alert">
             <div className="flex flex-col items-center gap-3 text-center">
               <span className="text-sm text-zinc-500 dark:text-zinc-400">

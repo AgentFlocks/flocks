@@ -48,8 +48,8 @@ it('report links point to original message', async () => {
  fireEvent.click(await screen.findByRole('button', { name: /第 1 轮/ }));
  const link = await screen.findByText('查看本轮对话'); expect(link.closest('a')).toHaveAttribute('href', '/sessions?session=real-session&focusMessage=anchor');
 });
-it('marks fetch errors stale', async () => {
- mocks.overview.mockRejectedValueOnce(new Error('unavailable')); render(<MemoryRouter><SecurityMonitor /></MemoryRouter>);
+it('marks fetch errors stale on the dashboard', async () => {
+ mocks.overview.mockRejectedValueOnce(new Error('unavailable')); render(<MemoryRouter initialEntries={['/suites/host-security-monitor/dashboard']}><SecurityMonitor /></MemoryRouter>);
  expect(await screen.findByRole('alert')).toHaveTextContent('数据更新失败');
 });
 
@@ -68,8 +68,8 @@ it('rechecks an unready installation on Start and displays the next execution', 
  mocks.overview.mockResolvedValue({ data });
  await act(async () => finish({ data }));
  expect(await screen.findByRole('button', { name: '暂停监测' })).toBeEnabled();
- expect(screen.getByRole('status')).toHaveTextContent('监测已启动');
- expect(screen.getByRole('status')).toHaveTextContent('首轮立即进入执行队列');
+ expect(screen.queryByRole('status')).not.toBeInTheDocument();
+ expect(screen.queryByText(/监测已启动，首轮/)).not.toBeInTheDocument();
  expect(screen.getByRole('region', { name: '监测控制' })).toHaveTextContent('10:10:00');
 });
 
@@ -78,6 +78,10 @@ it.each(['message', 'detail'])('shows the actual preflight reason from %s and le
  mocks.start.mockRejectedValue({ response: { data: { [key]: '未找到已启用的 XDR 接入' } } });
  render(<MemoryRouter><SecurityMonitor /></MemoryRouter>);
  fireEvent.click(await screen.findByRole('button', { name: '启动监测' }));
+ await waitFor(() => expect(mocks.overview).toHaveBeenCalledTimes(2));
+ expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+ fireEvent.click(screen.getByLabelText('更多监测功能'));
+ fireEvent.click(screen.getByRole('link', { name: '总结看板' }));
  expect(await screen.findByRole('alert')).toHaveTextContent('未找到已启用的 XDR 接入');
  await waitFor(() => expect(screen.getByRole('button', { name: '启动监测' })).toBeEnabled());
  expect(screen.queryByRole('status')).not.toBeInTheDocument();
@@ -121,7 +125,10 @@ it('deduplicates diagnostic downloads and keeps retry available after failure', 
  expect(mocks.diagnostics).toHaveBeenCalledTimes(1);
  expect(screen.getByRole('button', { name: '正在导出…' })).toBeDisabled();
  await act(async () => reject(new Error('private path')));
+ expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+ fireEvent.click(screen.getByRole('link', { name: '总结看板' }));
  expect(await screen.findByRole('alert')).toHaveTextContent('诊断日志导出失败，请稍后重试。');
+ fireEvent.click(screen.getByLabelText('更多监测功能'));
  expect(screen.getByRole('button', { name: '导出诊断日志' })).toBeEnabled();
  expect(screen.queryByText('private path')).not.toBeInTheDocument();
 });
@@ -290,9 +297,14 @@ it('keeps a historical conversation while showing live global starts and finishe
  expect(screen.getByTestId('native-chat')).toHaveTextContent('historical-session');
 });
 
-it('surfaces mail failures immediately and exposes useful health details in the drawer', async () => {
+it('keeps mail warnings off the conversation and displays them only on the dashboard', async () => {
  mocks.overview.mockResolvedValue({ data: { ...data, mail: { enabled: true, pending: 2, needsReview: 1, health: { errors: ['收信连接中断'], receive: { state: 'unavailable', error_type: 'TimeoutError', stage: 'poll', last_error_stage: 'fetch', last_error_at: '2026-09-29T01:00:00Z', consecutive_failures: 3 }, send: { state: 'healthy', last_success_at: '2026-09-29T00:50:00Z' } } }, investigation: { pending: 2, deferred: 1, system_wait: 1, needs_review: 0 }, metrics: { ...data.metrics, investigatedEvents: 2, investigationCompletedEvents: 1, investigationCompletionRate: .5 } } });
  render(<MemoryRouter><SecurityMonitor /></MemoryRouter>);
+ await screen.findByTestId('native-chat');
+ expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+ expect(screen.queryByText(/邮件通道异常/)).not.toBeInTheDocument();
+ fireEvent.click(screen.getByLabelText('更多监测功能'));
+ fireEvent.click(screen.getByRole('link', { name: '总结看板' }));
  expect(await screen.findByRole('alert')).toHaveTextContent('邮件通道异常：收信连接中断');
  fireEvent.click(screen.getByRole('button', { name: '查看原因' }));
  const drawer = screen.getByRole('dialog');
@@ -359,4 +371,21 @@ it('labels a recovered mail connection without presenting old errors as a curren
  expect(drawer).toHaveTextContent('连接检查成功：');
  expect(drawer).not.toHaveTextContent('邮件已发送');
  expect(drawer).not.toHaveTextContent('连续失败：');
+});
+
+
+it('keeps refresh and installation notices off the conversation without navigating automatically', async () => {
+ function RouteObserver() { return <output data-testid="route">{useLocation().pathname}</output>; }
+ mocks.overview.mockResolvedValueOnce({ data: { ...data, installation: { installed: true, ready: false, status: 'disabled', reason: '配置仍需检查' } } });
+ render(<MemoryRouter initialEntries={['/suites/host-security-monitor/session']}><SecurityMonitor /><RouteObserver /></MemoryRouter>);
+ await screen.findByTestId('native-chat');
+ expect(screen.queryByText(/配置仍需检查/)).not.toBeInTheDocument();
+ mocks.overview.mockRejectedValue(new Error('unavailable'));
+ await act(async () => mocks.subscription.onReconnect());
+ expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+ expect(screen.getByTestId('route')).toHaveTextContent('/session');
+ fireEvent.click(screen.getByLabelText('更多监测功能'));
+ fireEvent.click(screen.getByRole('link', { name: '总结看板' }));
+ expect(await screen.findByRole('alert')).toHaveTextContent('数据更新失败');
+ expect(screen.getByText(/配置仍需检查/)).toBeVisible();
 });

@@ -6730,3 +6730,16 @@ describe('monitoring round end cards', () => {
     expect(screen.getByText(summary)).toBeInTheDocument();
   });
 });
+
+
+it('routes monitoring page notices out of the conversation while preserving ordinary chat errors', async () => {
+  useSessionMessagesMock.mockReturnValue({ ...useSessionMessagesMock(), messages: [], loading: false, error: new Error('private detail') });
+  const notice = vi.fn();
+  const view = render(React.createElement(SessionChat, { sessionId: 'sess-1', hideInput: true,
+    monitoring: { running: false, paused: false, hidePageNotices: true, onPageNotice: notice } }));
+  await waitFor(() => expect(notice).toHaveBeenCalledWith('监测对话读取失败，请刷新后重试。'));
+  expect(screen.queryByText('消息加载失败')).not.toBeInTheDocument();
+  expect(screen.queryByText('private detail')).not.toBeInTheDocument();
+  view.rerender(React.createElement(SessionChat, { sessionId: 'sess-1', hideInput: true }));
+  expect(await screen.findByText('消息加载失败')).toBeInTheDocument();
+});
