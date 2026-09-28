@@ -3,46 +3,8 @@ import { Link } from 'react-router-dom';
 import { CalendarDays, CheckCircle2, ChevronDown, Clock3, ExternalLink, Loader2, XCircle } from 'lucide-react';
 import type { MonitorRun } from '@/api/securityMonitoring';
 
-const normalizeStatus = (status: string) => status === 'partial' ? 'completed'
-  : ['interrupted', 'cancelled'].includes(status) ? 'failed' : status;
-const count = (value: unknown) => typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined;
-const objectValue = (value: unknown): Record<string, unknown> | null => {
-  if (typeof value === 'string') {
-    try { value = JSON.parse(value); } catch { return null; }
-  }
-  return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null;
-};
-
-/** A round being completed never implies the underlying incident is closed. */
-export function roundBusinessConclusion(run: MonitorRun): string {
-  const status = normalizeStatus(run.status);
-  const facts = run.result;
-  if (status === 'running') return '调查执行中';
-  if (status === 'queued') return '等待执行';
-  if (status === 'failed') {
-    if (facts?.mail?.notification?.errors?.length || facts?.mail?.feedback?.errors?.length) return '邮件跟进失败';
-    const failedTools = run.steps.filter(step => ['failed', 'error'].includes(step.status)).map(step => step.tool);
-    if (failedTools.some(tool => /调查|智能体/.test(tool))) return '调查失败 · 待核对';
-    if (failedTools.some(tool => /查询|取证/.test(tool))) return '查询失败 · 待重试';
-    if (['interrupted', 'cancelled'].includes(run.status)) return '任务中断';
-    return '本轮执行失败';
-  }
-  if (status !== 'completed') return '状态待核对';
-  const verified = count(facts?.mail?.feedback?.verified) || 0;
-  const sent = count(facts?.mail?.notification?.sent) || 0;
-  const pending = count(facts?.mail?.feedback?.pending) || 0;
-  const deferred = count(facts?.deferred) || 0;
-  if (verified) return `${verified} 封反馈回查已确认${sent ? ' · 有新通知待回信' : ''}`;
-  if (sent) return `已通知 ${sent} 封 · 待回信`;
-  if (pending) return `${pending} 封回信待跟进`;
-  if (deferred) return `${deferred} 条已保存待续查`;
-  if (run.steps.some(step => objectValue(step.output)?.duplicate === true)) return '通知已去重 · 本轮未重发';
-  if (facts?.errors?.length) return '调查待续查'; // older partial records retain their evidence gaps
-  if (count(facts?.events) === 0) return '零事件 · 无需新通知';
-  if ((count(facts?.analyzed) || 0) > 0) return facts?.mail?.enabled === false
-    ? '调查完成 · 邮件未启用' : '调查完成 · 无新增通知';
-  return '本轮已结束 · 详见记录';
-}
+import { normalizeRoundStatus, roundBusinessConclusion, roundFactSummary, roundRecoverySummary } from './roundSummary';
+export { roundBusinessConclusion } from './roundSummary';
 
 function displayTime(value: string | null | undefined, timezone: string, date = false) {
   if (!value || !Number.isFinite(new Date(value).getTime())) return '时间未记录';
@@ -76,7 +38,7 @@ export default function RoundTimeline({ runs, timezone }: { runs: MonitorRun[]; 
     </div>
     <ol aria-label="执行轮次时间线" className="ml-2 border-l border-gray-200 dark:border-gray-700">
       {ordered.map((run, index) => {
-        const status = normalizeStatus(run.status);
+        const status = normalizeRoundStatus(run.status);
         const failed = status === 'failed';
         const complete = status === 'completed';
         const open = expanded.has(run.id);
@@ -92,10 +54,14 @@ export default function RoundTimeline({ runs, timezone }: { runs: MonitorRun[]; 
               type="button" aria-expanded={open} aria-controls={detailsId}
               aria-label={`${time} 第 ${index + 1} 轮：${roundBusinessConclusion(run)}`}
               onClick={() => setExpanded(current => { const next = new Set(current); if (next.has(run.id)) next.delete(run.id); else next.add(run.id); return next; })}
-              className="flex w-full flex-wrap items-center gap-x-4 gap-y-2 bg-white px-4 py-3 text-left transition-colors hover:bg-gray-50 dark:bg-gray-800 dark:hover:bg-gray-700/60"
+              className="grid w-full grid-cols-[1fr_auto_auto] items-center gap-x-4 gap-y-2 bg-white px-4 py-3 text-left transition-colors hover:bg-gray-50 dark:bg-gray-800 dark:hover:bg-gray-700/60 sm:flex sm:flex-wrap"
             >
               <time dateTime={run.started_at} className="shrink-0 text-sm font-medium tabular-nums text-gray-600 dark:text-gray-300">{time}</time>
-              <span className="min-w-0 flex-1 text-sm font-semibold text-gray-900 dark:text-gray-100">{roundBusinessConclusion(run)}</span>
+              <span className="order-last col-span-3 min-w-0 flex-1 break-words text-sm text-gray-900 dark:text-gray-100 sm:order-none">
+                <span className="block font-semibold">{roundBusinessConclusion(run)}</span>
+                {roundFactSummary(run) && <span className="mt-1 block text-xs leading-5 text-slate-500 dark:text-slate-400">{roundFactSummary(run)}</span>}
+                {roundRecoverySummary(run, timezone) && <span className="mt-1 block text-xs leading-5 text-sky-700 dark:text-sky-300">{roundRecoverySummary(run, timezone)}</span>}
+              </span>
               <span className={`text-xs font-medium ${tone}`}>{statusText}</span>
               <ChevronDown aria-hidden="true" size={16} className={`shrink-0 text-gray-400 transition-transform ${open ? 'rotate-180' : ''}`} />
             </button>

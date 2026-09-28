@@ -308,3 +308,105 @@ def test_model_and_mail_diagnostics_keep_only_bounded_metadata():
     assert 'PRIVATE' not in json.dumps(record)
     for value in ['https://provider.invalid?api_key=PRIVATE', 'Authorization: Bearer PRIVATE', 'x' * 129]:
         assert not diag.safe_record({'model_id': value, 'model_provider': value})
+
+
+@pytest.fixture
+async def real_sink(monkeypatch):
+    sink = diag.Sink()
+    monkeypatch.setattr(diag, '_sink', sink)
+    yield sink
+    await asyncio.wait_for(asyncio.to_thread(sink.pending.join), 2)
+
+
+async def test_trace_reserved_fields_cannot_drop_or_reassign_record(real_sink):
+    async with diag.trace_scope('owner', COMPONENT_ID, 'execution') as trace:
+        diag.event('investigation.model', duration_ms=7, elapsed_ms=999999,
+                   owner=diag.opaque('other'), scope=diag.opaque('other'),
+                   trace='a' * 32, seq=999, call=888, event='trace.start')
+    await asyncio.wait_for(asyncio.to_thread(real_sink.pending.join), 2)
+    bundle = diag.export_bundle('owner', COMPONENT_ID)
+    model = next(row for row in bundle['records'] if row['event'] == 'investigation.model')
+    assert model['trace'] == trace.id and model['seq'] == 2
+    assert model['duration_ms'] == 7 and model['elapsed_ms'] < 999999
+    assert 'call' not in model and model['owner'] == diag.opaque('owner')
+    assert bundle['record_count'] == 3 and bundle['health']['field_conflicts'] == 7
+    assert bundle['health']['record_errors'] == bundle['health']['write_errors'] == 0
+    assert not diag.export_bundle('other', COMPONENT_ID)['records']
+
+
+async def test_model_choice_reaches_real_sink_and_disk(monkeypatch, real_sink, tmp_path):
+    from flocks.monitoring import investigation as i
+    agent = SimpleNamespace(model=None, prompt='SECRET_AGENT_PROMPT')
+    monkeypatch.setattr(i.Agent, 'get', AsyncMock(return_value=agent))
+    monkeypatch.setattr(i.Config, 'resolve_default_llm', AsyncMock(return_value={
+        'provider_id': 'fixture', 'model_id': 'fixture-model'}))
+    monkeypatch.setattr(i.Provider, 'apply_config', AsyncMock())
+    response = SimpleNamespace(tool_calls=[], finish_reason='stop',
+        content=i.Choice(action='query', capability='cap-1', reason='SECRET_REASON').model_dump_json(),
+        usage={'prompt_tokens': 42, 'completion_tokens': 11, 'total_tokens': 53})
+    chat = AsyncMock(return_value=response)
+    monkeypatch.setattr(i.Provider, 'get', lambda _: SimpleNamespace(chat=chat))
+    async with diag.trace_scope('owner', COMPONENT_ID, 'execution'):
+        assert (await i.choose('fixture-monitor', {'private': 'SECRET_INPUT'})).action == 'query'
+        chat.side_effect = httpx.ReadTimeout('SECRET_ENDPOINT_TOKEN')
+        with pytest.raises(i.InvestigationError, match='超时'):
+            await i.choose('fixture-monitor', {})
+    await asyncio.wait_for(asyncio.to_thread(real_sink.pending.join), 2)
+    path = tmp_path / 'logs/security-monitor/diagnostics.jsonl'
+    disk = [json.loads(line) for line in path.read_text().splitlines()]
+    records = [row for row in disk if row['event'] == 'investigation.model']
+    assert len(records) == 2 and [row['seq'] for row in records] == [2, 3]
+    assert all('duration_ms' in row and 'elapsed_ms' in row for row in records)
+    assert records[0]['model_stop'] == 'stop' and records[0]['total_tokens'] == 53
+    assert records[1]['model_failure'] == 'timeout' and records[1]['error_type'] == 'ReadTimeout'
+    assert records[1]['success'] is False and chat.await_count == 2
+    assert 'SECRET' not in json.dumps(disk)
+    bundle = diag.export_bundle('owner', COMPONENT_ID)
+    assert bundle['record_count'] == 4 and bundle['health']['record_errors'] == 0
+
+
+@pytest.mark.parametrize('status,category', [(400, 'request'), (401, 'authentication'),
+    (403, 'permission'), (408, 'timeout'), (429, 'rate_limit'), (503, 'unavailable'), (504, 'timeout')])
+async def test_provider_failure_metadata_is_safe_and_persisted(real_sink, status, category):
+    class ProviderError(Exception):
+        status_code = status
+        request_id = 'SECRET_REQUEST_ID'
+    wrapped = RuntimeError('SECRET_WRAPPER_BODY')
+    wrapped.__cause__ = ProviderError('SECRET_CREDENTIAL')
+    async with diag.trace_scope('owner', COMPONENT_ID, 'execution'):
+        diag.event('investigation.model', failure=True, **diag.model_error(wrapped))
+    await asyncio.wait_for(asyncio.to_thread(real_sink.pending.join), 2)
+    record = next(row for row in diag.export_bundle('owner', COMPONENT_ID)['records']
+                  if row['event'] == 'investigation.model')
+    assert record['model_failure'] == category and record['http_status'] == status
+    assert record['error_type'] == 'RuntimeError' and record['cause_error_type'] == 'ProviderError'
+    assert record['request_id_hash'] == diag.opaque('SECRET_REQUEST_ID')
+    assert 'SECRET' not in json.dumps(record)
+
+
+@pytest.mark.parametrize('location', ['record', 'trace'])
+async def test_diagnostic_construction_failure_is_observable_and_nonblocking(real_sink, monkeypatch, location):
+    def fail(*args, **kwargs):
+        raise RuntimeError('SECRET_CREDENTIAL')
+    with monkeypatch.context() as patch:
+        if location == 'record':
+            patch.setattr(diag, 'safe_record', fail)
+        else:
+            patch.setattr(diag, 'datetime', SimpleNamespace(now=fail))
+        diag.Trace('owner', COMPONENT_ID, 'execution').emit('progress')
+    diag.Trace('owner', COMPONENT_ID, 'execution').emit('progress')
+    await asyncio.wait_for(asyncio.to_thread(real_sink.pending.join), 2)
+    bundle = diag.export_bundle('owner', COMPONENT_ID)
+    assert bundle['health']['record_errors'] == 1 and bundle['record_count'] == 1
+    assert 'SECRET' not in json.dumps(bundle)
+
+
+def test_provider_failure_properties_and_unknown_status_are_not_trusted():
+    class BrokenMetadata(Exception):
+        @property
+        def status_code(self):
+            raise ValueError('SECRET_ERROR')
+    assert diag.model_error(BrokenMetadata('SECRET_BODY')) == {
+        'error_type': 'BrokenMetadata', 'model_failure': 'other'}
+    assert diag.safe_record({'http_status': 9999, 'request_id_hash': 'SECRET',
+                             'model_failure': 'SECRET', 'cause_error_type': 'SECRET TOKEN'}) == {}

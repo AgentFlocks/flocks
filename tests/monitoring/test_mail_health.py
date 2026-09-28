@@ -56,6 +56,9 @@ async def test_disabled_or_other_project_has_no_mail_dependency_error(channel, e
 async def test_new_channel_unknown_and_changed_mailbox_are_explicit(channel):
     result = await mailflow.health_snapshot('owner')
     assert result['receive']['state'] == 'unknown' and len(result['errors']) == 2
+    assert all('尚未完成连接验证' in message for message in result['errors'])
+    assert '不代表已经发生邮件投递失败' in result['errors'][1]
+    assert '无法确认是否有新回信' in result['errors'][0]
     mailflow.settings.return_value['mailbox'] = 'old-mailbox'
     result = await mailflow.health_snapshot('owner')
     assert result['receive']['stage'] == 'configuration'
@@ -77,6 +80,23 @@ async def test_stale_receiver_and_recovery_are_reported_independently(channel):
     assert result['receive']['last_error_at']  # Retain last outage after recovery.
     assert result['receive']['stage'] == 'poll'
     assert result['receive']['last_error_stage'] == 'authenticate'
+
+
+async def test_recovered_receive_outage_does_not_keep_a_new_round_failed(channel):
+    channel.mark_connected()
+    channel._health_stage('receive', 'connect')
+    channel._health_failure('receive', TimeoutError('PRIVATE'))
+    channel._health_success('send', 'probe')
+    failed = await mailflow.health_snapshot('owner')
+    assert len(failed['errors']) == 1
+    assert failed['receive']['last_error_stage'] == 'connect'
+    channel._health_success('receive', 'poll')
+    recovered = await mailflow.health_snapshot('owner')
+    assert recovered['errors'] == []
+    assert recovered['receive']['state'] == 'healthy'
+    assert recovered['receive']['last_error_at'] == failed['receive']['last_error_at']
+    assert recovered['receive']['last_success_stage'] == 'poll'
+    assert recovered['send']['last_success_stage'] == 'probe'  # Not a delivery receipt.
 
 
 def test_poll_backoff_is_bounded_and_success_resets_it(channel):

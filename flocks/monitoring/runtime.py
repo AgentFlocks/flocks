@@ -212,6 +212,11 @@ async def run(execution, policy, adapter_factory=XdrAdapter):
                             (attempt_id, event['key'], encode(event)))
         resumed_keys = {event['key'] for event in resumed}
         observed = resumed + [event for event in observed if event['key'] not in resumed_keys]
+        # A fresh query can return an event already waiting for investigation.
+        # Keep source counts separate: a resumed case is not a newly read alert,
+        # and the overlap must not inflate the merged observation count.
+        event_sources = {'query_events': len(current_events), 'resumed_events': len(resumed_keys),
+                         'query_resumed_overlap': len(current_events.keys() & resumed_keys)}
         for event in observed[:20]:
             # Unstarted work is deferred, not a failed investigation attempt.
             # Otherwise a busy batch could exhaust three retries before a later
@@ -220,7 +225,8 @@ async def run(execution, policy, adapter_factory=XdrAdapter):
                 break
             await investigation.investigate(policy, event, recorder, budget)
             outcome = event['investigation']
-            if outcome['state'] not in {'ready', 'deferred', 'needs_review'}:
+            if (outcome.get('attempted_this_round', True)
+                    and outcome['state'] not in {'ready', 'deferred', 'needs_review'}):
                 from .summaries import label
                 errors.append('智能体调查未完成：' + label(outcome.get('reason'), '执行服务异常，证据和待办已保存', 240))
             await write('UPDATE monitor_observations SET data=? WHERE attempt_id=? AND event_key=?',
@@ -235,7 +241,7 @@ async def run(execution, policy, adapter_factory=XdrAdapter):
             for event in observed:
                 event['related'] = [x for x in groups.get((event['device'], event['host']), []) if x != event['key']]
                 await write('UPDATE monitor_observations SET data=? WHERE attempt_id=? AND event_key=?', (encode(event), attempt_id, event['key']))
-            result = {'events': len(observed), 'risk': sum(e['risk'] == 'risk' for e in observed),
+            result = {'events': len(observed), **event_sources, 'risk': sum(e['risk'] == 'risk' for e in observed),
                       'unknown': sum(e['risk'] == 'unknown' for e in observed), 'ignored': 0,
                       'analyzed': sum(e.get('investigation', {}).get('state') == 'ready' for e in observed),
                       'deferred': sum(not e.get('investigation') or e['investigation']['state'] == 'deferred' for e in observed),
@@ -252,8 +258,8 @@ async def run(execution, policy, adapter_factory=XdrAdapter):
         mail_health = await health_snapshot(policy.owner, policy.project)
         errors.extend(mail_health.get('errors', []) if automatic_enabled else [])
         result['investigation_backlog'] = await investigation.status_summary(policy)
-        if result['investigation_backlog'].get('system_wait'):
-            errors.append(f"仍有 {result['investigation_backlog']['system_wait']} 条调查因系统故障未恢复；具体恢复安排见本轮结束说明")
+        # Backlog describes durable incident work, not a fresh round failure.
+        # A retry that actually fails above still contributes a current error.
         errors[:] = list(dict.fromkeys(errors))
         result['mail'] = {'feedback': feedback, 'notification': notification, 'enabled': automatic_enabled, 'health': mail_health}
         result['disposition'] = '责任人邮件反馈后标记并回查' if automatic_enabled else '只读监测'

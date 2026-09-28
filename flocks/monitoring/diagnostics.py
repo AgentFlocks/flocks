@@ -74,6 +74,7 @@ def shape(value):
 
 _TYPES = {'str', 'dict', 'list', 'int', 'float', 'bool', 'bytes', 'NoneType', 'other'}
 _ENUMS = {
+    'model_failure': {'timeout', 'authentication', 'permission', 'rate_limit', 'unavailable', 'connection', 'request', 'other'},
     'error_kind': {'dependency', 'model_format', 'model_truncated', 'model_protocol', 'query_transient', 'budget', 'cancelled', 'system'},
     'validation_field': {'action', 'reason', 'capability', 'entity', 'agent', 'verdict', 'evidence_ids', 'gaps', 'document'},
     'validation_code': {'missing', 'invalid_type', 'invalid_json', 'extra_field', 'invalid_value', 'unknown_capability', 'ambiguous_capability', 'wrong_device', 'unsupported_entity', 'unknown_agent', 'invalid_reference', 'duplicate_query', 'over_budget'},
@@ -106,7 +107,7 @@ _NUMBERS = {'schema', 'pid', 'seq', 'elapsed_ms', 'duration_ms', 'length', 'item
 _BOOLS = {'success', 'truncated', 'has_error', 'has_saved_output', 'cursor_present',
           'has_tool_calls', 'retry_exhausted',
           'authenticated_sender', 'sender_verification_bypassed', 'development_sample', 'preferred_severity', 'malicious'}
-_IDS = {'trace', 'owner', 'scope', 'execution', 'device', 'notice', 'reply', 'project', 'event_id', 'provider_id'}
+_IDS = {'trace', 'owner', 'scope', 'execution', 'device', 'notice', 'reply', 'project', 'event_id', 'provider_id', 'request_id_hash'}
 
 
 def safe_record(fields):
@@ -121,7 +122,9 @@ def safe_record(fields):
             result[key] = value
         elif key in _IDS and isinstance(value, str) and re.fullmatch(r'[a-f0-9]{24,32}', value):
             result[key] = value
-        elif key == 'error_type' and isinstance(value, str) and re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]{0,79}', value):
+        elif key in {'error_type', 'cause_error_type'} and isinstance(value, str) and re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]{0,79}', value):
+            result[key] = value
+        elif key == 'http_status' and type(value) is int and 100 <= value <= 599:
             result[key] = value
         elif key == 'version' and isinstance(value, str) and re.fullmatch(r'[A-Za-z0-9.+_-]{1,64}', value):
             result[key] = value
@@ -133,6 +136,47 @@ def safe_record(fields):
         elif key == 'timestamp' and isinstance(value, str) and re.fullmatch(r'[0-9T:.+Z-]{20,40}', value):
             result[key] = value
     return result
+
+
+def model_error(exc):
+    """Describe provider failures without reading messages, bodies or headers."""
+    fields = {'error_type': type(exc).__name__, 'model_failure': 'other'}
+    names, seen = set(), set()
+    current = exc
+    for _ in range(4):
+        if current is None or id(current) in seen:
+            break
+        seen.add(id(current))
+        names.update(cls.__name__ for cls in type(current).__mro__)
+        if current is not exc:
+            fields['cause_error_type'] = type(current).__name__
+        # Some SDKs wrap HTTP errors; inspect only explicitly named metadata.
+        try:
+            status = getattr(current, 'status_code', None)
+            if type(status) is int and 100 <= status <= 599 and 'http_status' not in fields:
+                fields['http_status'] = status
+            request_id = getattr(current, 'request_id', None)
+            if isinstance(request_id, str) and 0 < len(request_id) <= 256 and 'request_id_hash' not in fields:
+                fields['request_id_hash'] = opaque(request_id)
+            current = current.__cause__
+        except Exception:
+            break  # Unusual exception properties must not mask the original failure.
+    status = fields.get('http_status')
+    if names & {'TimeoutError', 'TimeoutException', 'APITimeoutError'} or status in {408, 504}:
+        fields['model_failure'] = 'timeout'
+    elif status == 401 or 'AuthenticationError' in names:
+        fields['model_failure'] = 'authentication'
+    elif status == 403 or 'PermissionDeniedError' in names:
+        fields['model_failure'] = 'permission'
+    elif status == 429 or 'RateLimitError' in names:
+        fields['model_failure'] = 'rate_limit'
+    elif status is not None and status >= 500:
+        fields['model_failure'] = 'unavailable'
+    elif names & {'ConnectionError', 'APIConnectionError', 'ConnectError', 'NetworkError'}:
+        fields['model_failure'] = 'connection'
+    elif status is not None and status >= 400:
+        fields['model_failure'] = 'request'
+    return fields
 
 
 class _PrivateFileHandler(RotatingFileHandler):
@@ -152,6 +196,15 @@ class Sink:
         self.lock = threading.Lock()
         self.started = False
         self.dropped = self.write_errors = 0
+        self.record_errors = self.field_conflicts = 0
+
+    def record_error(self):
+        with self.lock:
+            self.record_errors += 1
+
+    def field_conflict(self, count):
+        with self.lock:
+            self.field_conflicts += count
 
     def submit(self, fields):
         try:
@@ -168,7 +221,7 @@ class Sink:
                 with self.lock:
                     self.dropped += 1
         except Exception:
-            pass  # Diagnostics must not change monitoring behavior.
+            self.record_error()  # Count failures before disk IO without changing monitoring behavior.
 
     def _work(self):
         handler, destination = None, None
@@ -193,10 +246,18 @@ class Sink:
     def snapshot(self):
         with self.lock:
             return list(self.recent), {'queue_dropped': self.dropped, 'write_errors': self.write_errors,
+                                       'record_errors': self.record_errors, 'field_conflicts': self.field_conflicts,
                                        'queued': self.pending.qsize()}
 
 
 _sink = Sink()
+
+
+def _note_health(method, *args):
+    try:
+        getattr(_sink, method)(*args)
+    except Exception:
+        pass  # Even a replaced/broken sink cannot change the monitored operation.
 
 
 class Trace:
@@ -218,11 +279,17 @@ class Trace:
                 return
         self.sequence += 1
         try:
-            _sink.submit(dict(schema=1, version=__version__, pid=os.getpid(), trace=self.id, seq=self.sequence,
-                              timestamp=datetime.now(timezone.utc).isoformat(), **self.ids, event=name,
-                              elapsed_ms=round((time.monotonic() - self.started) * 1000, 2), call=_call.get(), **fields))
+            common = dict(schema=1, version=__version__, pid=os.getpid(), trace=self.id, seq=self.sequence,
+                          timestamp=datetime.now(timezone.utc).isoformat(), **self.ids, event=name,
+                          elapsed_ms=round((time.monotonic() - self.started) * 1000, 2), call=_call.get())
+            conflicts = common.keys() & fields.keys()
+            if conflicts:
+                _note_health('field_conflict', len(conflicts))
+            # Trace identity/timing always win. An accidental reserved field
+            # must neither erase the event nor replace its owner or sequence.
+            _sink.submit({**fields, **common})
         except Exception:
-            pass
+            _note_health('record_error')
 
 
 def event(name, *, failure=False, **fields):

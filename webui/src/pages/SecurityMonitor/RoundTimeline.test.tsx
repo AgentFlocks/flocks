@@ -103,3 +103,57 @@ it('explains an empty date without rendering a report', () => {
   expect(screen.getByText('所选日期暂无监测记录')).toBeInTheDocument();
   expect(screen.queryByRole('list', { name: '执行轮次时间线' })).not.toBeInTheDocument();
 });
+
+it('separates successful current work from historical recovery and exposes query overlap without counting new incidents', () => {
+  show([run({ result: { events: 11, query_events: 3, resumed_events: 10, query_resumed_overlap: 2, analyzed: 2, deferred: 9,
+    investigation_backlog: { system_wait: 1, earliest_retry_at: '2026-09-25T01:49:49Z' } } })]);
+  const node = screen.getByTestId('round-timeline-node');
+  expect(node).toHaveTextContent('9 条已保存待续查');
+  expect(node).toHaveTextContent('本轮查询 3 条 · 历史续查 10 条 · 其中 2 条重叠 · 已有调查结论 2 条');
+  expect(node).toHaveTextContent('历史待恢复 1 条');
+  expect(node).toHaveTextContent('最早重试 2026/9/25 09:49:49');
+  expect(within(node).getByText('完成')).toBeInTheDocument();
+  expect(within(node).queryByText('失败')).not.toBeInTheDocument();
+  expect(node).not.toHaveTextContent('新事件');
+});
+
+it('keeps an old failed result as recorded instead of silently recoloring its history', () => {
+  show([run({ status: 'failed', error: '仍有 1 条调查因系统故障未恢复；具体恢复安排见本轮结束说明',
+    result: { events: 11, investigation_backlog: { system_wait: 1 } } })]);
+  const node = screen.getByTestId('round-timeline-node');
+  expect(node).toHaveTextContent('历史故障尚待恢复 · 查看原记录');
+  expect(node).toHaveTextContent('本轮处理 11 条（来源未记录）');
+  expect(node).toHaveTextContent('待恢复记录 1 条（含本轮及历史）');
+  expect(within(node).getByText('失败')).toBeInTheDocument();
+  expect(node).not.toHaveTextContent('本轮查询 0 条');
+});
+
+it('identifies model request and mail readiness failures without dumping the investigation narrative', () => {
+  show([run({ status: 'failed', summary: '事件长篇调查正文仅用于展开查看', result: {
+    events: 14, query_events: 0, resumed_events: 14, analyzed: 2,
+    errors: ['智能体调查未完成：调查模型请求失败，请检查模型服务、配置和访问权限'],
+    mail: { health: { enabled: true, errors: ['收信连接暂不可用'], receive: { state: 'unavailable' }, send: { state: 'unknown' } } },
+  } })]);
+  const node = screen.getByTestId('round-timeline-node');
+  expect(node).toHaveTextContent('调查模型请求失败 · 邮件连接未就绪');
+  expect(node).toHaveTextContent('本轮查询 0 条 · 历史续查 14 条 · 已有调查结论 2 条');
+  expect(screen.queryByText('事件长篇调查正文仅用于展开查看')).not.toBeInTheDocument();
+});
+
+it('does not turn an incomplete zero-count query into a no-alert conclusion', () => {
+  show([run({ status: 'failed', result: { events: 0, query_events: 0, query_complete: false, resumed_events: 0 },
+    steps: [{ id: 'query', tool: '查询 XDR 事件', status: 'failed' }] })]);
+  const node = screen.getByTestId('round-timeline-node');
+  expect(node).toHaveTextContent('查询失败 · 待重试');
+  expect(node).toHaveTextContent('查询未完成，已保存 0 条');
+  expect(node).not.toHaveTextContent('本轮查询 0 条');
+  expect(node).not.toHaveTextContent('零事件');
+});
+
+it.each(['调查模型请求超时', '调查模型认证失败', '调查模型访问被拒绝', '调查模型请求受到限流', '调查模型服务暂时不可用', '调查模型连接失败'])(
+  'preserves the recorded model failure type: %s', failure => {
+    show([run({ status: 'failed', result: { errors: [`智能体调查未完成：${failure}；已有证据保留`] },
+      steps: [{ id: 'model', tool: '智能体调查结果', status: 'failed' }] })]);
+    expect(screen.getByRole('button', { name: /第 1 轮/ })).toHaveTextContent(failure);
+  },
+);

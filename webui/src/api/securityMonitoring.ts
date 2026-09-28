@@ -9,11 +9,14 @@ export interface MonitorStep {
 }
 export interface MonitorRunResult {
   events?: number; risk?: number; unknown?: number; analyzed?: number; deferred?: number;
+  query_events?: number; resumed_events?: number; query_resumed_overlap?: number; query_complete?: boolean;
+  investigation_backlog?: { system_wait?: number; earliest_retry_at?: string | null; retry_exhausted?: number };
   errors?: string[];
   mail?: {
     enabled?: boolean;
     notification?: { sent?: number; pending?: number; errors?: string[] };
     feedback?: { processed?: number; verified?: number; pending?: number; errors?: string[] };
+    health?: MonitorMailHealth;
   };
 }
 export interface MonitorRun {
@@ -40,7 +43,7 @@ export interface MonitorMailHealth {
 }
 export interface MonitorMailDirectionHealth {
   state: 'healthy' | 'unavailable' | 'unknown' | 'disabled';
-  last_success_at?: string | null; last_error_at?: string | null;
+  last_success_at?: string | null; last_success_stage?: string | null; last_error_at?: string | null;
   stage?: string | null; last_error_stage?: string | null; error_type?: string | null; consecutive_failures?: number;
   next_retry_at?: string | null;
 }

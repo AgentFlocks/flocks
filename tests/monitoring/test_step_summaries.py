@@ -110,7 +110,7 @@ async def test_persisted_step_results_and_order(tmp_path, monkeypatch, mode):
     if mode == 'empty':
         assert '本轮 XDR 安全事件查询到 0 条事件' in combined
         assert len(calls) == 1 and len(texts) == 2
-        assert '读取 0 条事件' in texts[-1].text
+        assert '本轮查询返回 0 条，纳入历史待办 0 条' in texts[-1].text
     elif mode in ('query_failure', 'late_failure'):
         assert attempt['status'] == 'failed'
         assert not await rows('SELECT * FROM monitor_observations')
@@ -167,3 +167,16 @@ def test_bounded_summary_details_and_unknown_hosts():
 def test_native_incident_classification_in_step_summary(fields, expected):
     summary = summaries.page_summary(1, [{'uuId':'id',**fields}], 1, True)
     assert f'类型：{expected}；' in summary.details
+
+
+def test_historical_results_without_source_counts_keep_legacy_summary():
+    assert summaries.event_sources_summary({'events': 3}, 3) == '读取 3 条事件'
+    assert summaries.event_sources_summary({'query_events': 0}, 3) == '读取 3 条事件'
+
+
+def test_incomplete_query_count_cannot_be_read_as_zero_alerts():
+    text = summaries.event_sources_summary({'query_events': 0, 'resumed_events': 2,
+        'query_resumed_overlap': 0, 'query_complete': False}, 2)
+    assert '查询未完整成功，已保存查询结果 0 条' in text
+    assert '纳入历史待办 2 条' in text and '本轮共纳入 2 条事件' in text
+    assert '本轮查询返回 0 条' not in text

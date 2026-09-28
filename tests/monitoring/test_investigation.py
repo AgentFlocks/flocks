@@ -340,7 +340,7 @@ async def test_supported_provider_completion_reasons_are_validated(configured_mo
     assert diagnostics[0] == {'stage': 'investigation.model', 'model_stop': finish,
         'has_tool_calls': False, 'length': len(response.content), 'model_provider': 'fixture',
         'model_id': 'fixture-model', 'request_max_tokens': 2500, 'correction_attempt': 0,
-        'elapsed_ms': diagnostics[0]['elapsed_ms']}
+        'duration_ms': diagnostics[0]['duration_ms']}
 
 
 @pytest.mark.parametrize('kind,message', [

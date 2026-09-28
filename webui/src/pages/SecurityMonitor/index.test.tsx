@@ -305,3 +305,58 @@ it('surfaces mail failures immediately and exposes useful health details in the 
  expect(drawer).toHaveTextContent('1 / 2 条 · 50%');
  expect(drawer).toHaveTextContent('等待系统恢复 1');
 });
+
+it('keeps dashboard rows concise and preserves the full report and exact conversation anchor on demand', async () => {
+ function RouteObserver() { const location = useLocation(); return <output data-testid="location">{location.pathname}{location.search}</output>; }
+ mocks.overview.mockResolvedValue({ data: { ...data, runs: [{ ...data.runs[0], status: 'failed', summary: '长篇事件证据和调查过程。'.repeat(100),
+  error: '智能体调查未完成：调查模型请求失败，请检查模型服务、配置和访问权限',
+  next_step: '已保存进度，稍后继续调查。', result: { query_events: 0, resumed_events: 14, analyzed: 2,
+   investigation_backlog: { system_wait: 1 }, errors: ['智能体调查未完成：调查模型请求失败'] } }] } });
+ render(<MemoryRouter initialEntries={['/suites/host-security-monitor/dashboard']}><SecurityMonitor /><RouteObserver /></MemoryRouter>);
+ const headline = await screen.findByText('调查模型请求失败');
+ expect(headline).toBeVisible();
+ expect(screen.getByText('本轮查询 0 条 · 历史续查 14 条 · 已有调查结论 2 条')).toBeVisible();
+ const full = screen.getByText('长篇事件证据和调查过程。'.repeat(100));
+ expect(full).not.toBeVisible();
+ const disclosure = screen.getByText('展开本轮详情').closest('details');
+ expect(disclosure).not.toHaveAttribute('open');
+ fireEvent.click(screen.getByText('展开本轮详情'));
+ expect(disclosure).toHaveAttribute('open');
+ expect(full).toBeVisible();
+ expect(screen.getByText('已保存进度，稍后继续调查。')).toBeVisible();
+ fireEvent.click(screen.getByRole('button', { name: '查看本轮' }));
+ expect(screen.getByTestId('location')).toHaveTextContent('/sessions?session=real-session&focusMessage=anchor');
+});
+
+it('displays a completed round and outstanding historical recovery independently', async () => {
+ mocks.overview.mockResolvedValue({ data: { ...data, runs: [{ ...data.runs[0], status: 'completed', result: {
+  events: 11, query_events: 0, resumed_events: 11, analyzed: 2, deferred: 9,
+  investigation_backlog: { system_wait: 1, earliest_retry_at: '2026-09-29T01:49:49Z' },
+ } }] } });
+ render(<MemoryRouter initialEntries={['/suites/host-security-monitor/dashboard']}><SecurityMonitor /></MemoryRouter>);
+ const line = await screen.findByText(/历史待恢复 1 条/);
+ expect(line).toHaveClass('text-sky-700');
+ const row = line.closest('tr')!;
+ expect(within(row).getByText('完成')).toBeVisible();
+ expect(within(row).queryByText('失败')).not.toBeInTheDocument();
+ expect(row).toHaveTextContent('本轮查询 0 条 · 历史续查 11 条 · 已有调查结论 2 条');
+});
+
+it('labels a recovered mail connection without presenting old errors as a current outage or probes as delivery', async () => {
+ mocks.overview.mockResolvedValue({ data: { ...data, mail: { enabled: true, health: { errors: [],
+  receive: { state: 'healthy', last_error_at: '2026-09-29T01:43:11Z', last_error_stage: 'connect', error_type: 'TimeoutError', last_success_at: '2026-09-29T01:46:44Z', last_success_stage: 'poll', consecutive_failures: 0 },
+  send: { state: 'healthy', last_success_at: '2026-09-29T01:42:11Z', last_success_stage: 'probe' },
+ } } } });
+ render(<MemoryRouter><SecurityMonitor /></MemoryRouter>);
+ await screen.findByTestId('native-chat');
+ expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+ fireEvent.click(screen.getByLabelText('更多监测功能'));
+ fireEvent.click(screen.getByRole('button', { name: '运行与邮件健康' }));
+ const drawer = screen.getByRole('dialog');
+ expect(drawer).toHaveTextContent('收信连接 · 正常（已恢复）');
+ expect(drawer).toHaveTextContent('上次异常（已恢复）');
+ expect(drawer).toHaveTextContent('TimeoutError');
+ expect(drawer).toHaveTextContent('连接检查成功：');
+ expect(drawer).not.toHaveTextContent('邮件已发送');
+ expect(drawer).not.toHaveTextContent('连续失败：');
+});

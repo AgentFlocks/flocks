@@ -326,13 +326,20 @@ async def choose(agent_name, data):
         except asyncio.CancelledError:
             raise
         except Exception as exc:
+            failure = diag.model_error(exc)
             diag.event('investigation.model', failure=True, model_stop='other',
                 model_provider=model['provider_id'], model_id=model['model_id'],
                 request_max_tokens=options['max_tokens'], correction_attempt=correction,
-                elapsed_ms=int((time.monotonic()-started)*1000), error_type=type(exc).__name__,
+                duration_ms=int((time.monotonic()-started)*1000), **failure,
                 error_kind='dependency', has_error=True, success=False)
-            reason = ('调查模型请求超时，已有证据保留，等待模型服务恢复' if isinstance(exc, TimeoutError)
-                      else '调查模型请求失败，请检查模型服务、配置和访问权限；已有证据保留')
+            reason = {
+                'timeout': '调查模型请求超时，已有证据保留，等待模型服务恢复',
+                'authentication': '调查模型认证失败，请检查模型凭据；已有证据保留',
+                'permission': '调查模型访问被拒绝，请检查模型权限；已有证据保留',
+                'rate_limit': '调查模型请求受到限流，已有证据保留，等待下次重试',
+                'unavailable': '调查模型服务暂时不可用，已有证据保留，等待服务恢复',
+                'connection': '调查模型连接失败，已有证据保留，请检查网络和模型服务',
+            }.get(failure['model_failure'], '调查模型请求失败，请检查模型服务、配置和访问权限；已有证据保留')
             raise InvestigationError(reason, 'dependency') from None
         finish_reason = response.finish_reason
         usage = getattr(response, 'usage', {}) or {}
@@ -348,7 +355,7 @@ async def choose(agent_name, data):
             {'stop', 'end_turn', 'completed', 'length', 'max_tokens', 'tool_calls', 'content_filter'} else 'other',
             model_provider=model['provider_id'], model_id=model['model_id'],
             request_max_tokens=options['max_tokens'], correction_attempt=correction,
-            elapsed_ms=int((time.monotonic()-started)*1000), **usage_fields,
+            duration_ms=int((time.monotonic()-started)*1000), **usage_fields,
             has_tool_calls=bool(response.tool_calls), length=len(response.content or ''))
         try:
             if response.tool_calls:
@@ -554,6 +561,7 @@ async def investigate(policy, event, recorder, budget=None):
     evidence, result = json.loads(case['evidence']), json.loads(case['result'])
     state, next_retry_at, error_kind = case['state'], case['next_retry_at'], case['error_kind']
     exhausted, failures = bool(case['retry_exhausted']), case['failure_count']
+    attempted_this_round = False
     at = now()
     due = not exhausted and (not next_retry_at or (parse_time(next_retry_at) or at) <= at)
     if state in ('pending', 'deferred', 'system_wait', 'ready') and due:
@@ -587,6 +595,7 @@ async def investigate(policy, event, recorder, budget=None):
         diag.event('investigation.recovery', investigation_state=state, error_kind=error_kind or 'system',
                    failure_count=failures, retry_exhausted=exhausted, revision=revision)
     if state in ('pending', 'deferred', 'system_wait') and due:
+        attempted_this_round = True
         await write('UPDATE monitor_investigations SET attempts=attempts+1 WHERE owner=? AND project=? AND event_key=?',
                     (policy.owner, policy.project, event['key']))
         worker = Investigator(policy, event, recorder, evidence, save, budget or Budget())
@@ -603,6 +612,7 @@ async def investigate(policy, event, recorder, budget=None):
                       'specialists': worker.advice}
             await save_recovery()
             event['investigation'] = {'engine': ENGINE, 'state': state, **result,
+                'attempted_this_round': attempted_this_round,
                 'evidence_count': len(evidence), 'next_retry_at': next_retry_at,
                 'error_kind': error_kind, 'retry_exhausted': exhausted, 'revision': revision}
             raise
@@ -627,20 +637,26 @@ async def investigate(policy, event, recorder, budget=None):
                 result['validation_errors'] = exc.issues
             await save_recovery()
     event['investigation'] = {'engine': ENGINE, 'state': state, **result,
+        'attempted_this_round': attempted_this_round,
         'evidence_count': len(evidence), 'next_retry_at': next_retry_at,
         'error_kind': error_kind, 'retry_exhausted': exhausted, 'revision': revision}
     next_step = recovery_next_step(state, next_retry_at, exhausted)
     event['investigation']['next_step'] = next_step
     summary = f"{event_label(event)}：{result.get('reason', '尚未形成调查结论')}。"
+    waiting = not attempted_this_round and state in {'system_wait', 'pending', 'deferred', 'needs_review'}
+    if waiting:
+        summary = '本轮未执行此事件调查，保留已有状态。' + summary
     if result.get('gaps'):
         summary += '仍需核对：' + '；'.join(result['gaps']) + '。'
     summary += next_step
     async def finish(_):
-        return None, event['investigation'], Summary(summary, encode({'conclusion': result, 'evidence': evidence}), success=state == 'ready', sections=[
+        return None, event['investigation'], Summary(summary, encode({'conclusion': result, 'evidence': evidence}), success=state == 'ready' or not attempted_this_round, sections=[
             {'label': '调查对象', 'text': event_label(event)},
             {'label': '调查结论' if state == 'ready' else '本次调查状态', 'text': result.get('reason', '尚未形成调查结论')},
             {'label': '证据与缺口', 'text': f"保存 {len(evidence)} 项查询记录，其中 {sum(bool(e['success']) for e in evidence)} 项返回成功。引用：{'、'.join(result.get('evidence_ids', [])) or '暂无'}。" + ('仍需核对：' + '；'.join(result['gaps']) if result.get('gaps') else '证据完整性与每项查询记录一起保存，成功返回不等于已排除风险。')},
             {'label': '下一步', 'text': next_step},
         ])
-    await recorder.call('智能体调查结果', {'event': event['id']}, finish)
+    title = ('调查等待人工核对' if state == 'needs_review' else
+             '调查等待恢复' if exhausted else '调查等待重试') if waiting else '智能体调查结果'
+    await recorder.call(title, {'event': event['id']}, finish)
     return event

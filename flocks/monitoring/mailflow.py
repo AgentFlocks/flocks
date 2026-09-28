@@ -87,9 +87,15 @@ async def health_snapshot(owner, project=None):
         item = result[direction]
         if item['state'] != 'healthy':
             stage = labels.get(item['stage'], '连接检查')
-            text = f'{name}暂不可用：{stage}。'
+            # No probe after restart is an unverified dependency, not evidence
+            # that a message was sent and rejected. Keep the dependency visible
+            # until verified, without fabricating a delivery failure.
+            text = (f'{name}尚未完成连接验证：{stage}。' if item['state'] == 'unknown'
+                    else f'{name}暂不可用：{stage}。')
             if direction == 'receive':
                 text += '本轮无法确认是否有新回信；已保存回信和收信进度保留，连接恢复后继续补收。'
+            elif item['state'] == 'unknown':
+                text += '当前没有可用的连接验证结果，不代表已经发生邮件投递失败；实际发送结果请查看邮件记录。'
             else:
                 text += '投递结果未知的通知不会自动重发，请在邮件记录中核对。'
             result['errors'].append(text)

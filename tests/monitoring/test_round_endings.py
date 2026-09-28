@@ -441,11 +441,108 @@ async def test_zero_event_round_exposes_old_system_failure_and_retry_plan(contex
     outcome = await runtime.run(context.execution, context.policy, context.adapter)
     attempt, _, card = await ending()
     facts = json.loads(attempt['result'])
-    assert outcome.action == 'error'
+    assert outcome.action == 'stop'
     assert facts['events'] == 0  # cooldown prevents a repeated model call
     assert facts['investigation_backlog']['system_wait'] == 1
+    assert facts['errors'] == [] and not attempt['error']
+    assert facts['query_events'] == 0 and facts['resumed_events'] == 0
     assert '系统故障 1 条' in card.text
+    assert '历史故障待恢复，不代表本轮再次失败' in card.text
     assert '不早于' in attempt['next_step']
+
+
+@pytest.mark.parametrize('query_hits_waiting_event', [False, True])
+async def test_system_failure_only_fails_round_when_retry_actually_runs(context, monkeypatch, query_hits_waiting_event):
+    from datetime import timedelta
+    clock = runtime.now()
+    monkeypatch.setattr(investigation, 'now', lambda: clock)
+    monkeypatch.setattr(runtime, 'now', lambda: clock)
+    choose = AsyncMock(side_effect=ContractError('调查模型请求失败'))
+    monkeypatch.setattr(investigation, 'choose', choose)
+
+    first = await runtime.run(context.execution, context.policy, context.adapter)
+    first_attempt, _, _ = await ending()
+    assert first.action == 'error' and first_attempt['status'] == 'failed'
+    case = (await rows('SELECT * FROM monitor_investigations'))[0]
+    retry_at = case['next_retry_at']
+    assert case['attempts'] == 1 and case['failure_count'] == 1
+    if not query_hits_waiting_event:
+        context.events.clear()
+
+    # Restart recovery must retain the incident cooldown without relabeling
+    # the already failed round or creating another failed round.
+    await recovery.recover()
+    assert (await rows('SELECT next_retry_at FROM monitor_investigations'))[0]['next_retry_at'] == retry_at
+    clock += timedelta(minutes=5)
+    second = await runtime.run(context.execution, context.policy, context.adapter)
+    attempt, _, card = await ending()
+    result = json.loads(attempt['result'])
+    assert second.action == 'stop' and attempt['status'] == 'completed'
+    assert result['errors'] == [] and result['investigation_backlog']['system_wait'] == 1
+    assert choose.await_count == 1
+    assert result['query_events'] == int(query_hits_waiting_event)
+    assert result['resumed_events'] == result['query_resumed_overlap'] == 0
+    assert '历史故障待恢复，不代表本轮再次失败' in card.text
+    assert not await rows("SELECT * FROM monitor_steps WHERE attempt_id=? AND status='failed'", (attempt['id'],))
+    if query_hits_waiting_event:
+        snapshot = json.loads((await rows('SELECT data FROM monitor_observations WHERE attempt_id=?', (attempt['id'],)))[0]['data'])
+        assert snapshot['investigation']['state'] == 'system_wait'
+        assert snapshot['investigation']['attempted_this_round'] is False
+        step = (await rows("SELECT * FROM monitor_steps WHERE attempt_id=? AND tool='调查等待重试'", (attempt['id'],)))[0]
+        assert step['status'] == 'completed'
+        assert '本轮未执行此事件调查' in str(await Message.parts(step['message_id'], attempt['session_id']))
+
+    clock += timedelta(minutes=6)
+    third = await runtime.run(context.execution, context.policy, context.adapter)
+    attempt, _, _ = await ending()
+    result = json.loads(attempt['result'])
+    assert third.action == 'error' and attempt['status'] == 'failed'
+    assert choose.await_count == 2 and len(result['errors']) == 1
+    assert result['query_events'] == int(query_hits_waiting_event)
+    assert result['resumed_events'] == 1
+    assert result['query_resumed_overlap'] == int(query_hits_waiting_event)
+    assert result['events'] == result['query_events'] + result['resumed_events'] - result['query_resumed_overlap'] == 1
+    case = (await rows('SELECT * FROM monitor_investigations'))[0]
+    assert case['failure_count'] == case['attempts'] == 2
+
+
+@pytest.mark.parametrize('query_hits_waiting_event', [False, True])
+async def test_exhausted_history_remains_visible_without_failing_new_round(context, monkeypatch, query_hits_waiting_event):
+    choose = AsyncMock(side_effect=ContractError('调查模型请求失败'))
+    monkeypatch.setattr(investigation, 'choose', choose)
+    await runtime.run(context.execution, context.policy, context.adapter)
+    await write('UPDATE monitor_investigations SET retry_exhausted=1,next_retry_at=NULL,failure_count=3')
+    if not query_hits_waiting_event:
+        context.events.clear()
+    outcome = await runtime.run(context.execution, context.policy, context.adapter)
+    attempt, _, card = await ending()
+    assert outcome.action == 'stop' and attempt['status'] == 'completed'
+    assert choose.await_count == 1
+    assert '已停止自动恢复' in card.text and '暂停并重新启动' in attempt['next_step']
+    assert not await rows("SELECT * FROM monitor_steps WHERE attempt_id=? AND status='failed'", (attempt['id'],))
+
+
+@pytest.mark.parametrize('query_hits_history', [False, True])
+async def test_resumed_work_counts_are_separate_from_current_query(context, monkeypatch, query_hits_history):
+    # Preserve a real historical case, then let a later round complete it.
+    original_choose = investigation.choose
+    monkeypatch.setattr(investigation, 'choose', AsyncMock(side_effect=ContractError('暂时失败')))
+    await runtime.run(context.execution, context.policy, context.adapter)
+    await investigation.retry_waiting(context.policy)
+    monkeypatch.setattr(investigation, 'choose', original_choose)
+    if not query_hits_history:
+        context.events.clear()
+    outcome = await runtime.run(context.execution, context.policy, context.adapter)
+    attempt, _, card = await ending()
+    result = json.loads(attempt['result'])
+    assert outcome.action == 'stop'
+    assert result['events'] == result['analyzed'] == result['resumed_events'] == 1
+    assert result['query_events'] == result['query_resumed_overlap'] == int(query_hits_history)
+    assert f'本轮查询返回 {int(query_hits_history)} 条，纳入历史待办 1 条' in card.text
+    assert '本轮共纳入 1 条事件' in card.text
+    assert '读取 1 条事件' not in card.text
+    if query_hits_history:
+        assert '已合并去重' in card.text
 
 
 async def test_manual_review_is_not_promised_automatic_resumption(context):

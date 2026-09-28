@@ -29,6 +29,8 @@ def step_purpose(name, params):
         return event + f"通过 {label(params.get('tool'))} 查询{kind}证据，并保存来源、时间及完整性。"
     if name == '智能体调查结果':
         return event + '汇总已经查询到的事实、调查结论和未解决的问题。'
+    if name in {'调查等待人工核对', '调查等待恢复', '调查等待重试'}:
+        return event + '本轮未执行此事件调查；展示已保存的状态和恢复安排，不重复调用查询或模型。'
     if name == '关联分析':
         return '整理本轮事件的设备与主机关联，分别统计已完成调查、待办和初筛结果。'
     if name == '发送告警通知':
@@ -107,12 +109,24 @@ def hosts_summary(event, hosts):
     return Summary(text, detail_lines(lines, len(hosts)))
 
 
+def event_sources_summary(result, total):
+    """Describe known query/backlog counts; older saved results lack this split."""
+    if not all(type(result.get(key)) is int for key in ('query_events', 'resumed_events', 'query_resumed_overlap')):
+        return f'读取 {total} 条事件'
+    text = (f"本轮查询未完整成功，已保存查询结果 {result['query_events']} 条" if result.get('query_complete') is False else
+            f"本轮查询返回 {result['query_events']} 条")
+    text += f"，纳入历史待办 {result['resumed_events']} 条"
+    if result['query_resumed_overlap']:
+        text += f"（其中 {result['query_resumed_overlap']} 条也被本轮查询命中，已合并去重）"
+    return text + f'，本轮共纳入 {total} 条事件'
+
+
 def analysis_summary(result, events, groups):
     related = [keys for keys in groups.values() if len(keys) > 1]
     if not events and result['errors']:
         return Summary('关联分析已跳过：事件查询未完整成功，没有可分析的完整事件批次。不能将此次失败理解为查询到 0 条事件。此前收到的回信是否完成跟进，以本轮回信及回查记录为准。')
-    text = f"关联结果已整理：读取 {len(events)} 条事件，形成 {len(related)} 个同设备、同主机关联组，涉及 {sum(map(len, related))} 条事件；按等级初筛风险 {result['risk']} 条、待判定 {result['unknown']} 条。"
-    text += f"智能体已完成调查 {result.get('analyzed', 0)} 条。"
+    text = f"关联结果已整理：{event_sources_summary(result, len(events))}，形成 {len(related)} 个同设备、同主机关联组，涉及 {sum(map(len, related))} 条事件；按等级初筛风险 {result['risk']} 条、待判定 {result['unknown']} 条。"
+    text += f"其中 {result.get('analyzed', 0)} 条已有调查结论。"
     if result['errors']:
         text += f"有 {len(result['errors'])} 项查询或调查未完成，结果不完整；请查看对应失败步骤。"
     if len(events) == 1:
@@ -178,10 +192,10 @@ def operation_summary(event, params, value):
 
 
 def round_summary(status, result, observed, feedback, notification, enabled, development):
-    text = f"本轮{ {'completed': '完成', 'failed': '失败'}[status]}：读取 {len(observed)} 条事件，初筛风险 {result['risk']} 条，待判定 {result['unknown']} 条。"
+    text = f"本轮{ {'completed': '完成', 'failed': '失败'}[status]}：{event_sources_summary(result, len(observed))}，初筛风险 {result['risk']} 条，待判定 {result['unknown']} 条。"
     if status == 'completed':
         text += '本轮执行已结束；告警是否需要跟进、是否已闭环分别记录。'
-    text += f"已完成调查 {result.get('analyzed', 0)} 条。"
+    text += f"其中 {result.get('analyzed', 0)} 条已有调查结论。"
     if result.get('deferred'):
         text += f"另有 {result['deferred']} 条已保存待后续轮次调查。"
     if result['errors']:
@@ -207,6 +221,8 @@ def round_summary(status, result, observed, feedback, notification, enabled, dev
                  f"系统故障 {backlog.get('system_wait', 0)} 条、业务待人工核对 {backlog.get('needs_review', 0)} 条。")
         if backlog.get('retry_exhausted'):
             text += f"其中 {backlog['retry_exhausted']} 条已停止自动恢复，需修复后手动重新启动。"
+        if backlog.get('system_wait') and status == 'completed':
+            text += '本轮没有新增调查故障；上述历史故障待恢复，不代表本轮再次失败。'
         if backlog.get('needs_review'):
             text += '业务待人工核对不会在下轮自动续查。'
     if enabled:
