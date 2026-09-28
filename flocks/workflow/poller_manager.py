@@ -6,6 +6,8 @@ id that periodically triggers ``run_workflow`` with configured inputs.
 
 from __future__ import annotations
 
+from flocks.workflow import soc_diagnostics as soc_diag
+
 import asyncio
 import threading
 import time
@@ -404,6 +406,7 @@ class WorkflowPollerManager:
             current["error"] = str(exc)
             current["nextRunAt"] = None
             self._status[workflow_id] = current
+            soc_diag.record(workflow_id, "schedule.loop_failed", error_type=type(exc).__name__)
             log.warning("poller.loop_failed", {"workflow_id": workflow_id, "error": str(exc)})
         finally:
             if workflow_id in self._tasks and self._tasks.get(workflow_id) is asyncio.current_task():
@@ -422,9 +425,11 @@ class WorkflowPollerManager:
         config: Dict[str, Any],
     ) -> None:
         active_runs = self._cleanup_done_runs(workflow_id)
+        soc_diag.record(workflow_id, "schedule.tick", active_runs=active_runs)
         if config.get("noOverlap", True) and active_runs > 0:
             current = self._status.get(workflow_id) or self._base_status(workflow_id)
             current["lastStatus"] = "skipped"
+            soc_diag.record(workflow_id, "schedule.overlap_skipped", active_runs=active_runs)
             current["lastError"] = "previous_run_still_active"
             current["activeRuns"] = active_runs
             self._status[workflow_id] = current
@@ -436,6 +441,7 @@ class WorkflowPollerManager:
         )
         self._register_run_task(workflow_id, run_task)
 
+    @soc_diag.traced("schedule.dispatch")
     async def _execute_run(
         self,
         workflow_id: str,
@@ -448,6 +454,7 @@ class WorkflowPollerManager:
         cancel_events = self._run_cancel_events.setdefault(workflow_id, set())
         cancel_events.add(cancel_event)
         inputs = self._build_inputs(config)
+        soc_diag.progress("execution.create")
         exec_data = await create_execution_record(
             workflow_id,
             input_params=inputs,
@@ -461,10 +468,12 @@ class WorkflowPollerManager:
 
         tool_context = None
         try:
+            soc_diag.progress("context.prepare", execution=exec_id)
             tool_context = await build_workflow_tool_context(
                 workflow_id=workflow_id,
                 action_name="trigger:schedule",
             )
+            soc_diag.progress("runner.queued", execution=exec_id)
             result = await asyncio.to_thread(
                 run_workflow,
                 workflow=workflow_json,
@@ -550,11 +559,14 @@ class WorkflowPollerManager:
                 current["state"] = "running"
                 current["error"] = None
             self._status[workflow_id] = current
+            soc_diag.progress("execution.error", error_type=type(exc).__name__)
             log.warning("poller.run_failed", {"workflow_id": workflow_id, "error": str(exc)})
         finally:
             steps = step_recorder.take_steps()
+            soc_diag.progress("context.cleanup", execution=exec_id)
             await cleanup_workflow_tool_context(tool_context)
             try:
+                soc_diag.progress("execution.persist", execution=exec_id)
                 await record_execution_result(
                     workflow_id,
                     exec_id,
@@ -562,6 +574,7 @@ class WorkflowPollerManager:
                     steps=steps,
                 )
             except Exception as exc:
+                soc_diag.progress("execution.persist_failed", error_type=type(exc).__name__)
                 log.warning(
                     "poller.exec_record_failed",
                     {"workflow_id": workflow_id, "exec_id": exec_id, "error": str(exc)},

@@ -248,8 +248,11 @@ class EventDispatcher:
         event: TriggerEvent,
         executor: DispatchExecutor,
     ) -> Dict[str, Any]:
+        from flocks.workflow import soc_diagnostics
+        soc_diagnostics.progress("trigger.filter")
         matched, filter_error = evaluate_trigger_filter(trigger, event)
         mapped_inputs = preview_trigger_mapping(trigger, event)
+        soc_diagnostics.progress("trigger.filtered", matched=matched, has_error=bool(filter_error))
         if filter_error:
             raise TriggerDispatchError(filter_error)
         if not matched:

@@ -289,6 +289,7 @@ function truncate(value: string, max = 34) {
 export default function SocOverviewPage() {
   const [stats, setStats] = useState(EMPTY_STATS);
   const [loading, setLoading] = useState(true);
+  const [exporting, setExporting] = useState(false);
   const [error, setError] = useState('');
   const [timeFilter, setTimeFilter] = useState<TimeFilterState>(() => createRelativeTimeFilter(DEFAULT_TIME_RANGE));
   const [refreshKey, setRefreshKey] = useState<RefreshKey>('off');
@@ -306,6 +307,26 @@ export default function SocOverviewPage() {
       setLoading(false);
     }
   }, []);
+
+  const exportDiagnostics = async () => {
+    setExporting(true);
+    setError('');
+    try {
+      const response = await api.get('/api/soc-workspace/diagnostics');
+      const url = URL.createObjectURL(new Blob([JSON.stringify(response.data, null, 2)], { type: 'application/json' }));
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `soc-workspace-diagnostics-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (err) {
+      setError('SOC 诊断导出失败：请确认已使用管理员账号，并已更新 Flocks 主程序。页面不可用时可收集日志目录中的 soc-workspace-diagnostics.jsonl 及轮转文件。');
+    } finally {
+      setExporting(false);
+    }
+  };
 
   const refresh = useCallback(() => {
     void load(timeFilter);
@@ -382,6 +403,7 @@ export default function SocOverviewPage() {
             onApply={applyTimeRefresh}
             onClose={() => setTimeMenuOpen(false)}
           />
+          <button type="button" disabled={exporting} onClick={exportDiagnostics}>{exporting ? '导出中…' : '导出 SOC 诊断'}</button>
           <button type="button" onClick={refresh}>{loading ? '刷新中' : '刷新'}</button>
         </div>
       </header>

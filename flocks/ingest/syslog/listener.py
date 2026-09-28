@@ -6,8 +6,13 @@ import asyncio
 from typing import Awaitable, Callable, Union
 
 from flocks.ingest.syslog.parser import parse_syslog
+from flocks.workflow import soc_diagnostics
 
 OnSyslogMessage = Callable[[dict], Union[None, Awaitable[None]]]
+
+
+def _diagnose(callback, event, **fields):
+    soc_diagnostics.record(getattr(callback, "_diagnostic_workflow_id", None), event, **fields)
 
 
 class SyslogUDPProtocol(asyncio.DatagramProtocol):
@@ -27,8 +32,13 @@ class SyslogUDPProtocol(asyncio.DatagramProtocol):
         self._format_hint = format_hint
 
     def datagram_received(self, data: bytes, _addr) -> None:  # noqa: ANN001
+        _diagnose(self._on_message, "transport.received", count=len(data))
         text = data.decode("utf-8", errors="replace")
-        parsed = parse_syslog(text, self._format_hint)
+        try:
+            parsed = parse_syslog(text, self._format_hint)
+        except Exception as exc:
+            _diagnose(self._on_message, "transport.parse_failed", error_type=type(exc).__name__)
+            raise
         try:
             res = self._on_message(parsed)
             # If the callback returns a coroutine (legacy path), schedule it
@@ -39,8 +49,11 @@ class SyslogUDPProtocol(asyncio.DatagramProtocol):
                 except RuntimeError:
                     return
                 loop.create_task(self._safe_await(res))
-        except Exception:
-            pass
+        except Exception as exc:
+            _diagnose(self._on_message, "transport.callback_failed", error_type=type(exc).__name__)
+
+    def error_received(self, exc):
+        _diagnose(self._on_message, "transport.socket_error", error_type=type(exc).__name__)
 
     @staticmethod
     async def _safe_await(coro) -> None:  # noqa: ANN001
@@ -80,6 +93,7 @@ async def _handle_tcp_client(
             line = await reader.readline()
             if not line:
                 break
+            _diagnose(on_message, "transport.received", count=len(line))
             text = line.decode("utf-8", errors="replace").strip()
             if not text:
                 continue
@@ -88,8 +102,11 @@ async def _handle_tcp_client(
                 res = on_message(parsed)
                 if asyncio.iscoroutine(res):
                     await res
-            except Exception:
-                pass
+            except Exception as exc:
+                _diagnose(on_message, "transport.callback_failed", error_type=type(exc).__name__)
+    except Exception as exc:
+        _diagnose(on_message, "transport.client_failed", error_type=type(exc).__name__)
+        raise
     finally:
         try:
             writer.close()

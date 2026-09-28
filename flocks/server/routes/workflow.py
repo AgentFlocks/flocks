@@ -17,7 +17,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional, Any, Dict, Literal
-from fastapi import APIRouter, Body, HTTPException, Request, status, Query
+from fastapi import Depends, APIRouter, Body, HTTPException, Request, status, Query
 from pydantic import BaseModel, Field, ConfigDict, field_validator
 import uuid
 
@@ -97,6 +97,8 @@ from flocks.storage.storage import Storage
 from flocks.server.routes.event import publish_event
 from flocks.tool import ToolContext
 from flocks.utils.log import Log
+
+from flocks.server.auth import require_admin
 
 router = APIRouter()
 webhook_router = APIRouter()
@@ -3927,3 +3929,35 @@ async def save_sample_inputs(workflow_id: str, req: SampleInputsRequest):
     except Exception as e:
         log.error("workflow.sample_inputs.save.error", {"id": workflow_id, "error": str(e)})
         raise HTTPException(status_code=500, detail=f"Failed to save sample inputs: {str(e)}")
+
+
+@router.get("/soc-workspace/diagnostics")
+async def export_soc_workspace_diagnostics(user=Depends(require_admin)):
+    """Admin-only, payload-free support bundle. Does not restart or run workflows."""
+    from fastapi.responses import JSONResponse
+    from flocks.workflow import soc_diagnostics
+    from flocks.ingest.syslog.manager import default_manager as syslog
+    from flocks.workflow.poller_manager import default_manager as poller
+
+    states = {}
+    for wf in soc_diagnostics.WORKFLOWS:
+        listener = syslog.get_listener_status(wf)
+        schedule = poller.get_status(wf)
+        states[wf] = {
+            "syslog": {k: listener.get(k) for k in ("state", "port", "protocol", "queueSize", "queueCapacity", "workerCount")},
+            "schedule": {k: schedule.get(k) for k in ("state", "activeRuns", "lastRunAt", "lastStatus", "lastDurationMs", "nextRunAt", "lastRunId")},
+            "listener_task_alive": bool(syslog._tasks.get(wf) and not syslog._tasks[wf].done()),
+            "poller_task_alive": bool(poller._tasks.get(wf) and not poller._tasks[wf].done()),
+            "listener_has_error": bool(listener.get("error")),
+            "schedule_has_error": bool(schedule.get("error") or schedule.get("lastError")),
+            "previous_run_still_active": schedule.get("lastError") == "previous_run_still_active",
+        }
+    try:
+        bundle = await asyncio.wait_for(asyncio.to_thread(soc_diagnostics.export_bundle), timeout=15)
+    except (OSError, TimeoutError):
+        raise HTTPException(503, "SOC 诊断导出暂时不可用，请直接收集 soc-workspace-diagnostics.jsonl 及轮转文件") from None
+    bundle["trigger_runtime"] = states
+    return JSONResponse(bundle, headers={
+        "Content-Disposition": f'attachment; filename="soc-workspace-diagnostics-{int(time.time())}.json"',
+        "Cache-Control": "no-store",
+    })

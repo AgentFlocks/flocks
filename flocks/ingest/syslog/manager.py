@@ -38,6 +38,8 @@ from flocks.workflow.triggers.models import (
     workflow_trigger_definitions_from_json,
 )
 
+from flocks.workflow import soc_diagnostics as soc_diag
+
 log = Log.create(service="syslog.manager")
 
 
@@ -453,10 +455,15 @@ class SyslogManager:
         # invoke it inline from datagram_received() without creating an
         # asyncio task per packet. That preserves the queue-based backpressure.
         def on_msg(parsed: dict) -> None:
+            soc_diag.record(workflow_id, "received")
             try:
                 queue.put_nowait(parsed)
+                soc_diag.record(workflow_id, "enqueued", queue_size=queue.qsize(), queue_capacity=queue.maxsize)
             except asyncio.QueueFull:
                 throttle.record_drop()
+                soc_diag.record(workflow_id, "queue_full", queue_size=queue.qsize())
+
+        on_msg._diagnostic_workflow_id = workflow_id
 
         async def _periodic_drop_flush() -> None:
             """Flush leftover drop count when the flood stops."""
@@ -467,6 +474,8 @@ class SyslogManager:
                 except asyncio.TimeoutError:
                     pass
                 throttle.maybe_flush()
+                soc_diag.record(workflow_id, "listener.heartbeat", queue_size=queue.qsize(),
+                                worker_count=sum(not t.done() for t in self._worker_pools.get(workflow_id, [])))
 
         async def _bind_and_serve() -> None:
             """Bind the socket synchronously then mark the listener ready.
@@ -517,6 +526,7 @@ class SyslogManager:
         except asyncio.CancelledError:
             raise
         except OSError as exc:
+            soc_diag.record(workflow_id, "listener.bind_failed", error_type=type(exc).__name__)
             self._listener_status[workflow_id] = {
                 "state": "failed",
                 "error": str(exc),
@@ -538,6 +548,7 @@ class SyslogManager:
                 "protocol": protocol,
             }
             ready.set()
+            soc_diag.record(workflow_id, "listener.failed", error_type=type(exc).__name__)
             log.error("syslog.listener_error", {"workflow_id": workflow_id, "error": str(exc)})
 
     async def _worker_loop(
@@ -583,6 +594,7 @@ class SyslogManager:
                     {"workflow_id": workflow_id, "error": str(exc)},
                 )
 
+    @soc_diag.traced("syslog.dispatch")
     async def _trigger_workflow(
         self,
         workflow_id: str,
@@ -616,6 +628,7 @@ class SyslogManager:
             summarized_inputs = {"_trigger": trigger.type}
             summarized_inputs.update(mapped_inputs)
 
+            soc_diag.progress("execution.create")
             exec_data = await create_execution_record(
                 workflow_id,
                 input_params=summarized_inputs,
@@ -626,10 +639,12 @@ class SyslogManager:
             trigger_meta = mapped_inputs.get("_flocks", {}).get("trigger", {})
             tool_context = None
             try:
+                soc_diag.progress("context.prepare", execution=exec_id)
                 tool_context = await build_workflow_tool_context(
                     workflow_id=workflow_id,
                     action_name=f"trigger:{trigger.type}",
                 )
+                soc_diag.progress("runner.queued", execution=exec_id)
                 result = await asyncio.to_thread(
                     run_workflow,
                     workflow=workflow_plan,
@@ -666,6 +681,7 @@ class SyslogManager:
                 )
             except Exception as exc:
                 duration = time.time() - start_time
+                soc_diag.progress("execution.error", error_type=type(exc).__name__)
                 log.error(
                     "syslog.workflow_run_failed",
                     {"workflow_id": workflow_id, "exec_id": exec_id, "error": str(exc)},
@@ -688,8 +704,10 @@ class SyslogManager:
                 )
             finally:
                 steps = step_recorder.take_steps()
+                soc_diag.progress("context.cleanup", execution=exec_id)
                 await cleanup_workflow_tool_context(tool_context)
                 try:
+                    soc_diag.progress("execution.persist", execution=exec_id)
                     await record_execution_result(
                         workflow_id,
                         exec_id,
@@ -697,10 +715,13 @@ class SyslogManager:
                         steps=steps,
                     )
                 except Exception as exc:
+                    soc_diag.progress("execution.persist_failed", error_type=type(exc).__name__)
                     log.warning("syslog.exec_record_failed", {"exec_id": exec_id, "error": str(exc)})
+            soc_diag.progress("ingress.after", execution=exec_id)
             return exec_data
 
         try:
+            soc_diag.progress("ingress.hooks")
             action_payload = {
                 "operation": "workflow.trigger.syslog",
                 "transport": "headless",
@@ -723,6 +744,7 @@ class SyslogManager:
                 after=HookPipeline.run_ingress_after,
             )
         except TriggerDispatchError as exc:
+            soc_diag.progress("dispatch.error", error_type=type(exc).__name__)
             log.warning(
                 "syslog.trigger_dispatch_failed",
                 {"workflow_id": workflow_id, "trigger_id": trigger.id, "error": str(exc)},

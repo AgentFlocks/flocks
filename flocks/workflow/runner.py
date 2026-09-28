@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from flocks.workflow import soc_diagnostics
+
 import asyncio
 import gc
 import logging
@@ -312,6 +314,7 @@ def _validate_lint_results(lint_results: tuple[Dict[str, Any], ...]) -> None:
         _logger.warning(f"workflow lint 检查发现 {len(lint_warnings)} 个警告: {lint_warnings[:5]}")
 
 
+@soc_diagnostics.runner_observer
 def run_workflow(
     *,
     workflow: WorkflowSource,
