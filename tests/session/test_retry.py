@@ -50,13 +50,15 @@ class TestRetryable:
         result = SessionRetry.retryable(error)
         assert result == "Internal server error"
 
-    def test_stream_tool_arguments_truncated_error_is_retryable(self):
+    def test_stream_tool_arguments_truncated_error_is_not_retryable(self):
+        # The runner feeds a cut-off tool call back to the model as a tool
+        # error; replaying the same request must not happen.
         error = {
             "name": "StreamToolArgumentsTruncatedError",
             "data": {"message": "tool arguments were truncated"},
         }
         result = SessionRetry.retryable(error)
-        assert result == "Model output was truncated while generating tool arguments"
+        assert result is None
 
     def test_json_message_too_many_requests(self):
         import json

@@ -43,6 +43,12 @@ from flocks.session.lifecycle.compaction import (
 )
 from flocks.session.lifecycle.compaction.compaction import _get_compaction_history
 from flocks.session.prompt import SessionPrompt
+from flocks.session.context_usage import (
+    build_context_usage_snapshot,
+    estimate_observed_context_tokens,
+    has_observation_baseline,
+    latest_observation,
+)
 from flocks.provider.provider import Provider
 from flocks.session.goal import GoalManager
 
@@ -52,6 +58,8 @@ log = Log.create(service="session.loop")
 
 MAX_OVERFLOW_COMPACTION_ATTEMPTS = 3
 POST_COMPACTION_COOLDOWN_STEPS = 2
+# Minimum spacing between mid-turn composer-meter pushes for one session.
+CONTEXT_USAGE_PUSH_INTERVAL_SECONDS = 1.5
 RATE_LIMIT_COOLDOWN_SECONDS = 60.0
 CHAIN_EXHAUSTION_COOLDOWN_SECONDS = 5.0
 
@@ -105,6 +113,9 @@ class LoopContext:
     # with a current message estimate so tool output produced after that model
     # call cannot be missed.
     last_observed_prompt_tokens: int = 0
+    # Mid-turn ``context.usage.updated`` pushes (throttled, never awaited).
+    last_context_usage_push_at: float = 0.0
+    context_usage_push_task: Optional[asyncio.Task] = field(default=None, repr=False)
     auto_failover: bool = False
     # Entrypoint authorization is separate from persisted model_auto. Only a
     # WebUI message route may set this bit; non-WebUI entrypoints use the default.
@@ -471,6 +482,63 @@ class SessionLoop:
                 "event": event_name,
                 "error": str(exc),
             })
+
+    @classmethod
+    def _schedule_context_usage_push(
+        cls,
+        ctx: LoopContext,
+        callbacks: "LoopCallbacks",
+        *,
+        force: bool = False,
+    ) -> None:
+        """Refresh the composer context meter between steps of a turn.
+
+        The route only publishes usage when the turn ends, so a long tool
+        loop left the meter frozen at its pre-turn value.  The snapshot is
+        built in the background and throttled so it never delays a step.
+        ``force`` (after pruning or compaction changed the prompt) skips the
+        throttle and publishes after any push still in flight, so a snapshot
+        taken before the cleanup cannot land last.
+        """
+        publish = callbacks.event_publish_callback
+        if publish is None:
+            return
+        now = time.monotonic()
+        pending = ctx.context_usage_push_task
+        pending = pending if pending is not None and not pending.done() else None
+        if not force and (
+            pending is not None
+            or now - ctx.last_context_usage_push_at < CONTEXT_USAGE_PUSH_INTERVAL_SECONDS
+        ):
+            return
+        ctx.last_context_usage_push_at = now
+        session_id = ctx.session.id
+
+        async def _push() -> None:
+            if pending is not None:
+                try:
+                    await pending
+                except Exception:
+                    pass
+            try:
+                snapshot = await build_context_usage_snapshot(
+                    session_id,
+                    session=ctx.session,
+                    provider_id=ctx.provider_id,
+                    model_id=ctx.model_id,
+                )
+                await publish("context.usage.updated", snapshot.model_dump(by_alias=True))
+            except Exception as exc:
+                log.debug("loop.context_usage_push_failed", {
+                    "session_id": session_id,
+                    "error": str(exc),
+                })
+
+        ctx.context_usage_push_task = fire_and_forget(
+            _push(),
+            label="context_usage_push",
+            name=f"context_usage:{session_id}",
+        )
 
     @classmethod
     async def _publish_turn_stopped(
@@ -1609,9 +1677,13 @@ class SessionLoop:
                     input_tokens = tokens_dict.get("input", 0)
                     _cache = tokens_dict.get("cache") or {}
                     cache_read = _cache.get("read", 0) if isinstance(_cache, dict) else 0
+                    # ``input`` excludes cached tokens on both sides of the
+                    # cache: a cold-cache call reports most of its prompt as
+                    # ``cache.write``.
+                    cache_write = _cache.get("write", 0) if isinstance(_cache, dict) else 0
                     output_tokens = tokens_dict.get("output", 0)
                     reasoning_tokens = tokens_dict.get("reasoning", 0)
-                    observed_prompt_tokens = input_tokens + cache_read
+                    observed_prompt_tokens = input_tokens + cache_read + cache_write
                     reported_total = observed_prompt_tokens + output_tokens + reasoning_tokens
 
                     # Provider usage describes the prompt before the latest
@@ -1632,27 +1704,44 @@ class SessionLoop:
                         ),
                         len(messages) - 1,
                     )
+                    observed_index = last_finished_index
+                    observed_total = reported_total if observed_prompt_tokens > 0 else 0
+                    if observed_total <= 0:
+                        # A step can end without provider usage (a stream cut
+                        # mid tool call, a provider that omits it).  Judge by
+                        # the latest call that did report usage plus what came
+                        # after it, as the composer meter does: the
+                        # message-only estimate leaves out the system prompt
+                        # and tool definitions.
+                        earlier = latest_observation(messages[:last_finished_index])
+                        if (
+                            earlier is not None
+                            and earlier.prompt_tokens > 0
+                            and has_observation_baseline(ctx.session.id, earlier.message_id)
+                        ):
+                            observed_index = earlier.index
+                            observed_total = earlier.used_tokens
 
-                    async def _estimate_effective_tokens() -> tuple[int, int, str]:
-                        if observed_prompt_tokens > 0:
-                            tool_result_tokens = (
-                                await SessionPrompt.estimate_tool_result_tokens(
-                                    ctx.session.id,
-                                    last_finished.id,
-                                )
+                    async def _estimate_effective_tokens() -> tuple[int, int, str, int]:
+                        if observed_total > 0:
+                            # Shared with the composer meter, and subtracts
+                            # what cleanup removed since the observed call so
+                            # a pruned prompt is not judged by stale usage.
+                            (
+                                observed_effective,
+                                delta_tokens,
+                                freed_tokens,
+                            ) = await estimate_observed_context_tokens(
+                                ctx.session.id,
+                                messages,
+                                observed_index,
+                                observed_total,
                             )
-                            later_tokens = (
-                                await SessionPrompt.estimate_full_context_tokens(
-                                    ctx.session.id,
-                                    messages[last_finished_index + 1:],
-                                    policy=compaction_policy,
-                                )
-                            )
-                            delta_tokens = tool_result_tokens + later_tokens
                             return (
-                                reported_total + delta_tokens,
+                                observed_effective,
                                 delta_tokens,
                                 "observed+estimated_delta",
+                                freed_tokens,
                             )
 
                         estimated_tokens = (
@@ -1662,12 +1751,13 @@ class SessionLoop:
                                 policy=compaction_policy,
                             )
                         )
-                        return max(reported_total, estimated_tokens), estimated_tokens, "estimated"
+                        return max(reported_total, estimated_tokens), estimated_tokens, "estimated", 0
 
                     (
                         effective_tokens,
                         estimated_component_tokens,
                         decision_source,
+                        freed_tokens,
                     ) = await _estimate_effective_tokens()
                     tokens_dict = {
                         "input": effective_tokens,
@@ -1680,9 +1770,13 @@ class SessionLoop:
                         "effective_tokens": effective_tokens,
                         "observed_tokens": reported_total,
                         "estimated_component_tokens": estimated_component_tokens,
+                        "freed_tokens": freed_tokens,
                         "message_count": len(messages),
                         "overflow_threshold": compaction_policy.overflow_threshold,
                     })
+                    # The observed call's baseline is recorded now, so a
+                    # concurrent meter snapshot cannot capture it post-cleanup.
+                    cls._schedule_context_usage_push(ctx, callbacks)
                     
                     try:
                         _tok_cache = tokens_dict.get("cache") or {}
@@ -1931,7 +2025,59 @@ class SessionLoop:
                                         "error": str(trunc_err),
                                     })
                             
-                            # Recovery step 2: full compaction
+                            # Recovery step 2: drop tool outputs past their
+                            # per-tool retention window.  That often frees most
+                            # of the prompt on its own and, unlike a summary,
+                            # keeps the conversation intact, so only summarize
+                            # when the prompt still overflows afterwards.
+                            try:
+                                await SessionCompaction.prune(
+                                    ctx.session.id,
+                                    policy=compaction_policy,
+                                )
+                                (
+                                    pruned_effective_tokens,
+                                    _pruned_component_tokens,
+                                    _pruned_source,
+                                    pruned_freed_tokens,
+                                ) = await _estimate_effective_tokens()
+                                still_overflow = await SessionCompaction.is_overflow(
+                                    tokens={
+                                        "input": pruned_effective_tokens,
+                                        "output": 0,
+                                        "cache": {"read": 0, "write": 0},
+                                    },
+                                    model_context=model_context,
+                                    policy=compaction_policy,
+                                )
+                                log.info("loop.overflow_pruned", {
+                                    "session_id": ctx.session.id,
+                                    "effective_tokens_before": effective_tokens,
+                                    "effective_tokens_after": pruned_effective_tokens,
+                                    "freed_tokens": pruned_freed_tokens,
+                                    "still_overflow": still_overflow,
+                                })
+                                if not still_overflow:
+                                    set_context_state(
+                                        ctx.session.id,
+                                        tool_results_compacted=True,
+                                        last_compaction_step=ctx.last_compaction_step,
+                                        last_compaction_reason="prune",
+                                    )
+                                    await cls._publish_runtime_event(callbacks, "context.compacted", {
+                                        "sessionID": ctx.session.id,
+                                        "step": ctx.step,
+                                        "reason": "prune",
+                                    })
+                                    cls._schedule_context_usage_push(ctx, callbacks, force=True)
+                                    continue
+                            except Exception as prune_err:
+                                log.warn("loop.overflow_prune_error", {
+                                    "session_id": ctx.session.id,
+                                    "error": str(prune_err),
+                                })
+
+                            # Recovery step 3: full compaction
                             ctx.overflow_compaction_attempts += 1
                             if ctx.overflow_compaction_attempts >= 2:
                                 await cls._publish_session_notice(
@@ -1956,12 +2102,6 @@ class SessionLoop:
                             # --- Compaction start: notify all UIs ---
                             if callbacks.on_compaction:
                                 await callbacks.on_compaction()
-                            
-                            # Prune first, then summarize
-                            await SessionCompaction.prune(
-                                ctx.session.id,
-                                policy=compaction_policy,
-                            )
                             
                             # Same SSE progress adapter as the manual
                             # /compact route — mirrored here so the
@@ -2024,6 +2164,7 @@ class SessionLoop:
                                     "attempt": ctx.overflow_compaction_attempts,
                                     "cooldownUntilStep": ctx.step + POST_COMPACTION_COOLDOWN_STEPS,
                                 })
+                                cls._schedule_context_usage_push(ctx, callbacks, force=True)
                             
                             # Continuation user message is now created inside
                             # SessionCompaction.process() (matching Flocks).

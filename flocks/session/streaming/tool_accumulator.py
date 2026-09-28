@@ -51,6 +51,23 @@ class StreamToolArgumentsTruncatedError(RuntimeError):
         )
 
 
+def _truncation_recovery_hint(arguments_len: int) -> str:
+    """Tell the model how to recover from a cut-off tool call.
+
+    The runner feeds this error back to the model instead of replaying the
+    request, so the model must not simply resend the same oversized call:
+    whatever cut the stream (output-token cap, gateway size or time limit)
+    will usually cut the identical call at the same place again.
+    """
+    budget = max(1000, arguments_len // 2)
+    return (
+        " Do not resend the same oversized call. Split the content into several "
+        f"smaller tool calls of at most about {budget} characters each "
+        "(for example, write the first part of the file, then add the remaining "
+        "parts with edit)."
+    )
+
+
 def _looks_truncated(accumulated_args: str) -> bool:
     """True when the arguments are valid JSON that simply stops early.
 
@@ -182,6 +199,7 @@ class ToolCallAccumulator:
                 error_msg = (
                     f"Output was truncated (finish_reason='{stream_finish_reason}'). "
                     f"{detail} The tool was not executed."
+                    + _truncation_recovery_hint(len(accumulated_args))
                 )
                 await self._processor.process_event(
                     ToolInputErrorEvent(
@@ -225,6 +243,7 @@ class ToolCallAccumulator:
                 error_msg = (
                     f"Output was truncated (finish_reason={stream_finish_reason!r}). "
                     f"{detail} The tool was not executed."
+                    + _truncation_recovery_hint(len(accumulated_args))
                 )
                 await self._processor.process_event(
                     ToolInputErrorEvent(

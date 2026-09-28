@@ -707,16 +707,27 @@ class TestTurnLifecycle:
         )
         event_callback = AsyncMock()
         callbacks = LoopCallbacks(event_publish_callback=event_callback)
+        truncated = False
+
+        async def truncate_tool_outputs(*_args, **_kwargs):
+            nonlocal truncated
+            truncated = True
+            return 1
+
+        async def estimate_messages(_session_id, messages, **_kwargs):
+            # The whole overflowing conversation is large until its tool
+            # output is truncated; any smaller slice is negligible.
+            return 50_000 if messages is overflow_messages and not truncated else 0
 
         with patch(
             "flocks.session.session_loop.Provider.resolve_model_info",
             return_value=(20000, 1024, None),
         ), patch(
             "flocks.session.session_loop.SessionCompaction.truncate_oversized_tool_outputs",
-            AsyncMock(return_value=1),
+            truncate_tool_outputs,
         ), patch(
             "flocks.session.session_loop.SessionPrompt.estimate_full_context_tokens",
-            AsyncMock(side_effect=[0, 50_000, 0, 0]),
+            estimate_messages,
         ), patch(
             "flocks.session.runner.SessionRunner._process_step",
             AsyncMock(return_value=StepResult(action="stop")),
@@ -829,6 +840,241 @@ class TestTurnLifecycle:
         run_compaction.assert_awaited_once()
         assert truncation_calls == 2
         assert ctx.last_observed_prompt_tokens == 95_000
+
+    @pytest.mark.asyncio
+    async def test_overflow_resolved_by_prune_skips_summary(self):
+        """Pruning expired tool output can fix an overflow on its own.
+
+        Regression: the loop pruned and then summarized unconditionally, so a
+        prompt that pruning had already shrunk far below the threshold still
+        lost its history to a summary (the meter showed ~14% during it).
+        """
+        session = SimpleNamespace(
+            id="turn_prune_resolves_session",
+            agent="rex",
+            directory="/tmp",
+            memory_enabled=False,
+        )
+        ctx = LoopContext(
+            session=session,
+            provider_id="test-provider",
+            model_id="test-model",
+            agent_name="rex",
+        )
+        messages = [
+            self._make_msg("prune_resolves_user_a", "user"),
+            self._make_msg("prune_resolves_assistant_a", "assistant", finish="stop"),
+            self._make_msg("prune_resolves_user_b", "user"),
+            self._make_msg(
+                "prune_resolves_assistant_b",
+                "assistant",
+                finish="tool-calls",
+                tokens={"input": 95_000, "output": 0, "cache": {"read": 0, "write": 0}},
+            ),
+        ]
+        messages[1].parentID = messages[0].id
+        messages[3].parentID = messages[2].id
+        ctx.session_ctx = SimpleNamespace(get_messages=AsyncMock(return_value=messages))
+        old_output = ToolPart(
+            sessionID=session.id,
+            messageID="prune_resolves_assistant_a",
+            callID="call_old_read",
+            tool="read",
+            state=ToolStateCompleted(
+                input={"filePath": "/tmp/big.md"},
+                output="o" * 120_000,  # ~30K tokens from an earlier turn
+                title="read",
+                metadata={},
+                time={"start": 1, "end": 2},
+            ),
+        )
+        new_output = ToolPart(
+            sessionID=session.id,
+            messageID="prune_resolves_assistant_b",
+            callID="call_new_bash",
+            tool="bash",
+            state=ToolStateCompleted(
+                input={"command": "ls"},
+                output="n" * 80_000,  # ~20K tokens produced after the call
+                title="bash",
+                metadata={},
+                time={"start": 3, "end": 4},
+            ),
+        )
+        parts_by_message = {
+            "prune_resolves_assistant_a": [old_output],
+            "prune_resolves_assistant_b": [new_output],
+        }
+
+        async def prune(*_args, **_kwargs):
+            old_output.state.time["compacted"] = 5
+            SessionPrompt.invalidate_message_cache("prune_resolves_assistant_a")
+
+        run_compaction = AsyncMock(return_value="continue")
+        process_step = AsyncMock(return_value=StepResult(action="stop"))
+        event_callback = AsyncMock()
+
+        with patch(
+            "flocks.session.session_loop.Provider.resolve_model_info",
+            return_value=(128_000, 8_192, None),
+        ), patch(
+            "flocks.session.session_loop.Message.parts",
+            AsyncMock(
+                side_effect=lambda message_id, _session_id: (
+                    list(parts_by_message.get(message_id, []))
+                ),
+            ),
+        ), patch(
+            "flocks.session.session_loop.SessionCompaction.truncate_oversized_tool_outputs",
+            AsyncMock(return_value=0),
+        ), patch(
+            "flocks.session.session_loop.SessionCompaction.prune",
+            AsyncMock(side_effect=prune),
+        ), patch(
+            "flocks.session.session_loop.run_compaction",
+            run_compaction,
+        ), patch(
+            "flocks.session.runner.SessionRunner._process_step",
+            process_step,
+        ):
+            result = await SessionLoop._run_loop(
+                ctx,
+                LoopCallbacks(event_publish_callback=event_callback),
+            )
+
+        assert result.action == "stop"
+        run_compaction.assert_not_awaited()
+        process_step.assert_awaited_once()
+        compacted = [
+            call.args[1] for call in event_callback.await_args_list
+            if call.args[0] == "context.compacted"
+        ]
+        assert compacted == [{
+            "sessionID": session.id,
+            "step": 1,
+            "reason": "prune",
+        }]
+        assert ctx.overflow_compaction_attempts == 0
+
+    @pytest.mark.asyncio
+    async def test_step_without_usage_is_judged_by_the_previous_observation(self):
+        """A stream cut mid tool call reports no usage.  The overflow check
+        must not fall back to the message-only estimate, which leaves out the
+        system prompt and tool definitions the provider counted."""
+        from flocks.session.context_usage import estimate_observed_context_tokens
+
+        session = SimpleNamespace(
+            id="turn_no_usage_step_session",
+            agent="rex",
+            directory="/tmp",
+            memory_enabled=False,
+        )
+        ctx = LoopContext(
+            session=session,
+            provider_id="test-provider",
+            model_id="test-model",
+            agent_name="rex",
+        )
+        messages = [
+            self._make_msg("no_usage_user", "user"),
+            self._make_msg(
+                "no_usage_observed",
+                "assistant",
+                finish="tool-calls",
+                tokens={"input": 105_000, "output": 0, "cache": {"read": 0, "write": 0}},
+            ),
+            self._make_msg(
+                "no_usage_cut_step",
+                "assistant",
+                finish="tool-calls",
+                tokens={"input": 0, "output": 0, "cache": {"read": 0, "write": 0}},
+            ),
+        ]
+        messages[2].content = "n" * 20_000  # ~5K tokens produced by the cut step
+        ctx.session_ctx = SimpleNamespace(get_messages=AsyncMock(return_value=messages))
+        run_compaction = AsyncMock(return_value="stop")
+        process_step = AsyncMock(return_value=StepResult(action="stop"))
+
+        with patch(
+            "flocks.session.session_loop.Provider.resolve_model_info",
+            return_value=(128_000, 8_192, None),
+        ), patch(
+            "flocks.session.session_loop.Message.parts",
+            AsyncMock(return_value=[]),
+        ), patch(
+            "flocks.session.session_loop.SessionCompaction.truncate_oversized_tool_outputs",
+            AsyncMock(return_value=0),
+        ), patch(
+            "flocks.session.session_loop.SessionCompaction.prune",
+            AsyncMock(),
+        ), patch(
+            "flocks.session.session_loop.run_compaction",
+            run_compaction,
+        ), patch(
+            "flocks.session.runner.SessionRunner._process_step",
+            process_step,
+        ):
+            # The loop examined the observed step one iteration earlier.
+            await estimate_observed_context_tokens(session.id, messages, 1, 105_000)
+            result = await SessionLoop._run_loop(ctx, LoopCallbacks())
+
+        assert result.action == "stop"
+        run_compaction.assert_awaited_once()  # 105K observed + 5K > 108.8K
+        process_step.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_cache_writes_count_toward_overflow(self):
+        """A cold-cache Anthropic call reports most of its prompt as cache
+        writes; leaving them out hid an overflowing prompt from the trigger."""
+        session = SimpleNamespace(
+            id="turn_cache_write_session",
+            agent="rex",
+            directory="/tmp",
+            memory_enabled=False,
+        )
+        ctx = LoopContext(
+            session=session,
+            provider_id="test-provider",
+            model_id="test-model",
+            agent_name="rex",
+        )
+        messages = [
+            self._make_msg("cache_write_user", "user"),
+            self._make_msg(
+                "cache_write_assistant",
+                "assistant",
+                finish="tool-calls",
+                tokens={"input": 50, "output": 0, "cache": {"read": 0, "write": 110_000}},
+            ),
+        ]
+        ctx.session_ctx = SimpleNamespace(get_messages=AsyncMock(return_value=messages))
+        run_compaction = AsyncMock(return_value="stop")
+        process_step = AsyncMock(return_value=StepResult(action="stop"))
+
+        with patch(
+            "flocks.session.session_loop.Provider.resolve_model_info",
+            return_value=(128_000, 8_192, None),
+        ), patch(
+            "flocks.session.session_loop.Message.parts",
+            AsyncMock(return_value=[]),
+        ), patch(
+            "flocks.session.session_loop.SessionCompaction.truncate_oversized_tool_outputs",
+            AsyncMock(return_value=0),
+        ), patch(
+            "flocks.session.session_loop.SessionCompaction.prune",
+            AsyncMock(),
+        ), patch(
+            "flocks.session.session_loop.run_compaction",
+            run_compaction,
+        ), patch(
+            "flocks.session.runner.SessionRunner._process_step",
+            process_step,
+        ):
+            result = await SessionLoop._run_loop(ctx, LoopCallbacks())
+
+        assert result.action == "stop"
+        run_compaction.assert_awaited_once()  # 110,050 > 108,800
+        process_step.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_run_loop_skips_exit_condition_when_assistant_has_tool_parts(self):
@@ -1093,3 +1339,109 @@ class TestLoopContext:
             agent_name="test",
         )
         assert ctx.step == 0
+
+
+class TestContextUsagePush:
+    """Mid-turn composer meter updates (the route only pushes at turn end)."""
+
+    @pytest.mark.asyncio
+    async def test_push_publishes_snapshot_and_is_throttled(self):
+        ctx = LoopContext(
+            session=_make_session_info("ctx_usage_push"),
+            provider_id="gateway",
+            model_id="gpt-test",
+            agent_name="rex",
+        )
+        published = []
+
+        async def publish(event_name, payload):
+            published.append((event_name, payload))
+
+        snapshot = MagicMock()
+        snapshot.model_dump.return_value = {"sessionID": "ctx_usage_push", "usedTokens": 42}
+        build = AsyncMock(return_value=snapshot)
+        callbacks = LoopCallbacks(event_publish_callback=publish)
+
+        with patch("flocks.session.session_loop.build_context_usage_snapshot", build):
+            SessionLoop._schedule_context_usage_push(ctx, callbacks)
+            SessionLoop._schedule_context_usage_push(ctx, callbacks)  # throttled
+            await ctx.context_usage_push_task
+
+        assert published == [(
+            "context.usage.updated",
+            {"sessionID": "ctx_usage_push", "usedTokens": 42},
+        )]
+        build.assert_awaited_once()
+        assert build.await_args.kwargs["provider_id"] == "gateway"
+        assert build.await_args.kwargs["model_id"] == "gpt-test"
+
+    @pytest.mark.asyncio
+    async def test_push_failure_never_raises(self):
+        ctx = LoopContext(
+            session=_make_session_info("ctx_usage_push_failure"),
+            provider_id="gateway",
+            model_id="gpt-test",
+            agent_name="rex",
+        )
+        publish = AsyncMock()
+        with patch(
+            "flocks.session.session_loop.build_context_usage_snapshot",
+            AsyncMock(side_effect=RuntimeError("storage gone")),
+        ):
+            SessionLoop._schedule_context_usage_push(
+                ctx,
+                LoopCallbacks(event_publish_callback=publish),
+            )
+            await ctx.context_usage_push_task
+
+        publish.assert_not_awaited()
+
+    def test_push_needs_a_publish_callback(self):
+        ctx = LoopContext(
+            session=_make_session_info("ctx_usage_push_no_callback"),
+            provider_id="gateway",
+            model_id="gpt-test",
+            agent_name="rex",
+        )
+        SessionLoop._schedule_context_usage_push(ctx, LoopCallbacks())
+        assert ctx.context_usage_push_task is None
+
+    @pytest.mark.asyncio
+    async def test_forced_push_after_cleanup_lands_after_a_slower_earlier_push(self):
+        """A snapshot taken before pruning must not be the last one the
+        composer sees."""
+        ctx = LoopContext(
+            session=_make_session_info("ctx_usage_push_forced"),
+            provider_id="gateway",
+            model_id="gpt-test",
+            agent_name="rex",
+        )
+        published = []
+
+        async def publish(event_name, payload):
+            published.append(payload["label"])
+
+        release_first = asyncio.Event()
+        labels = iter(["before_prune", "after_prune"])
+
+        async def build(*_args, **_kwargs):
+            label = next(labels)
+            if label == "before_prune":
+                await release_first.wait()
+            snapshot = MagicMock()
+            snapshot.model_dump.return_value = {"label": label}
+            return snapshot
+
+        callbacks = LoopCallbacks(event_publish_callback=publish)
+        with patch("flocks.session.session_loop.build_context_usage_snapshot", build):
+            SessionLoop._schedule_context_usage_push(ctx, callbacks)
+            first = ctx.context_usage_push_task
+            await asyncio.sleep(0)  # first push is now building its snapshot
+            SessionLoop._schedule_context_usage_push(ctx, callbacks, force=True)
+            forced = ctx.context_usage_push_task
+            assert forced is not first
+            await asyncio.sleep(0)
+            release_first.set()
+            await forced
+
+        assert published == ["before_prune", "after_prune"]

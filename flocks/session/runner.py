@@ -41,6 +41,7 @@ from flocks.session.core.status import SessionStatus, SessionStatusRetry, Sessio
 from flocks.session.core.defaults import (
     DEFAULT_MAX_TOOL_STEPS,
     DOOM_LOOP_THRESHOLD,
+    MAX_CONSECUTIVE_TOOL_ARG_TRUNCATIONS,
     REPEATED_EXACT_TOOL_CALL_HALT_THRESHOLD,
 )
 from flocks.session.lifecycle.retry import (
@@ -282,6 +283,9 @@ class StepResult:
     error: Optional[str] = None
     usage: Optional[Dict[str, int]] = None
     failure: Optional[StepFailure] = None
+    # A streamed tool call was cut off mid-arguments; its part is stored as a
+    # tool error so the next step can react instead of replaying this one.
+    tool_args_truncated: bool = False
 
 
 @dataclass
@@ -383,6 +387,15 @@ class SessionRunner:
             else:
                 state["last_user_id"] = last_user_id
         return state
+
+    def _count_tool_args_truncation(self, *, truncated: bool, last_user_id: str) -> int:
+        """Track consecutive truncated-tool-call steps within one user turn."""
+        state = self._static_cache.get("tool_args_truncation_guard")
+        if not isinstance(state, dict) or state.get("last_user_id") != last_user_id:
+            state = {"last_user_id": last_user_id, "count": 0}
+        state["count"] = int(state.get("count", 0)) + 1 if truncated else 0
+        self._static_cache["tool_args_truncation_guard"] = state
+        return state["count"]
 
     def _should_warn_about_tool_loop(self, *, last_user_id: str) -> bool:
         state = self._get_tool_loop_guard_state(last_user_id=last_user_id)
@@ -763,6 +776,8 @@ class SessionRunner:
             return 0
 
         updated_count = 0
+        # Marking a part compacted changes its message's token estimate.
+        SessionPrompt.invalidate_message_cache({ref["message_id"] for ref in dirty_refs})
         for ref in dirty_refs:
             part = ref["part"]
             state = getattr(part, "state", None)
@@ -1507,10 +1522,6 @@ class SessionRunner:
             ),
         )
 
-    @staticmethod
-    def _is_stream_tool_arguments_truncated_error(error: Dict[str, Any]) -> bool:
-        return error.get("name") == "StreamToolArgumentsTruncatedError"
-    
     async def _process_step(
         self,
         messages: List[MessageInfo],
@@ -1767,7 +1778,7 @@ class SessionRunner:
                 }
             })
 
-        async def _create_attempt_assistant_message(*, publish: bool = True) -> MessageInfo:
+        async def _create_attempt_assistant_message() -> MessageInfo:
             msg = await Message.create(
                 session_id=self.session.id,
                 role=MessageRole.ASSISTANT,
@@ -1777,60 +1788,8 @@ class SessionRunner:
                 provider_id=self.provider_id,
                 parent_id=last_user.id,
             )
-            if publish:
-                await _publish_assistant_created(msg)
+            await _publish_assistant_created(msg)
             return msg
-
-        async def _replace_assistant_message_for_replay(reason: str) -> bool:
-            nonlocal assistant_msg
-            previous_msg = assistant_msg
-            try:
-                next_msg = await _create_attempt_assistant_message(publish=False)
-            except Exception as exc:
-                log.error("runner.step.replay_message_create_failed", {
-                    "session_id": self.session.id,
-                    "previous_message_id": previous_msg.id,
-                    "reason": reason,
-                    "error": str(exc),
-                })
-                return False
-
-            try:
-                deleted = await Message.delete(self.session.id, previous_msg.id)
-            except Exception as exc:
-                deleted = False
-                log.error("runner.step.replay_message_delete_failed", {
-                    "session_id": self.session.id,
-                    "previous_message_id": previous_msg.id,
-                    "next_message_id": next_msg.id,
-                    "reason": reason,
-                    "error": str(exc),
-                })
-            if not deleted:
-                try:
-                    await Message.delete(self.session.id, next_msg.id)
-                except Exception as exc:
-                    log.debug("runner.step.replay_message_cleanup_failed", {
-                        "session_id": self.session.id,
-                        "message_id": next_msg.id,
-                        "error": str(exc),
-                    })
-                return False
-
-            if self.callbacks.event_publish_callback:
-                await self.callbacks.event_publish_callback("message.removed", {
-                    "sessionID": self.session.id,
-                    "messageID": previous_msg.id,
-                })
-                await _publish_assistant_created(next_msg)
-            assistant_msg = next_msg
-            log.info("runner.step.replay_message_replaced", {
-                "session_id": self.session.id,
-                "previous_message_id": previous_msg.id,
-                "next_message_id": next_msg.id,
-                "reason": reason,
-            })
-            return True
 
         # Create assistant message for the first attempt.
         assistant_msg = await _create_attempt_assistant_message()
@@ -1967,6 +1926,66 @@ class SessionRunner:
                         )
                         return StepResult(action="stop", error=empty_error_msg)
 
+                truncation_count = self._count_tool_args_truncation(
+                    truncated=result.tool_args_truncated,
+                    last_user_id=last_user.id,
+                )
+                if truncation_count >= MAX_CONSECUTIVE_TOOL_ARG_TRUNCATIONS:
+                    truncation_error_msg = (
+                        "Model output was truncated while generating tool arguments "
+                        f"in {truncation_count} consecutive steps, so the turn was "
+                        "stopped instead of repeating the oversized tool call. Ask the "
+                        "model to split large content into smaller pieces, or raise the "
+                        "model's output token limit."
+                    )
+                    log.error("runner.step.tool_args_truncation_exhausted", {
+                        "session_id": self.session.id,
+                        "model": self.model_id,
+                        "consecutive": truncation_count,
+                    })
+                    truncation_error_dict = {
+                        "name": "StreamToolArgumentsTruncatedError",
+                        "message": truncation_error_msg,
+                        "data": {
+                            "message": truncation_error_msg,
+                            "model": self.model_id,
+                            "consecutive": truncation_count,
+                        },
+                    }
+                    await self._record_usage_if_available(result.usage, message_id=assistant_msg.id)
+                    if self._defer_step_errors:
+                        # Another candidate may have a larger output budget.
+                        # If this step ran no tool, the loop can drop it and
+                        # let that model redo the step without running
+                        # anything twice.
+                        return self._deferred_failure_result(
+                            message=truncation_error_msg,
+                            error_data=truncation_error_dict,
+                            assistant_message_id=assistant_msg.id,
+                            decision=FailoverDecision(True, "stream_truncated"),
+                            attempts=truncation_count,
+                            allow_fallback_override=(
+                                not self._attempt_state.tool_execution_started
+                            ),
+                        )
+                    if self.callbacks.on_error:
+                        await self.callbacks.on_error(truncation_error_msg)
+                    await Message.update(
+                        self.session.id,
+                        assistant_msg.id,
+                        error=truncation_error_dict,
+                        finish="error",
+                    )
+                    text_part = await self._ensure_visible_error_text(assistant_msg, truncation_error_msg)
+                    await self._publish_assistant_error_message(
+                        assistant_msg,
+                        agent_name=agent.name,
+                        parent_id=last_user.id,
+                        error_dict=truncation_error_dict,
+                        text_part=text_part,
+                    )
+                    return StepResult(action="stop", error=truncation_error_msg)
+
                 tool_loop_guard = self._update_tool_loop_guard(
                     result,
                     last_user_id=last_user.id,
@@ -2017,9 +2036,6 @@ class SessionRunner:
                 # Check if retryable
                 retry_message = SessionRetry.retryable(error_dict)
                 failover_decision = self.classify_failover_error(error_dict)
-                is_stream_tool_args_truncated = (
-                    self._is_stream_tool_arguments_truncated_error(error_dict)
-                )
                 retry_limit = MAX_ERROR_RETRIES
                 will_retry = retry_message is not None and error_attempt <= retry_limit
                 retry_blocked_by_tool_execution = (
@@ -2033,18 +2049,7 @@ class SessionRunner:
                 elif self._defer_step_errors and not self._attempt_state.replay_safe:
                     # Retrying after text/reasoning/tool activity can duplicate
                     # visible output or execute a tool twice.
-                    will_retry = will_retry and is_stream_tool_args_truncated
-
-                if will_retry and is_stream_tool_args_truncated:
-                    # A truncated tool-argument stream already created a
-                    # partial assistant message (and usually a tool part). The
-                    # retry is only safe if that partial attempt can be removed
-                    # before the next provider call.
-                    replaced = await _replace_assistant_message_for_replay(
-                        reason="stream_tool_arguments_truncated"
-                    )
-                    if not replaced:
-                        will_retry = False
+                    will_retry = False
 
                 if will_retry:
                     # Error is retryable and we have budget left
@@ -2107,19 +2112,12 @@ class SessionRunner:
                         error_dict["data"]["displayMessage"] = CONNECTION_ERROR_DISPLAY_MESSAGE
 
                     if self._defer_step_errors:
-                        allow_fallback_override = None
-                        if is_stream_tool_args_truncated:
-                            allow_fallback_override = (
-                                failover_decision.eligible
-                                and not retry_blocked_by_tool_execution
-                            )
                         return self._deferred_failure_result(
                             message=final_error_message,
                             error_data=error_dict,
                             assistant_message_id=assistant_msg.id,
                             decision=failover_decision,
                             attempts=error_attempt,
-                            allow_fallback_override=allow_fallback_override,
                         )
 
                     if self.callbacks.on_error:
@@ -2727,7 +2725,7 @@ class SessionRunner:
 
         if type(exception).__name__ == "StreamToolArgumentsTruncatedError":
             error_dict["data"].update({
-                "isRetryable": True,
+                "isRetryable": False,
                 "streamToolArgumentsTruncated": True,
                 "toolCallID": getattr(exception, "tool_call_id", None),
                 "toolName": getattr(exception, "tool_name", None),
@@ -3567,7 +3565,10 @@ class SessionRunner:
         if hasattr(self, '_current_reasoning_metadata'):
             delattr(self, '_current_reasoning_metadata')
 
-        from flocks.session.streaming.tool_accumulator import ToolCallAccumulator
+        from flocks.session.streaming.tool_accumulator import (
+            StreamToolArgumentsTruncatedError,
+            ToolCallAccumulator,
+        )
         tool_accumulator = ToolCallAccumulator(processor)
 
         text_started = False
@@ -3983,8 +3984,23 @@ class SessionRunner:
             "agent": agent.name,
         })
 
+        tool_args_truncated = False
         try:
             await tool_accumulator.flush_remaining(stream_finish_reason)
+        except StreamToolArgumentsTruncatedError as exc:
+            # The cut-off call is already stored as a failed tool part whose
+            # error tells the model how to recover. Finish the step normally
+            # so its text, reasoning and any completed tools stay visible.
+            # Replaying the request instead deleted all of that, and whatever
+            # cut the stream usually cut the identical retry at the same spot.
+            tool_args_truncated = True
+            log.warn("runner.stream.tool_arguments_truncated", {
+                "session_id": self.session.id,
+                "tool_call_id": exc.tool_call_id,
+                "tool_name": exc.tool_name,
+                "finish_reason": exc.finish_reason,
+                "arguments_len": exc.arguments_len,
+            })
         except Exception:
             await processor.drain_parallel_tool_calls()
             raise
@@ -4132,8 +4148,9 @@ class SessionRunner:
                 content=content,
                 tool_calls=tool_calls_for_result,
                 usage=stream_usage,
+                tool_args_truncated=tool_args_truncated,
             )
-        
+
         response_payload = self._build_langfuse_response_payload(
             action="stop",
             content=content,
@@ -4152,7 +4169,12 @@ class SessionRunner:
             },
             trace_output=response_payload,
         )
-        return StepResult(action=result_action, content=content, usage=stream_usage)
+        return StepResult(
+            action=result_action,
+            content=content,
+            usage=stream_usage,
+            tool_args_truncated=tool_args_truncated,
+        )
     
     @staticmethod
     def _end_observability(

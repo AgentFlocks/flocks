@@ -57,6 +57,22 @@ class TestCountTokens:
         text = "test text"  # 9 chars -> 9 // 4 = 2
         assert SessionPrompt.count_tokens(text) == len(text) // 4
 
+    def test_cjk_characters_count_one_token_each(self):
+        # chars/4 made a Chinese session look ~4x smaller than the provider
+        # reported, so the meter read 14% while compaction was running.
+        assert SessionPrompt.count_tokens("文件目录" * 100) == 400
+
+    def test_mixed_text_counts_cjk_and_other_characters_separately(self):
+        text = "写入 workspace/crm 目录"  # 4 CJK chars + 15 others
+        assert SessionPrompt.count_tokens(text) == 4 + 15 // 4
+
+    def test_cjk_punctuation_counts_like_cjk_text(self):
+        assert SessionPrompt.count_tokens("。、「」【】") == 6
+
+    def test_non_ascii_latin_text_keeps_chars_over_4(self):
+        text = "café résumé naïve"
+        assert SessionPrompt.count_tokens(text) == len(text) // 4
+
 
 # ---------------------------------------------------------------------------
 # estimate_tokens
