@@ -324,7 +324,7 @@ fi
 # installer files + version stamp
 # ---------------------------------------------------------------------------
 mkdir -p "$INSTALL_ROOT/installer"
-cp "$SCRIPT_DIR/installer/install.sh" "$SCRIPT_DIR/installer/flocks.service" \
+cp "$SCRIPT_DIR/installer/install.sh" "$SCRIPT_DIR/installer/migrate_data.py" "$SCRIPT_DIR/installer/flocks.service" \
    "$SCRIPT_DIR/installer/flocks.env.template" "$SCRIPT_DIR/installer/flocks-cli-wrapper.sh" \
    "$INSTALL_ROOT/installer/"
 chmod 755 "$INSTALL_ROOT/installer/install.sh" "$INSTALL_ROOT/installer/flocks-cli-wrapper.sh"
