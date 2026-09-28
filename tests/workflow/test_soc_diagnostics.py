@@ -17,12 +17,14 @@ def isolated(monkeypatch, tmp_path):
     monkeypatch.setattr(diag, '_queue', queue.Queue(maxsize=2048))
     diag._events.clear()
     diag._active.clear()
+    diag._live_progress.clear()
     diag._health.clear()
     for wf in diag.WORKFLOWS:
         diag._counters[wf].clear()
         diag._last[wf].clear()
     yield
     diag._active.clear()
+    diag._live_progress.clear()
 
 
 def test_ingest_exact_counts_sampled_rows_and_overflow_never_blocks():
@@ -251,3 +253,183 @@ async def test_sqlite_extended_error_is_exported_without_raw_payload():
     assert event['sqlite_errorcode'] == 517
     assert event['sqlite_errorname'] == 'SQLITE_BUSY_SNAPSHOT'
     assert 'sensitive SQL text' not in json.dumps(diag.export_bundle())
+
+
+def test_live_counts_use_real_stats_and_keep_unknowns_null():
+    result = diag._live_counts(diag.WORKFLOWS[0], {'stats': {
+        'raw_count': 12, 'normalized_count': 11, 'after_filter_count': 9,
+        'after_dedup_count': 9, 'unique_key_count': 4, 'dedup_removed_count': 5,
+        'filter_removed_count': 2, 'password': 'never expose'}, 'alerts': ['private']})
+    assert result == {'rawCount': 12, 'normalizedCount': 11, 'afterFilterCount': 9,
+                      'uniqueCount': 4, 'duplicateCount': 5, 'filterRemovedCount': 2}
+    assert diag._live_counts(diag.WORKFLOWS[0], {'stats': {'after_dedup_count': 9}})['uniqueCount'] is None
+    assert diag._live_counts(diag.WORKFLOWS[0], {'stats': {'after_filter_count': 9, 'dedup_removed_count': 5}})['uniqueCount'] == 4
+    assert diag._live_counts(diag.WORKFLOWS[0], {'stats': {'raw_count': False}})['rawCount'] is None
+    assert diag._live_counts(diag.WORKFLOWS[0], {'stats': {'raw_count': 0}})['rawCount'] == 0
+    assert 'private' not in json.dumps(result)
+    assert 'never expose' not in json.dumps(result)
+
+
+@pytest.mark.parametrize('unique_field,duplicate_flag,expected', [
+    ({}, True, (0, 1)),
+    ({}, False, (1, 0)),
+    ({}, 'true', (1, 0)),
+    ({'unique_key_count': 1}, True, (1, 0)),
+    ({'unique_key_count': 0}, True, (0, 0)),
+    ({'unique_key_count': None}, True, (1, 0)),
+])
+def test_legacy_singleton_duplicate_metrics_match_dashboard_without_overriding_explicit_unique(unique_field, duplicate_flag, expected):
+    import importlib.util
+    from pathlib import Path
+    path = Path(__file__).resolve().parents[2] / '.flocks/flockshub/plugins/webuis/soc_ui/soc_dashboard/api/handlers.py'
+    spec = importlib.util.spec_from_file_location('soc_dashboard_metric_contract', path)
+    dashboard = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(dashboard)
+    outputs = {'stats': {'raw_count': 1, 'normalized_count': 1, 'after_filter_count': 1,
+                         'after_dedup_count': 1, 'dedup_removed_count': 0, **unique_field},
+               'is_duplicate': duplicate_flag}
+    memory = diag._live_counts(diag.WORKFLOWS[0], outputs)
+    persisted = dashboard._dashboard_live_metrics('denoise', [outputs])
+    assert memory == persisted
+    assert (memory['uniqueCount'], memory['duplicateCount']) == expected
+
+
+def test_legacy_duplicate_flag_does_not_reclassify_a_batch():
+    metrics = diag._live_counts(diag.WORKFLOWS[0], {'is_duplicate': True, 'stats': {
+        'raw_count': 10, 'after_filter_count': 10, 'dedup_removed_count': 0}})
+    assert metrics['uniqueCount'] == 10 and metrics['duplicateCount'] == 0
+
+
+def test_triage_live_counts_distinguish_input_records_from_work_units():
+    assert diag._live_counts(diag.WORKFLOWS[1], {'load_stats': {'record_count': 20}}) == {
+        'inputCount': 20, 'completedCount': None, 'cacheHitCount': None, 'failedCount': None,
+        'attackCount': None, 'benignCount': None, 'unknownCount': None,
+        'workUnitCount': None, 'followersReusedCount': None,
+    }
+    metrics = diag._live_counts(diag.WORKFLOWS[1], {'triage_stats': {
+        'total': 20, 'work_units': 8, 'followers_reused': 12,
+        'triaged': 5, 'cache_hit': 2, 'triage_failed': 1,
+        'verdict_counts': {'attack': 1, 'attack_success': 2, 'attack_failed': 1, 'non_attack': 3, 'unknown': 1},
+        'raw': 'secret',
+    }})
+    assert metrics == {'inputCount': 20, 'completedCount': 8, 'cacheHitCount': 2, 'failedCount': 1,
+                       'attackCount': 4, 'benignCount': 3, 'unknownCount': 1,
+                       'workUnitCount': 8, 'followersReusedCount': 12}
+    assert diag._live_counts(diag.WORKFLOWS[1], {'triage_stats': {'triaged': 3, 'cache_hit': 2}})['completedCount'] is None
+
+
+@pytest.mark.asyncio
+async def test_live_projection_is_visible_between_real_nodes_and_retained_after_runner(monkeypatch):
+    from flocks.workflow.runner import run_workflow
+    from flocks.workflow.models import Workflow
+    from flocks.workflow.execution_store import ExecutionStepRecorder
+    # Real runner callbacks, with the same ID contract used by trigger/poller.
+    execution_id = 'persisted-workflow-execution-id'
+    entered, release = threading.Event(), threading.Event()
+    recorder = ExecutionStepRecorder()
+    workflow = Workflow.model_validate({'start': 'receive_alert', 'nodes': [
+        {'id': 'receive_alert', 'type': 'python', 'code': "outputs['stats'] = {'raw_count': 12}"},
+        {'id': 'normalize', 'type': 'python', 'code': "outputs['stats'] = {'raw_count': 12, 'normalized_count': 11}"},
+    ], 'edges': [{'from': 'receive_alert', 'to': 'normalize'}]})
+    def on_start(rid, index, node, inputs):
+        assert rid == execution_id
+        if node.id == 'normalize':
+            entered.set()
+            release.wait(3)
+        return True
+    class Manager:
+        @diag.traced('schedule.dispatch')
+        async def execute(self, workflow_id):
+            return await asyncio.to_thread(run_workflow, workflow=workflow, ensure_requirements=False,
+                run_id=execution_id, on_step_start=on_start, on_step_complete=recorder.on_step_complete)
+    task = asyncio.create_task(Manager().execute(diag.WORKFLOWS[0]))
+    try:
+        for _ in range(200):
+            if entered.is_set():
+                break
+            await asyncio.sleep(.01)
+        assert entered.is_set()
+        live = diag.read_workflow_live_progress(diag.WORKFLOWS[0], [execution_id])[execution_id]
+        assert live['nodeId'] == 'normalize' and live['phase'] == 'running'
+        assert live['executionId'] == execution_id and live['workflowId'] == diag.WORKFLOWS[0]
+        assert live['stepCount'] == recorder.step_count == 1
+        assert live['metrics']['rawCount'] == 12
+        assert live['metrics']['normalizedCount'] is None
+        assert live['updatedAt'] >= live['startedAt']
+        assert diag.read_workflow_live_progress(diag.WORKFLOWS[1], [execution_id]) == {}
+        assert diag.read_workflow_live_progress(diag.WORKFLOWS[0], ['different-id']) == {}
+        # A consumer cannot mutate the shared cache through returned values.
+        live['metrics']['rawCount'] = 999
+        assert diag.read_workflow_live_progress(diag.WORKFLOWS[0], [execution_id])[execution_id]['metrics']['rawCount'] == 12
+    finally:
+        release.set()
+        await task
+    final = diag.read_workflow_live_progress(diag.WORKFLOWS[0], [execution_id])[execution_id]
+    assert final['phase'] == 'success' and final['stepCount'] == recorder.step_count == 2
+    assert final['metrics']['rawCount'] == 12 and final['metrics']['normalizedCount'] == 11
+    assert not diag.snapshot()['active']
+    assert len(recorder.take_steps()) == 2  # normal buffered persistence remains intact
+
+
+def test_live_projection_is_bounded_expires_without_io_and_preserves_known_counts(monkeypatch):
+    tick = [100.0]
+    monkeypatch.setattr(diag.time, 'monotonic', lambda: tick[0])
+    for index in range(300):
+        diag._update_live_progress(diag.WORKFLOWS[0], f'run-{index}', outputs={'stats': {'raw_count': index}})
+        tick[0] += 1
+    assert len(diag._live_progress) == diag._LIVE_LIMIT
+    assert not diag.read_workflow_live_progress(diag.WORKFLOWS[0], ['run-0'])
+    diag._update_live_progress(diag.WORKFLOWS[0], 'run-299', node='later-node')
+    live = diag.read_workflow_live_progress(diag.WORKFLOWS[0], ['run-299'])['run-299']
+    assert live['metrics']['rawCount'] == 299 and live['metrics']['normalizedCount'] is None
+    tick[0] += diag._LIVE_TTL_SECONDS
+    assert diag.read_workflow_live_progress(diag.WORKFLOWS[0], ['run-299']) == {}
+    assert not diag._live_progress
+    assert not diag._events and diag._queue.empty()  # projection itself never queues IO
+
+
+def test_live_projection_supports_parallel_runners_without_cross_execution_leaks():
+    from concurrent.futures import ThreadPoolExecutor
+    def work(index):
+        workflow = diag.WORKFLOWS[index % 2]
+        token = diag._context.set((workflow, f'trace-{index}'))
+        execution = f'run-{index}'
+        @diag.runner_observer
+        def run(**kwargs):
+            kwargs['on_step_start'](execution, 1, SimpleNamespace(id='node'), {})
+            kwargs['on_step_complete'](SimpleNamespace(node_id='node', outputs={
+                'stats': {'raw_count': index}, 'load_stats': {'record_count': index},
+            }, duration_ms=1, error=None))
+            return SimpleNamespace(status='success', error=None)
+        try:
+            run(run_id=execution)
+        finally:
+            diag._context.reset(token)
+        return workflow, execution, index
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        completed = list(pool.map(work, range(100)))
+    for workflow, execution, index in completed:
+        live = diag.read_workflow_live_progress(workflow, [execution])[execution]
+        field = 'rawCount' if workflow == diag.WORKFLOWS[0] else 'inputCount'
+        assert live['metrics'][field] == index and live['stepCount'] == 1 and live['phase'] == 'success'
+        other = diag.WORKFLOWS[1] if workflow == diag.WORKFLOWS[0] else diag.WORKFLOWS[0]
+        assert not diag.read_workflow_live_progress(other, [execution])
+    assert not diag._active
+
+
+@pytest.mark.parametrize('error', [RuntimeError('secret failure'), asyncio.CancelledError()])
+def test_live_projection_retains_failed_or_cancelled_runner_without_error_text(error):
+    token = diag._context.set((diag.WORKFLOWS[0], 'trace-error'))
+    @diag.runner_observer
+    def run(**kwargs):
+        kwargs['on_step_start']('run-error', 1, SimpleNamespace(id='receive_alert'), {'secret': 'payload'})
+        raise error
+    try:
+        with pytest.raises(type(error)):
+            run(run_id='run-error')
+    finally:
+        diag._context.reset(token)
+    live = diag.read_workflow_live_progress(diag.WORKFLOWS[0], ['run-error'])['run-error']
+    assert live['phase'] == ('cancelled' if isinstance(error, asyncio.CancelledError) else 'failed')
+    assert live['metrics']['rawCount'] is None and live['stepCount'] == 0
+    assert 'secret' not in json.dumps(live)

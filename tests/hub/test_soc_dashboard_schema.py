@@ -27,10 +27,12 @@ def _activity_workflow_db(tmp_path):
     return path
 
 
-def _activity_execution(path, key, *, status="running", started=1000, inputs=None, output=None, payload=None):
+def _activity_execution(path, key, *, status="running", started=None, inputs=None, output=None, payload=None,
+                        workflow="stream_alert_denoise"):
+    started = int(datetime.now().timestamp() * 1000) if started is None else started
     with sqlite3.connect(path) as conn:
-        conn.execute("INSERT INTO workflow_executions VALUES (?, ?, ?, ?, ?, ?, ?, ?)", (
-            key, "stream_alert_denoise", status, started, started + 100,
+        conn.execute("INSERT INTO workflow_executions (id,workflow_id,status,started_at,updated_at,input_params,output_results,payload) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", (
+            key, workflow, status, started, started + 100,
             json.dumps(inputs or {}), json.dumps(output or {}), json.dumps(payload or {}),
         ))
 
@@ -83,20 +85,284 @@ def test_activity_distinguishes_empty_unknown_and_real_batches(tmp_path):
         assert conn.execute("SELECT count(*) FROM workflow_executions").fetchone()[0] == 4
 
 
-def test_activity_keeps_long_running_execution_and_bounds_history(tmp_path):
+def test_activity_hides_expired_unfinished_execution_and_preserves_history(tmp_path):
     handlers = _load_dashboard_handlers()
     handlers.WORKFLOW_DB = _activity_workflow_db(tmp_path)
-    _activity_execution(handlers.WORKFLOW_DB, "long-running", started=1000)
+    _activity_execution(handlers.WORKFLOW_DB, "expired-running", started=1000)
+    now_ms = int(datetime.now().timestamp() * 1000)
+    _activity_execution(handlers.WORKFLOW_DB, "still-running", started=now_ms - 10 * 60 * 1000)
     for index in range(30):
-        _activity_execution(handlers.WORKFLOW_DB, f"done-{index}", status="success", started=2000 + index)
+        _activity_execution(handlers.WORKFLOW_DB, f"done-{index}", status="success", started=now_ms - 30 + index)
     snapshot = {"complete": True}
     events = handlers._get_workflow_recent_events("stream_alert_denoise", snapshot=snapshot)
     assert len(events) == 11
-    assert events[0]["eventId"] == "workflow-execution:long-running"
+    assert events[0]["eventId"] == "workflow-execution:still-running"
+    assert all(e["eventId"] != "workflow-execution:expired-running" for e in events)
     assert events[0]["updatedAt"] != events[0]["occurredAt"]
     assert snapshot["complete"] is True
-    assert all(e["eventId"] != "workflow-execution:long-running" for e in
+    assert all(e["eventId"] != "workflow-execution:still-running" for e in
                handlers._get_workflow_recent_events("stream_alert_denoise", 2, 3))
+    with sqlite3.connect(handlers.WORKFLOW_DB) as conn:
+        assert conn.execute("SELECT status FROM workflow_executions WHERE id='expired-running'").fetchone()[0] == "running"
+
+
+def _activity_steps(path):
+    with sqlite3.connect(path) as conn:
+        for name, kind in (("current_node_id", "TEXT"), ("current_phase", "TEXT"),
+                           ("current_step_index", "INTEGER"), ("step_count", "INTEGER")):
+            conn.execute(f"ALTER TABLE workflow_executions ADD COLUMN {name} {kind}")
+        conn.execute("CREATE TABLE workflow_execution_steps (exec_id TEXT, step_index INTEGER, outputs TEXT, PRIMARY KEY(exec_id,step_index))")
+
+
+def test_activity_expiry_filters_both_queries_before_limit_without_cancelling(tmp_path, monkeypatch):
+    handlers = _load_dashboard_handlers()
+    handlers.WORKFLOW_DB = _activity_workflow_db(tmp_path)
+    clock = datetime.now().replace(microsecond=0)
+    now_ms = int(clock.timestamp() * 1000)
+    class FixedDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return clock.astimezone(tz) if tz else clock
+    monkeypatch.setattr(handlers, "datetime", FixedDatetime)
+    for index in range(20):
+        _activity_execution(handlers.WORKFLOW_DB, f"expired-{index}",
+                            status=("running", "queued", "pending", " RUNNING ")[index % 4],
+                            started=now_ms - 30 * 60 * 1000 - 1)
+    _activity_execution(handlers.WORKFLOW_DB, "boundary", started=now_ms - 30 * 60 * 1000)
+    _activity_execution(handlers.WORKFLOW_DB, "historical-complete", status="success", started=now_ms - 2 * 60 * 60 * 1000)
+    _activity_execution(handlers.WORKFLOW_DB, "historical-failed", status="failed", started=now_ms - 3 * 60 * 60 * 1000)
+    before = handlers.WORKFLOW_DB.read_bytes()
+    snapshot = {"complete": True, "available": True}
+    events = handlers._get_workflow_recent_events("stream_alert_denoise", snapshot=snapshot)
+    assert {event["eventId"] for event in events} == {
+        "workflow-execution:boundary", "workflow-execution:historical-complete", "workflow-execution:historical-failed"}
+    assert snapshot == {"complete": True, "available": True}
+    assert handlers.WORKFLOW_DB.read_bytes() == before
+
+
+def test_activity_active_query_uses_time_range_index_with_large_history(tmp_path, monkeypatch):
+    handlers = _load_dashboard_handlers()
+    handlers.WORKFLOW_DB = _activity_workflow_db(tmp_path)
+    now_ms = int(datetime.now().timestamp() * 1000)
+    with sqlite3.connect(handlers.WORKFLOW_DB) as conn:
+        conn.executemany("INSERT INTO workflow_executions VALUES (?,?,'running',?,?, '{}','{}','{}')", (
+            (f"expired-{index}", "stream_alert_denoise", now_ms - 2 * 3600 * 1000 - index, now_ms)
+            for index in range(30000)))
+    _activity_execution(handlers.WORKFLOW_DB, "recent-active", started=now_ms)
+    original_connect = sqlite3.connect
+    plans = []
+    class ExplainConnection(sqlite3.Connection):
+        def execute(self, sql, parameters=()):
+            if sql.startswith("SELECT id, status") and "AND LOWER(TRIM" in sql and "LIMIT ?" in sql:
+                plans.extend(str(row[3]) for row in super().execute("EXPLAIN QUERY PLAN " + sql, parameters).fetchall())
+            return super().execute(sql, parameters)
+    monkeypatch.setattr(handlers.sqlite3, "connect", lambda *a, **kw: original_connect(*a, **kw, factory=ExplainConnection))
+    snapshot = {"complete": True, "available": True}
+    events = handlers._get_workflow_recent_events("stream_alert_denoise", snapshot=snapshot)
+    assert [event["eventId"] for event in events] == ["workflow-execution:recent-active"]
+    assert snapshot == {"complete": True, "available": True}
+    assert plans and any("idx_started" in plan and "started_at>?" in plan for plan in plans), plans
+    assert not any("SCAN workflow_executions" in plan for plan in plans)
+
+
+def test_activity_live_steps_use_real_counts_and_update_one_execution(tmp_path):
+    handlers = _load_dashboard_handlers()
+    handlers.WORKFLOW_DB = _activity_workflow_db(tmp_path)
+    _activity_steps(handlers.WORKFLOW_DB)
+    _activity_execution(handlers.WORKFLOW_DB, "active", inputs={"_soc_alert_count": 100})
+    with sqlite3.connect(handlers.WORKFLOW_DB) as conn:
+        conn.execute("UPDATE workflow_executions SET current_node_id='filter_logs', current_phase='running', current_step_index=3, step_count=2")
+        conn.executemany("INSERT INTO workflow_execution_steps VALUES ('active',?,?)", [
+            (1, json.dumps({"stats": {"raw_count": 100}})),
+            (2, json.dumps({"stats": {"normalized_count": 90}})),
+        ])
+    event = handlers._get_workflow_recent_events("stream_alert_denoise")[0]
+    assert event["live"] == {"nodeId": "filter_logs", "nodeLabel": "过滤告警", "phase": "running",
+        "stepIndex": 3, "stepCount": 2, "metrics": {"rawCount": 100, "normalizedCount": 90,
+        "afterFilterCount": None, "uniqueCount": None, "duplicateCount": None, "filterRemovedCount": None}}
+    assert event["sampleCount"] is None
+    with sqlite3.connect(handlers.WORKFLOW_DB) as conn:
+        conn.execute("UPDATE workflow_executions SET current_node_id='dedup_and_write', current_step_index=4, step_count=3")
+        conn.execute("INSERT INTO workflow_execution_steps VALUES ('active',3,?)",
+                     (json.dumps({"stats": {"after_filter_count": 60, "filter_removed_count": 30}}),))
+    next_event = handlers._get_workflow_recent_events("stream_alert_denoise")[0]
+    assert next_event["eventId"] == event["eventId"] and next_event["status"] == "running"
+    assert next_event["live"]["nodeLabel"] == "去重并保存"
+    assert next_event["live"]["metrics"]["afterFilterCount"] == 60
+    assert next_event["live"]["metrics"]["filterRemovedCount"] == 30
+    assert next_event["live"]["metrics"]["uniqueCount"] is None
+    with sqlite3.connect(handlers.WORKFLOW_DB) as conn:
+        conn.execute("UPDATE workflow_executions SET status='success',output_results=?", (json.dumps({
+            "stats": {"after_dedup_count": 60, "unique_key_count": 45, "dedup_removed_count": 15}}),))
+    completed = handlers._get_workflow_recent_events("stream_alert_denoise")[0]
+    assert completed["status"] == "completed" and completed["sampleCount"] == 45
+    assert completed["live"]["metrics"]["uniqueCount"] == 45  # Never enriched after_dedup_count=60.
+    assert completed["live"]["metrics"]["rawCount"] == 100
+
+
+def test_activity_triage_live_metrics_keep_work_unit_semantics_and_missing_values(tmp_path):
+    handlers = _load_dashboard_handlers()
+    handlers.WORKFLOW_DB = _activity_workflow_db(tmp_path)
+    _activity_steps(handlers.WORKFLOW_DB)
+    _activity_execution(handlers.WORKFLOW_DB, "triage", workflow="stream_alert_triage")
+    with sqlite3.connect(handlers.WORKFLOW_DB) as conn:
+        conn.execute("UPDATE workflow_executions SET current_node_id='concurrent_triage', current_phase='running', current_step_index=2, step_count=1")
+        conn.execute("INSERT INTO workflow_execution_steps VALUES ('triage',1,?)", (json.dumps({"load_stats": {"record_count": 10}}),))
+    live = handlers._get_workflow_recent_events("stream_alert_triage")[0]["live"]
+    assert live["nodeLabel"] == "并发研判" and live["metrics"]["inputCount"] == 10
+    assert live["metrics"]["completedCount"] is live["metrics"]["unknownCount"] is None
+    with sqlite3.connect(handlers.WORKFLOW_DB) as conn:
+        conn.execute("INSERT INTO workflow_execution_steps VALUES ('triage',2,?)", (json.dumps({"triage_stats": {
+            "total": 10, "work_units": 6, "followers_reused": 4, "triaged": 3, "cache_hit": 2, "triage_failed": 1,
+            "verdict_counts": {"attack_success": 1, "attack_failed": 2, "non_attack": 2, "unknown": 1}}}),))
+    metrics = handlers._get_workflow_recent_events("stream_alert_triage")[0]["live"]["metrics"]
+    assert metrics == {"inputCount": 10, "completedCount": 6, "cacheHitCount": 2, "failedCount": 1,
+        "workUnitCount": 6, "followersReusedCount": 4, "attackCount": 3, "benignCount": 2, "unknownCount": 1}
+
+
+def test_activity_steps_are_bounded_and_missing_schema_remains_unknown(tmp_path):
+    handlers = _load_dashboard_handlers()
+    handlers.WORKFLOW_DB = _activity_workflow_db(tmp_path)
+    _activity_execution(handlers.WORKFLOW_DB, "old")
+    old = handlers._get_workflow_recent_events("stream_alert_denoise")[0]
+    assert old["live"]["nodeId"] is old["live"]["phase"] is old["live"]["stepIndex"] is None
+    assert all(value is None for value in old["live"]["metrics"].values())
+    _activity_steps(handlers.WORKFLOW_DB)
+    with sqlite3.connect(handlers.WORKFLOW_DB) as conn:
+        conn.execute("INSERT INTO workflow_execution_steps VALUES ('old',0,?)", (json.dumps({"stats": {"raw_count": 999}}),))
+        for index in range(1, 8):
+            conn.execute("INSERT INTO workflow_execution_steps VALUES ('old',?,?)", (index, "{}"))
+        conn.execute("UPDATE workflow_execution_steps SET outputs=? WHERE step_index=7", (
+            json.dumps({"stats": {"unique_key_count": 999}, "large": "x" * 70000}),))
+    bounded = handlers._get_workflow_recent_events("stream_alert_denoise")[0]
+    assert bounded["live"]["metrics"]["rawCount"] is None  # Old step outside bounded window.
+    assert bounded["live"]["metrics"]["uniqueCount"] is None  # Oversized step omitted.
+
+
+@pytest.mark.parametrize("mismatch", [None, "execution", "workflow", "stale"])
+def test_activity_memory_progress_merges_only_same_execution_newer_data(tmp_path, monkeypatch, mismatch):
+    handlers = _load_dashboard_handlers()
+    handlers.WORKFLOW_DB = _activity_workflow_db(tmp_path)
+    _activity_execution(handlers.WORKFLOW_DB, "live", output={"stats": {"raw_count": 12}})
+    with sqlite3.connect(handlers.WORKFLOW_DB) as conn:
+        updated_at = conn.execute("SELECT updated_at FROM workflow_executions").fetchone()[0]
+    memory = {"workflowId": "stream_alert_denoise", "executionId": "live", "updatedAt": updated_at + 100,
+        "nodeId": "filter_logs", "phase": "running", "stepIndex": 3, "stepCount": 2,
+        "metrics": {"rawCount": None, "normalizedCount": 10, "afterFilterCount": 0}}
+    if mismatch == "execution":
+        memory["executionId"] = "different"
+    if mismatch == "workflow":
+        memory["workflowId"] = "stream_alert_triage"
+    if mismatch == "stale":
+        memory["updatedAt"] = updated_at - 1
+    monkeypatch.setattr(handlers, "_dashboard_memory_progress", lambda workflow, ids: {"live": memory})
+    event = handlers._get_workflow_recent_events("stream_alert_denoise")[0]
+    assert event["live"]["metrics"]["rawCount"] == 12
+    if mismatch:
+        assert event["live"]["metrics"]["normalizedCount"] is None
+        assert event["live"]["nodeId"] is None
+    else:
+        assert event["live"]["metrics"]["normalizedCount"] == 10
+        assert event["live"]["metrics"]["afterFilterCount"] == 0
+        assert event["live"]["nodeLabel"] == "过滤告警"
+        assert event["status"] == "running"
+
+
+@pytest.mark.parametrize("phase", ["success", "failed", "cancelled"])
+def test_activity_live_finish_keeps_persisted_running_status_until_save(tmp_path, monkeypatch, phase):
+    handlers = _load_dashboard_handlers()
+    handlers.WORKFLOW_DB = _activity_workflow_db(tmp_path)
+    _activity_execution(handlers.WORKFLOW_DB, "saving")
+    with sqlite3.connect(handlers.WORKFLOW_DB) as conn:
+        updated_at = conn.execute("SELECT updated_at FROM workflow_executions").fetchone()[0]
+    monkeypatch.setattr(handlers, "_dashboard_memory_progress", lambda workflow, ids: {"saving": {
+        "workflowId": workflow, "executionId": "saving", "updatedAt": updated_at + 200,
+        "nodeId": "dedup_and_write", "phase": phase, "stepIndex": 4, "stepCount": 4,
+        "metrics": {"uniqueCount": 0}}})
+    event = handlers._get_workflow_recent_events("stream_alert_denoise")[0]
+    assert event["status"] == "running" and event["live"]["phase"] == phase
+    assert event["sampleCount"] == 0
+
+
+@pytest.mark.parametrize("database_status,memory_phase,can_supplement", [
+    ("success", "success", True), ("failed", "failed", True), ("cancelled", "cancelled", True),
+    ("error", "success", True),  # Runner finished before the final persistence error.
+    ("success", "running", False), ("running", "success", False),
+])
+def test_activity_final_large_payload_uses_terminal_memory_only_for_missing_metrics(
+        tmp_path, monkeypatch, database_status, memory_phase, can_supplement):
+    handlers = _load_dashboard_handlers()
+    handlers.WORKFLOW_DB = _activity_workflow_db(tmp_path)
+    _activity_steps(handlers.WORKFLOW_DB)
+    _activity_execution(handlers.WORKFLOW_DB, "large-final", workflow="stream_alert_triage", status=database_status,
+                        output={"triage_stats": {"triaged": 3, "cache_hit": 2, "triage_failed": 1}, "body": "x" * 300000})
+    with sqlite3.connect(handlers.WORKFLOW_DB) as conn:
+        conn.execute("UPDATE workflow_executions SET current_node_id='summarize', current_phase=?, current_step_index=4, step_count=4", (database_status,))
+        updated_at = conn.execute("SELECT updated_at FROM workflow_executions").fetchone()[0]
+        conn.execute("INSERT INTO workflow_execution_steps VALUES ('large-final',1,?)", (json.dumps({"load_stats": {"record_count": 10}}),))
+        conn.execute("INSERT INTO workflow_execution_steps VALUES ('large-final',2,?)", (json.dumps({"triage_stats": {"cache_hit": 0}}),))
+        conn.execute("INSERT INTO workflow_execution_steps VALUES ('large-final',4,?)", (json.dumps({
+            "triage_stats": {"triaged": 3, "cache_hit": 2, "triage_failed": 1}, "report": "x" * 70000}),))
+    monkeypatch.setattr(handlers, "_dashboard_memory_progress", lambda workflow, ids: {"large-final": {
+        "workflowId": workflow, "executionId": "large-final", "updatedAt": updated_at - 50,
+        "nodeId": "concurrent_triage", "phase": memory_phase, "stepIndex": 3, "stepCount": 3,
+        "metrics": {"inputCount": 999, "completedCount": 6, "cacheHitCount": 2, "failedCount": 1,
+                    "attackCount": 3, "benignCount": 2, "unknownCount": 1}}})
+    event = handlers._get_workflow_recent_events("stream_alert_triage")[0]
+    assert event["status"] == ("completed" if database_status == "success" else
+                               "running" if database_status == "running" else "failed")
+    assert event["live"]["nodeId"] == "summarize" and event["live"]["phase"] == database_status
+    assert event["live"]["stepCount"] == event["live"]["stepIndex"] == 4
+    assert round(datetime.fromisoformat(event["updatedAt"]).timestamp() * 1000) == updated_at
+    metrics = event["live"]["metrics"]
+    assert metrics["inputCount"] == 10 and metrics["cacheHitCount"] == 0  # Known DB values win, including zero.
+    assert metrics["completedCount"] == (6 if can_supplement else None)
+    assert metrics["failedCount"] == (1 if can_supplement else None)
+    assert metrics["attackCount"] == (3 if can_supplement else None)
+
+
+@pytest.mark.parametrize("delta", [-10, 0, 10])
+def test_activity_terminal_memory_preserves_known_input_count(tmp_path, monkeypatch, delta):
+    handlers = _load_dashboard_handlers()
+    handlers.WORKFLOW_DB = _activity_workflow_db(tmp_path)
+    _activity_execution(handlers.WORKFLOW_DB, "known-input", status="success", inputs={"_soc_alert_count": 12},
+                        output={"stats": {"unique_key_count": 0}},
+                        payload={"currentNodeId": "dedup_and_write", "currentPhase": "success"})
+    with sqlite3.connect(handlers.WORKFLOW_DB) as conn:
+        updated_at = conn.execute("SELECT updated_at FROM workflow_executions").fetchone()[0]
+    monkeypatch.setattr(handlers, "_dashboard_memory_progress", lambda workflow, ids: {"known-input": {
+        "workflowId": workflow, "executionId": "known-input", "updatedAt": updated_at + delta,
+        "nodeId": "filter_logs", "phase": "failed", "metrics": {"rawCount": 999, "uniqueCount": 7, "duplicateCount": 12}}})
+    event = handlers._get_workflow_recent_events("stream_alert_denoise")[0]
+    metrics = event["live"]["metrics"]
+    assert metrics["rawCount"] == 12 and metrics["uniqueCount"] == 0 and metrics["duplicateCount"] == 12
+    assert event["status"] == "completed" and event["live"]["phase"] == "success"
+    assert event["live"]["nodeId"] == "dedup_and_write"
+    assert round(datetime.fromisoformat(event["updatedAt"]).timestamp() * 1000) == updated_at
+
+
+def test_activity_invalid_timestamps_do_not_abort_other_events(tmp_path):
+    handlers = _load_dashboard_handlers()
+    handlers.WORKFLOW_DB = _activity_workflow_db(tmp_path)
+    _activity_execution(handlers.WORKFLOW_DB, "valid")
+    _activity_execution(handlers.WORKFLOW_DB, "bad-time", status="success", started=10**18)
+    snapshot = {"complete": True, "available": True}
+    events = handlers._get_workflow_recent_events("stream_alert_denoise", snapshot=snapshot)
+    assert [event["eventId"] for event in events] == ["workflow-execution:valid"]
+    assert snapshot == {"complete": False, "available": True}
+
+
+def test_activity_live_unknown_counters_are_not_fabricated():
+    handlers = _load_dashboard_handlers()
+    metrics = handlers._dashboard_live_metrics("denoise", [{"stats": {
+        "raw_count": 25, "normalized_count": 0, "after_filter_count": 0, "after_dedup_count": 9,
+        "dedup_removed_count": True, "filter_removed_count": -1}}])
+    assert metrics == {"rawCount": 25, "normalizedCount": 0, "afterFilterCount": 0,
+                       "uniqueCount": None, "duplicateCount": None, "filterRemovedCount": None}
+    triage = handlers._dashboard_live_metrics("triage", [{"triage_stats": {
+        "triaged": 3, "cache_hit": 0, "verdict_counts": {"attack_failed": 2}}}])
+    assert triage["completedCount"] is triage["failedCount"] is triage["benignCount"] is None
+    assert triage["attackCount"] == 2 and triage["cacheHitCount"] == 0
 
 
 def test_activity_large_payload_and_database_lock_degrade_without_writes(tmp_path):
@@ -233,8 +499,11 @@ def test_activity_large_text_is_not_materialized_in_native_sqlite_memory(tmp_pat
     handlers = _load_dashboard_handlers()
     db = _activity_workflow_db(tmp_path)
     _activity_execution(db, "old-large-running", payload={"padding": "x" * (32 * 1024 * 1024)})
+    now_ms = int(datetime.now().timestamp() * 1000)
+    with sqlite3.connect(db) as conn:
+        conn.execute("UPDATE workflow_executions SET started_at=?", (now_ms - 10 * 60 * 1000,))
     for index in range(12):
-        _activity_execution(db, f"new-done-{index}", status="success", started=2000 + index)
+        _activity_execution(db, f"new-done-{index}", status="success", started=now_ms + index)
     # A fresh process excludes fixture allocations; tracemalloc alone cannot
     # see SQLite's native buffers. Do not start the application or touch user DBs.
     script = '''

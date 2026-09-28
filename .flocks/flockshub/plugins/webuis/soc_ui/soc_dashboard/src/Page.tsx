@@ -93,12 +93,12 @@ const ACTIVITY_QUEUE_LIMIT = 8;
 const EVENT_RAIL_TASK_LIMIT = 10;
 const ACTIVITY_POLL_MS = 3000;
 const WORKFLOW_CONFIRMATION_TTL_MS = 30000;
+const AI_TASK_DISPLAY_TTL_MS = 30 * 60 * 1000;
 const ACTIVITY_REPLAY_WINDOW_MS = 10 * 60 * 1000;
 const ACTIVITY_SEEN_KEY = 'soc-dashboard-seen-activity-v1';
-const EVENT_RAIL_DEFAULT_WIDTH = 330;
+const EVENT_RAIL_DEFAULT_WIDTH = 420;
 const EVENT_RAIL_MIN_WIDTH = 280;
 const EVENT_RAIL_MAX_WIDTH = 560;
-const EVENT_RAIL_COMPACT_WIDTH = 292;
 const DEFAULT_TIME_RANGE = '7d';
 const DEFAULT_COMMAND_TITLE = 'Flocks AI 智能告警态势中心';
 const CUSTOM_COMMAND_TITLE_KEY = 'soc-dashboard-custom-title-v1';
@@ -188,7 +188,7 @@ function readMockDashboardEnabled() {
 function defaultEventRailWidth() {
   if (typeof window === 'undefined') return EVENT_RAIL_DEFAULT_WIDTH;
   if (window.innerWidth <= 1120) return EVENT_RAIL_MIN_WIDTH;
-  if (window.innerWidth <= 1360) return EVENT_RAIL_COMPACT_WIDTH;
+  if (window.innerWidth <= 1360) return Math.min(EVENT_RAIL_DEFAULT_WIDTH, window.innerWidth - 760);
   return EVENT_RAIL_DEFAULT_WIDTH;
 }
 
@@ -394,125 +394,6 @@ function activityHasVisibleEvents(activity) {
     || activity?.triage?.last
     || activity?.triage?.queue?.length
     || activity?.recent?.length
-  );
-}
-
-function createTaskCenterState() {
-  return {
-    connection: 'initializing',
-    generatedAt: '',
-    sessionCount: 0,
-    scheduledExecutionCount: 0,
-    scheduledTodayExecutionCount: 0,
-    workflowExecutionCount: 0,
-    workflowTodayExecutionCount: 0,
-    scheduledTasks: [],
-    workflows: [],
-    error: '',
-  };
-}
-
-function createMockTaskCenterState() {
-  const now = Date.now();
-  const startedAt = now - 7 * 60 * 1000;
-  const nextRunAt = new Date(now + 18 * 60 * 1000).toISOString();
-  const lastRunAt = new Date(now - 11 * 60 * 1000).toISOString();
-  return {
-    ...createTaskCenterState(),
-    connection: 'online',
-    generatedAt: new Date(now).toISOString(),
-    sessionCount: 6,
-    scheduledExecutionCount: 18,
-    scheduledTodayExecutionCount: 5,
-    workflowExecutionCount: 42,
-    workflowTodayExecutionCount: 9,
-    scheduledTasks: [
-      {
-        id: 'mock-soc-scheduler-patrol',
-        name: 'SOC 告警自动巡检（Mock）',
-        mode: 'cron',
-        status: 'active',
-        executionMode: 'workflow',
-        workflowId: 'stream_alert_denoise',
-        executionCount: 12,
-        todayExecutionCount: 4,
-        successCount: 10,
-        successRate: 0.8333,
-        activeCount: 1,
-        lastStatus: 'running',
-        lastRunAt,
-        nextRunAt,
-        cron: '*/15 * * * *',
-        cronDescription: '每 15 分钟',
-      },
-      {
-        id: 'mock-soc-scheduler-triage',
-        name: '高危告警智能研判（Mock）',
-        mode: 'cron',
-        status: 'active',
-        executionMode: 'workflow',
-        workflowId: 'stream_alert_triage',
-        executionCount: 6,
-        todayExecutionCount: 1,
-        successCount: 5,
-        successRate: 0.8333,
-        activeCount: 0,
-        lastStatus: 'completed',
-        lastRunAt: new Date(now - 42 * 60 * 1000).toISOString(),
-        nextRunAt: new Date(now + 36 * 60 * 1000).toISOString(),
-        cron: '*/30 * * * *',
-        cronDescription: '每 30 分钟',
-      },
-    ],
-    workflows: [
-      {
-        id: 'stream_alert_denoise',
-        name: '告警降噪工作流（Mock）',
-        executionCount: 24,
-        todayExecutionCount: 6,
-        successCount: 21,
-        successRate: 0.875,
-        activeCount: 1,
-        lastStatus: 'running',
-        lastRunAt: startedAt,
-        latestExecutionHash: 'mock-denoise-run-001',
-        latestAlertName: '异常登录爆发（Mock）',
-        progressPercent: 0.58,
-        progressLabel: '第 4/7 步',
-        currentPhase: 'running',
-        sessionId: '',
-        messageId: '',
-      },
-      {
-        id: 'stream_alert_triage',
-        name: '告警研判工作流（Mock）',
-        executionCount: 18,
-        todayExecutionCount: 3,
-        successCount: 15,
-        successRate: 0.8333,
-        activeCount: 1,
-        lastStatus: 'running',
-        lastRunAt: now - 4 * 60 * 1000,
-        latestExecutionHash: 'mock-triage-run-002',
-        latestAlertName: '远程命令执行攻击（Mock）',
-        progressPercent: 0.67,
-        progressLabel: '第 2/3 步',
-        currentPhase: 'running',
-        sessionId: '',
-        messageId: '',
-      },
-    ],
-    mock: true,
-  };
-}
-
-function taskCenterHasVisibleRows(taskCenter) {
-  return Boolean(
-    taskCenter?.scheduledTasks?.length
-    || taskCenter?.workflows?.length
-    || taskCenter?.sessionCount
-    || taskCenter?.scheduledExecutionCount
-    || taskCenter?.workflowExecutionCount
   );
 }
 
@@ -2161,7 +2042,7 @@ function activityTaskKey(event) {
   return String(event?.eventId || '').trim();
 }
 
-function buildEventQueueTasks(activity, timeFilter) {
+function buildEventQueueTasks(activity, timeFilter, now = Date.now()) {
   const taskByKey = new Map();
   const allEvents = [
     ...(activity.recent || []),
@@ -2169,13 +2050,18 @@ function buildEventQueueTasks(activity, timeFilter) {
     ...activity.denoise.queue, ...activity.triage.queue,
     activity.denoise.current, activity.triage.current,
   ].filter((event) => isVisibleActivity(event) && !event.hiddenFromQueue
-    && event.triggerSource === 'workflow_execution' && (!timeFilter || eventMatchesTimeFilter(event, timeFilter)));
+    && event.triggerSource === 'workflow_execution'
+    && ['stream_alert_denoise', 'stream_alert_triage'].includes(workflowIdFromEvent(event)) && (!timeFilter || eventMatchesTimeFilter(event, timeFilter)));
   for (const incoming of allEvents) {
     const key = activityTaskKey(incoming);
     const event = mergeActivityEvent(taskByKey.get(key)?.event, incoming);
     const status = String(event.status || '').toLowerCase();
     const state = status === 'unconfirmed' ? 'unconfirmed' : status === 'running' ? 'processing'
       : ['queued', 'pending'].includes(status) ? 'waiting' : 'completed';
+    // A refresh confirms liveness, but never renews the board's display window.
+    // This is a view filter only; workflow execution and history remain intact.
+    if (state !== 'completed' && activityTimestamp(event) > 0
+      && now - activityTimestamp(event) > AI_TASK_DISPLAY_TTL_MS) continue;
     taskByKey.set(key, { key, event, state, stage: event.stage,
       [event.stage]: event, latestAt: activityTimestamp(event) });
   }
@@ -2212,6 +2098,7 @@ function useAnimatedTaskWindow(tasks, transitionKey) {
     task.latestAt || '',
     JSON.stringify(task.event?.alert || {}),
     JSON.stringify(task.event?.result || {}),
+    JSON.stringify(task.event?.live || {}),
   ].join(':')).join('|');
 
   useEffect(() => {
@@ -2273,76 +2160,137 @@ function useAnimatedTaskWindow(tasks, transitionKey) {
   return displayedTasks;
 }
 
-function EventQueueProgress() {
-  // Animation duration is not workflow progress. Avoid a fabricated countdown.
-  return h('div', { className: 'event-rail-progress', 'aria-label': '工作流运行状态' },
-    h('small', null, '执行中 · 等待结果更新'));
+const AI_WORKFLOW_STEPS = {
+  denoise: [['receive_alert', '接收'], ['normalize', '标准化'], ['filter_logs', '过滤'], ['dedup_and_write', '去重入库']],
+  triage: [['load_dedup_file', '读取'], ['concurrent_triage', '并发研判'], ['commit_cursor', '保存进度'], ['summarize', '汇总']],
+};
+
+function knownCount(value) {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null;
 }
 
-function taskCenterPercent(value) {
-  return `${Math.round(Math.max(Math.min(Number(value || 0), 1), 0) * 100)}%`;
+function liveMetric(event, key) {
+  const live = knownCount(event?.live?.metrics?.[key]);
+  if (live !== null) return live;
+  // Older servers expose defaults for derived metrics. Only rawCount is an
+  // explicitly nullable observation, so never treat their defaults as facts.
+  return key === 'rawCount' ? knownCount(event?.result?.rawCount) : null;
 }
 
-function taskCenterTimeLabel(value) {
-  if (!value) return '暂无记录';
-  const raw = Number(value);
-  const date = Number.isFinite(raw) && raw > 0 ? new Date(raw) : new Date(value);
-  if (Number.isNaN(date.getTime())) return '暂无记录';
-  return date.toLocaleString('zh-CN', {
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    hour12: false,
-  });
+function metricValue(value) {
+  const count = knownCount(value);
+  return count === null ? '待返回' : count.toLocaleString('zh-CN');
 }
 
-function taskCenterStatusLabel(status) {
-  const value = String(status || '').toLowerCase();
-  if (['running', 'queued', 'pending'].includes(value)) return '执行中';
-  if (['completed', 'success'].includes(value)) return '成功';
-  if (['failed', 'error', 'timeout'].includes(value)) return '失败';
-  if (['disabled', 'stopped'].includes(value)) return '已关闭';
-  if (value === 'stale') return '已停止';
-  if (value === 'cancelled') return '取消';
-  return '待执行';
+function workflowResultPending(event) {
+  return ['success', 'completed', 'failed', 'error', 'cancelled'].includes(event?.live?.phase);
 }
 
-function taskCenterHashLabel(value) {
-  const text = String(value || '').trim();
-  if (!text) return '--';
-  if (text.length <= 12) return text;
-  return `${text.slice(0, 6)}...${text.slice(-4)}`;
+function EventQueueProgress({ event, live }) {
+  const steps = AI_WORKFLOW_STEPS[event.stage] || [];
+  const current = steps.findIndex(([id]) => id === event.live?.nodeId);
+  const finished = workflowResultPending(event);
+  const label = finished ? '执行结束 · 结果保存中' : event.live?.nodeLabel || event.live?.nodeId || '等待工作流返回当前步骤';
+  return h('div', { className: cx('ai-rail-step-progress', live && !finished && 'is-live'), 'aria-label': '工作流运行状态' }, [
+    h('div', { className: 'ai-step-track', key: 'track' }, steps.map(([id, name], index) =>
+      h('span', { className: cx(index === current && 'current', index < current && 'passed'),
+        'aria-current': index === current ? 'step' : undefined, key: id }, name))),
+    h('small', { className: 'ai-current-step', key: 'current' }, `当前步骤 · ${label}`),
+  ]);
 }
 
-function taskCenterHashValue(value) {
-  const text = String(value || '').trim();
-  return text || '--';
+function AiMetricGrid({ values, className = '' }) {
+  return h('dl', { className: cx('ai-metric-grid', className) }, values.map(([label, value, partial]) =>
+    h('div', { key: label }, [h('dt', { key: 'label' }, label),
+      h('dd', { className: knownCount(value) === null ? 'unknown' : '', key: 'value' }, `${partial && value !== null ? '≥ ' : ''}${metricValue(value)}`)])));
 }
 
-function taskCenterWorkflowName(item) {
-  const name = String(item?.name || item?.id || '').trim();
-  const id = String(item?.id || '').trim();
-  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(name)) {
-    return `动态工作流 ${taskCenterHashLabel(name)}`;
-  }
-  return name || id || '未命名工作流';
+function AiWorkflowFlow({ stage, tasks, online }) {
+  const running = tasks.find((task) => task.stage === stage && task.state === 'processing');
+  const latest = running || tasks.filter((task) => task.stage === stage && task.state === 'completed')
+    .sort((a, b) => Date.parse(b.event.updatedAt || b.event.occurredAt) - Date.parse(a.event.updatedAt || a.event.occurredAt))[0];
+  const event = latest?.event;
+  const steps = AI_WORKFLOW_STEPS[stage];
+  const finished = latest?.state === 'completed' || workflowResultPending(event);
+  const node = steps.findIndex(([id]) => id === event?.live?.nodeId);
+  const success = finished && (event?.status === 'completed' || ['success', 'completed'].includes(event?.live?.phase));
+  const index = success ? steps.length - 1 : node;
+  const updatedAt = Date.parse(event?.updatedAt || event?.occurredAt || '');
+  const replay = online && stage === 'denoise' && latest?.state === 'completed'
+    && success && Number.isFinite(updatedAt) && Date.now() - updatedAt >= 0 && Date.now() - updatedAt < 6000;
+  const animate = online && Boolean(running) && !finished || replay;
+  const count = liveMetric(event, stage === 'denoise' ? 'rawCount' : 'inputCount');
+  const title = !event ? '等待新告警进入' : finished
+    ? success ? replay ? '最近一批已完成 · 动效回放' : '最近一批已完成' : '最近一批执行异常'
+    : event?.live?.nodeLabel || event?.live?.nodeId || '等待返回当前步骤';
+  const result = !event ? '有新任务时自动展示处理动态' : finished && stage === 'denoise'
+    ? `重复 ${metricValue(liveMetric(event, 'duplicateCount'))} · 保留 ${metricValue(liveMetric(event, 'uniqueCount'))}`
+    : finished ? `已处理 ${metricValue(liveMetric(event, 'completedCount'))} 个研判单位`
+      : displayAlertText(event?.alert?.threatName) || '正在处理本批告警';
+  return h('div', { className: cx('ai-workflow-flow', animate && 'is-flowing', finished && 'flow-finished'),
+    'aria-label': stage === 'denoise' ? '降噪处理动态' : '研判处理动态' }, [
+    h('div', { className: 'ai-flow-caption', key: 'caption' }, [
+      h('span', { key: 'title' }, title),
+      h('small', { key: 'count' }, count === null ? '' : count === 1 ? '1 条告警' : `本批 ${count.toLocaleString('zh-CN')} 条`),
+    ]),
+    h('div', { className: 'ai-flow-rail', key: 'rail' }, [
+      ...steps.map(([id, name], i) => h('span', { className: cx('ai-flow-node', index === i && 'current', i < index && 'passed'), key: id }, name)),
+      h('span', { className: 'ai-flow-sweep', 'aria-hidden': true, key: 'sweep',
+        style: { '--step-end': `${stage === 'triage' && index >= 0 ? (index + 1) * 25 : 100}%` } }),
+    ]),
+    h('p', { className: 'ai-flow-result', title: result, key: 'result' }, result),
+  ]);
 }
 
-function taskCenterProgressValue(item) {
-  return Math.max(Math.min(Number(item?.progressPercent || 0), 1), 0);
-}
-
-function taskCenterProgressLabel(item) {
-  return String(item?.progressLabel || '').trim() || '待执行';
-}
-
-function workflowIdFromTaskCenterItem(item) {
-  return String(item?.id || item?.workflowId || item?.workflowID || '').trim();
-}
-
-function executionIdFromTaskCenterItem(item) {
-  return String(item?.latestExecutionHash || item?.executionId || item?.executionID || '').trim();
+function AiWorkflowOverview({ stage, tasks, online }) {
+  const active = tasks.filter((task) => task.stage === stage && task.state === 'processing');
+  const waiting = tasks.filter((task) => task.stage === stage && task.state === 'waiting').length;
+  const unconfirmed = tasks.filter((task) => task.stage === stage && task.state === 'unconfirmed').length;
+  const counts = active.map((task) => liveMetric(task.event, stage === 'denoise' ? 'rawCount' : 'inputCount'));
+  const known = counts.filter((count) => count !== null);
+  const total = known.length ? known.reduce((sum, count) => sum + count, 0) : null;
+  const denoise = stage === 'denoise';
+  const snapshot = tasks.filter((task) => task.stage === stage);
+  const observed = (key) => {
+    const values = snapshot.map((task) => liveMetric(task.event, key)).filter((value) => value !== null);
+    return [values.length ? values.reduce((sum, value) => sum + value, 0) : null, values.length < snapshot.length];
+  };
+  const metric = (label, key) => [label, ...observed(key)];
+  const metrics = denoise ? [
+    metric('输入告警', 'rawCount'), metric('重复合并', 'duplicateCount'),
+    metric('保留唯一键', 'uniqueCount'), metric('规则过滤', 'filterRemovedCount'),
+  ] : [
+    metric('处理单位', 'workUnitCount'), metric('已处理单位', 'completedCount'),
+    metric('缓存复用', 'cacheHitCount'), metric('研判失败', 'failedCount'),
+  ];
+  return h('section', { className: cx('ai-workflow-overview', `kind-${stage}`, online && active.some((task) => !workflowResultPending(task.event)) && 'is-live'),
+    'aria-label': denoise ? '降噪实时概况' : '研判实时概况' }, [
+    h('header', { key: 'head' }, [
+      h('span', { className: 'ai-stage-number', key: 'number' }, denoise ? '01' : '02'),
+      h('strong', { key: 'title' }, denoise ? '智能降噪' : '智能研判'),
+      h('span', { className: 'ai-lane-state', key: 'state' }, online && active.length ? `${active.length} 批执行` : !online ? '连接待恢复' : unconfirmed ? '状态待确认' : waiting ? `${waiting} 批排队` : '当前空闲'),
+    ]),
+    h('div', { className: 'ai-active-volume', key: 'volume' }, [
+      h('span', { key: 'label' }, '运行批次数据'),
+      h('b', { key: 'count' }, active.length ? metricValue(total) : online && !unconfirmed ? '0' : '待确认'),
+      h('small', { key: 'unit' }, total !== null || !active.length ? '条' : ''),
+      waiting ? h('small', { key: 'waiting' }, `另有 ${waiting} 批排队`) : null,
+    ]),
+    active.length > known.length ? h('small', { className: 'ai-data-note', key: 'partial' },
+      known.length ? '部分批次数量待返回，以上仅计已知数据' : '任务已运行，等待节点返回批次数量') : null,
+    h(AiWorkflowFlow, { stage, tasks, online, key: 'flow' }),
+    h('small', { className: 'ai-snapshot-label', key: 'scope' }, `最近 ${snapshot.length} 批快照 · 仅计已返回数据`),
+    h(AiMetricGrid, { values: metrics, key: 'metrics' }),
+    h('details', { className: 'ai-extra-metrics', key: 'extra' }, [
+      h('summary', { key: 'toggle' }, denoise ? '查看过滤与去重明细' : '查看研判结果分布'),
+      h(AiMetricGrid, { values: denoise ? [
+        metric('标准化', 'normalizedCount'), metric('过滤后', 'afterFilterCount'),
+      ] : [
+        metric('攻击行为', 'attackCount'), metric('非攻击', 'benignCount'),
+        metric('待确认', 'unknownCount'), metric('组内复用', 'followersReusedCount'),
+      ], key: 'values' }),
+    ]),
+  ]);
 }
 
 function executionIdFromWorkflowEvent(event) {
@@ -2376,292 +2324,107 @@ function openWorkflowExecution(workflowId, executionId) {
   return true;
 }
 
-function openWorkflowExecutionFromTaskCenter(item) {
-  return openWorkflowExecution(workflowIdFromTaskCenterItem(item), executionIdFromTaskCenterItem(item));
-}
-
 function openWorkflowExecutionFromEvent(event) {
   return openWorkflowExecution(workflowIdFromEvent(event), executionIdFromWorkflowEvent(event));
 }
 
-function TaskCenterSummary({ taskCenter }) {
-  const scheduledTasks = taskCenter.scheduledTasks || [];
-  const workflows = taskCenter.workflows || [];
-  const activeCount = [
-    ...scheduledTasks,
-    ...workflows,
-  ].reduce((sum, item) => sum + Math.max(Number(item.activeCount || 0), 0), 0);
-  const totalActiveCount = taskCenter.activeExecutionCount == null
-    ? activeCount
-    : Math.max(Number(taskCenter.activeExecutionCount || 0), 0);
-  const workflowCallTooltip = '优先来自 workflow_stats.call_count；今日为当天 call_count 增量，缺少快照时回退执行记录数';
-  const summaryMetric = (key, label, value, sub, className = '', title = '') => h('div', { className, key, title }, [
-    h('span', { key: 'label' }, label),
-    h(AnimatedNumber, { tag: 'b', value: value || 0, duration: 800, key: 'value' }),
-    sub ? h('small', { key: 'sub' }, sub) : null,
-  ]);
-  return h('div', { className: 'task-center-summary' }, [
-    summaryMetric('sessions', '关联会话', taskCenter.sessionCount, ''),
-    summaryMetric('active', '执行中', totalActiveCount, '', totalActiveCount ? 'active' : ''),
-    summaryMetric('scheduledRuns', '定时执行', taskCenter.scheduledExecutionCount, `今日启动 ${taskCenter.scheduledTodayExecutionCount || 0}`),
-    summaryMetric('workflowRuns', '工作流调用', taskCenter.workflowExecutionCount, `今日调用 ${taskCenter.workflowTodayExecutionCount || 0}`, '', workflowCallTooltip),
-  ]);
-}
-
-function TaskCenterItem({ item, kind }) {
-  const successRate = Math.max(Math.min(Number(item.successRate || 0), 1), 0);
-  const progressValue = taskCenterProgressValue(item);
-  const progressLabel = taskCenterProgressLabel(item);
-  const active = Number(item.activeCount || 0) > 0;
-  const schedulerStatus = String(item.status || '').toLowerCase();
-  const statusValue = kind === 'scheduled' ? schedulerStatus || item.lastStatus : item.lastStatus;
-  const status = taskCenterStatusLabel(statusValue);
-  const statusClass = String(statusValue || '').toLowerCase();
-  const latestTime = taskCenterTimeLabel(item.lastRunAt);
-  const latestExecutionHash = taskCenterHashValue(item.latestExecutionHash);
-  const itemName = kind === 'workflow' ? taskCenterWorkflowName(item) : item.name || item.id;
-  const alertName = String(item.latestAlertName || '').trim();
-  const hasExecution = kind === 'workflow' && Boolean(workflowIdFromTaskCenterItem(item) && executionIdFromTaskCenterItem(item));
-  const scheduledClosed = kind === 'scheduled' && ['disabled', 'stopped'].includes(schedulerStatus);
-  const sub = kind === 'scheduled'
-    ? scheduledClosed
-      ? item.lastRunAt
-        ? `上次执行 ${latestTime}`
-        : '已关闭'
-      : item.nextRunAt
-      ? `下次 ${taskCenterTimeLabel(item.nextRunAt)}`
-      : item.cronDescription || item.cron || taskCenterTimeLabel(item.lastRunAt)
-    : `最近调用 ${latestTime}`;
-  const stats = kind === 'workflow'
-    ? [
-        h('span', { key: 'total', title: '工作流被调用/运行的次数，不代表处理告警条数' }, ['调用 ', h(AnimatedNumber, { tag: 'b', value: item.executionCount || 0, duration: 700, key: 'value' })]),
-        h('span', { key: 'today', title: '当天工作流调用次数' }, ['今日调用 ', h(AnimatedNumber, { tag: 'b', value: item.todayExecutionCount || 0, duration: 700, key: 'value' })]),
-        h('span', { key: 'progress' }, ['进度 ', h('b', { key: 'value' }, progressLabel)]),
-        h('span', { key: 'rate' }, ['成功率 ', h('b', { key: 'value' }, taskCenterPercent(successRate))]),
-      ]
-    : [
-        h('span', { key: 'total' }, ['执行 ', h(AnimatedNumber, { tag: 'b', value: item.executionCount || 0, duration: 700, key: 'value' })]),
-        h('span', { key: 'today' }, ['今日启动 ', h(AnimatedNumber, { tag: 'b', value: item.todayExecutionCount || 0, duration: 700, key: 'value' })]),
-        h('span', { key: 'success' }, ['成功 ', h(AnimatedNumber, { tag: 'b', value: item.successCount || 0, duration: 700, key: 'value' })]),
-        h('span', { key: 'rate' }, ['成功率 ', h('b', { key: 'value' }, taskCenterPercent(successRate))]),
-      ];
-  const handleOpen = () => {
-    if (hasExecution) openWorkflowExecutionFromTaskCenter(item);
-  };
-  const handleKeyDown = (event) => {
-    if (!hasExecution) return;
-    if (event.key === 'Enter' || event.key === ' ') {
-      event.preventDefault();
-      openWorkflowExecutionFromTaskCenter(item);
-    }
-  };
-  return h('article', {
-    className: cx('task-center-item', active && 'active', hasExecution && 'clickable'),
-    role: hasExecution ? 'button' : undefined,
-    tabIndex: hasExecution ? 0 : undefined,
-    title: hasExecution ? '打开执行详情' : undefined,
-    onClick: handleOpen,
-    onKeyDown: handleKeyDown,
-  }, [
-    h('div', { className: 'task-center-item-head', key: 'head' }, [
-      h('strong', { title: item.name || item.id, key: 'name' }, itemName),
-      h('span', { className: cx('task-center-status', active && 'active', statusClass), key: 'status' }, active ? '执行中' : status),
-    ]),
-    h('div', { className: 'task-center-item-sub', title: sub, key: 'sub' }, sub),
-    kind === 'workflow' ? h('div', {
-      className: cx('task-center-alert', alertName && 'has-alert'),
-      title: alertName || '暂无告警名称',
-      key: 'alert',
-    }, [
-      h('span', { key: 'label' }, '关联告警'),
-      h('b', { key: 'value' }, alertName || '暂无告警名称'),
-    ]) : null,
-    kind === 'workflow' ? h('div', { className: 'task-center-hash', title: latestExecutionHash, key: 'hash' }, [
-      h('span', { key: 'label' }, '执行ID'),
-      h('code', { key: 'value' }, latestExecutionHash),
-      h('span', { key: 'link-label' }, '执行详情'),
-      h('code', { className: cx('task-center-jump', hasExecution && 'enabled'), key: 'link' }, hasExecution ? '查看执行' : '暂无执行记录'),
-    ]) : null,
-    h('div', { className: cx('task-center-stats', kind === 'workflow' && 'workflow-stats'), key: 'stats' }, stats),
-    h('div', {
-      className: cx('task-center-rate', kind === 'workflow' && 'progress-rate'),
-      style: { '--task-center-rate': kind === 'workflow' ? progressValue : successRate },
-      key: 'rateBar',
-    }, [
-      h('i', { key: 'fill' }),
-    ]),
-  ]);
-}
-
-function TaskCenterSection({ title, count, items, kind, emptyText, expanded, onToggle, collapsed, onCollapseToggle }) {
-  const hasOverflow = items.length > 3;
-  const visibleItems = expanded || !hasOverflow ? items : items.slice(0, 3);
-  const countUnit = kind === 'workflow' ? '个工作流' : '个任务';
-  const countText = collapsed || expanded || !hasOverflow ? `${count} ${countUnit}` : `显示 3/${count} ${countUnit}`;
-  return h('section', { className: 'task-center-section' }, [
-    h('div', { className: 'task-center-section-title', key: 'title' }, [
-      h('button', {
-        className: 'task-center-section-toggle',
-        type: 'button',
-        'aria-expanded': !collapsed,
-        onClick: onCollapseToggle,
-        key: 'toggle',
-      }, [
-        h('i', { key: 'chevron' }, collapsed ? '›' : '⌄'),
-        h('strong', { key: 'label' }, title),
-      ]),
-      h('span', { key: 'count' }, countText),
-    ]),
-    collapsed ? null : h('div', { className: 'task-center-section-list', key: 'list' }, visibleItems.length
-      ? visibleItems.map((item) => h(TaskCenterItem, { item, kind, key: `${kind}-${item.id}` }))
-      : h('div', { className: 'event-rail-empty' }, emptyText)),
-    !collapsed && hasOverflow ? h('button', {
-      className: 'task-center-expand',
-      type: 'button',
-      onClick: onToggle,
-      key: 'expand',
-    }, expanded ? '收起' : `展开全部 ${count} ${countUnit}`) : null,
-  ]);
-}
-
-function CommandTaskCenterPanel({ taskCenter }) {
-  const { useState } = getReact();
-  const [scheduledExpanded, setScheduledExpanded] = useState(false);
-  const [workflowExpanded, setWorkflowExpanded] = useState(false);
-  const [scheduledCollapsed, setScheduledCollapsed] = useState(false);
-  const [workflowCollapsed, setWorkflowCollapsed] = useState(false);
-  const scheduledTasks = taskCenter.scheduledTasks || [];
-  const workflows = taskCenter.workflows || [];
-  return h('div', { className: 'task-center-panel', key: 'taskCenterPanel' }, [
-    taskCenter.connection === 'error' ? h('div', {
-      className: 'task-center-inline-warn',
-      key: 'warn',
-    }, `任务中心连接异常：${taskCenter.error || '正在重试'}`) : null,
-    h(TaskCenterSummary, { taskCenter, key: 'summary' }),
-    h(TaskCenterSection, {
-      title: '定时执行',
-      count: scheduledTasks.length,
-      items: scheduledTasks,
-      kind: 'scheduled',
-      emptyText: '暂无定时任务执行记录',
-      expanded: scheduledExpanded,
-      onToggle: () => setScheduledExpanded((current) => !current),
-      collapsed: scheduledCollapsed,
-      onCollapseToggle: () => setScheduledCollapsed((current) => !current),
-      key: 'scheduled',
-    }),
-    h(TaskCenterSection, {
-      title: '工作流调用',
-      count: workflows.length,
-      items: workflows,
-      kind: 'workflow',
-      emptyText: '暂无工作流调用记录',
-      expanded: workflowExpanded,
-      onToggle: () => setWorkflowExpanded((current) => !current),
-      collapsed: workflowCollapsed,
-      onCollapseToggle: () => setWorkflowCollapsed((current) => !current),
-      key: 'workflows',
-    }),
-  ]);
-}
-
-function CommandAiTaskPanel({ activity, timeFilter }) {
-  const tasks = buildEventQueueTasks(activity, timeFilter);
+function CommandAiTaskPanel({ activity, timeFilter, now }) {
+  const tasks = buildEventQueueTasks(activity, timeFilter, now);
   const filterTransitionKey = [timeFilter.mode, timeFilter.range, timeFilter.start, timeFilter.end].join('|');
-  const visibleTasks = useAnimatedTaskWindow(
-    tasks.filter((task) => task.state !== 'completed'),
-    filterTransitionKey,
-  );
+  const activeTasks = tasks.filter((task) => task.state !== 'completed');
+  const visibleTasks = useAnimatedTaskWindow(activeTasks, filterTransitionKey);
   const counts = {
     processing: tasks.filter((task) => task.state === 'processing').length,
     waiting: tasks.filter((task) => task.state === 'waiting').length,
     unconfirmed: tasks.filter((task) => task.state === 'unconfirmed').length,
   };
+  const online = activity.connection === 'online';
   const banner = activity.connection === 'error'
     ? '处理任务连接异常，正在重试'
     : counts.processing
-      ? `AI 正在并行处理 ${counts.processing} 个任务`
-      : counts.waiting ? '最新 10 条待处理任务'
+      ? `本次快照 · ${counts.processing} 个任务执行中`
+      : counts.waiting ? `${counts.waiting} 个任务等待处理`
         : counts.unconfirmed ? '任务状态待确认，等待数据更新' : '等待新的降噪或研判任务';
   return [
-    h('div', { className: cx('event-update-banner', activity.connection === 'error' && 'warn'), key: 'banner' }, banner),
-    h('div', { className: 'event-rail-list', key: 'list' }, visibleTasks.length ? visibleTasks.map((task) => {
-      const event = task.event;
-      const title = displayAlertText(event?.alert?.threatName) || (task.stage === 'triage' ? '研判批次' : '降噪批次 · 数量未提供');
-      const stageLabel = task.stage === 'triage'
-        ? task.state === 'waiting' ? '待研判' : '智能研判'
-        : task.state === 'waiting' ? '待降噪' : '智能降噪';
-      const stateLabel = task.state === 'processing'
-        ? '处理中'
-        : task.state === 'unconfirmed' ? '状态待确认' : '等待处理';
-      const detail = task.state === 'unconfirmed'
-        ? '近期未收到该任务的状态，尚不能确认是否结束'
-        : task.state === 'processing'
-        ? task.stage === 'triage' ? '研判工作流处理中' : '降噪工作流处理中'
-        : task.stage === 'triage' ? '研判工作流排队中' : '降噪工作流排队中';
-      const hasExecution = Boolean(workflowIdFromEvent(event) && executionIdFromWorkflowEvent(event));
-      const handleOpen = () => {
-        if (hasExecution) openWorkflowExecutionFromEvent(event);
-      };
-      const handleKeyDown = (keyboardEvent) => {
-        if (!hasExecution) return;
-        if (keyboardEvent.key === 'Enter' || keyboardEvent.key === ' ') {
-          keyboardEvent.preventDefault();
-          openWorkflowExecutionFromEvent(event);
-        }
-      };
-      return h('article', {
-        className: cx('event-rail-item', `state-${task.state}`, `kind-${task.stage}`, `motion-${task.motion || 'stable'}`, hasExecution && 'clickable'),
-        key: task.key,
-        role: hasExecution ? 'button' : undefined,
-        tabIndex: hasExecution ? 0 : undefined,
-        title: hasExecution ? '打开执行详情' : undefined,
-        onClick: handleOpen,
-        onKeyDown: handleKeyDown,
-      }, [
-        h('div', { className: 'event-rail-meta', key: 'meta' }, [
-          h('span', { className: cx('event-queue-kind', `kind-${task.stage}`), key: 'kind' }, stageLabel),
-          h('span', { className: 'event-stage', key: 'stage' }, stateLabel),
-          h('time', { key: 'time' }, eventTimeLabel(event?.occurredAt)),
-        ]),
-        h('strong', { title, key: 'title' }, title),
-        h('span', { title: eventEndpoint(event), key: 'endpoint' }, eventEndpoint(event)),
-        h('small', { key: 'result' }, hasExecution ? `${detail} · 查看执行` : detail),
-        task.state === 'processing' ? h(EventQueueProgress, { event, key: 'progress' }) : null,
-      ]);
-    }) : h('div', { className: 'event-rail-empty' }, '等待新的降噪或研判任务')),
+    h('div', { className: cx('event-update-banner', !online && 'warn', online && tasks.some((task) => task.state === 'processing' && !workflowResultPending(task.event)) && 'is-live'), key: 'banner' }, [
+      h('span', { key: 'text' }, banner),
+      h('small', { key: 'refresh' }, online ? '每 3 秒更新' : '保留最后一次已知数据'),
+    ]),
+    h('div', { className: 'ai-task-board-scroll', key: 'list' }, [
+      h('div', { className: 'ai-board-caption', key: 'range' }, [
+        h('span', { key: 'label' }, '实时运行 · 最近批次'),
+        h('b', { key: 'range' }, timeFilterLabel(timeFilter)),
+      ]),
+      h('div', { className: 'ai-workflow-overviews', key: 'overviews' }, ['denoise', 'triage'].map((stage) =>
+        h(AiWorkflowOverview, { stage, tasks, online, key: stage }))),
+      h('div', { className: 'ai-task-list-heading', key: 'listHeading' }, [
+        h('strong', { key: 'title' }, '当前任务'),
+        h('small', { key: 'limit' }, `展示 ${Math.min(activeTasks.length, EVENT_RAIL_TASK_LIMIT)} / ${activeTasks.length} 批`),
+      ]),
+      activity.snapshotComplete === false ? h('p', { className: 'ai-data-note', key: 'coverage' }, '当前为部分任务快照，数量不代表全部并发任务。') : null,
+      h('div', { className: 'event-rail-list', key: 'tasks' }, visibleTasks.length ? visibleTasks.map((task) => {
+        const event = task.event;
+        const title = displayAlertText(event?.alert?.threatName) || (task.stage === 'triage' ? '研判批次' : '降噪批次 · 数量未提供');
+        const stageLabel = task.stage === 'triage' ? '智能研判' : '智能降噪';
+        const stateLabel = task.state === 'processing' ? workflowResultPending(event) ? '结果保存中' : '处理中' : task.state === 'unconfirmed' ? '状态待确认' : '等待处理';
+        const hasExecution = Boolean(workflowIdFromEvent(event) && executionIdFromWorkflowEvent(event));
+        const metrics = task.stage === 'denoise' ? [
+          ['输入', liveMetric(event, 'rawCount')], ['过滤后', liveMetric(event, 'afterFilterCount')],
+          ['重复', liveMetric(event, 'duplicateCount')], ['保留', liveMetric(event, 'uniqueCount')],
+        ] : [
+          ['本批告警', liveMetric(event, 'inputCount')], ['已处理单位', liveMetric(event, 'completedCount')],
+          ['缓存复用', liveMetric(event, 'cacheHitCount')], ['失败', liveMetric(event, 'failedCount')],
+        ];
+        return h('article', {
+          className: cx('event-rail-item', `state-${task.state}`, `kind-${task.stage}`, `motion-${task.motion || 'stable'}`, (!online || workflowResultPending(event)) && 'connection-stale', hasExecution && 'clickable'),
+          key: task.key, role: hasExecution ? 'button' : undefined, tabIndex: hasExecution ? 0 : undefined,
+          title: hasExecution ? '打开执行详情' : undefined,
+          onClick: () => { if (hasExecution) openWorkflowExecutionFromEvent(event); },
+          onKeyDown: (keyboardEvent) => {
+            if (hasExecution && ['Enter', ' '].includes(keyboardEvent.key)) {
+              keyboardEvent.preventDefault(); openWorkflowExecutionFromEvent(event);
+            }
+          },
+        }, [
+          h('div', { className: 'event-rail-meta', key: 'meta' }, [
+            h('span', { className: cx('event-queue-kind', `kind-${task.stage}`), key: 'kind' }, stageLabel),
+            h('span', { className: 'event-stage', key: 'stage' }, stateLabel),
+            h('time', { title: event?.occurredAt, key: 'time' }, eventTimeLabel(event?.occurredAt)),
+          ]),
+          h('strong', { title, key: 'title' }, title),
+          event?.alert?.srcIp || event?.alert?.dstIp ? h('span', { title: eventEndpoint(event), key: 'endpoint' }, eventEndpoint(event)) : null,
+          h(EventQueueProgress, { event, live: online && task.state === 'processing', key: 'progress' }),
+          h(AiMetricGrid, { values: metrics, className: 'ai-task-metrics', key: 'metrics' }),
+          task.stage === 'triage' ? h('small', { className: 'ai-data-note', key: 'unit' }, '同类告警合为研判单位；数量以节点返回为准') : null,
+          h('div', { className: 'ai-task-foot', key: 'foot' }, [
+            h('span', { key: 'elapsed' }, task.state === 'unconfirmed' ? '近期未确认状态' : `${task.state === 'waiting' ? '已等待' : '已运行'} ${formatDurationMs(now - activityTimestamp(event))}`),
+            hasExecution ? h('span', { key: 'link' }, '查看执行 ↗') : null,
+          ]),
+        ]);
+      }) : h('div', { className: 'event-rail-empty' }, online ? '暂无活跃任务，等待下一批告警' : '等待连接恢复后更新任务')),
+      h('p', { className: 'ai-board-policy', key: 'policy' }, '≥ 表示已知下限，仍有批次未返回统计。本栏只汇总最近批次。未完成任务超过 30 分钟自动移出，后台执行与历史记录保留。'),
+    ]),
   ];
 }
 
-function CommandEventRail({ activity, timeFilter, taskCenter, view, onViewChange, collapsed, onToggle, railWidth, onResizeStart, onResizeKeyDown }) {
-  const tasks = buildEventQueueTasks(activity, timeFilter);
+function CommandEventRail({ activity, timeFilter, collapsed, onToggle, railWidth, onResizeStart, onResizeKeyDown }) {
+  const { useEffect, useState } = getReact();
+  const [now, setNow] = useState(Date.now);
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, []);
+  const tasks = buildEventQueueTasks(activity, timeFilter, now);
   const queueCount = tasks.filter((task) => task.state !== 'completed').length;
-  const taskCenterCount = Number(taskCenter.sessionCount || 0);
   const content = collapsed ? [] : [
     h('div', { className: 'event-rail-head rail-view-head', key: 'head' }, [
-      h('div', { className: 'rail-view-tabs', role: 'tablist', key: 'tabs' }, [
-        h('button', {
-          className: cx(view === 'aiTasks' && 'active'),
-          type: 'button',
-          role: 'tab',
-          'aria-selected': view === 'aiTasks',
-          onClick: () => onViewChange('aiTasks'),
-          key: 'aiTasks',
-        }, 'AI处理任务'),
-        h('button', {
-          className: cx(view === 'taskCenter' && 'active'),
-          type: 'button',
-          role: 'tab',
-          'aria-selected': view === 'taskCenter',
-          onClick: () => onViewChange('taskCenter'),
-          key: 'taskCenter',
-        }, '任务中心'),
+      h('div', { className: 'ai-board-title', key: 'title' }, [
+        h('strong', { key: 'name' }, 'AI处理任务'),
+        h('span', { key: 'scope' }, 'SOC 工作套件'),
       ]),
-      h(AnimatedNumber, { tag: 'b', value: view === 'aiTasks' ? queueCount : taskCenterCount, duration: 600, key: 'count' }),
+      h(AnimatedNumber, { tag: 'b', value: queueCount, duration: 600, key: 'count' }),
     ]),
-    view === 'taskCenter'
-      ? h(CommandTaskCenterPanel, { taskCenter, key: 'taskCenterContent' })
-      : h(CommandAiTaskPanel, { activity, timeFilter, key: 'aiTaskContent' }),
+    h(CommandAiTaskPanel, { activity, timeFilter, now, key: 'aiTaskContent' }),
   ];
   return h('aside', { className: cx('command-event-rail', collapsed && 'collapsed') }, [
     collapsed ? null : h('div', {
@@ -2697,14 +2460,12 @@ export default function Page() {
   const [pageSettingsOpen, setPageSettingsOpen] = useState(false);
   const [eventRailCollapsed, setEventRailCollapsed] = useState(false);
   const [eventRailWidth, setEventRailWidth] = useState(defaultEventRailWidth);
-  const [rightRailView, setRightRailView] = useState('aiTasks');
   const [customCommandTitle, setCustomCommandTitle] = useState(readCustomCommandTitle);
   const [mockDashboardEnabled, setMockDashboardEnabled] = useState(readMockDashboardEnabled);
   const [stats, setStats] = useState(EMPTY_STATS);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [activity, setActivity] = useState(createActivityState);
-  const [taskCenter, setTaskCenter] = useState(createTaskCenterState);
   const activityCursor = useRef('');
   const workflowProgressByFilter = useRef(new Map());
   const statsRequestId = useRef(0);
@@ -2866,58 +2627,6 @@ export default function Page() {
   useEffect(() => {
     let stopped = false;
     let timer = 0;
-
-    const schedule = (delay) => {
-      if (!stopped) timer = window.setTimeout(() => void poll(), delay);
-    };
-
-    const poll = async () => {
-      if (stopped) return;
-      if (document.hidden) {
-        schedule(ACTIVITY_POLL_MS);
-        return;
-      }
-      try {
-        const params = mockDashboardEnabled ? { mockActivity: '1' } : {};
-        const response = await getApi().page.get('/task-center', { params });
-        const payload = response.data || {};
-        if (!stopped) {
-          setTaskCenter({
-            ...createTaskCenterState(),
-            ...payload,
-            scheduledTasks: Array.isArray(payload.scheduledTasks) ? payload.scheduledTasks : [],
-            workflows: Array.isArray(payload.workflows) ? payload.workflows : [],
-            sessionCount: Math.max(Number(payload.sessionCount || 0), 0),
-            scheduledExecutionCount: Math.max(Number(payload.scheduledExecutionCount || 0), 0),
-            scheduledTodayExecutionCount: Math.max(Number(payload.scheduledTodayExecutionCount || 0), 0),
-            workflowExecutionCount: Math.max(Number(payload.workflowExecutionCount || 0), 0),
-            workflowTodayExecutionCount: Math.max(Number(payload.workflowTodayExecutionCount || 0), 0),
-            connection: 'online',
-            error: '',
-          });
-        }
-      } catch (taskCenterError) {
-        if (!stopped) {
-          setTaskCenter((previous) => ({
-            ...previous,
-            connection: 'error',
-            error: taskCenterError instanceof Error ? taskCenterError.message : 'task center api failed',
-          }));
-        }
-      }
-      schedule(ACTIVITY_POLL_MS);
-    };
-
-    void poll();
-    return () => {
-      stopped = true;
-      window.clearTimeout(timer);
-    };
-  }, [mockDashboardEnabled]);
-
-  useEffect(() => {
-    let stopped = false;
-    let timer = 0;
     let statsTimer = 0;
     let lastStatsRefreshAt = 0;
     let retryDelay = ACTIVITY_POLL_MS;
@@ -2992,7 +2701,8 @@ export default function Page() {
           setActivity((previous) => {
             const next = enqueueActivity(previous, incomingEvents, payload.generatedAt,
               incomingRecentEvents, payload.batch, payload.workflowSnapshotComplete === true);
-            return payload.workflowSnapshotAvailable === false ? { ...next, connection: 'error' } : next;
+            return { ...next, snapshotComplete: payload.workflowSnapshotComplete === true,
+              ...(payload.workflowSnapshotAvailable === false ? { connection: 'error' } : {}) };
           });
           const batch = normalizeActivityBatch(payload.batch);
           const hasStatsChange = workflowChanged
@@ -3080,14 +2790,6 @@ export default function Page() {
     ),
     [activity, mockDashboardEnabled],
   );
-  const displayTaskCenter = useMemo(
-    () => (
-      !taskCenterHasVisibleRows(taskCenter) && mockDashboardEnabled
-        ? createMockTaskCenterState()
-        : taskCenter
-    ),
-    [mockDashboardEnabled, taskCenter],
-  );
   const displayActivityBusy = Boolean(
     displayActivity.denoise.current
     || displayActivity.triage.current
@@ -3136,9 +2838,6 @@ export default function Page() {
         key: 'events',
         activity: displayActivity,
         timeFilter,
-        taskCenter: displayTaskCenter,
-        view: rightRailView,
-        onViewChange: setRightRailView,
         collapsed: eventRailCollapsed,
         onToggle: () => setEventRailCollapsed((current) => !current),
         railWidth: eventRailWidth,
@@ -6129,7 +5828,7 @@ const CSS = `
   color: #b9d8ff;
   background: rgba(31,76,132,.3);
 }
-.event-update-banner:after {
+.event-update-banner.is-live:after {
   content: "";
   position: absolute;
   top: 0;
@@ -6806,5 +6505,95 @@ const CSS = `
 [data-animations="on"] *::before,
 [data-animations="on"] *::after {
   animation-play-state: running !important;
+}
+
+.ai-board-title { display: flex; flex-direction: column; gap: 3px; }
+.ai-board-title strong { color: #d9f3fa; font-size: 15px; letter-spacing: .5px; }
+.ai-board-title span { color: #639aaa; font-size: 10px; }
+/* AI task observatory: node-driven motion, bounded snapshots, one scroll area. */
+.ai-task-board-scroll { min-height: 0; overflow: auto; padding: 0 14px 14px; scrollbar-width: thin; scrollbar-color: #214252 transparent; }
+.ai-board-caption { display: flex; justify-content: space-between; gap: 8px; color: #91a9ba; font-size: 11px; padding: 0 2px 10px; }
+.ai-board-caption b { color: #b5c9d5; font-weight: 500; text-align: right; }
+.ai-workflow-overviews { display: grid; gap: 10px; }
+.ai-workflow-overview { --lane-color: #45dce9; position: relative; overflow: hidden; padding: 12px; border: 1px solid rgba(69,220,233,.2); border-radius: 10px; background: linear-gradient(135deg, rgba(21,78,91,.27), rgba(9,30,44,.7)); }
+.ai-workflow-overview.kind-triage { --lane-color: #b5a2ff; border-color: rgba(181,162,255,.22); background: linear-gradient(135deg, rgba(69,48,114,.25), rgba(9,30,44,.7)); }
+.ai-workflow-overview header { display: flex; align-items: center; gap: 7px; font-size: 14px; color: #e6f3fa; }
+.ai-stage-number { color: var(--lane-color); font-size: 11px; letter-spacing: 1px; font-variant-numeric: tabular-nums; }
+.ai-lane-state { margin-left: auto; color: #8da6b9; font-size: 11px; }
+.ai-workflow-overview.is-live .ai-lane-state { color: #68e2b8; }
+.ai-workflow-overview.is-live .ai-lane-state:before { content: ''; display: inline-block; width: 5px; height: 5px; margin: 0 5px 1px 0; border-radius: 50%; background: #68e2b8; animation: aiLivePulse 1.8s ease-in-out infinite; }
+.ai-active-volume { display: flex; align-items: baseline; gap: 6px; margin: 13px 0 9px; color: #91a9ba; }
+.ai-active-volume > span { font-size: 11px; }
+.ai-active-volume > b { color: var(--lane-color); font-size: 30px; line-height: 1; font-weight: 650; letter-spacing: -.5px; font-variant-numeric: tabular-nums; }
+.ai-active-volume > small { font-size: 11px; }
+.ai-snapshot-label { display: block; color: #829eaf; font-size: 11px; padding-bottom: 5px; }
+.ai-metric-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 5px; margin: 0; }
+.ai-metric-grid > div { min-width: 0; padding: 7px 0; }
+.ai-metric-grid dt { color: #93acbd; font-size: 11px; line-height: 1.5; white-space: nowrap; }
+.ai-metric-grid dd { margin: 3px 0 0; color: #e1edf5; font-size: 19px; font-weight: 600; line-height: 1.2; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.ai-metric-grid dd.unknown { color: #7490a5; font-size: 11px; font-weight: 400; }
+.ai-metric-grid > div:nth-child(2) dd:not(.unknown) { color: #75e2ba; }
+.ai-extra-metrics { border-top: 1px solid rgba(129,172,196,.13); margin-top: 5px; padding-top: 7px; }
+.ai-extra-metrics summary { cursor: pointer; color: #89a9bf; font-size: 11px; }
+.ai-extra-metrics .ai-metric-grid { margin-top: 4px; }
+.ai-task-list-heading { display: flex; justify-content: space-between; align-items: center; padding: 18px 2px 8px; color: #d1e4ef; font-size: 11px; }
+.ai-task-list-heading small { font-size: 11px; color: #819daf; }
+.ai-task-board-scroll .event-rail-list { overflow: visible; padding: 0; }
+.ai-task-board-scroll .event-rail-item { gap: 8px; padding: 12px; border: 1px solid rgba(96,142,166,.19); border-radius: 9px; margin-bottom: 9px; background: rgba(10,31,46,.8); min-height: 0; }
+.ai-task-board-scroll .event-rail-item:before { display: none; }
+.ai-task-board-scroll .event-rail-item:after { display: none; }
+.ai-task-board-scroll .event-rail-item > strong { font-size: 14px; white-space: normal; overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; line-height: 1.6; }
+.ai-task-board-scroll .event-rail-meta { gap: 5px; }
+.ai-task-board-scroll .event-rail-meta time { color: #9bb0c0; }
+.ai-rail-step-progress { --lane-color: #45dce9; width: 100%; }
+.kind-triage .ai-rail-step-progress { --lane-color: #b5a2ff; }
+.ai-step-track { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 4px; width: 100%; }
+.ai-step-track > span { position: relative; padding: 9px 0 2px; font-size: 11px; color: #8aa1b3; text-align: center; white-space: nowrap; }
+.ai-step-track > span:before { content: ''; position: absolute; inset: 0 0 auto; height: 3px; border-radius: 2px; background: rgba(104,139,161,.22); }
+.ai-step-track > span.passed:before { background: #439c87; }
+.ai-step-track > span.current { color: var(--lane-color); }
+.ai-step-track > span.current:before { background: var(--lane-color); }
+.ai-rail-step-progress.is-live .ai-step-track > span.current:before { animation: aiLivePulse 1.8s ease-in-out infinite; }
+.ai-current-step { display: block; color: #a6bbcb; font-size: 11px; line-height: 1.5; padding-top: 7px; overflow-wrap: anywhere; }
+.ai-task-metrics { width: 100%; border-top: 1px solid rgba(132,170,191,.1); }
+.ai-task-metrics dd { font-size: 14px; }
+.ai-task-foot { display: flex; justify-content: space-between; width: 100%; color: #829fae; font-size: 11px; font-variant-numeric: tabular-nums; }
+.ai-task-foot span:last-child { color: #77bdde; }
+.ai-task-board-scroll .ai-data-note, .ai-data-note { white-space: normal; color: #94a7b8; font-size: 11px; line-height: 1.6; margin: 3px 0 8px; }
+.ai-board-policy { color: #708da1; font-size: 11px; line-height: 1.8; margin: 10px 2px 0; }
+.event-update-banner { display: flex; flex-wrap: wrap; align-items: center; gap: 3px 5px; }
+.event-update-banner > span { flex: 1; min-width: 0; }
+.event-update-banner > small { width: 100%; padding-left: 18px; color: #88aeca; font-size: 11px; }
+.event-rail-item.connection-stale { animation: none !important; }
+@keyframes aiLivePulse { 0%, 100% { opacity: .5; } 50% { opacity: 1; box-shadow: 0 0 9px currentColor; } }
+@media (prefers-reduced-motion: reduce) {
+  .ai-workflow-overview.is-live .ai-lane-state:before,
+  .ai-rail-step-progress.is-live .ai-step-track > span.current:before,
+  .event-update-banner:after, .event-rail-item { animation: none !important; }
+}
+
+
+.ai-workflow-overview.kind-denoise { --flow-speed: .6s; }
+.ai-workflow-overview.kind-triage { --flow-speed: 2.2s; }
+.ai-workflow-flow { margin: 7px 0 11px; padding: 10px 10px 8px; border: 1px solid rgba(125,177,202,.14); border-radius: 7px; background: rgba(2,15,26,.38); }
+.ai-flow-caption { display: flex; align-items: baseline; justify-content: space-between; gap: 6px; color: var(--lane-color); font-size: 11px; }
+.ai-flow-caption small { color: #8cabbc; font-size: 10px; white-space: nowrap; }
+.ai-flow-rail { position: relative; display: grid; grid-template-columns: repeat(4, minmax(0,1fr)); padding-bottom: 13px; margin-top: 9px; }
+.ai-flow-rail:before { content: ''; position: absolute; left: 7%; right: 7%; top: 11px; height: 1px; background: rgba(118,169,194,.23); }
+.ai-flow-node { position: relative; text-align: center; justify-self: center; z-index: 1; color: #829bad; background: #0b2231; font-size: 11px; padding: 3px 4px; border-radius: 4px; }
+.ai-flow-node.current { color: var(--lane-color); background: #163349; box-shadow: 0 0 0 1px rgba(114,201,226,.28); }
+.ai-flow-node.passed { color: #78bda8; }
+.ai-flow-sweep { position: absolute; left: 0; bottom: 2px; width: var(--step-end, 100%); transition: width .6s ease; height: 3px; border-radius: 3px; overflow: hidden; background: rgba(118,169,194,.16); }
+.ai-workflow-flow.is-flowing .ai-flow-sweep:after { content: ''; position: absolute; left: -40%; top: 0; bottom: 0; width: 40%; background: linear-gradient(90deg, transparent, var(--lane-color), transparent); animation: aiFlowSweep var(--flow-speed, 2.6s) linear infinite; }
+.ai-workflow-overview > * { position: relative; z-index: 1; }
+.ai-workflow-overview.is-live:before { content: ''; position: absolute; pointer-events: none; z-index: 0; left: -40%; top: 0; bottom: 0; width: 40%; opacity: .09; background: linear-gradient(90deg, transparent, var(--lane-color), transparent); animation: aiFlowSweep 3.8s linear infinite; }
+.ai-flow-result { margin: 2px 0 0; color: #8eafbf; font-size: 10px; line-height: 1.7; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ai-workflow-flow.is-flowing .ai-flow-node.current { animation: aiLivePulse 1.8s ease-in-out infinite; }
+@keyframes aiFlowSweep { from { transform: translateX(0); } to { transform: translateX(350%); } }
+@media (prefers-reduced-motion: reduce) {
+  .ai-flow-sweep { transition: none; }
+  .ai-workflow-overview.is-live:before,
+  .ai-workflow-flow.is-flowing .ai-flow-sweep:after,
+  .ai-workflow-flow.is-flowing .ai-flow-node.current { animation: none !important; }
 }
 `;

@@ -6,7 +6,7 @@ active-span snapshots, so evidence remains available if the API loop stalls.
 from __future__ import annotations
 
 import asyncio
-from collections import Counter, deque
+from collections import Counter, OrderedDict, deque
 from contextvars import ContextVar
 from functools import wraps
 import json
@@ -32,6 +32,15 @@ _queue = queue.Queue(maxsize=2048)
 _writer = None
 _health = Counter()
 _boot = uuid.uuid4().hex
+_live_progress = OrderedDict()
+_LIVE_LIMIT = 256
+_LIVE_TTL_SECONDS = 30 * 60
+_LIVE_METRICS = {
+    WORKFLOWS[0]: ('rawCount', 'normalizedCount', 'afterFilterCount', 'uniqueCount',
+                   'duplicateCount', 'filterRemovedCount'),
+    WORKFLOWS[1]: ('inputCount', 'completedCount', 'cacheHitCount', 'failedCount',
+                   'attackCount', 'benignCount', 'unknownCount', 'workUnitCount', 'followersReusedCount'),
+}
 _FIELDS = {"trace", "execution", "node", "phase", "status", "error_type", "sqlite_errorcode", "sqlite_errorname", "backoff_seconds", "step", "duration_ms",
            "queue_size", "queue_capacity", "active_runs", "matched", "executed", "count",
            "thread", "parent", "worker_count", "listener_alive", "raw_count", "after_filter_count", "unique_key_count",
@@ -42,6 +51,118 @@ _FIELDS = {"trace", "execution", "node", "phase", "status", "error_type", "sqlit
            "candidate_file_count", "touched_file_count", "record_count", "bytes_read", "bad_lines",
            "oversized_lines", "partial_lines", "missing_files", "total", "work_units", "cache_hit",
            "followers_reused", "triaged", "triage_failed", "concurrency", "soc_db_rows"}
+
+
+def _count(value):
+    # Counts are exact nonnegative integers. False, missing and malformed values
+    # must never become a reassuring zero in the live UI.
+    return value if type(value) is int and value >= 0 else None
+
+
+def _live_counts(workflow, outputs):
+    """Extract bounded aggregate facts only, never alerts, subjects or payloads."""
+    out = outputs if isinstance(outputs, dict) else {}
+    stats = out.get('stats') if isinstance(out.get('stats'), dict) else {}
+    load = out.get('load_stats') if isinstance(out.get('load_stats'), dict) else {}
+    triage = out.get('triage_stats') if isinstance(out.get('triage_stats'), dict) else {}
+    if workflow == WORKFLOWS[0]:
+        result = {field: _count(stats.get(source)) for field, source in (
+            ('rawCount', 'raw_count'), ('normalizedCount', 'normalized_count'),
+            ('afterFilterCount', 'after_filter_count'), ('uniqueCount', 'unique_key_count'),
+            ('duplicateCount', 'dedup_removed_count'), ('filterRemovedCount', 'filter_removed_count'))}
+        # after_dedup_count includes enriched duplicate records, so is not a
+        # unique count. Only derive uniqueness from two known compatible counts.
+        if result['uniqueCount'] is None and result['afterFilterCount'] is not None and result['duplicateCount'] is not None:
+            value = result['afterFilterCount'] - result['duplicateCount']
+            result['uniqueCount'] = value if value >= 0 else None
+        if (out.get('is_duplicate') is True and result['rawCount'] == 1
+                and result['afterFilterCount'] == 1 and result['uniqueCount'] == 1
+                and result['duplicateCount'] == 0 and 'unique_key_count' not in stats):
+            # Older singleton outputs counted only in-batch duplicates. Their
+            # explicit cross-batch duplicate flag is the observed result. A
+            # current unique_key_count remains authoritative when provided.
+            result['uniqueCount'], result['duplicateCount'] = 0, 1
+        return result
+    if workflow != WORKFLOWS[1]:
+        return {}
+    result = {field: _count(triage.get(source)) for field, source in (
+        ('inputCount', 'total'), ('cacheHitCount', 'cache_hit'), ('failedCount', 'triage_failed'),
+        ('workUnitCount', 'work_units'), ('followersReusedCount', 'followers_reused'))}
+    if result['inputCount'] is None:
+        result['inputCount'] = _count(load.get('record_count'))
+    completed = [_count(triage.get(key)) for key in ('triaged', 'cache_hit', 'triage_failed')]
+    # These are leader/work-unit counts, including handled failures. Never mix
+    # them with input record_count, which also includes duplicate followers.
+    result['completedCount'] = sum(completed) if all(value is not None for value in completed) else None
+    verdicts = triage.get('verdict_counts') if isinstance(triage.get('verdict_counts'), dict) else {}
+    attack = [_count(verdicts.get(key)) for key in ('attack', 'attack_success', 'attack_failed') if key in verdicts]
+    result['attackCount'] = sum(attack) if attack and all(value is not None for value in attack) else None
+    result['benignCount'] = _count(verdicts.get('non_attack'))
+    result['unknownCount'] = _count(verdicts.get('unknown'))
+    return result
+
+
+def _prune_live_progress(at):
+    # Caller holds _lock; the collection is always bounded independently of IO.
+    for key in [key for key, item in _live_progress.items() if at - item['_updated_monotonic'] >= _LIVE_TTL_SECONDS]:
+        _live_progress.pop(key, None)
+    while len(_live_progress) > _LIVE_LIMIT:
+        _live_progress.popitem(last=False)
+
+
+def _update_live_progress(workflow, execution, *, phase='running', node=None,
+                          index=None, outputs=None, completed=False, reset=False):
+    """Same-process projection; diagnostics must not change runner semantics."""
+    if workflow not in WORKFLOWS or not isinstance(execution, str) or not execution or len(execution) > 160:
+        return
+    try:
+        at, stamp = time.monotonic(), int(time.time() * 1000)
+        metrics = _live_counts(workflow, outputs)
+        with _lock:
+            _prune_live_progress(at)
+            key = (workflow, execution)
+            item = None if reset else _live_progress.get(key)
+            if item is None:
+                item = {'workflowId': workflow, 'executionId': execution, 'startedAt': stamp,
+                        'nodeId': None, 'stepIndex': None, 'stepCount': 0,
+                        'metrics': dict.fromkeys(_LIVE_METRICS[workflow])}
+                _live_progress[key] = item
+            item.update(updatedAt=stamp, phase=phase, _updated_monotonic=at)
+            if isinstance(node, str):
+                item['nodeId'] = node[:160]
+            if type(index) is int:
+                item['stepIndex'] = index
+            if completed:
+                item['stepCount'] += 1
+            item['metrics'].update({key: value for key, value in metrics.items() if value is not None})
+            _live_progress.move_to_end(key)
+            _prune_live_progress(at)
+    except Exception:
+        with _lock:
+            _health['live_projection_errors'] += 1
+
+
+def read_workflow_live_progress(workflow_id, execution_ids):
+    """Return isolated copies for exact workflow/execution IDs, without IO.
+
+    Manager-created run_id values are persisted workflow execution IDs. Node
+    callbacks update this view before ExecutionStepRecorder's final DB flush.
+    Missing/expired entries require the caller to fall back to persisted facts;
+    this projection is neither a durable record nor shared between processes.
+    """
+    if workflow_id not in WORKFLOWS:
+        return {}
+    with _lock:
+        _prune_live_progress(time.monotonic())
+        result = {}
+        for execution in execution_ids:
+            if not isinstance(execution, str):
+                continue
+            item = _live_progress.get((workflow_id, execution))
+            if item is not None:
+                result[execution] = {key: dict(value) if key == 'metrics' else value
+                                     for key, value in item.items() if not key.startswith('_')}
+        return result
 
 
 def log_path():
@@ -183,9 +304,13 @@ def runner_observer(fn):
         if not ctx:
             return fn(**kwargs)
         wf, trace = ctx
+        execution = kwargs.get('run_id')
         start = kwargs.get("on_step_start")
         end = kwargs.get("on_step_complete")
         def on_start(rid, index, node, inputs):
+            nonlocal execution
+            execution = rid
+            _update_live_progress(wf, execution, node=node.id, index=index)
             key = trace + ":" + str(index)
             with _lock:
                 if len(_active) < 256:
@@ -195,6 +320,8 @@ def runner_observer(fn):
             record(wf, "node.start", trace=trace, execution=rid, node=node.id, step=index)
             return start(rid, index, node, inputs) if start else True
         def on_end(step):
+            _update_live_progress(wf, execution, node=step.node_id, outputs=step.outputs,
+                                  completed=True, phase='failed' if step.error else 'running')
             with _lock:
                 for key in [k for k, v in _active.items() if k.startswith(trace + ":") and v.get("node") == step.node_id]:
                     _active.pop(key, None)
@@ -227,12 +354,19 @@ def runner_observer(fn):
             if end:
                 return end(step)
         kwargs.update(on_step_start=on_start, on_step_complete=on_end)
+        _update_live_progress(wf, execution, reset=True)
         progress("runner.enter", execution=kwargs.get("run_id"), thread=threading.get_ident())
         try:
             result = fn(**kwargs)
+            status = str(result.status).lower()
+            phase = ('cancelled' if status in ('cancelled', 'canceled') else
+                     'failed' if result.error or status in ('failed', 'error') else 'success')
+            _update_live_progress(wf, execution, phase=phase, outputs=getattr(result, 'outputs', None))
             progress("runner.return", status=result.status, has_error=bool(result.error))
             return result
         except BaseException as exc:
+            _update_live_progress(wf, execution,
+                                  phase='cancelled' if isinstance(exc, asyncio.CancelledError) else 'failed')
             progress("runner.error", error_type=type(exc).__name__)
             raise
         finally:

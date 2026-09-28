@@ -6,7 +6,7 @@
   "nameCn": "SOC 工作区场景套件",
   "description": "Composite installer for the Flocks SOC workspace: pages, tools, denoise workflow, and triage workflow.",
   "descriptionCn": "Flocks SOC 工作区组件安装器：包含页面、工具、降噪工作流和研判工作流。",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "author": "Flocks Team",
   "license": "MIT",
   "homepage": "",

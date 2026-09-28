@@ -91,19 +91,19 @@ describe('SOC dashboard contract page runtime', () => {
     pageGetMock.mockReset();
   });
 
-  it('loads stats, activity, and task center data through the page SDK', async () => {
+  it('loads SOC stats and activity without polling the general task center', async () => {
     render(<Page />);
 
     await waitFor(() => {
       expect(pageGetMock).toHaveBeenCalledWith('/stats', expect.anything());
       expect(pageGetMock).toHaveBeenCalledWith('/activity', expect.anything());
-      expect(pageGetMock).toHaveBeenCalledWith('/task-center', expect.anything());
+      expect(pageGetMock).not.toHaveBeenCalledWith('/task-center', expect.anything());
     });
 
     expect(screen.getByText('Flocks AI 智能告警态势中心')).toBeInTheDocument();
   });
 
-  it('pauses task-center polling while the page is hidden', async () => {
+  it('pauses SOC activity polling while the page is hidden', async () => {
     setDocumentHidden(true);
 
     render(<Page />);
@@ -200,123 +200,17 @@ describe('SOC dashboard contract page runtime', () => {
     expect(await screen.findByText('已流转至研判')).toBeInTheDocument();
   });
 
-  it('renders task center overview with corrected metric semantics', async () => {
-    pageGetMock.mockImplementation((path: string) => {
-      if (path === '/stats') {
-        return Promise.resolve({ data: {} });
-      }
-      if (path === '/activity') {
-        return Promise.resolve({
-          data: {
-            cursor: 'eyJsYXN0Um93SWQiOjAsImxhc3RBY3Rpdml0eUlkIjowfQ',
-            events: [],
-            recentEvents: [],
-            workflowEvents: [],
-            batch: {},
-            workflowStats: { callCount: 0, latestStartedAt: 0 },
-            tokenUsage: { totalTokens: 0, todayTokens: 0, todayRequests: 0, dailySeries: [] },
-          },
-        });
-      }
-      if (path === '/task-center') {
-        return Promise.resolve({
-          data: {
-            sessionCount: 12,
-            activeExecutionCount: 9,
-            scheduledExecutionCount: 20,
-            scheduledTodayExecutionCount: 2,
-            workflowExecutionCount: 745000,
-            workflowTodayExecutionCount: 7,
-            scheduledTasks: [
-              {
-                id: 'scheduled-1',
-                name: '定时巡检',
-                status: 'disabled',
-                executionCount: 20,
-                todayExecutionCount: 2,
-                activeCount: 0,
-                successRate: 0.9,
-                lastStatus: 'completed',
-                lastRunAt: '2026-08-04T08:00:00',
-                nextRunAt: '2026-08-05T01:00:00Z',
-              },
-            ],
-            workflows: [
-              {
-                id: 'workflow-1',
-                name: '告警研判',
-                executionCount: 745000,
-                todayExecutionCount: 7,
-                activeCount: 3,
-                successRate: 0.98,
-                lastStatus: 'running',
-                lastRunAt: Date.now(),
-                latestExecutionHash: 'workflow-run-1',
-                latestAlertName: '远程命令执行',
-                sessionId: '',
-                messageId: '',
-                progressPercent: 0.5,
-                progressLabel: '运行中',
-              },
-            ],
-          },
-        });
-      }
-      return Promise.reject(new Error(`unexpected path: ${path}`));
-    });
-
-    const user = userEvent.setup();
+  it('shows only the two SOC workflows and omits the general task center entry', async () => {
+    mockActivity(() => ({ workflowEvents: [workflowEvent('soc'), workflowEvent('other', 'running', {
+      workflowId: 'unrelated-agent-task', alert: { threatName: '不应展示的其他任务' },
+    })] }));
     const { container } = render(<Page />);
-
-    await user.click(await screen.findByRole('tab', { name: '任务中心' }));
-
-    expect(await screen.findByText('关联会话')).toBeInTheDocument();
-    expect(screen.getByText('今日启动 2')).toBeInTheDocument();
-    expect(screen.getAllByText('工作流调用').length).toBeGreaterThanOrEqual(1);
-    expect(screen.getByText('今日调用 7')).toBeInTheDocument();
-    expect(screen.getByText('1 个任务')).toBeInTheDocument();
-    expect(screen.getByText('1 个工作流')).toBeInTheDocument();
-    expect(screen.getByText('已关闭')).toBeInTheDocument();
-    expect(screen.getByText(/上次执行/)).toBeInTheDocument();
-    expect(screen.queryByText(/下次/)).not.toBeInTheDocument();
-    expect(screen.getByText('关联告警')).toBeInTheDocument();
-    expect(screen.getByText('远程命令执行')).toBeInTheDocument();
-    expect(screen.getByText('执行ID')).toBeInTheDocument();
-    expect(screen.getByText('workflow-run-1')).toBeInTheDocument();
-    expect(screen.getByText('执行详情')).toBeInTheDocument();
-    expect(screen.getByText('查看执行')).toBeInTheDocument();
-    expect(screen.getByText(/最近调用/)).toBeInTheDocument();
-
-    const summary = container.querySelector('.task-center-summary') as HTMLElement;
-    expect(summary).toBeTruthy();
-    const cards = Array.from(summary.children) as HTMLElement[];
-    const activeCard = cards.find((card) => within(card).queryByText('执行中')) as HTMLElement;
-    const workflowCard = cards.find((card) => within(card).queryByText('工作流调用')) as HTMLElement;
-
-    expect(activeCard.querySelector('b.animated-number')).toHaveAttribute('title', '9');
-    expect(workflowCard).toHaveAttribute(
-      'title',
-      '优先来自 workflow_stats.call_count；今日为当天 call_count 增量，缺少快照时回退执行记录数',
-    );
-
-    const workflowStats = container.querySelector('.task-center-stats.workflow-stats') as HTMLElement;
-    expect(within(workflowStats).getByText('调用')).toBeInTheDocument();
-    expect(within(workflowStats).getByText('今日调用')).toBeInTheDocument();
-  });
-
-  it('uses dashboard mock rows with the same workflow execution field shape as real task-center data', async () => {
-    window.localStorage.setItem('soc-dashboard-mock-v1', '1');
-
-    render(<Page />);
-
-    const user = userEvent.setup();
-    await user.click(await screen.findByRole('tab', { name: '任务中心' }));
-
-    expect(await screen.findByText('告警研判工作流（Mock）')).toBeInTheDocument();
-    expect(screen.getByText('mock-triage-run-002')).toBeInTheDocument();
-    expect(screen.getAllByText('执行详情').length).toBeGreaterThanOrEqual(1);
-    expect(screen.getAllByText('查看执行').length).toBeGreaterThanOrEqual(1);
-    expect(screen.queryByText('查看对话')).not.toBeInTheDocument();
+    await waitFor(() => expect(container.querySelectorAll('.event-rail-item')).toHaveLength(1));
+    expect(screen.queryByRole('tab', { name: '任务中心' })).not.toBeInTheDocument();
+    const rail = container.querySelector('.command-event-rail') as HTMLElement;
+    expect(within(rail).queryByText('不应展示的其他任务')).not.toBeInTheDocument();
+    expect(pageGetMock).not.toHaveBeenCalledWith('/task-center', expect.anything());
+    expect(within(rail).getByText('SOC 工作套件')).toBeInTheDocument();
   });
 
   it('shows only actual running/queued tasks, not completed playback or empty batches', async () => {
@@ -496,7 +390,7 @@ describe('SOC dashboard contract page runtime', () => {
     const cards = container.querySelector('.ai-evidence-field') as HTMLElement;
     expect(within(cards).queryByText('旧任务')).not.toBeInTheDocument();
     expect(within(cards).getByText(/新任务-/)).toBeInTheDocument();
-    expect(screen.getByText('AI 正在并行处理 10 个任务')).toBeInTheDocument();
+    expect(screen.getByText('本次快照 · 10 个任务执行中')).toBeInTheDocument();
   });
 
   it('does not expire a long-running task whose unchanged status is still confirmed by polls', async () => {
@@ -543,6 +437,133 @@ describe('SOC dashboard contract page runtime', () => {
     await pollActivity();
     await act(async () => { await vi.advanceTimersByTimeAsync(500); });
     expect(container.querySelectorAll('.event-rail-item')).toHaveLength(0);
+  });
+
+  it('hides unfinished tasks older than 30 minutes, without deleting completed observations', async () => {
+    const old = new Date(Date.now() - 31 * 60 * 1000).toISOString();
+    mockActivity(() => ({ workflowEvents: [
+      ...['running', 'queued', 'pending'].map((status) => workflowEvent(`old-${status}`, status, { occurredAt: old })),
+      workflowEvent('current'),
+      workflowEvent('finished', 'completed', { occurredAt: old, live: { metrics: { rawCount: 100, duplicateCount: 60, uniqueCount: 40 } } }),
+    ] }));
+    const { container } = render(<Page />);
+    await waitFor(() => expect(container.querySelectorAll('.event-rail-item')).toHaveLength(1));
+    const overview = screen.getByRole('region', { name: '降噪实时概况' });
+    expect(within(overview).getByText('最近 2 批快照 · 仅计已返回数据')).toBeInTheDocument();
+    expect(within(overview).getByText('≥ 60')).toBeInTheDocument();
+    expect(within(overview).getByText('105')).toBeInTheDocument();
+  });
+
+  it('does not renew the 30-minute display deadline on poll confirmation', async () => {
+    vi.useFakeTimers();
+    const started = new Date(Date.now() - 30 * 60 * 1000 + 2000).toISOString();
+    mockActivity(() => ({ workflowEvents: [workflowEvent('deadline', 'running', { occurredAt: started })] }));
+    const { container } = render(<Page />);
+    await act(async () => {});
+    expect(container.querySelectorAll('.event-rail-item')).toHaveLength(1);
+    await pollActivity();
+    await act(async () => { await vi.advanceTimersByTimeAsync(500); });
+    expect(container.querySelectorAll('.event-rail-item')).toHaveLength(0);
+    expect(container.querySelector('.event-rail-head b')?.textContent).toBe('0');
+  });
+
+  it('removes tasks after 30 minutes even when the next poll never returns', async () => {
+    vi.useFakeTimers();
+    const started = new Date(Date.now() - 30 * 60 * 1000 + 4000).toISOString();
+    mockActivity(() => ({ workflowEvents: [workflowEvent('deadline', 'running', { occurredAt: started })] }));
+    const { container } = render(<Page />);
+    await act(async () => {});
+    const fallback = pageGetMock.getMockImplementation()!;
+    pageGetMock.mockImplementation((path: string, ...args: any[]) => path === '/activity'
+      ? new Promise(() => {}) : fallback(path, ...args));
+    await act(async () => { await vi.advanceTimersByTimeAsync(6000); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(500); });
+    expect(container.querySelectorAll('.event-rail-item')).toHaveLength(0);
+  });
+
+  it('refreshes real node and counters without replaying work or inventing unknown counts', async () => {
+    vi.useFakeTimers();
+    const original = workflowEvent('live-batch', 'running', { live: {
+      nodeId: 'normalize', nodeLabel: '标准化告警', metrics: { rawCount: 20, normalizedCount: 20, duplicateCount: null },
+    } });
+    let event = original;
+    mockActivity(() => ({ workflowEvents: [event], recentEvents: [event] }));
+    const { container } = render(<Page />);
+    await act(async () => {});
+    let card = container.querySelector('.event-rail-item') as HTMLElement;
+    expect(within(card).getByText('当前步骤 · 标准化告警')).toBeInTheDocument();
+    expect(within(card).getAllByText('待返回').length).toBeGreaterThan(0);
+    expect(card.querySelector('.ai-step-track [aria-current="step"]')?.textContent).toBe('标准化');
+    event = { ...original, live: { nodeId: 'dedup_and_write', nodeLabel: '去重入库', metrics: {
+      rawCount: 20, normalizedCount: 20, afterFilterCount: 18, duplicateCount: 12, uniqueCount: 6, filterRemovedCount: 2,
+    } } };
+    await pollActivity();
+    card = container.querySelector('.event-rail-item') as HTMLElement;
+    expect(within(card).getByText('当前步骤 · 去重入库')).toBeInTheDocument();
+    expect(card.querySelector('.ai-step-track [aria-current="step"]')?.textContent).toBe('去重入库');
+    const overview = screen.getByRole('region', { name: '降噪实时概况' });
+    expect(within(overview).getByText('12')).toBeInTheDocument();
+    expect(within(overview).getByText('6')).toBeInTheDocument();
+    expect(within(overview).queryByText('24')).not.toBeInTheDocument(); // Same execution appears in multiple lanes only once.
+    expect(within(overview).getByText('最近 1 批快照 · 仅计已返回数据')).toBeInTheDocument();
+  });
+
+  it('uses returned triage units, never a fabricated completion percentage', async () => {
+    mockActivity(() => ({ workflowEvents: [workflowEvent('triage-live', 'running', {
+      stage: 'triage', workflowId: 'stream_alert_triage', live: { nodeId: 'concurrent_triage', nodeLabel: '并发研判',
+        metrics: { inputCount: 100, workUnitCount: 8, completedCount: 5, cacheHitCount: 2, failedCount: 1 } },
+    })] }));
+    const { container } = render(<Page />);
+    await waitFor(() => expect(container.querySelector('.ai-step-track [aria-current="step"]')).toHaveTextContent('并发研判'));
+    const rail = container.querySelector('.ai-task-board-scroll') as HTMLElement;
+    expect(within(rail).getAllByText('已处理单位').length).toBeGreaterThan(0);
+    expect(within(rail).queryByText('5%')).not.toBeInTheDocument();
+    expect(within(rail).queryByText('63%')).not.toBeInTheDocument();
+    expect(within(rail).getByText('同类告警合为研判单位；数量以节点返回为准')).toBeInTheDocument();
+  });
+
+  it('stops node motion while a finished execution is saving its result', async () => {
+    mockActivity(() => ({ workflowEvents: [workflowEvent('saving', 'running', {
+      live: { nodeId: 'dedup_and_write', phase: 'success', metrics: { rawCount: 5, uniqueCount: 2, duplicateCount: 3 } },
+    })] }));
+    const { container } = render(<Page />);
+    await waitFor(() => expect(screen.getByText('结果保存中')).toBeInTheDocument());
+    expect(screen.getByText('当前步骤 · 执行结束 · 结果保存中')).toBeInTheDocument();
+    expect(container.querySelector('.ai-rail-step-progress')).not.toHaveClass('is-live');
+    expect(container.querySelector('.event-rail-item')).toHaveClass('connection-stale');
+    expect(container.querySelector('.ai-workflow-overview.kind-denoise')).not.toHaveClass('is-live');
+  });
+
+  it('briefly replays a fast denoise completion without resurrecting a running task', async () => {
+    vi.useFakeTimers();
+    const event = workflowEvent('quick-done', 'completed', { live: {
+      nodeId: 'dedup_and_write', phase: 'success', metrics: { rawCount: 1, duplicateCount: 1, uniqueCount: 0 },
+    } });
+    mockActivity(() => ({ workflowEvents: [event] }));
+    const { container } = render(<Page />);
+    await act(async () => {});
+    expect(screen.getByText('最近一批已完成 · 动效回放')).toBeInTheDocument();
+    expect(screen.getByLabelText('降噪处理动态')).toHaveClass('is-flowing');
+    expect(container.querySelectorAll('.event-rail-item')).toHaveLength(0);
+    await act(async () => { await vi.advanceTimersByTimeAsync(7000); });
+    expect(screen.queryByText('最近一批已完成 · 动效回放')).not.toBeInTheDocument();
+    expect(screen.getByLabelText('降噪处理动态')).not.toHaveClass('is-flowing');
+    expect(container.querySelectorAll('.event-rail-item')).toHaveLength(0);
+  });
+
+  it('allows decorative motion while real counters are still unknown, and stops it offline', async () => {
+    vi.useFakeTimers();
+    let data: any = { workflowEvents: [workflowEvent('unknown-counts', 'running', {
+      live: { nodeId: null, metrics: {} }, result: { rawCount: null },
+    })] };
+    mockActivity(() => data);
+    render(<Page />);
+    await act(async () => {});
+    expect(screen.getByLabelText('降噪处理动态')).toHaveClass('is-flowing');
+    expect(within(screen.getByRole('region', { name: '降噪实时概况' })).getAllByText('待返回').length).toBeGreaterThan(0);
+    data = { error: 'offline' };
+    await pollActivity();
+    expect(screen.getByLabelText('降噪处理动态')).not.toHaveClass('is-flowing');
   });
 
   it('ignores an in-flight activity response after unmount', async () => {

@@ -4,6 +4,7 @@ import json
 import math
 import re
 import sqlite3
+import sys
 import time
 from collections import Counter, OrderedDict
 from contextlib import closing
@@ -78,6 +79,13 @@ _token_usage_cache = {"updatedAt": 0.0, "mtimeNs": 0, "value": None}
 _TOKEN_USAGE_CACHE_TTL = 30.0
 _cache_lock = RLock()
 _workflow_activity_read_lock = Lock()
+_WORKFLOW_ACTIVITY_MAX_AGE_MS = 30 * 60 * 1000
+_WORKFLOW_ACTIVITY_STEP_LIMIT = 6
+_WORKFLOW_ACTIVITY_NODE_LABELS = {
+    "receive_alert": "接收告警", "normalize": "标准化告警", "filter_logs": "过滤告警",
+    "dedup_and_write": "去重并保存", "load_dedup_file": "读取待研判告警",
+    "concurrent_triage": "并发研判", "commit_cursor": "保存处理进度", "summarize": "汇总研判结果",
+}
 _schema_lock = RLock()
 _schema_ready: set = set()
 _activity_pruned_at: float = 0
@@ -1145,6 +1153,95 @@ def _get_workflow_recent_events(
         _workflow_activity_read_lock.release()
 
 
+def _dashboard_count(value):
+    """Unknown counters stay unknown; never turn absent values into 0 or 1."""
+    if type(value) is int and 0 <= value <= 2**53 - 1:
+        return value
+    if isinstance(value, str) and re.fullmatch(r"\d{1,16}", value):
+        parsed = int(value)
+        return parsed if parsed <= 2**53 - 1 else None
+    return None
+
+
+def _dashboard_live_metrics(stage, documents):
+    if stage == "denoise":
+        names = {"rawCount": "raw_count", "normalizedCount": "normalized_count",
+                 "afterFilterCount": "after_filter_count", "uniqueCount": "unique_key_count",
+                 "duplicateCount": "dedup_removed_count", "filterRemovedCount": "filter_removed_count"}
+    else:
+        names = {"inputCount": "total", "completedCount": "processed_count", "cacheHitCount": "cache_hit",
+                 "failedCount": "triage_failed", "workUnitCount": "work_units",
+                 "followersReusedCount": "followers_reused"}
+    metrics = dict.fromkeys(names)
+    if stage == "triage":
+        metrics.update(dict.fromkeys(("attackCount", "benignCount", "unknownCount")))
+    for document in documents:
+        stats = document.get("stats" if stage == "denoise" else "triage_stats")
+        stats = stats if isinstance(stats, dict) and stats.get("_type") != "dict" else {}
+        for key, field in names.items():
+            count = _dashboard_count(stats.get(field))
+            if count is not None:
+                metrics[key] = count
+        if stage == "denoise":
+            # after_dedup_count is the enriched row count in current workflows,
+            # including duplicates; it is not the unique-key count.
+            if _dashboard_count(stats.get("unique_key_count")) is None:
+                remaining, removed = (_dashboard_count(stats.get(key)) for key in
+                                      ("after_filter_count", "dedup_removed_count"))
+                if remaining is not None and removed is not None and remaining >= removed:
+                    metrics["uniqueCount"] = remaining - removed
+            if (document.get("is_duplicate") is True and metrics["rawCount"] == 1
+                    and metrics["afterFilterCount"] == 1 and metrics["uniqueCount"] == 1
+                    and metrics["duplicateCount"] == 0 and "unique_key_count" not in stats):
+                # Legacy singleton stats only counted in-batch duplicates; the
+                # explicit cross-batch duplicate flag is the recorded result.
+                metrics["uniqueCount"], metrics["duplicateCount"] = 0, 1
+        else:
+            load = document.get("load_stats")
+            if metrics["inputCount"] is None and isinstance(load, dict):
+                metrics["inputCount"] = _dashboard_count(load.get("record_count"))
+            if _dashboard_count(stats.get("processed_count")) is None:
+                counts = [_dashboard_count(stats.get(key)) for key in ("triaged", "cache_hit", "triage_failed")]
+                if all(value is not None for value in counts):
+                    metrics["completedCount"] = sum(counts)  # Work units, including failures; not follower rows.
+            verdicts = stats.get("verdict_counts")
+            if isinstance(verdicts, dict) and verdicts.get("_type") != "dict":
+                for key, fields in {"attackCount": ("attack", "attack_success", "attack_failed"),
+                                    "benignCount": ("non_attack", "benign"), "unknownCount": ("unknown",)}.items():
+                    counts = [_dashboard_count(verdicts.get(field)) for field in fields if field in verdicts]
+                    if counts and all(value is not None for value in counts):
+                        metrics[key] = sum(counts)
+    return metrics
+
+
+def _dashboard_live_progress(row, stage, documents):
+    payload = _safe_json_object(row["payload"])
+    def metadata(column, legacy):
+        value = row[column]
+        return payload.get(legacy) if value is None else value
+    node = metadata("current_node_id", "currentNodeId")
+    node = node[:128] if isinstance(node, str) and node else None
+    phase = metadata("current_phase", "currentPhase")
+    return {
+        "nodeId": node, "nodeLabel": _WORKFLOW_ACTIVITY_NODE_LABELS.get(node, node),
+        "phase": phase[:64] if isinstance(phase, str) and phase else None,
+        "stepIndex": _dashboard_count(metadata("current_step_index", "currentStepIndex")),
+        "stepCount": _dashboard_count(metadata("step_count", "stepCount")),
+        "metrics": _dashboard_live_metrics(stage, documents),
+    }
+
+
+def _dashboard_memory_progress(workflow_name, ids):
+    try:
+        # No producer in this process means there cannot be an in-memory
+        # snapshot. Avoid importing the workflow engine on a dashboard read.
+        module = sys.modules.get("flocks.workflow.soc_diagnostics")
+        reader = getattr(module, "read_workflow_live_progress", None)
+        return reader(workflow_name, ids) if callable(reader) else {}
+    except Exception:
+        return {}  # Optional in-memory telemetry must not break read-only activity.
+
+
 def _read_workflow_recent_events(workflow_name, start_time, end_time, limit, snapshot):
     if not WORKFLOW_DB.is_file():
         if snapshot is not None:
@@ -1170,24 +1267,34 @@ def _read_workflow_recent_events(workflow_name, start_time, end_time, limit, sna
             except sqlite3.OperationalError:
                 has_octet_length = False
 
-            def preview_column(name):
-                if name not in execution_columns or not has_octet_length:
+            def preview_column(name, columns=execution_columns, byte_limit=262144):
+                if name not in columns or not has_octet_length:
                     return f"'{{}}' AS {name}"
-                return f"CASE WHEN octet_length({name}) <= 262144 THEN {name} ELSE '{{}}' END AS {name}"
+                return f"CASE WHEN octet_length({name}) <= {byte_limit} THEN {name} ELSE '{{}}' END AS {name}"
 
             metadata_select = ", ".join([
                 "id", "status", "started_at",
                 _workflow_execution_column_expr(execution_columns, "updated_at", "started_at"),
+                *[_workflow_execution_column_expr(execution_columns, name, "NULL") for name in
+                  ("current_node_id", "current_phase", "current_step_index", "step_count")],
             ])
             query = f"SELECT {metadata_select} FROM workflow_executions WHERE workflow_id = ?"
             query_params = [workflow_name]
+            active_status = "LOWER(TRIM(COALESCE(status, ''))) IN ('running', 'queued', 'pending')"
+            cutoff = int(datetime.now(timezone.utc).timestamp() * 1000) - _WORKFLOW_ACTIVITY_MAX_AGE_MS
+            # Hide stale unfinished cards before either LIMIT. This is a view
+            # filter only: the execution and all of its history remain intact.
+            query += f" AND (NOT ({active_status}) OR started_at >= ?)"
+            query_params.append(cutoff)
             if start_time > 0 and end_time > 0:
                 query += " AND started_at >= ? AND started_at <= ?"
                 query_params.extend((int(start_time * 1000), int(end_time * 1000)))
             row_limit = max(1, min(_safe_int(limit), 10))
             active_rows = conn.execute(
-                query + " AND status IN ('running', 'queued', 'pending') ORDER BY started_at DESC LIMIT ?",
-                [*query_params, row_limit],
+                # Keep an explicit range predicate. SQLite does not infer it
+                # from the status OR above and could scan all old executions.
+                query + f" AND {active_status} AND started_at >= ? ORDER BY started_at DESC LIMIT ?",
+                [*query_params, cutoff, row_limit],
             ).fetchall()
             recent_rows = conn.execute(query + " ORDER BY started_at DESC LIMIT ?", [*query_params, row_limit]).fetchall()
             ids = list(dict.fromkeys(row["id"] for row in [*active_rows, *recent_rows]))
@@ -1196,6 +1303,7 @@ def _read_workflow_recent_events(workflow_name, start_time, end_time, limit, sna
             # Select payloads only AFTER bounding IDs; a sorting query must not
             # materialize previews for every matching execution before LIMIT.
             rows = []
+            steps_by_id = {}
             if ids:
                 previews = ", ".join(preview_column(name) for name in ("output_results", "input_params", "payload"))
                 placeholders = ",".join("?" for _ in ids)
@@ -1204,6 +1312,24 @@ def _read_workflow_recent_events(workflow_name, start_time, end_time, limit, sna
                     ids,
                 ).fetchall()}
                 rows = [by_id[key] for key in ids]
+                step_columns = {row[1] for row in conn.execute("PRAGMA table_info(workflow_execution_steps)").fetchall()}
+                if {"exec_id", "step_index", "outputs"} <= step_columns and has_octet_length:
+                    for key in ids:
+                        # Bound step IDs first too: sorting must never load all
+                        # outputs for long-running/looping executions.
+                        indexes = [step[0] for step in conn.execute(
+                            "SELECT step_index FROM workflow_execution_steps WHERE exec_id=? ORDER BY step_index DESC LIMIT ?",
+                            (key, _WORKFLOW_ACTIVITY_STEP_LIMIT),
+                        ).fetchall()]
+                        if indexes:
+                            placeholders = ",".join("?" for _ in indexes)
+                            steps_by_id[key] = [_safe_json_object(step["outputs"]) for step in conn.execute(
+                                f"SELECT step_index, {preview_column('outputs', step_columns, 65536)} "
+                                f"FROM workflow_execution_steps WHERE exec_id=? AND step_index IN ({placeholders}) ORDER BY step_index",
+                                (key, *indexes),
+                            ).fetchall()]
+                        if time.monotonic() > deadline:
+                            raise sqlite3.OperationalError("activity read budget exceeded")
             if time.monotonic() > deadline:
                 raise sqlite3.OperationalError("activity read budget exceeded")
             if snapshot is not None and len(active_rows) == row_limit:
@@ -1213,25 +1339,73 @@ def _read_workflow_recent_events(workflow_name, start_time, end_time, limit, sna
             snapshot.update(complete=False, available=False)
         return []
 
+    memory = _dashboard_memory_progress(workflow_name, ids)
     events = []
     for row in rows:
+        if time.monotonic() > deadline:
+            if snapshot is not None:
+                snapshot.update(complete=False, available=False)
+            return []
         execution_id = row["id"]
         status = row["status"]
         started_at = row["started_at"]
         output_text = row["output_results"]
         input_text = row["input_params"]
         payload_text = row["payload"]
-        metrics = _workflow_execution_metrics(output_text, input_text)
         alert, raw_count = _dashboard_execution_detail(output_text, input_text)
+        output = _safe_json_object(output_text)
+        documents = [*steps_by_id.get(execution_id, []), output]
+        live = _dashboard_live_progress(row, workflow_stage, documents)
+        if workflow_stage == "denoise" and live["metrics"]["rawCount"] is None:
+            live["metrics"]["rawCount"] = raw_count
+        incoming = memory.get(execution_id) if isinstance(memory, dict) else None
+        updated_at = _safe_int(row["updated_at"] or started_at)
+        normalized_status = str(status or "").strip().lower()
+        same_execution = (isinstance(incoming, dict) and incoming.get("workflowId") == workflow_name
+                          and incoming.get("executionId") == execution_id)
+        terminal_states = {"success", "completed", "failed", "error", "cancelled", "canceled", "timeout"}
+        incoming_newer = (same_execution and normalized_status not in terminal_states
+                          and _safe_int(incoming.get("updatedAt")) >= updated_at)
+        terminal_supplement = (same_execution and normalized_status in terminal_states
+                               and incoming.get("phase") in terminal_states)
+        if incoming_newer:
+            # Merge only this execution, and never replace known counters with
+            # missing/unknown telemetry. DB status remains authoritative.
+            for key in ("nodeId", "phase"):
+                value = incoming.get(key)
+                if isinstance(value, str) and value:
+                    live[key] = value[:128]
+            for key in ("stepIndex", "stepCount"):
+                value = _dashboard_count(incoming.get(key))
+                if value is not None:
+                    live[key] = value
+            live["nodeLabel"] = _WORKFLOW_ACTIVITY_NODE_LABELS.get(live["nodeId"], live["nodeId"])
+            updated_at = _safe_int(incoming["updatedAt"])
+        if incoming_newer or terminal_supplement:
+            # Final callbacks precede the DB commit. If bounded DB previews
+            # omitted large outputs, those final counters remain valid for the
+            # same execution. Older terminal telemetry may only fill gaps;
+            # it must not replace persisted state, timestamps or known counts,
+            # even if callback/commit timestamps tie or clocks move backwards.
+            incoming_metrics = incoming.get("metrics")
+            if isinstance(incoming_metrics, dict):
+                for key in live["metrics"]:
+                    value = _dashboard_count(incoming_metrics.get(key))
+                    if value is not None and (incoming_newer or live["metrics"][key] is None):
+                        live["metrics"][key] = value
+        metrics = live["metrics"]
+        if workflow_stage == "denoise":
+            if metrics["rawCount"] is None:
+                metrics["rawCount"] = raw_count
+            raw_count = metrics["rawCount"]
         if workflow_stage == "denoise" and raw_count == 0 and not alert:
             continue  # No alert work; keep the execution itself untouched.
-        unique_count = metrics["uniqueCount"]
+        unique_count = metrics.get("uniqueCount")
         threat_name = alert.get("threatName", "")
         if not threat_name and workflow_stage == "triage":
             threat_name = _workflow_latest_alert_name(workflow_name, output_text, input_text)
         if not threat_name:
             threat_name = f"降噪批次 · 原始 {raw_count} 条" if raw_count and raw_count > 0 else "降噪批次 · 数量未提供"
-        normalized_status = str(status or "").lower()
         event_status = (
             "completed"
             if normalized_status in {"success", "completed"}
@@ -1245,36 +1419,37 @@ def _read_workflow_recent_events(workflow_name, start_time, end_time, limit, sna
                 "input_params": input_text,
             }
         )
+        try:
+            occurred_at = datetime.fromtimestamp(_safe_int(started_at) / 1000).astimezone().isoformat(timespec="seconds")
+            refreshed_at = datetime.fromtimestamp(updated_at / 1000).astimezone().isoformat(timespec="milliseconds")
+        except (OverflowError, OSError, ValueError):
+            if snapshot is not None:
+                snapshot["complete"] = False
+            continue  # Invalid persisted timestamps must not crash the whole projection.
         events.append(
             {
                 "eventId": f"workflow-execution:{execution_id}",
                 "stage": workflow_stage,
                 "status": event_status,
-                "occurredAt": datetime.fromtimestamp(
-                    _safe_int(started_at) / 1000
-                ).astimezone().isoformat(timespec="seconds"),
-                "updatedAt": datetime.fromtimestamp(
-                    _safe_int(row["updated_at"] or started_at) / 1000
-                ).astimezone().isoformat(timespec="milliseconds"),
+                "occurredAt": occurred_at,
+                "updatedAt": refreshed_at,
                 "triggerSource": "workflow_execution",
                 "workflowId": workflow_name,
                 "sessionId": session_id,
                 "messageId": message_id,
-                "sampleCount": max(unique_count, 1),
+                "sampleCount": unique_count if workflow_stage == "denoise" else metrics["inputCount"],
+                "live": live,
                 "alert": {
                     **alert,
                     "id": alert.get("id") or "",
                     "threatName": threat_name,
                 },
                 "result": {
-                    "isDuplicate": metrics["isDuplicate"],
-                    "clusterId": str(metrics["clusterCount"] or "--"),
-                    **{
-                        key: value
-                        for key, value in metrics.items()
-                        if key not in {"preview", "sourceCounts", "sourceType"}
-                    },
-                    "rawCount": raw_count,
+                    **metrics,
+                    "isDuplicate": output.get("is_duplicate") if type(output.get("is_duplicate")) is bool else None,
+                    "reductionRate": (_ratio(max(raw_count - unique_count, 0), raw_count)
+                                      if raw_count is not None and unique_count is not None else None),
+                    "rawCount": raw_count if workflow_stage == "denoise" else metrics["inputCount"],
                 },
             }
         )
