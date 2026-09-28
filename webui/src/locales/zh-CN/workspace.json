@@ -94,6 +94,7 @@
     "nextPage": "下一页",
     "connection": {
       "title": "连接设置",
+      "guide": "配置说明",
       "provider": "知识库引擎",
       "baseUrl": "RAGFlow 地址",
       "apiKey": "API Key",

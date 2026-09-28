@@ -94,6 +94,7 @@
     "nextPage": "Next page",
     "connection": {
       "title": "Connection settings",
+      "guide": "Configuration guide",
       "provider": "Knowledge engine",
       "baseUrl": "RAGFlow URL",
       "apiKey": "API Key",

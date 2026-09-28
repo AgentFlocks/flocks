@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react';
-import { act, render, screen, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { createInstance } from 'i18next';
 import { I18nextProvider } from 'react-i18next';
@@ -8,6 +8,7 @@ import { knowledgebaseAPI, KnowledgebaseError } from '@/api/knowledgebase';
 import { ToastProvider } from '@/components/common/Toast';
 import common from '@/locales/en-US/common.json';
 import workspace from '@/locales/en-US/workspace.json';
+import workspaceZh from '@/locales/zh-CN/workspace.json';
 import ConnectionSettingsSheet from './ConnectionSettingsSheet';
 
 vi.mock('@/api/knowledgebase', async importOriginal => {
@@ -19,9 +20,10 @@ vi.mock('@/hooks/useDefaultModelVision', () => ({ useDefaultModelVision: () => n
 const api = vi.mocked(knowledgebaseAPI);
 const i18n = createInstance();
 beforeAll(async () => {
-  await i18n.init({ lng: 'en-US', fallbackLng: 'en-US', resources: { 'en-US': { workspace, common } }, interpolation: { escapeValue: false } });
+  await i18n.init({ lng: 'en-US', fallbackLng: 'en-US', resources: { 'en-US': { workspace, common }, 'zh-CN': { workspace: workspaceZh, common } }, interpolation: { escapeValue: false } });
 });
-beforeEach(() => {
+beforeEach(async () => {
+  await i18n.changeLanguage('en-US');
   vi.resetAllMocks();
   api.connection.mockResolvedValue({ provider: 'ragflow', base_url: 'https://ragflow.example', has_api_key: true });
 });
@@ -36,6 +38,27 @@ function mount(onClose = vi.fn(), onSaved = vi.fn()) {
 }
 
 describe('ConnectionSettingsSheet', () => {
+  it.each([
+    ['en-US', workspace, 'Flocks Knowledge Base Guide'],
+    ['zh-CN', workspaceZh, 'Flocks 知识库使用指南'],
+  ] as const)('opens the README in a separate %s drawer without losing the draft', async (language, messages, heading) => {
+    await i18n.changeLanguage(language);
+    const user = userEvent.setup();
+    const onClose = mount();
+    const key = await screen.findByLabelText(messages.knowledge.connection.apiKey);
+    await user.type(key, 'unsaved-key');
+    await user.click(screen.getByRole('button', { name: messages.knowledge.connection.guide }));
+    const guide = screen.getByRole('dialog', { name: messages.knowledge.connection.guide });
+    expect(within(guide).getByRole('heading', { level: 1, name: heading })).toBeInTheDocument();
+    expect(within(guide).getByRole('table')).toBeInTheDocument();
+    await user.click(within(guide).getByRole('button', { name: messages.knowledge.close }));
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(key).toHaveValue('unsaved-key');
+    expect(onClose).not.toHaveBeenCalled();
+    expect(api.saveConnection).not.toHaveBeenCalled();
+    expect(api.connection).toHaveBeenCalledTimes(1);
+  });
+
   it('shows only RAGFlow and never reads or fills a stored key', async () => {
     mount();
     expect(await screen.findByRole('combobox', { name: workspace.knowledge.connection.provider })).toHaveValue('ragflow');

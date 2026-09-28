@@ -5,6 +5,7 @@ import EntitySheet from '@/components/common/EntitySheet';
 import PasswordInput from '@/components/common/PasswordInput';
 import { useToast } from '@/components/common/Toast';
 import { Button, inputClass } from './ui';
+import ConnectionGuideSheet from './ConnectionGuideSheet';
 
 const safeSaveErrorCodes = new Set([
   'invalid_request',
@@ -27,6 +28,7 @@ export default function ConnectionSettingsSheet({ onClose, onSaved }: { onClose:
   const [loadError, setLoadError] = useState(false);
   const [loadRevision, setLoadRevision] = useState(0);
   const [saving, setSaving] = useState(false);
+  const [guideOpen, setGuideOpen] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const savingRef = useRef(false);
 
@@ -88,7 +90,7 @@ export default function ConnectionSettingsSheet({ onClose, onSaved }: { onClose:
     }
   };
 
-  return <EntitySheet
+  return <><EntitySheet
     open
     mode="edit"
     entityType={t('knowledge.connection.title')}
@@ -108,7 +110,10 @@ export default function ConnectionSettingsSheet({ onClose, onSaved }: { onClose:
     </div>}
     {!loading && settings && <div className="space-y-5">
       <div>
-        <label htmlFor="knowledge-provider" className="mb-1 block text-sm font-medium text-gray-700">{t('knowledge.connection.provider')}</label>
+        <div className="mb-1 flex items-center justify-between gap-2">
+          <label htmlFor="knowledge-provider" className="block text-sm font-medium text-gray-700">{t('knowledge.connection.provider')}</label>
+          <button type="button" onClick={() => setGuideOpen(true)} disabled={saving} className="text-sm text-blue-600 hover:underline disabled:opacity-50">{t('knowledge.connection.guide')}</button>
+        </div>
         <select id="knowledge-provider" defaultValue="ragflow" disabled={saving} className={inputClass}>
           <option value="ragflow">RAGFlow</option>
         </select>
@@ -124,5 +129,7 @@ export default function ConnectionSettingsSheet({ onClose, onSaved }: { onClose:
       </div>
       {saveError && <p role="alert" className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">{saveError}</p>}
     </div>}
-  </EntitySheet>;
+  </EntitySheet>
+    {guideOpen && <ConnectionGuideSheet onClose={() => setGuideOpen(false)} />}
+  </>;
 }
