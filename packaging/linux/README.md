@@ -83,7 +83,7 @@ systemd 用 oneshot 而不是把 `service-daemon` 放前台，是因为在线升
 
 ## 旧数据怎么带过来
 
-数据目录先看机器上已有的 `/etc/flocks/flocks.env`：里面的 `FLOCKS_ROOT` 是绝对路径就一直用它（运维把数据挪到数据盘的情况），没有才用 `/var/lib/flocks/.flocks`。Pro 标记、建目录、`install_profile.json` 都跟着这个目录走。之前这里写死了默认路径，数据挪过盘的机器重装时读不到 Pro 标记，会把 Pro 实例装成开源版。
+数据目录先看机器上已有的 `/etc/flocks/flocks.env`：里面的 `FLOCKS_ROOT` 是绝对路径就一直用它（运维把数据挪到数据盘的情况），没有才用 `/var/lib/flocks/.flocks`。Pro 标记、建目录、`install_profile.json` 都跟着这个目录走。只认 `FLOCKS_ROOT=` 这种写法，和 systemd、安装脚本合并 env 的读法一致：`export FLOCKS_ROOT=` 对服务不生效，安装脚本会打警告并按默认目录处理；写成相对路径直接报错退出。之前这里写死了默认路径，数据挪过盘的机器重装时读不到 Pro 标记，会把 Pro 实例装成开源版。
 
 数据目录里还没有用户数据时（`config/flocks.json`、`config/flocks.jsonc`、`data/flocks.db` 都不在，一般就是这台机器第一次装离线包），安装脚本会找上一个实例的数据拷一份过来，按这个顺序找：
 
@@ -100,11 +100,11 @@ sudo 默认会清掉调用方的环境变量，变量要写在 sudo 后面：`su
 拷贝由 `installer/migrate_data.py` 用包内 Python 执行，源目录只读不写：
 1. 整份拷到 `<数据目录>.migrating-<时间戳>`，跳过 socket、管道这类运行时文件。源目录顶层有指向别处的目录软链（比如 `data` 挪到了数据盘），拷成实体目录，新旧实例不共用同一份数据库。
 2. 原来的数据目录如果已经存在（没有用户数据），把只有它有的文件并进拷贝，然后把它改名成 `.pre-migration-<时间戳>`。
-3. 把拷贝改名成数据目录，最后 `chown -R flocks:flocks <数据目录>/`。结尾的斜杠让软链形式的数据目录跟到链接目标；树里的软链只改链接本身，不会顺着它去改树外文件的属主。
+3. 先把整份拷贝的属主交给 flocks，再把拷贝改名成数据目录。改名是最后一步，改名成功时数据已经是服务能用的状态。
 
-这一步排在创建服务用户之后、停旧程序之前，拷失败时旧安装原样不动，已拷的部分留在 `.migrating-*` 里。
+这一步排在创建服务用户之后、停旧程序之前，拷失败时旧安装原样不动，已拷的部分留在 `.migrating-*` 里。中途断掉只有两种结果：没改名，目标原样，重跑会从头再迁一次；已改名，数据已经完整归 flocks 所有。改属主时软链只改链接本身，不会顺着它去改树外文件；已有实例的数据目录，安装脚本从不改它的属主。
 
-旧实例里写死的绝对路径会跟着改：`config/flocks.json`、`config/mcp_list.json`、`data/hub/**/*.json`（hub 安装记录的 `installPath`、`backupPath`）里以旧目录开头的字符串，以及指向旧目录的软链，都换成新目录。迁移记录写在 `run/offline-migration-<时间戳>.json`。旧目录不删，装完会提示确认后自己清。
+旧实例里写死的绝对路径会跟着改：`config/flocks.json`、`config/flocks.jsonc`、`config/config.json`、`config/mcp_list.json`、`data/hub/**/*.json`（hub 安装记录的 `installPath`、`backupPath`）里以旧目录开头的字符串值，以及指向旧目录的软链，都换成新目录。改的时候只动字符串本身，注释、格式和键名原样保留；比较时先按 JSON 解码，`\uXXXX`、`\/` 这类转义写法也能匹配；读不了的文件（不是 UTF-8）会在安装日志里列出来。迁移记录写在 `run/offline-migration-<时间戳>.json`。旧目录不删，装完会提示确认后自己清。
 
 有两处没有跟着改。工作流中心的注册表按工作流文件的绝对路径算 id，从 `/root/.flocks` 换到 `/var/lib/flocks/.flocks` 后，发布过的工作流 API 服务要重新发布一次，工作流定义本身已经拷过来了。在线版程序目录里的 `.env`（比如 `/root/flocks/.env`）不在数据目录下，不会带过来，里面的变量要搬进 `/etc/flocks/flocks.env`。
 

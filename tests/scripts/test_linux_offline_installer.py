@@ -1074,10 +1074,14 @@ def test_migrate_helper_reads_the_flocks_root_an_installation_runs_with(tmp_path
     assert helper.configured_root(env_file) == ""
     env_file.write_text('HOME=/var/lib/flocks\nFLOCKS_ROOT=/var/lib/flocks/.flocks\n# note\nFLOCKS_ROOT="/data/flocks/"\n', encoding="utf-8")
     assert helper.configured_root(env_file) == "/data/flocks"
+    # systemd and the env merge only honour plain FLOCKS_ROOT= lines; an export line changes nothing
     env_file.write_text("export FLOCKS_ROOT=/srv/flocks\n", encoding="utf-8")
-    assert helper.configured_root(env_file) == "/srv/flocks"
-    env_file.write_text("FLOCKS_ROOT=~/.flocks\n", encoding="utf-8")
     assert helper.configured_root(env_file) == ""
+    env_file.write_text("FLOCKS_ROOT=/data/flocks\nexport FLOCKS_ROOT=/srv/flocks\n", encoding="utf-8")
+    assert helper.configured_root(env_file) == "/data/flocks"
+    env_file.write_text("FLOCKS_ROOT=~/.flocks\n", encoding="utf-8")
+    with pytest.raises(helper.MigrationError, match="不是绝对路径"):
+        helper.configured_root(env_file)
 
 
 def test_migrate_helper_never_deletes_anything() -> None:
@@ -1174,7 +1178,9 @@ def test_installer_chowns_the_data_root_without_following_links_out_of_it() -> N
         if line.lstrip().startswith("chown") and "-R" in line.split():
             flags = line.split()
             assert not ({"-H", "-L"} & set(flags)) or "-h" in flags, line
-    assert 'chown -R "$SERVICE_USER:$SERVICE_USER" "$DATA_ROOT/"' in text
+    # the migrated copy is handed over by the helper before its rename; the live data root is never re-owned
+    assert '--owner "$SERVICE_USER"' in text
+    assert not re.search(r'chown\s+-R[^\n]*"\$DATA_ROOT', text), "no recursive chown of the data root"
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="posix symlinks")
@@ -1299,3 +1305,120 @@ def test_migrate_helper_refuses_an_external_link_that_contains_the_new_data_dir(
     sibling.mkdir()
     os.symlink(sibling, source / "workspace")
     assert helper.check(source, data_disk / "flocks" / ".flocks", tmp_path / "no-proc").endswith("MB")
+
+
+@pytest.mark.skipif(BASH is None or sys.platform == "win32", reason="requires bash")
+def test_installer_reads_flocks_root_the_way_the_service_gets_it(tmp_path: Path) -> None:
+    """An export line never reaches the service (the merge appends FLOCKS_ROOT=, systemd skips export),
+    so the installer must not migrate into or chown that directory."""
+    payload = _fake_payload(tmp_path, with_bundle=True)
+    custom = _previous_data(tmp_path / "data-disk" / ".flocks")
+    env_file = tmp_path / "flocks.env"
+    env_file.write_text(f"export FLOCKS_ROOT={custom}\n", encoding="utf-8")
+    result = _dry_run(payload, extra_env={"FLOCKS_OFFLINE_ENV_FILE": str(env_file)})
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert f"数据目录 {tmp_path / 'data-home' / '.flocks'}" in result.stdout
+    assert "不会生效" in result.stderr
+
+    env_file.write_text("FLOCKS_ROOT=relative/flocks\n", encoding="utf-8")
+    result = _dry_run(payload, extra_env={"FLOCKS_OFFLINE_ENV_FILE": str(env_file)})
+    assert result.returncode == 1
+    assert "不是绝对路径" in result.stderr and "本次未做任何改动" in result.stderr
+
+
+def test_migrate_helper_rewrites_jsonc_and_legacy_config_and_keeps_comments(tmp_path: Path) -> None:
+    helper = _load_migrate_helper()
+    source = _previous_data(tmp_path / "old" / ".flocks")
+    jsonc = (
+        "{\n"
+        f'  // copied from "{source}/plugins" once\n'
+        f'  "{source}/as-a-key": 1,\n'
+        f'  "mcp": {{"cmd": "{source}/plugins/mcp/run.sh", "url": "http://host//path"}},\n'
+        f'  /* {source} */ "sibling": "{source}-old/x"\n'
+        "}\n"
+    )
+    (source / "config" / "flocks.jsonc").write_text(jsonc, encoding="utf-8")
+    (source / "config" / "config.json").write_text(json.dumps({"workspace": f"{source}/workspace"}), encoding="utf-8")
+    target = tmp_path / "new" / ".flocks"
+    lines = helper.copy(source, target, "4")
+
+    migrated = (target / "config" / "flocks.jsonc").read_text(encoding="utf-8")
+    expected = jsonc.replace(f'"cmd": "{source}/', f'"cmd": "{target}/')
+    assert migrated == expected, "only the value changes: comments, keys, siblings and formatting stay"
+    legacy = json.loads((target / "config" / "config.json").read_text(encoding="utf-8"))
+    assert legacy["workspace"] == f"{target}/workspace"
+    assert any("flocks.jsonc（1 处）" in line and "config.json（1 处）" in line for line in lines)
+
+
+def test_migrate_helper_prints_utf8_whatever_the_locale(tmp_path: Path) -> None:
+    """A latin-1 stdout used to raise UnicodeEncodeError on the first Chinese line, after the swap."""
+    source = _previous_data(tmp_path / "old" / ".flocks")
+    env = {**os.environ, "PYTHONIOENCODING": "latin-1", "LC_ALL": "C", "LANG": "C"}
+    copied = subprocess.run(
+        [sys.executable, str(MIGRATE_HELPER), "copy", "--source", str(source), "--target", str(tmp_path / "new" / ".flocks"),
+         "--stamp", "8"],
+        capture_output=True, env=env,
+    )
+    assert copied.returncode == 0, copied.stdout + copied.stderr
+    assert "已拷贝" in copied.stdout.decode("utf-8")
+    refused = subprocess.run(
+        [sys.executable, str(MIGRATE_HELPER), "plan", "--target", str(tmp_path / "x" / ".flocks"), "--explicit", "relative"],
+        capture_output=True, env=env,
+    )
+    assert refused.returncode == 1 and "绝对路径" in refused.stdout.decode("utf-8")
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="posix symlinks")
+def test_migrate_helper_treats_root_as_containing_everything(tmp_path: Path) -> None:
+    helper = _load_migrate_helper()
+    assert helper._inside(Path("/var/lib"), Path("/")) and helper._inside(Path("/"), Path("/"))
+    source = _previous_data(tmp_path / "old" / ".flocks")
+    os.symlink("/", source / "workspace")
+    with pytest.raises(helper.MigrationError, match="拷贝本身再拷进去"):
+        helper.check(source, tmp_path / "new" / ".flocks", tmp_path / "no-proc")
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="posix ownership")
+def test_migrate_helper_hands_the_copy_to_the_service_user_before_the_swap(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import pwd
+
+    helper = _load_migrate_helper()
+    source = _previous_data(tmp_path / "old" / ".flocks")
+    target = tmp_path / "new" / ".flocks"
+    me = pwd.getpwuid(os.getuid()).pw_name
+    calls: list[tuple[str, bool]] = []
+    real_chown = os.chown
+
+    def _recording_chown(path, uid, gid, *, dir_fd=None, follow_symlinks=True):
+        calls.append((str(path), follow_symlinks))
+        return real_chown(path, uid, gid, follow_symlinks=follow_symlinks)
+
+    with monkeypatch.context() as patched:
+        patched.setattr(helper.os, "chown", _recording_chown)
+        helper.copy(source, target, "6", me)
+
+    staging = str(target.resolve().with_name(".flocks.migrating-6"))
+    staged = {os.path.relpath(path, staging) for path, _ in calls if path == staging or path.startswith(staging + os.sep)}
+    expected = {"."} | {str(path.relative_to(source)) for path in source.rglob("*")}
+    assert expected <= staged, "every entry is handed over while it is still the staged copy"
+    assert all(not follow for _, follow in calls), "symlinks are relabelled themselves, never followed"
+    assert any(path.endswith("offline-migration-6.json") for path, _ in calls)
+    with pytest.raises(helper.MigrationError, match="不存在"):
+        helper.copy(source, tmp_path / "other" / ".flocks", "6", "no-such-user-for-flocks")
+
+
+def test_migrate_helper_matches_escaped_paths_in_json(tmp_path: Path) -> None:
+    """recovery.json is written with ensure_ascii (\\uXXXX) and JSON allows \\/; both must still be rewritten."""
+    helper = _load_migrate_helper()
+    source = _previous_data(tmp_path / "旧实例" / ".flocks")
+    recovery = source / "data" / "hub" / "backups" / "rollback-1" / "failed" / "tree-1" / "recovery.json"
+    recovery.parent.mkdir(parents=True)
+    recovery.write_text(json.dumps({"installPath": f"{source}/plugins/skills/my-skill"}), encoding="utf-8")
+    assert "\\u" in recovery.read_text(encoding="utf-8")
+    slashed = json.dumps({"backupPath": f"{source}/hub/x"}).replace("/", "\\/")
+    (source / "data" / "hub" / "slashed.json").write_text(slashed, encoding="utf-8")
+    target = tmp_path / "new" / ".flocks"
+    helper.copy(source, target, "2")
+    moved = target / "data" / "hub" / "backups" / "rollback-1" / "failed" / "tree-1" / "recovery.json"
+    assert json.loads(moved.read_text(encoding="utf-8"))["installPath"] == f"{target}/plugins/skills/my-skill"
+    assert json.loads((target / "data" / "hub" / "slashed.json").read_text(encoding="utf-8"))["backupPath"] == f"{target}/hub/x"

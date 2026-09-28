@@ -124,7 +124,10 @@ MIGRATE_HELPER="$SRC_ROOT/installer/migrate_data.py"
 # below keeps that line), else the default. The Pro marker, the data dirs and the migration of
 # a previous installation's data all use this one value.
 DATA_ROOT="$DATA_HOME/.flocks"
-CONFIGURED_ROOT="$("$BUNDLED_PY" "$MIGRATE_HELPER" env-root "$ENV_FILE")"
+CONFIGURED_ROOT=""
+if ! CONFIGURED_ROOT="$("$BUNDLED_PY" "$MIGRATE_HELPER" env-root "$ENV_FILE")"; then
+  fail "$CONFIGURED_ROOT"
+fi
 if [[ -n "$CONFIGURED_ROOT" ]]; then
   DATA_ROOT="$CONFIGURED_ROOT"
 fi
@@ -281,7 +284,10 @@ mkdir -p "$DATA_HOME"
 if [[ -n "$MIGRATE_FROM" ]]; then
   log "拷贝旧数据 ${MIGRATE_FROM} → ${DATA_ROOT}"
   MIGRATE_OUT=""
-  if ! MIGRATE_OUT="$("$BUNDLED_PY" "$MIGRATE_HELPER" copy --source "$MIGRATE_FROM" --target "$DATA_ROOT" --stamp "$STAMP")"; then
+  # --owner: the copy is handed to the service user before the rename that puts it in place, so an
+  # interrupted run leaves either the untouched target (a re-run migrates again) or a complete,
+  # service-owned data dir; the data of an existing installation is never re-owned
+  if ! MIGRATE_OUT="$("$BUNDLED_PY" "$MIGRATE_HELPER" copy --source "$MIGRATE_FROM" --target "$DATA_ROOT" --stamp "$STAMP" --owner "$SERVICE_USER")"; then
     fail "$MIGRATE_OUT"
   fi
   while IFS= read -r line; do
@@ -289,9 +295,6 @@ if [[ -n "$MIGRATE_FROM" ]]; then
       log "$line"
     fi
   done <<< "$MIGRATE_OUT"
-  # the trailing slash follows a data root that is a symlink (e.g. onto a data disk); inside the
-  # tree -R stays physical, so symlinks there are relabelled themselves and never followed out of it
-  chown -R "$SERVICE_USER:$SERVICE_USER" "$DATA_ROOT/"
 fi
 mkdir -p "$DATA_ROOT/config" "$DATA_ROOT/run" "$DATA_ROOT/logs" "$INSTALL_ROOT" "$(dirname "$ENV_FILE")"
 chmod 755 "$(dirname "$ENV_FILE")" "$INSTALL_ROOT"
