@@ -689,6 +689,24 @@ async def test_diagnostic_state_contains_only_flags_and_counts(auto, monkeypatch
     assert (await m.diagnostic_state('other'))['notices'] == {}
 
 
+async def test_diagnostics_include_scoped_investigation_recovery(auto):
+    for key, device, state, retry, exhausted in (
+        ('failed', 'device', 'system_wait', None, 1),
+        ('later', 'device', 'deferred', '2030-01-01T00:10:00+00:00', 0),
+        ('old-device', 'removed-device', 'system_wait', None, 1),
+    ):
+        event = {**auto.event, 'key': key, 'device': device}
+        await write('INSERT INTO monitor_investigations(owner,project,event_key,event,state,updated_at,next_retry_at,retry_exhausted) VALUES(?,?,?,?,?,?,?,?)',
+                    ('owner', auto.policy.project, key, encode(event), state, d.stamp(), retry, exhausted))
+    data = await m.diagnostic_state('owner')
+    assert data['investigations']['system_wait'] == 1
+    assert data['investigations']['deferred'] == 1
+    assert data['investigation_recovery']['retry_exhausted'] == 1
+    assert data['investigation_recovery']['earliest_retry_at'] == '2030-01-01T00:10:00+00:00'
+    assert auto.event['id'] not in data['investigation_recovery']
+    assert 'removed-device' not in json.dumps(data)
+
+
 @pytest.fixture
 def connected_email(monkeypatch):
     from flocks.channel.builtin.email.channel import EmailChannel
@@ -699,6 +717,8 @@ def connected_email(monkeypatch):
     plugin._resolved = resolved_config({'address': 'agent@example.com', 'imapHost': 'imap.example.com',
         'authservId': 'mx.example.com', 'allowFrom': ['person@example.com']})
     plugin.mark_connected()
+    plugin._health_success('receive', 'poll')
+    plugin._health_success('send', 'probe')
     monkeypatch.setattr(default_registry, '_channels', {'email': plugin})
     monkeypatch.setattr(Config, 'resolve_default_llm', AsyncMock(return_value={'model_id': 'fixture'}))
     return plugin

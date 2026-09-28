@@ -9,6 +9,8 @@ import smtplib
 import socket
 import ssl
 import uuid
+from datetime import datetime, timedelta, timezone
+from time import monotonic
 from email import encoders
 from email.mime.base import MIMEBase
 from email.mime.multipart import MIMEMultipart
@@ -45,6 +47,8 @@ from .inbound import (
 log = Log.create(service="channel.email")
 
 SMTP_CONNECT_TIMEOUT = 30
+IMAP_BATCH_SECONDS = 90
+IMAP_RETRY_MAX_SECONDS = 300
 NETEASE_SMTP_HOSTS = {"smtp.163.com", "smtp.126.com"}
 IMAP_CLIENT_ID = (
     '("name" "Flocks" '
@@ -63,6 +67,67 @@ class EmailChannel(ChannelPlugin):
         self._seen_uids: set[bytes] = set()
         self._seen_uids_max = 5000
         self._thread_context: dict[str, dict[str, str]] = {}
+        self._mail_health = {direction: self._empty_health() for direction in ('receive', 'send')}
+
+    @staticmethod
+    def _empty_health() -> dict[str, Any]:
+        return {'state': 'unknown', 'stage': 'unknown', 'last_success_at': None,
+                'last_success_stage': None, 'last_error_at': None, 'last_error_stage': None, 'error_type': None,
+                'consecutive_failures': 0, 'next_retry_at': None}
+
+    def _health_stage(self, direction: str, stage: str) -> None:
+        # Workers replace one snapshot atomically; readers never receive live dicts.
+        self._mail_health[direction] = {**self._mail_health[direction], 'stage': stage}
+
+    def _health_success(self, direction: str, stage: str) -> None:
+        self._mail_health[direction] = {**self._mail_health[direction], 'state': 'healthy',
+            'stage': stage, 'last_success_stage': stage,
+            'last_success_at': datetime.now(timezone.utc).isoformat(),
+            'consecutive_failures': 0, 'next_retry_at': None}
+
+    def _health_failure(self, direction: str, exc: BaseException) -> None:
+        previous = self._mail_health[direction]
+        failures = previous['consecutive_failures'] + 1
+        stage = 'tls' if isinstance(exc, ssl.SSLError) else previous['stage']
+        self._mail_health[direction] = {**previous, 'state': 'unavailable',
+            'last_error_at': datetime.now(timezone.utc).isoformat(), 'error_type': type(exc).__name__,
+            'stage': stage, 'last_error_stage': stage,
+            'consecutive_failures': failures,
+            'next_retry_at': (datetime.now(timezone.utc) + timedelta(seconds=
+                min(IMAP_RETRY_MAX_SECONDS, 30 * 2 ** min(failures - 1, 6)))).isoformat()}
+
+    def health_snapshot(self) -> dict[str, dict[str, Any]]:
+        """SMTP acceptance and IMAP receipt are independent, content-free facts."""
+        result = {key: dict(value) for key, value in self._mail_health.items()}
+        last_poll = result['receive']['last_success_at']
+        if last_poll and result['receive']['state'] == 'healthy':
+            # A hung receiver must not remain green indefinitely. The allowance
+            # includes one bounded fetch batch and its final socket operation.
+            stale_after = max(180, float(self._resolved.get('pollIntervalSeconds', 30)) * 2
+                              + IMAP_BATCH_SECONDS + 30)
+            if (datetime.now(timezone.utc) - datetime.fromisoformat(last_poll)).total_seconds() > stale_after:
+                result['receive'].update(state='unavailable', stage='stale')
+        return result
+
+    def _poll_delay(self) -> float:
+        interval = float(self._resolved.get('pollIntervalSeconds', 30))
+        failures = self._mail_health['receive']['consecutive_failures']
+        if not failures:
+            return interval
+        return max(interval, min(IMAP_RETRY_MAX_SECONDS, max(5, interval) * 2 ** min(failures - 1, 6)))
+
+    async def _recover_smtp_if_due(self) -> None:
+        health = self._mail_health['send']
+        if health['state'] != 'unavailable' or not health['next_retry_at']:
+            return
+        if datetime.fromisoformat(health['next_retry_at']) > datetime.now(timezone.utc):
+            return
+        try:
+            # Authenticate only. Never replay a notice whose delivery is unknown.
+            await asyncio.to_thread(self._test_smtp_connection)
+        except Exception as exc:
+            log.warning('email.smtp.recovery_failed', {'error': type(exc).__name__,
+                'stage': self._mail_health['send']['stage']})
 
     def meta(self) -> ChannelMeta:
         return ChannelMeta(
@@ -150,6 +215,7 @@ class EmailChannel(ChannelPlugin):
         self._config = config
         self._resolved = resolved_config(config)
         self._on_message = on_message
+        self._mail_health = {direction: self._empty_health() for direction in ('receive', 'send')}
 
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, self._test_connections)
@@ -162,6 +228,8 @@ class EmailChannel(ChannelPlugin):
                     from flocks.monitoring.mail_transport import diagnose_poll
                     await diagnose_poll(self._resolved, 'UnparsedMessage')
                 complete = True
+                dispatch_error = None
+                self._health_stage('receive', 'dispatch')
                 for uid, message in messages:
                     if abort.is_set():
                         complete = False
@@ -171,28 +239,43 @@ class EmailChannel(ChannelPlugin):
                         self._mark_seen(uid)
                     except Exception as exc:
                         complete = False
+                        dispatch_error = exc
                         log.warning("email.message.dispatch_failed", {"error": type(exc).__name__, "uid": uid.decode(errors="replace")})
+                if dispatch_error is not None:
+                    raise dispatch_error
                 if complete:
                     from flocks.monitoring.mail_transport import checkpoint
+                    self._health_stage('receive', 'checkpoint')
                     await asyncio.to_thread(checkpoint, getattr(self, "_monitor_poll", None), getattr(self, "_monitor_high", None))
+                    self._health_success('receive', 'poll')
                 self.mark_connected()
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                self.mark_disconnected(str(exc))
-                log.warning("email.poll.failed", {"error": str(exc)})
+                self._health_failure('receive', exc)
+                self.mark_disconnected(type(exc).__name__)
+                log.warning("email.poll.failed", {"error": type(exc).__name__,
+                    "stage": self._mail_health['receive']['stage']})
                 from flocks.monitoring.mail_transport import diagnose_poll
-                await diagnose_poll(self._resolved, type(exc).__name__)
+                await diagnose_poll(self._resolved, type(exc).__name__, self._mail_health['receive'])
 
+            if not abort.is_set():
+                await self._recover_smtp_if_due()
+            delay = self._poll_delay()
+            if self._mail_health['receive']['consecutive_failures']:
+                self._mail_health['receive'] = {**self._mail_health['receive'],
+                    'next_retry_at': (datetime.now(timezone.utc) + timedelta(seconds=delay)).isoformat()}
             try:
                 await asyncio.wait_for(
                     abort.wait(),
-                    timeout=float(self._resolved["pollIntervalSeconds"]),
+                    timeout=delay,
                 )
             except asyncio.TimeoutError:
                 continue
 
     async def stop(self) -> None:
+        self._health_stage('receive', 'stopped')
+        self._mail_health['receive'] = {**self._mail_health['receive'], 'state': 'unavailable', 'next_retry_at': None}
         self.mark_disconnected()
 
     async def send_text(self, ctx: OutboundContext) -> DeliveryResult:
@@ -218,13 +301,18 @@ class EmailChannel(ChannelPlugin):
                 ctx.subject, ctx.message_id, ctx.new_thread,
             )
             self.record_message()
+            self._health_success('send', 'send')
             return DeliveryResult(
                 channel_id="email",
                 message_id=message_id,
                 chat_id=target,
                 success=True,
             )
+        except asyncio.CancelledError as exc:
+            self._health_failure('send', exc)
+            raise
         except Exception as exc:
+            self._health_failure('send', exc)
             return DeliveryResult(
                 channel_id="email",
                 message_id="",
@@ -268,13 +356,18 @@ class EmailChannel(ChannelPlugin):
                 path,
             )
             self.record_message()
+            self._health_success('send', 'send')
             return DeliveryResult(
                 channel_id="email",
                 message_id=message_id,
                 chat_id=target,
                 success=True,
             )
+        except asyncio.CancelledError as exc:
+            self._health_failure('send', exc)
+            raise
         except Exception as exc:
+            self._health_failure('send', exc)
             return DeliveryResult(
                 channel_id="email",
                 message_id="",
@@ -285,47 +378,70 @@ class EmailChannel(ChannelPlugin):
 
     def _test_connections(self) -> None:
         cfg = self._resolved
-        imap = self._connect_imap()
+        imap = None
         try:
-            try:
-                self._authenticate_imap(imap)
-                self._identify_imap_client(imap)
-                self._select_inbox(imap)
-                if cfg["skipExistingOnStart"]:
-                    status, data = imap.uid("search", None, "ALL")
-                    if status == "OK" and data and data[0]:
-                        self._seen_uids.update(data[0].split())
-                        self._trim_seen_uids()
-            except Exception as exc:
-                raise RuntimeError(f"IMAP connection test failed: {exc}") from exc
-        finally:
-            try:
-                imap.logout()
-            except Exception:
-                pass
-
-        try:
-            smtp = self._connect_smtp()
+            self._health_stage('receive', 'connect')
+            imap = self._connect_imap()
+            self._health_stage('receive', 'authenticate')
+            self._authenticate_imap(imap)
+            self._identify_imap_client(imap)
+            self._health_stage('receive', 'select')
+            self._select_inbox(imap)
+            from flocks.monitoring.mail_transport import poll_range
+            # Monitoring's persisted opt-in cursor takes precedence over the
+            # ordinary-chat "skip existing" preference, including restarting
+            # this same plugin instance after mail arrived while disconnected.
+            monitoring_catchup = poll_range(cfg, imap)
+            if cfg["skipExistingOnStart"] and not monitoring_catchup:
+                self._health_stage('receive', 'search')
+                status, data = imap.uid("search", None, "ALL")
+                if status != "OK":
+                    raise RuntimeError('IMAP search failed')
+                if data and data[0]:
+                    self._seen_uids.update(data[0].split())
+                    self._trim_seen_uids()
+            self._health_success('receive', 'probe')
         except Exception as exc:
-            raise RuntimeError(f"SMTP connection test failed: {exc}") from exc
-        try:
-            try:
-                self._authenticate_smtp(smtp)
-            except Exception as exc:
-                raise RuntimeError(f"SMTP connection test failed: {exc}") from exc
+            self._health_failure('receive', exc)
+            raise RuntimeError(f"IMAP connection test failed: {type(exc).__name__}") from exc
         finally:
-            try:
-                smtp.quit()
-            except Exception:
-                smtp.close()
+            if imap is not None:
+                try:
+                    imap.logout()
+                except Exception:
+                    pass
+
+        self._test_smtp_connection()
+
+    def _test_smtp_connection(self) -> None:
+        smtp = None
+        try:
+            self._health_stage('send', 'connect')
+            smtp = self._connect_smtp()
+            self._health_stage('send', 'authenticate')
+            self._authenticate_smtp(smtp)
+            self._health_success('send', 'probe')
+        except Exception as exc:
+            self._health_failure('send', exc)
+            raise RuntimeError(f"SMTP connection test failed: {type(exc).__name__}") from exc
+        finally:
+            if smtp is not None:
+                try:
+                    smtp.quit()
+                except Exception:
+                    smtp.close()
 
     def _fetch_new_messages(self) -> list[tuple[bytes, InboundMessage]]:
         cfg = self._resolved
         parsed_messages: list[tuple[bytes, InboundMessage]] = []
+        deadline = monotonic() + IMAP_BATCH_SECONDS
+        self._health_stage('receive', 'connect')
         imap = self._connect_imap()
         try:
+            self._health_stage('receive', 'authenticate')
             self._authenticate_imap(imap)
             self._identify_imap_client(imap)
+            self._health_stage('receive', 'select')
             self._select_inbox(imap)
             from flocks.monitoring.mail_transport import poll_range, record_unparsed
             self._monitor_poll = poll_range(cfg, imap)
@@ -335,18 +451,26 @@ class EmailChannel(ChannelPlugin):
                 self._seen_uids.clear()
                 self._monitor_validity = self._monitor_poll[1]
             search = self._monitor_poll[2] if self._monitor_poll else ["UNSEEN"]
+            self._health_stage('receive', 'search')
             status, data = imap.uid("search", None, *search)
-            if status != "OK" or not data or not data[0]:
+            if status != "OK":
+                raise RuntimeError('IMAP search failed')
+            if not data or not data[0]:
                 return parsed_messages
 
             uids = data[0].split()
             if self._monitor_poll:
                 uids = sorted((u for u in uids if int(u) > self._monitor_poll[3]), key=int)[:100]
             for uid in uids:
+                if self._monitor_poll and monotonic() >= deadline:
+                    if self._monitor_high is None:
+                        raise TimeoutError('IMAP batch budget exhausted before fetching mail')
+                    break  # Only checkpoint fetched UIDs; catch up on the next poll.
                 if self._monitor_poll:
                     self._monitor_high = int(uid)
                 if uid in self._seen_uids:
                     continue
+                self._health_stage('receive', 'fetch')
                 status, msg_data = imap.uid("fetch", uid, "(BODY.PEEK[])")
                 if status != "OK":
                     self._monitor_high = None
@@ -525,6 +649,7 @@ class EmailChannel(ChannelPlugin):
             timeout=SMTP_CONNECT_TIMEOUT,
         )
         if cfg["smtpSecurity"] == "starttls":
+            self._health_stage('send', 'tls')
             code, response = smtp.starttls(context=context)
             if code != 220:
                 smtp.close()
@@ -546,6 +671,7 @@ class EmailChannel(ChannelPlugin):
         if cfg["imapSecurity"] != "starttls":
             return imap
 
+        self._health_stage('receive', 'tls')
         code, response = imap.starttls(ssl_context=context)
         if code != "OK":
             imap.close()
@@ -621,9 +747,12 @@ class EmailChannel(ChannelPlugin):
             )
             msg.attach(part)
 
+        self._health_stage('send', 'connect')
         smtp = self._connect_smtp()
         try:
+            self._health_stage('send', 'authenticate')
             self._authenticate_smtp(smtp)
+            self._health_stage('send', 'send')
             smtp.send_message(msg)
         finally:
             try:

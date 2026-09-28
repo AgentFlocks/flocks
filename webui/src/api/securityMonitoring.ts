@@ -32,15 +32,29 @@ export interface MonitorDisposition {
   id: string; status: 'writing' | 'pending' | 'mismatch' | 'failed' | 'verified';
   observed_status: number | null; error: string | null; comment: string; updated_at: string; session_id: string | null;
 }
+export interface MonitorMailHealth {
+  enabled: boolean;
+  errors: string[];
+  receive: MonitorMailDirectionHealth;
+  send: MonitorMailDirectionHealth;
+}
+export interface MonitorMailDirectionHealth {
+  state: 'healthy' | 'unavailable' | 'unknown' | 'disabled';
+  last_success_at?: string | null; last_error_at?: string | null;
+  stage?: string | null; last_error_stage?: string | null; error_type?: string | null; consecutive_failures?: number;
+  next_retry_at?: string | null;
+}
 export interface MonitorSnapshot {
+  currentRun?: { id: string; session_id: string; message_id: string; started_at: string } | null;
+  investigation?: { pending: number; deferred: number; system_wait: number; needs_review: number; ready: number; retry_exhausted: number; earliest_retry_at: string | null; oldest_updated_at: string | null };
   developmentSample?: boolean;
   investigationEngine?: 'rules' | 'agent-v1';
   roundTimeoutSeconds?: number;
-  mail?: { enabled: boolean; sentToday: number; receivedToday: number; pending: number; needsReview: number; sendUnknown: number };
+  mail?: { enabled: boolean; sentToday: number; receivedToday: number; pending: number; needsReview: number; sendUnknown: number; health?: MonitorMailHealth };
   automatic?: { enabled: boolean; rule: string; queued: number };
   businessDate: string; timezone: string; sessionID: string | null; nextRun: string | null; scheduledNextRun: string | null;
   installation: { installed: boolean; ready: boolean; reason: string | null; status: string; projectID: string | null };
-  metrics: { definitions: number; started: number; attempts: number; events: number; risk: number; unknown: number; ignored: number; openRisk?: number; closed?: number; contained?: number };
+  metrics: { investigatedEvents?: number; investigationCompletedEvents?: number; investigationCompletionRate?: number | null; definitions: number; started: number; attempts: number; events: number; risk: number; unknown: number; ignored: number; openRisk?: number; closed?: number; contained?: number };
   runs: MonitorRun[]; events: MonitorEvent[];
   queued: { id: string; status: string; scheduled_for: string | null; error: string | null; slot_status: string | null }[];
   report: { status: string; version: number; error: string | null };

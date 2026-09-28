@@ -38,6 +38,11 @@ CREATE TABLE IF NOT EXISTS monitor_investigations (
  event TEXT NOT NULL, evidence TEXT NOT NULL DEFAULT '[]', result TEXT NOT NULL DEFAULT '{}',
  state TEXT NOT NULL DEFAULT 'pending', attempts INTEGER NOT NULL DEFAULT 0,
  updated_at TEXT NOT NULL, PRIMARY KEY(owner,project,event_key));
+CREATE TABLE IF NOT EXISTS monitor_investigation_versions (
+ owner TEXT NOT NULL, project TEXT NOT NULL, event_key TEXT NOT NULL, revision INTEGER NOT NULL,
+ event TEXT NOT NULL, evidence TEXT NOT NULL, result TEXT NOT NULL, state TEXT NOT NULL,
+ attempts INTEGER NOT NULL, archived_at TEXT NOT NULL,
+ PRIMARY KEY(owner,project,event_key,revision));
 CREATE TABLE IF NOT EXISTS monitor_dispositions (
  id TEXT NOT NULL, owner TEXT NOT NULL, scope TEXT NOT NULL, event_key TEXT NOT NULL,
  comment TEXT NOT NULL, status TEXT NOT NULL, observed_status INTEGER, error TEXT,
@@ -103,6 +108,9 @@ async def connection():
             if column not in existing:
                 await db.execute(f'ALTER TABLE monitor_dispositions ADD COLUMN {column} {declaration}')
         for table, additions in (
+            ('monitor_investigations', [('revision', 'INTEGER NOT NULL DEFAULT 1'),
+                ('failure_count', 'INTEGER NOT NULL DEFAULT 0'), ('next_retry_at', 'TEXT'),
+                ('error_kind', 'TEXT'), ('retry_exhausted', 'INTEGER NOT NULL DEFAULT 0')]),
             ('monitor_attempts', [('summary', 'TEXT'), ('next_step', 'TEXT'), ('end_message_id', 'TEXT'), ('end_published', 'INTEGER NOT NULL DEFAULT 0')]),
             ('monitor_mail_notices', [('sent_at', 'TEXT')]),
         ):
@@ -111,6 +119,21 @@ async def connection():
             for column, declaration in additions:
                 if column not in existing:
                     await db.execute(f'ALTER TABLE {table} ADD COLUMN {column} {declaration}')
+            if table == 'monitor_investigations' and 'error_kind' not in existing:
+                # Earlier builds mixed these generated system errors with
+                # business decisions requiring human review. Migrate only
+                # known system messages, leaving genuine ambiguity untouched.
+                for prefix, kind in (
+                    ('调查模型选择了未开放的数据源', 'model_format'),
+                    ('调查模型输出达到长度上限', 'model_truncated'),
+                    ('调查模型决策格式无效', 'model_format'),
+                    ('调查模型没有返回完整决策', 'model_format'),
+                    ('未配置调查模型', 'dependency'),
+                    ('调查模型不可用', 'dependency'),
+                ):
+                    await db.execute("UPDATE monitor_investigations SET state='system_wait',error_kind=?,"
+                        "retry_exhausted=1,failure_count=3 WHERE state='needs_review' "
+                        "AND CASE WHEN json_valid(result) THEN json_extract(result,'$.reason') END LIKE ?", (kind, prefix + '%'))
         columns = await db.execute('PRAGMA table_info(monitor_reports)')
         if 'summary_content' not in {r['name'] for r in await columns.fetchall()}:
             await db.execute('ALTER TABLE monitor_reports ADD COLUMN summary_content TEXT')

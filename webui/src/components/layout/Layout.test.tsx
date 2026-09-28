@@ -1910,7 +1910,7 @@ describe('Layout WebUI contract pages navigation', () => {
     expect(screen.getByRole('tab', { name: '安全运营监测' })).toHaveAttribute('aria-selected', 'true');
     expect(screen.getByRole('link', { name: '监测对话' })).toBeInTheDocument();
     expect(screen.getByRole('link', { name: '总结看板' })).toBeInTheDocument();
-    expect(screen.getByRole('link', { name: '累计报告' })).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: '每日报告' })).toBeInTheDocument();
     expect(screen.queryByRole('link', { name: '告警调查' })).not.toBeInTheDocument();
     await userEvent.click(screen.getByRole('tab', { name: 'partitionScene' }));
     expect(await screen.findByRole('link', { name: '告警调查' })).toBeInTheDocument();

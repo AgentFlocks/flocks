@@ -8,7 +8,7 @@ from flocks.auth.context import get_current_auth_user
 from flocks.hub import local
 from flocks.project.project import Project, ProjectPathConflictError
 from flocks.task.manager import TaskManager
-from flocks.task.models import SchedulerStatus
+from flocks.task.models import SchedulerStatus, RetryConfig
 from flocks.task.plugin_models import TaskSpec
 from flocks.task.plugin_sync import upsert_task_specs
 from flocks.task.store import TaskStore
@@ -23,6 +23,7 @@ CORE_CAPABILITIES = {'monitor.daily.v1', 'monitor.readonly.v1', 'monitor.native-
 CORE_CAPABILITIES.add('monitor.investigation.v1')
 CORE_CAPABILITIES.add('monitor.agent-component.v1')
 CORE_CAPABILITIES.add('monitor.production-investigation.v1')
+CORE_CAPABILITIES.add('monitor.reliable-investigation.v1')
 
 
 def validate_manifest(manifest, package=None):
@@ -91,6 +92,7 @@ async def install(manifest):
         scheduler = await TaskStore.get_scheduler_by_dedup_key(key)
         if scheduler is None:
             raise RuntimeError('监测调度注册失败')
+        await _disable_round_retries(scheduler)
         # Installation gate is committed before activation; a crash leaves a
         # disabled definition which startup reconciliation can safely resume.
         await write('INSERT INTO monitor_installations(owner,scope,project,policy,installed,ready,reason,scheduler_id,activation_pending) VALUES(?,?,?,?,1,?,?,?,?) ON CONFLICT(owner,scope) DO UPDATE SET project=excluded.project,policy=excluded.policy,installed=1,ready=excluded.ready,reason=excluded.reason,scheduler_id=excluded.scheduler_id,activation_pending=excluded.activation_pending',
@@ -173,6 +175,7 @@ async def _owned_installation(owner):
 
 async def _migrate_policy(entry, scheduler, policy):
     """Persist the sole supported policy in both stores, preserving history."""
+    await _disable_round_retries(scheduler)
     current = policy.model_dump()
     if json.loads(entry['policy']) == current and scheduler.context.get('monitoring') == current:
         return
@@ -186,6 +189,23 @@ async def _migrate_policy(entry, scheduler, policy):
                          (encode(context), scheduler.id))
     entry['policy'] = encode(current)
     scheduler.context = context
+
+
+async def _disable_round_retries(scheduler):
+    """Investigation checkpoints, not TaskManager, own monitoring recovery."""
+    if scheduler.retry.max_retries or scheduler.retry.retry_after:
+        scheduler.retry.max_retries = 0
+        scheduler.retry.retry_after = None
+        await TaskStore.update_scheduler(scheduler)
+    # Clear an old build's minute-based retry plan without erasing attempt facts.
+    async with connection() as db:
+        cursor = await db.execute("SELECT id,retry FROM task_executions WHERE scheduler_id=? AND status IN ('failed','queued')", (scheduler.id,))
+        for item in await cursor.fetchall():
+            retry = RetryConfig.model_validate_json(item['retry'])
+            if retry.max_retries or retry.retry_after:
+                retry.max_retries = 0
+                retry.retry_after = None
+                await db.execute('UPDATE task_executions SET retry=? WHERE id=?', (retry.model_dump_json(by_alias=True), item['id']))
 
 
 async def _pause_monitor(entry):
@@ -243,6 +263,8 @@ async def start_monitoring(owner):
         await TaskStore.update_scheduler(scheduler)
         await write('UPDATE monitor_installations SET policy=?,ready=1,reason=NULL,activation_pending=? WHERE owner=? AND scope=?',
                     (encode(policy.model_dump()), IMMEDIATE_START_PENDING, owner, COMPONENT_ID))
+        from .investigation import retry_waiting
+        await retry_waiting(policy)
         await start_immediately(scheduler)
 
 

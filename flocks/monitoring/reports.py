@@ -23,6 +23,7 @@ async def snapshot(owner, scope, day):
             return [dict(x) for x in await cur.fetchall()]
         installations = await select('SELECT * FROM monitor_installations WHERE owner=? AND scope=?', (owner, scope))
         runs = await select('SELECT * FROM monitor_attempts WHERE owner=? AND scope=? AND business_date=? ORDER BY sequence', (owner, scope, day))
+        current_run = await select("SELECT a.id,a.session_id,a.message_id,a.started_at FROM monitor_attempts a JOIN monitor_installations i ON i.owner=a.owner AND i.scope=a.scope AND i.project=a.project WHERE a.owner=? AND a.scope=? AND a.status='running' AND i.installed=1 ORDER BY a.sequence DESC LIMIT 1", (owner, scope))
         observations = await select('SELECT o.*,a.sequence,a.session_id,a.message_id,a.started_at,a.project FROM monitor_observations o JOIN monitor_attempts a ON a.id=o.attempt_id WHERE a.owner=? AND a.scope=? AND a.business_date=? ORDER BY a.sequence', (owner, scope, day))
         dispositions = await select('SELECT * FROM monitor_dispositions WHERE owner=? AND scope=? ORDER BY created_at', (owner, scope))
         mail_notices = await select('SELECT id,state,created_at,updated_at,sent_at FROM monitor_mail_notices WHERE owner=? AND project=(SELECT project FROM monitor_installations WHERE owner=? AND scope=?)', (owner, owner, scope))
@@ -82,7 +83,15 @@ async def snapshot(owner, scope, day):
 
     policy = MonitoringPolicy.model_validate_json(installation['policy']) if installation else None
     development = bool(policy and sampling.enabled(policy))
+    from .investigation import status_summary
+    from .mailflow import health_snapshot
+    backlog = await status_summary(policy) if policy else {}
+    mail_health = await health_snapshot(owner, installation['project']) if installation else {'enabled': False, 'errors': []}
+    investigated_events = len(events)
+    completed_investigations = sum(e.get('investigation', {}).get('state') == 'ready' for e in events.values())
     return {'businessDate': day, 'developmentSample': development,
+            'currentRun': current_run[0] if current_run else None,
+            'investigation': backlog,
             'investigationEngine': 'agent-v1',
             'roundTimeoutSeconds': policy.timeout_seconds if policy else None,
             'installation': {'installed': bool(installation and installation['installed']),
@@ -99,12 +108,15 @@ async def snapshot(owner, scope, day):
             'metrics': {'definitions': int(bool(installation and installation['installed'])),
                         'started': len({r['execution_id'] for r in runs}), 'attempts': len(runs),
                         'events': len(events), 'risk': sum(e['risk'] == 'risk' for e in events.values()),
+                        'investigatedEvents': investigated_events,
+                        'investigationCompletedEvents': completed_investigations,
+                        'investigationCompletionRate': completed_investigations / investigated_events if investigated_events else None,
                         'openRisk': sum(e['risk'] == 'risk' and e['closure'] != 'closed' for e in events.values()),
                         'closed': sum(e['closure'] == 'closed' for e in events.values()),
                         'contained': sum(e['closure'] == 'contained' for e in events.values()),
                         'unknown': sum(e['risk'] == 'unknown' for e in events.values()),
                         'ignored': sum(e['risk'] == 'ignored' for e in events.values())},
-            'mail': {'enabled': bool(mail_settings and mail_settings[0]['enabled']),
+            'mail': {'enabled': bool(mail_settings and mail_settings[0]['enabled']), 'health': mail_health,
                      'sentToday': sum(n['state']=='sent' and datetime.fromisoformat(n['sent_at'] or n['updated_at']).astimezone(tz).date().isoformat()==day for n in mail_notices),
                      'receivedToday': sum(datetime.fromisoformat(r['received_at']).astimezone(tz).date().isoformat()==day for r in mail_replies),
                      'pending': sum(r['state'] in ('pending','interpreted') for r in mail_replies),
@@ -164,6 +176,18 @@ def render_summary(data):
             lines.append(f"- {name}：{event['disposition']}。")
     if not data['events']:
         lines.append('当天没有已提交的事件；查询失败不能视为没有告警。')
+    backlog = data.get('investigation', {})
+    lines += ['', '## 调查可靠性与依赖状态', '',
+              f"当天去重调查对象 {m.get('investigatedEvents', m['events'])} 条，其中已形成调查结论 {m.get('investigationCompletedEvents', 0)} 条。"]
+    rate = m.get('investigationCompletionRate')
+    lines.append(f'调查完成率：{rate:.1%}。' if rate is not None else '调查完成率：无事件，不计入成功率。')
+    lines.append(f"截至报告生成时，待续查 {backlog.get('pending', 0)} 条、延期 {backlog.get('deferred', 0)} 条、系统故障 {backlog.get('system_wait', 0)} 条、业务待人工核对 {backlog.get('needs_review', 0)} 条。")
+    if backlog.get('retry_exhausted'):
+        lines.append(f"其中 {backlog['retry_exhausted']} 条已停止自动恢复；修复依赖后需手动重新启动监测。")
+    health = mail.get('health', {})
+    if health.get('enabled'):
+        lines.append('邮件收信状态：' + {'healthy': '正常', 'unavailable': '不可用', 'unknown': '尚未验证', 'disabled': '未启用'}.get(health.get('receive', {}).get('state'), '未知') + '。')
+        lines.extend(health.get('errors', []))
     failed = sum(r['status'] not in ('completed', 'running') for r in data['runs'])
     lines += ['', '## 数据完整性', '', f"失败轮次：{failed}。统计以已提交事实及回查结果为准，发信和收到回信不等于处置完成。",
               '当天持续更新；跨日收到的反馈归入实际收到当天，原事件保留关联。邮件存量统计反映生成报告时的进度。']

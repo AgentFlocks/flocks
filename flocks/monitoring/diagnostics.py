@@ -20,6 +20,7 @@ import os
 from pathlib import Path
 import queue
 import re
+import subprocess
 import threading
 import time
 import uuid
@@ -73,10 +74,16 @@ def shape(value):
 
 _TYPES = {'str', 'dict', 'list', 'int', 'float', 'bool', 'bytes', 'NoneType', 'other'}
 _ENUMS = {
+    'error_kind': {'dependency', 'model_format', 'model_truncated', 'model_protocol', 'query_transient', 'budget', 'cancelled', 'system'},
+    'validation_field': {'action', 'reason', 'capability', 'entity', 'agent', 'verdict', 'evidence_ids', 'gaps', 'document'},
+    'validation_code': {'missing', 'invalid_type', 'invalid_json', 'extra_field', 'invalid_value', 'unknown_capability', 'ambiguous_capability', 'wrong_device', 'unsupported_entity', 'unknown_agent', 'invalid_reference', 'duplicate_query', 'over_budget'},
+    'investigation_state': {'pending', 'deferred', 'system_wait', 'needs_review', 'ready'},
+    'mail_direction': {'receive', 'send'},
+    'mail_stage': {'connect', 'tls', 'authenticate', 'select', 'search', 'fetch', 'dispatch', 'checkpoint', 'poll', 'send', 'probe', 'stopped', 'stale', 'configuration', 'unknown'},
     'model_stop': {'stop', 'end_turn', 'completed', 'length', 'max_tokens', 'tool_calls', 'content_filter', 'other'},
     'event': {'trace.start', 'trace.end', 'progress', 'stage.start', 'stage.end', 'query.window',
               'tool.raw', 'tool.normalized', 'adapter.result', 'adapter.structured', 'adapter.decoded', 'adapter.failure',
-              'mail.received', 'mail.result', 'mail.interpreted', 'mail.analyzed', 'mail.evidence', 'investigation.query', 'investigation.model', 'query.sample', 'page.validated', 'run.result', 'dispatch.result', 'background.result'},
+              'mail.received', 'mail.result', 'mail.interpreted', 'mail.analyzed', 'mail.evidence', 'investigation.query', 'investigation.model', 'investigation.validation', 'investigation.recovery', 'query.sample', 'page.validated', 'run.result', 'dispatch.result', 'background.result'},
     'entity_type': {'host', 'file', 'process', 'ip', 'innerip', 'dns'},
     'stage': {'dispatch', 'run', 'session.prepare', 'query.device', 'query.events', 'query.entities',
               'correlate', 'tool.execute', 'tool.handler', 'tool.normalize', 'report.export', 'step.other',
@@ -93,11 +100,13 @@ _ENUMS = {
 }
 _NUMBERS = {'schema', 'pid', 'seq', 'elapsed_ms', 'duration_ms', 'length', 'items', 'page', 'page_size',
             'window_seconds', 'devices', 'max_pages', 'timeout_seconds', 'json_position', 'json_line',
-            'json_column', 'events', 'errors', 'suppressed', 'calls', 'call', 'loop_lag_ms', 'total'}
+            'json_column', 'events', 'errors', 'suppressed', 'calls', 'call', 'loop_lag_ms', 'total',
+            'consecutive_failures', 'input_tokens', 'output_tokens', 'total_tokens', 'request_max_tokens',
+            'validation_count', 'models', 'revision', 'correction_attempt', 'failure_count'}
 _BOOLS = {'success', 'truncated', 'has_error', 'has_saved_output', 'cursor_present',
-          'has_tool_calls',
+          'has_tool_calls', 'retry_exhausted',
           'authenticated_sender', 'sender_verification_bypassed', 'development_sample', 'preferred_severity', 'malicious'}
-_IDS = {'trace', 'owner', 'scope', 'execution', 'device', 'notice', 'reply', 'project', 'event_id'}
+_IDS = {'trace', 'owner', 'scope', 'execution', 'device', 'notice', 'reply', 'project', 'event_id', 'provider_id'}
 
 
 def safe_record(fields):
@@ -116,6 +125,11 @@ def safe_record(fields):
             result[key] = value
         elif key == 'version' and isinstance(value, str) and re.fullmatch(r'[A-Za-z0-9.+_-]{1,64}', value):
             result[key] = value
+        elif key in {'model_provider', 'model_id'} and isinstance(value, str):
+            # Only identifier syntax: never accept endpoint URLs, query strings,
+            # authorization headers or arbitrary model response text.
+            if re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.+-]*(?:/[A-Za-z0-9][A-Za-z0-9_.+-]*){0,2}', value) and len(value) <= 128:
+                result[key] = value
         elif key == 'timestamp' and isinstance(value, str) and re.fullmatch(r'[0-9T:.+Z-]{20,40}', value):
             result[key] = value
     return result
@@ -319,6 +333,46 @@ def result(outcome, **fields):
     event('run.result', failure=outcome not in {'completed', 'ok'}, outcome=outcome, **fields)
 
 
+def build_state():
+    """Report installed versions, never a bundled version in place of missing state."""
+    from flocks.hub import local
+    from .agent_component import diagnostic_state
+    from .models import COMPONENT_ID
+    try:
+        record = local.get_record('component', COMPONENT_ID)
+    except Exception:
+        record = None
+    component_version = getattr(record, 'version', None)
+    if not isinstance(component_version, str) or not re.fullmatch(r'[A-Za-z0-9.+_-]{1,64}', component_version):
+        component_version = None
+    try:
+        agent = diagnostic_state()
+    except Exception:
+        agent = {'snapshot_available': False}
+    state = {'core_version': __version__, 'core_commit': None, 'core_dirty': None,
+             'component_version': component_version, 'component_installed': bool(record), 'agent': agent}
+    root = Path(__file__).resolve().parents[2]
+    if (root / '.git').exists():
+        try:
+            commit = subprocess.run(['git', '-C', str(root), 'rev-parse', 'HEAD'], capture_output=True, text=True, timeout=1, check=True).stdout.strip()
+            if re.fullmatch(r'[a-f0-9]{40,64}', commit):
+                state['core_commit'] = commit
+            dirty = subprocess.run(['git', '-C', str(root), 'status', '--porcelain', '--untracked-files=no'], capture_output=True, text=True, timeout=1, check=True)
+            state['core_dirty'] = bool(dirty.stdout.strip())
+        except (OSError, subprocess.SubprocessError):
+            pass
+    # A source digest also distinguishes unpacked deployments without Git metadata.
+    digest = hashlib.sha256()
+    try:
+        for path in sorted(Path(__file__).parent.glob('*.py')):
+            digest.update(path.name.encode())
+            digest.update(path.read_bytes())
+        state['monitor_source_sha256'] = digest.hexdigest()
+    except OSError:
+        state['monitor_source_sha256'] = None
+    return state
+
+
 def export_bundle(owner, scope):
     """Bounded read of our files only; no raw service log or customer DB export."""
     if not _export_lock.acquire(blocking=False):
@@ -361,9 +415,12 @@ def export_bundle(owner, scope):
         selected = sorted(records.values(), key=lambda r: (r.get('timestamp', ''), r.get('seq', 0)))
         capped = len(selected) > 5000
         selected = selected[-5000:]
-        return {'schema': 1, 'component': 'host-security-monitor', 'version': __version__, 'component_version': '1.5.0', 'mail_policy': 'mail-feedback-v1',
+        build = build_state()
+        return {'schema': 1, 'component': 'host-security-monitor', 'version': __version__, 'component_version': build['component_version'], 'build': build, 'mail_policy': 'mail-feedback-v1',
                 'exported_at': datetime.now(timezone.utc).isoformat(),
                 'coverage': 'recent_rotating_logs', 'record_count': len(selected), 'capped': capped,
+                'first_record_at': selected[0].get('timestamp') if selected else None,
+                'last_record_at': selected[-1].get('timestamp') if selected else None,
                 'health': {**health, 'read_errors': read_errors}, 'records': selected}
     finally:
         _export_lock.release()

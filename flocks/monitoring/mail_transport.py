@@ -82,7 +82,8 @@ def checkpoint(poll, last_uid):
         return
     with sqlite3.connect(TaskStore.get_db_path(), timeout=30) as db:
         db.execute('INSERT INTO monitor_mail_cursors VALUES(?,?,?) ON CONFLICT(mailbox) DO UPDATE '
-                   'SET validity=excluded.validity,last_uid=excluded.last_uid', (poll[0], poll[1], last_uid))
+                   'SET last_uid=CASE WHEN validity=excluded.validity THEN MAX(last_uid,excluded.last_uid) '
+                   'ELSE excluded.last_uid END,validity=excluded.validity', (poll[0], poll[1], last_uid))
 
 
 def record_unparsed(poll, uid):
@@ -96,13 +97,16 @@ def record_unparsed(poll, uid):
                    (poll[0], poll[1], int(uid), datetime.now(timezone.utc).isoformat()))
 
 
-async def diagnose_poll(cfg, error_type):
+async def diagnose_poll(cfg, error_type, health=None):
     """Exportable transport failure with no mailbox address or exception body."""
     from .store import rows
     from . import diagnostics as diag
     try:
         for row in await rows('SELECT owner,scope FROM monitor_mail_settings WHERE mailbox=?', (mailbox_key(cfg),)):
             async with diag.trace_scope(row['owner'], row['scope'], 'mail-poll'):
-                diag.event('mail.result', failure=True, stage='mail.receive', mail_state='pending', reason='unavailable', error_type=error_type)
+                diag.event('mail.result', failure=True, stage='mail.receive', mail_state='pending',
+                           reason='unavailable', error_type=error_type, mail_direction='receive',
+                           mail_stage=(health or {}).get('stage', 'unknown'),
+                           consecutive_failures=(health or {}).get('consecutive_failures', 0))
     except Exception:
         pass  # Observability never prevents mailbox recovery.

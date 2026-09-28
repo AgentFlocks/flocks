@@ -16,7 +16,7 @@
  * - Support optional copy actions, timestamps, and related affordances
  */
 
-import { useState, useCallback, useRef, useEffect, useMemo, memo } from 'react';
+import { useState, useCallback, useRef, useEffect, useMemo, memo, createContext, useContext } from 'react';
 import { Send, Loader2, ChevronDown, Square, Copy, User, FileText, Download, AlertCircle, X, RefreshCw, Pencil, Save, ImageIcon, Paperclip, Plus, ArrowUp, Clock, CheckCircle2, XCircle, Brain, Trash2, Bot, Check, Eye, ListTree, BookOpen, Workflow as WorkflowIcon } from 'lucide-react';
 import { StreamingMarkdown, useStreamingContent } from './StreamingMarkdown';
 import { useTranslation } from 'react-i18next';
@@ -28,6 +28,7 @@ import CommandDropdown, { isSlashCommandName, parseSlashCommand } from './Comman
 import ImageLightbox from './ImageLightbox';
 import { TodoList, buildTodoSummary, pickTodoEntries } from './TodoList';
 export { buildTodoSummary } from './TodoList';
+import { useMonitoringPresentation } from '@/hooks/useMonitoringPresentation';
 import { useSessionMessages } from '@/hooks/useSessions';
 import { useSSE, type SSEConnectionStatus } from '@/hooks/useSSE';
 import { useReasoningToggle } from '@/hooks/useReasoningToggle';
@@ -139,7 +140,11 @@ function getMessagePartDisplayText(part: MessagePart, hideTaskMetadata = false):
   return hideTaskMetadata ? stripTaskMetadata(displayText) : displayText;
 }
 
+const MonitoringViewContext = createContext(false);
+
 export interface SessionChatProps {
+  /** Dedicated monitoring surface; ordinary workbench rendering is unchanged. */
+  monitoring?: { running: boolean; paused: boolean; historical?: boolean };
   /** When null/undefined, only welcomeContent + input are rendered (lazy session). */
   sessionId?: string | null;
   /** Subscribe to SSE for live streaming updates */
@@ -1780,6 +1785,7 @@ function formatComposerReference(reference: ComposerReference): string {
 
 export default function SessionChat({
   sessionId,
+  monitoring,
   live = false,
   placeholder,
   hideInput = false,
@@ -1823,6 +1829,8 @@ export default function SessionChat({
 }: SessionChatProps) {
   const { t, i18n } = useTranslation('session');
   const toast = useToast();
+  const monitoringLiveKeys = useRef(new Set<string>());
+  useEffect(() => { monitoringLiveKeys.current.clear(); }, [sessionId]);
   const compact = display?.compact ?? true;
   const fullWidth = display?.fullWidth ?? false;
   const pageCanvas = display?.pageCanvas ?? false;
@@ -2526,6 +2534,9 @@ export default function SessionChat({
       }
 
       const action = resolveSessionChatSSEAction(event, sessionId);
+      if (monitoring && action.kind === 'message-part-updated') {
+        monitoringLiveKeys.current.add(`${action.part.messageID}:${action.part.id}`);
+      }
 
       switch (action.kind) {
         case 'ignore':
@@ -2740,6 +2751,7 @@ export default function SessionChat({
     },
     [
       sessionId,
+      monitoring,
       updateMessage,
       updateMessagePart,
       removeMessage,
@@ -2839,6 +2851,7 @@ export default function SessionChat({
     url: `${getApiBase()}/api/event`,
     onEvent: handleSSEEvent,
     onReconnect: () => {
+      monitoringLiveKeys.current.clear();
       if (!sessionId) return;
       void reconcileSessionStatusAfterReconnect();
       refetch();
@@ -4147,12 +4160,25 @@ export default function SessionChat({
     }
   }, [editingMessageId, messages, resetEditingState]);
 
+  const monitoringPresentation = useMonitoringPresentation({
+    messages, sessionId, enabled: !!monitoring,
+    ready: live && sseStatus === 'connected' && !monitoring?.historical && !focusMessageId,
+    interrupted: monitoring?.paused, liveKeys: monitoringLiveKeys.current,
+  });
+  const displayMessages = monitoringPresentation.messages;
+  const latestRoundEnded = useMemo(() => {
+    if (!monitoring) return false;
+    const start = messages.reduce((last, message, index) => message.role === 'user' ? index : last, 0);
+    return messages.slice(start).some(message => message.parts.some(part => part.metadata?.monitoringRoundEnd === true));
+  }, [messages, !!monitoring]);
+  useEffect(() => { if (monitoring) scrollToBottom(); }, [displayMessages, monitoring, scrollToBottom]);
+
   // ── Merged messages ──
   // Archived-by-compaction messages stay visible in the UI timeline. The
   // summary message itself renders as a divider, so multiple compactions
   // naturally appear as multiple chronological separators.
   const { merged, skipIndices } = useMemo(() => {
-    const merged = mergeConsecutiveAssistantMessages(messages);
+    const merged = mergeConsecutiveAssistantMessages(displayMessages);
     const skipIndices = new Set<number>();
 
     for (let idx = 0; idx < merged.length; idx++) {
@@ -4164,10 +4190,10 @@ export default function SessionChat({
     }
 
     return { merged, skipIndices };
-  }, [messages]);
+  }, [displayMessages]);
   const timelineItems = useMemo(() => (
-    buildChatTimelineItems({ messages: merged, skipIndices, isStreaming })
-  ), [isStreaming, merged, skipIndices]);
+    buildChatTimelineItems({ messages: merged, skipIndices, isStreaming: monitoring ? monitoring.running : isStreaming })
+  ), [isStreaming, merged, skipIndices, monitoring?.running]);
   const { historyItems, tailItems } = useStableChatTimelineSegments(timelineItems);
 
   useEffect(() => {
@@ -4210,13 +4236,13 @@ export default function SessionChat({
   }, [sessionId, focusMessageId, loading, messages, merged, onFocusMessageConsumed]);
 
   // ── Styling based on compact mode ──
-  const msgAreaClass = compact
+  const msgAreaClass = monitoring ? 'flex-1 min-h-0 overflow-y-auto py-5 bg-[#f7fbfd] dark:bg-slate-950' : compact
     ? 'relative flex flex-col flex-1 min-h-0 overflow-y-auto bg-gray-50 px-4 py-4 dark:bg-zinc-950'
     : pageCanvas
       ? 'relative flex flex-col flex-1 min-h-0 overflow-y-auto bg-transparent py-5'
       : 'relative flex flex-col flex-1 min-h-0 overflow-y-auto bg-gray-50 py-6 dark:bg-zinc-950';
 
-  const msgListClass = compact
+  const msgListClass = monitoring ? 'w-full max-w-6xl mx-auto space-y-6 px-12 sm:px-16' : compact
     ? fullWidth ? 'space-y-3 w-full px-4' : 'space-y-3'
     : fullWidth
       ? 'space-y-5 w-full px-12'
@@ -4233,7 +4259,9 @@ export default function SessionChat({
   }, [sessionId, visibleGoalBanner]);
 
   return (
-    <div className={`flex flex-col min-h-0 ${className}`}>
+    <MonitoringViewContext.Provider value={!!monitoring}><div className={`flex flex-col min-h-0 ${className}`}>
+      {monitoring && monitoringPresentation.pending && <div role="status" className="flex shrink-0 items-center justify-between gap-3 border-b border-sky-100 bg-[#eaf4ff] px-5 py-1.5 text-xs text-[#17212b] dark:border-sky-900 dark:bg-sky-950 dark:text-sky-100"><span>{latestRoundEnded ? '本轮已结束，正在展示本轮记录' : '正在按执行顺序展示新步骤'}</span><button className="shrink-0 font-semibold underline" onClick={monitoringPresentation.skip}>直接查看全部</button></div>}
+      {monitoring && live && ['disconnected', 'reconnecting', 'failed'].includes(sseStatus) && <p role="status" className="shrink-0 border-b border-slate-200 px-5 py-2 text-xs dark:border-slate-700">对话实时连接中断，正在尝试恢复；当前显示已保存的记录。</p>}
       {/* Messages area */}
       <div
         ref={scrollContainerRef}
@@ -4404,7 +4432,7 @@ export default function SessionChat({
             )}
 
             {/* Standalone thinking indicator when no incomplete message exists */}
-            {(isStreaming || sending) && !isCompacting && !(messages.length > 0 && messages[messages.length - 1].role === 'assistant' && !messages[messages.length - 1].finish) && (
+            {!monitoring && (isStreaming || sending) && !isCompacting && !(messages.length > 0 && messages[messages.length - 1].role === 'assistant' && !messages[messages.length - 1].finish) && (
               <div className={`group relative ${!compact ? 'w-full' : ''} flex`}>
                 <div className={compact ? `flex gap-2.5 ${getMessageGroupClassName({ compact, isUser: false, isEditing: false })}` : 'flex w-full min-w-0'}>
                   <span
@@ -4961,7 +4989,7 @@ export default function SessionChat({
           onClose={() => setComposerPreview(null)}
         />
       )}
-    </div>
+    </div></MonitoringViewContext.Provider>
   );
 }
 
@@ -5034,7 +5062,18 @@ function isMonitoringRoundEnd(part: MessagePart): boolean {
     && ['completed', 'failed'].includes(String(part.metadata.roundStatus));
 }
 
+function MonitoringEvidence({ details, active }: { details: string; active: boolean }) {
+  const [open, setOpen] = useState(active);
+  const touched = useRef(false);
+  useEffect(() => { if (!touched.current) setOpen(active); }, [active]);
+  return <details open={open} className="mt-3 border-t border-sky-100 pt-3 dark:border-sky-900">
+    <summary onClick={event => { event.preventDefault(); touched.current = true; setOpen(value => !value); }} className="cursor-pointer text-xs font-semibold text-sky-700 dark:text-sky-300">查看本步骤的结果与依据</summary>
+    <div className="mt-2 whitespace-pre-wrap break-words rounded-lg bg-[#eaf4ff] p-3 text-sm text-[#17212b] dark:bg-sky-950 dark:text-slate-200">{details}</div>
+  </details>;
+}
+
 function MonitoringStepSummary({ part, toolPart, isActive }: { part: MessagePart; toolPart?: MessagePart; isActive: boolean }) {
+  const monitor = useContext(MonitoringViewContext);
   const details = typeof part.metadata?.details === 'string' ? part.metadata.details : '';
   const rawSections: unknown = part.metadata?.monitoringSections;
   const sections = Array.isArray(rawSections) ? rawSections.flatMap(section => {
@@ -5047,10 +5086,10 @@ function MonitoringStepSummary({ part, toolPart, isActive }: { part: MessagePart
   if (!sections.length) return (
     <div data-testid="monitor-step-summary" className="text-sm leading-7">
       <p className="whitespace-pre-wrap break-words">{part.text}</p>
-      {details && <details className="mt-1" open={isActive || undefined}>
+      {details && (monitor ? <MonitoringEvidence details={details} active={isActive} /> : <details className="mt-1" open={isActive || undefined}>
         <summary className="cursor-pointer text-gray-500">查看本步骤的结果与依据</summary>
         <div className="mt-1 whitespace-pre-wrap break-words">{details}</div>
-      </details>}
+      </details>)}
     </div>
   );
   const status = toolPart?.state?.status;
@@ -5058,10 +5097,10 @@ function MonitoringStepSummary({ part, toolPart, isActive }: { part: MessagePart
   const running = status === 'running' || status === 'pending';
   const statusLabel = failed ? '步骤未完成' : running ? '步骤执行中' : status === 'completed' ? '步骤已完成' : '';
   return (
-    <section aria-label="本步骤解读" data-testid="monitor-step-summary" className="my-3 rounded-xl border border-zinc-200/80 bg-white/80 px-4 py-3 text-sm leading-7 dark:border-zinc-700 dark:bg-zinc-900/50">
+    <section aria-label="本步骤解读" data-testid="monitor-step-summary" className={monitor ? `my-3 overflow-hidden rounded-2xl border-l-4 border px-4 py-4 text-sm leading-7 shadow-sm ${failed ? 'border-slate-400 bg-white dark:border-slate-500 dark:bg-slate-900' : running ? 'border-[#bedcf5] border-l-sky-500 bg-[#eaf4ff] dark:border-sky-800 dark:bg-sky-950' : 'border-sky-100 border-l-[#168a5b] bg-white dark:border-slate-700 dark:border-l-emerald-500 dark:bg-slate-900'}` : 'my-3 rounded-xl border border-zinc-200/80 bg-white/80 px-4 py-3 text-sm leading-7 dark:border-zinc-700 dark:bg-zinc-900/50'}>
       <div className="mb-3 flex flex-wrap items-center justify-between gap-x-4 gap-y-1 border-b border-zinc-100 pb-2 dark:border-zinc-800">
         <h4 className="inline-flex items-center gap-2 font-semibold text-zinc-700 dark:text-zinc-200"><ListTree className="h-4 w-4 text-blue-500" aria-hidden="true" />步骤解读{toolPart?.tool && <span className="font-normal text-zinc-500">· {toolPart.tool}</span>}</h4>
-        {statusLabel && <span className={`inline-flex items-center gap-1.5 text-xs ${failed ? 'text-rose-600 dark:text-rose-300' : running ? 'text-blue-600 dark:text-blue-300' : 'text-emerald-700 dark:text-emerald-300'}`}>
+        {statusLabel && <span className={`inline-flex items-center gap-1.5 text-xs ${failed ? monitor ? 'text-slate-900 dark:text-slate-100' : 'text-rose-600 dark:text-rose-300' : running ? 'text-blue-600 dark:text-blue-300' : 'text-emerald-700 dark:text-emerald-300'}`}>
           {failed ? <XCircle className="h-3.5 w-3.5" aria-hidden="true" /> : running ? <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" /> : <CheckCircle2 className="h-3.5 w-3.5" aria-hidden="true" />}{statusLabel}
         </span>}
       </div>
@@ -5069,21 +5108,22 @@ function MonitoringStepSummary({ part, toolPart, isActive }: { part: MessagePart
         {sections.map((section, index) => {
           const gap = section.label === '证据与缺口';
           const next = section.label === '下一步';
-          return <div key={`${section.label}-${index}`} className={gap ? 'rounded-lg bg-amber-50/70 px-3 py-2 dark:bg-amber-950/20' : next ? 'rounded-lg bg-blue-50/70 px-3 py-2 dark:bg-blue-950/20' : ''}>
-            <dt className={`mb-0.5 text-xs font-semibold ${gap ? 'text-amber-800 dark:text-amber-300' : next ? 'text-blue-700 dark:text-blue-300' : 'text-zinc-500 dark:text-zinc-400'}`}>{section.label}</dt>
+          return <div key={`${section.label}-${index}`} className={monitor ? `${gap || next ? 'bg-[#eaf4ff] dark:bg-sky-950' : 'bg-slate-50/70 dark:bg-slate-800/40'} rounded-xl px-3 py-2.5` : gap ? 'rounded-lg bg-amber-50/70 px-3 py-2 dark:bg-amber-950/20' : next ? 'rounded-lg bg-blue-50/70 px-3 py-2 dark:bg-blue-950/20' : ''}>
+            <dt className={`mb-0.5 text-xs font-semibold ${monitor ? 'text-sky-800 dark:text-sky-300' : gap ? 'text-amber-800 dark:text-amber-300' : next ? 'text-blue-700 dark:text-blue-300' : 'text-zinc-500 dark:text-zinc-400'}`}>{section.label}</dt>
             <dd className="whitespace-pre-wrap break-words text-zinc-700 dark:text-zinc-200">{section.text}</dd>
           </div>;
         })}
       </dl>
-      {details && <details className="mt-3 border-t border-zinc-100 pt-2 dark:border-zinc-800" open={isActive || undefined}>
+      {details && (monitor ? <MonitoringEvidence details={details} active={isActive} /> : <details className="mt-3 border-t border-zinc-100 pt-2 dark:border-zinc-800" open={isActive || undefined}>
         <summary className="cursor-pointer text-xs font-medium text-zinc-500 hover:text-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-200">查看本步骤的结果与依据</summary>
         <div className="mt-2 whitespace-pre-wrap break-words rounded-lg bg-zinc-50 p-3 text-sm dark:bg-zinc-950/60">{details}</div>
-      </details>}
+      </details>)}
     </section>
   );
 }
 
 function MonitoringRoundEndCard({ part }: { part: MessagePart }) {
+  const monitor = useContext(MonitoringViewContext);
   const failed = part.metadata?.roundStatus === 'failed';
   const title = `本轮已结束 · ${failed ? '失败' : '完成'}`;
   const nextStep = typeof part.metadata?.nextStep === 'string' ? part.metadata.nextStep : '';
@@ -5096,11 +5136,11 @@ function MonitoringRoundEndCard({ part }: { part: MessagePart }) {
       data-testid="monitor-round-end"
       data-round-id={typeof part.metadata?.roundId === 'string' ? part.metadata.roundId : undefined}
       className={`my-4 overflow-hidden rounded-xl border shadow-sm ${failed
-        ? 'border-rose-200 bg-rose-50/60 dark:border-rose-900 dark:bg-rose-950/20'
+        ? monitor ? 'border-slate-400 border-l-4 bg-white dark:border-slate-500 dark:bg-slate-900' : 'border-rose-200 bg-rose-50/60 dark:border-rose-900 dark:bg-rose-950/20'
         : 'border-emerald-200 bg-emerald-50/50 dark:border-emerald-900 dark:bg-emerald-950/20'}`}
     >
       <div className={`flex items-center gap-2.5 border-b px-4 py-3 ${failed
-        ? 'border-rose-200/70 text-rose-800 dark:border-rose-900 dark:text-rose-200'
+        ? monitor ? 'border-slate-200 bg-slate-100 text-slate-900 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100' : 'border-rose-200/70 text-rose-800 dark:border-rose-900 dark:text-rose-200'
         : 'border-emerald-200/70 text-emerald-800 dark:border-emerald-900 dark:text-emerald-200'}`}>
         <Icon aria-hidden="true" className="h-5 w-5 shrink-0" />
         <h3 className="text-base font-semibold">{title}</h3>
@@ -5364,6 +5404,7 @@ function ChatMessageBubbleInner({
   onOpenContextFile,
   onOpenContext,
 }: ChatMessageBubbleProps) {
+  const monitor = useContext(MonitoringViewContext);
   const { t, i18n } = useTranslation('session');
   const isUser = message.role === 'user';
   const parts: MessagePart[] = Array.isArray(message.parts) ? message.parts : [];
@@ -5386,7 +5427,7 @@ function ChatMessageBubbleInner({
     );
   }
   const rawAgentName = message.agent || 'rex';
-  const agentName = rawAgentName.charAt(0).toUpperCase() + rawAgentName.slice(1);
+  const agentName = monitor ? '监测运营智能体' : rawAgentName.charAt(0).toUpperCase() + rawAgentName.slice(1);
 
   const getTextContent = () => {
     const text = parts
@@ -5448,8 +5489,8 @@ function ChatMessageBubbleInner({
       <User className={compact ? 'w-3 h-3' : 'w-3.5 h-3.5'} />
     </span>
   ) : (
-    <span className={`inline-flex items-center justify-center rounded-full bg-red-500 text-white font-bold shadow-sm ring-2 ring-white flex-shrink-0 dark:ring-zinc-950 ${avatarSize}`}>
-      {agentName.charAt(0).toUpperCase()}
+    <span className={`inline-flex items-center justify-center rounded-full ${monitor ? 'bg-[#168a5b]' : 'bg-red-500'} text-white font-bold shadow-sm ring-2 ring-white flex-shrink-0 dark:ring-zinc-950 ${avatarSize}`}>
+      {monitor ? <CheckCircle2 className="h-4 w-4" /> : agentName.charAt(0).toUpperCase()}
     </span>
   );
 
@@ -5474,7 +5515,7 @@ function ChatMessageBubbleInner({
               <AlertCircle className="mt-0.5 h-4 w-4 flex-shrink-0 text-red-500" />
               <span className="whitespace-pre-wrap break-words">{messageErrorText}</span>
             </div>
-          ) : (
+          ) : monitor ? <p className="text-xs text-slate-500">等待监测步骤记录…</p> : (
             <div className="flex items-center gap-1 py-1" aria-label={t('chat.thinking')}>
               <span className="w-1.5 h-1.5 rounded-full bg-zinc-400 animate-bounce [animation-delay:-0.3s]" />
               <span className="w-1.5 h-1.5 rounded-full bg-zinc-400 animate-bounce [animation-delay:-0.15s]" />
@@ -6029,6 +6070,10 @@ function ChatMessageBubbleInner({
     </div>
   ) : null;
 
+  if (monitor && isUser && !isEditing && parts.every(part => part.type === 'text') && getTextContent().startsWith('系统自动监测')) {
+    return <div className="flex items-center gap-2 border-b border-sky-100 pb-3 text-xs font-semibold text-sky-800 dark:border-sky-900 dark:text-sky-200"><Clock className="h-4 w-4 shrink-0" /><span className="min-w-0 whitespace-pre-wrap break-words">{getTextContent()}</span></div>;
+  }
+
   if (isUser) {
     if (!compact) {
       return (
@@ -6571,6 +6616,10 @@ export function ChatToolPart({
   processStep = false,
   openWhileActive = false,
 }: ChatToolPartProps) {
+  const monitor = useContext(MonitoringViewContext);
+  const [monitorOpen, setMonitorOpen] = useState(openWhileActive);
+  const monitorTouched = useRef(false);
+  useEffect(() => { if (monitor && !monitorTouched.current) setMonitorOpen(openWhileActive); }, [monitor, openWhileActive]);
   const { t } = useTranslation('session');
   const toolName = part.tool || 'unknown';
 
@@ -6801,12 +6850,12 @@ export function ChatToolPart({
   return (
     <>
       {/* The part wrapper owns vertical spacing between process rows. */}
-      <details className="group/tool rounded-lg bg-zinc-50 overflow-hidden" open={openWhileActive || undefined}>
-        <summary className="px-2.5 py-2 cursor-pointer list-none flex items-start gap-2 min-w-0 select-none hover:bg-zinc-50 transition-colors">
+      <details className={monitor ? `group/tool overflow-hidden rounded-xl border ${status === 'error' ? 'border-slate-400 bg-white dark:border-slate-600 dark:bg-slate-900' : 'border-[#bedcf5] bg-[#eaf4ff] dark:border-sky-900 dark:bg-sky-950'}` : 'group/tool rounded-lg bg-zinc-50 overflow-hidden'} open={monitor ? monitorOpen : openWhileActive || undefined}>
+        <summary onClick={monitor ? event => { event.preventDefault(); monitorTouched.current = true; setMonitorOpen(value => !value); } : undefined} className="px-3 py-3 cursor-pointer list-none flex items-start gap-2 min-w-0 select-none transition-colors">
         <span className={`${config.iconColor} flex-shrink-0 mt-0.5`}>{config.icon}</span>
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2 min-w-0">
-            <span className="font-medium text-zinc-700 text-xs whitespace-nowrap flex-shrink-0">{toolDisplayName}</span>
+            <span className={monitor ? "max-w-[70%] shrink-0 font-semibold text-[#17212b] text-sm break-words dark:text-sky-100" : "font-medium text-zinc-700 text-xs whitespace-nowrap flex-shrink-0"}>{toolDisplayName}</span>
             {cardHeaderDetail && (
               <span
                 className={`text-[11px] truncate min-w-0 ${

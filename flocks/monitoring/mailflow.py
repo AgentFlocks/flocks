@@ -50,6 +50,52 @@ async def settings(owner):
     return found[0] if found else {'enabled': False, 'recipient': '', 'responsible_name': '', 'revision': '', 'project': None, 'mailbox': ''}
 
 
+async def health_snapshot(owner, project=None):
+    """Read health facts without probing the network or exposing mailbox data.
+
+    A successful SMTP submission says nothing about receiving replies. Unknown
+    after process restart stays unknown until the channel verifies connectivity.
+    """
+    config = await settings(owner)
+    enabled = bool(config['enabled'] and (project is None or config['project'] == project))
+    empty = {'state': 'unknown' if enabled else 'disabled', 'stage': 'unknown',
+             'last_success_at': None, 'last_success_stage': None, 'last_error_at': None, 'last_error_stage': None,
+             'error_type': None, 'consecutive_failures': 0, 'next_retry_at': None}
+    result = {'enabled': enabled, 'receive': dict(empty), 'send': dict(empty), 'errors': []}
+    if not enabled:
+        return result
+    plugin = transport.default_registry.get('email')
+    cfg = getattr(plugin, '_resolved', {})
+    if plugin and callable(getattr(plugin, 'health_snapshot', None)):
+        health = plugin.health_snapshot()
+        for direction in ('receive', 'send'):
+            result[direction].update({key: health.get(direction, {}).get(key, value)
+                                      for key, value in empty.items()})
+    if not cfg or config['mailbox'] != transport.mailbox_key(cfg):
+        for direction in ('receive', 'send'):
+            result[direction].update(state='unavailable', stage='configuration')
+        result['errors'].append('邮件通道尚未配置或账号已变化，请核对邮件跟进配置；不能将当前状态视为没有回信。')
+        return result
+    if not plugin.status.connected and result['receive']['state'] == 'healthy':
+        result['receive'].update(state='unavailable', stage='stopped')
+    labels = {'connect': '连接', 'tls': '加密连接', 'authenticate': '认证', 'select': '打开收件箱',
+              'search': '检索邮件', 'fetch': '读取邮件', 'dispatch': '保存或转交回信',
+              'checkpoint': '保存收信进度', 'poll': '收信轮询', 'probe': '连接检查',
+              'send': '投递邮件', 'stopped': '连接未启动或已停止', 'stale': '长时间未完成收信检查',
+              'configuration': '配置', 'unknown': '连接尚未验证'}
+    for direction, name in (('receive', '收信（IMAP）'), ('send', '发信（SMTP）')):
+        item = result[direction]
+        if item['state'] != 'healthy':
+            stage = labels.get(item['stage'], '连接检查')
+            text = f'{name}暂不可用：{stage}。'
+            if direction == 'receive':
+                text += '本轮无法确认是否有新回信；已保存回信和收信进度保留，连接恢复后继续补收。'
+            else:
+                text += '投递结果未知的通知不会自动重发，请在邮件记录中核对。'
+            result['errors'].append(text)
+    return result
+
+
 async def configure(owner, body):
     await require_interactive()
     from .lifecycle import _owned_installation
@@ -557,6 +603,7 @@ async def history(owner, limit=100, offset=0, tab=None):
     reply_counts = await rows('SELECT state,COUNT(*) AS count FROM monitor_mail_replies WHERE owner=? AND project=? GROUP BY state', (owner, project))
     unparsed = await rows('SELECT COUNT(*) AS count FROM monitor_mail_unparsed WHERE mailbox=?', (config['mailbox'],))
     return {'settings': {**config, 'recipient_email': config['recipient']}, 'notices': notices, 'replies': replies,
+            'health': await health_snapshot(owner, project),
             'sender_verification_required': transport.REQUIRE_AUTHENTICATED_FEEDBACK,
             'unparsed_count': unparsed[0]['count'],
             'counts': {x['state']: x['count'] for x in counts}, 'reply_counts': {x['state']: x['count'] for x in reply_counts},
@@ -572,6 +619,7 @@ async def diagnostic_state(owner):
     cfg = getattr(plugin, '_resolved', {})
     installed = await rows('SELECT policy FROM monitor_installations WHERE owner=? AND scope=?', (owner, COMPONENT_ID))
     result = {'enabled': bool(config['enabled']), 'recipient_configured': bool(config['recipient']),
+              'health': await health_snapshot(owner, config['project']),
               'channel_connected': bool(plugin and plugin.status.connected),
               'sender_verification_required': transport.REQUIRE_AUTHENTICATED_FEEDBACK,
               'channel_requires_authenticated_sender': bool(cfg.get('requireAuthenticatedSender')),
@@ -585,8 +633,12 @@ async def diagnostic_state(owner):
         policy = MonitoringPolicy.model_validate_json(installed[0]['policy'])
         result['investigation_engine'] = policy.investigation_engine
         result['round_timeout_seconds'] = policy.timeout_seconds
-        investigations = await rows('SELECT state,COUNT(*) AS count FROM monitor_investigations WHERE owner=? AND project=? GROUP BY state', (owner, config['project']))
-        result['investigations'] = {r['state']: r['count'] for r in investigations if r['state'] in {'pending', 'ready', 'needs_review'}}
+        from .investigation import status_summary
+        backlog = await status_summary(policy)
+        result['investigations'] = {state: backlog[state] for state in
+            ('pending', 'ready', 'needs_review', 'deferred', 'system_wait')}
+        result['investigation_recovery'] = {key: backlog[key] for key in
+            ('retry_exhausted', 'earliest_retry_at', 'oldest_updated_at')}
     for name, table in (('notices', 'monitor_mail_notices'), ('replies', 'monitor_mail_replies')):
         counts = await rows(f'SELECT state,COUNT(*) AS count FROM {table} WHERE owner=? AND project=? GROUP BY state', (owner, config['project']))
         result[name] = {r['state']: r['count'] for r in counts if r['state'] in diag._ENUMS['mail_state']}

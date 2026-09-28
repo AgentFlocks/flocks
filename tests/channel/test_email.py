@@ -5,7 +5,7 @@ import uuid
 import email as email_lib
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -884,6 +884,9 @@ async def test_start_marks_channel_connected_after_successful_poll(
 async def test_start_keeps_uid_unseen_when_dispatch_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # This channel unit test does not own a monitoring installation/database.
+    # The real diagnostic bridge is exercised with isolated stores separately.
+    monkeypatch.setattr('flocks.monitoring.mail_transport.diagnose_poll', AsyncMock())
     plugin = EmailChannel()
     plugin._resolved = resolved_config({
         "address": "agent@example.com",

@@ -2,9 +2,9 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import { MemoryRouter, useLocation } from 'react-router-dom';
 import { beforeEach, expect, it, vi } from 'vitest';
 import SecurityMonitor from './index';
-const mocks = vi.hoisted(() => ({ overview: vi.fn(), report: vi.fn(), start: vi.fn(), pause: vi.fn(), diagnostics: vi.fn(), setInvestigationEngine: vi.fn() }));
+const mocks = vi.hoisted(() => ({ overview: vi.fn(), report: vi.fn(), start: vi.fn(), pause: vi.fn(), diagnostics: vi.fn(), setInvestigationEngine: vi.fn(), subscription: null as any }));
 vi.mock('@/api/securityMonitoring', async importOriginal => ({ ...(await importOriginal<any>()), monitoringApi: mocks }));
-vi.mock('@/hooks/useSSE', () => ({ useSSE: () => ({}) }));
+vi.mock('@/hooks/useSSE', () => ({ useSSE: (options: any) => { mocks.subscription = options; return {}; } }));
 vi.mock('@/components/common/SessionChat', () => ({ default: ({ sessionId, hideInput, live }: any) => <div data-testid="native-chat">{sessionId} {hideInput && 'readonly'} {live && 'live'}</div> }));
 const data = {
  businessDate: '2026-09-23', timezone: 'Asia/Shanghai', sessionID: 'real-session', nextRun: null, scheduledNextRun: '2026-09-23T02:10:00Z',
@@ -19,18 +19,22 @@ it('shows only agent investigation and removes development instructions, includi
  mocks.overview.mockResolvedValue({ data: { ...data, developmentSample: true, investigationEngine: 'rules' } });
  render(<MemoryRouter><SecurityMonitor /></MemoryRouter>);
  const controls = await screen.findByRole('region', { name: '监测控制' });
- expect(controls).toHaveTextContent('智能体调查');
+ fireEvent.click(screen.getByLabelText('更多监测功能'));
+ fireEvent.click(screen.getByRole('button', { name: '运行与邮件健康' }));
+ expect(screen.getByRole('dialog')).toHaveTextContent('智能体调查');
  expect(screen.queryByLabelText('调查方式')).not.toBeInTheDocument();
  expect(controls).not.toHaveTextContent('开发联调');
  expect(controls).not.toHaveTextContent('每轮随机');
  expect(controls).not.toHaveTextContent('固定规则调查');
  expect(mocks.setInvestigationEngine).not.toHaveBeenCalled();
 });
-it('uses one native readonly live session and four workspace tabs', async () => {
+it('uses a primary readonly live session with workspace links behind More', async () => {
  render(<MemoryRouter initialEntries={['/suites/host-security-monitor/session']}><SecurityMonitor /></MemoryRouter>);
  expect(await screen.findByTestId('native-chat')).toHaveTextContent('real-session readonly live');
+ expect(screen.getByLabelText('更多监测功能').parentElement).not.toHaveAttribute('open');
+ fireEvent.click(screen.getByLabelText('更多监测功能'));
  expect(within(screen.getByRole('navigation')).getAllByRole('link')).toHaveLength(4);
- expect(screen.getByText('在工作台打开')).toHaveAttribute('href', '/sessions?session=real-session');
+ expect(screen.getByText('在工作台打开')).toHaveAttribute('href', '/sessions?session=real-session&focusMessage=anchor');
 });
 it('uses fact metrics, filters risks and never claims disposition', async () => {
  render(<MemoryRouter initialEntries={['/suites/host-security-monitor/dashboard']}><SecurityMonitor /></MemoryRouter>);
@@ -55,12 +59,12 @@ it('rechecks an unready installation on Start and displays the next execution', 
  let finish!: (result: unknown) => void;
  mocks.start.mockImplementation(() => new Promise(resolve => { finish = resolve; }));
  render(<MemoryRouter><SecurityMonitor /></MemoryRouter>);
- const button = await screen.findByRole('button', { name: '检查接入并启动' });
- expect(screen.getByText(/监测未启动/)).toBeInTheDocument();
+ const button = await screen.findByRole('button', { name: '启动监测' });
+ expect(screen.getByRole('region', { name: '监测控制' })).toHaveTextContent('未就绪');
  fireEvent.click(button); fireEvent.click(button);
  expect(mocks.start).toHaveBeenCalledTimes(1);
  expect(screen.getByRole('button', { name: '正在处理…' })).toBeDisabled();
- expect(screen.getByLabelText('业务日期')).toBeDisabled();
+ expect(screen.queryByLabelText('业务日期')).not.toBeInTheDocument();
  mocks.overview.mockResolvedValue({ data });
  await act(async () => finish({ data }));
  expect(await screen.findByRole('button', { name: '暂停监测' })).toBeEnabled();
@@ -73,9 +77,9 @@ it.each(['message', 'detail'])('shows the actual preflight reason from %s and le
  mocks.overview.mockResolvedValue({ data: { ...data, installation: { ...data.installation, ready: false, status: 'disabled' } } });
  mocks.start.mockRejectedValue({ response: { data: { [key]: '未找到已启用的 XDR 接入' } } });
  render(<MemoryRouter><SecurityMonitor /></MemoryRouter>);
- fireEvent.click(await screen.findByRole('button', { name: '检查接入并启动' }));
+ fireEvent.click(await screen.findByRole('button', { name: '启动监测' }));
  expect(await screen.findByRole('alert')).toHaveTextContent('未找到已启用的 XDR 接入');
- await waitFor(() => expect(screen.getByRole('button', { name: '检查接入并启动' })).toBeEnabled());
+ await waitFor(() => expect(screen.getByRole('button', { name: '启动监测' })).toBeEnabled());
  expect(screen.queryByRole('status')).not.toBeInTheDocument();
 });
 
@@ -84,10 +88,10 @@ it('pauses monitoring and clears the next execution time', async () => {
  mocks.pause.mockImplementation(async () => { mocks.overview.mockResolvedValue({ data: paused }); return { data: paused }; });
  render(<MemoryRouter><SecurityMonitor /></MemoryRouter>);
  fireEvent.click(await screen.findByRole('button', { name: '暂停监测' }));
- expect(await screen.findByRole('button', { name: '检查接入并启动' })).toBeEnabled();
+ expect(await screen.findByRole('button', { name: '启动监测' })).toBeEnabled();
  expect(mocks.pause).toHaveBeenCalledTimes(1);
  expect(screen.getByRole('region', { name: '监测控制' })).toHaveTextContent('监测：已暂停');
- expect(screen.getByRole('region', { name: '监测控制' })).toHaveTextContent('下次检查 —');
+ expect(screen.getByRole('region', { name: '监测控制' })).toHaveTextContent('下次监测 —');
 });
 
 it('downloads one diagnostic file without starting another monitoring round', async () => {
@@ -98,6 +102,7 @@ it('downloads one diagnostic file without starting another monitoring round', as
  const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
  mocks.diagnostics.mockResolvedValue({ data: blob });
  render(<MemoryRouter><SecurityMonitor /></MemoryRouter>);
+ fireEvent.click(screen.getByLabelText('更多监测功能'));
  fireEvent.click(screen.getByRole('button', { name: '导出诊断日志' }));
  await waitFor(() => expect(createUrl).toHaveBeenCalledWith(blob));
  expect(click).toHaveBeenCalledTimes(1);
@@ -110,6 +115,7 @@ it('deduplicates diagnostic downloads and keeps retry available after failure', 
  let reject!: (reason: unknown) => void;
  mocks.diagnostics.mockImplementation(() => new Promise((_, fail) => { reject = fail; }));
  render(<MemoryRouter><SecurityMonitor /></MemoryRouter>);
+ fireEvent.click(screen.getByLabelText('更多监测功能'));
  const button = screen.getByRole('button', { name: '导出诊断日志' });
  fireEvent.click(button); fireEvent.click(button);
  expect(mocks.diagnostics).toHaveBeenCalledTimes(1);
@@ -243,4 +249,59 @@ it('clears previous timeline details while loading another date and starts its n
  expect(screen.queryByText('当前日期的详细报告')).not.toBeInTheDocument();
  fireEvent.click(screen.getByRole('button', { name: /第 1 轮/ }));
  expect(screen.getByText('当前日期的详细报告')).toBeInTheDocument();
+});
+
+
+it('keeps the primary route on Start and navigates only through the manual workbench link', async () => {
+ function RouteObserver() { const location = useLocation(); return <output data-testid="location">{location.pathname}{location.search}</output>; }
+ mocks.overview.mockResolvedValue({ data: { ...data, installation: { ...data.installation, status: 'disabled' } } });
+ mocks.start.mockImplementation(async () => { mocks.overview.mockResolvedValue({ data }); return { data }; });
+ render(<MemoryRouter initialEntries={['/suites/host-security-monitor/session']}><SecurityMonitor /><RouteObserver /></MemoryRouter>);
+ fireEvent.click(await screen.findByRole('button', { name: '启动监测' }));
+ await screen.findByRole('button', { name: '暂停监测' });
+ expect(screen.getByTestId('location')).toHaveTextContent('/suites/host-security-monitor/session');
+ await act(async () => mocks.subscription.onEvent({ type: 'monitor.execution.started' }));
+ await act(async () => mocks.subscription.onReconnect());
+ expect(screen.getByTestId('location')).toHaveTextContent('/suites/host-security-monitor/session');
+ fireEvent.click(screen.getByLabelText('更多监测功能'));
+ fireEvent.click(screen.getByRole('link', { name: '在工作台打开' }));
+ expect(screen.getByTestId('location')).toHaveTextContent('/sessions?session=real-session&focusMessage=anchor');
+});
+
+it('keeps a historical conversation while showing live global starts and finishes', async () => {
+ let running = false;
+ mocks.overview.mockImplementation(async (day) => ({ data: { ...data, businessDate: day || data.businessDate, sessionID: day ? 'historical-session' : 'real-session', currentRun: running ? { id: 'current', session_id: 'today-session', message_id: 'today-message', started_at: '2026-09-29T01:00:00Z' } : null } }));
+ render(<MemoryRouter initialEntries={['/suites/host-security-monitor/session']}><SecurityMonitor /></MemoryRouter>);
+ await screen.findByTestId('native-chat');
+ fireEvent.click(screen.getByLabelText('更多监测功能'));
+ fireEvent.click(screen.getByRole('button', { name: '查看历史日期' }));
+ fireEvent.change(screen.getByLabelText('业务日期'), { target: { value: '2026-09-20' } });
+ await waitFor(() => expect(screen.getByTestId('native-chat')).toHaveTextContent('historical-session'));
+ fireEvent.keyDown(document, { key: 'Escape' });
+ running = true;
+ await act(async () => mocks.subscription.onEvent({ type: 'monitor.execution.started' }));
+ expect(screen.getByRole('region', { name: '监测控制' })).toHaveTextContent('本轮执行中');
+ expect(screen.getByRole('region', { name: '监测控制' })).toHaveTextContent('下次：本轮结束后等待调度');
+ expect(screen.getByTestId('native-chat')).toHaveTextContent('historical-session');
+ expect(mocks.overview).toHaveBeenLastCalledWith('2026-09-20');
+ running = false;
+ await act(async () => mocks.subscription.onEvent({ type: 'monitor.execution.finished' }));
+ expect(screen.getByRole('region', { name: '监测控制' })).toHaveTextContent('等待下一轮');
+ expect(screen.getByTestId('native-chat')).toHaveTextContent('historical-session');
+});
+
+it('surfaces mail failures immediately and exposes useful health details in the drawer', async () => {
+ mocks.overview.mockResolvedValue({ data: { ...data, mail: { enabled: true, pending: 2, needsReview: 1, health: { errors: ['收信连接中断'], receive: { state: 'unavailable', error_type: 'TimeoutError', stage: 'poll', last_error_stage: 'fetch', last_error_at: '2026-09-29T01:00:00Z', consecutive_failures: 3 }, send: { state: 'healthy', last_success_at: '2026-09-29T00:50:00Z' } } }, investigation: { pending: 2, deferred: 1, system_wait: 1, needs_review: 0 }, metrics: { ...data.metrics, investigatedEvents: 2, investigationCompletedEvents: 1, investigationCompletionRate: .5 } } });
+ render(<MemoryRouter><SecurityMonitor /></MemoryRouter>);
+ expect(await screen.findByRole('alert')).toHaveTextContent('邮件通道异常：收信连接中断');
+ fireEvent.click(screen.getByRole('button', { name: '查看原因' }));
+ const drawer = screen.getByRole('dialog');
+ expect(drawer).toHaveTextContent('收信连接 · 不可用');
+ expect(drawer).toHaveTextContent('TimeoutError');
+ expect(drawer).toHaveTextContent('fetch');
+ expect(drawer).not.toHaveTextContent('poll');
+ expect(drawer).toHaveTextContent('连续失败：3 次');
+ expect(drawer).toHaveTextContent('发信连接 · 正常');
+ expect(drawer).toHaveTextContent('1 / 2 条 · 50%');
+ expect(drawer).toHaveTextContent('等待系统恢复 1');
 });

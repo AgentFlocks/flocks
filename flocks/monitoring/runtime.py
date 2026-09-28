@@ -146,7 +146,7 @@ async def query_device(adapter, device, start, end, recorder, *, selection=None)
 @diag.traced('run')
 async def run(execution, policy, adapter_factory=XdrAdapter):
     started = now()  # actual semaphore admission, not scheduled/queued time
-    from .mailflow import settings, process_replies, notify_batch, cutoff
+    from .mailflow import settings, process_replies, notify_batch, cutoff, health_snapshot
     reply_high = await cutoff(policy.owner, policy.project, before=started.isoformat())
     with diag.span('session.prepare', devices=len(policy.devices), max_pages=policy.max_pages, timeout_seconds=policy.timeout_seconds):
         session, day = await ensure_daily(policy, started)
@@ -175,6 +175,7 @@ async def run(execution, policy, adapter_factory=XdrAdapter):
     recorder = Recorder(session.id, attempt_id, confirm_start, trigger_message.id, agent=agent_name)
     adapter = adapter_factory(policy, session.id)
     errors, observed = [], []
+    query_errors = 0
     status, summary = 'failed', ''
     try:
         if not policy.devices:
@@ -201,6 +202,7 @@ async def run(execution, policy, adapter_factory=XdrAdapter):
                 observed.extend(events)
             except ContractError as exc:
                 errors.append(str(exc))
+                query_errors += 1
         current_events = {event['key']: event for event in observed}
         resumed = []
         for event in backlog:
@@ -217,8 +219,10 @@ async def run(execution, policy, adapter_factory=XdrAdapter):
             if budget.calls >= policy.investigation_calls or budget.models >= policy.investigation_calls * 2 + 3:
                 break
             await investigation.investigate(policy, event, recorder, budget)
-            if event['investigation']['state'] != 'ready':
-                errors.append('智能体调查尚未完成，证据和待办已保存')
+            outcome = event['investigation']
+            if outcome['state'] not in {'ready', 'deferred', 'needs_review'}:
+                from .summaries import label
+                errors.append('智能体调查未完成：' + label(outcome.get('reason'), '执行服务异常，证据和待办已保存', 240))
             await write('UPDATE monitor_observations SET data=? WHERE attempt_id=? AND event_key=?',
                         (encode(event), attempt_id, event['key']))
         async def analyze(_):
@@ -234,7 +238,8 @@ async def run(execution, policy, adapter_factory=XdrAdapter):
             result = {'events': len(observed), 'risk': sum(e['risk'] == 'risk' for e in observed),
                       'unknown': sum(e['risk'] == 'unknown' for e in observed), 'ignored': 0,
                       'analyzed': sum(e.get('investigation', {}).get('state') == 'ready' for e in observed),
-                      'deferred': sum('investigation' not in e for e in observed),
+                      'deferred': sum(not e.get('investigation') or e['investigation']['state'] == 'deferred' for e in observed),
+                      'query_complete': query_errors == 0,
                       'errors': errors, 'disposition': '待人工确认', 'closure': 'open'}
             return result, result, analysis_summary(result, observed, groups)
         result = await recorder.call('关联分析', {'policy': 'xdr-risk-v1'}, analyze)
@@ -244,7 +249,13 @@ async def run(execution, policy, adapter_factory=XdrAdapter):
         notification = await notify_batch(policy, session.id, mail_events, recorder)
         errors.extend(feedback.get('errors', []))
         errors.extend(notification.get('errors', []))
-        result['mail'] = {'feedback': feedback, 'notification': notification, 'enabled': automatic_enabled}
+        mail_health = await health_snapshot(policy.owner, policy.project)
+        errors.extend(mail_health.get('errors', []) if automatic_enabled else [])
+        result['investigation_backlog'] = await investigation.status_summary(policy)
+        if result['investigation_backlog'].get('system_wait'):
+            errors.append(f"仍有 {result['investigation_backlog']['system_wait']} 条调查因系统故障未恢复；具体恢复安排见本轮结束说明")
+        errors[:] = list(dict.fromkeys(errors))
+        result['mail'] = {'feedback': feedback, 'notification': notification, 'enabled': automatic_enabled, 'health': mail_health}
         result['disposition'] = '责任人邮件反馈后标记并回查' if automatic_enabled else '只读监测'
         # Waiting for a reply is normal completion; a failed investigation is not.
         status = 'failed' if errors else 'completed'
@@ -261,28 +272,58 @@ async def run(execution, policy, adapter_factory=XdrAdapter):
             for event in observed:
                 await write('UPDATE monitor_observations SET data=? WHERE attempt_id=? AND event_key=?',
                             (encode(event), attempt_id, event['key']))
-            summary += '已保存的调查证据和原事件编号会保留，后续轮次优先续查未完成事件；连续三轮未完成的事件保留待人工核对。'
+            summary += '已保存的调查证据和原事件编号会保留；延期任务后续续查，系统故障按恢复计划处理，需人工核对的事件不会自动续查。'
         raise
     finally:
-        diag.result(status, events=len(observed), errors=len(errors))
-        # Reserve the factual summary with the terminal status. Recovery can
-        # publish it even if the process stops before the message is created.
-        await write('UPDATE monitor_attempts SET status=?,finished_at=?,error=?,summary=? WHERE id=?',
-                    (status, now().isoformat(), '；'.join(errors) or None, summary or '本轮已中断，未记录为成功。', attempt_id))
-        from .rounds import finish_round
-        await finish_round(attempt_id, summary or '本轮已中断，未记录为成功。')
-        await write("INSERT INTO monitor_reports(owner,scope,business_date,status) VALUES(?,?,?,'pending') ON CONFLICT(owner,scope,business_date) DO UPDATE SET status='pending'", (policy.owner, policy.scope, day))
-        SessionStatus.set(session.id, SessionStatusIdle())
-        await publish('session.status', {'sessionID': session.id, 'status': {'type': 'idle'}})
-        from .reports import export_report
-        with diag.span('report.export'):
-            await export_report(policy.owner, policy.scope, day)
+        try:
+            # Reserve facts and report work before publishing the ending.
+            # Interrupted message persistence can then be repaired on recovery.
+            await write('UPDATE monitor_attempts SET status=?,finished_at=?,error=?,summary=? WHERE id=?',
+                        (status, now().isoformat(), '；'.join(errors) or None, summary or '本轮已中断，未记录为成功。', attempt_id))
+            await write("INSERT INTO monitor_reports(owner,scope,business_date,status) VALUES(?,?,?,'pending') ON CONFLICT(owner,scope,business_date) DO UPDATE SET status='pending'", (policy.owner, policy.scope, day))
+            from .rounds import finish_round
+            try:
+                await finish_round(attempt_id, summary or '本轮已中断，未记录为成功。')
+            except Exception:
+                status = 'failed'
+                errors.append('结束总结发布失败，已保存本轮事实，等待恢复结束标志')
+                summary = '本轮收尾失败：结束总结尚未正常发布。\n' + (summary or '已保存本轮事实。')
+                await write("UPDATE monitor_attempts SET status='failed',error=?,summary=?,end_published=0 WHERE id=?",
+                            ('；'.join(errors), summary, attempt_id))
+            from .reports import export_report
+            try:
+                with diag.span('report.export'):
+                    await export_report(policy.owner, policy.scope, day)
+            except Exception:
+                # Report failure is independently retried; it must not turn a
+                # completed investigation into a failed task or leave it busy.
+                await write("UPDATE monitor_reports SET status='failed',error=? WHERE owner=? AND scope=? AND business_date=?",
+                            ('日报导出失败，等待独立重试', policy.owner, policy.scope, day))
+        except Exception:
+            status = 'failed'
+            errors.append('本轮收尾记录保存失败，请检查存储并恢复记录')
+            try:
+                await write("UPDATE monitor_attempts SET status='failed',error=?,summary=?,end_published=0 WHERE id=?",
+                            ('；'.join(errors), summary or errors[-1], attempt_id))
+            except Exception:
+                pass  # Unavailable storage cannot prevent clearing busy state.
+            raise
+        finally:
+            diag.result(status, events=len(observed), errors=len(errors))
+            SessionStatus.set(session.id, SessionStatusIdle())
+            await publish('monitor.execution.finished', {'sessionID': session.id, 'executionID': execution.id,
+                          'attemptID': attempt_id, 'status': status, 'businessDate': day})
+            await publish('session.status', {'sessionID': session.id, 'status': {'type': 'idle'}})
     return LoopResult(action='error' if status == 'failed' else 'stop', error=summary if status == 'failed' else None,
                       metadata={'summary': summary})
 
 
 @diag.traced('dispatch')
 async def dispatch(execution, scheduler, *, adapter_factory=XdrAdapter):
+    # Recovery is persisted per event and consumed by a later ten-minute round.
+    # Older queued executions must not activate TaskManager's whole-round retry.
+    execution.retry.max_retries = 0
+    execution.retry.retry_after = None
     policy = MonitoringPolicy.model_validate(execution.execution_input_snapshot['context']['monitoring'])
     from flocks.hub import local
     record = local.get_record('component', policy.scope)
@@ -311,20 +352,26 @@ async def dispatch(execution, scheduler, *, adapter_factory=XdrAdapter):
                 session_id=execution.session_id or '', description=execution.title,
                 agent='security-monitor' if policy.investigation_engine == 'agent-v1' else 'rex',
                 allow_user_questions=False, runner=runner)
+            # The generic wait_for(timeout) cancels the runner before returning,
+            # so its cleanup would miss our timeout reason. Own this deadline
+            # without cancelling the waiter; set the reason before draining the
+            # runner and preserve the same ordering for explicit cancellation.
+            waiter = asyncio.create_task(manager.wait_for(background.id))
             try:
-                result = await manager.wait_for(background.id, timeout_ms=policy.timeout_seconds * 1000)
+                try:
+                    result = await asyncio.wait_for(asyncio.shield(waiter), timeout=policy.timeout_seconds)
+                except asyncio.TimeoutError:
+                    result = None
             except BaseException:
                 manager.cancel(background.id)
                 handle = manager._task_handles.get(background.id)
-                if handle:
-                    await asyncio.gather(handle, return_exceptions=True)
+                await asyncio.gather(waiter, *([handle] if handle else []), return_exceptions=True)
                 raise
             if result is None:
                 execution.execution_input_snapshot['monitorStopReason'] = 'timeout'
                 manager.cancel(background.id)
                 handle = manager._task_handles.get(background.id)
-                if handle:
-                    await asyncio.gather(handle, return_exceptions=True)
+                await asyncio.gather(waiter, *([handle] if handle else []), return_exceptions=True)
             if result is None or result.status != 'completed':
                 diag.event('background.result', failure=True, outcome='failed')
                 raise RuntimeError(result.error if result else '监测执行超时')

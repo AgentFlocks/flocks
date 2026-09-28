@@ -23,7 +23,34 @@ class Capability:
     skill: str = ''
 
     def json(self):
-        return asdict(self)
+        return {**asdict(self), 'entities': list(self.entities)}
+
+    @property
+    def entities(self):
+        return ('host', 'file', 'process', 'ip', 'innerip', 'dns', 'proof') if self.kind == 'xdr' else ('related',)
+
+
+def for_event(catalog, event):
+    """Never advertise another XDR device as a source for this event's UUID."""
+    return [cap for cap in catalog if cap.kind != 'xdr' or cap.device == event.get('device')]
+
+
+def resolve_choice(catalog, event, name):
+    """Resolve an ID or a unique exact tool alias, without guessing a device."""
+    allowed = for_event(catalog, event)
+    exact = [cap for cap in allowed if cap.id == name]
+    if len(exact) == 1:
+        return exact[0], None
+    # Base tool aliases are useful for registered names suffixed with __device.
+    # Do not use partial, fuzzy or display-name matching.
+    aliases = [cap for cap in allowed if name in {cap.tool, cap.tool.split('__')[0]}]
+    if len(aliases) == 1:
+        return aliases[0], None
+    if aliases or len(exact) > 1:
+        return None, 'ambiguous_capability'
+    if any(cap.id == name for cap in catalog):
+        return None, 'wrong_device'
+    return None, 'unknown_capability'
 
 
 async def tdp_skill():

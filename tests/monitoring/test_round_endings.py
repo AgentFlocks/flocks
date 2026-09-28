@@ -34,6 +34,10 @@ async def context(tmp_path, monkeypatch):
     async def publish(kind, payload):
         published.append((kind, payload))
     monkeypatch.setattr(runtime, 'publish', publish)
+    # This fixture simulates a healthy mailbox; failure cases override explicitly.
+    monkeypatch.setattr('flocks.monitoring.mailflow.health_snapshot', AsyncMock(return_value={
+        'enabled': True, 'receive': {'state': 'healthy'}, 'send': {'state': 'healthy'}, 'errors': [],
+    }))
     monkeypatch.setattr(capabilities, 'discover', AsyncMock(return_value=([
         capabilities.Capability('fixture-cap', 'xdr', policy.tool, 'xdr', 'Fixture XDR', 'unknown'),
     ], [])))
@@ -125,7 +129,7 @@ async def test_failed_query_or_incomplete_model_produces_failed_card(context, mo
     if failure == 'model':
         assert any(step['tool'] == '智能体调查结果' for step in failed_steps)
         case = (await rows('SELECT * FROM monitor_investigations'))[0]
-        assert case['state'] == 'pending'
+        assert case['state'] == 'system_wait'
     else:
         assert not await rows('SELECT * FROM monitor_cursors')
     for step in failed_steps:
@@ -411,3 +415,230 @@ async def test_steps_persist_readable_evidence_sections_without_model_reasoning(
     assert any('主机：192.0.2.1' in section['text'] for section in sections)
     assert any('evidence-1' in section['text'] for section in sections)
     assert not any('思考过程' in section['label'] for section in sections)
+
+
+async def test_zero_events_with_unavailable_receiver_is_failure_not_no_reply(context, monkeypatch):
+    from flocks.monitoring import mailflow
+    enable_fixture_mail(context, monkeypatch)
+    context.events.clear()
+    monkeypatch.setattr(mailflow, 'health_snapshot', AsyncMock(return_value={
+        'enabled': True, 'receive': {'state': 'unavailable', 'stage': 'search'},
+        'send': {'state': 'healthy'}, 'errors': ['邮件收取失败：搜索阶段异常'],
+    }))
+    outcome = await runtime.run(context.execution, context.policy, context.adapter)
+    attempt, _, card = await ending()
+    facts = json.loads(attempt['result'])
+    assert outcome.action == 'error' and facts['query_complete'] is True
+    assert facts['events'] == 0 and facts['mail']['health']['receive']['stage'] == 'search'
+    assert '当前不能把处理回信 0 封解释为没有新回信' in card.text
+    assert '查询未完整成功' not in card.text
+
+
+async def test_zero_event_round_exposes_old_system_failure_and_retry_plan(context, monkeypatch):
+    monkeypatch.setattr(investigation, 'choose', AsyncMock(side_effect=ContractError('调查模型没有返回完整决策')))
+    await runtime.run(context.execution, context.policy, context.adapter)
+    context.events.clear()
+    outcome = await runtime.run(context.execution, context.policy, context.adapter)
+    attempt, _, card = await ending()
+    facts = json.loads(attempt['result'])
+    assert outcome.action == 'error'
+    assert facts['events'] == 0  # cooldown prevents a repeated model call
+    assert facts['investigation_backlog']['system_wait'] == 1
+    assert '系统故障 1 条' in card.text
+    assert '不早于' in attempt['next_step']
+
+
+async def test_manual_review_is_not_promised_automatic_resumption(context):
+    await runtime.run(context.execution, context.policy, context.adapter)
+    await write("UPDATE monitor_investigations SET state='needs_review'")
+    context.events.clear()
+    outcome = await runtime.run(context.execution, context.policy, context.adapter)
+    attempt, _, card = await ending()
+    assert outcome.action == 'stop'
+    assert '业务待人工核对 1 条' in card.text
+    assert '不再自动续查' in attempt['next_step']
+    assert '优先处理已收到的回信和未完成调查' not in attempt['next_step']
+
+
+async def test_monitor_migration_disables_generic_retry_but_preserves_other_tasks(context):
+    from datetime import datetime, timedelta, timezone
+    from flocks.monitoring.lifecycle import _disable_round_retries
+    other = await TaskManager.create_scheduler(title='unrelated')
+    context.execution.status = TaskStatus.FAILED
+    context.execution.retry.retry_count = 2
+    context.execution.retry.retry_after = datetime.now(timezone.utc) + timedelta(seconds=60)
+    await TaskStore.update_execution(context.execution)
+    await _disable_round_retries(context.scheduler)
+    saved = await TaskStore.get_execution(context.execution.id)
+    assert saved.retry.max_retries == 0 and saved.retry.retry_after is None
+    assert saved.retry.retry_count == 2 and saved.status == TaskStatus.FAILED
+    assert (await TaskStore.get_scheduler(context.scheduler.id)).retry.max_retries == 0
+    assert (await TaskStore.get_scheduler(other.id)).retry.max_retries == 3
+
+
+async def test_next_step_excludes_old_devices_and_development_cases(context):
+    await runtime.run(context.execution, context.policy, context.adapter)
+    original = (await rows('SELECT * FROM monitor_investigations'))[0]
+    event = json.loads(original['event'])
+    event['device'] = 'removed-device'
+    await write("UPDATE monitor_investigations SET event=?,state='system_wait',retry_exhausted=1", (encode(event),))
+    context.events.clear()
+    await runtime.run(context.execution, context.policy, context.adapter)
+    attempt, _, _ = await ending()
+    assert '系统故障调查' not in attempt['next_step']
+    assert '修复依赖后' not in attempt['next_step']
+
+
+async def test_history_snapshot_reports_current_run_without_switching_session(context):
+    from flocks.monitoring.reports import snapshot
+    attempt = await seed_attempt(context)
+    view = await snapshot(context.policy.owner, context.policy.scope, '2000-01-01')
+    assert view['businessDate'] == '2000-01-01' and not view['runs']
+    assert view['sessionID'] is None
+    assert view['currentRun']['id'] == attempt.id
+    assert view['metrics']['investigationCompletionRate'] is None
+
+
+@pytest.mark.parametrize('stage', ['query', 'model'])
+async def test_real_background_timeout_marks_reason_before_runner_cleanup(context, monkeypatch, stage):
+    from flocks.auth.context import AuthUser
+    from flocks.hub import local
+    from flocks.task.background import BackgroundManager
+    from flocks.session.core.status import SessionStatus
+    monkeypatch.setattr(local, 'get_record', lambda kind, key: SimpleNamespace(enabled=True) if kind == 'component' else None)
+    monkeypatch.setattr('flocks.monitoring.agent_component.resolve', AsyncMock())
+    monkeypatch.setattr(runtime.AuthService, 'get_user_by_id', AsyncMock(return_value=SimpleNamespace(
+        status='active', to_auth_user=lambda: AuthUser(id='owner', username='owner', role='admin'))))
+    context.policy = context.policy.model_copy(update={'timeout_seconds': 1})
+    context.execution.execution_input_snapshot['context']['monitoring'] = context.policy.model_dump()
+    context.scheduler.context = {'monitoring': context.policy.model_dump()}
+    await TaskStore.update_scheduler(context.scheduler)
+    await write('UPDATE monitor_installations SET policy=?', (encode(context.policy.model_dump()),))
+    entered = asyncio.Event()
+    factory = context.adapter
+    if stage == 'query':
+        class Hanging(context.adapter):
+            async def call(self, *args):
+                entered.set()
+                await asyncio.Event().wait()
+        factory = Hanging
+    else:
+        original = investigation.choose
+        async def hang_after_evidence(agent, data):
+            if data['evidence']:
+                entered.set()
+                await asyncio.Event().wait()
+            return await original(agent, data)
+        monkeypatch.setattr(investigation, 'choose', hang_after_evidence)
+    manager = BackgroundManager()
+    waiting = AsyncMock(wraps=manager.wait_for)
+    monkeypatch.setattr(manager, 'wait_for', waiting)
+    monkeypatch.setattr(runtime, 'get_background_manager', lambda: manager)
+    outcome = await runtime.dispatch(context.execution, context.scheduler, adapter_factory=factory)
+    assert entered.is_set() and outcome.status == TaskStatus.FAILED
+    assert waiting.call_args.kwargs == {}  # Monitoring owns the deadline, not generic wait_for.
+    assert all(task.done() for task in manager._task_handles.values())
+    assert all(task.status == 'cancelled' for task in manager.list_tasks())
+    attempt, _, card = await ending()
+    assert '达到本轮 1 秒执行上限' in card.text
+    assert '运行中断或内部错误' not in card.text
+    assert attempt['status'] == 'failed' and attempt['end_published'] == 1
+    assert SessionStatus.get(attempt['session_id']).type == 'idle'
+    assert context.execution.id not in runtime._running
+    if stage == 'model':
+        saved = (await rows('SELECT * FROM monitor_investigations'))[0]
+        assert saved['state'] == 'deferred' and saved['error_kind'] == 'cancelled'
+        assert len(json.loads(saved['evidence'])) == 1
+        assert saved['failure_count'] == 0
+
+
+async def test_real_background_manual_cancel_drains_runner_and_waiter(context, monkeypatch):
+    from flocks.auth.context import AuthUser
+    from flocks.hub import local
+    from flocks.task.background import BackgroundManager
+    from flocks.session.core.status import SessionStatus
+    monkeypatch.setattr(local, 'get_record', lambda kind, key: SimpleNamespace(enabled=True) if kind == 'component' else None)
+    monkeypatch.setattr('flocks.monitoring.agent_component.resolve', AsyncMock())
+    monkeypatch.setattr(runtime.AuthService, 'get_user_by_id', AsyncMock(return_value=SimpleNamespace(
+        status='active', to_auth_user=lambda: AuthUser(id='owner', username='owner', role='admin'))))
+    entered = asyncio.Event()
+    class Hanging(context.adapter):
+        async def call(self, *args):
+            entered.set()
+            await asyncio.Event().wait()
+    manager = BackgroundManager()
+    monkeypatch.setattr(runtime, 'get_background_manager', lambda: manager)
+    dispatched = asyncio.create_task(runtime.dispatch(context.execution, context.scheduler, adapter_factory=Hanging))
+    await asyncio.wait_for(entered.wait(), 3)
+    cancelled = await TaskManager.cancel_execution(context.execution.id)
+    result = await asyncio.gather(dispatched, return_exceptions=True)
+    assert isinstance(result[0], asyncio.CancelledError)
+    assert cancelled.status == TaskStatus.CANCELLED
+    assert all(task.done() for task in manager._task_handles.values())
+    attempt, _, card = await ending()
+    assert attempt['status'] == 'failed' and '执行上限' not in card.text
+    assert SessionStatus.get(attempt['session_id']).type == 'idle'
+    assert context.execution.id not in runtime._running
+
+
+def real_dispatch_manager(monkeypatch):
+    from flocks.auth.context import AuthUser
+    from flocks.hub import local
+    from flocks.task.background import BackgroundManager
+    monkeypatch.setattr(local, 'get_record', lambda kind, key: SimpleNamespace(enabled=True) if kind == 'component' else None)
+    monkeypatch.setattr('flocks.monitoring.agent_component.resolve', AsyncMock())
+    monkeypatch.setattr(runtime.AuthService, 'get_user_by_id', AsyncMock(return_value=SimpleNamespace(
+        status='active', to_auth_user=lambda: AuthUser(id='owner', username='owner', role='admin'))))
+    manager = BackgroundManager()
+    monkeypatch.setattr(runtime, 'get_background_manager', lambda: manager)
+    return manager
+
+
+async def test_end_message_storage_failure_clears_busy_and_keeps_terminal_states_consistent(context, monkeypatch):
+    from flocks.session.core.status import SessionStatus
+    manager = real_dispatch_manager(monkeypatch)
+    original = Message.create
+    async def broken_ending(*args, **kwargs):
+        if (kwargs.get('part_metadata') or {}).get('monitoringRoundEnd'):
+            report = (await rows('SELECT * FROM monitor_reports'))[0]
+            assert report['status'] == 'pending'  # scheduled before message publication
+            raise RuntimeError('synthetic session storage failure')
+        return await original(*args, **kwargs)
+    monkeypatch.setattr(Message, 'create', broken_ending)
+    result = await runtime.dispatch(context.execution, context.scheduler, adapter_factory=context.adapter)
+    attempt = (await rows('SELECT * FROM monitor_attempts'))[0]
+    assert result.status == TaskStatus.FAILED and attempt['status'] == 'failed'
+    assert '结束总结发布失败' in attempt['error'] and attempt['summary']
+    assert attempt['end_published'] == 0 and attempt['end_message_id']
+    assert SessionStatus.get(attempt['session_id']).type == 'idle'
+    assert any(kind == 'monitor.execution.finished' and item['status'] == 'failed' for kind, item in context.published)
+    assert all(task.done() for task in manager._task_handles.values())
+    monkeypatch.setattr(Message, 'create', original)
+    await recovery.recover()
+    repaired, _, card = await ending(attempt['id'])
+    assert repaired['end_published'] == 1 and card.metadata['roundStatus'] == 'failed'
+    assert '收尾失败' in card.text
+
+
+@pytest.mark.parametrize('where', ['render', 'export'])
+async def test_report_failure_is_independently_retryable_without_busy_or_false_task_failure(context, monkeypatch, where):
+    from flocks.monitoring import reports
+    from flocks.session.core.status import SessionStatus
+    manager = real_dispatch_manager(monkeypatch)
+    original = getattr(reports, 'render' if where == 'render' else 'export_report')
+    if where == 'render':
+        def broken_render(*args):
+            raise RuntimeError('synthetic renderer failure')
+        monkeypatch.setattr(reports, 'render', broken_render)
+    else:
+        monkeypatch.setattr(reports, 'export_report', AsyncMock(side_effect=RuntimeError('synthetic report I/O failure')))
+    outcome = await runtime.dispatch(context.execution, context.scheduler, adapter_factory=context.adapter)
+    attempt, _, card = await ending()
+    report = (await rows('SELECT * FROM monitor_reports'))[0]
+    assert outcome.status == TaskStatus.COMPLETED and attempt['status'] == 'completed'
+    assert card.metadata['roundStatus'] == 'completed' and report['status'] == 'failed'
+    assert SessionStatus.get(attempt['session_id']).type == 'idle'
+    assert all(task.done() for task in manager._task_handles.values())
+    monkeypatch.setattr(reports, 'render' if where == 'render' else 'export_report', original)
+    await reports.retry_exports()
+    assert (await rows('SELECT * FROM monitor_reports'))[0]['status'] == 'updated'

@@ -1,10 +1,10 @@
-import MailFollowup, { MailSettings } from './MailFollowup';
+import MailFollowup, { MailSettings, Sheet } from './MailFollowup';
 import RoundTimeline from './RoundTimeline';
 import { StreamingMarkdown } from '@/components/common/StreamingMarkdown';
 import { getApiBase } from '@/api/client';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
-import { ShieldCheck, ArrowUpRight, RefreshCw, Play, Pause, Loader2, Download, CalendarDays, Clock3, Mail, Settings2, CheckCircle2, CircleX } from 'lucide-react';
+import { ShieldCheck, ArrowUpRight, RefreshCw, Play, Pause, Loader2, Download, CalendarDays, Clock3, Mail, Settings2, CheckCircle2, CircleX, MoreHorizontal, History, Activity } from 'lucide-react';
 import EventDisposition from './EventDisposition';
 import SessionChat from '@/components/common/SessionChat';
 import { monitoringApi, MONITOR_PATH, type MonitorSnapshot, type MonitorRun } from '@/api/securityMonitoring';
@@ -39,6 +39,16 @@ export default function SecurityMonitor() {
   const [reportRetry, setReportRetry] = useState(0);
   const [reportKind, setReportKind] = useState<'timeline' | 'summary'>('timeline');
   const [showSettings, setShowSettings] = useState(false);
+  const [drawer, setDrawer] = useState<'history' | 'health' | null>(null);
+  const moreRef = useRef<HTMLDetailsElement>(null);
+  const closeMore = () => { if (moreRef.current) moreRef.current.open = false; };
+  useEffect(() => {
+    const close = (event: MouseEvent | KeyboardEvent) => {
+      if (event instanceof KeyboardEvent ? event.key === 'Escape' : !moreRef.current?.contains(event.target as Node)) closeMore();
+    };
+    document.addEventListener('click', close); document.addEventListener('keydown', close);
+    return () => { document.removeEventListener('click', close); document.removeEventListener('keydown', close); };
+  }, []);
   const [controlBusy, setControlBusy] = useState(false);
   const [controlError, setControlError] = useState('');
   const [controlMessage, setControlMessage] = useState('');
@@ -53,7 +63,7 @@ export default function SecurityMonitor() {
     catch { if (sequence === refreshSequence.current) setError('数据更新失败，当前内容可能已过期。'); }
   }, [day]);
   useEffect(() => { void refresh(); const timer = window.setInterval(() => void refresh(), 10000); return () => { window.clearInterval(timer); refreshSequence.current++; }; }, [refresh]);
-  useSSE({ url: `${getApiBase()}/api/event`, onEvent: event => { if (event.type === 'monitor.execution.started' || event.type === 'task.updated' || event.type === 'monitor.control.changed') void refresh(); }, onReconnect: () => void refresh() });
+  useSSE({ url: `${getApiBase()}/api/event`, onEvent: event => { if (event.type === 'monitor.execution.started' || event.type === 'monitor.execution.finished' || event.type === 'task.updated' || event.type === 'monitor.control.changed') void refresh(); }, onReconnect: () => void refresh() });
   const control = async (action: 'start' | 'pause') => {
     if (controlPending.current) return;
     controlPending.current = true;
@@ -83,7 +93,7 @@ export default function SecurityMonitor() {
     return () => { active = false; };
   }, [view, reportKind, selectedDate, reportKey, snapshotMatchesDate, data?.report.status, reportRetry]);
   const currentReport = snapshotMatchesDate && report?.key === reportKey ? report.content : '';
-  const changeDate = (value: string) => { setDay(value || dateInZone(data?.timezone || 'Asia/Shanghai')); setReportError(''); };
+  const changeDate = (value: string) => { setDay(value || dateInZone(data?.timezone || 'Asia/Shanghai'));  setReportError(''); };
   const drill = (session: string, message: string) => navigate(`/sessions?session=${encodeURIComponent(session)}&focusMessage=${encodeURIComponent(message)}`);
   const download = () => {
     const url = URL.createObjectURL(new Blob([currentReport], { type: 'text/markdown;charset=utf-8' }));
@@ -106,41 +116,54 @@ export default function SecurityMonitor() {
       exportPending.current = false; setExportBusy(false);
     }
   };
-  const active = data?.runs.find(r => r.status === 'running');
+  const active = data?.currentRun ? { ...data.currentRun, steps: data.runs.find(run => run.id === data.currentRun?.id)?.steps || [] } : data?.currentRun === undefined && (!day || day === dateInZone(data?.timezone || 'Asia/Shanghai')) ? data?.runs.find(r => r.status === 'running') : undefined;
   const monitoringEnabled = data?.installation.installed && data.installation.status === 'active';
   const monitoringStatus = !data?.installation.installed ? '尚未安装' : !data.installation.ready ? '未就绪' : monitoringEnabled ? '已启动' : '已暂停';
-  return <div className="flex h-full min-h-0 flex-col overflow-hidden bg-gray-50 text-gray-900 dark:bg-gray-900 dark:text-gray-100">
-    <header className="shrink-0 border-b border-gray-200 bg-white px-4 pt-4 dark:border-gray-700 dark:bg-gray-900 sm:px-6">
-      <div className="mb-3 flex flex-wrap items-center justify-between gap-x-5 gap-y-3">
-        <div className="flex min-w-0 items-center gap-3">
-          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-blue-50 text-blue-600 dark:bg-blue-950/50 dark:text-blue-300"><ShieldCheck size={23} /></div>
-          <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1"><h1 className="text-xl font-semibold tracking-tight">安全运营监测</h1><p className="text-sm text-gray-500 dark:text-gray-400">监测运营智能体 · 邮件协同处置 · 回查确认</p></div>
+  const latestRun = data?.runs.reduce<MonitorRun | undefined>((latest, run) => !latest || run.started_at > latest.started_at ? run : latest, undefined);
+  const workbenchRun = data?.runs.find(run => run.status === 'running') || latestRun;
+  const workbenchLink = data?.sessionID ? `/sessions?session=${encodeURIComponent(data.sessionID)}${workbenchRun?.message_id ? `&focusMessage=${encodeURIComponent(workbenchRun.message_id)}` : ''}` : null;
+  const historySelected = !!day && day !== dateInZone(data?.timezone || 'Asia/Shanghai');
+  const healthErrors = data?.mail?.enabled ? data.mail.health?.errors || [] : [];
+  const menuAction = 'flex w-full items-center gap-2 rounded-lg px-3 py-2.5 text-left text-sm text-slate-700 hover:bg-sky-50 focus-visible:bg-sky-50 dark:text-slate-200 dark:hover:bg-sky-950 dark:focus-visible:bg-sky-950';
+  return <div className="flex h-full min-h-0 flex-col overflow-hidden bg-[#f7fbfd] text-[#17212b] dark:bg-slate-950 dark:text-slate-100" data-testid="monitor-primary-page">
+    <header className="z-20 shrink-0 border-b border-sky-100 bg-white/95 px-3 py-2.5 dark:border-slate-800 dark:bg-slate-950 sm:px-5">
+      <section aria-label="监测控制" className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 gap-y-1.5 sm:flex sm:flex-wrap">
+        <h1 className="flex min-w-0 items-center gap-2 text-sm font-semibold tracking-tight sm:mr-auto sm:text-base"><ShieldCheck size={20} className="shrink-0 text-[#168a5b] dark:text-emerald-400" /><span className="truncate">安全运营监测</span></h1>
+        <div className="col-span-2 col-start-1 row-start-2 flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-xs sm:order-none sm:gap-x-4">
+          <span className="inline-flex items-center gap-1.5 font-medium" title="监测启用状态与当前轮次状态分别展示"><span aria-hidden="true" className={`h-2 w-2 rounded-full ${monitoringEnabled ? 'bg-[#168a5b]' : 'bg-slate-400'}`} />监测：{data ? monitoringStatus : '读取中'}</span>
+          {monitoringEnabled && <span className={`inline-flex items-center gap-1 ${active ? 'text-sky-700 dark:text-sky-300' : 'text-slate-500 dark:text-slate-400'}`}>{active && <Loader2 size={12} className="animate-spin motion-reduce:animate-none" />}{active ? '本轮执行中' : '等待下一轮'}</span>}
+          <span className="inline-flex items-center gap-1 text-slate-500 dark:text-slate-400" title={data ? fmt(data?.scheduledNextRun || null, data.timezone) : undefined}><Clock3 size={12} />{active && monitoringEnabled ? '下次：本轮结束后等待调度' : `下次监测 ${monitoringEnabled && data?.scheduledNextRun ? new Date(data.scheduledNextRun).toLocaleTimeString('zh-CN', { timeZone: data.timezone, hour12: false }) : '—'}`}</span>
         </div>
-        <div className="flex items-center gap-2"><button disabled={exportBusy} onClick={() => void downloadDiagnostics()} title="导出近期运行步骤、耗时与错误类型，不含凭据或事件正文" className="inline-flex items-center gap-2 rounded-lg border border-gray-200 px-3 py-2 text-xs text-gray-600 hover:bg-gray-50 disabled:opacity-50 dark:border-gray-700 dark:text-gray-300 dark:hover:bg-gray-800"><Download size={15} />{exportBusy ? '正在导出…' : '导出诊断日志'}</button><button onClick={() => { void refresh(); setReportRetry(value => value + 1); }} aria-label="刷新" className="rounded-lg p-2 text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-800"><RefreshCw size={17} /></button></div>
-      </div>
-      <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1"><nav className="flex shrink-0 gap-4 whitespace-nowrap sm:gap-6" aria-label="监测工作区">
-        {([['session', '监测对话'], ['mail', '邮件跟进'], ['dashboard', '总结看板'], ['report', '每日报告']] as const).map(([id, label]) => <Link key={id} to={`${MONITOR_PATH}/${id}`} aria-current={view === id ? 'page' : undefined} className={`border-b-2 py-3 text-sm font-medium ${view === id ? 'border-blue-600 text-blue-600 dark:text-blue-400' : 'border-transparent text-gray-500 hover:text-gray-800 dark:hover:text-gray-200'}`}>{label}</Link>)}
-      </nav>{view !== 'report' && view !== 'mail' && <input aria-label="业务日期" type="date" disabled={controlBusy} value={selectedDate} onChange={e => changeDate(e.target.value)} className="rounded-lg border border-gray-200 bg-transparent px-2 py-1 text-sm dark:border-gray-700" />}</div>
+        <div className="col-start-2 row-start-1 flex shrink-0 items-center gap-1.5 sm:ml-2">
+          <button disabled={controlBusy || !data?.installation.installed} onClick={() => void control(monitoringEnabled ? 'pause' : 'start')} className={`inline-flex items-center gap-1.5 whitespace-nowrap rounded-lg px-3 py-2 text-xs font-semibold disabled:opacity-50 ${monitoringEnabled ? 'border border-sky-200 bg-sky-50 text-slate-700 hover:bg-sky-100 dark:border-sky-900 dark:bg-sky-950 dark:text-sky-100' : 'bg-[#168a5b] text-white hover:bg-emerald-700'}`}>
+            {controlBusy ? <Loader2 size={14} className="animate-spin motion-reduce:animate-none" /> : monitoringEnabled ? <Pause size={14} /> : <Play size={14} />}{controlBusy ? '正在处理…' : monitoringEnabled ? '暂停监测' : '启动监测'}
+          </button>
+          <details ref={moreRef} className="relative">
+            <summary aria-label="更多监测功能" className="flex cursor-pointer list-none items-center rounded-lg p-2 text-slate-500 hover:bg-sky-50 focus-visible:outline focus-visible:outline-sky-500 dark:hover:bg-slate-800 [&::-webkit-details-marker]:hidden"><MoreHorizontal size={20} /></summary>
+            <div className="absolute right-0 top-full z-30 mt-2 max-h-[75vh] w-64 overflow-auto rounded-xl border border-sky-100 bg-white p-2 shadow-xl dark:border-slate-700 dark:bg-slate-900">
+              <nav aria-label="监测工作区">{([['session', '监测对话'], ['mail', '邮件跟进'], ['dashboard', '总结看板'], ['report', '每日报告']] as const).map(([id, label]) => <Link key={id} to={`${MONITOR_PATH}/${id}`} onClick={closeMore} aria-current={view === id ? 'page' : undefined} className={menuAction}>{label}{view === id && <CheckCircle2 size={13} className="ml-auto text-emerald-600" />}</Link>)}</nav>
+              <div className="my-1 border-t border-sky-100 dark:border-slate-700" />
+              {workbenchLink && <Link to={workbenchLink} onClick={closeMore} className={menuAction}><ArrowUpRight size={15} />在工作台打开</Link>}
+              <button className={menuAction} onClick={() => { closeMore(); setDrawer('history'); }}><History size={15} />查看历史日期</button>
+              <button className={menuAction} onClick={() => { closeMore(); setShowSettings(true); }}><Settings2 size={15} />邮件配置</button>
+              <button className={menuAction} onClick={() => { closeMore(); setDrawer('health'); }}><Activity size={15} />运行与邮件健康</button>
+              <button disabled={exportBusy} onClick={() => void downloadDiagnostics()} className={`${menuAction} disabled:opacity-50`}><Download size={15} />{exportBusy ? '正在导出…' : '导出诊断日志'}</button>
+              <button onClick={() => { closeMore(); void refresh(); setReportRetry(value => value + 1); }} className={menuAction}><RefreshCw size={15} />刷新</button>
+            </div>
+          </details>
+        </div>
+      </section>
     </header>
-    {error && <p role="alert" className="bg-amber-50 px-6 py-2 text-sm text-amber-800">{error}</p>}
-    {exportError && <p role="alert" className="bg-amber-50 px-6 py-2 text-sm text-amber-800">{exportError}</p>}
-    {data && <section aria-label="监测控制" className="mx-4 mt-3 shrink-0 rounded-xl border border-gray-200 bg-white px-4 py-3 shadow-sm dark:border-gray-700 dark:bg-gray-800 sm:mx-6">
-      <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
-        <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-sm"><strong className="inline-flex items-center gap-2"><span aria-hidden="true" className={`h-2 w-2 rounded-full ${monitoringEnabled ? 'bg-emerald-500' : 'bg-gray-400'}`} />监测：{monitoringStatus}</strong><span className="inline-flex items-center gap-1.5 text-gray-500 dark:text-gray-400"><Clock3 size={14} />每 10 分钟触发</span><span className="text-gray-500 dark:text-gray-400">下次检查 {fmt(data.scheduledNextRun, data.timezone)}</span>{active && <span className="inline-flex items-center gap-1.5 text-blue-600"><Loader2 size={14} className="animate-spin" />调查执行中</span>}{data.queued.some(q => q.status === 'queued') && <span className="text-blue-600">一轮等待中</span>}</div>
-        <button disabled={controlBusy || !data.installation.installed} onClick={() => void control(monitoringEnabled ? 'pause' : 'start')} className={`inline-flex shrink-0 items-center gap-2 rounded-lg px-3 py-2 text-sm font-medium disabled:opacity-50 ${monitoringEnabled ? 'border border-gray-200 text-gray-700 hover:bg-gray-50 dark:border-gray-600 dark:text-gray-200 dark:hover:bg-gray-700' : 'bg-blue-600 text-white hover:bg-blue-700'}`}>
-          {controlBusy ? <Loader2 size={15} className="animate-spin" /> : monitoringEnabled ? <Pause size={15} /> : <Play size={15} />}
-          {controlBusy ? '正在处理…' : monitoringEnabled ? '暂停监测' : '检查接入并启动'}
-        </button>
-      </div>
-      <div className="mt-2 flex flex-wrap items-center justify-between gap-x-4 gap-y-2 text-xs text-gray-500 dark:text-gray-400"><div className="flex flex-wrap items-center gap-x-4 gap-y-1"><span title={`同一监测串行执行；忙碌时多次触发合并为一轮。单轮上限 ${Math.round((data.roundTimeoutSeconds || 1200) / 60)} 分钟。`} className="inline-flex items-center gap-1.5"><ShieldCheck size={14} />智能体调查</span><span className="inline-flex items-center gap-1.5"><Mail size={14} />邮件跟进：{data.mail?.enabled ? '已启用' : '未启用'}</span><span>待处理回复 {data.mail?.pending || 0}</span><span>待确认 {data.mail?.needsReview || 0}</span></div><div className="flex items-center gap-4"><Link className="text-blue-600 hover:underline dark:text-blue-400" to={`${MONITOR_PATH}/mail`}>查看邮件记录</Link><button className="inline-flex items-center gap-1 text-blue-600 hover:underline dark:text-blue-400" onClick={() => setShowSettings(true)}><Settings2 size={13} />配置</button></div></div>
-      {controlError && <p role="alert" className="mt-2 text-sm text-red-600">{controlError}</p>}
-      {controlMessage && <p role="status" className="mt-2 text-sm text-blue-600">{controlMessage}</p>}
-    </section>}
+    {error && <p role="alert" className="shrink-0 border-b border-slate-300 bg-white px-5 py-2 text-sm font-medium dark:bg-slate-900">{error}</p>}
+    {exportError && <p role="alert" className="shrink-0 bg-sky-50 px-5 py-2 text-sm dark:bg-sky-950">{exportError}</p>}
+    {controlError && <p role="alert" className="shrink-0 border-l-4 border-slate-600 bg-white px-5 py-2 text-sm dark:bg-slate-900">{controlError}</p>}
+    {controlMessage && <p role="status" className="sr-only">{controlMessage}</p>}
+    {healthErrors.length > 0 && <div role="alert" className="flex shrink-0 items-center justify-between gap-3 border-b border-sky-200 bg-sky-50 px-5 py-2 text-xs dark:border-sky-900 dark:bg-sky-950"><span className="flex min-w-0 items-center gap-2"><CircleX size={14} className="shrink-0" /><span className="truncate">邮件通道异常：{healthErrors.join('；')}</span></span><button className="shrink-0 font-semibold underline" onClick={() => setDrawer('health')}>查看原因</button></div>}
+    {historySelected && view === 'session' && <div className="flex shrink-0 items-center justify-between border-b border-sky-100 bg-sky-50 px-5 py-1.5 text-xs dark:border-sky-900 dark:bg-sky-950"><span>历史会话 · {day}</span><button className="font-medium underline" onClick={() => setDay('')}>回到今天</button></div>}
     {!data ? <p className="p-6">正在加载监测事实…</p> : <>
       {!data.installation.installed || !data.installation.ready ? <div className="mx-6 mt-4 rounded-lg border border-amber-300 p-4 text-sm">{data.installation.installed ? '已安装但未就绪' : '尚未安装'}：{data.installation.reason}。<Link className="ml-2 text-blue-600" to="/scenes/suites?workspace=host-security-monitor">管理场景</Link></div> : null}
-      {view === 'mail' ? <MailFollowup /> : view === 'session' ? <div className="flex min-h-0 flex-1 flex-col">
-        <div className="flex flex-wrap justify-between gap-2 px-6 py-3 text-xs text-gray-500"><span>{data.businessDate} · {data.timezone} · {active ? '执行中' : monitoringEnabled ? '等待下一轮' : '监测未启动'}</span>{data.sessionID && <Link className="flex items-center gap-1 text-blue-600" to={`/sessions?session=${data.sessionID}`}>在工作台打开 <ArrowUpRight size={15} /></Link>}</div>
-        {data.sessionID ? <SessionChat sessionId={data.sessionID} hideInput display={{ compact: false, showActions: false, showTimestamp: true, collapseIntermediateSteps: false, processGroupsDefaultOpen: true, processGroupsOpenWhileActive: true }} live className="min-h-0 flex-1" /> : <p className="p-8 text-gray-500">当天首次实际启动后，将在这里显示原生监测会话。</p>}
+      {view === 'mail' ? <MailFollowup /> : view === 'session' ? <div className="flex min-h-0 flex-1 flex-col" aria-label="监测动态对话">
+        {data.sessionID ? <SessionChat sessionId={data.sessionID} hideInput monitoring={{ running: !!active, paused: !monitoringEnabled, historical: historySelected }} display={{ compact: false, showActions: false, showTimestamp: true, collapseIntermediateSteps: false, processGroupsDefaultOpen: true, processGroupsOpenWhileActive: true }} live className="min-h-0 flex-1" /> : <div className="m-auto max-w-sm px-6 py-12 text-center"><ShieldCheck size={32} className="mx-auto mb-4 text-[#168a5b]" /><h2 className="font-semibold">{historySelected ? '所选日期暂无监测对话' : '监测对话已准备好'}</h2><p className="mt-2 text-sm leading-6 text-slate-500">{historySelected ? '可以切换历史日期，或回到今天。' : '启动后，查询、调查、邮件跟进和本轮总结会在这里动态展开。'}</p></div>}
       </div> : <div className="min-h-0 flex-1 overflow-auto p-6">
         {view === 'report' ? <section aria-label="每日报告内容" className={`${card} mx-auto max-w-6xl`}>
           <div className="mb-5 flex flex-wrap items-center justify-between gap-4 border-b border-gray-100 pb-5 dark:border-gray-700"><div><h2 className="flex items-center gap-2 text-lg font-semibold"><CalendarDays size={19} className="text-blue-600" />每日报告</h2><p className="mt-1 text-sm text-gray-500">选择日期，查看当天执行时间线和告警总结。</p></div><div className="flex flex-wrap items-center gap-2"><label className="flex items-center gap-2 text-sm font-medium">报告日期<input aria-label="报告日期" type="date" value={selectedDate} max={dateInZone(data.timezone)} onChange={e => changeDate(e.target.value)} className="rounded-lg border border-gray-200 bg-transparent px-3 py-2 dark:border-gray-600" /></label><button onClick={() => changeDate('')} className="rounded-lg border border-gray-200 px-3 py-2 text-sm hover:bg-gray-50 dark:border-gray-600 dark:hover:bg-gray-700">今天</button><button onClick={() => changeDate(previousDay(dateInZone(data.timezone)))} className="rounded-lg border border-gray-200 px-3 py-2 text-sm hover:bg-gray-50 dark:border-gray-600 dark:hover:bg-gray-700">昨天</button></div></div>
@@ -160,6 +183,9 @@ export default function SecurityMonitor() {
         </div>}
       </div>}
     </>}
+    {drawer && <Sheet title={drawer === 'history' ? '历史监测记录' : '运行与邮件健康'} close={() => setDrawer(null)}>
+      {drawer === 'history' ? <div className="space-y-4"><p className="text-sm text-slate-500">按监测业务时区选择日期。后台的新轮次不会改变正在查看的历史记录。</p><label className="block text-sm font-medium">业务日期<input aria-label="业务日期" type="date" disabled={controlBusy} value={selectedDate} max={dateInZone(data?.timezone || 'Asia/Shanghai')} onChange={e => changeDate(e.target.value)} className="mt-2 block w-full rounded-lg border border-sky-200 bg-transparent px-3 py-2 dark:border-sky-900" /></label><button className={menuAction} onClick={() => { setDay(''); setDrawer(null); }}>回到今天</button></div> : <div className="space-y-5 text-sm"><div><p className="font-semibold">智能体调查</p><p className="mt-2 text-slate-500">每 10 分钟触发，同一监测串行执行；单轮上限 {Math.round((data?.roundTimeoutSeconds || 1200) / 60)} 分钟。忙碌时多次触发合并为一轮。</p></div>{data?.investigation && <div><p className="font-semibold">调查待办</p><p className="mt-2 leading-7 text-slate-500">待调查 {data.investigation.pending} · 延后续查 {data.investigation.deferred} · 等待系统恢复 {data.investigation.system_wait} · 待人工确认 {data.investigation.needs_review}</p>{data.investigation.earliest_retry_at && <p className="mt-1 text-xs text-slate-500">最早重试：{fmt(data.investigation.earliest_retry_at, data.timezone)}</p>}</div>}{data?.metrics.investigatedEvents !== undefined && <div><p className="font-semibold">有事件调查完成情况</p><p className="mt-2 text-slate-500">{data.metrics.investigationCompletedEvents || 0} / {data.metrics.investigatedEvents} 条 · {data.metrics.investigationCompletionRate == null ? '暂无有事件调查' : `${Math.round(data.metrics.investigationCompletionRate * 100)}%`}</p></div>}<div><p className="font-semibold">邮件跟进：{data?.mail?.enabled ? '已启用' : '未启用'}</p><p className="mt-2 text-slate-500">待处理回复 {data?.mail?.pending || 0} · 待确认 {data?.mail?.needsReview || 0}</p></div>{(['receive', 'send'] as const).map(direction => { const health = data?.mail?.health?.[direction]; return <div key={direction} className="rounded-xl border border-sky-100 bg-sky-50 p-4 dark:border-sky-900 dark:bg-sky-950"><h3 className="font-semibold">{direction === 'receive' ? '收信连接' : '发信连接'} · {({ healthy: '正常', unavailable: '不可用', unknown: '尚未确认', disabled: '未启用' } as Record<string, string>)[health?.state || 'unknown']}</h3><dl className="mt-3 space-y-2 text-xs"><div>最近成功：{fmt(health?.last_success_at || null, data?.timezone || 'Asia/Shanghai')}</div>{health?.last_error_at && <div>最近失败：{fmt(health.last_error_at, data?.timezone || 'Asia/Shanghai')} · {health.last_error_stage || health.stage || '阶段未知'} · {health.error_type || '原因未知'}</div>}{!!health?.consecutive_failures && <div>连续失败：{health.consecutive_failures} 次</div>}{health?.next_retry_at && <div>下次重试：{fmt(health.next_retry_at, data?.timezone || 'Asia/Shanghai')}</div>}</dl></div>; })}{healthErrors.map((message, index) => <p key={index} className="font-medium">{message}</p>)}<Link className={menuAction} onClick={() => setDrawer(null)} to={`${MONITOR_PATH}/mail`}><Mail size={15} />查看邮件记录</Link></div>}
+    </Sheet>}
     {showSettings && <MailSettings close={() => setShowSettings(false)} refresh={refresh} />}
   </div>;
 }

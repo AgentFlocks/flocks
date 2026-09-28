@@ -184,18 +184,31 @@ def round_summary(status, result, observed, feedback, notification, enabled, dev
     text += f"已完成调查 {result.get('analyzed', 0)} 条。"
     if result.get('deferred'):
         text += f"另有 {result['deferred']} 条已保存待后续轮次调查。"
-    if result['errors'] and observed:
+    if result['errors']:
         text += '\n待跟进事项：' + '；'.join(result['errors']) + '。已有证据和待办保留，不据此判定无风险。'
     if not observed:
-        text += ('查询未完整成功，不能据此说没有告警；请检查失败步骤后重试。' if result['errors'] else
+        text += ('查询未完整成功，不能据此说没有告警；请检查失败步骤后重试。' if not result.get('query_complete', not result['errors']) else
                  '当前时间范围和筛选条件下没有可分析事件，因此未生成新的告警通知；后续轮次继续查询。')
     for event in observed[:5]:
         investigation = event.get('investigation')
         if investigation:
-            state = {'ready': '已形成调查结论', 'pending': '已保存，待续查', 'needs_review': '需人工核对'}.get(investigation['state'], '待核对')
+            state = {'ready': '已形成调查结论', 'pending': '已保存，待续查', 'deferred': '本轮额度用完，已延期',
+                     'system_wait': '系统故障，调查尚未恢复', 'needs_review': '需人工核对，不再自动续查'}.get(investigation['state'], '待核对')
             text += f"\n智能体调查：{event_label(event)} · {state}。{investigation.get('reason', '')}"
-            if investigation['state'] == 'pending':
+            if investigation['state'] in {'pending', 'deferred'}:
                 text += '下一轮优先读取已有证据继续调查。'
+            elif investigation['state'] == 'system_wait':
+                text += ('自动恢复次数已用完；请修复依赖后暂停并重新启动监测，再次尝试。' if investigation.get('retry_exhausted') else
+                         f"已保存恢复计划；不早于 {label(investigation.get('next_retry_at'), '下一次计划监测')} 再次尝试。")
+    backlog = result.get('investigation_backlog', {})
+    if any(backlog.get(key) for key in ('pending', 'deferred', 'system_wait', 'needs_review')):
+        text += ('\n历史与当前未完成调查：'
+                 f"待续查 {backlog.get('pending', 0)} 条、额度延期 {backlog.get('deferred', 0)} 条、"
+                 f"系统故障 {backlog.get('system_wait', 0)} 条、业务待人工核对 {backlog.get('needs_review', 0)} 条。")
+        if backlog.get('retry_exhausted'):
+            text += f"其中 {backlog['retry_exhausted']} 条已停止自动恢复，需修复后手动重新启动。"
+        if backlog.get('needs_review'):
+            text += '业务待人工核对不会在下轮自动续查。'
     if enabled:
         text += f"\n邮件：发送 {notification['sent']} 封；处理回信 {feedback['processed']} 封，{feedback['verified']} 封已回查确认，{feedback['pending']} 封待跟进。"
         text += '\n' + '\n'.join(notification.get('explanations', [])[:5]) if notification.get('explanations') else ''
@@ -205,6 +218,9 @@ def round_summary(status, result, observed, feedback, notification, enabled, dev
             text += '\n下一步：查看上方失败或待核对原因及邮件跟进记录；发送结果未知时不会自动重发。'
         elif observed:
             text += '\n未新增邮件不等于没有风险；请按上方通知判断查看去重或未发送原因。'
+        health = result.get('mail', {}).get('health', {})
+        if health.get('errors'):
+            text += '\n邮件通道异常：' + '；'.join(health['errors']) + '。当前不能把处理回信 0 封解释为没有新回信。'
     else:
         text += '\n邮件跟进未启用，本轮只做查询和分析，没有发信或修改状态。需要邮件协同时，请配置责任人邮箱并启用邮件跟进。'
     if development:

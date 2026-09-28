@@ -280,3 +280,31 @@ async def test_mail_snapshot_failure_exports_only_exception_type(monkeypatch, ca
     data = json.loads(response.body)
     assert data['mail'] == {'snapshot_available': False, 'error_type': 'TypeError'}
     assert 'SECRET' not in json.dumps(data)
+
+
+def test_export_reports_installed_versions_not_bundled_fallback(monkeypatch, captured):
+    from flocks.hub import local
+    from flocks.monitoring import agent_component
+    monkeypatch.setattr(local, 'get_record', lambda kind, key: SimpleNamespace(version='2.4.1') if kind == 'component' else None)
+    monkeypatch.setattr(agent_component, 'diagnostic_state', lambda: {'installed': True, 'version': '1.2.3'})
+    bundle = diag.export_bundle('owner', COMPONENT_ID)
+    assert bundle['component_version'] == '2.4.1'
+    assert bundle['build']['agent']['version'] == '1.2.3'
+    assert len(bundle['build']['monitor_source_sha256']) == 64
+    monkeypatch.setattr(local, 'get_record', lambda *args: None)
+    assert diag.export_bundle('owner', COMPONENT_ID)['component_version'] is None
+
+
+def test_model_and_mail_diagnostics_keep_only_bounded_metadata():
+    record = diag.safe_record({'event': 'investigation.validation', 'model_id': 'provider/model-1',
+        'model_provider': 'compatible', 'request_max_tokens': 3000, 'input_tokens': 42,
+        'output_tokens': 19, 'error_kind': 'model_format', 'validation_field': 'capability',
+        'validation_code': 'wrong_device', 'mail_stage': 'authenticate',
+        'mail_direction': 'receive', 'consecutive_failures': 4,
+        'raw_reply': 'PRIVATE', 'token': 'PRIVATE', 'validation_input': 'PRIVATE'})
+    assert record['model_id'] == 'provider/model-1'
+    assert record['validation_code'] == 'wrong_device'
+    assert record['mail_stage'] == 'authenticate'
+    assert 'PRIVATE' not in json.dumps(record)
+    for value in ['https://provider.invalid?api_key=PRIVATE', 'Authorization: Bearer PRIVATE', 'x' * 129]:
+        assert not diag.safe_record({'model_id': value, 'model_provider': value})

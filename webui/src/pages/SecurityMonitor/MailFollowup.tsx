@@ -76,7 +76,7 @@ function StatusBadge({ state }: { state: string }) {
   );
 }
 
-function Sheet({
+export function Sheet({
   title,
   close,
   children,
