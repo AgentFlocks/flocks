@@ -124,6 +124,7 @@ async def test_native_rounds_dashboard_report_idempotence(policy):
     assert len(attempts) == 2 and len({x['session_id'] for x in attempts}) == 1
     day = attempts[0]['business_date']
     data = await snapshot(policy.owner, policy.scope, day)
+    assert [r['id'] for r in data['runs']] == [r['id'] for r in reversed(attempts)]
     assert data['metrics']['events'] == 1 and data['metrics']['started'] == 2
     assert data['metrics']['risk'] == 1 and data['events'][0]['incidentSeverity'] == 4
     assert data['events'][0]['closure'] == 'open'
@@ -137,6 +138,7 @@ async def test_native_rounds_dashboard_report_idempotence(policy):
     second = (await rows('SELECT * FROM monitor_reports'))[0]
     assert first['version'] == second['version']
     assert second['content'].count('## 轮次') == 2
+    assert second['content'].index(' · 尝试 ' + attempts[1]['id']) < second['content'].index(' · 尝试 ' + attempts[0]['id'])
     assert len(list((Path.home() / '.flocks/workspace/outputs' / day).glob('*.md'))) == 2
     foreign = await snapshot('other', policy.scope, day)
     assert not foreign['runs'] and not foreign['events']
@@ -273,3 +275,14 @@ async def test_recovery_closes_running_steps_preserves_attempt(policy):
     await run(execution, policy, FixtureAdapter)
     attempts = await rows('SELECT * FROM monitor_attempts ORDER BY sequence')
     assert len(attempts) == 2 and attempts[0]['session_id'] == attempts[1]['session_id']
+
+
+def test_saved_timeline_download_projects_newest_first_without_changing_report_facts():
+    from flocks.monitoring.reports import newest_timeline_content
+    intro = '# 时间线\n\n原有统计\n'
+    older = '## 轮次 exec-1 · 尝试 attempt-1\n\n状态：失败；计划：手动；开始：2026-09-29T01:00:00+00:00；结束：已结束。\n原始错误保留\n'
+    newer = '## 轮次 exec-2 · 尝试 attempt-2\n\n状态：完成；计划：手动；开始：2026-09-29T02:00:00+00:00；结束：已结束。\n查询与分析顺序保留\n'
+    expected = intro + newer + older
+    assert newest_timeline_content(intro + older + newer) == expected
+    assert newest_timeline_content(expected) == expected
+    assert newest_timeline_content('没有轮次的旧报告') == '没有轮次的旧报告'

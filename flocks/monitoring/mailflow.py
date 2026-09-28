@@ -595,7 +595,7 @@ async def history(owner, limit=100, offset=0, tab=None):
     for n in notices:
         n['sent_at'] = n['sent_at'] or n['updated_at']
         n['event'] = json.loads(n['event'])
-        n['items'] = await rows('SELECT i.*,r.payload AS reply_payload FROM monitor_mail_items i JOIN monitor_mail_replies r ON r.id=i.reply_id WHERE i.notice_id=? AND i.owner=? ORDER BY i.created_at LIMIT 100', (n['id'], owner))
+        n['items'] = await rows('SELECT i.*,r.payload AS reply_payload FROM monitor_mail_items i JOIN monitor_mail_replies r ON r.id=i.reply_id WHERE i.notice_id=? AND i.owner=? ORDER BY i.created_at DESC,i.id DESC LIMIT 100', (n['id'], owner))
         for item in n['items']:
             item['reply_excerpt'] = json.loads(item.pop('reply_payload'))['text'][:2000]
     for r in replies:

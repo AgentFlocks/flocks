@@ -3,6 +3,7 @@ import asyncio
 import hashlib
 import json
 import os
+import re
 import tempfile
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
@@ -22,7 +23,7 @@ async def snapshot(owner, scope, day):
             cur = await db.execute(sql, args)
             return [dict(x) for x in await cur.fetchall()]
         installations = await select('SELECT * FROM monitor_installations WHERE owner=? AND scope=?', (owner, scope))
-        runs = await select('SELECT * FROM monitor_attempts WHERE owner=? AND scope=? AND business_date=? ORDER BY sequence', (owner, scope, day))
+        runs = await select('SELECT * FROM monitor_attempts WHERE owner=? AND scope=? AND business_date=? ORDER BY started_at DESC,sequence DESC', (owner, scope, day))
         current_run = await select("SELECT a.id,a.session_id,a.message_id,a.started_at FROM monitor_attempts a JOIN monitor_installations i ON i.owner=a.owner AND i.scope=a.scope AND i.project=a.project WHERE a.owner=? AND a.scope=? AND a.status='running' AND i.installed=1 ORDER BY a.sequence DESC LIMIT 1", (owner, scope))
         observations = await select('SELECT o.*,a.sequence,a.session_id,a.message_id,a.started_at,a.project FROM monitor_observations o JOIN monitor_attempts a ON a.id=o.attempt_id WHERE a.owner=? AND a.scope=? AND a.business_date=? ORDER BY a.sequence', (owner, scope, day))
         dispositions = await select('SELECT * FROM monitor_dispositions WHERE owner=? AND scope=? ORDER BY created_at', (owner, scope))
@@ -103,7 +104,7 @@ async def snapshot(owner, scope, day):
             'sessionID': daily[0]['session_id'] if daily else None,
             'nextRun': (trigger.get('next_run') or trigger.get('nextRun')) if day == today and scheduler and scheduler[0]['status'] == 'active' else None,
             'automatic': {'enabled': automatic, 'rule': 'xdr-evidence-v1', 'queued': len(queue)},
-            'runs': runs, 'events': list(events.values()), 'queued': queued,
+            'runs': runs, 'events': sorted(events.values(), key=lambda e: e['observedAt'], reverse=True), 'queued': queued,
             'report': report[0] if report else {'status': 'pending', 'version': 0, 'error': None},
             'metrics': {'definitions': int(bool(installation and installation['installed'])),
                         'started': len({r['execution_id'] for r in runs}), 'attempts': len(runs),
@@ -145,7 +146,7 @@ def render(data):
                 item = event['dispositionRecord']
                 lines += [f"  - 处置记录：{item['id']}；来源：{item['mode']}；目标：{item['target_status']}；状态：{item['status']}；回查值：{item['observed_status']}；更新时间：{item['updated_at']}。"]
         lines += ['']
-    for run in data['runs']:
+    for run in sorted(data['runs'], key=lambda r: (r['started_at'], r.get('sequence', 0)), reverse=True):
         lines += [f"## 轮次 {run['execution_id']} · 尝试 {run['id']}", '',
                   f"状态：{ {'completed': '完成', 'failed': '失败', 'running': '执行中'}.get(run['status'], run['status'])}；计划：{run['scheduled_for'] or '手动'}；开始：{run['started_at']}；结束：{run['finished_at'] or '执行中'}。", '',
                   f"[查看本轮对话](/sessions?session={run['session_id']}&focusMessage={run['message_id']})", '']
@@ -157,6 +158,22 @@ def render(data):
             lines += [f"- {step['tool']}：{step['status']}。{step['error'] or step['output'] or ''}"]
         lines += ['', '状态标记和回查结果见上方步骤及去重事件；处置中、已遏制不计为处置完成。', '']
     return '\n'.join(lines)
+
+
+def newest_timeline_content(content):
+    """Project previously saved Markdown in descending order without rewriting audit data."""
+    headings = list(re.finditer(r'^## 轮次 [^\n]+ · 尝试 [^\n]+\n', content, re.MULTILINE))
+    if len(headings) < 2:
+        return content
+    blocks = [content[item.start():headings[i + 1].start() if i + 1 < len(headings) else len(content)]
+              for i, item in enumerate(headings)]
+    def started(block):
+        match = re.search(r'^状态：[^\n]*；开始：([^；\n]+)；', block, re.MULTILINE)
+        try:
+            return datetime.fromisoformat(match.group(1)).timestamp() if match else float('-inf')
+        except ValueError:
+            return float('-inf')
+    return content[:headings[0].start()] + ''.join(sorted(blocks, key=started, reverse=True))
 
 
 def render_summary(data):

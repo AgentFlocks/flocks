@@ -11,7 +11,7 @@ from fastapi.responses import PlainTextResponse, JSONResponse
 from flocks.server.auth import require_user
 from flocks.monitoring.models import COMPONENT_ID
 from flocks.monitoring.store import rows
-from flocks.monitoring.reports import snapshot
+from flocks.monitoring.reports import snapshot, newest_timeline_content
 
 router = APIRouter(prefix='/monitoring/host-security-monitor')
 from flocks.monitoring.disposition import DispositionRequest
@@ -163,4 +163,6 @@ async def report(day: str, kind: str = 'timeline', user=Depends(require_user)):
     content = result[0]['summary_content' if kind == 'summary' else 'content'] if result else None
     if content is None:
         raise HTTPException(404, '当日报告尚未生成')
+    if kind == 'timeline':
+        content = newest_timeline_content(content)
     return PlainTextResponse(content, headers={'Content-Disposition': f'inline; filename="security-monitor-{day}.md"'})

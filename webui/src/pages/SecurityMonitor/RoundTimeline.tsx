@@ -3,7 +3,7 @@ import { Link } from 'react-router-dom';
 import { CalendarDays, CheckCircle2, ChevronDown, Clock3, ExternalLink, Loader2, XCircle } from 'lucide-react';
 import type { MonitorRun } from '@/api/securityMonitoring';
 
-import { normalizeRoundStatus, roundBusinessConclusion, roundFactSummary, roundRecoverySummary } from './roundSummary';
+import { newestRunsFirst, normalizeRoundStatus, roundBusinessConclusion, roundFactSummary, roundRecoverySummary } from './roundSummary';
 export { roundBusinessConclusion } from './roundSummary';
 
 function displayTime(value: string | null | undefined, timezone: string, date = false) {
@@ -21,10 +21,7 @@ function plainFact(value: unknown): string {
 
 export default function RoundTimeline({ runs, timezone }: { runs: MonitorRun[]; timezone: string }) {
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
-  const ordered = useMemo(() => [...runs].sort((a, b) => {
-    const left = Date.parse(a.started_at), right = Date.parse(b.started_at);
-    return Number.isFinite(left) && Number.isFinite(right) ? left - right : 0;
-  }), [runs]);
+  const ordered = useMemo(() => newestRunsFirst(runs), [runs]);
   const hasExpanded = ordered.some(run => expanded.has(run.id));
   if (!ordered.length) return <div className="rounded-xl border border-dashed border-gray-200 py-12 text-center dark:border-gray-700">
     <CalendarDays size={28} aria-hidden="true" className="mx-auto mb-3 text-gray-400" />
@@ -33,7 +30,7 @@ export default function RoundTimeline({ runs, timezone }: { runs: MonitorRun[]; 
   </div>;
   return <section aria-label="轮次时间线">
     <div className="mb-5 flex flex-wrap items-center justify-between gap-2 text-xs text-gray-500 dark:text-gray-400">
-      <p>按开始时间排列 · 共 {ordered.length} 轮 · 点击节点查看本轮报告</p>
+      <p>按开始时间倒序 · 最新在前 · 共 {ordered.length} 轮 · 点击节点查看本轮报告</p>
       <button type="button" disabled={!hasExpanded} onClick={() => setExpanded(new Set())} className="rounded-md px-2 py-1 text-blue-600 hover:bg-blue-50 disabled:cursor-default disabled:opacity-40 dark:text-blue-400 dark:hover:bg-blue-950/40">全部收起</button>
     </div>
     <ol aria-label="执行轮次时间线" className="ml-2 border-l border-gray-200 dark:border-gray-700">
@@ -52,7 +49,7 @@ export default function RoundTimeline({ runs, timezone }: { runs: MonitorRun[]; 
           <div className={`overflow-hidden rounded-xl border ${open ? 'border-blue-200 dark:border-blue-900' : 'border-gray-200 dark:border-gray-700'}`}>
             <button
               type="button" aria-expanded={open} aria-controls={detailsId}
-              aria-label={`${time} 第 ${index + 1} 轮：${roundBusinessConclusion(run)}`}
+              aria-label={`${time} 第 ${ordered.length - index} 轮：${roundBusinessConclusion(run)}`}
               onClick={() => setExpanded(current => { const next = new Set(current); if (next.has(run.id)) next.delete(run.id); else next.add(run.id); return next; })}
               className="grid w-full grid-cols-[1fr_auto_auto] items-center gap-x-4 gap-y-2 bg-white px-4 py-3 text-left transition-colors hover:bg-gray-50 dark:bg-gray-800 dark:hover:bg-gray-700/60 sm:flex sm:flex-wrap"
             >
@@ -67,7 +64,7 @@ export default function RoundTimeline({ runs, timezone }: { runs: MonitorRun[]; 
             </button>
             {open && <section id={detailsId} aria-label={`${time} 本轮报告`} className="space-y-4 border-t border-gray-100 bg-gray-50/60 px-4 py-4 text-sm dark:border-gray-700 dark:bg-gray-900/40">
               <div className="flex flex-wrap items-start justify-between gap-3">
-                <div><h3 className="font-semibold">本轮对话报告</h3><p className="mt-1 text-xs text-gray-500">第 {index + 1} 轮 · 任务完成不代表告警已闭环。</p></div>
+                <div><h3 className="font-semibold">本轮对话报告</h3><p className="mt-1 text-xs text-gray-500">第 {ordered.length - index} 轮 · 任务完成不代表告警已闭环。</p></div>
                 {run.session_id && run.message_id && <Link to={`/sessions?session=${encodeURIComponent(run.session_id)}&focusMessage=${encodeURIComponent(run.message_id)}`} className="inline-flex items-center gap-1 whitespace-nowrap text-blue-600 hover:underline dark:text-blue-400">查看本轮对话<ExternalLink size={13} aria-hidden="true" /></Link>}
               </div>
               <dl className="grid gap-x-6 gap-y-2 text-xs text-gray-500 sm:grid-cols-2 dark:text-gray-400">

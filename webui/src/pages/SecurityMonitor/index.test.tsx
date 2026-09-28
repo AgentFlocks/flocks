@@ -389,3 +389,19 @@ it('keeps refresh and installation notices off the conversation without navigati
  expect(await screen.findByRole('alert')).toHaveTextContent('数据更新失败');
  expect(screen.getByText(/配置仍需检查/)).toBeVisible();
 });
+
+
+it('orders dashboard round rows and trend markers newest first even for ascending API data', async () => {
+ mocks.overview.mockResolvedValue({ data: { ...data, runs: [
+  { ...data.runs[0], id: 'older', started_at: '2026-09-23T01:00:00Z', error: '旧记录' },
+  { ...data.runs[0], id: 'newer', started_at: '2026-09-23T02:00:00Z', error: '新记录' },
+ ] } });
+ render(<MemoryRouter initialEntries={['/suites/host-security-monitor/dashboard']}><SecurityMonitor /></MemoryRouter>);
+ await screen.findByText('轮次明细');
+ const table = screen.getByText('轮次明细').parentElement!;
+ const rows = within(table).getAllByRole('row');
+ expect(rows[1]).toHaveTextContent('新记录');
+ expect(rows[2]).toHaveTextContent('旧记录');
+ const trend = screen.getByLabelText('实际轮次状态');
+ expect(within(trend).getAllByRole('button')[0].title).toContain('10:00:00');
+});

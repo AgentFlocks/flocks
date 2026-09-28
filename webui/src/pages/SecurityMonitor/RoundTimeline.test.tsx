@@ -15,7 +15,7 @@ function show(runs: MonitorRun[]) {
   return render(<MemoryRouter><RoundTimeline runs={runs} timezone="Asia/Shanghai" /></MemoryRouter>);
 }
 
-it('shows a chronological node per round and only expands the selected report', () => {
+it('shows newest rounds first and only expands the selected report', () => {
   show([
     run({ id: 'round-two', message_id: 'second-start', started_at: '2026-09-25T01:10:00Z',
       summary: '已向责任人发送事件 incident-2 的通知，等待回信。',
@@ -24,23 +24,23 @@ it('shows a chronological node per round and only expands the selected report', 
   ]);
   const nodes = screen.getAllByTestId('round-timeline-node');
   expect(nodes).toHaveLength(2);
-  expect(nodes[0]).toHaveTextContent('09:00:00');
-  expect(nodes[0]).toHaveTextContent('零事件 · 无需新通知');
-  expect(nodes[1]).toHaveTextContent('09:10:00');
-  expect(nodes[1]).toHaveTextContent('已通知 1 封 · 待回信');
+  expect(nodes[1]).toHaveTextContent('09:00:00');
+  expect(nodes[1]).toHaveTextContent('零事件 · 无需新通知');
+  expect(nodes[0]).toHaveTextContent('09:10:00');
+  expect(nodes[0]).toHaveTextContent('已通知 1 封 · 待回信');
   expect(screen.queryByText('查询完成，未发现符合条件的事件。')).not.toBeInTheDocument();
   expect(screen.queryByText(/事件 incident-2 的通知/)).not.toBeInTheDocument();
   expect(screen.getByRole('button', { name: '全部收起' })).toBeDisabled();
 
-  fireEvent.click(within(nodes[1]).getByRole('button'));
+  fireEvent.click(within(nodes[0]).getByRole('button'));
   expect(screen.getByText(/事件 incident-2 的通知/)).toBeInTheDocument();
   expect(screen.queryByText('查询完成，未发现符合条件的事件。')).not.toBeInTheDocument();
-  expect(within(nodes[1]).getByRole('button')).toHaveAttribute('aria-expanded', 'true');
+  expect(within(nodes[0]).getByRole('button')).toHaveAttribute('aria-expanded', 'true');
   expect(screen.getByRole('link', { name: '查看本轮对话' })).toHaveAttribute('href', '/sessions?session=daily-session&focusMessage=second-start');
   expect(screen.getByText(/任务完成不代表告警已闭环/)).toBeInTheDocument();
   expect(screen.getByText(/等待下一轮定时检查/)).toBeInTheDocument();
 
-  fireEvent.click(within(nodes[0]).getByRole('button'));
+  fireEvent.click(within(nodes[1]).getByRole('button'));
   expect(screen.getAllByRole('region', { name: /本轮报告/ })).toHaveLength(2);
   fireEvent.click(screen.getByRole('button', { name: '全部收起' }));
   expect(screen.queryByRole('region', { name: /本轮报告/ })).not.toBeInTheDocument();
@@ -157,3 +157,13 @@ it.each(['调查模型请求超时', '调查模型认证失败', '调查模型�
     expect(screen.getByRole('button', { name: /第 1 轮/ })).toHaveTextContent(failure);
   },
 );
+
+
+it('keeps chronological round numbers while showing newest first without mutating input', () => {
+ const runs = [run(), run({ id: 'new', started_at: '2026-09-25T02:00:00Z' })];
+ show(runs);
+ const nodes = screen.getAllByTestId('round-timeline-node');
+ expect(within(nodes[0]).getByRole('button')).toHaveAccessibleName(/第 2 轮/);
+ expect(within(nodes[1]).getByRole('button')).toHaveAccessibleName(/第 1 轮/);
+ expect(runs[0].id).toBe('round-one');
+});

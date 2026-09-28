@@ -73,3 +73,13 @@ export function roundRecoverySummary(run: MonitorRun, timezone: string): string 
   if (count(backlog?.retry_exhausted)) label += ` · ${backlog?.retry_exhausted} 条已停止自动重试`;
   return label;
 }
+
+
+/** Presentation only: never mutate the execution/processing order. */
+export function newestRunsFirst(runs: MonitorRun[]): MonitorRun[] {
+  const time = (value: string) => { const parsed = Date.parse(value); return Number.isFinite(parsed) ? parsed : -Infinity; };
+  return [...runs].sort((a, b) => {
+    const left = time(a.started_at), right = time(b.started_at);
+    return left === right ? b.id.localeCompare(a.id) : left > right ? -1 : 1;
+  });
+}
