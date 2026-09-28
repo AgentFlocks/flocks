@@ -2,7 +2,7 @@
 
 English · [简体中文](README_cn.md)
 
-This guide covers installing Flocks and RAGFlow, connecting them, and using **Knowledge Sets** (called Datasets in RAGFlow) from chat and Workflows.
+The Flocks knowledge base integrates RAGFlow directly. This guide covers installing Flocks and RAGFlow, connecting them, and using Knowledge Sets from chat and Workflows. **Knowledge Sets** is the Flocks term for Datasets in RAGFlow.
 
 ## 1. Start RAGFlow and configure an embedding model
 
@@ -18,7 +18,7 @@ Sign in to RAGFlow at the address shown by your deployment (commonly `http://127
 
 1. Open **User settings → Model providers**. Add your embedding provider, its provider API key and service URL, then register the exact model as type **Embedding**.
 2. Check that the model works, and select it as the default **Embedding model** in **System Model Settings**.
-3. Set the default *before* creating Knowledge Sets in Flocks. You can check each new set's actual embedding model in RAGFlow. Sets searched together should use compatible embedding models.
+3. After creating a Knowledge Set, check its actual embedding model in RAGFlow. We recommend using the same embedding model for sets you plan to search together.
 4. In RAGFlow, open your avatar menu → **API**, and generate a **RAGFlow API Key**. This is the credential Flocks uses to call RAGFlow; it is **not** the embedding provider's key.
 
 If the embedding service runs elsewhere, make sure the **RAGFlow container** can reach it. `127.0.0.1` inside a container does not refer to the Docker host. UI labels and file APIs can differ between RAGFlow releases; consult its [official documentation](https://ragflow.io/docs) for your deployment.
@@ -47,13 +47,13 @@ Open **Workspace → Knowledge Base → Connection settings** (the unconfigured 
 - **RAGFlow URL:** An address reachable from the **Flocks backend**. On the same machine, this may be `http://127.0.0.1:9380`. If Flocks runs in a container or on another host, use an address it can actually reach.
 - **API Key:** The key from RAGFlow's **API** page. When a key is already saved, the field shows a masked **configured** placeholder, not the actual key. Leave it unchanged to keep the saved key, or enter a replacement. Changing the URL (including its path) requires entering a key again.
 
-Click **Save**. Flocks first performs two authenticated, **read-only checks**: listing Knowledge Sets and listing files. Successful saves **take effect immediately, without restarting Core**, and refresh the connection status and lists. If validation or saving fails, the existing connection remains active. The key is stored in Flocks' credential store; its actual value is not sent back to the browser.
+Click **Save**. Flocks first performs two authenticated, **read-only checks**: listing Knowledge Sets and listing files. Successful saves **take effect immediately** and refresh the connection status and lists. If validation or saving fails, the existing connection remains active. The key is stored in Flocks' credential store; its actual value is not sent back to the browser.
 
 Requests already using the previous connection can finish before it is closed. A successful save checks those two list APIs, not the full upload-and-retrieval flow below.
 
 ## 4. Upload a file and build a Knowledge Set
 
-1. **Upload:** In **Workspace → Knowledge Base → Knowledge Files**, click **Upload file**. This stores the original file; it does **not** start parsing. The default file limit is 32 MiB, and multipart overhead can also cause uploads near that limit to fail.
+1. **Upload:** In **Workspace → Knowledge Base → Knowledge Files**, click **Upload file**. This stores the original file; it does **not** start parsing. The default file limit is 32 MB, and multipart overhead can also cause uploads near that limit to fail.
 2. **Create:** Switch to **Knowledge Sets** and click **Create Knowledge Set**. Give it a name and description. The form does not choose an embedding model; configure RAGFlow's default first.
 3. **Link:** Open your new Knowledge Set and click **Link existing files** to associate the uploaded file. Wait until a document appears in the linked-file list. File IDs and linked-document IDs are different.
 4. **Parse:** Click **Start parsing** on that document. RAGFlow will parse and index it. The current page does **not** poll for completion automatically; reopen the set's detail view to check document status before retrieving its content.
@@ -64,15 +64,15 @@ In the **same session** you plan to ask from, open **Session → Context → Kno
 
 Ask an Agent that has permission to use `rag_retrieve` (for example, Rex with this built-in tool enabled):
 
-> Search the Knowledge Sets selected for this session with `rag_retrieve`. Answer using only the matching passages and name any document you can verify. If there are no matches, say so.
+> Consult the Knowledge Sets first, then answer based on the passages you find and name any document you can verify. If there are no matches, say so.
 
 Tool execution depends on Agent tools, permissions and the model's tool choice. Retrieval returns passages; it does not enforce citation formatting or automatically generate an answer. If a multi-set query fails, check that the sets use compatible embedding models.
 
 ## 6. Use a Knowledge Set in a Workflow
 
-A Workflow can invoke `rag_retrieve` in a **tool node** with `keywords` (the question) and optionally `top_k`, and pass the result to a later answer node. Prefer starting the Workflow **from the same session** with its Knowledge Sets selected, using an Agent allowed to call both `run_workflow` and `rag_retrieve`. Do not put the RAGFlow URL or API Key into the Workflow.
+A Workflow can invoke `rag_retrieve` in a **tool node** with `dataset` (Knowledge Sets), `keywords` (the question) and optionally `top_k`, and pass the result to a later answer node. Prefer starting the Workflow **from the same session** with its Knowledge Sets selected, using an Agent allowed to call both `run_workflow` and `rag_retrieve`.
 
-> There is no dedicated “Select Knowledge Set” Workflow node. Standalone Workflows and some sandbox execution modes may not inherit the original session's selection, and the default execution summary might omit full passages. Check the session scope and actual retrieved content in a test environment before relying on a Workflow in production. For ordinary chat, use the direct retrieval method above.
+> There is no dedicated “Select Knowledge Set” Workflow node. Include the `dataset` parameter when calling the `rag_retrieve` tool.
 
 ## Troubleshooting
 
