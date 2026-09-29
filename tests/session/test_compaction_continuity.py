@@ -2,6 +2,8 @@
 
 Covers the pieces that decide whether the agent can resume its task:
 - prune() does not treat the compaction continuation as a new turn
+- prune / oversized-output truncation reach the next request, not just the
+  token estimate
 - the verbatim tail kept by a compaction stays within its token budget
 - the continuation message re-injects archived user requests and the todo list
 - the continuation keeps the turn's agent / model / execution mode
@@ -24,6 +26,8 @@ from flocks.session.message import (
     ToolPart,
     ToolStateCompleted,
 )
+from flocks.session.runner import SessionRunner
+from flocks.session.session import Session
 
 
 def _policy(**overrides) -> CompactionPolicy:
@@ -127,6 +131,83 @@ class TestPruneTurnCounting:
         await SessionCompaction.prune(session_id, policy=_policy(prune_minimum=10))
 
         assert await _read_part_compacted(session_id, assistant.id)
+
+
+class TestCleanupReachesTheNextRequest:
+    """Regression: the runner reuses its converted chat messages while each
+    message's parts revision is unchanged, and prune / oversized-output
+    truncation changed parts in place without bumping it.  The overflow check
+    saw the cleaned-up size while the model kept getting the full output."""
+
+    @staticmethod
+    async def _tool_contents(runner, messages):
+        chat_messages = await runner._to_chat_messages(messages, [])
+        return [message.content for message in chat_messages if message.role == "tool"]
+
+    @pytest.mark.asyncio
+    async def test_pruned_output_is_not_resent(self):
+        session = await Session.create(
+            project_id="cleanup_reaches_request_prune",
+            directory="/tmp/cleanup-prune",
+        )
+        user = await _user(session.id, "read the CRM doc")
+        assistant = await _assistant_with_read(session.id, user.id, "d" * 40_000)
+        follow_up = await _user(session.id, "now write it to workspace/crm")
+        messages = [user, assistant, follow_up]
+        runner = SessionRunner(session=session, static_cache={})
+        assert await self._tool_contents(runner, messages) == ["d" * 40_000]
+
+        await SessionCompaction.prune(session.id, policy=_policy(prune_minimum=10))
+
+        [content] = await self._tool_contents(runner, messages)
+        assert content.startswith("[Context compacted: `read` output omitted")
+
+    @pytest.mark.asyncio
+    async def test_truncated_output_is_not_resent(self):
+        session = await Session.create(
+            project_id="cleanup_reaches_request_truncate",
+            directory="/tmp/cleanup-truncate",
+        )
+        user = await _user(session.id, "read the CRM doc")
+        assistant = await _assistant_with_read(session.id, user.id, "d" * 30_000)
+        messages = [user, assistant]
+        runner = SessionRunner(session=session, static_cache={})
+        assert await self._tool_contents(runner, messages) == ["d" * 30_000]
+
+        # A 16K window caps a single tool result at 19,200 characters.
+        truncated = await SessionCompaction.truncate_oversized_tool_outputs(
+            session.id,
+            context_window_tokens=16_000,
+        )
+
+        assert truncated == 1
+        [content] = await self._tool_contents(runner, messages)
+        assert len(content) < 20_000
+
+    @pytest.mark.asyncio
+    async def test_budget_placeholder_is_not_resent(self):
+        session = await Session.create(
+            project_id="cleanup_reaches_request_budget",
+            directory="/tmp/cleanup-budget",
+        )
+        user = await _user(session.id, "read the three CRM docs")
+        messages = [user]
+        for _ in range(3):
+            # Each fits the 19,200-character cap of a 16K window, but together
+            # they exceed its 48,000-character total budget.
+            messages.append(await _assistant_with_read(session.id, user.id, "d" * 19_000))
+        runner = SessionRunner(session=session, static_cache={})
+        assert await self._tool_contents(runner, messages) == ["d" * 19_000] * 3
+
+        truncated = await SessionCompaction.truncate_oversized_tool_outputs(
+            session.id,
+            context_window_tokens=16_000,
+        )
+
+        assert truncated == 1
+        oldest, *rest = await self._tool_contents(runner, messages)
+        assert oldest == "[compacted: tool output removed to free context]"
+        assert rest == ["d" * 19_000] * 2
 
 
 class TestContinuationMessage:

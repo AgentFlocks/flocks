@@ -2500,7 +2500,281 @@ async def test_process_step_keeps_truncated_tool_call_step_and_continues(monkeyp
     assert len(tool_parts) == 1
     assert tool_parts[0].state.status == "error"
     assert "not executed" in tool_parts[0].state.error
-    assert "Split the content" in tool_parts[0].state.error
+    # Resend with a raised output limit or split; either way not a replay.
+    assert "split the content" in tool_parts[0].state.error.lower()
+
+
+class _CappedGatewayProvider:
+    """A gateway model configured with an 8192-token output limit.
+
+    ``streams`` holds one callable per request; each returns the chunks to
+    stream (or raises to fail the request before any output).
+    """
+
+    def __init__(self, streams):
+        self._streams = list(streams)
+        self.max_tokens_sent = []
+        self._config_models = [
+            SimpleNamespace(id="gpt-test", capabilities=SimpleNamespace(max_tokens=8192)),
+        ]
+
+    def is_configured(self):
+        return True
+
+    async def chat_stream(self, **kwargs):  # noqa: ANN003
+        self.max_tokens_sent.append(kwargs.get("max_tokens"))
+        for chunk in self._streams.pop(0)():
+            yield chunk
+
+
+def _cut_off_write_chunks():
+    partial_args = '{"filePath": "/tmp/crm.md", "content": "# Flocks CRM\\n' + "x" * 400
+    return [
+        SimpleNamespace(delta="Writing the doc.", finish_reason=None),
+        SimpleNamespace(
+            delta="",
+            finish_reason=None,
+            tool_calls=[{
+                "index": 0,
+                "id": "call_write_cut",
+                "type": "function",
+                "function": {"name": "write", "arguments": partial_args},
+            }],
+        ),
+    ]
+
+
+async def _gateway_step(
+    monkeypatch,
+    session_id,
+    provider,
+    *,
+    context_window=128_000,
+    defer_step_errors=False,
+    prior_truncations=0,
+    prior_truncation_user_id=None,
+):
+    runner = SessionRunner(
+        session=_make_session(session_id),
+        provider_id="gateway",
+        model_id="gpt-test",
+        callbacks=RunnerCallbacks(on_error=AsyncMock()),
+        defer_step_errors=defer_step_errors,
+    )
+    monkeypatch.setattr(
+        runner_mod.Provider,
+        "resolve_model_info",
+        lambda *_args: (context_window, 8192, None),
+    )
+    last_user = await Message.create(
+        runner.session.id,
+        MessageRole.USER,
+        "write the CRM doc",
+        agent="rex",
+        model={"providerID": "gateway", "modelID": "gpt-test"},
+    )
+    if prior_truncations:
+        runner._static_cache["tool_args_truncation_guard"] = {
+            "last_user_id": prior_truncation_user_id or last_user.id,
+            "count": prior_truncations,
+        }
+    agent = SimpleNamespace(name="rex", steps=None, mode="primary", prompt="", tools=[])
+    _patch_step_environment(monkeypatch, runner, provider, agent)
+    monkeypatch.setattr(
+        "flocks.provider.options._resolve_reasoning_transport",
+        lambda *_args: None,
+    )
+    result = await runner._process_step([last_user], last_user)
+    parts = []
+    for msg in await Message.list(runner.session.id):
+        if getattr(msg, "role", None) == "assistant":
+            parts.extend(await Message.parts(msg.id, runner.session.id))
+    return result, parts
+
+
+@pytest.mark.asyncio
+async def test_cut_off_at_the_output_limit_raises_it_for_the_next_request(monkeypatch):
+    """Root cause of the repeated cut-offs: a gateway model keeps its guessed
+    8192-token output limit, reasoning spends part of it, and a long write
+    call is cut at the same place every time.  After one cut the model gets
+    more room instead of the same limit again."""
+    from flocks.provider import output_limits
+    from flocks.provider.options import build_provider_options
+
+    provider = _CappedGatewayProvider([_cut_off_write_chunks])
+
+    result, parts = await _gateway_step(monkeypatch, "ses_runner_output_limit_raise", provider)
+
+    assert result.tool_args_truncated is True
+    assert provider.max_tokens_sent == [8192]
+    [tool_part] = [part for part in parts if getattr(part, "type", None) == "tool"]
+    assert "output token limit (8192 tokens)" in tool_part.state.error
+    assert "raised to 16384 tokens" in tool_part.state.error
+    assert output_limits.effective_max_tokens("gateway", "gpt-test", 8192) == 16384
+    assert build_provider_options("gateway", "gpt-test")["max_tokens"] == 16384
+
+
+@pytest.mark.asyncio
+async def test_rejected_raised_limit_is_retried_with_the_configured_one(monkeypatch):
+    from flocks.provider import output_limits
+
+    output_limits.effective_max_tokens("gateway", "gpt-test", 8192)
+    output_limits.raise_max_tokens("gateway", "gpt-test", 16384)
+
+    def rejected():
+        raise RuntimeError(
+            "Error code: 400 - max_tokens is too large: 16384. "
+            "This model supports at most 8192 completion tokens"
+        )
+
+    def answered():
+        return [SimpleNamespace(delta="Done.", finish_reason="stop")]
+
+    provider = _CappedGatewayProvider([rejected, answered])
+    monkeypatch.setattr(runner_mod.SessionRetry, "sleep", AsyncMock(return_value=None))
+
+    result, parts = await _gateway_step(monkeypatch, "ses_runner_output_limit_rejected", provider)
+
+    assert provider.max_tokens_sent == [16384, 8192]
+    assert result.error is None
+    assert any(
+        getattr(part, "type", None) == "text" and "Done." in getattr(part, "text", "")
+        for part in parts
+    )
+    assert output_limits.effective_max_tokens("gateway", "gpt-test", 8192) == 8192
+    assert output_limits.next_max_tokens("gateway", "gpt-test", 8192) is None
+
+
+def _tool_error(parts):
+    [tool_part] = [part for part in parts if getattr(part, "type", None) == "tool"]
+    return tool_part.state.error
+
+
+@pytest.mark.asyncio
+async def test_output_limit_is_not_raised_past_the_room_the_window_leaves(monkeypatch):
+    """A 40K window leaves 6,000 tokens above the 85% overflow threshold; a
+    larger output limit would let prompt plus output exceed the window."""
+    from flocks.provider import output_limits
+
+    provider = _CappedGatewayProvider([_cut_off_write_chunks])
+
+    result, parts = await _gateway_step(
+        monkeypatch,
+        "ses_runner_output_limit_window",
+        provider,
+        context_window=40_000,
+    )
+
+    assert result.tool_args_truncated is True
+    assert "Split the content" in _tool_error(parts)
+    assert "raised" not in _tool_error(parts)
+    assert output_limits.effective_max_tokens("gateway", "gpt-test", 8192) == 8192
+
+
+@pytest.mark.asyncio
+async def test_repeated_cut_off_in_a_turn_is_told_to_split(monkeypatch):
+    """A second cut-off in a row suggests the limit was not the cause, so
+    resending would only use up the turn's consecutive cut-off budget."""
+    from flocks.provider import output_limits
+
+    provider = _CappedGatewayProvider([_cut_off_write_chunks])
+
+    result, parts = await _gateway_step(
+        monkeypatch,
+        "ses_runner_output_limit_repeat",
+        provider,
+        prior_truncations=1,
+    )
+
+    assert result.tool_args_truncated is True
+    assert "Split the content" in _tool_error(parts)
+    assert output_limits.effective_max_tokens("gateway", "gpt-test", 8192) == 16384
+
+
+@pytest.mark.asyncio
+async def test_cut_off_counted_for_an_earlier_turn_still_gets_resend(monkeypatch):
+    """A summary or a queued prompt starts a new user turn inside the same
+    run; the previous turn's cut-off must not turn this one's hint into
+    "split"."""
+    provider = _CappedGatewayProvider([_cut_off_write_chunks])
+
+    _result, parts = await _gateway_step(
+        monkeypatch,
+        "ses_runner_output_limit_new_turn",
+        provider,
+        prior_truncations=1,
+        prior_truncation_user_id="msg_user_previous_turn",
+    )
+
+    assert "Send the call again" in _tool_error(parts)
+
+
+def _rejected_before_output(message, status):
+    def rejected():
+        error = RuntimeError(message)
+        error.status_code = status
+        raise error
+
+    return rejected
+
+
+def _answered():
+    return [SimpleNamespace(delta="Done.", finish_reason="stop")]
+
+
+@pytest.mark.parametrize("defer_step_errors", [False, True], ids=["single", "auto"])
+@pytest.mark.asyncio
+async def test_bare_bad_request_for_a_raised_limit_retries_on_the_same_model(
+    monkeypatch,
+    defer_step_errors,
+):
+    """Gateways often reject an oversized max_tokens with a plain 400. Auto
+    mode must retry on the same model with the configured limit rather than
+    fail over."""
+    from flocks.provider import output_limits
+
+    output_limits.effective_max_tokens("gateway", "gpt-test", 8192)
+    output_limits.raise_max_tokens("gateway", "gpt-test", 16384)
+    provider = _CappedGatewayProvider([_rejected_before_output("Bad Request", 400), _answered])
+    monkeypatch.setattr(runner_mod.SessionRetry, "sleep", AsyncMock(return_value=None))
+
+    result, parts = await _gateway_step(
+        monkeypatch,
+        f"ses_runner_output_limit_bare_400_{defer_step_errors}",
+        provider,
+        defer_step_errors=defer_step_errors,
+    )
+
+    assert provider.max_tokens_sent == [16384, 8192]
+    assert result.error is None
+    assert getattr(result, "failure", None) is None
+    assert output_limits.effective_max_tokens("gateway", "gpt-test", 8192) == 8192
+
+
+@pytest.mark.asyncio
+async def test_error_after_output_started_keeps_the_raised_limit(monkeypatch):
+    """Once the response has started, the limit was accepted; a later error
+    is something else and must not pin the model back."""
+    from flocks.provider import output_limits
+
+    output_limits.effective_max_tokens("gateway", "gpt-test", 8192)
+    output_limits.raise_max_tokens("gateway", "gpt-test", 16384)
+
+    def fails_mid_stream():
+        yield SimpleNamespace(delta="Writing", finish_reason=None)
+        raise RuntimeError("Error code: 400 - max_tokens is too large")
+
+    provider = _CappedGatewayProvider([fails_mid_stream])
+
+    result, _parts = await _gateway_step(
+        monkeypatch,
+        "ses_runner_output_limit_mid_stream_error",
+        provider,
+    )
+
+    assert provider.max_tokens_sent == [16384]
+    assert result.error is not None
+    assert output_limits.effective_max_tokens("gateway", "gpt-test", 8192) == 16384
 
 
 @pytest.mark.asyncio

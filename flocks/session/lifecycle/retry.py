@@ -136,6 +136,9 @@ class SessionRetry:
         error_name = error.get("name", "")
         error_data = error.get("data", {})
 
+        if error_name == "OutputLimitRejectedError":
+            return "Output token limit not accepted, retrying with the configured limit"
+
         if error_name == "StreamToolArgumentsTruncatedError":
             # The runner turns a cut-off tool call into a tool error the model
             # can react to. Replaying the request would stack a second attempt

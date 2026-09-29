@@ -78,6 +78,7 @@ from flocks.session.callable_schema import list_session_callable_tool_infos
 from flocks.agent.registry import Agent
 from flocks.agent.agent import AgentInfo
 from flocks.agent.toolset import agent_declares_tool
+from flocks.provider import output_limits
 from flocks.provider.provider import Provider, ChatMessage
 from flocks.provider.reasoning_replay import prepare_reasoning_for_replay
 from flocks.hooks.pipeline import HookPipeline, HookStage
@@ -387,6 +388,25 @@ class SessionRunner:
             else:
                 state["last_user_id"] = last_user_id
         return state
+
+    def _output_room_tokens(self) -> Optional[int]:
+        """Output a request can ask for without prompt plus output passing the
+        context window: the overflow check lets the prompt reach the threshold."""
+        try:
+            context_window, max_output, max_input = Provider.resolve_model_info(
+                self.provider_id,
+                self.model_id,
+            )
+        except Exception:
+            return None
+        if not context_window or context_window <= 0:
+            return None
+        policy = CompactionPolicy.from_model(
+            context_window=context_window,
+            max_output_tokens=max_output or 4096,
+            max_input_tokens=max_input,
+        )
+        return max(0, context_window - policy.overflow_threshold)
 
     def _count_tool_args_truncation(self, *, truncated: bool, last_user_id: str) -> int:
         """Track consecutive truncated-tool-call steps within one user turn."""
@@ -2723,6 +2743,12 @@ class SessionRunner:
             }
         }
 
+        if isinstance(exception, output_limits.OutputLimitRejectedError):
+            # Retry on the same model: the next attempt is rebuilt with the
+            # configured output limit, which the provider accepted before.
+            error_dict["data"]["isRetryable"] = True
+            return error_dict
+
         if type(exception).__name__ == "StreamToolArgumentsTruncatedError":
             error_dict["data"].update({
                 "isRetryable": False,
@@ -3970,6 +3996,26 @@ class SessionRunner:
                     )
                 except Exception as hook_exc:
                     log.debug("runner.hook.llm_after.error", {"error": str(hook_exc)})
+            sent_output_limit = provider_options.get("max_tokens")
+            if (
+                not self._attempt_state.received_chunk
+                and output_limits.is_raised(self.provider_id, self.model_id, sent_output_limit)
+                and output_limits.looks_like_limit_rejection(exc)
+            ):
+                # The provider refused the output limit raised after an
+                # earlier cut-off. Go back to the configured one for good; the
+                # step retry rebuilds the request with it.
+                output_limits.reject_raised(self.provider_id, self.model_id)
+                log.warn("runner.output_limit.raised_rejected", {
+                    "session_id": self.session.id,
+                    "provider_id": self.provider_id,
+                    "model_id": self.model_id,
+                    "max_tokens": sent_output_limit,
+                    "error": str(exc)[:300],
+                })
+                raise output_limits.OutputLimitRejectedError(
+                    f"The provider rejected max_tokens={sent_output_limit}: {exc}"
+                ) from exc
             raise
         finally:
             await model_activity.stop()
@@ -3985,8 +4031,29 @@ class SessionRunner:
         })
 
         tool_args_truncated = False
+        sent_output_limit = provider_options.get("max_tokens")
+        next_output_limit = output_limits.next_max_tokens(
+            self.provider_id,
+            self.model_id,
+            sent_output_limit,
+            output_room=self._output_room_tokens(),
+        )
+        # Only the first cut-off of a turn is told to resend: a repeat means
+        # the limit was probably not the cause (a gateway size or time limit
+        # cuts the same call again), and resending burns the turn's budget of
+        # consecutive cut-offs.  The raise is still recorded.
+        truncation_guard = self._static_cache.get("tool_args_truncation_guard")
+        repeated_truncation = (
+            isinstance(truncation_guard, dict)
+            and truncation_guard.get("last_user_id") == getattr(assistant_msg, "parentID", None)
+            and int(truncation_guard.get("count", 0) or 0) > 0
+        )
         try:
-            await tool_accumulator.flush_remaining(stream_finish_reason)
+            await tool_accumulator.flush_remaining(
+                stream_finish_reason,
+                output_limit=sent_output_limit,
+                raised_output_limit=None if repeated_truncation else next_output_limit,
+            )
         except StreamToolArgumentsTruncatedError as exc:
             # The cut-off call is already stored as a failed tool part whose
             # error tells the model how to recover. Finish the step normally
@@ -3994,12 +4061,22 @@ class SessionRunner:
             # Replaying the request instead deleted all of that, and whatever
             # cut the stream usually cut the identical retry at the same spot.
             tool_args_truncated = True
+            # The request's output limit is the usual cause (a guessed limit,
+            # shared with reasoning), so give the model's next calls more room.
+            if next_output_limit:
+                output_limits.raise_max_tokens(
+                    self.provider_id,
+                    self.model_id,
+                    next_output_limit,
+                )
             log.warn("runner.stream.tool_arguments_truncated", {
                 "session_id": self.session.id,
                 "tool_call_id": exc.tool_call_id,
                 "tool_name": exc.tool_name,
                 "finish_reason": exc.finish_reason,
                 "arguments_len": exc.arguments_len,
+                "max_tokens": sent_output_limit,
+                "raised_max_tokens": next_output_limit,
             })
         except Exception:
             await processor.drain_parallel_tool_calls()

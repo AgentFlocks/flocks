@@ -51,14 +51,28 @@ class StreamToolArgumentsTruncatedError(RuntimeError):
         )
 
 
-def _truncation_recovery_hint(arguments_len: int) -> str:
+def _truncation_recovery_hint(
+    arguments_len: int,
+    *,
+    output_limit: Optional[int] = None,
+    raised_output_limit: Optional[int] = None,
+) -> str:
     """Tell the model how to recover from a cut-off tool call.
 
     The runner feeds this error back to the model instead of replaying the
-    request, so the model must not simply resend the same oversized call:
-    whatever cut the stream (output-token cap, gateway size or time limit)
-    will usually cut the identical call at the same place again.
+    request.  When the request's output-token limit was the likely cause and
+    the runner raised it, the same call fits now and can simply be resent.
+    Otherwise whatever cut the stream (a limit that cannot go higher, a
+    gateway size or time limit) will cut the identical call at the same
+    place again, so it has to be split.
     """
+    if output_limit and raised_output_limit:
+        return (
+            f" The response most likely ran into the output token limit ({output_limit} "
+            f"tokens), which has been raised to {raised_output_limit} tokens for your "
+            "next responses. Send the call again; if it is cut off again, split the "
+            "content into several smaller calls."
+        )
     budget = max(1000, arguments_len // 2)
     return (
         " Do not resend the same oversized call. Split the content into several "
@@ -175,8 +189,16 @@ class ToolCallAccumulator:
     async def flush_remaining(
         self,
         stream_finish_reason: Optional[str] = None,
+        *,
+        output_limit: Optional[int] = None,
+        raised_output_limit: Optional[int] = None,
     ) -> None:
-        """Process any tool calls still in the accumulator after the stream ends."""
+        """Process any tool calls still in the accumulator after the stream ends.
+
+        ``output_limit`` is the ``max_tokens`` the request carried and
+        ``raised_output_limit`` what the runner will send next if this call
+        turns out to be cut off; the error text tells the model which applies.
+        """
         is_truncated = stream_finish_reason in ("length", "max_tokens")
         truncation_error: StreamToolArgumentsTruncatedError | None = None
 
@@ -199,7 +221,11 @@ class ToolCallAccumulator:
                 error_msg = (
                     f"Output was truncated (finish_reason='{stream_finish_reason}'). "
                     f"{detail} The tool was not executed."
-                    + _truncation_recovery_hint(len(accumulated_args))
+                    + _truncation_recovery_hint(
+                        len(accumulated_args),
+                        output_limit=output_limit,
+                        raised_output_limit=raised_output_limit,
+                    )
                 )
                 await self._processor.process_event(
                     ToolInputErrorEvent(
@@ -243,7 +269,11 @@ class ToolCallAccumulator:
                 error_msg = (
                     f"Output was truncated (finish_reason={stream_finish_reason!r}). "
                     f"{detail} The tool was not executed."
-                    + _truncation_recovery_hint(len(accumulated_args))
+                    + _truncation_recovery_hint(
+                        len(accumulated_args),
+                        output_limit=output_limit,
+                        raised_output_limit=raised_output_limit,
+                    )
                 )
                 await self._processor.process_event(
                     ToolInputErrorEvent(

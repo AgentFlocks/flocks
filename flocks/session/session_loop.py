@@ -60,6 +60,8 @@ MAX_OVERFLOW_COMPACTION_ATTEMPTS = 3
 POST_COMPACTION_COOLDOWN_STEPS = 2
 # Minimum spacing between mid-turn composer-meter pushes for one session.
 CONTEXT_USAGE_PUSH_INTERVAL_SECONDS = 1.5
+# Longest an overflow waits for the meter to show its pre-cleanup size.
+CONTEXT_USAGE_PUSH_WAIT_SECONDS = 5.0
 RATE_LIMIT_COOLDOWN_SECONDS = 60.0
 CHAIN_EXHAUSTION_COOLDOWN_SECONDS = 5.0
 
@@ -539,6 +541,26 @@ class SessionLoop:
             label="context_usage_push",
             name=f"context_usage:{session_id}",
         )
+
+    @classmethod
+    async def _push_context_usage_before_cleanup(
+        cls,
+        ctx: LoopContext,
+        callbacks: "LoopCallbacks",
+    ) -> None:
+        """Publish the size that triggered an overflow before cleanup starts.
+
+        A push still building its snapshot would otherwise read the history
+        mid-prune and show the pruned figure under "Compacting context", which
+        looks like compaction started far below the threshold.
+        """
+        cls._schedule_context_usage_push(ctx, callbacks, force=True)
+        task = ctx.context_usage_push_task
+        if task is not None and not task.done():
+            # ``wait`` neither raises for a cancelled push nor cancels it when
+            # this loop is cancelled; the timeout keeps a slow snapshot from
+            # holding up compaction.
+            await asyncio.wait({task}, timeout=CONTEXT_USAGE_PUSH_WAIT_SECONDS)
 
     @classmethod
     async def _publish_turn_stopped(
@@ -1848,6 +1870,9 @@ class SessionLoop:
                                             compaction_policy.overflow_threshold
                                         ),
                                     })
+                                    # Below the threshold nothing overflows, so
+                                    # this skips no summary; the overflow check
+                                    # below would pass it through the same way.
                                     if effective_tokens <= compaction_policy.overflow_threshold:
                                         turn_state = set_turn_state(
                                             ctx.session.id,
@@ -1964,6 +1989,8 @@ class SessionLoop:
                                     await callbacks.on_error(_error_msg)
                                 break
 
+                            await cls._push_context_usage_before_cleanup(ctx, callbacks)
+
                             # Recovery step 1: try truncating oversized tool
                             # results (once per run, matches OpenClaw
                             # toolResultTruncationAttempted)
@@ -2016,6 +2043,10 @@ class SessionLoop:
                                             log.info("loop.overflow_resolved_by_truncation", {
                                                 "session_id": ctx.session.id,
                                             })
+                                            # The meter still shows the size before
+                                            # cleanup, and the next step's push falls
+                                            # inside the throttle window.
+                                            cls._schedule_context_usage_push(ctx, callbacks, force=True)
                                             # Do NOT reset overflow_compaction_attempts
                                             # (matches OpenClaw OC-65)
                                             continue
@@ -2025,59 +2056,7 @@ class SessionLoop:
                                         "error": str(trunc_err),
                                     })
                             
-                            # Recovery step 2: drop tool outputs past their
-                            # per-tool retention window.  That often frees most
-                            # of the prompt on its own and, unlike a summary,
-                            # keeps the conversation intact, so only summarize
-                            # when the prompt still overflows afterwards.
-                            try:
-                                await SessionCompaction.prune(
-                                    ctx.session.id,
-                                    policy=compaction_policy,
-                                )
-                                (
-                                    pruned_effective_tokens,
-                                    _pruned_component_tokens,
-                                    _pruned_source,
-                                    pruned_freed_tokens,
-                                ) = await _estimate_effective_tokens()
-                                still_overflow = await SessionCompaction.is_overflow(
-                                    tokens={
-                                        "input": pruned_effective_tokens,
-                                        "output": 0,
-                                        "cache": {"read": 0, "write": 0},
-                                    },
-                                    model_context=model_context,
-                                    policy=compaction_policy,
-                                )
-                                log.info("loop.overflow_pruned", {
-                                    "session_id": ctx.session.id,
-                                    "effective_tokens_before": effective_tokens,
-                                    "effective_tokens_after": pruned_effective_tokens,
-                                    "freed_tokens": pruned_freed_tokens,
-                                    "still_overflow": still_overflow,
-                                })
-                                if not still_overflow:
-                                    set_context_state(
-                                        ctx.session.id,
-                                        tool_results_compacted=True,
-                                        last_compaction_step=ctx.last_compaction_step,
-                                        last_compaction_reason="prune",
-                                    )
-                                    await cls._publish_runtime_event(callbacks, "context.compacted", {
-                                        "sessionID": ctx.session.id,
-                                        "step": ctx.step,
-                                        "reason": "prune",
-                                    })
-                                    cls._schedule_context_usage_push(ctx, callbacks, force=True)
-                                    continue
-                            except Exception as prune_err:
-                                log.warn("loop.overflow_prune_error", {
-                                    "session_id": ctx.session.id,
-                                    "error": str(prune_err),
-                                })
-
-                            # Recovery step 3: full compaction
+                            # Recovery step 2: full compaction
                             ctx.overflow_compaction_attempts += 1
                             if ctx.overflow_compaction_attempts >= 2:
                                 await cls._publish_session_notice(
@@ -2102,6 +2081,12 @@ class SessionLoop:
                             # --- Compaction start: notify all UIs ---
                             if callbacks.on_compaction:
                                 await callbacks.on_compaction()
+                            
+                            # Prune first, then summarize
+                            await SessionCompaction.prune(
+                                ctx.session.id,
+                                policy=compaction_policy,
+                            )
                             
                             # Same SSE progress adapter as the manual
                             # /compact route — mirrored here so the

@@ -21,6 +21,19 @@ log = Log.create(service="session.compaction.pruning")
 COMPACTION_CONTINUATION_METADATA_KEY = "compactionContinuation"
 
 
+async def _persist_changed_parts(session_id: str, message_id: str) -> None:
+    """Persist a message's parts after compaction changed them in place.
+
+    The runner reuses its converted chat messages while a message's parts
+    revision is unchanged, so without the bump the next request would still
+    carry the tool output that was just cleared.
+    """
+    from flocks.session.message import Message
+
+    Message._touch_parts_revision(session_id, message_id)
+    await Message._persist_parts(session_id, message_id=message_id)
+
+
 def starts_user_turn(parts: list) -> bool:
     """Whether a user message starts a new turn for tool-output retention.
 
@@ -163,7 +176,7 @@ async def prune(
 
         try:
             for mid in affected_msg_ids:
-                await Message._persist_parts(session_id, message_id=mid)
+                await _persist_changed_parts(session_id, mid)
             if not affected_msg_ids:
                 await Message._persist_parts(session_id)
         except Exception as persist_err:
@@ -275,7 +288,7 @@ async def validate_preserved_messages(
             if compacted_count:
                 SessionPrompt.invalidate_message_cache(mid)
                 try:
-                    await Message._persist_parts(session_id, message_id=mid)
+                    await _persist_changed_parts(session_id, mid)
                 except Exception as pe:
                     log.warn("compaction.boundary_persist_error", {"error": str(pe)})
                 log.info("compaction.boundary_tools_compacted", {
@@ -367,7 +380,7 @@ async def _repair_tool_pairing(
         SessionPrompt.invalidate_message_cache(affected_msg_ids)
     for mid in affected_msg_ids:
         try:
-            await Message._persist_parts(session_id, message_id=mid)
+            await _persist_changed_parts(session_id, mid)
         except Exception as pe:
             log.warn("compaction.repair_pairing_persist_error", {"error": str(pe)})
 
@@ -437,6 +450,9 @@ async def truncate_oversized_tool_outputs(
 
             if len(output) > max_chars:
                 state.output = _truncate(output, max_chars)
+                # The runner sends the cached prompt-facing copy, not
+                # ``state.output``; refresh it or the cut never reaches the model.
+                Message._prepare_tool_output_cache(part)
                 truncated_count += 1
                 affected_msg_ids.add(msg.id)
 
@@ -462,6 +478,7 @@ async def truncate_oversized_tool_outputs(
             if out_len <= len(COMPACT_PLACEHOLDER):
                 continue
             part.state.output = COMPACT_PLACEHOLDER
+            Message._prepare_tool_output_cache(part)
             freed += out_len - len(COMPACT_PLACEHOLDER)
             truncated_count += 1
             affected_msg_ids.add(mid)
@@ -476,7 +493,7 @@ async def truncate_oversized_tool_outputs(
     if truncated_count:
         try:
             for mid in affected_msg_ids:
-                await Message._persist_parts(session_id, message_id=mid)
+                await _persist_changed_parts(session_id, mid)
         except Exception as persist_err:
             log.warn("compaction.oversized_persist_error", {"error": str(persist_err)})
 
