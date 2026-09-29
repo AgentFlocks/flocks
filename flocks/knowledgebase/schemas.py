@@ -1,6 +1,6 @@
 import re
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 _ID = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 
@@ -52,6 +52,25 @@ class DatasetCreate(Input):
         if any(ord(char) < 32 for char in value):
             raise ValueError("control characters are not allowed")
         return value.strip()
+
+
+class DatasetUpdate(DatasetCreate):
+    # Omission means unchanged; explicit null is not a replacement value.
+    name: str | None = Field(default=None, min_length=1, max_length=255)
+    description: str | None = Field(default=None, max_length=4000)
+
+    @field_validator("name", "description", mode="before")
+    @classmethod
+    def non_null_fields(cls, value):
+        if value is None:
+            raise ValueError("updated fields must be strings")
+        return value
+
+    @model_validator(mode="after")
+    def has_changes(self):
+        if not self.model_fields_set:
+            raise ValueError("at least one updated field is required")
+        return self
 
 
 class LinkFiles(Input):

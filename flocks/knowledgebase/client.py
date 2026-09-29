@@ -18,7 +18,7 @@ from starlette.responses import JSONResponse
 
 from .errors import KBError, KnowledgebaseError, unavailable
 from .ragflow import RagflowAdapter
-from .schemas import DatasetCreate, Documents, LinkFiles, ListQuery, Retrieval
+from .schemas import DatasetCreate, DatasetUpdate, Documents, LinkFiles, ListQuery, Retrieval
 from .service import KnowledgeAPI
 
 _ID = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
@@ -188,6 +188,11 @@ class KnowledgebaseClient:
     async def create_dataset(self, payload: dict) -> dict:
         model = self._payload(DatasetCreate, payload)
         return await self._call(self._api.create_dataset(model))
+
+    async def update_dataset(self, dataset_id: str, payload: dict) -> None:
+        ident = self.resource_id(dataset_id)
+        model = self._payload(DatasetUpdate, payload)
+        await self._call(self._api.update_dataset(ident, model))
 
     async def delete_dataset(self, dataset_id: str) -> None:
         ident = self.resource_id(dataset_id)

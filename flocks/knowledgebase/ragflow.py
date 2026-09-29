@@ -254,6 +254,10 @@ class RagflowAdapter:
             raise UpstreamError("upstream_invalid_response")
         return result
 
+    async def file_ancestors(self, file_id: str) -> list[dict]:
+        result = self._object(await self.request("GET", f"/api/v1/files/{self._segment(file_id)}/ancestors"))
+        return self._list({"data": result.get("parent_folders")})
+
     async def upload_file(
         self,
         filename: str,
@@ -312,6 +316,23 @@ class RagflowAdapter:
 
     async def create_dataset(self, payload: dict) -> dict:
         return self._object(await self.request("POST", "/api/v1/datasets", json=payload))
+
+    async def update_dataset(self, id: str, payload: dict) -> None:
+        if (
+            not isinstance(payload, dict) or not payload
+            or set(payload) - {"name", "description"}
+            or any(not isinstance(value, str) for value in payload.values())
+        ):
+            raise KBError(400, "invalid_request", "Only dataset name and description can be updated.")
+        # v0.27.2 replaces connector bindings even when only metadata is edited.
+        # A fresh snapshot (including []) can overwrite concurrent changes.
+        # Do not write until the upstream supports atomic metadata-only updates.
+        raise KBError(
+            400,
+            "dataset_update_unsupported",
+            "Dataset name and description updates are disabled because connector "
+            "bindings cannot be preserved atomically by this integration.",
+        )
 
     async def delete_dataset(self, id: str) -> None:
         self._mutation(await self.request("DELETE", "/api/v1/datasets", json={"ids": self._ids([id])}))

@@ -4,8 +4,14 @@ from __future__ import annotations
 
 from typing import Any
 
-from .errors import UpstreamError
-from .schemas import DatasetCreate, Documents, LinkFiles, Retrieval
+from .errors import KBError, UpstreamError
+from .schemas import DatasetCreate, DatasetUpdate, Documents, LinkFiles, Retrieval, resource_id
+
+# v0.27.2 api.db constants, not inferred resource IDs or paths. The skills root
+# and reused legacy knowledgebase roots do not always have a source marker.
+_RESERVED_ROOT_NAMES = frozenset({".knowledgebase", "skills"})
+_MAX_ANCESTORS = 128
+
 
 def _text(value: Any, default: str = "") -> str:
     return value if isinstance(value, str) else default
@@ -24,6 +30,28 @@ def file_view(item: dict) -> dict:
         "size": _optional_int(item.get("size")),
         "parent_id": item.get("parent_id") if isinstance(item.get("parent_id"), str) else None,
     }
+
+
+def _resource_metadata(item: dict) -> None:
+    if not isinstance(item, dict):
+        raise UpstreamError("upstream_invalid_response")
+    try:
+        resource_id(item.get("id"))
+        resource_id(item.get("parent_id"))
+    except ValueError:
+        raise UpstreamError("upstream_invalid_response") from None
+    if not isinstance(item.get("name"), str) or not item["name"] or not isinstance(item.get("type"), str) or not item["type"]:
+        raise UpstreamError("upstream_invalid_response")
+
+
+def _writable_chain(chain: list[dict]) -> bool:
+    # Missing source_type is intentionally not treated as the upstream LOCAL="".
+    root_id = chain[-1]["id"]
+    return all(
+        item.get("source_type") == ""
+        and not (item["id"] != root_id and item["parent_id"] == root_id and item["name"].casefold() in _RESERVED_ROOT_NAMES)
+        for item in chain
+    )
 
 
 def dataset_view(item: dict) -> dict:
@@ -97,8 +125,43 @@ class KnowledgeAPI:
     async def download(self, file_id: str) -> tuple[bytes, str]:
         return await self.ragflow.download_file(file_id)
 
+    async def _ancestors(self, file_id: str) -> list[dict]:
+        chain = await self.ragflow.file_ancestors(file_id)
+        if not chain or len(chain) > _MAX_ANCESTORS:
+            raise UpstreamError("upstream_invalid_response")
+        seen = set()
+        for index, item in enumerate(chain):
+            _resource_metadata(item)
+            if item["id"] in seen or (index > 0 and item["type"] != "folder"):
+                raise UpstreamError("upstream_invalid_response")
+            seen.add(item["id"])
+            expected_parent = chain[index + 1].get("id") if index + 1 < len(chain) else item["id"]
+            if item["parent_id"] != expected_parent:
+                raise UpstreamError("upstream_invalid_response")
+        if chain[0]["id"] != file_id or chain[-1]["type"] != "folder":
+            raise UpstreamError("upstream_invalid_response")
+        return chain
+
+    @staticmethod
+    def _require_writable(chain: list[dict], *, resource: bool = False) -> None:
+        if not _writable_chain(chain) or (resource and chain[0]["id"] == chain[0]["parent_id"]):
+            raise KBError(403, "resource_read_only", "This resource is read-only.")
+
     async def delete_file(self, file_id: str) -> None:
-        await self.ragflow.delete_files([file_id])
+        chain = await self._ancestors(file_id)
+        self._require_writable(chain, resource=True)
+        if chain[0]["type"] == "folder":
+            # A preflight cannot protect children added before recursive DELETE.
+            # Refuse even empty folders until atomic empty-only deletion exists.
+            raise KBError(
+                400,
+                "folder_delete_unsupported",
+                "Folder deletion is disabled because the knowledge engine cannot "
+                "guarantee atomic empty-only deletion.",
+            )
+        result = await self.ragflow.delete_files([file_id])
+        if type(result.get("success_count")) is not int or result["success_count"] != 1:
+            raise UpstreamError("upstream_invalid_response")
 
     async def list_datasets(self, *, page: int, page_size: int, keywords: str | None) -> dict:
         raw = await self.ragflow.list_datasets(page=page, page_size=page_size)
@@ -113,6 +176,11 @@ class KnowledgeAPI:
             {"name": payload.name, "description": payload.description}
         )
         return dataset_view(created)
+
+    async def update_dataset(self, dataset_id: str, payload: DatasetUpdate) -> None:
+        await self.ragflow.update_dataset(
+            dataset_id, payload.model_dump(include={"name", "description"}, exclude_unset=True)
+        )
 
     async def delete_dataset(self, dataset_id: str) -> None:
         await self.ragflow.delete_dataset(dataset_id)

@@ -284,6 +284,14 @@ def create_router() -> APIRouter:
         except KnowledgebaseError as exc:
             return _error(exc)
 
+    @router.put("/datasets/{dataset_id}", status_code=204)
+    async def update_dataset(dataset_id: str, body: dict, _user=Depends(require_user)):
+        try:
+            await client().update_dataset(dataset_id, body)
+        except KnowledgebaseError as exc:
+            return _error(exc)
+        return Response(status_code=204)
+
     @router.delete("/datasets/{dataset_id}", status_code=204)
     async def delete_dataset(dataset_id: str, _user=Depends(require_user)):
         try:
