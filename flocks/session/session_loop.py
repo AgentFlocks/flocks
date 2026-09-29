@@ -2159,7 +2159,13 @@ class SessionLoop:
                             continue
                     except Exception as e:
                         log.error("loop.compaction_overflow_check_error", {"error": str(e)})
-            
+
+            if not ctx.last_context_usage_push_at:
+                # Nothing pushed yet this turn (a new session has no model call
+                # to examine above), so the meter still shows the snapshot
+                # taken before the model was known, without the system prompt.
+                cls._schedule_context_usage_push(ctx, callbacks)
+
             # Process single step — wrap in a Task so abort() can cancel it immediately
             # rather than waiting for the current tool call to finish.
             step_task = asyncio.create_task(

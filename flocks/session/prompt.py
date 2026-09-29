@@ -645,9 +645,9 @@ class SessionPrompt:
             content = msg.get("content", "")
         elif hasattr(msg, "content"):
             content = msg.content or ""
-        total += cls.count_tokens(content)
 
         # Message parts (tool inputs/outputs, text parts, reasoning)
+        parts: list = []
         try:
             parts = await Message.parts(msg_id or "", session_id)
             for part in parts:
@@ -689,6 +689,12 @@ class SessionPrompt:
                 "message_id": msg_id or '?', "error": str(_e),
             })
             total += 50
+        if not parts:
+            # The runner sends a message's parts.  An in-memory assistant
+            # message also carries its text as ``content`` (set by
+            # ``Message.update``, never persisted), so counting both would
+            # count that text twice.
+            total += cls.count_tokens(content)
 
         if cacheable:
             cls._message_token_cache[msg_id] = total

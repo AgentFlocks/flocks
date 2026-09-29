@@ -3948,3 +3948,81 @@ async def test_to_chat_messages_expands_workflow_node_ref_marker(monkeypatch):
     assert "node_id: query_fofa" in chat_messages[0].content
     assert "node_type: python" in chat_messages[0].content
     assert "只修改这个节点的代码并保留其他节点不变" in chat_messages[0].content
+
+
+def _auto_failover_step(monkeypatch, session_id, *, provider, call_llm=None):
+    """A step in Auto mode: errors are handed back to the loop's failover."""
+    runner = SessionRunner(
+        session=_make_session(session_id),
+        provider_id="primary",
+        model_id="primary-model",
+        defer_step_errors=True,
+        failover_available=True,
+    )
+    last_user = UserMessageInfo(
+        id=f"msg_user_{session_id}",
+        sessionID=session_id,
+        role="user",
+        time={"created": 1_000},
+        agent="rex",
+        model={"providerID": "primary", "modelID": "primary-model"},
+    )
+    agent = SimpleNamespace(name="rex", steps=None, mode="primary", prompt="", tools=[])
+    monkeypatch.setattr(runner_mod.Agent, "get", AsyncMock(return_value=agent))
+    monkeypatch.setattr(runner_mod.Provider, "get", lambda provider_id: provider)
+    monkeypatch.setattr(runner_mod.Provider, "apply_config", AsyncMock(return_value=None))
+    if call_llm is not None:
+        monkeypatch.setattr(runner_mod.SessionPrompt, "build_system_prompt_blocks", AsyncMock(return_value=[]))
+        monkeypatch.setattr(runner, "_build_callable_tool_schema", AsyncMock(return_value=[]))
+        monkeypatch.setattr(
+            runner,
+            "_to_chat_messages",
+            AsyncMock(return_value=[SimpleNamespace(role="user", content="hi")]),
+        )
+        monkeypatch.setattr(
+            runner_mod.Message,
+            "create",
+            AsyncMock(return_value=SimpleNamespace(id=f"msg_assistant_{session_id}")),
+        )
+        monkeypatch.setattr(runner_mod.Message, "update", AsyncMock(return_value=None))
+        monkeypatch.setattr(runner_mod.SessionRetry, "sleep", AsyncMock(return_value=None))
+        monkeypatch.setattr(runner, "_call_llm", call_llm)
+    return runner._process_step([last_user], last_user)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("configured", [None, False], ids=["not-found", "not-configured"])
+async def test_auto_mode_hands_an_unavailable_provider_to_failover(monkeypatch, configured):
+    provider = None
+    if configured is False:
+        provider = MagicMock()
+        provider.is_configured.return_value = False
+
+    result = await _auto_failover_step(
+        monkeypatch,
+        "ses_runner_auto_provider_unavailable",
+        provider=provider,
+    )
+
+    assert result.failure is not None
+    assert result.failure.reason == "provider_unavailable"
+    assert result.failure.allow_fallback is True
+
+
+@pytest.mark.asyncio
+async def test_auto_mode_hands_repeated_empty_responses_to_failover(monkeypatch):
+    provider = MagicMock()
+    provider.is_configured.return_value = True
+    call_llm = AsyncMock(return_value=StepResult(action="stop", content=""))
+
+    result = await _auto_failover_step(
+        monkeypatch,
+        "ses_runner_auto_empty_response",
+        provider=provider,
+        call_llm=call_llm,
+    )
+
+    assert result.failure is not None
+    assert result.failure.reason == "empty_response"
+    assert result.failure.allow_fallback is True
+    assert call_llm.await_count == 4  # the first call and three retries

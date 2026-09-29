@@ -556,19 +556,21 @@ async def _estimate_message_breakdown(session_id: str, messages: List[Any]) -> t
     }
     latest_compacted_part_ms = 0
     for message in messages:
-        content = _field_value(message, "content", "")
-        tokens_by_key["conversation"] += SessionPrompt.count_tokens(content or "")
-
         message_id = _field_value(message, "id")
-        if not message_id:
-            continue
-        try:
-            parts = await Message.parts(message_id, session_id)
-        except Exception as exc:
-            log.debug("context_usage.breakdown_parts_failed", {
-                "message_id": message_id,
-                "error": str(exc),
-            })
+        parts: List[Any] = []
+        if message_id:
+            try:
+                parts = await Message.parts(message_id, session_id)
+            except Exception as exc:
+                log.debug("context_usage.breakdown_parts_failed", {
+                    "message_id": message_id,
+                    "error": str(exc),
+                })
+        if not parts:
+            # Same rule as SessionPrompt._tokens_for_message: an in-memory
+            # assistant message repeats its text part as ``content``.
+            content = _field_value(message, "content", "")
+            tokens_by_key["conversation"] += SessionPrompt.count_tokens(content or "")
             continue
 
         for part in parts:

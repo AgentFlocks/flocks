@@ -535,3 +535,28 @@ async def test_system_prompt_estimate_uses_resolved_turn_context(monkeypatch):
         tool_revision=7,
     )
     worktree_for_directory.assert_called_once_with("/workspace/project")
+
+
+@pytest.mark.asyncio
+async def test_breakdown_counts_a_streamed_answer_once():
+    """The runner stores a streamed answer as a text part and also sets it as
+    ``content`` on the in-memory message; the meter counts it once."""
+    from flocks.session.message import Message, MessageRole, TextPart
+
+    session_id = "ses_breakdown_answer_once"
+    answer = "Design note: customer records, stages, owners and follow-ups. " * 200
+    msg = await Message.create(session_id, MessageRole.ASSISTANT, "")
+    await Message.store_part(
+        session_id,
+        msg.id,
+        TextPart(sessionID=session_id, messageID=msg.id, text=answer),
+    )
+    await Message.update(session_id, msg.id, content=answer, finish="stop")
+    messages = await Message.list(session_id)
+
+    breakdown, _compacted_ms = await context_usage._estimate_message_breakdown(
+        session_id,
+        messages,
+    )
+
+    assert breakdown["conversation"] == context_usage.SessionPrompt.count_tokens(answer)

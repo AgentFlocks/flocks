@@ -20,10 +20,10 @@ def pytest_configure(config: pytest.Config) -> None:
 def skip_background_context_usage_push(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch):
     """Keep loop tests from starting the composer-meter push.
 
-    The push runs in a background task that loads the agent registry; the
-    test's event loop cancels it at teardown, and the cancelled load stays
-    cached, so every later test that touches an agent gets CancelledError.
-    Tests of the push itself opt out with ``real_context_usage_push``.
+    The push runs in a background task that outlives the test body: it loads
+    the agent registry and reads storage while the fixtures tear down, and the
+    test's event loop cancels it halfway.  Tests of the push itself opt out
+    with ``real_context_usage_push``.
     """
     if request.node.get_closest_marker("real_context_usage_push") is not None:
         return

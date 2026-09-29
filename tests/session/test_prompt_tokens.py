@@ -651,3 +651,31 @@ class TestEstimateToolResultTokens:
             + SessionPrompt.count_tokens("Error: boom")
             + SessionPrompt.count_tokens("Error: Tool execution was interrupted")
         )
+
+
+async def _assistant_answer_in_memory(session_id: str, answer: str):
+    """An assistant message as the runner leaves it after streaming: the
+    answer is stored as a text part and also set as ``content`` on the
+    in-memory message (``Message.update`` does not persist ``content``)."""
+    from flocks.session.message import Message, MessageRole, TextPart
+
+    msg = await Message.create(session_id, MessageRole.ASSISTANT, "")
+    await Message.store_part(
+        session_id,
+        msg.id,
+        TextPart(sessionID=session_id, messageID=msg.id, text=answer),
+    )
+    await Message.update(session_id, msg.id, content=answer, finish="stop")
+    messages = await Message.list(session_id)
+    assert getattr(messages[-1], "content", "") == answer
+    return messages
+
+
+@pytest.mark.asyncio
+async def test_streamed_answer_is_counted_once():
+    answer = "Design note: customer records, stages, owners and follow-ups. " * 200
+    messages = await _assistant_answer_in_memory("ses_estimate_answer_once", answer)
+
+    result = await SessionPrompt.estimate_full_context_tokens("ses_estimate_answer_once", messages)
+
+    assert result == SessionPrompt.count_tokens(answer)

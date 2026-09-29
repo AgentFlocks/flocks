@@ -1035,6 +1035,74 @@ class TestTurnLifecycle:
         # would fall inside the throttle window.
         assert run.forced_pushes == [True]
 
+    async def _pushes_before_first_step(self, session_id, messages):
+        session = SimpleNamespace(
+            id=session_id,
+            agent="rex",
+            directory="/tmp",
+            memory_enabled=False,
+        )
+        ctx = LoopContext(
+            session=session,
+            provider_id="test-provider",
+            model_id="test-model",
+            agent_name="rex",
+        )
+        ctx.session_ctx = SimpleNamespace(get_messages=AsyncMock(return_value=messages))
+        order = []
+
+        def schedule_push(_cls, push_ctx, _callbacks, *, force=False):
+            push_ctx.last_context_usage_push_at = time.monotonic()
+            order.append("push")
+
+        async def step(*_args, **_kwargs):
+            order.append("step")
+            return StepResult(action="stop")
+
+        with patch(
+            "flocks.session.session_loop.Provider.resolve_model_info",
+            return_value=(128_000, 8_192, None),
+        ), patch(
+            "flocks.session.session_loop.Message.parts",
+            AsyncMock(return_value=[]),
+        ), patch(
+            "flocks.session.session_loop.SessionCompaction.truncate_oversized_tool_outputs",
+            AsyncMock(return_value=0),
+        ), patch.object(
+            SessionLoop,
+            "_schedule_context_usage_push",
+            classmethod(schedule_push),
+        ), patch(
+            "flocks.session.runner.SessionRunner._process_step",
+            AsyncMock(side_effect=step),
+        ):
+            await SessionLoop._run_loop(ctx, LoopCallbacks(event_publish_callback=AsyncMock()))
+        return order[:order.index("step")]
+
+    @pytest.mark.asyncio
+    async def test_first_step_of_a_new_session_pushes_the_meter_first(self):
+        """No finished step to examine yet: without a push the meter keeps the
+        snapshot taken before the model was known (no system prompt)."""
+        messages = [self._make_msg("first_push_user", "user")]
+
+        assert await self._pushes_before_first_step("turn_first_push_session", messages) == ["push"]
+
+    @pytest.mark.asyncio
+    async def test_turn_after_a_model_call_is_not_pushed_twice(self):
+        messages = [
+            self._make_msg("second_push_user_a", "user"),
+            self._make_msg(
+                "second_push_assistant_a",
+                "assistant",
+                finish="stop",
+                tokens={"input": 20_000, "output": 10, "cache": {"read": 0, "write": 0}},
+            ),
+            self._make_msg("second_push_user_b", "user"),
+        ]
+        messages[1].parentID = messages[0].id
+
+        assert await self._pushes_before_first_step("turn_second_push_session", messages) == ["push"]
+
     @pytest.mark.asyncio
     async def test_step_without_usage_is_judged_by_the_previous_observation(self):
         """A stream cut mid tool call reports no usage.  The overflow check

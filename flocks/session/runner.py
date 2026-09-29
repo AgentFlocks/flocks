@@ -134,6 +134,12 @@ def _annotate_with_provider_version(tool_info: Any, description: Optional[str]) 
 TOOL_RESULT_MIN_TURN_BUDGET = 4_000
 TOOL_RESULT_PREVIEW_CHARS = 160
 
+# Usage that marks cache tokens as counted in prompt_tokens is only trusted
+# when the request estimate is below this share of prompt_tokens plus the
+# cache.  The estimate runs low on real tokenizers (code, JSON, blocks it
+# leaves out), and trusting an Anthropic-style report would under-count.
+CACHE_IN_PROMPT_REQUEST_RATIO = 0.7
+
 # Maximum seconds to wait for the *first* chunk from the LLM stream.
 # If the model never starts responding, the stream times out and the session
 # surfaces a clear error rather than hanging forever.
@@ -1606,7 +1612,7 @@ class SessionRunner:
                         "data": {"message": error},
                     },
                     assistant_message_id=None,
-                    decision=FailoverDecision(True, "provider_unavailable", 0),
+                    decision=FailoverDecision(True, "provider_unavailable"),
                     attempts=0,
                 )
             error_dict = self._build_session_error_dict(
@@ -1646,7 +1652,7 @@ class SessionRunner:
                         "data": {"message": error},
                     },
                     assistant_message_id=None,
-                    decision=FailoverDecision(True, "provider_unavailable", 0),
+                    decision=FailoverDecision(True, "provider_unavailable"),
                     attempts=0,
                 )
             error_dict = self._build_session_error_dict(
@@ -1925,7 +1931,7 @@ class SessionRunner:
                                 message=empty_error_msg,
                                 error_data=empty_error_dict,
                                 assistant_message_id=assistant_msg.id,
-                                decision=FailoverDecision(True, "empty_response", 3),
+                                decision=FailoverDecision(True, "empty_response"),
                                 attempts=empty_attempt,
                             )
                         if self.callbacks.on_error:
@@ -2165,12 +2171,38 @@ class SessionRunner:
         return StepResult(action="stop", error="Aborted")
 
     @staticmethod
-    def _build_tokens_update(stream_usage: Optional[Dict[str, int]]) -> Optional[Dict[str, Any]]:
-        """Normalize runner token updates from provider usage."""
+    def _build_tokens_update(
+        stream_usage: Optional[Dict[str, int]],
+        *,
+        request_tokens: Optional[int] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Normalize runner token updates from provider usage.
+
+        ``request_tokens`` is an estimate of the request that produced the
+        usage; it is only needed when the usage marks cache tokens as already
+        counted in prompt_tokens.
+        """
         if not stream_usage:
             return None
+        # ``input`` is the uncached part of the prompt, next to cache reads and
+        # writes.  A gateway that already counted those into prompt_tokens
+        # says how many (see openai_base._cache_tokens_in_prompt).
+        prompt_tokens = stream_usage.get("prompt_tokens") or 0
+        in_prompt = stream_usage.get("cache_tokens_in_prompt") or 0
+        if in_prompt and request_tokens:
+            cached = (stream_usage.get("cache_read_input_tokens") or 0) + (
+                stream_usage.get("cache_creation_input_tokens") or 0
+            )
+            # Take the cache out only when the request sent is clearly smaller
+            # than prompt_tokens plus the cache.  Taking it out of an
+            # Anthropic-style prompt_tokens would under-count, and a prompt
+            # that runs past the window is not recovered from; counting the
+            # cache twice only compacts early.
+            if request_tokens >= CACHE_IN_PROMPT_REQUEST_RATIO * (prompt_tokens + cached):
+                in_prompt = 0
+        uncached_input = max(0, prompt_tokens - in_prompt)
         return {
-            "input": stream_usage.get("prompt_tokens", 0),
+            "input": uncached_input,
             "output": stream_usage.get("completion_tokens", 0),
             "reasoning": stream_usage.get("reasoning_tokens", 0),
             "cache": {
@@ -2178,6 +2210,39 @@ class SessionRunner:
                 "write": stream_usage.get("cache_creation_input_tokens", 0),
             },
         }
+
+    @staticmethod
+    def _estimate_request_tokens(
+        messages: List[Any],
+        tools: Optional[List[Dict[str, Any]]],
+    ) -> int:
+        """Rough size of a request as sent: message text, replayed reasoning,
+        tool calls and tool schemas.  Images and other non-text blocks are left
+        out rather than counted by their encoded size."""
+        def field(item: Any, name: str) -> Any:
+            return item.get(name) if isinstance(item, dict) else getattr(item, name, None)
+
+        total = 0
+        for message in messages:
+            content = field(message, "content")
+            if isinstance(content, str):
+                total += SessionPrompt.count_tokens(content)
+            elif isinstance(content, list):
+                for block in content:
+                    text = block.get("text") if isinstance(block, dict) else None
+                    if isinstance(text, str):
+                        total += SessionPrompt.count_tokens(text)
+            reasoning = field(message, "reasoning_content")
+            if isinstance(reasoning, str):
+                total += SessionPrompt.count_tokens(reasoning)
+            tool_calls = field(message, "tool_calls")
+            if tool_calls:
+                total += SessionPrompt.count_tokens(
+                    json.dumps(tool_calls, ensure_ascii=False, default=str)
+                )
+        if tools:
+            total += SessionPrompt.count_tokens(json.dumps(tools, ensure_ascii=False, default=str))
+        return total
 
     @staticmethod
     def _serialize_chat_message_for_langfuse(message: ChatMessage) -> Dict[str, Any]:
@@ -4121,7 +4186,14 @@ class SessionRunner:
         reasoning = processor.get_reasoning_content()
         
         # Update message tokens if provider reported usage
-        tokens_update = self._build_tokens_update(stream_usage)
+        tokens_update = self._build_tokens_update(
+            stream_usage,
+            request_tokens=(
+                self._estimate_request_tokens(messages, provider_tools)
+                if stream_usage and stream_usage.get("cache_tokens_in_prompt")
+                else None
+            ),
+        )
         if tokens_update:
             try:
                 await Message.update(
