@@ -260,6 +260,24 @@ describe('SOC dashboard contract page runtime', () => {
     expect(rail.querySelector('.ai-record-title')).toHaveTextContent('边界扫描');
   });
 
+  it('keeps execution records without placeholder cards until a valid step arrives', async () => {
+    vi.useFakeTimers();
+    let event = workflowEvent('awaiting-node', 'running', { live: { nodeId: 'not-a-soc-step' } });
+    mockActivity(() => ({ workflowEvents: [event] }));
+    const { container } = render(<Page />);
+    await act(async () => {});
+    expect(container.querySelectorAll('.ai-step-card')).toHaveLength(0);
+    expect(container.querySelectorAll('.ai-card-slot')).toHaveLength(0);
+    expect(container.querySelector('.ai-execution-record')).toHaveTextContent('边界扫描');
+    expect(container.querySelector('.ai-record-state')).toHaveTextContent('处理中');
+    expect(container).not.toHaveTextContent('获取当前步骤');
+    event = { ...event, live: { nodeId: 'normalize' } };
+    await pollActivity();
+    expect(container.querySelectorAll('.ai-step-card')).toHaveLength(1);
+    expect(container.querySelector('.ai-step-card')).toHaveAttribute('data-step', 'normalize');
+    expect(container.querySelectorAll('.ai-execution-record')).toHaveLength(1);
+  });
+
   it('does not replay a terminal workflow or synthesize tasks from counter increases', async () => {
     vi.useFakeTimers();
     const running = workflowEvent('active');
@@ -443,7 +461,7 @@ describe('SOC dashboard contract page runtime', () => {
     const old = new Date(Date.now() - 31 * 60 * 1000).toISOString();
     mockActivity(() => ({ workflowEvents: [
       ...['running', 'queued', 'pending'].map((status) => workflowEvent(`old-${status}`, status, { occurredAt: old })),
-      workflowEvent('current'),
+      workflowEvent('current', 'running', { live: { nodeId: 'normalize' } }),
       workflowEvent('finished', 'completed', { occurredAt: old, live: { metrics: { rawCount: 100, duplicateCount: 60, uniqueCount: 40 } } }),
     ] }));
     const { container } = render(<Page />);

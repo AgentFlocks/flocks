@@ -31,6 +31,10 @@ function replayable(task: any, now: number): boolean {
   const age = now - taskTime(task);
   return task?.state === 'completed' && task.event?.status === 'completed' && age >= 0 && age < STEP_REPLAY_WINDOW_MS;
 }
+function knownNode(task: any, nodeId: unknown): boolean {
+  const nodes = STEP_NODES[task?.stage as keyof typeof STEP_NODES] || [];
+  return typeof nodeId === 'string' && nodes.includes(nodeId);
+}
 function nodesFor(task: any, now: number): string[] {
   const live = taskIsLive(task);
   if (!live && !replayable(task, now)) return [];
@@ -38,7 +42,7 @@ function nodesFor(task: any, now: number): string[] {
   // Reconstruct only measured successful steps. Polls can miss very fast nodes.
   const current = live && nodes.includes(task.event?.live?.nodeId) ? task.event.live.nodeId : null;
   const known = nodes.filter((id) => nodeDuration(task, id) !== null || id === current);
-  return known.length ? known : live ? ['unknown'] : [];
+  return known;
 }
 
 export function advanceStepStream(previous: StepStream, tasks: any[], online: boolean, now: number): StepStream {
@@ -66,6 +70,9 @@ export function advanceStepStream(previous: StepStream, tasks: any[], online: bo
   for (const prior of previous.cards) {
     const source = byId.get(prior.task.key);
     let card = { ...prior, task: source || prior.task };
+    // Older presentation state may contain a placeholder. Drop it immediately
+    // so it neither animates out nor occupies a slot for a real observed step.
+    if (!knownNode(card.task, card.nodeId)) continue;
     const live = source && taskIsLive(source);
     const completed = source?.state === 'completed' && source.event?.status === 'completed';
     if (card.phase === 'exit') {
@@ -85,11 +92,13 @@ export function advanceStepStream(previous: StepStream, tasks: any[], online: bo
         if (durationMs !== null) {
           card = { ...card, durationMs, phase: 'complete', outcome: 'complete',
             endAt: Math.max(card.enteredAt + STEP_DISPLAY_MS, now + 450) };
-        } else if (!live || source.event?.live?.nodeId !== (card.nodeId === 'unknown' ? undefined : card.nodeId)) {
+        } else if (!live || source.event?.live?.nodeId !== card.nodeId) {
           // A changed node alone cannot supply an invented successful duration.
-          if (!live || card.nodeId !== 'unknown' || source.event?.live?.nodeId) {
-            card = { ...card, phase: 'exit', outcome: 'changed', endAt: now + STEP_EXIT_MS };
-          }
+          // Missing telemetry also must not consume the node's dedup memory;
+          // the same real node can become observable again on the next poll.
+          card = { ...card, phase: 'exit',
+            outcome: live && !knownNode(source, source.event?.live?.nodeId) ? 'stopped' : 'changed',
+            endAt: now + STEP_EXIT_MS };
         }
       } else if (now >= card.endAt) {
         card = { ...card, phase: 'exit', endAt: now + STEP_EXIT_MS };

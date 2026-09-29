@@ -2233,7 +2233,8 @@ const AI_STEP_DESCRIPTIONS = {
 function AiWorkflowStepCard({ card }) {
   const event = card.task.event;
   const denoise = card.task.stage === 'denoise';
-  const title = (AI_WORKFLOW_STEPS[card.task.stage] || []).find(([id]) => id === card.nodeId)?.[1] || '获取当前步骤';
+  const title = (AI_WORKFLOW_STEPS[card.task.stage] || []).find(([id]) => id === card.nodeId)?.[1];
+  if (!title) return null;
   const exiting = card.phase === 'exit';
   const done = card.outcome === 'complete';
   const replay = done && card.task.state === 'completed';
@@ -2254,7 +2255,7 @@ function AiWorkflowStepCard({ card }) {
     h('header', { key: 'title' }, [
       h('strong', { key: 'name' }, title), h('span', { className: 'ai-step-state', key: 'state' }, status),
     ]),
-    h('p', { className: 'ai-step-description', key: 'description' }, AI_STEP_DESCRIPTIONS[card.nodeId] || '等待工作流返回当前步骤。'),
+    h('p', { className: 'ai-step-description', key: 'description' }, AI_STEP_DESCRIPTIONS[card.nodeId]),
     h('div', { className: 'ai-step-facts', key: 'facts' }, [
       h('div', { className: 'ai-step-count', key: 'count' }, count !== null ? [
         h('b', { className: 'ai-rolling-number', key: count }, compactNumber(count)), h('span', { key: 'unit' }, '条 · 本批输入'),
@@ -2321,6 +2322,33 @@ function openWorkflowExecutionFromEvent(event) {
   return openWorkflowExecution(workflowIdFromEvent(event), executionIdFromWorkflowEvent(event));
 }
 
+function AiExecutionRecord({ task, recent = false, now }) {
+  const tone = task.state === 'completed' ? task.event.status === 'completed' ? 'complete' : 'error'
+    : task.state === 'unconfirmed' ? 'unconfirmed' : task.state === 'waiting' ? 'waiting'
+      : taskIsLive(task) ? 'running' : 'saving';
+  const symbol = tone === 'complete' ? '✓' : tone === 'error' ? '!' : tone === 'running' ? '●' : '·';
+  const elapsed = recent ? workflowElapsed(task.event, now) : '';
+  return h('button', {
+    type: 'button', className: cx('ai-execution-record', recent ? 'ai-recent-record' : 'event-rail-item',
+      `kind-${task.stage}`, `state-${task.state}`, !recent && `motion-${task.motion || 'stable'}`),
+    onClick: () => openWorkflowExecutionFromEvent(task.event),
+  }, [
+    h('span', { className: 'ai-record-heading', key: 'heading' }, [
+      h('time', { key: 'time' }, eventTimeLabel(recent ? task.event.updatedAt || task.event.occurredAt : task.event.occurredAt)),
+      h('b', { key: 'stage' }, task.stage === 'denoise' ? '降噪' : '研判'),
+      h('span', { className: cx('ai-record-state', `tone-${tone}`), key: 'state' }, [
+        h('i', { 'aria-hidden': true, key: 'icon' }, symbol), h('span', { key: 'label' }, workflowStateLabel(task)),
+      ]),
+    ]),
+    h('span', { className: 'ai-record-body', key: 'body' }, [
+      h('span', { className: recent ? 'ai-record-elapsed' : 'ai-record-title', key: 'text' }, recent
+        ? elapsed ? `用时 ${elapsed}` : '查看本批执行结果'
+        : displayAlertText(task.event.alert?.threatName) || '查看执行详情'),
+      h('span', { className: 'ai-record-link', 'aria-hidden': true, key: 'link' }, '详情 ↗'),
+    ]),
+  ]);
+}
+
 function CommandAiTaskPanel({ activity, timeFilter, now }) {
   const tasks = buildEventQueueTasks(activity, timeFilter, now);
   const filterKey = [timeFilter.mode, timeFilter.range, timeFilter.start, timeFilter.end].join('|');
@@ -2338,21 +2366,9 @@ function CommandAiTaskPanel({ activity, timeFilter, now }) {
         h('summary', { key: 'title' }, `执行记录${active.length ? ` · ${active.length} 批` : ''}`),
         activity.snapshotComplete === false ? h('p', { className: 'ai-data-note', key: 'coverage' }, '当前为部分任务快照。') : null,
         h('div', { className: 'event-rail-list', key: 'active' }, visibleTasks.map((task) =>
-          h('button', { type: 'button', className: cx('event-rail-item', `kind-${task.stage}`, `state-${task.state}`, `motion-${task.motion || 'stable'}`),
-            key: task.key, onClick: () => openWorkflowExecutionFromEvent(task.event) }, [
-            h('span', { className: 'ai-record-heading', key: 'head' }, [
-              h('time', { key: 'time' }, eventTimeLabel(task.event.occurredAt)),
-              h('b', { key: 'stage' }, task.stage === 'denoise' ? '降噪' : '研判'),
-              h('small', { key: 'status' }, workflowStateLabel(task)),
-            ]),
-            h('span', { className: 'ai-record-title', key: 'title' }, displayAlertText(task.event.alert?.threatName) || '查看执行详情'),
-          ]))),
+          h(AiExecutionRecord, { task, now, key: task.key }))),
         ...tasks.filter((task) => task.state === 'completed').sort((a, b) => workflowTaskTime(b) - workflowTaskTime(a)).slice(0, 4).map((task) =>
-          h('button', { className: 'ai-recent-record', type: 'button', key: task.key, onClick: () => openWorkflowExecutionFromEvent(task.event) }, [
-            h('time', { key: 'time' }, eventTimeLabel(task.event.updatedAt || task.event.occurredAt)),
-            h('span', { key: 'text' }, `${task.stage === 'denoise' ? '降噪' : '研判'} · ${workflowStateLabel(task)}`),
-            h('small', { key: 'elapsed' }, workflowElapsed(task.event, now) || '详情 ↗'),
-          ])),
+          h(AiExecutionRecord, { task, now, recent: true, key: task.key })),
         !tasks.length ? h('p', { className: 'ai-data-note', key: 'empty' }, '暂无处理记录') : null,
         h('p', { className: 'ai-data-note', key: 'policy' }, '只展示最近批次。未完成任务超过 30 分钟移出本栏，后台与执行历史保留。步骤回放是展示动画，耗时来自实际执行记录。'),
       ]),
@@ -6496,20 +6512,29 @@ const CSS = `
 .ai-step-card footer { margin-top:6px; display:flex; align-items:center; justify-content:space-between; gap:8px; min-height:14px; font-size:10px; color:#9bcebf; }
 .ai-step-card footer button { background:none; border:0; padding:0; color:#91bfd1; cursor:pointer; font-size:10px; white-space:nowrap; }
 .ai-stream-resting { margin:10px 3px 20px; color:#85a5b6; font-size:11px; line-height:1.8; }
-.ai-execution-details { border-top:1px solid rgba(129,172,196,.1); padding:11px 2px 0; color:#7297a8; font-size:11px; }
-.ai-execution-details summary { cursor:pointer; }
-.ai-execution-details .event-rail-list { overflow:visible; padding:8px 0 0; }
-.ai-execution-details .event-rail-item { width:100%; text-align:left; display:block; min-height:0; padding:9px 0; border:0; border-bottom:1px solid #ffffff08; background:none; color:#a6bec9; cursor:pointer; margin:0; }
+.ai-execution-details { border-top:1px solid rgba(129,172,196,.18); padding:10px 0 0; color:#c4d9e3; font-size:12px; }
+.ai-execution-details summary { cursor:pointer; padding:8px 10px; border:1px solid rgba(129,172,196,.16); border-radius:7px; background:rgba(85,125,150,.08); font-weight:500; }
+.ai-execution-details summary::marker { color:#96bacb; }
+.ai-execution-details[open] summary { margin-bottom:8px; }
+.ai-execution-details .event-rail-list { overflow:visible; padding:0; }
+.ai-execution-details .ai-execution-record { --record-accent:#80c7b5; width:100%; text-align:left; display:block; min-height:0; padding:9px 10px; margin:0 0 6px; border:1px solid rgba(129,172,196,.15); border-left:2px solid var(--record-accent); border-radius:7px; background:rgba(75,115,141,.075); color:#c4d9e3; cursor:pointer; box-shadow:none; transition:background .18s,border-color .18s; }
+.ai-execution-details .ai-execution-record.kind-triage { --record-accent:#8bb9dc; }
+.ai-execution-details .ai-execution-record:hover { background:rgba(100,152,179,.15); border-top-color:rgba(129,172,196,.3); border-right-color:rgba(129,172,196,.3); border-bottom-color:rgba(129,172,196,.3); }
 .ai-execution-details .event-rail-item.state-processing { animation:none; }
 .ai-execution-details .event-rail-item:before, .ai-execution-details .event-rail-item:after { display:none; }
-.ai-record-heading { display:flex; align-items:center; gap:10px; font-size:11px; }
-.ai-record-heading time { color:#678d9f; }
-.ai-record-heading b { font-weight:400; }
-.ai-record-heading small { margin-left:auto; font-size:10px; }
-.ai-record-title { display:block; padding-top:5px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:#7f9eae; font-size:10px; }
-.ai-recent-record { width:100%; display:flex; align-items:center; gap:10px; background:none; border:0; border-bottom:1px solid #ffffff08; padding:10px 0; color:#8cabbc; cursor:pointer; text-align:left; font-size:11px; }
-.ai-recent-record time { color:#678d9f; }
-.ai-recent-record small { margin-left:auto; color:#8fc4bf; font-size:10px; }
+.ai-execution-record .ai-record-heading { display:flex; align-items:center; gap:8px; font-size:12px; color:#c4d9e3; line-height:1.5; }
+.ai-record-heading time { color:#b4cbd7; font-variant-numeric:tabular-nums; }
+.ai-record-heading b { color:var(--record-accent); font-weight:500; }
+.ai-record-state { margin-left:auto; display:inline-flex; align-items:center; gap:4px; padding:2px 5px; border-radius:4px; font-size:10px; line-height:1.4; white-space:nowrap; color:#c1d1dc; background:rgba(129,157,176,.12); }
+.ai-record-state i { font-style:normal; font-size:10px; }
+.ai-record-state.tone-running { color:#ade2cd; background:rgba(82,180,145,.12); }
+.ai-record-state.tone-complete { color:#a2d8cb; background:rgba(86,154,139,.12); }
+.ai-record-state.tone-error { color:#f1b7ad; background:rgba(197,102,83,.14); }
+.ai-record-state.tone-waiting { color:#decca1; background:rgba(166,141,80,.13); }
+.ai-execution-record .ai-record-body { display:flex; align-items:center; justify-content:space-between; gap:8px; padding-top:6px; color:#a7bfcd; font-size:11px; line-height:1.5; }
+.ai-record-title { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.ai-record-elapsed { color:#b5cbd4; font-variant-numeric:tabular-nums; }
+.ai-record-link { color:#94b5c9; font-size:10px; white-space:nowrap; flex-shrink:0; }
 .ai-data-note { color:#708c9e; font-size:10px; line-height:1.8; }
 .ai-step-card button:focus-visible, .ai-execution-details button:focus-visible, .ai-execution-details summary:focus-visible { outline:2px solid #6ddbd0; outline-offset:3px; }
 @keyframes aiSlotEnter { from { grid-template-rows:0fr; opacity:0; } to { grid-template-rows:1fr; opacity:1; } }

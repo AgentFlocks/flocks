@@ -8,7 +8,7 @@ import {
 const NOW = Date.parse('2026-09-30T10:00:00Z');
 
 function batch(key: string, options: {
-  stage?: 'denoise' | 'triage'; state?: string; node?: string;
+  stage?: 'denoise' | 'triage'; state?: string; node?: unknown;
   phase?: string; durations?: Record<string, unknown>; updatedAt?: number;
   status?: string;
 } = {}) {
@@ -81,21 +81,59 @@ describe('SOC independent workflow step cards', () => {
     expect(advanceStepStream(createStepStream(), [task], true, NOW).cards).toEqual([]);
   });
 
-  it('shows only a live unknown card when the actual step is unavailable', () => {
-    const task = batch('a');
+  it.each([undefined, null, '', 'unknown', 'not-a-step', 1, {}])('does not allocate a placeholder for an unknown or invalid node (%s)', node => {
+    const task = batch('a', { node });
     const state = advanceStepStream(createStepStream(), [task], true, NOW);
-    expect(state.cards).toHaveLength(1);
-    expect(state.cards[0]).toMatchObject({ nodeId: 'unknown', phase: 'processing', durationMs: null });
+    expect(state.cards).toEqual([]);
+    expect(state.batches).toEqual({});
+    expect(state.serial).toBe(0);
   });
 
-  it('ends an unknown live card when the task finishes without a node or timing', () => {
-    let task = batch('a');
-    let state = advanceStepStream(createStepStream(), [task], true, NOW);
-    task = batch('a', { state: 'completed' });
-    state = advanceStepStream(state, [task], true, NOW + 100);
-    expect(state.cards[0]).toMatchObject({ phase: 'exit', outcome: 'changed', durationMs: null });
-    state = advanceStepStream(state, [task], true, NOW + 100 + STEP_EXIT_MS);
+  it('immediately displays a real step when a previously unknown batch returns a valid node', () => {
+    let state = advanceStepStream(createStepStream(), [batch('a')], true, NOW);
+    const task = batch('a', { node: 'normalize' });
+    state = advanceStepStream(state, [task], true, NOW + 1);
+    expect(state.cards).toHaveLength(1);
+    expect(state.cards[0]).toMatchObject({ nodeId: 'normalize', phase: 'processing', serial: 1, enteredAt: NOW + 1 });
+  });
+
+  it('does not let unknown nodes consume the six real-step slots', () => {
+    const unknown = Array.from({ length: 20 }, (_, i) => batch(`unknown-${i}`));
+    const known = Array.from({ length: STEP_CARD_LIMIT }, (_, i) => batch(`known-${i}`, { node: 'normalize' }));
+    const state = advanceStepStream(createStepStream(), [...unknown, ...known], true, NOW);
+    expect(state.cards.map(card => card.task.key)).toEqual(known.map(task => task.key));
+    expect(Object.keys(state.batches)).toHaveLength(STEP_CARD_LIMIT);
+    expect(state.serial).toBe(STEP_CARD_LIMIT);
+  });
+
+  it.each(['processing', 'completed'])('preserves measured successful steps despite missing current node (%s)', stateName => {
+    const task = batch('a', { state: stateName, durations: { normalize: 20 } });
+    const state = advanceStepStream(createStepStream(), [task], true, NOW);
+    expect(state.cards).toHaveLength(1);
+    expect(state.cards[0]).toMatchObject({ nodeId: 'normalize', phase: 'complete', durationMs: 20 });
+  });
+
+  it.each(['processing', 'complete', 'exit'] as const)('drops a legacy unknown card in %s phase without an exit animation or slot delay', phase => {
+    const original = batch('a', { node: 'normalize' });
+    const legacy = advanceStepStream(createStepStream(), [original], true, NOW);
+    legacy.cards[0] = { ...legacy.cards[0], nodeId: 'unknown', phase, endAt: NOW + 9999 };
+    const known = Array.from({ length: STEP_CARD_LIMIT - 1 }, (_, i) => batch(`known-${i}`, { node: 'normalize' }));
+    const state = advanceStepStream(legacy, [original, ...known], true, NOW + 1);
+    expect(state.cards).toHaveLength(STEP_CARD_LIMIT);
+    expect(state.cards.every(card => card.nodeId === 'normalize' && card.phase === 'processing')).toBe(true);
+    expect(state.cards[0]).toMatchObject({ serial: 1, enteredAt: NOW + 1 });
+    expect(state.batches.a.nodes).not.toContain('unknown');
+  });
+
+  it('can resume a previously visible step after its current-node telemetry disappears', () => {
+    const original = batch('a', { node: 'normalize' });
+    let state = advanceStepStream(createStepStream(), [original], true, NOW);
+    state = advanceStepStream(state, [batch('a')], true, NOW + 50);
+    expect(state.cards[0]).toMatchObject({ nodeId: 'normalize', phase: 'exit', outcome: 'stopped' });
+    state = advanceStepStream(state, [batch('a')], true, NOW + 50 + STEP_EXIT_MS);
     expect(state.cards).toEqual([]);
+    state = advanceStepStream(state, [original], true, NOW + 51 + STEP_EXIT_MS);
+    expect(state.cards[0]).toMatchObject({ nodeId: 'normalize', phase: 'processing', serial: 1 });
   });
 
   it('never infers completion or a duration from a change of the live node', () => {
