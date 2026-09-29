@@ -91,6 +91,7 @@ const EMPTY_STATS = {
 };
 
 const ACTIVITY_QUEUE_LIMIT = 8;
+const WORKFLOW_RECENT_PER_STATE_LIMIT = 32;
 const EVENT_RAIL_TASK_LIMIT = 10;
 const ACTIVITY_POLL_MS = 3000;
 const WORKFLOW_CONFIRMATION_TTL_MS = 30000;
@@ -214,6 +215,7 @@ function createActivityState() {
     denoise: { current: null, queue: [], last: null },
     triage: { current: null, queue: [], last: null },
     recent: [],
+    workflowRecent: [],
     lastIdentified: null,
     batch: emptyActivityBatch(),
     batchUpdatedAt: 0,
@@ -395,6 +397,7 @@ function activityHasVisibleEvents(activity) {
     || activity?.triage?.last
     || activity?.triage?.queue?.length
     || activity?.recent?.length
+    || activity?.workflowRecent?.length
   );
 }
 
@@ -480,7 +483,8 @@ function expireWorkflowActivity(previous, now = Date.now()) {
     // A missing/truncated response is not evidence of completion or failure.
     return { ...event, status: 'unconfirmed' };
   };
-  const next = { ...previous, recent: previous.recent.map(expire), lastIdentified: expire(previous.lastIdentified) };
+  const next = { ...previous, recent: previous.recent.map(expire),
+    workflowRecent: (previous.workflowRecent || []).map(expire), lastIdentified: expire(previous.lastIdentified) };
   for (const kind of ['denoise', 'triage']) {
     const lane = previous[kind];
     const current = expire(lane.current);
@@ -537,6 +541,7 @@ function enqueueActivity(previous, events, generatedAt, recentEvents, rawBatch, 
     denoise: { ...previous.denoise, queue: [...previous.denoise.queue] },
     triage: { ...previous.triage, queue: [...previous.triage.queue] },
     recent: [...previous.recent],
+    workflowRecent: [...(previous.workflowRecent || [])],
     batch: hasBatch ? batch : previous.batch,
     batchUpdatedAt: hasBatch ? Date.now() : previous.batchUpdatedAt,
     mode: modeState.mode,
@@ -552,6 +557,7 @@ function enqueueActivity(previous, events, generatedAt, recentEvents, rawBatch, 
       lane.queue = lane.queue.filter(retained);
     }
     next.recent = next.recent.filter(retained);
+    next.workflowRecent = next.workflowRecent.filter(retained);
   }
   if (batch.mode !== 'normal' && batch.receivedCount > 0) next.denoise.queue = [];
   for (const event of incomingEvents) {
@@ -594,6 +600,20 @@ function enqueueActivity(previous, events, generatedAt, recentEvents, rawBatch, 
     }
   }
   const incomingRecent = [...incomingRecentEvents, ...incomingEvents];
+  // Task evidence has its own bounded cache. High-volume alert activity must
+  // not evict the executions that supply dynamic cards and execution records.
+  const workflowById = new Map(next.workflowRecent.map((event) => [event.eventId, event]));
+  for (const event of incomingRecent) {
+    if (event?.triggerSource !== 'workflow_execution' || !event.eventId) continue;
+    workflowById.set(event.eventId, mergeActivityEvent(workflowById.get(event.eventId), event));
+  }
+  const workflowItems = [...workflowById.values()].sort((a, b) => workflowTaskTime({ event: b }) - workflowTaskTime({ event: a }));
+  next.workflowRecent = ['denoise', 'triage'].flatMap((stage) => {
+    const items = workflowItems.filter((event) => event.stage === stage);
+    const unfinished = (event) => isRunningWorkflowEvent(event) || event.status === 'unconfirmed';
+    return [...items.filter(unfinished).slice(0, WORKFLOW_RECENT_PER_STATE_LIMIT),
+      ...items.filter((event) => !unfinished(event)).slice(0, WORKFLOW_RECENT_PER_STATE_LIMIT)];
+  });
   for (const event of [...incomingRecent].reverse()) {
     if (!event?.eventId) continue;
     const merged = [mergeActivityEvent(next.recent.find((item) => item.eventId === event.eventId), event),
@@ -2046,6 +2066,7 @@ function activityTaskKey(event) {
 function buildEventQueueTasks(activity, timeFilter, now = Date.now()) {
   const taskByKey = new Map();
   const allEvents = [
+    ...(activity.workflowRecent || []),
     ...(activity.recent || []),
     activity.denoise.last, activity.triage.last,
     ...activity.denoise.queue, ...activity.triage.queue,
@@ -2233,7 +2254,9 @@ const AI_STEP_DESCRIPTIONS = {
 function AiWorkflowStepCard({ card }) {
   const event = card.task.event;
   const denoise = card.task.stage === 'denoise';
-  const title = (AI_WORKFLOW_STEPS[card.task.stage] || []).find(([id]) => id === card.nodeId)?.[1];
+  const batchCard = card.nodeId === 'batch';
+  const title = batchCard ? denoise ? '降噪处理' : '告警研判'
+    : (AI_WORKFLOW_STEPS[card.task.stage] || []).find(([id]) => id === card.nodeId)?.[1];
   if (!title) return null;
   const exiting = card.phase === 'exit';
   const done = card.outcome === 'complete';
@@ -2244,23 +2267,27 @@ function AiWorkflowStepCard({ card }) {
   const filtered = liveMetric(event, 'afterFilterCount');
   const rate = denoise && card.nodeId === 'dedup_and_write' && filtered > 0 && duplicate !== null && duplicate <= filtered ? duplicate / filtered * 100 : null;
   const processed = !denoise && card.nodeId === 'summarize' ? liveMetric(event, 'completedCount') : null;
-  const status = done ? '✓ 完成' : exiting ? card.outcome === 'stopped' ? '已停止展示' : '切换步骤' : '处理中';
+  const status = done ? '✓ 完成' : exiting ? card.outcome === 'stopped' ? '已停止展示'
+    : card.outcome === 'yielded' ? '轮换展示' : '切换步骤' : '处理中';
   return h('article', { className: cx('ai-step-card', `kind-${card.task.stage}`, exiting && 'is-exiting', moving && 'is-moving', done && 'is-complete'),
     style: { '--shine-delay': `${-(card.serial % 4) * .23}s` },
     'aria-label': `${denoise ? '降噪' : '研判'}第${card.serial}批${title}步骤卡片`, 'data-step': card.nodeId, 'data-batch': card.serial }, [
     h('div', { className: 'ai-step-meta', key: 'meta' }, [
       h('span', { key: 'kind' }, denoise ? '智能降噪' : '智能研判'),
-      h('small', { key: 'batch' }, `第 ${card.serial} 批${replay ? ' · 已完成步骤回放' : ''}`),
+      h('small', { key: 'batch' }, `第 ${card.serial} 批${replay ? batchCard ? ' · 已完成批次回放' : ' · 已完成步骤回放' : ''}`),
     ]),
     h('header', { key: 'title' }, [
       h('strong', { key: 'name' }, title), h('span', { className: 'ai-step-state', key: 'state' }, status),
     ]),
-    h('p', { className: 'ai-step-description', key: 'description' }, AI_STEP_DESCRIPTIONS[card.nodeId]),
+    h('p', { className: 'ai-step-description', key: 'description' }, batchCard
+      ? done ? denoise ? '本批告警已完成降噪处理。' : '本批告警已完成研判任务。'
+        : denoise ? '正在执行本批告警的降噪任务。' : '正在执行本批告警的研判任务。'
+      : AI_STEP_DESCRIPTIONS[card.nodeId]),
     h('div', { className: 'ai-step-facts', key: 'facts' }, [
       h('div', { className: 'ai-step-count', key: 'count' }, count !== null ? [
         h('b', { className: 'ai-rolling-number', key: count }, compactNumber(count)), h('span', { key: 'unit' }, '条 · 本批输入'),
-      ] : h('span', { key: 'unknown' }, '批次数量尚未返回')),
-      card.durationMs !== null && done ? h('span', { className: 'ai-step-duration', key: 'duration' }, `本步 ${formatStepDuration(card.durationMs)}`) : null,
+      ] : [h('b', { className: 'ai-rolling-number', key: 'batch-count' }, '1'), h('span', { key: 'unit' }, '批 · 工作流执行')]),
+      card.durationMs !== null && done ? h('span', { className: 'ai-step-duration', key: 'duration' }, `${batchCard ? '整批' : '本步'} ${formatStepDuration(card.durationMs)}`) : null,
     ]),
     h('footer', { key: 'foot' }, [
       h('span', { key: 'result' }, rate !== null ? `去重率 ${trim(rate)}%` : processed !== null ? `已处理 ${processed} 个研判单位` : ''),
@@ -2355,6 +2382,10 @@ function CommandAiTaskPanel({ activity, timeFilter, now }) {
   const active = tasks.filter((task) => task.state !== 'completed');
   const visibleTasks = useAnimatedTaskWindow(active, filterKey);
   const online = activity.connection === 'online';
+  const recentCompleted = ['denoise', 'triage'].flatMap((stage) => tasks
+    .filter((task) => task.stage === stage && task.state === 'completed')
+    .sort((a, b) => workflowTaskTime(b) - workflowTaskTime(a)).slice(0, 4))
+    .sort((a, b) => workflowTaskTime(b) - workflowTaskTime(a));
   return [
     h('div', { className: cx('ai-stream-status', !online && 'offline'), key: 'status' }, [
       h('span', { key: 'connection' }, [h('i', { 'aria-hidden': true, key: 'dot' }), online ? '处理动态' : '连接恢复中']),
@@ -2367,10 +2398,10 @@ function CommandAiTaskPanel({ activity, timeFilter, now }) {
         activity.snapshotComplete === false ? h('p', { className: 'ai-data-note', key: 'coverage' }, '当前为部分任务快照。') : null,
         h('div', { className: 'event-rail-list', key: 'active' }, visibleTasks.map((task) =>
           h(AiExecutionRecord, { task, now, key: task.key }))),
-        ...tasks.filter((task) => task.state === 'completed').sort((a, b) => workflowTaskTime(b) - workflowTaskTime(a)).slice(0, 4).map((task) =>
+        ...recentCompleted.map((task) =>
           h(AiExecutionRecord, { task, now, recent: true, key: task.key })),
         !tasks.length ? h('p', { className: 'ai-data-note', key: 'empty' }, '暂无处理记录') : null,
-        h('p', { className: 'ai-data-note', key: 'policy' }, '只展示最近批次。未完成任务超过 30 分钟移出本栏，后台与执行历史保留。步骤回放是展示动画，耗时来自实际执行记录。'),
+        h('p', { className: 'ai-data-note', key: 'policy' }, '动态展示近期执行样本；耗时来自实际记录。未完成任务超过 30 分钟移出本栏，不影响后台执行。完整执行详情受历史保留上限约束。'),
       ]),
     ]),
   ];

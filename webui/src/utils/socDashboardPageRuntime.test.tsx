@@ -260,25 +260,27 @@ describe('SOC dashboard contract page runtime', () => {
     expect(rail.querySelector('.ai-record-title')).toHaveTextContent('边界扫描');
   });
 
-  it('keeps execution records without placeholder cards until a valid step arrives', async () => {
+  it('shows batch activity without unknown placeholders until a valid step arrives', async () => {
     vi.useFakeTimers();
     let event = workflowEvent('awaiting-node', 'running', { live: { nodeId: 'not-a-soc-step' } });
     mockActivity(() => ({ workflowEvents: [event] }));
     const { container } = render(<Page />);
     await act(async () => {});
-    expect(container.querySelectorAll('.ai-step-card')).toHaveLength(0);
-    expect(container.querySelectorAll('.ai-card-slot')).toHaveLength(0);
+    expect(container.querySelectorAll('.ai-step-card')).toHaveLength(1);
+    expect(container.querySelector('.ai-step-card')).toHaveTextContent('降噪处理');
+    expect(container.querySelector('.ai-step-card')).toHaveAttribute('data-step', 'batch');
     expect(container.querySelector('.ai-execution-record')).toHaveTextContent('边界扫描');
     expect(container.querySelector('.ai-record-state')).toHaveTextContent('处理中');
     expect(container).not.toHaveTextContent('获取当前步骤');
     event = { ...event, live: { nodeId: 'normalize' } };
     await pollActivity();
+    await act(async () => { await vi.advanceTimersByTimeAsync(500); });
     expect(container.querySelectorAll('.ai-step-card')).toHaveLength(1);
     expect(container.querySelector('.ai-step-card')).toHaveAttribute('data-step', 'normalize');
     expect(container.querySelectorAll('.ai-execution-record')).toHaveLength(1);
   });
 
-  it('does not replay a terminal workflow or synthesize tasks from counter increases', async () => {
+  it('does not resurrect terminal workflows or synthesize tasks from counter increases', async () => {
     vi.useFakeTimers();
     const running = workflowEvent('active');
     let event = running;
@@ -561,14 +563,58 @@ describe('SOC dashboard contract page runtime', () => {
     expect(container.querySelectorAll('.ai-step-card')).toHaveLength(0);
   });
 
-  it('never replaces missing step durations with total runtime, or invents unobserved steps', async () => {
+  it('plays a completed batch with total runtime without inventing step timings', async () => {
     mockActivity(() => ({ workflowEvents: [workflowEvent('done-no-steps', 'completed', {
       result: { rawCount: 12, durationMs: 450 }, live: { nodeId: 'dedup_and_write', metrics: { rawCount: 12 } },
     })] }));
     const { container } = render(<Page />);
-    await waitFor(() => expect(container.querySelector('.ai-stream-resting')).toHaveTextContent('最近一批已完成'));
-    expect(container.querySelectorAll('.ai-step-card')).toHaveLength(0);
+    await waitFor(() => expect(container.querySelector('.ai-step-card')).toHaveTextContent('整批 0.45 秒'));
+    expect(container.querySelectorAll('.ai-step-card')).toHaveLength(1);
+    expect(container.querySelector('.ai-step-card')).toHaveTextContent('已完成批次回放');
+    expect(container.querySelector('.ai-step-card')).toHaveTextContent('降噪处理');
     expect(container.querySelector('.ai-task-board-scroll')).not.toHaveTextContent('本步 0.45 秒');
+  });
+
+  it('keeps denoise dynamics and records when ordinary activity and newer triage results arrive', async () => {
+    vi.useFakeTimers();
+    const denoise = Array.from({ length: 10 }, (_, index) => workflowEvent(`denoise-${index}`, 'completed', {
+      occurredAt: new Date(Date.now() - 1000 - index).toISOString(),
+      updatedAt: new Date(Date.now() - 1000 - index).toISOString(),
+      result: { rawCount: 1, durationMs: 120 },
+    }));
+    const ordinary = Array.from({ length: 30 }, (_, index) => ({ ...workflowEvent(`ordinary-${index}`, 'completed'),
+      triggerSource: 'alert_activity', occurredAt: new Date(Date.now() + 1).toISOString(),
+    }));
+    let data: any = { workflowEvents: denoise, recentEvents: ordinary };
+    mockActivity(() => data);
+    const { container } = render(<Page />);
+    await act(async () => {});
+    expect(container.querySelectorAll('.ai-step-card.kind-denoise')).toHaveLength(6);
+    expect(container.querySelectorAll('.ai-recent-record.kind-denoise')).toHaveLength(4);
+    data = { workflowEvents: Array.from({ length: 4 }, (_, index) => workflowEvent(`triage-${index}`, 'completed', {
+      workflowId: 'stream_alert_triage', stage: 'triage', result: { rawCount: 5, durationMs: 2200 },
+    })), workflowSnapshotComplete: true };
+    await pollActivity();
+    await act(async () => { await vi.advanceTimersByTimeAsync(600); });
+    expect(container.querySelectorAll('.ai-step-card.kind-denoise').length).toBeGreaterThan(0);
+    expect(container.querySelectorAll('.ai-step-card.kind-triage').length).toBeGreaterThan(0);
+    expect(container.querySelectorAll('.ai-recent-record.kind-denoise')).toHaveLength(4);
+    expect(container.querySelectorAll('.ai-recent-record.kind-triage')).toHaveLength(4);
+  });
+
+  it('keeps fresh execution traffic animated across three-second polling intervals', async () => {
+    vi.useFakeTimers();
+    let batch = 0;
+    mockActivity(() => ({ workflowEvents: [workflowEvent(`batch-${batch++}`, 'completed', {
+      result: { rawCount: 5, durationMs: 100 },
+    })] }));
+    const { container } = render(<Page />);
+    await act(async () => {});
+    for (let tick = 0; tick < 16; tick++) {
+      await act(async () => { await vi.advanceTimersByTimeAsync(750); });
+      expect(container.querySelectorAll('.ai-step-card').length).toBeGreaterThan(0);
+      expect(container).not.toHaveTextContent('获取当前步骤');
+    }
   });
 
   it.each(['success', 'canceled', 'timeout'])('stops cards when offline or execution is saving a %s result', async (phase) => {
@@ -580,7 +626,7 @@ describe('SOC dashboard contract page runtime', () => {
     const { container } = render(<Page />);
     await act(async () => {});
     expect(container.querySelector('.ai-step-card')).toHaveClass('is-moving');
-    expect(container.querySelector('.ai-step-card')).toHaveTextContent('批次数量尚未返回');
+    expect(container.querySelector('.ai-step-card')).toHaveTextContent('1批 · 工作流执行');
     expect(container.querySelector('.ai-step-duration')).toBeNull();
     data = { error: 'offline' }; await pollActivity();
     expect(container.querySelector('.ai-step-card')).toBeNull();

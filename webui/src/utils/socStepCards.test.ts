@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   advanceStepStream, createStepStream, nodeDuration, STEP_CARD_LIMIT,
-  STEP_DISPLAY_MS, STEP_EXIT_MS, STEP_REPLAY_WINDOW_MS, taskIsLive,
+  STEP_DISPLAY_MS, STEP_BATCH_DISPLAY_MS, STEP_EXIT_MS, STEP_REPLAY_WINDOW_MS, taskIsLive,
 } from '../../../.flocks/flockshub/plugins/webuis/soc_ui/soc_dashboard/src/stepCards';
 
 const NOW = Date.parse('2026-09-30T10:00:00Z');
@@ -10,12 +10,12 @@ const NOW = Date.parse('2026-09-30T10:00:00Z');
 function batch(key: string, options: {
   stage?: 'denoise' | 'triage'; state?: string; node?: unknown;
   phase?: string; durations?: Record<string, unknown>; updatedAt?: number;
-  status?: string;
+  status?: string; durationMs?: unknown;
 } = {}) {
   const { stage = 'denoise', state = 'processing', node, phase,
-    durations = {}, updatedAt = NOW, status = state === 'completed' ? 'completed' : 'running' } = options;
+    durations = {}, updatedAt = NOW, status = state === 'completed' ? 'completed' : 'running', durationMs } = options;
   return { key, stage, state, event: {
-    status, updatedAt: new Date(updatedAt).toISOString(),
+    status, updatedAt: new Date(updatedAt).toISOString(), result: { durationMs },
     live: { nodeId: node, phase, stepDurationsMs: durations },
   } };
 }
@@ -66,9 +66,17 @@ describe('SOC independent workflow step cards', () => {
     expect(state.batches.a.nodes).toEqual(['normalize']);
   });
 
-  it('does not replay a completed batch without measured steps', () => {
-    const task = batch('a', { state: 'completed', node: 'dedup_and_write' });
-    expect(advanceStepStream(createStepStream(), [task], true, NOW).cards).toEqual([]);
+  it.each([undefined, 230])('shows a real completed batch without inventing step timings (duration %s)', durationMs => {
+    const task = batch('a', { state: 'completed', node: 'dedup_and_write', durationMs });
+    let state = advanceStepStream(createStepStream(), [task], true, NOW);
+    expect(state.cards).toHaveLength(1);
+    expect(state.cards[0]).toMatchObject({ nodeId: 'batch', phase: 'complete', durationMs: durationMs ?? null });
+    state = advanceStepStream(state, [task], true, NOW + STEP_BATCH_DISPLAY_MS - 1);
+    expect(state.cards[0].phase).toBe('complete');
+    state = advanceStepStream(state, [task], true, NOW + STEP_BATCH_DISPLAY_MS);
+    state = advanceStepStream(state, [task], true, NOW + STEP_BATCH_DISPLAY_MS + STEP_EXIT_MS);
+    expect(state.cards).toEqual([]);
+    expect(nodeDuration(task, 'dedup_and_write')).toBeNull();
   });
 
   it.each(['failed', 'error', 'cancelled', 'canceled', 'timeout'])('never reconstructs a %s batch as successful steps', status => {
@@ -81,27 +89,31 @@ describe('SOC independent workflow step cards', () => {
     expect(advanceStepStream(createStepStream(), [task], true, NOW).cards).toEqual([]);
   });
 
-  it.each([undefined, null, '', 'unknown', 'not-a-step', 1, {}])('does not allocate a placeholder for an unknown or invalid node (%s)', node => {
+  it.each([undefined, null, '', 'unknown', 'not-a-step', 1, {}])('uses a real batch card when current-step telemetry is unavailable (%s)', node => {
     const task = batch('a', { node });
     const state = advanceStepStream(createStepStream(), [task], true, NOW);
-    expect(state.cards).toEqual([]);
-    expect(state.batches).toEqual({});
-    expect(state.serial).toBe(0);
+    expect(state.cards).toHaveLength(1);
+    expect(state.cards[0]).toMatchObject({ nodeId: 'batch', phase: 'processing', durationMs: null });
+    expect(state.serial).toBe(1);
   });
 
-  it('immediately displays a real step when a previously unknown batch returns a valid node', () => {
+  it('switches from a batch card to a real step as soon as measured telemetry becomes available', () => {
     let state = advanceStepStream(createStepStream(), [batch('a')], true, NOW);
     const task = batch('a', { node: 'normalize' });
     state = advanceStepStream(state, [task], true, NOW + 1);
     expect(state.cards).toHaveLength(1);
-    expect(state.cards[0]).toMatchObject({ nodeId: 'normalize', phase: 'processing', serial: 1, enteredAt: NOW + 1 });
+    expect(state.cards[0]).toMatchObject({ nodeId: 'batch', phase: 'exit', outcome: 'changed' });
+    state = advanceStepStream(state, [task], true, NOW + 1 + STEP_EXIT_MS);
+    expect(state.cards[0]).toMatchObject({ nodeId: 'normalize', phase: 'processing', serial: 1 });
+    expect(state.batches.a.nodes).not.toContain('batch');
   });
 
-  it('does not let unknown nodes consume the six real-step slots', () => {
+  it('bounds real batch fallbacks at six without creating unknown-step placeholders', () => {
     const unknown = Array.from({ length: 20 }, (_, i) => batch(`unknown-${i}`));
     const known = Array.from({ length: STEP_CARD_LIMIT }, (_, i) => batch(`known-${i}`, { node: 'normalize' }));
     const state = advanceStepStream(createStepStream(), [...unknown, ...known], true, NOW);
-    expect(state.cards.map(card => card.task.key)).toEqual(known.map(task => task.key));
+    expect(state.cards).toHaveLength(STEP_CARD_LIMIT);
+    expect(state.cards.every(card => card.nodeId === 'batch')).toBe(true);
     expect(Object.keys(state.batches)).toHaveLength(STEP_CARD_LIMIT);
     expect(state.serial).toBe(STEP_CARD_LIMIT);
   });
@@ -131,8 +143,9 @@ describe('SOC independent workflow step cards', () => {
     state = advanceStepStream(state, [batch('a')], true, NOW + 50);
     expect(state.cards[0]).toMatchObject({ nodeId: 'normalize', phase: 'exit', outcome: 'stopped' });
     state = advanceStepStream(state, [batch('a')], true, NOW + 50 + STEP_EXIT_MS);
-    expect(state.cards).toEqual([]);
+    expect(state.cards[0]).toMatchObject({ nodeId: 'batch', phase: 'processing' });
     state = advanceStepStream(state, [original], true, NOW + 51 + STEP_EXIT_MS);
+    state = advanceStepStream(state, [original], true, NOW + 51 + STEP_EXIT_MS * 2);
     expect(state.cards[0]).toMatchObject({ nodeId: 'normalize', phase: 'processing', serial: 1 });
   });
 
@@ -210,6 +223,109 @@ describe('SOC independent workflow step cards', () => {
     state = advanceStepStream(state, [...burst, ...tasks], true, NOW + 50);
     expect(state.cards.map(card => card.task.key)).toEqual(keys);
     expect(Object.keys(state.batches)).toHaveLength(STEP_CARD_LIMIT);
+  });
+
+  it('reserves three slots per category when long-running triage and completed denoise both need display', () => {
+    const triage = Array.from({ length: 6 }, (_, i) => batch(`t${i}`, { stage: 'triage', node: 'concurrent_triage' }));
+    const denoise = Array.from({ length: 10 }, (_, i) => batch(`d${i}`, { state: 'completed' }));
+    const state = advanceStepStream(createStepStream(), [...triage, ...denoise], true, NOW);
+    expect(state.cards).toHaveLength(6);
+    expect(state.cards.filter(card => card.task.stage === 'triage')).toHaveLength(3);
+    expect(state.cards.filter(card => card.task.stage === 'denoise')).toHaveLength(3);
+  });
+
+  it('rotates surplus cards when the other category arrives without marking the running nodes complete', () => {
+    const triage = Array.from({ length: 6 }, (_, i) => batch(`t${i}`, { stage: 'triage', node: 'concurrent_triage' }));
+    const denoise = Array.from({ length: 3 }, (_, i) => batch(`d${i}`, { state: 'completed' }));
+    let state = advanceStepStream(createStepStream(), triage, true, NOW);
+    expect(state.cards).toHaveLength(6);
+    state = advanceStepStream(state, [...triage, ...denoise], true, NOW + 100);
+    expect(state.cards.filter(card => card.outcome === 'yielded')).toHaveLength(3);
+    state = advanceStepStream(state, [...triage, ...denoise], true, NOW + 100 + STEP_EXIT_MS);
+    expect(state.cards.filter(card => card.task.stage === 'triage')).toHaveLength(3);
+    expect(state.cards.filter(card => card.task.stage === 'denoise')).toHaveLength(3);
+    expect(state.batches.t3.nodes).toEqual([]);
+    expect(state.batches.t4.nodes).toEqual([]);
+    expect(state.batches.t5.nodes).toEqual([]);
+  });
+
+  it('continues a selected successful replay using its own evidence after source-cache eviction', () => {
+    const task = batch('a', { state: 'completed', durations: {
+      receive_alert: 20, normalize: 50, filter_logs: 30, dedup_and_write: 40,
+    } });
+    let state = advanceStepStream(createStepStream(), [task], true, NOW);
+    let now = NOW;
+    for (const node of ['receive_alert', 'normalize', 'filter_logs', 'dedup_and_write']) {
+      expect(state.cards[0]).toMatchObject({ nodeId: node, phase: 'complete', outcome: 'complete' });
+      state = advanceStepStream(state, [], true, now + STEP_DISPLAY_MS);
+      state = advanceStepStream(state, [], true, now + STEP_DISPLAY_MS + STEP_EXIT_MS);
+      now += STEP_DISPLAY_MS + STEP_EXIT_MS;
+    }
+    expect(state.cards).toEqual([]);
+    expect(state.batches.a.nodes).toEqual(['receive_alert', 'normalize', 'filter_logs', 'dedup_and_write']);
+  });
+
+  it('finishes an already-selected recent replay even when later steps cross the admission window', () => {
+    const task = batch('a', { state: 'completed', updatedAt: NOW - STEP_REPLAY_WINDOW_MS + 1,
+      durations: { normalize: 20, dedup_and_write: 50 } });
+    let state = advanceStepStream(createStepStream(), [task], true, NOW);
+    state = advanceStepStream(state, [], true, NOW + STEP_DISPLAY_MS);
+    state = advanceStepStream(state, [], true, NOW + STEP_DISPLAY_MS + STEP_EXIT_MS);
+    expect(state.cards[0]).toMatchObject({ nodeId: 'dedup_and_write', phase: 'complete' });
+  });
+
+  it.each(['failed', 'unconfirmed'])('stops retained successful replay when explicitly observed as %s', status => {
+    const task = batch('a', { state: 'completed', durations: { normalize: 20, dedup_and_write: 50 } });
+    let state = advanceStepStream(createStepStream(), [task], true, NOW);
+    const stopped = batch('a', { state: status === 'failed' ? 'completed' : status, status,
+      durations: { normalize: 20, dedup_and_write: 50 } });
+    state = advanceStepStream(state, [stopped], true, NOW + 1);
+    expect(state.cards[0]).toMatchObject({ phase: 'exit', outcome: 'stopped' });
+    state = advanceStepStream(state, [stopped], true, NOW + 1 + STEP_EXIT_MS);
+    expect(state.cards).toEqual([]);
+  });
+
+  it('stops successful replay immediately while offline', () => {
+    const task = batch('a', { state: 'completed', durations: { normalize: 20 } });
+    const state = advanceStepStream(createStepStream(), [task], true, NOW);
+    expect(advanceStepStream(state, [], false, NOW + 1).cards).toEqual([]);
+  });
+
+  it('updates a running batch to successful completion with unknown duration without inventing milliseconds', () => {
+    let state = advanceStepStream(createStepStream(), [batch('a')], true, NOW);
+    state = advanceStepStream(state, [batch('a', { state: 'completed' })], true, NOW + 50);
+    expect(state.cards[0]).toMatchObject({ nodeId: 'batch', phase: 'complete', outcome: 'complete', durationMs: null });
+  });
+
+  it('does not use a supplied whole-batch duration for any live step', () => {
+    const task = batch('a', { durationMs: 12000 });
+    expect(nodeDuration(task, 'batch')).toBeNull();
+    const state = advanceStepStream(createStepStream(), [task], true, NOW);
+    expect(state.cards[0]).toMatchObject({ nodeId: 'batch', phase: 'processing', durationMs: null });
+  });
+
+  it('keeps both categories visible under repeated three-second denoise bursts without unbounded playback queues', () => {
+    const triage = Array.from({ length: 6 }, (_, i) => batch(`t${i}`, { stage: 'triage', node: 'concurrent_triage' }));
+    let state = advanceStepStream(createStepStream(), triage, true, NOW);
+    let denoise: ReturnType<typeof batch>[] = [];
+    const seenDenoise = new Set<string>();
+    for (let elapsed = 0; elapsed < 120000; elapsed += 120) {
+      if (elapsed % 3000 === 0) {
+        denoise = Array.from({ length: 10 }, (_, i) => batch(`d${elapsed}-${i}`, {
+          state: 'completed', updatedAt: NOW + elapsed, durationMs: 30,
+        }));
+      }
+      state = advanceStepStream(state, [...triage, ...denoise], true, NOW + elapsed);
+      expect(state.cards.length).toBeLessThanOrEqual(STEP_CARD_LIMIT);
+      expect(Object.keys(state.batches).length).toBeLessThanOrEqual(128);
+      expect(new Set(state.cards.map(card => card.task.key)).size).toBe(state.cards.length);
+      if (elapsed >= STEP_EXIT_MS) {
+        expect(state.cards.filter(card => card.task.stage === 'triage')).toHaveLength(3);
+        expect(state.cards.filter(card => card.task.stage === 'denoise')).toHaveLength(3);
+      }
+      state.cards.filter(card => card.task.stage === 'denoise').forEach(card => seenDenoise.add(card.task.key));
+    }
+    expect(seenDenoise.size).toBeGreaterThan(60);
   });
 
   it('bounds memory during prolonged traffic and does not evict an in-flight batch', () => {
