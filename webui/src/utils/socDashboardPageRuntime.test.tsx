@@ -223,7 +223,7 @@ describe('SOC dashboard contract page runtime', () => {
     await waitFor(() => expect(container.querySelectorAll('.event-rail-item')).toHaveLength(2));
     const rail = container.querySelector('.event-rail-list') as HTMLElement;
     expect(within(rail).getByText('处理中')).toBeInTheDocument();
-    expect(within(rail).getByText('等待处理')).toBeInTheDocument();
+    expect(within(rail).getByText('排队中')).toBeInTheDocument();
     expect(within(rail).queryByText(/原始 0 条/)).not.toBeInTheDocument();
     expect(within(rail).queryByText(/降噪处理完成/)).not.toBeInTheDocument();
     expect(within(rail).queryByText(/s \/ .*s/)).not.toBeInTheDocument();
@@ -257,7 +257,7 @@ describe('SOC dashboard contract page runtime', () => {
     await pollActivity();
     const rail = container.querySelector('.event-rail-list') as HTMLElement;
     expect(within(rail).getByText('边界扫描')).toBeInTheDocument();
-    expect(within(rail).getByText('192.0.2.1 → 198.51.100.2')).toBeInTheDocument();
+    expect(rail.querySelector('.ai-record-title')).toHaveTextContent('边界扫描');
   });
 
   it('does not replay a terminal workflow or synthesize tasks from counter increases', async () => {
@@ -292,7 +292,7 @@ describe('SOC dashboard contract page runtime', () => {
     data = { error: 'offline' };
     await pollActivity();
     expect(container.querySelectorAll('.event-rail-item')).toHaveLength(1);
-    expect(screen.getByText('处理任务连接异常，正在重试')).toBeInTheDocument();
+    expect(screen.getAllByText('连接恢复中')[0]).toBeInTheDocument();
     data = { workflowEvents: [], workflowSnapshotComplete: true };
     await act(async () => { await vi.advanceTimersByTimeAsync(6500); });
     await act(async () => { await vi.advanceTimersByTimeAsync(500); });
@@ -390,7 +390,7 @@ describe('SOC dashboard contract page runtime', () => {
     const cards = container.querySelector('.ai-evidence-field') as HTMLElement;
     expect(within(cards).queryByText('旧任务')).not.toBeInTheDocument();
     expect(within(cards).getByText(/新任务-/)).toBeInTheDocument();
-    expect(screen.getByText('本次快照 · 10 个任务执行中')).toBeInTheDocument();
+    expect(container.querySelectorAll('.event-rail-item.state-processing')).toHaveLength(10);
   });
 
   it('does not expire a long-running task whose unchanged status is still confirmed by polls', async () => {
@@ -448,10 +448,9 @@ describe('SOC dashboard contract page runtime', () => {
     ] }));
     const { container } = render(<Page />);
     await waitFor(() => expect(container.querySelectorAll('.event-rail-item')).toHaveLength(1));
-    const overview = screen.getByRole('region', { name: '降噪实时概况' });
-    expect(within(overview).getByText('最近 2 批快照 · 仅计已返回数据')).toBeInTheDocument();
-    expect(within(overview).getByText('≥ 60')).toBeInTheDocument();
-    expect(within(overview).getByText('105')).toBeInTheDocument();
+    await waitFor(() => expect(container.querySelector('.ai-step-count b')).toHaveTextContent('5')); // One batch, not summed snapshots.
+    expect(container.querySelectorAll('.ai-recent-record')).toHaveLength(1);
+    expect(container.querySelector('.ai-recent-record')).toHaveTextContent('已完成');
   });
 
   it('does not renew the 30-minute display deadline on poll confirmation', async () => {
@@ -464,7 +463,8 @@ describe('SOC dashboard contract page runtime', () => {
     await pollActivity();
     await act(async () => { await vi.advanceTimersByTimeAsync(500); });
     expect(container.querySelectorAll('.event-rail-item')).toHaveLength(0);
-    expect(container.querySelector('.event-rail-head b')?.textContent).toBe('0');
+    expect(container.querySelector('.event-rail-head b')).toBeNull();
+    expect(container.querySelector('.ai-board-ready')).toHaveTextContent('实时');
   });
 
   it('removes tasks after 30 minutes even when the next poll never returns', async () => {
@@ -481,89 +481,110 @@ describe('SOC dashboard contract page runtime', () => {
     expect(container.querySelectorAll('.event-rail-item')).toHaveLength(0);
   });
 
-  it('refreshes real node and counters without replaying work or inventing unknown counts', async () => {
+  it('shows parallel cards for different batches at the same step plus triage', async () => {
+    mockActivity(() => ({ workflowEvents: [
+      workflowEvent('denoise-a', 'running', { live: { nodeId: 'normalize', metrics: { rawCount: 20 } } }),
+      workflowEvent('denoise-b', 'running', { live: { nodeId: 'normalize', metrics: { rawCount: 50 } } }),
+      workflowEvent('triage-a', 'running', { stage: 'triage', workflowId: 'stream_alert_triage', live: {
+        nodeId: 'concurrent_triage', metrics: { inputCount: 100, workUnitCount: 8, completedCount: 5 } } }),
+    ] }));
+    const { container } = render(<Page />);
+    await waitFor(() => expect(container.querySelectorAll('.ai-step-card')).toHaveLength(3));
+    expect(container.querySelectorAll('.ai-step-card[data-step="normalize"]')).toHaveLength(2);
+    expect(container.querySelector('.ai-step-card.kind-triage')).toHaveTextContent('并发研判');
+    expect(container.querySelector('.ai-step-card.kind-triage')).toHaveTextContent('100');
+    expect(container.querySelector('.ai-step-card.kind-triage')).not.toHaveTextContent('5%');
+    expect(container.querySelectorAll('.ai-pipeline-track')).toHaveLength(0);
+    expect(container.querySelector('details.ai-execution-details')).not.toHaveAttribute('open');
+  });
+
+  it('updates the current card without duplicating the batch and transitions to the next step', async () => {
     vi.useFakeTimers();
     const original = workflowEvent('live-batch', 'running', { live: {
-      nodeId: 'normalize', nodeLabel: '标准化告警', metrics: { rawCount: 20, normalizedCount: 20, duplicateCount: null },
+      nodeId: 'normalize', metrics: { rawCount: 20 },
     } });
     let event = original;
     mockActivity(() => ({ workflowEvents: [event], recentEvents: [event] }));
     const { container } = render(<Page />);
     await act(async () => {});
-    let card = container.querySelector('.event-rail-item') as HTMLElement;
-    expect(within(card).getByText('当前步骤 · 标准化告警')).toBeInTheDocument();
-    expect(within(card).getAllByText('待返回').length).toBeGreaterThan(0);
-    expect(card.querySelector('.ai-step-track [aria-current="step"]')?.textContent).toBe('标准化');
-    event = { ...original, live: { nodeId: 'dedup_and_write', nodeLabel: '去重入库', metrics: {
-      rawCount: 20, normalizedCount: 20, afterFilterCount: 18, duplicateCount: 12, uniqueCount: 6, filterRemovedCount: 2,
+    expect(container.querySelector('.ai-step-card')).toHaveTextContent('标准化');
+    event = { ...original, live: { nodeId: 'dedup_and_write', metrics: {
+      rawCount: 20, afterFilterCount: 18, duplicateCount: 12, uniqueCount: 6,
     } } };
     await pollActivity();
-    card = container.querySelector('.event-rail-item') as HTMLElement;
-    expect(within(card).getByText('当前步骤 · 去重入库')).toBeInTheDocument();
-    expect(card.querySelector('.ai-step-track [aria-current="step"]')?.textContent).toBe('去重入库');
-    const overview = screen.getByRole('region', { name: '降噪实时概况' });
-    expect(within(overview).getByText('12')).toBeInTheDocument();
-    expect(within(overview).getByText('6')).toBeInTheDocument();
-    expect(within(overview).queryByText('24')).not.toBeInTheDocument(); // Same execution appears in multiple lanes only once.
-    expect(within(overview).getByText('最近 1 批快照 · 仅计已返回数据')).toBeInTheDocument();
+    await act(async () => { await vi.advanceTimersByTimeAsync(500); });
+    expect(container.querySelectorAll('.ai-step-card')).toHaveLength(1);
+    const card = container.querySelector('.ai-step-card')!;
+    expect(card).toHaveTextContent('去重入库');
+    expect(card).toHaveTextContent('去重率 66.7%');
+    expect(card.querySelector('.ai-step-count b')).toHaveTextContent('20');
   });
 
-  it('uses returned triage units, never a fabricated completion percentage', async () => {
-    mockActivity(() => ({ workflowEvents: [workflowEvent('triage-live', 'running', {
-      stage: 'triage', workflowId: 'stream_alert_triage', live: { nodeId: 'concurrent_triage', nodeLabel: '并发研判',
-        metrics: { inputCount: 100, workUnitCount: 8, completedCount: 5, cacheHitCount: 2, failedCount: 1 } },
-    })] }));
-    const { container } = render(<Page />);
-    await waitFor(() => expect(container.querySelector('.ai-step-track [aria-current="step"]')).toHaveTextContent('并发研判'));
-    const rail = container.querySelector('.ai-task-board-scroll') as HTMLElement;
-    expect(within(rail).getAllByText('已处理单位').length).toBeGreaterThan(0);
-    expect(within(rail).queryByText('5%')).not.toBeInTheDocument();
-    expect(within(rail).queryByText('63%')).not.toBeInTheDocument();
-    expect(within(rail).getByText('同类告警合为研判单位；数量以节点返回为准')).toBeInTheDocument();
-  });
-
-  it('stops node motion while a finished execution is saving its result', async () => {
-    mockActivity(() => ({ workflowEvents: [workflowEvent('saving', 'running', {
-      live: { nodeId: 'dedup_and_write', phase: 'success', metrics: { rawCount: 5, uniqueCount: 2, duplicateCount: 3 } },
-    })] }));
-    const { container } = render(<Page />);
-    await waitFor(() => expect(screen.getByText('结果保存中')).toBeInTheDocument());
-    expect(screen.getByText('当前步骤 · 执行结束 · 结果保存中')).toBeInTheDocument();
-    expect(container.querySelector('.ai-rail-step-progress')).not.toHaveClass('is-live');
-    expect(container.querySelector('.event-rail-item')).toHaveClass('connection-stale');
-    expect(container.querySelector('.ai-workflow-overview.kind-denoise')).not.toHaveClass('is-live');
-  });
-
-  it('briefly replays a fast denoise completion without resurrecting a running task', async () => {
+  it('renders measured step durations, sweeps each card, then removes it before the next', async () => {
     vi.useFakeTimers();
-    const event = workflowEvent('quick-done', 'completed', { live: {
-      nodeId: 'dedup_and_write', phase: 'success', metrics: { rawCount: 1, duplicateCount: 1, uniqueCount: 0 },
+    const event = workflowEvent('quick-done', 'completed', { result: { rawCount: 120, durationMs: 230 }, live: {
+      nodeId: 'normalize', phase: 'success', metrics: { rawCount: 120 },
+      stepDurationsMs: { receive_alert: 20, normalize: 50 },
     } });
     mockActivity(() => ({ workflowEvents: [event] }));
     const { container } = render(<Page />);
     await act(async () => {});
-    expect(screen.getByText('最近一批已完成 · 动效回放')).toBeInTheDocument();
-    expect(screen.getByLabelText('降噪处理动态')).toHaveClass('is-flowing');
-    expect(container.querySelectorAll('.event-rail-item')).toHaveLength(0);
-    await act(async () => { await vi.advanceTimersByTimeAsync(7000); });
-    expect(screen.queryByText('最近一批已完成 · 动效回放')).not.toBeInTheDocument();
-    expect(screen.getByLabelText('降噪处理动态')).not.toHaveClass('is-flowing');
-    expect(container.querySelectorAll('.event-rail-item')).toHaveLength(0);
+    expect(container.querySelector('.ai-step-card')).toHaveTextContent('接收');
+    expect(container.querySelector('.ai-step-card')).toHaveTextContent('本步 0.02 秒');
+    expect(container.querySelector('.ai-step-card')).toHaveTextContent('已完成步骤回放');
+    await act(async () => { await vi.advanceTimersByTimeAsync(2100); });
+    expect(container.querySelectorAll('.ai-step-card')).toHaveLength(1);
+    expect(container.querySelector('.ai-step-card')).toHaveTextContent('标准化');
+    expect(container.querySelector('.ai-step-card')).toHaveTextContent('本步 0.05 秒');
+    await act(async () => { await vi.advanceTimersByTimeAsync(2400); });
+    expect(container.querySelectorAll('.ai-step-card')).toHaveLength(0);
+    expect(container.querySelector('.ai-stream-resting')).toHaveTextContent('最近一批已完成 · 0.23 秒');
+    await pollActivity();
+    expect(container.querySelectorAll('.ai-step-card')).toHaveLength(0);
   });
 
-  it('allows decorative motion while real counters are still unknown, and stops it offline', async () => {
+  it('never replaces missing step durations with total runtime, or invents unobserved steps', async () => {
+    mockActivity(() => ({ workflowEvents: [workflowEvent('done-no-steps', 'completed', {
+      result: { rawCount: 12, durationMs: 450 }, live: { nodeId: 'dedup_and_write', metrics: { rawCount: 12 } },
+    })] }));
+    const { container } = render(<Page />);
+    await waitFor(() => expect(container.querySelector('.ai-stream-resting')).toHaveTextContent('最近一批已完成'));
+    expect(container.querySelectorAll('.ai-step-card')).toHaveLength(0);
+    expect(container.querySelector('.ai-task-board-scroll')).not.toHaveTextContent('本步 0.45 秒');
+  });
+
+  it.each(['success', 'canceled', 'timeout'])('stops cards when offline or execution is saving a %s result', async (phase) => {
     vi.useFakeTimers();
-    let data: any = { workflowEvents: [workflowEvent('unknown-counts', 'running', {
-      live: { nodeId: null, metrics: {} }, result: { rawCount: null },
+    let data: any = { workflowEvents: [workflowEvent('live', 'running', {
+      live: { nodeId: 'normalize', metrics: {} }, result: { rawCount: null },
     })] };
     mockActivity(() => data);
-    render(<Page />);
+    const { container } = render(<Page />);
     await act(async () => {});
-    expect(screen.getByLabelText('降噪处理动态')).toHaveClass('is-flowing');
-    expect(within(screen.getByRole('region', { name: '降噪实时概况' })).getAllByText('待返回').length).toBeGreaterThan(0);
-    data = { error: 'offline' };
-    await pollActivity();
-    expect(screen.getByLabelText('降噪处理动态')).not.toHaveClass('is-flowing');
+    expect(container.querySelector('.ai-step-card')).toHaveClass('is-moving');
+    expect(container.querySelector('.ai-step-card')).toHaveTextContent('批次数量尚未返回');
+    expect(container.querySelector('.ai-step-duration')).toBeNull();
+    data = { error: 'offline' }; await pollActivity();
+    expect(container.querySelector('.ai-step-card')).toBeNull();
+    data = { workflowEvents: [workflowEvent('saving', 'running', {
+      live: { nodeId: 'dedup_and_write', phase, metrics: { rawCount: 5 } },
+    })] };
+    await act(async () => { await vi.advanceTimersByTimeAsync(6500); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(500); });
+    expect(container.querySelector('.ai-step-card')).toBeNull();
+    expect(container.querySelector('.event-rail-list')).toHaveTextContent('结果保存中');
+    expect(container.querySelector('.ai-stream-resting')).toHaveTextContent('本批步骤已结束，正在保存执行结果');
+  });
+
+  it('never labels failed or unknown terminal work as successful processing', async () => {
+    mockActivity(() => ({ workflowEvents: [workflowEvent('failed', 'failed', {
+      result: { rawCount: null }, live: { nodeId: 'normalize', metrics: {} },
+    })] }));
+    const { container } = render(<Page />);
+    await waitFor(() => expect(container.querySelector('.ai-stream-resting')).toHaveTextContent('执行异常'));
+    expect(container.querySelectorAll('.ai-step-card')).toHaveLength(0);
+    expect(container.querySelector('.ai-task-board-scroll')).not.toHaveTextContent('本批完成降噪');
+    expect(container.querySelector('.ai-task-board-scroll')).not.toHaveTextContent('数据处理中');
   });
 
   it('ignores an in-flight activity response after unmount', async () => {

@@ -1,4 +1,5 @@
 import { severityKey, severityRows } from './severityValues';
+import { advanceStepStream, createStepStream, taskIsLive } from './stepCards';
 
 // The host installs the runtime for this page right before the bundle
 // evaluates. Bind it here once: this page keeps polling while another SOC
@@ -2177,119 +2178,111 @@ function liveMetric(event, key) {
   return key === 'rawCount' ? knownCount(event?.result?.rawCount) : null;
 }
 
-function metricValue(value) {
-  const count = knownCount(value);
-  return count === null ? '待返回' : count.toLocaleString('zh-CN');
+function workflowTaskTime(task) {
+  return Date.parse(task?.event?.updatedAt || task?.event?.occurredAt || '') || 0;
 }
 
-function workflowResultPending(event) {
-  return ['success', 'completed', 'failed', 'error', 'cancelled'].includes(event?.live?.phase);
+function formatStepDuration(ms) {
+  if (ms < 1000) return `${Number((ms / 1000).toFixed(ms < 10 ? 3 : 2))} 秒`;
+  if (ms < 60000) return `${trim(ms / 1000)} 秒`;
+  return `${Math.floor(ms / 60000)} 分 ${Math.floor(ms % 60000 / 1000)} 秒`;
 }
 
-function EventQueueProgress({ event, live }) {
-  const steps = AI_WORKFLOW_STEPS[event.stage] || [];
-  const current = steps.findIndex(([id]) => id === event.live?.nodeId);
-  const finished = workflowResultPending(event);
-  const label = finished ? '执行结束 · 结果保存中' : event.live?.nodeLabel || event.live?.nodeId || '等待工作流返回当前步骤';
-  return h('div', { className: cx('ai-rail-step-progress', live && !finished && 'is-live'), 'aria-label': '工作流运行状态' }, [
-    h('div', { className: 'ai-step-track', key: 'track' }, steps.map(([id, name], index) =>
-      h('span', { className: cx(index === current && 'current', index < current && 'passed'),
-        'aria-current': index === current ? 'step' : undefined, key: id }, name))),
-    h('small', { className: 'ai-current-step', key: 'current' }, `当前步骤 · ${label}`),
+function workflowElapsed(event, now, running = false) {
+  const duration = knownCount(event?.result?.durationMs);
+  const started = activityTimestamp(event);
+  if (!running && duration === null || running && !started) return '';
+  return formatStepDuration(running ? Math.max(0, now - started) : duration);
+}
+
+function workflowStateLabel(task) {
+  if (!task) return '待命';
+  if (task.state === 'completed') return task.event.status === 'completed' ? '已完成' : '执行异常';
+  if (task.state === 'unconfirmed') return '状态待确认';
+  if (task.state === 'waiting') return '排队中';
+  return taskIsLive(task) ? '处理中' : '结果保存中';
+}
+
+function useAiStepStream(tasks, online) {
+  const { useEffect, useRef, useState } = getReact();
+  const [stream, setStream] = useState(createStepStream);
+  const latest = useRef({ tasks, online });
+  latest.current = { tasks, online };
+  useEffect(() => {
+    setStream((previous) => advanceStepStream(previous, tasks, online, Date.now()));
+  }, [tasks, online]);
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      if (document.hidden) return;
+      const observedAt = Date.now();
+      const snapshot = latest.current;
+      setStream((previous) => advanceStepStream(previous, snapshot.tasks, snapshot.online, observedAt));
+    }, 120);
+    return () => window.clearInterval(timer);
+  }, []);
+  return online ? stream.cards : [];
+}
+
+const AI_STEP_DESCRIPTIONS = {
+  receive_alert: '接收新告警，准备进入降噪。', normalize: '提取关键字段，统一告警格式。',
+  filter_logs: '按规则筛选需要继续处理的告警。', dedup_and_write: '合并重复告警，保存降噪结果。',
+  load_dedup_file: '读取需要研判的告警。', concurrent_triage: '结合告警证据，并发分析风险。',
+  commit_cursor: '保存本批处理进度。', summarize: '汇总研判结论与处理结果。',
+};
+
+function AiWorkflowStepCard({ card }) {
+  const event = card.task.event;
+  const denoise = card.task.stage === 'denoise';
+  const title = (AI_WORKFLOW_STEPS[card.task.stage] || []).find(([id]) => id === card.nodeId)?.[1] || '获取当前步骤';
+  const exiting = card.phase === 'exit';
+  const done = card.outcome === 'complete';
+  const replay = done && card.task.state === 'completed';
+  const moving = !exiting && (done || taskIsLive(card.task));
+  const count = liveMetric(event, denoise ? 'rawCount' : 'inputCount');
+  const duplicate = liveMetric(event, 'duplicateCount');
+  const filtered = liveMetric(event, 'afterFilterCount');
+  const rate = denoise && card.nodeId === 'dedup_and_write' && filtered > 0 && duplicate !== null && duplicate <= filtered ? duplicate / filtered * 100 : null;
+  const processed = !denoise && card.nodeId === 'summarize' ? liveMetric(event, 'completedCount') : null;
+  const status = done ? '✓ 完成' : exiting ? card.outcome === 'stopped' ? '已停止展示' : '切换步骤' : '处理中';
+  return h('article', { className: cx('ai-step-card', `kind-${card.task.stage}`, exiting && 'is-exiting', moving && 'is-moving', done && 'is-complete'),
+    style: { '--shine-delay': `${-(card.serial % 4) * .23}s` },
+    'aria-label': `${denoise ? '降噪' : '研判'}第${card.serial}批${title}步骤卡片`, 'data-step': card.nodeId, 'data-batch': card.serial }, [
+    h('div', { className: 'ai-step-meta', key: 'meta' }, [
+      h('span', { key: 'kind' }, denoise ? '智能降噪' : '智能研判'),
+      h('small', { key: 'batch' }, `第 ${card.serial} 批${replay ? ' · 已完成步骤回放' : ''}`),
+    ]),
+    h('header', { key: 'title' }, [
+      h('strong', { key: 'name' }, title), h('span', { className: 'ai-step-state', key: 'state' }, status),
+    ]),
+    h('p', { className: 'ai-step-description', key: 'description' }, AI_STEP_DESCRIPTIONS[card.nodeId] || '等待工作流返回当前步骤。'),
+    h('div', { className: 'ai-step-facts', key: 'facts' }, [
+      h('div', { className: 'ai-step-count', key: 'count' }, count !== null ? [
+        h('b', { className: 'ai-rolling-number', key: count }, compactNumber(count)), h('span', { key: 'unit' }, '条 · 本批输入'),
+      ] : h('span', { key: 'unknown' }, '批次数量尚未返回')),
+      card.durationMs !== null && done ? h('span', { className: 'ai-step-duration', key: 'duration' }, `本步 ${formatStepDuration(card.durationMs)}`) : null,
+    ]),
+    h('footer', { key: 'foot' }, [
+      h('span', { key: 'result' }, rate !== null ? `去重率 ${trim(rate)}%` : processed !== null ? `已处理 ${processed} 个研判单位` : ''),
+      h('button', { type: 'button', onClick: () => openWorkflowExecutionFromEvent(event), key: 'detail' }, '详情 ↗'),
+    ]),
   ]);
 }
 
-function AiMetricGrid({ values, className = '' }) {
-  return h('dl', { className: cx('ai-metric-grid', className) }, values.map(([label, value, partial]) =>
-    h('div', { key: label }, [h('dt', { key: 'label' }, label),
-      h('dd', { className: knownCount(value) === null ? 'unknown' : '', key: 'value' }, `${partial && value !== null ? '≥ ' : ''}${metricValue(value)}`)])));
-}
-
-function AiWorkflowFlow({ stage, tasks, online }) {
-  const running = tasks.find((task) => task.stage === stage && task.state === 'processing');
-  const latest = running || tasks.filter((task) => task.stage === stage && task.state === 'completed')
-    .sort((a, b) => Date.parse(b.event.updatedAt || b.event.occurredAt) - Date.parse(a.event.updatedAt || a.event.occurredAt))[0];
-  const event = latest?.event;
-  const steps = AI_WORKFLOW_STEPS[stage];
-  const finished = latest?.state === 'completed' || workflowResultPending(event);
-  const node = steps.findIndex(([id]) => id === event?.live?.nodeId);
-  const success = finished && (event?.status === 'completed' || ['success', 'completed'].includes(event?.live?.phase));
-  const index = success ? steps.length - 1 : node;
-  const updatedAt = Date.parse(event?.updatedAt || event?.occurredAt || '');
-  const replay = online && stage === 'denoise' && latest?.state === 'completed'
-    && success && Number.isFinite(updatedAt) && Date.now() - updatedAt >= 0 && Date.now() - updatedAt < 6000;
-  const animate = online && Boolean(running) && !finished || replay;
-  const count = liveMetric(event, stage === 'denoise' ? 'rawCount' : 'inputCount');
-  const title = !event ? '等待新告警进入' : finished
-    ? success ? replay ? '最近一批已完成 · 动效回放' : '最近一批已完成' : '最近一批执行异常'
-    : event?.live?.nodeLabel || event?.live?.nodeId || '等待返回当前步骤';
-  const result = !event ? '有新任务时自动展示处理动态' : finished && stage === 'denoise'
-    ? `重复 ${metricValue(liveMetric(event, 'duplicateCount'))} · 保留 ${metricValue(liveMetric(event, 'uniqueCount'))}`
-    : finished ? `已处理 ${metricValue(liveMetric(event, 'completedCount'))} 个研判单位`
-      : displayAlertText(event?.alert?.threatName) || '正在处理本批告警';
-  return h('div', { className: cx('ai-workflow-flow', animate && 'is-flowing', finished && 'flow-finished'),
-    'aria-label': stage === 'denoise' ? '降噪处理动态' : '研判处理动态' }, [
-    h('div', { className: 'ai-flow-caption', key: 'caption' }, [
-      h('span', { key: 'title' }, title),
-      h('small', { key: 'count' }, count === null ? '' : count === 1 ? '1 条告警' : `本批 ${count.toLocaleString('zh-CN')} 条`),
-    ]),
-    h('div', { className: 'ai-flow-rail', key: 'rail' }, [
-      ...steps.map(([id, name], i) => h('span', { className: cx('ai-flow-node', index === i && 'current', i < index && 'passed'), key: id }, name)),
-      h('span', { className: 'ai-flow-sweep', 'aria-hidden': true, key: 'sweep',
-        style: { '--step-end': `${stage === 'triage' && index >= 0 ? (index + 1) * 25 : 100}%` } }),
-    ]),
-    h('p', { className: 'ai-flow-result', title: result, key: 'result' }, result),
-  ]);
-}
-
-function AiWorkflowOverview({ stage, tasks, online }) {
-  const active = tasks.filter((task) => task.stage === stage && task.state === 'processing');
-  const waiting = tasks.filter((task) => task.stage === stage && task.state === 'waiting').length;
-  const unconfirmed = tasks.filter((task) => task.stage === stage && task.state === 'unconfirmed').length;
-  const counts = active.map((task) => liveMetric(task.event, stage === 'denoise' ? 'rawCount' : 'inputCount'));
-  const known = counts.filter((count) => count !== null);
-  const total = known.length ? known.reduce((sum, count) => sum + count, 0) : null;
-  const denoise = stage === 'denoise';
-  const snapshot = tasks.filter((task) => task.stage === stage);
-  const observed = (key) => {
-    const values = snapshot.map((task) => liveMetric(task.event, key)).filter((value) => value !== null);
-    return [values.length ? values.reduce((sum, value) => sum + value, 0) : null, values.length < snapshot.length];
-  };
-  const metric = (label, key) => [label, ...observed(key)];
-  const metrics = denoise ? [
-    metric('输入告警', 'rawCount'), metric('重复合并', 'duplicateCount'),
-    metric('保留唯一键', 'uniqueCount'), metric('规则过滤', 'filterRemovedCount'),
-  ] : [
-    metric('处理单位', 'workUnitCount'), metric('已处理单位', 'completedCount'),
-    metric('缓存复用', 'cacheHitCount'), metric('研判失败', 'failedCount'),
-  ];
-  return h('section', { className: cx('ai-workflow-overview', `kind-${stage}`, online && active.some((task) => !workflowResultPending(task.event)) && 'is-live'),
-    'aria-label': denoise ? '降噪实时概况' : '研判实时概况' }, [
-    h('header', { key: 'head' }, [
-      h('span', { className: 'ai-stage-number', key: 'number' }, denoise ? '01' : '02'),
-      h('strong', { key: 'title' }, denoise ? '智能降噪' : '智能研判'),
-      h('span', { className: 'ai-lane-state', key: 'state' }, online && active.length ? `${active.length} 批执行` : !online ? '连接待恢复' : unconfirmed ? '状态待确认' : waiting ? `${waiting} 批排队` : '当前空闲'),
-    ]),
-    h('div', { className: 'ai-active-volume', key: 'volume' }, [
-      h('span', { key: 'label' }, '运行批次数据'),
-      h('b', { key: 'count' }, active.length ? metricValue(total) : online && !unconfirmed ? '0' : '待确认'),
-      h('small', { key: 'unit' }, total !== null || !active.length ? '条' : ''),
-      waiting ? h('small', { key: 'waiting' }, `另有 ${waiting} 批排队`) : null,
-    ]),
-    active.length > known.length ? h('small', { className: 'ai-data-note', key: 'partial' },
-      known.length ? '部分批次数量待返回，以上仅计已知数据' : '任务已运行，等待节点返回批次数量') : null,
-    h(AiWorkflowFlow, { stage, tasks, online, key: 'flow' }),
-    h('small', { className: 'ai-snapshot-label', key: 'scope' }, `最近 ${snapshot.length} 批快照 · 仅计已返回数据`),
-    h(AiMetricGrid, { values: metrics, key: 'metrics' }),
-    h('details', { className: 'ai-extra-metrics', key: 'extra' }, [
-      h('summary', { key: 'toggle' }, denoise ? '查看过滤与去重明细' : '查看研判结果分布'),
-      h(AiMetricGrid, { values: denoise ? [
-        metric('标准化', 'normalizedCount'), metric('过滤后', 'afterFilterCount'),
-      ] : [
-        metric('攻击行为', 'attackCount'), metric('非攻击', 'benignCount'),
-        metric('待确认', 'unknownCount'), metric('组内复用', 'followersReusedCount'),
-      ], key: 'values' }),
-    ]),
+function AiStepStream({ tasks, online }) {
+  const cards = useAiStepStream(tasks, online);
+  const busy = tasks.filter((task) => taskIsLive(task)).length;
+  const latest = [...tasks].filter((task) => task.state === 'completed').sort((a, b) => workflowTaskTime(b) - workflowTaskTime(a))[0];
+  return h('div', { className: 'ai-step-stream', 'aria-label': '动态处理步骤' }, [
+    ...cards.map((card) => h('div', { className: cx('ai-card-slot', card.phase === 'exit' && 'is-exiting'),
+      key: `${card.task.key}:${card.nodeId}` }, h(AiWorkflowStepCard, { card }))),
+    !cards.length ? h('p', { className: 'ai-stream-resting', key: 'empty' }, !online ? '连接恢复中，已保存的执行记录保留'
+      : tasks.some((task) => task.state === 'unconfirmed') ? '近期未确认处理状态'
+        : tasks.some((task) => task.state === 'processing' && !taskIsLive(task)) ? '本批步骤已结束，正在保存执行结果'
+        : tasks.some((task) => task.state === 'waiting') ? '下一批数据等待处理'
+          : busy ? '等待新的步骤记录'
+            : latest ? `${latest.stage === 'triage' ? '研判' : '降噪'}最近一批${latest.event.status === 'completed' ? '已完成' : '执行异常'}${workflowElapsed(latest.event, Date.now()) ? ` · ${workflowElapsed(latest.event, Date.now())}` : ''}`
+              : '等待新告警，处理步骤将在这里逐张出现') : null,
+    busy > 6 ? h('small', { className: 'ai-data-note', key: 'more' }, `当前展示部分处理动态 · ${busy} 批执行中`) : null,
   ]);
 }
 
@@ -2330,79 +2323,39 @@ function openWorkflowExecutionFromEvent(event) {
 
 function CommandAiTaskPanel({ activity, timeFilter, now }) {
   const tasks = buildEventQueueTasks(activity, timeFilter, now);
-  const filterTransitionKey = [timeFilter.mode, timeFilter.range, timeFilter.start, timeFilter.end].join('|');
-  const activeTasks = tasks.filter((task) => task.state !== 'completed');
-  const visibleTasks = useAnimatedTaskWindow(activeTasks, filterTransitionKey);
-  const counts = {
-    processing: tasks.filter((task) => task.state === 'processing').length,
-    waiting: tasks.filter((task) => task.state === 'waiting').length,
-    unconfirmed: tasks.filter((task) => task.state === 'unconfirmed').length,
-  };
+  const filterKey = [timeFilter.mode, timeFilter.range, timeFilter.start, timeFilter.end].join('|');
+  const active = tasks.filter((task) => task.state !== 'completed');
+  const visibleTasks = useAnimatedTaskWindow(active, filterKey);
   const online = activity.connection === 'online';
-  const banner = activity.connection === 'error'
-    ? '处理任务连接异常，正在重试'
-    : counts.processing
-      ? `本次快照 · ${counts.processing} 个任务执行中`
-      : counts.waiting ? `${counts.waiting} 个任务等待处理`
-        : counts.unconfirmed ? '任务状态待确认，等待数据更新' : '等待新的降噪或研判任务';
   return [
-    h('div', { className: cx('event-update-banner', !online && 'warn', online && tasks.some((task) => task.state === 'processing' && !workflowResultPending(task.event)) && 'is-live'), key: 'banner' }, [
-      h('span', { key: 'text' }, banner),
-      h('small', { key: 'refresh' }, online ? '每 3 秒更新' : '保留最后一次已知数据'),
+    h('div', { className: cx('ai-stream-status', !online && 'offline'), key: 'status' }, [
+      h('span', { key: 'connection' }, [h('i', { 'aria-hidden': true, key: 'dot' }), online ? '处理动态' : '连接恢复中']),
+      h('small', { key: 'scope' }, `${timeFilterLabel(timeFilter)} · 每 3 秒更新`),
     ]),
-    h('div', { className: 'ai-task-board-scroll', key: 'list' }, [
-      h('div', { className: 'ai-board-caption', key: 'range' }, [
-        h('span', { key: 'label' }, '实时运行 · 最近批次'),
-        h('b', { key: 'range' }, timeFilterLabel(timeFilter)),
+    h('div', { className: 'ai-task-board-scroll', key: 'body' }, [
+      h(AiStepStream, { tasks, online, key: filterKey }),
+      h('details', { className: 'ai-execution-details', key: 'details' }, [
+        h('summary', { key: 'title' }, `执行记录${active.length ? ` · ${active.length} 批` : ''}`),
+        activity.snapshotComplete === false ? h('p', { className: 'ai-data-note', key: 'coverage' }, '当前为部分任务快照。') : null,
+        h('div', { className: 'event-rail-list', key: 'active' }, visibleTasks.map((task) =>
+          h('button', { type: 'button', className: cx('event-rail-item', `kind-${task.stage}`, `state-${task.state}`, `motion-${task.motion || 'stable'}`),
+            key: task.key, onClick: () => openWorkflowExecutionFromEvent(task.event) }, [
+            h('span', { className: 'ai-record-heading', key: 'head' }, [
+              h('time', { key: 'time' }, eventTimeLabel(task.event.occurredAt)),
+              h('b', { key: 'stage' }, task.stage === 'denoise' ? '降噪' : '研判'),
+              h('small', { key: 'status' }, workflowStateLabel(task)),
+            ]),
+            h('span', { className: 'ai-record-title', key: 'title' }, displayAlertText(task.event.alert?.threatName) || '查看执行详情'),
+          ]))),
+        ...tasks.filter((task) => task.state === 'completed').sort((a, b) => workflowTaskTime(b) - workflowTaskTime(a)).slice(0, 4).map((task) =>
+          h('button', { className: 'ai-recent-record', type: 'button', key: task.key, onClick: () => openWorkflowExecutionFromEvent(task.event) }, [
+            h('time', { key: 'time' }, eventTimeLabel(task.event.updatedAt || task.event.occurredAt)),
+            h('span', { key: 'text' }, `${task.stage === 'denoise' ? '降噪' : '研判'} · ${workflowStateLabel(task)}`),
+            h('small', { key: 'elapsed' }, workflowElapsed(task.event, now) || '详情 ↗'),
+          ])),
+        !tasks.length ? h('p', { className: 'ai-data-note', key: 'empty' }, '暂无处理记录') : null,
+        h('p', { className: 'ai-data-note', key: 'policy' }, '只展示最近批次。未完成任务超过 30 分钟移出本栏，后台与执行历史保留。步骤回放是展示动画，耗时来自实际执行记录。'),
       ]),
-      h('div', { className: 'ai-workflow-overviews', key: 'overviews' }, ['denoise', 'triage'].map((stage) =>
-        h(AiWorkflowOverview, { stage, tasks, online, key: stage }))),
-      h('div', { className: 'ai-task-list-heading', key: 'listHeading' }, [
-        h('strong', { key: 'title' }, '当前任务'),
-        h('small', { key: 'limit' }, `展示 ${Math.min(activeTasks.length, EVENT_RAIL_TASK_LIMIT)} / ${activeTasks.length} 批`),
-      ]),
-      activity.snapshotComplete === false ? h('p', { className: 'ai-data-note', key: 'coverage' }, '当前为部分任务快照，数量不代表全部并发任务。') : null,
-      h('div', { className: 'event-rail-list', key: 'tasks' }, visibleTasks.length ? visibleTasks.map((task) => {
-        const event = task.event;
-        const title = displayAlertText(event?.alert?.threatName) || (task.stage === 'triage' ? '研判批次' : '降噪批次 · 数量未提供');
-        const stageLabel = task.stage === 'triage' ? '智能研判' : '智能降噪';
-        const stateLabel = task.state === 'processing' ? workflowResultPending(event) ? '结果保存中' : '处理中' : task.state === 'unconfirmed' ? '状态待确认' : '等待处理';
-        const hasExecution = Boolean(workflowIdFromEvent(event) && executionIdFromWorkflowEvent(event));
-        const metrics = task.stage === 'denoise' ? [
-          ['输入', liveMetric(event, 'rawCount')], ['过滤后', liveMetric(event, 'afterFilterCount')],
-          ['重复', liveMetric(event, 'duplicateCount')], ['保留', liveMetric(event, 'uniqueCount')],
-        ] : [
-          ['本批告警', liveMetric(event, 'inputCount')], ['已处理单位', liveMetric(event, 'completedCount')],
-          ['缓存复用', liveMetric(event, 'cacheHitCount')], ['失败', liveMetric(event, 'failedCount')],
-        ];
-        return h('article', {
-          className: cx('event-rail-item', `state-${task.state}`, `kind-${task.stage}`, `motion-${task.motion || 'stable'}`, (!online || workflowResultPending(event)) && 'connection-stale', hasExecution && 'clickable'),
-          key: task.key, role: hasExecution ? 'button' : undefined, tabIndex: hasExecution ? 0 : undefined,
-          title: hasExecution ? '打开执行详情' : undefined,
-          onClick: () => { if (hasExecution) openWorkflowExecutionFromEvent(event); },
-          onKeyDown: (keyboardEvent) => {
-            if (hasExecution && ['Enter', ' '].includes(keyboardEvent.key)) {
-              keyboardEvent.preventDefault(); openWorkflowExecutionFromEvent(event);
-            }
-          },
-        }, [
-          h('div', { className: 'event-rail-meta', key: 'meta' }, [
-            h('span', { className: cx('event-queue-kind', `kind-${task.stage}`), key: 'kind' }, stageLabel),
-            h('span', { className: 'event-stage', key: 'stage' }, stateLabel),
-            h('time', { title: event?.occurredAt, key: 'time' }, eventTimeLabel(event?.occurredAt)),
-          ]),
-          h('strong', { title, key: 'title' }, title),
-          event?.alert?.srcIp || event?.alert?.dstIp ? h('span', { title: eventEndpoint(event), key: 'endpoint' }, eventEndpoint(event)) : null,
-          h(EventQueueProgress, { event, live: online && task.state === 'processing', key: 'progress' }),
-          h(AiMetricGrid, { values: metrics, className: 'ai-task-metrics', key: 'metrics' }),
-          task.stage === 'triage' ? h('small', { className: 'ai-data-note', key: 'unit' }, '同类告警合为研判单位；数量以节点返回为准') : null,
-          h('div', { className: 'ai-task-foot', key: 'foot' }, [
-            h('span', { key: 'elapsed' }, task.state === 'unconfirmed' ? '近期未确认状态' : `${task.state === 'waiting' ? '已等待' : '已运行'} ${formatDurationMs(now - activityTimestamp(event))}`),
-            hasExecution ? h('span', { key: 'link' }, '查看执行 ↗') : null,
-          ]),
-        ]);
-      }) : h('div', { className: 'event-rail-empty' }, online ? '暂无活跃任务，等待下一批告警' : '等待连接恢复后更新任务')),
-      h('p', { className: 'ai-board-policy', key: 'policy' }, '≥ 表示已知下限，仍有批次未返回统计。本栏只汇总最近批次。未完成任务超过 30 分钟自动移出，后台执行与历史记录保留。'),
     ]),
   ];
 }
@@ -2422,7 +2375,7 @@ function CommandEventRail({ activity, timeFilter, collapsed, onToggle, railWidth
         h('strong', { key: 'name' }, 'AI处理任务'),
         h('span', { key: 'scope' }, 'SOC 工作套件'),
       ]),
-      h(AnimatedNumber, { tag: 'b', value: queueCount, duration: 600, key: 'count' }),
+      queueCount ? h('b', { key: 'count' }, `${queueCount} 批`) : h('span', { className: 'ai-board-ready', key: 'ready' }, '实时'),
     ]),
     h(CommandAiTaskPanel, { activity, timeFilter, now, key: 'aiTaskContent' }),
   ];
@@ -6510,90 +6463,64 @@ const CSS = `
 .ai-board-title { display: flex; flex-direction: column; gap: 3px; }
 .ai-board-title strong { color: #d9f3fa; font-size: 15px; letter-spacing: .5px; }
 .ai-board-title span { color: #639aaa; font-size: 10px; }
-/* AI task observatory: node-driven motion, bounded snapshots, one scroll area. */
-.ai-task-board-scroll { min-height: 0; overflow: auto; padding: 0 14px 14px; scrollbar-width: thin; scrollbar-color: #214252 transparent; }
-.ai-board-caption { display: flex; justify-content: space-between; gap: 8px; color: #91a9ba; font-size: 11px; padding: 0 2px 10px; }
-.ai-board-caption b { color: #b5c9d5; font-weight: 500; text-align: right; }
-.ai-workflow-overviews { display: grid; gap: 10px; }
-.ai-workflow-overview { --lane-color: #45dce9; position: relative; overflow: hidden; padding: 12px; border: 1px solid rgba(69,220,233,.2); border-radius: 10px; background: linear-gradient(135deg, rgba(21,78,91,.27), rgba(9,30,44,.7)); }
-.ai-workflow-overview.kind-triage { --lane-color: #b5a2ff; border-color: rgba(181,162,255,.22); background: linear-gradient(135deg, rgba(69,48,114,.25), rgba(9,30,44,.7)); }
-.ai-workflow-overview header { display: flex; align-items: center; gap: 7px; font-size: 14px; color: #e6f3fa; }
-.ai-stage-number { color: var(--lane-color); font-size: 11px; letter-spacing: 1px; font-variant-numeric: tabular-nums; }
-.ai-lane-state { margin-left: auto; color: #8da6b9; font-size: 11px; }
-.ai-workflow-overview.is-live .ai-lane-state { color: #68e2b8; }
-.ai-workflow-overview.is-live .ai-lane-state:before { content: ''; display: inline-block; width: 5px; height: 5px; margin: 0 5px 1px 0; border-radius: 50%; background: #68e2b8; animation: aiLivePulse 1.8s ease-in-out infinite; }
-.ai-active-volume { display: flex; align-items: baseline; gap: 6px; margin: 13px 0 9px; color: #91a9ba; }
-.ai-active-volume > span { font-size: 11px; }
-.ai-active-volume > b { color: var(--lane-color); font-size: 30px; line-height: 1; font-weight: 650; letter-spacing: -.5px; font-variant-numeric: tabular-nums; }
-.ai-active-volume > small { font-size: 11px; }
-.ai-snapshot-label { display: block; color: #829eaf; font-size: 11px; padding-bottom: 5px; }
-.ai-metric-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 5px; margin: 0; }
-.ai-metric-grid > div { min-width: 0; padding: 7px 0; }
-.ai-metric-grid dt { color: #93acbd; font-size: 11px; line-height: 1.5; white-space: nowrap; }
-.ai-metric-grid dd { margin: 3px 0 0; color: #e1edf5; font-size: 19px; font-weight: 600; line-height: 1.2; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
-.ai-metric-grid dd.unknown { color: #7490a5; font-size: 11px; font-weight: 400; }
-.ai-metric-grid > div:nth-child(2) dd:not(.unknown) { color: #75e2ba; }
-.ai-extra-metrics { border-top: 1px solid rgba(129,172,196,.13); margin-top: 5px; padding-top: 7px; }
-.ai-extra-metrics summary { cursor: pointer; color: #89a9bf; font-size: 11px; }
-.ai-extra-metrics .ai-metric-grid { margin-top: 4px; }
-.ai-task-list-heading { display: flex; justify-content: space-between; align-items: center; padding: 18px 2px 8px; color: #d1e4ef; font-size: 11px; }
-.ai-task-list-heading small { font-size: 11px; color: #819daf; }
-.ai-task-board-scroll .event-rail-list { overflow: visible; padding: 0; }
-.ai-task-board-scroll .event-rail-item { gap: 8px; padding: 12px; border: 1px solid rgba(96,142,166,.19); border-radius: 9px; margin-bottom: 9px; background: rgba(10,31,46,.8); min-height: 0; }
-.ai-task-board-scroll .event-rail-item:before { display: none; }
-.ai-task-board-scroll .event-rail-item:after { display: none; }
-.ai-task-board-scroll .event-rail-item > strong { font-size: 14px; white-space: normal; overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; line-height: 1.6; }
-.ai-task-board-scroll .event-rail-meta { gap: 5px; }
-.ai-task-board-scroll .event-rail-meta time { color: #9bb0c0; }
-.ai-rail-step-progress { --lane-color: #45dce9; width: 100%; }
-.kind-triage .ai-rail-step-progress { --lane-color: #b5a2ff; }
-.ai-step-track { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 4px; width: 100%; }
-.ai-step-track > span { position: relative; padding: 9px 0 2px; font-size: 11px; color: #8aa1b3; text-align: center; white-space: nowrap; }
-.ai-step-track > span:before { content: ''; position: absolute; inset: 0 0 auto; height: 3px; border-radius: 2px; background: rgba(104,139,161,.22); }
-.ai-step-track > span.passed:before { background: #439c87; }
-.ai-step-track > span.current { color: var(--lane-color); }
-.ai-step-track > span.current:before { background: var(--lane-color); }
-.ai-rail-step-progress.is-live .ai-step-track > span.current:before { animation: aiLivePulse 1.8s ease-in-out infinite; }
-.ai-current-step { display: block; color: #a6bbcb; font-size: 11px; line-height: 1.5; padding-top: 7px; overflow-wrap: anywhere; }
-.ai-task-metrics { width: 100%; border-top: 1px solid rgba(132,170,191,.1); }
-.ai-task-metrics dd { font-size: 14px; }
-.ai-task-foot { display: flex; justify-content: space-between; width: 100%; color: #829fae; font-size: 11px; font-variant-numeric: tabular-nums; }
-.ai-task-foot span:last-child { color: #77bdde; }
-.ai-task-board-scroll .ai-data-note, .ai-data-note { white-space: normal; color: #94a7b8; font-size: 11px; line-height: 1.6; margin: 3px 0 8px; }
-.ai-board-policy { color: #708da1; font-size: 11px; line-height: 1.8; margin: 10px 2px 0; }
-.event-update-banner { display: flex; flex-wrap: wrap; align-items: center; gap: 3px 5px; }
-.event-update-banner > span { flex: 1; min-width: 0; }
-.event-update-banner > small { width: 100%; padding-left: 18px; color: #88aeca; font-size: 11px; }
-.event-rail-item.connection-stale { animation: none !important; }
-@keyframes aiLivePulse { 0%, 100% { opacity: .5; } 50% { opacity: 1; box-shadow: 0 0 9px currentColor; } }
-@media (prefers-reduced-motion: reduce) {
-  .ai-workflow-overview.is-live .ai-lane-state:before,
-  .ai-rail-step-progress.is-live .ai-step-track > span.current:before,
-  .event-update-banner:after, .event-rail-item { animation: none !important; }
+/* Two compact processing lanes. Sweep timing is presentation, never throughput. */
+.ai-task-board-scroll { min-height: 0; overflow: auto; padding: 2px 14px 14px; scrollbar-width: thin; scrollbar-color: #214252 transparent; }
+.ai-stream-status { display:flex; align-items:center; justify-content:space-between; gap:8px; padding:12px 17px; color:#90b4c3; font-size:11px; }
+.ai-stream-status > span { display:flex; align-items:center; gap:7px; color:#b8d7e3; }
+.ai-stream-status i { width:5px; height:5px; border-radius:50%; background:#62dcbc; box-shadow:0 0 8px #62dcbc66; }
+.ai-stream-status small { font-size:10px; color:#688e9f; }
+.ai-stream-status.offline i { background:#e7b86d; box-shadow:none; }
+.event-rail-head .ai-board-ready { color:#69bcab; font-size:10px; letter-spacing:2px; }
+.ai-step-stream { min-height:72px; }
+.ai-card-slot { display:grid; grid-template-rows:1fr; margin-bottom:8px; animation:aiSlotEnter .35s ease-out both; }
+.ai-card-slot.is-exiting { animation:aiSlotExit .36s ease-in both; }
+.ai-step-card { --lane-color:#55f0c4; --lane-rgb:85,240,196; position:relative; min-height:0; border:1px solid rgba(var(--lane-rgb),.4); border-radius:10px; padding:10px 12px 8px; overflow:hidden; background:linear-gradient(140deg,rgba(var(--lane-rgb),.14),rgba(8,26,40,.86)); box-shadow:0 5px 22px #00000024,inset 0 0 22px rgba(var(--lane-rgb),.04); animation:aiCardEnter .35s ease-out both; }
+.ai-step-card.kind-triage { --lane-color:#8cc7ff; --lane-rgb:140,199,255; }
+.ai-step-card > * { position:relative; z-index:1; }
+.ai-step-card.is-moving:before { content:''; position:absolute; z-index:0; pointer-events:none; top:-15%; bottom:-15%; left:-80%; width:65%; background:linear-gradient(105deg,transparent 10%,rgba(var(--lane-rgb),.08) 42%,rgba(var(--lane-rgb),.34) 82%,rgba(229,255,250,.5) 94%,transparent 100%); transform:skewX(-12deg); filter:drop-shadow(0 0 10px rgba(var(--lane-rgb),.6)); animation:aiCardShine 1.55s var(--shine-delay,0s) ease-in-out infinite; }
+.ai-step-card.is-moving { box-shadow:0 0 18px rgba(var(--lane-rgb),.1),inset 0 0 28px rgba(var(--lane-rgb),.07); }
+.ai-step-card.is-complete { border-color:rgba(var(--lane-rgb),.65); }
+.ai-step-card.is-exiting { pointer-events:none; animation:aiCardExit .36s ease-in both; }
+.ai-step-meta { display:flex; align-items:center; justify-content:space-between; gap:8px; color:var(--lane-color); font-size:10px; margin-bottom:6px; }
+.ai-step-meta small { color:#779daf; font-size:10px; }
+.ai-step-card header { display:flex; align-items:center; justify-content:space-between; gap:10px; color:#effaff; }
+.ai-step-card header strong { font-size:14px; font-weight:500; }
+.ai-step-state { color:var(--lane-color); font-size:11px; white-space:nowrap; }
+.ai-step-description { color:#96b4c3; font-size:11px; margin:6px 0 8px; line-height:1.6; }
+.ai-step-facts { display:flex; align-items:baseline; justify-content:space-between; gap:8px; font-variant-numeric:tabular-nums; }
+.ai-step-count { display:flex; align-items:baseline; gap:6px; }
+.ai-step-count b { color:#effbff; font-size:14px; font-weight:500; line-height:1.4; }
+.ai-step-count span { font-size:10px; color:#85a7b9; }
+.ai-step-duration { color:var(--lane-color); font-size:12px; white-space:nowrap; }
+.ai-rolling-number { animation:aiNumberRoll .4s ease-out both; }
+.ai-step-card footer { margin-top:6px; display:flex; align-items:center; justify-content:space-between; gap:8px; min-height:14px; font-size:10px; color:#9bcebf; }
+.ai-step-card footer button { background:none; border:0; padding:0; color:#91bfd1; cursor:pointer; font-size:10px; white-space:nowrap; }
+.ai-stream-resting { margin:10px 3px 20px; color:#85a5b6; font-size:11px; line-height:1.8; }
+.ai-execution-details { border-top:1px solid rgba(129,172,196,.1); padding:11px 2px 0; color:#7297a8; font-size:11px; }
+.ai-execution-details summary { cursor:pointer; }
+.ai-execution-details .event-rail-list { overflow:visible; padding:8px 0 0; }
+.ai-execution-details .event-rail-item { width:100%; text-align:left; display:block; min-height:0; padding:9px 0; border:0; border-bottom:1px solid #ffffff08; background:none; color:#a6bec9; cursor:pointer; margin:0; }
+.ai-execution-details .event-rail-item.state-processing { animation:none; }
+.ai-execution-details .event-rail-item:before, .ai-execution-details .event-rail-item:after { display:none; }
+.ai-record-heading { display:flex; align-items:center; gap:10px; font-size:11px; }
+.ai-record-heading time { color:#678d9f; }
+.ai-record-heading b { font-weight:400; }
+.ai-record-heading small { margin-left:auto; font-size:10px; }
+.ai-record-title { display:block; padding-top:5px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:#7f9eae; font-size:10px; }
+.ai-recent-record { width:100%; display:flex; align-items:center; gap:10px; background:none; border:0; border-bottom:1px solid #ffffff08; padding:10px 0; color:#8cabbc; cursor:pointer; text-align:left; font-size:11px; }
+.ai-recent-record time { color:#678d9f; }
+.ai-recent-record small { margin-left:auto; color:#8fc4bf; font-size:10px; }
+.ai-data-note { color:#708c9e; font-size:10px; line-height:1.8; }
+.ai-step-card button:focus-visible, .ai-execution-details button:focus-visible, .ai-execution-details summary:focus-visible { outline:2px solid #6ddbd0; outline-offset:3px; }
+@keyframes aiSlotEnter { from { grid-template-rows:0fr; opacity:0; } to { grid-template-rows:1fr; opacity:1; } }
+@keyframes aiSlotExit { from { grid-template-rows:1fr; margin-bottom:8px; } to { grid-template-rows:0fr; margin-bottom:0; } }
+@keyframes aiCardEnter { from { opacity:0; transform:translateY(14px) scale(.97); } to { opacity:1; transform:translateY(0) scale(1); } }
+@keyframes aiCardExit { from { opacity:1; transform:translateY(0) scale(1); } to { opacity:0; transform:translateY(-10px) scale(.96); padding-top:0; padding-bottom:0; border-width:0; } }
+@keyframes aiCardShine { from { left:-80%; } to { left:140%; } }
+@keyframes aiNumberRoll { from { transform:translateY(7px); opacity:.25; } to { transform:translateY(0); opacity:1; } }
+@media (prefers-reduced-motion:reduce) {
+  .ai-step-card, .ai-step-card:before, .ai-card-slot, .ai-rolling-number, .ai-execution-details .event-rail-item { animation:none !important; }
+  .ai-step-card.is-moving:before { display:none; }
 }
 
-
-.ai-workflow-overview.kind-denoise { --flow-speed: .6s; }
-.ai-workflow-overview.kind-triage { --flow-speed: 2.2s; }
-.ai-workflow-flow { margin: 7px 0 11px; padding: 10px 10px 8px; border: 1px solid rgba(125,177,202,.14); border-radius: 7px; background: rgba(2,15,26,.38); }
-.ai-flow-caption { display: flex; align-items: baseline; justify-content: space-between; gap: 6px; color: var(--lane-color); font-size: 11px; }
-.ai-flow-caption small { color: #8cabbc; font-size: 10px; white-space: nowrap; }
-.ai-flow-rail { position: relative; display: grid; grid-template-columns: repeat(4, minmax(0,1fr)); padding-bottom: 13px; margin-top: 9px; }
-.ai-flow-rail:before { content: ''; position: absolute; left: 7%; right: 7%; top: 11px; height: 1px; background: rgba(118,169,194,.23); }
-.ai-flow-node { position: relative; text-align: center; justify-self: center; z-index: 1; color: #829bad; background: #0b2231; font-size: 11px; padding: 3px 4px; border-radius: 4px; }
-.ai-flow-node.current { color: var(--lane-color); background: #163349; box-shadow: 0 0 0 1px rgba(114,201,226,.28); }
-.ai-flow-node.passed { color: #78bda8; }
-.ai-flow-sweep { position: absolute; left: 0; bottom: 2px; width: var(--step-end, 100%); transition: width .6s ease; height: 3px; border-radius: 3px; overflow: hidden; background: rgba(118,169,194,.16); }
-.ai-workflow-flow.is-flowing .ai-flow-sweep:after { content: ''; position: absolute; left: -40%; top: 0; bottom: 0; width: 40%; background: linear-gradient(90deg, transparent, var(--lane-color), transparent); animation: aiFlowSweep var(--flow-speed, 2.6s) linear infinite; }
-.ai-workflow-overview > * { position: relative; z-index: 1; }
-.ai-workflow-overview.is-live:before { content: ''; position: absolute; pointer-events: none; z-index: 0; left: -40%; top: 0; bottom: 0; width: 40%; opacity: .09; background: linear-gradient(90deg, transparent, var(--lane-color), transparent); animation: aiFlowSweep 3.8s linear infinite; }
-.ai-flow-result { margin: 2px 0 0; color: #8eafbf; font-size: 10px; line-height: 1.7; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.ai-workflow-flow.is-flowing .ai-flow-node.current { animation: aiLivePulse 1.8s ease-in-out infinite; }
-@keyframes aiFlowSweep { from { transform: translateX(0); } to { transform: translateX(350%); } }
-@media (prefers-reduced-motion: reduce) {
-  .ai-flow-sweep { transition: none; }
-  .ai-workflow-overview.is-live:before,
-  .ai-workflow-flow.is-flowing .ai-flow-sweep:after,
-  .ai-workflow-flow.is-flowing .ai-flow-node.current { animation: none !important; }
-}
 `;

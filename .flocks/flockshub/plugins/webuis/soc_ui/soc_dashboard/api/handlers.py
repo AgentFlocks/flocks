@@ -1275,6 +1275,7 @@ def _read_workflow_recent_events(workflow_name, start_time, end_time, limit, sna
             metadata_select = ", ".join([
                 "id", "status", "started_at",
                 _workflow_execution_column_expr(execution_columns, "updated_at", "started_at"),
+                _workflow_execution_column_expr(execution_columns, "finished_at", "NULL"),
                 *[_workflow_execution_column_expr(execution_columns, name, "NULL") for name in
                   ("current_node_id", "current_phase", "current_step_index", "step_count")],
             ])
@@ -1304,6 +1305,7 @@ def _read_workflow_recent_events(workflow_name, start_time, end_time, limit, sna
             # materialize previews for every matching execution before LIMIT.
             rows = []
             steps_by_id = {}
+            step_durations_by_id = {}
             if ids:
                 previews = ", ".join(preview_column(name) for name in ("output_results", "input_params", "payload"))
                 placeholders = ",".join("?" for _ in ids)
@@ -1314,6 +1316,27 @@ def _read_workflow_recent_events(workflow_name, start_time, end_time, limit, sna
                 rows = [by_id[key] for key in ids]
                 step_columns = {row[1] for row in conn.execute("PRAGMA table_info(workflow_execution_steps)").fetchall()}
                 if {"exec_id", "step_index", "outputs"} <= step_columns and has_octet_length:
+                    timing_select = "NULL AS node_id, NULL AS step_duration_ms"
+                    if {"node_id", "error", "payload"} <= step_columns:
+                        try:
+                            conn.execute("SELECT json_valid('{}')").fetchone()
+                        except sqlite3.OperationalError:
+                            pass  # Old SQLite keeps timings unknown; never read an unbounded payload.
+                        else:
+                            # StepResult is persisted only after a node exits; its
+                            # duration_ms is measured by perf_counter in the engine.
+                            # Extract only scalar timing, within the existing 64 KiB
+                            # per-step preview limit. Never expose step payloads.
+                            timing_select = """CASE WHEN octet_length(node_id) <= 128 THEN node_id END AS node_id,
+                                CASE WHEN error IS NULL OR error = '' THEN
+                                    CASE WHEN octet_length(payload) <= 65536 THEN
+                                        CASE WHEN json_valid(payload) THEN
+                                            CASE WHEN json_type(payload, '$.duration_ms') IN ('integer', 'real')
+                                                AND (json_extract(payload, '$.error') IS NULL OR json_extract(payload, '$.error') = '')
+                                            THEN json_extract(payload, '$.duration_ms') END
+                                        END
+                                    END
+                                END AS step_duration_ms"""
                     for key in ids:
                         # Bound step IDs first too: sorting must never load all
                         # outputs for long-running/looping executions.
@@ -1323,11 +1346,22 @@ def _read_workflow_recent_events(workflow_name, start_time, end_time, limit, sna
                         ).fetchall()]
                         if indexes:
                             placeholders = ",".join("?" for _ in indexes)
-                            steps_by_id[key] = [_safe_json_object(step["outputs"]) for step in conn.execute(
-                                f"SELECT step_index, {preview_column('outputs', step_columns, 65536)} "
+                            step_rows = conn.execute(
+                                f"SELECT step_index, {preview_column('outputs', step_columns, 65536)}, {timing_select} "
                                 f"FROM workflow_execution_steps WHERE exec_id=? AND step_index IN ({placeholders}) ORDER BY step_index",
                                 (key, *indexes),
-                            ).fetchall()]
+                            ).fetchall()
+                            steps_by_id[key] = [_safe_json_object(step["outputs"]) for step in step_rows]
+                            durations = {}
+                            for step in step_rows:
+                                node, duration = step["node_id"], step["step_duration_ms"]
+                                if node in _WORKFLOW_ACTIVITY_NODE_LABELS:
+                                    # A later missing/failed attempt must not inherit
+                                    # an earlier successful duration for the same node.
+                                    durations.pop(node, None)
+                                    if type(duration) in (int, float) and math.isfinite(duration) and 0 <= duration <= 2**53 - 1:
+                                        durations[node] = duration
+                            step_durations_by_id[key] = durations
                         if time.monotonic() > deadline:
                             raise sqlite3.OperationalError("activity read budget exceeded")
             if time.monotonic() > deadline:
@@ -1356,6 +1390,7 @@ def _read_workflow_recent_events(workflow_name, start_time, end_time, limit, sna
         output = _safe_json_object(output_text)
         documents = [*steps_by_id.get(execution_id, []), output]
         live = _dashboard_live_progress(row, workflow_stage, documents)
+        live["stepDurationsMs"] = step_durations_by_id.get(execution_id, {})
         if workflow_stage == "denoise" and live["metrics"]["rawCount"] is None:
             live["metrics"]["rawCount"] = raw_count
         incoming = memory.get(execution_id) if isinstance(memory, dict) else None
@@ -1364,6 +1399,18 @@ def _read_workflow_recent_events(workflow_name, start_time, end_time, limit, sna
         same_execution = (isinstance(incoming, dict) and incoming.get("workflowId") == workflow_name
                           and incoming.get("executionId") == execution_id)
         terminal_states = {"success", "completed", "failed", "error", "cancelled", "canceled", "timeout"}
+        # Only persisted completion timestamps describe actual execution time.
+        # updated_at and live callbacks may include later refresh/save activity.
+        started_ms, finished_ms = (_dashboard_count(value) for value in (started_at, row["finished_at"]))
+        duration_ms = None
+        if normalized_status in terminal_states and started_ms is not None and finished_ms is not None and finished_ms >= started_ms:
+            try:
+                datetime.fromtimestamp(started_ms / 1000, timezone.utc)
+                datetime.fromtimestamp(finished_ms / 1000, timezone.utc)
+            except (OverflowError, OSError, ValueError):
+                pass
+            else:
+                duration_ms = finished_ms - started_ms
         incoming_newer = (same_execution and normalized_status not in terminal_states
                           and _safe_int(incoming.get("updatedAt")) >= updated_at)
         terminal_supplement = (same_execution and normalized_status in terminal_states
@@ -1446,6 +1493,7 @@ def _read_workflow_recent_events(workflow_name, start_time, end_time, limit, sna
                 },
                 "result": {
                     **metrics,
+                    "durationMs": duration_ms,
                     "isDuplicate": output.get("is_duplicate") if type(output.get("is_duplicate")) is bool else None,
                     "reductionRate": (_ratio(max(raw_count - unique_count, 0), raw_count)
                                       if raw_count is not None and unique_count is not None else None),

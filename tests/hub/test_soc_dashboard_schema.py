@@ -85,6 +85,58 @@ def test_activity_distinguishes_empty_unknown_and_real_batches(tmp_path):
         assert conn.execute("SELECT count(*) FROM workflow_executions").fetchone()[0] == 4
 
 
+@pytest.mark.parametrize("status, expected", [
+    ("success", 250), ("completed", 250), ("failed", 250), ("error", 250),
+    ("cancelled", 250), ("canceled", 250), ("timeout", 250),
+    ("running", None), ("queued", None), ("pending", None), ("unknown", None),
+])
+def test_activity_duration_uses_persisted_terminal_timestamps(tmp_path, monkeypatch, status, expected):
+    handlers = _load_dashboard_handlers()
+    handlers.WORKFLOW_DB = _activity_workflow_db(tmp_path)
+    started = int(datetime.now().timestamp() * 1000)
+    _activity_execution(handlers.WORKFLOW_DB, "timed", status=status, started=started,
+                        inputs={"_soc_alert_count": 1})
+    with sqlite3.connect(handlers.WORKFLOW_DB) as conn:
+        conn.execute("ALTER TABLE workflow_executions ADD COLUMN finished_at INTEGER")
+        conn.execute("UPDATE workflow_executions SET finished_at=?, updated_at=?", (started + 250, started + 5000))
+    # A newer terminal callback cannot manufacture completion for a persisted
+    # active row or substitute a different duration for the DB facts.
+    monkeypatch.setattr(handlers, "_dashboard_memory_progress", lambda workflow, ids: {"timed": {
+        "workflowId": workflow, "executionId": "timed", "updatedAt": started + 10000,
+        "phase": "success", "durationMs": 9999, "metrics": {},
+    }})
+    event = handlers._get_workflow_recent_events("stream_alert_denoise")[0]
+    assert event["result"]["durationMs"] == expected
+
+
+@pytest.mark.parametrize("finished, expected", [
+    (None, None), (-1, None), (999, None), (1000, 0), (1001, 1),
+    (1000.5, None), ("not-a-timestamp", None), (10**18, None),
+    (253402300800000, None),  # Beyond the supported datetime range.
+])
+def test_activity_duration_preserves_unknown_or_invalid_completion_time(tmp_path, finished, expected):
+    handlers = _load_dashboard_handlers()
+    handlers.WORKFLOW_DB = _activity_workflow_db(tmp_path)
+    _activity_execution(handlers.WORKFLOW_DB, "timed", status="success", started=1000,
+                        inputs={"_soc_alert_count": 1})
+    with sqlite3.connect(handlers.WORKFLOW_DB) as conn:
+        conn.execute("ALTER TABLE workflow_executions ADD COLUMN finished_at INTEGER")
+        conn.execute("UPDATE workflow_executions SET finished_at=?", (finished,))
+    event = handlers._get_workflow_recent_events("stream_alert_denoise")[0]
+    assert event["result"]["durationMs"] == expected
+
+
+def test_activity_duration_remains_unknown_for_legacy_schema(tmp_path):
+    handlers = _load_dashboard_handlers()
+    handlers.WORKFLOW_DB = _activity_workflow_db(tmp_path)
+    _activity_execution(handlers.WORKFLOW_DB, "legacy", status="success",
+                        inputs={"_soc_alert_count": 2})
+    event = handlers._get_workflow_recent_events("stream_alert_denoise")[0]
+    assert event["status"] == "completed"
+    assert event["result"]["rawCount"] == 2
+    assert event["result"]["durationMs"] is None
+
+
 def test_activity_hides_expired_unfinished_execution_and_preserves_history(tmp_path):
     handlers = _load_dashboard_handlers()
     handlers.WORKFLOW_DB = _activity_workflow_db(tmp_path)
@@ -112,6 +164,79 @@ def _activity_steps(path):
                            ("current_step_index", "INTEGER"), ("step_count", "INTEGER")):
             conn.execute(f"ALTER TABLE workflow_executions ADD COLUMN {name} {kind}")
         conn.execute("CREATE TABLE workflow_execution_steps (exec_id TEXT, step_index INTEGER, outputs TEXT, PRIMARY KEY(exec_id,step_index))")
+
+
+def _activity_step_timings(path):
+    _activity_steps(path)
+    with sqlite3.connect(path) as conn:
+        for name in ("node_id", "error", "payload"):
+            conn.execute(f"ALTER TABLE workflow_execution_steps ADD COLUMN {name} TEXT")
+
+
+def test_activity_step_durations_are_actual_independent_node_measurements(tmp_path):
+    handlers = _load_dashboard_handlers()
+    handlers.WORKFLOW_DB = _activity_workflow_db(tmp_path)
+    _activity_step_timings(handlers.WORKFLOW_DB)
+    _activity_execution(handlers.WORKFLOW_DB, "active", inputs={"_soc_alert_count": 8})
+    with sqlite3.connect(handlers.WORKFLOW_DB) as conn:
+        conn.execute("UPDATE workflow_executions SET current_node_id='filter_logs', current_phase='running'")
+        for index, node, duration in [(1, "receive_alert", 20), (2, "normalize", 50)]:
+            conn.execute("INSERT INTO workflow_execution_steps (exec_id,step_index,node_id,outputs,payload) VALUES ('active',?,?,?,?)",
+                         (index, node, "{}", json.dumps({"node_id": node, "duration_ms": duration, "error": None})))
+    event = handlers._get_workflow_recent_events("stream_alert_denoise")[0]
+    assert event["live"]["stepDurationsMs"] == {"receive_alert": 20, "normalize": 50}
+    assert event["live"]["nodeId"] == "filter_logs"
+    assert event["result"]["durationMs"] is None  # The whole batch is still running.
+
+
+@pytest.mark.parametrize("duration, expected", [
+    (0, 0), (0.25, 0.25), (20, 20), (50, 50), (None, None), (-1, None),
+    (True, None), ("20", None), ({"value": 20}, None), (float("nan"), None),
+    (float("inf"), None), (2**53, None),
+])
+def test_activity_step_duration_rejects_missing_or_invalid_measurements(tmp_path, duration, expected):
+    handlers = _load_dashboard_handlers()
+    handlers.WORKFLOW_DB = _activity_workflow_db(tmp_path)
+    _activity_step_timings(handlers.WORKFLOW_DB)
+    _activity_execution(handlers.WORKFLOW_DB, "timed", status="success")
+    with sqlite3.connect(handlers.WORKFLOW_DB) as conn:
+        conn.execute("INSERT INTO workflow_execution_steps (exec_id,step_index,node_id,outputs,payload) VALUES ('timed',1,'receive_alert','{}',?)",
+                     (json.dumps({"duration_ms": duration}),))
+    event = handlers._get_workflow_recent_events("stream_alert_denoise")[0]
+    assert event["live"]["stepDurationsMs"] == ({} if expected is None else {"receive_alert": expected})
+
+
+@pytest.mark.parametrize("column_error, payload_error", [("node failed", None), (None, "node failed")])
+def test_activity_failed_step_cannot_reuse_previous_success_duration(tmp_path, column_error, payload_error):
+    handlers = _load_dashboard_handlers()
+    handlers.WORKFLOW_DB = _activity_workflow_db(tmp_path)
+    _activity_step_timings(handlers.WORKFLOW_DB)
+    _activity_execution(handlers.WORKFLOW_DB, "retry", status="failed")
+    with sqlite3.connect(handlers.WORKFLOW_DB) as conn:
+        conn.execute("INSERT INTO workflow_execution_steps (exec_id,step_index,node_id,outputs,payload) VALUES ('retry',1,'normalize','{}',?)",
+                     (json.dumps({"duration_ms": 20}),))
+        conn.execute("INSERT INTO workflow_execution_steps (exec_id,step_index,node_id,error,outputs,payload) VALUES ('retry',2,'normalize',?,'{}',?)",
+                     (column_error, json.dumps({"duration_ms": 50, "error": payload_error})))
+    event = handlers._get_workflow_recent_events("stream_alert_denoise")[0]
+    assert event["live"]["stepDurationsMs"] == {}
+
+
+def test_activity_step_durations_keep_step_window_payload_bounds_and_privacy(tmp_path):
+    handlers = _load_dashboard_handlers()
+    handlers.WORKFLOW_DB = _activity_workflow_db(tmp_path)
+    _activity_step_timings(handlers.WORKFLOW_DB)
+    _activity_execution(handlers.WORKFLOW_DB, "bounded", status="success")
+    with sqlite3.connect(handlers.WORKFLOW_DB) as conn:
+        for index in range(7):
+            node = "receive_alert" if index == 0 else "normalize"
+            payload = {"duration_ms": 20 if index == 0 else 50, "private_input": "not-for-dashboard"}
+            conn.execute("INSERT INTO workflow_execution_steps (exec_id,step_index,node_id,outputs,payload) VALUES ('bounded',?,?,'{}',?)",
+                         (index, node, json.dumps(payload)))
+        conn.execute("UPDATE workflow_execution_steps SET node_id='filter_logs',payload=? WHERE step_index=6",
+                     (json.dumps({"duration_ms": 99, "padding": "x" * 65536}),))
+    event = handlers._get_workflow_recent_events("stream_alert_denoise")[0]
+    assert event["live"]["stepDurationsMs"] == {"normalize": 50}
+    assert "not-for-dashboard" not in json.dumps(event)
 
 
 def test_activity_expiry_filters_both_queries_before_limit_without_cancelling(tmp_path, monkeypatch):
@@ -177,7 +302,7 @@ def test_activity_live_steps_use_real_counts_and_update_one_execution(tmp_path):
             (2, json.dumps({"stats": {"normalized_count": 90}})),
         ])
     event = handlers._get_workflow_recent_events("stream_alert_denoise")[0]
-    assert event["live"] == {"nodeId": "filter_logs", "nodeLabel": "过滤告警", "phase": "running",
+    assert event["live"] == {"nodeId": "filter_logs", "nodeLabel": "过滤告警", "phase": "running", "stepDurationsMs": {},
         "stepIndex": 3, "stepCount": 2, "metrics": {"rawCount": 100, "normalizedCount": 90,
         "afterFilterCount": None, "uniqueCount": None, "duplicateCount": None, "filterRemovedCount": None}}
     assert event["sampleCount"] is None
@@ -227,6 +352,7 @@ def test_activity_steps_are_bounded_and_missing_schema_remains_unknown(tmp_path)
     old = handlers._get_workflow_recent_events("stream_alert_denoise")[0]
     assert old["live"]["nodeId"] is old["live"]["phase"] is old["live"]["stepIndex"] is None
     assert all(value is None for value in old["live"]["metrics"].values())
+    assert old["live"]["stepDurationsMs"] == {}
     _activity_steps(handlers.WORKFLOW_DB)
     with sqlite3.connect(handlers.WORKFLOW_DB) as conn:
         conn.execute("INSERT INTO workflow_execution_steps VALUES ('old',0,?)", (json.dumps({"stats": {"raw_count": 999}}),))
