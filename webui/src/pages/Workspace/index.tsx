@@ -97,7 +97,7 @@ export default function WorkspacePage() {
   const [activeTab, setActiveTab] = useState<Tab>(() => new URLSearchParams(location.search).get('tab') === 'knowledge' ? 'knowledge' : 'files');
   const { t } = useTranslation('workspace');
   useEffect(() => {
-    if (new URLSearchParams(location.search).get('tab') === 'knowledge') setActiveTab('knowledge');
+    setActiveTab(new URLSearchParams(location.search).get('tab') === 'knowledge' ? 'knowledge' : 'files');
   }, [location.key, location.search]);
 
   return (

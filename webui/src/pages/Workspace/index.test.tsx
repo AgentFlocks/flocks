@@ -1,9 +1,14 @@
 import { screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { Link } from 'react-router-dom';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import WorkspacePage from './index';
 import { renderWithRouter } from '@/test/helpers';
+
+vi.mock('./KnowledgeTab', () => ({
+  default: ({ active }: { active: boolean }) => active ? <div>Knowledge pane</div> : null,
+}));
 
 const mocks = vi.hoisted(() => ({
   list: vi.fn(),
@@ -228,6 +233,22 @@ describe('WorkspacePage', () => {
     mocks.readMemoryFile.mockResolvedValue({ data: { content: '' } });
     mocks.writeMemoryFile.mockResolvedValue({ data: { written: true } });
     mocks.confirm.mockResolvedValue(true);
+  });
+
+  it.each(['/workspace', '/workspace?tab=knowledge'])('点击文件目录导航回到文件管理：%s', async initialEntry => {
+    const user = userEvent.setup();
+    renderWithRouter(<><Link to="/workspace">File directory</Link><WorkspacePage /></>, {
+      routerProps: { initialEntries: [initialEntry] },
+    });
+    if (initialEntry === '/workspace') {
+      expect(await screen.findByRole('button', { name: 'New directory' })).toBeInTheDocument();
+      await user.click(screen.getByRole('button', { name: 'tabs.knowledge' }));
+    }
+    expect(screen.getByText('Knowledge pane')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'New directory' })).not.toBeInTheDocument();
+    await user.click(screen.getByRole('link', { name: 'File directory' }));
+    expect(await screen.findByRole('button', { name: 'New directory' })).toBeInTheDocument();
+    expect(screen.queryByText('Knowledge pane')).not.toBeInTheDocument();
   });
 
   it('删除子目录文件后保持在当前目录，不会重新加载根目录', async () => {
