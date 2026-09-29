@@ -43,11 +43,27 @@ class MailSettingsRequest(BaseModel):
         return value
 
 
-async def settings(owner):
+async def settings(owner, device=None):
     found = await rows('SELECT s.* FROM monitor_mail_settings s JOIN monitor_installations i ON '
                        'i.owner=s.owner AND i.scope=s.scope AND i.project=s.project '
                        'WHERE s.owner=? AND s.scope=? AND i.installed=1', (owner, COMPONENT_ID))
-    return found[0] if found else {'enabled': False, 'recipient': '', 'responsible_name': '', 'revision': '', 'project': None, 'mailbox': ''}
+    config = found[0] if found else {'enabled': False, 'recipient': '', 'responsible_name': '', 'revision': '', 'project': None, 'mailbox': ''}
+    if device is None:
+        return config
+    installations = await rows('SELECT policy FROM monitor_installations WHERE owner=? AND scope=? AND installed=1', (owner, COMPONENT_ID))
+    policy = MonitoringPolicy.model_validate_json(installations[0]['policy']) if installations else None
+    if not policy or device not in policy.devices:
+        return {**config, 'enabled': False, 'recipient': '', 'revision': ''}
+    if policy.targets_configured:
+        targets = await rows('SELECT * FROM monitor_device_targets WHERE owner=? AND scope=? AND project=? AND device=?',
+                             (owner, COMPONENT_ID, policy.project, device))
+        if not targets:
+            return {**config, 'enabled': False, 'recipient': '', 'revision': ''}
+        return {**config, **targets[0], 'enabled': config['enabled'],
+                'device_name': policy.device_names.get(device, targets[0]['device_name'])}
+    # Legacy recipients are valid only for the original single monitored target.
+    return {**config, 'enabled': bool(config['enabled'] and len(policy.devices) == 1),
+            'device_name': policy.device_names.get(device, device)}
 
 
 async def health_snapshot(owner, project=None):
@@ -107,6 +123,8 @@ async def configure(owner, body):
     from .lifecycle import _owned_installation
     async with lock(owner):
         entry, _, policy = await _owned_installation(owner)
+        if policy.targets_configured:
+            raise ValueError('请在监测配置页面按设备修改责任人和邮箱')
         current = await settings(owner)
         key = current['mailbox']
         if body.enabled:
@@ -130,8 +148,9 @@ async def configure(owner, body):
         async with connection() as db:
             await db.execute('BEGIN IMMEDIATE')
             conflicts = await db.execute('SELECT 1 FROM monitor_mail_settings WHERE mailbox=? AND recipient=? AND owner!=? '
+                                         'UNION SELECT 1 FROM monitor_device_targets WHERE mailbox=? AND recipient=? AND owner!=? '
                                          'UNION SELECT 1 FROM monitor_mail_notices WHERE mailbox=? AND recipient=? AND owner!=? LIMIT 1',
-                                         (key, body.recipient_email, owner, key, body.recipient_email, owner))
+                                         (key, body.recipient_email, owner) * 3)
             if key and await conflicts.fetchone():
                 raise ValueError('该邮箱已关联其他拥有者的监测，请使用独立责任人邮箱')
             unchanged = current['project'] == policy.project and current['mailbox'] == key and current['recipient'] == body.recipient_email
@@ -144,8 +163,8 @@ async def configure(owner, body):
     return await settings(owner)
 
 
-async def authorized(policy, revision):
-    config = await settings(policy.owner)
+async def authorized(policy, revision, device=None):
+    config = await settings(policy.owner, device)
     if not config['enabled'] or config['project'] != policy.project or config['revision'] != revision:
         raise ContractError('邮件跟进已关闭或配置已变化')
     from .lifecycle import _owned_installation
@@ -171,11 +190,11 @@ class MailAdapter(XdrAdapter):
         if params.get('action') != 'update_status':
             return await super().call(device, params, message_id)
         async with lock(self.policy.owner):
-            await authorized(self.policy, self.revision)
+            await authorized(self.policy, self.revision, device)
             ids = params.get('uuids')
             if not isinstance(ids, list) or len(ids) != 1:
                 raise PermissionError('邮件反馈每次只允许标记一个事件')
-            with automatic_mark_scope(self.policy.tool, device, ids[0], params.get('deal_status'), self.session_id):
+            with automatic_mark_scope(self.policy.tool_for(device), device, ids[0], params.get('deal_status'), self.session_id):
                 return await super().call(device, params, message_id)
 
 
@@ -245,8 +264,13 @@ async def queue_notices(policy, observed, session_id):
     if not config['enabled'] or config['project'] != policy.project:
         return
     stamp = d.stamp()
+    routes = {device: await settings(policy.owner, device) for device in {event['device'] for event in observed}}
     async with connection() as db:
         for event in observed:
+            config = routes[event['device']]
+            if not config['enabled'] or not config['recipient']:
+                continue
+            event['device_name'] = config.get('device_name', event['device'])
             if event.get('development_sample') is True:
                 continue  # Retained historical samples cannot issue new mail.
             await db.execute("UPDATE monitor_mail_notices SET event_key='legacy-sample:' || id, "
@@ -261,8 +285,8 @@ async def queue_notices(policy, observed, session_id):
 
 
 async def notify_one(policy, notice, session_id, adapter_factory=MailAdapter):
-    config = await authorized(policy, notice['revision'])
     event = json.loads(notice['event'])
+    config = await authorized(policy, notice['revision'], event['device'])
     if event.get('development_sample') is True:
         await write("UPDATE monitor_mail_notices SET state='skipped',error='已退出联调，历史测试通知不再发送',updated_at=? WHERE id=? AND state='queued'", (d.stamp(), notice['id']))
         return 'skipped'
@@ -319,15 +343,16 @@ async def notify_one(policy, notice, session_id, adapter_factory=MailAdapter):
     event['analysis'] = advice
     event['notified_status'] = raw.get('dealStatus')
     event['notified_host'] = raw.get('hostIp')
-    subject = re.sub(r'[\r\n]', ' ', f"安全告警处理通知 · {event['id']} · {event['name']}")[:240]
+    subject = re.sub(r'[\r\n]', ' ', f"安全告警处理通知 · {config.get('device_name', event['device'])} · {event['id']} · {event['name']}")[:240]
     body = (f"{config['responsible_name'] or '责任人'}：\n请核查以下安全告警并处置。\n\n"
+            f"监测设备：{config.get('device_name', event['device'])}\n设备编号：{event['device']}\n"
             f"事件编号：{event['id']}\n事件名称：{event['name']}\n主机：{event['host'] or '未知'}\n"
             f"最近发生时间（XDR）：{raw.get('endTime', '未知')}\n风险：{event['reason']}\n分析参考：{advice}\n\n"
             "请核查并处理这条告警。完成后用自己的话说明处理结果和措施；可以回复本邮件，也可以新写邮件提供上述事件编号。\n"
             "Flocks 会在下一轮监测中读取反馈，核对后标记事件状态并回查。\n"
             f"通知编号：{notice['id']}")
     async with lock(policy.owner):
-        await authorized(policy, notice['revision'])
+        await authorized(policy, notice['revision'], event['device'])
         # Commit the intent before network I/O. Unknown outcomes never auto-resend.
         async with connection() as db:
             cur = await db.execute("UPDATE monitor_mail_notices SET subject=?,body=?,event=?,state='sending',session_id=?,updated_at=? WHERE id=? AND state='queued'",
@@ -378,7 +403,8 @@ async def notify_batch(policy, session_id, observed, recorder, adapter_factory=M
     for notice in pending:
         if monotonic() >= deadline:
             break
-        if notice['revision'] != config['revision']:
+        route = await settings(policy.owner, json.loads(notice['event'])['device'])
+        if not route['enabled'] or notice['revision'] != route['revision'] or notice['mailbox'] != route['mailbox'] or notice['recipient'] != route['recipient']:
             await write("UPDATE monitor_mail_notices SET state='needs_review',error='通知配置已变化，未发送',updated_at=? WHERE id=?", (d.stamp(), notice['id']))
             result['pending'] += 1
             result['explanations'].append('通知配置已变化，未发送；请在邮件跟进中核对原通知。')
@@ -421,8 +447,11 @@ async def notify_batch(policy, session_id, observed, recorder, adapter_factory=M
 async def mark_item(policy, item, session_id, adapter_factory=MailAdapter):
     notice = (await rows('SELECT * FROM monitor_mail_notices WHERE id=? AND owner=? AND project=?', (item['notice_id'], policy.owner, policy.project)))[0]
     async with d._locks.setdefault((policy.owner, notice['event_key']), asyncio.Lock()):
-        await authorized(policy, notice['revision'])
         event = json.loads(notice['event'])
+        route = await settings(policy.owner, event['device'])
+        if not route['enabled'] or notice['revision'] != route['revision'] or notice['recipient'] != route['recipient'] or notice['mailbox'] != route['mailbox']:
+            raise ValueError('设备责任人配置已变化，请人工核对旧回信')
+        await authorized(policy, notice['revision'], event['device'])
         # The current observed object and device must still belong to this installation.
         actual, _ = await d.target(policy.owner, event['key'])
         if actual != policy:
@@ -522,7 +551,7 @@ async def process_replies(policy, session_id, high, recorder, adapter_factory=Ma
 
 async def process_reply(policy, reply, session_id, adapter_factory, interpreter, validator):
     payload = json.loads(reply['payload'])
-    config = await authorized(policy, (await settings(policy.owner))['revision'])
+    await authorized(policy, (await settings(policy.owner))['revision'])
     if transport.REQUIRE_AUTHENTICATED_FEEDBACK and payload.get('authenticated_sender') is not True:
         raise ValueError('回信身份未核验，不能在严格模式下自动处置')
     notices = await rows("SELECT * FROM monitor_mail_notices WHERE owner=? AND project=? AND mailbox=? AND recipient=? AND state IN ('sent','send_unknown','sending') ORDER BY created_at DESC",
@@ -555,10 +584,12 @@ async def process_reply(policy, reply, session_id, adapter_factory, interpreter,
             return
         if not accepted:
             raise ValueError('无法明确理解回信')
+        for notice, item in accepted:
+            route = await settings(policy.owner, json.loads(notice['event'])['device'])
+            if not route['enabled'] or notice['revision'] != route['revision'] or notice['recipient'] != route['recipient'] or notice['mailbox'] != route['mailbox']:
+                raise ValueError('设备责任人配置已变化，请人工核对旧回信')
         async with connection() as db:
             for notice, item in accepted:
-                if notice['revision'] != config['revision']:
-                    raise ValueError('通知配置已变化')
                 identity = str(uuid5(NAMESPACE_URL, reply['id']+notice['id']))
                 target = TARGETS[item.outcome]
                 if json.loads(notice['event']).get('development_sample') is True:
@@ -604,7 +635,7 @@ async def history(owner, limit=100, offset=0, tab=None):
         r['targets'] = await rows('SELECT n.event,i.state,i.target FROM monitor_mail_items i JOIN monitor_mail_notices n ON n.id=i.notice_id WHERE i.reply_id=? AND i.owner=?', (r['id'], owner))
         for target in r['targets']:
             event = json.loads(target.pop('event'))
-            target.update(event_id=event['id'], name=event['name'])
+            target.update(event_id=event['id'], name=event['name'], device=event['device'], device_name=event.get('device_name', event['device']))
     counts = await rows('SELECT state,COUNT(*) AS count FROM monitor_mail_notices WHERE owner=? AND project=? GROUP BY state', (owner, project))
     reply_counts = await rows('SELECT state,COUNT(*) AS count FROM monitor_mail_replies WHERE owner=? AND project=? GROUP BY state', (owner, project))
     unparsed = await rows('SELECT COUNT(*) AS count FROM monitor_mail_unparsed WHERE mailbox=?', (config['mailbox'],))
@@ -637,6 +668,14 @@ async def diagnostic_state(owner):
         from .agent_component import diagnostic_state as agent_state
         result['agent_component'] = agent_state()
         policy = MonitoringPolicy.model_validate_json(installed[0]['policy'])
+        targets = await rows('SELECT device,recipient FROM monitor_device_targets WHERE owner=? AND scope=? AND project=?',
+                             (owner, COMPONENT_ID, policy.project))
+        result['monitoring_devices'] = len(policy.devices)
+        result['device_targets_configured'] = policy.targets_configured
+        result['recipient_configured'] = (bool(targets) and all(row['recipient'] for row in targets)
+                                          if policy.targets_configured else bool(config['recipient']))
+        result['device_targets'] = [{'device': diag.opaque(row['device']), 'recipient_configured': bool(row['recipient'])}
+                                    for row in targets]
         result['investigation_engine'] = policy.investigation_engine
         result['round_timeout_seconds'] = policy.timeout_seconds
         from .investigation import status_summary

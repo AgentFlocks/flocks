@@ -62,18 +62,33 @@ export interface MonitorSnapshot {
   queued: { id: string; status: string; scheduled_for: string | null; error: string | null; slot_status: string | null }[];
   report: { status: string; version: number; error: string | null };
 }
+export interface MonitorConfigurationTarget {
+  device_id: string; device_name: string; responsible_name: string; recipient_email: string;
+  available: boolean; reason: string | null;
+}
+export interface MonitorConfiguration {
+  enabled: boolean; running: boolean;
+  targets: MonitorConfigurationTarget[];
+  devices: { id: string; name: string; available: boolean; reason: string | null }[];
+  sender_verification_required: boolean;
+}
+export interface MonitorConfigurationInput {
+  enabled: boolean;
+  targets: Pick<MonitorConfigurationTarget, 'device_id' | 'responsible_name' | 'recipient_email'>[];
+}
 export interface MailHistory {
   unparsed_count?: number;
   sender_verification_required?: boolean;
   settings: { enabled: boolean; recipient_email: string; responsible_name: string };
   counts: Record<string, number>; reply_counts: Record<string, number>; has_more: boolean;
-  notices: { id: string; recipient: string; state: string; subject: string; body: string; error: string | null; created_at: string; sent_at?: string; event: { id: string; name: string; host: string }; items: { id: string; reply_id: string; reply_excerpt?: string; target: number; state: string; reason: string; error: string | null }[] }[];
-  replies: { id: string; sender: string; state: string; error: string | null; received_at: string; targets?: { event_id: string; name: string; state: string; target: number }[]; payload: { subject: string; text: string; authenticated_sender?: boolean; sender_verification_bypassed?: boolean }; result: { items?: { notice_id: string; outcome: string; evidence: string; reason: string }[] } | null }[];
+  notices: { id: string; recipient: string; state: string; subject: string; body: string; error: string | null; created_at: string; sent_at?: string; event: { id: string; name: string; host: string; device?: string; device_name?: string }; items: { id: string; reply_id: string; reply_excerpt?: string; target: number; state: string; reason: string; error: string | null }[] }[];
+  replies: { id: string; sender: string; state: string; error: string | null; received_at: string; targets?: { event_id: string; name: string; state: string; target: number; device?: string; device_name?: string }[]; payload: { subject: string; text: string; authenticated_sender?: boolean; sender_verification_bypassed?: boolean }; result: { items?: { notice_id: string; outcome: string; evidence: string; reason: string }[] } | null }[];
 }
 export const monitoringApi = {
   setInvestigationEngine: (engine: 'agent-v1') => client.put<MonitorSnapshot>(`${MONITOR_API}/investigation-engine`, { engine }),
   mail: (offset = 0, tab?: 'sent' | 'received') => client.get<MailHistory>(`${MONITOR_API}/mail`, { params: { offset, tab } }),
-  saveMail: (body: { enabled: boolean; recipient_email: string; responsible_name: string }) => client.put<MonitorSnapshot>(`${MONITOR_API}/mail/settings`, body),
+  configuration: () => client.get<MonitorConfiguration>(`${MONITOR_API}/configuration`),
+  saveConfiguration: (body: MonitorConfigurationInput) => client.put<MonitorConfiguration>(`${MONITOR_API}/configuration`, body),
   setAutomaticStatus: (enabled: boolean) => client.put<MonitorSnapshot>(`${MONITOR_API}/automatic-status`, { enabled }),
   confirmDisposition: (body: { request_id: string; event_key: string; comment: string; confirmed: true }) => client.post<MonitorDisposition>(`${MONITOR_API}/dispositions`, body),
   recheckDisposition: (id: string) => client.post<MonitorDisposition>(`${MONITOR_API}/dispositions/${encodeURIComponent(id)}/recheck`),

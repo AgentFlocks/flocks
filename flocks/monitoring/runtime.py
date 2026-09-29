@@ -130,14 +130,14 @@ async def query_device(adapter, device, start, end, recorder, *, selection=None)
             selected, complete = batch.add(items, total, params['page_size'])
             if not complete and page == adapter.policy.max_pages:
                 raise ContractError('达到分页预算，查询未完成')
-            display = {'device': device, 'page': page, 'received': len(items), 'total': total}
+            display = {'device': device, 'device_name': getattr(adapter.policy, 'device_names', {}).get(device, device), 'page': page, 'received': len(items), 'total': total}
             summary_args = {}
             if selection is not None:
                 display['selection'] = {'description': selection.description, 'matched': len(selected),
                                         'excluded': len(items) - len(selected), 'cumulative': batch.counts}
                 summary_args = {'selection': selection.description, 'received': len(items), 'counts': batch.counts}
             return complete, display, page_summary(page, selected, len(batch.events), complete, **summary_args)
-        complete = await recorder.call('查询 XDR 事件', {'device': device, **params}, query)
+        complete = await recorder.call('查询 XDR 事件', {'device': device, 'device_name': getattr(adapter.policy, 'device_names', {}).get(device, device), **params}, query)
         if complete:
             return list(batch.events.values())
     raise ContractError('达到分页预算，查询未完成')
@@ -163,7 +163,8 @@ async def run(execution, policy, adapter_factory=XdrAdapter):
     mode_label = '邮件协同跟进' if automatic_enabled else '只读任务'
     trigger_message = await emit_message(session.id, f'系统自动监测 · {started.astimezone(ZoneInfo(policy.timezone)).strftime("%H:%M:%S")} · {mode_label}', role=MessageRole.USER)
     query_description = '查询待处置、处置中且未加白或部分加白的 XDR 事件，并关联分析。'
-    await emit_message(session.id, '本轮安全运营监测开始。' + query_description + ('先处理此前收到的回信，再查询新事件并逐条邮件通知责任人。' if automatic_enabled else '邮件跟进未启用，本轮只查询分析。'), message_id=message_id, parent_id=trigger_message.id, agent=agent_name)
+    device_description = '监测设备：' + '、'.join(policy.device_names.get(device, device) for device in policy.devices) + '。'
+    await emit_message(session.id, '本轮安全运营监测开始。' + device_description + query_description + ('先处理此前收到的回信，再查询新事件并按设备逐条通知对应责任人。' if automatic_enabled else '邮件跟进未启用，本轮只查询分析。'), message_id=message_id, parent_id=trigger_message.id, agent=agent_name)
     sequence = (await rows('SELECT sequence FROM monitor_attempts WHERE id=?', (attempt_id,)))[0]['sequence']
     from flocks.session.core.status import SessionStatus, SessionStatusBusy, SessionStatusIdle
     SessionStatus.set(session.id, SessionStatusBusy())
@@ -194,6 +195,7 @@ async def run(execution, policy, adapter_factory=XdrAdapter):
                     events = await query_device(adapter, device, start, end, recorder)
                 async with connection() as db:
                     for event in events:
+                        event['device_name'] = policy.device_names.get(device, device)
                         event['investigationWindow'] = {'start': max(start, end-86400), 'end': end}
                         await investigation.enqueue(db, policy, event, started.isoformat())
                         await db.execute('INSERT INTO monitor_observations VALUES(?,?,?)', (attempt_id, event['key'], encode(event)))
@@ -201,7 +203,7 @@ async def run(execution, policy, adapter_factory=XdrAdapter):
                                          (policy.owner, policy.scope, device, end))
                 observed.extend(events)
             except ContractError as exc:
-                errors.append(str(exc))
+                errors.append(f"{policy.device_names.get(device, device)}：{exc}")
                 query_errors += 1
         current_events = {event['key']: event for event in observed}
         resumed = []
@@ -350,7 +352,7 @@ async def dispatch(execution, scheduler, *, adapter_factory=XdrAdapter):
     task = asyncio.current_task()
     _running[execution.id] = task
     try:
-        with unattended_scope(), monitoring_read_scope(policy.tool, policy.devices):
+        with unattended_scope(), monitoring_read_scope(policy.tool, policy.devices, policy.device_tools):
             manager = get_background_manager()
             async def runner():
                 return await run(execution, policy, adapter_factory)

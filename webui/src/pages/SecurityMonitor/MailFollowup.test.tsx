@@ -1,16 +1,13 @@
-import {
-  act,
-  fireEvent,
-  render,
-  screen,
-  waitFor,
-  within,
-} from "@testing-library/react";
+import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import { beforeEach, expect, it, vi } from "vitest";
-import MailFollowup, { MailSettings } from "./MailFollowup";
+import { MemoryRouter } from "react-router-dom";
+import MailFollowup from "./MailFollowup";
 
-const mocks = vi.hoisted(() => ({ mail: vi.fn(), saveMail: vi.fn() }));
-vi.mock("@/api/securityMonitoring", () => ({ monitoringApi: mocks }));
+const mocks = vi.hoisted(() => ({ mail: vi.fn() }));
+vi.mock("@/api/securityMonitoring", async (importOriginal) => ({
+  ...(await importOriginal<object>()),
+  monitoringApi: mocks,
+}));
 const data = {
   settings: {
     enabled: true,
@@ -28,7 +25,13 @@ const data = {
       created_at: "2026-09-25T00:00:00Z",
       subject: "告警通知",
       body: "一条告警",
-      event: { id: "event", name: "待跟进告警", host: "fixture" },
+      event: {
+        id: "event",
+        name: "待跟进告警",
+        host: "fixture",
+        device: "device-a",
+        device_name: "总部 XDR",
+      },
       items: [],
     },
   ],
@@ -53,13 +56,18 @@ beforeEach(() => {
 });
 
 it("lists sent notices without exposing subjects or bodies until details are opened", async () => {
-  render(<MailFollowup />);
+  render(
+    <MemoryRouter>
+      <MailFollowup />
+    </MemoryRouter>,
+  );
   expect(await screen.findByText("待跟进告警")).toBeInTheDocument();
   expect(mocks.mail).toHaveBeenCalledWith(0, "sent");
   expect(
     screen.getByRole("columnheader", { name: "关联事件 / ID" }),
   ).toBeInTheDocument();
   expect(screen.getByText("event")).toBeInTheDocument();
+  expect(screen.getByText("总部 XDR")).toBeInTheDocument();
   expect(
     screen.getByText(/邮件已发送或收到回复均不代表处置完成/),
   ).toBeInTheDocument();
@@ -70,6 +78,7 @@ it("lists sent notices without exposing subjects or bodies until details are ope
   const dialog = screen.getByRole("dialog", { name: "发信详情" });
   expect(within(dialog).getByText("告警通知")).toBeInTheDocument();
   expect(within(dialog).getByText("一条告警")).toBeInTheDocument();
+  expect(within(dialog).getByText("总部 XDR")).toBeInTheDocument();
   fireEvent.keyDown(document, { key: "Escape" });
   expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
 });
@@ -100,7 +109,11 @@ it("filters every unconfirmed notice and orders sent records newest first", asyn
       ],
     }),
   );
-  render(<MailFollowup />);
+  render(
+    <MemoryRouter>
+      <MailFollowup />
+    </MemoryRouter>,
+  );
   await screen.findByText("最新告警");
   expect(screen.queryByText(/隐藏-/)).not.toBeInTheDocument();
   expect(screen.queryByText(/待发送/)).not.toBeInTheDocument();
@@ -112,7 +125,11 @@ it("filters every unconfirmed notice and orders sent records newest first", asyn
 });
 
 it("keeps unmatched replies visible and shows their subject and body only in details", async () => {
-  render(<MailFollowup />);
+  render(
+    <MemoryRouter>
+      <MailFollowup />
+    </MemoryRouter>,
+  );
   fireEvent.click(await screen.findByRole("tab", { name: "回信记录" }));
   expect(await screen.findByText("待关联")).toBeInTheDocument();
   expect(mocks.mail).toHaveBeenLastCalledWith(0, "received");
@@ -129,42 +146,6 @@ it("keeps unmatched replies visible and shows their subject and body only in det
   ).toBeInTheDocument();
 });
 
-it("saves recipient settings and closes after the refreshed state", async () => {
-  const close = vi.fn(),
-    refresh = vi.fn().mockResolvedValue(undefined);
-  mocks.saveMail.mockResolvedValue({});
-  render(<MailSettings close={close} refresh={refresh} />);
-  fireEvent.change(await screen.findByLabelText("责任人邮箱"), {
-    target: { value: "new@example.com" },
-  });
-  fireEvent.click(screen.getByRole("button", { name: "保存配置" }));
-  await waitFor(() => expect(close).toHaveBeenCalledTimes(1));
-  expect(mocks.saveMail).toHaveBeenCalledWith({
-    enabled: true,
-    recipient_email: "new@example.com",
-    responsible_name: "值班",
-  });
-  expect(refresh).toHaveBeenCalledTimes(1);
-});
-it.each([
-  [
-    { error: "HTTPException", message: "请先连接 Flocks 邮件通道" },
-    "请先连接 Flocks 邮件通道",
-  ],
-  [{ detail: "请先连接 Flocks 邮件通道" }, "请先连接 Flocks 邮件通道"],
-  [{ message: { invalid: true }, detail: [] }, "邮件配置保存失败"],
-])(
-  "keeps configuration open and displays the server error %j",
-  async (errorData, expected) => {
-    mocks.saveMail.mockRejectedValue({ response: { data: errorData } });
-    const close = vi.fn();
-    render(<MailSettings close={close} refresh={vi.fn()} />);
-    fireEvent.click(await screen.findByRole("button", { name: "保存配置" }));
-    expect(await screen.findByRole("alert")).toHaveTextContent(expected);
-    expect(close).not.toHaveBeenCalled();
-  },
-);
-
 it("shows the related alert and verified state in reply rows while preserving details", async () => {
   mocks.mail.mockResolvedValue({
     data: {
@@ -179,6 +160,8 @@ it("shows the related alert and verified state in reply rows while preserving de
               name: "待跟进告警",
               state: "verified",
               target: 40,
+              device: "device-b",
+              device_name: "分部 XDR",
             },
           ],
           result: {
@@ -195,7 +178,11 @@ it("shows the related alert and verified state in reply rows while preserving de
       ],
     },
   });
-  render(<MailFollowup />);
+  render(
+    <MemoryRouter>
+      <MailFollowup />
+    </MemoryRouter>,
+  );
   fireEvent.click(await screen.findByRole("tab", { name: "回信记录" }));
   expect(await screen.findByText("目标状态已回查确认")).toBeInTheDocument();
   expect(screen.getByText("待跟进告警")).toBeInTheDocument();
@@ -203,11 +190,18 @@ it("shows the related alert and verified state in reply rows while preserving de
   expect(screen.queryByText(/负责人明确确认已清理/)).not.toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: "查看回信详情：reply" }));
   expect(screen.getByText("解读：负责人明确确认已清理")).toBeInTheDocument();
+  expect(
+    within(screen.getByRole("dialog")).getByText("来源设备：分部 XDR"),
+  ).toBeInTheDocument();
 });
 
 it("surfaces unsupported mail without hiding normal follow-up records", async () => {
   mocks.mail.mockResolvedValue({ data: { ...data, unparsed_count: 2 } });
-  render(<MailFollowup />);
+  render(
+    <MemoryRouter>
+      <MailFollowup />
+    </MemoryRouter>,
+  );
   expect(await screen.findByRole("alert")).toHaveTextContent(
     "2 封邮件未能解析",
   );
@@ -218,7 +212,11 @@ it("describes the relaxed authentication risk without calling it development sam
   mocks.mail.mockResolvedValue({
     data: { ...data, sender_verification_required: false },
   });
-  render(<MailSettings close={vi.fn()} refresh={vi.fn()} />);
+  render(
+    <MemoryRouter>
+      <MailFollowup />
+    </MemoryRouter>,
+  );
   expect(await screen.findByText(/回信身份认证暂时放宽/)).toBeInTheDocument();
   expect(screen.getByText(/伪造回信触发状态标记的风险/)).toBeInTheDocument();
   expect(screen.queryByText(/开发联调/)).not.toBeInTheDocument();
@@ -241,7 +239,11 @@ it("explains historically unverified feedback inside the detail without claiming
       ],
     },
   });
-  render(<MailFollowup />);
+  render(
+    <MemoryRouter>
+      <MailFollowup />
+    </MemoryRouter>,
+  );
   fireEvent.click(await screen.findByRole("tab", { name: "回信记录" }));
   fireEvent.click(
     await screen.findByRole("button", { name: "查看回信详情：reply" }),
@@ -261,7 +263,11 @@ it("paginates the selected record type and resets to the first page on a tab swi
   mocks.mail.mockImplementation((offset: number, tab: string) =>
     Promise.resolve(response({ has_more: tab === "sent" && offset === 0 })),
   );
-  render(<MailFollowup />);
+  render(
+    <MemoryRouter>
+      <MailFollowup />
+    </MemoryRouter>,
+  );
   const next = await screen.findByRole("button", { name: "下一页" });
   fireEvent.click(next);
   expect(await screen.findByText("第 2 页")).toBeInTheDocument();
@@ -286,7 +292,11 @@ it("discards a late response from the previous tab instead of replacing current 
           }),
         ),
   );
-  render(<MailFollowup />);
+  render(
+    <MemoryRouter>
+      <MailFollowup />
+    </MemoryRouter>,
+  );
   fireEvent.click(screen.getByRole("tab", { name: "回信记录" }));
   expect(await screen.findByText("latest@example.com")).toBeInTheDocument();
   await act(async () => {
@@ -297,7 +307,11 @@ it("discards a late response from the previous tab instead of replacing current 
 });
 
 it("refreshes an open detail after a new processing state arrives", async () => {
-  render(<MailFollowup />);
+  render(
+    <MemoryRouter>
+      <MailFollowup />
+    </MemoryRouter>,
+  );
   fireEvent.click(
     await screen.findByRole("button", { name: "查看发信详情：event" }),
   );
@@ -321,4 +335,17 @@ it("refreshes an open detail after a new processing state arrives", async () => 
   expect(
     within(screen.getByRole("dialog")).getAllByText("目标状态已回查确认"),
   ).toHaveLength(2);
+});
+
+it("links mail configuration to the shared full-page configuration", async () => {
+  render(
+    <MemoryRouter>
+      <MailFollowup />
+    </MemoryRouter>,
+  );
+  expect(await screen.findByRole("link", { name: "监测配置" })).toHaveAttribute(
+    "href",
+    "/suites/host-security-monitor/configuration",
+  );
+  expect(screen.queryByLabelText("责任人邮箱")).not.toBeInTheDocument();
 });

@@ -19,7 +19,8 @@ def step_purpose(name, params):
     """Explain the actual requested operation, never invent model reasoning."""
     event = f"事件 {label(params['event'], limit=100)}：" if params.get('event') else ''
     if name == '查询 XDR 事件':
-        return f"查询第 {label(params.get('page_num'), '1')} 页待处置、处置中且未加白或部分加白的事件，核对分页完整性与重复记录。"
+        source = f"从设备「{label(params['device_name'])}」" if params.get('device_name') else ''
+        return source + f"查询第 {label(params.get('page_num'), '1')} 页待处置、处置中且未加白或部分加白的事件，核对分页完整性与重复记录。"
     if name == '确认数据源与协作能力':
         return event + '检查本项目已接入且允许使用的查询工具、设备和安全协作智能体。'
     if name in ('监测运营智能体：选择下一步', '协作智能体分析'):
@@ -66,7 +67,8 @@ def detail_lines(lines, total):
 
 
 def event_label(event):
-    return f"{label(event.get('name'), '名称未提供')}（ID：{label(event.get('uuId') or event.get('id'), limit=100)}）"
+    source = f"设备「{label(event['device_name'])}」· " if event.get('device_name') else ''
+    return source + f"{label(event.get('name'), '名称未提供')}（ID：{label(event.get('uuId') or event.get('id'), limit=100)}）"
 
 
 def incident_type(event):

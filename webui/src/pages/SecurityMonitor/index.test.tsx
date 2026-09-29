@@ -2,7 +2,7 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import { MemoryRouter, useLocation } from 'react-router-dom';
 import { beforeEach, expect, it, vi } from 'vitest';
 import SecurityMonitor from './index';
-const mocks = vi.hoisted(() => ({ overview: vi.fn(), report: vi.fn(), start: vi.fn(), pause: vi.fn(), diagnostics: vi.fn(), setInvestigationEngine: vi.fn(), subscription: null as any }));
+const mocks = vi.hoisted(() => ({ overview: vi.fn(), report: vi.fn(), start: vi.fn(), pause: vi.fn(), diagnostics: vi.fn(), configuration: vi.fn(), saveConfiguration: vi.fn(), setInvestigationEngine: vi.fn(), subscription: null as any }));
 vi.mock('@/api/securityMonitoring', async importOriginal => ({ ...(await importOriginal<any>()), monitoringApi: mocks }));
 vi.mock('@/hooks/useSSE', () => ({ useSSE: (options: any) => { mocks.subscription = options; return {}; } }));
 vi.mock('@/components/common/SessionChat', () => ({ default: ({ sessionId, hideInput, live }: any) => <div data-testid="native-chat">{sessionId} {hideInput && 'readonly'} {live && 'live'}</div> }));
@@ -404,4 +404,39 @@ it('orders dashboard round rows and trend markers newest first even for ascendin
  expect(rows[2]).toHaveTextContent('旧记录');
  const trend = screen.getByLabelText('实际轮次状态');
  expect(within(trend).getAllByRole('button')[0].title).toContain('10:00:00');
+});
+
+
+it('opens the full configuration page from the compact menu without starting monitoring', async () => {
+ mocks.configuration.mockResolvedValue({ data: { enabled: false, running: false, targets: [], devices: [], sender_verification_required: true } });
+ function RouteObserver() { return <output data-testid="route">{useLocation().pathname}</output>; }
+ render(<MemoryRouter initialEntries={['/suites/host-security-monitor/session']}><SecurityMonitor /><RouteObserver /></MemoryRouter>);
+ await screen.findByTestId('native-chat');
+ fireEvent.click(screen.getByLabelText('更多监测功能'));
+ fireEvent.click(screen.getByRole('link', { name: '监测配置' }));
+ expect(await screen.findByRole('heading', { name: '监测配置' })).toBeInTheDocument();
+ expect(screen.getByTestId('route')).toHaveTextContent('/suites/host-security-monitor/configuration');
+ expect(screen.queryByTestId('native-chat')).not.toBeInTheDocument();
+ expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+ expect(mocks.start).not.toHaveBeenCalled();
+ expect(mocks.saveConfiguration).not.toHaveBeenCalled();
+});
+
+it('loads configuration directly even if the overview cannot be read', async () => {
+ mocks.overview.mockRejectedValue(new Error('overview unavailable'));
+ mocks.configuration.mockResolvedValue({ data: { enabled: false, running: false, targets: [], devices: [], sender_verification_required: true } });
+ render(<MemoryRouter initialEntries={['/suites/host-security-monitor/configuration']}><SecurityMonitor /></MemoryRouter>);
+ expect(await screen.findByRole('button', { name: '保存配置' })).toBeDisabled();
+ expect(screen.getByText(/暂无已登记的 XDR 设备/)).toBeInTheDocument();
+ expect(mocks.start).not.toHaveBeenCalled();
+});
+
+it('shows start failures on configuration without leaving the configuration page', async () => {
+ mocks.overview.mockResolvedValue({ data: { ...data, installation: { ...data.installation, status: 'disabled' } } });
+ mocks.configuration.mockResolvedValue({ data: { enabled: false, running: false, targets: [], devices: [], sender_verification_required: true } });
+ mocks.start.mockRejectedValue({ response: { data: { message: '所选设备不可用' } } });
+ render(<MemoryRouter initialEntries={['/suites/host-security-monitor/configuration']}><SecurityMonitor /></MemoryRouter>);
+ fireEvent.click(await screen.findByRole('button', { name: '启动监测' }));
+ expect(await screen.findByRole('alert')).toHaveTextContent('所选设备不可用');
+ expect(screen.getByRole('heading', { name: '监测配置' })).toBeInTheDocument();
 });

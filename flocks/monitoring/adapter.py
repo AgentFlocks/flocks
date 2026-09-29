@@ -19,36 +19,52 @@ class ContractError(RuntimeError):
     pass
 
 
-async def discover():
+async def device_catalog():
+    """List every registered XDR by stable ID, including unavailable targets."""
     from flocks.tool.device.store import list_devices, get_device_tool_enabled
     await ToolRegistry.init_async()
-    candidates = []
-    enabled_devices = 0
-    configured_devices = 0
+    catalog = []
+    tools = ToolRegistry.list_tools()
     for device in await list_devices():
-        if not device.enabled or device.service_id != 'sangfor_xdr':
+        if device.service_id != 'sangfor_xdr':
             continue
-        enabled_devices += 1
+        entry = {'id': device.id, 'name': device.name, 'available': False, 'reason': None, 'tool': None}
+        catalog.append(entry)
+        if not device.enabled:
+            entry['reason'] = 'XDR 接入已停用，请先在设备接入中启用'
+            continue
         if not all(device.fields_set.get(key) for key in ('host', 'auth_code')):
+            entry['reason'] = 'XDR 接入缺少地址或认证信息，请在设备接入中补全'
             continue
-        configured_devices += 1
-        for info in ToolRegistry.list_tools():
-            if (info.name.startswith('sangfor_xdr_incidents') and info.enabled
+        candidates = []
+        for info in tools:
+            if (info.name.split('__')[0] == 'sangfor_xdr_incidents' and info.enabled
                     and info.source == 'device' and info.provider == device.storage_key
                     and not info.requires_confirmation
                     and await get_device_tool_enabled(device.id, info.name) is not False):
                 schema = info.get_schema().to_json_schema()
                 properties = schema.get('properties', {})
                 if {'action', 'start_time', 'end_time', 'page_num', 'page_size', 'uuid', 'entity_type', *QUERY_FIELDS} <= properties.keys():
-                    candidates.append((device.id, info.name))
+                    candidates.append(info.name)
+        if len(candidates) == 1:
+            entry.update(available=True, tool=candidates[0])
+        elif candidates:
+            entry['reason'] = 'XDR 事件查询工具存在多个匹配项，请检查设备工具绑定'
+        else:
+            entry['reason'] = 'XDR 事件查询工具不可用，请更新 XDR API 工具并检查筛选字段、工具启用状态及确认要求'
+    return catalog
+
+
+async def discover():
+    catalog = await device_catalog()
+    candidates = [entry for entry in catalog if entry['available']]
     if len(candidates) != 1:
-        reason = ('未找到已启用的 XDR 接入，请先在设备接入中添加并启用 XDR' if not enabled_devices else
-                  'XDR 接入缺少地址或认证信息，请在设备接入中补全' if not configured_devices else
-                  '存在多个可用 XDR 接入，当前仅支持唯一监测目标' if len(candidates) > 1 else
-                  'XDR 事件查询工具不可用，请更新 XDR API 工具并检查筛选字段、工具启用状态及确认要求')
+        reason = ('请在监测配置中选择需要监测的 XDR 设备' if len(candidates) > 1 else
+                  catalog[0]['reason'] if catalog else
+                  '未找到已启用的 XDR 接入，请先在设备接入中添加并启用 XDR')
         return [], None, reason
-    device, tool = candidates[0]
-    return [device], tool, None
+    device = candidates[0]
+    return [device['id']], device['tool'], None
 
 
 class XdrAdapter:
@@ -58,7 +74,7 @@ class XdrAdapter:
         self.policy, self.session_id = policy, session_id
 
     async def call(self, device, params, message_id):
-        with monitoring_call_scope(self.policy.tool, device, params), diag.tool_call(), diag.span('tool.execute', device=diag.opaque(device),
+        with monitoring_call_scope(self.policy.tool_for(device), device, params), diag.tool_call(), diag.span('tool.execute', device=diag.opaque(device),
                                         action=params.get('action') if params.get('action') in self.allowed_actions else 'other'):
             return await self._call(device, params, message_id)
 
@@ -66,7 +82,8 @@ class XdrAdapter:
         if params.get('action') not in self.allowed_actions or device not in self.policy.devices:
             diag.event('adapter.failure', failure=True, reason='permission')
             raise PermissionError('Monitoring permits only bound read-only XDR actions')
-        tool = ToolRegistry.get(self.policy.tool)
+        tool_name = self.policy.tool_for(device)
+        tool = ToolRegistry.get(tool_name)
         if tool is None or not tool.info.enabled or tool.info.requires_confirmation:
             diag.event('adapter.failure', failure=True, reason='unavailable')
             raise ContractError('只读查询能力不可用或需要确认')
@@ -77,11 +94,11 @@ class XdrAdapter:
             if 'severities' not in properties.get('api_params', {}).get('properties', {}):
                 raise ContractError('请更新 XDR API 工具：联调抽样需要事件等级筛选能力')
         ctx = ToolContext(session_id=self.session_id, message_id=message_id, agent='rex')
-        capture = OutputCapture(self.policy.tool)
+        capture = OutputCapture(tool_name)
         ctx._output_capture = capture
         try:
             result = await ToolRegistry.execute(
-                self.policy.tool,
+                tool_name,
                 ctx=ctx,
                 device_id=device, **params,
             )

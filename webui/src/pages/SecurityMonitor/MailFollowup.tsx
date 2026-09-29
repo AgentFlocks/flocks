@@ -13,9 +13,15 @@ import {
   Mail,
   RefreshCw,
   ShieldAlert,
+  Settings2,
   X,
 } from "lucide-react";
-import { monitoringApi, type MailHistory } from "@/api/securityMonitoring";
+import { Link } from "react-router-dom";
+import {
+  monitoringApi,
+  MONITOR_PATH,
+  type MailHistory,
+} from "@/api/securityMonitoring";
 
 type Notice = MailHistory["notices"][number] & { sent_at?: string | null };
 type Reply = MailHistory["replies"][number];
@@ -45,11 +51,9 @@ const date = (s: string) =>
   new Date(s).toLocaleString("zh-CN", { hour12: false });
 const button =
   "inline-flex items-center justify-center gap-1.5 rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-600 transition-colors hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-40 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-300 dark:hover:bg-gray-800";
-const field =
-  "mt-2 w-full rounded-lg border border-gray-200 bg-white px-3 py-2.5 text-sm outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100 dark:border-gray-700 dark:bg-gray-900 dark:focus:ring-blue-900";
 const cell = "px-4 py-4 align-top";
 
-function AuthenticationNotice() {
+export function AuthenticationNotice() {
   return (
     <div className="flex items-start gap-2 rounded-lg bg-amber-50 px-3 py-2.5 text-xs leading-relaxed text-amber-800 dark:bg-amber-950/30 dark:text-amber-300">
       <ShieldAlert className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
@@ -138,7 +142,7 @@ export function Sheet({
           </h2>
           <button
             onClick={close}
-            aria-label={`关闭${title === "邮件跟进配置" ? "配置" : "详情"}`}
+            aria-label="关闭详情"
             className="rounded-lg p-2 text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-800"
           >
             <X className="h-5 w-5" />
@@ -147,154 +151,6 @@ export function Sheet({
         <div className="min-h-0 flex-1 overflow-auto p-6">{children}</div>
       </section>
     </div>
-  );
-}
-
-export function MailSettings({
-  close,
-  refresh,
-}: {
-  close: () => void;
-  refresh: () => Promise<void>;
-}) {
-  const [form, setForm] = useState<MailHistory["settings"] | null>(null);
-  const [busy, setBusy] = useState(false),
-    [error, setError] = useState("");
-  const [verificationRequired, setVerificationRequired] = useState(true);
-  useEffect(() => {
-    let live = true;
-    monitoringApi
-      .mail()
-      .then((r) => {
-        if (live) {
-          setForm({
-            enabled: !!r.data.settings.enabled,
-            recipient_email: r.data.settings.recipient_email,
-            responsible_name: r.data.settings.responsible_name,
-          });
-          setVerificationRequired(
-            r.data.sender_verification_required !== false,
-          );
-        }
-      })
-      .catch(() => {
-        if (live) setError("配置读取失败");
-      });
-    return () => {
-      live = false;
-    };
-  }, []);
-  async function save() {
-    if (!form || busy) return;
-    setBusy(true);
-    setError("");
-    try {
-      await monitoringApi.saveMail(form);
-      await refresh();
-      close();
-    } catch (e: unknown) {
-      const data = (
-        e as { response?: { data?: { message?: unknown; detail?: unknown } } }
-      )?.response?.data;
-      const message =
-        typeof data?.message === "string" ? data.message : data?.detail;
-      setError(
-        typeof message === "string" && message.trim()
-          ? message
-          : "邮件配置保存失败",
-      );
-    } finally {
-      setBusy(false);
-    }
-  }
-  return (
-    <Sheet title="邮件跟进配置" close={close}>
-      {!form && !error && (
-        <p role="status" className="text-sm text-gray-500">
-          正在读取配置…
-        </p>
-      )}
-      {form && (
-        <form
-          onSubmit={(e) => {
-            e.preventDefault();
-            void save();
-          }}
-          className="space-y-6"
-        >
-          <div>
-            <h3 className="font-medium text-gray-900 dark:text-gray-100">
-              告警责任人
-            </h3>
-            <p className="mt-1 text-sm text-gray-500">
-              告警通知发送至此邮箱，并关联责任人的处理反馈。
-            </p>
-          </div>
-          <label className="block text-sm font-medium">
-            责任人名称（可选）
-            <input
-              className={field}
-              value={form.responsible_name}
-              onChange={(e) =>
-                setForm({ ...form, responsible_name: e.target.value })
-              }
-              maxLength={80}
-            />
-          </label>
-          <label className="block text-sm font-medium">
-            责任人邮箱
-            <input
-              required={form.enabled}
-              type="email"
-              className={field}
-              value={form.recipient_email}
-              onChange={(e) =>
-                setForm({ ...form, recipient_email: e.target.value })
-              }
-            />
-          </label>
-          <label className="flex items-start gap-3 rounded-xl border border-gray-200 p-4 dark:border-gray-700">
-            <input
-              className="mt-1 accent-blue-600"
-              type="checkbox"
-              checked={form.enabled}
-              onChange={(e) => setForm({ ...form, enabled: e.target.checked })}
-            />
-            <span className="text-sm font-medium">
-              启用邮件通知及回信处置
-              <span className="mt-1 block text-xs font-normal leading-relaxed text-gray-500">
-                一条告警一封通知。回信先保存，下一轮解读并核对状态。
-              </span>
-            </span>
-          </label>
-          <div className="space-y-2 text-xs leading-relaxed text-gray-500">
-            <p>
-              复用 Flocks
-              已连接的邮件通道和已配置模型。暂停监测后停止自动发信和标记。
-            </p>
-            <p>
-              启用时检查通道连接和责任人收件范围。更换邮箱后，旧通知的回复保留待人工核对。邮件通道自身的访问控制仍然有效。
-            </p>
-          </div>
-          {!verificationRequired && <AuthenticationNotice />}
-          <button
-            disabled={busy}
-            className="inline-flex w-full items-center justify-center rounded-lg bg-blue-600 px-4 py-2.5 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-40"
-            type="submit"
-          >
-            {busy ? "正在保存…" : "保存配置"}
-          </button>
-        </form>
-      )}
-      {error && (
-        <p
-          role="alert"
-          className="mt-4 rounded-lg bg-red-50 p-3 text-sm text-red-700 dark:bg-red-950/40 dark:text-red-300"
-        >
-          {error}
-        </p>
-      )}
-    </Sheet>
   );
 }
 
@@ -331,6 +187,11 @@ function NoticeDetail({ notice }: { notice: Notice }) {
             </span>
           </DetailField>
         </div>
+        {(notice.event.device_name || notice.event.device) && (
+          <DetailField title="来源设备">
+            {notice.event.device_name || notice.event.device}
+          </DetailField>
+        )}
         <DetailField title="关联主机">
           {notice.event.host || "未知"}
         </DetailField>
@@ -431,6 +292,11 @@ function ReplyDetail({ reply }: { reply: Reply }) {
                 className="rounded-lg bg-gray-50 p-4 text-sm dark:bg-gray-800"
               >
                 <p className="font-medium">{t.name}</p>
+                {(t.device_name || t.device) && (
+                  <p className="mt-1 text-xs text-gray-500">
+                    来源设备：{t.device_name || t.device}
+                  </p>
+                )}
                 <p className="my-2 break-all font-mono text-xs text-gray-500">
                   {t.event_id}
                 </p>
@@ -555,17 +421,23 @@ export default function MailFollowup() {
             跨日期查看已发送通知与收到的回信。邮件已发送或收到回复均不代表处置完成。
           </p>
         </div>
-        <button
-          className={`${button} shrink-0`}
-          disabled={loading}
-          onClick={() => void refresh()}
-        >
-          <RefreshCw
-            className={`h-3.5 w-3.5 ${loading ? "animate-spin" : ""}`}
-            aria-hidden="true"
-          />
-          刷新记录
-        </button>
+        <div className="flex shrink-0 flex-wrap justify-end gap-2">
+          <Link className={button} to={`${MONITOR_PATH}/configuration`}>
+            <Settings2 size={15} />
+            监测配置
+          </Link>
+          <button
+            className={`${button} shrink-0`}
+            disabled={loading}
+            onClick={() => void refresh()}
+          >
+            <RefreshCw
+              className={`h-3.5 w-3.5 ${loading ? "animate-spin" : ""}`}
+              aria-hidden="true"
+            />
+            刷新记录
+          </button>
+        </div>
       </div>
       {error && (
         <p
@@ -685,6 +557,11 @@ export default function MailFollowup() {
                             <p className="mt-1 break-all font-mono text-xs text-gray-500">
                               {n.event.id}
                             </p>
+                            {(n.event.device_name || n.event.device) && (
+                              <p className="mt-1 text-xs text-gray-500">
+                                {n.event.device_name || n.event.device}
+                              </p>
+                            )}
                           </td>
                           <td
                             className={`${cell} break-words text-xs text-gray-600 dark:text-gray-400`}
@@ -739,6 +616,11 @@ export default function MailFollowup() {
                                   <p className="mt-1 break-all font-mono text-xs text-gray-500">
                                     {t.event_id}
                                   </p>
+                                  {(t.device_name || t.device) && (
+                                    <p className="mt-1 text-xs text-gray-500">
+                                      {t.device_name || t.device}
+                                    </p>
+                                  )}
                                 </div>
                               ))
                             ) : (

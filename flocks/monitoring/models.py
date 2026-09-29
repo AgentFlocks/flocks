@@ -25,6 +25,13 @@ class MonitoringPolicy(BaseModel):
     timezone: str = 'Asia/Shanghai'
     devices: list[str] = Field(default_factory=list)
     tool: str = 'sangfor_xdr_incidents'
+    targets_configured: bool = False
+    device_tools: dict[str, str] = Field(default_factory=dict)
+    device_names: dict[str, str] = Field(default_factory=dict)
+
+    def tool_for(self, device: str) -> str:
+        return self.device_tools.get(device, self.tool)
+
     timeout_seconds: int = Field(default=1200, ge=1, le=1800)
     investigation_engine: Literal['agent-v1'] = 'agent-v1'
 

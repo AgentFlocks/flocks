@@ -80,9 +80,10 @@ def automatic_mark_scope(tool: str, device: str, event_id: str, target: int, ses
 
 
 @contextmanager
-def monitoring_read_scope(tool: str, devices: list[str]):
+def monitoring_read_scope(tool: str, devices: list[str], device_tools: dict[str, str] | None = None):
     # A child may narrow its own inputs, but cannot replace its parent's scope.
-    token = _read_only.set(_read_only.get() or {'tool': tool, 'devices': tuple(devices)})
+    token = _read_only.set(_read_only.get() or {'tool': tool, 'devices': tuple(devices),
+                                              'device_tools': dict(device_tools or {})})
     try:
         yield
     finally:
@@ -119,6 +120,8 @@ async def require_monitor_read(tool: str, params: dict, session_id: str | None =
                  and grant[4] == session_id and params.get('action') == 'update_status'
                  and params.get('uuids') == [grant[2]] and type(params.get('deal_status')) is int
                  and params.get('deal_status') == grant[3])
-    if (tool != policy['tool'] or (params.get('action') not in {'list', 'get_entities', 'get_proof'} and not automatic)
-            or (resolved_device or params.get('device_id')) not in policy['devices']):
+    device = resolved_device or params.get('device_id')
+    expected_tool = (policy.get('device_tools') or {}).get(device, policy['tool'])
+    if (tool != expected_tool or (params.get('action') not in {'list', 'get_entities', 'get_proof'} and not automatic)
+            or device not in policy['devices']):
         raise PermissionError('Monitoring execution permits only bound XDR read-only actions')

@@ -78,7 +78,7 @@ async def discover(policy, *, include_unbound=False):
                       and t.provider == device.storage_key and not t.requires_confirmation]
         for info in candidates:
             kind, skill = None, ''
-            if device.id in policy.devices and info.name == policy.tool:
+            if device.id in policy.devices and info.name == policy.tool_for(device.id):
                 kind = 'xdr'
             elif device.service_id == 'tdp_api' and info.name.split('__')[0] == 'tdp_log_search':
                 try:

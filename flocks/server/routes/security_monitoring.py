@@ -12,10 +12,12 @@ from flocks.server.auth import require_user
 from flocks.monitoring.models import COMPONENT_ID
 from flocks.monitoring.store import rows
 from flocks.monitoring.reports import snapshot, newest_timeline_content
-
-router = APIRouter(prefix='/monitoring/host-security-monitor')
+from flocks.monitoring.mailflow import MailSettingsRequest
+from flocks.monitoring.configuration import ConfigurationRequest
 from flocks.monitoring.disposition import DispositionRequest
 from flocks.monitoring.automatic import AutomaticRequest
+
+router = APIRouter(prefix='/monitoring/host-security-monitor')
 
 
 async def _disposition_action(action):
@@ -91,7 +93,33 @@ async def _control(action, owner):
     return await snapshot(owner, COMPONENT_ID, await resolve_day(owner))
 
 
-from flocks.monitoring.mailflow import MailSettingsRequest
+@router.get('/configuration')
+async def monitoring_configuration(user=Depends(require_user)):
+    from flocks.monitoring.configuration import snapshot
+    try:
+        return await snapshot(user.id)
+    except FileNotFoundError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except Exception:
+        raise HTTPException(503, '监测配置暂时无法读取，请稍后重试') from None
+
+
+@router.put('/configuration')
+async def save_monitoring_configuration(body: ConfigurationRequest, user=Depends(require_user)):
+    from flocks.monitoring.configuration import configure
+    try:
+        result = await configure(user.id, body)
+    except FileNotFoundError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except Exception:
+        raise HTTPException(503, '监测配置保存未完成，请刷新配置后核对') from None
+    from flocks.server.routes.event import publish_event
+    await publish_event('monitor.control.changed', {'owner': user.id})
+    return result
 
 
 @router.get('/mail')

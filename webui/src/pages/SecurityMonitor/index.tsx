@@ -1,4 +1,5 @@
-import MailFollowup, { MailSettings, Sheet } from './MailFollowup';
+import MailFollowup, { Sheet } from './MailFollowup';
+import Configuration from './Configuration';
 import RoundTimeline from './RoundTimeline';
 import { newestRunsFirst, roundBusinessConclusion, roundFactSummary, roundRecoverySummary } from './roundSummary';
 import { StreamingMarkdown } from '@/components/common/StreamingMarkdown';
@@ -29,7 +30,7 @@ function RunBadge({ status }: { status: string }) {
 
 export default function SecurityMonitor() {
   const location = useLocation(), navigate = useNavigate();
-  const view = location.pathname.endsWith('/mail') ? 'mail' : location.pathname.endsWith('/dashboard') ? 'dashboard' : location.pathname.endsWith('/report') ? 'report' : 'session';
+  const view = location.pathname.endsWith('/configuration') ? 'configuration' : location.pathname.endsWith('/mail') ? 'mail' : location.pathname.endsWith('/dashboard') ? 'dashboard' : location.pathname.endsWith('/report') ? 'report' : 'session';
   const [day, setDay] = useState('');
   const [data, setData] = useState<MonitorSnapshot | null>(null);
   const [error, setError] = useState('');
@@ -39,7 +40,7 @@ export default function SecurityMonitor() {
   const [reportError, setReportError] = useState('');
   const [reportRetry, setReportRetry] = useState(0);
   const [reportKind, setReportKind] = useState<'timeline' | 'summary'>('timeline');
-  const [showSettings, setShowSettings] = useState(false);
+  const [configurationRevision, setConfigurationRevision] = useState(0);
   const [drawer, setDrawer] = useState<'history' | 'health' | null>(null);
   const moreRef = useRef<HTMLDetailsElement>(null);
   const closeMore = () => { if (moreRef.current) moreRef.current.open = false; };
@@ -79,6 +80,7 @@ export default function SecurityMonitor() {
       setControlError(typeof detail === 'string' ? detail : '监测操作未完成，请刷新状态后重试。');
     } finally {
       await refresh();
+      setConfigurationRevision(value => value + 1);
       controlPending.current = false; setControlBusy(false);
     }
   };
@@ -147,7 +149,7 @@ export default function SecurityMonitor() {
               <div className="my-1 border-t border-sky-100 dark:border-slate-700" />
               {workbenchLink && <Link to={workbenchLink} onClick={closeMore} className={menuAction}><ArrowUpRight size={15} />在工作台打开</Link>}
               <button className={menuAction} onClick={() => { closeMore(); setDrawer('history'); }}><History size={15} />查看历史日期</button>
-              <button className={menuAction} onClick={() => { closeMore(); setShowSettings(true); }}><Settings2 size={15} />邮件配置</button>
+              <Link className={menuAction} to={`${MONITOR_PATH}/configuration`} onClick={closeMore} aria-current={view === 'configuration' ? 'page' : undefined}><Settings2 size={15} />监测配置</Link>
               <button className={menuAction} onClick={() => { closeMore(); navigate(`${MONITOR_PATH}/dashboard`); setDrawer('health'); }}><Activity size={15} />运行与邮件健康</button>
               <button disabled={exportBusy} onClick={() => void downloadDiagnostics()} className={`${menuAction} disabled:opacity-50`}><Download size={15} />{exportBusy ? '正在导出…' : '导出诊断日志'}</button>
               <button onClick={() => { closeMore(); void refresh(); setReportRetry(value => value + 1); }} className={menuAction}><RefreshCw size={15} />刷新</button>
@@ -159,11 +161,11 @@ export default function SecurityMonitor() {
     {view === 'dashboard' && chatNotice && <p role="alert" className="shrink-0 bg-sky-50 px-5 py-2 text-sm dark:bg-sky-950">{chatNotice}</p>}
     {view === 'dashboard' && error && <p role="alert" className="shrink-0 border-b border-slate-300 bg-white px-5 py-2 text-sm font-medium dark:bg-slate-900">{error}</p>}
     {view === 'dashboard' && exportError && <p role="alert" className="shrink-0 bg-sky-50 px-5 py-2 text-sm dark:bg-sky-950">{exportError}</p>}
-    {view === 'dashboard' && controlError && <p role="alert" className="shrink-0 border-l-4 border-slate-600 bg-white px-5 py-2 text-sm dark:bg-slate-900">{controlError}</p>}
+    {(view === 'dashboard' || view === 'configuration') && controlError && <p role="alert" className="shrink-0 border-l-4 border-slate-600 bg-white px-5 py-2 text-sm dark:bg-slate-900">{controlError}</p>}
     {view === 'dashboard' && controlMessage && <p role="status" className="sr-only">{controlMessage}</p>}
     {view === 'dashboard' && healthErrors.length > 0 && <div role="alert" className="flex shrink-0 items-center justify-between gap-3 border-b border-sky-200 bg-sky-50 px-5 py-2 text-xs dark:border-sky-900 dark:bg-sky-950"><span className="flex min-w-0 items-center gap-2"><CircleX size={14} className="shrink-0" /><span className="truncate">邮件通道异常：{healthErrors.join('；')}</span></span><button className="shrink-0 font-semibold underline" onClick={() => setDrawer('health')}>查看原因</button></div>}
     {historySelected && view === 'session' && <div className="flex shrink-0 items-center justify-between border-b border-sky-100 bg-sky-50 px-5 py-1.5 text-xs dark:border-sky-900 dark:bg-sky-950"><span>历史会话 · {day}</span><button className="font-medium underline" onClick={() => setDay('')}>回到今天</button></div>}
-    {!data ? <p className="p-6">正在加载监测事实…</p> : <>
+    {view === 'configuration' ? <Configuration refreshKey={configurationRevision} onChanged={refresh} /> : !data ? <p className="p-6">正在加载监测事实…</p> : <>
       {view === 'dashboard' && (!data.installation.installed || !data.installation.ready) ? <div className="mx-6 mt-4 rounded-lg border border-amber-300 p-4 text-sm">{data.installation.installed ? '已安装但未就绪' : '尚未安装'}：{data.installation.reason}。<Link className="ml-2 text-blue-600" to="/scenes/suites?workspace=host-security-monitor">管理场景</Link></div> : null}
       {view === 'mail' ? <MailFollowup /> : view === 'session' ? <div className="flex min-h-0 flex-1 flex-col" aria-label="监测动态对话">
         {data.sessionID ? <SessionChat sessionId={data.sessionID} hideInput monitoring={{ running: !!active, paused: !monitoringEnabled, historical: historySelected, hidePageNotices: true, onPageNotice: setChatNotice }} display={{ compact: false, showActions: false, showTimestamp: true, collapseIntermediateSteps: false, processGroupsDefaultOpen: true, processGroupsOpenWhileActive: true }} live className="min-h-0 flex-1" /> : <div className="m-auto max-w-sm px-6 py-12 text-center"><ShieldCheck size={32} className="mx-auto mb-4 text-[#168a5b]" /><h2 className="font-semibold">{historySelected ? '所选日期暂无监测对话' : '监测对话已准备好'}</h2><p className="mt-2 text-sm leading-6 text-slate-500">{historySelected ? '可以切换历史日期，或回到今天。' : '启动后，查询、调查、邮件跟进和本轮总结会在这里动态展开。'}</p></div>}
@@ -202,6 +204,5 @@ export default function SecurityMonitor() {
     {drawer && (drawer === 'history' || view === 'dashboard') && <Sheet title={drawer === 'history' ? '历史监测记录' : '运行与邮件健康'} close={() => setDrawer(null)}>
       {drawer === 'history' ? <div className="space-y-4"><p className="text-sm text-slate-500">按监测业务时区选择日期。后台的新轮次不会改变正在查看的历史记录。</p><label className="block text-sm font-medium">业务日期<input aria-label="业务日期" type="date" disabled={controlBusy} value={selectedDate} max={dateInZone(data?.timezone || 'Asia/Shanghai')} onChange={e => changeDate(e.target.value)} className="mt-2 block w-full rounded-lg border border-sky-200 bg-transparent px-3 py-2 dark:border-sky-900" /></label><button className={menuAction} onClick={() => { setDay(''); setDrawer(null); }}>回到今天</button></div> : <div className="space-y-5 text-sm"><div><p className="font-semibold">智能体调查</p><p className="mt-2 text-slate-500">每 10 分钟触发，同一监测串行执行；单轮上限 {Math.round((data?.roundTimeoutSeconds || 1200) / 60)} 分钟。忙碌时多次触发合并为一轮。</p></div>{data?.investigation && <div><p className="font-semibold">调查待办</p><p className="mt-2 leading-7 text-slate-500">待调查 {data.investigation.pending} · 延后续查 {data.investigation.deferred} · 等待系统恢复 {data.investigation.system_wait} · 待人工确认 {data.investigation.needs_review}</p>{data.investigation.earliest_retry_at && <p className="mt-1 text-xs text-slate-500">最早重试：{fmt(data.investigation.earliest_retry_at, data.timezone)}</p>}</div>}{data?.metrics.investigatedEvents !== undefined && <div><p className="font-semibold">有事件调查完成情况</p><p className="mt-2 text-slate-500">{data.metrics.investigationCompletedEvents || 0} / {data.metrics.investigatedEvents} 条 · {data.metrics.investigationCompletionRate == null ? '暂无有事件调查' : `${Math.round(data.metrics.investigationCompletionRate * 100)}%`}</p></div>}<div><p className="font-semibold">邮件跟进：{data?.mail?.enabled ? '已启用' : '未启用'}</p><p className="mt-2 text-slate-500">待处理回复 {data?.mail?.pending || 0} · 待确认 {data?.mail?.needsReview || 0}</p></div>{(['receive', 'send'] as const).map(direction => { const health = data?.mail?.health?.[direction]; const recovered = health?.state === 'healthy' && !!health.last_error_at && !!health.last_success_at && Date.parse(health.last_success_at) > Date.parse(health.last_error_at); return <div key={direction} className="rounded-xl border border-sky-100 bg-sky-50 p-4 dark:border-sky-900 dark:bg-sky-950"><h3 className="font-semibold">{direction === 'receive' ? '收信连接' : '发信连接'} · {({ healthy: '正常', unavailable: '不可用', unknown: '尚未确认', disabled: '未启用' } as Record<string, string>)[health?.state || 'unknown']}{recovered ? '（已恢复）' : ''}</h3><dl className="mt-3 space-y-2 text-xs"><div>{direction === 'send' && health?.last_success_stage === 'probe' ? '连接检查成功' : '最近成功'}：{fmt(health?.last_success_at || null, data?.timezone || 'Asia/Shanghai')}</div>{health?.last_error_at && <div>{recovered ? '上次异常（已恢复）' : '最近失败'}：{fmt(health.last_error_at, data?.timezone || 'Asia/Shanghai')} · {health.last_error_stage || health.stage || '阶段未知'} · {health.error_type || '原因未知'}</div>}{!!health?.consecutive_failures && <div>连续失败：{health.consecutive_failures} 次</div>}{health?.state !== 'healthy' && health?.next_retry_at && <div>下次重试：{fmt(health.next_retry_at, data?.timezone || 'Asia/Shanghai')}</div>}</dl></div>; })}{healthErrors.map((message, index) => <p key={index} className="font-medium">{message}</p>)}<Link className={menuAction} onClick={() => setDrawer(null)} to={`${MONITOR_PATH}/mail`}><Mail size={15} />查看邮件记录</Link></div>}
     </Sheet>}
-    {showSettings && <MailSettings close={() => setShowSettings(false)} refresh={refresh} />}
   </div>;
 }

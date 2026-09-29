@@ -24,6 +24,7 @@ CORE_CAPABILITIES.add('monitor.investigation.v1')
 CORE_CAPABILITIES.add('monitor.agent-component.v1')
 CORE_CAPABILITIES.add('monitor.production-investigation.v1')
 CORE_CAPABILITIES.add('monitor.reliable-investigation.v1')
+CORE_CAPABILITIES.add('monitor.multi-xdr.v1')
 
 
 def validate_manifest(manifest, package=None):
@@ -72,6 +73,16 @@ async def install(manifest):
         policy = MonitoringPolicy(owner=user.id, project=project.id, directory=str(directory),
                                   investigation_engine='agent-v1', timeout_seconds=1200,
                                   devices=devices, tool=tool or 'sangfor_xdr_incidents')
+        if old:
+            previous = MonitoringPolicy.model_validate_json(old[0]['policy'])
+            if previous.targets_configured and previous.project == project.id:
+                from .configuration import resolve_targets
+                policy = previous
+                reason = await resolve_targets(policy) or await unavailable_reason()
+            elif previous.project == project.id and previous.devices and devices != previous.devices:
+                # A new sole available device must never inherit the old owner mailbox.
+                policy = previous
+                reason = '原监测设备接入已变化，请在监测配置中确认设备与责任人对应关系'
         from .capabilities import discover as discover_investigation
         catalog, notes = await discover_investigation(policy, include_unbound=True)
         policy.correlation_devices = sorted({cap.device for cap in catalog if cap.kind != 'xdr'})
@@ -250,7 +261,14 @@ async def start_monitoring(owner):
         await write('UPDATE monitor_installations SET ready=0,reason=? WHERE owner=? AND scope=?', ('接入检查尚未完成，请重试启动', owner, COMPONENT_ID))
         from flocks.hub.catalog import load_manifest
         validate_manifest(load_manifest('component', COMPONENT_ID), Path(record.installPath))
-        devices, tool, reason = await discover()
+        if policy.targets_configured:
+            from .configuration import resolve_targets
+            reason = await resolve_targets(policy)
+            devices, tool = policy.devices, policy.tool
+        else:
+            devices, tool, reason = await discover()
+            if policy.devices and devices != policy.devices:
+                reason = reason or '原监测设备接入已变化，请在监测配置中确认设备与责任人对应关系'
         if not Path(policy.directory).is_dir():
             reason = '监测工作目录不可用，请恢复目录或重新安装场景'
         if reason:

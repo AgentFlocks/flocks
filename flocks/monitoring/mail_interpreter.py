@@ -108,8 +108,20 @@ def validate(result, payload, notices):
                     for x in [n['id'], json.loads(n['event'])['id'], *json.loads(n['event']).get('alertIds', [])])}
         direct = mentioned(current)
         contextual = mentioned(context)
-        if header_ids and (len(header_ids) != 1 or header_ids != {notice['id']} or direct - header_ids):
-            raise ValueError('邮件回复关联与正文目标冲突')
+        if header_ids:
+            # A shared incident ID on two XDRs is not a conflicting reference:
+            # an exact original Message-ID disambiguates it. Distinct notice or
+            # incident identifiers in the new reply still contradict that link.
+            selected_ids = {str(identifier) for identifier in identifiers}
+            conflicting = any(re.search(r'(?<![\w-])' + re.escape(str(identifier)) + r'(?![\w-])', current)
+                for other in notices if other['id'] != notice['id']
+                for identifier in [other['id'], json.loads(other['event'])['id'], *json.loads(other['event']).get('alertIds', [])]
+                if str(identifier) and str(identifier) not in selected_ids)
+            other_devices = {json.loads(other['event']).get('device') for other in notices} - {event.get('device'), None, ''}
+            conflicting = conflicting or any(re.search(r'(?<![\w-])' + re.escape(device) + r'(?![\w-])', current)
+                                             for device in other_devices)
+            if len(header_ids) != 1 or header_ids != {notice['id']} or conflicting:
+                raise ValueError('邮件回复关联与正文目标冲突')
         if not header_ids and (notice['id'] not in contextual or len(contextual) > 1 and notice['id'] not in direct):
             raise ValueError('新邮件需要可核实的事件编号，当前不能唯一定位')
         # An identifier shared by several underlying alerts is not a unique event.

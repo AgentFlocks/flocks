@@ -66,6 +66,11 @@ CREATE TABLE IF NOT EXISTS monitor_mail_notices (
  message_id TEXT NOT NULL UNIQUE, subject TEXT NOT NULL, body TEXT NOT NULL,
  event TEXT NOT NULL, state TEXT NOT NULL, error TEXT, session_id TEXT, created_at TEXT NOT NULL,
  updated_at TEXT NOT NULL, UNIQUE(owner,scope,project,event_key));
+CREATE TABLE IF NOT EXISTS monitor_device_targets (
+ owner TEXT NOT NULL, scope TEXT NOT NULL, project TEXT NOT NULL, device TEXT NOT NULL,
+ device_name TEXT NOT NULL, recipient TEXT NOT NULL, responsible_name TEXT NOT NULL,
+ revision TEXT NOT NULL, mailbox TEXT NOT NULL, updated_at TEXT NOT NULL,
+ PRIMARY KEY(owner,scope,project,device));
 CREATE TABLE IF NOT EXISTS monitor_mail_replies (
  sequence INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, owner TEXT NOT NULL,
  project TEXT NOT NULL, mailbox TEXT NOT NULL, message_id TEXT NOT NULL, sender TEXT NOT NULL,

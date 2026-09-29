@@ -11,7 +11,7 @@ import httpx
 
 from flocks.monitoring import diagnostics as diag
 from flocks.monitoring.adapter import XdrAdapter, ContractError
-from flocks.monitoring.models import COMPONENT_ID
+from flocks.monitoring.models import COMPONENT_ID, MonitoringPolicy
 from flocks.server.routes import security_monitoring as api
 from flocks.tool.registry import Tool, ToolContext, ToolInfo, ToolRegistry, ToolResult, ToolParameter, ParameterType
 
@@ -35,7 +35,8 @@ def captured(monkeypatch):
 
 
 def adapter(monkeypatch, result):
-    policy = SimpleNamespace(owner='owner', devices=['private-device'], tool='sangfor_xdr_incidents')
+    policy = MonitoringPolicy(owner='owner', project='project', directory='.',
+                              devices=['private-device'], tool='sangfor_xdr_incidents')
     monkeypatch.setattr(ToolRegistry, 'get', lambda *a: SimpleNamespace(info=SimpleNamespace(enabled=True, requires_confirmation=False)))
     async def execute(name, ctx, **params):
         ctx._output_capture.accept(name, result)
