@@ -223,23 +223,23 @@ async def confirm(owner, request: DispositionRequest, adapter_factory=Dispositio
 
 
 @traced('disposition.recheck')
-async def recheck(owner, request_id, adapter_factory=DispositionAdapter):
+async def recheck(owner, request_id, adapter_factory=DispositionAdapter, *, defer_exports=False):
     item = await record(owner, request_id)
     async with _locks.setdefault((owner, item['event_key']), asyncio.Lock()):
         policy, event = await target(owner, item['event_key'])
         item = await record(owner, request_id)
-        if item['mode'] in ('automatic', 'mail') and item['project'] != policy.project:
+        if item['mode'] in ('automatic', 'mail', 'mail_manual') and item['project'] != policy.project:
             raise ValueError('自动标记记录不属于当前监测项目')
         # Another process may still be sending the original request. Recovery
         # after a crash is read-only and becomes available after its call budget.
         if item['status'] == 'writing' and (datetime.now(timezone.utc) - datetime.fromisoformat(item['updated_at'])).total_seconds() < 120:
             raise ValueError('处置正在执行，请稍后回查')
         if not item['session_id']:
-            return await finish(owner, request_id, 'failed', error='处置尚未执行，请重新确认')
+            return await finish(owner, request_id, 'failed', error='处置尚未执行，请重新确认', defer_exports=defer_exports)
         try:
             factory = XdrAdapter if item['mode'] == 'automatic' and adapter_factory is DispositionAdapter else adapter_factory
             current = await read_status(factory(policy, item['session_id']), event)
         except Exception as exc:
             error = str(exc) if isinstance(exc, ContractError) else '回查失败，请检查接入与权限后重试'
-            return await finish(owner, request_id, 'pending', error=error)
-        return await finish(owner, request_id, 'verified' if matches_status(item['target_status'], current) else 'mismatch', current)
+            return await finish(owner, request_id, 'pending', error=error, defer_exports=defer_exports)
+        return await finish(owner, request_id, 'verified' if matches_status(item['target_status'], current) else 'mismatch', current, defer_exports=defer_exports)

@@ -76,17 +76,27 @@ export interface MonitorConfigurationInput {
   enabled: boolean;
   targets: Pick<MonitorConfigurationTarget, 'device_id' | 'responsible_name' | 'recipient_email'>[];
 }
+export interface MailManualStatus {
+  available: boolean;
+  reason: string;
+  state: 'handled' | 'unhandled' | 'pending' | 'failed' | null;
+  request_id: string | null;
+  error: string | null;
+  updated_at: string | null;
+}
 export interface MailHistory {
   unparsed_count?: number;
   sender_verification_required?: boolean;
   settings: { enabled: boolean; recipient_email: string; responsible_name: string };
   counts: Record<string, number>; reply_counts: Record<string, number>; has_more: boolean;
-  notices: { id: string; recipient: string; state: string; subject: string; body: string; error: string | null; created_at: string; sent_at?: string; event: { id: string; name: string; host: string; device?: string; device_name?: string }; items: { id: string; reply_id: string; reply_excerpt?: string; target: number; state: string; reason: string; error: string | null }[] }[];
+  notices: { id: string; recipient: string; state: string; subject: string; body: string; error: string | null; created_at: string; sent_at?: string; manual?: MailManualStatus; replies?: MailHistory["replies"]; reply_received?: boolean; disposition_state?: 'handled' | 'unhandled'; disposition_source?: 'manual' | 'reply' | null; event: { id: string; name: string; host: string; device?: string; device_name?: string }; items: { id: string; reply_id: string; reply_excerpt?: string; target: number; state: string; reason: string; error: string | null }[] }[];
   replies: { id: string; sender: string; state: string; error: string | null; received_at: string; targets?: { event_id: string; name: string; state: string; target: number; device?: string; device_name?: string }[]; payload: { subject: string; text: string; authenticated_sender?: boolean; sender_verification_bypassed?: boolean }; result: { items?: { notice_id: string; outcome: string; evidence: string; reason: string }[] } | null }[];
 }
 export const monitoringApi = {
   setInvestigationEngine: (engine: 'agent-v1') => client.put<MonitorSnapshot>(`${MONITOR_API}/investigation-engine`, { engine }),
   mail: (offset = 0, tab?: 'sent' | 'received') => client.get<MailHistory>(`${MONITOR_API}/mail`, { params: { offset, tab } }),
+  setMailManualStatus: (id: string, body: { request_id: string; state: 'handled' | 'unhandled' }) => client.post<MailManualStatus>(`${MONITOR_API}/mail/notices/${encodeURIComponent(id)}/manual-status`, body),
+  recheckMailManualStatus: (id: string) => client.post<MailManualStatus>(`${MONITOR_API}/mail/notices/${encodeURIComponent(id)}/manual-status/recheck`),
   configuration: () => client.get<MonitorConfiguration>(`${MONITOR_API}/configuration`),
   saveConfiguration: (body: MonitorConfigurationInput) => client.put<MonitorConfiguration>(`${MONITOR_API}/configuration`, body),
   setAutomaticStatus: (enabled: boolean) => client.put<MonitorSnapshot>(`${MONITOR_API}/automatic-status`, { enabled }),

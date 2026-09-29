@@ -20,7 +20,7 @@ _round_locks = {}
 TARGETS = {'in_progress': 10, 'contained': 70, 'completed': 40, 'false_positive': 60}
 STATE_LABELS = {'sent': '已发送', 'queued': '尚未发送，等待重试', 'sending': '发送中', 'skipped': '未发送', 'already_attempted': '已尝试发送',
                 'send_unknown': '发送结果待核对', 'pending': '等待下轮处理', 'interpreted': '已解读，等待回查',
-                'verified': '已回查确认', 'needs_review': '待人工核对', 'unrelated': '普通邮件已转交'}
+                'verified': '已回查确认', 'needs_review': '反馈待核验', 'unrelated': '普通邮件已转交'}
 
 
 def lock(owner):
@@ -234,20 +234,22 @@ async def receive(msg):
         identity = encode([raw.get('uidvalidity'), raw.get('uid')])
     payload = {k: getattr(msg, k) for k in ('text', 'reply_to_id', 'thread_id', 'account_id', 'sender_id', 'chat_id')}
     payload.update({k: raw.get(k) for k in ('subject', 'references', 'date')})
+    payload['notice_ids'] = [notice['id'] for notice in candidates]
     authenticated = raw.get('authenticated_sender') is True
     bypassed = not authenticated and not transport.REQUIRE_AUTHENTICATED_FEEDBACK
     payload.update(authenticated_sender=authenticated, sender_verification_bypassed=bypassed)
     stamp = d.stamp()
     state, error = ('pending', None) if authenticated or bypassed else ('needs_review', '回信身份未通过邮件通道核验')
     if ambiguous_project:
-        state, error = 'needs_review', '回信涉及多个监测项目，需人工核对'
+        state, error = 'needs_review', '回信涉及多个监测项目，暂无法唯一关联'
     if len(msg.text) > 20000:
-        state, error = 'needs_review', '邮件超过解读预算，需人工核对'
+        state, error = 'needs_review', '邮件超过解读预算，反馈待核验'
     # Bounded original mail is business data, never diagnostic text.
     payload['text'] = msg.text[:50000]
-    await write('INSERT OR IGNORE INTO monitor_mail_replies(id,owner,project,mailbox,message_id,sender,payload,state,error,received_at,updated_at) '
-                'VALUES(?,?,?,?,?,?,?,?,?,?,?)', (str(uuid4()), owner, project, mailbox, identity, msg.sender_id,
-                                                 encode(payload), state, error, stamp, stamp))
+    async with lock(owner):
+        await write('INSERT OR IGNORE INTO monitor_mail_replies(id,owner,project,mailbox,message_id,sender,payload,state,error,received_at,updated_at) '
+                    'VALUES(?,?,?,?,?,?,?,?,?,?,?)', (str(uuid4()), owner, project, mailbox, identity, msg.sender_id,
+                                                     encode(payload), state, error, stamp, stamp))
     async with diag.trace_scope(owner, COMPONENT_ID, 'mail:' + identity):
         diag.event('mail.received', project=diag.opaque(project), reply=diag.opaque(identity), mail_state=state,
                    success=state=='pending', authenticated_sender=authenticated, sender_verification_bypassed=bypassed)
@@ -285,6 +287,17 @@ async def queue_notices(policy, observed, session_id):
 
 
 async def notify_one(policy, notice, session_id, adapter_factory=MailAdapter):
+    from .mail_manual import completion_claimed
+    if await completion_claimed(policy.owner, notice['id']):
+        return 'already_attempted'
+    async def skip(reason, updated_event=None):
+        async with lock(policy.owner):
+            if await completion_claimed(policy.owner, notice['id']):
+                return 'already_attempted'
+            async with connection() as db:
+                changed = await db.execute("UPDATE monitor_mail_notices SET state='skipped',error=?,event=COALESCE(?,event),updated_at=? "
+                    "WHERE id=? AND state='queued'", (reason, encode(updated_event) if updated_event else None, d.stamp(), notice['id']))
+            return 'skipped' if changed.rowcount else 'already_attempted'
     event = json.loads(notice['event'])
     config = await authorized(policy, notice['revision'], event['device'])
     if event.get('development_sample') is True:
@@ -295,8 +308,7 @@ async def notify_one(policy, notice, session_id, adapter_factory=MailAdapter):
     adapter = adapter_factory(policy, session_id, notice['revision'])
     raw = await read_event(adapter, event, eligible=True)
     if raw is None:
-        await write("UPDATE monitor_mail_notices SET state='skipped',error='事件已离开通知查询范围',updated_at=? WHERE id=?", (d.stamp(), notice['id']))
-        return 'skipped'
+        return await skip('事件已离开通知查询范围')
     responses, failures, failure_reasons = {}, [], {}
     for kind in ENTITY_TYPES:
         try:
@@ -330,9 +342,7 @@ async def notify_one(policy, notice, session_id, adapter_factory=MailAdapter):
     # malicious finding or incomplete query returned immediately before sending.
     if decision.target in (40, 60):
         reason = '分析未发现需要责任人继续处置的事项；不发送通知，不自动修改 XDR 状态。' + assessment.text
-        await write("UPDATE monitor_mail_notices SET state='skipped',event=?,error=?,updated_at=? WHERE id=? AND state='queued'",
-                    (encode(event), reason, d.stamp(), notice['id']))
-        return 'skipped'
+        return await skip(reason, event)
     event['notified_end_time'] = raw.get('endTime')
     advice = assessment.text + '\n' + assessment.details
     if event.get('investigation'):
@@ -352,6 +362,8 @@ async def notify_one(policy, notice, session_id, adapter_factory=MailAdapter):
             "Flocks 会在下一轮监测中读取反馈，核对后标记事件状态并回查。\n"
             f"通知编号：{notice['id']}")
     async with lock(policy.owner):
+        if await completion_claimed(policy.owner, notice['id']):
+            return 'already_attempted'
         await authorized(policy, notice['revision'], event['device'])
         # Commit the intent before network I/O. Unknown outcomes never auto-resend.
         async with connection() as db:
@@ -417,6 +429,8 @@ async def notify_batch(policy, session_id, observed, recorder, adapter_factory=M
                 diag.event('mail.result', failure=True, notice=diag.opaque(notice['id']), mail_state='pending', error_type=type(exc).__name__)
                 state = 'pending'
                 error = str(exc) if isinstance(exc, ContractError) else '发信流程未完成，请检查前面的失败步骤或诊断日志'
+                await write("UPDATE monitor_mail_notices SET error=?,updated_at=? WHERE id=? AND state='queued'",
+                            (error, d.stamp(), notice['id']))
             current = (await rows('SELECT * FROM monitor_mail_notices WHERE id=?', (notice['id'],)))[0]
             if state == 'pending' and current['state'] == 'send_unknown':
                 state = 'send_unknown'
@@ -447,6 +461,9 @@ async def notify_batch(policy, session_id, observed, recorder, adapter_factory=M
 async def mark_item(policy, item, session_id, adapter_factory=MailAdapter):
     notice = (await rows('SELECT * FROM monitor_mail_notices WHERE id=? AND owner=? AND project=?', (item['notice_id'], policy.owner, policy.project)))[0]
     async with d._locks.setdefault((policy.owner, notice['event_key']), asyncio.Lock()):
+        from .mail_manual import completion_claimed
+        if await completion_claimed(policy.owner, notice['id']):
+            raise ValueError('此告警已有人工处置记录，回信保留，不重复写回')
         event = json.loads(notice['event'])
         route = await settings(policy.owner, event['device'])
         if not route['enabled'] or notice['revision'] != route['revision'] or notice['recipient'] != route['recipient'] or notice['mailbox'] != route['mailbox']:
@@ -532,7 +549,7 @@ async def process_replies(policy, session_id, high, recorder, adapter_factory=Ma
                     await write('UPDATE monitor_mail_replies SET error=?,updated_at=? WHERE id=?', ('暂未处理完成，下一轮重试或回查', d.stamp(), reply['id']))
                 except ValueError as exc:
                     diag.event('mail.result', failure=True, reply=diag.opaque(reply['id']), mail_state='needs_review', reason='ambiguous_reply', error_type=type(exc).__name__)
-                    await write("UPDATE monitor_mail_replies SET state='needs_review',error=?,updated_at=? WHERE id=?", ('解读或事件核验不明确，请人工核对', d.stamp(), reply['id']))
+                    await write("UPDATE monitor_mail_replies SET state='needs_review',error=?,updated_at=? WHERE id=?", ('回信解读或事件关联尚不明确，反馈已保存，未改写告警', d.stamp(), reply['id']))
                 except Exception as exc:
                     success = False
                     diag.event('mail.result', failure=True, reply=diag.opaque(reply['id']), mail_state='pending', reason='model_failed', error_type=type(exc).__name__)
@@ -608,7 +625,7 @@ async def process_reply(policy, reply, session_id, adapter_factory, interpreter,
             diag.event('mail.result', mail_state=state, notice=diag.opaque(item['notice_id']), failure=state!='verified')
             error = None
         except ValueError:
-            state, error = 'needs_review', '事件、配置或处理依据变化，需要人工核对'
+            state, error = 'needs_review', '事件、配置或处理依据变化，反馈已保存，本次未改写告警'
         await write('UPDATE monitor_mail_items SET state=?,error=?,updated_at=? WHERE id=?', (state, error, d.stamp(), item['id']))
     states = await rows('SELECT state FROM monitor_mail_items WHERE reply_id=?', (reply['id'],))
     state = ('interpreted' if any(x['state'] not in ('verified', 'needs_review', 'failed') for x in states)
@@ -617,28 +634,124 @@ async def process_reply(policy, reply, session_id, adapter_factory, interpreter,
 
 
 async def history(owner, limit=100, offset=0, tab=None):
+    from .mail_manual import snapshot as manual_snapshot, explicit_reference
     config = await settings(owner)
     project = config['project']
-    notices = await rows("SELECT * FROM monitor_mail_notices WHERE owner=? AND project=? AND state='sent' ORDER BY COALESCE(sent_at,updated_at) DESC,id DESC LIMIT ? OFFSET ?", (owner, project, limit + 1, offset)) if tab != 'received' else []
-    replies = await rows('SELECT * FROM monitor_mail_replies WHERE owner=? AND project=? ORDER BY received_at DESC,sequence DESC LIMIT ? OFFSET ?', (owner, project, limit + 1, offset)) if tab != 'sent' else []
-    has_more = len(notices) > limit or len(replies) > limit
-    notices, replies = notices[:limit], replies[:limit]
-    for n in notices:
-        n['sent_at'] = n['sent_at'] or n['updated_at']
-        n['event'] = json.loads(n['event'])
-        n['items'] = await rows('SELECT i.*,r.payload AS reply_payload FROM monitor_mail_items i JOIN monitor_mail_replies r ON r.id=i.reply_id WHERE i.notice_id=? AND i.owner=? ORDER BY i.created_at DESC,i.id DESC LIMIT 100', (n['id'], owner))
-        for item in n['items']:
-            item['reply_excerpt'] = json.loads(item.pop('reply_payload'))['text'][:2000]
-    for r in replies:
+    # One connection for this projection. Only the current page's related mail
+    # bodies are loaded; background polling must not rescan all historical mail.
+    async with connection() as db:
+        async def select(sql, args=()):
+            cursor = await db.execute(sql, args)
+            return [dict(row) for row in await cursor.fetchall()]
+        notices = await select("SELECT * FROM monitor_mail_notices WHERE owner=? AND project=? AND "
+            "(state IN ('sent','send_unknown') OR (state IN ('queued','failed') AND error IS NOT NULL)) "
+            "ORDER BY COALESCE(sent_at,updated_at) DESC,id DESC LIMIT ? OFFSET ?",
+            (owner, project, limit + 1, offset)) if tab != 'received' else []
+        has_more = len(notices) > limit
+        notices = notices[:limit]
+        ids = [n['id'] for n in notices]
+        placeholders = ','.join('?' for _ in ids) or 'NULL'
+        references = await select("SELECT id,message_id,mailbox,recipient,created_at,json_extract(event,'$.id') AS event_id, "
+                                  "json_extract(event,'$.name') AS event_name,json_extract(event,'$.device') AS device, "
+                                  "json_extract(event,'$.device_name') AS device_name "
+                                  'FROM monitor_mail_notices WHERE owner=? AND project=?', (owner, project))
+        for ref in references:
+            ref['event'] = {'id': ref.pop('event_id'), 'name': ref.pop('event_name'),
+                            'device': ref.pop('device'), 'device_name': ref.pop('device_name')}
+        # Conservative candidates also keep an ambiguous incoming reply from
+        # exposing the manual button before interpretation has resolved it.
+        legacy = []
+        legacy_args = []
+        for n in notices:
+            legacy.append('(r.mailbox=? AND r.sender=? AND r.received_at>=?)')
+            legacy_args.extend((n['mailbox'], n['recipient'], n['created_at']))
+        candidate_sql = (f"EXISTS(SELECT 1 FROM json_each(r.payload,'$.notice_ids') j WHERE j.value IN ({placeholders})) "
+            f"OR EXISTS(SELECT 1 FROM monitor_mail_items i WHERE i.owner=r.owner AND i.reply_id=r.id AND i.notice_id IN ({placeholders})) "
+            + ("OR (json_type(r.payload,'$.notice_ids') IS NULL AND (" + ' OR '.join(legacy) + '))' if legacy else ''))
+        candidates = await select(f'SELECT r.* FROM monitor_mail_replies r WHERE r.owner=? AND r.project=? AND ({candidate_sql}) '
+            'ORDER BY r.received_at DESC,r.sequence DESC', (owner, project, *ids, *ids, *legacy_args)) if ids else []
+        if tab == 'received':
+            standalone = await select('SELECT * FROM monitor_mail_replies WHERE owner=? AND project=? ORDER BY received_at DESC,sequence DESC LIMIT ? OFFSET ?',
+                                      (owner, project, limit + 1, offset))
+        else:
+            standalone = await select("SELECT r.* FROM monitor_mail_replies r WHERE r.owner=? AND r.project=? "
+                "AND r.state NOT IN ('unrelated','forwarding') AND COALESCE(json_array_length(r.payload,'$.notice_ids'),0)!=1 "
+                "AND NOT EXISTS(SELECT 1 FROM monitor_mail_items i WHERE i.owner=r.owner AND i.reply_id=r.id) "
+                "ORDER BY r.received_at DESC,r.sequence DESC LIMIT ? OFFSET ?", (owner, project, limit + 1, offset))
+        has_more = has_more or len(standalone) > limit
+        reply_rows = {r['id']: r for r in candidates + standalone}
+        reply_ids = list(reply_rows)
+        reply_placeholders = ','.join('?' for _ in reply_ids) or 'NULL'
+        links = await select(f'SELECT * FROM monitor_mail_items WHERE owner=? AND project=? AND '
+            f'(notice_id IN ({placeholders}) OR reply_id IN ({reply_placeholders})) ORDER BY created_at DESC,id DESC',
+            (owner, project, *ids, *reply_ids))
+        manual_rows = await select('SELECT m.*,d.status,d.error,d.updated_at FROM monitor_mail_manual m '
+            'LEFT JOIN monitor_dispositions d ON d.id=m.id AND d.owner=m.owner AND d.scope=? '
+            f'WHERE m.owner=? AND m.project=? AND m.notice_id IN ({placeholders}) ORDER BY m.created_at DESC,m.rowid DESC',
+            (COMPONENT_ID, owner, project, *ids))
+        event_keys = [n['event_key'] for n in notices]
+        dispositions = await select('SELECT * FROM monitor_dispositions WHERE owner=? AND scope=? AND project=? '
+            f'AND event_key IN ({placeholders}) ORDER BY created_at DESC,rowid DESC', (owner, COMPONENT_ID, project, *event_keys))
+        counts = await select('SELECT state,COUNT(*) AS count FROM monitor_mail_notices WHERE owner=? AND project=? GROUP BY state', (owner, project))
+        reply_counts = await select('SELECT state,COUNT(*) AS count FROM monitor_mail_replies WHERE owner=? AND project=? GROUP BY state', (owner, project))
+        unparsed = await select('SELECT COUNT(*) AS count FROM monitor_mail_unparsed WHERE mailbox=?', (config['mailbox'],))
+    reference_map = {n['id']: n for n in references}
+    items_by_reply, items_by_notice = {}, {}
+    for item in links:
+        items_by_reply.setdefault(item['reply_id'], []).append(item)
+        items_by_notice.setdefault(item['notice_id'], []).append(item)
+    manual_by_notice, disposition_by_event = {}, {}
+    for item in manual_rows:
+        manual_by_notice.setdefault(item['notice_id'], item)
+    for item in dispositions:
+        disposition_by_event.setdefault(item['event_key'], item)
+    by_notice, ambiguous, assigned = {}, set(), set()
+    for r in reply_rows.values():
         r['payload'] = json.loads(r['payload'])
         r['result'] = json.loads(r['result']) if r['result'] else None
-        r['targets'] = await rows('SELECT n.event,i.state,i.target FROM monitor_mail_items i JOIN monitor_mail_notices n ON n.id=i.notice_id WHERE i.reply_id=? AND i.owner=?', (r['id'], owner))
-        for target in r['targets']:
-            event = json.loads(target.pop('event'))
-            target.update(event_id=event['id'], name=event['name'], device=event['device'], device_name=event.get('device_name', event['device']))
-    counts = await rows('SELECT state,COUNT(*) AS count FROM monitor_mail_notices WHERE owner=? AND project=? GROUP BY state', (owner, project))
-    reply_counts = await rows('SELECT state,COUNT(*) AS count FROM monitor_mail_replies WHERE owner=? AND project=? GROUP BY state', (owner, project))
-    unparsed = await rows('SELECT COUNT(*) AS count FROM monitor_mail_unparsed WHERE mailbox=?', (config['mailbox'],))
+        r['targets'] = []
+        items = items_by_reply.get(r['id'], [])
+        linked_ids = {i['notice_id'] for i in items}
+        if not linked_ids and r['state'] not in ('unrelated', 'forwarding'):
+            candidates = r['payload'].get('notice_ids')
+            if not isinstance(candidates, list):
+                peers = [n for n in references if n['mailbox'] == r['mailbox'] and n['recipient'] == r['sender']]
+                candidates = [n['id'] for n in peers if explicit_reference(n, r['payload'])]
+                if not candidates:
+                    # An old free-form reply is still feedback; do not offer
+                    # a manual decision while its association is unresolved.
+                    ambiguous.update(n['id'] for n in peers if r['received_at'] >= n['created_at'])
+            if len(candidates) == 1:
+                linked_ids = set(candidates)
+            else:
+                ambiguous.update(candidates)
+        for item in items:
+            # Notice body and host are already on its own row. Replies only need
+            # identifiers here, and never borrow another device's event data.
+            n = next((n for n in notices if n['id'] == item['notice_id']), None)
+            event = json.loads(n['event']) if n else reference_map.get(item['notice_id'], {}).get('event', {})
+            r['targets'].append({'event_id': event.get('id', ''), 'name': event.get('name', ''),
+                'device': event.get('device', ''), 'device_name': event.get('device_name', event.get('device', '')),
+                'state': item['state'], 'target': item['target']})
+        for notice_id in linked_ids:
+            by_notice.setdefault(notice_id, []).append(r)
+        if linked_ids:
+            assigned.add(r['id'])
+    for n in notices:
+        n['sent_at'] = (n['sent_at'] or n['updated_at']) if n['state'] == 'sent' else n['sent_at']
+        n['event'] = json.loads(n['event'])
+        n['replies'] = sorted(by_notice.get(n['id'], []), key=lambda r: r['received_at'], reverse=True)
+        n['reply_received'] = bool(n['replies'])
+        n['manual'] = await manual_snapshot(n, previous=manual_by_notice.get(n['id']),
+            reply_present=n['reply_received'] or n['id'] in ambiguous)
+        n['items'] = [dict(i) for i in items_by_notice.get(n['id'], [])][:100]
+        for item in n['items']:
+            item['reply_excerpt'] = reply_rows.get(item['reply_id'], {}).get('payload', {}).get('text', '')[:2000]
+        disposition = disposition_by_event.get(n['event_key'], {})
+        n['disposition_state'] = 'handled' if disposition.get('status') == 'verified' and disposition.get('target_status') == 40 else 'unhandled'
+        n['disposition_source'] = ('reply' if disposition.get('mode') == 'mail' else 'manual' if disposition else
+                                  'manual' if n['manual']['state'] == 'unhandled' else None)
+    replies = [reply_rows[r['id']] for r in standalone[:limit] if tab == 'received' or r['id'] not in assigned]
     return {'settings': {**config, 'recipient_email': config['recipient']}, 'notices': notices, 'replies': replies,
             'health': await health_snapshot(owner, project),
             'sender_verification_required': transport.REQUIRE_AUTHENTICATED_FEEDBACK,

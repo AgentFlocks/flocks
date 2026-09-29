@@ -440,3 +440,15 @@ it('shows start failures on configuration without leaving the configuration page
  expect(await screen.findByRole('alert')).toHaveTextContent('所选设备不可用');
  expect(screen.getByRole('heading', { name: '监测配置' })).toBeInTheDocument();
 });
+
+
+it('keeps the dashboard read-only and directs manual handling to the notice list', async () => {
+ mocks.overview.mockResolvedValue({data: {...data, events: [{...data.events[0], closure: 'open', dispositionRecord: {id: 'write-1', status: 'pending', error: '回查连接超时'}}]}});
+ render(<MemoryRouter initialEntries={['/suites/host-security-monitor/dashboard']}><SecurityMonitor /></MemoryRouter>);
+ expect(await screen.findByText('事件明细 · 处置记录')).toBeInTheDocument();
+ expect(screen.getByText('最近处置记录：结果待回查')).toBeInTheDocument();
+ expect(screen.getByText('回查连接超时')).toBeInTheDocument();
+ expect(screen.getByRole('link', {name: '在邮件跟进中查看和处理'})).toHaveAttribute('href', '/suites/host-security-monitor/mail');
+ expect(screen.queryByRole('button', {name: '确认已处置'})).not.toBeInTheDocument();
+ expect(screen.queryByRole('button', {name: '回查状态'})).not.toBeInTheDocument();
+});

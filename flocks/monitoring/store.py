@@ -81,6 +81,10 @@ CREATE TABLE IF NOT EXISTS monitor_mail_items (
  project TEXT NOT NULL, target INTEGER NOT NULL, reason TEXT NOT NULL, state TEXT NOT NULL,
  error TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
  UNIQUE(reply_id,notice_id));
+CREATE TABLE IF NOT EXISTS monitor_mail_manual (
+ id TEXT PRIMARY KEY, notice_id TEXT NOT NULL, owner TEXT NOT NULL, project TEXT NOT NULL,
+ state TEXT NOT NULL, created_at TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS monitor_mail_manual_notice ON monitor_mail_manual(owner,notice_id,created_at);
 CREATE TABLE IF NOT EXISTS monitor_mail_cursors (
  mailbox TEXT PRIMARY KEY, validity TEXT NOT NULL, last_uid INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS monitor_mail_unparsed (

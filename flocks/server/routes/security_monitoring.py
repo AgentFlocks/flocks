@@ -13,6 +13,7 @@ from flocks.monitoring.models import COMPONENT_ID
 from flocks.monitoring.store import rows
 from flocks.monitoring.reports import snapshot, newest_timeline_content
 from flocks.monitoring.mailflow import MailSettingsRequest
+from flocks.monitoring.mail_manual import ManualMailRequest
 from flocks.monitoring.configuration import ConfigurationRequest
 from flocks.monitoring.disposition import DispositionRequest
 from flocks.monitoring.automatic import AutomaticRequest
@@ -33,8 +34,7 @@ async def _disposition_action(action):
 
 @router.post('/dispositions')
 async def confirm_disposition(body: DispositionRequest, user=Depends(require_user)):
-    from flocks.monitoring.disposition import confirm
-    return await _disposition_action(confirm(user.id, body))
+    raise HTTPException(409, '请在邮件跟进的对应告警中记录人工处理结果；仅发信失败或尚无回信时开放')
 
 
 @router.post('/dispositions/{request_id}/recheck')
@@ -137,6 +137,25 @@ async def mail_settings(body: MailSettingsRequest, user=Depends(require_user)):
             with diag.span('mail.configure'):
                 await configure(owner, body)
     return await _control(change, user.id)
+
+
+async def _manual_mail_action(action, owner):
+    result = await _disposition_action(action)
+    from flocks.monitoring.runtime import publish
+    await publish('monitor.control.changed', {'owner': owner})
+    return result
+
+
+@router.post('/mail/notices/{notice_id}/manual-status')
+async def manual_mail_status(notice_id: UUID, body: ManualMailRequest, user=Depends(require_user)):
+    from flocks.monitoring.mail_manual import change
+    return await _manual_mail_action(change(user.id, str(notice_id), body), user.id)
+
+
+@router.post('/mail/notices/{notice_id}/manual-status/recheck')
+async def recheck_manual_mail(notice_id: UUID, user=Depends(require_user)):
+    from flocks.monitoring.mail_manual import recheck
+    return await _manual_mail_action(recheck(user.id, str(notice_id)), user.id)
 
 
 @router.put('/automatic-status')

@@ -112,6 +112,12 @@ async def test_normal_business_outcomes_finish_without_partial_status(context, m
 
 @pytest.mark.parametrize('failure', ['api', 'model'])
 async def test_failed_query_or_incomplete_model_produces_failed_card(context, monkeypatch, failure):
+    from flocks.monitoring import mailflow
+    enable_fixture_mail(context, monkeypatch)
+    monkeypatch.setattr(mailflow, 'health_snapshot', AsyncMock(return_value={
+        'enabled': True, 'receive': {'state': 'unknown'}, 'send': {'state': 'unknown'},
+        'errors': ['邮件连接尚未验证'],
+    }))
     factory = context.adapter
     if failure == 'api':
         class Failed(context.adapter):
@@ -124,6 +130,9 @@ async def test_failed_query_or_incomplete_model_produces_failed_card(context, mo
     assert result.action == 'error'
     attempt, _, card = await ending()
     assert attempt['status'] == 'failed' and attempt['error']
+    facts = json.loads(attempt['result'])
+    assert facts['mail']['warnings'] == ['邮件连接尚未验证']
+    assert '邮件连接尚未验证' not in attempt['error']
     failed_steps = await rows("SELECT * FROM monitor_steps WHERE status='failed'")
     assert failed_steps
     if failure == 'model':
@@ -304,7 +313,7 @@ async def assert_recorded_step(attempt, tool_name, *, failed):
     ('queued', True), ('pending', True), ('send_unknown', True), ('exception', True),
     ('sent', False), ('skipped', False), ('already_attempted', False),
 ])
-async def test_notification_outcome_distinguishes_transport_failure_from_business_completion(context, monkeypatch, outcome, failed):
+async def test_notification_failure_is_visible_without_failing_investigation_round(context, monkeypatch, outcome, failed):
     from flocks.monitoring import mailflow
     enable_fixture_mail(context, monkeypatch)
     context.events.clear()
@@ -322,12 +331,13 @@ async def test_notification_outcome_distinguishes_transport_failure_from_busines
     call = AsyncMock(side_effect=notify)
     monkeypatch.setattr(mailflow, 'notify_one', call)
     result = await runtime.run(context.execution, context.policy, context.adapter)
-    assert result.action == ('error' if failed else 'stop')
+    assert result.action == 'stop'
     attempt, _, card = await ending()
-    assert attempt['status'] == ('failed' if failed else 'completed')
+    assert attempt['status'] == 'completed' and not attempt['error']
     facts = json.loads(attempt['result'])
     assert bool(facts['mail']['notification'].get('errors')) is failed
-    assert bool(facts['errors']) is failed
+    assert bool(facts['mail']['warnings']) is failed
+    assert facts['errors'] == []
     assert call.await_count == 1
     await assert_recorded_step(attempt, '邮件通知结果', failed=failed)
     assert card.metadata['roundStatus'] == attempt['status']
@@ -369,12 +379,13 @@ async def test_reply_failures_are_not_confused_with_normal_waiting_or_human_revi
     process = AsyncMock(side_effect=error, return_value=None)
     monkeypatch.setattr(mailflow, 'process_reply', process)
     result = await runtime.run(context.execution, context.policy, context.adapter)
-    assert result.action == ('error' if failed else 'stop')
+    assert result.action == 'stop'
     attempt, _, _ = await ending()
-    assert attempt['status'] == ('failed' if failed else 'completed')
+    assert attempt['status'] == 'completed' and not attempt['error']
     facts = json.loads(attempt['result'])
     assert bool(facts['mail']['feedback'].get('errors')) is failed
-    assert bool(facts['errors']) is failed
+    assert bool(facts['mail']['warnings']) is failed
+    assert facts['errors'] == []
     reply = (await rows('SELECT * FROM monitor_mail_replies'))[0]
     assert reply['state'] == state and process.await_count == 1
     assert facts['mail']['feedback']['pending'] == 1
@@ -417,21 +428,67 @@ async def test_steps_persist_readable_evidence_sections_without_model_reasoning(
     assert not any('思考过程' in section['label'] for section in sections)
 
 
-async def test_zero_events_with_unavailable_receiver_is_failure_not_no_reply(context, monkeypatch):
+@pytest.mark.parametrize('receive,send', [('unavailable', 'healthy'), ('unknown', 'unknown'), ('healthy', 'unavailable')])
+async def test_zero_events_with_mail_warning_complete_without_claiming_no_reply(context, monkeypatch, receive, send):
     from flocks.monitoring import mailflow
     enable_fixture_mail(context, monkeypatch)
     context.events.clear()
     monkeypatch.setattr(mailflow, 'health_snapshot', AsyncMock(return_value={
-        'enabled': True, 'receive': {'state': 'unavailable', 'stage': 'search'},
-        'send': {'state': 'healthy'}, 'errors': ['邮件收取失败：搜索阶段异常'],
+        'enabled': True, 'receive': {'state': receive, 'stage': 'search'},
+        'send': {'state': send}, 'errors': ['邮件连接未就绪'],
     }))
     outcome = await runtime.run(context.execution, context.policy, context.adapter)
     attempt, _, card = await ending()
     facts = json.loads(attempt['result'])
-    assert outcome.action == 'error' and facts['query_complete'] is True
+    assert outcome.action == 'stop' and facts['query_complete'] is True
     assert facts['events'] == 0 and facts['mail']['health']['receive']['stage'] == 'search'
+    assert facts['errors'] == [] and facts['mail']['warnings'] == ['邮件连接未就绪']
+    assert attempt['status'] == 'completed' and not attempt['error']
+    assert card.metadata['roundStatus'] == 'completed'
+    assert '邮件跟进提示（不影响本轮任务结果）' in card.text
     assert '当前不能把处理回信 0 封解释为没有新回信' in card.text
     assert '查询未完整成功' not in card.text
+
+
+@pytest.mark.parametrize('stage', ['cutoff', 'process_replies', 'notify_batch', 'health_snapshot'])
+async def test_mail_service_exception_does_not_abort_query_or_round(context, monkeypatch, stage):
+    from flocks.monitoring import mailflow
+    enable_fixture_mail(context, monkeypatch)
+    context.events.clear()
+    monkeypatch.setattr(mailflow, stage, AsyncMock(side_effect=RuntimeError('secret mailbox response')))
+    outcome = await runtime.run(context.execution, context.policy, context.adapter)
+    attempt, _, card = await ending()
+    facts = json.loads(attempt['result'])
+    assert outcome.action == 'stop' and facts['query_complete'] is True
+    assert facts['mail']['warnings'] and not facts['errors'] and not attempt['error']
+    assert await rows('SELECT * FROM monitor_cursors')
+    assert 'secret mailbox response' not in card.text
+    assert (await rows('SELECT status FROM monitor_reports'))[0]['status'] == 'updated'
+    if stage in {'cutoff', 'process_replies'}:
+        assert facts['mail']['feedback']['unavailable']
+        assert '回信处理进度暂不可用' in card.text
+    elif stage == 'notify_batch':
+        assert facts['mail']['notification']['unavailable']
+        assert '发送计数暂不可用' in card.text
+
+
+@pytest.mark.parametrize('stage', ['process_replies', 'notify_batch'])
+async def test_mail_stage_cancellation_still_stops_monitoring(context, monkeypatch, stage):
+    from flocks.monitoring import mailflow
+    enable_fixture_mail(context, monkeypatch)
+    context.events.clear()
+    entered = asyncio.Event()
+    async def wait(*args, **kwargs):
+        entered.set()
+        await asyncio.Event().wait()
+    monkeypatch.setattr(mailflow, stage, wait)
+    task = asyncio.create_task(runtime.run(context.execution, context.policy, context.adapter))
+    await asyncio.wait_for(entered.wait(), 3)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    attempt, _, card = await ending()
+    assert attempt['status'] == 'failed' and '中断' in card.text
 
 
 async def test_zero_event_round_exposes_old_system_failure_and_retry_plan(context, monkeypatch):

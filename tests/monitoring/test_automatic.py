@@ -799,7 +799,7 @@ async def test_old_benign_investigation_cannot_hide_fresh_malicious_evidence(aut
     assert not writes(auto)
 
 
-async def test_mail_history_filters_sent_before_pagination_and_uses_actual_send_time(auto):
+async def test_mail_history_pages_sent_and_delivery_unknown_but_not_unsent(auto):
     states = ['sent', 'queued', 'sent', 'skipped', 'send_unknown', 'sent']
     sent_ids = []
     for index, state in enumerate(states):
@@ -809,7 +809,7 @@ async def test_mail_history_filters_sent_before_pagination_and_uses_actual_send_
         stamp = f'2026-09-25T{index:02d}:00:00+00:00'
         await write('UPDATE monitor_mail_notices SET state=?,created_at=?,updated_at=?,sent_at=? WHERE id=?',
                     (state, '2026-09-24T00:00:00+00:00', stamp, stamp if state == 'sent' else None, n['id']))
-        if state == 'sent': sent_ids.append(n['id'])
+        if state in ('sent', 'send_unknown'): sent_ids.append(n['id'])
     first = await m.history('owner', limit=2, tab='sent')
     second = await m.history('owner', limit=2, offset=2, tab='sent')
     assert [n['id'] for n in first['notices']] == sent_ids[::-1][:2]

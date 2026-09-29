@@ -47,7 +47,7 @@ async def snapshot(owner, scope, day):
         events[item['event_key']] = event
     for disposition in dispositions:
         event = events.get(disposition['event_key'])
-        if event is None or disposition['mode'] in ('automatic', 'mail') and disposition['project'] != event['projectID']:
+        if event is None or disposition['mode'] in ('automatic', 'mail', 'mail_manual') and disposition['project'] != event['projectID']:
             continue
         event['dispositionRecord'] = disposition
         # Re-sampling an unchanged terminal event must not undo a verified test.
@@ -86,8 +86,13 @@ async def snapshot(owner, scope, day):
     development = bool(policy and sampling.enabled(policy))
     from .investigation import status_summary
     from .mailflow import health_snapshot
+    from .runtime import mail_followup
     backlog = await status_summary(policy) if policy else {}
-    mail_health = await health_snapshot(owner, installation['project']) if installation else {'enabled': False, 'errors': []}
+    mail_health = (await mail_followup('mail.receive', lambda: health_snapshot(owner, installation['project']),
+                   {'enabled': bool(mail_settings and mail_settings[0]['enabled']),
+                    'receive': {'state': 'unknown'}, 'send': {'state': 'unknown'},
+                    'errors': ['邮件连接状态暂无法读取；不据此判断投递失败或没有回信。']})
+                   if installation else {'enabled': False, 'errors': []})
     investigated_events = len(events)
     completed_investigations = sum(e.get('investigation', {}).get('state') == 'ready' for e in events.values())
     return {'businessDate': day, 'developmentSample': development,
@@ -183,7 +188,8 @@ def render_summary(data):
              f"处置完成 {m['closed']} 条，已遏制 {m['contained']} 条，已忽略 {m['ignored']} 条，仍未闭环风险 {m['openRisk']} 条。", '',
              '## 邮件与处置进展', '',
              f"当天确认发送 {mail.get('sentToday', 0)} 封，收到 {mail.get('receivedToday', 0)} 封回复。",
-             f"截至当前，待处理回复 {mail.get('pending', 0)} 封，待确认 {mail.get('needsReview', 0)} 封，发件结果未知 {mail.get('sendUnknown', 0)} 封。", '',
+             f"截至当前，待处理回复 {mail.get('pending', 0)} 封，反馈待核验 {mail.get('needsReview', 0)} 封，发件结果未知 {mail.get('sendUnknown', 0)} 封。",
+             '邮件状态与是否收到回信不决定监测任务成败；发信失败或未收到回信时，可在发信记录更新处置状态。', '',
              '## 需要继续跟进', '']
     for event in data['events']:
         if event['closure'] not in ('closed', 'ignored'):

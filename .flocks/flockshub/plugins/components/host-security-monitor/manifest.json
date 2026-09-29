@@ -5,8 +5,8 @@
   "name": "Security Operations Monitoring",
   "nameCn": "安全运营监测",
   "description": "Model-directed monitoring investigation with persistent evidence, bounded serial scheduling and verified mail follow-up.",
-  "descriptionCn": "按设备名称配置多台 XDR 与各自责任人邮箱；监测运营智能体查询关联，逐设备邮件协同并回查确认。",
-  "version": "1.8.0",
+  "descriptionCn": "多 XDR 分别配置责任人；按告警展示发信、回信及处置标签，邮件异常不影响监测任务结果。",
+  "version": "1.9.0",
   "author": "Flocks Team",
   "license": "MIT",
   "homepage": "",
@@ -85,7 +85,8 @@
     "monitor.agent-component.v1",
     "monitor.production-investigation.v1",
     "monitor.reliable-investigation.v1",
-    "monitor.multi-xdr.v1"
+    "monitor.multi-xdr.v1",
+    "monitor.mail-manual.v1"
   ],
   "edition": "oss"
 }

@@ -228,7 +228,7 @@ async def test_disposition_trace_has_no_comment_device_or_body(setup, real_tool,
     assert 'PRIVATE_COMMENT' not in json.dumps(captured)
 
 
-async def test_routes_validate_confirmation_and_owner_scope(setup, monkeypatch):
+async def test_legacy_route_cannot_bypass_notice_manual_boundary(setup, monkeypatch):
     from fastapi import FastAPI
     from flocks.server.routes import security_monitoring as api
     import httpx
@@ -243,5 +243,6 @@ async def test_routes_validate_confirmation_and_owner_scope(setup, monkeypatch):
         for bad in ({**body, 'confirmed': False}, {**body, 'owner': 'other'}, {**body, 'deal_status': 60}):
             assert (await client.post(path, json=bad)).status_code == 422
         assert mock.call_count == 0
-        assert (await client.post(path, json=body)).status_code == 200
-        assert mock.call_args.args[0] == 'owner'
+        response = await client.post(path, json=body)
+        assert response.status_code == 409 and '邮件跟进' in response.json()['detail']
+        assert mock.call_count == 0

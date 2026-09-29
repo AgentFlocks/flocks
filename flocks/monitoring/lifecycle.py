@@ -25,6 +25,7 @@ CORE_CAPABILITIES.add('monitor.agent-component.v1')
 CORE_CAPABILITIES.add('monitor.production-investigation.v1')
 CORE_CAPABILITIES.add('monitor.reliable-investigation.v1')
 CORE_CAPABILITIES.add('monitor.multi-xdr.v1')
+CORE_CAPABILITIES.add('monitor.mail-manual.v1')
 
 
 def validate_manifest(manifest, package=None):

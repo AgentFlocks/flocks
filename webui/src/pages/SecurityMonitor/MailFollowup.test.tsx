@@ -2,8 +2,14 @@ import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import { beforeEach, expect, it, vi } from "vitest";
 import { MemoryRouter } from "react-router-dom";
 import MailFollowup from "./MailFollowup";
+import client from "@/api/client";
+import type { MailManualStatus } from "@/api/securityMonitoring";
 
-const mocks = vi.hoisted(() => ({ mail: vi.fn() }));
+const mocks = vi.hoisted(() => ({
+  mail: vi.fn(),
+  setMailManualStatus: vi.fn(),
+  recheckMailManualStatus: vi.fn(),
+}));
 vi.mock("@/api/securityMonitoring", async (importOriginal) => ({
   ...(await importOriginal<object>()),
   monitoringApi: mocks,
@@ -73,9 +79,9 @@ it("lists sent notices without exposing subjects or bodies until details are ope
   ).toBeInTheDocument();
   expect(screen.queryByText("告警通知")).not.toBeInTheDocument();
   expect(screen.queryByText("一条告警")).not.toBeInTheDocument();
-  expect(screen.getByText("等待回信")).toBeInTheDocument();
+  expect(screen.getByText("尚无回信")).toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: "查看发信详情：event" }));
-  const dialog = screen.getByRole("dialog", { name: "发信详情" });
+  const dialog = screen.getByRole("dialog", { name: "告警邮件详情" });
   expect(within(dialog).getByText("告警通知")).toBeInTheDocument();
   expect(within(dialog).getByText("一条告警")).toBeInTheDocument();
   expect(within(dialog).getByText("总部 XDR")).toBeInTheDocument();
@@ -83,45 +89,40 @@ it("lists sent notices without exposing subjects or bodies until details are ope
   expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
 });
 
-it("filters every unconfirmed notice and orders sent records newest first", async () => {
+it("shows failed and uncertain deliveries returned by the server alongside sent mail", async () => {
   mocks.mail.mockResolvedValue(
     response({
       notices: [
         data.notices[0],
-        ...["queued", "sending", "send_unknown", "skipped", "failed"].map(
-          (state) => ({
-            ...data.notices[0],
-            id: state,
-            state,
-            event: { ...data.notices[0].event, name: `隐藏-${state}` },
-          }),
-        ),
         {
           ...data.notices[0],
-          id: "new",
+          id: "uncertain",
+          state: "send_unknown",
+          event: { ...data.notices[0].event, name: "待确认投递" },
+        },
+        {
+          ...data.notices[0],
+          id: "failed",
+          state: "queued",
+          error: "SMTP timeout",
           created_at: "2026-09-25T02:00:00Z",
-          event: {
-            ...data.notices[0].event,
-            id: "new-event",
-            name: "最新告警",
-          },
+          event: { ...data.notices[0].event, name: "发送失败告警" },
         },
       ],
-    }),
+    } as Partial<typeof data>),
   );
   render(
     <MemoryRouter>
       <MailFollowup />
     </MemoryRouter>,
   );
-  await screen.findByText("最新告警");
-  expect(screen.queryByText(/隐藏-/)).not.toBeInTheDocument();
-  expect(screen.queryByText(/待发送/)).not.toBeInTheDocument();
-  expect(screen.queryByText(/发件待确认/)).not.toBeInTheDocument();
+  await screen.findByText("发送失败告警");
+  expect(screen.getByText("发送失败 · 待重试")).toBeInTheDocument();
+  expect(screen.getByText("发送结果待确认")).toBeInTheDocument();
+  expect(screen.getByText("待确认投递")).toBeInTheDocument();
   const rows = screen.getAllByRole("row");
-  expect(rows).toHaveLength(3);
-  expect(rows[1]).toHaveTextContent("最新告警");
-  expect(rows[2]).toHaveTextContent("待跟进告警");
+  expect(rows).toHaveLength(4);
+  expect(rows[1]).toHaveTextContent("发送失败告警");
 });
 
 it("keeps unmatched replies visible and shows their subject and body only in details", async () => {
@@ -130,9 +131,8 @@ it("keeps unmatched replies visible and shows their subject and body only in det
       <MailFollowup />
     </MemoryRouter>,
   );
-  fireEvent.click(await screen.findByRole("tab", { name: "回信记录" }));
-  expect(await screen.findByText("待关联")).toBeInTheDocument();
-  expect(mocks.mail).toHaveBeenLastCalledWith(0, "received");
+  expect(await screen.findByText(/待关联回信 ·/)).toBeInTheDocument();
+  expect(mocks.mail).toHaveBeenLastCalledWith(0, "sent");
   expect(screen.getByText("已收到，待下轮处理")).toBeInTheDocument();
   expect(screen.queryByText("处置反馈")).not.toBeInTheDocument();
   expect(screen.queryByText("已清理并复查")).not.toBeInTheDocument();
@@ -146,34 +146,39 @@ it("keeps unmatched replies visible and shows their subject and body only in det
   ).toBeInTheDocument();
 });
 
-it("shows the related alert and verified state in reply rows while preserving details", async () => {
+it("combines delivery, reply, and automatic disposition on the same alert row", async () => {
+  const reply = {
+    ...data.replies[0],
+    state: "verified",
+    targets: [
+      { event_id: "event", name: "待跟进告警", state: "verified", target: 40 },
+    ],
+    result: {
+      items: [
+        {
+          notice_id: "notice",
+          reason: "负责人明确确认已清理",
+          evidence: "已清理并复查",
+          outcome: "completed",
+        },
+      ],
+    },
+  };
   mocks.mail.mockResolvedValue({
     data: {
       ...data,
-      replies: [
+      replies: [],
+      notices: [
         {
-          ...data.replies[0],
-          state: "verified",
-          targets: [
-            {
-              event_id: "event",
-              name: "待跟进告警",
-              state: "verified",
-              target: 40,
-              device: "device-b",
-              device_name: "分部 XDR",
-            },
+          ...data.notices[0],
+          replies: [reply],
+          reply_received: true,
+          disposition_state: "handled",
+          disposition_source: "reply",
+          manual: manual({ available: false, reason: "已收到回信，自动处理" }),
+          items: [
+            { id: "item", state: "verified", reason: "已回查", target: 40 },
           ],
-          result: {
-            items: [
-              {
-                notice_id: "notice",
-                reason: "负责人明确确认已清理",
-                evidence: "已清理并复查",
-                outcome: "completed",
-              },
-            ],
-          },
         },
       ],
     },
@@ -183,16 +188,50 @@ it("shows the related alert and verified state in reply rows while preserving de
       <MailFollowup />
     </MemoryRouter>,
   );
-  fireEvent.click(await screen.findByRole("tab", { name: "回信记录" }));
-  expect(await screen.findByText("目标状态已回查确认")).toBeInTheDocument();
-  expect(screen.getByText("待跟进告警")).toBeInTheDocument();
-  expect(screen.getByText("event")).toBeInTheDocument();
-  expect(screen.queryByText(/负责人明确确认已清理/)).not.toBeInTheDocument();
-  fireEvent.click(screen.getByRole("button", { name: "查看回信详情：reply" }));
-  expect(screen.getByText("解读：负责人明确确认已清理")).toBeInTheDocument();
+  const row = (await screen.findByText("待跟进告警")).closest("tr")!;
+  expect(within(row).getByText("已发送")).toBeInTheDocument();
+  expect(within(row).getByText("已收到回信")).toBeInTheDocument();
+  expect(within(row).getByText("已处置 · XDR 已确认")).toBeInTheDocument();
+  expect(within(row).getByText("回信自动更新")).toBeInTheDocument();
+  expect(screen.queryByRole("tab")).not.toBeInTheDocument();
   expect(
-    within(screen.getByRole("dialog")).getByText("来源设备：分部 XDR"),
-  ).toBeInTheDocument();
+    screen.queryByRole("button", { name: /标记.*处置/ }),
+  ).not.toBeInTheDocument();
+  expect(screen.queryByText("处置反馈")).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "查看发信详情：event" }));
+  const detail = within(screen.getByRole("dialog"));
+  expect(detail.getByText("处置反馈")).toBeInTheDocument();
+  expect(detail.getByText("已清理并复查")).toBeInTheDocument();
+  expect(detail.getByText("解读：负责人明确确认已清理")).toBeInTheDocument();
+  expect(screen.queryByText(/待关联回信 ·/)).not.toBeInTheDocument();
+});
+
+it("shows a saved reply before interpretation without offering human approval", async () => {
+  mocks.mail.mockResolvedValue({
+    data: {
+      ...data,
+      replies: [],
+      notices: [
+        {
+          ...data.notices[0],
+          reply_received: true,
+          replies: [data.replies[0]],
+          manual: manual({ available: false, reason: "回信已保存" }),
+        },
+      ],
+    },
+  });
+  render(
+    <MemoryRouter>
+      <MailFollowup />
+    </MemoryRouter>,
+  );
+  expect(await screen.findByText("已收到回信")).toBeInTheDocument();
+  expect(screen.getByText("回信已保存，等待自动处理")).toBeInTheDocument();
+  expect(screen.queryByText("尚无回信")).not.toBeInTheDocument();
+  expect(
+    screen.queryByRole("button", { name: /标记.*处置/ }),
+  ).not.toBeInTheDocument();
 });
 
 it("surfaces unsupported mail without hiding normal follow-up records", async () => {
@@ -244,7 +283,6 @@ it("explains historically unverified feedback inside the detail without claiming
       <MailFollowup />
     </MemoryRouter>,
   );
-  fireEvent.click(await screen.findByRole("tab", { name: "回信记录" }));
   fireEvent.click(
     await screen.findByRole("button", { name: "查看回信详情：reply" }),
   );
@@ -259,51 +297,22 @@ it("explains historically unverified feedback inside the detail without claiming
   expect(screen.queryByText(/目标状态已回查确认/)).not.toBeInTheDocument();
 });
 
-it("paginates the selected record type and resets to the first page on a tab switch", async () => {
-  mocks.mail.mockImplementation((offset: number, tab: string) =>
-    Promise.resolve(response({ has_more: tab === "sent" && offset === 0 })),
+it("paginates alert records and returns to the previous page", async () => {
+  mocks.mail.mockImplementation((offset: number) =>
+    Promise.resolve(response({ has_more: offset === 0 })),
   );
   render(
     <MemoryRouter>
       <MailFollowup />
     </MemoryRouter>,
   );
-  const next = await screen.findByRole("button", { name: "下一页" });
-  fireEvent.click(next);
+  fireEvent.click(await screen.findByRole("button", { name: "下一页" }));
   expect(await screen.findByText("第 2 页")).toBeInTheDocument();
   expect(mocks.mail).toHaveBeenLastCalledWith(100, "sent");
   expect(screen.getByRole("button", { name: "下一页" })).toBeDisabled();
-  fireEvent.click(screen.getByRole("tab", { name: "回信记录" }));
+  fireEvent.click(screen.getByRole("button", { name: "上一页" }));
   expect(await screen.findByText("第 1 页")).toBeInTheDocument();
-  expect(mocks.mail).toHaveBeenLastCalledWith(0, "received");
-  expect(screen.getByRole("button", { name: "上一页" })).toBeDisabled();
-});
-
-it("discards a late response from the previous tab instead of replacing current records", async () => {
-  let finishSent: (result: ReturnType<typeof response>) => void = () => {};
-  mocks.mail.mockImplementation((_offset: number, tab: string) =>
-    tab === "sent"
-      ? new Promise((resolve) => {
-          finishSent = resolve;
-        })
-      : Promise.resolve(
-          response({
-            replies: [{ ...data.replies[0], sender: "latest@example.com" }],
-          }),
-        ),
-  );
-  render(
-    <MemoryRouter>
-      <MailFollowup />
-    </MemoryRouter>,
-  );
-  fireEvent.click(screen.getByRole("tab", { name: "回信记录" }));
-  expect(await screen.findByText("latest@example.com")).toBeInTheDocument();
-  await act(async () => {
-    finishSent(response());
-  });
-  expect(screen.getByText("latest@example.com")).toBeInTheDocument();
-  expect(screen.queryByText("owner@example.com")).not.toBeInTheDocument();
+  expect(mocks.mail).toHaveBeenLastCalledWith(0, "sent");
 });
 
 it("refreshes an open detail after a new processing state arrives", async () => {
@@ -348,4 +357,264 @@ it("links mail configuration to the shared full-page configuration", async () =>
     "/suites/host-security-monitor/configuration",
   );
   expect(screen.queryByLabelText("责任人邮箱")).not.toBeInTheDocument();
+});
+
+const manual = (
+  overrides: Partial<MailManualStatus> = {},
+): MailManualStatus => ({
+  available: true,
+  reason: "尚无关联回信，可人工跟进",
+  state: null,
+  request_id: null,
+  error: null,
+  updated_at: null,
+  ...overrides,
+});
+function setManualNotice(value = manual()) {
+  mocks.mail.mockResolvedValue({
+    data: { ...data, notices: [{ ...data.notices[0], manual: value }] },
+  });
+}
+
+it("marks a notice handled only after the server confirms XDR state", async () => {
+  setManualNotice();
+  let finish: (result: { data: MailManualStatus }) => void = () => {};
+  mocks.setMailManualStatus.mockImplementation(
+    () =>
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+  );
+  render(
+    <MemoryRouter>
+      <MailFollowup />
+    </MemoryRouter>,
+  );
+  fireEvent.click(
+    await screen.findByRole("button", { name: "标记已处置：event" }),
+  );
+  expect(screen.queryByText("已处置 · XDR 已确认")).not.toBeInTheDocument();
+  expect(
+    screen.getByRole("button", { name: "标记已处置：event" }),
+  ).toBeDisabled();
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  expect(mocks.setMailManualStatus).toHaveBeenCalledWith("notice", {
+    request_id: expect.stringMatching(/^[a-f0-9-]{36}$/i),
+    state: "handled",
+  });
+  await act(async () =>
+    finish({
+      data: manual({
+        available: false,
+        state: "handled",
+        reason: "XDR 已回查确认",
+      }),
+    }),
+  );
+  expect(screen.getByText("已处置 · XDR 已确认")).toBeInTheDocument();
+  expect(
+    screen.queryByRole("button", { name: "标记已处置：event" }),
+  ).not.toBeInTheDocument();
+});
+
+it("keeps a pending write distinct from handled and provides a readback action", async () => {
+  setManualNotice(
+    manual({
+      available: false,
+      state: "pending",
+      request_id: "existing-request",
+      reason: "写回结果待确认",
+    }),
+  );
+  mocks.recheckMailManualStatus.mockResolvedValue({
+    data: manual({
+      available: false,
+      state: "handled",
+      reason: "XDR 已回查确认",
+    }),
+  });
+  render(
+    <MemoryRouter>
+      <MailFollowup />
+    </MemoryRouter>,
+  );
+  expect(
+    await screen.findByText("待回查 · 尚未确认已处置"),
+  ).toBeInTheDocument();
+  expect(
+    screen.queryByRole("button", { name: "标记已处置：event" }),
+  ).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "回查处置状态：event" }));
+  expect(await screen.findByText("已处置 · XDR 已确认")).toBeInTheDocument();
+  expect(mocks.recheckMailManualStatus).toHaveBeenCalledWith("notice");
+  expect(mocks.setMailManualStatus).not.toHaveBeenCalled();
+});
+
+it("records unhandled without pretending to change XDR to an earlier status", async () => {
+  setManualNotice();
+  mocks.setMailManualStatus.mockResolvedValue({
+    data: manual({ state: "unhandled", reason: "仅记录人工跟进" }),
+  });
+  render(
+    <MemoryRouter>
+      <MailFollowup />
+    </MemoryRouter>,
+  );
+  fireEvent.click(
+    await screen.findByRole("button", { name: "标记未处置：event" }),
+  );
+  expect(await screen.findByText("未处置")).toBeInTheDocument();
+  expect(mocks.setMailManualStatus).toHaveBeenCalledWith("notice", {
+    request_id: expect.any(String),
+    state: "unhandled",
+  });
+  expect(screen.getByText(/不回退 XDR 状态/)).toBeInTheDocument();
+});
+
+it("keeps a stable request ID for an uncertain retry and supports intranet HTTP", async () => {
+  setManualNotice();
+  const randomUUID = vi
+    .spyOn(crypto, "randomUUID")
+    .mockImplementation(() => "00000000-0000-4000-8000-000000000001");
+  Object.defineProperty(crypto, "randomUUID", {
+    configurable: true,
+    value: undefined,
+  });
+  mocks.setMailManualStatus.mockRejectedValueOnce(new Error("network"));
+  mocks.setMailManualStatus.mockResolvedValueOnce({
+    data: manual({ state: "pending", available: false }),
+  });
+  try {
+    render(
+      <MemoryRouter>
+        <MailFollowup />
+      </MemoryRouter>,
+    );
+    fireEvent.click(
+      await screen.findByRole("button", { name: "标记已处置：event" }),
+    );
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "重试将沿用原请求",
+    );
+    expect(
+      screen.getByRole("button", { name: "标记未处置：event" }),
+    ).toBeDisabled();
+    const first = mocks.setMailManualStatus.mock.calls[0][1];
+    expect(first.request_id).toMatch(
+      /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "标记已处置：event" }));
+    await screen.findByText("待回查 · 尚未确认已处置");
+    expect(mocks.setMailManualStatus.mock.calls[1][1]).toEqual(first);
+  } finally {
+    randomUUID.mockRestore();
+  }
+});
+
+it("does not offer manual approval when a reply is already being processed", async () => {
+  setManualNotice(
+    manual({ available: false, reason: "已收到回信，自动处理反馈" }),
+  );
+  render(
+    <MemoryRouter>
+      <MailFollowup />
+    </MemoryRouter>,
+  );
+  await screen.findByText("已收到回信，自动处理反馈");
+  expect(
+    screen.queryByRole("button", { name: /标记.*处置/ }),
+  ).not.toBeInTheDocument();
+  mocks.mail.mockResolvedValue(
+    response({ replies: [{ ...data.replies[0], state: "needs_review" }] }),
+  );
+  fireEvent.click(screen.getByRole("button", { name: "刷新记录" }));
+  expect(await screen.findByText("反馈待核验")).toBeInTheDocument();
+  expect(screen.queryByText(/待人工确认/)).not.toBeInTheDocument();
+  expect(
+    screen.queryByRole("button", { name: /标记.*处置/ }),
+  ).not.toBeInTheDocument();
+});
+
+it("discards an old poll that finishes after a successful manual update", async () => {
+  setManualNotice();
+  mocks.setMailManualStatus.mockResolvedValue({
+    data: manual({ state: "handled", available: false }),
+  });
+  render(
+    <MemoryRouter>
+      <MailFollowup />
+    </MemoryRouter>,
+  );
+  await screen.findByRole("button", { name: "标记已处置：event" });
+  let finishPoll: (result: ReturnType<typeof response>) => void = () => {};
+  mocks.mail.mockImplementationOnce(
+    () =>
+      new Promise((resolve) => {
+        finishPoll = resolve;
+      }),
+  );
+  fireEvent.click(screen.getByRole("button", { name: "刷新记录" }));
+  fireEvent.click(screen.getByRole("button", { name: "标记已处置：event" }));
+  await screen.findByText("已处置 · XDR 已确认");
+  await act(async () => finishPoll(response()));
+  expect(screen.getByText("已处置 · XDR 已确认")).toBeInTheDocument();
+});
+
+it("uses the notice-specific API for manual status and a body-free readback", async () => {
+  const { monitoringApi: api } = await vi.importActual<
+    typeof import("@/api/securityMonitoring")
+  >("@/api/securityMonitoring");
+  const post = vi.spyOn(client, "post").mockResolvedValue({ data: manual() });
+  try {
+    await api.setMailManualStatus("notice/1", {
+      request_id: "request",
+      state: "handled",
+    });
+    expect(post).toHaveBeenLastCalledWith(
+      "/api/monitoring/host-security-monitor/mail/notices/notice%2F1/manual-status",
+      { request_id: "request", state: "handled" },
+    );
+    await api.recheckMailManualStatus("notice/1");
+    expect(post).toHaveBeenLastCalledWith(
+      "/api/monitoring/host-security-monitor/mail/notices/notice%2F1/manual-status/recheck",
+    );
+  } finally {
+    post.mockRestore();
+  }
+});
+
+it("uses the newest feedback state instead of an older verified reply", async () => {
+  mocks.mail.mockResolvedValue({
+    data: {
+      ...data,
+      notices: [
+        {
+          ...data.notices[0],
+          reply_received: true,
+          items: [
+            {
+              id: "new",
+              state: "pending",
+              target: 40,
+              reason: "最新反馈等待回查",
+            },
+            {
+              id: "old",
+              state: "verified",
+              target: 10,
+              reason: "较早反馈已核验",
+            },
+          ],
+        },
+      ],
+    },
+  });
+  render(
+    <MemoryRouter>
+      <MailFollowup />
+    </MemoryRouter>,
+  );
+  const row = (await screen.findByText("待跟进告警")).closest("tr")!;
+  expect(within(row).getByText("已收到，待下轮处理")).toBeInTheDocument();
+  expect(within(row).queryByText("目标状态已回查确认")).not.toBeInTheDocument();
 });

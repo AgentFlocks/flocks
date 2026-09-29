@@ -6,8 +6,6 @@ import {
   type ReactNode,
 } from "react";
 import {
-  ArrowDownLeft,
-  ArrowUpRight,
   ChevronLeft,
   ChevronRight,
   Mail,
@@ -21,6 +19,7 @@ import {
   monitoringApi,
   MONITOR_PATH,
   type MailHistory,
+  type MailManualStatus,
 } from "@/api/securityMonitoring";
 
 type Notice = MailHistory["notices"][number] & { sent_at?: string | null };
@@ -28,7 +27,6 @@ type Reply = MailHistory["replies"][number];
 type Selection =
   | { kind: "sent"; record: Notice }
   | { kind: "received"; record: Reply };
-type Tab = Selection["kind"];
 const PAGE_SIZE = 100;
 const states: Record<string, string> = {
   queued: "等待发送",
@@ -38,7 +36,7 @@ const states: Record<string, string> = {
   skipped: "未发送",
   pending: "已收到，待下轮处理",
   interpreted: "已解读，等待标记或回查",
-  needs_review: "待人工确认",
+  needs_review: "反馈待核验",
   verified: "目标状态已回查确认",
   mismatch: "回查不一致",
   failed: "处理失败",
@@ -52,6 +50,98 @@ const date = (s: string) =>
 const button =
   "inline-flex items-center justify-center gap-1.5 rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-600 transition-colors hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-40 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-300 dark:hover:bg-gray-800";
 const cell = "px-4 py-4 align-top";
+type ManualTarget = "handled" | "unhandled";
+
+function requestId() {
+  if (crypto.randomUUID) return crypto.randomUUID();
+  // Intranet HTTP deployments also support getRandomValues.
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  bytes[6] = (bytes[6] & 15) | 64;
+  bytes[8] = (bytes[8] & 63) | 128;
+  const hex = Array.from(bytes, (n) => n.toString(16).padStart(2, "0")).join(
+    "",
+  );
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+function DispositionBadge({ notice }: { notice: Notice }) {
+  const handled =
+    notice.disposition_state === "handled" ||
+    (!notice.disposition_state && notice.manual?.state === "handled");
+  const source =
+    notice.disposition_source || (notice.manual?.state ? "manual" : null);
+  return (
+    <div className="space-y-1">
+      <span
+        className={`inline-flex rounded-md px-2 py-1 text-xs font-medium ${handled ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300" : "bg-blue-50 text-blue-700 dark:bg-blue-950/40 dark:text-blue-300"}`}
+      >
+        {handled ? "已处置 · XDR 已确认" : "未处置"}
+      </span>
+      {source && (
+        <p className="text-xs text-gray-500">
+          {source === "reply" ? "回信自动更新" : "人工标记"}
+        </p>
+      )}
+      {notice.manual?.state === "pending" && (
+        <p className="text-xs text-blue-700 dark:text-blue-300">
+          待回查 · 尚未确认已处置
+        </p>
+      )}
+      {notice.manual?.state === "failed" && (
+        <p className="text-xs text-amber-700">标记未完成</p>
+      )}
+    </div>
+  );
+}
+
+function ReplyBadge({ notice }: { notice: Notice }) {
+  const received =
+    notice.reply_received || !!notice.replies?.length || !!notice.items.length;
+  return (
+    <div className="space-y-1">
+      <span
+        className={`inline-flex rounded-md px-2 py-1 text-xs font-medium ${received ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300" : "bg-gray-100 text-gray-500 dark:bg-gray-800 dark:text-gray-400"}`}
+      >
+        {received ? "已收到回信" : "尚无回信"}
+      </span>
+      {received && (
+        <p className="text-xs text-gray-500">
+          {notice.items.length
+            ? label(notice.items[0].state)
+            : "回信已保存，等待自动处理"}
+        </p>
+      )}
+    </div>
+  );
+}
+
+function applyManual(notice: Notice, manual: MailManualStatus): Notice {
+  return {
+    ...notice,
+    manual,
+    ...(manual.state === "handled"
+      ? ({
+          disposition_state: "handled",
+          disposition_source: "manual",
+        } as const)
+      : manual.state === "unhandled" && notice.disposition_state !== "handled"
+        ? ({
+            disposition_state: "unhandled",
+            disposition_source: "manual",
+          } as const)
+        : {}),
+  };
+}
+
+function DeliveryBadge({ notice }: { notice: Notice }) {
+  return notice.state === "queued" && notice.error ? (
+    <span className="inline-flex rounded-md bg-amber-50 px-2 py-1 text-xs font-medium text-amber-800 dark:bg-amber-950/40 dark:text-amber-300">
+      发送失败 · 待重试
+    </span>
+  ) : (
+    <StatusBadge state={notice.state} />
+  );
+}
 
 export function AuthenticationNotice() {
   return (
@@ -179,6 +269,12 @@ function NoticeDetail({ notice }: { notice: Notice }) {
           {date(notice.sent_at || notice.created_at)}
         </DetailField>
         <DetailField title="收件人">{notice.recipient}</DetailField>
+        <DetailField title="投递状态">
+          <DeliveryBadge notice={notice} />
+        </DetailField>
+        <DetailField title="处置状态">
+          <DispositionBadge notice={notice} />
+        </DetailField>
         <div className="col-span-2">
           <DetailField title="关联告警">
             {notice.event.name}
@@ -195,14 +291,25 @@ function NoticeDetail({ notice }: { notice: Notice }) {
         <DetailField title="关联主机">
           {notice.event.host || "未知"}
         </DetailField>
-        <DetailField title="跟进状态">
-          <StatusBadge
-            state={
-              notice.items[notice.items.length - 1]?.state || "waiting_reply"
-            }
-          />
+        <DetailField title="回信状态">
+          <ReplyBadge notice={notice} />
         </DetailField>
       </dl>
+      {notice.manual && (
+        <div className="space-y-1 rounded-lg bg-blue-50 p-3 text-sm text-blue-800 dark:bg-blue-950/30 dark:text-blue-200">
+          <p>{notice.manual.reason}</p>
+          {notice.manual.updated_at && (
+            <p className="text-xs">
+              最近人工操作：{date(notice.manual.updated_at)}
+            </p>
+          )}
+          {notice.manual.error && (
+            <p className="text-amber-700 dark:text-amber-300">
+              {notice.manual.error}
+            </p>
+          )}
+        </div>
+      )}
       <section className="space-y-3 rounded-xl border border-gray-200 p-4 dark:border-gray-700">
         <h3 className="text-xs text-gray-500">邮件主题</h3>
         <p className="break-words font-medium">{notice.subject || "无主题"}</p>
@@ -214,6 +321,28 @@ function NoticeDetail({ notice }: { notice: Notice }) {
         </pre>
       </section>
       {notice.error && <p className="text-sm text-amber-700">{notice.error}</p>}
+      {!!notice.replies?.length && (
+        <section className="space-y-4">
+          <h3 className="text-sm font-semibold">
+            邮件往来 · 回信 {notice.replies.length} 封
+          </h3>
+          {notice.replies
+            .slice()
+            .sort((a, b) => a.received_at.localeCompare(b.received_at))
+            .map((reply) => (
+              <details
+                key={reply.id}
+                className="rounded-xl border border-blue-100 p-4 dark:border-blue-900"
+                open
+              >
+                <summary className="mb-4 cursor-pointer text-sm font-medium">
+                  {date(reply.received_at)} · {reply.sender}
+                </summary>
+                <ReplyDetail reply={reply} />
+              </details>
+            ))}
+        </section>
+      )}
       <section>
         <h3 className="mb-3 text-sm font-semibold">回信与状态跟进</h3>
         {notice.items.length === 0 ? (
@@ -337,16 +466,24 @@ function ReplyDetail({ reply }: { reply: Reply }) {
 export default function MailFollowup() {
   const [data, setData] = useState<MailHistory | null>(null),
     [error, setError] = useState("");
-  const [offset, setOffset] = useState(0),
-    [tab, setTab] = useState<Tab>("sent");
+  const [offset, setOffset] = useState(0);
   const [loading, setLoading] = useState(false),
     [selection, setSelection] = useState<Selection | null>(null);
+  const [manualBusy, setManualBusy] = useState<Record<string, boolean>>({});
+  const [manualErrors, setManualErrors] = useState<Record<string, string>>({});
+  const [uncertainTargets, setUncertainTargets] = useState<
+    Record<string, ManualTarget | undefined>
+  >({});
+  const manualRequests = useRef(
+    new Map<string, { request_id: string; state: ManualTarget }>(),
+  );
+  const inFlight = useRef(new Set<string>());
   const sequence = useRef(0);
   const refresh = useCallback(async () => {
     const id = ++sequence.current;
     setLoading(true);
     try {
-      const r = await monitoringApi.mail(offset, tab);
+      const r = await monitoringApi.mail(offset, "sent");
       if (id === sequence.current) {
         setData(r.data);
         setError("");
@@ -357,7 +494,7 @@ export default function MailFollowup() {
     } finally {
       if (id === sequence.current) setLoading(false);
     }
-  }, [offset, tab]);
+  }, [offset]);
   useEffect(() => {
     void refresh();
     const timer = window.setInterval(() => void refresh(), 10000);
@@ -366,28 +503,91 @@ export default function MailFollowup() {
       sequence.current++;
     };
   }, [refresh]);
-  const navigate = (nextTab: Tab, nextOffset: number) => {
-    if (nextTab === tab && nextOffset === offset) return;
+  const navigate = (nextOffset: number) => {
+    if (nextOffset === offset) return;
     sequence.current++;
     setSelection(null);
     setData(null);
     setError("");
     setOffset(nextOffset);
-    setTab(nextTab);
   };
-  const notices = (data?.notices || [])
-    .filter((n) => n.state === "sent")
-    .slice()
-    .sort((a, b) => {
-      const aa = a as Notice,
-        bb = b as Notice;
-      return (bb.sent_at || bb.created_at).localeCompare(
-        aa.sent_at || aa.created_at,
+  const updateManual = async (notice: Notice, target?: ManualTarget) => {
+    if (inFlight.current.has(notice.id)) return;
+    if (
+      target &&
+      (!notice.manual?.available || notice.manual.state === "pending")
+    )
+      return;
+    inFlight.current.add(notice.id);
+    setManualBusy((old) => ({ ...old, [notice.id]: true }));
+    setManualErrors((old) => ({ ...old, [notice.id]: "" }));
+    try {
+      let result;
+      if (target) {
+        let request = manualRequests.current.get(notice.id);
+        if (request && request.state !== target) return;
+        if (!request) {
+          request = { request_id: requestId(), state: target };
+          manualRequests.current.set(notice.id, request);
+        }
+        result = await monitoringApi.setMailManualStatus(notice.id, request);
+      } else {
+        result = await monitoringApi.recheckMailManualStatus(notice.id);
+      }
+      // An older poll must not replace the result of this write/recheck.
+      sequence.current++;
+      setLoading(false);
+      setData((old) =>
+        old
+          ? {
+              ...old,
+              notices: old.notices.map((n) =>
+                n.id === notice.id ? applyManual(n, result.data) : n,
+              ),
+            }
+          : old,
       );
-    });
+      setSelection((old) =>
+        old?.kind === "sent" && old.record.id === notice.id
+          ? { ...old, record: applyManual(old.record, result.data) }
+          : old,
+      );
+      manualRequests.current.delete(notice.id);
+      setUncertainTargets((old) => ({ ...old, [notice.id]: undefined }));
+    } catch (err: unknown) {
+      const detail = (err as { response?: { data?: { detail?: unknown } } })
+        ?.response?.data?.detail;
+      setManualErrors((old) => ({
+        ...old,
+        [notice.id]:
+          typeof detail === "string"
+            ? detail
+            : "请求结果未确认，请重试同一操作；重试将沿用原请求，避免重复写入。",
+      }));
+      if (target)
+        setUncertainTargets((old) => ({ ...old, [notice.id]: target }));
+      void refresh();
+    } finally {
+      inFlight.current.delete(notice.id);
+      setManualBusy((old) => ({ ...old, [notice.id]: false }));
+    }
+  };
+  const notices = (data?.notices || []).slice().sort((a, b) => {
+    const aa = a as Notice,
+      bb = b as Notice;
+    return (bb.sent_at || bb.created_at).localeCompare(
+      aa.sent_at || aa.created_at,
+    );
+  });
   const replies = (data?.replies || [])
     .slice()
     .sort((a, b) => b.received_at.localeCompare(a.received_at));
+  const linkedReplies = new Set(
+    notices.flatMap((n) => (n.replies || []).map((r) => r.id)),
+  );
+  const unmatchedReplies = replies.filter(
+    (r) => !linkedReplies.has(r.id) && !r.targets?.length,
+  );
   const replyCount = Object.values(data?.reply_counts || {}).reduce(
     (sum, count) => sum + count,
     0,
@@ -409,7 +609,7 @@ export default function MailFollowup() {
               selection.record,
           }
         : null;
-  const empty = tab === "sent" ? notices.length === 0 : replies.length === 0;
+  const empty = notices.length === 0;
   return (
     <div className="min-h-0 flex-1 overflow-auto bg-gray-50/40 p-4 sm:p-6 dark:bg-gray-950/20">
       <div className="mb-5 flex items-start justify-between gap-4">
@@ -418,7 +618,7 @@ export default function MailFollowup() {
             邮件跟进
           </h2>
           <p className="mt-1 text-xs leading-relaxed text-gray-500">
-            跨日期查看已发送通知与收到的回信。邮件已发送或收到回复均不代表处置完成。
+            每条告警集中展示发信、回信和处置状态。邮件已发送或收到回复均不代表处置完成；邮件状态和是否有回信不决定监测任务成败。
           </p>
         </div>
         <div className="flex shrink-0 flex-wrap justify-end gap-2">
@@ -461,45 +661,25 @@ export default function MailFollowup() {
           封邮件未能解析，原信保留在邮箱中，请核对并导出诊断日志。其他回信继续处理。
         </p>
       )}
+      <p className="mb-4 rounded-lg bg-blue-50 px-4 py-3 text-xs leading-relaxed text-blue-800 dark:bg-blue-950/30 dark:text-blue-200">
+        每条告警单独发一封邮件。仅发信失败或尚无回信时可人工标记：选择“已处置”将向该告警所属
+        XDR 写回处置完成，并回查确认；“未处置”仅记录跟进状态，不回退 XDR 状态。
+      </p>
       <section className="overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm dark:border-gray-800 dark:bg-gray-900">
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-gray-100 px-4 py-3 dark:border-gray-800">
-          <div
-            className="flex gap-1 rounded-lg bg-gray-100 p-1 dark:bg-gray-800"
-            role="tablist"
-            aria-label="邮件记录类型"
-          >
-            {(
-              [
-                { key: "sent", name: "发信记录", Icon: ArrowUpRight },
-                { key: "received", name: "回信记录", Icon: ArrowDownLeft },
-              ] as const
-            ).map(({ key, name, Icon }) => (
-              <button
-                key={key}
-                id={`mail-tab-${key}`}
-                aria-controls="mail-records"
-                role="tab"
-                aria-selected={tab === key}
-                className={`inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm transition-colors ${tab === key ? "bg-white font-medium text-blue-700 shadow-sm dark:bg-gray-700 dark:text-blue-300" : "text-gray-500 hover:text-gray-800 dark:hover:text-gray-200"}`}
-                onClick={() => navigate(key, 0)}
-              >
-                <Icon className="h-3.5 w-3.5" aria-hidden="true" />
-                {name}
-              </button>
-            ))}
-          </div>
+          <h3 id="mail-records-title" className="text-sm font-semibold">
+            告警邮件跟进
+          </h3>
           {data && (
             <p className="text-xs text-gray-500">
-              {tab === "sent"
-                ? `已发送 ${data.counts.sent || 0} 封`
-                : `已收到 ${replyCount} 封 · 待处理 ${(data.reply_counts.pending || 0) + (data.reply_counts.interpreted || 0)} 封`}
+              已发送 {data.counts.sent || 0} 封 · 已收到 {replyCount} 封回信
             </p>
           )}
         </div>
         <div
           id="mail-records"
-          role="tabpanel"
-          aria-labelledby={`mail-tab-${tab}`}
+          role="region"
+          aria-labelledby="mail-records-title"
           aria-busy={loading}
         >
           {!data && loading && (
@@ -512,145 +692,139 @@ export default function MailFollowup() {
           )}
           {data && !empty && (
             <div className="overflow-x-auto">
-              <table className="w-full min-w-[760px] table-fixed text-left text-sm">
+              <table className="w-full min-w-[1240px] table-fixed text-left text-sm">
                 <caption className="sr-only">
-                  {tab === "sent"
-                    ? "已发送邮件记录，按发送时间从新到旧"
-                    : "收到的回信记录，按收到时间从新到旧"}
+                  告警邮件跟进，按时间从新到旧，包含发信、回信和处置状态
                 </caption>
                 <thead className="bg-gray-50/80 text-xs font-medium text-gray-500 dark:bg-gray-800/50">
                   <tr>
-                    <th className="w-40 px-4 py-3">
-                      {tab === "sent" ? "发送时间" : "收到时间"}
-                    </th>
+                    <th className="w-40 px-4 py-3">发送 / 记录时间</th>
                     <th className="px-4 py-3">关联事件 / ID</th>
-                    <th className="w-48 px-4 py-3">
-                      {tab === "sent" ? "责任人邮箱" : "发件人"}
-                    </th>
-                    <th className="w-44 px-4 py-3">
-                      {tab === "sent" ? "跟进状态" : "处理状态"}
-                    </th>
+                    <th className="w-44 px-4 py-3">责任人邮箱</th>
+                    <th className="w-36 px-4 py-3">发信状态</th>
+                    <th className="w-36 px-4 py-3">回信状态</th>
+                    <th className="w-60 px-4 py-3">处置标签 / 操作</th>
                     <th className="w-24 px-4 py-3">
-                      <span className="sr-only">操作</span>
+                      <span className="sr-only">详情</span>
                     </th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-100 dark:divide-gray-800">
-                  {tab === "sent"
-                    ? notices.map((n) => (
-                        <tr
-                          key={n.id}
-                          className="cursor-pointer transition-colors hover:bg-blue-50/50 dark:hover:bg-blue-950/20"
-                          onClick={() =>
-                            setSelection({ kind: "sent", record: n })
-                          }
-                        >
-                          <td
-                            className={`${cell} text-xs leading-relaxed text-gray-500`}
-                          >
-                            {date((n as Notice).sent_at || n.created_at)}
-                          </td>
-                          <td className={cell}>
-                            <p className="line-clamp-2 font-medium text-gray-800 dark:text-gray-200">
-                              {n.event.name || "未命名事件"}
-                            </p>
-                            <p className="mt-1 break-all font-mono text-xs text-gray-500">
-                              {n.event.id}
-                            </p>
-                            {(n.event.device_name || n.event.device) && (
-                              <p className="mt-1 text-xs text-gray-500">
-                                {n.event.device_name || n.event.device}
-                              </p>
-                            )}
-                          </td>
-                          <td
-                            className={`${cell} break-words text-xs text-gray-600 dark:text-gray-400`}
-                          >
-                            {n.recipient}
-                          </td>
-                          <td className={cell}>
-                            <StatusBadge
-                              state={
-                                n.items[n.items.length - 1]?.state ||
-                                "waiting_reply"
-                              }
-                            />
-                          </td>
-                          <td className={cell}>
+                  {notices.map((n) => (
+                    <tr
+                      key={n.id}
+                      className="cursor-pointer transition-colors hover:bg-blue-50/50 dark:hover:bg-blue-950/20"
+                      onClick={() => setSelection({ kind: "sent", record: n })}
+                    >
+                      <td
+                        className={`${cell} text-xs leading-relaxed text-gray-500`}
+                      >
+                        {date((n as Notice).sent_at || n.created_at)}
+                      </td>
+                      <td className={cell}>
+                        <p className="line-clamp-2 font-medium text-gray-800 dark:text-gray-200">
+                          {n.event.name || "未命名事件"}
+                        </p>
+                        <p className="mt-1 break-all font-mono text-xs text-gray-500">
+                          {n.event.id}
+                        </p>
+                        {(n.event.device_name || n.event.device) && (
+                          <p className="mt-1 text-xs text-gray-500">
+                            {n.event.device_name || n.event.device}
+                          </p>
+                        )}
+                      </td>
+                      <td
+                        className={`${cell} break-words text-xs text-gray-600 dark:text-gray-400`}
+                      >
+                        {n.recipient}
+                      </td>
+                      <td className={cell}>
+                        <DeliveryBadge notice={n} />
+                      </td>
+                      <td className={cell}>
+                        <ReplyBadge notice={n} />
+                      </td>
+                      <td className={cell} onClick={(e) => e.stopPropagation()}>
+                        <div className="space-y-2">
+                          <DispositionBadge notice={n} />
+                          {n.manual?.state === "pending" ? (
                             <button
-                              className="text-xs font-medium text-blue-600 hover:underline dark:text-blue-400"
-                              aria-label={`查看发信详情：${n.event.id}`}
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                setSelection({ kind: "sent", record: n });
-                              }}
+                              className={button}
+                              disabled={manualBusy[n.id]}
+                              onClick={() => void updateManual(n)}
+                              aria-label={`回查处置状态：${n.event.id}`}
                             >
-                              查看详情
+                              {manualBusy[n.id] ? "回查中…" : "回查状态"}
                             </button>
-                          </td>
-                        </tr>
-                      ))
-                    : replies.map((r) => (
-                        <tr
-                          key={r.id}
-                          className="cursor-pointer transition-colors hover:bg-blue-50/50 dark:hover:bg-blue-950/20"
-                          onClick={() =>
-                            setSelection({ kind: "received", record: r })
-                          }
-                        >
-                          <td
-                            className={`${cell} text-xs leading-relaxed text-gray-500`}
-                          >
-                            {date(r.received_at)}
-                          </td>
-                          <td className={cell}>
-                            {r.targets?.length ? (
-                              r.targets.map((t, index) => (
-                                <div
-                                  key={`${t.event_id}-${index}`}
-                                  className={index ? "mt-2" : ""}
+                          ) : (
+                            n.manual?.available && (
+                              <div className="flex flex-wrap gap-2">
+                                <button
+                                  className={`${button} text-emerald-700 dark:text-emerald-300`}
+                                  disabled={
+                                    manualBusy[n.id] ||
+                                    n.manual.state === "handled" ||
+                                    uncertainTargets[n.id] === "unhandled"
+                                  }
+                                  aria-label={`标记已处置：${n.event.id}`}
+                                  onClick={() =>
+                                    void updateManual(n, "handled")
+                                  }
                                 >
-                                  <p className="line-clamp-2 font-medium text-gray-800 dark:text-gray-200">
-                                    {t.name || "未命名事件"}
-                                  </p>
-                                  <p className="mt-1 break-all font-mono text-xs text-gray-500">
-                                    {t.event_id}
-                                  </p>
-                                  {(t.device_name || t.device) && (
-                                    <p className="mt-1 text-xs text-gray-500">
-                                      {t.device_name || t.device}
-                                    </p>
-                                  )}
-                                </div>
-                              ))
-                            ) : (
-                              <span className="rounded-md bg-gray-100 px-2 py-1 text-xs text-gray-500 dark:bg-gray-800">
-                                待关联
-                              </span>
-                            )}
-                          </td>
-                          <td
-                            className={`${cell} break-words text-xs text-gray-600 dark:text-gray-400`}
-                          >
-                            {r.sender}
-                          </td>
-                          <td className={cell}>
-                            <StatusBadge state={r.state} />
-                          </td>
-                          <td className={cell}>
-                            <button
-                              className="text-xs font-medium text-blue-600 hover:underline dark:text-blue-400"
-                              aria-label={`查看回信详情：${r.id}`}
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                setSelection({ kind: "received", record: r });
-                              }}
+                                  {manualBusy[n.id] ? "处理中…" : "标记已处置"}
+                                </button>
+                                <button
+                                  className={button}
+                                  disabled={
+                                    manualBusy[n.id] ||
+                                    n.manual.state === "unhandled" ||
+                                    uncertainTargets[n.id] === "handled"
+                                  }
+                                  aria-label={`标记未处置：${n.event.id}`}
+                                  onClick={() =>
+                                    void updateManual(n, "unhandled")
+                                  }
+                                >
+                                  标记未处置
+                                </button>
+                              </div>
+                            )
+                          )}
+                          {n.manual?.reason && (
+                            <p className="text-xs leading-relaxed text-gray-500">
+                              {n.manual.reason}
+                            </p>
+                          )}
+                          {n.manual?.error && (
+                            <p className="text-xs text-amber-700 dark:text-amber-300">
+                              {n.manual.error}
+                            </p>
+                          )}
+                          {manualErrors[n.id] && (
+                            <p
+                              role="alert"
+                              className="text-xs text-red-700 dark:text-red-300"
                             >
-                              查看详情
-                            </button>
-                          </td>
-                        </tr>
-                      ))}
+                              {manualErrors[n.id]}
+                            </p>
+                          )}
+                        </div>
+                      </td>
+                      <td className={cell}>
+                        <button
+                          className="text-xs font-medium text-blue-600 hover:underline dark:text-blue-400"
+                          aria-label={`查看发信详情：${n.event.id}`}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setSelection({ kind: "sent", record: n });
+                          }}
+                        >
+                          查看详情
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
                 </tbody>
               </table>
             </div>
@@ -661,11 +835,9 @@ export default function MailFollowup() {
                 className="mb-1 h-8 w-8 text-gray-300 dark:text-gray-600"
                 aria-hidden="true"
               />
-              <p>{tab === "sent" ? "暂无已发送邮件" : "暂无回信记录"}</p>
+              <p>暂无告警邮件记录</p>
               <p className="text-xs">
-                {tab === "sent"
-                  ? "通知成功发出后，会显示在这里。"
-                  : "收到责任人回信后，会显示在这里。"}
+                已发送、发送失败或结果待确认的通知会显示在这里。
               </p>
             </div>
           )}
@@ -679,7 +851,7 @@ export default function MailFollowup() {
               <button
                 className={button}
                 disabled={offset === 0 || loading}
-                onClick={() => navigate(tab, Math.max(0, offset - PAGE_SIZE))}
+                onClick={() => navigate(Math.max(0, offset - PAGE_SIZE))}
               >
                 <ChevronLeft className="h-4 w-4" aria-hidden="true" />
                 上一页
@@ -687,7 +859,7 @@ export default function MailFollowup() {
               <button
                 className={button}
                 disabled={!data.has_more || loading}
-                onClick={() => navigate(tab, offset + PAGE_SIZE)}
+                onClick={() => navigate(offset + PAGE_SIZE)}
               >
                 下一页
                 <ChevronRight className="h-4 w-4" aria-hidden="true" />
@@ -696,9 +868,42 @@ export default function MailFollowup() {
           </div>
         )}
       </section>
+      {!!unmatchedReplies.length && (
+        <section className="mt-5 rounded-xl border border-blue-100 bg-white p-4 dark:border-blue-900 dark:bg-gray-900">
+          <h3 className="text-sm font-semibold">
+            待关联回信 · {unmatchedReplies.length} 封
+          </h3>
+          <p className="mt-1 text-xs text-gray-500">
+            回信已保存，尚未关联到具体告警；不需要人工审批。
+          </p>
+          <ul className="mt-3 divide-y divide-gray-100 dark:divide-gray-800">
+            {unmatchedReplies.map((reply) => (
+              <li
+                key={reply.id}
+                className="flex flex-wrap items-center gap-3 py-3 text-sm"
+              >
+                <span className="text-xs text-gray-500">
+                  {date(reply.received_at)}
+                </span>
+                <span className="min-w-0 flex-1 break-all">{reply.sender}</span>
+                <StatusBadge state={reply.state} />
+                <button
+                  className="text-xs text-blue-600"
+                  aria-label={`查看回信详情：${reply.id}`}
+                  onClick={() =>
+                    setSelection({ kind: "received", record: reply })
+                  }
+                >
+                  查看详情
+                </button>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
       {current && (
         <Sheet
-          title={current.kind === "sent" ? "发信详情" : "回信详情"}
+          title={current.kind === "sent" ? "告警邮件详情" : "回信详情"}
           close={() => setSelection(null)}
         >
           {current.kind === "sent" ? (

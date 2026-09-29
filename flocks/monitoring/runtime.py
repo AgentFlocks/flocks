@@ -26,6 +26,22 @@ def now():
     return datetime.now(timezone.utc)
 
 
+async def mail_followup(stage, operation, fallback):
+    """Keep mail follow-up observable without changing investigation outcomes.
+
+    Cancellation still stops the round. A transport or feedback service error
+    only leaves its durable mail work pending; it cannot invalidate an XDR
+    query or investigation that completed successfully.
+    """
+    try:
+        with diag.span(stage):
+            return await operation()
+    except Exception:
+        # Exception messages can include mailbox credentials or message text.
+        # The span records only the exception type; the UI gets a safe warning.
+        return fallback
+
+
 async def publish(kind, payload):
     from flocks.server.routes.event import publish_event
     try:
@@ -147,7 +163,6 @@ async def query_device(adapter, device, start, end, recorder, *, selection=None)
 async def run(execution, policy, adapter_factory=XdrAdapter):
     started = now()  # actual semaphore admission, not scheduled/queued time
     from .mailflow import settings, process_replies, notify_batch, cutoff, health_snapshot
-    reply_high = await cutoff(policy.owner, policy.project, before=started.isoformat())
     with diag.span('session.prepare', devices=len(policy.devices), max_pages=policy.max_pages, timeout_seconds=policy.timeout_seconds):
         session, day = await ensure_daily(policy, started)
     execution.session_id = session.id
@@ -181,7 +196,13 @@ async def run(execution, policy, adapter_factory=XdrAdapter):
     try:
         if not policy.devices:
             raise ContractError('未绑定可用数据源')
-        feedback = await process_replies(policy, session.id, reply_high, recorder)
+        feedback_unavailable = {'processed': 0, 'verified': 0, 'pending': 0, 'unavailable': True,
+                                'errors': ['回信处理暂未完成；已保存反馈保留待自动核验，实际处理进度请查看邮件跟进记录。']}
+        reply_high = await mail_followup('mail.receive',
+            lambda: cutoff(policy.owner, policy.project, before=started.isoformat()), None)
+        feedback = (await mail_followup('mail.interpret',
+            lambda: process_replies(policy, session.id, reply_high, recorder), feedback_unavailable)
+            if reply_high is not None else feedback_unavailable)
         from . import investigation
         budget = investigation.Budget()
         backlog = await investigation.pending(policy)
@@ -248,23 +269,30 @@ async def run(execution, policy, adapter_factory=XdrAdapter):
                       'analyzed': sum(e.get('investigation', {}).get('state') == 'ready' for e in observed),
                       'deferred': sum(not e.get('investigation') or e['investigation']['state'] == 'deferred' for e in observed),
                       'query_complete': query_errors == 0,
-                      'errors': errors, 'disposition': '待人工确认', 'closure': 'open'}
+                      'errors': errors, 'disposition': '待跟进', 'closure': 'open'}
             return result, result, analysis_summary(result, observed, groups)
         result = await recorder.call('关联分析', {'policy': 'xdr-risk-v1'}, analyze)
         result['development_sample'] = False
         # Only completed investigations can propose a new follow-up.
         mail_events = [event for event in observed if event.get('investigation', {}).get('state') == 'ready']
-        notification = await notify_batch(policy, session.id, mail_events, recorder)
-        errors.extend(feedback.get('errors', []))
-        errors.extend(notification.get('errors', []))
-        mail_health = await health_snapshot(policy.owner, policy.project)
-        errors.extend(mail_health.get('errors', []) if automatic_enabled else [])
+        notification = await mail_followup('mail.send',
+            lambda: notify_batch(policy, session.id, mail_events, recorder),
+            {'sent': 0, 'pending': 0, 'unavailable': True,
+             'errors': ['发信阶段暂未完成；实际投递结果请查看发信记录，结果未知时不会自动重复发送。']})
+        mail_health = await mail_followup('mail.receive',
+            lambda: health_snapshot(policy.owner, policy.project),
+            {'enabled': automatic_enabled, 'receive': {'state': 'unknown'}, 'send': {'state': 'unknown'},
+             'errors': ['邮件连接状态暂无法读取；不据此判断投递失败或没有回信。']})
+        mail_warnings = list(dict.fromkeys(
+            feedback.get('errors', []) + notification.get('errors', [])
+            + (mail_health.get('errors', []) if automatic_enabled else [])))
         result['investigation_backlog'] = await investigation.status_summary(policy)
         # Backlog describes durable incident work, not a fresh round failure.
         # A retry that actually fails above still contributes a current error.
         errors[:] = list(dict.fromkeys(errors))
-        result['mail'] = {'feedback': feedback, 'notification': notification, 'enabled': automatic_enabled, 'health': mail_health}
-        result['disposition'] = '责任人邮件反馈后标记并回查' if automatic_enabled else '只读监测'
+        result['mail'] = {'feedback': feedback, 'notification': notification, 'enabled': automatic_enabled,
+                          'health': mail_health, 'warnings': mail_warnings}
+        result['disposition'] = '根据责任人反馈或允许的人工标记更新告警并回查' if automatic_enabled else '只读监测'
         # Waiting for a reply is normal completion; a failed investigation is not.
         status = 'failed' if errors else 'completed'
         summary = round_summary(status, result, observed, feedback, notification, automatic_enabled, False)

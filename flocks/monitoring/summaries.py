@@ -228,17 +228,26 @@ def round_summary(status, result, observed, feedback, notification, enabled, dev
         if backlog.get('needs_review'):
             text += '业务待人工核对不会在下轮自动续查。'
     if enabled:
-        text += f"\n邮件：发送 {notification['sent']} 封；处理回信 {feedback['processed']} 封，{feedback['verified']} 封已回查确认，{feedback['pending']} 封待跟进。"
+        sent = '发送计数暂不可用' if notification.get('unavailable') else f"发送 {notification['sent']} 封"
+        received = ('回信处理进度暂不可用' if feedback.get('unavailable') else
+                    f"处理回信 {feedback['processed']} 封，{feedback['verified']} 封已回查确认，{feedback['pending']} 封待自动核验")
+        text += f'\n邮件：{sent}；{received}。邮件状态与是否收到回信不决定本轮任务成败。'
         text += '\n' + '\n'.join(notification.get('explanations', [])[:5]) if notification.get('explanations') else ''
         if notification['sent']:
             text += '\n下一步：请回复测试处理结果；回信先保存，下一轮解读并核对原事件，明确完成后标记忽略并回查。' if development else '\n下一步：等待责任人回信，下一轮解读并核对原事件，再标记状态和回查。'
         elif feedback['pending'] or notification['pending']:
-            text += '\n下一步：查看上方失败或待核对原因及邮件跟进记录；发送结果未知时不会自动重发。'
+            text += '\n下一步：已收到的回信由程序继续核验；发送结果未知时不会自动重发。发信失败或尚未收到回信时，可在发信记录更新处置状态。'
         elif observed:
             text += '\n未新增邮件不等于没有风险；请按上方通知判断查看去重或未发送原因。'
-        health = result.get('mail', {}).get('health', {})
+        mail = result.get('mail', {})
+        health = mail.get('health', {})
+        warnings = mail.get('warnings', [])
+        if warnings:
+            text += '\n邮件跟进提示（不影响本轮任务结果）：' + '；'.join(warnings)
         if health.get('errors'):
-            text += '\n邮件通道异常：' + '；'.join(health['errors']) + '。当前不能把处理回信 0 封解释为没有新回信。'
+            if not warnings:
+                text += '\n邮件跟进提示（不影响本轮任务结果）：' + '；'.join(health['errors'])
+            text += '。当前不能把处理回信 0 封解释为没有新回信。'
     else:
         text += '\n邮件跟进未启用，本轮只做查询和分析，没有发信或修改状态。需要邮件协同时，请配置责任人邮箱并启用邮件跟进。'
     if development:
