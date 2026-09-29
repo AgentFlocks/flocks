@@ -28,6 +28,7 @@ vi.mock('react-i18next', () => ({
   useTranslation: () => ({
     t: (key: string) => ({
       'context.title': 'Context',
+      'context.settings': 'Context settings',
       'context.progress': 'Progress',
       'context.outputs': 'Outputs',
       'context.contextFiles': 'Context files',
@@ -169,7 +170,10 @@ describe('SessionContextPanel', () => {
     renderPanel();
     await user.click(screen.getByRole('button', { name: /Skills/ }));
     const skills = screen.getByRole('button', { name: /Skills/ });
-    const datasets = screen.getByRole('region', { name: 'Knowledge Sets' });
+    const settings = screen.getByRole('region', { name: 'Context settings' });
+    const datasets = within(settings).getByRole('region', { name: 'Knowledge Sets' });
+    expect(within(settings).queryByRole('heading', { name: 'Context settings' })).not.toBeInTheDocument();
+    expect(within(datasets).getByRole('heading', { name: 'Knowledge Sets' })).toHaveClass('text-xs', 'font-semibold', 'text-zinc-700');
     expect(skills.compareDocumentPosition(datasets) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     const output = screen.getByText('report.md');
     const progress = screen.getByText('Write report');

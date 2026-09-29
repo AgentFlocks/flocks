@@ -459,6 +459,7 @@
   },
   "context": {
     "title": "Context",
+    "settings": "Context settings",
     "refresh": "Refresh Context",
     "preview": "Preview",
     "download": "Download",
@@ -502,6 +503,8 @@
   "dataset": {
     "title": "Knowledge Sets",
     "scope": "Applies to all agents in this session only. Other sessions are unchanged.",
+    "scopeTitle": "Shared knowledge for this session",
+    "selectionHint": "Choose the Knowledge Sets this session needs, then apply. Cancelling leaves the saved selection unchanged.",
     "loading": "Loading session Knowledge Sets…",
     "renderFailed": "The Knowledge Set section could not be displayed. The rest of Context is still available.",
     "retry": "Retry Knowledge Sets",
@@ -529,6 +532,7 @@
     "picker": "Knowledge Set selection",
     "draftHint": "Changes are a draft until you apply. All selected Knowledge Sets must be ready and use the same embedding model ID and version.",
     "selected": "Selected Knowledge Sets",
+    "addedToSession": "Added to this session",
     "remove": "Remove Knowledge Set {{name}}",
     "noneSelected": "No Knowledge Sets in this draft.",
     "clear": "Clear selection",

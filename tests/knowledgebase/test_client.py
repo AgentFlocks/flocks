@@ -56,7 +56,7 @@ async def test_client_keeps_the_deployment_prefix_and_engine_key(base_url, expec
     def handler(request):
         assert request.method == "GET"
         assert request.url.path == expected_path
-        assert dict(request.url.params) == {"page": "1", "page_size": "20"}
+        assert dict(request.url.params) == {"page": "1", "page_size": "100"}
         assert request.headers["Authorization"] == f"Bearer {TOKEN}"
         assert request.headers["Accept"] == "application/json"
         return httpx.Response(200, json=file_page())

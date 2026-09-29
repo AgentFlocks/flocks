@@ -8,6 +8,7 @@ import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { knowledgebaseAPI } from '@/api/knowledgebase';
 import { ToastProvider } from '@/components/common/Toast';
 import session from '@/locales/en-US/session.json';
+import sessionZh from '@/locales/zh-CN/session.json';
 import common from '@/locales/en-US/common.json';
 import SessionDatasetSection from './SessionDatasetSection';
 
@@ -27,7 +28,7 @@ vi.mock('@/api/knowledgebase', async importOriginal => {
 const api = vi.mocked(knowledgebaseAPI);
 const i18n = createInstance();
 beforeAll(async () => {
-  await i18n.init({ lng: 'en-US', fallbackLng: 'en-US', resources: { 'en-US': { session, common } }, interpolation: { escapeValue: false } });
+  await i18n.init({ lng: 'en-US', fallbackLng: 'en-US', resources: { 'en-US': { session, common }, 'zh-CN': { session: sessionZh, common } }, interpolation: { escapeValue: false } });
 });
 
 function Providers({ children }: { children: ReactNode }) {
@@ -45,7 +46,158 @@ function deferred<T>() {
 }
 
 describe('SessionDatasetSection', () => {
-  beforeEach(() => { vi.resetAllMocks(); });
+  beforeEach(async () => { vi.resetAllMocks(); await i18n.changeLanguage('en-US'); });
+
+  it('keeps only the small scope description below the matching section heading', async () => {
+    api.status.mockResolvedValue({ configured: true, ready: true });
+    api.sessionDatasets.mockResolvedValue({ session_id: 'sess-1', dataset_ids: [] });
+    api.datasets.mockResolvedValue({ items: [], total: 0, page: 1 });
+    const { container } = render(<SessionDatasetSection sessionId="sess-1" />, { wrapper: Providers });
+    await screen.findByRole('button', { name: session.dataset.select });
+    const heading = screen.getByRole('heading', { name: session.dataset.title });
+    const hint = screen.getByText(session.dataset.scope);
+    expect(heading).toHaveClass('text-xs', 'font-semibold', 'text-zinc-700');
+    expect(hint).toHaveClass('session-knowledge-hint');
+    expect(heading.parentElement!.nextElementSibling).toBe(hint);
+    expect(screen.queryByText(session.dataset.scopeTitle)).not.toBeInTheDocument();
+    expect(container.querySelector('.session-knowledge-scope')).not.toBeInTheDocument();
+  });
+
+  it.each([
+    ['en-US', session],
+    ['zh-CN', sessionZh],
+  ] as const)('marks saved bindings, but not unapplied drafts, as added in %s', async (language, messages) => {
+    await i18n.changeLanguage(language);
+    const user = userEvent.setup();
+    api.status.mockResolvedValue({ configured: true, ready: true });
+    api.sessionDatasets.mockResolvedValue({ session_id: 'sess-1', dataset_ids: [], datasets: [] });
+    api.datasets.mockResolvedValue({ items: [dataset('alpha', 'Alpha')], total: 1, page: 1 });
+    api.setSessionDatasets.mockResolvedValue({ session_id: 'sess-1', dataset_ids: ['alpha'] });
+    render(<SessionDatasetSection sessionId="sess-1" />, { wrapper: Providers });
+    await user.click(await screen.findByRole('button', { name: messages.dataset.select }));
+    await user.click(screen.getByRole('checkbox', { name: 'Alpha' }));
+    expect(screen.queryByText(messages.dataset.addedToSession)).not.toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: messages.dataset.cancel }));
+    expect(screen.queryByText(messages.dataset.addedToSession)).not.toBeInTheDocument();
+    expect(api.setSessionDatasets).not.toHaveBeenCalled();
+    await user.click(screen.getByRole('button', { name: messages.dataset.select }));
+    await user.click(screen.getByRole('checkbox', { name: 'Alpha' }));
+    await user.click(screen.getByRole('button', { name: messages.dataset.apply }));
+    expect(await screen.findByText(messages.dataset.addedToSession)).toBeInTheDocument();
+  });
+
+  it('marks only bound IDs as added even when inline metadata includes other sets', async () => {
+    api.status.mockResolvedValue({ configured: true, ready: true });
+    api.sessionDatasets.mockResolvedValue({
+      session_id: 'sess-1', dataset_ids: ['alpha', 'missing'], datasets: [dataset('alpha', 'Alpha'), dataset('extra', 'Not bound')],
+    });
+    api.datasets.mockResolvedValue({ items: [], total: 0, page: 1 });
+    render(<SessionDatasetSection sessionId="sess-1" />, { wrapper: Providers });
+    expect(await screen.findByText('Alpha')).toBeInTheDocument();
+    expect(screen.getByText('missing')).toBeInTheDocument();
+    expect(screen.getAllByText(session.dataset.addedToSession)).toHaveLength(2);
+    expect(screen.queryByText('Not bound')).not.toBeInTheDocument();
+  });
+
+  it('ignores a saved response from the previously active session', async () => {
+    const user = userEvent.setup();
+    const saved = deferred<{ session_id: string; dataset_ids: string[] }>();
+    api.status.mockResolvedValue({ configured: true, ready: true });
+    api.sessionDatasets.mockImplementation(async id => ({ session_id: id, dataset_ids: id === 'sess-b' ? ['beta'] : [] }));
+    api.datasets.mockResolvedValue({ items: [dataset('alpha', 'Alpha'), dataset('beta', 'Beta')], total: 2, page: 1 });
+    api.setSessionDatasets.mockReturnValue(saved.promise);
+    const view = render(<SessionDatasetSection sessionId="sess-a" />, { wrapper: Providers });
+    await user.click(await screen.findByRole('button', { name: session.dataset.select }));
+    await user.click(screen.getByRole('checkbox', { name: 'Alpha' }));
+    await user.click(screen.getByRole('button', { name: session.dataset.apply }));
+    view.rerender(<SessionDatasetSection sessionId="sess-b" />);
+    expect(await screen.findByText('Beta')).toBeInTheDocument();
+    await act(async () => saved.resolve({ session_id: 'sess-a', dataset_ids: ['alpha'] }));
+    expect(screen.queryByText('Alpha')).not.toBeInTheDocument();
+    expect(screen.getByText('Beta')).toBeInTheDocument();
+    expect(screen.getAllByText(session.dataset.addedToSession)).toHaveLength(1);
+  });
+
+  it('does not let a pending refresh replace a newer successfully saved selection', async () => {
+    const user = userEvent.setup();
+    const alpha = dataset('alpha', 'Alpha');
+    const beta = dataset('beta', 'Beta');
+    const oldCatalog = deferred<{ items: ReturnType<typeof dataset>[]; total: number; page: number }>();
+    api.status.mockResolvedValue({ configured: true, ready: true });
+    api.sessionDatasets.mockResolvedValue({ session_id: 'sess-1', dataset_ids: ['alpha'] });
+    api.datasets.mockResolvedValue({ items: [alpha, beta], total: 2, page: 1 });
+    api.setSessionDatasets.mockResolvedValue({ session_id: 'sess-1', dataset_ids: ['beta'] });
+    render(<SessionDatasetSection sessionId="sess-1" />, { wrapper: Providers });
+    await screen.findByText('Alpha');
+    api.datasets.mockReturnValueOnce(oldCatalog.promise);
+    await user.click(screen.getByRole('button', { name: session.dataset.refresh }));
+    await waitFor(() => expect(api.datasets).toHaveBeenCalledTimes(2));
+    await user.click(screen.getByRole('button', { name: session.dataset.select }));
+    await user.click(screen.getByRole('checkbox', { name: 'Alpha' }));
+    await user.click(screen.getByRole('checkbox', { name: 'Beta' }));
+    await user.click(screen.getByRole('button', { name: session.dataset.apply }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    expect(screen.queryByText(session.dataset.loading)).not.toBeInTheDocument();
+    expect(screen.getByText('Beta')).toBeInTheDocument();
+    await act(async () => oldCatalog.resolve({ items: [alpha, beta], total: 2, page: 1 }));
+    expect(screen.queryByText('Alpha')).not.toBeInTheDocument();
+    expect(screen.getByText('Beta')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: session.dataset.select }));
+    expect(screen.getByRole('checkbox', { name: 'Beta' })).toBeChecked();
+    expect(screen.getByRole('checkbox', { name: 'Alpha' })).not.toBeChecked();
+    expect(api.setSessionDatasets).toHaveBeenCalledExactlyOnceWith('sess-1', ['beta']);
+  });
+
+  it('renders the reference card metadata and stages removal until Apply', async () => {
+    const user = userEvent.setup();
+    api.status.mockResolvedValue({ configured: true, ready: true });
+    const alpha = { ...dataset('alpha', 'Alpha'), document_count: 3 };
+    api.sessionDatasets.mockResolvedValue({ session_id: 'sess-1', dataset_ids: ['alpha'], datasets: [alpha] });
+    api.datasets.mockResolvedValue({ items: [alpha], total: 1, page: 1 });
+    api.setSessionDatasets.mockResolvedValue({ session_id: 'sess-1', dataset_ids: [] });
+    render(<SessionDatasetSection sessionId="sess-1" />, { wrapper: Providers });
+    expect(await screen.findByText('Alpha')).toBeInTheDocument();
+    expect(screen.getByText('3 files')).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: session.dataset.manage })).toHaveAttribute('href', '/workspace?tab=knowledge');
+    await user.click(screen.getByRole('button', { name: 'Remove Knowledge Set Alpha' }));
+    expect(screen.getByRole('dialog', { name: session.dataset.picker })).toBeInTheDocument();
+    expect(screen.getByRole('checkbox', { name: 'Alpha' })).not.toBeChecked();
+    expect(api.setSessionDatasets).not.toHaveBeenCalled();
+    await user.click(screen.getByRole('button', { name: session.dataset.cancel }));
+    expect(screen.getByText(session.dataset.addedToSession)).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Remove Knowledge Set Alpha' }));
+    await user.click(screen.getByRole('button', { name: session.dataset.apply }));
+    await waitFor(() => expect(api.setSessionDatasets).toHaveBeenCalledWith('sess-1', []));
+    expect(await screen.findByText(session.dataset.empty)).toBeInTheDocument();
+  });
+
+  it('does not replace unknown file metadata with a zero count', async () => {
+    api.status.mockResolvedValue({ configured: true, ready: true });
+    api.sessionDatasets.mockResolvedValue({ session_id: 'sess-1', dataset_ids: ['missing'], datasets: [] });
+    api.datasets.mockResolvedValue({ items: [], total: 0, page: 1 });
+    render(<SessionDatasetSection sessionId="sess-1" />, { wrapper: Providers });
+    expect(await screen.findByText(session.dataset.fileCountUnknown)).toBeInTheDocument();
+    expect(screen.queryByText('0 files')).not.toBeInTheDocument();
+  });
+
+  it('keeps the picker open and prevents repeated Apply while saving', async () => {
+    const user = userEvent.setup();
+    const saved = deferred<{ session_id: string; dataset_ids: string[] }>();
+    api.status.mockResolvedValue({ configured: true, ready: true });
+    api.sessionDatasets.mockResolvedValue({ session_id: 'sess-1', dataset_ids: [] });
+    api.datasets.mockResolvedValue({ items: [dataset('alpha', 'Alpha')], total: 1, page: 1 });
+    api.setSessionDatasets.mockReturnValue(saved.promise);
+    render(<SessionDatasetSection sessionId="sess-1" />, { wrapper: Providers });
+    await user.click(await screen.findByRole('button', { name: session.dataset.select }));
+    await user.click(screen.getByRole('checkbox', { name: 'Alpha' }));
+    await user.click(screen.getByRole('button', { name: session.dataset.apply }));
+    expect(screen.getByRole('button', { name: session.dataset.saving })).toBeDisabled();
+    expect(screen.getByRole('button', { name: session.dataset.cancel })).toBeDisabled();
+    expect(screen.getByRole('checkbox', { name: 'Alpha' })).toBeDisabled();
+    await act(async () => saved.resolve({ session_id: 'sess-1', dataset_ids: ['alpha'] }));
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(api.setSessionDatasets).toHaveBeenCalledTimes(1);
+  });
 
   it('keeps a load failure inside the section', async () => {
     api.status.mockResolvedValue({ configured: true, ready: true });

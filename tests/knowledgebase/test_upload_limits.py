@@ -139,7 +139,7 @@ async def test_normal_upload_preserves_contents_and_response(monkeypatch, with_l
     assert status == 201
     assert body == {"data": {"id": "f1", "name": "note.txt", "size": 3, "parent_id": None}}
     assert reads == len(chunks)
-    client.upload.assert_awaited_once_with("note.txt", b"abc", "text/plain")
+    client.upload.assert_awaited_once_with("note.txt", b"abc", "text/plain", parent_id=None)
 
 
 @pytest.mark.asyncio
@@ -213,7 +213,7 @@ async def test_upload_pins_generation_and_limit_through_all_awaits(monkeypatch, 
 
         monkeypatch.setattr(UploadFile, "read", read)
     else:
-        async def upload(*args):
+        async def upload(*args, **kwargs):
             await pause()
             return {"id": "old-generation"}
 
@@ -232,7 +232,7 @@ async def test_upload_pins_generation_and_limit_through_all_awaits(monkeypatch, 
         finish.set()
         status, _, _ = await pending
         assert status == 201  # Old limit, not the replacement's one-byte limit.
-        old.upload.assert_awaited_once_with("note.txt", b"abc", "text/plain")
+        old.upload.assert_awaited_once_with("note.txt", b"abc", "text/plain", parent_id=None)
     old.close.assert_awaited_once()
     new.upload.assert_not_awaited()
     assert runtime.get_client() is new

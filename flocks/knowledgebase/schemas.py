@@ -21,6 +21,58 @@ def resource_id(value: str) -> str:
     return value
 
 
+def file_name(value: str) -> str:
+    if any(ord(char) < 32 or 127 <= ord(char) < 160 for char in value):
+        raise ValueError("control characters are not allowed")
+    cleaned = value.strip()
+    if not cleaned or cleaned in {".", ".."} or "/" in cleaned or "\\" in cleaned:
+        raise ValueError("a single file or folder name is required")
+    return cleaned
+
+
+class FolderCreate(Input):
+    name: str = Field(min_length=1, max_length=255)
+    parent_id: str | None = None
+
+    @field_validator("name")
+    @classmethod
+    def name_value(cls, value: str) -> str:
+        return file_name(value)
+
+    @field_validator("parent_id")
+    @classmethod
+    def parent(cls, value: str | None) -> str | None:
+        return resource_id(value) if value is not None else None
+
+
+class FileUpdate(Input):
+    name: str | None = Field(default=None, min_length=1, max_length=255)
+    parent_id: str | None = None
+
+    @field_validator("name", "parent_id", mode="before")
+    @classmethod
+    def non_null_fields(cls, value):
+        if value is None:
+            raise ValueError("updated fields must be strings")
+        return value
+
+    @field_validator("name")
+    @classmethod
+    def name_value(cls, value: str) -> str:
+        return file_name(value)
+
+    @field_validator("parent_id")
+    @classmethod
+    def parent(cls, value: str) -> str:
+        return resource_id(value)
+
+    @model_validator(mode="after")
+    def has_changes(self):
+        if not self.model_fields_set:
+            raise ValueError("at least one updated field is required")
+        return self
+
+
 class IdList(Input):
     ids: list[str] = Field(min_length=1, max_length=100)
 
@@ -39,7 +91,7 @@ class DatasetCreate(Input):
     @field_validator("name")
     @classmethod
     def dataset_name(cls, value: str) -> str:
-        if any(ord(char) < 32 for char in value):
+        if any(ord(char) < 32 or 127 <= ord(char) < 160 for char in value):
             raise ValueError("control characters are not allowed")
         cleaned = value.strip()
         if not cleaned:
@@ -49,7 +101,12 @@ class DatasetCreate(Input):
     @field_validator("description")
     @classmethod
     def dataset_description(cls, value: str) -> str:
-        if any(ord(char) < 32 for char in value):
+        # Textareas use LF or CRLF; keep their content while rejecting other
+        # C0/C1 controls (including a bare carriage return).
+        if any(
+            (ord(char) < 32 and char not in "\n\t") or 127 <= ord(char) < 160
+            for char in value.replace("\r\n", "\n")
+        ):
             raise ValueError("control characters are not allowed")
         return value.strip()
 

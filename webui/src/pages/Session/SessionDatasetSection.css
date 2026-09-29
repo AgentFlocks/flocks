@@ -1,0 +1,74 @@
+.session-knowledge {
+  padding: 10px 12px 12px;
+  color: #586d87;
+  font-size: 12px;
+}
+
+.session-knowledge svg { flex-shrink: 0; stroke-width: 1.65; }
+.session-knowledge-heading { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.session-knowledge-heading > svg { stroke-width: 2; }
+.session-knowledge-heading h3 { margin: 0; }
+.session-knowledge-heading > button { margin-left: auto; width: 24px; height: 20px; }
+.session-knowledge-hint { margin: 0 0 12px; color: #9299a4; font-size: 11px; line-height: 1.6; }
+.session-knowledge-cards { margin: 0; padding: 0; list-style: none; }
+.session-knowledge-card { display: flex; align-items: center; gap: 12px; margin-bottom: 11px; padding: 15px 13px; border: 1px solid #dce6f2; border-radius: 11px; background: #f5f8fd; }
+.session-knowledge-avatar { display: grid; width: 37px; height: 39px; flex-shrink: 0; place-items: center; border: 1px solid #dce6f2; border-radius: 8px; background: #edf3fa; color: #6783a5; }
+.session-knowledge-avatar svg { width: 21px; height: 21px; }
+.session-knowledge-card-body { min-width: 0; flex: 1; }
+.session-knowledge-card-body strong { display: block; overflow: hidden; color: #48617d; font-size: 13px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.session-knowledge-card-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 6px; color: #95a7bb; font-size: 11px; }
+.session-knowledge-saved { display: inline-flex; align-items: center; gap: 4px; padding: 2px 5px; border-radius: 5px; background: #edf7f1; color: #20765b; font-size: 9px; }
+.session-knowledge-saved svg { width: 12px; height: 12px; }
+.session-knowledge-icon-button { display: inline-flex; width: 30px; height: 30px; flex-shrink: 0; align-items: center; justify-content: center; border-radius: 7px; color: #697381; }
+.session-knowledge-icon-button svg { width: 16px; height: 16px; }
+.session-knowledge-icon-button:hover { background: #edf1f6; color: #19212d; }
+.session-knowledge-icon-button:disabled { cursor: default; opacity: .5; }
+.session-knowledge-button { display: inline-flex; min-height: 33px; align-items: center; justify-content: center; gap: 7px; padding: 7px 11px; border: 1px solid #dfe3e9; border-radius: 8px; background: #fff; color: #19212d; font-size: 11px; font-weight: 550; line-height: 1.4; }
+.session-knowledge-button svg { width: 17px; height: 17px; }
+.session-knowledge-button:hover { background: #f8f9fb; }
+.session-knowledge-button:disabled { cursor: default; opacity: .5; }
+.session-knowledge-button.is-primary { border-color: #dc2626; background: #dc2626; color: #fff; }
+.session-knowledge-button.is-primary:hover { background: #b91c1c; }
+.session-knowledge-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 11px; margin: 16px 0; }
+.session-knowledge-manage { display: inline-flex; align-items: center; gap: 7px; color: #3e6597; font-size: 11px; text-decoration: none; }
+.session-knowledge-manage svg { width: 15px; height: 15px; }
+.session-knowledge-manage:hover { text-decoration: underline; }
+.session-knowledge-empty { padding: 21px 12px; border: 1px dashed #dce6f2; border-radius: 10px; color: #9299a4; font-size: 11px; line-height: 1.8; text-align: center; }
+.session-knowledge-message { margin: 0 0 12px; color: #697381; font-size: 11px; line-height: 1.8; }
+.session-knowledge dialog { width: min(530px, calc(100vw - 32px)); max-height: calc(100dvh - 48px); border-color: #e1e5eb; border-radius: 14px; box-shadow: 0 24px 90px #17233828; }
+.session-knowledge dialog::backdrop { background: #17233849; backdrop-filter: blur(2px); }
+.session-knowledge-picker { color: #19212d; }
+.session-knowledge-options { display: flex; max-height: 280px; flex-direction: column; gap: 5px; overflow-y: auto; }
+.session-knowledge-choice { display: flex; align-items: center; gap: 10px; padding: 11px 10px; border: 1px solid transparent; border-radius: 8px; font-size: 12px; }
+.session-knowledge-choice.is-selected { border-color: #e0e7ef; background: #f3f6fa; }
+.session-knowledge-choice > input { width: 15px; height: 15px; flex-shrink: 0; accent-color: #334155; }
+.session-knowledge-choice > svg { width: 18px; height: 18px; color: #6783a5; }
+.session-knowledge-choice > span { min-width: 0; flex: 1; overflow-wrap: anywhere; }
+.session-knowledge-choice > small { color: #9299a4; font-size: 10px; }
+.session-knowledge-picker-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; padding-top: 14px; border-top: 1px solid #e9edf2; }
+.session-knowledge button:focus-visible, .session-knowledge a:focus-visible, .session-knowledge input:focus-visible { outline: 2px solid #5273a0; outline-offset: 2px; }
+
+.dark .session-knowledge { border-color: #434b56; color: #b3c4d8; }
+.dark .session-knowledge-card-body strong { color: #c4d4e5; }
+.dark .session-knowledge-avatar, .dark .session-knowledge-icon-button:hover { border-color: #465a70; background: #33465a; color: #b4c9df; }
+.dark .session-knowledge-card { border-color: #40566c; background: #2d3b4c; }
+.dark .session-knowledge-card-meta { color: #9ab2cc; }
+.dark .session-knowledge-hint { color: var(--flocks-dark-text-subtle, #9aa7b4); }
+.dark .session-knowledge-saved { background: #294d3f; color: #a3d9bf; }
+.dark .session-knowledge-button { border-color: #434b56; background: #303842; color: #e2e9f0; }
+.dark .session-knowledge-button:hover { background: #3a4652; }
+.dark .session-knowledge-button.is-primary { border-color: #dc2626; background: #dc2626; color: #fff; }
+.dark .session-knowledge-button.is-primary:hover { background: #b91c1c; }
+.dark .session-knowledge-manage { color: #9bc3eb; }
+.dark .session-knowledge-empty { border-color: #40566c; color: #a0afbf; }
+.dark .session-knowledge-message, .dark .session-knowledge-icon-button { color: #b0bdcc; }
+.dark .session-knowledge-picker { color: #e2e9f0; }
+.dark .session-knowledge-choice.is-selected { border-color: #465a70; background: #33465a; }
+.dark .session-knowledge-choice > small { color: #a0afbf; }
+.dark .session-knowledge-picker-actions { border-color: #434b56; }
+
+@media (max-width: 540px) {
+  .session-knowledge-card { padding: 12px 10px; }
+  .session-knowledge-card-body strong { font-size: 12px; }
+  .session-knowledge-choice { flex-wrap: wrap; }
+}

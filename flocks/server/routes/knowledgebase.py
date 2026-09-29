@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from contextvars import ContextVar
 
-from fastapi import APIRouter, Depends, File, Query, Request, UploadFile
+from fastapi import APIRouter, Depends, File, Form, Query, Request, UploadFile
 from fastapi.responses import JSONResponse, Response
 from fastapi.routing import APIRoute
 from pydantic import BaseModel, Field
@@ -206,14 +206,29 @@ def create_router() -> APIRouter:
         page: int = Query(default=1, ge=1, le=10000),
         page_size: int = Query(default=20, ge=1, le=100),
         q: str | None = Query(default=None, max_length=200),
+        parent_id: str | None = Query(default=None, min_length=1, max_length=128),
+        include_folders: bool = Query(default=False),
         _user=Depends(require_user),
     ):
         try:
-            return {"data": await client().files(page=page, page_size=page_size, q=q)}
+            return {"data": await client().files(
+                page=page, page_size=page_size, q=q, parent_id=parent_id, include_folders=include_folders
+            )}
         except KnowledgebaseError as exc:
             return _error(exc)
 
-    async def upload(request: Request, file: UploadFile = File(...), _user=Depends(require_user)):
+    @router.post("/folders", status_code=201)
+    async def create_folder(body: dict, _user=Depends(require_user)):
+        try:
+            return {"data": await client().create_folder(body)}
+        except KnowledgebaseError as exc:
+            return _error(exc)
+
+    async def upload(
+        request: Request, file: UploadFile = File(...),
+        parent_id: str | None = Form(default=None, min_length=1, max_length=128),
+        _user=Depends(require_user),
+    ):
         try:
             current = client()
             limit = current.connection.max_upload_bytes
@@ -231,6 +246,7 @@ def create_router() -> APIRouter:
                 file.filename or "upload",
                 b"".join(chunks),
                 file.content_type or "application/octet-stream",
+                parent_id=parent_id,
             )
             return {"data": created}
         except KnowledgebaseError as exc:
@@ -249,6 +265,14 @@ def create_router() -> APIRouter:
         except KnowledgebaseError as exc:
             return _error(exc)
         return file_content_response(body, media, inline=inline)
+
+    @router.put("/files/{file_id}", status_code=204)
+    async def update_file(file_id: str, body: dict, _user=Depends(require_user)):
+        try:
+            await client().update_file(file_id, body)
+        except KnowledgebaseError as exc:
+            return _error(exc)
+        return Response(status_code=204)
 
     @router.delete("/files/{file_id}", status_code=204)
     async def delete_file(file_id: str, _user=Depends(require_user)):
@@ -313,6 +337,19 @@ def create_router() -> APIRouter:
             return {"data": await client().documents(dataset_id, page=page, page_size=page_size, q=q)}
         except KnowledgebaseError as exc:
             return _error(exc)
+
+    @router.get("/datasets/{dataset_id}/documents/{document_id}/content")
+    async def document_content(
+        dataset_id: str,
+        document_id: str,
+        inline: bool = Query(default=False),
+        _user=Depends(require_user),
+    ):
+        try:
+            body, media = await client().document_content(dataset_id, document_id)
+        except KnowledgebaseError as exc:
+            return _error(exc)
+        return file_content_response(body, media, inline=inline)
 
     @router.post("/datasets/{dataset_id}/files")
     async def link_files(dataset_id: str, body: FileIds, _user=Depends(require_user)):

@@ -18,7 +18,7 @@ from starlette.responses import JSONResponse
 
 from .errors import KBError, KnowledgebaseError, unavailable
 from .ragflow import RagflowAdapter
-from .schemas import DatasetCreate, DatasetUpdate, Documents, LinkFiles, ListQuery, Retrieval
+from .schemas import DatasetCreate, DatasetUpdate, Documents, FileUpdate, FolderCreate, LinkFiles, ListQuery, Retrieval
 from .service import KnowledgeAPI
 
 _ID = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
@@ -153,19 +153,42 @@ class KnowledgebaseClient:
         finally:
             await form.close()
 
-    async def files(self, *, page: int = 1, page_size: int = 20, q: str | None = None) -> dict:
+    async def files(
+        self, *, page: int = 1, page_size: int = 20, q: str | None = None,
+        parent_id: str | None = None, include_folders: bool = False,
+    ) -> dict:
         query = self._query(page, page_size, q)
-        return await self._call(self._api.list_files(
+        parent = self.resource_id(parent_id) if parent_id is not None else None
+        if type(include_folders) is not bool or (parent is not None and not include_folders):
+            raise KnowledgebaseError(422, "validation_error", "A parent folder requires directory listing mode.")
+        if include_folders:
+            return await self._call(self._api.list_directory(
+                parent, page=query.page, page_size=query.page_size, keywords=query.q or None
+            ))
+        return await self._call(self._api.list_source_files(
             page=query.page, page_size=query.page_size, keywords=query.q or None
         ))
 
-    async def upload(self, filename: str, content: bytes, content_type: str) -> dict:
+    async def create_folder(self, payload: dict) -> dict:
+        model = self._payload(FolderCreate, payload)
+        return await self._call(self._api.create_folder(model))
+
+    async def update_file(self, file_id: str, payload: dict) -> None:
+        ident = self.resource_id(file_id)
+        model = self._payload(FileUpdate, payload)
+        await self._call(self._api.update_file(ident, model))
+
+    async def upload(self, filename: str, content: bytes, content_type: str, parent_id: str | None = None) -> dict:
+        parent = self.resource_id(parent_id) if parent_id is not None else None
         if len(content) > self.connection.max_upload_bytes:
             raise KnowledgebaseError(413, "request_too_large", "The file exceeds the upload limit.")
         name, media = await self._upload_metadata(filename, content_type, len(content))
-        if "/" in name or "\\" in name or name in {".", ".."} or len(name) > 255:
+        if (
+            "/" in name or "\\" in name or name in {".", ".."} or not name.strip() or len(name) > 255
+            or any(ord(char) < 32 or 127 <= ord(char) < 160 for char in name)
+        ):
             raise KnowledgebaseError(400, "invalid_request", "A file name is required.")
-        return await self._call(self._api.upload(name, content, media))
+        return await self._call(self._api.upload(name, content, media, parent_id=parent))
 
     async def content(self, file_id: str) -> tuple[bytes, str]:
         ident = self.resource_id(file_id)
@@ -204,6 +227,11 @@ class KnowledgebaseClient:
         return await self._call(self._api.list_documents(
             ident, page=query.page, page_size=query.page_size, keywords=query.q or None
         ))
+
+    async def document_content(self, dataset_id: str, document_id: str) -> tuple[bytes, str]:
+        dataset_ident = self.resource_id(dataset_id)
+        document_ident = self.resource_id(document_id)
+        return await self._call(self._api.download_document(dataset_ident, document_ident), download=True)
 
     async def link_files(self, dataset_id: str, file_ids: list[str]) -> dict:
         ident = self.resource_id(dataset_id)

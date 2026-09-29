@@ -12,6 +12,7 @@ from urllib.parse import quote
 import httpx
 
 from .errors import KBError, UpstreamError
+from .schemas import resource_id
 
 
 class RagflowAdapter:
@@ -258,6 +259,21 @@ class RagflowAdapter:
         result = self._object(await self.request("GET", f"/api/v1/files/{self._segment(file_id)}/ancestors"))
         return self._list({"data": result.get("parent_folders")})
 
+    async def create_folder(self, name: str, parent_id: str) -> dict:
+        return self._object(await self.request(
+            "POST", "/api/v1/files", json={"name": name, "parent_id": parent_id, "type": "folder"}
+        ))
+
+    async def move_file(self, file_id: str, *, name: str | None = None, parent_id: str | None = None) -> None:
+        payload: dict[str, Any] = {"src_file_ids": self._ids([file_id])}
+        if name is not None:
+            payload["new_name"] = name
+        if parent_id is not None:
+            payload["dest_file_id"] = parent_id
+        result = await self.request("POST", "/api/v1/files/move", json=payload)
+        if result.get("data") is not True:
+            raise UpstreamError("upstream_invalid_response")
+
     async def upload_file(
         self,
         filename: str,
@@ -281,7 +297,10 @@ class RagflowAdapter:
         return self._object(await self.request("DELETE", "/api/v1/files", json={"ids": self._ids(ids)}), mutation=True)
 
     async def download_file(self, file_id: str) -> tuple[bytes, str]:
-        async with self._stream("GET", f"/api/v1/files/{self._segment(file_id)}") as response:
+        return await self._download_content(f"/api/v1/files/{self._segment(file_id)}")
+
+    async def _download_content(self, path: str) -> tuple[bytes, str]:
+        async with self._stream("GET", path) as response:
             content = await self._read_limited(response)
             if not 200 <= response.status_code < 300:
                 self._envelope(response.status_code, content)
@@ -312,10 +331,42 @@ class RagflowAdapter:
     async def get_dataset(self, id: str) -> dict:
         async with self._stream("GET", f"/api/v1/datasets/{self._segment(id)}") as response:
             envelope = self._envelope(response.status_code, await self._read_limited(response), dataset_lookup=True)
-            return self._object(envelope)
+            dataset = self._object(envelope)
+            if dataset.get("id") != id:
+                raise UpstreamError("upstream_invalid_response")
+            return dataset
 
     async def create_dataset(self, payload: dict) -> dict:
         return self._object(await self.request("POST", "/api/v1/datasets", json=payload))
+
+    @staticmethod
+    def _dataset_update_connectors(dataset: dict) -> list[dict]:
+        # v0.27.2 GET /datasets/{id} (API-key accessible) returns all bindings,
+        # including disabled connectors. The dataset list does not. Only these
+        # two fields are consumed by Connector2KbService.link_connectors.
+        preserved = []
+        seen = set()
+        try:
+            connectors = dataset.get("connectors")
+            if not isinstance(connectors, list):
+                raise ValueError
+            for connector in connectors:
+                if not isinstance(connector, dict):
+                    raise ValueError
+                ident = resource_id(connector.get("id"))
+                auto_parse = connector.get("auto_parse")
+                if ident in seen or not isinstance(auto_parse, str) or auto_parse not in {"0", "1"}:
+                    raise ValueError
+                seen.add(ident)
+                preserved.append({"id": ident, "auto_parse": auto_parse})
+        except ValueError:
+            raise KBError(
+                502,
+                "dataset_connectors_unverified",
+                "Dataset update blocked because existing connector bindings and "
+                "synchronization options could not be verified.",
+            ) from None
+        return preserved
 
     async def update_dataset(self, id: str, payload: dict) -> None:
         if (
@@ -356,6 +407,9 @@ class RagflowAdapter:
             await self.request("GET", self._documents_path(dataset_id), params={"page": page, "page_size": page_size}),
             "docs",
         )
+
+    async def download_document(self, dataset_id: str, document_id: str) -> tuple[bytes, str]:
+        return await self._download_content(f"{self._documents_path(dataset_id)}/{self._segment(document_id)}")
 
     async def parse_documents(self, dataset_id: str, doc_ids: list[str]) -> dict:
         return self._object(

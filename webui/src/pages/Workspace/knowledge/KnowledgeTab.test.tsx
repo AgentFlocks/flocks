@@ -5,7 +5,7 @@ import { createInstance } from 'i18next';
 import { I18nextProvider } from 'react-i18next';
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { knowledgebaseAPI } from '@/api/knowledgebase';
+import { knowledgebaseAPI, type KnowledgeFile } from '@/api/knowledgebase';
 import { ConfirmProvider } from '@/components/common/ConfirmDialog';
 import { ToastProvider } from '@/components/common/Toast';
 import workspace from '@/locales/en-US/workspace.json';
@@ -29,6 +29,10 @@ vi.mock('@/components/common/FilePreview', () => ({
 }));
 
 const api = vi.mocked(knowledgebaseAPI);
+const rootFolder = { id: 'root-id', name: 'Root', parent_id: null, can_write: true };
+function directory(items: KnowledgeFile[] = [], fileTotal = items.length) {
+  return { items: items.map(item => ({ ...item, parent_id: item.parent_id ?? rootFolder.id, kind: 'file' as const, can_manage: true })), total: fileTotal, file_total: fileTotal, page: 1, current_folder: rootFolder, breadcrumbs: [rootFolder] };
+}
 const i18n = createInstance();
 beforeAll(async () => {
   await i18n.init({ lng: 'en-US', fallbackLng: 'en-US', resources: { 'en-US': { workspace, common } }, interpolation: { escapeValue: false } });
@@ -39,13 +43,39 @@ function Providers({ children }: { children: ReactNode }) {
 }
 
 describe('KnowledgeTab', () => {
-  beforeEach(() => { vi.resetAllMocks(); });
+  beforeEach(() => {
+    vi.resetAllMocks();
+    api.datasets.mockResolvedValue({ items: [], total: 0, page: 1 });
+  });
+
+  it('uses height-constrained segmented navigation without another Knowledge heading', async () => {
+    const user = userEvent.setup();
+    api.status.mockResolvedValue({ configured: true, ready: true });
+    api.directory.mockResolvedValue(directory([], 9));
+    api.datasets.mockResolvedValue({ items: [], total: 3, page: 1 });
+    const { container } = render(<KnowledgeTab />, { wrapper: Providers });
+    expect(container.firstElementChild).toHaveClass('kb-workspace', 'h-full', 'min-h-0', 'flex');
+    const files = await screen.findByRole('tab', { name: 'Files (9)' });
+    const datasets = await screen.findByRole('tab', { name: 'Knowledge Sets (3)' });
+    expect(files).toHaveAttribute('aria-selected', 'true');
+    expect(files.querySelector('.kb-tab-count')).toHaveTextContent('9');
+    expect(datasets).toHaveAttribute('tabindex', '-1');
+    expect(screen.queryByRole('heading', { name: workspace.tabs.knowledge })).not.toBeInTheDocument();
+    files.focus();
+    await user.keyboard('{ArrowRight}');
+    expect(datasets).toHaveFocus();
+    expect(datasets).toHaveAttribute('aria-selected', 'true');
+    expect(screen.getByRole('tabpanel')).toHaveAttribute('aria-labelledby', datasets.id);
+    await user.keyboard('{Home}');
+    expect(files).toHaveFocus();
+    expect(files).toHaveAttribute('aria-selected', 'true');
+  });
 
   it('shows that the service is not configured and does not load files', async () => {
     api.status.mockResolvedValue({ configured: false, ready: false });
     render(<KnowledgeTab />, { wrapper: Providers });
     expect(await screen.findByText(workspace.knowledge.unavailable.knowledgebase_not_configured)).toBeInTheDocument();
-    expect(api.files).not.toHaveBeenCalled();
+    expect(api.directory).not.toHaveBeenCalled();
   });
 
   it('opens the same connection settings from the header and not-configured message', async () => {
@@ -58,7 +88,7 @@ describe('KnowledgeTab', () => {
     await user.click(screen.getAllByRole('button', { name: workspace.knowledge.connection.title })[1]);
     expect(await screen.findByRole('combobox', { name: workspace.knowledge.connection.provider })).toHaveValue('ragflow');
     expect(screen.getAllByRole('option')).toHaveLength(1);
-    expect(api.files).not.toHaveBeenCalled();
+    expect(api.directory).not.toHaveBeenCalled();
     await user.click(screen.getByRole('button', { name: common.entity.cancelButton }));
     await user.click(screen.getAllByRole('button', { name: workspace.knowledge.connection.title })[0]);
     expect(await screen.findByRole('textbox', { name: workspace.knowledge.connection.baseUrl })).toHaveValue('');
@@ -68,7 +98,7 @@ describe('KnowledgeTab', () => {
   it('shows connection settings to a ready knowledge tab without changing readiness', async () => {
     const user = userEvent.setup();
     api.status.mockResolvedValue({ configured: true, ready: true });
-    api.files.mockResolvedValue({ items: [], total: 0, page: 1 });
+    api.directory.mockResolvedValue(directory());
     api.connection.mockResolvedValue({ provider: 'ragflow', base_url: 'https://ragflow.example', has_api_key: true });
     render(<KnowledgeTab />, { wrapper: Providers });
     await user.click(screen.getByRole('button', { name: workspace.knowledge.connection.title }));
@@ -79,8 +109,9 @@ describe('KnowledgeTab', () => {
   it('applies a new connection, reloads readiness and the list, removes the old preview, and reopens with metadata only', async () => {
     const user = userEvent.setup();
     api.status.mockResolvedValue({ configured: true, ready: true });
-    api.files.mockResolvedValueOnce({ items: [{ id: 'old', name: 'old.pdf', size: 10, parent_id: null }], total: 1, page: 1 })
-      .mockResolvedValue({ items: [{ id: 'new', name: 'new.pdf', size: 20, parent_id: null }], total: 1, page: 1 });
+    const oldFiles = directory([{ id: 'old', name: 'old.pdf', size: 10, parent_id: null }]);
+    api.directory.mockResolvedValueOnce(oldFiles)
+      .mockResolvedValue(directory([{ id: 'new', name: 'new.pdf', size: 20, parent_id: null }]));
     api.connection.mockResolvedValueOnce({ provider: 'ragflow', base_url: 'https://old.example', has_api_key: true })
       .mockResolvedValue({ provider: 'ragflow', base_url: 'https://new.example', has_api_key: true });
     api.saveConnection.mockResolvedValue({ provider: 'ragflow', base_url: 'https://new.example', has_api_key: true, applied: true, restart_required: false });
@@ -98,7 +129,7 @@ describe('KnowledgeTab', () => {
     expect(screen.queryByTestId('preview')).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'old.pdf' })).not.toBeInTheDocument();
     expect(api.status).toHaveBeenCalledTimes(2);
-    expect(api.files).toHaveBeenCalledTimes(2);
+    expect(api.directory).toHaveBeenCalledTimes(2);
     await user.click(screen.getByRole('button', { name: workspace.knowledge.connection.title }));
     expect(await screen.findByLabelText(workspace.knowledge.connection.baseUrl)).toHaveValue('https://new.example');
     expect(screen.getByLabelText(workspace.knowledge.connection.apiKey)).toHaveValue('');
@@ -109,7 +140,7 @@ describe('KnowledgeTab', () => {
   it('keeps the current preview and draft without refreshing when saving fails', async () => {
     const user = userEvent.setup();
     api.status.mockResolvedValue({ configured: true, ready: true });
-    api.files.mockResolvedValue({ items: [{ id: 'old', name: 'old.pdf', size: 10, parent_id: null }], total: 1, page: 1 });
+    api.directory.mockResolvedValue(directory([{ id: 'old', name: 'old.pdf', size: 10, parent_id: null }]));
     api.connection.mockResolvedValue({ provider: 'ragflow', base_url: 'https://old.example', has_api_key: true });
     api.saveConnection.mockRejectedValue(new Error('private connection details'));
     render(<KnowledgeTab />, { wrapper: Providers });
@@ -127,14 +158,14 @@ describe('KnowledgeTab', () => {
     expect(key).toHaveValue('draft-key');
     expect(screen.getByTestId('preview')).toHaveTextContent('old.pdf');
     expect(api.status).toHaveBeenCalledTimes(1);
-    expect(api.files).toHaveBeenCalledTimes(1);
+    expect(api.directory).toHaveBeenCalledTimes(1);
     expect(screen.queryByText(workspace.knowledge.connection.saved)).not.toBeInTheDocument();
   });
 
   it('lists files and previews a PDF through the existing renderer without a text fetch', async () => {
     const user = userEvent.setup();
     api.status.mockResolvedValue({ configured: true, ready: true });
-    api.files.mockResolvedValue({ items: [{ id: 'file-1', name: 'guide.pdf', size: 10, parent_id: null }], total: 1, page: 1 });
+    api.directory.mockResolvedValue(directory([{ id: 'file-1', name: 'guide.pdf', size: 10, parent_id: null }]));
     render(<KnowledgeTab />, { wrapper: Providers });
     await user.click(await screen.findByRole('button', { name: 'guide.pdf' }));
     expect(await screen.findByTestId('preview')).toHaveTextContent('guide.pdf:binary');
@@ -144,13 +175,13 @@ describe('KnowledgeTab', () => {
   it('creates a dataset without choosing an embedding model', async () => {
     const user = userEvent.setup();
     api.status.mockResolvedValue({ configured: true, ready: true });
-    api.files.mockResolvedValue({ items: [], total: 0, page: 1 });
+    api.directory.mockResolvedValue(directory());
     api.datasets.mockResolvedValue({ items: [], total: 0, page: 1 });
     api.createDataset.mockResolvedValue({ id: 'ds-1', name: 'Notes', description: '', document_count: 0, chunk_count: 0 });
     api.dataset.mockResolvedValue({ id: 'ds-1', name: 'Notes', description: '', document_count: 0, chunk_count: 0 });
     api.documents.mockResolvedValue({ items: [], total: 0, page: 1 });
     render(<KnowledgeTab />, { wrapper: Providers });
-    await user.click(await screen.findByRole('tablist').then(() => screen.getByRole('button', { name: workspace.knowledge.datasets.title })));
+    await user.click(await screen.findByRole('tab', { name: /^Knowledge Sets/ }));
     await user.click(await screen.findByRole('button', { name: workspace.knowledge.datasets.create }));
     await user.type(screen.getByRole('textbox', { name: workspace.knowledge.name }), 'Notes');
     await user.click(screen.getByRole('button', { name: workspace.knowledge.create }));
@@ -161,13 +192,13 @@ describe('KnowledgeTab', () => {
     const user = userEvent.setup();
     const dataset = { id: 'ds-1', name: 'Notes', description: '', document_count: 0, chunk_count: 0 };
     api.status.mockResolvedValue({ configured: true, ready: true });
-    api.files.mockResolvedValue({ items: [], total: 0, page: 1 });
+    api.directory.mockResolvedValue(directory());
     api.datasets.mockResolvedValue({ items: [dataset], total: 1, page: 1 });
     api.dataset.mockResolvedValue(dataset);
     api.documents.mockResolvedValue({ items: [], total: 0, page: 1 });
     api.removeDataset.mockRejectedValue(new Error('delete failed'));
     render(<KnowledgeTab />, { wrapper: Providers });
-    await user.click(await screen.findByRole('button', { name: workspace.knowledge.datasets.title }));
+    await user.click(await screen.findByRole('tab', { name: /^Knowledge Sets/ }));
     await user.click(await screen.findByRole('button', { name: 'Notes' }));
     await user.click(await screen.findByRole('button', { name: workspace.knowledge.datasets.delete }));
     await user.click(await screen.findByRole('button', { name: common.button.confirm }));

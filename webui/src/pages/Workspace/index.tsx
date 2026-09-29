@@ -15,6 +15,7 @@ import {
   workspaceAPI, WorkspaceNode, WorkspaceProject, formatBytes, formatDate, fileIcon,
 } from '@/api/workspace';
 import { FilePreviewRenderer, PreviewModal, type PreviewFileAccess } from '@/components/common/FilePreview';
+import { WorkspaceFileSplit, FileListTable, FileListRow, FileListActions, PreviewPanelHeader, fileActionClass, previewActionClass } from '@/components/common/WorkspaceFileView';
 
 // ─── Types ────────────────────────────────────────────────────────────────
 
@@ -30,25 +31,6 @@ const MEMORY_PREVIEW_FILE_ACCESS: PreviewFileAccess = {
   previewUrl: (path) => workspaceAPI.memoryPreviewUrl(path),
   downloadUrl: (path) => workspaceAPI.memoryDownloadUrl(path),
 };
-
-const PREVIEW_PANEL_DEFAULT_RATIO = 0.5;
-const PREVIEW_PANEL_MIN_WIDTH = 420;
-const PREVIEW_PANEL_MIN_LIST_WIDTH = 360;
-function getViewportWidth(): number {
-  return typeof window === 'undefined' ? PREVIEW_PANEL_MIN_WIDTH * 2 : window.innerWidth;
-}
-
-function getPreviewPanelMaxWidth(containerWidth = getViewportWidth()): number {
-  return Math.max(PREVIEW_PANEL_MIN_WIDTH, containerWidth - PREVIEW_PANEL_MIN_LIST_WIDTH);
-}
-
-function getDefaultPreviewPanelWidth(containerWidth = getViewportWidth()): number {
-  const targetWidth = Math.floor(containerWidth * PREVIEW_PANEL_DEFAULT_RATIO);
-  return Math.min(
-    getPreviewPanelMaxWidth(containerWidth),
-    Math.max(PREVIEW_PANEL_MIN_WIDTH, targetWidth),
-  );
-}
 
 interface SortState {
   field: SortField;
@@ -207,15 +189,10 @@ function FilesTab() {
   const [newDir, setNewDir] = useState<{ show: boolean; name: string }>({ show: false, name: '' });
   const [dragOver, setDragOver] = useState(false);
   const [previewModalOpen, setPreviewModalOpen] = useState(false);
-  const [previewPanelWidth, setPreviewPanelWidth] = useState(() => getDefaultPreviewPanelWidth());
-  const [fileListWidth, setFileListWidth] = useState(900);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const workspaceSplitRef = useRef<HTMLDivElement>(null);
-  const fileListRef = useRef<HTMLDivElement>(null);
   const latestDirRequestIdRef = useRef(0);
   const didInitRef = useRef(false);
-  const userResizedPreviewRef = useRef(false);
 
   const loadFileContent = useCallback(async (path: string) => {
     const res = await workspaceAPI.readFile(path);
@@ -266,49 +243,6 @@ function FilesTab() {
   useEffect(() => {
     setSort({ field: 'name', direction: isOutputsDirectory ? 'desc' : 'asc' });
   }, [isOutputsDirectory]);
-
-  useEffect(() => {
-    const node = fileListRef.current;
-    if (!node) return;
-
-    if (node.clientWidth > 0) {
-      setFileListWidth(node.clientWidth);
-    }
-    if (typeof ResizeObserver === 'undefined') return;
-
-    const observer = new ResizeObserver(([entry]) => {
-      if (entry.contentRect.width > 0) {
-        setFileListWidth(entry.contentRect.width);
-      }
-    });
-    observer.observe(node);
-    return () => observer.disconnect();
-  }, []);
-
-  useEffect(() => {
-    const node = workspaceSplitRef.current;
-    if (!node) return;
-
-    const syncPreviewWidth = (containerWidth: number) => {
-      if (containerWidth <= 0) return;
-      const maxWidth = getPreviewPanelMaxWidth(containerWidth);
-      setPreviewPanelWidth((current) => {
-        if (userResizedPreviewRef.current) {
-          return Math.min(maxWidth, Math.max(PREVIEW_PANEL_MIN_WIDTH, current));
-        }
-        return getDefaultPreviewPanelWidth(containerWidth);
-      });
-    };
-
-    syncPreviewWidth(node.clientWidth);
-    if (typeof ResizeObserver === 'undefined') return;
-
-    const observer = new ResizeObserver(([entry]) => {
-      syncPreviewWidth(entry.contentRect.width);
-    });
-    observer.observe(node);
-    return () => observer.disconnect();
-  }, []);
 
   const handleSelectNode = useCallback(async (node: WorkspaceNode) => {
     if (node.type === 'directory') {
@@ -420,32 +354,6 @@ function FilesTab() {
     }));
   }, []);
 
-  const handlePreviewResizeStart = useCallback((event: React.PointerEvent<HTMLButtonElement>) => {
-    event.preventDefault();
-    userResizedPreviewRef.current = true;
-    const pointerId = event.pointerId;
-    const startX = event.clientX;
-    const startWidth = previewPanelWidth;
-    const containerWidth = workspaceSplitRef.current?.clientWidth ?? getViewportWidth();
-    const maxWidth = getPreviewPanelMaxWidth(containerWidth);
-
-    event.currentTarget.setPointerCapture(pointerId);
-
-    const handlePointerMove = (moveEvent: PointerEvent) => {
-      const nextWidth = startWidth - (moveEvent.clientX - startX);
-      setPreviewPanelWidth(Math.min(maxWidth, Math.max(PREVIEW_PANEL_MIN_WIDTH, nextWidth)));
-    };
-    const handlePointerUp = () => {
-      window.removeEventListener('pointermove', handlePointerMove);
-      window.removeEventListener('pointerup', handlePointerUp);
-      window.removeEventListener('pointercancel', handlePointerUp);
-    };
-
-    window.addEventListener('pointermove', handlePointerMove);
-    window.addEventListener('pointerup', handlePointerUp);
-    window.addEventListener('pointercancel', handlePointerUp);
-  }, [previewPanelWidth]);
-
   const sortedItems = useMemo(() => {
     const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
     return [...items].sort((a, b) => {
@@ -465,13 +373,12 @@ function FilesTab() {
   }, [items, sort]);
 
   const breadcrumbs = currentPath ? ['', ...currentPath.split('/')] : [''];
-  const showSizeColumn = fileListWidth >= 560;
-  const showModifiedColumn = fileListWidth >= 760;
 
-  return (
-    <div ref={workspaceSplitRef} className="flex h-full min-h-0 gap-4">
-      {/* File list */}
-      <div ref={fileListRef} className="flex h-full min-w-0 flex-1 flex-col overflow-hidden rounded-xl border border-gray-200 bg-white">
+  const renderList = (fileListWidth: number) => {
+    const showSizeColumn = fileListWidth >= 560;
+    const showModifiedColumn = fileListWidth >= 760;
+    return (
+      <>
         {/* Toolbar */}
         <div className="flex items-center gap-2 px-4 py-2 border-b border-gray-100 flex-shrink-0">
           <div className="flex items-center gap-1 flex-1 min-w-0 text-sm text-gray-600">
@@ -542,7 +449,7 @@ function FilesTab() {
         )}
 
         <div
-          className={`flex-1 overflow-y-auto relative ${dragOver ? 'ring-2 ring-sky-400 ring-inset bg-sky-50/80' : ''}`}
+          className={`min-h-0 flex-1 overflow-y-auto relative ${dragOver ? 'ring-2 ring-sky-400 ring-inset bg-sky-50/80' : ''}`}
           onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
           onDragLeave={() => setDragOver(false)}
           onDrop={(e) => { e.preventDefault(); setDragOver(false); handleUpload(e.dataTransfer.files); }}
@@ -564,9 +471,7 @@ function FilesTab() {
               <p className="text-sm">{t('files.emptyDir')}</p>
             </div>
           ) : (
-            <table className="w-full text-sm">
-              <thead className="sticky top-0 bg-gray-50 dark:bg-zinc-900/95">
-                <tr>
+            <FileListTable header={<>
                   <th className="w-8 px-4 py-2 text-left text-xs font-medium text-gray-500 dark:text-zinc-500"></th>
                   <th className="px-2 py-2 text-left text-xs font-medium text-gray-500 dark:text-zinc-500" aria-sort={sort.field === 'name' ? (sort.direction === 'asc' ? 'ascending' : 'descending') : 'none'}>
                     <SortHeaderButton label={t('files.columns.name')} field="name" sort={sort} onClick={handleSort} />
@@ -582,18 +487,12 @@ function FilesTab() {
                     </th>
                   )}
                   <th className="w-20"></th>
-                </tr>
-              </thead>
-              <tbody>
+            </>}>
                 {sortedItems.map((item) => (
-                  <tr
+                  <FileListRow
                     key={item.path}
                     onClick={() => handleSelectNode(item)}
-                    className={`group border-t border-gray-50 cursor-pointer transition-colors ${
-                      panel.node?.path === item.path
-                        ? 'bg-slate-100 dark:bg-zinc-800/70'
-                        : 'hover:bg-gray-50 dark:hover:bg-zinc-900/70'
-                    }`}
+                    selected={panel.node?.path === item.path}
                   >
                     <td className="px-4 py-2 text-sm">{fileIcon(item)}</td>
                     <td className="max-w-0 truncate px-2 py-2 font-medium text-gray-800 dark:text-zinc-100">
@@ -610,24 +509,23 @@ function FilesTab() {
                       </td>
                     )}
                     <td className="px-2 py-2">
-                      <div className="flex items-center justify-end gap-1 opacity-0 group-hover:opacity-100" onClick={(e) => e.stopPropagation()}>
+                      <FileListActions>
                         {item.type === 'file' && (
-                          <a href={workspaceAPI.downloadUrl(item.path)} download={item.name} title={t('files.download')} className="p-1 text-gray-400 hover:text-gray-600 rounded hover:bg-gray-100">
+                          <a href={workspaceAPI.downloadUrl(item.path)} download={item.name} title={t('files.download')} className={fileActionClass}>
                             <Download className="w-3.5 h-3.5" />
                           </a>
                         )}
-                        <button onClick={() => handleReveal(item)} title={t('files.reveal')} className="p-1 text-gray-400 hover:text-gray-600 rounded hover:bg-gray-100">
+                        <button onClick={() => handleReveal(item)} title={t('files.reveal')} className={fileActionClass}>
                           <FolderOpen className="w-3.5 h-3.5" />
                         </button>
                         <button onClick={() => handleDelete(item)} title={t('files.delete')} className="p-1 text-gray-400 hover:text-slate-700 rounded hover:bg-slate-100">
                           <Trash2 className="w-3.5 h-3.5" />
                         </button>
-                      </div>
+                      </FileListActions>
                     </td>
-                  </tr>
+                  </FileListRow>
                 ))}
-              </tbody>
-            </table>
+            </FileListTable>
           )}
         </div>
 
@@ -637,25 +535,19 @@ function FilesTab() {
             {t('files.uploading')}
           </div>
         )}
-      </div>
+      </>
+    );
+  };
 
-      {/* Right: preview / edit panel */}
-      {panel.node && (
-        <div
-          className="relative flex h-full flex-shrink-0 flex-col overflow-hidden rounded-xl border border-gray-200 bg-white"
-          style={{ width: previewPanelWidth, minWidth: PREVIEW_PANEL_MIN_WIDTH }}
-        >
-          <button
-            type="button"
-            aria-label={t('files.preview.resize')}
-            title={t('files.preview.resize')}
-            onPointerDown={handlePreviewResizeStart}
-            className="absolute left-0 top-0 z-10 h-full w-2 cursor-col-resize border-l border-transparent transition-colors hover:border-sky-300 hover:bg-sky-50/70 active:border-sky-400 active:bg-sky-100"
-          />
-          <div className="flex items-center gap-2 px-4 py-2.5 border-b border-gray-100 flex-shrink-0">
-            <span className="text-sm flex-shrink-0">{fileIcon(panel.node)}</span>
-            <span className="flex-1 text-sm font-medium text-gray-800 truncate">{panel.node.name}</span>
-            <div className="flex items-center gap-1 flex-shrink-0">
+  return (
+    <>
+      <WorkspaceFileSplit
+        list={renderList}
+        preview={panel.node && <>
+          <PreviewPanelHeader
+            title={panel.node.name}
+            icon={fileIcon(panel.node)}
+            actions={<>
               {panel.node.is_text_file && !panel.editing && !panel.truncated && (
                 <button onClick={() => dispatchPanel({ type: 'start_edit' })} title={t('files.edit')} className="p-1.5 text-gray-400 hover:text-slate-700 hover:bg-slate-100 rounded">
                   <Edit3 className="w-4 h-4" />
@@ -671,25 +563,24 @@ function FilesTab() {
                   </button>
                 </>
               )}
-              <a href={workspaceAPI.downloadUrl(panel.node.path)} download={panel.node.name} title={t('files.download')} className="p-1.5 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded">
+              <a href={workspaceAPI.downloadUrl(panel.node.path)} download={panel.node.name} title={t('files.download')} className={previewActionClass}>
                 <Download className="w-4 h-4" />
               </a>
-              <button onClick={() => handleReveal(panel.node!)} title={t('files.reveal')} className="p-1.5 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded">
+              <button onClick={() => handleReveal(panel.node!)} title={t('files.reveal')} className={previewActionClass}>
                 <FolderOpen className="w-4 h-4" />
               </button>
-              <button onClick={() => setPreviewModalOpen(true)} title={t('files.preview.fullscreen')} className="p-1.5 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded">
+              <button onClick={() => setPreviewModalOpen(true)} title={t('files.preview.fullscreen')} className={previewActionClass}>
                 <Maximize2 className="w-4 h-4" />
               </button>
-              <button onClick={() => dispatchPanel({ type: 'close' })} title={t('files.close')} className="p-1.5 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded">
+              <button onClick={() => dispatchPanel({ type: 'close' })} title={t('files.close')} className={previewActionClass}>
                 <X className="w-4 h-4" />
               </button>
-            </div>
-          </div>
-
-          <div className="px-4 py-1.5 bg-gray-50 border-b border-gray-100 flex gap-4 text-xs text-gray-400 flex-shrink-0">
-            <span>{formatBytes(panel.node.size ?? 0)}</span>
-            <span>{formatDate(panel.node.modified_at)}</span>
-          </div>
+            </>}
+            meta={<>
+              <span>{formatBytes(panel.node.size ?? 0)}</span>
+              <span>{formatDate(panel.node.modified_at)}</span>
+            </>}
+          />
 
           <div className="flex-1 min-h-0 overflow-hidden">
             <FilePreviewRenderer
@@ -704,8 +595,8 @@ function FilesTab() {
               onReveal={handleReveal}
             />
           </div>
-        </div>
-      )}
+        </>}
+      />
       {panel.node && previewModalOpen && (
         <PreviewModal
           node={panel.node}
@@ -717,7 +608,7 @@ function FilesTab() {
           onReveal={handleReveal}
         />
       )}
-    </div>
+    </>
   );
 }
 

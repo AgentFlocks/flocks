@@ -596,7 +596,9 @@ export default function SessionContextPanel({
                 </div>
               </Section>
             )}
-            <SessionDatasetSection sessionId={sessionId} />
+            <section aria-label={t('context.settings')}>
+              <SessionDatasetSection sessionId={sessionId} />
+            </section>
           </>
         )}
       </div>

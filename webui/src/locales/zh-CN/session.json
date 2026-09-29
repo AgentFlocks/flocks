@@ -460,6 +460,7 @@
   },
   "context": {
     "title": "上下文",
+    "settings": "上下文设置",
     "refresh": "刷新上下文",
     "preview": "预览",
     "download": "下载",
@@ -503,6 +504,8 @@
   "dataset": {
     "title": "知识集",
     "scope": "仅应用于当前会话中的所有 Agent，不影响其他会话。",
+    "scopeTitle": "当前会话共享知识",
+    "selectionHint": "选择此会话需要的知识集，点击应用后生效；取消不会改变已保存的选择。",
     "loading": "正在加载会话知识集…",
     "renderFailed": "无法显示知识集区域，上下文的其他区域仍可使用。",
     "retry": "重试加载知识集",
@@ -530,6 +533,7 @@
     "picker": "知识集选择",
     "draftHint": "应用前的修改仅为草稿。所有选中知识集必须已就绪，且使用相同的嵌入模型 ID 和版本。",
     "selected": "已选择的知识集",
+    "addedToSession": "已加入当前会话",
     "remove": "移除知识集 {{name}}",
     "noneSelected": "草稿中未选择知识集。",
     "clear": "清空选择",
