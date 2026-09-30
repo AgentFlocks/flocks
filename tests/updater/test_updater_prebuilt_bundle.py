@@ -221,7 +221,7 @@ async def test_perform_pro_bundle_install_uses_local_bundle_without_network(
     assert marker["core_version"] == "v2026.9.14"
     assert marker["flockspro_component_version"] == "2026.9.14"
     assert marker["build_id"] == "offline_build_1"
-    assert version_writes == ["2026.9.14"]
+    assert version_writes == []
     assert (install_root / "webui" / "dist" / "index.html").is_file()
 
 
@@ -361,7 +361,7 @@ async def test_perform_pro_bundle_install_ignores_bundle_on_disk_without_env(
 
 
 @pytest.mark.asyncio
-async def test_perform_pro_bundle_install_prebuilt_core_upgrade_needs_dependency_wheels(
+async def test_perform_pro_bundle_install_ignores_bundled_core_without_dependency_wheels(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -377,11 +377,10 @@ async def test_perform_pro_bundle_install_prebuilt_core_upgrade_needs_dependency
     monkeypatch.setattr(updater, "_fetch_console_manifest_release_info", _no_console)
     monkeypatch.setattr(updater, "_backup_current_version", lambda *_args, **_kwargs: tmp_path / "backup.tar.gz")
 
-    progresses = [step async for step in updater.perform_pro_bundle_install(restart=True)]
+    progresses = [step async for step in updater.perform_pro_bundle_install(restart=False)]
 
-    assert progresses[-1].stage == "error"
-    assert "dependency wheels" in progresses[-1].message
-    assert captured == []
+    assert progresses[-1].stage == "done"
+    assert len(captured) == 1 and captured[0][1:3] == ["pip", "install"]
     assert not (install_root / "new_core.py").exists()
 
 
@@ -1052,4 +1051,3 @@ async def test_load_console_session_token_can_skip_storage(monkeypatch: pytest.M
     run_dir.mkdir(parents=True)
     (run_dir / "console-session.json").write_text(json.dumps({"console_session_token": "tok_file"}), encoding="utf-8")
     assert await updater._load_console_session_token(use_storage=False) == "tok_file"
-

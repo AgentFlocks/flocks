@@ -931,16 +931,6 @@ def _version_label(version: str | None) -> str:
     return normalized if normalized.startswith(("v", "V")) else f"v{normalized}"
 
 
-def _is_pro_bundle_core_older_than_local(manifest: dict[str, Any], current_version: str | None = None) -> bool:
-    bundle_core_version = _pro_bundle_core_version_for_compare(manifest)
-    if not bundle_core_version:
-        return False
-    local_version = str(current_version or get_current_version() or "").strip()
-    if not local_version:
-        return False
-    return _parse_version(bundle_core_version) < _parse_version(local_version)
-
-
 def _effective_pro_bundle_manifest(manifest: dict[str, Any], effective_core_version: str) -> dict[str, Any]:
     payload = dict(manifest)
     effective_label = _version_label(effective_core_version)
@@ -963,10 +953,6 @@ def _validate_pro_bundle_marker_manifest(manifest: dict[str, Any]) -> None:
 
 def _pro_bundle_core_version_for_marker(manifest: dict[str, Any]) -> str:
     return _required_pro_bundle_marker_value(manifest, "core_version")
-
-
-def _pro_bundle_core_version_or_empty(manifest: dict[str, Any]) -> str:
-    return str(manifest.get("core_version") or "").strip()
 
 
 def _archive_filename_for_format(latest_tag: str, fmt: str) -> str:
@@ -1694,11 +1680,7 @@ def _resolve_pro_bundle_content(content_root: Path) -> tuple[Path, Path | None, 
     if not flocks_dir.is_dir() and not _is_prebuilt_pro_bundle_manifest(manifest):
         return content_root, None, {}
 
-    wheel_value = str(manifest.get("flockspro_wheel") or "").strip()
-    wheel_path = _resolve_bundle_member_path(content_root, wheel_value) if wheel_value else None
-    if wheel_path is None or not wheel_path.is_file():
-        wheels = sorted((content_root / "wheels").glob("*.whl"))
-        wheel_path = wheels[0] if wheels else None
+    wheel_path, _ = _resolve_pro_bundle_wheel(content_root)
     source_root = flocks_dir if flocks_dir.is_dir() else content_root
     return source_root, wheel_path, manifest
 
@@ -1708,12 +1690,20 @@ def _resolve_pro_bundle_wheel(content_root: Path) -> tuple[Path, dict[str, Any]]
     manifest = _load_json_file(manifest_path) if manifest_path.is_file() else {}
     wheel_value = str(manifest.get("flockspro_wheel") or "").strip()
     wheel_path = _resolve_bundle_member_path(content_root, wheel_value) if wheel_value else None
-    if wheel_path is None or not wheel_path.is_file():
-        wheels = sorted((content_root / "wheels").glob("*.whl"))
+    if not wheel_value:
+        wheels = sorted((content_root / "wheels").glob("flockspro-*.whl"))
+        if len(wheels) > 1:
+            raise ValueError("Pro bundle must identify a single flockspro wheel")
         wheel_path = wheels[0] if wheels else None
     if wheel_path is None or not wheel_path.is_file():
         raise ValueError("Pro bundle 中未找到 flockspro wheel")
+    _validate_pro_wheel_name(wheel_path)
     return wheel_path, manifest
+
+
+def _validate_pro_wheel_name(wheel_path: Path) -> None:
+    if wheel_path.suffix != ".whl" or wheel_path.name.split("-", 1)[0].lower() != "flockspro":
+        raise RuntimeError("Pro-only update can only install a flockspro wheel; local core was preserved.")
 
 
 def _is_pro_component_installed() -> bool:
@@ -1771,15 +1761,32 @@ async def install_or_repair_source(
     pro_bundle_manifest_path: Path | None = None,
     bundle_sha256: str | None = None,
     prebuilt: bool = False,
+    pro_only: bool = False,
     dependency_wheels_dir: Path | None = None,
 ) -> None:
     """Install or repair the active source tree after managed services stop.
 
-    ``prebuilt`` is set for offline bundles: the WebUI bundle is already built and
+    ``pro_only`` installs only the Pro wheel in the existing runtime. It must not
+    sync core dependencies, build WebUI, migrate the CLI or write a core version.
+    ``prebuilt`` is set for offline source bundles: the WebUI bundle is already built and
     the Python environment is either untouched (Pro-only change) or refreshed from
     ``dependency_wheels_dir`` without network access. The default (``False``) is
     the online behaviour: ``uv sync`` against the index and ``npm run build``.
     """
+    if pro_only:
+        if pro_wheel_path is None or not pro_wheel_path.is_file():
+            raise RuntimeError("Pro-only update requires a Pro component wheel.")
+        if pro_bundle_manifest_path is None or not pro_bundle_manifest_path.is_file():
+            raise RuntimeError("Pro-only update requires a Pro bundle manifest.")
+        manifest = _effective_pro_bundle_manifest(_load_json_file(pro_bundle_manifest_path), version)
+        _validate_pro_bundle_marker_manifest(manifest)
+        validation_error = await _validate_restart_runtime(install_root)
+        if validation_error:
+            raise RuntimeError(validation_error)
+        await _install_pro_wheel(install_root, uv_path, pro_wheel_path)
+        _write_pro_bundle_install_marker(manifest, bundle_sha256=bundle_sha256)
+        return
+
     install_webui_dir = install_root / "webui"
     if not prebuilt and install_webui_dir.is_dir() and (install_webui_dir / "package.json").exists():
         from flocks.cli import service_manager
@@ -1829,16 +1836,7 @@ async def install_or_repair_source(
         log.info("updater.frontend.build_skipped_prebuilt", {"dist": str(dist_index)})
 
     if pro_wheel_path is not None:
-        python_path = _venv_python_path(install_root)
-        install_cmd = [uv_path, "pip", "install", "--python", str(python_path), "--no-deps", str(pro_wheel_path)]
-        code, _, err = await _run_async(
-            install_cmd,
-            cwd=install_root,
-            timeout=180,
-            env=sync_env,
-        )
-        if code != 0:
-            raise RuntimeError(f"Flocks Pro component install failed: {err}")
+        await _install_pro_wheel(install_root, uv_path, pro_wheel_path)
 
     if not prebuilt and install_webui_dir.is_dir() and (install_webui_dir / "package.json").exists():
         frontend_error = await _build_frontend_workspace(
@@ -1860,6 +1858,16 @@ async def install_or_repair_source(
             bundle_sha256=bundle_sha256,
         )
     _write_version_marker(version.lstrip("v"))
+
+
+async def _install_pro_wheel(install_root: Path, uv_path: str, wheel_path: Path) -> None:
+    # Dependencies and the editable core belong to the existing source checkout.
+    # A Pro update must never resolve/reinstall them from the bundle.
+    _validate_pro_wheel_name(wheel_path)
+    install_cmd = [uv_path, "pip", "install", "--python", str(_venv_python_path(install_root)), "--no-deps", str(wheel_path)]
+    code, _, err = await _run_async(install_cmd, cwd=install_root, timeout=180, env=_build_uv_sync_env())
+    if code != 0:
+        raise RuntimeError(f"Flocks Pro component install failed; local core was preserved: {err}")
 
 
 def _merge_console_manifest_release_identity(
@@ -2302,10 +2310,9 @@ def _read_pro_bundle_install_marker() -> dict[str, Any]:
 
 def _current_pro_version_state(local_core_version: str) -> ProVersionState:
     marker = _read_pro_bundle_install_marker()
-    core_version = _pro_bundle_core_version_or_empty(marker) if marker else local_core_version
     return ProVersionState(
         bundle_version=_version_label(str(marker.get("bundle_version") or "").strip()),
-        core_version=_version_label(core_version),
+        core_version=_version_label(local_core_version),
         pro_component_version=str(marker.get("flockspro_component_version") or "").strip() or None,
     )
 
@@ -2483,7 +2490,8 @@ async def check_update(
         if latest_pro_state and current_pro_state
         else False
     )
-    has_update = bundle_has_update or core_has_update or pro_component_has_update
+    # The core shipped alongside Pro is release metadata, not an upgrade target.
+    has_update = bundle_has_update or pro_component_has_update
     log.info(
         "updater.check.result",
         {
@@ -2695,7 +2703,7 @@ async def perform_pro_bundle_install(
     console_session_token: str | None = None,
     local_bundle_dir: Path | None = None,
 ) -> AsyncGenerator[UpdateProgress, None]:
-    """Apply the Console Pro bundle as a combined OSS core + Pro component upgrade.
+    """Install the Console Pro component while preserving the local core and WebUI.
 
     When ``local_bundle_dir`` is given, or ``FLOCKS_PRO_BUNDLE_DIR`` points at a
     bundle shipped with an offline installation, the bundle is installed from disk
@@ -3094,10 +3102,11 @@ async def perform_update(
             raise ValueError("Pro bundle 中未找到 flockspro wheel")
         prebuilt = _is_prebuilt_pro_bundle_manifest(pro_bundle_manifest)
         if prebuilt:
-            dependency_wheels_dir = _prebuilt_dependency_wheels_dir(
-                _pro_bundle_root(content_root),
-                pro_bundle_manifest,
-            )
+            if profile.sources != ["console-manifest"]:
+                dependency_wheels_dir = _prebuilt_dependency_wheels_dir(
+                    _pro_bundle_root(content_root),
+                    pro_bundle_manifest,
+                )
             if local_bundle_copy is not None and local_bundle_copy.is_dir() and bundle_sha256 and pro_wheel_path:
                 # A local bundle directory carries no archive; its sha256 covers the Pro wheel.
                 await asyncio.to_thread(_verify_download_sha256, pro_wheel_path, bundle_sha256)
@@ -3108,30 +3117,16 @@ async def perform_update(
         yield UpdateProgress(stage="error", message=msg, success=False)
         return
     if profile.sources == ["console-manifest"]:
-        bundle_has_core_source = (content_root / "pyproject.toml").is_file()
-        skip_core_replace = _is_pro_bundle_core_older_than_local(pro_bundle_manifest, current_version)
-        if prebuilt and not bundle_has_core_source:
-            # Pro-only prebuilt bundle: nothing to replace, keep the local core untouched.
-            skip_core_replace = True
-            log.info("updater.pro_bundle.prebuilt_pro_only", {"local_version": current_version})
-        elif prebuilt and not skip_core_replace and dependency_wheels_dir is None:
-            shutil.rmtree(tmp_dir, ignore_errors=True)
-            msg = (
-                "Prebuilt Flocks Pro bundle replaces the core but ships no dependency wheels; "
-                "refusing to leave the environment out of sync."
-            )
-            _record_update_journal(f"ERROR {msg}")
-            yield UpdateProgress(stage="error", message=msg, success=False)
-            return
-        if skip_core_replace:
-            bundle_core_version = _pro_bundle_core_version_for_compare(pro_bundle_manifest)
-            pro_bundle_manifest = _effective_pro_bundle_manifest(pro_bundle_manifest, current_version)
-            log.info(
-                "updater.pro_bundle.keep_local_core",
-                {"local_version": current_version, "bundle_core_version": bundle_core_version},
-            )
-        else:
-            effective_update_version = _pro_bundle_core_version_for_marker(pro_bundle_manifest)
+        # This applies to every Pro entry point, regardless of bundle core age,
+        # online/offline format or whether the package includes core source.
+        skip_core_replace = True
+        dependency_wheels_dir = None
+        bundle_core_version = _pro_bundle_core_version_for_compare(pro_bundle_manifest)
+        pro_bundle_manifest = _effective_pro_bundle_manifest(pro_bundle_manifest, current_version)
+        log.info(
+            "updater.pro_bundle.keep_local_core",
+            {"local_version": current_version, "bundle_core_version": bundle_core_version},
+        )
     else:
         effective_update_version = latest_tag
 
@@ -3181,6 +3176,7 @@ async def perform_update(
                 bundle_sha256=bundle_sha256,
                 sync_timeout=sync_timeout,
                 prebuilt=prebuilt,
+                pro_only=True,
                 dependency_wheels_dir=dependency_wheels_dir,
             )
         except RuntimeError as exc:
@@ -3193,7 +3189,7 @@ async def perform_update(
         log.info("updater.apply.done", {"version": effective_update_version, "restart": False, "region": profile.region})
         yield UpdateProgress(
             stage="done",
-            message=f"Upgraded to {_version_label(effective_update_version)}",
+            message=f"Pro component updated; local Flocks {_version_label(current_version)} and WebUI preserved.",
             success=True,
         )
         return
@@ -3250,6 +3246,7 @@ async def perform_update(
             cleanup_dir=tmp_dir,
             wait_for_parent=not wait_for_handoff,
             prebuilt=prebuilt,
+            pro_only=skip_core_replace,
             dependency_wheels_dir=dependency_wheels_dir,
         )
     except Exception as exc:
@@ -3300,7 +3297,10 @@ async def perform_update(
                 return
             yield UpdateProgress(
                 stage="done",
-                message=f"Upgraded to {_version_label(effective_update_version)}",
+                message=(
+                    f"Pro component updated; local Flocks {_version_label(current_version)} and WebUI preserved."
+                    if skip_core_replace else f"Upgraded to {_version_label(effective_update_version)}"
+                ),
                 success=True,
             )
             return
@@ -3432,6 +3432,7 @@ def _build_restart_handoff_argv(
     cleanup_dir: Path | None = None,
     wait_for_parent: bool = True,
     prebuilt: bool = False,
+    pro_only: bool = False,
     dependency_wheels_dir: Path | None = None,
 ) -> list[str]:
     """Wrap the real restart command in a helper that finishes upgrade work."""
@@ -3439,6 +3440,8 @@ def _build_restart_handoff_argv(
         raise ValueError("restart command is empty")
 
     source_upgrade = content_root is not None
+    if pro_only and source_upgrade:
+        raise ValueError("Pro-only update cannot replace core source")
     if source_upgrade:
         if service_snapshot is None:
             raise ValueError("source upgrade requires a captured service snapshot")
@@ -3531,6 +3534,8 @@ def _build_restart_handoff_argv(
         argv.extend(["--cleanup-dir", str(cleanup_dir)])
     if prebuilt:
         argv.append("--prebuilt")
+    if pro_only:
+        argv.append("--pro-only")
     if dependency_wheels_dir is not None:
         argv.extend(["--dependency-wheels-dir", str(dependency_wheels_dir)])
     argv.extend(["--", *managed_restart_argv])

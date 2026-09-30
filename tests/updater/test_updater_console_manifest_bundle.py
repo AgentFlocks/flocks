@@ -277,7 +277,7 @@ async def test_check_update_force_console_manifest_reports_stale_product_marker_
 
 
 @pytest.mark.asyncio
-async def test_check_update_trusts_pro_marker_core_when_global_marker_is_stale(
+async def test_check_update_uses_local_core_instead_of_historical_pro_marker(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
 ) -> None:
@@ -320,7 +320,7 @@ async def test_check_update_trusts_pro_marker_core_when_global_marker_is_stale(
 
     assert info.current_version == "v2026.7.5"
     assert info.current_bundle_version == "v2026.7.5"
-    assert info.current_core_version == "v2026.7.4"
+    assert info.current_core_version == "v2026.7.5"
     assert info.latest_core_version == "v2026.7.4"
 
 
@@ -875,7 +875,7 @@ async def test_download_console_bundle_reports_http_status_and_body(
 
 
 @pytest.mark.asyncio
-async def test_core_pro_bundle_requires_source_upgrade_handoff(
+async def test_core_pro_bundle_installs_only_pro_without_source_upgrade_handoff(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
 ) -> None:
@@ -948,11 +948,13 @@ async def test_core_pro_bundle_requires_source_upgrade_handoff(
     monkeypatch.setattr(updater, "_run_async", _fake_run_async)
 
     progresses = [step async for step in updater.perform_pro_bundle_install(restart=False)]
-    assert progresses[-1].stage == "error"
-    assert "detached handoff" in progresses[-1].message
+    assert progresses[-1].stage == "done"
+    assert "WebUI preserved" in progresses[-1].message
     assert not (install_root / "new_core.py").exists()
     assert (install_root / "old_core.py").exists()
-    assert captured == []
+    assert len(captured) == 1
+    assert captured[0][:3] == ["/usr/bin/uv", "pip", "install"]
+    assert "--no-deps" in captured[0]
     assert version_writes == []
 
 
@@ -1054,6 +1056,9 @@ async def test_perform_pro_bundle_install_schedules_restart_before_stream_can_cl
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
 ) -> None:
+    from flocks.cli import service_manager
+
+    monkeypatch.setattr(updater, "_handoff_service_config", lambda: service_manager.ServiceConfig())
     bundle_root = tmp_path / "bundle-root"
     core_root = bundle_root / "flocks"
     core_root.mkdir(parents=True)

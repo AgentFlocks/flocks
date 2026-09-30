@@ -215,10 +215,13 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--bundle-sha256")
     parser.add_argument("--cleanup-dir")
     parser.add_argument("--prebuilt", action="store_true")
+    parser.add_argument("--pro-only", action="store_true")
     parser.add_argument("--dependency-wheels-dir")
     parser.add_argument("--prepare-handover", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("restart_argv", nargs=argparse.REMAINDER)
     args = parser.parse_args(argv)
+    if args.pro_only and (args.mode == "upgrade" or args.content_root):
+        parser.error("Pro-only update cannot replace core source")
     if args.restart_argv and args.restart_argv[0] == "--":
         args.restart_argv = args.restart_argv[1:]
     return args
@@ -240,6 +243,7 @@ def _run_upgrade_tasks(args: argparse.Namespace) -> str | None:
                 bundle_sha256=args.bundle_sha256,
                 sync_timeout=args.sync_timeout,
                 prebuilt=bool(getattr(args, "prebuilt", False)),
+                pro_only=bool(getattr(args, "pro_only", False)),
                 dependency_wheels_dir=(
                     Path(args.dependency_wheels_dir) if getattr(args, "dependency_wheels_dir", None) else None
                 ),

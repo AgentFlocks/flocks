@@ -22,6 +22,13 @@ import { UPDATE_DISMISSED_KEY, buildUpdateDismissalKey } from '@/utils/updateDis
 
 const HEALTH_POLL_INTERVAL = 2000;
 const HEALTH_POLL_TIMEOUT = 5 * 60 * 1000;
+const PRO_STAGE_LABELS: Partial<Record<UpdateProgress['stage'], string>> = {
+  fetching: 'fetchingPro',
+  backing_up: 'backingUpPro',
+  applying: 'applyingPro',
+  syncing: 'syncingPro',
+  done: 'donePro',
+};
 
 export { UPDATE_DISMISSED_KEY };
 
@@ -82,11 +89,13 @@ export default function UpdateModal({
   const [restarting, setRestarting] = useState(false);
   const modalTitle = edition === 'flockspro' ? t('proTitle') : t('title');
   const currentDisplayVersion = edition === 'flockspro'
-    ? info?.current_bundle_version || null
+    ? info?.current_pro_component_version || null
     : info?.current_version || null;
   const latestDisplayVersion = edition === 'flockspro'
-    ? info?.latest_bundle_version || null
+    ? info?.latest_pro_component_version || null
     : info?.latest_version || null;
+  // Pro's generic current_version is a bundle tag, not the running Core.
+  const currentCoreVersion = info?.current_core_version || null;
   // useRef avoids stale closure: the `restarting` value inside async callbacks
   // always reflects the latest state even after re-renders.
   const restartingRef = useRef(false);
@@ -187,9 +196,8 @@ export default function UpdateModal({
   };
 
   const renderStep = (step: UpdateProgress, index: number) => {
-    const label = edition === 'flockspro' && step.stage === 'fetching'
-      ? t('stageLabels.fetchingPro')
-      : t(`stageLabels.${step.stage}`, { defaultValue: step.stage });
+    const stageLabel = edition === 'flockspro' ? PRO_STAGE_LABELS[step.stage] || step.stage : step.stage;
+    const label = t(`stageLabels.${stageLabel}`, { defaultValue: step.stage });
     const isError = step.stage === 'error';
     const isSpinning = step.stage === 'restarting';
     const downloadPercent = clampPercent(step.percent);
@@ -281,8 +289,13 @@ export default function UpdateModal({
                       </div>
                     )}
                     <p className="mt-2 text-sm leading-6 text-amber-800">
-                      {t('confirmUpgradeDesc')}
+                      {t(edition === 'flockspro' ? 'confirmProUpgradeDesc' : 'confirmUpgradeDesc')}
                     </p>
+                    {edition === 'flockspro' && (
+                      <p className="mt-1 text-xs text-amber-800">
+                        {t('coreUnchanged')}: {formatUpdateVersion(currentCoreVersion)}
+                      </p>
+                    )}
                   </div>
                 </div>
               </div>
@@ -347,9 +360,11 @@ export default function UpdateModal({
             {info?.has_update ? (
               <div className="rounded-xl border border-amber-100 bg-amber-50/70 px-3 py-2 text-xs text-amber-800">
                 <div className="font-medium">
-                  {t('confirmUpgrade', { version: formatUpdateVersion(latestDisplayVersion) })}
+                  {t(edition === 'flockspro' ? 'confirmProUpgrade' : 'confirmUpgrade', {
+                    version: formatUpdateVersion(latestDisplayVersion),
+                  })}
                 </div>
-                <div className="mt-1 leading-5">{t('newVersionDesc')}</div>
+                <div className="mt-1 leading-5">{t(edition === 'flockspro' ? 'proUpdateScope' : 'newVersionDesc')}</div>
               </div>
             ) : (
               <div className="rounded-xl border border-gray-100 bg-gray-50 px-3 py-2 text-xs text-gray-600">
@@ -383,11 +398,11 @@ export default function UpdateModal({
 
           <div className="px-4 pb-3 space-y-3">
             <div className="flex items-center justify-between text-xs">
-              <span className="text-gray-400">{t('currentVersion')}</span>
+              <span className="text-gray-400">{t(edition === 'flockspro' ? 'currentProVersion' : 'currentVersion')}</span>
               <span className="font-medium text-gray-700">{formatUpdateVersion(currentDisplayVersion)}</span>
             </div>
             <div className="flex items-center justify-between text-xs">
-              <span className="text-gray-400">{t('latestVersion')}</span>
+              <span className="text-gray-400">{t(edition === 'flockspro' ? 'latestProVersion' : 'latestVersion')}</span>
               <div className="flex items-center gap-1.5">
                 {checking ? (
                   <Loader2 className="w-3 h-3 text-gray-400 animate-spin" />
@@ -405,6 +420,12 @@ export default function UpdateModal({
                 )}
               </div>
             </div>
+            {edition === 'flockspro' && (
+              <div className="flex items-center justify-between text-xs">
+                <span className="text-gray-400">{t('coreUnchanged')}</span>
+                <span className="font-medium text-gray-700">{formatUpdateVersion(currentCoreVersion)}</span>
+              </div>
+            )}
           </div>
 
           <div className="flex items-center gap-2 px-4 pb-4">
