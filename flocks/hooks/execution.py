@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import re
 from collections.abc import Awaitable, Callable, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -10,12 +12,17 @@ from typing import Any, TypeVar
 
 from flocks.hooks.pipeline import HookContext, HookPipeline
 from flocks.identity import Subject, reset_current_subject, set_current_subject
+from flocks.utils.log import Log
 
 
 T = TypeVar("T")
 StageRunner = Callable[[dict[str, Any]], Awaitable[HookContext]]
 SubjectSink = Callable[[Subject], None]
 ContextSink = Callable[[dict[str, Any]], None]
+log = Log.create(service="hooks.execution")
+_STOP_AUDIT_TIMEOUT_SECONDS = 0.25
+_MAX_PENDING_STOP_AUDITS = 8
+_pending_stop_audits: set[asyncio.Task] = set()
 
 
 @dataclass(eq=False, slots=True)
@@ -131,6 +138,122 @@ def execution_lifecycle_scope(*, reuse_current: bool = False):
 class ExecutionStopped(RuntimeError):
     """Raised when a lifecycle hook requests that an operation stop."""
 
+    def __init__(
+        self,
+        message: str = "operation stopped by extension",
+        *,
+        source: str | None = None,
+        stage: str | None = None,
+        reason: str = "extension_stop",
+        detail: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.stop_source = source
+        self.stop_stage = stage
+        self.stop_reason = reason
+        self.stop_detail = detail
+        self._ingress_audit_attempted = False
+
+
+def _safe_identifier(value: Any) -> str | None:
+    if isinstance(value, str) and re.fullmatch(r"[\w.:/-]{1,160}", value):
+        return value
+    return None
+
+
+def execution_stop_diagnostics(error: BaseException) -> dict[str, str | bool]:
+    """Neutral stop facts, excluding all free-form extension detail text.
+
+    Extensions may put payloads or credentials in a detail in any language or
+    syntax. Preserve that text on the original exception only; pattern-based
+    redaction cannot make it safe for diagnostics or durable audit storage.
+    """
+    if not isinstance(error, ExecutionStopped):
+        return {}
+    return {
+        key: value
+        for key, value in {
+            "stop_source": _safe_identifier(error.stop_source),
+            "stop_stage": _safe_identifier(error.stop_stage),
+            "stop_reason": (
+                error.stop_reason
+                if error.stop_reason in {"extension_stop", "critical_entrypoint_failure"}
+                else "extension_stop"
+            ),
+            "stop_detail_present": bool(error.stop_detail),
+        }.items()
+        if value is not None
+    }
+
+
+def _finish_stop_audit(task: asyncio.Task) -> None:
+    _pending_stop_audits.discard(task)
+    if not task.cancelled():
+        error = task.exception()
+        if error is not None:
+            log.warning("ingress.stop_audit_failed", {"error_type": type(error).__name__})
+
+
+async def _audit_ingress_stop(payload: dict[str, Any], error: ExecutionStopped) -> None:
+    """Reuse the registered audit bridge on rejection only, with bounded work."""
+    from flocks.audit import emit_audit_event
+
+    if error._ingress_audit_attempted:
+        return
+    error._ingress_audit_attempted = True
+    if len(_pending_stop_audits) >= _MAX_PENDING_STOP_AUDITS:
+        log.warning("ingress.stop_audit_busy", {})
+        return
+    facts = execution_stop_diagnostics(error)
+    reason = "; ".join(
+        f"{key}={facts[key]}"
+        for key in ("stop_source", "stop_stage", "stop_reason")
+        if key in facts
+    )
+    if facts["stop_detail_present"]:
+        reason += "; detail omitted"
+    audit_payload: dict[str, Any] = {
+        "status": "failed",
+        "phase": facts.get("stop_stage", "ingress.before"),
+        "entry": _safe_identifier(payload.get("operation")),
+        "resource": {
+            "type": "workflow" if payload.get("workflow_id") else "operation",
+            "id": _safe_identifier(payload.get("workflow_id"))
+            or _safe_identifier(payload.get("operation")),
+        },
+        "reason": reason,
+    }
+    # Existing audit bridges retain these generic fields. Do not pass event,
+    # trigger, context, subject, email or tool arguments into an audit sink.
+    task = asyncio.create_task(emit_audit_event("ingress.stopped", audit_payload))
+    _pending_stop_audits.add(task)
+    task.add_done_callback(_finish_stop_audit)
+    try:
+        done, _ = await asyncio.wait({task}, timeout=_STOP_AUDIT_TIMEOUT_SECONDS)
+        if not done:
+            task.cancel()
+            log.warning("ingress.stop_audit_timeout", {})
+    except asyncio.CancelledError:
+        task.cancel()
+        raise
+
+
+async def _after_preserving_error(
+    after: StageRunner, payload: dict[str, Any], primary: BaseException,
+) -> None:
+    """Run cleanup without replacing the error that prevented the operation."""
+    try:
+        await after(payload)
+    except asyncio.CancelledError:
+        # A new cancellation must still interrupt cleanup/audit. An existing
+        # cancellation also remains a cancellation, never an extension stop.
+        raise
+    except Exception as secondary:
+        log.warning("hook.after_failed_during_error", {
+            "primary_error_type": type(primary).__name__,
+            "after_error_type": type(secondary).__name__,
+        })
+
 
 async def _noop_stage(payload: dict[str, Any]) -> HookContext:
     return HookContext(stage="noop", input=payload, output={})
@@ -145,16 +268,19 @@ def raise_if_execution_stopped(ctx: HookContext) -> None:
 
 def execution_stop_error(ctx: HookContext) -> ExecutionStopped | None:
     """Return the generic stop error requested by a lifecycle hook, if any."""
-    if ctx.execution_stop_requested:
-        return ExecutionStopped(
-            ctx.execution_stop_detail or "operation stopped by extension"
-        )
     execution = ctx.output.get("execution")
-    if not isinstance(execution, dict) or execution.get("stop") is not True:
+    if not ctx.execution_stop_requested and (
+        not isinstance(execution, dict) or execution.get("stop") is not True
+    ):
         return None
-    detail = execution.get("detail")
-    message = str(detail) if detail is not None else "operation stopped by extension"
-    return ExecutionStopped(message)
+    detail = ctx.execution_stop_detail if ctx.execution_stop_requested else execution.get("detail")
+    detail = str(detail) if detail is not None else None
+    source = ctx.execution_stop_source
+    stage = ctx.execution_stop_stage or ctx.stage
+    message = detail or "operation stopped by extension"
+    if not detail:
+        message += f" (hook={_safe_identifier(source) or 'unknown'}, stage={_safe_identifier(stage) or 'unknown'})"
+    return ExecutionStopped(message, source=source, stage=stage, detail=detail)
 
 
 def subject_from_hook_context(ctx: HookContext) -> Subject | None:
@@ -211,14 +337,23 @@ async def execute_with_hooks(
     if after is None:
         after = _noop_stage
     with execution_lifecycle_scope(reuse_current=reuse_execution_scope):
-        return await _execute_with_hooks_in_scope(
-            payload,
-            effect,
-            before=before,
-            after=after,
-            subject_sink=subject_sink,
-            context_sink=context_sink,
-        )
+        try:
+            return await _execute_with_hooks_in_scope(
+                payload,
+                effect,
+                before=before,
+                after=after,
+                subject_sink=subject_sink,
+                context_sink=context_sink,
+            )
+        except ExecutionStopped as exc:
+            if (
+                before == HookPipeline.run_ingress_before
+                or after == HookPipeline.run_ingress_after
+                or (exc.stop_stage or "").startswith("ingress.")
+            ):
+                await _audit_ingress_stop(payload, exc)
+            raise
 
 
 async def _execute_with_hooks_in_scope(
@@ -234,30 +369,33 @@ async def _execute_with_hooks_in_scope(
     from flocks.plugin import PluginLoader
 
     if PluginLoader.has_runtime_critical_entrypoint_failure():
-        stopped = ExecutionStopped("critical plugin entrypoint failure")
-        after_ctx = await after({
+        stopped = ExecutionStopped(
+            "critical plugin entrypoint failure",
+            source="plugin.loader",
+            stage="plugin.load",
+            reason="critical_entrypoint_failure",
+        )
+        await _after_preserving_error(after, {
             **payload,
             "outcome": "stopped",
             "terminal_outcome": _terminal_outcome(
                 "stopped", executed=False, error=stopped
             ),
             "error": stopped,
-        })
-        raise_if_execution_stopped(after_ctx)
+        }, stopped)
         raise stopped
 
     try:
         before_ctx = await before(payload)
     except BaseException as exc:
-        after_ctx = await after({
+        await _after_preserving_error(after, {
             **payload,
             "outcome": "error",
             "terminal_outcome": _terminal_outcome(
                 "error", executed=False, error=exc
             ),
             "error": exc,
-        })
-        raise_if_execution_stopped(after_ctx)
+        }, exc)
         raise
     stopped = execution_stop_error(before_ctx)
     before_context = before_ctx.output.get("context")
@@ -281,7 +419,8 @@ async def _execute_with_hooks_in_scope(
         return {**data, "context": before_context}
 
     if stopped is not None:
-        after_ctx = await after(
+        await _after_preserving_error(
+            after,
             _after_payload({
                 **payload,
                 "outcome": "stopped",
@@ -289,9 +428,9 @@ async def _execute_with_hooks_in_scope(
                     "stopped", executed=False, error=stopped
                 ),
                 "error": stopped,
-            })
+            }),
+            stopped,
         )
-        raise_if_execution_stopped(after_ctx)
         raise stopped
 
     subject = subject_from_hook_context(before_ctx)
@@ -301,27 +440,12 @@ async def _execute_with_hooks_in_scope(
     context_token = _current_execution_context.set(effective_context)
     try:
         result = await effect()
-    except Exception as exc:
-        if subject_token is not None:
-            reset_current_subject(subject_token)
-        _current_execution_context.reset(context_token)
-        after_ctx = await after(
-            _after_payload({
-                **payload,
-                "outcome": "error",
-                "terminal_outcome": _terminal_outcome(
-                    "error", executed=True, error=exc
-                ),
-                "error": exc,
-            })
-        )
-        raise_if_execution_stopped(after_ctx)
-        raise
     except BaseException as exc:
         if subject_token is not None:
             reset_current_subject(subject_token)
         _current_execution_context.reset(context_token)
-        after_ctx = await after(
+        await _after_preserving_error(
+            after,
             _after_payload({
                 **payload,
                 "outcome": "error",
@@ -329,9 +453,9 @@ async def _execute_with_hooks_in_scope(
                     "error", executed=True, error=exc
                 ),
                 "error": exc,
-            })
+            }),
+            exc,
         )
-        raise_if_execution_stopped(after_ctx)
         raise
 
     if subject_token is not None:

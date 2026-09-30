@@ -88,6 +88,8 @@ class HookContext:
     # must not be able to resume the effect by replacing ``output.execution``.
     execution_stop_requested: bool = False
     execution_stop_detail: str | None = None
+    execution_stop_source: str | None = None
+    execution_stop_stage: str | None = None
 
 
 class HookBase:
@@ -616,7 +618,6 @@ class HookPipeline:
                     )
                 else:
                     await cls._invoke_handler(handler, ctx)
-                cls._latch_execution_stop(ctx)
             except asyncio.TimeoutError as exc:
                 duration_ms = int((time.perf_counter() - handler_started_at) * 1000)
                 log.warning("hook.timeout", {
@@ -639,6 +640,10 @@ class HookPipeline:
                 })
                 if entry.fail_policy != FailPolicy.ISOLATE:
                     raise
+            finally:
+                # A failing isolated hook may already have requested a stop.
+                # Attribute that request before another hook sees shared output.
+                cls._latch_execution_stop(ctx, source=entry.name)
         log.debug("hook.stage_complete", {
             "stage": stage,
             "handler_count": handler_count,
@@ -647,7 +652,7 @@ class HookPipeline:
         return ctx
 
     @staticmethod
-    def _latch_execution_stop(ctx: HookContext) -> None:
+    def _latch_execution_stop(ctx: HookContext, *, source: str | None = None) -> None:
         """Remember a generic stop request even if later hooks mutate output.
 
         This is intentionally limited to the pre-existing generic
@@ -656,16 +661,17 @@ class HookPipeline:
         it and for supplying an opaque detail string.
         """
         execution = ctx.output.get("execution")
-        if not isinstance(execution, dict) or execution.get("stop") is not True:
+        if (
+            ctx.execution_stop_requested
+            or not isinstance(execution, dict)
+            or execution.get("stop") is not True
+        ):
             return
         ctx.execution_stop_requested = True
-        if ctx.execution_stop_detail is None:
-            detail = execution.get("detail")
-            ctx.execution_stop_detail = (
-                str(detail)
-                if detail is not None
-                else "operation stopped by extension"
-            )
+        ctx.execution_stop_source = source
+        ctx.execution_stop_stage = ctx.stage
+        detail = execution.get("detail")
+        ctx.execution_stop_detail = str(detail) if detail is not None else None
 
     @classmethod
     def _register_plugin_extension_point(cls) -> None:

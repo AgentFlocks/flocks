@@ -47,6 +47,7 @@ _LIVE_METRICS = {
                    'attackCount', 'benignCount', 'unknownCount', 'workUnitCount', 'followersReusedCount'),
 }
 _FIELDS = {"trace", "execution", "node", "phase", "status", "error_type", "sqlite_errorcode", "sqlite_errorname", "backoff_seconds", "step", "duration_ms",
+           "stop_source", "stop_stage", "stop_reason", "stop_detail_present",
            "queue_size", "queue_capacity", "active_runs", "matched", "executed", "count",
            "thread", "parent", "worker_count", "listener_alive", "raw_count", "after_filter_count", "unique_key_count",
            "dedup_removed_count", "selected_count", "processed_count", "has_error",
@@ -299,8 +300,20 @@ def traced(phase):
                 record(workflow_id, "trace.end", trace=trace, status="returned")
                 return result
             except BaseException as exc:
+                from flocks.hooks.execution import execution_stop_diagnostics
                 from flocks.workflow.store import sqlite_error_fields
-                record(workflow_id, "trace.end", trace=trace, status="cancelled" if isinstance(exc, asyncio.CancelledError) else "error", **sqlite_error_fields(exc))
+                stop = execution_stop_diagnostics(exc)
+                # Keep the support bundle payload-free. Extension detail can
+                # contain arbitrary input; source/stage/code identify the
+                # stopping hook without exporting the detail or message body.
+                stop_fields = {
+                    key: stop[key]
+                    for key in ("stop_source", "stop_stage", "stop_reason")
+                    if key in stop
+                }
+                if stop:
+                    stop_fields["stop_detail_present"] = bool(stop.get("stop_detail_present"))
+                record(workflow_id, "trace.end", trace=trace, status="cancelled" if isinstance(exc, asyncio.CancelledError) else "error", **sqlite_error_fields(exc), **stop_fields)
                 raise
             finally:
                 with _lock:

@@ -95,6 +95,58 @@ async def test_cancellation_preserved_and_no_stale_dispatch():
 
 
 @pytest.mark.asyncio
+async def test_ingress_stop_identifies_hook_without_exporting_extension_detail():
+    from flocks.hooks.execution import ExecutionStopped
+
+    stopped = ExecutionStopped('private-event-body')
+    stopped.stop_source = 'example.policy.ingress'
+    stopped.stop_stage = 'ingress.before'
+    stopped.stop_reason = 'extension_stop'
+    stopped.stop_detail = 'private-event-body password=private-secret'
+
+    class Manager:
+        @diag.traced('syslog.dispatch')
+        async def execute(self, workflow_id):
+            diag.progress('ingress.hooks')
+            raise stopped
+
+    with pytest.raises(ExecutionStopped) as caught:
+        await Manager().execute(diag.WORKFLOWS[0])
+    assert caught.value is stopped
+    event = diag._events[-1]
+    assert event['error_type'] == 'ExecutionStopped'
+    assert event['stop_source'] == 'example.policy.ingress'
+    assert event['stop_stage'] == 'ingress.before'
+    assert event['stop_reason'] == 'extension_stop'
+    assert event['stop_detail_present'] is True
+    assert 'stop_detail' not in event
+    diag.log_path().write_text(json.dumps(event) + '\n')
+    bundle = diag.export_bundle()
+    assert bundle['persisted_events'][0]['stop_source'] == 'example.policy.ingress'
+    assert 'private-event-body' not in json.dumps(bundle)
+    assert 'private-secret' not in json.dumps(bundle)
+    assert not diag.snapshot()['active']
+
+
+@pytest.mark.asyncio
+async def test_other_failures_do_not_export_stop_attributes_or_error_text():
+    failure = RuntimeError('private failure')
+    failure.stop_source = 'not-a-real-stop'
+
+    class Manager:
+        @diag.traced('syslog.dispatch')
+        async def execute(self, workflow_id):
+            raise failure
+
+    with pytest.raises(RuntimeError) as caught:
+        await Manager().execute(diag.WORKFLOWS[0])
+    assert caught.value is failure
+    assert diag._events[-1]['error_type'] == 'RuntimeError'
+    assert not any(key.startswith('stop_') for key in diag._events[-1])
+    assert 'private failure' not in json.dumps(diag.export_bundle())
+
+
+@pytest.mark.asyncio
 async def test_non_soc_unmodified_and_no_collection():
     class Manager:
         @diag.traced('schedule.dispatch')

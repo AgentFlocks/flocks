@@ -879,6 +879,9 @@ class KafkaManager:
             action_payload = {
                 "operation": "workflow.trigger.kafka",
                 "transport": "headless",
+                # Internal adapter contract; never derive permission-carrier
+                # fields from the untrusted message body.
+                "legacy_compat": True,
                 "workflow_id": workflow_id,
                 "trigger": trigger,
                 "event": event,
