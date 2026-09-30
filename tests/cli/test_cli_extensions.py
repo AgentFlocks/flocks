@@ -120,10 +120,6 @@ def test_should_load_for_shell_completion(monkeypatch):
     def status() -> None:
         pass
 
-    @app.command()
-    def status() -> None:
-        pass
-
     monkeypatch.setattr(cli_main.sys, "argv", ["flocks", "status"])
     monkeypatch.setenv("_FLOCKS_COMPLETE", "complete_zsh")
     assert cli_main._should_load_cli_extensions(app) is True
