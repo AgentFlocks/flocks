@@ -2270,8 +2270,8 @@ function AiWorkflowStepCard({ card }) {
   const status = done ? '✓ 完成' : exiting ? card.outcome === 'stopped' ? '已停止展示'
     : card.outcome === 'yielded' ? '轮换展示' : '切换步骤' : '处理中';
   return h('article', { className: cx('ai-step-card', `kind-${card.task.stage}`, exiting && 'is-exiting', moving && 'is-moving', done && 'is-complete'),
-    style: { '--shine-delay': `${-(card.serial % 4) * .23}s` },
     'aria-label': `${denoise ? '降噪' : '研判'}第${card.serial}批${title}步骤卡片`, 'data-step': card.nodeId, 'data-batch': card.serial }, [
+    moving ? h('span', { className: 'ai-step-sweep', 'aria-hidden': true, key: 'sweep' }) : null,
     h('div', { className: 'ai-step-meta', key: 'meta' }, [
       h('span', { key: 'kind' }, denoise ? '智能降噪' : '智能研判'),
       h('small', { key: 'batch' }, `第 ${card.serial} 批${replay ? batchCard ? ' · 已完成批次回放' : ' · 已完成步骤回放' : ''}`),
@@ -6524,7 +6524,7 @@ const CSS = `
 .ai-step-card { --lane-color:#55f0c4; --lane-rgb:85,240,196; position:relative; min-height:0; border:1px solid rgba(var(--lane-rgb),.4); border-radius:10px; padding:10px 12px 8px; overflow:hidden; background:linear-gradient(140deg,rgba(var(--lane-rgb),.14),rgba(8,26,40,.86)); box-shadow:0 5px 22px #00000024,inset 0 0 22px rgba(var(--lane-rgb),.04); animation:aiCardEnter .35s ease-out both; }
 .ai-step-card.kind-triage { --lane-color:#8cc7ff; --lane-rgb:140,199,255; }
 .ai-step-card > * { position:relative; z-index:1; }
-.ai-step-card.is-moving:before { content:''; position:absolute; z-index:0; pointer-events:none; top:-15%; bottom:-15%; left:-80%; width:65%; background:linear-gradient(105deg,transparent 10%,rgba(var(--lane-rgb),.08) 42%,rgba(var(--lane-rgb),.34) 82%,rgba(229,255,250,.5) 94%,transparent 100%); transform:skewX(-12deg); filter:drop-shadow(0 0 10px rgba(var(--lane-rgb),.6)); animation:aiCardShine 1.55s var(--shine-delay,0s) ease-in-out infinite; }
+.ai-step-card > .ai-step-sweep { position:absolute; z-index:0; pointer-events:none; inset:0 auto 0 0; width:60%; background:linear-gradient(90deg,transparent,rgba(0,8,18,.12) 12%,rgba(0,8,18,.28) 40%,rgba(0,8,18,.28) 78%,rgba(var(--lane-rgb),.10) 94%,transparent); transform:translateX(-100%); will-change:transform; animation:aiCardSweep 1.6s linear infinite; }
 .ai-step-card.is-moving { box-shadow:0 0 18px rgba(var(--lane-rgb),.1),inset 0 0 28px rgba(var(--lane-rgb),.07); }
 .ai-step-card.is-complete { border-color:rgba(var(--lane-rgb),.65); }
 .ai-step-card.is-exiting { pointer-events:none; animation:aiCardExit .36s ease-in both; }
@@ -6572,11 +6572,11 @@ const CSS = `
 @keyframes aiSlotExit { from { grid-template-rows:1fr; margin-bottom:8px; } to { grid-template-rows:0fr; margin-bottom:0; } }
 @keyframes aiCardEnter { from { opacity:0; transform:translateY(14px) scale(.97); } to { opacity:1; transform:translateY(0) scale(1); } }
 @keyframes aiCardExit { from { opacity:1; transform:translateY(0) scale(1); } to { opacity:0; transform:translateY(-10px) scale(.96); padding-top:0; padding-bottom:0; border-width:0; } }
-@keyframes aiCardShine { from { left:-80%; } to { left:140%; } }
+@keyframes aiCardSweep { from { transform:translateX(-100%); } to { transform:translateX(166.667%); } }
 @keyframes aiNumberRoll { from { transform:translateY(7px); opacity:.25; } to { transform:translateY(0); opacity:1; } }
 @media (prefers-reduced-motion:reduce) {
-  .ai-step-card, .ai-step-card:before, .ai-card-slot, .ai-rolling-number, .ai-execution-details .event-rail-item { animation:none !important; }
-  .ai-step-card.is-moving:before { display:none; }
+  .ai-step-card, .ai-step-sweep, .ai-card-slot, .ai-rolling-number, .ai-execution-details .event-rail-item { animation:none !important; }
+  .ai-step-sweep { display:none; }
 }
 
 `;
