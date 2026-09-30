@@ -1,6 +1,6 @@
 // A bounded presentation state machine. It never starts or cancels a workflow.
 export const STEP_CARD_LIMIT = 6;
-export const STEP_DISPLAY_MS = 1600;
+export const STEP_DISPLAY_MS = 2000;
 export const STEP_BATCH_DISPLAY_MS = 3200;
 export const STEP_EXIT_MS = 360;
 export const STEP_REPLAY_WINDOW_MS = 30000;
@@ -11,7 +11,8 @@ export const STEP_NODES = {
 
 export type StepCard = {
   task: any; nodeId: string; serial: number; enteredAt: number;
-  phase: 'processing' | 'complete' | 'exit'; endAt: number;
+  // replay retains an observed step for presentation; it is not success evidence.
+  phase: 'processing' | 'replay' | 'complete' | 'exit'; endAt: number;
   outcome: 'complete' | 'changed' | 'stopped' | 'yielded'; durationMs: number | null;
 };
 type BatchMemory = { nodes: string[]; serial: number; touchedAt: number; replaySelected?: boolean };
@@ -109,18 +110,23 @@ export function advanceStepStream(previous: StepStream, tasks: any[], online: bo
     } else {
       const durationMs = nodeDuration(source, card.nodeId);
       const available = nextNode(source, batches[card.task.key], now);
-      if (card.nodeId === 'batch' && available && available !== 'batch') {
-        card = { ...card, phase: 'exit', outcome: 'changed', endAt: now + STEP_EXIT_MS };
+      const minimumEndAt = card.enteredAt + (card.nodeId === 'batch' ? STEP_BATCH_DISPLAY_MS : STEP_DISPLAY_MS);
+      if ((card.phase === 'processing' || card.phase === 'replay')
+        && (durationMs !== null || card.nodeId === 'batch' && completed)) {
+        card = { ...card, durationMs, phase: 'complete', outcome: 'complete',
+          endAt: Math.max(minimumEndAt, now + 450) };
       } else if (card.phase === 'processing') {
-        if (durationMs !== null || card.nodeId === 'batch' && completed) {
-          card = { ...card, durationMs, phase: 'complete', outcome: 'complete',
-            endAt: Math.max(card.enteredAt + (card.nodeId === 'batch' ? STEP_BATCH_DISPLAY_MS : STEP_DISPLAY_MS), now + 450) };
-        } else if (card.nodeId !== 'batch' && (!live || source.event?.live?.nodeId !== card.nodeId)) {
-          card = { ...card, phase: 'exit',
-            outcome: live && !knownNode(source, source.event?.live?.nodeId) ? 'stopped' : 'changed',
-            endAt: now + STEP_EXIT_MS };
+        const batchHasSteps = card.nodeId === 'batch' && available && available !== 'batch';
+        const stepChanged = card.nodeId !== 'batch' && (!live || source.event?.live?.nodeId !== card.nodeId);
+        if (stepChanged && live && !knownNode(source, source.event?.live?.nodeId)) {
+          card = { ...card, phase: 'exit', outcome: 'stopped', endAt: now + STEP_EXIT_MS };
+        } else if (batchHasSteps || stepChanged) {
+          // A fast normal transition must not flash the observed card away.
+          // Keep its presentation, without inventing completion or elapsed time.
+          card = { ...card, phase: 'replay', outcome: 'changed', endAt: minimumEndAt };
         }
-      } else if (now >= card.endAt) {
+      }
+      if ((card.phase === 'complete' || card.phase === 'replay') && now >= card.endAt) {
         card = { ...card, phase: 'exit', endAt: now + STEP_EXIT_MS };
       }
     }

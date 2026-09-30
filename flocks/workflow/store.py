@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import os
 import sqlite3
 from contextvars import ContextVar
@@ -191,6 +192,7 @@ class WorkflowStore:
             cls._conn.row_factory = aiosqlite.Row
             await Storage.configure_connection(cls._conn)
             await cls._conn.executescript(_WORKFLOW_DDL)
+            await cls._ensure_step_duration_column(cls._conn)
             for stmt in _INDEX_STMTS:
                 await cls._conn.execute(stmt)
             await cls._conn.commit()
@@ -229,6 +231,21 @@ class WorkflowStore:
                 )
                 log.info("workflow.store.initialized")
                 return
+            raise
+
+    @staticmethod
+    async def _ensure_step_duration_column(db: aiosqlite.Connection) -> None:
+        # Serialize the check and ALTER across processes. Existing rows stay
+        # NULL: initialization must never scan/backfill large step payloads.
+        await db.execute("BEGIN IMMEDIATE")
+        try:
+            async with db.execute("PRAGMA table_info(workflow_execution_steps)") as cur:
+                columns = {row[1] for row in await cur.fetchall()}
+            if "duration_ms" not in columns:
+                await db.execute("ALTER TABLE workflow_execution_steps ADD COLUMN duration_ms REAL")
+            await db.commit()
+        except BaseException:
+            await db.rollback()
             raise
 
     @classmethod
@@ -568,9 +585,16 @@ class WorkflowStore:
                 cls._json_dumps(step_payload.get("outputs") or {}),
                 step_payload.get("error"),
                 cls._json_dumps(step_payload),
+                cls._step_duration_ms(step_payload.get("duration_ms")),
             )
             for step_index, step_payload in steps
         ]
+
+    @staticmethod
+    def _step_duration_ms(value: Any) -> Optional[float]:
+        if type(value) in (int, float) and 0 <= value <= 2**53 - 1 and math.isfinite(value):
+            return float(value)
+        return None
 
     @classmethod
     async def record_step(
@@ -595,8 +619,8 @@ class WorkflowStore:
         await db.executemany(
             """
             INSERT OR REPLACE INTO workflow_execution_steps
-            (exec_id, step_index, node_id, node_type, inputs, outputs, error, payload)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            (exec_id, step_index, node_id, node_type, inputs, outputs, error, payload, duration_ms)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             rows,
         )
@@ -617,8 +641,8 @@ class WorkflowStore:
             await db.executemany(
                 """
                 INSERT OR REPLACE INTO workflow_execution_steps
-                (exec_id, step_index, node_id, node_type, inputs, outputs, error, payload)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                (exec_id, step_index, node_id, node_type, inputs, outputs, error, payload, duration_ms)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 step_rows,
             )
@@ -937,6 +961,7 @@ CREATE TABLE IF NOT EXISTS workflow_execution_steps (
     outputs    TEXT NOT NULL DEFAULT '{}',
     error      TEXT,
     payload    TEXT NOT NULL,
+    duration_ms REAL,
     PRIMARY KEY (exec_id, step_index)
 );
 

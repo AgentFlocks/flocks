@@ -355,12 +355,16 @@ async def test_live_projection_is_visible_between_real_nodes_and_retained_after_
         assert live['stepCount'] == recorder.step_count == 1
         assert live['metrics']['rawCount'] == 12
         assert live['metrics']['normalizedCount'] is None
+        assert live['stepDurationsMs']['receive_alert'] >= 0
+        assert 'normalize' not in live['stepDurationsMs']
         assert live['updatedAt'] >= live['startedAt']
         assert diag.read_workflow_live_progress(diag.WORKFLOWS[1], [execution_id]) == {}
         assert diag.read_workflow_live_progress(diag.WORKFLOWS[0], ['different-id']) == {}
         # A consumer cannot mutate the shared cache through returned values.
         live['metrics']['rawCount'] = 999
+        live['stepDurationsMs']['receive_alert'] = -1
         assert diag.read_workflow_live_progress(diag.WORKFLOWS[0], [execution_id])[execution_id]['metrics']['rawCount'] == 12
+        assert diag.read_workflow_live_progress(diag.WORKFLOWS[0], [execution_id])[execution_id]['stepDurationsMs']['receive_alert'] >= 0
     finally:
         release.set()
         await task
@@ -369,6 +373,36 @@ async def test_live_projection_is_visible_between_real_nodes_and_retained_after_
     assert final['metrics']['rawCount'] == 12 and final['metrics']['normalizedCount'] == 11
     assert not diag.snapshot()['active']
     assert len(recorder.take_steps()) == 2  # normal buffered persistence remains intact
+
+
+@pytest.mark.parametrize('workflow,node', [(diag.WORKFLOWS[0], 'normalize'), (diag.WORKFLOWS[1], 'concurrent_triage')])
+def test_live_step_durations_are_recorded_before_persistence_and_cleared_on_retry(workflow, node):
+    token = diag._context.set((workflow, 'trace-timing'))
+    @diag.runner_observer
+    def run(**kwargs):
+        kwargs['on_step_start']('timed', 1, SimpleNamespace(id=node), {})
+        kwargs['on_step_complete'](SimpleNamespace(node_id=node, duration_ms=50, error=None, outputs={}))
+        assert diag.read_workflow_live_progress(workflow, ['timed'])['timed']['stepDurationsMs'] == {node: 50}
+        kwargs['on_step_start']('timed', 2, SimpleNamespace(id=node), {})
+        assert diag.read_workflow_live_progress(workflow, ['timed'])['timed']['stepDurationsMs'] == {}
+        kwargs['on_step_complete'](SimpleNamespace(node_id=node, duration_ms=20, error='failed', outputs={}))
+        assert diag.read_workflow_live_progress(workflow, ['timed'])['timed']['stepDurationsMs'] == {}
+        return SimpleNamespace(status='failed', error='failed')
+    try:
+        run(run_id='timed')
+    finally:
+        diag._context.reset(token)
+
+
+@pytest.mark.parametrize('duration, expected', [(0, 0), (.25, .25), (None, None), (-1, None),
+    (True, None), ('20', None), (float('inf'), None), (float('nan'), None), (10**1000, None)])
+def test_live_step_durations_reject_invalid_values_and_unknown_node_names(duration, expected):
+    workflow = diag.WORKFLOWS[1]
+    diag._update_live_progress(workflow, 'timed', node='load_dedup_file', completed=True, duration_ms=duration)
+    diag._update_live_progress(workflow, 'timed', node='arbitrary-secret-node', completed=True, duration_ms=20)
+    live = diag.read_workflow_live_progress(workflow, ['timed'])['timed']
+    assert live['stepDurationsMs'] == ({} if expected is None else {'load_dedup_file': expected})
+    assert len(live['stepDurationsMs']) <= 4
 
 
 def test_live_projection_is_bounded_expires_without_io_and_preserves_known_counts(monkeypatch):

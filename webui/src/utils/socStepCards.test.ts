@@ -97,13 +97,17 @@ describe('SOC independent workflow step cards', () => {
     expect(state.serial).toBe(1);
   });
 
-  it('switches from a batch card to a real step as soon as measured telemetry becomes available', () => {
+  it('keeps a batch card visible for its minimum before switching to an observed real step', () => {
     let state = advanceStepStream(createStepStream(), [batch('a')], true, NOW);
     const task = batch('a', { node: 'normalize' });
     state = advanceStepStream(state, [task], true, NOW + 1);
     expect(state.cards).toHaveLength(1);
+    expect(state.cards[0]).toMatchObject({ nodeId: 'batch', phase: 'replay', outcome: 'changed', durationMs: null });
+    state = advanceStepStream(state, [task], true, NOW + STEP_BATCH_DISPLAY_MS - 1);
+    expect(state.cards[0].phase).toBe('replay');
+    state = advanceStepStream(state, [task], true, NOW + STEP_BATCH_DISPLAY_MS);
     expect(state.cards[0]).toMatchObject({ nodeId: 'batch', phase: 'exit', outcome: 'changed' });
-    state = advanceStepStream(state, [task], true, NOW + 1 + STEP_EXIT_MS);
+    state = advanceStepStream(state, [task], true, NOW + STEP_BATCH_DISPLAY_MS + STEP_EXIT_MS);
     expect(state.cards[0]).toMatchObject({ nodeId: 'normalize', phase: 'processing', serial: 1 });
     expect(state.batches.a.nodes).not.toContain('batch');
   });
@@ -125,7 +129,7 @@ describe('SOC independent workflow step cards', () => {
     expect(state.cards[0]).toMatchObject({ nodeId: 'normalize', phase: 'complete', durationMs: 20 });
   });
 
-  it.each(['processing', 'complete', 'exit'] as const)('drops a legacy unknown card in %s phase without an exit animation or slot delay', phase => {
+  it.each(['processing', 'replay', 'complete', 'exit'] as const)('drops a legacy unknown card in %s phase without an exit animation or slot delay', phase => {
     const original = batch('a', { node: 'normalize' });
     const legacy = advanceStepStream(createStepStream(), [original], true, NOW);
     legacy.cards[0] = { ...legacy.cards[0], nodeId: 'unknown', phase, endAt: NOW + 9999 };
@@ -145,7 +149,9 @@ describe('SOC independent workflow step cards', () => {
     state = advanceStepStream(state, [batch('a')], true, NOW + 50 + STEP_EXIT_MS);
     expect(state.cards[0]).toMatchObject({ nodeId: 'batch', phase: 'processing' });
     state = advanceStepStream(state, [original], true, NOW + 51 + STEP_EXIT_MS);
-    state = advanceStepStream(state, [original], true, NOW + 51 + STEP_EXIT_MS * 2);
+    expect(state.cards[0]).toMatchObject({ nodeId: 'batch', phase: 'replay', outcome: 'changed' });
+    state = advanceStepStream(state, [original], true, NOW + 50 + STEP_EXIT_MS + STEP_BATCH_DISPLAY_MS);
+    state = advanceStepStream(state, [original], true, NOW + 50 + STEP_EXIT_MS * 2 + STEP_BATCH_DISPLAY_MS);
     expect(state.cards[0]).toMatchObject({ nodeId: 'normalize', phase: 'processing', serial: 1 });
   });
 
@@ -154,8 +160,12 @@ describe('SOC independent workflow step cards', () => {
     let state = advanceStepStream(createStepStream(), [task], true, NOW);
     task = batch('a', { node: 'filter_logs' });
     state = advanceStepStream(state, [task], true, NOW + 50);
-    expect(state.cards[0]).toMatchObject({ nodeId: 'normalize', phase: 'exit', outcome: 'changed', durationMs: null });
-    state = advanceStepStream(state, [task], true, NOW + 50 + STEP_EXIT_MS);
+    expect(state.cards[0]).toMatchObject({ nodeId: 'normalize', phase: 'replay', outcome: 'changed', durationMs: null });
+    state = advanceStepStream(state, [task], true, NOW + STEP_DISPLAY_MS - 1);
+    expect(state.cards[0].phase).toBe('replay');
+    state = advanceStepStream(state, [task], true, NOW + STEP_DISPLAY_MS);
+    expect(state.cards[0]).toMatchObject({ nodeId: 'normalize', phase: 'exit', outcome: 'changed' });
+    state = advanceStepStream(state, [task], true, NOW + STEP_DISPLAY_MS + STEP_EXIT_MS);
     expect(state.cards[0]).toMatchObject({ nodeId: 'filter_logs', phase: 'processing', durationMs: null });
     expect(state.cards[0].serial).toBe(1);
   });
@@ -168,6 +178,85 @@ describe('SOC independent workflow step cards', () => {
     expect(state.cards[0]).toMatchObject({ nodeId: 'normalize', durationMs: 20, phase: 'complete', outcome: 'complete' });
     state = advanceStepStream(state, [task], true, NOW + STEP_DISPLAY_MS - 1);
     expect(state.cards[0].phase).toBe('complete');
+  });
+
+  it('uses a two-second minimum for step presentation without restarting it at every poll', () => {
+    expect(STEP_DISPLAY_MS).toBe(2000);
+    let state = advanceStepStream(createStepStream(), [batch('a', { node: 'normalize' })], true, NOW);
+    const next = batch('a', { node: 'filter_logs' });
+    for (const elapsed of [20, 40, 120, 700, 1999]) {
+      state = advanceStepStream(state, [next], true, NOW + elapsed);
+      expect(state.cards[0]).toMatchObject({ nodeId: 'normalize', phase: 'replay',
+        outcome: 'changed', durationMs: null, enteredAt: NOW, endAt: NOW + 2000 });
+    }
+    state = advanceStepStream(state, [next], true, NOW + 2000);
+    expect(state.cards[0]).toMatchObject({ phase: 'exit', outcome: 'changed' });
+  });
+
+  it('keeps an observed step after successful batch completion without claiming an unmeasured step succeeded', () => {
+    let state = advanceStepStream(createStepStream(), [batch('a', { node: 'normalize' })], true, NOW);
+    const completed = batch('a', { state: 'completed', node: 'dedup_and_write', durationMs: 83 });
+    state = advanceStepStream(state, [completed], true, NOW + 50);
+    expect(state.cards[0]).toMatchObject({ nodeId: 'normalize', phase: 'replay', outcome: 'changed', durationMs: null });
+    state = advanceStepStream(state, [], true, NOW + STEP_DISPLAY_MS - 1);
+    expect(state.cards[0].phase).toBe('replay');
+    state = advanceStepStream(state, [], true, NOW + STEP_DISPLAY_MS);
+    state = advanceStepStream(state, [], true, NOW + STEP_DISPLAY_MS + STEP_EXIT_MS);
+    expect(state.cards[0]).toMatchObject({ nodeId: 'batch', phase: 'complete', durationMs: 83 });
+    expect(state.batches.a.nodes).toEqual(['normalize']);
+    expect(state.batches.a.nodes).not.toContain('dedup_and_write');
+  });
+
+  it('upgrades a retained step only when its actual duration arrives', () => {
+    let state = advanceStepStream(createStepStream(), [batch('a', { node: 'normalize' })], true, NOW);
+    state = advanceStepStream(state, [batch('a', { node: 'filter_logs' })], true, NOW + 20);
+    expect(state.cards[0].phase).toBe('replay');
+    const measured = batch('a', { node: 'filter_logs', durations: { normalize: 50 }, durationMs: 9999 });
+    state = advanceStepStream(state, [measured], true, NOW + 100);
+    expect(state.cards[0]).toMatchObject({ phase: 'complete', outcome: 'complete', durationMs: 50,
+      endAt: NOW + STEP_DISPLAY_MS });
+  });
+
+  it('preserves a measured batch duration while switching from a batch card to successful steps', () => {
+    let state = advanceStepStream(createStepStream(), [batch('a')], true, NOW);
+    const completed = batch('a', { state: 'completed', durationMs: 70, durations: { normalize: 20, dedup_and_write: 50 } });
+    state = advanceStepStream(state, [completed], true, NOW + 70);
+    expect(state.cards[0]).toMatchObject({ nodeId: 'batch', phase: 'complete', outcome: 'complete', durationMs: 70 });
+    state = advanceStepStream(state, [completed], true, NOW + STEP_BATCH_DISPLAY_MS - 1);
+    expect(state.cards[0].phase).toBe('complete');
+    state = advanceStepStream(state, [completed], true, NOW + STEP_BATCH_DISPLAY_MS);
+    state = advanceStepStream(state, [completed], true, NOW + STEP_BATCH_DISPLAY_MS + STEP_EXIT_MS);
+    expect(state.cards[0]).toMatchObject({ nodeId: 'normalize', phase: 'complete', durationMs: 20 });
+  });
+
+  it('does not extend a normal transition once the minimum presentation has already elapsed', () => {
+    const initial = batch('a', { node: 'normalize' });
+    let state = advanceStepStream(createStepStream(), [initial], true, NOW);
+    state = advanceStepStream(state, [initial], true, NOW + STEP_DISPLAY_MS + 1000);
+    expect(state.cards[0].phase).toBe('processing');
+    state = advanceStepStream(state, [batch('a', { node: 'filter_logs' })], true, NOW + STEP_DISPLAY_MS + 1100);
+    expect(state.cards[0]).toMatchObject({ phase: 'exit', outcome: 'changed', durationMs: null });
+  });
+
+  it.each(['failed', 'unconfirmed', 'missing', 'offline'])('stops a retained step immediately on %s instead of waiting for its display minimum', interruption => {
+    let state = advanceStepStream(createStepStream(), [batch('a', { node: 'normalize' })], true, NOW);
+    const next = batch('a', { node: 'filter_logs' });
+    state = advanceStepStream(state, [next], true, NOW + 20);
+    expect(state.cards[0].phase).toBe('replay');
+    const tasks = interruption === 'missing' ? [] : interruption === 'failed'
+      ? [batch('a', { state: 'completed', status: 'failed', node: 'filter_logs' })]
+      : interruption === 'unconfirmed' ? [batch('a', { state: 'unconfirmed', node: 'filter_logs' })] : [next];
+    state = advanceStepStream(state, tasks, interruption !== 'offline', NOW + 21);
+    if (interruption === 'offline') expect(state.cards).toEqual([]);
+    else expect(state.cards[0]).toMatchObject({ phase: 'exit', outcome: 'stopped', endAt: NOW + 21 + STEP_EXIT_MS });
+  });
+
+  it('does not delay a failure during a batch-to-step presentation transition', () => {
+    let state = advanceStepStream(createStepStream(), [batch('a')], true, NOW);
+    state = advanceStepStream(state, [batch('a', { node: 'normalize' })], true, NOW + 20);
+    expect(state.cards[0]).toMatchObject({ nodeId: 'batch', phase: 'replay' });
+    state = advanceStepStream(state, [batch('a', { node: 'normalize', state: 'completed', status: 'failed' })], true, NOW + 21);
+    expect(state.cards[0]).toMatchObject({ phase: 'exit', outcome: 'stopped', durationMs: null });
   });
 
   it.each(['unconfirmed', 'waiting'])('stops a live card when the batch becomes %s', stateName => {
@@ -195,9 +284,9 @@ describe('SOC independent workflow step cards', () => {
     state = advanceStepStream(state, [task], true, NOW + STEP_DISPLAY_MS);
     state = advanceStepStream(state, [task], true, NOW + STEP_DISPLAY_MS + STEP_EXIT_MS);
     expect(state.cards[0].nodeId).toBe('normalize');
-    state = advanceStepStream(state, [task], false, NOW + 2000);
+    state = advanceStepStream(state, [task], false, NOW + STEP_DISPLAY_MS + STEP_EXIT_MS + 100);
     expect(state.cards).toEqual([]);
-    state = advanceStepStream(state, [task], true, NOW + 2200);
+    state = advanceStepStream(state, [task], true, NOW + STEP_DISPLAY_MS + STEP_EXIT_MS + 200);
     expect(state.cards[0]).toMatchObject({ nodeId: 'normalize', phase: 'processing', serial: 1 });
     expect(state.batches.a.nodes).toEqual(['receive_alert']);
   });
@@ -332,7 +421,7 @@ describe('SOC independent workflow step cards', () => {
     const long = batch('long', { node: 'normalize' });
     let state = createStepStream();
     for (let i = 0; i < 180; i += 1) {
-      const now = NOW + i * 2200;
+      const now = NOW + i * (STEP_DISPLAY_MS + STEP_EXIT_MS + 1);
       const fast = batch(`batch-${i}`, { state: 'completed', updatedAt: now, durations: { normalize: 20 } });
       state = advanceStepStream(state, [long, fast], true, now);
       state = advanceStepStream(state, [long, fast], true, now + STEP_DISPLAY_MS);

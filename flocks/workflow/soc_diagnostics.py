@@ -11,6 +11,7 @@ from contextvars import ContextVar
 from functools import wraps
 import json
 import logging
+import math
 from logging.handlers import RotatingFileHandler
 import os
 from pathlib import Path
@@ -35,6 +36,10 @@ _boot = uuid.uuid4().hex
 _live_progress = OrderedDict()
 _LIVE_LIMIT = 256
 _LIVE_TTL_SECONDS = 30 * 60
+_LIVE_STEPS = {
+    WORKFLOWS[0]: frozenset(('receive_alert', 'normalize', 'filter_logs', 'dedup_and_write')),
+    WORKFLOWS[1]: frozenset(('load_dedup_file', 'concurrent_triage', 'commit_cursor', 'summarize')),
+}
 _LIVE_METRICS = {
     WORKFLOWS[0]: ('rawCount', 'normalizedCount', 'afterFilterCount', 'uniqueCount',
                    'duplicateCount', 'filterRemovedCount'),
@@ -111,7 +116,7 @@ def _prune_live_progress(at):
 
 
 def _update_live_progress(workflow, execution, *, phase='running', node=None,
-                          index=None, outputs=None, completed=False, reset=False):
+                          index=None, outputs=None, completed=False, reset=False, duration_ms=None):
     """Same-process projection; diagnostics must not change runner semantics."""
     if workflow not in WORKFLOWS or not isinstance(execution, str) or not execution or len(execution) > 160:
         return
@@ -125,7 +130,7 @@ def _update_live_progress(workflow, execution, *, phase='running', node=None,
             if item is None:
                 item = {'workflowId': workflow, 'executionId': execution, 'startedAt': stamp,
                         'nodeId': None, 'stepIndex': None, 'stepCount': 0,
-                        'metrics': dict.fromkeys(_LIVE_METRICS[workflow])}
+                        'metrics': dict.fromkeys(_LIVE_METRICS[workflow]), 'stepDurationsMs': {}}
                 _live_progress[key] = item
             item.update(updatedAt=stamp, phase=phase, _updated_monotonic=at)
             if isinstance(node, str):
@@ -134,6 +139,14 @@ def _update_live_progress(workflow, execution, *, phase='running', node=None,
                 item['stepIndex'] = index
             if completed:
                 item['stepCount'] += 1
+            if node in _LIVE_STEPS[workflow]:
+                # A new attempt clears the prior attempt's duration. Only an
+                # observed successful node-end supplies a value; never infer
+                # one from polling, animation or whole-execution elapsed time.
+                item['stepDurationsMs'].pop(node, None)
+                if (completed and phase == 'running' and type(duration_ms) in (int, float)
+                        and 0 <= duration_ms <= 2**53 - 1 and math.isfinite(duration_ms)):
+                    item['stepDurationsMs'][node] = duration_ms
             item['metrics'].update({key: value for key, value in metrics.items() if value is not None})
             _live_progress.move_to_end(key)
             _prune_live_progress(at)
@@ -160,7 +173,7 @@ def read_workflow_live_progress(workflow_id, execution_ids):
                 continue
             item = _live_progress.get((workflow_id, execution))
             if item is not None:
-                result[execution] = {key: dict(value) if key == 'metrics' else value
+                result[execution] = {key: dict(value) if key in ('metrics', 'stepDurationsMs') else value
                                      for key, value in item.items() if not key.startswith('_')}
         return result
 
@@ -321,7 +334,8 @@ def runner_observer(fn):
             return start(rid, index, node, inputs) if start else True
         def on_end(step):
             _update_live_progress(wf, execution, node=step.node_id, outputs=step.outputs,
-                                  completed=True, phase='failed' if step.error else 'running')
+                                  completed=True, phase='failed' if step.error else 'running',
+                                  duration_ms=step.duration_ms)
             with _lock:
                 for key in [k for k, v in _active.items() if k.startswith(trace + ":") and v.get("node") == step.node_id]:
                     _active.pop(key, None)

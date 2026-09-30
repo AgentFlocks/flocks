@@ -274,7 +274,8 @@ describe('SOC dashboard contract page runtime', () => {
     expect(container).not.toHaveTextContent('获取当前步骤');
     event = { ...event, live: { nodeId: 'normalize' } };
     await pollActivity();
-    await act(async () => { await vi.advanceTimersByTimeAsync(500); });
+    expect(container.querySelector('.ai-step-card')).toHaveTextContent('步骤记录');
+    await act(async () => { await vi.advanceTimersByTimeAsync(800); });
     expect(container.querySelectorAll('.ai-step-card')).toHaveLength(1);
     expect(container.querySelector('.ai-step-card')).toHaveAttribute('data-step', 'normalize');
     expect(container.querySelectorAll('.ai-execution-record')).toHaveLength(1);
@@ -552,7 +553,7 @@ describe('SOC dashboard contract page runtime', () => {
     expect(container.querySelector('.ai-step-card')).toHaveTextContent('接收');
     expect(container.querySelector('.ai-step-card')).toHaveTextContent('本步 0.02 秒');
     expect(container.querySelector('.ai-step-card')).toHaveTextContent('已完成步骤回放');
-    await act(async () => { await vi.advanceTimersByTimeAsync(2100); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(2500); });
     expect(container.querySelectorAll('.ai-step-card')).toHaveLength(1);
     expect(container.querySelector('.ai-step-card')).toHaveTextContent('标准化');
     expect(container.querySelector('.ai-step-card')).toHaveTextContent('本步 0.05 秒');
@@ -561,6 +562,52 @@ describe('SOC dashboard contract page runtime', () => {
     expect(container.querySelector('.ai-stream-resting')).toHaveTextContent('最近一批已完成 · 0.23 秒');
     await pollActivity();
     expect(container.querySelectorAll('.ai-step-card')).toHaveLength(0);
+  });
+
+  it('keeps a recently observed step sweeping after a normal node change without inventing completion', async () => {
+    vi.useFakeTimers();
+    let event = workflowEvent('fast-switch', 'running', { live: {
+      nodeId: 'normalize', phase: 'running', metrics: { rawCount: 20 }, stepDurationsMs: { receive_alert: 20 },
+    } });
+    mockActivity(() => ({ workflowEvents: [event] }));
+    const { container } = render(<Page />);
+    await act(async () => {});
+    await act(async () => { await vi.advanceTimersByTimeAsync(2500); });
+    expect(container.querySelector('.ai-step-card')).toHaveTextContent('标准化');
+    event = { ...event, updatedAt: new Date().toISOString(), live: {
+      nodeId: 'filter_logs', phase: 'running', metrics: { rawCount: 20 }, stepDurationsMs: { receive_alert: 20 },
+    } };
+    await act(async () => { await vi.advanceTimersByTimeAsync(500); });
+    const card = container.querySelector('.ai-step-card')!;
+    expect(card).toHaveTextContent('标准化');
+    expect(card).toHaveTextContent('步骤记录');
+    expect(card).toHaveClass('is-moving');
+    expect(card.querySelector('.ai-step-sweep')).not.toBeNull();
+    expect(card).not.toHaveTextContent('✓ 完成');
+    expect(card.querySelector('.ai-step-duration')).toBeNull();
+    await act(async () => { await vi.advanceTimersByTimeAsync(2100); });
+    expect(container.querySelector('.ai-step-card')).toHaveTextContent('过滤');
+  });
+
+  it('shows measured triage timings while the batch is still running', async () => {
+    vi.useFakeTimers();
+    mockActivity(() => ({ workflowEvents: [workflowEvent('triage-timing', 'running', {
+      stage: 'triage', workflowId: 'stream_alert_triage', live: {
+        nodeId: 'commit_cursor', phase: 'running', metrics: { inputCount: 8 },
+        stepDurationsMs: { concurrent_triage: 1234 },
+      },
+    })] }));
+    const { container } = render(<Page />);
+    await act(async () => {});
+    const card = container.querySelector('.ai-step-card.kind-triage')!;
+    expect(card).toHaveTextContent('并发研判');
+    expect(card).toHaveTextContent('本步 1.23 秒');
+    expect(card).toHaveClass('is-moving');
+    expect(card.querySelector('.ai-step-sweep')).not.toBeNull();
+    expect(container.querySelector('.ai-record-state')).toHaveTextContent('处理中');
+    await act(async () => { await vi.advanceTimersByTimeAsync(2500); });
+    expect(container.querySelector('.ai-step-card.kind-triage')).toHaveTextContent('保存进度');
+    expect(container.querySelector('.ai-step-duration')).toBeNull();
   });
 
   it('plays a completed batch with total runtime without inventing step timings', async () => {

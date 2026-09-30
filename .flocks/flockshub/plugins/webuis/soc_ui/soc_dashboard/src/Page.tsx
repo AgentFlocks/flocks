@@ -2260,27 +2260,29 @@ function AiWorkflowStepCard({ card }) {
   if (!title) return null;
   const exiting = card.phase === 'exit';
   const done = card.outcome === 'complete';
+  const observedReplay = card.phase === 'replay';
   const replay = done && card.task.state === 'completed';
-  const moving = !exiting && (done || taskIsLive(card.task));
+  const moving = !exiting && (done || observedReplay || taskIsLive(card.task));
   const count = liveMetric(event, denoise ? 'rawCount' : 'inputCount');
   const duplicate = liveMetric(event, 'duplicateCount');
   const filtered = liveMetric(event, 'afterFilterCount');
   const rate = denoise && card.nodeId === 'dedup_and_write' && filtered > 0 && duplicate !== null && duplicate <= filtered ? duplicate / filtered * 100 : null;
   const processed = !denoise && card.nodeId === 'summarize' ? liveMetric(event, 'completedCount') : null;
   const status = done ? '✓ 完成' : exiting ? card.outcome === 'stopped' ? '已停止展示'
-    : card.outcome === 'yielded' ? '轮换展示' : '切换步骤' : '处理中';
+    : card.outcome === 'yielded' ? '轮换展示' : '切换步骤' : observedReplay ? '步骤记录' : '处理中';
   return h('article', { className: cx('ai-step-card', `kind-${card.task.stage}`, exiting && 'is-exiting', moving && 'is-moving', done && 'is-complete'),
     'aria-label': `${denoise ? '降噪' : '研判'}第${card.serial}批${title}步骤卡片`, 'data-step': card.nodeId, 'data-batch': card.serial }, [
     moving ? h('span', { className: 'ai-step-sweep', 'aria-hidden': true, key: 'sweep' }) : null,
     h('div', { className: 'ai-step-meta', key: 'meta' }, [
       h('span', { key: 'kind' }, denoise ? '智能降噪' : '智能研判'),
-      h('small', { key: 'batch' }, `第 ${card.serial} 批${replay ? batchCard ? ' · 已完成批次回放' : ' · 已完成步骤回放' : ''}`),
+      h('small', { key: 'batch' }, `第 ${card.serial} 批${observedReplay ? ' · 已观察步骤回放' : replay ? batchCard ? ' · 已完成批次回放' : ' · 已完成步骤回放' : ''}`),
     ]),
     h('header', { key: 'title' }, [
       h('strong', { key: 'name' }, title), h('span', { className: 'ai-step-state', key: 'state' }, status),
     ]),
     h('p', { className: 'ai-step-description', key: 'description' }, batchCard
-      ? done ? denoise ? '本批告警已完成降噪处理。' : '本批告警已完成研判任务。'
+      ? observedReplay ? denoise ? '展示本批告警已观察到的降噪任务。' : '展示本批告警已观察到的研判任务。'
+        : done ? denoise ? '本批告警已完成降噪处理。' : '本批告警已完成研判任务。'
         : denoise ? '正在执行本批告警的降噪任务。' : '正在执行本批告警的研判任务。'
       : AI_STEP_DESCRIPTIONS[card.nodeId]),
     h('div', { className: 'ai-step-facts', key: 'facts' }, [

@@ -1306,6 +1306,7 @@ def _read_workflow_recent_events(workflow_name, start_time, end_time, limit, sna
             rows = []
             steps_by_id = {}
             step_durations_by_id = {}
+            step_failed_nodes_by_id = {}
             if ids:
                 previews = ", ".join(preview_column(name) for name in ("output_results", "input_params", "payload"))
                 placeholders = ",".join("?" for _ in ids)
@@ -1315,28 +1316,35 @@ def _read_workflow_recent_events(workflow_name, start_time, end_time, limit, sna
                 ).fetchall()}
                 rows = [by_id[key] for key in ids]
                 step_columns = {row[1] for row in conn.execute("PRAGMA table_info(workflow_execution_steps)").fetchall()}
-                if {"exec_id", "step_index", "outputs"} <= step_columns and has_octet_length:
-                    timing_select = "NULL AS node_id, NULL AS step_duration_ms"
-                    if {"node_id", "error", "payload"} <= step_columns:
-                        try:
-                            conn.execute("SELECT json_valid('{}')").fetchone()
-                        except sqlite3.OperationalError:
-                            pass  # Old SQLite keeps timings unknown; never read an unbounded payload.
-                        else:
-                            # StepResult is persisted only after a node exits; its
-                            # duration_ms is measured by perf_counter in the engine.
-                            # Extract only scalar timing, within the existing 64 KiB
-                            # per-step preview limit. Never expose step payloads.
-                            timing_select = """CASE WHEN octet_length(node_id) <= 128 THEN node_id END AS node_id,
-                                CASE WHEN error IS NULL OR error = '' THEN
-                                    CASE WHEN octet_length(payload) <= 65536 THEN
+                if {"exec_id", "step_index"} <= step_columns:
+                    timing_select = "NULL AS node_id, NULL AS step_duration_ms, 1 AS step_failed"
+                    if {"node_id", "error"} <= step_columns:
+                        legacy_duration = "NULL"
+                        if "payload" in step_columns and has_octet_length:
+                            try:
+                                conn.execute("SELECT json_valid('{}')").fetchone()
+                            except sqlite3.OperationalError:
+                                pass
+                            else:
+                                # Old rows have no scalar duration. Preserve the
+                                # bounded fallback, without loading large payloads.
+                                legacy_duration = """CASE WHEN octet_length(payload) <= 65536 THEN
                                         CASE WHEN json_valid(payload) THEN
                                             CASE WHEN json_type(payload, '$.duration_ms') IN ('integer', 'real')
                                                 AND (json_extract(payload, '$.error') IS NULL OR json_extract(payload, '$.error') = '')
                                             THEN json_extract(payload, '$.duration_ms') END
                                         END
-                                    END
-                                END AS step_duration_ms"""
+                                    END"""
+                        duration = f"COALESCE(duration_ms, {legacy_duration})" if "duration_ms" in step_columns else legacy_duration
+                        # Current rows have a compact numeric duration, independent
+                        # of SQLite JSON/octet_length support and payload size.
+                        # Only known SOC node names are returned to the dashboard.
+                        known_nodes = ",".join(f"'{node}'" for node in _WORKFLOW_ACTIVITY_NODE_LABELS)
+                        timing_select = (
+                            f"CASE WHEN node_id IN ({known_nodes}) THEN node_id END AS node_id, "
+                            f"CASE WHEN error IS NULL OR error = '' THEN {duration} END AS step_duration_ms, "
+                            "CASE WHEN error IS NULL OR error = '' THEN 0 ELSE 1 END AS step_failed"
+                        )
                     for key in ids:
                         # Bound step IDs first too: sorting must never load all
                         # outputs for long-running/looping executions.
@@ -1353,15 +1361,20 @@ def _read_workflow_recent_events(workflow_name, start_time, end_time, limit, sna
                             ).fetchall()
                             steps_by_id[key] = [_safe_json_object(step["outputs"]) for step in step_rows]
                             durations = {}
+                            failed_nodes = set()
                             for step in step_rows:
                                 node, duration = step["node_id"], step["step_duration_ms"]
                                 if node in _WORKFLOW_ACTIVITY_NODE_LABELS:
                                     # A later missing/failed attempt must not inherit
                                     # an earlier successful duration for the same node.
                                     durations.pop(node, None)
+                                    failed_nodes.discard(node)
+                                    if step["step_failed"]:
+                                        failed_nodes.add(node)
                                     if type(duration) in (int, float) and math.isfinite(duration) and 0 <= duration <= 2**53 - 1:
                                         durations[node] = duration
                             step_durations_by_id[key] = durations
+                            step_failed_nodes_by_id[key] = failed_nodes
                         if time.monotonic() > deadline:
                             raise sqlite3.OperationalError("activity read budget exceeded")
             if time.monotonic() > deadline:
@@ -1440,6 +1453,19 @@ def _read_workflow_recent_events(workflow_name, start_time, end_time, limit, sna
                     value = _dashboard_count(incoming_metrics.get(key))
                     if value is not None and (incoming_newer or live["metrics"][key] is None):
                         live["metrics"][key] = value
+            # Node-end callbacks precede final step persistence. They hold only
+            # bounded, measured timings and may fill gaps, never replace a known
+            # persisted duration or revive a node with a persisted failed result.
+            incoming_durations = incoming.get("stepDurationsMs")
+            if isinstance(incoming_durations, dict):
+                blocked = step_failed_nodes_by_id.get(execution_id, set())
+                for node in _WORKFLOW_ACTIVITY_NODE_LABELS:
+                    value = incoming_durations.get(node)
+                    if (node not in live["stepDurationsMs"] and node not in blocked
+                            and type(value) in (int, float) and 0 <= value <= 2**53 - 1 and math.isfinite(value)):
+                        live["stepDurationsMs"][node] = value
+                if incoming_newer and incoming.get("phase") in {"failed", "error", "cancelled", "canceled", "timeout"}:
+                    live["stepDurationsMs"].pop(incoming.get("nodeId"), None)
         metrics = live["metrics"]
         if workflow_stage == "denoise":
             if metrics["rawCount"] is None:

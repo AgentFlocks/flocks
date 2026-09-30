@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import os
+import json
+import sqlite3
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -96,6 +98,50 @@ async def test_workflow_store_records_execution_steps_config_and_kv() -> None:
     await WorkflowStore.kv_put("workflow_runtime/wf-1", {"status": "active"})
     assert await WorkflowStore.kv_get("workflow_runtime/wf-1") == {"status": "active"}
     assert await WorkflowStore.kv_list_keys("workflow_runtime/") == ["workflow_runtime/wf-1"]
+
+
+@pytest.mark.asyncio
+async def test_step_duration_column_migrates_without_backfilling_old_payloads() -> None:
+    path = WorkflowStore.get_db_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = json.dumps({"node_id": "normalize", "duration_ms": 50, "stdout": "x" * 100_000})
+    with sqlite3.connect(path) as db:
+        db.execute("""CREATE TABLE workflow_execution_steps (
+            exec_id TEXT, step_index INTEGER, node_id TEXT, node_type TEXT,
+            inputs TEXT, outputs TEXT, error TEXT, payload TEXT,
+            PRIMARY KEY(exec_id, step_index))""")
+        db.execute("INSERT INTO workflow_execution_steps VALUES ('old',1,'normalize','python','{}','{}',NULL,?)", (payload,))
+    await WorkflowStore.init()
+    await WorkflowStore.close()
+    await WorkflowStore.init()  # Idempotent on a migrated database.
+    with sqlite3.connect(path) as db:
+        columns = [row[1] for row in db.execute("PRAGMA table_info(workflow_execution_steps)")]
+        assert columns.count("duration_ms") == 1
+        assert db.execute("SELECT duration_ms,payload FROM workflow_execution_steps WHERE exec_id='old'").fetchone() == (None, payload)
+    await WorkflowStore.record_step("new", 1, {"node_id": "normalize", "duration_ms": 50})
+    with sqlite3.connect(path) as db:
+        assert db.execute("SELECT duration_ms FROM workflow_execution_steps WHERE exec_id='new'").fetchone()[0] == 50
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("duration, expected", [(0, 0), (.25, .25), (20, 20), (None, None),
+    (-1, None), (True, None), ("20", None), (float("inf"), None), (float("nan"), None), (10**1000, None)])
+async def test_record_step_stores_only_valid_numeric_duration(duration, expected) -> None:
+    await WorkflowStore.record_step("timed", 1, {"node_id": "load_dedup_file", "duration_ms": duration})
+    with sqlite3.connect(WorkflowStore.get_db_path()) as db:
+        assert db.execute("SELECT duration_ms FROM workflow_execution_steps").fetchone()[0] == expected
+
+
+@pytest.mark.asyncio
+async def test_complete_execution_persists_step_duration_independent_of_payload_size() -> None:
+    await WorkflowStore.complete_execution(
+        {"id": "triage", "workflowId": "stream_alert_triage", "status": "success", "startedAt": 100},
+        [(1, {"node_id": "load_dedup_file", "duration_ms": 20}),
+         (2, {"node_id": "concurrent_triage", "duration_ms": 50, "stdout": "x" * 100_000})],
+    )
+    with sqlite3.connect(WorkflowStore.get_db_path()) as db:
+        assert db.execute("SELECT node_id,duration_ms FROM workflow_execution_steps ORDER BY step_index").fetchall() == [
+            ("load_dedup_file", 20), ("concurrent_triage", 50)]
 
 
 @pytest.mark.asyncio

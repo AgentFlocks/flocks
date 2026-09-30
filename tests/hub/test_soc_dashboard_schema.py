@@ -239,6 +239,71 @@ def test_activity_step_durations_keep_step_window_payload_bounds_and_privacy(tmp
     assert "not-for-dashboard" not in json.dumps(event)
 
 
+@pytest.mark.parametrize("workflow,node", [("stream_alert_denoise", "normalize"), ("stream_alert_triage", "concurrent_triage")])
+@pytest.mark.parametrize("old_sqlite", [False, True])
+def test_activity_scalar_step_duration_survives_large_payload_and_old_sqlite(tmp_path, monkeypatch, workflow, node, old_sqlite):
+    handlers = _load_dashboard_handlers()
+    handlers.WORKFLOW_DB = _activity_workflow_db(tmp_path)
+    _activity_step_timings(handlers.WORKFLOW_DB)
+    _activity_execution(handlers.WORKFLOW_DB, "timed", status="success", workflow=workflow)
+    with sqlite3.connect(handlers.WORKFLOW_DB) as conn:
+        conn.execute("ALTER TABLE workflow_execution_steps ADD COLUMN duration_ms REAL")
+        conn.execute("INSERT INTO workflow_execution_steps (exec_id,step_index,node_id,outputs,payload,duration_ms) VALUES ('timed',1,?,'{}',?,50)",
+                     (node, json.dumps({"duration_ms": 999, "stdout": "private" * 20000})))
+    original_connect = sqlite3.connect
+    queries = []
+    class TrackedConnection(sqlite3.Connection):
+        def execute(self, sql, *args):
+            queries.append(sql)
+            if old_sqlite and sql in ("SELECT octet_length('')", "SELECT json_valid('{}')"):
+                raise sqlite3.OperationalError("unavailable function")
+            return super().execute(sql, *args)
+    monkeypatch.setattr(handlers.sqlite3, "connect", lambda *a, **kw: original_connect(*a, **kw, factory=TrackedConnection))
+    event = handlers._get_workflow_recent_events(workflow)[0]
+    assert event["live"]["stepDurationsMs"] == {node: 50}
+    assert "private" not in json.dumps(event)
+    if old_sqlite:
+        assert not any("json_extract" in sql or "length(payload)" in sql for sql in queries)
+
+
+@pytest.mark.parametrize("mismatch", [None, "workflow", "execution", "stale"])
+def test_activity_live_timings_fill_unpersisted_triage_steps_only_for_same_current_execution(tmp_path, monkeypatch, mismatch):
+    handlers = _load_dashboard_handlers()
+    handlers.WORKFLOW_DB = _activity_workflow_db(tmp_path)
+    _activity_execution(handlers.WORKFLOW_DB, "triage", workflow="stream_alert_triage")
+    with sqlite3.connect(handlers.WORKFLOW_DB) as conn:
+        updated_at = conn.execute("SELECT updated_at FROM workflow_executions").fetchone()[0]
+    incoming = {"workflowId": "stream_alert_triage", "executionId": "triage", "updatedAt": updated_at + 1,
+                "phase": "running", "nodeId": "concurrent_triage", "stepDurationsMs": {
+                    "load_dedup_file": 20, "unknown-node": 5, "concurrent_triage": -1, "commit_cursor": True}}
+    if mismatch == "workflow":
+        incoming["workflowId"] = "stream_alert_denoise"
+    elif mismatch == "execution":
+        incoming["executionId"] = "other"
+    elif mismatch == "stale":
+        incoming["updatedAt"] = updated_at - 1
+    monkeypatch.setattr(handlers, "_dashboard_memory_progress", lambda wf, ids: {"triage": incoming})
+    event = handlers._get_workflow_recent_events("stream_alert_triage")[0]
+    assert event["live"]["stepDurationsMs"] == ({} if mismatch else {"load_dedup_file": 20})
+    assert event["result"]["durationMs"] is None
+
+
+def test_activity_live_timing_never_overwrites_persisted_duration_or_failed_step(tmp_path, monkeypatch):
+    handlers = _load_dashboard_handlers()
+    handlers.WORKFLOW_DB = _activity_workflow_db(tmp_path)
+    _activity_step_timings(handlers.WORKFLOW_DB)
+    _activity_execution(handlers.WORKFLOW_DB, "triage", status="failed", workflow="stream_alert_triage")
+    with sqlite3.connect(handlers.WORKFLOW_DB) as conn:
+        conn.execute("ALTER TABLE workflow_execution_steps ADD COLUMN duration_ms REAL")
+        conn.execute("INSERT INTO workflow_execution_steps (exec_id,step_index,node_id,outputs,duration_ms) VALUES ('triage',1,'load_dedup_file','{}',20)")
+        conn.execute("INSERT INTO workflow_execution_steps (exec_id,step_index,node_id,outputs,error,duration_ms) VALUES ('triage',2,'concurrent_triage','{}','failed',50)")
+    monkeypatch.setattr(handlers, "_dashboard_memory_progress", lambda wf, ids: {"triage": {
+        "workflowId": wf, "executionId": "triage", "phase": "failed", "stepDurationsMs": {
+            "load_dedup_file": 999, "concurrent_triage": 999}}})
+    event = handlers._get_workflow_recent_events("stream_alert_triage")[0]
+    assert event["live"]["stepDurationsMs"] == {"load_dedup_file": 20}
+
+
 def test_activity_expiry_filters_both_queries_before_limit_without_cancelling(tmp_path, monkeypatch):
     handlers = _load_dashboard_handlers()
     handlers.WORKFLOW_DB = _activity_workflow_db(tmp_path)
