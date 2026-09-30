@@ -18,6 +18,7 @@ export interface WebUIContractPageListItem {
 }
 
 export interface WebUIContractWorkspaceSection {
+  query?: Record<string, string>;
   id: string;
   label: string;
   labelEn?: string | null;
@@ -42,6 +43,8 @@ export interface WebUIContractWorkspaceListItem {
   pages: WebUIContractPageListItem[];
   /** Scene suite that ships the workspace; the API only lists scenes that have one. */
   suiteId?: string | null;
+  /** The suite needs Flocks Pro and no Pro license is active: it stays installed but cannot open. */
+  locked?: boolean;
 }
 
 export interface WebUIContractPageManifest {

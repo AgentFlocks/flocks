@@ -63,6 +63,8 @@ def _make_agent(name="rex", tools=None):
     agent = MagicMock()
     agent.name = name
     agent.tools = tools
+    agent.skills = []
+    agent.prompt_profile = "standard"
     return agent
 
 
@@ -3190,9 +3192,13 @@ async def test_process_step_empty_retry_records_usage_per_attempt(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_process_step_retries_empty_transport_exception(monkeypatch):
+@pytest.mark.parametrize("failure", ["transport", "throttle", "quota", "quota_deferred", "alibaba", "alibaba_exhausted"])
+async def test_process_step_retries_only_transient_provider_errors(monkeypatch, failure):
     runner = _make_runner("ses_runner_transport_retry")
     runner.callbacks = RunnerCallbacks(on_error=AsyncMock())
+    runner._defer_step_errors = failure == "quota_deferred"
+    if failure.startswith("alibaba"):
+        runner.provider_id = "alibaba"
 
     last_user = UserMessageInfo(
         id="msg_user_transport_retry",
@@ -3206,12 +3212,22 @@ async def test_process_step_retries_empty_transport_exception(monkeypatch):
     provider = MagicMock()
     provider.is_configured.return_value = True
     assistant_msg = SimpleNamespace(id="msg_assistant_transport_retry")
+    error = httpcore.ReadError() if failure == "transport" else RuntimeError(
+        "429 insufficient_quota" if failure.startswith("quota") else "429 rate limit exceeded"
+    )
+    if failure.startswith("alibaba"):
+        error = type("SdkError", (RuntimeError,), {
+            "status_code": 429,
+            "response": SimpleNamespace(headers={"Retry-After": "90"}),
+        })("429 insufficient_quota")
     call_llm_mock = AsyncMock(
         side_effect=[
-            httpcore.ReadError(),
+            error,
             StepResult(action="stop", content="recovered"),
         ]
     )
+    if failure == "alibaba_exhausted":
+        call_llm_mock.side_effect = [error] * 6
     sleep_mock = AsyncMock(return_value=None)
 
     monkeypatch.setattr(runner_mod.Agent, "get", AsyncMock(return_value=agent))
@@ -3229,9 +3245,25 @@ async def test_process_step_retries_empty_transport_exception(monkeypatch):
     monkeypatch.setattr(runner_mod.Message, "update", AsyncMock(return_value=None))
     monkeypatch.setattr(runner, "_call_llm", call_llm_mock)
     monkeypatch.setattr(runner_mod.SessionRetry, "sleep", sleep_mock)
+    monkeypatch.setattr(runner, "_ensure_visible_error_text", AsyncMock(return_value=None))
+    monkeypatch.setattr(runner, "_publish_assistant_error_message", AsyncMock())
 
     result = await runner._process_step([last_user], last_user)
 
+    if failure == "alibaba_exhausted":
+        assert result.error is not None
+        assert result.error_code != "model_quota_exhausted"
+        assert call_llm_mock.await_count == 6
+        assert sleep_mock.await_count == 5
+        return
+    if failure == "alibaba":
+        assert sleep_mock.await_args.args[0] == 90_000
+    if failure.startswith("quota"):
+        assert result.action == "stop"
+        assert result.error_code == "model_quota_exhausted"
+        call_llm_mock.assert_awaited_once()
+        sleep_mock.assert_not_awaited()
+        return
     assert result.content == "recovered"
     assert call_llm_mock.await_count == 2
     sleep_mock.assert_awaited_once()
@@ -3339,6 +3371,7 @@ async def test_process_step_uses_default_max_steps_when_agent_steps_missing(monk
 
     assert result.action == "stop"
     assert captured["tools"] == []
+    assert runner.max_steps_reached is True
 
 
 @pytest.mark.asyncio
@@ -3388,6 +3421,7 @@ async def test_process_step_respects_explicit_agent_steps_over_default(monkeypat
 
     assert result.action == "stop"
     assert captured["tools"] == sentinel_tools
+    assert runner.max_steps_reached is False
 
 
 @pytest.mark.asyncio
@@ -3453,6 +3487,7 @@ async def test_process_step_halts_after_third_exact_tool_only_turn(monkeypatch):
         else:
             assert result.action == "stop"
             assert "Stopped the loop because `echo_tool` was called 3 times in a row" in result.content
+            assert result.error == "runner_tool_loop_guard_halt:repeated_exact_tool_call:echo_tool"
 
     assert update_mock.await_args_list[-2].kwargs["content"].startswith("Stopped the loop because `echo_tool`")
     assert update_mock.await_args_list[-1].kwargs["finish"] == "stop"

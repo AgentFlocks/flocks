@@ -12,6 +12,7 @@ import contextvars
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -21,7 +22,7 @@ import weakref
 from contextlib import asynccontextmanager, contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import AsyncIterator, Any, ClassVar, Dict, Iterator, List, Literal, Optional, Tuple
+from typing import Annotated, AsyncIterator, Any, ClassVar, Dict, Iterator, List, Literal, Optional, Tuple
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -115,6 +116,21 @@ class ProjectDeletionError(ValueError):
     """Raised when a protected project cannot be deleted."""
 
 
+WORKBENCH_PROJECT_SCOPE = "workbench"
+PROJECT_SCOPE_PATTERN = r"^[a-z][a-z0-9-]{0,63}$"
+# ``workbench`` holds the folders of the session manager. An extension may
+# keep its own folders under another scope name; they stay out of the session
+# manager and can reuse the same directories only through their own scope.
+ProjectScope = Annotated[str, Field(pattern=PROJECT_SCOPE_PATTERN)]
+
+
+def normalize_project_scope(scope: Optional[str]) -> str:
+    value = (scope or WORKBENCH_PROJECT_SCOPE).strip()
+    if not re.fullmatch(PROJECT_SCOPE_PATTERN, value):
+        raise ValueError(f"Invalid project scope: {scope!r}")
+    return value
+
+
 class ProjectIcon(BaseModel):
     """Project icon configuration."""
 
@@ -138,6 +154,8 @@ class ProjectInfo(BaseModel):
 
     id: str
     worktree: str
+    source_kind: Optional[Literal["local", "git", "zip", "url"]] = Field(None, alias="sourceKind")
+    scope: Optional[ProjectScope] = None
     vcs: Optional[str] = None
     name: Optional[str] = None
     icon: Optional[ProjectIcon] = None
@@ -165,6 +183,8 @@ class ProjectRegistryEntry(BaseModel):
     id: str
     name: str
     worktree: str
+    source_kind: Optional[Literal["local", "git", "zip", "url"]] = Field(None, alias="sourceKind")
+    scope: Optional[ProjectScope] = None
     created_at: int = Field(alias="createdAt")
     updated_at: int = Field(alias="updatedAt")
     owner_user_id: Optional[str] = Field(None, alias="ownerUserID")
@@ -493,6 +513,8 @@ class Project:
             id=entry.id,
             worktree=entry.worktree,
             name=entry.name,
+            sourceKind=entry.source_kind,
+            scope=entry.scope or WORKBENCH_PROJECT_SCOPE,
             vcs="git" if (Path(entry.worktree) / ".git").exists() else None,
             time=ProjectTime(created=entry.created_at, updated=entry.updated_at),
             pathStatus=cls._path_status(entry.worktree),
@@ -524,9 +546,12 @@ class Project:
         owner_id: str,
         name: Optional[str],
         worktree: str,
+        source_kind: Literal["local", "git", "zip", "url"] = "local",
+        scope: str = WORKBENCH_PROJECT_SCOPE,
     ) -> ProjectInfo:
         """Register an existing directory for a user."""
 
+        scope = normalize_project_scope(scope)
         async with cls._lock:
             with _registry_cross_process_lock(cls.registry_path(owner_id)):
                 registry = cls._read_registry(owner_id)
@@ -563,7 +588,17 @@ class Project:
                     ),
                     None,
                 )
-                if removed_entry is not None:
+                # Only ordinary workbench folders come back as the old registration.
+                # An extension scope keys its own data by registration, so
+                # re-adding a folder there starts a new history and the removed
+                # registration keeps hiding what belonged to it.
+                if (
+                    removed_entry is not None
+                    and scope == WORKBENCH_PROJECT_SCOPE
+                    and (removed_entry.scope or WORKBENCH_PROJECT_SCOPE) == WORKBENCH_PROJECT_SCOPE
+                ):
+                    removed_entry.scope = scope
+                    removed_entry.source_kind = source_kind
                     removed_entry.name = normalized_name
                     removed_entry.worktree = normalized_worktree
                     removed_entry.owner_user_id = owner_id
@@ -583,6 +618,8 @@ class Project:
                     createdAt=now,
                     updatedAt=now,
                     ownerUserID=owner_id,
+                    sourceKind=source_kind,
+                    scope=scope,
                 )
                 registry.projects.append(entry)
                 cls._write_registry(owner_id, registry)
@@ -874,6 +911,27 @@ class Project:
             cls.invalidate_session_stats(owner_id)
             log.info("project.restored", {"id": project_id})
             return cls._entry_to_info(entry)
+
+    @classmethod
+    def worktree_registration_ids(cls, owner_id: str, project: ProjectInfo) -> set[str]:
+        """The project's id plus removed registrations of the same folder."""
+        return {entry.id for entry in cls._read_registry(owner_id).projects
+                if entry.id == project.id or (entry.removed_at is not None and
+                    cls._normalized_worktree(entry.worktree) == cls._normalized_worktree(project.worktree))}
+
+    @classmethod
+    async def purge_registrations(cls, owner_id: str, project_ids: set[str]) -> None:
+        """Remove registrations after the caller has cleaned the data keyed by them."""
+        async with cls._lock:
+            with _registry_cross_process_lock(cls.registry_path(owner_id)):
+                registry = cls._read_registry(owner_id)
+                registry.projects = [entry for entry in registry.projects if entry.id not in project_ids]
+                cls._write_registry(owner_id, registry)
+            cls.invalidate_session_stats(owner_id)
+
+    @classmethod
+    def removed_project_ids(cls) -> set[str]:
+        return {entry.id for entry in cls._all_registry_entries(include_removed=True) if entry.removed_at is not None}
 
     @classmethod
     def registered_project_ids(cls, owner_id: str) -> set[str]:

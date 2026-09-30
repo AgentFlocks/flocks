@@ -62,9 +62,10 @@ class WebUIContractPageErrorBoundary extends Component<
 
 interface PageRuntimeHostProps {
   pageId?: string;
+  initialBuildHash?: string;
 }
 
-export default function PageRuntimeHost({ pageId }: PageRuntimeHostProps) {
+export default function PageRuntimeHost({ pageId, initialBuildHash }: PageRuntimeHostProps) {
   const { t } = useTranslation('webuiContractPage');
   const tr = useCallback(
     (key: string) => i18n.t(key, { ns: 'webuiContractPage' }),
@@ -90,14 +91,17 @@ export default function PageRuntimeHost({ pageId }: PageRuntimeHostProps) {
     if (!pageId) return;
     setLoading(true);
     try {
-      const response = await webuiContractPagesAPI.get(pageId);
-      const nextHash = hash || response.data.build.hash;
-      setBuildHash(nextHash);
-      if (response.data.build.status !== 'ready' || !nextHash) {
-        setPageComponent(null);
-        setError(response.data.build.error || tr('host.notBuilt'));
-        return;
+      let nextHash = hash;
+      if (!nextHash) {
+        const response = await webuiContractPagesAPI.get(pageId);
+        nextHash = response.data.build.hash;
+        if (response.data.build.status !== 'ready' || !nextHash) {
+          setPageComponent(null);
+          setError(response.data.build.error || tr('host.notBuilt'));
+          return;
+        }
       }
+      setBuildHash(nextHash);
       await loadBundle(nextHash);
     } catch (err: unknown) {
       setPageComponent(null);
@@ -108,8 +112,8 @@ export default function PageRuntimeHost({ pageId }: PageRuntimeHostProps) {
   }, [loadBundle, pageId, tr]);
 
   useEffect(() => {
-    void refreshPage();
-  }, [refreshPage]);
+    void refreshPage(initialBuildHash);
+  }, [initialBuildHash, refreshPage]);
 
   useSSE({
     url: '/api/event',

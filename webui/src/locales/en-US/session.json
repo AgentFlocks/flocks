@@ -569,5 +569,10 @@
     "failed": "Unable to load this session. Please retry.",
     "retry": "Retry",
     "back": "Back to workbench"
+  },
+  "workbenchChat": {
+    "newSession": "New conversation",
+    "sessions": "Conversations",
+    "session": "Conversation"
   }
 }

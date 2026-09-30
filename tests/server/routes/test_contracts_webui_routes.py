@@ -135,6 +135,7 @@ async def test_list_webui_workspaces_returns_grouped_pages(client: AsyncClient, 
                     "id": "operations",
                     "label": "调查列表",
                     "labelEn": None,
+                    "query": {},
                     "pageIds": ["ops-overview", "investigation-list"],
                     "defaultPageId": "ops-overview",
                     "contentPadding": "comfortable",
@@ -177,6 +178,7 @@ async def test_list_webui_workspaces_returns_grouped_pages(client: AsyncClient, 
             ],
             "suiteId": "scene-suite",
             "native": False,
+            "locked": False,
         }
     ]
 

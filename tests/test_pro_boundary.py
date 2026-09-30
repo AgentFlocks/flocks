@@ -17,6 +17,11 @@ _REMOVED_SECURITY_MODULES = frozenset(
 )
 
 
+# Packages that only ship inside Flocks Pro (obfuscated). OSS may expose
+# generic mechanisms they use, but never import them.
+_PRO_ONLY_PACKAGES = frozenset({"flocks_code_security"})
+
+
 def _imports_in(module_path: Path) -> set[str]:
     tree = ast.parse(module_path.read_text(encoding="utf-8"), filename=str(module_path))
     imports: set[str] = set()
@@ -48,3 +53,8 @@ def test_oss_runtime_source_has_no_pro_or_removed_security_dependencies() -> Non
         if item == "flockspro.policy" or item.startswith("flockspro.policy.")
     }
     assert not imports.intersection(_REMOVED_SECURITY_MODULES)
+    assert not {
+        item
+        for item in imports
+        if item.split(".", 1)[0] in _PRO_ONLY_PACKAGES
+    }

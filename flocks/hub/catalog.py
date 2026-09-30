@@ -12,7 +12,10 @@ from typing import Any, Iterable, Optional
 
 from flocks.hub import local
 from flocks.hub.models import HubCatalogEntry, HubIndex, HubIndexEntry, HubPluginManifest, HubTaxonomy, PluginType
-from flocks.hub.paths import get_bundled_hub_root
+from flocks.hub.paths import extension_hub_roots, get_bundled_hub_root, owning_hub_root
+from flocks.utils.log import Log
+
+log = Log.create(service="hub.catalog")
 
 _LEGACY_REMOVED_PLUGINS: dict[tuple[PluginType, str], dict[str, Optional[str]]] = {
     ("agent", "alert-triage-agent"): {
@@ -138,13 +141,39 @@ def _frontmatter(path: Path) -> dict[str, Any]:
     return {}
 
 
-@lru_cache(maxsize=1)
-def load_index() -> HubIndex:
-    root = get_bundled_hub_root()
+def _read_index(root: Path) -> Optional[HubIndex]:
     path = root / "index.json"
     if not path.is_file():
-        return HubIndex(schemaVersion="hub.index.v1", plugins=[])
+        return None
     return HubIndex.model_validate(_read_json(path))
+
+
+@lru_cache(maxsize=1)
+def _merged_index() -> tuple[HubIndex, dict[tuple[str, str], Path]]:
+    """The bundled index with extension entries merged in, plus each entry's root."""
+    bundled_root = get_bundled_hub_root()
+    index = _read_index(bundled_root) or HubIndex(schemaVersion="hub.index.v1", plugins=[])
+    plugins = list(index.plugins)
+    owners = {(item.type, item.id): bundled_root.resolve() for item in plugins}
+    for root in extension_hub_roots():
+        try:
+            extension_index = _read_index(root)
+        except Exception as exc:
+            log.warn("hub.extension_index.invalid", {"root": str(root), "error": str(exc)})
+            continue
+        for item in extension_index.plugins if extension_index else []:
+            key = (item.type, item.id)
+            position = next((i for i, current in enumerate(plugins) if (current.type, current.id) == key), None)
+            if position is None:
+                plugins.append(item)
+            else:
+                plugins[position] = item
+            owners[key] = root
+    return index.model_copy(update={"plugins": plugins}), owners
+
+
+def load_index() -> HubIndex:
+    return _merged_index()[0]
 
 
 @lru_cache(maxsize=1)
@@ -157,12 +186,12 @@ def load_taxonomy() -> HubTaxonomy:
 
 
 @lru_cache(maxsize=1)
-def _manifest_path_lookup() -> dict[tuple[str, str], str]:
-    return {(item.type, item.id): item.manifestPath for item in load_index().plugins}
+def _manifest_path_lookup() -> dict[tuple[str, str], tuple[Path, str]]:
+    index, owners = _merged_index()
+    return {(item.type, item.id): (owners[(item.type, item.id)], item.manifestPath) for item in index.plugins}
 
 
-def manifest_path(plugin_type: PluginType, plugin_id: str) -> Path:
-    root = get_bundled_hub_root()
+def _direct_manifest_path(root: Path, plugin_type: PluginType, plugin_id: str) -> Optional[Path]:
     direct = root / "plugins" / f"{plugin_type}s" / plugin_id / "manifest.json"
     if direct.is_file():
         return direct
@@ -174,14 +203,47 @@ def manifest_path(plugin_type: PluginType, plugin_id: str) -> Path:
         tool_direct = root / "plugins" / "tools" / "device" / plugin_id / "manifest.json"
         if tool_direct.is_file():
             return tool_direct
-    manifest_rel = _manifest_path_lookup().get((plugin_type, plugin_id))
-    if manifest_rel:
-        path = (root / manifest_rel).resolve()
-        bundled = root.resolve()
-        if bundled not in path.parents and path != bundled:
-            raise ValueError("manifest path escapes hub root")
-        return path
-    return direct
+    return None
+
+
+def _indexed_manifest_path(root: Path, manifest_rel: str) -> Path:
+    path = (root / manifest_rel).resolve()
+    resolved_root = root.resolve()
+    if resolved_root not in path.parents and path != resolved_root:
+        raise ValueError("manifest path escapes hub root")
+    return path
+
+
+def _within_root(path: Path, root: Path) -> bool:
+    resolved, resolved_root = path.resolve(), root.resolve()
+    return resolved == resolved_root or resolved_root in resolved.parents
+
+
+def manifest_path(plugin_type: PluginType, plugin_id: str) -> Path:
+    # Extension roots come first: they may replace a bundled placeholder.
+    for extension_root in reversed(extension_hub_roots()):
+        direct = _direct_manifest_path(extension_root, plugin_type, plugin_id)
+        if direct is not None:
+            if not _within_root(direct, extension_root):
+                raise ValueError("manifest path escapes hub root")
+            return direct
+    root = get_bundled_hub_root()
+    indexed = _manifest_path_lookup().get((plugin_type, plugin_id))
+    if indexed is not None and indexed[0] != root.resolve():
+        return _indexed_manifest_path(*indexed)
+    direct = _direct_manifest_path(root, plugin_type, plugin_id)
+    if direct is not None:
+        return direct
+    if indexed is not None:
+        return _indexed_manifest_path(*indexed)
+    return root / "plugins" / f"{plugin_type}s" / plugin_id / "manifest.json"
+
+
+def manifest_relative_path(plugin_type: PluginType, plugin_id: str) -> str:
+    """Manifest path relative to the hub root that ships the plugin."""
+    path = manifest_path(plugin_type, plugin_id)
+    root = owning_hub_root(path) or get_bundled_hub_root()
+    return str(path.resolve().relative_to(root))
 
 
 def load_manifest(plugin_type: PluginType, plugin_id: str) -> HubPluginManifest:
@@ -630,6 +692,7 @@ def _catalog_entries_cache_key() -> tuple[tuple[str, int, int], ...]:
     return (
         _path_signature(root / "index.json"),
         _path_signature(root / "taxonomy.json"),
+        *(_path_signature(extension_root / "index.json") for extension_root in extension_hub_roots()),
         *_installed_plugins_cache_key(),
         *_system_plugin_roots_cache_key(),
         *_bundled_tool_roots_cache_key(),
@@ -721,7 +784,7 @@ def _catalog_entries_snapshot() -> tuple[HubCatalogEntry, ...]:
 
 def clear_catalog_caches() -> None:
     """Clear Hub filesystem discovery caches after installs or explicit refreshes."""
-    load_index.cache_clear()
+    _merged_index.cache_clear()
     load_taxonomy.cache_clear()
     _manifest_path_lookup.cache_clear()
     _cached_system_plugin_roots.cache_clear()
@@ -852,7 +915,7 @@ def _entry_from_manifest(manifest: HubPluginManifest) -> HubCatalogEntry:
         state=state,
         installedVersion=installed_version,
         source=manifest.source.kind,
-        manifestPath=str(manifest_path(manifest.type, manifest.id).relative_to(get_bundled_hub_root())),
+        manifestPath=manifest_relative_path(manifest.type, manifest.id),
         installPath=str(install_path) if install_path else None,
         native=False,
     )
@@ -1022,12 +1085,11 @@ def _entry_from_bundled_tool(
 
 
 def list_manifests() -> list[HubPluginManifest]:
-    root = get_bundled_hub_root()
     index = load_index()
     result: list[HubPluginManifest] = []
     for item in index.plugins:
-        path = root / item.manifestPath
         try:
+            path = manifest_path(item.type, item.id)
             result.append(HubPluginManifest.model_validate(_read_json(path)))
         except Exception:
             continue

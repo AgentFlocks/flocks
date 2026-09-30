@@ -855,6 +855,12 @@ class SessionCompaction:
            ``FLOCKS_COMPACTION_FLUSH_TIMEOUT`` (default
            ``_DEFAULT_FLUSH_TIMEOUT_SECONDS``, currently 90s).
         """
+        from flocks.session.session import Session
+
+        session = await Session.get_by_id_unfiltered(session_id)
+        if session is not None and not session.memory_enabled:
+            return
+
         kwargs = dict(
             session_id=session_id,
             summary=summary_text,
@@ -1770,10 +1776,14 @@ class SessionCompaction:
                 post_compaction_text = await cls._build_post_compaction_context(
                     session_id, policy=policy,
                 )
+                # Preserve the active agent: a synthetic user message otherwise
+                # defaults to Rex and can widen an isolated session's tool set.
+                parent = await Message.get(session_id, parent_id)
                 await Message.create(
                     session_id=session_id,
                     role=MessageRole.USER,
                     content=post_compaction_text,
+                    **({"agent": parent.agent} if parent is not None else {}),
                     synthetic=True,
                 )
                 log.info("compaction.continuation_message_created", {

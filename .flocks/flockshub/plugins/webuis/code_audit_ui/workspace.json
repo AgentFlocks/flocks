@@ -1,7 +1,7 @@
 {
   "id": "code_audit_ui",
   "version": "1.0.0",
-  "title": "代码审计",
+  "title": "代码漏洞审计工作区",
   "titleEn": "Code Audit",
   "icon": "FileSearch",
   "order": 20,

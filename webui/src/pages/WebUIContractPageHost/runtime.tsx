@@ -1,8 +1,43 @@
-import React, { type ComponentType, type ReactNode } from 'react';
+import React, { lazy, Suspense, type ComponentProps, type ComponentType, type ReactNode } from 'react';
 import { jsx, jsxs } from 'react/jsx-runtime';
+import { useTranslation } from 'react-i18next';
 import type { AxiosRequestConfig, AxiosResponse } from 'axios';
 import apiClient from '@/api/client';
+import WorkbenchChat from '@/components/common/WorkbenchChat';
+import WorkbenchPanel from '@/components/common/WorkbenchPanel';
+import type SessionTranscriptComponent from '@/components/common/SessionTranscript';
+import type { WorkbenchModelPickerProps } from '@/components/common/WorkbenchModelPicker';
 import { useAuth } from '@/contexts/AuthContext';
+
+const LazyWorkbenchModelPicker = lazy(() => import('@/components/common/WorkbenchModelPicker'));
+export function WorkbenchModelPicker(props: WorkbenchModelPickerProps) {
+  return <Suspense fallback={<div aria-busy="true" />}><LazyWorkbenchModelPicker {...props} /></Suspense>;
+}
+
+const LazySessionTranscript = lazy(() => import('@/components/common/SessionTranscript'));
+export function SessionTranscript(props: ComponentProps<typeof SessionTranscriptComponent>) {
+  return <Suspense fallback={<div aria-busy="true" />}><LazySessionTranscript {...props} /></Suspense>;
+}
+
+interface MarkdownRendererProps {
+  content: string;
+}
+
+const LazyMarkdownRenderer = lazy(async () => {
+  const [{ default: ReactMarkdown }, { default: remarkGfm }] = await Promise.all([
+    import('react-markdown'),
+    import('remark-gfm'),
+  ]);
+  const MarkdownRenderer = ({ content }: MarkdownRendererProps) => (
+    <ReactMarkdown remarkPlugins={[remarkGfm]} skipHtml>
+      {content}
+    </ReactMarkdown>
+  );
+  return { default: MarkdownRenderer };
+});
+
+const MAX_CACHED_PAGE_BUNDLES = 20;
+const pageBundleCache = new Map<string, Promise<ComponentType>>();
 
 interface WebUIContractPageScopedApi {
   get<T = unknown>(path: string, config?: AxiosRequestConfig): Promise<AxiosResponse<T>>;
@@ -31,7 +66,13 @@ export interface WebUIContractPageSdk {
   jsxs: typeof jsxs;
   api: WebUIContractPageApiClient;
   Card: typeof Card;
+  Markdown: typeof Markdown;
+  SessionTranscript: typeof SessionTranscript;
+  WorkbenchPanel: typeof WorkbenchPanel;
+  WorkbenchChat: typeof WorkbenchChat;
+  WorkbenchModelPicker: typeof WorkbenchModelPicker;
   useCurrentUser: typeof useCurrentUser;
+  useLanguage: typeof useLanguage;
 }
 
 declare global {
@@ -49,9 +90,28 @@ export function Card({ title, children }: { title: string; children: ReactNode }
   );
 }
 
+export function Markdown({ content }: { content: string }) {
+  return (
+    <Suspense
+      fallback={(
+        <pre className="whitespace-pre-wrap text-sm" aria-busy="true">
+          {content}
+        </pre>
+      )}
+    >
+      <LazyMarkdownRenderer content={content} />
+    </Suspense>
+  );
+}
+
 export function useCurrentUser() {
   const { user } = useAuth();
   return user;
+}
+
+export function useLanguage() {
+  const { i18n } = useTranslation();
+  return i18n.resolvedLanguage || i18n.language || 'en-US';
 }
 
 function normalizePageApiPath(path: string): string {
@@ -116,37 +176,58 @@ export function installWebUIContractPageRuntime(pageId: string): void {
     jsxs,
     api: createPageApiClient(pageId),
     Card,
+    Markdown,
+    SessionTranscript,
+    WorkbenchPanel,
+    WorkbenchChat,
+    WorkbenchModelPicker,
     useCurrentUser,
+    useLanguage,
   };
 }
 
-// Bundles evaluate one at a time: the SDK global must still name the page a
-// bundle belongs to when that bundle reads it, even while several kept-alive
-// panes load at once.
+// A bundle must evaluate with its own SDK, even when several panes load at once.
 let bundleImportQueue: Promise<unknown> = Promise.resolve();
 
-export async function loadWebUIContractPageBundle(
+export function loadWebUIContractPageBundle(
   url: string,
   missingExportMessage = 'Page bundle does not export a default component',
   pageId?: string,
 ): Promise<ComponentType> {
-  const response = await apiClient.get<string>(url, { responseType: 'text' });
-  const source = typeof response.data === 'string' ? response.data : String(response.data ?? '');
-  const moduleUrl = URL.createObjectURL(new Blob([source], { type: 'application/javascript' }));
+  const cacheKey = JSON.stringify([url, pageId]);
+  const cached = pageBundleCache.get(cacheKey);
+  if (cached) {
+    pageBundleCache.delete(cacheKey);
+    pageBundleCache.set(cacheKey, cached);
+    return cached;
+  }
 
-  const load = bundleImportQueue.then(async () => {
-    try {
-      if (pageId) installWebUIContractPageRuntime(pageId);
-      const mod = await import(/* @vite-ignore */ moduleUrl);
-      const component = mod.default as ComponentType | undefined;
-      if (!component) {
-        throw new Error(missingExportMessage);
+  const request = (async () => {
+    const response = await apiClient.get<string>(url, { responseType: 'text' });
+    const source = typeof response.data === 'string' ? response.data : String(response.data ?? '');
+    const moduleUrl = URL.createObjectURL(new Blob([source], { type: 'application/javascript' }));
+    const load = bundleImportQueue.then(async () => {
+      try {
+        if (pageId) installWebUIContractPageRuntime(pageId);
+        const mod = await import(/* @vite-ignore */ moduleUrl);
+        const component = mod.default as ComponentType | undefined;
+        if (!component) throw new Error(missingExportMessage);
+        return component;
+      } finally {
+        URL.revokeObjectURL(moduleUrl);
       }
-      return component;
-    } finally {
-      URL.revokeObjectURL(moduleUrl);
-    }
+    });
+    bundleImportQueue = load.catch(() => undefined);
+    return load;
+  })().catch((error: unknown) => {
+    if (pageBundleCache.get(cacheKey) === request) pageBundleCache.delete(cacheKey);
+    throw error;
   });
-  bundleImportQueue = load.catch(() => undefined);
-  return load;
+  pageBundleCache.set(cacheKey, request);
+  while (pageBundleCache.size > MAX_CACHED_PAGE_BUNDLES) {
+    const oldest = pageBundleCache.keys().next().value;
+    if (typeof oldest !== 'string') break;
+    pageBundleCache.delete(oldest);
+  }
+  return request;
 }

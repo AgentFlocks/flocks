@@ -75,6 +75,39 @@ async def test_session_create_initializes_callable_tools_from_declared_agent_too
 
 
 @pytest.mark.asyncio
+async def test_session_create_does_not_add_always_load_tools_for_isolated_profile(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    initialize_mock = AsyncMock()
+    monkeypatch.setattr(
+        "flocks.session.callable_state.initialize_session_callable_tools",
+        initialize_mock,
+    )
+
+    class _AgentInfo:
+        tools = ["audit_read"]
+        prompt_profile = "isolated"
+
+    monkeypatch.setattr(
+        "flocks.agent.registry.Agent.get",
+        AsyncMock(return_value=_AgentInfo()),
+    )
+
+    session = await Session.create(
+        project_id="test_project_isolated_tools",
+        directory="/test/dir",
+        title="Isolated Callable Tools",
+        agent="isolated-reviewer",
+    )
+
+    initialize_mock.assert_awaited_once_with(
+        session.id,
+        ["audit_read"],
+        always_load_tool_names=set(),
+    )
+
+
+@pytest.mark.asyncio
 async def test_session_get():
     """Test session retrieval"""
     # Create a session

@@ -141,7 +141,7 @@ def agent_to_response(
         options=agent.options,
         delegatable=delegatable,
         steps=agent.steps,
-        skills=skills or [],
+        skills=list(agent.skills if skills is None else skills),
         tools=tools or [],
         tags=agent.tags,
     )
@@ -176,6 +176,7 @@ def _agent_data_to_info(agent_data: Dict[str, Any]) -> AgentInfoModel:
         native=False,
         hidden=False,
         delegatable=delegatable,
+        skills=agent_data.get("skills", []),
     )
 
 
@@ -243,6 +244,16 @@ async def _load_custom_agent_extras(name: str) -> tuple[List[str], List[str], Li
         return [], [], []
 
 
+async def _load_custom_agent_overlay(name: str) -> Optional[Dict[str, Any]]:
+    """The stored overlay of *name*, or None when nothing was stored."""
+    from flocks.storage.storage import Storage
+    try:
+        data = await Storage.read(f"agent/custom/{name}")
+    except Exception:
+        return None
+    return data if isinstance(data, dict) else None
+
+
 def _get_all_tool_names() -> List[str]:
     """Return all registered tool names, initialising ToolRegistry if needed."""
     from flocks.tool.registry import ToolRegistry
@@ -273,12 +284,21 @@ async def _build_single_agent_response(
     all_tool_names: List[str],
 ) -> AgentResponse:
     """Build AgentResponse for one agent, resolving model overrides and tools/skills."""
+    skills = list(agent.skills)
     if agent.native:
         tools = _compute_native_agent_tools(agent, all_tool_names)
-        skills: List[str] = []
         permission: List[Dict[str, Any]] = []
     else:
-        skills, tools, permission = await _load_custom_agent_extras(agent.name)
+        # A stored overlay (YAML agents edited in the UI, storage-backed agents)
+        # is what the user saved; agents registered at runtime have none and
+        # report their own definition.
+        overlay = await _load_custom_agent_overlay(agent.name) or {}
+        permission = normalize_permission_items(overlay.get("permission"))
+        tools = list(agent.tools or [])
+        if isinstance(overlay.get("skills"), list):
+            skills = list(overlay["skills"])
+        if isinstance(overlay.get("tools"), list):
+            tools = list(overlay["tools"])
     override = overrides.get(agent.name, {})
     model_override = {k: override[k] for k in ("modelID", "providerID") if k in override} or None
     temperature_override = override.get("temperature")
@@ -594,6 +614,10 @@ async def update_agent(name: str, req: AgentUpdateRequest):
                 updates["model"] = req.model.model_dump()
             if req.delegatable is not None:
                 updates["delegatable"] = req.delegatable
+            if req.skills is not None:
+                updates["skills"] = req.skills
+            if req.tools is not None:
+                updates["tools"] = req.tools
 
             if use_group_override:
                 await _save_agent_group_override(group_agent, req.group)
@@ -641,6 +665,8 @@ async def update_agent(name: str, req: AgentUpdateRequest):
                     )
                 if req.delegatable is not None:
                     agent.delegatable = req.delegatable
+                if req.skills is not None:
+                    agent.skills = list(req.skills)
                 if req.tools is not None:
                     agent.tools = req.tools
                     agent.permission = permission_items_to_ruleset(extras.get("permission"))

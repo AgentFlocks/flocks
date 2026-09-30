@@ -6,6 +6,8 @@ Based on Flocks' ported src/session/retry.ts
 """
 
 import asyncio
+import random
+import re
 from typing import Optional, Dict, Any
 
 from flocks.utils.log import Log
@@ -20,6 +22,15 @@ RETRY_BACKOFF_FACTOR = 2
 RETRY_MAX_DELAY_NO_HEADERS = 30_000  # 30 seconds
 RETRY_MAX_DELAY = 2_147_483_647  # max 32-bit signed integer
 MAX_ERROR_RETRIES = 5
+MODEL_QUOTA_EXHAUSTED = "model_quota_exhausted"
+
+
+class ModelQuotaExhaustedError(RuntimeError):
+    """A provider quota that cannot be recovered by retrying this audit."""
+
+    code = MODEL_QUOTA_EXHAUSTED
+
+
 CONNECTION_ERROR_DISPLAY_MESSAGE = (
     "Model is unavailable. Please check the provider connection and model configuration."
 )
@@ -46,6 +57,36 @@ class SessionRetry:
     Handles retry logic for API failures with exponential backoff.
     Matches Flocks SessionRetry namespace.
     """
+
+    @staticmethod
+    def is_alibaba_rate_limit(error: Dict[str, Any]) -> bool:
+        """Alibaba uses insufficient_quota for TPS/TPM throttling."""
+        data = error.get("data") or {}
+        if data.get("providerID") != "alibaba" or data.get("statusCode") != 429:
+            return False
+        code = str(data.get("providerCode") or "").lower()
+        if code:
+            return code in {"insufficient_quota", "throttling.allocationquota"}
+        message = str(data.get("message") or error.get("message") or "")
+        return bool(re.search(r"\binsufficient_quota\b", message, re.IGNORECASE))
+
+    @staticmethod
+    def is_quota_exhausted(error: Dict[str, Any]) -> bool:
+        """Recognize explicit quota errors, never generic 429/TPM exhaustion."""
+        data = error.get("data") or {}
+        if data.get("error_code") == MODEL_QUOTA_EXHAUSTED:
+            return True
+        if SessionRetry.is_alibaba_rate_limit(error):
+            return False
+        code = str(data.get("providerCode") or "").lower()
+        if code in {"insufficient_quota", "billing_hard_limit_reached"}:
+            return True
+        message = str(data.get("message") or error.get("message") or "")
+        return bool(re.search(
+            r"\b(?:insufficient[ _-]quota|billing[ _-]hard[ _-]limit[ _-]reached)\b",
+            message,
+            re.IGNORECASE,
+        ))
     
     @staticmethod
     async def sleep(ms: int, abort_event: asyncio.Event) -> None:
@@ -73,7 +114,7 @@ class SessionRetry:
             pass
     
     @staticmethod
-    def delay(attempt: int, error: Optional[Dict[str, Any]] = None) -> int:
+    def delay(attempt: int, error: Optional[Dict[str, Any]] = None, *, jitter: bool = False) -> int:
         """
         Calculate retry delay in milliseconds
         
@@ -82,13 +123,14 @@ class SessionRetry:
         Args:
             attempt: Current retry attempt number (1-indexed)
             error: Error object with optional responseHeaders
+            jitter: Randomize backoff without shortening server-provided delays
             
         Returns:
             Delay in milliseconds
         """
         if error and isinstance(error, dict):
             data = error.get("data", {})
-            headers = data.get("responseHeaders", {})
+            headers = {str(key).lower(): value for key, value in data.get("responseHeaders", {}).items()}
             
             if headers:
                 # Check retry-after-ms header
@@ -114,13 +156,11 @@ class SessionRetry:
                     
                     # Try parsing as HTTP date (not implemented for simplicity)
                     # In production, use email.utils.parsedate_to_datetime
-                
-                # Has headers but no valid retry-after, use exponential backoff
-                return int(RETRY_INITIAL_DELAY * (RETRY_BACKOFF_FACTOR ** (attempt - 1)))
-        
-        # No headers or no error, use capped exponential backoff
+
+        # No usable server delay: use capped exponential backoff
         delay_ms = RETRY_INITIAL_DELAY * (RETRY_BACKOFF_FACTOR ** (attempt - 1))
-        return int(min(delay_ms, RETRY_MAX_DELAY_NO_HEADERS))
+        delay_ms = min(delay_ms, RETRY_MAX_DELAY_NO_HEADERS)
+        return int(random.uniform(delay_ms / 2, delay_ms)) if jitter else int(delay_ms)
     
     @staticmethod
     def retryable(error: Dict[str, Any]) -> Optional[str]:
@@ -133,6 +173,8 @@ class SessionRetry:
         Returns:
             Error message string if retryable, None if not retryable
         """
+        if SessionRetry.is_quota_exhausted(error):
+            return None
         error_name = error.get("name", "")
         error_data = error.get("data", {})
 

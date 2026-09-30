@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+from pathlib import Path
 from typing import Any, Callable, Iterable, Optional
 
 
@@ -92,6 +93,25 @@ def register_audit_sink(sink: Any) -> None:
     register_sink(sink)
 
 
+def register_hub_root(name: str, root: Path) -> None:
+    """Add an extension hub root whose entries join (and override) the catalog."""
+    from flocks.hub.catalog import clear_catalog_caches
+    from flocks.hub.paths import register_hub_root as _register
+
+    _register(name, root)
+    clear_catalog_caches()
+
+
+def unregister_hub_root(name: str) -> bool:
+    from flocks.hub.catalog import clear_catalog_caches
+    from flocks.hub.paths import unregister_hub_root as _unregister
+
+    removed = _unregister(name)
+    if removed:
+        clear_catalog_caches()
+    return removed
+
+
 def register_http_hook(
     hook: Callable[..., Any],
     *,
@@ -167,7 +187,9 @@ __all__ = [
     "register_audit_sink",
     "register_auth_backend",
     "register_http_hook",
+    "register_hub_root",
     "register_license_checker",
     "register_lifecycle_hook",
     "register_event_hook",
+    "unregister_hub_root",
 ]

@@ -86,7 +86,12 @@ from flocks.tool.catalog import (
     list_tool_catalog_infos,
 )
 from flocks.tool.registry import ToolRegistry, ToolResult
-from flocks.utils.langfuse import generation_scope, is_active as langfuse_is_active, trace_scope
+from flocks.utils.langfuse import (
+    generation_scope,
+    is_active as langfuse_is_active,
+    resolve_session_trace_context,
+    trace_scope,
+)
 from flocks.session.utils.file_extractor import (
     read_file_part_bytes,
     is_text_extractable_mime,
@@ -282,6 +287,7 @@ class StepResult:
     error: Optional[str] = None
     usage: Optional[Dict[str, int]] = None
     failure: Optional[StepFailure] = None
+    error_code: Optional[str] = None
 
 
 @dataclass
@@ -351,6 +357,12 @@ class SessionRunner:
         self._session_start_pending = session_start_pending
         self._session_start_fired = False
         self._attempt_state = LlmAttemptState()
+        # Content-free diagnostics; timestamps are Unix seconds, not proof of
+        # useful progress. Parallel calls of the same tool retain their count.
+        self.execution_activity = {
+            "state": "processing", "last_activity_at": time.time(),
+            "request_started_at": None, "active_tools": {},
+        }
 
     @staticmethod
     def _canonical_tool_signature(tool_name: str, arguments: Dict[str, Any]) -> str:
@@ -599,6 +611,7 @@ class SessionRunner:
         messages: List[MessageInfo],
     ) -> Tuple[List[Any], Dict[str, Any]]:
         execution_mode = self._execution_mode_from_messages(messages)
+        isolated_profile = getattr(agent, "prompt_profile", "standard") == "isolated"
         from flocks.agent.tool_permissions import QUESTION_TOOL_NAME
         from flocks.permission.next import PermissionNext
 
@@ -609,6 +622,7 @@ class SessionRunner:
         result = await list_session_callable_tool_infos(
             session_id=self.session.id,
             declared_tool_names=declared_tool_names,
+            strict_declared_tools=isolated_profile,
             agent=agent.name,
             step=self._step,
             event_publish_callback=self.callbacks.event_publish_callback,
@@ -1411,6 +1425,12 @@ class SessionRunner:
         if error_name in {"CancelledError", "MessageAbortedError", "AbortedError"}:
             return FailoverDecision(False, "cancelled")
 
+        if SessionRetry.is_alibaba_rate_limit(error):
+            return FailoverDecision(True, "rate_limit")
+
+        if SessionRetry.is_quota_exhausted(error):
+            return FailoverDecision(True, "billing")
+
         quota_or_rate_limited = any(pattern in lowered for pattern in (
             "rate limit", "too many requests", "quota exceeded", "resource exhausted",
             "insufficient quota", "billing limit",
@@ -1496,6 +1516,7 @@ class SessionRunner:
         return StepResult(
             action="stop",
             error=message,
+            error_code=error_data.get("data", {}).get("error_code"),
             failure=StepFailure(
                 message=message,
                 error_data=error_data,
@@ -1560,7 +1581,9 @@ class SessionRunner:
         
         # Check if we've reached max steps (matching Flocks logic)
         max_steps = agent.steps if hasattr(agent, 'steps') and agent.steps is not None else DEFAULT_MAX_TOOL_STEPS
+        self.execution_activity["max_steps"] = max_steps
         is_last_step = self._step >= max_steps
+        self.max_steps_reached = is_last_step
         
         # Get provider
         provider = Provider.get(self.provider_id)
@@ -1658,6 +1681,8 @@ class SessionRunner:
             session_directory=self.session.directory,
             agent_name=agent.name,
             agent_prompt=getattr(agent, "prompt", None),
+            agent_skill_names=getattr(agent, "skills", ()) or (),
+            prompt_profile=getattr(agent, "prompt_profile", "standard"),
             provider_id=self.provider_id,
             model_id=self.model_id,
             execution_mode_prompt=execution_mode_prompt(
@@ -1990,6 +2015,10 @@ class SessionRunner:
                     result = StepResult(
                         action="stop",
                         content=halt_message,
+                        error=(
+                            "runner_tool_loop_guard_halt:repeated_exact_tool_call:"
+                            f"{tool_loop_guard.get('tool_name') or 'tool'}"
+                        ),
                         usage=result.usage,
                     )
 
@@ -2048,12 +2077,7 @@ class SessionRunner:
 
                 if will_retry:
                     # Error is retryable and we have budget left
-                    delay_ms = SessionRetry.delay(error_attempt, error_dict)
-                    # Always cap the sleep to RETRY_MAX_DELAY_NO_HEADERS so a
-                    # headers-present but retry-after-absent 500 response cannot
-                    # cause multi-minute sleeps that block the loop.
-                    from flocks.session.lifecycle.retry import RETRY_MAX_DELAY_NO_HEADERS
-                    delay_ms = min(delay_ms, RETRY_MAX_DELAY_NO_HEADERS)
+                    delay_ms = SessionRetry.delay(error_attempt, error_dict, jitter=True)
                     next_retry_time = int(asyncio.get_event_loop().time() * 1000) + delay_ms
 
                     log.warn("runner.step.retry", {
@@ -2141,7 +2165,10 @@ class SessionRunner:
                         text_part=text_part,
                     )
                     
-                    return StepResult(action="stop", error=final_error_message)
+                    return StepResult(
+                        action="stop", error=final_error_message,
+                        error_code=error_dict["data"].get("error_code"),
+                    )
         
         # Aborted
         return StepResult(action="stop", error="Aborted")
@@ -2280,7 +2307,7 @@ class SessionRunner:
         minimal_prompt: bool = False,
     ) -> TurnPromptContext:
         """Collect cached runtime values before deterministic prompt assembly."""
-        if minimal_prompt:
+        if minimal_prompt or getattr(agent, "prompt_profile", "standard") == "isolated":
             return await self._add_turn_prompt_tail(
                 TurnPromptContext(minimal_prompt=True),
                 messages=messages,
@@ -2720,6 +2747,7 @@ class SessionRunner:
             "message": str(exception),
             "data": {
                 "message": str(exception),
+                "providerID": self.provider_id,
                 "exceptionType": type(exception).__name__,
                 "exceptionModule": type(exception).__module__,
             }
@@ -2815,7 +2843,40 @@ class SessionRunner:
             error_dict["name"] = "APIError"
             error_dict["data"]["isRetryable"] = True
             error_dict["data"]["displayMessage"] = CONNECTION_ERROR_DISPLAY_MESSAGE
-        
+
+        # SDK errors may keep the provider code in a structured body rather
+        # than their human-readable message. Preserve only the code.
+        current = exception
+        seen = set()
+        while current is not None and id(current) not in seen:
+            seen.add(id(current))
+            body = getattr(current, "body", None)
+            details = body.get("error", body) if isinstance(body, dict) else {}
+            code = (
+                (details.get("code") or details.get("type")) if isinstance(details, dict) else None
+            ) or getattr(current, "code", None)
+            candidate = {"data": {
+                "providerID": self.provider_id, "statusCode": status_code,
+                "providerCode": code if isinstance(code, str) else None,
+                "message": str(current),
+            }}
+            if SessionRetry.is_alibaba_rate_limit(candidate):
+                error_dict["data"].update(
+                    providerCode=candidate["data"]["providerCode"] or "insufficient_quota",
+                    isRetryable=True,
+                )
+                break
+            if SessionRetry.is_quota_exhausted(candidate):
+                from flocks.session.lifecycle.retry import MODEL_QUOTA_EXHAUSTED
+
+                error_dict["data"].update(
+                    providerCode=code,
+                    error_code=MODEL_QUOTA_EXHAUSTED,
+                    isRetryable=False,
+                )
+                break
+            current = current.__cause__ or current.__context__
+
         return error_dict
     
     def _get_context_window_tokens(self) -> int:
@@ -3520,12 +3581,27 @@ class SessionRunner:
             # Mark before hooks/callbacks/execution (including parallel tools)
             # so a concurrent provider error can never replay side effects.
             self._attempt_state.tool_execution_started = True
+            active = self.execution_activity["active_tools"]
+            active[tool_name] = active.get(tool_name, 0) + 1
+            self.execution_activity["last_activity_at"] = time.time()
             if self.callbacks.on_tool_start:
                 await self.callbacks.on_tool_start(tool_name, tool_input)
+
+        async def _on_tool_execution_end(tool_name: str, result: ToolResult) -> None:
+            active = self.execution_activity["active_tools"]
+            if active.get(tool_name, 0) <= 1:
+                active.pop(tool_name, None)
+            else:
+                active[tool_name] -= 1
+            self.execution_activity["last_activity_at"] = time.time()
+            if self.callbacks.on_tool_end:
+                await self.callbacks.on_tool_end(tool_name, result)
 
         turn_plan_file = getattr(self, "_turn_plan_file", None)
         if turn_plan_file is None:
             turn_plan_file = session_plan_file(self.session)
+        allowed_tool_names = self._get_prompt_tool_names_from_schema(tools)
+
         model_activity = ModelActivity(self.session.id, assistant_msg.id, self.callbacks.event_publish_callback)
         processor = StreamProcessor(
             session_id=self.session.id,
@@ -3537,7 +3613,7 @@ class SessionRunner:
             text_delta_callback=self.callbacks.on_text_delta,
             reasoning_delta_callback=self.callbacks.on_reasoning_delta,
             tool_start_callback=_on_tool_execution_start,
-            tool_end_callback=self.callbacks.on_tool_end,
+            tool_end_callback=_on_tool_execution_end,
             event_publish_callback=self.callbacks.event_publish_callback,
             session_key=self.session.id,
             main_session_key=main_session_key,
@@ -3554,6 +3630,7 @@ class SessionRunner:
             plan_file_path=str(turn_plan_file.path),
             plan_relative_path=turn_plan_file.relative_path,
             plan_permission_path=turn_plan_file.permission_path,
+            allowed_tool_names=allowed_tool_names,
         )
         
         # Build provider options (thinking / reasoning / max_tokens)
@@ -3655,6 +3732,14 @@ class SessionRunner:
             raise RuntimeError("LLM hook stage probe failed; request was not sent") from exc
 
         if llm_before_enabled:
+            # The projected tool schema is a hard capability ceiling for this
+            # turn. Hooks may hide tools, but must not add a capability or
+            # replace the trusted schema for an existing tool name.
+            tool_schema_ceiling: dict[str, Dict[str, Any]] = {}
+            for tool_schema in tools:
+                names = self._get_prompt_tool_names_from_schema([tool_schema])
+                if len(names) == 1 and names[0] not in tool_schema_ceiling:
+                    tool_schema_ceiling[names[0]] = copy.deepcopy(tool_schema)
             llm_before_hook_input = {
                 **llm_hook_metadata,
                 "request": {
@@ -3683,8 +3768,26 @@ class SessionRunner:
                     )
                     updated_tools = updated_request.get("tools")
                     if isinstance(updated_tools, list):
-                        tools = copy.deepcopy(updated_tools)
+                        projected_tools: list[Dict[str, Any]] = []
+                        projected_names: set[str] = set()
+                        for requested_schema in updated_tools:
+                            requested_names = self._get_prompt_tool_names_from_schema(
+                                [requested_schema]
+                            )
+                            if len(requested_names) != 1:
+                                continue
+                            requested_name = requested_names[0]
+                            trusted_schema = tool_schema_ceiling.get(requested_name)
+                            if trusted_schema is None or requested_name in projected_names:
+                                continue
+                            projected_tools.append(copy.deepcopy(trusted_schema))
+                            projected_names.add(requested_name)
+                        tools = projected_tools
                         provider_tools = None if self._should_use_text_tool_call_mode() else (tools if tools else None)
+                        updated_allowed_tool_names = self._get_prompt_tool_names_from_schema(tools)
+                        if updated_allowed_tool_names != allowed_tool_names:
+                            processor.set_allowed_tool_names(updated_allowed_tool_names)
+                            allowed_tool_names = updated_allowed_tool_names
                 self._log_perf(
                     "runner.hook.llm_before.complete",
                     hook_started_at,
@@ -3701,6 +3804,12 @@ class SessionRunner:
         # the core session flow.
         if langfuse_is_active():
             try:
+                persisted_trace_context = resolve_session_trace_context(
+                    getattr(self.session, "metadata", None)
+                )
+                correlation_session_id = persisted_trace_context.get(
+                    "session_id", self.session.id
+                )
                 trace_tags = [
                     f"session:{self.session.id}",
                     f"step:{self._step}",
@@ -3708,6 +3817,9 @@ class SessionRunner:
                     f"agent:{agent.name}",
                     f"provider:{self.provider_id}",
                 ]
+                trace_tags.extend(persisted_trace_context.get("tags", []))
+                trace_tags = list(dict.fromkeys(trace_tags))
+                correlation_metadata = persisted_trace_context.get("metadata", {})
                 request_payload = self._build_langfuse_request_payload(
                     step=self._step,
                     messages=messages,
@@ -3716,15 +3828,21 @@ class SessionRunner:
                     provider_options=provider_options,
                 )
                 trace_ctx = trace_scope(
-                    name="SessionRunner.step",
-                    session_id=self.session.id,
+                    name=persisted_trace_context.get(
+                        "trace_name", "SessionRunner.step"
+                    ),
+                    trace_name=persisted_trace_context.get("root_trace_name"),
+                    trace_context=persisted_trace_context.get("trace_context"),
+                    session_id=correlation_session_id,
                     tags=trace_tags,
                     input=request_payload,
                     metadata={
+                        **correlation_metadata,
                         "provider_id": self.provider_id,
                         "model_id": self.model_id,
                         "agent": agent.name,
                         "workspace": self.session.directory,
+                        "execution_session_id": self.session.id,
                         "message_count": len(messages),
                         "available_tool_count": len(tools),
                         "request_tool_count": len(provider_tools or []),
@@ -3739,8 +3857,10 @@ class SessionRunner:
                     model=self.model_id,
                     input=request_payload,
                     metadata={
+                        **correlation_metadata,
                         "provider_id": self.provider_id,
                         "session_id": self.session.id,
+                        "correlation_session_id": correlation_session_id,
                         "step": self._step,
                         "agent": agent.name,
                         "workspace": self.session.directory,
@@ -3757,6 +3877,9 @@ class SessionRunner:
                 trace_ctx = None
                 generation_ctx = None
         llm_call_started_at = time.perf_counter()
+        self.execution_activity.update(
+            state="waiting_model", request_started_at=time.time(), last_activity_at=time.time(),
+        )
         first_chunk_logged = False
         aborted_during_stream = False
         stream_timeouts = resolve_llm_stream_timeouts(provider, self.model_id)
@@ -3785,6 +3908,7 @@ class SessionRunner:
                 ongoing_chunk_timeout_s=stream_timeouts.ongoing_chunk_s,
             ):
                 chunk_counts["total"] += 1
+                self.execution_activity.update(state="streaming_model", last_activity_at=time.time())
                 self._attempt_state.received_chunk = True
                 if not first_chunk_logged:
                     first_chunk_logged = True
@@ -3973,6 +4097,7 @@ class SessionRunner:
         finally:
             await model_activity.stop()
         
+        self.execution_activity.update(state="processing", last_activity_at=time.time())
         log.debug("runner.stream.summary", {
             "total_chunks": chunk_counts["total"],
             "reasoning_chunks": chunk_counts["reasoning"],
