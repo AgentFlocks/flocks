@@ -45,6 +45,7 @@ from flocks.session.lifecycle.compaction.compaction import _get_compaction_histo
 from flocks.session.prompt import SessionPrompt
 from flocks.provider.provider import Provider
 from flocks.session.goal import GoalManager
+from flocks.session.runtime_controls import runtime_controls
 
 
 log = Log.create(service="session.loop")
@@ -1470,7 +1471,7 @@ class SessionLoop:
             # may cancel this task before it finishes).
             # generate_title_after_first_message is idempotent: if this task saves
             # the title first, the safety-net call returns immediately.
-            if ctx.step == 1 and not ctx.auto_failover:
+            if ctx.step == 1 and not ctx.auto_failover and runtime_controls.get() is None:
                 try:
                     from flocks.session.lifecycle.title import SessionTitle
                     # UserMessageInfo.model is Dict[str, str] {"providerID": ..., "modelID": ...}
@@ -2110,7 +2111,7 @@ class SessionLoop:
                     })
                     continue
 
-                if not step_result.error and last_message is not None:
+                if not step_result.error and last_message is not None and runtime_controls.get() is None:
                     try:
                         content_result = Message.get_text_content(last_message)
                         last_response = (

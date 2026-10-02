@@ -197,13 +197,42 @@ async def read_tool(
     Returns:
         ToolResult with file contents
     """
+    from flocks.session.runtime_controls import runtime_controls
+    sandbox = ctx.extra.get("sandbox", {})
+    read_roots = [sandbox.get("workspace_dir")]
     try:
-        resolution = await resolve_tool_path(
-            ctx,
-            filePath,
-            allow_host_memory=True,
-            allow_host_skills=True,
-        )
+        if runtime_controls.get() is not None and sandbox.get("workspace_access") == "ro":
+            workspace = Path(sandbox["workspace_dir"]).expanduser()
+            project = Path(sandbox["agent_workspace_dir"]).expanduser()
+            mount = Path(sandbox.get("container_workdir", "/workspace"))
+            path = Path(filePath.strip()).expanduser()
+            if path.is_relative_to("/agent"):
+                path = project / path.relative_to("/agent")
+                read_roots = [str(project)]
+            elif path.is_relative_to(mount):
+                path = workspace / path.relative_to(mount)
+            elif path.is_absolute():
+                if path.is_relative_to(project) and not path.is_relative_to(workspace):
+                    read_roots = [str(project)]
+            else:
+                # Relative reads prefer existing workspace files, then project files.
+                read_roots = [str(workspace), str(project)]
+            filePath = str(path)
+
+        for root in read_roots:
+            read_ctx = ctx
+            if root != sandbox.get("workspace_dir"):
+                import copy
+                read_ctx = copy.copy(ctx)
+                read_ctx.extra = {**ctx.extra, "sandbox": {**sandbox, "workspace_dir": root}}
+            resolution = await resolve_tool_path(
+                read_ctx,
+                filePath,
+                allow_host_memory=True,
+                allow_host_skills=True,
+            )
+            if os.path.exists(resolution.resolved_path):
+                break
     except ValueError as exc:
         return ToolResult(
             success=False,

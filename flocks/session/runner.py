@@ -615,7 +615,11 @@ class SessionRunner:
         )
         permission_denied_tool_names: List[str] = []
         tool_infos = []
+        from flocks.session.runtime_controls import runtime_controls
+        controls = runtime_controls.get()
         for tool_info in result.tool_infos:
+            if controls is not None and controls.denial(tool_info.name):
+                continue
             if not is_tool_allowed(execution_mode, tool_info.name):
                 continue
             if tool_info.name == QUESTION_TOOL_NAME:
@@ -2242,7 +2246,11 @@ class SessionRunner:
         Uses the shared provider-layer usage service so that CLI and HTTP
         callers rely on the same persistence and aggregation path.
         """
+        from flocks.session.runtime_controls import runtime_controls
+        controls = runtime_controls.get()
         if not usage:
+            if controls is not None and controls.max_budget is not None:
+                controls.failure = "Provider did not report usage; cannot enforce --max-budget"
             return
 
         try:
@@ -3484,6 +3492,11 @@ class SessionRunner:
         Uses StreamProcessor to handle events and execute tools synchronously.
         Ported from Flocks' SessionProcessor.process() behavior.
         """
+        from flocks.session.runtime_controls import runtime_controls
+        controls = runtime_controls.get()
+        if controls is not None:
+            controls.check_budget(self._resolve_usage_pricing(), require_pricing=True)
+
         def _build_llm_response_payload(
             *,
             content: str,
@@ -3758,6 +3771,7 @@ class SessionRunner:
                 generation_ctx = None
         llm_call_started_at = time.perf_counter()
         first_chunk_logged = False
+        accounted_usage = {}
         aborted_during_stream = False
         stream_timeouts = resolve_llm_stream_timeouts(provider, self.model_id)
         log.debug("runner.llm.stream_timeouts", {
@@ -3802,6 +3816,15 @@ class SessionRunner:
                 # Capture usage from chunk (providers may include it in the final chunk)
                 if hasattr(chunk, 'usage') and chunk.usage:
                     stream_usage = chunk.usage
+                    if controls is not None:
+                        # Usage snapshots are cumulative within one request. Charge
+                        # before any tool in this chunk, including on error streams.
+                        controls.record_usage(
+                            {**accounted_usage, **stream_usage},
+                            self._resolve_usage_pricing(),
+                            previous_usage=accounted_usage,
+                        )
+                        accounted_usage.update(stream_usage)
 
                 # Check for abort
                 if self.is_aborted:

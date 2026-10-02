@@ -3282,7 +3282,7 @@ async def refresh_api_services_status(
 
         # Discover API services from both config and tool registry
         config = await Config.get()
-        api_services: Dict[str, Any] = (config.model_extra or {}).get("api_services", {})
+        api_services: Dict[str, Any] = config.api_services or {}
 
         # Also discover services from registered tools (covers YAML API tools)
         from flocks.tool.registry import ToolRegistry

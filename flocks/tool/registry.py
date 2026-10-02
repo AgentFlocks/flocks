@@ -1207,6 +1207,21 @@ class ToolRegistry:
         **kwargs
     ) -> ToolResult:
         """Execute a tool by name"""
+        from flocks.session.runtime_controls import runtime_controls
+
+        controls = runtime_controls.get()
+        if controls is not None:
+            controls.check_budget()
+            denial = controls.denial(tool_name)
+            if denial:
+                return ToolResult(success=False, error=denial)
+            if controls.sandbox_required:
+                sandbox = ctx.extra.get("sandbox") if ctx else None
+                if not sandbox or not sandbox.get("container_name"):
+                    return ToolResult(success=False, error="Required sandbox is unavailable; refusing host execution")
+                if ctx.extra.get("sandbox_elevated"):
+                    return ToolResult(success=False, error="Elevated host execution is disabled in headless sandbox mode")
+
         tool = cls.get(tool_name)
         if not tool:
             return ToolResult(
@@ -1634,6 +1649,10 @@ class ToolRegistry:
         immediately disable it.  Existing explicit user choices
         (``enabled: false``) are never overwritten.
         """
+        from flocks.config.runtime import runtime_config
+        if runtime_config.get() is not None:
+            # Headless overrides must never bootstrap persistent user settings.
+            return
         try:
             from flocks.config.config_writer import ConfigWriter
             from flocks.tool.tool_loader import API_LIKE_SOURCES
