@@ -53,11 +53,11 @@ def _format_permission_rules(agent: AgentInfo) -> str:
         if rule.pattern and rule.pattern != "*":
             target = f"{target}:{rule.pattern}"
         
-        if rule.action == "allow":
+        if rule.level.value == "allow":
             allow.append(target)
-        elif rule.action == "deny":
+        elif rule.level.value == "deny":
             deny.append(target)
-        elif rule.action == "ask":
+        elif rule.level.value == "ask":
             ask.append(target)
     
     parts = []
@@ -94,9 +94,9 @@ def agent_list(
     """
     # Get agents
     if all_agents:
-        agents = Agent.list()
+        agents = _run_registry(Agent.list())
     else:
-        agents = Agent.list_visible()
+        agents = _run_registry(Agent.list_visible())
     
     # Filter by mode
     if mode:
@@ -106,7 +106,10 @@ def agent_list(
     agents.sort(key=lambda a: (not a.native, a.name))
     
     if not agents:
-        console.print("[dim]No agents found[/dim]")
+        if format == "json":
+            typer.echo("[]")
+        else:
+            console.print("[dim]No agents found[/dim]")
         return
     
     # Output based on format
@@ -122,7 +125,7 @@ def agent_list(
             }
             for a in agents
         ]
-        console.print(json.dumps(json_data, indent=2))
+        typer.echo(json.dumps(json_data, indent=2))
     
     elif format == "tree":
         # Tree format grouped by mode
@@ -186,7 +189,7 @@ def agent_show(
     """
     Show details of a specific agent
     """
-    agent = Agent.get(name)
+    agent = _run_registry(Agent.get(name))
     
     if not agent:
         console.print(f"[red]Agent not found: {name}[/red]")
@@ -229,10 +232,10 @@ def agent_show(
                 "allow": "green",
                 "deny": "red",
                 "ask": "yellow",
-            }.get(rule.action, "white")
+            }.get(rule.level.value, "white")
             
             pattern_str = f" ({rule.pattern})" if rule.pattern and rule.pattern != "*" else ""
-            console.print(f"  [{action_color}]{rule.action:5}[/{action_color}] {rule.permission}{pattern_str}")
+            console.print(f"  [{action_color}]{rule.level.value:5}[/{action_color}] {rule.permission}{pattern_str}")
     else:
         console.print("  [dim]No rules defined[/dim]")
     
@@ -259,13 +262,34 @@ def agent_permissions(
     """
     Check whether an agent declares a specific tool.
     """
-    agent = Agent.get(name)
+    agent = _run_registry(Agent.get(name))
     
     if not agent:
         console.print(f"[red]Agent not found: {name}[/red]")
         raise typer.Exit(1)
     
     _ = pattern
-    result = asyncio.run(Agent.has_tool(name, tool))
+    result = _run_registry(Agent.has_tool(name, tool))
     color = "green" if result else "red"
     console.print(f"[{color}]{'allow' if result else 'deny'}[/{color}]")
+
+
+def _run_registry(operation):
+    """Keep registry diagnostics off stdout and close discovery-owned stores."""
+    from contextlib import redirect_stdout
+    import sys
+    from flocks.cli.runtime import close_cli_resources
+
+    async def run():
+        try:
+            return await operation
+        finally:
+            await close_cli_resources()
+    try:
+        with redirect_stdout(sys.stderr):
+            value = asyncio.run(run())
+            sys.stderr.flush()
+        return value
+    except Exception as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1) from exc

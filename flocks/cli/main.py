@@ -19,6 +19,12 @@ from rich.panel import Panel
 from flocks import __version__
 from flocks.cli.commands import (
     admin_app,
+    agent_app,
+    exec_command,
+    workflow_app,
+    device_app,
+    model_app,
+    plugin_app,
     BROWSER_CONTEXT_SETTINGS,
     browser_command,
     doctor_command,
@@ -64,6 +70,12 @@ app = typer.Typer(
 )
 
 # Register command groups
+app.command(name="exec", rich_help_panel="Agent CLI")(exec_command)
+app.add_typer(agent_app, name="agent", rich_help_panel="Agent CLI")
+app.add_typer(workflow_app, name="workflow", rich_help_panel="Agent CLI")
+app.add_typer(device_app, name="device", rich_help_panel="Agent CLI")
+app.add_typer(model_app, name="model", rich_help_panel="Agent CLI")
+app.add_typer(plugin_app, name="plugin", rich_help_panel="Agent CLI")
 app.add_typer(session_app, name="session")
 app.add_typer(mcp_app, name="mcp")
 app.add_typer(export_app, name="export")
@@ -141,7 +153,6 @@ def main_callback(
         "flocks.start",
         {
             "version": __version__,
-            "args": sys.argv[1:],
         },
     )
 

@@ -800,6 +800,8 @@ class ConfigInfo(BaseModel):
     disabled_providers: Optional[List[str]] = None
     enabled_providers: Optional[List[str]] = None
     model: Optional[str] = None
+    default_models: Optional[Dict[str, Any]] = None
+    api_services: Optional[Dict[str, Any]] = None
     small_model: Optional[str] = Field(None, alias="smallModel")
     fallback_providers: Optional[List[FallbackProviderConfig]] = None
     default_agent: Optional[str] = Field(None, alias="defaultAgent")
@@ -1517,6 +1519,12 @@ class Config:
         Returns:
             Complete merged configuration
         """
+        from flocks.config.runtime import runtime_config
+
+        override = runtime_config.get()
+        if override is not None:
+            return override
+
         if cls._cached_config is not None:
             return cls._cached_config
         
@@ -1657,6 +1665,9 @@ class Config:
                     channel_cfg = channels.get(channel_id)
                     if isinstance(channel_cfg, dict):
                         channel_cfg.pop("allowFrom", None)
+        from flocks.config.runtime import runtime_config
+        if runtime_config.get() is not None:
+            raise RuntimeError("Configuration writes are disabled during a runtime override")
         config_file.write_text(json.dumps(config_data, indent=2), encoding="utf-8")
         
         # Clear cache
