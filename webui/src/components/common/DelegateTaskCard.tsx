@@ -123,7 +123,13 @@ export function extractDelegateInfo(state: Partial<ToolState>, subTaskLabel: str
   const currentText = (meta?.currentText ?? innerMeta?.currentText ?? '') as string;
   const elapsed = (meta?.elapsed ?? innerMeta?.elapsed ?? 0) as number;
   const isBackground = !!input.run_in_background || Boolean(meta?.background ?? innerMeta?.background);
+  const submitted = Boolean(meta?.submitted ?? innerMeta?.submitted);
   const runtimeStatus = meta?.status ?? innerMeta?.status;
+  if (submitted) {
+    output = meta?.result ?? innerMeta?.result;
+    const finishedAt = meta?.finished_at ?? innerMeta?.finished_at;
+    durationMs = state.time?.start ? (finishedAt || Date.now()) - state.time.start : null;
+  }
   const backgroundStatus = isBackground
     ? (typeof runtimeStatus === 'string' && runtimeStatus.trim()
       ? runtimeStatus
@@ -137,8 +143,8 @@ export function extractDelegateInfo(state: Partial<ToolState>, subTaskLabel: str
     description: input.description || subTaskLabel,
     isBackground,
     childSessionId,
-    status: backgroundStatus || state.status || 'pending',
-    error: state.error,
+    status: (submitted ? runtimeStatus : backgroundStatus) || state.status || 'pending',
+    error: submitted && runtimeStatus === 'error' ? output : state.error,
     output,
     durationMs,
     steps,

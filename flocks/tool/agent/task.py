@@ -2,8 +2,7 @@
 
 The runtime keeps ``task`` as a registered tool name for workflow/backward
 compatibility, but all scheduling behavior lives in ``delegate_task``.
-Background subagent execution is disabled; run synchronously and emit
-multiple sibling tool calls in one assistant turn for parallel work.
+Each call creates an independent session. Interactive delegation is asynchronous.
 """
 
 from __future__ import annotations
@@ -25,8 +24,7 @@ DESCRIPTION = """Compatibility alias for delegate_task.
 
 Use delegate_task directly for new prompts. Workflows may continue using task;
 it accepts the same single-subagent shape and forwards it to delegate_task.
-Background subagent execution is disabled; run synchronously and emit multiple
-sibling tool calls in one assistant turn for parallel work.
+Each call creates an independent session. Interactive delegation is asynchronous.
 """
 
 
@@ -52,8 +50,8 @@ sibling tool calls in one assistant turn for parallel work.
         ToolParameter(
             name="subagent_type",
             type=ParameterType.STRING,
-            description="Delegatable agent name. Required for new tasks; omit when continuing with session_id.",
-            required=False,
+            description="Delegatable agent name. Each call creates a new session.",
+            required=True,
         ),
         ToolParameter(
             name="load_skills",
@@ -61,12 +59,6 @@ sibling tool calls in one assistant turn for parallel work.
             description="Optional skill names to inject into the delegated agent",
             required=False,
             default=[],
-        ),
-        ToolParameter(
-            name="session_id",
-            type=ParameterType.STRING,
-            description="Existing subagent session to continue",
-            required=False,
         ),
         ToolParameter(
             name="command",
@@ -89,7 +81,6 @@ async def task_tool(
     subagent_type: Optional[str] = None,
     load_skills: Optional[list] = None,
     run_in_background: bool = False,
-    session_id: Optional[str] = None,
     command: Optional[str] = None,
     model: Optional[str] = None,
 ) -> ToolResult:
@@ -101,7 +92,6 @@ async def task_tool(
         description=description,
         run_in_background=run_in_background,
         subagent_type=subagent_type,
-        session_id=session_id,
         command=command,
         model=model,
     )

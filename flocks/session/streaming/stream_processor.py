@@ -185,6 +185,9 @@ class StreamProcessor:
         # model response can launch too; the runner drains these before the step
         # returns.
         self._parallel_tool_tasks: Dict[str, asyncio.Task[None]] = {}
+        self._sleep_calls = []
+        self._draining_sleep = False
+        self._sleep_allowed = False
     
     async def process_event(self, event: StreamEvent) -> None:
         """
@@ -551,6 +554,10 @@ class StreamProcessor:
         tools are executed immediately upon receiving the tool-call event,
         not batched after streaming completes.
         """
+        if event.tool_name == "sleep" and not self._draining_sleep:
+            if not any(call.tool_call_id == event.tool_call_id for call in self._sleep_calls):
+                self._sleep_calls.append(event)
+            return
         tool_call_id = event.tool_call_id
         tool_name = event.tool_name
         tool_input = event.input
@@ -807,6 +814,7 @@ class StreamProcessor:
             except Exception as exc:
                 log.debug("stream.tool_span.init_failed", {"error": str(exc)})
         registry_execution_started = False
+        tool_finished = asyncio.Event()
         try:
             sandbox_meta = await self._resolve_sandbox_meta(tool_name)
             if sandbox_meta["blocked"]:
@@ -925,6 +933,8 @@ class StreamProcessor:
                 tool_extra = {
                     **sandbox_meta["extra"],
                     "agent_execution_session": True,
+                    "tool_finished": tool_finished,
+                    "sleep_allowed": self._sleep_allowed,
                     "execution_mode": self._execution_mode,
                     "workspace_dir": self._workspace_dir,
                     "model": {
@@ -1183,6 +1193,9 @@ class StreamProcessor:
                     await self.tool_end_callback(tool_name, error_result)
                 except Exception as e2:
                     log.error("stream.tool_end_callback.error", {"error": str(e2)})
+
+        finally:
+            tool_finished.set()
 
     async def _run_pre_execution_tool_after_hook(
         self,
@@ -1655,10 +1668,15 @@ class StreamProcessor:
 
     async def drain_parallel_tool_calls(self) -> None:
         """Wait for foreground parallel tool-calls before returning the step."""
-        if not self._parallel_tool_tasks:
-            return
-        tasks = list(self._parallel_tool_tasks.values())
-        await asyncio.gather(*tasks, return_exceptions=True)
+        if self._parallel_tool_tasks:
+            await asyncio.gather(*self._parallel_tool_tasks.values(), return_exceptions=True)
+        if self._sleep_calls:
+            self._sleep_allowed = len(self._sleep_calls) == 1 and set(self.tool_calls) <= {
+                self._sleep_calls[0].tool_call_id}
+            self._draining_sleep = True
+            calls, self._sleep_calls = self._sleep_calls, []
+            for call in calls:
+                await self._handle_tool_call(call)
 
     @staticmethod
     def _compute_visible_delta(previous: str, current: str) -> str:

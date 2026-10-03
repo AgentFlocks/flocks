@@ -189,3 +189,20 @@ describe('DelegateTaskCard process step', () => {
     expect(screen.getByTestId('delegate-detail-sheet')).toHaveTextContent('ses-child');
   });
 });
+
+describe('independent asynchronous delegates', () => {
+  it('keeps a returned submission running until the child result event arrives', () => {
+    const state = {
+      status: 'completed' as const, input: { subagent_type: 'explore', description: 'Inspect' },
+      output: { status: 'submitted', child_session_id: 'child-one' },
+      metadata: { sessionId: 'child-one', submitted: true, status: 'running' },
+      time: { start: 100, end: 101 },
+    };
+    expect(extractDelegateInfo(state, 'task')).toMatchObject({
+      childSessionId: 'child-one', status: 'running', output: undefined,
+    });
+    expect(extractDelegateInfo({ ...state, metadata: {
+      ...state.metadata, status: 'completed', result: 'Child finished', finished_at: 250,
+    } }, 'task')).toMatchObject({ status: 'completed', output: 'Child finished', durationMs: 150 });
+  });
+});

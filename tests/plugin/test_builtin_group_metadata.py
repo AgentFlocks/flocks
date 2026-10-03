@@ -159,9 +159,9 @@ def test_core_python_tool_groups():
         and any(isinstance(target, ast.Name) and target.id == "_builtin_module_groups" for target in node.targets)
     )
     paths = [ROOT.joinpath(*package.split("."), f"{module}.py") for package, names in modules for module in names]
-    assert len(paths) == 38
+    assert len(paths) == 39
     declarations = [(path, node) for path in paths for node in _tool_declarations(_ast(path))]
-    assert len(declarations) == 40
+    assert len(declarations) == 42
     builtin_registration = next(
         node for node in registry_class.body
         if isinstance(node, ast.FunctionDef) and node.name == "_register_builtin_tools"
@@ -183,7 +183,7 @@ def test_core_python_tool_groups():
         _assert_group(ast.literal_eval(keywords["group"]), (path, name), TOOL_GROUPS)
         if "native" in keywords and ast.literal_eval(keywords["native"]) is False:
             non_native.add(name)
-    assert len(names) == 41
+    assert len(names) == 43
     assert {"task", "lsp", "list_providers", "add_provider", "add_model"} <= non_native
     assert "invalid" not in names  # Internal failure sentinel, not a registered builtin.
 

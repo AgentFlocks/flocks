@@ -131,6 +131,15 @@ interface ComposerReference {
   value: string;
 }
 
+function getAgentSender(parts: MessagePart[]) {
+  for (const part of parts) {
+    const sender = part.synthetic && part.metadata?.communication;
+    if (sender?.source_type === 'agent' && typeof sender.source_agent === 'string'
+      && typeof sender.source_session_id === 'string') return sender;
+  }
+  return undefined;
+}
+
 function getMessagePartDisplayText(part: MessagePart, hideTaskMetadata = false): string {
   const metadataDisplayText = part.metadata?.displayText ?? part.metadata?.display_text;
   const displayText = typeof metadataDisplayText === 'string' && metadataDisplayText
@@ -4153,7 +4162,7 @@ export default function SessionChat({
 
     for (let idx = 0; idx < merged.length; idx++) {
       const msg = merged[idx];
-      if (msg.parts.length > 0 && msg.parts.every(p => p.synthetic)) {
+      if (msg.parts.length > 0 && msg.parts.every(p => p.synthetic) && !getAgentSender(msg.parts)) {
         skipIndices.add(idx);
         continue;
       }
@@ -5208,8 +5217,9 @@ function ChatMessageBubbleInner({
   onOpenContext,
 }: ChatMessageBubbleProps) {
   const { t, i18n } = useTranslation('session');
-  const isUser = message.role === 'user';
   const parts: MessagePart[] = Array.isArray(message.parts) ? message.parts : [];
+  const sender = message.role === 'user' ? getAgentSender(parts) : undefined;
+  const isUser = message.role === 'user' && !sender;
   const processElapsedClock = useProcessElapsedClock(isActive && collapseIntermediateSteps);
   const { getPartExpanded, togglePart } = useReasoningToggle(parts, message.finish);
   // Lightbox state for inline image previews. Browsers block top-level
@@ -5228,13 +5238,13 @@ function ChatMessageBubbleInner({
       </div>
     );
   }
-  const rawAgentName = message.agent || 'rex';
+  const rawAgentName = sender?.source_agent || message.agent || 'rex';
   const agentName = rawAgentName.charAt(0).toUpperCase() + rawAgentName.slice(1);
 
   const getTextContent = () => {
     const text = parts
       .filter((p) => p.type === 'text' && p.text)
-      .map((p) => p.text)
+      .map((p) => sender ? getMessagePartDisplayText(p) : p.text)
       .join('\n\n');
     return isUser ? text : stripTaskMetadata(text);
   };
@@ -5841,7 +5851,7 @@ function ChatMessageBubbleInner({
           </>
         ) : (
           <>
-            <button
+            {!sender && <button
               onClick={() => void onRegenerate?.(targetMessageId)}
               disabled={actionsDisabled || isActionPending}
               className={iconButtonClass}
@@ -5849,7 +5859,7 @@ function ChatMessageBubbleInner({
             >
               <RefreshCw className={`w-3 h-3 ${isActionPending ? 'animate-spin' : ''}`} />
               <span className={tooltipClass}>{t('chat.regenerate')}</span>
-            </button>
+            </button>}
             <button
               onClick={() => onCopy?.(getTextContent())}
               disabled={isActionPending}

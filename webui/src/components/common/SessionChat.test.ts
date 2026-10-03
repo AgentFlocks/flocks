@@ -6422,3 +6422,34 @@ describe('process duration across model/tool boundaries', () => {
     ])).toBe(7_000);
   });
 });
+
+describe('agent communication', () => {
+  const incoming = {
+    id: 'agent-report', sessionID: 'sess-1', role: 'user', agent: 'rex', timestamp: 1,
+    parts: [{ id: 'report-text', type: 'text', synthetic: true,
+      text: 'internal source and guidance',
+      metadata: { displayText: 'Halfway through the investigation', communication: {
+        source_type: 'agent', source_agent: 'explore', source_session_id: 'child-1',
+      } },
+    }],
+  } as Message;
+
+  it('renders the sender and display text without user-edit or regeneration actions', () => {
+    render(React.createElement(ChatMessageBubble, { message: incoming, showActions: true }));
+    expect(screen.getByText('Explore')).toBeInTheDocument();
+    expect(screen.getByText('Halfway through the investigation')).toBeInTheDocument();
+    expect(screen.queryByText('internal source and guidance')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'chat.regenerate' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'chat.edit' })).not.toBeInTheDocument();
+  });
+
+  it('keeps agent communication visible in the full chat while hiding internal reminders', () => {
+    const previous = useSessionMessagesMock();
+    useSessionMessagesMock.mockReturnValue({ ...previous, messages: [incoming, {
+      ...incoming, id: 'reminder', parts: [{ id: 'internal', type: 'text', synthetic: true, text: 'hidden reminder' }],
+    }] });
+    render(React.createElement(SessionChat, { sessionId: 'sess-1', hideInput: true }));
+    expect(screen.getByText('Halfway through the investigation')).toBeInTheDocument();
+    expect(screen.queryByText('hidden reminder')).not.toBeInTheDocument();
+  });
+});

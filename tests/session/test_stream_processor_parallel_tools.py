@@ -64,3 +64,32 @@ async def test_foreground_subagent_tool_calls_start_in_parallel():
 
     assert processor.tool_calls["call-1"].status == "completed"
     assert processor.tool_calls["call-2"].status == "completed"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mixed", [False, True])
+async def test_sleep_runs_after_stream_and_rejects_mixed_batches(mixed):
+    from flocks.tool.agent.communication import sleep
+    processor = StreamProcessor(
+        session_id="sleep-session", assistant_message=SimpleNamespace(id="msg"),
+        agent=SimpleNamespace(name="rex"),
+    )
+    results = []
+
+    async def execute(tool_name, ctx, **kwargs):
+        result = await sleep(ctx, .001) if tool_name == "sleep" else ToolResult(success=True)
+        results.append(result)
+        return result
+
+    with (
+        patch("flocks.session.streaming.stream_processor.Message.store_part", AsyncMock()),
+        patch("flocks.session.streaming.stream_processor.Message.parts", AsyncMock(return_value=[])),
+        patch("flocks.session.streaming.stream_processor.ToolRegistry.execute", execute),
+        patch.object(processor, "_resolve_sandbox_meta", AsyncMock(return_value={"blocked": False, "error": None, "extra": {}})),
+    ):
+        await processor.process_event(ToolCallEvent(tool_call_id="sleep", tool_name="sleep", input={}))
+        assert not results
+        if mixed:
+            await processor.process_event(ToolCallEvent(tool_call_id="other", tool_name="read", input={}))
+        await processor.drain_parallel_tool_calls()
+    assert results[-1].success is not mixed

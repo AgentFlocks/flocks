@@ -433,6 +433,8 @@ class SessionLoop:
     @classmethod
     def abort(cls, session_id: str) -> bool:
         """Abort running loop"""
+        from flocks.session.agent_inbox import AgentInbox
+        AgentInbox.stop(session_id)
         ctx = cls._active_loops.get(session_id)
         if ctx:
             ctx.signal_abort()
@@ -736,27 +738,32 @@ class SessionLoop:
                     error="Loop already running",
                 )
             cls._active_loops[session_id] = ctx
+            from flocks.session.agent_inbox import AgentInbox
+            AgentInbox.get(session_id).parent_id = session.parent_id
         
         # Set status to busy
         SessionStatus.set(session_id, SessionStatusBusy())
-        await cls._publish_session_status(callbacks or LoopCallbacks(), session_id, "busy")
         
-        # Mark orphaned running tool parts as error (e.g. from server restart).
-        # Wrapped in try/except so cleanup failures never block the session loop.
         try:
-            from flocks.session.orphan_tools import abort_orphan_running_parts
+            # Mark orphaned running tool parts as error (e.g. from server restart).
+            # Wrapped in try/except so cleanup failures never block the session loop.
+            try:
+                from flocks.session.orphan_tools import abort_orphan_running_parts
 
-            await abort_orphan_running_parts(session_id)
-        except Exception as exc:
-            log.warn("loop.orphan_cleanup_failed", {
-                "session_id": session_id,
-                "error": str(exc),
-            })
+                await abort_orphan_running_parts(session_id)
+            except Exception as exc:
+                log.warn("loop.orphan_cleanup_failed", {
+                    "session_id": session_id,
+                    "error": str(exc),
+                })
         
-        try:
+            await cls._publish_session_status(callbacks or LoopCallbacks(), session_id, "busy")
             # Run loop iteration
-            result = await cls._run_loop(ctx, callbacks or LoopCallbacks())
-            return result
+            from flocks.session.agent_inbox import AgentInbox
+            while True:
+                result = await cls._run_loop(ctx, callbacks or LoopCallbacks())
+                if ctx.should_abort() or result.error or not AgentInbox.get(session_id).messages:
+                    return result
         except Exception as e:
             log.error("loop.error", {"session_id": session_id, "error": str(e)})
             # Report error to callbacks so CLI/TUI can display it
@@ -781,26 +788,34 @@ class SessionLoop:
                 model_id=ctx.model_id,
             )
         finally:
-            # Clean up
-            if session_id in cls._active_loops:
-                del cls._active_loops[session_id]
-            clear_turn_state(session_id)
-            
-            # Set status to idle
-            SessionStatus.set(session_id, SessionStatusIdle())
-            await cls._publish_session_status(callbacks or LoopCallbacks(), session_id, "idle")
-            
-            # Touch session (update timestamp)
-            await Session.touch(session.project_id, session_id)
-
-            # Publish idle event
             try:
-                from flocks.bus.bus import Bus
-                from flocks.bus.events import SessionIdle
-                await Bus.publish(SessionIdle, {"sessionID": session_id})
-            except Exception as exc:
-                log.warn("loop.idle.event_error", {"error": str(exc)})
-    
+                clear_turn_state(session_id)
+            
+                # Set status to idle
+                SessionStatus.set(session_id, SessionStatusIdle())
+                await cls._publish_session_status(callbacks or LoopCallbacks(), session_id, "idle")
+            
+                # Touch session (update timestamp)
+                await Session.touch(session.project_id, session_id)
+
+                # Publish idle event
+                try:
+                    from flocks.bus.bus import Bus
+                    from flocks.bus.events import SessionIdle
+                    await Bus.publish(SessionIdle, {"sessionID": session_id})
+                except Exception as exc:
+                    log.warn("loop.idle.event_error", {"error": str(exc)})
+            finally:
+                cls._active_loops.pop(session_id, None)
+                from flocks.session.agent_inbox import AgentInbox
+                AgentInbox.wake(session_id, (callbacks or LoopCallbacks()).event_publish_callback)
+                # Agent-triggered loops have no HTTP prompt chain to drain the
+                # user's existing queue when they finish.
+                from flocks.session.interaction_queue import InteractionQueue
+                if not Session.is_lifecycle_transitioning(session_id) and await InteractionQueue.list(session_id):
+                    from flocks.server.routes.session import _schedule_prompt_queue_drain
+                    await _schedule_prompt_queue_drain(session_id, session.directory)
+
     @staticmethod
     async def _resolve_model(
         session: Any,
@@ -1328,6 +1343,8 @@ class SessionLoop:
         loop_error: Optional[str] = None
         
         while not ctx.should_abort():
+            from flocks.session.agent_inbox import AgentInbox
+            await AgentInbox.drain(ctx.session.id, callbacks)
             # Set status to busy
             SessionStatus.set(ctx.session.id, SessionStatusBusy())
             
@@ -2034,6 +2051,11 @@ class SessionLoop:
                     except Exception as e:
                         log.error("loop.compaction_overflow_check_error", {"error": str(e)})
             
+            if ctx.should_abort():
+                break
+            if AgentInbox.get(ctx.session.id).messages:
+                continue  # Rebuild context with input received during preparation.
+
             # Process single step — wrap in a Task so abort() can cancel it immediately
             # rather than waiting for the current tool call to finish.
             step_task = asyncio.create_task(

@@ -5257,7 +5257,6 @@ async def run_prompt_queue_item_now(
     import os
 
     from flocks.session.interaction_queue import InteractionQueue, QueueItemNotFoundError
-    from flocks.session.session_loop import SessionLoop
 
     session = await _get_session_by_id_unfiltered(sessionID)
     if not session:
@@ -5274,9 +5273,9 @@ async def run_prompt_queue_item_now(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     await _publish_prompt_queue(sessionID)
 
-    if SessionLoop.is_running(sessionID):
-        await abort_session(sessionID)
-        await _wait_for_session_idle(sessionID)
+    # The parent may already be idle while its independent children still run.
+    await abort_session(sessionID)
+    await _wait_for_session_idle(sessionID)
 
     await _schedule_prompt_queue_drain(sessionID, working_directory)
     return {"status": "accepted", "sessionID": sessionID, "queueID": queueID}
