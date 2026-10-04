@@ -131,6 +131,28 @@ interface ComposerReference {
   value: string;
 }
 
+const AGENT_AVATAR_COLORS: Record<string, string> = {
+  rex: 'bg-red-600',
+  'rex-junior': 'bg-violet-600',
+  explore: 'bg-teal-700',
+  librarian: 'bg-amber-700',
+  oracle: 'bg-blue-600',
+  prometheus: 'bg-orange-700',
+  hephaestus: 'bg-slate-600',
+  'multimodal-looker': 'bg-pink-700',
+  'self-improve': 'bg-lime-700',
+};
+const CUSTOM_AGENT_AVATAR_COLORS = Object.values(AGENT_AVATAR_COLORS);
+
+function getAgentAvatarColor(agent: string): string {
+  const name = agent.trim().toLowerCase().replace(/_/g, '-');
+  if (Object.prototype.hasOwnProperty.call(AGENT_AVATAR_COLORS, name)) return AGENT_AVATAR_COLORS[name];
+  // Custom agents keep the same color across sessions, reloads and message order.
+  let hash = 0;
+  for (const character of name) hash = (Math.imul(hash, 31) + character.codePointAt(0)!) >>> 0;
+  return CUSTOM_AGENT_AVATAR_COLORS[hash % CUSTOM_AGENT_AVATAR_COLORS.length];
+}
+
 function getAgentSender(parts: MessagePart[]) {
   for (const part of parts) {
     const sender = part.synthetic && part.metadata?.communication;
@@ -4325,7 +4347,7 @@ export default function SessionChat({
               <div className={`group relative ${!compact ? 'w-full' : ''} flex`}>
                 <div className={compact ? `flex gap-2.5 ${getMessageGroupClassName({ compact, isUser: false, isEditing: false })}` : 'flex w-full min-w-0'}>
                   <span
-                    className={`inline-flex items-center justify-center rounded-full bg-red-500 text-white font-bold shadow-sm ring-2 ring-white flex-shrink-0 dark:ring-zinc-950 ${
+                    className={`inline-flex items-center justify-center rounded-full ${getAgentAvatarColor(pendingAgentName)} text-white font-bold shadow-sm ring-2 ring-white flex-shrink-0 dark:ring-zinc-950 ${
                       compact ? 'w-7 h-7 text-xs' : 'w-8 h-8 text-sm'
                     } ${compact ? '' : 'absolute -left-10 top-1'}`}
                   >
@@ -4383,7 +4405,7 @@ export default function SessionChat({
               <div className={`group relative ${!compact ? 'w-full' : ''} flex`}>
                 <div className={compact ? `flex gap-2.5 ${getMessageGroupClassName({ compact, isUser: false, isEditing: false })}` : 'flex w-full min-w-0'}>
                   <span
-                    className={`inline-flex items-center justify-center rounded-full bg-red-500 text-white font-bold shadow-sm ring-2 ring-white flex-shrink-0 dark:ring-zinc-950 ${
+                    className={`inline-flex items-center justify-center rounded-full ${getAgentAvatarColor(pendingAgentName)} text-white font-bold shadow-sm ring-2 ring-white flex-shrink-0 dark:ring-zinc-950 ${
                       compact ? 'w-7 h-7 text-xs' : 'w-8 h-8 text-sm'
                     } ${compact ? '' : 'absolute -left-10 top-1'}`}
                   >
@@ -5319,7 +5341,7 @@ function ChatMessageBubbleInner({
       <User className={compact ? 'w-3 h-3' : 'w-3.5 h-3.5'} />
     </span>
   ) : (
-    <span className={`inline-flex items-center justify-center rounded-full bg-red-500 text-white font-bold shadow-sm ring-2 ring-white flex-shrink-0 dark:ring-zinc-950 ${avatarSize}`}>
+    <span className={`inline-flex items-center justify-center rounded-full ${getAgentAvatarColor(rawAgentName)} text-white font-bold shadow-sm ring-2 ring-white flex-shrink-0 dark:ring-zinc-950 ${avatarSize}`}>
       {agentName.charAt(0).toUpperCase()}
     </span>
   );
