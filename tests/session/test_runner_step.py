@@ -40,7 +40,7 @@ from flocks.session.prompt import (
     TurnPromptContext,
     get_prompt_flocks_config_guard,
 )
-from flocks.session.core.defaults import DEFAULT_MAX_TOOL_STEPS
+from flocks.session.prompt_strings import PROMPT_MAX_STEPS
 from flocks.session.session import Session, SessionInfo
 from flocks.tool.registry import ToolCategory, ToolInfo
 
@@ -170,6 +170,53 @@ class TestToolLoopGuard:
         assert reset["action"] == "allow"
         assert restarted["action"] == "allow"
         assert runner._get_tool_loop_guard_state(last_user_id="user-1")["exact_count"] == 1
+
+    def test_allows_four_identical_successful_sleep_turns(self):
+        runner = _make_runner("ses_runner_successful_sleep")
+        for index in range(4):
+            result = StepResult(
+                action="continue",
+                tool_calls=[ToolCall(id=f"sleep-{index}", name="sleep", arguments={"timeout_s": 60})],
+                _successful_sleep=True,
+            )
+            assert runner._update_tool_loop_guard(result, last_user_id="user-1")["action"] == "allow"
+        assert runner._get_tool_loop_guard_state(last_user_id="user-1")["exact_count"] == 0
+        assert runner._should_warn_about_tool_loop(last_user_id="user-1") is False
+
+    def test_successful_sleep_resets_previous_streak_and_warning(self):
+        runner = _make_runner("ses_runner_sleep_resets_guard")
+        repeated_tool = StepResult(
+            action="continue",
+            tool_calls=[ToolCall(id="echo", name="echo_tool", arguments={"text": "loop"})],
+        )
+        runner._update_tool_loop_guard(repeated_tool, last_user_id="user-1")
+        assert runner._update_tool_loop_guard(repeated_tool, last_user_id="user-1")["action"] == "warn"
+        assert runner._should_warn_about_tool_loop(last_user_id="user-1") is True
+
+        decision = runner._update_tool_loop_guard(StepResult(
+            action="continue",
+            tool_calls=[ToolCall(id="sleep", name="sleep", arguments={"timeout_s": 60})],
+            _successful_sleep=True,
+        ), last_user_id="user-1")
+
+        assert decision["action"] == "allow"
+        assert runner._should_warn_about_tool_loop(last_user_id="user-1") is False
+        state = runner._get_tool_loop_guard_state(last_user_id="user-1")
+        assert state["exact_count"] == 0
+        assert state["last_signature"] == ""
+        assert runner._update_tool_loop_guard(repeated_tool, last_user_id="user-1")["action"] == "allow"
+        assert state["exact_count"] == 1
+
+    @pytest.mark.parametrize("tool_name,successful_sleep", [("sleep", False), ("echo_tool", True)])
+    def test_does_not_exempt_unsuccessful_sleep_or_other_tools(self, tool_name, successful_sleep):
+        runner = _make_runner("ses_runner_sleep_guard_failures")
+        result = StepResult(
+            action="continue",
+            tool_calls=[ToolCall(id="call", name=tool_name, arguments={})],
+            _successful_sleep=successful_sleep,
+        )
+        decisions = [runner._update_tool_loop_guard(result, last_user_id="user-1") for _ in range(3)]
+        assert [decision["action"] for decision in decisions] == ["allow", "warn", "halt"]
 
 
 # ---------------------------------------------------------------------------
@@ -3293,10 +3340,12 @@ async def test_process_step_does_not_retry_after_tool_execution_started(monkeypa
 
 
 @pytest.mark.asyncio
-async def test_process_step_uses_default_max_steps_when_agent_steps_missing(monkeypatch):
+@pytest.mark.parametrize("step", [1000, 1001, 100_000])
+@pytest.mark.parametrize("steps_missing", [True, False], ids=["missing", "none"])
+async def test_process_step_has_no_default_max_steps(monkeypatch, step, steps_missing):
     runner = _make_runner("ses_runner_default_max_steps")
     runner.callbacks = RunnerCallbacks(on_error=AsyncMock())
-    runner._step = DEFAULT_MAX_TOOL_STEPS
+    runner._step = step
 
     last_user = UserMessageInfo(
         id="msg_user_default_max_steps",
@@ -3307,12 +3356,16 @@ async def test_process_step_uses_default_max_steps_when_agent_steps_missing(monk
         model={"providerID": "anthropic", "modelID": "claude-sonnet"},
     )
 
-    agent = SimpleNamespace(name="rex", steps=None, mode="primary", prompt="", tools=["read"])
+    agent = SimpleNamespace(name="rex", mode="primary", prompt="", tools=["read"])
+    if not steps_missing:
+        agent.steps = None
     provider = MagicMock()
     provider.is_configured.return_value = True
     assistant_msg = SimpleNamespace(id="msg_assistant_default_max_steps")
     sentinel_tools = [{"type": "function", "function": {"name": "read", "description": "", "parameters": {}}}]
     captured = {}
+    warn_mock = MagicMock()
+    monkeypatch.setattr(runner_mod.log, "warn", warn_mock)
 
     monkeypatch.setattr(runner_mod.Agent, "get", AsyncMock(return_value=agent))
     monkeypatch.setattr(runner_mod.Provider, "get", lambda provider_id: provider)
@@ -3331,6 +3384,7 @@ async def test_process_step_uses_default_max_steps_when_agent_steps_missing(monk
 
     async def fake_call_llm(self, provider, messages, tools, agent, assistant_msg):  # noqa: ANN001
         captured["tools"] = tools
+        captured["messages"] = messages
         return StepResult(action="stop", content="done")
 
     monkeypatch.setattr(SessionRunner, "_call_llm", fake_call_llm)
@@ -3338,14 +3392,17 @@ async def test_process_step_uses_default_max_steps_when_agent_steps_missing(monk
     result = await runner._process_step([last_user], last_user)
 
     assert result.action == "stop"
-    assert captured["tools"] == []
+    assert captured["tools"] == sentinel_tools
+    assert all(message.content != PROMPT_MAX_STEPS for message in captured["messages"])
+    assert not any(call.args[0] == "runner.max_steps_reached" for call in warn_mock.call_args_list)
 
 
 @pytest.mark.asyncio
-async def test_process_step_respects_explicit_agent_steps_over_default(monkeypatch):
+@pytest.mark.parametrize("step", [2, 3, 4])
+async def test_process_step_respects_explicit_agent_steps(monkeypatch, step):
     runner = _make_runner("ses_runner_explicit_max_steps")
     runner.callbacks = RunnerCallbacks(on_error=AsyncMock())
-    runner._step = DEFAULT_MAX_TOOL_STEPS
+    runner._step = step
 
     last_user = UserMessageInfo(
         id="msg_user_explicit_max_steps",
@@ -3356,12 +3413,14 @@ async def test_process_step_respects_explicit_agent_steps_over_default(monkeypat
         model={"providerID": "anthropic", "modelID": "claude-sonnet"},
     )
 
-    agent = SimpleNamespace(name="rex", steps=DEFAULT_MAX_TOOL_STEPS + 1, mode="primary", prompt="", tools=["read"])
+    agent = SimpleNamespace(name="rex", steps=3, mode="primary", prompt="", tools=["read"])
     provider = MagicMock()
     provider.is_configured.return_value = True
     assistant_msg = SimpleNamespace(id="msg_assistant_explicit_max_steps")
     sentinel_tools = [{"type": "function", "function": {"name": "read", "description": "", "parameters": {}}}]
     captured = {}
+    warn_mock = MagicMock()
+    monkeypatch.setattr(runner_mod.log, "warn", warn_mock)
 
     monkeypatch.setattr(runner_mod.Agent, "get", AsyncMock(return_value=agent))
     monkeypatch.setattr(runner_mod.Provider, "get", lambda provider_id: provider)
@@ -3380,6 +3439,7 @@ async def test_process_step_respects_explicit_agent_steps_over_default(monkeypat
 
     async def fake_call_llm(self, provider, messages, tools, agent, assistant_msg):  # noqa: ANN001
         captured["tools"] = tools
+        captured["messages"] = messages
         return StepResult(action="stop", content="done")
 
     monkeypatch.setattr(SessionRunner, "_call_llm", fake_call_llm)
@@ -3387,20 +3447,36 @@ async def test_process_step_respects_explicit_agent_steps_over_default(monkeypat
     result = await runner._process_step([last_user], last_user)
 
     assert result.action == "stop"
-    assert captured["tools"] == sentinel_tools
+    limit_reached = step >= agent.steps
+    assert captured["tools"] == ([] if limit_reached else sentinel_tools)
+    assert any(message.content == PROMPT_MAX_STEPS for message in captured["messages"]) == limit_reached
+    max_steps_warnings = [
+        call for call in warn_mock.call_args_list if call.args[0] == "runner.max_steps_reached"
+    ]
+    assert len(max_steps_warnings) == int(limit_reached)
+    if limit_reached:
+        assert max_steps_warnings[0].args[1] == {
+            "step": step, "max_steps": agent.steps, "session_id": runner.session.id,
+        }
 
 
 @pytest.mark.asyncio
-async def test_process_step_halts_after_third_exact_tool_only_turn(monkeypatch):
+@pytest.mark.parametrize(
+    "tool_name,successful_sleep,turn_count",
+    [("echo_tool", False, 3), ("sleep", False, 3), ("sleep", True, 4)],
+    ids=["ordinary-tool", "failed-sleep", "successful-sleep"],
+)
+async def test_process_step_tool_loop_guard_across_runner_instances(
+    monkeypatch, tool_name, successful_sleep, turn_count,
+):
     shared_cache = {}
     provider = MagicMock()
     provider.is_configured.return_value = True
     update_mock = AsyncMock(return_value=None)
     create_mock = AsyncMock(
         side_effect=[
-            SimpleNamespace(id="msg_assistant_tool_loop_1"),
-            SimpleNamespace(id="msg_assistant_tool_loop_2"),
-            SimpleNamespace(id="msg_assistant_tool_loop_3"),
+            SimpleNamespace(id=f"msg_assistant_tool_loop_{idx}")
+            for idx in range(1, turn_count + 1)
         ]
     )
 
@@ -3408,7 +3484,11 @@ async def test_process_step_halts_after_third_exact_tool_only_turn(monkeypatch):
         del provider, messages, tools, agent, assistant_msg
         return StepResult(
             action="continue",
-            tool_calls=[ToolCall(id="c-loop", name="echo_tool", arguments={"text": "loop"})],
+            tool_calls=[ToolCall(
+                id="c-loop", name=tool_name,
+                arguments={"timeout_s": 60} if tool_name == "sleep" else {"text": "loop"},
+            )],
+            _successful_sleep=successful_sleep,
         )
 
     monkeypatch.setattr(runner_mod.Agent, "get", AsyncMock(return_value=SimpleNamespace(
@@ -3416,7 +3496,7 @@ async def test_process_step_halts_after_third_exact_tool_only_turn(monkeypatch):
         steps=None,
         mode="primary",
         prompt="",
-        tools=["echo_tool"],
+        tools=[tool_name],
     )))
     monkeypatch.setattr(runner_mod.Provider, "get", lambda provider_id: provider)
     monkeypatch.setattr(runner_mod.Provider, "apply_config", AsyncMock(return_value=None))
@@ -3436,11 +3516,11 @@ async def test_process_step_halts_after_third_exact_tool_only_turn(monkeypatch):
         model={"providerID": "anthropic", "modelID": "claude-sonnet"},
     )
 
-    for idx in range(1, 4):
+    for idx in range(1, turn_count + 1):
         runner = SessionRunner(session=_make_session("ses_runner_tool_loop_guard"), static_cache=shared_cache)
         runner.callbacks = RunnerCallbacks(on_error=AsyncMock())
         monkeypatch.setattr(runner, "_build_callable_tool_schema", AsyncMock(return_value=[
-            {"type": "function", "function": {"name": "echo_tool", "description": "", "parameters": {}}}
+            {"type": "function", "function": {"name": tool_name, "description": "", "parameters": {}}}
         ]))
         monkeypatch.setattr(
             runner,
@@ -3448,14 +3528,18 @@ async def test_process_step_halts_after_third_exact_tool_only_turn(monkeypatch):
             AsyncMock(return_value=[SimpleNamespace(role="user", content="hi")]),
         )
         result = await runner._process_step([last_user], last_user)
-        if idx < 3:
+        if successful_sleep or idx < 3:
             assert result.action == "continue"
         else:
             assert result.action == "stop"
-            assert "Stopped the loop because `echo_tool` was called 3 times in a row" in result.content
+            assert f"Stopped the loop because `{tool_name}` was called 3 times in a row" in result.content
 
-    assert update_mock.await_args_list[-2].kwargs["content"].startswith("Stopped the loop because `echo_tool`")
-    assert update_mock.await_args_list[-1].kwargs["finish"] == "stop"
+    if successful_sleep:
+        assert shared_cache["tool_loop_guard"]["exact_count"] == 0
+        assert runner._should_warn_about_tool_loop(last_user_id=last_user.id) is False
+    else:
+        assert update_mock.await_args_list[-2].kwargs["content"].startswith(f"Stopped the loop because `{tool_name}`")
+        assert update_mock.await_args_list[-1].kwargs["finish"] == "stop"
 
 
 @pytest.mark.asyncio

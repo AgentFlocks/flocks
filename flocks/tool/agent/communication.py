@@ -3,7 +3,41 @@ import asyncio
 import math
 
 from flocks.session.agent_inbox import AgentInbox, AgentMessage, authorize_message
+from flocks.session.execution_mode import (
+    PLAN_DELEGATABLE_AGENT_NAMES,
+    SessionExecutionMode,
+    runtime_execution_mode,
+)
+from flocks.session.message import Message, MessageRole
+from flocks.session.session import Session, SessionInfo
 from flocks.tool.registry import ToolRegistry, ToolCategory, ToolParameter, ParameterType, ToolResult, ToolContext
+
+
+async def _check_plan_recipient(ctx: ToolContext, target: SessionInfo) -> None:
+    if runtime_execution_mode(ctx.extra.get("execution_mode")) != SessionExecutionMode.PLAN:
+        return
+
+    history = await Message.list(target.id)
+    last_user = next((m for m in reversed(history) if m.role == MessageRole.USER), None)
+    agent = getattr(last_user, "agent", None) or target.agent
+    mode = runtime_execution_mode(getattr(last_user or target, "executionMode", None))
+    if agent in PLAN_DELEGATABLE_AGENT_NAMES or mode == SessionExecutionMode.PLAN:
+        return
+
+    # Reporting up the actual delegation chain is not delegating Build work.
+    source = await Session.get_by_id(ctx.session_id)
+    visited = {ctx.session_id}
+    while source and source.parent_id and source.parent_id not in visited:
+        if source.parent_id == target.id:
+            return
+        visited.add(source.parent_id)
+        source = await Session.get_by_id(source.parent_id)
+
+    allowed = ", ".join(sorted(PLAN_DELEGATABLE_AGENT_NAMES))
+    raise ValueError(
+        f"Plan mode may only send work to read-only recipients ({allowed} or Plan mode); "
+        "reports to parent or ancestor sessions are allowed."
+    )
 
 
 @ToolRegistry.register_function(
@@ -18,9 +52,11 @@ async def send_to_session(ctx: ToolContext, session_id: str, content: str) -> To
     try:
         if not content.strip():
             raise ValueError("Message cannot be empty")
-        await authorize_message(ctx.session_id, session_id)
+        target = await authorize_message(ctx.session_id, session_id)
+        await _check_plan_recipient(ctx, target)
         await ctx.ask(permission="send_to_session", patterns=[session_id])
         target = await authorize_message(ctx.session_id, session_id)
+        await _check_plan_recipient(ctx, target)
         if ctx.aborted:
             raise ValueError("Execution stopped")
         AgentInbox.get(session_id).parent_id = target.parent_id
@@ -41,7 +77,7 @@ async def sleep(ctx: ToolContext, timeout_s: float = 60) -> ToolResult:
         return ToolResult(success=False, error="sleep must be the only tool call in its batch")
     if not math.isfinite(timeout_s) or timeout_s <= 0:
         return ToolResult(success=False, error="timeout_s must be positive and finite")
-    inbox = AgentInbox.get(ctx.session_id)
+    inbox = AgentInbox.bind(ctx.session_id)
     incoming = asyncio.create_task(inbox.ready.wait())
     aborted = asyncio.create_task(ctx.abort.wait())
     try:

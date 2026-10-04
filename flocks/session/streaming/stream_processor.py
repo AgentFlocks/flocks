@@ -1666,15 +1666,37 @@ class StreamProcessor:
 
         task.add_done_callback(_cleanup)
 
-    async def drain_parallel_tool_calls(self) -> None:
-        """Wait for foreground parallel tool-calls before returning the step."""
+    async def drain_parallel_tool_calls(self, *, execute_deferred: bool = True) -> None:
+        """Join started tools; only start deferred waits after a successful stream."""
         if self._parallel_tool_tasks:
             await asyncio.gather(*self._parallel_tool_tasks.values(), return_exceptions=True)
         if self._sleep_calls:
-            self._sleep_allowed = len(self._sleep_calls) == 1 and set(self.tool_calls) <= {
-                self._sleep_calls[0].tool_call_id}
-            self._draining_sleep = True
             calls, self._sleep_calls = self._sleep_calls, []
+            if not execute_deferred:
+                for call in calls:
+                    tool_state = self.tool_calls.get(call.tool_call_id)
+                    if tool_state is None:
+                        tool_state = ToolCallState(
+                            id=call.tool_call_id,
+                            name=call.tool_name,
+                            input=call.input,
+                            part_id=Identifier.create("part"),
+                        )
+                        self.tool_calls[call.tool_call_id] = tool_state
+                    if tool_state.status in ("completed", "error"):
+                        continue
+                    tool_state.input = call.input
+                    await self._finalize_interrupted_tool_call(
+                        tool_state=tool_state,
+                        tool_name=call.tool_name,
+                        tool_input=call.input,
+                        tool_call_id=call.tool_call_id,
+                        tool_start_time=int(datetime.now().timestamp() * 1000),
+                    )
+                return
+            self._sleep_allowed = len(calls) == 1 and set(self.tool_calls) <= {
+                calls[0].tool_call_id}
+            self._draining_sleep = True
             for call in calls:
                 await self._handle_tool_call(call)
 

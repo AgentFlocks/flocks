@@ -23,7 +23,7 @@ import { useTranslation } from 'react-i18next';
 import LoadingSpinner from './LoadingSpinner';
 import { QuestionTool, type QuestionItem } from './QuestionTool';
 import { PermissionApprovalDialog, type PermissionDecision } from './PermissionApprovalDialog';
-import DelegateTaskCard, { isDelegateTool, shouldRenderDelegateTaskCard } from './DelegateTaskCard';
+import DelegateTaskCard, { extractDelegateInfo, isDelegateTool, shouldRenderDelegateTaskCard } from './DelegateTaskCard';
 import CommandDropdown, { isSlashCommandName, parseSlashCommand } from './CommandDropdown';
 import ImageLightbox from './ImageLightbox';
 import { TodoList, buildTodoSummary, pickTodoEntries } from './TodoList';
@@ -2268,6 +2268,17 @@ export default function SessionChat({
   } =
     useSessionMessages(sessionId || undefined);
 
+  // A completed submission receipt can still represent a running child, even
+  // while this session is idle. Keep Stop availability separate from streaming.
+  const hasRunningDelegates = useMemo(() => messages.some((message) => (
+    message.role === 'assistant' && message.parts.some((part) => {
+      if ((part.type !== 'tool' && part.type !== 'toolCall') || !shouldRenderDelegateTaskCard(part)) return false;
+      const info = extractDelegateInfo(part.state || {}, '');
+      return Boolean(info.childSessionId) && (info.status === 'pending' || info.status === 'running');
+    })
+  )), [messages]);
+  const canStop = Boolean(sessionId) && (isStreaming || hasRunningDelegates);
+
   useEffect(() => {
     setSubmittedModelPromptSessionId(null);
     clearPendingContextUsage();
@@ -3820,7 +3831,7 @@ export default function SessionChat({
     const lastAsstMsg = [...messagesRef.current].reverse().find(
       (m) => m.role === 'assistant' && !m.finish,
     );
-    const shouldRestoreActivity = isStreaming || sending || sessionBusyRef.current || Boolean(lastAsstMsg?.id);
+    const wasSessionBusy = sessionBusyRef.current;
     abortedMessageIdRef.current = lastAsstMsg?.id || null;
     abortingRef.current = true;
     suppressStreamingUntilIdleRef.current = true;
@@ -3838,11 +3849,9 @@ export default function SessionChat({
       abortingRef.current = false;
       abortedMessageIdRef.current = null;
       suppressStreamingUntilIdleRef.current = false;
-      if (shouldRestoreActivity) {
-        sessionBusyRef.current = true;
-        setIsStreaming(true);
-        if (sending) setSending(true);
-      }
+      sessionBusyRef.current = wasSessionBusy;
+      setIsStreaming(isStreaming);
+      setSending(sending);
     }
   }, [isStreaming, markMessageStopped, sending, sessionId]);
 
@@ -4197,6 +4206,15 @@ export default function SessionChat({
     writeDismissedGoalKey(sessionId, goalKey);
     setDismissedGoalKey(goalKey);
   }, [sessionId, visibleGoalBanner]);
+  const stopButton = canStop && (
+    <button
+      onClick={handleAbort}
+      title={t('chat.stopTitle')}
+      className="inline-flex h-8 w-8 items-center justify-center rounded-full bg-zinc-800 text-white hover:bg-zinc-900 shadow-sm transition-all"
+    >
+      <Square className="w-3 h-3 fill-current" />
+    </button>
+  );
 
   return (
     <div className={`flex flex-col min-h-0 ${className}`}>
@@ -4419,6 +4437,13 @@ export default function SessionChat({
               </button>
             ))}
           </div>
+        </div>
+      )}
+
+      {/* Live detail views can stop work without exposing a follow-up composer. */}
+      {hideInput && live && canStop && (
+        <div className="flex flex-shrink-0 justify-end px-4 py-3">
+          {stopButton}
         </div>
       )}
 
@@ -4865,24 +4890,15 @@ export default function SessionChat({
                   )}
 
                   {isStreaming ? (
-                    <>
-                      {canSend && (
-                        <button
-                          onClick={handleSend}
-                          title={hasUploadingFiles ? t('chat.upload.waiting') : t('chat.queue.enqueue')}
-                          className="inline-flex h-8 w-8 items-center justify-center rounded-full bg-sky-500 text-white shadow-sm transition-all hover:bg-sky-600 hover:shadow"
-                        >
-                          {sending || hasUploadingFiles ? <Loader2 className="w-4 h-4 animate-spin" /> : <ArrowUp className="w-4 h-4" strokeWidth={2.5} />}
-                        </button>
-                      )}
+                    canSend && (
                       <button
-                        onClick={handleAbort}
-                        title={t('chat.stopTitle')}
-                        className="inline-flex h-8 w-8 items-center justify-center rounded-full bg-zinc-800 text-white hover:bg-zinc-900 shadow-sm transition-all"
+                        onClick={handleSend}
+                        title={hasUploadingFiles ? t('chat.upload.waiting') : t('chat.queue.enqueue')}
+                        className="inline-flex h-8 w-8 items-center justify-center rounded-full bg-sky-500 text-white shadow-sm transition-all hover:bg-sky-600 hover:shadow"
                       >
-                        <Square className="w-3 h-3 fill-current" />
+                        {sending || hasUploadingFiles ? <Loader2 className="w-4 h-4 animate-spin" /> : <ArrowUp className="w-4 h-4" strokeWidth={2.5} />}
                       </button>
-                    </>
+                    )
                   ) : (
                     <button
                       onClick={handleSend}
@@ -4897,6 +4913,7 @@ export default function SessionChat({
                       {sending || hasUploadingFiles ? <Loader2 className="w-4 h-4 animate-spin" /> : <ArrowUp className="w-4 h-4" strokeWidth={2.5} />}
                     </button>
                   )}
+                  {stopButton}
                 </div>
             </div>
           </div>

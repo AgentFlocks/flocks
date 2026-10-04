@@ -3181,6 +3181,20 @@ async def _prepare_replay_runtime(
     }
 
 
+async def _stop_replay_execution(session_id: str) -> None:
+    """Stop and join the previous execution tree before rewinding history."""
+    from flocks.session.agent_inbox import AgentInbox
+
+    # Capture descendants and tasks before cancellation can unregister them.
+    session_ids, tasks = AgentInbox.snapshot_tree(session_id)
+    await _abort_session_processing(session_id)
+    if not await AgentInbox.wait_for_tree(session_ids, tasks):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Timed out waiting for previous session execution to stop",
+        )
+
+
 async def _run_existing_user_message(
     session_id: str,
     session,
@@ -3371,6 +3385,7 @@ async def resend_session_message(
 
     async def _handle_resend() -> None:
         runtime = await _prepare_replay_runtime(sessionID, message)
+        await _stop_replay_execution(sessionID)
         updated_session = await SessionRevert.revert(sessionID, messageID)
         await Message.update_part(sessionID, messageID, text_part.id, text=text)
         await _publish_text_part_update(sessionID, messageID, text_part.id, text)
@@ -3474,6 +3489,7 @@ async def regenerate_session_message(
 
     async def _handle_regenerate() -> None:
         runtime = await _prepare_replay_runtime(sessionID, parent_message)
+        await _stop_replay_execution(sessionID)
         updated_session = await SessionRevert.revert(sessionID, parent_message_id)
         refreshed_parent = await Message.get(sessionID, parent_message_id)
         if not refreshed_parent:

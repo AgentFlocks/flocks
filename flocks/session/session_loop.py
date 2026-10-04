@@ -112,6 +112,7 @@ class LoopContext:
     model_candidates: List[RuntimeModel] = field(default_factory=list)
     candidate_index: int = 0
     model_candidate_policy: Literal["fixed", "automatic", "configured"] = "automatic"
+    auto_candidates_initialized: bool = False
     turn_user_id: Optional[str] = None
     turn_additional_context: Optional[str] = None
     stop_hook_active: bool = False
@@ -147,6 +148,8 @@ class LoopCallbacks:
     # Runner-level callbacks (text delta, tool events, permissions, etc.)
     # Type: Optional[RunnerCallbacks] - using Any to avoid circular import
     runner_callbacks: Optional[Any] = None
+    # Destination-bound delivery for inbox continuations, not the initial run.
+    on_background_result: Optional[Callable[["LoopResult"], Awaitable[None]]] = None
 
 
 @dataclass
@@ -434,8 +437,11 @@ class SessionLoop:
     def abort(cls, session_id: str) -> bool:
         """Abort running loop"""
         from flocks.session.agent_inbox import AgentInbox
-        AgentInbox.stop(session_id)
         ctx = cls._active_loops.get(session_id)
+        inbox = AgentInbox._inboxes.get(session_id)
+        if inbox and AgentInbox.dispatch(inbox, lambda: cls.abort(session_id)):
+            return ctx is not None
+        AgentInbox.stop(session_id)
         if ctx:
             ctx.signal_abort()
             return True
@@ -452,7 +458,7 @@ class SessionLoop:
         for sid in child_ids:
             ctx = cls._active_loops.get(sid)
             if ctx and not ctx.should_abort():
-                ctx.signal_abort()
+                cls.abort(sid)
                 aborted += 1
             aborted += cls.abort_children(sid)
         return aborted
@@ -621,6 +627,8 @@ class SessionLoop:
                     )
                 ):
                     active_ctx.auto_failover_allowed = True
+                    from flocks.session.agent_inbox import AgentInbox
+                    AgentInbox.get(session_id).auto_failover_allowed = True
             return LoopResult(
                 action="queued",
                 error="Loop already running",
@@ -739,7 +747,11 @@ class SessionLoop:
                 )
             cls._active_loops[session_id] = ctx
             from flocks.session.agent_inbox import AgentInbox
-            AgentInbox.get(session_id).parent_id = session.parent_id
+            inbox = AgentInbox.bind(session_id)
+            inbox.parent_id = session.parent_id
+            inbox.auto_failover_allowed = ctx.auto_failover_allowed
+            if callbacks and callbacks.on_background_result:
+                inbox.on_result = callbacks.on_background_result
         
         # Set status to busy
         SessionStatus.set(session_id, SessionStatusBusy())
@@ -967,7 +979,36 @@ class SessionLoop:
             )
         )
         cls._select_candidate(ctx, next_index)
+        ctx.auto_candidates_initialized = True
         return next_index
+
+    @classmethod
+    async def _pending_real_user(
+        cls,
+        ctx: LoopContext,
+        messages: List[MessageInfo],
+        last_user: MessageInfo,
+    ) -> Optional[MessageInfo]:
+        """Find the human turn hidden by inbox input, without replaying old hooks."""
+        parts = await Message.parts(last_user.id, ctx.session.id)
+        if not any(bool(getattr(part, "synthetic", False)) for part in parts):
+            return last_user
+
+        from flocks.session.agent_inbox import AgentInbox
+        prepared_id = ctx.turn_user_id or AgentInbox.get(ctx.session.id).prepared_user_id
+        # An assistant can be created after a queued human input while still
+        # answering the previous turn. Its parent, not its own ID, is the boundary.
+        handled_ids = {getattr(msg, "parentID", None) for msg in messages
+                       if msg.role == MessageRole.ASSISTANT}
+        for msg in reversed(messages):
+            if msg.role != MessageRole.USER:
+                continue
+            if msg.id == prepared_id or msg.id in handled_ids:
+                break
+            parts = await Message.parts(msg.id, ctx.session.id)
+            if not any(bool(getattr(part, "synthetic", False)) for part in parts):
+                return msg
+        return None
 
     @classmethod
     async def _prepare_auto_turn(
@@ -1341,29 +1382,34 @@ class SessionLoop:
         """
         last_message: Optional[MessageInfo] = None
         loop_error: Optional[str] = None
-        
+        retry_preparation = False
+
         while not ctx.should_abort():
             from flocks.session.agent_inbox import AgentInbox
             await AgentInbox.drain(ctx.session.id, callbacks)
+            if ctx.should_abort():
+                break
             # Set status to busy
             SessionStatus.set(ctx.session.id, SessionStatusBusy())
-            
-            ctx.step += 1
-            turn_state = set_turn_state(
-                ctx.session.id,
-                step=ctx.step,
-                status="started",
-                queued_message_detected=False,
-            )
-            await cls._publish_runtime_event(callbacks, "turn.started", turn_state.model_dump(by_alias=True))
-            log.info("loop.step", {
-                "session_id": ctx.session.id,
-                "step": ctx.step,
-            })
-            
-            # Callback: step start
-            if callbacks.on_step_start:
-                await callbacks.on_step_start(ctx.step)
+            retrying_preparation = retry_preparation
+            retry_preparation = False
+            if not retrying_preparation:
+                ctx.step += 1
+                turn_state = set_turn_state(
+                    ctx.session.id,
+                    step=ctx.step,
+                    status="started",
+                    queued_message_detected=False,
+                )
+                await cls._publish_runtime_event(callbacks, "turn.started", turn_state.model_dump(by_alias=True))
+                log.info("loop.step", {
+                    "session_id": ctx.session.id,
+                    "step": ctx.step,
+                })
+
+                # Callback: step start
+                if callbacks.on_step_start:
+                    await callbacks.on_step_start(ctx.step)
             
             # Get messages via SessionContext interface
             messages_started_at = asyncio.get_event_loop().time()
@@ -1460,13 +1506,23 @@ class SessionLoop:
                 last_message = last_assistant
                 break
 
-            if await cls._prepare_auto_turn(ctx, last_user):
+            turn_user = await cls._pending_real_user(ctx, messages, last_user)
+            if turn_user and await cls._prepare_auto_turn(ctx, turn_user):
                 ctx.turn_additional_context = None
                 ctx.stop_hook_active = False
-                await cls._run_user_prompt_before_hook(ctx, last_user)
-            
+                await cls._run_user_prompt_before_hook(ctx, turn_user)
+                AgentInbox.get(ctx.session.id).prepared_user_id = turn_user.id
+            if turn_user is None and ctx.auto_failover and ctx.auto_failover_allowed and not ctx.auto_candidates_initialized:
+                # A fresh inbox wake may contain only synthetic input. It still
+                # needs a failover chain, but must not re-run a human turn's hooks.
+                from flocks.config.config import Config
+                await cls._reset_auto_turn_candidates(
+                    ctx, ctx.model_candidates[0], last_user.id, config=await Config.get(),
+                )
+            AgentInbox.get(ctx.session.id).auto_failover_allowed = ctx.auto_failover_allowed
+
             # Bootstrap memory on first step (once per loop, stored in ctx)
-            if ctx.step == 1 and ctx.session.memory_enabled and ctx.memory_bootstrap_data is None:
+            if ctx.step == 1 and not retrying_preparation and ctx.session.memory_enabled and ctx.memory_bootstrap_data is None:
                 try:
                     from flocks.memory.bootstrap import MemoryBootstrap
                     ctx.memory_bootstrap_data = await MemoryBootstrap(
@@ -1487,7 +1543,7 @@ class SessionLoop:
             # may cancel this task before it finishes).
             # generate_title_after_first_message is idempotent: if this task saves
             # the title first, the safety-net call returns immediately.
-            if ctx.step == 1 and not ctx.auto_failover:
+            if ctx.step == 1 and not retrying_preparation and not ctx.auto_failover:
                 try:
                     from flocks.session.lifecycle.title import SessionTitle
                     # UserMessageInfo.model is Dict[str, str] {"providerID": ..., "modelID": ...}
@@ -2054,7 +2110,8 @@ class SessionLoop:
             if ctx.should_abort():
                 break
             if AgentInbox.get(ctx.session.id).messages:
-                continue  # Rebuild context with input received during preparation.
+                retry_preparation = True
+                continue  # Rebuild context without consuming a model step.
 
             # Process single step — wrap in a Task so abort() can cancel it immediately
             # rather than waiting for the current tool call to finish.

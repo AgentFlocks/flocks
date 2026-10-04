@@ -4,13 +4,14 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from flocks.session.streaming.stream_events import ToolCallEvent
+from flocks.session.streaming.stream_events import ToolCallEvent, ToolInputStartEvent
 from flocks.session.streaming.stream_processor import StreamProcessor
 from flocks.tool.registry import ToolResult
 
 
 @pytest.mark.asyncio
-async def test_foreground_subagent_tool_calls_start_in_parallel():
+@pytest.mark.parametrize("execute_deferred", [True, False])
+async def test_foreground_subagent_tool_calls_start_in_parallel(execute_deferred):
     processor = StreamProcessor(
         session_id="ses-parent",
         assistant_message=SimpleNamespace(id="msg-assistant"),
@@ -60,10 +61,44 @@ async def test_foreground_subagent_tool_calls_start_in_parallel():
         assert set(started) == {"call-1", "call-2"}
 
         release.set()
-        await processor.drain_parallel_tool_calls()
+        await processor.drain_parallel_tool_calls(execute_deferred=execute_deferred)
 
     assert processor.tool_calls["call-1"].status == "completed"
     assert processor.tool_calls["call-2"].status == "completed"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("input_started", [True, False])
+async def test_cleanup_discards_deferred_sleep_and_finalizes_state(input_started):
+    publish = AsyncMock()
+    processor = StreamProcessor(
+        session_id="ses-interrupted-sleep",
+        assistant_message=SimpleNamespace(id="msg-assistant"),
+        agent=SimpleNamespace(name="rex"),
+        event_publish_callback=publish,
+    )
+    execute = AsyncMock(return_value=ToolResult(success=True))
+    with (
+        patch("flocks.session.streaming.stream_processor.Message.store_part", AsyncMock()) as store,
+        patch("flocks.session.streaming.stream_processor.ToolRegistry.execute", execute),
+    ):
+        if input_started:
+            await processor.process_event(ToolInputStartEvent(id="call-sleep", tool_name="sleep"))
+        await processor.process_event(ToolCallEvent(
+            tool_call_id="call-sleep", tool_name="sleep", input={"timeout_s": 3600},
+        ))
+        await processor.drain_parallel_tool_calls(execute_deferred=False)
+        assert processor._sleep_calls == []
+        await processor.drain_parallel_tool_calls()
+
+    execute.assert_not_awaited()
+    state = processor.tool_calls["call-sleep"]
+    assert state.status == "error"
+    assert state.input == {"timeout_s": 3600}
+    assert state.metadata["interrupted"] is True
+    assert store.await_args.args[2].state.status == "error"
+    assert store.await_args.args[2].state.metadata["interrupted"] is True
+    assert publish.await_args.args[1]["part"]["state"]["metadata"]["interrupted"] is True
 
 
 @pytest.mark.asyncio

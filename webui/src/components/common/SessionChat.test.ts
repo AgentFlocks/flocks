@@ -1441,6 +1441,7 @@ describe('SessionChat standalone thinking indicator', () => {
       });
       expect(clientPostMock).toHaveBeenCalledWith('/api/session/sess-1/abort');
       expect(markMessageStopped).not.toHaveBeenCalled();
+      expect(screen.getByTitle('chat.stopTitle')).toBeInTheDocument();
     } finally {
       consoleError.mockRestore();
     }
@@ -1503,6 +1504,148 @@ describe('SessionChat standalone thinking indicator', () => {
     });
 
     expect(removeMessage).toHaveBeenCalledWith('assistant-failed');
+  });
+});
+
+describe('SessionChat delegated work stop controls', () => {
+  function submittedReceipt(status = 'running', nestedMetadata = false): Message {
+    const metadata = { submitted: true, status, sessionId: 'child-1' };
+    return makeMessage({
+      id: 'delegate-receipt',
+      finish: 'stop',
+      parts: [{
+        id: 'delegate-part',
+        type: 'tool',
+        tool: 'delegate_task',
+        state: {
+          status: 'completed',
+          input: { subagent_type: 'explore', description: 'Inspect the task' },
+          metadata: nestedMetadata ? { metadata } : metadata,
+        },
+      }],
+    });
+  }
+
+  it.each([false, true])('shows Stop for an idle parent with a running submitted child (nested metadata: %s)', async (nestedMetadata) => {
+    mockStatefulSessionMessages([submittedReceipt('running', nestedMetadata)]);
+    const conversationBottomSlot = vi.fn(() => null);
+    const onStreamingDone = vi.fn();
+    const { container } = render(React.createElement(SessionChat, {
+      sessionId: 'sess-1',
+      conversationBottomSlot,
+      onStreamingDone,
+    }));
+
+    await waitFor(() => expect(clientGetMock).toHaveBeenCalledWith('/api/session/status'));
+    expect(screen.getByTitle('chat.stopTitle')).toBeInTheDocument();
+    expect(screen.getByPlaceholderText('请输入消息')).not.toBeDisabled();
+    expect(conversationBottomSlot).toHaveBeenLastCalledWith(expect.objectContaining({
+      streaming: false,
+      sending: false,
+    }));
+    expect(container.querySelectorAll('.animate-bounce')).toHaveLength(0);
+    expect(onStreamingDone).not.toHaveBeenCalled();
+
+    fireEvent.change(screen.getByPlaceholderText('请输入消息'), { target: { value: 'Follow up' } });
+    expect(screen.queryByTitle('chat.queue.enqueue')).not.toBeInTheDocument();
+    fireEvent.click(container.querySelector('button[class*="bg-sky-500"]')!);
+    await waitFor(() => expect(clientPostMock).toHaveBeenCalledWith(
+      '/api/session/sess-1/prompt_async', expect.any(Object),
+    ));
+    expect(sessionApiEnqueuePromptMock).not.toHaveBeenCalled();
+  });
+
+  it('aborts the idle parent and hides Stop when the submitted child finishes', async () => {
+    const messagesHook = { ...useSessionMessagesMock(), messages: [submittedReceipt()] };
+    useSessionMessagesMock.mockReturnValue(messagesHook);
+    const { rerender } = render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
+    await waitFor(() => expect(clientGetMock).toHaveBeenCalledWith('/api/session/status'));
+
+    fireEvent.click(screen.getByTitle('chat.stopTitle'));
+    await waitFor(() => expect(clientPostMock).toHaveBeenCalledWith('/api/session/sess-1/abort'));
+    expect(sessionApiEnqueuePromptMock).not.toHaveBeenCalled();
+
+    useSessionMessagesMock.mockReturnValue({ ...messagesHook, messages: [submittedReceipt('completed')] });
+    rerender(React.createElement(SessionChat, { sessionId: 'sess-1' }));
+    expect(screen.queryByTitle('chat.stopTitle')).not.toBeInTheDocument();
+  });
+
+  it.each(['completed', 'error', 'aborted', 'cancelled'])('does not expose Stop for a %s child receipt', async (status) => {
+    mockStatefulSessionMessages([submittedReceipt(status)]);
+    render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
+    await waitFor(() => expect(clientGetMock).toHaveBeenCalledWith('/api/session/status'));
+    expect(screen.queryByTitle('chat.stopTitle')).not.toBeInTheDocument();
+  });
+
+  it('does not treat unrelated tool metadata as a running delegate', async () => {
+    const receipt = submittedReceipt();
+    receipt.parts[0].tool = 'bash';
+    mockStatefulSessionMessages([receipt]);
+    render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
+    await waitFor(() => expect(clientGetMock).toHaveBeenCalledWith('/api/session/status'));
+    expect(screen.queryByTitle('chat.stopTitle')).not.toBeInTheDocument();
+  });
+
+  it('keeps an idle parent idle after abort fails, even with unfinished assistant history', async () => {
+    mockStatefulSessionMessages([
+      makeMessage({
+        id: 'old-unfinished-assistant',
+        finish: null,
+        parts: [{ id: 'old-text', type: 'text', text: 'Old partial response' }],
+      }),
+      submittedReceipt(),
+    ]);
+    const conversationBottomSlot = vi.fn(() => null);
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    clientPostMock.mockImplementation((url: string) => url.endsWith('/abort')
+      ? Promise.reject(new Error('abort failed'))
+      : Promise.resolve({ data: {} }));
+    try {
+      const { container } = render(React.createElement(SessionChat, {
+        sessionId: 'sess-1', conversationBottomSlot,
+      }));
+      await waitFor(() => expect(clientGetMock).toHaveBeenCalledWith('/api/session/status'));
+      fireEvent.click(screen.getByTitle('chat.stopTitle'));
+      await waitFor(() => expect(consoleError).toHaveBeenCalled());
+
+      expect(conversationBottomSlot).toHaveBeenLastCalledWith(expect.objectContaining({
+        streaming: false,
+        sending: false,
+      }));
+      expect(screen.getByTitle('chat.stopTitle')).toBeInTheDocument();
+      expect(container.querySelectorAll('.animate-bounce')).toHaveLength(0);
+      fireEvent.change(screen.getByPlaceholderText('请输入消息'), { target: { value: 'Try again' } });
+      expect(screen.queryByTitle('chat.queue.enqueue')).not.toBeInTheDocument();
+      fireEvent.click(container.querySelector('button[class*="bg-sky-500"]')!);
+      await waitFor(() => expect(clientPostMock).toHaveBeenCalledWith(
+        '/api/session/sess-1/prompt_async', expect.any(Object),
+      ));
+      expect(sessionApiEnqueuePromptMock).not.toHaveBeenCalled();
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
+  it('allows a live child detail to stop without exposing input', async () => {
+    clientGetMock.mockImplementation((url: string) => Promise.resolve({
+      data: url === '/api/session/status' ? { 'child-1': { type: 'busy' } } : {},
+    }));
+    render(React.createElement(SessionChat, {
+      sessionId: 'child-1', live: true, hideInput: true,
+    }));
+    await waitFor(() => expect(screen.getByTitle('chat.stopTitle')).toBeInTheDocument());
+    expect(screen.queryByRole('textbox')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByTitle('chat.stopTitle'));
+    await waitFor(() => expect(clientPostMock).toHaveBeenCalledWith('/api/session/child-1/abort'));
+    expect(screen.queryByRole('textbox')).not.toBeInTheDocument();
+  });
+
+  it('does not add Stop to a non-live read-only detail', async () => {
+    mockStatefulSessionMessages([submittedReceipt()]);
+    render(React.createElement(SessionChat, { sessionId: 'sess-1', hideInput: true }));
+    await waitFor(() => expect(clientGetMock).toHaveBeenCalledWith('/api/session/status'));
+    expect(screen.queryByTitle('chat.stopTitle')).not.toBeInTheDocument();
+    expect(screen.queryByRole('textbox')).not.toBeInTheDocument();
   });
 });
 
