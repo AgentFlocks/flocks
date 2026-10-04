@@ -187,7 +187,6 @@ class StreamProcessor:
         self._parallel_tool_tasks: Dict[str, asyncio.Task[None]] = {}
         self._sleep_calls = []
         self._draining_sleep = False
-        self._sleep_allowed = False
     
     async def process_event(self, event: StreamEvent) -> None:
         """
@@ -934,7 +933,6 @@ class StreamProcessor:
                     **sandbox_meta["extra"],
                     "agent_execution_session": True,
                     "tool_finished": tool_finished,
-                    "sleep_allowed": self._sleep_allowed,
                     "execution_mode": self._execution_mode,
                     "workspace_dir": self._workspace_dir,
                     "model": {
@@ -1694,8 +1692,6 @@ class StreamProcessor:
                         tool_start_time=int(datetime.now().timestamp() * 1000),
                     )
                 return
-            self._sleep_allowed = len(calls) == 1 and set(self.tool_calls) <= {
-                calls[0].tool_call_id}
             self._draining_sleep = True
             for call in calls:
                 await self._handle_tool_call(call)

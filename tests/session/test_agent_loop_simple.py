@@ -121,7 +121,7 @@ async def test_messages_enter_real_loop_after_batch_and_before_next_decision(tmp
 async def test_progress_wakes_sleep_but_human_queue_does_not(tmp_path, monkeypatch):
     parent, child = await sessions(tmp_path)
     monkeypatch.setattr(AgentInbox, "wake", lambda *args: None)
-    context = ToolContext(parent.id, "msg", extra={"sleep_allowed": True})
+    context = ToolContext(parent.id, "msg")
     wait = asyncio.create_task(sleep(context, 1))
     await InteractionQueue.enqueue(parent.id, parts=[{"type": "text", "text": "Later human task"}])
     await asyncio.sleep(0)
@@ -135,14 +135,14 @@ async def test_progress_wakes_sleep_but_human_queue_does_not(tmp_path, monkeypat
 
 async def test_sleep_timeout_and_stop_do_not_leave_waiters(tmp_path):
     parent, _ = await sessions(tmp_path)
-    ctx = ToolContext(parent.id, "msg", extra={"sleep_allowed": True})
+    ctx = ToolContext(parent.id, "msg")
     assert (await sleep(ctx, .001)).output == {"wake_reason": "timeout"}
     waiting = asyncio.create_task(sleep(ctx, 60))
     await asyncio.sleep(0)
     ctx.abort.set()
     with pytest.raises(asyncio.CancelledError):
         await waiting
-    assert not (await sleep(ToolContext(parent.id, "msg"), 1)).success
+    assert not (await sleep(ToolContext(parent.id, "msg"), 0)).success
 
 
 async def test_idle_recipient_wakes_without_forcing_parent_to_wait(tmp_path, monkeypatch):
@@ -407,6 +407,8 @@ async def test_completed_child_reports_followup_once(tmp_path, monkeypatch, outc
                 AsyncMock(return_value=ToolResult(success=True, output="first result")))
     await until(lambda: child.id not in AgentInbox._children)
     assert len(AgentInbox.get(parent.id).messages) == 1
+    original_receipt = next(p for p in await Message.parts(receipt.id, parent.id)
+                            if p.type == "tool").model_dump()
     entered = asyncio.Event()
 
     async def run(sid, **kwargs):
@@ -434,9 +436,7 @@ async def test_completed_child_reports_followup_once(tmp_path, monkeypatch, outc
     expected = {"success": "second result", "error": "followup failed", "stop": "interrupted"}[outcome]
     assert expected in reports[1].content
     updated = next(p for p in await Message.parts(receipt.id, parent.id) if p.type == "tool")
-    assert updated.state.status == "completed"
-    assert expected in updated.state.metadata["result"]
-    assert updated.state.metadata["status"] == ("completed" if outcome == "success" else "error")
+    assert updated.model_dump() == original_receipt
     run_mock.assert_awaited_once()
 
 
@@ -468,7 +468,18 @@ async def test_stop_preserves_terminal_child_finalizer(tmp_path, monkeypatch, fo
             await release.wait()
         return await parts(mid, sid)
 
-    monkeypatch.setattr(Message, "parts", blocked_parts)
+    if followup:
+        from flocks.session import delegated_execution
+        format_result = delegated_execution.format_sync_subagent_result
+
+        async def blocked_format(**kwargs):
+            entered.set()
+            await release.wait()
+            return await format_result(**kwargs)
+
+        monkeypatch.setattr(delegated_execution, "format_sync_subagent_result", blocked_format)
+    else:
+        monkeypatch.setattr(Message, "parts", blocked_parts)
     if followup:
         async def run(sid, **kwargs):
             await AgentInbox.drain(sid, kwargs["callbacks"])
@@ -599,7 +610,7 @@ async def test_cross_thread_inbox_notification_uses_consumer_loop(tmp_path, monk
     loop = asyncio.get_running_loop()
     errors, wake_loops = [], []
     monkeypatch.setattr(AgentInbox, "wake", lambda *args: wake_loops.append(asyncio.get_running_loop()))
-    waiting = asyncio.create_task(sleep(ToolContext(parent.id, "msg", extra={"sleep_allowed": True}), 2))
+    waiting = asyncio.create_task(sleep(ToolContext(parent.id, "msg"), 2))
     await asyncio.sleep(0)
     await asyncio.sleep(0)
 

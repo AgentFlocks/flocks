@@ -53,6 +53,10 @@ def start_child(ctx, child_id, child_agent, execute):
             return
         except Exception as exc:
             log.warn("child.card_update_failed", {"error": str(exc), "session_id": child_id})
+        await report(result)
+
+    async def report(result):
+        status = "completed" if result.success else "error"
         if not ctx.aborted and not parent_inbox.stopped:
             AgentInbox.post(ctx.session_id, AgentMessage(
                 child_id, child_agent,
@@ -63,7 +67,12 @@ def start_child(ctx, child_id, child_agent, execute):
         result = await format_sync_subagent_result(
             description=child_agent, session_id=child_id, loop_result=loop_result,
         )
-        await deliver(result)
+        try:
+            await Session.run_active_write(
+                ctx.session_id, lambda: report(result), expected_generation=generation,
+            )
+        except (SessionInactiveError, SessionNotFoundError):
+            return
 
     child_inbox.on_result = deliver_followup
 

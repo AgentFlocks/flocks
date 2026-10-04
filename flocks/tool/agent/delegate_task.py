@@ -29,31 +29,6 @@ from flocks.utils.log import Log
 log = Log.create(service="tool.delegate_task")
 
 
-async def _run_subagent_with_hooks(
-    *,
-    ctx: ToolContext,
-    child_session_id: str,
-    child_agent: str,
-    workspace: str,
-    prompt: str,
-    description: str,
-    resumed: bool,
-    provider_id: Optional[str] = None,
-    model_id: Optional[str] = None,
-    callbacks: Optional[Any] = None,
-) -> Any:
-    """Run one child session and surface terminal outcome to caller."""
-    try:
-        return await SessionLoop.run(
-            child_session_id,
-            provider_id=provider_id,
-            model_id=model_id,
-            callbacks=callbacks,
-        )
-    except asyncio.CancelledError:
-        raise
-
-
 async def _subagent_session_permissions(agent_name: str) -> list:
     """Build session permission rules for a delegated subagent."""
     from flocks.agent.registry import Agent
@@ -400,10 +375,8 @@ async def delegate_task_tool(
         async def execute_child():
             if ctx.aborted or (parent_inbox and parent_inbox.stopped) or (child_inbox and child_inbox.stopped):
                 raise asyncio.CancelledError()
-            loop_result = await _run_subagent_with_hooks(
-                ctx=ctx, child_session_id=created.id, child_agent=agent_to_use,
-                workspace=runtime_directory, prompt=full_prompt, description=description,
-                resumed=False, provider_id=(explicit_model or {}).get("providerID"),
+            loop_result = await SessionLoop.run(
+                created.id, provider_id=(explicit_model or {}).get("providerID"),
                 model_id=(explicit_model or {}).get("modelID"),
                 callbacks=forwarder.build_callbacks(event_publish_callback=ctx.event_publish_callback),
             )

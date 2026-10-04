@@ -102,16 +102,20 @@ async def test_cleanup_discards_deferred_sleep_and_finalizes_state(input_started
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("mixed", [False, True])
-async def test_sleep_runs_after_stream_and_rejects_mixed_batches(mixed):
+@pytest.mark.parametrize("other_tool", [None, "read", "delegate_task"])
+async def test_sleep_runs_after_stream_and_other_tools(other_tool):
     from flocks.tool.agent.communication import sleep
     processor = StreamProcessor(
         session_id="sleep-session", assistant_message=SimpleNamespace(id="msg"),
         agent=SimpleNamespace(name="rex"),
     )
     results = []
+    order = []
 
     async def execute(tool_name, ctx, **kwargs):
+        if tool_name != "sleep":
+            await asyncio.sleep(0)
+        order.append(tool_name)
         result = await sleep(ctx, .001) if tool_name == "sleep" else ToolResult(success=True)
         results.append(result)
         return result
@@ -124,7 +128,8 @@ async def test_sleep_runs_after_stream_and_rejects_mixed_batches(mixed):
     ):
         await processor.process_event(ToolCallEvent(tool_call_id="sleep", tool_name="sleep", input={}))
         assert not results
-        if mixed:
-            await processor.process_event(ToolCallEvent(tool_call_id="other", tool_name="read", input={}))
+        if other_tool:
+            await processor.process_event(ToolCallEvent(tool_call_id="other", tool_name=other_tool, input={}))
         await processor.drain_parallel_tool_calls()
-    assert results[-1].success is not mixed
+    assert results[-1].success
+    assert order == ([other_tool, "sleep"] if other_tool else ["sleep"])

@@ -69,12 +69,10 @@ async def send_to_session(ctx: ToolContext, session_id: str, content: str) -> To
 
 @ToolRegistry.register_function(
     name="sleep", group="代理协作", native=True, category=ToolCategory.SYSTEM,
-    description="Wait for an agent message, child result or timeout while other agents continue. Use only when you need their input. Must be the only tool call in its batch. Timeout does not cancel children.",
+    description="Wait for an agent message, child result or timeout while other agents continue. Use only when you need their input. Runs after the other tool calls in its batch. Timeout does not cancel children.",
     parameters=[ToolParameter(name="timeout_s", type=ParameterType.NUMBER, default=60, description="Maximum seconds to wait")],
 )
 async def sleep(ctx: ToolContext, timeout_s: float = 60) -> ToolResult:
-    if not ctx.extra.get("sleep_allowed"):
-        return ToolResult(success=False, error="sleep must be the only tool call in its batch")
     if not math.isfinite(timeout_s) or timeout_s <= 0:
         return ToolResult(success=False, error="timeout_s must be positive and finite")
     inbox = AgentInbox.bind(ctx.session_id)
