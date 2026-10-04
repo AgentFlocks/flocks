@@ -1094,7 +1094,7 @@ export function mergeConsecutiveAssistantMessages(messages: Message[]): MergedMe
       continue;
     }
 
-    if (msg.role !== 'assistant') {
+    if (msg.role !== 'assistant' || getAgentSender(msg.parts)) {
       result.push(msg);
       continue;
     }
@@ -1103,6 +1103,7 @@ export function mergeConsecutiveAssistantMessages(messages: Message[]): MergedMe
     if (
       last &&
       last.role === 'assistant' &&
+      !getAgentSender(last.parts) &&
       last._merged &&
       last.finish !== 'summary' &&
       !!last.compacted === !!msg.compacted
@@ -5235,7 +5236,7 @@ function ChatMessageBubbleInner({
 }: ChatMessageBubbleProps) {
   const { t, i18n } = useTranslation('session');
   const parts: MessagePart[] = Array.isArray(message.parts) ? message.parts : [];
-  const sender = message.role === 'user' ? getAgentSender(parts) : undefined;
+  const sender = getAgentSender(parts);
   const isUser = message.role === 'user' && !sender;
   const processElapsedClock = useProcessElapsedClock(isActive && collapseIntermediateSteps);
   const { getPartExpanded, togglePart } = useReasoningToggle(parts, message.finish);
@@ -6720,6 +6721,7 @@ export const ChatMessageBubble = memo(ChatMessageBubbleInner, (prev, next) => {
   if (prev.onOpenContextFile !== next.onOpenContextFile) return false;
   if (prev.onOpenContext !== next.onOpenContext) return false;
   if (prev.message.finish !== next.message.finish) return false;
+  if (prev.message.role !== next.message.role || prev.message.agent !== next.message.agent) return false;
   const prevParts = prev.message.parts as any[] | undefined;
   const nextParts = next.message.parts as any[] | undefined;
   if ((prevParts?.length ?? 0) !== (nextParts?.length ?? 0)) return false;

@@ -6577,6 +6577,29 @@ describe('agent communication', () => {
     }],
   } as Message;
 
+  it.each([
+    ['rex-junior', 'rex', 'Rex-junior'],
+    ['rex', 'rex-junior', 'Rex'],
+    ['explore', 'librarian', 'Explore'],
+  ])('keeps %s → %s separate when the message part arrives before its role', (source, target, label) => {
+    const report = {
+      ...incoming, role: 'assistant', agent: target,
+      parts: incoming.parts.map(part => ({ ...part, metadata: {
+        ...part.metadata, communication: { ...part.metadata?.communication, source_agent: source },
+      } })),
+    } as Message;
+    const ordinary = { ...incoming, id: 'before', role: 'assistant', agent: target,
+      parts: [{ id: 'ordinary', type: 'text', text: 'Working on the task' }],
+    } as Message;
+    const merged = mergeConsecutiveAssistantMessages([ordinary, report, { ...ordinary, id: 'after' }]);
+    expect(merged).toHaveLength(3);
+    const { rerender } = render(React.createElement(ChatMessageBubble, { message: merged[1] }));
+    expect(screen.getByText(label)).toBeInTheDocument();
+    expect(screen.getByText('Halfway through the investigation')).toBeInTheDocument();
+    rerender(React.createElement(ChatMessageBubble, { message: { ...report, role: 'user' } }));
+    expect(screen.getByText(label)).toBeInTheDocument();
+  });
+
   it('renders the sender and display text without user-edit or regeneration actions', () => {
     render(React.createElement(ChatMessageBubble, { message: incoming, showActions: true }));
     expect(screen.getByText('Explore')).toBeInTheDocument();
