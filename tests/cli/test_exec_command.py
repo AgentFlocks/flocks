@@ -160,7 +160,8 @@ async def test_headless_persists_prompt_image_final_schema_and_resumes(runtime, 
         callbacks = kwargs["callbacks"]
         await callbacks.on_step_start(1)
         await callbacks.runner_callbacks.on_text_delta('{"answer":42}')
-        await callbacks.on_step_end(1)
+        if callbacks.on_step_end is not None:
+            await callbacks.on_step_end(1)
         msg = await Message.create(sid, MessageRole.ASSISTANT, '{"answer":42}')
         return LoopResult(action="stop", last_message=msg)
     monkeypatch.setattr(SessionLoop, "run", loop)
@@ -171,7 +172,14 @@ async def test_headless_persists_prompt_image_final_schema_and_resumes(runtime, 
     assert result["structured_output"] == {"answer": 42}
     assert any(p.type == "file" for p in observed[0][0].parts)
     assert "JSON Schema" in observed[0][0].parts[0].text
-    assert [e["type"] for e in events] == ["session", "step_start", "text_delta", "step_end"]
+    # Five-event protocol: no tools in this turn; result is returned by
+    # run_headless and serialized once by the CLI, not emitted as a callback.
+    assert events == [
+        {"type": "session", "session_id": result["session_id"]},
+        {"type": "text_delta", "delta": '{"answer":42}'},
+    ]
+    assert result["type"] == "result"
+    assert result["result"] == '{"answer":42}'
     sid = result["session_id"]
     assert (await Session.get_by_id(sid)).directory == str(runtime)
     continued = await run_headless(ExecOptions(runtime, prompt="next", session_id=sid))
