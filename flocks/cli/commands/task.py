@@ -26,6 +26,23 @@ task_app = typer.Typer(
 console = Console()
 
 
+def _run_task_command(operation):
+    """Close invocation-owned stores before asyncio tears down the event loop."""
+    from flocks.cli.runtime import close_cli_resources
+    from flocks.task.store import TaskStore
+
+    async def execute():
+        try:
+            return await operation
+        finally:
+            try:
+                await TaskStore.close()
+            finally:
+                await close_cli_resources()
+
+    return asyncio.run(execute())
+
+
 # ------------------------------------------------------------------
 # Default: dashboard
 # ------------------------------------------------------------------
@@ -34,13 +51,13 @@ console = Console()
 def task_default(ctx: typer.Context):
     """Show task dashboard (default when no subcommand given)."""
     if ctx.invoked_subcommand is None:
-        asyncio.run(_dashboard())
+        _run_task_command(_dashboard())
 
 
 @task_app.command("dashboard")
 def task_dashboard():
     """Show task center overview."""
-    asyncio.run(_dashboard())
+    _run_task_command(_dashboard())
 
 
 async def _dashboard():
@@ -83,7 +100,7 @@ def task_list(
     format: str = typer.Option("table", "--format", help="Output format: table | json"),
 ):
     """List tasks."""
-    asyncio.run(_list_tasks(status, task_type, limit, format))
+    _run_task_command(_list_tasks(status, task_type, limit, format))
 
 
 async def _list_tasks(status_val, type_val, limit, fmt):
@@ -155,7 +172,7 @@ async def _list_tasks(status_val, type_val, limit, fmt):
 @task_app.command("show")
 def task_show(task_id: str = typer.Argument(..., help="Task ID")):
     """Show task details."""
-    asyncio.run(_show_task(task_id))
+    _run_task_command(_show_task(task_id))
 
 
 async def _show_task(task_id: str):
@@ -238,7 +255,7 @@ def task_create(
     prompt: Optional[str] = typer.Option(None, "--prompt", help="User prompt"),
 ):
     """Create a new task."""
-    asyncio.run(_create_task(title, description, task_type, priority, mode, agent, workflow, skill or [], cron, prompt))
+    _run_task_command(_create_task(title, description, task_type, priority, mode, agent, workflow, skill or [], cron, prompt))
 
 
 async def _create_task(title, description, task_type, priority, mode, agent, workflow, skills, cron, prompt):
@@ -301,7 +318,7 @@ def task_queue(
     resume: bool = typer.Option(False, "--resume", help="Resume queue"),
 ):
     """View or control the task queue."""
-    asyncio.run(_queue(pause, resume))
+    _run_task_command(_queue(pause, resume))
 
 
 async def _queue(pause: bool, resume: bool):
@@ -337,7 +354,7 @@ async def _queue(pause: bool, resume: bool):
 @task_app.command("scheduled")
 def task_scheduled():
     """List all scheduled tasks."""
-    asyncio.run(_scheduled())
+    _run_task_command(_scheduled())
 
 
 async def _scheduled():
@@ -379,7 +396,7 @@ async def _scheduled():
 @task_app.command("cancel")
 def task_cancel(task_id: str = typer.Argument(..., help="Task ID")):
     """Cancel a task."""
-    asyncio.run(_cancel(task_id))
+    _run_task_command(_cancel(task_id))
 
 
 async def _cancel(task_id: str):
@@ -398,7 +415,7 @@ async def _cancel(task_id: str):
 @task_app.command("retry")
 def task_retry(task_id: str = typer.Argument(..., help="Task ID")):
     """Retry a failed task."""
-    asyncio.run(_retry(task_id))
+    _run_task_command(_retry(task_id))
 
 
 async def _retry(task_id: str):
@@ -417,7 +434,7 @@ async def _retry(task_id: str):
 @task_app.command("rerun")
 def task_rerun(task_id: str = typer.Argument(..., help="Task ID")):
     """Rerun a task (stop if running, requeue)."""
-    asyncio.run(_rerun(task_id))
+    _run_task_command(_rerun(task_id))
 
 
 async def _rerun(task_id: str):
