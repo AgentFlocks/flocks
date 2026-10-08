@@ -9,6 +9,7 @@
 - [文件](#文件)
 - [怎么构建](#怎么构建)
 - [装到机器上是什么样](#装到机器上是什么样)
+- [旧数据怎么带过来](#旧数据怎么带过来)
 - [Pro 升级在离线机器上怎么走](#pro-升级在离线机器上怎么走)
 - [和原来的升级方式是什么关系](#和原来的升级方式是什么关系)
 - [测试](#测试)
@@ -68,7 +69,7 @@ docker run --rm -it -v "$PWD":/src -v ~/.cache/flocks-offline-build:/root/.cache
 /opt/flocks/installer, versions.json    这次安装用的脚本和版本信息
 /etc/flocks/flocks.env                  服务环境变量；改 IP/端口/控制台地址就改它然后 systemctl restart flocks
 /etc/systemd/system/flocks.service      oneshot + RemainAfterExit，ExecStart=flocks start，ExecStop=flocks stop
-/var/lib/flocks/.flocks                 数据（配置、数据库、日志、授权），任何情况下不动
+/var/lib/flocks/.flocks                 数据（配置、数据库、日志、授权）；flocks.env 里改过 FLOCKS_ROOT 就是改过的那个。已有数据时安装脚本不动它，第一次装会把旧实例的数据拷进来（见下一节）
 /usr/local/bin/flocks                   CLI 包装
 ```
 
@@ -79,6 +80,33 @@ docker run --rm -it -v "$PWD":/src -v ~/.cache/flocks-offline-build:/root/.cache
 systemd 用 oneshot 而不是把 `service-daemon` 放前台，是因为在线升级的 `restart_handoff` 会先 `stop_all` 再自己拉起新的 `flocks start`；前台模式下主进程一退 systemd 会连 handoff 一起杀掉。oneshot 下 `systemctl status` 只能看到 active (exited)，看进程用 `sudo flocks status`。
 
 调试用的环境变量（客户不需要）：`FLOCKS_OFFLINE_DRY_RUN=1` 只打印计划；`FLOCKS_OFFLINE_SKIP_SYSTEMD=1` 在容器里用 `flocks start` 直接起；`FLOCKS_OFFLINE_SKIP_FIREWALL=1`、`FLOCKS_OFFLINE_SKIP_START=1`（只装不启动，smoke 里有真跑；之前这条分支调了一个还没定义的函数，exit 127）、`FLOCKS_OFFLINE_PORT`、`FLOCKS_OFFLINE_HEALTH_TIMEOUT`。
+
+## 旧数据怎么带过来
+
+数据目录先看机器上已有的 `/etc/flocks/flocks.env`：里面的 `FLOCKS_ROOT` 是绝对路径就一直用它（运维把数据挪到数据盘的情况），没有才用 `/var/lib/flocks/.flocks`。Pro 标记、建目录、`install_profile.json` 都跟着这个目录走。只认 `FLOCKS_ROOT=` 这种写法，和 systemd、安装脚本合并 env 的读法一致：`export FLOCKS_ROOT=` 对服务不生效，安装脚本会打警告并按默认目录处理；写成相对路径直接报错退出。之前这里写死了默认路径，数据挪过盘的机器重装时读不到 Pro 标记，会把 Pro 实例装成开源版。
+
+数据目录里还没有用户数据时（`config/flocks.json`、`config/flocks.jsonc`、`data/flocks.db` 都不在，一般就是这台机器第一次装离线包），安装脚本会找上一个实例的数据拷一份过来，按这个顺序找：
+
+1. `FLOCKS_OFFLINE_MIGRATE_FROM=<目录>`，显式指定；写 `none` 表示不迁移。
+2. 启动安装脚本时带的 `FLOCKS_ROOT`，对应在线版改过数据目录的情况。
+3. 本机用户默认的 `~/.flocks`：执行 sudo 的用户、root、`/etc/passwd` 里每个用户的 home。只有一个有数据就用它；有好几个就列出来（带数据库最后写入时间）报错退出，让运维用第 1 条指定，脚本不替人猜。
+
+sudo 默认会清掉调用方的环境变量，变量要写在 sudo 后面：`sudo FLOCKS_OFFLINE_MIGRATE_FROM=/home/admin/.flocks bash /var/tmp/flocks-offline.run`。
+
+数据目录本身也先过一遍：不能是 `/`；已经存在但没有用户数据时，里面只能有 Flocks 自己的目录（config、data、run、logs、plugins、workspace 这类），混着别的东西（别的服务的文件之类；新 ext4 盘根目录的 `lost+found` 不算）就当作数据目录配错了，报错退出，安装脚本不会去建目录、改属主或改名。显式给了 `FLOCKS_OFFLINE_MIGRATE_FROM`、数据目录却已经有数据时，也报错退出，不会悄悄跳过。
+
+动文件之前还要查三件事：有进程还开着源目录里的文件（旧实例没停，按 `/proc/*/fd` 查），就报出 PID 和命令行后退出；数据目录是挂载点时没法整目录替换，让运维把 FLOCKS_ROOT 改到挂载点下的子目录；数据目录真实所在的分区（软链按链接目标算）放不下一份拷贝（另留 200 MB），也退出；旧目录顶层的外部软链指向的目录如果包含新数据目录（比如 `workspace -> /data` 而新数据目录在 `/data/flocks`），照拷会把拷贝本身再拷进去，同样拒绝。旧实例还占着端口时，端口检查会先报错，并提示先 `flocks stop`。迁移的数据里有 Pro 标记（`run/pro-bundle-installed.json`）就按已激活 Pro 处理：新包带 Pro 组件就装进新 venv，不带就在动文件之前拒绝。
+
+拷贝由 `installer/migrate_data.py` 用包内 Python 执行，源目录只读不写：
+1. 整份拷到 `<数据目录>.migrating-<时间戳>`，跳过 socket、管道这类运行时文件。源目录顶层有指向别处的目录软链（比如 `data` 挪到了数据盘），拷成实体目录，新旧实例不共用同一份数据库。
+2. 原来的数据目录如果已经存在（没有用户数据），把只有它有的文件并进拷贝，然后把它改名成 `.pre-migration-<时间戳>`。
+3. 先把整份拷贝的属主交给 flocks，再把拷贝改名成数据目录。改名是最后一步，改名成功时数据已经是服务能用的状态。
+
+这一步排在创建服务用户之后、停旧程序之前，拷失败时旧安装原样不动，已拷的部分留在 `.migrating-*` 里。中途断掉只有两种结果：没改名，目标原样，重跑会从头再迁一次；已改名，数据已经完整归 flocks 所有。改属主时软链只改链接本身，不会顺着它去改树外文件；已有实例的数据目录，安装脚本从不改它的属主。
+
+旧实例里写死的绝对路径会跟着改：`config/flocks.json`、`config/flocks.jsonc`、`config/config.json`、`config/mcp_list.json`、`data/hub/**/*.json`（hub 安装记录的 `installPath`、`backupPath`）里以旧目录开头的字符串值，以及指向旧目录的软链，都换成新目录。改的时候只动字符串本身，注释、格式和键名原样保留；比较时先按 JSON 解码，`\uXXXX`、`\/` 这类转义写法也能匹配；读不了的文件（不是 UTF-8）会在安装日志里列出来。迁移记录写在 `run/offline-migration-<时间戳>.json`。旧目录不删，装完会提示确认后自己清。
+
+有两处没有跟着改。工作流中心的注册表按工作流文件的绝对路径算 id，从 `/root/.flocks` 换到 `/var/lib/flocks/.flocks` 后，发布过的工作流 API 服务要重新发布一次，工作流定义本身已经拷过来了。在线版程序目录里的 `.env`（比如 `/root/flocks/.env`）不在数据目录下，不会带过来，里面的变量要搬进 `/etc/flocks/flocks.env`。
 
 ## Pro 升级在离线机器上怎么走
 
@@ -94,14 +122,14 @@ systemd 用 oneshot 而不是把 `service-daemon` 放前台，是因为在线升
 
 离线实例的升级机制和在线安装是同一套代码（备份到 `~/.flocks/version`、`_replace_install_dir` 保留 `.venv`、marker、handoff 重启），只是"包从哪来"不同：Pro 组件来自包内 `bundle/`，核心升级靠新版 `.run` 覆盖执行。env 里的 `FLOCKS_DEPLOY_MODE=offline` 会让页面"检查更新 → 升级"、`flocks update` 和 `/api/update/apply` 在动任何文件之前就拒绝联网升级并提示用新 `.run`（否则会先替换源码再在 `uv sync` 上被 `UV_OFFLINE=1` 卡住，服务停在半路）。页面上 `update_allowed=false` 时显示"离线安装包部署"的提示，不是 Docker 那条；这块提示不看 `has_update`。核心版本检查（`edition=flocks`）在离线实例上根本不出网：`check_update` 直接返回本地版本、`latest` 为空、无错误——之前会挨个等 GitHub/Gitee 超时（30–45 秒），最后一级兜底还会在当前目录跑 `git tag`，在别的 git 仓库里执行 CLI 甚至能凑出一个假的“有新版本”。页面这时显示“离线部署，未查询远端版本”而不是“已是最新”；`flocks update` / `--check` 先打提示、再打当前版本，退出码 0，不问“是否使用中国镜像”。Pro 那条（`edition=flockspro`，走 console manifest）不受影响，console 是这类机器唯一允许访问的端点。
 
-机器如果后来能联网、想改回在线升级：从 `/etc/flocks/flocks.env` 删掉 `FLOCKS_DEPLOY_MODE` / `FLOCKS_OFFLINE_INSTALL` / `UV_OFFLINE` / `npm_config_offline` / `FLOCKS_PRO_BUNDLE_DIR` / `FLOCKS_UPDATE_CHANNEL`，`systemctl restart flocks`，之后就是普通源码安装的在线升级路径（GitHub/Gitee 源码包 + console `flockspro` 渠道），代码不用改。反过来，`install.sh` 装的实例不能用 `.run` 原地升级：`.run` 是另一种部署形态（`/opt/flocks`、`flocks` 用户、`/var/lib/flocks/.flocks`），数据要自己从 `~/.flocks` 搬过去，而且 5173 被旧实例占着时安装脚本会直接报错。
+机器如果后来能联网、想改回在线升级：从 `/etc/flocks/flocks.env` 删掉 `FLOCKS_DEPLOY_MODE` / `FLOCKS_OFFLINE_INSTALL` / `UV_OFFLINE` / `npm_config_offline` / `FLOCKS_PRO_BUNDLE_DIR` / `FLOCKS_UPDATE_CHANNEL`，`systemctl restart flocks`，之后就是普通源码安装的在线升级路径（GitHub/Gitee 源码包 + console `flockspro` 渠道），代码不用改。反过来，`install.sh` 装的实例改用 `.run`：`.run` 是另一种部署形态（`/opt/flocks`、`flocks` 用户、`/var/lib/flocks/.flocks`），旧实例的 `~/.flocks` 会按上面「旧数据怎么带过来」自动拷一份；旧实例要先停，端口还被它占着时安装脚本会报错退出，并提示先 `flocks stop`。
 
 在线用户不受影响：新逻辑全部靠 `FLOCKS_PRO_BUNDLE_DIR`、`FLOCKS_DEPLOY_MODE=offline`、manifest 的 `prebuilt` 和 handoff 的 `--prebuilt` 参数触发，`service_manager` 在 `ps` 不可用时（没有这个命令，或 BusyBox 那种不认 `-p` / `-eo` 的 `ps`，总之调用失败）改读 `/proc`——最小化容器里 `flocks stop` 找不到守护进程会把旧后端留在端口上；`ps` 正常的机器走原来的路径，console 现在发的 bundle（带 `flocks/`）新代码照收，既有 updater 测试全部原样通过。
 
 ## 测试
 
 ```bash
-uv run pytest tests/scripts/test_linux_offline_installer.py   # 语法、函数先定义后调用、无递归删除、模板键、dry-run（含端口沿用/覆盖）、源码导出不带本地密钥、已激活 Pro 的沿用/拒绝、firewalld 永久规则（假 firewall-cmd）、随机密码
+uv run pytest tests/scripts/test_linux_offline_installer.py   # 语法、函数先定义后调用、无递归删除、模板键、dry-run（含端口沿用/覆盖）、源码导出不带本地密钥、已激活 Pro 的沿用/拒绝、firewalld 永久规则（假 firewall-cmd）、随机密码、旧数据迁移（选源顺序、多个候选时拒绝、源目录只读、路径改写、占用和空间检查、FLOCKS_ROOT 挪过盘时的 Pro 判断）
 uv run pytest tests/updater/test_updater_prebuilt_bundle.py     # 本地 bundle / prebuilt 路径、离线降级 handoff 带 --prebuilt、console 身份只在完全匹配时借 release_id，以及默认路径不变的回归
 uv run pytest tests/cli/test_update_command.py                  # 离线实例 flocks update 先给 .run 指引
 cd webui && npx vitest run src/components/common/UpdateModal.test.tsx   # 离线提示不依赖 has_update

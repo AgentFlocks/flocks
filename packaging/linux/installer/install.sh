@@ -118,7 +118,19 @@ REPO_DIR="$INSTALL_ROOT/flocks"
 VENV_BIN="$REPO_DIR/.venv/bin"
 FLOCKS_CLI="$VENV_BIN/flocks"
 UV_BIN="$INSTALL_ROOT/tools/uv/uv"
+MIGRATE_HELPER="$SRC_ROOT/installer/migrate_data.py"
+[[ -f "$MIGRATE_HELPER" ]] || fail "安装包不完整：缺少 installer/migrate_data.py"
+# The data root is the FLOCKS_ROOT an existing installation already runs with (the env merge
+# below keeps that line), else the default. The Pro marker, the data dirs and the migration of
+# a previous installation's data all use this one value.
 DATA_ROOT="$DATA_HOME/.flocks"
+CONFIGURED_ROOT=""
+if ! CONFIGURED_ROOT="$("$BUNDLED_PY" "$MIGRATE_HELPER" env-root "$ENV_FILE")"; then
+  fail "$CONFIGURED_ROOT"
+fi
+if [[ -n "$CONFIGURED_ROOT" ]]; then
+  DATA_ROOT="$CONFIGURED_ROOT"
+fi
 MARKER="$DATA_ROOT/run/pro-bundle-installed.json"
 
 # ---------------------------------------------------------------------------
@@ -185,16 +197,41 @@ PY
   fi
 }
 
+# A data root without user data (the first offline install on this machine) gets a copy of the
+# previous installation's data: FLOCKS_OFFLINE_MIGRATE_FROM, else the FLOCKS_ROOT the installer
+# was started with, else the default ~/.flocks of the local users (several → stop and ask).
+# The source directory is only ever read.
+MIGRATE_FROM=""
+if ! MIGRATE_FROM="$("$BUNDLED_PY" "$MIGRATE_HELPER" plan --target "$DATA_ROOT" \
+    --explicit "${FLOCKS_OFFLINE_MIGRATE_FROM:-}" --env-root "${FLOCKS_ROOT:-}" --sudo-user "${SUDO_USER:-}")"; then
+  fail "$MIGRATE_FROM"
+fi
+
 log "Flocks 离线安装 ${CORE_VERSION} (${PKG_ARCH}) → ${INSTALL_ROOT}"
 if [[ "$EXISTING_INSTALL" -eq 1 ]]; then
   log "检测到已安装的 Flocks，将升级并保留 ${DATA_ROOT} 下的数据"
 elif port_in_use; then
+  if [[ -n "$MIGRATE_FROM" ]]; then
+    fail "端口 ${PORT} 已被占用，多半是使用 ${MIGRATE_FROM} 的旧 Flocks 还在运行：请先以原来的用户执行 flocks stop 再安装，数据会自动带过来。本次未做任何改动"
+  fi
   fail "端口 ${PORT} 已被其他程序占用，且没有检测到旧的 Flocks 安装；请先释放端口再安装"
 fi
+if [[ -n "$MIGRATE_FROM" ]]; then
+  MIGRATE_SIZE=""
+  if ! MIGRATE_SIZE="$("$BUNDLED_PY" "$MIGRATE_HELPER" check --source "$MIGRATE_FROM" --target "$DATA_ROOT")"; then
+    fail "$MIGRATE_SIZE"
+  fi
+  log "检测到旧的 Flocks 数据 ${MIGRATE_FROM}（约 ${MIGRATE_SIZE}），将拷贝到 ${DATA_ROOT}，原目录不动"
+fi
 
-# An activated Pro instance (marker present) must not silently turn into OSS when the new
-# package ships no Pro bundle: either the previous bundle can be carried over (same core
-# version, wheel matches its manifest sha256) or we stop here, before anything is changed.
+# An activated Pro instance (marker present, here or in the data being migrated) must not
+# silently turn into OSS when the new package ships no Pro bundle: either the previous bundle
+# can be carried over (same core version, wheel matches its manifest sha256) or we stop here,
+# before anything is changed.
+PRO_ACTIVE=0
+if [[ -f "$MARKER" ]] || [[ -n "$MIGRATE_FROM" && -f "$MIGRATE_FROM/run/pro-bundle-installed.json" ]]; then
+  PRO_ACTIVE=1
+fi
 CARRY_OVER_BUNDLE=0
 if [[ -d "$SRC_ROOT/bundle" && ! -d "$SRC_ROOT/bundle/wheels" ]]; then
   fail "安装包不完整：bundle/ 目录里没有 wheels/"
@@ -216,7 +253,7 @@ if expected and expected != actual:
     sys.exit(1)
 PYCHECK
 }
-if [[ -f "$MARKER" && ! -d "$SRC_ROOT/bundle/wheels" ]]; then
+if [[ "$PRO_ACTIVE" -eq 1 && ! -d "$SRC_ROOT/bundle/wheels" ]]; then
   OLD_BUNDLE="$INSTALL_ROOT/bundle"
   if [[ -f "$OLD_BUNDLE/manifest.json" ]] && ls "$OLD_BUNDLE"/wheels/flockspro-*.whl >/dev/null 2>&1; then
     if bundle_compatible "$OLD_BUNDLE" "$CORE_VERSION"; then
@@ -231,7 +268,7 @@ if [[ -f "$MARKER" && ! -d "$SRC_ROOT/bundle/wheels" ]]; then
 fi
 
 if [[ "$DRY_RUN" == "1" ]]; then
-  log "dry-run: 将安装到 ${INSTALL_ROOT}，服务用户 ${SERVICE_USER}，数据目录 ${DATA_ROOT}，端口 ${PORT}，systemd=${HAVE_SYSTEMD}，Pro bundle=${HAS_PRO_BUNDLE}，carry-over-bundle=${CARRY_OVER_BUNDLE}"
+  log "dry-run: 将安装到 ${INSTALL_ROOT}，服务用户 ${SERVICE_USER}，数据目录 ${DATA_ROOT}，端口 ${PORT}，systemd=${HAVE_SYSTEMD}，Pro bundle=${HAS_PRO_BUNDLE}，carry-over-bundle=${CARRY_OVER_BUNDLE}，迁移旧数据=${MIGRATE_FROM:-无}"
   exit 0
 fi
 
@@ -242,7 +279,24 @@ if ! getent passwd "$SERVICE_USER" >/dev/null; then
   useradd --system --create-home --home-dir "$DATA_HOME" --shell /bin/bash "$SERVICE_USER"
   log "已创建服务用户 ${SERVICE_USER}（HOME=${DATA_HOME}）"
 fi
-mkdir -p "$DATA_HOME" "$DATA_ROOT/config" "$DATA_ROOT/run" "$DATA_ROOT/logs" "$INSTALL_ROOT" "$(dirname "$ENV_FILE")"
+mkdir -p "$DATA_HOME"
+# first thing that changes the machine: a failed copy leaves the previous installation as it was
+if [[ -n "$MIGRATE_FROM" ]]; then
+  log "拷贝旧数据 ${MIGRATE_FROM} → ${DATA_ROOT}"
+  MIGRATE_OUT=""
+  # --owner: the copy is handed to the service user before the rename that puts it in place, so an
+  # interrupted run leaves either the untouched target (a re-run migrates again) or a complete,
+  # service-owned data dir; the data of an existing installation is never re-owned
+  if ! MIGRATE_OUT="$("$BUNDLED_PY" "$MIGRATE_HELPER" copy --source "$MIGRATE_FROM" --target "$DATA_ROOT" --stamp "$STAMP" --owner "$SERVICE_USER")"; then
+    fail "$MIGRATE_OUT"
+  fi
+  while IFS= read -r line; do
+    if [[ -n "$line" ]]; then
+      log "$line"
+    fi
+  done <<< "$MIGRATE_OUT"
+fi
+mkdir -p "$DATA_ROOT/config" "$DATA_ROOT/run" "$DATA_ROOT/logs" "$INSTALL_ROOT" "$(dirname "$ENV_FILE")"
 chmod 755 "$(dirname "$ENV_FILE")" "$INSTALL_ROOT"
 chown "$SERVICE_USER:$SERVICE_USER" "$DATA_HOME" "$DATA_ROOT" "$DATA_ROOT/config" "$DATA_ROOT/run" "$DATA_ROOT/logs"
 chmod 750 "$DATA_HOME"
@@ -481,10 +535,16 @@ finish_staging() {
   done
   rmdir "$SRC_ROOT" 2>/dev/null || true
 }
+report_migration() {
+  if [[ -n "$MIGRATE_FROM" ]]; then
+    log "旧数据目录 ${MIGRATE_FROM} 原样保留；确认新实例里的账号、会话和配置都在之后可自行清理"
+  fi
+}
 
 if [[ "${FLOCKS_OFFLINE_SKIP_START:-0}" == "1" ]]; then
   finish_staging
   log "已安装，未启动服务（FLOCKS_OFFLINE_SKIP_START=1）"
+  report_migration
   exit 0
 fi
 
@@ -524,3 +584,4 @@ SERVER_IP="$( (ip -4 route get 1.1.1.1 2>/dev/null || true) | awk '/src/ {for (i
 [[ -n "$SERVER_IP" ]] || SERVER_IP="<服务器IP>"
 finish_staging
 log "安装完成：http://${SERVER_IP}:${PORT}"
+report_migration
