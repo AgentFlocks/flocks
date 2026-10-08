@@ -3,7 +3,7 @@
 import time
 from typing import Iterable, Optional
 
-from flocks.session.message import Message, MessageWithParts, ToolPart, ToolStateCompleted, ToolStateError
+from flocks.session.message import Message, MessageWithParts, ToolPart, ToolStateCompleted, ToolStateError, ToolStatePending
 from flocks.session.session import SessionInfo
 from flocks.storage.storage import Storage
 from flocks.utils.log import Log
@@ -33,7 +33,18 @@ async def abort_orphan_running_parts_in_messages(
     session_id: str,
     messages_with_parts: Iterable[MessageWithParts],
 ) -> int:
-    """Interrupt orphaned running tools and submitted delegation receipts."""
+    """Interrupt orphaned tools and submitted delegation receipts."""
+    from flocks.session.core.status import SessionStatus
+    from flocks.session.runner import SessionRunner
+    from flocks.session.session_loop import SessionLoop
+
+    # A pending input can still be streaming; only recover it when no runner
+    # can resume writing its state. Running tools retain their existing recovery.
+    recover_pending = (
+        SessionStatus.get_for_session(session_id).type == "idle"
+        and not SessionLoop.is_running(session_id)
+        and session_id not in SessionRunner._active_sessions
+    )
     now_ms = int(time.time() * 1000)
     repaired = 0
 
@@ -44,6 +55,8 @@ async def abort_orphan_running_parts_in_messages(
                 continue
             state = part.state
             if getattr(state, "status", None) == "running":
+                part.state = _build_interrupted_error_state(state, now_ms)
+            elif isinstance(state, ToolStatePending) and recover_pending:
                 part.state = _build_interrupted_error_state(state, now_ms)
             elif (
                 part.tool in {"delegate_task", "task"}

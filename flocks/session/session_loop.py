@@ -512,9 +512,11 @@ class SessionLoop:
         if not callbacks.event_publish_callback:
             return
         try:
+            from flocks.session.agent_inbox import AgentInbox
             await callbacks.event_publish_callback("session.status", {
                 "sessionID": session_id,
                 "status": {"type": status},
+                "ancestorSessionIDs": AgentInbox.ancestors(session_id),
             })
         except Exception as exc:
             log.debug("loop.session_status.publish_failed", {

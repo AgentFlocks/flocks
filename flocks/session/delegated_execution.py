@@ -63,18 +63,36 @@ def start_child(ctx, child_id, child_agent, execute):
                 f"Task {status}:\n{result.output if result.success else result.error}",
             ), publisher=ctx.event_publish_callback, inbox=parent_inbox)
 
-    async def deliver_followup(loop_result):
-        result = await format_sync_subagent_result(
-            description=child_agent, session_id=child_id, loop_result=loop_result,
-        )
-        try:
-            await Session.run_active_write(
-                ctx.session_id, lambda: report(result), expected_generation=generation,
-            )
-        except (SessionInactiveError, SessionNotFoundError):
-            return
+    def bind_followup_result():
+        # A follow-up is a new execution, independent of the initial tool's
+        # cancellation token. Capture its destination now, not at completion.
+        destination = AgentInbox._inboxes.get(ctx.session_id)
+        followup_generation = Session.lifecycle_generation(ctx.session_id)
 
-    child_inbox.on_result = deliver_followup
+        async def deliver_followup(loop_result):
+            result = await format_sync_subagent_result(
+                description=child_agent, session_id=child_id, loop_result=loop_result,
+            )
+
+            async def post_result():
+                if destination is None:
+                    return
+                status = "completed" if result.success else "error"
+                AgentInbox.post(ctx.session_id, AgentMessage(
+                    child_id, child_agent,
+                    f"Task {status}:\n{result.output if result.success else result.error}",
+                ), publisher=ctx.event_publish_callback, inbox=destination)
+
+            try:
+                await Session.run_active_write(
+                    ctx.session_id, post_result, expected_generation=followup_generation,
+                )
+            except (SessionInactiveError, SessionNotFoundError):
+                return
+
+        return deliver_followup
+
+    child_inbox.result_callback_factory = bind_followup_result
 
     async def finish(done):
         if tool_finished:

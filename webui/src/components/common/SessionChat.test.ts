@@ -1508,8 +1508,14 @@ describe('SessionChat standalone thinking indicator', () => {
 });
 
 describe('SessionChat delegated work stop controls', () => {
-  function submittedReceipt(status = 'running', nestedMetadata = false): Message {
-    const metadata = { submitted: true, status, sessionId: 'child-1' };
+  beforeEach(() => {
+    clientGetMock.mockImplementation((url: string) => Promise.resolve({
+      data: url === '/api/session/status' ? { 'child-1': { type: 'busy' } } : {},
+    }));
+  });
+
+  function submittedReceipt(status = 'running', nestedMetadata = false, childId = 'child-1'): Message {
+    const metadata = { submitted: true, status, sessionId: childId };
     return makeMessage({
       id: 'delegate-receipt',
       finish: 'stop',
@@ -1526,6 +1532,50 @@ describe('SessionChat delegated work stop controls', () => {
     });
   }
 
+  it('keeps Stop for a busy grandchild even when the parent and child are idle', async () => {
+    clientGetMock.mockImplementation((url: string) => Promise.resolve({
+      data: url === '/api/session/status' ? {
+        'grandchild-1': { type: 'busy', ancestorSessionIDs: ['child-1', 'sess-1'] },
+        unrelated: { type: 'busy', ancestorSessionIDs: ['another-root'] },
+      } : [],
+    }));
+    mockStatefulSessionMessages([submittedReceipt('completed')]);
+    render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
+    await waitFor(() => expect(screen.getByTitle('chat.stopTitle')).toBeInTheDocument());
+    act(() => { useSSEOptionsRef.current.onEvent({
+      type: 'session.status', properties: { sessionID: 'child-1', status: { type: 'idle' } },
+    }); });
+    expect(screen.getByTitle('chat.stopTitle')).toBeInTheDocument();
+    fireEvent.click(screen.getByTitle('chat.stopTitle'));
+    await waitFor(() => expect(clientPostMock).toHaveBeenCalledWith('/api/session/sess-1/abort'));
+    act(() => { useSSEOptionsRef.current.onEvent({
+      type: 'session.status', properties: { sessionID: 'grandchild-1', status: { type: 'idle' } },
+    }); });
+    expect(screen.queryByTitle('chat.stopTitle')).not.toBeInTheDocument();
+  });
+
+  it('discovers a new grandchild from SSE without a loaded delegation receipt', async () => {
+    clientGetMock.mockResolvedValue({ data: [] });
+    mockStatefulSessionMessages([]);
+    const onStreamingDone = vi.fn();
+    const { rerender } = render(React.createElement(SessionChat, { sessionId: 'sess-1', onStreamingDone }));
+    await waitFor(() => expect(clientGetMock).toHaveBeenCalledWith('/api/session/status'));
+    act(() => { useSSEOptionsRef.current.onEvent({
+      type: 'session.status', properties: {
+        sessionID: 'grandchild-1', status: { type: 'busy' }, ancestorSessionIDs: ['child-1', 'sess-1'],
+      },
+    }); });
+    expect(screen.getByTitle('chat.stopTitle')).toBeInTheDocument();
+    expect(onStreamingDone).not.toHaveBeenCalled();
+    rerender(React.createElement(SessionChat, { sessionId: 'sess-2', onStreamingDone }));
+    act(() => { useSSEOptionsRef.current.onEvent({
+      type: 'session.status', properties: {
+        sessionID: 'grandchild-1', status: { type: 'busy' }, ancestorSessionIDs: ['child-1', 'sess-1'],
+      },
+    }); });
+    expect(screen.queryByTitle('chat.stopTitle')).not.toBeInTheDocument();
+  });
+
   it.each([false, true])('shows Stop for an idle parent with a running submitted child (nested metadata: %s)', async (nestedMetadata) => {
     mockStatefulSessionMessages([submittedReceipt('running', nestedMetadata)]);
     const conversationBottomSlot = vi.fn(() => null);
@@ -1536,8 +1586,8 @@ describe('SessionChat delegated work stop controls', () => {
       onStreamingDone,
     }));
 
-    await waitFor(() => expect(clientGetMock).toHaveBeenCalledWith('/api/session/status'));
-    expect(screen.getByTitle('chat.stopTitle')).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByTitle('chat.stopTitle')).toBeInTheDocument());
+    expect(clientGetMock).toHaveBeenCalledWith('/api/session/status');
     expect(screen.getByPlaceholderText('请输入消息')).not.toBeDisabled();
     expect(conversationBottomSlot).toHaveBeenLastCalledWith(expect.objectContaining({
       streaming: false,
@@ -1555,25 +1605,38 @@ describe('SessionChat delegated work stop controls', () => {
     expect(sessionApiEnqueuePromptMock).not.toHaveBeenCalled();
   });
 
-  it('aborts the idle parent and hides Stop when the submitted child finishes', async () => {
-    const messagesHook = { ...useSessionMessagesMock(), messages: [submittedReceipt()] };
-    useSessionMessagesMock.mockReturnValue(messagesHook);
-    const { rerender } = render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
-    await waitFor(() => expect(clientGetMock).toHaveBeenCalledWith('/api/session/status'));
+  it('aborts the idle parent without changing its receipt and hides Stop when the child becomes idle', async () => {
+    const receipt = submittedReceipt('completed');
+    const markMessageStopped = vi.fn();
+    useSessionMessagesMock.mockReturnValue({
+      ...useSessionMessagesMock(), messages: [receipt], markMessageStopped,
+    });
+    render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
+    await waitFor(() => expect(screen.getByTitle('chat.stopTitle')).toBeInTheDocument());
 
     fireEvent.click(screen.getByTitle('chat.stopTitle'));
     await waitFor(() => expect(clientPostMock).toHaveBeenCalledWith('/api/session/sess-1/abort'));
+    expect(markMessageStopped).not.toHaveBeenCalled();
+    expect(receipt.parts[0].state?.metadata).toEqual({ submitted: true, status: 'completed', sessionId: 'child-1' });
     expect(sessionApiEnqueuePromptMock).not.toHaveBeenCalled();
 
-    useSessionMessagesMock.mockReturnValue({ ...messagesHook, messages: [submittedReceipt('completed')] });
-    rerender(React.createElement(SessionChat, { sessionId: 'sess-1' }));
+    act(() => {
+      useSSEOptionsRef.current.onEvent({
+        type: 'session.status', properties: { sessionID: 'child-1', status: { type: 'idle' } },
+      });
+    });
     expect(screen.queryByTitle('chat.stopTitle')).not.toBeInTheDocument();
   });
 
-  it.each(['completed', 'error', 'aborted', 'cancelled'])('does not expose Stop for a %s child receipt', async (status) => {
+  it.each(['completed', 'error', 'aborted', 'cancelled'])('uses live child status, not the %s receipt status', async (status) => {
     mockStatefulSessionMessages([submittedReceipt(status)]);
     render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
-    await waitFor(() => expect(clientGetMock).toHaveBeenCalledWith('/api/session/status'));
+    await waitFor(() => expect(screen.getByTitle('chat.stopTitle')).toBeInTheDocument());
+    act(() => {
+      useSSEOptionsRef.current.onEvent({
+        type: 'session.status', properties: { sessionID: 'child-1', status: { type: 'idle' } },
+      });
+    });
     expect(screen.queryByTitle('chat.stopTitle')).not.toBeInTheDocument();
   });
 
@@ -1646,6 +1709,169 @@ describe('SessionChat delegated work stop controls', () => {
     await waitFor(() => expect(clientGetMock).toHaveBeenCalledWith('/api/session/status'));
     expect(screen.queryByTitle('chat.stopTitle')).not.toBeInTheDocument();
     expect(screen.queryByRole('textbox')).not.toBeInTheDocument();
+  });
+
+  it('shows Stop when a completed historical receipt has a busy child follow-up from SSE', async () => {
+    clientGetMock.mockResolvedValue({ data: {} });
+    const receipt = submittedReceipt('completed');
+    useSessionMessagesMock.mockReturnValue({ ...useSessionMessagesMock(), messages: [receipt] });
+    const conversationBottomSlot = vi.fn(() => null);
+    const onStreamingDone = vi.fn();
+    render(React.createElement(SessionChat, {
+      sessionId: 'sess-1', conversationBottomSlot, onStreamingDone,
+    }));
+    await waitFor(() => expect(clientGetMock).toHaveBeenCalledWith('/api/session/status'));
+    expect(screen.queryByTitle('chat.stopTitle')).not.toBeInTheDocument();
+
+    act(() => {
+      useSSEOptionsRef.current.onEvent({
+        type: 'session.status', properties: { sessionID: 'child-1', status: { type: 'busy' } },
+      });
+    });
+    expect(screen.getByTitle('chat.stopTitle')).toBeInTheDocument();
+    expect(conversationBottomSlot).toHaveBeenLastCalledWith(expect.objectContaining({ streaming: false }));
+    expect(onStreamingDone).not.toHaveBeenCalled();
+    expect(receipt.parts[0].state?.metadata).toEqual({ submitted: true, status: 'completed', sessionId: 'child-1' });
+  });
+
+  it('uses the server snapshot rather than a stale running receipt', async () => {
+    clientGetMock.mockResolvedValue({ data: {} });
+    mockStatefulSessionMessages([submittedReceipt('running')]);
+    render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
+    await waitFor(() => expect(clientGetMock).toHaveBeenCalledWith('/api/session/status'));
+    expect(screen.queryByTitle('chat.stopTitle')).not.toBeInTheDocument();
+  });
+
+  it('ignores unrelated status events without stopping the parent or changing child activity', async () => {
+    mockStatefulSessionMessages([submittedReceipt('completed')]);
+    const onStreamingDone = vi.fn();
+    const onSSEEvent = vi.fn();
+    render(React.createElement(SessionChat, { sessionId: 'sess-1', onStreamingDone, onSSEEvent }));
+    await waitFor(() => expect(screen.getByTitle('chat.stopTitle')).toBeInTheDocument());
+    act(() => {
+      useSSEOptionsRef.current.onEvent({
+        type: 'session.status', properties: { sessionID: 'unrelated', status: { type: 'idle' } },
+      });
+      useSSEOptionsRef.current.onEvent({
+        type: 'session.status', properties: { sessionID: 'child-1', status: { type: 'compacting' } },
+      });
+    });
+    expect(screen.getByTitle('chat.stopTitle')).toBeInTheDocument();
+    expect(onStreamingDone).not.toHaveBeenCalled();
+    expect(onSSEEvent).not.toHaveBeenCalled();
+  });
+
+  it('keeps Stop visible until all tracked children are idle', async () => {
+    clientGetMock.mockImplementation((url: string) => Promise.resolve({
+      data: url === '/api/session/status'
+        ? { 'child-1': { type: 'busy' }, 'child-2': { type: 'busy' } }
+        : {},
+    }));
+    mockStatefulSessionMessages([
+      submittedReceipt('completed'),
+      { ...submittedReceipt('completed', false, 'child-2'), id: 'delegate-receipt-2' },
+    ]);
+    render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
+    await waitFor(() => expect(screen.getByTitle('chat.stopTitle')).toBeInTheDocument());
+    act(() => {
+      useSSEOptionsRef.current.onEvent({
+        type: 'session.status', properties: { sessionID: 'child-1', status: { type: 'idle' } },
+      });
+    });
+    expect(screen.getByTitle('chat.stopTitle')).toBeInTheDocument();
+    act(() => {
+      useSSEOptionsRef.current.onEvent({
+        type: 'session.status', properties: { sessionID: 'child-2', status: { type: 'idle' } },
+      });
+    });
+    expect(screen.queryByTitle('chat.stopTitle')).not.toBeInTheDocument();
+  });
+
+  it('reconciles child activity after SSE reconnect', async () => {
+    mockStatefulSessionMessages([submittedReceipt('completed')]);
+    let childStatus = 'busy';
+    clientGetMock.mockImplementation((url: string) => Promise.resolve({
+      data: url === '/api/session/status' ? { 'child-1': { type: childStatus } } : {},
+    }));
+    render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
+    await waitFor(() => expect(screen.getByTitle('chat.stopTitle')).toBeInTheDocument());
+    childStatus = 'idle';
+    act(() => { useSSEOptionsRef.current.onReconnect(); });
+    await waitFor(() => expect(screen.queryByTitle('chat.stopTitle')).not.toBeInTheDocument());
+    expect(clientGetMock.mock.calls.filter(([url]) => url === '/api/session/status').length).toBeGreaterThanOrEqual(3);
+  });
+
+  it('ignores an old status response after a newer child SSE event', async () => {
+    const status = deferred<{ data: Record<string, { type: string }> }>();
+    let requests = 0;
+    clientGetMock.mockImplementation((url: string) => {
+      if (url === '/api/session/status' && ++requests === 1) return status.promise;
+      return Promise.resolve({ data: {} });
+    });
+    mockStatefulSessionMessages([submittedReceipt('completed')]);
+    render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
+    await waitFor(() => expect(requests).toBeGreaterThan(0));
+    act(() => {
+      useSSEOptionsRef.current.onEvent({
+        type: 'session.status', properties: { sessionID: 'child-1', status: { type: 'busy' } },
+      });
+    });
+    expect(screen.getByTitle('chat.stopTitle')).toBeInTheDocument();
+    await act(async () => { status.resolve({ data: {} }); });
+    expect(screen.getByTitle('chat.stopTitle')).toBeInTheDocument();
+  });
+
+  it('replaces tracked child IDs without reusing old status or accepting old child events', async () => {
+    clientGetMock.mockImplementation((url: string) => Promise.resolve({
+      data: url === '/api/session/status' ? { 'child-1': { type: 'busy' } } : {},
+    }));
+    const initial = { ...useSessionMessagesMock(), messages: [submittedReceipt('completed')] };
+    useSessionMessagesMock.mockReturnValue(initial);
+    const props = { sessionId: 'sess-1' };
+    const { rerender } = render(React.createElement(SessionChat, props));
+    await waitFor(() => expect(screen.getByTitle('chat.stopTitle')).toBeInTheDocument());
+
+    useSessionMessagesMock.mockReturnValue({ ...initial, messages: [submittedReceipt('completed', false, 'child-2')] });
+    rerender(React.createElement(SessionChat, props));
+    await waitFor(() => expect(screen.queryByTitle('chat.stopTitle')).not.toBeInTheDocument());
+    act(() => {
+      useSSEOptionsRef.current.onEvent({
+        type: 'session.status', properties: { sessionID: 'child-1', status: { type: 'busy' } },
+      });
+    });
+    expect(screen.queryByTitle('chat.stopTitle')).not.toBeInTheDocument();
+    act(() => {
+      useSSEOptionsRef.current.onEvent({
+        type: 'session.status', properties: { sessionID: 'child-2', status: { type: 'retry' } },
+      });
+    });
+    expect(screen.getByTitle('chat.stopTitle')).toBeInTheDocument();
+  });
+
+  it('discards the previous session child status request after a session switch', async () => {
+    const oldStatus = deferred<{ data: Record<string, { type: string }> }>();
+    let requests = 0;
+    clientGetMock.mockImplementation((url: string) => {
+      if (url === '/api/session/status' && ++requests === 1) return oldStatus.promise;
+      return Promise.resolve({ data: {} });
+    });
+    const initial = { ...useSessionMessagesMock(), messages: [submittedReceipt('completed')] };
+    useSessionMessagesMock.mockReturnValue(initial);
+    const { rerender } = render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
+    await waitFor(() => expect(requests).toBeGreaterThan(0));
+    useSessionMessagesMock.mockReturnValue({
+      ...initial,
+      messages: [{ ...submittedReceipt('completed', false, 'child-2'), sessionID: 'sess-2' }],
+    });
+    rerender(React.createElement(SessionChat, { sessionId: 'sess-2' }));
+    await act(async () => { oldStatus.resolve({ data: { 'child-1': { type: 'busy' } } }); });
+    expect(screen.queryByTitle('chat.stopTitle')).not.toBeInTheDocument();
+    act(() => {
+      useSSEOptionsRef.current.onEvent({
+        type: 'session.status', properties: { sessionID: 'child-2', status: { type: 'busy' } },
+      });
+    });
+    expect(screen.getByTitle('chat.stopTitle')).toBeInTheDocument();
   });
 });
 

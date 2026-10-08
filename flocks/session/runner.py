@@ -3991,43 +3991,45 @@ class SessionRunner:
 
         try:
             await tool_accumulator.flush_remaining(stream_finish_reason)
-        except Exception:
+
+            if stream_text_rewriter is not None:
+                trailing_text = stream_text_rewriter.flush()
+                if trailing_text:
+                    if not text_started:
+                        await processor.process_event(TextStartEvent())
+                        text_started = True
+                    await processor.process_event(TextDeltaEvent(text=trailing_text))
+
+            # End text block if started
+            if text_started:
+                await processor.process_event(TextEndEvent())
+
+            # End any remaining reasoning block
+            if hasattr(self, '_current_reasoning_id'):
+                await _flush_reasoning_rewriter()
+                reasoning_end_metadata = getattr(self, '_current_reasoning_metadata', {}) or {}
+                await processor.process_event(ReasoningEndEvent(
+                    id=self._current_reasoning_id,
+                    metadata=reasoning_end_metadata,
+                ))
+                delattr(self, '_current_reasoning_id')
+                if hasattr(self, '_current_reasoning_metadata'):
+                    delattr(self, '_current_reasoning_metadata')
+
+            # Emit finish event
+            await processor.process_event(FinishEvent(
+                finish_reason=processor.get_finish_reason()
+            ))
+        except (Exception, asyncio.CancelledError):
             await processor.drain_parallel_tool_calls(execute_deferred=False)
             raise
-
-        if stream_text_rewriter is not None:
-            trailing_text = stream_text_rewriter.flush()
-            if trailing_text:
-                if not text_started:
-                    await processor.process_event(TextStartEvent())
-                    text_started = True
-                await processor.process_event(TextDeltaEvent(text=trailing_text))
-        
-        # End text block if started
-        if text_started:
-            await processor.process_event(TextEndEvent())
-        
-        # End any remaining reasoning block
-        if hasattr(self, '_current_reasoning_id'):
-            await _flush_reasoning_rewriter()
-            reasoning_end_metadata = getattr(self, '_current_reasoning_metadata', {}) or {}
-            await processor.process_event(ReasoningEndEvent(
-                id=self._current_reasoning_id,
-                metadata=reasoning_end_metadata,
-            ))
-            delattr(self, '_current_reasoning_id')
-            if hasattr(self, '_current_reasoning_metadata'):
-                delattr(self, '_current_reasoning_metadata')
-        
-        # Emit finish event
-        await processor.process_event(FinishEvent(
-            finish_reason=processor.get_finish_reason()
-        ))
 
         # Foreground subagent tool-calls are launched concurrently during
         # streaming so sibling subagents can start in the same assistant turn.
         # Drain them here before exposing tool results to the next loop step.
-        await processor.drain_parallel_tool_calls()
+        await processor.drain_parallel_tool_calls(
+            execute_deferred=not (aborted_during_stream or self.is_aborted)
+        )
         
         # Get processed content
         content = processor.get_text_content()

@@ -1561,6 +1561,40 @@ class TestSessionMessages:
         assert repaired_part.state.time["end"] >= 1000
 
     @pytest.mark.asyncio
+    async def test_list_messages_recovers_stale_pending_tool_only_when_idle(
+        self,
+        client: AsyncClient,
+        session_id: str,
+    ):
+        from flocks.session.message import ToolStatePending
+
+        msg = await Message.create(session_id, MessageRole.ASSISTANT, "")
+        part = ToolPart(
+            id="part_pending_on_read", sessionID=session_id, messageID=msg.id,
+            callID="call_pending_on_read", tool="sleep",
+            state=ToolStatePending(input={"timeout_s": 40}, raw='{"timeout_s":40}'),
+        )
+        await Message.store_part(session_id, msg.id, part)
+        SessionStatus.set(session_id, SessionStatusBusy())
+        try:
+            busy_response = await client.get(f"/api/session/{session_id}/message")
+        finally:
+            SessionStatus.clear(session_id)
+        assert busy_response.status_code == status.HTTP_200_OK
+        assert next(p for p in await Message.parts(msg.id, session_id) if p.id == part.id).state.status == "pending"
+
+        idle_response = await client.get(f"/api/session/{session_id}/message")
+        assert idle_response.status_code == status.HTTP_200_OK
+        recovered = next(p for p in await Message.parts(msg.id, session_id) if p.id == part.id)
+        assert recovered.state.status == "error"
+        assert recovered.id == part.id
+        assert recovered.callID == part.callID
+        assert recovered.state.input == {"timeout_s": 40}
+        assert recovered.state.error == INTERRUPTED_TOOL_ERROR
+        assert await client.get(f"/api/session/{session_id}/message")
+        assert next(p for p in await Message.parts(msg.id, session_id) if p.id == part.id).state == recovered.state
+
+    @pytest.mark.asyncio
     async def test_list_messages_uses_preloaded_orphan_recovery_path(
         self,
         client: AsyncClient,
@@ -2924,6 +2958,22 @@ class TestSessionUtilities:
         assert resp.status_code == status.HTTP_200_OK
         data = resp.json()
         assert "total" in data or isinstance(data, dict)
+
+    @pytest.mark.asyncio
+    async def test_session_status_includes_idle_ancestors(self, client: AsyncClient, monkeypatch):
+        from flocks.session.agent_inbox import AgentInbox
+        from flocks.session.core.status import SessionStatus, SessionStatusBusy
+
+        AgentInbox.bind("status-child").parent_id = "status-root"
+        AgentInbox.bind("status-grandchild").parent_id = "status-child"
+        monkeypatch.setattr(SessionStatus, "list", lambda: {"status-grandchild": SessionStatusBusy()})
+        try:
+            resp = await client.get("/api/session/status")
+            assert resp.status_code == 200
+            assert resp.json()["status-grandchild"]["ancestorSessionIDs"] == ["status-child", "status-root"]
+        finally:
+            AgentInbox._inboxes.pop("status-child", None)
+            AgentInbox._inboxes.pop("status-grandchild", None)
 
     @pytest.mark.asyncio
     async def test_session_metrics(self, client: AsyncClient):

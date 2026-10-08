@@ -523,6 +523,7 @@ async def test_call_llm_drains_started_delegate_before_raising_provider_error(
         "has_stage_handlers",
         AsyncMock(return_value=False),
     )
+    monkeypatch.setattr(runner_mod.HookPipeline, "run_tool_before", AsyncMock(return_value=None))
     monkeypatch.setattr(
         "flocks.provider.options.build_provider_options",
         lambda provider_id, model_id: {},
@@ -579,7 +580,8 @@ async def test_call_llm_drains_started_delegate_before_raising_provider_error(
             assistant_msg=assistant_msg,
         )
     )
-    await asyncio.wait_for(delegate_started.wait(), timeout=1)
+    # First tool-schema lookup can include plugin discovery on a cold test run.
+    await asyncio.wait_for(delegate_started.wait(), timeout=5)
     await asyncio.sleep(0)
     provider_error_waited_for_delegate = not call_task.done()
 
@@ -722,6 +724,70 @@ async def test_call_llm_discards_deferred_sleep_on_unsuccessful_stream(monkeypat
     ]
     assert published_sleep[-1]["state"]["status"] == "error"
     assert published_sleep[-1]["state"]["metadata"]["interrupted"] is True
+
+
+@pytest.mark.asyncio
+async def test_call_llm_cancel_during_first_deferred_sleep_finalizes_both(monkeypatch):
+    runner = _make_runner("ses_runner_two_sleeps")
+    runner.callbacks.event_publish_callback = AsyncMock()
+    store = AsyncMock()
+    started = asyncio.Event()
+    executed = []
+
+    async def execute(tool_name, ctx, **_kwargs):
+        executed.append(ctx.call_id)
+        started.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(runner_mod, "langfuse_is_active", lambda: False)
+    monkeypatch.setattr(runner_mod.Message, "store_part", store)
+    monkeypatch.setattr(runner_mod.Message, "parts", AsyncMock(return_value=[]))
+    monkeypatch.setattr(runner_mod.Message, "update", AsyncMock())
+    monkeypatch.setattr(runner_mod.HookPipeline, "has_stage_handlers", AsyncMock(return_value=False))
+    monkeypatch.setattr(runner_mod.HookPipeline, "run_tool_before", AsyncMock(return_value=None))
+    monkeypatch.setattr("flocks.provider.options.build_provider_options", lambda *_args: {})
+    monkeypatch.setattr("flocks.session.streaming.stream_processor.ToolRegistry.execute", execute)
+    monkeypatch.setattr(
+        StreamProcessor, "_resolve_sandbox_meta",
+        AsyncMock(return_value={"blocked": False, "error": None, "extra": {}}),
+    )
+
+    class Provider:
+        async def chat_stream(self, **_kwargs):
+            for index in (1, 2):
+                yield SimpleNamespace(tool_calls=[{
+                    "index": index, "id": f"sleep-{index}",
+                    "function": {"name": "sleep", "arguments": f'{{"timeout_s":{index}}}'},
+                }])
+
+    call = asyncio.create_task(runner._call_llm(
+        provider=Provider(), messages=[ChatMessage(role="user", content="wait twice")],
+        tools=[], agent=SimpleNamespace(name="rex"), assistant_msg=SimpleNamespace(id="msg-two-sleeps"),
+    ))
+    await asyncio.wait_for(started.wait(), timeout=1)
+    call.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await call
+
+    assert executed == ["sleep-1"]
+    for index in (1, 2):
+        call_id = f"sleep-{index}"
+        parts = [
+            entry.args[2] for entry in store.await_args_list
+            if getattr(entry.args[2], "callID", None) == call_id
+        ]
+        assert [part.state.status for part in parts] == (
+            ["pending", "running", "error"] if index == 1 else ["pending", "error"]
+        )
+        assert parts[-1].id == parts[0].id
+        assert parts[-1].state.input == {"timeout_s": index}
+        assert parts[-1].state.metadata["interrupted"] is True
+        events = [
+            entry.args[1]["part"] for entry in runner.callbacks.event_publish_callback.await_args_list
+            if entry.args[1].get("part", {}).get("callID") == call_id
+        ]
+        assert events[-1]["id"] == parts[0].id
+        assert events[-1]["state"]["status"] == "error"
 
 
 @pytest.mark.parametrize("outcome", ["success", "error", "cancel"])

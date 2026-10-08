@@ -766,10 +766,13 @@ async def get_session_status() -> Dict[str, Any]:
     from flocks.session.core.status import SessionStatus
     from flocks.session.core.turn_state import get_turn_state, get_context_state
     
+    from flocks.session.agent_inbox import AgentInbox
+
     statuses = SessionStatus.list()
     return {
         session_id: {
             **status.model_dump(),
+            "ancestorSessionIDs": AgentInbox.ancestors(session_id),
             "turn": get_turn_state(session_id).model_dump(by_alias=True),
             "context": get_context_state(session_id).model_dump(by_alias=True),
         }

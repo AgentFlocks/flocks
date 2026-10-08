@@ -2291,16 +2291,73 @@ export default function SessionChat({
   } =
     useSessionMessages(sessionId || undefined);
 
-  // A completed submission receipt can still represent a running child, even
-  // while this session is idle. Keep Stop availability separate from streaming.
-  const hasRunningDelegates = useMemo(() => messages.some((message) => (
-    message.role === 'assistant' && message.parts.some((part) => {
-      if ((part.type !== 'tool' && part.type !== 'toolCall') || !shouldRenderDelegateTaskCard(part)) return false;
-      const info = extractDelegateInfo(part.state || {}, '');
-      return Boolean(info.childSessionId) && (info.status === 'pending' || info.status === 'running');
-    })
-  )), [messages]);
+  // A historical receipt describes the submission, not the child's *current*
+  // activity. Receipts identify direct children; runtime ancestry also includes
+  // grandchildren and descendants whose receipts are outside the loaded page.
+  const childSessionIds = useMemo(() => [...new Set(messages.flatMap((message) => (
+    message.sessionID === sessionId && message.role === 'assistant'
+      ? message.parts.flatMap((part) => {
+          if ((part.type !== 'tool' && part.type !== 'toolCall') || !shouldRenderDelegateTaskCard(part)) return [];
+          const childId = extractDelegateInfo(part.state || {}, '').childSessionId;
+          return childId && childId !== sessionId ? [childId] : [];
+        })
+      : []
+  )))].sort(), [messages, sessionId]);
+  const childStatusScope = JSON.stringify([sessionId, childSessionIds]);
+  const childSessionIdsRef = useRef(childSessionIds);
+  childSessionIdsRef.current = childSessionIds;
+  const currentChildStatusScopeRef = useRef(childStatusScope);
+  currentChildStatusScopeRef.current = childStatusScope;
+  const descendantSessionIdsRef = useRef(new Set<string>());
+  const childStatusRequestRef = useRef(0);
+  const childStatusRevisionRef = useRef<Record<string, number>>({});
+  const [childStatuses, setChildStatuses] = useState<{
+    scope: string;
+    active: Record<string, boolean>;
+  }>({ scope: childStatusScope, active: {} });
+  const hasRunningDelegates = childStatuses.scope === childStatusScope
+    && Object.values(childStatuses.active).some(Boolean);
   const canStop = Boolean(sessionId) && (isStreaming || hasRunningDelegates);
+
+  const refreshChildStatuses = useCallback(async () => {
+    const ids = childSessionIdsRef.current;
+    if (!sessionId) return;
+    const request = ++childStatusRequestRef.current;
+    const revisions = { ...childStatusRevisionRef.current };
+    try {
+      const response = await client.get('/api/session/status');
+      if (request !== childStatusRequestRef.current || currentChildStatusScopeRef.current !== childStatusScope) return;
+      const tracked = new Set([...ids, ...descendantSessionIdsRef.current]);
+      for (const [id, status] of Object.entries(response.data || {})) {
+        const ancestors = (status as { ancestorSessionIDs?: string[] })?.ancestorSessionIDs;
+        if (Array.isArray(ancestors) && ancestors.includes(sessionId)) {
+          tracked.add(id);
+          descendantSessionIdsRef.current.add(id);
+        }
+      }
+      setChildStatuses((current) => {
+        const active = current.scope === childStatusScope ? { ...current.active } : {};
+        for (const id of tracked) {
+          // An SSE update received during the request is newer than its snapshot.
+          if ((childStatusRevisionRef.current[id] || 0) !== (revisions[id] || 0)) continue;
+          active[id] = isActiveSessionStatus(response.data?.[id]);
+        }
+        return { scope: childStatusScope, active };
+      });
+    } catch {
+      // Keep the last known activity until the next status event or reconnect.
+    }
+  }, [childStatusScope, sessionId]);
+
+  useEffect(() => {
+    childStatusRequestRef.current += 1;
+    childStatusRevisionRef.current = {};
+    descendantSessionIdsRef.current = new Set();
+    setChildStatuses((current) => current.scope === childStatusScope
+      ? current : { scope: childStatusScope, active: {} });
+    void refreshChildStatuses();
+    return () => { childStatusRequestRef.current += 1; };
+  }, [childStatusScope, refreshChildStatuses]);
 
   useEffect(() => {
     setSubmittedModelPromptSessionId(null);
@@ -2534,6 +2591,29 @@ export default function SessionChat({
 
   const handleSSEEvent = useCallback(
     (event: SSEChatEvent) => {
+      // The same SSE connection also carries child activity. Do not route child
+      // events through the parent's message/streaming action reducer.
+      const childId = event.properties?.sessionID;
+      if (
+        event.type === 'session.status'
+        && typeof childId === 'string'
+        && childId !== sessionId
+        && (childSessionIdsRef.current.includes(childId)
+          || descendantSessionIdsRef.current.has(childId)
+          || (sessionId && Array.isArray(event.properties?.ancestorSessionIDs)
+            && event.properties.ancestorSessionIDs.includes(sessionId)))
+        && typeof event.properties?.status?.type === 'string'
+      ) {
+        descendantSessionIdsRef.current.add(childId);
+        childStatusRevisionRef.current[childId] = (childStatusRevisionRef.current[childId] || 0) + 1;
+        setChildStatuses((current) => ({
+          scope: childStatusScope,
+          active: {
+            ...(current.scope === childStatusScope ? current.active : {}),
+            [childId]: isActiveSessionStatus(event.properties?.status),
+          },
+        }));
+      }
       // Forward only global events or events relevant to this chat. The global
       // stream can be very noisy when multiple sessions run in parallel.
       if (shouldForwardSSEEventToParent(event, sessionId)) onSSEEvent?.(event);
@@ -2786,6 +2866,7 @@ export default function SessionChat({
     },
     [
       sessionId,
+      childStatusScope,
       updateMessage,
       updateMessagePart,
       removeMessage,
@@ -2887,6 +2968,7 @@ export default function SessionChat({
     onReconnect: () => {
       if (!sessionId) return;
       void reconcileSessionStatusAfterReconnect();
+      void refreshChildStatuses();
       refetch();
       void refreshContextUsage();
       fetchPromptQueue();
@@ -3008,10 +3090,13 @@ export default function SessionChat({
     if (!sessionId || loading) return;
     if (statusCheckedRef.current === sessionId) return;
     statusCheckedRef.current = sessionId;
+    const statusRevision = sessionStatusRevisionRef.current;
+    let cancelled = false;
 
     const checkStatus = async () => {
       try {
         const res = await client.get('/api/session/status');
+        if (cancelled || statusRevision !== sessionStatusRevisionRef.current) return;
         const status = res.data[sessionId];
         if (status?.type === 'busy' && !suppressStreamingUntilIdleRef.current) {
           sessionBusyRef.current = true;
@@ -3037,11 +3122,10 @@ export default function SessionChat({
           sessionBusyRef.current = false;
         }
       } catch {
-        if (messages.length > 0) {
-          const lastMsg = messages[messages.length - 1];
-          if (lastMsg.role === 'assistant' && !lastMsg.finish) {
-            setIsStreaming(true);
-          }
+        if (cancelled || statusRevision !== sessionStatusRevisionRef.current) return;
+        const lastMsg = messagesRef.current[messagesRef.current.length - 1];
+        if (lastMsg?.role === 'assistant' && !lastMsg.finish) {
+          setIsStreaming(true);
         }
       }
 
@@ -3051,8 +3135,9 @@ export default function SessionChat({
         console.warn('[SessionChat] Failed to recover pending questions:', err);
       }
     };
-    checkStatus();
-  }, [sessionId, loading, messages, fetchPendingQuestions]);
+    void checkStatus();
+    return () => { cancelled = true; };
+  }, [sessionId, loading, fetchPendingQuestions]);
 
   // A remote proxy or a reconnect boundary can delay or lose the one-shot
   // question.asked event. Reconcile only while the session is active; the
@@ -3851,9 +3936,9 @@ export default function SessionChat({
   const handleAbort = useCallback(async () => {
     if (!sessionId) return;
     // Record the ID of the message being aborted so we can ignore its finish event later.
-    const lastAsstMsg = [...messagesRef.current].reverse().find(
+    const lastAsstMsg = isStreaming ? [...messagesRef.current].reverse().find(
       (m) => m.role === 'assistant' && !m.finish,
-    );
+    ) : undefined;
     const wasSessionBusy = sessionBusyRef.current;
     abortedMessageIdRef.current = lastAsstMsg?.id || null;
     abortingRef.current = true;

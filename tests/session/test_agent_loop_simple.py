@@ -439,6 +439,67 @@ async def test_completed_child_reports_followup_once(tmp_path, monkeypatch, outc
     assert updated.model_dump() == original_receipt
     run_mock.assert_awaited_once()
 
+    if outcome == "stop":
+        async def resumed(sid, **kwargs):
+            await AgentInbox.drain(sid, kwargs["callbacks"])
+            answer = await Message.create(sid, MessageRole.ASSISTANT, "third result", finish="stop")
+            return LoopResult(action="stop", last_message=answer)
+
+        run_mock.side_effect = resumed
+        sent = await send_to_session(ToolContext(parent.id, "followup", agent="rex"), child.id, "new task")
+        assert sent.success
+        await until(lambda: child.id not in AgentInbox._wakes
+                    and len(AgentInbox.get(parent.id).messages) == 3)
+        assert "third result" in AgentInbox.get(parent.id).messages[2].content
+        assert next(p for p in await Message.parts(receipt.id, parent.id)
+                    if p.type == "tool").model_dump() == original_receipt
+        assert run_mock.await_count == 2
+
+
+@pytest.mark.parametrize("stop_parent", [False, True])
+async def test_stopped_child_reports_new_followup_after_restart(tmp_path, monkeypatch, stop_parent):
+    parent, child = await sessions(tmp_path)
+    wake = AgentInbox.wake
+    monkeypatch.setattr(AgentInbox, "wake", lambda sid, publisher=None: wake(sid, publisher) if sid == child.id else None)
+    receipt = await Message.create(parent.id, MessageRole.ASSISTANT, "")
+    part = ToolPart(sessionID=parent.id, messageID=receipt.id, callID="call", tool="delegate_task",
+        state=ToolStateCompleted(input={}, output="submitted", title="task",
+            metadata={"sessionId": child.id, "submitted": True, "status": "running"},
+            time={"start": 1, "end": 2}))
+    await Message.store_part(parent.id, receipt.id, part)
+    initial_context = ToolContext(parent.id, receipt.id, call_id="call")
+    start_child(initial_context, child.id, "explore",
+                AsyncMock(return_value=ToolResult(success=True, output="initial result")))
+    await until(lambda: child.id not in AgentInbox._children)
+    original_receipt = next(p for p in await Message.parts(receipt.id, parent.id)
+                            if p.type == "tool").model_dump()
+    assert len(AgentInbox.get(parent.id).messages) == 1
+
+    old_inbox = AgentInbox.get(child.id)
+    SessionLoop.abort(parent.id if stop_parent else child.id)
+    if stop_parent:
+        initial_context.abort.set()
+    AgentInbox.bind(parent.id)
+    expected_count = 1 if stop_parent else 2
+    assert old_inbox.stopped
+
+    async def run(sid, **kwargs):
+        await AgentInbox.drain(sid, kwargs["callbacks"])
+        answer = await Message.create(sid, MessageRole.ASSISTANT, "new result", finish="stop")
+        return LoopResult(action="stop", last_message=answer)
+
+    run_mock = AsyncMock(side_effect=run)
+    monkeypatch.setattr(SessionLoop, "run", run_mock)
+    sent = await send_to_session(ToolContext(parent.id, "followup", agent="rex"), child.id, "new task")
+    assert sent.success and sent.output["status"] == "sent"
+    await until(lambda: child.id not in AgentInbox._wakes and len(AgentInbox.get(parent.id).messages) == expected_count)
+    assert AgentInbox.get(child.id) is not old_inbox
+    assert "new result" in AgentInbox.get(parent.id).messages[-1].content
+    assert (await Message.get(child.id, sent.output["message_id"])) is not None
+    assert next(p for p in await Message.parts(receipt.id, parent.id)
+                if p.type == "tool").model_dump() == original_receipt
+    run_mock.assert_awaited_once()
+
 
 @pytest.mark.parametrize("followup", [False, True])
 @pytest.mark.parametrize("stop_parent", [False, True])
@@ -496,6 +557,8 @@ async def test_stop_preserves_terminal_child_finalizer(tmp_path, monkeypatch, fo
     SessionLoop.abort(parent.id if stop_parent else child.id)
     await asyncio.sleep(0)
     assert not finalizer.cancelled()
+    if stop_parent:
+        AgentInbox.bind(parent.id)
     release.set()
     await until(lambda: child.id not in AgentInbox._children and child.id not in AgentInbox._wakes)
     # Execution already completed before Stop. Its terminal card still commits,
@@ -505,6 +568,8 @@ async def test_stop_preserves_terminal_child_finalizer(tmp_path, monkeypatch, fo
     assert "completed work" in updated.state.metadata["result"]
     assert len(old_parent.messages) == (0 if stop_parent else 1)
     assert old_parent.stopped is stop_parent
+    if stop_parent:
+        assert not AgentInbox.get(parent.id).messages
 
 
 async def test_archive_cancels_tracked_child_finalizer(tmp_path, monkeypatch):
@@ -775,3 +840,14 @@ async def test_background_wake_retains_authorized_auto_and_delivery_only(
     hook.assert_not_awaited()
     delivery.assert_awaited_once()
     assert await Message.get_text_content(delivery.await_args.args[0].last_message) == "answer 3"
+
+
+async def test_status_event_includes_full_runtime_ancestry():
+    AgentInbox.bind("child").parent_id = "root"
+    AgentInbox.bind("grandchild").parent_id = "child"
+    publish = AsyncMock()
+    await SessionLoop._publish_session_status(LoopCallbacks(event_publish_callback=publish), "grandchild", "busy")
+    assert publish.await_args.args[1]["ancestorSessionIDs"] == ["child", "root"]
+    AgentInbox.get("root").parent_id = "grandchild"
+    assert AgentInbox.ancestors("grandchild") == ["child", "root"]
+    AgentInbox.get("root").parent_id = None

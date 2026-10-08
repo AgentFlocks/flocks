@@ -12,6 +12,7 @@ from flocks.session.message import (
     ToolPart,
     ToolStateCompleted,
     ToolStateError,
+    ToolStatePending,
     ToolStateRunning,
 )
 from flocks.session.orphan_tools import (
@@ -20,7 +21,8 @@ from flocks.session.orphan_tools import (
     abort_orphan_running_parts,
     abort_orphan_running_parts_in_messages,
 )
-from flocks.session.core.status import SessionStatus, SessionStatusBusy
+from flocks.session.core.status import SessionStatus, SessionStatusBusy, SessionStatusQueued, SessionStatusRetry
+from flocks.session.runner import SessionRunner
 from flocks.session.session import Session
 
 
@@ -190,6 +192,58 @@ async def test_abort_all_orphan_running_parts_skips_busy_sessions():
 
     assert repaired == 0
     assert running_part.state.status == "running"
+
+
+@pytest.mark.asyncio
+async def test_idle_pending_tool_recovery_preserves_identity_input_and_is_idempotent():
+    session = await Session.create(project_id="proj_orphan_pending", directory="/tmp")
+    msg = await Message.create(session.id, MessageRole.ASSISTANT, "")
+    part = ToolPart(
+        id="part_pending_orphan", sessionID=session.id, messageID=msg.id,
+        callID="call_pending_orphan", tool="sleep",
+        state=ToolStatePending(input={"timeout_s": 123}, raw='{"timeout_s":123}'),
+    )
+    await Message.store_part(session.id, msg.id, part)
+
+    assert await abort_orphan_running_parts(session.id) == 1
+    recovered = next(p for p in await Message.parts(msg.id, session.id) if p.id == part.id)
+    assert recovered.id == part.id
+    assert recovered.callID == part.callID
+    assert isinstance(recovered.state, ToolStateError)
+    assert recovered.state.input == {"timeout_s": 123}
+    assert recovered.state.error == INTERRUPTED_TOOL_ERROR
+    assert recovered.state.time["end"] >= recovered.state.time["start"]
+    assert await abort_orphan_running_parts(session.id) == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("guard", ["busy", "queued", "retry", "loop", "runner"])
+async def test_pending_recovery_does_not_touch_active_or_queued_session(guard, monkeypatch):
+    session = await Session.create(project_id="proj_orphan_pending_safe", directory="/tmp")
+    msg = await Message.create(session.id, MessageRole.ASSISTANT, "")
+    part = ToolPart(
+        id="part_pending_safe", sessionID=session.id, messageID=msg.id,
+        callID="call_pending_safe", tool="sleep",
+        state=ToolStatePending(input={}, raw=""),
+    )
+    await Message.store_part(session.id, msg.id, part)
+    if guard in {"busy", "queued", "retry"}:
+        status = {
+            "busy": SessionStatusBusy(),
+            "queued": SessionStatusQueued(),
+            "retry": SessionStatusRetry(attempt=1, message="retrying", next=1234),
+        }[guard]
+        SessionStatus.set(session.id, status)
+    elif guard == "loop":
+        monkeypatch.setitem(SessionLoop._active_loops, session.id, object())
+    else:
+        monkeypatch.setitem(SessionRunner._active_sessions, session.id, object())
+    try:
+        assert await abort_orphan_running_parts(session.id) == 0
+        unchanged = next(p for p in await Message.parts(msg.id, session.id) if p.id == part.id)
+        assert isinstance(unchanged.state, ToolStatePending)
+    finally:
+        SessionStatus.clear(session.id)
 
 
 @pytest.fixture

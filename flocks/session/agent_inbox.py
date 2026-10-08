@@ -38,6 +38,7 @@ class Inbox:
     stopped: bool = False
     owner_loop: asyncio.AbstractEventLoop | None = field(default=None, repr=False)
     on_result: Callable[[Any], Awaitable[None]] | None = field(default=None, repr=False)
+    result_callback_factory: Callable[[], Callable[[Any], Awaitable[None]]] | None = field(default=None, repr=False)
     auto_failover_allowed: bool = False
     prepared_user_id: str | None = None
 
@@ -60,8 +61,10 @@ class AgentInbox:
     def get(cls, session_id: str) -> Inbox:
         inbox = cls._inboxes.setdefault(session_id, Inbox())
         if inbox.stopped:
-            # Keep ancestry while cancelled wakes hand off to their finalizers.
-            inbox = Inbox(parent_id=inbox.parent_id, owner_loop=inbox.owner_loop)
+            # Keep ancestry and result delivery while old finalizers finish on
+            # the stopped inbox; new messages belong to a fresh generation.
+            inbox = Inbox(parent_id=inbox.parent_id, owner_loop=inbox.owner_loop,
+                          on_result=inbox.on_result, result_callback_factory=inbox.result_callback_factory)
             cls._inboxes[session_id] = inbox
         return inbox
 
@@ -116,6 +119,9 @@ class AgentInbox:
         if not inbox.messages or inbox.stopped:
             return
         cls.bind(session_id)
+        # Capture delivery before execution; old finalizers must never adopt a
+        # replacement parent inbox after Stop. New wakes bind a fresh destination.
+        on_result = inbox.result_callback_factory() if inbox.result_callback_factory else inbox.on_result
 
         async def run():
             session = await Session.get_by_id(session_id)
@@ -143,8 +149,8 @@ class AgentInbox:
                 result = LoopResult(action="error", error=str(exc))
             if result is not None and inbox.stopped:
                 result = LoopResult(action="stop", metadata={"aborted": True})
-            if result is not None and result.action in {"stop", "error"} and inbox.on_result:
-                await inbox.on_result(result)
+            if result is not None and result.action in {"stop", "error"} and on_result:
+                await on_result(result)
             return result
 
         def completed(done):
@@ -238,6 +244,21 @@ class AgentInbox:
         if not inbox.messages:
             inbox.ready.clear()
         return bool(pending)
+
+    @classmethod
+    def ancestors(cls, session_id: str) -> list[str]:
+        """Return the runtime ancestry used by both status snapshots and SSE."""
+        ancestors: list[str] = []
+        visited = {session_id}
+        while True:
+            inbox = cls._inboxes.get(session_id)
+            job = cls._children.get(session_id)
+            parent_id = inbox.parent_id if inbox and inbox.parent_id else (job[0] if job else None)
+            if not parent_id or parent_id in visited:
+                return ancestors
+            ancestors.append(parent_id)
+            visited.add(parent_id)
+            session_id = parent_id
 
     @classmethod
     def snapshot_tree(cls, session_id: str) -> tuple[set[str], set[asyncio.Task]]:
