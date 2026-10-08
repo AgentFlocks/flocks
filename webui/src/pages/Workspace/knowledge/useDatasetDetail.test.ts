@@ -28,7 +28,7 @@ afterEach(() => { cleanup(); vi.useRealTimers(); });
 
 describe('bounded read-only dataset document refresh', () => {
   it('observes documents after an initially empty detail without repeating metadata or writes on every tick', async () => {
-    const { result } = renderHook(() => useDatasetDetail(dataset.id, '', 1, 0));
+    const { result } = renderHook(() => useDatasetDetail(dataset.id, 1, 0));
     await settle();
     expect(result.current.data?.documents.items).toEqual([]);
     api.documents.mockResolvedValue(pageOf([document]));
@@ -42,7 +42,7 @@ describe('bounded read-only dataset document refresh', () => {
   });
 
   it('bounds empty-list polling, refreshes final metadata, and lets a manual refresh restart observation', async () => {
-    const { result } = renderHook(() => useDatasetDetail(dataset.id, '', 1, 0));
+    const { result } = renderHook(() => useDatasetDetail(dataset.id, 1, 0));
     await settle();
     await tick(DOCUMENT_REFRESH_LIMIT_MS);
     expect(result.current.refreshStatus).toBe('expired');
@@ -64,7 +64,7 @@ describe('bounded read-only dataset document refresh', () => {
   });
 
   it('retains data during an external revision and reloads both metadata and documents', async () => {
-    const { result, rerender } = renderHook(({ revision }) => useDatasetDetail(dataset.id, '', 1, revision), { initialProps: { revision: 0 } });
+    const { result, rerender } = renderHook(({ revision }) => useDatasetDetail(dataset.id, 1, revision), { initialProps: { revision: 0 } });
     await settle();
     const previous = result.current.data;
     const updated = deferred<Dataset>();
@@ -82,7 +82,7 @@ describe('bounded read-only dataset document refresh', () => {
 
   it('stops on refresh errors and keeps previously loaded documents', async () => {
     api.documents.mockResolvedValue(pageOf([document]));
-    const { result } = renderHook(() => useDatasetDetail(dataset.id, '', 1, 0));
+    const { result } = renderHook(() => useDatasetDetail(dataset.id, 1, 0));
     await settle();
     const previous = result.current.data;
     api.documents.mockRejectedValue(new Error('Read failed'));
@@ -96,7 +96,7 @@ describe('bounded read-only dataset document refresh', () => {
   });
 
   it('cancels an in-flight read and ignores its late result', async () => {
-    const { result } = renderHook(() => useDatasetDetail(dataset.id, '', 1, 0));
+    const { result } = renderHook(() => useDatasetDetail(dataset.id, 1, 0));
     await settle();
     const delayed = deferred<Page<KnowledgeDocument>>();
     api.documents.mockImplementation(() => delayed.promise);
@@ -115,7 +115,7 @@ describe('bounded read-only dataset document refresh', () => {
   it('aborts a stalled initial request at the deadline without accepting a late response', async () => {
     const delayed = deferred<Page<KnowledgeDocument>>();
     api.documents.mockImplementation(() => delayed.promise);
-    const { result } = renderHook(() => useDatasetDetail(dataset.id, '', 1, 0));
+    const { result } = renderHook(() => useDatasetDetail(dataset.id, 1, 0));
     await tick(DOCUMENT_REFRESH_LIMIT_MS);
     expect(api.documents.mock.calls[0][2]?.aborted).toBe(true);
     expect(result.current.refreshStatus).toBe('expired');
@@ -128,7 +128,7 @@ describe('bounded read-only dataset document refresh', () => {
   it('aborts on dataset changes and unmount, without leaking a previous target response', async () => {
     const delayed = deferred<Page<KnowledgeDocument>>();
     api.documents.mockImplementationOnce(() => delayed.promise).mockResolvedValue(pageOf([]));
-    const { result, rerender, unmount } = renderHook(({ id }) => useDatasetDetail(id, '', 1, 0), { initialProps: { id: dataset.id } });
+    const { result, rerender, unmount } = renderHook(({ id }) => useDatasetDetail(id, 1, 0), { initialProps: { id: dataset.id } });
     const firstSignal = api.documents.mock.calls[0][2]!;
     const other = { ...dataset, id: 'set-2', name: 'Other notes' };
     api.dataset.mockResolvedValue(other);

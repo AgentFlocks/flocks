@@ -57,16 +57,18 @@ async def detach_dataset(dataset_id: str) -> None:
         sessions = await Session.list_all_unfiltered()
     except Exception:
         return
+
+    def mutate(metadata: dict[str, Any]) -> dict[str, Any]:
+        # The listing is only a stale snapshot for finding candidates. Recompute
+        # from the metadata read under the Session lock so a concurrent save is kept.
+        current = dataset_ids_from_metadata(metadata)
+        if dataset_id in current:
+            metadata[_KEY] = {"dataset_ids": [item for item in current if item != dataset_id]}
+        return metadata
+
     for session in sessions:
-        current = dataset_ids_from_metadata(getattr(session, "metadata", None))
-        if dataset_id not in current:
+        if dataset_id not in dataset_ids_from_metadata(getattr(session, "metadata", None)):
             continue
-        remaining = [item for item in current if item != dataset_id]
-
-        def mutate(metadata: dict[str, Any], kept: list[str] = remaining) -> dict[str, Any]:
-            metadata[_KEY] = {"dataset_ids": kept}
-            return metadata
-
         try:
             await Session.mutate_metadata(session.project_id, session.id, mutate)
         except Exception:

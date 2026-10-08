@@ -11,8 +11,8 @@ type State = { key: string; data?: Detail; error?: string; loading: boolean; ref
 
 // Linking only schedules work upstream. Observe documents for a bounded window,
 // without parsing, resubmitting a link, or remounting previews and form drafts.
-export function useDatasetDetail(id: string, q: string, page: number, revision: number) {
-  const key = JSON.stringify([id, q, page]);
+export function useDatasetDetail(id: string, page: number, revision: number) {
+  const key = JSON.stringify([id, page]);
   const [reloadVersion, setReloadVersion] = useState(0);
   const [state, setState] = useState<State>({ key, loading: true, refreshStatus: 'refreshing' });
   const stopRef = useRef<() => void>(() => {});
@@ -41,7 +41,7 @@ export function useDatasetDetail(id: string, q: string, page: number, revision: 
       try {
         const [dataset, documents] = await Promise.all([
           initial || remaining === 0 ? knowledgebaseAPI.dataset(id, controller.signal) : Promise.resolve(undefined),
-          knowledgebaseAPI.documents(id, { q, page, page_size: PAGE_SIZE }, controller.signal),
+          knowledgebaseAPI.documents(id, { page, page_size: PAGE_SIZE }, controller.signal),
         ]);
         if (stopped) return;
         setState(current => ({ key, data: { dataset: dataset ?? current.data!.dataset, documents }, loading: false, refreshStatus: 'refreshing' }));
@@ -54,7 +54,7 @@ export function useDatasetDetail(id: string, q: string, page: number, revision: 
     };
     void read(true);
     return stop;
-  }, [id, q, page, key, revision, reloadVersion]);
+  }, [id, page, key, revision, reloadVersion]);
 
   return {
     data: state.key === key ? state.data : undefined,

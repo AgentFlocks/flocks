@@ -1,3 +1,5 @@
+import copy
+
 import pytest
 
 from flocks.knowledgebase.errors import KnowledgebaseError
@@ -53,6 +55,25 @@ async def test_deleting_a_dataset_removes_it_from_the_session(session):
     await set_selection(session.id, "owner", ["dataset-a", "dataset-b"])
     await detach_dataset("dataset-a")
     assert session.metadata["knowledgebase"]["dataset_ids"] == ["dataset-b"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("concurrent", "expected"), [
+    (["dataset-b", "dataset-c"], ["dataset-b", "dataset-c"]),
+    (["dataset-a", "dataset-b", "dataset-c"], ["dataset-b", "dataset-c"]),
+])
+async def test_deleting_a_dataset_keeps_a_selection_saved_after_the_listing(session, monkeypatch, concurrent, expected):
+    await set_selection(session.id, "owner", ["dataset-a", "dataset-b"])
+
+    async def stale_listing():
+        snapshot = copy.deepcopy(session)
+        # The owner saves while the delete is between its listing and the locked update.
+        await set_selection(session.id, "owner", concurrent)
+        return [snapshot]
+
+    monkeypatch.setattr(Session, "list_all_unfiltered", staticmethod(stale_listing))
+    await detach_dataset("dataset-a")
+    assert session.metadata["knowledgebase"]["dataset_ids"] == expected
 
 
 @pytest.mark.asyncio

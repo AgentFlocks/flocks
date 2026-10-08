@@ -45,7 +45,10 @@ function pickerRows(binding: SessionDatasets | null, catalog: Dataset[], draft: 
 }
 
 function DatasetBody({ sessionId }: { sessionId: string }) {
-  const { t } = useTranslation('session');
+  // The picker's shared Modal reads 'workspace', which the Session route does not
+  // preload. Loading it here keeps opening the picker from suspending this section,
+  // which would re-run the session effect and close the picker again.
+  const { t } = useTranslation(['session', 'workspace']);
   const inRouter = useInRouterContext();
   const toast = useOptionalToast();
   const [binding, setBinding] = useState<SessionDatasets | null>(null);
@@ -57,6 +60,18 @@ function DatasetBody({ sessionId }: { sessionId: string }) {
   const [draft, setDraft] = useState<string[]>([]);
   const [configured, setConfigured] = useState<boolean | null>(null);
   const request = useRef(0);
+  // Set while the picker holds choices that have not been applied yet.
+  const edited = useRef(false);
+
+  const openPicker = (ids: string[], changed: boolean) => {
+    edited.current = changed;
+    setDraft(ids);
+    setPicking(true);
+  };
+  const closePicker = () => {
+    edited.current = false;
+    setPicking(false);
+  };
 
   const load = async () => {
     const ticket = ++request.current;
@@ -78,7 +93,8 @@ function DatasetBody({ sessionId }: { sessionId: string }) {
       }
       setBinding(next);
       setCatalog([...available.values()]);
-      setDraft(next.dataset_ids);
+      // A refresh that returns while the picker is being edited must not undo those choices.
+      if (!edited.current) setDraft(next.dataset_ids);
     } catch (failure) {
       if (request.current !== ticket) return;
       setError((failure as Error).message || t('dataset.loadFailed'));
@@ -97,7 +113,7 @@ function DatasetBody({ sessionId }: { sessionId: string }) {
       const next = await knowledgebaseAPI.setSessionDatasets(sessionId, draft);
       if (request.current !== ticket) return;
       setBinding(next);
-      setPicking(false);
+      closePicker();
       toast.success(t('dataset.apply'));
     } catch (failure) {
       if (request.current !== ticket) return;
@@ -113,6 +129,7 @@ function DatasetBody({ sessionId }: { sessionId: string }) {
     setDraft([]);
     setPicking(false);
     setSaving(false);
+    edited.current = false;
     void load();
     return () => { request.current += 1; };
   }, [sessionId]);
@@ -143,24 +160,24 @@ function DatasetBody({ sessionId }: { sessionId: string }) {
             <span className="session-knowledge-saved"><Check aria-hidden="true" />{t('dataset.addedToSession')}</span>
           </div>
         </div>
-        <button type="button" className="session-knowledge-icon-button" aria-label={t('dataset.remove', { name: item.name })} title={t('dataset.remove', { name: item.name })} onClick={() => { setDraft(binding.dataset_ids.filter(id => id !== item.id)); setPicking(true); }}><X aria-hidden="true" /></button>
+        <button type="button" className="session-knowledge-icon-button" aria-label={t('dataset.remove', { name: item.name })} title={t('dataset.remove', { name: item.name })} onClick={() => openPicker(binding.dataset_ids.filter(id => id !== item.id), true)}><X aria-hidden="true" /></button>
       </li>)}</ul>
       <div className="session-knowledge-actions">
-        <button type="button" className={buttonClass} onClick={() => { setDraft(binding.dataset_ids); setPicking(true); }}><Plus aria-hidden="true" />{t('dataset.select')}</button>
+        <button type="button" className={buttonClass} onClick={() => openPicker(binding.dataset_ids, false)}><Plus aria-hidden="true" />{t('dataset.select')}</button>
         {inRouter ? <Link className="session-knowledge-manage" to="/workspace?tab=knowledge">{manageLabel}</Link> : <a className="session-knowledge-manage" href="/workspace?tab=knowledge">{manageLabel}</a>}
       </div>
     </>}
-    {picking && <Modal title={t('dataset.picker')} onClose={() => { if (!saving) setPicking(false); }}>
+    {picking && <Modal title={t('dataset.picker')} onClose={() => { if (!saving) closePicker(); }}>
       <div className="session-knowledge-picker">
         <p className="session-knowledge-message">{t('dataset.selectionHint')}</p>
         <div className="session-knowledge-options">
           {options.map(item => <label key={item.id} className={`session-knowledge-choice${draft.includes(item.id) ? ' is-selected' : ''}`}>
-            <input type="checkbox" aria-label={item.name} disabled={saving} checked={draft.includes(item.id)} onChange={() => setDraft(current => current.includes(item.id) ? current.filter(id => id !== item.id) : [...current, item.id])} />
+            <input type="checkbox" aria-label={item.name} disabled={saving} checked={draft.includes(item.id)} onChange={() => { edited.current = true; setDraft(current => current.includes(item.id) ? current.filter(id => id !== item.id) : [...current, item.id]); }} />
             <Database aria-hidden="true" /><span>{item.name}</span><small>{fileCount(item)}</small>
           </label>)}
         </div>
         <div className="session-knowledge-picker-actions">
-          <button type="button" className={buttonClass} disabled={saving} onClick={() => setPicking(false)}>{t('dataset.cancel')}</button>
+          <button type="button" className={buttonClass} disabled={saving} onClick={closePicker}>{t('dataset.cancel')}</button>
           <button type="button" className={`${buttonClass} is-primary`} disabled={saving} onClick={() => void apply()}>{t(saving ? 'dataset.saving' : 'dataset.apply')}</button>
         </div>
       </div>

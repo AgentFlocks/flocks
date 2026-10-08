@@ -9,7 +9,7 @@ import { useToast } from '@/components/common/Toast';
 import { FileListActions, FileListRow, FileListTable, WorkspaceFileSplit } from '@/components/common/WorkspaceFileView';
 import FileBrowser from './FileBrowser';
 import FilePreview from './FilePreview';
-import { PAGE_SIZE, useKnowledgeQuery, useMountedRef } from './state';
+import { filterLoadedPage, PAGE_SIZE, useKnowledgeQuery, useMountedRef } from './state';
 import { Button, CreatedAt, fileType, inputClass, LoadState, Modal, Pagination } from './ui';
 import { useDatasetDetail } from './useDatasetDetail';
 
@@ -21,7 +21,8 @@ export default function DatasetsPage({ revision, onChanged }: { revision: number
   const [layout, setLayout] = useState<'grid' | 'list'>('grid');
   const [openId, setOpenId] = useState<string | null>(null);
   const [form, setForm] = useState<Dataset | 'create' | null>(null);
-  const query = useKnowledgeQuery(openId ? null : JSON.stringify([q, page, revision]), signal => knowledgebaseAPI.datasets({ q, page, page_size: PAGE_SIZE }, signal));
+  const query = useKnowledgeQuery(openId ? null : JSON.stringify([page, revision]), signal => knowledgebaseAPI.datasets({ page, page_size: PAGE_SIZE }, signal));
+  const datasets = query.data ? filterLoadedPage(query.data.items, q) : undefined;
   return <div className="kb-datasets-page">
     {openId ? <DatasetDetail key={openId} id={openId} revision={revision} onBack={() => setOpenId(null)} onChanged={onChanged} /> : <section className="kb-dataset-gallery" aria-label={t('knowledge.datasets.gallery')} inert={Boolean(form)}
       onClickCapture={event => { if (form) { event.preventDefault(); event.stopPropagation(); } }}
@@ -29,7 +30,7 @@ export default function DatasetsPage({ revision, onChanged }: { revision: number
       <div className="kb-dataset-toolbar">
         <label className="kb-search">
           <Search aria-hidden="true" />
-          <input value={q} onChange={event => { setQ(event.target.value); setPage(1); }} aria-label={t('knowledge.datasets.search')}
+          <input value={q} onChange={event => setQ(event.target.value)} aria-label={t('knowledge.datasets.search')}
             aria-describedby={searchHintId} placeholder={t('knowledge.datasets.search')} />
         </label>
         <div className="kb-dataset-toolbar-actions">
@@ -44,7 +45,7 @@ export default function DatasetsPage({ revision, onChanged }: { revision: number
       <LoadState loading={query.loading} error={query.error} retry={query.reload}>
         <div className="kb-dataset-scroll">
           <ul className="kb-dataset-grid" data-layout={layout}>
-            {query.data?.items.map(dataset => <li key={dataset.id} className="kb-dataset-card">
+            {datasets?.map(dataset => <li key={dataset.id} className="kb-dataset-card">
               <div className="kb-dataset-card-head">
                 <button type="button" aria-label={dataset.name} className="kb-dataset-open" onClick={() => setOpenId(dataset.id)}>
                   <span className="kb-dataset-icon"><Database aria-hidden="true" /></span>
@@ -58,7 +59,7 @@ export default function DatasetsPage({ revision, onChanged }: { revision: number
                 <Button variant="quiet" size="small" onClick={() => setOpenId(dataset.id)}>{t('knowledge.datasets.open')}<ChevronRight aria-hidden="true" /></Button>
               </div>
             </li>)}
-            {query.data?.items.length === 0 && <li className="kb-dataset-empty"><span className="kb-empty-icon"><Database aria-hidden="true" /></span><p>{t(q ? 'knowledge.noMatch' : 'knowledge.datasets.empty')}</p></li>}
+            {datasets?.length === 0 && <li className="kb-dataset-empty"><span className="kb-empty-icon"><Database aria-hidden="true" /></span><p>{t(q.trim() ? 'knowledge.noMatch' : 'knowledge.datasets.empty')}</p></li>}
           </ul>
         </div>
         {query.data && <Pagination variant="knowledge" page={page} total={query.data.total} onChange={setPage} />}
@@ -151,7 +152,7 @@ function DatasetDetail({ id, revision, onBack, onChanged }: { id: string; revisi
   const [editing, setEditing] = useState(false);
   const [preview, setPreview] = useState<KnowledgeDocument | null>(null);
   const [busy, setBusy] = useState(false);
-  const query = useDatasetDetail(id, q, page, revision);
+  const query = useDatasetDetail(id, page, revision);
 
   const run = async (action: () => Promise<unknown>, ok: string, onSuccess?: () => void) => {
     if (busy) return;
@@ -194,6 +195,7 @@ function DatasetDetail({ id, revision, onBack, onChanged }: { id: string; revisi
   };
 
   const data = query.data;
+  const documents = data ? filterLoadedPage(data.documents.items, q) : [];
   return <div className="kb-dataset-detail">
     <div className="contents" inert={editing || linking}
       onClickCapture={event => { if (editing || linking) { event.preventDefault(); event.stopPropagation(); } }}
@@ -217,7 +219,7 @@ function DatasetDetail({ id, revision, onBack, onChanged }: { id: string; revisi
         </header>
         <WorkspaceFileSplit className="kb-document-workbench" list={listWidth => <>
           <div className="kb-document-toolbar">
-            <label className="kb-search"><Search aria-hidden="true" /><input value={q} onChange={event => { setQ(event.target.value); setPage(1); }}
+            <label className="kb-search"><Search aria-hidden="true" /><input value={q} onChange={event => setQ(event.target.value)}
               aria-label={t('knowledge.datasets.searchDocuments')} placeholder={t('knowledge.datasets.searchDocuments')} /></label>
             <Button variant="primary" disabled={busy} onClick={() => setLinking(true)}><Plus aria-hidden="true" />{t('knowledge.datasets.linkFiles')}</Button>
           </div>
@@ -230,7 +232,7 @@ function DatasetDetail({ id, revision, onBack, onChanged }: { id: string; revisi
               {listWidth >= 560 && <th scope="col" className="kb-document-status-col">{t('knowledge.status')}</th>}
               <th scope="col" className="kb-document-actions">{t('knowledge.actions')}</th>
             </>}>
-              {data.documents.items.map(document => <FileListRow key={document.id} selected={preview?.id === document.id} className="kb-document-row" onClick={() => openSource(document)}>
+              {documents.map(document => <FileListRow key={document.id} selected={preview?.id === document.id} className="kb-document-row" onClick={() => openSource(document)}>
                 <td className="kb-document-name"><button type="button" className="kb-document-filename w-full text-left" title={document.name} disabled={!document.id?.trim()}><FileText aria-hidden="true" /><span>{document.name}</span></button></td>
                 <td className="kb-document-type">{fileType(document.name)}</td>
                 {listWidth >= 560 && <td className="kb-document-size">{document.size == null ? '—' : formatBytes(document.size)}</td>}
@@ -241,7 +243,7 @@ function DatasetDetail({ id, revision, onBack, onChanged }: { id: string; revisi
                   <Button variant="quiet" size={listWidth < 850 ? 'icon' : 'small'} aria-label={t('knowledge.datasets.unlink')} title={t('knowledge.datasets.unlinkName', { name: document.name })} disabled={busy} onClick={() => void run(() => knowledgebaseAPI.removeDocuments(id, [document.id]), t('knowledge.datasets.unlink'), () => setPreview(current => current?.id === document.id ? null : current))}>{listWidth < 850 ? <Unlink aria-hidden="true" /> : t('knowledge.datasets.unlink')}</Button>
                 </FileListActions></td>
               </FileListRow>)}
-              {data.documents.items.length === 0 && <tr><td colSpan={3 + Number(listWidth >= 760) + 2 * Number(listWidth >= 560)} className="kb-document-empty">{t(q ? 'knowledge.noMatch' : 'knowledge.datasets.noDocuments')}</td></tr>}
+              {documents.length === 0 && <tr><td colSpan={3 + Number(listWidth >= 760) + 2 * Number(listWidth >= 560)} className="kb-document-empty">{t(q.trim() ? 'knowledge.noMatch' : 'knowledge.datasets.noDocuments')}</td></tr>}
             </FileListTable>
           </div>
           <Pagination variant="knowledge" page={page} total={data.documents.total} onChange={setPage} />
@@ -255,10 +257,22 @@ function DatasetDetail({ id, revision, onBack, onChanged }: { id: string; revisi
   </div>;
 }
 
+const DOCUMENT_STATES = new Set(['ready', 'unparsed', 'queued', 'parsing', 'processing', 'pending', 'cancelled', 'failed', 'unknown', 'uploaded', 'active']);
+// RAGFlow v0.27.2 document listings report parsing as TaskStatus names in `run`.
+const RAGFLOW_RUN_STATES: Record<string, string> = {
+  UNSTART: 'unparsed', RUNNING: 'parsing', CANCEL: 'cancelled', DONE: 'ready', FAIL: 'failed', SCHEDULE: 'queued',
+};
+
+function documentState(status: string): string {
+  // A missing status still renders as unknown instead of breaking the table.
+  if (typeof status !== 'string') return '';
+  return RAGFLOW_RUN_STATES[status.toUpperCase()] ?? status;
+}
+
 function DocumentStatus({ status }: { status: string }) {
   const { t } = useTranslation('workspace');
-  const known = ['ready', 'unparsed', 'queued', 'parsing', 'processing', 'pending', 'cancelled', 'failed', 'unknown', 'uploaded', 'active'].includes(status);
-  return <span className="kb-document-status" data-state={status || 'unknown'}>{known ? t(`knowledge.states.${status}`) : status || t('knowledge.states.unknown')}</span>;
+  const state = documentState(status);
+  return <span className="kb-document-status" data-state={state || 'unknown'}>{DOCUMENT_STATES.has(state) ? t(`knowledge.states.${state}`) : state || t('knowledge.states.unknown')}</span>;
 }
 
 function LinkFiles({ datasetId, onClose, onLinked }: { datasetId: string; onClose: () => void; onLinked: () => void }) {

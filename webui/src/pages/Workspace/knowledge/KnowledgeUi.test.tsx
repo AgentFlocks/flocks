@@ -264,6 +264,86 @@ describe('Knowledge workspace UI', () => {
     expect(api.datasets.mock.calls.filter(([options]) => options?.page_size === 1)).toHaveLength(1);
   });
 
+  it('searches only the loaded knowledge set page without jumping back to the first page', async () => {
+    const user = userEvent.setup();
+    const later: Dataset = { ...dataset, id: 'set-21', name: 'Threat intel' };
+    api.datasets.mockImplementation(options => Promise.resolve(options?.page === 2 ? pageOf([later], 21, 2) : pageOf([dataset, secondDataset], 21, 1)));
+    render(<KnowledgeTab />, { wrapper: Providers });
+    await user.click(screen.getByRole('tab', { name: /^Knowledge Sets/ }));
+    await user.click(await screen.findByRole('button', { name: workspace.knowledge.nextPage }));
+    expect(await screen.findByRole('button', { name: later.name })).toBeInTheDocument();
+    const requests = api.datasets.mock.calls.length;
+    const search = screen.getByRole('textbox', { name: workspace.knowledge.datasets.search });
+    await user.type(search, 'THREAT');
+    expect(screen.getByText('Page 2')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: later.name })).toBeInTheDocument();
+    await user.clear(search);
+    await user.type(search, 'notes');
+    expect(screen.getByText(workspace.knowledge.noMatch)).toBeInTheDocument();
+    expect(api.datasets).toHaveBeenCalledTimes(requests);
+    expect(api.datasets.mock.calls.some(([options]) => options?.q !== undefined)).toBe(false);
+    // Paging keeps the filter and stays usable because totals are not filtered.
+    await user.click(screen.getByRole('button', { name: workspace.knowledge.previousPage }));
+    expect(await screen.findByRole('button', { name: dataset.name })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: secondDataset.name })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: workspace.knowledge.nextPage })).toBeEnabled();
+  });
+
+  it('searches only the loaded document page and keeps typing in the same field', async () => {
+    const user = userEvent.setup();
+    const first = { id: 'doc-1', dataset_id: dataset.id, name: 'alpha.txt', status: 'DONE', progress: 1, chunk_count: 1 };
+    const later = { id: 'doc-21', dataset_id: dataset.id, name: 'beacon-report.pdf', status: 'DONE', progress: 1, chunk_count: 1 };
+    api.documents.mockImplementation((_id, options) => Promise.resolve(options?.page === 2 ? pageOf([later], 21, 2) : pageOf([first], 21, 1)));
+    render(<KnowledgeTab />, { wrapper: Providers });
+    await openDataset(user);
+    await user.click(screen.getByRole('button', { name: workspace.knowledge.nextPage }));
+    expect(await screen.findByText(later.name)).toBeInTheDocument();
+    const before = api.documents.mock.calls.length;
+    const search = screen.getByRole('textbox', { name: workspace.knowledge.datasets.searchDocuments });
+    await user.type(search, 'beacon');
+    expect(search).toBeInTheDocument();
+    expect(search).toHaveFocus();
+    expect(search).toHaveValue('beacon');
+    expect(screen.getByText('Page 2')).toBeInTheDocument();
+    expect(screen.getByText(later.name)).toBeInTheDocument();
+    // Only the bounded refresh may read again, and it stays on the same unfiltered page.
+    expect(api.documents.mock.calls.slice(before).every(([, options]) => options?.page === 2 && options?.q === undefined)).toBe(true);
+    await user.type(search, '-missing');
+    expect(screen.getByText(workspace.knowledge.noMatch)).toBeInTheDocument();
+  });
+
+  it.each([
+    ['DONE', 'ready'],
+    ['FAIL', 'failed'],
+    ['RUNNING', 'parsing'],
+    ['UNSTART', 'unparsed'],
+    ['CANCEL', 'cancelled'],
+    ['SCHEDULE', 'queued'],
+  ] as const)('shows the RAGFlow run status %s as the %s state', async (run, state) => {
+    const user = userEvent.setup();
+    api.documents.mockResolvedValue(pageOf([{ id: 'doc-1', dataset_id: dataset.id, name: 'report.pdf', status: run, progress: 1, chunk_count: 1 }]));
+    render(<KnowledgeTab />, { wrapper: Providers });
+    const table = await openDataset(user);
+    expect(within(table).getByText(workspace.knowledge.states[state])).toHaveAttribute('data-state', state);
+    expect(within(table).queryByText(run)).not.toBeInTheDocument();
+  });
+
+  it('keeps an unrecognized document status readable', async () => {
+    const user = userEvent.setup();
+    api.documents.mockResolvedValue(pageOf([{ id: 'doc-1', dataset_id: dataset.id, name: 'report.pdf', status: 'PAUSED', progress: null, chunk_count: null }]));
+    render(<KnowledgeTab />, { wrapper: Providers });
+    const table = await openDataset(user);
+    expect(within(table).getByText('PAUSED')).toHaveAttribute('data-state', 'PAUSED');
+  });
+
+  it('shows a missing document status as unknown', async () => {
+    const user = userEvent.setup();
+    api.documents.mockResolvedValue(pageOf([{ id: 'doc-1', dataset_id: dataset.id, name: 'report.pdf', status: null as unknown as string, progress: null, chunk_count: null }]));
+    render(<KnowledgeTab />, { wrapper: Providers });
+    const table = await openDataset(user);
+    expect(within(table).getByText(workspace.knowledge.states.unknown)).toHaveAttribute('data-state', 'unknown');
+  });
+
   it('clears old counts and previews on connection changes and ignores late count responses', async () => {
     const user = userEvent.setup();
     const oldDatasetCount = deferred<Page<Dataset>>();

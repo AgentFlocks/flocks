@@ -11,6 +11,23 @@ export function useMountedRef() {
   return mounted;
 }
 
+// Matches what Python's str.casefold() (the old backend filter) treats as equal:
+// the upper-case round trip applies full foldings such as ﬁ → fi, ß and ẞ both
+// become ss, every Greek sigma is σ, and dotless ı stays distinct from i.
+function foldCase(value: string): string {
+  return value
+    .replace(/[^ı]+/g, part => part.toUpperCase().toLowerCase())
+    .replace(/ß/g, 'ss')
+    .replace(/ς/g, 'σ');
+}
+
+// Dataset and document searches filter only the loaded page; they never change
+// the page or refetch, so an item seen on page 2 is still found there.
+export function filterLoadedPage<T extends { name: string }>(items: T[], q: string): T[] {
+  const needle = foldCase(q.trim());
+  return needle ? items.filter(item => foldCase(item.name).includes(needle)) : items;
+}
+
 export function errorCode(error: unknown): string {
   return (error as { code?: string; message?: string })?.message || (error as { code?: string })?.code || 'knowledgebase_unavailable';
 }
