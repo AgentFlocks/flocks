@@ -1,6 +1,13 @@
 {
   "description": "Pinned toolchain versions bundled into the Linux offline installer (flocks-offline.run). Bump here when upgrading; the build script downloads exactly these.",
   "install_root": "/opt/flocks",
+  "build_image": "registry.access.redhat.com/ubi8/ubi:8.10",
+  "glibc_floor": {
+    "description": "Oldest runtime the package must work on (RHEL 8: glibc 2.28, libstdc++ of GCC 8). build-offline-run.sh fails when a shipped binary needs more, see glibc_floor.py; build on a distribution no newer than this (build_image).",
+    "GLIBC": "2.28",
+    "GLIBCXX": "3.4.25",
+    "CXXABI": "1.3.11"
+  },
   "python": {
     "version": "3.12.12",
     "python_build_standalone_release": "20251202",

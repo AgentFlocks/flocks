@@ -49,7 +49,7 @@ Extract and examine the header, payload, and signature components.
 
 ```bash
 # Decode JWT parts (base64url decode)
-JWT="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"
+JWT="<JWT>"
 
 # Decode header
 echo "$JWT" | cut -d. -f1 | base64 -d 2>/dev/null | jq .
