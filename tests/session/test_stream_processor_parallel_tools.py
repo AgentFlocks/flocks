@@ -271,7 +271,7 @@ async def test_multiple_deferred_sleeps_complete_once_on_success():
 
 
 @pytest.mark.asyncio
-async def test_cancelled_tool_before_hook_preserves_cancellation_and_finalizes_part():
+async def test_cancelled_tool_input_rewrite_hook_preserves_cancellation_and_finalizes_part():
     processor = StreamProcessor(
         session_id="ses-hook-cancel", assistant_message=SimpleNamespace(id="msg-hook-cancel"),
         agent=SimpleNamespace(name="rex"), event_publish_callback=AsyncMock(),
@@ -279,7 +279,7 @@ async def test_cancelled_tool_before_hook_preserves_cancellation_and_finalizes_p
     cancellation = asyncio.CancelledError("pre-hook cancelled")
     with (
         patch("flocks.session.streaming.stream_processor.Message.store_part", AsyncMock()) as store,
-        patch.object(HookPipeline, "run_tool_before", AsyncMock(side_effect=cancellation)),
+        patch.object(HookPipeline, "run_tool_input_rewrite", AsyncMock(side_effect=cancellation)),
         patch("flocks.session.streaming.stream_processor.ToolRegistry.execute", AsyncMock()) as execute,
     ):
         await processor.process_event(ToolInputStartEvent(id="before-1", tool_name="read"))
