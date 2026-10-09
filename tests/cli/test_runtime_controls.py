@@ -64,3 +64,10 @@ def test_budget_uses_existing_cost_calculator_and_rejects_unknown_currency():
         RuntimeControls(max_budget=1).check_budget(None, require_pricing=True)
     with pytest.raises(RuntimeError, match="known USD"):
         RuntimeControls(max_budget=1).check_budget(PriceConfig(input=1, output=1, currency="CNY"), require_pricing=True)
+
+
+def test_send_to_session_is_detached_even_when_allowed():
+    # Posting to another session's inbox can start that session's loop,
+    # which then runs past the headless invocation and its budget.
+    controls = RuntimeControls(allowed_tools=("send_to_session",), permission_mode="bypassPermissions")
+    assert "Detached orchestration" in (controls.denial("send_to_session") or "")

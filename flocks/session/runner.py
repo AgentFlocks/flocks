@@ -39,7 +39,6 @@ from flocks.session.message import (
 from flocks.session.prompt import SessionPrompt, SystemPromptBlock, TurnPromptContext
 from flocks.session.core.status import SessionStatus, SessionStatusRetry, SessionStatusBusy
 from flocks.session.core.defaults import (
-    DEFAULT_MAX_TOOL_STEPS,
     DOOM_LOOP_THRESHOLD,
     REPEATED_EXACT_TOOL_CALL_HALT_THRESHOLD,
 )
@@ -282,6 +281,8 @@ class StepResult:
     error: Optional[str] = None
     usage: Optional[Dict[str, int]] = None
     failure: Optional[StepFailure] = None
+    # Internal execution outcome: a sleep call alone does not prove a successful wait.
+    _successful_sleep: bool = field(default=False, repr=False, compare=False)
 
 
 @dataclass
@@ -560,7 +561,12 @@ class SessionRunner:
         last_user_id: str,
     ) -> Dict[str, Any]:
         visible_text = bool((result.content or "").strip())
-        if visible_text or len(result.tool_calls) != 1:
+        successful_sleep = (
+            len(result.tool_calls) == 1
+            and result.tool_calls[0].name == "sleep"
+            and result._successful_sleep
+        )
+        if visible_text or len(result.tool_calls) != 1 or successful_sleep:
             self._reset_tool_loop_guard(last_user_id=last_user_id)
             return {"action": "allow"}
 
@@ -1562,9 +1568,9 @@ class SessionRunner:
         except Exception as e:
             log.debug("runner.session_agent.error", {"error": str(e)})
         
-        # Check if we've reached max steps (matching Flocks logic)
-        max_steps = agent.steps if hasattr(agent, 'steps') and agent.steps is not None else DEFAULT_MAX_TOOL_STEPS
-        is_last_step = self._step >= max_steps
+        # Only explicitly configured step limits constrain tool calls.
+        max_steps = getattr(agent, "steps", None)
+        is_last_step = max_steps is not None and self._step >= max_steps
         
         # Get provider
         provider = Provider.get(self.provider_id)
@@ -3962,14 +3968,14 @@ class SessionRunner:
             await model_activity.stop()
             # Foreground delegate tasks own child sessions. Let their
             # cancellation/finalization finish before unwinding this step.
-            await processor.drain_parallel_tool_calls()
+            await processor.drain_parallel_tool_calls(execute_deferred=False)
             raise
         except Exception as exc:
             await model_activity.stop()
             # A foreground delegate may already be running when the provider
             # stream fails. Drain first so the retry layer observes the tool
             # side-effect fence and cannot dispatch the same work twice.
-            await processor.drain_parallel_tool_calls()
+            await processor.drain_parallel_tool_calls(execute_deferred=False)
             partial_response = _build_llm_response_payload(
                 content=processor.get_text_content(),
                 reasoning=processor.get_reasoning_content(),
@@ -4008,43 +4014,45 @@ class SessionRunner:
 
         try:
             await tool_accumulator.flush_remaining(stream_finish_reason)
-        except Exception:
-            await processor.drain_parallel_tool_calls()
-            raise
 
-        if stream_text_rewriter is not None:
-            trailing_text = stream_text_rewriter.flush()
-            if trailing_text:
-                if not text_started:
-                    await processor.process_event(TextStartEvent())
-                    text_started = True
-                await processor.process_event(TextDeltaEvent(text=trailing_text))
-        
-        # End text block if started
-        if text_started:
-            await processor.process_event(TextEndEvent())
-        
-        # End any remaining reasoning block
-        if hasattr(self, '_current_reasoning_id'):
-            await _flush_reasoning_rewriter()
-            reasoning_end_metadata = getattr(self, '_current_reasoning_metadata', {}) or {}
-            await processor.process_event(ReasoningEndEvent(
-                id=self._current_reasoning_id,
-                metadata=reasoning_end_metadata,
+            if stream_text_rewriter is not None:
+                trailing_text = stream_text_rewriter.flush()
+                if trailing_text:
+                    if not text_started:
+                        await processor.process_event(TextStartEvent())
+                        text_started = True
+                    await processor.process_event(TextDeltaEvent(text=trailing_text))
+
+            # End text block if started
+            if text_started:
+                await processor.process_event(TextEndEvent())
+
+            # End any remaining reasoning block
+            if hasattr(self, '_current_reasoning_id'):
+                await _flush_reasoning_rewriter()
+                reasoning_end_metadata = getattr(self, '_current_reasoning_metadata', {}) or {}
+                await processor.process_event(ReasoningEndEvent(
+                    id=self._current_reasoning_id,
+                    metadata=reasoning_end_metadata,
+                ))
+                delattr(self, '_current_reasoning_id')
+                if hasattr(self, '_current_reasoning_metadata'):
+                    delattr(self, '_current_reasoning_metadata')
+
+            # Emit finish event
+            await processor.process_event(FinishEvent(
+                finish_reason=processor.get_finish_reason()
             ))
-            delattr(self, '_current_reasoning_id')
-            if hasattr(self, '_current_reasoning_metadata'):
-                delattr(self, '_current_reasoning_metadata')
-        
-        # Emit finish event
-        await processor.process_event(FinishEvent(
-            finish_reason=processor.get_finish_reason()
-        ))
+        except (Exception, asyncio.CancelledError):
+            await processor.drain_parallel_tool_calls(execute_deferred=False)
+            raise
 
         # Foreground subagent tool-calls are launched concurrently during
         # streaming so sibling subagents can start in the same assistant turn.
         # Drain them here before exposing tool results to the next loop step.
-        await processor.drain_parallel_tool_calls()
+        await processor.drain_parallel_tool_calls(
+            execute_deferred=not (aborted_during_stream or self.is_aborted)
+        )
         
         # Get processed content
         content = processor.get_text_content()
@@ -4155,6 +4163,11 @@ class SessionRunner:
                 content=content,
                 tool_calls=tool_calls_for_result,
                 usage=stream_usage,
+                _successful_sleep=(
+                    len(tool_calls_for_result) == 1
+                    and tool_calls_for_result[0].name == "sleep"
+                    and processor.tool_calls[tool_calls_for_result[0].id].status == "completed"
+                ),
             )
         
         response_payload = self._build_langfuse_response_payload(

@@ -11,7 +11,11 @@ from typing import Any
 READ_TOOLS = frozenset({"read", "glob", "grep", "ls", "todowrite", "todoread", "todo"})
 EDIT_TOOLS = frozenset({"write", "edit", "apply_patch", "multiedit"})
 # These entrypoints can escape invocation lifetime/context into other workers.
-DETACHED_TOOLS = frozenset({"delegate_task", "run_workflow", "run_workflow_node", "task", "task_manage", "schedule_task"})
+# send_to_session wakes an idle recipient, whose loop then outlives this run.
+DETACHED_TOOLS = frozenset({
+    "delegate_task", "run_workflow", "run_workflow_node", "task", "task_manage", "schedule_task",
+    "send_to_session",
+})
 SANDBOX_TOOLS = frozenset({"bash", "read", "write", "edit"})
 
 
