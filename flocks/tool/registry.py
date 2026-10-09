@@ -864,7 +864,7 @@ class ToolRegistry:
         # Owner-scoped, read-only Knowledgebase retrieval (connection is lazy).
         ("flocks.tool", ["knowledgebase"]),
         # agent/ — agent delegation/coordination
-        ("flocks.tool.agent", ["delegate_task", "task"]),
+        ("flocks.tool.agent", ["delegate_task", "task", "communication"]),
         # task/ — task/workflow
         ("flocks.tool.task", [
             "schedule_task_center",
