@@ -176,6 +176,18 @@
     "folderSaveFailed": "保存失败",
     "createFolder": "创建文件夹",
     "saveName": "保存名称",
-    "cancel": "取消"
+    "cancel": "取消",
+    "loadMore": "加载更多",
+    "collapse": "收起",
+    "selectMode": "批量管理",
+    "selectedCount": "已选 {{count}} 个会话",
+    "archiveSelectedTitle": "归档所选会话",
+    "archiveSelectedDescription": "归档选中的 {{count}} 个会话后，可在系统管理的已归档任务中恢复。",
+    "archivedCount": "已归档 {{count}} 个会话",
+    "deleteFolder": "删除",
+    "deleteFolderTitle": "删除项目",
+    "deleteFolderDescription": "确定删除项目“{{folder}}”吗？项目中的会话将进入归档，项目文件夹和文件会保留；恢复任一归档会话时会同时恢复该项目。",
+    "folderDeleted": "项目已删除，相关会话已归档",
+    "deleteFolderFailed": "删除失败"
   }
 }

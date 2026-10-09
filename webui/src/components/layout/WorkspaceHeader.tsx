@@ -80,7 +80,7 @@ export default function WorkspaceHeader({
   return (
     <header
       data-workspace-header
-      className="fixed inset-x-0 top-0 z-40 flex h-14 items-center gap-2 border-b border-zinc-200 bg-white px-3 sm:gap-4 sm:px-5 dark:border-zinc-800 dark:bg-zinc-900"
+      className="fixed inset-x-0 top-0 z-50 flex h-14 items-center gap-2 border-b border-zinc-200 bg-white px-3 sm:gap-4 sm:px-5 dark:border-zinc-800 dark:bg-zinc-900"
     >
       <button
         type="button"

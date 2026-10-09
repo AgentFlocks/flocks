@@ -1,6 +1,6 @@
 {
-  "title": "Business groups",
-  "navigation": "Filter by business group",
+  "title": "Groups",
+  "navigation": "Filter by group",
   "countsDescription": "Drag a plugin onto a group to move it.",
   "defaultNames": {
     "平台集成": "Platform Integrations",
@@ -38,9 +38,11 @@
   "cancel": "Cancel",
   "close": "Close",
   "confirmScope": "Move these {{count}} plugins to “{{group}}”?\n{{items}}\nNo plugins will be deleted.",
+  "confirmScopeTitle": "Move to “{{group}}”",
+  "confirmScopeAction": "Move",
   "dialog": {
-    "createTitle": "New business group",
-    "renameTitle": "Rename business group",
+    "createTitle": "New group",
+    "renameTitle": "Rename group",
     "moveTitle": "Edit group for {{name}}",
     "name": "Group name",
     "firstPlugin": "First editable plugin",
@@ -69,7 +71,7 @@
     "refresh": "Could not refresh the list. Refresh and try again."
   },
   "drag": {
-    "sourceLabel": "{{name}}. Press Alt+M to move to a business group.",
+    "sourceLabel": "{{name}}. Press Alt+M to move to a group.",
     "reorderLabel": "Reorder group {{name}}",
     "reorderHint": "Drag or use Up/Down to reorder groups.",
     "orderPlaced": "Group order updated.",

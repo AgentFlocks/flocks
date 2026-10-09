@@ -46,12 +46,13 @@ vi.mock('@/hooks/useLayoutOpenTabs', () => ({ useLayoutOpenTabs: () => { const [
 vi.mock('@/hooks/useWorkspacePageOrders', () => ({ useWorkspacePageOrders: () => ({ apply: (_id: string, items: any[]) => items, applyNav: (_id: string, items: any[]) => items }) }));
 // The history panel is heavy (sessions, SSE); it has its own test.
 vi.mock('./SessionHistoryPanel', () => ({ default: () => <div data-testid="history-panel" /> }));
-vi.mock('@/components/common/UpdateModal', () => ({
-  default: (props: Record<string, unknown>) => {
+vi.mock('@/components/common/UpdateModal', () => {
+  function UpdateModalMock(props: Record<string, unknown>) {
     React.useEffect(() => { (props.onPresented as (() => void) | undefined)?.(); }, [props.onPresented]);
     return <div role="dialog" aria-label="update-modal" />;
-  },
-}));
+  }
+  return { default: UpdateModalMock };
+});
 vi.mock('@/components/common/OnboardingModal', () => ({ default: () => <div role="dialog" aria-label="onboarding" /> }));
 vi.mock('@/components/common/NotificationModal', () => ({ default: () => null }));
 vi.mock('@/components/common/TokenPolicyNotice', () => ({ default: () => null }));

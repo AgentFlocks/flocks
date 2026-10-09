@@ -4,9 +4,8 @@ import {
   MessageSquarePlus,
   Workflow,
   ListTodo,
+  ChevronLeft,
   ChevronRight,
-  PanelLeftClose,
-  PanelLeftOpen,
   Layers,
   ShieldCheck,
   ScanSearch,
@@ -783,7 +782,7 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
       title: t('shortcutsTitle'),
       description: t('shortcutsBody'),
       confirmText: t('gotIt'),
-      cancelText: '',
+      hideCancel: true,
     });
   }, [confirm, t]);
 
@@ -946,11 +945,12 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
         <button
           type="button"
           onClick={toggleCollapsed}
-          className="absolute -right-3 top-4 hidden h-6 w-6 items-center justify-center rounded-full border border-zinc-200 bg-white text-zinc-400 shadow-sm hover:text-zinc-700 lg:flex dark:border-zinc-700 dark:bg-zinc-900 dark:hover:text-zinc-200"
+          // Same handle in both states, centred on the sidebar edge so it stays put while pages scroll.
+          className="absolute -right-3 top-1/2 hidden h-9 w-6 -translate-y-1/2 items-center justify-center rounded-lg border border-zinc-200 bg-white text-zinc-500 shadow-sm transition-colors hover:text-zinc-800 lg:flex dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100"
           aria-label={collapsed ? t('expandNav') : t('collapseNav')}
           title={collapsed ? t('expandNav') : t('collapseNav')}
         >
-          {collapsed ? <PanelLeftOpen className="h-3.5 w-3.5" /> : <PanelLeftClose className="h-3.5 w-3.5" />}
+          {collapsed ? <ChevronRight className="h-4 w-4" /> : <ChevronLeft className="h-4 w-4" />}
         </button>
       </aside>
 

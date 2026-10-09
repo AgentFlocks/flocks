@@ -169,7 +169,9 @@ vi.mock('react-i18next', () => ({
   }),
 }));
 
-vi.mock('@/components/common/Toast', () => ({
+vi.mock('@/components/common/Toast', async (importOriginal) => ({
+  // Keep the module's other exports (GroupNav uses useOptionalToast).
+  ...(await importOriginal<typeof import('@/components/common/Toast')>()),
   useToast: () => ({
     success: mocks.toastSuccess,
     error: mocks.toastError,

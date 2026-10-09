@@ -176,6 +176,18 @@
     "folderSaveFailed": "Save failed",
     "createFolder": "Create folder",
     "saveName": "Save name",
-    "cancel": "Cancel"
+    "cancel": "Cancel",
+    "loadMore": "Load more",
+    "collapse": "Collapse",
+    "selectMode": "Select sessions",
+    "selectedCount": "{{count}} selected",
+    "archiveSelectedTitle": "Archive selected sessions",
+    "archiveSelectedDescription": "Archive {{count}} selected sessions? You can restore them from Archived tasks in system settings.",
+    "archivedCount": "Archived {{count}} sessions",
+    "deleteFolder": "Delete",
+    "deleteFolderTitle": "Delete project",
+    "deleteFolderDescription": "Delete project “{{folder}}”? Its sessions are archived; the folder and its files are kept. Restoring any archived session restores the project too.",
+    "folderDeleted": "Project deleted and its sessions archived",
+    "deleteFolderFailed": "Delete failed"
   }
 }

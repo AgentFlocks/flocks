@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { Bot, Plus } from "lucide-react";
 import SessionChat from "./SessionChat";
@@ -33,6 +33,8 @@ export default function WorkbenchChat({
   onRetry,
   retryLabel,
   labels,
+  leading,
+  showWelcome = true,
 }: {
   /** Agent that answers in this chat; the transport sends to it. */
   agentName: string;
@@ -58,6 +60,10 @@ export default function WorkbenchChat({
     sources: string;
     suggestions: string[];
   };
+  /** Shown above the questions and answers in the same scroll area (e.g. the run being discussed). */
+  leading?: ReactNode;
+  /** The welcome card with suggested questions; hide it while questions cannot be asked. */
+  showWelcome?: boolean;
 }) {
   const { t } = useTranslation("session");
   const [model, setModel] = useState(() => readChatDraft(`${taskKey}:model`));
@@ -168,7 +174,8 @@ export default function WorkbenchChat({
             {labels.agent}
           </span>
         }
-        welcomeContent={(setInput) => (
+        conversationTopSlot={leading}
+        welcomeContent={showWelcome ? (setInput) => (
           <GuidedCreatePanel
             icon={<Bot className="h-5 w-5" />}
             title={labels.title}
@@ -185,7 +192,7 @@ export default function WorkbenchChat({
             ]}
             onStartPrompt={(prompt) => setInput(prompt)}
           />
-        )}
+        ) : undefined}
         renderMessageFooter={(message) => {
           if (message.role !== "assistant") return null;
           const turn = turns.find((turn) =>
@@ -246,3 +253,6 @@ export default function WorkbenchChat({
     </div>
   );
 }
+
+/** Lets page bundles check that this host renders `leading` (older hosts ignore it). */
+WorkbenchChat.supportsLeading = true;

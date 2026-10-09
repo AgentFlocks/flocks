@@ -33,8 +33,8 @@ function Example({ inventory, showItems = true, onCreate, onReadOnly = notify }:
 async function mount(items: GroupNavItem[], onCreate?: (key: string, group: string) => Promise<void>) {
   const i18n = createInstance();
   await i18n.use(initReactI18next).init({ lng: 'en-US', resources: { 'en-US': { pluginGroups: messages }, 'zh-CN': { pluginGroups: zhMessages } }, interpolation: { escapeValue: false } });
-  const view = render(<I18nextProvider i18n={i18n}><Example inventory={items} onCreate={onCreate} /></I18nextProvider>);
-  return { ...view, i18n, showItems: (showItems: boolean) => view.rerender(<I18nextProvider i18n={i18n}><Example inventory={items} showItems={showItems} onCreate={onCreate} /></I18nextProvider>) };
+  const view = render(<I18nextProvider i18n={i18n}><ToastProvider><Example inventory={items} onCreate={onCreate} /></ToastProvider></I18nextProvider>);
+  return { ...view, i18n, showItems: (showItems: boolean) => view.rerender(<I18nextProvider i18n={i18n}><ToastProvider><Example inventory={items} showItems={showItems} onCreate={onCreate} /></ToastProvider></I18nextProvider>) };
 }
 function transfer() {
   const values = new Map<string, string>();
@@ -201,7 +201,7 @@ describe('pure native GroupNav', () => {
     await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent(messages.validation.duplicate));
     expect(create).toHaveBeenCalledExactlyOnceWith('a', 'Outside current filters');
     expect(move).not.toHaveBeenCalled();
-    expect(within(screen.getByRole('complementary')).queryByRole('status')).not.toBeInTheDocument();
+    expect(screen.queryByText(messages.saved)).not.toBeInTheDocument();
     expect(screen.getByRole('dialog')).toBeInTheDocument();
   });
 
@@ -228,11 +228,13 @@ describe('pure native GroupNav', () => {
     fireEvent.change(screen.getByRole('combobox'), { target: { value: '' } });
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
     await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('Alpha: disk full'));
-    expect(within(screen.getByRole('complementary')).queryByRole('status')).not.toBeInTheDocument();
+    expect(screen.queryByText(messages.saved)).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Operations 1' })).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
-    expect(within(screen.getByRole('complementary')).getByRole('status')).toHaveTextContent(messages.saved);
+    // Feedback is a top-right toast, not a line inside the group list.
+    expect((await screen.findByText(messages.saved)).closest('[role="status"]')).toBeInTheDocument();
+    expect(within(screen.getByRole('complementary')).queryByText(messages.saved)).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Operations 1' })).not.toBeInTheDocument();
     expect(move).toHaveBeenCalledTimes(2);
   });
@@ -250,6 +252,13 @@ describe('pure native GroupNav', () => {
     expect(move).not.toHaveBeenCalled();
     expect(rename).not.toHaveBeenCalled();
     expect(remove).not.toHaveBeenCalled();
+  });
+
+  it('lists Ungrouped below every named group', async () => {
+    localStorage.setItem('flocks:plugin-group-order:test', JSON.stringify(['Beta', 'Alpha']));
+    await mount([{ key: 'a', name: 'A', group: 'Alpha' }, { key: 'b', name: 'B', group: 'Beta' }, { key: 'c', name: 'C' }]);
+    const order = Array.from(screen.getByRole('navigation').querySelectorAll('button[aria-pressed]')).map((button) => button.getAttribute('title'));
+    expect(order).toEqual(['All', 'Beta', 'Alpha', 'Ungrouped']);
   });
 
   it('keeps All distinct from Ungrouped and groups literally called all/new', async () => {

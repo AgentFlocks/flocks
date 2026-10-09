@@ -1,7 +1,8 @@
 // Create or rename a history folder (a project directory) from the sidebar.
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
-import { ArrowUp, FolderOpen, HardDrive, Loader2 } from 'lucide-react';
+import { ArrowUp, FolderOpen, HardDrive, Loader2, X } from 'lucide-react';
 import apiClient from '@/api/client';
 import { useToast } from '@/components/common/Toast';
 
@@ -130,12 +131,19 @@ export default function ProjectFolderDialog({ mode, project, onClose, onSaved }:
 
   const inputClass = 'h-9 w-full rounded-lg border border-zinc-300 bg-white px-2.5 text-sm text-zinc-900 outline-none transition-colors placeholder:text-zinc-400 focus:border-red-500 disabled:opacity-60 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100';
 
-  return (
-    <div className="fixed inset-0 z-[70] flex items-center justify-center bg-zinc-950/40 px-4" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !submitting) onClose(); }}>
-      <div role="dialog" aria-modal="true" aria-labelledby="project-folder-dialog-title" className="w-full max-w-[440px] rounded-2xl border border-zinc-200 bg-white p-5 shadow-xl dark:border-zinc-700 dark:bg-zinc-900">
-        <h2 id="project-folder-dialog-title" className="mb-4 text-base font-semibold text-zinc-900 dark:text-zinc-50">
-          {mode === 'create' ? t('history.newFolder') : t('history.renameFolder')}
-        </h2>
+  // Rendered on <body>: the sidebar is transformed, which would otherwise pin this page-level modal inside it.
+  return createPortal(
+    <div className="fixed inset-0 z-[70] flex items-center justify-center bg-zinc-950/40 p-4" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !submitting) onClose(); }}>
+      <div role="dialog" aria-modal="true" aria-labelledby="project-folder-dialog-title" className="max-h-[calc(100vh-2rem)] w-full max-w-[440px] overflow-y-auto rounded-2xl border border-zinc-200 bg-white p-5 shadow-xl dark:border-zinc-700 dark:bg-zinc-900">
+        <div className="mb-4 flex items-start justify-between gap-3">
+          <h2 id="project-folder-dialog-title" className="text-base font-semibold text-zinc-900 dark:text-zinc-50">
+            {mode === 'create' ? t('history.newFolder') : t('history.renameFolder')}
+          </h2>
+          <button type="button" onClick={onClose} disabled={submitting} aria-label={t('history.cancel')} title={t('history.cancel')}
+            className="-mr-1 -mt-1 grid h-8 w-8 shrink-0 place-items-center rounded-lg text-zinc-400 transition-colors hover:bg-zinc-100 hover:text-zinc-700 disabled:opacity-50 dark:hover:bg-zinc-800 dark:hover:text-zinc-200">
+            <X className="h-4 w-4" />
+          </button>
+        </div>
         <form onSubmit={(event) => { event.preventDefault(); void submit(); }} className="space-y-3">
           <div>
             <label htmlFor="project-folder-name" className="mb-1.5 block text-xs font-medium text-zinc-600 dark:text-zinc-400">{t('history.folderName')}</label>
@@ -230,6 +238,7 @@ export default function ProjectFolderDialog({ mode, project, onClose, onSaved }:
           </div>
         </form>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }

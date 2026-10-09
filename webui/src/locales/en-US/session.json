@@ -2,7 +2,7 @@
   "managementTitle": "Workbench",
   "sessionCount": "{{count}} tasks",
   "clearSearch": "Clear search",
-  "newSession": "New Task",
+  "newSession": "New Rex session",
   "loadMore": "Load more",
   "collapseLoaded": "Show less",
   "noSessions": "No sessions yet",

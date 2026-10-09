@@ -2,7 +2,7 @@
   "managementTitle": "工作台",
   "sessionCount": "{{count}} 个任务",
   "clearSearch": "清空搜索",
-  "newSession": "新建任务",
+  "newSession": "Rex 新会话",
   "loadMore": "加载更多",
   "collapseLoaded": "收起",
   "noSessions": "暂无会话",

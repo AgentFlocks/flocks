@@ -111,3 +111,13 @@ it("selects and creates independent conversations", () => {
   fireEvent.click(screen.getByRole("button", { name: "workbenchChat.newSession" }));
   expect(create).toHaveBeenCalledOnce();
 });
+
+it("shows the leading content above the conversation and hides the welcome on request", () => {
+  expect((WorkbenchChat as unknown as { supportsLeading?: boolean }).supportsLeading).toBe(true);
+  const leading = <div>execution record</div>;
+  render(<WorkbenchChat {...base} leading={leading} />);
+  expect(props.conversationTopSlot).toBe(leading);
+  expect(typeof props.welcomeContent).toBe("function");
+  render(<WorkbenchChat {...base} leading={leading} showWelcome={false} />);
+  expect(props.welcomeContent).toBeUndefined();
+});

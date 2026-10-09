@@ -26,7 +26,9 @@ vi.mock('@/api/client', () => ({ default: {
 } }));
 vi.mock('@/contexts/AuthContext', () => ({ useAuth: () => ({ user: mocks.auth }) }));
 vi.mock('@/api/provider', () => ({ providerAPI: { listApiServices: mocks.listServices, updateApiService: mocks.updateService, deleteApiService: mocks.deleteService } }));
-vi.mock('@/components/common/Toast', () => ({
+vi.mock('@/components/common/Toast', async (importOriginal) => ({
+  // Keep the module's other exports (GroupNav uses useOptionalToast).
+  ...(await importOriginal<typeof import('@/components/common/Toast')>()),
   useToast: () => ({ error: vi.fn(), warning: mocks.toastWarning, success: vi.fn() }),
 }));
 
@@ -108,7 +110,7 @@ describe('Tools native group attributes and original view preservation', () => {
 
   it('uses full facets, scalar group filters, distinct All/Ungrouped cache keys and offset zero', async () => {
     await mount();
-    const nav = screen.getByRole('complementary', { name: '业务分组' });
+    const nav = screen.getByRole('complementary', { name: '分组' });
     expect(within(nav).getByRole('button', { name: '全部 61' })).toBeInTheDocument();
     expect(within(nav).getByRole('button', { name: '未分组 1' })).toBeInTheDocument();
     fireEvent.change(screen.getByPlaceholderText(zhTool.search.placeholder), { target: { value: 'tool_' } });

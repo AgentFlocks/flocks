@@ -7056,6 +7056,29 @@ it('uses an authorized transport with native messages and restores failed drafts
   expect(send).toHaveBeenCalledTimes(2);
 });
 
+it('scrolls top content with the conversation and places the welcome after it', async () => {
+  const top = React.createElement('div', { 'data-testid': 'run-record' }, 'execution record');
+  const welcome = React.createElement('p', null, 'ask about the audit');
+  const view = render(React.createElement(SessionChat, {
+    transport: { messages: [], send: vi.fn() }, conversationTopSlot: top, welcomeContent: welcome,
+  }));
+  const record = screen.getByTestId('run-record');
+  const prompt = screen.getByText('ask about the audit');
+  expect(record.compareDocumentPosition(prompt) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  // Without top content the welcome fills the view; below it, it only follows the record.
+  expect(prompt.parentElement).not.toHaveStyle({ minHeight: '100%' });
+  expect(record.parentElement).toBe(prompt.parentElement?.parentElement);
+
+  view.rerender(React.createElement(SessionChat, { transport: { messages: [], send: vi.fn() }, conversationTopSlot: top }));
+  expect(screen.getByTestId('run-record')).toBeVisible();
+  expect(screen.queryByText('暂无消息')).not.toBeInTheDocument();
+
+  const answer: Message[] = [{ id: 'a', sessionID: '', role: 'assistant', timestamp: 0, finish: 'stop', parts: [{ id: 't', type: 'text', text: 'seven findings' }] }];
+  view.rerender(React.createElement(SessionChat, { transport: { messages: answer, send: vi.fn() }, conversationTopSlot: top }));
+  const reply = await screen.findByText('seven findings');
+  expect(screen.getByTestId('run-record').compareDocumentPosition(reply) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+});
+
 it('keeps a task draft when its native session arrives and after reopening', async () => {
   const draftKey = 'audit:task-draft';
   const transport = { send: vi.fn() };

@@ -234,6 +234,8 @@ export interface SessionChatProps {
   welcomeContent?: React.ReactNode | ((setInput: (text: string) => void) => React.ReactNode);
   /** Extra content rendered below the conversation area and above the composer. */
   conversationBottomSlot?: React.ReactNode | ((actions: ConversationBottomSlotActions) => React.ReactNode);
+  /** Content above the messages that scrolls with them, e.g. the run a follow-up chat is about. */
+  conversationTopSlot?: React.ReactNode;
   /** Called when SSE connection status changes */
   onSseStatusChange?: (status: SSEConnectionStatus) => void;
   /** Forward SSE events with properties to parent (global events like session.updated) */
@@ -1877,6 +1879,7 @@ export default function SessionChat({
   display,
   welcomeContent,
   conversationBottomSlot,
+  conversationTopSlot,
   onSseStatusChange,
   onSSEEvent,
   onError,
@@ -4500,6 +4503,7 @@ export default function SessionChat({
         onScroll={handleScroll}
         style={{ scrollbarGutter: 'stable' }}
       >
+        {conversationTopSlot}
         {loading && messages.length === 0 ? (
           <div className="flex justify-center py-8">
             <LoadingSpinner
@@ -4525,16 +4529,16 @@ export default function SessionChat({
           </div>
         ) : messages.length === 0 ? (
           welcomeContent ? (
-            typeof welcomeContent === 'function' ? (
-              <div className="flex items-center justify-center" style={{ minHeight: '100%' }}>
-                {welcomeContent((text) => { setInput(text); textareaRef.current?.focus(); })}
-              </div>
-            ) : (
-              <div className="flex items-center justify-center" style={{ minHeight: '100%' }}>
-                {welcomeContent}
-              </div>
-            )
-          ) : (
+            // Below top content the welcome follows it instead of filling the view.
+            <div
+              className={`flex items-center justify-center ${conversationTopSlot ? 'py-6' : ''}`}
+              style={conversationTopSlot ? undefined : { minHeight: '100%' }}
+            >
+              {typeof welcomeContent === 'function'
+                ? welcomeContent((text) => { setInput(text); textareaRef.current?.focus(); })
+                : welcomeContent}
+            </div>
+          ) : conversationTopSlot ? null : (
             <div className="text-center py-8 text-gray-400 text-sm">{effectiveEmptyText}</div>
           )
         ) : (
@@ -5103,7 +5107,8 @@ export default function SessionChat({
                 </div>
 
                 {/* Bottom toolbar inside the composer card */}
-                <div className="flex items-center gap-1 px-2 pb-2">
+                {/* Wraps onto a second line when a narrow composer cannot fit every control. */}
+                <div className="flex flex-wrap items-center gap-1 px-2 pb-2">
                   <div className="relative" data-composer-add-menu hidden={!!transport}>
                     <button
                       type="button"
@@ -5165,48 +5170,51 @@ export default function SessionChat({
                   {toolbarSlot}
 
                   {centerToolbarSlot && (
-                    <div className="ml-1">
+                    // Starts from its narrowest usable width (a shortened model name), so the row
+                    // shrinks the model name first and only wraps when even that does not fit.
+                    <div className="ml-1 min-w-0 max-w-max grow basis-44">
                       {centerToolbarSlot}
                     </div>
                   )}
 
-                  <div className="flex-1" />
+                  {/* Usage and send stay together on the right, also when they wrap to their own line. */}
+                  <div className="ml-auto flex shrink-0 items-center gap-1">
+                    {resolvedContextWindowTokens > 0 && (
+                      <ContextUsageRing
+                        percent={contextUsagePercent}
+                        title={contextUsageTitle}
+                        usedTokens={estimatedContextTokens}
+                        totalTokens={resolvedContextWindowTokens}
+                        breakdown={contextUsageBreakdown}
+                      />
+                    )}
 
-                  {resolvedContextWindowTokens > 0 && (
-                    <ContextUsageRing
-                      percent={contextUsagePercent}
-                      title={contextUsageTitle}
-                      usedTokens={estimatedContextTokens}
-                      totalTokens={resolvedContextWindowTokens}
-                      breakdown={contextUsageBreakdown}
-                    />
-                  )}
-
-                  {isStreaming ? (
-                    canSend && (
+                    {isStreaming ? (
+                      canSend && (
+                        <button
+                          onClick={handleSend}
+                          title={hasUploadingFiles ? t('chat.upload.waiting') : t('chat.queue.enqueue')}
+                          className="inline-flex h-8 w-8 items-center justify-center rounded-full bg-sky-500 text-white shadow-sm transition-all hover:bg-sky-600 hover:shadow"
+                        >
+                          {sending || hasUploadingFiles ? <Loader2 className="w-4 h-4 animate-spin" /> : <ArrowUp className="w-4 h-4" strokeWidth={2.5} />}
+                        </button>
+                      )
+                    ) : (
                       <button
                         onClick={handleSend}
-                        title={hasUploadingFiles ? t('chat.upload.waiting') : t('chat.queue.enqueue')}
-                        className="inline-flex h-8 w-8 items-center justify-center rounded-full bg-sky-500 text-white shadow-sm transition-all hover:bg-sky-600 hover:shadow"
+                        disabled={!canSend}
+                        title={hasUploadingFiles ? t('chat.upload.waiting') : undefined}
+                        className={`inline-flex h-8 w-8 items-center justify-center rounded-full transition-all ${
+                          canSend
+                            ? 'bg-sky-500 text-white hover:bg-sky-600 shadow-sm hover:shadow'
+                            : 'cursor-not-allowed border border-zinc-300 bg-zinc-200 text-zinc-400 dark:border-[#5a6573] dark:bg-[#46515e] dark:text-[#b8c2cc]'
+                        }`}
                       >
                         {sending || hasUploadingFiles ? <Loader2 className="w-4 h-4 animate-spin" /> : <ArrowUp className="w-4 h-4" strokeWidth={2.5} />}
                       </button>
-                    )
-                  ) : (
-                    <button
-                      onClick={handleSend}
-                      disabled={!canSend}
-                      title={hasUploadingFiles ? t('chat.upload.waiting') : undefined}
-                      className={`inline-flex h-8 w-8 items-center justify-center rounded-full transition-all ${
-                        canSend
-                          ? 'bg-sky-500 text-white hover:bg-sky-600 shadow-sm hover:shadow'
-                          : 'cursor-not-allowed border border-zinc-300 bg-zinc-200 text-zinc-400 dark:border-[#5a6573] dark:bg-[#46515e] dark:text-[#b8c2cc]'
-                      }`}
-                    >
-                      {sending || hasUploadingFiles ? <Loader2 className="w-4 h-4 animate-spin" /> : <ArrowUp className="w-4 h-4" strokeWidth={2.5} />}
-                    </button>
-                  )}
-                  {stopButton}
+                    )}
+                    {stopButton}
+                  </div>
                 </div>
             </div>
           </div>
