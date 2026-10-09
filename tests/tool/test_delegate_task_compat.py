@@ -6,21 +6,6 @@ import pytest
 from flocks.tool.registry import ToolContext, ToolRegistry
 
 
-async def _persist_continuation_sessions(child_id: str) -> None:
-    from flocks.session.session import SessionInfo
-    from flocks.storage.storage import Storage
-
-    parent = SessionInfo(
-        id="test-session", project_id="delegate-test", directory="/tmp/project", agent="rex",
-    )
-    child = SessionInfo(
-        id=child_id, project_id=parent.project_id, directory=parent.directory,
-        parent_id=parent.id, agent="asset-survey", category="task",
-    )
-    await Storage.set(f"session:{parent.project_id}:{parent.id}", parent)
-    await Storage.set(f"session:{child.project_id}:{child.id}", child)
-
-
 def _make_ctx() -> ToolContext:
     return ToolContext(session_id="test-session", message_id="test-message", agent="rex")
 
@@ -40,7 +25,8 @@ class TestDelegateTaskTolerance:
         schema = ToolRegistry.get_schema(tool_name)
         assert schema is not None
         assert "prompt" in schema.required
-        assert "subagent_type" in schema.properties
+        assert "subagent_type" in schema.required
+        assert "session_id" not in schema.properties
         assert "category" not in schema.properties
         assert "load_skills" not in schema.required
         assert "description" not in schema.required
@@ -62,7 +48,6 @@ class TestDelegateTaskTolerance:
         )
         child_session = SimpleNamespace(id="ses-child")
         with (
-            patch("flocks.tool.agent.delegate_task._find_completed_delegate", AsyncMock(return_value=None)),
             patch("flocks.tool.agent.delegate_task.is_delegatable", return_value=True),
             patch("flocks.tool.agent.delegate_task.Skill.get", AsyncMock()) as skill_get,
             patch("flocks.tool.agent.delegate_task.Session.get_by_id", AsyncMock(return_value=parent_session)),
@@ -103,8 +88,7 @@ class TestDelegateTaskTolerance:
         )
         child_session = SimpleNamespace(id="ses-child")
 
-        with patch("flocks.tool.agent.delegate_task._find_completed_delegate", AsyncMock(return_value=None)), \
-             patch("flocks.tool.agent.delegate_task.is_delegatable", return_value=True), \
+        with patch("flocks.tool.agent.delegate_task.is_delegatable", return_value=True), \
              patch("flocks.tool.agent.delegate_task.Session.get_by_id", AsyncMock(return_value=parent_session)), \
              patch("flocks.tool.agent.delegate_task.Session.create", AsyncMock(return_value=child_session)) as create_session, \
              patch("flocks.tool.agent.delegate_task.Message.create", AsyncMock()), \
@@ -154,7 +138,7 @@ class TestDelegateTaskTolerance:
 
         assert result.success is False
         assert "unknown parameters: command" not in (result.error or "")
-        assert "subagent_type or session_id" in (result.error or "")
+        assert "subagent_type" in (result.error or "")
 
     @pytest.mark.asyncio
     async def test_delegate_task_requires_subagent_for_new_task(self):
@@ -165,7 +149,7 @@ class TestDelegateTaskTolerance:
         )
 
         assert result.success is False
-        assert "subagent_type or session_id" in (result.error or "")
+        assert "subagent_type" in (result.error or "")
 
     @pytest.mark.asyncio
     async def test_delegate_task_rejects_restricted_subagent(self):
@@ -232,7 +216,7 @@ class TestDelegateTaskTolerance:
         )
 
         assert result.success is False
-        assert "Background subagent execution is disabled" in (result.error or "")
+        assert "already asynchronous" in (result.error or "")
 
     @pytest.mark.asyncio
     async def test_delegate_task_rejects_legacy_batch_tasks_param(self):
@@ -248,57 +232,14 @@ class TestDelegateTaskTolerance:
         assert "unknown parameters: tasks" in (result.error or "")
 
     @pytest.mark.asyncio
-    async def test_delegate_task_sync_continue_fails_when_last_message_missing(self):
-        await _persist_continuation_sessions("ses-child")
-
-        with patch("flocks.tool.agent.delegate_task.Message.create", AsyncMock()), \
-             patch("flocks.tool.agent.delegate_task.SessionLoop.run", AsyncMock(return_value=SimpleNamespace(
-                 action="stop",
-                 error=None,
-                 last_message=None,
-             ))):
-            result = await ToolRegistry.execute(
-                "delegate_task",
-                ctx=_make_ctx(),
-                session_id="ses-child",
-                prompt="Continue investigating",
-            )
-
-        assert result.success is True
-        assert result.metadata["sessionId"] == "ses-child"
-        assert result.metadata["emptyOutput"] is True
-        assert "without producing a final assistant message" in (result.output or "")
-
-    @pytest.mark.asyncio
-    async def test_delegate_task_sync_continue_reports_normalized_abort(self):
-        await _persist_continuation_sessions("ses-child-aborted")
-
-        with (
-            patch("flocks.tool.agent.delegate_task.Message.create", AsyncMock()),
-            patch(
-                "flocks.tool.agent.delegate_task.SessionLoop.run",
-                AsyncMock(
-                    return_value=SimpleNamespace(
-                        action="stop",
-                        error=None,
-                        last_message=None,
-                        metadata={"aborted": True},
-                    )
-                ),
-            ),
-        ):
-            result = await ToolRegistry.execute(
-                "delegate_task",
-                ctx=_make_ctx(),
-                session_id="ses-child-aborted",
-                prompt="Continue investigating",
-            )
-
-        assert result.success is False
-        assert result.metadata["sessionId"] == "ses-child-aborted"
-        assert result.metadata["status"] == "interrupted"
-        assert "Sub-agent execution was interrupted" in (result.error or "")
-        assert "session_id: ses-child-aborted" in (result.error or "")
+    @pytest.mark.parametrize("tool_name", ["delegate_task", "task"])
+    async def test_delegate_rejects_session_reuse(self, tool_name):
+        result = await ToolRegistry.execute(
+            tool_name, ctx=_make_ctx(), subagent_type="explore",
+            session_id="existing-child", prompt="New independent task",
+        )
+        assert not result.success
+        assert "unknown parameters: session_id" in result.error
 
     @pytest.mark.asyncio
     async def test_new_delegate_reports_normalized_abort_to_parent_metadata(self):
@@ -315,10 +256,6 @@ class TestDelegateTaskTolerance:
         child_session = SimpleNamespace(id="ses-new-child-aborted")
 
         with (
-            patch(
-                "flocks.tool.agent.delegate_task._find_completed_delegate",
-                AsyncMock(return_value=None),
-            ),
             patch("flocks.tool.agent.delegate_task.is_delegatable", return_value=True),
             patch(
                 "flocks.tool.agent.delegate_task.Session.get_by_id",

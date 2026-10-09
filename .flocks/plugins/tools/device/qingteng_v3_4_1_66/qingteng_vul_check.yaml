@@ -1,4 +1,5 @@
 name: qingteng_vul_check
+group: EDR/HIDS
 description: >
   青藤云漏洞/风险检测。支持多种风险类型检测：
   - app: 应用风险

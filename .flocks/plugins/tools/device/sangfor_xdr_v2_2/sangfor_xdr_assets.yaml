@@ -1,4 +1,5 @@
 name: sangfor_xdr_assets
+group: XDR
 description: >
   Query and manage Sangfor XDR assets. Retrieve asset lists, IP segment
   tree, asset types, connected devices, and department structure.

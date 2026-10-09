@@ -1,4 +1,5 @@
 name: sangfor_sip_assets
+group: SIEM
 description: >
   Query Sangfor SIP asset data. Use the `action` parameter to select:
   - `ipgroup`   – 受监控IP模块（监控范围、资产组、责任人等）

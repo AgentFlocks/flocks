@@ -1,4 +1,5 @@
 name: threatbook_cn_file_upload
+group: 威胁情报
 description: >
   Submit a file to ThreatBook sandbox for malware analysis.
   Supports PE, Office documents, PDF, HTML, Script, MSI, SWF, JAR, LNK, ELF,

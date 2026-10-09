@@ -1,4 +1,5 @@
 name: onesig_strategy_api_ops
+group: 网络防护
 description: >
   OneSIG Strategy API mutation grouped tool. Uses ApiKey + Secret HMAC-SHA1
   signing and calls /api/v3 mutation endpoints for assets, policies,

@@ -31,8 +31,9 @@ LIST_FORMATS = ("table", "json")
 async def _with_store_cleanup(coro):
     """Run a task command and release the stores it opened.
 
-    Release the task handle and shut down the shared PostgreSQL pools before
-    asyncio closes the command's event loop.
+    Release the task handle, then the other invocation-owned stores (workflow
+    store, channel bindings) and the shared PostgreSQL pools before asyncio
+    closes the command's event loop.
     """
     try:
         return await coro
@@ -44,13 +45,25 @@ async def _with_store_cleanup(coro):
         except Exception:
             pass
         try:
+            from flocks.workflow.store import WorkflowStore
+
+            await WorkflowStore.close()
+        except Exception:
+            pass
+        try:
+            from flocks.channel.inbound.session_binding import close_binding_db
+
+            await close_binding_db()
+        except Exception:
+            pass
+        try:
             await Storage.shutdown()
         except Exception:
             pass
 
 
-def _run(coro) -> None:
-    asyncio.run(_with_store_cleanup(coro))
+def _run(coro):
+    return asyncio.run(_with_store_cleanup(coro))
 
 
 def _validate_list_format(value: str) -> str:

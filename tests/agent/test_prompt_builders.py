@@ -11,7 +11,8 @@ def test_rex_prompt_uses_todos_and_delegate_task_only():
 
     assert "## Todo Management" in prompt
     assert "YOUR TODO CREATION WOULD BE TRACKED BY HOOK" in prompt
-    assert "multiple foreground `delegate_task` tool calls" in prompt
+    assert "`delegate_task` calls return immediately" in prompt
+    assert "Every `delegate_task` call creates an independent child session" in prompt
     assert "`delegate_task` / `task`" not in prompt
     assert "After code changes, run the lint/typecheck/tests." in prompt
     assert "If tests fail, iterate until they pass before finalizing." in prompt

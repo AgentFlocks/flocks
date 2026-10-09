@@ -57,6 +57,22 @@ class TestCountTokens:
         text = "test text"  # 9 chars -> 9 // 4 = 2
         assert SessionPrompt.count_tokens(text) == len(text) // 4
 
+    def test_cjk_characters_count_one_token_each(self):
+        # chars/4 made a Chinese session look ~4x smaller than the provider
+        # reported, so the meter read 14% while compaction was running.
+        assert SessionPrompt.count_tokens("文件目录" * 100) == 400
+
+    def test_mixed_text_counts_cjk_and_other_characters_separately(self):
+        text = "写入 workspace/crm 目录"  # 4 CJK chars + 15 others
+        assert SessionPrompt.count_tokens(text) == 4 + 15 // 4
+
+    def test_cjk_punctuation_counts_like_cjk_text(self):
+        assert SessionPrompt.count_tokens("。、「」【】") == 6
+
+    def test_non_ascii_latin_text_keeps_chars_over_4(self):
+        text = "café résumé naïve"
+        assert SessionPrompt.count_tokens(text) == len(text) // 4
+
 
 # ---------------------------------------------------------------------------
 # estimate_tokens
@@ -635,3 +651,31 @@ class TestEstimateToolResultTokens:
             + SessionPrompt.count_tokens("Error: boom")
             + SessionPrompt.count_tokens("Error: Tool execution was interrupted")
         )
+
+
+async def _assistant_answer_in_memory(session_id: str, answer: str):
+    """An assistant message as the runner leaves it after streaming: the
+    answer is stored as a text part and the runner also passes it as
+    ``content`` to ``Message.update``. Messages are read back from
+    PostgreSQL, which keeps the text part only, so the answer must still be
+    counted exactly once."""
+    from flocks.session.message import Message, MessageRole, TextPart
+
+    msg = await Message.create(session_id, MessageRole.ASSISTANT, "")
+    await Message.store_part(
+        session_id,
+        msg.id,
+        TextPart(sessionID=session_id, messageID=msg.id, text=answer),
+    )
+    await Message.update(session_id, msg.id, content=answer, finish="stop")
+    return await Message.list(session_id)
+
+
+@pytest.mark.asyncio
+async def test_streamed_answer_is_counted_once():
+    answer = "Design note: customer records, stages, owners and follow-ups. " * 200
+    messages = await _assistant_answer_in_memory("ses_estimate_answer_once", answer)
+
+    result = await SessionPrompt.estimate_full_context_tokens("ses_estimate_answer_once", messages)
+
+    assert result == SessionPrompt.count_tokens(answer)

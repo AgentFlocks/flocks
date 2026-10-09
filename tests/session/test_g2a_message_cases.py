@@ -56,7 +56,7 @@ class _RecordingProcessor:
     def get_finish_reason(self):
         return self.finish_reason
 
-    async def drain_parallel_tool_calls(self) -> None:
+    async def drain_parallel_tool_calls(self, *, execute_deferred: bool = True) -> None:
         self.drained += 1
         self.drain_positions.append(len(self.events))
 
@@ -72,7 +72,7 @@ class _FakeToolAccumulator:
     async def feed_chunk(self, tool_call) -> None:
         self.fed.append(tool_call)
 
-    async def flush_remaining(self, finish_reason) -> None:
+    async def flush_remaining(self, finish_reason, *, output_limit=None, raised_output_limit=None) -> None:
         return None
 
 

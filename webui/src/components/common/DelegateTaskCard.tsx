@@ -9,6 +9,7 @@ import { useState, useEffect, useRef } from 'react';
 import { IconRobot, IconChevronDown, IconChevronRight, IconExternalLink, IconCircleX } from '@tabler/icons-react';
 import { useTranslation } from 'react-i18next';
 import type { MessagePart, ToolState } from '@/types';
+import { stripTaskMetadata } from '@/features/session-chat/display';
 import DelegateDetailSheet from './DelegateDetailSheet';
 
 // ---------------------------------------------------------------------------
@@ -107,9 +108,7 @@ export function extractDelegateInfo(state: Partial<ToolState>, subTaskLabel: str
 
   let output: string | undefined;
   if (state.output !== undefined && state.output !== null) {
-    const raw = typeof state.output === 'string' ? state.output : JSON.stringify(state.output);
-    const cleaned = raw.replace(/<task_metadata>[\s\S]*?<\/task_metadata>/g, '').trim();
-    output = cleaned || undefined;
+    output = typeof state.output === 'string' ? state.output : JSON.stringify(state.output);
   }
 
   // metadata can be flat { sessionId, ... } (completed state / ToolResult)
@@ -123,7 +122,17 @@ export function extractDelegateInfo(state: Partial<ToolState>, subTaskLabel: str
   const currentText = (meta?.currentText ?? innerMeta?.currentText ?? '') as string;
   const elapsed = (meta?.elapsed ?? innerMeta?.elapsed ?? 0) as number;
   const isBackground = !!input.run_in_background || Boolean(meta?.background ?? innerMeta?.background);
+  const submitted = Boolean(meta?.submitted ?? innerMeta?.submitted);
   const runtimeStatus = meta?.status ?? innerMeta?.status;
+  if (submitted) {
+    output = meta?.result ?? innerMeta?.result;
+    const finishedAt = meta?.finished_at ?? innerMeta?.finished_at;
+    durationMs = state.time?.start ? (finishedAt || Date.now()) - state.time.start : null;
+  }
+  if (output !== undefined && output !== null) {
+    output = stripTaskMetadata(typeof output === 'string' ? output : JSON.stringify(output)).trim() || undefined;
+  }
+  const error = state.error ? stripTaskMetadata(state.error).trim() || undefined : undefined;
   const backgroundStatus = isBackground
     ? (typeof runtimeStatus === 'string' && runtimeStatus.trim()
       ? runtimeStatus
@@ -137,8 +146,8 @@ export function extractDelegateInfo(state: Partial<ToolState>, subTaskLabel: str
     description: input.description || subTaskLabel,
     isBackground,
     childSessionId,
-    status: backgroundStatus || state.status || 'pending',
-    error: state.error,
+    status: (submitted ? runtimeStatus : backgroundStatus) || state.status || 'pending',
+    error: submitted && runtimeStatus === 'error' ? output : error,
     output,
     durationMs,
     steps,

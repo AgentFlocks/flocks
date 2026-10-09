@@ -37,6 +37,7 @@ from flocks.agent.agent import (
     AvailableSkill,
     AvailableWorkflow,
     DelegationTrigger,
+    normalize_agent_group,
 )
 import flocks.agent.delegatable_settings as delegatable_settings
 from flocks.agent.toolset import agent_declares_tool
@@ -162,6 +163,7 @@ def _storage_custom_agent_to_info(agent_data: Dict[str, Any]) -> Optional[AgentI
 
     return AgentInfo(
         name=name,
+        group=agent_data.get("group"),
         name_cn=agent_data.get("name_cn") or agent_data.get("nameCn"),
         description=agent_data.get("description"),
         description_cn=agent_data.get("description_cn") or agent_data.get("descriptionCn"),
@@ -328,6 +330,12 @@ class Agent:
             project_dir=Path.cwd(),
         )
 
+        # Load complete Storage definitions before applying cfg.agent overlays.
+        # Otherwise a group-only override creates an empty agent and masks the
+        # stored prompt/model/tools on the next reload.
+        storage_custom_agents = await _load_storage_custom_agents(set(result.keys()))
+        result.update(storage_custom_agents)
+
         # User overrides from cfg.agent
         default_llm = await Config.resolve_default_llm()
         default_model_id = default_llm["model_id"] if default_llm else None
@@ -364,6 +372,14 @@ class Agent:
 
                 item = result.get(key)
                 if not item:
+                    # Metadata overlays cannot turn a removed/missing definition
+                    # into an executable empty agent. Empty serialized defaults
+                    # (notably options={}) are not definition fields either.
+                    if value.group is not None and not any(
+                        field != "group" and setting not in (None, {}, [])
+                        for field, setting in value.model_dump(exclude_defaults=True).items()
+                    ):
+                        continue
                     item = AgentInfo(
                         name=key,
                         mode="all",
@@ -402,8 +418,6 @@ class Agent:
                     if isinstance(value.permission, dict):
                         item.tools = _permission_dict_to_tools(value.permission)
 
-        storage_custom_agents = await _load_storage_custom_agents(set(result.keys()))
-        result.update(storage_custom_agents)
         _apply_delegatable_overrides(result)
 
         # enabled_agents whitelist filter
@@ -424,6 +438,15 @@ class Agent:
 
         # Merge runtime-registered custom agents
         result.update(Agent._custom_agents)
+
+        # Group overlays also apply to runtime/Storage registrations. Copy the
+        # result rather than mutating the registered source definition.
+        for key, value in (cfg.agent or {}).items():
+            key = AGENT_ALIASES.get(key, key)
+            if key in result and value.group is not None and not result[key].group_readonly:
+                result[key] = result[key].model_copy(
+                    update={"group": normalize_agent_group(value.group)}
+                )
 
         # Share reference with metadata query functions
         _set_agents_ref(result)
@@ -466,7 +489,7 @@ class Agent:
                 # Record the new mtime first to avoid a redundant invalidation on
                 # the very next call in the same worker.
                 cls._skill_settings_mtime = current_mtime
-                cls._state_accessor.invalidate()  # type: ignore[attr-defined]
+                cls._state_accessor.invalidate_all()  # type: ignore[attr-defined]
         except Exception:
             pass
 
@@ -480,7 +503,7 @@ class Agent:
             current_mtime = sentinel.stat().st_mtime
             if current_mtime > cls._delegatable_settings_mtime:
                 cls._delegatable_settings_mtime = current_mtime
-                cls._state_accessor.invalidate()  # type: ignore[attr-defined]
+                cls._state_accessor.invalidate_all()  # type: ignore[attr-defined]
         except Exception:
             pass
 
@@ -501,7 +524,16 @@ class Agent:
         if Agent._state_generations.get(key) != Agent._cache_generation:
             Agent._state_accessor.invalidate()  # type: ignore[attr-defined]
             Agent._state_generations[key] = Agent._cache_generation
-        return await Agent._state_accessor()
+        load = Agent._state_accessor()
+        if load.cancelled() or (not load.done() and load.get_loop().is_closed()):
+            # A cancelled load, or one left pending on a closed event loop,
+            # would stay cached and fail every later call.
+            Agent._state_accessor.invalidate()  # type: ignore[attr-defined]
+            load = Agent._state_accessor()
+        # Every caller awaits the same load task.  Shield it so a cancelled
+        # caller (a client disconnecting, a background task stopped) does not
+        # cancel the load for everyone.
+        return await asyncio.shield(load)
 
     @classmethod
     async def refresh(cls) -> Dict[str, AgentInfo]:
@@ -510,13 +542,13 @@ class Agent:
 
     @classmethod
     def invalidate_cache(cls) -> None:
-        """Invalidate cached agent state.
+        """Invalidate cached agent state in every directory of this process.
 
         Dynamic agent prompts depend on the current tool registry, so tool
         plugin refreshes also need a lightweight way to invalidate agents.
         """
         cls._cache_generation += 1
-        cls._state_accessor.invalidate()  # type: ignore[attr-defined]
+        cls._state_accessor.invalidate_all()  # type: ignore[attr-defined]
 
     # ── Lookup ──────────────────────────────────────────────────────────────
 
@@ -525,6 +557,30 @@ class Agent:
         agents = await cls.state()
         resolved = AGENT_ALIASES.get(agent, agent)
         return agents.get(resolved)
+
+    @classmethod
+    async def get_group_definition(cls, name: str) -> Optional[AgentInfo]:
+        """Resolve selected group authority even for disabled/filtered YAML agents.
+
+        There is no separate ownership cache: active agents reuse their loaded
+        metadata; disabled definitions use the same first-wins native discovery.
+        """
+        agent = await cls.get(name)
+        if agent is not None:
+            return agent
+        definitions = await asyncio.to_thread(scan_and_load)
+        return definitions.get(AGENT_ALIASES.get(name, name))
+
+    @classmethod
+    async def validate_group_settings(cls, updates: Dict[str, Any]) -> None:
+        """Reject explicit fixed-group changes before generic config side effects."""
+        for name, settings in updates.items():
+            if not isinstance(settings, dict) or "group" not in settings:
+                continue
+            agent = await cls.get_group_definition(name)
+            if agent is not None and agent.group_readonly:
+                if normalize_agent_group(settings["group"]) != normalize_agent_group(agent.group):
+                    raise ValueError(f"System agent group is read-only: {name}")
 
     @classmethod
     async def list(cls) -> List[AgentInfo]:

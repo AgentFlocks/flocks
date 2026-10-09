@@ -39,6 +39,23 @@ class _FakeProcess:
     returncode = 0
 
 
+def _controlled_environ(monkeypatch) -> dict:
+    """Run with a small known environment plus the knowledgebase credential.
+
+    Host shells inherit the server environment minus that credential. The tests
+    compare the child environment as a whole, so a failure prints it; with this
+    fixture it only ever holds test values, never a developer's or CI's.
+    """
+    for name in list(bash_module.os.environ):
+        monkeypatch.delenv(name)
+    inherited = {"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"}
+    for name, value in inherited.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setenv("FLOCKS_KNOWLEDGEBASE_API_TOKEN", "kb-token")
+    monkeypatch.setenv("FLOCKS_KNOWLEDGEBASE_URL", "http://knowledgebase.invalid")
+    return inherited
+
+
 def test_get_shell_windows_prefers_powershell_variants(monkeypatch):
     """Windows shell detection should only consider PowerShell variants."""
     monkeypatch.setattr(bash_module.sys, "platform", "win32")
@@ -109,6 +126,7 @@ async def test_execute_host_windows_uses_explicit_powershell(monkeypatch):
     monkeypatch.setattr(bash_module.asyncio, "create_subprocess_exec", fake_exec)
     monkeypatch.setattr(bash_module.asyncio, "create_subprocess_shell", shell_mock)
     monkeypatch.setattr(bash_module, "_stream_output", fake_stream_output)
+    inherited = _controlled_environ(monkeypatch)
 
     result = await bash_module._execute_host(
         ctx=ctx,
@@ -128,7 +146,7 @@ async def test_execute_host_windows_uses_explicit_powershell(monkeypatch):
                 "stderr": bash_module.asyncio.subprocess.PIPE,
                 "cwd": "/tmp",
                 "env": {
-                    **bash_module.os.environ,
+                    **inherited,
                     "PYTHONIOENCODING": "utf-8",
                     "PYTHONUTF8": "1",
                 },
@@ -158,6 +176,7 @@ async def test_execute_host_unix_still_uses_subprocess_shell(monkeypatch):
     monkeypatch.setattr(bash_module.asyncio, "create_subprocess_shell", fake_shell)
     monkeypatch.setattr(bash_module.asyncio, "create_subprocess_exec", exec_mock)
     monkeypatch.setattr(bash_module, "_stream_output", fake_stream_output)
+    inherited = _controlled_environ(monkeypatch)
 
     result = await bash_module._execute_host(
         ctx=ctx,
@@ -176,6 +195,7 @@ async def test_execute_host_unix_still_uses_subprocess_shell(monkeypatch):
                 "stdout": bash_module.asyncio.subprocess.PIPE,
                 "stderr": bash_module.asyncio.subprocess.PIPE,
                 "cwd": "/tmp",
+                "env": inherited,
                 "start_new_session": True,
             },
         )

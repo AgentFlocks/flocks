@@ -28,6 +28,7 @@ vi.mock('react-i18next', () => ({
   useTranslation: () => ({
     t: (key: string) => ({
       'context.title': 'Context',
+      'context.settings': 'Context settings',
       'context.progress': 'Progress',
       'context.outputs': 'Outputs',
       'context.contextFiles': 'Context files',
@@ -37,10 +38,23 @@ vi.mock('react-i18next', () => ({
       'context.failed': 'Failed',
       'context.unknown': 'Unknown',
       'context.download': 'Download',
+      'dataset.title': 'Knowledge Sets',
+      'dataset.loading': 'Loading Knowledge Sets',
+      'dataset.select': 'Select Knowledge Sets',
+      'dataset.refresh': 'Refresh Knowledge Sets',
+      'dataset.retry': 'Retry Knowledge Sets',
+      'dataset.renderFailed': 'Knowledge Set section unavailable',
       'chat.tool.todoStatus.inProgress': 'in progress',
     }[key] || key),
   }),
 }));
+
+const knowledgeApi = vi.hoisted(() => ({ status: vi.fn(), sessionDatasets: vi.fn(), datasets: vi.fn() }));
+const datasetRenderIssue = vi.hoisted(() => ({ current: null as Promise<void> | Error | null, attempts: 0 }));
+vi.mock('@/api/knowledgebase', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/api/knowledgebase')>();
+  return { ...actual, knowledgebaseAPI: knowledgeApi };
+});
 
 const previewSuspension = vi.hoisted(() => ({ current: null as Promise<void> | null, attempts: 0 }));
 vi.mock('@/components/common/FilePreview', () => ({
@@ -121,6 +135,10 @@ function renderPanel(overrides: Partial<React.ComponentProps<typeof SessionConte
 describe('SessionContextPanel', () => {
   beforeEach(() => {
     vi.resetAllMocks();
+    knowledgeApi.status.mockResolvedValue({ configured: false, ready: false, reason: 'integration_pending' });
+    knowledgeApi.datasets.mockResolvedValue({ items: [], total: 0, page: 1 });
+    datasetRenderIssue.current = null;
+    datasetRenderIssue.attempts = 0;
     previewSuspension.current = null;
     previewSuspension.attempts = 0;
     sessionApi.contextFilePreviewUrl.mockImplementation((sessionId: string, resourceId: string) => `/preview/${sessionId}/${resourceId}`);
@@ -145,6 +163,97 @@ describe('SessionContextPanel', () => {
     expect(screen.getByText('Research')).toBeInTheDocument();
     fireEvent.click(screen.getByText('Skills'));
     expect(screen.getByText('docx')).toBeInTheDocument();
+  });
+
+  it('appends Datasets after Skills without remounting existing Context inputs or sections on Dataset failure/retry', async () => {
+    const user = userEvent.setup();
+    renderPanel();
+    await user.click(screen.getByRole('button', { name: /Skills/ }));
+    const skills = screen.getByRole('button', { name: /Skills/ });
+    const settings = screen.getByRole('region', { name: 'Context settings' });
+    const datasets = within(settings).getByRole('region', { name: 'Knowledge Sets' });
+    expect(within(settings).queryByRole('heading', { name: 'Context settings' })).not.toBeInTheDocument();
+    expect(within(datasets).getByRole('heading', { name: 'Knowledge Sets' })).toHaveClass('text-xs', 'font-semibold', 'text-fg-secondary');
+    expect(skills.compareDocumentPosition(datasets) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    const output = screen.getByText('report.md');
+    const progress = screen.getByText('Write report');
+    const skill = screen.getByText('docx');
+    const search = screen.getByPlaceholderText('context.searchPlaceholder');
+    const selectors = screen.getAllByRole('combobox');
+    await user.type(search, 'report');
+    await user.click(screen.getByTitle('context.addFolder'));
+    const folderInput = screen.getByPlaceholderText('context.folderPathPlaceholder');
+    await user.type(folderInput, '/preserve/draft');
+    knowledgeApi.status.mockResolvedValue({ configured: true, ready: true });
+    knowledgeApi.sessionDatasets.mockRejectedValue(new Error('Dataset GET failed'));
+    await user.click(screen.getByRole('button', { name: 'Refresh Knowledge Sets' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('Dataset GET failed');
+    knowledgeApi.sessionDatasets.mockResolvedValue({ session_id: 'sess-1', source_session_id: 'sess-1', inherited: false, editable: true, dataset_ids: [], datasets: [], unavailable_ids: [] });
+    await user.click(screen.getByRole('button', { name: 'Retry Knowledge Sets' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Select Knowledge Sets' })).toBeEnabled());
+    expect(screen.getByPlaceholderText('context.searchPlaceholder')).toBe(search);
+    expect(search).toHaveValue('report');
+    expect(screen.getByPlaceholderText('context.folderPathPlaceholder')).toBe(folderInput);
+    expect(folderInput).toHaveValue('/preserve/draft');
+    expect(screen.getAllByRole('combobox')).toEqual(selectors);
+    expect(screen.getByText('report.md')).toBe(output);
+    expect(screen.getByText('Write report')).toBe(progress);
+    expect(screen.getByText('docx')).toBe(skill);
+    expect(sessionApi.addContextFolder).not.toHaveBeenCalled();
+  });
+
+  it.each(['suspension', 'render error'])('contains Dataset %s locally without blanking or resetting existing Context', async (failure) => {
+    const user = userEvent.setup();
+    const suspension = deferred<void>();
+    const status = deferred<{ configured: boolean; ready: boolean }>();
+    knowledgeApi.status.mockReturnValue(status.promise);
+    knowledgeApi.sessionDatasets.mockResolvedValue({
+      session_id: 'sess-1', source_session_id: 'sess-1', inherited: false, editable: true,
+      dataset_ids: ['research'], unavailable_ids: [],
+      datasets: [{
+        id: 'research',
+        description: '',
+        document_count: 1,
+        chunk_count: 0,
+        get name() {
+          if (datasetRenderIssue.current) {
+            datasetRenderIssue.attempts += 1;
+            throw datasetRenderIssue.current;
+          }
+          return 'Research Dataset';
+        },
+      }],
+    });
+    const errorLog = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      render(<React.Suspense fallback={<div>Outer panel suspended</div>}>
+        <SessionContextPanel sessionId="sess-1" snapshot={snapshot} loading={false} onClose={vi.fn()} onRefresh={vi.fn()} onFocusMessage={vi.fn()} />
+      </React.Suspense>);
+      const output = screen.getByText('report.md');
+      const search = screen.getByPlaceholderText('context.searchPlaceholder');
+      await user.type(search, 'report');
+      await user.click(screen.getByRole('button', { name: /Skills/ }));
+      const skill = screen.getByText('docx');
+      datasetRenderIssue.current = failure === 'suspension' ? suspension.promise : new Error('Dataset render failed');
+      await act(async () => status.resolve({ configured: true, ready: true }));
+      await waitFor(() => expect(datasetRenderIssue.attempts).toBeGreaterThan(0));
+      expect(screen.queryByText('Outer panel suspended')).not.toBeInTheDocument();
+      expect(screen.getByText('report.md')).toBe(output);
+      expect(screen.getByText('docx')).toBe(skill);
+      expect(search).toBeVisible();
+      expect(search).toHaveValue('report');
+      datasetRenderIssue.current = null;
+      if (failure === 'suspension') await act(async () => suspension.resolve());
+      else {
+        expect(screen.getByRole('alert')).toHaveTextContent('Knowledge Set section unavailable');
+        await user.click(screen.getByRole('button', { name: 'Retry Knowledge Sets' }));
+      }
+      expect(await screen.findByText('Research Dataset')).toBeVisible();
+      expect(screen.getByPlaceholderText('context.searchPlaceholder')).toBe(search);
+      expect(screen.getByText('report.md')).toBe(output);
+    } finally {
+      errorLog.mockRestore();
+    }
   });
 
   it.each([

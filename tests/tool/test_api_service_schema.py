@@ -1,6 +1,19 @@
 from flocks.tool.schema.api_service_schema import _build_api_service_credential_schema
 
 
+def test_native_group_never_enters_credential_schema() -> None:
+    fields = _build_api_service_credential_schema(
+        "example_api",
+        {"group": "Operations", "credential_fields": [
+            {"key": "group", "storage": "config", "config_key": "group"},
+            {"key": "alias", "storage": "secret", "config_key": "group"},
+            {"key": "username", "storage": "config", "config_key": "username"},
+        ]},
+    )
+    assert [field.key for field in fields] == ["username"]
+    assert _build_api_service_credential_schema("example_api", {"group": "Operations"}) == []
+
+
 def test_credential_schema_preserves_internal_fields() -> None:
     fields = _build_api_service_credential_schema(
         "webcli_device",

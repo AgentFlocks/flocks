@@ -1,4 +1,5 @@
 name: ngtip_platform
+group: 威胁情报
 description: >
   NGTIP Platform Function grouped tool. Use the `action` parameter to access
   intelligence management, asset management, user management, intelligence

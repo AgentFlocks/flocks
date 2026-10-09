@@ -1,4 +1,5 @@
 name: onesec_threat
+group: EDR/HIDS
 description: >
   OneSEC threat protection grouped tool. Use the `action` parameter to access
   antivirus version and scan task APIs. Configure the OneSEC service with

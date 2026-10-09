@@ -346,6 +346,10 @@ class SkillInstaller:
                 success=False,
                 error=f"Skill install timed out after {_INSTALL_TIMEOUT_SEC}s: {source}",
             )
+        except ValueError as exc:
+            # Native metadata/readonly preflight failures are install failures,
+            # not server errors or a reason to try a different shadowing source.
+            return SkillInstallResult(success=False, error=str(exc))
         finally:
             _OVERWRITE_ALLOWED.reset(token)
 
@@ -595,6 +599,7 @@ class SkillInstaller:
         """Copy staged agent skill directories into Flocks skill storage."""
         install_root = _resolve_install_root(scope)
         imported: List[tuple[str, Path]] = []
+        prepared: list[tuple[str, Path, Path, str]] = []
         seen: set[Path] = set()
         candidate_roots = [
             staging / ".flocks" / "plugins" / "skills",
@@ -612,7 +617,7 @@ class SkillInstaller:
                     continue
                 seen.add(skill_dir)
                 try:
-                    content = skill_md.read_text(encoding="utf-8")
+                    content = skill_md.read_bytes().decode("utf-8")
                 except Exception:
                     continue
                 data = Skill._parse_frontmatter(content)
@@ -620,10 +625,15 @@ class SkillInstaller:
                 if not name or not Skill._is_valid_name(name):
                     continue
                 dest = install_root / name
-                if dest.exists():
-                    shutil.rmtree(dest)
-                shutil.copytree(skill_dir, dest)
-                imported.append((name, dest / "SKILL.md"))
+                content = Skill.preserve_install_group(dest / "SKILL.md", content, scope=scope, name=name)
+                prepared.append((name, skill_dir, dest, content))
+        # Preflight the whole CLI import before replacing even the first skill.
+        for name, skill_dir, dest, content in prepared:
+            if dest.exists():
+                shutil.rmtree(dest)
+            shutil.copytree(skill_dir, dest)
+            (dest / "SKILL.md").write_bytes(content.encode("utf-8"))
+            imported.append((name, dest / "SKILL.md"))
         return imported
 
     @classmethod
@@ -705,6 +715,9 @@ class SkillInstaller:
 
                 install_root = _resolve_install_root(scope)
                 skill_dir = install_root / skill_name
+                skill_md_content = Skill.preserve_install_group(
+                    skill_dir / "SKILL.md", skill_md_content, scope=scope, name=skill_name,
+                )
                 skill_dir.mkdir(parents=True, exist_ok=True)
 
                 for zip_entry in names_in_zip:
@@ -715,14 +728,17 @@ class SkillInstaller:
                         continue
                     dest = (skill_dir / zip_entry).resolve()
                     # Zip Slip prevention: ensure dest stays inside skill_dir
-                    if not str(dest).startswith(str(skill_dir.resolve())):
+                    if not dest.is_relative_to(skill_dir.resolve()):
                         log.warn("skill.install.clawhub.zip_slip", {
                             "entry": zip_entry,
                             "skill": name,
                         })
                         continue
                     dest.parent.mkdir(parents=True, exist_ok=True)
-                    dest.write_bytes(zf.read(zip_entry))
+                    dest.write_bytes(
+                        skill_md_content.encode("utf-8") if dest == skill_dir.resolve() / "SKILL.md"
+                        else zf.read(zip_entry)
+                    )
 
         except zipfile.BadZipFile:
             return SkillInstallResult(
@@ -922,6 +938,10 @@ class SkillInstaller:
                     continue
 
             skill_root = _resolve_install_root(scope) / name
+            try:
+                content = Skill.preserve_install_group(skill_root / "SKILL.md", content, scope=scope, name=name)
+            except ValueError as exc:
+                return SkillInstallResult(success=False, error=str(exc))
             skill_root.mkdir(parents=True, exist_ok=True)
             skill_root_resolved = skill_root.resolve()
             prefix = f"{skill_dir}/"
@@ -938,7 +958,9 @@ class SkillInstaller:
                 except ValueError:
                     continue
                 dest.parent.mkdir(parents=True, exist_ok=True)
-                dest.write_bytes(zf.read(member))
+                dest.write_bytes(
+                    content.encode("utf-8") if dest == skill_root_resolved / "SKILL.md" else zf.read(member)
+                )
                 file_count += 1
 
             Skill.clear_cache()
@@ -1041,11 +1063,19 @@ class SkillInstaller:
             )
 
         skill_dir = _resolve_install_root(scope) / name
+        try:
+            skill_md_content = Skill.preserve_install_group(
+                skill_dir / "SKILL.md", skill_md_content, scope=scope, name=name,
+            )
+        except ValueError as exc:
+            return SkillInstallResult(success=False, error=str(exc))
         skill_dir.mkdir(parents=True, exist_ok=True)
+        (skill_dir / "SKILL.md").write_bytes(skill_md_content.encode("utf-8"))
 
-        # Recursively download all files preserving directory structure
-        file_count = await cls._download_github_entries(
-            client, entries, skill_dir, relative_base=""
+        # Reuse the already-validated SKILL.md response; a second download must
+        # not bypass the preservation/readonly checks with different content.
+        file_count = 1 + await cls._download_github_entries(
+            client, [entry for entry in entries if entry["name"] != "SKILL.md"], skill_dir, relative_base=""
         )
 
         Skill.clear_cache()
@@ -1077,6 +1107,8 @@ class SkillInstaller:
         for entry in entries:
             entry_type = entry.get("type")
             entry_name = entry.get("name", "")
+            if not entry_name or entry_name in {".", ".."} or "/" in entry_name or "\\" in entry_name:
+                continue
             rel_path = f"{relative_base}/{entry_name}".lstrip("/")
 
             if entry_type == "file":
@@ -1197,7 +1229,7 @@ class SkillInstaller:
             return SkillInstallResult(success=False, error=f"File not found: {path}")
 
         try:
-            content = local_path.read_text(encoding="utf-8")
+            content = local_path.read_bytes().decode("utf-8")
         except Exception as exc:
             return SkillInstallResult(success=False, error=f"Cannot read file: {exc}")
 
@@ -1243,8 +1275,12 @@ class SkillInstaller:
                 success=False,
                 error=f"Skill already exists: {name}. Pass overwrite=true to replace it.",
             )
+        try:
+            content = Skill.preserve_install_group(skill_path, content, scope=scope, name=name)
+        except ValueError as exc:
+            return SkillInstallResult(success=False, error=str(exc))
         skill_dir.mkdir(parents=True, exist_ok=True)
-        skill_path.write_text(content, encoding="utf-8")
+        skill_path.write_bytes(content.encode("utf-8"))
 
         Skill.clear_cache()
         log.info("skill.install.saved", {"name": name, "path": str(skill_path)})

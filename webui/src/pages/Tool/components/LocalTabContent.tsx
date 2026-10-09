@@ -11,11 +11,15 @@ import { getLocalizedToolDescription } from '../toolDisplay';
 import {
   SERVICE_TAB_ACTIONS_CELL,
   SERVICE_TAB_BADGE_CELL,
+  SERVICE_TAB_CARD_CLASS,
+  SERVICE_TAB_CARD_GRID_COLS,
   SERVICE_TAB_GRID_COLS,
   SERVICE_TAB_NAME_CELL,
   SERVICE_TAB_ROW_CLASS,
   SERVICE_TAB_STATS_CELL,
 } from './gridLayout';
+import type { GroupDrag } from '@/components/plugin-groups/GroupNav';
+import PluginGroupButton from '@/components/plugin-groups/PluginGroupButton';
 
 interface LocalTabContentProps {
   tools: Tool[];
@@ -23,6 +27,8 @@ interface LocalTabContentProps {
   selectedToolName?: string | null;
   onSelectTool: (tool: Tool) => void;
   onRefreshTools: () => Promise<void>;
+  groupDrag?: GroupDrag;
+  viewMode?: 'list' | 'cards';
 }
 
 export default function LocalTabContent({
@@ -31,6 +37,8 @@ export default function LocalTabContent({
   selectedToolName,
   onSelectTool,
   onRefreshTools,
+  groupDrag,
+  viewMode = 'list',
 }: LocalTabContentProps) {
   const { t, i18n } = useTranslation('tool');
   const [selectedCategory, setSelectedCategory] = useState<string>('all');
@@ -100,7 +108,7 @@ export default function LocalTabContent({
           description={searchQuery ? t('empty.tryOtherKeywords') : t('local.noToolsDesc')}
         />
       ) : (
-        <div className="bg-surface border border-line rounded-control overflow-x-auto divide-y divide-line">
+        <div className={viewMode === 'list' ? 'bg-surface border border-line rounded-control overflow-x-auto divide-y divide-line' : 'grid gap-3 sm:grid-cols-2 xl:grid-cols-3'}>
           {filteredTools.map((tool) => {
             const isSelected = selectedToolName === tool.name;
             const description = getLocalizedToolDescription(tool, i18n.language);
@@ -108,8 +116,9 @@ export default function LocalTabContent({
             return (
               <div
                 key={tool.name}
-                className={`${SERVICE_TAB_ROW_CLASS} transition-colors ${isSelected ? 'bg-info-soft' : 'hover:bg-hover'}`}
-                style={{ gridTemplateColumns: SERVICE_TAB_GRID_COLS }}
+                {...groupDrag?.dragProps(tool.name)}
+                className={`${viewMode === 'list' ? SERVICE_TAB_ROW_CLASS : SERVICE_TAB_CARD_CLASS} transition-colors ${isSelected ? 'bg-info-soft' : `${viewMode === 'cards' ? 'bg-surface ' : ''}hover:bg-hover`}`}
+                style={{ gridTemplateColumns: viewMode === 'list' ? SERVICE_TAB_GRID_COLS : SERVICE_TAB_CARD_GRID_COLS }}
               >
                 {/* Icon */}
                 <div className={`w-8 h-8 flex items-center justify-center rounded-control ${tool.enabled ? 'bg-info-soft' : 'bg-subtle'}`}>
@@ -166,7 +175,8 @@ export default function LocalTabContent({
                 </div>
 
                 {/* Actions column */}
-                <div className={`${SERVICE_TAB_ACTIONS_CELL} gap-1.5`}>
+                <div className={`${SERVICE_TAB_ACTIONS_CELL} flex-wrap gap-1.5`}>
+                  {groupDrag && <PluginGroupButton grouping={groupDrag} itemKey={tool.name} iconOnly className="border border-line hover:border-line-control" />}
                   {tool.enabled ? (
                     <>
                       <button

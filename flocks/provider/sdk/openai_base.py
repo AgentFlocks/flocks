@@ -468,6 +468,12 @@ def _normalize_stream_usage(raw_usage: Any) -> Optional[Dict[str, int]]:
     )
     cache_read_tokens = getattr(raw_usage, "cache_read_input_tokens", 0) or 0
     cache_write_tokens = getattr(raw_usage, "cache_creation_input_tokens", 0) or 0
+    cache_tokens_in_prompt = _cache_tokens_in_prompt(
+        raw_usage,
+        prompt_tokens,
+        cache_read_tokens,
+        cache_write_tokens,
+    )
 
     if not any(
         [
@@ -492,7 +498,44 @@ def _normalize_stream_usage(raw_usage: Any) -> Optional[Dict[str, int]]:
         usage["cache_read_input_tokens"] = cache_read_tokens
     if cache_write_tokens:
         usage["cache_creation_input_tokens"] = cache_write_tokens
+    if cache_tokens_in_prompt:
+        usage["cache_tokens_in_prompt"] = cache_tokens_in_prompt
     return usage
+
+
+def _cache_tokens_in_prompt(
+    raw_usage: Any,
+    prompt_tokens: int,
+    cache_read_tokens: int,
+    cache_write_tokens: int,
+) -> int:
+    """How many of the Anthropic-style cache tokens ``prompt_tokens`` likely counts.
+
+    Flocks reads ``cache_read_input_tokens`` / ``cache_creation_input_tokens``
+    as Anthropic reports them: on top of an uncached ``prompt_tokens``.
+    LiteLLM (proxy or SDK) instead counts cached tokens into ``prompt_tokens``
+    as OpenAI does (its own Anthropic, Bedrock and Gemini mappings, and its
+    documented usage format) and repeats them in those top-level fields, so
+    adding them back counts the cache twice.
+
+    The report is recognised by LiteLLM's fingerprint: its ``Usage`` copies
+    the top-level fields into ``prompt_tokens_details``.  That copy is made
+    whatever ``prompt_tokens`` means, so a gateway passing Anthropic's own
+    numbers through LiteLLM looks the same; the runner therefore checks the
+    result against the size of the request it sent before relying on it.
+    """
+    if not cache_read_tokens and not cache_write_tokens:
+        return 0
+    details = getattr(raw_usage, "prompt_tokens_details", None)
+    details_read = getattr(details, "cached_tokens", 0) or 0
+    details_write = getattr(details, "cache_creation_tokens", 0) or 0
+    included = 0
+    if cache_read_tokens and details_read == cache_read_tokens:
+        included += cache_read_tokens
+    if cache_write_tokens and details_write == cache_write_tokens:
+        included += cache_write_tokens
+    # A prompt smaller than its cached part cannot contain it.
+    return included if prompt_tokens >= included else 0
 
 
 def _supports_include_usage_fallback(exc: Exception) -> bool:

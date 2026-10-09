@@ -1,4 +1,5 @@
 name: tdp_privacy_diagram
+group: NDR
 description: >
   查询 TDP 明文敏感信息拓扑概览，返回标签、站点、接口和访问源关系。优先使用顶层语义化参数，
   例如敏感标签、HTTP 方法、业务组和 URL/IP 模糊条件；`condition` 仅作为高级兼容入口。

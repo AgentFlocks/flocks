@@ -1,4 +1,5 @@
 name: skyeye_download_pcap
+group: NDR
 description: >
   下载 SkyEye 告警关联的 PCAP 包。通常需要传入告警发生当天对应的
   `start_time` / `end_time` 查询窗口，并返回文件内容的 base64、

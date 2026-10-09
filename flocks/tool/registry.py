@@ -5,7 +5,9 @@ Provides a framework for registering, discovering, and executing tools.
 Compatible with Flocks's TypeScript Tool system.
 """
 
+import ast
 import asyncio
+import copy
 import importlib
 import json
 import os
@@ -19,7 +21,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional, Set
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+from pydantic_core import PydanticCustomError
 
 from flocks.utils.log import Log
 
@@ -92,6 +95,37 @@ class ToolSchema(BaseModel):
         return schema
 
 
+def normalize_tool_group(value: Optional[str]) -> Optional[str]:
+    """Validate native tool grouping metadata (not a runtime parameter)."""
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise PydanticCustomError("group_type", "group must be a string or null")
+    value = value.strip()
+    if len(value) > 32:
+        raise PydanticCustomError("group_length", "group must be at most 32 characters")
+    if any(ord(char) < 32 or ord(char) == 127 for char in value):
+        raise PydanticCustomError("group_control", "group cannot contain control characters")
+    return value
+
+
+def is_shipped_tool_path(path: Path) -> bool:
+    """Whether the resolved definition belongs to the installation's native tools.
+
+    Deliberately independent of cwd, Instance, ``native`` and plugin names.
+    User/Hub copies (and symlinks pointing outside the installation) stay editable.
+    """
+    root = Path(__file__).resolve().parents[2] / ".flocks" / "plugins" / "tools"
+    return Path(path).resolve().is_relative_to(root.resolve())
+
+
+def validate_tool_definition_group(path: Path, current: Mapping[str, Any], updates: Mapping[str, Any]) -> None:
+    """Preflight a partial native definition update before writing other fields."""
+    if "group" in updates and is_shipped_tool_path(path):
+        if normalize_tool_group(updates["group"]) != normalize_tool_group(current.get("group")):
+            raise ValueError("System tool group is read-only")
+
+
 class ToolInfo(BaseModel):
     """Tool information"""
     name: str = Field(..., description="Tool name (unique identifier)")
@@ -132,6 +166,11 @@ class ToolInfo(BaseModel):
             "'sangfor', 'qingteng'. None for non-device tools."
         ),
     )
+
+    group: Optional[str] = Field(None, description="Optional plugin group")
+    group_readonly: bool = Field(False, description="Computed from the actual system definition source")
+
+    _validate_group = field_validator("group", mode="before")(normalize_tool_group)
 
     def get_schema(self) -> ToolSchema:
         """Generate JSON Schema for this tool."""
@@ -230,6 +269,7 @@ class ToolContext:
         permission_callback: Optional[Callable[[PermissionRequest], Awaitable[None]]] = None,
         metadata_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
         event_publish_callback: Optional[Callable[[str, Dict[str, Any]], Awaitable[None]]] = None,
+        input_patch_callback: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
     ):
         self.session_id = session_id
         self.message_id = message_id
@@ -241,6 +281,27 @@ class ToolContext:
         self._metadata_callback = metadata_callback
         self._metadata: Dict[str, Any] = {}
         self.event_publish_callback = event_publish_callback
+        self._input_patch_callback = input_patch_callback
+
+    async def notify_input_patched(self, effective_input: Dict[str, Any]) -> None:
+        """Report the input the handler will actually receive after a
+        ``tool.execute.before`` hook patched it.
+
+        Only called when a hook changed the input; the caller (session stream
+        layer) uses it to refresh what the UI shows for the running tool.
+        A failing callback must not block execution.
+        """
+        if self._input_patch_callback is None:
+            return
+        try:
+            await self._input_patch_callback(dict(effective_input))
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            log.warn("tool.input_patch_callback.error", {
+                "call_id": self.call_id,
+                "error": str(exc),
+            })
 
     @property
     def abort(self) -> asyncio.Event:
@@ -628,6 +689,8 @@ class Tool:
                 HookDecisionAction,
                 ToolDecision,
                 ToolExecutionOutcome,
+                merge_redacted_rewrite,
+                restore_redacted_echo,
             )
             from flocks.hooks.execution import (
                 current_execution_context,
@@ -667,28 +730,60 @@ class Tool:
             result: ToolResult | None = None
             terminal_status = "error"
             terminal_error: BaseException | None = None
+            input_patched = False
             try:
                 from flocks.hooks.tool_gate import run_tool_gate, take_carried_decision
 
-                # A caller that already ran the gate for this call passes its
-                # verdict down rather than having the handlers asked twice.
+                # The only tool.execute.before firing for this call: the
+                # session stream layer does not run it again (it learns about
+                # an input rewrite via notify_input_patched), and a caller that
+                # already ran the gate passes its verdict down rather than
+                # having the handlers asked twice.
                 verdict = take_carried_decision(
                     ctx.extra, call_id=getattr(ctx, "call_id", None)
                 )
+                original_kwargs = coerced_kwargs
+                legacy_base = coerced_kwargs
+                rewritten: Dict[str, Any] = {}
                 if verdict is None:
+                    # The flat legacy keys travel next to the contract, as they did
+                    # when the stream layer fired this gate: a handler written
+                    # against the old shape rewrites ``tool.input`` in place. Give
+                    # it a deep copy so nothing it mutates reaches the handler
+                    # unseen. Hooks on ``tool.input.rewrite`` do not need it.
+                    legacy_input = copy.deepcopy(coerced_kwargs)
                     verdict = await run_tool_gate(
-                        payload,
+                        {
+                            **payload,
+                            "sessionID": ctx.session_id,
+                            "workspace": tool_context_extra.get("workspace_dir"),
+                            "agent": ctx.agent,
+                            "tool": {
+                                "name": self.info.name,
+                                "input": legacy_input,
+                                "callID": getattr(ctx, "call_id", None),
+                            },
+                        },
                         call_id=getattr(ctx, "call_id", None),
-                        tool_input=raw_kwargs,
+                        tool_input=legacy_input,
                     )
+                    # One gate pass authorizes the call (approvals and audit run
+                    # once). Policies judged the redact_sensitive view, so an
+                    # in-place rewrite may only fill values hidden there: the
+                    # secrets the Pro redaction hook restores. Anything a policy
+                    # can see must come through validated_input_patch.
+                    rewritten = verdict.tool_input or {}
+                    legacy_base = merge_redacted_rewrite(coerced_kwargs, rewritten)
                 decision = verdict.decision
-                if decision.validated_input_patch:
-                    patched_kwargs = {
-                        **coerced_kwargs,
-                        **dict(decision.validated_input_patch),
-                    }
+                if decision.validated_input_patch or legacy_base != coerced_kwargs:
+                    # Hooks see the redact_sensitive view; never let an echoed
+                    # "[REDACTED]" marker replace the real (restored) secret.
+                    patch = restore_redacted_echo(
+                        legacy_base,
+                        dict(decision.validated_input_patch or {}),
+                    )
                     patched_kwargs, _ = _remap_schema_kwargs(
-                        patched_kwargs,
+                        {**legacy_base, **patch},
                         declared_param_names,
                         tool_name=self.info.name,
                     )
@@ -721,7 +816,21 @@ class Tool:
                         tool_context_extra=tool_context_extra,
                         validated_input=coerced_kwargs,
                     )
-
+                input_patched = coerced_kwargs != original_kwargs
+                dropped = sorted(
+                    key for key in set(rewritten) | set(original_kwargs)
+                    if rewritten
+                    and rewritten.get(key) != original_kwargs.get(key)
+                    and rewritten.get(key) != coerced_kwargs.get(key)
+                )
+                if dropped:
+                    # Visible values a legacy hook changed in place without
+                    # also patching them through the contract.
+                    log.warn("tool.legacy_input_rewrite.ignored", {
+                        "tool": self.info.name,
+                        "call_id": getattr(ctx, "call_id", None),
+                        "keys": dropped,
+                    })
                 if decision.action is HookDecisionAction.DENY:
                     terminal_status = "deny"
                     result = ToolResult(
@@ -744,6 +853,8 @@ class Tool:
                         },
                     )
                 else:
+                    if input_patched:
+                        await ctx.notify_input_patched(coerced_kwargs)
                     result = await self.handler(ctx, **coerced_kwargs)
                     terminal_status = "success" if result.success else "error"
             except asyncio.CancelledError as exc:
@@ -848,6 +959,55 @@ class ToolRegistry:
     Compatible with Flocks's Tool Registry pattern.
     """
 
+    _builtin_module_groups = [
+        # file/ — filesystem operations
+        (
+            "flocks.tool.file",
+            [
+                "read",
+                "write",
+                "edit",
+                "apply_patch",
+                "glob",
+                "doc_parser",
+                "delete",
+                "move",
+                "copy",
+                "mkdir",
+            ],
+        ),
+        # code/ — code analysis + terminal
+        ("flocks.tool.code", ["bash", "grep", "lsp_tool"]),
+        # web/ — internet access
+        ("flocks.tool.web", ["webfetch", "websearch"]),
+        # Owner-scoped, read-only Knowledgebase retrieval (connection is lazy).
+        ("flocks.tool", ["knowledgebase"]),
+        # agent/ — agent delegation/coordination
+        ("flocks.tool.agent", ["delegate_task", "task", "communication"]),
+        # task/ — task/workflow
+        ("flocks.tool.task", [
+            "schedule_task_center",
+            "todo",
+            "run_workflow",
+            "run_workflow_node",
+            "workflow_config_manage",
+        ]),
+        # security/ — SSH forensics + threat intelligence (optional: asyncssh)
+        ("flocks.tool.security", ["ssh_host_cmd", "ssh_run_script"]),
+        # system/ — questions, model config, memory, MCP management, session management, slash commands
+        ("flocks.tool.system", ["question", "plan_exit", "model_config", "memory", "flocks_mcp", "session_manage", "slash_command", "tool_search"]),
+        # skill/ — skill management (search, install, status, deps, remove, load)
+        ("flocks.tool.skill", ["flocks_skills", "skill_load"]),
+        # device/ — security device asset context and status probes
+        ("flocks.tool.device", ["manage_tool"]),
+        # channel/ — IM platform messaging
+        ("flocks.tool.channel", ["channel_message", "im_send_message"]),
+        # wecom/ — 企业微信 MCP（文档、智能表格）
+        ("flocks.tool.wecom", ["wecom_mcp"]),
+        # invalid-argument fallback tool (excluded from search/callable schema by name)
+        ("flocks.tool", ["invalid"]),
+    ]
+
     _tools: Dict[str, Tool] = {}
     _initialized: bool = False
     _dynamic_modules: Dict[str, str] = {}
@@ -883,8 +1043,79 @@ class ToolRegistry:
     _enabled_defaults: Dict[str, bool] = {}
 
     @classmethod
+    def _core_definition_paths(cls) -> List[Path]:
+        package_root = Path(__file__).resolve().parents[1]
+        return [
+            package_root.joinpath(*package.split(".")[1:], f"{module}.py").resolve()
+            for package, modules in cls._builtin_module_groups
+            for module in modules
+        ] + [Path(__file__).resolve()]
+
+    @classmethod
+    def _is_core_handler(cls, handler: Callable) -> bool:
+        code = getattr(handler, "__code__", None)
+        return code is not None and Path(code.co_filename).resolve() in cls._core_definition_paths()
+
+    @classmethod
+    def _definition_group_readonly(cls, tool: Tool) -> bool:
+        definition = getattr(tool, "_yaml_path", None) or getattr(tool, "_definition_path", None)
+        if definition is not None:
+            return is_shipped_tool_path(definition)
+        if cls._is_core_handler(tool.handler):
+            return True
+        code = getattr(tool.handler, "__code__", None)
+        return code is not None and is_shipped_tool_path(Path(code.co_filename))
+
+    @classmethod
+    def validate_group_settings(cls, settings: Mapping[str, Any]) -> None:
+        """Preflight incoming tool_settings without loading plugins or config.
+
+        Safe inside ConfigWriter and generic config preflight: enabled-only
+        entries do nothing, and even a cold registry uses metadata-only reads.
+        No bootstrap, config overlay, plugin execution or ConfigWriter calls.
+        """
+        for name, entry in settings.items():
+            if not isinstance(entry, Mapping) or "group" not in entry:
+                continue
+            desired = normalize_tool_group(entry["group"])
+            tool = cls._tools.get(name)
+            if tool is not None:
+                readonly = cls._definition_group_readonly(tool)
+                group = tool.info.group
+            else:
+                readonly, group = cls._unloaded_definition_group(name)
+            if readonly and desired != normalize_tool_group(group):
+                raise ValueError(f"System tool group is read-only: {name}")
+
+    @classmethod
+    def _unloaded_definition_group(cls, name: str) -> tuple[bool, Optional[str]]:
+        # Core registration wins over plugin discovery, including modules
+        # imported before init and intentionally non-native core tools.
+        for path in cls._core_definition_paths():
+            if not path.is_file():
+                continue
+            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+                if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+                    continue
+                if node.func.attr != "register_function":
+                    continue
+                fields = {kw.arg: kw.value for kw in node.keywords}
+                name_node = fields.get("name")
+                if isinstance(name_node, ast.Constant) and name_node.value == name:
+                    group_node = fields.get("group")
+                    group = ast.literal_eval(group_node) if group_node is not None else None
+                    return True, normalize_tool_group(group)
+        from flocks.tool.tool_loader import find_yaml_tool, _read_yaml_raw
+
+        path = find_yaml_tool(name)
+        if path is not None and is_shipped_tool_path(path):
+            return True, normalize_tool_group(_read_yaml_raw(path).get("group"))
+        return False, None
+
+    @classmethod
     def register(cls, tool: Tool) -> None:
         """Register a tool"""
+        tool.info.group_readonly = cls._definition_group_readonly(tool)
         try:
             from flocks.tool.catalog import apply_tool_catalog_defaults
 
@@ -1006,6 +1237,7 @@ class ToolRegistry:
         always_load: Optional[bool] = None,
         tags: Optional[List[str]] = None,
         enabled: bool = True,
+        group: Optional[str] = None,
     ) -> Callable[[ToolHandler], ToolHandler]:
         """
         Decorator to register a function as a tool.
@@ -1036,6 +1268,7 @@ class ToolRegistry:
                 "always_load": always_load,
                 "tags": list(tags or []),
                 "enabled": enabled,
+                "group": group,
             }
             if native is not None:
                 info_kwargs["native"] = native
@@ -1095,6 +1328,21 @@ class ToolRegistry:
         **kwargs
     ) -> ToolResult:
         """Execute a tool by name"""
+        from flocks.session.runtime_controls import runtime_controls
+
+        controls = runtime_controls.get()
+        if controls is not None:
+            controls.check_budget()
+            denial = controls.denial(tool_name)
+            if denial:
+                return ToolResult(success=False, error=denial)
+            if controls.sandbox_required:
+                sandbox = ctx.extra.get("sandbox") if ctx else None
+                if not sandbox or not sandbox.get("container_name"):
+                    return ToolResult(success=False, error="Required sandbox is unavailable; refusing host execution")
+                if ctx.extra.get("sandbox_elevated"):
+                    return ToolResult(success=False, error="Elevated host execution is disabled in headless sandbox mode")
+
         tool = cls.get(tool_name)
         if not tool:
             return ToolResult(
@@ -1534,6 +1782,10 @@ class ToolRegistry:
         immediately disable it.  Existing explicit user choices
         (``enabled: false``) are never overwritten.
         """
+        from flocks.config.runtime import runtime_config
+        if runtime_config.get() is not None:
+            # Headless overrides must never bootstrap persistent user settings.
+            return
         try:
             from flocks.config.config_writer import ConfigWriter
             from flocks.tool.tool_loader import API_LIKE_SOURCES
@@ -1848,12 +2100,16 @@ class ToolRegistry:
                 info = ToolInfo(
                     name=name,
                     description=spec.get("description", ""),
+                    group=spec.get("group"),
                     category=category,
                     parameters=params,
                     source="plugin_py",
                     native=is_native,
                 )
-                cls.register(Tool(info=info, handler=handler))
+                tool = Tool(info=info, handler=handler)
+                if Path(source).is_file():
+                    tool._definition_path = Path(source)
+                cls.register(tool)
             return errors
 
         def _dedup_key(item: Any) -> str:
@@ -1879,61 +2135,12 @@ class ToolRegistry:
     def _register_builtin_tools(cls) -> None:
         """Register built-in tools by importing tool modules.
 
-        All tools registered during these imports are marked ``native=True``
-        after the fact.  Using a post-import bulk update means individual
-        ``@register_function`` call sites don't need to pass ``native=True``
-        explicitly, and user plugin Python files that also use
-        ``@register_function`` won't accidentally inherit native status.
+        Reconcile actual core handlers, including previously imported modules.
+        Implicit native flags default to True; explicit False remains meaningful
+        for discovery/search. Group ownership is independent of that flag, and
+        imported user plugins never inherit core status from the import delta.
         """
-        before = set(cls._tools.keys())
-
-        _tool_groups = [
-            # file/ — filesystem operations
-            (
-                "flocks.tool.file",
-                [
-                    "read",
-                    "write",
-                    "edit",
-                    "apply_patch",
-                    "glob",
-                    "doc_parser",
-                    "delete",
-                    "move",
-                    "copy",
-                    "mkdir",
-                ],
-            ),
-            # code/ — code analysis + terminal
-            ("flocks.tool.code", ["bash", "grep", "lsp_tool"]),
-            # web/ — internet access
-            ("flocks.tool.web", ["webfetch", "websearch"]),
-            # agent/ — agent delegation/coordination
-            ("flocks.tool.agent", ["delegate_task", "task"]),
-            # task/ — task/workflow
-            ("flocks.tool.task", [
-                "schedule_task_center",
-                "todo",
-                "run_workflow",
-                "run_workflow_node",
-                "workflow_config_manage",
-            ]),
-            # security/ — SSH forensics + threat intelligence (optional: asyncssh)
-            ("flocks.tool.security", ["ssh_host_cmd", "ssh_run_script"]),
-            # system/ — questions, model config, memory, MCP management, session management, slash commands
-            ("flocks.tool.system", ["question", "plan_exit", "model_config", "memory", "flocks_mcp", "session_manage", "slash_command", "tool_search"]),
-            # skill/ — skill management (search, install, status, deps, remove, load)
-            ("flocks.tool.skill", ["flocks_skills", "skill_load"]),
-            # device/ — security device asset context and status probes
-            ("flocks.tool.device", ["manage_tool"]),
-            # channel/ — IM platform messaging
-            ("flocks.tool.channel", ["channel_message", "im_send_message"]),
-            # wecom/ — 企业微信 MCP（文档、智能表格）
-            ("flocks.tool.wecom", ["wecom_mcp"]),
-            # invalid-argument fallback tool (excluded from search/callable schema by name)
-            ("flocks.tool", ["invalid"]),
-        ]
-        for package, modules in _tool_groups:
+        for package, modules in cls._builtin_module_groups:
             for mod_name in modules:
                 try:
                     importlib.import_module(f"{package}.{mod_name}")
@@ -1944,8 +2151,12 @@ class ToolRegistry:
         # explicitly declare native. This keeps the default convenient for
         # built-ins while preserving native=False for management tools that
         # should be discovered through tool_search.
-        for name in set(cls._tools.keys()) - before:
-            tool = cls._tools[name]
+        for tool in cls._tools.values():
+            if getattr(tool, "_yaml_path", None) or getattr(tool, "_definition_path", None):
+                continue
+            if not cls._is_core_handler(tool.handler):
+                continue
+            tool.info.group_readonly = True
             fields_set = getattr(tool.info, "model_fields_set", None)
             if fields_set is None:
                 fields_set = getattr(tool.info, "__fields_set__", set())
@@ -1957,6 +2168,7 @@ class ToolRegistry:
         if "get_time" not in cls._tools:
             @cls.register_function(
                 name="get_time",
+                group="系统管理",
                 description="Get current date and time in ISO 8601 or Unix timestamp format",
                 category=ToolCategory.SYSTEM,
                 native=True,

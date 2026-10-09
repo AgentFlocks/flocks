@@ -23,7 +23,6 @@ import {
   IconGauge,
   IconGripVertical,
   IconLoader2,
-  IconPencil,
   IconPlus,
   IconShieldCheck,
   type TablerIcon,
@@ -52,9 +51,6 @@ const SIDEBAR_WIDTH_KEY = 'flocks_layout_sidebar_width';
 const SIDEBAR_DEFAULT_WIDTH = 208;
 const SIDEBAR_MIN_WIDTH = 176;
 const SIDEBAR_MAX_WIDTH = 520;
-const SOC_DASHBOARD_TITLE_KEY = 'soc-dashboard-custom-title-v1';
-const SOC_DASHBOARD_TITLE_CHANGED_EVENT = 'soc-dashboard:title-changed';
-const SOC_DASHBOARD_TITLE_MAX_LENGTH = 64;
 
 type LazyLayoutModule = { default: ComponentType<any> };
 
@@ -156,35 +152,11 @@ function saveSidebarWidth(width: number): void {
   }
 }
 
-function readSocDashboardTitle(): string {
-  try {
-    return localStorage.getItem(SOC_DASHBOARD_TITLE_KEY)?.trim() || '';
-  } catch {
-    return '';
-  }
-}
-
-function saveSocDashboardTitle(title: string): void {
-  const normalizedTitle = title.trim();
-  try {
-    if (normalizedTitle) {
-      localStorage.setItem(SOC_DASHBOARD_TITLE_KEY, normalizedTitle);
-    } else {
-      localStorage.removeItem(SOC_DASHBOARD_TITLE_KEY);
-    }
-  } catch {
-    // Local storage can be unavailable in restricted browser contexts.
-  }
-  window.dispatchEvent(new CustomEvent(SOC_DASHBOARD_TITLE_CHANGED_EVENT, {
-    detail: { title: normalizedTitle || null },
-  }));
-}
-
 const OnboardingModal = lazyLayoutComponent(() => import('@/components/common/OnboardingModal'));
 const UpdateModal = lazyLayoutComponent(() => import('@/components/common/UpdateModal'), ['update']);
 const NotificationModal = lazyLayoutComponent(() => import('@/components/common/NotificationModal'), ['notification']);
 const TokenPolicyNotice = lazyLayoutComponent(() => import('@/components/common/TokenPolicyNotice'), ['notification']);
-import { checkUpdate, type VersionInfo } from '@/api/update';
+import { checkUpdate, getCurrentRelease, type VersionInfo } from '@/api/update';
 import {
   ackNotification,
   getActiveNotifications,
@@ -214,6 +186,7 @@ import {
   AGENT_PARTITION_DEFAULT_PATH,
   SCENE_SUITES_PATH,
   SETTINGS_PARTITION_DEFAULT_PATH,
+  hasEnabledSceneWorkspace,
   readPartitionPaths,
   resolveNavPartition,
   savePartitionPaths,
@@ -259,9 +232,6 @@ interface LayoutNavSection {
   accordionGroup?: 'primary';
   /** Scene workspace whose pages this group lists (one group per workspace section, e.g. SOC 态势 / 告警运营). */
   workspace?: WebUIContractWorkspaceListItem;
-  /** Workspace the section's own actions belong to (自定义页面 / 自定义标题).
-   *  Set on the last group of the SOC scene only, so the actions close its menu. */
-  actionsWorkspace?: WebUIContractWorkspaceListItem;
 }
 
 function formatUpdateVersion(version?: string | null): string | null {
@@ -353,6 +323,7 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
   const [latestVersion, setLatestVersion] = useState<string | null>(null);
   const [currentVersion, setCurrentVersion] = useState<string | null>(null);
   const [updateInfo, setUpdateInfo] = useState<VersionInfo | null>(null);
+  const [currentRelease, setCurrentRelease] = useState<{ userId: string; info: VersionInfo | null } | null>(null);
   const [hasCompletedUpdateCheck, setHasCompletedUpdateCheck] = useState(false);
   const lastUpdateCheckAtRef = useRef(0);
   const checkingUpdateRef = useRef(false);
@@ -365,6 +336,7 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
   const lastNotificationFetchKeyRef = useRef<string | null>(null);
   const canManageUpdates = user?.role === 'admin';
   const notificationGateReady = !canManageUpdates || hasCompletedUpdateCheck;
+  const currentReleaseReady = !!user?.id && currentRelease?.userId === user.id;
   const canCreateWorkspaceCustomPage = user?.role === 'admin';
   // Entries an extension added to the account menu, admin-only ones filtered
   // out for everyone else. Empty in a stock build.
@@ -400,8 +372,6 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
   const [draggingNavItem, setDraggingNavItem] = useState<{ sectionId: string; key: string } | null>(null);
   const [dragOverNavItemKey, setDragOverNavItemKey] = useState<string | null>(null);
   const [creatingWorkspaceCustomPageSession, setCreatingWorkspaceCustomPageSession] = useState(false);
-  const [socTitleDialogOpen, setSocTitleDialogOpen] = useState(false);
-  const [socTitleDraft, setSocTitleDraft] = useState(readSocDashboardTitle);
   const hasCustomDisplayName = Boolean(configuredDisplayName?.trim());
   const expandedSidebarWidth = sidebarWidth;
   const sidebarOffsetStyle = {
@@ -643,15 +613,36 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
   }, [i18n.language, user?.id]);
 
   useEffect(() => {
+    const userId = user?.id;
+    if (!userId) {
+      setCurrentRelease(null);
+      return;
+    }
+
+    let cancelled = false;
+    void getCurrentRelease()
+      .then((info) => {
+        if (!cancelled) setCurrentRelease({ userId, info });
+      })
+      .catch(() => {
+        if (!cancelled) setCurrentRelease({ userId, info: null });
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [user?.id]);
+
+  useEffect(() => {
     if (!user?.id) {
       setUpdateNotification(null);
       setUpdateNotificationReady(false);
       return;
     }
-    if (!notificationGateReady) return;
+    if (!notificationGateReady || !currentReleaseReady) return;
 
     setUpdateNotificationReady(false);
-    const notification = buildUpdateNotification(updateInfo, i18n.language);
+    const notification = buildUpdateNotification(currentRelease?.info ?? null, i18n.language);
     if (!notification) {
       setUpdateNotification(null);
       setUpdateNotificationReady(true);
@@ -674,12 +665,12 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
     return () => {
       cancelled = true;
     };
-  }, [i18n.language, notificationGateReady, updateInfo, user?.id]);
+  }, [currentRelease, currentReleaseReady, i18n.language, notificationGateReady, user?.id]);
 
   const allNotifications = updateNotification
     ? [...notifications, updateNotification].sort((a, b) => a.priority - b.priority)
     : notifications;
-  const visibleNotifications = tokenPolicy.ready && !tokenPolicy.notice && backendNotificationsReady && updateNotificationReady && !showOnboarding && updateState === 'idle' && allNotifications.length > 0
+  const visibleNotifications = tokenPolicy.ready && !tokenPolicy.notice && backendNotificationsReady && currentReleaseReady && updateNotificationReady && !showOnboarding && updateState === 'idle' && allNotifications.length > 0
     ? allNotifications
     : [];
 
@@ -767,16 +758,10 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
             .filter((group) => group.items.length > 0)
             .map(({ id, name, items }): LayoutNavSection => ({ id, name, partition: 'scene', collapsible: true, workspace, items }));
         });
-      // 自定义页面 / 自定义标题 belong to the SOC scene; they follow its last group.
-      for (let index = sceneWorkspaceSections.length - 1; index >= 0; index -= 1) {
-        const workspace = sceneWorkspaceSections[index].workspace;
-        if (workspace && isSocWorkspace(workspace)) {
-          sceneWorkspaceSections[index] = { ...sceneWorkspaceSections[index], actionsWorkspace: workspace };
-          break;
-        }
-      }
       // Custom pages that do not belong to a workspace sit next to the scene
-      // workspaces rather than under the home entry.
+      // workspaces rather than under the home entry. The SOC workspace tab only
+      // exists while a scene is enabled, so otherwise they join the Agent menu.
+      const customPagesPartition: NavPartitionId = hasEnabledSceneWorkspace(webuiContractWorkspaces) ? 'scene' : 'agent';
       const customPageItems: LayoutNavItem[] = webuiContractPages
         .filter((page) => !page.workspaceId && page.enabled && page.placement === 'home.after' && page.buildStatus === 'ready')
         .map((page) => ({
@@ -864,7 +849,7 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
           ? [{
               id: 'customPages',
               name: t('customPages'),
-              partition: 'scene' as const,
+              partition: customPagesPartition,
               collapsible: true,
               items: [...customPageItems, ...extensionSceneItems],
             }]
@@ -888,10 +873,14 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
     [webuiContractWorkspaces],
   );
   const requestedWorkspace = viewingScenes ? new URLSearchParams(location.search).get('workspace') : null;
-  const routePartition = resolveNavPartition(location.pathname, webuiContractWorkspaces);
+  // Until the navigation data arrives the scene state is unknown (see resolveNavPartition).
+  const routePartition = resolveNavPartition(location.pathname, webuiContractNavLoading ? null : webuiContractWorkspaces);
   const selectedPartition = routePartition;
-  // The suite manager highlights the scene tab only while it manages one of its scenes.
-  const managingScene = viewingScenes && sceneWorkspaces.some((workspace) => workspace.id === requestedWorkspace);
+  // The SOC workspace tab is shown only while a scene suite is enabled; a
+  // disabled suite stays installed but no longer has a tab to land on.
+  const hasScenePartition = sceneWorkspaces.some((workspace) => workspace.enabled);
+  // The suite manager highlights the scene tab only while it manages one of its (enabled) scenes.
+  const managingScene = viewingScenes && sceneWorkspaces.some((workspace) => workspace.enabled && workspace.id === requestedWorkspace);
 
   // Where the scene tab lands when the scene it should show has no page to
   // open: the manager, targeted at that scene so its state is explained.
@@ -916,9 +905,15 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
     [navigation, selectedPartition],
   );
 
-  // One SOC workspace tab for every installed scene (and the custom pages);
-  // it only disappears when there is nothing at all to show in it.
-  const hasScenePartition = sceneWorkspaces.length > 0 || navigation.some((section) => section.id === 'customPages');
+  // 「+ 自定义页面」 adds a page to the SOC scene: admins see it at the bottom of
+  // the menu while that scene's groups are on screen.
+  const customPageWorkspace = useMemo(() => (
+    canCreateWorkspaceCustomPage
+      ? visibleNavigation.find((section) => isSocWorkspace(section.workspace ?? null))?.workspace ?? null
+      : null
+  ), [canCreateWorkspaceCustomPage, visibleNavigation]);
+
+  // One SOC workspace tab for every enabled scene (and the custom pages next to them).
   const partitionItems = useMemo<PartitionTopBarItem[]>(() => [
     { id: 'agent', name: t('partitionAgent'), icon: IconSparkles },
     ...(hasScenePartition ? [{ id: 'scene' as const, name: t('partitionScene'), icon: IconShieldCheck }] : []),
@@ -927,12 +922,18 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
 
   // Remember where each partition was left so the top bar returns to it.
   const partitionPathsRef = useRef<NavPartitionPaths>(readPartitionPaths());
+  // A custom page's partition is only a guess until navigation data has loaded
+  // once: while the first request runs or after it failed, nothing is known. A
+  // failed later refresh keeps the last good data, so that case needs no guard.
+  const navStateUnknown = webuiContractNavLoading
+    || (Boolean(webuiContractNavError) && webuiContractWorkspaces.length === 0 && webuiContractPages.length === 0);
   useEffect(() => {
-    if (viewingScenes) return;
+    // Recording a guessed partition could overwrite where another one was left.
+    if (viewingScenes || navStateUnknown) return;
     const next = { ...partitionPathsRef.current, [routePartition]: `${location.pathname}${location.search}` };
     partitionPathsRef.current = next;
     savePartitionPaths(next);
-  }, [location.pathname, location.search, routePartition, viewingScenes]);
+  }, [location.pathname, location.search, navStateUnknown, routePartition, viewingScenes]);
 
   const partitionTargetPath = useCallback((id: NavPartitionId): string | null => {
     const hrefs = navigation
@@ -946,7 +947,7 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
     if (id === 'agent') return AGENT_PARTITION_DEFAULT_PATH;
     if (id === 'settings') return SETTINGS_PARTITION_DEFAULT_PATH;
     if (hrefs.length > 0) return hrefs[0];
-    return sceneManagementPath(sceneWorkspaces[0]);
+    return sceneManagementPath(sceneWorkspaces.find((workspace) => workspace.enabled) ?? sceneWorkspaces[0]);
   }, [navigation, sceneManagementPath, sceneWorkspaces]);
 
   const selectPartition = useCallback((id: NavPartitionId) => {
@@ -1020,7 +1021,7 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
     return map;
   }, [openTabs]);
   const navItemPath = useCallback(
-    (href: string) => openTabPathByHref.get(href) ?? href,
+    (href: string) => href === '/workspace' ? '/workspace?tab=files' : openTabPathByHref.get(href) ?? href,
     [openTabPathByHref],
   );
 
@@ -1185,32 +1186,6 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
     toast,
   ]);
 
-  const openSocTitleDialog = useCallback(() => {
-    setSocTitleDraft(readSocDashboardTitle());
-    setSocTitleDialogOpen(true);
-  }, []);
-
-  const closeSocTitleDialog = useCallback(() => {
-    setSocTitleDialogOpen(false);
-  }, []);
-
-  const handleSaveSocTitle = useCallback(() => {
-    saveSocDashboardTitle(socTitleDraft);
-    setSocTitleDialogOpen(false);
-    if (location.pathname === '/contracts/webui/workspaces/soc_ui/soc-dashboard') {
-      window.setTimeout(() => window.location.reload(), 0);
-    }
-  }, [location.pathname, socTitleDraft]);
-
-  const handleResetSocTitle = useCallback(() => {
-    setSocTitleDraft('');
-    saveSocDashboardTitle('');
-    setSocTitleDialogOpen(false);
-    if (location.pathname === '/contracts/webui/workspaces/soc_ui/soc-dashboard') {
-      window.setTimeout(() => window.location.reload(), 0);
-    }
-  }, [location.pathname]);
-
   const openManualUpdateCheck = useCallback(() => {
     setAccountMenuOpen(false);
     setUpdateInfo(null);
@@ -1272,64 +1247,6 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
           </ExtensionSlot>
         </Suspense>
       </LazyLoadErrorBoundary>
-
-      {socTitleDialogOpen && (
-        <div
-          className="fixed inset-0 z-[80] flex items-center justify-center bg-overlay-backdrop px-4"
-          onMouseDown={(event) => {
-            if (event.target === event.currentTarget) {
-              closeSocTitleDialog();
-            }
-          }}
-        >
-          <form
-            className="w-full max-w-sm rounded-lg border border-line bg-surface p-4 shadow-xl dark:border-line dark:bg-surface"
-            onSubmit={(event) => {
-              event.preventDefault();
-              handleSaveSocTitle();
-            }}
-          >
-            <h2 className="text-base font-semibold text-fg dark:text-fg">
-              {tWebUIContractPage('workspace.customTitleDialogTitle')}
-            </h2>
-            <label className="mt-4 block text-sm font-medium text-fg-secondary dark:text-fg-secondary">
-              {tWebUIContractPage('workspace.customTitle')}
-              <input
-                autoFocus
-                value={socTitleDraft}
-                onChange={(event) => setSocTitleDraft(event.target.value)}
-                maxLength={SOC_DASHBOARD_TITLE_MAX_LENGTH}
-                placeholder={tWebUIContractPage('workspace.customTitlePlaceholder')}
-                className="mt-2 h-10 w-full rounded-md border border-line bg-surface px-3 text-sm text-fg outline-none transition-colors placeholder:text-fg-muted focus:border-line-control dark:border-line dark:bg-canvas dark:text-fg dark:placeholder:text-fg-muted dark:focus:border-line-control"
-              />
-            </label>
-            <div className="mt-4 flex items-center justify-between gap-2">
-              <button
-                type="button"
-                onClick={handleResetSocTitle}
-                className="inline-flex h-9 items-center rounded-md px-3 text-sm font-semibold text-fg-muted transition-colors hover:bg-hover hover:text-fg dark:text-fg-muted dark:hover:bg-hover dark:hover:text-fg"
-              >
-                {tWebUIContractPage('workspace.customTitleReset')}
-              </button>
-              <div className="flex gap-2">
-                <button
-                  type="button"
-                  onClick={closeSocTitleDialog}
-                  className="inline-flex h-9 items-center rounded-md border border-line px-3 text-sm font-semibold text-fg-secondary transition-colors hover:bg-hover hover:text-fg dark:border-line dark:text-fg-secondary dark:hover:bg-hover dark:hover:text-fg"
-                >
-                  {tWebUIContractPage('workspace.customTitleCancel')}
-                </button>
-                <button
-                  type="submit"
-                  className="ui-btn ui-btn-primary"
-                >
-                  {tWebUIContractPage('workspace.customTitleSave')}
-                </button>
-              </div>
-            </div>
-          </form>
-        </div>
-      )}
 
       {sidebarOpen && (
         <div
@@ -1415,8 +1332,6 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
                   : collapsedNavSectionIds.has(sectionId)
               );
               const reorderable = Boolean(section.collapsible) && section.items.length > 1;
-              const actionsWorkspace = section.actionsWorkspace ?? null;
-              const showSocWorkspaceActions = !collapsed && isSocWorkspace(actionsWorkspace);
               return (
                 <div key={sectionId} className="mb-6">
                   {!collapsed && section.name && (
@@ -1515,38 +1430,35 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
                           </div>
                         );
                       })}
-                      {showSocWorkspaceActions && actionsWorkspace && (
-                        <div className="space-y-0.5 pt-1">
-                          {canCreateWorkspaceCustomPage && (
-                            <button
-                              type="button"
-                              onClick={() => void handleCreateWorkspaceCustomPage(actionsWorkspace)}
-                              disabled={creatingWorkspaceCustomPageSession}
-                              className="flex w-full items-center rounded-lg px-3 py-1.5 text-left text-xs font-medium text-fg-muted transition-colors hover:bg-hover hover:text-fg-secondary disabled:cursor-not-allowed disabled:bg-disabled disabled:text-fg-disabled dark:text-fg-muted dark:hover:bg-hover dark:hover:text-fg-secondary"
-                            >
-                              <IconPlus aria-hidden="true" className="ml-0.5 mr-3.5 h-4 w-4 flex-shrink-0" />
-                              <span className="min-w-0 flex-1 truncate">{tWebUIContractPage('workspace.customPage')}</span>
-                              {creatingWorkspaceCustomPageSession ? (
-                                <IconLoader2 aria-hidden="true" className="ml-2 h-4 w-4 shrink-0 animate-spin" />
-                              ) : null}
-                            </button>
-                          )}
-                          <button
-                            type="button"
-                            onClick={openSocTitleDialog}
-                            className="flex w-full items-center rounded-lg px-3 py-1.5 text-left text-xs font-medium text-fg-muted transition-colors hover:bg-hover hover:text-fg-secondary dark:text-fg-muted dark:hover:bg-hover dark:hover:text-fg-secondary"
-                          >
-                            <IconPencil aria-hidden="true" className="ml-0.5 mr-3.5 h-4 w-4 flex-shrink-0" />
-                            <span className="min-w-0 flex-1 truncate">{tWebUIContractPage('workspace.customTitle')}</span>
-                          </button>
-                        </div>
-                      )}
                     </div>
                   )}
                 </div>
               );
             })}
           </nav>
+
+          {/* Pinned under the menu (not inside a group), so new pages and new
+              sections never move it; the dashed outline marks it as an action. */}
+          {customPageWorkspace && (
+            <div className={`flex-shrink-0 ${collapsed ? 'px-2 pb-2' : 'px-3 pb-3'}`}>
+              <button
+                type="button"
+                data-workspace-custom-page-action
+                onClick={() => void handleCreateWorkspaceCustomPage(customPageWorkspace)}
+                disabled={creatingWorkspaceCustomPageSession}
+                title={collapsed ? tWebUIContractPage('workspace.customPage') : undefined}
+                aria-label={collapsed ? tWebUIContractPage('workspace.customPage') : undefined}
+                className={`flex w-full items-center justify-center gap-1.5 rounded-lg border border-dashed border-line-control text-xs font-medium text-fg-muted transition-colors hover:bg-hover hover:text-fg-secondary disabled:cursor-not-allowed disabled:bg-disabled disabled:text-fg-disabled ${collapsed ? 'h-9' : 'h-8 px-3'}`}
+              >
+                {creatingWorkspaceCustomPageSession ? (
+                  <IconLoader2 aria-hidden="true" className="h-4 w-4 shrink-0 animate-spin" />
+                ) : (
+                  <IconPlus aria-hidden="true" className="h-4 w-4 shrink-0" />
+                )}
+                {!collapsed && <span className="min-w-0 truncate">{tWebUIContractPage('workspace.customPage')}</span>}
+              </button>
+            </div>
+          )}
 
           {/* Bottom account entry */}
           <div

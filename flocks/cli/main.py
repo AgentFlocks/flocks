@@ -23,6 +23,11 @@ from flocks.cli.commands import (
     acp_app,
     admin_app,
     agent_app,
+    exec_command,
+    workflow_app,
+    device_app,
+    model_app,
+    plugin_app,
     BROWSER_CONTEXT_SETTINGS,
     browser_command,
     debug_app,
@@ -69,6 +74,12 @@ app = typer.Typer(
 )
 
 # Register command groups
+app.command(name="exec", rich_help_panel="Agent CLI")(exec_command)
+app.add_typer(agent_app, name="agent", rich_help_panel="Agent CLI")
+app.add_typer(workflow_app, name="workflow", rich_help_panel="Agent CLI")
+app.add_typer(device_app, name="device", rich_help_panel="Agent CLI")
+app.add_typer(model_app, name="model", rich_help_panel="Agent CLI")
+app.add_typer(plugin_app, name="plugin", rich_help_panel="Agent CLI")
 app.add_typer(session_app, name="session")
 app.add_typer(mcp_app, name="mcp")
 app.add_typer(export_app, name="export")
@@ -78,8 +89,8 @@ app.add_typer(task_app, name="task")
 app.add_typer(skill_app, name="skills")
 app.add_typer(admin_app, name="admin")
 # Developer/editor-integration groups: invocable, but kept out of `flocks --help`.
+# (`agent` is registered above as part of the Agent CLI panel.)
 app.add_typer(acp_app, name="acp", hidden=True)
-app.add_typer(agent_app, name="agent", hidden=True)
 app.add_typer(debug_app, name="debug", hidden=True)
 
 app.command(name="update")(update_command)
@@ -212,7 +223,6 @@ def main_callback(
         "flocks.start",
         {
             "version": __version__,
-            "args": sys.argv[1:],
         },
     )
 
@@ -455,6 +465,10 @@ def serve(
         host=host,
         port=port,
         reload=reload,
+        # Session loops, agent inboxes, the config cache and the knowledge engine
+        # client live in this process; an explicit 1 stops WEB_CONCURRENCY from
+        # forking workers that would each hold a diverging copy.
+        workers=1,
         log_level="info",
         log_config=_uvicorn_log_config(),
         access_log=False,

@@ -1,9 +1,14 @@
 import { screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { Link } from 'react-router-dom';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import WorkspacePage from './index';
 import { renderWithRouter } from '@/test/helpers';
+
+vi.mock('./KnowledgeTab', () => ({
+  default: ({ active }: { active: boolean }) => active ? <div>Knowledge pane</div> : null,
+}));
 
 const mocks = vi.hoisted(() => ({
   list: vi.fn(),
@@ -231,6 +236,22 @@ describe('WorkspacePage', () => {
     mocks.confirm.mockResolvedValue(true);
   });
 
+  it.each(['/workspace', '/workspace?tab=knowledge'])('点击文件目录导航回到文件管理：%s', async initialEntry => {
+    const user = userEvent.setup();
+    renderWithRouter(<><Link to="/workspace">File directory</Link><WorkspacePage /></>, {
+      routerProps: { initialEntries: [initialEntry] },
+    });
+    if (initialEntry === '/workspace') {
+      expect(await screen.findByRole('button', { name: 'New directory' })).toBeInTheDocument();
+      await user.click(screen.getByRole('button', { name: 'tabs.knowledge' }));
+    }
+    expect(screen.getByText('Knowledge pane')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'New directory' })).not.toBeInTheDocument();
+    await user.click(screen.getByRole('link', { name: 'File directory' }));
+    expect(await screen.findByRole('button', { name: 'New directory' })).toBeInTheDocument();
+    expect(screen.queryByText('Knowledge pane')).not.toBeInTheDocument();
+  });
+
   it('删除子目录文件后保持在当前目录，不会重新加载根目录', async () => {
     let reportsListCount = 0;
     mocks.list.mockImplementation((path = '') => {
@@ -318,6 +339,29 @@ describe('WorkspacePage', () => {
     expect(await screen.findByText('Preview truncated to first 16 B')).toBeInTheDocument();
     expect(screen.getByText(/"id": 1/)).toBeInTheDocument();
     expect(screen.queryByTitle('Edit')).not.toBeInTheDocument();
+  });
+
+  it('文件列表仅在选中文件时展开共享预览，关闭后恢复完整列表', async () => {
+    mocks.list.mockResolvedValue({ data: [file('notes.md', 'notes.md')] });
+    mocks.readFile.mockResolvedValue({ data: { content: '# Notes', truncated: false } });
+    const user = userEvent.setup();
+    renderWithRouter(<WorkspacePage />);
+
+    expect(screen.queryByRole('button', { name: 'Drag to resize preview' })).not.toBeInTheDocument();
+    const filename = await screen.findByText('notes.md');
+    await user.click(filename);
+    expect(await screen.findByRole('heading', { name: 'Notes' })).toBeInTheDocument();
+    const preview = screen.getByRole('button', { name: 'Drag to resize preview' }).parentElement!;
+    expect(preview).toHaveStyle({ minWidth: '420px' });
+    expect(filename.closest('tr')).toHaveClass('bg-subtle');
+    expect(within(preview).getByText('24 B').parentElement).toHaveClass('px-4', 'py-1.5');
+    expect(within(preview).getByTitle('notes.md').parentElement).toHaveClass('px-4', 'py-2.5');
+    expect(within(preview).getByTitle('Edit')).toBeInTheDocument();
+    expect(within(preview).getByTitle('Open containing folder')).toBeInTheDocument();
+
+    await user.click(within(preview).getByTitle('Close'));
+    expect(screen.queryByRole('button', { name: 'Drag to resize preview' })).not.toBeInTheDocument();
+    expect(screen.getByText('notes.md').closest('tr')).not.toHaveClass('bg-subtle');
   });
 
   it('Markdown 文件默认渲染预览，并可打开全屏预览', async () => {
@@ -508,8 +552,9 @@ describe('WorkspacePage', () => {
 
       const panel = (await screen.findByTitle('Close')).closest('[data-workspace-preview]') as HTMLElement;
       expect(panel).not.toBeNull();
-      expect(panel.className).toContain('w-full');
-      expect(panel.style.minWidth).toBe('');
+      // The shared split stacks the preview at full width without the 420px floor.
+      expect(panel).toHaveStyle({ width: '100%', minWidth: '0' });
+      expect(panel.parentElement).toHaveAttribute('data-layout', 'stacked');
       expect(panel.parentElement?.className).toContain('flex-col');
       // No horizontal resize handle when stacked.
       expect(screen.queryByTitle('Drag to resize preview')).not.toBeInTheDocument();

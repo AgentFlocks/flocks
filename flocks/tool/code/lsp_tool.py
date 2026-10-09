@@ -59,6 +59,7 @@ Parameters:
 
 @ToolRegistry.register_function(
     name="lsp",
+    group="代码分析",
     description=DESCRIPTION,
     category=ToolCategory.CODE,
     native=False,

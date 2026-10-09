@@ -1,4 +1,5 @@
 name: Sangfor EDR WebCLI
+group: EDR/HIDS
 vendor: sangfor
 service_id: sangfor_edr
 version: "1.0.0"

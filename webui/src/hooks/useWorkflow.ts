@@ -5,6 +5,7 @@ import {
   useRefreshOnResume,
   useSharedResource,
   type SharedResource,
+  type SharedResourceFetchOptions,
 } from './useSharedResource';
 
 const WORKFLOW_LIST_STALE_TIME_MS = 5000;
@@ -37,7 +38,7 @@ function getWorkflowListResource(category?: string, status?: string): SharedReso
       const response = await workflowAPI.listSummaries({ category, status });
       return Array.isArray(response.data) ? response.data : [];
     },
-    fallbackDataOnError: [],
+    fallbackDataOnError: (previous) => previous,
     getErrorMessage: (err) => (err instanceof Error && err.message ? err.message : 'Failed to fetch workflows'),
   });
 
@@ -80,7 +81,7 @@ export function useWorkflows(category?: string, status?: string) {
     workflows,
     loading,
     error,
-    refetch: () => fetchWorkflows(),
+    refetch: (options?: SharedResourceFetchOptions) => fetchWorkflows(options),
   };
 }
 

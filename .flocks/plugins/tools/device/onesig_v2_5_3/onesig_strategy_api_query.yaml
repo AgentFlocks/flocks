@@ -1,4 +1,5 @@
 name: onesig_strategy_api_query
+group: 网络防护
 description: >
   OneSIG Strategy API read-only grouped tool. Uses ApiKey + Secret HMAC-SHA1
   signing and calls /api/v3 endpoints for status, asset, policy, whitelist,

@@ -30,12 +30,14 @@ def test_cli_help_lists_service_commands(monkeypatch, tmp_path) -> None:
     result = runner.invoke(cli_main.app, ["--help"])
 
     assert result.exit_code == 0
-    for command in ("start", "stop", "restart", "status", "logs", "session", "mcp", "task", "skills"):
+    for command in ("start", "stop", "restart", "status", "logs", "session", "mcp", "task", "skills", "exec", "agent", "workflow", "device", "model", "plugin"):
         assert _help_contains_command(result.stdout, command)
     assert "Agents must use `flocks restart" in result.stdout
     assert "--server-only`;" in result.stdout
-    assert "bare restart stops the supervisor and terminates the running agent" in result.stdout
-    for command in ("agent", "acp", "debug", "run", "serve", "service-watchdog", "service-daemon", "auth", "models"):
+    # Adding workflow widens the name column, so Rich may wrap this sentence.
+    help_text = " ".join(result.stdout.replace("│", " ").split())
+    assert "bare restart stops the supervisor and terminates the running agent" in help_text
+    for command in ("acp", "debug", "run", "serve", "service-watchdog", "service-daemon", "auth", "models"):
         assert not _help_contains_command(result.stdout, command)
 
 
@@ -113,6 +115,20 @@ def test_serve_exposes_runtime_server_port(monkeypatch) -> None:
     cli_main.serve(host="127.0.0.1", port=5173, reload=False)
 
     assert os.environ["_FLOCKS_SERVER_PORT"] == "5173"
+
+
+def test_serve_stays_single_process_under_web_concurrency(monkeypatch) -> None:
+    import uvicorn
+
+    calls = []
+    monkeypatch.setenv("WEB_CONCURRENCY", "2")
+    monkeypatch.setattr(uvicorn, "run", lambda *args, **kwargs: calls.append(kwargs))
+
+    cli_main.serve(host="127.0.0.1", port=5173, reload=False)
+
+    assert [call["workers"] for call in calls] == [1]
+    # uvicorn only consults WEB_CONCURRENCY when no worker count is given.
+    assert uvicorn.Config("flocks.server.app:app", workers=calls[0]["workers"]).workers == 1
 
 
 def test_tui_starts_hidden_serve_command(monkeypatch, tmp_path) -> None:

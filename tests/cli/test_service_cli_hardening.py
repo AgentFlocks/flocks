@@ -2,7 +2,8 @@
 
 Covers:
 - ``--log-level`` rejects unknown levels
-- hidden ``acp`` / ``agent`` / ``debug`` / ``run`` commands are registered (invocable, not listed)
+- hidden ``acp`` / ``debug`` / ``run`` commands are registered (invocable, not listed);
+  ``agent`` is listed under the Agent CLI panel (see ``tests/cli/test_service_commands.py``)
 - ``flocks start`` reports ``ServiceConfigError`` / ``WebUIDistMissingError`` as CLI errors (no traceback)
 - port options and ``FLOCKS_*PORT`` env values are validated against 1..65535
 - ``[flocks]`` / ``[daemon]`` prefixes survive Rich markup rendering
@@ -78,7 +79,7 @@ def test_known_log_levels_accepted_case_insensitively(monkeypatch, level) -> Non
 
 
 # --------------------------------------------------------------------------- hidden command groups
-@pytest.mark.parametrize("command", ["acp", "agent", "debug", "run"])
+@pytest.mark.parametrize("command", ["acp", "debug", "run"])
 def test_hidden_command_groups_are_invocable_but_not_listed(command) -> None:
     help_result = runner.invoke(cli_main.app, ["--help"])
     sub_help = runner.invoke(cli_main.app, [command, "--help"])

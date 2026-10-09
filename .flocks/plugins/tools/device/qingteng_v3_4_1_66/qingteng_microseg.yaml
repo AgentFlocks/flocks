@@ -1,4 +1,5 @@
 name: qingteng_microseg
+group: EDR/HIDS
 description: >
   青藤微隔离工具。支持一键隔离策略管理、主机微隔离状态控制及黑名单策略管理。
   适用于对受感染主机实施网络隔离、配置访问控制策略及管理黑名单流量规则。

@@ -47,19 +47,44 @@ import concurrent.futures
 import threading
 from typing import Any, Callable, Coroutine
 
+from flocks.provider.llm_budget import budget_scope, get_loop_budget, set_loop_budget, set_scope_budget
+
 __all__ = [
     "run_sync",
     "run_sync_cancellable",
     "register_primary_loop",
     "primary_loop",
+    "configure_llm_concurrency",
+    "llm_concurrency_limit",
+    "is_workflow_loop",
+    "DEFAULT_LLM_MAX_CONCURRENCY",
+    "WORKFLOW_LLM_BUDGET_SCOPE",
     "_get_loop_for_testing",
 ]
+
+# Cap on LLM calls in flight for workflow execution (``llm.ask`` plus every
+# subagent session started by ``delegate_task`` inside a workflow). Interactive
+# sessions run on the server loop and are not budgeted, so this is the share of
+# the provider's quota that workflows can take away from them. It is a
+# process-wide cap: all concurrent runs (syslog / kafka / scheduled / manual)
+# draw from these slots together, not one budget per run. On the private loop
+# the budget is attached to the loop; when workflow coroutines run on the
+# registered server loop (see "Loop affinity" above) they draw from the
+# ``WORKFLOW_LLM_BUDGET_SCOPE`` budget instead, so interactive sessions on that
+# loop stay unbudgeted. Overridden by ``workflow.llm.max_concurrency`` in
+# flocks.json; 0 lifts the cap. A wait longer than a few seconds is logged as
+# ``llm_budget.slot.slow_acquire`` — the wait counts towards the node timeout,
+# so without that line a saturated budget just looks like a node timing out.
+DEFAULT_LLM_MAX_CONCURRENCY = 8
+WORKFLOW_LLM_BUDGET_SCOPE = "workflow"
 
 
 _lock = threading.Lock()
 _loop: asyncio.AbstractEventLoop | None = None
 _thread: threading.Thread | None = None
 _primary_loop: asyncio.AbstractEventLoop | None = None
+_llm_limit: int = DEFAULT_LLM_MAX_CONCURRENCY
+set_scope_budget(WORKFLOW_LLM_BUDGET_SCOPE, _llm_limit)
 
 
 def register_primary_loop(loop: asyncio.AbstractEventLoop | None = None) -> asyncio.AbstractEventLoop:
@@ -103,6 +128,19 @@ def _select_loop() -> asyncio.AbstractEventLoop:
     return _ensure_loop()
 
 
+async def _in_workflow_budget_scope(coro: Coroutine[Any, Any, Any]) -> Any:
+    """Run *coro* (and the tasks it starts) against the workflow LLM budget."""
+    with budget_scope(WORKFLOW_LLM_BUDGET_SCOPE):
+        return await coro
+
+
+def _submit(coro: Coroutine[Any, Any, Any], loop: asyncio.AbstractEventLoop) -> "concurrent.futures.Future[Any]":
+    """Schedule *coro* on *loop*; on a shared loop it runs under the workflow budget scope."""
+    if loop is not _loop:
+        coro = _in_workflow_budget_scope(coro)
+    return asyncio.run_coroutine_threadsafe(coro, loop)
+
+
 def _ensure_loop() -> asyncio.AbstractEventLoop:
     """Return a running background loop, starting it on first use."""
     global _loop, _thread
@@ -136,10 +174,50 @@ def _ensure_loop() -> asyncio.AbstractEventLoop:
         thread.start()
         ready.wait()
 
+        set_loop_budget(loop, _llm_limit)
         _loop = loop
         _thread = thread
 
     return _loop
+
+
+def configure_llm_concurrency(limit: int | None) -> None:
+    """Set the workflow LLM budget (``None`` / ``0`` = unlimited).
+
+    Applies to the private workflow loop and to workflow coroutines running on
+    the registered server loop. Safe to call from any thread and before the
+    loop exists; the value is applied when the loop starts. Callers holding a
+    slot keep it.
+    """
+    global _llm_limit
+    try:
+        resolved = int(limit) if limit is not None else 0
+    except (TypeError, ValueError):
+        resolved = 0
+    _llm_limit = max(0, resolved)
+    set_scope_budget(WORKFLOW_LLM_BUDGET_SCOPE, _llm_limit)
+    with _lock:
+        loop = _loop
+    if loop is not None and loop.is_running():
+        set_loop_budget(loop, _llm_limit)
+
+
+def llm_concurrency_limit() -> int:
+    """Current cap for LLM calls on the workflow loop; ``0`` means unlimited."""
+    with _lock:
+        loop = _loop
+    if loop is not None and loop.is_running():
+        return get_loop_budget(loop)
+    return _llm_limit
+
+
+def is_workflow_loop() -> bool:
+    """True when called from a coroutine running on the workflow loop."""
+    try:
+        current = asyncio.get_running_loop()
+    except RuntimeError:
+        return False
+    return current is _loop
 
 
 def _assert_not_workflow_loop(coro: Coroutine[Any, Any, Any], loop: asyncio.AbstractEventLoop) -> None:
@@ -174,7 +252,7 @@ def run_sync(coro: Coroutine[Any, Any, Any]) -> Any:
     loop = _select_loop()
     _assert_not_workflow_loop(coro, loop)
 
-    future = asyncio.run_coroutine_threadsafe(coro, loop)
+    future = _submit(coro, loop)
     try:
         return future.result()
     except concurrent.futures.CancelledError as exc:
@@ -199,7 +277,7 @@ def run_sync_cancellable(
     loop = _select_loop()
     _assert_not_workflow_loop(coro, loop)
 
-    future = asyncio.run_coroutine_threadsafe(coro, loop)
+    future = _submit(coro, loop)
     try:
         while True:
             if cancel_checker():

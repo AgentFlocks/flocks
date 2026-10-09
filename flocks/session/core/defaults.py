@@ -25,11 +25,11 @@ def fallback_model_id() -> str:
 # message are identical (same tool + same input), stop processing.
 DOOM_LOOP_THRESHOLD = 3
 
-# Default assistant-step budget when an agent does not declare an explicit
-# ``steps`` limit. Keeps tool loops finite without being too aggressive for
-# longer coding/research tasks.
-DEFAULT_MAX_TOOL_STEPS = 1000
-
 # Cross-step loop guard thresholds. These complement the per-message doom-loop
 # detection in ``stream_processor.py`` by stopping repeated tool-only turns.
 REPEATED_EXACT_TOOL_CALL_HALT_THRESHOLD = 3
+
+# Consecutive steps whose tool-call arguments were cut off mid-stream before
+# the turn stops. Each truncated step is fed back to the model so it can split
+# the call; this only bounds a model that keeps producing oversized calls.
+MAX_CONSECUTIVE_TOOL_ARG_TRUNCATIONS = 3

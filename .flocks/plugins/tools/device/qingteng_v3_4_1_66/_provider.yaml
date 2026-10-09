@@ -1,4 +1,5 @@
 name: qingteng
+group: EDR/HIDS
 vendor: qingteng
 service_id: qingteng
 version: "3.4.1.66"

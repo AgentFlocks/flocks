@@ -52,7 +52,7 @@ def context_usage_mocks(monkeypatch):
         return list(state["parts"].get(message_id, []))
 
     async def fake_estimate(session_id: str, messages: list):
-        return state["estimate"]
+        return state["estimate"] if messages else 0
 
     async def fake_system_prompt_tokens(*args, **kwargs):
         return state["system_prompt"]
@@ -60,6 +60,7 @@ def context_usage_mocks(monkeypatch):
     async def fake_tool_definition_tokens(*args, **kwargs):
         return state["tool_definitions"], ()
 
+    context_usage.reset_observation_baselines()
     monkeypatch.setattr(context_usage.Message, "list", fake_list)
     monkeypatch.setattr(context_usage.Message, "parts", fake_parts)
     monkeypatch.setattr(
@@ -126,6 +127,91 @@ async def test_context_usage_prefers_fresh_observed_tokens(context_usage_mocks):
 
 
 @pytest.mark.asyncio
+async def test_context_usage_follows_observed_total_when_estimate_is_higher(context_usage_mocks):
+    """The meter must match the compaction trigger, which uses the observed
+    figure; history reasoning the adapter never re-sends inflates the
+    estimate, and ``max`` showed a near-full meter that never compacted."""
+    msg = _message(
+        "assistant-1",
+        tokens={"input": 90, "output": 10, "cache": {"read": 0, "write": 0}},
+    )
+    context_usage_mocks["active"] = [msg]
+    context_usage_mocks["all"] = [msg]
+    context_usage_mocks["estimate"] = 150
+    context_usage_mocks["system_prompt"] = 30
+    context_usage_mocks["tool_definitions"] = 20
+
+    snapshot = await context_usage.build_context_usage_snapshot("sess-high-estimate")
+
+    assert snapshot.estimated_tokens == 200
+    assert snapshot.used_tokens == 100
+    assert snapshot.source == "observed"
+    assert snapshot.percent == 50
+
+
+@pytest.mark.asyncio
+async def test_context_usage_counts_cache_writes_as_prompt(context_usage_mocks, monkeypatch):
+    """Anthropic reports a cold-cache prompt almost entirely as cache
+    writes; counting only ``input + cache.read`` put the meter near 0%."""
+    msg = _message(
+        "assistant-1",
+        tokens={"input": 3, "output": 400, "cache": {"read": 0, "write": 58_000}},
+    )
+    context_usage_mocks["active"] = [msg]
+    context_usage_mocks["all"] = [msg]
+    context_usage_mocks["estimate"] = 20
+    monkeypatch.setattr(
+        context_usage.Provider,
+        "resolve_model_info",
+        lambda provider_id, model_id: (200_000, 8_000, None),
+    )
+
+    snapshot = await context_usage.build_context_usage_snapshot("sess-cold-cache")
+
+    assert snapshot.used_tokens == 58_403
+    assert snapshot.observed_tokens == 58_403
+    assert snapshot.source == "observed"
+
+
+@pytest.mark.asyncio
+async def test_context_usage_never_drops_below_fixed_costs_after_cleanup(
+    context_usage_mocks,
+    monkeypatch,
+):
+    """A cleanup estimate that over-counts (history reasoning the adapter
+    never re-sent) must not eat the system prompt and tool definitions."""
+    user = _message("user-1", role="user", created=50, tokens=None, finish=None)
+    observed = _message(
+        "assistant-1",
+        created=100,
+        tokens={"input": 150, "output": 10, "cache": {"read": 0, "write": 0}},
+    )
+    context_usage_mocks["active"] = [user, observed]
+    context_usage_mocks["all"] = [user, observed]
+    context_usage_mocks["system_prompt"] = 60
+    context_usage_mocks["tool_definitions"] = 40
+    prefix_tokens = {"value": 400}  # estimate says the prefix is far bigger than real
+
+    async def fake_estimate(session_id: str, messages: list):
+        if not messages:
+            return 0
+        return prefix_tokens["value"] if messages == [user] else prefix_tokens["value"] + 10
+
+    monkeypatch.setattr(
+        context_usage.SessionPrompt,
+        "estimate_full_context_tokens",
+        fake_estimate,
+    )
+
+    await context_usage.build_context_usage_snapshot("sess-over-freed")  # baseline 400
+    prefix_tokens["value"] = 0  # the whole prefix was archived
+    snapshot = await context_usage.build_context_usage_snapshot("sess-over-freed")
+
+    # 160 observed - 400 "freed" would be negative; fixed costs stay.
+    assert snapshot.used_tokens == 100
+
+
+@pytest.mark.asyncio
 async def test_context_usage_falls_back_to_estimate_without_provider_tokens(context_usage_mocks):
     msg = _message("assistant-1", tokens=None)
     context_usage_mocks["active"] = [msg]
@@ -170,6 +256,91 @@ async def test_context_usage_ignores_observed_tokens_after_later_summary(context
         ("conversation", 40),
         ("agentDelegation", 0),
     ]
+
+
+@pytest.mark.asyncio
+async def test_context_usage_subtracts_tokens_cleaned_up_after_observation(
+    context_usage_mocks,
+    monkeypatch,
+):
+    """Cleanup after the observed call must lower the meter.
+
+    The same figure drives the compaction trigger; before, a stale observed
+    value kept an already-pruned prompt looking full.
+    """
+    user = _message("user-1", role="user", created=50, tokens=None, finish=None)
+    observed = _message(
+        "assistant-1",
+        created=100,
+        tokens={"input": 150, "output": 10, "cache": {"read": 0, "write": 0}},
+    )
+    context_usage_mocks["active"] = [user, observed]
+    context_usage_mocks["all"] = [user, observed]
+    prefix_tokens = {"value": 120}
+
+    async def fake_estimate(session_id: str, messages: list):
+        if not messages:
+            return 0
+        # Only the part before the observed call shrinks when pruned.
+        return prefix_tokens["value"] if messages == [user] else prefix_tokens["value"] + 10
+
+    monkeypatch.setattr(
+        context_usage.SessionPrompt,
+        "estimate_full_context_tokens",
+        fake_estimate,
+    )
+
+    before = await context_usage.build_context_usage_snapshot("sess-cleanup")
+    prefix_tokens["value"] = 40  # a prune replaced tool output with placeholders
+    after = await context_usage.build_context_usage_snapshot("sess-cleanup")
+
+    assert before.used_tokens == 160
+    assert after.used_tokens == 80
+    assert after.observed_tokens == 160
+    assert after.source == "observed"
+
+
+@pytest.mark.asyncio
+async def test_context_usage_adjusts_observation_across_a_summary_when_baseline_known(
+    context_usage_mocks,
+):
+    observed = _message(
+        "assistant-1",
+        created=100,
+        tokens={"input": 190, "output": 20, "cache": {"read": 0, "write": 0}},
+    )
+    context_usage_mocks["active"] = [observed]
+    context_usage_mocks["all"] = [observed]
+    context_usage_mocks["estimate"] = 40
+    await context_usage.build_context_usage_snapshot("sess-summary")  # baseline 0
+
+    summary = _message(
+        "summary-1",
+        created=200,
+        tokens=None,
+        finish="summary",
+        summary={"tokens": 40},
+    )
+    context_usage_mocks["active"] = [observed, summary]
+    snapshot = await context_usage.build_context_usage_snapshot("sess-summary")
+
+    assert snapshot.used_tokens == 250  # 210 observed + 40 for the summary
+    assert snapshot.source == "observed"
+
+
+@pytest.mark.asyncio
+async def test_context_usage_reports_recent_user_message_ids(context_usage_mocks):
+    messages = [
+        _message(f"user-{index:02d}", role="user", tokens=None, finish=None)
+        for index in range(25)
+    ]
+    context_usage_mocks["active"] = messages
+    context_usage_mocks["all"] = messages
+
+    snapshot = await context_usage.build_context_usage_snapshot("sess-users")
+    payload = snapshot.model_dump(by_alias=True)
+
+    assert payload["recentUserMessageIDs"] == [f"user-{index:02d}" for index in range(5, 25)]
 
 
 @pytest.mark.asyncio
@@ -364,3 +535,28 @@ async def test_system_prompt_estimate_uses_resolved_turn_context(monkeypatch):
         tool_revision=7,
     )
     worktree_for_directory.assert_called_once_with("/workspace/project")
+
+
+@pytest.mark.asyncio
+async def test_breakdown_counts_a_streamed_answer_once():
+    """The runner stores a streamed answer as a text part and also sets it as
+    ``content`` on the in-memory message; the meter counts it once."""
+    from flocks.session.message import Message, MessageRole, TextPart
+
+    session_id = "ses_breakdown_answer_once"
+    answer = "Design note: customer records, stages, owners and follow-ups. " * 200
+    msg = await Message.create(session_id, MessageRole.ASSISTANT, "")
+    await Message.store_part(
+        session_id,
+        msg.id,
+        TextPart(sessionID=session_id, messageID=msg.id, text=answer),
+    )
+    await Message.update(session_id, msg.id, content=answer, finish="stop")
+    messages = await Message.list(session_id)
+
+    breakdown, _compacted_ms = await context_usage._estimate_message_breakdown(
+        session_id,
+        messages,
+    )
+
+    assert breakdown["conversation"] == context_usage.SessionPrompt.count_tokens(answer)

@@ -770,6 +770,8 @@ async def get_session_status(request: Request) -> Dict[str, Any]:
     from flocks.session.core.turn_state import get_turn_state, get_context_state
     
     current_user = require_user(request)
+    from flocks.session.agent_inbox import AgentInbox
+
     statuses = SessionStatus.list()
     from flocks.storage.storage import Storage
     async with Storage.transaction() as db:
@@ -801,6 +803,7 @@ async def get_session_status(request: Request) -> Dict[str, Any]:
             continue
         result[session_id] = {
             **session_status.model_dump(),
+            "ancestorSessionIDs": AgentInbox.ancestors(session_id),
             "turn": get_turn_state(session_id).model_dump(by_alias=True),
             "context": get_context_state(session_id).model_dump(by_alias=True),
         }
@@ -3504,6 +3507,20 @@ async def _prepare_replay_runtime(
     }
 
 
+async def _stop_replay_execution(session_id: str) -> None:
+    """Stop and join the previous execution tree before rewinding history."""
+    from flocks.session.agent_inbox import AgentInbox
+
+    # Capture descendants and tasks before cancellation can unregister them.
+    session_ids, tasks = AgentInbox.snapshot_tree(session_id)
+    await _abort_session_processing(session_id)
+    if not await AgentInbox.wait_for_tree(session_ids, tasks):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Timed out waiting for previous session execution to stop",
+        )
+
+
 async def _run_existing_user_message(
     session_id: str,
     session,
@@ -3694,6 +3711,7 @@ async def resend_session_message(
 
     async def _handle_resend() -> None:
         runtime = await _prepare_replay_runtime(sessionID, message)
+        await _stop_replay_execution(sessionID)
         updated_session = await SessionRevert.revert(sessionID, messageID)
         await Message.update_part(sessionID, messageID, text_part.id, text=text)
         await _publish_text_part_update(sessionID, messageID, text_part.id, text)
@@ -3797,6 +3815,7 @@ async def regenerate_session_message(
 
     async def _handle_regenerate() -> None:
         runtime = await _prepare_replay_runtime(sessionID, parent_message)
+        await _stop_replay_execution(sessionID)
         updated_session = await SessionRevert.revert(sessionID, parent_message_id)
         refreshed_parent = await Message.get(sessionID, parent_message_id)
         if not refreshed_parent:
@@ -5595,7 +5614,6 @@ async def run_prompt_queue_item_now(
     import os
 
     from flocks.session.interaction_queue import InteractionQueue, QueueItemNotFoundError
-    from flocks.session.session_loop import SessionLoop
 
     session = await _get_session_by_id_unfiltered(sessionID)
     if not session:
@@ -5612,9 +5630,9 @@ async def run_prompt_queue_item_now(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     await _publish_prompt_queue(sessionID)
 
-    if SessionLoop.is_running(sessionID):
-        await abort_session(sessionID)
-        await _wait_for_session_idle(sessionID)
+    # The parent may already be idle while its independent children still run.
+    await abort_session(sessionID)
+    await _wait_for_session_idle(sessionID)
 
     await _schedule_prompt_queue_drain(sessionID, working_directory)
     return {"status": "accepted", "sessionID": sessionID, "queueID": queueID}

@@ -1,4 +1,5 @@
 name: greynoise_gnql_query
+group: 威胁情报
 description: >
   GreyNoise Query Language (GNQL) search. Use to search the GreyNoise NOISE dataset
   for IPs matching criteria like classification:malicious, tags:Mirai, cve:CVE-2021-xxx,

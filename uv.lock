@@ -573,7 +573,7 @@ wheels = [
 
 [[package]]
 name = "flocks"
-version = "2026.9.14"
+version = "2026.9.23"
 source = { editable = "." }
 dependencies = [
     { name = "aiofiles" },
@@ -672,7 +672,7 @@ requires-dist = [
     { name = "defusedxml", specifier = ">=0.7.1" },
     { name = "dingtalk-stream", specifier = ">=0.20" },
     { name = "fastapi", specifier = ">=0.109.0" },
-    { name = "filelock", specifier = ">=3.16.0" },
+    { name = "filelock", specifier = ">=3.25.2" },
     { name = "gitpython", specifier = ">=3.1.41" },
     { name = "google-genai", specifier = ">=0.3.0" },
     { name = "httpx", extras = ["socks"], specifier = ">=0.26.0" },

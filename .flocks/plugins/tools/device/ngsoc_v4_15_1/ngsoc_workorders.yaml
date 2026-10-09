@@ -1,4 +1,5 @@
 name: ngsoc_workorders
+group: SIEM
 description: >
   NGSOC work-order grouped tool. Use the `action` parameter to update
   work-order status, list work-orders with rich filters / pagination,

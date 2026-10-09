@@ -2989,26 +2989,36 @@ describe('SessionPage session actions menu', () => {
     });
     const originalInnerHeight = window.innerHeight;
     Object.defineProperty(window, 'innerHeight', { configurable: true, value: 400 });
-
-    renderSessionPage();
-
-    await screen.findByText('Original Session');
-    const actionsTrigger = screen.getByRole('button', { name: 'moreActions' });
-    vi.spyOn(actionsTrigger, 'getBoundingClientRect').mockReturnValue({
-      bottom: 380,
-      right: 300,
-    } as DOMRect);
-    await user.click(actionsTrigger);
-    await user.click(screen.getByRole('button', { name: 'moveToProjectAction' }));
-
-    const menu = document.querySelector('[data-session-menu-portal]') as HTMLElement;
-    expect(menu.style.top).toBe('300px');
-    expect(menu.style.maxHeight).toBe('calc(100vh - 16px)');
-
-    Object.defineProperty(window, 'innerHeight', {
-      configurable: true,
-      value: originalInnerHeight,
+    // jsdom has no layout: place the trigger near the bottom edge and give the
+    // menu content (which the menu measures) a real height.
+    let actionsTrigger: HTMLElement | null = null;
+    const rects = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
+      if (this === actionsTrigger) return { top: 356, bottom: 380, left: 276, right: 300, width: 24, height: 24 } as DOMRect;
+      const height = this.parentElement?.hasAttribute('data-session-menu-portal') ? 120 : 0;
+      return { top: 0, bottom: height, left: 0, right: 0, width: 0, height } as DOMRect;
     });
+
+    try {
+      renderSessionPage();
+
+      await screen.findByText('Original Session');
+      actionsTrigger = screen.getByRole('button', { name: 'moreActions' });
+      await user.click(actionsTrigger);
+      await user.click(screen.getByRole('button', { name: 'moveToProjectAction' }));
+
+      const menu = document.querySelector('[data-session-menu-portal]') as HTMLElement;
+      // 130px (content plus padding and borders) does not fit below the trigger, so the
+      // picker opens above it, right-aligned to the trigger and capped to the viewport.
+      expect(menu.style.top).toBe('222px');
+      expect(menu.style.left).toBe('80px');
+      expect(menu.style.maxHeight).toBe('384px');
+    } finally {
+      rects.mockRestore();
+      Object.defineProperty(window, 'innerHeight', {
+        configurable: true,
+        value: originalInnerHeight,
+      });
+    }
   });
 
   it('shows the backend detail when moving a task fails', async () => {

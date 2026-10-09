@@ -1,4 +1,5 @@
 name: greynoise_gnql_stats
+group: 威胁情报
 description: >
   GreyNoise Query Language (GNQL) statistics. Returns aggregate counts
   grouped by specified field (country, port, tag, classification, etc.).

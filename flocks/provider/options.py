@@ -648,8 +648,12 @@ def _apply_max_tokens_from_config(
         model_info = Provider.get_model(model_id)
 
     if model_info and model_info.capabilities and model_info.capabilities.max_tokens:
-        options["max_tokens"] = model_info.capabilities.max_tokens
+        from flocks.provider.output_limits import effective_max_tokens
+
+        configured = model_info.capabilities.max_tokens
+        options["max_tokens"] = effective_max_tokens(provider_id, model_id, configured)
         log.debug("options.max_tokens.from_config", {
             "model_id": model_id,
-            "max_tokens": model_info.capabilities.max_tokens,
+            "max_tokens": options["max_tokens"],
+            "configured_max_tokens": configured,
         })

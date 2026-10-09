@@ -1,4 +1,5 @@
 name: qingteng_fastjob
+group: EDR/HIDS
 description: >
   青藤快速任务（FastJob）工具。支持查看检测项列表、创建/编辑/删除/执行快速作业及查询执行结果。
   适用于对单台或多台主机快速执行安全检测和应急响应任务。

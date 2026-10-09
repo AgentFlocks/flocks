@@ -47,6 +47,10 @@
   "toolFailure": {
     "disableOnRepeatedFailure": true
   },
+  "concurrency": {
+    "maxConcurrentRequests": 8,
+    "maxParallelSubagents": 4
+  },
   "sandbox": {
     "mode": "off",
     "scope": "agent",
@@ -60,6 +64,11 @@
     "prune": {
       "idle_hours": 12,
       "max_age_days": 3
+    }
+  },
+  "workflow": {
+    "llm": {
+      "max_concurrency": 8
     }
   },
   "server": {

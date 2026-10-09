@@ -50,3 +50,11 @@ export const SERVICE_TAB_BADGE_CELL = 'shrink-0 text-center';
 // so every row has the same two-line shape.
 export const SERVICE_TAB_STATS_CELL = 'flex items-center justify-start sm:justify-end shrink-0 basis-1/4 sm:basis-auto';
 export const SERVICE_TAB_ACTIONS_CELL = 'flex items-center justify-end flex-1 basis-0 sm:flex-none sm:basis-auto';
+
+/**
+ * Card view (plugin view toggle): each row becomes a two-column card -- icon ·
+ * name on the first line, the remaining cells spanning both columns below.
+ */
+export const SERVICE_TAB_CARD_GRID_COLS = '32px minmax(0, 1fr)';
+export const SERVICE_TAB_CARD_CLASS =
+  'grid items-center gap-3 px-4 py-3 rounded-control border border-line [&>:nth-child(5)]:col-span-2 [&>:nth-child(6)]:col-span-2';

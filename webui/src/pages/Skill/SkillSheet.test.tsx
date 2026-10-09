@@ -3,12 +3,14 @@ import userEvent from '@testing-library/user-event';
 import { render, screen } from '@testing-library/react';
 import React from 'react';
 import SkillSheet from '@/pages/Skill/SkillSheet';
+import { skillAPI } from '@/api/skill';
 
 // ---------------------------------------------------------------------------
 // Mocks
 // ---------------------------------------------------------------------------
 
-vi.mock('@/api/skill', () => ({
+vi.mock('@/api/skill', async (importOriginal) => ({
+  ...await importOriginal<typeof import('@/api/skill')>(),
   skillAPI: {
     create: vi.fn().mockResolvedValue({}),
     update: vi.fn().mockResolvedValue({}),
@@ -100,6 +102,15 @@ describe('SkillSheet', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+  });
+
+  it.each(['project', 'flocks'])('keeps all built-in definition fields read-only for source %s', (source) => {
+    render(<SkillSheet {...defaultProps} skill={{ name: 'builtin', description: 'Built-in definition', content: '# Fixed', location: '/package/SKILL.md', source, group: 'Pack' }} />);
+    expect(screen.getByText('sheet.readonlyNote')).toBeInTheDocument();
+    expect(screen.queryByPlaceholderText('my-skill')).not.toBeInTheDocument();
+    expect(screen.queryByRole('textbox')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'sheet.edit' })).not.toBeInTheDocument();
+    expect(skillAPI.update).not.toHaveBeenCalled();
   });
 
   describe('Create mode', () => {

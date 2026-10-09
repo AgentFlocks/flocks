@@ -17,11 +17,21 @@ from flocks.cli.commands.skill import skill_app
 from flocks.cli.commands.stats import stats_app
 from flocks.cli.commands.task import task_app
 from flocks.cli.commands.admin import admin_app
+from flocks.cli.commands.exec import exec_command
+from flocks.cli.commands.workflow import workflow_app
+from flocks.cli.commands.device import device_app
+from flocks.cli.commands.model import model_app
+from flocks.cli.commands.plugin import plugin_app
 
 __all__ = [
     "acp_app",
     "agent_app",
     "debug_app",
+    "exec_command",
+    "workflow_app",
+    "device_app",
+    "model_app",
+    "plugin_app",
     "session_app",
     "mcp_app",
     "browser_command",

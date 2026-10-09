@@ -1,4 +1,5 @@
 name: sangfor_sip_events
+group: SIEM
 description: >
   Query Sangfor SIP security event data.
   - `sec_event` – 安全事件（含威胁级别、攻击方向、处置状态、攻击结果等）

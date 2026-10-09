@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+import weakref
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -1555,6 +1556,157 @@ class TestChannelDeliveryCallbacks:
         cb.deliver_text.assert_awaited_once()
         call_arg = cb.deliver_text.call_args[0][0]
         assert "boom" in call_arg
+
+    async def test_background_reply_retains_destination_without_duplicate_first_run(self):
+        from flocks.channel.inbound.dispatcher import ChannelDeliveryCallbacks, InboundDispatcher
+        from flocks.session.session_loop import LoopResult
+
+        cb = ChannelDeliveryCallbacks(
+            channel_id="feishu", account_id="original_account",
+            chat_id="original_chat", thread_id="original_thread",
+            reply_to_id="original_reply", session_id="original_session",
+        )
+        binding = SimpleNamespace(session_id="original_session", agent_id="rex")
+        first_message = SimpleNamespace(id="first_message")
+        background_message = SimpleNamespace(id="background_message")
+        with patch.object(
+            InboundDispatcher, "_run_session_loop", new_callable=AsyncMock,
+            return_value=LoopResult(action="stop", last_message=first_message),
+        ) as run_loop, patch(
+            "flocks.session.message.Message.parts", new_callable=AsyncMock,
+            side_effect=[
+                [SimpleNamespace(type="text", text="First reply")],
+                [
+                    SimpleNamespace(type="reasoning", text="not a reply"),
+                    SimpleNamespace(type="text", text="Background reply"),
+                    SimpleNamespace(type="text", text="Second paragraph"),
+                ],
+            ],
+        ) as parts, patch(
+            "flocks.channel.outbound.deliver.OutboundDelivery.deliver",
+            new_callable=AsyncMock,
+        ) as deliver:
+            await InboundDispatcher._run_agent(binding, cb)
+            deliver.assert_awaited_once()
+            assert deliver.await_args.args[0].text == "First reply"
+            background_callback = run_loop.await_args.args[1].on_background_result
+
+            # A later binding/result must not redirect the captured IM destination.
+            binding.session_id = "different_session"
+            await background_callback(LoopResult(
+                action="stop", last_message=background_message,
+                metadata={"session_id": "different_session"},
+            ))
+
+        run_loop.assert_awaited_once()
+        assert deliver.await_count == 2
+        ctx = deliver.await_args.args[0]
+        assert ctx.channel_id == "feishu"
+        assert ctx.account_id == "original_account"
+        assert ctx.to == "original_chat"
+        assert ctx.thread_id == "original_thread"
+        assert ctx.reply_to_id == "original_reply"
+        assert ctx.text == "Background reply\nSecond paragraph"
+        assert deliver.await_args.kwargs == {"session_id": "original_session"}
+        parts.assert_awaited_with("background_message", session_id="original_session")
+
+    async def test_background_reply_does_not_retain_or_reuse_streaming_callbacks(self, monkeypatch):
+        from flocks.channel.inbound.dispatcher import ChannelDeliveryCallbacks, InboundDispatcher
+        from flocks.session.session_loop import LoopResult
+
+        cb = ChannelDeliveryCallbacks(
+            channel_id="feishu", account_id="acc", chat_id="chat_1",
+            thread_id="thread_1", reply_to_id="reply_1", session_id="session_1",
+        )
+        binding = SimpleNamespace(session_id="session_1", agent_id="rex")
+        msg = InboundMessage(
+            channel_id="feishu", account_id="acc", chat_id="chat_1",
+            sender_id="sender_1", message_id="reply_1", text="hello",
+        )
+        card = MagicMock(is_degraded=False)
+        card.start = AsyncMock(return_value="card_1")
+        card.append = AsyncMock()
+        card.finalize = AsyncMock()
+        card.abort = AsyncMock()
+        retained = {}
+        runs = []
+
+        async def run_loop(binding, loop_callbacks):
+            runs.append(binding.session_id)
+            retained["background"] = loop_callbacks.on_background_result
+            retained["runner_ref"] = weakref.ref(loop_callbacks.runner_callbacks)
+            await loop_callbacks.runner_callbacks.on_text_delta("First reply")
+            return LoopResult(action="stop", last_message=SimpleNamespace(id="first_message"))
+
+        monkeypatch.setattr(InboundDispatcher, "_run_session_loop", run_loop)
+        with patch(
+            "flocks.channel.builtin.feishu.streaming_card.StreamingCard", return_value=card,
+        ), patch(
+            "flocks.channel.inbound.dispatcher._extract_message_text",
+            new_callable=AsyncMock, side_effect=["First reply", "Background reply"],
+        ), patch(
+            "flocks.channel.outbound.deliver.OutboundDelivery.deliver",
+            new_callable=AsyncMock,
+        ) as deliver, patch.object(InboundDispatcher, "_run_agent", new_callable=AsyncMock) as rerun:
+            await InboundDispatcher._run_agent_with_streaming(binding, cb, msg, {})
+            card.finalize.assert_awaited_once_with("First reply")
+            deliver.assert_not_awaited()
+            assert retained["runner_ref"]() is None
+
+            await retained["background"](LoopResult(
+                action="stop", last_message=SimpleNamespace(id="background_message"),
+            ))
+
+        assert runs == ["session_1"]
+        rerun.assert_not_awaited()
+        deliver.assert_awaited_once()
+        assert deliver.await_args.args[0].text == "Background reply"
+        card.append.assert_awaited_once_with("First reply")
+        card.finalize.assert_awaited_once_with("First reply")
+        card.abort.assert_not_awaited()
+
+    @pytest.mark.parametrize("result_kwargs", [
+        {"action": "error"},
+        {"action": "queued"},
+        {"action": "continue"},
+        {"error": "failed"},
+        {"metadata": {"aborted": True}},
+        {"last_message": None},
+        {"last_message": SimpleNamespace(id="failed_message", error={"message": "failed"})},
+    ])
+    async def test_background_reply_filters_non_successful_results(self, result_kwargs):
+        from flocks.channel.inbound.dispatcher import ChannelDeliveryCallbacks
+        from flocks.session.session_loop import LoopResult
+
+        cb = ChannelDeliveryCallbacks(
+            channel_id="feishu", account_id="acc", chat_id="chat_1", session_id="session_1",
+        )
+        result = LoopResult(**{
+            "action": "stop", "last_message": SimpleNamespace(id="message_1"), **result_kwargs,
+        })
+        with patch(
+            "flocks.channel.inbound.dispatcher._extract_message_text", new_callable=AsyncMock,
+        ) as extract, patch.object(cb, "deliver_text", new_callable=AsyncMock) as deliver:
+            await cb.to_loop_callbacks().on_background_result(result)
+        extract.assert_not_awaited()
+        deliver.assert_not_awaited()
+
+    @pytest.mark.parametrize("text", [None, "", " \n "])
+    async def test_background_reply_filters_empty_text(self, text):
+        from flocks.channel.inbound.dispatcher import ChannelDeliveryCallbacks
+        from flocks.session.session_loop import LoopResult
+
+        cb = ChannelDeliveryCallbacks(
+            channel_id="feishu", account_id="acc", chat_id="chat_1", session_id="session_1",
+        )
+        with patch(
+            "flocks.channel.inbound.dispatcher._extract_message_text",
+            new_callable=AsyncMock, return_value=text,
+        ), patch.object(cb, "deliver_text", new_callable=AsyncMock) as deliver:
+            await cb.to_loop_callbacks().on_background_result(LoopResult(
+                action="stop", last_message=SimpleNamespace(id="message_1"),
+            ))
+        deliver.assert_not_awaited()
 
 
 # =====================================================================

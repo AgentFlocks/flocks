@@ -85,6 +85,7 @@ async def _build_device_tool_hints(matches: List[Dict[str, Any]]) -> Dict[str, D
 
 @ToolRegistry.register_function(
     name="tool_search",
+    group="检索",
     description=DESCRIPTION,
     category=ToolCategory.SYSTEM,
     parameters=[

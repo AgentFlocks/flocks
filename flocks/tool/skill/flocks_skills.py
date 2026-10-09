@@ -57,6 +57,7 @@ def _flocks_executable() -> Optional[str]:
 
 @ToolRegistry.register_function(
     name="flocks_skills",
+    group="系统管理",
     description=_DESCRIPTION,
     category=ToolCategory.SYSTEM,
     parameters=[

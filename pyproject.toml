@@ -1,6 +1,6 @@
 [project]
 name = "flocks"
-version = "v2026.9.14"
+version = "v2026.9.23"
 description = "AI-Native SecOps platform with multi-agent collaboration"
 authors = [
     {name = "Flocks Team", email = "team@example.com"}
@@ -44,6 +44,7 @@ dependencies = [
     "httpx[socks]>=0.26.0",
     "aiofiles>=23.2.1",
     # File & Code Processing
+    "filelock>=3.25.2",
     "tree-sitter>=0.21.0",
     "watchdog>=4.0.0",
     "gitpython>=3.1.41",
@@ -59,7 +60,6 @@ dependencies = [
     "pyyaml>=6.0.1",
     "toml>=0.10.2",
     "jsonschema>=4.20.0",
-    "filelock>=3.16.0",
     "striprtf>=0.0.26",
     "claude>=0.4.11",
     "mcp>=1.26.0",

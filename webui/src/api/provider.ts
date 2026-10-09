@@ -163,7 +163,7 @@ export const providerAPI = {
   getServiceMetadata: (id: string) =>
     client.get<APIServiceMetadata>(`/api/provider/${id}/metadata`),
 
-  updateApiService: (id: string, data: { enabled: boolean; verify_ssl?: boolean }) =>
+  updateApiService: (id: string, data: { enabled?: boolean; verify_ssl?: boolean; group?: string | null }) =>
     client.patch<APIServiceSummary>(`/api/provider/api-services/${id}`, data)
       .then((response) => {
         invalidateApiServicesListCache();

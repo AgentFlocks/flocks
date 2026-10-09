@@ -28,19 +28,6 @@ agent_app = typer.Typer(
 console = Console()
 
 
-async def _run_registry(coro):
-    """Await registry work, then release its workflow-store handle.
-
-    The command's event-loop shutdown also closes its shared PostgreSQL pool.
-    """
-    try:
-        return await coro
-    finally:
-        from flocks.workflow.store import WorkflowStore
-
-        await WorkflowStore.close()
-
-
 def _format_mode(mode: str) -> str:
     """Format agent mode for display"""
     mode_colors = {
@@ -116,9 +103,9 @@ def agent_list(
     """
     # Get agents
     if all_agents:
-        agents = asyncio.run(_run_registry(Agent.list()))
+        agents = _run_registry(Agent.list())
     else:
-        agents = asyncio.run(_run_registry(Agent.list_visible()))
+        agents = _run_registry(Agent.list_visible())
     
     # Filter by mode
     if mode:
@@ -128,7 +115,10 @@ def agent_list(
     agents.sort(key=lambda a: (not a.native, a.name))
     
     if not agents:
-        console.print("[dim]No agents found[/dim]")
+        if format == "json":
+            typer.echo("[]")
+        else:
+            console.print("[dim]No agents found[/dim]")
         return
     
     # Output based on format
@@ -144,8 +134,7 @@ def agent_list(
             }
             for a in agents
         ]
-        # Plain stdout: Rich would soft-wrap long lines and break the JSON for consumers.
-        print(json.dumps(json_data, indent=2))
+        typer.echo(json.dumps(json_data, indent=2))
     
     elif format == "tree":
         # Tree format grouped by mode
@@ -209,7 +198,7 @@ def agent_show(
     """
     Show details of a specific agent
     """
-    agent = asyncio.run(_run_registry(Agent.get(name)))
+    agent = _run_registry(Agent.get(name))
     
     if not agent:
         console.print(f"[red]Agent not found: {name}[/red]")
@@ -283,13 +272,34 @@ def agent_permissions(
     """
     Check whether an agent declares a specific tool.
     """
-    agent = asyncio.run(_run_registry(Agent.get(name)))
+    agent = _run_registry(Agent.get(name))
     
     if not agent:
         console.print(f"[red]Agent not found: {name}[/red]")
         raise typer.Exit(1)
     
     _ = pattern
-    result = asyncio.run(_run_registry(Agent.has_tool(name, tool)))
+    result = _run_registry(Agent.has_tool(name, tool))
     color = "green" if result else "red"
     console.print(f"[{color}]{'allow' if result else 'deny'}[/{color}]")
+
+
+def _run_registry(operation):
+    """Keep registry diagnostics off stdout and close discovery-owned stores."""
+    from contextlib import redirect_stdout
+    import sys
+    from flocks.cli.runtime import close_cli_resources
+
+    async def run():
+        try:
+            return await operation
+        finally:
+            await close_cli_resources()
+    try:
+        with redirect_stdout(sys.stderr):
+            value = asyncio.run(run())
+            sys.stderr.flush()
+        return value
+    except Exception as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1) from exc

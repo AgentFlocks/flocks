@@ -603,6 +603,20 @@ class TestToolRouteRegressions:
         assert upper.json()["total"] == lower.json()["total"]
 
     @pytest.mark.asyncio
+    async def test_internal_sentinel_tools_are_not_listed(self, client: AsyncClient):
+        """``invalid`` is registered for the runtime but is not a tool to list, group or enable."""
+        from flocks.tool.registry import ToolRegistry
+
+        ToolRegistry.init()
+        assert ToolRegistry.get("invalid") is not None
+        listed = await client.get("/api/tools")
+        page = await client.get("/api/tools/page", params={"q": "invalid", "limit": 200})
+
+        assert listed.status_code == 200 and page.status_code == 200
+        assert "invalid" not in {item["name"] for item in listed.json()}
+        assert "invalid" not in {item["name"] for item in page.json()["items"]}
+
+    @pytest.mark.asyncio
     async def test_patch_unknown_device_returns_404(self, client: AsyncClient):
         response = await client.patch(
             "/api/tools/read",

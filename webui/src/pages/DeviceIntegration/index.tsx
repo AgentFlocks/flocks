@@ -45,6 +45,11 @@ import type { APIServiceCredentialField, Message, Tool } from '@/types';
 import { toolAPI } from '@/api/tool';
 import ToolDetailModal from '../Tool/components/ToolDetailModal';
 import { buildCustomDeviceModeRoutingPrompt } from './customDevice';
+import GroupNav, { useGroupDrag, type GroupDrag, type GroupNavProps } from '@/components/plugin-groups/GroupNav';
+import PluginGroupButton from '@/components/plugin-groups/PluginGroupButton';
+import { deriveGroupNav, matchesGroup, saveGroupItems, type GroupSelection } from '@/components/plugin-groups/groupView';
+import { usePluginViewMode, type PluginViewMode } from '@/hooks/usePluginViewMode';
+import PluginViewToggle from '@/components/plugin-groups/PluginViewToggle';
 
 // ============================================================================
 // Constants
@@ -181,31 +186,34 @@ function StatusBadge({ status, enabled }: { status: string; enabled: boolean }) 
 // Active device card
 // ============================================================================
 
-function ActiveCard({ device, vendorKey, selected, onClick }: {
+function ActiveCard({ device, grouping, vendorKey, selected, onClick, viewMode = 'cards' }: {
   device: DeviceIntegration;
+  grouping: GroupDrag;
   vendorKey?: string;
   selected: boolean;
   onClick: () => void;
+  viewMode?: PluginViewMode;
 }) {
   const { i18n } = useTranslation('device');
   const vendor = vendorKey ? vendorPresentation(vendorKey) : undefined;
   const vendorLabel = vendor ? (i18n.language.startsWith('zh') ? vendor.nameCn : vendor.nameEn) : undefined;
   return (
-    <button
+    <div
       onClick={onClick}
-      className={`w-full text-left rounded-card border p-4 transition-all duration-150 group ${
+      className={`${viewMode === 'cards' ? 'w-full text-left rounded-card border p-4 transition-all duration-150 group' : 'w-full text-left rounded-control border px-4 py-3 transition-all duration-150 group'} ${
         selected
           ? 'border-info bg-info-soft shadow-sm ring-1 ring-focus'
           : 'border-line bg-surface hover:border-line-control hover:shadow-sm'
       }`}
     >
+      <button type="button" className="w-full text-left">
       <div className="flex items-start gap-3">
         <div className={`w-9 h-9 rounded-card flex items-center justify-center flex-shrink-0 ${
           selected ? 'bg-info-soft' : 'bg-subtle group-hover:bg-hover'
         }`}>
           <IconPlugConnected aria-hidden="true" className={`w-4 h-4 ${selected ? 'text-info' : 'text-fg-muted'}`} />
         </div>
-        <div className="flex-1 min-w-0">
+        <div className={viewMode === 'cards' ? 'flex-1 min-w-0' : 'flex-1 min-w-0 grid gap-x-4 gap-y-1 md:grid-cols-2 xl:grid-cols-[minmax(160px,1fr)_minmax(150px,1fr)_minmax(180px,1fr)_auto] xl:items-center'}>
           <div className="flex items-center justify-between gap-2">
             <p className="text-sm font-semibold text-fg truncate">{device.name}</p>
             <IconSettings aria-hidden="true" className={`w-4 h-4 flex-shrink-0 ${selected ? 'text-info' : 'text-fg-placeholder group-hover:text-fg-muted'}`} />
@@ -225,7 +233,11 @@ function ActiveCard({ device, vendorKey, selected, onClick }: {
           </div>
         </div>
       </div>
-    </button>
+      </button>
+      <div className="mt-2 flex justify-end">
+        <PluginGroupButton grouping={grouping} itemKey={device.id} />
+      </div>
+    </div>
   );
 }
 
@@ -1728,9 +1740,10 @@ function DeviceConfigPanel({
 
 type RoomStatus = 'ok' | 'partial' | 'empty';
 
-function GroupSidebar({ groups, devices, selectedGroupId, onSelect, onRename, onDelete, onCreate }: {
+function GroupSidebar({ groups, devices, selectedGroupId, onSelect, onRename, onDelete, onCreate, businessNav }: {
   groups: DeviceGroup[];
   devices: DeviceIntegration[];
+  businessNav: GroupNavProps;
   selectedGroupId: string | null;
   onSelect: (id: string | null) => void;
   onRename: (id: string, newName: string) => Promise<void>;
@@ -1830,11 +1843,13 @@ function GroupSidebar({ groups, devices, selectedGroupId, onSelect, onRename, on
     // self-stretch ensures the panel fills the full flex-row height so the
     // right border reaches the bottom even when there are few rooms.
     // Below md the room list cannot share the row with the device cards
-    // (375px leaves ~120px for the cards), so it stacks above them as a
-    // capped-height block and only becomes the 208px side column from md up.
+    // (375px leaves ~120px for the cards), so the rail stacks above them and
+    // only becomes the 208px side column from md up. The room list and the
+    // business groups each cap their own height there: a single cap on the
+    // rail let the groups squeeze the room list to nothing.
     <div
       data-testid="device-room-sidebar"
-      className="w-full max-h-48 flex-shrink-0 border-b border-line flex flex-col bg-subtle md:h-full md:max-h-none md:w-52 md:border-b-0 md:border-r"
+      className="w-full flex-shrink-0 border-b border-line flex flex-col bg-subtle md:h-full md:w-52 md:border-b-0 md:border-r"
     >
       {/* Header */}
       <div className="px-3 py-2.5 flex items-center justify-between flex-shrink-0">
@@ -1852,7 +1867,7 @@ function GroupSidebar({ groups, devices, selectedGroupId, onSelect, onRename, on
       <div className="h-px bg-selected mx-0" />
 
       {/* Scrollable list */}
-      <div className="flex-1 overflow-y-auto py-1 px-2">
+      <div data-testid="device-room-list" className="max-h-36 flex-1 overflow-y-auto py-1 px-2 md:max-h-none">
         {/* "全部机房" item */}
         <button
           onClick={() => { onSelect(null); cancelEdit(); }}
@@ -1996,6 +2011,10 @@ function GroupSidebar({ groups, devices, selectedGroupId, onSelect, onRename, on
           </div>
         )}
       </div>
+      {/* Business groups share this 208px rail; room navigation stays independent. */}
+      <div className="max-h-56 shrink-0 overflow-y-auto border-t border-line px-2 py-3 md:max-h-[50%]">
+        <GroupNav {...businessNav} className="md:w-full" />
+      </div>
     </div>
   );
 }
@@ -2024,6 +2043,7 @@ export default function DeviceIntegrationPage() {
   const rexStatusPollRef = useRef<number | null>(null);
   // null = "全部机房" aggregate view; string = specific group id
   const [selectedGroupId, setSelectedGroupId] = useState<string | null>(null);
+  const [viewMode, setViewMode] = usePluginViewMode('device', 'cards');
   // Group ids whose section is collapsed in the "全部机房" view. Default
   // (absent) = expanded, so brand-new rooms show their devices immediately.
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
@@ -2062,11 +2082,46 @@ export default function DeviceIntegrationPage() {
     resetRexSession();
   }, [resetRexSession]);
 
-  // Devices shown in the main area (filtered by selected room)
-  const filteredDevices = useMemo(
+  // Keep native room selection and shared business membership independent.
+  // The full devices state remains authoritative for rooms, forms and wizard counts.
+  const roomDevices = useMemo(
     () => selectedGroupId ? devices.filter((d) => d.group_id === selectedGroupId) : devices,
     [devices, selectedGroupId],
   );
+  const [businessGroup, setBusinessGroup] = useState<GroupSelection>(null);
+  // Device UUID instances own their group independently of the selected template.
+  const asBusinessItem = (device: DeviceIntegration) => ({
+    key: device.id, name: device.name, group: device.group,
+  });
+  const businessItems = devices.map(asBusinessItem);
+  const businessDrag = useGroupDrag(businessItems, toast.warning);
+  const reloadBusinessDevices = useCallback(async () => {
+    // Metadata updates never provision devices, rescan templates or change rooms.
+    const response = await deviceAPI.list();
+    setDevices(response.data || []);
+  }, []);
+  const saveBusinessGroup = (id: string, group: string | null) => deviceAPI.update(id, { group });
+  const loadBusinessItems = async () => (await deviceAPI.list()).data.map(asBusinessItem);
+  const moveBusinessGroup = async (key: string, group: string | null) => {
+    const inventory = await loadBusinessItems();
+    await saveGroupItems(inventory.filter((item) => item.key === key), group, saveBusinessGroup, reloadBusinessDevices, t);
+  };
+  const createBusinessGroup = async (key: string, group: string) => {
+    const inventory = await loadBusinessItems();
+    if (inventory.some((item) => matchesGroup(item.group, group))) throw new Error(t('pluginGroups:validation.duplicate'));
+    await saveGroupItems(inventory.filter((item) => item.key === key), group, saveBusinessGroup, reloadBusinessDevices, t);
+  };
+  const changeBusinessGroup = async (from: string, to: string | null) => {
+    const inventory = await loadBusinessItems();
+    if (to !== null && inventory.some((item) => matchesGroup(item.group, to))) throw new Error(t('pluginGroups:validation.duplicate'));
+    await saveGroupItems(inventory.filter((item) => matchesGroup(item.group, from)), to, saveBusinessGroup, reloadBusinessDevices, t, true);
+  };
+  const businessNav: GroupNavProps = {
+    preferenceKey: 'device', inventoryComplete: !loading && !refreshing, ...deriveGroupNav(businessItems), items: businessItems,
+    selection: businessGroup, onSelect: setBusinessGroup, onMove: moveBusinessGroup, onCreate: createBusinessGroup,
+    onRename: changeBusinessGroup, onDelete: (name) => changeBusinessGroup(name, null), ...businessDrag,
+  };
+  const filteredDevices = roomDevices.filter((device) => matchesGroup(device.group, businessGroup));
 
   const fetchData = useCallback(async (
     silent = false,
@@ -2388,8 +2443,8 @@ export default function DeviceIntegrationPage() {
   // Groups that actually render a section in the "全部机房" view (i.e. have at
   // least one device) — drives the collapse-all toggle.
   const nonEmptyGroupIds = useMemo(
-    () => groups.filter((g) => devices.some((d) => d.group_id === g.id)).map((g) => g.id),
-    [groups, devices],
+    () => groups.filter((g) => filteredDevices.some((d) => d.group_id === g.id)).map((g) => g.id),
+    [groups, filteredDevices],
   );
   const allCollapsed =
     nonEmptyGroupIds.length > 0 && nonEmptyGroupIds.every((id) => collapsedGroups.has(id));
@@ -2408,6 +2463,7 @@ export default function DeviceIntegrationPage() {
         icon={<IconServerCog aria-hidden="true" className="w-8 h-8" />}
         action={
           <div className="flex items-center gap-2">
+            <PluginViewToggle value={viewMode} onChange={setViewMode} />
             <button
               onClick={() => void fetchData(true, true, true)}
               disabled={refreshing}
@@ -2434,6 +2490,7 @@ export default function DeviceIntegrationPage() {
           <GroupSidebar
             groups={groups}
             devices={devices}
+            businessNav={businessNav}
             selectedGroupId={selectedGroupId}
             onSelect={setSelectedGroupId}
             onRename={handleRenameGroup}
@@ -2473,7 +2530,7 @@ export default function DeviceIntegrationPage() {
                     <IconBuilding aria-hidden="true" className="w-4 h-4 text-fg-muted flex-shrink-0" />
                     <span className="text-sm font-semibold text-fg">{t('header.allRooms')}</span>
                     <span className="text-xs text-fg-muted">
-                      {t('header.deviceCount', { count: devices.length, rooms: groups.length })}
+                      {t('header.deviceCount', { count: filteredDevices.length, rooms: groups.length })}
                     </span>
                     {connectedCount > 0 && (
                       <span className="inline-flex items-center gap-1 text-xs text-success">
@@ -2527,7 +2584,7 @@ export default function DeviceIntegrationPage() {
                   /* ── "全部机房" grouped view ── */
                   <div className="space-y-8">
                     {groups.map((group) => {
-                      const gDevices = devices.filter((d) => d.group_id === group.id);
+                      const gDevices = filteredDevices.filter((d) => d.group_id === group.id);
                       if (gDevices.length === 0) return null;
                       const gConnected = gDevices.filter(
                         (d) => d.enabled && (d.status === 'ok' || d.status === 'connected'),
@@ -2554,15 +2611,17 @@ export default function DeviceIntegrationPage() {
                             )}
                           </button>
                           {!collapsed && (
-                            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+                            <div className={viewMode === 'cards' ? 'grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4' : 'space-y-2'}>
                               {gDevices.map((d) => (
-                                <ActiveCard
-                                  key={d.id}
-                                  device={d}
-                                  vendorKey={vendorOf(d)}
-                                  selected={panelDeviceId === d.id}
-                                  onClick={() => setPanel({ kind: 'edit', device: d })}
-                                />
+                                <div key={d.id} {...businessDrag.dragProps(d.id, { allowPrimaryButton: true })}>
+                                  <ActiveCard grouping={businessDrag}
+                                    device={d}
+                                    vendorKey={vendorOf(d)}
+                                    selected={panelDeviceId === d.id}
+                                    onClick={() => setPanel({ kind: 'edit', device: d })}
+                                    viewMode={viewMode}
+                                  />
+                                </div>
                               ))}
                             </div>
                           )}
@@ -2575,7 +2634,7 @@ export default function DeviceIntegrationPage() {
                         reachable — the "全部机房" view should never hide a device. */}
                     {(() => {
                       const known = new Set(groups.map((g) => g.id));
-                      const orphans = devices.filter((d) => !known.has(d.group_id));
+                      const orphans = filteredDevices.filter((d) => !known.has(d.group_id));
                       if (orphans.length === 0) return null;
                       return (
                         <section>
@@ -2587,15 +2646,17 @@ export default function DeviceIntegrationPage() {
                             </span>
                             <span className="text-xs text-fg-muted">{t('section.ungroupedHint')}</span>
                           </div>
-                          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+                          <div className={viewMode === 'cards' ? 'grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4' : 'space-y-2'}>
                             {orphans.map((d) => (
-                              <ActiveCard
-                                key={d.id}
-                                device={d}
-                                vendorKey={vendorOf(d)}
-                                selected={panelDeviceId === d.id}
-                                onClick={() => setPanel({ kind: 'edit', device: d })}
-                              />
+                              <div key={d.id} {...businessDrag.dragProps(d.id, { allowPrimaryButton: true })}>
+                                <ActiveCard grouping={businessDrag}
+                                  device={d}
+                                  vendorKey={vendorOf(d)}
+                                  selected={panelDeviceId === d.id}
+                                  onClick={() => setPanel({ kind: 'edit', device: d })}
+                                  viewMode={viewMode}
+                                />
+                              </div>
                             ))}
                           </div>
                         </section>
@@ -2633,15 +2694,17 @@ export default function DeviceIntegrationPage() {
                         <span className="text-xs text-success">{t('header.connected', { count: connectedCount })}</span>
                       )}
                     </div>
-                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+                    <div className={viewMode === 'cards' ? 'grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4' : 'space-y-2'}>
                       {filteredDevices.map((d) => (
-                        <ActiveCard
-                          key={d.id}
-                          device={d}
-                          vendorKey={vendorOf(d)}
-                          selected={panelDeviceId === d.id}
-                          onClick={() => setPanel({ kind: 'edit', device: d })}
-                        />
+                        <div key={d.id} {...businessDrag.dragProps(d.id, { allowPrimaryButton: true })}>
+                          <ActiveCard grouping={businessDrag}
+                            device={d}
+                            vendorKey={vendorOf(d)}
+                            selected={panelDeviceId === d.id}
+                            onClick={() => setPanel({ kind: 'edit', device: d })}
+                            viewMode={viewMode}
+                          />
+                        </div>
                       ))}
                     </div>
                   </section>

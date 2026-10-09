@@ -119,7 +119,10 @@ async def test_rate_limited_provider_retries_five_times_then_fails(monkeypatch):
 
     assert MAX_ERROR_RETRIES == 5
     assert calls == MAX_ERROR_RETRIES + 1  # first attempt + 5 retries
-    assert slept == [2000, 4000, 8000, 16000, 30000]  # capped at RETRY_MAX_DELAY_NO_HEADERS
+    # 2s x 2^n capped at RETRY_MAX_DELAY_NO_HEADERS, with equal jitter: each wait is in [base / 2, base].
+    bases = [2000, 4000, 8000, 16000, 30000]
+    assert len(slept) == len(bases)
+    assert all(base / 2 <= ms <= base for ms, base in zip(slept, bases)), slept
     retry_statuses = [s for s in statuses if isinstance(s, SessionStatusRetry)]
     assert [s.attempt for s in retry_statuses] == [1, 2, 3, 4, 5]
     # The runner normalises every rate-limit shaped exception into a retryable APIError,
@@ -157,7 +160,8 @@ async def test_retry_after_header_beats_exponential_backoff(monkeypatch):
 
     result = await runner._process_step([_last_user(runner)], _last_user(runner))
 
-    assert slept == [7000]
+    # retry-after is a lower bound plus up to 25 % jitter, never the 2000 ms first backoff step.
+    assert len(slept) == 1 and 7000 <= slept[0] <= 8750, slept
     assert result.action == "stop" and result.content == "ok"
     # priority: retry-after-ms > retry-after > backoff
     assert SessionRetry.delay(1, {"data": {"responseHeaders": {"retry-after-ms": "1500", "retry-after": "7"}}}) == 1500

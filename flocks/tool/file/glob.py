@@ -121,6 +121,7 @@ def fallback_glob(
 
 @ToolRegistry.register_function(
     name="glob",
+    group="检索",
     description=DESCRIPTION,
     category=ToolCategory.SEARCH,
     parameters=[

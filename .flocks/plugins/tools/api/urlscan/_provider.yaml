@@ -1,4 +1,5 @@
 name: urlscan
+group: 威胁情报
 description: URLScan.io - Automated URL scanning and threat intelligence
 auth:
   secret: urlscan_api_key

@@ -26,7 +26,7 @@ import ExtensionSlot from '@/components/extensions/ExtensionSlot';
 import VoiceInput from '@/components/voice/VoiceInput';
 import { QuestionTool, type QuestionItem } from './QuestionTool';
 import { PermissionApprovalDialog, type PermissionDecision } from './PermissionApprovalDialog';
-import DelegateTaskCard, { isDelegateTool, shouldRenderDelegateTaskCard } from './DelegateTaskCard';
+import DelegateTaskCard, { extractDelegateInfo, isDelegateTool, shouldRenderDelegateTaskCard } from './DelegateTaskCard';
 import CommandDropdown, { isSlashCommandName, parseSlashCommand } from './CommandDropdown';
 import ImageLightbox from './ImageLightbox';
 import { TodoList, buildTodoSummary, pickTodoEntries } from './TodoList';
@@ -66,10 +66,12 @@ import {
   fetchSessionChatCommands,
   getQueuedPromptText,
   parseInstructionDisplayText,
+  readSessionRetryStatus,
   resolveSessionChatSSEAction,
   shouldForwardSSEEventToParent,
   stripTaskMetadata,
   type CompactionStage,
+  type SessionRetryStatus,
   usePendingQuestions,
   useSessionContextUsage,
   useSessionPromptQueue,
@@ -132,6 +134,38 @@ type ComposerReferenceKind = 'subagent' | 'skill' | 'workflow';
 interface ComposerReference {
   kind: ComposerReferenceKind;
   value: string;
+}
+
+const AGENT_AVATAR_COLORS: Record<string, string> = {
+  // Semantic category pairs (UI_SPEC.md) so avatars follow the light / dark theme.
+  rex: 'bg-brand-soft text-brand',
+  'rex-junior': 'bg-ai-soft text-ai',
+  explore: 'bg-data-soft text-data',
+  librarian: 'bg-warning-soft text-warning',
+  oracle: 'bg-info-soft text-info',
+  prometheus: 'bg-danger-soft text-danger',
+  hephaestus: 'bg-subtle text-fg-secondary',
+  'multimodal-looker': 'bg-success-soft text-success',
+  'self-improve': 'bg-selected text-fg',
+};
+const CUSTOM_AGENT_AVATAR_COLORS = Object.values(AGENT_AVATAR_COLORS);
+
+function getAgentAvatarColor(agent: string): string {
+  const name = agent.trim().toLowerCase().replace(/_/g, '-');
+  if (Object.prototype.hasOwnProperty.call(AGENT_AVATAR_COLORS, name)) return AGENT_AVATAR_COLORS[name];
+  // Custom agents keep the same color across sessions, reloads and message order.
+  let hash = 0;
+  for (const character of name) hash = (Math.imul(hash, 31) + character.codePointAt(0)!) >>> 0;
+  return CUSTOM_AGENT_AVATAR_COLORS[hash % CUSTOM_AGENT_AVATAR_COLORS.length];
+}
+
+function getAgentSender(parts: MessagePart[]) {
+  for (const part of parts) {
+    const sender = part.synthetic && part.metadata?.communication;
+    if (sender?.source_type === 'agent' && typeof sender.source_agent === 'string'
+      && typeof sender.source_session_id === 'string') return sender;
+  }
+  return undefined;
 }
 
 function getMessagePartDisplayText(part: MessagePart, hideTaskMetadata = false): string {
@@ -277,10 +311,13 @@ interface ComposerAttachment {
 }
 
 const APPROX_CHARS_PER_TOKEN = 4;
+// Mirrors SessionPrompt.count_tokens: CJK characters cost about one token each.
+const CJK_CHAR_RE = /[\u3000-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af\uf900-\ufaff\uff00-\uffef]/g;
 
 function countTokensLikeCompaction(text: string | null | undefined): number {
   if (!text) return 0;
-  return Math.floor(text.length / APPROX_CHARS_PER_TOKEN);
+  const cjkChars = text.match(CJK_CHAR_RE)?.length ?? 0;
+  return cjkChars + Math.floor((text.length - cjkChars) / APPROX_CHARS_PER_TOKEN);
 }
 
 const INSIGNIFICANT_THINKING_TEXT_RE = /^[\p{P}\p{S}]+$/u;
@@ -363,40 +400,40 @@ function sumMergedProcessIntervals(intervals: ProcessTimeInterval[]): number {
   return total + currentEnd - currentStart;
 }
 
+function isModelActivityPart(part: MessagePart): boolean {
+  return part.type === 'step-start' && !!part.time && Number.isFinite(part.time.start);
+}
+
 export function getProcessGroupDurationMs(
   parts: readonly MessagePart[],
   activeNowMs?: number,
   activePartId?: string,
+  activeScope?: { messageId?: string; modelPartId?: string },
 ): number | null {
-  let activeIntervalIndex = -1;
-  if (activeNowMs !== undefined) {
-    const startIndex = activePartId
-      ? parts.findIndex((part) => part.id === activePartId)
-      : parts.length - 1;
-    const endIndex = activePartId ? startIndex : 0;
-    for (let index = startIndex; index >= endIndex; index -= 1) {
-      const part = parts[index];
-      if (!part) continue;
-      const time = getProcessPartTime(part);
-      if (
-        !!time
-        && Number.isFinite(time.start)
-        && !Number.isFinite(time.end)
-        && time.start <= activeNowMs
-        && (part.type !== 'tool' || isActiveToolPart(part))
-      ) {
-        activeIntervalIndex = index;
-        break;
-      }
-    }
-  }
-
-  const intervals = parts
-    .map((part, index) => getProcessPartInterval(
-      part,
-      index === activeIntervalIndex ? activeNowMs : undefined,
-    ))
-    .filter((interval): interval is ProcessTimeInterval => interval !== null);
+  const belongsToActiveMessage = (part: MessagePart) => (
+    !activeScope?.messageId || part.messageID === activeScope.messageId
+  );
+  const canExtend = (part: MessagePart) => {
+    const time = getProcessPartTime(part);
+    return activeNowMs !== undefined && belongsToActiveMessage(part)
+      && !!time && Number.isFinite(time.start) && !Number.isFinite(time.end)
+      && time.start <= activeNowMs;
+  };
+  // Only the latest model marker may be open. A lost close event on an older
+  // attempt must not extend it through a retry/backoff or a later model call.
+  const modelPart = [...parts].reverse().find(isModelActivityPart);
+  const activePart = activePartId
+    ? parts.find((part) => part.id === activePartId)
+    : [...parts].reverse().find((part) => canExtend(part)
+      && (part.type !== 'tool' || isActiveToolPart(part)));
+  const intervals = parts.map((part) => {
+    const active = canExtend(part) && (
+      part.type === 'tool' ? isActiveToolPart(part)
+        : isModelActivityPart(part) ? part.id === (activeScope?.modelPartId ?? modelPart?.id)
+          : !modelPart && part === activePart
+    );
+    return getProcessPartInterval(part, active ? activeNowMs : undefined);
+  }).filter((interval): interval is ProcessTimeInterval => interval !== null);
 
   if (intervals.length === 0) return null;
   return sumMergedProcessIntervals(intervals);
@@ -688,6 +725,33 @@ function adjustContextSegmentTokens(
   return 0;
 }
 
+// Rows are estimates; the total is what the provider reported. The backend
+// folds an observed surplus into "conversation", but most of it is tokenizer
+// drift that belongs to every row (a two-message chat is not 3K tokens of
+// conversation), so take it back out and scale all rows to the total instead.
+// An estimate above the total (uncounted history reasoning) scales down.
+function scaleContextSegmentsToObservedTotal(
+  segments: ContextUsageBreakdownSegment[],
+  estimatedTokens: number,
+  usedTokens: number,
+): void {
+  if (usedTokens <= 0 || usedTokens === estimatedTokens) return;
+  if (usedTokens > estimatedTokens) {
+    adjustContextSegmentTokens(segments, 'conversation', -(usedTokens - estimatedTokens));
+  }
+  const counted = segments.filter((segment) => segment.included && segment.tokens > 0);
+  const countedTokens = counted.reduce((total, segment) => total + segment.tokens, 0);
+  if (countedTokens <= 0 || countedTokens === usedTokens) return;
+  let assigned = 0;
+  let largest = counted[0];
+  counted.forEach((segment) => {
+    segment.tokens = Math.floor((segment.tokens * usedTokens) / countedTokens);
+    assigned += segment.tokens;
+    if (segment.tokens > largest.tokens) largest = segment;
+  });
+  largest.tokens += usedTokens - assigned;
+}
+
 function normalizeFixedContextSegments(
   segments: ContextUsageBreakdownSegment[],
 ): ContextUsageBreakdownSegment[] {
@@ -754,15 +818,15 @@ export function buildContextUsageBreakdown(
     const includedToolDefinitionTokens = serverSegments.reduce((total, segment) => (
       segment.key === 'toolDefinitions' && segment.included ? total + segment.tokens : total
     ), 0);
-    const estimatedSnapshotTokens = snapshot.estimatedTokens > 0
-      ? snapshot.estimatedTokens
-      : snapshot.usedTokens || 0;
-    if (includeSnapshotUsage && !useLocalMessageUsage) {
-      adjustContextSegmentTokens(
-        segments,
-        'conversation',
-        -Math.max(0, (snapshot.usedTokens || 0) - estimatedSnapshotTokens),
-      );
+    // ``usedTokens`` is the figure the backend compares against the
+    // compaction threshold (provider-reported usage, including the system
+    // prompt and tool definitions), so the meter reaches that threshold when
+    // compaction actually starts.
+    const snapshotUsedTokens = snapshot.usedTokens > 0
+      ? snapshot.usedTokens
+      : snapshot.estimatedTokens || 0;
+    if (includeSnapshotUsage && !useLocalMessageUsage && snapshot.estimatedTokens > 0) {
+      scaleContextSegmentsToObservedTotal(segments, snapshot.estimatedTokens, snapshotUsedTokens);
     }
     const pendingTokenDeltas = includeSnapshotUsage ? options?.pendingTokenDeltas || {} : {};
     const pendingTokenDeltaTotal = Object.entries(pendingTokenDeltas).reduce(
@@ -783,15 +847,20 @@ export function buildContextUsageBreakdown(
               0,
               (
                 useLocalMessageUsage
-                  ? activeBreakdown?.usedTokens || 0
-                  : estimatedSnapshotTokens - includedSystemPromptTokens - includedToolDefinitionTokens
+                  ? includedSystemPromptTokens
+                    + includedToolDefinitionTokens
+                    + (activeBreakdown?.usedTokens || 0)
+                  : snapshotUsedTokens
               ) + pendingTokenDeltaTotal,
             )
           : 0
       ) + draftTokens,
       compactedTokens: Math.max(0, snapshot.compactedTokens || 0),
+      // Before the first model call nothing is sent yet, so the fixed
+      // prompt costs are listed but not counted.
       segments: normalizeFixedContextSegments(segments).map((segment) => (
-        segment.key === 'systemPrompt' || segment.key === 'toolDefinitions'
+        !includeSnapshotUsage
+          && (segment.key === 'systemPrompt' || segment.key === 'toolDefinitions')
           ? { ...segment, included: false }
           : segment
       )),
@@ -878,8 +947,9 @@ function ContextUsageRing({
       : clamped >= 50
         ? 'stroke-info'
         : 'stroke-fg-muted';
+  // Fixed prompt costs are only counted once the model has been called.
   const rows = breakdown.segments.filter((segment) => (
-    segment.key !== 'systemPrompt' && segment.key !== 'toolDefinitions'
+    segment.included || (segment.key !== 'systemPrompt' && segment.key !== 'toolDefinitions')
   ));
   const activeSegments = breakdown.segments.filter((segment) => segment.included && segment.tokens > 0);
 
@@ -1095,7 +1165,7 @@ export function mergeConsecutiveAssistantMessages(messages: Message[]): MergedMe
       continue;
     }
 
-    if (msg.role !== 'assistant') {
+    if (msg.role !== 'assistant' || getAgentSender(msg.parts)) {
       result.push(msg);
       continue;
     }
@@ -1104,12 +1174,14 @@ export function mergeConsecutiveAssistantMessages(messages: Message[]): MergedMe
     if (
       last &&
       last.role === 'assistant' &&
+      !getAgentSender(last.parts) &&
       last._merged &&
       last.finish !== 'summary' &&
       !!last.compacted === !!msg.compacted
     ) {
       last.parts = [...last.parts, ...msg.parts];
-      if (msg.finish) last.finish = msg.finish;
+      // The last constituent message owns the live state, including an unset finish.
+      last.finish = msg.finish;
     } else {
       result.push({ ...msg, parts: [...msg.parts], _merged: true });
     }
@@ -1291,9 +1363,10 @@ export function shouldRenderMessage(
   message: Pick<Message, 'role' | 'parts' | 'finish' | 'error'>,
   options?: { isActive?: boolean },
 ): boolean {
+  const visibleParts = message.parts?.filter((part) => !isModelActivityPart(part));
   if (
     message.role === 'assistant' &&
-    (message.parts?.length ?? 0) === 0 &&
+    (visibleParts?.length ?? 0) === 0 &&
     message.finish !== 'summary' &&
     !message.error &&
     !options?.isActive
@@ -1302,7 +1375,7 @@ export function shouldRenderMessage(
   }
   if (
     message.role === 'assistant' &&
-    (message.parts?.length ?? 0) === 0 &&
+    (visibleParts?.length ?? 0) === 0 &&
     message.finish === 'stop' &&
     !message.error
   ) {
@@ -1312,8 +1385,8 @@ export function shouldRenderMessage(
     message.role === 'assistant' &&
     message.finish === 'stop' &&
     !message.error &&
-    message.parts?.length &&
-    message.parts.every((part) => {
+    visibleParts?.length &&
+    visibleParts.every((part) => {
       if (part.type === 'text') return !(part.text || '').trim();
       if (part.type === 'reasoning' || part.type === 'thinking') return !getRenderableThinkingText(part);
       return false;
@@ -1945,6 +2018,10 @@ export default function SessionChat({
   const [compactingMessage, setCompactingMessage] = useState('');
   const [isDreaming, setIsDreaming] = useState(false);
   const [dreamingMessage, setDreamingMessage] = useState('');
+  // Backend retry state (provider 429 / 5xx). Without this the chat only shows
+  // the generic thinking dots for the whole backoff window.
+  const [retryStatus, setRetryStatus] = useState<SessionRetryStatus | null>(null);
+  const [retryCountdownSeconds, setRetryCountdownSeconds] = useState<number | null>(null);
   const [goalBanner, setGoalBanner] = useState<GoalBannerState | null>(null);
   const [dismissedGoalKey, setDismissedGoalKey] = useState(() => readDismissedGoalKey(sessionId));
   useEffect(() => {
@@ -1979,6 +2056,44 @@ export default function SessionChat({
   const [processGroupOpenState, setProcessGroupOpenState] = useState<ProcessGroupOpenState>(() => (
     readProcessGroupOpenState(sessionId)
   ));
+
+  // Seconds until the backend's next provider attempt, refreshed while the
+  // retry notice is visible so the user can see the wait shrinking.
+  useEffect(() => {
+    const nextAt = retryStatus?.next;
+    if (!retryStatus || typeof nextAt !== 'number') {
+      setRetryCountdownSeconds(null);
+      return undefined;
+    }
+    const update = () => {
+      setRetryCountdownSeconds(Math.max(0, Math.ceil((nextAt - Date.now()) / 1000)));
+    };
+    update();
+    const timer = window.setInterval(update, 500);
+    return () => window.clearInterval(timer);
+  }, [retryStatus]);
+
+  const retryNoticeText = useMemo(() => {
+    if (!retryStatus) return '';
+    const attempt = retryStatus.maxAttempts
+      ? `${retryStatus.attempt}/${retryStatus.maxAttempts}`
+      : `${retryStatus.attempt}`;
+    // Provider SDKs put the whole JSON error body in the message; keep the
+    // notice to one line.
+    const rawReason = (retryStatus.message || '').trim();
+    const reason = rawReason.length > 120 ? `${rawReason.slice(0, 117)}…` : rawReason;
+    const base = retryStatus.rateLimited
+      ? t('chat.retryNotice.rateLimited', { attempt })
+      : t('chat.retryNotice.transient', {
+        attempt,
+        reason: reason || t('chat.retryNotice.unknownReason'),
+      });
+    if (retryCountdownSeconds !== null && retryCountdownSeconds > 0) {
+      return `${base}${t('chat.retryNotice.countdown', { seconds: retryCountdownSeconds })}`;
+    }
+    return base;
+  }, [retryStatus, retryCountdownSeconds, t]);
+
   // Live compaction progress, populated by ``session.compaction_progress`` SSE
   // events emitted by the backend. ``chunk_done`` arrivals are non-deterministic
   // (parallel ``asyncio.gather``) so we deduplicate by ``data.chunk`` index.
@@ -2120,6 +2235,19 @@ export default function SessionChat({
       });
     }
   }, [refreshContextUsage, resolvePendingContextUsage, sessionId]);
+  // Prompts the latest snapshot already counts no longer need their
+  // optimistic estimate. Without this the meter stayed on the pre-send
+  // baseline for the whole turn and only jumped once the turn ended (or the
+  // page was reloaded), even though the backend pushes usage between steps.
+  useEffect(() => {
+    const includedUserMessageIds = activeContextUsageSnapshot?.recentUserMessageIDs;
+    if (!sessionId || !activeContextUsageSnapshot || !includedUserMessageIds?.length) return;
+    const pending = pendingContextUsageRef.current;
+    if (pending.sessionId !== sessionId) return;
+    const coveredKeys = Object.keys(pending.entries)
+      .filter((key) => includedUserMessageIds.includes(key));
+    resolvePendingContextUsage(coveredKeys, sessionId, activeContextUsageSnapshot);
+  }, [activeContextUsageSnapshot, resolvePendingContextUsage, sessionId]);
   const isCompactingRef = useRef(false);
   const prevStreamingRef = useRef(false);
   // Tracks "sessionId::message" key to prevent double-send in React StrictMode
@@ -2295,6 +2423,74 @@ export default function SessionChat({
     }
   }, [loadOlder, loadNewer]);
 
+
+  // A historical receipt describes the submission, not the child's *current*
+  // activity. Receipts identify direct children; runtime ancestry also includes
+  // grandchildren and descendants whose receipts are outside the loaded page.
+  const childSessionIds = useMemo(() => [...new Set(messages.flatMap((message) => (
+    message.sessionID === sessionId && message.role === 'assistant'
+      ? message.parts.flatMap((part) => {
+          if ((part.type !== 'tool' && part.type !== 'toolCall') || !shouldRenderDelegateTaskCard(part)) return [];
+          const childId = extractDelegateInfo(part.state || {}, '').childSessionId;
+          return childId && childId !== sessionId ? [childId] : [];
+        })
+      : []
+  )))].sort(), [messages, sessionId]);
+  const childStatusScope = JSON.stringify([sessionId, childSessionIds]);
+  const childSessionIdsRef = useRef(childSessionIds);
+  childSessionIdsRef.current = childSessionIds;
+  const currentChildStatusScopeRef = useRef(childStatusScope);
+  currentChildStatusScopeRef.current = childStatusScope;
+  const descendantSessionIdsRef = useRef(new Set<string>());
+  const childStatusRequestRef = useRef(0);
+  const childStatusRevisionRef = useRef<Record<string, number>>({});
+  const [childStatuses, setChildStatuses] = useState<{
+    scope: string;
+    active: Record<string, boolean>;
+  }>({ scope: childStatusScope, active: {} });
+  const hasRunningDelegates = childStatuses.scope === childStatusScope
+    && Object.values(childStatuses.active).some(Boolean);
+  const canStop = Boolean(sessionId) && (isStreaming || hasRunningDelegates);
+
+  const refreshChildStatuses = useCallback(async () => {
+    const ids = childSessionIdsRef.current;
+    if (!sessionId) return;
+    const request = ++childStatusRequestRef.current;
+    const revisions = { ...childStatusRevisionRef.current };
+    try {
+      const response = await client.get('/api/session/status');
+      if (request !== childStatusRequestRef.current || currentChildStatusScopeRef.current !== childStatusScope) return;
+      const tracked = new Set([...ids, ...descendantSessionIdsRef.current]);
+      for (const [id, status] of Object.entries(response.data || {})) {
+        const ancestors = (status as { ancestorSessionIDs?: string[] })?.ancestorSessionIDs;
+        if (Array.isArray(ancestors) && ancestors.includes(sessionId)) {
+          tracked.add(id);
+          descendantSessionIdsRef.current.add(id);
+        }
+      }
+      setChildStatuses((current) => {
+        const active = current.scope === childStatusScope ? { ...current.active } : {};
+        for (const id of tracked) {
+          // An SSE update received during the request is newer than its snapshot.
+          if ((childStatusRevisionRef.current[id] || 0) !== (revisions[id] || 0)) continue;
+          active[id] = isActiveSessionStatus(response.data?.[id]);
+        }
+        return { scope: childStatusScope, active };
+      });
+    } catch {
+      // Keep the last known activity until the next status event or reconnect.
+    }
+  }, [childStatusScope, sessionId]);
+
+  useEffect(() => {
+    childStatusRequestRef.current += 1;
+    childStatusRevisionRef.current = {};
+    descendantSessionIdsRef.current = new Set();
+    setChildStatuses((current) => current.scope === childStatusScope
+      ? current : { scope: childStatusScope, active: {} });
+    void refreshChildStatuses();
+    return () => { childStatusRequestRef.current += 1; };
+  }, [childStatusScope, refreshChildStatuses]);
 
   useEffect(() => {
     setSubmittedModelPromptSessionId(null);
@@ -2545,6 +2741,29 @@ export default function SessionChat({
 
   const handleSSEEvent = useCallback(
     (event: SSEChatEvent) => {
+      // The same SSE connection also carries child activity. Do not route child
+      // events through the parent's message/streaming action reducer.
+      const childId = event.properties?.sessionID;
+      if (
+        event.type === 'session.status'
+        && typeof childId === 'string'
+        && childId !== sessionId
+        && (childSessionIdsRef.current.includes(childId)
+          || descendantSessionIdsRef.current.has(childId)
+          || (sessionId && Array.isArray(event.properties?.ancestorSessionIDs)
+            && event.properties.ancestorSessionIDs.includes(sessionId)))
+        && typeof event.properties?.status?.type === 'string'
+      ) {
+        descendantSessionIdsRef.current.add(childId);
+        childStatusRevisionRef.current[childId] = (childStatusRevisionRef.current[childId] || 0) + 1;
+        setChildStatuses((current) => ({
+          scope: childStatusScope,
+          active: {
+            ...(current.scope === childStatusScope ? current.active : {}),
+            [childId]: isActiveSessionStatus(event.properties?.status),
+          },
+        }));
+      }
       // Forward only global events or events relevant to this chat. The global
       // stream can be very noisy when multiple sessions run in parallel.
       if (shouldForwardSSEEventToParent(event, sessionId)) onSSEEvent?.(event);
@@ -2597,6 +2816,7 @@ export default function SessionChat({
           setIsStreaming(false);
           setIsDreaming(false);
           setDreamingMessage('');
+          setRetryStatus(null);
           setGoalBanner(null);
           setDismissedGoalKey('');
           setSubmittedModelPromptSessionId(null);
@@ -2616,6 +2836,18 @@ export default function SessionChat({
             isCompactingRef.current = false;
             setIsDreaming(false);
             setDreamingMessage('');
+            setRetryStatus(null);
+          } else if (action.statusType === 'retry') {
+            sessionBusyRef.current = true;
+            if (
+              !abortingRef.current &&
+              !suppressStreamingUntilIdleRef.current
+            ) setIsStreaming(true);
+            setIsCompacting(false);
+            isCompactingRef.current = false;
+            setIsDreaming(false);
+            setDreamingMessage('');
+            setRetryStatus(action.retry ?? { attempt: 1, message: action.message });
           } else if (action.statusType === 'compacting') {
             sessionBusyRef.current = true;
             if (
@@ -2650,6 +2882,7 @@ export default function SessionChat({
             setCompactingMessage('');
             setIsDreaming(false);
             setDreamingMessage('');
+            setRetryStatus(null);
             setCompactionStages([]);
             refetch();
             refreshContextUsageAfterTurn({ skipIfFreshMs: 500 });
@@ -2715,6 +2948,10 @@ export default function SessionChat({
         case 'message-part-updated': {
           sessionStatusRevisionRef.current += 1;
           const part = action.part as Pick<MessagePart, 'id' | 'type' | 'state'>;
+          // A finished tool part can be a sub-agent's late receipt while this
+          // session is still backing off; only fresh output ends the retry.
+          const finishedToolPart = (part.type === 'tool' || part.type === 'toolCall') && !isActiveToolPart(part);
+          if (!finishedToolPart) setRetryStatus((current) => (current ? null : current));
           if (part.id) {
             if (isActiveToolPart(part)) {
               activeToolPartIdsRef.current.add(part.id);
@@ -2788,6 +3025,7 @@ export default function SessionChat({
           setIsCompacting(false);
           setIsDreaming(false);
           setDreamingMessage('');
+          setRetryStatus(null);
           setCompactionStages([]);
           stopContextUsageRefreshing();
           refreshContextUsageAfterTurn({ skipIfFreshMs: 500 });
@@ -2800,6 +3038,7 @@ export default function SessionChat({
     },
     [
       sessionId,
+      childStatusScope,
       updateMessage,
       updateMessagePart,
       removeMessage,
@@ -2879,6 +3118,11 @@ export default function SessionChat({
           setCompactingMessage('');
           setCompactionStages([]);
         }
+        // A retry event missed while the stream was down is recovered from
+        // the poll; any other active state means the backoff is over.
+        setRetryStatus(status?.type === 'retry'
+          ? (readSessionRetryStatus(status) ?? { attempt: 1, message: status.message })
+          : null);
         return;
       }
 
@@ -2890,6 +3134,7 @@ export default function SessionChat({
       isCompactingRef.current = false;
       setCompactingMessage('');
       setCompactionStages([]);
+      setRetryStatus(null);
     } catch {
       // Keep the current activity state when reconnect status cannot be verified.
     }
@@ -2901,6 +3146,7 @@ export default function SessionChat({
     onReconnect: () => {
       if (!sessionId) return;
       void reconcileSessionStatusAfterReconnect();
+      void refreshChildStatuses();
       refetch();
       void refreshContextUsage();
       fetchPromptQueue();
@@ -2966,6 +3212,7 @@ export default function SessionChat({
     setCompactingMessage('');
     setIsDreaming(false);
     setDreamingMessage('');
+    setRetryStatus(null);
     setCompactionStages([]);
     setGoalBanner(null);
     setDismissedGoalKey('');
@@ -3022,16 +3269,35 @@ export default function SessionChat({
     if (!sessionId || loading) return;
     if (statusCheckedRef.current === sessionId) return;
     statusCheckedRef.current = sessionId;
+    // The poll is in flight across awaits, and this closure keeps the
+    // sessionId it started with. By the time it lands the consumer may have
+    // swapped sessions (callers like WorkflowDetail/ChatTab reuse this
+    // component without remounting) or an SSE status may already have
+    // superseded it — both bump the revision, so comparing it is what tells
+    // a stale response apart, the same way
+    // reconcileSessionStatusAfterReconnect does.
+    const statusRevision = sessionStatusRevisionRef.current;
+    let cancelled = false;
 
     const checkStatus = async () => {
       try {
         const res = await client.get('/api/session/status');
+        if (cancelled || statusRevision !== sessionStatusRevisionRef.current) return;
         const status = res.data[sessionId];
         if (status?.type === 'busy' && !suppressStreamingUntilIdleRef.current) {
           sessionBusyRef.current = true;
           setIsStreaming(true);
           setIsDreaming(false);
           setDreamingMessage('');
+          setRetryStatus(null);
+        } else if (status?.type === 'retry' && !suppressStreamingUntilIdleRef.current) {
+          // The backend is sleeping between provider retries; the turn is
+          // still running even though nothing is streaming yet.
+          sessionBusyRef.current = true;
+          setIsStreaming(true);
+          setIsDreaming(false);
+          setDreamingMessage('');
+          setRetryStatus(readSessionRetryStatus(status) ?? { attempt: 1, message: status.message });
         } else if (status?.type === 'compacting' && !suppressStreamingUntilIdleRef.current) {
           sessionBusyRef.current = true;
           setIsStreaming(true);
@@ -3051,22 +3317,23 @@ export default function SessionChat({
           sessionBusyRef.current = false;
         }
       } catch {
-        if (messages.length > 0) {
-          const lastMsg = messages[messages.length - 1];
-          if (lastMsg.role === 'assistant' && !lastMsg.finish) {
-            setIsStreaming(true);
-          }
+        if (cancelled || statusRevision !== sessionStatusRevisionRef.current) return;
+        const lastMsg = messagesRef.current[messagesRef.current.length - 1];
+        if (lastMsg?.role === 'assistant' && !lastMsg.finish) {
+          setIsStreaming(true);
         }
       }
 
+      if (statusRevision !== sessionStatusRevisionRef.current) return;
       try {
         await fetchPendingQuestions(sessionId);
       } catch (err) {
         console.warn('[SessionChat] Failed to recover pending questions:', err);
       }
     };
-    checkStatus();
-  }, [sessionId, loading, messages, fetchPendingQuestions]);
+    void checkStatus();
+    return () => { cancelled = true; };
+  }, [sessionId, loading, fetchPendingQuestions]);
 
   // A remote proxy or a reconnect boundary can delay or lose the one-shot
   // question.asked event. Reconcile only while the session is active; the
@@ -3874,10 +4141,10 @@ export default function SessionChat({
     if (!sessionId) return;
     sessionStatusRevisionRef.current += 1;
     // Record the ID of the message being aborted so we can ignore its finish event later.
-    const lastAsstMsg = [...messagesRef.current].reverse().find(
+    const lastAsstMsg = isStreaming ? [...messagesRef.current].reverse().find(
       (m) => m.role === 'assistant' && !m.finish,
-    );
-    const shouldRestoreActivity = isStreaming || sending || sessionBusyRef.current || Boolean(lastAsstMsg?.id);
+    ) : undefined;
+    const wasSessionBusy = sessionBusyRef.current;
     abortedMessageIdRef.current = lastAsstMsg?.id || null;
     abortingRef.current = true;
     suppressStreamingUntilIdleRef.current = true;
@@ -3895,11 +4162,9 @@ export default function SessionChat({
       abortingRef.current = false;
       abortedMessageIdRef.current = null;
       suppressStreamingUntilIdleRef.current = false;
-      if (shouldRestoreActivity) {
-        sessionBusyRef.current = true;
-        setIsStreaming(true);
-        if (sending) setSending(true);
-      }
+      sessionBusyRef.current = wasSessionBusy;
+      setIsStreaming(isStreaming);
+      setSending(sending);
     }
   }, [isStreaming, markMessageStopped, sending, sessionId]);
 
@@ -4231,7 +4496,7 @@ export default function SessionChat({
 
     for (let idx = 0; idx < merged.length; idx++) {
       const msg = merged[idx];
-      if (msg.parts.length > 0 && msg.parts.every(p => p.synthetic)) {
+      if (msg.parts.length > 0 && msg.parts.every(p => p.synthetic) && !getAgentSender(msg.parts)) {
         skipIndices.add(idx);
         continue;
       }
@@ -4268,6 +4533,15 @@ export default function SessionChat({
     writeDismissedGoalKey(sessionId, goalKey);
     setDismissedGoalKey(goalKey);
   }, [sessionId, visibleGoalBanner]);
+  const stopButton = canStop && (
+    <button
+      onClick={handleAbort}
+      title={t('chat.stopTitle')}
+      className="ui-btn-icon inline-flex h-8 w-8 items-center justify-center rounded-full border border-line-control bg-surface text-fg transition-colors hover:bg-hover"
+    >
+      <IconSquare aria-hidden="true" className="w-4 h-4 fill-current" />
+    </button>
+  );
 
   return (
     <div className={`flex flex-col min-h-0 ${className}`}>
@@ -4401,7 +4675,7 @@ export default function SessionChat({
               <div className={`group relative ${!compact ? 'w-full' : ''} flex`}>
                 <div className={compact ? `flex gap-2.5 ${getMessageGroupClassName({ compact, isUser: false, isEditing: false })}` : 'flex w-full min-w-0'}>
                   <span
-                    className={`inline-flex items-center justify-center rounded-full bg-ai-soft text-ai font-bold shadow-sm ring-2 ring-line flex-shrink-0 dark:ring-focus ${
+                    className={`inline-flex items-center justify-center rounded-full ${getAgentAvatarColor(pendingAgentName)} font-bold shadow-sm ring-2 ring-line flex-shrink-0 dark:ring-focus ${
                       compact ? 'w-7 h-7 text-xs' : 'w-8 h-8 text-sm'
                     } ${compact ? '' : 'absolute -left-10 top-1'}`}
                   >
@@ -4454,12 +4728,28 @@ export default function SessionChat({
               </div>
             )}
 
+            {/* Provider retry notice: the backend is backing off (429 / 5xx) before the next attempt */}
+            {retryStatus && isStreaming && !isCompacting && (
+              <div
+                className={`group relative ${!compact ? 'w-full' : ''} flex`}
+                data-testid="session-retry-notice"
+                role="status"
+              >
+                <div className={compact ? 'w-full' : 'flex w-full min-w-0'}>
+                  <div className="flex w-full items-center gap-2 rounded-card border border-warning bg-warning-soft px-3 py-2 text-xs text-warning">
+                    <IconLoader2 aria-hidden="true" className="h-3.5 w-3.5 flex-shrink-0 animate-spin text-warning" />
+                    <span className="min-w-0 break-words">{retryNoticeText}</span>
+                  </div>
+                </div>
+              </div>
+            )}
+
             {/* Standalone thinking indicator when no incomplete message exists */}
             {(isStreaming || sending) && !isCompacting && !(messages.length > 0 && messages[messages.length - 1].role === 'assistant' && !messages[messages.length - 1].finish) && (
               <div className={`group relative ${!compact ? 'w-full' : ''} flex`}>
                 <div className={compact ? `flex gap-2.5 ${getMessageGroupClassName({ compact, isUser: false, isEditing: false })}` : 'flex w-full min-w-0'}>
                   <span
-                    className={`inline-flex items-center justify-center rounded-full bg-ai-soft text-ai font-bold shadow-sm ring-2 ring-line flex-shrink-0 dark:ring-focus ${
+                    className={`inline-flex items-center justify-center rounded-full ${getAgentAvatarColor(pendingAgentName)} font-bold shadow-sm ring-2 ring-line flex-shrink-0 dark:ring-focus ${
                       compact ? 'w-7 h-7 text-xs' : 'w-8 h-8 text-sm'
                     } ${compact ? '' : 'absolute -left-10 top-1'}`}
                   >
@@ -4514,6 +4804,13 @@ export default function SessionChat({
               </button>
             ))}
           </div>
+        </div>
+      )}
+
+      {/* Live detail views can stop work without exposing a follow-up composer. */}
+      {hideInput && live && canStop && (
+        <div className="flex flex-shrink-0 justify-end px-4 py-3">
+          {stopButton}
         </div>
       )}
 
@@ -4993,24 +5290,15 @@ export default function SessionChat({
                   )}
 
                   {isStreaming ? (
-                    <>
-                      {canSend && !composerBusy && (
-                        <button
-                          onClick={handleSend}
-                          title={hasUploadingFiles ? t('chat.upload.waiting') : t('chat.queue.enqueue')}
-                          className="ui-btn-icon inline-flex items-center justify-center rounded-control bg-action text-action-fg transition-colors hover:bg-action-hover"
-                        >
-                          {sending || hasUploadingFiles ? <IconLoader2 aria-hidden="true" className="w-4 h-4 animate-spin" /> : <IconArrowUp aria-hidden="true" className="w-4 h-4" stroke={2} />}
-                        </button>
-                      )}
+                    canSend && !composerBusy && (
                       <button
-                        onClick={handleAbort}
-                        title={t('chat.stopTitle')}
-                        className="ui-btn-icon inline-flex h-8 w-8 items-center justify-center rounded-full border border-line-control bg-surface text-fg transition-colors hover:bg-hover"
+                        onClick={handleSend}
+                        title={hasUploadingFiles ? t('chat.upload.waiting') : t('chat.queue.enqueue')}
+                        className="ui-btn-icon inline-flex items-center justify-center rounded-control bg-action text-action-fg transition-colors hover:bg-action-hover"
                       >
-                        <IconSquare aria-hidden="true" className="w-4 h-4 fill-current" />
+                        {sending || hasUploadingFiles ? <IconLoader2 aria-hidden="true" className="w-4 h-4 animate-spin" /> : <IconArrowUp aria-hidden="true" className="w-4 h-4" stroke={2} />}
                       </button>
-                    </>
+                    )
                   ) : (
                     <button
                       onClick={handleSend}
@@ -5026,6 +5314,7 @@ export default function SessionChat({
                       {sending || hasUploadingFiles ? <IconLoader2 aria-hidden="true" className="w-4 h-4 animate-spin" /> : <IconArrowUp aria-hidden="true" className="w-4 h-4" stroke={2} />}
                     </button>
                   )}
+                  {stopButton}
                 </div>
             </div>
           </div>
@@ -5419,8 +5708,9 @@ function ChatMessageBubbleInner({
   onOpenContext,
 }: ChatMessageBubbleProps) {
   const { t, i18n } = useTranslation('session');
-  const isUser = message.role === 'user';
   const parts: MessagePart[] = Array.isArray(message.parts) ? message.parts : [];
+  const sender = getAgentSender(parts);
+  const isUser = message.role === 'user' && !sender;
   const processElapsedClock = useProcessElapsedClock(isActive && collapseIntermediateSteps);
   const { getPartExpanded, togglePart } = useReasoningToggle(parts, message.finish);
   // Lightbox state for inline image previews. Browsers block top-level
@@ -5439,13 +5729,13 @@ function ChatMessageBubbleInner({
       </div>
     );
   }
-  const rawAgentName = message.agent || 'rex';
+  const rawAgentName = sender?.source_agent || message.agent || 'rex';
   const agentName = rawAgentName.charAt(0).toUpperCase() + rawAgentName.slice(1);
 
   const getTextContent = () => {
     const text = parts
       .filter((p) => p.type === 'text' && p.text)
-      .map((p) => p.text)
+      .map((p) => sender ? getMessagePartDisplayText(p) : p.text)
       .join('\n\n');
     return isUser ? text : stripTaskMetadata(text);
   };
@@ -5481,7 +5771,9 @@ function ChatMessageBubbleInner({
   const iconButtonClass = 'group/action relative inline-flex h-6 w-6 items-center justify-center rounded-full border border-transparent bg-transparent text-fg-muted transition-colors duration-150 hover:bg-hover hover:text-fg-secondary active:bg-surface focus-visible:bg-surface focus-visible:outline-none disabled:cursor-not-allowed disabled:bg-disabled disabled:text-fg-disabled dark:text-fg-muted bg-hover dark:hover:text-fg bg-hover bg-hover';
   const tooltipClass = 'pointer-events-none absolute bottom-full left-1/2 z-10 mb-1.5 -translate-x-1/2 whitespace-nowrap rounded-md bg-subtle px-2 py-1 text-xs font-medium text-fg opacity-0 shadow-sm transition-opacity duration-150 group-hover/action:opacity-100';
   const messageErrorText = isUser ? '' : getMessageErrorText(message);
+  const visiblePartCount = parts.filter((part) => !isModelActivityPart(part)).length;
   const hasOnlyBlankTextParts = parts.length > 0 && parts.every((part) =>
+    isModelActivityPart(part) ||
     part.type === 'text' && !String(part.text || '').trim()
   );
   const shouldRenderAssistantErrorState = !isUser && !!messageErrorText && (
@@ -5500,7 +5792,7 @@ function ChatMessageBubbleInner({
       <IconUser aria-hidden="true" className={compact ? 'w-4 h-4' : 'w-4 h-4'} />
     </span>
   ) : (
-    <span className={`inline-flex items-center justify-center rounded-full bg-ai-soft text-ai font-bold shadow-sm ring-2 ring-line flex-shrink-0 dark:ring-focus ${avatarSize}`}>
+    <span className={`inline-flex items-center justify-center rounded-full ${getAgentAvatarColor(rawAgentName)} font-bold shadow-sm ring-2 ring-line flex-shrink-0 dark:ring-focus ${avatarSize}`}>
       {agentName.charAt(0).toUpperCase()}
     </span>
   );
@@ -5514,7 +5806,7 @@ function ChatMessageBubbleInner({
     >
 
       {/* Empty / loading state */}
-      {(parts.length === 0 || shouldRenderAssistantErrorState) && (
+      {(visiblePartCount === 0 || shouldRenderAssistantErrorState) && (
         isUser ? (
           <div className="flex items-center gap-2 opacity-60">
             <div className="w-1.5 h-1.5 rounded-full bg-current animate-pulse" />
@@ -5587,6 +5879,12 @@ function ChatMessageBubbleInner({
           const activeTailPart = isActive
             ? [...displayParts].reverse().find(isRenderableDisplayPart)
             : undefined;
+          const activeMessageId = displayParts[displayParts.length - 1]?.messageID;
+          const latestModelPart = [...displayParts].reverse().find(isModelActivityPart);
+          const activeOutputPart = [...displayParts].reverse().find((part) => (
+            ['text', 'reasoning', 'thinking'].includes(part.type)
+            && (!activeMessageId || part.messageID === activeMessageId)
+          ));
           const renderPart = (part: MessagePart, i: number, isVisible = true, processStep = false) => (
             // Spacing between consecutive parts is owned by this wrapper,
             // not by individual part components. Each part used to set its
@@ -5750,21 +6048,16 @@ function ChatMessageBubbleInner({
           const renderProcessGroup = (
             group: Array<{ part: MessagePart; index: number }>,
             groupIndex: number,
-            activeTimingPart?: MessagePart,
+            timingParts: MessagePart[],
           ) => {
             const processGroupOpen = processGroupsDefaultOpen || (processGroupsOpenWhileActive && isActive);
             const processGroupKey = `${message.id}:process:${groupIndex}`;
-            const groupParts = group.map(({ part }) => part);
-            const groupActivePart = groupParts.find((part) => part === activeTailPart);
-            const timedActivePart = groupActivePart || activeTimingPart;
-            const durationParts = timedActivePart && !groupParts.includes(timedActivePart)
-              ? [...groupParts, timedActivePart]
-              : groupParts;
-            const processGroupActive = isActive && !!timedActivePart;
+            const durationParts = [...group.map(({ part }) => part), ...timingParts];
             const processDurationMs = getProcessGroupDurationMs(
               durationParts,
-              processGroupActive ? processElapsedClock : undefined,
-              processGroupActive ? timedActivePart?.id : undefined,
+              isActive ? processElapsedClock : undefined,
+              activeOutputPart?.id,
+              { messageId: activeMessageId, modelPartId: latestModelPart?.id },
             );
             const hasStoredOpenState = !!processGroupOpenState
               && Object.prototype.hasOwnProperty.call(processGroupOpenState, processGroupKey);
@@ -5804,33 +6097,64 @@ function ChatMessageBubbleInner({
           };
           const renderDisplayParts = () => {
             if (!collapseIntermediateSteps || isUser) {
-              return displayParts.map((part, index) => renderPart(part, index));
+              return displayParts.filter((part) => !isModelActivityPart(part)).map((part, index) => renderPart(part, index));
             }
-            const nodes: React.ReactNode[] = [];
-            let processGroup: Array<{ part: MessagePart; index: number }> = [];
+            // Build first, render second: hidden markers and final output can
+            // arrive after a group's visible steps. Keep their timing after finish.
+            type ProcessGroup = {
+              steps: Array<{ part: MessagePart; index: number }>;
+              timing: MessagePart[];
+              index: number;
+            };
+            const nodes: Array<() => React.ReactNode> = [];
+            let processGroup: ProcessGroup | undefined;
+            let lastGroup: ProcessGroup | undefined;
+            let pendingTiming: MessagePart[] = [];
             let processGroupIndex = 0;
             const lastIntermediateProcessIndex = displayParts.reduce((lastIndex, part, index) => (
               isIntermediateProcessPart(part) ? index : lastIndex
             ), -1);
-            const flushProcessGroup = (activeTimingPart?: MessagePart) => {
-              if (processGroup.length === 0) return;
-              nodes.push(renderProcessGroup(processGroup, processGroupIndex, activeTimingPart));
-              processGroup = [];
-              processGroupIndex += 1;
+            const flushProcessGroup = () => {
+              if (!processGroup) return;
+              const group = processGroup;
+              nodes.push(() => renderProcessGroup(group.steps, group.index, group.timing));
+              lastGroup = group;
+              processGroup = undefined;
             };
             displayParts.forEach((part, index) => {
-              if (isIntermediateProcessPart(part) || (isRenderableTextPart(part) && index <= lastIntermediateProcessIndex)) {
-                processGroup.push({ part, index });
+              if (isModelActivityPart(part)) {
+                const group = processGroup || lastGroup;
+                if (group) group.timing.push(part);
+                else pendingTiming.push(part);
                 return;
+              }
+              if (isIntermediateProcessPart(part) || (isRenderableTextPart(part) && index <= lastIntermediateProcessIndex)) {
+                if (!processGroup) {
+                  processGroup = { steps: [], timing: pendingTiming, index: processGroupIndex++ };
+                  pendingTiming = [];
+                }
+                processGroup.steps.push({ part, index });
+                return;
+              }
+              // Empty output is still timed, but never adds a visible step.
+              if ((isActive || latestModelPart) && ['text', 'reasoning', 'thinking'].includes(part.type)) {
+                const group = processGroup || lastGroup;
+                if (group) group.timing.push(part);
+                else pendingTiming.push(part);
               }
               if (!isRenderableDisplayPart(part)) return;
               if (isPendingQuestionToolPart(part) || isRenderableTextPart(part)) {
-                flushProcessGroup(isActive && part === activeTailPart && isRenderableTextPart(part) ? part : undefined);
+                flushProcessGroup();
               }
-              nodes.push(renderPart(part, index));
+              if (isPendingQuestionToolPart(part)) {
+                // A question divides groups; do not assign subsequent timing twice.
+                lastGroup = undefined;
+                pendingTiming = [];
+              }
+              nodes.push(() => renderPart(part, index));
             });
             flushProcessGroup();
-            return nodes;
+            return nodes.map((render) => render());
           };
           return (
             <>
@@ -5937,7 +6261,7 @@ function ChatMessageBubbleInner({
       )}
 
       {/* Streaming indicator */}
-      {isActive && !isUser && parts.length > 0 && (() => {
+      {isActive && !isUser && visiblePartCount > 0 && (() => {
         return (
           <div className="flex items-center gap-2 mt-2.5 pt-2 border-t border-line text-xs text-fg-muted">
             <div className="flex gap-0.5">
@@ -5992,7 +6316,7 @@ function ChatMessageBubbleInner({
   const footerTimestamp = showTimestamp && message.timestamp
     ? <span className="select-none text-xs text-fg-muted dark:text-fg-muted">{formatSmartTime(message.timestamp, i18n.language)}</span>
     : null;
-  const footer = !compact && showActions && parts.length > 0 && !isEditing ? (
+  const footer = !compact && showActions && visiblePartCount > 0 && !isEditing ? (
     <div className={`mt-1.5 flex items-center ${
       isUser ? 'justify-between' : `justify-start${footerTimestamp ? ' gap-1.5' : ''}`
     }`}>
@@ -6023,7 +6347,7 @@ function ChatMessageBubbleInner({
           </>
         ) : (
           <>
-            <button
+            {!sender && <button
               onClick={() => void onRegenerate?.(targetMessageId)}
               disabled={actionsDisabled || isActionPending}
               className={iconButtonClass}
@@ -6031,7 +6355,7 @@ function ChatMessageBubbleInner({
             >
               <IconRefresh aria-hidden="true" className={`w-4 h-4 ${isActionPending ? 'animate-spin' : ''}`} />
               <span className={tooltipClass}>{t('chat.regenerate')}</span>
-            </button>
+            </button>}
             <button
               onClick={() => onCopy?.(getTextContent())}
               disabled={isActionPending}
@@ -6888,6 +7212,7 @@ export const ChatMessageBubble = memo(ChatMessageBubbleInner, (prev, next) => {
   if (prev.onOpenContextFile !== next.onOpenContextFile) return false;
   if (prev.onOpenContext !== next.onOpenContext) return false;
   if (prev.message.finish !== next.message.finish) return false;
+  if (prev.message.role !== next.message.role || prev.message.agent !== next.message.agent) return false;
   const prevParts = prev.message.parts as any[] | undefined;
   const nextParts = next.message.parts as any[] | undefined;
   if ((prevParts?.length ?? 0) !== (nextParts?.length ?? 0)) return false;

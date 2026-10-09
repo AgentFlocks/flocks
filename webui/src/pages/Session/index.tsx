@@ -41,6 +41,7 @@ import {
 } from '@tabler/icons-react';
 import { useTranslation } from 'react-i18next';
 import { useLocation, useNavigate, useSearchParams, useParams } from 'react-router-dom';
+import SessionActionsMenu from './SessionActionsMenu';
 import SessionComposerMenu, { SessionComposerMenuHeader, SessionModeOption } from './SessionComposerMenu';
 import { sessionPath } from '@/utils/sessionUrl';
 import { PaneActiveContext } from '@/components/layout/PaneActiveContext';
@@ -889,12 +890,14 @@ export default function SessionPage() {
   const [contextLoading, setContextLoading] = useState(false);
   const [contextLoadingMore, setContextLoadingMore] = useState(false);
   const [contextError, setContextError] = useState<string | null>(null);
+  const [contextResetVersion, setContextResetVersion] = useState(0);
   const contextScope = useMemo(() => ({
     sessionId: selectedSessionId,
     open: contextPanelOpen,
+    resetVersion: contextResetVersion,
     active: false,
     skillSignatures: new Map<string, string>(),
-  }), [selectedSessionId, contextPanelOpen]);
+  }), [selectedSessionId, contextPanelOpen, contextResetVersion]);
   const contextScopeRef = useRef(contextScope);
   contextScopeRef.current = contextScope;
   const contextSnapshotRef = useRef<SessionContextSnapshot | null>(null);
@@ -939,7 +942,7 @@ export default function SessionPage() {
   const [projectSubmitting, setProjectSubmitting] = useState(false);
   const [batchArchiving, setBatchArchiving] = useState(false);
   const [openMenuSessionId, setOpenMenuSessionId] = useState<string | null>(null);
-  const [menuAnchor, setMenuAnchor] = useState<{ top: number; right: number } | null>(null);
+  const [menuAnchor, setMenuAnchor] = useState<HTMLElement | null>(null);
   const [movePickerSessionId, setMovePickerSessionId] = useState<string | null>(null);
   const [movingSessionId, setMovingSessionId] = useState<string | null>(null);
   const [movingTargetProjectId, setMovingTargetProjectId] = useState<string | null>(null);
@@ -1449,6 +1452,31 @@ export default function SessionPage() {
     const eventSessionId = event.properties?.sessionID
       || event.properties?.part?.sessionID
       || event.properties?.info?.sessionID;
+    if (
+      event.type === 'session.cleared'
+      && contextScopeRef.current === contextScope
+      && contextScope.active
+      && eventSessionId === contextScope.sessionId
+    ) {
+      // Clearing history invalidates every message-backed resource, even when
+      // the panel is closed. Stop old reads before starting a fresh scope.
+      contextScope.active = false;
+      if (contextRefetchTimerRef.current !== null) {
+        window.clearTimeout(contextRefetchTimerRef.current);
+        contextRefetchTimerRef.current = null;
+      }
+      contextFlightRef.current?.controller.abort();
+      contextFlightRef.current = null;
+      contextScope.skillSignatures.clear();
+      contextSnapshotRef.current = null;
+      setContextSnapshot(null);
+      setContextError(null);
+      setRequestedContextResource(null);
+      // Remount the panel to cancel previews/folder navigation and clear local
+      // errors. The scope effect reloads retained roots if the panel is open.
+      setContextResetVersion((version) => version + 1);
+      return;
+    }
     if (
       contextScopeRef.current === contextScope
       && contextScope.active
@@ -2130,12 +2158,14 @@ export default function SessionPage() {
     setContextSnapshot(null);
     setRequestedContextResource(null);
     setSelectedAgent('rex');
-    setSelectedModelKey(null);
+    // Starting another blank draft keeps the session ID null, so the model
+    // initialization effect will not run again. Restore the default explicitly.
+    setSelectedModelKey(resolvedDefaultModelInitialized ? defaultSelectionKey : null);
     setSseStatus('disconnected');
     setShowAgentOptions(false);
     setShowModelOptions(false);
     setShowProjectOptions(false);
-  }, [selectSession]);
+  }, [defaultSelectionKey, resolvedDefaultModelInitialized, selectSession]);
 
   const handleCreateSession = useCallback(async (projectIdOverride?: string) => {
     if (creating) return;
@@ -2812,8 +2842,7 @@ export default function SessionPage() {
         setMenuAnchor(null);
         return null;
       }
-      const rect = trigger.getBoundingClientRect();
-      setMenuAnchor({ top: rect.bottom + 4, right: window.innerWidth - rect.right });
+      setMenuAnchor(trigger);
       return sessionId;
     });
   }, []);
@@ -2937,14 +2966,7 @@ export default function SessionPage() {
           <button
             onClick={(e) => {
               e.stopPropagation();
-              if (openMenuSessionId === session.id) {
-                setOpenMenuSessionId(null);
-                setMenuAnchor(null);
-              } else {
-                const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
-                setMenuAnchor({ top: rect.bottom + 4, right: window.innerWidth - rect.right });
-                setOpenMenuSessionId(session.id);
-              }
+              handleToggleSessionMenu(session.id, e.currentTarget);
             }}
             title={t('moreActions')}
             aria-label={t('moreActions')}
@@ -4200,7 +4222,7 @@ export default function SessionPage() {
               style={{ '--session-context-width': `${contextPanelWidth}px` } as React.CSSProperties}
             >
               <SessionContextPanel
-                key={activeChatSessionId}
+                key={`${activeChatSessionId}:${contextResetVersion}`}
                 sessionId={activeChatSessionId}
                 snapshot={contextSnapshot?.sessionID === activeChatSessionId ? contextSnapshot : null}
                 loading={contextLoading}
@@ -4433,7 +4455,7 @@ export default function SessionPage() {
         />
       )}
 
-      {/* Three-dot dropdown — rendered outside sidebar to avoid overflow:hidden clipping */}
+      {/* Three-dot dropdown — positioned in the viewport outside the sidebar. */}
       {openMenuSessionId && menuAnchor && (() => {
         const sid = openMenuSessionId;
         const session = sessions.find(s => s.id === sid);
@@ -4446,26 +4468,8 @@ export default function SessionPage() {
           && project.pathStatus !== 'missing'
           && project.pathStatus !== 'unreadable'
         ));
-        const movePickerHeight = Math.min(
-          272,
-          48 + Math.max(44, moveTargetProjects.length * 34),
-        );
-        const menuTop = showMovePicker
-          ? Math.max(8, Math.min(menuAnchor.top, window.innerHeight - movePickerHeight - 8))
-          : menuAnchor.top;
         return (
-          <div
-            className={`fixed z-50 grid gap-0.5 overflow-hidden rounded-card border border-line bg-surface p-1 shadow-overlay ${
-              showMovePicker ? 'w-[220px]' : 'w-[132px]'
-            }`}
-            style={{
-              top: menuTop,
-              right: menuAnchor.right,
-              maxHeight: showMovePicker ? 'calc(100vh - 16px)' : undefined,
-            }}
-            data-session-menu-portal
-            onClick={(e) => e.stopPropagation()}
-          >
+          <SessionActionsMenu anchor={menuAnchor} width={showMovePicker ? 220 : 132}>
             {showMovePicker ? (
               <>
                 <div className="flex h-8 items-center gap-1 border-b border-line px-1 pb-1 ">
@@ -4556,7 +4560,7 @@ export default function SessionPage() {
             </button>
               </>
             )}
-          </div>
+          </SessionActionsMenu>
         );
       })()}
     </div>

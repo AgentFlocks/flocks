@@ -338,6 +338,7 @@ async def _resolve_sandbox_workdir(
 
 @ToolRegistry.register_function(
     name="bash",
+    group="终端执行",
     description=get_description(os.getcwd()),
     category=ToolCategory.TERMINAL,
     parameters=[
@@ -472,10 +473,12 @@ async def _execute_host(
         }
     )
 
-    # Build environment with UTF-8 encoding for Windows
-    env = None
+    # Host commands inherit the server environment. Drop the knowledge service
+    # credential so an agent shell cannot read it back.
+    env = os.environ.copy()
+    env.pop("FLOCKS_KNOWLEDGEBASE_API_TOKEN", None)
+    env.pop("FLOCKS_KNOWLEDGEBASE_URL", None)
     if sys.platform == "win32":
-        env = os.environ.copy()
         env["PYTHONIOENCODING"] = "utf-8"
         env["PYTHONUTF8"] = "1"
 
@@ -502,6 +505,7 @@ async def _execute_host(
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=cwd,
+                env=env,
                 start_new_session=True,  # Create new process group
             )
     except Exception as e:

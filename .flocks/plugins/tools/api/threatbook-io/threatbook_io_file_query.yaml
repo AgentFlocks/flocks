@@ -1,4 +1,5 @@
 name: threatbook_io_file_query
+group: 威胁情报
 description: >
   Query file hash threat intelligence including static/dynamic analysis reports,
   malware detection results, behavioral signatures, network behavior, and

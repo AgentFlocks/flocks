@@ -23,6 +23,8 @@ _SENSITIVE_KEYS = {
     "apikey",
 }
 
+REDACTED_VALUE = "[REDACTED]"
+
 
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -35,13 +37,65 @@ def redact_sensitive(value: Any) -> Any:
         for key, item in value.items():
             normalized = str(key).strip().lower()
             if normalized in _SENSITIVE_KEYS:
-                redacted[key] = "[REDACTED]"
+                redacted[key] = REDACTED_VALUE
                 continue
             redacted[key] = redact_sensitive(item)
         return redacted
     if isinstance(value, list):
         return [redact_sensitive(item) for item in value]
     return value
+
+
+def restore_redacted_echo(original: Any, patched: Any) -> Any:
+    """Return *patched* with echoed redaction markers replaced by *original* values.
+
+    Hooks only ever see the ``redact_sensitive`` view of a tool input.  A hook
+    that hands the whole input back as ``validated_input_patch`` (for example
+    to restore placeholders in one field) would otherwise overwrite every
+    secret-bearing field with the literal marker.
+    """
+    if isinstance(patched, dict):
+        base = original if isinstance(original, dict) else {}
+        restored: Dict[str, Any] = {}
+        for key, item in patched.items():
+            normalized = str(key).strip().lower()
+            if normalized in _SENSITIVE_KEYS and item == REDACTED_VALUE and key in base:
+                restored[key] = base[key]
+                continue
+            restored[key] = restore_redacted_echo(base.get(key), item)
+        return restored
+    if isinstance(patched, list):
+        base_list = original if isinstance(original, list) else []
+        return [
+            restore_redacted_echo(base_list[index] if index < len(base_list) else None, item)
+            for index, item in enumerate(patched)
+        ]
+    return patched
+
+
+def merge_redacted_rewrite(original: Any, rewritten: Any) -> Any:
+    """Return *original* with only its secret-bearing values taken from *rewritten*.
+
+    A hook written against the flat legacy ``tool.input`` rewrites it in place,
+    outside the ``redact_sensitive`` view that policies judge.  A value at a
+    redacted position reads ``[REDACTED]`` to every policy before and after such
+    a rewrite, so it can be taken over (the Pro redaction hook restores secrets
+    this way); anything a policy can see has to arrive as
+    ``validated_input_patch``.  Keys the rewrite added or dropped are ignored.
+    """
+    if isinstance(original, dict) and isinstance(rewritten, dict):
+        merged: Dict[str, Any] = {}
+        for key, item in original.items():
+            if key not in rewritten:
+                merged[key] = item
+            elif str(key).strip().lower() in _SENSITIVE_KEYS:
+                merged[key] = rewritten[key]
+            else:
+                merged[key] = merge_redacted_rewrite(item, rewritten[key])
+        return merged
+    if isinstance(original, list) and isinstance(rewritten, list) and len(original) == len(rewritten):
+        return [merge_redacted_rewrite(item, rewritten[index]) for index, item in enumerate(original)]
+    return original
 
 
 def schema_digest(value: dict[str, Any]) -> str:

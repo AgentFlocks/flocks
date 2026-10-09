@@ -1,4 +1,5 @@
 name: qianxin_mcp
+group: 威胁情报
 type: remote
 url: https://mcp.ti.qianxin.com/ti-stream-mcp?apikey={secret:qianxin_mcp_key}
 enabled: true

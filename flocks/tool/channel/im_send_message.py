@@ -203,6 +203,7 @@ async def _resolve_target(
 
 @ToolRegistry.register_function(
     name="im_send_message",
+    group="企业协作",
     description=(
         "Resolve a messaging channel target session and optionally send a message. "
         "Use this for WeCom/企业微信, Weixin/微信, Feishu, DingTalk, Telegram, WhatsApp, Email/邮件, Slack, "

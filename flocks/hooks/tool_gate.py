@@ -17,13 +17,17 @@ implements one contract and it holds wherever the call originates.
 
 Firing once
 -----------
-A streamed tool call reaches the gate before the UI is told the call is running
-(so the surface shows the input that will actually be used) and then again on
-its way through the registry.  :func:`carry_decision` stashes the verdict on the
-tool context so the registry reuses it instead of asking the handlers a second
-time.  Handlers therefore see one call per tool call, and a handler with side
-effects -- an audit record, a counter, a confirmation prompt -- is not
-duplicated.
+For a streamed tool call the registry is the only place the gate fires, on the
+canonical ``tool_execution`` payload (secret-bearing keys redacted).  The
+session stream layer runs the separate ``tool.input.rewrite`` stage on the raw
+model input before it publishes the running state, and learns about a
+``validated_input_patch`` the registry applied through
+``ToolContext.input_patch_callback``, so the surface still shows the input the
+tool actually receives.  A caller that has already run the gate for a call can
+stash the verdict with :func:`carry_decision`; the registry then reuses it
+instead of asking the handlers a second time.  Handlers therefore see one call
+per tool call, and a handler with side effects -- an audit record, a counter, a
+confirmation prompt -- is not duplicated.
 """
 
 from __future__ import annotations

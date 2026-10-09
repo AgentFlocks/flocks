@@ -50,8 +50,10 @@ const toolsResource = createSharedResource<Tool[]>({
 let toolRefreshInFlight: Promise<ToolRefreshResponse> | null = null;
 const toolPageResources = new Map<string, SharedResource<ToolListPageResponse>>();
 
-function normalizeToolPageParams(params: ToolListPageParams): Required<ToolListPageParams> {
+function normalizeToolPageParams(params: ToolListPageParams): Required<Omit<ToolListPageParams, 'group'>> & Pick<ToolListPageParams, 'group'> {
   return {
+    // Do not collapse All (undefined) and Ungrouped ('') into one cache key.
+    group: params.group,
     source: params.source ?? '',
     category: params.category ?? '',
     sourceName: params.sourceName ?? '',
@@ -191,6 +193,7 @@ export function useToolPage(params: ToolListPageParams) {
   const resource = useMemo(
     () => getToolPageResource(params),
     [
+      params.group,
       params.source,
       params.category,
       params.sourceName,

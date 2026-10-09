@@ -1,4 +1,5 @@
 name: qingteng_host_list
+group: EDR/HIDS
 description: >
   查询青藤云平台的主机资产列表。支持查询 Linux 和 Windows 主机。
   用于主机资产梳理、资产盘点、安全评估等场景。

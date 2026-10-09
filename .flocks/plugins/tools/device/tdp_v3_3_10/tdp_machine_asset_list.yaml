@@ -1,4 +1,5 @@
 name: tdp_machine_asset_list
+group: NDR
 description: >
   查询 TDP 服务资产相关接口。`service_list` 适合按服务、分类、端口、是否活跃和是否对外开放筛选；
   `host_asset_list` 更适合按主机资产视角查看；`web_app_framework_list` 用于按 Web 应用和框架维度筛选。

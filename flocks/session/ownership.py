@@ -5,9 +5,10 @@ from __future__ import annotations
 import asyncio
 import time
 import uuid
+from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Iterator
 
 from flocks.storage.storage import Storage
 from flocks.task.node import process_owner_id
@@ -154,6 +155,20 @@ class SessionExecutionLease:
 def current_lease(session_id: str) -> SessionExecutionLease | None:
     lease = _current.get()
     return lease if lease is not None and lease.session_id == session_id else None
+
+
+@contextmanager
+def outside_execution() -> Iterator[None]:
+    """Write as an independent caller, not as the execution that scheduled this work.
+
+    Tasks copy the context they start in, so work a runner leaves behind (a
+    delegated child's result) would keep verifying that runner's lease after it
+    was released. Callers keep their own guards, such as Session.run_active_write."""
+    previous = _current.set(None)
+    try:
+        yield
+    finally:
+        _current.reset(previous)
 
 
 def require_execution_allowed(session_id: str) -> None:

@@ -21,6 +21,7 @@ import {
   getMessageErrorText,
   getMessageGroupClassName,
   getProcessGroupDurationMs,
+  mergeConsecutiveAssistantMessages,
   getRenderableThinkingText,
   getThinkingFirstSentence,
   getRenderableFileUrl,
@@ -72,6 +73,10 @@ const tMock = (key: string, options?: Record<string, unknown>) => {
   'chat.process.toolCount': '{{count}} 次工具调用',
   'chat.process.textCount': '{{count}} 段中间回复',
   'chat.compacting': '压缩中...',
+  'chat.retryNotice.rateLimited': '模型请求被限流（429），正在第 {{attempt}} 次重试',
+  'chat.retryNotice.transient': '模型请求失败（{{reason}}），正在第 {{attempt}} 次重试',
+  'chat.retryNotice.countdown': '，约 {{seconds}} 秒后',
+  'chat.retryNotice.unknownReason': '临时错误',
   'chat.contextCompressed': '上下文已压缩',
   'chat.contextUsage.title': 'Context Usage',
   'chat.contextUsage.close': 'Close',
@@ -483,6 +488,266 @@ describe('SessionChat message loading state', () => {
   });
 });
 
+describe('SessionChat provider retry notice', () => {
+  const userMessage = makeMessage({
+    id: 'msg-user',
+    role: 'user',
+    parts: [{ id: 'part-user', type: 'text', text: '分析这批 CVE' } as Message['parts'][number]],
+  });
+
+  it('shows the backoff state pushed by the backend and clears it when streaming resumes', async () => {
+    mockStatefulSessionMessages([userMessage]);
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'Date'] });
+    try {
+      render(React.createElement(SessionChat, {
+        sessionId: 'sess-1',
+        live: true,
+      }));
+      await act(async () => {
+        await Promise.resolve();
+      });
+
+      act(() => {
+        useSSEOptionsRef.current.onEvent({
+          type: 'session.status',
+          properties: { sessionID: 'sess-1', status: { type: 'busy' } },
+        });
+      });
+      expect(screen.queryByTestId('session-retry-notice')).toBeNull();
+
+      act(() => {
+        useSSEOptionsRef.current.onEvent({
+          type: 'session.status',
+          properties: {
+            sessionID: 'sess-1',
+            status: {
+              type: 'retry',
+              attempt: 2,
+              maxAttempts: 5,
+              message: 'Rate Limited',
+              next: Date.now() + 8000,
+              rateLimited: true,
+              providerID: 'prov',
+              modelID: 'm',
+            },
+          },
+        });
+      });
+      const notice = screen.getByTestId('session-retry-notice');
+      expect(notice.textContent).toContain('模型请求被限流（429），正在第 2/5 次重试');
+      expect(notice.textContent).toContain('约 8 秒后');
+
+      act(() => {
+        vi.advanceTimersByTime(3000);
+      });
+      expect(screen.getByTestId('session-retry-notice').textContent).toContain('约 5 秒后');
+
+      // Non-429 failures show the backend's reason instead.
+      act(() => {
+        useSSEOptionsRef.current.onEvent({
+          type: 'session.status',
+          properties: {
+            sessionID: 'sess-1',
+            status: { type: 'retry', attempt: 1, message: 'Provider Server Error', rateLimited: false },
+          },
+        });
+      });
+      expect(screen.getByTestId('session-retry-notice').textContent)
+        .toContain('模型请求失败（Provider Server Error），正在第 1 次重试');
+
+      // Long SDK error bodies are cut to one line.
+      const longReason = `Error code: 500 - ${'x'.repeat(200)}`;
+      act(() => {
+        useSSEOptionsRef.current.onEvent({
+          type: 'session.status',
+          properties: {
+            sessionID: 'sess-1',
+            status: { type: 'retry', attempt: 2, maxAttempts: 5, message: longReason, rateLimited: false },
+          },
+        });
+      });
+      const truncated = screen.getByTestId('session-retry-notice').textContent || '';
+      expect(truncated).toContain(`${longReason.slice(0, 117)}…`);
+      expect(truncated).not.toContain(longReason);
+
+      // The backend reports the next attempt as in flight: the notice goes away.
+      act(() => {
+        useSSEOptionsRef.current.onEvent({
+          type: 'session.status',
+          properties: { sessionID: 'sess-1', status: { type: 'busy' } },
+        });
+      });
+      expect(screen.queryByTestId('session-retry-notice')).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('drops the notice when the consumer swaps to another session without remounting', async () => {
+    mockStatefulSessionMessages([userMessage]);
+    const view = render(React.createElement(SessionChat, {
+      sessionId: 'sess-1',
+      live: true,
+    }));
+    await act(async () => {
+      await Promise.resolve();
+    });
+    act(() => {
+      useSSEOptionsRef.current.onEvent({
+        type: 'session.status',
+        properties: {
+          sessionID: 'sess-1',
+          status: { type: 'retry', attempt: 2, maxAttempts: 5, message: 'Rate Limited', rateLimited: true },
+        },
+      });
+    });
+    expect(screen.getByTestId('session-retry-notice')).toBeTruthy();
+
+    // sess-2 is busy running a tool: its status poll turns streaming back on,
+    // so a stale notice from sess-1 would render inside sess-2's conversation.
+    clientGetMock.mockImplementation((url: string) => {
+      if (url === '/api/session/status') {
+        return Promise.resolve({ data: { 'sess-2': { type: 'busy' } } });
+      }
+      if (url === '/api/session/sess-2/message') {
+        return Promise.resolve({ data: { items: [], hasMore: false, nextBefore: null } });
+      }
+      return Promise.resolve({ data: {} });
+    });
+    view.rerender(React.createElement(SessionChat, {
+      sessionId: 'sess-2',
+      live: true,
+    }));
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(clientGetMock).toHaveBeenCalledWith('/api/session/status');
+    expect(screen.queryByTestId('session-retry-notice')).toBeNull();
+  });
+
+  it('keeps the notice when a sub-agent receipt lands during the backoff', async () => {
+    mockStatefulSessionMessages([userMessage]);
+    render(React.createElement(SessionChat, { sessionId: 'sess-1', live: true }));
+    await act(async () => { await Promise.resolve(); });
+    act(() => {
+      useSSEOptionsRef.current.onEvent({
+        type: 'session.status',
+        properties: {
+          sessionID: 'sess-1',
+          status: { type: 'retry', attempt: 1, maxAttempts: 5, message: 'Rate Limited', rateLimited: true },
+        },
+      });
+    });
+    expect(screen.getByTestId('session-retry-notice')).toBeTruthy();
+
+    // An earlier delegate_task's child finishes while the parent sleeps
+    // between retries; its receipt rewrites that old tool part.
+    act(() => {
+      useSSEOptionsRef.current.onEvent({
+        type: 'message.part.updated',
+        properties: {
+          part: {
+            id: 'part-delegate', messageID: 'msg-earlier', sessionID: 'sess-1', type: 'tool',
+            callID: 'call-delegate', tool: 'delegate_task',
+            state: {
+              status: 'completed', input: {}, output: 'submitted',
+              metadata: { submitted: true, status: 'completed' }, time: { start: 1, end: 2 },
+            },
+          },
+        },
+      });
+    });
+    expect(screen.getByTestId('session-retry-notice')).toBeTruthy();
+
+    // Output from the retried request does end the notice.
+    act(() => {
+      useSSEOptionsRef.current.onEvent({
+        type: 'message.part.updated',
+        properties: {
+          part: { id: 'part-text', messageID: 'msg-new', sessionID: 'sess-1', type: 'text', text: '继续' },
+        },
+      });
+    });
+    expect(screen.queryByTestId('session-retry-notice')).toBeNull();
+  });
+
+  it('recovers the retry state from the status poll after a reload', async () => {
+    // Shape comes from the backend's SessionStatusRetry model dump, which is
+    // what /api/session/status actually returns — the SSE event serializes
+    // the very same object.
+    mockFallbackPolling({
+      localMessages: [userMessage],
+      fetchedMessages: [],
+      refetch: vi.fn(),
+      status: {
+        'sess-1': {
+          type: 'retry',
+          attempt: 3,
+          message: 'Rate Limited',
+          next: Date.now() + 4000,
+          maxAttempts: 5,
+          rateLimited: true,
+          providerID: 'prov',
+          modelID: 'm',
+        } as never,
+      },
+    });
+    render(React.createElement(SessionChat, {
+      sessionId: 'sess-1',
+      live: true,
+    }));
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(screen.getByTestId('session-retry-notice').textContent)
+      .toContain('模型请求被限流（429），正在第 3/5 次重试');
+  });
+
+  it('ignores a status poll that lands after the consumer switched sessions', async () => {
+    // WorkflowDetail/ChatTab swaps sessionId without remounting; a slow poll
+    // for the old session must not paint its retry notice onto the new one.
+    mockStatefulSessionMessages([userMessage]);
+    // One resolver per poll: the sess-1 poll must be the one we answer late,
+    // not whichever call happened to be last.
+    const statusResolvers: Array<(value: unknown) => void> = [];
+    clientGetMock.mockImplementation((url: string) => {
+      if (url === '/api/session/status') {
+        return new Promise((resolve) => { statusResolvers.push(resolve); });
+      }
+      return Promise.resolve({ data: {} });
+    });
+
+    const view = render(React.createElement(SessionChat, { sessionId: 'sess-1', live: true }));
+    await act(async () => { await Promise.resolve(); });
+
+    view.rerender(React.createElement(SessionChat, { sessionId: 'sess-2', live: true }));
+    await act(async () => { await Promise.resolve(); });
+
+    expect(statusResolvers.length).toBeGreaterThan(0);
+    // sess-1's polls finally answer "retrying" — too late to matter. Answer
+    // every pending poll: the child-status refresh polls the same URL first.
+    await act(async () => {
+      statusResolvers.splice(0).forEach((resolve) => resolve({
+        data: {
+          'sess-1': {
+            type: 'retry',
+            attempt: 2,
+            message: 'Rate Limited',
+            next: Date.now() + 3000,
+            maxAttempts: 5,
+            rateLimited: true,
+          },
+        },
+      }));
+      await Promise.resolve();
+    });
+
+    expect(screen.queryByTestId('session-retry-notice')).toBeNull();
+  });
+});
+
 describe('SessionChat focused message deep links', () => {
   it('scrolls to and consumes a rendered focus target', async () => {
     const onFocusMessageConsumed = vi.fn();
@@ -727,7 +992,7 @@ describe('buildContextUsageBreakdown', () => {
     expect(breakdown.usedTokens).toBe(23);
   });
 
-  it('uses backend snapshots when available and adds the local draft on top', () => {
+  it('uses the backend compaction-basis total and adds the local draft on top', () => {
     const breakdown = buildContextUsageBreakdown([], 'd'.repeat(40), {
       sessionID: 'sess-1',
       usedTokens: 130,
@@ -752,18 +1017,44 @@ describe('buildContextUsageBreakdown', () => {
       ],
     });
 
-    expect(breakdown.usedTokens).toBe(85);
+    // 130 observed + 10 draft. The 30-token observed drift is spread over
+    // the estimated rows (x1.3) instead of landing on "conversation".
+    expect(breakdown.usedTokens).toBe(140);
     expect(breakdown.compactedTokens).toBe(50);
     expect(breakdown.segments.map((segment) => [segment.key, segment.tokens, segment.included])).toEqual([
-      ['systemPrompt', 15, false],
-      ['toolDefinitions', 10, false],
+      ['systemPrompt', 19, true],
+      ['toolDefinitions', 13, true],
       ['conversation', 10, true],
-      ['reasoning', 5, true],
-      ['tools', 40, true],
-      ['skillLoad', 20, true],
-      ['agentDelegation', 10, true],
+      ['reasoning', 6, true],
+      ['tools', 53, true],
+      ['skillLoad', 26, true],
+      ['agentDelegation', 13, true],
     ]);
+    expect(breakdown.segments.reduce((total, segment) => total + segment.tokens, 0))
+      .toBe(breakdown.usedTokens);
     expect(breakdown.excludedSegments).toEqual([]);
+  });
+
+  it('scales rows down when the estimate exceeds the observed total', () => {
+    const breakdown = buildContextUsageBreakdown([], '', {
+      sessionID: 'sess-1',
+      usedTokens: 100,
+      contextWindow: 1000,
+      percent: 10,
+      source: 'observed',
+      estimatedTokens: 200,
+      compactedTokens: 0,
+      segments: [
+        { key: 'systemPrompt', tokens: 80, included: true, source: 'estimated' },
+        { key: 'reasoning', tokens: 120, included: true, source: 'estimated' },
+      ],
+      excludedSegments: [],
+    });
+
+    expect(breakdown.usedTokens).toBe(100);
+    expect(breakdown.segments.find((segment) => segment.key === 'systemPrompt')?.tokens).toBe(40);
+    expect(breakdown.segments.find((segment) => segment.key === 'reasoning')?.tokens).toBe(60);
+    expect(breakdown.segments.reduce((total, segment) => total + segment.tokens, 0)).toBe(100);
   });
 
   it('applies and clamps pending removals by attributed segment', () => {
@@ -786,7 +1077,8 @@ describe('buildContextUsageBreakdown', () => {
       pendingTokenDeltas: { reasoning: -50, tools: -300 },
     });
 
-    expect(breakdown.usedTokens).toBe(100);
+    // 260 minus the 80 tokens actually removable (reasoning 50, tools 30).
+    expect(breakdown.usedTokens).toBe(180);
     expect(breakdown.segments.find((segment) => segment.key === 'conversation')?.tokens).toBe(100);
     expect(breakdown.segments.find((segment) => segment.key === 'reasoning')?.tokens).toBe(0);
     expect(breakdown.segments.find((segment) => segment.key === 'tools')?.tokens).toBe(0);
@@ -826,9 +1118,10 @@ describe('buildContextUsageBreakdown', () => {
       useLocalMessageUsage: true,
     });
 
-    expect(breakdown.usedTokens).toBe(100);
+    // Fixed 120 (80 + 40) + local 300 - pending removals 200.
+    expect(breakdown.usedTokens).toBe(220);
     expect(breakdown.segments.find((segment) => segment.key === 'toolDefinitions')?.tokens).toBe(40);
-    expect(breakdown.segments.find((segment) => segment.key === 'toolDefinitions')?.included).toBe(false);
+    expect(breakdown.segments.find((segment) => segment.key === 'toolDefinitions')?.included).toBe(true);
     expect(breakdown.segments.find((segment) => segment.key === 'conversation')?.tokens).toBe(100);
     expect(breakdown.segments.find((segment) => segment.key === 'reasoning')?.tokens).toBe(0);
   });
@@ -1479,6 +1772,7 @@ describe('SessionChat standalone thinking indicator', () => {
       });
       expect(clientPostMock).toHaveBeenCalledWith('/api/session/sess-1/abort');
       expect(markMessageStopped).not.toHaveBeenCalled();
+      expect(screen.getByTitle('chat.stopTitle')).toBeInTheDocument();
     } finally {
       consoleError.mockRestore();
     }
@@ -1541,6 +1835,374 @@ describe('SessionChat standalone thinking indicator', () => {
     });
 
     expect(removeMessage).toHaveBeenCalledWith('assistant-failed');
+  });
+});
+
+describe('SessionChat delegated work stop controls', () => {
+  beforeEach(() => {
+    clientGetMock.mockImplementation((url: string) => Promise.resolve({
+      data: url === '/api/session/status' ? { 'child-1': { type: 'busy' } } : {},
+    }));
+  });
+
+  function submittedReceipt(status = 'running', nestedMetadata = false, childId = 'child-1'): Message {
+    const metadata = { submitted: true, status, sessionId: childId };
+    return makeMessage({
+      id: 'delegate-receipt',
+      finish: 'stop',
+      parts: [{
+        id: 'delegate-part',
+        type: 'tool',
+        tool: 'delegate_task',
+        state: {
+          status: 'completed',
+          input: { subagent_type: 'explore', description: 'Inspect the task' },
+          metadata: nestedMetadata ? { metadata } : metadata,
+        },
+      }],
+    });
+  }
+
+  it('keeps Stop for a busy grandchild even when the parent and child are idle', async () => {
+    clientGetMock.mockImplementation((url: string) => Promise.resolve({
+      data: url === '/api/session/status' ? {
+        'grandchild-1': { type: 'busy', ancestorSessionIDs: ['child-1', 'sess-1'] },
+        unrelated: { type: 'busy', ancestorSessionIDs: ['another-root'] },
+      } : [],
+    }));
+    mockStatefulSessionMessages([submittedReceipt('completed')]);
+    render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
+    await waitFor(() => expect(screen.getByTitle('chat.stopTitle')).toBeInTheDocument());
+    act(() => { useSSEOptionsRef.current.onEvent({
+      type: 'session.status', properties: { sessionID: 'child-1', status: { type: 'idle' } },
+    }); });
+    expect(screen.getByTitle('chat.stopTitle')).toBeInTheDocument();
+    fireEvent.click(screen.getByTitle('chat.stopTitle'));
+    await waitFor(() => expect(clientPostMock).toHaveBeenCalledWith('/api/session/sess-1/abort'));
+    act(() => { useSSEOptionsRef.current.onEvent({
+      type: 'session.status', properties: { sessionID: 'grandchild-1', status: { type: 'idle' } },
+    }); });
+    expect(screen.queryByTitle('chat.stopTitle')).not.toBeInTheDocument();
+  });
+
+  it('discovers a new grandchild from SSE without a loaded delegation receipt', async () => {
+    clientGetMock.mockResolvedValue({ data: [] });
+    mockStatefulSessionMessages([]);
+    const onStreamingDone = vi.fn();
+    const { rerender } = render(React.createElement(SessionChat, { sessionId: 'sess-1', onStreamingDone }));
+    await waitFor(() => expect(clientGetMock).toHaveBeenCalledWith('/api/session/status'));
+    act(() => { useSSEOptionsRef.current.onEvent({
+      type: 'session.status', properties: {
+        sessionID: 'grandchild-1', status: { type: 'busy' }, ancestorSessionIDs: ['child-1', 'sess-1'],
+      },
+    }); });
+    expect(screen.getByTitle('chat.stopTitle')).toBeInTheDocument();
+    expect(onStreamingDone).not.toHaveBeenCalled();
+    rerender(React.createElement(SessionChat, { sessionId: 'sess-2', onStreamingDone }));
+    act(() => { useSSEOptionsRef.current.onEvent({
+      type: 'session.status', properties: {
+        sessionID: 'grandchild-1', status: { type: 'busy' }, ancestorSessionIDs: ['child-1', 'sess-1'],
+      },
+    }); });
+    expect(screen.queryByTitle('chat.stopTitle')).not.toBeInTheDocument();
+  });
+
+  it.each([false, true])('shows Stop for an idle parent with a running submitted child (nested metadata: %s)', async (nestedMetadata) => {
+    mockStatefulSessionMessages([submittedReceipt('running', nestedMetadata)]);
+    const conversationBottomSlot = vi.fn(() => null);
+    const onStreamingDone = vi.fn();
+    const { container } = render(React.createElement(SessionChat, {
+      sessionId: 'sess-1',
+      conversationBottomSlot,
+      onStreamingDone,
+    }));
+
+    await waitFor(() => expect(screen.getByTitle('chat.stopTitle')).toBeInTheDocument());
+    expect(clientGetMock).toHaveBeenCalledWith('/api/session/status');
+    expect(screen.getByPlaceholderText('请输入消息')).not.toBeDisabled();
+    expect(conversationBottomSlot).toHaveBeenLastCalledWith(expect.objectContaining({
+      streaming: false,
+      sending: false,
+    }));
+    expect(container.querySelectorAll('.animate-bounce')).toHaveLength(0);
+    expect(onStreamingDone).not.toHaveBeenCalled();
+
+    fireEvent.change(screen.getByPlaceholderText('请输入消息'), { target: { value: 'Follow up' } });
+    expect(screen.queryByTitle('chat.queue.enqueue')).not.toBeInTheDocument();
+    fireEvent.click(container.querySelector('button[class*="bg-action"]')!);
+    await waitFor(() => expect(clientPostMock).toHaveBeenCalledWith(
+      '/api/session/sess-1/prompt_async', expect.any(Object),
+    ));
+    expect(sessionApiEnqueuePromptMock).not.toHaveBeenCalled();
+  });
+
+  it('aborts the idle parent without changing its receipt and hides Stop when the child becomes idle', async () => {
+    const receipt = submittedReceipt('completed');
+    const markMessageStopped = vi.fn();
+    useSessionMessagesMock.mockReturnValue({
+      ...useSessionMessagesMock(), messages: [receipt], markMessageStopped,
+    });
+    render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
+    await waitFor(() => expect(screen.getByTitle('chat.stopTitle')).toBeInTheDocument());
+
+    fireEvent.click(screen.getByTitle('chat.stopTitle'));
+    await waitFor(() => expect(clientPostMock).toHaveBeenCalledWith('/api/session/sess-1/abort'));
+    expect(markMessageStopped).not.toHaveBeenCalled();
+    expect(receipt.parts[0].state?.metadata).toEqual({ submitted: true, status: 'completed', sessionId: 'child-1' });
+    expect(sessionApiEnqueuePromptMock).not.toHaveBeenCalled();
+
+    act(() => {
+      useSSEOptionsRef.current.onEvent({
+        type: 'session.status', properties: { sessionID: 'child-1', status: { type: 'idle' } },
+      });
+    });
+    expect(screen.queryByTitle('chat.stopTitle')).not.toBeInTheDocument();
+  });
+
+  it.each(['completed', 'error', 'aborted', 'cancelled'])('uses live child status, not the %s receipt status', async (status) => {
+    mockStatefulSessionMessages([submittedReceipt(status)]);
+    render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
+    await waitFor(() => expect(screen.getByTitle('chat.stopTitle')).toBeInTheDocument());
+    act(() => {
+      useSSEOptionsRef.current.onEvent({
+        type: 'session.status', properties: { sessionID: 'child-1', status: { type: 'idle' } },
+      });
+    });
+    expect(screen.queryByTitle('chat.stopTitle')).not.toBeInTheDocument();
+  });
+
+  it('does not treat unrelated tool metadata as a running delegate', async () => {
+    const receipt = submittedReceipt();
+    receipt.parts[0].tool = 'bash';
+    mockStatefulSessionMessages([receipt]);
+    render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
+    await waitFor(() => expect(clientGetMock).toHaveBeenCalledWith('/api/session/status'));
+    expect(screen.queryByTitle('chat.stopTitle')).not.toBeInTheDocument();
+  });
+
+  it('keeps an idle parent idle after abort fails, even with unfinished assistant history', async () => {
+    mockStatefulSessionMessages([
+      makeMessage({
+        id: 'old-unfinished-assistant',
+        finish: null,
+        parts: [{ id: 'old-text', type: 'text', text: 'Old partial response' }],
+      }),
+      submittedReceipt(),
+    ]);
+    const conversationBottomSlot = vi.fn(() => null);
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    clientPostMock.mockImplementation((url: string) => url.endsWith('/abort')
+      ? Promise.reject(new Error('abort failed'))
+      : Promise.resolve({ data: {} }));
+    try {
+      const { container } = render(React.createElement(SessionChat, {
+        sessionId: 'sess-1', conversationBottomSlot,
+      }));
+      await waitFor(() => expect(clientGetMock).toHaveBeenCalledWith('/api/session/status'));
+      fireEvent.click(screen.getByTitle('chat.stopTitle'));
+      await waitFor(() => expect(consoleError).toHaveBeenCalled());
+
+      expect(conversationBottomSlot).toHaveBeenLastCalledWith(expect.objectContaining({
+        streaming: false,
+        sending: false,
+      }));
+      expect(screen.getByTitle('chat.stopTitle')).toBeInTheDocument();
+      expect(container.querySelectorAll('.animate-bounce')).toHaveLength(0);
+      fireEvent.change(screen.getByPlaceholderText('请输入消息'), { target: { value: 'Try again' } });
+      expect(screen.queryByTitle('chat.queue.enqueue')).not.toBeInTheDocument();
+      fireEvent.click(container.querySelector('button[class*="bg-action"]')!);
+      await waitFor(() => expect(clientPostMock).toHaveBeenCalledWith(
+        '/api/session/sess-1/prompt_async', expect.any(Object),
+      ));
+      expect(sessionApiEnqueuePromptMock).not.toHaveBeenCalled();
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
+  it('allows a live child detail to stop without exposing input', async () => {
+    clientGetMock.mockImplementation((url: string) => Promise.resolve({
+      data: url === '/api/session/status' ? { 'child-1': { type: 'busy' } } : {},
+    }));
+    render(React.createElement(SessionChat, {
+      sessionId: 'child-1', live: true, hideInput: true,
+    }));
+    await waitFor(() => expect(screen.getByTitle('chat.stopTitle')).toBeInTheDocument());
+    expect(screen.queryByRole('textbox')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByTitle('chat.stopTitle'));
+    await waitFor(() => expect(clientPostMock).toHaveBeenCalledWith('/api/session/child-1/abort'));
+    expect(screen.queryByRole('textbox')).not.toBeInTheDocument();
+  });
+
+  it('does not add Stop to a non-live read-only detail', async () => {
+    mockStatefulSessionMessages([submittedReceipt()]);
+    render(React.createElement(SessionChat, { sessionId: 'sess-1', hideInput: true }));
+    await waitFor(() => expect(clientGetMock).toHaveBeenCalledWith('/api/session/status'));
+    expect(screen.queryByTitle('chat.stopTitle')).not.toBeInTheDocument();
+    expect(screen.queryByRole('textbox')).not.toBeInTheDocument();
+  });
+
+  it('shows Stop when a completed historical receipt has a busy child follow-up from SSE', async () => {
+    clientGetMock.mockResolvedValue({ data: {} });
+    const receipt = submittedReceipt('completed');
+    useSessionMessagesMock.mockReturnValue({ ...useSessionMessagesMock(), messages: [receipt] });
+    const conversationBottomSlot = vi.fn(() => null);
+    const onStreamingDone = vi.fn();
+    render(React.createElement(SessionChat, {
+      sessionId: 'sess-1', conversationBottomSlot, onStreamingDone,
+    }));
+    await waitFor(() => expect(clientGetMock).toHaveBeenCalledWith('/api/session/status'));
+    expect(screen.queryByTitle('chat.stopTitle')).not.toBeInTheDocument();
+
+    act(() => {
+      useSSEOptionsRef.current.onEvent({
+        type: 'session.status', properties: { sessionID: 'child-1', status: { type: 'busy' } },
+      });
+    });
+    expect(screen.getByTitle('chat.stopTitle')).toBeInTheDocument();
+    expect(conversationBottomSlot).toHaveBeenLastCalledWith(expect.objectContaining({ streaming: false }));
+    expect(onStreamingDone).not.toHaveBeenCalled();
+    expect(receipt.parts[0].state?.metadata).toEqual({ submitted: true, status: 'completed', sessionId: 'child-1' });
+  });
+
+  it('uses the server snapshot rather than a stale running receipt', async () => {
+    clientGetMock.mockResolvedValue({ data: {} });
+    mockStatefulSessionMessages([submittedReceipt('running')]);
+    render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
+    await waitFor(() => expect(clientGetMock).toHaveBeenCalledWith('/api/session/status'));
+    expect(screen.queryByTitle('chat.stopTitle')).not.toBeInTheDocument();
+  });
+
+  it('ignores unrelated status events without stopping the parent or changing child activity', async () => {
+    mockStatefulSessionMessages([submittedReceipt('completed')]);
+    const onStreamingDone = vi.fn();
+    const onSSEEvent = vi.fn();
+    render(React.createElement(SessionChat, { sessionId: 'sess-1', onStreamingDone, onSSEEvent }));
+    await waitFor(() => expect(screen.getByTitle('chat.stopTitle')).toBeInTheDocument());
+    act(() => {
+      useSSEOptionsRef.current.onEvent({
+        type: 'session.status', properties: { sessionID: 'unrelated', status: { type: 'idle' } },
+      });
+      useSSEOptionsRef.current.onEvent({
+        type: 'session.status', properties: { sessionID: 'child-1', status: { type: 'compacting' } },
+      });
+    });
+    expect(screen.getByTitle('chat.stopTitle')).toBeInTheDocument();
+    expect(onStreamingDone).not.toHaveBeenCalled();
+    expect(onSSEEvent).not.toHaveBeenCalled();
+  });
+
+  it('keeps Stop visible until all tracked children are idle', async () => {
+    clientGetMock.mockImplementation((url: string) => Promise.resolve({
+      data: url === '/api/session/status'
+        ? { 'child-1': { type: 'busy' }, 'child-2': { type: 'busy' } }
+        : {},
+    }));
+    mockStatefulSessionMessages([
+      submittedReceipt('completed'),
+      { ...submittedReceipt('completed', false, 'child-2'), id: 'delegate-receipt-2' },
+    ]);
+    render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
+    await waitFor(() => expect(screen.getByTitle('chat.stopTitle')).toBeInTheDocument());
+    act(() => {
+      useSSEOptionsRef.current.onEvent({
+        type: 'session.status', properties: { sessionID: 'child-1', status: { type: 'idle' } },
+      });
+    });
+    expect(screen.getByTitle('chat.stopTitle')).toBeInTheDocument();
+    act(() => {
+      useSSEOptionsRef.current.onEvent({
+        type: 'session.status', properties: { sessionID: 'child-2', status: { type: 'idle' } },
+      });
+    });
+    expect(screen.queryByTitle('chat.stopTitle')).not.toBeInTheDocument();
+  });
+
+  it('reconciles child activity after SSE reconnect', async () => {
+    mockStatefulSessionMessages([submittedReceipt('completed')]);
+    let childStatus = 'busy';
+    clientGetMock.mockImplementation((url: string) => Promise.resolve({
+      data: url === '/api/session/status' ? { 'child-1': { type: childStatus } } : {},
+    }));
+    render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
+    await waitFor(() => expect(screen.getByTitle('chat.stopTitle')).toBeInTheDocument());
+    childStatus = 'idle';
+    act(() => { useSSEOptionsRef.current.onReconnect(); });
+    await waitFor(() => expect(screen.queryByTitle('chat.stopTitle')).not.toBeInTheDocument());
+    expect(clientGetMock.mock.calls.filter(([url]) => url === '/api/session/status').length).toBeGreaterThanOrEqual(3);
+  });
+
+  it('ignores an old status response after a newer child SSE event', async () => {
+    const status = deferred<{ data: Record<string, { type: string }> }>();
+    let requests = 0;
+    clientGetMock.mockImplementation((url: string) => {
+      if (url === '/api/session/status' && ++requests === 1) return status.promise;
+      return Promise.resolve({ data: {} });
+    });
+    mockStatefulSessionMessages([submittedReceipt('completed')]);
+    render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
+    await waitFor(() => expect(requests).toBeGreaterThan(0));
+    act(() => {
+      useSSEOptionsRef.current.onEvent({
+        type: 'session.status', properties: { sessionID: 'child-1', status: { type: 'busy' } },
+      });
+    });
+    expect(screen.getByTitle('chat.stopTitle')).toBeInTheDocument();
+    await act(async () => { status.resolve({ data: {} }); });
+    expect(screen.getByTitle('chat.stopTitle')).toBeInTheDocument();
+  });
+
+  it('replaces tracked child IDs without reusing old status or accepting old child events', async () => {
+    clientGetMock.mockImplementation((url: string) => Promise.resolve({
+      data: url === '/api/session/status' ? { 'child-1': { type: 'busy' } } : {},
+    }));
+    const initial = { ...useSessionMessagesMock(), messages: [submittedReceipt('completed')] };
+    useSessionMessagesMock.mockReturnValue(initial);
+    const props = { sessionId: 'sess-1' };
+    const { rerender } = render(React.createElement(SessionChat, props));
+    await waitFor(() => expect(screen.getByTitle('chat.stopTitle')).toBeInTheDocument());
+
+    useSessionMessagesMock.mockReturnValue({ ...initial, messages: [submittedReceipt('completed', false, 'child-2')] });
+    rerender(React.createElement(SessionChat, props));
+    await waitFor(() => expect(screen.queryByTitle('chat.stopTitle')).not.toBeInTheDocument());
+    act(() => {
+      useSSEOptionsRef.current.onEvent({
+        type: 'session.status', properties: { sessionID: 'child-1', status: { type: 'busy' } },
+      });
+    });
+    expect(screen.queryByTitle('chat.stopTitle')).not.toBeInTheDocument();
+    act(() => {
+      useSSEOptionsRef.current.onEvent({
+        type: 'session.status', properties: { sessionID: 'child-2', status: { type: 'retry' } },
+      });
+    });
+    expect(screen.getByTitle('chat.stopTitle')).toBeInTheDocument();
+  });
+
+  it('discards the previous session child status request after a session switch', async () => {
+    const oldStatus = deferred<{ data: Record<string, { type: string }> }>();
+    let requests = 0;
+    clientGetMock.mockImplementation((url: string) => {
+      if (url === '/api/session/status' && ++requests === 1) return oldStatus.promise;
+      return Promise.resolve({ data: {} });
+    });
+    const initial = { ...useSessionMessagesMock(), messages: [submittedReceipt('completed')] };
+    useSessionMessagesMock.mockReturnValue(initial);
+    const { rerender } = render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
+    await waitFor(() => expect(requests).toBeGreaterThan(0));
+    useSessionMessagesMock.mockReturnValue({
+      ...initial,
+      messages: [{ ...submittedReceipt('completed', false, 'child-2'), sessionID: 'sess-2' }],
+    });
+    rerender(React.createElement(SessionChat, { sessionId: 'sess-2' }));
+    await act(async () => { oldStatus.resolve({ data: { 'child-1': { type: 'busy' } } }); });
+    expect(screen.queryByTitle('chat.stopTitle')).not.toBeInTheDocument();
+    act(() => {
+      useSSEOptionsRef.current.onEvent({
+        type: 'session.status', properties: { sessionID: 'child-2', status: { type: 'busy' } },
+      });
+    });
+    expect(screen.getByTitle('chat.stopTitle')).toBeInTheDocument();
   });
 });
 
@@ -4766,13 +5428,14 @@ describe('SessionChat context usage popover', () => {
         expect.any(Object),
       );
     });
-    expect(contextButton).toHaveTextContent('10%');
+    // Once the prompt is sent the system prompt is part of the context too.
+    expect(contextButton).toHaveTextContent('18%');
 
     const user = userEvent.setup();
     await user.click(contextButton);
     const conversationRow = screen.getByText('Conversation').closest('[role="menuitem"]');
-    expect(screen.queryByText('System prompt')).not.toBeInTheDocument();
-    expect(screen.queryByText('Tool definitions')).not.toBeInTheDocument();
+    const systemPromptRow = screen.getByText('System prompt').closest('[role="menuitem"]');
+    expect(within(systemPromptRow as HTMLElement).getByText('80')).toBeInTheDocument();
     expect(within(conversationRow as HTMLElement).getByText('100')).toBeInTheDocument();
   });
 
@@ -4909,7 +5572,8 @@ describe('SessionChat context usage popover', () => {
       await request.promise;
     });
 
-    expect(contextButton).toHaveTextContent('10%');
+    // Fixed 120 + the 100-token prompt, counted once.
+    expect(contextButton).toHaveTextContent('22%');
   });
 
   it('keeps a newer prompt pending when the previous turn refresh resolves', async () => {
@@ -4941,7 +5605,7 @@ describe('SessionChat context usage popover', () => {
     const textarea = screen.getByPlaceholderText('请输入消息');
     fireEvent.change(textarea, { target: { value: 'a'.repeat(400) } });
     fireEvent.keyDown(textarea, { key: 'Enter', code: 'Enter' });
-    await waitFor(() => expect(contextButton).toHaveTextContent('10%'));
+    await waitFor(() => expect(contextButton).toHaveTextContent('18%'));
 
     act(() => {
       useSSEOptionsRef.current.onEvent({
@@ -4965,7 +5629,7 @@ describe('SessionChat context usage popover', () => {
     fireEvent.keyDown(textarea, { key: 'Enter', code: 'Enter' });
     await waitFor(() => {
       expect(clientPostMock).toHaveBeenCalledTimes(2);
-      expect(contextButton).toHaveTextContent('20%');
+      expect(contextButton).toHaveTextContent('28%');
     });
 
     await act(async () => {
@@ -4986,7 +5650,7 @@ describe('SessionChat context usage popover', () => {
       await previousTurnRefresh.promise;
     });
 
-    await waitFor(() => expect(contextButton).toHaveTextContent('20%'));
+    await waitFor(() => expect(contextButton).toHaveTextContent('28%'));
   });
 
   it('drops pending usage during the first render of a different session', async () => {
@@ -5081,7 +5745,7 @@ describe('SessionChat context usage popover', () => {
       fireEvent.change(textarea, { target: { value: 'x'.repeat(400) } });
       fireEvent.keyDown(textarea, { key: 'Enter', code: 'Enter' });
       await waitFor(() => {
-        expect(contextButton).toHaveTextContent('10%');
+        expect(contextButton).toHaveTextContent('18%');
       });
 
       act(() => {
@@ -5109,7 +5773,7 @@ describe('SessionChat context usage popover', () => {
       await waitFor(() => {
         expect(warnSpy).toHaveBeenCalled();
       });
-      expect(contextButton).toHaveTextContent('10%');
+      expect(contextButton).toHaveTextContent('18%');
     } finally {
       warnSpy.mockRestore();
     }
@@ -5172,7 +5836,7 @@ describe('SessionChat context usage popover', () => {
     expect(screen.getByRole('button', { name: 'chat.contextUsageTitle' })).toHaveTextContent('0%');
   });
 
-  it('does not attribute observed fixed-cost drift to a short model conversation', async () => {
+  it('counts fixed prompt costs but does not pin observed drift on a short conversation', async () => {
     const user = userEvent.setup();
     sessionApiGetContextUsageMock.mockResolvedValue({
       sessionID: 'sess-1',
@@ -5226,13 +5890,18 @@ describe('SessionChat context usage popover', () => {
     const contextButton = await screen.findByRole('button', { name: 'chat.contextUsageTitle' });
     expect(contextButton).toHaveClass('h-6');
     expect(contextButton).not.toHaveClass('w-6');
-    expect(contextButton).toHaveTextContent('0%');
+    // 23,210 observed tokens of a 1M window.
+    expect(contextButton).toHaveTextContent('2%');
     await user.click(contextButton);
 
-    expect(screen.queryByText('System prompt')).not.toBeInTheDocument();
-    expect(screen.queryByText('Tool definitions')).not.toBeInTheDocument();
+    // The 3,200-token drift is spread x1.16 over the rows: 8000 -> 9279,
+    // 12000 -> 13919 (+1 rounding), conversation 10 -> 11.
+    const systemPromptRow = screen.getByText('System prompt').closest('[role="menuitem"]');
+    const toolDefinitionsRow = screen.getByText('Tool definitions').closest('[role="menuitem"]');
     const conversationRow = screen.getByText('Conversation').closest('[role="menuitem"]');
-    expect(within(conversationRow as HTMLElement).getByText('10')).toBeInTheDocument();
+    expect(within(systemPromptRow as HTMLElement).getByText('9.3K')).toBeInTheDocument();
+    expect(within(toolDefinitionsRow as HTMLElement).getByText('14K')).toBeInTheDocument();
+    expect(within(conversationRow as HTMLElement).getByText('11')).toBeInTheDocument();
     expect(screen.getByText('Reasoning')).toBeInTheDocument();
     expect(screen.getByText('Tool calls')).toBeInTheDocument();
     expect(screen.getByText('Skill loads')).toBeInTheDocument();
@@ -5286,7 +5955,7 @@ describe('SessionChat context usage popover', () => {
     }));
 
     const contextButton = await screen.findByRole('button', { name: 'chat.contextUsageTitle' });
-    expect(contextButton).toHaveTextContent('21%');
+    expect(contextButton).toHaveTextContent('29%');
 
     await user.click(screen.getByLabelText('chat.edit'));
     // editing shows the raw-content hint above the editor
@@ -5302,7 +5971,8 @@ describe('SessionChat context usage popover', () => {
         editedText,
       );
     });
-    expect(contextButton).toHaveTextContent('10%');
+    // 290 + 90 for the longer prompt - 200 for the discarded reply.
+    expect(contextButton).toHaveTextContent('18%');
 
     await user.click(contextButton);
     const conversationRow = screen.getByText('Conversation').closest('[role="menuitem"]');
@@ -5372,7 +6042,8 @@ describe('SessionChat context usage popover', () => {
       await request.promise;
     });
 
-    await waitFor(() => expect(contextButton).toHaveTextContent('10%'));
+    // Fixed 120 + the 100-token edited prompt.
+    await waitFor(() => expect(contextButton).toHaveTextContent('22%'));
     await user.click(contextButton);
     const conversationRow = screen.getByText('Conversation').closest('[role="menuitem"]');
     const reasoningRow = screen.getByText('Reasoning').closest('[role="menuitem"]');
@@ -5533,6 +6204,68 @@ describe('SessionChat context usage popover', () => {
     expect(onError).toHaveBeenCalledWith('provider unavailable');
 
     expect(screen.getByText('420')).toBeInTheDocument();
+  });
+
+  it('follows mid-turn usage pushes once they include the sent prompt', async () => {
+    // Regression: the meter stayed on the pre-send baseline for the whole
+    // turn (27%) and only showed the real usage (61%) after a reload.
+    mockStatefulSessionMessages();
+    sessionApiGetContextUsageMock.mockResolvedValue({
+      sessionID: 'sess-1',
+      usedTokens: 80,
+      contextWindow: 1000,
+      percent: 8,
+      source: 'estimated',
+      estimatedTokens: 80,
+      compactedTokens: 0,
+      segments: [
+        { key: 'systemPrompt', tokens: 80, included: true, source: 'estimated' },
+      ],
+      excludedSegments: [],
+    });
+
+    render(React.createElement(SessionChat, { sessionId: 'sess-1', live: true }));
+
+    const contextButton = await screen.findByRole('button', { name: 'chat.contextUsageTitle' });
+    await waitFor(() => expect(sessionApiGetContextUsageMock).toHaveBeenCalledTimes(1));
+    const textarea = screen.getByPlaceholderText('请输入消息');
+    fireEvent.change(textarea, { target: { value: 'x'.repeat(400) } });
+    fireEvent.keyDown(textarea, { key: 'Enter', code: 'Enter' });
+    await waitFor(() => expect(contextButton).toHaveTextContent('18%'));
+    const sentMessageId = (clientPostMock.mock.calls[0][1] as { messageID: string }).messageID;
+
+    const pushedSnapshot = (usedTokens: number, recentUserMessageIDs: string[]) => ({
+      sessionID: 'sess-1',
+      usedTokens,
+      contextWindow: 1000,
+      percent: Math.round(usedTokens / 10),
+      source: 'observed',
+      estimatedTokens: usedTokens,
+      compactedTokens: 0,
+      segments: [
+        { key: 'systemPrompt', tokens: 80, included: true, source: 'estimated' },
+        { key: 'conversation', tokens: usedTokens - 80, included: true, source: 'estimated' },
+      ],
+      excludedSegments: [],
+      recentUserMessageIDs,
+    });
+
+    // A push computed before the prompt was stored must not replace it.
+    act(() => {
+      useSSEOptionsRef.current.onEvent({
+        type: 'context.usage.updated',
+        properties: pushedSnapshot(90, []),
+      });
+    });
+    expect(contextButton).toHaveTextContent('18%');
+
+    act(() => {
+      useSSEOptionsRef.current.onEvent({
+        type: 'context.usage.updated',
+        properties: pushedSnapshot(610, [sentMessageId]),
+      });
+    });
+    await waitFor(() => expect(contextButton).toHaveTextContent('61%'));
   });
 
   it('does not refetch immediately after a pushed context usage snapshot', async () => {
@@ -6535,5 +7268,173 @@ describe('areChatMessagePartsRenderEqual', () => {
         } as Message['parts'][number],
       ],
     )).toBe(false);
+  });
+});
+
+
+describe('process duration across model/tool boundaries', () => {
+  const done = { id: 'done', type: 'tool', tool: 'read', state: {
+    status: 'completed', input: {}, output: 'ok', time: { start: 0, end: 5_000 },
+  } } as Message['parts'][number];
+  const marker = { id: 'model', type: 'step-start', time: { start: 20_000 } } as Message['parts'][number];
+
+  it.each(['pending', 'between-rounds', 'parallel'] as const)('keeps ticking during %s', (scenario) => {
+    vi.useFakeTimers();
+    vi.setSystemTime(22_000);
+    try {
+      const extra: Message['parts'] = scenario === 'pending'
+        ? [marker, { id: 'pending', type: 'tool', tool: 'read', state: { status: 'pending', input: {} } }]
+        : scenario === 'between-rounds' ? [marker]
+          : [
+            { id: 'running', type: 'tool', tool: 'read', state: { status: 'running', input: {}, time: { start: 20_000 } } },
+            { ...done, id: 'finished-first', state: { ...done.state!, time: { start: 20_000, end: 21_000 } } },
+          ];
+      render(React.createElement(ChatMessageBubble, {
+        message: makeMessage({ role: 'assistant', parts: [done, ...extra] }),
+        isActive: true, collapseIntermediateSteps: true,
+      }));
+      expect(screen.getByTestId('chat-process-duration')).toHaveTextContent('已处理 7s');
+      act(() => vi.advanceTimersByTime(10_000));
+      expect(screen.getByTestId('chat-process-duration')).toHaveTextContent('已处理 17s');
+      expect(screen.getByText(`查看 ${scenario === 'pending' ? 2 : scenario === 'parallel' ? 3 : 1} 个步骤`)).toBeInTheDocument();
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('keeps final output timing after completion and remount', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(25_000);
+    try {
+      const output = { id: 'output', type: 'text', text: '最终回答', time: { start: 22_000 } } as Message['parts'][number];
+      const message = makeMessage({ role: 'assistant', parts: [done, marker, output] });
+      const mounted = render(React.createElement(ChatMessageBubble, { message, isActive: true, collapseIntermediateSteps: true }));
+      expect(screen.getByTestId('chat-process-duration')).toHaveTextContent('已处理 10s');
+      const completed = { ...message, finish: 'stop', parts: [done,
+        { ...marker, time: { start: 20_000, end: 25_000 } },
+        { ...output, time: { start: 22_000, end: 25_000 } },
+      ] };
+      mounted.rerender(React.createElement(ChatMessageBubble, { message: completed, isActive: false, collapseIntermediateSteps: true }));
+      act(() => vi.advanceTimersByTime(10_000));
+      expect(screen.getByTestId('chat-process-duration')).toHaveTextContent('已处理 10s');
+      mounted.unmount();
+      render(React.createElement(ChatMessageBubble, { message: completed, isActive: false, collapseIntermediateSteps: true }));
+      expect(screen.getByTestId('chat-process-duration')).toHaveTextContent('已处理 10s');
+      expect(screen.getByText('查看 1 个步骤')).toBeInTheDocument();
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('does not extend orphan intervals from older messages/attempts', () => {
+    const parts = [
+      { ...marker, id: 'old-model', messageID: 'old', time: { start: 0 } },
+      { ...done, id: 'old-tool', messageID: 'old', state: { status: 'running', time: { start: 0 } } },
+      { ...marker, messageID: 'new' },
+      { ...done, messageID: 'new' },
+    ] as Message['parts'];
+    expect(getProcessGroupDurationMs(parts, 22_000, 'old-tool', { messageId: 'new', modelPartId: 'model' })).toBe(7_000);
+    expect(getProcessGroupDurationMs(parts.slice(0, 2), 22_000, undefined, { messageId: 'new', modelPartId: 'model' })).toBeNull();
+  });
+
+  it('keeps a merged next round active before any visible output arrives', () => {
+    const merged = mergeConsecutiveAssistantMessages([
+      makeMessage({ id: 'old', role: 'assistant', finish: 'tool-calls', parts: [done] }),
+      makeMessage({ id: 'new', role: 'assistant', parts: [marker] }),
+    ]);
+    const items = buildChatTimelineItems({ messages: merged, skipIndices: new Set(), isStreaming: true });
+    expect(items).toHaveLength(1);
+    expect(items[0].isActive).toBe(true);
+  });
+
+  it('preserves the initial loading state and hides empty completed timing-only messages', () => {
+    const message = makeMessage({ role: 'assistant', parts: [marker] });
+    render(React.createElement(ChatMessageBubble, { message, isActive: true, collapseIntermediateSteps: true }));
+    expect(screen.getByLabelText('思考中...')).toBeInTheDocument();
+    expect(screen.queryByTestId('chat-process-group')).not.toBeInTheDocument();
+    expect(shouldRenderMessage({ ...message, finish: 'stop' }, { isActive: false })).toBe(false);
+  });
+
+  it('assigns model intervals once across a visible question boundary', () => {
+    render(React.createElement(ChatMessageBubble, {
+      message: makeMessage({ role: 'assistant', parts: [
+        { ...marker, id: 'model-before', time: { start: 0, end: 5_000 } }, done,
+        { id: 'question', type: 'tool', tool: 'question', callID: 'question-call', state: { status: 'running', input: {} } },
+        { ...marker, time: { start: 20_000, end: 23_000 } },
+        { ...done, id: 'second-tool', state: { ...done.state!, time: { start: 22_000, end: 24_000 } } },
+      ] }),
+      pendingQuestions: { 'question-call': { requestId: 'req', questions: [{ id: 'scope', type: 'choice', question: '选择范围', options: [{ label: '全部' }] }] } },
+      isActive: false, collapseIntermediateSteps: true,
+    }));
+    const durations = screen.getAllByTestId('chat-process-duration');
+    expect(durations).toHaveLength(2);
+    expect(durations[0]).toHaveTextContent('已处理 5s');
+    expect(durations[1]).toHaveTextContent('已处理 4s');
+  });
+
+  it('does not change completed legacy message timing', () => {
+    render(React.createElement(ChatMessageBubble, {
+      message: makeMessage({ role: 'assistant', finish: 'stop', parts: [done,
+        { id: 'legacy-output', type: 'text', text: '完成', time: { start: 20_000, end: 30_000 } },
+      ] }), isActive: false, collapseIntermediateSteps: true,
+    }));
+    expect(screen.getByTestId('chat-process-duration')).toHaveTextContent('已处理 5s');
+  });
+
+  it('merges model/tool overlap and excludes a real gap', () => {
+    expect(getProcessGroupDurationMs([
+      { ...marker, time: { start: 0, end: 5_000 } }, done,
+      { ...marker, id: 'next', time: { start: 20_000, end: 22_000 } },
+    ])).toBe(7_000);
+  });
+});
+
+describe('agent communication', () => {
+  const incoming = {
+    id: 'agent-report', sessionID: 'sess-1', role: 'user', agent: 'rex', timestamp: 1,
+    parts: [{ id: 'report-text', type: 'text', synthetic: true,
+      text: 'internal source and guidance',
+      metadata: { displayText: 'Halfway through the investigation', communication: {
+        source_type: 'agent', source_agent: 'explore', source_session_id: 'child-1',
+      } },
+    }],
+  } as Message;
+
+  it.each([
+    ['rex-junior', 'rex', 'Rex-junior'],
+    ['rex', 'rex-junior', 'Rex'],
+    ['explore', 'librarian', 'Explore'],
+  ])('keeps %s → %s separate when the message part arrives before its role', (source, target, label) => {
+    const report = {
+      ...incoming, role: 'assistant', agent: target,
+      parts: incoming.parts.map(part => ({ ...part, metadata: {
+        ...part.metadata, communication: { ...part.metadata?.communication, source_agent: source },
+      } })),
+    } as Message;
+    const ordinary = { ...incoming, id: 'before', role: 'assistant', agent: target,
+      parts: [{ id: 'ordinary', type: 'text', text: 'Working on the task' }],
+    } as Message;
+    const merged = mergeConsecutiveAssistantMessages([ordinary, report, { ...ordinary, id: 'after' }]);
+    expect(merged).toHaveLength(3);
+    const { rerender } = render(React.createElement(ChatMessageBubble, { message: merged[1] }));
+    expect(screen.getByText(label)).toBeInTheDocument();
+    expect(screen.getByText('Halfway through the investigation')).toBeInTheDocument();
+    rerender(React.createElement(ChatMessageBubble, { message: { ...report, role: 'user' } }));
+    expect(screen.getByText(label)).toBeInTheDocument();
+  });
+
+  it('renders the sender and display text without user-edit or regeneration actions', () => {
+    render(React.createElement(ChatMessageBubble, { message: incoming, showActions: true }));
+    expect(screen.getByText('Explore')).toBeInTheDocument();
+    expect(screen.getByText('Halfway through the investigation')).toBeInTheDocument();
+    expect(screen.queryByText('internal source and guidance')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'chat.regenerate' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'chat.edit' })).not.toBeInTheDocument();
+  });
+
+  it('keeps agent communication visible in the full chat while hiding internal reminders', () => {
+    const previous = useSessionMessagesMock();
+    useSessionMessagesMock.mockReturnValue({ ...previous, messages: [incoming, {
+      ...incoming, id: 'reminder', parts: [{ id: 'internal', type: 'text', synthetic: true, text: 'hidden reminder' }],
+    }] });
+    render(React.createElement(SessionChat, { sessionId: 'sess-1', hideInput: true }));
+    expect(screen.getByText('Halfway through the investigation')).toBeInTheDocument();
+    expect(screen.queryByText('hidden reminder')).not.toBeInTheDocument();
   });
 });

@@ -62,8 +62,9 @@ class StateManager:
             
         Returns:
             Function that returns the state value.
-            The returned function also has an ``invalidate()`` method that
-            removes the cached state so the next access triggers re-init.
+            ``invalidate()`` removes the current directory's cached state;
+            ``invalidate_all()`` removes this accessor's state in every directory.
+            Subsequent access lazily re-initializes it.
         """
         state_id = self._next_id
         self._next_id += 1
@@ -93,7 +94,15 @@ class StateManager:
             if key in self._disposers:
                 self._disposers[key].pop(state_id, None)
 
+        def invalidate_all() -> None:
+            """Invalidate this accessor in every directory, leaving other states intact."""
+            for states in list(self._states.values()):
+                states.pop(state_id, None)
+            for disposers in list(self._disposers.values()):
+                disposers.pop(state_id, None)
+
         accessor.invalidate = invalidate  # type: ignore[attr-defined]
+        accessor.invalidate_all = invalidate_all  # type: ignore[attr-defined]
         return accessor
     
     async def dispose(self, key: str) -> None:
@@ -190,16 +199,16 @@ class Instance:
                 
                 cls._cache[directory] = asyncio.create_task(create_context())
         
-        # Wait for context to be ready.  If initialization fails, drop the
-        # failed task so a later request can retry after transient storage or
-        # startup recovery completes.
+        # A cancelled waiter must not cancel shared initialization. Only evict
+        # failed/cancelled initializers so later requests can retry them.
         task = cls._cache[directory]
         try:
-            ctx = await task
-        except Exception:
-            async with cls._lock:
-                if cls._cache.get(directory) is task:
-                    cls._cache.pop(directory, None)
+            ctx = await asyncio.shield(task)
+        except (Exception, asyncio.CancelledError):
+            if task.done() and (task.cancelled() or task.exception() is not None):
+                async with cls._lock:
+                    if cls._cache.get(directory) is task:
+                        cls._cache.pop(directory, None)
             raise
         
         # Execute fn within context

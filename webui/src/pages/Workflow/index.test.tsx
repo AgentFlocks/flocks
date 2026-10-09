@@ -1,15 +1,25 @@
 import type { ReactNode } from 'react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { WorkflowSummary } from '@/api/workflow';
 import WorkflowPage from './index';
 
-const { mockNavigate, mockUseWorkflows, mockLanguage } = vi.hoisted(() => ({
+const { mockNavigate, mockUseWorkflows, mockLanguage, nativeWorkflowAPI, toastWarning } = vi.hoisted(() => ({
+  toastWarning: vi.fn(),
+  nativeWorkflowAPI: { update: vi.fn(), listSummaries: vi.fn() },
   mockNavigate: vi.fn(),
   mockUseWorkflows: vi.fn(),
   mockLanguage: { current: 'zh-CN' },
 }));
+
+
+beforeEach(() => {
+  window.localStorage.clear();
+});
+
+vi.mock('@/api/workflow', () => ({ workflowAPI: nativeWorkflowAPI }));
+vi.mock('@/components/common/Toast', () => ({ useToast: () => ({ warning: toastWarning }) }));
 
 vi.mock('react-router-dom', () => ({
   useNavigate: () => mockNavigate,
@@ -108,6 +118,117 @@ describe('WorkflowPage', () => {
     });
   });
 
+  it('keeps native cards/sections/actions and saves draft groups through the singular native route', async () => {
+    const workflows = [makeWorkflow({ id: 'draft', name: 'Draft workflow', source: 'global', group: 'Ops' }), makeWorkflow({ id: 'builtin', name: 'Built-in workflow', source: 'project', group: 'Ops' })];
+    const refetch = vi.fn().mockResolvedValue(undefined);
+    mockUseWorkflows.mockReturnValue({ workflows, loading: false, error: null, refetch });
+    nativeWorkflowAPI.listSummaries.mockResolvedValue({ data: workflows });
+    nativeWorkflowAPI.update.mockResolvedValue({ data: {} });
+    render(<WorkflowPage />);
+    const original = screen.getByText('Draft workflow').closest('div.group')!;
+    const text = original.textContent;
+    fireEvent.click(screen.getByRole('button', { name: 'view.list' }));
+    const list = screen.getByText('Draft workflow').closest('div.group')!;
+    expect(list.textContent).toBe(text);
+    expect(list).toHaveClass('sm:flex-row');
+    fireEvent.click(list);
+    expect(mockNavigate).toHaveBeenCalledWith('/workflows/draft');
+    mockNavigate.mockClear();
+    fireEvent.click(within(list as HTMLElement).getByRole('button', { name: 'editGroup' }));
+    expect(mockNavigate).not.toHaveBeenCalled();
+    fireEvent.change(screen.getByRole('combobox'), { target: { value: '' } });
+    fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'save' }));
+    await waitFor(() => expect(nativeWorkflowAPI.update).toHaveBeenCalledExactlyOnceWith('draft', { group: null }));
+    expect(refetch).toHaveBeenCalledWith({ silent: true, rejectOnError: true });
+    expect(screen.getByRole('region', { name: '自定义工作流' })).toBeInTheDocument();
+    expect(screen.getByRole('region', { name: '内置工作流' })).toBeInTheDocument();
+  });
+
+  it('uses server ownership rather than project source for group permissions', async () => {
+    const workflows = [
+      makeWorkflow({ id: 'shipped', name: 'Shipped workflow', group: 'Mixed', group_readonly: true }),
+      makeWorkflow({ id: 'project-custom', name: 'User project workflow', group: 'Mixed', group_readonly: false }),
+    ];
+    mockUseWorkflows.mockReturnValue({ workflows, loading: false, error: null, refetch: vi.fn() });
+    nativeWorkflowAPI.listSummaries.mockResolvedValue({ data: workflows });
+    render(<WorkflowPage />);
+    const locked = screen.getByText('Shipped workflow').closest('div.group')!.parentElement!;
+    const dataTransfer = { setData: vi.fn() };
+    expect(fireEvent.dragStart(locked, { dataTransfer })).toBe(false);
+    expect(dataTransfer.setData).not.toHaveBeenCalled();
+    fireEvent.click(within(locked).getByRole('button', { name: 'editGroup' }));
+    expect(toastWarning).toHaveBeenCalledTimes(2);
+    expect(toastWarning).toHaveBeenLastCalledWith('pluginGroups:readOnly.system');
+    expect(nativeWorkflowAPI.update).not.toHaveBeenCalled();
+    expect(nativeWorkflowAPI.listSummaries).not.toHaveBeenCalled();
+    fireEvent.keyDown(locked, { key: 'm', altKey: true });
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'renameNamed' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'deleteNamed' })).toBeDisabled();
+    fireEvent.click(within(screen.getByText('User project workflow').closest('div.group') as HTMLElement).getByRole('button', { name: 'editGroup' }));
+    expect(mockNavigate).not.toHaveBeenCalled();
+    fireEvent.change(screen.getByRole('combobox'), { target: { value: '' } });
+    fireEvent.click(screen.getByRole('button', { name: 'save' }));
+    await waitFor(() => expect(nativeWorkflowAPI.update).toHaveBeenCalledExactlyOnceWith('project-custom', { group: null }));
+  });
+
+  it.each(['create', 'rename', 'delete'])('prechecks fresh workflow ownership before %s', async (operation) => {
+    const workflow = makeWorkflow({ id: 'changed', group: 'Ops', group_readonly: false });
+    mockUseWorkflows.mockReturnValue({ workflows: [workflow], loading: false, error: null, refetch: vi.fn() });
+    nativeWorkflowAPI.listSummaries.mockResolvedValue({ data: [{ ...workflow, group_readonly: true }] });
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+    render(<WorkflowPage />);
+    fireEvent.click(screen.getByRole('button', { name: operation === 'create' ? 'create' : `${operation}Named` }));
+    if (operation !== 'delete') {
+      fireEvent.change(screen.getByRole('textbox'), { target: { value: 'New' } });
+      if (operation === 'create') fireEvent.change(screen.getByRole('combobox'), { target: { value: 'changed' } });
+      fireEvent.click(screen.getByRole('button', { name: 'save' }));
+    }
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('pluginGroups:errors.readOnlyMembers'));
+    expect(nativeWorkflowAPI.update).not.toHaveBeenCalled();
+    expect(window.confirm).not.toHaveBeenCalled();
+  });
+
+  it('renames the complete native summary scope, including workflows beyond page 12', async () => {
+    const workflows = Array.from({ length: 15 }, (_, index) => makeWorkflow({ id: `wf-${index}`, name: `Workflow ${index}`, source: 'global', group: 'Ops' }));
+    mockUseWorkflows.mockReturnValue({ workflows, loading: false, error: null, refetch: vi.fn().mockResolvedValue(undefined) });
+    nativeWorkflowAPI.listSummaries.mockResolvedValue({ data: workflows });
+    nativeWorkflowAPI.update.mockResolvedValue({ data: {} });
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+    render(<WorkflowPage />);
+    expect(screen.queryByText('Workflow 14')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'renameNamed' }));
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Renamed' } });
+    fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'save' }));
+    await waitFor(() => expect(nativeWorkflowAPI.update).toHaveBeenCalledTimes(15));
+    expect(nativeWorkflowAPI.listSummaries).toHaveBeenCalledOnce();
+    expect(nativeWorkflowAPI.update).toHaveBeenLastCalledWith('wf-14', { group: 'Renamed' });
+  });
+
+  it.each(['create', 'rename'])('rejects a concurrently created group before %s writes', async (operation) => {
+    const workflow = makeWorkflow({ id: 'draft', group: 'Ops' });
+    mockUseWorkflows.mockReturnValue({ workflows: [workflow], loading: false, error: null, refetch: vi.fn() });
+    nativeWorkflowAPI.listSummaries.mockResolvedValue({ data: [workflow, makeWorkflow({ id: 'new', group: 'Existing' })] });
+    render(<WorkflowPage />);
+    fireEvent.click(screen.getByRole('button', { name: operation === 'create' ? 'create' : 'renameNamed' }));
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Existing' } });
+    if (operation === 'create') fireEvent.change(screen.getByRole('combobox'), { target: { value: 'draft' } });
+    fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'save' }));
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('pluginGroups:validation.duplicate'));
+    expect(nativeWorkflowAPI.update).not.toHaveBeenCalled();
+  });
+
+  it('handles a rejected manual refresh without reporting a successful reload', async () => {
+    const refetch = vi.fn().mockRejectedValue(new Error('offline'));
+    mockUseWorkflows.mockReturnValue({ workflows: [makeWorkflow()], loading: false, error: 'offline', refetch });
+    render(<WorkflowPage />);
+    fireEvent.click(screen.getByTitle('common:button.refresh'));
+    await waitFor(() => expect(screen.getByTitle('common:button.refresh')).not.toBeDisabled());
+    expect(screen.getByRole('alert')).toHaveTextContent('offline');
+    expect(screen.queryByTitle('common:button.refreshed')).not.toBeInTheDocument();
+    expect(refetch).toHaveBeenCalledWith({ silent: true, rejectOnError: true });
+  });
+
   it('按 source 将工作流分到自定义和内置分组', () => {
     mockUseWorkflows.mockReturnValue({
       workflows: [
@@ -202,13 +323,101 @@ describe('WorkflowPage', () => {
 
     const { container } = render(<WorkflowPage />);
 
-    const grid = container.querySelector('.grid');
-    expect(grid?.className).toContain('grid-cols-1');
-    expect(grid?.className).toContain('sm:grid-cols-2');
+    // auto-fill with a min(20rem, 100%) track: one column on a phone, more as width allows
+    const grid = Array.from(container.querySelectorAll<HTMLElement>('.grid'))
+      .find((element) => element.className.includes('auto-fill'));
+    expect(grid?.className).toContain('minmax(min(20rem,100%),1fr)');
     const createButton = screen.getAllByRole('button', { name: /创建工作流/ })[0];
     expect(createButton.className).toContain('whitespace-nowrap');
-    const filterScroller = screen.getByRole('tablist').parentElement;
-    expect(filterScroller?.className).toContain('overflow-x-auto');
+  });
+
+  it('只保留左侧业务分组一个筛选入口，分区计数跟随所选分组', () => {
+    mockUseWorkflows.mockReturnValue({
+      workflows: [
+        makeWorkflow({ id: 'custom-a', name: 'Custom A', source: 'global' }),
+        makeWorkflow({ id: 'custom-b', name: 'Custom B', source: 'global' }),
+        makeWorkflow({ id: 'custom-c', name: 'Custom C', source: 'global', group: '安全研判' }),
+        makeWorkflow({ id: 'builtin-a', name: 'Builtin A', source: 'project', group: '安全研判', group_readonly: true }),
+        makeWorkflow({ id: 'builtin-b', name: 'Builtin B', source: 'project', group: '安全研判', group_readonly: true }),
+      ],
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+    const sectionCount = (name: string) =>
+      within(screen.getByRole('region', { name })).getByRole('heading', { name }).nextElementSibling?.textContent;
+
+    render(<WorkflowPage />);
+
+    expect(screen.queryByRole('tablist')).not.toBeInTheDocument();
+    expect(sectionCount('自定义工作流')).toBe('3');
+    expect(sectionCount('内置工作流')).toBe('2');
+
+    fireEvent.click(screen.getByTitle('ungrouped'));
+    expect(sectionCount('自定义工作流')).toBe('2');
+    expect(screen.queryByRole('region', { name: '内置工作流' })).not.toBeInTheDocument();
+    expect(screen.queryByText('emptyState.title')).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByTitle('安全研判'));
+    expect(sectionCount('自定义工作流')).toBe('1');
+    expect(within(screen.getByRole('region', { name: '自定义工作流' })).getByText('Custom C')).toBeInTheDocument();
+    expect(sectionCount('内置工作流')).toBe('2');
+    expect(within(screen.getByRole('region', { name: '内置工作流' })).getByText('Builtin A')).toBeInTheDocument();
+  });
+
+  it('从第 3 页切到只有 2 页的分组时回到第 1 页', () => {
+    mockUseWorkflows.mockReturnValue({
+      workflows: Array.from({ length: 26 }, (_, index) =>
+        makeWorkflow({ id: `wf-${index}`, name: `Workflow ${index}`, source: 'global', group: index < 14 ? 'Ops' : null })),
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    render(<WorkflowPage />);
+    const custom = screen.getByRole('region', { name: '自定义工作流' });
+    fireEvent.click(within(custom).getByRole('button', { name: '3' }));
+    expect(within(custom).getByText('25–26 / 26')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByTitle('Ops'));
+    const opsCustom = screen.getByRole('region', { name: '自定义工作流' });
+    expect(within(opsCustom).getByText(/ \/ 14$/)).toHaveTextContent('1–12 / 14');
+  });
+
+  it('所选分组下没有工作流时只显示一条空提示', () => {
+    mockUseWorkflows.mockReturnValue({
+      workflows: [makeWorkflow({ id: 'builtin-a', name: 'Builtin A', source: 'project', group: '安全研判', group_readonly: true })],
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    render(<WorkflowPage />);
+    fireEvent.click(screen.getByTitle('ungrouped'));
+
+    expect(screen.queryByRole('region')).not.toBeInTheDocument();
+    expect(screen.getAllByText('emptyState.title')).toHaveLength(1);
+  });
+
+  it('卡片列数跟随分区宽度，长名称换行显示而不是截成一个字', () => {
+    const longName = '多源威胁情报关联分析与自动化处置编排工作流';
+    mockUseWorkflows.mockReturnValue({
+      workflows: [makeWorkflow({ id: 'wf-long', name: longName, source: 'global' })],
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    render(<WorkflowPage />);
+
+    const title = screen.getByText(longName);
+    const grid = title.closest('div.group')!.parentElement!.parentElement!;
+    expect(grid.className).toContain('grid-cols-[repeat(auto-fill,minmax(min(20rem,100%),1fr))]');
+    expect(grid.className).not.toMatch(/\b(sm|md|lg|xl):grid-cols-/);
+    expect(title).toHaveAttribute('title', longName);
+    expect(title).toHaveClass('line-clamp-2', 'break-words');
+    expect(title).not.toHaveClass('truncate');
+    expect(screen.getByText('badge.custom')).toHaveClass('whitespace-nowrap');
   });
 
   it('没有自定义工作流时不渲染空分组', () => {

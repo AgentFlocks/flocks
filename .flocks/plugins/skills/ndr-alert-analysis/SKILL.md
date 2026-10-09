@@ -1,5 +1,6 @@
 ---
 name: ndr-alert-analysis
+group: 安全研判
 description: 用于 NDR（网络检测与响应）告警的自动化研判分析，按照标准流程进行情报查询、资产关联、漏洞分析、payload 解析和综合研判。
 ---
 

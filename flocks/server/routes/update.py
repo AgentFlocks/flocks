@@ -11,10 +11,11 @@ from typing import Annotated, Literal
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 
-from flocks.server.auth import require_admin
+from flocks.server.auth import require_admin, require_user
 from flocks.updater import check_update, perform_update, detect_deploy_mode
 from flocks.updater.deploy import update_refusal_reason
 from flocks.updater.models import VersionInfo
+from flocks.updater.updater import get_current_version, get_installed_release
 from flocks.utils.log import Log
 
 router = APIRouter()
@@ -25,6 +26,8 @@ _UPDATE_CHECK_ERROR_CACHE_TTL_SECONDS = 60.0
 _update_check_cache: dict[tuple[str, str], tuple[float, VersionInfo]] = {}
 _update_check_inflight: dict[tuple[str, str], asyncio.Task[VersionInfo]] = {}
 _update_check_lock = asyncio.Lock()
+_installed_release_cache: dict[str, tuple[float, VersionInfo]] = {}
+_installed_release_inflight: dict[str, asyncio.Task[VersionInfo]] = {}
 
 # ``target_version`` ends up in the download URL and the archive filename, so
 # it must look like a release tag (``2026.03.24``, ``v1.2.3-rc1``) and nothing
@@ -44,6 +47,8 @@ def _update_cache_key(locale: str | None, edition: str) -> tuple[str, str]:
 def clear_update_check_cache() -> None:
     _update_check_cache.clear()
     _update_check_inflight.clear()
+    _installed_release_cache.clear()
+    _installed_release_inflight.clear()
 
 
 async def _run_update_check_for_cache(
@@ -95,6 +100,46 @@ async def _check_update_cached(
 
     info = await asyncio.shield(task)
     return info.model_copy(deep=True)
+
+
+async def _run_installed_release_for_cache(version: str) -> VersionInfo:
+    current_task = asyncio.current_task()
+    try:
+        info = await get_installed_release(version)
+        async with _update_check_lock:
+            if _installed_release_inflight.get(version) is current_task:
+                ttl = _UPDATE_CHECK_CACHE_TTL_SECONDS if info.release_notes else _UPDATE_CHECK_ERROR_CACHE_TTL_SECONDS
+                _installed_release_cache[version] = (time.monotonic() + ttl, info.model_copy(deep=True))
+        return info
+    finally:
+        async with _update_check_lock:
+            if _installed_release_inflight.get(version) is current_task:
+                _installed_release_inflight.pop(version, None)
+
+
+async def _installed_release_cached(version: str) -> VersionInfo:
+    now = time.monotonic()
+    async with _update_check_lock:
+        cached = _installed_release_cache.get(version)
+        if cached and cached[0] > now:
+            return cached[1].model_copy(deep=True)
+        task = _installed_release_inflight.get(version)
+        if task is None:
+            task = asyncio.create_task(_run_installed_release_for_cache(version))
+            _installed_release_inflight[version] = task
+
+    info = await asyncio.shield(task)
+    return info.model_copy(deep=True)
+
+
+@router.get(
+    "/current-release",
+    response_model=VersionInfo,
+    summary="Get release notes for the installed Flocks Core version",
+)
+async def current_release(request: Request) -> VersionInfo:
+    require_user(request)
+    return await _installed_release_cached(get_current_version())
 
 
 @router.get(

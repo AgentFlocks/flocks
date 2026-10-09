@@ -212,6 +212,8 @@ export interface WorkflowStats {
 }
 
 export interface WorkflowSummary {
+  group_readonly?: boolean;
+  group?: string | null;
   id: string;
   name: string;
   nameI18n?: Record<string, string>;
@@ -227,6 +229,8 @@ export interface WorkflowSummary {
 }
 
 export interface Workflow {
+  group_readonly?: boolean;
+  group?: string | null;
   id: string;
   name: string;
   nameI18n?: Record<string, string>;
@@ -459,6 +463,7 @@ export const workflowAPI = {
     client.post<Workflow>('/api/workflow', data),
   
   update: (id: string, data: {
+    group?: string | null;
     name?: string;
     description?: string;
     category?: string;

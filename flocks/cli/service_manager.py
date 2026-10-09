@@ -802,8 +802,16 @@ def _port_owner_lookup_available() -> bool:
 
 
 def _bind_port_available(port: int) -> bool:
-    """Return True when the TCP port can be bound on any local IPv4 interface."""
+    """Return True when the TCP port can be bound on any local IPv4 interface.
+
+    On Linux the probe binds the way uvicorn does (SO_REUSEADDR): connections a stopped
+    backend left in TIME_WAIT (an open browser tab's event stream is enough) must not
+    count as "in use" for the next minute, while a listener on any local address still
+    makes the wildcard bind fail. Elsewhere SO_REUSEADDR could bind over a live listener.
+    """
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        if sys.platform.startswith("linux"):
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
             sock.bind(("0.0.0.0", port))
         except OSError:

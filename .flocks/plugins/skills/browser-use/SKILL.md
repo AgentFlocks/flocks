@@ -1,5 +1,6 @@
 ---
 name: browser-use
+group: 系统辅助
 description: 统一处理浏览器使用任务，支持可见浏览器 CDP 直连、专用 headless CDP、agent-browser。Use when the user asks to browse websites, interact with pages, fill forms, capture screenshots, reuse an existing Chrome/Chromium/Edge login session, work with an already-open browser/sidebar browser, access login-only/internal/dynamic pages, or automate browser actions.
 ---
 

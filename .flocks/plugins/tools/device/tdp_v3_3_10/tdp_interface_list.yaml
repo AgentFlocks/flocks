@@ -1,4 +1,5 @@
 name: tdp_interface_list
+group: NDR
 description: >
   查询 TDP API 接口列表，支持按域名、请求方法、敏感标签、是否对外开放和关键词筛选。
   优先使用顶层语义化参数；`condition` / `page` 仅用于传递尚未暴露的底层字段。

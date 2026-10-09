@@ -1,23 +1,26 @@
 import { pageActionLabel } from '../pageActionLabel';
 import { useState, useEffect, useCallback, useMemo, useRef, useReducer } from 'react';
+import { useLocation } from 'react-router-dom';
+import KnowledgeTab from './KnowledgeTab';
 import {
-  IconFolderOpen,
-  IconUpload,
-  IconDownload,
-  IconTrash,
-  IconEdit,
-  IconDeviceFloppy,
-  IconX,
-  IconChevronRight,
-  IconChevronDown,
-  IconChevronUp,
-  IconRefresh,
-  IconFolderPlus,
-  IconBrain,
   IconAlertTriangle,
-  IconSearch,
   IconArrowLeft,
   IconArrowsDiagonal,
+  IconBrain,
+  IconChevronDown,
+  IconChevronRight,
+  IconChevronUp,
+  IconDatabase,
+  IconDeviceFloppy,
+  IconDownload,
+  IconEdit,
+  IconFolderOpen,
+  IconFolderPlus,
+  IconRefresh,
+  IconSearch,
+  IconTrash,
+  IconUpload,
+  IconX,
 } from '@tabler/icons-react';
 import { useTranslation } from 'react-i18next';
 import PageHeader from '@/components/common/PageHeader';
@@ -29,10 +32,11 @@ import {
   workspaceAPI, WorkspaceNode, WorkspaceProject, formatBytes, formatDate, fileIcon,
 } from '@/api/workspace';
 import { FilePreviewRenderer, PreviewModal, type PreviewFileAccess } from '@/components/common/FilePreview';
+import { WorkspaceFileSplit, FileListTable, FileListRow, FileListActions, PreviewPanelHeader, fileActionClass, previewActionClass } from '@/components/common/WorkspaceFileView';
 
 // ─── Types ────────────────────────────────────────────────────────────────
 
-type Tab = 'files' | 'memory';
+type Tab = 'files' | 'memory' | 'knowledge';
 type SortField = 'name' | 'size' | 'modified';
 type SortDirection = 'asc' | 'desc';
 const WORKSPACE_PREVIEW_FILE_ACCESS: PreviewFileAccess = {
@@ -44,29 +48,6 @@ const MEMORY_PREVIEW_FILE_ACCESS: PreviewFileAccess = {
   previewUrl: (path) => workspaceAPI.memoryPreviewUrl(path),
   downloadUrl: (path) => workspaceAPI.memoryDownloadUrl(path),
 };
-
-const PREVIEW_PANEL_DEFAULT_RATIO = 0.5;
-const PREVIEW_PANEL_MIN_WIDTH = 420;
-const PREVIEW_PANEL_MIN_LIST_WIDTH = 360;
-// Below this container width the list and the preview cannot sit side by side
-// (min list + min preview); stack them vertically instead of squeezing the
-// list to zero and pushing the preview's close button off screen.
-const PREVIEW_STACK_BREAKPOINT = PREVIEW_PANEL_MIN_WIDTH + PREVIEW_PANEL_MIN_LIST_WIDTH;
-function getViewportWidth(): number {
-  return typeof window === 'undefined' ? PREVIEW_PANEL_MIN_WIDTH * 2 : window.innerWidth;
-}
-
-function getPreviewPanelMaxWidth(containerWidth = getViewportWidth()): number {
-  return Math.max(PREVIEW_PANEL_MIN_WIDTH, containerWidth - PREVIEW_PANEL_MIN_LIST_WIDTH);
-}
-
-function getDefaultPreviewPanelWidth(containerWidth = getViewportWidth()): number {
-  const targetWidth = Math.floor(containerWidth * PREVIEW_PANEL_DEFAULT_RATIO);
-  return Math.min(
-    getPreviewPanelMaxWidth(containerWidth),
-    Math.max(PREVIEW_PANEL_MIN_WIDTH, targetWidth),
-  );
-}
 
 interface SortState {
   field: SortField;
@@ -140,8 +121,12 @@ function panelReducer(state: PanelState, action: PanelAction): PanelState {
 // ─── Main Page ────────────────────────────────────────────────────────────
 
 export default function WorkspacePage() {
-  const [activeTab, setActiveTab] = useState<Tab>('files');
+  const location = useLocation();
+  const [activeTab, setActiveTab] = useState<Tab>(() => new URLSearchParams(location.search).get('tab') === 'knowledge' ? 'knowledge' : 'files');
   const { t } = useTranslation('workspace');
+  useEffect(() => {
+    setActiveTab(new URLSearchParams(location.search).get('tab') === 'knowledge' ? 'knowledge' : 'files');
+  }, [location.key, location.search]);
 
   return (
     <div className="flex h-[calc(100vh-3rem)] min-h-[560px] flex-col">
@@ -154,10 +139,12 @@ export default function WorkspacePage() {
       <div className="flex gap-1 px-1 mb-4 border-b border-line">
         <TabButton active={activeTab === 'files'} onClick={() => setActiveTab('files')} icon={<IconFolderOpen aria-hidden="true" className="w-4 h-4" />} label={t('tabs.files')} />
         <TabButton active={activeTab === 'memory'} onClick={() => setActiveTab('memory')} icon={<IconBrain aria-hidden="true" className="w-4 h-4" />} label={t('tabs.memory')} />
+        <TabButton active={activeTab === 'knowledge'} onClick={() => setActiveTab('knowledge')} icon={<IconDatabase aria-hidden="true" className="w-4 h-4" />} label={t('tabs.knowledge')} />
       </div>
 
       <div className="min-h-0 flex-1 overflow-hidden">
-        {activeTab === 'files' ? <FilesTab /> : <MemoryTab />}
+        {activeTab === 'files' ? <FilesTab /> : activeTab === 'memory' ? <MemoryTab /> : null}
+        <KnowledgeTab active={activeTab === 'knowledge'} />
       </div>
     </div>
   );
@@ -225,21 +212,15 @@ function FilesTab() {
   // Preview/edit panel — consolidated into a reducer
   const [panel, dispatchPanel] = useReducer(panelReducer, PANEL_INIT);
 
-  // Upload / new-dir state
+  // IconUpload / new-dir state
   const [uploading, setUploading] = useState(false);
   const [newDir, setNewDir] = useState<{ show: boolean; name: string }>({ show: false, name: '' });
   const [dragOver, setDragOver] = useState(false);
   const [previewModalOpen, setPreviewModalOpen] = useState(false);
-  const [previewPanelWidth, setPreviewPanelWidth] = useState(() => getDefaultPreviewPanelWidth());
-  const [fileListWidth, setFileListWidth] = useState(900);
-  const [stackPreview, setStackPreview] = useState(() => getViewportWidth() < PREVIEW_STACK_BREAKPOINT);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const workspaceSplitRef = useRef<HTMLDivElement>(null);
-  const fileListRef = useRef<HTMLDivElement>(null);
   const latestDirRequestIdRef = useRef(0);
   const didInitRef = useRef(false);
-  const userResizedPreviewRef = useRef(false);
 
   const loadFileContent = useCallback(async (path: string) => {
     const res = await workspaceAPI.readFile(path);
@@ -290,50 +271,6 @@ function FilesTab() {
   useEffect(() => {
     setSort({ field: 'name', direction: isOutputsDirectory ? 'desc' : 'asc' });
   }, [isOutputsDirectory]);
-
-  useEffect(() => {
-    const node = fileListRef.current;
-    if (!node) return;
-
-    if (node.clientWidth > 0) {
-      setFileListWidth(node.clientWidth);
-    }
-    if (typeof ResizeObserver === 'undefined') return;
-
-    const observer = new ResizeObserver(([entry]) => {
-      if (entry.contentRect.width > 0) {
-        setFileListWidth(entry.contentRect.width);
-      }
-    });
-    observer.observe(node);
-    return () => observer.disconnect();
-  }, []);
-
-  useEffect(() => {
-    const node = workspaceSplitRef.current;
-    if (!node) return;
-
-    const syncPreviewWidth = (containerWidth: number) => {
-      if (containerWidth <= 0) return;
-      setStackPreview(containerWidth < PREVIEW_STACK_BREAKPOINT);
-      const maxWidth = getPreviewPanelMaxWidth(containerWidth);
-      setPreviewPanelWidth((current) => {
-        if (userResizedPreviewRef.current) {
-          return Math.min(maxWidth, Math.max(PREVIEW_PANEL_MIN_WIDTH, current));
-        }
-        return getDefaultPreviewPanelWidth(containerWidth);
-      });
-    };
-
-    syncPreviewWidth(node.clientWidth);
-    if (typeof ResizeObserver === 'undefined') return;
-
-    const observer = new ResizeObserver(([entry]) => {
-      syncPreviewWidth(entry.contentRect.width);
-    });
-    observer.observe(node);
-    return () => observer.disconnect();
-  }, []);
 
   const handleSelectNode = useCallback(async (node: WorkspaceNode) => {
     if (node.type === 'directory') {
@@ -446,32 +383,6 @@ function FilesTab() {
     }));
   }, []);
 
-  const handlePreviewResizeStart = useCallback((event: React.PointerEvent<HTMLButtonElement>) => {
-    event.preventDefault();
-    userResizedPreviewRef.current = true;
-    const pointerId = event.pointerId;
-    const startX = event.clientX;
-    const startWidth = previewPanelWidth;
-    const containerWidth = workspaceSplitRef.current?.clientWidth ?? getViewportWidth();
-    const maxWidth = getPreviewPanelMaxWidth(containerWidth);
-
-    event.currentTarget.setPointerCapture(pointerId);
-
-    const handlePointerMove = (moveEvent: PointerEvent) => {
-      const nextWidth = startWidth - (moveEvent.clientX - startX);
-      setPreviewPanelWidth(Math.min(maxWidth, Math.max(PREVIEW_PANEL_MIN_WIDTH, nextWidth)));
-    };
-    const handlePointerUp = () => {
-      window.removeEventListener('pointermove', handlePointerMove);
-      window.removeEventListener('pointerup', handlePointerUp);
-      window.removeEventListener('pointercancel', handlePointerUp);
-    };
-
-    window.addEventListener('pointermove', handlePointerMove);
-    window.addEventListener('pointerup', handlePointerUp);
-    window.addEventListener('pointercancel', handlePointerUp);
-  }, [previewPanelWidth]);
-
   const sortedItems = useMemo(() => {
     const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
     return [...items].sort((a, b) => {
@@ -491,13 +402,12 @@ function FilesTab() {
   }, [items, sort]);
 
   const breadcrumbs = currentPath ? ['', ...currentPath.split('/')] : [''];
-  const showSizeColumn = fileListWidth >= 560;
-  const showModifiedColumn = fileListWidth >= 760;
 
-  return (
-    <div ref={workspaceSplitRef} className={`flex h-full min-h-0 gap-4 ${stackPreview ? 'flex-col' : ''}`}>
-      {/* File list */}
-      <div ref={fileListRef} className="flex h-full min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-card border border-line bg-surface">
+  const renderList = (fileListWidth: number) => {
+    const showSizeColumn = fileListWidth >= 560;
+    const showModifiedColumn = fileListWidth >= 760;
+    return (
+      <>
         {/* Toolbar */}
         <div className="flex items-center gap-2 px-4 py-2 border-b border-line flex-shrink-0">
           <div className="flex items-center gap-1 flex-1 min-w-0 text-sm text-fg-secondary">
@@ -568,7 +478,7 @@ function FilesTab() {
         )}
 
         <div
-          className={`flex-1 overflow-y-auto relative ${dragOver ? 'ring-2 ring-focus ring-inset bg-info-soft' : ''}`}
+          className={`min-h-0 flex-1 overflow-y-auto relative ${dragOver ? 'ring-2 ring-focus ring-inset bg-info-soft' : ''}`}
           onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
           onDragLeave={() => setDragOver(false)}
           onDrop={(e) => { e.preventDefault(); setDragOver(false); handleUpload(e.dataTransfer.files); }}
@@ -590,11 +500,9 @@ function FilesTab() {
               <p className="text-sm">{t('files.emptyDir')}</p>
             </div>
           ) : (
-            <table className="w-full text-sm">
-              <thead className="sticky top-0 bg-subtle ">
-                <tr>
-                  <th className="w-8 px-4 py-2 text-left text-xs font-medium text-fg-muted "></th>
-                  <th className="px-2 py-2 text-left text-xs font-medium text-fg-muted " aria-sort={sort.field === 'name' ? (sort.direction === 'asc' ? 'ascending' : 'descending') : 'none'}>
+            <FileListTable header={<>
+                  <th className="w-8 px-4 py-2 text-left text-xs font-medium text-fg-muted dark:text-fg-muted"></th>
+                  <th className="px-2 py-2 text-left text-xs font-medium text-fg-muted dark:text-fg-muted" aria-sort={sort.field === 'name' ? (sort.direction === 'asc' ? 'ascending' : 'descending') : 'none'}>
                     <SortHeaderButton label={t('files.columns.name')} field="name" sort={sort} onClick={handleSort} />
                   </th>
                   {showSizeColumn && (
@@ -608,18 +516,12 @@ function FilesTab() {
                     </th>
                   )}
                   <th className="w-20"></th>
-                </tr>
-              </thead>
-              <tbody>
+            </>}>
                 {sortedItems.map((item) => (
-                  <tr
+                  <FileListRow
                     key={item.path}
                     onClick={() => handleSelectNode(item)}
-                    className={`group border-t border-line cursor-pointer transition-colors ${
-                      panel.node?.path === item.path
-                        ? 'bg-subtle '
-                        : 'hover:bg-hover '
-                    }`}
+                    selected={panel.node?.path === item.path}
                   >
                     <td className="px-4 py-2 text-sm">{fileIcon(item)}</td>
                     <td className="max-w-0 truncate px-2 py-2 font-medium text-fg ">
@@ -636,24 +538,23 @@ function FilesTab() {
                       </td>
                     )}
                     <td className="px-2 py-2">
-                      <div className="flex items-center justify-end gap-1 opacity-0 group-hover:opacity-100" onClick={(e) => e.stopPropagation()}>
+                      <FileListActions>
                         {item.type === 'file' && (
-                          <a href={workspaceAPI.downloadUrl(item.path)} download={item.name} title={t('files.download')} className="p-1 text-fg-muted hover:text-fg-secondary rounded-tag hover:bg-hover">
-                            <IconDownload aria-hidden="true" className="w-4 h-4" />
+                          <a href={workspaceAPI.downloadUrl(item.path)} download={item.name} title={t('files.download')} className={fileActionClass}>
+                            <IconDownload aria-hidden="true" className="w-3.5 h-3.5" />
                           </a>
                         )}
-                        <button onClick={() => handleReveal(item)} title={t('files.reveal')} className="ui-btn-icon inline-flex items-center justify-center p-1 text-fg-muted hover:text-fg-secondary rounded-control hover:bg-hover">
-                          <IconFolderOpen aria-hidden="true" className="w-4 h-4" />
+                        <button onClick={() => handleReveal(item)} title={t('files.reveal')} className={fileActionClass}>
+                          <IconFolderOpen aria-hidden="true" className="w-3.5 h-3.5" />
                         </button>
                         <button onClick={() => handleDelete(item)} title={t('files.delete')} className="ui-btn-icon inline-flex items-center justify-center p-1 text-fg-muted hover:text-fg-secondary rounded-control hover:bg-hover">
                           <IconTrash aria-hidden="true" className="w-4 h-4" />
                         </button>
-                      </div>
+                      </FileListActions>
                     </td>
-                  </tr>
+                  </FileListRow>
                 ))}
-              </tbody>
-            </table>
+            </FileListTable>
           )}
         </div>
 
@@ -663,30 +564,19 @@ function FilesTab() {
             {t('files.uploading')}
           </div>
         )}
-      </div>
+      </>
+    );
+  };
 
-      {/* Right: preview / edit panel */}
-      {panel.node && (
-        <div
-          data-workspace-preview="true"
-          className={`relative flex flex-shrink-0 flex-col overflow-hidden rounded-card border border-line bg-surface ${
-            stackPreview ? 'h-[60%] min-h-0 w-full' : 'h-full'
-          }`}
-          style={stackPreview ? undefined : { width: previewPanelWidth, minWidth: PREVIEW_PANEL_MIN_WIDTH }}
-        >
-          {!stackPreview && (
-            <button
-              type="button"
-              aria-label={t('files.preview.resize')}
-              title={t('files.preview.resize')}
-              onPointerDown={handlePreviewResizeStart}
-              className="absolute left-0 top-0 z-10 h-full w-2 cursor-col-resize border-l border-transparent transition-colors hover:border-info hover:bg-info-soft active:border-info active:bg-info-soft"
-            />
-          )}
-          <div className="flex items-center gap-2 px-4 py-2.5 border-b border-line flex-shrink-0">
-            <span className="text-sm flex-shrink-0">{fileIcon(panel.node)}</span>
-            <span className="flex-1 text-sm font-medium text-fg truncate">{panel.node.name}</span>
-            <div className="flex items-center gap-1 flex-shrink-0">
+  return (
+    <>
+      <WorkspaceFileSplit
+        list={renderList}
+        preview={panel.node && <>
+          <PreviewPanelHeader
+            title={panel.node.name}
+            icon={fileIcon(panel.node)}
+            actions={<>
               {panel.node.is_text_file && !panel.editing && !panel.truncated && (
                 <button onClick={() => dispatchPanel({ type: 'start_edit' })} title={t('files.edit')} className="ui-btn-icon inline-flex items-center justify-center p-1.5 text-fg-muted hover:text-fg-secondary hover:bg-hover rounded-control">
                   <IconEdit aria-hidden="true" className="w-4 h-4" />
@@ -702,25 +592,24 @@ function FilesTab() {
                   </button>
                 </>
               )}
-              <a href={workspaceAPI.downloadUrl(panel.node.path)} download={panel.node.name} title={t('files.download')} className="p-1.5 text-fg-muted hover:text-fg-secondary hover:bg-hover rounded-tag">
+              <a href={workspaceAPI.downloadUrl(panel.node.path)} download={panel.node.name} title={t('files.download')} className={previewActionClass}>
                 <IconDownload aria-hidden="true" className="w-4 h-4" />
               </a>
-              <button onClick={() => handleReveal(panel.node!)} title={t('files.reveal')} className="ui-btn-icon inline-flex items-center justify-center p-1.5 text-fg-muted hover:text-fg-secondary hover:bg-hover rounded-control">
+              <button onClick={() => handleReveal(panel.node!)} title={t('files.reveal')} className={previewActionClass}>
                 <IconFolderOpen aria-hidden="true" className="w-4 h-4" />
               </button>
-              <button onClick={() => setPreviewModalOpen(true)} title={t('files.preview.fullscreen')} className="ui-btn-icon inline-flex items-center justify-center p-1.5 text-fg-muted hover:text-fg-secondary hover:bg-hover rounded-control">
+              <button onClick={() => setPreviewModalOpen(true)} title={t('files.preview.fullscreen')} className={previewActionClass}>
                 <IconArrowsDiagonal aria-hidden="true" className="w-4 h-4" />
               </button>
-              <button onClick={() => dispatchPanel({ type: 'close' })} title={t('files.close')} className="ui-btn-icon inline-flex items-center justify-center p-1.5 text-fg-muted hover:text-fg-secondary hover:bg-hover rounded-control">
+              <button onClick={() => dispatchPanel({ type: 'close' })} title={t('files.close')} className={previewActionClass}>
                 <IconX aria-hidden="true" className="w-4 h-4" />
               </button>
-            </div>
-          </div>
-
-          <div className="px-4 py-1.5 bg-subtle border-b border-line flex gap-4 text-xs text-fg-muted flex-shrink-0">
-            <span>{formatBytes(panel.node.size ?? 0)}</span>
-            <span>{formatDate(panel.node.modified_at)}</span>
-          </div>
+            </>}
+            meta={<>
+              <span>{formatBytes(panel.node.size ?? 0)}</span>
+              <span>{formatDate(panel.node.modified_at)}</span>
+            </>}
+          />
 
           <div className="flex-1 min-h-0 overflow-hidden">
             <FilePreviewRenderer
@@ -735,8 +624,8 @@ function FilesTab() {
               onReveal={handleReveal}
             />
           </div>
-        </div>
-      )}
+        </>}
+      />
       {panel.node && previewModalOpen && (
         <PreviewModal
           node={panel.node}
@@ -748,7 +637,7 @@ function FilesTab() {
           onReveal={handleReveal}
         />
       )}
-    </div>
+    </>
   );
 }
 

@@ -52,6 +52,9 @@ vi.mock('@/components/common/PageHeader', () => ({
   ),
 }));
 
+// Group writes report failures through toasts; these tests never trigger them.
+vi.mock('@/components/common/Toast', () => ({ useToast: () => ({ warning: vi.fn(), error: vi.fn(), success: vi.fn() }) }));
+
 vi.mock('@/components/common/LoadingSpinner', () => ({
   default: () => <div>loading</div>,
 }));

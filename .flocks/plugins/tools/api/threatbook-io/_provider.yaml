@@ -1,4 +1,5 @@
 name: threatbook-io
+group: 威胁情报
 description: ThreatBook IO Threat Intelligence Platform - Global edition providing IP, domain, URL, file hash intelligence
 description_cn: ThreatBook IO 威胁情报平台（全球版），提供 IP、域名、URL、文件哈希等威胁情报查询能力
 auth:

@@ -1,0 +1,9 @@
+# 端到端测试用的 CentOS Stream 9 镜像：带 systemd（作为 PID 1 跑）、nftables、firewalld、dnsmasq（模拟内网 DNS）、
+# squid + httpd-tools（模拟客户现成的 HTTP 代理，含 basic 认证）、socat + openssl（给 squid 套一层 TLS 当 https 代理）
+ARG BASE=quay.io/centos/centos:stream9
+FROM ${BASE}
+RUN dnf install -y --setopt=install_weak_deps=False systemd nftables iproute bind-utils procps-ng passwd shadow-utils util-linux hostname iputils sudo tar gzip firewalld python3 python3-pip dnsmasq squid httpd-tools socat openssl \
+ && dnf clean all
+RUN systemctl mask systemd-udevd.service systemd-udevd-kernel.socket systemd-udevd-control.socket systemd-modules-load.service getty.target console-getty.service
+STOPSIGNAL SIGRTMIN+3
+CMD ["/sbin/init"]

@@ -16,6 +16,7 @@ from urllib.parse import parse_qs, urlparse
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator
+from pydantic_core import PydanticCustomError
 
 from flocks.audit import emit_audit_event
 from flocks.auth.context import AuthUser
@@ -29,6 +30,7 @@ from flocks.mcp import (
     McpServerInfo,
 )
 from flocks.mcp.catalog import McpCatalog
+from flocks.mcp.types import normalize_mcp_group
 from flocks.mcp.auth import McpAuth
 from flocks.mcp.installer import preflight_install, preflight_uninstall
 from flocks.mcp.utils import (
@@ -135,6 +137,14 @@ def _remote_mcp_url_error(config: Dict[str, Any]) -> Optional[str]:
     return None
 
 
+def _read_stored_mcp_group(value: Any) -> Optional[str]:
+    """Ignore malformed legacy instance metadata in responses, never on writes."""
+    try:
+        return normalize_mcp_group(value)
+    except PydanticCustomError:
+        return None
+
+
 def _to_frontend_mcp_config(server_config: Dict[str, Any]) -> Dict[str, Any]:
     """Normalize backend transport names for the frontend form."""
     server_config = mask_sensitive_mcp_config_for_frontend(server_config)
@@ -169,6 +179,7 @@ def _to_frontend_mcp_config(server_config: Dict[str, Any]) -> Dict[str, Any]:
         args = args_value
     return {
         "type": transport,
+        "group": _read_stored_mcp_group(server_config.get("group")),
         "url": server_config.get("url"),
         "command": command,
         "args": args,
@@ -224,6 +235,18 @@ def _load_raw_mcp_server_config(name: str) -> Optional[Dict[str, Any]]:
     return normalize_mcp_config(server_config)
 
 
+def _effective_mcp_group(name: str, config: Dict[str, Any]) -> Optional[str]:
+    if "group" in config:
+        return _read_stored_mcp_group(config["group"])
+    try:
+        entry = McpCatalog.get().get_entry(name)
+    except FileNotFoundError:
+        # Without mcp_list.json there is no catalog default group; that must not
+        # fail the add / status / info request that only wanted to label the server.
+        return None
+    return normalize_mcp_group(getattr(entry, "group", None))
+
+
 async def _build_mcp_status_response() -> Dict[str, Any]:
     """Merge runtime state with configured-but-not-connected MCP servers."""
     status = await MCP.status()
@@ -233,26 +256,32 @@ async def _build_mcp_status_response() -> Dict[str, Any]:
     for name, server_config in configured.items():
         if not isinstance(server_config, dict):
             continue
-        if name in result:
-            continue
-        if server_config.get("enabled", True):
-            result[name] = McpStatusInfo(status=McpStatus.DISCONNECTED).model_dump()
-        else:
-            result[name] = McpStatusInfo(status=McpStatus.DISABLED).model_dump()
+        if name not in result:
+            server_status = McpStatus.DISCONNECTED if server_config.get("enabled", True) else McpStatus.DISABLED
+            result[name] = McpStatusInfo(status=server_status).model_dump()
+        result[name]["group"] = _effective_mcp_group(name, server_config)
 
     return result
 
 
-def _persist_mcp_server_config(name: str, config: Dict[str, Any]) -> None:
-    """Persist MCP config to both runtime config and canonical YAML."""
+def _persist_mcp_server_config(
+    name: str, config: Dict[str, Any], *, metadata_only: bool = False,
+) -> None:
+    """Persist through the native writers, which own omitted-field preservation."""
     ConfigWriter.add_mcp_server(name, config)
 
     from flocks.tool.tool_loader import save_mcp_config
-    save_mcp_config(name, config)
+    if metadata_only:
+        save_mcp_config(name, config, metadata_only=True)
+    else:
+        save_mcp_config(name, config)
 
 
 def _prepare_mcp_config_for_save(name: str, config: Dict[str, Any]) -> Dict[str, Any]:
     """Normalize config and move any plain-text remote secrets into SecretManager."""
+    config = dict(config)
+    if "group" in config:
+        config["group"] = normalize_mcp_group(config["group"]) or ""
     clean_config = extract_api_key_from_mcp_url(name, normalize_mcp_config(config))
     clean_config = extract_auth_value_from_mcp_config(name, clean_config)
     clean_config = extract_sensitive_headers_from_mcp_config(name, clean_config)
@@ -279,6 +308,13 @@ class McpAddRequest(BaseModel):
         if _config_type_missing(value):
             raise ValueError(_MCP_TYPE_REQUIRED_MESSAGE)
         return value
+
+    @field_validator("config")
+    @classmethod
+    def validate_config_group(cls, config):
+        if "group" in config:
+            config = {**config, "group": normalize_mcp_group(config["group"]) or ""}
+        return config
 
 
 class McpAuthCallbackRequest(BaseModel):
@@ -403,6 +439,13 @@ class McpTestRequest(BaseModel):
 class McpUpdateRequest(BaseModel):
     """Request to update an existing MCP server configuration."""
     config: Dict[str, Any] = Field(..., description="Partial or full MCP server configuration")
+
+    @field_validator("config")
+    @classmethod
+    def validate_config_group(cls, config):
+        if "group" in config:
+            config = {**config, "group": normalize_mcp_group(config["group"]) or ""}
+        return config
 
 
 class ThreatBookMcpConfigureRequest(BaseModel):
@@ -740,6 +783,25 @@ async def remove_mcp_server(name: str, _admin: object = Depends(require_admin)):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+def _update_mcp_metadata(name: str, updates: Dict[str, Any]) -> Dict[str, Any]:
+    # Read the raw record: normalizing transport/auth here could alter credentials.
+    existing = ConfigWriter.get_mcp_server(name)
+    if not isinstance(existing, dict):
+        raise HTTPException(status_code=404, detail=f"MCP server not found: {name}")
+    config = dict(existing)
+    if "group" in updates:
+        config["group"] = normalize_mcp_group(updates["group"]) or ""
+        _persist_mcp_server_config(name, config, metadata_only=True)
+    projection = {**config, "group": _effective_mcp_group(name, config)}
+    return {
+        "success": True,
+        "message": f"MCP server '{name}' metadata updated successfully.",
+        "config": _to_frontend_mcp_config(projection),
+        "reconnected": False,
+        "reconnect_error": None,
+    }
+
+
 @router.put(
     "/{name}",
     response_model=Dict[str, Any],
@@ -748,9 +810,15 @@ async def remove_mcp_server(name: str, _admin: object = Depends(require_admin)):
     operation_id="mcp.update"
 )
 @serialized_config_mutation
-async def update_mcp_server(name: str, request: McpUpdateRequest, _admin: object = Depends(require_admin)):
-    """Update an existing MCP server configuration and clear stale runtime state."""
+async def update_mcp_server(
+    name: str,
+    request: McpUpdateRequest,
+    _admin: object = Depends(require_admin),
+):
+    """Update native config; metadata-only writes leave runtime state untouched."""
     try:
+        if set(request.config) <= {"group"}:
+            return _update_mcp_metadata(name, request.config)
         existing_config = _load_raw_mcp_server_config(name)
         if not existing_config:
             raise HTTPException(status_code=404, detail=f"MCP server not found: {name}")
@@ -904,9 +972,13 @@ async def get_mcp_server_info(name: str):
                 resources=[],
             )
         result = info.model_dump()
+        result["group_readonly"] = False
         if isinstance(server_config, dict):
-            result["config"] = _to_frontend_mcp_config(server_config)
+            result["group"] = _effective_mcp_group(name, server_config)
+            result["status"]["group"] = result["group"]
+            result["config"] = _to_frontend_mcp_config({**server_config, "group": result["group"]})
         else:
+            result["group"] = None
             result["config"] = None
         return result
     except HTTPException:
@@ -1399,7 +1471,7 @@ async def get_mcp_catalog():
     """List all available MCP servers from catalog"""
     try:
         catalog = McpCatalog.get()
-        return [entry.to_dict() for entry in catalog.entries]
+        return [{**entry.to_dict(), "group": normalize_mcp_group(getattr(entry, "group", None))} for entry in catalog.entries]
     except Exception as e:
         log.error("mcp.catalog.error", {"error": str(e)})
         raise HTTPException(status_code=500, detail=str(e))
@@ -1457,7 +1529,7 @@ async def search_mcp_catalog(request: CatalogSearchRequest):
             tags=request.tags,
             official_only=request.official_only,
         )
-        return [entry.to_dict() for entry in results]
+        return [{**entry.to_dict(), "group": normalize_mcp_group(getattr(entry, "group", None))} for entry in results]
     except Exception as e:
         log.error("mcp.catalog.search.error", {"error": str(e)})
         raise HTTPException(status_code=500, detail=str(e))
@@ -1477,7 +1549,7 @@ async def get_catalog_entry(server_id: str):
         entry = catalog.get_entry(server_id)
         if not entry:
             raise HTTPException(status_code=404, detail=f"Catalog entry not found: {server_id}")
-        return entry.to_dict()
+        return {**entry.to_dict(), "group": normalize_mcp_group(getattr(entry, "group", None))}
     except HTTPException:
         raise
     except Exception as e:
@@ -1528,6 +1600,9 @@ async def auto_setup_catalog(_admin: object = Depends(require_admin)):
             if not config:
                 continue
             config["enabled"] = False
+            group = normalize_mcp_group(getattr(entry, "group", None))
+            if group is not None:
+                config["group"] = group
             ConfigWriter.add_mcp_server(entry.id, config)
             configured.append(entry.id)
 
@@ -1593,6 +1668,12 @@ async def install_from_catalog(request: CatalogInstallRequest, _admin: object = 
             )
 
         config["enabled"] = bool(request.enabled)
+        if ConfigWriter.get_mcp_server(request.server_id) is None:
+            # Only first installation seeds the directory default. Existing
+            # instance overrides/clears are preserved by the native writers.
+            group = normalize_mcp_group(getattr(entry, "group", None))
+            if group is not None:
+                config["group"] = group
 
         if request.enabled:
             # Connect immediately only when the caller explicitly enables the
@@ -1621,12 +1702,15 @@ async def install_from_catalog(request: CatalogInstallRequest, _admin: object = 
             raise
 
         log.info("mcp.catalog.installed", {"server_id": request.server_id})
+        saved_config = ConfigWriter.get_mcp_server(request.server_id)
+        response_config = dict(saved_config if isinstance(saved_config, dict) else config)
+        response_config["group"] = _effective_mcp_group(request.server_id, response_config)
 
         return {
             "success": True,
             "server_id": request.server_id,
             "name": entry.name,
-            "config": config,
+            "config": response_config,
             "message": (
                 f"Added {entry.name} to configuration and enabled it"
                 if request.enabled

@@ -36,6 +36,7 @@ log = Log.create(service="tool.device.manage_tool")
 
 @ToolRegistry.register_function(
     name="device_manage",
+    group="系统管理",
     description=(
         "管理已接入安全设备。action=list 用于列出机房、设备、device_id 和工具集；"
         "action=list_templates 用于列出已有设备模板、安装状态和配置字段；"

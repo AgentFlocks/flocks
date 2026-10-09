@@ -9,7 +9,7 @@ with ``info`` so clients that only act on ``properties.info`` see it too.
 
 import pytest
 
-from flocks.auth.context import AuthUser
+from flocks.auth.context import AuthUser, reset_current_auth_user, set_current_auth_user
 from flocks.bus.bus import Bus
 from flocks.bus.events import SessionCreated, SessionDeleted
 from flocks.server.routes import event as event_routes
@@ -90,11 +90,24 @@ async def test_session_deleted_reaches_sse_even_though_the_row_is_gone(
 
     monkeypatch.setattr(event_routes, "_get_event_session", _get_event_session)
     queue = await broadcaster.subscribe(owner)
+    stranger = AuthUser(id="user-stranger", username="stranger", role="member")
+    stranger_queue = await broadcaster.subscribe(stranger)
+    admin = AuthUser(id="user-admin", username="admin", role="admin")
+    admin_queue = await broadcaster.subscribe(admin)
 
-    await Bus.publish(SessionDeleted, {"sessionID": "session-gone"})
+    # Deletion happens in the deleting user's request context.
+    token = set_current_auth_user(owner)
+    try:
+        await Bus.publish(SessionDeleted, {"sessionID": "session-gone"})
+    finally:
+        reset_current_auth_user(token)
 
+    expected = [{"type": "session.deleted", "properties": {"info": {"id": "session-gone"}}}]
     deleted = [e for e in _drain(queue) if e["type"] == "session.deleted"]
-    assert deleted == [{"type": "session.deleted", "properties": {"info": {"id": "session-gone"}}}]
+    assert deleted == expected
+    assert [e for e in _drain(admin_queue) if e["type"] == "session.deleted"] == expected
+    # No broadcast: other members never learn about the deleted session id.
+    assert not [e for e in _drain(stranger_queue) if e["type"] == "session.deleted"]
 
 
 @pytest.mark.asyncio

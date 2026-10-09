@@ -1,4 +1,5 @@
 name: qingteng_risk
+group: EDR/HIDS
 description: >
   青藤风险发现分组工具。通过 `action` 参数访问补丁、风险项、弱密码、Web 风险文件、
   漏洞检测和漏洞作业管理相关接口。

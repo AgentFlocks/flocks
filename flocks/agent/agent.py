@@ -16,7 +16,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Literal, Optional
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic_core import PydanticCustomError
 
 from flocks.permission import Ruleset
 
@@ -100,6 +101,20 @@ class AvailableWorkflow:
 # Core agent configuration model
 # ---------------------------------------------------------------------------
 
+def normalize_agent_group(value: Any) -> str:
+    """Validate the optional display group on an agent's own definition."""
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        raise PydanticCustomError("group_type", "group must be a string or null")
+    value = value.strip()
+    if any(ord(char) < 32 or ord(char) == 127 for char in value):
+        raise PydanticCustomError("group_control", "group must not contain control characters")
+    if len(value) > 32:
+        raise PydanticCustomError("group_length", "group must be at most 32 characters")
+    return value
+
+
 class AgentInfo(BaseModel):
     """
     Complete agent configuration.
@@ -114,6 +129,9 @@ class AgentInfo(BaseModel):
     # Chinese display name for localized UI. The canonical ``name`` remains the
     # stable identifier used by tools, routing, storage, and @mentions.
     name_cn: Optional[str] = None
+    group: Optional[str] = None
+    # Computed from the selected definition's package-anchored source, not native.
+    group_readonly: bool = False
     description: Optional[str] = None
     # Chinese UI label; English ``description`` is used for delegation prompts / tooling.
     description_cn: Optional[str] = None
@@ -159,6 +177,8 @@ class AgentInfo(BaseModel):
     # e.g. ["security"] marks an agent as cybersecurity-domain relevant,
     # which the Web UI uses to decide whether to surface the agent.
     tags: List[str] = Field(default_factory=list)
+
+    _validate_group = field_validator("group", mode="before")(normalize_agent_group)
 
     @model_validator(mode="after")
     def _derive_delegatable(self) -> "AgentInfo":

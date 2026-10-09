@@ -1,4 +1,5 @@
 name: tdp_log_search
+group: NDR
 description: >
   查询 TDP 日志调查/告警相关接口。默认执行日志搜索，也可通过 action 切换到字段聚合统计。
 category: custom

@@ -232,6 +232,8 @@ class StepStartPart(BaseModel):
     messageID: str = Field(..., description="Message ID")
     type: Literal["step-start"] = "step-start"
     snapshot: Optional[str] = Field(None, description="Snapshot ID")
+    # Optional model-stream activity. Legacy step markers have no timing.
+    time: Optional[PartTime] = None
 
 
 class StepFinishPart(BaseModel):
@@ -1062,7 +1064,18 @@ class Message:
         )
         if end is None and start is not None:
             end = start
-        return {"start": int(start), "end": int(end) if end is not None else None}
+        normalized: Dict[str, Optional[int]] = {
+            "start": int(start),
+            "end": int(end) if end is not None else None,
+        }
+        # ``compacted`` is the only marker prune() leaves on a tool result (the
+        # output text stays in storage), so dropping it here would send the
+        # full output back to the LLM after the next cache load.  Only keep a
+        # real timestamp: tool-state ``time`` is ``Dict[str, int]``.
+        compacted = time_info.get("compacted")
+        if isinstance(compacted, int) and not isinstance(compacted, bool) and compacted > 0:
+            normalized["compacted"] = compacted
+        return normalized
 
     @classmethod
     def _normalize_tool_state(
@@ -1103,6 +1116,10 @@ class Message:
                 if isinstance(raw_time, dict)
                 else fallback_time
             )
+            # A modern running interval is intentionally open. Synthesizing
+            # end=start on reload freezes its live process-duration clock.
+            if isinstance(raw_time, dict) and isinstance(raw_time.get("start"), int) and raw_time.get("end") is None:
+                normalized["time"].pop("end", None)
         elif status == "completed":
             normalized.setdefault("input", {})
             normalized.setdefault("output", "")

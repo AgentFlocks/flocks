@@ -29,31 +29,6 @@ from flocks.utils.log import Log
 log = Log.create(service="tool.delegate_task")
 
 
-async def _run_subagent_with_hooks(
-    *,
-    ctx: ToolContext,
-    child_session_id: str,
-    child_agent: str,
-    workspace: str,
-    prompt: str,
-    description: str,
-    resumed: bool,
-    provider_id: Optional[str] = None,
-    model_id: Optional[str] = None,
-    callbacks: Optional[Any] = None,
-) -> Any:
-    """Run one child session and surface terminal outcome to caller."""
-    try:
-        return await SessionLoop.run(
-            child_session_id,
-            provider_id=provider_id,
-            model_id=model_id,
-            callbacks=callbacks,
-        )
-    except asyncio.CancelledError:
-        raise
-
-
 async def _subagent_session_permissions(agent_name: str) -> list:
     """Build session permission rules for a delegated subagent."""
     from flocks.agent.registry import Agent
@@ -105,59 +80,6 @@ def _parse_model(model: Optional[str]) -> Optional[Dict[str, str]]:
     return {"modelID": model}
 
 
-async def _find_completed_delegate(
-    session_id: str,
-    current_message_id: str,
-    agent_key: Optional[str],
-    description: str,
-    *,
-    prompt: str,
-    model: Optional[str] = None,
-    load_skills: Optional[list[str]] = None,
-) -> Optional[ToolResult]:
-    """Reuse identical completed work only within the current user turn."""
-    try:
-        from flocks.session.message import ToolPart
-        messages = await Message.list(session_id)
-        for msg in reversed(messages):
-            if msg.id == current_message_id:
-                continue
-            if msg.role == MessageRole.USER:
-                break
-            parts = await Message.parts(msg.id, session_id)
-            for p in parts:
-                if not isinstance(p, ToolPart):
-                    continue
-                if p.tool != "delegate_task":
-                    continue
-                state = p.state
-                if getattr(state, "status", None) != "completed":
-                    continue
-                inp = getattr(state, "input", {})
-                prev_key = inp.get("subagent_type")
-                if (
-                    prev_key == agent_key
-                    and inp.get("description") == description
-                    and inp.get("prompt") == prompt
-                    and inp.get("model") == model
-                    and (inp.get("load_skills") or []) == (load_skills or [])
-                ):
-                    output = getattr(state, "output", "")
-                    if isinstance(output, dict):
-                        import json as _json
-                        output = _json.dumps(output, ensure_ascii=False)
-                    meta = getattr(state, "metadata", {}) or {}
-                    return ToolResult(
-                        success=True,
-                        output=f"[Already completed — returning previous result]\n\n{output}",
-                        title=description,
-                        metadata=meta,
-                    )
-    except Exception as exc:
-        log.debug("delegate_task.dedup_check_failed", {"error": str(exc)})
-    return None
-
-
 async def _resolve_skill_content(skill_names: List[str]) -> Dict[str, Any]:
     skill_names = [str(name).strip() for name in (skill_names or []) if str(name).strip()]
     if len(skill_names) == 0:
@@ -190,7 +112,6 @@ def _derive_task_description(
     description: Optional[str],
     prompt: str,
     subagent_type: Optional[str] = None,
-    session_id: Optional[str] = None,
 ) -> str:
     normalized = " ".join((description or "").split())
     if normalized:
@@ -202,8 +123,6 @@ def _derive_task_description(
 
     if subagent_type:
         return f"delegate to {subagent_type}"
-    if session_id:
-        return f"continue task {session_id}"
     return "delegate task"
 
 
@@ -225,22 +144,24 @@ work that requires continuous coordination in the current context.
 Usage notes:
 - Provide a clear description (3-5 words)
 - Provide detailed prompt with context
-- Pass session_id to continue a previous agent with full context
-- Background subagent execution is disabled. Do not set run_in_background=true.
-- Foreground execution is always used: the tool waits for completion and returns results inline.
-- For independent parallel work needed this turn, emit multiple sibling
-  foreground delegate_task tool calls in the same assistant response.
-  The runtime executes them concurrently and the webui renders each as its
-  own DelegateTaskCard.
+- Every call creates an independent child session, even for the same agent or prompt.
+- Interactive calls return the child session ID immediately; the child keeps running.
+- Continue your own work. Call sleep only when you need an agent message or result.
+- Use send_to_session(session_id=..., content=...) for corrections and follow-ups.
+- Children use the same tool to report intermediate results to their parent.
+- A final result is delivered automatically. Reports do not require acknowledgement.
+- Workflow and direct program callers still receive results synchronously.
+- Do not pass run_in_background; interactive delegation is already asynchronous.
 
 REQUIRED: prompt.
 LOAD_SKILLS is optional and defaults to [].
 DESCRIPTION is optional and will be auto-derived when omitted.
-SUBAGENT_TYPE is required for new tasks. Omit it only when session_id continues an existing task.
+SUBAGENT_TYPE is required.
 """
 
 @ToolRegistry.register_function(
     name="delegate_task",
+    group="代理协作",
     description=DESCRIPTION,
     category=ToolCategory.SYSTEM,
     native=True,
@@ -267,14 +188,8 @@ SUBAGENT_TYPE is required for new tasks. Omit it only when session_id continues 
         ToolParameter(
             name="subagent_type",
             type=ParameterType.STRING,
-            description="Delegatable agent name. Required for new tasks; omit when continuing with session_id.",
-            required=False,
-        ),
-        ToolParameter(
-            name="session_id",
-            type=ParameterType.STRING,
-            description="Existing task session to continue",
-            required=False,
+            description="Delegatable agent name. Each call creates a new session.",
+            required=True,
         ),
         ToolParameter(
             name="command",
@@ -300,7 +215,6 @@ async def delegate_task_tool(
     # also protects direct in-process callers that bypass the registry.
     run_in_background: bool = False,
     subagent_type: Optional[str] = None,
-    session_id: Optional[str] = None,
     command: Optional[str] = None,
     model: Optional[str] = None,
 ) -> ToolResult:
@@ -308,9 +222,7 @@ async def delegate_task_tool(
         return ToolResult(
             success=False,
             error=(
-                "Background subagent execution is disabled. "
-                "Use foreground delegate_task calls; emit multiple sibling calls "
-                "in the same assistant turn for parallel work."
+                "Omit run_in_background; interactive delegation is already asynchronous."
             ),
         )
 
@@ -318,9 +230,23 @@ async def delegate_task_tool(
         return ToolResult(success=False, error="prompt is required")
 
     load_skills = [str(name).strip() for name in (load_skills or []) if str(name).strip()]
-    description = _derive_task_description(description, prompt, subagent_type, session_id)
-    if not subagent_type and not session_id:
-        return ToolResult(success=False, error="Must provide either subagent_type or session_id.")
+    description = _derive_task_description(description, prompt, subagent_type)
+    if not subagent_type:
+        return ToolResult(success=False, error="subagent_type is required")
+
+    interactive = bool(ctx.extra.get("agent_execution_session")) and not ctx.extra.get("workflow_context")
+    from flocks.session.agent_inbox import AgentInbox
+    # Inbox generation of the execution making this call: pinned by the step
+    # before any await of the tool pipeline, else taken before the first await
+    # here. Once it is closed that execution is over, so the child must not
+    # start (checked again right before it is submitted).
+    parent_inbox = (ctx.extra.get("agent_inbox") or AgentInbox.get(ctx.session_id)) if interactive else None
+
+    def execution_ended() -> bool:
+        return ctx.aborted or (parent_inbox is not None and parent_inbox.stopped)
+
+    if execution_ended():  # nobody is waiting for this call: no permission prompt
+        return ToolResult(success=False, error="Execution stopped")
 
     await ctx.ask(
         permission="delegate_task",
@@ -332,20 +258,8 @@ async def delegate_task_tool(
         },
     )
 
-    # Reuse identical work only within this user turn.
-    if not session_id:
-        agent_key = subagent_type
-        prev = await _find_completed_delegate(
-            ctx.session_id, ctx.message_id, agent_key, description,
-            prompt=prompt, model=model, load_skills=load_skills,
-        )
-        if prev is not None:
-            log.info("delegate_task.dedup_hit", {
-                "session_id": ctx.session_id,
-                "agent_key": agent_key,
-                "description": description,
-            })
-            return prev
+    if execution_ended():
+        return ToolResult(success=False, error="Execution stopped")
 
     skill_result = await _resolve_skill_content(load_skills)
     if skill_result["error"]:
@@ -353,41 +267,6 @@ async def delegate_task_tool(
 
     explicit_model = _parse_model(model)
     agent_to_use: Optional[str] = None
-
-    if session_id:
-        # Sync continuation
-        session = await Session.get_by_id(session_id)
-        if not session:
-            return ToolResult(success=False, error=f"Session {session_id} not found")
-        await Message.create(
-            session_id=session.id,
-            role=MessageRole.USER,
-            content=prompt,
-            agent=session.agent or ctx.agent,
-        )
-        from flocks.session.session_loop import LoopCallbacks
-
-        result = await _run_subagent_with_hooks(
-            ctx=ctx,
-            child_session_id=session.id,
-            child_agent=session.agent or ctx.agent,
-            workspace=getattr(session, "directory", None) or "",
-            prompt=prompt,
-            description=description,
-            resumed=True,
-            provider_id=(explicit_model or {}).get("providerID"),
-            model_id=(explicit_model or {}).get("modelID"),
-            callbacks=LoopCallbacks(
-                event_publish_callback=ctx.event_publish_callback,
-            ),
-        )
-        ctx.metadata({"title": f"Continue: {description}", "metadata": {"sessionId": session.id}})
-        return await format_sync_subagent_result(
-            description=description,
-            session_id=session.id,
-            loop_result=result,
-            metadata={"sessionId": session.id},
-        )
 
     if subagent_type:
         # 使用轻量级元数据查询，避免循环依赖
@@ -405,7 +284,6 @@ async def delegate_task_tool(
     system_content = "\n\n".join(system_parts) if system_parts else ""
     full_prompt = f"{system_content}\n\n{prompt}" if system_content else prompt
 
-    # Sync execution
     parent_session = await Session.get_by_id(ctx.session_id)
     if not parent_session:
         return ToolResult(success=False, error="Parent session not found")
@@ -439,8 +317,13 @@ async def delegate_task_tool(
         "agent_type": agent_to_use,
     }
 
-    async def _run_child_effect() -> dict[str, Any]:
+    async def _run_child_effect() -> ToolResult:
         created = await Session.create(**create_kwargs)
+        child_inbox = AgentInbox.get(created.id) if interactive else None
+        if child_inbox:
+            # Known before the child's loop starts, so stopping only the
+            # subagents of the parent also reaches a child still queued.
+            child_inbox.category = created.category
         child_payload["child_session_id"] = created.id
         try:
             from flocks.session.execution_profile import upsert_session_execution_profile
@@ -458,10 +341,15 @@ async def delegate_task_tool(
             pass
         if ctx.extra.get("workflow_temp_parent") is True:
             ctx.extra["workflow_child_session_created"] = True
+        collaboration_prompt = (
+            f"Your session ID: {created.id}. Parent session ID: {ctx.session_id}. "
+            "Use send_to_session to report useful intermediate results while continuing your work.\n\n"
+            + full_prompt
+        ) if interactive else full_prompt
         await Message.create(
             session_id=created.id,
             role=MessageRole.USER,
-            content=full_prompt,
+            content=collaboration_prompt,
             agent=agent_to_use,
         )
 
@@ -499,25 +387,43 @@ async def delegate_task_tool(
                     )
             except Exception:
                 pass
-        loop_result = await _run_subagent_with_hooks(
-            ctx=ctx,
-            child_session_id=created.id,
-            child_agent=agent_to_use,
-            workspace=runtime_directory,
-            prompt=full_prompt,
-            description=description,
-            resumed=False,
-            provider_id=(explicit_model or {}).get("providerID"),
-            model_id=(explicit_model or {}).get("modelID"),
-            callbacks=forwarder.build_callbacks(
-                event_publish_callback=ctx.event_publish_callback,
-            ),
-        )
-        return {
-            "loop_result": loop_result,
-            "child_session_id": created.id,
-            "metadata": dict(forwarder.final_metadata),
-        }
+        async def execute_child():
+            if ctx.aborted or (parent_inbox and parent_inbox.stopped) or (child_inbox and child_inbox.stopped):
+                raise asyncio.CancelledError()
+            loop_result = await SessionLoop.run(
+                created.id, provider_id=(explicit_model or {}).get("providerID"),
+                model_id=(explicit_model or {}).get("modelID"),
+                callbacks=forwarder.build_callbacks(event_publish_callback=ctx.event_publish_callback),
+            )
+            if interactive and loop_result.action != "stop":
+                raise RuntimeError(loop_result.error or "Child did not complete")
+            return await format_sync_subagent_result(
+                description=description, session_id=created.id, loop_result=loop_result,
+                metadata=forwarder.final_metadata,
+            )
+
+        if interactive:
+            from flocks.session.delegated_execution import start_child
+            # A stopped parent inbox means the execution that made this call
+            # is over; start_child would bind the inbox's next generation and
+            # the child's result would wake the parent again.
+            if execution_ended():
+                raise asyncio.CancelledError()
+
+            async def execute_with_child_hooks():
+                return await execute_with_hooks(
+                    child_payload, execute_child,
+                    before=HookPipeline.run_subagent_before, after=HookPipeline.run_subagent_after,
+                )
+
+            start_child(ctx, created.id, agent_to_use, execute_with_child_hooks)
+            return ToolResult(success=True, title=description,
+                output={"status": "submitted", "child_session_id": created.id},
+                metadata={"sessionId": created.id, "submitted": True, "status": "running"})
+        return await execute_child()
+
+    if interactive:
+        return await _run_child_effect()
 
     result = await execute_with_hooks(
         child_payload,
@@ -525,17 +431,6 @@ async def delegate_task_tool(
         before=HookPipeline.run_subagent_before,
         after=HookPipeline.run_subagent_after,
     )
-    child_session_id = str(result.get("child_session_id") or "")
-    final_metadata = dict(result.get("metadata") or {})
-    tool_result = await format_sync_subagent_result(
-        description=description,
-        session_id=child_session_id,
-        loop_result=result["loop_result"],
-        metadata=final_metadata,
-    )
-    result_status = (
-        "interrupted" if tool_result.metadata.get("status") == "interrupted"
-        else "completed" if tool_result.success else "error"
-    )
-    ctx.metadata({"title": description, "metadata": {**final_metadata, "status": result_status}})
-    return tool_result
+    ctx.metadata({"title": description, "metadata": {
+        **result.metadata, "status": result.metadata.get("status") or ("completed" if result.success else "error")}})
+    return result

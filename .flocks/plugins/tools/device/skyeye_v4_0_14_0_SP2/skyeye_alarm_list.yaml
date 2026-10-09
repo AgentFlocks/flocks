@@ -1,4 +1,5 @@
 name: skyeye_alarm_list
+group: NDR
 description: >
   查询 SkyEye 告警列表。默认返回最近 7 天的告警，可按告警类型、API 威胁类型、
   威胁级别、攻击结果、攻击阶段、资产组、攻击组织、IOC、资产标签和分页排序等条件过滤。

@@ -33,6 +33,7 @@ import {
 import LoadingSpinner from '@/components/common/LoadingSpinner';
 import { TodoList } from '@/components/common/TodoList';
 import { extractErrorMessage } from '@/utils/error';
+import SessionDatasetSection from './SessionDatasetSection';
 
 interface PreviewState {
   node: WorkspaceNode;
@@ -606,6 +607,9 @@ export default function SessionContextPanel({
                 </div>
               </Section>
             )}
+            <section aria-label={t('context.settings')}>
+              <SessionDatasetSection sessionId={sessionId} />
+            </section>
           </>
         )}
       </div>

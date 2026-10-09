@@ -1,4 +1,5 @@
 name: ngsoc
+group: SIEM
 vendor: qianxin
 service_id: ngsoc_api
 version: "4.15.1"

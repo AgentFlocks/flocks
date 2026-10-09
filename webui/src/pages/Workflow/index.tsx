@@ -19,6 +19,8 @@ import { useTranslation } from 'react-i18next';
 import PageHeader from '@/components/common/PageHeader';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
 import EmptyState from '@/components/common/EmptyState';
+import { useToast } from '@/components/common/Toast';
+import PluginGroupButton from '@/components/plugin-groups/PluginGroupButton';
 import { useWorkflows } from '@/hooks/useWorkflow';
 import {
   WorkflowCapabilityState,
@@ -27,17 +29,24 @@ import {
   WorkflowTriggerType,
 } from '@/api/workflow';
 import { getWorkflowDisplayName } from '@/utils/workflowDisplay';
+import GroupNav, { useGroupDrag, type GroupDrag } from '@/components/plugin-groups/GroupNav';
+import { deriveGroupNav, matchesGroup, saveGroupItems, type GroupSelection } from '@/components/plugin-groups/groupView';
+import PluginViewToggle from '@/components/plugin-groups/PluginViewToggle';
+import { usePluginViewMode, type PluginViewMode } from '@/hooks/usePluginViewMode';
+import { workflowAPI } from '@/api/workflow';
 
 function isBuiltin(workflow: WorkflowSummary): boolean {
   return workflow.source === 'project';
 }
 
 // ---------------------------------------------------------------------------
-// Types
+// Constants
 // ---------------------------------------------------------------------------
 
-type SourceFilter = 'all' | 'builtin' | 'custom';
 const PAGE_SIZE = 12;
+// Columns follow the section's own width (the group nav already takes part of
+// the viewport), so cards never shrink below the width their header row needs.
+const CARD_GRID_CLASS = 'grid gap-3 grid-cols-[repeat(auto-fill,minmax(min(20rem,100%),1fr))]';
 const MAX_VISIBLE_TRIGGER_STATUSES = 2;
 const STATUS_TOOLTIP_WIDTH = 224;
 const STATUS_TOOLTIP_MAX_HEIGHT = 240;
@@ -83,12 +92,37 @@ const CAPABILITY_DETAIL_LABEL_KEYS = {
 // ---------------------------------------------------------------------------
 
 export default function WorkflowPage() {
-  const { t } = useTranslation('workflow');
+  const { t, i18n } = useTranslation('workflow');
   const navigate = useNavigate();
   const { workflows, loading, error, refetch } = useWorkflows();
   const [refreshing, setRefreshing] = useState(false);
   const [refreshDone, setRefreshDone] = useState(false);
-  const [sourceFilter, setSourceFilter] = useState<SourceFilter>('all');
+  const [viewMode, setViewMode] = usePluginViewMode('workflow', 'cards');
+  const [groupSelection, setGroupSelection] = useState<GroupSelection>(null);
+  const asGroupItem = (workflow: WorkflowSummary) => ({
+    key: workflow.id, name: getWorkflowDisplayName(workflow, i18n?.language), group: workflow.group,
+    readOnlyReason: workflow.group_readonly ? t('pluginGroups:readOnly.system') : undefined,
+  });
+  const groupItems = workflows.map(asGroupItem);
+  const { warning } = useToast();
+  const groupDrag = useGroupDrag(groupItems, warning);
+  const saveGroup = (id: string, group: string | null) => workflowAPI.update(id, { group });
+  const reloadGroups = () => refetch({ silent: true, rejectOnError: true });
+  const loadGroupItems = async () => (await workflowAPI.listSummaries()).data.map(asGroupItem);
+  const moveGroup = async (key: string, group: string | null) => {
+    const inventory = await loadGroupItems();
+    await saveGroupItems(inventory.filter((item) => item.key === key), group, saveGroup, reloadGroups, t);
+  };
+  const createGroup = async (key: string, group: string) => {
+    const inventory = await loadGroupItems();
+    if (inventory.some((item) => matchesGroup(item.group, group))) throw new Error(t('pluginGroups:validation.duplicate'));
+    await saveGroupItems(inventory.filter((item) => item.key === key), group, saveGroup, reloadGroups, t);
+  };
+  const changeGroup = async (from: string, to: string | null) => {
+    const inventory = await loadGroupItems();
+    if (to !== null && inventory.some((item) => matchesGroup(item.group, to))) throw new Error(t('pluginGroups:validation.duplicate'));
+    await saveGroupItems(inventory.filter((item) => matchesGroup(item.group, from)), to, saveGroup, reloadGroups, t, true);
+  };
 
   const openFreshCreate = () => {
     navigate('/workflows/new', {
@@ -99,19 +133,27 @@ export default function WorkflowPage() {
     });
   };
 
-  const builtinWorkflows = useMemo(() => workflows.filter(isBuiltin), [workflows]);
-  const customWorkflows  = useMemo(() => workflows.filter(w => !isBuiltin(w)), [workflows]);
+  // The group nav is the only filter; built-in / custom is expressed by the
+  // sections themselves, so their counts always match the cards shown.
+  const groupWorkflows   = useMemo(
+    () => workflows.filter((workflow) => matchesGroup(workflow.group, groupSelection)),
+    [workflows, groupSelection],
+  );
+  const builtinWorkflows = useMemo(() => groupWorkflows.filter(isBuiltin), [groupWorkflows]);
+  const customWorkflows  = useMemo(() => groupWorkflows.filter(w => !isBuiltin(w)), [groupWorkflows]);
 
   const handleRefresh = async () => {
     if (refreshing) return;
     try {
       setRefreshing(true);
       await Promise.all([
-        refetch(),
+        reloadGroups(),
         new Promise((r) => setTimeout(r, 600)),
       ]);
       setRefreshDone(true);
       setTimeout(() => setRefreshDone(false), 2000);
+    } catch {
+      // The native list hook surfaces the error while retaining the last inventory.
     } finally {
       setRefreshing(false);
     }
@@ -125,7 +167,7 @@ export default function WorkflowPage() {
     );
   }
 
-  if (error) {
+  if (error && workflows.length === 0) {
     return (
       <div className="flex items-center justify-center h-full">
         <div className="text-center">
@@ -141,15 +183,8 @@ export default function WorkflowPage() {
     );
   }
 
-  const filterChips: { key: SourceFilter; label: string; count: number }[] = [
-    { key: 'all',     label: t('filter.all'),     count: workflows.length },
-    { key: 'builtin', label: t('filter.builtin'), count: builtinWorkflows.length },
-    { key: 'custom',  label: t('filter.custom'),  count: customWorkflows.length },
-  ];
-
-  const showBuiltin = sourceFilter !== 'custom' && builtinWorkflows.length > 0;
-  const showCustom  = sourceFilter !== 'builtin' && customWorkflows.length > 0;
-  const isEmpty     = !showBuiltin && !showCustom;
+  const showBuiltin = builtinWorkflows.length > 0;
+  const showCustom  = customWorkflows.length > 0;
 
   return (
     <div className="h-full flex flex-col">
@@ -157,53 +192,15 @@ export default function WorkflowPage() {
         title={t('pageTitle')}
         description={t('pageDescription')}
         icon={<WorkflowIcon aria-hidden="true" className="w-8 h-8" />}
-        // Refresh / create actions intentionally moved to the toolbar below so
-        // the page header stays uniform with Skill/Agent pages and the
-        // segmented source filter shares a row with its primary actions.
+        // Refresh / create actions intentionally live in the toolbar below so
+        // the page header stays uniform with Skill/Agent pages.
       />
 
+      {error && <p role="alert" className="px-4 py-2 text-sm text-danger">{error}</p>}
       {/* Toolbar */}
-      {/* min-w-0 + overflow-x-auto on the filter: at phone widths the three chips
-          would otherwise squeeze the actions column and wrap the create button
-          character by character. */}
       <div className="px-4 py-2 border-b border-line flex flex-wrap items-center gap-3 min-w-0">
-        {/* Source filter — same segmented-control style as Skill / Agent pages.
-            flex-auto keeps the chips on one full-width row (actions wrap below
-            them on phones); the scroll container only kicks in below ~300px. */}
-        <div className="min-w-0 flex-auto overflow-x-auto">
-        <div
-          role="tablist"
-          aria-label={t('filter.aria')}
-          className="inline-flex items-center rounded-control border border-line bg-surface p-0.5 text-xs"
-        >
-          {filterChips.map((chip, idx) => {
-            const active = chip.key === sourceFilter;
-            return (
-              <button
-                key={chip.key}
-                type="button"
-                role="tab"
-                aria-selected={active}
-                onClick={() => setSourceFilter(chip.key)}
-                className={`px-2.5 py-1 rounded-control transition-colors whitespace-nowrap ${
-                  active
-                    ? 'bg-selected text-fg'
-                    : 'text-fg-muted hover:text-fg-secondary hover:bg-selected'
-                } ${idx > 0 ? 'ml-0.5' : ''}`}
-              >
-                <span>{chip.label}</span>
-                <span className={`ml-1.5 inline-block min-w-[1.25rem] px-1 rounded-tag text-xs tabular-nums ${
-                  active ? 'bg-surface' : 'bg-subtle text-fg-muted'
-                }`}>
-                  {chip.count}
-                </span>
-              </button>
-            );
-          })}
-        </div>
-        </div>
-
         <div className="ml-auto flex items-center gap-2 shrink-0">
+          <PluginViewToggle value={viewMode} onChange={setViewMode} />
           <button
             onClick={handleRefresh}
             disabled={refreshing}
@@ -228,10 +225,12 @@ export default function WorkflowPage() {
 
       {/* Content */}
       <div
-        className="flex-1 overflow-y-auto px-4 py-4 space-y-6"
+        className="flex-1 min-h-0 overflow-y-auto px-4 py-4 flex flex-col gap-4 md:flex-row"
         style={{ scrollbarGutter: 'stable' }}
       >
-        {isEmpty ? (
+        <GroupNav inventoryComplete={!loading && !error} preferenceKey="workflow" {...deriveGroupNav(groupItems)} items={groupItems} selection={groupSelection} onSelect={setGroupSelection} onMove={moveGroup} onCreate={createGroup} onRename={changeGroup} onDelete={(name) => changeGroup(name, null)} {...groupDrag} />
+        <div className="min-w-0 flex-1 space-y-6">
+        {workflows.length === 0 ? (
           <EmptyState
             icon={<WorkflowIcon aria-hidden="true" className="w-8 h-8" />}
             title={t('emptyState.title')}
@@ -253,6 +252,9 @@ export default function WorkflowPage() {
                 title={t('section.custom')}
                 icon={<IconFolderOpen aria-hidden="true" className="w-4 h-4" />}
                 workflows={customWorkflows}
+                groupSelection={groupSelection}
+                groupDrag={groupDrag}
+                viewMode={viewMode}
               />
             )}
             {showBuiltin && (
@@ -260,10 +262,17 @@ export default function WorkflowPage() {
                 title={t('section.builtin')}
                 icon={<IconSparkles aria-hidden="true" className="w-4 h-4" />}
                 workflows={builtinWorkflows}
+                groupSelection={groupSelection}
+                groupDrag={groupDrag}
+                viewMode={viewMode}
               />
+            )}
+            {!showCustom && !showBuiltin && (
+              <p className="py-4 text-xs text-fg-muted">{t('emptyState.title')}</p>
             )}
           </>
         )}
+        </div>
       </div>
     </div>
   );
@@ -277,16 +286,26 @@ function WorkflowSection({
   title,
   icon,
   workflows,
+  groupSelection,
+  groupDrag,
+  viewMode,
 }: {
   title: string;
   icon: React.ReactNode;
   workflows: WorkflowSummary[];
+  groupSelection: GroupSelection;
+  groupDrag: GroupDrag;
+  viewMode: PluginViewMode;
 }) {
   const [page, setPage] = useState(1);
   const totalPages = Math.max(1, Math.ceil(workflows.length / PAGE_SIZE));
+  // `workflows` is already narrowed to the selected group; restart paging on switch.
+  useEffect(() => { setPage(1); }, [groupSelection]);
 
+  // Functional update: this runs in the same commit as the reset above, and a
+  // plain setPage(totalPages) would override it with the stale page.
   useEffect(() => {
-    if (page > totalPages) setPage(totalPages);
+    if (page > totalPages) setPage((current) => Math.min(current, totalPages));
   }, [totalPages, page]);
 
   const displayed = workflows.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
@@ -311,9 +330,11 @@ function WorkflowSection({
 
       {/* Grid — min-height anchors layout to avoid jump when pagination hides rows */}
       <div style={{ minHeight: totalPages > 1 ? 540 : undefined }}>
-        <div className="grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+        <div className={viewMode === 'cards' ? CARD_GRID_CLASS : 'space-y-2'}>
           {displayed.map(workflow => (
-            <WorkflowCard key={workflow.id} workflow={workflow} />
+            <div key={workflow.id} className="min-w-0 [&>div]:h-full" {...groupDrag.dragProps(workflow.id)}>
+              <WorkflowCard workflow={workflow} layout={viewMode} grouping={groupDrag} />
+            </div>
           ))}
         </div>
       </div>
@@ -358,7 +379,7 @@ function WorkflowSection({
 // WorkflowCard
 // ---------------------------------------------------------------------------
 
-function WorkflowCard({ workflow }: { workflow: WorkflowSummary }) {
+function WorkflowCard({ workflow, grouping, layout = 'cards' }: { workflow: WorkflowSummary; grouping: GroupDrag; layout?: PluginViewMode }) {
   const { t, i18n } = useTranslation('workflow');
   const navigate = useNavigate();
   const builtin = isBuiltin(workflow);
@@ -382,9 +403,9 @@ function WorkflowCard({ workflow }: { workflow: WorkflowSummary }) {
   return (
     <div
       onClick={() => navigate(`/workflows/${workflow.id}`)}
-      className="group relative bg-surface rounded-card border border-line flex flex-col
+      className={`group relative bg-surface rounded-card border border-line flex flex-col
  overflow-hidden cursor-pointer transition-all duration-150
- hover:border-line-control"
+ hover:border-line-control ${layout === 'list' ? 'sm:flex-row' : ''}`}
     >
       {/* Card body */}
       <div className="flex-1 px-4 pt-3 pb-2 flex flex-col gap-2 min-w-0">
@@ -395,30 +416,37 @@ function WorkflowCard({ workflow }: { workflow: WorkflowSummary }) {
           </div>
 
           <div className="min-w-0 flex-1">
-            <span className="block text-sm font-semibold text-fg truncate ">
+            {/* Long names wrap to a second line instead of collapsing to "H…". */}
+            <span
+              title={displayName}
+              className="text-sm font-semibold text-fg line-clamp-2 break-words"
+            >
               {displayName}
             </span>
             <div className="flex items-center gap-1 mt-0.5 flex-wrap">
               {/* Source badge */}
               {builtin ? (
-                <span className="inline-flex items-center px-1.5 py-0.5 rounded-tag text-xs font-medium
+                <span className="inline-flex shrink-0 items-center whitespace-nowrap px-1.5 py-0.5 rounded-tag text-xs font-medium
  bg-info-soft text-info">
                   {t('badge.builtin')}
                 </span>
               ) : (
-                <span className="inline-flex items-center px-1.5 py-0.5 rounded-tag text-xs font-medium
+                <span className="inline-flex shrink-0 items-center whitespace-nowrap px-1.5 py-0.5 rounded-tag text-xs font-medium
  bg-data-soft text-data">
                   {t('badge.custom')}
                 </span>
               )}
               {/* Node count */}
-              <span className="text-xs text-fg-muted">
+              <span className="whitespace-nowrap text-xs text-fg-muted">
                 {workflow.nodeCount} {t('stats.nodes')}
               </span>
             </div>
           </div>
 
-          <IconChevronRight aria-hidden="true" className="w-4 h-4 text-fg-placeholder shrink-0 mt-1 group-hover:text-fg-muted transition-colors" />
+          <div className="flex shrink-0 items-center gap-1">
+            <PluginGroupButton grouping={grouping} itemKey={workflow.id} />
+            <IconChevronRight aria-hidden="true" className="w-4 h-4 text-fg-placeholder shrink-0 mt-1 group-hover:text-fg-muted transition-colors" />
+          </div>
         </div>
 
         {/* Description */}
@@ -458,7 +486,7 @@ function WorkflowCard({ workflow }: { workflow: WorkflowSummary }) {
       </div>
 
       {/* Stats footer — kept from original, cleaned to white bg */}
-      <div className="border-t border-line px-4 py-2.5 grid grid-cols-3 gap-2">
+      <div className={`border-t border-line px-4 py-2.5 grid grid-cols-3 gap-2 ${layout === 'list' ? 'sm:w-72 sm:shrink-0 sm:items-center sm:border-t-0 sm:border-l' : ''}`}>
         <div>
           <div className="text-base font-bold text-fg tabular-nums">
             {workflow.stats.callCount}

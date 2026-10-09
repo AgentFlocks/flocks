@@ -123,7 +123,6 @@ def test_replace_with_retry_reraises_after_exhausting_attempts(tmp_path, monkeyp
 def test_purge_stale_scratch_removes_leftovers(tmp_path):
     parent = tmp_path
     _make_tree(parent / ".soc_ui.55ram7wo" / "soc_overview", "stranded")
-    _make_tree(parent / ".soc_ui.bak" / "soc_dashboard", "stranded")
     _make_tree(parent / "soc_ui", "live")
     # Unrelated dot-dir for a different plugin must be left untouched.
     _make_tree(parent / ".other.bak", "keep")
@@ -131,7 +130,6 @@ def test_purge_stale_scratch_removes_leftovers(tmp_path):
     installer._purge_stale_scratch(parent, "soc_ui")
 
     assert not (parent / ".soc_ui.55ram7wo").exists()
-    assert not (parent / ".soc_ui.bak").exists()
     assert (parent / "soc_ui" / "manifest.json").read_text(encoding="utf-8") == "live"
     assert (parent / ".other.bak").exists()
 
@@ -154,3 +152,64 @@ def test_copy_package_purges_stale_scratch_before_staging(tmp_path):
     assert not (dst.parent / ".soc_ui.leftover").exists()
     # ``manifest.json`` is intentionally not copied by the installer.
     assert not (dst / "manifest.json").exists()
+
+
+def test_rollback_retains_open_writer_to_replacement(tmp_path):
+    import sys
+    if sys.platform == "win32":
+        pytest.skip("Windows prevents renaming directories with open file handles")
+    dst, old, recovery = tmp_path / "installed", tmp_path / "old", tmp_path / "failed"
+    _make_tree(dst, "new")
+    _make_tree(old, "old")
+    with (dst / "manifest.json").open("a") as writer:
+        installer._rollback_replacement(dst, old, recovery_root=recovery)
+        writer.write(" + edit after rollback")
+        writer.flush()
+    assert (dst / "manifest.json").read_text() == "old"
+    saved = list(recovery.glob("*/content/manifest.json"))
+    assert len(saved) == 1
+    assert saved[0].read_text() == "new + edit after rollback"
+    # A second rollback creates another container without altering the first.
+    installer._rollback_replacement(dst, None, recovery_root=recovery)
+    assert saved[0].read_text() == "new + edit after rollback"
+    assert len(list(recovery.glob("*/content/manifest.json"))) == 2
+
+
+def test_rollback_metadata_failure_keeps_both_trees(tmp_path, monkeypatch):
+    dst, old = tmp_path / "installed", tmp_path / "old"
+    _make_tree(dst, "new")
+    _make_tree(old, "old")
+    write = Path.write_text
+    def fail_metadata(path, *args, **kwargs):
+        if path.name == "recovery.json":
+            raise OSError("disk full writing recovery metadata")
+        return write(path, *args, **kwargs)
+    monkeypatch.setattr(Path, "write_text", fail_metadata)
+    with pytest.raises(OSError, match="disk full"):
+        installer._rollback_replacement(dst, old, recovery_root=tmp_path / "failed")
+    assert (dst / "manifest.json").read_text() == "new"
+    assert (old / "manifest.json").read_text() == "old"
+
+
+def test_rollback_restore_failure_preserves_both_trees(tmp_path, monkeypatch):
+    dst, old, recovery = tmp_path / "installed", tmp_path / "old", tmp_path / "failed"
+    _make_tree(dst, "new")
+    _make_tree(old, "old")
+    replace = installer._replace_with_retry
+    def fail_restore(src, target):
+        if src == old:
+            raise PermissionError("cannot restore original")
+        return replace(src, target)
+    monkeypatch.setattr(installer, "_replace_with_retry", fail_restore)
+    with pytest.raises(RuntimeError, match="current content preserved at"):
+        installer._rollback_replacement(dst, old, recovery_root=recovery)
+    assert (old / "manifest.json").read_text() == "old"
+    assert next(recovery.glob("*/content/manifest.json")).read_text() == "new"
+
+
+def test_rollback_missing_original_does_not_remove_current(tmp_path):
+    dst = tmp_path / "installed"
+    _make_tree(dst, "new")
+    with pytest.raises(RuntimeError, match="original directory is missing"):
+        installer._rollback_replacement(dst, tmp_path / "missing", recovery_root=tmp_path / "failed")
+    assert (dst / "manifest.json").read_text() == "new"

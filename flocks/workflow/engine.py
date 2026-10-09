@@ -52,6 +52,78 @@ _OBSERVABILITY_DICT_KEY_LIMIT = 50
 DEFAULT_PREVIEW_ITEMS_FOR_DICT = 3
 
 
+class _NodeRunTracker:
+    """Which node run each worker thread is executing, and whether it timed out.
+
+    A host-thread node that hits ``node_timeout_s`` cannot be killed: the
+    engine stops waiting, but the ``wf-node`` / ``wf-par`` thread keeps running
+    the node code, and with it any tool or ``llm.ask`` call in flight on the
+    workflow loop (a subagent session started by ``delegate_task`` keeps
+    consuming the provider's quota for minutes). The runtime's cancel checker
+    is polled from that same thread by ``run_sync_cancellable``, so a thread
+    whose current run is flagged ``timed_out`` cancels the in-flight future at
+    its next poll and unwinds the node. The run is bound thread-locally, so a
+    flag set after the node already finished can never hit a later node that
+    happens to reuse the same OS thread.
+    """
+
+    def __init__(self) -> None:
+        self._local = threading.local()
+        self._running: Set["_NodeRun"] = set()
+        self._lock = threading.Lock()
+
+    def bind(self, run: "_NodeRun") -> None:
+        self._local.run = run
+        with self._lock:
+            self._running.add(run)
+
+    def unbind(self, run: "_NodeRun") -> None:
+        self._local.run = None
+        with self._lock:
+            self._running.discard(run)
+
+    def current_thread_marked(self) -> bool:
+        run = getattr(self._local, "run", None)
+        return run is not None and run.timed_out
+
+    def active(self) -> bool:
+        """True while a timed-out node is still executing on some thread."""
+        with self._lock:
+            return any(run.timed_out for run in self._running)
+
+    def residual_checker(self, previous: Optional[Callable[[], bool]]) -> Callable[[], bool]:
+        """Checker left on the runtime after a run while timed-out nodes still unwind."""
+
+        def _residual() -> bool:
+            return self.current_thread_marked() or bool(previous and previous())
+
+        return _residual
+
+
+class _NodeRun:
+    """Bookkeeping for one node execution on a worker thread."""
+
+    __slots__ = ("timed_out",)
+
+    def __init__(self) -> None:
+        self.timed_out = False
+
+
+def _run_node_tracked(
+    tracker: _NodeRunTracker,
+    run: _NodeRun,
+    fn: Callable[..., _T],
+    *args: Any,
+    **kwargs: Any,
+) -> _T:
+    """Run *fn* on the current worker thread with *run* bound to the thread."""
+    tracker.bind(run)
+    try:
+        return fn(*args, **kwargs)
+    finally:
+        tracker.unbind(run)
+
+
 def _summarize_for_observability(value: Any, *, depth: int = 0) -> Any:
     """Return a bounded, non-retaining summary for logs and lightweight history."""
     if depth >= 2:
@@ -189,6 +261,9 @@ class WorkflowEngine:
     _depth: int = 0
     max_parallel_workers: int = 4
     workflow_loader: Optional[Callable[[str], "Workflow"]] = field(default=None, repr=False)
+    # Engine-scoped so a node that timed out in an earlier run() is still
+    # cancellable at its next poll, whichever checker a later run installs.
+    _timed_out_threads: _NodeRunTracker = field(default_factory=_NodeRunTracker, init=False, repr=False)
 
     def __post_init__(self) -> None:
         if self.max_steps <= 0:
@@ -277,6 +352,10 @@ class WorkflowEngine:
         if step_timeout_s is not None:
             timeout_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="wf-node")
         timeout_cancel_event = threading.Event()
+        # Host-thread nodes that timed out keep running on their worker thread;
+        # flagging their run makes the next tool / llm.ask cancel poll on that
+        # thread abort the in-flight call instead of letting it run to completion.
+        timed_out_threads = self._timed_out_threads
         previous_cancel_checker = None
         previous_enable_cancel_trace = None
         if isinstance(self.runtime, (PythonExecRuntime, SandboxPythonExecRuntime)):
@@ -284,17 +363,23 @@ class WorkflowEngine:
             previous_enable_cancel_trace = getattr(self.runtime, "enable_cancel_trace", None)
 
             def _runtime_cancel_requested() -> bool:
-                return timeout_cancel_event.is_set() or _run_deadline_exceeded() or bool(cancel and cancel())
+                return (
+                    timeout_cancel_event.is_set()
+                    or _run_deadline_exceeded()
+                    or timed_out_threads.current_thread_marked()
+                    or bool(cancel and cancel())
+                )
 
             self.runtime.cancel_checker = (
                 _runtime_cancel_requested
                 if step_timeout_s is not None or cancel is not None or run_deadline_s is not None
                 else None
             )
-            # A timeout-only checker is consumed by isolated-process RPC calls.
-            # Enabling sys.settrace for every ordinary workflow line would add
-            # a large steady-state cost; host-thread timeouts keep their legacy
-            # nonfatal, best-effort semantics.
+            # A timeout-only checker is consumed by isolated-process RPC calls
+            # and by the cancel polls inside tool / llm.ask calls. Enabling
+            # sys.settrace for every ordinary workflow line would add a large
+            # steady-state cost, so plain Python code in a timed-out host-thread
+            # node still runs until its next tool / LLM call or its end.
             if isinstance(self.runtime, PythonExecRuntime):
                 self.runtime.enable_cancel_trace = cancel is not None
         try:
@@ -478,9 +563,13 @@ class WorkflowEngine:
 
                     _exec_args = [(i, nid, nd, inp) for i, (nid, nd, inp, _) in enumerate(ready)]
                     _completed_idx: Set[int] = set()
+                    _node_runs: Dict[int, _NodeRun] = {a[0]: _NodeRun() for a in _exec_args}
                     _pool = ThreadPoolExecutor(max_workers=_pw, thread_name_prefix="wf-par")
                     try:
-                        _fut_map = {_pool.submit(_par_exec, a): a[0] for a in _exec_args}
+                        _fut_map = {
+                            _pool.submit(_run_node_tracked, timed_out_threads, _node_runs[a[0]], _par_exec, a): a[0]
+                            for a in _exec_args
+                        }
                         try:
                             for _fut in as_completed(_fut_map.keys(), timeout=step_timeout_s):
                                 _ci = _fut_map[_fut]
@@ -489,6 +578,7 @@ class WorkflowEngine:
                         except FuturesTimeoutError:
                             for _f2, _ci2 in _fut_map.items():
                                 if _ci2 not in _completed_idx:
+                                    _node_runs[_ci2].timed_out = True
                                     exec_results.append(
                                         _ExecOutcome(
                                             idx=_ci2,
@@ -510,9 +600,17 @@ class WorkflowEngine:
                     # ── Serial execution (preserves original behaviour) ───
                     for _idx, (_nid, _nd, _inp, _src) in enumerate(ready):
                         _t0 = time.perf_counter()
+                        _serial_run = _NodeRun()
                         try:
                             if step_timeout_s is not None and timeout_executor is not None:
-                                _sfut = timeout_executor.submit(self._execute_node, _nd, _inp)
+                                _sfut = timeout_executor.submit(
+                                    _run_node_tracked,
+                                    timed_out_threads,
+                                    _serial_run,
+                                    self._execute_node,
+                                    _nd,
+                                    _inp,
+                                )
                                 _outs, _so = _sfut.result(timeout=step_timeout_s)
                             else:
                                 _outs, _so = self._execute_node(_nd, _inp)
@@ -523,6 +621,8 @@ class WorkflowEngine:
                             _process_isolated = bool(_nd.process_isolated)
                             if _process_isolated:
                                 timeout_cancel_event.set()
+                            else:
+                                _serial_run.timed_out = True
                             _fte_msg = str(_fte).strip()
                             _err = _fte_msg if _fte_msg else f"节点执行超时 ({self.node_timeout_s}s)"
                             exec_results.append(
@@ -852,7 +952,13 @@ class WorkflowEngine:
                 except TypeError:
                     timeout_executor.shutdown(wait=False)
             if isinstance(self.runtime, (PythonExecRuntime, SandboxPythonExecRuntime)):
-                self.runtime.cancel_checker = previous_cancel_checker
+                if timed_out_threads.active():
+                    # Serial nodes read the checker off the shared runtime; a
+                    # timed-out one is still unwinding and must keep seeing its
+                    # mark so its next tool / llm.ask poll cancels the call.
+                    self.runtime.cancel_checker = timed_out_threads.residual_checker(previous_cancel_checker)
+                else:
+                    self.runtime.cancel_checker = previous_cancel_checker
                 if isinstance(self.runtime, PythonExecRuntime):
                     self.runtime.enable_cancel_trace = bool(previous_enable_cancel_trace)
 
@@ -1011,7 +1117,7 @@ class WorkflowEngine:
                 node_id=node.id,
                 message=f"Prompt template render failed: {type(e).__name__}: {e}",
             ) from e
-        from .llm import get_llm_client, llm_hook_context_from_registry
+        from .llm import default_llm_node_max_retries, get_llm_client, llm_hook_context_from_registry
 
         _rt = _runtime or self.runtime
         cancel_checker = getattr(_rt, "cancel_checker", None)
@@ -1021,7 +1127,9 @@ class WorkflowEngine:
                 cancel_checker=cancel_checker,
                 hook_context=llm_hook_context_from_registry(getattr(_rt, "tool_registry", None)),
             )
-            text = client.ask(rendered)
+            # Transient provider failures (429 / 5xx / timeouts) are retried
+            # with backoff instead of failing the node on the first hit.
+            text = client.ask(rendered, max_retries=default_llm_node_max_retries())
         except RunCancelledError:
             raise
         except Exception as e:

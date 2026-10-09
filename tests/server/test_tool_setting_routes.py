@@ -22,6 +22,7 @@ from fastapi.testclient import TestClient
 
 from flocks.auth.context import AuthUser
 from flocks.server.auth import require_admin
+from flocks.tool.code.lsp_tool import lsp_tool
 from flocks.tool.registry import (
     Tool,
     ToolCategory,
@@ -160,6 +161,206 @@ def test_tool_mutation_routes_require_admin():
     ]
 
     assert [response.status_code for response in responses] == [403, 403, 403, 403]
+
+
+class TestNativeToolGroup:
+    def test_editor_and_reload_cannot_shadow_selected_core_tool(self, tool_client, tmp_path, monkeypatch):
+        import yaml
+        from flocks.tool import tool_loader
+
+        client, original, _ = tool_client
+        core = Tool(ToolInfo(name=original.info.name, description="Core", native=False, group="Canonical"), lsp_tool)
+        ToolRegistry.register(core)
+        shadow = tmp_path / "shadow.yaml"
+        shadow.write_text(yaml.safe_dump({
+            "name": core.info.name, "description": "Shadow", "group": "User",
+            "handler": {"type": "http", "url": "https://example.invalid"},
+        }))
+        before = shadow.read_bytes()
+        monkeypatch.setattr(tool_loader, "_find_yaml_file", lambda name: shadow)
+        response = client.put(f"/api/tools/{core.info.name}", json={"description": "changed"})
+        assert response.status_code == 400, response.text
+        response = client.post(f"/api/tools/{core.info.name}/reload")
+        assert response.status_code == 400, response.text
+        assert ToolRegistry._tools[core.info.name] is core
+        assert shadow.read_bytes() == before
+
+    def test_removing_group_override_restores_registration_default(self, tool_client):
+        from flocks.config.config_writer import ConfigWriter
+        from flocks.server.routes.tool import _invalidate_tool_summary_cache
+
+        client, tool, _ = tool_client
+        tool.info.group = "Package"
+        response = client.patch(f"/api/tools/{tool.info.name}", json={"group": "User"})
+        assert response.json()["group"] == "User"
+        assert tool.info.group == "Package"
+        ConfigWriter.delete_tool_setting(tool.info.name, field="group")
+        ToolRegistry._apply_tool_settings()
+        _invalidate_tool_summary_cache()
+        assert client.get(f"/api/tools/{tool.info.name}").json()["group"] == "Package"
+        rows = client.get("/api/tools/page").json()["items"]
+        assert next(row for row in rows if row["name"] == tool.info.name)["group"] == "Package"
+
+    @pytest.mark.parametrize("group", [None, "", "Override"])
+    def test_shipped_group_rejection_precedes_enabled_and_yaml_changes(self, tool_client, tmp_path, monkeypatch, group):
+        import yaml
+        from flocks.config.config_writer import ConfigWriter
+        from flocks.tool import registry, tool_loader
+
+        client, original, _ = tool_client
+        installation = tmp_path / "installation"
+        monkeypatch.setattr(registry, "__file__", str(installation / "flocks/tool/registry.py"))
+        path = installation / ".flocks/plugins/tools/api/source.yaml"
+        path.parent.mkdir(parents=True)
+        raw = {"name": original.info.name, "description": "before", "group": "Canonical", "enabled": True,
+               "handler": {"type": "http", "url": "https://example.invalid"}}
+        path.write_text(yaml.safe_dump(raw))
+        tool = tool_loader.yaml_to_tool(raw, path)
+        ToolRegistry.register(tool)
+        config = ConfigWriter._read_raw()
+        config["tool_settings"] = {tool.info.name: {"group": "Stale"}}
+        ConfigWriter._write_raw(config)
+        before_config = ConfigWriter._get_config_path().read_bytes()
+        before_yaml = path.read_bytes()
+        response = client.patch(f"/api/tools/{tool.info.name}", json={"group": group, "enabled": False})
+        assert response.status_code == 400, response.text
+        assert ConfigWriter._get_config_path().read_bytes() == before_config
+        assert tool.info.enabled is True
+        response = client.put(f"/api/tools/{tool.info.name}", json={"group": group, "description": "changed"})
+        assert response.status_code == 400, response.text
+        assert path.read_bytes() == before_yaml
+        assert ConfigWriter._get_config_path().read_bytes() == before_config
+        response = client.get(f"/api/tools/{tool.info.name}")
+        assert response.json()["group"] == "Canonical"
+        assert response.json()["group_readonly"] is True
+        rows = client.get("/api/tools/page").json()["items"]
+        row = next(row for row in rows if row["name"] == tool.info.name)
+        assert row["group"] == "Canonical" and row["group_readonly"] is True
+        # Same fixed value is accepted without changing the stale saved overlay.
+        response = client.patch(f"/api/tools/{tool.info.name}", json={"group": "Canonical"})
+        assert response.status_code == 200, response.text
+        assert ConfigWriter._get_config_path().read_bytes() == before_config
+
+    def test_group_only_clear_and_enabled_reset_preserve_metadata(self, tool_client, monkeypatch):
+        from flocks.config.config_writer import ConfigWriter
+
+        client, tool, _ = tool_client
+        _set_service(enabled=True)
+        monkeypatch.setattr(ToolRegistry, "refresh_plugin_tools", lambda *a, **k: pytest.fail("metadata must not rescan"))
+        name = tool.info.name
+        tool.info.group = "Pack default"
+        ConfigWriter.set_tool_setting(name, {"future_metadata": {"kept": True}})
+        response = client.patch(f"/api/tools/{name}", json={"group": "  Operations  "})
+        assert response.status_code == 200, response.text
+        assert response.json()["group"] == "Operations"
+        assert response.json()["enabled"] is True
+        assert response.json()["enabled_customized"] is False
+        assert tool.info.group == "Pack default"
+
+        client.patch(f"/api/tools/{name}", json={"enabled": False})
+        assert _read_settings()[name]["group"] == "Operations"
+        reset = client.post(f"/api/tools/{name}/reset")
+        assert reset.json()["enabled_customized"] is False
+        assert _read_settings()[name] == {"group": "Operations", "future_metadata": {"kept": True}}
+        client.patch(f"/api/tools/{name}", json={"enabled": False})
+        client.patch(f"/api/tools/{name}", json={"enabled": True})
+        assert _read_settings()[name]["group"] == "Operations"
+        assert "enabled" not in _read_settings()[name]
+
+        for clear in (None, "", "   "):
+            response = client.patch(f"/api/tools/{name}", json={"group": clear})
+            assert response.status_code == 200, response.text
+            assert response.json()["group"] == ""
+            assert _read_settings()[name]["group"] == ""
+            assert _read_settings()[name]["future_metadata"] == {"kept": True}
+
+    def test_yaml_editor_preserves_effective_group_and_only_changes_metadata(self, tool_client, tmp_path, monkeypatch):
+        import yaml
+        from flocks.tool import tool_loader
+
+        client, tool, _ = tool_client
+        _set_service(enabled=True)
+        path = tmp_path / "native.yaml"
+        data = {
+            "name": tool.info.name, "description": "before", "group": "Package",
+            "handler": {"type": "http", "url": "https://example.invalid", "method": "GET"},
+            "future_metadata": {"kept": True},
+        }
+        path.write_text(yaml.safe_dump(data))
+        monkeypatch.setattr(tool_loader, "_find_yaml_file", lambda name: path)
+        client.patch(f"/api/tools/{tool.info.name}", json={"group": "User", "enabled": False})
+        response = client.put(f"/api/tools/{tool.info.name}", json={"description": "after"})
+        assert response.status_code == 200, response.text
+        assert response.json()["group"] == "User"
+        assert yaml.safe_load(path.read_text())["group"] == "Package"
+        live = ToolRegistry.get(tool.info.name)
+        monkeypatch.setattr(tool_loader, "yaml_to_tool", lambda *args: pytest.fail("metadata-only must not reload handler"))
+        cleared = client.put(f"/api/tools/{tool.info.name}", json={"group": None})
+        assert cleared.status_code == 200, cleared.text
+        assert cleared.json()["group"] == ""
+        assert cleared.json()["enabled"] is False
+        assert ToolRegistry.get(tool.info.name) is live
+        saved = yaml.safe_load(path.read_text())
+        assert saved["group"] == ""
+        assert saved["future_metadata"] == {"kept": True}
+        assert saved["handler"] == data["handler"]
+        assert _read_settings()[tool.info.name]["group"] == ""
+
+    def test_auto_disable_keeps_group(self, tool_client):
+        client, tool, _ = tool_client
+        _set_service(enabled=True)
+        client.patch(f"/api/tools/{tool.info.name}", json={"group": "Operations"})
+        for _ in range(ToolRegistry._failure_disable_threshold):
+            ToolRegistry._record_failure(tool, {}, "upstream failure")
+        assert _read_settings()[tool.info.name] == {"group": "Operations", "enabled": False}
+
+    def test_filter_before_paging_and_full_query_group_facets(self, tool_client):
+        from flocks.config.config_writer import ConfigWriter
+
+        client, first, second = tool_client
+        _set_service(enabled=True)
+        # Prime the existing index, then update metadata without reloading tools.
+        client.get("/api/tools/page")
+        client.patch(f"/api/tools/{first.info.name}", json={"group": "A, B"})
+        for idx in range(3):
+            tool = _stub_api_tool(f"matching_{idx}", enabled=True)
+            tool.info.group = "A, B" if idx < 2 else "Elsewhere"
+            ToolRegistry.register(tool)
+        response = client.get("/api/tools/page", params={"group": " A, B ", "limit": 1, "offset": 1, "sort_by": "name"})
+        body = response.json()
+        assert response.status_code == 200, body
+        assert body["total"] == 3
+        assert len(body["items"]) == 1
+        assert body["items"][0]["group"] == "A, B"
+        assert body["facets"]["group"] == {"A, B": 3, "Elsewhere": 1, "": 1}
+        assert body["facets"]["source_groups"] == {"api": 1}
+        assert body["facets"]["category"] == {"custom": 3}
+        assert body["facets"]["source"] == {"api": 3}
+        assert body["facets"]["source_name"] == {_TEST_SERVICE_ID: 3}
+        assert body["facets"]["enabled"] == {"true": 3}
+        ungrouped = client.get("/api/tools/page", params={"group": ""}).json()
+        assert [row["name"] for row in ungrouped["items"]] == [second.info.name]
+        searched = client.get("/api/tools/page", params={"q": "matching", "group": "A, B", "limit": 1}).json()
+        assert searched["total"] == 2
+        assert searched["facets"]["group"] == {"A, B": 2, "Elsewhere": 1}
+        assert len(client.get("/api/tools").json()) == 5
+        assert client.get(f"/api/tools/{first.info.name}").json()["group"] == "A, B"
+        # A write from a different worker must invalidate the original summary cache too.
+        ConfigWriter.set_tool_setting(first.info.name, {"group": "Elsewhere"})
+        assert client.get("/api/tools/page", params={"group": "A, B"}).json()["total"] == 2
+
+    @pytest.mark.parametrize("group", [42, [], {}, "x" * 33, "a\x00b", "a\x7fb"])
+    def test_invalid_group_rejected_without_mutation(self, tool_client, group):
+        client, tool, _ = tool_client
+        response = client.patch(f"/api/tools/{tool.info.name}", json={"group": group})
+        assert response.status_code == 422
+        assert _read_settings() == {}
+
+    def test_group_uses_original_admin_guard_and_not_device_override(self, tool_client):
+        client, tool, _ = tool_client
+        assert _viewer_client().patch(f"/api/tools/{tool.info.name}", json={"group": "G"}).status_code == 403
+        assert client.patch(f"/api/tools/{tool.info.name}?device_id=example", json={"group": "G"}).status_code == 400
+        assert _read_settings() == {}
 
 
 class TestToolInfoResponse:

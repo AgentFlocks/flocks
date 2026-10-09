@@ -3,7 +3,7 @@
 import time
 from typing import Any, Dict, Iterable, Optional
 
-from flocks.session.message import Message, MessageWithParts, ToolPart, ToolStateError
+from flocks.session.message import Message, MessageWithParts, ToolPart, ToolStateCompleted, ToolStateError, ToolStatePending
 from flocks.session.session import SessionInfo
 from flocks.session.ownership import SessionExecutionLease, current_lease
 from flocks.storage.storage import Storage
@@ -53,7 +53,10 @@ async def abort_orphan_running_parts_in_messages(
     session_id: str,
     messages_with_parts: Iterable[MessageWithParts],
 ) -> int:
-    """Repair only while holding the same shared lease used by live runners."""
+    """Interrupt orphaned tools and submitted delegation receipts.
+
+    Repair only while holding the same shared lease used by live runners.
+    """
     lease = current_lease(session_id)
     if lease is None:
         lease = await SessionExecutionLease.acquire(session_id)
@@ -62,6 +65,17 @@ async def abort_orphan_running_parts_in_messages(
         async with lease:
             return await abort_orphan_running_parts_in_messages(session_id, messages_with_parts)
     lease.require_owned()
+    from flocks.session.core.status import SessionStatus
+    from flocks.session.runner import SessionRunner
+    from flocks.session.session_loop import SessionLoop
+
+    # A pending input can still be streaming; only recover it when no runner
+    # can resume writing its state. Running tools retain their existing recovery.
+    recover_pending = (
+        SessionStatus.get_for_session(session_id).type == "idle"
+        and not SessionLoop.is_running(session_id)
+        and session_id not in SessionRunner._active_sessions
+    )
     now_ms = int(time.time() * 1000)
     repaired = 0
 
@@ -71,14 +85,42 @@ async def abort_orphan_running_parts_in_messages(
             if not isinstance(part, ToolPart):
                 continue
             state = part.state
-            if getattr(state, "status", None) != "running":
+            if getattr(state, "status", None) == "running":
+                part.state = _build_interrupted_error_state(state, now_ms)
+            elif isinstance(state, ToolStatePending) and recover_pending:
+                part.state = _build_interrupted_error_state(state, now_ms)
+            elif (
+                part.tool in {"delegate_task", "task"}
+                and isinstance(state, ToolStateCompleted)
+                and state.metadata.get("submitted") is True
+                and state.metadata.get("status") == "running"
+            ):
+                from flocks.session.agent_inbox import AgentInbox
+                from flocks.session.session_loop import SessionLoop
+
+                child_id = state.metadata.get("sessionId")
+                # Registrations also cover done-callback handoffs and finalizers.
+                if (
+                    child_id in AgentInbox._children
+                    or child_id in AgentInbox._wakes
+                    or SessionLoop.is_running(child_id)
+                ):
+                    continue
+                part.state = state.model_copy(update={"metadata": {
+                    **state.metadata,
+                    "status": "error",
+                    "result": INTERRUPTED_TOOL_ERROR,
+                    "finished_at": now_ms,
+                }})
+            else:
                 continue
 
-            part.state = _build_interrupted_error_state(state, now_ms)
             await Message.store_part(session_id, message_id, part)
             repaired += 1
 
-        if _is_unfinished_assistant(msg_with_parts.info):
+        # Same rule as pending tools: only close a reply no runner can still
+        # be writing (a busy, queued or looping session keeps it open).
+        if recover_pending and _is_unfinished_assistant(msg_with_parts.info):
             updated = await Message.update(
                 session_id,
                 message_id,

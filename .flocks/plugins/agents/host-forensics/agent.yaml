@@ -1,4 +1,5 @@
 name: host-forensics
+group: 安全研判
 name_cn: 主机取证智能体
 description: >-
   Linux host compromise detection and forensics subagent. Use when the user asks to inspect,

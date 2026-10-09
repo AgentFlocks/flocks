@@ -1,4 +1,5 @@
 name: tdp_file_download
+group: NDR
 description: >
   按样本哈希下载 TDP 告警关联的恶意文件。
 category: custom

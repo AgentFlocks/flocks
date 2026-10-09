@@ -94,7 +94,7 @@ describe('Home create WebUI contract page entry', () => {
     );
   });
 
-  it('hides the create WebUI contract page entry for non-admin users', () => {
+  it('keeps setup guidance available while hiding custom-page creation from members', () => {
     useAuthMock.mockReturnValue({
       user: {
         id: 'user-2',
@@ -114,10 +114,13 @@ describe('Home create WebUI contract page entry', () => {
     expect(
       screen.queryByRole('button', { name: 'createWebUIContractPage' }),
     ).not.toBeInTheDocument();
+    // Onboarding is available to members; custom-page management is admin-only.
+    expect(screen.getByRole('button', { name: 'getStarted' })).toBeEnabled();
     expect(createMock).not.toHaveBeenCalled();
   });
 
-  it.each(['admin', 'member'])('opens onboarding without creating a contract-page session for %s', async (role) => {
+  it.each(['admin', 'member'])('opens onboarding for %s without creating or navigating to a custom-page session', async (role) => {
+    const user = userEvent.setup();
     useAuthMock.mockReturnValue({
       user: {
         id: `user-${role}`,
@@ -127,20 +130,54 @@ describe('Home create WebUI contract page entry', () => {
         must_reset_password: false,
       },
     });
-    const user = userEvent.setup();
     const onOpenOnboarding = vi.fn();
     window.addEventListener('flocks:open-onboarding', onOpenOnboarding);
     try {
-      render(<MemoryRouter><Home /></MemoryRouter>);
+      render(
+        <MemoryRouter>
+          <Home />
+        </MemoryRouter>,
+      );
 
       await user.click(screen.getByRole('button', { name: 'getStarted' }));
 
-      expect(onOpenOnboarding).toHaveBeenCalledTimes(1);
+      expect(onOpenOnboarding).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({ type: 'flocks:open-onboarding' }),
+      );
       expect(createMock).not.toHaveBeenCalled();
       expect(navigateMock).not.toHaveBeenCalled();
+      expect(toastErrorMock).not.toHaveBeenCalled();
     } finally {
       window.removeEventListener('flocks:open-onboarding', onOpenOnboarding);
     }
+  });
+
+  it('removes only custom-page creation when the current user changes from admin to member', () => {
+    const { rerender } = render(
+      <MemoryRouter>
+        <Home />
+      </MemoryRouter>,
+    );
+    expect(screen.getByRole('button', { name: 'createWebUIContractPage' })).toBeEnabled();
+
+    useAuthMock.mockReturnValue({
+      user: {
+        id: 'member-user',
+        username: 'member',
+        role: 'member',
+        status: 'active',
+        must_reset_password: false,
+      },
+    });
+    rerender(
+      <MemoryRouter>
+        <Home />
+      </MemoryRouter>,
+    );
+
+    expect(screen.queryByRole('button', { name: 'createWebUIContractPage' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'getStarted' })).toBeEnabled();
+    expect(createMock).not.toHaveBeenCalled();
   });
 
   it('shows the concrete stats load failure instead of a backend-not-running hint', () => {

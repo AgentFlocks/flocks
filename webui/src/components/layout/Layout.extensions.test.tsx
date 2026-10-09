@@ -34,7 +34,10 @@ vi.mock('@/contexts/ProductNameContext', () => ({
 vi.mock('@/hooks/useWebUIContractPages', () => ({
   useWebUIContractPages: () => ({ pages: [], workspaces: [], loading: false, error: null, refetch: vi.fn() }),
 }));
-vi.mock('@/api/update', () => ({ checkUpdate: vi.fn().mockResolvedValue({ has_update: false, latest_version: null, current_version: '0.2.0', error: null }) }));
+vi.mock('@/api/update', () => ({
+  checkUpdate: vi.fn().mockResolvedValue({ has_update: false, latest_version: null, current_version: '0.2.0', error: null }),
+  getCurrentRelease: vi.fn().mockResolvedValue({ current_version: '0.2.0', latest_version: '0.2.0', release_notes: null, error: null }),
+}));
 vi.mock('@/api/notifications', () => ({
   getActiveNotifications: vi.fn().mockResolvedValue([]),
   ackNotification: vi.fn(),

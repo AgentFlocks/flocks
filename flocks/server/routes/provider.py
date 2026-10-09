@@ -16,7 +16,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, Response, status
-from pydantic import BaseModel, Field, ConfigDict, ValidationError
+from pydantic import BaseModel, Field, ConfigDict, ValidationError, field_validator
+from pydantic_core import PydanticCustomError
 
 from flocks.audit import emit_audit_event
 from flocks.auth.context import AuthUser
@@ -47,6 +48,7 @@ from flocks.tool.schema.api_service_schema import (
     _get_compound_secret_metadata,
     _normalize_api_service_credential_field,
     _should_persist_secondary_secret,
+    normalize_api_service_group,
 )
 from flocks.config.config import get_user_plugins_root
 
@@ -119,6 +121,9 @@ def _load_provider_yaml_metadata(provider_id: str) -> Optional[Dict[str, Any]]:
 
 def _load_api_service_metadata_data(provider_id: str) -> Optional[Dict[str, Any]]:
     """Compatibility wrapper preserving the historical patch seam in this module."""
+    from flocks.config.api_versioning import versioned_storage_key_for
+
+    provider_id = versioned_storage_key_for(provider_id) or provider_id
     merged: Dict[str, Any] = {}
 
     config_data = ConfigWriter.get_api_service_raw(provider_id)
@@ -136,6 +141,7 @@ def _load_api_service_metadata_data(provider_id: str) -> Optional[Dict[str, Any]
     if isinstance(yaml_data, dict):
         merged = {**yaml_data, **merged}
 
+    api_service_schema_helpers.project_api_service_group(merged, yaml_data, config_data)
     return merged or None
 
 
@@ -168,7 +174,7 @@ def _legacy_metadata_cache_key(provider_id: str) -> tuple[str, int]:
 
 
 def _api_service_summary_metadata_cache_key(provider_id: str) -> tuple[Any, ...]:
-    config_data = ConfigWriter.get_api_service_raw(provider_id) or {}
+    config_data = ConfigWriter.get_api_service_raw(provider_id)
     return (
         json.dumps(config_data, sort_keys=True, default=str),
         _legacy_metadata_cache_key(provider_id),
@@ -210,6 +216,8 @@ def _load_provider_yaml_summary_metadata(provider_id: str) -> Optional[Dict[str,
         "name": prov.get("name", provider_id),
         "service_id": prov.get("service_id", provider_id),
         "version": extract_provider_version(prov),
+        "group": normalize_api_service_group(prov.get("group")),
+        "group_readonly": api_service_schema_helpers.is_shipped_tool_path(descriptor.provider_yaml),
         "description": prov.get("description"),
         "description_cn": prov.get("description_cn"),
         "defaults": prov.get("defaults", {}),
@@ -220,6 +228,9 @@ def _load_provider_yaml_summary_metadata(provider_id: str) -> Optional[Dict[str,
 
 def _load_api_service_summary_metadata_data(provider_id: str) -> Optional[Dict[str, Any]]:
     """Load only metadata needed by the API service list endpoint."""
+    from flocks.config.api_versioning import versioned_storage_key_for
+
+    provider_id = versioned_storage_key_for(provider_id) or provider_id
     cache_key = _api_service_summary_metadata_cache_key(provider_id)
     with _api_service_summary_metadata_cache_lock:
         cached = _api_service_summary_metadata_cache.get(provider_id)
@@ -242,6 +253,7 @@ def _load_api_service_summary_metadata_data(provider_id: str) -> Optional[Dict[s
     if isinstance(yaml_data, dict):
         merged = {**yaml_data, **merged}
 
+    api_service_schema_helpers.project_api_service_group(merged, yaml_data, config_data)
     result = merged or None
     with _api_service_summary_metadata_cache_lock:
         _api_service_summary_metadata_cache[provider_id] = (
@@ -870,7 +882,7 @@ async def list_api_services_route():
 @router.patch(
     "/api-services/{provider_id}",
     summary="Update API service",
-    description="Enable or disable an API service and all tools it exposes."
+    description="Update API service metadata or enable/disable the service and its tools."
 )
 @serialized_config_mutation
 async def update_api_service_route(
@@ -885,7 +897,7 @@ async def update_api_service_route(
         # further down in this module, so it cannot be used as the annotation).
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=json.loads(exc.json()),
+            detail=[{**error, "loc": ["body", *error["loc"]]} for error in json.loads(exc.json())],
         ) from exc
     return await update_api_service(provider_id, payload)
 
@@ -1182,6 +1194,11 @@ async def update_provider(
 class APIServiceMetadata(BaseModel):
     """API service metadata"""
     name: str
+    group: Optional[str] = None
+    group_readonly: bool = False
+
+    _validate_group = field_validator("group", mode="before")(normalize_api_service_group)
+
     version: Optional[str] = None
     description: Optional[str] = None
     description_cn: Optional[str] = None
@@ -1200,6 +1217,11 @@ class APIServiceMetadata(BaseModel):
 class APIServiceSummary(BaseModel):
     """API service summary for the Tool API page."""
     id: str
+    group: Optional[str] = None
+    group_readonly: bool = False
+
+    _validate_group = field_validator("group", mode="before")(normalize_api_service_group)
+
     name: str
     version: Optional[str] = None
     enabled: bool = True
@@ -1218,8 +1240,18 @@ class APIServiceSummary(BaseModel):
 
 class APIServiceUpdateRequest(BaseModel):
     """API service update request."""
-    enabled: bool = Field(..., description="Enable or disable the API service")
+    enabled: Optional[bool] = Field(None, description="Enable or disable the API service; omitted leaves it unchanged")
     verify_ssl: Optional[bool] = Field(None, description="SSL verification for HTTP requests (default: False)")
+    group: Optional[str] = None
+
+    _validate_group = field_validator("group", mode="before")(normalize_api_service_group)
+
+    @field_validator("enabled", mode="before")
+    @classmethod
+    def validate_enabled(cls, value):
+        if value is None:
+            raise PydanticCustomError("bool_type", "enabled must be a boolean when provided")
+        return value
 
 
 def _get_api_service_enabled(provider_id: str) -> bool:
@@ -1358,7 +1390,7 @@ async def _save_api_service_status_if_configured(provider_id: str, response: Dic
     if is_temporary_credential_override_active():
         return
     raw_service = ConfigWriter.get_api_service_raw(provider_id)
-    if raw_service is None:
+    if raw_service is None or set(raw_service) <= {"group"}:
         return
     if raw_service.get("enabled") is False:
         return
@@ -1387,6 +1419,8 @@ def _build_api_service_summary(
 
     return APIServiceSummary(
         id=provider_id,
+        group=meta.get("group"),
+        group_readonly=meta.get("group_readonly", False),
         name=meta.get("name", provider_id),
         version=version,
         enabled=enabled,
@@ -1510,32 +1544,63 @@ async def update_api_service(provider_id: str, request: APIServiceUpdateRequest)
     try:
         from flocks.tool.registry import ToolRegistry
 
-        await ToolRegistry.init_async()
+        from flocks.config.api_versioning import versioned_storage_key_for
 
-        existing = ConfigWriter.get_api_service_raw(provider_id)
-        if existing is None and provider_id not in ToolRegistry.get_api_service_ids():
+        # Resolve legacy aliases once; reads and writes must target the same native record.
+        provider_id = versioned_storage_key_for(provider_id) or provider_id
+        if not request.model_fields_set:
+            raise HTTPException(status_code=400, detail="No updates provided")
+        raw_existing = ConfigWriter.get_api_service_raw(provider_id)
+        existing = dict(raw_existing or {})
+        if "group" in request.model_fields_set:
+            descriptor = _find_api_service_descriptor(provider_id)
+            if descriptor is not None and descriptor.storage_key != provider_id:
+                raise HTTPException(status_code=400, detail="Use the API service's versioned storage key")
+            if (
+                raw_existing is None
+                and descriptor is None
+                and provider_id not in ToolRegistry.get_api_service_ids()
+            ):
+                raise HTTPException(status_code=404, detail=f"API service not found: {provider_id}")
+            definition = _load_provider_yaml_summary_metadata(provider_id) if raw_existing is None else None
+            if definition and definition.get("group_readonly"):
+                if request.group != normalize_api_service_group(definition.get("group")):
+                    raise HTTPException(status_code=400, detail="System API definition group is read-only")
+                if request.model_fields_set == {"group"}:
+                    return _build_api_service_summary(provider_id, await _read_api_service_status_cache())
+                # Reposting the fixed default is a no-op; a real connection
+                # update may still create the ordinary editable config record.
+            else:
+                existing["group"] = request.group or ""
+        await ToolRegistry.init_async()
+        if (
+            raw_existing is None
+            and provider_id not in ToolRegistry.get_api_service_ids()
+            and _find_api_service_descriptor(provider_id) is None
+        ):
             raise HTTPException(status_code=404, detail="API service not found")
-        existing = existing or {}
-        existing["enabled"] = request.enabled
+        if request.enabled is not None:
+            existing["enabled"] = request.enabled
         if request.verify_ssl is not None:
             existing["verify_ssl"] = request.verify_ssl
         ConfigWriter.set_api_service(provider_id, existing)
         _clear_api_service_summary_metadata_cache(provider_id)
 
-        matched_count = _set_api_service_tools_enabled(provider_id, request.enabled)
-
         statuses = await _read_api_service_status_cache()
-        if request.enabled:
-            status_payload = statuses.get(provider_id, {})
-            if status_payload.get("status") == "disabled":
-                statuses.pop(provider_id, None)
-        else:
-            statuses[provider_id] = {
-                "status": "disabled",
-                "message": "Service disabled",
-                "checked_at": int(time.time()),
-            }
-        await _write_api_service_status_cache(statuses)
+        matched_count = 0
+        if request.enabled is not None:
+            matched_count = _set_api_service_tools_enabled(provider_id, request.enabled)
+            if request.enabled:
+                status_payload = statuses.get(provider_id, {})
+                if status_payload.get("status") == "disabled":
+                    statuses.pop(provider_id, None)
+            else:
+                statuses[provider_id] = {
+                    "status": "disabled",
+                    "message": "Service disabled",
+                    "checked_at": int(time.time()),
+                }
+            await _write_api_service_status_cache(statuses)
 
         log.info("api_service.updated", {
             "provider_id": provider_id,
@@ -1746,6 +1811,8 @@ async def get_api_service_metadata(provider_id: str):
 
         return APIServiceMetadata(
             name=data.get("name", provider_id),
+            group=data.get("group"),
+            group_readonly=data.get("group_readonly", False),
             version=data.get("version"),
             description=data.get("description"),
             description_cn=data.get("description_cn"),
@@ -2222,7 +2289,7 @@ async def get_service_credentials(
 
         if raw_service:
             for field in schema:
-                if field.storage != "config":
+                if field.storage != "config" or field.key == "group" or field.config_key == "group":
                     continue
                 raw_value = raw_service.get(field.config_key)
                 if raw_value is None and field.key == "base_url":
@@ -2238,6 +2305,8 @@ async def get_service_credentials(
                 field_values["username"] = legacy_username
 
         for field_name in _get_api_service_secret_field_names(provider_id, metadata):
+            if field_name == "group":
+                continue
             for candidate in _get_api_service_secret_candidates(provider_id, raw_service, field_name=field_name):
                 value = secrets.get(candidate)
                 if value:
@@ -3346,7 +3415,7 @@ async def refresh_api_services_status(
 
         # Discover API services from both config and tool registry
         config = await Config.get()
-        api_services: Dict[str, Any] = (config.model_extra or {}).get("api_services", {})
+        api_services: Dict[str, Any] = config.api_services or {}
 
         # Also discover services from registered tools (covers YAML API tools)
         from flocks.tool.registry import ToolRegistry

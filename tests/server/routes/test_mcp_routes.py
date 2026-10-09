@@ -11,6 +11,240 @@ from flocks.server.routes import mcp as mcp_routes
 from flocks.tool import tool_loader
 
 
+class TestNativeMcpGroup:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("stored_group,expected", [
+        (["legacy"], None), ("x" * 33, None), ("a\x00b", None),
+        ("a\nb", None), ("a\x7fb", None), (None, None), ("", ""), (" Valid ", "Valid"),
+    ])
+    async def test_bad_stored_group_cannot_break_mixed_status_and_info_reads(
+        self, tmp_path, monkeypatch, stored_group, expected,
+    ):
+        import json
+        from types import SimpleNamespace
+        from flocks.config.config_writer import ConfigWriter
+        from flocks.mcp.types import normalize_mcp_group
+
+        monkeypatch.setenv("FLOCKS_CONFIG_DIR", str(tmp_path / "config"))
+        configs = {
+            "legacy": {
+                "type": "remote", "url": "https://example.invalid/mcp", "enabled": False,
+                "headers": {"Authorization": "{secret:unchanged}"}, "group": stored_group,
+            },
+            "healthy": {"type": "remote", "url": "https://example.invalid/good", "group": " Operations "},
+            "inherited": {"type": "remote", "url": "https://example.invalid/default"},
+            "explicit-null": {"type": "remote", "url": "https://example.invalid/clear", "group": None},
+        }
+        path = ConfigWriter._get_config_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        # Bypass current validation only to reproduce legacy stored data.
+        path.write_text(json.dumps({"mcp": configs}), encoding="utf-8")
+        before = path.read_bytes()
+        entry = SimpleNamespace(group="Canonical", group_readonly=True)
+        monkeypatch.setattr(mcp_routes.McpCatalog, "get", lambda: SimpleNamespace(get_entry=lambda name: entry))
+        monkeypatch.setattr(mcp_routes.MCP, "status", AsyncMock(return_value={
+            "healthy": McpStatusInfo(status=McpStatus.CONNECTED, tools_count=3),
+        }))
+        monkeypatch.setattr(mcp_routes.MCP, "get_server_info", AsyncMock(return_value=None))
+
+        statuses = await mcp_routes.get_mcp_status()
+        assert set(statuses) == set(configs)
+        assert statuses["legacy"]["group"] == expected
+        assert statuses["legacy"]["status"] == McpStatus.DISABLED
+        assert statuses["legacy"]["group_readonly"] is False
+        assert statuses["healthy"]["group"] == "Operations"
+        assert statuses["healthy"]["tools_count"] == 3
+        assert statuses["inherited"]["group"] == "Canonical"
+        assert statuses["explicit-null"]["group"] is None
+        info = await mcp_routes.get_mcp_server_info("legacy")
+        assert info["group"] == info["config"]["group"] == info["status"]["group"] == expected
+        assert info["config"]["url"] == configs["legacy"]["url"]
+        assert mcp_routes._to_frontend_mcp_config(configs["legacy"])["group"] == expected
+        assert entry.group == "Canonical" and entry.group_readonly is True
+        assert path.read_bytes() == before
+        assert ConfigWriter.get_mcp_server("legacy")["group"] == stored_group
+        if stored_group is not None and expected is None:
+            with pytest.raises(ValueError):
+                normalize_mcp_group(stored_group)
+            with pytest.raises(ValueError):
+                mcp_routes.McpUpdateRequest(config={"group": stored_group})
+
+    @pytest.mark.parametrize("group", ["Instance", "", None])
+    def test_native_writers_preserve_group_yml_metadata_and_replace_connection(self, tmp_path, monkeypatch, group):
+        import yaml
+        from flocks.config.config_writer import ConfigWriter
+
+        monkeypatch.setenv("FLOCKS_CONFIG_DIR", str(tmp_path / "config"))
+        monkeypatch.setattr(tool_loader, "_MCP_SUBDIR", tmp_path / "mcp")
+        yaml_path = tmp_path / "mcp/native-server.yml"
+        yaml_path.parent.mkdir()
+        yaml_path.write_text(yaml.safe_dump({
+            "name": "native-server", "type": "local", "command": ["old"], "cwd": "/old",
+            "environment": {"KEY": "{secret:old}"}, "args": ["old"], "group": "Old YAML",
+            "description": "Native template metadata", "future_metadata": {"keep": True},
+        }))
+        ConfigWriter.add_mcp_server("native-server", {"type": "local", "command": ["old"], "group": group})
+        replacement = {"type": "remote", "url": "https://example.invalid/new", "enabled": False}
+        # Exercise the native writer boundary without the route wrapper.
+        ConfigWriter.add_mcp_server("native-server", replacement)
+        result = tool_loader.save_mcp_config("native-server", replacement)
+        assert result == yaml_path
+        assert "group" not in replacement
+        assert ConfigWriter.get_mcp_server("native-server") == {**replacement, "group": group or ""}
+        assert yaml.safe_load(yaml_path.read_text()) == {
+            "name": "native-server", **replacement, "group": group or "",
+            "description": "Native template metadata", "future_metadata": {"keep": True},
+        }
+        assert list(yaml_path.parent.iterdir()) == [yaml_path]
+        for clear in (None, ""):
+            saved = tool_loader.save_mcp_config("native-server", {**replacement, "group": clear})
+            assert yaml.safe_load(saved.read_text())["group"] == ""
+
+    def test_yaml_only_group_is_preserved_without_json_record(self, tmp_path, monkeypatch):
+        import yaml
+        from flocks.config.config_writer import ConfigWriter
+
+        monkeypatch.setenv("FLOCKS_CONFIG_DIR", str(tmp_path / "config"))
+        monkeypatch.setattr(tool_loader, "_MCP_SUBDIR", tmp_path / "mcp")
+        first = tool_loader.save_mcp_config("yaml-only", {"type": "remote", "url": "https://example.invalid", "group": "YAML"})
+        saved = tool_loader.save_mcp_config("yaml-only", {"type": "local", "command": ["new"]})
+        assert saved == first
+        assert yaml.safe_load(saved.read_text()) == {"name": "yaml-only", "type": "local", "command": ["new"], "group": "YAML"}
+        assert ConfigWriter.get_mcp_server("yaml-only") is None
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("group", ["  Operations  ", "", None])
+    async def test_group_only_persists_raw_and_yaml_without_connection_changes(self, tmp_path, monkeypatch, group):
+        import yaml
+        from flocks.config.config_writer import ConfigWriter
+
+        monkeypatch.setenv("FLOCKS_CONFIG_DIR", str(tmp_path / "config"))
+        monkeypatch.setattr(tool_loader, "_MCP_SUBDIR", tmp_path / "mcp")
+        original = {
+            "type": "sse", "url": "https://example.invalid/mcp", "enabled": False,
+            "transport": "http", "oauth": {"clientId": "keep"},
+            "auth": {"type": "apikey", "value": "{secret:keep}"},
+            "headers": {"Authorization": "{secret:header}"},
+            "env": {"OTHER": "value"}, "unknown": {"keep": True}, "group": "Package",
+        }
+        ConfigWriter.add_mcp_server("native-group", original)
+        forbidden = AsyncMock(side_effect=AssertionError("metadata cannot change runtime state"))
+        for method in ("connect", "disconnect", "remove", "status"):
+            monkeypatch.setattr(mcp_routes.MCP, method, forbidden)
+        result = await mcp_routes.update_mcp_server(
+            "native-group", mcp_routes.McpUpdateRequest(config={"group": group}),
+        )
+        expected = {**original, "group": (group or "").strip()}
+        assert ConfigWriter.get_mcp_server("native-group") == expected
+        saved = yaml.safe_load((tmp_path / "mcp" / "native_group.yaml").read_text())
+        assert saved == {"name": "native-group", **expected}
+        assert result["config"]["group"] == expected["group"]
+        assert result["reconnected"] is False
+        forbidden.assert_not_called()
+        # An omitted group remains unchanged and also cannot trigger a reconnect.
+        await mcp_routes.update_mcp_server("native-group", mcp_routes.McpUpdateRequest(config={}))
+        assert ConfigWriter.get_mcp_server("native-group") == expected
+
+    @pytest.mark.asyncio
+    async def test_group_only_preserves_yaml_fields_and_original_filename(self, tmp_path, monkeypatch):
+        import yaml
+        from flocks.config.config_writer import ConfigWriter
+
+        monkeypatch.setenv("FLOCKS_CONFIG_DIR", str(tmp_path / "config"))
+        monkeypatch.setattr(tool_loader, "_MCP_SUBDIR", tmp_path / "mcp")
+        original = {"type": "remote", "url": "https://example.invalid/runtime", "group": "Before"}
+        ConfigWriter.add_mcp_server("native-group", original)
+        yaml_path = tmp_path / "mcp" / "native-group.yml"
+        yaml_path.parent.mkdir()
+        source = {"name": "native-group", "type": "remote", "url": "https://example.invalid/source", "group": "Before", "future_metadata": {"kept": True}}
+        yaml_path.write_text(yaml.safe_dump(source))
+        await mcp_routes.update_mcp_server("native-group", mcp_routes.McpUpdateRequest(config={"group": None}))
+        assert yaml.safe_load(yaml_path.read_text()) == {**source, "group": ""}
+        assert ConfigWriter.get_mcp_server("native-group") == {**original, "group": ""}
+        assert sorted(path.name for path in yaml_path.parent.iterdir()) == ["native-group.yml"]
+
+    @pytest.mark.parametrize("group", ["Operations", "", None])
+    def test_native_config_replacement_preserves_omitted_group(self, tmp_path, monkeypatch, group):
+        import yaml
+        from flocks.config.config_writer import ConfigWriter
+
+        monkeypatch.setenv("FLOCKS_CONFIG_DIR", str(tmp_path / "config"))
+        monkeypatch.setattr(tool_loader, "_MCP_SUBDIR", tmp_path / "mcp")
+        ConfigWriter.add_mcp_server("native", {"type": "remote", "url": "https://example.invalid/old", "group": group})
+        replacement = {"type": "remote", "url": "https://example.invalid/new", "enabled": False}
+        mcp_routes._persist_mcp_server_config("native", replacement)
+        expected = {**replacement, "group": group or ""}
+        assert ConfigWriter.get_mcp_server("native") == expected
+        assert yaml.safe_load((tmp_path / "mcp" / "native.yaml").read_text()) == {"name": "native", **expected}
+        assert "group" not in replacement
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("saved_group", ["Operations", "", None])
+    async def test_catalog_reinstall_preserves_native_group(self, tmp_path, monkeypatch, saved_group):
+        from types import SimpleNamespace
+        from flocks.config.config_writer import ConfigWriter
+
+        monkeypatch.setenv("FLOCKS_CONFIG_DIR", str(tmp_path / "config"))
+        monkeypatch.setattr(tool_loader, "_MCP_SUBDIR", tmp_path / "mcp")
+        ConfigWriter.add_mcp_server("native", {"type": "local", "command": ["old"], "group": saved_group})
+        entry = SimpleNamespace(
+            name="Native", group="Package", required_env_vars={},
+            to_mcp_config=lambda *args, **kwargs: {"type": "local", "command": ["new"]},
+        )
+        monkeypatch.setattr(mcp_routes.McpCatalog, "get", lambda: SimpleNamespace(get_entry=lambda name: entry))
+        result = await mcp_routes.install_from_catalog(mcp_routes.CatalogInstallRequest(server_id="native", skip_package_install=True))
+        assert result["config"]["group"] == (saved_group or "")
+        assert ConfigWriter.get_mcp_server("native")["group"] == (saved_group or "")
+
+    @pytest.mark.asyncio
+    async def test_unconfigured_catalog_group_write_rejected(self, monkeypatch):
+        from fastapi import HTTPException
+
+        monkeypatch.setattr(mcp_routes.ConfigWriter, "get_mcp_server", lambda name: None)
+        monkeypatch.setattr(mcp_routes, "_persist_mcp_server_config", lambda *a: pytest.fail("must not install"))
+        with pytest.raises(HTTPException) as exc:
+            await mcp_routes.update_mcp_server("catalog-only", mcp_routes.McpUpdateRequest(config={"group": "G"}))
+        assert exc.value.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_status_and_info_config_clear_outranks_catalog_default(self, monkeypatch):
+        from types import SimpleNamespace
+
+        monkeypatch.setattr(mcp_routes.McpCatalog, "get", lambda: SimpleNamespace(get_entry=lambda name: SimpleNamespace(group="Package")))
+        monkeypatch.setattr(mcp_routes.MCP, "status", AsyncMock(return_value={
+            "cleared": McpStatusInfo(status=McpStatus.CONNECTED),
+        }))
+        configs = {
+            "cleared": {"type": "remote", "url": "https://example.invalid", "group": ""},
+            "inherited": {"type": "remote", "url": "https://example.invalid"},
+        }
+        monkeypatch.setattr(mcp_routes.ConfigWriter, "list_mcp_servers", lambda: configs)
+        monkeypatch.setattr(mcp_routes.ConfigWriter, "get_mcp_server", configs.get)
+        monkeypatch.setattr(mcp_routes.MCP, "get_server_info", AsyncMock(return_value=None))
+        statuses = await mcp_routes.get_mcp_status()
+        assert statuses["cleared"]["group"] == ""
+        assert statuses["inherited"]["group"] == "Package"
+        info = await mcp_routes.get_mcp_server_info("cleared")
+        assert info["group"] == info["config"]["group"] == info["status"]["group"] == ""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("method,path,payload", [
+        ("PUT", "/api/mcp/validation-only", {"config": {"group": "a\x00b"}}),
+        ("PATCH", "/api/tools/validation-only", {"group": 42}),
+        ("PATCH", "/api/provider/api-services/validation-only", {"group": "x" * 33}),
+    ])
+    async def test_native_group_http_validation_errors_are_serializable(self, client, method, path, payload):
+        response = await client.request(method, path, json=payload)
+        assert response.status_code == 422, response.text
+
+    @pytest.mark.parametrize("group", [42, [], "x" * 33, "a\x00b"])
+    def test_group_validation_rejects_invalid_config(self, group):
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError):
+            mcp_routes.McpUpdateRequest(config={"group": group})
+
+
 class TestMcpRoutes:
 
     @pytest.mark.asyncio

@@ -133,6 +133,11 @@ class PermissionConfig(BaseModel):
         return migrated
 
 
+def _preserve_group_clear(value: Any) -> Any:
+    """An explicit null group must survive exclude-none config serialization."""
+    return "" if value is None else value
+
+
 # ==================== Agent Configuration ====================
 
 class AgentConfig(BaseModel):
@@ -144,6 +149,8 @@ class AgentConfig(BaseModel):
     model_config = {"extra": "allow", "populate_by_name": True}  # Allow unknown fields and populate by alias
     
     name: Optional[str] = None
+    group: Optional[str] = None
+    _normalize_group_clear = field_validator("group", mode="before")(_preserve_group_clear)
     model: Optional[str] = None
     temperature: Optional[float] = None
     top_p: Optional[float] = None
@@ -222,6 +229,21 @@ class ProviderOptionsConfig(BaseModel):
     enterprise_url: Optional[str] = Field(None, alias="enterpriseUrl")
     set_cache_key: Optional[bool] = Field(None, alias="setCacheKey")
     timeout: Optional[Union[int, Literal[False]]] = None
+    max_concurrent_requests: Optional[int] = Field(
+        None,
+        alias="maxConcurrentRequests",
+        ge=0,
+        description=(
+            "Cap on concurrent model requests to this provider across the "
+            "whole process (sessions, subagents, tasks and workflow llm nodes "
+            "share it). A response that only fans out to subagents stays "
+            "inside it; once it runs an inline tool it gives its slot up for "
+            "the rest of that response, so generating requests can exceed the "
+            "cap until that stream ends. Title, compaction, goal and memory "
+            "calls bypass it entirely. 0 disables the cap. Overrides "
+            "concurrency.maxConcurrentRequests."
+        ),
+    )
 
 
 class ModelVariantConfig(BaseModel):
@@ -262,7 +284,9 @@ class McpOAuthConfig(BaseModel):
 class McpLocalConfig(BaseModel):
     """MCP local server configuration"""
     model_config = {"extra": "allow", "populate_by_name": True}
-    
+
+    group: Optional[str] = None
+    _normalize_group_clear = field_validator("group", mode="before")(_preserve_group_clear)
     type: Literal["local"]
     command: List[str]
     environment: Optional[Dict[str, str]] = Field(
@@ -276,7 +300,9 @@ class McpLocalConfig(BaseModel):
 class McpRemoteConfig(BaseModel):
     """MCP remote server configuration"""
     model_config = {"extra": "allow"}
-    
+
+    group: Optional[str] = None
+    _normalize_group_clear = field_validator("group", mode="before")(_preserve_group_clear)
     type: Literal["remote", "sse"]
     url: str
     enabled: Optional[bool] = None
@@ -456,6 +482,39 @@ class UIConfig(BaseModel):
         if any(ord(ch) < 32 or ord(ch) == 127 for ch in normalized):
             raise ValueError("faviconPath must not contain control characters")
         return normalized
+
+
+class ConcurrencyConfig(BaseModel):
+    """Process-wide limits on model requests and subagent fan-out."""
+    model_config = {"extra": "allow", "populate_by_name": True}
+
+    max_concurrent_requests: Optional[int] = Field(
+        None,
+        alias="maxConcurrentRequests",
+        ge=0,
+        description=(
+            "Default cap on generating model requests per provider. Every caller "
+            "in the process (interactive sessions, foreground subagents, "
+            "scheduled/background tasks, workflow llm nodes) shares it; requests "
+            "beyond the cap queue in-process instead of hitting the provider's "
+            "own limit and failing with HTTP 429. A response that only fans out "
+            "to subagents stays inside the cap; once it runs an inline tool it "
+            "gives its slot up for the rest of that response, so generating "
+            "requests can exceed the cap until the stream ends. Title, "
+            "compaction, goal and memory calls bypass it entirely. 0 disables "
+            "the cap. Falls back to FLOCKS_LLM_MAX_CONCURRENT_REQUESTS, then 8."
+        ),
+    )
+    max_parallel_subagents: Optional[int] = Field(
+        None,
+        alias="maxParallelSubagents",
+        ge=0,
+        description=(
+            "How many sibling delegate_task calls from one model response run at "
+            "the same time; the rest start as earlier ones finish. 0 disables "
+            "the cap. Falls back to FLOCKS_SUBAGENT_MAX_PARALLEL, then 4."
+        ),
+    )
 
 
 class ExperimentalConfig(BaseModel):
@@ -826,6 +885,8 @@ class ConfigInfo(BaseModel):
     disabled_providers: Optional[List[str]] = None
     enabled_providers: Optional[List[str]] = None
     model: Optional[str] = None
+    default_models: Optional[Dict[str, Any]] = None
+    api_services: Optional[Dict[str, Any]] = None
     small_model: Optional[str] = Field(None, alias="smallModel")
     fallback_providers: Optional[List[FallbackProviderConfig]] = None
     default_agent: Optional[str] = Field(None, alias="defaultAgent")
@@ -873,7 +934,19 @@ class ConfigInfo(BaseModel):
         None,
         description="Outbound network policy (proxy mode, proxy URLs, direct-connection whitelist).",
     )
-    
+    concurrency: Optional[ConcurrencyConfig] = Field(
+        None,
+        description="Process-wide model request / subagent concurrency limits.",
+    )
+    # Workflow engine settings, read raw by flocks.workflow.runner
+    workflow: Optional[Dict[str, Any]] = Field(
+        None,
+        description=(
+            "Workflow engine settings. Keys: llm.max_concurrency (concurrent LLM "
+            "calls on the workflow loop; default 8, 0 = unlimited)."
+        ),
+    )
+
     # Memory system configuration (added for memory system integration)
     memory: Optional[Any] = Field(
         None,
@@ -927,6 +1000,29 @@ class ConfigInfo(BaseModel):
         alias="portalBaseUrl",
         description="Console portal base URL used by OSS console account login redirect.",
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def preserve_explicit_plugin_group_clears(cls, data: Any) -> Any:
+        """Keep explicit null groups through the exclude-none config merge/save.
+
+        An omitted group inherits, but null is a clear, represented on disk by
+        the empty string. Only native plugin metadata is affected; connection
+        fields and unrelated config retain their existing None semantics.
+        """
+        if not isinstance(data, dict):
+            return data
+        normalized = dict(data)
+        for section in ("agent", "mode", "mcp", "api_services", "tool_settings"):
+            entries = data.get(section)
+            if not isinstance(entries, dict):
+                continue
+            entries = dict(entries)
+            for name, entry in entries.items():
+                if isinstance(entry, dict) and "group" in entry and entry["group"] is None:
+                    entries[name] = {**entry, "group": ""}
+            normalized[section] = entries
+        return normalized
 
     @model_validator(mode="before")
     @classmethod
@@ -1565,6 +1661,12 @@ class Config:
         Returns:
             Complete merged configuration
         """
+        from flocks.config.runtime import runtime_config
+
+        override = runtime_config.get()
+        if override is not None:
+            return override
+
         if cls._cached_config is not None:
             return cls._cached_config
         
@@ -1744,6 +1846,9 @@ class Config:
                     channel_cfg = channels.get(channel_id)
                     if isinstance(channel_cfg, dict):
                         channel_cfg.pop("allowFrom", None)
+        from flocks.config.runtime import runtime_config
+        if runtime_config.get() is not None:
+            raise RuntimeError("Configuration writes are disabled during a runtime override")
         config_file.write_text(json.dumps(config_data, indent=2), encoding="utf-8")
         
         # Clear cache
