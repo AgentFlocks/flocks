@@ -164,6 +164,67 @@ vi.mock('react-i18next', () => ({
   }),
 }));
 
+function makeWorkflow(id: string, createdAt: number) {
+  return {
+    id,
+    name: id,
+    workflowJson: { start: 'n1', nodes: [], edges: [] },
+    status: 'active',
+    source: 'global',
+    createdAt,
+    updatedAt: createdAt,
+    stats: {
+      callCount: 0,
+      successCount: 0,
+      errorCount: 0,
+      totalRuntime: 0,
+      avgRuntime: 0,
+      thumbsUp: 0,
+      thumbsDown: 0,
+    },
+  };
+}
+
+function toolPart(tool: string, input: Record<string, unknown>, sessionID = 'session-active') {
+  return {
+    id: `part-${tool}-${JSON.stringify(input).length}`,
+    messageID: 'message-1',
+    sessionID,
+    type: 'tool',
+    tool,
+    state: { status: 'completed', input },
+  };
+}
+
+// A write tool call in the chat that targets the workflow's directory.
+function workflowWritePart(workflowId: string, sessionID = 'session-active') {
+  return toolPart(
+    'write',
+    { filePath: `/home/alice/.flocks/plugins/workflows/${workflowId}/workflow.md` },
+    sessionID,
+  );
+}
+
+function emitToolPart(part: unknown) {
+  latestSessionChatProps()?.onSSEEvent?.({ type: 'message.part.updated', properties: { part } });
+}
+
+function mockStoredConversation(sessionId: string, parts: unknown[]) {
+  mockClientGet.mockImplementation((url: string) => Promise.resolve(
+    url === `/api/session/${sessionId}/message`
+      ? { data: [{ info: { id: 'message-1', role: 'assistant' }, parts }] }
+      : { data: {} },
+  ));
+}
+
+function latestSessionChatProps() {
+  return capturedSessionChatProps[capturedSessionChatProps.length - 1];
+}
+
+function storedConversationFetches(sessionId: string) {
+  return mockClientGet.mock.calls.filter(([url]) => url === `/api/session/${sessionId}/message`).length;
+}
+
 function renderCreateChatTab(props?: Partial<ComponentProps<typeof CreateChatTab>>) {
   return render(
     <MemoryRouter>
@@ -402,7 +463,7 @@ describe('WorkflowCreate CreateChatTab', () => {
     expect(onWorkflowCreated).not.toHaveBeenCalled();
   });
 
-  it('attaches the workflow identified by a workflow.created SSE event', async () => {
+  it('attaches a workflow.created workflow that this chat wrote', async () => {
     const creationStartedAt = Date.now();
     const createdWorkflow = {
       id: 'created-by-this-event',
@@ -435,7 +496,11 @@ describe('WorkflowCreate CreateChatTab', () => {
       expect(workflowAPI.listSummaries).toHaveBeenCalledTimes(1);
     });
 
-    capturedSessionChatProps[capturedSessionChatProps.length - 1]?.onSSEEvent?.({
+    latestSessionChatProps()?.onSSEEvent?.({
+      type: 'message.part.updated',
+      properties: { part: workflowWritePart('created-by-this-event') },
+    });
+    latestSessionChatProps()?.onSSEEvent?.({
       type: 'workflow.created',
       properties: { id: 'created-by-this-event' },
     });
@@ -444,6 +509,39 @@ describe('WorkflowCreate CreateChatTab', () => {
       expect(workflowAPI.get).toHaveBeenCalledWith('created-by-this-event');
     });
     expect(onWorkflowCreated).toHaveBeenCalledWith(createdWorkflow);
+    expect(storedConversationFetches('session-active')).toBe(0);
+  });
+
+  it('ignores workflow.created for a workflow this chat never touched', async () => {
+    const creationStartedAt = Date.now();
+    vi.mocked(workflowAPI.get).mockResolvedValue({ data: makeWorkflow('someone-elses', creationStartedAt + 100) });
+    const onWorkflowCreated = vi.fn();
+
+    renderCreateChatTab({
+      initialSessionId: 'session-active',
+      creationStartedAt,
+      onWorkflowCreated,
+    });
+
+    await waitFor(() => {
+      expect(workflowAPI.listSummaries).toHaveBeenCalledTimes(1);
+    });
+
+    // A tool call from another session must not count for this chat.
+    latestSessionChatProps()?.onSSEEvent?.({
+      type: 'message.part.updated',
+      properties: { part: workflowWritePart('someone-elses', 'session-other') },
+    });
+    latestSessionChatProps()?.onSSEEvent?.({
+      type: 'workflow.created',
+      properties: { id: 'someone-elses' },
+    });
+
+    await waitFor(() => {
+      expect(storedConversationFetches('session-active')).toBe(1);
+    });
+    expect(workflowAPI.get).not.toHaveBeenCalled();
+    expect(onWorkflowCreated).not.toHaveBeenCalled();
   });
 
   it('replays workflow.created events that arrive before the initial snapshot is ready', async () => {
@@ -471,6 +569,9 @@ describe('WorkflowCreate CreateChatTab', () => {
       resolveSnapshot = resolve;
     }) as any);
     vi.mocked(workflowAPI.get).mockResolvedValue({ data: createdWorkflow });
+    // The page was reloaded after the chat wrote the workflow: the link comes
+    // from the stored conversation, not from a live tool event.
+    mockStoredConversation('session-active', [workflowWritePart('created-before-snapshot-ready')]);
     const onWorkflowCreated = vi.fn();
 
     renderCreateChatTab({
@@ -537,5 +638,278 @@ describe('WorkflowCreate CreateChatTab', () => {
       expect(workflowAPI.listSummaries).toHaveBeenCalledTimes(2);
     });
     expect(onWorkflowCreated).not.toHaveBeenCalled();
+  });
+
+  it('does not attach another user\'s workflow even when it is the only fresh one', async () => {
+    const creationStartedAt = Date.now();
+    const othersWorkflow = makeWorkflow('bob-workflow', creationStartedAt + 100);
+    vi.mocked(workflowAPI.listSummaries)
+      .mockResolvedValueOnce({ data: [] })
+      .mockResolvedValue({ data: [othersWorkflow] });
+    vi.mocked(workflowAPI.get).mockResolvedValue({ data: othersWorkflow });
+    const onWorkflowCreated = vi.fn();
+
+    renderCreateChatTab({
+      initialSessionId: 'session-active',
+      creationStartedAt,
+      onWorkflowCreated,
+    });
+
+    await waitFor(() => {
+      expect(workflowAPI.listSummaries).toHaveBeenCalledTimes(1);
+    });
+
+    latestSessionChatProps()?.onStreamingDone?.();
+    await waitFor(() => {
+      expect(storedConversationFetches('session-active')).toBe(1);
+    });
+    expect(workflowAPI.get).not.toHaveBeenCalled();
+    expect(onWorkflowCreated).not.toHaveBeenCalled();
+
+    // Once checked, the same candidate never triggers another read, even
+    // while the chat keeps working.
+    emitToolPart(toolPart('bash', { command: 'ls' }));
+    latestSessionChatProps()?.onStreamingDone?.();
+    await waitFor(() => {
+      expect(workflowAPI.listSummaries).toHaveBeenCalledTimes(3);
+    });
+    expect(storedConversationFetches('session-active')).toBe(1);
+    expect(onWorkflowCreated).not.toHaveBeenCalled();
+  });
+
+  it('does not attach another user\'s workflow that this chat only read', async () => {
+    const creationStartedAt = Date.now();
+    const othersWorkflow = makeWorkflow('bob-workflow', creationStartedAt + 100);
+    vi.mocked(workflowAPI.listSummaries)
+      .mockResolvedValueOnce({ data: [] })
+      .mockResolvedValue({ data: [othersWorkflow] });
+    vi.mocked(workflowAPI.get).mockResolvedValue({ data: othersWorkflow });
+    const onWorkflowCreated = vi.fn();
+
+    renderCreateChatTab({
+      initialSessionId: 'session-active',
+      creationStartedAt,
+      onWorkflowCreated,
+    });
+
+    await waitFor(() => {
+      expect(workflowAPI.listSummaries).toHaveBeenCalledTimes(1);
+    });
+
+    emitToolPart(toolPart('read', { filePath: '/home/bob/.flocks/plugins/workflows/bob-workflow/workflow.json' }));
+    latestSessionChatProps()?.onStreamingDone?.();
+
+    await waitFor(() => {
+      expect(storedConversationFetches('session-active')).toBe(1);
+    });
+    expect(workflowAPI.get).not.toHaveBeenCalled();
+    expect(onWorkflowCreated).not.toHaveBeenCalled();
+  });
+
+  it('prefers the workflow this chat wrote over one it only touched from the shell', async () => {
+    const creationStartedAt = Date.now();
+    const othersWorkflow = makeWorkflow('bob-workflow', creationStartedAt + 300);
+    const ownWorkflow = makeWorkflow('alice-workflow', creationStartedAt + 100);
+    vi.mocked(workflowAPI.listSummaries)
+      .mockResolvedValueOnce({ data: [] })
+      .mockResolvedValue({ data: [othersWorkflow, ownWorkflow] });
+    vi.mocked(workflowAPI.get).mockImplementation(async (id: string) => ({
+      data: id === ownWorkflow.id ? ownWorkflow : othersWorkflow,
+    }) as any);
+    const onWorkflowCreated = vi.fn();
+
+    renderCreateChatTab({
+      initialSessionId: 'session-active',
+      creationStartedAt,
+      onWorkflowCreated,
+    });
+
+    await waitFor(() => {
+      expect(workflowAPI.listSummaries).toHaveBeenCalledTimes(1);
+    });
+
+    // Copying out of bob's directory is a shell write that names bob's id.
+    emitToolPart(toolPart('bash', { command: 'cp ~/.flocks/plugins/workflows/bob-workflow/workflow.json /tmp/ref.json' }));
+    emitToolPart(workflowWritePart('alice-workflow'));
+    latestSessionChatProps()?.onStreamingDone?.();
+
+    await waitFor(() => {
+      expect(onWorkflowCreated).toHaveBeenCalledWith(ownWorkflow);
+    });
+    expect(workflowAPI.get).not.toHaveBeenCalledWith('bob-workflow');
+  });
+
+  it('does not attach another user\'s workflow that this chat only inspected from the shell', async () => {
+    const creationStartedAt = Date.now();
+    const othersWorkflow = makeWorkflow('bob-workflow', creationStartedAt + 100);
+    vi.mocked(workflowAPI.listSummaries)
+      .mockResolvedValueOnce({ data: [] })
+      .mockResolvedValue({ data: [othersWorkflow] });
+    vi.mocked(workflowAPI.get).mockResolvedValue({ data: othersWorkflow });
+    const onWorkflowCreated = vi.fn();
+
+    renderCreateChatTab({
+      initialSessionId: 'session-active',
+      creationStartedAt,
+      onWorkflowCreated,
+    });
+
+    await waitFor(() => {
+      expect(workflowAPI.listSummaries).toHaveBeenCalledTimes(1);
+    });
+
+    emitToolPart(toolPart('bash', { command: 'cat ~/.flocks/plugins/workflows/bob-workflow/workflow.json' }));
+    latestSessionChatProps()?.onStreamingDone?.();
+
+    await waitFor(() => {
+      expect(storedConversationFetches('session-active')).toBe(1);
+    });
+    expect(workflowAPI.get).not.toHaveBeenCalled();
+    expect(onWorkflowCreated).not.toHaveBeenCalled();
+  });
+
+  it('attaches a workflow written with a guessed argument name', async () => {
+    const creationStartedAt = Date.now();
+    const ownWorkflow = makeWorkflow('alice-workflow', creationStartedAt + 100);
+    vi.mocked(workflowAPI.listSummaries)
+      .mockResolvedValueOnce({ data: [] })
+      .mockResolvedValue({ data: [ownWorkflow] });
+    vi.mocked(workflowAPI.get).mockResolvedValue({ data: ownWorkflow });
+    const onWorkflowCreated = vi.fn();
+
+    renderCreateChatTab({
+      initialSessionId: 'session-active',
+      creationStartedAt,
+      onWorkflowCreated,
+    });
+
+    await waitFor(() => {
+      expect(workflowAPI.listSummaries).toHaveBeenCalledTimes(1);
+    });
+
+    // The registry runs `file_path` as filePath; the stored part keeps the guess.
+    emitToolPart(toolPart('write', { file_path: '/home/alice/.flocks/plugins/workflows/alice-workflow/workflow.md' }));
+    latestSessionChatProps()?.onStreamingDone?.();
+
+    await waitFor(() => {
+      expect(onWorkflowCreated).toHaveBeenCalledWith(ownWorkflow);
+    });
+    expect(storedConversationFetches('session-active')).toBe(0);
+  });
+
+  it('reads the stored conversation once per new candidate and retries a failed read', async () => {
+    const creationStartedAt = Date.now();
+    const firstOthers = makeWorkflow('bob-workflow', creationStartedAt + 100);
+    const secondOthers = makeWorkflow('carol-workflow', creationStartedAt + 200);
+    vi.mocked(workflowAPI.listSummaries)
+      .mockResolvedValueOnce({ data: [] })
+      .mockResolvedValueOnce({ data: [firstOthers] })
+      .mockResolvedValueOnce({ data: [firstOthers] })
+      .mockResolvedValueOnce({ data: [firstOthers] })
+      .mockResolvedValue({ data: [secondOthers, firstOthers] });
+    let failNextRead = true;
+    mockClientGet.mockImplementation((url: string) => {
+      if (url !== '/api/session/session-active/message') return Promise.resolve({ data: {} });
+      if (failNextRead) {
+        failNextRead = false;
+        return Promise.reject(new Error('network down'));
+      }
+      return Promise.resolve({ data: [] });
+    });
+    const onWorkflowCreated = vi.fn();
+
+    renderCreateChatTab({
+      initialSessionId: 'session-active',
+      creationStartedAt,
+      onWorkflowCreated,
+    });
+
+    await waitFor(() => {
+      expect(workflowAPI.listSummaries).toHaveBeenCalledTimes(1);
+    });
+
+    const detectAndCountReads = async (expectedPolls: number) => {
+      latestSessionChatProps()?.onStreamingDone?.();
+      await waitFor(() => {
+        expect(workflowAPI.listSummaries).toHaveBeenCalledTimes(expectedPolls);
+      });
+      await act(async () => {});
+      return storedConversationFetches('session-active');
+    };
+
+    expect(await detectAndCountReads(2)).toBe(1); // read fails, candidate stays unchecked
+    expect(await detectAndCountReads(3)).toBe(2); // retried and settled
+    expect(await detectAndCountReads(4)).toBe(2); // settled candidate: no read
+    expect(await detectAndCountReads(5)).toBe(3); // a new candidate gets its own read
+    expect(onWorkflowCreated).not.toHaveBeenCalled();
+  });
+
+  it('picks the workflow this chat wrote when another user creates one at the same time', async () => {
+    const creationStartedAt = Date.now();
+    const othersWorkflow = makeWorkflow('bob-workflow', creationStartedAt + 300);
+    const ownWorkflow = makeWorkflow('alice-workflow', creationStartedAt + 100);
+    vi.mocked(workflowAPI.listSummaries)
+      .mockResolvedValueOnce({ data: [] })
+      .mockResolvedValue({ data: [othersWorkflow, ownWorkflow] });
+    vi.mocked(workflowAPI.get).mockImplementation(async (id: string) => ({
+      data: id === ownWorkflow.id ? ownWorkflow : othersWorkflow,
+    }) as any);
+    const onWorkflowCreated = vi.fn();
+
+    renderCreateChatTab({
+      initialSessionId: 'session-active',
+      creationStartedAt,
+      onWorkflowCreated,
+    });
+
+    await waitFor(() => {
+      expect(workflowAPI.listSummaries).toHaveBeenCalledTimes(1);
+    });
+
+    emitToolPart(workflowWritePart('alice-workflow'));
+    latestSessionChatProps()?.onStreamingDone?.();
+
+    await waitFor(() => {
+      expect(onWorkflowCreated).toHaveBeenCalledWith(ownWorkflow);
+    });
+    expect(workflowAPI.get).not.toHaveBeenCalledWith('bob-workflow');
+  });
+
+  it('recovers the link from the stored conversation after a reload', async () => {
+    const creationStartedAt = Date.now();
+    const ownWorkflow = makeWorkflow('reloaded-workflow', creationStartedAt + 100);
+    vi.mocked(workflowAPI.listSummaries)
+      .mockResolvedValueOnce({ data: [] })
+      .mockResolvedValue({ data: [ownWorkflow] });
+    vi.mocked(workflowAPI.get).mockResolvedValue({ data: ownWorkflow });
+    mockStoredConversation('session-active', [{
+      id: 'part-bash',
+      messageID: 'message-1',
+      sessionID: 'session-active',
+      type: 'tool',
+      tool: 'bash',
+      state: {
+        status: 'completed',
+        input: { command: 'mkdir -p ~/.flocks/plugins/workflows/reloaded-workflow' },
+      },
+    }]);
+    const onWorkflowCreated = vi.fn();
+
+    renderCreateChatTab({
+      initialSessionId: 'session-active',
+      creationStartedAt,
+      onWorkflowCreated,
+    });
+
+    await waitFor(() => {
+      expect(workflowAPI.listSummaries).toHaveBeenCalledTimes(1);
+    });
+
+    latestSessionChatProps()?.onStreamingDone?.();
+
+    await waitFor(() => {
+      expect(onWorkflowCreated).toHaveBeenCalledWith(ownWorkflow);
+    });
+    expect(storedConversationFetches('session-active')).toBe(1);
   });
 });
