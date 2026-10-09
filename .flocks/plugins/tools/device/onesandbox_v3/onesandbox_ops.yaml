@@ -1,4 +1,5 @@
 name: onesandbox_ops
+group: 威胁情报
 description: >
   OneSandbox v3 mutation grouped tool for sample upload, report deletion,
   event upload, hash reputation update/delete, SafeSkill scan, and CheckURL

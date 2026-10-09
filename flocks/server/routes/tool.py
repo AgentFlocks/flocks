@@ -8,7 +8,8 @@ import threading
 import time
 from typing import Annotated, List, Optional, Dict, Any, Literal, Sequence
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+from pydantic_core import PydanticCustomError
 
 from flocks.server.auth import require_admin
 from flocks.server.config_mutation import serialized_config_mutation
@@ -25,6 +26,8 @@ from flocks.tool.registry import (
     ToolResult,
     ToolCategory,
     ToolContext,
+    normalize_tool_group,
+    is_shipped_tool_path,
 )
 
 
@@ -47,7 +50,9 @@ class ToolInfoResponse(BaseModel):
     parameters_count: int = Field(0, description="Number of tool parameters")
     enabled: bool = Field(True, description="Effective enabled state (overlay applied, ANDed with API service flag)")
     enabled_default: bool = Field(True, description="Factory default from the YAML/registration source (no overlay)")
-    enabled_customized: bool = Field(False, description="True if a user setting is recorded in flocks.json tool_settings")
+    group: Optional[str] = Field(None, description="Optional plugin group")
+    group_readonly: bool = False
+    enabled_customized: bool = Field(False, description="True if an enabled override is recorded in flocks.json tool_settings")
     requires_confirmation: bool = Field(False, description="Requires confirmation")
 
 
@@ -59,7 +64,17 @@ class ToolSchemaResponse(BaseModel):
 
 class ToolUpdateRequest(BaseModel):
     """Tool update request"""
-    enabled: bool = Field(..., description="Enable or disable the tool")
+    enabled: Optional[bool] = Field(None, description="Enable or disable the tool; omitted leaves it unchanged")
+    group: Optional[str] = Field(None, description="Plugin group; null or empty clears it")
+
+    _validate_group = field_validator("group", mode="before")(normalize_tool_group)
+
+    @field_validator("enabled", mode="before")
+    @classmethod
+    def validate_enabled(cls, value):
+        if value is None:
+            raise PydanticCustomError("bool_type", "enabled must be a boolean when provided")
+        return value
 
 
 class ToolExecuteRequest(BaseModel):
@@ -127,6 +142,7 @@ class ToolListFacets(BaseModel):
     category: Dict[str, int] = Field(default_factory=dict)
     source: Dict[str, int] = Field(default_factory=dict)
     source_groups: Dict[str, int] = Field(default_factory=dict)
+    group: Dict[str, int] = Field(default_factory=dict)
     source_name: Dict[str, int] = Field(default_factory=dict)
     enabled: Dict[str, int] = Field(default_factory=dict)
 
@@ -171,11 +187,13 @@ class ToolListIndexItem:
     enabled_default: bool
     enabled_customized: bool
     requires_confirmation: bool
+    group: Optional[str] = None
+    group_readonly: bool = False
 
 
 _TOOL_SUMMARY_CACHE_TTL_SECONDS = 5.0
 _tool_summary_cache_lock = threading.Lock()
-_tool_summary_cache_key: tuple[int, tuple[str, ...]] | None = None
+_tool_summary_cache_key: tuple[Any, ...] | None = None
 _tool_summary_cache_expires_at = 0.0
 _tool_summary_cache_items: tuple[ToolListIndexItem, ...] = ()
 
@@ -189,8 +207,10 @@ def _invalidate_tool_summary_cache() -> None:
         _tool_summary_cache_items = ()
 
 
-def _tool_summary_cache_current_key() -> tuple[int, tuple[str, ...]]:
-    return ToolRegistry.snapshot_identity()
+def _tool_summary_cache_current_key() -> tuple[Any, ...]:
+    # Metadata changes do not affect executable toolset revisions, but another
+    # worker's native settings write must still invalidate this list snapshot.
+    return (*ToolRegistry.snapshot_identity(), ToolRegistry._current_config_state_token())
 
 
 def _get_tool_summary_items() -> List[ToolListIndexItem]:
@@ -265,6 +285,8 @@ def _build_tool_response(t: ToolInfo, *, include_parameters: bool = True) -> Too
     parameters = [p.model_dump() for p in t.parameters] if include_parameters else []
     return ToolInfoResponse(
         name=t.name,
+        group=normalize_tool_group(t.group if t.group_readonly else setting.get("group", t.group)),
+        group_readonly=t.group_readonly,
         description=t.description,
         description_cn=t.description_cn,
         category=t.category.value,
@@ -286,6 +308,8 @@ def _build_tool_index_item(t: ToolInfo) -> ToolListIndexItem:
     setting = ConfigWriter.get_tool_setting(t.name) or {}
     return ToolListIndexItem(
         name=t.name,
+        group=normalize_tool_group(t.group if t.group_readonly else setting.get("group", t.group)),
+        group_readonly=t.group_readonly,
         description=t.description,
         description_cn=t.description_cn,
         category=t.category.value,
@@ -303,6 +327,8 @@ def _build_tool_index_item(t: ToolInfo) -> ToolListIndexItem:
 def _tool_index_item_to_response(item: ToolListIndexItem) -> ToolInfoResponse:
     return ToolInfoResponse(
         name=item.name,
+        group=item.group,
+        group_readonly=item.group_readonly,
         description=item.description,
         description_cn=item.description_cn,
         category=item.category,
@@ -347,6 +373,8 @@ def _build_tool_facets(items: Sequence[ToolInfoResponse | ToolListIndexItem]) ->
         facets.source[item.source] = facets.source.get(item.source, 0) + 1
         source_name = item.source_name or "Flocks"
         facets.source_name[source_name] = facets.source_name.get(source_name, 0) + 1
+        group = item.group or ""
+        facets.group[group] = facets.group.get(group, 0) + 1
         enabled_key = str(item.enabled).lower()
         facets.enabled[enabled_key] = facets.enabled.get(enabled_key, 0) + 1
     return facets
@@ -392,8 +420,11 @@ def _filter_tool_items(
     include_source: bool = True,
     include_source_name: bool = True,
     include_enabled: bool = True,
+    group_filter: Optional[str] = None,
 ) -> List[ToolInfoResponse | ToolListIndexItem]:
     result = list(items)
+    if group_filter is not None:
+        result = [tool for tool in result if (tool.group or "") == group_filter]
     if include_category and category_filter:
         result = [tool for tool in result if tool.category in category_filter]
     if include_source and source_filter:
@@ -654,7 +685,7 @@ def _set_global_tool_enabled(tool: Any, desired: bool) -> bool:
         new_enabled = desired and service_ok
 
         if desired == default:
-            removed = ConfigWriter.delete_tool_setting(tool.info.name)
+            removed = ConfigWriter.delete_tool_setting(tool.info.name, field="enabled")
             log.info("tool.updated.reset_to_default", {
                 "name": tool.info.name,
                 "enabled": new_enabled,
@@ -742,6 +773,7 @@ async def list_tools_page(
     source_name: Optional[str] = None,
     enabled: Optional[str] = None,
     q: Optional[str] = None,
+    group: Optional[str] = None,
     sort_by: Literal["category", "source", "source_name", "enabled", "name"] = "source",
     sort_dir: Literal["asc", "desc"] = "asc",
     offset: int = Query(0, ge=0),
@@ -764,52 +796,38 @@ async def list_tools_page(
 
     all_items = _get_tool_summary_items()
 
-    result = _filter_tool_items(
-        all_items,
+    try:
+        group_filter = normalize_tool_group(group)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    filters = dict(
         category_filter=category_filter,
         source_filter=source_filter,
         source_name_filter=source_name_filter,
         enabled_filter=enabled_filter,
         query=query,
     )
-    source_facet_items = _filter_tool_items(
-        all_items,
-        category_filter=category_filter,
-        source_filter=source_filter,
-        source_name_filter=source_name_filter,
-        enabled_filter=enabled_filter,
-        query=query,
-        include_source=False,
-    )
+    # Group counts span the full eligible query, before selecting a group or page.
+    eligible_items = _filter_tool_items(all_items, **filters)
+    result = [
+        item for item in eligible_items
+        if group_filter is None or (item.group or "") == group_filter
+    ]
+    filters["group_filter"] = group_filter
+    source_facet_items = _filter_tool_items(all_items, **filters, include_source=False)
     facets = ToolListFacets(
+        group=_build_tool_facets(eligible_items).group,
         category=_build_tool_facets(_filter_tool_items(
-            all_items,
-            category_filter=category_filter,
-            source_filter=source_filter,
-            source_name_filter=source_name_filter,
-            enabled_filter=enabled_filter,
-            query=query,
-            include_category=False,
+            all_items, **filters, include_category=False,
         )).category,
         source=_build_tool_facets(source_facet_items).source,
         source_groups=_build_source_group_counts(source_facet_items),
         source_name=_build_tool_facets(_filter_tool_items(
-            all_items,
-            category_filter=category_filter,
-            source_filter=source_filter,
-            source_name_filter=source_name_filter,
-            enabled_filter=enabled_filter,
-            query=query,
-            include_source_name=False,
+            all_items, **filters, include_source_name=False,
         )).source_name,
         enabled=_build_tool_facets(_filter_tool_items(
-            all_items,
-            category_filter=category_filter,
-            source_filter=source_filter,
-            source_name_filter=source_name_filter,
-            enabled_filter=enabled_filter,
-            query=query,
-            include_enabled=False,
+            all_items, **filters, include_enabled=False,
         )).enabled,
     )
     result = _sort_tool_items(result, sort_by, sort_dir)
@@ -904,8 +922,8 @@ async def update_tool(
     Two behaviours of note (global mode only):
 
     * If ``request.enabled`` matches the registration-time default we
-      *delete* the overlay entry instead of writing one — the tool is
-      back to "no customisation", and the UI's "已自定义" badge clears.
+      remove only the enabled override — grouping and other metadata are
+      retained, and the UI's "已自定义" enabled badge clears.
     * Asking to enable a tool whose API service is currently disabled
       still persists the overlay (so the intent survives the service
       being re-enabled later) but does not flip the in-memory
@@ -921,7 +939,16 @@ async def update_tool(
             detail=f"Tool not found: {tool_name}",
         )
 
-    desired = bool(request.enabled)
+    if not request.model_fields_set:
+        raise HTTPException(status_code=400, detail="No updates provided")
+    if device_id and "group" in request.model_fields_set:
+        raise HTTPException(status_code=400, detail="group belongs to the tool, not a device override")
+    if "group" in request.model_fields_set:
+        try:
+            ToolRegistry.validate_group_settings({tool_name: {"group": request.group}})
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    desired = request.enabled
 
     # --- Per-device mode ---
     if device_id:
@@ -953,8 +980,12 @@ async def update_tool(
         _invalidate_tool_summary_cache()
         return _build_tool_response(tool.info)
 
-    # --- Global mode (original behaviour) ---
-    _set_global_tool_enabled(tool, desired)
+    # --- Global mode (native settings, without rescanning plugin files) ---
+    with ToolRegistry._refresh_lock:
+        if desired is not None:
+            _set_global_tool_enabled(tool, desired)
+        if "group" in request.model_fields_set and not tool.info.group_readonly:
+            ConfigWriter.set_tool_setting(tool_name, {"group": request.group or ""})
     _invalidate_tool_summary_cache()
     return _build_tool_response(tool.info)
 
@@ -966,7 +997,7 @@ async def update_tool(
 )
 @serialized_config_mutation
 async def reset_tool_setting(tool_name: str, _admin: object = Depends(require_admin)):
-    """Remove the user setting for ``tool_name`` and restore the default.
+    """Remove the enabled override for ``tool_name``, retaining other metadata.
 
     Restores the registration-time ``enabled`` value from the registry's
     snapshot (or the YAML file as a fallback) and re-applies the same
@@ -984,7 +1015,7 @@ async def reset_tool_setting(tool_name: str, _admin: object = Depends(require_ad
         )
 
     with ToolRegistry._refresh_lock:
-        removed = ConfigWriter.delete_tool_setting(tool_name)
+        removed = ConfigWriter.delete_tool_setting(tool_name, field="enabled")
         default = _get_default_enabled(tool.info)
         new_enabled = default and _service_allows_enable(tool.info)
         previous_enabled = bool(tool.info.enabled)
@@ -1363,6 +1394,9 @@ class CreateToolRequest(BaseModel):
     parameters: Optional[List[Dict[str, Any]]] = Field(None, description="Simplified parameter list")
     handler: Dict[str, Any] = Field(..., description="Handler config (type: http|script)")
     response: Optional[Dict[str, Any]] = Field(None, description="Response processing config")
+    group: Optional[str] = None
+
+    _validate_group = field_validator("group", mode="before")(normalize_tool_group)
 
 
 class UpdateToolRequest(BaseModel):
@@ -1375,6 +1409,9 @@ class UpdateToolRequest(BaseModel):
     parameters: Optional[List[Dict[str, Any]]] = Field(None)
     handler: Optional[Dict[str, Any]] = Field(None)
     response: Optional[Dict[str, Any]] = Field(None)
+    group: Optional[str] = None
+
+    _validate_group = field_validator("group", mode="before")(normalize_tool_group)
 
 
 class PluginToolListResponse(BaseModel):
@@ -1412,6 +1449,8 @@ async def create_tool(request: CreateToolRequest, _admin: object = Depends(requi
         "requires_confirmation": request.requires_confirmation,
         "handler": request.handler,
     }
+    if "group" in request.model_fields_set:
+        data["group"] = request.group or ""
     if request.inputSchema:
         data["inputSchema"] = request.inputSchema
     if request.parameters:
@@ -1481,13 +1520,16 @@ async def update_plugin_tool(name: str, request: UpdateToolRequest, _admin: obje
 
     ToolRegistry.init()
 
-    if not find_yaml_tool(name):
+    yaml_path = find_yaml_tool(name)
+    if not yaml_path:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"YAML plugin tool not found: {name}",
         )
 
-    updates = {k: v for k, v in request.model_dump().items() if v is not None}
+    updates = {k: v for k, v in request.model_dump(exclude_unset=True).items() if v is not None}
+    if "group" in request.model_fields_set:
+        updates["group"] = request.group or ""
     if not updates:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -1499,9 +1541,21 @@ async def update_plugin_tool(name: str, request: UpdateToolRequest, _admin: obje
             raise HTTPException(status_code=500, detail=f"Failed to update YAML for tool {name}")
     except HTTPException:
         raise
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as e:
         log.error("tool.update.error", {"error": str(e), "name": name})
         raise HTTPException(status_code=500, detail=str(e))
+
+    if "group" in updates and not is_shipped_tool_path(yaml_path):
+        # Explicit native edits also replace an existing user group override.
+        if "group" in (ConfigWriter.get_tool_setting(name) or {}):
+            ConfigWriter.set_tool_setting(name, {"group": updates["group"]})
+        tool = ToolRegistry.get(name)
+        if tool is not None and set(updates) == {"group"}:
+            tool.info.group = updates["group"]
+            _invalidate_tool_summary_cache()
+            return _build_tool_response(tool.info)
 
     # Reload tool into registry
     try:
@@ -1512,6 +1566,8 @@ async def update_plugin_tool(name: str, request: UpdateToolRequest, _admin: obje
             if not tool.info.source:
                 tool.info.source = "plugin_yaml"
             ToolRegistry.register(tool)
+            ToolRegistry._sync_api_service_states()
+            ToolRegistry._apply_tool_settings()
             _invalidate_tool_summary_cache()
             return _build_tool_response(tool.info)
     except Exception as e:
@@ -1607,7 +1663,7 @@ async def reload_tool(name: str, _admin: object = Depends(require_admin)):
     Re-reads the YAML file from disk and re-registers the tool
     in the ToolRegistry without restarting the service.
     """
-    from flocks.tool.tool_loader import find_yaml_tool, yaml_to_tool, _read_yaml_raw
+    from flocks.tool.tool_loader import find_yaml_tool, yaml_to_tool, _read_yaml_raw, validate_yaml_tool_replacement
 
     ToolRegistry.init()
 
@@ -1617,6 +1673,11 @@ async def reload_tool(name: str, _admin: object = Depends(require_admin)):
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"YAML plugin tool not found: {name}",
         )
+
+    try:
+        validate_yaml_tool_replacement(name, yaml_path)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     try:
         raw = _read_yaml_raw(yaml_path)

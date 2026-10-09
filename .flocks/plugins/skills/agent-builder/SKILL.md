@@ -1,5 +1,6 @@
 ---
 name: agent-builder
+group: 系统辅助
 category: system
 description: Create new sub-agents (subagents) by generating YAML config and prompt files in ~/.flocks/plugins/agents/. The created agent can be delegated to by Rex via delegate_task. Use when the user asks to create, add, or generate a new agent.
 ---

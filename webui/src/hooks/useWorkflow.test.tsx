@@ -53,7 +53,7 @@ describe('useWorkflows', () => {
     __resetWorkflowResourcesForTesting();
   });
 
-  it('clears workflows when a silent refetch fails', async () => {
+  it('preserves the last native inventory and exposes silent refetch failures', async () => {
     listMock.mockResolvedValueOnce({
       data: [makeWorkflow()],
     });
@@ -72,7 +72,8 @@ describe('useWorkflows', () => {
     window.dispatchEvent(new Event('focus'));
 
     await waitFor(() => {
-      expect(result.current.workflows).toEqual([]);
+      expect(result.current.error).toBe('Session expired');
+      expect(result.current.workflows).toHaveLength(1);
     });
     nowSpy.mockRestore();
 

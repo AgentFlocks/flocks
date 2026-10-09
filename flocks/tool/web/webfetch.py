@@ -160,6 +160,7 @@ def extract_text_from_html(html: str) -> str:
 
 @ToolRegistry.register_function(
     name="webfetch",
+    group="检索",
     description=DESCRIPTION,
     category=ToolCategory.BROWSER,
     parameters=[

@@ -1,4 +1,5 @@
 name: greynoise_tags
+group: 威胁情报
 description: >
   List all available GreyNoise tags. Tags categorize threat actors, malware families,
   attack techniques, and scanner types. Useful for understanding what threats GreyNoise

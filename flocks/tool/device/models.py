@@ -4,7 +4,8 @@ from __future__ import annotations
 import os
 from typing import Any, Dict, List, Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+from pydantic_core import PydanticCustomError
 
 from flocks.storage.storage import Storage
 
@@ -40,6 +41,7 @@ Storage.register_ddl("""
 CREATE TABLE IF NOT EXISTS device_integrations (
     id          TEXT PRIMARY KEY,
     group_id    TEXT NOT NULL,
+    plugin_group TEXT NOT NULL DEFAULT '',
     name        TEXT NOT NULL,
     storage_key TEXT NOT NULL,
     service_id  TEXT NOT NULL,
@@ -67,6 +69,16 @@ async def _ensure_device_integrations_group_id(db: Any) -> None:
 
 
 Storage.register_ddl(_ensure_device_integrations_group_id)
+
+
+async def _ensure_device_integrations_plugin_group(db: Any) -> None:
+    cursor = await db.execute("PRAGMA table_info(device_integrations)")
+    columns = {str(row[1]) for row in await cursor.fetchall()}
+    if "plugin_group" not in columns:
+        await db.execute("ALTER TABLE device_integrations ADD COLUMN plugin_group TEXT NOT NULL DEFAULT ''")
+
+
+Storage.register_ddl(_ensure_device_integrations_plugin_group)
 
 Storage.register_ddl("""
 CREATE INDEX IF NOT EXISTS idx_device_group ON device_integrations(group_id);
@@ -122,6 +134,8 @@ class DeviceGroupUpdate(BaseModel):
 class DeviceIntegration(BaseModel):
     id: str
     group_id: str
+    group: str = ""
+    group_readonly: bool = False
     name: str
     storage_key: str
     service_id: str
@@ -140,9 +154,22 @@ class DeviceIntegration(BaseModel):
     updated_at: int
 
 
+def _normalize_plugin_group(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise PydanticCustomError("group_type", "group must be a string or null")
+    value = value.strip()
+    if len(value) > 32 or any(ord(char) < 32 or ord(char) == 127 for char in value):
+        raise PydanticCustomError("group_value", "group must contain at most 32 printable characters")
+    return value
+
+
 class DeviceIntegrationCreate(BaseModel):
     name: str
     storage_key: str
+    group: Optional[str] = None
+    _validate_plugin_group = field_validator("group", mode="before")(_normalize_plugin_group)
     group_id: Optional[str] = None    # defaults to the single default group
     service_id: Optional[str] = None  # derived from storage_key if omitted
     enabled: bool = True
@@ -151,6 +178,8 @@ class DeviceIntegrationCreate(BaseModel):
 
 
 class DeviceIntegrationUpdate(BaseModel):
+    group: Optional[str] = None
+    _validate_plugin_group = field_validator("group", mode="before")(_normalize_plugin_group)
     name: Optional[str] = None
     group_id: Optional[str] = None
     enabled: Optional[bool] = None
@@ -188,6 +217,8 @@ class DeviceTestRequest(BaseModel):
 
 
 class DeviceTemplate(BaseModel):
+    group: Optional[str] = None
+    group_readonly: bool = False
     plugin_id: str
     storage_key: str
     service_id: str

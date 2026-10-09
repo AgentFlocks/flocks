@@ -1,4 +1,5 @@
 name: skyeye_alarm_params
+group: NDR
 description: >
   获取 SkyEye 告警检索所需的枚举值，例如攻击阶段、攻击组织、资产组、
   资产标签、告警类型、API 威胁类型和重点关注标签等，可先查询本接口再调用

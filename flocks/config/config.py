@@ -133,6 +133,11 @@ class PermissionConfig(BaseModel):
         return migrated
 
 
+def _preserve_group_clear(value: Any) -> Any:
+    """An explicit null group must survive exclude-none config serialization."""
+    return "" if value is None else value
+
+
 # ==================== Agent Configuration ====================
 
 class AgentConfig(BaseModel):
@@ -144,6 +149,8 @@ class AgentConfig(BaseModel):
     model_config = {"extra": "allow", "populate_by_name": True}  # Allow unknown fields and populate by alias
     
     name: Optional[str] = None
+    group: Optional[str] = None
+    _normalize_group_clear = field_validator("group", mode="before")(_preserve_group_clear)
     model: Optional[str] = None
     temperature: Optional[float] = None
     top_p: Optional[float] = None
@@ -262,7 +269,9 @@ class McpOAuthConfig(BaseModel):
 class McpLocalConfig(BaseModel):
     """MCP local server configuration"""
     model_config = {"extra": "allow", "populate_by_name": True}
-    
+
+    group: Optional[str] = None
+    _normalize_group_clear = field_validator("group", mode="before")(_preserve_group_clear)
     type: Literal["local"]
     command: List[str]
     environment: Optional[Dict[str, str]] = Field(
@@ -276,7 +285,9 @@ class McpLocalConfig(BaseModel):
 class McpRemoteConfig(BaseModel):
     """MCP remote server configuration"""
     model_config = {"extra": "allow"}
-    
+
+    group: Optional[str] = None
+    _normalize_group_clear = field_validator("group", mode="before")(_preserve_group_clear)
     type: Literal["remote", "sse"]
     url: str
     enabled: Optional[bool] = None
@@ -886,6 +897,29 @@ class ConfigInfo(BaseModel):
         alias="portalBaseUrl",
         description="Console portal base URL used by OSS console account login redirect.",
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def preserve_explicit_plugin_group_clears(cls, data: Any) -> Any:
+        """Keep explicit null groups through the exclude-none config merge/save.
+
+        An omitted group inherits, but null is a clear, represented on disk by
+        the empty string. Only native plugin metadata is affected; connection
+        fields and unrelated config retain their existing None semantics.
+        """
+        if not isinstance(data, dict):
+            return data
+        normalized = dict(data)
+        for section in ("agent", "mode", "mcp", "api_services", "tool_settings"):
+            entries = data.get(section)
+            if not isinstance(entries, dict):
+                continue
+            entries = dict(entries)
+            for name, entry in entries.items():
+                if isinstance(entry, dict) and "group" in entry and entry["group"] is None:
+                    entries[name] = {**entry, "group": ""}
+            normalized[section] = entries
+        return normalized
 
     @model_validator(mode="before")
     @classmethod

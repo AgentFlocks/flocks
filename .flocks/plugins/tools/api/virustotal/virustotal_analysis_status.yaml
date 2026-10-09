@@ -1,4 +1,5 @@
 name: virustotal_analysis_status
+group: 威胁情报
 description: Check the status of a file or URL analysis in VirusTotal.
 category: custom
 enabled: true

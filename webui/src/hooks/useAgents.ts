@@ -13,7 +13,7 @@ const agentsResource = createSharedResource<Agent[]>({
     const response = await agentAPI.list();
     return Array.isArray(response.data) ? response.data : [];
   },
-  fallbackDataOnError: [],
+  fallbackDataOnError: (previous) => previous,
   getErrorMessage: (err) => (err instanceof Error && err.message ? err.message : 'Failed to fetch agents'),
 });
 
@@ -63,7 +63,7 @@ export function useAgents() {
   useRefreshOnResume(refreshAndFetch);
 
   const refetch = useCallback(
-    (showLoading = true) => fetchAgents({ silent: !showLoading }),
+    (showLoading = true, rejectOnError = false) => fetchAgents({ silent: !showLoading, rejectOnError }),
     [fetchAgents],
   );
 

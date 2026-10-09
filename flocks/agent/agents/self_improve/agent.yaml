@@ -1,4 +1,5 @@
 name: self-improve
+group: 系统辅助
 description: Hidden Dream Agent that improves durable Memory and reusable user Skills.
 mode: subagent
 hidden: true

@@ -15,6 +15,7 @@ PluginEdition = Literal["oss", "pro"]
 PluginState = Literal[
     "available",
     "installed",
+    "partial",
     "updateAvailable",
     "localOnly",
     "broken",
@@ -125,6 +126,9 @@ class InstalledPluginRecord(BaseModel):
     scope: Literal["global", "project"] = "global"
     checksum: Optional[str] = None
     installPath: Optional[str] = None
+    # Legacy field retained for record compatibility; never used to waive backup.
+    fileHashes: Optional[dict[str, str]] = None
+    backupPath: Optional[str] = None
 
 
 HubInstallProgressStatus = Literal["pending", "installing", "installed", "skipped", "failed", "completed"]

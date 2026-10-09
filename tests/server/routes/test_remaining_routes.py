@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 from fastapi import APIRouter, HTTPException, status
 from httpx import AsyncClient
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 
 # ---------------------------------------------------------------------------
@@ -59,7 +59,7 @@ async def _wait_for_execution_terminal_state(
 def isolated_workflow_filesystem(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """Redirect workflow route filesystem writes into a per-test temp dir."""
     from flocks.server.routes import workflow as workflow_routes
-    from flocks.workflow import fs_store
+    from flocks.workflow import center, fs_store
 
     workspace_root = tmp_path / "workspace"
     project_root = workspace_root / ".flocks" / "plugins" / "workflows"
@@ -86,17 +86,17 @@ def isolated_workflow_filesystem(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     monkeypatch.setattr(workflow_routes, "_global_workflow_dir", lambda workflow_id: global_root / workflow_id)
     monkeypatch.setattr(fs_store, "_workspace_root", workspace_root, raising=False)
     monkeypatch.setattr(fs_store, "find_workspace_root", lambda: workspace_root)
+    # fs_store delegates to center.resolve_workflow_scan_roots; patch its real
+    # root resolvers rather than silently creating unused fs_store attributes.
     monkeypatch.setattr(
-        fs_store,
+        center,
         "resolve_project_workflow_roots",
-        lambda workspace=None: [legacy_project_main, legacy_project_plugin, project_root],
-        raising=False,
+        lambda workspace=None: [legacy_project_plugin, legacy_project_main, project_root],
     )
     monkeypatch.setattr(
-        fs_store,
+        center,
         "resolve_global_workflow_roots",
-        lambda: [legacy_global_main, legacy_global_plugin, global_root],
-        raising=False,
+        lambda: [legacy_global_plugin, legacy_global_main, global_root],
     )
 
     yield {
@@ -377,11 +377,12 @@ class TestWorkflowRoutes:
                     },
                 ],
                 "edges": [
-                    {"from": "step1", "to": "step2"},
+                    {"from": "step1", "to": "step2", "mapping": {"value": "value"}},
                 ],
             },
         }
         create_resp = await client.post("/api/workflow", json=payload)
+        assert create_resp.status_code == status.HTTP_201_CREATED, create_resp.text
         wf_id = create_resp.json()["id"]
 
         run_resp = await client.post(f"/api/workflow/{wf_id}/run", json={"inputs": {}})
@@ -564,6 +565,140 @@ class TestConfigRoutes:
         )
         assert resp.status_code == status.HTTP_200_OK, resp.text
         assert invalidate_calls == ["weixin", "feishu"]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("section,name", [
+        ("agent", "rex"), ("agent", "sisyphus"), ("mode", "sisyphus"),
+        ("tool_settings", "get_time"),
+    ])
+    @pytest.mark.parametrize("group", ["Changed", "", None])
+    async def test_locked_group_preflight_precedes_config_and_secret_writes(
+        self, monkeypatch, section, name, group,
+    ):
+        from flocks.agent.registry import Agent
+        from flocks.server.routes import config as config_routes
+        from flocks.security import channel_secrets
+        from flocks.tool.registry import ToolRegistry
+
+        update = AsyncMock()
+        extract = Mock()
+        agent_check = AsyncMock(side_effect=ValueError("System definition group is read-only"))
+        tool_check = Mock(side_effect=ValueError("System definition group is read-only"))
+        monkeypatch.setattr(config_routes.Config, "update", update)
+        monkeypatch.setattr(channel_secrets, "extract_channel_secrets", extract)
+        monkeypatch.setattr(Agent, "validate_group_settings", agent_check)
+        monkeypatch.setattr(ToolRegistry, "validate_group_settings", tool_check)
+        payload = {
+            section: {name: {"group": group}},
+            "channels": {"slack": {"botToken": "synthetic-not-a-real-token"}},
+        }
+
+        with pytest.raises(HTTPException) as exc:
+            await config_routes.update_config(payload)
+
+        assert exc.value.status_code == status.HTTP_403_FORBIDDEN
+        update.assert_not_awaited()
+        extract.assert_not_called()
+        if section == "tool_settings":
+            tool_check.assert_called_once_with(payload[section])
+            agent_check.assert_not_awaited()
+        else:
+            agent_check.assert_awaited_once_with(payload[section])
+            tool_check.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_non_group_settings_and_user_instances_do_not_enter_definition_guard(
+        self, monkeypatch,
+    ):
+        from flocks.agent.registry import Agent
+        from flocks.server.routes import config as config_routes
+        from flocks.tool.registry import ToolRegistry
+
+        agent_check = AsyncMock(side_effect=AssertionError("No definition group was supplied"))
+        tool_check = Mock(side_effect=AssertionError("No definition group was supplied"))
+        update = AsyncMock()
+        monkeypatch.setattr(Agent, "validate_group_settings", agent_check)
+        monkeypatch.setattr(ToolRegistry, "validate_group_settings", tool_check)
+        monkeypatch.setattr(config_routes.Config, "update", update)
+        monkeypatch.setattr(config_routes.Config, "clear_cache", lambda: None)
+        monkeypatch.setattr(config_routes, "get_config", AsyncMock(return_value={"saved": True}))
+        payload = {
+            "agent": {"rex": {"temperature": 0.2}},
+            "tool_settings": {"get_time": {"enabled": False}},
+            "mcp": {"configured-server": {"type": "remote", "url": "http://127.0.0.1:9/unused", "group": "Personal"}},
+            "api_services": {"configured_v1": {"group": None}},
+        }
+
+        assert await config_routes.update_config(payload) == {"saved": True}
+
+        agent_check.assert_not_awaited()
+        tool_check.assert_not_called()
+        update.assert_awaited_once()
+        saved = update.await_args.args[0]
+        assert saved.agent["rex"].temperature == 0.2
+        assert saved.api_services["configured_v1"]["group"] == ""
+
+    @pytest.mark.asyncio
+    async def test_invalid_group_fails_before_secret_extraction(self, monkeypatch):
+        from flocks.server.routes import config as config_routes
+        from flocks.security import channel_secrets
+
+        update = AsyncMock()
+        extract = Mock()
+        monkeypatch.setattr(config_routes.Config, "update", update)
+        monkeypatch.setattr(channel_secrets, "extract_channel_secrets", extract)
+        with pytest.raises(HTTPException) as exc:
+            await config_routes.update_config({
+                "agent": {"custom": {"group": ["invalid"]}},
+                "channels": {"slack": {"botToken": "synthetic-not-a-real-token"}},
+            })
+        assert exc.value.status_code == status.HTTP_400_BAD_REQUEST
+        update.assert_not_awaited()
+        extract.assert_not_called()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("section", ["mcp", "api_services"])
+    @pytest.mark.parametrize("group", [["invalid"], {"bad": True}, 1, True, "x" * 33, "line\nbreak", "nul\x00value"])
+    async def test_invalid_service_group_is_rejected_before_any_side_effect(self, monkeypatch, section, group):
+        from flocks.server.routes import config as config_routes
+        from flocks.security import channel_secrets
+
+        update = AsyncMock()
+        extract = Mock(side_effect=AssertionError("Group must be validated before secrets are extracted"))
+        monkeypatch.setattr(config_routes.Config, "update", update)
+        monkeypatch.setattr(channel_secrets, "extract_channel_secrets", extract)
+        with pytest.raises(HTTPException) as exc:
+            await config_routes.update_config({
+                section: {"configured-instance": {"group": group}},
+                "channels": {"slack": {"botToken": "synthetic-not-a-real-token"}},
+            })
+        assert exc.value.status_code == status.HTTP_400_BAD_REQUEST
+        update.assert_not_awaited()
+        extract.assert_not_called()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("section", ["mcp", "api_services"])
+    @pytest.mark.parametrize("group", [None, "", "  Operations  ", "安" * 32])
+    async def test_service_group_preflight_accepts_valid_instance_values(self, section, group):
+        from flocks.server.routes import config as config_routes
+
+        payload = {section: {"configured-instance": {"group": group}}}
+        await config_routes._validate_plugin_group_updates(payload)
+        assert payload[section]["configured-instance"]["group"] == group
+
+    @pytest.mark.asyncio
+    async def test_failed_agent_config_write_keeps_agent_cache(self, monkeypatch):
+        from flocks.agent.registry import Agent
+        from flocks.server.routes import config as config_routes
+
+        invalidate = Mock()
+        monkeypatch.setattr(Agent, "validate_group_settings", AsyncMock())
+        monkeypatch.setattr(Agent, "invalidate_cache", invalidate)
+        monkeypatch.setattr(config_routes.Config, "update", AsyncMock(side_effect=OSError("write failed")))
+        with pytest.raises(HTTPException) as exc:
+            await config_routes.update_config({"agent": {"custom": {"group": "After"}}})
+        assert exc.value.status_code == status.HTTP_400_BAD_REQUEST
+        invalidate.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_config_has_expected_top_level_keys(self, client: AsyncClient):

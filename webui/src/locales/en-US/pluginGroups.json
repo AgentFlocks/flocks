@@ -1,0 +1,83 @@
+{
+  "title": "Business groups",
+  "navigation": "Filter by business group",
+  "countsDescription": "Drag a plugin onto a group to move it.",
+  "defaultNames": {
+    "平台集成": "Platform Integrations",
+    "安全研判": "Security Analysis",
+    "系统辅助": "System Utilities",
+    "威胁情报": "Threat Intelligence",
+    "文件操作": "File Operations",
+    "终端执行": "Terminal Commands",
+    "代码分析": "Code Analysis",
+    "检索": "Search",
+    "任务与工作流": "Tasks & Workflows",
+    "代理协作": "Agent Collaboration",
+    "系统管理": "System Management",
+    "企业协作": "Enterprise Collaboration",
+    "网络测绘": "Network Mapping",
+    "网络防护": "Network Protection",
+    "SIEM 与日志分析": "SIEM & Log Analysis",
+    "安全运营": "Security Operations",
+    "数据处理": "Data Processing",
+    "合规": "Compliance",
+    "代码安全": "Code Security"
+  },
+  "all": "All",
+  "ungrouped": "Ungrouped",
+  "create": "New group",
+  "groupAction": "Group",
+  "editGroup": "Edit group",
+  "rename": "Rename",
+  "delete": "Delete group",
+  "renameNamed": "Rename group {{name}}",
+  "deleteNamed": "Delete group {{name}}",
+  "save": "Save",
+  "saving": "Saving…",
+  "saved": "Group changes saved.",
+  "cancel": "Cancel",
+  "close": "Close",
+  "confirmScope": "Move these {{count}} plugins to “{{group}}”?\n{{items}}\nNo plugins will be deleted.",
+  "dialog": {
+    "createTitle": "New business group",
+    "renameTitle": "Rename business group",
+    "moveTitle": "Edit group for {{name}}",
+    "name": "Group name",
+    "firstPlugin": "First editable plugin",
+    "choosePlugin": "Choose a plugin",
+    "destination": "Destination group"
+  },
+  "validation": {
+    "length": "Use 1–32 characters, excluding leading/trailing spaces and control characters.",
+    "duplicate": "A group with this name already exists. Choose another name.",
+    "firstPlugin": "Choose an editable plugin."
+  },
+  "readOnly": {
+    "system": "The group of a built-in plugin cannot be changed.",
+    "builtinSkill": "The group of a built-in skill cannot be changed.",
+    "admin": "You do not have permission to change groups.",
+    "catalog": "Install or configure this service first.",
+    "noEditable": "No plugins are available for grouping."
+  },
+  "errors": {
+    "missing": "This plugin or group is unavailable. Refresh and try again.",
+    "readOnlyMembers": "Groups cannot be changed for these plugins: {{items}}",
+    "write": "Could not save this plugin’s group.",
+    "partial": "Saved {{succeeded}}; failed {{failed}}.",
+    "succeededItems": "Saved plugins:",
+    "failedItems": "Failed plugins:",
+    "refresh": "Could not refresh the list. Refresh and try again."
+  },
+  "drag": {
+    "sourceLabel": "{{name}}. Press Alt+M to move to a business group.",
+    "reorderLabel": "Reorder group {{name}}",
+    "reorderHint": "Drag or use Up/Down to reorder groups.",
+    "orderPlaced": "Group order updated.",
+    "cancelled": "Cancelled."
+  },
+  "view": {
+    "label": "View layout",
+    "cards": "Card view",
+    "list": "List view"
+  }
+}

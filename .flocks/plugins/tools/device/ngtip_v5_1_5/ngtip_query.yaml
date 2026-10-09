@@ -1,4 +1,5 @@
 name: ngtip_query
+group: 威胁情报
 description: >
   NGTIP Intelligence Query grouped tool. Use the `action` parameter to access
   DNS/domain detection, IP reputation, file hash reputation, vulnerability

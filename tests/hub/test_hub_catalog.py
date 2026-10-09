@@ -9,34 +9,10 @@ from fastapi.testclient import TestClient
 from flocks.hub import local
 from flocks.hub.catalog import list_catalog, load_manifest, load_taxonomy
 from flocks.hub.files import file_tree, read_file_content
+from flocks.hub.update_protection import build_plan
 from flocks.hub.installer import install_plugin, uninstall_plugin, update_plugin
 from flocks.plugin.loader import PluginLoader
 
-
-@pytest.fixture()
-def isolated_hub_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    home = tmp_path / "home"
-    config_dir = tmp_path / "config"
-    data_dir = tmp_path / "data"
-    project_dir = tmp_path / "project"
-    home.mkdir()
-    config_dir.mkdir()
-    data_dir.mkdir()
-    project_dir.mkdir()
-    monkeypatch.chdir(project_dir)
-    monkeypatch.setenv("HOME", str(home))
-    monkeypatch.setenv("FLOCKS_CONFIG_DIR", str(config_dir))
-    monkeypatch.setenv("FLOCKS_DATA_DIR", str(data_dir))
-    (config_dir / "flocks.json").write_text(json.dumps({}), encoding="utf-8")
-
-    from flocks.config.config import Config
-    from flocks.skill.skill import Skill
-
-    Config._global_config = None
-    Config._cached_config = None
-    Skill.clear_cache()
-    yield {"home": home, "config_dir": config_dir, "data_dir": data_dir, "project_dir": project_dir}
-    Skill.clear_cache()
 
 
 def _patch_webui_bundle_build(monkeypatch: pytest.MonkeyPatch) -> list[str]:
@@ -208,7 +184,7 @@ async def test_hub_update_runtime_failure_restores_previous_plugin(
     monkeypatch.setattr("flocks.hub.installer._refresh_runtime", fail_then_recover)
 
     with pytest.raises(RuntimeError, match="import failed"):
-        await update_plugin("tool", "soc_workspace_query")
+        await update_plugin("tool", "soc_workspace_query", confirmation_token=build_plan("tool", "soc_workspace_query")["token"], confirm_changes=True)
 
     assert refresh_calls == 2
     assert old_handler.read_text(encoding="utf-8") == "OLD = True\n"
@@ -376,12 +352,14 @@ def test_bundled_hub_manifest_and_files_load():
 
 
 async def test_hub_installs_and_uninstalls_skill(isolated_hub_env):
-    record = await install_plugin("skill", "ndr-alert-analysis")
-    skill_dir = isolated_hub_env["home"] / ".flocks" / "plugins" / "skills" / "ndr-alert-analysis"
+    # Hub-only packages remain installable; a same-named readonly native Skill
+    # (such as ndr-alert-analysis) must not be shadowed by this install path.
+    record = await install_plugin("skill", "triaging-security-incident")
+    skill_dir = isolated_hub_env["home"] / ".flocks" / "plugins" / "skills" / "triaging-security-incident"
     assert (skill_dir / "SKILL.md").is_file()
     assert record.enabled is True
 
-    removed = await uninstall_plugin("skill", "ndr-alert-analysis")
+    removed = await uninstall_plugin("skill", "triaging-security-incident")
     assert removed is True
     assert not skill_dir.exists()
 
@@ -939,7 +917,7 @@ async def test_scene_suite_state_reflects_real_payload_completeness(
                     ]})
                 return manifest
 
-            monkeypatch.setattr("flocks.server.routes.hub.load_manifest", manifest_with_optional_workflow)
+            monkeypatch.setattr("flocks.hub.catalog.load_manifest", manifest_with_optional_workflow)
     elif scenario == "missing_tool":
         Path(preserved_tool.installPath).rename(isolated_hub_env["home"] / "tool-backup")
     elif scenario == "disabled":
@@ -964,7 +942,8 @@ async def test_scene_suite_state_reflects_real_payload_completeness(
             assert suite["installedVersion"] == load_manifest("component", "soc-workspace").version
 
         if expected_state == "partial":
-            await install_plugin("component", "soc-workspace")
+            plan = build_plan("component", "soc-workspace")
+            await install_plugin("component", "soc-workspace", confirmation_token=plan["token"], confirm_changes=True)
             repaired = await client.get("/hub/scene-suites", timeout=30)
             repaired_suite = next(item for item in repaired.json() if item["id"] == "soc-workspace")
             assert repaired_suite["state"] == "installed"
@@ -975,7 +954,7 @@ async def test_scene_suite_state_reflects_real_payload_completeness(
 
 @pytest.mark.parametrize("action", ["install", "install/stream", "update", "uninstall"])
 @pytest.mark.parametrize("fail_after_change", [False, True])
-async def test_scene_suite_mutations_notify_other_sse_subscribers(
+async def test_scene_suite_mutations_notify_acting_user_sse_subscribers(
     isolated_hub_env, monkeypatch: pytest.MonkeyPatch,
     action: str, fail_after_change: bool,
 ):
@@ -983,6 +962,7 @@ async def test_scene_suite_mutations_notify_other_sse_subscribers(
 
     from httpx import ASGITransport, AsyncClient
 
+    from flocks.auth.context import AuthUser, reset_current_auth_user, set_current_auth_user
     from flocks.server.auth import require_admin
     from flocks.server.routes import hub as hub_routes
     from flocks.server.routes.event import EventBroadcaster
@@ -1014,17 +994,35 @@ async def test_scene_suite_mutations_notify_other_sse_subscribers(
         await original_publish(event)
 
     monkeypatch.setattr(broadcaster, "publish", publish_and_capture_state)
-    subscriber = await broadcaster.subscribe()
+    admin = AuthUser(id="user-admin", username="admin", role="admin")
+    subscriber = await broadcaster.subscribe(admin)
+    bystander = await broadcaster.subscribe(AuthUser(id="user-member", username="member", role="member"))
+    # Another admin only receives system events, so this tells the acting-user
+    # path apart from the no-user fallback.
+    other_admin = await broadcaster.subscribe(AuthUser(id="user-admin-2", username="admin2", role="admin"))
     app = FastAPI()
     app.include_router(hub_routes.router)
-    app.dependency_overrides[require_admin] = lambda: object()
+    app.dependency_overrides[require_admin] = lambda: admin
+
+    @app.middleware("http")
+    async def act_as_admin(request, call_next):
+        # Like the real auth middleware, run the route with the admin in context.
+        token = set_current_auth_user(admin)
+        try:
+            return await call_next(request)
+        finally:
+            reset_current_auth_user(token)
+
     endpoint = "/hub/plugins/component/soc-workspace"
     try:
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
             if action == "uninstall":
                 response = await client.delete(endpoint, timeout=30)
             else:
-                response = await client.post(f"{endpoint}/{action}", json={"scope": "global"}, timeout=30)
+                body = {"scope": "global"}
+                if action == "update":
+                    body.update(confirmationToken=build_plan("component", "soc-workspace")["token"], confirmChanges=True)
+                response = await client.post(f"{endpoint}/{action}", json=body, timeout=30)
         assert response.status_code == (422 if fail_after_change and action != "install/stream" else 200)
         if fail_after_change:
             assert "fixture failure after changing installed payload" in response.text
@@ -1032,9 +1030,13 @@ async def test_scene_suite_mutations_notify_other_sse_subscribers(
         assert event["type"] == "hub.scene_suites.changed"
         assert event["properties"] == {"suiteId": "soc-workspace", "action": action.split("/")[0]}
         assert subscriber.empty()
+        assert bystander.empty()
+        assert other_admin.empty()
         assert published_states == ["partial" if fail_after_change else "available" if action == "uninstall" else "installed"]
     finally:
         await broadcaster.unsubscribe(subscriber)
+        await broadcaster.unsubscribe(bystander)
+        await broadcaster.unsubscribe(other_admin)
 
 
 async def test_suite_uninstall_cleans_access_when_required_webui_payload_is_missing(
@@ -1176,6 +1178,196 @@ async def test_scene_suite_infers_orphans_only_from_its_own_workflow_records(
         assert await uninstall_plugin("component", "soc-workspace") is False
         assert local.get_record("workflow", "stream_alert_triage") == record
         assert Path(record.installPath).is_dir()
+
+
+@pytest.mark.parametrize(("child_type", "child_id"), [
+    ("webui", "soc_ui"),
+    ("tool", "soc_workspace_query"),
+    ("workflow", "stream_alert_denoise"),
+    ("workflow", "stream_alert_triage"),
+])
+@pytest.mark.parametrize(("update_mode", "version_state"), [
+    ("suite", "older"), ("suite", "unrecorded"), ("suite", "current"), ("suite", "newer"),
+    ("child", "older"), ("child", "unrecorded"),
+])
+async def test_suite_update_follows_child_versions_without_bumping_suite(
+    isolated_hub_env, monkeypatch: pytest.MonkeyPatch,
+    child_type: str, child_id: str, version_state: str, update_mode: str,
+):
+    from httpx import ASGITransport, AsyncClient
+
+    from flocks.server.auth import require_admin, require_user
+    from flocks.server.routes.hub import router
+
+    async def noop_refresh(_plugin_type, _changed_path=None):
+        return None
+
+    monkeypatch.setattr("flocks.hub.installer._refresh_runtime", noop_refresh)
+    _patch_webui_bundle_build(monkeypatch)
+    suite_record = await install_plugin("component", "soc-workspace")
+    before_records = local.load_installed_records()
+    child_record = local.get_record(child_type, child_id)
+    child_dir = Path(child_record.installPath)
+    old_file = child_dir / "old-release.txt"
+    old_file.write_text("old release payload", encoding="utf-8")
+    payload_path = child_dir / {
+        "webui": "soc_overview/src/index.tsx",
+        "tool": "soc_workspace_query.py",
+        "workflow": "workflow.json",
+    }[child_type]
+    latest_payload = payload_path.read_bytes()
+    payload_path.write_bytes(latest_payload + b"\n")
+    if version_state == "unrecorded":
+        local.remove_installed_record(child_type, child_id)
+        if child_type == "webui":
+            workspace_file = child_dir / "workspace.json"
+            workspace = json.loads(workspace_file.read_text(encoding="utf-8"))
+            workspace["version"] = "0.0.1"
+            workspace_file.write_text(json.dumps(workspace), encoding="utf-8")
+    elif version_state in {"older", "newer"}:
+        local.save_installed_record(child_record.model_copy(update={
+            "version": "0.0.1" if version_state == "older" else "999.0.0",
+        }))
+    needs_update = version_state in {"older", "unrecorded"}
+    expected_state = "updateAvailable" if needs_update else "installed"
+    app = FastAPI()
+    app.include_router(router)
+    app.dependency_overrides[require_admin] = lambda: object()
+    app.dependency_overrides[require_user] = lambda: object()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get("/hub/scene-suites")
+        suite = next(item for item in response.json() if item["id"] == "soc-workspace")
+        assert suite["state"] == expected_state
+        assert suite["installedVersion"] == suite["version"] == suite_record.version
+        catalog = await client.get("/hub/catalog")
+        assert next(item for item in catalog.json() if item["id"] == "soc-workspace")["state"] == expected_state
+        assert next(item for item in catalog.json() if item["id"] == child_id)["state"] == expected_state
+
+        target = "component/soc-workspace" if update_mode == "suite" else f"{child_type}/{child_id}"
+        preview = await client.post(f"/hub/plugins/{target}/update/preview")
+        assert preview.status_code == 200
+        assert preview.json()["requiresConfirmation"] is True
+        response = await client.post(f"/hub/plugins/{target}/update", json={
+            "confirmationToken": preview.json()["token"], "confirmChanges": True,
+        })
+        assert response.status_code == 200, response.text
+        updated = local.get_record(child_type, child_id)
+        assert updated.version == ("999.0.0" if version_state == "newer" else child_record.version)
+        if version_state != "unrecorded" or update_mode == "suite":
+            assert updated.installedBy == child_record.installedBy
+        assert old_file.exists() is (not needs_update)
+        assert payload_path.read_bytes() == (latest_payload if needs_update else latest_payload + b"\n")
+        for key, record in before_records.items():
+            if key not in {"component:soc-workspace", f"{child_type}:{child_id}"}:
+                assert local.load_installed_records()[key] == record
+        response = await client.get("/hub/scene-suites")
+        assert next(item for item in response.json() if item["id"] == "soc-workspace")["state"] == "installed"
+        catalog = await client.get("/hub/catalog")
+        assert next(item for item in catalog.json() if item["id"] == child_id)["state"] == "installed"
+
+
+@pytest.mark.parametrize(("child_type", "child_id", "payload_file"), [
+    ("workflow", "stream_alert_triage", "workflow.json"),
+    ("tool", "soc_workspace_query", "soc_workspace_query.py"),
+])
+@pytest.mark.parametrize("update_mode", ["suite", "child"])
+async def test_official_child_update_does_not_copy_project_override(
+    isolated_hub_env, monkeypatch: pytest.MonkeyPatch,
+    child_type: str, child_id: str, payload_file: str, update_mode: str,
+):
+    import shutil
+
+    from flocks.hub.catalog import clear_catalog_caches, system_plugin_root
+
+    async def noop_refresh(_plugin_type, _changed_path=None):
+        return None
+
+    monkeypatch.setattr("flocks.hub.installer._refresh_runtime", noop_refresh)
+    _patch_webui_bundle_build(monkeypatch)
+    await install_plugin("component", "soc-workspace")
+    record = local.get_record(child_type, child_id)
+    installed_dir = Path(record.installPath)
+    official_payload = (installed_dir / payload_file).read_bytes()
+    project_dir = local.install_dir(child_type, child_id, "project")
+    if child_type == "tool":
+        project_dir = local.install_root("tool", "project") / "python" / child_id
+    project_dir.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(installed_dir, project_dir)
+    (project_dir / payload_file).write_bytes(official_payload + b"\n\n")
+    clear_catalog_caches()
+    assert system_plugin_root(child_type, child_id) == project_dir
+    local.save_installed_record(record.model_copy(update={"version": "0.0.1"}))
+    (installed_dir / payload_file).write_bytes(official_payload + b"\n")
+    if update_mode == "suite":
+        await update_plugin("component", "soc-workspace", confirmation_token=build_plan("component", "soc-workspace")["token"], confirm_changes=True)
+    else:
+        await update_plugin(child_type, child_id, confirmation_token=build_plan(child_type, child_id)["token"], confirm_changes=True)
+    assert (installed_dir / payload_file).read_bytes() == official_payload
+    assert (project_dir / payload_file).read_bytes() == official_payload + b"\n\n"
+    assert local.get_record(child_type, child_id).version == record.version
+
+
+async def test_updating_a_workflow_notifies_scene_suite_subscribers(isolated_hub_env, monkeypatch):
+    from httpx import ASGITransport, AsyncClient
+
+    from flocks.server.auth import require_admin
+    from flocks.server.routes.hub import router
+
+    async def noop_refresh(_plugin_type, _changed_path=None):
+        return None
+
+    monkeypatch.setattr("flocks.hub.installer._refresh_runtime", noop_refresh)
+    _patch_webui_bundle_build(monkeypatch)
+    await install_plugin("component", "soc-workspace")
+    record = local.get_record("workflow", "stream_alert_triage")
+    local.save_installed_record(record.model_copy(update={"version": "0.0.1"}))
+    events = []
+
+    async def capture_event(event_type, properties):
+        events.append((event_type, properties))
+
+    monkeypatch.setattr("flocks.server.routes.event.publish_event", capture_event)
+    app = FastAPI()
+    app.include_router(router)
+    app.dependency_overrides[require_admin] = lambda: object()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post("/hub/plugins/workflow/stream_alert_triage/update", json={
+            "confirmationToken": build_plan("workflow", "stream_alert_triage")["token"], "confirmChanges": True,
+        })
+        assert response.status_code == 200, response.text
+    assert ("hub.scene_suites.changed", {"suiteId": "soc-workspace", "action": "update"}) in events
+
+
+async def test_suite_child_update_failure_preserves_old_payload_and_update_badge(
+    isolated_hub_env, monkeypatch: pytest.MonkeyPatch,
+):
+    from flocks.hub.catalog import clear_catalog_caches
+    from flocks.server.routes.hub import hub_scene_suites
+
+    async def noop_refresh(_plugin_type, _changed_path=None):
+        return None
+
+    monkeypatch.setattr("flocks.hub.installer._refresh_runtime", noop_refresh)
+    _patch_webui_bundle_build(monkeypatch)
+    suite_record = await install_plugin("component", "soc-workspace")
+    child_record = local.get_record("workflow", "stream_alert_triage").model_copy(update={"version": "0.0.1"})
+    local.save_installed_record(child_record)
+    old_payload = Path(child_record.installPath) / "workflow.json"
+    old_payload.write_text('{"name": "previous release"}', encoding="utf-8")
+
+    async def fail_workflow_refresh(plugin_type, _changed_path=None):
+        if plugin_type == "workflow":
+            raise RuntimeError("workflow refresh failed")
+
+    monkeypatch.setattr("flocks.hub.installer._refresh_runtime", fail_workflow_refresh)
+    with pytest.raises(RuntimeError, match="workflow refresh failed"):
+        await update_plugin("component", "soc-workspace", confirmation_token=build_plan("component", "soc-workspace")["token"], confirm_changes=True)
+    assert old_payload.read_text(encoding="utf-8") == '{"name": "previous release"}'
+    assert local.get_record("workflow", "stream_alert_triage") == child_record
+    assert local.get_record("component", "soc-workspace") == suite_record
+    clear_catalog_caches()
+    suite = next(item for item in await hub_scene_suites() if item.id == "soc-workspace")
+    assert suite.state == "updateAvailable"
 
 
 async def test_scene_suite_reports_page_package_versions(isolated_hub_env, monkeypatch: pytest.MonkeyPatch):
@@ -1345,7 +1537,7 @@ async def test_suite_uninstall_required_child_failure_has_context_and_can_retry(
     monkeypatch.setattr(installer, "_refresh_runtime", noop_refresh)
     _patch_webui_bundle_build(monkeypatch)
     await install_plugin("component", "soc-workspace")
-    original_uninstall = installer.uninstall_plugin
+    original_uninstall = installer._uninstall_plugin
 
     async def fail_required_tool(plugin_type, plugin_id):
         if plugin_type == "tool" and plugin_id == "soc_workspace_query":
@@ -1356,7 +1548,7 @@ async def test_suite_uninstall_required_child_failure_has_context_and_can_retry(
     app.include_router(router)
     app.dependency_overrides[require_admin] = lambda: object()
     endpoint = "/hub/plugins/component/soc-workspace"
-    monkeypatch.setattr(installer, "uninstall_plugin", fail_required_tool)
+    monkeypatch.setattr(installer, "_uninstall_plugin", fail_required_tool)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         failed = await client.delete(endpoint, timeout=30)
         assert failed.status_code == 422
@@ -1366,7 +1558,7 @@ async def test_suite_uninstall_required_child_failure_has_context_and_can_retry(
         assert local.get_record("component", "soc-workspace") is not None
         assert local.get_record("tool", "soc_workspace_query") is not None
 
-        monkeypatch.setattr(installer, "uninstall_plugin", original_uninstall)
+        monkeypatch.setattr(installer, "_uninstall_plugin", original_uninstall)
         retried = await client.delete(endpoint, timeout=30)
         assert retried.status_code == 200, retried.text
         assert retried.json() == {"removed": True}
@@ -1392,17 +1584,17 @@ async def test_hub_uninstalls_python_tool_without_record(isolated_hub_env, monke
 
 
 async def test_catalog_clears_stale_skill_record_after_external_delete(isolated_hub_env):
-    await install_plugin("skill", "ndr-alert-analysis")
-    skill_dir = isolated_hub_env["home"] / ".flocks" / "plugins" / "skills" / "ndr-alert-analysis"
+    await install_plugin("skill", "triaging-security-incident")
+    skill_dir = isolated_hub_env["home"] / ".flocks" / "plugins" / "skills" / "triaging-security-incident"
     assert (skill_dir / "SKILL.md").is_file()
 
     import shutil
 
     shutil.rmtree(skill_dir)
     entries = list_catalog(plugin_type="skill")
-    entry = next(item for item in entries if item.id == "ndr-alert-analysis")
+    entry = next(item for item in entries if item.id == "triaging-security-incident")
     assert entry.state == "available"
-    assert local.get_record("skill", "ndr-alert-analysis") is None
+    assert local.get_record("skill", "triaging-security-incident") is None
 
 
 def test_hub_routes_cover_catalog_files_install_and_uninstall(isolated_hub_env):
@@ -1455,17 +1647,20 @@ def test_hub_routes_cover_catalog_files_install_and_uninstall(isolated_hub_env):
     )
     assert traversal.status_code == 400
 
-    installed = client.post("/api/hub/plugins/skill/ndr-alert-analysis/install", json={"scope": "global"})
+    protected = client.post("/api/hub/plugins/skill/ndr-alert-analysis/install", json={"scope": "global"})
+    assert protected.status_code == 422 and "read-only" in protected.text
+
+    installed = client.post("/api/hub/plugins/skill/triaging-security-incident/install", json={"scope": "global"})
     assert installed.status_code == 200
-    assert installed.json()["id"] == "ndr-alert-analysis"
+    assert installed.json()["id"] == "triaging-security-incident"
 
     installed_catalog = client.get("/api/hub/catalog", params={"state": "installed"}).json()
-    assert any(item["id"] == "ndr-alert-analysis" for item in installed_catalog)
+    assert any(item["id"] == "triaging-security-incident" for item in installed_catalog)
 
-    removed = client.delete("/api/hub/plugins/skill/ndr-alert-analysis")
+    removed = client.delete("/api/hub/plugins/skill/triaging-security-incident")
     assert removed.status_code == 200
     available_catalog = client.get("/api/hub/catalog", params={"state": "available"}).json()
-    assert any(item["id"] == "ndr-alert-analysis" for item in available_catalog)
+    assert any(item["id"] == "triaging-security-incident" for item in available_catalog)
 
 
 def test_hub_paginated_facets_exclude_their_own_filter():

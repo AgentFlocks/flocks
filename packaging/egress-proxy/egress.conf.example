@@ -1,0 +1,59 @@
+# flocks-egress 参数文件。复制为 egress.conf，填好第一行，然后 sudo bash setup-a.sh install
+# （不想用文件也可以直接 sudo bash setup-a.sh install --proxy http://<代理IP>:<端口>）
+# 每行 KEY="VALUE"，# 开头是注释。装完以后这个文件在 /etc/flocks-egress/egress.conf，改完执行 sudo flocks-egress reconfigure
+
+# 【只有这一项必填】客户代理的地址：http://IP:端口、https://IP:端口（TLS 到代理）或 socks5://IP:端口
+#   要账号密码的写 http://用户:密码@IP:端口，或者分开写在下面 PROXY_USER / PROXY_PASSWORD
+#   密码里有 @ : / % 等字符时用 URL 编码（@→%40  :→%3A  /→%2F  %→%25）；分开写则不用编码
+PROXY_URL="http://10.0.0.5:3128"
+
+# ------------------------------------------------------------------ 下面都可选，不填就用默认值
+
+# 代理账号密码（代理要认证时）。分开写不用 URL 编码；含双引号的值用单引号包起来
+# PROXY_USER=""
+# PROXY_PASSWORD=""
+
+# https 代理用了自签证书、又不方便把 CA 导入系统时设 yes（正规做法：cp 根证书 /etc/pki/ca-trust/source/anchors/ && update-ca-trust）
+# PROXY_TLS_INSECURE="no"
+
+# 额外算作内网、直连的网段（CIDR 或 IP，逗号分隔）。10/8、172.16/12、192.168/16、100.64/10、回环、链路本地、组播已内置
+# 客户自有公网段、DMZ 段、用公网地址的内网服务填这里
+# DIRECT_CIDRS=""
+
+# 内网域名后缀（逗号分隔）。只在 fake-ip 模式用到（见 DNS_MODE）；/etc/resolv.conf 的 search 域和本机域名自动加入
+# DIRECT_DOMAINS=""
+
+# DNS 模式，默认 auto：安装时问内网 DNS 能不能解析公网域名——
+#   能 → redir-host：不碰 DNS，程序拿真实 IP，内网/外网纯按 IP 区分，不需要任何域名名单
+#   不能 → fake-ip：接管 DNS，公网域名给 198.18.x.x 占位地址、由代理去解析，内网域名靠 search 域 / DIRECT_DOMAINS 识别
+# DNS_MODE="auto"
+
+# 内网 DNS 服务器，逗号分隔。默认取 /etc/resolv.conf 的 nameserver
+# DNS_SERVERS=""
+
+# 接管范围：host = 整台机器发出的公网流量都走代理（默认）；user = 只接管 FLOCKS_USER 这个用户的进程
+# SCOPE="host"
+# FLOCKS_USER="flocks"
+
+# 本机 Docker / podman 容器（bridge 网络）的流量要不要一起接管：auto = host 范围接管、user 范围不接管（容器流量分不出用户）
+# flocks 跑在 Docker 里时靠这个覆盖；设 no 则容器流量不动
+# CONTAINERS="auto"
+
+# 发往公网的 UDP：reject = 立刻拒绝（默认，QUIC 自动回退 TCP；公网 NTP 会失败，请用内网 NTP）/ allow = 放行直连
+# 代理带不了 UDP（HTTP 代理完全不行，SOCKS5 理论可以但本工具的接管方式只管 TCP），所以公网 UDP 只有拒绝或直连两种选择
+# PUBLIC_UDP="reject"
+
+# 引擎进程不在时（崩了 / 被停）：direct = 分流规则随引擎一起卸掉，直连兜底（默认；能不能通看网络）/ reject = 公网 TCP 立刻被拒、不漏成直连
+# ENGINE_DOWN="direct"
+
+# 引擎日志级别：info 每条出站连接一行（默认）/ warning 只记异常
+# ENGINE_LOG_LEVEL="info"
+
+# 验收（flocks-egress check）用的地址：公网地址逗号分隔（选代理能访问的）；内网地址填一个内网 HTTP 服务用来证明直连
+# CHECK_PUBLIC_URLS="https://www.baidu.com/"
+# CHECK_INTRANET_URL=""
+
+# 本机 127.0.0.1 上的监听端口，与现有服务冲突时再改
+# REDIR_PORT="7892"
+# DNS_PORT="1053"
+# MIXED_PORT="7890"

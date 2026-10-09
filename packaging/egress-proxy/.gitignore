@@ -1,0 +1,7 @@
+vendor/mihomo-linux-*
+vendor/*.gz
+dist/
+__pycache__/
+# e2e / pytest 的原始日志只留在本机（仓库根 .gitignore 已经忽略 *.log，这里写明白免得有人再加回来）；
+# 跑了什么、结果、交付包校验和记在 tests/results/README.txt 里
+tests/results/**/*.log

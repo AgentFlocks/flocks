@@ -150,6 +150,7 @@ async def _http_session_send(
 
 @ToolRegistry.register_function(
     name="channel_message",
+    group="企业协作",
     description=(
         "Send a message to the messaging channel bound to a session. "
         "Channel types: WeCom/企业微信=wecom, Weixin/微信=weixin, Feishu=feishu, DingTalk=dingtalk, "

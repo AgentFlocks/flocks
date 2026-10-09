@@ -1,5 +1,5 @@
 import { createPortal } from 'react-dom';
-import { useEffect } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import {
@@ -13,7 +13,7 @@ import {
   BellOff,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
-import type { UserNotification } from '@/api/notifications';
+import type { NotificationQRCode, UserNotification } from '@/api/notifications';
 
 interface NotificationModalProps {
   notifications: UserNotification[];
@@ -23,8 +23,8 @@ interface NotificationModalProps {
   onDismissForever: () => void;
 }
 
-const getAccent = (kind: UserNotification['kind']) => {
-  if (kind === 'benefit') {
+const getAccent = (kind: UserNotification['kind'], hasQRCode = false) => {
+  if (kind === 'benefit' && !hasQRCode) {
     return {
       icon: Gift,
       ring: 'border-emerald-200',
@@ -36,7 +36,7 @@ const getAccent = (kind: UserNotification['kind']) => {
     };
   }
 
-  if (kind === 'whats_new') {
+  if (kind === 'whats_new' || hasQRCode) {
     return {
       icon: Sparkles,
       ring: 'border-amber-200',
@@ -59,6 +59,30 @@ const getAccent = (kind: UserNotification['kind']) => {
   };
 };
 
+function NoticeQRCode({ code }: { code: NotificationQRCode }) {
+  const { t } = useTranslation('notification');
+  const [failed, setFailed] = useState(false);
+  return (
+    <figure className="mx-auto w-[136px] max-w-full text-center sm:mx-0">
+      {failed ? (
+        <div role="status" className="flex min-h-32 items-center rounded-lg border border-amber-200 bg-white p-2 text-xs leading-5 text-gray-600">
+          {t('qrUnavailable')}
+        </div>
+      ) : (
+        <img
+          src={code.src}
+          alt={code.alt}
+          width={128}
+          height={128}
+          onError={() => setFailed(true)}
+          className="mx-auto block h-32 w-32 max-w-full rounded-lg bg-white object-contain"
+        />
+      )}
+      {code.caption && <figcaption className="mt-2 text-sm font-semibold leading-6 text-amber-800">{code.caption}</figcaption>}
+    </figure>
+  );
+}
+
 export default function NotificationModal({
   notifications,
   acknowledgingIds = [],
@@ -68,19 +92,52 @@ export default function NotificationModal({
 }: NotificationModalProps) {
   const { t } = useTranslation('notification');
   const primaryNotification = notifications.find((item) => item.kind === 'benefit') ?? notifications[0];
-  const accent = getAccent(primaryNotification.kind);
-  const Icon = accent.icon;
+  const accent = getAccent(primaryNotification?.kind ?? 'announcement', !!primaryNotification?.qr_code);
+  const Icon = primaryNotification?.qr_code ? Sparkles : accent.icon;
   const isBusy = acknowledgingIds.length > 0;
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const hasNotifications = notifications.length > 0;
 
   useEffect(() => {
+    if (!hasNotifications) return;
+    const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    dialogRef.current?.focus();
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      if (previousFocus?.isConnected) previousFocus.focus();
+    };
+  }, [hasNotifications]);
+
+  useEffect(() => {
+    if (!hasNotifications) return;
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape' && !isBusy) {
-        onClose();
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        event.stopPropagation();
+        if (!isBusy) onClose();
+      }
+      if (event.key === 'Tab') {
+        const controls = dialogRef.current?.querySelectorAll<HTMLElement>(
+          'button:not(:disabled), a[href], [tabindex="0"]',
+        );
+        const first = controls?.[0];
+        const last = controls?.[controls.length - 1];
+        const atDialog = document.activeElement === dialogRef.current
+          || !dialogRef.current?.contains(document.activeElement);
+        if (event.shiftKey && (atDialog || document.activeElement === first)) {
+          event.preventDefault();
+          last?.focus();
+        } else if (!event.shiftKey && (atDialog || document.activeElement === last)) {
+          event.preventDefault();
+          first?.focus();
+        }
       }
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [isBusy, onClose]);
+  }, [hasNotifications, isBusy, onClose]);
 
   const handleAction = (notification: UserNotification) => {
     const url = notification.primary_action?.url ?? notification.secondary_action?.url;
@@ -90,20 +147,24 @@ export default function NotificationModal({
     onAcknowledge(notification);
   };
 
+  if (!hasNotifications) return null;
+
   return createPortal(
     <>
-      <div className="fixed inset-0 z-[90] bg-black/30" onClick={() => onClose()} />
-      <div className="fixed inset-0 z-[100] flex items-center justify-center pointer-events-none">
+      <div className="fixed inset-0 z-[90] bg-black/30" onClick={() => { if (!isBusy) onClose(); }} aria-hidden="true" />
+      <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 pointer-events-none">
         <div
-          className={`pointer-events-auto w-full max-w-lg mx-4 overflow-hidden rounded-2xl border ${accent.ring} bg-white shadow-2xl`}
+          ref={dialogRef}
+          tabIndex={-1}
+          className={`pointer-events-auto flex max-h-[calc(100dvh-2rem)] w-full max-w-2xl flex-col overflow-hidden rounded-2xl border ${accent.ring} bg-white shadow-2xl outline-none`}
           onClick={(e) => e.stopPropagation()}
           role="dialog"
           aria-modal="true"
           aria-labelledby="notification-modal-title"
         >
-          <div className={`flex items-start gap-3 bg-gradient-to-r ${accent.header} px-5 py-4`}>
+          <div className={`flex shrink-0 items-start gap-3 bg-gradient-to-r ${accent.header} px-5 py-4`}>
             <span className={`mt-0.5 flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-full ${accent.iconBg} text-white shadow-sm`}>
-              <Icon className="h-5 w-5" />
+              <Icon aria-hidden="true" className="h-5 w-5" />
             </span>
             <div className="min-w-0 flex-1">
               <div id="notification-modal-title" className={`text-base font-semibold ${accent.title}`}>{t('title')}</div>
@@ -112,18 +173,18 @@ export default function NotificationModal({
             <button
               onClick={() => onClose()}
               disabled={isBusy}
-              className="rounded p-1 text-gray-400 transition-colors hover:text-gray-600 disabled:cursor-not-allowed disabled:opacity-50"
+              className="shrink-0 rounded p-1 text-gray-400 transition-colors hover:text-gray-600 focus-visible:outline focus-visible:outline-2 focus-visible:outline-amber-600 disabled:cursor-not-allowed disabled:opacity-50"
               aria-label={t('close')}
             >
-              <X className="h-4 w-4" />
+              <X aria-hidden="true" className="h-4 w-4" />
             </button>
           </div>
 
-          <div className="max-h-[70vh] overflow-y-auto px-5 py-4">
+          <div tabIndex={0} role="region" aria-labelledby="notification-modal-title" className="min-h-0 overflow-y-auto overscroll-contain px-4 py-4 focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-amber-600 sm:px-5">
             <div className="space-y-4">
               {notifications.map((notification, index) => {
-                const sectionAccent = getAccent(notification.kind);
-                const SectionIcon = sectionAccent.icon;
+                const sectionAccent = getAccent(notification.kind, !!notification.qr_code);
+                const SectionIcon = notification.kind === 'benefit' ? Gift : sectionAccent.icon;
                 const primary = notification.primary_action;
                 const secondary = notification.secondary_action;
                 const action = primary ?? secondary;
@@ -131,38 +192,41 @@ export default function NotificationModal({
                 return (
                   <section
                     key={notification.id}
-                    className={`rounded-2xl border ${sectionAccent.ring} bg-white p-4 ${index > 0 ? 'mt-4' : ''}`}
+                    className={`rounded-2xl border ${sectionAccent.ring} ${notification.qr_code ? 'bg-gradient-to-br from-amber-50 to-orange-50' : 'bg-white'} p-4 ${index > 0 ? 'mt-4' : ''}`}
                   >
                     <div className="flex items-start gap-3">
-                      <span className={`mt-0.5 flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full ${sectionAccent.iconBg} text-white shadow-sm`}>
-                        <SectionIcon className="h-4 w-4" />
+                      <span className={`mt-0.5 flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-full ${sectionAccent.iconBg} text-white shadow-sm`}>
+                        <SectionIcon aria-hidden="true" className="h-5 w-5" />
                       </span>
                       <div className="min-w-0 flex-1">
                         <div className={`text-sm font-semibold ${sectionAccent.title}`}>{notification.title}</div>
                         {notification.summary && (
-                          <p className={`mt-1 text-xs leading-5 ${sectionAccent.text}`}>{notification.summary}</p>
+                          <p className={`mt-1 text-sm leading-6 ${sectionAccent.text}`}>{notification.summary}</p>
                         )}
                       </div>
                     </div>
 
-                    {notification.body && (
-                      notification.kind === 'whats_new' ? (
-                        <div className="prose prose-sm mt-3 max-w-none break-words text-gray-600 prose-headings:my-3 prose-headings:text-gray-800 prose-p:my-2 prose-p:leading-6 prose-ul:my-2 prose-ol:my-2 prose-li:my-1 prose-a:break-all prose-a:text-amber-700 prose-pre:overflow-x-auto">
-                          <ReactMarkdown
-                            remarkPlugins={[remarkGfm]}
-                            components={{
-                              a: ({ children, ...props }) => (
-                                <a {...props} target="_blank" rel="noopener noreferrer">{children}</a>
-                              ),
-                            }}
-                          >
-                            {notification.body}
-                          </ReactMarkdown>
-                        </div>
-                      ) : (
-                        <p className="mt-3 whitespace-pre-wrap text-sm leading-6 text-gray-600">{notification.body}</p>
-                      )
-                    )}
+                    <div className={notification.qr_code ? 'mt-4 grid grid-cols-1 items-start gap-4 sm:grid-cols-[minmax(0,1fr)_136px]' : ''}>
+                      {notification.body && (
+                        notification.kind === 'whats_new' || notification.qr_code ? (
+                          <div className={`prose prose-sm min-w-0 max-w-none break-words text-gray-600 prose-headings:my-3 prose-headings:text-sm prose-headings:font-semibold prose-headings:text-amber-950 prose-p:my-2 prose-p:leading-6 prose-ul:my-2 prose-ol:my-2 prose-li:my-1 prose-a:break-words prose-a:text-amber-800 prose-a:underline prose-pre:overflow-x-auto ${notification.qr_code ? 'prose-p:first:mt-0 prose-h3:text-amber-800 prose-strong:text-amber-800' : 'mt-4'}`}>
+                            <ReactMarkdown
+                              remarkPlugins={[remarkGfm]}
+                              components={{
+                                a: ({ children, ...props }) => (
+                                  <a {...props} target="_blank" rel="noopener noreferrer">{children}</a>
+                                ),
+                              }}
+                            >
+                              {notification.body}
+                            </ReactMarkdown>
+                          </div>
+                        ) : (
+                          <p className="mt-3 whitespace-pre-wrap text-sm leading-6 text-gray-600">{notification.body}</p>
+                        )
+                      )}
+                      {notification.qr_code && <NoticeQRCode key={notification.qr_code.src} code={notification.qr_code} />}
+                    </div>
 
                     {notification.highlights.length > 0 && (
                       <div className="mt-3 space-y-2">
@@ -193,11 +257,11 @@ export default function NotificationModal({
             </div>
           </div>
 
-          <div className="flex flex-wrap items-center gap-2 border-t border-gray-100 px-5 py-4">
+          <div className="flex shrink-0 flex-wrap items-center gap-2 border-t border-gray-100 px-4 py-4 sm:px-5">
             <button
               onClick={onDismissForever}
               disabled={isBusy}
-              className="flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-600 disabled:cursor-not-allowed disabled:opacity-50"
+              className="flex items-center gap-1.5 rounded-lg px-2 py-2 text-sm font-medium text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-600 focus-visible:outline focus-visible:outline-2 focus-visible:outline-amber-600 disabled:cursor-not-allowed disabled:opacity-50"
               title={t('dismissThis')}
             >
               {isBusy ? (
@@ -211,7 +275,7 @@ export default function NotificationModal({
             <button
               onClick={() => onAcknowledge()}
               disabled={isBusy}
-              className={`ml-auto flex items-center gap-1.5 rounded-lg px-4 py-2 text-xs font-semibold text-white shadow-sm transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${accent.button}`}
+              className={`ml-auto flex items-center gap-1.5 rounded-xl px-5 py-2.5 text-sm font-semibold text-white shadow-sm transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-600 disabled:cursor-not-allowed disabled:opacity-50 ${accent.button}`}
             >
               {isBusy && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
               {t('gotIt')}

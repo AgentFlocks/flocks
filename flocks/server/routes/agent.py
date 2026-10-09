@@ -25,7 +25,7 @@ import asyncio
 from typing import List, Optional, Dict, Any
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 import flocks.agent.delegatable_settings as delegatable_settings
 from flocks.agent.registry import Agent
@@ -34,8 +34,9 @@ from flocks.agent.tool_permissions import (
     permission_items_to_ruleset,
     sync_question_permission_with_tools,
 )
-from flocks.agent.agent import AgentInfo as AgentInfoModel, AgentModel as AgentModelConfig
+from flocks.agent.agent import AgentInfo as AgentInfoModel, AgentModel as AgentModelConfig, normalize_agent_group
 from flocks.agent.agent_factory import find_yaml_agent, read_yaml_agent, update_yaml_agent, delete_yaml_agent
+from flocks.server.config_mutation import serialized_config_mutation
 from flocks.utils.log import Log
 
 router = APIRouter()
@@ -67,6 +68,8 @@ class AgentResponse(BaseModel):
     """
     name: str
     nameCn: Optional[str] = None
+    group: Optional[str] = None
+    group_readonly: bool = False
     description: Optional[str] = None
     descriptionCn: Optional[str] = None
     mode: str = "primary"
@@ -121,6 +124,8 @@ def agent_to_response(
 
     return AgentResponse(
         name=agent.name,
+        group=agent.group,
+        group_readonly=agent.group_readonly,
         nameCn=agent.name_cn,
         description=agent.description,
         descriptionCn=agent.description_cn,
@@ -154,6 +159,7 @@ def _agent_data_to_info(agent_data: Dict[str, Any]) -> AgentInfoModel:
         delegatable = mode != "primary"
     return AgentInfoModel(
         name=agent_data["name"],
+        group=agent_data.get("group"),
         name_cn=agent_data.get("name_cn") or agent_data.get("nameCn"),
         description=agent_data.get("description") or "",
         description_cn=agent_data.get("description_cn") or agent_data.get("descriptionCn"),
@@ -183,6 +189,7 @@ def _custom_agent_data_to_response(agent_data: Dict[str, Any]) -> AgentResponse:
         delegatable = mode != "primary"
     return AgentResponse(
         name=agent_data["name"],
+        group=agent_data.get("group"),
         nameCn=agent_data.get("name_cn") or agent_data.get("nameCn"),
         description=agent_data.get("description"),
         descriptionCn=agent_data.get("description_cn") or agent_data.get("descriptionCn"),
@@ -364,6 +371,9 @@ async def get_agent_prompt(name: str):
 class AgentCreateRequest(BaseModel):
     """Request to create a custom agent"""
     name: str = Field(..., description="Agent name")
+    group: Optional[str] = None
+    _validate_group = field_validator("group", mode="before")(normalize_agent_group)
+
     nameCn: Optional[str] = Field(None, description="Chinese UI agent name")
     description: Optional[str] = Field(None, description="Agent description (English; used for delegation)")
     descriptionCn: Optional[str] = Field(None, description="Chinese UI description")
@@ -380,6 +390,9 @@ class AgentCreateRequest(BaseModel):
 
 class AgentUpdateRequest(BaseModel):
     """Request to update a custom agent"""
+    group: Optional[str] = None
+    _validate_group = field_validator("group", mode="before")(normalize_agent_group)
+
     nameCn: Optional[str] = Field(None, description="Chinese UI agent name")
     description: Optional[str] = Field(None, description="Agent description (English; used for delegation)")
     descriptionCn: Optional[str] = Field(None, description="Chinese UI description")
@@ -415,6 +428,10 @@ async def create_agent(req: AgentCreateRequest):
 
     try:
         existing = await Agent.get(req.name)
+        if existing is None:
+            selected = await Agent.get_group_definition(req.name)
+            if selected is not None and selected.group_readonly:
+                existing = selected
         if existing:
             raise HTTPException(status_code=409, detail=f"Agent {req.name} already exists")
 
@@ -425,6 +442,7 @@ async def create_agent(req: AgentCreateRequest):
         )
         agent_data: Dict[str, Any] = {
             "name": req.name,
+            "group": req.group,
             "name_cn": req.nameCn,
             "description": req.description,
             "description_cn": req.descriptionCn,
@@ -453,7 +471,23 @@ async def create_agent(req: AgentCreateRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@serialized_config_mutation
+async def _save_agent_group_override(agent: AgentInfoModel, group: Optional[str]) -> None:
+    """Patch only the raw group field, preserving references and unknown config."""
+    from flocks.config.config_writer import ConfigWriter
+
+    value = normalize_agent_group(group)
+    if agent.group_readonly:
+        if value != normalize_agent_group(agent.group):
+            raise HTTPException(status_code=403, detail="System agent group is read-only")
+        return
+    ConfigWriter.set_agent_group(agent.name, value)
+    # Shared definitions/overrides affect every pre-warmed project context.
+    Agent.invalidate_cache()
+
+
 @router.put("/{name}", response_model=AgentResponse, summary="Update custom agent")
+@serialized_config_mutation
 async def update_agent(name: str, req: AgentUpdateRequest):
     """
     Update a custom agent (Storage-based or YAML plugin).
@@ -461,6 +495,31 @@ async def update_agent(name: str, req: AgentUpdateRequest):
     from flocks.storage.storage import Storage
 
     try:
+        group_agent = None
+        use_group_override = False
+        if "group" in req.model_fields_set:
+            from flocks.config.config import Config
+
+            group_agent = await Agent.get(name)
+            if group_agent is None:
+                raise HTTPException(status_code=404, detail=f"Agent {name} not found")
+            if group_agent.group_readonly:
+                if req.group != normalize_agent_group(group_agent.group):
+                    raise HTTPException(status_code=403, detail="System agent group is read-only")
+                if req.model_fields_set == {"group"}:
+                    return await get_agent(name)
+                # Full edit forms may echo the unchanged system group. Treat it
+                # as omitted while keeping all pre-existing non-group controls.
+                req = AgentUpdateRequest.model_validate(req.model_dump(exclude_unset=True, exclude={"group"}))
+            else:
+                configured = (await Config.get()).agent.get(group_agent.name)
+                use_group_override = group_agent.native or (
+                    configured is not None and configured.group is not None
+                )
+                if use_group_override and req.model_fields_set == {"group"}:
+                    await _save_agent_group_override(group_agent, req.group)
+                    return await get_agent(name)
+
         # --- Try Storage-based custom agent first ---
         agent_key = f"agent/custom/{name}"
         agent_data: Optional[Dict[str, Any]] = None
@@ -473,6 +532,10 @@ async def update_agent(name: str, req: AgentUpdateRequest):
         # YAML agents may also have an overlay entry (skills/tools only) which
         # lacks the "name" key; those should fall through to the YAML path.
         if agent_data is not None and agent_data.get("name"):
+            if use_group_override:
+                await _save_agent_group_override(group_agent, req.group)
+            if "group" in req.model_fields_set and not use_group_override:
+                agent_data["group"] = req.group
             if req.nameCn is not None:
                 agent_data["name_cn"] = req.nameCn
             if req.description is not None:
@@ -508,11 +571,13 @@ async def update_agent(name: str, req: AgentUpdateRequest):
             AgentRegistry.invalidate_cache()
 
             log.info("agent.updated", {"name": name, "source": "storage"})
-            return _custom_agent_data_to_response(agent_data)
+            return await get_agent(name)
 
         # --- Fall back to YAML plugin agent ---
         if find_yaml_agent(name) is not None:
             updates: Dict[str, Any] = {}
+            if "group" in req.model_fields_set and not use_group_override:
+                updates["group"] = req.group
             if req.nameCn is not None:
                 updates["name_cn"] = req.nameCn
             if req.description is not None:
@@ -530,6 +595,8 @@ async def update_agent(name: str, req: AgentUpdateRequest):
             if req.delegatable is not None:
                 updates["delegatable"] = req.delegatable
 
+            if use_group_override:
+                await _save_agent_group_override(group_agent, req.group)
             if not update_yaml_agent(name, updates):
                 raise HTTPException(status_code=500, detail=f"Failed to write YAML for agent {name}")
 
@@ -553,6 +620,8 @@ async def update_agent(name: str, req: AgentUpdateRequest):
             # Sync: apply updates to the in-memory AgentInfo cache
             agent = await Agent.get(name)
             if agent:
+                if "group" in req.model_fields_set:
+                    agent.group = req.group
                 if req.nameCn is not None:
                     agent.name_cn = req.nameCn
                 if req.description is not None:
@@ -577,12 +646,18 @@ async def update_agent(name: str, req: AgentUpdateRequest):
                     agent.permission = permission_items_to_ruleset(extras.get("permission"))
                 elif req.permission is not None:
                     agent.permission = permission_items_to_ruleset(extras.get("permission"))
+                Agent.invalidate_cache()
                 overrides = await _load_model_overrides()
                 delegatable_overrides = _load_delegatable_overrides()
                 all_tool_names = await _get_all_tool_names_async()
                 return await _build_single_agent_response(agent, overrides, delegatable_overrides, all_tool_names)
+            Agent.invalidate_cache()
             yaml_data = read_yaml_agent(name) or {}
             return _custom_agent_data_to_response(yaml_data)
+
+        if group_agent is not None and req.model_fields_set == {"group"}:
+            await _save_agent_group_override(group_agent, req.group)
+            return await get_agent(name)
 
         raise HTTPException(status_code=404, detail=f"Custom agent {name} not found")
     except HTTPException:
@@ -620,7 +695,7 @@ async def update_agent_delegatable(name: str, req: AgentDelegatableUpdateRequest
             await AgentRegistry.refresh()
 
             log.info("agent.delegatable.updated", {"name": name, "source": "storage", "delegatable": req.delegatable})
-            return _custom_agent_data_to_response(agent_data)
+            return await get_agent(name)
 
         delegatable_settings.set_override(name, req.delegatable)
         await Agent.refresh()
@@ -755,7 +830,7 @@ async def update_agent_model(name: str, req: AgentModelUpdateRequest):
                 AgentRegistry.invalidate_cache()
 
                 log.info("agent.model.updated", {"name": name, "source": "storage"})
-                return _custom_agent_data_to_response(agent_data)
+                return await get_agent(name)
 
             # --- Fall back to YAML plugin agent ---
             if find_yaml_agent(name) is not None:

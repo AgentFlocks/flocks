@@ -1,4 +1,5 @@
 name: sangfor_edr_threat_assets
+group: EDR/HIDS
 description: >
   Collect Sangfor EDR threat-asset analysis data through authenticated HTTP APIs.
   The collector uses the verified cookie/login_token pair from the HTTP login

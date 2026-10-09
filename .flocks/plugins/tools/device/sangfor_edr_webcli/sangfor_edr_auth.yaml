@@ -1,4 +1,5 @@
 name: sangfor_edr_auth
+group: EDR/HIDS
 description: >
   Manage a matched Sangfor EDR cookie/login_token pair. ensure_auth_state and
   refresh_auth_state use HTTP login by default. browser_login is used only when

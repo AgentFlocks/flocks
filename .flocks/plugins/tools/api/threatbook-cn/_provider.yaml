@@ -1,4 +1,5 @@
 name: threatbook-cn
+group: 威胁情报
 description: ThreatBook Threat Intelligence Platform
 description_cn: 微步在线威胁情报平台，提供文件样本分析与URL扫描能力
 auth:

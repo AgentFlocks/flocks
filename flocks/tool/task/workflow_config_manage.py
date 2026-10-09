@@ -429,6 +429,7 @@ async def _save_runtime_config(workflow_id: str, config_type: str, config: Dict[
 
 @ToolRegistry.register_function(
     name="workflow_config_manage",
+    group="任务与工作流",
     description=DESCRIPTION,
     description_cn=DESCRIPTION_CN,
     category=ToolCategory.SYSTEM,

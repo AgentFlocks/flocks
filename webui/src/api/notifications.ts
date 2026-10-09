@@ -7,6 +7,12 @@ export interface NotificationAction {
   url?: string | null;
 }
 
+export interface NotificationQRCode {
+  src: string;
+  alt: string;
+  caption?: string | null;
+}
+
 export interface UserNotification {
   id: string;
   kind: NotificationKind;
@@ -16,6 +22,7 @@ export interface UserNotification {
   highlights: string[];
   primary_action?: NotificationAction | null;
   secondary_action?: NotificationAction | null;
+  qr_code?: NotificationQRCode | null;
   version?: string | null;
   priority: number;
 }

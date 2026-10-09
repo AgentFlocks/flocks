@@ -1,5 +1,6 @@
 ---
 name: onboarding
+group: 系统辅助
 category: system
 description: Guide new users through the complete Flocks setup process via conversation — covering ThreatBook MCP/API, security tool APIs, IM channels, and scenario demos. Also runs system health inspection for returning users. Trigger when the user sends "请启动新手引导流程", "start onboarding", or any similar request to begin setup/configuration.
 ---

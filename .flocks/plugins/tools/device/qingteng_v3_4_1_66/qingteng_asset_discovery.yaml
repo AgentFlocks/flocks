@@ -1,4 +1,5 @@
 name: qingteng_asset_discovery
+group: EDR/HIDS
 description: >
   青藤资产发现工具。支持查询已发现主机列表，以及创建/查询/更新/删除/执行资产扫描任务。
   适用于对未安装 Agent 的主机进行网络扫描发现，了解全局资产状况。

@@ -140,6 +140,72 @@ def test_local_mcp_config_accepts_legacy_env_alias():
     }
 
 
+@pytest.mark.parametrize("section", ["agent", "mode", "mcp", "api_services", "tool_settings"])
+@pytest.mark.parametrize("clear", [None, ""])
+def test_native_group_clear_survives_config_merge(section, clear):
+    entry = {"group": "Package", "future_metadata": {"kept": True}}
+    if section == "mcp":
+        entry.update(type="remote", url="https://example.invalid/mcp")
+    original = ConfigInfo.model_validate({section: {"example": entry}})
+    omitted = ConfigInfo.model_validate({section: {"example": {"enabled": False}}})
+    merged = Config.merge_config_concat_arrays(original, omitted)
+    assert merged.model_dump(exclude_none=True)[section]["example"]["group"] == "Package"
+
+    patch_entry = {"group": clear}
+    # Full MCP config exercises its typed model, not just the partial-dict fallback.
+    if section == "mcp":
+        patch_entry.update(type="remote", url="https://example.invalid/mcp")
+    update = ConfigInfo.model_validate({section: {"example": patch_entry}})
+    assert patch_entry["group"] == clear  # Validation must not mutate the input.
+    cleared = Config.merge_config_concat_arrays(merged, update)
+    reloaded = ConfigInfo.model_validate(cleared.model_dump(exclude_none=True))
+    saved = reloaded.model_dump(exclude_none=True)[section]["example"]
+    assert saved["group"] == ""
+    assert saved["future_metadata"] == {"kept": True}
+    assert Config.merge_config_concat_arrays(reloaded, omitted).model_dump(exclude_none=True)[section]["example"]["group"] == ""
+
+
+def test_explicit_group_clear_in_prevalidated_plugin_configs():
+    from flocks.config.config import AgentConfig, McpLocalConfig, McpRemoteConfig
+
+    agent = AgentConfig(group=None)
+    local = McpLocalConfig(type="local", command=["test"], group=None)
+    remote = McpRemoteConfig(type="remote", url="https://example.invalid", group=None)
+    config = ConfigInfo(agent={"clear": agent, "omitted": AgentConfig()}, mcp={"local": local, "remote": remote})
+    dumped = config.model_dump(exclude_none=True)
+    assert dumped["agent"]["clear"]["group"] == ""
+    assert "group" not in dumped["agent"]["omitted"]
+    assert dumped["mcp"]["local"]["group"] == dumped["mcp"]["remote"]["group"] == ""
+    assert agent.group == local.group == remote.group == ""
+    assert agent.model_dump(exclude_none=True)["group"] == ""
+    assert "group" not in AgentConfig().model_dump(exclude_none=True)
+
+
+@pytest.mark.asyncio
+async def test_config_update_persists_null_group_clear_without_resurrection():
+    original = ConfigInfo.model_validate({
+        "agent": {"example": {"group": "Package", "model": "test/model"}},
+        "mcp": {"example": {"type": "remote", "url": "https://example.invalid", "group": "Package"}},
+        "tool_settings": {"example": {"group": "Package", "enabled": False}},
+        "api_services": {"example_v1": {"group": "Package", "enabled": False}},
+    })
+    await Config.update(original)
+    await Config.update(ConfigInfo.model_validate({
+        "agent": {"example": {"group": None}},
+        "mcp": {"example": {"group": None}},
+        "tool_settings": {"example": {"group": None}},
+        "api_services": {"example_v1": {"group": None}},
+    }))
+    await Config.update(ConfigInfo(theme="dark"))
+    raw = json.loads(Config.get_config_file().read_text())
+    loaded = (await Config.get()).model_dump(exclude_none=True)
+    for section, name in [("agent", "example"), ("mcp", "example"), ("tool_settings", "example"), ("api_services", "example_v1")]:
+        assert raw[section][name]["group"] == loaded[section][name]["group"] == ""
+    assert raw["agent"]["example"]["model"] == "test/model"
+    assert raw["mcp"]["example"]["url"] == "https://example.invalid"
+    assert raw["tool_settings"]["example"]["enabled"] is False
+
+
 def test_legacy_todo_permission_names_migrate_to_todo():
     permission = PermissionConfig.model_validate({
         "todowrite": "deny",

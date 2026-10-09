@@ -1,4 +1,5 @@
 name: onesec_edr
+group: EDR/HIDS
 description: >
   OneSEC EDR grouped tool. Use the `action` parameter to access endpoint
   detection, response, IOC, and action-status APIs. Configure the OneSEC

@@ -40,6 +40,7 @@ from flocks.tool.device.store import (
     row_to_device,
     storage_key_to_service_id,
     update_device_row,
+    update_device_metadata,
 )
 from flocks.tool.device.sync import sync_service_tool_state
 
@@ -192,6 +193,7 @@ async def create_device(body: DeviceIntegrationCreate) -> DeviceIntegration:
         enabled=body.enabled,
         verify_ssl=body.verify_ssl,
         db_fields=db_fields,
+        group=body.group or "",
     )
     await _forget_auto_instance_ignore(storage_key)
     await sync_service_tool_state(service_id)
@@ -206,6 +208,14 @@ async def update_device(device_id: str, body: DeviceIntegrationUpdate) -> Device
     row = await fetch_device(device_id)
     if row is None:
         raise DeviceNotFoundError("Device not found")
+
+    if body.model_fields_set == {"group"}:
+        if not await update_device_metadata(device_id, group=body.group or ""):
+            raise DeviceNotFoundError("Device not found")
+        updated = await fetch_device(device_id)
+        if updated is None:
+            raise DeviceNotFoundError("Device not found")
+        return row_to_device(updated)
 
     prior_fields: dict = json.loads(row["fields"] or "{}")
 
@@ -234,6 +244,7 @@ async def update_device(device_id: str, body: DeviceIntegrationUpdate) -> Device
         enabled=new_enabled,
         verify_ssl=new_ssl,
         db_fields=new_fields,
+        group=(body.group or "") if "group" in body.model_fields_set else None,
     )
     await sync_service_tool_state(storage_key_to_service_id(row["storage_key"]))
 

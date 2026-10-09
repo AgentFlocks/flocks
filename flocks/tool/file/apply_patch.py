@@ -249,6 +249,7 @@ def generate_diff(filepath: str, old_content: str, new_content: str) -> str:
 
 @ToolRegistry.register_function(
     name="apply_patch",
+    group="文件操作",
     description=DESCRIPTION,
     category=ToolCategory.FILE,
     parameters=[

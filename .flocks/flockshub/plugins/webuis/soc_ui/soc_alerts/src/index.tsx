@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { api } from '@flocks/webui-contract-sdk';
 import { filterOptionText, matchesFilterOptionSearch } from './filterValues';
 
@@ -1123,6 +1123,13 @@ function Badge({ children, tone = 'slate' }: { children: React.ReactNode; tone?:
   return <span className={`inline-flex items-center rounded border px-2 py-1 text-xs font-medium ${classes[tone]}`}>{children}</span>;
 }
 
+// This page is bundled by esbuild without Tailwind, so only utility classes that
+// already appear in the host webui/src are generated. Layout values that the host
+// never uses (arbitrary grid tracks, fixed widths) have to be inline styles.
+const FILTER_GRID_STYLE = { gridTemplateColumns: 'repeat(auto-fill, minmax(min(100%, 220px), 1fr))' };
+const FILTER_PANEL_MIN_WIDTH = 320;
+const FILTER_PANEL_EDGE_GAP = 16;
+
 function FilterDropdown({
   config,
   value,
@@ -1144,6 +1151,8 @@ function FilterDropdown({
 }) {
   const [search, setSearch] = useState('');
   const [draft, setDraft] = useState<string[]>(value);
+  const [alignRight, setAlignRight] = useState(false);
+  const rootRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     if (open) {
@@ -1151,6 +1160,33 @@ function FilterDropdown({
       setSearch('');
     }
   }, [open, value]);
+
+  // The panel is at least FILTER_PANEL_MIN_WIDTH wide, which is wider than a
+  // narrow grid column. Flip it to the column's right edge when left alignment
+  // would run past the page's right edge (and cause a horizontal scrollbar).
+  useLayoutEffect(() => {
+    if (!open) return undefined;
+    const measure = () => {
+      const root = rootRef.current;
+      if (!root) return;
+      const rect = root.getBoundingClientRect();
+      const pageRoot = root.closest('[data-soc-alerts-root]');
+      let boundsLeft = 0;
+      let boundsRight = document.documentElement.clientWidth;
+      if (pageRoot instanceof HTMLElement) {
+        boundsLeft = pageRoot.getBoundingClientRect().left + pageRoot.clientLeft;
+        boundsRight = boundsLeft + pageRoot.clientWidth;
+      }
+      const overflowsRight = rect.left + FILTER_PANEL_MIN_WIDTH > boundsRight - FILTER_PANEL_EDGE_GAP;
+      // Only flip when the flipped panel still starts inside the page: content
+      // pushed past the left edge of the scroll container cannot be scrolled to.
+      const fitsRightAligned = rect.right - FILTER_PANEL_MIN_WIDTH >= boundsLeft;
+      setAlignRight(overflowsRight && fitsRightAligned);
+    };
+    measure();
+    window.addEventListener('resize', measure);
+    return () => window.removeEventListener('resize', measure);
+  }, [open]);
 
   const choices = options.filter((option) => option && option !== ALL_FILTER_VALUE);
   const visibleChoices = choices.filter((choice) => matchesFilterOptionSearch(config.key, choice, search, tr));
@@ -1164,7 +1200,7 @@ function FilterDropdown({
   };
 
   return (
-    <div className="relative" data-soc-menu-root="true" style={{ zIndex: open ? 40 : 1 }}>
+    <div ref={rootRef} className="relative" data-soc-menu-root="true" style={{ zIndex: open ? 40 : 1 }}>
       <button
         type="button"
         onClick={onToggle}
@@ -1174,7 +1210,10 @@ function FilterDropdown({
         <span className="ml-2 shrink-0 text-slate-400">{open ? '⌃' : '⌄'}</span>
       </button>
       {open && (
-        <div className="absolute left-0 top-[calc(100%+8px)] w-full rounded-md border border-slate-200 bg-white shadow-xl" style={{ zIndex: 41 }}>
+        <div
+          className={`absolute ${alignRight ? 'right-0' : 'left-0'} top-[calc(100%+8px)] w-full rounded-md border border-slate-200 bg-white shadow-xl`}
+          style={{ zIndex: 41, minWidth: FILTER_PANEL_MIN_WIDTH, top: 'calc(100% + 8px)' }}
+        >
           <div className="p-4">
             <label className="flex h-10 items-center gap-2 rounded border border-slate-300 bg-white px-3 text-sm text-slate-500">
               <span className="text-lg leading-none">⌕</span>
@@ -1185,7 +1224,8 @@ function FilterDropdown({
                 placeholder={tr('查找选择条件')}
               />
             </label>
-            <div className="mt-3 max-h-[200px] overflow-y-auto overscroll-contain pr-1">
+            {/* max-h-[200px] is not in the host CSS; the inline cap keeps the footer within reach. */}
+            <div className="mt-3 max-h-[200px] overflow-y-auto overscroll-contain pr-1" style={{ maxHeight: 200 }}>
               {visibleChoices.map((choice) => {
                 const checked = selected.has(normalized(choice));
                 return (
@@ -1212,7 +1252,7 @@ function FilterDropdown({
             </div>
             <div className="flex items-center gap-2">
               <button type="button" onClick={() => onApply(draft)} className="rounded border border-slate-300 bg-white px-5 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50">{tr('确定')}</button>
-              <button type="button" onClick={() => onQuery(draft)} className="rounded bg-[#303a65] px-5 py-2 text-sm font-medium text-white hover:bg-[#263052]">{tr('查询')}</button>
+              <button type="button" onClick={() => onQuery(draft)} className="rounded bg-[#303a65] px-5 py-2 text-sm font-medium text-white hover:bg-[#263052]" style={{ backgroundColor: '#303a65' }}>{tr('查询')}</button>
             </div>
           </div>
         </div>
@@ -1565,7 +1605,7 @@ export default function SocAlertsPage() {
 
   const timeline = useMemo(() => buildTimeline(filteredIncidents, resolveTimeWindow(appliedTimeFilter)), [appliedTimeFilter, filteredIncidents]);
   return (
-    <div className="relative min-h-full overflow-y-auto bg-[#f5f7fb] text-slate-900" style={{ isolation: 'isolate' }}>
+    <div className="relative min-h-full overflow-y-auto bg-[#f5f7fb] text-slate-900" style={{ isolation: 'isolate' }} data-soc-alerts-root="true">
       {openMenu && <button type="button" aria-label={tr('关闭筛选菜单')} className="absolute inset-0 cursor-default" style={{ zIndex: 5 }} onClick={() => setOpenMenu(null)} />}
       <div className="relative border-b border-slate-200 bg-white" style={{ zIndex: 10 }}>
         <div className="px-6 py-4">
@@ -1585,64 +1625,63 @@ export default function SocAlertsPage() {
           </div>
 
           {filtersOpen && (
-            <div className="grid gap-3 xl:grid-cols-[1fr_auto]">
-              <div className="space-y-3">
-                <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-                  {visibleFilterConfigs.map((config) => (
-                    <FilterDropdown
-                      key={config.key}
-                      config={config}
-                      value={selectedFilters[config.key] || []}
-                      options={filterOptions[config.key] || []}
-                      open={openMenu === `filter:${config.key}`}
-                      onToggle={() => setOpenMenu(openMenu === `filter:${config.key}` ? null : `filter:${config.key}`)}
-                      onApply={(next) => {
-                        setSelectedFilters((current) => ({ ...current, [config.key]: next }));
-                        setOpenMenu(null);
-                      }}
-                      onQuery={(next) => {
-                        const nextFilters = cloneFilters({ ...selectedFilters, [config.key]: next });
-                        setSelectedFilters(nextFilters);
-                        setAppliedKeyword(keyword);
-                        setAppliedFilters(cloneFilters(nextFilters));
-                        setAppliedTimeFilter(timeFilter);
-                        setOpenMenu(null);
-                        setPage(1);
-                      }}
-                      tr={tr}
-                    />
-                  ))}
-                </div>
-                <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-                  <label className="flex h-10 items-center gap-2 rounded border border-slate-300 bg-white px-3 text-sm text-slate-500">
-                    <span className="text-lg leading-none">⌕</span>
-                    <input
-                      value={keyword}
-                      onChange={(event) => setKeyword(event.target.value)}
-                      className="min-w-0 flex-1 border-0 bg-transparent outline-none placeholder:text-slate-400"
-                      placeholder={tr('请输入源地址、目标地址、HTTP Host、URL、规则 ID 或威胁名称')}
-                    />
-                    <span className="flex h-5 w-5 items-center justify-center rounded-full bg-blue-500 text-xs font-bold text-white">?</span>
-                  </label>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setShowMoreFilters((show) => {
-                        const next = !show;
-                        if (!next && openFilterKey && MORE_FILTER_CONFIGS.some((config) => config.key === openFilterKey)) setOpenMenu(null);
-                        return next;
-                      });
+            <div className="space-y-3">
+              <div className="grid gap-3" style={FILTER_GRID_STYLE}>
+                {visibleFilterConfigs.map((config) => (
+                  <FilterDropdown
+                    key={config.key}
+                    config={config}
+                    value={selectedFilters[config.key] || []}
+                    options={filterOptions[config.key] || []}
+                    open={openMenu === `filter:${config.key}`}
+                    onToggle={() => setOpenMenu(openMenu === `filter:${config.key}` ? null : `filter:${config.key}`)}
+                    onApply={(next) => {
+                      setSelectedFilters((current) => ({ ...current, [config.key]: next }));
+                      setOpenMenu(null);
                     }}
-                    className="flex h-10 items-center justify-center rounded border border-slate-300 bg-white px-3 text-sm text-slate-600 hover:bg-slate-50"
-                  >＋ {showMoreFilters ? tr('收起更多筛选') : tr('更多筛选条件')}</button>
-                </div>
+                    onQuery={(next) => {
+                      const nextFilters = cloneFilters({ ...selectedFilters, [config.key]: next });
+                      setSelectedFilters(nextFilters);
+                      setAppliedKeyword(keyword);
+                      setAppliedFilters(cloneFilters(nextFilters));
+                      setAppliedTimeFilter(timeFilter);
+                      setOpenMenu(null);
+                      setPage(1);
+                    }}
+                    tr={tr}
+                  />
+                ))}
               </div>
-              <div className="flex flex-wrap items-start gap-3 xl:w-[260px]">
+              <div className="flex flex-wrap items-center gap-3">
+                <label
+                  className="flex h-10 items-center gap-2 rounded border border-slate-300 bg-white px-3 text-sm text-slate-500"
+                  style={{ flex: '1 1 320px', minWidth: 0 }}
+                >
+                  <span className="text-lg leading-none">⌕</span>
+                  <input
+                    value={keyword}
+                    onChange={(event) => setKeyword(event.target.value)}
+                    className="min-w-0 flex-1 border-0 bg-transparent outline-none placeholder:text-slate-400"
+                    placeholder={tr('请输入源地址、目标地址、HTTP Host、URL、规则 ID 或威胁名称')}
+                  />
+                  <span className="flex h-5 w-5 items-center justify-center rounded-full bg-blue-500 text-xs font-bold text-white">?</span>
+                </label>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowMoreFilters((show) => {
+                      const next = !show;
+                      if (!next && openFilterKey && MORE_FILTER_CONFIGS.some((config) => config.key === openFilterKey)) setOpenMenu(null);
+                      return next;
+                    });
+                  }}
+                  className="flex h-10 shrink-0 items-center justify-center rounded border border-slate-300 bg-white px-3 text-sm text-slate-600 hover:bg-slate-50"
+                >＋ {showMoreFilters ? tr('收起更多筛选') : tr('更多筛选条件')}</button>
                 <button
                   type="button"
                   onClick={runQuery}
                   style={{ backgroundColor: '#303a65', borderColor: '#303a65', color: '#ffffff' }}
-                  className="inline-flex h-10 min-w-[96px] items-center justify-center gap-2 rounded border px-4 text-sm font-medium transition hover:opacity-95 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-100"
+                  className="inline-flex h-10 min-w-[96px] shrink-0 items-center justify-center gap-2 rounded border px-4 text-sm font-medium transition hover:opacity-95 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-100"
                 >
                   <span className="text-lg leading-none">⌕</span>
                   {tr('查询')}
@@ -1650,7 +1689,7 @@ export default function SocAlertsPage() {
                 <button
                   type="button"
                   onClick={resetQuery}
-                  className="inline-flex h-10 min-w-[96px] items-center justify-center gap-2 rounded border border-slate-300 bg-white px-4 text-sm font-medium text-slate-600 transition hover:border-slate-400 hover:bg-slate-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-100"
+                  className="inline-flex h-10 min-w-[96px] shrink-0 items-center justify-center gap-2 rounded border border-slate-300 bg-white px-4 text-sm font-medium text-slate-600 transition hover:border-slate-400 hover:bg-slate-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-100"
                 >
                   <span className="text-base leading-none">✖</span>
                   {tr('重置')}

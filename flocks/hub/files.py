@@ -24,14 +24,16 @@ _TEXT_EXTENSIONS = {
 _MAX_PREVIEW_BYTES = 512_000
 
 
-def plugin_root(plugin_type: PluginType, plugin_id: str) -> Path:
+def plugin_root(plugin_type: PluginType, plugin_id: str, *, prefer_bundled: bool = False) -> Path:
     from flocks.hub.catalog import manifest_path, system_plugin_root
 
-    system_root = system_plugin_root(plugin_type, plugin_id)
-    if system_root is not None:
-        return system_root.resolve()
+    published_manifest = manifest_path(plugin_type, plugin_id)
+    if not prefer_bundled or not published_manifest.is_file():
+        system_root = system_plugin_root(plugin_type, plugin_id)
+        if system_root is not None:
+            return system_root.resolve()
 
-    root = manifest_path(plugin_type, plugin_id).parent.resolve()
+    root = published_manifest.parent.resolve()
     bundled = get_bundled_hub_root().resolve()
     if bundled not in root.parents and root != bundled:
         raise ValueError("plugin path escapes hub root")

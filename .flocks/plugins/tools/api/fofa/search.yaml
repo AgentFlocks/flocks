@@ -1,4 +1,5 @@
 name: fofa_search
+group: 网络测绘
 description: >
   Search FOFA network space for assets matching query syntax.
   Use for asset discovery, attack surface enumeration, and vulnerability assessment.

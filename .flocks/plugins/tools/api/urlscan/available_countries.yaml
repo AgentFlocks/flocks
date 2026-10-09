@@ -1,4 +1,5 @@
 name: urlscan_available_countries
+group: 威胁情报
 description: >
   Retrieve the list of countries available for scanning using the Scan API.
   Use this to check which geographic locations can be specified for scans.

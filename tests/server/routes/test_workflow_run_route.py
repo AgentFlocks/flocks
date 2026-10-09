@@ -1,4 +1,5 @@
 import asyncio
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
@@ -212,7 +213,10 @@ async def test_update_workflow_rejects_unmapped_edges_when_strict(
         "editMarkdownContent": None,
     }
 
-    monkeypatch.setattr(workflow_module, "_read_workflow_from_fs", lambda _workflow_id: dict(existing))
+    monkeypatch.setattr(
+        workflow_module, "resolve_workflow_from_fs",
+        lambda _workflow_id: (Path("unused"), {**existing, "group_readonly": False}),
+    )
     monkeypatch.setattr(workflow_module, "_write_workflow_to_fs", write_workflow)
 
     req = workflow_module.WorkflowUpdateRequest(

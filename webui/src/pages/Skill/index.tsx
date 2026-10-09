@@ -19,10 +19,15 @@ import PageHeader from '@/components/common/PageHeader';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
 import EmptyState from '@/components/common/EmptyState';
 import { useToast } from '@/components/common/Toast';
-import { skillAPI, Skill } from '@/api/skill';
+import { isSkillDefinitionReadOnly, skillAPI, Skill } from '@/api/skill';
 import { EnabledBadge } from '@/pages/Tool/components/badges';
 import SkillSheet from './SkillSheet';
 import SkillInstallDialog from './SkillInstallDialog';
+import GroupNav, { useGroupDrag, type GroupDrag } from '@/components/plugin-groups/GroupNav';
+import { deriveGroupNav, matchesGroup, saveGroupItems, type GroupSelection } from '@/components/plugin-groups/groupView';
+import { usePluginViewMode } from '@/hooks/usePluginViewMode';
+import PluginViewToggle from '@/components/plugin-groups/PluginViewToggle';
+import PluginGroupButton from '@/components/plugin-groups/PluginGroupButton';
 
 const PAGE_SIZE = 25;
 
@@ -33,7 +38,7 @@ export default function SkillPage() {
   const [error, setError] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [installingDeps, setInstallingDeps] = useState<Record<string, boolean>>({});
-  const { error: showErrorToast, success: showSuccessToast } = useToast();
+  const { error: showErrorToast, success: showSuccessToast, warning: showWarningToast } = useToast();
 
   const [sheetSkill, setSheetSkill] = useState<Skill | null>(null);
   const [showCreateSheet, setShowCreateSheet] = useState(false);
@@ -49,6 +54,7 @@ export default function SkillPage() {
   // the Tool list page's column-filter behavior.
   const [enabledFilter, setEnabledFilter] = useState<Set<string>>(new Set());
   const [sourceColFilter, setSourceColFilter] = useState<Set<string>>(new Set());
+  const [viewMode, setViewMode] = usePluginViewMode('skill', 'list');
   // Throttle anchor for `refreshSkillsAndFetch` — visibility/focus listeners
   // can fire several times in a single second; without this guard the page
   // would hammer the backend every time the tab gets focus.
@@ -103,6 +109,37 @@ export default function SkillPage() {
     [skills],
   );
 
+  const [groupSelection, setGroupSelection] = useState<GroupSelection>(null);
+  const asGroupItem = (skill: Skill) => ({
+    key: skill.name, name: skill.name, group: skill.group,
+    readOnlyReason: skill.group_readonly ? t('pluginGroups:readOnly.system')
+      : isSkillDefinitionReadOnly(skill) ? t('pluginGroups:readOnly.builtinSkill') : undefined,
+  });
+  const groupItems = visibleSkills.map(asGroupItem);
+  const groupDrag = useGroupDrag(groupItems, showWarningToast);
+  const refreshGroupingInventory = useCallback(async () => {
+    if (!await fetchSkills({ silent: true })) throw new Error('Skill inventory refresh failed');
+  }, [fetchSkills]);
+  const saveGroup = (name: string, group: string | null) => skillAPI.updateGroup(name, group);
+  const loadGroupItems = async () => {
+    const { data } = await skillAPI.list();
+    return data.filter((skill) => !skill.ui_hidden && skill.category !== 'system').map(asGroupItem);
+  };
+  const moveGroup = async (key: string, group: string | null) => {
+    const inventory = await loadGroupItems();
+    await saveGroupItems(inventory.filter((item) => item.key === key), group, saveGroup, refreshGroupingInventory, t);
+  };
+  const createGroup = async (key: string, group: string) => {
+    const inventory = await loadGroupItems();
+    if (inventory.some((item) => matchesGroup(item.group, group))) throw new Error(t('pluginGroups:validation.duplicate'));
+    await saveGroupItems(inventory.filter((item) => item.key === key), group, saveGroup, refreshGroupingInventory, t);
+  };
+  const changeGroup = async (from: string, to: string | null) => {
+    const inventory = await loadGroupItems();
+    if (to !== null && inventory.some((item) => matchesGroup(item.group, to))) throw new Error(t('pluginGroups:validation.duplicate'));
+    await saveGroupItems(inventory.filter((item) => matchesGroup(item.group, from)), to, saveGroup, refreshGroupingInventory, t, true);
+  };
+
   const enabledCount = useMemo(
     () => visibleSkills.filter(s => !s.disabled).length,
     [visibleSkills],
@@ -118,6 +155,7 @@ export default function SkillPage() {
   const filteredSkills = useMemo(() => {
     const q = searchQuery.toLowerCase();
     return visibleSkills.filter(skill => {
+      if (!matchesGroup(skill.group, groupSelection)) return false;
       const isUser = isUserManaged(skill);
       if (sourceFilter === 'builtin' && isUser) return false;
       if (sourceFilter === 'custom' && !isUser) return false;
@@ -132,12 +170,12 @@ export default function SkillPage() {
         (skill.description || '').toLowerCase().includes(q)
       );
     });
-  }, [visibleSkills, searchQuery, sourceFilter, enabledFilter, sourceColFilter]);
+  }, [visibleSkills, searchQuery, sourceFilter, enabledFilter, sourceColFilter, groupSelection]);
 
   const hasColumnFilter = enabledFilter.size > 0 || sourceColFilter.size > 0;
 
   // Reset to first page whenever any filter changes
-  useEffect(() => { setPage(1); }, [searchQuery, sourceFilter, enabledFilter, sourceColFilter]);
+  useEffect(() => { setPage(1); }, [searchQuery, sourceFilter, enabledFilter, sourceColFilter, groupSelection]);
 
   const totalPages = Math.max(1, Math.ceil(filteredSkills.length / PAGE_SIZE));
 
@@ -326,6 +364,7 @@ export default function SkillPage() {
 
         {/* 右侧操作：刷新 + 安装 + 创建 */}
         <div className="ml-auto flex items-center gap-2">
+          <PluginViewToggle value={viewMode} onChange={setViewMode} />
           <button
             onClick={handleRefresh}
             disabled={refreshing}
@@ -355,6 +394,9 @@ export default function SkillPage() {
         </div>
       </div>
 
+      <div className="flex min-h-0 flex-1 flex-col gap-3 pt-3 md:flex-row">
+        <GroupNav inventoryComplete={!loading && !error} preferenceKey="skill" {...deriveGroupNav(groupItems)} items={groupItems} selection={groupSelection} onSelect={setGroupSelection} onMove={moveGroup} onCreate={createGroup} onRename={changeGroup} onDelete={(name) => changeGroup(name, null)} {...groupDrag} />
+        <div className="flex min-h-0 min-w-0 flex-1 flex-col">
       <div className="flex-1 overflow-y-auto px-4 py-3">
         {visibleSkills.length === 0 ? (
           // Truly empty inventory — show big EmptyState with CTAs
@@ -387,6 +429,8 @@ export default function SkillPage() {
           // as a single empty row inside the table so the column headers
           // and filter funnels stay visible and operable.
           <SkillTable
+            viewMode={viewMode}
+            grouping={groupDrag}
             skills={pagedSkills}
             selectedSkill={sheetSkill}
             installingDeps={installingDeps}
@@ -410,12 +454,13 @@ export default function SkillPage() {
               })
             }
             onClearSourceColFilter={() => setSourceColFilter(new Set())}
-            hasActiveFilter={sourceFilter !== 'all' || hasColumnFilter || !!searchQuery}
+            hasActiveFilter={sourceFilter !== 'all' || hasColumnFilter || !!searchQuery || groupSelection !== null}
             onClearAllFilters={() => {
               setSourceFilter('all');
               setEnabledFilter(new Set());
               setSourceColFilter(new Set());
               setSearchQuery('');
+              setGroupSelection(null);
             }}
             onSelect={handleSelectSkill}
             onInstallDeps={handleInstallDeps}
@@ -432,6 +477,8 @@ export default function SkillPage() {
           onPageChange={setPage}
         />
       )}
+        </div>
+      </div>
 
       {sheetSkill && (
         <SkillSheet
@@ -474,12 +521,14 @@ export default function SkillPage() {
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 function isUserManaged(skill: Skill): boolean {
-  return skill.source !== 'project';
+  return !isSkillDefinitionReadOnly(skill);
 }
 
 // ─── SkillTable ───────────────────────────────────────────────────────────────
 
 interface SkillTableProps {
+  viewMode?: 'cards' | 'list';
+  grouping?: GroupDrag;
   skills: Skill[];
   selectedSkill: Skill | null;
   installingDeps: Record<string, boolean>;
@@ -499,6 +548,7 @@ interface SkillTableProps {
 }
 
 function SkillTable({
+  viewMode = 'list', grouping,
   skills, selectedSkill, installingDeps, togglingSkills,
   enabledFilter, onToggleEnabledFilter, onClearEnabledFilter,
   allSources, sourceColFilter, onToggleSourceColFilter, onClearSourceColFilter,
@@ -507,9 +557,45 @@ function SkillTable({
 }: SkillTableProps) {
   const { t } = useTranslation('skill');
 
+  if (viewMode === 'cards') {
+    return (
+      <>
+        <div className="mb-3 flex flex-wrap items-center gap-4 text-xs text-gray-500">
+          <ColumnFilterHeader
+            label={t('table.source')} values={allSources} active={sourceColFilter}
+            onToggle={onToggleSourceColFilter} onClear={onClearSourceColFilter}
+          />
+          <ColumnFilterHeader
+            label={t('table.enabled')} values={['enabled', 'disabled']} active={enabledFilter}
+            onToggle={onToggleEnabledFilter} onClear={onClearEnabledFilter}
+            renderLabel={(value) => value === 'enabled' ? t('filter.enabled') : t('filter.disabled')}
+          />
+        </div>
+        {skills.length > 0 ? (
+          <div className="grid gap-3 grid-cols-1 sm:grid-cols-2 xl:grid-cols-3">
+            {skills.map((skill) => (
+              <SkillCard key={skill.name} skill={skill} grouping={grouping}
+                isSelected={selectedSkill?.name === skill.name}
+                installingDeps={installingDeps[skill.name] ?? false}
+                toggling={togglingSkills[skill.name] ?? false}
+                onSelect={onSelect} onInstallDeps={onInstallDeps} onToggle={onToggle} />
+            ))}
+          </div>
+        ) : (
+          <div className="flex flex-col items-center justify-center gap-3 rounded-xl border border-gray-200 bg-white px-4 py-12 text-gray-400">
+            <BookOpen className="h-10 w-10 text-gray-300" />
+            <div className="text-sm">{t('emptyState.noResults')}</div>
+            {hasActiveFilter && <button type="button" onClick={onClearAllFilters}
+              className="rounded-lg border border-gray-200 px-3 py-1.5 text-xs text-gray-600 hover:bg-gray-50">{t('filter.clear')}</button>}
+          </div>
+        )}
+      </>
+    );
+  }
+
   return (
-    <div className="bg-white border border-gray-200 rounded-xl overflow-hidden">
-      <table className="min-w-full table-fixed text-xs">
+    <div className="bg-white border border-gray-200 rounded-xl overflow-x-auto">
+      <table className="min-w-[max(100%,40rem)] table-fixed text-xs">
         <colgroup>
           <col style={{ width: '8%' }} />
           <col style={{ width: '46%' }} />
@@ -554,6 +640,7 @@ function SkillTable({
               onSelect={onSelect}
               onInstallDeps={onInstallDeps}
               onToggle={onToggle}
+              grouping={grouping}
             />
           ))}
           {skills.length === 0 && (
@@ -584,6 +671,7 @@ function SkillTable({
 // ─── SkillRow ─────────────────────────────────────────────────────────────────
 
 interface SkillRowProps {
+  grouping?: GroupDrag;
   skill: Skill;
   isSelected: boolean;
   installingDeps: boolean;
@@ -593,7 +681,7 @@ interface SkillRowProps {
   onToggle: (skill: Skill, e: React.MouseEvent) => void;
 }
 
-function SkillRow({ skill, isSelected, installingDeps, toggling, onSelect, onInstallDeps, onToggle }: SkillRowProps) {
+function SkillRow({ skill, isSelected, installingDeps, toggling, onSelect, onInstallDeps, onToggle, grouping }: SkillRowProps) {
   const { t } = useTranslation('skill');
   const isUser = isUserManaged(skill);
   const hasMissingDeps = skill.eligible === false && (skill.install_specs?.length ?? 0) > 0;
@@ -605,6 +693,7 @@ function SkillRow({ skill, isSelected, installingDeps, toggling, onSelect, onIns
   // buttons — stays independently clickable without nested-button warnings.
   return (
     <tr
+      {...grouping?.dragProps(skill.name)}
       className={`transition-colors ${
         skill.disabled ? 'bg-gray-50/40 dark:bg-zinc-900/30' : 'hover:bg-gray-50 dark:hover:bg-zinc-900/60'
       } ${isSelected ? 'bg-slate-50 dark:bg-zinc-900/80' : ''}`}
@@ -664,7 +753,7 @@ function SkillRow({ skill, isSelected, installingDeps, toggling, onSelect, onIns
       </td>
 
       {/* 启用开关列：控制 skill 是否注入 Agent System Prompt */}
-      <td className="px-4 py-3">
+      <td className="whitespace-nowrap px-4 py-3">
         <SkillEnabledControl
           enabled={enabled}
           loading={toggling}
@@ -676,6 +765,7 @@ function SkillRow({ skill, isSelected, installingDeps, toggling, onSelect, onIns
       {/* 操作列：编辑（+ 缺依赖时的安装按钮）；删除操作在编辑面板内 */}
       <td className="px-4 py-3 text-right">
         <div className="flex items-center justify-end gap-1">
+          {grouping && <PluginGroupButton grouping={grouping} itemKey={skill.name} />}
           {hasMissingDeps && (
             <button
               onClick={(e) => onInstallDeps(skill, e)}
@@ -705,6 +795,58 @@ function SkillRow({ skill, isSelected, installingDeps, toggling, onSelect, onIns
         </div>
       </td>
     </tr>
+  );
+}
+
+function SkillCard({ skill, isSelected, installingDeps, toggling, onSelect, onInstallDeps, onToggle, grouping }: SkillRowProps) {
+  const { t } = useTranslation('skill');
+  const isUser = isUserManaged(skill);
+  const enabled = !skill.disabled;
+  const hasMissingDeps = skill.eligible === false && (skill.install_specs?.length ?? 0) > 0;
+
+  return (
+    <article
+      {...grouping?.dragProps(skill.name)}
+      className={`flex min-w-0 flex-col rounded-xl border bg-white p-4 ${isSelected ? 'border-slate-400 ring-2 ring-slate-200' : 'border-gray-200'} ${skill.disabled ? 'opacity-75' : ''}`}
+    >
+      <div className="mb-3 flex items-center justify-between gap-2">
+        <SourceTypeBadge isUser={isUser} />
+        <SkillEnabledControl enabled={enabled} loading={toggling}
+          title={enabled ? t('toggle.enabledTip') : t('toggle.disabledTip')}
+          onChange={(event) => onToggle(skill, event)} />
+      </div>
+      <button type="button" onClick={() => onSelect(skill)} title={t('table.edit')}
+        className="flex min-w-0 items-start gap-2.5 text-left group/name">
+        <span className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-gray-100 text-gray-400">
+          {isUser ? <FolderOpen className="h-3.5 w-3.5" /> : <Sparkles className="h-3.5 w-3.5" />}
+        </span>
+        <span className="min-w-0 flex-1">
+          <span className="block truncate text-sm font-medium text-gray-900 group-hover/name:text-slate-700">{skill.name}</span>
+          <span className="mt-1 block line-clamp-2 text-xs leading-5 text-gray-400">{skill.description || t('sheet.noDescription')}</span>
+        </span>
+      </button>
+      {hasMissingDeps && <div className="mt-2 flex items-start gap-1 text-[11px] text-amber-600" title={(skill.missing ?? []).join(', ')}>
+        <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />
+        <span>{t('eligibility.missingDepsInline', { list: (skill.missing ?? []).join(', ') })}</span>
+      </div>}
+      <div className="mt-3 flex min-w-0 items-center gap-2 text-[11px] text-gray-400">
+        <span className="shrink-0">{t('table.source')}</span>
+        <span className="truncate font-mono" title={skill.location}>{skill.source ?? '-'}</span>
+      </div>
+      <div className="mt-auto flex flex-wrap items-center justify-end gap-1 border-t border-gray-100 pt-3">
+        {grouping && <PluginGroupButton grouping={grouping} itemKey={skill.name} />}
+        {hasMissingDeps && <button onClick={(event) => onInstallDeps(skill, event)} disabled={installingDeps}
+          title={t('eligibility.installDeps')}
+          className="inline-flex items-center gap-1 rounded border border-gray-200 bg-white px-2 py-1 text-xs text-gray-600 hover:bg-gray-50 disabled:opacity-50">
+          {installingDeps ? <Loader2 className="h-3 w-3 animate-spin" /> : <CloudDownload className="h-3 w-3" />}
+          {installingDeps ? t('eligibility.installing') : t('eligibility.installDeps')}
+        </button>}
+        <button type="button" onClick={() => onSelect(skill)} title={t('table.edit')} aria-label={t('table.edit')}
+          className="rounded-md border border-gray-200 p-1.5 text-gray-500 hover:border-slate-300 hover:bg-gray-50 hover:text-slate-700">
+          <Pencil className="h-3.5 w-3.5" />
+        </button>
+      </div>
+    </article>
   );
 }
 

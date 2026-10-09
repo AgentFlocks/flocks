@@ -159,6 +159,7 @@ def _verification_nudge_needed(todos: List[TodoInfo]) -> bool:
 
 @ToolRegistry.register_function(
     name="todo",
+    group="任务与工作流",
     description=TODO_DESCRIPTION,
     category=ToolCategory.SYSTEM,
     parameters=[

@@ -31,6 +31,12 @@ class NotificationAction(BaseModel):
     url: str | None = None
 
 
+class NotificationQRCode(BaseModel):
+    src: str
+    alt: str
+    caption: str | None = None
+
+
 class NotificationContent(BaseModel):
     title: str
     summary: str | None = None
@@ -42,6 +48,7 @@ class NotificationContent(BaseModel):
     secondary_action: NotificationAction | None = Field(
         default=None, alias="secondaryAction"
     )
+    qr_code: NotificationQRCode | None = Field(default=None, alias="qrCode")
 
     model_config = {"populate_by_name": True}
 
@@ -68,6 +75,7 @@ class NotificationResponse(BaseModel):
     highlights: list[str] = Field(default_factory=list)
     primary_action: NotificationAction | None = None
     secondary_action: NotificationAction | None = None
+    qr_code: NotificationQRCode | None = None
     version: str | None = None
     priority: int = 100
 
@@ -84,7 +92,55 @@ class NotificationAckStatus(BaseModel):
     acknowledged: bool
 
 
-DEFAULT_NOTIFICATIONS: tuple[NotificationConfig, ...] = ()
+DEFAULT_NOTIFICATIONS: tuple[NotificationConfig, ...] = (
+    NotificationConfig(
+        id="holiday-benefits-2026-09-23",
+        kind="benefit",
+        priority=10,
+        startsAt="2026-09-23T00:00:00+08:00",
+        expiresAt="2026-10-15T00:00:00+08:00",
+        locales={
+            "zh-CN": NotificationContent(
+                title="10 月 Token 政策调整",
+                summary="双节前做好切换，业务运行更安心。",
+                body=(
+                    "10 月 1 日起，每人每日保留 1000 万免费 Token，超出部分按金额计费，"
+                    "可登录[微步大模型平台](https://portal.agentflocks.com)充值。\n\n"
+                    "公共免费池及原有临时加额同步停止。\n\n"
+                    "### 双节过渡保障\n\n"
+                    "尚未完成切换？扫码提交申请，即可获取业务保障临时额度 "
+                    "**1亿Token**（2026年10月15日到期）。"
+                ),
+                qrCode=NotificationQRCode(
+                    src="/notifications/holiday-transition-20260923.jpg",
+                    alt="微步在线小程序码",
+                    caption="扫码申请过渡保障",
+                ),
+            ),
+            "en-US": NotificationContent(
+                title="October Token policy changes",
+                summary="Prepare for the holiday transition and keep your services running.",
+                body=(
+                    "Starting October 1, each person keeps a daily free allowance of "
+                    "10 million Tokens. Usage above that allowance is billed by monetary value. "
+                    "Sign in to the [ThreatBook LLM Platform](https://portal.agentflocks.com) "
+                    "to top up.\n\n"
+                    "The public free pool and existing temporary extra allowances "
+                    "will end at the same time.\n\n"
+                    "### Holiday transition support\n\n"
+                    "Not ready to switch yet? Scan the code to apply for a temporary "
+                    "business continuity allowance of **100 million Tokens** "
+                    "(expires on October 15, 2026)."
+                ),
+                qrCode=NotificationQRCode(
+                    src="/notifications/holiday-transition-20260923.jpg",
+                    alt="ThreatBook Online mini program code",
+                    caption="Scan to apply for transition support",
+                ),
+            ),
+        },
+    ),
+)
 
 
 class NotificationService:
@@ -215,6 +271,7 @@ class NotificationService:
                     highlights=content.highlights,
                     primary_action=content.primary_action,
                     secondary_action=content.secondary_action,
+                    qr_code=content.qr_code,
                     version=notification.version,
                     priority=notification.priority,
                 )

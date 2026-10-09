@@ -1,4 +1,5 @@
 name: sangfor_xdr_alerts
+group: XDR
 description: >
   Manage Sangfor XDR security alerts. Query alerts by time range,
   update alert disposition status, and retrieve alert proof/evidence.

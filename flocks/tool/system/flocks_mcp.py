@@ -30,6 +30,7 @@ log = Log.create(service="tool.flocks_mcp")
 
 @ToolRegistry.register_function(
     name="flocks_mcp",
+    group="系统管理",
     description=(
         "Manage MCP servers registered in Flocks. "
         "Use 'list' to see all servers and their status. "

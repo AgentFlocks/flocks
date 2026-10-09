@@ -1,4 +1,5 @@
 name: greynoise_enterprise_ip_query
+group: 威胁情报
 description: >
   Query GreyNoise threat intelligence for an IP address to determine if it's
   associated with malicious scanning or attack activity. Returns classification

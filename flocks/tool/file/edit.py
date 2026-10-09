@@ -405,6 +405,7 @@ def _apply_edits_to_normalized_content(
 
 @ToolRegistry.register_function(
     name="edit",
+    group="文件操作",
     description=DESCRIPTION,
     category=ToolCategory.FILE,
     parameters=[

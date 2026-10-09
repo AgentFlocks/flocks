@@ -1340,3 +1340,15 @@ describe('useSessions list loading', () => {
     expect(result.current.loadingMoreProjectIds).toEqual(new Set());
   });
 });
+
+
+describe('model activity part updates', () => {
+  it('retains timing through SSE replacement and a serialized reload', () => {
+    const start = { id: 'model-clock', messageID: 'msg-1', sessionID: 'sess-1', type: 'step-start', time: { start: 1000 } };
+    const initial = [makeMsg({ id: 'msg-1', parts: [] })];
+    const opened = applyMessagePartUpdate(initial, start);
+    const closed = applyMessagePartUpdate(opened, { ...start, time: { start: 1000, end: 11000 } });
+    expect(opened[0].parts[0].time).toEqual({ start: 1000 });
+    expect(JSON.parse(JSON.stringify(closed))[0].parts).toEqual([{ ...start, time: { start: 1000, end: 11000 } }]);
+  });
+});

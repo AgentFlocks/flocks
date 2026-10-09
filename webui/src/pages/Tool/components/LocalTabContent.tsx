@@ -8,6 +8,8 @@ import EmptyState from '@/components/common/EmptyState';
 import { CATEGORY_LABEL_KEY } from '../constants';
 import { getLocalizedToolDescription } from '../toolDisplay';
 import { SERVICE_TAB_GRID_COLS } from './gridLayout';
+import type { GroupDrag } from '@/components/plugin-groups/GroupNav';
+import PluginGroupButton from '@/components/plugin-groups/PluginGroupButton';
 
 interface LocalTabContentProps {
   tools: Tool[];
@@ -15,6 +17,8 @@ interface LocalTabContentProps {
   selectedToolName?: string | null;
   onSelectTool: (tool: Tool) => void;
   onRefreshTools: () => Promise<void>;
+  groupDrag?: GroupDrag;
+  viewMode?: 'list' | 'cards';
 }
 
 export default function LocalTabContent({
@@ -23,6 +27,8 @@ export default function LocalTabContent({
   selectedToolName,
   onSelectTool,
   onRefreshTools,
+  groupDrag,
+  viewMode = 'list',
 }: LocalTabContentProps) {
   const { t, i18n } = useTranslation('tool');
   const [selectedCategory, setSelectedCategory] = useState<string>('all');
@@ -92,7 +98,7 @@ export default function LocalTabContent({
           description={searchQuery ? t('empty.tryOtherKeywords') : t('local.noToolsDesc')}
         />
       ) : (
-        <div className="bg-white border border-gray-200 rounded-lg overflow-hidden divide-y divide-gray-100">
+        <div className={viewMode === 'list' ? 'bg-white border border-gray-200 rounded-lg overflow-hidden divide-y divide-gray-100' : 'grid gap-3 sm:grid-cols-2 xl:grid-cols-3'}>
           {filteredTools.map((tool) => {
             const isSelected = selectedToolName === tool.name;
             const description = getLocalizedToolDescription(tool, i18n.language);
@@ -100,8 +106,9 @@ export default function LocalTabContent({
             return (
               <div
                 key={tool.name}
-                className={`grid items-center gap-3 px-4 py-3 transition-colors ${isSelected ? 'bg-blue-50' : 'hover:bg-gray-50'}`}
-                style={{ gridTemplateColumns: SERVICE_TAB_GRID_COLS }}
+                {...groupDrag?.dragProps(tool.name)}
+                className={`grid items-center gap-3 px-4 py-3 transition-colors ${isSelected ? 'bg-blue-50' : 'hover:bg-gray-50'}${viewMode === 'cards' ? ' rounded-lg border border-gray-200 bg-white [&>:nth-child(5)]:col-span-2 [&>:nth-child(6)]:col-span-2' : ''}`}
+                style={{ gridTemplateColumns: viewMode === 'list' ? SERVICE_TAB_GRID_COLS : '32px minmax(0, 1fr)' }}
               >
                 {/* Icon */}
                 <div className={`w-8 h-8 flex items-center justify-center rounded-lg ${tool.enabled ? 'bg-blue-50' : 'bg-gray-50'}`}>
@@ -158,7 +165,8 @@ export default function LocalTabContent({
                 </div>
 
                 {/* Actions column */}
-                <div className="flex items-center justify-end gap-1.5">
+                <div className="flex flex-wrap items-center justify-end gap-1.5">
+                  {groupDrag && <PluginGroupButton grouping={groupDrag} itemKey={tool.name} />}
                   {tool.enabled ? (
                     <>
                       <button

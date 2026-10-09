@@ -14,6 +14,7 @@ from flocks.tool.registry import (
 
 @ToolRegistry.register_function(
     name="copy",
+    group="文件操作",
     description="Copy a file or directory.",
     category=ToolCategory.FILE,
     parameters=[

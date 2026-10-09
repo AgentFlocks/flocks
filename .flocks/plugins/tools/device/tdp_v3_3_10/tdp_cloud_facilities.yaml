@@ -1,4 +1,5 @@
 name: tdp_cloud_facilities
+group: NDR
 description: >
   查询 TDP 云服务相关数据。`access_source` 返回访问源主机列表；`assets_info` 查询某个访问源主机的云服务访问详情；
   `instance_list` 返回云实例列表；`instance_access_list` 查询指定云实例的访问明细。优先使用顶层语义化参数，`condition` / `page`

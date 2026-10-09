@@ -1,4 +1,5 @@
 name: virustotal_domain_query
+group: 威胁情报
 description: Query domain threat intelligence from VirusTotal.
 category: custom
 enabled: true

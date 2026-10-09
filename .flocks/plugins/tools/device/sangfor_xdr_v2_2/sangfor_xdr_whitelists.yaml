@@ -1,4 +1,5 @@
 name: sangfor_xdr_whitelists
+group: XDR
 description: >
   Manage Sangfor XDR whitelists. Create, query, update, delete whitelist
   rules, and toggle their enabled/disabled status. Use to suppress

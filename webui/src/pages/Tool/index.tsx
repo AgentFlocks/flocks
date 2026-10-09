@@ -45,8 +45,14 @@ import LoadingSpinner from '@/components/common/LoadingSpinner';
 import EmptyState from '@/components/common/EmptyState';
 import { useToast } from '@/components/common/Toast';
 import { useToolPage } from '@/hooks/useTools';
+import GroupNav, { useGroupDrag, type GroupDrag } from '@/components/plugin-groups/GroupNav';
+import PluginGroupButton from '@/components/plugin-groups/PluginGroupButton';
+import { assertGroupItemsEditable, saveGroupItems, type GroupSelection } from '@/components/plugin-groups/groupView';
+import { useAuth } from '@/contexts/AuthContext';
+import { usePluginViewMode } from '@/hooks/usePluginViewMode';
+import PluginViewToggle from '@/components/plugin-groups/PluginViewToggle';
 import { useDebouncedValue } from '@/hooks/useDebouncedValue';
-import { canDirectlyTestTool, toolAPI, Tool, ToolFixture } from '@/api/tool';
+import { canDirectlyTestTool, listAllToolPages, toolAPI, Tool, ToolFixture } from '@/api/tool';
 import { mcpAPI, MCPServer } from '@/api/mcp';
 import { providerAPI } from '@/api/provider';
 import client from '@/api/client';
@@ -67,7 +73,7 @@ import {
   shouldLoadMcpCatalog,
   type TabKey,
 } from './tabLoading';
-import { getToolTabCounts } from './tabCounts';
+import { getApiServiceCount, getMcpServiceCount, getToolTabCounts } from './tabCounts';
 
 // ============================================================================
 // Constants & Config
@@ -170,25 +176,28 @@ export default function ToolPage() {
   ];
 
   const [activeTab, setActiveTab] = useState<TabKey>(DEFAULT_TOOL_TAB);
+  const [viewMode, setViewMode] = usePluginViewMode(`tools.${activeTab}`, 'list');
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedTool, setSelectedTool] = useState<Tool | null>(null);
   const [testParams, setTestParams] = useState('{}');
   const [testResult, setTestResult] = useState<any>(null);
   const [testing, setTesting] = useState(false);
   const [currentPage, setCurrentPage] = useState(1);
+  const [toolGroup, setToolGroup] = useState<GroupSelection>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [refreshDone, setRefreshDone] = useState(false);
 
   // Sheet state
   const [showMCPSheet, setShowMCPSheet] = useState(false);
-  const [mcpRefreshKey, setMcpRefreshKey] = useState(0);
+  const [serviceRefreshKey, setServiceRefreshKey] = useState(0);
   const [showAPISheet, setShowAPISheet] = useState(false);
   const [showGenerateSheet, setShowGenerateSheet] = useState(false);
   // Sort: default by 类别 (source) MCP -> API -> 内置
   const [sort, setSort] = useState<SortState>({ field: 'source', dir: 'asc' });
   const [filters, setFilters] = useState<ColumnFilters>(EMPTY_FILTERS);
 
-  const [apiEnabledServicesCount, setApiEnabledServicesCount] = useState(0);
+  const [apiServicesCount, setApiServicesCount] = useState(0);
+  const [mcpInventory, setMcpInventory] = useState<Record<string, unknown> | MCPServer[]>({});
   const debouncedSearchQuery = useDebouncedValue(searchQuery, 250);
   const tabSourceFilter = getTabSourceFilter(activeTab);
   const sourceFilterParam = useMemo(() => {
@@ -199,7 +208,10 @@ export default function ToolPage() {
     }
     return joinFilterValues(values);
   }, [filters.source, tabSourceFilter]);
+  // Service tabs group their native inventories, never their child tools.
+  const toolGroupFilter = activeTab === 'all' || activeTab === 'local' ? toolGroup : null;
   const toolPageParams = useMemo(() => ({
+    group: toolGroupFilter ?? undefined,
     source: sourceFilterParam,
     category: joinFilterValues(filters.category),
     sourceName: joinFilterValues(filters.source_name),
@@ -211,6 +223,7 @@ export default function ToolPage() {
     limit: PAGE_SIZE,
   }), [
     sourceFilterParam,
+    toolGroupFilter,
     filters.category,
     filters.source_name,
     filters.enabled,
@@ -230,6 +243,9 @@ export default function ToolPage() {
     reload: reloadToolPage,
   } = useToolPage(toolPageParams);
   const [hasLoadedToolPage, setHasLoadedToolPage] = useState(false);
+  // Do not apply a previous query's service facets during the input debounce or load.
+  const apiToolSearchPending = searchQuery.trim().toLowerCase() !== debouncedSearchQuery.trim().toLowerCase()
+    || loading || !toolPageInitialized;
 
   // Catalog data (fetched once at top level, shared with MCP & API tabs)
   const [catalogEntries, setCatalogEntries] = useState<MCPCatalogEntry[]>([]);
@@ -295,27 +311,104 @@ export default function ToolPage() {
     setConfiguredIds(prev => { const next = new Set(prev); next.delete(id); return next; });
   }, []);
 
-  const fetchApiServicesCount = useCallback(async () => {
+  const fetchApiServicesCount = useCallback(async (force = false) => {
     try {
-      const res = await providerAPI.listApiServices();
-      const services = Array.isArray(res.data) ? res.data : [];
-      setApiEnabledServicesCount(services.filter((service) => service.enabled).length);
+      const res = await providerAPI.listApiServices(force ? { force: true } : undefined);
+      setApiServicesCount(getApiServiceCount(Array.isArray(res.data) ? res.data : []));
     } catch {
-      // Keep the previous count when the status request fails.
+      // Keep the previous native inventory count on a failed reload.
+    }
+  }, []);
+
+  const fetchMcpInventory = useCallback(async () => {
+    try {
+      const res = await mcpAPI.list();
+      setMcpInventory(res.data);
+    } catch {
+      // A tool facet cannot stand in for missing/zero-tool native services.
     }
   }, []);
 
   useEffect(() => {
-    fetchApiServicesCount();
-  }, [fetchApiServicesCount]);
+    void fetchApiServicesCount();
+    void fetchMcpInventory();
+  }, [fetchApiServicesCount, fetchMcpInventory]);
 
   const refreshToolData = useCallback(async () => {
     const [refreshResult] = await Promise.all([
       refetch(),
-      fetchApiServicesCount(),
+      fetchApiServicesCount(true),
+      fetchMcpInventory(),
     ]);
     return refreshResult;
-  }, [refetch, fetchApiServicesCount]);
+  }, [refetch, fetchApiServicesCount, fetchMcpInventory]);
+
+  const { user } = useAuth();
+  const readOnlyReason = user?.role === 'admin' ? undefined : t('pluginGroups:readOnly.admin');
+  const asGroupItem = (tool: Tool) => ({
+    key: tool.name, name: tool.name, group: tool.group,
+    readOnlyReason: tool.group_readonly ? t('pluginGroups:readOnly.system') : readOnlyReason,
+  });
+  const toolGroupItems = tools.map(asGroupItem);
+  const toolGroupDrag = useGroupDrag(toolGroupItems, toast.warning);
+  const groupFacets = toolFacets.group ?? {};
+  const hasToolInventoryFilters = !!(toolPageParams.q || toolPageParams.source || toolPageParams.category || toolPageParams.sourceName || toolPageParams.enabled);
+  const nativeGroupNav = {
+    groups: Object.entries(groupFacets).filter(([name, count]) => name && count > 0).map(([name, count]) => ({
+      name, count, readOnlyReason: readOnlyReason || toolGroupItems.find((item) => item.group === name && item.readOnlyReason)?.readOnlyReason,
+    })),
+    total: toolFacets.group ? Object.values(groupFacets).reduce((sum, count) => sum + count, 0) : totalTools,
+    ungroupedCount: groupFacets[''] ?? 0,
+    inventoryComplete: !hasToolInventoryFilters && toolPageInitialized && !loading && !error,
+  };
+  const saveToolGroup = (name: string, group: string | null) => toolAPI.updateGroup(name, group);
+  const reloadToolGroups = async () => {
+    await reloadToolPage();
+    if (!toolGroup) return;
+    // Filtered facets cannot establish that the final native member left.
+    const { data } = await toolAPI.listPage({ offset: 0, limit: 1 });
+    if (!data.facets.group) throw new Error(t('pluginGroups:errors.refresh'));
+    if (!(data.facets.group[toolGroup] > 0)) {
+      setToolGroup((current) => current === toolGroup ? null : current);
+      setCurrentPage(1);
+    }
+  };
+  const moveToolGroup = async (key: string, group: string | null) => {
+    const { data } = await toolAPI.get(key);
+    await saveGroupItems([asGroupItem(data)], group, saveToolGroup, reloadToolGroups, t);
+  };
+  const ensureNewToolGroup = async (name: string) => {
+    // Query-independent native facets include names hidden by search, columns or tabs.
+    // Only one summary row is needed; do not fetch every tool just to validate a name.
+    const { data } = await toolAPI.listPage({ offset: 0, limit: 1 });
+    if (!data.facets.group) throw new Error(t('pluginGroups:errors.refresh'));
+    if ((data.facets.group[name] ?? 0) > 0) throw new Error(t('pluginGroups:validation.duplicate'));
+  };
+  const createToolGroup = async (key: string, group: string) => {
+    await ensureNewToolGroup(group);
+    await moveToolGroup(key, group);
+  };
+  const changeToolGroup = async (from: string, to: string | null) => {
+    if (to !== null) await ensureNewToolGroup(to);
+    // Audit the entire native group, including members hidden by query, columns,
+    // tabs or pagination. Counts and the loaded 25 rows cannot prove writability.
+    const wholeGroup = await listAllToolPages({ group: from, sortBy: toolPageParams.sortBy, sortDir: toolPageParams.sortDir }, { requireComplete: true });
+    assertGroupItemsEditable(wholeGroup.map(asGroupItem), t);
+    // Keep the existing write scope explicit in the single native confirmation.
+    const members = hasToolInventoryFilters
+      ? await listAllToolPages({ ...toolPageParams, group: from }, { requireComplete: true })
+      : wholeGroup;
+    await saveGroupItems(members.map(asGroupItem), to, saveToolGroup, reloadToolGroups, t, true);
+  };
+  const selectToolGroup = useCallback((name: GroupSelection) => {
+    setToolGroup(name);
+    setCurrentPage(1);
+  }, []);
+  // A failed first request has no facets, not an authoritative empty inventory.
+  // Do not let it clear the selected group and silently fall back to All.
+  const toolGroupNav = toolFacets.group ? <GroupNav preferenceKey={`tools.${activeTab}`} {...nativeGroupNav} items={toolGroupItems}
+    selection={toolGroup} onSelect={selectToolGroup} onMove={moveToolGroup} onCreate={createToolGroup} onRename={changeToolGroup}
+    onDelete={(name) => changeToolGroup(name, null)} {...toolGroupDrag} /> : null;
 
   const showRefreshOutcome = useCallback((status: 'success' | 'partial' | 'error', message: string) => {
     if (status === 'partial') {
@@ -342,8 +435,11 @@ export default function ToolPage() {
   const apiCatalogEntries = useMemo(() => [] as MCPCatalogEntry[], []);
 
   const tabCounts = useMemo(
-    () => getToolTabCounts(totalTools, toolFacets, apiEnabledServicesCount),
-    [totalTools, toolFacets, apiEnabledServicesCount],
+    () => getToolTabCounts(totalTools, toolFacets, {
+      api: apiServicesCount,
+      mcp: getMcpServiceCount(mcpInventory, mcpCatalogEntries),
+    }),
+    [totalTools, toolFacets, apiServicesCount, mcpInventory, mcpCatalogEntries],
   );
   const enabledSummary = useMemo(() => ({
     active: toolFacets.enabled['true'] ?? tools.filter((tool) => tool.enabled).length,
@@ -368,8 +464,8 @@ export default function ToolPage() {
   const paginatedTools = tools;
 
   useEffect(() => {
-    if (currentPage > totalPages) setCurrentPage(totalPages);
-  }, [currentPage, totalPages]);
+    if (toolPageInitialized && currentPage > totalPages) setCurrentPage(totalPages);
+  }, [currentPage, totalPages, toolPageInitialized]);
 
   useEffect(() => {
     if (toolPageInitialized && !error) {
@@ -379,6 +475,7 @@ export default function ToolPage() {
 
   const handleTabChange = (tab: TabKey) => {
     setActiveTab(tab);
+    selectToolGroup(null);
     setCurrentPage(1);
     setSearchQuery('');
     setFilters(EMPTY_FILTERS);
@@ -409,6 +506,7 @@ export default function ToolPage() {
       const message = extractErrorMessage(err, t('alert.unknownError'));
       toast.error(t('alert.refreshFailedTitle'), message);
     } finally {
+      setServiceRefreshKey((key) => key + 1);
       setRefreshing(false);
     }
   };
@@ -524,6 +622,7 @@ export default function ToolPage() {
           </div>
         </div>
         <div className="flex items-center gap-2">
+          <PluginViewToggle value={viewMode} onChange={setViewMode} />
           <button
             onClick={handleRefresh}
             disabled={refreshing}
@@ -587,8 +686,8 @@ export default function ToolPage() {
             ))}
           </nav>
 
-          {/* Search - right aligned, same row */}
-          <div className="relative mb-px">
+          {/* Query controls stay on the left; native actions remain above on the right. */}
+          <div className="relative mb-px order-first">
             <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-gray-400" />
             <input
               type="text"
@@ -622,14 +721,13 @@ export default function ToolPage() {
 
       {/* Tab Content */}
       <div className="min-h-[420px] [scrollbar-gutter:stable]">
-        {isTabPageLoading ? (
-          <div className="flex min-h-[420px] items-center justify-center rounded-lg border border-gray-200 bg-white">
-            <LoadingSpinner delayMs={180} />
-          </div>
-        ) : activeTab === 'mcp' ? (
+        {/* Native service inventories own their filters/detail state. Loading a
+            child-tool query must not unmount them and reset the business group. */}
+        {activeTab === 'mcp' ? (
           <MCPTabContent
             tools={processedTools}
             searchQuery={searchQuery}
+            onServersChange={setMcpInventory}
             onSelectTool={openDetail}
             onRefreshTools={refreshToolDataAfterMutation}
             catalogEntries={mcpCatalogEntries}
@@ -638,11 +736,17 @@ export default function ToolPage() {
             configuredIds={configuredIds}
             onConfiguredChange={onConfiguredChange}
             onConfiguredRemove={onConfiguredRemove}
-            refreshKey={mcpRefreshKey}
+            refreshKey={serviceRefreshKey}
+            viewMode={viewMode}
           />
         ) : activeTab === 'api' ? (
           <APITabContent
             tools={processedTools}
+            searchQuery={searchQuery}
+            matchingToolServices={apiToolSearchPending || error ? undefined : toolFacets.source_name}
+            toolSearchPending={apiToolSearchPending}
+            onServiceCountChange={setApiServicesCount}
+            refreshKey={serviceRefreshKey}
             onSelectTool={openDetail}
             onRefreshTools={refreshToolDataAfterMutation}
             catalogEntries={apiCatalogEntries}
@@ -650,13 +754,22 @@ export default function ToolPage() {
             catalogLoading={catalogLoading}
             configuredIds={configuredIds}
             onConfiguredChange={onConfiguredChange}
+            viewMode={viewMode}
           />
+        ) : isTabPageLoading ? (
+          <div className="flex min-h-[420px] items-center justify-center rounded-lg border border-gray-200 bg-white">
+            <LoadingSpinner delayMs={180} />
+          </div>
         ) : activeTab === 'local' ? (
-          <div className="overflow-hidden rounded-lg border border-gray-200 bg-white">
+          <div className="flex flex-col gap-4 md:flex-row">
+            {toolGroupNav}
+          <div className="min-w-0 flex-1 overflow-hidden rounded-lg border border-gray-200 bg-white">
             <LocalTabContent
               tools={processedTools}
               searchQuery={searchQuery}
               selectedToolName={selectedTool?.name}
+              groupDrag={toolGroupDrag}
+              viewMode={viewMode}
               onSelectTool={openDetail}
               onRefreshTools={refreshToolDataAfterMutation}
             />
@@ -668,9 +781,12 @@ export default function ToolPage() {
               onPageChange={setCurrentPage}
             />
           </div>
+          </div>
         ) : (
           /* All tab: active tools only */
-          <div className="space-y-4">
+          <div className="flex flex-col gap-4 md:flex-row">
+          {toolGroupNav}
+          <div className="min-w-0 flex-1 space-y-4">
             {/* Inactive services callout */}
             {(mcpCatalogEntries.length > 0 || apiCatalogEntries.length > 0) && !searchQuery && (
               <div className="flex items-center justify-between px-4 py-3 bg-gray-50 border border-gray-200 rounded-lg text-sm">
@@ -706,6 +822,8 @@ export default function ToolPage() {
             ) : (
               <ToolTable
                 tools={paginatedTools}
+                groupDrag={toolGroupDrag}
+                viewMode={viewMode}
                 sort={sort}
                 filters={filters}
                 filterOptions={filterOptions}
@@ -720,6 +838,7 @@ export default function ToolPage() {
                 onSelect={openDetail}
               />
             )}
+          </div>
           </div>
         )}
       </div>
@@ -769,7 +888,7 @@ export default function ToolPage() {
             setShowMCPSheet(false);
             void handleRefresh();
           }}
-          onSaved={() => { setShowMCPSheet(false); handleRefresh(); setMcpRefreshKey(k => k + 1); }}
+          onSaved={() => { setShowMCPSheet(false); void handleRefresh(); }}
           onRefresh={handleRefresh}
         />
       )}
@@ -3250,6 +3369,8 @@ function ProviderCredentialsCard({ providerId, onTestingStart, onTestingEnd }: {
 
 function ToolTable({
   tools,
+  groupDrag,
+  viewMode,
   sort,
   filters,
   filterOptions,
@@ -3264,6 +3385,8 @@ function ToolTable({
   onSelect,
 }: {
   tools: Tool[];
+  groupDrag: GroupDrag;
+  viewMode: 'list' | 'cards';
   sort: SortState;
   filters: ColumnFilters;
   filterOptions: Record<string, string[]>;
@@ -3299,8 +3422,10 @@ function ToolTable({
     <div className="bg-white rounded-lg border border-gray-200 overflow-hidden flex flex-col">
       {/* Header */}
       <div
-        className="grid items-center gap-3 px-4 py-2.5 bg-gray-50 border-b border-gray-200 text-[11px] font-medium text-gray-500 uppercase tracking-wide"
-        style={{ gridTemplateColumns: GRID_COLS }}
+        className={viewMode === 'list'
+          ? 'grid items-center gap-3 px-4 py-2.5 bg-gray-50 border-b border-gray-200 text-[11px] font-medium text-gray-500 uppercase tracking-wide'
+          : 'flex flex-wrap items-center gap-4 px-4 py-2.5 bg-gray-50 border-b border-gray-200 text-[11px] font-medium text-gray-500 uppercase tracking-wide [&>:first-child]:hidden [&>:nth-child(2)]:hidden [&>:last-child]:hidden'}
+        style={viewMode === 'list' ? { gridTemplateColumns: GRID_COLS } : undefined}
       >
         <div />
         <div>{t('table.toolName')}</div>
@@ -3348,8 +3473,8 @@ function ToolTable({
         <div className="text-center">{t('table.actions')}</div>
       </div>
 
-      {/* Rows */}
-      <div className="flex-1 divide-y divide-gray-100">
+      {/* Both layouts retain the same native fields and action callbacks. */}
+      <div className={viewMode === 'list' ? 'flex-1 divide-y divide-gray-100' : 'grid gap-3 p-3 sm:grid-cols-2 xl:grid-cols-3'}>
         {tools.map((tool) => {
           const sb = SOURCE_BADGE[tool.source] || SOURCE_BADGE.custom;
           const sourceLabel = getSourceLabel(tool.source, t);
@@ -3358,8 +3483,9 @@ function ToolTable({
           return (
             <div
               key={tool.name}
-              className="grid items-center gap-3 px-4 py-3 hover:bg-gray-50 transition-colors"
-              style={{ gridTemplateColumns: GRID_COLS }}
+              {...groupDrag.dragProps(tool.name)}
+              className={`grid items-center gap-3 px-4 py-3 hover:bg-gray-50 transition-colors${viewMode === 'cards' ? ' rounded-lg border border-gray-200 bg-white [&>:nth-child(n+3)]:col-span-2' : ''}`}
+              style={{ gridTemplateColumns: viewMode === 'list' ? GRID_COLS : '32px minmax(0, 1fr)' }}
             >
               {/* Icon */}
               <div className={`w-8 h-8 flex items-center justify-center rounded-lg ${tool.enabled ? 'bg-gray-100' : 'bg-gray-50'}`}>
@@ -3405,8 +3531,9 @@ function ToolTable({
                 <EnabledBadge enabled={tool.enabled} />
               </div>
 
-              {/* Actions column — manage button */}
-              <div className="w-full flex items-center justify-center">
+              {/* Actions column */}
+              <div className="w-full flex flex-wrap items-center justify-center gap-1">
+                <PluginGroupButton grouping={groupDrag} itemKey={tool.name} />
                 <button
                   onClick={() => onSelect(tool)}
                   className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border border-gray-200 text-gray-600 text-xs font-medium hover:bg-gray-100 hover:text-gray-800 transition-colors"

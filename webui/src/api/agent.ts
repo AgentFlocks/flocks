@@ -1,6 +1,9 @@
 import client from './client';
 
 export interface Agent {
+  /** Server-computed ownership of the selected definition, never a writable setting. */
+  group_readonly?: boolean;
+  group?: string | null;
   name: string;
   /** Chinese display name; canonical `name` remains the stable identifier. */
   nameCn?: string;
@@ -70,6 +73,7 @@ export const agentAPI = {
     client.post<Agent>('/api/agent', data),
 
   update: (name: string, data: {
+    group?: string | null;
     nameCn?: string;
     description?: string;
     descriptionCn?: string;

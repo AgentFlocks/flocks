@@ -126,6 +126,7 @@ def row_to_device(row: aiosqlite.Row) -> DeviceIntegration:
     return DeviceIntegration(
         id=row["id"],
         group_id=row["group_id"] or DEFAULT_GROUP_ID,
+        group=(row["plugin_group"] or "") if "plugin_group" in row.keys() else "",
         name=row["name"],
         storage_key=storage_key,
         service_id=derived_service_id or row["service_id"],
@@ -288,6 +289,7 @@ async def insert_device(
     db_fields: Dict[str, str],
     status: str = "unknown",
     message: Optional[str] = None,
+    group: str = "",
 ) -> None:
     """Insert a new device row. ``device_id`` and ``db_fields`` must already be
     derived by the caller (so secrets can be persisted under their final id).
@@ -298,13 +300,13 @@ async def insert_device(
             """
             INSERT INTO device_integrations
                 (id, group_id, name, storage_key, service_id, enabled, verify_ssl,
-                 fields, status, message, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 fields, status, message, created_at, updated_at, plugin_group)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 device_id, group_id, name, storage_key, service_id,
                 int(enabled), int(verify_ssl), json.dumps(db_fields),
-                status, message, now, now,
+                status, message, now, now, group,
             ),
         )
         await db.commit()
@@ -319,19 +321,35 @@ async def update_device_row(
     enabled: bool,
     verify_ssl: bool,
     db_fields: Dict[str, str],
+    group: Optional[str] = None,
 ) -> None:
     async with Storage.connect(Storage.get_db_path()) as db:
         await db.execute(
             """
             UPDATE device_integrations
-            SET name=?, group_id=?, enabled=?, verify_ssl=?, fields=?, updated_at=?
+            SET name=?, group_id=?, enabled=?, verify_ssl=?, fields=?, updated_at=?,
+                plugin_group=COALESCE(?, plugin_group)
             WHERE id=?
             """,
             (name, group_id, int(enabled), int(verify_ssl),
-             json.dumps(db_fields), _now_ms(), device_id),
+             json.dumps(db_fields), _now_ms(), group, device_id),
         )
         await db.commit()
     _bump_revision()
+
+
+async def update_device_metadata(device_id: str, *, group: str) -> bool:
+    """Update display metadata without rewriting connection or room settings."""
+    async with Storage.connect(Storage.get_db_path()) as db:
+        cursor = await db.execute(
+            "UPDATE device_integrations SET plugin_group=?, updated_at=? WHERE id=?",
+            (group, _now_ms(), device_id),
+        )
+        changed = cursor.rowcount > 0
+        await db.commit()
+    if changed:
+        _bump_revision()
+    return changed
 
 
 async def delete_device_row(device_id: str) -> None:

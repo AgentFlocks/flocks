@@ -4,10 +4,16 @@ import { useTranslation } from 'react-i18next';
 import PageHeader from '@/components/common/PageHeader';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
 import EmptyState from '@/components/common/EmptyState';
+import { useToast } from '@/components/common/Toast';
+import PluginGroupButton from '@/components/plugin-groups/PluginGroupButton';
 import { useAgents } from '@/hooks/useAgents';
 import { agentAPI, Agent } from '@/api/agent';
 import { getAgentDisplayDescription, getAgentDisplayName } from '@/utils/agentDisplay';
 import AgentSheet from './AgentSheet';
+import GroupNav, { useGroupDrag, type GroupDrag } from '@/components/plugin-groups/GroupNav';
+import { deriveGroupNav, matchesGroup, saveGroupItems, type GroupSelection } from '@/components/plugin-groups/groupView';
+import PluginViewToggle from '@/components/plugin-groups/PluginViewToggle';
+import { usePluginViewMode, type PluginViewMode } from '@/hooks/usePluginViewMode';
 
 // ============================================================================
 // Main Page Component
@@ -22,13 +28,41 @@ export default function AgentPage() {
   const { agents, loading, error, refetch } = useAgents();
   const [refreshing, setRefreshing] = useState(false);
   const [refreshDone, setRefreshDone] = useState(false);
+  const [viewMode, setViewMode] = usePluginViewMode('agent', 'cards');
+  const [groupSelection, setGroupSelection] = useState<GroupSelection>(null);
+  const asGroupItem = (agent: Agent) => ({
+    key: agent.name, name: getAgentDisplayName(agent, i18n.language), group: agent.group,
+    readOnlyReason: agent.group_readonly ? t('pluginGroups:readOnly.system') : undefined,
+  });
+  const visibleAgents = (inventory: Agent[]) => inventory.filter((agent) => agent.mode === 'primary' || !(agent.tags ?? []).includes('system'));
+  const groupItems = visibleAgents(agents).map(asGroupItem);
+  const { warning } = useToast();
+  const groupDrag = useGroupDrag(groupItems, warning);
+  const saveGroup = (name: string, group: string | null) => agentAPI.update(name, { group });
+  const reloadGroups = () => refetch(false, true);
+  const loadGroupItems = async () => visibleAgents((await agentAPI.list()).data).map(asGroupItem);
+  const moveGroup = async (key: string, group: string | null) => {
+    const inventory = await loadGroupItems();
+    await saveGroupItems(inventory.filter((item) => item.key === key), group, saveGroup, reloadGroups, t);
+  };
+  const createGroup = async (key: string, group: string) => {
+    const inventory = await loadGroupItems();
+    if (inventory.some((item) => matchesGroup(item.group, group))) throw new Error(t('pluginGroups:validation.duplicate'));
+    await saveGroupItems(inventory.filter((item) => item.key === key), group, saveGroup, reloadGroups, t);
+  };
+  const changeGroup = async (from: string, to: string | null) => {
+    const inventory = await loadGroupItems();
+    if (to !== null && inventory.some((item) => matchesGroup(item.group, to))) throw new Error(t('pluginGroups:validation.duplicate'));
+    await saveGroupItems(inventory.filter((item) => matchesGroup(item.group, from)), to, saveGroup, reloadGroups, t, true);
+  };
+  const selectAgent = (agent: Agent) => setEditingAgent(agent);
 
   const handleRefresh = async () => {
     if (refreshing) return;
     try {
       setRefreshing(true);
       await Promise.all([
-        agentAPI.refresh().then(() => refetch()),
+        agentAPI.refresh().then(() => refetch(false)),
         new Promise((r) => setTimeout(r, 600)),
       ]);
       setRefreshDone(true);
@@ -80,7 +114,7 @@ export default function AgentPage() {
     );
   }
 
-  if (error) {
+  if (error && agents.length === 0) {
     return (
       <div className="flex items-center justify-center h-full">
         <div className="text-center">
@@ -104,12 +138,14 @@ export default function AgentPage() {
         icon={<Bot className="w-8 h-8" />}
       />
 
+      {error && <p role="alert" className="px-4 py-2 text-sm text-red-600">{error}</p>}
       {/* Toolbar — mirrors the Skill page toolbar style */}
       <div className="px-4 py-2 border-b border-gray-100 flex items-center gap-2">
         <span className="text-xs text-gray-400 select-none">
           {t('totalCount', { total: primaryAgents.length + subAgents.length })}
         </span>
         <div className="ml-auto flex items-center gap-2">
+          <PluginViewToggle value={viewMode} onChange={setViewMode} />
           <button
             onClick={handleRefresh}
             disabled={refreshing}
@@ -135,7 +171,9 @@ export default function AgentPage() {
       {/* scrollbar-gutter: stable reserves the scrollbar track width even when the
           scrollbar is absent, preventing the layout shift that occurs when filters
           toggle between many results (scrollbar visible) and few results (no bar). */}
-      <div className="flex-1 overflow-y-auto px-4 py-4 space-y-6" style={{ scrollbarGutter: 'stable' }}>
+      <div className="flex-1 min-h-0 overflow-y-auto px-4 py-4 flex flex-col gap-4 md:flex-row" style={{ scrollbarGutter: 'stable' }}>
+        <GroupNav inventoryComplete={!loading && !error} preferenceKey="agent" {...deriveGroupNav(groupItems)} items={groupItems} selection={groupSelection} onSelect={setGroupSelection} onMove={moveGroup} onCreate={createGroup} onRename={changeGroup} onDelete={(name) => changeGroup(name, null)} {...groupDrag} />
+        <div className="min-w-0 flex-1 space-y-6">
         {agents.length === 0 ? (
           <EmptyState
             icon={<Bot className="w-16 h-16" />}
@@ -161,7 +199,10 @@ export default function AgentPage() {
                 agents={primaryAgents}
                 displayLang={i18n.language}
                 selectedAgent={editingAgent}
-                onSelect={setEditingAgent}
+                onSelect={selectAgent}
+                groupSelection={groupSelection}
+                groupDrag={groupDrag}
+                viewMode={viewMode}
                 onDelete={handleDelete}
                 togglingAgents={togglingAgents}
                 onToggleDelegatable={handleToggleDelegatable}
@@ -175,7 +216,10 @@ export default function AgentPage() {
                 agents={subAgents}
                 displayLang={i18n.language}
                 selectedAgent={editingAgent}
-                onSelect={setEditingAgent}
+                onSelect={selectAgent}
+                groupSelection={groupSelection}
+                groupDrag={groupDrag}
+                viewMode={viewMode}
                 onDelete={handleDelete}
                 showSourceFilter
                 paginate
@@ -185,6 +229,7 @@ export default function AgentPage() {
             )}
           </>
         )}
+        </div>
       </div>
 
       {editingAgent && (
@@ -298,6 +343,9 @@ interface AgentSectionProps {
   onToggleDelegatable: (agent: Agent, delegatable: boolean) => void;
   showSourceFilter?: boolean;
   paginate?: boolean;
+  groupSelection: GroupSelection;
+  groupDrag: GroupDrag;
+  viewMode: PluginViewMode;
 }
 
 function AgentSection({
@@ -313,6 +361,9 @@ function AgentSection({
   onToggleDelegatable,
   showSourceFilter = false,
   paginate = false,
+  groupSelection,
+  groupDrag,
+  viewMode,
 }: AgentSectionProps) {
   const { t } = useTranslation('agent');
   const [sourceFilter, setSourceFilter] = useState<SourceFilter>('all');
@@ -322,16 +373,13 @@ function AgentSection({
   const builtinCount = useMemo(() => agents.filter(a => a.native).length, [agents]);
   const customCount  = useMemo(() => agents.filter(a => !a.native).length, [agents]);
 
-  const filtered = useMemo(
-    () => showSourceFilter
-      ? agents.filter((a) => {
-          if (sourceFilter === 'builtin') return a.native;
-          if (sourceFilter === 'custom') return !a.native;
-          return true;
-        })
-      : agents,
-    [agents, showSourceFilter, sourceFilter],
-  );
+  const filtered = agents.filter((agent) => {
+    if (!matchesGroup(agent.group, groupSelection)) return false;
+    if (!showSourceFilter) return true;
+    if (sourceFilter === 'builtin') return agent.native;
+    if (sourceFilter === 'custom') return !agent.native;
+    return true;
+  });
 
   const totalPages = paginate ? Math.max(1, Math.ceil(filtered.length / SUB_AGENT_PAGE_SIZE)) : 1;
 
@@ -341,7 +389,7 @@ function AgentSection({
   }, [totalPages, page]);
 
   // Reset to page 1 when filter changes
-  useEffect(() => { setPage(1); }, [sourceFilter]);
+  useEffect(() => { setPage(1); }, [sourceFilter, groupSelection]);
 
   const displayed = paginate
     ? filtered.slice((page - 1) * SUB_AGENT_PAGE_SIZE, page * SUB_AGENT_PAGE_SIZE)
@@ -415,18 +463,21 @@ function AgentSection({
             {t(`filter.${sourceFilter}` as any)} — {t('emptyState.title')}
           </p>
         ) : (
-          <div className="grid gap-3 grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+          <div className={viewMode === 'cards' ? 'grid gap-3 grid-cols-2 lg:grid-cols-3 xl:grid-cols-4' : 'space-y-2'}>
             {displayed.map((agent) => (
-              <AgentCard
-                key={agent.name}
-                agent={agent}
-                displayLang={displayLang}
-                isSelected={selectedAgent?.name === agent.name}
-                onClick={() => onSelect(agent)}
-                onDelete={onDelete}
-                toggling={!!togglingAgents[agent.name]}
-                onToggleDelegatable={onToggleDelegatable}
-              />
+              <div key={agent.name} className="min-w-0 [&>div]:h-full" {...groupDrag.dragProps(agent.name)}>
+                <AgentCard
+                  agent={agent}
+                  grouping={groupDrag}
+                  displayLang={displayLang}
+                  isSelected={selectedAgent?.name === agent.name}
+                  onClick={() => onSelect(agent)}
+                  onDelete={onDelete}
+                  toggling={!!togglingAgents[agent.name]}
+                  onToggleDelegatable={onToggleDelegatable}
+                  layout={viewMode}
+                />
+              </div>
             ))}
           </div>
         )}
@@ -450,6 +501,8 @@ function AgentSection({
 // ============================================================================
 
 interface AgentCardProps {
+  grouping: GroupDrag;
+  layout?: PluginViewMode;
   agent: Agent;
   displayLang: string;
   isSelected: boolean;
@@ -460,6 +513,8 @@ interface AgentCardProps {
 }
 
 function AgentCard({
+  grouping,
+  layout = 'cards',
   agent,
   displayLang,
   isSelected,
@@ -476,7 +531,7 @@ function AgentCard({
   return (
     <div
       className={`
-        group relative bg-white rounded-xl border flex flex-col overflow-hidden
+        group relative bg-white rounded-xl border flex flex-col overflow-hidden ${layout === 'list' ? 'lg:flex-row' : ''}
         cursor-pointer transition-all duration-150
         ${isSelected
           ? 'border-slate-400 shadow-md ring-2 ring-slate-200'
@@ -486,9 +541,9 @@ function AgentCard({
       onClick={onClick}
     >
       {/* Card body */}
-      <div className="flex-1 px-4 pt-3 pb-2 flex flex-col gap-2 min-w-0">
+      <div className={`flex-1 px-4 pt-3 pb-2 flex flex-col gap-2 min-w-0 ${layout === 'list' ? 'sm:flex-row sm:items-center sm:gap-4' : ''}`}>
         {/* Avatar + Name row */}
-        <div className="flex items-start gap-2.5 min-w-0">
+        <div className={`flex items-start gap-2.5 min-w-0 ${layout === 'list' ? 'sm:w-52 sm:shrink-0' : ''}`}>
           <div className="w-8 h-8 rounded-lg flex items-center justify-center shrink-0 mt-0.5 bg-gray-100">
             <Bot className="w-4 h-4 text-gray-500" />
           </div>
@@ -524,13 +579,13 @@ function AgentCard({
         </div>
 
         {/* Description */}
-        <p className="text-xs text-gray-500 leading-relaxed line-clamp-2">
+        <p className={`text-xs text-gray-500 leading-relaxed line-clamp-2 ${layout === 'list' ? 'flex-1' : ''}`}>
           {displayDesc || t('common:empty.noDescription')}
         </p>
 
         {/* Model chip */}
         {agent.model && (
-          <div className="self-start inline-flex items-center gap-1 text-[10px] text-gray-400">
+          <div className={`self-start inline-flex items-center gap-1 text-[10px] text-gray-400 ${layout === 'list' ? 'sm:w-32 sm:shrink-0 sm:self-center' : ''}`}>
             <Cpu className="w-3 h-3 shrink-0" />
             <span className="truncate max-w-[120px]">
               {agent.model.modelID}
@@ -541,7 +596,7 @@ function AgentCard({
 
       {/* Footer — delete / enable / edit */}
       <div
-        className="border-t border-gray-100 px-4 py-2 flex items-center justify-between"
+        className={`border-t border-gray-100 px-3 py-2 flex items-center justify-between ${layout === 'list' ? 'lg:border-t-0 lg:border-l lg:gap-4 lg:shrink-0' : ''}`}
         onClick={(e) => e.stopPropagation()}
       >
         {/* Delete — disabled for built-in agents */}
@@ -550,7 +605,7 @@ function AgentCard({
             type="button"
             disabled
             title={t('badge.nativeDeleteDisabled')}
-            className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium
+            className="inline-flex shrink-0 whitespace-nowrap items-center gap-1 px-1 py-1 rounded-md text-[11px] font-medium
                        text-gray-300 cursor-not-allowed select-none"
           >
             <Trash2 className="w-3 h-3" />
@@ -561,7 +616,7 @@ function AgentCard({
             type="button"
             onClick={(e) => { e.stopPropagation(); onDelete(agent.name); }}
             title={t('badge.delete')}
-            className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium
+            className="inline-flex shrink-0 whitespace-nowrap items-center gap-1 px-1 py-1 rounded-md text-[11px] font-medium
                        text-gray-400 hover:text-red-600 hover:bg-red-50 transition-colors"
           >
             <Trash2 className="w-3 h-3" />
@@ -569,7 +624,8 @@ function AgentCard({
           </button>
         )}
 
-        <div className="flex items-center gap-2">
+        <div className="flex shrink-0 flex-nowrap items-center justify-end gap-1 whitespace-nowrap">
+          <PluginGroupButton grouping={grouping} itemKey={agent.name} />
           {showDelegatableToggle && (
             <div className="flex items-center gap-1.5">
               <span className="text-[11px] font-medium text-gray-400">
@@ -592,7 +648,7 @@ function AgentCard({
             onClick={onClick}
             title={t('badge.edit')}
             aria-label={t('badge.edit')}
-            className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium text-gray-400
+            className="inline-flex shrink-0 whitespace-nowrap items-center gap-1 px-1 py-1 rounded-md text-[11px] font-medium text-gray-400
                        hover:text-slate-700 hover:bg-gray-50 transition-colors"
           >
             <Pencil className="w-3 h-3" />

@@ -1,4 +1,5 @@
 name: tdp_threat_alert_host
+group: NDR
 description: >
   查询 TDP 告警主机相关数据。`alert_host_list` 返回告警主机列表；`host_threat_list`
   返回指定告警主机的威胁列表，通常需要先从 `alert_host_list` 结果里取得 `assets_machine`。优先使用顶层语义化参数，不要手写

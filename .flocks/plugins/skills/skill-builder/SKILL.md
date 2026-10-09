@@ -1,5 +1,6 @@
 ---
 name: skill-builder
+group: 系统辅助
 category: system
 description: Create or improve skill. Use when the user asks to create, add, generate, update, refactor, package, or test a skill, convert a repeated workflow into a reusable skill, write a `SKILL.md`, or add `references/`, `scripts/` for a skill.
 ---

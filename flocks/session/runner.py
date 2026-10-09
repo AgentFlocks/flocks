@@ -39,7 +39,6 @@ from flocks.session.message import (
 from flocks.session.prompt import SessionPrompt, SystemPromptBlock, TurnPromptContext
 from flocks.session.core.status import SessionStatus, SessionStatusRetry, SessionStatusBusy
 from flocks.session.core.defaults import (
-    DEFAULT_MAX_TOOL_STEPS,
     DOOM_LOOP_THRESHOLD,
     REPEATED_EXACT_TOOL_CALL_HALT_THRESHOLD,
 )
@@ -56,6 +55,7 @@ from flocks.session.llm_hook_utils import (
     serialize_chat_message,
     stream_text_replacements_from_hook_output,
 )
+from flocks.session.streaming.model_activity import ModelActivity
 from flocks.session.streaming.stream_processor import StreamProcessor
 from flocks.session.streaming.stream_events import (
     StartEvent,
@@ -282,6 +282,8 @@ class StepResult:
     error: Optional[str] = None
     usage: Optional[Dict[str, int]] = None
     failure: Optional[StepFailure] = None
+    # Internal execution outcome: a sleep call alone does not prove a successful wait.
+    _successful_sleep: bool = field(default=False, repr=False, compare=False)
 
 
 @dataclass
@@ -560,7 +562,12 @@ class SessionRunner:
         last_user_id: str,
     ) -> Dict[str, Any]:
         visible_text = bool((result.content or "").strip())
-        if visible_text or len(result.tool_calls) != 1:
+        successful_sleep = (
+            len(result.tool_calls) == 1
+            and result.tool_calls[0].name == "sleep"
+            and result._successful_sleep
+        )
+        if visible_text or len(result.tool_calls) != 1 or successful_sleep:
             self._reset_tool_loop_guard(last_user_id=last_user_id)
             return {"action": "allow"}
 
@@ -1558,9 +1565,9 @@ class SessionRunner:
         except Exception as e:
             log.debug("runner.session_agent.error", {"error": str(e)})
         
-        # Check if we've reached max steps (matching Flocks logic)
-        max_steps = agent.steps if hasattr(agent, 'steps') and agent.steps is not None else DEFAULT_MAX_TOOL_STEPS
-        is_last_step = self._step >= max_steps
+        # Only explicitly configured step limits constrain tool calls.
+        max_steps = getattr(agent, "steps", None)
+        is_last_step = max_steps is not None and self._step >= max_steps
         
         # Get provider
         provider = Provider.get(self.provider_id)
@@ -3526,9 +3533,11 @@ class SessionRunner:
         turn_plan_file = getattr(self, "_turn_plan_file", None)
         if turn_plan_file is None:
             turn_plan_file = session_plan_file(self.session)
+        model_activity = ModelActivity(self.session.id, assistant_msg.id, self.callbacks.event_publish_callback)
         processor = StreamProcessor(
             session_id=self.session.id,
             assistant_message=assistant_msg,
+            model_activity=model_activity,
             agent=agent,
             abort_event=self._external_abort or self._abort,
             permission_callback=self._handle_permission,
@@ -3773,15 +3782,17 @@ class SessionRunner:
         # Invariant while the slot is held: do not await anything that needs a
         # slot of its own, or the workflow loop can deadlock itself at a small
         # max_concurrency (parent holds, awaits child, child waits for a slot).
-        # Today that holds because every tool that starts a subagent session
-        # goes through StreamProcessor._start_parallel_tool_call's create_task
-        # (delegate_task requires subagent_type / session_id, so it always
-        # takes that branch) and the drains below run after the release. Keep
-        # it that way when adding tools that call the model themselves.
+        # Today that holds because no tool call made during the stream waits
+        # for a subagent: delegate_task / task (subagent_type is required) go
+        # through StreamProcessor._start_parallel_tool_call's create_task and,
+        # inside a session, return as soon as the child is submitted; sleep is
+        # deferred to the drain below, and the drains run after the release.
+        # Keep it that way when adding tools that call the model themselves.
         llm_budget_slot = llm_slot()
         await llm_budget_slot.acquire()
         llm_call_started_at = time.perf_counter()
         try:
+            await model_activity.start()
             async for chunk in _iter_with_chunk_timeout(
                 provider.chat_stream(
                     model_id=self.model_id,
@@ -3953,25 +3964,29 @@ class SessionRunner:
             # foreground children, which run on this same loop and need slots
             # of their own (holding it here could deadlock the whole budget).
             llm_budget_slot.release()
-            # Foreground delegate tasks own child sessions. A user abort has
-            # already signalled them (routes/session.py abort_children); a
-            # cancellation that reaches us any other way (workflow node
-            # timeout cancelling the delegate_task future) has not, so do it
-            # here, then let their cancellation/finalization finish before
-            # unwinding this step. Only subagent sessions (category "task"):
-            # a session the user created from this one (WebUI "new from
-            # parent") is also a child by parent_id but must keep running.
-            from flocks.session.session_loop import SessionLoop
+            # Not a user abort (that has stopped them already): a workflow
+            # node timeout or a watchdog gave up on this execution. Stop the
+            # subagents it started now, not after the drain below, which can
+            # sit on a tool call waiting for a permission reply. SessionLoop
+            # does the same for cancels landing anywhere else in the step.
+            # Synchronous like the release, so a second cancel landing in the
+            # awaits below cannot skip either.
+            if not self.is_aborted:
+                from flocks.session.session_loop import SessionLoop
 
-            SessionLoop.abort_children(self.session.id, only_category="task")
-            await processor.drain_parallel_tool_calls()
+                SessionLoop.end_cancelled_execution(self.session.id)
+            await model_activity.stop()
+            # Foreground delegate tasks own child sessions. Let their
+            # cancellation/finalization finish before unwinding this step.
+            await processor.drain_parallel_tool_calls(execute_deferred=False)
             raise
         except Exception as exc:
             llm_budget_slot.release()
+            await model_activity.stop()
             # A foreground delegate may already be running when the provider
             # stream fails. Drain first so the retry layer observes the tool
             # side-effect fence and cannot dispatch the same work twice.
-            await processor.drain_parallel_tool_calls()
+            await processor.drain_parallel_tool_calls(execute_deferred=False)
             partial_response = _build_llm_response_payload(
                 content=processor.get_text_content(),
                 reasoning=processor.get_reasoning_content(),
@@ -3997,6 +4012,7 @@ class SessionRunner:
             raise
         finally:
             llm_budget_slot.release()
+            await model_activity.stop()
 
         log.debug("runner.stream.summary", {
             "total_chunks": chunk_counts["total"],
@@ -4010,43 +4026,45 @@ class SessionRunner:
 
         try:
             await tool_accumulator.flush_remaining(stream_finish_reason)
-        except Exception:
-            await processor.drain_parallel_tool_calls()
-            raise
 
-        if stream_text_rewriter is not None:
-            trailing_text = stream_text_rewriter.flush()
-            if trailing_text:
-                if not text_started:
-                    await processor.process_event(TextStartEvent())
-                    text_started = True
-                await processor.process_event(TextDeltaEvent(text=trailing_text))
-        
-        # End text block if started
-        if text_started:
-            await processor.process_event(TextEndEvent())
-        
-        # End any remaining reasoning block
-        if hasattr(self, '_current_reasoning_id'):
-            await _flush_reasoning_rewriter()
-            reasoning_end_metadata = getattr(self, '_current_reasoning_metadata', {}) or {}
-            await processor.process_event(ReasoningEndEvent(
-                id=self._current_reasoning_id,
-                metadata=reasoning_end_metadata,
+            if stream_text_rewriter is not None:
+                trailing_text = stream_text_rewriter.flush()
+                if trailing_text:
+                    if not text_started:
+                        await processor.process_event(TextStartEvent())
+                        text_started = True
+                    await processor.process_event(TextDeltaEvent(text=trailing_text))
+
+            # End text block if started
+            if text_started:
+                await processor.process_event(TextEndEvent())
+
+            # End any remaining reasoning block
+            if hasattr(self, '_current_reasoning_id'):
+                await _flush_reasoning_rewriter()
+                reasoning_end_metadata = getattr(self, '_current_reasoning_metadata', {}) or {}
+                await processor.process_event(ReasoningEndEvent(
+                    id=self._current_reasoning_id,
+                    metadata=reasoning_end_metadata,
+                ))
+                delattr(self, '_current_reasoning_id')
+                if hasattr(self, '_current_reasoning_metadata'):
+                    delattr(self, '_current_reasoning_metadata')
+
+            # Emit finish event
+            await processor.process_event(FinishEvent(
+                finish_reason=processor.get_finish_reason()
             ))
-            delattr(self, '_current_reasoning_id')
-            if hasattr(self, '_current_reasoning_metadata'):
-                delattr(self, '_current_reasoning_metadata')
-        
-        # Emit finish event
-        await processor.process_event(FinishEvent(
-            finish_reason=processor.get_finish_reason()
-        ))
+        except (Exception, asyncio.CancelledError):
+            await processor.drain_parallel_tool_calls(execute_deferred=False)
+            raise
 
         # Foreground subagent tool-calls are launched concurrently during
         # streaming so sibling subagents can start in the same assistant turn.
         # Drain them here before exposing tool results to the next loop step.
-        await processor.drain_parallel_tool_calls()
+        await processor.drain_parallel_tool_calls(
+            execute_deferred=not (aborted_during_stream or self.is_aborted)
+        )
         
         # Get processed content
         content = processor.get_text_content()
@@ -4157,6 +4175,11 @@ class SessionRunner:
                 content=content,
                 tool_calls=tool_calls_for_result,
                 usage=stream_usage,
+                _successful_sleep=(
+                    len(tool_calls_for_result) == 1
+                    and tool_calls_for_result[0].name == "sleep"
+                    and processor.tool_calls[tool_calls_for_result[0].id].status == "completed"
+                ),
             )
         
         response_payload = self._build_langfuse_response_payload(

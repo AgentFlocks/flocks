@@ -34,6 +34,9 @@ from flocks.tool.registry import (
     ToolInfo,
     ToolParameter,
     ToolResult,
+    normalize_tool_group,
+    is_shipped_tool_path,
+    validate_tool_definition_group,
 )
 from flocks.utils.log import Log
 
@@ -660,6 +663,8 @@ def yaml_to_tool(raw: dict, yaml_path: Path) -> Tool:
         name=name,
         description=raw.get("description", ""),
         description_cn=raw.get("description_cn", "") or None,
+        group=raw.get("group"),
+        group_readonly=is_shipped_tool_path(yaml_path),
         category=category,
         parameters=parameters,
         enabled=raw.get("enabled", True),
@@ -730,6 +735,15 @@ def _find_yaml_file(name: str) -> Optional[Path]:
     The ``mcp/`` subdirectory is skipped — MCP configs have a different
     format and are managed via :func:`find_mcp_config`.
     """
+    # An already selected definition is authoritative, including filenames
+    # that differ from the tool's declared name and device tool directories.
+    from flocks.tool.registry import ToolRegistry
+
+    tool = ToolRegistry._tools.get(name)
+    selected = getattr(tool, "_yaml_path", None)
+    if selected is not None and Path(selected).is_file():
+        return Path(selected)
+
     for tools_root in _yaml_tool_search_roots():
         if not tools_root.is_dir():
             continue
@@ -770,6 +784,23 @@ def _find_yaml_file(name: str) -> Optional[Path]:
                 if candidate.is_file():
                     return candidate
 
+    # Fall back to native discovery identity, not a filename convention.
+    from flocks.plugin.loader import scan_directory
+
+    for root in _yaml_tool_search_roots():
+        for source in scan_directory(root, recursive=True, max_depth=2, exclude_subdirs={"mcp", "generated"}):
+            path = Path(source)
+            if path.suffix not in {".yaml", ".yml"}:
+                continue
+            try:
+                raw = _read_yaml_raw(path)
+            except (OSError, yaml.YAMLError):
+                continue
+            if isinstance(raw, dict) and raw.get("name") == name and (
+                isinstance(raw.get("handler"), dict) and raw["handler"]
+                or isinstance(raw.get("execution"), dict) and raw["execution"]
+            ):
+                return path
     return None
 
 
@@ -841,6 +872,17 @@ def create_yaml_tool(
 
     if _find_yaml_file(name):
         raise ValueError(f"Tool '{name}' already exists")
+    from flocks.tool.registry import ToolRegistry
+
+    existing = ToolRegistry._tools.get(name)
+    readonly = (
+        ToolRegistry._definition_group_readonly(existing)
+        if existing is not None else ToolRegistry._unloaded_definition_group(name)[0]
+    )
+    if readonly:
+        raise ValueError(f"Cannot shadow system tool definition: {name}")
+    if "group" in data:
+        data = {**data, "group": normalize_tool_group(data["group"]) or ""}
 
     base_dir = _TOOLS_SUBDIR / tool_type
     if provider:
@@ -854,6 +896,18 @@ def create_yaml_tool(
     return target_path
 
 
+def validate_yaml_tool_replacement(name: str, path: Path) -> None:
+    """An editor/reload cannot replace a selected system tool with a shadow."""
+    from flocks.tool.registry import ToolRegistry
+
+    existing = ToolRegistry._tools.get(name)
+    if existing is None or not ToolRegistry._definition_group_readonly(existing):
+        return
+    selected = getattr(existing, "_yaml_path", None)
+    if selected is None or Path(selected).resolve() != path.resolve():
+        raise ValueError(f"Cannot replace system tool definition: {name}")
+
+
 def update_yaml_tool(name: str, updates: Dict[str, Any]) -> bool:
     """Apply partial updates to a YAML plugin tool file.
 
@@ -863,11 +917,15 @@ def update_yaml_tool(name: str, updates: Dict[str, Any]) -> bool:
     if path is None:
         return False
 
-    try:
-        data = _read_yaml_raw(path)
+    validate_yaml_tool_replacement(name, path)
+    data = _read_yaml_raw(path)
+    validate_tool_definition_group(path, data, updates)
 
+    try:
         for key, value in updates.items():
-            if value is not None:
+            if key == "group":
+                data[key] = normalize_tool_group(value) or ""
+            elif value is not None:
                 data[key] = value
             else:
                 data.pop(key, None)
@@ -1104,6 +1162,8 @@ def list_yaml_tools() -> List[Dict[str, Any]]:
             results.append({
                 "name": name,
                 "description": data.get("description", ""),
+                "group": normalize_tool_group(data.get("group")),
+                "group_readonly": is_shipped_tool_path(yf),
                 "provider": provider_name,
                 "handler_type": handler.get("type", "unknown") if isinstance(handler, dict) else "unknown",
                 "tool_type": _infer_tool_type(yf),
@@ -1128,7 +1188,9 @@ def _mcp_filename(name: str) -> str:
     return name.replace("-", "_")
 
 
-def save_mcp_config(name: str, config: Dict[str, Any]) -> Path:
+def save_mcp_config(
+    name: str, config: Dict[str, Any], *, metadata_only: bool = False,
+) -> Path:
     """Save an MCP server config to ``~/.flocks/plugins/tools/mcp/{name}.yaml``.
 
     Parameters
@@ -1137,15 +1199,43 @@ def save_mcp_config(name: str, config: Dict[str, Any]) -> Path:
         MCP server name (e.g. ``"brave-search"``).
     config:
         Server configuration dict (type, command/url, environment, etc.).
+    metadata_only:
+        Update only native grouping in an existing YAML, preserving its other
+        metadata and connection fields even when they differ from runtime config.
 
     Returns
     -------
     Path to the created/updated YAML file.
     """
+    from flocks.config.config_writer import ConfigWriter
+    from flocks.mcp.types import ServerConfig, normalize_mcp_group
+    from flocks.config.config import McpLocalConfig, McpRemoteConfig
+
     filename = _mcp_filename(name)
-    target = _MCP_SUBDIR / f"{filename}.yaml"
-    data: Dict[str, Any] = {"name": name}
-    data.update(config)
+    target = find_mcp_config(name) or (_MCP_SUBDIR / f"{filename}.yaml")
+    previous = _read_yaml_raw(target) if target.is_file() else {}
+    if not isinstance(previous, dict):
+        raise ValueError(f"MCP YAML must contain a mapping: {target}")
+    if metadata_only and previous:
+        data = dict(previous)
+    else:
+        # Preserve YAML-only catalog metadata, never stale transport/auth fields
+        # when a local connection is replaced by a remote one (or vice versa).
+        connection_keys = (
+            set(ServerConfig.model_fields) | set(McpLocalConfig.model_fields)
+            | set(McpRemoteConfig.model_fields) | {"env", "environment"}
+        ) - {"group", "metadata"}
+        data = {key: value for key, value in previous.items() if key not in connection_keys}
+        data.update(config)
+        data["name"] = name
+    if "group" in config:
+        data["group"] = normalize_mcp_group(config["group"]) or ""
+    else:
+        # Callers often save JSON first with the same omitted field. Its current
+        # explicit group is authoritative over an older YAML copy.
+        current = ConfigWriter.get_mcp_server(name)
+        if isinstance(current, dict) and "group" in current:
+            data["group"] = normalize_mcp_group(current["group"]) or ""
     _write_yaml(target, data)
     log.info("tool.mcp_config.saved", {"name": name, "path": str(target)})
     return target

@@ -46,6 +46,7 @@ Parameters:
 
 @ToolRegistry.register_function(
     name="websearch",
+    group="检索",
     description=get_description(),
     category=ToolCategory.SEARCH,
     parameters=[

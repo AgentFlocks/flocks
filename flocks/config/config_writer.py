@@ -591,6 +591,32 @@ class ConfigWriter:
         })
 
     # ------------------------------------------------------------------
+    # Agent metadata (agent section)
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def set_agent_group(cls, name: str, group: Optional[str]) -> None:
+        """Update one validated Agent's group without resolving other config."""
+        from flocks.agent.agent import normalize_agent_group
+
+        if not name:
+            raise ValueError("Agent name must be a non-empty string")
+        value = normalize_agent_group(group) or ""
+        path = cls._get_config_path()
+        data = cls._read_path_raw(path, strict=True)
+        if not isinstance(data, dict):
+            raise ValueError("Configuration must be an object")
+        agents = data.get("agent", {})
+        if not isinstance(agents, dict):
+            raise ValueError("agent configuration must be an object")
+        existing = agents.get(name, {})
+        if not isinstance(existing, dict):
+            raise ValueError(f"Agent configuration must be an object: {name}")
+        data["agent"] = {**agents, name: {**existing, "group": value}}
+        cls._write_raw(data, path)
+        log.info("config_writer.agent_group_updated", {"name": name})
+
+    # ------------------------------------------------------------------
     # MCP server CRUD (mcp section)
     # ------------------------------------------------------------------
 
@@ -614,11 +640,23 @@ class ConfigWriter:
             name: MCP server name (key in mcp section)
             server_config: Full server config dict (McpLocalConfig or McpRemoteConfig)
         """
-        data = cls._read_raw()
-        if "mcp" not in data:
-            data["mcp"] = {}
-        data["mcp"][name] = server_config
-        cls._write_raw(data)
+        from flocks.mcp.types import normalize_mcp_group
+
+        path = cls._get_config_path()
+        data = cls._read_path_raw(path, strict=True)
+        if not isinstance(data, dict):
+            raise ValueError("Configuration must be an object")
+        mcp = data.get("mcp", {})
+        if not isinstance(mcp, dict):
+            raise ValueError("mcp configuration must be an object")
+        existing = mcp.get(name)
+        incoming = dict(server_config)
+        if "group" in incoming:
+            incoming["group"] = normalize_mcp_group(incoming["group"]) or ""
+        elif isinstance(existing, dict) and "group" in existing:
+            incoming["group"] = existing["group"] if existing["group"] is not None else ""
+        data["mcp"] = {**mcp, name: incoming}
+        cls._write_raw(data, path)
         log.info("config_writer.mcp_server_added", {"name": name})
 
     @classmethod
@@ -645,6 +683,10 @@ class ConfigWriter:
         Returns:
             True if the server existed and the field was updated.
         """
+        if field == "group":
+            from flocks.mcp.types import normalize_mcp_group
+
+            value = normalize_mcp_group(value) or ""
         data = cls._read_raw()
         mcp = data.get("mcp", {})
         if name not in mcp:
@@ -762,7 +804,7 @@ class ConfigWriter:
     # Tool settings  (tool_settings section)
     # ------------------------------------------------------------------
     #
-    # User-level overlay for per-tool settings (currently: ``enabled``).
+    # User-level overlay for per-tool settings (``enabled`` and native ``group``).
     # The section mirrors ``model_settings`` for naming consistency —
     # both are flat maps keyed by the entity's unique id.
     #
@@ -801,25 +843,38 @@ class ConfigWriter:
         """
         if not tool_name:
             raise ValueError("tool_name must be a non-empty string")
-        data = cls._read_raw()
+        incoming = dict(setting or {})
+        if "group" in incoming:
+            from flocks.tool.registry import ToolRegistry, normalize_tool_group
+
+            incoming["group"] = normalize_tool_group(incoming["group"]) or ""
+            ToolRegistry.validate_group_settings({tool_name: incoming})
+        path = cls._get_config_path()
+        data = cls._read_path_raw(path, strict="group" in incoming)
+        if not isinstance(data, dict):
+            raise ValueError("Configuration must be an object")
         settings = data.get("tool_settings")
         if not isinstance(settings, dict):
+            if "group" in incoming and settings is not None:
+                raise ValueError("tool_settings configuration must be an object")
             settings = {}
         existing = settings.get(tool_name)
         if not isinstance(existing, dict):
+            if "group" in incoming and existing is not None:
+                raise ValueError(f"Tool setting must be an object: {tool_name}")
             existing = {}
-        merged = {**existing, **(setting or {})}
+        merged = {**existing, **incoming}
         settings[tool_name] = merged
         data["tool_settings"] = settings
-        cls._write_raw(data)
+        cls._write_raw(data, path)
         log.info("config_writer.tool_setting_set", {
             "tool": tool_name,
             "fields": sorted(merged.keys()),
         })
 
     @classmethod
-    def delete_tool_setting(cls, tool_name: str) -> bool:
-        """Remove the tool_settings[tool_name] entry.
+    def delete_tool_setting(cls, tool_name: str, *, field: Optional[str] = None) -> bool:
+        """Remove a tool setting, or only ``field`` while retaining other metadata.
 
         Pops the whole ``tool_settings`` key when the last entry is
         removed so flocks.json doesn't accumulate empty container objects
@@ -831,7 +886,15 @@ class ConfigWriter:
         settings = data.get("tool_settings")
         if not isinstance(settings, dict) or tool_name not in settings:
             return False
-        del settings[tool_name]
+        if field is not None:
+            entry = settings[tool_name]
+            if not isinstance(entry, dict) or field not in entry:
+                return False
+            del entry[field]
+            if not entry:
+                del settings[tool_name]
+        else:
+            del settings[tool_name]
         if settings:
             data["tool_settings"] = settings
         else:

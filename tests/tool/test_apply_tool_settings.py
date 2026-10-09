@@ -6,6 +6,10 @@ import json
 
 import pytest
 
+# Import before fixture snapshots so registration side effects cannot be lost
+# while the modules remain cached for later built-in registry tests.
+from flocks.tool.code.lsp_tool import lsp_tool
+from flocks.tool.wecom.wecom_mcp import wecom_mcp
 from flocks.tool.registry import (
     Tool,
     ToolCategory,
@@ -54,6 +58,11 @@ def isolated_registry(monkeypatch):
     so tests exercising the unregister paths can't leak names into the
     real registry when the test process later runs unrelated tests.
     """
+    from flocks.config import api_versioning
+
+    # Fake providers in this unit suite must not resolve through real project
+    # descriptors simply because pytest was launched from the repository root.
+    monkeypatch.setattr(api_versioning, "discover_api_service_descriptors", lambda **kwargs: [])
     saved_tools = dict(ToolRegistry._tools)
     saved_defaults = dict(ToolRegistry._enabled_defaults)
     saved_plugin_names = list(ToolRegistry._plugin_tool_names)
@@ -76,6 +85,171 @@ def _set_api_service(name: str, *, enabled: bool) -> None:
         "apiKey": "{secret:test_key}",
         "enabled": enabled,
     })
+
+
+def test_native_group_declarative_python_registration(isolated_registry, monkeypatch, tmp_path):
+    from flocks.plugin import PluginLoader
+
+    extensions = []
+    monkeypatch.setattr(PluginLoader, "register_extension_point", extensions.append)
+    ToolRegistry._register_plugin_extension_point()
+    definition = {
+        "name": "declarative_group_tool", "description": "Python definition",
+        "group": "  Package  ", "handler": lambda ctx: ToolResult(success=True),
+        "parameters": [{"name": "value", "type": "string", "description": "Runtime value"}],
+    }
+    assert extensions[0].consumer([definition], str(tmp_path / "tool.py")) == []
+    info = ToolRegistry._tools[definition["name"]].info
+    assert info.group == "Package"
+    assert info.source == "plugin_py"
+    assert list(info.get_schema().properties) == ["value"]
+    assert definition["group"] == "  Package  "
+
+
+def test_native_group_python_registration_and_overlay(temp_config, isolated_registry):
+    from flocks.config.config_writer import ConfigWriter
+
+    @ToolRegistry.register_function(name="group_python_tool", description="test", group="  Package  ")
+    async def group_python_tool(ctx):
+        return ToolResult(success=True)
+
+    tool = ToolRegistry._tools["group_python_tool"]
+    assert tool.info.group == "Package"
+    assert "group" not in tool.info.get_schema().properties
+    ConfigWriter.set_tool_setting(tool.info.name, {"group": "User"})
+    ToolRegistry._apply_tool_settings()
+    assert tool.info.group == "Package"
+    assert ConfigWriter.get_tool_setting(tool.info.name)["group"] == "User"
+    assert tool.info.enabled is True
+    ConfigWriter.set_tool_setting(tool.info.name, {"group": ""})
+    ToolRegistry._apply_tool_settings()
+    assert tool.info.group == "Package"
+    assert ConfigWriter.get_tool_setting(tool.info.name)["group"] == ""
+    ConfigWriter.delete_tool_setting(tool.info.name, field="group")
+    ToolRegistry._apply_tool_settings()
+    assert tool.info.group == "Package"
+    assert tool.info.enabled is True
+
+
+@pytest.mark.parametrize("name", ["get_time", "lsp", "task", "list_providers", "add_provider", "add_model", "wecom_mcp"])
+def test_group_preflight_is_cold_and_source_based(name, isolated_registry, monkeypatch):
+    monkeypatch.setattr(ToolRegistry, "init", lambda: pytest.fail("must not initialize registry"))
+    from flocks.config.config_writer import ConfigWriter
+    monkeypatch.setattr(ConfigWriter, "_read_raw", lambda: pytest.fail("must not read config"))
+    readonly, group = ToolRegistry._unloaded_definition_group(name)
+    assert readonly and group
+    ToolRegistry.validate_group_settings({name: {"group": group}})
+    for clear_or_change in (None, "", "Override"):
+        with pytest.raises(ValueError, match="read-only"):
+            ToolRegistry.validate_group_settings({name: {"group": clear_or_change, "enabled": False}})
+    # The actual registered definition wins over a core name or native=True.
+    custom = _stub_tool(name, enabled=True, native=True)
+    ToolRegistry.register(custom)
+    assert custom.info.group_readonly is False
+    ToolRegistry.validate_group_settings({name: {"group": "Custom"}})
+
+
+def test_create_cannot_shadow_a_cold_core_definition(tmp_path, isolated_registry, monkeypatch):
+    from flocks.tool import tool_loader
+
+    monkeypatch.setattr(tool_loader, "_TOOLS_SUBDIR", tmp_path / "tools")
+    monkeypatch.setattr(tool_loader, "_yaml_tool_search_roots", lambda: [tmp_path / "tools"])
+    monkeypatch.setattr(ToolRegistry, "init", lambda: pytest.fail("must not initialize registry"))
+    raw = {"name": "get_time", "group": "User", "handler": {"type": "http", "url": "https://example.invalid"}}
+    with pytest.raises(ValueError, match="Cannot shadow system"):
+        tool_loader.create_yaml_tool(raw)
+    assert not (tmp_path / "tools").exists()
+
+
+def test_enabled_preflight_does_not_discover_any_definitions(isolated_registry, monkeypatch):
+    monkeypatch.setattr(ToolRegistry, "_unloaded_definition_group", lambda name: pytest.fail("no discovery"))
+    ToolRegistry.validate_group_settings({"read": {"enabled": False}, "unknown": {"enabled": True}})
+
+
+def test_preimported_core_keeps_search_flags_and_readonly(isolated_registry, monkeypatch):
+    import importlib
+
+    lsp = Tool(ToolInfo(name="lsp", description="LSP", native=False, group="代码分析"), lsp_tool)
+    wecom = Tool(ToolInfo(name="wecom_mcp", description="WeCom", category=ToolCategory.CUSTOM, group="企业协作"), wecom_mcp)
+    ToolRegistry.register(lsp)
+    ToolRegistry.register(wecom)
+    # Simulate modules already imported before the initialization pass; no new
+    # registration delta exists, so provenance must be checked on existing tools.
+    monkeypatch.setattr(importlib, "import_module", lambda name: None)
+    ToolRegistry._register_builtin_tools()
+    assert lsp.info.native is False and lsp.info.group_readonly is True
+    assert wecom.info.category == ToolCategory.CUSTOM
+    assert wecom.info.group_readonly is True
+    assert ToolRegistry._tools["get_time"].info.group == "系统管理"
+    assert ToolRegistry._tools["get_time"].info.group_readonly is True
+
+
+def test_shipped_yaml_group_guards_source_update_and_direct_reload(tmp_path, monkeypatch, isolated_registry):
+    import yaml
+    from flocks.tool import registry, tool_loader
+
+    installation = tmp_path / "installation"
+    monkeypatch.setattr(registry, "__file__", str(installation / "flocks" / "tool" / "registry.py"))
+    path = installation / ".flocks/plugins/tools/api/provider/tool.yaml"
+    path.parent.mkdir(parents=True)
+    raw = {
+        "name": "declared_name", "description": "before", "group": "Canonical",
+        "handler": {"type": "http", "url": "https://example.invalid"},
+    }
+    path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+    tool = tool_loader.yaml_to_tool(raw, path)
+    assert tool.info.group_readonly is True
+    ToolRegistry.register(tool)
+    assert tool_loader.find_yaml_tool("declared_name") == path
+    before = path.read_bytes()
+    for group in (None, "", "Changed"):
+        with pytest.raises(ValueError, match="read-only"):
+            tool_loader.update_yaml_tool("declared_name", {"group": group, "description": "after"})
+        assert path.read_bytes() == before
+    assert tool_loader.update_yaml_tool("declared_name", {"group": "Canonical", "description": "after"})
+    reloaded = tool_loader.yaml_to_tool(yaml.safe_load(path.read_text()), path)
+    assert reloaded.info.group_readonly is True
+    assert reloaded.info.group == "Canonical"
+
+    custom_path = tmp_path / "project/.flocks/plugins/tools/custom.yaml"
+    custom_path.parent.mkdir(parents=True)
+    custom_path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+    custom = tool_loader.yaml_to_tool(raw, custom_path)
+    custom.info.native = True
+    ToolRegistry.register(custom)
+    assert custom.info.group_readonly is False
+    assert tool_loader.update_yaml_tool("declared_name", {"group": None})
+    assert yaml.safe_load(custom_path.read_text())["group"] == ""
+    assert yaml.safe_load(path.read_text())["group"] == "Canonical"
+
+    symlink = path.parent / "user_symlink.yaml"
+    symlink.symlink_to(custom_path)
+    assert tool_loader.yaml_to_tool(raw, symlink).info.group_readonly is False
+
+
+def test_native_group_yaml_default_and_editor_preservation(tmp_path, monkeypatch):
+    import yaml
+    from flocks.tool import tool_loader
+
+    path = tmp_path / "standalone.yaml"
+    raw = {
+        "name": "yaml_group_tool", "description": "before", "group": " Package ",
+        "unknown": {"keep": True},
+        "handler": {"type": "http", "url": "https://example.invalid", "method": "GET"},
+    }
+    path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+    monkeypatch.setattr(tool_loader, "_find_yaml_file", lambda name: path)
+    tool = tool_loader.yaml_to_tool(raw, path)
+    assert tool.info.group == "Package"
+    assert tool_loader.update_yaml_tool(raw["name"], {"description": "after"})
+    saved = yaml.safe_load(path.read_text(encoding="utf-8"))
+    assert saved["group"] == " Package "
+    assert saved["unknown"] == {"keep": True}
+    assert tool_loader.update_yaml_tool(raw["name"], {"group": None})
+    saved = yaml.safe_load(path.read_text(encoding="utf-8"))
+    assert saved["group"] == ""
+    assert saved["handler"] == raw["handler"]
+    assert tool_loader.yaml_to_tool(saved, path).info.group == ""
 
 
 def test_apply_tool_settings_enables_disabled_tool(temp_config, isolated_registry):

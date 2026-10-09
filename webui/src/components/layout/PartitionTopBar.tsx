@@ -1,8 +1,23 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
 import { Link, useLocation } from 'react-router-dom';
 import { Settings, type LucideIcon } from 'lucide-react';
 import type { NavPartitionId } from '@/utils/navPartitions';
+
+const SETTINGS_MENU_CLOSE_DELAY_MS = 120;
+
+interface MenuAnchor {
+  top: number;
+  right: number;
+}
+
+/** Viewport position that hangs the menu below the gear, right edges aligned. */
+function menuAnchorOf(button: HTMLElement | null): MenuAnchor {
+  const rect = button?.getBoundingClientRect();
+  if (!rect) return { top: 0, right: 0 };
+  return { top: rect.bottom, right: Math.max(0, document.documentElement.clientWidth - rect.right) };
+}
 
 export interface PartitionTopBarItem {
   id: NavPartitionId;
@@ -33,36 +48,62 @@ export default function PartitionTopBar({
   const { t } = useTranslation('nav');
   const location = useLocation();
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [menuAnchor, setMenuAnchor] = useState<MenuAnchor>({ top: 0, right: 0 });
   const settingsRef = useRef<HTMLDivElement>(null);
   const settingsButtonRef = useRef<HTMLButtonElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
   const keyboardOpen = useRef(false);
   const closeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => () => { if (closeTimer.current) clearTimeout(closeTimer.current); }, []);
+
+  const cancelClose = useCallback(() => {
+    if (closeTimer.current) clearTimeout(closeTimer.current);
+    closeTimer.current = null;
+  }, []);
+  const scheduleClose = useCallback(() => {
+    cancelClose();
+    closeTimer.current = setTimeout(() => setSettingsOpen(false), SETTINGS_MENU_CLOSE_DELAY_MS);
+  }, [cancelClose]);
+  // The anchor is measured together with opening, so the first render of the
+  // menu is already in place (and focusable for keyboard opens).
+  const openSettings = useCallback(() => {
+    cancelClose();
+    setMenuAnchor(menuAnchorOf(settingsButtonRef.current));
+    setSettingsOpen(true);
+  }, [cancelClose]);
+  // The menu lives outside this wrapper in the DOM (portal), so both count as inside.
+  const withinSettings = useCallback((node: EventTarget | null) => (
+    node instanceof Node && Boolean(settingsRef.current?.contains(node) || menuRef.current?.contains(node))
+  ), []);
 
   useEffect(() => { setSettingsOpen(false); }, [location.pathname, location.search]);
   useEffect(() => {
     if (!settingsOpen) return;
     if (keyboardOpen.current) {
-      settingsRef.current?.querySelector<HTMLElement>('[role="menuitem"]')?.focus();
+      menuRef.current?.querySelector<HTMLElement>('[role="menuitem"]')?.focus();
       keyboardOpen.current = false;
     }
     const closeOutside = (event: PointerEvent) => {
-      if (!settingsRef.current?.contains(event.target as Node)) setSettingsOpen(false);
+      if (!withinSettings(event.target)) setSettingsOpen(false);
     };
     const closeEscape = (event: KeyboardEvent) => {
       if (event.key === 'Escape') { setSettingsOpen(false); settingsButtonRef.current?.focus(); }
     };
+    const followButton = () => setMenuAnchor(menuAnchorOf(settingsButtonRef.current));
     document.addEventListener('pointerdown', closeOutside);
     document.addEventListener('keydown', closeEscape);
+    window.addEventListener('resize', followButton);
     return () => {
       document.removeEventListener('pointerdown', closeOutside);
       document.removeEventListener('keydown', closeEscape);
+      window.removeEventListener('resize', followButton);
     };
-  }, [settingsOpen]);
+  }, [settingsOpen, withinSettings]);
 
-  // z-[35]: the settings menu hangs below the bar over page content, so the bar
-  // must sit above page chrome (contract pages use z-30 for sticky toolbars)
-  // while staying under the mobile drawer backdrop (z-40) and page dialogs (z-40/50).
+  // z-[35] keeps the opaque bar above page chrome (contract pages use z-30 for
+  // sticky toolbars) and under the mobile drawer backdrop (z-40) and page dialogs.
+  // The settings menu does not rely on it: it is portalled to <body> at z-[55],
+  // over any z-index a page picks (aside is z-50) and under app dialogs (z-[60]+).
   return (
     <div data-partition-top-bar className="relative z-[35] flex h-11 shrink-0 items-center gap-1 border-b border-zinc-200 bg-zinc-100 pl-16 pr-2 lg:pl-3 dark:border-zinc-800 dark:bg-zinc-900">
       <div className="flex min-w-0 flex-1 items-center gap-1">
@@ -113,42 +154,70 @@ export default function PartitionTopBar({
         </Link>
       )}
       </div>
+      {/* React computes enter/leave along the component tree, so moving between the
+          gear and the portalled menu only fires a leave on the side left behind:
+          both leaves check where the pointer went before scheduling a close. */}
       <div ref={settingsRef} className="relative ml-auto shrink-0"
-        onMouseEnter={() => { if (closeTimer.current) clearTimeout(closeTimer.current); setSettingsOpen(true); }}
-        onMouseLeave={() => { closeTimer.current = setTimeout(() => setSettingsOpen(false), 120); }}
-        onBlur={(event) => { if (!event.currentTarget.contains(event.relatedTarget)) setSettingsOpen(false); }}>
+        onMouseEnter={openSettings}
+        onMouseLeave={(event) => { if (!withinSettings(event.relatedTarget)) scheduleClose(); }}
+        onBlur={(event) => { if (!withinSettings(event.relatedTarget)) setSettingsOpen(false); }}>
         <button ref={settingsButtonRef} type="button" title={t('partitionSettings')} aria-label={t('partitionSettings')}
           aria-haspopup="menu" aria-expanded={settingsOpen} aria-controls="topbar-settings-menu"
-          onClick={() => setSettingsOpen(true)}
+          onClick={(event) => {
+            // Enter/Space arrive as a click without a pointer (detail 0). Tab cannot
+            // reach the portalled items, so move into the menu the way ArrowDown does.
+            if (event.detail === 0) {
+              if (settingsOpen) {
+                menuRef.current?.querySelector<HTMLElement>('[role="menuitem"]')?.focus();
+                return;
+              }
+              keyboardOpen.current = true;
+            }
+            openSettings();
+          }}
           onKeyDown={(event) => {
             if (event.key !== 'ArrowDown') return;
             event.preventDefault();
-            if (settingsOpen) settingsRef.current?.querySelector<HTMLElement>('[role="menuitem"]')?.focus();
-            else { keyboardOpen.current = true; setSettingsOpen(true); }
+            if (settingsOpen) menuRef.current?.querySelector<HTMLElement>('[role="menuitem"]')?.focus();
+            else { keyboardOpen.current = true; openSettings(); }
           }}
           className={`flex h-8 w-8 items-center justify-center rounded-lg transition-colors ${activeId === 'settings' ? 'bg-white text-zinc-900 dark:bg-zinc-800 dark:text-zinc-50' : 'text-zinc-500 hover:bg-white/60 dark:text-zinc-400 dark:hover:bg-zinc-800'}`}>
           <Settings className="h-4 w-4" />
         </button>
-        {settingsOpen && <div className="absolute right-0 top-full z-30 pt-1">
-          <div id="topbar-settings-menu" role="menu" aria-label={t('partitionSettings')}
-            onKeyDown={(event) => {
-              if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
-              event.preventDefault();
-              const entries = Array.from(event.currentTarget.querySelectorAll<HTMLElement>('[role="menuitem"]'));
-              const index = entries.indexOf(document.activeElement as HTMLElement);
-              const next = event.key === 'Home' ? 0 : event.key === 'End' ? entries.length - 1 : (index + (event.key === 'ArrowUp' ? -1 : 1) + entries.length) % entries.length;
-              entries[next]?.focus();
-            }}
-            className="max-h-[calc(100dvh-3.5rem)] w-60 max-w-[calc(100vw-1rem)] overflow-y-auto rounded-xl border border-zinc-200 bg-white p-1.5 shadow-lg dark:border-zinc-700 dark:bg-zinc-900">
-            {settingsGroups.map((group) => <div key={group.name} role="group" aria-label={group.name}>
-              <p className="px-2 py-1.5 text-xs text-zinc-400">{group.name}</p>
-              {group.items.map((item) => <Link key={item.href} to={item.href} role="menuitem" target={item.external ? '_blank' : undefined} rel={item.external ? 'noopener noreferrer' : undefined}
-                onClick={() => setSettingsOpen(false)} className="flex items-center gap-2 rounded-lg px-2 py-2 text-sm text-zinc-700 hover:bg-zinc-100 focus:bg-zinc-100 dark:text-zinc-200 dark:hover:bg-zinc-800 dark:focus:bg-zinc-800">
-                <item.icon className="h-4 w-4 shrink-0" /><span>{item.name}</span>
-              </Link>)}
-            </div>)}
-          </div>
-        </div>}
+        {settingsOpen && createPortal(
+          <div ref={menuRef} data-topbar-settings-layer className="fixed z-[55] pt-1"
+            style={{ top: menuAnchor.top, right: menuAnchor.right }}
+            onMouseEnter={cancelClose}
+            onMouseLeave={(event) => { if (!withinSettings(event.relatedTarget)) scheduleClose(); }}>
+            <div id="topbar-settings-menu" role="menu" aria-label={t('partitionSettings')}
+              onKeyDown={(event) => {
+                if (event.key === 'Tab') {
+                  // The menu sits at the end of <body>, so the browser's next stop
+                  // would be outside the page: close it and return to the gear.
+                  event.preventDefault();
+                  setSettingsOpen(false);
+                  settingsButtonRef.current?.focus();
+                  return;
+                }
+                if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
+                event.preventDefault();
+                const entries = Array.from(event.currentTarget.querySelectorAll<HTMLElement>('[role="menuitem"]'));
+                const index = entries.indexOf(document.activeElement as HTMLElement);
+                const next = event.key === 'Home' ? 0 : event.key === 'End' ? entries.length - 1 : (index + (event.key === 'ArrowUp' ? -1 : 1) + entries.length) % entries.length;
+                entries[next]?.focus();
+              }}
+              className="max-h-[calc(100dvh-3.5rem)] w-60 max-w-[calc(100vw-1rem)] overflow-y-auto rounded-xl border border-zinc-200 bg-white p-1.5 shadow-lg dark:border-zinc-700 dark:bg-zinc-900">
+              {settingsGroups.map((group) => <div key={group.name} role="group" aria-label={group.name}>
+                <p className="px-2 py-1.5 text-xs text-zinc-400">{group.name}</p>
+                {group.items.map((item) => <Link key={item.href} to={item.href} role="menuitem" target={item.external ? '_blank' : undefined} rel={item.external ? 'noopener noreferrer' : undefined}
+                  onClick={() => setSettingsOpen(false)} className="flex items-center gap-2 rounded-lg px-2 py-2 text-sm text-zinc-700 hover:bg-zinc-100 focus:bg-zinc-100 dark:text-zinc-200 dark:hover:bg-zinc-800 dark:focus:bg-zinc-800">
+                  <item.icon className="h-4 w-4 shrink-0" /><span>{item.name}</span>
+                </Link>)}
+              </div>)}
+            </div>
+          </div>,
+          document.body,
+        )}
       </div>
     </div>
   );

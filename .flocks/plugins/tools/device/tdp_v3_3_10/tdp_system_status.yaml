@@ -1,4 +1,5 @@
 name: tdp_system_status
+group: NDR
 description: >
   查询 TDP 系统运行状态。默认返回全部状态汇总，也可通过 action 切换到单个子状态接口。
 category: custom

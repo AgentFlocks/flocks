@@ -1,5 +1,6 @@
 ---
 name: tool-builder
+group: 系统辅助
 category: system
 description: Creates reusable Flocks tools and API integrations. Supports YAML-HTTP for REST APIs and Python for local utilities, with mandatory verification and smoke testing. All output under ~/.flocks/plugins/tools/. When to use: creating or adding a new Flocks tool, building local utilities such as base64 encode-decode, URL encode-decode, JSON formatting, parsing, hashing, text or file transformation, or integrating an external REST API as a reusable tool. Example requests: "Create a base64 encode/decode tool", "Build a URL encode/decode utility", "Add a JSON formatter tool", "Integrate a REST API as a Flocks tool".
 ---

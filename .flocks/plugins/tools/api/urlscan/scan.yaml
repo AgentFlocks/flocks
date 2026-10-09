@@ -1,4 +1,5 @@
 name: urlscan_scan
+group: 威胁情报
 description: >
   Submit a URL to URLScan.io for automated scanning. URLScan browses the URL
   like a regular user and records domains/IPs contacted, resources loaded,

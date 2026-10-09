@@ -1,4 +1,5 @@
 name: ngsoc_alarms
+group: SIEM
 description: >
   NGSOC threat-alarm grouped tool. Use the `action` parameter to query
   alarm lists, fetch alarm details, change alarm dispose state, request

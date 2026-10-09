@@ -1,4 +1,5 @@
 name: tdp_dashboard_status
+group: NDR
 description: >
   查询 TDP Dashboard 相关数据。默认返回概览状态，也可通过 action 切换到阻断、
   安全统计、攻击资产、文件检测、阶段统计等子接口。优先使用顶层时间、业务组和分页参数；

@@ -395,6 +395,7 @@ def _parse_args(args: Any) -> dict:
 
 @ToolRegistry.register_function(
     name="wecom_mcp",
+    group="企业协作",
     description=(
         "Discover and call tools provided by the connected WeCom MCP server. "
         "Use action='list' to inspect method names and input schemas for a category, "

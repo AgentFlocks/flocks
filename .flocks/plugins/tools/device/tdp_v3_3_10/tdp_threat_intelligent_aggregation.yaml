@@ -1,4 +1,5 @@
 name: tdp_threat_intelligent_aggregation
+group: NDR
 description: >
   查询 TDP“威胁-智能聚合”中的聚合攻击事件及其详情。默认查询智能聚合后的攻击事件，也可查询指定聚合事件的
   攻击成功统计、攻击时间线、攻击过程告警、结果分布、受攻击实体和攻击者 IP 信息。本 tool 不用于查询

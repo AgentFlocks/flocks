@@ -231,6 +231,8 @@ class StepStartPart(BaseModel):
     messageID: str = Field(..., description="Message ID")
     type: Literal["step-start"] = "step-start"
     snapshot: Optional[str] = Field(None, description="Snapshot ID")
+    # Optional model-stream activity. Legacy step markers have no timing.
+    time: Optional[PartTime] = None
 
 
 class StepFinishPart(BaseModel):
@@ -1074,6 +1076,10 @@ class Message:
                 if isinstance(raw_time, dict)
                 else fallback_time
             )
+            # A modern running interval is intentionally open. Synthesizing
+            # end=start on reload freezes its live process-duration clock.
+            if isinstance(raw_time, dict) and isinstance(raw_time.get("start"), int) and raw_time.get("end") is None:
+                normalized["time"].pop("end", None)
         elif status == "completed":
             normalized.setdefault("input", {})
             normalized.setdefault("output", "")

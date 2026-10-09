@@ -704,15 +704,34 @@ def test_parse_frontmatter_unclosed_returns_empty():
     assert data == {}
 
 
-def test_parse_frontmatter_yaml_failure_fallback():
-    """When yaml.safe_load fails, falls back to simple key:value parser."""
-    # Force yaml.safe_load to raise an exception
-    with patch("yaml.safe_load", side_effect=Exception("yaml error")):
-        content = "---\nname: fallback-skill\ndescription: Fallback test\n---\n"
-        data = Skill._parse_frontmatter(content)
+def test_parse_frontmatter_recovers_legacy_flat_scalar_without_flattening_metadata():
+    content = (
+        "---\r\nname: fallback-skill\r\ndescription: Analyze: alerts\r\n"
+        "metadata:\r\n  unknown:\r\n    values: [one, two]\r\n---\r\nBody  \r\n"
+    )
+    data = Skill._parse_frontmatter(content)
+    assert data["description"] == "Analyze: alerts"
+    assert data["metadata"] == {"unknown": {"values": ["one", "two"]}}
+    rendered = Skill.render_frontmatter(content, {"group": "Ops"})
+    assert Skill._parse_frontmatter(rendered) == {**data, "group": "Ops"}
+    assert rendered.endswith("---\r\nBody  \r\n")
+    assert "\n" not in rendered.replace("\r\n", "")
 
-    assert data.get("name") == "fallback-skill"
-    assert data.get("description") == "Fallback test"
+
+@pytest.mark.parametrize("header", [
+    "name: broken\ndescription: Analyze: alerts\nmetadata: [unclosed\n",
+    "name: broken\ndescription: [unclosed\n",
+    "name: broken\ndescription: Analyze: alerts\nmetadata:\n  nested: Invalid: value\n",
+    "- name: not-a-mapping\n",
+])
+def test_frontmatter_unrecoverable_write_keeps_original_bytes(tmp_path, header):
+    path = tmp_path / "SKILL.md"
+    original = f"---\n{header}---\nOriginal body\n".encode()
+    path.write_bytes(original)
+    assert Skill._parse_frontmatter(original.decode()) == {}
+    with pytest.raises(ValueError):
+        Skill.update_frontmatter(path, {"group": "Ops"})
+    assert path.read_bytes() == original
 
 
 # =============================================================================

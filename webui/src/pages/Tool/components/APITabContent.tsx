@@ -8,10 +8,16 @@ import { providerAPI } from '@/api/provider';
 import { listAllToolPages, type Tool } from '@/api/tool';
 import type { APIServiceSummary, MCPCatalogCategory, MCPCatalogEntry } from '@/types';
 import EmptyState from '@/components/common/EmptyState';
+import { useToast } from '@/components/common/Toast';
+import PluginGroupButton from '@/components/plugin-groups/PluginGroupButton';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
 import { getCatalogDescription } from '@/utils/mcpCatalog';
 import { APIServiceDetailPanel } from './ServiceDetailPanel';
 import { SERVICE_TAB_GRID_COLS } from './gridLayout';
+import GroupNav, { useGroupDrag } from '@/components/plugin-groups/GroupNav';
+import { deriveGroupNav, matchesGroup, saveGroupItems, type GroupSelection } from '@/components/plugin-groups/groupView';
+import { useAuth } from '@/contexts/AuthContext';
+import { extractErrorMessage } from '@/utils/error';
 
 const DETAIL_DRAWER_WIDTH = 560;
 const LANG_COLORS: Record<string, string> = {
@@ -27,8 +33,15 @@ const INSTALL_CONFIRM_BUTTON_CLASS = 'px-4 py-2 text-sm text-white bg-green-600 
 
 interface APITabContentProps {
   tools: Tool[];
+  searchQuery?: string;
+  /** Complete source_name facet for the current query, not the loaded tool page. */
+  matchingToolServices?: Readonly<Record<string, number>>;
+  toolSearchPending?: boolean;
   onSelectTool: (tool: Tool) => void;
   onRefreshTools: () => Promise<void>;
+  onServiceCountChange?: (count: number) => void;
+  refreshKey?: number;
+  viewMode?: 'list' | 'cards';
   catalogEntries: MCPCatalogEntry[];
   catalogCategories: Record<string, MCPCatalogCategory>;
   catalogLoading: boolean;
@@ -38,8 +51,14 @@ interface APITabContentProps {
 
 export default function APITabContent({
   tools,
+  searchQuery = '',
+  matchingToolServices,
+  toolSearchPending = false,
   onSelectTool,
   onRefreshTools,
+  onServiceCountChange,
+  refreshKey,
+  viewMode = 'list',
   catalogEntries,
   catalogCategories,
   catalogLoading,
@@ -59,6 +78,7 @@ export default function APITabContent({
 
   const [services, setServices] = useState<APIServiceSummary[]>([]);
   const [servicesLoading, setServicesLoading] = useState(true);
+  const [servicesError, setServicesError] = useState<unknown>(null);
   const [selectedServiceId, setSelectedServiceId] = useState<string | null>(null);
   const [testingServices, setTestingServices] = useState<Set<string>>(new Set());
   const [selectedCategory, setSelectedCategory] = useState<string>('all');
@@ -67,14 +87,17 @@ export default function APITabContent({
   const [credValues, setCredValues] = useState<Record<string, string>>({});
   const [serviceToolCache, setServiceToolCache] = useState<Record<string, Tool[]>>({});
 
-  const fetchServices = useCallback(async () => {
+  const fetchServices = useCallback(async (force = false) => {
     try {
       setServicesLoading(true);
-      const res = await providerAPI.listApiServices();
+      const res = await providerAPI.listApiServices(force ? { force: true } : undefined);
       // Exclude security device APIs — they live on the Device Integration page
       setServices((res.data || []).filter((s) => s.integration_type !== 'device'));
-    } catch {
-      setServices([]);
+      setServicesError(null);
+    } catch (error) {
+      if (force) throw error;
+      // Keep the last native rows and group selection when a reload fails.
+      setServicesError(error);
     } finally {
       setServicesLoading(false);
     }
@@ -82,7 +105,7 @@ export default function APITabContent({
 
   useEffect(() => {
     fetchServices();
-  }, [fetchServices]);
+  }, [fetchServices, refreshKey]);
 
   const selectedService = useMemo(
     () => (selectedServiceId ? services.find((service) => service.id === selectedServiceId) ?? null : null),
@@ -307,8 +330,66 @@ export default function APITabContent({
       : (englishDescription || chineseDescription);
   }, [i18n.language]);
 
+  const { user } = useAuth();
+  const [groupSelection, setGroupSelection] = useState<GroupSelection>(null);
+  // The server distinguishes definition-only rows from configured instances;
+  // builtin, credentials and enabled state do not establish group ownership.
+  const asServiceGroupItem = (service: APIServiceSummary) => ({
+    key: service.id, name: service.name, group: service.group,
+    readOnlyReason: service.group_readonly ? t('pluginGroups:readOnly.system')
+      : user?.role === 'admin' ? undefined : t('pluginGroups:readOnly.admin'),
+  });
+  const asCatalogGroupItem = (entry: MCPCatalogEntry) => ({
+    key: `catalog:${entry.id}`, name: entry.name, group: entry.group,
+    readOnlyReason: t(entry.group_readonly ? 'pluginGroups:readOnly.system' : 'pluginGroups:readOnly.catalog'),
+  });
+  const groupInventory = (nativeServices: APIServiceSummary[]) => [
+    ...nativeServices.map(asServiceGroupItem),
+    ...catalogEntries.filter((entry) => !nativeServices.some((service) => service.id === entry.id)).map(asCatalogGroupItem),
+  ];
+  const groupItems = groupInventory(services);
+  useEffect(() => {
+    if (!servicesLoading && servicesError === null) onServiceCountChange?.(groupItems.length);
+  }, [groupItems.length, servicesLoading, servicesError, onServiceCountChange]);
+  const { warning } = useToast();
+  const groupDrag = useGroupDrag(groupItems, warning);
+  const reloadGroupData = () => fetchServices(true);
+  const saveGroup = (id: string, group: string | null) => providerAPI.updateApiService(id, { group });
+  const loadGroupItems = async () => {
+    const { data } = await providerAPI.listApiServices({ force: true });
+    return groupInventory(data.filter((service) => service.integration_type !== 'device'));
+  };
+  const moveGroup = async (key: string, group: string | null) => {
+    const inventory = await loadGroupItems();
+    await saveGroupItems(inventory.filter((item) => item.key === key), group, saveGroup, reloadGroupData, t);
+  };
+  const createGroup = async (key: string, group: string) => {
+    const inventory = await loadGroupItems();
+    if (inventory.some((item) => matchesGroup(item.group, group))) throw new Error(t('pluginGroups:validation.duplicate'));
+    await saveGroupItems(inventory.filter((item) => item.key === key), group, saveGroup, reloadGroupData, t);
+  };
+  const changeGroup = async (from: string, to: string | null) => {
+    const inventory = await loadGroupItems();
+    if (to !== null && inventory.some((item) => matchesGroup(item.group, to))) throw new Error(t('pluginGroups:validation.duplicate'));
+    const members = inventory.filter((item) => matchesGroup(item.group, from));
+    await saveGroupItems(members, to, saveGroup, reloadGroupData, t, true);
+  };
+  const query = searchQuery.trim().toLowerCase();
+  const matchesQuery = (...values: (string | undefined)[]) => !query || values.some((value) => value?.toLowerCase().includes(query));
+  const visibleServices = services.filter((service) => matchesGroup(service.group, groupSelection)
+    && (matchesQuery(service.id, service.name, service.description, service.description_cn)
+      || (!toolSearchPending && (matchingToolServices?.[service.id] ?? 0) > 0)));
+  const visibleCatalog = filteredCatalog.filter((entry) => matchesGroup(entry.group, groupSelection)
+    && matchesQuery(entry.id, entry.name, entry.description, entry.description_cn, ...entry.tags));
+
   return (
-    <div className="space-y-4">
+    <div className="flex flex-col gap-4 md:flex-row" aria-busy={!!query && toolSearchPending}>
+      <GroupNav inventoryComplete={!servicesLoading && servicesError === null && !catalogLoading} preferenceKey="tools.api" {...deriveGroupNav(groupItems)} items={groupItems} selection={groupSelection} onSelect={setGroupSelection} onMove={moveGroup} onCreate={createGroup} onRename={changeGroup} onDelete={(name) => changeGroup(name, null)} {...groupDrag} />
+      <div className="min-w-0 flex-1 space-y-4">
+      {servicesError !== null && <div role="alert" className="flex items-center justify-between gap-3 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+        <span>{extractErrorMessage(servicesError, t('alert.refreshFailedTitle'))}</span>
+        <button type="button" onClick={() => void fetchServices()} disabled={servicesLoading} className="shrink-0 rounded border px-3 py-1.5 disabled:opacity-50">{t('button.retry')}</button>
+      </div>}
       <div className="flex items-center gap-1.5 flex-wrap">
         <button
           onClick={() => setSelectedCategory('all')}
@@ -329,23 +410,25 @@ export default function APITabContent({
         )}
       </div>
 
-      {servicesLoading && services.length === 0 && filteredCatalog.length === 0 ? (
+      {(servicesLoading && services.length === 0 && filteredCatalog.length === 0)
+        || (query && toolSearchPending && visibleServices.length === 0 && visibleCatalog.length === 0) ? (
         <div className="flex min-h-[360px] items-center justify-center rounded-lg border border-gray-200 bg-white">
           <LoadingSpinner delayMs={180} />
         </div>
-      ) : services.length === 0 && filteredCatalog.length === 0 && !catalogLoading ? (
+      ) : visibleServices.length === 0 && visibleCatalog.length === 0 && !catalogLoading ? (
         <EmptyState icon={<Cloud className="w-16 h-16" />} title={t('api.noTools')} description={t('api.noToolsDesc')} />
       ) : (
-        <div className="bg-white border border-gray-200 rounded-lg overflow-hidden divide-y divide-gray-100">
-          {services.map((service) => {
+        <div className={viewMode === 'list' ? 'bg-white border border-gray-200 rounded-lg overflow-hidden divide-y divide-gray-100' : 'grid gap-3 sm:grid-cols-2 xl:grid-cols-3'}>
+          {visibleServices.map((service) => {
             const isSelected = selectedServiceId === service.id;
             const rowDescription = getServiceDescription(service) || `${service.name} API service`;
 
             return (
               <div
                 key={service.id}
-                className={`grid items-center gap-3 px-4 py-3 transition-colors ${isSelected ? 'bg-purple-50' : 'hover:bg-gray-50'}`}
-                style={{ gridTemplateColumns: SERVICE_TAB_GRID_COLS }}
+                {...groupDrag.dragProps(service.id)}
+                className={`grid items-center gap-3 px-4 py-3 transition-colors ${isSelected ? 'bg-purple-50' : 'hover:bg-gray-50'}${viewMode === 'cards' ? ' rounded-lg border border-gray-200 bg-white [&>:nth-child(5)]:col-span-2 [&>:nth-child(6)]:col-span-2' : ''}`}
+                style={{ gridTemplateColumns: viewMode === 'list' ? SERVICE_TAB_GRID_COLS : '32px minmax(0, 1fr)' }}
               >
                 {/* Icon */}
                 <div className={`w-8 h-8 flex items-center justify-center rounded-lg ${service.enabled ? 'bg-purple-50' : 'bg-gray-50'}`}>
@@ -392,7 +475,8 @@ export default function APITabContent({
                 </div>
 
                 {/* Actions column */}
-                <div className="flex items-center justify-end gap-1.5">
+                <div className="flex flex-wrap items-center justify-end gap-1.5">
+                  <PluginGroupButton grouping={groupDrag} itemKey={service.id} />
                   {service.enabled ? (
                     <>
                       <button
@@ -441,11 +525,12 @@ export default function APITabContent({
             );
           })}
 
-          {filteredCatalog.map((entry) => (
+          {visibleCatalog.map((entry) => (
             <div
               key={`catalog-${entry.id}`}
-              className="grid items-center gap-3 px-4 py-3 cursor-default hover:bg-gray-50 transition-colors"
-              style={{ gridTemplateColumns: SERVICE_TAB_GRID_COLS }}
+              {...groupDrag.dragProps(`catalog:${entry.id}`)}
+              className={`grid items-center gap-3 px-4 py-3 cursor-default hover:bg-gray-50 transition-colors${viewMode === 'cards' ? ' rounded-lg border border-gray-200 bg-white [&>:nth-child(5)]:col-span-2 [&>:nth-child(6)]:col-span-2' : ''}`}
+              style={{ gridTemplateColumns: viewMode === 'list' ? SERVICE_TAB_GRID_COLS : '32px minmax(0, 1fr)' }}
             >
               {/* Icon */}
               <div className="w-8 h-8 flex items-center justify-center rounded-lg bg-gray-50">
@@ -480,7 +565,8 @@ export default function APITabContent({
               </div>
 
               {/* Actions column */}
-              <div className="flex items-center justify-end gap-1.5">
+              <div className="flex flex-wrap items-center justify-end gap-1.5">
+                <PluginGroupButton grouping={groupDrag} itemKey={`catalog:${entry.id}`} />
                 <button
                   onClick={() => {
                     if (entry.requires_auth && !isConfigured(entry.id)) {
@@ -512,6 +598,8 @@ export default function APITabContent({
           ))}
         </div>
       )}
+
+      </div>
 
       {credModalEntry && (
         <>

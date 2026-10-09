@@ -9,10 +9,11 @@ import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from flocks.config.config import Config
 from flocks.mcp.installer import rewrite_local_command_for_managed_python
+from flocks.mcp.types import normalize_mcp_group
 from flocks.utils.log import Log
 
 log = Log.create(service="mcp.catalog")
@@ -112,6 +113,9 @@ class CatalogEntry(BaseModel):
     system_deps: List[str] = Field(default_factory=list)
     tags: List[str] = Field(default_factory=list)
     official: bool = False
+    group: Optional[str] = None
+    group_readonly: bool = False
+    _validate_group = field_validator("group", mode="before")(normalize_mcp_group)
 
     @property
     def tool_type(self) -> str:
@@ -281,7 +285,17 @@ class McpCatalog:
             pass
 
     def _load(self) -> None:
-        """Load catalog data from JSON file."""
+        """Load mutable catalog details, projecting only shipped canonical groups."""
+        from flocks.config.config_writer import _get_example_config_dir
+
+        shipped_groups: Dict[str, Optional[str]] = {}
+        shipped_path = _get_example_config_dir() / "mcp_list.json.example"
+        if shipped_path.is_file():
+            shipped = json.loads(shipped_path.read_text(encoding="utf-8"))
+            shipped_groups = {
+                entry["id"]: normalize_mcp_group(entry.get("group"))
+                for entry in shipped.get("servers", [])
+            }
         try:
             catalog_path = _resolve_catalog_file()
             self._catalog_path = catalog_path
@@ -294,6 +308,9 @@ class McpCatalog:
                 self._categories[cat_id] = CategoryInfo(**cat_data)
 
             for entry_data in raw.get("servers", []):
+                entry_data["group_readonly"] = entry_data.get("id") in shipped_groups
+                if entry_data["group_readonly"]:
+                    entry_data["group"] = shipped_groups[entry_data["id"]]
                 env_vars_raw = entry_data.get("env_vars", {})
                 parsed_env: Dict[str, EnvVarSpec] = {}
                 for k, v in env_vars_raw.items():

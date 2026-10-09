@@ -111,7 +111,7 @@ async def test_callable_schema_does_not_expand_empty_declared_tools_to_all_enabl
     initialize_mock.assert_awaited_once_with(
         "session-always-load-only",
         [],
-        always_load_tool_names={"question", "tool_search"},
+        always_load_tool_names={"question", "tool_search", "send_to_session", "sleep"},
     )
     assert result.metadata["callableToolCount"] == 2
 

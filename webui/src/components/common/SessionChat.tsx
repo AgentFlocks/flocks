@@ -23,7 +23,7 @@ import { useTranslation } from 'react-i18next';
 import LoadingSpinner from './LoadingSpinner';
 import { QuestionTool, type QuestionItem } from './QuestionTool';
 import { PermissionApprovalDialog, type PermissionDecision } from './PermissionApprovalDialog';
-import DelegateTaskCard, { isDelegateTool, shouldRenderDelegateTaskCard } from './DelegateTaskCard';
+import DelegateTaskCard, { extractDelegateInfo, isDelegateTool, shouldRenderDelegateTaskCard } from './DelegateTaskCard';
 import CommandDropdown, { isSlashCommandName, parseSlashCommand } from './CommandDropdown';
 import ImageLightbox from './ImageLightbox';
 import { TodoList, buildTodoSummary, pickTodoEntries } from './TodoList';
@@ -129,6 +129,37 @@ type ComposerReferenceKind = 'subagent' | 'skill' | 'workflow';
 interface ComposerReference {
   kind: ComposerReferenceKind;
   value: string;
+}
+
+const AGENT_AVATAR_COLORS: Record<string, string> = {
+  rex: 'bg-red-600',
+  'rex-junior': 'bg-violet-600',
+  explore: 'bg-teal-700',
+  librarian: 'bg-amber-700',
+  oracle: 'bg-blue-600',
+  prometheus: 'bg-orange-700',
+  hephaestus: 'bg-slate-600',
+  'multimodal-looker': 'bg-pink-700',
+  'self-improve': 'bg-lime-700',
+};
+const CUSTOM_AGENT_AVATAR_COLORS = Object.values(AGENT_AVATAR_COLORS);
+
+function getAgentAvatarColor(agent: string): string {
+  const name = agent.trim().toLowerCase().replace(/_/g, '-');
+  if (Object.prototype.hasOwnProperty.call(AGENT_AVATAR_COLORS, name)) return AGENT_AVATAR_COLORS[name];
+  // Custom agents keep the same color across sessions, reloads and message order.
+  let hash = 0;
+  for (const character of name) hash = (Math.imul(hash, 31) + character.codePointAt(0)!) >>> 0;
+  return CUSTOM_AGENT_AVATAR_COLORS[hash % CUSTOM_AGENT_AVATAR_COLORS.length];
+}
+
+function getAgentSender(parts: MessagePart[]) {
+  for (const part of parts) {
+    const sender = part.synthetic && part.metadata?.communication;
+    if (sender?.source_type === 'agent' && typeof sender.source_agent === 'string'
+      && typeof sender.source_session_id === 'string') return sender;
+  }
+  return undefined;
 }
 
 function getMessagePartDisplayText(part: MessagePart, hideTaskMetadata = false): string {
@@ -360,40 +391,40 @@ function sumMergedProcessIntervals(intervals: ProcessTimeInterval[]): number {
   return total + currentEnd - currentStart;
 }
 
+function isModelActivityPart(part: MessagePart): boolean {
+  return part.type === 'step-start' && !!part.time && Number.isFinite(part.time.start);
+}
+
 export function getProcessGroupDurationMs(
   parts: readonly MessagePart[],
   activeNowMs?: number,
   activePartId?: string,
+  activeScope?: { messageId?: string; modelPartId?: string },
 ): number | null {
-  let activeIntervalIndex = -1;
-  if (activeNowMs !== undefined) {
-    const startIndex = activePartId
-      ? parts.findIndex((part) => part.id === activePartId)
-      : parts.length - 1;
-    const endIndex = activePartId ? startIndex : 0;
-    for (let index = startIndex; index >= endIndex; index -= 1) {
-      const part = parts[index];
-      if (!part) continue;
-      const time = getProcessPartTime(part);
-      if (
-        !!time
-        && Number.isFinite(time.start)
-        && !Number.isFinite(time.end)
-        && time.start <= activeNowMs
-        && (part.type !== 'tool' || isActiveToolPart(part))
-      ) {
-        activeIntervalIndex = index;
-        break;
-      }
-    }
-  }
-
-  const intervals = parts
-    .map((part, index) => getProcessPartInterval(
-      part,
-      index === activeIntervalIndex ? activeNowMs : undefined,
-    ))
-    .filter((interval): interval is ProcessTimeInterval => interval !== null);
+  const belongsToActiveMessage = (part: MessagePart) => (
+    !activeScope?.messageId || part.messageID === activeScope.messageId
+  );
+  const canExtend = (part: MessagePart) => {
+    const time = getProcessPartTime(part);
+    return activeNowMs !== undefined && belongsToActiveMessage(part)
+      && !!time && Number.isFinite(time.start) && !Number.isFinite(time.end)
+      && time.start <= activeNowMs;
+  };
+  // Only the latest model marker may be open. A lost close event on an older
+  // attempt must not extend it through a retry/backoff or a later model call.
+  const modelPart = [...parts].reverse().find(isModelActivityPart);
+  const activePart = activePartId
+    ? parts.find((part) => part.id === activePartId)
+    : [...parts].reverse().find((part) => canExtend(part)
+      && (part.type !== 'tool' || isActiveToolPart(part)));
+  const intervals = parts.map((part) => {
+    const active = canExtend(part) && (
+      part.type === 'tool' ? isActiveToolPart(part)
+        : isModelActivityPart(part) ? part.id === (activeScope?.modelPartId ?? modelPart?.id)
+          : !modelPart && part === activePart
+    );
+    return getProcessPartInterval(part, active ? activeNowMs : undefined);
+  }).filter((interval): interval is ProcessTimeInterval => interval !== null);
 
   if (intervals.length === 0) return null;
   return sumMergedProcessIntervals(intervals);
@@ -1085,7 +1116,7 @@ export function mergeConsecutiveAssistantMessages(messages: Message[]): MergedMe
       continue;
     }
 
-    if (msg.role !== 'assistant') {
+    if (msg.role !== 'assistant' || getAgentSender(msg.parts)) {
       result.push(msg);
       continue;
     }
@@ -1094,12 +1125,14 @@ export function mergeConsecutiveAssistantMessages(messages: Message[]): MergedMe
     if (
       last &&
       last.role === 'assistant' &&
+      !getAgentSender(last.parts) &&
       last._merged &&
       last.finish !== 'summary' &&
       !!last.compacted === !!msg.compacted
     ) {
       last.parts = [...last.parts, ...msg.parts];
-      if (msg.finish) last.finish = msg.finish;
+      // The last constituent message owns the live state, including an unset finish.
+      last.finish = msg.finish;
     } else {
       result.push({ ...msg, parts: [...msg.parts], _merged: true });
     }
@@ -1281,9 +1314,10 @@ export function shouldRenderMessage(
   message: Pick<Message, 'role' | 'parts' | 'finish' | 'error'>,
   options?: { isActive?: boolean },
 ): boolean {
+  const visibleParts = message.parts?.filter((part) => !isModelActivityPart(part));
   if (
     message.role === 'assistant' &&
-    (message.parts?.length ?? 0) === 0 &&
+    (visibleParts?.length ?? 0) === 0 &&
     message.finish !== 'summary' &&
     !message.error &&
     !options?.isActive
@@ -1292,7 +1326,7 @@ export function shouldRenderMessage(
   }
   if (
     message.role === 'assistant' &&
-    (message.parts?.length ?? 0) === 0 &&
+    (visibleParts?.length ?? 0) === 0 &&
     message.finish === 'stop' &&
     !message.error
   ) {
@@ -1302,8 +1336,8 @@ export function shouldRenderMessage(
     message.role === 'assistant' &&
     message.finish === 'stop' &&
     !message.error &&
-    message.parts?.length &&
-    message.parts.every((part) => {
+    visibleParts?.length &&
+    visibleParts.every((part) => {
       if (part.type === 'text') return !(part.text || '').trim();
       if (part.type === 'reasoning' || part.type === 'thinking') return !getRenderableThinkingText(part);
       return false;
@@ -2257,6 +2291,74 @@ export default function SessionChat({
   } =
     useSessionMessages(sessionId || undefined);
 
+  // A historical receipt describes the submission, not the child's *current*
+  // activity. Receipts identify direct children; runtime ancestry also includes
+  // grandchildren and descendants whose receipts are outside the loaded page.
+  const childSessionIds = useMemo(() => [...new Set(messages.flatMap((message) => (
+    message.sessionID === sessionId && message.role === 'assistant'
+      ? message.parts.flatMap((part) => {
+          if ((part.type !== 'tool' && part.type !== 'toolCall') || !shouldRenderDelegateTaskCard(part)) return [];
+          const childId = extractDelegateInfo(part.state || {}, '').childSessionId;
+          return childId && childId !== sessionId ? [childId] : [];
+        })
+      : []
+  )))].sort(), [messages, sessionId]);
+  const childStatusScope = JSON.stringify([sessionId, childSessionIds]);
+  const childSessionIdsRef = useRef(childSessionIds);
+  childSessionIdsRef.current = childSessionIds;
+  const currentChildStatusScopeRef = useRef(childStatusScope);
+  currentChildStatusScopeRef.current = childStatusScope;
+  const descendantSessionIdsRef = useRef(new Set<string>());
+  const childStatusRequestRef = useRef(0);
+  const childStatusRevisionRef = useRef<Record<string, number>>({});
+  const [childStatuses, setChildStatuses] = useState<{
+    scope: string;
+    active: Record<string, boolean>;
+  }>({ scope: childStatusScope, active: {} });
+  const hasRunningDelegates = childStatuses.scope === childStatusScope
+    && Object.values(childStatuses.active).some(Boolean);
+  const canStop = Boolean(sessionId) && (isStreaming || hasRunningDelegates);
+
+  const refreshChildStatuses = useCallback(async () => {
+    const ids = childSessionIdsRef.current;
+    if (!sessionId) return;
+    const request = ++childStatusRequestRef.current;
+    const revisions = { ...childStatusRevisionRef.current };
+    try {
+      const response = await client.get('/api/session/status');
+      if (request !== childStatusRequestRef.current || currentChildStatusScopeRef.current !== childStatusScope) return;
+      const tracked = new Set([...ids, ...descendantSessionIdsRef.current]);
+      for (const [id, status] of Object.entries(response.data || {})) {
+        const ancestors = (status as { ancestorSessionIDs?: string[] })?.ancestorSessionIDs;
+        if (Array.isArray(ancestors) && ancestors.includes(sessionId)) {
+          tracked.add(id);
+          descendantSessionIdsRef.current.add(id);
+        }
+      }
+      setChildStatuses((current) => {
+        const active = current.scope === childStatusScope ? { ...current.active } : {};
+        for (const id of tracked) {
+          // An SSE update received during the request is newer than its snapshot.
+          if ((childStatusRevisionRef.current[id] || 0) !== (revisions[id] || 0)) continue;
+          active[id] = isActiveSessionStatus(response.data?.[id]);
+        }
+        return { scope: childStatusScope, active };
+      });
+    } catch {
+      // Keep the last known activity until the next status event or reconnect.
+    }
+  }, [childStatusScope, sessionId]);
+
+  useEffect(() => {
+    childStatusRequestRef.current += 1;
+    childStatusRevisionRef.current = {};
+    descendantSessionIdsRef.current = new Set();
+    setChildStatuses((current) => current.scope === childStatusScope
+      ? current : { scope: childStatusScope, active: {} });
+    void refreshChildStatuses();
+    return () => { childStatusRequestRef.current += 1; };
+  }, [childStatusScope, refreshChildStatuses]);
+
   useEffect(() => {
     setSubmittedModelPromptSessionId(null);
     clearPendingContextUsage();
@@ -2489,6 +2591,29 @@ export default function SessionChat({
 
   const handleSSEEvent = useCallback(
     (event: SSEChatEvent) => {
+      // The same SSE connection also carries child activity. Do not route child
+      // events through the parent's message/streaming action reducer.
+      const childId = event.properties?.sessionID;
+      if (
+        event.type === 'session.status'
+        && typeof childId === 'string'
+        && childId !== sessionId
+        && (childSessionIdsRef.current.includes(childId)
+          || descendantSessionIdsRef.current.has(childId)
+          || (sessionId && Array.isArray(event.properties?.ancestorSessionIDs)
+            && event.properties.ancestorSessionIDs.includes(sessionId)))
+        && typeof event.properties?.status?.type === 'string'
+      ) {
+        descendantSessionIdsRef.current.add(childId);
+        childStatusRevisionRef.current[childId] = (childStatusRevisionRef.current[childId] || 0) + 1;
+        setChildStatuses((current) => ({
+          scope: childStatusScope,
+          active: {
+            ...(current.scope === childStatusScope ? current.active : {}),
+            [childId]: isActiveSessionStatus(event.properties?.status),
+          },
+        }));
+      }
       // Forward only global events or events relevant to this chat. The global
       // stream can be very noisy when multiple sessions run in parallel.
       if (shouldForwardSSEEventToParent(event, sessionId)) onSSEEvent?.(event);
@@ -2741,6 +2866,7 @@ export default function SessionChat({
     },
     [
       sessionId,
+      childStatusScope,
       updateMessage,
       updateMessagePart,
       removeMessage,
@@ -2842,6 +2968,7 @@ export default function SessionChat({
     onReconnect: () => {
       if (!sessionId) return;
       void reconcileSessionStatusAfterReconnect();
+      void refreshChildStatuses();
       refetch();
       void refreshContextUsage();
       fetchPromptQueue();
@@ -2963,10 +3090,13 @@ export default function SessionChat({
     if (!sessionId || loading) return;
     if (statusCheckedRef.current === sessionId) return;
     statusCheckedRef.current = sessionId;
+    const statusRevision = sessionStatusRevisionRef.current;
+    let cancelled = false;
 
     const checkStatus = async () => {
       try {
         const res = await client.get('/api/session/status');
+        if (cancelled || statusRevision !== sessionStatusRevisionRef.current) return;
         const status = res.data[sessionId];
         if (status?.type === 'busy' && !suppressStreamingUntilIdleRef.current) {
           sessionBusyRef.current = true;
@@ -2992,11 +3122,10 @@ export default function SessionChat({
           sessionBusyRef.current = false;
         }
       } catch {
-        if (messages.length > 0) {
-          const lastMsg = messages[messages.length - 1];
-          if (lastMsg.role === 'assistant' && !lastMsg.finish) {
-            setIsStreaming(true);
-          }
+        if (cancelled || statusRevision !== sessionStatusRevisionRef.current) return;
+        const lastMsg = messagesRef.current[messagesRef.current.length - 1];
+        if (lastMsg?.role === 'assistant' && !lastMsg.finish) {
+          setIsStreaming(true);
         }
       }
 
@@ -3006,8 +3135,9 @@ export default function SessionChat({
         console.warn('[SessionChat] Failed to recover pending questions:', err);
       }
     };
-    checkStatus();
-  }, [sessionId, loading, messages, fetchPendingQuestions]);
+    void checkStatus();
+    return () => { cancelled = true; };
+  }, [sessionId, loading, fetchPendingQuestions]);
 
   // A remote proxy or a reconnect boundary can delay or lose the one-shot
   // question.asked event. Reconcile only while the session is active; the
@@ -3806,10 +3936,10 @@ export default function SessionChat({
   const handleAbort = useCallback(async () => {
     if (!sessionId) return;
     // Record the ID of the message being aborted so we can ignore its finish event later.
-    const lastAsstMsg = [...messagesRef.current].reverse().find(
+    const lastAsstMsg = isStreaming ? [...messagesRef.current].reverse().find(
       (m) => m.role === 'assistant' && !m.finish,
-    );
-    const shouldRestoreActivity = isStreaming || sending || sessionBusyRef.current || Boolean(lastAsstMsg?.id);
+    ) : undefined;
+    const wasSessionBusy = sessionBusyRef.current;
     abortedMessageIdRef.current = lastAsstMsg?.id || null;
     abortingRef.current = true;
     suppressStreamingUntilIdleRef.current = true;
@@ -3827,11 +3957,9 @@ export default function SessionChat({
       abortingRef.current = false;
       abortedMessageIdRef.current = null;
       suppressStreamingUntilIdleRef.current = false;
-      if (shouldRestoreActivity) {
-        sessionBusyRef.current = true;
-        setIsStreaming(true);
-        if (sending) setSending(true);
-      }
+      sessionBusyRef.current = wasSessionBusy;
+      setIsStreaming(isStreaming);
+      setSending(sending);
     }
   }, [isStreaming, markMessageStopped, sending, sessionId]);
 
@@ -4151,7 +4279,7 @@ export default function SessionChat({
 
     for (let idx = 0; idx < merged.length; idx++) {
       const msg = merged[idx];
-      if (msg.parts.length > 0 && msg.parts.every(p => p.synthetic)) {
+      if (msg.parts.length > 0 && msg.parts.every(p => p.synthetic) && !getAgentSender(msg.parts)) {
         skipIndices.add(idx);
         continue;
       }
@@ -4186,6 +4314,15 @@ export default function SessionChat({
     writeDismissedGoalKey(sessionId, goalKey);
     setDismissedGoalKey(goalKey);
   }, [sessionId, visibleGoalBanner]);
+  const stopButton = canStop && (
+    <button
+      onClick={handleAbort}
+      title={t('chat.stopTitle')}
+      className="inline-flex h-8 w-8 items-center justify-center rounded-full bg-zinc-800 text-white hover:bg-zinc-900 shadow-sm transition-all"
+    >
+      <Square className="w-3 h-3 fill-current" />
+    </button>
+  );
 
   return (
     <div className={`flex flex-col min-h-0 ${className}`}>
@@ -4295,7 +4432,7 @@ export default function SessionChat({
               <div className={`group relative ${!compact ? 'w-full' : ''} flex`}>
                 <div className={compact ? `flex gap-2.5 ${getMessageGroupClassName({ compact, isUser: false, isEditing: false })}` : 'flex w-full min-w-0'}>
                   <span
-                    className={`inline-flex items-center justify-center rounded-full bg-red-500 text-white font-bold shadow-sm ring-2 ring-white flex-shrink-0 dark:ring-zinc-950 ${
+                    className={`inline-flex items-center justify-center rounded-full ${getAgentAvatarColor(pendingAgentName)} text-white font-bold shadow-sm ring-2 ring-white flex-shrink-0 dark:ring-zinc-950 ${
                       compact ? 'w-7 h-7 text-xs' : 'w-8 h-8 text-sm'
                     } ${compact ? '' : 'absolute -left-10 top-1'}`}
                   >
@@ -4353,7 +4490,7 @@ export default function SessionChat({
               <div className={`group relative ${!compact ? 'w-full' : ''} flex`}>
                 <div className={compact ? `flex gap-2.5 ${getMessageGroupClassName({ compact, isUser: false, isEditing: false })}` : 'flex w-full min-w-0'}>
                   <span
-                    className={`inline-flex items-center justify-center rounded-full bg-red-500 text-white font-bold shadow-sm ring-2 ring-white flex-shrink-0 dark:ring-zinc-950 ${
+                    className={`inline-flex items-center justify-center rounded-full ${getAgentAvatarColor(pendingAgentName)} text-white font-bold shadow-sm ring-2 ring-white flex-shrink-0 dark:ring-zinc-950 ${
                       compact ? 'w-7 h-7 text-xs' : 'w-8 h-8 text-sm'
                     } ${compact ? '' : 'absolute -left-10 top-1'}`}
                   >
@@ -4408,6 +4545,13 @@ export default function SessionChat({
               </button>
             ))}
           </div>
+        </div>
+      )}
+
+      {/* Live detail views can stop work without exposing a follow-up composer. */}
+      {hideInput && live && canStop && (
+        <div className="flex flex-shrink-0 justify-end px-4 py-3">
+          {stopButton}
         </div>
       )}
 
@@ -4854,24 +4998,15 @@ export default function SessionChat({
                   )}
 
                   {isStreaming ? (
-                    <>
-                      {canSend && (
-                        <button
-                          onClick={handleSend}
-                          title={hasUploadingFiles ? t('chat.upload.waiting') : t('chat.queue.enqueue')}
-                          className="inline-flex h-8 w-8 items-center justify-center rounded-full bg-sky-500 text-white shadow-sm transition-all hover:bg-sky-600 hover:shadow"
-                        >
-                          {sending || hasUploadingFiles ? <Loader2 className="w-4 h-4 animate-spin" /> : <ArrowUp className="w-4 h-4" strokeWidth={2.5} />}
-                        </button>
-                      )}
+                    canSend && (
                       <button
-                        onClick={handleAbort}
-                        title={t('chat.stopTitle')}
-                        className="inline-flex h-8 w-8 items-center justify-center rounded-full bg-zinc-800 text-white hover:bg-zinc-900 shadow-sm transition-all"
+                        onClick={handleSend}
+                        title={hasUploadingFiles ? t('chat.upload.waiting') : t('chat.queue.enqueue')}
+                        className="inline-flex h-8 w-8 items-center justify-center rounded-full bg-sky-500 text-white shadow-sm transition-all hover:bg-sky-600 hover:shadow"
                       >
-                        <Square className="w-3 h-3 fill-current" />
+                        {sending || hasUploadingFiles ? <Loader2 className="w-4 h-4 animate-spin" /> : <ArrowUp className="w-4 h-4" strokeWidth={2.5} />}
                       </button>
-                    </>
+                    )
                   ) : (
                     <button
                       onClick={handleSend}
@@ -4886,6 +5021,7 @@ export default function SessionChat({
                       {sending || hasUploadingFiles ? <Loader2 className="w-4 h-4 animate-spin" /> : <ArrowUp className="w-4 h-4" strokeWidth={2.5} />}
                     </button>
                   )}
+                  {stopButton}
                 </div>
             </div>
           </div>
@@ -5206,8 +5342,9 @@ function ChatMessageBubbleInner({
   onOpenContext,
 }: ChatMessageBubbleProps) {
   const { t, i18n } = useTranslation('session');
-  const isUser = message.role === 'user';
   const parts: MessagePart[] = Array.isArray(message.parts) ? message.parts : [];
+  const sender = getAgentSender(parts);
+  const isUser = message.role === 'user' && !sender;
   const processElapsedClock = useProcessElapsedClock(isActive && collapseIntermediateSteps);
   const { getPartExpanded, togglePart } = useReasoningToggle(parts, message.finish);
   // Lightbox state for inline image previews. Browsers block top-level
@@ -5226,13 +5363,13 @@ function ChatMessageBubbleInner({
       </div>
     );
   }
-  const rawAgentName = message.agent || 'rex';
+  const rawAgentName = sender?.source_agent || message.agent || 'rex';
   const agentName = rawAgentName.charAt(0).toUpperCase() + rawAgentName.slice(1);
 
   const getTextContent = () => {
     const text = parts
       .filter((p) => p.type === 'text' && p.text)
-      .map((p) => p.text)
+      .map((p) => sender ? getMessagePartDisplayText(p) : p.text)
       .join('\n\n');
     return isUser ? text : stripTaskMetadata(text);
   };
@@ -5268,7 +5405,9 @@ function ChatMessageBubbleInner({
   const iconButtonClass = 'group/action relative inline-flex h-6 w-6 items-center justify-center rounded-full border border-transparent bg-transparent text-[#8b929d] transition-colors duration-150 hover:bg-white hover:text-[#4f5660] active:bg-white focus-visible:bg-white focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-40 dark:text-[#9aa7b4] dark:hover:bg-white/[0.08] dark:hover:text-zinc-100 dark:active:bg-white/[0.08] dark:focus-visible:bg-white/[0.08]';
   const tooltipClass = 'pointer-events-none absolute bottom-full left-1/2 z-10 mb-1.5 -translate-x-1/2 whitespace-nowrap rounded-md bg-gray-900 px-2 py-1 text-[11px] font-medium text-white opacity-0 shadow-sm transition-opacity duration-150 group-hover/action:opacity-100';
   const messageErrorText = isUser ? '' : getMessageErrorText(message);
+  const visiblePartCount = parts.filter((part) => !isModelActivityPart(part)).length;
   const hasOnlyBlankTextParts = parts.length > 0 && parts.every((part) =>
+    isModelActivityPart(part) ||
     part.type === 'text' && !String(part.text || '').trim()
   );
   const shouldRenderAssistantErrorState = !isUser && !!messageErrorText && (
@@ -5287,7 +5426,7 @@ function ChatMessageBubbleInner({
       <User className={compact ? 'w-3 h-3' : 'w-3.5 h-3.5'} />
     </span>
   ) : (
-    <span className={`inline-flex items-center justify-center rounded-full bg-red-500 text-white font-bold shadow-sm ring-2 ring-white flex-shrink-0 dark:ring-zinc-950 ${avatarSize}`}>
+    <span className={`inline-flex items-center justify-center rounded-full ${getAgentAvatarColor(rawAgentName)} text-white font-bold shadow-sm ring-2 ring-white flex-shrink-0 dark:ring-zinc-950 ${avatarSize}`}>
       {agentName.charAt(0).toUpperCase()}
     </span>
   );
@@ -5301,7 +5440,7 @@ function ChatMessageBubbleInner({
     >
 
       {/* Empty / loading state */}
-      {(parts.length === 0 || shouldRenderAssistantErrorState) && (
+      {(visiblePartCount === 0 || shouldRenderAssistantErrorState) && (
         isUser ? (
           <div className="flex items-center gap-2 opacity-60">
             <div className="w-1.5 h-1.5 rounded-full bg-current animate-pulse" />
@@ -5369,6 +5508,12 @@ function ChatMessageBubbleInner({
           const activeTailPart = isActive
             ? [...displayParts].reverse().find(isRenderableDisplayPart)
             : undefined;
+          const activeMessageId = displayParts[displayParts.length - 1]?.messageID;
+          const latestModelPart = [...displayParts].reverse().find(isModelActivityPart);
+          const activeOutputPart = [...displayParts].reverse().find((part) => (
+            ['text', 'reasoning', 'thinking'].includes(part.type)
+            && (!activeMessageId || part.messageID === activeMessageId)
+          ));
           const renderPart = (part: MessagePart, i: number, isVisible = true, processStep = false) => (
             // Spacing between consecutive parts is owned by this wrapper,
             // not by individual part components. Each part used to set its
@@ -5532,21 +5677,16 @@ function ChatMessageBubbleInner({
           const renderProcessGroup = (
             group: Array<{ part: MessagePart; index: number }>,
             groupIndex: number,
-            activeTimingPart?: MessagePart,
+            timingParts: MessagePart[],
           ) => {
             const processGroupOpen = processGroupsDefaultOpen || (processGroupsOpenWhileActive && isActive);
             const processGroupKey = `${message.id}:process:${groupIndex}`;
-            const groupParts = group.map(({ part }) => part);
-            const groupActivePart = groupParts.find((part) => part === activeTailPart);
-            const timedActivePart = groupActivePart || activeTimingPart;
-            const durationParts = timedActivePart && !groupParts.includes(timedActivePart)
-              ? [...groupParts, timedActivePart]
-              : groupParts;
-            const processGroupActive = isActive && !!timedActivePart;
+            const durationParts = [...group.map(({ part }) => part), ...timingParts];
             const processDurationMs = getProcessGroupDurationMs(
               durationParts,
-              processGroupActive ? processElapsedClock : undefined,
-              processGroupActive ? timedActivePart?.id : undefined,
+              isActive ? processElapsedClock : undefined,
+              activeOutputPart?.id,
+              { messageId: activeMessageId, modelPartId: latestModelPart?.id },
             );
             const hasStoredOpenState = !!processGroupOpenState
               && Object.prototype.hasOwnProperty.call(processGroupOpenState, processGroupKey);
@@ -5586,33 +5726,64 @@ function ChatMessageBubbleInner({
           };
           const renderDisplayParts = () => {
             if (!collapseIntermediateSteps || isUser) {
-              return displayParts.map((part, index) => renderPart(part, index));
+              return displayParts.filter((part) => !isModelActivityPart(part)).map((part, index) => renderPart(part, index));
             }
-            const nodes: React.ReactNode[] = [];
-            let processGroup: Array<{ part: MessagePart; index: number }> = [];
+            // Build first, render second: hidden markers and final output can
+            // arrive after a group's visible steps. Keep their timing after finish.
+            type ProcessGroup = {
+              steps: Array<{ part: MessagePart; index: number }>;
+              timing: MessagePart[];
+              index: number;
+            };
+            const nodes: Array<() => React.ReactNode> = [];
+            let processGroup: ProcessGroup | undefined;
+            let lastGroup: ProcessGroup | undefined;
+            let pendingTiming: MessagePart[] = [];
             let processGroupIndex = 0;
             const lastIntermediateProcessIndex = displayParts.reduce((lastIndex, part, index) => (
               isIntermediateProcessPart(part) ? index : lastIndex
             ), -1);
-            const flushProcessGroup = (activeTimingPart?: MessagePart) => {
-              if (processGroup.length === 0) return;
-              nodes.push(renderProcessGroup(processGroup, processGroupIndex, activeTimingPart));
-              processGroup = [];
-              processGroupIndex += 1;
+            const flushProcessGroup = () => {
+              if (!processGroup) return;
+              const group = processGroup;
+              nodes.push(() => renderProcessGroup(group.steps, group.index, group.timing));
+              lastGroup = group;
+              processGroup = undefined;
             };
             displayParts.forEach((part, index) => {
-              if (isIntermediateProcessPart(part) || (isRenderableTextPart(part) && index <= lastIntermediateProcessIndex)) {
-                processGroup.push({ part, index });
+              if (isModelActivityPart(part)) {
+                const group = processGroup || lastGroup;
+                if (group) group.timing.push(part);
+                else pendingTiming.push(part);
                 return;
+              }
+              if (isIntermediateProcessPart(part) || (isRenderableTextPart(part) && index <= lastIntermediateProcessIndex)) {
+                if (!processGroup) {
+                  processGroup = { steps: [], timing: pendingTiming, index: processGroupIndex++ };
+                  pendingTiming = [];
+                }
+                processGroup.steps.push({ part, index });
+                return;
+              }
+              // Empty output is still timed, but never adds a visible step.
+              if ((isActive || latestModelPart) && ['text', 'reasoning', 'thinking'].includes(part.type)) {
+                const group = processGroup || lastGroup;
+                if (group) group.timing.push(part);
+                else pendingTiming.push(part);
               }
               if (!isRenderableDisplayPart(part)) return;
               if (isPendingQuestionToolPart(part) || isRenderableTextPart(part)) {
-                flushProcessGroup(isActive && part === activeTailPart && isRenderableTextPart(part) ? part : undefined);
+                flushProcessGroup();
               }
-              nodes.push(renderPart(part, index));
+              if (isPendingQuestionToolPart(part)) {
+                // A question divides groups; do not assign subsequent timing twice.
+                lastGroup = undefined;
+                pendingTiming = [];
+              }
+              nodes.push(() => renderPart(part, index));
             });
             flushProcessGroup();
-            return nodes;
+            return nodes.map((render) => render());
           };
           return (
             <>
@@ -5719,7 +5890,7 @@ function ChatMessageBubbleInner({
       )}
 
       {/* Streaming indicator */}
-      {isActive && !isUser && parts.length > 0 && (() => {
+      {isActive && !isUser && visiblePartCount > 0 && (() => {
         return (
           <div className="flex items-center gap-2 mt-2.5 pt-2 border-t border-gray-100 text-xs text-gray-400">
             <div className="flex gap-0.5">
@@ -5774,7 +5945,7 @@ function ChatMessageBubbleInner({
   const footerTimestamp = showTimestamp && message.timestamp
     ? <span className="select-none text-[11px] text-[#8b929d] dark:text-[#9aa7b4]">{formatSmartTime(message.timestamp, i18n.language)}</span>
     : null;
-  const footer = !compact && showActions && parts.length > 0 && !isEditing ? (
+  const footer = !compact && showActions && visiblePartCount > 0 && !isEditing ? (
     <div className={`mt-1.5 flex items-center ${
       isUser ? 'justify-between' : `justify-start${footerTimestamp ? ' gap-1.5' : ''}`
     }`}>
@@ -5805,7 +5976,7 @@ function ChatMessageBubbleInner({
           </>
         ) : (
           <>
-            <button
+            {!sender && <button
               onClick={() => void onRegenerate?.(targetMessageId)}
               disabled={actionsDisabled || isActionPending}
               className={iconButtonClass}
@@ -5813,7 +5984,7 @@ function ChatMessageBubbleInner({
             >
               <RefreshCw className={`w-3 h-3 ${isActionPending ? 'animate-spin' : ''}`} />
               <span className={tooltipClass}>{t('chat.regenerate')}</span>
-            </button>
+            </button>}
             <button
               onClick={() => onCopy?.(getTextContent())}
               disabled={isActionPending}
@@ -6657,6 +6828,7 @@ export const ChatMessageBubble = memo(ChatMessageBubbleInner, (prev, next) => {
   if (prev.onOpenContextFile !== next.onOpenContextFile) return false;
   if (prev.onOpenContext !== next.onOpenContext) return false;
   if (prev.message.finish !== next.message.finish) return false;
+  if (prev.message.role !== next.message.role || prev.message.agent !== next.message.agent) return false;
   const prevParts = prev.message.parts as any[] | undefined;
   const nextParts = next.message.parts as any[] | undefined;
   if ((prevParts?.length ?? 0) !== (nextParts?.length ?? 0)) return false;

@@ -1,4 +1,5 @@
 name: qingteng_detect
+group: EDR/HIDS
 description: >
   青藤入侵检测分组工具。通过 `action` 参数访问可疑操作、暴力破解、异常登录、
   WebShell、反弹 Shell、本地提权、后门检测和网络蜜罐相关接口。

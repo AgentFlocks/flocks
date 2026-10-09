@@ -337,6 +337,7 @@ async def _resolve_sandbox_workdir(
 
 @ToolRegistry.register_function(
     name="bash",
+    group="终端执行",
     description=get_description(os.getcwd()),
     category=ToolCategory.TERMINAL,
     parameters=[

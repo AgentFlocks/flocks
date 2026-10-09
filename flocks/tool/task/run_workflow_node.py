@@ -121,6 +121,7 @@ def _format_node_result(result: Dict[str, Any]) -> str:
 
 @ToolRegistry.register_function(
     name="run_workflow_node",
+    group="任务与工作流",
     description=DESCRIPTION,
     category=ToolCategory.SYSTEM,
     requires_confirmation=False,

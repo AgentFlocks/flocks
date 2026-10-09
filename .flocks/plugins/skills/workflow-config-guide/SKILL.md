@@ -1,5 +1,6 @@
 ---
 name: workflow-config-guide
+group: 系统辅助
 category: system
 ui_hidden: true
 description: 配置现有 Flocks 工作流的发布、集成、触发器和发布配置模板；本 skill 只定义交互协议，具体配置问题必须来自工作流目录内的 guide.md
