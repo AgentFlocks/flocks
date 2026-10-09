@@ -956,13 +956,15 @@ class WorkflowEngine:
                 node_id=node.id,
                 message=f"Prompt template render failed: {type(e).__name__}: {e}",
             ) from e
-        from .llm import get_llm_client
+        from .llm import default_llm_node_max_retries, get_llm_client
 
         _rt = _runtime or self.runtime
         cancel_checker = getattr(_rt, "cancel_checker", None)
         try:
             client = get_llm_client(model=node.model, cancel_checker=cancel_checker)
-            text = client.ask(rendered)
+            # Transient provider failures (429 / 5xx / timeouts) are retried
+            # with backoff instead of failing the node on the first hit.
+            text = client.ask(rendered, max_retries=default_llm_node_max_retries())
         except RunCancelledError:
             raise
         except Exception as e:

@@ -266,3 +266,70 @@ class TestSleep:
         asyncio.create_task(set_abort_soon())
         with pytest.raises(asyncio.CancelledError):
             await SessionRetry.sleep(10000, abort)
+
+
+# ---------------------------------------------------------------------------
+# jittered_delay() / retry_after_ms() / is_rate_limited()
+# ---------------------------------------------------------------------------
+
+class TestJitteredDelay:
+    def test_plain_backoff_stays_within_half_to_full_base(self):
+        for attempt, base in zip(range(1, 6), [2000, 4000, 8000, 16000, 30_000]):
+            samples = {SessionRetry.jittered_delay(attempt) for _ in range(200)}
+            assert all(base // 2 <= sample <= base for sample in samples), (attempt, samples)
+            # Actually spreads: more than one distinct value out of 200 draws.
+            assert len(samples) > 1
+
+    def test_never_exceeds_explicit_cap(self):
+        samples = [SessionRetry.jittered_delay(9, max_delay_ms=5000) for _ in range(100)]
+        assert all(2500 <= sample <= 5000 for sample in samples)
+
+    def test_retry_after_is_a_lower_bound_plus_up_to_25_percent(self):
+        error = {"data": {"responseHeaders": {"retry-after": "3"}}}
+        samples = [SessionRetry.jittered_delay(1, error) for _ in range(100)]
+        assert all(3000 <= sample <= 3750 for sample in samples)
+
+    def test_retry_after_ms_header_wins_and_header_case_is_ignored(self):
+        error = {"data": {"responseHeaders": {"Retry-After-Ms": "500", "retry-after": "9"}}}
+        assert SessionRetry.retry_after_ms(error) == 500
+        samples = [SessionRetry.jittered_delay(1, error) for _ in range(50)]
+        assert all(500 <= sample <= 625 for sample in samples)
+
+    def test_retry_after_ms_returns_none_without_usable_headers(self):
+        assert SessionRetry.retry_after_ms(None) is None
+        assert SessionRetry.retry_after_ms({}) is None
+        assert SessionRetry.retry_after_ms({"data": {"responseHeaders": {"retry-after": "soon"}}}) is None
+        assert SessionRetry.retry_after_ms({"data": {"responseHeaders": {"retry-after": "0"}}}) is None
+
+
+class TestIsRateLimited:
+    def test_status_code_429(self):
+        assert SessionRetry.is_rate_limited({"data": {"statusCode": 429, "message": "x"}}) is True
+        assert SessionRetry.is_rate_limited({"data": {"statusCode": "429"}}) is True
+
+    def test_message_patterns(self):
+        assert SessionRetry.is_rate_limited({"data": {"message": "Too Many Requests"}}) is True
+        assert SessionRetry.is_rate_limited({"data": {"message": "rate_limit_exceeded"}}) is True
+        assert SessionRetry.is_rate_limited({"message": "HTTP 429"}) is True
+
+    def test_status_code_wins_over_message_text(self):
+        # Provider errors carry request ids and quota hints; a 401 whose body
+        # mentions 429 must not cool down the whole provider.
+        assert SessionRetry.is_rate_limited({
+            "data": {"statusCode": 401, "message": "Invalid API key; request_id=req_429abc"}
+        }) is False
+        assert SessionRetry.is_rate_limited({
+            "data": {"statusCode": 500, "message": "rate limit"}
+        }) is False
+        assert SessionRetry.is_rate_limited({
+            "data": {"statusCode": 429, "message": "slow down"}
+        }) is True
+        # Unparseable status falls back to the message.
+        assert SessionRetry.is_rate_limited({
+            "data": {"statusCode": "n/a", "message": "Too Many Requests"}
+        }) is True
+
+    def test_other_errors_are_not_rate_limits(self):
+        assert SessionRetry.is_rate_limited({"data": {"statusCode": 500, "message": "boom"}}) is False
+        assert SessionRetry.is_rate_limited({"data": {"message": "connection reset"}}) is False
+        assert SessionRetry.is_rate_limited({"data": {"message": None}}) is False

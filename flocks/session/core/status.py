@@ -32,11 +32,25 @@ class SessionStatusQueued(BaseModel):
 
 
 class SessionStatusRetry(BaseModel):
-    """Retry status"""
+    """Retry status.
+
+    The same object feeds both channels clients use: the ``session.status``
+    SSE event and the ``/api/session/status`` poll they fall back to after a
+    refresh or a dropped stream. Keep every field a client needs here so the
+    two never disagree.
+    """
     type: Literal["retry"] = "retry"
     attempt: int = Field(..., description="Retry attempt number")
     message: str = Field(..., description="Error message")
     next: int = Field(..., description="Next retry timestamp (ms)")
+    maxAttempts: Optional[int] = Field(
+        None, description="Retry budget for this kind of failure"
+    )
+    rateLimited: bool = Field(
+        False, description="True when the provider rejected the request as rate-limited (429)"
+    )
+    providerID: Optional[str] = Field(None, description="Provider being retried")
+    modelID: Optional[str] = Field(None, description="Model being retried")
 
 
 COMPACTING_DEFAULT_MESSAGE = "Compacting context…"
@@ -185,10 +199,10 @@ class SessionStatus:
 
     @classmethod
     def get_busy_session_ids(cls) -> List[str]:
-        """Return IDs of all sessions that are busy or compacting (across all instances)."""
+        """Return IDs of all sessions that are busy, compacting or retrying (across all instances)."""
         result: List[str] = []
         for _inst_id, statuses in list(cls._state.items()):
             for sid, info in list(statuses.items()):
-                if info.type in ("busy", "compacting", "dreaming"):
+                if info.type in ("busy", "compacting", "dreaming", "retry"):
                     result.append(sid)
         return result

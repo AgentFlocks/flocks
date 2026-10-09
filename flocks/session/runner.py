@@ -43,6 +43,14 @@ from flocks.session.core.defaults import (
     MAX_CONSECUTIVE_TOOL_ARG_TRUNCATIONS,
     REPEATED_EXACT_TOOL_CALL_HALT_THRESHOLD,
 )
+from flocks.provider.concurrency import (
+    PRIORITY_BACKGROUND,
+    PRIORITY_INTERACTIVE,
+    LlmSlot,
+    acquire_llm_slot,
+    report_provider_rate_limited,
+    resolve_max_parallel_subagents,
+)
 from flocks.session.lifecycle.retry import (
     CONNECTION_ERROR_DISPLAY_MESSAGE,
     MAX_ERROR_RETRIES,
@@ -296,6 +304,14 @@ class StepResult:
     _successful_sleep: bool = field(default=False, repr=False, compare=False)
 
 
+# Root-session categories whose model requests queue behind interactive work.
+BACKGROUND_SESSION_CATEGORIES = frozenset({"task"})
+
+# Applied the moment a 429 surfaces, before the slot is handed on; the retry
+# branch replaces it with the jittered delay once that is known.
+MIN_RATE_LIMIT_COOLDOWN_S = 1.0
+
+
 @dataclass
 class RunnerCallbacks:
     """Callbacks for runner events."""
@@ -363,6 +379,11 @@ class SessionRunner:
         self._session_start_pending = session_start_pending
         self._session_start_fired = False
         self._attempt_state = LlmAttemptState()
+        # Provider request slot held while the model is generating; see
+        # flocks.provider.concurrency. Released at first tool execution or
+        # when the stream ends, whichever comes first.
+        self._active_llm_slot: Optional[LlmSlot] = None
+        self._llm_priority: Optional[int] = None
 
     @staticmethod
     def _canonical_tool_signature(tool_name: str, arguments: Dict[str, Any]) -> str:
@@ -1890,23 +1911,27 @@ class SessionRunner:
                         # about to retry – the provider may have already charged
                         # for the tokens returned in this response.
                         await self._record_usage_if_available(result.usage, message_id=assistant_msg.id)
-                        delay_ms = SessionRetry.delay(empty_attempt)
-                        next_retry_time = int(asyncio.get_event_loop().time() * 1000) + delay_ms
+                        delay_ms = SessionRetry.jittered_delay(empty_attempt)
+                        next_retry_time = int(time.time() * 1000) + delay_ms
                         log.warn("runner.step.empty_response_retry", {
                             "attempt": empty_attempt,
                             "delay_ms": delay_ms,
                             "session_id": self.session.id,
                             "model": self.model_id,
                         })
-                        SessionStatus.set(
-                            self.session.id,
-                            SessionStatusRetry(
-                                attempt=empty_attempt,
-                                message="Model returned empty response, retrying...",
-                                next=next_retry_time,
-                            )
+                        empty_retry_status = SessionStatusRetry(
+                            attempt=empty_attempt,
+                            message="Model returned empty response, retrying...",
+                            next=next_retry_time,
+                            maxAttempts=MAX_EMPTY_RETRIES,
+                            rateLimited=False,
+                            providerID=self.provider_id,
+                            modelID=self.model_id,
                         )
+                        SessionStatus.set(self.session.id, empty_retry_status)
+                        await self._publish_retry_status(empty_retry_status)
                         await SessionRetry.sleep(delay_ms, self._abort)
+                        await self._publish_busy_status()
                         continue
                     else:
                         # All retries exhausted — surface a clear error so the
@@ -2087,38 +2112,59 @@ class SessionRunner:
                     # visible output or execute a tool twice.
                     will_retry = False
 
+                # The delay is capped at RETRY_MAX_DELAY_NO_HEADERS so a
+                # headers-present but retry-after-absent 500 response cannot
+                # cause multi-minute sleeps, and jittered so N sessions
+                # rejected by the same 429 do not retry in lockstep.
+                from flocks.session.lifecycle.retry import RETRY_MAX_DELAY_NO_HEADERS
+                delay_ms = SessionRetry.jittered_delay(
+                    error_attempt,
+                    error_dict,
+                    max_delay_ms=RETRY_MAX_DELAY_NO_HEADERS,
+                )
+                rate_limited = SessionRetry.is_rate_limited(error_dict)
+                if rate_limited:
+                    # Every other caller of this provider backs off too,
+                    # instead of piling onto an upstream that just said no.
+                    # This is independent of our own retry budget: the last
+                    # 429 of an exhausted caller is exactly when the rest
+                    # should hold off.
+                    report_provider_rate_limited(
+                        self.provider_id,
+                        delay_ms / 1000.0,
+                        reason="http_429",
+                    )
+
                 if will_retry:
-                    # Error is retryable and we have budget left
-                    delay_ms = SessionRetry.delay(error_attempt, error_dict)
-                    # Always cap the sleep to RETRY_MAX_DELAY_NO_HEADERS so a
-                    # headers-present but retry-after-absent 500 response cannot
-                    # cause multi-minute sleeps that block the loop.
-                    from flocks.session.lifecycle.retry import RETRY_MAX_DELAY_NO_HEADERS
-                    delay_ms = min(delay_ms, RETRY_MAX_DELAY_NO_HEADERS)
-                    next_retry_time = int(asyncio.get_event_loop().time() * 1000) + delay_ms
+                    next_retry_time = int(time.time() * 1000) + delay_ms
 
                     log.warn("runner.step.retry", {
                         **error_log_context,
                         "attempt": error_attempt,
                         "delay_ms": delay_ms,
                         "reason": retry_message,
+                        "rate_limited": rate_limited,
                         "max_retries": retry_limit,
                     })
                     
                     # Set retry status
-                    SessionStatus.set(
-                        self.session.id,
-                        SessionStatusRetry(
-                            attempt=error_attempt,
-                            message=retry_message,
-                            next=next_retry_time,
-                        )
+                    retry_status = SessionStatusRetry(
+                        attempt=error_attempt,
+                        message=retry_message,
+                        next=next_retry_time,
+                        maxAttempts=retry_limit,
+                        rateLimited=rate_limited,
+                        providerID=self.provider_id,
+                        modelID=self.model_id,
                     )
+                    SessionStatus.set(self.session.id, retry_status)
+                    await self._publish_retry_status(retry_status)
                     
                     # Wait before retry
                     await SessionRetry.sleep(delay_ms, self._abort)
 
                     self._attempt_state = LlmAttemptState()
+                    await self._publish_busy_status()
                     
                     # Continue to next retry attempt
                     continue
@@ -2806,6 +2852,118 @@ class SessionRunner:
         metadata = get_tool_catalog_metadata(tool_name, tool.info)
         return agent_declares_tool(agent, tool_name) or metadata.always_load
     
+    async def _publish_retry_status(self, status: SessionStatusRetry) -> None:
+        """Push the retry state to clients; SessionStatus alone is poll-only.
+
+        Serialized straight from the stored status so a client that refreshes
+        mid-backoff and falls back to ``/api/session/status`` sees exactly the
+        same fields the SSE event carried.
+        """
+        publish = self.callbacks.event_publish_callback
+        if not publish:
+            return
+        try:
+            await publish("session.status", {
+                "sessionID": self.session.id,
+                "status": status.model_dump(mode="json"),
+            })
+        except Exception as exc:
+            log.debug("runner.retry_status.publish_failed", {"error": str(exc)})
+
+    async def _publish_busy_status(self) -> None:
+        """Tell clients a retry sleep ended and the next attempt is in flight."""
+        publish = self.callbacks.event_publish_callback
+        if not publish:
+            return
+        try:
+            await publish("session.status", {
+                "sessionID": self.session.id,
+                "status": {"type": "busy"},
+            })
+        except Exception as exc:
+            log.debug("runner.busy_status.publish_failed", {"error": str(exc)})
+
+    async def _resolve_llm_priority(self) -> int:
+        """Interactive lineages go first; scheduled/workflow work waits behind them.
+
+        A session (or subagent) whose root ancestor is a scheduled task,
+        workflow temp parent or memory-evolution session (``category ==
+        "task"``) is background. Everything else (``user``, agent-studio
+        ``test`` sessions, ...) has a person waiting on it and is interactive.
+        """
+        cached = getattr(self, "_llm_priority", None)
+        if cached is None:
+            # One runner per step: keep the answer for the whole loop run.
+            cached = self._static_cache.get("llm_priority")
+        if isinstance(cached, int):
+            self._llm_priority = cached
+            return cached
+        priority = PRIORITY_INTERACTIVE
+        try:
+            current = self.session
+            seen: set = set()
+            while current is not None and current.id not in seen and len(seen) < 16:
+                seen.add(current.id)
+                parent_id = getattr(current, "parent_id", None)
+                if not parent_id:
+                    break
+                parent = await Session.get_by_id_unfiltered(parent_id)
+                if parent is None:
+                    break
+                current = parent
+            root_category = str(getattr(current, "category", "user") or "user")
+            if root_category in BACKGROUND_SESSION_CATEGORIES:
+                priority = PRIORITY_BACKGROUND
+        except Exception as exc:
+            log.debug("runner.llm_priority.resolve_failed", {"error": str(exc)})
+        self._llm_priority = priority
+        self._static_cache["llm_priority"] = priority
+        return priority
+
+    async def _resolve_max_parallel_subagents(self) -> int:
+        """Per-response cap on concurrently running foreground subagents."""
+        cached = self._static_cache.get("max_parallel_subagents")
+        if isinstance(cached, int):
+            return cached
+        try:
+            from flocks.config.config import Config
+
+            config = await Config.get()
+        except Exception as exc:
+            log.debug("runner.max_parallel_subagents.config_failed", {"error": str(exc)})
+            config = None
+        value = resolve_max_parallel_subagents(config)
+        self._static_cache["max_parallel_subagents"] = value
+        return value
+
+    def _report_rate_limit_cooldown_for_exception(self, exc: BaseException) -> None:
+        """Apply a provider cooldown as soon as a 429 is seen."""
+        try:
+            error_dict = self._exception_to_error_dict(exc)
+            if not SessionRetry.is_rate_limited(error_dict):
+                return
+            hinted_ms = SessionRetry.retry_after_ms(error_dict)
+            cooldown_s = (
+                hinted_ms / 1000.0 if hinted_ms is not None else MIN_RATE_LIMIT_COOLDOWN_S
+            )
+            report_provider_rate_limited(self.provider_id, cooldown_s, reason="http_429")
+        except Exception as report_exc:
+            log.debug("runner.rate_limit_cooldown.failed", {"error": str(report_exc)})
+
+    def _release_llm_slot(self, reason: str) -> None:
+        slot: Optional[LlmSlot] = getattr(self, "_active_llm_slot", None)
+        if slot is None:
+            return
+        self._active_llm_slot = None
+        if slot.released:
+            return
+        slot.release()
+        log.debug("runner.llm_slot.released", {
+            "provider_id": self.provider_id,
+            "reason": reason,
+            "held_s": round(time.monotonic() - slot.granted_at, 3),
+        })
+
     def _exception_to_error_dict(self, exception: Exception) -> Dict[str, Any]:
         """
         Convert exception to error dict for retry checking.
@@ -3628,6 +3786,26 @@ class SessionRunner:
             # Mark before hooks/callbacks/execution (including parallel tools)
             # so a concurrent provider error can never replay side effects.
             self._attempt_state.tool_execution_started = True
+            # Inline tools block the streaming loop, and one of them may call
+            # the model itself (run_workflow, a non-parallel delegate_task).
+            # Holding the slot across that would make this turn wait on a
+            # nested call that is waiting for our slot, so hand it back and
+            # accept that this response's stream stays open -- and keeps
+            # generating -- without holding one.
+            #
+            # Sibling delegate_task calls are different: they run in their own
+            # tasks, the stream never awaits them, and the slot is released in
+            # the `finally` below before `drain_parallel_tool_calls`. Keeping
+            # the slot for them costs nothing and keeps fan-out, the case this
+            # cap exists for, inside the limit -- as long as no inline tool ran
+            # earlier in the same response, which already gave the slot away.
+            if processor.owns_current_parallel_tool_call():
+                log.debug("runner.llm_slot.kept_for_parallel_tool", {
+                    "session_id": self.session.id,
+                    "tool_name": tool_name,
+                })
+            else:
+                self._release_llm_slot("tool_execution_started")
             if self.callbacks.on_tool_start:
                 await self.callbacks.on_tool_start(tool_name, tool_input)
 
@@ -3662,6 +3840,7 @@ class SessionRunner:
             plan_file_path=str(turn_plan_file.path),
             plan_relative_path=turn_plan_file.relative_path,
             plan_permission_path=turn_plan_file.permission_path,
+            max_parallel_subagents=await self._resolve_max_parallel_subagents(),
         )
         
         # Build provider options (thinking / reasoning / max_tokens)
@@ -3879,6 +4058,23 @@ class SessionRunner:
             "ongoing_chunk_timeout_s": stream_timeouts.ongoing_chunk_s,
             "local_endpoint": stream_timeouts.is_local,
         })
+        llm_priority = await self._resolve_llm_priority()
+        slot_wait_started = time.perf_counter()
+        self._active_llm_slot = await acquire_llm_slot(
+            self.provider_id,
+            priority=llm_priority,
+        )
+        slot_waited_s = time.perf_counter() - slot_wait_started
+        if slot_waited_s >= 0.5:
+            log.info("runner.llm_slot.waited", {
+                "session_id": self.session.id,
+                "provider_id": self.provider_id,
+                "priority": llm_priority,
+                "waited_s": round(slot_waited_s, 3),
+            })
+        # Time the model from the moment the request can actually go out, so
+        # first-chunk / durationMs metrics do not absorb in-process queueing.
+        llm_call_started_at = time.perf_counter()
         try:
             await model_activity.start()
             async for chunk in _iter_with_chunk_timeout(
@@ -4058,12 +4254,21 @@ class SessionRunner:
                         await tool_accumulator.feed_chunk(tc)
         except asyncio.CancelledError:
             await model_activity.stop()
+            self._release_llm_slot("cancelled")
             # Foreground delegate tasks own child sessions. Let their
             # cancellation/finalization finish before unwinding this step.
             await processor.drain_parallel_tool_calls(execute_deferred=False)
             raise
         except Exception as exc:
+            # First statement in the branch, and synchronous on purpose: an
+            # abort landing on any await here would otherwise skip the
+            # cooldown while `finally` still hands the slot on, letting the
+            # waiter reach a provider that just said 429. _process_step
+            # refines the duration with the jittered delay; the limiter keeps
+            # the longer of the two.
+            self._report_rate_limit_cooldown_for_exception(exc)
             await model_activity.stop()
+            self._release_llm_slot("stream_error")
             # A foreground delegate may already be running when the provider
             # stream fails. Drain first so the retry layer observes the tool
             # side-effect fence and cannot dispatch the same work twice.
@@ -4112,6 +4317,9 @@ class SessionRunner:
                 ) from exc
             raise
         finally:
+            # Free the provider slot first (synchronous, instant) so a queued
+            # caller can start while the activity marker is persisted.
+            self._release_llm_slot("stream_finished")
             await model_activity.stop()
         
         log.debug("runner.stream.summary", {
