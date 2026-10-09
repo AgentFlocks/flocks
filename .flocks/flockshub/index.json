@@ -14638,9 +14638,9 @@
       "id": "soc_ui",
       "type": "webui",
       "name": "SOC Workspace WebUI",
-      "description": "SOC workspace pages for posture, overview, and alert investigation.",
-      "descriptionCn": "SOC 工作区页面，包含态势、SOC 总览和告警调查。",
-      "version": "1.1.10",
+      "description": "SOC workspace for posture, overview, alert investigation, incident response and retrospective review.",
+      "descriptionCn": "SOC 工作区，包含态势、SOC 总览、告警调查、事件响应与复盘。",
+      "version": "1.2.3",
       "category": "workflow-automation",
       "tags": [
         "siem",
@@ -14653,7 +14653,7 @@
         "security-reporting"
       ],
       "trust": "official",
-      "riskLevel": "low",
+      "riskLevel": "high",
       "manifestPath": "plugins/webuis/soc_ui/manifest.json"
     },
     {
@@ -14729,9 +14729,9 @@
       "type": "component",
       "name": "SOC Workspace Component",
       "nameCn": "SOC 工作区场景套件",
-      "description": "Composite installer for the Flocks SOC workspace: pages, tools, denoise workflow, and triage workflow.",
-      "descriptionCn": "Flocks SOC 工作区组件安装器：包含页面、工具、降噪工作流和研判工作流。",
-      "version": "1.0.0",
+      "description": "SOC workspace with alert triage, persistent investigations, governed response and incident reviews.",
+      "descriptionCn": "SOC 工作区：告警研判、持续调查、受控处置及事件复盘。",
+      "version": "1.1.1",
       "category": "workflow-automation",
       "tags": [
         "siem",
@@ -14744,7 +14744,7 @@
         "security-reporting"
       ],
       "trust": "official",
-      "riskLevel": "medium",
+      "riskLevel": "high",
       "manifestPath": "plugins/components/soc-workspace/manifest.json"
     },
     {
@@ -14826,6 +14826,72 @@
       "riskLevel": "low",
       "edition": "pro",
       "manifestPath": "plugins/components/ai-redteam-workspace/manifest.json"
+    },
+    {
+      "id": "soc-investigator",
+      "type": "agent",
+      "name": "SOC Investigator",
+      "nameCn": "安全事件调查",
+      "description": "Investigate a persistent SOC case using the existing Flocks agent loop.",
+      "descriptionCn": "沿用 Flocks Agent 引擎调查安全事件，保留证据、假设、处置建议和复盘记录。",
+      "version": "1.0.0",
+      "category": "workflow-automation",
+      "tags": [
+        "siem",
+        "ndr",
+        "integration"
+      ],
+      "useCases": [
+        "alert-triage",
+        "security-reporting"
+      ],
+      "trust": "official",
+      "riskLevel": "medium",
+      "manifestPath": "plugins/agents/soc-investigator/manifest.json"
+    },
+    {
+      "id": "soc_case_manage",
+      "type": "tool",
+      "name": "Flocks SOC Case Management",
+      "description": "Persistent SOC investigation, immutable evidence, human-approved device response and verified incident retrospectives through the Flocks tool lifecycle.",
+      "descriptionCn": "SOC 事件调查、证据、人工审批处置与效果核验、复盘改进；设备操作遵循 Flocks 原工具执行与策略链。",
+      "version": "1.0.2",
+      "category": "integration",
+      "tags": [
+        "siem",
+        "edr",
+        "integration"
+      ],
+      "useCases": [
+        "alert-triage",
+        "incident-response",
+        "security-reporting"
+      ],
+      "trust": "official",
+      "riskLevel": "high",
+      "manifestPath": "plugins/tools/python/soc_case_manage/manifest.json"
+    },
+    {
+      "id": "soc_case_investigation",
+      "type": "workflow",
+      "name": "SOC Case Investigation",
+      "nameCn": "安全事件调查",
+      "description": "Bounded case investigation that preserves evidence in the SOC workspace.",
+      "descriptionCn": "围绕已有安全事件执行调查，把证据、假设和建议保存到 SOC 工作区。",
+      "version": "1.0.1",
+      "category": "workflow-automation",
+      "tags": [
+        "siem",
+        "ndr",
+        "integration"
+      ],
+      "useCases": [
+        "alert-triage",
+        "security-reporting"
+      ],
+      "trust": "official",
+      "riskLevel": "medium",
+      "manifestPath": "plugins/workflows/soc_case_investigation/manifest.json"
     }
   ]
 }

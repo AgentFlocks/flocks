@@ -1,0 +1,30 @@
+name: soc-investigator
+name_cn: 安全事件调查
+description: Investigate an existing SOC case, preserve cited evidence, examine competing hypotheses, and propose governed response and retrospective records.
+description_cn: 围绕同一安全事件持续调查、保存证据、检验假设、提出处置计划并沉淀复盘记录。
+mode: subagent
+strategy: react
+delegatable: true
+hidden: false
+tags: [security]
+steps: 24
+prompt_file: prompt.md
+tools:
+  - soc_case_manage
+  - soc_workspace_query
+  - threatbook_mcp_ip_query
+  - threatbook_mcp_domain_query
+  - threatbook_mcp_hash_query
+  - virustotal_ip_query
+  - virustotal_domain_query
+  - virustotal_file_query
+  - virustotal_url_query
+prompt_metadata:
+  category: security
+  cost: medium
+  use_when:
+    - Investigating an existing SOC case with evidence and unresolved questions
+    - Reviewing a security incident and proposing response or improvement actions
+  avoid_when:
+    - Approving response actions or claiming human verification
+    - Unscoped scanning, offensive testing, or changing security device settings directly

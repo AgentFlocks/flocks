@@ -46,6 +46,7 @@ interface AlertTableCell {
 interface IncidentCluster {
   id: string;
   sourceRecordId?: string;
+  sourceRowId?: string;
   observedAt?: string;
   rawAlerts?: number;
   confidence?: number;
@@ -306,6 +307,12 @@ const EN_TEXT: Record<string, string> = {
   '待确认': 'Pending',
   '收起': 'Collapse',
   '关闭详情': 'Close details',
+  '升级为事件': 'Escalate to incident',
+  '正在创建事件…': 'Creating incident…',
+  '查看响应事件': 'View response incident',
+  '事件创建未确认，重试将复用同一请求。': 'Incident creation is unconfirmed. Retrying uses the same request.',
+  '当前账号无权附加全局告警快照，可在事件响应中手工创建事件。': 'Your account cannot attach global alert snapshots. You can create an incident in Incident Response.',
+  '当前告警来源不支持事件快照': 'This alert source does not support incident snapshots',
   '告警': 'Alert',
   '告警摘要': 'Alert Summary',
   '基础信息': 'Basic Info',
@@ -1987,6 +1994,40 @@ function IncidentInlineDetail({ incident, onClose, tr }: { incident: IncidentClu
   const [stepsOpen, setStepsOpen] = useState(true);
   const [activePane, setActivePane] = useState<'detail' | 'triage'>('detail');
   const [copyDone, setCopyDone] = useState(false);
+  const [caseBusy, setCaseBusy] = useState(false);
+  const [caseError, setCaseError] = useState('');
+  const [createdCaseId, setCreatedCaseId] = useState('');
+  const caseRequestRef = useRef<{ sourceRowId: string; body: string } | null>(null);
+  const currentSourceRowId = useRef(incident.sourceRowId);
+  currentSourceRowId.current = incident.sourceRowId;
+  const caseLock = useRef(false);
+  useEffect(() => { setCaseError(''); setCreatedCaseId(''); }, [incident.id, incident.sourceRowId]);
+  async function escalateIncident() {
+    if (caseLock.current || !incident.sourceRowId) return;
+    const sourceRowId = incident.sourceRowId;
+    caseLock.current = true; setCaseBusy(true); setCaseError('');
+    if (caseRequestRef.current?.sourceRowId !== sourceRowId) {
+      caseRequestRef.current = { sourceRowId, body: JSON.stringify({ params: {
+        operation: 'create', idempotency_key: globalThis.crypto.randomUUID(), data: {
+          title: incident.title.slice(0, 240), severity: incident.priority === 'P1' ? 'high' : 'medium',
+          summary: (incident.conclusion?.summary || incident.reason || '').slice(0, 4000),
+          alert_id: incident.sourceRowId,
+        },
+      } }) };
+    }
+    try {
+      const response = await fetch('/api/tools/soc_case_manage/execute', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: caseRequestRef.current.body });
+      const result = await response.json();
+      if (!response.ok || !result.success) {
+        if (response.status === 403 || Number(result.metadata?.status_code) === 403) throw new Error(tr('当前账号无权附加全局告警快照，可在事件响应中手工创建事件。'));
+        throw new Error(typeof result.detail === 'string' ? result.detail : result.error || `HTTP ${response.status}`);
+      }
+      const output = typeof result.output === 'string' ? JSON.parse(result.output) : result.output;
+      if (!output?.case?.id) throw new Error(tr('事件创建未确认，重试将复用同一请求。'));
+      if (currentSourceRowId.current === sourceRowId) setCreatedCaseId(output.case.id);
+    } catch (err) { if (currentSourceRowId.current === sourceRowId) setCaseError(err instanceof Error ? err.message : tr('事件创建未确认，重试将复用同一请求。')); }
+    finally { caseLock.current = false; setCaseBusy(false); }
+  }
   const report = parseTaggedReport(incident.triageReport);
   const markdownReport = report ? null : parseMarkdownReport(incident.triageReport);
   const attackJudgement = attackVerdictLabel(incident, tr);
@@ -2119,6 +2160,7 @@ function IncidentInlineDetail({ incident, onClose, tr }: { incident: IncidentClu
             </div>
           </div>
           <div className="flex shrink-0 items-center gap-2">
+            {createdCaseId ? <a className="rounded border border-blue-300 px-3 py-1.5 text-sm text-blue-700" href={`/contracts/webui/soc-cases?case_id=${encodeURIComponent(createdCaseId)}`}>{tr('查看响应事件')}</a> : <button type="button" disabled={caseBusy || !incident.sourceRowId} title={!incident.sourceRowId ? tr('当前告警来源不支持事件快照') : undefined} onClick={() => void escalateIncident()} className="rounded border border-blue-300 px-3 py-1.5 text-sm text-blue-700 disabled:opacity-50">{tr(caseBusy ? '正在创建事件…' : '升级为事件')}</button>}
             {activePane === 'triage' && (
               <div className="flex items-center gap-1">
                 <button
@@ -2173,6 +2215,8 @@ function IncidentInlineDetail({ incident, onClose, tr }: { incident: IncidentClu
         </div>
 
         <div className="overflow-y-auto bg-white px-8 py-6" style={{ maxHeight: 560 }}>
+          {!incident.sourceRowId && <p className="mb-3 text-sm text-slate-500">{tr('当前告警来源不支持事件快照')}</p>}
+          {caseError && <div role="alert" className="mb-4 rounded border border-orange-200 bg-orange-50 px-4 py-3 text-sm text-orange-800">{caseError}</div>}
           {activePane === 'detail' ? (
             <div className="bg-white">
               <ArchiveSection title={tr('告警')} value={threatName}>

@@ -3,6 +3,7 @@
 from collections import deque
 from contextlib import nullcontext
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError, as_completed
+from contextvars import copy_context
 from dataclasses import dataclass, field
 import hashlib
 from itertools import islice
@@ -566,8 +567,13 @@ class WorkflowEngine:
                     _node_runs: Dict[int, _NodeRun] = {a[0]: _NodeRun() for a in _exec_args}
                     _pool = ThreadPoolExecutor(max_workers=_pw, thread_name_prefix="wf-par")
                     try:
+                        # Each concurrent node needs its own Context: one
+                        # Context cannot be entered by two workers at once.
                         _fut_map = {
-                            _pool.submit(_run_node_tracked, timed_out_threads, _node_runs[a[0]], _par_exec, a): a[0]
+                            _pool.submit(
+                                copy_context().run, _run_node_tracked,
+                                timed_out_threads, _node_runs[a[0]], _par_exec, a,
+                            ): a[0]
                             for a in _exec_args
                         }
                         try:
@@ -603,7 +609,11 @@ class WorkflowEngine:
                         _serial_run = _NodeRun()
                         try:
                             if step_timeout_s is not None and timeout_executor is not None:
+                                # ThreadPoolExecutor does not copy ContextVars.
+                                # Preserve the authenticated caller and opaque
+                                # execution context on every reused worker hop.
                                 _sfut = timeout_executor.submit(
+                                    copy_context().run,
                                     _run_node_tracked,
                                     timed_out_threads,
                                     _serial_run,

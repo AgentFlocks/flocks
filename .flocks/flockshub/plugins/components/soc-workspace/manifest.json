@@ -4,9 +4,9 @@
   "type": "component",
   "name": "SOC Workspace Component",
   "nameCn": "SOC 工作区场景套件",
-  "description": "Composite installer for the Flocks SOC workspace: pages, tools, denoise workflow, and triage workflow.",
-  "descriptionCn": "Flocks SOC 工作区组件安装器：包含页面、工具、降噪工作流和研判工作流。",
-  "version": "1.0.0",
+  "description": "SOC workspace with alert triage, persistent investigations, governed response and incident reviews.",
+  "descriptionCn": "SOC 工作区：告警研判、持续调查、受控处置及事件复盘。",
+  "version": "1.1.1",
   "author": "Flocks Team",
   "license": "MIT",
   "homepage": "",
@@ -48,15 +48,18 @@
   },
   "permissions": {
     "tools": [
-      "soc_workspace_query"
+      "soc_workspace_query",
+      "soc_case_manage"
     ],
     "network": false,
     "shell": false,
     "filesystem": "read-write"
   },
   "risk": {
-    "level": "medium",
-    "reasons": []
+    "level": "high",
+    "reasons": [
+      "Includes incident response approval and governed device execution; investigation and retrospective records remain plugin-owned."
+    ]
   },
   "entrypoints": [
     "component.json"
@@ -78,6 +81,18 @@
     {
       "type": "workflow",
       "id": "stream_alert_triage"
+    },
+    {
+      "type": "tool",
+      "id": "soc_case_manage"
+    },
+    {
+      "type": "agent",
+      "id": "soc-investigator"
+    },
+    {
+      "type": "workflow",
+      "id": "soc_case_investigation"
     }
   ],
   "checksums": {}

@@ -60,6 +60,17 @@ async def build_workflow_tool_context(
         parent_session = await Session.get_by_id(effective_session_id)
         if not parent_session:
             raise HTTPException(status_code=400, detail=f"Parent session not found: {effective_session_id}")
+        # HTTP callers must be allowed to write before a synthetic message or
+        # execution-profile update touches an existing session. Background
+        # workflow workers retain their existing runtime-owned context path.
+        from flocks.auth.context import get_current_auth_user
+        from flocks.session.policy import SessionPolicy
+
+        principal = get_current_auth_user()
+        if principal is not None and not SessionPolicy.can_write(parent_session, principal):
+            raise HTTPException(status_code=403, detail="No write access to workflow parent session")
+        if effective_message_id and not await Message.get(effective_session_id, effective_message_id):
+            raise HTTPException(status_code=400, detail="Workflow message does not belong to the parent session")
         workspace_dir = str(getattr(parent_session, "directory", None) or workspace_dir)
         if getattr(parent_session, "project_id", None):
             project_id = str(parent_session.project_id)

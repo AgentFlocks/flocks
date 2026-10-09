@@ -295,6 +295,40 @@ def test_query_can_use_postgres_json_driver(tmp_path: Path, monkeypatch: pytest.
     assert response.body["items"][0]["entityId"] == "record:allowed"
 
 
+def test_postgres_json_driver_takes_source_row_id_only_from_the_configured_column(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    from flocks.contracts.access.driver import SOURCE_ROW_ID_FIELD, PostgresJsonDriverExecutor
+
+    store = _store(tmp_path, monkeypatch)
+    db_path = tmp_path / "contract_records.db"
+    # A stored payload claiming another row's identity must not keep that claim.
+    _write_contract_postgres(db_path, [_contract_record(id="row-a", **{SOURCE_ROW_ID_FIELD: "row-b"})])
+    seen: list[object] = []
+    matches = PostgresJsonDriverExecutor._matches_predicates
+
+    def spy(self, record, *args, **kwargs):  # the full record, before field projection
+        seen.append(record.get(SOURCE_ROW_ID_FIELD))
+        return matches(self, record, *args, **kwargs)
+
+    monkeypatch.setattr(PostgresJsonDriverExecutor, "_matches_predicates", spy)
+
+    def run(driver_options):
+        runtime = OperationRuntime(plugins=(_plugin(
+            store, adapter_kind="builtin-postgres-json", source_root=db_path, driver_options=driver_options,
+        ),))
+        seen.clear()
+        runtime.execute(
+            page_id=PAGE_ID, contract_id=CONTRACT_ID, operation_name="list",
+            payload={"params": {"limit": 10}}, principal=AuthUser(id="u1", username="alice", role="admin"),
+        )
+        return list(seen)
+
+    base = {"table": "records", "recordColumn": "record_json", "dateColumn": "record_date"}
+    assert run({**base, "rowIdColumn": "id"}) == ["row-a"]
+    assert run(base) == [None]
+
+
 def test_query_can_filter_postgres_json_driver_by_event_time(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     store = _store(tmp_path, monkeypatch)
     db_path = tmp_path / "contract_records.db"

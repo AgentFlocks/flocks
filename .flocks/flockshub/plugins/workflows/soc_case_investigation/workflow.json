@@ -1,0 +1,25 @@
+{
+  "name": "soc_case_investigation",
+  "nameCn": "安全事件调查",
+  "description": "Investigate a persisted case through the existing Flocks agent and governed tool runtime.",
+  "description_cn": "读取已有事件并调用安全事件调查 Agent，证据和结论写回同一事件，不自动审批、执行或结案。",
+  "start": "investigate_case",
+  "nodes": [
+    {
+      "id": "investigate_case",
+      "type": "python",
+      "description": "读取事件、执行有步数上限的调查 Agent，再读取持久化结果。",
+      "code": "import json\nimport uuid\n\n\ndef case_command(operation, **params):\n    raw = tool.run('soc_case_manage', operation=operation, **params)\n    try:\n        result = json.loads(raw) if isinstance(raw, str) else raw\n    except (TypeError, ValueError) as exc:\n        raise RuntimeError('事件工具返回了无法解析的结果，调查已停止。') from exc\n    if not isinstance(result, dict) or not isinstance(result.get('case'), dict) or result.get('ok') is False:\n        raise RuntimeError('事件工具未返回有效事件记录，调查已停止。')\n    return result\n\n\ncase_id = str(inputs.get('case_id') or '').strip()\nquestion = str(inputs.get('question') or '调查现有证据，明确攻击范围、反证与未解问题，保存调查结论和必要的处置计划。').strip()\nif not case_id or len(case_id) > 128:\n    raise ValueError('必须指定已有事件的 case_id。')\nif len(question) > 2000:\n    raise ValueError('调查问题最多 2000 字符。')\nsnapshot = case_command('get', case_id=case_id, data={'limit': 20})\ncase = snapshot['case']\nif case['status'] == 'closed':\n    raise ValueError('事件已关闭，请先由操作员重开事件。')\nif case['status'] == 'open':\n    changed = case_command('update', case_id=case_id,\n        expected_version=case['version'], idempotency_key='investigate-' + uuid.uuid4().hex,\n        data={'status': 'investigating'})\n    case = changed['case']\nversion_before = case['version']\nresult = tool.run_safe('delegate_task', subagent_type='soc-investigator',\n    description='调查安全事件 ' + case_id,\n    prompt='调查 SOC 事件 ' + case_id + '。先用 soc_case_manage 读取权威记录。'\n        + '任务问题：' + question + '\\n最多 8 次外部只读查询；所有证据、假设与计划通过事件工具保存。'\n        + '禁止审批、执行处置或代替操作员核验、结案。输出必须区分已保存事实和未解缺口。')\ncurrent = case_command('get', case_id=case_id, data={'limit': 1})\noutputs['case_id'] = case_id\noutputs['case_version'] = current['case']['version']\noutputs['case_status'] = current['case']['status']\noutputs['counts'] = current.get('counts', {})\noutputs['records_changed'] = current['case']['version'] > version_before\noutputs['case_url'] = '/contracts/webui/workspaces/soc_ui/soc-cases?case_id=' + case_id\noutputs['investigation_summary'] = str(result.get('text') or '')[:12000]\nif not result.get('success'):\n    raise RuntimeError('调查未完成；已有事件记录保留。请查看子会话与工作流错误后继续。')\n",
+      "timeoutFatal": true
+    }
+  ],
+  "edges": [],
+  "metadata": {
+    "node_timeout_s": 900,
+    "sampleInputs": {
+      "case_id": "",
+      "question": "调查现有证据、攻击范围与待确认问题。"
+    },
+    "strict_edge_mapping": true
+  }
+}

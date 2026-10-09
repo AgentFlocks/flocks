@@ -1,0 +1,72 @@
+{
+  "schemaVersion": "hub.plugin.v1",
+  "id": "soc_case_investigation",
+  "type": "workflow",
+  "name": "SOC Case Investigation",
+  "nameCn": "安全事件调查",
+  "description": "Bounded case investigation that preserves evidence in the SOC workspace.",
+  "descriptionCn": "围绕已有安全事件执行调查，把证据、假设和建议保存到 SOC 工作区。",
+  "version": "1.0.1",
+  "author": "Flocks Team",
+  "license": "MIT",
+  "homepage": "",
+  "category": "workflow-automation",
+  "tags": [
+    "siem",
+    "ndr",
+    "integration"
+  ],
+  "useCases": [
+    "alert-triage",
+    "security-reporting"
+  ],
+  "domains": [
+    "security-ops"
+  ],
+  "capabilities": [
+    "workflow"
+  ],
+  "trust": "official",
+  "source": {
+    "kind": "bundled",
+    "path": "plugins/workflows/soc_case_investigation"
+  },
+  "compatibility": {
+    "flocks": ">=0.8.0",
+    "os": [
+      "darwin",
+      "linux",
+      "windows"
+    ]
+  },
+  "dependencies": {
+    "skills": [],
+    "tools": [
+      "soc_case_manage",
+      "soc_workspace_query"
+    ],
+    "python": [],
+    "external": []
+  },
+  "permissions": {
+    "tools": [
+      "soc_case_manage",
+      "soc_workspace_query",
+      "delegate_task"
+    ],
+    "network": false,
+    "shell": false,
+    "filesystem": "read-write"
+  },
+  "risk": {
+    "level": "medium",
+    "reasons": [
+      "Persists incident investigation records; device execution remains separately governed."
+    ]
+  },
+  "entrypoints": [
+    "workflow.json"
+  ],
+  "components": [],
+  "checksums": {}
+}

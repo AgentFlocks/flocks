@@ -78,7 +78,7 @@ DISPLAY_FIELDS = (
     "is_duplicate",
     "_syslog_meta",
 )
-DRIVER_FIELDS = frozenset((*DISPLAY_FIELDS, "triage_attack_verdict", "triage_attack_success"))
+DRIVER_FIELDS = frozenset((*DISPLAY_FIELDS, "triage_attack_verdict", "triage_attack_success", "__flocks_source_row_id"))
 FILTER_FIELDS = frozenset(
     {
         "_source_type",
@@ -160,6 +160,10 @@ class _BindingResolver:
                 "dateColumn": settings["date_column"],
                 "eventTimeColumn": settings["event_time_column"],
                 "orderColumn": settings["order_column"],
+                # Case snapshots currently target the canonical SOC store.
+                # Custom sources keep their existing query behavior.
+                **({"rowIdColumn": "row_id"} if settings["table"] == DEFAULT_TABLE
+                   and settings["record_column"] == DEFAULT_RECORD_COLUMN else {}),
             },
             predicate_value_resolver=_filter_value,
             capabilities=frozenset({"query"}),
@@ -245,6 +249,7 @@ def _incident_from_row(row: InternalDataRow) -> dict[str, Any]:
     return {
         "id": record_id,
         "sourceRecordId": record_id,
+        "sourceRowId": _text(record.get("__flocks_source_row_id")),
         "observedAt": observed_at,
         "rawAlerts": 1,
         "priority": "P1" if verdict == "success" else "P2",

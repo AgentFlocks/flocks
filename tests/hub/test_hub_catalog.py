@@ -407,7 +407,7 @@ async def test_hub_installs_soc_webui_package(isolated_hub_env, monkeypatch: pyt
         "// built during hub install: soc-alerts\n"
     )
     assert (access_dir / "soc_alerts_operations.py").is_file()
-    assert set(built_pages) == {"soc-alerts", "soc-dashboard", "soc-overview"}
+    assert set(built_pages) == {"soc-alerts", "soc-cases", "soc-dashboard", "soc-overview"}
     assert dashboard_manifest["id"] == "soc-dashboard"
     assert workspace_manifest["version"] == record.version == load_manifest("webui", "soc_ui").version
     assert record.installPath == str(webui_dir)
@@ -1795,7 +1795,7 @@ def test_hub_component_install_stream_reports_child_progress(isolated_hub_env, m
     assert frames[0]["event"] == "start"
     assert frames[0]["type"] == "component"
     assert frames[0]["id"] == "soc-workspace"
-    assert [item["status"] for item in frames[0]["items"]] == ["pending", "pending", "pending", "pending"]
+    assert [item["status"] for item in frames[0]["items"]] == ["pending"] * 7
 
     installed_children = {
         (frame["item"]["type"], frame["item"]["id"])
@@ -1807,6 +1807,9 @@ def test_hub_component_install_stream_reports_child_progress(isolated_hub_env, m
         ("tool", "soc_workspace_query"),
         ("workflow", "stream_alert_denoise"),
         ("workflow", "stream_alert_triage"),
+        ("tool", "soc_case_manage"),
+        ("agent", "soc-investigator"),
+        ("workflow", "soc_case_investigation"),
     }
     assert frames[-1]["event"] == "complete"
     assert frames[-1]["record"]["id"] == "soc-workspace"

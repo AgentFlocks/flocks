@@ -1,0 +1,79 @@
+{
+  "schemaVersion": "hub.plugin.v1",
+  "id": "soc-investigator",
+  "type": "agent",
+  "name": "SOC Investigator",
+  "nameCn": "安全事件调查",
+  "description": "Investigate a persistent SOC case using the existing Flocks agent loop.",
+  "descriptionCn": "沿用 Flocks Agent 引擎调查安全事件，保留证据、假设、处置建议和复盘记录。",
+  "version": "1.0.0",
+  "author": "Flocks Team",
+  "license": "MIT",
+  "homepage": "",
+  "category": "workflow-automation",
+  "tags": [
+    "siem",
+    "ndr",
+    "integration"
+  ],
+  "useCases": [
+    "alert-triage",
+    "security-reporting"
+  ],
+  "domains": [
+    "security-ops"
+  ],
+  "capabilities": [
+    "llm-agent"
+  ],
+  "trust": "official",
+  "source": {
+    "kind": "bundled",
+    "path": "plugins/agents/soc-investigator"
+  },
+  "compatibility": {
+    "flocks": ">=0.8.0",
+    "os": [
+      "darwin",
+      "linux",
+      "windows"
+    ]
+  },
+  "dependencies": {
+    "skills": [],
+    "tools": [
+      "soc_case_manage",
+      "soc_workspace_query"
+    ],
+    "python": [],
+    "external": []
+  },
+  "permissions": {
+    "tools": [
+      "soc_case_manage",
+      "soc_workspace_query",
+      "threatbook_mcp_ip_query",
+      "threatbook_mcp_domain_query",
+      "threatbook_mcp_hash_query",
+      "virustotal_ip_query",
+      "virustotal_domain_query",
+      "virustotal_file_query",
+      "virustotal_url_query"
+    ],
+    "network": true,
+    "shell": false,
+    "filesystem": "read-write"
+  },
+  "risk": {
+    "level": "medium",
+    "reasons": [
+      "Persists incident investigation records and may query configured read-only threat intelligence services; device execution remains separately governed."
+    ]
+  },
+  "entrypoints": [
+    "agent.yaml",
+    "prompt.md"
+  ],
+  "components": [],
+  "checksums": {}
+}

@@ -121,7 +121,7 @@ def test_access_contract_uses_pg_binding_and_stable_order():
     module = load("access/soc_alerts_operations.py")
     binding = module._BindingResolver().resolve(page_id="soc-alerts", slot_id="main", contract_id=module.CONTRACT_ID, contract_version=module.CONTRACT_VERSION)
     assert binding.adapter_kind == "builtin-postgres-json"
-    assert binding.driver_options == {"table": "alert_records", "recordColumn": "record_json", "dateColumn": "asset_date", "eventTimeColumn": "event_time", "orderColumn": "rowid"}
+    assert binding.driver_options == {"table": "alert_records", "recordColumn": "record_json", "dateColumn": "asset_date", "eventTimeColumn": "event_time", "orderColumn": "rowid", "rowIdColumn": "row_id"}
     assert str(binding.source_root) == "/postgresql/alert_records"
 
 

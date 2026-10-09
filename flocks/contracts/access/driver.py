@@ -18,6 +18,7 @@ JSON_DATA_SUFFIXES = frozenset({".jsonl", ".json"})
 MAX_PG_SCAN_ROWS = 50_000
 MAX_PG_SCAN_BYTES = 32 * 1024 * 1024
 MAX_PG_SCAN_SECONDS = 30
+SOURCE_ROW_ID_FIELD = "__flocks_source_row_id"
 
 
 class DriverProxy:
@@ -64,7 +65,9 @@ class PostgresJsonDriverExecutor:
         record_column = _postgres_identifier(options.get("recordColumn"), "record_json")
         date_column = _postgres_identifier(options.get("dateColumn"), "record_date")
         event_time_column = _postgres_identifier_optional(options.get("eventTimeColumn"))
-        query = f"SELECT {record_column} FROM {table}"
+        row_id_column = _postgres_identifier_optional(options.get("rowIdColumn"))
+        projection = record_column + (f", {row_id_column}" if row_id_column else "")
+        query = f"SELECT {projection} FROM {table}"
         conditions: list[str] = []
         query_params: list[Any] = []
         start_date, end_date = JsonlDriverExecutor()._request_date_range(plan.params)
@@ -116,7 +119,8 @@ class PostgresJsonDriverExecutor:
                     admin_message=f"PostgreSQL query failed ({type(exc).__name__}).",
                 ) from exc
 
-        for (record_value,) in records():
+        for source_row in records():
+            record_value = source_row[0]
             try:
                 record = json.loads(record_value) if isinstance(record_value, str) else record_value
             except json.JSONDecodeError:
@@ -124,6 +128,11 @@ class PostgresJsonDriverExecutor:
             if not isinstance(record, dict):
                 parse_errors += 1
                 continue
+            # Only an explicitly configured database column can supply source
+            # identity. A JSON payload cannot impersonate another stored row.
+            record = {key: value for key, value in record.items() if key != SOURCE_ROW_ID_FIELD}
+            if row_id_column and source_row[1] is not None:
+                record[SOURCE_ROW_ID_FIELD] = str(source_row[1])
             if record.get("_type") == "file_header":
                 continue
             if not sql_event_time_filtered and not self._matches_event_time_range(record, start_time, end_time):

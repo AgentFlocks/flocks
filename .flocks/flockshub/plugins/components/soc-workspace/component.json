@@ -3,8 +3,8 @@
   "id": "soc-workspace",
   "name": "SOC Workspace",
   "nameCn": "SOC 工作区",
-  "description": "Composite package for the Flocks SOC workspace WebUI, query tool, and denoise/triage workflows.",
-  "descriptionCn": "Flocks SOC 工作区组件包，包含 WebUI 页面、查询工具、降噪工作流和研判工作流。",
+  "description": "SOC workspace with alert triage, persistent investigations, governed response and incident reviews.",
+  "descriptionCn": "SOC 工作区：告警研判、持续调查、受控处置及事件复盘。",
   "components": [
     {
       "type": "webui",
@@ -21,6 +21,18 @@
     {
       "type": "workflow",
       "id": "stream_alert_triage"
+    },
+    {
+      "type": "tool",
+      "id": "soc_case_manage"
+    },
+    {
+      "type": "agent",
+      "id": "soc-investigator"
+    },
+    {
+      "type": "workflow",
+      "id": "soc_case_investigation"
     }
   ]
 }

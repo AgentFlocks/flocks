@@ -117,9 +117,13 @@ class Query:
 
 
 class Connection:
-    def __init__(self, *, timeout: float = 5.0, readonly: bool = False) -> None:
+    def __init__(self, *, timeout: float = 5.0, readonly: bool = False,
+                 isolation: str | None = None) -> None:
+        if isolation not in (None, "read_committed", "read_uncommitted", "repeatable_read", "serializable"):
+            raise ValueError("isolation must be a supported PostgreSQL transaction isolation level")
         self.timeout = min(30.0, max(0.05, float(timeout)))
         self.readonly = readonly
+        self.isolation = isolation
         self._pool = self._connection = self._transaction = None
         self._queries = weakref.WeakSet()
 
@@ -144,7 +148,7 @@ class Connection:
             self._pool = await pool_for(registry.current().dsn or "")
             connection = await self._pool.acquire(timeout=self.timeout)
             try:
-                transaction = connection.transaction(readonly=self.readonly)
+                transaction = connection.transaction(readonly=self.readonly, isolation=self.isolation)
                 await transaction.start()
                 await connection.execute("SELECT set_config('statement_timeout', $1, true)", str(int(self.timeout * 1000)))
                 self._connection, self._transaction = connection, transaction
@@ -201,8 +205,9 @@ class Connection:
         ).fetchall()}
 
 
-def connect(*, timeout: float = 5.0, readonly: bool = False) -> Connection:
-    return Connection(timeout=timeout, readonly=readonly)
+def connect(*, timeout: float = 5.0, readonly: bool = False,
+            isolation: str | None = None) -> Connection:
+    return Connection(timeout=timeout, readonly=readonly, isolation=isolation)
 
 
 __all__ = ["connect", "identity"]

@@ -270,6 +270,7 @@ class ToolContext:
         metadata_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
         event_publish_callback: Optional[Callable[[str, Dict[str, Any]], Awaitable[None]]] = None,
         input_patch_callback: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
+        validated_input_guard: Optional[Callable[[str, Dict[str, Any]], Awaitable[bool]]] = None,
     ):
         self.session_id = session_id
         self.message_id = message_id
@@ -282,6 +283,9 @@ class ToolContext:
         self._metadata: Dict[str, Any] = {}
         self.event_publish_callback = event_publish_callback
         self._input_patch_callback = input_patch_callback
+        # Optional caller-owned precondition on the final effective inputs.
+        # It can restrict an allowed call, never bypass an extension's gate.
+        self.validated_input_guard = validated_input_guard
 
     async def notify_input_patched(self, effective_input: Dict[str, Any]) -> None:
         """Report the input the handler will actually receive after a
@@ -853,10 +857,29 @@ class Tool:
                         },
                     )
                 else:
-                    if input_patched:
-                        await ctx.notify_input_patched(coerced_kwargs)
-                    result = await self.handler(ctx, **coerced_kwargs)
-                    terminal_status = "success" if result.success else "error"
+                    inputs_allowed = True
+                    if ctx.validated_input_guard is not None:
+                        try:
+                            inputs_allowed = await ctx.validated_input_guard(
+                                self.info.name, copy.deepcopy(coerced_kwargs)
+                            ) is True
+                        except Exception:
+                            inputs_allowed = False
+                    if not inputs_allowed:
+                        terminal_status = "deny"
+                        result = ToolResult(
+                            success=False,
+                            error="Final tool arguments did not satisfy the caller's execution precondition",
+                            metadata={
+                                "validated_input_guard_blocked": True,
+                                "hook_decision": decision.model_dump(mode="json"),
+                            },
+                        )
+                    else:
+                        if input_patched:
+                            await ctx.notify_input_patched(coerced_kwargs)
+                        result = await self.handler(ctx, **coerced_kwargs)
+                        terminal_status = "success" if result.success else "error"
             except asyncio.CancelledError as exc:
                 terminal_status = "cancelled"
                 terminal_error = exc
@@ -1476,7 +1499,8 @@ class ToolRegistry:
                 cls._reset_failure_state(tool_name)
             else:
                 result_metadata = result.metadata or {}
-                if result_metadata.get("blocked_by_hook") or result_metadata.get("confirmation_required"):
+                if (result_metadata.get("blocked_by_hook") or result_metadata.get("confirmation_required")
+                        or result_metadata.get("validated_input_guard_blocked")):
                     # A hook verdict (policy deny / confirmation) says nothing about
                     # the tool itself; counting it would let a policy switch the
                     # tool off for everyone after three refusals.
