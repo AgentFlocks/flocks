@@ -897,7 +897,15 @@ class ConfigInfo(BaseModel):
         None,
         description="Process-wide model request / subagent concurrency limits.",
     )
-    
+    # Workflow engine settings, read raw by flocks.workflow.runner
+    workflow: Optional[Dict[str, Any]] = Field(
+        None,
+        description=(
+            "Workflow engine settings. Keys: llm.max_concurrency (concurrent LLM "
+            "calls on the workflow loop; default 8, 0 = unlimited)."
+        ),
+    )
+
     # Memory system configuration (added for memory system integration)
     memory: Optional[Any] = Field(
         None,

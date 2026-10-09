@@ -234,6 +234,20 @@ async def delegate_task_tool(
     if not subagent_type:
         return ToolResult(success=False, error="subagent_type is required")
 
+    interactive = bool(ctx.extra.get("agent_execution_session")) and not ctx.extra.get("workflow_context")
+    from flocks.session.agent_inbox import AgentInbox
+    # Inbox generation of the execution making this call: pinned by the step
+    # before any await of the tool pipeline, else taken before the first await
+    # here. Once it is closed that execution is over, so the child must not
+    # start (checked again right before it is submitted).
+    parent_inbox = (ctx.extra.get("agent_inbox") or AgentInbox.get(ctx.session_id)) if interactive else None
+
+    def execution_ended() -> bool:
+        return ctx.aborted or (parent_inbox is not None and parent_inbox.stopped)
+
+    if execution_ended():  # nobody is waiting for this call: no permission prompt
+        return ToolResult(success=False, error="Execution stopped")
+
     await ctx.ask(
         permission="delegate_task",
         patterns=[subagent_type or "continue"],
@@ -244,11 +258,8 @@ async def delegate_task_tool(
         },
     )
 
-    if ctx.aborted:
+    if execution_ended():
         return ToolResult(success=False, error="Execution stopped")
-    interactive = bool(ctx.extra.get("agent_execution_session")) and not ctx.extra.get("workflow_context")
-    from flocks.session.agent_inbox import AgentInbox
-    parent_inbox = AgentInbox.get(ctx.session_id) if interactive else None
 
     skill_result = await _resolve_skill_content(load_skills)
     if skill_result["error"]:
@@ -309,6 +320,10 @@ async def delegate_task_tool(
     async def _run_child_effect() -> ToolResult:
         created = await Session.create(**create_kwargs)
         child_inbox = AgentInbox.get(created.id) if interactive else None
+        if child_inbox:
+            # Known before the child's loop starts, so stopping only the
+            # subagents of the parent also reaches a child still queued.
+            child_inbox.category = created.category
         child_payload["child_session_id"] = created.id
         try:
             from flocks.session.execution_profile import upsert_session_execution_profile
@@ -389,7 +404,10 @@ async def delegate_task_tool(
 
         if interactive:
             from flocks.session.delegated_execution import start_child
-            if ctx.aborted:
+            # A stopped parent inbox means the execution that made this call
+            # is over; start_child would bind the inbox's next generation and
+            # the child's result would wake the parent again.
+            if execution_ended():
                 raise asyncio.CancelledError()
 
             async def execute_with_child_hooks():

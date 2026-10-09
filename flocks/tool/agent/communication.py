@@ -59,7 +59,8 @@ async def send_to_session(ctx: ToolContext, session_id: str, content: str) -> To
         await _check_plan_recipient(ctx, target)
         if ctx.aborted:
             raise ValueError("Execution stopped")
-        AgentInbox.get(session_id).parent_id = target.parent_id
+        inbox = AgentInbox.get(session_id)
+        inbox.parent_id, inbox.category = target.parent_id, target.category
         message = AgentMessage(ctx.session_id, ctx.agent, content)
         AgentInbox.post(session_id, message, publisher=ctx.event_publish_callback)
         return ToolResult(success=True, output={"status": "sent", "session_id": session_id, "message_id": message.id})

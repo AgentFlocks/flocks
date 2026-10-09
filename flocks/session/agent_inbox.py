@@ -33,6 +33,9 @@ class AgentMessage:
 @dataclass
 class Inbox:
     parent_id: str | None = None
+    # Session category ("task" for subagents), so a filtered stop can tell
+    # subagents from user-created sessions without loading them.
+    category: str | None = None
     messages: deque[AgentMessage] = field(default_factory=deque)
     ready: asyncio.Event = field(default_factory=asyncio.Event)
     stopped: bool = False
@@ -63,7 +66,7 @@ class AgentInbox:
         if inbox.stopped:
             # Keep ancestry and result delivery while old finalizers finish on
             # the stopped inbox; new messages belong to a fresh generation.
-            inbox = Inbox(parent_id=inbox.parent_id, owner_loop=inbox.owner_loop,
+            inbox = Inbox(parent_id=inbox.parent_id, category=inbox.category, owner_loop=inbox.owner_loop,
                           on_result=inbox.on_result, result_callback_factory=inbox.result_callback_factory)
             cls._inboxes[session_id] = inbox
         return inbox
@@ -290,14 +293,36 @@ class AgentInbox:
             await asyncio.sleep(min(0.01, remaining))
 
     @classmethod
-    def stop(cls, session_id: str) -> None:
+    def child_ids(cls, session_id: str, *, only_category: str | None = None) -> set[str]:
+        """Direct children in the runtime tree, including submitted ones."""
+        children = {sid for sid, box in cls._inboxes.items() if box.parent_id == session_id}
+        children.update(sid for sid, (parent, _) in cls._children.items() if parent == session_id)
+        if only_category is not None:
+            children = {sid for sid in children
+                        if getattr(cls._inboxes.get(sid), "category", None) == only_category}
+        return children
+
+    @classmethod
+    def close(cls, session_id: str) -> None:
+        """Drop pending and late input for an execution that is ending.
+
+        Unlike stop(), this leaves the session's own tasks and children alone:
+        the caller is that execution, and cancelling it again from inside would
+        cut its cleanup short."""
         inbox = cls._inboxes.get(session_id)
-        if inbox and cls.dispatch(inbox, lambda: cls.stop(session_id)):
+        if inbox and cls.dispatch(inbox, lambda: cls.close(session_id)):
             return
         if inbox:
             inbox.stopped = True
             inbox.messages.clear()
             inbox.ready.set()
+
+    @classmethod
+    def stop(cls, session_id: str, *, only_category: str | None = None) -> None:
+        inbox = cls._inboxes.get(session_id)
+        if inbox and cls.dispatch(inbox, lambda: cls.stop(session_id, only_category=only_category)):
+            return
+        cls.close(session_id)
         wake = cls._wakes.get(session_id)
         if wake and wake is not asyncio.current_task() and wake not in cls._finalizers:
             wake.cancel()
@@ -305,10 +330,10 @@ class AgentInbox:
         if own_job and own_job[1] is not asyncio.current_task() and own_job[1] not in cls._finalizers:
             own_job[1].cancel()
         from flocks.session.session_loop import SessionLoop
-        children = {sid for sid, box in cls._inboxes.items() if box.parent_id == session_id}
-        children.update(sid for sid, (parent, _) in cls._children.items() if parent == session_id)
-        for child_id in children:
-            SessionLoop.abort(child_id)
+        # A filtered stop stays inside its category all the way down: a child
+        # of another category keeps running, and so does everything under it.
+        for child_id in cls.child_ids(session_id, only_category=only_category):
+            SessionLoop.abort(child_id, only_category=only_category)
 
 
 async def authorize_message(source_id: str, target_id: str) -> Session:

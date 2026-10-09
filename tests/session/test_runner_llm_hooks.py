@@ -840,3 +840,94 @@ async def test_model_timing_closes_on_every_stream_exit(monkeypatch, outcome):
     assert len(saved) == 2  # No per-token writes.
     assert saved[-1]["time"]["end"] == 11000
     assert saved[-1]["id"] == saved[0]["id"]
+
+
+@pytest.mark.parametrize("outcome", ["success", "error", "cancel"])
+async def test_llm_budget_slot_is_released_on_every_stream_exit(monkeypatch, outcome):
+    from flocks.provider.llm_budget import loop_budget_snapshot, set_loop_budget
+
+    runner = _make_runner("ses_llm_budget")
+    monkeypatch.setattr(runner_mod, "StreamProcessor", _FakeProcessor)
+    monkeypatch.setattr(runner_mod.Message, "store_part", AsyncMock())
+    monkeypatch.setattr(runner_mod.Message, "update", AsyncMock())
+    monkeypatch.setattr(runner_mod.HookPipeline, "has_stage_handlers", AsyncMock(return_value=False))
+    in_flight_during_stream = []
+
+    class Provider:
+        async def chat_stream(self, **_kwargs):
+            in_flight_during_stream.append(loop_budget_snapshot()["in_flight"])
+            yield SimpleNamespace(delta="a", reasoning=None, tool_calls=None)
+            if outcome == "error":
+                raise RuntimeError("provider failed")
+            if outcome == "cancel":
+                raise asyncio.CancelledError()
+
+    loop = asyncio.get_running_loop()
+    set_loop_budget(loop, 1)  # as on the workflow loop
+    try:
+        call = runner._call_llm(
+            provider=Provider(), messages=[ChatMessage(role="user", content="test")],
+            tools=[], agent=SimpleNamespace(name="rex"), assistant_msg=SimpleNamespace(id="msg_budget"),
+        )
+        if outcome == "success":
+            await call
+        else:
+            with pytest.raises(RuntimeError if outcome == "error" else asyncio.CancelledError):
+                await call
+        assert in_flight_during_stream == [1]
+        assert loop_budget_snapshot(loop) == {"limit": 1, "in_flight": 0, "waiting": 0}
+    finally:
+        set_loop_budget(loop, 0)
+
+
+async def test_cancel_while_queued_for_provider_slot_returns_loop_budget(monkeypatch):
+    """The loop budget is already held while queueing for the provider slot.
+
+    A cancel landing there must hand it back: the try/finally around the
+    stream has not started yet, so nothing else would.
+    """
+    from flocks.provider import concurrency
+    from flocks.provider.llm_budget import loop_budget_snapshot, set_loop_budget
+
+    concurrency.reset_limiters_for_testing()
+    monkeypatch.setenv("FLOCKS_LLM_MAX_CONCURRENT_REQUESTS", "1")
+    runner = _make_runner("ses_llm_budget_provider_queue")
+    monkeypatch.setattr(runner_mod, "StreamProcessor", _FakeProcessor)
+    monkeypatch.setattr(runner_mod.Message, "store_part", AsyncMock())
+    monkeypatch.setattr(runner_mod.Message, "update", AsyncMock())
+    monkeypatch.setattr(runner_mod.HookPipeline, "has_stage_handlers", AsyncMock(return_value=False))
+    streamed = []
+
+    class Provider:
+        async def chat_stream(self, **_kwargs):
+            streamed.append(True)
+            yield SimpleNamespace(delta="a", reasoning=None, tool_calls=None)
+
+    loop = asyncio.get_running_loop()
+    set_loop_budget(loop, 1)
+    limiter = concurrency.get_provider_limiter(runner.provider_id, limit=1)
+    outside_holder = await limiter.acquire()
+    try:
+        call = asyncio.create_task(runner._call_llm(
+            provider=Provider(), messages=[ChatMessage(role="user", content="test")],
+            tools=[], agent=SimpleNamespace(name="rex"), assistant_msg=SimpleNamespace(id="msg_queued"),
+        ))
+        for _ in range(200):
+            if limiter.snapshot()["waiting"] == 1:
+                break
+            await asyncio.sleep(0.005)
+        assert limiter.snapshot()["waiting"] == 1
+        assert loop_budget_snapshot(loop)["in_flight"] == 1
+
+        call.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await call
+
+        assert streamed == []
+        assert loop_budget_snapshot(loop) == {"limit": 1, "in_flight": 0, "waiting": 0}
+        assert limiter.snapshot()["waiting"] == 0
+        assert limiter.snapshot()["active"] == 1  # only the outside holder
+    finally:
+        outside_holder.release()
+        set_loop_budget(loop, 0)
+        concurrency.reset_limiters_for_testing()

@@ -7,6 +7,7 @@ import time
 from typing import Any, Callable, Dict, Optional
 
 from flocks.config.config import Config
+from flocks.provider.llm_budget import llm_slot
 from flocks.provider.concurrency import (
     PRIORITY_BACKGROUND,
     acquire_llm_slot,
@@ -559,11 +560,18 @@ class LLMClient:
                     slot.release()
 
             async def _call():
-                # ``timeout_s`` bounds queueing for a slot plus the call itself,
-                # so a saturated provider cannot stretch a 30 s budget to minutes.
-                if timeout_s is not None and float(timeout_s) > 0:
-                    return await asyncio.wait_for(_acquire_and_chat(), timeout=float(timeout_s))
-                return await _acquire_and_chat()
+                # One slot of the workflow loop's LLM budget for the whole
+                # request (see flocks.provider.llm_budget). Waiting for it is
+                # queueing behind other workflow calls, not the model being
+                # slow, so ``timeout_s`` starts once it is held (the cancel
+                # checker keeps being polled while queued). From there
+                # ``timeout_s`` bounds queueing for a provider slot plus the
+                # call itself, so a saturated provider cannot stretch a 30 s
+                # budget to minutes.
+                async with llm_slot():
+                    if timeout_s is not None and float(timeout_s) > 0:
+                        return await asyncio.wait_for(_acquire_and_chat(), timeout=float(timeout_s))
+                    return await _acquire_and_chat()
 
             last_exc: Optional[Exception] = None
             for attempt in range(retry_count + 1):

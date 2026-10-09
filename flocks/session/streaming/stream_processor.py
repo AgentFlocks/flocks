@@ -159,6 +159,11 @@ class StreamProcessor:
         self.tool_end_callback = tool_end_callback
         self.event_publish_callback = event_publish_callback
         self.model_activity = model_activity or ModelActivity(session_id, assistant_message.id, event_publish_callback)
+        # Agent inbox generation of the execution this step belongs to, taken
+        # while it is live: a delegation still in the tool pipeline when that
+        # execution is cancelled checks it and does not bind the next one.
+        from flocks.session.agent_inbox import AgentInbox
+        self._agent_inbox = AgentInbox._inboxes.get(session_id)
         self._config_data = config_data
         self._session_key = session_key or session_id
         self._main_session_key = main_session_key or session_id
@@ -948,6 +953,7 @@ class StreamProcessor:
                     **sandbox_meta["extra"],
                     "agent_execution_session": True,
                     "tool_finished": tool_finished,
+                    "agent_inbox": self._agent_inbox,
                     "execution_mode": self._execution_mode,
                     "workspace_dir": self._workspace_dir,
                     "model": {

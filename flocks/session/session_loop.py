@@ -100,6 +100,8 @@ class LoopContext:
     trace_step_offset: int = 0
     # Track current step asyncio.Task so abort() can cancel it immediately
     _current_step_task: Optional[asyncio.Task] = field(default=None, repr=False)
+    # This execution's agent inbox generation (bound when the loop starts)
+    inbox: Optional[Any] = field(default=None, repr=False)
     # Memory bootstrap data loaded once on step 1; passed to each SessionRunner
     memory_bootstrap_data: Optional[Dict[str, Any]] = field(default=None, repr=False)
     # Reusable runner artifacts that stay stable across steps in the same loop.
@@ -448,34 +450,86 @@ class SessionLoop:
         return cls._active_loops.get(session_id)
     
     @classmethod
-    def abort(cls, session_id: str) -> bool:
-        """Abort running loop"""
+    def abort(cls, session_id: str, *, only_category: Optional[str] = None) -> bool:
+        """Abort running loop; ``only_category`` filters the descendants it stops."""
         from flocks.session.agent_inbox import AgentInbox
         ctx = cls._active_loops.get(session_id)
         inbox = AgentInbox._inboxes.get(session_id)
-        if inbox and AgentInbox.dispatch(inbox, lambda: cls.abort(session_id)):
+        if inbox and AgentInbox.dispatch(inbox, lambda: cls.abort(session_id, only_category=only_category)):
             return ctx is not None
-        AgentInbox.stop(session_id)
+        AgentInbox.stop(session_id, only_category=only_category)
         if ctx:
             ctx.signal_abort()
             return True
         return False
     
     @classmethod
-    def abort_children(cls, parent_session_id: str) -> int:
-        """Abort all child loops whose session.parent_id matches, recursively."""
+    def abort_children(cls, parent_session_id: str, *, only_category: Optional[str] = None) -> int:
+        """Abort all child loops whose session.parent_id matches, recursively.
+
+        ``only_category`` restricts the abort to children of that session
+        category, so a caller can stop the subagent sessions it spawned
+        (``category="task"``) without touching sessions the user created from
+        the same parent (WebUI "new from parent", ``category="user"``).
+        The filter holds all the way down, including the agent inbox tree: a
+        user session's own subagents are its children, not this parent's. A
+        filtered call also reaches children with no loop running right now
+        (submitted but not started yet, or idle while their own children
+        still run), which only the inbox tree knows about.
+        """
         aborted = 0
         child_ids = [
             sid for sid, ctx in list(cls._active_loops.items())
             if getattr(ctx.session, 'parent_id', None) == parent_session_id
+            and (
+                only_category is None
+                or getattr(ctx.session, 'category', 'user') == only_category
+            )
         ]
         for sid in child_ids:
             ctx = cls._active_loops.get(sid)
             if ctx and not ctx.should_abort():
-                cls.abort(sid)
+                cls.abort(sid, only_category=only_category)
                 aborted += 1
-            aborted += cls.abort_children(sid)
+            aborted += cls.abort_children(sid, only_category=only_category)
+        if only_category is not None:
+            from flocks.session.agent_inbox import AgentInbox
+            for sid in AgentInbox.child_ids(parent_session_id, only_category=only_category) - set(child_ids):
+                cls.abort(sid, only_category=only_category)
         return aborted
+
+    @classmethod
+    def end_cancelled_execution(cls, session_id: str) -> None:
+        """Stop what a cancelled, not aborted, execution left running.
+
+        Subagents report back through the session's agent inbox. A user abort
+        has already stopped them and closed it (abort()). Cancellation by
+        whoever awaits this loop (a workflow node timeout cancelling the
+        delegate_task future, a background-task watchdog, session lifecycle)
+        has not. Close the inbox, so a stopped child's late "Sub-agent
+        stopped" report cannot wake this session again, then stop its
+        subagents. Only category "task": a session the user created from this
+        one (WebUI "new from parent") is a child by parent_id too but keeps
+        running. Delegations still in flight see the closed inbox and do not
+        start their child (delegate_task checks before submitting).
+        """
+        from flocks.session.agent_inbox import AgentInbox
+        AgentInbox.close(session_id)
+        cls.abort_children(session_id, only_category="task")
+
+    @classmethod
+    def _end_cancelled_loop(cls, ctx: LoopContext) -> None:
+        """end_cancelled_execution() for a cancel the runner did not handle.
+
+        The runner does it before draining tool calls when the cancel lands in
+        the model stream; this covers every other await of the step and the
+        loop between steps. Skipped after a user abort, which stopped all of
+        it already, and once done for this execution: input that reached a
+        new inbox generation since then belongs to the next execution.
+        """
+        if ctx.should_abort() or (ctx.inbox is not None and ctx.inbox.stopped):
+            return
+        cls.end_cancelled_execution(ctx.session.id)
 
     @classmethod
     async def _publish_runtime_event(
@@ -841,7 +895,9 @@ class SessionLoop:
             cls._active_loops[session_id] = ctx
             from flocks.session.agent_inbox import AgentInbox
             inbox = AgentInbox.bind(session_id)
+            ctx.inbox = inbox
             inbox.parent_id = session.parent_id
+            inbox.category = getattr(session, "category", None)
             inbox.auto_failover_allowed = ctx.auto_failover_allowed
             if callbacks and callbacks.on_background_result:
                 inbox.on_result = callbacks.on_background_result
@@ -867,8 +923,15 @@ class SessionLoop:
             from flocks.session.agent_inbox import AgentInbox
             while True:
                 result = await cls._run_loop(ctx, callbacks or LoopCallbacks())
-                if ctx.should_abort() or result.error or not AgentInbox.get(session_id).messages:
+                # A cancelled execution ends here (its inbox is closed); input
+                # sent since then is left to the next one, woken in finally.
+                if (ctx.should_abort() or result.error or (ctx.inbox is not None and ctx.inbox.stopped)
+                        or not AgentInbox.get(session_id).messages):
                     return result
+        except asyncio.CancelledError:
+            # Cancelled between steps (a cancelled step is handled in _run_loop).
+            cls._end_cancelled_loop(ctx)
+            raise
         except Exception as e:
             log.error("loop.error", {"session_id": session_id, "error": str(e)})
             # Report error to callbacks so CLI/TUI can display it
@@ -2264,6 +2327,7 @@ class SessionLoop:
                 step_result = await step_task
             except asyncio.CancelledError:
                 log.info("loop.step_cancelled", {"session_id": ctx.session.id, "step": ctx.step})
+                cls._end_cancelled_loop(ctx)
                 break
             finally:
                 ctx._current_step_task = None

@@ -85,6 +85,7 @@ from flocks.session.callable_schema import list_session_callable_tool_infos
 from flocks.agent.registry import Agent
 from flocks.agent.agent import AgentInfo
 from flocks.agent.toolset import agent_declares_tool
+from flocks.provider.llm_budget import llm_slot
 from flocks.provider import output_limits
 from flocks.provider.provider import Provider, ChatMessage
 from flocks.provider.reasoning_replay import prepare_reasoning_for_replay
@@ -4046,7 +4047,6 @@ class SessionRunner:
                 log.debug("runner.observability.init_failed", {"error": str(exc)})
                 trace_ctx = None
                 generation_ctx = None
-        llm_call_started_at = time.perf_counter()
         first_chunk_logged = False
         accounted_usage = {}
         aborted_during_stream = False
@@ -4059,11 +4059,37 @@ class SessionRunner:
             "local_endpoint": stream_timeouts.is_local,
         })
         llm_priority = await self._resolve_llm_priority()
+        # One slot of this loop's LLM budget for the whole response (no-op on
+        # the server loop; capped on the workflow loop, see
+        # flocks.provider.llm_budget). Taken before the first-chunk timeout
+        # clock starts so queueing behind other workflow calls is not mistaken
+        # for an unresponsive model; released in the finally below.
+        #
+        # Invariant while the slot is held: do not await anything that needs a
+        # slot of its own, or the workflow loop can deadlock itself at a small
+        # max_concurrency (parent holds, awaits child, child waits for a slot).
+        # Today that holds because no tool call made during the stream waits
+        # for a subagent: delegate_task / task (subagent_type is required) go
+        # through StreamProcessor._start_parallel_tool_call's create_task and,
+        # inside a session, return as soon as the child is submitted; sleep is
+        # deferred to the drain below, and the drains run after the release.
+        # Keep it that way when adding tools that call the model themselves.
+        llm_budget_slot = llm_slot()
+        await llm_budget_slot.acquire()
+        # Then the provider's request slot (flocks.provider.concurrency), in
+        # this order: waiting for the loop budget never holds a provider slot
+        # that sessions on other loops are queueing for.
         slot_wait_started = time.perf_counter()
-        self._active_llm_slot = await acquire_llm_slot(
-            self.provider_id,
-            priority=llm_priority,
-        )
+        try:
+            self._active_llm_slot = await acquire_llm_slot(
+                self.provider_id,
+                priority=llm_priority,
+            )
+        except BaseException:
+            # Cancelled or failed while queued: the try/finally below has not
+            # started, so hand the loop budget back here.
+            llm_budget_slot.release()
+            raise
         slot_waited_s = time.perf_counter() - slot_wait_started
         if slot_waited_s >= 0.5:
             log.info("runner.llm_slot.waited", {
@@ -4253,6 +4279,21 @@ class SessionRunner:
                     for tc in chunk_tool_calls:
                         await tool_accumulator.feed_chunk(tc)
         except asyncio.CancelledError:
+            # The stream is over: give the LLM slot back before waiting on
+            # foreground children, which run on this same loop and need slots
+            # of their own (holding it here could deadlock the whole budget).
+            llm_budget_slot.release()
+            # Not a user abort (that has stopped them already): a workflow
+            # node timeout or a watchdog gave up on this execution. Stop the
+            # subagents it started now, not after the drain below, which can
+            # sit on a tool call waiting for a permission reply. SessionLoop
+            # does the same for cancels landing anywhere else in the step.
+            # Synchronous like the release, so a second cancel landing in the
+            # awaits below cannot skip either.
+            if not self.is_aborted:
+                from flocks.session.session_loop import SessionLoop
+
+                SessionLoop.end_cancelled_execution(self.session.id)
             await model_activity.stop()
             self._release_llm_slot("cancelled")
             # Foreground delegate tasks own child sessions. Let their
@@ -4267,6 +4308,7 @@ class SessionRunner:
             # refines the duration with the jittered delay; the limiter keeps
             # the longer of the two.
             self._report_rate_limit_cooldown_for_exception(exc)
+            llm_budget_slot.release()
             await model_activity.stop()
             self._release_llm_slot("stream_error")
             # A foreground delegate may already be running when the provider
@@ -4320,8 +4362,9 @@ class SessionRunner:
             # Free the provider slot first (synchronous, instant) so a queued
             # caller can start while the activity marker is persisted.
             self._release_llm_slot("stream_finished")
+            llm_budget_slot.release()
             await model_activity.stop()
-        
+
         log.debug("runner.stream.summary", {
             "total_chunks": chunk_counts["total"],
             "reasoning_chunks": chunk_counts["reasoning"],
