@@ -1037,7 +1037,7 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
     return map;
   }, [openTabs]);
   const navItemPath = useCallback(
-    (href: string) => openTabPathByHref.get(href) ?? href,
+    (href: string) => href === '/workspace' ? '/workspace?tab=files' : openTabPathByHref.get(href) ?? href,
     [openTabPathByHref],
   );
 

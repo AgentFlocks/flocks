@@ -81,6 +81,15 @@ export function useToast() {
   return context;
 }
 
+const silentToast = {
+  success() {},
+  error() {},
+};
+
+export function useOptionalToast() {
+  return useContext(ToastContext) ?? silentToast;
+}
+
 // Toast 配置
 const toastConfig: Record<ToastType, { icon: typeof CheckCircle; className: string }> = {
   success: {

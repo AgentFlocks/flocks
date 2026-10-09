@@ -74,6 +74,12 @@ export default defineConfig({
     },
   },
   server: {
+    fs: {
+      allow: [
+        root,
+        path.resolve(root, '../flocks/knowledgebase'),
+      ],
+    },
     port: 5173,
     host: '127.0.0.1',
     ...(allowedHosts ? { allowedHosts } : {}),
