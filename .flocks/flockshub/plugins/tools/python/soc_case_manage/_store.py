@@ -764,9 +764,12 @@ class CaseStore:
                 raise CaseError("forbidden", "Only an administrator can attach a global alert snapshot", 403)
             if not db.table_exists("alert_records"):
                 raise CaseError("alert_not_found", "Alert source is unavailable", 404)
-            columns = db.columns("alert_records")
-            where = "row_id=?" + (" OR record_id=?" if "record_id" in columns else "")
-            rows = db.execute("SELECT row_id,octet_length(record_json::text) AS bytes,CASE WHEN octet_length(record_json::text)<=32768 THEN record_json::text ELSE NULL END AS snapshot FROM alert_records WHERE " + where + " ORDER BY row_id LIMIT 2", (alert_id, alert_id) if "record_id" in columns else (alert_id,)).fetchall()
+            select = "SELECT row_id,octet_length(record_json::text) AS bytes,CASE WHEN octet_length(record_json::text)<=32768 THEN record_json::text ELSE NULL END AS snapshot FROM alert_records WHERE "
+            # row_id is the primary key; record_id has no index, so an OR of the
+            # two scans every alert. Fall back to record_id only when no row matches.
+            rows = db.execute(select + "row_id=?", (alert_id,)).fetchall()
+            if not rows and "record_id" in db.columns("alert_records"):
+                rows = db.execute(select + "record_id=? ORDER BY row_id LIMIT 2", (alert_id,)).fetchall()
             if not rows:
                 raise CaseError("alert_not_found", "Alert not found", 404)
             if len(rows) > 1:

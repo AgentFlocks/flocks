@@ -196,3 +196,30 @@ async def test_a_case_opened_from_an_alert_stores_the_snapshot_without_credentia
     assert "Host: portal.test" in evidence["content"] and "brute force" in evidence["content"]
     for secret in ("abc123", "xyz789"):
         assert secret not in evidence["content"]
+
+
+@pytest.mark.skipif(not os.getenv("FLOCKS_TEST_PG_DSN"), reason="Requires isolated PostgreSQL")
+async def test_an_alert_row_id_is_matched_before_any_record_id(tool) -> None:
+    from flocks.db.connect import open_transaction
+
+    handle = await open_transaction()
+    try:
+        await handle.executescript("CREATE TABLE alert_records (row_id TEXT PRIMARY KEY, record_id TEXT, record_json JSONB)")
+        for row_id, record_id in (("row-1", "row-2"), ("row-2", "shared"), ("row-3", "shared"), ("row-4", "only-4")):
+            await handle.execute("INSERT INTO alert_records(row_id, record_id, record_json) VALUES (?, ?, ?::jsonb)",
+                                 (row_id, record_id, json.dumps({"threat_name": "alert " + row_id})))
+    finally:
+        await handle.close()
+    store = tool.CaseStore()
+    admin = tool.Actor(user_id="admin", kind="human", is_admin=True)
+
+    def open_case(alert_id):
+        return store.dispatch("create", admin, idempotency_key="create-" + alert_id,
+                              data={"title": "Alert " + alert_id, "alert_id": alert_id})
+
+    # row-1's record_id is also "row-2": the primary key decides, without a table scan.
+    assert (await asyncio.to_thread(open_case, "row-2"))["case"]["source_alert_id"] == "row-2"
+    assert (await asyncio.to_thread(open_case, "only-4"))["case"]["source_alert_id"] == "row-4"
+    with pytest.raises(tool.CaseError) as ambiguous:
+        await asyncio.to_thread(open_case, "shared")
+    assert ambiguous.value.code == "ambiguous_alert"

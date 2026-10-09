@@ -5,7 +5,7 @@
   "name": "Flocks SOC Case Management",
   "description": "Persistent SOC investigation, immutable evidence, human-approved device response and verified incident retrospectives through the Flocks tool lifecycle.",
   "descriptionCn": "SOC 事件调查、证据、人工审批处置与效果核验、复盘改进；设备操作遵循 Flocks 原工具执行与策略链。",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "author": "Flocks Team",
   "license": "MIT",
   "homepage": "",
