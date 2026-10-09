@@ -313,6 +313,95 @@ describe('WorkflowPage', () => {
     );
   });
 
+  it('只保留左侧业务分组一个筛选入口，分区计数跟随所选分组', () => {
+    mockUseWorkflows.mockReturnValue({
+      workflows: [
+        makeWorkflow({ id: 'custom-a', name: 'Custom A', source: 'global' }),
+        makeWorkflow({ id: 'custom-b', name: 'Custom B', source: 'global' }),
+        makeWorkflow({ id: 'custom-c', name: 'Custom C', source: 'global', group: '安全研判' }),
+        makeWorkflow({ id: 'builtin-a', name: 'Builtin A', source: 'project', group: '安全研判', group_readonly: true }),
+        makeWorkflow({ id: 'builtin-b', name: 'Builtin B', source: 'project', group: '安全研判', group_readonly: true }),
+      ],
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+    const sectionCount = (name: string) =>
+      within(screen.getByRole('region', { name })).getByRole('heading', { name }).nextElementSibling?.textContent;
+
+    render(<WorkflowPage />);
+
+    expect(screen.queryByRole('tablist')).not.toBeInTheDocument();
+    expect(sectionCount('自定义工作流')).toBe('3');
+    expect(sectionCount('内置工作流')).toBe('2');
+
+    fireEvent.click(screen.getByTitle('ungrouped'));
+    expect(sectionCount('自定义工作流')).toBe('2');
+    expect(screen.queryByRole('region', { name: '内置工作流' })).not.toBeInTheDocument();
+    expect(screen.queryByText('emptyState.title')).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByTitle('安全研判'));
+    expect(sectionCount('自定义工作流')).toBe('1');
+    expect(within(screen.getByRole('region', { name: '自定义工作流' })).getByText('Custom C')).toBeInTheDocument();
+    expect(sectionCount('内置工作流')).toBe('2');
+    expect(within(screen.getByRole('region', { name: '内置工作流' })).getByText('Builtin A')).toBeInTheDocument();
+  });
+
+  it('从第 3 页切到只有 2 页的分组时回到第 1 页', () => {
+    mockUseWorkflows.mockReturnValue({
+      workflows: Array.from({ length: 26 }, (_, index) =>
+        makeWorkflow({ id: `wf-${index}`, name: `Workflow ${index}`, source: 'global', group: index < 14 ? 'Ops' : null })),
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    render(<WorkflowPage />);
+    const custom = screen.getByRole('region', { name: '自定义工作流' });
+    fireEvent.click(within(custom).getByRole('button', { name: '3' }));
+    expect(within(custom).getByText('25–26 / 26')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByTitle('Ops'));
+    const opsCustom = screen.getByRole('region', { name: '自定义工作流' });
+    expect(within(opsCustom).getByText(/ \/ 14$/)).toHaveTextContent('1–12 / 14');
+  });
+
+  it('所选分组下没有工作流时只显示一条空提示', () => {
+    mockUseWorkflows.mockReturnValue({
+      workflows: [makeWorkflow({ id: 'builtin-a', name: 'Builtin A', source: 'project', group: '安全研判', group_readonly: true })],
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    render(<WorkflowPage />);
+    fireEvent.click(screen.getByTitle('ungrouped'));
+
+    expect(screen.queryByRole('region')).not.toBeInTheDocument();
+    expect(screen.getAllByText('emptyState.title')).toHaveLength(1);
+  });
+
+  it('卡片列数跟随分区宽度，长名称换行显示而不是截成一个字', () => {
+    const longName = '多源威胁情报关联分析与自动化处置编排工作流';
+    mockUseWorkflows.mockReturnValue({
+      workflows: [makeWorkflow({ id: 'wf-long', name: longName, source: 'global' })],
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    render(<WorkflowPage />);
+
+    const title = screen.getByText(longName);
+    const grid = title.closest('div.group')!.parentElement!.parentElement!;
+    expect(grid.className).toContain('grid-cols-[repeat(auto-fill,minmax(min(20rem,100%),1fr))]');
+    expect(grid.className).not.toMatch(/\b(sm|md|lg|xl):grid-cols-/);
+    expect(title).toHaveAttribute('title', longName);
+    expect(title).toHaveClass('line-clamp-2', 'break-words');
+    expect(title).not.toHaveClass('truncate');
+    expect(screen.getByText('badge.custom')).toHaveClass('whitespace-nowrap');
+  });
+
   it('没有自定义工作流时不渲染空分组', () => {
     mockUseWorkflows.mockReturnValue({
       workflows: [makeWorkflow({ id: 'wf-project-only', name: 'Project Only', source: 'project' })],

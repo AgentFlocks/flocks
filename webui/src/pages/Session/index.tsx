@@ -10,6 +10,7 @@ import {
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { useLocation, useNavigate, useSearchParams, useParams } from 'react-router-dom';
+import SessionActionsMenu from './SessionActionsMenu';
 import SessionComposerMenu, { SessionComposerMenuHeader, SessionModeOption } from './SessionComposerMenu';
 import { sessionPath } from '@/utils/sessionUrl';
 import { PaneActiveContext } from '@/components/layout/PaneActiveContext';
@@ -867,7 +868,7 @@ export default function SessionPage() {
   const [projectSubmitting, setProjectSubmitting] = useState(false);
   const [batchArchiving, setBatchArchiving] = useState(false);
   const [openMenuSessionId, setOpenMenuSessionId] = useState<string | null>(null);
-  const [menuAnchor, setMenuAnchor] = useState<{ top: number; right: number } | null>(null);
+  const [menuAnchor, setMenuAnchor] = useState<HTMLElement | null>(null);
   const [movePickerSessionId, setMovePickerSessionId] = useState<string | null>(null);
   const [movingSessionId, setMovingSessionId] = useState<string | null>(null);
   const [movingTargetProjectId, setMovingTargetProjectId] = useState<string | null>(null);
@@ -2766,8 +2767,7 @@ export default function SessionPage() {
         setMenuAnchor(null);
         return null;
       }
-      const rect = trigger.getBoundingClientRect();
-      setMenuAnchor({ top: rect.bottom + 4, right: window.innerWidth - rect.right });
+      setMenuAnchor(trigger);
       return sessionId;
     });
   }, []);
@@ -2891,14 +2891,7 @@ export default function SessionPage() {
           <button
             onClick={(e) => {
               e.stopPropagation();
-              if (openMenuSessionId === session.id) {
-                setOpenMenuSessionId(null);
-                setMenuAnchor(null);
-              } else {
-                const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
-                setMenuAnchor({ top: rect.bottom + 4, right: window.innerWidth - rect.right });
-                setOpenMenuSessionId(session.id);
-              }
+              handleToggleSessionMenu(session.id, e.currentTarget);
             }}
             title={t('moreActions')}
             aria-label={t('moreActions')}
@@ -4386,7 +4379,7 @@ export default function SessionPage() {
         />
       )}
 
-      {/* Three-dot dropdown — rendered outside sidebar to avoid overflow:hidden clipping */}
+      {/* Three-dot dropdown — positioned in the viewport outside the sidebar. */}
       {openMenuSessionId && menuAnchor && (() => {
         const sid = openMenuSessionId;
         const session = sessions.find(s => s.id === sid);
@@ -4399,26 +4392,8 @@ export default function SessionPage() {
           && project.pathStatus !== 'missing'
           && project.pathStatus !== 'unreadable'
         ));
-        const movePickerHeight = Math.min(
-          272,
-          48 + Math.max(44, moveTargetProjects.length * 34),
-        );
-        const menuTop = showMovePicker
-          ? Math.max(8, Math.min(menuAnchor.top, window.innerHeight - movePickerHeight - 8))
-          : menuAnchor.top;
         return (
-          <div
-            className={`fixed z-50 grid gap-0.5 overflow-hidden rounded-[10px] border border-black/[0.11] bg-[#fdfdfc] p-1 shadow-[0_8px_24px_rgba(22,27,34,0.10)] dark:border-white/[0.10] dark:bg-[#303842] dark:shadow-[0_12px_32px_rgba(15,18,22,0.35)] ${
-              showMovePicker ? 'w-[220px]' : 'w-[132px]'
-            }`}
-            style={{
-              top: menuTop,
-              right: menuAnchor.right,
-              maxHeight: showMovePicker ? 'calc(100vh - 16px)' : undefined,
-            }}
-            data-session-menu-portal
-            onClick={(e) => e.stopPropagation()}
-          >
+          <SessionActionsMenu anchor={menuAnchor} width={showMovePicker ? 220 : 132}>
             {showMovePicker ? (
               <>
                 <div className="flex h-8 items-center gap-1 border-b border-black/[0.07] px-1 pb-1 dark:border-white/[0.08]">
@@ -4509,7 +4484,7 @@ export default function SessionPage() {
             </button>
               </>
             )}
-          </div>
+          </SessionActionsMenu>
         );
       })()}
     </div>
