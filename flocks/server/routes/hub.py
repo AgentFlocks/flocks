@@ -312,7 +312,8 @@ async def _publish_scene_suites_changed(plugin_type: PluginType, plugin_id: str,
         suite_ids = [plugin_id] if plugin_type == "component" else []
         if plugin_type != "component":
             # Updating a child also changes its suite's update/completeness
-            # state. Refresh other open scene views without a manual reload.
+            # state. Refresh the acting user's other open scene views
+            # without a manual reload.
             entries = await asyncio.to_thread(list_catalog, plugin_type="component")
             for entry in entries:
                 refs = load_manifest("component", entry.id).components

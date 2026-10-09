@@ -4,10 +4,14 @@ from unittest.mock import AsyncMock
 import pytest
 from starlette.requests import Request
 
-from flocks.auth.context import AuthUser
+from flocks.auth.context import AuthUser, reset_current_auth_user, set_current_auth_user
 from flocks.server.routes import event as event_routes
 from flocks.server.routes.event import EventBroadcaster
 from flocks.session.session import SessionInfo
+
+_ADMIN = AuthUser(id="user-admin", username="admin", role="admin")
+_ALICE = AuthUser(id="user-alice", username="alice", role="member")
+_BOB = AuthUser(id="user-bob", username="bob", role="member")
 
 
 def _snapshot(text: str, delta: str, part_type: str = "text") -> dict:
@@ -29,7 +33,7 @@ def _snapshot(text: str, delta: str, part_type: str = "text") -> dict:
 @pytest.mark.asyncio
 async def test_event_broadcaster_compacts_overflowing_client_queue():
     broadcaster = EventBroadcaster(queue_maxsize=3, queue_drop_to=1)
-    queue = await broadcaster.subscribe()
+    queue = await broadcaster.subscribe(_ADMIN)
 
     for index in range(5):
         await broadcaster.publish({
@@ -53,7 +57,7 @@ async def test_event_broadcaster_compacts_overflowing_client_queue():
 @pytest.mark.asyncio
 async def test_event_broadcaster_shutdown_does_not_block_on_full_queue():
     broadcaster = EventBroadcaster(queue_maxsize=2, queue_drop_to=0)
-    queue = await broadcaster.subscribe()
+    queue = await broadcaster.subscribe(_ADMIN)
 
     await broadcaster.publish({"type": "event.one", "properties": {}})
     await broadcaster.publish({"type": "event.two", "properties": {}})
@@ -70,7 +74,7 @@ async def test_event_broadcaster_shutdown_does_not_block_on_full_queue():
 @pytest.mark.asyncio
 async def test_event_broadcaster_keeps_latest_event_when_drop_target_is_max_minus_one():
     broadcaster = EventBroadcaster(queue_maxsize=3, queue_drop_to=2)
-    queue = await broadcaster.subscribe()
+    queue = await broadcaster.subscribe(_ADMIN)
 
     for event_type in ("event.one", "event.two", "event.three", "event.latest"):
         await broadcaster.publish({"type": event_type, "properties": {}})
@@ -86,7 +90,7 @@ async def test_event_broadcaster_keeps_latest_event_when_drop_target_is_max_minu
 @pytest.mark.asyncio
 async def test_event_broadcaster_preserves_low_backlog_snapshot_cadence():
     broadcaster = EventBroadcaster(queue_maxsize=10, queue_coalesce_at=3)
-    queue = await broadcaster.subscribe()
+    queue = await broadcaster.subscribe(_ADMIN)
     first = _snapshot("hello", "hello")
     latest = _snapshot("hello world", " world")
 
@@ -102,7 +106,7 @@ async def test_event_broadcaster_preserves_low_backlog_snapshot_cadence():
 @pytest.mark.asyncio
 async def test_event_broadcaster_coalesces_adjacent_snapshots_at_high_water(part_type: str):
     broadcaster = EventBroadcaster(queue_maxsize=10, queue_coalesce_at=3)
-    queue = await broadcaster.subscribe()
+    queue = await broadcaster.subscribe(_ADMIN)
     snapshots = [
         _snapshot("h", "h", part_type),
         _snapshot("he", "e", part_type),
@@ -124,7 +128,7 @@ async def test_event_broadcaster_coalesces_adjacent_snapshots_at_high_water(part
 @pytest.mark.asyncio
 async def test_event_broadcaster_does_not_coalesce_across_control_events():
     broadcaster = EventBroadcaster(queue_maxsize=10, queue_coalesce_at=2)
-    queue = await broadcaster.subscribe()
+    queue = await broadcaster.subscribe(_ADMIN)
     first = _snapshot("hello", "hello")
     control = {"type": "question.asked", "properties": {"requestID": "question-1"}}
     latest = _snapshot("hello world", " world")
@@ -142,7 +146,7 @@ async def test_event_broadcaster_does_not_coalesce_across_control_events():
 @pytest.mark.asyncio
 async def test_message_finish_is_an_ordering_barrier_at_high_water():
     broadcaster = EventBroadcaster(queue_maxsize=10, queue_coalesce_at=2)
-    queue = await broadcaster.subscribe()
+    queue = await broadcaster.subscribe(_ADMIN)
     first = _snapshot("hello", "hello")
     finish = {
         "type": "message.updated",
@@ -169,7 +173,7 @@ async def test_message_finish_is_an_ordering_barrier_at_high_water():
 @pytest.mark.asyncio
 async def test_high_backlog_snapshot_memory_remains_bounded():
     broadcaster = EventBroadcaster(queue_maxsize=1000, queue_coalesce_at=4)
-    queue = await broadcaster.subscribe()
+    queue = await broadcaster.subscribe(_ADMIN)
     text = ""
 
     for _ in range(1000):
@@ -187,7 +191,7 @@ async def test_high_backlog_snapshot_memory_remains_bounded():
 @pytest.mark.asyncio
 async def test_text_snapshot_does_not_evict_control_events():
     broadcaster = EventBroadcaster(queue_maxsize=3, queue_drop_to=1)
-    queue = await broadcaster.subscribe()
+    queue = await broadcaster.subscribe(_ADMIN)
     controls = [
         {"type": "permission.request", "properties": {"requestID": "permission-1"}},
         {"type": "question.asked", "properties": {"id": "question-1"}},
@@ -226,7 +230,7 @@ async def test_text_snapshot_does_not_evict_control_events():
 @pytest.mark.asyncio
 async def test_snapshot_dropped_behind_full_control_queue_emits_deferred_marker():
     broadcaster = EventBroadcaster(queue_maxsize=3, queue_drop_to=1)
-    queue = await broadcaster.subscribe()
+    queue = await broadcaster.subscribe(_ADMIN)
     controls = [
         {"type": f"control.{index}", "properties": {"index": index}}
         for index in range(3)
@@ -295,10 +299,87 @@ async def test_session_events_are_filtered_by_subscriber_user(monkeypatch: pytes
     assert alice_queue.get_nowait() == private_event
     assert bob_queue.empty()
 
-    global_event = {"type": "workflow.updated", "properties": {"id": "workflow-1"}}
-    await broadcaster.publish(global_event)
-    assert alice_queue.get_nowait() == global_event
-    assert bob_queue.get_nowait() == global_event
+
+@pytest.mark.asyncio
+async def test_subscribe_requires_authenticated_user():
+    broadcaster = EventBroadcaster()
+
+    with pytest.raises(ValueError):
+        await broadcaster.subscribe(None)
+    assert broadcaster.client_count == 0
+
+
+@pytest.mark.asyncio
+async def test_non_session_event_only_reaches_publishing_user():
+    broadcaster = EventBroadcaster()
+    alice_tab_1 = await broadcaster.subscribe(_ALICE)
+    alice_tab_2 = await broadcaster.subscribe(_ALICE)
+    bob_queue = await broadcaster.subscribe(_BOB)
+    admin_queue = await broadcaster.subscribe(_ADMIN)
+
+    event = {"type": "workflow.created", "properties": {"id": "workflow-1", "name": "alice flow"}}
+    token = set_current_auth_user(_ALICE)
+    try:
+        await broadcaster.publish(event)
+    finally:
+        reset_current_auth_user(token)
+
+    assert alice_tab_1.get_nowait() == event
+    assert alice_tab_2.get_nowait() == event
+    assert bob_queue.empty()
+    assert admin_queue.empty()
+
+
+@pytest.mark.asyncio
+async def test_non_session_event_without_user_context_reaches_admins_only():
+    broadcaster = EventBroadcaster()
+    alice_queue = await broadcaster.subscribe(_ALICE)
+    admin_queue = await broadcaster.subscribe(_ADMIN)
+
+    event = {"type": "contracts.webui.pages.updated", "properties": {"id": "page-1", "hash": "abc"}}
+    await broadcaster.publish(event)
+
+    assert admin_queue.get_nowait() == event
+    assert alice_queue.empty()
+
+
+@pytest.mark.asyncio
+async def test_non_session_event_from_api_token_service_reaches_admins_only():
+    from flocks.server.auth import _build_api_token_user
+
+    service_user = _build_api_token_user()
+    broadcaster = EventBroadcaster()
+    alice_queue = await broadcaster.subscribe(_ALICE)
+    admin_queue = await broadcaster.subscribe(_ADMIN)
+    tui_queue = await broadcaster.subscribe(service_user)
+
+    event = {"type": "hub.scene_suites.changed", "properties": {"suiteId": "soc", "action": "install"}}
+    token = set_current_auth_user(service_user)
+    try:
+        await broadcaster.publish(event)
+    finally:
+        reset_current_auth_user(token)
+
+    assert admin_queue.get_nowait() == event
+    assert tui_queue.get_nowait() == event
+    assert alice_queue.empty()
+
+
+@pytest.mark.asyncio
+async def test_publish_event_routes_to_context_user(monkeypatch: pytest.MonkeyPatch):
+    broadcaster = EventBroadcaster()
+    monkeypatch.setattr(EventBroadcaster, "_instance", broadcaster)
+    alice_queue = await broadcaster.subscribe(_ALICE)
+    bob_queue = await broadcaster.subscribe(_BOB)
+
+    token = set_current_auth_user(_BOB)
+    try:
+        await event_routes.publish_event("tui.toast.show", {"message": "for bob only"})
+    finally:
+        reset_current_auth_user(token)
+
+    assert bob_queue.get_nowait()["type"] == "tui.toast.show"
+    assert alice_queue.empty()
 
 
 @pytest.mark.asyncio

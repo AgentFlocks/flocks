@@ -999,6 +999,131 @@ async def test_instance_provide_drops_failed_context_task(monkeypatch):
     Instance._cache.pop(directory, None)
 
 
+@pytest.fixture
+def isolated_instance_initialization(monkeypatch, tmp_path):
+    directory = str(tmp_path)
+    monkeypatch.setattr(Instance, "_cache", {})
+    monkeypatch.setattr(Instance, "_lock", asyncio.Lock())
+    from_directory = AsyncMock(return_value={
+        "project": SimpleNamespace(id="project"),
+        "sandbox": directory,
+    })
+    monkeypatch.setattr("flocks.project.instance.Project.from_directory", from_directory)
+    return directory, from_directory
+
+
+@pytest.mark.asyncio
+async def test_instance_provide_cancelled_waiter_preserves_shared_initialization(
+    isolated_instance_initialization,
+):
+    directory, from_directory = isolated_instance_initialization
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def initialize():
+        started.set()
+        await release.wait()
+
+    init = AsyncMock(side_effect=initialize)
+    cancelled_fn = AsyncMock()
+    first = asyncio.create_task(Instance.provide(directory, init=init, fn=cancelled_fn))
+    second = asyncio.create_task(Instance.provide(
+        directory, init=init, fn=Instance.get_directory,
+    ))
+    try:
+        await asyncio.wait_for(started.wait(), timeout=1)
+        shared = Instance._cache[directory]
+        first.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await first
+
+        assert Instance._cache[directory] is shared
+        assert not shared.done()
+        assert not second.done()
+        cancelled_fn.assert_not_awaited()
+
+        release.set()
+        assert await asyncio.wait_for(second, timeout=1) == directory
+        assert await Instance.provide(directory, init=init, fn=Instance.get_directory) == directory
+        assert Instance._cache[directory] is shared
+        init.assert_awaited_once()
+        from_directory.assert_awaited_once_with(directory)
+    finally:
+        release.set()
+        first.cancel()
+        second.cancel()
+        await asyncio.gather(first, second, *Instance._cache.values(), return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_instance_provide_cancelled_initializer_can_retry(
+    isolated_instance_initialization,
+):
+    directory, from_directory = isolated_instance_initialization
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def initialize():
+        started.set()
+        await release.wait()
+
+    init = AsyncMock(side_effect=initialize)
+    waiter = asyncio.create_task(Instance.provide(directory, init=init))
+    try:
+        await asyncio.wait_for(started.wait(), timeout=1)
+        failed = Instance._cache[directory]
+        failed.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiter
+
+        assert failed.cancelled()
+        assert directory not in Instance._cache
+        release.set()
+        assert await Instance.provide(directory, init=init, fn=Instance.get_directory) == directory
+        assert Instance._cache[directory] is not failed
+        assert init.await_count == 2
+        assert from_directory.await_count == 2
+    finally:
+        release.set()
+        waiter.cancel()
+        await asyncio.gather(waiter, *Instance._cache.values(), return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_instance_provide_keeps_fn_cancellable(
+    isolated_instance_initialization,
+):
+    directory, from_directory = isolated_instance_initialization
+    started = asyncio.Event()
+    stopped = asyncio.Event()
+
+    async def run():
+        assert Instance.get_directory() == directory
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            stopped.set()
+
+    waiter = asyncio.create_task(Instance.provide(directory, fn=run))
+    try:
+        await asyncio.wait_for(started.wait(), timeout=1)
+        shared = Instance._cache[directory]
+        assert shared.done()
+        waiter.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiter
+
+        assert stopped.is_set()
+        assert Instance._cache[directory] is shared
+        assert not shared.cancelled()
+        assert await Instance.provide(directory, fn=Instance.get_directory) == directory
+        from_directory.assert_awaited_once_with(directory)
+    finally:
+        waiter.cancel()
+        await asyncio.gather(waiter, return_exceptions=True)
+
+
 def test_is_db_corruption_error_recognizes_known_messages():
     """Both ``NotADBError`` and ``DatabaseError`` variants are flagged as corruption."""
     not_a_db = sqlite3.DatabaseError("file is not a database")
