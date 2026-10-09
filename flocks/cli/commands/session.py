@@ -332,3 +332,54 @@ async def _restore_session(session_id: str, project_id: Optional[str]):
     else:
         console.print(f"[red]Failed to restore session (not found or not archived): {session_id}[/red]")
         raise typer.Exit(1)
+
+
+@session_app.command("new")
+def session_new(
+    prompt: Optional[str] = typer.Argument(None, help="Optional initial prompt, or - for stdin"),
+    directory: str = typer.Option(".", "-C", "--cd"),
+    model: Optional[str] = typer.Option(None, "-m", "--model"),
+    agent: Optional[str] = typer.Option(None, "--agent"),
+    output_format: str = typer.Option("text", "--output-format"),
+):
+    """Create a session; when a prompt is provided, run its first turn."""
+    _invoke_session(prompt, directory, model, agent, output_format, create_only=prompt is None)
+
+
+@session_app.command("resume")
+def session_resume(
+    session_id: Optional[str] = typer.Argument(None, help="Session ID (or use --last)"),
+    last: bool = typer.Option(False, "--last"),
+    prompt: Optional[str] = typer.Option(None, "-p", "--prompt", help="New prompt, or - for stdin; omitted continues history"),
+    directory: str = typer.Option(".", "-C", "--cd"),
+    model: Optional[str] = typer.Option(None, "-m", "--model"),
+    agent: Optional[str] = typer.Option(None, "--agent"),
+    output_format: str = typer.Option("text", "--output-format"),
+):
+    """Run a turn in an existing session without entering a TUI.
+
+    For full tool, schema, sandbox and budget controls use exec --session/--last.
+    """
+    if bool(session_id) == last:
+        raise typer.BadParameter("Specify a session ID or --last (exactly one)")
+    _invoke_session(prompt, directory, model, agent, output_format, session_id=session_id, last=last)
+
+
+def _invoke_session(prompt, directory, model, agent, output_format, **kwargs):
+    from pathlib import Path
+    import sys
+    from flocks.cli.commands.exec import OutputFormat, invoke_headless
+    from flocks.cli.headless import ExecOptions
+
+    directory = Path(directory).expanduser().resolve()
+    if not directory.is_dir():
+        raise typer.BadParameter("--cd must be an existing directory")
+    try:
+        format_value = OutputFormat(output_format)
+    except ValueError as exc:
+        raise typer.BadParameter("--output-format must be text, json or stream-json") from exc
+    if prompt == "-":
+        prompt = sys.stdin.read()
+    if prompt is not None and not prompt.strip():
+        raise typer.BadParameter("Prompt must not be empty")
+    invoke_headless(ExecOptions(directory=directory, prompt=prompt, model=model, agent=agent, **kwargs), format_value)

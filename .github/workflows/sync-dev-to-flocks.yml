@@ -1,0 +1,55 @@
+name: Sync dev to flocks
+
+on:
+  push:
+    branches:
+      - dev
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sync-dev-to-flocks
+  cancel-in-progress: false
+
+env:
+  SOURCE_BRANCH: dev
+  TARGET_REPOSITORY: AgentFlocks/flocks
+  TARGET_BRANCH: dev
+  SYNC_BRANCH_PREFIX: chore/sync-flocksdev-dev
+  GITLEAKS_VERSION: 8.30.1
+  GITLEAKS_LINUX_X64_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+
+jobs:
+  sync-dev-to-flocks:
+    # The sync carries this file into AgentFlocks/flocks as well; only the private dev repository runs it.
+    if: github.repository == 'AgentFlocks/flocksdev'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ env.SOURCE_BRANCH }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install gitleaks
+        run: |
+          set -euo pipefail
+
+          archive="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl --fail --silent --show-error --location --retry 3 --max-time 120 \
+            --output "${RUNNER_TEMP}/${archive}" \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${archive}"
+          echo "${GITLEAKS_LINUX_X64_SHA256}  ${RUNNER_TEMP}/${archive}" | sha256sum --check --strict
+          mkdir -p "${RUNNER_TEMP}/gitleaks"
+          tar -xzf "${RUNNER_TEMP}/${archive}" -C "${RUNNER_TEMP}/gitleaks" gitleaks
+          echo "${RUNNER_TEMP}/gitleaks" >> "${GITHUB_PATH}"
+
+      - name: Update the flocks sync branch and PR
+        env:
+          FLOCKS_SYNC_TOKEN: ${{ secrets.FLOCKS_SYNC_TOKEN }}
+        run: bash .github/scripts/sync-dev-to-flocks.sh

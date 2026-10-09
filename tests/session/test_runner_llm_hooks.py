@@ -72,7 +72,13 @@ class _FakeToolAccumulator:
     async def feed_chunk(self, tool_call) -> None:
         return None
 
-    async def flush_remaining(self, finish_reason) -> None:
+    async def flush_remaining(
+        self,
+        finish_reason,
+        *,
+        output_limit=None,
+        raised_output_limit=None,
+    ) -> None:
         return None
 
 
@@ -648,8 +654,6 @@ async def test_call_llm_only_exempts_successful_sleep_from_loop_guard(monkeypatc
 @pytest.mark.asyncio
 @pytest.mark.parametrize("exit_kind", ["provider_error", "cancel", "flush_error"])
 async def test_call_llm_discards_deferred_sleep_on_unsuccessful_stream(monkeypatch, exit_kind):
-    from flocks.session.streaming.tool_accumulator import StreamToolArgumentsTruncatedError
-
     runner = _make_runner(f"ses_runner_sleep_{exit_kind}")
     runner.callbacks.event_publish_callback = AsyncMock()
     store_part = AsyncMock()
@@ -697,16 +701,23 @@ async def test_call_llm_discards_deferred_sleep_on_unsuccessful_stream(monkeypat
             else:
                 raise interruption
 
-    error_type = StreamToolArgumentsTruncatedError if exit_kind == "flush_error" else type(interruption)
-    with pytest.raises(error_type) as raised:
-        await asyncio.wait_for(runner._call_llm(
-            provider=Provider(), messages=[ChatMessage(role="user", content="wait for a message")],
-            tools=[], agent=SimpleNamespace(name="rex"), assistant_msg=SimpleNamespace(id="msg_sleep"),
-        ), timeout=1)
-
+    call = runner._call_llm(
+        provider=Provider(), messages=[ChatMessage(role="user", content="wait for a message")],
+        tools=[], agent=SimpleNamespace(name="rex"), assistant_msg=SimpleNamespace(id="msg_sleep"),
+    )
     if exit_kind == "flush_error":
-        assert raised.value.tool_call_id == "call-truncated"
+        # A cut-off tool call finishes the step instead of failing it; the
+        # batch's deferred wait must still not start.
+        result = await asyncio.wait_for(call, timeout=1)
+        assert result.tool_args_truncated is True
+        truncated_parts = [
+            c.args[2] for c in store_part.await_args_list
+            if getattr(c.args[2], "callID", None) == "call-truncated"
+        ]
+        assert truncated_parts[-1].state.status == "error"
     else:
+        with pytest.raises(type(interruption)) as raised:
+            await asyncio.wait_for(call, timeout=1)
         assert raised.value is interruption
     execute.assert_not_awaited()
     assert runner._attempt_state.tool_execution_started is False

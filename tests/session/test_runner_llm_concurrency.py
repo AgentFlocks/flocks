@@ -99,7 +99,13 @@ class _FakeToolAccumulator:
     async def feed_chunk(self, tool_call) -> None:
         return None
 
-    async def flush_remaining(self, finish_reason) -> None:
+    async def flush_remaining(
+        self,
+        finish_reason,
+        *,
+        output_limit=None,
+        raised_output_limit=None,
+    ) -> None:
         return None
 
 

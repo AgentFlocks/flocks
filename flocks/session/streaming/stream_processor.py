@@ -5,6 +5,7 @@ Processes streaming LLM responses with synchronous tool execution.
 Ported from Flocks' SessionProcessor pattern.
 """
 
+import copy
 import json
 import re
 import asyncio
@@ -110,6 +111,8 @@ class ToolCallState:
     output: Optional[str] = None
     error: Optional[str] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
+    # Model-emitted input before any tool.execute.before hook patched ``input``
+    raw_input: Optional[Dict[str, Any]] = None
 
 
 class StreamProcessor:
@@ -633,6 +636,10 @@ class StreamProcessor:
         
         tool_state = self.tool_calls[tool_call_id]
         tool_state.input = tool_input
+        # What the model emitted; ``input`` may be rewritten by the
+        # tool.input.rewrite stage below (and, rarely, patched by a
+        # tool.execute.before hook, see _on_input_patched).
+        tool_state.raw_input = tool_input
 
         if tool_name == "invalid":
             original_tool, parse_error = _invalid_tool_call_parse_error(tool_input)
@@ -683,98 +690,66 @@ class StreamProcessor:
             })
             return
 
-        # Hook pipeline: tool.execute.before
-        # Apply any input rewrite before publishing the running state so UI
-        # surfaces show the actual tool input that will be executed.
+        # Hook pipeline: tool.input.rewrite (once, on the raw model input).
+        # Hooks such as redaction-placeholder restore rewrite the input here,
+        # before validation, before the tool.execute.before policy hooks and
+        # before execution, so the running state, doom-loop check, policy
+        # evaluation and the handler all see the same effective input.
+        # tool.execute.before itself runs exactly once, inside Tool.execute
+        # (registry layer) on the canonical payload; it is deliberately not
+        # fired here as well.  Should a tool.execute.before hook still patch
+        # the input, the registry reports it via ToolContext.input_patch_callback.
         tool_start_time = int(datetime.now().timestamp() * 1000)
-        post_hook_fired = False
-        hook_blocked = False
-        hook_block_reason = ""
         try:
-            from flocks.hooks.pipeline import HookPipeline
-            hook_ctx = await HookPipeline.run_tool_before({
-                "sessionID": self.session_id,
-                "workspace": self._workspace_dir,
-                "agent": self.agent.name,
-                "tool": {
-                    "name": tool_name,
-                    "input": tool_input,
-                    "callID": tool_call_id,
-                },
-            })
-            if hook_ctx and isinstance(hook_ctx.input, dict):
-                updated = hook_ctx.input.get("tool", {}).get("input")
-                if isinstance(updated, dict):
-                    tool_input = updated
-                    tool_state.input = tool_input
-            hook_output = hook_ctx.output if hook_ctx and isinstance(hook_ctx.output, dict) else {}
-            decision = str(hook_output.get("decision") or "").strip().lower()
-            hook_blocked = decision == "block" or bool(hook_output.get("skip", False))
-            hook_block_reason = str(
-                hook_output.get("reason") or hook_output.get("error") or ""
-            ).strip()
+            tool_input = await self._rewrite_tool_input(
+                tool_name=tool_name,
+                tool_input=tool_input,
+                tool_call_id=tool_call_id,
+            )
+            tool_state.input = tool_input
         except asyncio.CancelledError:
             await self._finalize_interrupted_tool_call(
                 tool_state=tool_state,
                 tool_name=tool_name,
-                tool_input=tool_input,
+                tool_input=tool_state.input,
                 tool_call_id=tool_call_id,
                 tool_start_time=tool_start_time,
             )
             raise
-        except Exception as e:
-            log.error("stream.tool_before_hook.error", {"error": str(e)})
-            hook_blocked = True
-            hook_block_reason = "Tool execution blocked because tool-before hook failed"
-
+        except Exception as exc:
+            # The pipeline only lets propagate / fail_closed hooks raise out
+            # of a stage; honour that policy the same way the registry does
+            # for tool.execute.before: do not execute.
+            log.error("stream.tool_input_rewrite.error", {
+                "tool": tool_name,
+                "tool_call_id": tool_call_id,
+                "error": str(exc),
+            })
+            await self._finalize_failed_tool_call(
+                tool_state=tool_state,
+                tool_name=tool_name,
+                tool_call_id=tool_call_id,
+                tool_start_time=tool_start_time,
+                error=f"Tool input rewrite hook failed: {exc}",
+            )
+            return
         tool_state.status = "running"
-        
+
         # Update ToolPart to running state (like Flocks's Session.updatePart)
         # This matches Flocks's logic: update existing part from pending to running
-        try:
-            # Update the existing ToolPart with running state and actual input
-            tool_part = ToolPart(
-                id=tool_state.part_id,
-                sessionID=self.session_id,
-                messageID=self.assistant_message.id,
-                type="tool",
-                callID=tool_call_id,
-                tool=tool_name,
-                state=ToolStateRunning(
-                    status="running",
-                    input=tool_input,
-                    time={"start": tool_start_time},
-                ),
-            )
-            await Message.store_part(self.session_id, self.assistant_message.id, tool_part)
-            
-            # Publish running tool event (matches Flocks Session.updatePart)
-            if self.event_publish_callback:
-                await self.event_publish_callback("message.part.updated", {
-                    "part": {
-                        "id": tool_state.part_id,
-                        "messageID": self.assistant_message.id,
-                        "sessionID": self.session_id,
-                        "type": "tool",
-                        "callID": tool_call_id,
-                        "tool": tool_name,
-                        "state": {
-                            "status": "running",
-                            "input": tool_input,
-                            "time": {"start": tool_start_time},
-                        }
-                    }
-                })
-            
-        except Exception as e:
-            log.error("stream.tool_call.update_part_failed", {"error": str(e)})
-        
+        await self._store_and_publish_running_state(
+            tool_state=tool_state,
+            tool_name=tool_name,
+            tool_call_id=tool_call_id,
+            tool_start_time=tool_start_time,
+        )
+
         # Doom loop detection - check recent tool calls in assistant message
         # Ported from original exact logic: check parts of current assistant message
         try:
             # Get all parts of current assistant message from storage
             parts = await Message.parts(self.assistant_message.id, self.session_id)
-            
+
             # Observational timing markers must not interrupt doom-loop detection.
             recent_parts = []
             for part in reversed(parts):
@@ -783,14 +758,16 @@ class StreamProcessor:
                 recent_parts.append(part)
                 if len(recent_parts) == DOOM_LOOP_THRESHOLD:
                     break
-            
+            # Compare what the model emitted, not the hook-rewritten input.
+            input_signature = json.dumps(tool_state.raw_input, sort_keys=True)
+
             if (
                 len(recent_parts) == DOOM_LOOP_THRESHOLD and
                 all(
                     p.type == "tool" and
                     p.tool == tool_name and
                     p.state.status != "pending" and
-                    json.dumps(p.state.input, sort_keys=True) == json.dumps(tool_input, sort_keys=True)
+                    json.dumps(self._doom_loop_input(p), sort_keys=True) == input_signature
                     for p in recent_parts
                 )
             ):
@@ -840,7 +817,6 @@ class StreamProcessor:
                 )
             except Exception as exc:
                 log.debug("stream.tool_span.init_failed", {"error": str(exc)})
-        registry_execution_started = False
         tool_finished = asyncio.Event()
         try:
             sandbox_meta = await self._resolve_sandbox_meta(tool_name)
@@ -851,11 +827,22 @@ class StreamProcessor:
                     metadata={"sandbox": True, "blocked_by_policy": True},
                 )
             else:
+                async def _on_input_patched(effective_input: Dict[str, Any]) -> None:
+                    """Registry reports a hook-patched input before the handler runs."""
+                    if not isinstance(effective_input, dict) or effective_input == tool_state.input:
+                        return
+                    tool_state.input = effective_input
+                    await self._store_and_publish_running_state(
+                        tool_state=tool_state,
+                        tool_name=tool_name,
+                        tool_call_id=tool_call_id,
+                        tool_start_time=tool_start_time,
+                    )
+
                 def _make_metadata_cb(
                         _part_id=tool_state.part_id,
                         _call_id=tool_call_id,
                         _tool=tool_name,
-                        _input=tool_input,
                         _start=tool_start_time,
                     ):
                         import copy
@@ -885,7 +872,7 @@ class StreamProcessor:
                             tool_state.metadata = snapshot
                             state_dict = {
                                 "status": "running",
-                                "input": _input,
+                                "input": tool_state.input,
                                 "time": {"start": _start},
                                 "metadata": snapshot,
                             }
@@ -924,7 +911,7 @@ class StreamProcessor:
                                 try:
                                     running_state = ToolStateRunning(
                                         status="running",
-                                        input=_input,
+                                        input=tool_state.input,
                                         title=snapshot.get("title"),
                                         metadata=snapshot,
                                         time={"start": _start},
@@ -996,10 +983,10 @@ class StreamProcessor:
                     extra=tool_extra,
                     metadata_callback=_make_metadata_cb(),
                     event_publish_callback=self.event_publish_callback,
+                    input_patch_callback=_on_input_patched,
                 )
                 cb = ctx._metadata_callback
                 try:
-                    registry_execution_started = True
                     result = await ToolRegistry.execute(
                         tool_name=tool_name,
                         ctx=ctx,
@@ -1048,7 +1035,7 @@ class StreamProcessor:
                     # output can be str, dict, or list - ToolStateCompleted handles all
                     completed_state = ToolStateCompleted(
                         status="completed",
-                        input=tool_input,
+                        input=tool_state.input,
                         output=result.output if result.output is not None else "",
                         title=result.title or tool_name,
                         metadata=result.metadata or {},
@@ -1059,7 +1046,7 @@ class StreamProcessor:
                     resolved_error = _resolve_tool_error(result)
                     completed_state = ToolStateError(
                         status="error",
-                        input=tool_input,
+                        input=tool_state.input,
                         error=resolved_error,
                         metadata=result.metadata or {},
                         time={"start": tool_start_time, "end": tool_end_time},
@@ -1081,7 +1068,7 @@ class StreamProcessor:
                 if self.event_publish_callback:
                     state_dict = {
                         "status": completed_state.status,
-                        "input": tool_input,
+                        "input": tool_state.input,
                         "time": {"start": tool_start_time, "end": tool_end_time},
                     }
                     if result.success:
@@ -1125,161 +1112,222 @@ class StreamProcessor:
                     log.error("stream.tool_end_callback.error", {"error": str(e)})
             
         except asyncio.CancelledError:
-            if not registry_execution_started:
-                await self._run_pre_execution_tool_after_hook(
-                    tool_name=tool_name,
-                    tool_input=tool_input,
-                    tool_call_id=tool_call_id,
-                    tool_start_time=tool_start_time,
-                )
             await self._finalize_interrupted_tool_call(
                 tool_state=tool_state,
                 tool_name=tool_name,
-                tool_input=tool_input,
+                tool_input=tool_state.input,
                 tool_call_id=tool_call_id,
                 tool_start_time=tool_start_time,
                 tool_span_ctx=tool_span_ctx,
             )
             raise
         except Exception as e:
-            log.error("stream.tool_call.error", {
-                "tool_call_id": tool_call_id,
-                "tool_name": tool_name,
-                "error": str(e),
-            })
-            try:
-                if tool_span_ctx is not None:
-                    tool_span_ctx.end(
-                        output=str(e),
-                        metadata={"success": False},
-                        level="ERROR",
-                        status_message="tool_exception",
-                    )
-            except Exception as _span_err:
-                log.debug("stream.tool_span.error_end_failed", {"error": str(_span_err)})
-            
-            tool_state.status = "error"
-            tool_state.error = str(e)
-            
-            # Update ToolPart in storage with error state
-            try:
-                tool_error_time = int(datetime.now().timestamp() * 1000)
-                error_state = ToolStateError(
-                    status="error",
-                    input=tool_input,
-                    error=str(e),
-                    time={"start": tool_start_time if 'tool_start_time' in locals() else tool_error_time, "end": tool_error_time},
-                )
-                
-                error_part = ToolPart(
-                    id=tool_state.part_id,
-                    sessionID=self.session_id,
-                    messageID=self.assistant_message.id,
-                    type="tool",
-                    callID=tool_call_id,
-                    tool=tool_name,
-                    state=error_state,
-                )
-                await Message.store_part(self.session_id, self.assistant_message.id, error_part)
-                
-                # Publish error tool event (matches Flocks Session.updatePart)
-                if self.event_publish_callback:
-                    await self.event_publish_callback("message.part.updated", {
-                        "part": {
-                            "id": tool_state.part_id,
-                            "messageID": self.assistant_message.id,
-                            "sessionID": self.session_id,
-                            "type": "tool",
-                            "callID": tool_call_id,
-                            "tool": tool_name,
-                            "state": {
-                                "status": "error",
-                                "input": tool_input,
-                                "error": str(e),
-                                "time": {"start": tool_start_time if 'tool_start_time' in locals() else tool_error_time, "end": tool_error_time},
-                            }
-                        }
-                    })
-                
-            except Exception as store_e:
-                log.error("stream.tool_call.update_part_failed", {"error": str(store_e)})
-            
-            # Create error result for callback
-            error_result = ToolResult(
-                success=False,
-                output="",
+            await self._finalize_failed_tool_call(
+                tool_state=tool_state,
+                tool_name=tool_name,
+                tool_call_id=tool_call_id,
+                tool_start_time=tool_start_time,
                 error=str(e),
-                title="",
-                metadata={},
+                tool_span_ctx=tool_span_ctx,
             )
-            
-            # Notify tool end with error (for CLI display)
-            if self.tool_end_callback:
-                try:
-                    await self.tool_end_callback(tool_name, error_result)
-                except Exception as e2:
-                    log.error("stream.tool_end_callback.error", {"error": str(e2)})
 
         finally:
             tool_finished.set()
 
-    async def _run_pre_execution_tool_after_hook(
+    async def _finalize_failed_tool_call(
+        self,
+        *,
+        tool_state: ToolCallState,
+        tool_name: str,
+        tool_call_id: str,
+        tool_start_time: int,
+        error: str,
+        tool_span_ctx: Optional[Any] = None,
+    ) -> None:
+        """Persist, publish and report the error state for a tool call that
+        failed outside the handler (execution exception, rewrite hook failure)."""
+        log.error("stream.tool_call.error", {
+            "tool_call_id": tool_call_id,
+            "tool_name": tool_name,
+            "error": error,
+        })
+        try:
+            if tool_span_ctx is not None:
+                tool_span_ctx.end(
+                    output=error,
+                    metadata={"success": False},
+                    level="ERROR",
+                    status_message="tool_exception",
+                )
+        except Exception as _span_err:
+            log.debug("stream.tool_span.error_end_failed", {"error": str(_span_err)})
+
+        tool_state.status = "error"
+        tool_state.error = error
+
+        # Update ToolPart in storage with error state
+        try:
+            tool_error_time = int(datetime.now().timestamp() * 1000)
+            error_state = ToolStateError(
+                status="error",
+                input=tool_state.input,
+                error=error,
+                time={"start": tool_start_time, "end": tool_error_time},
+            )
+
+            error_part = ToolPart(
+                id=tool_state.part_id,
+                sessionID=self.session_id,
+                messageID=self.assistant_message.id,
+                type="tool",
+                callID=tool_call_id,
+                tool=tool_name,
+                state=error_state,
+            )
+            await Message.store_part(self.session_id, self.assistant_message.id, error_part)
+
+            # Publish error tool event (matches Flocks Session.updatePart)
+            if self.event_publish_callback:
+                await self.event_publish_callback("message.part.updated", {
+                    "part": {
+                        "id": tool_state.part_id,
+                        "messageID": self.assistant_message.id,
+                        "sessionID": self.session_id,
+                        "type": "tool",
+                        "callID": tool_call_id,
+                        "tool": tool_name,
+                        "state": {
+                            "status": "error",
+                            "input": tool_state.input,
+                            "error": error,
+                            "time": {"start": tool_start_time, "end": tool_error_time},
+                        }
+                    }
+                })
+
+        except Exception as store_e:
+            log.error("stream.tool_call.update_part_failed", {"error": str(store_e)})
+
+        # Create error result for callback
+        error_result = ToolResult(
+            success=False,
+            output="",
+            error=error,
+            title="",
+            metadata={},
+        )
+
+        # Notify tool end with error (for CLI display)
+        if self.tool_end_callback:
+            try:
+                await self.tool_end_callback(tool_name, error_result)
+            except Exception as e2:
+                log.error("stream.tool_end_callback.error", {"error": str(e2)})
+
+    async def _rewrite_tool_input(
         self,
         *,
         tool_name: str,
         tool_input: Dict[str, Any],
         tool_call_id: str,
+    ) -> Dict[str, Any]:
+        """Run the tool.input.rewrite stage and return the effective input.
+
+        Contract: hooks rewrite ``ctx.input["tool"]["input"]`` in place (a
+        deep copy of the model input, so ``raw_input`` stays untouched).  The
+        stage carries no decision: ``decision`` / ``execution`` / ``skip`` in
+        the output are ignored, tool.execute.before is the place for those.
+        Exceptions from propagate / fail_closed hooks propagate to the caller.
+        """
+        from flocks.hooks.pipeline import HookPipeline
+
+        hook_ctx = await HookPipeline.run_tool_input_rewrite({
+            "sessionID": self.session_id,
+            "messageID": self.assistant_message.id,
+            "workspace": self._workspace_dir,
+            "agent": self.agent.name,
+            "tool": {
+                "name": tool_name,
+                "input": copy.deepcopy(tool_input),
+                "callID": tool_call_id,
+            },
+        })
+        ignored = sorted(
+            key for key in ("decision", "execution", "skip")
+            if isinstance(hook_ctx.output, dict) and key in hook_ctx.output
+        )
+        if ignored:
+            log.warn("stream.tool_input_rewrite.decision_ignored", {
+                "tool": tool_name,
+                "tool_call_id": tool_call_id,
+                "keys": ignored,
+            })
+        tool_section = hook_ctx.input.get("tool") if isinstance(hook_ctx.input, dict) else None
+        updated = tool_section.get("input") if isinstance(tool_section, dict) else None
+        if isinstance(updated, dict):
+            return updated
+        return tool_input
+
+    async def _store_and_publish_running_state(
+        self,
+        *,
+        tool_state: ToolCallState,
+        tool_name: str,
+        tool_call_id: str,
         tool_start_time: int,
     ) -> None:
-        """Emit the canonical terminal hook when cancellation precedes registry execution."""
-        try:
-            from flocks.hooks.pipeline import HookPipeline
-            from flocks.session.tool_execution import build_session_tool_execution_payload
+        """Persist and publish the running ToolPart with the current input.
 
-            schema = ToolRegistry.get_schema(tool_name)
-            payload = await build_session_tool_execution_payload(
-                session_id=self.session_id,
-                message_id=self.assistant_message.id,
-                agent=self.agent.name,
-                tool_name=tool_name,
-                tool_input=tool_input,
-                validated_input=tool_input,
-                tool_schema=schema.to_json_schema() if schema else {},
-                tool_context_extra={
-                    "tool_call_id": tool_call_id,
-                    "workspace_dir": self._workspace_dir,
-                    "execution_context": {
-                        "trace_id": f"{self.session_id}:{self.assistant_message.id}",
-                        "execution_id": self.assistant_message.id,
-                        "turn_id": self.assistant_message.id,
-                        "step": int(self._step_index or 0),
-                        "attempt": 1,
-                    },
-                },
+        Called once when execution starts and again if a tool.execute.before
+        hook patched the input, so UI surfaces show what actually executes.
+        """
+        try:
+            tool_part = ToolPart(
+                id=tool_state.part_id,
+                sessionID=self.session_id,
+                messageID=self.assistant_message.id,
+                type="tool",
+                callID=tool_call_id,
+                tool=tool_name,
+                state=ToolStateRunning(
+                    status="running",
+                    input=tool_state.input,
+                    time={"start": tool_start_time},
+                ),
             )
-            duration_ms = max(
-                0,
-                int(datetime.now().timestamp() * 1000) - tool_start_time,
-            )
-            await HookPipeline.run_tool_after(
-                {
-                    **payload,
-                    "outcome": {
-                        "status": "cancelled",
-                        "duration_ms": duration_ms,
-                        "error_type": "CancelledError",
-                        "error_message": "Tool execution was interrupted",
-                        "result_summary": None,
-                    },
-                }
-            )
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            log.error("stream.tool_pre_execution_after_hook.error", {
-                "tool": tool_name,
-                "error": str(exc),
-            })
+            await Message.store_part(self.session_id, self.assistant_message.id, tool_part)
+
+            # Publish running tool event (matches Flocks Session.updatePart)
+            if self.event_publish_callback:
+                await self.event_publish_callback("message.part.updated", {
+                    "part": {
+                        "id": tool_state.part_id,
+                        "messageID": self.assistant_message.id,
+                        "sessionID": self.session_id,
+                        "type": "tool",
+                        "callID": tool_call_id,
+                        "tool": tool_name,
+                        "state": {
+                            "status": "running",
+                            "input": tool_state.input,
+                            "time": {"start": tool_start_time},
+                        }
+                    }
+                })
+        except Exception as e:
+            log.error("stream.tool_call.update_part_failed", {"error": str(e)})
+
+    def _doom_loop_input(self, part: Any) -> Any:
+        """Input to compare for doom-loop detection: what the model emitted.
+
+        Stored parts carry the hook-patched input (what executed); calls this
+        processor handled also remember the raw model input, so repeated
+        identical calls still match even when a hook rewrote them.
+        """
+        state = self.tool_calls.get(getattr(part, "callID", None))
+        if state is not None and state.raw_input is not None:
+            return state.raw_input
+        return getattr(getattr(part, "state", None), "input", None)
 
     async def _finalize_interrupted_tool_call(
         self,

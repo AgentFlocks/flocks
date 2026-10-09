@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 import hashlib
 import json
 import os
+import re
 import sys
 from pathlib import Path
 from datetime import datetime
@@ -34,6 +35,15 @@ if TYPE_CHECKING:
 
 # Output token maximum
 OUTPUT_TOKEN_MAX = int(os.getenv("FLOCKS_OUTPUT_TOKEN_MAX", "32000"))
+
+# CJK punctuation, ideographs, kana, Hangul and full-width forms.  Tokenizers
+# spend about one token per such character, versus roughly four characters per
+# token for ASCII text, so counting them as chars/4 under-reported Chinese
+# sessions ~4x.
+_CJK_CHAR_RE = re.compile(
+    r"[\u3000-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af\uf900-\ufaff\uff00-\uffef]"
+)
+
 SystemPromptCache = Dict[str, Any]
 AsyncPromptFactory = Callable[[], Awaitable[Optional[str]]]
 StringPromptFactory = Callable[[], Optional[str]]
@@ -461,17 +471,21 @@ class SessionPrompt:
 
     @classmethod
     def count_tokens(cls, text: str) -> int:
-        """Count tokens using fast chars/4 rough estimate.
+        """Count tokens using a fast character-based estimate.
 
-        Returns ``len(text) // 4`` directly — no tiktoken, no model call.
-        Fast enough for every-step overflow detection while staying within
-        the same order of magnitude as provider-side counts.  The fixed
-        85 % × context_window overflow threshold tolerates the slack from
-        this rough estimate without needing a safety margin.
+        ASCII text counts as ``len(text) // 4``; each CJK character counts as
+        one token — no tiktoken, no model call.  Fast enough for every-step
+        overflow detection while staying within the same order of magnitude
+        as provider-side counts.  The fixed 85 % × context_window overflow
+        threshold tolerates the remaining slack without a safety margin.
         """
         if not text:
             return 0
-        return len(text) // 4
+        if text.isascii():
+            return len(text) // 4
+        # ``sub`` counts in C; iterating matches cost ~2x on long CJK text.
+        cjk_chars = len(text) - len(_CJK_CHAR_RE.sub("", text))
+        return cjk_chars + (len(text) - cjk_chars) // 4
     
     @classmethod
     def count_message_tokens(cls, messages: List[Any]) -> int:
@@ -497,7 +511,7 @@ class SessionPrompt:
     
     @classmethod
     def estimate_tokens(cls, text: str) -> int:
-        """Alias for :meth:`count_tokens` — both return ``len(text) // 4``.
+        """Alias for :meth:`count_tokens` — both return the same estimate.
 
         Kept for callers that still import ``estimate_tokens`` by name (pruning,
         a handful of log statements, legacy tests).  ``count_tokens`` is the
@@ -631,9 +645,9 @@ class SessionPrompt:
             content = msg.get("content", "")
         elif hasattr(msg, "content"):
             content = msg.content or ""
-        total += cls.count_tokens(content)
 
         # Message parts (tool inputs/outputs, text parts, reasoning)
+        parts: list = []
         try:
             parts = await Message.parts(msg_id or "", session_id)
             for part in parts:
@@ -675,6 +689,12 @@ class SessionPrompt:
                 "message_id": msg_id or '?', "error": str(_e),
             })
             total += 50
+        if not parts:
+            # The runner sends a message's parts.  An in-memory assistant
+            # message also carries its text as ``content`` (set by
+            # ``Message.update``, never persisted), so counting both would
+            # count that text twice.
+            total += cls.count_tokens(content)
 
         if cacheable:
             cls._message_token_cache[msg_id] = total

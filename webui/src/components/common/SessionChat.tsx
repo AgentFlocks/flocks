@@ -307,10 +307,13 @@ interface ComposerAttachment {
 }
 
 const APPROX_CHARS_PER_TOKEN = 4;
+// Mirrors SessionPrompt.count_tokens: CJK characters cost about one token each.
+const CJK_CHAR_RE = /[\u3000-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af\uf900-\ufaff\uff00-\uffef]/g;
 
 function countTokensLikeCompaction(text: string | null | undefined): number {
   if (!text) return 0;
-  return Math.floor(text.length / APPROX_CHARS_PER_TOKEN);
+  const cjkChars = text.match(CJK_CHAR_RE)?.length ?? 0;
+  return cjkChars + Math.floor((text.length - cjkChars) / APPROX_CHARS_PER_TOKEN);
 }
 
 const INSIGNIFICANT_THINKING_TEXT_RE = /^[\p{P}\p{S}]+$/u;
@@ -718,6 +721,33 @@ function adjustContextSegmentTokens(
   return 0;
 }
 
+// Rows are estimates; the total is what the provider reported. The backend
+// folds an observed surplus into "conversation", but most of it is tokenizer
+// drift that belongs to every row (a two-message chat is not 3K tokens of
+// conversation), so take it back out and scale all rows to the total instead.
+// An estimate above the total (uncounted history reasoning) scales down.
+function scaleContextSegmentsToObservedTotal(
+  segments: ContextUsageBreakdownSegment[],
+  estimatedTokens: number,
+  usedTokens: number,
+): void {
+  if (usedTokens <= 0 || usedTokens === estimatedTokens) return;
+  if (usedTokens > estimatedTokens) {
+    adjustContextSegmentTokens(segments, 'conversation', -(usedTokens - estimatedTokens));
+  }
+  const counted = segments.filter((segment) => segment.included && segment.tokens > 0);
+  const countedTokens = counted.reduce((total, segment) => total + segment.tokens, 0);
+  if (countedTokens <= 0 || countedTokens === usedTokens) return;
+  let assigned = 0;
+  let largest = counted[0];
+  counted.forEach((segment) => {
+    segment.tokens = Math.floor((segment.tokens * usedTokens) / countedTokens);
+    assigned += segment.tokens;
+    if (segment.tokens > largest.tokens) largest = segment;
+  });
+  largest.tokens += usedTokens - assigned;
+}
+
 function normalizeFixedContextSegments(
   segments: ContextUsageBreakdownSegment[],
 ): ContextUsageBreakdownSegment[] {
@@ -784,15 +814,15 @@ export function buildContextUsageBreakdown(
     const includedToolDefinitionTokens = serverSegments.reduce((total, segment) => (
       segment.key === 'toolDefinitions' && segment.included ? total + segment.tokens : total
     ), 0);
-    const estimatedSnapshotTokens = snapshot.estimatedTokens > 0
-      ? snapshot.estimatedTokens
-      : snapshot.usedTokens || 0;
-    if (includeSnapshotUsage && !useLocalMessageUsage) {
-      adjustContextSegmentTokens(
-        segments,
-        'conversation',
-        -Math.max(0, (snapshot.usedTokens || 0) - estimatedSnapshotTokens),
-      );
+    // ``usedTokens`` is the figure the backend compares against the
+    // compaction threshold (provider-reported usage, including the system
+    // prompt and tool definitions), so the meter reaches that threshold when
+    // compaction actually starts.
+    const snapshotUsedTokens = snapshot.usedTokens > 0
+      ? snapshot.usedTokens
+      : snapshot.estimatedTokens || 0;
+    if (includeSnapshotUsage && !useLocalMessageUsage && snapshot.estimatedTokens > 0) {
+      scaleContextSegmentsToObservedTotal(segments, snapshot.estimatedTokens, snapshotUsedTokens);
     }
     const pendingTokenDeltas = includeSnapshotUsage ? options?.pendingTokenDeltas || {} : {};
     const pendingTokenDeltaTotal = Object.entries(pendingTokenDeltas).reduce(
@@ -813,15 +843,20 @@ export function buildContextUsageBreakdown(
               0,
               (
                 useLocalMessageUsage
-                  ? activeBreakdown?.usedTokens || 0
-                  : estimatedSnapshotTokens - includedSystemPromptTokens - includedToolDefinitionTokens
+                  ? includedSystemPromptTokens
+                    + includedToolDefinitionTokens
+                    + (activeBreakdown?.usedTokens || 0)
+                  : snapshotUsedTokens
               ) + pendingTokenDeltaTotal,
             )
           : 0
       ) + draftTokens,
       compactedTokens: Math.max(0, snapshot.compactedTokens || 0),
+      // Before the first model call nothing is sent yet, so the fixed
+      // prompt costs are listed but not counted.
       segments: normalizeFixedContextSegments(segments).map((segment) => (
-        segment.key === 'systemPrompt' || segment.key === 'toolDefinitions'
+        !includeSnapshotUsage
+          && (segment.key === 'systemPrompt' || segment.key === 'toolDefinitions')
           ? { ...segment, included: false }
           : segment
       )),
@@ -908,8 +943,9 @@ function ContextUsageRing({
       : clamped >= 50
         ? 'stroke-sky-500'
         : 'stroke-zinc-400';
+  // Fixed prompt costs are only counted once the model has been called.
   const rows = breakdown.segments.filter((segment) => (
-    segment.key !== 'systemPrompt' && segment.key !== 'toolDefinitions'
+    segment.included || (segment.key !== 'systemPrompt' && segment.key !== 'toolDefinitions')
   ));
   const activeSegments = breakdown.segments.filter((segment) => segment.included && segment.tokens > 0);
 
@@ -2181,6 +2217,19 @@ export default function SessionChat({
       });
     }
   }, [refreshContextUsage, resolvePendingContextUsage, sessionId]);
+  // Prompts the latest snapshot already counts no longer need their
+  // optimistic estimate. Without this the meter stayed on the pre-send
+  // baseline for the whole turn and only jumped once the turn ended (or the
+  // page was reloaded), even though the backend pushes usage between steps.
+  useEffect(() => {
+    const includedUserMessageIds = activeContextUsageSnapshot?.recentUserMessageIDs;
+    if (!sessionId || !activeContextUsageSnapshot || !includedUserMessageIds?.length) return;
+    const pending = pendingContextUsageRef.current;
+    if (pending.sessionId !== sessionId) return;
+    const coveredKeys = Object.keys(pending.entries)
+      .filter((key) => includedUserMessageIds.includes(key));
+    resolvePendingContextUsage(coveredKeys, sessionId, activeContextUsageSnapshot);
+  }, [activeContextUsageSnapshot, resolvePendingContextUsage, sessionId]);
   const isCompactingRef = useRef(false);
   const prevStreamingRef = useRef(false);
   // Tracks "sessionId::message" key to prevent double-send in React StrictMode
