@@ -680,3 +680,33 @@ async def _refresh_tools(server: Optional[str]):
         
         console.print()
         console.print("[green]Refresh complete[/green]")
+
+
+@mcp_app.command("serve")
+def mcp_serve(
+    directory: str = typer.Option(".", "-C", "--cd"),
+    permission_mode: str = typer.Option("default", "--permission-mode"),
+    allowed_tools: list[str] = typer.Option([], "--allowed-tools"),
+    disallowed_tools: list[str] = typer.Option([], "--disallowed-tools"),
+    sandbox: Optional[str] = typer.Option(None, "--sandbox"),
+    max_budget: Optional[float] = typer.Option(None, "--max-budget"),
+):
+    """Expose Flocks as an MCP server over stdin/stdout (no HTTP service needed)."""
+    import math
+    from pathlib import Path
+    from flocks.cli.commands.exec import PermissionMode, SandboxMode, split_tools
+    from flocks.cli.mcp_server import create_server, serve_stdio
+
+    path = Path(directory).expanduser().resolve()
+    if not path.is_dir():
+        raise typer.BadParameter("--cd must be an existing directory")
+    try:
+        PermissionMode(permission_mode)
+        if sandbox is not None:
+            SandboxMode(sandbox)
+        if max_budget is not None and (not math.isfinite(max_budget) or max_budget < 0):
+            raise ValueError("--max-budget must be finite and non-negative")
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    server = create_server(path, permission_mode, split_tools(allowed_tools), split_tools(disallowed_tools), sandbox, max_budget)
+    asyncio.run(serve_stdio(server))

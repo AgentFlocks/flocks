@@ -100,6 +100,10 @@ class ConfigWriter:
     @classmethod
     def _read_raw(cls) -> Dict[str, Any]:
         """Read flocks.json as raw dict (no secret resolution)."""
+        from flocks.config.runtime import runtime_config
+        override = runtime_config.get()
+        if override is not None:
+            return override.model_dump(by_alias=True, exclude_none=True)
         return cls._read_path_raw(cls._get_config_path())
 
     @classmethod
@@ -163,6 +167,9 @@ class ConfigWriter:
         path: Optional[Path] = None,
     ) -> None:
         """Atomic write: write to tmp file then rename, then clear Config cache."""
+        from flocks.config.runtime import runtime_config
+        if runtime_config.get() is not None:
+            raise RuntimeError("Configuration writes are disabled during a runtime override")
         path = path or cls._get_config_path()
         path.parent.mkdir(parents=True, exist_ok=True)
 
