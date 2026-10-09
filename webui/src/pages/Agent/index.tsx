@@ -373,14 +373,14 @@ function AgentSection({
   const [page, setPage] = useState(1);
 
   // Per-source counts for the filter chips
-  const builtinCount = useMemo(() => agents.filter(a => a.native).length, [agents]);
-  const customCount  = useMemo(() => agents.filter(a => !a.native).length, [agents]);
+  const builtinCount = useMemo(() => agents.filter(isBuiltinAgent).length, [agents]);
+  const customCount  = useMemo(() => agents.filter(a => !isBuiltinAgent(a)).length, [agents]);
 
   const filtered = agents.filter((agent) => {
     if (!matchesGroup(agent.group, groupSelection)) return false;
     if (!showSourceFilter) return true;
-    if (sourceFilter === 'builtin') return agent.native;
-    if (sourceFilter === 'custom') return !agent.native;
+    if (sourceFilter === 'builtin') return isBuiltinAgent(agent);
+    if (sourceFilter === 'custom') return !isBuiltinAgent(agent);
     return true;
   });
 
@@ -503,6 +503,11 @@ function AgentSection({
 // Agent Card
 // ============================================================================
 
+/** Shipped with the product rather than made by the user: core built-ins and sealed (Pro) agents. */
+function isBuiltinAgent(agent: Agent): boolean {
+  return !!agent.native || !!agent.promptProtected;
+}
+
 interface AgentCardProps {
   grouping: GroupDrag;
   layout?: PluginViewMode;
@@ -529,7 +534,12 @@ function AgentCard({
   const { t } = useTranslation('agent');
   const displayName = getAgentDisplayName(agent, displayLang);
   const displayDesc = getAgentDisplayDescription(agent, displayLang);
-  const showDelegatableToggle = agent.mode === 'subagent';
+  // A sealed definition keeps its own delegation setting (the API refuses changes).
+  const showDelegatableToggle = agent.mode === 'subagent' && !agent.promptProtected;
+  const sourceLabel = agent.promptProtected ? t('badge.protected') : agent.native ? t('badge.native') : t('badge.custom');
+  const deleteDisabledReason = agent.promptProtected
+    ? t('badge.protectedDeleteDisabled')
+    : agent.native ? t('badge.nativeDeleteDisabled') : undefined;
 
   return (
     <PluginCard
@@ -537,7 +547,7 @@ function AgentCard({
       icon={<Bot className="h-4 w-4" />}
       title={displayName}
       tags={<>
-        <PluginSourceTag builtin={!!agent.native} label={agent.native ? t('badge.native') : t('badge.custom')} />
+        <PluginSourceTag builtin={isBuiltinAgent(agent)} label={sourceLabel} />
         {agent.delegatable && (
           <span className="inline-flex items-center rounded bg-gray-50 px-1.5 py-0.5 text-[10px] font-medium text-gray-500">{t('badge.delegatable')}</span>
         )}
@@ -564,10 +574,11 @@ function AgentCard({
       selected={isSelected}
       onOpen={onClick}
       deleteLabel={t('badge.delete')}
-      onDelete={agent.native ? undefined : () => onDelete(agent.name)}
-      deleteDisabledReason={agent.native ? t('badge.nativeDeleteDisabled') : undefined}
+      onDelete={deleteDisabledReason ? undefined : () => onDelete(agent.name)}
+      deleteDisabledReason={deleteDisabledReason}
       groupButton={<PluginGroupButton grouping={grouping} itemKey={agent.name} iconOnly />}
       editLabel={t('badge.edit')}
+      editDisabledReason={agent.promptProtected ? t('badge.protectedEditDisabled') : undefined}
       testId={`agent-card-${agent.name}`}
     />
   );

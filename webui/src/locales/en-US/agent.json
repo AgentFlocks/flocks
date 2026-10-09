@@ -25,7 +25,10 @@
     "delegatable": "Delegatable",
     "delete": "Delete",
     "edit": "Edit",
-    "nativeDeleteDisabled": "Built-in agents cannot be deleted"
+    "nativeDeleteDisabled": "Built-in agents cannot be deleted",
+    "protected": "Pro built-in",
+    "protectedDeleteDisabled": "Flocks Pro built-in agents cannot be deleted",
+    "protectedEditDisabled": "Built into Flocks Pro; its prompt is protected and cannot be viewed or edited"
   },
   "filter": {
     "all": "All",

@@ -765,6 +765,11 @@ class Agent:
 
     @classmethod
     def register(cls, name: str, info: AgentInfo) -> None:
+        current = cls._custom_agents.get(name)
+        if current is not None and current.prompt_protected and not info.prompt_protected:
+            # A sealed definition is only ever replaced by another sealed one
+            # (its own package re-registering); nothing else may swap it out.
+            raise PermissionError(f"Agent {name} is protected and cannot be replaced")
         cls._custom_agents[name] = info
 
     @classmethod

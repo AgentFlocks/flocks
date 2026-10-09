@@ -167,6 +167,10 @@ class AgentInfo(BaseModel):
 
     model: Optional[AgentModel] = None
     prompt: Optional[str] = None
+    # Set by a package that ships its prompt sealed (e.g. an obfuscated plugin): the
+    # core still runs the prompt, but the API never serves it back and the
+    # definition cannot be edited or deleted through it.
+    prompt_protected: bool = Field(default=False, alias="promptProtected")
     options: Dict[str, Any] = Field(default_factory=dict)
     steps: Optional[int] = Field(default=None, description="Max steps")
 

@@ -31,6 +31,8 @@ export interface PluginCardProps {
   groupButton?: ReactNode;
   extraActions?: ReactNode;
   editLabel: string;
+  /** Set for items that cannot be opened for editing; the card and edit button then stay inert. */
+  editDisabledReason?: string;
   dragProps?: HTMLAttributes<HTMLElement>;
   testId?: string;
 }
@@ -48,18 +50,19 @@ const iconButtonClass = 'inline-flex h-7 w-7 shrink-0 items-center justify-cente
 
 export default function PluginCard({
   icon, title, tags, status, description, emptyDescription, meta, layout = 'cards', selected = false, muted = false,
-  onOpen, deleteLabel, onDelete, deleteDisabledReason, groupButton, extraActions, editLabel, dragProps, testId,
+  onOpen, deleteLabel, onDelete, deleteDisabledReason, groupButton, extraActions, editLabel, editDisabledReason, dragProps, testId,
 }: PluginCardProps) {
   const list = layout === 'list';
   const stop = (event: MouseEvent) => event.stopPropagation();
   const showDelete = onDelete !== undefined || deleteDisabledReason !== undefined;
+  const canOpen = editDisabledReason === undefined;
 
   return (
     <article
       {...dragProps}
       data-testid={testId}
-      onClick={onOpen}
-      className={`group relative flex h-full min-w-0 cursor-pointer flex-col rounded-xl border bg-white transition-all duration-150 ${list ? 'lg:flex-row lg:items-center' : ''} ${
+      onClick={canOpen ? onOpen : undefined}
+      className={`group relative flex h-full min-w-0 ${canOpen ? 'cursor-pointer' : ''} flex-col rounded-xl border bg-white transition-all duration-150 ${list ? 'lg:flex-row lg:items-center' : ''} ${
         selected ? 'border-slate-400 shadow-md ring-2 ring-slate-200' : 'border-gray-200 hover:border-gray-300 hover:shadow-md'
       } ${muted ? 'opacity-75' : ''}`}
     >
@@ -98,7 +101,14 @@ export default function PluginCard({
         )}
         {groupButton}
         {extraActions}
-        <button type="button" onClick={onOpen} title={editLabel} aria-label={editLabel} className={iconButtonClass}>
+        <button
+          type="button"
+          disabled={!canOpen}
+          onClick={canOpen ? onOpen : undefined}
+          title={editDisabledReason || editLabel}
+          aria-label={editLabel}
+          className={iconButtonClass}
+        >
           <Pencil className="h-3.5 w-3.5" />
         </button>
       </div>

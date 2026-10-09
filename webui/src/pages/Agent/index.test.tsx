@@ -43,6 +43,9 @@ vi.mock('react-i18next', () => ({
       'badge.delegatable': '可委托',
       'badge.delete': '删除',
       'badge.edit': '编辑',
+      'badge.protected': 'Pro 内置',
+      'badge.protectedDeleteDisabled': 'Pro 内置不可删',
+      'badge.protectedEditDisabled': '提示词受保护',
       'form.enabled': '启用',
       'form.enabledTip': '允许委派',
       'form.disabledTip': '禁止委派',
@@ -248,6 +251,42 @@ describe('AgentPage business groups and native layouts', () => {
     expect(screen.getByText('still-visible')).toBeInTheDocument();
     expect(nativeAPI.update).toHaveBeenCalledWith('still-visible', { group: null });
     expect(nativeAPI.refresh).not.toHaveBeenCalled();
+  });
+});
+
+describe('AgentPage protected prompts', () => {
+  it('shows a sealed agent as built in, without opening it for editing or deleting it', async () => {
+    const sealed = makeAgent({ name: 'code-security', nameCn: '代码安全审计', mode: 'primary', promptProtected: true, group: 'Engineering' });
+    const custom = makeAgent({ name: 'analyst', nameCn: '分析智能体', mode: 'primary', group: 'Engineering' });
+    useInventory([sealed, custom]);
+    render(<AgentPage />);
+    const card = await screen.findByTestId('agent-card-code-security');
+    expect(within(card).getByText('Pro 内置')).toBeInTheDocument();
+    const edit = within(card).getByRole('button', { name: '编辑' });
+    const remove = within(card).getByRole('button', { name: '删除' });
+    expect(edit).toBeDisabled();
+    expect(edit).toHaveAttribute('title', '提示词受保护');
+    expect(remove).toBeDisabled();
+    expect(remove).toHaveAttribute('title', 'Pro 内置不可删');
+    fireEvent.click(edit);
+    fireEvent.click(within(card).getByText('代码安全审计'));
+    expect(screen.queryByTestId('agent-sheet')).not.toBeInTheDocument();
+    expect(nativeAPI.delete).not.toHaveBeenCalled();
+
+    const other = screen.getByTestId('agent-card-analyst');
+    fireEvent.click(within(other).getByRole('button', { name: '编辑' }));
+    expect(screen.getByTestId('agent-sheet')).toBeInTheDocument();
+  });
+
+  it('does not offer the delegation toggle on a sealed sub-agent', async () => {
+    const sealed = makeAgent({ name: 'sealed-sub', mode: 'subagent', promptProtected: true, delegatable: false });
+    const custom = makeAgent({ name: 'open-sub', mode: 'subagent', delegatable: false });
+    useInventory([sealed, custom]);
+    render(<AgentPage />);
+    const sealedCard = await screen.findByTestId('agent-card-sealed-sub');
+    expect(within(sealedCard).queryByRole('switch')).not.toBeInTheDocument();
+    expect(within(screen.getByTestId('agent-card-open-sub')).getByRole('switch')).toBeInTheDocument();
+    expect(nativeAPI.setDelegatable).not.toHaveBeenCalled();
   });
 });
 
