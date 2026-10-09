@@ -633,7 +633,12 @@ def test_windows_port_is_in_use_confirms_empty_pid_lookup_with_bind(
     assert service_manager.port_is_in_use(5173, listeners=[]) is expected
 
 
-def test_bind_port_available_checks_all_ipv4_interfaces(monkeypatch) -> None:
+@pytest.mark.parametrize(
+    ("platform", "reuse_expected"),
+    [("linux", True), ("darwin", False), ("win32", False)],
+)
+def test_bind_port_available_checks_all_ipv4_interfaces(monkeypatch, platform: str, reuse_expected: bool) -> None:
+    monkeypatch.setattr(service_manager.sys, "platform", platform)
     binds: list[tuple[str, int]] = []
     sockopts: list[tuple[object, ...]] = []
 
@@ -654,7 +659,43 @@ def test_bind_port_available_checks_all_ipv4_interfaces(monkeypatch) -> None:
 
     assert service_manager._bind_port_available(8000) is True
     assert binds == [("0.0.0.0", 8000)]
-    assert sockopts == []
+    # Linux probes like uvicorn binds (SO_REUSEADDR, still refused by any listener);
+    # elsewhere SO_REUSEADDR could bind over a live listener, so the probe stays plain
+    expected = [(service_manager.socket.SOL_SOCKET, service_manager.socket.SO_REUSEADDR, 1)] if reuse_expected else []
+    assert sockopts == expected
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux TIME_WAIT / SO_REUSEADDR semantics")
+def test_bind_port_available_ignores_time_wait_but_not_a_listener() -> None:
+    import socket
+
+    def listener(host: str) -> socket.socket:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)  # what uvicorn does
+        sock.bind((host, 0))
+        sock.listen()
+        return sock
+
+    # a live listener on a specific address still blocks the wildcard probe (#394)
+    with listener("127.0.0.1") as other:
+        assert service_manager._bind_port_available(other.getsockname()[1]) is False
+
+    server = listener("0.0.0.0")
+    port = server.getsockname()[1]
+    assert service_manager._bind_port_available(port) is False
+    # a browser tab's open event stream when the backend stops: the server closes first,
+    # its side of the connection lingers in TIME_WAIT after the listener is gone
+    client = socket.create_connection(("127.0.0.1", port))
+    conn, _ = server.accept()
+    conn.close()
+    assert client.recv(1) == b""
+    client.close()
+    server.close()
+    plain = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    with pytest.raises(OSError):
+        plain.bind(("0.0.0.0", port))  # the old probe called this port busy for a minute
+    plain.close()
+    assert service_manager._bind_port_available(port) is True
 
 
 def test_wait_for_http_rejects_unreachable_responses(monkeypatch) -> None:
