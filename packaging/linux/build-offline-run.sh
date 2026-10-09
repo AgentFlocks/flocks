@@ -2,11 +2,15 @@
 #
 # Build the Linux offline installer: a single self-extracting `flocks-offline.run`
 # that carries Python, Node.js, uv, a prebuilt virtualenv, the built WebUI and
-# (optionally) a Pro bundle. Run it on the target distribution/architecture, e.g.
-# inside a `quay.io/centos/centos:stream9` container for CentOS Stream 9 x86_64.
+# (optionally) a Pro bundle. Run it on the oldest distribution the package must support,
+# for the architecture it is for: the `build_image` of versions.manifest.json (RHEL 8.10 /
+# UBI 8.10, glibc 2.28). The build fails when a shipped binary needs a newer glibc than
+# `glibc_floor` (see glibc_floor.py), which is what happens when built on a newer distribution.
 #
-# The virtualenv is built *at the final install path* (default /opt/flocks) because
-# venvs are not relocatable, so the staging root must be writable and empty.
+# The virtualenv is built *at the default install path* (default /opt/flocks) because
+# venvs are not relocatable, so the staging root must be writable and empty. The few
+# places that name that path are listed in installer/relocate.list; install.sh rewrites
+# them when the operator installs somewhere else (FLOCKS_OFFLINE_BASE).
 #
 # Usage:
 #   packaging/linux/build-offline-run.sh [--repo-root DIR] [--output-dir DIR]
@@ -48,7 +52,7 @@ info() { printf '[build-offline-run] %s\n' "$*"; }
 fail() { printf '[build-offline-run] error: %s\n' "$*" >&2; exit 1; }
 
 usage() {
-  sed -n '2,24p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '2,26p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 while [[ $# -gt 0 ]]; do
@@ -281,6 +285,12 @@ fi
 find "$INSTALL_ROOT/flocks/webui/dist" -exec touch {} +
 fi  # REPACK build guard
 
+# every binary that ships (toolchain, venv wheels) must load on the oldest supported glibc /
+# libstdc++; a wheel picked for a newer build host only fails on the customer's machine
+info "checking shipped binaries against glibc_floor"
+"$PYTHON_BIN" "$SCRIPT_DIR/glibc_floor.py" --manifest "$MANIFEST" "$INSTALL_ROOT/tools" "$INSTALL_ROOT/flocks" \
+  || fail "some shipped binaries need a newer glibc / libstdc++ than glibc_floor in $MANIFEST; build in its build_image"
+
 # ---------------------------------------------------------------------------
 # optional Pro bundle (manifest.json + wheels/), consumed via FLOCKS_PRO_BUNDLE_DIR
 # ---------------------------------------------------------------------------
@@ -326,8 +336,12 @@ fi
 mkdir -p "$INSTALL_ROOT/installer"
 cp "$SCRIPT_DIR/installer/install.sh" "$SCRIPT_DIR/installer/migrate_data.py" "$SCRIPT_DIR/installer/flocks.service" \
    "$SCRIPT_DIR/installer/flocks.env.template" "$SCRIPT_DIR/installer/flocks-cli-wrapper.sh" \
+   "$SCRIPT_DIR/installer/relocate.py" \
    "$INSTALL_ROOT/installer/"
 chmod 755 "$INSTALL_ROOT/installer/install.sh" "$INSTALL_ROOT/installer/flocks-cli-wrapper.sh"
+# what names the build root inside the venv and the toolchain, for installs somewhere else; fails
+# when a binary other than a .pyc names it (nothing to rewrite safely there)
+"$PYTHON_BIN" "$INSTALL_ROOT/installer/relocate.py" scan "$INSTALL_ROOT" "$INSTALL_ROOT" "$INSTALL_ROOT/installer/relocate.list"
 "$PYTHON_BIN" - "$INSTALL_ROOT/versions.json" <<PY
 import json, sys
 json.dump({
@@ -358,11 +372,109 @@ if command -v pigz >/dev/null; then
 fi
 # --target: extract next to the final location (same filesystem, no /tmp space needed);
 # install.sh moves the payload into place and removes the then-empty staging directory.
+# makeself bakes --target into its header. With FLOCKS_OFFLINE_BASE=<base> the install goes to
+# <base>/flocks/app (install.sh set_layout), so the payload has to land on that disk too, and
+# nothing may be created under the default root: a copy of the stock header re-points targetdir
+# when the variable is set. What can be told before extracting is refused there, so no one is left
+# with gigabytes of payload for a run that cannot work: a base that does not exist, is not
+# absolute, sits on a noexec mount or around the default root, or an install elsewhere on this
+# machine (install.sh checks the same for runs of an already extracted payload).
+MAKESELF_HEADER="$CACHE_DIR/makeself/makeself-header-flocks.sh"
+python3 - "$CACHE_DIR/makeself/makeself-header.sh" "$MAKESELF_HEADER" <<'PY'
+import sys
+source, target = sys.argv[1], sys.argv[2]
+text = open(source, encoding="utf-8").read()
+anchor = 'targetdir="$archdirname"\n'
+if text.count(anchor) != 1:
+    sys.exit(f"makeself header: expected exactly one {anchor!r}, the makeself version changed")
+# the header template is an unquoted heredoc: \$, \` and \\ are expanded when the .run runs
+addition = r"""# flocks: FLOCKS_OFFLINE_BASE moves the extraction next to <base>/flocks/app (see install.sh)
+case "\${FLOCKS_OFFLINE_BASE:-}" in
+    "") ;;
+    /)
+        echo "FLOCKS_OFFLINE_BASE 不能是 /" >&2
+        exit 1 ;;
+    /?*)
+        flocks_base="\${FLOCKS_OFFLINE_BASE%/}"
+        flocks_build_root="\${targetdir%/.staging}"
+        if test ! -d "\$flocks_base"; then
+            echo "FLOCKS_OFFLINE_BASE=\$FLOCKS_OFFLINE_BASE 不存在，请先建好（或挂载好）这个目录再安装" >&2
+            exit 1
+        fi
+        case "\$flocks_base/flocks/app/" in
+            "\$flocks_build_root"/*)
+                echo "FLOCKS_OFFLINE_BASE=\$FLOCKS_OFFLINE_BASE 会和默认安装目录 \$flocks_build_root 套在一起，请换一个目录" >&2
+                exit 1 ;;
+        esac
+        if command -v findmnt >/dev/null 2>&1 && findmnt -no OPTIONS --target "\$flocks_base" 2>/dev/null | grep -qw noexec; then
+            echo "FLOCKS_OFFLINE_BASE=\$FLOCKS_OFFLINE_BASE 所在分区挂载了 noexec，程序不能从这里运行，请换一个目录" >&2
+            exit 1
+        fi
+        # an install elsewhere, found like install.sh installed_layout does: the CLI wrapper, else the
+        # systemd unit (both only with our marker), else the default root. It counts when the program is
+        # there, or when an install / upgrade stopped half-way (env file or a parked *.bak-* program left).
+        # FLOCKS_OFFLINE_WRAPPER / FLOCKS_OFFLINE_UNIT_FILE are for tests. Names next to CJK text are braced:
+        # bash 3.2 (macOS /bin/sh) reads a following UTF-8 lead byte into the name.
+        flocks_wrapper="\${FLOCKS_OFFLINE_WRAPPER:-/usr/local/bin/flocks}"
+        flocks_unit="\${FLOCKS_OFFLINE_UNIT_FILE:-/etc/systemd/system/flocks.service}"
+        flocks_root=""
+        flocks_env=""
+        flocks_leftovers=""
+        if test -f "\$flocks_wrapper" && grep -q '^# Run the packaged Flocks CLI' "\$flocks_wrapper" 2>/dev/null; then
+            flocks_leftovers="\$flocks_wrapper"
+            flocks_cli=\`sed -n 's/^FLOCKS_CLI="\\(.*\\)"\$/\\1/p' "\$flocks_wrapper" 2>/dev/null | head -n 1\`
+            case "\$flocks_cli" in
+                /*/flocks/.venv/bin/flocks)
+                    flocks_root="\${flocks_cli%/flocks/.venv/bin/flocks}"
+                    flocks_env=\`sed -n 's/^ENV_FILE="\\(.*\\)"\$/\\1/p' "\$flocks_wrapper" 2>/dev/null | head -n 1\` ;;
+            esac
+        fi
+        if test -f "\$flocks_unit" && grep -q '(offline installation)' "\$flocks_unit" 2>/dev/null; then
+            flocks_leftovers="\${flocks_leftovers:+\$flocks_leftovers }\$flocks_unit"
+            if test -z "\$flocks_root"; then
+                flocks_root=\`sed -n 's|^WorkingDirectory=\\(/.*\\)/flocks\$|\\1|p' "\$flocks_unit" 2>/dev/null | head -n 1\`
+                flocks_env=\`sed -n 's/^EnvironmentFile=//p' "\$flocks_unit" 2>/dev/null | head -n 1\`
+            fi
+        fi
+        flocks_state=""
+        if test -n "\$flocks_root"; then
+            if test -f "\$flocks_root/flocks/pyproject.toml"; then
+                flocks_state="installed"
+            elif { test -n "\$flocks_env" && test -f "\$flocks_env"; } || ls -d "\$flocks_root"/flocks.bak-* >/dev/null 2>&1; then
+                flocks_state="unfinished"
+            fi
+        fi
+        if test -z "\$flocks_state" && test -f "\$flocks_build_root/flocks/pyproject.toml"; then
+            flocks_root="\$flocks_build_root"
+            flocks_state="installed"
+        fi
+        if test -n "\$flocks_state" && test "\$flocks_root" != "\$flocks_base/flocks/app"; then
+            if test "\$flocks_state" = "installed"; then
+                echo "这台机器上已经装了 Flocks（\${flocks_root}），安装包不会把它搬到 \$flocks_base/flocks/app；升级请去掉 FLOCKS_OFFLINE_BASE 重跑，会按原目录升级。本次未做任何改动" >&2
+                exit 1
+            fi
+            if test -n "\$flocks_env" && test -f "\$flocks_env"; then flocks_leftovers="\${flocks_leftovers:+\$flocks_leftovers }\$flocks_env"; fi
+            echo "这台机器上已经装了 Flocks（\${flocks_root}，上次安装或升级没有做完），安装包不会把它搬到 \$flocks_base/flocks/app；去掉 FLOCKS_OFFLINE_BASE 重跑会在原目录接着装。确定不要旧实例了，先把 \$flocks_leftovers 改名挪走再装。本次未做任何改动" >&2
+            exit 1
+        fi
+        targetdir="\$flocks_base/flocks/app/.staging" ;;
+    *)
+        echo "FLOCKS_OFFLINE_BASE=\$FLOCKS_OFFLINE_BASE 需要是绝对路径，例如 /data" >&2
+        exit 1 ;;
+esac
+"""
+open(target, "w", encoding="utf-8").write(text.replace(anchor, anchor + addition))
+PY
 "$MAKESELF" "${MAKESELF_COMPRESS[@]}" --needroot --nox11 --sha256 \
+  --header "$MAKESELF_HEADER" \
   --tar-quietly --tar-extra "--owner=root --group=root --numeric-owner" \
   --target "$INSTALL_ROOT/.staging" \
   "$INSTALL_ROOT" "$OUT_RUN" \
   "Flocks offline installer ${CORE_VERSION} (${ARCH})" ./installer/install.sh
+# grep the file itself: `head -c … | grep -q` loses to SIGPIPE under pipefail whenever grep
+# answers before head has written everything (that is what failed the aarch64 build)
+grep -aq 'targetdir="\$flocks_base/flocks/app/.staging"' "$OUT_RUN" \
+  || fail "the FLOCKS_OFFLINE_BASE extraction did not make it into the .run header"
 ( cd "$OUTPUT_DIR" && sha256sum "$RUN_NAME" > "$RUN_NAME.sha256" )
 cp "$INSTALL_ROOT/versions.json" "$OUTPUT_DIR/versions.json"
 info "done: $OUT_RUN ($(du -h "$OUT_RUN" | awk '{print $1}'))"

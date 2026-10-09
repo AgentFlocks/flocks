@@ -23,7 +23,7 @@ import { useTranslation } from 'react-i18next';
 import LoadingSpinner from './LoadingSpinner';
 import { QuestionTool, type QuestionItem } from './QuestionTool';
 import { PermissionApprovalDialog, type PermissionDecision } from './PermissionApprovalDialog';
-import DelegateTaskCard, { isDelegateTool, shouldRenderDelegateTaskCard } from './DelegateTaskCard';
+import DelegateTaskCard, { extractDelegateInfo, isDelegateTool, shouldRenderDelegateTaskCard } from './DelegateTaskCard';
 import CommandDropdown, { isSlashCommandName, parseSlashCommand } from './CommandDropdown';
 import ImageLightbox from './ImageLightbox';
 import { TodoList, buildTodoSummary, pickTodoEntries } from './TodoList';
@@ -131,6 +131,37 @@ type ComposerReferenceKind = 'subagent' | 'skill' | 'workflow';
 interface ComposerReference {
   kind: ComposerReferenceKind;
   value: string;
+}
+
+const AGENT_AVATAR_COLORS: Record<string, string> = {
+  rex: 'bg-red-600',
+  'rex-junior': 'bg-violet-600',
+  explore: 'bg-teal-700',
+  librarian: 'bg-amber-700',
+  oracle: 'bg-blue-600',
+  prometheus: 'bg-orange-700',
+  hephaestus: 'bg-slate-600',
+  'multimodal-looker': 'bg-pink-700',
+  'self-improve': 'bg-lime-700',
+};
+const CUSTOM_AGENT_AVATAR_COLORS = Object.values(AGENT_AVATAR_COLORS);
+
+function getAgentAvatarColor(agent: string): string {
+  const name = agent.trim().toLowerCase().replace(/_/g, '-');
+  if (Object.prototype.hasOwnProperty.call(AGENT_AVATAR_COLORS, name)) return AGENT_AVATAR_COLORS[name];
+  // Custom agents keep the same color across sessions, reloads and message order.
+  let hash = 0;
+  for (const character of name) hash = (Math.imul(hash, 31) + character.codePointAt(0)!) >>> 0;
+  return CUSTOM_AGENT_AVATAR_COLORS[hash % CUSTOM_AGENT_AVATAR_COLORS.length];
+}
+
+function getAgentSender(parts: MessagePart[]) {
+  for (const part of parts) {
+    const sender = part.synthetic && part.metadata?.communication;
+    if (sender?.source_type === 'agent' && typeof sender.source_agent === 'string'
+      && typeof sender.source_session_id === 'string') return sender;
+  }
+  return undefined;
 }
 
 function getMessagePartDisplayText(part: MessagePart, hideTaskMetadata = false): string {
@@ -1087,7 +1118,7 @@ export function mergeConsecutiveAssistantMessages(messages: Message[]): MergedMe
       continue;
     }
 
-    if (msg.role !== 'assistant') {
+    if (msg.role !== 'assistant' || getAgentSender(msg.parts)) {
       result.push(msg);
       continue;
     }
@@ -1096,6 +1127,7 @@ export function mergeConsecutiveAssistantMessages(messages: Message[]): MergedMe
     if (
       last &&
       last.role === 'assistant' &&
+      !getAgentSender(last.parts) &&
       last._merged &&
       last.finish !== 'summary' &&
       !!last.compacted === !!msg.compacted
@@ -2303,6 +2335,74 @@ export default function SessionChat({
   } =
     useSessionMessages(sessionId || undefined);
 
+  // A historical receipt describes the submission, not the child's *current*
+  // activity. Receipts identify direct children; runtime ancestry also includes
+  // grandchildren and descendants whose receipts are outside the loaded page.
+  const childSessionIds = useMemo(() => [...new Set(messages.flatMap((message) => (
+    message.sessionID === sessionId && message.role === 'assistant'
+      ? message.parts.flatMap((part) => {
+          if ((part.type !== 'tool' && part.type !== 'toolCall') || !shouldRenderDelegateTaskCard(part)) return [];
+          const childId = extractDelegateInfo(part.state || {}, '').childSessionId;
+          return childId && childId !== sessionId ? [childId] : [];
+        })
+      : []
+  )))].sort(), [messages, sessionId]);
+  const childStatusScope = JSON.stringify([sessionId, childSessionIds]);
+  const childSessionIdsRef = useRef(childSessionIds);
+  childSessionIdsRef.current = childSessionIds;
+  const currentChildStatusScopeRef = useRef(childStatusScope);
+  currentChildStatusScopeRef.current = childStatusScope;
+  const descendantSessionIdsRef = useRef(new Set<string>());
+  const childStatusRequestRef = useRef(0);
+  const childStatusRevisionRef = useRef<Record<string, number>>({});
+  const [childStatuses, setChildStatuses] = useState<{
+    scope: string;
+    active: Record<string, boolean>;
+  }>({ scope: childStatusScope, active: {} });
+  const hasRunningDelegates = childStatuses.scope === childStatusScope
+    && Object.values(childStatuses.active).some(Boolean);
+  const canStop = Boolean(sessionId) && (isStreaming || hasRunningDelegates);
+
+  const refreshChildStatuses = useCallback(async () => {
+    const ids = childSessionIdsRef.current;
+    if (!sessionId) return;
+    const request = ++childStatusRequestRef.current;
+    const revisions = { ...childStatusRevisionRef.current };
+    try {
+      const response = await client.get('/api/session/status');
+      if (request !== childStatusRequestRef.current || currentChildStatusScopeRef.current !== childStatusScope) return;
+      const tracked = new Set([...ids, ...descendantSessionIdsRef.current]);
+      for (const [id, status] of Object.entries(response.data || {})) {
+        const ancestors = (status as { ancestorSessionIDs?: string[] })?.ancestorSessionIDs;
+        if (Array.isArray(ancestors) && ancestors.includes(sessionId)) {
+          tracked.add(id);
+          descendantSessionIdsRef.current.add(id);
+        }
+      }
+      setChildStatuses((current) => {
+        const active = current.scope === childStatusScope ? { ...current.active } : {};
+        for (const id of tracked) {
+          // An SSE update received during the request is newer than its snapshot.
+          if ((childStatusRevisionRef.current[id] || 0) !== (revisions[id] || 0)) continue;
+          active[id] = isActiveSessionStatus(response.data?.[id]);
+        }
+        return { scope: childStatusScope, active };
+      });
+    } catch {
+      // Keep the last known activity until the next status event or reconnect.
+    }
+  }, [childStatusScope, sessionId]);
+
+  useEffect(() => {
+    childStatusRequestRef.current += 1;
+    childStatusRevisionRef.current = {};
+    descendantSessionIdsRef.current = new Set();
+    setChildStatuses((current) => current.scope === childStatusScope
+      ? current : { scope: childStatusScope, active: {} });
+    void refreshChildStatuses();
+    return () => { childStatusRequestRef.current += 1; };
+  }, [childStatusScope, refreshChildStatuses]);
+
   useEffect(() => {
     setSubmittedModelPromptSessionId(null);
     clearPendingContextUsage();
@@ -2535,6 +2635,29 @@ export default function SessionChat({
 
   const handleSSEEvent = useCallback(
     (event: SSEChatEvent) => {
+      // The same SSE connection also carries child activity. Do not route child
+      // events through the parent's message/streaming action reducer.
+      const childId = event.properties?.sessionID;
+      if (
+        event.type === 'session.status'
+        && typeof childId === 'string'
+        && childId !== sessionId
+        && (childSessionIdsRef.current.includes(childId)
+          || descendantSessionIdsRef.current.has(childId)
+          || (sessionId && Array.isArray(event.properties?.ancestorSessionIDs)
+            && event.properties.ancestorSessionIDs.includes(sessionId)))
+        && typeof event.properties?.status?.type === 'string'
+      ) {
+        descendantSessionIdsRef.current.add(childId);
+        childStatusRevisionRef.current[childId] = (childStatusRevisionRef.current[childId] || 0) + 1;
+        setChildStatuses((current) => ({
+          scope: childStatusScope,
+          active: {
+            ...(current.scope === childStatusScope ? current.active : {}),
+            [childId]: isActiveSessionStatus(event.properties?.status),
+          },
+        }));
+      }
       // Forward only global events or events relevant to this chat. The global
       // stream can be very noisy when multiple sessions run in parallel.
       if (shouldForwardSSEEventToParent(event, sessionId)) onSSEEvent?.(event);
@@ -2716,7 +2839,10 @@ export default function SessionChat({
         }
         case 'message-part-updated': {
           const part = action.part as Pick<MessagePart, 'id' | 'type' | 'state'>;
-          setRetryStatus((current) => (current ? null : current));
+          // A finished tool part can be a sub-agent's late receipt while this
+          // session is still backing off; only fresh output ends the retry.
+          const finishedToolPart = (part.type === 'tool' || part.type === 'toolCall') && !isActiveToolPart(part);
+          if (!finishedToolPart) setRetryStatus((current) => (current ? null : current));
           if (part.id) {
             if (isActiveToolPart(part)) {
               activeToolPartIdsRef.current.add(part.id);
@@ -2803,6 +2929,7 @@ export default function SessionChat({
     },
     [
       sessionId,
+      childStatusScope,
       updateMessage,
       updateMessagePart,
       removeMessage,
@@ -2910,6 +3037,7 @@ export default function SessionChat({
     onReconnect: () => {
       if (!sessionId) return;
       void reconcileSessionStatusAfterReconnect();
+      void refreshChildStatuses();
       refetch();
       void refreshContextUsage();
       fetchPromptQueue();
@@ -3032,7 +3160,6 @@ export default function SessionChat({
     if (!sessionId || loading) return;
     if (statusCheckedRef.current === sessionId) return;
     statusCheckedRef.current = sessionId;
-
     // The poll is in flight across awaits, and this closure keeps the
     // sessionId it started with. By the time it lands the consumer may have
     // swapped sessions (callers like WorkflowDetail/ChatTab reuse this
@@ -3041,11 +3168,12 @@ export default function SessionChat({
     // a stale response apart, the same way
     // reconcileSessionStatusAfterReconnect does.
     const statusRevision = sessionStatusRevisionRef.current;
+    let cancelled = false;
 
     const checkStatus = async () => {
       try {
         const res = await client.get('/api/session/status');
-        if (statusRevision !== sessionStatusRevisionRef.current) return;
+        if (cancelled || statusRevision !== sessionStatusRevisionRef.current) return;
         const status = res.data[sessionId];
         if (status?.type === 'busy' && !suppressStreamingUntilIdleRef.current) {
           sessionBusyRef.current = true;
@@ -3080,12 +3208,10 @@ export default function SessionChat({
           sessionBusyRef.current = false;
         }
       } catch {
-        if (statusRevision !== sessionStatusRevisionRef.current) return;
-        if (messages.length > 0) {
-          const lastMsg = messages[messages.length - 1];
-          if (lastMsg.role === 'assistant' && !lastMsg.finish) {
-            setIsStreaming(true);
-          }
+        if (cancelled || statusRevision !== sessionStatusRevisionRef.current) return;
+        const lastMsg = messagesRef.current[messagesRef.current.length - 1];
+        if (lastMsg?.role === 'assistant' && !lastMsg.finish) {
+          setIsStreaming(true);
         }
       }
 
@@ -3096,8 +3222,9 @@ export default function SessionChat({
         console.warn('[SessionChat] Failed to recover pending questions:', err);
       }
     };
-    checkStatus();
-  }, [sessionId, loading, messages, fetchPendingQuestions]);
+    void checkStatus();
+    return () => { cancelled = true; };
+  }, [sessionId, loading, fetchPendingQuestions]);
 
   // A remote proxy or a reconnect boundary can delay or lose the one-shot
   // question.asked event. Reconcile only while the session is active; the
@@ -3896,10 +4023,10 @@ export default function SessionChat({
   const handleAbort = useCallback(async () => {
     if (!sessionId) return;
     // Record the ID of the message being aborted so we can ignore its finish event later.
-    const lastAsstMsg = [...messagesRef.current].reverse().find(
+    const lastAsstMsg = isStreaming ? [...messagesRef.current].reverse().find(
       (m) => m.role === 'assistant' && !m.finish,
-    );
-    const shouldRestoreActivity = isStreaming || sending || sessionBusyRef.current || Boolean(lastAsstMsg?.id);
+    ) : undefined;
+    const wasSessionBusy = sessionBusyRef.current;
     abortedMessageIdRef.current = lastAsstMsg?.id || null;
     abortingRef.current = true;
     suppressStreamingUntilIdleRef.current = true;
@@ -3917,11 +4044,9 @@ export default function SessionChat({
       abortingRef.current = false;
       abortedMessageIdRef.current = null;
       suppressStreamingUntilIdleRef.current = false;
-      if (shouldRestoreActivity) {
-        sessionBusyRef.current = true;
-        setIsStreaming(true);
-        if (sending) setSending(true);
-      }
+      sessionBusyRef.current = wasSessionBusy;
+      setIsStreaming(isStreaming);
+      setSending(sending);
     }
   }, [isStreaming, markMessageStopped, sending, sessionId]);
 
@@ -4241,7 +4366,7 @@ export default function SessionChat({
 
     for (let idx = 0; idx < merged.length; idx++) {
       const msg = merged[idx];
-      if (msg.parts.length > 0 && msg.parts.every(p => p.synthetic)) {
+      if (msg.parts.length > 0 && msg.parts.every(p => p.synthetic) && !getAgentSender(msg.parts)) {
         skipIndices.add(idx);
         continue;
       }
@@ -4276,6 +4401,15 @@ export default function SessionChat({
     writeDismissedGoalKey(sessionId, goalKey);
     setDismissedGoalKey(goalKey);
   }, [sessionId, visibleGoalBanner]);
+  const stopButton = canStop && (
+    <button
+      onClick={handleAbort}
+      title={t('chat.stopTitle')}
+      className="inline-flex h-8 w-8 items-center justify-center rounded-full bg-zinc-800 text-white hover:bg-zinc-900 shadow-sm transition-all"
+    >
+      <Square className="w-3 h-3 fill-current" />
+    </button>
+  );
 
   return (
     <div className={`flex flex-col min-h-0 ${className}`}>
@@ -4385,7 +4519,7 @@ export default function SessionChat({
               <div className={`group relative ${!compact ? 'w-full' : ''} flex`}>
                 <div className={compact ? `flex gap-2.5 ${getMessageGroupClassName({ compact, isUser: false, isEditing: false })}` : 'flex w-full min-w-0'}>
                   <span
-                    className={`inline-flex items-center justify-center rounded-full bg-red-500 text-white font-bold shadow-sm ring-2 ring-white flex-shrink-0 dark:ring-zinc-950 ${
+                    className={`inline-flex items-center justify-center rounded-full ${getAgentAvatarColor(pendingAgentName)} text-white font-bold shadow-sm ring-2 ring-white flex-shrink-0 dark:ring-zinc-950 ${
                       compact ? 'w-7 h-7 text-xs' : 'w-8 h-8 text-sm'
                     } ${compact ? '' : 'absolute -left-10 top-1'}`}
                   >
@@ -4459,7 +4593,7 @@ export default function SessionChat({
               <div className={`group relative ${!compact ? 'w-full' : ''} flex`}>
                 <div className={compact ? `flex gap-2.5 ${getMessageGroupClassName({ compact, isUser: false, isEditing: false })}` : 'flex w-full min-w-0'}>
                   <span
-                    className={`inline-flex items-center justify-center rounded-full bg-red-500 text-white font-bold shadow-sm ring-2 ring-white flex-shrink-0 dark:ring-zinc-950 ${
+                    className={`inline-flex items-center justify-center rounded-full ${getAgentAvatarColor(pendingAgentName)} text-white font-bold shadow-sm ring-2 ring-white flex-shrink-0 dark:ring-zinc-950 ${
                       compact ? 'w-7 h-7 text-xs' : 'w-8 h-8 text-sm'
                     } ${compact ? '' : 'absolute -left-10 top-1'}`}
                   >
@@ -4514,6 +4648,13 @@ export default function SessionChat({
               </button>
             ))}
           </div>
+        </div>
+      )}
+
+      {/* Live detail views can stop work without exposing a follow-up composer. */}
+      {hideInput && live && canStop && (
+        <div className="flex flex-shrink-0 justify-end px-4 py-3">
+          {stopButton}
         </div>
       )}
 
@@ -4960,24 +5101,15 @@ export default function SessionChat({
                   )}
 
                   {isStreaming ? (
-                    <>
-                      {canSend && (
-                        <button
-                          onClick={handleSend}
-                          title={hasUploadingFiles ? t('chat.upload.waiting') : t('chat.queue.enqueue')}
-                          className="inline-flex h-8 w-8 items-center justify-center rounded-full bg-sky-500 text-white shadow-sm transition-all hover:bg-sky-600 hover:shadow"
-                        >
-                          {sending || hasUploadingFiles ? <Loader2 className="w-4 h-4 animate-spin" /> : <ArrowUp className="w-4 h-4" strokeWidth={2.5} />}
-                        </button>
-                      )}
+                    canSend && (
                       <button
-                        onClick={handleAbort}
-                        title={t('chat.stopTitle')}
-                        className="inline-flex h-8 w-8 items-center justify-center rounded-full bg-zinc-800 text-white hover:bg-zinc-900 shadow-sm transition-all"
+                        onClick={handleSend}
+                        title={hasUploadingFiles ? t('chat.upload.waiting') : t('chat.queue.enqueue')}
+                        className="inline-flex h-8 w-8 items-center justify-center rounded-full bg-sky-500 text-white shadow-sm transition-all hover:bg-sky-600 hover:shadow"
                       >
-                        <Square className="w-3 h-3 fill-current" />
+                        {sending || hasUploadingFiles ? <Loader2 className="w-4 h-4 animate-spin" /> : <ArrowUp className="w-4 h-4" strokeWidth={2.5} />}
                       </button>
-                    </>
+                    )
                   ) : (
                     <button
                       onClick={handleSend}
@@ -4992,6 +5124,7 @@ export default function SessionChat({
                       {sending || hasUploadingFiles ? <Loader2 className="w-4 h-4 animate-spin" /> : <ArrowUp className="w-4 h-4" strokeWidth={2.5} />}
                     </button>
                   )}
+                  {stopButton}
                 </div>
             </div>
           </div>
@@ -5312,8 +5445,9 @@ function ChatMessageBubbleInner({
   onOpenContext,
 }: ChatMessageBubbleProps) {
   const { t, i18n } = useTranslation('session');
-  const isUser = message.role === 'user';
   const parts: MessagePart[] = Array.isArray(message.parts) ? message.parts : [];
+  const sender = getAgentSender(parts);
+  const isUser = message.role === 'user' && !sender;
   const processElapsedClock = useProcessElapsedClock(isActive && collapseIntermediateSteps);
   const { getPartExpanded, togglePart } = useReasoningToggle(parts, message.finish);
   // Lightbox state for inline image previews. Browsers block top-level
@@ -5332,13 +5466,13 @@ function ChatMessageBubbleInner({
       </div>
     );
   }
-  const rawAgentName = message.agent || 'rex';
+  const rawAgentName = sender?.source_agent || message.agent || 'rex';
   const agentName = rawAgentName.charAt(0).toUpperCase() + rawAgentName.slice(1);
 
   const getTextContent = () => {
     const text = parts
       .filter((p) => p.type === 'text' && p.text)
-      .map((p) => p.text)
+      .map((p) => sender ? getMessagePartDisplayText(p) : p.text)
       .join('\n\n');
     return isUser ? text : stripTaskMetadata(text);
   };
@@ -5395,7 +5529,7 @@ function ChatMessageBubbleInner({
       <User className={compact ? 'w-3 h-3' : 'w-3.5 h-3.5'} />
     </span>
   ) : (
-    <span className={`inline-flex items-center justify-center rounded-full bg-red-500 text-white font-bold shadow-sm ring-2 ring-white flex-shrink-0 dark:ring-zinc-950 ${avatarSize}`}>
+    <span className={`inline-flex items-center justify-center rounded-full ${getAgentAvatarColor(rawAgentName)} text-white font-bold shadow-sm ring-2 ring-white flex-shrink-0 dark:ring-zinc-950 ${avatarSize}`}>
       {agentName.charAt(0).toUpperCase()}
     </span>
   );
@@ -5945,7 +6079,7 @@ function ChatMessageBubbleInner({
           </>
         ) : (
           <>
-            <button
+            {!sender && <button
               onClick={() => void onRegenerate?.(targetMessageId)}
               disabled={actionsDisabled || isActionPending}
               className={iconButtonClass}
@@ -5953,7 +6087,7 @@ function ChatMessageBubbleInner({
             >
               <RefreshCw className={`w-3 h-3 ${isActionPending ? 'animate-spin' : ''}`} />
               <span className={tooltipClass}>{t('chat.regenerate')}</span>
-            </button>
+            </button>}
             <button
               onClick={() => onCopy?.(getTextContent())}
               disabled={isActionPending}
@@ -6797,6 +6931,7 @@ export const ChatMessageBubble = memo(ChatMessageBubbleInner, (prev, next) => {
   if (prev.onOpenContextFile !== next.onOpenContextFile) return false;
   if (prev.onOpenContext !== next.onOpenContext) return false;
   if (prev.message.finish !== next.message.finish) return false;
+  if (prev.message.role !== next.message.role || prev.message.agent !== next.message.agent) return false;
   const prevParts = prev.message.parts as any[] | undefined;
   const nextParts = next.message.parts as any[] | undefined;
   if ((prevParts?.length ?? 0) !== (nextParts?.length ?? 0)) return false;

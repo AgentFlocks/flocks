@@ -199,16 +199,16 @@ class Instance:
                 
                 cls._cache[directory] = asyncio.create_task(create_context())
         
-        # Wait for context to be ready.  If initialization fails, drop the
-        # failed task so a later request can retry after transient storage or
-        # startup recovery completes.
+        # A cancelled waiter must not cancel shared initialization. Only evict
+        # failed/cancelled initializers so later requests can retry them.
         task = cls._cache[directory]
         try:
-            ctx = await task
-        except Exception:
-            async with cls._lock:
-                if cls._cache.get(directory) is task:
-                    cls._cache.pop(directory, None)
+            ctx = await asyncio.shield(task)
+        except (Exception, asyncio.CancelledError):
+            if task.done() and (task.cancelled() or task.exception() is not None):
+                async with cls._lock:
+                    if cls._cache.get(directory) is task:
+                        cls._cache.pop(directory, None)
             raise
         
         # Execute fn within context

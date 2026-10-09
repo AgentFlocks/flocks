@@ -88,7 +88,7 @@ class _FakeProcessor:
     def get_finish_reason(self):
         return self.finish_reason
 
-    async def drain_parallel_tool_calls(self) -> None:
+    async def drain_parallel_tool_calls(self, *, execute_deferred: bool = True) -> None:
         return None
 
 
