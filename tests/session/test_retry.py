@@ -50,13 +50,24 @@ class TestRetryable:
         result = SessionRetry.retryable(error)
         assert result == "Internal server error"
 
-    def test_stream_tool_arguments_truncated_error_is_retryable(self):
+    def test_stream_tool_arguments_truncated_error_is_not_retryable(self):
+        # The runner feeds a cut-off tool call back to the model as a tool
+        # error; replaying the same request must not happen.
         error = {
             "name": "StreamToolArgumentsTruncatedError",
             "data": {"message": "tool arguments were truncated"},
         }
         result = SessionRetry.retryable(error)
-        assert result == "Model output was truncated while generating tool arguments"
+        assert result is None
+
+    def test_rejected_raised_output_limit_is_retried(self):
+        """The retry is rebuilt with the configured output limit, which the
+        provider accepted before the runner raised it."""
+        error = {
+            "name": "OutputLimitRejectedError",
+            "data": {"message": "The provider rejected max_tokens=16384", "statusCode": 400},
+        }
+        assert SessionRetry.retryable(error) is not None
 
     def test_json_message_too_many_requests(self):
         import json

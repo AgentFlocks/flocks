@@ -136,9 +136,16 @@ class SessionRetry:
         error_name = error.get("name", "")
         error_data = error.get("data", {})
 
+        if error_name == "OutputLimitRejectedError":
+            return "Output token limit not accepted, retrying with the configured limit"
+
         if error_name == "StreamToolArgumentsTruncatedError":
-            return "Model output was truncated while generating tool arguments"
-        
+            # The runner turns a cut-off tool call into a tool error the model
+            # can react to. Replaying the request would stack a second attempt
+            # onto the same assistant message, and whatever cut the stream
+            # usually cuts the identical retry at the same place.
+            return None
+
         # Check if it's an APIError with isRetryable flag
         if error_name == "APIError":
             if not error_data.get("isRetryable", False):
