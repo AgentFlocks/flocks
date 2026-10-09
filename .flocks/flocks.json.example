@@ -47,6 +47,10 @@
   "toolFailure": {
     "disableOnRepeatedFailure": true
   },
+  "concurrency": {
+    "maxConcurrentRequests": 8,
+    "maxParallelSubagents": 4
+  },
   "sandbox": {
     "mode": "off",
     "scope": "agent",

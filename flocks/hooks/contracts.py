@@ -23,6 +23,8 @@ _SENSITIVE_KEYS = {
     "apikey",
 }
 
+REDACTED_VALUE = "[REDACTED]"
+
 
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -35,13 +37,40 @@ def redact_sensitive(value: Any) -> Any:
         for key, item in value.items():
             normalized = str(key).strip().lower()
             if normalized in _SENSITIVE_KEYS:
-                redacted[key] = "[REDACTED]"
+                redacted[key] = REDACTED_VALUE
                 continue
             redacted[key] = redact_sensitive(item)
         return redacted
     if isinstance(value, list):
         return [redact_sensitive(item) for item in value]
     return value
+
+
+def restore_redacted_echo(original: Any, patched: Any) -> Any:
+    """Return *patched* with echoed redaction markers replaced by *original* values.
+
+    Hooks only ever see the ``redact_sensitive`` view of a tool input.  A hook
+    that hands the whole input back as ``validated_input_patch`` (for example
+    to restore placeholders in one field) would otherwise overwrite every
+    secret-bearing field with the literal marker.
+    """
+    if isinstance(patched, dict):
+        base = original if isinstance(original, dict) else {}
+        restored: Dict[str, Any] = {}
+        for key, item in patched.items():
+            normalized = str(key).strip().lower()
+            if normalized in _SENSITIVE_KEYS and item == REDACTED_VALUE and key in base:
+                restored[key] = base[key]
+                continue
+            restored[key] = restore_redacted_echo(base.get(key), item)
+        return restored
+    if isinstance(patched, list):
+        base_list = original if isinstance(original, list) else []
+        return [
+            restore_redacted_echo(base_list[index] if index < len(base_list) else None, item)
+            for index, item in enumerate(patched)
+        ]
+    return patched
 
 
 def schema_digest(value: dict[str, Any]) -> str:

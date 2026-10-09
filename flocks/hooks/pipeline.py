@@ -7,6 +7,7 @@ agent lifecycle stages:
 - session.start
 - llm.call.before
 - llm.call.after
+- tool.input.rewrite
 - tool.execute.before
 - tool.execute.after
 - turn.after
@@ -38,6 +39,11 @@ class HookStage:
     SESSION_START = "session.start"
     LLM_BEFORE = "llm.call.before"
     LLM_AFTER = "llm.call.after"
+    # Runs once per session tool call on the model-emitted input, before
+    # validation, before tool.execute.before and before execution.  Hooks
+    # that rewrite the input (e.g. restore redaction placeholders) implement
+    # ``tool_input_rewrite``; they see the raw input, not the redacted view.
+    TOOL_INPUT_REWRITE = "tool.input.rewrite"
     TOOL_BEFORE = "tool.execute.before"
     TOOL_AFTER = "tool.execute.after"
     TURN_AFTER = "turn.after"
@@ -66,6 +72,7 @@ _DEFAULT_STAGE_TIMEOUTS: Dict[str, float] = {
     HookStage.SESSION_START: 5.0,
     HookStage.LLM_BEFORE: 5.0,
     HookStage.LLM_AFTER: 5.0,
+    HookStage.TOOL_INPUT_REWRITE: 5.0,
     HookStage.TOOL_BEFORE: 5.0,
     HookStage.TOOL_AFTER: 5.0,
     HookStage.TURN_AFTER: 5.0,
@@ -101,6 +108,9 @@ class HookBase:
         return None
 
     async def llm_after(self, ctx: HookContext) -> None:  # pragma: no cover - default no-op
+        return None
+
+    async def tool_input_rewrite(self, ctx: HookContext) -> None:  # pragma: no cover - default no-op
         return None
 
     async def tool_before(self, ctx: HookContext) -> None:  # pragma: no cover - default no-op
@@ -331,6 +341,14 @@ class HookPipeline:
         output_data: Optional[Dict[str, Any]] = None,
     ) -> HookContext:
         return await cls._run_stage(HookStage.LLM_AFTER, input_data, output_data)
+
+    @classmethod
+    async def run_tool_input_rewrite(
+        cls,
+        input_data: Dict[str, Any],
+        output_data: Optional[Dict[str, Any]] = None,
+    ) -> HookContext:
+        return await cls._run_stage(HookStage.TOOL_INPUT_REWRITE, input_data, output_data)
 
     @classmethod
     async def run_tool_before(
@@ -717,6 +735,7 @@ class HookPipeline:
             HookStage.SESSION_START: ("session_start",),
             HookStage.LLM_BEFORE: ("llm_before",),
             HookStage.LLM_AFTER: ("llm_after",),
+            HookStage.TOOL_INPUT_REWRITE: ("tool_input_rewrite",),
             HookStage.TOOL_BEFORE: ("tool_before",),
             HookStage.TOOL_AFTER: ("tool_after",),
             HookStage.TURN_AFTER: ("turn_after", "turn_finish"),

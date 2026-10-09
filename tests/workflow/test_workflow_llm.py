@@ -351,3 +351,246 @@ def test_get_llm_client_does_not_stick_to_old_default(monkeypatch):
 
     assert out1 == "first:first-model"
     assert out2 == "second:second-model"
+
+
+# ---------------------------------------------------------------------------
+# Provider request limiter + 429 handling (flocks.provider.concurrency)
+# ---------------------------------------------------------------------------
+
+class _RateLimitedProvider(_FakeProvider):
+    """Fails with HTTP 429 (retry-after: 0.02s) ``failures`` times, then succeeds."""
+
+    def __init__(self, provider_id: str, failures: int, *, status: int = 429, **kwargs):
+        super().__init__(provider_id, "ok", **kwargs)
+        self._failures = failures
+        self._status = status
+
+    def __copy__(self):
+        # The workflow client clones providers per call; keep the failure
+        # budget shared so the clone keeps failing until it is used up.
+        return self
+
+    async def chat(self, model_id: str, messages, **kwargs):
+        self.calls += 1
+        if self._failures > 0:
+            self._failures -= 1
+
+            class _HttpError(RuntimeError):
+                pass
+
+            exc = _HttpError(f"HTTP {self._status}")
+            exc.status_code = self._status
+            exc.response = type("Resp", (), {
+                "status_code": self._status,
+                "headers": {"retry-after-ms": "20"},
+            })()
+            raise exc
+        return _FakeResponse(f"{self.id}:{model_id}")
+
+
+@pytest.fixture
+def _limiters():
+    from flocks.provider import concurrency
+
+    concurrency.reset_limiters_for_testing()
+    yield concurrency
+    concurrency.reset_limiters_for_testing()
+
+
+def test_llm_429_is_retried_with_backoff_and_cools_down_the_provider(monkeypatch, _limiters):
+    provider = _RateLimitedProvider("demo", failures=2, models=["m"])
+    _patch_provider(monkeypatch, {"demo": provider})
+    cooldowns: list[tuple[str, float]] = []
+    from flocks.workflow import llm as workflow_llm_mod
+
+    monkeypatch.setattr(
+        workflow_llm_mod,
+        "report_provider_rate_limited",
+        lambda pid, cooldown_s, reason="rate_limit": cooldowns.append((pid, cooldown_s)) or cooldown_s,
+    )
+
+    client = LLMClient(provider_id="demo", model="m")
+    started = time.monotonic()
+    out = client.ask("hello", max_retries=2, retry_delay_s=1.0)
+
+    assert out == "demo:m"
+    assert provider.calls == 3
+    # retry-after-ms: 20 wins over the 1 s base delay (with <= 25 % jitter).
+    assert time.monotonic() - started < 0.5
+    # Two reports per 429: the floor applied before the slot is handed on,
+    # then the jittered delay once the caller knows it.
+    assert [pid for pid, _ in cooldowns] == ["demo"] * 4, cooldowns
+    assert all(0.02 <= wait <= 0.026 for _, wait in cooldowns), cooldowns
+
+
+def test_llm_deterministic_4xx_is_not_retried(monkeypatch, _limiters):
+    provider = _RateLimitedProvider("demo", failures=5, status=400, models=["m"])
+    _patch_provider(monkeypatch, {"demo": provider})
+
+    client = LLMClient(provider_id="demo", model="m")
+    with pytest.raises(ValueError):
+        client.ask("hello", max_retries=3, retry_delay_s=0)
+
+    assert provider.calls == 1
+
+
+def test_llm_ask_takes_a_provider_slot_and_releases_it(monkeypatch, _limiters):
+    provider = _FakeProvider("demo", "ok", models=["m"])
+    _patch_provider(monkeypatch, {"demo": provider})
+    monkeypatch.setenv("FLOCKS_LLM_MAX_CONCURRENT_REQUESTS", "1")
+
+    client = LLMClient(provider_id="demo", model="m")
+    assert client.ask("hello") == "demo:m"
+
+    limiter = _limiters.get_provider_limiter("demo")
+    assert limiter.limit == 1
+    assert limiter.snapshot()["active"] == 0
+
+
+def test_llm_node_default_retries_come_from_env(monkeypatch):
+    from flocks.workflow import llm as workflow_llm_mod
+
+    monkeypatch.delenv("FLOCKS_WORKFLOW_LLM_MAX_RETRIES", raising=False)
+    assert workflow_llm_mod.default_llm_node_max_retries() == workflow_llm_mod.DEFAULT_LLM_NODE_MAX_RETRIES
+    monkeypatch.setenv("FLOCKS_WORKFLOW_LLM_MAX_RETRIES", "5")
+    assert workflow_llm_mod.default_llm_node_max_retries() == 5
+    monkeypatch.setenv("FLOCKS_WORKFLOW_LLM_MAX_RETRIES", "-3")
+    assert workflow_llm_mod.default_llm_node_max_retries() == 0
+    monkeypatch.setenv("FLOCKS_WORKFLOW_LLM_MAX_RETRIES", "x")
+    assert workflow_llm_mod.default_llm_node_max_retries() == workflow_llm_mod.DEFAULT_LLM_NODE_MAX_RETRIES
+
+
+def test_llm_node_retries_transient_failure_by_default(monkeypatch, _limiters):
+    provider = _RateLimitedProvider("demo", failures=1, models=["m"])
+    _patch_provider(monkeypatch, {"demo": provider})
+    from flocks.workflow import llm as workflow_llm_mod
+
+    monkeypatch.setattr(workflow_llm_mod, "report_provider_rate_limited", lambda *a, **k: 0.0)
+
+    workflow = Workflow.from_dict({
+        "start": "ask",
+        "nodes": [
+            {"id": "ask", "type": "llm", "model": "demo/m", "prompt": "hi", "output_key": "answer"},
+        ],
+        "edges": [],
+    })
+    step = WorkflowEngine(workflow).run_node("ask", {})
+    assert step.outputs["answer"] == "demo:m"
+    assert provider.calls == 2
+
+
+def test_llm_429_cools_down_even_without_retry_budget(monkeypatch, _limiters):
+    """LazyLLM.ask defaults to max_retries=0; that 429 must still hold others back."""
+    provider = _RateLimitedProvider("demo", failures=5, models=["m"])
+    _patch_provider(monkeypatch, {"demo": provider})
+    cooldowns: list[tuple[str, float]] = []
+    from flocks.workflow import llm as workflow_llm_mod
+
+    monkeypatch.setattr(
+        workflow_llm_mod,
+        "report_provider_rate_limited",
+        lambda pid, cooldown_s, reason="rate_limit": cooldowns.append((pid, cooldown_s)) or cooldown_s,
+    )
+
+    client = LLMClient(provider_id="demo", model="m")
+    with pytest.raises(ValueError):
+        client.ask("hello", max_retries=0, retry_delay_s=0)
+
+    assert provider.calls == 1
+    # Reported before the slot is released and again with the final delay;
+    # what matters is that a caller with zero budget still cools the provider.
+    assert [pid for pid, _ in cooldowns] == ["demo"] * 2, cooldowns
+    assert all(wait > 0 for _, wait in cooldowns), cooldowns
+
+
+def test_llm_status_code_wins_over_message_text(_limiters):
+    """A 401 whose body happens to mention 429 must not look like a rate limit."""
+    from flocks.workflow.llm import classify_transient_error
+
+    class _Err(RuntimeError):
+        pass
+
+    auth = _Err("Invalid API key; request_id=req_429abc")
+    auth.status_code = 401
+    assert classify_transient_error(auth) == (False, False)
+
+    throttled = _Err("slow down")
+    throttled.status_code = 429
+    assert classify_transient_error(throttled) == (True, True)
+
+    server = _Err("boom")
+    server.status_code = 503
+    assert classify_transient_error(server) == (True, False)
+
+    # No usable status code: fall back to the message.
+    assert classify_transient_error(_Err("Rate limit exceeded")) == (True, True)
+    assert classify_transient_error(_Err("something odd")) == (True, False)
+
+
+def test_llm_auth_error_mentioning_429_is_not_retried(monkeypatch, _limiters):
+    provider = _RateLimitedProvider("demo", failures=5, status=401, models=["m"])
+    _patch_provider(monkeypatch, {"demo": provider})
+    cooldowns: list = []
+    from flocks.workflow import llm as workflow_llm_mod
+
+    monkeypatch.setattr(workflow_llm_mod, "report_provider_rate_limited", lambda *a, **k: cooldowns.append(a))
+
+    client = LLMClient(provider_id="demo", model="m")
+    with pytest.raises(ValueError):
+        client.ask("hello", max_retries=3, retry_delay_s=0)
+
+    assert provider.calls == 1
+    assert cooldowns == []
+
+
+def test_retry_delay_does_not_overflow_on_huge_attempt_counts():
+    """A terminal retry with a large budget must not raise OverflowError."""
+    from flocks.workflow.llm import MAX_RETRY_DELAY_S, _retry_delay_s
+
+    exc = RuntimeError("boom")
+    assert _retry_delay_s(0.0, 1024, exc) == 0.0
+    delay = _retry_delay_s(1.0, 1024, exc)
+    assert 0 < delay <= MAX_RETRY_DELAY_S
+
+
+def test_response_safety_error_is_not_a_rate_limit(_limiters):
+    """A byte count containing 429 must not cool the provider down."""
+    from flocks.provider.sdk.openai_base import LLMResponseTooLargeError
+    from flocks.workflow.llm import classify_transient_error
+
+    exc = LLMResponseTooLargeError("response exceeded limit: 42900000 bytes received")
+    assert "429" in str(exc)
+    assert classify_transient_error(exc) == (False, False)
+
+
+def test_oversized_response_does_not_cool_down_the_provider(monkeypatch, _limiters):
+    from flocks.provider.sdk.openai_base import LLMResponseTooLargeError
+
+    class _OversizedProvider(_FakeProvider):
+        def __copy__(self):
+            # The workflow clones providers per call; keep this subclass so
+            # the message below survives into the actual call.
+            return self
+
+        # The byte count is what makes this a reproducer: plain "response
+        # exceeded limit" would never look like a rate limit.
+        async def chat(self, model_id: str, messages, **kwargs):
+            self.calls += 1
+            raise LLMResponseTooLargeError(
+                "response exceeded limit: 42900000 bytes received"
+            )
+
+    provider = _OversizedProvider("demo", "too_large", models=["m"])
+    _patch_provider(monkeypatch, {"demo": provider})
+    cooldowns: list = []
+    from flocks.workflow import llm as workflow_llm_mod
+
+    monkeypatch.setattr(workflow_llm_mod, "report_provider_rate_limited", lambda *a, **k: cooldowns.append(a))
+
+    client = LLMClient(provider_id="demo", model="m")
+    with pytest.raises(ValueError, match="response exceeded limit"):
+        client.ask("hello", max_retries=2, retry_delay_s=0)
+
+    assert provider.calls == 1
+    assert cooldowns == []
+    assert _limiters.get_provider_limiter("demo").cooldown_remaining() == 0

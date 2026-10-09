@@ -72,6 +72,10 @@ const tMock = (key: string, options?: Record<string, unknown>) => {
   'chat.process.toolCount': '{{count}} 次工具调用',
   'chat.process.textCount': '{{count}} 段中间回复',
   'chat.compacting': '压缩中...',
+  'chat.retryNotice.rateLimited': '模型请求被限流（429），正在第 {{attempt}} 次重试',
+  'chat.retryNotice.transient': '模型请求失败（{{reason}}），正在第 {{attempt}} 次重试',
+  'chat.retryNotice.countdown': '，约 {{seconds}} 秒后',
+  'chat.retryNotice.unknownReason': '临时错误',
   'chat.contextCompressed': '上下文已压缩',
   'chat.contextUsage.title': 'Context Usage',
   'chat.contextUsage.close': 'Close',
@@ -483,6 +487,266 @@ describe('SessionChat message loading state', () => {
   });
 });
 
+describe('SessionChat provider retry notice', () => {
+  const userMessage = makeMessage({
+    id: 'msg-user',
+    role: 'user',
+    parts: [{ id: 'part-user', type: 'text', text: '分析这批 CVE' } as Message['parts'][number]],
+  });
+
+  it('shows the backoff state pushed by the backend and clears it when streaming resumes', async () => {
+    mockStatefulSessionMessages([userMessage]);
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'Date'] });
+    try {
+      render(React.createElement(SessionChat, {
+        sessionId: 'sess-1',
+        live: true,
+      }));
+      await act(async () => {
+        await Promise.resolve();
+      });
+
+      act(() => {
+        useSSEOptionsRef.current.onEvent({
+          type: 'session.status',
+          properties: { sessionID: 'sess-1', status: { type: 'busy' } },
+        });
+      });
+      expect(screen.queryByTestId('session-retry-notice')).toBeNull();
+
+      act(() => {
+        useSSEOptionsRef.current.onEvent({
+          type: 'session.status',
+          properties: {
+            sessionID: 'sess-1',
+            status: {
+              type: 'retry',
+              attempt: 2,
+              maxAttempts: 5,
+              message: 'Rate Limited',
+              next: Date.now() + 8000,
+              rateLimited: true,
+              providerID: 'prov',
+              modelID: 'm',
+            },
+          },
+        });
+      });
+      const notice = screen.getByTestId('session-retry-notice');
+      expect(notice.textContent).toContain('模型请求被限流（429），正在第 2/5 次重试');
+      expect(notice.textContent).toContain('约 8 秒后');
+
+      act(() => {
+        vi.advanceTimersByTime(3000);
+      });
+      expect(screen.getByTestId('session-retry-notice').textContent).toContain('约 5 秒后');
+
+      // Non-429 failures show the backend's reason instead.
+      act(() => {
+        useSSEOptionsRef.current.onEvent({
+          type: 'session.status',
+          properties: {
+            sessionID: 'sess-1',
+            status: { type: 'retry', attempt: 1, message: 'Provider Server Error', rateLimited: false },
+          },
+        });
+      });
+      expect(screen.getByTestId('session-retry-notice').textContent)
+        .toContain('模型请求失败（Provider Server Error），正在第 1 次重试');
+
+      // Long SDK error bodies are cut to one line.
+      const longReason = `Error code: 500 - ${'x'.repeat(200)}`;
+      act(() => {
+        useSSEOptionsRef.current.onEvent({
+          type: 'session.status',
+          properties: {
+            sessionID: 'sess-1',
+            status: { type: 'retry', attempt: 2, maxAttempts: 5, message: longReason, rateLimited: false },
+          },
+        });
+      });
+      const truncated = screen.getByTestId('session-retry-notice').textContent || '';
+      expect(truncated).toContain(`${longReason.slice(0, 117)}…`);
+      expect(truncated).not.toContain(longReason);
+
+      // The backend reports the next attempt as in flight: the notice goes away.
+      act(() => {
+        useSSEOptionsRef.current.onEvent({
+          type: 'session.status',
+          properties: { sessionID: 'sess-1', status: { type: 'busy' } },
+        });
+      });
+      expect(screen.queryByTestId('session-retry-notice')).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('drops the notice when the consumer swaps to another session without remounting', async () => {
+    mockStatefulSessionMessages([userMessage]);
+    const view = render(React.createElement(SessionChat, {
+      sessionId: 'sess-1',
+      live: true,
+    }));
+    await act(async () => {
+      await Promise.resolve();
+    });
+    act(() => {
+      useSSEOptionsRef.current.onEvent({
+        type: 'session.status',
+        properties: {
+          sessionID: 'sess-1',
+          status: { type: 'retry', attempt: 2, maxAttempts: 5, message: 'Rate Limited', rateLimited: true },
+        },
+      });
+    });
+    expect(screen.getByTestId('session-retry-notice')).toBeTruthy();
+
+    // sess-2 is busy running a tool: its status poll turns streaming back on,
+    // so a stale notice from sess-1 would render inside sess-2's conversation.
+    clientGetMock.mockImplementation((url: string) => {
+      if (url === '/api/session/status') {
+        return Promise.resolve({ data: { 'sess-2': { type: 'busy' } } });
+      }
+      if (url === '/api/session/sess-2/message') {
+        return Promise.resolve({ data: { items: [], hasMore: false, nextBefore: null } });
+      }
+      return Promise.resolve({ data: {} });
+    });
+    view.rerender(React.createElement(SessionChat, {
+      sessionId: 'sess-2',
+      live: true,
+    }));
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(clientGetMock).toHaveBeenCalledWith('/api/session/status');
+    expect(screen.queryByTestId('session-retry-notice')).toBeNull();
+  });
+
+  it('keeps the notice when a sub-agent receipt lands during the backoff', async () => {
+    mockStatefulSessionMessages([userMessage]);
+    render(React.createElement(SessionChat, { sessionId: 'sess-1', live: true }));
+    await act(async () => { await Promise.resolve(); });
+    act(() => {
+      useSSEOptionsRef.current.onEvent({
+        type: 'session.status',
+        properties: {
+          sessionID: 'sess-1',
+          status: { type: 'retry', attempt: 1, maxAttempts: 5, message: 'Rate Limited', rateLimited: true },
+        },
+      });
+    });
+    expect(screen.getByTestId('session-retry-notice')).toBeTruthy();
+
+    // An earlier delegate_task's child finishes while the parent sleeps
+    // between retries; its receipt rewrites that old tool part.
+    act(() => {
+      useSSEOptionsRef.current.onEvent({
+        type: 'message.part.updated',
+        properties: {
+          part: {
+            id: 'part-delegate', messageID: 'msg-earlier', sessionID: 'sess-1', type: 'tool',
+            callID: 'call-delegate', tool: 'delegate_task',
+            state: {
+              status: 'completed', input: {}, output: 'submitted',
+              metadata: { submitted: true, status: 'completed' }, time: { start: 1, end: 2 },
+            },
+          },
+        },
+      });
+    });
+    expect(screen.getByTestId('session-retry-notice')).toBeTruthy();
+
+    // Output from the retried request does end the notice.
+    act(() => {
+      useSSEOptionsRef.current.onEvent({
+        type: 'message.part.updated',
+        properties: {
+          part: { id: 'part-text', messageID: 'msg-new', sessionID: 'sess-1', type: 'text', text: '继续' },
+        },
+      });
+    });
+    expect(screen.queryByTestId('session-retry-notice')).toBeNull();
+  });
+
+  it('recovers the retry state from the status poll after a reload', async () => {
+    // Shape comes from the backend's SessionStatusRetry model dump, which is
+    // what /api/session/status actually returns — the SSE event serializes
+    // the very same object.
+    mockFallbackPolling({
+      localMessages: [userMessage],
+      fetchedMessages: [],
+      refetch: vi.fn(),
+      status: {
+        'sess-1': {
+          type: 'retry',
+          attempt: 3,
+          message: 'Rate Limited',
+          next: Date.now() + 4000,
+          maxAttempts: 5,
+          rateLimited: true,
+          providerID: 'prov',
+          modelID: 'm',
+        } as never,
+      },
+    });
+    render(React.createElement(SessionChat, {
+      sessionId: 'sess-1',
+      live: true,
+    }));
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(screen.getByTestId('session-retry-notice').textContent)
+      .toContain('模型请求被限流（429），正在第 3/5 次重试');
+  });
+
+  it('ignores a status poll that lands after the consumer switched sessions', async () => {
+    // WorkflowDetail/ChatTab swaps sessionId without remounting; a slow poll
+    // for the old session must not paint its retry notice onto the new one.
+    mockStatefulSessionMessages([userMessage]);
+    // One resolver per poll: the sess-1 poll must be the one we answer late,
+    // not whichever call happened to be last.
+    const statusResolvers: Array<(value: unknown) => void> = [];
+    clientGetMock.mockImplementation((url: string) => {
+      if (url === '/api/session/status') {
+        return new Promise((resolve) => { statusResolvers.push(resolve); });
+      }
+      return Promise.resolve({ data: {} });
+    });
+
+    const view = render(React.createElement(SessionChat, { sessionId: 'sess-1', live: true }));
+    await act(async () => { await Promise.resolve(); });
+
+    view.rerender(React.createElement(SessionChat, { sessionId: 'sess-2', live: true }));
+    await act(async () => { await Promise.resolve(); });
+
+    expect(statusResolvers.length).toBeGreaterThan(0);
+    // sess-1's polls finally answer "retrying" — too late to matter. Answer
+    // every pending poll: the child-status refresh polls the same URL first.
+    await act(async () => {
+      statusResolvers.splice(0).forEach((resolve) => resolve({
+        data: {
+          'sess-1': {
+            type: 'retry',
+            attempt: 2,
+            message: 'Rate Limited',
+            next: Date.now() + 3000,
+            maxAttempts: 5,
+            rateLimited: true,
+          },
+        },
+      }));
+      await Promise.resolve();
+    });
+
+    expect(screen.queryByTestId('session-retry-notice')).toBeNull();
+  });
+});
+
 describe('SessionChat focused message deep links', () => {
   it('scrolls to and consumes a rendered focus target', async () => {
     const onFocusMessageConsumed = vi.fn();
@@ -722,7 +986,7 @@ describe('buildContextUsageBreakdown', () => {
     expect(breakdown.usedTokens).toBe(23);
   });
 
-  it('uses backend snapshots when available and adds the local draft on top', () => {
+  it('uses the backend compaction-basis total and adds the local draft on top', () => {
     const breakdown = buildContextUsageBreakdown([], 'd'.repeat(40), {
       sessionID: 'sess-1',
       usedTokens: 130,
@@ -747,18 +1011,44 @@ describe('buildContextUsageBreakdown', () => {
       ],
     });
 
-    expect(breakdown.usedTokens).toBe(85);
+    // 130 observed + 10 draft. The 30-token observed drift is spread over
+    // the estimated rows (x1.3) instead of landing on "conversation".
+    expect(breakdown.usedTokens).toBe(140);
     expect(breakdown.compactedTokens).toBe(50);
     expect(breakdown.segments.map((segment) => [segment.key, segment.tokens, segment.included])).toEqual([
-      ['systemPrompt', 15, false],
-      ['toolDefinitions', 10, false],
+      ['systemPrompt', 19, true],
+      ['toolDefinitions', 13, true],
       ['conversation', 10, true],
-      ['reasoning', 5, true],
-      ['tools', 40, true],
-      ['skillLoad', 20, true],
-      ['agentDelegation', 10, true],
+      ['reasoning', 6, true],
+      ['tools', 53, true],
+      ['skillLoad', 26, true],
+      ['agentDelegation', 13, true],
     ]);
+    expect(breakdown.segments.reduce((total, segment) => total + segment.tokens, 0))
+      .toBe(breakdown.usedTokens);
     expect(breakdown.excludedSegments).toEqual([]);
+  });
+
+  it('scales rows down when the estimate exceeds the observed total', () => {
+    const breakdown = buildContextUsageBreakdown([], '', {
+      sessionID: 'sess-1',
+      usedTokens: 100,
+      contextWindow: 1000,
+      percent: 10,
+      source: 'observed',
+      estimatedTokens: 200,
+      compactedTokens: 0,
+      segments: [
+        { key: 'systemPrompt', tokens: 80, included: true, source: 'estimated' },
+        { key: 'reasoning', tokens: 120, included: true, source: 'estimated' },
+      ],
+      excludedSegments: [],
+    });
+
+    expect(breakdown.usedTokens).toBe(100);
+    expect(breakdown.segments.find((segment) => segment.key === 'systemPrompt')?.tokens).toBe(40);
+    expect(breakdown.segments.find((segment) => segment.key === 'reasoning')?.tokens).toBe(60);
+    expect(breakdown.segments.reduce((total, segment) => total + segment.tokens, 0)).toBe(100);
   });
 
   it('applies and clamps pending removals by attributed segment', () => {
@@ -781,7 +1071,8 @@ describe('buildContextUsageBreakdown', () => {
       pendingTokenDeltas: { reasoning: -50, tools: -300 },
     });
 
-    expect(breakdown.usedTokens).toBe(100);
+    // 260 minus the 80 tokens actually removable (reasoning 50, tools 30).
+    expect(breakdown.usedTokens).toBe(180);
     expect(breakdown.segments.find((segment) => segment.key === 'conversation')?.tokens).toBe(100);
     expect(breakdown.segments.find((segment) => segment.key === 'reasoning')?.tokens).toBe(0);
     expect(breakdown.segments.find((segment) => segment.key === 'tools')?.tokens).toBe(0);
@@ -821,9 +1112,10 @@ describe('buildContextUsageBreakdown', () => {
       useLocalMessageUsage: true,
     });
 
-    expect(breakdown.usedTokens).toBe(100);
+    // Fixed 120 (80 + 40) + local 300 - pending removals 200.
+    expect(breakdown.usedTokens).toBe(220);
     expect(breakdown.segments.find((segment) => segment.key === 'toolDefinitions')?.tokens).toBe(40);
-    expect(breakdown.segments.find((segment) => segment.key === 'toolDefinitions')?.included).toBe(false);
+    expect(breakdown.segments.find((segment) => segment.key === 'toolDefinitions')?.included).toBe(true);
     expect(breakdown.segments.find((segment) => segment.key === 'conversation')?.tokens).toBe(100);
     expect(breakdown.segments.find((segment) => segment.key === 'reasoning')?.tokens).toBe(0);
   });
@@ -5002,13 +5294,14 @@ describe('SessionChat context usage popover', () => {
         expect.any(Object),
       );
     });
-    expect(contextButton).toHaveTextContent('10%');
+    // Once the prompt is sent the system prompt is part of the context too.
+    expect(contextButton).toHaveTextContent('18%');
 
     const user = userEvent.setup();
     await user.click(contextButton);
     const conversationRow = screen.getByText('Conversation').closest('[role="menuitem"]');
-    expect(screen.queryByText('System prompt')).not.toBeInTheDocument();
-    expect(screen.queryByText('Tool definitions')).not.toBeInTheDocument();
+    const systemPromptRow = screen.getByText('System prompt').closest('[role="menuitem"]');
+    expect(within(systemPromptRow as HTMLElement).getByText('80')).toBeInTheDocument();
     expect(within(conversationRow as HTMLElement).getByText('100')).toBeInTheDocument();
   });
 
@@ -5145,7 +5438,8 @@ describe('SessionChat context usage popover', () => {
       await request.promise;
     });
 
-    expect(contextButton).toHaveTextContent('10%');
+    // Fixed 120 + the 100-token prompt, counted once.
+    expect(contextButton).toHaveTextContent('22%');
   });
 
   it('keeps a newer prompt pending when the previous turn refresh resolves', async () => {
@@ -5177,7 +5471,7 @@ describe('SessionChat context usage popover', () => {
     const textarea = screen.getByPlaceholderText('请输入消息');
     fireEvent.change(textarea, { target: { value: 'a'.repeat(400) } });
     fireEvent.keyDown(textarea, { key: 'Enter', code: 'Enter' });
-    await waitFor(() => expect(contextButton).toHaveTextContent('10%'));
+    await waitFor(() => expect(contextButton).toHaveTextContent('18%'));
 
     act(() => {
       useSSEOptionsRef.current.onEvent({
@@ -5201,7 +5495,7 @@ describe('SessionChat context usage popover', () => {
     fireEvent.keyDown(textarea, { key: 'Enter', code: 'Enter' });
     await waitFor(() => {
       expect(clientPostMock).toHaveBeenCalledTimes(2);
-      expect(contextButton).toHaveTextContent('20%');
+      expect(contextButton).toHaveTextContent('28%');
     });
 
     await act(async () => {
@@ -5222,7 +5516,7 @@ describe('SessionChat context usage popover', () => {
       await previousTurnRefresh.promise;
     });
 
-    await waitFor(() => expect(contextButton).toHaveTextContent('20%'));
+    await waitFor(() => expect(contextButton).toHaveTextContent('28%'));
   });
 
   it('drops pending usage during the first render of a different session', async () => {
@@ -5317,7 +5611,7 @@ describe('SessionChat context usage popover', () => {
       fireEvent.change(textarea, { target: { value: 'x'.repeat(400) } });
       fireEvent.keyDown(textarea, { key: 'Enter', code: 'Enter' });
       await waitFor(() => {
-        expect(contextButton).toHaveTextContent('10%');
+        expect(contextButton).toHaveTextContent('18%');
       });
 
       act(() => {
@@ -5345,7 +5639,7 @@ describe('SessionChat context usage popover', () => {
       await waitFor(() => {
         expect(warnSpy).toHaveBeenCalled();
       });
-      expect(contextButton).toHaveTextContent('10%');
+      expect(contextButton).toHaveTextContent('18%');
     } finally {
       warnSpy.mockRestore();
     }
@@ -5408,7 +5702,7 @@ describe('SessionChat context usage popover', () => {
     expect(screen.getByRole('button', { name: 'chat.contextUsageTitle' })).toHaveTextContent('0%');
   });
 
-  it('does not attribute observed fixed-cost drift to a short model conversation', async () => {
+  it('counts fixed prompt costs but does not pin observed drift on a short conversation', async () => {
     const user = userEvent.setup();
     sessionApiGetContextUsageMock.mockResolvedValue({
       sessionID: 'sess-1',
@@ -5462,13 +5756,18 @@ describe('SessionChat context usage popover', () => {
     const contextButton = await screen.findByRole('button', { name: 'chat.contextUsageTitle' });
     expect(contextButton).toHaveClass('h-6');
     expect(contextButton).not.toHaveClass('w-6');
-    expect(contextButton).toHaveTextContent('0%');
+    // 23,210 observed tokens of a 1M window.
+    expect(contextButton).toHaveTextContent('2%');
     await user.click(contextButton);
 
-    expect(screen.queryByText('System prompt')).not.toBeInTheDocument();
-    expect(screen.queryByText('Tool definitions')).not.toBeInTheDocument();
+    // The 3,200-token drift is spread x1.16 over the rows: 8000 -> 9279,
+    // 12000 -> 13919 (+1 rounding), conversation 10 -> 11.
+    const systemPromptRow = screen.getByText('System prompt').closest('[role="menuitem"]');
+    const toolDefinitionsRow = screen.getByText('Tool definitions').closest('[role="menuitem"]');
     const conversationRow = screen.getByText('Conversation').closest('[role="menuitem"]');
-    expect(within(conversationRow as HTMLElement).getByText('10')).toBeInTheDocument();
+    expect(within(systemPromptRow as HTMLElement).getByText('9.3K')).toBeInTheDocument();
+    expect(within(toolDefinitionsRow as HTMLElement).getByText('14K')).toBeInTheDocument();
+    expect(within(conversationRow as HTMLElement).getByText('11')).toBeInTheDocument();
     expect(screen.getByText('Reasoning')).toBeInTheDocument();
     expect(screen.getByText('Tool calls')).toBeInTheDocument();
     expect(screen.getByText('Skill loads')).toBeInTheDocument();
@@ -5522,7 +5821,7 @@ describe('SessionChat context usage popover', () => {
     }));
 
     const contextButton = await screen.findByRole('button', { name: 'chat.contextUsageTitle' });
-    expect(contextButton).toHaveTextContent('21%');
+    expect(contextButton).toHaveTextContent('29%');
 
     await user.click(screen.getByLabelText('chat.edit'));
     fireEvent.change(screen.getByDisplayValue(originalText), { target: { value: editedText } });
@@ -5536,7 +5835,8 @@ describe('SessionChat context usage popover', () => {
         editedText,
       );
     });
-    expect(contextButton).toHaveTextContent('10%');
+    // 290 + 90 for the longer prompt - 200 for the discarded reply.
+    expect(contextButton).toHaveTextContent('18%');
 
     await user.click(contextButton);
     const conversationRow = screen.getByText('Conversation').closest('[role="menuitem"]');
@@ -5606,7 +5906,8 @@ describe('SessionChat context usage popover', () => {
       await request.promise;
     });
 
-    await waitFor(() => expect(contextButton).toHaveTextContent('10%'));
+    // Fixed 120 + the 100-token edited prompt.
+    await waitFor(() => expect(contextButton).toHaveTextContent('22%'));
     await user.click(contextButton);
     const conversationRow = screen.getByText('Conversation').closest('[role="menuitem"]');
     const reasoningRow = screen.getByText('Reasoning').closest('[role="menuitem"]');
@@ -5767,6 +6068,68 @@ describe('SessionChat context usage popover', () => {
     expect(onError).toHaveBeenCalledWith('provider unavailable');
 
     expect(screen.getByText('420')).toBeInTheDocument();
+  });
+
+  it('follows mid-turn usage pushes once they include the sent prompt', async () => {
+    // Regression: the meter stayed on the pre-send baseline for the whole
+    // turn (27%) and only showed the real usage (61%) after a reload.
+    mockStatefulSessionMessages();
+    sessionApiGetContextUsageMock.mockResolvedValue({
+      sessionID: 'sess-1',
+      usedTokens: 80,
+      contextWindow: 1000,
+      percent: 8,
+      source: 'estimated',
+      estimatedTokens: 80,
+      compactedTokens: 0,
+      segments: [
+        { key: 'systemPrompt', tokens: 80, included: true, source: 'estimated' },
+      ],
+      excludedSegments: [],
+    });
+
+    render(React.createElement(SessionChat, { sessionId: 'sess-1', live: true }));
+
+    const contextButton = await screen.findByRole('button', { name: 'chat.contextUsageTitle' });
+    await waitFor(() => expect(sessionApiGetContextUsageMock).toHaveBeenCalledTimes(1));
+    const textarea = screen.getByPlaceholderText('请输入消息');
+    fireEvent.change(textarea, { target: { value: 'x'.repeat(400) } });
+    fireEvent.keyDown(textarea, { key: 'Enter', code: 'Enter' });
+    await waitFor(() => expect(contextButton).toHaveTextContent('18%'));
+    const sentMessageId = (clientPostMock.mock.calls[0][1] as { messageID: string }).messageID;
+
+    const pushedSnapshot = (usedTokens: number, recentUserMessageIDs: string[]) => ({
+      sessionID: 'sess-1',
+      usedTokens,
+      contextWindow: 1000,
+      percent: Math.round(usedTokens / 10),
+      source: 'observed',
+      estimatedTokens: usedTokens,
+      compactedTokens: 0,
+      segments: [
+        { key: 'systemPrompt', tokens: 80, included: true, source: 'estimated' },
+        { key: 'conversation', tokens: usedTokens - 80, included: true, source: 'estimated' },
+      ],
+      excludedSegments: [],
+      recentUserMessageIDs,
+    });
+
+    // A push computed before the prompt was stored must not replace it.
+    act(() => {
+      useSSEOptionsRef.current.onEvent({
+        type: 'context.usage.updated',
+        properties: pushedSnapshot(90, []),
+      });
+    });
+    expect(contextButton).toHaveTextContent('18%');
+
+    act(() => {
+      useSSEOptionsRef.current.onEvent({
+        type: 'context.usage.updated',
+        properties: pushedSnapshot(610, [sentMessageId]),
+      });
+    });
+    await waitFor(() => expect(contextButton).toHaveTextContent('61%'));
   });
 
   it('does not refetch immediately after a pushed context usage snapshot', async () => {

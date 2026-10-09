@@ -72,7 +72,13 @@ class _FakeToolAccumulator:
     async def feed_chunk(self, tool_call) -> None:
         return None
 
-    async def flush_remaining(self, finish_reason) -> None:
+    async def flush_remaining(
+        self,
+        finish_reason,
+        *,
+        output_limit=None,
+        raised_output_limit=None,
+    ) -> None:
         return None
 
 
@@ -648,8 +654,6 @@ async def test_call_llm_only_exempts_successful_sleep_from_loop_guard(monkeypatc
 @pytest.mark.asyncio
 @pytest.mark.parametrize("exit_kind", ["provider_error", "cancel", "flush_error"])
 async def test_call_llm_discards_deferred_sleep_on_unsuccessful_stream(monkeypatch, exit_kind):
-    from flocks.session.streaming.tool_accumulator import StreamToolArgumentsTruncatedError
-
     runner = _make_runner(f"ses_runner_sleep_{exit_kind}")
     runner.callbacks.event_publish_callback = AsyncMock()
     store_part = AsyncMock()
@@ -697,16 +701,23 @@ async def test_call_llm_discards_deferred_sleep_on_unsuccessful_stream(monkeypat
             else:
                 raise interruption
 
-    error_type = StreamToolArgumentsTruncatedError if exit_kind == "flush_error" else type(interruption)
-    with pytest.raises(error_type) as raised:
-        await asyncio.wait_for(runner._call_llm(
-            provider=Provider(), messages=[ChatMessage(role="user", content="wait for a message")],
-            tools=[], agent=SimpleNamespace(name="rex"), assistant_msg=SimpleNamespace(id="msg_sleep"),
-        ), timeout=1)
-
+    call = runner._call_llm(
+        provider=Provider(), messages=[ChatMessage(role="user", content="wait for a message")],
+        tools=[], agent=SimpleNamespace(name="rex"), assistant_msg=SimpleNamespace(id="msg_sleep"),
+    )
     if exit_kind == "flush_error":
-        assert raised.value.tool_call_id == "call-truncated"
+        # A cut-off tool call finishes the step instead of failing it; the
+        # batch's deferred wait must still not start.
+        result = await asyncio.wait_for(call, timeout=1)
+        assert result.tool_args_truncated is True
+        truncated_parts = [
+            c.args[2] for c in store_part.await_args_list
+            if getattr(c.args[2], "callID", None) == "call-truncated"
+        ]
+        assert truncated_parts[-1].state.status == "error"
     else:
+        with pytest.raises(type(interruption)) as raised:
+            await asyncio.wait_for(call, timeout=1)
         assert raised.value is interruption
     execute.assert_not_awaited()
     assert runner._attempt_state.tool_execution_started is False
@@ -867,3 +878,56 @@ async def test_llm_budget_slot_is_released_on_every_stream_exit(monkeypatch, out
         assert loop_budget_snapshot(loop) == {"limit": 1, "in_flight": 0, "waiting": 0}
     finally:
         set_loop_budget(loop, 0)
+
+
+async def test_cancel_while_queued_for_provider_slot_returns_loop_budget(monkeypatch):
+    """The loop budget is already held while queueing for the provider slot.
+
+    A cancel landing there must hand it back: the try/finally around the
+    stream has not started yet, so nothing else would.
+    """
+    from flocks.provider import concurrency
+    from flocks.provider.llm_budget import loop_budget_snapshot, set_loop_budget
+
+    concurrency.reset_limiters_for_testing()
+    monkeypatch.setenv("FLOCKS_LLM_MAX_CONCURRENT_REQUESTS", "1")
+    runner = _make_runner("ses_llm_budget_provider_queue")
+    monkeypatch.setattr(runner_mod, "StreamProcessor", _FakeProcessor)
+    monkeypatch.setattr(runner_mod.Message, "store_part", AsyncMock())
+    monkeypatch.setattr(runner_mod.Message, "update", AsyncMock())
+    monkeypatch.setattr(runner_mod.HookPipeline, "has_stage_handlers", AsyncMock(return_value=False))
+    streamed = []
+
+    class Provider:
+        async def chat_stream(self, **_kwargs):
+            streamed.append(True)
+            yield SimpleNamespace(delta="a", reasoning=None, tool_calls=None)
+
+    loop = asyncio.get_running_loop()
+    set_loop_budget(loop, 1)
+    limiter = concurrency.get_provider_limiter(runner.provider_id, limit=1)
+    outside_holder = await limiter.acquire()
+    try:
+        call = asyncio.create_task(runner._call_llm(
+            provider=Provider(), messages=[ChatMessage(role="user", content="test")],
+            tools=[], agent=SimpleNamespace(name="rex"), assistant_msg=SimpleNamespace(id="msg_queued"),
+        ))
+        for _ in range(200):
+            if limiter.snapshot()["waiting"] == 1:
+                break
+            await asyncio.sleep(0.005)
+        assert limiter.snapshot()["waiting"] == 1
+        assert loop_budget_snapshot(loop)["in_flight"] == 1
+
+        call.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await call
+
+        assert streamed == []
+        assert loop_budget_snapshot(loop) == {"limit": 1, "in_flight": 0, "waiting": 0}
+        assert limiter.snapshot()["waiting"] == 0
+        assert limiter.snapshot()["active"] == 1  # only the outside holder
+    finally:
+        outside_holder.release()
+        set_loop_budget(loop, 0)
+        concurrency.reset_limiters_for_testing()

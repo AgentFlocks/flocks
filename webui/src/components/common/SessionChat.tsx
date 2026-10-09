@@ -63,10 +63,12 @@ import {
   fetchSessionChatCommands,
   getQueuedPromptText,
   parseInstructionDisplayText,
+  readSessionRetryStatus,
   resolveSessionChatSSEAction,
   shouldForwardSSEEventToParent,
   stripTaskMetadata,
   type CompactionStage,
+  type SessionRetryStatus,
   usePendingQuestions,
   useSessionContextUsage,
   useSessionPromptQueue,
@@ -305,10 +307,13 @@ interface ComposerAttachment {
 }
 
 const APPROX_CHARS_PER_TOKEN = 4;
+// Mirrors SessionPrompt.count_tokens: CJK characters cost about one token each.
+const CJK_CHAR_RE = /[\u3000-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af\uf900-\ufaff\uff00-\uffef]/g;
 
 function countTokensLikeCompaction(text: string | null | undefined): number {
   if (!text) return 0;
-  return Math.floor(text.length / APPROX_CHARS_PER_TOKEN);
+  const cjkChars = text.match(CJK_CHAR_RE)?.length ?? 0;
+  return cjkChars + Math.floor((text.length - cjkChars) / APPROX_CHARS_PER_TOKEN);
 }
 
 const INSIGNIFICANT_THINKING_TEXT_RE = /^[\p{P}\p{S}]+$/u;
@@ -716,6 +721,33 @@ function adjustContextSegmentTokens(
   return 0;
 }
 
+// Rows are estimates; the total is what the provider reported. The backend
+// folds an observed surplus into "conversation", but most of it is tokenizer
+// drift that belongs to every row (a two-message chat is not 3K tokens of
+// conversation), so take it back out and scale all rows to the total instead.
+// An estimate above the total (uncounted history reasoning) scales down.
+function scaleContextSegmentsToObservedTotal(
+  segments: ContextUsageBreakdownSegment[],
+  estimatedTokens: number,
+  usedTokens: number,
+): void {
+  if (usedTokens <= 0 || usedTokens === estimatedTokens) return;
+  if (usedTokens > estimatedTokens) {
+    adjustContextSegmentTokens(segments, 'conversation', -(usedTokens - estimatedTokens));
+  }
+  const counted = segments.filter((segment) => segment.included && segment.tokens > 0);
+  const countedTokens = counted.reduce((total, segment) => total + segment.tokens, 0);
+  if (countedTokens <= 0 || countedTokens === usedTokens) return;
+  let assigned = 0;
+  let largest = counted[0];
+  counted.forEach((segment) => {
+    segment.tokens = Math.floor((segment.tokens * usedTokens) / countedTokens);
+    assigned += segment.tokens;
+    if (segment.tokens > largest.tokens) largest = segment;
+  });
+  largest.tokens += usedTokens - assigned;
+}
+
 function normalizeFixedContextSegments(
   segments: ContextUsageBreakdownSegment[],
 ): ContextUsageBreakdownSegment[] {
@@ -782,15 +814,15 @@ export function buildContextUsageBreakdown(
     const includedToolDefinitionTokens = serverSegments.reduce((total, segment) => (
       segment.key === 'toolDefinitions' && segment.included ? total + segment.tokens : total
     ), 0);
-    const estimatedSnapshotTokens = snapshot.estimatedTokens > 0
-      ? snapshot.estimatedTokens
-      : snapshot.usedTokens || 0;
-    if (includeSnapshotUsage && !useLocalMessageUsage) {
-      adjustContextSegmentTokens(
-        segments,
-        'conversation',
-        -Math.max(0, (snapshot.usedTokens || 0) - estimatedSnapshotTokens),
-      );
+    // ``usedTokens`` is the figure the backend compares against the
+    // compaction threshold (provider-reported usage, including the system
+    // prompt and tool definitions), so the meter reaches that threshold when
+    // compaction actually starts.
+    const snapshotUsedTokens = snapshot.usedTokens > 0
+      ? snapshot.usedTokens
+      : snapshot.estimatedTokens || 0;
+    if (includeSnapshotUsage && !useLocalMessageUsage && snapshot.estimatedTokens > 0) {
+      scaleContextSegmentsToObservedTotal(segments, snapshot.estimatedTokens, snapshotUsedTokens);
     }
     const pendingTokenDeltas = includeSnapshotUsage ? options?.pendingTokenDeltas || {} : {};
     const pendingTokenDeltaTotal = Object.entries(pendingTokenDeltas).reduce(
@@ -811,15 +843,20 @@ export function buildContextUsageBreakdown(
               0,
               (
                 useLocalMessageUsage
-                  ? activeBreakdown?.usedTokens || 0
-                  : estimatedSnapshotTokens - includedSystemPromptTokens - includedToolDefinitionTokens
+                  ? includedSystemPromptTokens
+                    + includedToolDefinitionTokens
+                    + (activeBreakdown?.usedTokens || 0)
+                  : snapshotUsedTokens
               ) + pendingTokenDeltaTotal,
             )
           : 0
       ) + draftTokens,
       compactedTokens: Math.max(0, snapshot.compactedTokens || 0),
+      // Before the first model call nothing is sent yet, so the fixed
+      // prompt costs are listed but not counted.
       segments: normalizeFixedContextSegments(segments).map((segment) => (
-        segment.key === 'systemPrompt' || segment.key === 'toolDefinitions'
+        !includeSnapshotUsage
+          && (segment.key === 'systemPrompt' || segment.key === 'toolDefinitions')
           ? { ...segment, included: false }
           : segment
       )),
@@ -906,8 +943,9 @@ function ContextUsageRing({
       : clamped >= 50
         ? 'stroke-sky-500'
         : 'stroke-zinc-400';
+  // Fixed prompt costs are only counted once the model has been called.
   const rows = breakdown.segments.filter((segment) => (
-    segment.key !== 'systemPrompt' && segment.key !== 'toolDefinitions'
+    segment.included || (segment.key !== 'systemPrompt' && segment.key !== 'toolDefinitions')
   ));
   const activeSegments = breakdown.segments.filter((segment) => segment.included && segment.tokens > 0);
 
@@ -1962,6 +2000,10 @@ export default function SessionChat({
   const [compactingMessage, setCompactingMessage] = useState('');
   const [isDreaming, setIsDreaming] = useState(false);
   const [dreamingMessage, setDreamingMessage] = useState('');
+  // Backend retry state (provider 429 / 5xx). Without this the chat only shows
+  // the generic thinking dots for the whole backoff window.
+  const [retryStatus, setRetryStatus] = useState<SessionRetryStatus | null>(null);
+  const [retryCountdownSeconds, setRetryCountdownSeconds] = useState<number | null>(null);
   const [goalBanner, setGoalBanner] = useState<GoalBannerState | null>(null);
   const [dismissedGoalKey, setDismissedGoalKey] = useState(() => readDismissedGoalKey(sessionId));
   useEffect(() => {
@@ -1996,6 +2038,44 @@ export default function SessionChat({
   const [processGroupOpenState, setProcessGroupOpenState] = useState<ProcessGroupOpenState>(() => (
     readProcessGroupOpenState(sessionId)
   ));
+
+  // Seconds until the backend's next provider attempt, refreshed while the
+  // retry notice is visible so the user can see the wait shrinking.
+  useEffect(() => {
+    const nextAt = retryStatus?.next;
+    if (!retryStatus || typeof nextAt !== 'number') {
+      setRetryCountdownSeconds(null);
+      return undefined;
+    }
+    const update = () => {
+      setRetryCountdownSeconds(Math.max(0, Math.ceil((nextAt - Date.now()) / 1000)));
+    };
+    update();
+    const timer = window.setInterval(update, 500);
+    return () => window.clearInterval(timer);
+  }, [retryStatus]);
+
+  const retryNoticeText = useMemo(() => {
+    if (!retryStatus) return '';
+    const attempt = retryStatus.maxAttempts
+      ? `${retryStatus.attempt}/${retryStatus.maxAttempts}`
+      : `${retryStatus.attempt}`;
+    // Provider SDKs put the whole JSON error body in the message; keep the
+    // notice to one line.
+    const rawReason = (retryStatus.message || '').trim();
+    const reason = rawReason.length > 120 ? `${rawReason.slice(0, 117)}…` : rawReason;
+    const base = retryStatus.rateLimited
+      ? t('chat.retryNotice.rateLimited', { attempt })
+      : t('chat.retryNotice.transient', {
+        attempt,
+        reason: reason || t('chat.retryNotice.unknownReason'),
+      });
+    if (retryCountdownSeconds !== null && retryCountdownSeconds > 0) {
+      return `${base}${t('chat.retryNotice.countdown', { seconds: retryCountdownSeconds })}`;
+    }
+    return base;
+  }, [retryStatus, retryCountdownSeconds, t]);
+
   // Live compaction progress, populated by ``session.compaction_progress`` SSE
   // events emitted by the backend. ``chunk_done`` arrivals are non-deterministic
   // (parallel ``asyncio.gather``) so we deduplicate by ``data.chunk`` index.
@@ -2137,6 +2217,19 @@ export default function SessionChat({
       });
     }
   }, [refreshContextUsage, resolvePendingContextUsage, sessionId]);
+  // Prompts the latest snapshot already counts no longer need their
+  // optimistic estimate. Without this the meter stayed on the pre-send
+  // baseline for the whole turn and only jumped once the turn ended (or the
+  // page was reloaded), even though the backend pushes usage between steps.
+  useEffect(() => {
+    const includedUserMessageIds = activeContextUsageSnapshot?.recentUserMessageIDs;
+    if (!sessionId || !activeContextUsageSnapshot || !includedUserMessageIds?.length) return;
+    const pending = pendingContextUsageRef.current;
+    if (pending.sessionId !== sessionId) return;
+    const coveredKeys = Object.keys(pending.entries)
+      .filter((key) => includedUserMessageIds.includes(key));
+    resolvePendingContextUsage(coveredKeys, sessionId, activeContextUsageSnapshot);
+  }, [activeContextUsageSnapshot, resolvePendingContextUsage, sessionId]);
   const isCompactingRef = useRef(false);
   const prevStreamingRef = useRef(false);
   // Tracks "sessionId::message" key to prevent double-send in React StrictMode
@@ -2666,6 +2759,7 @@ export default function SessionChat({
           setIsStreaming(false);
           setIsDreaming(false);
           setDreamingMessage('');
+          setRetryStatus(null);
           setGoalBanner(null);
           setDismissedGoalKey('');
           setSubmittedModelPromptSessionId(null);
@@ -2685,6 +2779,18 @@ export default function SessionChat({
             isCompactingRef.current = false;
             setIsDreaming(false);
             setDreamingMessage('');
+            setRetryStatus(null);
+          } else if (action.statusType === 'retry') {
+            sessionBusyRef.current = true;
+            if (
+              !abortingRef.current &&
+              !suppressStreamingUntilIdleRef.current
+            ) setIsStreaming(true);
+            setIsCompacting(false);
+            isCompactingRef.current = false;
+            setIsDreaming(false);
+            setDreamingMessage('');
+            setRetryStatus(action.retry ?? { attempt: 1, message: action.message });
           } else if (action.statusType === 'compacting') {
             sessionBusyRef.current = true;
             if (
@@ -2719,6 +2825,7 @@ export default function SessionChat({
             setCompactingMessage('');
             setIsDreaming(false);
             setDreamingMessage('');
+            setRetryStatus(null);
             setCompactionStages([]);
             refetch();
             refreshContextUsageAfterTurn({ skipIfFreshMs: 500 });
@@ -2781,6 +2888,10 @@ export default function SessionChat({
         }
         case 'message-part-updated': {
           const part = action.part as Pick<MessagePart, 'id' | 'type' | 'state'>;
+          // A finished tool part can be a sub-agent's late receipt while this
+          // session is still backing off; only fresh output ends the retry.
+          const finishedToolPart = (part.type === 'tool' || part.type === 'toolCall') && !isActiveToolPart(part);
+          if (!finishedToolPart) setRetryStatus((current) => (current ? null : current));
           if (part.id) {
             if (isActiveToolPart(part)) {
               activeToolPartIdsRef.current.add(part.id);
@@ -2854,6 +2965,7 @@ export default function SessionChat({
           setIsCompacting(false);
           setIsDreaming(false);
           setDreamingMessage('');
+          setRetryStatus(null);
           setCompactionStages([]);
           stopContextUsageRefreshing();
           refreshContextUsageAfterTurn({ skipIfFreshMs: 500 });
@@ -2946,6 +3058,11 @@ export default function SessionChat({
           setCompactingMessage('');
           setCompactionStages([]);
         }
+        // A retry event missed while the stream was down is recovered from
+        // the poll; any other active state means the backoff is over.
+        setRetryStatus(status?.type === 'retry'
+          ? (readSessionRetryStatus(status) ?? { attempt: 1, message: status.message })
+          : null);
         return;
       }
 
@@ -2957,6 +3074,7 @@ export default function SessionChat({
       isCompactingRef.current = false;
       setCompactingMessage('');
       setCompactionStages([]);
+      setRetryStatus(null);
     } catch {
       // Keep the current activity state when reconnect status cannot be verified.
     }
@@ -3034,6 +3152,7 @@ export default function SessionChat({
     setCompactingMessage('');
     setIsDreaming(false);
     setDreamingMessage('');
+    setRetryStatus(null);
     setCompactionStages([]);
     setGoalBanner(null);
     setDismissedGoalKey('');
@@ -3090,6 +3209,13 @@ export default function SessionChat({
     if (!sessionId || loading) return;
     if (statusCheckedRef.current === sessionId) return;
     statusCheckedRef.current = sessionId;
+    // The poll is in flight across awaits, and this closure keeps the
+    // sessionId it started with. By the time it lands the consumer may have
+    // swapped sessions (callers like WorkflowDetail/ChatTab reuse this
+    // component without remounting) or an SSE status may already have
+    // superseded it — both bump the revision, so comparing it is what tells
+    // a stale response apart, the same way
+    // reconcileSessionStatusAfterReconnect does.
     const statusRevision = sessionStatusRevisionRef.current;
     let cancelled = false;
 
@@ -3103,6 +3229,15 @@ export default function SessionChat({
           setIsStreaming(true);
           setIsDreaming(false);
           setDreamingMessage('');
+          setRetryStatus(null);
+        } else if (status?.type === 'retry' && !suppressStreamingUntilIdleRef.current) {
+          // The backend is sleeping between provider retries; the turn is
+          // still running even though nothing is streaming yet.
+          sessionBusyRef.current = true;
+          setIsStreaming(true);
+          setIsDreaming(false);
+          setDreamingMessage('');
+          setRetryStatus(readSessionRetryStatus(status) ?? { attempt: 1, message: status.message });
         } else if (status?.type === 'compacting' && !suppressStreamingUntilIdleRef.current) {
           sessionBusyRef.current = true;
           setIsStreaming(true);
@@ -3129,6 +3264,7 @@ export default function SessionChat({
         }
       }
 
+      if (statusRevision !== sessionStatusRevisionRef.current) return;
       try {
         await fetchPendingQuestions(sessionId);
       } catch (err) {
@@ -4480,6 +4616,22 @@ export default function SessionChat({
                         )}
                       </div>
                     </div>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Provider retry notice: the backend is backing off (429 / 5xx) before the next attempt */}
+            {retryStatus && isStreaming && !isCompacting && (
+              <div
+                className={`group relative ${!compact ? 'w-full' : ''} flex`}
+                data-testid="session-retry-notice"
+                role="status"
+              >
+                <div className={compact ? 'w-full' : 'flex w-full min-w-0'}>
+                  <div className="flex w-full items-center gap-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-700 dark:border-amber-500/35 dark:bg-amber-950/30 dark:text-amber-300">
+                    <Loader2 className="h-3.5 w-3.5 flex-shrink-0 animate-spin text-amber-500" />
+                    <span className="min-w-0 break-words">{retryNoticeText}</span>
                   </div>
                 </div>
               </div>

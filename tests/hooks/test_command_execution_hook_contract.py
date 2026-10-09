@@ -202,3 +202,113 @@ async def test_tool_deny_does_not_run_handler_and_emits_terminal_outcome() -> No
     assert result.error == "policy denied"
     assert calls == []
     assert observed_after[0]["status"] == "deny"
+
+
+@pytest.mark.asyncio
+async def test_validated_input_patch_is_reported_to_context_before_handler() -> None:
+    """A patched input reaches ToolContext.input_patch_callback before the handler runs."""
+    calls: list[dict[str, Any]] = []
+    reported: list[tuple[str, dict[str, Any]]] = []
+
+    class Patch(HookBase):
+        async def tool_before(self, _ctx) -> dict[str, Any]:
+            return {
+                "decision": {
+                    "action": "allow",
+                    "validated_input_patch": {"command": "patched"},
+                }
+            }
+
+    async def _on_patched(effective: dict[str, Any]) -> None:
+        reported.append(("callback", effective))
+        assert calls == [], "callback must run before the handler"
+
+    async def handler(_ctx: ToolContext, **kwargs: Any) -> ToolResult:
+        calls.append(kwargs)
+        reported.append(("handler", dict(kwargs)))
+        return ToolResult(success=True, output="ok")
+
+    HookPipeline.register("patch", Patch())
+    tool = _tool("bash", {"command": "original"}, calls)
+    tool.handler = handler
+    result = await tool.execute(
+        ToolContext(session_id="s-1", message_id="m-1", input_patch_callback=_on_patched),
+        command="original",
+    )
+
+    assert result.success is True
+    assert reported == [
+        ("callback", {"command": "patched"}),
+        ("handler", {"command": "patched"}),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_unchanged_patch_is_not_reported() -> None:
+    reported: list[dict[str, Any]] = []
+    calls: list[dict[str, Any]] = []
+
+    class Echo(HookBase):
+        async def tool_before(self, ctx) -> dict[str, Any]:
+            validated = ctx.input["tool_execution"]["tool"]["validated_input"]
+            return {"decision": {"action": "allow", "validated_input_patch": dict(validated)}}
+
+    async def _on_patched(effective: dict[str, Any]) -> None:
+        reported.append(effective)
+
+    HookPipeline.register("echo", Echo())
+    result = await _tool("bash", {"command": "same"}, calls).execute(
+        ToolContext(session_id="s-1", message_id="m-1", input_patch_callback=_on_patched),
+        command="same",
+    )
+
+    assert result.success is True
+    assert calls == [{"command": "same"}]
+    assert reported == []
+
+
+@pytest.mark.asyncio
+async def test_input_patch_callback_failure_does_not_block_execution() -> None:
+    calls: list[dict[str, Any]] = []
+
+    class Patch(HookBase):
+        async def tool_before(self, _ctx) -> dict[str, Any]:
+            return {"decision": {"action": "allow", "validated_input_patch": {"command": "patched"}}}
+
+    async def _broken(_effective: dict[str, Any]) -> None:
+        raise RuntimeError("ui update failed")
+
+    HookPipeline.register("patch", Patch())
+    result = await _tool("bash", {"command": "original"}, calls).execute(
+        ToolContext(session_id="s-1", message_id="m-1", input_patch_callback=_broken),
+        command="original",
+    )
+
+    assert result.success is True
+    assert calls == [{"command": "patched"}]
+
+
+@pytest.mark.asyncio
+async def test_patch_echoing_redaction_marker_keeps_real_secret() -> None:
+    """Hooks only see the redacted view; echoing it back must not clobber secrets."""
+    calls: list[dict[str, Any]] = []
+    seen: list[dict[str, Any]] = []
+
+    class RestoreHost(HookBase):
+        async def tool_before(self, ctx) -> dict[str, Any]:
+            validated = dict(ctx.input["tool_execution"]["tool"]["validated_input"])
+            seen.append(dict(validated))
+            validated["host"] = "10.0.0.8"
+            # Whole-dict echo, the way a placeholder-restoring hook behaves.
+            return {"decision": {"action": "allow", "validated_input_patch": validated}}
+
+    arguments = {"host": "[[V_IP_1]]", "command": "uname -a", "password": "real-secret"}
+    HookPipeline.register("restore", RestoreHost())
+    result = await _tool("ssh_host_cmd", arguments, calls).execute(
+        ToolContext(session_id="s-1", message_id="m-1"),
+        **arguments,
+    )
+
+    assert result.success is True
+    assert seen == [{"host": "[[V_IP_1]]", "command": "uname -a", "password": "[REDACTED]"}]
+    assert calls == [{"host": "10.0.0.8", "command": "uname -a", "password": "real-secret"}]

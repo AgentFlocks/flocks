@@ -6,6 +6,7 @@ Based on Flocks' ported src/session/retry.ts
 """
 
 import asyncio
+import random
 from typing import Optional, Dict, Any
 
 from flocks.utils.log import Log
@@ -121,6 +122,76 @@ class SessionRetry:
         # No headers or no error, use capped exponential backoff
         delay_ms = RETRY_INITIAL_DELAY * (RETRY_BACKOFF_FACTOR ** (attempt - 1))
         return int(min(delay_ms, RETRY_MAX_DELAY_NO_HEADERS))
+
+    @staticmethod
+    def retry_after_ms(error: Optional[Dict[str, Any]]) -> Optional[int]:
+        """Return the provider's ``retry-after`` hint in milliseconds, if any."""
+        if not error or not isinstance(error, dict):
+            return None
+        headers = (error.get("data") or {}).get("responseHeaders") or {}
+        if not isinstance(headers, dict):
+            return None
+        lowered = {str(key).lower(): value for key, value in headers.items()}
+        for header, scale in (("retry-after-ms", 1.0), ("retry-after", 1000.0)):
+            raw = lowered.get(header)
+            if raw is None:
+                continue
+            try:
+                parsed = float(raw)
+            except (TypeError, ValueError):
+                continue
+            if 0 < parsed < float("inf"):
+                return int(parsed * scale)
+        return None
+
+    @staticmethod
+    def jittered_delay(
+        attempt: int,
+        error: Optional[Dict[str, Any]] = None,
+        *,
+        max_delay_ms: int = RETRY_MAX_DELAY_NO_HEADERS,
+    ) -> int:
+        """``delay()`` with jitter so concurrent callers do not retry in lockstep.
+
+        N sessions rejected by the same 429 would otherwise all sleep the same
+        2/4/8/16/30 s schedule and hit the provider together again. A
+        ``retry-after`` hint is honoured as a lower bound (plus up to 25 %);
+        plain backoff uses "equal jitter": ``[base / 2, base]``. The result
+        never exceeds ``max_delay_ms``.
+        """
+        cap = max(1, int(max_delay_ms))
+        hinted = SessionRetry.retry_after_ms(error)
+        if hinted is not None:
+            return max(1, min(cap, int(min(hinted, cap) * random.uniform(1.0, 1.25))))
+        base = min(SessionRetry.delay(attempt, error), cap)
+        half = base / 2.0
+        return max(1, int(half + random.uniform(0.0, half)))
+
+    @staticmethod
+    def is_rate_limited(error: Dict[str, Any]) -> bool:
+        """Return True when the provider rejected the request as rate-limited (429).
+
+        A usable status code decides on its own: provider errors carry request
+        ids and quota hints, so a 401 whose body happens to contain "429" must
+        not put the whole provider into cooldown. Text matching is only a
+        fallback for errors that arrive without a status code.
+        """
+        data = error.get("data") or {}
+        status_code = data.get("statusCode")
+        try:
+            normalized = int(status_code) if status_code is not None else None
+        except (TypeError, ValueError):
+            normalized = None
+        if normalized is not None:
+            return normalized == 429
+        message = data.get("message") or error.get("message") or ""
+        if not isinstance(message, str):
+            return False
+        lowered = message.lower()
+        return any(
+            pattern in lowered
+            for pattern in ("rate limit", "rate_limit", "too many requests", "429")
+        )
     
     @staticmethod
     def retryable(error: Dict[str, Any]) -> Optional[str]:
@@ -136,9 +207,16 @@ class SessionRetry:
         error_name = error.get("name", "")
         error_data = error.get("data", {})
 
+        if error_name == "OutputLimitRejectedError":
+            return "Output token limit not accepted, retrying with the configured limit"
+
         if error_name == "StreamToolArgumentsTruncatedError":
-            return "Model output was truncated while generating tool arguments"
-        
+            # The runner turns a cut-off tool call into a tool error the model
+            # can react to. Replaying the request would stack a second attempt
+            # onto the same assistant message, and whatever cut the stream
+            # usually cuts the identical retry at the same place.
+            return None
+
         # Check if it's an APIError with isRetryable flag
         if error_name == "APIError":
             if not error_data.get("isRetryable", False):

@@ -5,7 +5,34 @@ from pathlib import Path
 import pytest
 
 from flocks.config.config import Config
+from flocks.session.session_loop import SessionLoop
 from flocks.storage.storage import Storage
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    config.addinivalue_line(
+        "markers",
+        "real_context_usage_push: run SessionLoop._schedule_context_usage_push for real",
+    )
+
+
+@pytest.fixture(autouse=True)
+def skip_background_context_usage_push(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch):
+    """Keep loop tests from starting the composer-meter push.
+
+    The push runs in a background task that outlives the test body: it loads
+    the agent registry and reads storage while the fixtures tear down, and the
+    test's event loop cancels it halfway.  Tests of the push itself opt out
+    with ``real_context_usage_push``.
+    """
+    if request.node.get_closest_marker("real_context_usage_push") is not None:
+        return
+    # Same signature as the real method, so a wrong call still fails loudly.
+    monkeypatch.setattr(
+        SessionLoop,
+        "_schedule_context_usage_push",
+        classmethod(lambda cls, ctx, callbacks, *, force=False: None),
+    )
 
 
 @pytest.fixture(autouse=True)

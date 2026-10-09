@@ -512,7 +512,16 @@ class Agent:
         # Detect cross-worker skill-settings changes before serving cached state.
         Agent._sync_skill_settings_cache()
         Agent._sync_delegatable_settings_cache()
-        return await Agent._state_accessor()
+        load = Agent._state_accessor()
+        if load.cancelled() or (not load.done() and load.get_loop().is_closed()):
+            # A cancelled load, or one left pending on a closed event loop,
+            # would stay cached and fail every later call.
+            Agent._state_accessor.invalidate()  # type: ignore[attr-defined]
+            load = Agent._state_accessor()
+        # Every caller awaits the same load task.  Shield it so a cancelled
+        # caller (a client disconnecting, a background task stopped) does not
+        # cancel the load for everyone.
+        return await asyncio.shield(load)
 
     @classmethod
     async def refresh(cls) -> Dict[str, AgentInfo]:

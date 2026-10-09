@@ -66,6 +66,8 @@ export interface ContextUsageSnapshot {
   modelID?: string | null;
   segments: ContextUsageSegment[];
   excludedSegments: ContextUsageSegment[];
+  /** Newest user messages the snapshot already counts. */
+  recentUserMessageIDs?: string[];
 }
 
 export interface SessionGoalState {
