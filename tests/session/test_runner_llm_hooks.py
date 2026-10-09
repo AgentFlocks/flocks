@@ -61,7 +61,7 @@ class _FakeProcessor:
     def get_finish_reason(self):
         return self.finish_reason
 
-    async def drain_parallel_tool_calls(self) -> None:
+    async def drain_parallel_tool_calls(self, *, execute_deferred: bool = True) -> None:
         return None
 
 
@@ -72,7 +72,13 @@ class _FakeToolAccumulator:
     async def feed_chunk(self, tool_call) -> None:
         return None
 
-    async def flush_remaining(self, finish_reason) -> None:
+    async def flush_remaining(
+        self,
+        finish_reason,
+        *,
+        output_limit=None,
+        raised_output_limit=None,
+    ) -> None:
         return None
 
 
@@ -541,6 +547,7 @@ async def test_call_llm_drains_started_delegate_before_raising_provider_error(
         "has_stage_handlers",
         AsyncMock(return_value=False),
     )
+    monkeypatch.setattr(runner_mod.HookPipeline, "run_tool_before", AsyncMock(return_value=None))
     monkeypatch.setattr(
         "flocks.provider.options.build_provider_options",
         lambda provider_id, model_id: {},
@@ -602,7 +609,8 @@ async def test_call_llm_drains_started_delegate_before_raising_provider_error(
             assistant_msg=assistant_msg,
         )
     )
-    await asyncio.wait_for(delegate_started.wait(), timeout=1)
+    # First tool-schema lookup can include plugin discovery on a cold test run.
+    await asyncio.wait_for(delegate_started.wait(), timeout=5)
     await asyncio.sleep(0)
     provider_error_waited_for_delegate = not call_task.done()
 
@@ -611,6 +619,209 @@ async def test_call_llm_drains_started_delegate_before_raising_provider_error(
         await call_task
 
     assert provider_error_waited_for_delegate is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["success", "invalid", "failure"])
+async def test_call_llm_only_exempts_successful_sleep_from_loop_guard(monkeypatch, outcome):
+    from flocks.tool.agent.communication import sleep
+
+    runner = _make_runner(f"ses_runner_sleep_result_{outcome}")
+    store_part = AsyncMock()
+
+    async def execute(tool_name, ctx, **kwargs):
+        assert tool_name == "sleep"
+        if outcome == "failure":
+            raise RuntimeError("sleep failed")
+        return await sleep(ctx, **kwargs)
+
+    monkeypatch.setattr(runner_mod, "langfuse_is_active", lambda: False)
+    monkeypatch.setattr(runner_mod.Message, "store_part", store_part)
+    monkeypatch.setattr(runner_mod.Message, "parts", AsyncMock(return_value=[]))
+    monkeypatch.setattr(runner_mod.Message, "update", AsyncMock())
+    monkeypatch.setattr(runner_mod.HookPipeline, "has_stage_handlers", AsyncMock(return_value=False))
+    monkeypatch.setattr(runner_mod.HookPipeline, "run_tool_before", AsyncMock(return_value=None))
+    monkeypatch.setattr("flocks.provider.options.build_provider_options", lambda *_args: {})
+    monkeypatch.setattr("flocks.session.streaming.stream_processor.ToolRegistry.execute", execute)
+    monkeypatch.setattr(
+        StreamProcessor, "_resolve_sandbox_meta",
+        AsyncMock(return_value={"blocked": False, "error": None, "extra": {}}),
+    )
+
+    class Provider:
+        async def chat_stream(self, **_kwargs):
+            yield SimpleNamespace(tool_calls=[{
+                "index": 0,
+                "id": "call-sleep",
+                "function": {
+                    "name": "sleep",
+                    "arguments": '{"timeout_s":0}' if outcome == "invalid" else '{"timeout_s":0.001}',
+                },
+            }])
+
+    result = await runner._call_llm(
+        provider=Provider(), messages=[ChatMessage(role="user", content="wait for a message")],
+        tools=[{"type": "function", "function": {"name": "sleep"}}], agent=SimpleNamespace(name="rex"), assistant_msg=SimpleNamespace(id="msg_sleep"),
+    )
+
+    assert result._successful_sleep is (outcome == "success")
+    assert len(result.tool_calls) == 1
+    assert result.tool_calls[0].name == "sleep"
+    assert store_part.await_args.args[2].state.status == ("completed" if outcome == "success" else "error")
+    decisions = [runner._update_tool_loop_guard(result, last_user_id="user-1") for _ in range(3)]
+    assert [decision["action"] for decision in decisions] == (
+        ["allow"] * 3 if outcome == "success" else ["allow", "warn", "halt"]
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("exit_kind", ["provider_error", "cancel", "flush_error"])
+async def test_call_llm_discards_deferred_sleep_on_unsuccessful_stream(monkeypatch, exit_kind):
+    runner = _make_runner(f"ses_runner_sleep_{exit_kind}")
+    runner.callbacks.event_publish_callback = AsyncMock()
+    store_part = AsyncMock()
+    interruption = (
+        asyncio.CancelledError("provider stream cancelled")
+        if exit_kind == "cancel"
+        else RuntimeError("provider stream failed after sleep call")
+    )
+
+    async def unexpected_sleep(**_kwargs):
+        await asyncio.Event().wait()
+
+    execute = AsyncMock(side_effect=unexpected_sleep)
+    monkeypatch.setattr(runner_mod, "langfuse_is_active", lambda: False)
+    monkeypatch.setattr(runner_mod.Message, "store_part", store_part)
+    monkeypatch.setattr(runner_mod.Message, "parts", AsyncMock(return_value=[]))
+    monkeypatch.setattr(runner_mod.Message, "update", AsyncMock())
+    monkeypatch.setattr(runner_mod.HookPipeline, "has_stage_handlers", AsyncMock(return_value=False))
+    monkeypatch.setattr(runner_mod.HookPipeline, "run_tool_before", AsyncMock(return_value=None))
+    monkeypatch.setattr("flocks.provider.options.build_provider_options", lambda *_args: {})
+    monkeypatch.setattr("flocks.session.streaming.stream_processor.ToolRegistry.execute", execute)
+    monkeypatch.setattr(
+        StreamProcessor, "_resolve_sandbox_meta",
+        AsyncMock(return_value={"blocked": False, "error": None, "extra": {}}),
+    )
+
+    class Provider:
+        async def chat_stream(self, **_kwargs):
+            yield SimpleNamespace(
+                tool_calls=[{
+                    "index": 0,
+                    "id": "call-sleep",
+                    "function": {"name": "sleep", "arguments": '{"timeout_s":3600}'},
+                }],
+            )
+            if exit_kind == "flush_error":
+                yield SimpleNamespace(
+                    tool_calls=[{
+                        "index": 1,
+                        "id": "call-truncated",
+                        "function": {"name": "read", "arguments": '{"file_path":"unfinished'},
+                    }],
+                    finish_reason="length",
+                )
+            else:
+                raise interruption
+
+    call = runner._call_llm(
+        provider=Provider(), messages=[ChatMessage(role="user", content="wait for a message")],
+        tools=[], agent=SimpleNamespace(name="rex"), assistant_msg=SimpleNamespace(id="msg_sleep"),
+    )
+    if exit_kind == "flush_error":
+        # A cut-off tool call finishes the step instead of failing it; the
+        # batch's deferred wait must still not start.
+        result = await asyncio.wait_for(call, timeout=1)
+        assert result.tool_args_truncated is True
+        truncated_parts = [
+            c.args[2] for c in store_part.await_args_list
+            if getattr(c.args[2], "callID", None) == "call-truncated"
+        ]
+        assert truncated_parts[-1].state.status == "error"
+    else:
+        with pytest.raises(type(interruption)) as raised:
+            await asyncio.wait_for(call, timeout=1)
+        assert raised.value is interruption
+    execute.assert_not_awaited()
+    assert runner._attempt_state.tool_execution_started is False
+    sleep_parts = [
+        call.args[2] for call in store_part.await_args_list
+        if getattr(call.args[2], "callID", None) == "call-sleep"
+    ]
+    assert [part.state.status for part in sleep_parts] == ["pending", "error"]
+    assert sleep_parts[0].id == sleep_parts[1].id
+    assert sleep_parts[-1].state.input == {"timeout_s": 3600}
+    assert sleep_parts[-1].state.metadata["interrupted"] is True
+    published_sleep = [
+        call.args[1]["part"] for call in runner.callbacks.event_publish_callback.await_args_list
+        if call.args[1].get("part", {}).get("callID") == "call-sleep"
+    ]
+    assert published_sleep[-1]["state"]["status"] == "error"
+    assert published_sleep[-1]["state"]["metadata"]["interrupted"] is True
+
+
+@pytest.mark.asyncio
+async def test_call_llm_cancel_during_first_deferred_sleep_finalizes_both(monkeypatch):
+    runner = _make_runner("ses_runner_two_sleeps")
+    runner.callbacks.event_publish_callback = AsyncMock()
+    store = AsyncMock()
+    started = asyncio.Event()
+    executed = []
+
+    async def execute(tool_name, ctx, **_kwargs):
+        executed.append(ctx.call_id)
+        started.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(runner_mod, "langfuse_is_active", lambda: False)
+    monkeypatch.setattr(runner_mod.Message, "store_part", store)
+    monkeypatch.setattr(runner_mod.Message, "parts", AsyncMock(return_value=[]))
+    monkeypatch.setattr(runner_mod.Message, "update", AsyncMock())
+    monkeypatch.setattr(runner_mod.HookPipeline, "has_stage_handlers", AsyncMock(return_value=False))
+    monkeypatch.setattr(runner_mod.HookPipeline, "run_tool_before", AsyncMock(return_value=None))
+    monkeypatch.setattr("flocks.provider.options.build_provider_options", lambda *_args: {})
+    monkeypatch.setattr("flocks.session.streaming.stream_processor.ToolRegistry.execute", execute)
+    monkeypatch.setattr(
+        StreamProcessor, "_resolve_sandbox_meta",
+        AsyncMock(return_value={"blocked": False, "error": None, "extra": {}}),
+    )
+
+    class Provider:
+        async def chat_stream(self, **_kwargs):
+            for index in (1, 2):
+                yield SimpleNamespace(tool_calls=[{
+                    "index": index, "id": f"sleep-{index}",
+                    "function": {"name": "sleep", "arguments": f'{{"timeout_s":{index}}}'},
+                }])
+
+    call = asyncio.create_task(runner._call_llm(
+        provider=Provider(), messages=[ChatMessage(role="user", content="wait twice")],
+        tools=[{"type": "function", "function": {"name": "sleep"}}], agent=SimpleNamespace(name="rex"), assistant_msg=SimpleNamespace(id="msg-two-sleeps"),
+    ))
+    await asyncio.wait_for(started.wait(), timeout=1)
+    call.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await call
+
+    assert executed == ["sleep-1"]
+    for index in (1, 2):
+        call_id = f"sleep-{index}"
+        parts = [
+            entry.args[2] for entry in store.await_args_list
+            if getattr(entry.args[2], "callID", None) == call_id
+        ]
+        assert [part.state.status for part in parts] == (
+            ["pending", "running", "error"] if index == 1 else ["pending", "error"]
+        )
+        assert parts[-1].id == parts[0].id
+        assert parts[-1].state.input == {"timeout_s": index}
+        assert parts[-1].state.metadata["interrupted"] is True
+        events = [
+            entry.args[1]["part"] for entry in runner.callbacks.event_publish_callback.await_args_list
+            if entry.args[1].get("part", {}).get("callID") == call_id
+        ]
+        assert events[-1]["id"] == parts[0].id
+        assert events[-1]["state"]["status"] == "error"
 
 
 @pytest.mark.parametrize("outcome", ["success", "error", "cancel"])
@@ -652,3 +863,94 @@ async def test_model_timing_closes_on_every_stream_exit(monkeypatch, outcome):
     assert len(saved) == 2  # No per-token writes.
     assert saved[-1]["time"]["end"] == 11000
     assert saved[-1]["id"] == saved[0]["id"]
+
+
+@pytest.mark.parametrize("outcome", ["success", "error", "cancel"])
+async def test_llm_budget_slot_is_released_on_every_stream_exit(monkeypatch, outcome):
+    from flocks.provider.llm_budget import loop_budget_snapshot, set_loop_budget
+
+    runner = _make_runner("ses_llm_budget")
+    monkeypatch.setattr(runner_mod, "StreamProcessor", _FakeProcessor)
+    monkeypatch.setattr(runner_mod.Message, "store_part", AsyncMock())
+    monkeypatch.setattr(runner_mod.Message, "update", AsyncMock())
+    monkeypatch.setattr(runner_mod.HookPipeline, "has_stage_handlers", AsyncMock(return_value=False))
+    in_flight_during_stream = []
+
+    class Provider:
+        async def chat_stream(self, **_kwargs):
+            in_flight_during_stream.append(loop_budget_snapshot()["in_flight"])
+            yield SimpleNamespace(delta="a", reasoning=None, tool_calls=None)
+            if outcome == "error":
+                raise RuntimeError("provider failed")
+            if outcome == "cancel":
+                raise asyncio.CancelledError()
+
+    loop = asyncio.get_running_loop()
+    set_loop_budget(loop, 1)  # as on the workflow loop
+    try:
+        call = runner._call_llm(
+            provider=Provider(), messages=[ChatMessage(role="user", content="test")],
+            tools=[], agent=SimpleNamespace(name="rex"), assistant_msg=SimpleNamespace(id="msg_budget"),
+        )
+        if outcome == "success":
+            await call
+        else:
+            with pytest.raises(RuntimeError if outcome == "error" else asyncio.CancelledError):
+                await call
+        assert in_flight_during_stream == [1]
+        assert loop_budget_snapshot(loop) == {"limit": 1, "in_flight": 0, "waiting": 0}
+    finally:
+        set_loop_budget(loop, 0)
+
+
+async def test_cancel_while_queued_for_provider_slot_returns_loop_budget(monkeypatch):
+    """The loop budget is already held while queueing for the provider slot.
+
+    A cancel landing there must hand it back: the try/finally around the
+    stream has not started yet, so nothing else would.
+    """
+    from flocks.provider import concurrency
+    from flocks.provider.llm_budget import loop_budget_snapshot, set_loop_budget
+
+    concurrency.reset_limiters_for_testing()
+    monkeypatch.setenv("FLOCKS_LLM_MAX_CONCURRENT_REQUESTS", "1")
+    runner = _make_runner("ses_llm_budget_provider_queue")
+    monkeypatch.setattr(runner_mod, "StreamProcessor", _FakeProcessor)
+    monkeypatch.setattr(runner_mod.Message, "store_part", AsyncMock())
+    monkeypatch.setattr(runner_mod.Message, "update", AsyncMock())
+    monkeypatch.setattr(runner_mod.HookPipeline, "has_stage_handlers", AsyncMock(return_value=False))
+    streamed = []
+
+    class Provider:
+        async def chat_stream(self, **_kwargs):
+            streamed.append(True)
+            yield SimpleNamespace(delta="a", reasoning=None, tool_calls=None)
+
+    loop = asyncio.get_running_loop()
+    set_loop_budget(loop, 1)
+    limiter = concurrency.get_provider_limiter(runner.provider_id, limit=1)
+    outside_holder = await limiter.acquire()
+    try:
+        call = asyncio.create_task(runner._call_llm(
+            provider=Provider(), messages=[ChatMessage(role="user", content="test")],
+            tools=[], agent=SimpleNamespace(name="rex"), assistant_msg=SimpleNamespace(id="msg_queued"),
+        ))
+        for _ in range(200):
+            if limiter.snapshot()["waiting"] == 1:
+                break
+            await asyncio.sleep(0.005)
+        assert limiter.snapshot()["waiting"] == 1
+        assert loop_budget_snapshot(loop)["in_flight"] == 1
+
+        call.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await call
+
+        assert streamed == []
+        assert loop_budget_snapshot(loop) == {"limit": 1, "in_flight": 0, "waiting": 0}
+        assert limiter.snapshot()["waiting"] == 0
+        assert limiter.snapshot()["active"] == 1  # only the outside holder
+    finally:
+        outside_holder.release()
+        set_loop_budget(loop, 0)
+        concurrency.reset_limiters_for_testing()

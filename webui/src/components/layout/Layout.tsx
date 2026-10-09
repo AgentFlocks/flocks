@@ -723,7 +723,10 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
     for (const tab of openTabs) map.set(tab.href, tab.path);
     return map;
   }, [openTabs]);
-  const navItemPath = useCallback((href: string) => openTabPathByHref.get(href) ?? href, [openTabPathByHref]);
+  const navItemPath = useCallback(
+    (href: string) => href === '/workspace' ? '/workspace?tab=files' : openTabPathByHref.get(href) ?? href,
+    [openTabPathByHref],
+  );
 
   // A scene whose workspace closed (uninstalled, disabled or license lapsed)
   // cannot stay on screen: fall back to its suite manager.

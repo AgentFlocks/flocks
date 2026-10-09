@@ -270,7 +270,7 @@ async def test_runner_hook_can_only_shrink_the_projected_tool_set(
         async def process_event(self, _event):  # noqa: ANN001, ANN202
             return None
 
-        async def drain_parallel_tool_calls(self) -> None:
+        async def drain_parallel_tool_calls(self, *, execute_deferred: bool = True) -> None:
             return None
 
         def get_text_content(self) -> str:
@@ -289,7 +289,7 @@ async def test_runner_hook_can_only_shrink_the_projected_tool_set(
         async def feed_chunk(self, _tool_call):  # noqa: ANN001, ANN202
             return None
 
-        async def flush_remaining(self, _finish_reason):  # noqa: ANN001, ANN202
+        async def flush_remaining(self, _finish_reason, **_kwargs):  # noqa: ANN001, ANN003, ANN202
             return None
 
     hook_tools = [

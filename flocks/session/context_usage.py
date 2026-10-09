@@ -9,7 +9,8 @@ token usage or after compaction changes the prompt shape.
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, Iterable, List, Literal, Optional
+from collections import OrderedDict
+from typing import Any, Dict, Iterable, List, Literal, Optional, Tuple
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -25,6 +26,15 @@ log = Log.create(service="context-usage")
 UsageSource = Literal["observed", "estimated"]
 DELEGATION_TOOLS = {"delegate_task", "task"}
 ZERO_VISIBLE_SEGMENTS = {"agentDelegation"}
+RECENT_USER_MESSAGE_IDS_LIMIT = 20
+
+# Estimate of the messages that fed an observed model call, recorded the first
+# time that observation is examined.  The session loop examines it right after
+# the step, before any cleanup runs, so re-estimating the same messages later
+# shows how many tokens pruning, truncation or archiving removed since — which
+# the provider-reported figure cannot reflect until the next model call.
+_OBSERVATION_BASELINES: "OrderedDict[Tuple[str, str], int]" = OrderedDict()
+_OBSERVATION_BASELINES_MAX = 1024
 
 
 class ContextUsageSegment(BaseModel):
@@ -56,6 +66,9 @@ class ContextUsageSnapshot(BaseModel):
     model_id: Optional[str] = Field(None, alias="modelID")
     segments: List[ContextUsageSegment] = Field(default_factory=list)
     excluded_segments: List[ContextUsageSegment] = Field(default_factory=list, alias="excludedSegments")
+    # Newest user messages this snapshot counts, so a client can tell which of
+    # its optimistic prompt estimates the snapshot already includes.
+    recent_user_message_ids: List[str] = Field(default_factory=list, alias="recentUserMessageIDs")
 
 
 class _ObservedTokens(BaseModel):
@@ -63,6 +76,66 @@ class _ObservedTokens(BaseModel):
     created_ms: int
     used_tokens: int
     prompt_tokens: int
+    index: int = -1
+
+
+def has_observation_baseline(session_id: str, message_id: str) -> bool:
+    """Whether the pre-cleanup estimate for an observed call is known."""
+    return (session_id, message_id) in _OBSERVATION_BASELINES
+
+
+def reset_observation_baselines(session_id: Optional[str] = None) -> None:
+    """Drop recorded baselines (all, or one session's)."""
+    if session_id is None:
+        _OBSERVATION_BASELINES.clear()
+        return
+    for key in [key for key in _OBSERVATION_BASELINES if key[0] == session_id]:
+        _OBSERVATION_BASELINES.pop(key, None)
+
+
+async def estimate_observed_context_tokens(
+    session_id: str,
+    messages: List[Any],
+    observed_index: int,
+    observed_total: int,
+) -> Tuple[int, int, int]:
+    """Current prompt size derived from the latest provider-reported usage.
+
+    ``observed_total`` is input + cache-read + output + reasoning tokens of
+    ``messages[observed_index]``.  The result adds what was produced after
+    that call (its tool results and later messages) and subtracts what
+    cleanup removed from the earlier messages since the call.  The session
+    loop's compaction trigger and the composer meter both use this, so the
+    meter shows the number compaction actually acts on.
+
+    Returns ``(effective_tokens, unobserved_tokens, freed_tokens)``.
+    """
+    observed_id = str(getattr(messages[observed_index], "id", "") or "")
+    prompt_tokens_now = await SessionPrompt.estimate_full_context_tokens(
+        session_id,
+        messages[:observed_index],
+    )
+    key = (session_id, observed_id)
+    baseline = _OBSERVATION_BASELINES.get(key)
+    if baseline is None:
+        baseline = prompt_tokens_now
+        _OBSERVATION_BASELINES[key] = baseline
+        while len(_OBSERVATION_BASELINES) > _OBSERVATION_BASELINES_MAX:
+            _OBSERVATION_BASELINES.popitem(last=False)
+    else:
+        _OBSERVATION_BASELINES.move_to_end(key)
+    freed_tokens = max(0, baseline - prompt_tokens_now)
+    tool_result_tokens = await SessionPrompt.estimate_tool_result_tokens(
+        session_id,
+        observed_id,
+    )
+    later_tokens = await SessionPrompt.estimate_full_context_tokens(
+        session_id,
+        messages[observed_index + 1:],
+    )
+    unobserved_tokens = tool_result_tokens + later_tokens
+    effective_tokens = max(0, observed_total - freed_tokens) + unobserved_tokens
+    return effective_tokens, unobserved_tokens, freed_tokens
 
 
 def token_usage_to_dict(tokens: Any) -> Dict[str, Any]:
@@ -103,9 +176,11 @@ async def build_context_usage_snapshot(
     """Build a context-usage snapshot for UI display.
 
     ``usedTokens`` means the best available estimate of the current prompt
-    footprint.  If the provider emitted usage for the latest model call and no
-    later compaction mutation has changed the prompt, we use that observed
-    value.  Otherwise we fall back to ``SessionPrompt.estimate_full_context_tokens``.
+    footprint.  If the provider emitted usage for a model call we use that
+    observed value, adjusted by ``estimate_observed_context_tokens`` for what
+    was added or cleaned up since — the same figure the session loop compares
+    against the compaction threshold.  Otherwise we fall back to the
+    estimate.
     """
     active_messages = await Message.list(session_id)
 
@@ -136,13 +211,19 @@ async def build_context_usage_snapshot(
     )
     estimated_tokens = system_prompt_tokens + tool_definition_tokens + message_estimate_tokens
 
-    latest_observed = _latest_fresh_observation(
-        active_messages,
-        latest_context_mutation_ms=max(
+    latest_observed = latest_observation(active_messages)
+    if latest_observed is not None and not has_observation_baseline(
+        session_id,
+        latest_observed.message_id,
+    ):
+        latest_context_mutation_ms = max(
             _latest_summary_message_ms(active_messages),
             latest_compacted_part_ms,
-        ),
-    )
+        )
+        if latest_observed.created_ms and latest_observed.created_ms < latest_context_mutation_ms:
+            # Cleanup already changed the prompt and nobody recorded what it
+            # looked like before, so the observed figure cannot be adjusted.
+            latest_observed = None
 
     observed_tokens: Optional[int] = None
     last_message_id: Optional[str] = None
@@ -151,8 +232,26 @@ async def build_context_usage_snapshot(
     if latest_observed is not None:
         observed_tokens = latest_observed.used_tokens
         last_message_id = latest_observed.message_id
-        used_tokens = max(estimated_tokens, latest_observed.used_tokens)
-        source = "observed" if used_tokens == latest_observed.used_tokens else "estimated"
+        # Same number the session loop compares against the compaction
+        # threshold.  Taking ``max`` with the estimate made the meter read
+        # higher whenever the estimate over-counts (history reasoning most
+        # adapters never send back, CJK text on thrifty tokenizers), so it
+        # could sit near full without compaction ever starting.
+        used_tokens, unobserved_tokens, _freed = await estimate_observed_context_tokens(
+            session_id,
+            active_messages,
+            latest_observed.index,
+            latest_observed.used_tokens,
+        )
+        # What cleanup freed is an estimate, and it over-counts history the
+        # provider never re-sent (reasoning on most adapters), so after a
+        # compaction it could eat into the system prompt and tool definitions,
+        # which no cleanup removes.
+        used_tokens = max(
+            used_tokens,
+            system_prompt_tokens + tool_definition_tokens + unobserved_tokens,
+        )
+        source = "observed"
 
     percent = (
         max(0, min(100, int(((used_tokens / context_window) * 100) + 0.5)))
@@ -205,7 +304,22 @@ async def build_context_usage_snapshot(
         modelID=model_id,
         segments=segments,
         excludedSegments=[],
+        recentUserMessageIDs=_recent_user_message_ids(active_messages),
     )
+
+
+def _recent_user_message_ids(messages: List[Any]) -> List[str]:
+    ids: List[str] = []
+    for message in reversed(messages):
+        if _role_value(message) != "user":
+            continue
+        message_id = getattr(message, "id", None)
+        if message_id:
+            ids.append(str(message_id))
+            if len(ids) >= RECENT_USER_MESSAGE_IDS_LIMIT:
+                break
+    ids.reverse()
+    return ids
 
 
 def _coerce_int(value: Any) -> int:
@@ -239,13 +353,20 @@ def _latest_summary_message_ms(messages: List[Any]) -> int:
     return latest
 
 
-def _observed_tokens_for_message(message: Any) -> Optional[_ObservedTokens]:
+def _observed_tokens_for_message(message: Any, index: int = -1) -> Optional[_ObservedTokens]:
     if _role_value(message) != "assistant" or _is_summary_message(message):
         return None
 
     data = token_usage_to_dict(getattr(message, "tokens", None))
     cache = data.get("cache") or {}
-    prompt_tokens = _coerce_int(data.get("input")) + _coerce_int(cache.get("read"))
+    # ``input`` excludes cached prompt tokens (Anthropic reports reads and
+    # writes separately), so both are added back.  Leaving out writes made a
+    # cold-cache call look nearly empty.
+    prompt_tokens = (
+        _coerce_int(data.get("input"))
+        + _coerce_int(cache.get("read"))
+        + _coerce_int(cache.get("write"))
+    )
     used_tokens = (
         prompt_tokens
         + _coerce_int(data.get("output"))
@@ -258,21 +379,16 @@ def _observed_tokens_for_message(message: Any) -> Optional[_ObservedTokens]:
         created_ms=_time_created_ms(message),
         used_tokens=used_tokens,
         prompt_tokens=prompt_tokens,
+        index=index,
     )
 
 
-def _latest_fresh_observation(
-    messages: List[Any],
-    *,
-    latest_context_mutation_ms: int,
-) -> Optional[_ObservedTokens]:
-    for message in reversed(messages):
-        observation = _observed_tokens_for_message(message)
-        if observation is None:
-            continue
-        if observation.created_ms and observation.created_ms < latest_context_mutation_ms:
-            return None
-        return observation
+def latest_observation(messages: List[Any]) -> Optional[_ObservedTokens]:
+    """Newest assistant call in ``messages`` that reported provider usage."""
+    for index in range(len(messages) - 1, -1, -1):
+        observation = _observed_tokens_for_message(messages[index], index)
+        if observation is not None:
+            return observation
     return None
 
 
@@ -446,19 +562,21 @@ async def _estimate_message_breakdown(session_id: str, messages: List[Any]) -> t
     }
     latest_compacted_part_ms = 0
     for message in messages:
-        content = _field_value(message, "content", "")
-        tokens_by_key["conversation"] += SessionPrompt.count_tokens(content or "")
-
         message_id = _field_value(message, "id")
-        if not message_id:
-            continue
-        try:
-            parts = await Message.parts(message_id, session_id)
-        except Exception as exc:
-            log.debug("context_usage.breakdown_parts_failed", {
-                "message_id": message_id,
-                "error": str(exc),
-            })
+        parts: List[Any] = []
+        if message_id:
+            try:
+                parts = await Message.parts(message_id, session_id)
+            except Exception as exc:
+                log.debug("context_usage.breakdown_parts_failed", {
+                    "message_id": message_id,
+                    "error": str(exc),
+                })
+        if not parts:
+            # Same rule as SessionPrompt._tokens_for_message: an in-memory
+            # assistant message repeats its text part as ``content``.
+            content = _field_value(message, "content", "")
+            tokens_by_key["conversation"] += SessionPrompt.count_tokens(content or "")
             continue
 
         for part in parts:

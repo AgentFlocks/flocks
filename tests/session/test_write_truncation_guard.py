@@ -69,6 +69,57 @@ class TestTruncatedArgumentsAreNotExecuted:
         ]
         assert errors and "not executed" in errors[0].error
 
+    @pytest.mark.parametrize("finish_reason", ["length", None])
+    @pytest.mark.asyncio
+    async def test_raised_output_limit_tells_the_model_to_resend(self, finish_reason):
+        """When the request's output limit was the likely cause and the runner
+        raised it, the same call fits now; asking the model to split it is
+        only the fallback."""
+        acc, proc = _make_accumulator()
+        acc._accumulator["call_write"] = {
+            "id": "call_write",
+            "name": "write",
+            "arguments_str": WRITE_ARGS[: len(WRITE_ARGS) // 2],
+            "completed": False,
+        }
+
+        with pytest.raises(StreamToolArgumentsTruncatedError):
+            await acc.flush_remaining(
+                finish_reason,
+                output_limit=8192,
+                raised_output_limit=16384,
+            )
+
+        [error] = [
+            c.args[0].error
+            for c in proc.process_event.call_args_list
+            if c.args[0].type == "tool-input-error"
+        ]
+        assert "output token limit (8192 tokens)" in error
+        assert "raised to 16384 tokens" in error
+        assert "Send the call again" in error
+
+    @pytest.mark.asyncio
+    async def test_without_a_raise_the_model_is_told_to_split(self):
+        acc, proc = _make_accumulator()
+        acc._accumulator["call_write"] = {
+            "id": "call_write",
+            "name": "write",
+            "arguments_str": WRITE_ARGS[: len(WRITE_ARGS) // 2],
+            "completed": False,
+        }
+
+        with pytest.raises(StreamToolArgumentsTruncatedError):
+            await acc.flush_remaining(None, output_limit=32000, raised_output_limit=None)
+
+        [error] = [
+            c.args[0].error
+            for c in proc.process_event.call_args_list
+            if c.args[0].type == "tool-input-error"
+        ]
+        assert "Split the content" in error
+        assert "raised" not in error
+
     @pytest.mark.asyncio
     async def test_complete_write_still_executes(self):
         acc, proc = _make_accumulator()

@@ -272,6 +272,7 @@ class ToolContext:
         permission_callback: Optional[Callable[[PermissionRequest], Awaitable[None]]] = None,
         metadata_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
         event_publish_callback: Optional[Callable[[str, Dict[str, Any]], Awaitable[None]]] = None,
+        input_patch_callback: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
     ):
         self.session_id = session_id
         self.message_id = message_id
@@ -283,6 +284,27 @@ class ToolContext:
         self._metadata_callback = metadata_callback
         self._metadata: Dict[str, Any] = {}
         self.event_publish_callback = event_publish_callback
+        self._input_patch_callback = input_patch_callback
+
+    async def notify_input_patched(self, effective_input: Dict[str, Any]) -> None:
+        """Report the input the handler will actually receive after a
+        ``tool.execute.before`` hook patched it.
+
+        Only called when a hook changed the input; the caller (session stream
+        layer) uses it to refresh what the UI shows for the running tool.
+        A failing callback must not block execution.
+        """
+        if self._input_patch_callback is None:
+            return
+        try:
+            await self._input_patch_callback(dict(effective_input))
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            log.warn("tool.input_patch_callback.error", {
+                "call_id": self.call_id,
+                "error": str(exc),
+            })
 
     @property
     def abort(self) -> asyncio.Event:
@@ -632,6 +654,7 @@ class Tool:
                 HookDecisionAction,
                 ToolDecision,
                 ToolExecutionOutcome,
+                restore_redacted_echo,
             )
             from flocks.hooks.execution import (
                 current_execution_context,
@@ -671,7 +694,11 @@ class Tool:
             result: ToolResult | None = None
             terminal_status = "error"
             terminal_error: BaseException | None = None
+            input_patched = False
             try:
+                # The only tool.execute.before firing for this call.  The
+                # session stream layer deliberately does not run it again;
+                # it learns about an input rewrite via notify_input_patched.
                 before_ctx = await HookPipeline.run_tool_before(payload)
                 raw_decision = before_ctx.output.get("decision")
                 normalized_decision = (
@@ -693,9 +720,16 @@ class Tool:
                         reason=str(legacy_stop),
                     )
                 if decision.validated_input_patch:
+                    pre_patch_kwargs = coerced_kwargs
+                    # Hooks see the redact_sensitive view; never let an echoed
+                    # "[REDACTED]" marker replace the real secret.
+                    patch = restore_redacted_echo(
+                        coerced_kwargs,
+                        dict(decision.validated_input_patch),
+                    )
                     patched_kwargs = {
                         **coerced_kwargs,
-                        **dict(decision.validated_input_patch),
+                        **patch,
                     }
                     patched_kwargs, _ = remap_schema_kwargs(
                         patched_kwargs,
@@ -721,6 +755,7 @@ class Tool:
                         self.info.parameters,
                         self.info.name,
                     )
+                    input_patched = coerced_kwargs != pre_patch_kwargs
                     payload = await build_session_tool_execution_payload(
                         session_id=ctx.session_id,
                         message_id=ctx.message_id,
@@ -754,6 +789,8 @@ class Tool:
                         },
                     )
                 else:
+                    if input_patched:
+                        await ctx.notify_input_patched(coerced_kwargs)
                     result = await self.handler(ctx, **coerced_kwargs)
                     terminal_status = "success" if result.success else "error"
             except asyncio.CancelledError as exc:
@@ -879,8 +916,10 @@ class ToolRegistry:
         ("flocks.tool.code", ["bash", "grep", "lsp_tool"]),
         # web/ — internet access
         ("flocks.tool.web", ["webfetch", "websearch"]),
+        # Owner-scoped, read-only Knowledgebase retrieval (connection is lazy).
+        ("flocks.tool", ["knowledgebase"]),
         # agent/ — agent delegation/coordination
-        ("flocks.tool.agent", ["delegate_task", "task"]),
+        ("flocks.tool.agent", ["delegate_task", "task", "communication"]),
         # task/ — task/workflow
         ("flocks.tool.task", [
             "schedule_task_center",
@@ -1223,6 +1262,21 @@ class ToolRegistry:
         **kwargs
     ) -> ToolResult:
         """Execute a tool by name"""
+        from flocks.session.runtime_controls import runtime_controls
+
+        controls = runtime_controls.get()
+        if controls is not None:
+            controls.check_budget()
+            denial = controls.denial(tool_name)
+            if denial:
+                return ToolResult(success=False, error=denial)
+            if controls.sandbox_required:
+                sandbox = ctx.extra.get("sandbox") if ctx else None
+                if not sandbox or not sandbox.get("container_name"):
+                    return ToolResult(success=False, error="Required sandbox is unavailable; refusing host execution")
+                if ctx.extra.get("sandbox_elevated"):
+                    return ToolResult(success=False, error="Elevated host execution is disabled in headless sandbox mode")
+
         # Create default context if not provided
         if ctx is None:
             ctx = ToolContext(
@@ -1668,6 +1722,10 @@ class ToolRegistry:
         immediately disable it.  Existing explicit user choices
         (``enabled: false``) are never overwritten.
         """
+        from flocks.config.runtime import runtime_config
+        if runtime_config.get() is not None:
+            # Headless overrides must never bootstrap persistent user settings.
+            return
         try:
             from flocks.config.config_writer import ConfigWriter
             from flocks.tool.tool_loader import API_LIKE_SOURCES

@@ -132,15 +132,15 @@ Every delegation prompt must include:
 - `CONSTRAINTS`: must-do and must-not-do requirements
 - `CONTEXT`: relevant files, patterns, prior findings
 
-Reuse `session_id` when follow-up work belongs to the same delegated thread. Do not restart a subagent unless context reuse would hurt quality.
+Every `delegate_task` call creates an independent child session. Use `send_to_session` with the returned child session ID for follow-up information.
 
 ## 4. Execute
 
 - Match existing codebase patterns when editing.
 - Fix bugs minimally; do not refactor during a bugfix unless required.
 - Keep search bounded: stop when you have enough context, when results repeat, or when direct evidence already answers the question.
-- For independent parallel branches whose results are needed this turn, emit multiple foreground `delegate_task` tool calls in the same assistant turn. The runtime executes those sibling tool calls concurrently and returns all tool results before you continue.
-- Do not use `run_in_background=true`; background subagent execution is disabled.
+- Interactive `delegate_task` calls return immediately while independent child sessions continue. Keep working, send updates with `send_to_session`, and use `sleep` only when you need a result.
+- Do not use `run_in_background=true`; interactive delegation is already asynchronous.
 
 ## 5. Verify
 

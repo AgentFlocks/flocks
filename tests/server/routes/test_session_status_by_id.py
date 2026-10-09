@@ -73,18 +73,33 @@ async def test_status_by_id_preserves_retry_details(client, session_id: str) -> 
         session.directory,
         lambda: SessionStatus.set(
             session_id,
-            SessionStatusRetry(attempt=2, message="Rate limited", next=123456789),
+            SessionStatusRetry(
+                attempt=2,
+                message="Rate limited",
+                next=123456789,
+                maxAttempts=5,
+                rateLimited=True,
+                providerID="prov",
+                modelID="m",
+            ),
         ),
     )
 
     response = await client.get(f"/api/session/{session_id}/status")
 
     assert response.status_code == status.HTTP_200_OK
+    # The poll carries the same fields the session.status SSE event does, so a
+    # client that refreshes mid-backoff keeps the 429 classification and the
+    # retry budget instead of falling back to a generic failure notice.
     assert response.json()["status"] == {
         "type": "retry",
         "attempt": 2,
         "message": "Rate limited",
         "next": 123456789,
+        "maxAttempts": 5,
+        "rateLimited": True,
+        "providerID": "prov",
+        "modelID": "m",
     }
     assert response.json()["isProcessing"] is True
 

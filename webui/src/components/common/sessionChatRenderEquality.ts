@@ -66,6 +66,7 @@ export function areChatMessagePartsRenderEqual(
       return false;
     }
 
+    if (JSON.stringify(prevPart.metadata) !== JSON.stringify(nextPart.metadata)) return false;
     if (!areToolStatesRenderEqual(prevPart.state, nextPart.state)) return false;
     if (!areLegacyToolPayloadsRenderEqual(prevPart.toolCall, nextPart.toolCall)) return false;
     if (!areLegacyToolPayloadsRenderEqual(prevPart.toolResult, nextPart.toolResult)) return false;

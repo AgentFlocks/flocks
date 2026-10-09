@@ -954,7 +954,7 @@ async def test_scene_suite_state_reflects_real_payload_completeness(
 
 @pytest.mark.parametrize("action", ["install", "install/stream", "update", "uninstall"])
 @pytest.mark.parametrize("fail_after_change", [False, True])
-async def test_scene_suite_mutations_notify_other_sse_subscribers(
+async def test_scene_suite_mutations_notify_acting_user_sse_subscribers(
     isolated_hub_env, monkeypatch: pytest.MonkeyPatch,
     action: str, fail_after_change: bool,
 ):
@@ -962,6 +962,7 @@ async def test_scene_suite_mutations_notify_other_sse_subscribers(
 
     from httpx import ASGITransport, AsyncClient
 
+    from flocks.auth.context import AuthUser, reset_current_auth_user, set_current_auth_user
     from flocks.server.auth import require_admin
     from flocks.server.routes import hub as hub_routes
     from flocks.server.routes.event import EventBroadcaster
@@ -993,10 +994,25 @@ async def test_scene_suite_mutations_notify_other_sse_subscribers(
         await original_publish(event)
 
     monkeypatch.setattr(broadcaster, "publish", publish_and_capture_state)
-    subscriber = await broadcaster.subscribe()
+    admin = AuthUser(id="user-admin", username="admin", role="admin")
+    subscriber = await broadcaster.subscribe(admin)
+    bystander = await broadcaster.subscribe(AuthUser(id="user-member", username="member", role="member"))
+    # Another admin only receives system events, so this tells the acting-user
+    # path apart from the no-user fallback.
+    other_admin = await broadcaster.subscribe(AuthUser(id="user-admin-2", username="admin2", role="admin"))
     app = FastAPI()
     app.include_router(hub_routes.router)
-    app.dependency_overrides[require_admin] = lambda: object()
+    app.dependency_overrides[require_admin] = lambda: admin
+
+    @app.middleware("http")
+    async def act_as_admin(request, call_next):
+        # Like the real auth middleware, run the route with the admin in context.
+        token = set_current_auth_user(admin)
+        try:
+            return await call_next(request)
+        finally:
+            reset_current_auth_user(token)
+
     endpoint = "/hub/plugins/component/soc-workspace"
     try:
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
@@ -1014,9 +1030,13 @@ async def test_scene_suite_mutations_notify_other_sse_subscribers(
         assert event["type"] == "hub.scene_suites.changed"
         assert event["properties"] == {"suiteId": "soc-workspace", "action": action.split("/")[0]}
         assert subscriber.empty()
+        assert bystander.empty()
+        assert other_admin.empty()
         assert published_states == ["partial" if fail_after_change else "available" if action == "uninstall" else "installed"]
     finally:
         await broadcaster.unsubscribe(subscriber)
+        await broadcaster.unsubscribe(bystander)
+        await broadcaster.unsubscribe(other_admin)
 
 
 async def test_suite_uninstall_cleans_access_when_required_webui_payload_is_missing(

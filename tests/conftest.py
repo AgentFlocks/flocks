@@ -123,3 +123,12 @@ async def _cleanup_runtime_singletons_after_test():
     except Exception:
         pass
 
+    # Output limits raised after a cut-off are process-wide; keep one test's
+    # raised or rejected limit out of the next test's requests.
+    try:
+        from flocks.provider import output_limits
+
+        output_limits.reset()
+    except Exception:
+        pass
+

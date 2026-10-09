@@ -1,5 +1,5 @@
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from fastapi import HTTPException
@@ -128,6 +128,204 @@ def test_plan_delegation_only_allows_explore_and_librarian(tool_name) -> None:
         )
         assert reason is not None
         assert "explore, librarian" in reason
+
+
+@pytest.fixture
+def communication_sessions(monkeypatch, tmp_path):
+    from flocks.session.agent_inbox import AgentInbox
+    from flocks.session.message import Message
+    from flocks.session.session import Session
+
+    sessions = {
+        session_id: SessionInfo(
+            id=session_id,
+            projectID="project",
+            directory=str(tmp_path),
+            agent="rex-junior",
+            parentID=parent_id,
+            permission=[{"permission": "edit", "action": "allow"}],
+        )
+        for session_id, parent_id in (
+            ("root", None), ("parent", "root"),
+            ("source", "parent"), ("target", "source"),
+        )
+    }
+    histories = {session_id: [] for session_id in sessions}
+    monkeypatch.setattr(Session, "get_by_id", AsyncMock(side_effect=sessions.get))
+    monkeypatch.setattr(Session, "is_lifecycle_transitioning", lambda _sid: False)
+    monkeypatch.setattr(Message, "list", AsyncMock(side_effect=histories.get))
+    monkeypatch.setattr(AgentInbox, "_inboxes", {})
+    post = Mock(wraps=AgentInbox.post)
+    wake = Mock()
+    monkeypatch.setattr(AgentInbox, "post", post)
+    monkeypatch.setattr(AgentInbox, "wake", wake)
+    permission = AsyncMock()
+    ctx = ToolContext(
+        session_id="source",
+        message_id="message",
+        agent="rex-junior",
+        extra={"execution_mode": "plan"},
+        permission_callback=permission,
+    )
+    return SimpleNamespace(
+        sessions=sessions, histories=histories, ctx=ctx,
+        permission=permission, post=post, wake=wake, inboxes=AgentInbox,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "session_agent,user_agent,user_mode,sibling",
+    [
+        ("rex-junior", None, None, False),
+        ("rex-junior", "rex-junior", "build", False),
+        ("explore", "rex-junior", "build", False),
+        ("librarian", "rex-junior", "goal", False),
+        ("rex-junior", "rex-junior", "build", True),
+    ],
+)
+async def test_plan_send_blocks_write_capable_recipient_before_permission(
+    communication_sessions, session_agent, user_agent, user_mode, sibling,
+) -> None:
+    from flocks.tool.agent.communication import send_to_session
+
+    state = communication_sessions
+    target = state.sessions["target"]
+    target.agent = session_agent
+    if sibling:
+        target.parent_id = "parent"
+    if user_agent is not None:
+        state.histories["target"] = [
+            SimpleNamespace(role="user", agent="explore", executionMode="plan"),
+            SimpleNamespace(role="user", agent=user_agent, executionMode=user_mode),
+            SimpleNamespace(role="assistant", agent="explore", executionMode="plan"),
+        ]
+    before = target.model_dump()
+    inbox = state.inboxes.get("target")
+
+    result = await send_to_session(state.ctx, "target", "Implement the change")
+
+    assert not result.success
+    assert "Plan mode" in result.error
+    state.permission.assert_not_awaited()
+    state.post.assert_not_called()
+    state.wake.assert_not_called()
+    assert not inbox.messages
+    assert not inbox.ready.is_set()
+    assert target.model_dump() == before
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "session_agent,user_agent,user_mode",
+    [
+        ("rex-junior", "explore", "build"),
+        ("rex-junior", "librarian", "build"),
+        ("rex-junior", "rex-junior", "plan"),
+        ("explore", None, None),
+        ("librarian", None, None),
+        ("explore", "", "build"),
+    ],
+)
+async def test_plan_send_allows_read_only_recipient_without_changing_permissions(
+    communication_sessions, session_agent, user_agent, user_mode,
+) -> None:
+    from flocks.tool.agent.communication import send_to_session
+
+    state = communication_sessions
+    target = state.sessions["target"]
+    target.agent = session_agent
+    if user_agent is not None:
+        state.histories["target"] = [
+            SimpleNamespace(role="user", agent="rex-junior", executionMode="build"),
+            SimpleNamespace(role="user", agent=user_agent, executionMode=user_mode),
+            SimpleNamespace(role="assistant", agent="rex-junior", executionMode="build"),
+        ]
+    before = target.model_dump()
+
+    result = await send_to_session(state.ctx, "target", "Inspect the implementation")
+
+    assert result.success
+    state.permission.assert_awaited_once()
+    state.post.assert_called_once()
+    state.wake.assert_called_once_with("target", None)
+    assert state.inboxes.get("target").messages[0].content == "Inspect the implementation"
+    assert target.model_dump() == before
+    if user_agent is not None:
+        assert state.histories["target"][-2].agent == user_agent
+        assert state.histories["target"][-2].executionMode == user_mode
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("target_id", ["parent", "root"])
+async def test_plan_send_allows_reports_to_actual_parent_or_ancestor(
+    communication_sessions, target_id,
+) -> None:
+    from flocks.tool.agent.communication import send_to_session
+
+    state = communication_sessions
+    state.histories[target_id] = [
+        SimpleNamespace(role="user", agent="rex-junior", executionMode="build"),
+    ]
+
+    result = await send_to_session(state.ctx, target_id, "Investigation progress")
+
+    assert result.success
+    state.permission.assert_awaited_once()
+    state.wake.assert_called_once_with(target_id, None)
+    assert state.inboxes.get(target_id).messages[0].content == "Investigation progress"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["build", "goal", None])
+async def test_build_send_to_write_capable_recipient_is_unchanged(
+    communication_sessions, mode,
+) -> None:
+    from flocks.tool.agent.communication import send_to_session
+
+    state = communication_sessions
+    state.ctx.extra = {"execution_mode": mode} if mode else {}
+
+    result = await send_to_session(state.ctx, "target", "Implement the change")
+
+    assert result.success
+    state.permission.assert_awaited_once()
+    state.wake.assert_called_once_with("target", None)
+    assert state.inboxes.get("target").messages[0].content == "Implement the change"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "initial_agent,initial_mode", [("rex-junior", "plan"), ("explore", "build")],
+)
+async def test_plan_send_rechecks_recipient_mode_and_agent_after_permission(
+    communication_sessions, initial_agent, initial_mode,
+) -> None:
+    from flocks.tool.agent.communication import send_to_session
+
+    state = communication_sessions
+    state.sessions["target"].agent = "explore"
+    state.histories["target"] = [
+        SimpleNamespace(role="user", agent=initial_agent, executionMode=initial_mode),
+    ]
+
+    async def change_recipient(_request):
+        state.histories["target"].append(
+            SimpleNamespace(role="user", agent="rex-junior", executionMode="build"),
+        )
+
+    state.permission.side_effect = change_recipient
+    inbox = state.inboxes.get("target")
+
+    result = await send_to_session(state.ctx, "target", "Inspect the implementation")
+
+    assert not result.success
+    assert "Plan mode" in result.error
+    state.permission.assert_awaited_once()
+    state.post.assert_not_called()
+    state.wake.assert_not_called()
+    assert not inbox.messages
+    assert not inbox.ready.is_set()
 
 
 def test_plan_file_is_stable_and_session_scoped(tmp_path) -> None:

@@ -1,10 +1,18 @@
 import asyncio
 from copy import copy
 from dataclasses import dataclass
+import os
+import random
 import time
 from typing import Any, Callable, Dict, Optional
 
 from flocks.config.config import Config
+from flocks.provider.llm_budget import llm_slot
+from flocks.provider.concurrency import (
+    PRIORITY_BACKGROUND,
+    acquire_llm_slot,
+    report_provider_rate_limited,
+)
 from flocks.provider.provider import ChatMessage, Provider, ProviderConfig
 from flocks.provider.sdk.openai_base import LLMResponseSafetyError
 from flocks.workflow._async_runtime import (
@@ -28,6 +36,122 @@ def _run_coro_sync(
     if cancel_checker is not None:
         return _run_sync_cancellable_on_shared_loop(coro, cancel_checker)
     return _run_sync_on_shared_loop(coro)
+
+
+# Retries for workflow ``llm`` nodes. Only transient provider failures
+# (429 / 5xx / timeouts / connection errors) are retried; the delay grows
+# ``retry_delay_s * 2**attempt`` with jitter and honours ``retry-after``.
+_ENV_NODE_MAX_RETRIES = "FLOCKS_WORKFLOW_LLM_MAX_RETRIES"
+DEFAULT_LLM_NODE_MAX_RETRIES = 2
+MAX_RETRY_DELAY_S = 30.0
+# Applied the moment a 429 is seen, before the slot is handed on; the caller
+# replaces it with the jittered delay once that is known.
+MIN_RATE_LIMIT_COOLDOWN_S = 1.0
+
+
+def default_llm_node_max_retries() -> int:
+    raw = os.getenv(_ENV_NODE_MAX_RETRIES)
+    if raw is None or not raw.strip():
+        return DEFAULT_LLM_NODE_MAX_RETRIES
+    try:
+        return max(0, int(raw.strip()))
+    except ValueError:
+        return DEFAULT_LLM_NODE_MAX_RETRIES
+
+
+def _exception_status_code(exc: BaseException) -> Optional[int]:
+    seen: set[int] = set()
+    current: Optional[BaseException] = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        response = getattr(current, "response", None)
+        for value in (
+            getattr(current, "status_code", None),
+            getattr(response, "status_code", None),
+        ):
+            try:
+                normalized = int(value) if value is not None else None
+            except (TypeError, ValueError):
+                normalized = None
+            if normalized is not None and 100 <= normalized <= 599:
+                return normalized
+        current = current.__cause__ or current.__context__
+    return None
+
+
+def _exception_retry_after_s(exc: BaseException) -> Optional[float]:
+    seen: set[int] = set()
+    current: Optional[BaseException] = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        headers = getattr(getattr(current, "response", None), "headers", None)
+        if headers is not None:
+            try:
+                lowered = {str(key).lower(): value for key, value in dict(headers).items()}
+            except (TypeError, ValueError):
+                lowered = {}
+            for header, scale in (("retry-after-ms", 0.001), ("retry-after", 1.0)):
+                raw = lowered.get(header)
+                if raw is None:
+                    continue
+                try:
+                    parsed = float(raw)
+                except (TypeError, ValueError):
+                    continue
+                if 0 < parsed < float("inf"):
+                    return parsed * scale
+        current = current.__cause__ or current.__context__
+    return None
+
+
+_RATE_LIMIT_MESSAGE_PATTERNS = ("rate limit", "rate_limit", "too many requests", "429")
+
+
+def classify_transient_error(exc: BaseException) -> tuple[bool, bool]:
+    """Return ``(retryable, rate_limited)`` for a provider exception.
+
+    Everything is retried except failures that are deterministic by
+    construction: HTTP 4xx other than 408/429 (bad request, auth, unknown
+    model). Unknown errors without a status code stay retryable so a flaky
+    gateway does not fail a workflow node on its first hiccup.
+
+    An explicit status code always wins over the message text: provider
+    errors routinely carry request ids and quota hints, so a 401 whose body
+    mentions "429" must stay non-retryable. Text matching only fills in when
+    no usable status code is attached.
+    """
+    if isinstance(exc, (asyncio.TimeoutError, TimeoutError)):
+        return True, False
+    if isinstance(exc, LLMResponseSafetyError):
+        # Size/encoding guards carry no status code and their text can contain
+        # a byte count like "42900000 bytes received"; matching that as a rate
+        # limit would cool the whole provider down over a local guard.
+        return False, False
+    status = _exception_status_code(exc)
+    if status is not None:
+        if status == 429:
+            return True, True
+        if 400 <= status < 500 and status != 408:
+            return False, False
+        return True, False
+    lowered = str(exc).lower()
+    if any(pattern in lowered for pattern in _RATE_LIMIT_MESSAGE_PATTERNS):
+        return True, True
+    return True, False
+
+
+def _retry_delay_s(base_delay_s: float, attempt: int, exc: BaseException) -> float:
+    hinted = _exception_retry_after_s(exc)
+    if hinted is not None:
+        return min(hinted, MAX_RETRY_DELAY_S) * random.uniform(1.0, 1.25)
+    base_delay_s = max(0.0, base_delay_s)
+    if base_delay_s == 0:
+        return 0.0
+    # The cap is reached long before attempt 60; shifting further would only
+    # build a huge int and overflow the multiplication.
+    base = min(base_delay_s * (2 ** min(attempt, 60)), MAX_RETRY_DELAY_S)
+    half = base / 2.0
+    return half + random.uniform(0.0, half)
 
 
 def _coerce_bool(value: Any, default: bool) -> bool:
@@ -405,19 +529,55 @@ class LLMClient:
 
             provider = self._prepare_provider(target.provider_id)
 
-            async def _call():
-                coro = provider.chat(
-                    model_id=target.model_id,
-                    messages=[ChatMessage(role="user", content=prompt + "请使用中文输出。")],
-                    temperature=temperature,
+            async def _acquire_and_chat():
+                # Same process-wide budget as sessions and subagents; workflow
+                # traffic yields to interactive sessions when the cap is hit.
+                slot = await acquire_llm_slot(
+                    target.provider_id,
+                    priority=PRIORITY_BACKGROUND,
                 )
-                if timeout_s is not None and float(timeout_s) > 0:
-                    return await asyncio.wait_for(coro, timeout=float(timeout_s))
-                return await coro
+                try:
+                    return await provider.chat(
+                        model_id=target.model_id,
+                        messages=[ChatMessage(role="user", content=prompt + "请使用中文输出。")],
+                        temperature=temperature,
+                    )
+                except BaseException as exc:
+                    # Set the cooldown before the slot changes hands: the
+                    # waiter it goes to would otherwise reach the provider
+                    # while the cooldown is still zero. The sync caller
+                    # refines it with the jittered delay afterwards, and the
+                    # limiter keeps whichever is longer.
+                    _, rate_limited = classify_transient_error(exc)
+                    if rate_limited:
+                        report_provider_rate_limited(
+                            target.provider_id,
+                            _exception_retry_after_s(exc) or MIN_RATE_LIMIT_COOLDOWN_S,
+                            reason="http_429",
+                        )
+                    raise
+                finally:
+                    slot.release()
+
+            async def _call():
+                # One slot of the workflow loop's LLM budget for the whole
+                # request (see flocks.provider.llm_budget). Waiting for it is
+                # queueing behind other workflow calls, not the model being
+                # slow, so ``timeout_s`` starts once it is held (the cancel
+                # checker keeps being polled while queued). From there
+                # ``timeout_s`` bounds queueing for a provider slot plus the
+                # call itself, so a saturated provider cannot stretch a 30 s
+                # budget to minutes.
+                async with llm_slot():
+                    if timeout_s is not None and float(timeout_s) > 0:
+                        return await asyncio.wait_for(_acquire_and_chat(), timeout=float(timeout_s))
+                    return await _acquire_and_chat()
 
             last_exc: Optional[Exception] = None
             for attempt in range(retry_count + 1):
                 self._raise_if_cancelled()
+                retryable = False
+                rate_limited = False
                 try:
                     response = _run_coro_sync(_call(), self.cancel_checker)
                     self.provider_id = target.provider_id
@@ -433,14 +593,29 @@ class LLMClient:
                         f"LLM call timed out after {timeout_s}s "
                         f"(attempt {attempt + 1}/{total_attempts})"
                     )
+                    retryable = True
                 except LLMResponseSafetyError as exc:
                     last_exc = exc
                     break
                 except Exception as exc:
                     last_exc = exc
+                    retryable, rate_limited = classify_transient_error(exc)
 
-                if attempt < retry_count and delay_s > 0:
-                    self._sleep_with_cancel(delay_s)
+                wait_s = _retry_delay_s(delay_s, attempt, last_exc)
+                if rate_limited:
+                    # Hold every caller of this provider back, even when this
+                    # call has no retry budget left (``max_retries=0`` is the
+                    # default for ``LazyLLM.ask``): the last 429 is exactly
+                    # when the rest should stop piling on.
+                    report_provider_rate_limited(
+                        target.provider_id, wait_s, reason="http_429"
+                    )
+                if not retryable:
+                    # Bad request / auth / unknown model: retrying cannot help,
+                    # move on to the next candidate target (if any).
+                    break
+                if attempt < retry_count and wait_s > 0:
+                    self._sleep_with_cancel(wait_s)
 
             if last_exc is not None:
                 runtime_errors.append((target, last_exc))

@@ -16,7 +16,15 @@ import asyncio
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from flocks.tool.registry import ToolResult
+from flocks.tool.registry import (
+    ParameterType,
+    Tool,
+    ToolCategory,
+    ToolInfo,
+    ToolParameter,
+    ToolRegistry,
+    ToolResult,
+)
 from flocks.session.files import public_resource_id
 from flocks.session.streaming.stream_processor import StreamProcessor, ToolCallState
 from flocks.session.streaming.stream_events import (
@@ -74,12 +82,44 @@ def _make_processor(
             "read",
             "write",
             "run_workflow",
+            "echo_tool",
+            "ssh_host_cmd",
         ],
         abort_event=abort_event,
         text_delta_callback=text_callback,
         reasoning_delta_callback=reasoning_callback,
         event_publish_callback=event_callback,
     )
+
+
+class _RegistrySandbox:
+    """Register plain handlers as tools in an otherwise empty ToolRegistry."""
+
+    def register(self, name, handler, *, params=("text",)):
+        tool = Tool(
+            info=ToolInfo(
+                name=name,
+                description=name,
+                category=ToolCategory.TERMINAL,
+                parameters=[ToolParameter(name=p, type=ParameterType.STRING) for p in params],
+            ),
+            handler=handler,
+        )
+        ToolRegistry._tools[name] = tool
+        return tool
+
+
+@pytest.fixture
+def registry_sandbox(monkeypatch):
+    """Real Tool.execute path (hooks included) without loading builtin/plugin tools."""
+    from flocks.hooks.pipeline import HookPipeline
+
+    monkeypatch.setattr(ToolRegistry, "_tools", {})
+    monkeypatch.setattr(ToolRegistry, "_initialized", True)
+    HookPipeline.reset()
+    HookPipeline._initialized = True
+    yield _RegistrySandbox()
+    HookPipeline.reset()
 
 
 # ---------------------------------------------------------------------------
@@ -586,31 +626,36 @@ class TestToolCallExecution:
         assert events[0][1]["part"]["state"]["metadata"]["interrupted"] is True
 
     @pytest.mark.asyncio
-    async def test_pre_execution_cancellation_emits_tool_after(self):
-        proc = _make_processor()
-        payload = {"operation": "tool.execute", "tool_execution": {}}
+    async def test_pre_execution_cancellation_does_not_emit_unpaired_tool_after(self):
+        """Cancelled before the registry ran: no before hook fired, so no after hook either."""
+        events = []
+
+        async def capture_event(event_type, data):
+            events.append((event_type, data))
+
+        proc = _make_processor(event_callback=capture_event)
 
         with (
-            patch(
-                "flocks.session.tool_execution.build_session_tool_execution_payload",
-                new=AsyncMock(return_value=payload),
-            ),
-            patch(
-                "flocks.hooks.pipeline.HookPipeline.run_tool_after",
-                new=AsyncMock(),
-            ) as tool_after,
+            patch("flocks.session.streaming.stream_processor.Message.store_part", new=AsyncMock()) as store_part,
+            patch("flocks.session.streaming.stream_processor.Message.parts", new=AsyncMock(return_value=[])),
+            patch.object(proc, "_resolve_sandbox_meta", new=AsyncMock(side_effect=asyncio.CancelledError())),
+            patch("flocks.hooks.pipeline.HookPipeline.run_tool_before", new=AsyncMock()) as tool_before,
+            patch("flocks.hooks.pipeline.HookPipeline.run_tool_after", new=AsyncMock()) as tool_after,
         ):
-            await proc._run_pre_execution_tool_after_hook(
-                tool_name="bash",
-                tool_input={"command": "pwd"},
-                tool_call_id="tc_cancelled",
-                tool_start_time=1,
-            )
+            await proc.process_event(ToolInputStartEvent(id="tc_cancelled", tool_name="bash"))
+            with pytest.raises(asyncio.CancelledError):
+                await proc.process_event(
+                    ToolCallEvent(tool_call_id="tc_cancelled", tool_name="bash", input={"command": "pwd"})
+                )
 
-        tool_after.assert_awaited_once()
-        outcome = tool_after.await_args.args[0]["outcome"]
-        assert outcome["status"] == "cancelled"
-        assert outcome["error_type"] == "CancelledError"
+        tool_before.assert_not_awaited()
+        tool_after.assert_not_awaited()
+        assert proc.tool_calls["tc_cancelled"].status == "error"
+        assert proc.tool_calls["tc_cancelled"].metadata["interrupted"] is True
+        stored_state = store_part.await_args.args[2].state
+        assert isinstance(stored_state, ToolStateError)
+        assert stored_state.input == {"command": "pwd"}
+        assert events[-1][1]["part"]["state"]["metadata"]["interrupted"] is True
 
     @pytest.mark.asyncio
     async def test_sandbox_block_skips_registry_execution(self):
@@ -830,79 +875,479 @@ class TestToolCallExecution:
         assert seen_abort["event"] is abort_event
 
     @pytest.mark.asyncio
-    async def test_tool_before_rewrite_is_published_in_running_state(self):
+    async def test_tool_before_hook_fires_once_per_tool_call(self, registry_sandbox):
+        """One LLM tool call = one tool.execute.before + one tool.execute.after (registry only)."""
+        from flocks.hooks.pipeline import HookBase, HookPipeline
+
+        observed = {"before": [], "after": []}
+
+        class Recorder(HookBase):
+            async def tool_before(self, ctx):
+                observed["before"].append(sorted(ctx.input.keys()))
+
+            async def tool_after(self, ctx):
+                observed["after"].append(sorted(ctx.input.keys()))
+
+        HookPipeline.register("recorder", Recorder())
+        handler_calls = []
+
+        async def handler(_ctx, **kwargs):
+            handler_calls.append(kwargs)
+            return ToolResult(success=True, output="ok", title="echo")
+
+        registry_sandbox.register("echo_tool", handler, params=("text",))
+        proc = _make_processor()
+
+        with (
+            patch("flocks.session.streaming.stream_processor.Message.store_part", new=AsyncMock()),
+            patch("flocks.session.streaming.stream_processor.Message.parts", new=AsyncMock(return_value=[])),
+        ):
+            await proc.process_event(ToolInputStartEvent(id="tc_once", tool_name="echo_tool"))
+            await proc.process_event(
+                ToolCallEvent(tool_call_id="tc_once", tool_name="echo_tool", input={"text": "hi"})
+            )
+
+        assert handler_calls == [{"text": "hi"}]
+        assert observed["before"] == [["operation", "tool_execution"]]
+        assert observed["after"] == [["operation", "outcome", "tool_execution"]]
+        assert proc.tool_calls["tc_once"].status == "completed"
+
+    @pytest.mark.asyncio
+    async def test_tool_input_rewrite_feeds_policy_hooks_and_execution(self, registry_sandbox):
+        """Rewrite runs once on the raw input; policy hooks, the UI and the handler all see it.
+
+        Placeholders inside secret-bearing keys are restored too (the rewrite
+        hook sees the raw input), while tool.execute.before hooks still get the
+        redacted view of those keys.
+        """
+        from flocks.hooks.pipeline import HookBase, HookPipeline
+
+        rewrite_calls = []
+        policy_seen = []
+
+        class RestorePlaceholders(HookBase):
+            async def tool_input_rewrite(self, ctx):
+                tool_input = ctx.input["tool"]["input"]
+                rewrite_calls.append(dict(tool_input))
+                ctx.input["tool"]["input"] = {
+                    key: {"[IP_1]": "10.1.2.3", "[PW_1]": "real-pw"}.get(value, value)
+                    for key, value in tool_input.items()
+                }
+
+        class PolicyObserver(HookBase):
+            async def tool_before(self, ctx):
+                policy_seen.append(dict(ctx.input["tool_execution"]["tool"]["validated_input"]))
+
+        HookPipeline.register("restore", RestorePlaceholders(), order=120)
+        HookPipeline.register("policy", PolicyObserver(), order=200)
+        handler_calls = []
+
+        async def handler(_ctx, **kwargs):
+            handler_calls.append(kwargs)
+            return ToolResult(success=True, output="ok", title="ssh", metadata={})
+
+        registry_sandbox.register("ssh_host_cmd", handler, params=("host", "command", "password"))
+        event_callback = AsyncMock()
+        proc = _make_processor(event_callback=event_callback)
+        model_input = {"host": "[IP_1]", "command": "uname -a", "password": "[PW_1]"}
+
+        with (
+            patch("flocks.session.streaming.stream_processor.Message.store_part", new=AsyncMock()) as store_part,
+            patch("flocks.session.streaming.stream_processor.Message.parts", new=AsyncMock(return_value=[])),
+        ):
+            await proc.process_event(ToolInputStartEvent(id="tc_rewrite", tool_name="ssh_host_cmd"))
+            await proc.process_event(
+                ToolCallEvent(tool_call_id="tc_rewrite", tool_name="ssh_host_cmd", input=dict(model_input))
+            )
+
+        restored = {"host": "10.1.2.3", "command": "uname -a", "password": "real-pw"}
+        assert rewrite_calls == [model_input]
+        assert handler_calls == [restored]
+        # policy hooks evaluate the restored command but never see the secret
+        assert policy_seen == [{"host": "10.1.2.3", "command": "uname -a", "password": "[REDACTED]"}]
+
+        tool_states = [
+            call.args[1]["part"]["state"]
+            for call in event_callback.await_args_list
+            if call.args[0] == "message.part.updated"
+            and call.args[1].get("part", {}).get("type") == "tool"
+        ]
+        assert [state["input"] for state in tool_states if state["status"] == "running"] == [restored]
+        assert tool_states[-1]["status"] == "completed" and tool_states[-1]["input"] == restored
+        # nothing persisted for this call carries the placeholder version
+        assert [call.args[2].state.input for call in store_part.await_args_list[1:]] == [restored, restored]
+        state = proc.tool_calls["tc_rewrite"]
+        assert state.input == restored
+        assert state.raw_input == model_input
+
+    @pytest.mark.asyncio
+    async def test_tool_input_rewrite_isolated_hook_error_keeps_model_input(self, registry_sandbox):
+        """Default (isolate) fail policy: a broken rewrite hook is best-effort, the tool still runs."""
+        from flocks.hooks.pipeline import HookBase, HookPipeline
+
+        class Broken(HookBase):
+            async def tool_input_rewrite(self, ctx):
+                raise RuntimeError("restore state corrupted")
+
+        HookPipeline.register("broken", Broken())
+        handler_calls = []
+
+        async def handler(_ctx, **kwargs):
+            handler_calls.append(kwargs)
+            return ToolResult(success=True, output="ok", title="ip query")
+
+        registry_sandbox.register("ip_query", handler, params=("ip",))
+        proc = _make_processor()
+
+        with (
+            patch("flocks.session.streaming.stream_processor.Message.store_part", new=AsyncMock()),
+            patch("flocks.session.streaming.stream_processor.Message.parts", new=AsyncMock(return_value=[])),
+        ):
+            await proc.process_event(ToolInputStartEvent(id="tc_rw_isolated", tool_name="ip_query"))
+            await proc.process_event(
+                ToolCallEvent(tool_call_id="tc_rw_isolated", tool_name="ip_query", input={"ip": "[IP_1]"})
+            )
+
+        assert handler_calls == [{"ip": "[IP_1]"}]
+        assert proc.tool_calls["tc_rw_isolated"].status == "completed"
+
+    @pytest.mark.asyncio
+    async def test_tool_input_rewrite_fail_closed_hook_error_blocks_execution(self, registry_sandbox):
+        """A fail_closed rewrite hook that raises must stop the call, like tool.execute.before does."""
+        from flocks.hooks.pipeline import HookBase, HookPipeline
+
+        class Broken(HookBase):
+            async def tool_input_rewrite(self, ctx):
+                raise RuntimeError("redaction backend down")
+
+        HookPipeline.register("broken", Broken(), fail_policy="fail_closed")
+        handler_calls = []
+
+        async def handler(_ctx, **kwargs):
+            handler_calls.append(kwargs)
+            return ToolResult(success=True, output="ok", title="ip query")
+
+        registry_sandbox.register("ip_query", handler, params=("ip",))
+        tool_end = AsyncMock()
+        event_callback = AsyncMock()
+        proc = _make_processor(event_callback=event_callback)
+        proc.tool_end_callback = tool_end
+
+        with (
+            patch("flocks.session.streaming.stream_processor.Message.store_part", new=AsyncMock()) as store_part,
+            patch("flocks.session.streaming.stream_processor.Message.parts", new=AsyncMock(return_value=[])),
+            patch("flocks.hooks.pipeline.HookPipeline.run_tool_before", new=AsyncMock()) as tool_before,
+            patch("flocks.hooks.pipeline.HookPipeline.run_tool_after", new=AsyncMock()) as tool_after,
+        ):
+            await proc.process_event(ToolInputStartEvent(id="tc_rw_closed", tool_name="ip_query"))
+            await proc.process_event(
+                ToolCallEvent(tool_call_id="tc_rw_closed", tool_name="ip_query", input={"ip": "[IP_1]"})
+            )
+
+        assert handler_calls == []
+        tool_before.assert_not_awaited()
+        tool_after.assert_not_awaited()
+        state = proc.tool_calls["tc_rw_closed"]
+        assert state.status == "error"
+        assert "redaction backend down" in state.error
+        stored_state = store_part.await_args.args[2].state
+        assert isinstance(stored_state, ToolStateError)
+        assert stored_state.input == {"ip": "[IP_1]"}
+        published = event_callback.await_args_list[-1].args[1]["part"]["state"]
+        assert published["status"] == "error"
+        tool_end.assert_awaited_once()
+        assert tool_end.await_args.args[1].success is False
+
+    @pytest.mark.asyncio
+    async def test_tool_input_rewrite_hook_cannot_mutate_raw_input_or_decide(self, registry_sandbox):
+        """The stage hands hooks a copy and carries no decision."""
+        from flocks.hooks.pipeline import HookBase, HookPipeline
+
+        class Sneaky(HookBase):
+            async def tool_input_rewrite(self, ctx):
+                ctx.input["tool"]["input"]["nested"]["ip"] = "10.1.2.3"
+                return {"decision": {"action": "deny", "reason": "nope"}, "execution": {"stop": True}}
+
+        HookPipeline.register("sneaky", Sneaky())
+        handler_calls = []
+
+        async def handler(_ctx, **kwargs):
+            handler_calls.append(kwargs)
+            return ToolResult(success=True, output="ok", title="ip query")
+
+        registry_sandbox.register("ip_query", handler, params=("nested",))
+        proc = _make_processor()
+        model_input = {"nested": {"ip": "[IP_1]"}}
+
+        with (
+            patch("flocks.session.streaming.stream_processor.Message.store_part", new=AsyncMock()),
+            patch("flocks.session.streaming.stream_processor.Message.parts", new=AsyncMock(return_value=[])),
+        ):
+            await proc.process_event(ToolInputStartEvent(id="tc_rw_copy", tool_name="ip_query"))
+            await proc.process_event(
+                ToolCallEvent(tool_call_id="tc_rw_copy", tool_name="ip_query", input=model_input)
+            )
+
+        state = proc.tool_calls["tc_rw_copy"]
+        assert state.status == "completed"
+        assert state.raw_input == {"nested": {"ip": "[IP_1]"}}
+        assert model_input == {"nested": {"ip": "[IP_1]"}}
+        assert state.input == {"nested": {"ip": "10.1.2.3"}}
+        # a "nested" object param is coerced to a JSON string by the registry
+        assert handler_calls == [{"nested": '{"ip": "10.1.2.3"}'}]
+
+    @pytest.mark.asyncio
+    async def test_tool_input_rewrite_cancellation_finalizes_interrupted_state(self, registry_sandbox):
+        executed = []
+
+        async def handler(_ctx, **kwargs):
+            executed.append(kwargs)
+            return ToolResult(success=True, output="ok", title="ip query")
+
+        registry_sandbox.register("ip_query", handler, params=("ip",))
+        proc = _make_processor()
+
+        with (
+            patch("flocks.session.streaming.stream_processor.Message.store_part", new=AsyncMock()) as store_part,
+            patch("flocks.session.streaming.stream_processor.Message.parts", new=AsyncMock(return_value=[])),
+            patch(
+                "flocks.hooks.pipeline.HookPipeline.run_tool_input_rewrite",
+                new=AsyncMock(side_effect=asyncio.CancelledError()),
+            ),
+            patch("flocks.hooks.pipeline.HookPipeline.run_tool_before", new=AsyncMock()) as tool_before,
+            patch("flocks.hooks.pipeline.HookPipeline.run_tool_after", new=AsyncMock()) as tool_after,
+        ):
+            await proc.process_event(ToolInputStartEvent(id="tc_rw_cancel", tool_name="ip_query"))
+            with pytest.raises(asyncio.CancelledError):
+                await proc.process_event(
+                    ToolCallEvent(tool_call_id="tc_rw_cancel", tool_name="ip_query", input={"ip": "[IP_1]"})
+                )
+
+        assert executed == []
+        tool_before.assert_not_awaited()
+        tool_after.assert_not_awaited()
+        state = proc.tool_calls["tc_rw_cancel"]
+        assert state.status == "error" and state.metadata["interrupted"] is True
+        assert isinstance(store_part.await_args.args[2].state, ToolStateError)
+
+    @pytest.mark.asyncio
+    async def test_doom_loop_detects_repeated_calls_when_rewrite_hook_changes_input(self, registry_sandbox):
+        from flocks.hooks.pipeline import HookBase, HookPipeline
+
+        class RestorePlaceholder(HookBase):
+            async def tool_input_rewrite(self, ctx):
+                ctx.input["tool"]["input"] = {"ip": "10.1.2.3"}
+
+        HookPipeline.register("restore", RestorePlaceholder())
+        handler_calls = []
+
+        async def handler(_ctx, **kwargs):
+            handler_calls.append(kwargs)
+            return ToolResult(success=True, output="ok", title="ip query", metadata={})
+
+        registry_sandbox.register("ip_query", handler, params=("ip",))
+        proc = _make_processor()
+        stored: dict = {}
+
+        async def _store_part(_session_id, _message_id, part):
+            stored[part.id] = part
+            return part
+
+        async def _parts(_message_id, _session_id=None):
+            return list(stored.values())
+
+        with (
+            patch("flocks.session.streaming.stream_processor.Message.store_part", new=AsyncMock(side_effect=_store_part)),
+            patch("flocks.session.streaming.stream_processor.Message.parts", new=AsyncMock(side_effect=_parts)),
+        ):
+            for index in range(3):
+                call_id = f"tc_rw_loop_{index}"
+                await proc.process_event(ToolInputStartEvent(id=call_id, tool_name="ip_query"))
+                await proc.process_event(
+                    ToolCallEvent(tool_call_id=call_id, tool_name="ip_query", input={"ip": "[IP_1]"})
+                )
+
+        assert proc._stop_tool_processing is True
+        assert handler_calls == [{"ip": "10.1.2.3"}, {"ip": "10.1.2.3"}]
+
+    @pytest.mark.asyncio
+    async def test_tool_before_patch_republishes_running_state_and_executes_patched_input(
+        self, registry_sandbox
+    ):
+        from flocks.hooks.pipeline import HookBase, HookPipeline
+
+        before_calls = []
+
+        class RestorePlaceholder(HookBase):
+            async def tool_before(self, ctx):
+                validated = ctx.input["tool_execution"]["tool"]["validated_input"]
+                before_calls.append(dict(validated))
+                if validated.get("ip") == "[IP_1]":
+                    return {"decision": {"action": "allow", "validated_input_patch": {"ip": "10.1.2.3"}}}
+                return None
+
+        HookPipeline.register("restore", RestorePlaceholder())
+        handler_calls = []
+
+        async def handler(_ctx, **kwargs):
+            handler_calls.append(kwargs)
+            return ToolResult(success=True, output="ok", title="ip query", metadata={})
+
+        registry_sandbox.register("ip_query", handler, params=("ip",))
         event_callback = AsyncMock()
         proc = _make_processor(event_callback=event_callback)
 
-        async def _fake_tool_before(payload):
-            assert payload["tool"]["input"] == {"ip": "[IP_1]"}
-            payload["tool"]["input"] = {"ip": "10.1.2.3"}
-            ctx = MagicMock()
-            ctx.input = payload
-            ctx.output = {}
-            return ctx
-
-        result = ToolResult(success=True, output="ok", title="ip query", metadata={})
-
         with (
-            patch("flocks.session.streaming.stream_processor.Message.store_part", new=AsyncMock()),
-            patch("flocks.session.streaming.stream_processor.Message.update_part", new=AsyncMock()),
-            patch(
-                "flocks.session.streaming.stream_processor.ToolRegistry.execute",
-                new=AsyncMock(return_value=result),
-            ),
-            patch(
-                "flocks.hooks.pipeline.HookPipeline.run_tool_before",
-                new=AsyncMock(side_effect=_fake_tool_before),
-            ),
+            patch("flocks.session.streaming.stream_processor.Message.store_part", new=AsyncMock()) as store_part,
+            patch("flocks.session.streaming.stream_processor.Message.parts", new=AsyncMock(return_value=[])),
         ):
             await proc.process_event(ToolInputStartEvent(id="tc_restore_running", tool_name="ip_query"))
             await proc.process_event(
-                ToolCallEvent(
-                    tool_call_id="tc_restore_running",
-                    tool_name="ip_query",
-                    input={"ip": "[IP_1]"},
-                )
+                ToolCallEvent(tool_call_id="tc_restore_running", tool_name="ip_query", input={"ip": "[IP_1]"})
             )
 
-        running_inputs = [
-            call.args[1]["part"]["state"]["input"]
+        assert before_calls == [{"ip": "[IP_1]"}]
+        assert handler_calls == [{"ip": "10.1.2.3"}]
+
+        tool_updates = [
+            call.args[1]["part"]["state"]
             for call in event_callback.await_args_list
-            if (
-                call.args[0] == "message.part.updated"
-                and call.args[1].get("part", {}).get("type") == "tool"
-                and call.args[1]["part"]["state"]["status"] == "running"
-            )
+            if call.args[0] == "message.part.updated"
+            and call.args[1].get("part", {}).get("type") == "tool"
         ]
-        assert running_inputs == [{"ip": "10.1.2.3"}]
+        running_inputs = [state["input"] for state in tool_updates if state["status"] == "running"]
+        # First publish carries the model input, the hook rewrite is published
+        # before the handler runs, and the terminal state keeps the rewrite.
+        assert running_inputs == [{"ip": "[IP_1]"}, {"ip": "10.1.2.3"}]
+        assert tool_updates[-1]["status"] == "completed"
+        assert tool_updates[-1]["input"] == {"ip": "10.1.2.3"}
+        stored_states = [call.args[2].state for call in store_part.await_args_list]
+        assert stored_states[-1].input == {"ip": "10.1.2.3"}
+
+        state = proc.tool_calls["tc_restore_running"]
+        assert state.input == {"ip": "10.1.2.3"}
+        assert state.raw_input == {"ip": "[IP_1]"}
 
     @pytest.mark.asyncio
-    async def test_tool_before_failure_allows_tool_execution(self):
+    async def test_running_metadata_updates_keep_patched_input(self, registry_sandbox):
+        """Live metadata updates during execution must not revert the input to the model's."""
+        from flocks.hooks.pipeline import HookBase, HookPipeline
+
+        class RestorePlaceholder(HookBase):
+            async def tool_before(self, ctx):
+                return {"decision": {"action": "allow", "validated_input_patch": {"ip": "10.1.2.3"}}}
+
+        HookPipeline.register("restore", RestorePlaceholder())
+
+        async def handler(ctx, **kwargs):
+            ctx.metadata({"title": "probing", "metadata": {"progress": 1}})
+            # let the scheduled running-state update tasks run
+            for _ in range(3):
+                await asyncio.sleep(0)
+            return ToolResult(success=True, output="ok", title="ip query", metadata={})
+
+        registry_sandbox.register("ip_query", handler, params=("ip",))
+        event_callback = AsyncMock()
+        proc = _make_processor(event_callback=event_callback)
+
+        with (
+            patch("flocks.session.streaming.stream_processor.Message.store_part", new=AsyncMock()) as store_part,
+            patch("flocks.session.streaming.stream_processor.Message.parts", new=AsyncMock(return_value=[])),
+        ):
+            await proc.process_event(ToolInputStartEvent(id="tc_meta", tool_name="ip_query"))
+            await proc.process_event(
+                ToolCallEvent(tool_call_id="tc_meta", tool_name="ip_query", input={"ip": "[IP_1]"})
+            )
+
+        running_states = [
+            call.args[1]["part"]["state"]
+            for call in event_callback.await_args_list
+            if call.args[0] == "message.part.updated"
+            and call.args[1].get("part", {}).get("type") == "tool"
+            and call.args[1]["part"]["state"]["status"] == "running"
+        ]
+        with_metadata = [state for state in running_states if state.get("metadata")]
+        assert with_metadata, "metadata update was not published"
+        assert all(state["input"] == {"ip": "10.1.2.3"} for state in with_metadata)
+        # Nothing published or persisted after the rewrite may carry the raw input.
+        first_patched = next(i for i, s in enumerate(running_states) if s["input"] == {"ip": "10.1.2.3"})
+        assert all(s["input"] == {"ip": "10.1.2.3"} for s in running_states[first_patched:])
+        stored_inputs = [call.args[2].state.input for call in store_part.await_args_list]
+        first_stored_patched = stored_inputs.index({"ip": "10.1.2.3"})
+        assert all(i == {"ip": "10.1.2.3"} for i in stored_inputs[first_stored_patched:])
+
+    @pytest.mark.asyncio
+    async def test_doom_loop_detects_repeated_calls_when_hook_patches_input(self, registry_sandbox):
+        """Doom-loop compares what the model emitted, even if a hook rewrote every call."""
+        from flocks.hooks.pipeline import HookBase, HookPipeline
+
+        class RestorePlaceholder(HookBase):
+            async def tool_before(self, ctx):
+                return {"decision": {"action": "allow", "validated_input_patch": {"ip": "10.1.2.3"}}}
+
+        HookPipeline.register("restore", RestorePlaceholder())
+        handler_calls = []
+
+        async def handler(_ctx, **kwargs):
+            handler_calls.append(kwargs)
+            return ToolResult(success=True, output="ok", title="ip query", metadata={})
+
+        registry_sandbox.register("ip_query", handler, params=("ip",))
         proc = _make_processor()
-        execute_mock = AsyncMock(return_value=ToolResult(success=True, output="executed", title="ip query"))
+
+        # Minimal part store: keeps the latest state per part id, in creation order.
+        stored: dict = {}
+
+        async def _store_part(_session_id, _message_id, part):
+            stored[part.id] = part
+            return part
+
+        async def _parts(_message_id, _session_id=None):
+            return list(stored.values())
+
+        with (
+            patch("flocks.session.streaming.stream_processor.Message.store_part", new=AsyncMock(side_effect=_store_part)),
+            patch("flocks.session.streaming.stream_processor.Message.parts", new=AsyncMock(side_effect=_parts)),
+        ):
+            for index in range(3):
+                call_id = f"tc_loop_{index}"
+                await proc.process_event(ToolInputStartEvent(id=call_id, tool_name="ip_query"))
+                await proc.process_event(
+                    ToolCallEvent(tool_call_id=call_id, tool_name="ip_query", input={"ip": "[IP_1]"})
+                )
+
+        assert proc._stop_tool_processing is True
+        assert handler_calls == [{"ip": "10.1.2.3"}, {"ip": "10.1.2.3"}]
+
+    @pytest.mark.asyncio
+    async def test_tool_before_failure_allows_tool_execution(self, registry_sandbox):
+        """An isolated (default fail policy) hook error must not block the tool."""
+        from flocks.hooks.pipeline import HookBase, HookPipeline
+
+        class Broken(HookBase):
+            async def tool_before(self, ctx):
+                raise RuntimeError("redaction restore failed")
+
+        HookPipeline.register("broken", Broken())
+        handler_calls = []
+
+        async def handler(_ctx, **kwargs):
+            handler_calls.append(kwargs)
+            return ToolResult(success=True, output="executed", title="ip query")
+
+        registry_sandbox.register("ip_query", handler, params=("ip",))
+        proc = _make_processor()
 
         with (
             patch("flocks.session.streaming.stream_processor.Message.store_part", new=AsyncMock()),
-            patch("flocks.session.streaming.stream_processor.Message.update_part", new=AsyncMock()),
-            patch(
-                "flocks.session.streaming.stream_processor.ToolRegistry.execute",
-                new=execute_mock,
-            ),
-            patch(
-                "flocks.hooks.pipeline.HookPipeline.run_tool_before",
-                new=AsyncMock(side_effect=RuntimeError("redaction restore failed")),
-            ),
+            patch("flocks.session.streaming.stream_processor.Message.parts", new=AsyncMock(return_value=[])),
         ):
             await proc.process_event(ToolInputStartEvent(id="tc_hook_fail", tool_name="ip_query"))
             await proc.process_event(
-                ToolCallEvent(
-                    tool_call_id="tc_hook_fail",
-                    tool_name="ip_query",
-                    input={"ip": "[[V_IP_ADDRESS_1]]"},
-                )
+                ToolCallEvent(tool_call_id="tc_hook_fail", tool_name="ip_query", input={"ip": "[[V_IP_ADDRESS_1]]"})
             )
 
-        execute_mock.assert_awaited_once()
+        assert handler_calls == [{"ip": "[[V_IP_ADDRESS_1]]"}]
         state = proc.tool_calls["tc_hook_fail"]
         assert state.status == "completed"
         assert state.output == "executed"

@@ -1562,6 +1562,40 @@ class TestSessionMessages:
         assert repaired_part.state.time["end"] >= 1000
 
     @pytest.mark.asyncio
+    async def test_list_messages_recovers_stale_pending_tool_only_when_idle(
+        self,
+        client: AsyncClient,
+        session_id: str,
+    ):
+        from flocks.session.message import ToolStatePending
+
+        msg = await Message.create(session_id, MessageRole.ASSISTANT, "")
+        part = ToolPart(
+            id="part_pending_on_read", sessionID=session_id, messageID=msg.id,
+            callID="call_pending_on_read", tool="sleep",
+            state=ToolStatePending(input={"timeout_s": 40}, raw='{"timeout_s":40}'),
+        )
+        await Message.store_part(session_id, msg.id, part)
+        SessionStatus.set(session_id, SessionStatusBusy())
+        try:
+            busy_response = await client.get(f"/api/session/{session_id}/message")
+        finally:
+            SessionStatus.clear(session_id)
+        assert busy_response.status_code == status.HTTP_200_OK
+        assert next(p for p in await Message.parts(msg.id, session_id) if p.id == part.id).state.status == "pending"
+
+        idle_response = await client.get(f"/api/session/{session_id}/message")
+        assert idle_response.status_code == status.HTTP_200_OK
+        recovered = next(p for p in await Message.parts(msg.id, session_id) if p.id == part.id)
+        assert recovered.state.status == "error"
+        assert recovered.id == part.id
+        assert recovered.callID == part.callID
+        assert recovered.state.input == {"timeout_s": 40}
+        assert recovered.state.error == INTERRUPTED_TOOL_ERROR
+        assert await client.get(f"/api/session/{session_id}/message")
+        assert next(p for p in await Message.parts(msg.id, session_id) if p.id == part.id).state == recovered.state
+
+    @pytest.mark.asyncio
     async def test_list_messages_uses_preloaded_orphan_recovery_path(
         self,
         client: AsyncClient,
@@ -1968,14 +2002,17 @@ class TestSessionMessagesRemaining:
         )
 
     @pytest.mark.asyncio
-    async def test_resend_preflight_failure_keeps_existing_history(
+    @pytest.mark.parametrize("action", ["resend", "regenerate"])
+    async def test_replay_preflight_failure_keeps_existing_history_and_jobs(
         self,
         client: AsyncClient,
         session_id: str,
         monkeypatch: pytest.MonkeyPatch,
+        action: str,
     ):
-        """Replay preflight errors must not truncate history or mutate the target text."""
+        """Replay preflight errors must preserve both history and submitted work."""
         from flocks.server.routes import session as session_routes
+        from flocks.session.agent_inbox import AgentInbox
 
         create_resp = await client.post(
             f"/api/session/{session_id}/message",
@@ -1990,6 +2027,7 @@ class TestSessionMessagesRemaining:
         list_resp = await client.get(f"/api/session/{session_id}/message")
         messages = list_resp.json()
         user_message = next(msg for msg in messages if msg["info"]["role"] == "user")
+        assistant_message = next(msg for msg in messages if msg["info"]["role"] == "assistant")
         user_part = next(part for part in user_message["parts"] if part["type"] == "text")
 
         async def _fail_prepare_replay_runtime(session_id: str, user_message):
@@ -1999,7 +2037,8 @@ class TestSessionMessagesRemaining:
             )
 
         scheduled_coroutines = []
-
+        abort = AsyncMock(wraps=session_routes._abort_session_processing)
+        monkeypatch.setattr(session_routes, "_abort_session_processing", abort)
         monkeypatch.setattr(session_routes, "_prepare_replay_runtime", _fail_prepare_replay_runtime)
         monkeypatch.setattr(
             session_routes,
@@ -2007,15 +2046,24 @@ class TestSessionMessagesRemaining:
             lambda coro, **kwargs: scheduled_coroutines.append(coro),
         )
 
-        resend_resp = await client.post(
-            f"/api/session/{session_id}/message/{user_message['info']['id']}/resend",
-            json={"text": "Should not be applied", "partID": user_part["id"]},
-        )
-        assert resend_resp.status_code == status.HTTP_202_ACCEPTED
+        child_job = asyncio.create_task(asyncio.Event().wait())
+        monkeypatch.setitem(AgentInbox._children, "ses_preflight_child", (session_id, child_job))
+        try:
+            target = user_message if action == "resend" else assistant_message
+            replay_resp = await client.post(
+                f"/api/session/{session_id}/message/{target['info']['id']}/{action}",
+                json={"text": "Should not be applied", "partID": user_part["id"]},
+            )
+            assert replay_resp.status_code == status.HTTP_202_ACCEPTED
 
-        assert len(scheduled_coroutines) == 1
-        with pytest.raises(HTTPException):
-            await scheduled_coroutines.pop(0)
+            assert len(scheduled_coroutines) == 1
+            with pytest.raises(HTTPException):
+                await scheduled_coroutines.pop(0)
+            abort.assert_not_awaited()
+            assert not child_job.done()
+        finally:
+            child_job.cancel()
+            await asyncio.gather(child_job, return_exceptions=True)
 
         updated_resp = await client.get(f"/api/session/{session_id}/message")
         updated_messages = updated_resp.json()
@@ -2543,6 +2591,227 @@ class TestSessionMessagesRemaining:
 # Utility endpoints
 # ===========================================================================
 
+class TestSessionReplayCancellation:
+    @pytest.fixture
+    async def replay_history(self, session_id, monkeypatch):
+        from flocks.session.agent_inbox import AgentInbox
+        from flocks.session.session_loop import SessionLoop
+
+        monkeypatch.setattr(AgentInbox, "_inboxes", {})
+        monkeypatch.setattr(AgentInbox, "_children", {})
+        monkeypatch.setattr(AgentInbox, "_wakes", {})
+        monkeypatch.setattr(SessionLoop, "_active_loops", {})
+        monkeypatch.setattr(session_routes, "_prepare_replay_runtime", AsyncMock(return_value={"agent_name": "rex"}))
+        monkeypatch.setattr("flocks.snapshot.Snapshot.track", AsyncMock(return_value=None))
+        user = await Message.create(session_id, MessageRole.USER, "Original question")
+        assistant = await Message.create(session_id, MessageRole.ASSISTANT, "Old answer", parentID=user.id)
+        return user, assistant
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("action", ["resend", "regenerate"])
+    async def test_replay_joins_old_child_and_finalizer_before_rewinding(
+        self, client, session_id, replay_history, monkeypatch, action,
+    ):
+        from flocks.session.agent_inbox import AgentInbox
+        from flocks.session.delegated_execution import start_child
+        from flocks.session.lifecycle.revert import SessionRevert
+        from flocks.session.session_loop import SessionLoop
+        from flocks.tool.registry import ToolContext, ToolResult
+
+        user, assistant = replay_history
+        parent = await Session.get_by_id(session_id)
+        child = await Session.create(project_id=parent.project_id, directory=parent.directory, parent_id=session_id)
+        receipt = ToolPart(
+            sessionID=session_id, messageID=assistant.id, callID="old-child", tool="delegate_task",
+            state=ToolStateCompleted(
+                input={}, output="submitted", title="Old child",
+                metadata={"sessionId": child.id, "submitted": True, "status": "running"},
+                time={"start": 1, "end": 2},
+            ),
+        )
+        await Message.store_part(session_id, assistant.id, receipt)
+        started, cancelled = asyncio.Event(), asyncio.Event()
+        release_child, finalizing, release_finalizer = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        delivered = asyncio.Event()
+
+        async def execute():
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancelled.set()
+                await release_child.wait()
+                return ToolResult(success=True, output="Late old child result")
+
+        async def publish_result(event_name, payload):
+            finalizing.set()
+            await release_finalizer.wait()
+            delivered.set()
+
+        start_child(
+            ToolContext(session_id, assistant.id, call_id=receipt.callID, event_publish_callback=publish_result),
+            child.id, "explore", execute,
+        )
+        old_job = AgentInbox._children[child.id][1]
+        old_inbox = AgentInbox.get(session_id)
+        revert = AsyncMock(wraps=SessionRevert.revert)
+        monkeypatch.setattr(SessionRevert, "revert", revert)
+        scheduled = []
+        monkeypatch.setattr(session_routes, "_schedule_background_coro", lambda coro, **kw: scheduled.append(coro))
+
+        async def provide(*, directory, init, fn):
+            return await fn()
+
+        async def replay(session_id, session, user_message, working_directory, runtime=None):
+            assert delivered.is_set()
+            assert child.id not in AgentInbox._children
+            assert AgentInbox.get(session_id) is not old_inbox
+            await SessionRevert.cleanup(session)
+            await Message.create(session_id, MessageRole.ASSISTANT, "Replayed answer", parentID=user_message.id)
+
+        monkeypatch.setattr("flocks.project.instance.Instance.provide", provide)
+        monkeypatch.setattr(session_routes, "_run_existing_user_message", replay)
+        replay_job = None
+        try:
+            await asyncio.wait_for(started.wait(), 2)
+            assert not SessionLoop.is_running(session_id)
+            target = user if action == "resend" else assistant
+            response = await client.post(
+                f"/api/session/{session_id}/message/{target.id}/{action}",
+                json={"text": "Edited question"},
+            )
+            assert response.status_code == status.HTTP_202_ACCEPTED
+            assert len(scheduled) == 1
+            replay_job = asyncio.create_task(scheduled.pop())
+            session_routes._track_background_task(replay_job, session_id=session_id)
+
+            await asyncio.wait_for(cancelled.wait(), 2)
+            assert old_inbox.stopped
+            assert not replay_job.done()
+            revert.assert_not_awaited()
+            release_child.set()
+
+            await asyncio.wait_for(finalizing.wait(), 2)
+            assert old_job.done()
+            assert AgentInbox._children[child.id][1] is not old_job
+            assert not replay_job.done()
+            revert.assert_not_awaited()
+            release_finalizer.set()
+            await asyncio.wait_for(replay_job, 2)
+
+            revert.assert_awaited_once_with(session_id, user.id)
+            assert not old_inbox.messages
+            assert not AgentInbox.get(session_id).messages
+            assert await Message.get(session_id, assistant.id) is None
+            history = [await Message.get_text_content(m) for m in await Message.list(session_id)]
+            expected_question = "Edited question" if action == "resend" else "Original question"
+            assert history == [expected_question, "Replayed answer"]
+        finally:
+            release_child.set()
+            release_finalizer.set()
+            if replay_job and not replay_job.done():
+                replay_job.cancel()
+                await asyncio.gather(replay_job, return_exceptions=True)
+            for coro in scheduled:
+                coro.close()
+            ids, tasks = AgentInbox.snapshot_tree(session_id)
+            AgentInbox.stop(session_id)
+            await AgentInbox.wait_for_tree(ids, tasks, timeout_s=2)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("action", ["resend", "regenerate"])
+    async def test_replay_timeout_does_not_rewind_history(
+        self, client, session_id, replay_history, monkeypatch, action,
+    ):
+        from flocks.session.agent_inbox import AgentInbox
+        from flocks.session.lifecycle.revert import SessionRevert
+
+        user, assistant = replay_history
+        before = [m.model_dump() for m in await Message.list_with_parts(session_id)]
+        old_inbox = AgentInbox.bind(session_id)
+        child_id = "ses_old_wake"
+        AgentInbox.bind(child_id).parent_id = session_id
+        started, cancelled, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+        async def slow_finalizer():
+            started.set()
+            try:
+                await release.wait()
+            except asyncio.CancelledError:
+                cancelled.set()
+                await release.wait()
+
+        finalizer = asyncio.create_task(slow_finalizer())
+        AgentInbox._wakes[child_id] = finalizer
+        wait_for_tree = AgentInbox.wait_for_tree
+
+        async def short_wait(ids, tasks):
+            # The child link disappears on abort: this must be the pre-abort snapshot.
+            assert ids == {session_id, child_id}
+            assert finalizer in tasks
+            assert old_inbox.stopped
+            return await wait_for_tree(ids, tasks, timeout_s=0.01)
+
+        monkeypatch.setattr(AgentInbox, "wait_for_tree", short_wait)
+        revert = AsyncMock()
+        run = AsyncMock()
+        monkeypatch.setattr(SessionRevert, "revert", revert)
+        monkeypatch.setattr(session_routes, "_run_existing_user_message", run)
+        scheduled = []
+        monkeypatch.setattr(session_routes, "_schedule_background_coro", lambda coro, **kw: scheduled.append(coro))
+        try:
+            await asyncio.wait_for(started.wait(), 2)
+            target = user if action == "resend" else assistant
+            response = await client.post(
+                f"/api/session/{session_id}/message/{target.id}/{action}",
+                json={"text": "Must not be saved"},
+            )
+            assert response.status_code == status.HTTP_202_ACCEPTED
+            assert len(scheduled) == 1
+            with pytest.raises(HTTPException) as exc:
+                await asyncio.wait_for(scheduled.pop(), 2)
+            assert exc.value.status_code == status.HTTP_409_CONFLICT
+            assert "Timed out" in exc.value.detail
+            assert cancelled.is_set()
+            assert not finalizer.done()
+            revert.assert_not_awaited()
+            run.assert_not_awaited()
+            assert [m.model_dump() for m in await Message.list_with_parts(session_id)] == before
+            assert (await Session.get_by_id(session_id)).revert is None
+        finally:
+            release.set()
+            await asyncio.wait_for(finalizer, 2)
+            AgentInbox._wakes.pop(child_id, None)
+            for coro in scheduled:
+                coro.close()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("action", ["resend", "regenerate"])
+    async def test_replay_still_rejects_active_parent(
+        self, client, session_id, replay_history, monkeypatch, action,
+    ):
+        from flocks.session.session_loop import SessionLoop
+
+        user, assistant = replay_history
+        monkeypatch.setitem(SessionLoop._active_loops, session_id, object())
+        abort = AsyncMock()
+        schedule = MagicMock()
+        monkeypatch.setattr(session_routes, "_abort_session_processing", abort)
+        monkeypatch.setattr(session_routes, "_schedule_background_coro", schedule)
+        target = user if action == "resend" else assistant
+        response = await client.post(
+            f"/api/session/{session_id}/message/{target.id}/{action}",
+            json={"text": "Must not be saved"},
+        )
+        assert response.status_code == status.HTTP_409_CONFLICT
+        session_routes._prepare_replay_runtime.assert_not_awaited()
+        abort.assert_not_awaited()
+        schedule.assert_not_called()
+        assert [await Message.get_text_content(m) for m in await Message.list(session_id)] == [
+            "Original question", "Old answer",
+        ]
+
+
 class TestSessionUtilities:
     """clear, abort, status, metrics, recent endpoints."""
 
@@ -2690,6 +2959,22 @@ class TestSessionUtilities:
         assert resp.status_code == status.HTTP_200_OK
         data = resp.json()
         assert "total" in data or isinstance(data, dict)
+
+    @pytest.mark.asyncio
+    async def test_session_status_includes_idle_ancestors(self, client: AsyncClient, monkeypatch):
+        from flocks.session.agent_inbox import AgentInbox
+        from flocks.session.core.status import SessionStatus, SessionStatusBusy
+
+        AgentInbox.bind("status-child").parent_id = "status-root"
+        AgentInbox.bind("status-grandchild").parent_id = "status-child"
+        monkeypatch.setattr(SessionStatus, "list", lambda: {"status-grandchild": SessionStatusBusy()})
+        try:
+            resp = await client.get("/api/session/status")
+            assert resp.status_code == 200
+            assert resp.json()["status-grandchild"]["ancestorSessionIDs"] == ["status-child", "status-root"]
+        finally:
+            AgentInbox._inboxes.pop("status-child", None)
+            AgentInbox._inboxes.pop("status-grandchild", None)
 
     @pytest.mark.asyncio
     async def test_session_metrics(self, client: AsyncClient):

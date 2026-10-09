@@ -10,9 +10,11 @@ export {
   type SSEChatEvent,
 } from './sseRouting';
 export {
+  readSessionRetryStatus,
   resolveSessionChatSSEAction,
   type CompactionStage,
   type SessionChatSSEAction,
+  type SessionRetryStatus,
 } from './sseActions';
 export {
   useSessionContextUsage,

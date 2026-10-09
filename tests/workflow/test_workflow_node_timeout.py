@@ -1,5 +1,6 @@
 """Regression tests for isolated and compatibility node timeouts."""
 
+import asyncio
 import io
 import os
 import threading
@@ -907,3 +908,136 @@ def test_run_workflow_explicit_node_timeout_overrides_metadata():
     assert len(result.history) == 1
     assert result.history[0].get("error") is None
     assert result.history[0]["outputs"]["ok"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Host-thread (default) node timeouts must cancel the tool / llm.ask call that
+# is in flight on the workflow loop instead of letting it run to completion.
+# ---------------------------------------------------------------------------
+
+
+class _InFlightProbe:
+    """Stand-in for a tool / LLM call submitted to the workflow loop.
+
+    ``call`` is what ``tools_adapter._execute_tool_async`` and workflow
+    ``llm.py`` do: block the node thread on ``run_sync_cancellable`` with the
+    runtime's cancel checker (exposed to node code as ``cancelled``).
+    """
+
+    def __init__(self) -> None:
+        self.started = threading.Event()
+        self.cancelled = threading.Event()
+        self.completed = threading.Event()
+        self.threads: list[str] = []
+
+    async def _slow(self) -> str:
+        self.started.set()
+        try:
+            await asyncio.sleep(5)
+        except asyncio.CancelledError:
+            self.cancelled.set()
+            raise
+        self.completed.set()
+        return "done"
+
+    def call(self, cancel_checker) -> str:
+        from flocks.workflow._async_runtime import run_sync_cancellable
+
+        self.threads.append(threading.current_thread().name)
+        return run_sync_cancellable(self._slow(), cancel_checker)
+
+
+class _StubRegistry:
+    """Keeps PythonExecRuntime.execute off the real ToolRegistry (slow cold start)."""
+
+    cancel_checker = None
+
+    def run(self, _name, **_kwargs):  # pragma: no cover - not exercised
+        raise AssertionError("no tools in this test")
+
+
+def _engine_with_probe(nodes: list[dict], probe: _InFlightProbe) -> WorkflowEngine:
+    workflow = Workflow.from_dict({
+        "name": "inflight",
+        "start": "start",
+        "nodes": [{"id": "start", "type": "python", "code": "outputs['go'] = 1"}, *nodes],
+        "edges": [{"from": "start", "to": node["id"]} for node in nodes],
+    })
+    return WorkflowEngine(
+        workflow,
+        runtime=PythonExecRuntime(globals={"probe": probe}, tool_registry=_StubRegistry()),
+        node_timeout_s=0.5,
+        stop_on_error=False,
+        max_parallel_workers=4,
+    )
+
+
+def test_host_thread_timeout_cancels_in_flight_call_serial():
+    probe = _InFlightProbe()
+    engine = _engine_with_probe(
+        [{"id": "slow", "type": "python", "code": "outputs['r'] = probe.call(cancelled)"}],
+        probe,
+    )
+    started = time.perf_counter()
+    result = engine.run(retain_history=True)
+    elapsed = time.perf_counter() - started
+
+    assert elapsed < 2.0
+    assert [(s.node_id, "超时" in (s.error or "")) for s in result.history if s.error] == [("slow", True)]
+    assert probe.started.is_set()
+    # The abandoned worker thread polls the cancel checker every 0.1 s and
+    # cancels the coroutine on the workflow loop; it must not run to the end.
+    assert probe.cancelled.wait(2.0), "in-flight call was not cancelled after the node timed out"
+    assert not probe.completed.is_set()
+
+
+def test_host_thread_timeout_cancels_in_flight_calls_parallel():
+    probe = _InFlightProbe()
+    engine = _engine_with_probe(
+        [
+            {"id": "slow_a", "type": "python", "code": "outputs['a'] = probe.call(cancelled)"},
+            {"id": "slow_b", "type": "python", "code": "outputs['b'] = probe.call(cancelled)"},
+        ],
+        probe,
+    )
+    cancelled_count = {"n": 0}
+    lock = threading.Lock()
+    original_slow = probe._slow
+
+    async def _counting_slow():
+        try:
+            return await original_slow()
+        except asyncio.CancelledError:
+            with lock:
+                cancelled_count["n"] += 1
+            raise
+
+    probe._slow = _counting_slow  # type: ignore[method-assign]
+
+    result = engine.run(retain_history=True)
+
+    timed_out = sorted(s.node_id for s in result.history if s.error and "超时" in s.error)
+    assert timed_out == ["slow_a", "slow_b"], [(s.node_id, s.error, s.outputs) for s in result.history]
+    deadline = time.perf_counter() + 2.0
+    while time.perf_counter() < deadline and cancelled_count["n"] < 2:
+        time.sleep(0.05)
+    assert cancelled_count["n"] == 2
+    assert not probe.completed.is_set()
+
+
+def test_host_thread_timeout_does_not_cancel_sibling_that_finishes_in_time():
+    probe = _InFlightProbe()
+    engine = _engine_with_probe(
+        [
+            {"id": "slow", "type": "python", "code": "outputs['r'] = probe.call(cancelled)"},
+            {"id": "fast", "type": "python", "code": "outputs['f'] = 'ok'"},
+        ],
+        probe,
+    )
+    result = engine.run(retain_history=True)
+
+    by_node = {s.node_id: s for s in result.history}
+    assert "超时" in (by_node["slow"].error or "")
+    assert by_node["fast"].error is None
+    assert by_node["fast"].outputs == {"f": "ok"}
+    assert probe.cancelled.wait(2.0)

@@ -39,9 +39,17 @@ from flocks.session.message import (
 from flocks.session.prompt import SessionPrompt, SystemPromptBlock, TurnPromptContext
 from flocks.session.core.status import SessionStatus, SessionStatusRetry, SessionStatusBusy
 from flocks.session.core.defaults import (
-    DEFAULT_MAX_TOOL_STEPS,
     DOOM_LOOP_THRESHOLD,
+    MAX_CONSECUTIVE_TOOL_ARG_TRUNCATIONS,
     REPEATED_EXACT_TOOL_CALL_HALT_THRESHOLD,
+)
+from flocks.provider.concurrency import (
+    PRIORITY_BACKGROUND,
+    PRIORITY_INTERACTIVE,
+    LlmSlot,
+    acquire_llm_slot,
+    report_provider_rate_limited,
+    resolve_max_parallel_subagents,
 )
 from flocks.session.lifecycle.retry import (
     CONNECTION_ERROR_DISPLAY_MESSAGE,
@@ -77,6 +85,8 @@ from flocks.session.callable_schema import list_session_callable_tool_infos
 from flocks.agent.registry import Agent
 from flocks.agent.agent import AgentInfo
 from flocks.agent.toolset import agent_declares_tool
+from flocks.provider.llm_budget import llm_slot
+from flocks.provider import output_limits
 from flocks.provider.provider import Provider, ChatMessage
 from flocks.provider.reasoning_replay import prepare_reasoning_for_replay
 from flocks.hooks.pipeline import HookPipeline, HookStage
@@ -136,6 +146,12 @@ def _annotate_with_provider_version(tool_info: Any, description: Optional[str]) 
     return f"{base.rstrip()}\n\n{note}"
 TOOL_RESULT_MIN_TURN_BUDGET = 4_000
 TOOL_RESULT_PREVIEW_CHARS = 160
+
+# Usage that marks cache tokens as counted in prompt_tokens is only trusted
+# when the request estimate is below this share of prompt_tokens plus the
+# cache.  The estimate runs low on real tokenizers (code, JSON, blocks it
+# leaves out), and trusting an Anthropic-style report would under-count.
+CACHE_IN_PROMPT_REQUEST_RATIO = 0.7
 
 # Maximum seconds to wait for the *first* chunk from the LLM stream.
 # If the model never starts responding, the stream times out and the session
@@ -288,6 +304,19 @@ class StepResult:
     usage: Optional[Dict[str, int]] = None
     failure: Optional[StepFailure] = None
     error_code: Optional[str] = None
+    # A streamed tool call was cut off mid-arguments; its part is stored as a
+    # tool error so the next step can react instead of replaying this one.
+    tool_args_truncated: bool = False
+    # Internal execution outcome: a sleep call alone does not prove a successful wait.
+    _successful_sleep: bool = field(default=False, repr=False, compare=False)
+
+
+# Root-session categories whose model requests queue behind interactive work.
+BACKGROUND_SESSION_CATEGORIES = frozenset({"task"})
+
+# Applied the moment a 429 surfaces, before the slot is handed on; the retry
+# branch replaces it with the jittered delay once that is known.
+MIN_RATE_LIMIT_COOLDOWN_S = 1.0
 
 
 @dataclass
@@ -363,6 +392,11 @@ class SessionRunner:
             "state": "processing", "last_activity_at": time.time(),
             "request_started_at": None, "active_tools": {},
         }
+        # Provider request slot held while the model is generating; see
+        # flocks.provider.concurrency. Released at first tool execution or
+        # when the stream ends, whichever comes first.
+        self._active_llm_slot: Optional[LlmSlot] = None
+        self._llm_priority: Optional[int] = None
 
     @staticmethod
     def _canonical_tool_signature(tool_name: str, arguments: Dict[str, Any]) -> str:
@@ -395,6 +429,34 @@ class SessionRunner:
             else:
                 state["last_user_id"] = last_user_id
         return state
+
+    def _output_room_tokens(self) -> Optional[int]:
+        """Output a request can ask for without prompt plus output passing the
+        context window: the overflow check lets the prompt reach the threshold."""
+        try:
+            context_window, max_output, max_input = Provider.resolve_model_info(
+                self.provider_id,
+                self.model_id,
+            )
+        except Exception:
+            return None
+        if not context_window or context_window <= 0:
+            return None
+        policy = CompactionPolicy.from_model(
+            context_window=context_window,
+            max_output_tokens=max_output or 4096,
+            max_input_tokens=max_input,
+        )
+        return max(0, context_window - policy.overflow_threshold)
+
+    def _count_tool_args_truncation(self, *, truncated: bool, last_user_id: str) -> int:
+        """Track consecutive truncated-tool-call steps within one user turn."""
+        state = self._static_cache.get("tool_args_truncation_guard")
+        if not isinstance(state, dict) or state.get("last_user_id") != last_user_id:
+            state = {"last_user_id": last_user_id, "count": 0}
+        state["count"] = int(state.get("count", 0)) + 1 if truncated else 0
+        self._static_cache["tool_args_truncation_guard"] = state
+        return state["count"]
 
     def _should_warn_about_tool_loop(self, *, last_user_id: str) -> bool:
         state = self._get_tool_loop_guard_state(last_user_id=last_user_id)
@@ -572,7 +634,12 @@ class SessionRunner:
         last_user_id: str,
     ) -> Dict[str, Any]:
         visible_text = bool((result.content or "").strip())
-        if visible_text or len(result.tool_calls) != 1:
+        successful_sleep = (
+            len(result.tool_calls) == 1
+            and result.tool_calls[0].name == "sleep"
+            and result._successful_sleep
+        )
+        if visible_text or len(result.tool_calls) != 1 or successful_sleep:
             self._reset_tool_loop_guard(last_user_id=last_user_id)
             return {"action": "allow"}
 
@@ -629,7 +696,11 @@ class SessionRunner:
         )
         permission_denied_tool_names: List[str] = []
         tool_infos = []
+        from flocks.session.runtime_controls import runtime_controls
+        controls = runtime_controls.get()
         for tool_info in result.tool_infos:
+            if controls is not None and controls.denial(tool_info.name):
+                continue
             if not is_tool_allowed(execution_mode, tool_info.name):
                 continue
             if tool_info.name == QUESTION_TOOL_NAME:
@@ -777,6 +848,8 @@ class SessionRunner:
             return 0
 
         updated_count = 0
+        # Marking a part compacted changes its message's token estimate.
+        SessionPrompt.invalidate_message_cache({ref["message_id"] for ref in dirty_refs})
         for ref in dirty_refs:
             part = ref["part"]
             state = getattr(part, "state", None)
@@ -1528,10 +1601,6 @@ class SessionRunner:
             ),
         )
 
-    @staticmethod
-    def _is_stream_tool_arguments_truncated_error(error: Dict[str, Any]) -> bool:
-        return error.get("name") == "StreamToolArgumentsTruncatedError"
-    
     async def _process_step(
         self,
         messages: List[MessageInfo],
@@ -1579,10 +1648,10 @@ class SessionRunner:
         except Exception as e:
             log.debug("runner.session_agent.error", {"error": str(e)})
         
-        # Check if we've reached max steps (matching Flocks logic)
-        max_steps = agent.steps if hasattr(agent, 'steps') and agent.steps is not None else DEFAULT_MAX_TOOL_STEPS
+        # Only explicitly configured step limits constrain tool calls.
+        max_steps = getattr(agent, "steps", None)
         self.execution_activity["max_steps"] = max_steps
-        is_last_step = self._step >= max_steps
+        is_last_step = max_steps is not None and self._step >= max_steps
         self.max_steps_reached = is_last_step
         
         # Get provider
@@ -1598,7 +1667,7 @@ class SessionRunner:
                         "data": {"message": error},
                     },
                     assistant_message_id=None,
-                    decision=FailoverDecision(True, "provider_unavailable", 0),
+                    decision=FailoverDecision(True, "provider_unavailable"),
                     attempts=0,
                 )
             error_dict = self._build_session_error_dict(
@@ -1638,7 +1707,7 @@ class SessionRunner:
                         "data": {"message": error},
                     },
                     assistant_message_id=None,
-                    decision=FailoverDecision(True, "provider_unavailable", 0),
+                    decision=FailoverDecision(True, "provider_unavailable"),
                     attempts=0,
                 )
             error_dict = self._build_session_error_dict(
@@ -1792,7 +1861,7 @@ class SessionRunner:
                 }
             })
 
-        async def _create_attempt_assistant_message(*, publish: bool = True) -> MessageInfo:
+        async def _create_attempt_assistant_message() -> MessageInfo:
             msg = await Message.create(
                 session_id=self.session.id,
                 role=MessageRole.ASSISTANT,
@@ -1802,60 +1871,8 @@ class SessionRunner:
                 provider_id=self.provider_id,
                 parent_id=last_user.id,
             )
-            if publish:
-                await _publish_assistant_created(msg)
+            await _publish_assistant_created(msg)
             return msg
-
-        async def _replace_assistant_message_for_replay(reason: str) -> bool:
-            nonlocal assistant_msg
-            previous_msg = assistant_msg
-            try:
-                next_msg = await _create_attempt_assistant_message(publish=False)
-            except Exception as exc:
-                log.error("runner.step.replay_message_create_failed", {
-                    "session_id": self.session.id,
-                    "previous_message_id": previous_msg.id,
-                    "reason": reason,
-                    "error": str(exc),
-                })
-                return False
-
-            try:
-                deleted = await Message.delete(self.session.id, previous_msg.id)
-            except Exception as exc:
-                deleted = False
-                log.error("runner.step.replay_message_delete_failed", {
-                    "session_id": self.session.id,
-                    "previous_message_id": previous_msg.id,
-                    "next_message_id": next_msg.id,
-                    "reason": reason,
-                    "error": str(exc),
-                })
-            if not deleted:
-                try:
-                    await Message.delete(self.session.id, next_msg.id)
-                except Exception as exc:
-                    log.debug("runner.step.replay_message_cleanup_failed", {
-                        "session_id": self.session.id,
-                        "message_id": next_msg.id,
-                        "error": str(exc),
-                    })
-                return False
-
-            if self.callbacks.event_publish_callback:
-                await self.callbacks.event_publish_callback("message.removed", {
-                    "sessionID": self.session.id,
-                    "messageID": previous_msg.id,
-                })
-                await _publish_assistant_created(next_msg)
-            assistant_msg = next_msg
-            log.info("runner.step.replay_message_replaced", {
-                "session_id": self.session.id,
-                "previous_message_id": previous_msg.id,
-                "next_message_id": next_msg.id,
-                "reason": reason,
-            })
-            return True
 
         # Create assistant message for the first attempt.
         assistant_msg = await _create_attempt_assistant_message()
@@ -1920,23 +1937,27 @@ class SessionRunner:
                         # about to retry – the provider may have already charged
                         # for the tokens returned in this response.
                         await self._record_usage_if_available(result.usage, message_id=assistant_msg.id)
-                        delay_ms = SessionRetry.delay(empty_attempt)
-                        next_retry_time = int(asyncio.get_event_loop().time() * 1000) + delay_ms
+                        delay_ms = SessionRetry.jittered_delay(empty_attempt)
+                        next_retry_time = int(time.time() * 1000) + delay_ms
                         log.warn("runner.step.empty_response_retry", {
                             "attempt": empty_attempt,
                             "delay_ms": delay_ms,
                             "session_id": self.session.id,
                             "model": self.model_id,
                         })
-                        SessionStatus.set(
-                            self.session.id,
-                            SessionStatusRetry(
-                                attempt=empty_attempt,
-                                message="Model returned empty response, retrying...",
-                                next=next_retry_time,
-                            )
+                        empty_retry_status = SessionStatusRetry(
+                            attempt=empty_attempt,
+                            message="Model returned empty response, retrying...",
+                            next=next_retry_time,
+                            maxAttempts=MAX_EMPTY_RETRIES,
+                            rateLimited=False,
+                            providerID=self.provider_id,
+                            modelID=self.model_id,
                         )
+                        SessionStatus.set(self.session.id, empty_retry_status)
+                        await self._publish_retry_status(empty_retry_status)
                         await SessionRetry.sleep(delay_ms, self._abort)
+                        await self._publish_busy_status()
                         continue
                     else:
                         # All retries exhausted — surface a clear error so the
@@ -1971,7 +1992,7 @@ class SessionRunner:
                                 message=empty_error_msg,
                                 error_data=empty_error_dict,
                                 assistant_message_id=assistant_msg.id,
-                                decision=FailoverDecision(True, "empty_response", 3),
+                                decision=FailoverDecision(True, "empty_response"),
                                 attempts=empty_attempt,
                             )
                         if self.callbacks.on_error:
@@ -1991,6 +2012,66 @@ class SessionRunner:
                             text_part=text_part,
                         )
                         return StepResult(action="stop", error=empty_error_msg)
+
+                truncation_count = self._count_tool_args_truncation(
+                    truncated=result.tool_args_truncated,
+                    last_user_id=last_user.id,
+                )
+                if truncation_count >= MAX_CONSECUTIVE_TOOL_ARG_TRUNCATIONS:
+                    truncation_error_msg = (
+                        "Model output was truncated while generating tool arguments "
+                        f"in {truncation_count} consecutive steps, so the turn was "
+                        "stopped instead of repeating the oversized tool call. Ask the "
+                        "model to split large content into smaller pieces, or raise the "
+                        "model's output token limit."
+                    )
+                    log.error("runner.step.tool_args_truncation_exhausted", {
+                        "session_id": self.session.id,
+                        "model": self.model_id,
+                        "consecutive": truncation_count,
+                    })
+                    truncation_error_dict = {
+                        "name": "StreamToolArgumentsTruncatedError",
+                        "message": truncation_error_msg,
+                        "data": {
+                            "message": truncation_error_msg,
+                            "model": self.model_id,
+                            "consecutive": truncation_count,
+                        },
+                    }
+                    await self._record_usage_if_available(result.usage, message_id=assistant_msg.id)
+                    if self._defer_step_errors:
+                        # Another candidate may have a larger output budget.
+                        # If this step ran no tool, the loop can drop it and
+                        # let that model redo the step without running
+                        # anything twice.
+                        return self._deferred_failure_result(
+                            message=truncation_error_msg,
+                            error_data=truncation_error_dict,
+                            assistant_message_id=assistant_msg.id,
+                            decision=FailoverDecision(True, "stream_truncated"),
+                            attempts=truncation_count,
+                            allow_fallback_override=(
+                                not self._attempt_state.tool_execution_started
+                            ),
+                        )
+                    if self.callbacks.on_error:
+                        await self.callbacks.on_error(truncation_error_msg)
+                    await Message.update(
+                        self.session.id,
+                        assistant_msg.id,
+                        error=truncation_error_dict,
+                        finish="error",
+                    )
+                    text_part = await self._ensure_visible_error_text(assistant_msg, truncation_error_msg)
+                    await self._publish_assistant_error_message(
+                        assistant_msg,
+                        agent_name=agent.name,
+                        parent_id=last_user.id,
+                        error_dict=truncation_error_dict,
+                        text_part=text_part,
+                    )
+                    return StepResult(action="stop", error=truncation_error_msg)
 
                 tool_loop_guard = self._update_tool_loop_guard(
                     result,
@@ -2046,9 +2127,6 @@ class SessionRunner:
                 # Check if retryable
                 retry_message = SessionRetry.retryable(error_dict)
                 failover_decision = self.classify_failover_error(error_dict)
-                is_stream_tool_args_truncated = (
-                    self._is_stream_tool_arguments_truncated_error(error_dict)
-                )
                 retry_limit = MAX_ERROR_RETRIES
                 will_retry = retry_message is not None and error_attempt <= retry_limit
                 retry_blocked_by_tool_execution = (
@@ -2062,46 +2140,61 @@ class SessionRunner:
                 elif self._defer_step_errors and not self._attempt_state.replay_safe:
                     # Retrying after text/reasoning/tool activity can duplicate
                     # visible output or execute a tool twice.
-                    will_retry = will_retry and is_stream_tool_args_truncated
+                    will_retry = False
 
-                if will_retry and is_stream_tool_args_truncated:
-                    # A truncated tool-argument stream already created a
-                    # partial assistant message (and usually a tool part). The
-                    # retry is only safe if that partial attempt can be removed
-                    # before the next provider call.
-                    replaced = await _replace_assistant_message_for_replay(
-                        reason="stream_tool_arguments_truncated"
+                # The delay is capped at RETRY_MAX_DELAY_NO_HEADERS so a
+                # headers-present but retry-after-absent 500 response cannot
+                # cause multi-minute sleeps, and jittered so N sessions
+                # rejected by the same 429 do not retry in lockstep.
+                from flocks.session.lifecycle.retry import RETRY_MAX_DELAY_NO_HEADERS
+                delay_ms = SessionRetry.jittered_delay(
+                    error_attempt,
+                    error_dict,
+                    max_delay_ms=RETRY_MAX_DELAY_NO_HEADERS,
+                )
+                rate_limited = SessionRetry.is_rate_limited(error_dict)
+                if rate_limited:
+                    # Every other caller of this provider backs off too,
+                    # instead of piling onto an upstream that just said no.
+                    # This is independent of our own retry budget: the last
+                    # 429 of an exhausted caller is exactly when the rest
+                    # should hold off.
+                    report_provider_rate_limited(
+                        self.provider_id,
+                        delay_ms / 1000.0,
+                        reason="http_429",
                     )
-                    if not replaced:
-                        will_retry = False
 
                 if will_retry:
-                    # Error is retryable and we have budget left
-                    delay_ms = SessionRetry.delay(error_attempt, error_dict, jitter=True)
-                    next_retry_time = int(asyncio.get_event_loop().time() * 1000) + delay_ms
+                    next_retry_time = int(time.time() * 1000) + delay_ms
 
                     log.warn("runner.step.retry", {
                         **error_log_context,
                         "attempt": error_attempt,
                         "delay_ms": delay_ms,
                         "reason": retry_message,
+                        "rate_limited": rate_limited,
                         "max_retries": retry_limit,
                     })
                     
                     # Set retry status
-                    SessionStatus.set(
-                        self.session.id,
-                        SessionStatusRetry(
-                            attempt=error_attempt,
-                            message=retry_message,
-                            next=next_retry_time,
-                        )
+                    retry_status = SessionStatusRetry(
+                        attempt=error_attempt,
+                        message=retry_message,
+                        next=next_retry_time,
+                        maxAttempts=retry_limit,
+                        rateLimited=rate_limited,
+                        providerID=self.provider_id,
+                        modelID=self.model_id,
                     )
+                    SessionStatus.set(self.session.id, retry_status)
+                    await self._publish_retry_status(retry_status)
                     
                     # Wait before retry
                     await SessionRetry.sleep(delay_ms, self._abort)
 
                     self._attempt_state = LlmAttemptState()
+                    await self._publish_busy_status()
                     
                     # Continue to next retry attempt
                     continue
@@ -2131,19 +2224,12 @@ class SessionRunner:
                         error_dict["data"]["displayMessage"] = CONNECTION_ERROR_DISPLAY_MESSAGE
 
                     if self._defer_step_errors:
-                        allow_fallback_override = None
-                        if is_stream_tool_args_truncated:
-                            allow_fallback_override = (
-                                failover_decision.eligible
-                                and not retry_blocked_by_tool_execution
-                            )
                         return self._deferred_failure_result(
                             message=final_error_message,
                             error_data=error_dict,
                             assistant_message_id=assistant_msg.id,
                             decision=failover_decision,
                             attempts=error_attempt,
-                            allow_fallback_override=allow_fallback_override,
                         )
 
                     if self.callbacks.on_error:
@@ -2174,12 +2260,38 @@ class SessionRunner:
         return StepResult(action="stop", error="Aborted")
 
     @staticmethod
-    def _build_tokens_update(stream_usage: Optional[Dict[str, int]]) -> Optional[Dict[str, Any]]:
-        """Normalize runner token updates from provider usage."""
+    def _build_tokens_update(
+        stream_usage: Optional[Dict[str, int]],
+        *,
+        request_tokens: Optional[int] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Normalize runner token updates from provider usage.
+
+        ``request_tokens`` is an estimate of the request that produced the
+        usage; it is only needed when the usage marks cache tokens as already
+        counted in prompt_tokens.
+        """
         if not stream_usage:
             return None
+        # ``input`` is the uncached part of the prompt, next to cache reads and
+        # writes.  A gateway that already counted those into prompt_tokens
+        # says how many (see openai_base._cache_tokens_in_prompt).
+        prompt_tokens = stream_usage.get("prompt_tokens") or 0
+        in_prompt = stream_usage.get("cache_tokens_in_prompt") or 0
+        if in_prompt and request_tokens:
+            cached = (stream_usage.get("cache_read_input_tokens") or 0) + (
+                stream_usage.get("cache_creation_input_tokens") or 0
+            )
+            # Take the cache out only when the request sent is clearly smaller
+            # than prompt_tokens plus the cache.  Taking it out of an
+            # Anthropic-style prompt_tokens would under-count, and a prompt
+            # that runs past the window is not recovered from; counting the
+            # cache twice only compacts early.
+            if request_tokens >= CACHE_IN_PROMPT_REQUEST_RATIO * (prompt_tokens + cached):
+                in_prompt = 0
+        uncached_input = max(0, prompt_tokens - in_prompt)
         return {
-            "input": stream_usage.get("prompt_tokens", 0),
+            "input": uncached_input,
             "output": stream_usage.get("completion_tokens", 0),
             "reasoning": stream_usage.get("reasoning_tokens", 0),
             "cache": {
@@ -2187,6 +2299,39 @@ class SessionRunner:
                 "write": stream_usage.get("cache_creation_input_tokens", 0),
             },
         }
+
+    @staticmethod
+    def _estimate_request_tokens(
+        messages: List[Any],
+        tools: Optional[List[Dict[str, Any]]],
+    ) -> int:
+        """Rough size of a request as sent: message text, replayed reasoning,
+        tool calls and tool schemas.  Images and other non-text blocks are left
+        out rather than counted by their encoded size."""
+        def field(item: Any, name: str) -> Any:
+            return item.get(name) if isinstance(item, dict) else getattr(item, name, None)
+
+        total = 0
+        for message in messages:
+            content = field(message, "content")
+            if isinstance(content, str):
+                total += SessionPrompt.count_tokens(content)
+            elif isinstance(content, list):
+                for block in content:
+                    text = block.get("text") if isinstance(block, dict) else None
+                    if isinstance(text, str):
+                        total += SessionPrompt.count_tokens(text)
+            reasoning = field(message, "reasoning_content")
+            if isinstance(reasoning, str):
+                total += SessionPrompt.count_tokens(reasoning)
+            tool_calls = field(message, "tool_calls")
+            if tool_calls:
+                total += SessionPrompt.count_tokens(
+                    json.dumps(tool_calls, ensure_ascii=False, default=str)
+                )
+        if tools:
+            total += SessionPrompt.count_tokens(json.dumps(tools, ensure_ascii=False, default=str))
+        return total
 
     @staticmethod
     def _serialize_chat_message_for_langfuse(message: ChatMessage) -> Dict[str, Any]:
@@ -2269,7 +2414,11 @@ class SessionRunner:
         Uses the shared provider-layer usage service so that CLI and HTTP
         callers rely on the same persistence and aggregation path.
         """
+        from flocks.session.runtime_controls import runtime_controls
+        controls = runtime_controls.get()
         if not usage:
+            if controls is not None and controls.max_budget is not None:
+                controls.failure = "Provider did not report usage; cannot enforce --max-budget"
             return
 
         try:
@@ -2736,6 +2885,118 @@ class SessionRunner:
         metadata = get_tool_catalog_metadata(tool_name, tool.info)
         return agent_declares_tool(agent, tool_name) or metadata.always_load
     
+    async def _publish_retry_status(self, status: SessionStatusRetry) -> None:
+        """Push the retry state to clients; SessionStatus alone is poll-only.
+
+        Serialized straight from the stored status so a client that refreshes
+        mid-backoff and falls back to ``/api/session/status`` sees exactly the
+        same fields the SSE event carried.
+        """
+        publish = self.callbacks.event_publish_callback
+        if not publish:
+            return
+        try:
+            await publish("session.status", {
+                "sessionID": self.session.id,
+                "status": status.model_dump(mode="json"),
+            })
+        except Exception as exc:
+            log.debug("runner.retry_status.publish_failed", {"error": str(exc)})
+
+    async def _publish_busy_status(self) -> None:
+        """Tell clients a retry sleep ended and the next attempt is in flight."""
+        publish = self.callbacks.event_publish_callback
+        if not publish:
+            return
+        try:
+            await publish("session.status", {
+                "sessionID": self.session.id,
+                "status": {"type": "busy"},
+            })
+        except Exception as exc:
+            log.debug("runner.busy_status.publish_failed", {"error": str(exc)})
+
+    async def _resolve_llm_priority(self) -> int:
+        """Interactive lineages go first; scheduled/workflow work waits behind them.
+
+        A session (or subagent) whose root ancestor is a scheduled task,
+        workflow temp parent or memory-evolution session (``category ==
+        "task"``) is background. Everything else (``user``, agent-studio
+        ``test`` sessions, ...) has a person waiting on it and is interactive.
+        """
+        cached = getattr(self, "_llm_priority", None)
+        if cached is None:
+            # One runner per step: keep the answer for the whole loop run.
+            cached = self._static_cache.get("llm_priority")
+        if isinstance(cached, int):
+            self._llm_priority = cached
+            return cached
+        priority = PRIORITY_INTERACTIVE
+        try:
+            current = self.session
+            seen: set = set()
+            while current is not None and current.id not in seen and len(seen) < 16:
+                seen.add(current.id)
+                parent_id = getattr(current, "parent_id", None)
+                if not parent_id:
+                    break
+                parent = await Session.get_by_id_unfiltered(parent_id)
+                if parent is None:
+                    break
+                current = parent
+            root_category = str(getattr(current, "category", "user") or "user")
+            if root_category in BACKGROUND_SESSION_CATEGORIES:
+                priority = PRIORITY_BACKGROUND
+        except Exception as exc:
+            log.debug("runner.llm_priority.resolve_failed", {"error": str(exc)})
+        self._llm_priority = priority
+        self._static_cache["llm_priority"] = priority
+        return priority
+
+    async def _resolve_max_parallel_subagents(self) -> int:
+        """Per-response cap on concurrently running foreground subagents."""
+        cached = self._static_cache.get("max_parallel_subagents")
+        if isinstance(cached, int):
+            return cached
+        try:
+            from flocks.config.config import Config
+
+            config = await Config.get()
+        except Exception as exc:
+            log.debug("runner.max_parallel_subagents.config_failed", {"error": str(exc)})
+            config = None
+        value = resolve_max_parallel_subagents(config)
+        self._static_cache["max_parallel_subagents"] = value
+        return value
+
+    def _report_rate_limit_cooldown_for_exception(self, exc: BaseException) -> None:
+        """Apply a provider cooldown as soon as a 429 is seen."""
+        try:
+            error_dict = self._exception_to_error_dict(exc)
+            if not SessionRetry.is_rate_limited(error_dict):
+                return
+            hinted_ms = SessionRetry.retry_after_ms(error_dict)
+            cooldown_s = (
+                hinted_ms / 1000.0 if hinted_ms is not None else MIN_RATE_LIMIT_COOLDOWN_S
+            )
+            report_provider_rate_limited(self.provider_id, cooldown_s, reason="http_429")
+        except Exception as report_exc:
+            log.debug("runner.rate_limit_cooldown.failed", {"error": str(report_exc)})
+
+    def _release_llm_slot(self, reason: str) -> None:
+        slot: Optional[LlmSlot] = getattr(self, "_active_llm_slot", None)
+        if slot is None:
+            return
+        self._active_llm_slot = None
+        if slot.released:
+            return
+        slot.release()
+        log.debug("runner.llm_slot.released", {
+            "provider_id": self.provider_id,
+            "reason": reason,
+            "held_s": round(time.monotonic() - slot.granted_at, 3),
+        })
+
     def _exception_to_error_dict(self, exception: Exception) -> Dict[str, Any]:
         """
         Convert exception to error dict for retry checking.
@@ -2753,9 +3014,15 @@ class SessionRunner:
             }
         }
 
+        if isinstance(exception, output_limits.OutputLimitRejectedError):
+            # Retry on the same model: the next attempt is rebuilt with the
+            # configured output limit, which the provider accepted before.
+            error_dict["data"]["isRetryable"] = True
+            return error_dict
+
         if type(exception).__name__ == "StreamToolArgumentsTruncatedError":
             error_dict["data"].update({
-                "isRetryable": True,
+                "isRetryable": False,
                 "streamToolArgumentsTruncated": True,
                 "toolCallID": getattr(exception, "tool_call_id", None),
                 "toolName": getattr(exception, "tool_name", None),
@@ -3545,6 +3812,11 @@ class SessionRunner:
         Uses StreamProcessor to handle events and execute tools synchronously.
         Ported from Flocks' SessionProcessor.process() behavior.
         """
+        from flocks.session.runtime_controls import runtime_controls
+        controls = runtime_controls.get()
+        if controls is not None:
+            controls.check_budget(self._resolve_usage_pricing(), require_pricing=True)
+
         def _build_llm_response_payload(
             *,
             content: str,
@@ -3584,6 +3856,26 @@ class SessionRunner:
             active = self.execution_activity["active_tools"]
             active[tool_name] = active.get(tool_name, 0) + 1
             self.execution_activity["last_activity_at"] = time.time()
+            # Inline tools block the streaming loop, and one of them may call
+            # the model itself (run_workflow, a non-parallel delegate_task).
+            # Holding the slot across that would make this turn wait on a
+            # nested call that is waiting for our slot, so hand it back and
+            # accept that this response's stream stays open -- and keeps
+            # generating -- without holding one.
+            #
+            # Sibling delegate_task calls are different: they run in their own
+            # tasks, the stream never awaits them, and the slot is released in
+            # the `finally` below before `drain_parallel_tool_calls`. Keeping
+            # the slot for them costs nothing and keeps fan-out, the case this
+            # cap exists for, inside the limit -- as long as no inline tool ran
+            # earlier in the same response, which already gave the slot away.
+            if processor.owns_current_parallel_tool_call():
+                log.debug("runner.llm_slot.kept_for_parallel_tool", {
+                    "session_id": self.session.id,
+                    "tool_name": tool_name,
+                })
+            else:
+                self._release_llm_slot("tool_execution_started")
             if self.callbacks.on_tool_start:
                 await self.callbacks.on_tool_start(tool_name, tool_input)
 
@@ -3631,6 +3923,7 @@ class SessionRunner:
             plan_relative_path=turn_plan_file.relative_path,
             plan_permission_path=turn_plan_file.permission_path,
             allowed_tool_names=allowed_tool_names,
+            max_parallel_subagents=await self._resolve_max_parallel_subagents(),
         )
         
         # Build provider options (thinking / reasoning / max_tokens)
@@ -3644,7 +3937,10 @@ class SessionRunner:
         if hasattr(self, '_current_reasoning_metadata'):
             delattr(self, '_current_reasoning_metadata')
 
-        from flocks.session.streaming.tool_accumulator import ToolCallAccumulator
+        from flocks.session.streaming.tool_accumulator import (
+            StreamToolArgumentsTruncatedError,
+            ToolCallAccumulator,
+        )
         tool_accumulator = ToolCallAccumulator(processor)
 
         text_started = False
@@ -3876,11 +4172,8 @@ class SessionRunner:
                 log.debug("runner.observability.init_failed", {"error": str(exc)})
                 trace_ctx = None
                 generation_ctx = None
-        llm_call_started_at = time.perf_counter()
-        self.execution_activity.update(
-            state="waiting_model", request_started_at=time.time(), last_activity_at=time.time(),
-        )
         first_chunk_logged = False
+        accounted_usage = {}
         aborted_during_stream = False
         stream_timeouts = resolve_llm_stream_timeouts(provider, self.model_id)
         log.debug("runner.llm.stream_timeouts", {
@@ -3890,6 +4183,52 @@ class SessionRunner:
             "ongoing_chunk_timeout_s": stream_timeouts.ongoing_chunk_s,
             "local_endpoint": stream_timeouts.is_local,
         })
+        llm_priority = await self._resolve_llm_priority()
+        # One slot of this loop's LLM budget for the whole response (no-op on
+        # the server loop; capped on the workflow loop, see
+        # flocks.provider.llm_budget). Taken before the first-chunk timeout
+        # clock starts so queueing behind other workflow calls is not mistaken
+        # for an unresponsive model; released in the finally below.
+        #
+        # Invariant while the slot is held: do not await anything that needs a
+        # slot of its own, or the workflow loop can deadlock itself at a small
+        # max_concurrency (parent holds, awaits child, child waits for a slot).
+        # Today that holds because no tool call made during the stream waits
+        # for a subagent: delegate_task / task (subagent_type is required) go
+        # through StreamProcessor._start_parallel_tool_call's create_task and,
+        # inside a session, return as soon as the child is submitted; sleep is
+        # deferred to the drain below, and the drains run after the release.
+        # Keep it that way when adding tools that call the model themselves.
+        llm_budget_slot = llm_slot()
+        await llm_budget_slot.acquire()
+        # Then the provider's request slot (flocks.provider.concurrency), in
+        # this order: waiting for the loop budget never holds a provider slot
+        # that sessions on other loops are queueing for.
+        slot_wait_started = time.perf_counter()
+        try:
+            self._active_llm_slot = await acquire_llm_slot(
+                self.provider_id,
+                priority=llm_priority,
+            )
+        except BaseException:
+            # Cancelled or failed while queued: the try/finally below has not
+            # started, so hand the loop budget back here.
+            llm_budget_slot.release()
+            raise
+        slot_waited_s = time.perf_counter() - slot_wait_started
+        if slot_waited_s >= 0.5:
+            log.info("runner.llm_slot.waited", {
+                "session_id": self.session.id,
+                "provider_id": self.provider_id,
+                "priority": llm_priority,
+                "waited_s": round(slot_waited_s, 3),
+            })
+        # Time the model from the moment the request can actually go out, so
+        # first-chunk / durationMs metrics do not absorb in-process queueing.
+        llm_call_started_at = time.perf_counter()
+        self.execution_activity.update(
+            state="waiting_model", request_started_at=time.time(), last_activity_at=time.time(),
+        )
         try:
             await model_activity.start()
             async for chunk in _iter_with_chunk_timeout(
@@ -3926,6 +4265,15 @@ class SessionRunner:
                 # Capture usage from chunk (providers may include it in the final chunk)
                 if hasattr(chunk, 'usage') and chunk.usage:
                     stream_usage = chunk.usage
+                    if controls is not None:
+                        # Usage snapshots are cumulative within one request. Charge
+                        # before any tool in this chunk, including on error streams.
+                        controls.record_usage(
+                            {**accounted_usage, **stream_usage},
+                            self._resolve_usage_pricing(),
+                            previous_usage=accounted_usage,
+                        )
+                        accounted_usage.update(stream_usage)
 
                 # Check for abort
                 if self.is_aborted:
@@ -4060,17 +4408,42 @@ class SessionRunner:
                     for tc in chunk_tool_calls:
                         await tool_accumulator.feed_chunk(tc)
         except asyncio.CancelledError:
+            # The stream is over: give the LLM slot back before waiting on
+            # foreground children, which run on this same loop and need slots
+            # of their own (holding it here could deadlock the whole budget).
+            llm_budget_slot.release()
+            # Not a user abort (that has stopped them already): a workflow
+            # node timeout or a watchdog gave up on this execution. Stop the
+            # subagents it started now, not after the drain below, which can
+            # sit on a tool call waiting for a permission reply. SessionLoop
+            # does the same for cancels landing anywhere else in the step.
+            # Synchronous like the release, so a second cancel landing in the
+            # awaits below cannot skip either.
+            if not self.is_aborted:
+                from flocks.session.session_loop import SessionLoop
+
+                SessionLoop.end_cancelled_execution(self.session.id)
             await model_activity.stop()
+            self._release_llm_slot("cancelled")
             # Foreground delegate tasks own child sessions. Let their
             # cancellation/finalization finish before unwinding this step.
-            await processor.drain_parallel_tool_calls()
+            await processor.drain_parallel_tool_calls(execute_deferred=False)
             raise
         except Exception as exc:
+            # First statement in the branch, and synchronous on purpose: an
+            # abort landing on any await here would otherwise skip the
+            # cooldown while `finally` still hands the slot on, letting the
+            # waiter reach a provider that just said 429. _process_step
+            # refines the duration with the jittered delay; the limiter keeps
+            # the longer of the two.
+            self._report_rate_limit_cooldown_for_exception(exc)
+            llm_budget_slot.release()
             await model_activity.stop()
+            self._release_llm_slot("stream_error")
             # A foreground delegate may already be running when the provider
             # stream fails. Drain first so the retry layer observes the tool
             # side-effect fence and cannot dispatch the same work twice.
-            await processor.drain_parallel_tool_calls()
+            await processor.drain_parallel_tool_calls(execute_deferred=False)
             partial_response = _build_llm_response_payload(
                 content=processor.get_text_content(),
                 reasoning=processor.get_reasoning_content(),
@@ -4093,10 +4466,34 @@ class SessionRunner:
                     )
                 except Exception as hook_exc:
                     log.debug("runner.hook.llm_after.error", {"error": str(hook_exc)})
+            sent_output_limit = provider_options.get("max_tokens")
+            if (
+                not self._attempt_state.received_chunk
+                and output_limits.is_raised(self.provider_id, self.model_id, sent_output_limit)
+                and output_limits.looks_like_limit_rejection(exc)
+            ):
+                # The provider refused the output limit raised after an
+                # earlier cut-off. Go back to the configured one for good; the
+                # step retry rebuilds the request with it.
+                output_limits.reject_raised(self.provider_id, self.model_id)
+                log.warn("runner.output_limit.raised_rejected", {
+                    "session_id": self.session.id,
+                    "provider_id": self.provider_id,
+                    "model_id": self.model_id,
+                    "max_tokens": sent_output_limit,
+                    "error": str(exc)[:300],
+                })
+                raise output_limits.OutputLimitRejectedError(
+                    f"The provider rejected max_tokens={sent_output_limit}: {exc}"
+                ) from exc
             raise
         finally:
+            # Free the provider slot first (synchronous, instant) so a queued
+            # caller can start while the activity marker is persisted.
+            self._release_llm_slot("stream_finished")
+            llm_budget_slot.release()
             await model_activity.stop()
-        
+
         self.execution_activity.update(state="processing", last_activity_at=time.time())
         log.debug("runner.stream.summary", {
             "total_chunks": chunk_counts["total"],
@@ -4108,52 +4505,110 @@ class SessionRunner:
             "agent": agent.name,
         })
 
+        tool_args_truncated = False
+        sent_output_limit = provider_options.get("max_tokens")
+        next_output_limit = output_limits.next_max_tokens(
+            self.provider_id,
+            self.model_id,
+            sent_output_limit,
+            output_room=self._output_room_tokens(),
+        )
+        # Only the first cut-off of a turn is told to resend: a repeat means
+        # the limit was probably not the cause (a gateway size or time limit
+        # cuts the same call again), and resending burns the turn's budget of
+        # consecutive cut-offs.  The raise is still recorded.
+        truncation_guard = self._static_cache.get("tool_args_truncation_guard")
+        repeated_truncation = (
+            isinstance(truncation_guard, dict)
+            and truncation_guard.get("last_user_id") == getattr(assistant_msg, "parentID", None)
+            and int(truncation_guard.get("count", 0) or 0) > 0
+        )
         try:
-            await tool_accumulator.flush_remaining(stream_finish_reason)
-        except Exception:
-            await processor.drain_parallel_tool_calls()
-            raise
+            try:
+                await tool_accumulator.flush_remaining(
+                    stream_finish_reason,
+                    output_limit=sent_output_limit,
+                    raised_output_limit=None if repeated_truncation else next_output_limit,
+                )
+            except StreamToolArgumentsTruncatedError as exc:
+                # The cut-off call is already stored as a failed tool part whose
+                # error tells the model how to recover. Finish the step normally
+                # so its text, reasoning and any completed tools stay visible.
+                # Replaying the request instead deleted all of that, and whatever
+                # cut the stream usually cut the identical retry at the same spot.
+                tool_args_truncated = True
+                # The request's output limit is the usual cause (a guessed limit,
+                # shared with reasoning), so give the model's next calls more room.
+                if next_output_limit:
+                    output_limits.raise_max_tokens(
+                        self.provider_id,
+                        self.model_id,
+                        next_output_limit,
+                    )
+                log.warn("runner.stream.tool_arguments_truncated", {
+                    "session_id": self.session.id,
+                    "tool_call_id": exc.tool_call_id,
+                    "tool_name": exc.tool_name,
+                    "finish_reason": exc.finish_reason,
+                    "arguments_len": exc.arguments_len,
+                    "max_tokens": sent_output_limit,
+                    "raised_max_tokens": next_output_limit,
+                })
 
-        if stream_text_rewriter is not None:
-            trailing_text = stream_text_rewriter.flush()
-            if trailing_text:
-                if not text_started:
-                    await processor.process_event(TextStartEvent())
-                    text_started = True
-                await processor.process_event(TextDeltaEvent(text=trailing_text))
-        
-        # End text block if started
-        if text_started:
-            await processor.process_event(TextEndEvent())
-        
-        # End any remaining reasoning block
-        if hasattr(self, '_current_reasoning_id'):
-            await _flush_reasoning_rewriter()
-            reasoning_end_metadata = getattr(self, '_current_reasoning_metadata', {}) or {}
-            await processor.process_event(ReasoningEndEvent(
-                id=self._current_reasoning_id,
-                metadata=reasoning_end_metadata,
+            if stream_text_rewriter is not None:
+                trailing_text = stream_text_rewriter.flush()
+                if trailing_text:
+                    if not text_started:
+                        await processor.process_event(TextStartEvent())
+                        text_started = True
+                    await processor.process_event(TextDeltaEvent(text=trailing_text))
+
+            # End text block if started
+            if text_started:
+                await processor.process_event(TextEndEvent())
+
+            # End any remaining reasoning block
+            if hasattr(self, '_current_reasoning_id'):
+                await _flush_reasoning_rewriter()
+                reasoning_end_metadata = getattr(self, '_current_reasoning_metadata', {}) or {}
+                await processor.process_event(ReasoningEndEvent(
+                    id=self._current_reasoning_id,
+                    metadata=reasoning_end_metadata,
+                ))
+                delattr(self, '_current_reasoning_id')
+                if hasattr(self, '_current_reasoning_metadata'):
+                    delattr(self, '_current_reasoning_metadata')
+
+            # Emit finish event
+            await processor.process_event(FinishEvent(
+                finish_reason=processor.get_finish_reason()
             ))
-            delattr(self, '_current_reasoning_id')
-            if hasattr(self, '_current_reasoning_metadata'):
-                delattr(self, '_current_reasoning_metadata')
-        
-        # Emit finish event
-        await processor.process_event(FinishEvent(
-            finish_reason=processor.get_finish_reason()
-        ))
+        except (Exception, asyncio.CancelledError):
+            await processor.drain_parallel_tool_calls(execute_deferred=False)
+            raise
 
         # Foreground subagent tool-calls are launched concurrently during
         # streaming so sibling subagents can start in the same assistant turn.
         # Drain them here before exposing tool results to the next loop step.
-        await processor.drain_parallel_tool_calls()
+        # A response cut off mid tool call still finishes the step, but its
+        # batch did not end cleanly: the model must resend before any wait.
+        await processor.drain_parallel_tool_calls(
+            execute_deferred=not (aborted_during_stream or self.is_aborted or tool_args_truncated)
+        )
         
         # Get processed content
         content = processor.get_text_content()
         reasoning = processor.get_reasoning_content()
         
         # Update message tokens if provider reported usage
-        tokens_update = self._build_tokens_update(stream_usage)
+        tokens_update = self._build_tokens_update(
+            stream_usage,
+            request_tokens=(
+                self._estimate_request_tokens(messages, provider_tools)
+                if stream_usage and stream_usage.get("cache_tokens_in_prompt")
+                else None
+            ),
+        )
         if tokens_update:
             try:
                 await Message.update(
@@ -4257,8 +4712,14 @@ class SessionRunner:
                 content=content,
                 tool_calls=tool_calls_for_result,
                 usage=stream_usage,
+                tool_args_truncated=tool_args_truncated,
+                _successful_sleep=(
+                    len(tool_calls_for_result) == 1
+                    and tool_calls_for_result[0].name == "sleep"
+                    and processor.tool_calls[tool_calls_for_result[0].id].status == "completed"
+                ),
             )
-        
+
         response_payload = self._build_langfuse_response_payload(
             action="stop",
             content=content,
@@ -4277,7 +4738,12 @@ class SessionRunner:
             },
             trace_output=response_payload,
         )
-        return StepResult(action=result_action, content=content, usage=stream_usage)
+        return StepResult(
+            action=result_action,
+            content=content,
+            usage=stream_usage,
+            tool_args_truncated=tool_args_truncated,
+        )
     
     @staticmethod
     def _end_observability(
