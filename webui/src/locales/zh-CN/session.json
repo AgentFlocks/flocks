@@ -2,7 +2,7 @@
   "managementTitle": "工作台",
   "sessionCount": "{{count}} 个任务",
   "clearSearch": "清空搜索",
-  "newSession": "新建任务",
+  "newSession": "Rex 新会话",
   "loadMore": "加载更多",
   "collapseLoaded": "收起",
   "noSessions": "暂无会话",
@@ -630,5 +630,10 @@
     "failed": "会话加载失败，请重试。",
     "retry": "重试",
     "back": "返回工作台"
+  },
+  "workbenchChat": {
+    "newSession": "新建会话",
+    "sessions": "会话列表",
+    "session": "会话"
   }
 }

@@ -2,7 +2,7 @@
   "managementTitle": "Workbench",
   "sessionCount": "{{count}} tasks",
   "clearSearch": "Clear search",
-  "newSession": "New Task",
+  "newSession": "New Rex session",
   "loadMore": "Load more",
   "collapseLoaded": "Show less",
   "noSessions": "No sessions yet",
@@ -629,5 +629,10 @@
     "failed": "Unable to load this session. Please retry.",
     "retry": "Retry",
     "back": "Back to workbench"
+  },
+  "workbenchChat": {
+    "newSession": "New conversation",
+    "sessions": "Conversations",
+    "session": "Conversation"
   }
 }

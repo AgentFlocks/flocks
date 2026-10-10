@@ -22,6 +22,8 @@ export interface Agent {
     providerID: string;
   };
   prompt?: string;
+  /** The registering package seals the prompt: the API omits it and refuses edits and deletion. */
+  promptProtected?: boolean;
   options: Record<string, any>;
   delegatable?: boolean;
   steps?: number;

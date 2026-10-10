@@ -1,7 +1,7 @@
 {
   "id": "ai_redteam_ui",
   "version": "1.0.0",
-  "title": "AI 红队",
+  "title": "AI 红队工作区",
   "titleEn": "AI Redteam",
   "icon": "Crosshair",
   "order": 30,

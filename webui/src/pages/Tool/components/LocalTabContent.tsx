@@ -10,6 +10,9 @@ import { getLocalizedToolDescription } from '../toolDisplay';
 import { SERVICE_TAB_GRID_COLS } from './gridLayout';
 import type { GroupDrag } from '@/components/plugin-groups/GroupNav';
 import PluginGroupButton from '@/components/plugin-groups/PluginGroupButton';
+import PluginCard, { PLUGIN_CARD_GRID_CLASS } from '@/components/plugin-groups/PluginCard';
+import EnabledSwitch from '@/components/plugin-groups/EnabledSwitch';
+import { EnabledBadge } from './badges';
 
 interface LocalTabContentProps {
   tools: Tool[];
@@ -98,17 +101,63 @@ export default function LocalTabContent({
           description={searchQuery ? t('empty.tryOtherKeywords') : t('local.noToolsDesc')}
         />
       ) : (
-        <div className={viewMode === 'list' ? 'bg-white border border-gray-200 rounded-lg overflow-hidden divide-y divide-gray-100' : 'grid gap-3 sm:grid-cols-2 xl:grid-cols-3'}>
+        <div className={viewMode === 'list' ? 'bg-white border border-gray-200 rounded-lg overflow-hidden divide-y divide-gray-100' : PLUGIN_CARD_GRID_CLASS}>
           {filteredTools.map((tool) => {
             const isSelected = selectedToolName === tool.name;
             const description = getLocalizedToolDescription(tool, i18n.language);
+
+            if (viewMode === 'cards') {
+              return (
+                <PluginCard
+                  key={tool.name}
+                  icon={<Code className="h-4 w-4" />}
+                  title={tool.name}
+                  tags={<>
+                    <span className="rounded bg-blue-100 px-1.5 py-0.5 text-[10px] font-medium text-blue-700">{t('source.local')}</span>
+                    {tool.enabled_customized && (
+                      <span className="rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-700">{t('toolDetail.customized', { defaultValue: '已自定义' })}</span>
+                    )}
+                    {tool.requires_confirmation && (
+                      <span className="inline-flex items-center gap-0.5 rounded border border-amber-200 bg-amber-50 px-1.5 py-0.5 text-[10px] font-medium text-amber-700">
+                        <AlertTriangle className="h-2.5 w-2.5" />{t('local.requiresConfirmation')}
+                      </span>
+                    )}
+                  </>}
+                  status={<EnabledBadge enabled={tool.enabled} />}
+                  statusControl={(
+                    <EnabledSwitch
+                      enabled={tool.enabled}
+                      loading={toggling === tool.name}
+                      label={t('card.enabledSwitch')}
+                      title={tool.enabled ? t('card.disableTip') : t('card.enableTip')}
+                      onChange={(event) => void handleToggleEnabled(tool, !tool.enabled, event)}
+                    />
+                  )}
+                  description={description}
+                  emptyDescription={t('toolDetail.noDescription')}
+                  meta={(
+                    <span className="inline-flex items-center gap-1">
+                      <Wrench className="h-3 w-3" />
+                      {t('local.paramsCount', { count: tool.parameters_count ?? tool.parameters?.length ?? 0 })}
+                    </span>
+                  )}
+                  selected={isSelected}
+                  muted={!tool.enabled}
+                  onOpen={() => onSelectTool(tool)}
+                  groupButton={groupDrag ? <PluginGroupButton grouping={groupDrag} itemKey={tool.name} iconOnly /> : undefined}
+                  editLabel={t('local.manage')}
+                  dragProps={groupDrag?.dragProps(tool.name)}
+                  testId={`local-tool-card-${tool.name}`}
+                />
+              );
+            }
 
             return (
               <div
                 key={tool.name}
                 {...groupDrag?.dragProps(tool.name)}
-                className={`grid items-center gap-3 px-4 py-3 transition-colors ${isSelected ? 'bg-blue-50' : 'hover:bg-gray-50'}${viewMode === 'cards' ? ' rounded-lg border border-gray-200 bg-white [&>:nth-child(5)]:col-span-2 [&>:nth-child(6)]:col-span-2' : ''}`}
-                style={{ gridTemplateColumns: viewMode === 'list' ? SERVICE_TAB_GRID_COLS : '32px minmax(0, 1fr)' }}
+                className={`grid items-center gap-3 px-4 py-3 transition-colors ${isSelected ? 'bg-blue-50' : 'hover:bg-gray-50'}`}
+                style={{ gridTemplateColumns: SERVICE_TAB_GRID_COLS }}
               >
                 {/* Icon */}
                 <div className={`w-8 h-8 flex items-center justify-center rounded-lg ${tool.enabled ? 'bg-blue-50' : 'bg-gray-50'}`}>
@@ -143,7 +192,7 @@ export default function LocalTabContent({
                       </span>
                     )}
                   </div>
-                  <p className="text-xs text-gray-500 truncate mt-0.5">{description || t('detail.noDescription')}</p>
+                  <p className="text-xs text-gray-500 truncate mt-0.5">{description || t('toolDetail.noDescription')}</p>
                 </button>
 
                 {/* Type column */}

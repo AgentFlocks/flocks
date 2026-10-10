@@ -60,21 +60,24 @@ export default function SystemLogPage() {
   };
 
   return (
-    <div className="h-full flex flex-col">
+    <div className="flex flex-col">
       <PageHeader
         title={t('logs.title')}
         description={t('logs.description')}
         icon={<ScrollText className="w-8 h-8" />}
       />
 
+      {/* The page around it grows with its content, so the viewer takes a viewport-based
+          height and scrolls inside (auto-scroll follows the newest lines). */}
+      <div className="flex h-[calc(100dvh-18rem)] min-h-[420px] flex-col overflow-hidden rounded-xl border border-gray-200 bg-white">
       {/* Toolbar */}
-      <div className="px-4 py-2 border-b border-gray-100 flex items-center gap-3">
+      <div className="px-4 py-2 border-b border-gray-100 flex flex-wrap items-center gap-3">
         {/* File selector */}
         <select
           value={selectedFile || ''}
           onChange={(e) => handleFileSelect(e.target.value)}
           disabled={files.length === 0}
-          className="text-sm border border-gray-200 rounded-lg px-2.5 py-1.5 bg-white
+          className="min-w-0 max-w-full text-sm border border-gray-200 rounded-lg px-2.5 py-1.5 bg-white
                      focus:outline-none focus:ring-1 focus:ring-slate-300 focus:border-slate-400
                      disabled:opacity-50 disabled:cursor-not-allowed"
         >
@@ -150,6 +153,7 @@ export default function SystemLogPage() {
           )}
         </div>
       )}
+      </div>
     </div>
   );
 }

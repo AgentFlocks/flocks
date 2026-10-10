@@ -266,6 +266,27 @@ class TestLoadAgent:
         assert agent is not None
         assert agent.tools == []
 
+    def test_loads_agent_skills_and_isolated_prompt_profile(self, tmp_path):
+        agent_dir = _write_agent_dir(tmp_path, """
+            name: isolated
+            skills:
+              - secure-review
+              - framework-guide
+            prompt_profile: isolated
+            session_directory: ~/.flocks/workspace/dedicated-agent/runtime
+            memory_enabled: false
+            require_dedicated_session: true
+        """)
+
+        agent = load_agent(agent_dir)
+
+        assert agent is not None
+        assert agent.skills == ["secure-review", "framework-guide"]
+        assert agent.prompt_profile == "isolated"
+        assert agent.session_directory == "~/.flocks/workspace/dedicated-agent/runtime"
+        assert agent.memory_enabled is False
+        assert agent.require_dedicated_session is True
+
     def test_rex_empty_tools_expand_to_builtin_toolset(self, tmp_path, monkeypatch):
         monkeypatch.setattr(
             "flocks.agent.toolset.get_all_enabled_builtin_tool_names",
@@ -669,6 +690,23 @@ class TestYamlToAgentInfo:
         assert agent.model is not None
         assert agent.model.model_id == "claude-3"
 
+    def test_isolation_policy_parsed(self, tmp_path):
+        yaml_path = self._make_yaml_path(tmp_path)
+        raw = {
+            "name": "isolated_plugin",
+            "prompt_profile": "isolated",
+            "session_directory": "~/.flocks/workspace/runtime",
+            "memory_enabled": False,
+            "require_dedicated_session": True,
+        }
+
+        agent = yaml_to_agent_info(raw, yaml_path)
+
+        assert agent.prompt_profile == "isolated"
+        assert agent.session_directory == "~/.flocks/workspace/runtime"
+        assert agent.memory_enabled is False
+        assert agent.require_dedicated_session is True
+
     def test_description_cn_snake_and_camel(self, tmp_path):
         yaml_path = self._make_yaml_path(tmp_path)
         raw = {
@@ -718,6 +756,17 @@ class TestAgentConfigOverrides:
         result = scan_and_load()
         # All 13 built-ins should be present without a whitelist
         assert len(result) >= 10
+
+    def test_enabled_agents_whitelist_applies_after_runtime_merge(self):
+        from flocks.agent.registry import _apply_enabled_agents
+
+        agents = {
+            "rex": AgentInfo(name="rex"),
+            "runtime-security": AgentInfo(name="runtime-security"),
+        }
+        _apply_enabled_agents(agents, ["rex"])
+
+        assert set(agents) == {"rex"}
 
 
 # ===========================================================================

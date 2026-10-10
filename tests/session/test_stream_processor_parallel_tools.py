@@ -17,6 +17,7 @@ async def test_foreground_subagent_tool_calls_start_in_parallel(execute_deferred
         session_id="ses-parent",
         assistant_message=SimpleNamespace(id="msg-assistant"),
         agent=SimpleNamespace(name="rex"),
+        allowed_tool_names=["delegate_task"],
     )
     release = asyncio.Event()
     both_started = asyncio.Event()
@@ -108,7 +109,7 @@ async def test_sleep_runs_after_stream_and_other_tools(other_tool):
     from flocks.tool.agent.communication import sleep
     processor = StreamProcessor(
         session_id="sleep-session", assistant_message=SimpleNamespace(id="msg"),
-        agent=SimpleNamespace(name="rex"),
+        agent=SimpleNamespace(name="rex"), allowed_tool_names=["sleep", "read", "delegate_task"],
     )
     results = []
     order = []
@@ -141,7 +142,7 @@ async def test_cancelling_first_deferred_sleep_finalizes_all_pending_siblings():
     published = AsyncMock()
     processor = StreamProcessor(
         session_id="ses-two-sleeps", assistant_message=SimpleNamespace(id="msg-two-sleeps"),
-        agent=SimpleNamespace(name="rex"), event_publish_callback=published,
+        agent=SimpleNamespace(name="rex"), event_publish_callback=published, allowed_tool_names=["sleep"],
     )
     started = asyncio.Event()
     executed = []
@@ -214,7 +215,7 @@ async def test_cancellation_while_publishing_first_running_sleep_finalizes_both(
 
     processor = StreamProcessor(
         session_id="ses-running-publish", assistant_message=SimpleNamespace(id="msg-running-publish"),
-        agent=SimpleNamespace(name="rex"), event_publish_callback=publish,
+        agent=SimpleNamespace(name="rex"), event_publish_callback=publish, allowed_tool_names=["sleep"],
     )
     execute = AsyncMock(return_value=ToolResult(success=True))
     with (
@@ -248,7 +249,7 @@ async def test_cancellation_while_publishing_first_running_sleep_finalizes_both(
 async def test_multiple_deferred_sleeps_complete_once_on_success():
     processor = StreamProcessor(
         session_id="ses-multiple-sleeps", assistant_message=SimpleNamespace(id="msg-multiple-sleeps"),
-        agent=SimpleNamespace(name="rex"),
+        agent=SimpleNamespace(name="rex"), allowed_tool_names=["sleep"],
     )
     execute = AsyncMock(return_value=ToolResult(success=True, output="done"))
     with (
@@ -274,7 +275,7 @@ async def test_multiple_deferred_sleeps_complete_once_on_success():
 async def test_cancelled_tool_input_rewrite_hook_preserves_cancellation_and_finalizes_part():
     processor = StreamProcessor(
         session_id="ses-hook-cancel", assistant_message=SimpleNamespace(id="msg-hook-cancel"),
-        agent=SimpleNamespace(name="rex"), event_publish_callback=AsyncMock(),
+        agent=SimpleNamespace(name="rex"), event_publish_callback=AsyncMock(), allowed_tool_names=["read"],
     )
     cancellation = asyncio.CancelledError("pre-hook cancelled")
     with (
@@ -302,6 +303,7 @@ async def test_max_parallel_subagents_caps_running_siblings():
         session_id="ses-parent",
         assistant_message=SimpleNamespace(id="msg-assistant"),
         agent=SimpleNamespace(name="rex"),
+        allowed_tool_names=["delegate_task"],
         max_parallel_subagents=2,
     )
     release = asyncio.Event()
@@ -358,6 +360,7 @@ async def test_max_parallel_subagents_zero_means_unbounded():
         session_id="ses-parent",
         assistant_message=SimpleNamespace(id="msg-assistant"),
         agent=SimpleNamespace(name="rex"),
+        allowed_tool_names=["delegate_task"],
         max_parallel_subagents=0,
     )
     release = asyncio.Event()
@@ -399,6 +402,7 @@ async def test_queued_siblings_do_not_start_after_the_turn_is_aborted():
         assistant_message=SimpleNamespace(id="msg-assistant"),
         agent=SimpleNamespace(name="rex"),
         abort_event=abort_event,
+        allowed_tool_names=["delegate_task"],
         max_parallel_subagents=1,
     )
     release = asyncio.Event()

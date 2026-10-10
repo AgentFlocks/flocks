@@ -19,7 +19,9 @@ beforeEach(() => {
 });
 
 vi.mock('@/api/workflow', () => ({ workflowAPI: nativeWorkflowAPI }));
-vi.mock('@/components/common/Toast', () => ({ useToast: () => ({ warning: toastWarning }) }));
+vi.mock('@/components/common/Toast', async (importOriginal) => ({
+  // Keep the module's other exports (GroupNav uses useOptionalToast).
+  ...(await importOriginal<typeof import('@/components/common/Toast')>()), useToast: () => ({ warning: toastWarning }) }));
 
 vi.mock('react-router-dom', () => ({
   useNavigate: () => mockNavigate,

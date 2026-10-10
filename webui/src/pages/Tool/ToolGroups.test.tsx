@@ -26,12 +26,23 @@ vi.mock('@/api/client', () => ({ default: {
 } }));
 vi.mock('@/contexts/AuthContext', () => ({ useAuth: () => ({ user: mocks.auth }) }));
 vi.mock('@/api/provider', () => ({ providerAPI: { listApiServices: mocks.listServices, updateApiService: mocks.updateService, deleteApiService: mocks.deleteService } }));
-vi.mock('@/components/common/Toast', () => ({
+vi.mock('@/components/common/Toast', async (importOriginal) => ({
+  // Keep the module's other exports (GroupNav uses useOptionalToast).
+  ...(await importOriginal<typeof import('@/components/common/Toast')>()),
   useToast: () => ({ error: vi.fn(), warning: mocks.toastWarning, success: vi.fn() }),
 }));
 
 let inventory: Tool[];
-const nativeRow = (name: string) => screen.getByRole('button', { name: new RegExp(`^${name}(?: |$)`) }).closest('[draggable]') as HTMLElement;
+const nativeRow = (name: string) => (
+  screen.queryByTestId(`tool-card-${name}`)
+  ?? screen.queryByTestId(`local-tool-card-${name}`)
+  ?? screen.getByRole('button', { name: new RegExp(`^${name}(?: |$)`) }).closest('[draggable]')
+) as HTMLElement;
+// The list row's visible fields (name, category, source, provider, status); cards must keep each one.
+const rowFields = (row: HTMLElement) => [
+  ...Array.from(row.children[1].children).map((cell) => cell.textContent ?? ''),
+  ...Array.from(row.children).slice(2, 5).map((cell) => cell.textContent ?? ''),
+].filter(Boolean);
 
 async function mount(language = 'zh-CN') {
   const i18n = createInstance();
@@ -108,7 +119,7 @@ describe('Tools native group attributes and original view preservation', () => {
 
   it('uses full facets, scalar group filters, distinct All/Ungrouped cache keys and offset zero', async () => {
     await mount();
-    const nav = screen.getByRole('complementary', { name: '业务分组' });
+    const nav = screen.getByRole('complementary', { name: '分组' });
     expect(within(nav).getByRole('button', { name: '全部 61' })).toBeInTheDocument();
     expect(within(nav).getByRole('button', { name: '未分组 1' })).toBeInTheDocument();
     fireEvent.change(screen.getByPlaceholderText(zhTool.search.placeholder), { target: { value: 'tool_' } });
@@ -122,16 +133,20 @@ describe('Tools native group attributes and original view preservation', () => {
     expect(betaCalls[0][0]).toEqual(expect.objectContaining({ group: 'Beta', offset: 0, q: 'tool_', sort_by: 'source', sort_dir: 'asc' }));
     fireEvent.click(screen.getByRole('button', { name: '2' }));
     await screen.findByRole('button', { name: 'tool_55' });
-    const originalText = nativeRow('tool_55').textContent;
+    const fields = rowFields(nativeRow('tool_55'));
+    expect(fields).toEqual(expect.arrayContaining(['tool_55', 'Native provider', zhTool.enabledBadge.enabled]));
     const requests = mocks.listPage.mock.calls.length;
     fireEvent.click(screen.getByRole('button', { name: '卡片视图' }));
-    expect(nativeRow('tool_55').textContent).toBe(originalText);
+    const card = nativeRow('tool_55');
+    expect(card).toHaveAttribute('data-testid', 'tool-card-tool_55');
+    fields.forEach((field) => expect(card.textContent).toContain(field));
+    expect(within(card).getByText('Complete description 55')).toBeInTheDocument();
     expect(mocks.listPage).toHaveBeenCalledTimes(requests);
     fireEvent.click(screen.getByRole('button', { name: '全部 61' }));
-    await screen.findByRole('button', { name: 'tool_00' });
+    await screen.findByTestId('tool-card-tool_00');
     expect(mocks.listPage).toHaveBeenCalledWith(expect.objectContaining({ group: undefined, offset: 0, q: 'tool_' }));
     fireEvent.click(screen.getByRole('button', { name: '未分组 1' }));
-    await screen.findByRole('button', { name: 'tool_60' });
+    await screen.findByTestId('tool-card-tool_60');
     expect(mocks.listPage).toHaveBeenLastCalledWith(expect.objectContaining({ group: '', offset: 0, q: 'tool_' }));
   });
 
@@ -623,11 +638,16 @@ describe('Tools native group attributes and original view preservation', () => {
     expect(screen.queryByRole('button', { name: /^tool_00 / })).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: /^tool_01 / })).toBeInTheDocument();
     expect(mocks.listPage).toHaveBeenCalledTimes(requests);
-    const text = nativeRow('tool_01').textContent;
+    const row = nativeRow('tool_01');
+    const name = within(row).getByRole('button', { name: /^tool_01 / }).textContent ?? '';
     fireEvent.click(screen.getByRole('button', { name: '卡片视图' }));
-    expect(nativeRow('tool_01').textContent).toBe(text);
+    const card = nativeRow('tool_01');
+    expect(card).toHaveAttribute('data-testid', 'local-tool-card-tool_01');
+    expect(name).toContain('Complete description 1');
+    ['tool_01', 'Complete description 1', zhTool.source.local, zhTool.enabledBadge.enabled].forEach((field) => expect(card.textContent).toContain(field));
+    expect(within(card).getByRole('switch', { name: zhTool.card.enabledSwitch })).toHaveAttribute('aria-checked', 'true');
     fireEvent.click(screen.getByRole('button', { name: /^全量工具/ }));
-    await screen.findByRole('button', { name: 'tool_00' });
+    await screen.findByTestId('tool-card-tool_00');
     expect(screen.getByRole('button', { name: '卡片视图' })).toHaveAttribute('aria-pressed', 'true');
   });
 });
