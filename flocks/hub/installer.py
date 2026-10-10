@@ -17,6 +17,7 @@ from typing import Awaitable, Callable
 from flocks.config.config import Config
 from flocks.hub import local
 from flocks.hub.catalog import _catalog_install_state, clear_catalog_caches, load_manifest
+from flocks.hub.custom_pages import carry_over, classify_pages
 from flocks.hub.files import plugin_root
 from flocks.hub.models import (
     HubComponentRef,
@@ -563,6 +564,7 @@ def _copy_webui_package_with_build(
     retain_backup: bool = False,
     before_replace: Callable[[], None] | None = None,
     backup_destination: Path | None = None,
+    keep_pages: list[dict] | None = None,
 ) -> Path | None:
     parent = dst.parent
     parent.mkdir(parents=True, exist_ok=True)
@@ -571,6 +573,9 @@ def _copy_webui_package_with_build(
     try:
         _copy_package_contents(src, tmp)
         _build_webui_pages(plugin_id, tmp)
+        # Pages admins added keep their own build output: a broken one must
+        # not block the release, and the page store rebuilds stale bundles.
+        carry_over(dst, tmp, keep_pages or [])
         if before_replace is not None:
             before_replace()
         backup = _replace_prepared_path(tmp, dst, backup_destination=backup_destination)
@@ -1029,6 +1034,15 @@ async def _install_plugin(
         if plugin_type == "component":
             component_ref_installs = await _install_component_refs(manifest, scope=scope, progress=progress, protection_plan=protection_plan)
         if plugin_type == "webui":
+            keep_pages = expected.get("keepPages") if expected is not None else None
+            if keep_pages is None:
+                baseline = (
+                    previous_record.fileHashes
+                    if previous_record and previous_record.installPath
+                    and Path(previous_record.installPath).resolve() == dst.resolve()
+                    else None
+                )
+                keep_pages, _ = classify_pages(dst, src, baseline)
             package_backup = _copy_webui_package_with_build(
                 plugin_id,
                 src,
@@ -1036,6 +1050,7 @@ async def _install_plugin(
                 retain_backup=True,
                 before_replace=lambda: verify_root("package", dst),
                 backup_destination=retained_roots.get("package"),
+                keep_pages=keep_pages,
             )
         else:
             package_backup = _copy_package(
@@ -1063,6 +1078,12 @@ async def _install_plugin(
             scope=scope,
             installed_by=installed_by,
         )
+        if plugin_type == "webui":
+            # The release's own files, so the next update can tell pages that
+            # admins added from ones this release shipped and a later one dropped.
+            record = record.model_copy(update={"fileHashes": payload_hashes(
+                plugin_type, src, src / "access" if access_dst is not None else None, source=True,
+            )})
         local.save_installed_record(record)
         clear_catalog_caches()
         await _refresh_runtime(plugin_type, dst)
