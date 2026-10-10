@@ -3233,11 +3233,16 @@ export default function SessionChat({
     // reconcileSessionStatusAfterReconnect does.
     const statusRevision = sessionStatusRevisionRef.current;
     let cancelled = false;
+    // Set once the poll has an answer, even a superseded one. A poll cancelled
+    // before that hands the check back to the next run (see cleanup below).
+    let settled = false;
 
     const checkStatus = async () => {
       try {
         const res = await client.get('/api/session/status');
-        if (cancelled || statusRevision !== sessionStatusRevisionRef.current) return;
+        if (cancelled) return;
+        settled = true;
+        if (statusRevision !== sessionStatusRevisionRef.current) return;
         const status = res.data[sessionId];
         if (status?.type === 'busy' && !suppressStreamingUntilIdleRef.current) {
           sessionBusyRef.current = true;
@@ -3272,7 +3277,9 @@ export default function SessionChat({
           sessionBusyRef.current = false;
         }
       } catch {
-        if (cancelled || statusRevision !== sessionStatusRevisionRef.current) return;
+        if (cancelled) return;
+        settled = true;
+        if (statusRevision !== sessionStatusRevisionRef.current) return;
         const lastMsg = messagesRef.current[messagesRef.current.length - 1];
         if (lastMsg?.role === 'assistant' && !lastMsg.finish) {
           setIsStreaming(true);
@@ -3287,7 +3294,16 @@ export default function SessionChat({
       }
     };
     void checkStatus();
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+      // The message load flips ``loading`` false -> true right after mount,
+      // which re-runs this effect and cancels the poll still in flight. Without
+      // this reset the later ``loading=false`` run would skip the session as
+      // already checked, so a reload during a retry showed an idle chat.
+      if (!settled && statusCheckedRef.current === sessionId) {
+        statusCheckedRef.current = null;
+      }
+    };
   }, [sessionId, loading, fetchPendingQuestions]);
 
   // A remote proxy or a reconnect boundary can delay or lose the one-shot

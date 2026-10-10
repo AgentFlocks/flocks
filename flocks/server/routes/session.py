@@ -1271,6 +1271,58 @@ async def create_session(http_request: Request, request: Optional[SessionCreateR
 
 
 
+# Static reads stay above GET /{sessionID}: routes match in registration
+# order, so a later /metrics or /recent would be read as a session ID.
+
+@router.get("/metrics")
+async def get_metrics():
+    """
+    Get system-wide monitoring metrics
+
+    Returns metrics including:
+    - Tool call parsing success/failure rates
+    - Repair strategy success rates
+    - Top failing tools
+    - Recent failure details
+    """
+    monitor = get_monitor()
+    metrics = monitor.get_metrics()
+
+    return {
+        "status": "success",
+        "metrics": metrics,
+    }
+
+
+@router.get("/recent")
+async def get_recent_sessions(
+    request: Request,
+    limit: int = Query(10, ge=1, le=50, description="Number of sessions"),
+):
+    """
+    Get recent sessions
+
+    Returns the most recently updated sessions the caller may read, with the
+    same visibility rules as ``GET /session``.
+    """
+    # Every parameter is passed explicitly: called as a plain function, the
+    # omitted ones would arrive as FastAPI ``Query`` objects, not None.
+    return await list_sessions(
+        request,
+        view=None,
+        manager=None,
+        directory=None,
+        projectID=None,
+        roots=None,
+        start=None,
+        search=None,
+        limit=limit,
+        offset=None,
+        category=None,
+        session_status="active",
+    )
+
+
 @router.get(
     "/{sessionID}",
     response_model=SessionDetailResponse,
@@ -5754,26 +5806,6 @@ async def respond_to_permission(
 # Monitoring & Metrics Routes
 # =============================================================================
 
-@router.get("/metrics")
-async def get_metrics():
-    """
-    Get system-wide monitoring metrics
-    
-    Returns metrics including:
-    - Tool call parsing success/failure rates
-    - Repair strategy success rates
-    - Top failing tools
-    - Recent failure details
-    """
-    monitor = get_monitor()
-    metrics = monitor.get_metrics()
-    
-    return {
-        "status": "success",
-        "metrics": metrics,
-    }
-
-
 @router.get("/{sessionID}/metrics")
 async def get_session_metrics(sessionID: str):
     """
@@ -5805,42 +5837,6 @@ async def get_session_metrics(sessionID: str):
 # =============================================================================
 # WebUI Enhancement Routes
 # =============================================================================
-
-@router.get("/recent")
-async def get_recent_sessions(limit: int = Query(10, ge=1, le=50, description="Number of sessions")):
-    """
-    Get recent sessions
-    
-    Returns list of recently active sessions for WebUI home page.
-    """
-    try:
-        # Get all sessions
-        sessions_result = await Session.list()
-        
-        # Convert to response format
-        sessions = []
-        for session_model in sessions_result:
-            if _is_hidden_from_session_manager(session_model):
-                continue
-            try:
-                session_dict = session_model.model_dump(mode="json", by_alias=True)
-                sessions.append(SessionResponse(**session_dict))
-            except Exception as e:
-                log.warning("session.recent.skip", {"session_id": session_model.id, "error": str(e)})
-                continue
-        
-        # Sort by updated time (most recent first)
-        sessions.sort(key=lambda s: s.time.updated, reverse=True)
-        
-        # Limit results
-        sessions = sessions[:limit]
-        
-        log.info("session.recent", {"count": len(sessions), "limit": limit})
-        return sessions
-    except Exception as e:
-        log.error("session.recent.error", {"error": str(e)})
-        raise HTTPException(status_code=500, detail=f"Failed to get recent sessions: {str(e)}")
-
 
 @router.get("/{sessionID}/statistics")
 async def get_session_statistics(sessionID: str):

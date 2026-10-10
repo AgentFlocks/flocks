@@ -28,6 +28,13 @@ _INACTIVITY_TIMEOUT_SECONDS = 300  # 5 minutes
 _WATCHDOG_CHECK_INTERVAL = 30
 
 
+def _new_task_id() -> str:
+    # Keep the whole ascending id: its leading characters only encode the time,
+    # so a truncated id is shared by every task started within the same minutes
+    # and the later task overwrites the earlier one in _tasks / _task_handles.
+    return f"bg_{Identifier.ascending('task')}"
+
+
 @dataclass
 class BackgroundTask:
     id: str
@@ -98,7 +105,7 @@ class BackgroundManager:
         return self._tasks.get(task_id)
 
     async def launch(self, input_data: LaunchInput) -> BackgroundTask:
-        task_id = f"bg_{Identifier.ascending('task')[:8]}"
+        task_id = _new_task_id()
         task = BackgroundTask(
             id=task_id,
             status="pending",
@@ -119,7 +126,7 @@ class BackgroundManager:
         return task
 
     async def resume(self, input_data: ResumeInput) -> BackgroundTask:
-        task_id = f"bg_{Identifier.ascending('task')[:8]}"
+        task_id = _new_task_id()
         task = BackgroundTask(
             id=task_id,
             status="pending",
@@ -168,7 +175,7 @@ class BackgroundManager:
             provider_id=provider_id,
             model_id=model_id,
         )
-        task_id = f"bg_{Identifier.ascending('task')[:8]}"
+        task_id = _new_task_id()
         task = BackgroundTask(
             id=task_id,
             status="pending",

@@ -5,6 +5,13 @@ from __future__ import annotations
 from mcp.types import METHOD_NOT_FOUND
 
 
+class McpServerNotConnectedError(ValueError):
+    """The operation needs a live client, but the server has none.
+
+    Subclasses ValueError so existing ``except ValueError`` callers keep working.
+    """
+
+
 def is_method_not_found_error(exc: BaseException) -> bool:
     """Return whether an exception chain contains JSON-RPC method-not-found."""
     return _contains_method_not_found(exc, seen=set())

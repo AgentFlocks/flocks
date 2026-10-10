@@ -29,6 +29,7 @@ import { deriveGroupNav, matchesGroup, saveGroupItems, type GroupSelection } fro
 import PluginViewToggle from '@/components/plugin-groups/PluginViewToggle';
 import { usePluginViewMode, type PluginViewMode } from '@/hooks/usePluginViewMode';
 import { workflowAPI } from '@/api/workflow';
+import { useFittingStatusCount } from './statusFit';
 
 function isBuiltin(workflow: WorkflowSummary): boolean {
   return workflow.source === 'project';
@@ -391,8 +392,26 @@ function WorkflowCard({ workflow, grouping, layout = 'cards' }: { workflow: Work
     items: [],
   };
   const triggerItems = triggerStatus.items ?? [];
-  const visibleTriggerItems = triggerItems.slice(0, MAX_VISIBLE_TRIGGER_STATUSES);
-  const hiddenTriggerItems = triggerItems.slice(MAX_VISIBLE_TRIGGER_STATUSES);
+  const candidateTriggerItems = triggerItems.slice(0, MAX_VISIBLE_TRIGGER_STATUSES);
+  // Long labels (e.g. at phone width) may not all fit next to API: show only
+  // what fits and move the rest into the "+N" list instead of clipping them.
+  const statusLineRef = useRef<HTMLDivElement>(null);
+  const statusSampleRef = useRef<HTMLDivElement>(null);
+  const statusSampleKey = [
+    `${t('integration.api')}:${t(CAPABILITY_STATUS_LABEL_KEYS[apiStatus.state])}`,
+    ...candidateTriggerItems.map(trigger => (
+      `${t(TRIGGER_TYPE_LABEL_KEYS[trigger.type])}:${t(CAPABILITY_STATUS_LABEL_KEYS[trigger.state])}`
+    )),
+  ].join('|');
+  const fittingTriggerCount = useFittingStatusCount(
+    statusLineRef,
+    statusSampleRef,
+    candidateTriggerItems.length,
+    triggerItems.length,
+    statusSampleKey,
+  );
+  const visibleTriggerItems = triggerItems.slice(0, fittingTriggerCount);
+  const hiddenTriggerItems = triggerItems.slice(fittingTriggerCount);
 
   return (
     <div
@@ -449,6 +468,7 @@ function WorkflowCard({ workflow, grouping, layout = 'cards' }: { workflow: Work
         </p>
 
         <div
+          ref={statusLineRef}
           className="mt-auto pt-1 h-5 flex items-center min-w-0"
           aria-label={t('integration.aria')}
         >
@@ -475,6 +495,34 @@ function WorkflowCard({ workflow, grouping, layout = 'cards' }: { workflow: Work
           </div>
           {hiddenTriggerItems.length > 0 && (
             <OverflowStatusList items={hiddenTriggerItems} />
+          )}
+          {candidateTriggerItems.length > 0 && (
+            // Invisible copy of the row, read by useFittingStatusCount: lead
+            // status, candidates, then a worst-case "+N" sample. Zero width
+            // with clipping keeps it from widening the card's scroll area;
+            // its shrink-0 children still lay out at their natural widths.
+            <div
+              ref={statusSampleRef}
+              aria-hidden="true"
+              className="pointer-events-none invisible absolute left-0 top-0 flex w-0 items-center gap-x-3 overflow-hidden whitespace-nowrap"
+            >
+              <CapabilityStatus
+                decorative
+                label={t('integration.api')}
+                state={apiStatus.state}
+                statusLabel={t(CAPABILITY_STATUS_LABEL_KEYS[apiStatus.state])}
+              />
+              {candidateTriggerItems.map(trigger => (
+                <CapabilityStatus
+                  key={trigger.id}
+                  decorative
+                  label={t(TRIGGER_TYPE_LABEL_KEYS[trigger.type])}
+                  state={trigger.state}
+                  statusLabel={t(CAPABILITY_STATUS_LABEL_KEYS[trigger.state])}
+                />
+              ))}
+              <span className="ml-2 shrink-0 text-[11px] leading-4 font-medium">+{triggerItems.length}</span>
+            </div>
           )}
         </div>
       </div>
@@ -510,10 +558,13 @@ function CapabilityStatus({
   label,
   state,
   statusLabel,
+  decorative = false,
 }: {
   label: string;
   state: WorkflowCapabilityState;
   statusLabel: string;
+  /** Measurement copy: no accessible name or tooltip of its own. */
+  decorative?: boolean;
 }) {
   const { t } = useTranslation('workflow');
   const detailLabel = state === 'running'
@@ -525,8 +576,8 @@ function CapabilityStatus({
   const styles = CAPABILITY_STATUS_STYLES[state];
   return (
     <span
-      aria-label={accessibleLabel}
-      title={accessibleLabel}
+      aria-label={decorative ? undefined : accessibleLabel}
+      title={decorative ? undefined : accessibleLabel}
       className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap text-[11px] leading-4"
     >
       <span className={`h-1.5 w-1.5 rounded-full ${styles.dot}`} />

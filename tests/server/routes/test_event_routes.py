@@ -1,3 +1,4 @@
+import asyncio
 import json
 from unittest.mock import AsyncMock
 
@@ -379,6 +380,120 @@ async def test_publish_event_routes_to_context_user(monkeypatch: pytest.MonkeyPa
         reset_current_auth_user(token)
 
     assert bob_queue.get_nowait()["type"] == "tui.toast.show"
+    assert alice_queue.empty()
+
+
+def _session(session_id: str, owner: AuthUser, **metadata) -> SessionInfo:
+    return SessionInfo(
+        id=session_id,
+        projectID="project-1",
+        directory="/tmp/project-1",
+        ownerUserID=owner.id,
+        ownerUsername=owner.username,
+        metadata=metadata,
+    )
+
+
+async def _publish_tui_as(user: AuthUser, tui_event) -> None:
+    from flocks.server.routes import tui as tui_routes
+
+    auth_ctx = set_current_auth_user(user)
+    try:
+        await tui_routes.publish_tui_event_endpoint(tui_event)
+    finally:
+        reset_current_auth_user(auth_ctx)
+
+
+@pytest.fixture
+def tui_broadcaster(monkeypatch: pytest.MonkeyPatch) -> EventBroadcaster:
+    from flocks.server.routes import tui as tui_routes
+
+    broadcaster = EventBroadcaster()
+    monkeypatch.setattr(EventBroadcaster, "_instance", broadcaster)
+    monkeypatch.setattr(tui_routes, "_control_events", asyncio.Queue())
+    return broadcaster
+
+
+@pytest.mark.asyncio
+async def test_tui_publish_with_shared_session_id_only_reaches_publisher(
+    monkeypatch: pytest.MonkeyPatch,
+    tui_broadcaster: EventBroadcaster,
+):
+    from flocks.server.routes import tui as tui_routes
+
+    shared = _session("session-shared", _ALICE, shared_local=True)
+    monkeypatch.setattr(event_routes, "_get_event_session", AsyncMock(return_value=shared))
+    alice_queue = await tui_broadcaster.subscribe(_ALICE)
+    bob_queue = await tui_broadcaster.subscribe(_BOB)
+    admin_queue = await tui_broadcaster.subscribe(_ADMIN)
+
+    await _publish_tui_as(_ALICE, tui_routes.EventTuiCommandExecute(
+        properties={"command": "session.interrupt", "sessionID": shared.id},
+    ))
+
+    received = alice_queue.get_nowait()
+    assert received["type"] == "tui.command.execute"
+    assert received["properties"]["sessionID"] == shared.id
+    assert bob_queue.empty()
+    assert admin_queue.empty()
+
+
+@pytest.mark.asyncio
+async def test_tui_publish_cannot_target_another_users_session(
+    monkeypatch: pytest.MonkeyPatch,
+    tui_broadcaster: EventBroadcaster,
+):
+    from flocks.server.routes import tui as tui_routes
+
+    bob_private = _session("session-bob", _BOB)
+    monkeypatch.setattr(event_routes, "_get_event_session", AsyncMock(return_value=bob_private))
+    alice_queue = await tui_broadcaster.subscribe(_ALICE)
+    bob_queue = await tui_broadcaster.subscribe(_BOB)
+
+    await _publish_tui_as(_ALICE, tui_routes.EventTuiSessionSelect(
+        properties={"sessionID": bob_private.id},
+    ))
+    await _publish_tui_as(_ALICE, tui_routes.EventTuiCommandExecute(
+        properties={"command": "app.exit", "sessionID": bob_private.id},
+    ))
+
+    assert [alice_queue.get_nowait()["type"] for _ in range(2)] == [
+        "tui.session.select",
+        "tui.command.execute",
+    ]
+    assert bob_queue.empty()
+
+
+@pytest.mark.parametrize("event_type", [
+    "tui.prompt.append",
+    "tui.command.execute",
+    "tui.toast.show",
+    "tui.session.select",
+])
+@pytest.mark.asyncio
+async def test_tui_events_from_api_token_with_session_id_reach_admins_only(
+    monkeypatch: pytest.MonkeyPatch,
+    event_type: str,
+):
+    from flocks.server.auth import _build_api_token_user
+
+    service_user = _build_api_token_user()
+    alice_session = _session("session-alice", _ALICE, shared_local=True)
+    monkeypatch.setattr(event_routes, "_get_event_session", AsyncMock(return_value=alice_session))
+    broadcaster = EventBroadcaster()
+    alice_queue = await broadcaster.subscribe(_ALICE)
+    admin_queue = await broadcaster.subscribe(_ADMIN)
+    tui_queue = await broadcaster.subscribe(service_user)
+
+    event = {"type": event_type, "properties": {"sessionID": alice_session.id}}
+    auth_ctx = set_current_auth_user(service_user)
+    try:
+        await broadcaster.publish(event)
+    finally:
+        reset_current_auth_user(auth_ctx)
+
+    assert admin_queue.get_nowait() == event
+    assert tui_queue.get_nowait() == event
     assert alice_queue.empty()
 
 
