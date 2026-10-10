@@ -734,13 +734,11 @@ async def delete_agent(name: str):
         # AND a YAML file (e.g. YAML base + Storage overlay from edits).
 
         agent_key = f"agent/custom/{name}"
-        try:
-            await Storage.read(agent_key)
-            await Storage.remove(agent_key)
+        # Storage.read returns None for a missing key instead of raising, so
+        # only the removal result tells whether a Storage entry existed.
+        if await Storage.remove(agent_key):
             deleted_storage = True
             log.info("agent.deleted", {"name": name, "source": "storage"})
-        except Storage.NotFoundError:
-            pass
 
         if delete_yaml_agent(name):
             deleted_yaml = True

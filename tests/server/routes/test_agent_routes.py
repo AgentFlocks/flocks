@@ -827,6 +827,33 @@ class TestAgentDelete:
         # The important thing is it does NOT crash (5xx).
         assert resp.status_code < 500
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("prefix", ["/api/agent", "/agent", "/app/agent"])
+    async def test_delete_missing_agent_returns_404(self, client: AsyncClient, prefix: str):
+        """Storage.read returns None for a missing key; that is not a deletion (FL-BUG-006)."""
+        resp = await client.delete(f"{prefix}/autotest-missing-resource-8f9ea73b")
+        assert resp.status_code == status.HTTP_404_NOT_FOUND
+        assert "not found" in resp.json()["message"]
+
+    @pytest.mark.asyncio
+    async def test_delete_builtin_agent_keeps_its_settings(
+        self,
+        client: AsyncClient,
+        _isolated_delegatable_settings: Path,
+    ):
+        """A refused delete must not run the cleanup that follows a real one."""
+        from flocks.agent.registry import Agent, is_delegatable
+
+        await Agent.state()
+        patch_resp = await client.patch("/api/agent/explore/delegatable", json={"delegatable": False})
+        assert patch_resp.status_code == status.HTTP_200_OK
+
+        resp = await client.delete("/api/agent/explore")
+
+        assert resp.status_code == status.HTTP_404_NOT_FOUND
+        assert is_delegatable("explore") is False
+        assert (await client.get("/api/agent/explore")).status_code == status.HTTP_200_OK
+
 
 # ===========================================================================
 # Test / Run

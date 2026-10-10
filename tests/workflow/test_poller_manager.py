@@ -482,3 +482,73 @@ async def test_restart_workflow_replaces_existing_task(monkeypatch: pytest.Monke
     assert first_task.cancelled() or first_task.done()
 
     await manager.stop_workflow("wf-restart")
+
+
+def _patch_scheduled_run(monkeypatch: pytest.MonkeyPatch, workflow_json: dict[str, Any], *, fail: bool = False):
+    created: list[dict[str, Any]] = []
+    recorded: list[dict[str, Any]] = []
+
+    async def _fake_get_config(_workflow_id: str, *, kind: str) -> dict[str, Any]:
+        return {"enabled": True, "intervalSeconds": 3600, "timeoutSeconds": 5}
+
+    async def _fake_create_execution_record(workflow_id: str, *, input_params=None, exec_id=None):
+        record = {"id": "exec-1", "workflowId": workflow_id, "inputParams": input_params or {}}
+        created.append(record)
+        return dict(record)
+
+    async def _fake_record_execution_result(workflow_id, exec_id, exec_data, *, steps=None):
+        recorded.append(dict(exec_data))
+
+    def _fake_run_workflow(**kwargs):
+        if fail:
+            raise RuntimeError("node crashed")
+        return RunWorkflowResult(status="SUCCEEDED", run_id="run-1", steps=1, outputs={"total": 42})
+
+    monkeypatch.setattr(poller_manager.WorkflowStore, "get_config", _fake_get_config)
+    monkeypatch.setattr(poller_manager, "read_workflow_from_fs", lambda _workflow_id: {"workflowJson": workflow_json})
+    monkeypatch.setattr(poller_manager, "create_execution_record", _fake_create_execution_record)
+    monkeypatch.setattr(poller_manager, "record_execution_result", _fake_record_execution_result)
+    monkeypatch.setattr(poller_manager, "run_workflow", _fake_run_workflow)
+    return created, recorded
+
+
+_SCHEDULED_WORKFLOW = {
+    "start": "n1",
+    "nodes": [{"id": "n1", "type": "python", "code": "outputs['total'] = 42"}],
+    "edges": [],
+    "triggers": [{"id": "autotest-schedule", "type": "schedule", "source": {"mode": "interval", "intervalSeconds": 3600}}],
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fail", [False, True])
+async def test_scheduled_run_history_keeps_the_trigger_id(monkeypatch: pytest.MonkeyPatch, fail: bool) -> None:
+    """The loop path (restart -> first tick) used to write schedule-default (FL-BUG-009)."""
+    manager = poller_manager.WorkflowPollerManager()
+    created, recorded = _patch_scheduled_run(monkeypatch, _SCHEDULED_WORKFLOW, fail=fail)
+
+    await manager.restart_workflow("wf-schedule")
+    for _ in range(200):
+        if recorded:
+            break
+        await asyncio.sleep(0.01)
+    await manager.stop_workflow("wf-schedule")
+
+    assert created[0]["inputParams"]["_flocks"]["trigger"]["id"] == "autotest-schedule"
+    assert recorded[0]["triggerId"] == "autotest-schedule"
+    assert recorded[0]["status"] == ("error" if fail else "success")
+
+
+@pytest.mark.asyncio
+async def test_run_once_uses_the_trigger_id_and_legacy_configs_keep_the_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = poller_manager.WorkflowPollerManager()
+    _created, recorded = _patch_scheduled_run(monkeypatch, _SCHEDULED_WORKFLOW)
+    await manager.run_once("wf-schedule")
+    assert recorded[-1]["triggerId"] == "autotest-schedule"
+
+    legacy = {key: value for key, value in _SCHEDULED_WORKFLOW.items() if key != "triggers"}
+    _created, recorded = _patch_scheduled_run(monkeypatch, legacy)
+    await manager.run_once("wf-legacy")
+    assert recorded[-1]["triggerId"] == "schedule-default"
