@@ -59,6 +59,31 @@ describe('ConnectionSettingsSheet', () => {
     expect(api.connection).toHaveBeenCalledTimes(1);
   });
 
+  it.each([
+    ['zh-CN', workspaceZh, 'Flocks 知识库使用指南', 'English', 'Flocks Knowledge Base Guide', '简体中文', ['Flocks 安装说明', 'README_zh.md']],
+    ['en-US', workspace, 'Flocks Knowledge Base Guide', '简体中文', 'Flocks 知识库使用指南', 'English', ['Flocks installer', 'README.md']],
+  ] as const)('switches the %s guide language inside the drawer', async (language, messages, heading, other, otherHeading, back, [installer, installerFile]) => {
+    await i18n.changeLanguage(language);
+    const user = userEvent.setup();
+    const { rerender } = render(<ConnectionSettingsSheet onClose={vi.fn()} onSaved={vi.fn()} />, { wrapper: Providers });
+    await user.click(await screen.findByRole('button', { name: messages.knowledge.connection.guide }));
+    const guide = screen.getByRole('dialog', { name: messages.knowledge.connection.guide });
+    // The other guide is not on GitHub before publishing, so the switch must not be a link out.
+    expect(within(guide).queryByRole('link', { name: other })).not.toBeInTheDocument();
+    await user.click(within(guide).getByRole('button', { name: other }));
+    expect(within(guide).getByRole('heading', { level: 1, name: otherHeading })).toBeInTheDocument();
+    expect(within(guide).getByRole('button', { name: back })).toHaveFocus();
+    rerender(<ConnectionSettingsSheet onClose={vi.fn()} onSaved={vi.fn()} />);
+    expect(within(guide).getByRole('button', { name: back })).toHaveFocus();
+    await user.keyboard('{Enter}');
+    expect(within(guide).getByRole('heading', { level: 1, name: heading })).toBeInTheDocument();
+    expect(within(guide).getByRole('button', { name: other })).toHaveFocus();
+    for (const item of within(guide).getAllByRole('link', { name: installer })) {
+      expect(item).toHaveAttribute('href', `https://github.com/AgentFlocks/flocks/blob/main/${installerFile}`);
+      expect(item).toHaveAttribute('target', '_blank');
+    }
+  });
+
   it('shows only RAGFlow and never reads or fills a stored key', async () => {
     mount();
     expect(await screen.findByRole('combobox', { name: workspace.knowledge.connection.provider })).toHaveValue('ragflow');
