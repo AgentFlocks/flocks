@@ -28,6 +28,17 @@ _INACTIVITY_TIMEOUT_SECONDS = 300  # 5 minutes
 _WATCHDOG_CHECK_INTERVAL = 30
 
 
+def _cancel_requested() -> bool:
+    """Whether the running task itself was cancelled.
+
+    Supervision also reports a stopped loop (the session's stop button) as a
+    cancellation so the run is not recorded as completed; only a real cancel
+    goes on to whoever awaits the task.
+    """
+    current = asyncio.current_task()
+    return current is not None and current.cancelling() > 0
+
+
 def _new_task_id() -> str:
     # Keep the whole ascending id: its leading characters only encode the time,
     # so a truncated id is shared by every task started within the same minutes
@@ -283,17 +294,15 @@ class BackgroundManager:
                 if result.last_message:
                     output = await Message.get_text_content(result.last_message)
                 task.output = output
-                # The session's stop button aborts the loop, which then
-                # returns normally: that run was stopped, not completed.
-                aborted = bool((getattr(result, "metadata", None) or {}).get("aborted"))
-                task.status = "cancelled" if aborted else "completed"
+                task.status = "completed"
                 task.completed_at = int(datetime.now().timestamp() * 1000)
                 await self._inject_parent_completion(task)
             except asyncio.CancelledError:
                 task.status = "cancelled"
                 task.completed_at = int(datetime.now().timestamp() * 1000)
                 await self._inject_parent_completion(task)
-                raise
+                if _cancel_requested():
+                    raise
             except Exception as exc:
                 log.error("background.existing_session.error", {"error": str(exc), "task_id": task.id})
                 task.error = str(exc)
@@ -712,7 +721,8 @@ class BackgroundManager:
                 task.status = "cancelled"
                 task.completed_at = int(datetime.now().timestamp() * 1000)
                 await self._inject_parent_completion(task)
-                raise
+                if _cancel_requested():
+                    raise
             except Exception as exc:
                 log.error("background.task.error", {"error": str(exc), "task_id": task.id})
                 task.error = str(exc)
@@ -752,7 +762,8 @@ class BackgroundManager:
                 task.status = "cancelled"
                 task.completed_at = int(datetime.now().timestamp() * 1000)
                 await self._inject_parent_completion(task)
-                raise
+                if _cancel_requested():
+                    raise
             except Exception as exc:
                 log.error("background.resume.error", {"error": str(exc), "task_id": task.id})
                 task.error = str(exc)
