@@ -271,32 +271,6 @@
           "currency": "CNY"
         }
       },
-      "qwen3-max": {
-        "name": "qwen3-max",
-        "family": "qwen",
-        "capabilities": {
-          "supports_tools": true,
-          "supports_reasoning": true,
-          "interleaved": {
-            "field": "reasoning_content",
-            "echo": "tool_calls",
-            "cross_provider_policy": "promote"
-          },
-          "thinking_level_map": {
-            "high": "enabled"
-          },
-          "supports_streaming": true
-        },
-        "limits": {
-          "context_window": 252000,
-          "max_output_tokens": 64000
-        },
-        "pricing": {
-          "input": 2.5,
-          "output": 10.0,
-          "currency": "CNY"
-        }
-      },
       "kimi-k2.6": {
         "name": "kimi-k2.6",
         "family": "kimi-k2.6",
@@ -352,7 +326,10 @@
           "currency": "CNY"
         }
       }
-    }
+    },
+    "retired_models": [
+      "qwen3-max"
+    ]
   },
   "threatbook-io-llm": {
     "name": "ThreatBook-io-llm",
@@ -595,32 +572,6 @@
           "currency": "CNY"
         }
       },
-      "qwen3-max": {
-        "name": "qwen3-max",
-        "family": "qwen",
-        "capabilities": {
-          "supports_tools": true,
-          "supports_reasoning": true,
-          "interleaved": {
-            "field": "reasoning_content",
-            "echo": "tool_calls",
-            "cross_provider_policy": "promote"
-          },
-          "thinking_level_map": {
-            "high": "enabled"
-          },
-          "supports_streaming": true
-        },
-        "limits": {
-          "context_window": 252000,
-          "max_output_tokens": 64000
-        },
-        "pricing": {
-          "input": 2.5,
-          "output": 10.0,
-          "currency": "CNY"
-        }
-      },
       "deepseek-v4-flash": {
         "name": "deepseek-v4-flash",
         "family": "deepseek-v4",
@@ -646,7 +597,10 @@
           "currency": "CNY"
         }
       }
-    }
+    },
+    "retired_models": [
+      "qwen3-max"
+    ]
   },
   "google": {
     "name": "Google",

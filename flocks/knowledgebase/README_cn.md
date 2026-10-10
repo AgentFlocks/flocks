@@ -27,7 +27,7 @@ docker compose -f docker-compose.yml up -d
 
 ## 2. 安装并启动 Flocks
 
-按 [Flocks 安装说明](../../README.md)运行安装脚本；macOS/Linux 可使用：
+按 [Flocks 安装说明](../../README_zh.md)运行安装脚本；macOS/Linux 可使用：
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/AgentFlocks/flocks/main/install.sh | bash
@@ -85,4 +85,4 @@ Workflow 可以用**工具节点**调用 `rag_retrieve`，传入 `dataset`（知
 | 文件已上传却查不到 | 依次确认：已关联到知识集 → 文档出现 → 已开始解析并完成 → 已绑定到当前会话 → Agent 有 `rag_retrieve` 权限。 |
 | 上传被拒绝 | 检查文件名和大小；超过上限的上传不会成功，接近上限也需考虑请求封装开销。 |
 
-更多安装、服务管理与模型部署细节分别参考 [Flocks 安装说明](../../README.md)及 [RAGFlow 官方文档](https://ragflow.io/docs)。
+更多安装、服务管理与模型部署细节分别参考 [Flocks 安装说明](../../README_zh.md)及 [RAGFlow 官方文档](https://ragflow.io/docs)。

@@ -2302,7 +2302,7 @@ function getDefaultReasoningToggleValue(providerId: string, modelId: string): bo
   if (providerId === 'groq') return true;
 
   if (['threatbook-cn-llm', 'threatbook-io-llm', 'alibaba', 'moonshot'].includes(providerId)) {
-    if (lowered.includes('qwen3-max') || lowered.includes('qwen3.6-plus')) return true;
+    if (lowered.includes('qwen3.6-plus')) return true;
   }
 
   return true;
