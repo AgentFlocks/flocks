@@ -135,6 +135,38 @@ class Todo:
             expected_generation=expected_generation,
         )
     
+    @staticmethod
+    def has_in_progress(todos: Optional[List[TodoInfo]]) -> bool:
+        return bool(todos) and any(todo.status == "in_progress" for todo in todos)
+
+    @classmethod
+    def settle(
+        cls,
+        todos: Optional[List[TodoInfo]],
+        *,
+        finished: bool,
+    ) -> Optional[List[TodoInfo]]:
+        """The list to keep once the agent's run has ended, or None to leave it.
+
+        Agents often end their turn on the last step without marking it
+        completed, and the progress panel then showed that step as in progress
+        for good.  When the agent finished the work itself and nothing is left
+        pending, its in-progress items were the final steps: they are completed
+        and the now fully closed list is cleared, as the todo tool does.  When
+        work is still pending, or the run stopped short of finishing, they go
+        back to pending so the plan carries over to the next turn.
+        """
+        if not cls.has_in_progress(todos):
+            return None
+        if finished and not any(todo.status == "pending" for todo in todos):
+            return []
+        return [
+            todo.model_copy(update={"status": "pending"})
+            if todo.status == "in_progress"
+            else todo
+            for todo in todos
+        ]
+
     @classmethod
     async def get(cls, session_id: str) -> List[TodoInfo]:
         """

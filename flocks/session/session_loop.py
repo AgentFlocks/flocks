@@ -24,7 +24,9 @@ from flocks.utils.log import Log
 from flocks.utils.id import Identifier
 from flocks.session.session import (
     Session,
+    SessionInactiveError,
     SessionInfo,
+    SessionNotFoundError,
     is_model_auto_session_category,
 )
 from flocks.session.message import Message, MessageInfo, MessageRole
@@ -133,6 +135,8 @@ class LoopContext:
     turn_additional_context: Optional[str] = None
     stop_hook_active: bool = False
     session_start_pending: bool = False
+    # Goal verdict on the turn that ended the loop ("inactive" without a goal).
+    goal_verdict: Optional[str] = None
 
     @property
     def trace_step(self) -> int:
@@ -927,10 +931,16 @@ class SessionLoop:
                 # sent since then is left to the next one, woken in finally.
                 if (ctx.should_abort() or result.error or (ctx.inbox is not None and ctx.inbox.stopped)
                         or not AgentInbox.get(session_id).messages):
+                    await cls._settle_todos(ctx, result)
                     return result
         except asyncio.CancelledError:
             # Cancelled between steps (a cancelled step is handled in _run_loop).
             cls._end_cancelled_loop(ctx)
+            # Settle in its own task: the cancellation must reach the caller now.
+            from flocks.session.background_tasks import track_background_task
+            track_background_task(fire_and_forget(
+                cls._settle_todos(ctx, None), label="loop.todo_settle",
+            ))
             raise
         except Exception as e:
             log.error("loop.error", {"session_id": session_id, "error": str(e)})
@@ -949,12 +959,14 @@ class SessionLoop:
                 })
             except Exception as exc:
                 log.warn("loop.error.event_error", {"error": str(exc)})
-            return LoopResult(
+            result = LoopResult(
                 action="error",
                 error=str(e),
                 provider_id=ctx.provider_id,
                 model_id=ctx.model_id,
             )
+            await cls._settle_todos(ctx, result)
+            return result
         finally:
             try:
                 clear_turn_state(session_id)
@@ -983,6 +995,65 @@ class SessionLoop:
                 if not Session.is_lifecycle_transitioning(session_id) and await InteractionQueue.list(session_id):
                     from flocks.server.routes.session import _schedule_prompt_queue_drain
                     await _schedule_prompt_queue_drain(session_id, session.directory)
+
+    @classmethod
+    async def _settle_todos(cls, ctx: LoopContext, result: Optional[LoopResult]) -> None:
+        """Leave no todo in progress once this run is over (see Todo.settle).
+
+        ``result`` is None for a cancelled run.  The decision is taken under
+        the session write lock, so a todo write or a stop that lands in the
+        meantime is neither overwritten nor missed.
+        """
+        session_id = ctx.session.id
+        try:
+            from flocks.server.routes.question import has_pending_questions
+            from flocks.session.agent_inbox import AgentInbox
+            from flocks.session.features.todo import Todo
+
+            if not Todo.has_in_progress(await Todo.get_snapshot(session_id)):
+                return  # most runs: nothing to settle, no lock taken
+            last = result.last_message if result is not None else None
+            agent_finished = (
+                result is not None
+                and result.action != "error"
+                and not result.error
+                and last is not None
+                and getattr(last, "finish", None) == "stop"
+                and not getattr(last, "error", None)
+                # A goal that is paused, blocked or waiting is not done.
+                and ctx.goal_verdict in (None, "inactive", "complete")
+            )
+
+            async def settle() -> None:
+                current = await Todo.get_snapshot(session_id)
+                # No await from here to the write, so a stop or a newer run
+                # that comes in while reading is still seen.
+                active = cls._active_loops.get(session_id)
+                if active is not None and active is not ctx:
+                    return  # a newer run owns the list now
+                stopped = ctx.should_abort() or (ctx.inbox is not None and ctx.inbox.stopped)
+                # The plan is still live while the user owes an answer or
+                # delegated work can report back (to a stopped run it cannot).
+                if not stopped and (
+                    has_pending_questions(session_id) or AgentInbox.has_pending_reports(session_id)
+                ):
+                    return
+                finished = agent_finished and not stopped
+                todos = Todo.settle(current, finished=finished)
+                if todos is None:
+                    return
+                await Todo.update(session_id, todos)
+                log.info("loop.todo_settled", {
+                    "session_id": session_id,
+                    "finished": finished,
+                    "cleared": not todos,
+                })
+
+            await Session.run_active_write(session_id, settle)
+        except (SessionInactiveError, SessionNotFoundError):
+            pass  # archived or deleted while running
+        except Exception as exc:
+            log.warn("loop.todo_settle.error", {"session_id": session_id, "error": str(exc)})
 
     @staticmethod
     async def _resolve_model(
@@ -2388,6 +2459,7 @@ class SessionLoop:
                     })
                     continue
 
+                ctx.goal_verdict = None
                 if not step_result.error and last_message is not None and runtime_controls.get() is None:
                     try:
                         content_result = Message.get_text_content(last_message)
@@ -2420,6 +2492,7 @@ class SessionLoop:
                         provider_id=ctx.provider_id,
                         model_id=ctx.model_id,
                     )
+                    ctx.goal_verdict = goal_decision.verdict
                     if goal_decision.status in {"completed", "blocked", "paused"} and goal_decision.objective:
                         await cls._publish_runtime_event(callbacks, "session.goal.updated", {
                             "sessionID": ctx.session.id,
