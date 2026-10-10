@@ -95,6 +95,22 @@ export {
 
 export type MergedMessage = Message & { _merged?: boolean };
 
+/**
+ * Whether a permission request belongs in this chat: its own, or one from a
+ * subagent it delegated to (the user is waiting here, not in the subagent's
+ * session). The backend names the delegating sessions on the request.
+ */
+export function isPermissionRequestForSession(
+  requestSessionID: string,
+  metadata: Record<string, unknown> | undefined,
+  sessionId: string | null | undefined,
+): boolean {
+  if (!sessionId || !requestSessionID) return false;
+  if (requestSessionID === sessionId) return true;
+  const chain = metadata?.delegationChain;
+  return Array.isArray(chain) && chain.includes(sessionId);
+}
+
 /** Node reference shown above the chat input as a dismissible chip */
 export interface NodeRef {
   id: string;
@@ -2610,12 +2626,32 @@ export default function SessionChat({
   const pendingQuestionsRef = useRef(pendingQuestions);
   useEffect(() => { pendingQuestionsRef.current = pendingQuestions; }, [pendingQuestions]);
 
+  // A list response can be overtaken by events: a request settled meanwhile
+  // must not come back, one announced meanwhile must not be dropped, and
+  // anything the list leaves out that was known before it is stale.
+  const settledPermissionIdsRef = useRef(new Set<string>());
+  const permissionChangeSeqRef = useRef(0);
+  const permissionAnnouncedAtRef = useRef(new Map<string, number>());
+  const permissionFetchSeqRef = useRef(0);
+  const permissionAppliedSeqRef = useRef(0);
+  const permissionSessionGenerationRef = useRef(0);
+
   const addPendingPermission = useCallback((request: PendingPermission) => {
+    permissionChangeSeqRef.current += 1;
+    if (settledPermissionIdsRef.current.has(request.id)) return;
+    permissionAnnouncedAtRef.current.set(request.id, permissionChangeSeqRef.current);
     setPendingPermissions((previous) => (
       previous.some((item) => item.id === request.id)
         ? previous
         : [...previous, request]
     ));
+  }, []);
+
+  const settlePendingPermission = useCallback((requestId: string) => {
+    permissionChangeSeqRef.current += 1;
+    settledPermissionIdsRef.current.add(requestId);
+    permissionAnnouncedAtRef.current.delete(requestId);
+    setPendingPermissions((previous) => previous.filter((item) => item.id !== requestId));
   }, []);
 
   const fetchPendingPermissions = useCallback(async () => {
@@ -2624,9 +2660,34 @@ export default function SessionChat({
       return;
     }
     const targetSessionId = sessionId;
+    const sessionGeneration = permissionSessionGenerationRef.current;
+    const fetchSeq = ++permissionFetchSeqRef.current;
+    const changeSeq = permissionChangeSeqRef.current;
     const requests = await permissionApi.list();
-    if (activePermissionSessionRef.current !== targetSessionId) return;
-    setPendingPermissions(requests.filter((item) => item.sessionID === targetSessionId));
+    // A newer answer already shown, or a switch to another session (even one
+    // coming back to this session), makes this answer stale. While a newer
+    // request is still out (or has failed) this one is the best there is.
+    if (
+      fetchSeq <= permissionAppliedSeqRef.current
+      || sessionGeneration !== permissionSessionGenerationRef.current
+      || activePermissionSessionRef.current !== targetSessionId
+    ) return;
+    permissionAppliedSeqRef.current = fetchSeq;
+    const settled = settledPermissionIdsRef.current;
+    const fetched = requests.filter((item) => (
+      isPermissionRequestForSession(item.sessionID, item.metadata, targetSessionId)
+      && !settled.has(item.id)
+    ));
+    const fetchedIds = new Set(fetched.map((item) => item.id));
+    // Only requests announced after this list was asked for are newer than it.
+    setPendingPermissions((previous) => [
+      ...fetched,
+      ...previous.filter((item) => (
+        !fetchedIds.has(item.id)
+        && !settled.has(item.id)
+        && (permissionAnnouncedAtRef.current.get(item.id) ?? 0) > changeSeq
+      )),
+    ]);
   }, [sessionId]);
 
   const handlePermissionReply = useCallback(async (decision: PermissionDecision) => {
@@ -2646,14 +2707,21 @@ export default function SessionChat({
           always: decision === 'always',
         });
       }
-      setPendingPermissions((previous) => previous.filter((item) => item.id !== request.id));
+      settlePendingPermission(request.id);
     } catch (error: unknown) {
+      if ((error as { response?: { status?: number } })?.response?.status === 404) {
+        // Answered elsewhere (the subagent's own chat) or no longer awaited:
+        // drop it so it does not hold up the requests behind it.
+        settlePendingPermission(request.id);
+        void fetchPendingPermissions().catch(() => {});
+        return;
+      }
       const message = error instanceof Error ? error.message : String(error);
       setPermissionError(message || '提交确认失败，请重试。');
     } finally {
       setPermissionSubmitting(false);
     }
-  }, [pendingPermissions, permissionSubmitting]);
+  }, [pendingPermissions, permissionSubmitting, fetchPendingPermissions, settlePendingPermission]);
 
   const sseEnabled = Boolean(sessionId) && (live || isStreaming || !hideInput);
 
@@ -2712,16 +2780,20 @@ export default function SessionChat({
       if (shouldForwardSSEEventToParent(event, sessionId)) onSSEEvent?.(event);
 
       const properties = event.properties;
+      const requestSessionID = typeof properties?.sessionID === 'string' ? properties.sessionID : '';
+      const requestMetadata = properties?.metadata && typeof properties.metadata === 'object'
+        ? properties.metadata as Record<string, unknown>
+        : {};
       if (
         event.type === 'permission.request'
         && properties
-        && properties.sessionID === sessionId
+        && isPermissionRequestForSession(requestSessionID, requestMetadata, sessionId)
       ) {
         const requestID = typeof properties.requestID === 'string' ? properties.requestID : '';
         if (requestID) {
           addPendingPermission({
             id: requestID,
-            sessionID: sessionId ?? '',
+            sessionID: requestSessionID,
             messageID: typeof properties.messageID === 'string' ? properties.messageID : '',
             toolID: typeof properties.tool?.name === 'string'
               ? properties.tool.name
@@ -2735,13 +2807,16 @@ export default function SessionChat({
             always: Array.isArray(properties.always)
               ? properties.always.filter((pattern): pattern is string => typeof pattern === 'string')
               : [],
-            metadata: properties.metadata && typeof properties.metadata === 'object'
-              ? properties.metadata as Record<string, unknown>
-              : {},
+            metadata: requestMetadata,
             time: { created: Date.now() },
           });
           setPermissionError(null);
         }
+      }
+      // A request is settled once for every chat showing it (the subagent's
+      // own and the ones that delegated to it).
+      if (event.type === 'permission.replied' && typeof properties?.requestID === 'string') {
+        settlePendingPermission(properties.requestID);
       }
 
       const action = resolveSessionChatSSEAction(event, sessionId);
@@ -2995,6 +3070,7 @@ export default function SessionChat({
       removeByRequestId,
       applyPromptQueueItems,
       addPendingPermission,
+      settlePendingPermission,
       onSSEEvent,
       onError,
       scrollToBottom,
@@ -3168,6 +3244,9 @@ export default function SessionChat({
     isAtBottomRef.current = true;
     clearPendingQuestions();
     setPendingPermissions([]);
+    settledPermissionIdsRef.current = new Set();
+    permissionAnnouncedAtRef.current = new Map();
+    permissionSessionGenerationRef.current += 1;
     setPermissionError(null);
     // Swap the draft when the session changes — needed for callers that
     // don't force a remount (Session/index.tsx does, but other consumers
@@ -3190,6 +3269,8 @@ export default function SessionChat({
     fetchPromptQueue();
   }, [fetchPromptQueue]);
 
+  // Keep after the session reset effect above: that one bumps the session
+  // generation, and a list requested before the bump is dropped as stale.
   useEffect(() => {
     fetchPendingPermissions().catch((err) => {
       console.warn('[SessionChat] Failed to fetch pending permissions:', err);

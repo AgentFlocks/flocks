@@ -362,10 +362,7 @@ class TaskManager:
             source=scheduler.source.model_copy(deep=True),
             trigger_type=trigger_type,
             status=TaskStatus.PENDING,
-            workspace_directory=(
-                scheduler.workspace_directory
-                or cls._default_workspace_directory()
-            ),
+            workspace_directory=scheduler.workspace_directory,
             retry=scheduler.retry.model_copy(deep=True),
             execution_mode=scheduler.execution_mode,
             agent_name=scheduler.agent_name,
@@ -381,6 +378,8 @@ class TaskManager:
                 "tags": scheduler.tags,
             },
         )
+        if not execution.workspace_directory:
+            execution.workspace_directory = cls._default_workspace_directory(execution.id)
         await TaskStore.create_execution(execution)
         if enqueue:
             await cls._enqueue_execution(execution)
@@ -878,12 +877,15 @@ class TaskManager:
         return execution
 
     @staticmethod
-    def _default_workspace_directory() -> str:
+    def _default_workspace_directory(execution_id: str) -> str:
+        # Named after the execution, not the clock: executions started in the
+        # same second used to share one directory and overwrite each other's
+        # files. Same layout as TaskExecutor's fallback for unset directories.
         from flocks.workspace.manager import WorkspaceManager
 
         workspace_root = WorkspaceManager.get_instance().get_workspace_dir()
         today = date.today().isoformat()
-        return str(workspace_root / "tasks" / today / f"exec-{datetime.now(timezone.utc).timestamp():.0f}")
+        return str(workspace_root / "tasks" / today / execution_id)
 
     @staticmethod
     def _dispatch_timeout_message() -> str:

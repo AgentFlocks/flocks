@@ -22,8 +22,15 @@ from flocks.tool.registry import (
 )
 async def mkdir_tool(ctx: ToolContext, path: str) -> ToolResult:
     try:
-        resolved = (await resolve_tool_path(ctx, path)).resolved_path
+        resolution = await resolve_tool_path(ctx, path)
     except ValueError as exc:
         return ToolResult(success=False, error=str(exc))
+    resolved = resolution.resolved_path
+    await ctx.ask(
+        permission="edit",
+        patterns=[resolution.permission_pattern],
+        always=["*"],
+        metadata={"tool": "mkdir", "filepath": resolved},
+    )
     os.makedirs(resolved, exist_ok=True)
     return ToolResult(success=True, output=f"Created directory: {resolved}", metadata={"path": resolved})

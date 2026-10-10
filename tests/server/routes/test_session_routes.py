@@ -2964,16 +2964,21 @@ class TestSessionUtilities:
         from flocks.session.agent_inbox import AgentInbox
         from flocks.session.core.status import SessionStatus, SessionStatusBusy
 
-        AgentInbox.bind("status-child").parent_id = "status-root"
-        AgentInbox.bind("status-grandchild").parent_id = "status-child"
-        monkeypatch.setattr(SessionStatus, "list", lambda: {"status-grandchild": SessionStatusBusy()})
+        root = (await client.post("/api/session", json={"title": "status root"})).json()["id"]
+        child = (await client.post("/api/session", json={"title": "status child", "parentID": root})).json()["id"]
+        grandchild = (
+            await client.post("/api/session", json={"title": "status grandchild", "parentID": child})
+        ).json()["id"]
+        AgentInbox.bind(child).parent_id = root
+        AgentInbox.bind(grandchild).parent_id = child
+        monkeypatch.setattr(SessionStatus, "list", lambda: {grandchild: SessionStatusBusy()})
         try:
             resp = await client.get("/api/session/status")
             assert resp.status_code == 200
-            assert resp.json()["status-grandchild"]["ancestorSessionIDs"] == ["status-child", "status-root"]
+            assert resp.json()[grandchild]["ancestorSessionIDs"] == [child, root]
         finally:
-            AgentInbox._inboxes.pop("status-child", None)
-            AgentInbox._inboxes.pop("status-grandchild", None)
+            AgentInbox._inboxes.pop(child, None)
+            AgentInbox._inboxes.pop(grandchild, None)
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("prefix", ["/api/session", "/session"])

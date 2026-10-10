@@ -295,6 +295,30 @@ class Session:
             reset_current_auth_user(token)
 
     @classmethod
+    async def delegating_sessions(cls, session: Any) -> List[SessionInfo]:
+        """The sessions ``session`` was delegated from, nearest first.
+
+        Walks up while the session is a delegated one (category ``task``); a
+        session a user started from a parent is its own conversation and ends
+        the walk. Its limits bind the subagents below it, and the user answers
+        their permission requests there.
+        """
+        found: List[SessionInfo] = []
+        current = session
+        seen = {getattr(current, "id", None)}
+        while getattr(current, "category", None) == "task":
+            parent_id = getattr(current, "parent_id", None)
+            if not parent_id or parent_id in seen:
+                break
+            seen.add(parent_id)
+            parent = await cls.get_by_id_unfiltered(parent_id)
+            if parent is None:
+                break
+            found.append(parent)
+            current = parent
+        return found
+
+    @classmethod
     async def run_active_write(
         cls,
         session_id: str,

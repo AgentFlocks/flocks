@@ -165,6 +165,22 @@ class TestSessionStatusList:
         # Original state unaffected
         assert "injected" not in SessionStatus.list()
 
+    def test_list_includes_sessions_recorded_under_other_instances(self):
+        # Task sessions run their loop outside the request's instance.
+        SessionStatus._state["/workspace/tasks/exec"] = {
+            "ses_task": SessionStatusBusy(),
+            "ses_both": SessionStatusBusy(),
+        }
+        SessionStatus.set("ses_both", SessionStatusCompacting())
+
+        try:
+            result = SessionStatus.list()
+        finally:
+            SessionStatus._state.pop("/workspace/tasks/exec", None)
+
+        assert result["ses_task"].type == "busy"
+        assert result["ses_both"].type == "compacting"
+
     def test_multiple_sessions_independent(self):
         SessionStatus.set("s1", SessionStatusBusy())
         SessionStatus.set("s2", SessionStatusRetry(attempt=1, message="retry", next=0))

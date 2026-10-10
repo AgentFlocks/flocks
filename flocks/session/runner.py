@@ -1619,6 +1619,7 @@ class SessionRunner:
         agent_name = last_user.agent or self.agent_name
         agent = await Agent.get(agent_name) or await Agent.get("rex")
         self._turn_permission_ruleset = self._permission_ruleset_for_agent(agent)
+        self._turn_delegating_sessions = None
 
         # Track session agent (Flocks compatibility)
         try:
@@ -4654,24 +4655,45 @@ class SessionRunner:
         except Exception as _tr_err:
             log.debug("runner.observability.trace_end_failed", {"error": str(_tr_err)})
 
-    def _permission_ruleset_for_agent(self, agent: AgentInfo) -> List[Any]:
-        """Combine agent and session rules in effective priority order."""
-        from flocks.permission.helpers import merge
+    @staticmethod
+    def _session_permission_rules(session: Any) -> List[Any]:
+        """A session's own permission rules in ruleset form."""
         from flocks.permission.rule import (
             PermissionLevel,
             PermissionRule,
             PermissionScope,
         )
 
-        session_rules = []
-        for rule in getattr(self.session, "permission", None) or []:
-            session_rules.append(PermissionRule(
+        return [
+            PermissionRule(
                 permission=rule.permission,
                 level=PermissionLevel(rule.action),
                 scope=PermissionScope.PATTERN,
                 pattern=rule.pattern,
-            ))
-        return merge(list(getattr(agent, "permission", None) or []), session_rules)
+            )
+            for rule in getattr(session, "permission", None) or []
+        ]
+
+    def _permission_ruleset_for_agent(self, agent: AgentInfo) -> List[Any]:
+        """Combine agent and session rules in effective priority order."""
+        from flocks.permission.helpers import merge
+
+        return merge(
+            list(getattr(agent, "permission", None) or []),
+            self._session_permission_rules(self.session),
+        )
+
+    async def _delegating_sessions(self) -> List[Any]:
+        """The sessions this one was delegated from, cached for the turn.
+
+        A subagent must stay within the limits set on the session that
+        delegated to it (e.g. write denied there).
+        """
+        cached = getattr(self, "_turn_delegating_sessions", None)
+        if cached is None:
+            cached = await Session.delegating_sessions(self.session)
+            self._turn_delegating_sessions = cached
+        return cached
 
     async def _effective_permission_ruleset(self) -> List[Any]:
         ruleset = getattr(self, "_turn_permission_ruleset", None)
@@ -4692,13 +4714,26 @@ class SessionRunner:
         from flocks.permission.next import PermissionNext
 
         patterns = list(getattr(request, "patterns", None) or [])
+        metadata = dict(getattr(request, "metadata", None) or {})
+        # File tools ask for ``edit``; rules that name the tool itself apply too.
+        tool_name = metadata.get("tool") if isinstance(metadata.get("tool"), str) else None
+        aliases = [tool_name] if tool_name else []
         ruleset = await self._effective_permission_ruleset()
         configured_action = PermissionNext.evaluate_request(
             request.permission,
             patterns,
             ruleset,
+            aliases,
         )
-        metadata = dict(getattr(request, "metadata", None) or {})
+        delegating = await self._delegating_sessions()
+        for parent in delegating:
+            # Each delegating session's own rules are a separate limit.
+            inherited = self._session_permission_rules(parent)
+            if inherited:
+                configured_action = PermissionNext.stricter(
+                    configured_action,
+                    PermissionNext.evaluate_request(request.permission, patterns, inherited, aliases),
+                )
         deny_only_preflight = metadata.get("reason") == "question_tool"
 
         tool_metadata = get_tool_catalog_metadata(str(getattr(request, "permission", "") or ""))
@@ -4731,6 +4766,10 @@ class SessionRunner:
 
         metadata.setdefault("messageID", getattr(request, "message_id", "") or "")
         metadata.setdefault("sessionID", self.session.id)
+        if delegating:
+            # The user is waiting in the sessions that delegated this one;
+            # they show the request too.
+            metadata["delegationChain"] = [parent.id for parent in delegating]
 
         reply = await PermissionNext.ask(
             session_id=self.session.id,
@@ -4739,7 +4778,7 @@ class SessionRunner:
             ruleset=ruleset,
             metadata=metadata,
             always=list(getattr(request, "always", None) or []),
-            tool={"name": request.permission},
+            tool={"name": tool_name or request.permission},
         )
         if reply in {"deny", "deny_session", "reject", "never"}:
             raise PermissionError(f"Permission denied: {request.permission}")

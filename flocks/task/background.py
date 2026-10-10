@@ -203,7 +203,10 @@ class BackgroundManager:
                 if result.last_message:
                     output = await Message.get_text_content(result.last_message)
                 task.output = output
-                task.status = "completed"
+                # The session's stop button aborts the loop, which then
+                # returns normally: that run was stopped, not completed.
+                aborted = bool((getattr(result, "metadata", None) or {}).get("aborted"))
+                task.status = "cancelled" if aborted else "completed"
                 task.completed_at = int(datetime.now().timestamp() * 1000)
                 await self._inject_parent_completion(task)
             except asyncio.CancelledError:
