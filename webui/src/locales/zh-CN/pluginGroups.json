@@ -1,6 +1,6 @@
 {
-  "title": "业务分组",
-  "navigation": "按业务分组筛选",
+  "title": "分组",
+  "navigation": "按分组筛选",
   "countsDescription": "拖动插件到分组即可归组。",
   "defaultNames": {
     "平台集成": "平台集成",
@@ -38,9 +38,11 @@
   "cancel": "取消",
   "close": "关闭",
   "confirmScope": "将以下 {{count}} 个插件移到“{{group}}”？\n{{items}}\n不会删除插件。",
+  "confirmScopeTitle": "移动到“{{group}}”",
+  "confirmScopeAction": "确认移动",
   "dialog": {
-    "createTitle": "新建业务分组",
-    "renameTitle": "重命名业务分组",
+    "createTitle": "新建分组",
+    "renameTitle": "重命名分组",
     "moveTitle": "设置 {{name}} 的分组",
     "name": "分组名称",
     "firstPlugin": "首个可编辑插件",
@@ -69,7 +71,7 @@
     "refresh": "列表刷新失败，请刷新后重试。"
   },
   "drag": {
-    "sourceLabel": "{{name}}。按 Alt+M 移入业务分组。",
+    "sourceLabel": "{{name}}。按 Alt+M 移入分组。",
     "reorderLabel": "调整分组 {{name}} 的顺序",
     "reorderHint": "拖动或按上下方向键调整顺序。",
     "orderPlaced": "分组顺序已更新。",

@@ -36,6 +36,7 @@ def _build_processor(config_data: dict) -> StreamProcessor:
         session_key="session-sandbox-test",
         main_session_key="main",
         workspace_dir="/tmp",
+        allowed_tool_names=["bash"],
     )
 
 
@@ -306,9 +307,19 @@ async def test_stream_processor_tool_call_diff_when_sandbox_on_off(
     assert len(captured_extras) == 2
     assert captured_extras[0][0] == "bash"
     assert captured_extras[0][1] == {
+        "agent_execution_session": True,
+        "enforce_callable_tools": True,
+        "turn_callable_tool_names": ["bash"],
         "execution_mode": "build",
         "workspace_dir": "/tmp",
         "model": {"providerID": "test-provider", "modelID": "test-model"},
+        "execution_context": {
+            "trace_id": "session-sandbox-test:msg-sandbox-test",
+            "execution_id": "msg-sandbox-test",
+            "turn_id": "msg-sandbox-test",
+            "step": 0,
+            "attempt": 1,
+        },
         "plan_file_path": None,
         "plan_relative_path": None,
         "plan_permission_path": None,

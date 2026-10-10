@@ -302,7 +302,7 @@ async def test_real_stream_returns_submission_before_child_finishes(tmp_path, mo
 
     monkeypatch.setattr(SessionLoop, "run", child_run)
     processor = StreamProcessor(session_id=parent.id, assistant_message=assistant,
-                                agent=SimpleNamespace(name="rex"))
+                                agent=SimpleNamespace(name="rex"), allowed_tool_names=["delegate_task"])
     monkeypatch.setattr(processor, "_resolve_sandbox_meta", AsyncMock(return_value={"blocked": False, "error": None, "extra": {}}))
     await processor.process_event(ToolCallEvent(tool_call_id="delegate", tool_name="delegate_task",
         input={"subagent_type": "explore", "prompt": "work"}))

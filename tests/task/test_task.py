@@ -494,6 +494,7 @@ async def test_background_task_fails_fast_when_user_input_is_required(
         _session_id: str,
         provider_id=None,
         model_id=None,
+        agent_name=None,
         callbacks=None,
     ):
         try:
@@ -533,6 +534,136 @@ async def test_background_task_fails_fast_when_user_input_is_required(
         )
 
     assert rejected == ["ses_interactive_block"]
+
+
+@pytest.mark.asyncio
+async def test_existing_background_session_pins_agent_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loop_run = AsyncMock(return_value=SimpleNamespace(last_message=None))
+    monkeypatch.setattr(background_module.SessionLoop, "run", loop_run)
+
+    manager = BackgroundManager()
+    task = BackgroundTask(
+        id="bg_identity",
+        status="running",
+        description="security worker",
+        prompt="",
+        agent="isolated-worker",
+    )
+
+    await manager._run_session_with_watchdog(
+        task,
+        "ses_security_worker",
+        callbacks=None,
+        agent_name=task.agent,
+    )
+
+    assert loop_run.await_args.args == ("ses_security_worker",)
+    assert loop_run.await_args.kwargs["agent_name"] == "isolated-worker"
+
+
+@pytest.mark.asyncio
+async def test_background_event_progress_refreshes_inactivity_timer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from flocks.server.routes import event as event_routes
+
+    publish = AsyncMock()
+    monkeypatch.setattr(event_routes, "publish_event", publish)
+    task = BackgroundTask(
+        id="bg_progress",
+        status="running",
+        description="security worker",
+        prompt="",
+        agent="isolated-solver",
+        last_activity_at=1,
+    )
+
+    callbacks = BackgroundManager()._build_activity_callbacks(task)
+    assert callbacks.event_publish_callback is not None
+    await callbacks.event_publish_callback("message.part.updated", {"part": {"status": "running"}})
+
+    assert task.last_activity_at is not None and task.last_activity_at > 1
+    publish.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_existing_background_session_rejects_capsule_identity_mismatch() -> None:
+    manager = BackgroundManager()
+
+    with pytest.raises(ValueError, match="execution capsule"):
+        await manager.run_existing_session(
+            session_id="ses_security_worker",
+            description="security worker",
+            agent="isolated-worker",
+            execution_capsule={
+                "session_id": "ses_other",
+                "agent_name": "isolated-worker",
+            },
+        )
+
+    assert manager.list_tasks() == []
+
+
+@pytest.mark.asyncio
+async def test_existing_background_session_waits_for_start_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = BackgroundManager()
+    run = AsyncMock(return_value=SimpleNamespace(action=None, last_message=None))
+    monkeypatch.setattr(manager, "_run_session_with_watchdog", run)
+    monkeypatch.setattr(manager, "_inject_parent_completion", AsyncMock())
+    start_gate = asyncio.Event()
+
+    task = await manager.run_existing_session(
+        session_id="ses_security_worker",
+        description="security worker",
+        agent="isolated-worker",
+        start_gate=start_gate,
+    )
+    await asyncio.sleep(0)
+
+    assert task.status == "pending"
+    run.assert_not_awaited()
+
+    start_gate.set()
+    completed = await manager.wait_for(task.id, timeout_ms=1_000)
+
+    assert completed is task
+    assert task.status == "completed"
+    run.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_existing_background_session_preserves_loop_error_for_supervisor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = BackgroundManager()
+    monkeypatch.setattr(
+        background_module.SessionLoop,
+        "run",
+        AsyncMock(
+            return_value=SimpleNamespace(
+                action="error",
+                error="provider 503 stream interrupted",
+                last_message=None,
+            )
+        ),
+    )
+    monkeypatch.setattr(manager, "_inject_parent_completion", AsyncMock())
+    task = BackgroundTask(
+        id="bg_provider_error",
+        status="pending",
+        description="security worker",
+        prompt="",
+        agent="isolated-worker",
+    )
+
+    await manager._run_existing_session(task, "ses_security_worker")
+
+    assert task.status == "error"
+    assert task.error == "provider 503 stream interrupted"
 
 
 @pytest.mark.asyncio

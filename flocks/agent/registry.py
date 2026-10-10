@@ -177,6 +177,11 @@ def _storage_custom_agent_to_info(agent_data: Dict[str, Any]) -> Optional[AgentI
         delegatable=agent_data.get("delegatable"),
         permission=permission_items_to_ruleset(agent_data.get("permission")),
         tools=agent_data.get("tools", []),
+        skills=agent_data.get("skills", []),
+        prompt_profile=agent_data.get(
+            "prompt_profile",
+            agent_data.get("promptProfile", "standard"),
+        ),
         tags=agent_data.get("tags", []),
     )
 
@@ -213,6 +218,18 @@ def _apply_delegatable_overrides(agents: Dict[str, AgentInfo]) -> None:
         agent = agents.get(name)
         if agent is not None:
             agent.delegatable = delegatable
+
+
+def _apply_enabled_agents(
+    agents: Dict[str, AgentInfo],
+    enabled_agents: Optional[List[str]],
+) -> None:
+    """Apply the configured allowlist after any registry merge stage."""
+    if enabled_agents is None:
+        return
+    allowed = set(enabled_agents)
+    for name in [key for key in agents if key not in allowed]:
+        del agents[name]
 
 
 # ---------------------------------------------------------------------------
@@ -412,6 +429,10 @@ class Agent:
                     item.steps = value.steps
                 if value.delegatable is not None:
                     item.delegatable = value.delegatable
+                if value.skills is not None:
+                    item.skills = list(value.skills)
+                if value.prompt_profile is not None:
+                    item.prompt_profile = value.prompt_profile
                 item.options.update(value.options)
                 if value.permission:
                     item.permission = merge(item.permission, from_config(value.permission), cli_overrides)
@@ -421,10 +442,7 @@ class Agent:
         _apply_delegatable_overrides(result)
 
         # enabled_agents whitelist filter
-        if cfg.enabled_agents is not None:
-            allowed = set(cfg.enabled_agents)
-            for n in [k for k in result if k not in allowed]:
-                del result[n]
+        _apply_enabled_agents(result, cfg.enabled_agents)
 
         # ── ④ Phase-2 dynamic prompts ──────────────────────────────────────
         available_agents = _build_available_agents(result)
@@ -447,6 +465,11 @@ class Agent:
                 result[key] = result[key].model_copy(
                     update={"group": normalize_agent_group(value.group)}
                 )
+
+        # Runtime registration is not an escape hatch around the configured
+        # agent allowlist. Apply the same policy after every registry source
+        # has been merged.
+        _apply_enabled_agents(result, cfg.enabled_agents)
 
         # Share reference with metadata query functions
         _set_agents_ref(result)
@@ -742,7 +765,17 @@ class Agent:
 
     @classmethod
     def register(cls, name: str, info: AgentInfo) -> None:
+        current = cls._custom_agents.get(name)
+        if current is not None and current.prompt_protected and not info.prompt_protected:
+            # A sealed definition is only ever replaced by another sealed one
+            # (its own package re-registering); nothing else may swap it out.
+            raise PermissionError(f"Agent {name} is protected and cannot be replaced")
         cls._custom_agents[name] = info
+
+    @classmethod
+    def registered(cls, name: str) -> Optional[AgentInfo]:
+        """The runtime registration under *name*, if an extension made one."""
+        return cls._custom_agents.get(name)
 
     @classmethod
     def unregister(cls, name: str) -> bool:

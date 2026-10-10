@@ -293,3 +293,53 @@ async def test_corrupt_registry_returns_no_projects(project_root):
 
     assert projects == []
     assert registry_path.read_text(encoding="utf-8") == "{broken"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('kind', ['local', 'git', 'zip', 'url'])
+async def test_source_kind_survives_registry_reload(project_root, kind):
+    project = await Project.create(owner_id='source-owner', name='Source demo', worktree=str(project_root / 'source'), source_kind=kind)
+    registry = Project._read_registry('source-owner')
+    entry = next(entry for entry in registry.projects if entry.id == project.id)
+    assert entry.source_kind == kind
+    assert Project._entry_to_info(entry).model_dump(by_alias=True)['sourceKind'] == kind
+
+
+@pytest.mark.asyncio
+async def test_extension_project_scope_is_persisted(project_root):
+    project = await Project.create(owner_id='ext-owner', name='Extension only', worktree=str(project_root / 'ext'), scope='extension-a')
+    registry = Project._read_registry('ext-owner')
+    entry = next(item for item in registry.projects if item.id == project.id)
+    assert entry.scope == 'extension-a'
+    assert Project._entry_to_info(entry).scope == 'extension-a'
+
+
+@pytest.mark.asyncio
+async def test_invalid_project_scope_is_rejected(project_root):
+    with pytest.raises(ValueError):
+        await Project.create(owner_id='ext-owner', name='Bad', worktree=str(project_root / 'bad'), scope='Not A Scope')
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('original_scope', ['workbench', 'extension-a'])
+async def test_readding_deleted_folder_in_extension_scope_creates_fresh_identity(project_root, original_scope):
+    source = project_root / 'ext-source'
+    first = await Project.create(owner_id='ext-owner', name='Demo', worktree=str(source), scope=original_scope)
+    await Project.delete(first.id, owner_id='ext-owner')
+    second = await Project.create(owner_id='ext-owner', name='Demo', worktree=str(source), scope='extension-a')
+    assert second.id != first.id
+    assert first.id in Project.removed_project_ids()
+    assert second.id not in Project.removed_project_ids()
+    assert await Project.get(first.id, owner_id='ext-owner') is None
+    assert (await Project.get(second.id, owner_id='ext-owner')).scope == 'extension-a'
+    assert Project.worktree_registration_ids('ext-owner', second) == {first.id, second.id}
+    assert source.is_dir()
+
+
+@pytest.mark.asyncio
+async def test_readding_workbench_project_keeps_existing_restore_behavior(project_root):
+    source = project_root / 'workbench-source'
+    first = await Project.create(owner_id='owner', name='Demo', worktree=str(source))
+    await Project.delete(first.id, owner_id='owner')
+    second = await Project.create(owner_id='owner', name='Demo', worktree=str(source))
+    assert second.id == first.id

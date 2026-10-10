@@ -5,4 +5,9 @@ if (!sdk) {
 export const api = sdk.api;
 export const contract = sdk.api.contract;
 export const Card = sdk.Card;
+export const Markdown = sdk.Markdown;
 export const useCurrentUser = sdk.useCurrentUser;
+export const useLanguage = sdk.useLanguage;
+// Undefined on hosts older than these hooks; pages check before calling them.
+export const usePaneActive = sdk.usePaneActive;
+export const useServerEvents = sdk.useServerEvents;

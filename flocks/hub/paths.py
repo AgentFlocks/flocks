@@ -4,8 +4,17 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import Optional
 
 from flocks.project.instance import Instance
+
+
+# Hub roots contributed by extensions (Flocks Pro ships its scene suites this
+# way). Each is shaped like the bundled root: ``index.json`` plus ``plugins/``.
+# Their index entries join the catalog and replace bundled entries with the
+# same type and id, so a placeholder listed by OSS can be backed by the real
+# package once the extension is installed.
+_EXTENSION_HUB_ROOTS: dict[str, Path] = {}
 
 
 def _candidate_roots() -> list[Path]:
@@ -32,6 +41,36 @@ def get_bundled_hub_root() -> Path:
         if root.is_dir():
             return root
     return Path.cwd().resolve() / ".flocks" / "flockshub"
+
+
+def register_hub_root(name: str, root: Path) -> None:
+    """Register (or move) the extension hub root called *name*."""
+    if not name:
+        raise ValueError("hub root name cannot be empty")
+    _EXTENSION_HUB_ROOTS[name] = Path(root).expanduser().resolve()
+
+
+def unregister_hub_root(name: str) -> bool:
+    return _EXTENSION_HUB_ROOTS.pop(name, None) is not None
+
+
+def extension_hub_roots() -> list[Path]:
+    """Registered extension roots that exist, in registration order."""
+    return [root for root in _EXTENSION_HUB_ROOTS.values() if root.is_dir()]
+
+
+def hub_roots() -> list[Path]:
+    """Every root plugin files may come from: extensions first, then bundled."""
+    return [*extension_hub_roots(), get_bundled_hub_root().resolve()]
+
+
+def owning_hub_root(path: Path) -> Optional[Path]:
+    """The hub root that contains *path*, or None when it lies outside all of them."""
+    resolved = path.resolve()
+    for root in hub_roots():
+        if resolved == root or root in resolved.parents:
+            return root
+    return None
 
 
 def safe_relative_path(value: str) -> Path:

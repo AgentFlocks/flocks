@@ -343,10 +343,22 @@ async def test_call_llm_blocks_provider_when_hook_stage_probe_fails(monkeypatch:
 @pytest.mark.asyncio
 async def test_call_llm_initializes_langfuse_after_llm_before_redaction(monkeypatch: pytest.MonkeyPatch):
     runner = _make_runner("ses_runner_langfuse_redacted")
+    runner.session.metadata = {
+        "langfuse": {
+            "session_id": "scan_123",
+            "trace_name": "extension.phase.model-step",
+            "tags": ["feature:extension", "phase:baseline"],
+            "metadata": {
+                "scan_id": "scan_123",
+                "assigned_paths": ["app.py"],
+            },
+        }
+    }
     assistant_msg = SimpleNamespace(id="msg_assistant_langfuse_redacted")
     agent = SimpleNamespace(name="rex")
     generation_inputs: list[list[dict[str, object]]] = []
     trace_inputs: list[dict[str, object]] = []
+    trace_calls: list[dict[str, object]] = []
 
     async def _before(payload):
         raw_messages = payload["request"]["messages"]
@@ -367,6 +379,7 @@ async def test_call_llm_initializes_langfuse_after_llm_before_redaction(monkeypa
         )
 
     def _trace_scope(**kwargs):
+        trace_calls.append(kwargs)
         trace_inputs.append(kwargs["input"])
         return SimpleNamespace(observation="trace")
 
@@ -421,6 +434,11 @@ async def test_call_llm_initializes_langfuse_after_llm_before_redaction(monkeypa
     assert "alice@example.com" not in str(generation_inputs)
     assert "alice@example.com" not in str(trace_inputs)
     assert "[[V_EMAIL_1]]" in str(generation_inputs)
+    assert trace_calls[0]["name"] == "extension.phase.model-step"
+    assert trace_calls[0]["session_id"] == "scan_123"
+    assert "phase:baseline" in trace_calls[0]["tags"]
+    assert trace_calls[0]["metadata"]["assigned_paths"] == ["app.py"]
+    assert trace_calls[0]["metadata"]["execution_session_id"] == runner.session.id
 
 
 @pytest.mark.asyncio
@@ -581,7 +599,12 @@ async def test_call_llm_drains_started_delegate_before_raising_provider_error(
         runner._call_llm(
             provider=_Provider(),
             messages=[ChatMessage(role="user", content="delegate the investigation")],
-            tools=[],
+            tools=[
+                {
+                    "type": "function",
+                    "function": {"name": "delegate_task"},
+                }
+            ],
             agent=agent,
             assistant_msg=assistant_msg,
         )
@@ -638,7 +661,7 @@ async def test_call_llm_only_exempts_successful_sleep_from_loop_guard(monkeypatc
 
     result = await runner._call_llm(
         provider=Provider(), messages=[ChatMessage(role="user", content="wait for a message")],
-        tools=[], agent=SimpleNamespace(name="rex"), assistant_msg=SimpleNamespace(id="msg_sleep"),
+        tools=[{"type": "function", "function": {"name": "sleep"}}], agent=SimpleNamespace(name="rex"), assistant_msg=SimpleNamespace(id="msg_sleep"),
     )
 
     assert result._successful_sleep is (outcome == "success")
@@ -773,7 +796,7 @@ async def test_call_llm_cancel_during_first_deferred_sleep_finalizes_both(monkey
 
     call = asyncio.create_task(runner._call_llm(
         provider=Provider(), messages=[ChatMessage(role="user", content="wait twice")],
-        tools=[], agent=SimpleNamespace(name="rex"), assistant_msg=SimpleNamespace(id="msg-two-sleeps"),
+        tools=[{"type": "function", "function": {"name": "sleep"}}], agent=SimpleNamespace(name="rex"), assistant_msg=SimpleNamespace(id="msg-two-sleeps"),
     ))
     await asyncio.wait_for(started.wait(), timeout=1)
     call.cancel()

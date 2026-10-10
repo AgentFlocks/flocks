@@ -19,6 +19,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from fastapi import HTTPException, status
 from httpx import AsyncClient
+from flocks.agent.agent import AgentInfo
 from flocks.auth.context import API_TOKEN_SERVICE_USER_ID, AuthUser
 from flocks.hooks.execution import (
     ExecutionStopped,
@@ -2228,7 +2229,7 @@ class TestSessionMessagesRemaining:
 
         monkeypatch.setattr(
             "flocks.agent.registry.Agent.get",
-            AsyncMock(return_value=SimpleNamespace(name="rex", model=None)),
+            AsyncMock(return_value=AgentInfo(name="rex", model=None)),
         )
         monkeypatch.setattr(
             session_routes,
@@ -2331,7 +2332,7 @@ class TestSessionMessagesRemaining:
         user_message = SimpleNamespace(agent="rex")
         monkeypatch.setattr(
             "flocks.agent.registry.Agent.get",
-            AsyncMock(return_value=SimpleNamespace(name="rex", model=None)),
+            AsyncMock(return_value=AgentInfo(name="rex", model=None)),
         )
         monkeypatch.setattr(
             "flocks.session.session.Session.get_by_id",
@@ -2381,7 +2382,7 @@ class TestSessionMessagesRemaining:
         user_message = SimpleNamespace(agent="rex")
         monkeypatch.setattr(
             "flocks.agent.registry.Agent.get",
-            AsyncMock(return_value=SimpleNamespace(name="rex", model=None)),
+            AsyncMock(return_value=AgentInfo(name="rex", model=None)),
         )
         monkeypatch.setattr(
             "flocks.session.session.Session.get_by_id",
@@ -2480,7 +2481,7 @@ class TestSessionMessagesRemaining:
         )
         monkeypatch.setattr(
             "flocks.agent.registry.Agent.get",
-            AsyncMock(return_value=SimpleNamespace(name="rex", model=None)),
+            AsyncMock(return_value=AgentInfo(name="rex", model=None)),
         )
         monkeypatch.setattr("flocks.provider.provider.Provider._ensure_initialized", lambda: None)
         monkeypatch.setattr("flocks.config.config.Config.get", AsyncMock(return_value=SimpleNamespace()))
@@ -2557,7 +2558,7 @@ class TestSessionMessagesRemaining:
         )
         monkeypatch.setattr(
             "flocks.agent.registry.Agent.get",
-            AsyncMock(return_value=SimpleNamespace(name="rex", model=None)),
+            AsyncMock(return_value=AgentInfo(name="rex", model=None)),
         )
         monkeypatch.setattr("flocks.provider.provider.Provider._ensure_initialized", lambda: None)
         monkeypatch.setattr("flocks.config.config.Config.get", AsyncMock(return_value=SimpleNamespace()))

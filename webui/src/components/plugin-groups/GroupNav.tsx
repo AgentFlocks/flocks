@@ -1,6 +1,7 @@
 import { useEffect, useId, useRef, useState, type HTMLAttributes, type ReactNode } from 'react';
 import { GripVertical, Pencil, Plus, Trash2, X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
+import { useOptionalToast } from '@/components/common/Toast';
 import { GroupActionCancelled, groupItemLabel, groupLabel, groupName, orderGroupNames, type GroupNavEntry, type GroupNavItem, type GroupSelection } from './groupView';
 
 const RESOURCE_MIME = 'application/x-flocks-visible-plugin';
@@ -157,6 +158,7 @@ export default function GroupNav({
   onMove, onCreate, onRename, onDelete, movingItem, clearMovingItem, consumeResourceDrag, className = '',
 }: GroupNavProps) {
   const { t } = useTranslation('pluginGroups');
+  const toast = useOptionalToast();
   const dialogTitleId = useId();
   const [dialog, setDialog] = useState<Dialog>(null);
   const [name, setName] = useState('');
@@ -165,7 +167,7 @@ export default function GroupNav({
   const busyRef = useRef(false);
   const orderGesture = useRef<{ token: string; name: string; element: HTMLElement } | null>(null);
   const orderSequence = useRef(0);
-  const [message, setMessage] = useState('');
+  // Success/cancel feedback is a top-right toast; failures stay in place until the next action.
   const [error, setError] = useState('');
   const names = groups.filter((entry) => entry.count > 0 && entry.name).map((entry) => entry.name);
   const storageKey = `flocks:plugin-group-order:${preferenceKey}`;
@@ -192,7 +194,7 @@ export default function GroupNav({
     next.splice(ordered.indexOf(target), 0, source);
     try { window.localStorage.setItem(storageKey, JSON.stringify(next)); } catch { /* browser-only preference */ }
     setPersonalOrder({ key: storageKey, value: next });
-    setMessage(t('drag.orderPlaced'));
+    toast.success(t('drag.orderPlaced'));
   };
 
   const run = async (action: () => Promise<void>, close = true) => {
@@ -200,16 +202,15 @@ export default function GroupNav({
     busyRef.current = true;
     setBusy(true);
     setError('');
-    setMessage('');
     try {
       await action();
       if (close) { setDialog(null); clearMovingItem?.(); }
-      setMessage(t('saved'));
+      toast.success(t('saved'));
     } catch (err) {
       if (err instanceof GroupActionCancelled) {
+        // The user just declined the confirmation; nothing else to report.
         setDialog(null);
         clearMovingItem?.();
-        setMessage(t('drag.cancelled'));
       } else setError(err instanceof Error ? err.message : String(err));
     } finally {
       busyRef.current = false;
@@ -271,7 +272,6 @@ export default function GroupNav({
       <p className="mb-2 px-2 text-[11px] leading-4 text-gray-400">{t('countsDescription')}</p>
       <nav className="space-y-0.5">
         <div className="flex">{navigationButton(null, t('all'), total)}</div>
-        <div className="flex" {...dropProps('')}>{navigationButton('', t('ungrouped'), ungroupedCount)}</div>
         {ordered.map((group) => {
           const entry = groups.find((row) => row.name === group) ?? { name: group, count: 0 };
           const label = groupLabel(group, t);
@@ -301,8 +301,8 @@ export default function GroupNav({
               className="rounded p-1 text-gray-400 hover:bg-gray-100 disabled:opacity-40"><Trash2 className="h-3 w-3" /></button>
           </div>;
         })}
+        <div className="flex" {...dropProps('')}>{navigationButton('', t('ungrouped'), ungroupedCount)}</div>
       </nav>
-      {message && <p role="status" className="mt-3 px-2 text-xs text-gray-500">{message}</p>}
       {error && !modalOpen && <p role="alert" className="mt-3 whitespace-pre-wrap px-2 text-xs text-red-600">{error}</p>}
       {modalOpen && <GroupDialog key={dialog?.kind ?? 'move'} titleId={dialogTitleId} onClose={closeModal} busy={busy}>
           <div className="mb-3 flex items-center justify-between">

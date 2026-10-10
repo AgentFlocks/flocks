@@ -1,4 +1,5 @@
 import type { TFunction } from 'i18next';
+import { requestConfirm } from '@/components/common/ConfirmDialog';
 import { extractErrorMessage } from '@/utils/error';
 
 /** Presentation rows only. Keys are the current page's native item identities. */
@@ -79,11 +80,19 @@ export async function saveGroupItems(
 ): Promise<void> {
   if (!items.length) throw new Error(t('pluginGroups:errors.missing'));
   assertGroupItemsEditable(items, t);
-  if (confirmScope && !window.confirm(t('pluginGroups:confirmScope', {
-    count: items.length,
-    group: group === null ? t('pluginGroups:ungrouped') : groupLabel(group, t),
-    items: items.map(groupItemLabel).join(', '),
-  }))) throw new GroupActionCancelled();
+  if (confirmScope) {
+    const target = group === null ? t('pluginGroups:ungrouped') : groupLabel(group, t);
+    const confirmed = await requestConfirm({
+      title: t('pluginGroups:confirmScopeTitle', { group: target }),
+      description: t('pluginGroups:confirmScope', {
+        count: items.length,
+        group: target,
+        items: items.map(groupItemLabel).join(', '),
+      }),
+      confirmText: t('pluginGroups:confirmScopeAction'),
+    });
+    if (!confirmed) throw new GroupActionCancelled();
+  }
 
   const failures: string[] = [];
   const succeeded: string[] = [];

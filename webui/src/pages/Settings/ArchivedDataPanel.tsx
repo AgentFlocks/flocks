@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ArchiveRestore, Loader2, RefreshCw, Search, Trash2 } from 'lucide-react';
+import { Archive, ArchiveRestore, Loader2, RefreshCw, Search, Trash2 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { sessionApi } from '@/api/session';
 import { useToast } from '@/components/common/Toast';
+import PageHeader from '@/components/common/PageHeader';
 import type { Session } from '@/types';
 
 const PAGE_SIZE = 50;
@@ -148,17 +149,14 @@ export default function ArchivedDataPanel() {
   };
 
   return (
-    <div className="mx-auto w-full max-w-7xl">
-      <header className="border-b border-zinc-200 pb-6 dark:border-zinc-800">
-        <h1 className="text-2xl font-bold tracking-normal text-zinc-950 dark:text-zinc-50">
-          {t('archivedData.title')}
-        </h1>
-        <p className="mt-2 text-sm text-zinc-500 dark:text-zinc-400">
-          {t('archivedData.description')}
-        </p>
-      </header>
+    <div>
+      <PageHeader
+        title={t('archivedData.title')}
+        description={t('archivedData.description')}
+        icon={<Archive className="h-8 w-8" />}
+      />
 
-      <div className="mt-6 flex items-center gap-3">
+      <div className="flex items-center gap-3">
         <label className="relative block w-full sm:max-w-sm">
           <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-zinc-400" />
           <input
@@ -206,7 +204,7 @@ export default function ArchivedDataPanel() {
         </div>
       )}
 
-      <div className="mt-4 overflow-hidden rounded-xl border border-zinc-200 dark:border-zinc-800">
+      <div className="mt-4 overflow-x-auto rounded-xl border border-zinc-200 dark:border-zinc-800">
         {loading ? (
           <div className="flex min-h-48 items-center justify-center gap-2 text-sm text-zinc-500">
             <Loader2 className="h-5 w-5 animate-spin" />

@@ -8,6 +8,7 @@
  */
 
 import { lazy, Suspense, useMemo, useState } from 'react';
+import { requestConfirm } from '@/components/common/ConfirmDialog';
 import { useTranslation } from 'react-i18next';
 import { BookOpen, Lock, Pencil, Eye, Save, Loader2, Trash2 } from 'lucide-react';
 import { isSkillDefinitionReadOnly, skillAPI, Skill } from '@/api/skill';
@@ -139,7 +140,7 @@ export default function SkillSheet({ skill, onClose, onSaved, onDeleted }: Skill
 
   const handleDelete = async () => {
     if (!skill || isSkillDefinitionReadOnly(skill)) return;
-    if (!confirm(t('sheet.deleteConfirm', { name: skill.name }))) return;
+    if (!(await requestConfirm({ description: t('sheet.deleteConfirm', { name: skill.name }), confirmText: t('sheet.delete'), variant: 'danger' }))) return;
     try {
       setDeleting(true);
       await skillAPI.delete(skill.name);

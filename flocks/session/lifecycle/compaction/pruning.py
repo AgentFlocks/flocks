@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import time
-from typing import Optional, Any
+from typing import Optional, Any, Awaitable, Callable
 
 from flocks.utils.log import Log
 from flocks.session.prompt import SessionPrompt
@@ -15,6 +15,15 @@ from .models import (
 )
 
 log = Log.create(service="session.compaction.pruning")
+
+# Extensions may preserve domain evidence before destructive context cleanup.
+# These callbacks run at compaction boundaries, never during tool execution.
+_tool_output_preservers: dict[str, Callable[[str], Awaitable[None]]] = {}
+
+
+def register_tool_output_preserver(name: str, callback: Callable[[str], Awaitable[None]]) -> None:
+    _tool_output_preservers[name] = callback
+
 
 # Text-part metadata flag on the synthetic user message written after an
 # automatic compaction (see ``SessionCompaction._archive_and_write_summary``).
@@ -420,6 +429,16 @@ async def truncate_oversized_tool_outputs(
     messages = await Message.list(session_id)
     truncated_count = 0
     affected_msg_ids: set[str] = set()
+    preserved = False
+
+    async def preserve_outputs() -> None:
+        nonlocal preserved
+        if not preserved:
+            # Propagate failures before changing any output; evidence must not
+            # silently disappear when its owner cannot preserve it.
+            for callback in tuple(_tool_output_preservers.values()):
+                await callback(session_id)
+            preserved = True
 
     all_tool_parts: list[tuple[str, Any]] = []
 
@@ -449,6 +468,7 @@ async def truncate_oversized_tool_outputs(
                 state.output = output
 
             if len(output) > max_chars:
+                await preserve_outputs()
                 state.output = _truncate(output, max_chars)
                 # The runner sends the cached prompt-facing copy, not
                 # ``state.output``; refresh it or the cut never reaches the model.
@@ -468,6 +488,7 @@ async def truncate_oversized_tool_outputs(
         total_tool_chars += len(out) if isinstance(out, str) else len(str(out))
 
     if total_tool_chars > total_budget:
+        await preserve_outputs()
         chars_to_free = total_tool_chars - total_budget
         freed = 0
         for mid, part in all_tool_parts:

@@ -63,6 +63,8 @@ def _make_agent(name="rex", tools=None):
     agent = MagicMock()
     agent.name = name
     agent.tools = tools
+    agent.skills = []
+    agent.prompt_profile = "standard"
     return agent
 
 
@@ -3639,9 +3641,13 @@ async def test_process_step_empty_retry_records_usage_per_attempt(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_process_step_retries_empty_transport_exception(monkeypatch):
+@pytest.mark.parametrize("failure", ["transport", "throttle", "quota", "quota_deferred", "alibaba", "alibaba_exhausted"])
+async def test_process_step_retries_only_transient_provider_errors(monkeypatch, failure):
     runner = _make_runner("ses_runner_transport_retry")
     runner.callbacks = RunnerCallbacks(on_error=AsyncMock())
+    runner._defer_step_errors = failure == "quota_deferred"
+    if failure.startswith("alibaba"):
+        runner.provider_id = "alibaba"
 
     last_user = UserMessageInfo(
         id="msg_user_transport_retry",
@@ -3655,12 +3661,22 @@ async def test_process_step_retries_empty_transport_exception(monkeypatch):
     provider = MagicMock()
     provider.is_configured.return_value = True
     assistant_msg = SimpleNamespace(id="msg_assistant_transport_retry")
+    error = httpcore.ReadError() if failure == "transport" else RuntimeError(
+        "429 insufficient_quota" if failure.startswith("quota") else "429 rate limit exceeded"
+    )
+    if failure.startswith("alibaba"):
+        error = type("SdkError", (RuntimeError,), {
+            "status_code": 429,
+            "response": SimpleNamespace(headers={"Retry-After": "90"}),
+        })("429 insufficient_quota")
     call_llm_mock = AsyncMock(
         side_effect=[
-            httpcore.ReadError(),
+            error,
             StepResult(action="stop", content="recovered"),
         ]
     )
+    if failure == "alibaba_exhausted":
+        call_llm_mock.side_effect = [error] * 6
     sleep_mock = AsyncMock(return_value=None)
 
     monkeypatch.setattr(runner_mod.Agent, "get", AsyncMock(return_value=agent))
@@ -3678,9 +3694,29 @@ async def test_process_step_retries_empty_transport_exception(monkeypatch):
     monkeypatch.setattr(runner_mod.Message, "update", AsyncMock(return_value=None))
     monkeypatch.setattr(runner, "_call_llm", call_llm_mock)
     monkeypatch.setattr(runner_mod.SessionRetry, "sleep", sleep_mock)
+    monkeypatch.setattr(runner, "_ensure_visible_error_text", AsyncMock(return_value=None))
+    monkeypatch.setattr(runner, "_publish_assistant_error_message", AsyncMock())
 
     result = await runner._process_step([last_user], last_user)
 
+    if failure == "alibaba_exhausted":
+        assert result.error is not None
+        assert result.error_code != "model_quota_exhausted"
+        assert call_llm_mock.await_count == 6
+        assert sleep_mock.await_count == 5
+        return
+    if failure == "alibaba":
+        # Retry-After: 90 is honoured up to the runtime-wide cap that also
+        # bounds the provider cooldown (see SessionRetry.jittered_delay).
+        from flocks.session.lifecycle.retry import RETRY_MAX_DELAY_NO_HEADERS
+
+        assert sleep_mock.await_args.args[0] == RETRY_MAX_DELAY_NO_HEADERS
+    if failure.startswith("quota"):
+        assert result.action == "stop"
+        assert result.error_code == "model_quota_exhausted"
+        call_llm_mock.assert_awaited_once()
+        sleep_mock.assert_not_awaited()
+        return
     assert result.content == "recovered"
     assert call_llm_mock.await_count == 2
     sleep_mock.assert_awaited_once()
@@ -3797,6 +3833,7 @@ async def test_process_step_has_no_default_max_steps(monkeypatch, step, steps_mi
     assert captured["tools"] == sentinel_tools
     assert all(message.content != PROMPT_MAX_STEPS for message in captured["messages"])
     assert not any(call.args[0] == "runner.max_steps_reached" for call in warn_mock.call_args_list)
+    assert runner.max_steps_reached is False
 
 
 @pytest.mark.asyncio
@@ -3860,6 +3897,7 @@ async def test_process_step_respects_explicit_agent_steps(monkeypatch, step):
         assert max_steps_warnings[0].args[1] == {
             "step": step, "max_steps": agent.steps, "session_id": runner.session.id,
         }
+    assert runner.max_steps_reached is limit_reached
 
 
 @pytest.mark.asyncio
@@ -3935,6 +3973,7 @@ async def test_process_step_tool_loop_guard_across_runner_instances(
         else:
             assert result.action == "stop"
             assert f"Stopped the loop because `{tool_name}` was called 3 times in a row" in result.content
+            assert result.error == f"runner_tool_loop_guard_halt:repeated_exact_tool_call:{tool_name}"
 
     if successful_sleep:
         assert shared_cache["tool_loop_guard"]["exact_count"] == 0
