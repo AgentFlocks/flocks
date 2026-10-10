@@ -140,6 +140,8 @@ async def test_list_webui_workspaces_returns_grouped_pages(client: AsyncClient, 
                     "defaultPageId": "ops-overview",
                     "contentPadding": "comfortable",
                     "themeOverride": None,
+                    "flat": False,
+                    "icon": None,
                 }
             ],
             "pages": [

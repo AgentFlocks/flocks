@@ -73,6 +73,11 @@ class WebUIWorkspaceSectionManifest(BaseModel):
         description="Temporary theme override while viewing pages in this section",
         alias="themeOverride",
     )
+    flat: bool = Field(
+        False,
+        description="Show the section as one navigation item named by its label, without a group header",
+    )
+    icon: Optional[str] = Field(None, description="Icon of the navigation item of a flat section")
 
 
 class WebUIPageBuildMeta(BaseModel):

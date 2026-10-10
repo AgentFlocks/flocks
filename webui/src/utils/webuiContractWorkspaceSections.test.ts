@@ -82,3 +82,20 @@ describe('webuiContractWorkspaceSections localization', () => {
    expect(findWorkspaceSection(sections, 'soc-overview','')?.id).toBe('home');
    expect(findWorkspaceSection(sections, 'soc-overview','?view=audits&scan_id=123')?.id).toBe('audits');
  });
+
+describe('webuiContractWorkspaceSections flat sections', () => {
+  it('passes the flat flag and icon through, defaulting to grouped sections', () => {
+    const flat = buildWebUIContractWorkspaceSections({
+      ...workspace,
+      sections: [
+        { id: 'home', label: '首页', labelEn: 'Home', flat: true, icon: ' Home ', pageIds: ['soc-overview'] },
+        { id: 'operations', label: '告警运营', pageIds: ['soc-overview', 'soc-alerts'] },
+      ],
+    }, 'en-US');
+    expect(flat.map((section) => [section.id, section.label, section.flat, section.icon])).toEqual([
+      ['home', 'Home', true, 'Home'],
+      ['operations', '告警运营', false, null],
+    ]);
+    expect(buildWebUIContractWorkspaceSections({ ...workspace, sections: [] }, 'zh-CN')[0]).toMatchObject({ flat: false, icon: null });
+  });
+});

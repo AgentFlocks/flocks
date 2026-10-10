@@ -628,20 +628,37 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
     const map = new Map<string, NavSection[]>();
     for (const workspace of openSceneWorkspaces) {
       const readyPages = (pages: WebUIContractWorkspaceListItem['pages']) => pages.filter((page) => page.enabled && page.buildStatus === 'ready');
-      const groups = (workspace.sections?.length ?? 0) > 0
-        ? buildWebUIContractWorkspaceSections(workspace, i18n.language).map((section) => ({
-          id: `scene:${workspace.id}:${section.id}`,
-          name: section.label,
-          collapsible: true,
-          items: workspacePageOrders
-            .apply(`${workspace.id}:${section.id}`, readyPages(section.pages))
-            .map((page) => ({
+      const groups: NavSection[] = (workspace.sections?.length ?? 0) > 0
+        ? buildWebUIContractWorkspaceSections(workspace, i18n.language).reduce<NavSection[]>((result, section) => {
+          const pages = workspacePageOrders.apply(`${workspace.id}:${section.id}`, readyPages(section.pages));
+          if (section.flat) {
+            // One item named by the section; consecutive flat sections share a header-less group.
+            const page = pages.find((item) => item.id === section.defaultPageId) ?? pages[0];
+            if (!page) return result;
+            const item: NavItem = {
+              pageId: page.id,
+              name: section.label,
+              href: workspaceSectionHref(workspace.route, section, page.id),
+              icon: resolveWebUIContractPageIcon(section.icon || page.icon),
+            };
+            const last = result[result.length - 1];
+            if (last && !last.name) last.items.push(item);
+            else result.push({ id: `scene:${workspace.id}:${section.id}`, items: [item] });
+            return result;
+          }
+          result.push({
+            id: `scene:${workspace.id}:${section.id}`,
+            name: section.label,
+            collapsible: true,
+            items: pages.map((page) => ({
               pageId: page.id,
               name: page.title,
               href: workspaceSectionHref(workspace.route, section, page.id),
               icon: resolveWebUIContractPageIcon(page.icon),
             } as NavItem)),
-        }))
+          });
+          return result;
+        }, [])
         : [{
           id: `scene:${workspace.id}`,
           items: workspacePageOrders

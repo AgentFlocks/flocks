@@ -15,6 +15,8 @@ export interface WebUIContractWorkspaceSectionView {
   defaultPageId: string;
   contentPadding: WebUIContractWorkspaceContentPadding;
   themeOverride: WebUIContractWorkspaceThemeOverride | null;
+  flat: boolean;
+  icon: string | null;
 }
 
 function isChineseLanguage(language?: string | null): boolean {
@@ -71,6 +73,8 @@ export function buildWebUIContractWorkspaceSections(
           defaultPageId,
           contentPadding: section.contentPadding ?? 'comfortable',
           themeOverride: section.themeOverride ?? null,
+          flat: Boolean(section.flat),
+          icon: section.icon?.trim() || null,
         };
       })
       .filter((section): section is WebUIContractWorkspaceSectionView => section !== null);
@@ -89,6 +93,8 @@ export function buildWebUIContractWorkspaceSections(
       defaultPageId,
       contentPadding: 'comfortable',
       themeOverride: null,
+      flat: false,
+      icon: null,
     },
   ];
 }

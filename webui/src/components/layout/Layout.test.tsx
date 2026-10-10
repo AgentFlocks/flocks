@@ -152,6 +152,39 @@ describe('Layout chrome', () => {
     await waitFor(() => expect(activeProbe().textContent).toBe('/contracts/webui/workspaces/soc_ui'));
   });
 
+  it('shows flat workspace sections as single named items and keeps grouped sections', async () => {
+    const page = (id: string, title: string) => ({
+      id, title, route: `/contracts/webui/${id}`, icon: 'ShieldCheck', order: 10, enabled: true,
+      placement: 'home.after', buildHash: 'r', buildStatus: 'ready', workspaceId: 'code_audit_ui',
+    });
+    useWebUIContractPages.mockReturnValue({
+      pages: [], loading: false, error: null, refetch: vi.fn(),
+      workspaces: [sceneWorkspace('code_audit_ui', '代码漏洞审计工作区', {
+        defaultPageId: 'audit-home',
+        pages: [page('audit-home', '代码审计首页'), page('audit-report', '报告中心')],
+        sections: [
+          { id: 'home', label: '首页', flat: true, icon: 'Home', pageIds: ['audit-home'], defaultPageId: 'audit-home' },
+          { id: 'audits', label: '任务列表', flat: true, icon: 'ListTodo', pageIds: ['audit-home'], defaultPageId: 'audit-home', query: { view: 'audits' } },
+          { id: 'reports', label: '报告', pageIds: ['audit-report'], defaultPageId: 'audit-report' },
+        ],
+      })],
+    });
+    renderAt('/contracts/webui/workspaces/code_audit_ui/audit-home?view=audits');
+    const home = await screen.findByRole('link', { name: '首页' });
+    const tasks = screen.getByRole('link', { name: '任务列表' });
+    expect(home).toHaveAttribute('href', '/contracts/webui/workspaces/code_audit_ui/audit-home');
+    expect(tasks).toHaveAttribute('href', '/contracts/webui/workspaces/code_audit_ui/audit-home?view=audits');
+    expect(tasks).toHaveAttribute('aria-current', 'page');
+    expect(home).not.toHaveAttribute('aria-current');
+    // Flat sections have no group header and do not repeat the page title.
+    expect(screen.queryByRole('button', { name: '首页' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '任务列表' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: '代码审计首页' })).not.toBeInTheDocument();
+    // An ordinary section still groups its pages under a collapsible header.
+    expect(screen.getByRole('button', { name: '报告' })).toHaveAttribute('aria-expanded', 'true');
+    expect(screen.getByRole('link', { name: '报告中心' })).toBeInTheDocument();
+  });
+
   it('hides the history panel outside the Agent workspace', async () => {
     useWebUIContractPages.mockReturnValue({
       pages: [], workspaces: [sceneWorkspace('soc_ui', 'SOC 工作区')], loading: false, error: null, refetch: vi.fn(),
