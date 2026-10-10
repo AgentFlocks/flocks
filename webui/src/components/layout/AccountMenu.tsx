@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState, type KeyboardEvent } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type KeyboardEvent } from 'react';
+import { createPortal } from 'react-dom';
 import { Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import {
@@ -22,6 +23,33 @@ import {
 import { MENU_ITEM_CLASS, MENU_LABEL_CLASS, MENU_SEPARATOR_CLASS } from './HeaderMenu';
 
 export const FLOCKS_LLM_USAGE_URL = 'https://portal.agentflocks.com';
+
+const MENU_WIDTH = 256;
+const MENU_GAP = 8;
+// The fixed workspace header (h-14) plus a gap stays clear above the menu.
+const MENU_TOP_LIMIT = 64;
+
+/**
+ * Fixed-position placement next to the account block. The menu is portalled
+ * to <body> because the sidebar clips its overflow, which used to cut the
+ * expanded menu at the sidebar edge and hide the collapsed one entirely.
+ */
+export function accountMenuPosition(
+  anchor: Pick<DOMRect, 'top' | 'bottom' | 'left' | 'right'>,
+  collapsed: boolean,
+  viewport: { width: number; height: number },
+): CSSProperties {
+  // Collapsed: beside the icon rail, bottom-aligned with the avatar.
+  // Expanded: above the account block, inset like the block's padding.
+  const bottomEdge = collapsed ? anchor.bottom - MENU_GAP : anchor.top - MENU_GAP;
+  const preferredLeft = collapsed ? anchor.right + MENU_GAP : anchor.left + 12;
+  const left = Math.max(MENU_GAP, Math.min(preferredLeft, viewport.width - MENU_WIDTH - MENU_GAP));
+  return {
+    left,
+    bottom: Math.max(0, viewport.height - bottomEdge),
+    maxHeight: Math.max(160, bottomEdge - MENU_TOP_LIMIT),
+  };
+}
 
 interface AccountMenuProps {
   collapsed: boolean;
@@ -65,19 +93,37 @@ export default function AccountMenu({
 }: AccountMenuProps) {
   const { t } = useTranslation('nav');
   const [open, setOpen] = useState(false);
+  const [position, setPosition] = useState<CSSProperties | null>(null);
   const rootRef = useRef<HTMLDivElement>(null);
   const buttonRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const focusFirstRef = useRef(false);
 
+  // Measure before paint so the menu never flashes at the page origin.
+  useLayoutEffect(() => {
+    if (!open) {
+      setPosition(null);
+      return undefined;
+    }
+    const place = () => {
+      const anchor = rootRef.current?.getBoundingClientRect();
+      if (anchor) setPosition(accountMenuPosition(anchor, collapsed, { width: window.innerWidth, height: window.innerHeight }));
+    };
+    place();
+    window.addEventListener('resize', place);
+    return () => window.removeEventListener('resize', place);
+  }, [collapsed, open]);
+
+  const placed = position !== null;
   useEffect(() => {
-    if (!open) return undefined;
+    if (!open || !placed) return undefined;
     if (focusFirstRef.current) {
       menuRef.current?.querySelector<HTMLElement>('[role="menuitem"]')?.focus();
       focusFirstRef.current = false;
     }
     const onPointerDown = (event: PointerEvent) => {
-      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
+      const target = event.target as Node;
+      if (!rootRef.current?.contains(target) && !menuRef.current?.contains(target)) setOpen(false);
     };
     const onKeyDown = (event: globalThis.KeyboardEvent) => {
       if (event.key !== 'Escape') return;
@@ -90,7 +136,7 @@ export default function AccountMenu({
       document.removeEventListener('pointerdown', onPointerDown);
       document.removeEventListener('keydown', onKeyDown);
     };
-  }, [open]);
+  }, [open, placed]);
 
   const close = () => setOpen(false);
   const follow = () => {
@@ -133,16 +179,15 @@ export default function AccountMenu({
 
   return (
     <div ref={rootRef} className={`relative shrink-0 border-t border-zinc-200 dark:border-zinc-800 ${collapsed ? 'p-2' : 'p-3'}`}>
-      {open && (
+      {open && position && createPortal(
         <div
           ref={menuRef}
           role="menu"
           aria-label={t('accountMenu')}
           onKeyDown={onMenuKeyDown}
           data-account-menu
-          className={`absolute z-[60] max-h-[calc(100dvh-8rem)] w-64 overflow-y-auto rounded-xl border border-zinc-200 bg-white p-1.5 shadow-lg dark:border-zinc-700 dark:bg-zinc-900 ${
-            collapsed ? 'bottom-2 left-full ml-2' : 'bottom-full left-3 mb-2'
-          }`}
+          style={position}
+          className="fixed z-[60] w-64 overflow-y-auto rounded-xl border border-zinc-200 bg-white p-1.5 shadow-lg dark:border-zinc-700 dark:bg-zinc-900"
         >
           <div className={MENU_LABEL_CLASS}>{t('aiCapabilities')}</div>
           {renderLinks(aiCapabilities)}
@@ -200,7 +245,8 @@ export default function AccountMenu({
             <LogOut className="h-4 w-4 shrink-0 text-zinc-400" />
             {t('logout')}
           </button>
-        </div>
+        </div>,
+        document.body,
       )}
       <button
         ref={buttonRef}

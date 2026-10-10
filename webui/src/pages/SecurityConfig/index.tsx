@@ -36,7 +36,7 @@ function Card({
   children: ReactNode;
 }) {
   return (
-    <section className="rounded-xl border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
+    <section className="rounded-xl border border-zinc-200 bg-white p-6 dark:border-zinc-800 dark:bg-zinc-900">
       <div className="flex items-start justify-between gap-4">
         <div className="min-w-0">
           <h2 className="text-base font-semibold text-zinc-900 dark:text-zinc-100">{title}</h2>
@@ -525,11 +525,11 @@ export default function SecurityConfigPage() {
   };
 
   return (
-    <div className="mx-auto w-full max-w-6xl space-y-5">
+    <div className="space-y-5">
       <PageHeader
         title={t('security.title')}
         description={t('security.description')}
-        icon={<Shield className="h-6 w-6" />}
+        icon={<Shield className="h-8 w-8" />}
         action={(
           <Link
             to="/settings/audit-logs"

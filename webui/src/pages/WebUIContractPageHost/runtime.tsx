@@ -1,4 +1,4 @@
-import React, { lazy, Suspense, type ComponentProps, type ComponentType, type ReactNode } from 'react';
+import React, { lazy, Suspense, useContext, type ComponentProps, type ComponentType, type ReactNode } from 'react';
 import { jsx, jsxs } from 'react/jsx-runtime';
 import { useTranslation } from 'react-i18next';
 import type { AxiosRequestConfig, AxiosResponse } from 'axios';
@@ -8,6 +8,8 @@ import WorkbenchPanel from '@/components/common/WorkbenchPanel';
 import type SessionTranscriptComponent from '@/components/common/SessionTranscript';
 import type { WorkbenchModelPickerProps } from '@/components/common/WorkbenchModelPicker';
 import { useAuth } from '@/contexts/AuthContext';
+import { PaneActiveContext } from '@/components/layout/PaneActiveContext';
+import { useSSE, type SSEConnectionStatus, type SSEEvent } from '@/hooks/useSSE';
 
 const LazyWorkbenchModelPicker = lazy(() => import('@/components/common/WorkbenchModelPicker'));
 export function WorkbenchModelPicker(props: WorkbenchModelPickerProps) {
@@ -73,6 +75,8 @@ export interface WebUIContractPageSdk {
   WorkbenchModelPicker: typeof WorkbenchModelPicker;
   useCurrentUser: typeof useCurrentUser;
   useLanguage: typeof useLanguage;
+  usePaneActive: typeof usePaneActive;
+  useServerEvents: typeof useServerEvents;
 }
 
 declare global {
@@ -112,6 +116,23 @@ export function useCurrentUser() {
 export function useLanguage() {
   const { i18n } = useTranslation();
   return i18n.resolvedLanguage || i18n.language || 'en-US';
+}
+
+/** False while the page sits in a hidden keep-alive tab; pages pause polling then. */
+export function usePaneActive(): boolean {
+  return useContext(PaneActiveContext);
+}
+
+/**
+ * Server events from the host's shared stream. A page that opened its own
+ * EventSource held a second long-lived connection per browser tab, and
+ * browsers allow only six per host over HTTP/1.1.
+ */
+export function useServerEvents(
+  onEvent: (event: SSEEvent) => void,
+  options: { enabled?: boolean; onReconnect?: () => void } = {},
+): SSEConnectionStatus {
+  return useSSE({ url: '/api/event', onEvent, enabled: options.enabled, onReconnect: options.onReconnect }).status;
 }
 
 function normalizePageApiPath(path: string): string {
@@ -183,6 +204,8 @@ export function installWebUIContractPageRuntime(pageId: string): void {
     WorkbenchModelPicker,
     useCurrentUser,
     useLanguage,
+    usePaneActive,
+    useServerEvents,
   };
 }
 

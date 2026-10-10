@@ -42,6 +42,7 @@ import {
   Save,
 } from 'lucide-react';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
+import { useDelayedVisible } from '@/hooks/useDelayedVisible';
 import EmptyState from '@/components/common/EmptyState';
 import { useToast } from '@/components/common/Toast';
 import { useToolPage } from '@/hooks/useTools';
@@ -51,6 +52,7 @@ import { assertGroupItemsEditable, saveGroupItems, type GroupSelection } from '@
 import { useAuth } from '@/contexts/AuthContext';
 import { usePluginViewMode } from '@/hooks/usePluginViewMode';
 import PluginViewToggle from '@/components/plugin-groups/PluginViewToggle';
+import PluginCard, { PLUGIN_CARD_GRID_CLASS } from '@/components/plugin-groups/PluginCard';
 import { useDebouncedValue } from '@/hooks/useDebouncedValue';
 import { canDirectlyTestTool, listAllToolPages, toolAPI, Tool, ToolFixture } from '@/api/tool';
 import { mcpAPI, MCPServer } from '@/api/mcp';
@@ -584,11 +586,7 @@ export default function ToolPage() {
   const isTabPageLoading = loading && hasLoadedToolPage && !toolPageInitialized;
 
   if (isInitialLoading) {
-    return (
-      <div className="flex items-center justify-center h-full">
-        <LoadingSpinner delayMs={180} />
-      </div>
-    );
+    return <ToolPageSkeleton />;
   }
 
   if (error && !hasLoadedToolPage) {
@@ -3364,6 +3362,44 @@ function ProviderCredentialsCard({ providerId, onTestingStart, onTestingEnd }: {
 }
 
 // ============================================================================
+// First-load skeleton: the page's own layout, so nothing jumps when data lands
+// ============================================================================
+
+function ToolPageSkeleton() {
+  const { t } = useTranslation('tool');
+  const visible = useDelayedVisible(180);
+  if (!visible) return null;
+  return (
+    <div className="min-w-0 space-y-6" aria-busy="true" data-testid="tool-page-skeleton">
+      <div className="flex items-center gap-3">
+        <div className="text-red-600">
+          <Wrench className="w-8 h-8" />
+        </div>
+        <div>
+          <h1 className="text-2xl font-bold text-gray-900">{t('pageTitle')}</h1>
+          <div className="mt-2 h-4 w-28 animate-pulse rounded-full bg-gray-200" />
+        </div>
+      </div>
+      <div className="flex min-h-14 items-center gap-6 border-b border-gray-200">
+        <div className="h-9 w-64 animate-pulse rounded-lg bg-gray-100" />
+        <div className="ml-auto flex gap-8">
+          {[0, 1, 2, 3].map((index) => <div key={index} className="h-5 w-24 animate-pulse rounded-full bg-gray-100" />)}
+        </div>
+      </div>
+      <div className="flex flex-col gap-4 md:flex-row">
+        <div className="hidden w-56 shrink-0 space-y-2 md:block">
+          {[0, 1, 2, 3, 4].map((index) => <div key={index} className="h-8 animate-pulse rounded-lg bg-gray-100" />)}
+        </div>
+        <div className="min-w-0 flex-1 space-y-2 rounded-lg border border-gray-200 bg-white p-3">
+          {[0, 1, 2, 3, 4, 5, 6, 7].map((index) => <div key={index} className="h-10 animate-pulse rounded-md bg-gray-50" />)}
+        </div>
+      </div>
+      <span className="sr-only" role="status">{t('common:status.loading')}</span>
+    </div>
+  );
+}
+
+// ============================================================================
 // Tool Table (全量工具 tab)
 // ============================================================================
 
@@ -3400,7 +3436,7 @@ function ToolTable({
   onPageChange: (page: number) => void;
   onSelect: (tool: Tool) => void;
 }) {
-  const { t } = useTranslation('tool');
+  const { t, i18n } = useTranslation('tool');
   // Column layout, left-to-right.  Every data column uses ``minmax(min, fr)``
   // so any leftover width on wide screens is shared *proportionally* across
   // the table rather than dumped into a single gap between "name" and
@@ -3474,18 +3510,49 @@ function ToolTable({
       </div>
 
       {/* Both layouts retain the same native fields and action callbacks. */}
-      <div className={viewMode === 'list' ? 'flex-1 divide-y divide-gray-100' : 'grid gap-3 p-3 sm:grid-cols-2 xl:grid-cols-3'}>
+      <div className={viewMode === 'list' ? 'flex-1 divide-y divide-gray-100' : `${PLUGIN_CARD_GRID_CLASS} p-3`}>
         {tools.map((tool) => {
           const sb = SOURCE_BADGE[tool.source] || SOURCE_BADGE.custom;
           const sourceLabel = getSourceLabel(tool.source, t);
           const categoryLabel = t(`category.${CATEGORY_I18N_KEY[tool.category] || tool.category}`, { defaultValue: tool.category });
 
+          if (viewMode === 'cards') {
+            // Same card as skills and agents: name and tags on top, state in the
+            // corner, description, provider, then the actions in one bar.
+            return (
+              <PluginCard
+                key={tool.name}
+                icon={<Wrench className="h-4 w-4" />}
+                title={tool.name}
+                tags={<>
+                  <span className={`inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-medium ${sb.className}`}>{sourceLabel}</span>
+                  <span className="text-[10px] text-gray-400">{categoryLabel}</span>
+                </>}
+                status={<EnabledBadge enabled={tool.enabled} />}
+                description={getLocalizedToolDescription(tool, i18n.language)}
+                emptyDescription={t('toolDetail.noDescription')}
+                meta={(
+                  <div className="flex min-w-0 items-center gap-2">
+                    <span className="shrink-0">{t('table.provider')}</span>
+                    <span className="truncate" title={tool.source_name || 'Flocks'}>{tool.source_name || 'Flocks'}</span>
+                  </div>
+                )}
+                muted={!tool.enabled}
+                onOpen={() => onSelect(tool)}
+                groupButton={<PluginGroupButton grouping={groupDrag} itemKey={tool.name} iconOnly />}
+                editLabel={t('mcp.manage')}
+                dragProps={groupDrag.dragProps(tool.name)}
+                testId={`tool-card-${tool.name}`}
+              />
+            );
+          }
+
           return (
             <div
               key={tool.name}
               {...groupDrag.dragProps(tool.name)}
-              className={`grid items-center gap-3 px-4 py-3 hover:bg-gray-50 transition-colors${viewMode === 'cards' ? ' rounded-lg border border-gray-200 bg-white [&>:nth-child(n+3)]:col-span-2' : ''}`}
-              style={{ gridTemplateColumns: viewMode === 'list' ? GRID_COLS : '32px minmax(0, 1fr)' }}
+              className="grid items-center gap-3 px-4 py-3 hover:bg-gray-50 transition-colors"
+              style={{ gridTemplateColumns: GRID_COLS }}
             >
               {/* Icon */}
               <div className={`w-8 h-8 flex items-center justify-center rounded-lg ${tool.enabled ? 'bg-gray-100' : 'bg-gray-50'}`}>

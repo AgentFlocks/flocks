@@ -25,6 +25,12 @@
     "custom": "自定义"
   },
 
+  "card": {
+    "enabledSwitch": "启用",
+    "enableTip": "已禁用，点击后启用该工具",
+    "disableTip": "已启用，点击后禁用该工具"
+  },
+
   "search": {
     "placeholder": "搜索工具..."
   },

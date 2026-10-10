@@ -29,6 +29,8 @@ import PluginViewToggle from '@/components/plugin-groups/PluginViewToggle';
 import PluginGroupButton from '@/components/plugin-groups/PluginGroupButton';
 import PluginCard, { PLUGIN_CARD_GRID_CLASS, PluginSourceTag } from '@/components/plugin-groups/PluginCard';
 import EnabledToggle from '@/components/plugin-groups/EnabledToggle';
+import { EnabledBadge } from '@/pages/Tool/components/badges';
+import EnabledSwitch from '@/components/plugin-groups/EnabledSwitch';
 import { requestConfirm } from '@/components/common/ConfirmDialog';
 
 const PAGE_SIZE = 25;
@@ -831,7 +833,8 @@ function SkillCard({ skill, isSelected, installingDeps, toggling, onSelect, onIn
       icon={isUser ? <FolderOpen className="h-4 w-4" /> : <Sparkles className="h-4 w-4" />}
       title={skill.name}
       tags={<PluginSourceTag builtin={!isUser} label={isUser ? t('table.custom') : t('table.builtin')} />}
-      status={<EnabledToggle enabled={enabled} loading={toggling}
+      status={<EnabledBadge enabled={enabled} />}
+      statusControl={<EnabledSwitch enabled={enabled} loading={toggling} label={t('table.enabled')}
         title={enabled ? t('toggle.enabledTip') : t('toggle.disabledTip')}
         onChange={(event) => onToggle(skill, event)} />}
       description={skill.description}

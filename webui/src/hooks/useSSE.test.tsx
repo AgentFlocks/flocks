@@ -61,6 +61,40 @@ describe('useSSE', () => {
     unmount();
   });
 
+  it('closes the stream when the page goes into the back/forward cache and recovers when it returns', () => {
+    const onReconnect = vi.fn();
+    const { result, unmount } = renderHook(() => useSSE({ url: '/api/event', onEvent: vi.fn(), onReconnect }));
+    act(() => { eventSources[0].onopen?.(new Event('open')); });
+    expect(result.current.status).toBe('connected');
+
+    const hidden = new Event('pagehide');
+    Object.defineProperty(hidden, 'persisted', { value: true });
+    act(() => { window.dispatchEvent(hidden); });
+    // The cached page must not keep holding a connection to the host.
+    expect(eventSources[0].readyState).toBe(FakeEventSource.CLOSED);
+    expect(result.current.status).toBe('disconnected');
+
+    const shown = new Event('pageshow');
+    Object.defineProperty(shown, 'persisted', { value: true });
+    act(() => { window.dispatchEvent(shown); });
+    expect(eventSources).toHaveLength(2);
+    act(() => { eventSources[1].onopen?.(new Event('open')); });
+    expect(result.current.status).toBe('connected');
+    // Events sent while the page was cached were missed, so subscribers resync.
+    expect(onReconnect).toHaveBeenCalledTimes(1);
+
+    unmount();
+  });
+
+  it('does not reconnect on a first page show', () => {
+    const { unmount } = renderHook(() => useSSE({ url: '/api/event', onEvent: vi.fn() }));
+    const shown = new Event('pageshow');
+    Object.defineProperty(shown, 'persisted', { value: false });
+    act(() => { window.dispatchEvent(shown); });
+    expect(eventSources).toHaveLength(1);
+    unmount();
+  });
+
   it('allows callers to opt out of credentials explicitly', () => {
     const { unmount } = renderHook(() => useSSE({
       url: '/public/events',

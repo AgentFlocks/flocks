@@ -46,6 +46,7 @@ vi.mock('react-i18next', () => ({
       'badge.protected': 'Pro 内置',
       'badge.protectedDeleteDisabled': 'Pro 内置不可删',
       'badge.protectedEditDisabled': '提示词受保护',
+      'badge.protectedDelegateDisabled': 'Pro 内置不可改委托',
       'form.enabled': '启用',
       'form.enabledTip': '允许委派',
       'form.disabledTip': '禁止委派',
@@ -278,14 +279,18 @@ describe('AgentPage protected prompts', () => {
     expect(screen.getByTestId('agent-sheet')).toBeInTheDocument();
   });
 
-  it('does not offer the delegation toggle on a sealed sub-agent', async () => {
+  it('shows a sealed sub-agent\'s delegation but keeps its switch disabled with the reason', async () => {
     const sealed = makeAgent({ name: 'sealed-sub', mode: 'subagent', promptProtected: true, delegatable: false });
     const custom = makeAgent({ name: 'open-sub', mode: 'subagent', delegatable: false });
     useInventory([sealed, custom]);
     render(<AgentPage />);
     const sealedCard = await screen.findByTestId('agent-card-sealed-sub');
-    expect(within(sealedCard).queryByRole('switch')).not.toBeInTheDocument();
-    expect(within(screen.getByTestId('agent-card-open-sub')).getByRole('switch')).toBeInTheDocument();
+    const sealedSwitch = within(sealedCard).getByRole('switch', { name: '启用' });
+    expect(sealedSwitch).toBeDisabled();
+    expect(sealedSwitch).toHaveAttribute('aria-description', 'Pro 内置不可改委托');
+    expect(within(sealedCard).getByText('enabledBadge.disabled')).toBeInTheDocument();
+    fireEvent.click(sealedSwitch);
+    expect(within(screen.getByTestId('agent-card-open-sub')).getByRole('switch')).toBeEnabled();
     expect(nativeAPI.setDelegatable).not.toHaveBeenCalled();
   });
 });

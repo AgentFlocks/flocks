@@ -1,8 +1,37 @@
 import { describe, expect, it, vi } from 'vitest';
+import { render, screen } from '@testing-library/react';
 import apiClient from '@/api/client';
+import { PaneActiveContext } from '@/components/layout/PaneActiveContext';
 import { installWebUIContractPageRuntime, loadWebUIContractPageBundle } from './runtime';
 
+const { useSSEMock } = vi.hoisted(() => ({ useSSEMock: vi.fn(() => ({ status: 'connected' })) }));
+vi.mock('@/hooks/useSSE', () => ({ useSSE: useSSEMock }));
+
 describe('WebUIContractPage runtime', () => {
+  it('tells a page whether its keep-alive tab is on screen', () => {
+    installWebUIContractPageRuntime('code-security-workspace');
+    const { usePaneActive } = window.__FLOCKS_WEBUI_CONTRACT_SDK__!;
+    function Probe() {
+      return <span data-testid="pane">{String(usePaneActive())}</span>;
+    }
+    const { rerender } = render(<PaneActiveContext.Provider value={false}><Probe /></PaneActiveContext.Provider>);
+    expect(screen.getByTestId('pane')).toHaveTextContent('false');
+    rerender(<PaneActiveContext.Provider value><Probe /></PaneActiveContext.Provider>);
+    expect(screen.getByTestId('pane')).toHaveTextContent('true');
+  });
+
+  it('gives pages the shared /api/event stream instead of their own connection', () => {
+    installWebUIContractPageRuntime('code-security-workspace');
+    const { useServerEvents } = window.__FLOCKS_WEBUI_CONTRACT_SDK__!;
+    const onEvent = vi.fn();
+    function Probe() {
+      return <span data-testid="status">{useServerEvents(onEvent, { enabled: false })}</span>;
+    }
+    render(<Probe />);
+    expect(screen.getByTestId('status')).toHaveTextContent('connected');
+    expect(useSSEMock).toHaveBeenCalledWith(expect.objectContaining({ url: '/api/event', onEvent, enabled: false }));
+  });
+
   it('exposes page-scoped api helper', async () => {
     const getSpy = vi.spyOn(apiClient, 'get').mockResolvedValue({ data: {} } as never);
     installWebUIContractPageRuntime('dash-1');

@@ -252,6 +252,28 @@ describe('SkillPage', () => {
     expect(await screen.findByTestId('skill-sheet')).toBeInTheDocument();
   });
 
+  it('shows the state top-right and switches it from the card action bar', async () => {
+    statusMock.mockResolvedValue({ data: [makeSkill('ndr-alert-analysis')] });
+    toggleMock.mockResolvedValue({ data: { name: 'ndr-alert-analysis', disabled: true } });
+    render(<SkillPage />);
+    await screen.findByText('ndr-alert-analysis');
+    fireEvent.click(screen.getByRole('button', { name: 'view.cards' }));
+    const card = screen.getByTestId('skill-card-ndr-alert-analysis');
+    const actionBar = within(card).getByRole('button', { name: 'table.edit' }).parentElement!;
+
+    // The top-right badge is only a state; the switch lives in the action bar.
+    expect(within(card).getByText('enabledBadge.enabled').closest('button')).toBeNull();
+    const toggle = within(card).getByRole('switch', { name: zhSkill.table.enabled });
+    expect(actionBar).toContainElement(toggle);
+    expect(toggle).toHaveAttribute('aria-checked', 'true');
+
+    fireEvent.click(toggle);
+    await waitFor(() => expect(toggleMock).toHaveBeenCalledWith('ndr-alert-analysis'));
+    await waitFor(() => expect(within(card).getByRole('switch')).toHaveAttribute('aria-checked', 'false'));
+    expect(within(card).getByText('enabledBadge.disabled')).toBeInTheDocument();
+    expect(getMock).not.toHaveBeenCalled();
+  });
+
   it('loads the original full list before whole-group edits and reports exact partial failures', async () => {
     let inventory = [{ ...makeSkill('first'), group: 'Ops' as string | null }, { ...makeSkill('failed'), group: 'Ops' as string | null }];
     statusMock.mockImplementation(async () => ({ data: inventory }));

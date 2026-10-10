@@ -374,7 +374,7 @@ export default function AuditLogsPage() {
         icon={<ShieldCheck className="w-8 h-8" />}
       />
 
-      <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-4 space-y-4">
+      <div className="bg-white rounded-xl border border-gray-200 p-6 space-y-4">
         <div className="grid grid-cols-1 md:grid-cols-5 gap-3">
           <select
             value={eventType}

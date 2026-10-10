@@ -7,7 +7,8 @@ import EmptyState from '@/components/common/EmptyState';
 import { useToast } from '@/components/common/Toast';
 import PluginGroupButton from '@/components/plugin-groups/PluginGroupButton';
 import PluginCard, { PLUGIN_CARD_GRID_CLASS, PluginSourceTag } from '@/components/plugin-groups/PluginCard';
-import EnabledToggle from '@/components/plugin-groups/EnabledToggle';
+import EnabledSwitch from '@/components/plugin-groups/EnabledSwitch';
+import { EnabledBadge } from '@/pages/Tool/components/badges';
 import { requestConfirm } from '@/components/common/ConfirmDialog';
 import { useAgents } from '@/hooks/useAgents';
 import { agentAPI, Agent } from '@/api/agent';
@@ -534,8 +535,9 @@ function AgentCard({
   const { t } = useTranslation('agent');
   const displayName = getAgentDisplayName(agent, displayLang);
   const displayDesc = getAgentDisplayDescription(agent, displayLang);
-  // A sealed definition keeps its own delegation setting (the API refuses changes).
-  const showDelegatableToggle = agent.mode === 'subagent' && !agent.promptProtected;
+  // Delegation applies to sub-agents. A sealed definition keeps its own setting
+  // (the API refuses changes), so its switch stays disabled and says why.
+  const showDelegation = agent.mode === 'subagent';
   const sourceLabel = agent.promptProtected ? t('badge.protected') : agent.native ? t('badge.native') : t('badge.custom');
   const deleteDisabledReason = agent.promptProtected
     ? t('badge.protectedDeleteDisabled')
@@ -552,15 +554,15 @@ function AgentCard({
           <span className="inline-flex items-center rounded bg-gray-50 px-1.5 py-0.5 text-[10px] font-medium text-gray-500">{t('badge.delegatable')}</span>
         )}
       </>}
-      status={showDelegatableToggle ? (
-        <EnabledToggle
+      status={showDelegation ? <EnabledBadge enabled={!!agent.delegatable} /> : undefined}
+      statusControl={showDelegation ? (
+        <EnabledSwitch
           enabled={!!agent.delegatable}
           loading={toggling}
+          label={t('form.enabled')}
           title={agent.delegatable ? t('form.enabledTip') : t('form.disabledTip')}
-          onChange={(e) => {
-            e.stopPropagation();
-            onToggleDelegatable(agent, !agent.delegatable);
-          }}
+          disabledReason={agent.promptProtected ? t('badge.protectedDelegateDisabled') : undefined}
+          onChange={() => onToggleDelegatable(agent, !agent.delegatable)}
         />
       ) : undefined}
       description={displayDesc}

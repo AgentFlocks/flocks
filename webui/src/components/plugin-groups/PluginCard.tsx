@@ -2,10 +2,10 @@ import type { HTMLAttributes, MouseEvent, ReactNode } from 'react';
 import { Pencil, Trash2 } from 'lucide-react';
 
 /**
- * One card layout for plugin resources (agents, skills): icon, title, tags
- * under the title, enabled state in the top-right corner, a two-line
- * description (full text on hover) and the actions in a fixed order —
- * delete, group, (extra), edit — as icon buttons with tooltips.
+ * One card layout for plugin resources (agents, skills, tools): icon, title,
+ * tags under the title, the read-only state in the top-right corner, a
+ * two-line description (full text on hover) and the action bar: the state
+ * switch on the left, then delete, group, (extra), edit as icon buttons.
  */
 /** Columns follow the space the section actually has, never a fixed count. */
 export const PLUGIN_CARD_GRID_CLASS = 'grid gap-3 grid-cols-[repeat(auto-fill,minmax(min(20rem,100%),1fr))]';
@@ -14,8 +14,10 @@ export interface PluginCardProps {
   icon: ReactNode;
   title: string;
   tags?: ReactNode;
-  /** Enabled state (usually a toggle badge) shown in the top-right corner. */
+  /** Read-only state badge, shown in the top-right corner. */
   status?: ReactNode;
+  /** The switch that changes `status`, shown at the start of the action bar. */
+  statusControl?: ReactNode;
   description?: string;
   emptyDescription: string;
   /** Extra facts under the description (model, source, warnings). */
@@ -24,7 +26,8 @@ export interface PluginCardProps {
   selected?: boolean;
   muted?: boolean;
   onOpen: () => void;
-  deleteLabel: string;
+  /** Required when a delete button is shown. */
+  deleteLabel?: string;
   /** Omit to hide; pass with `deleteDisabledReason` for read-only items. */
   onDelete?: () => void;
   deleteDisabledReason?: string;
@@ -50,7 +53,7 @@ export function PluginSourceTag({ builtin, label }: { builtin: boolean; label: s
 const iconButtonClass = 'inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-700 disabled:cursor-not-allowed disabled:text-gray-300 disabled:hover:bg-transparent dark:disabled:text-zinc-600';
 
 export default function PluginCard({
-  icon, title, tags, status, description, emptyDescription, meta, layout = 'cards', selected = false, muted = false,
+  icon, title, tags, status, statusControl, description, emptyDescription, meta, layout = 'cards', selected = false, muted = false,
   onOpen, deleteLabel, onDelete, deleteDisabledReason, groupButton, extraActions, editLabel, editDisabledReason, dragProps, testId,
 }: PluginCardProps) {
   const list = layout === 'list';
@@ -76,9 +79,10 @@ export default function PluginCard({
             <span className="block truncate text-sm font-semibold leading-snug text-gray-900" title={title}>{title}</span>
             {tags && <div className="mt-1 flex flex-wrap items-center gap-1">{tags}</div>}
           </div>
-          {status && !list && <div className="shrink-0" onClick={stop}>{status}</div>}
+          {status && !list && <div className="shrink-0">{status}</div>}
         </div>
-        <p className={`line-clamp-2 text-xs leading-5 text-gray-500 ${list ? 'lg:flex-1' : ''}`} title={description || undefined}>
+        {/* Two lines reserved in card view, so every card in the grid keeps the same height. */}
+        <p className={`line-clamp-2 text-xs leading-5 text-gray-500 ${list ? 'lg:flex-1' : 'min-h-10'}`} title={description || undefined}>
           {description || emptyDescription}
         </p>
         {meta && <div className={`min-w-0 text-[11px] text-gray-400 ${list ? 'lg:w-48 lg:shrink-0' : ''}`}>{meta}</div>}
@@ -87,7 +91,12 @@ export default function PluginCard({
         className={`mt-auto flex items-center justify-end gap-1 border-t border-gray-100 px-3 py-2 ${list ? 'lg:mt-0 lg:shrink-0 lg:border-l lg:border-t-0' : ''}`}
         onClick={stop}
       >
-        {status && list && <div className="mr-auto shrink-0 lg:mr-2">{status}</div>}
+        {(statusControl || (status && list)) && (
+          <div className={`mr-auto flex shrink-0 items-center gap-2 ${list ? 'lg:mr-2' : ''}`}>
+            {list && !statusControl && status}
+            {statusControl}
+          </div>
+        )}
         {showDelete && (
           <button
             type="button"
