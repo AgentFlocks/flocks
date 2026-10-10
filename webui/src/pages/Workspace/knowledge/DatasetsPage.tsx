@@ -1,19 +1,19 @@
 import { useEffect, useId, useRef, useState } from 'react';
 import {
-  IconArrowLeft,
-  IconChevronRight,
-  IconDatabase,
-  IconFileText,
-  IconLayoutGrid,
-  IconList,
-  IconPencil,
-  IconPlayerPlay,
-  IconPlus,
-  IconSearch,
-  IconStack2,
-  IconTrash,
-  IconUnlink,
-} from '@tabler/icons-react';
+  ArrowLeft,
+  ChevronRight,
+  Database,
+  FileText,
+  Layers,
+  LayoutGrid,
+  List,
+  Pencil,
+  Play,
+  Plus,
+  Search,
+  Trash2,
+  Unlink,
+} from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { knowledgebaseAPI, type Dataset, type KnowledgeDocument } from '@/api/knowledgebase';
 import { useConfirm } from '@/components/common/ConfirmDialog';
@@ -43,16 +43,16 @@ export default function DatasetsPage({ revision, onChanged }: { revision: number
       onKeyDownCapture={event => { if (form) { event.preventDefault(); event.stopPropagation(); } }}>
       <div className="kb-dataset-toolbar">
         <label className="kb-search">
-          <IconSearch aria-hidden="true" />
+          <Search aria-hidden="true" />
           <input value={q} onChange={event => setQ(event.target.value)} aria-label={t('knowledge.datasets.search')}
             aria-describedby={searchHintId} placeholder={t('knowledge.datasets.search')} />
         </label>
         <div className="kb-dataset-toolbar-actions">
           <div role="group" aria-label={t('knowledge.datasets.layout')} className="kb-layout-toggle">
-            <Button variant="quiet" size="icon" aria-label={t('knowledge.datasets.gridView')} title={t('knowledge.datasets.gridView')} aria-pressed={layout === 'grid'} onClick={() => setLayout('grid')}><IconLayoutGrid aria-hidden="true" /></Button>
-            <Button variant="quiet" size="icon" aria-label={t('knowledge.datasets.listView')} title={t('knowledge.datasets.listView')} aria-pressed={layout === 'list'} onClick={() => setLayout('list')}><IconList aria-hidden="true" /></Button>
+            <Button variant="quiet" size="icon" aria-label={t('knowledge.datasets.gridView')} title={t('knowledge.datasets.gridView')} aria-pressed={layout === 'grid'} onClick={() => setLayout('grid')}><LayoutGrid aria-hidden="true" /></Button>
+            <Button variant="quiet" size="icon" aria-label={t('knowledge.datasets.listView')} title={t('knowledge.datasets.listView')} aria-pressed={layout === 'list'} onClick={() => setLayout('list')}><List aria-hidden="true" /></Button>
           </div>
-          <Button variant="primary" onClick={() => setForm('create')}><IconPlus aria-hidden="true" />{t('knowledge.datasets.create')}</Button>
+          <Button variant="primary" onClick={() => setForm('create')}><Plus aria-hidden="true" />{t('knowledge.datasets.create')}</Button>
         </div>
       </div>
       <p id={searchHintId} className="kb-search-hint">{t('knowledge.datasets.pageSearch')}</p>
@@ -62,18 +62,18 @@ export default function DatasetsPage({ revision, onChanged }: { revision: number
             {datasets?.map(dataset => <li key={dataset.id} className="kb-dataset-card">
               <div className="kb-dataset-card-head">
                 <button type="button" aria-label={dataset.name} className="kb-dataset-open" onClick={() => setOpenId(dataset.id)}>
-                  <span className="kb-dataset-icon"><IconDatabase aria-hidden="true" /></span>
+                  <span className="kb-dataset-icon"><Database aria-hidden="true" /></span>
                   <span className="kb-dataset-heading"><span className="kb-dataset-name" title={dataset.name}>{dataset.name}</span><span className="kb-dataset-subtitle">{t('knowledge.datasets.entityType')}</span></span>
                 </button>
-                <Button variant="quiet" size="small" className="kb-dataset-edit" aria-label={t('knowledge.datasets.edit')} onClick={() => setForm(dataset)}><IconPencil aria-hidden="true" />{t('knowledge.datasets.editAction')}</Button>
+                <Button variant="quiet" size="small" className="kb-dataset-edit" aria-label={t('knowledge.datasets.edit')} onClick={() => setForm(dataset)}><Pencil aria-hidden="true" />{t('knowledge.datasets.editAction')}</Button>
               </div>
               <p className="kb-dataset-description" title={dataset.description || undefined}>{dataset.description || t('knowledge.datasets.noDescription')}</p>
               <div className="kb-dataset-card-footer">
                 <DatasetMetadata dataset={dataset} />
-                <Button variant="quiet" size="small" onClick={() => setOpenId(dataset.id)}>{t('knowledge.datasets.open')}<IconChevronRight aria-hidden="true" /></Button>
+                <Button variant="quiet" size="small" onClick={() => setOpenId(dataset.id)}>{t('knowledge.datasets.open')}<ChevronRight aria-hidden="true" /></Button>
               </div>
             </li>)}
-            {datasets?.length === 0 && <li className="kb-dataset-empty"><span className="kb-empty-icon"><IconDatabase aria-hidden="true" /></span><p>{t(q.trim() ? 'knowledge.noMatch' : 'knowledge.datasets.empty')}</p></li>}
+            {datasets?.length === 0 && <li className="kb-dataset-empty"><span className="kb-empty-icon"><Database aria-hidden="true" /></span><p>{t(q.trim() ? 'knowledge.noMatch' : 'knowledge.datasets.empty')}</p></li>}
           </ul>
         </div>
         {query.data && <Pagination variant="knowledge" page={page} total={query.data.total} onChange={setPage} />}
@@ -87,8 +87,8 @@ function DatasetMetadata({ dataset }: { dataset: Dataset }) {
   const { t } = useTranslation('workspace');
   const knownCount = (value: number | null) => typeof value === 'number' && Number.isFinite(value) && value >= 0;
   return <div className="kb-dataset-metadata">
-    {knownCount(dataset.document_count) && <span><IconFileText aria-hidden="true" />{t('knowledge.datasets.documentCount', { value: dataset.document_count })}</span>}
-    {knownCount(dataset.chunk_count) && <span><IconStack2 aria-hidden="true" />{t('knowledge.datasets.chunkCount', { value: dataset.chunk_count })}</span>}
+    {knownCount(dataset.document_count) && <span><FileText aria-hidden="true" />{t('knowledge.datasets.documentCount', { value: dataset.document_count })}</span>}
+    {knownCount(dataset.chunk_count) && <span><Layers aria-hidden="true" />{t('knowledge.datasets.chunkCount', { value: dataset.chunk_count })}</span>}
   </div>;
 }
 
@@ -150,7 +150,7 @@ function DatasetForm({ dataset, onClose, onSaved }: { dataset?: Dataset; onClose
     <form className="space-y-4" onSubmit={event => { event.preventDefault(); void submit(); }}>
       <label className="block space-y-2 text-sm"><span>{t('knowledge.name')}</span><input required disabled={busy} value={name} onChange={event => setName(event.target.value)} className={inputClass} /></label>
       <label className="block space-y-2 text-sm"><span>{t('knowledge.datasets.descriptionLabel')}</span><textarea disabled={busy} value={description} onChange={event => setDescription(event.target.value)} className={inputClass} /></label>
-      {!target && <p className="text-xs text-fg-muted">{t('knowledge.datasets.catalogHint')}</p>}
+      {!target && <p className="text-xs text-gray-500">{t('knowledge.datasets.catalogHint')}</p>}
     </form>
   </EntitySheet></div>;
 }
@@ -215,7 +215,7 @@ function DatasetDetail({ id, revision, onBack, onChanged }: { id: string; revisi
       onClickCapture={event => { if (editing || linking) { event.preventDefault(); event.stopPropagation(); } }}
       onKeyDownCapture={event => { if (editing || linking) { event.preventDefault(); event.stopPropagation(); } }}>
     <div className="flex flex-wrap items-center justify-end gap-2 pb-3">
-      <Button variant="link" size="small" onClick={onBack}><IconArrowLeft aria-hidden="true" />{t('knowledge.datasets.back')}</Button>
+      <Button variant="link" size="small" onClick={onBack}><ArrowLeft aria-hidden="true" />{t('knowledge.datasets.back')}</Button>
       <Button variant="quiet" size="small" onClick={query.reload}>{t('knowledge.refresh')}</Button>
       {query.refreshStatus === 'refreshing' && <Button variant="quiet" size="small" onClick={query.cancel}>{t('knowledge.datasets.stopRefresh')}</Button>}
     </div>
@@ -223,19 +223,19 @@ function DatasetDetail({ id, revision, onBack, onChanged }: { id: string; revisi
     <LoadState loading={query.loading && !data} error={data ? undefined : query.error} retry={query.reload}>
       {data && <>
         <header className="kb-dataset-detail-header">
-          <span className="kb-dataset-icon"><IconDatabase aria-hidden="true" /></span>
+          <span className="kb-dataset-icon"><Database aria-hidden="true" /></span>
           <div className="kb-dataset-detail-summary">
-            <div className="kb-dataset-detail-title"><h2>{data.dataset.name}</h2><Button variant="quiet" size="small" disabled={busy} onClick={() => setEditing(true)}><IconPencil aria-hidden="true" />{t('knowledge.datasets.edit')}</Button></div>
+            <div className="kb-dataset-detail-title"><h2>{data.dataset.name}</h2><Button variant="quiet" size="small" disabled={busy} onClick={() => setEditing(true)}><Pencil aria-hidden="true" />{t('knowledge.datasets.edit')}</Button></div>
             <p>{data.dataset.description || t('knowledge.datasets.noDescription')}</p>
             <DatasetMetadata dataset={data.dataset} />
           </div>
-          <Button variant="danger" size="small" className="kb-dataset-delete" disabled={busy} onClick={() => void remove(data.dataset)}><IconTrash aria-hidden="true" />{t('knowledge.datasets.delete')}</Button>
+          <Button variant="danger" size="small" className="kb-dataset-delete" disabled={busy} onClick={() => void remove(data.dataset)}><Trash2 aria-hidden="true" />{t('knowledge.datasets.delete')}</Button>
         </header>
         <WorkspaceFileSplit className="kb-document-workbench" list={listWidth => <>
           <div className="kb-document-toolbar">
-            <label className="kb-search"><IconSearch aria-hidden="true" /><input value={q} onChange={event => setQ(event.target.value)}
+            <label className="kb-search"><Search aria-hidden="true" /><input value={q} onChange={event => setQ(event.target.value)}
               aria-label={t('knowledge.datasets.searchDocuments')} placeholder={t('knowledge.datasets.searchDocuments')} /></label>
-            <Button variant="primary" disabled={busy} onClick={() => setLinking(true)}><IconPlus aria-hidden="true" />{t('knowledge.datasets.linkFiles')}</Button>
+            <Button variant="primary" disabled={busy} onClick={() => setLinking(true)}><Plus aria-hidden="true" />{t('knowledge.datasets.linkFiles')}</Button>
           </div>
           <div className="kb-documents-scroll">
             <FileListTable aria-label={t('knowledge.datasets.documents')} className={`kb-document-table${listWidth < 850 ? ' is-compact' : ''}`} header={<>
@@ -247,14 +247,14 @@ function DatasetDetail({ id, revision, onBack, onChanged }: { id: string; revisi
               <th scope="col" className="kb-document-actions">{t('knowledge.actions')}</th>
             </>}>
               {documents.map(document => <FileListRow key={document.id} selected={preview?.id === document.id} className="kb-document-row" onClick={() => openSource(document)}>
-                <td className="kb-document-name"><button type="button" className="kb-document-filename w-full text-left" title={document.name} disabled={!document.id?.trim()}><IconFileText aria-hidden="true" /><span>{document.name}</span></button></td>
+                <td className="kb-document-name"><button type="button" className="kb-document-filename w-full text-left" title={document.name} disabled={!document.id?.trim()}><FileText aria-hidden="true" /><span>{document.name}</span></button></td>
                 <td className="kb-document-type">{fileType(document.name)}</td>
                 {listWidth >= 560 && <td className="kb-document-size">{document.size == null ? '—' : formatBytes(document.size)}</td>}
                 {listWidth >= 760 && <td className="kb-document-date"><CreatedAt value={document.updated_at} /></td>}
                 {listWidth >= 560 && <td className="kb-document-status-col"><DocumentStatus status={document.status} /></td>}
                 <td className="kb-document-actions"><FileListActions className="kb-document-action-buttons">
-                  <Button variant="secondary" size={listWidth < 850 ? 'icon' : 'small'} aria-label={t('knowledge.datasets.parse')} title={t('knowledge.datasets.parseName', { name: document.name })} disabled={busy} onClick={() => void run(() => knowledgebaseAPI.parse(id, [document.id]), t('knowledge.datasets.parse'))}>{listWidth < 850 ? <IconPlayerPlay aria-hidden="true" /> : t('knowledge.datasets.parse')}</Button>
-                  <Button variant="quiet" size={listWidth < 850 ? 'icon' : 'small'} aria-label={t('knowledge.datasets.unlink')} title={t('knowledge.datasets.unlinkName', { name: document.name })} disabled={busy} onClick={() => void run(() => knowledgebaseAPI.removeDocuments(id, [document.id]), t('knowledge.datasets.unlink'), () => setPreview(current => current?.id === document.id ? null : current))}>{listWidth < 850 ? <IconUnlink aria-hidden="true" /> : t('knowledge.datasets.unlink')}</Button>
+                  <Button variant="secondary" size={listWidth < 850 ? 'icon' : 'small'} aria-label={t('knowledge.datasets.parse')} title={t('knowledge.datasets.parseName', { name: document.name })} disabled={busy} onClick={() => void run(() => knowledgebaseAPI.parse(id, [document.id]), t('knowledge.datasets.parse'))}>{listWidth < 850 ? <Play aria-hidden="true" /> : t('knowledge.datasets.parse')}</Button>
+                  <Button variant="quiet" size={listWidth < 850 ? 'icon' : 'small'} aria-label={t('knowledge.datasets.unlink')} title={t('knowledge.datasets.unlinkName', { name: document.name })} disabled={busy} onClick={() => void run(() => knowledgebaseAPI.removeDocuments(id, [document.id]), t('knowledge.datasets.unlink'), () => setPreview(current => current?.id === document.id ? null : current))}>{listWidth < 850 ? <Unlink aria-hidden="true" /> : t('knowledge.datasets.unlink')}</Button>
                 </FileListActions></td>
               </FileListRow>)}
               {documents.length === 0 && <tr><td colSpan={3 + Number(listWidth >= 760) + 2 * Number(listWidth >= 560)} className="kb-document-empty">{t(q.trim() ? 'knowledge.noMatch' : 'knowledge.datasets.noDocuments')}</td></tr>}

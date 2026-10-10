@@ -353,7 +353,7 @@ describe('WorkspacePage', () => {
     expect(await screen.findByRole('heading', { name: 'Notes' })).toBeInTheDocument();
     const preview = screen.getByRole('button', { name: 'Drag to resize preview' }).parentElement!;
     expect(preview).toHaveStyle({ minWidth: '420px' });
-    expect(filename.closest('tr')).toHaveClass('bg-subtle');
+    expect(filename.closest('tr')).toHaveClass('bg-slate-100');
     expect(within(preview).getByText('24 B').parentElement).toHaveClass('px-4', 'py-1.5');
     expect(within(preview).getByTitle('notes.md').parentElement).toHaveClass('px-4', 'py-2.5');
     expect(within(preview).getByTitle('Edit')).toBeInTheDocument();
@@ -361,7 +361,7 @@ describe('WorkspacePage', () => {
 
     await user.click(within(preview).getByTitle('Close'));
     expect(screen.queryByRole('button', { name: 'Drag to resize preview' })).not.toBeInTheDocument();
-    expect(screen.getByText('notes.md').closest('tr')).not.toHaveClass('bg-subtle');
+    expect(screen.getByText('notes.md').closest('tr')).not.toHaveClass('bg-slate-100');
   });
 
   it('Markdown 文件默认渲染预览，并可打开全屏预览', async () => {

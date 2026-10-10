@@ -7,7 +7,7 @@
  */
 
 import { useId, useRef, useState, useCallback } from 'react';
-import { IconX } from '@tabler/icons-react';
+import { X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import SessionChat from './SessionChat';
 import { useDialogFocus } from '@/hooks/useDialogFocus';
@@ -30,10 +30,10 @@ export interface DelegateDetailSheetProps {
 // ---------------------------------------------------------------------------
 
 const STATUS_DOT: Record<string, string> = {
-  pending:   'bg-selected',
-  running:   'bg-info animate-pulse',
-  completed: 'bg-success',
-  error:     'bg-action',
+  pending:   'bg-gray-400',
+  running:   'bg-sky-500 animate-pulse',
+  completed: 'bg-emerald-500',
+  error:     'bg-red-500',
 };
 
 // ---------------------------------------------------------------------------
@@ -116,14 +116,14 @@ export default function DelegateDetailSheet({
     <div className="fixed inset-0 z-50 flex justify-end">
       {/* Backdrop */}
       <div
-        className="absolute inset-0 bg-overlay-backdrop backdrop-blur-[2px] transition-opacity"
+        className="absolute inset-0 bg-black/30 backdrop-blur-[2px] transition-opacity"
         onClick={onClose}
       />
 
       {/* Drag separator — matching workflow RightPanel style */}
       <div
         onMouseDown={onDragStart}
-        className="relative w-1 flex-shrink-0 bg-selected hover:bg-action-hover active:bg-action-pressed cursor-col-resize transition-colors duration-150 z-[51]"
+        className="relative w-1 bg-gray-200 hover:bg-red-400 active:bg-red-500 cursor-col-resize transition-colors duration-150 flex-shrink-0 z-[51]"
       >
         <div className="absolute inset-y-0 -left-1.5 -right-1.5" />
       </div>
@@ -136,32 +136,32 @@ export default function DelegateDetailSheet({
         aria-labelledby={titleId}
         tabIndex={-1}
         data-ui-overlay="drawer"
-        className="relative max-w-full bg-surface shadow-overlay flex flex-col border-l border-line overflow-hidden z-[51]"
+        className="relative bg-white shadow-2xl flex flex-col border-l border-gray-200 max-w-full overflow-hidden z-[51]"
         style={{ width }}
       >
         {/* Header */}
-        <div className="flex items-center gap-3 px-4 sm:px-6 py-4 border-b border-line bg-canvas flex-shrink-0">
-          <span className="inline-flex items-center justify-center w-8 h-8 rounded-control bg-ai-soft text-ai text-sm font-semibold">
+        <div className="flex items-center gap-3 border-b border-gray-200 bg-gray-50/80 px-4 sm:px-6 py-4 flex-shrink-0">
+          <span className="inline-flex items-center justify-center w-8 h-8 rounded-full bg-gradient-to-br from-violet-500 to-red-500 text-white text-sm font-bold shadow-sm">
             {agentName.charAt(0)}
           </span>
 
           <div className="flex-1 min-w-0">
             <div className="flex items-center gap-2">
-              <h2 id={titleId} className="text-title-section text-fg truncate">{agentName}</h2>
-              <span className="flex items-center gap-1 text-xs font-medium text-fg-muted">
+              <h2 id={titleId} className="text-sm font-semibold text-gray-900 truncate">{agentName}</h2>
+              <span className="flex items-center gap-1 text-[10px] font-medium text-gray-500">
                 <span className={`inline-block w-1.5 h-1.5 rounded-full ${dot}`} />
                 {statusLabel}
               </span>
             </div>
-            <p className="text-xs text-fg-muted truncate mt-0.5">{description}</p>
+            <p className="text-xs text-gray-500 mt-0.5 truncate">{description}</p>
           </div>
 
           <button
             onClick={onClose}
             aria-label={t('button.close')}
-            className="ui-btn ui-btn-ghost ui-btn-icon shrink-0 text-fg-muted"
+            className="p-1.5 rounded-md text-gray-400 hover:text-gray-600 hover:bg-gray-200/60 transition-colors shrink-0"
           >
-            <IconX aria-hidden="true" className="w-4 h-4" />
+            <X aria-hidden="true" className="w-4 h-4" />
           </button>
         </div>
 

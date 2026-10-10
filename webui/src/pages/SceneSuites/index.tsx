@@ -1,7 +1,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import { IconAlertCircle, IconCircleArrowUp, IconDownload, IconLoader2, IconPower, IconRefresh, IconTrash } from '@tabler/icons-react';
+import {
+  AlertCircle,
+  ArrowUpCircle,
+  Download,
+  Loader2,
+  Power,
+  RefreshCw,
+  Trash2,
+} from 'lucide-react';
 import { hubAPI, type HubInstallProgressEvent, type HubSceneSuite } from '@/api/hub';
 import SuiteInstallProgressPanel, {
   applySuiteInstallProgressEvent,
@@ -261,8 +269,8 @@ export default function SceneSuitesPage() {
 
   if (loading) {
     return (
-      <div className="flex items-center gap-2 text-sm text-fg-muted ">
-        <IconLoader2 aria-hidden="true" className="h-4 w-4 animate-spin" />
+      <div className="flex items-center gap-2 text-sm text-zinc-500 dark:text-zinc-400">
+        <Loader2 aria-hidden="true" className="h-4 w-4 animate-spin" />
       </div>
     );
   }
@@ -281,29 +289,29 @@ export default function SceneSuitesPage() {
       )}
       <div className="mb-5 flex items-start justify-between gap-4">
         <div className="min-w-0">
-          <h1 className="text-title-page font-bold text-fg">{text.title}</h1>
-          <p className="mt-1 text-sm text-fg-muted ">{text.description}</p>
+          <h1 className="text-xl font-bold text-zinc-900 dark:text-zinc-50">{text.title}</h1>
+          <p className="mt-1 text-sm text-zinc-500 dark:text-zinc-400">{text.description}</p>
         </div>
         <button
           type="button"
           onClick={() => void refetch()}
           disabled={busyId !== null}
-          className="inline-flex shrink-0 items-center gap-1.5 rounded-control border border-line px-3 py-1.5 text-sm font-medium text-fg-secondary transition-colors hover:bg-hover "
+          className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-200 px-3 py-1.5 text-sm font-medium text-zinc-600 transition-colors hover:bg-zinc-50 dark:border-zinc-800 dark:text-zinc-300 dark:hover:bg-zinc-900 shrink-0"
         >
-          <IconRefresh aria-hidden="true" className="h-4 w-4" />
+          <RefreshCw aria-hidden="true" className="h-4 w-4" />
           {text.refresh}
         </button>
       </div>
 
       {error && (
-        <div className="mb-4 flex items-center gap-2 rounded-control border border-danger bg-danger-soft px-3 py-2 text-sm text-danger ">
-          <IconAlertCircle aria-hidden="true" className="h-4 w-4 shrink-0" />
+        <div className="mb-4 flex items-center gap-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700 dark:border-red-900 dark:bg-red-950/40 dark:text-red-300">
+          <AlertCircle aria-hidden="true" className="h-4 w-4 shrink-0" />
           {error}
         </div>
       )}
 
       {suites.length === 0 && !error && (
-        <p className="text-sm text-fg-muted ">{text.empty}</p>
+        <p className="text-sm text-zinc-500 dark:text-zinc-400">{text.empty}</p>
       )}
 
       <div className="space-y-3">
@@ -326,49 +334,49 @@ export default function SceneSuitesPage() {
               data-suite-id={suite.id}
               ref={targeted ? targetCardRef : undefined}
               tabIndex={targeted ? -1 : undefined}
-              className={`rounded-card border border-line bg-surface p-4 ${targeted ? 'ring-2 ring-focus ring-offset-2 ' : ''}`}
+              className={`rounded-xl border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900 ${targeted ? 'ring-2 ring-zinc-500 ring-offset-2 dark:ring-offset-zinc-950' : ''}`}
             >
               <div className="flex flex-col items-start justify-between gap-4 sm:flex-row">
                 <div className="min-w-0">
                   <div className="flex flex-wrap items-center gap-2">
-                    <h2 className="text-base font-semibold text-fg ">{suiteName(suite, zh)}</h2>
-                    <span className="rounded-tag border border-line px-1.5 py-0.5 text-xs font-medium text-fg-muted ">
+                    <h2 className="text-base font-semibold text-zinc-900 dark:text-zinc-50">{suiteName(suite, zh)}</h2>
+                    <span className="rounded border border-zinc-200 px-1.5 py-0.5 text-[11px] font-medium text-zinc-500 dark:border-zinc-700 dark:text-zinc-400">
                       {stateLabel[suite.state] ?? suite.state}
                     </span>
                     {suite.edition === 'pro' && (
-                      <span className="rounded-tag border border-warning bg-warning-soft px-1.5 py-0.5 text-xs font-semibold text-warning ">
+                      <span className="rounded border border-amber-300 bg-amber-50 px-1.5 py-0.5 text-[11px] font-semibold text-amber-700 dark:border-amber-800 dark:bg-amber-950/50 dark:text-amber-300">
                         {text.proBadge}
                       </span>
                     )}
                     {isInstalled && suite.workspaceEnabled === false && (
-                      <span className="rounded-tag border border-line-control px-1.5 py-0.5 text-xs font-medium text-fg-muted ">
+                      <span className="rounded border border-zinc-300 px-1.5 py-0.5 text-[11px] font-medium text-zinc-500 dark:border-zinc-700 dark:text-zinc-400">
                         {text.disabled}
                       </span>
                     )}
                   </div>
-                  <p className="mt-1 text-sm text-fg-muted ">{suiteDescription(suite, zh)}</p>
-                  <p className="mt-1 text-xs text-fg-muted ">
+                  <p className="mt-1 text-sm text-zinc-500 dark:text-zinc-400">{suiteDescription(suite, zh)}</p>
+                  <p className="mt-1 text-xs text-zinc-400 dark:text-zinc-500">
                     {suite.installedVersion ? text.currentVersion.replace('{v}', suite.installedVersion) + ' · ' : ''}
                     {text.latestVersion.replace('{v}', suite.version)}
                     {pagesBehind && (
                       <>
                         {' · '}
-                        <span className="text-warning ">
+                        <span className="text-amber-600 dark:text-amber-400">
                           {text.pagesVersion.replace('{installed}', suite.workspaceVersion ?? '').replace('{latest}', suite.workspaceLatestVersion ?? '')}
                         </span>
                       </>
                     )}
                   </p>
                   {proLocked && (
-                    <p className="mt-2 text-xs text-warning ">{text.proHint}</p>
+                    <p className="mt-2 text-xs text-amber-700 dark:text-amber-300">{text.proHint}</p>
                   )}
                   {isPartial && (
-                    <p className="mt-2 text-sm text-warning ">
+                    <p className="mt-2 text-sm text-amber-700 dark:text-amber-300">
                       {hasWorkspace ? text.partialWorkspace : text.partialSuite}
                     </p>
                   )}
                   {targeted && isInstalled && hasWorkspace && (suite.workspaceEnabled === false || (!isPartial && pagesUnavailable)) && (
-                    <p className="mt-2 text-sm text-warning ">
+                    <p className="mt-2 text-sm text-amber-700 dark:text-amber-300">
                       {suite.workspaceEnabled === false ? text.workspaceDisabled : text.workspacePending}
                     </p>
                   )}
@@ -378,9 +386,9 @@ export default function SceneSuitesPage() {
                   {proLocked ? (
                     <Link
                       to="/settings/flockspro"
-                      className="inline-flex items-center gap-1.5 rounded-control bg-warning-soft px-3 py-1.5 text-sm font-semibold text-warning transition-colors hover:bg-warning-soft"
+                      className="inline-flex items-center gap-1.5 rounded-lg bg-amber-500 px-3 py-1.5 text-sm font-semibold text-white transition-colors hover:bg-amber-600"
                     >
-                      <IconCircleArrowUp aria-hidden="true" className="h-4 w-4" />
+                      <ArrowUpCircle aria-hidden="true" className="h-4 w-4" />
                       {text.upgrade}
                     </Link>
                   ) : (
@@ -390,9 +398,9 @@ export default function SceneSuitesPage() {
                           type="button"
                           disabled={busyId !== null}
                           onClick={() => void runAction(suite, 'install')}
-                          className="ui-btn ui-btn-primary"
+                          className="inline-flex items-center gap-1.5 rounded-lg bg-zinc-900 px-3 py-1.5 text-sm font-semibold text-white transition-colors hover:bg-zinc-800 disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-white"
                         >
-                          {busy ? <IconLoader2 aria-hidden="true" className="h-4 w-4 animate-spin" /> : <IconDownload aria-hidden="true" className="h-4 w-4" />}
+                          {busy ? <Loader2 aria-hidden="true" className="h-4 w-4 animate-spin" /> : <Download aria-hidden="true" className="h-4 w-4" />}
                           {isPartial ? text.completeInstall : text.install}
                         </button>
                       )}
@@ -401,9 +409,9 @@ export default function SceneSuitesPage() {
                           type="button"
                           disabled={busyId !== null}
                           onClick={() => void runAction(suite, 'update')}
-                          className="inline-flex items-center gap-1.5 rounded-control border border-line px-3 py-1.5 text-sm font-medium text-fg-secondary transition-colors hover:bg-hover disabled:bg-disabled disabled:text-fg-disabled "
+                          className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-200 px-3 py-1.5 text-sm font-medium text-zinc-700 transition-colors hover:bg-zinc-50 disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-800"
                         >
-                          <IconCircleArrowUp aria-hidden="true" className="h-4 w-4" />
+                          <ArrowUpCircle aria-hidden="true" className="h-4 w-4" />
                           {text.update}
                         </button>
                       )}
@@ -413,10 +421,10 @@ export default function SceneSuitesPage() {
                           disabled={busyId !== null}
                           onClick={() => void runAction(suite, suite.workspaceEnabled === false ? 'enable' : 'disable')}
                           className={suite.workspaceEnabled === false
-                            ? 'ui-btn ui-btn-primary'
-                            : 'inline-flex items-center gap-1.5 rounded-control border border-line px-3 py-1.5 text-sm font-medium text-fg-secondary transition-colors hover:bg-hover disabled:bg-disabled disabled:text-fg-disabled '}
+                            ? 'inline-flex items-center gap-1.5 rounded-lg bg-zinc-900 px-3 py-1.5 text-sm font-semibold text-white transition-colors hover:bg-zinc-800 disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-white'
+                            : 'inline-flex items-center gap-1.5 rounded-lg border border-zinc-200 px-3 py-1.5 text-sm font-medium text-zinc-700 transition-colors hover:bg-zinc-50 disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-800'}
                         >
-                          <IconPower aria-hidden="true" className="h-4 w-4" />
+                          <Power aria-hidden="true" className="h-4 w-4" />
                           {suite.workspaceEnabled === false ? text.enable : text.disable}
                         </button>
                       )}
@@ -425,9 +433,9 @@ export default function SceneSuitesPage() {
                           type="button"
                           disabled={busyId !== null}
                           onClick={() => void runAction(suite, 'uninstall')}
-                          className="inline-flex items-center gap-1.5 rounded-control border border-danger px-3 py-1.5 text-sm font-medium text-danger transition-colors hover:bg-danger-soft disabled:bg-disabled disabled:text-fg-disabled "
+                          className="inline-flex items-center gap-1.5 rounded-lg border border-red-200 px-3 py-1.5 text-sm font-medium text-red-600 transition-colors hover:bg-red-50 disabled:opacity-50 dark:border-red-900 dark:text-red-300 dark:hover:bg-red-950/40"
                         >
-                          <IconTrash aria-hidden="true" className="h-4 w-4" />
+                          <Trash2 aria-hidden="true" className="h-4 w-4" />
                           {text.uninstall}
                         </button>
                       )}

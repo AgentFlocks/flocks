@@ -2,7 +2,7 @@ import { pageActionLabel } from '../../pageActionLabel';
 import PageDialog from '../../PageDialog';
 import React, { useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { IconX, IconPlayerPlay, IconAlertCircle } from '@tabler/icons-react';
+import { AlertCircle, Play, X } from 'lucide-react';
 
 interface ExecuteDialogProps {
   onClose: () => void;
@@ -27,19 +27,19 @@ export default function ExecuteDialog({ onClose, onExecute }: ExecuteDialogProps
   };
 
   return (
-    <PageDialog onClose={onClose} className="fixed inset-0 bg-overlay-backdrop flex items-center justify-center z-50">
-      <div className="bg-surface rounded-control shadow-overlay w-full max-w-modal max-h-[80vh] flex flex-col">
+    <PageDialog onClose={onClose} className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+      <div className="bg-white rounded-lg shadow-2xl w-full max-w-2xl max-h-[80vh] flex flex-col">
         {/* Header */}
-        <div className="flex items-center justify-between p-6 border-b border-line">
+        <div className="flex items-center justify-between p-6 border-b border-gray-200">
           <div>
-            <h2 className="text-xl font-semibold text-fg">{t('editor.dialog.title')}</h2>
-            <p className="text-sm text-fg-muted mt-1">{t('editor.dialog.subtitle')}</p>
+            <h2 className="text-xl font-semibold text-gray-900">{t('editor.dialog.title')}</h2>
+            <p className="text-sm text-gray-500 mt-1">{t('editor.dialog.subtitle')}</p>
           </div>
           <button aria-label={pageActionLabel('close')}
             onClick={onClose}
-            className="ui-btn-icon inline-flex items-center justify-center p-2 hover:bg-hover rounded-control transition-colors"
+            className="p-2 hover:bg-gray-100 rounded-lg transition-colors"
           >
-            <IconX aria-hidden="true" className="w-5 h-5" />
+            <X aria-hidden="true" className="w-5 h-5" />
           </button>
         </div>
 
@@ -47,7 +47,7 @@ export default function ExecuteDialog({ onClose, onExecute }: ExecuteDialogProps
         <div className="flex-1 overflow-y-auto p-6 space-y-4">
           {/* Input Parameters */}
           <div>
-            <label className="block text-sm font-medium text-fg-secondary mb-2">
+            <label className="block text-sm font-medium text-gray-700 mb-2">
               {t('editor.dialog.inputParams')}
             </label>
             <textarea
@@ -57,21 +57,21 @@ export default function ExecuteDialog({ onClose, onExecute }: ExecuteDialogProps
                 setError(null);
               }}
               rows={12}
-              className="ui-textarea w-full px-3  border border-line-control rounded-control font-mono text-sm resize-none bg-subtle text-fg"
+              className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-red-500 font-mono text-sm resize-none bg-gray-900 text-gray-300"
               placeholder='{\n  "key1": "value1",\n  "key2": "value2"\n}'
               spellCheck={false}
             />
             {error && (
-              <div className="mt-2 flex items-start gap-2 p-3 bg-danger-soft border border-danger rounded-control">
-                <IconAlertCircle aria-hidden="true" className="w-4 h-4 text-danger flex-shrink-0 mt-0.5" />
-                <p className="text-sm text-danger">{error}</p>
+              <div className="mt-2 flex items-start gap-2 p-3 bg-red-50 border border-red-200 rounded-lg">
+                <AlertCircle aria-hidden="true" className="w-4 h-4 text-red-600 mt-0.5 flex-shrink-0" />
+                <p className="text-sm text-red-800">{error}</p>
               </div>
             )}
           </div>
 
           {/* Options */}
-          <div className="space-y-3 pt-4 border-t border-line">
-            <h3 className="text-sm font-semibold text-fg">{t('editor.dialog.options')}</h3>
+          <div className="space-y-3 pt-4 border-t border-gray-200">
+            <h3 className="text-sm font-semibold text-gray-900">{t('editor.dialog.options')}</h3>
             
             {/* Trace */}
             <div className="flex items-center gap-2">
@@ -79,16 +79,16 @@ export default function ExecuteDialog({ onClose, onExecute }: ExecuteDialogProps
                 type="checkbox"
                 checked={trace}
                 onChange={(e) => setTrace(e.target.checked)}
-                className="w-4 h-4 text-danger border-line-control rounded-tag "
+                className="w-4 h-4 text-red-600 border-gray-300 rounded focus:ring-red-500"
               />
-              <label className="text-sm text-fg-secondary">
+              <label className="text-sm text-gray-700">
                 {t('editor.dialog.traceLabel')}
               </label>
             </div>
 
             {/* Timeout */}
             <div>
-              <label className="block text-sm font-medium text-fg-secondary mb-1">
+              <label className="block text-sm font-medium text-gray-700 mb-1">
                 {t('editor.dialog.timeout')}
               </label>
               <input
@@ -97,35 +97,35 @@ export default function ExecuteDialog({ onClose, onExecute }: ExecuteDialogProps
                 onChange={(e) => setTimeoutS(parseInt(e.target.value) || 300)}
                 min={10}
                 max={3600}
-                className="ui-input w-full px-3  border border-line-control rounded-control text-sm"
+                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-red-500 text-sm"
               />
-              <p className="text-xs text-fg-muted mt-1">
+              <p className="text-xs text-gray-500 mt-1">
                 {t('editor.dialog.timeoutHint')}
               </p>
             </div>
           </div>
 
           {/* Tips */}
-          <div className="p-3 bg-danger-soft border border-danger rounded-control">
-            <p className="text-xs text-danger">
+          <div className="p-3 bg-red-50 border border-red-200 rounded-lg">
+            <p className="text-xs text-red-800">
               {t('editor.dialog.tip')}
             </p>
           </div>
         </div>
 
         {/* Footer */}
-        <div className="flex items-center justify-end gap-3 p-6 border-t border-line bg-subtle">
+        <div className="flex items-center justify-end gap-3 p-6 border-t border-gray-200 bg-gray-50">
           <button
             onClick={onClose}
-            className="px-4 py-2 border border-line-control text-fg-secondary rounded-control hover:bg-hover transition-colors"
+            className="px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-100 transition-colors"
           >
             {t('common:button.cancel')}
           </button>
           <button
             onClick={handleExecute}
-            className="flex items-center gap-2 px-4 py-2 bg-action text-action-fg rounded-control hover:bg-action-hover transition-colors"
+            className="flex items-center gap-2 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors"
           >
-            <IconPlayerPlay aria-hidden="true" className="w-4 h-4" />
+            <Play aria-hidden="true" className="w-4 h-4" />
             {t('editor.dialog.startExecute')}
           </button>
         </div>

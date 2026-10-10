@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { IconLoader2, IconMicrophone } from '@tabler/icons-react';
+import { Loader2, Mic } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { voiceApi, VOICE_STATUS_CHANGED, type VoiceCaptureMode } from '@/api/voice';
 import { VoiceSession, type VoicePhase } from '@/voice/voiceSession';
@@ -150,13 +150,13 @@ export default function VoiceInput({ context: composer }: { context: VoiceInputC
         onClick={() => { if (active) void session.current?.stop(); else start(); }}
       >
         <span className="flocks-voice-button__icon" aria-hidden="true">
-          {busy ? <IconLoader2 aria-hidden="true" className="h-4 w-4 animate-spin" />
+          {busy ? <Loader2 aria-hidden="true" className="h-4 w-4 animate-spin" />
             : phase === 'recording'
               // A pulsing dot says recording is live; the label says what the
               // tap does. A stop square here as well would be two marks for
               // one thing.
               ? <span className="flocks-voice-button__pulse" />
-              : <IconMicrophone aria-hidden="true" className="h-4 w-4" />}
+              : <Mic aria-hidden="true" className="h-4 w-4" />}
         </span>
         <span>{caption}</span>
       </button>}

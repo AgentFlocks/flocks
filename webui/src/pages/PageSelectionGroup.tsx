@@ -5,7 +5,7 @@ export default function PageSelectionGroup({ children, className = '', onKeyDown
   return (
     <div
       {...props}
-      className={`ui-segmented ${className}`}
+      className={className}
       data-page-selection-group="true"
       onKeyDown={(event) => {
         onKeyDown?.(event);

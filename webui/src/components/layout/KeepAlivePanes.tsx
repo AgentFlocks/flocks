@@ -63,7 +63,7 @@ function Pane({ active, location, routes }: PaneProps) {
             </div>
           ) : (
             <div className="h-full overflow-y-auto">
-              <div className="min-h-full shrink-0 p-6">{element}</div>
+              <div className="p-6 min-h-full shrink-0">{element}</div>
             </div>
           )}
         </div>

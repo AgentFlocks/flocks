@@ -171,81 +171,81 @@ function AgentFormModal({
   const isSubmitDisabled = loading || !formData.prompt || (nameEditable && !formData.name);
 
   return (
-    <PageDialog onClose={loading ? undefined : onClose} className="fixed inset-0 bg-overlay-backdrop flex items-center justify-center z-50 p-4">
-      <div className="bg-surface rounded-card shadow-overlay max-w-modal w-full max-h-[90vh] overflow-y-auto">
-        <div className="px-6 py-4 border-b border-line">
-          <h3 className="text-title-card font-semibold text-fg">{title}</h3>
+    <PageDialog onClose={loading ? undefined : onClose} className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
+      <div className="bg-white rounded-xl shadow-2xl max-w-2xl w-full max-h-[90vh] overflow-y-auto">
+        <div className="px-6 py-4 border-b border-gray-200">
+          <h3 className="text-lg font-semibold text-gray-900">{title}</h3>
         </div>
 
         <div className="px-6 py-4 space-y-4">
           <div>
-            <label className="block text-sm font-medium text-fg-secondary mb-1">
-              {t('agent:form.name')} {nameEditable && <span className="text-fg-muted">*</span>}
+            <label className="block text-sm font-medium text-gray-700 mb-1">
+              {t('agent:form.name')} {nameEditable && <span className="text-slate-500">*</span>}
             </label>
             {nameEditable ? (
               <input
                 type="text"
                 value={formData.name}
                 onChange={(e) => onChange({ ...formData, name: e.target.value })}
-                className="ui-input w-full px-4  border border-line-control rounded-control text-sm"
+                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-400 text-sm"
                 placeholder="my-agent"
               />
             ) : (
-              <div className="px-4 py-2 bg-subtle border border-line rounded-control text-sm text-fg-secondary font-mono">
+              <div className="px-4 py-2 bg-gray-50 border border-gray-200 rounded-lg text-sm text-gray-700 font-mono">
                 {formData.name}
               </div>
             )}
           </div>
 
           <div>
-            <label className="block text-sm font-medium text-fg-secondary mb-1">{t('agent:form.nameCn')}</label>
+            <label className="block text-sm font-medium text-gray-700 mb-1">{t('agent:form.nameCn')}</label>
             <input
               type="text"
               value={formData.nameCn}
               onChange={(e) => onChange({ ...formData, nameCn: e.target.value })}
-              className="ui-input w-full px-4  border border-line-control rounded-control text-sm"
+              className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-400 text-sm"
               placeholder={t('agent:form.nameCnPlaceholder')}
             />
           </div>
 
           <div>
-            <label className="block text-sm font-medium text-fg-secondary mb-1">{t('agent:form.description')}</label>
-            <p className="text-xs text-fg-muted mb-1">{t('agent:form.descriptionHint')}</p>
+            <label className="block text-sm font-medium text-gray-700 mb-1">{t('agent:form.description')}</label>
+            <p className="text-xs text-gray-500 mb-1">{t('agent:form.descriptionHint')}</p>
             <input
               type="text"
               value={formData.description}
               onChange={(e) => onChange({ ...formData, description: e.target.value })}
-              className="ui-input w-full px-4  border border-line-control rounded-control text-sm"
+              className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-400 text-sm"
               placeholder={t('agent:form.descriptionPlaceholder')}
             />
           </div>
 
           <div>
-            <label className="block text-sm font-medium text-fg-secondary mb-1">{t('agent:form.descriptionCn')}</label>
+            <label className="block text-sm font-medium text-gray-700 mb-1">{t('agent:form.descriptionCn')}</label>
             <input
               type="text"
               value={formData.descriptionCn}
               onChange={(e) => onChange({ ...formData, descriptionCn: e.target.value })}
-              className="ui-input w-full px-4  border border-line-control rounded-control text-sm"
+              className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-400 text-sm"
               placeholder={t('agent:form.descriptionCnPlaceholder')}
             />
           </div>
 
           <div>
-            <label className="block text-sm font-medium text-fg-secondary mb-1">
-              System Prompt <span className="text-fg-muted">*</span>
+            <label className="block text-sm font-medium text-gray-700 mb-1">
+              System Prompt <span className="text-slate-500">*</span>
             </label>
             <textarea
               value={formData.prompt}
               onChange={(e) => onChange({ ...formData, prompt: e.target.value })}
-              className="ui-textarea w-full h-40 px-4  border border-line-control rounded-control resize-none font-mono text-sm"
+              className="w-full h-40 px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-400 resize-none font-mono text-sm"
               placeholder="You are a helpful assistant..."
             />
           </div>
 
           <div className="grid grid-cols-3 gap-4">
             <div>
-              <label className="block text-sm font-medium text-fg-secondary mb-1">{t('agent:form.temperature')}</label>
+              <label className="block text-sm font-medium text-gray-700 mb-1">{t('agent:form.temperature')}</label>
               <input
                 type="number"
                 min="0"
@@ -253,38 +253,38 @@ function AgentFormModal({
                 step="0.1"
                 value={formData.temperature}
                 onChange={(e) => onChange({ ...formData, temperature: parseFloat(e.target.value) })}
-                className="ui-input w-full px-4  border border-line-control rounded-control text-sm"
+                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-400 text-sm"
               />
             </div>
             <div>
-              <label className="block text-sm font-medium text-fg-secondary mb-1">{t('agent:form.mode')}</label>
+              <label className="block text-sm font-medium text-gray-700 mb-1">{t('agent:form.mode')}</label>
               <select
                 value={formData.mode}
                 onChange={(e) => onChange({ ...formData, mode: e.target.value })}
                 disabled={!nameEditable}
-                className="ui-select w-full px-4  border border-line-control rounded-control text-sm disabled:bg-disabled disabled:text-fg-disabled"
+                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-400 text-sm disabled:bg-gray-50 disabled:text-gray-500"
               >
                 <option value="primary">{t('agent:form.primaryModeLabel')}</option>
                 <option value="subagent">{t('agent:form.subagentModeLabel')}</option>
               </select>
             </div>
             <div>
-              <label className="block text-sm font-medium text-fg-secondary mb-1">
+              <label className="block text-sm font-medium text-gray-700 mb-1">
                 {t('agent:form.color')}
-                <span className="ml-1 text-xs font-normal text-fg-muted">{t('agent:form.colorOptional')}</span>
+                <span className="ml-1 text-xs font-normal text-gray-400">{t('agent:form.colorOptional')}</span>
               </label>
               <div className="flex items-center gap-2">
                 <input
                   type="color"
                   value={formData.color || defaultColor}
                   onChange={(e) => onChange({ ...formData, color: e.target.value })}
-                  className="h-9 w-12 rounded-tag border border-line-control cursor-pointer p-0.5"
+                  className="h-9 w-12 rounded border border-gray-300 cursor-pointer p-0.5"
                 />
                 <input
                   type="text"
                   value={formData.color}
                   onChange={(e) => onChange({ ...formData, color: e.target.value })}
-                  className="ui-input flex-1 px-3  border border-line-control rounded-control text-sm font-mono"
+                  className="flex-1 px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-400 text-sm font-mono"
                   placeholder={t('agent:form.colorOptional')}
                 />
               </div>
@@ -292,18 +292,18 @@ function AgentFormModal({
           </div>
         </div>
 
-        <div className="px-6 py-4 border-t border-line flex items-center justify-end gap-3">
+        <div className="px-6 py-4 border-t border-gray-200 flex items-center justify-end gap-3">
           <button
             onClick={onClose}
             disabled={loading}
-            className="px-4 py-2 text-sm text-fg-secondary hover:bg-hover rounded-control disabled:bg-disabled disabled:text-fg-disabled"
+            className="px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 rounded-lg disabled:opacity-50"
           >
             {t('common:button.cancel')}
           </button>
           <button
             onClick={onSubmit}
             disabled={isSubmitDisabled}
-            className="ui-btn ui-btn-primary"
+            className="px-4 py-2 text-sm bg-slate-800 text-white rounded-lg hover:bg-slate-900 disabled:opacity-50"
           >
             {loading ? loadingLabel : submitLabel}
           </button>

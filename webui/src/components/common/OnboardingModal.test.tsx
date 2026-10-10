@@ -260,7 +260,7 @@ describe('OnboardingModal', () => {
     await user.click(screen.getByRole('button', { name: 'onboarding.bootstrap.savePrimary' }));
     expect(screen.getByRole('button', { name: 'button.close' })).toBeDisabled();
     await user.keyboard('{Escape}');
-    fireEvent.click(document.querySelector('.bg-overlay-backdrop')!);
+    fireEvent.click(document.querySelector('div.fixed.inset-0')!);
     expect(onClose).not.toHaveBeenCalled();
   });
 

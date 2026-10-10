@@ -457,10 +457,10 @@ describe('WorkflowPage', () => {
 
     render(<WorkflowPage />);
 
-    expect(within(screen.getByLabelText('API：启用')).getByText('启用')).toHaveClass('text-success');
-    expect(within(screen.getByLabelText('Syslog：启用')).getByText('启用')).toHaveClass('text-success');
+    expect(within(screen.getByLabelText('API：启用')).getByText('启用')).toHaveClass('text-green-600');
+    expect(within(screen.getByLabelText('Syslog：启用')).getByText('启用')).toHaveClass('text-green-600');
     const kafkaStatus = screen.getByLabelText('Kafka：关闭（异常）');
-    expect(within(kafkaStatus).getByText('关闭')).toHaveClass('text-danger');
+    expect(within(kafkaStatus).getByText('关闭')).toHaveClass('text-red-600');
     expect(kafkaStatus).toHaveAttribute('title', 'Kafka：关闭（异常）');
     expect(screen.queryByText('草稿')).not.toBeInTheDocument();
   });
@@ -477,8 +477,8 @@ describe('WorkflowPage', () => {
 
     const apiStatus = screen.getByLabelText('API：关闭（未配置）');
     const triggerStatus = screen.getByLabelText('Trigger：关闭（未配置）');
-    expect(within(apiStatus).getByText('关闭')).toHaveClass('text-fg-muted');
-    expect(within(triggerStatus).getByText('关闭')).toHaveClass('text-fg-muted');
+    expect(within(apiStatus).getByText('关闭')).toHaveClass('text-gray-400');
+    expect(within(triggerStatus).getByText('关闭')).toHaveClass('text-gray-400');
     expect(apiStatus).toHaveAttribute('title', 'API：关闭（未配置）');
   });
 

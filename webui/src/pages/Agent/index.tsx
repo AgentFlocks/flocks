@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo } from 'react';
-import { IconRobot, IconPlus, IconCpu, IconRefresh, IconPencil, IconTrash, IconShield, IconBolt, IconLoader2 } from '@tabler/icons-react';
+import { Bot, Cpu, Loader2, Pencil, Plus, RefreshCw, Shield, Trash2, Zap } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import PageHeader from '@/components/common/PageHeader';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
@@ -118,10 +118,10 @@ export default function AgentPage() {
     return (
       <div className="flex items-center justify-center h-full">
         <div className="text-center">
-          <p className="text-danger mb-4">{error}</p>
+          <p className="text-red-600 mb-4">{error}</p>
           <button
             onClick={() => refetch()}
-            className="px-4 py-2 bg-subtle text-fg rounded-control hover:bg-hover"
+            className="px-4 py-2 bg-slate-800 text-white rounded-lg hover:bg-slate-900"
           >
             {t('common:button.retry')}
           </button>
@@ -135,13 +135,13 @@ export default function AgentPage() {
       <PageHeader tone="ai"
         title={t('pageTitle')}
         description={t('pageDescription')}
-        icon={<IconRobot aria-hidden="true" className="w-8 h-8" />}
+        icon={<Bot aria-hidden="true" className="w-8 h-8" />}
       />
 
-      {error && <p role="alert" className="px-4 py-2 text-sm text-danger">{error}</p>}
+      {error && <p role="alert" className="px-4 py-2 text-sm text-red-600">{error}</p>}
       {/* Toolbar — mirrors the Skill page toolbar style */}
-      <div className="px-4 py-2 border-b border-line flex flex-wrap items-center gap-2">
-        <span className="whitespace-nowrap text-xs text-fg-muted select-none">
+      <div className="px-4 py-2 border-b border-gray-100 flex items-center gap-2 flex-wrap">
+        <span className="text-xs text-gray-400 select-none whitespace-nowrap">
           {t('totalCount', { total: primaryAgents.length + subAgents.length })}
         </span>
         <div className="ml-auto flex items-center gap-2">
@@ -150,19 +150,19 @@ export default function AgentPage() {
             onClick={handleRefresh}
             disabled={refreshing}
             title={refreshDone ? t('common:button.refreshed') : t('common:button.refresh')}
-            className={`ui-btn-icon inline-flex items-center justify-center p-1.5 rounded-control border transition-all ${
+            className={`p-1.5 rounded-lg border transition-all ${
               refreshDone
-                ? 'border-success text-success'
-                : 'border-line text-fg-muted hover:bg-hover hover:text-fg-secondary disabled:bg-disabled disabled:text-fg-disabled'
+                ? 'border-green-200 text-green-600'
+                : 'border-gray-200 text-gray-400 hover:bg-gray-50 hover:text-gray-600 disabled:opacity-50'
             }`}
           >
-            <IconRefresh aria-hidden="true" className={`w-4 h-4 ${refreshing ? 'animate-spin' : ''}`} />
+            <RefreshCw aria-hidden="true" className={`w-3.5 h-3.5 ${refreshing ? 'animate-spin' : ''}`} />
           </button>
           <button
             onClick={() => setShowCreateSheet(true)}
-            className="inline-flex items-center gap-1.5 whitespace-nowrap px-3 py-1.5 bg-action text-action-fg rounded-control hover:bg-action-hover transition-colors text-sm"
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors text-sm whitespace-nowrap"
           >
-            <IconPlus aria-hidden="true" className="w-4 h-4" />
+            <Plus aria-hidden="true" className="w-4 h-4" />
             {t('createSubAgent')}
           </button>
         </div>
@@ -176,15 +176,15 @@ export default function AgentPage() {
         <div className="min-w-0 flex-1 space-y-6">
         {agents.length === 0 ? (
           <EmptyState
-            icon={<IconRobot aria-hidden="true" className="w-8 h-8" />}
+            icon={<Bot aria-hidden="true" className="w-16 h-16" />}
             title={t('emptyState.title')}
             description={t('emptyState.description')}
             action={
               <button
                 onClick={() => setShowCreateSheet(true)}
-                className="inline-flex items-center gap-2 px-4 py-2 bg-action text-action-fg rounded-control hover:bg-action-hover transition-colors"
+                className="inline-flex items-center gap-2 px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors"
               >
-                <IconPlus aria-hidden="true" className="w-5 h-5" />
+                <Plus aria-hidden="true" className="w-5 h-5" />
                 {t('createSubAgent')}
               </button>
             }
@@ -195,7 +195,7 @@ export default function AgentPage() {
               <AgentSection
                 title={t('section.primary.title')}
                 subtitle={t('section.primary.subtitle')}
-                icon={<IconShield aria-hidden="true" className="w-4 h-4" />}
+                icon={<Shield aria-hidden="true" className="w-4 h-4" />}
                 agents={primaryAgents}
                 displayLang={i18n.language}
                 selectedAgent={editingAgent}
@@ -212,7 +212,7 @@ export default function AgentPage() {
               <AgentSection
                 title={t('section.sub.title')}
                 subtitle={t('section.sub.subtitle')}
-                icon={<IconBolt aria-hidden="true" className="w-4 h-4" />}
+                icon={<Zap aria-hidden="true" className="w-4 h-4" />}
                 agents={subAgents}
                 displayLang={i18n.language}
                 selectedAgent={editingAgent}
@@ -288,14 +288,14 @@ function PaginationBar({
   const start = (page - 1) * pageSize + 1;
   const end = Math.min(total, page * pageSize);
   return (
-    <div className="mt-3 flex items-center justify-between text-xs text-fg-muted select-none">
+    <div className="mt-3 flex items-center justify-between text-xs text-gray-400 select-none">
       <span>{t('pagination.info', { start, end, total })}</span>
       <div className="flex items-center gap-1">
         <button
           type="button"
           disabled={page <= 1}
           onClick={() => onPageChange(page - 1)}
-          className="px-2 py-0.5 rounded-tag border border-line hover:bg-hover disabled:bg-disabled disabled:text-fg-disabled disabled:cursor-not-allowed transition-colors"
+          className="px-2 py-0.5 rounded border border-gray-200 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
         >
           ‹
         </button>
@@ -305,10 +305,10 @@ function PaginationBar({
             type="button"
             onClick={() => onPageChange(p)}
             aria-current={p === page ? 'page' : undefined}
-            className={`w-6 h-5 rounded-tag text-xs font-medium transition-colors ${
+            className={`w-6 h-5 rounded text-[11px] font-medium transition-colors ${
               p === page
-                ? 'bg-selected text-fg'
-                : 'hover:bg-selected text-fg-muted'
+                ? 'bg-slate-700 text-white'
+                : 'hover:bg-gray-100 text-gray-500'
             }`}
           >
             {p}
@@ -318,7 +318,7 @@ function PaginationBar({
           type="button"
           disabled={page >= totalPages}
           onClick={() => onPageChange(page + 1)}
-          className="px-2 py-0.5 rounded-tag border border-line hover:bg-hover disabled:bg-disabled disabled:text-fg-disabled disabled:cursor-not-allowed transition-colors"
+          className="px-2 py-0.5 rounded border border-gray-200 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
         >
           ›
         </button>
@@ -410,23 +410,23 @@ function AgentSection({
   return (
     <div>
       {/* Section header: left accent stripe */}
-      <div className="flex items-start gap-3 pl-3 border-l-2 border-line-control">
-        <span className="text-fg-muted mt-0.5">{icon}</span>
+      <div className="flex items-start gap-3 pl-3 border-l-2 border-slate-300">
+        <span className="text-slate-400 mt-0.5">{icon}</span>
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2">
-            <h2 className="text-sm font-semibold text-fg">{title}</h2>
-            <span className="text-xs font-medium px-1.5 py-0.5 rounded-tag bg-subtle text-fg-muted tabular-nums">
+            <h2 className="text-sm font-semibold text-gray-800">{title}</h2>
+            <span className="text-[11px] font-medium px-1.5 py-0.5 rounded bg-slate-100 text-slate-500 tabular-nums">
               {agents.length}
             </span>
           </div>
-          <p className="text-xs text-fg-muted mt-0.5">{subtitle}</p>
+          <p className="text-xs text-gray-400 mt-0.5">{subtitle}</p>
         </div>
       </div>
 
       {/* Source filter — segmented control, same style as Skill page */}
       {showSourceFilter && (
         <div className="mt-2.5 mb-3" role="tablist" aria-label={t('filter.aria')}>
-          <div className="inline-flex items-center rounded-control border border-line bg-surface p-0.5 text-xs">
+          <div className="inline-flex items-center rounded-lg border border-gray-200 bg-white p-0.5 text-xs">
             {filterChips.map((chip, idx) => {
               const active = chip.key === sourceFilter;
               return (
@@ -436,15 +436,15 @@ function AgentSection({
                   role="tab"
                   aria-selected={active}
                   onClick={() => setSourceFilter(chip.key)}
-                  className={`px-2.5 py-1 rounded-control transition-colors whitespace-nowrap ${
+                  className={`px-2.5 py-1 rounded-md transition-colors whitespace-nowrap ${
                     active
-                      ? 'bg-selected text-fg'
-                      : 'text-fg-muted hover:text-fg-secondary hover:bg-selected'
+                      ? 'bg-slate-700 text-white'
+                      : 'text-gray-500 hover:text-gray-700 hover:bg-gray-50'
                   } ${idx > 0 ? 'ml-0.5' : ''}`}
                 >
                   <span>{chip.label}</span>
-                  <span className={`ml-1.5 inline-block min-w-[1.25rem] px-1 rounded-tag text-xs tabular-nums ${
-                    active ? 'bg-surface' : 'bg-subtle text-fg-muted'
+                  <span className={`ml-1.5 inline-block px-1 rounded text-[10px] tabular-nums min-w-[1.25rem] ${
+                    active ? 'bg-white/15' : 'bg-gray-100 text-gray-500'
                   }`}>
                     {chip.count}
                   </span>
@@ -460,11 +460,11 @@ function AgentSection({
       <div style={GRID_MIN_H ? { minHeight: GRID_MIN_H } : undefined}>
         {!showSourceFilter && <div className="mb-3" />}
         {displayed.length === 0 ? (
-          <p className="text-xs text-fg-muted py-4">
+          <p className="text-xs text-gray-400 py-4">
             {t(`filter.${sourceFilter}` as any)} — {t('emptyState.title')}
           </p>
         ) : (
-          <div className={viewMode === 'cards' ? 'grid gap-4 grid-cols-[repeat(auto-fill,minmax(15rem,1fr))]' : 'space-y-2'}>
+          <div className={viewMode === 'cards' ? 'grid gap-3 grid-cols-[repeat(auto-fill,minmax(15rem,1fr))]' : 'space-y-2'}>
             {/* Columns follow the space left next to the group rail, not the viewport: at xl a fixed
                 four-column grid made cards too narrow for the delete / group / enable / edit footer. */}
             {displayed.map((agent) => (
@@ -534,11 +534,11 @@ function AgentCard({
   return (
     <div
       className={`
- group relative bg-surface rounded-card border flex flex-col overflow-hidden ${layout === 'list' ? 'lg:flex-row' : ''}
- cursor-pointer transition-all duration-150
- ${isSelected
-          ? 'border-line-control ring-2 ring-focus'
-          : 'border-line hover:border-line-control'
+        group relative bg-white rounded-xl border flex flex-col overflow-hidden ${layout === 'list' ? 'lg:flex-row' : ''}
+        cursor-pointer transition-all duration-150
+        ${isSelected
+          ? 'border-slate-400 shadow-md ring-2 ring-slate-200'
+          : 'border-gray-200 hover:border-gray-300 hover:shadow-md'
         }
  `}
       onClick={onClick}
@@ -547,12 +547,12 @@ function AgentCard({
       <div className={`flex-1 px-4 pt-3 pb-2 flex flex-col gap-2 min-w-0 ${layout === 'list' ? 'sm:flex-row sm:items-center sm:gap-4' : ''}`}>
         {/* Avatar + Name row */}
         <div className={`flex items-start gap-2.5 min-w-0 ${layout === 'list' ? 'sm:w-52 sm:shrink-0' : ''}`}>
-          <div className="w-8 h-8 rounded-control flex items-center justify-center shrink-0 mt-0.5 bg-subtle">
-            <IconRobot aria-hidden="true" className="w-4 h-4 text-fg-muted" />
+          <div className="w-8 h-8 rounded-lg flex items-center justify-center mt-0.5 bg-gray-100 shrink-0">
+            <Bot aria-hidden="true" className="w-4 h-4 text-gray-500" />
           </div>
 
           <div className="min-w-0 flex-1">
-            <span className="block text-sm font-semibold text-fg truncate ">
+            <span className="block text-sm font-semibold text-gray-900 leading-snug truncate">
               {displayName}
             </span>
             {/* Badges row: source badge (always shown) + delegatable */}
@@ -560,20 +560,18 @@ function AgentCard({
               {/* Source badge: built-in vs custom — styled distinctly */}
               {agent.native
                 ? (
-                  <span className="inline-flex items-center px-1.5 py-0.5 rounded-tag text-xs font-medium
- bg-info-soft text-info">
+                  <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-blue-50 text-blue-600">
                     {t('badge.native')}
                   </span>
                 )
                 : (
-                  <span className="inline-flex items-center px-1.5 py-0.5 rounded-tag text-xs font-medium
- bg-data-soft text-data">
+                  <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-teal-50 text-teal-600">
                     {t('badge.custom')}
                   </span>
                 )
               }
               {agent.delegatable && (
-                <span className="inline-flex items-center px-1.5 py-0.5 rounded-tag bg-subtle text-fg-muted text-xs font-medium">
+                <span className="inline-flex items-center px-1.5 py-0.5 rounded bg-gray-50 text-gray-500 text-[10px] font-medium">
                   {t('badge.delegatable')}
                 </span>
               )}
@@ -582,14 +580,14 @@ function AgentCard({
         </div>
 
         {/* Description */}
-        <p className={`text-xs text-fg-muted line-clamp-2 ${layout === 'list' ? 'flex-1' : ''}`}>
+        <p className={`text-xs text-gray-500 leading-relaxed line-clamp-2 ${layout === 'list' ? 'flex-1' : ''}`}>
           {displayDesc || t('common:empty.noDescription')}
         </p>
 
         {/* Model chip */}
         {agent.model && (
-          <div className={`self-start inline-flex items-center gap-1 text-xs text-fg-muted ${layout === 'list' ? 'sm:w-32 sm:shrink-0 sm:self-center' : ''}`}>
-            <IconCpu aria-hidden="true" className="w-4 h-4 shrink-0" />
+          <div className={`self-start inline-flex items-center gap-1 text-[10px] text-gray-400 ${layout === 'list' ? 'sm:w-32 sm:shrink-0 sm:self-center' : ''}`}>
+            <Cpu aria-hidden="true" className="w-3 h-3 shrink-0" />
             <span className="truncate max-w-[120px]">
               {agent.model.modelID}
             </span>
@@ -599,7 +597,7 @@ function AgentCard({
 
       {/* Footer — delete / enable / edit */}
       <div
-        className={`border-t border-line px-3 py-2 flex flex-wrap items-center justify-between gap-x-2 gap-y-1 ${layout === 'list' ? 'lg:border-t-0 lg:border-l lg:gap-4 lg:shrink-0' : ''}`}
+        className={`border-t border-gray-100 px-3 py-2 flex items-center justify-between flex-wrap ${layout === 'list' ? 'lg:border-t-0 lg:border-l lg:gap-4 lg:shrink-0' : ''}`}
         onClick={(e) => e.stopPropagation()}
       >
         {/* Delete — disabled for built-in agents */}
@@ -608,10 +606,9 @@ function AgentCard({
             type="button"
             disabled
             title={t('badge.nativeDeleteDisabled')}
-            className="inline-flex shrink-0 whitespace-nowrap items-center gap-1 px-1 py-1 rounded-control text-xs font-medium
- text-fg-disabled cursor-not-allowed select-none"
+            className="inline-flex items-center gap-1 px-1 py-1 rounded-md text-[11px] font-medium text-gray-300 cursor-not-allowed select-none shrink-0 whitespace-nowrap"
           >
-            <IconTrash aria-hidden="true" className="w-4 h-4" />
+            <Trash2 aria-hidden="true" className="w-3 h-3" />
             {t('badge.delete')}
           </button>
         ) : (
@@ -619,20 +616,19 @@ function AgentCard({
             type="button"
             onClick={(e) => { e.stopPropagation(); onDelete(agent.name); }}
             title={t('badge.delete')}
-            className="inline-flex shrink-0 whitespace-nowrap items-center gap-1 px-1 py-1 rounded-control text-xs font-medium
- text-fg-muted hover:text-danger hover:bg-danger-soft transition-colors"
+            className="inline-flex items-center gap-1 px-1 py-1 rounded-md text-[11px] font-medium text-gray-400 hover:text-red-600 hover:bg-red-50 transition-colors shrink-0 whitespace-nowrap"
           >
-            <IconTrash aria-hidden="true" className="w-4 h-4" />
+            <Trash2 aria-hidden="true" className="w-3 h-3" />
             {t('badge.delete')}
           </button>
         )}
 
         {/* Wraps under the delete button when the card is too narrow for group + enable + edit. */}
-        <div className="ml-auto flex shrink-0 flex-nowrap items-center justify-end gap-1 whitespace-nowrap">
-          <PluginGroupButton grouping={grouping} itemKey={agent.name} iconOnly={layout !== 'list'} />
+        <div className="flex items-center justify-end gap-1 ml-auto shrink-0 flex-nowrap whitespace-nowrap">
+          <PluginGroupButton grouping={grouping} itemKey={agent.name} />
           {showDelegatableToggle && (
             <div className="flex items-center gap-1.5">
-              <span className="text-xs font-medium text-fg-secondary">
+              <span className="text-[11px] font-medium text-gray-400">
                 {t('form.enabled')}
               </span>
               <ToggleSwitch
@@ -652,10 +648,9 @@ function AgentCard({
             onClick={onClick}
             title={t('badge.edit')}
             aria-label={t('badge.edit')}
-            className="inline-flex shrink-0 whitespace-nowrap items-center gap-1 px-1 py-1 rounded-control text-xs font-medium text-fg-secondary
- hover:text-fg-secondary hover:bg-hover transition-colors"
+            className="inline-flex items-center gap-1 px-1 py-1 rounded-md text-[11px] font-medium text-gray-400 hover:text-slate-700 hover:bg-gray-50 transition-colors shrink-0 whitespace-nowrap"
           >
-            <IconPencil aria-hidden="true" className="w-4 h-4" />
+            <Pencil aria-hidden="true" className="w-3 h-3" />
             {t('badge.edit')}
           </button>
         </div>
@@ -670,16 +665,28 @@ function ToggleSwitch({ enabled, loading, title, onChange }: {
   title?: string;
   onChange: (e: React.MouseEvent) => void;
 }) {
-  const { t } = useTranslation('common');
   return (
-    <span className="inline-flex items-center gap-2">
-      <button type="button" role="switch" aria-checked={enabled} aria-label={title || t('status.enabled')}
-        onClick={onChange} disabled={loading} title={title} className="ui-btn-icon inline-flex shrink-0 items-center justify-center rounded-control disabled:cursor-not-allowed">
-<span className="ui-switch" aria-hidden="true" aria-checked={enabled} aria-disabled={loading} />
-</button>
-      <span className={loading ? 'text-xs text-fg-disabled' : 'text-xs text-fg-secondary'}>
-        {t(loading ? 'status.loading' : enabled ? 'status.enabled' : 'status.disabled')}
-      </span>
-    </span>
+    <button
+      type="button"
+      role="switch"
+      aria-checked={enabled}
+      aria-label={title}
+      onClick={onChange}
+      disabled={loading}
+      title={title}
+      className={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full border-2 border-transparent
+        transition-colors duration-150 focus:outline-none focus-visible:ring-2 focus-visible:ring-slate-400 focus-visible:ring-offset-2 disabled:cursor-wait
+        ${enabled ? 'bg-slate-500' : 'bg-gray-200'}`}
+    >
+      {loading
+        ? <Loader2 className="absolute inset-0 m-auto w-3 h-3 text-white animate-spin" />
+        : (
+          <span className={`pointer-events-none inline-block h-4 w-4 rounded-full bg-white shadow
+            transform transition-transform duration-150
+            ${enabled ? 'translate-x-4' : 'translate-x-0'}`}
+          />
+        )
+      }
+    </button>
   );
 }

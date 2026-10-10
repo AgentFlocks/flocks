@@ -1,4 +1,4 @@
-import { IconMoon, IconSun } from '@tabler/icons-react';
+import { Moon, Sun } from 'lucide-react';
 import { useContext } from 'react';
 import { useTranslation } from 'react-i18next';
 import { ThemeContext } from '@/contexts/ThemeContext';
@@ -11,7 +11,7 @@ export default function ThemeToggle({ collapsed = false }: ThemeToggleProps) {
   const { theme, toggleTheme } = useContext(ThemeContext);
   const { t } = useTranslation('nav');
   const isDark = theme === 'dark';
-  const Icon = isDark ? IconSun : IconMoon;
+  const Icon = isDark ? Sun : Moon;
 
   return (
     <button
@@ -21,8 +21,10 @@ export default function ThemeToggle({ collapsed = false }: ThemeToggleProps) {
       aria-label={isDark ? t('switchToLightTheme') : t('switchToDarkTheme')}
       aria-pressed={isDark}
       className={`
-        ui-btn ui-btn-ghost ui-btn-icon text-fg-secondary
-        ${collapsed ? 'shrink-0' : ''}
+        flex items-center justify-center rounded-lg transition-colors
+        text-zinc-500 hover:bg-white/70 hover:text-zinc-900
+        dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100
+        ${collapsed ? 'h-8 w-8 shrink-0' : 'h-8 w-8'}
       `}
     >
       <Icon aria-hidden="true" className="h-4 w-4" />

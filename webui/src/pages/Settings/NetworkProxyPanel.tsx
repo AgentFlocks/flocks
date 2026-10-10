@@ -1,6 +1,12 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { IconCircleCheck, IconCircleX, IconLoader2, IconNetwork, IconPlugConnected } from '@tabler/icons-react';
+import {
+  CheckCircle,
+  Loader2,
+  PlugZap,
+  Shield,
+  XCircle,
+} from 'lucide-react';
 
 import { networkProxyApi, type NetworkProxyTestResult, type NetworkProxyView, type ProxyMode } from '@/api/networkProxy';
 import { useToast } from '@/components/common/Toast';
@@ -165,7 +171,7 @@ export default function NetworkProxyPanel() {
   if (loading || !form || !view) {
     return (
       <div className="flex items-center gap-2 py-12 text-sm text-fg-secondary">
-        <IconLoader2 aria-hidden="true" className="h-4 w-4 animate-spin" />
+        <Loader2 aria-hidden="true" className="h-4 w-4 animate-spin" />
         {t('common:loading', { defaultValue: '...' })}
       </div>
     );
@@ -179,7 +185,7 @@ export default function NetworkProxyPanel() {
     <div className="mx-auto max-w-3xl space-y-6">
       <header className="flex items-start gap-3">
         <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-control bg-data-soft text-data">
-          <IconNetwork aria-hidden="true" className="h-5 w-5" />
+          <Shield aria-hidden="true" className="h-5 w-5" />
         </div>
         <div className="min-w-0">
           <h1 className="text-title-section text-fg">{t('title')}</h1>
@@ -192,7 +198,7 @@ export default function NetworkProxyPanel() {
         <div className="flex flex-wrap items-center gap-3">
           <span className="text-title-card text-fg">{t('effective')}</span>
           <span className={effective.active ? 'ui-badge ui-badge-info' : 'ui-badge ui-badge-success'}>
-            {effective.active ? <IconPlugConnected aria-hidden="true" className="h-4 w-4" /> : <IconCircleCheck aria-hidden="true" className="h-4 w-4" />}
+            {effective.active ? <PlugZap aria-hidden="true" className="h-4 w-4" /> : <CheckCircle aria-hidden="true" className="h-4 w-4" />}
             {effective.active ? t('effectiveActive') : t('effectiveDirect')}
           </span>
           <SourceLabel source={view.effective.source ?? view.source} t={t} />
@@ -342,7 +348,7 @@ export default function NetworkProxyPanel() {
       <div className="flex flex-wrap items-center justify-between gap-3">
         <p className="text-xs text-fg-secondary">{t('restartHint')}</p>
         <button type="button" className="ui-btn ui-btn-primary" disabled={!dirty || hasUrlError || saving} onClick={() => void handleSave()}>
-          {saving ? <IconLoader2 aria-hidden="true" className="h-4 w-4 animate-spin" /> : null}
+          {saving ? <Loader2 aria-hidden="true" className="h-4 w-4 animate-spin" /> : null}
           {saving ? t('saving') : t('save')}
         </button>
       </div>
@@ -358,7 +364,7 @@ export default function NetworkProxyPanel() {
             onChange={(e) => setTestUrl(e.target.value)}
           />
           <button type="button" className="ui-btn" disabled={testing} onClick={() => void handleTest()}>
-            {testing ? <IconLoader2 aria-hidden="true" className="h-4 w-4 animate-spin" /> : null}
+            {testing ? <Loader2 aria-hidden="true" className="h-4 w-4 animate-spin" /> : null}
             {testing ? t('testRunning') : t('testRun')}
           </button>
         </div>
@@ -370,9 +376,9 @@ export default function NetworkProxyPanel() {
             }`}
           >
             {testResult.ok ? (
-              <IconCircleCheck aria-hidden="true" className="mt-0.5 h-4 w-4 shrink-0" />
+              <CheckCircle aria-hidden="true" className="mt-0.5 h-4 w-4 shrink-0" />
             ) : (
-              <IconCircleX aria-hidden="true" className="mt-0.5 h-4 w-4 shrink-0" />
+              <XCircle aria-hidden="true" className="mt-0.5 h-4 w-4 shrink-0" />
             )}
             <span className="break-all">
               {testResult.ok

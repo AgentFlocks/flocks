@@ -103,31 +103,31 @@ export default function ConnectionSettingsSheet({ onClose, onSaved }: { onClose:
     onClose={handleClose}
     onSubmit={handleSave}
   >
-    {loading && <p role="status" className="text-sm text-fg-muted">{t('knowledge.connection.loading')}</p>}
-    {!loading && loadError && <div role="alert" className="space-y-2 text-sm text-danger">
+    {loading && <p role="status" className="text-sm text-gray-500">{t('knowledge.connection.loading')}</p>}
+    {!loading && loadError && <div role="alert" className="space-y-2 text-sm text-red-600">
       <p>{t('knowledge.connection.loadFailed')}</p>
       <Button onClick={() => setLoadRevision(value => value + 1)}>{t('knowledge.retry')}</Button>
     </div>}
     {!loading && settings && <div className="space-y-5">
       <div>
         <div className="mb-1 flex items-center justify-between gap-2">
-          <label htmlFor="knowledge-provider" className="block text-sm font-medium text-fg-secondary">{t('knowledge.connection.provider')}</label>
-          <button type="button" onClick={() => setGuideOpen(true)} disabled={saving} className="text-sm text-info hover:underline disabled:opacity-50">{t('knowledge.connection.guide')}</button>
+          <label htmlFor="knowledge-provider" className="block text-sm font-medium text-gray-700">{t('knowledge.connection.provider')}</label>
+          <button type="button" onClick={() => setGuideOpen(true)} disabled={saving} className="text-sm text-blue-600 hover:underline disabled:opacity-50">{t('knowledge.connection.guide')}</button>
         </div>
         <select id="knowledge-provider" defaultValue="ragflow" disabled={saving} className={inputClass}>
           <option value="ragflow">RAGFlow</option>
         </select>
       </div>
       <div>
-        <label htmlFor="knowledge-base-url" className="mb-1 block text-sm font-medium text-fg-secondary">{t('knowledge.connection.baseUrl')}</label>
+        <label htmlFor="knowledge-base-url" className="mb-1 block text-sm font-medium text-gray-700">{t('knowledge.connection.baseUrl')}</label>
         <input id="knowledge-base-url" type="url" value={baseUrl} onChange={event => { setBaseUrl(event.target.value); setSaveError(null); }} disabled={saving} placeholder="https://ragflow.example.com" className={inputClass} />
       </div>
       <div>
-        <label htmlFor="knowledge-api-key" className="mb-1 block text-sm font-medium text-fg-secondary">{t('knowledge.connection.apiKey')}</label>
+        <label htmlFor="knowledge-api-key" className="mb-1 block text-sm font-medium text-gray-700">{t('knowledge.connection.apiKey')}</label>
         <PasswordInput id="knowledge-api-key" placeholder={settings.has_api_key ? t('knowledge.connection.keyConfiguredPlaceholder') : undefined} value={apiKey} onChange={event => { setApiKey(event.target.value); setSaveError(null); }} disabled={saving} autoComplete="off" className="text-sm" />
-        <p className="mt-1 text-xs text-fg-muted">{t(settings.has_api_key ? 'knowledge.connection.keyExistingHint' : 'knowledge.connection.keyNewHint')}</p>
+        <p className="mt-1 text-xs text-gray-500">{t(settings.has_api_key ? 'knowledge.connection.keyExistingHint' : 'knowledge.connection.keyNewHint')}</p>
       </div>
-      {saveError && <p role="alert" className="rounded-lg border border-danger bg-danger-soft p-3 text-sm text-danger">{saveError}</p>}
+      {saveError && <p role="alert" className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">{saveError}</p>}
     </div>}
   </EntitySheet>
     {guideOpen && <ConnectionGuideSheet onClose={() => setGuideOpen(false)} />}

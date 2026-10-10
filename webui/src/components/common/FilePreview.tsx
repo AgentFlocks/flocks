@@ -1,16 +1,16 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
 import {
-  IconAlertTriangle,
-  IconChevronLeft,
-  IconChevronRight,
-  IconCode,
-  IconDownload,
-  IconEye,
-  IconFolderOpen,
-  IconX,
-  IconZoomIn,
-  IconZoomOut,
-} from '@tabler/icons-react';
+  AlertTriangle,
+  ChevronLeft,
+  ChevronRight,
+  Code2,
+  Download,
+  Eye,
+  FolderOpen,
+  X,
+  ZoomIn,
+  ZoomOut,
+} from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import LoadingSpinner from '@/components/common/LoadingSpinner';
@@ -138,7 +138,7 @@ function parseCsv(content: string): { rows: string[][]; truncated: boolean } {
 
 function SourcePreview({ content }: { content: string }) {
   return (
-    <pre className="h-full overflow-auto bg-surface p-4 text-sm font-mono text-fg-secondary whitespace-pre-wrap break-words">
+    <pre className="h-full bg-white p-4 text-sm font-mono text-gray-700 overflow-auto whitespace-pre-wrap break-words">
       {content}
     </pre>
   );
@@ -156,17 +156,17 @@ function CsvPreview({ content }: { content: string }) {
   const columnCount = Math.max(...rows.map((row) => row.length));
 
   return (
-    <div className="h-full overflow-auto bg-surface">
+    <div className="h-full bg-white overflow-auto">
       {parsed.truncated && (
-        <div className="sticky left-0 top-0 z-20 border-b border-warning bg-warning-soft px-3 py-2 text-xs text-warning">
+        <div className="sticky left-0 top-0 border-b border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800 z-20">
           {t('files.preview.csvTruncated', { rows: CSV_MAX_ROWS, columns: CSV_MAX_COLUMNS })}
         </div>
       )}
       <table className="min-w-full border-separate border-spacing-0 text-sm">
-        <thead className="sticky top-0 z-10 bg-canvas">
+        <thead className="sticky top-0 bg-gray-50 z-10">
           <tr>
             {Array.from({ length: columnCount }).map((_, index) => (
-              <th key={index} className="whitespace-nowrap border-b border-r border-line px-3 py-2 text-left text-xs font-semibold text-fg-secondary">
+              <th key={index} className="border-b border-r border-gray-200 px-3 py-2 text-left text-xs font-semibold text-gray-600 whitespace-nowrap">
                 {header[index] || `Column ${index + 1}`}
               </th>
             ))}
@@ -174,9 +174,9 @@ function CsvPreview({ content }: { content: string }) {
         </thead>
         <tbody>
           {body.map((row, rowIndex) => (
-            <tr key={rowIndex} className={rowIndex % 2 === 0 ? 'bg-surface' : 'bg-canvas'}>
+            <tr key={rowIndex} className={rowIndex % 2 === 0 ? 'bg-white' : 'bg-gray-50/50'}>
               {Array.from({ length: columnCount }).map((_, columnIndex) => (
-                <td key={columnIndex} className="max-w-[320px] whitespace-nowrap border-b border-r border-line px-3 py-2 text-fg-secondary">
+                <td key={columnIndex} className="max-w-[320px] border-b border-r border-gray-100 px-3 py-2 text-gray-700 whitespace-nowrap">
                   <span className="block truncate" title={row[columnIndex] ?? ''}>{row[columnIndex] ?? ''}</span>
                 </td>
               ))}
@@ -417,9 +417,9 @@ function PdfPreview({
 
   if (error) {
     return (
-      <div className="h-full overflow-auto bg-surface p-5">
-        <div className="flex max-w-xl items-start gap-3 rounded-lg border border-warning bg-warning-soft px-4 py-3 text-warning">
-          <IconAlertTriangle aria-hidden="true" className="mt-0.5 h-5 w-5 flex-shrink-0" />
+      <div className="h-full bg-white p-5 overflow-auto">
+        <div className="flex max-w-xl items-start gap-3 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-amber-800">
+          <AlertTriangle aria-hidden="true" className="mt-0.5 h-5 w-5 flex-shrink-0" />
           <div className="min-w-0 flex-1 space-y-3">
             <div className="space-y-1">
               <p className="text-sm font-medium">{t('files.preview.pdfLoadFailed')}</p>
@@ -429,18 +429,18 @@ function PdfPreview({
               <a
                 href={fileAccess.downloadUrl(node.path)}
                 download={node.name}
-                className="flex items-center gap-2 rounded-lg bg-selected px-3 py-1.5 text-sm text-fg hover:bg-hover"
+                className="flex items-center gap-2 rounded-lg bg-slate-700 px-3 py-1.5 text-sm text-white hover:bg-slate-800"
               >
-                <IconDownload aria-hidden="true" className="h-4 w-4" />
+                <Download aria-hidden="true" className="h-4 w-4" />
                 {t('files.downloadFile')}
               </a>
               {onReveal && (
                 <button
                   type="button"
                   onClick={() => onReveal(node)}
-                  className="flex items-center gap-2 rounded-lg border border-warning bg-surface px-3 py-1.5 text-sm text-warning hover:bg-warning-soft"
+                  className="flex items-center gap-2 rounded-lg border border-amber-200 bg-white px-3 py-1.5 text-sm text-amber-800 hover:bg-amber-100"
                 >
-                  <IconFolderOpen aria-hidden="true" className="h-4 w-4" />
+                  <FolderOpen aria-hidden="true" className="h-4 w-4" />
                   {t('files.reveal')}
                 </button>
               )}
@@ -452,19 +452,19 @@ function PdfPreview({
   }
 
   return (
-    <div className="flex h-full flex-col bg-subtle">
-      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-line bg-surface px-3 py-2">
+    <div className="flex h-full flex-col bg-gray-100">
+      <div className="flex items-center justify-between gap-2 border-b border-gray-200 bg-white px-3 py-2 flex-wrap">
         <div className="flex items-center gap-1">
           <button
             type="button"
             onClick={() => scrollToPage(pageNumber - 1)}
             disabled={loading || pageNumber <= 1}
             title={t('files.preview.previousPage')}
-            className="ui-btn-icon rounded p-1.5 text-fg-muted hover:bg-hover disabled:cursor-not-allowed disabled:bg-disabled disabled:text-fg-disabled"
+            className="rounded p-1.5 text-gray-500 hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-40"
           >
-            <IconChevronLeft aria-hidden="true" className="h-4 w-4" />
+            <ChevronLeft aria-hidden="true" className="h-4 w-4" />
           </button>
-          <span className="min-w-[5.5rem] text-center text-xs text-fg-secondary">
+          <span className="text-center text-xs text-gray-600 min-w-[5.5rem]">
             {loading ? t('files.preview.pdfLoading') : t('files.preview.pageIndicator', { page: pageNumber, total: pageCount })}
           </span>
           <button
@@ -472,9 +472,9 @@ function PdfPreview({
             onClick={() => scrollToPage(pageNumber + 1)}
             disabled={loading || pageNumber >= pageCount}
             title={t('files.preview.nextPage')}
-            className="ui-btn-icon rounded p-1.5 text-fg-muted hover:bg-hover disabled:cursor-not-allowed disabled:bg-disabled disabled:text-fg-disabled"
+            className="rounded p-1.5 text-gray-500 hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-40"
           >
-            <IconChevronRight aria-hidden="true" className="h-4 w-4" />
+            <ChevronRight aria-hidden="true" className="h-4 w-4" />
           </button>
         </div>
         <div className="flex items-center gap-1">
@@ -483,26 +483,26 @@ function PdfPreview({
             onClick={() => setScale((value) => Math.max(PDF_MIN_SCALE, Number((value - PDF_SCALE_STEP).toFixed(2))))}
             disabled={loading || scale <= PDF_MIN_SCALE}
             title={t('files.preview.zoomOut')}
-            className="ui-btn-icon rounded p-1.5 text-fg-muted hover:bg-hover disabled:cursor-not-allowed disabled:bg-disabled disabled:text-fg-disabled"
+            className="rounded p-1.5 text-gray-500 hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-40"
           >
-            <IconZoomOut aria-hidden="true" className="h-4 w-4" />
+            <ZoomOut aria-hidden="true" className="h-4 w-4" />
           </button>
-          <span className="w-12 text-center text-xs text-fg-secondary">{Math.round(scale * 100)}%</span>
+          <span className="w-12 text-center text-xs text-gray-600">{Math.round(scale * 100)}%</span>
           <button
             type="button"
             onClick={() => setScale((value) => Math.min(PDF_MAX_SCALE, Number((value + PDF_SCALE_STEP).toFixed(2))))}
             disabled={loading || scale >= PDF_MAX_SCALE}
             title={t('files.preview.zoomIn')}
-            className="ui-btn-icon rounded p-1.5 text-fg-muted hover:bg-hover disabled:cursor-not-allowed disabled:bg-disabled disabled:text-fg-disabled"
+            className="rounded p-1.5 text-gray-500 hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-40"
           >
-            <IconZoomIn aria-hidden="true" className="h-4 w-4" />
+            <ZoomIn aria-hidden="true" className="h-4 w-4" />
           </button>
         </div>
       </div>
       <div ref={previewAreaRef} onScroll={handlePreviewScroll} className="relative min-h-0 flex-1 overflow-auto p-4">
         {(loading || rendering) && (
           <div className="absolute inset-x-0 top-4 z-10 flex justify-center">
-            <div className="rounded-full border border-line bg-surface px-3 py-1 text-xs text-fg-muted shadow-sm">
+            <div className="rounded-full border border-gray-200 bg-white px-3 py-1 text-xs text-gray-500 shadow-sm">
               {loading ? t('files.preview.pdfLoading') : t('files.preview.pdfRendering')}
             </div>
           </div>
@@ -517,9 +517,9 @@ function PdfPreview({
               >
                 <canvas
                   ref={(element) => setPageCanvasRef(page, element)}
-                  className="h-fit max-w-none bg-surface shadow"
+                  className="h-fit max-w-none bg-white shadow"
                 />
-                <span className="text-xs text-fg-muted">{page}</span>
+                <span className="text-[11px] text-gray-400">{page}</span>
               </div>
             );
           })}
@@ -565,27 +565,27 @@ function ImagePreview({ node, fileAccess }: { node: WorkspaceNode; fileAccess: P
   const displayWidth = naturalSize ? Math.max(1, Math.round(naturalSize.width * fitScale * scale)) : undefined;
 
   return (
-    <div className="flex h-full flex-col bg-subtle">
-      <div className="flex justify-end border-b border-line bg-surface px-3 py-2">
+    <div className="flex h-full flex-col bg-gray-100">
+      <div className="flex justify-end border-b border-gray-200 bg-white px-3 py-2">
         <div className="flex items-center gap-1">
           <button
             type="button"
             onClick={() => setScale((value) => Math.max(IMAGE_MIN_SCALE, Number((value - IMAGE_SCALE_STEP).toFixed(2))))}
             disabled={scale <= IMAGE_MIN_SCALE}
             title={t('files.preview.zoomOut')}
-            className="ui-btn-icon rounded p-1.5 text-fg-muted hover:bg-hover disabled:cursor-not-allowed disabled:bg-disabled disabled:text-fg-disabled"
+            className="rounded p-1.5 text-gray-500 hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-40"
           >
-            <IconZoomOut aria-hidden="true" className="h-4 w-4" />
+            <ZoomOut aria-hidden="true" className="h-4 w-4" />
           </button>
-          <span className="w-12 text-center text-xs text-fg-secondary">{Math.round(scale * 100)}%</span>
+          <span className="w-12 text-center text-xs text-gray-600">{Math.round(scale * 100)}%</span>
           <button
             type="button"
             onClick={() => setScale((value) => Math.min(IMAGE_MAX_SCALE, Number((value + IMAGE_SCALE_STEP).toFixed(2))))}
             disabled={scale >= IMAGE_MAX_SCALE}
             title={t('files.preview.zoomIn')}
-            className="ui-btn-icon rounded p-1.5 text-fg-muted hover:bg-hover disabled:cursor-not-allowed disabled:bg-disabled disabled:text-fg-disabled"
+            className="rounded p-1.5 text-gray-500 hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-40"
           >
-            <IconZoomIn aria-hidden="true" className="h-4 w-4" />
+            <ZoomIn aria-hidden="true" className="h-4 w-4" />
           </button>
         </div>
       </div>
@@ -601,7 +601,7 @@ function ImagePreview({ node, fileAccess }: { node: WorkspaceNode; fileAccess: P
               });
             }}
             style={displayWidth ? { width: displayWidth } : undefined}
-            className="h-fit max-w-none self-start bg-surface object-contain shadow"
+            className="h-fit max-w-none self-start bg-white object-contain shadow"
           />
         </div>
       </div>
@@ -642,7 +642,7 @@ function RenderedPreview({
 
   if (kind === 'markdown') {
     return (
-      <div className="h-full overflow-auto bg-surface p-5">
+      <div className="h-full bg-white p-5 overflow-auto">
         <Suspense fallback={<div className="flex h-32 items-center justify-center"><LoadingSpinner /></div>}>
           <LazyStreamingMarkdown content={content} isStreaming={false} />
         </Suspense>
@@ -652,15 +652,15 @@ function RenderedPreview({
 
   if (kind === 'html') {
     return (
-      <div className="flex h-full flex-col bg-surface">
-        <div className="border-b border-warning bg-warning-soft px-4 py-2 text-xs text-warning">
+      <div className="flex h-full flex-col bg-white">
+        <div className="border-b border-amber-100 bg-amber-50 px-4 py-2 text-xs text-amber-800">
           {t('files.preview.htmlSandbox')}
         </div>
         <iframe
           title={node.name}
           sandbox=""
           srcDoc={content}
-          className="min-h-0 flex-1 border-0 bg-surface"
+          className="flex-1 border-0 bg-white min-h-0"
         />
       </div>
     );
@@ -671,7 +671,7 @@ function RenderedPreview({
     return (
       <div className="flex h-full flex-col">
         {formatted.error && (
-          <div className="mx-4 mt-4 rounded-lg border border-warning bg-warning-soft px-3 py-2 text-xs text-warning">
+          <div className="mx-4 mt-4 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
             {t('files.preview.jsonParseFailed')}
           </div>
         )}
@@ -685,7 +685,7 @@ function RenderedPreview({
     return (
       <div className="flex h-full flex-col">
         {formatted.errorCount > 0 && (
-          <div className="mx-4 mt-4 rounded-lg border border-warning bg-warning-soft px-3 py-2 text-xs text-warning">
+          <div className="mx-4 mt-4 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
             {t('files.preview.jsonlParseFailed', { count: formatted.errorCount })}
           </div>
         )}
@@ -716,30 +716,30 @@ function UnsupportedPreview({
 }) {
   const { t } = useTranslation('workspace');
   return (
-    <div className="h-full overflow-auto bg-surface p-5">
-      <div className="flex max-w-xl items-start gap-3 rounded-lg border border-line bg-canvas px-4 py-3 text-fg-muted">
-        <IconAlertTriangle aria-hidden="true" className="mt-0.5 h-5 w-5 flex-shrink-0 text-warning" />
+    <div className="h-full bg-white p-5 overflow-auto">
+      <div className="flex max-w-xl items-start gap-3 rounded-lg border border-gray-200 bg-gray-50 px-4 py-3 text-gray-500">
+        <AlertTriangle aria-hidden="true" className="mt-0.5 h-5 w-5 text-orange-300 flex-shrink-0" />
         <div className="min-w-0 flex-1 space-y-3">
           <div className="space-y-1">
-            <p className="text-sm font-medium text-fg-secondary">{t('files.preview.unsupportedTitle')}</p>
-            <p className="text-xs leading-5 text-fg-muted">{t('files.preview.unsupportedDesc')}</p>
+            <p className="text-sm font-medium text-gray-700">{t('files.preview.unsupportedTitle')}</p>
+            <p className="text-xs leading-5 text-gray-500">{t('files.preview.unsupportedDesc')}</p>
           </div>
           <div className="flex flex-wrap gap-2">
             <a
               href={fileAccess.downloadUrl(node.path)}
               download={node.name}
-              className="flex items-center gap-2 rounded-lg bg-selected px-3 py-1.5 text-sm text-fg hover:bg-hover"
+              className="flex items-center gap-2 rounded-lg bg-slate-700 px-3 py-1.5 text-sm text-white hover:bg-slate-800"
             >
-              <IconDownload aria-hidden="true" className="h-4 w-4" />
+              <Download aria-hidden="true" className="h-4 w-4" />
               {t('files.downloadFile')}
             </a>
             {onReveal && (
               <button
                 type="button"
                 onClick={() => onReveal(node)}
-                className="flex items-center gap-2 rounded-lg border border-line bg-surface px-3 py-1.5 text-sm text-fg-secondary hover:bg-hover hover:text-fg"
+                className="flex items-center gap-2 rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-sm text-gray-600 hover:bg-gray-50 hover:text-gray-800"
               >
-                <IconFolderOpen aria-hidden="true" className="h-4 w-4" />
+                <FolderOpen aria-hidden="true" className="h-4 w-4" />
                 {t('files.reveal')}
               </button>
             )}
@@ -759,21 +759,21 @@ function PreviewModeToggle({
 }) {
   const { t } = useTranslation('workspace');
   return (
-    <div className="flex items-center rounded-md border border-line bg-canvas p-0.5">
+    <div className="flex items-center rounded-md border border-gray-200 bg-gray-50 p-0.5">
       <button
         type="button"
         onClick={() => onChange('preview')}
-        className={`flex items-center gap-1 rounded px-2 py-1 text-xs ${mode === 'preview' ? 'bg-surface text-fg shadow-sm' : 'text-fg-muted hover:text-fg-secondary'}`}
+        className={`flex items-center gap-1 rounded px-2 py-1 text-xs ${mode === 'preview' ? 'bg-white text-gray-800 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}
       >
-        <IconEye aria-hidden="true" className="h-4 w-4" />
+        <Eye aria-hidden="true" className="h-3.5 w-3.5" />
         {t('files.preview.previewMode')}
       </button>
       <button
         type="button"
         onClick={() => onChange('source')}
-        className={`flex items-center gap-1 rounded px-2 py-1 text-xs ${mode === 'source' ? 'bg-surface text-fg shadow-sm' : 'text-fg-muted hover:text-fg-secondary'}`}
+        className={`flex items-center gap-1 rounded px-2 py-1 text-xs ${mode === 'source' ? 'bg-white text-gray-800 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}
       >
-        <IconCode aria-hidden="true" className="h-4 w-4" />
+        <Code2 aria-hidden="true" className="h-3.5 w-3.5" />
         {t('files.preview.sourceMode')}
       </button>
     </div>
@@ -815,7 +815,7 @@ export function FilePreviewRenderer({
       <textarea
         value={editContent ?? ''}
         onChange={(e) => onEditChange(e.target.value)}
-        className="h-full w-full resize-none border-none bg-surface p-4 text-sm font-mono text-fg outline-none"
+        className="h-full w-full resize-none border-none bg-white p-4 text-sm font-mono text-gray-800 outline-none"
         spellCheck={false}
       />
     );
@@ -826,12 +826,12 @@ export function FilePreviewRenderer({
   return (
     <div className="flex h-full flex-col">
       {truncated && (
-        <div className="mx-4 mt-4 rounded-lg border border-warning bg-warning-soft px-3 py-2 text-xs text-warning">
+        <div className="mx-4 mt-4 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
           {t('files.truncatedPreview', { limit: formatBytes(previewLimitBytes ?? 0) })}
         </div>
       )}
       {canToggleSource && (
-        <div className="flex justify-end border-b border-line px-4 py-2">
+        <div className="flex justify-end border-b border-gray-100 px-4 py-2">
           <PreviewModeToggle mode={mode} onChange={setMode} />
         </div>
       )}
@@ -865,23 +865,23 @@ export function PreviewModal({
 }) {
   const { t } = useTranslation('workspace');
   return (
-    <div className="fixed inset-0 z-50 flex bg-overlay-backdrop p-4">
-      <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl bg-surface shadow-2xl">
-        <div className="flex items-center gap-3 border-b border-line px-4 py-3">
+    <div className="fixed inset-0 flex bg-black/40 p-4 z-50">
+      <div className="flex flex-1 flex-col rounded-xl bg-white shadow-2xl min-h-0 overflow-hidden">
+        <div className="flex items-center gap-3 border-b border-gray-100 px-4 py-3">
           <span className="text-sm">{fileIcon(node)}</span>
-          <span className="min-w-0 flex-1 truncate text-sm font-medium text-fg">{node.name}</span>
-          <span className="text-xs text-fg-muted">{formatBytes(node.size ?? 0)}</span>
-          <span className="text-xs text-fg-muted">{formatDate(node.modified_at)}</span>
-          <a href={fileAccess.downloadUrl(node.path)} download={node.name} title={t('files.download')} className="rounded p-1.5 text-fg-muted hover:bg-hover hover:text-fg-secondary">
-            <IconDownload aria-hidden="true" className="h-4 w-4" />
+          <span className="flex-1 text-sm font-medium text-gray-900 min-w-0 truncate">{node.name}</span>
+          <span className="text-xs text-gray-400">{formatBytes(node.size ?? 0)}</span>
+          <span className="text-xs text-gray-400">{formatDate(node.modified_at)}</span>
+          <a href={fileAccess.downloadUrl(node.path)} download={node.name} title={t('files.download')} className="rounded p-1.5 text-gray-400 hover:bg-gray-100 hover:text-gray-600">
+            <Download aria-hidden="true" className="h-4 w-4" />
           </a>
           {onReveal && (
-            <button onClick={() => onReveal(node)} title={t('files.reveal')} className="ui-btn-icon rounded p-1.5 text-fg-muted hover:bg-hover hover:text-fg-secondary">
-              <IconFolderOpen aria-hidden="true" className="h-4 w-4" />
+            <button onClick={() => onReveal(node)} title={t('files.reveal')} className="rounded p-1.5 text-gray-400 hover:bg-gray-100 hover:text-gray-600">
+              <FolderOpen aria-hidden="true" className="h-4 w-4" />
             </button>
           )}
-          <button onClick={onClose} title={t('files.close')} className="ui-btn-icon rounded p-1.5 text-fg-muted hover:bg-hover hover:text-fg-secondary">
-            <IconX aria-hidden="true" className="h-4 w-4" />
+          <button onClick={onClose} title={t('files.close')} className="rounded p-1.5 text-gray-400 hover:bg-gray-100 hover:text-gray-600">
+            <X aria-hidden="true" className="h-4 w-4" />
           </button>
         </div>
         <div className="min-h-0 flex-1">

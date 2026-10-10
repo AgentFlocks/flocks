@@ -1,5 +1,5 @@
 import { Link } from 'react-router-dom';
-import { IconArrowLeft, IconLayoutSidebarRight, IconLayoutSidebarRightCollapse } from '@tabler/icons-react';
+import { ArrowLeft, PanelRight, PanelRightClose } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { Workflow, WorkflowExecution } from '@/api/workflow';
 import { getWorkflowDisplayName } from '@/utils/workflowDisplay';
@@ -16,9 +16,9 @@ export default function TopBar({ workflow, latestExecution, panelOpen, onToggleP
   const displayName = getWorkflowDisplayName(workflow, i18n?.language);
 
   const statusConfig = {
-    draft:    { label: t('status.draft'),    className: 'bg-subtle text-fg-secondary' },
-    active:   { label: t('status.active'),   className: 'bg-success-soft text-success' },
-    archived: { label: t('status.archived'), className: 'bg-warning-soft text-warning' },
+    draft:    { label: t('status.draft'),    className: 'bg-gray-100 text-gray-700' },
+    active:   { label: t('status.active'),   className: 'bg-green-100 text-green-800' },
+    archived: { label: t('status.archived'), className: 'bg-yellow-100 text-yellow-800' },
   };
 
   const status = statusConfig[workflow.status];
@@ -30,31 +30,31 @@ export default function TopBar({ workflow, latestExecution, panelOpen, onToggleP
   const isRunning = latestExecution?.status === 'running';
 
   return (
-    <div className="min-h-14 bg-surface border-b border-line pl-14 pr-4 py-2 flex items-center gap-3 flex-shrink-0 z-10 lg:pl-4">
+    <div className="bg-white border-b border-gray-200 flex items-center gap-3 min-h-14 pl-14 pr-4 py-2 flex-shrink-0 z-10 lg:pl-4">
       {/* Back button */}
       <Link
         to="/workflows"
-        className="flex items-center gap-1.5 text-fg-muted hover:text-fg transition-colors text-sm font-medium"
+        className="flex items-center gap-1.5 text-gray-500 hover:text-gray-800 transition-colors text-sm font-medium"
       >
-        <IconArrowLeft aria-hidden="true" className="w-4 h-4" />
+        <ArrowLeft aria-hidden="true" className="w-4 h-4" />
         {t('pageTitle')}
       </Link>
 
-      <div className="w-px h-5 bg-selected" />
+      <div className="w-px h-5 bg-gray-200" />
 
       {/* Workflow name + status */}
       <div className="flex flex-col flex-1 min-w-0">
         <div className="flex items-center gap-2 min-w-0">
-          <h1 className="text-title-page font-bold text-fg truncate">{displayName}</h1>
-          <span className={`px-2 py-0.5 rounded-pill text-xs font-medium flex-shrink-0 ${status.className}`}>
+          <h1 className="text-sm font-semibold text-gray-900 truncate">{displayName}</h1>
+          <span className={`px-2 py-0.5 rounded-full text-xs font-medium flex-shrink-0 ${status.className}`}>
             {status.label}
           </span>
           {workflow.category && workflow.category !== 'default' && (
-            <span className="text-xs text-fg-muted flex-shrink-0">{workflow.category}</span>
+            <span className="text-xs text-gray-400 flex-shrink-0">{workflow.category}</span>
           )}
         </div>
         {isRunning && currentNodeLabel && (
-          <div className="mt-1 text-xs text-success truncate">
+          <div className="mt-1 text-xs text-emerald-700 truncate">
             {t('detail.topBar.runningStage', {
               phase: t(`detail.topBar.phase.${currentPhase || 'running'}`),
               node: currentNodeLabel,
@@ -67,13 +67,13 @@ export default function TopBar({ workflow, latestExecution, panelOpen, onToggleP
       <div className="flex items-center gap-2">
         <button
           onClick={onTogglePanel}
-          className="flex items-center justify-center w-8 h-8 border border-line text-fg-secondary rounded-control hover:bg-hover transition-colors"
+          className="flex items-center justify-center w-8 h-8 border border-gray-200 text-gray-600 rounded-lg hover:bg-gray-50 transition-colors"
           title={panelOpen ? t('detail.topBar.collapsePanel') : t('detail.topBar.expandPanel')}
         >
           {panelOpen ? (
-            <IconLayoutSidebarRightCollapse aria-hidden="true" className="w-4 h-4" />
+            <PanelRightClose aria-hidden="true" className="w-4 h-4" />
           ) : (
-            <IconLayoutSidebarRight aria-hidden="true" className="w-4 h-4" />
+            <PanelRight aria-hidden="true" className="w-4 h-4" />
           )}
         </button>
       </div>

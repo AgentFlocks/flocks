@@ -94,8 +94,7 @@ describe('Tools native group attributes and original view preservation', () => {
     await mount(language);
     const header = screen.getByText(labels[0]).parentElement!;
     expect(Array.from(header.children).map((cell) => cell.textContent)).toEqual(['', ...labels]);
-    // The actions column fits the group button beside 管理 (see GRID_COLS in pages/Tool/index.tsx).
-    expect(header.style.gridTemplateColumns).toBe('32px minmax(220px, 3fr) minmax(80px, 1fr) minmax(140px, 1.6fr) minmax(80px, 1fr) minmax(124px, 1.2fr)');
+    expect(header.style.gridTemplateColumns).toBe('32px minmax(220px, 3fr) minmax(80px, 1fr) minmax(140px, 1.6fr) minmax(80px, 1fr) minmax(90px, 1fr)');
     const row = nativeRow('tool_00');
     expect(row.children).toHaveLength(6);
     expect(row.style.gridTemplateColumns).toBe(header.style.gridTemplateColumns);

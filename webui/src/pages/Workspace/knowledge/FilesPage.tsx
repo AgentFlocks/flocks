@@ -1,13 +1,13 @@
 import { useEffect, useRef, useState } from 'react';
 import {
-  IconFolder,
-  IconFolderDown,
-  IconFolderPlus,
-  IconPencil,
-  IconTrash,
-  IconUpload,
-  IconX,
-} from '@tabler/icons-react';
+  Folder,
+  FolderInput,
+  FolderPlus,
+  Pencil,
+  Trash2,
+  Upload,
+  X,
+} from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { knowledgebaseAPI, type KnowledgeEntry, type KnowledgeFile } from '@/api/knowledgebase';
 import { formatBytes } from '@/api/workspace';
@@ -140,58 +140,58 @@ function DirectoryPage({ revision, onChanged, folderId, onNavigate, onFileTotal 
   return <>
     <WorkspaceFileSplit
       list={listWidth => <>
-        <div className="flex-shrink-0 space-y-2 border-b border-line px-4 py-2">
+        <div className="space-y-2 border-b border-gray-100 px-4 py-2 flex-shrink-0">
           <DirectoryNavigation breadcrumbs={query.data?.breadcrumbs ?? []} currentFolderId={folderId} onNavigate={onNavigate} loading={query.loading} onRefresh={refresh} search={<input
             value={q}
             onChange={event => { setQ(event.target.value); setPage(1); }}
             aria-label={t('knowledge.files.search')}
             placeholder={t('knowledge.files.search')}
             title={t('knowledge.files.pageSearch')}
-            className="w-full min-w-0 max-w-xs rounded-lg border border-line bg-surface px-3 py-1.5 text-sm text-fg focus:outline-none focus:ring-2 focus:ring-focus dark:border-line dark:bg-surface dark:text-fg"
+            className="rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-sm text-gray-900 focus:outline-none focus:ring-2 focus:ring-slate-400 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100 w-full min-w-0 max-w-xs"
           />}>
             {canWrite && <>
-              <button type="button" disabled={busy} onClick={() => setEditor({ entry: null, name: '' })} title={t('knowledge.files.newFolder')} className={`${previewActionClass} disabled:cursor-not-allowed disabled:opacity-50`}><IconFolderPlus aria-hidden="true" className="h-4 w-4" /></button>
-              <button type="button" disabled={busy} onClick={() => input.current?.click()} title={t('knowledge.files.upload')} className={`${previewActionClass} disabled:cursor-not-allowed disabled:opacity-50`}><IconUpload aria-hidden="true" className="h-4 w-4" /></button>
+              <button type="button" disabled={busy} onClick={() => setEditor({ entry: null, name: '' })} title={t('knowledge.files.newFolder')} className={`${previewActionClass} disabled:cursor-not-allowed disabled:opacity-50`}><FolderPlus aria-hidden="true" className="h-4 w-4" /></button>
+              <button type="button" disabled={busy} onClick={() => input.current?.click()} title={t('knowledge.files.upload')} className={`${previewActionClass} disabled:cursor-not-allowed disabled:opacity-50`}><Upload aria-hidden="true" className="h-4 w-4" /></button>
               <input ref={input} type="file" className="hidden" onChange={event => { upload(event.target.files?.[0]); event.target.value = ''; }} />
             </>}
           </DirectoryNavigation>
-          {query.data?.current_folder.can_write === false && <p className="text-xs text-fg-muted">{t('knowledge.files.readOnlyFolder')}</p>}
+          {query.data?.current_folder.can_write === false && <p className="text-xs text-gray-500">{t('knowledge.files.readOnlyFolder')}</p>}
         </div>
-        {editor && <form onSubmit={event => { event.preventDefault(); saveName(); }} className="flex flex-shrink-0 items-center gap-2 border-b border-line bg-subtle px-4 py-2 dark:border-line dark:bg-subtle">
-          {editor.entry ? <IconPencil aria-hidden="true" className="h-4 w-4 flex-shrink-0 text-fg-muted" /> : <IconFolderPlus aria-hidden="true" className="h-4 w-4 flex-shrink-0 text-fg-muted" />}
-          <input autoFocus disabled={busy} value={editor.name} onChange={event => setEditor({ ...editor, name: event.target.value })} onKeyDown={event => { if (event.key === 'Escape' && !busy) setEditor(null); }} aria-label={editor.entry ? t('knowledge.files.renameName', { name: editor.entry.name }) : t('files.dirNamePlaceholder')} placeholder={t('files.dirNamePlaceholder')} className="min-w-0 flex-1 bg-transparent text-sm text-fg outline-none dark:text-fg" />
-          <button type="submit" disabled={busy || !canSaveName} className="rounded bg-action px-2 py-1 text-xs text-action-fg hover:bg-action-hover disabled:opacity-50">{t(editor.entry ? 'knowledge.files.saveName' : 'files.create')}</button>
-          <button type="button" disabled={busy} onClick={() => setEditor(null)} aria-label={t('knowledge.close')} className={previewActionClass}><IconX aria-hidden="true" className="h-4 w-4" /></button>
+        {editor && <form onSubmit={event => { event.preventDefault(); saveName(); }} className="flex items-center gap-2 border-b border-slate-100 bg-slate-50 px-4 py-2 dark:border-zinc-700 dark:bg-zinc-800 flex-shrink-0">
+          {editor.entry ? <Pencil aria-hidden="true" className="h-4 w-4 text-slate-500 flex-shrink-0" /> : <FolderPlus aria-hidden="true" className="h-4 w-4 text-slate-500 flex-shrink-0" />}
+          <input autoFocus disabled={busy} value={editor.name} onChange={event => setEditor({ ...editor, name: event.target.value })} onKeyDown={event => { if (event.key === 'Escape' && !busy) setEditor(null); }} aria-label={editor.entry ? t('knowledge.files.renameName', { name: editor.entry.name }) : t('files.dirNamePlaceholder')} placeholder={t('files.dirNamePlaceholder')} className="flex-1 bg-transparent text-sm text-gray-800 outline-none dark:text-zinc-100 min-w-0" />
+          <button type="submit" disabled={busy || !canSaveName} className="rounded bg-slate-700 px-2 py-1 text-xs text-white hover:bg-slate-800 disabled:opacity-50">{t(editor.entry ? 'knowledge.files.saveName' : 'files.create')}</button>
+          <button type="button" disabled={busy} onClick={() => setEditor(null)} aria-label={t('knowledge.close')} className={previewActionClass}><X aria-hidden="true" className="h-4 w-4" /></button>
         </form>}
         <LoadState loading={query.loading} error={query.error} retry={refresh}>
           <div className="relative min-h-0 flex-1 overflow-auto">
             <FileListTable aria-label={t('knowledge.files.table')} className="table-fixed" header={<>
-              <th scope="col" className="px-4 py-2 text-left text-xs font-medium text-fg-muted dark:text-fg-muted">{t('knowledge.name')}</th>
-              <th scope="col" className="w-20 px-4 py-2 text-right text-xs font-medium text-fg-muted dark:text-fg-muted">{t('knowledge.type')}</th>
-              {listWidth >= 560 && <th scope="col" className="w-24 px-4 py-2 text-right text-xs font-medium text-fg-muted dark:text-fg-muted">{t('files.columns.size')}</th>}
-              {listWidth >= 760 && <th scope="col" className="w-40 px-4 py-2 text-right text-xs font-medium text-fg-muted dark:text-fg-muted">{t('files.columns.modified')}</th>}
-              <th scope="col" className="w-28 px-2 py-2 text-right text-xs font-medium text-fg-muted dark:text-fg-muted">{t('knowledge.actions')}</th>
+              <th scope="col" className="px-4 py-2 text-left text-xs font-medium text-gray-500 dark:text-zinc-500">{t('knowledge.name')}</th>
+              <th scope="col" className="w-20 px-4 py-2 text-right text-xs font-medium text-gray-500 dark:text-zinc-500">{t('knowledge.type')}</th>
+              {listWidth >= 560 && <th scope="col" className="w-24 px-4 py-2 text-right text-xs font-medium text-gray-500 dark:text-zinc-500">{t('files.columns.size')}</th>}
+              {listWidth >= 760 && <th scope="col" className="w-40 px-4 py-2 text-right text-xs font-medium text-gray-500 dark:text-zinc-500">{t('files.columns.modified')}</th>}
+              <th scope="col" className="w-28 px-2 py-2 text-right text-xs font-medium text-gray-500 dark:text-zinc-500">{t('knowledge.actions')}</th>
             </>}>
               {query.data?.items.map(entry => (
                 <FileListRow key={entry.id} selected={preview?.id === entry.id} onClick={() => entry.kind === 'folder' ? onNavigate(entry.id) : setPreview(entry)}>
-                  <td className="max-w-0 px-4 py-2 font-medium text-fg dark:text-fg">
-                    <button type="button" className="flex w-full min-w-0 items-center gap-2 text-left focus-visible:outline focus-visible:outline-2 focus-visible:outline-focus" title={entry.name}>
-                      {entry.kind === 'folder' && <IconFolder aria-hidden="true" className="h-4 w-4 flex-shrink-0 text-info" />}<span className="truncate">{entry.name}</span>
+                  <td className="max-w-0 px-4 py-2 font-medium text-gray-800 dark:text-zinc-100">
+                    <button type="button" className="flex items-center gap-2 text-left focus-visible:outline focus-visible:outline-2 focus-visible:outline-slate-500 w-full min-w-0" title={entry.name}>
+                      {entry.kind === 'folder' && <Folder aria-hidden="true" className="h-4 w-4 text-sky-600 flex-shrink-0" />}<span className="truncate">{entry.name}</span>
                     </button>
                   </td>
-                  <td className="whitespace-nowrap px-4 py-2 text-right text-fg-muted dark:text-fg-muted">{entry.kind === 'folder' ? t('knowledge.files.folder') : fileType(entry.name)}</td>
-                  {listWidth >= 560 && <td className="whitespace-nowrap px-4 py-2 text-right tabular-nums text-fg-muted dark:text-fg-muted">{entry.kind === 'folder' || entry.size == null ? '—' : formatBytes(entry.size)}</td>}
-                  {listWidth >= 760 && <td className="whitespace-nowrap px-4 py-2 text-right text-xs text-fg-muted dark:text-fg-muted"><CreatedAt value={entry.updated_at} /></td>}
+                  <td className="px-4 py-2 text-right text-gray-400 dark:text-zinc-500 whitespace-nowrap">{entry.kind === 'folder' ? t('knowledge.files.folder') : fileType(entry.name)}</td>
+                  {listWidth >= 560 && <td className="px-4 py-2 text-right tabular-nums text-gray-400 dark:text-zinc-500 whitespace-nowrap">{entry.kind === 'folder' || entry.size == null ? '—' : formatBytes(entry.size)}</td>}
+                  {listWidth >= 760 && <td className="px-4 py-2 text-right text-xs text-gray-400 dark:text-zinc-500 whitespace-nowrap"><CreatedAt value={entry.updated_at} /></td>}
                   <td className="px-2 py-2">
                     {entry.can_manage === true && <FileListActions>
-                      <button type="button" disabled={busy} onClick={() => setEditor({ entry, name: entry.name })} title={t('knowledge.files.rename')} className={fileActionClass}><IconPencil aria-hidden="true" className="h-3.5 w-3.5" /></button>
-                      {entry.kind === 'file' && <button type="button" disabled={busy} onClick={() => setMoving(entry)} title={t('knowledge.files.move')} className={fileActionClass}><IconFolderDown aria-hidden="true" className="h-3.5 w-3.5" /></button>}
-                      <button type="button" disabled={busy} onClick={() => void remove(entry)} title={t('knowledge.delete')} className={fileActionClass}><IconTrash aria-hidden="true" className="h-3.5 w-3.5" /></button>
+                      <button type="button" disabled={busy} onClick={() => setEditor({ entry, name: entry.name })} title={t('knowledge.files.rename')} className={fileActionClass}><Pencil aria-hidden="true" className="h-3.5 w-3.5" /></button>
+                      {entry.kind === 'file' && <button type="button" disabled={busy} onClick={() => setMoving(entry)} title={t('knowledge.files.move')} className={fileActionClass}><FolderInput aria-hidden="true" className="h-3.5 w-3.5" /></button>}
+                      <button type="button" disabled={busy} onClick={() => void remove(entry)} title={t('knowledge.delete')} className={fileActionClass}><Trash2 aria-hidden="true" className="h-3.5 w-3.5" /></button>
                     </FileListActions>}
                   </td>
                 </FileListRow>
               ))}
-              {query.data?.items.length === 0 && <tr><td colSpan={3 + Number(listWidth >= 560) + Number(listWidth >= 760)} className="h-32 px-4 text-center text-fg-muted">{t('knowledge.files.empty')}</td></tr>}
+              {query.data?.items.length === 0 && <tr><td colSpan={3 + Number(listWidth >= 560) + Number(listWidth >= 760)} className="h-32 px-4 text-center text-gray-400">{t('knowledge.files.empty')}</td></tr>}
             </FileListTable>
           </div>
           {query.data && <div className="flex-shrink-0"><Pagination page={page} total={query.data.total} onChange={setPage} /></div>}

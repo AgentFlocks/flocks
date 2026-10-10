@@ -1,6 +1,12 @@
 import PageDialog from '../PageDialog';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { IconRestore, IconLoader2, IconRefresh, IconSearch, IconTrash } from '@tabler/icons-react';
+import {
+  ArchiveRestore,
+  Loader2,
+  RefreshCw,
+  Search,
+  Trash2,
+} from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { sessionApi } from '@/api/session';
 import { useToast } from '@/components/common/Toast';
@@ -150,24 +156,24 @@ export default function ArchivedDataPanel() {
 
   return (
     <div className="mx-auto w-full max-w-7xl">
-      <header className="border-b border-line pb-6 ">
-        <h1 className="text-title-page font-bold tracking-normal text-fg">
+      <header className="border-b border-zinc-200 pb-6 dark:border-zinc-800">
+        <h1 className="text-2xl font-bold tracking-normal text-zinc-950 dark:text-zinc-50">
           {t('archivedData.title')}
         </h1>
-        <p className="mt-2 text-sm text-fg-muted ">
+        <p className="mt-2 text-sm text-zinc-500 dark:text-zinc-400">
           {t('archivedData.description')}
         </p>
       </header>
 
       <div className="mt-6 flex items-center gap-3">
         <label className="relative block w-full sm:max-w-sm">
-          <IconSearch aria-hidden="true" className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-fg-muted" />
+          <Search aria-hidden="true" className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-zinc-400" />
           <input
             value={searchValue}
             onChange={(event) => setSearchValue(event.target.value)}
             placeholder={t('archivedData.searchPlaceholder')}
             aria-label={t('archivedData.searchPlaceholder')}
-            className="ui-input h-10 w-full rounded-control border border-line bg-surface pl-9 pr-3 text-sm focus:border-line-control"
+            className="h-10 w-full rounded-lg border border-zinc-200 bg-white pl-9 pr-3 text-sm outline-none focus:border-zinc-400 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-100"
           />
         </label>
         <button
@@ -176,15 +182,15 @@ export default function ArchivedDataPanel() {
           disabled={loading}
           aria-label={t('archivedData.refresh')}
           title={t('archivedData.refresh')}
-          className="ui-btn-icon inline-flex items-center justify-center ml-auto inline-flex   shrink-0 items-center justify-center rounded-control text-fg-muted transition-colors hover:bg-hover hover:text-fg disabled:bg-disabled disabled:text-fg-disabled "
+          className="inline-flex h-10 w-10 items-center justify-center rounded-lg text-zinc-500 transition-colors hover:bg-zinc-100 hover:text-zinc-900 disabled:opacity-50 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100 ml-auto shrink-0"
         >
-          <IconRefresh aria-hidden="true" className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
+          <RefreshCw aria-hidden="true" className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
         </button>
       </div>
 
       {selectedIds.size > 0 && (
-        <div className="mt-4 flex flex-wrap items-center gap-2 rounded-control border border-line bg-subtle p-3 ">
-          <span className="mr-auto text-sm text-fg-secondary ">
+        <div className="mt-4 flex items-center gap-2 rounded-lg border border-zinc-200 bg-zinc-50 p-3 dark:border-zinc-800 dark:bg-zinc-900/60 flex-wrap">
+          <span className="text-sm text-zinc-600 dark:text-zinc-300 mr-auto">
             {t('archivedData.selected', { count: selectedIds.size })}
           </span>
           <button
@@ -192,43 +198,43 @@ export default function ArchivedDataPanel() {
             onClick={() => void restoreSessions(Array.from(selectedIds))}
             aria-label={t('archivedData.restoreSelected')}
             title={t('archivedData.restoreSelected')}
-            className="ui-btn-icon inline-flex items-center justify-center inline-flex   items-center justify-center rounded-control text-fg-secondary transition-colors hover:bg-surface hover:text-fg "
+            className="inline-flex h-9 w-9 items-center justify-center rounded-md text-zinc-600 transition-colors hover:bg-white hover:text-zinc-950 dark:text-zinc-300 dark:hover:bg-zinc-800 dark:hover:text-zinc-50"
           >
-            <IconRestore aria-hidden="true" className="h-4 w-4" />
+            <ArchiveRestore aria-hidden="true" className="h-4 w-4" />
           </button>
           <button
             type="button"
             onClick={() => setPendingDeleteIds(Array.from(selectedIds))}
-            className="inline-flex h-9 items-center gap-2 rounded-control bg-action-danger px-3 text-sm font-semibold text-action-fg hover:bg-action-danger"
+            className="inline-flex h-9 items-center gap-2 rounded-md bg-red-600 px-3 text-sm font-semibold text-white hover:bg-red-700"
           >
-            <IconTrash aria-hidden="true" className="h-4 w-4" />
+            <Trash2 aria-hidden="true" className="h-4 w-4" />
             {t('archivedData.deleteSelected')}
           </button>
         </div>
       )}
 
-      <div className="mt-4 overflow-hidden rounded-card border border-line ">
+      <div className="mt-4 rounded-xl border border-zinc-200 dark:border-zinc-800 overflow-hidden">
         {loading ? (
-          <div className="flex min-h-48 items-center justify-center gap-2 text-sm text-fg-muted">
-            <IconLoader2 aria-hidden="true" className="h-5 w-5 animate-spin" />
+          <div className="flex items-center justify-center gap-2 text-sm text-zinc-500 min-h-48">
+            <Loader2 aria-hidden="true" className="h-5 w-5 animate-spin" />
             {t('archivedData.loading')}
           </div>
         ) : error ? (
           <div className="flex min-h-48 flex-col items-center justify-center gap-3 p-6 text-center">
-            <p className="text-sm text-danger ">{error}</p>
+            <p className="text-sm text-red-600 dark:text-red-300">{error}</p>
             <button type="button" onClick={() => void fetchSessions(false)} className="text-sm font-semibold underline">
               {t('archivedData.retry')}
             </button>
           </div>
         ) : sessions.length === 0 ? (
-          <div className="flex min-h-48 flex-col items-center justify-center p-6 text-center text-fg-muted">
-            <IconRestore aria-hidden="true" className="mb-3 h-8 w-8 text-fg-placeholder " />
-            <p className="text-sm font-semibold text-fg-secondary ">{t('archivedData.empty')}</p>
+          <div className="flex flex-col items-center justify-center p-6 text-center text-zinc-500 min-h-48">
+            <ArchiveRestore aria-hidden="true" className="mb-3 h-8 w-8 text-zinc-300 dark:text-zinc-700" />
+            <p className="text-sm font-semibold text-zinc-700 dark:text-zinc-300">{t('archivedData.empty')}</p>
             <p className="mt-1 text-xs">{t('archivedData.emptyDescription')}</p>
           </div>
         ) : (
           <>
-            <div className="hidden grid-cols-[2.25rem_minmax(10rem,2fr)_minmax(6.5rem,0.8fr)_minmax(7rem,1fr)_9.5rem_7rem] items-center gap-4 border-b border-line bg-subtle px-4 py-2.5 text-sm font-normal text-fg-muted md:grid">
+            <div className="grid-cols-[2.25rem_minmax(10rem,2fr)_minmax(6.5rem,0.8fr)_minmax(7rem,1fr)_9.5rem_7rem] items-center gap-4 border-b border-zinc-200 bg-zinc-50 px-4 py-2.5 text-sm font-normal text-zinc-500 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-400 hidden md:grid">
               <input
                 type="checkbox"
                 checked={allSelected}
@@ -252,7 +258,7 @@ export default function ArchivedDataPanel() {
                 : session.ownerUsername || t('archivedData.systemOwner');
               const projectLabel = getProjectLabel(session);
               return (
-                <div key={session.id} className="grid gap-3 border-b border-line px-4 py-3.5 text-sm font-normal last:border-b-0 md:grid-cols-[2.25rem_minmax(10rem,2fr)_minmax(6.5rem,0.8fr)_minmax(7rem,1fr)_9.5rem_7rem] md:items-center md:gap-4">
+                <div key={session.id} className="grid border-b border-zinc-100 px-4 py-3.5 text-sm font-normal last:border-b-0 dark:border-zinc-900 gap-3 md:grid-cols-[2.25rem_minmax(10rem,2fr)_minmax(6.5rem,0.8fr)_minmax(7rem,1fr)_9.5rem_7rem] md:items-center md:gap-4">
                   <input
                     type="checkbox"
                     checked={selectedIds.has(session.id)}
@@ -262,15 +268,15 @@ export default function ArchivedDataPanel() {
                     className="h-4 w-4 justify-self-center"
                   />
                   <div className="min-w-0">
-                    <p className="truncate text-sm font-normal text-fg ">{session.title}</p>
+                    <p className="text-sm font-normal text-zinc-900 dark:text-zinc-100 truncate">{session.title}</p>
                   </div>
-                  <p className="truncate text-sm font-normal text-fg-secondary " title={ownerLabel}>
+                  <p className="text-sm font-normal text-zinc-600 dark:text-zinc-400 truncate" title={ownerLabel}>
                     {ownerLabel}
                   </p>
-                  <p className="truncate text-sm font-normal text-fg-secondary " title={projectLabel}>
+                  <p className="text-sm font-normal text-zinc-600 dark:text-zinc-400 truncate" title={projectLabel}>
                     {projectLabel}
                   </p>
-                  <p className="text-sm font-normal text-fg-muted">
+                  <p className="text-sm font-normal text-zinc-500">
                     {session.time.archived ? new Date(session.time.archived).toLocaleString() : '—'}
                   </p>
                   <div className="flex items-center justify-center gap-3">
@@ -280,7 +286,7 @@ export default function ArchivedDataPanel() {
                       disabled={!canManage || restoring}
                       aria-label={t('archivedData.restore')}
                       title={t('archivedData.restore')}
-                      className="text-sm font-normal text-fg-link transition-colors hover:underline disabled:bg-disabled disabled:text-fg-disabled "
+                      className="text-sm font-normal text-blue-600 transition-colors hover:text-blue-700 disabled:opacity-40 dark:text-blue-300 dark:hover:text-blue-200"
                     >
                       {t('archivedData.restore')}
                     </button>
@@ -290,7 +296,7 @@ export default function ArchivedDataPanel() {
                       disabled={!canManage}
                       aria-label={t('archivedData.delete')}
                       title={t('archivedData.delete')}
-                      className="text-sm font-normal text-danger transition-colors hover:text-danger disabled:bg-disabled disabled:text-fg-disabled "
+                      className="text-sm font-normal text-red-600 transition-colors hover:text-red-700 disabled:opacity-40 dark:text-red-300 dark:hover:text-red-200"
                     >
                       {t('archivedData.delete')}
                     </button>
@@ -308,21 +314,21 @@ export default function ArchivedDataPanel() {
             type="button"
             onClick={() => void fetchSessions(true)}
             disabled={loadingMore}
-            className="inline-flex h-9 items-center gap-2 rounded-control border border-line px-4 text-sm font-semibold hover:bg-hover disabled:bg-disabled disabled:text-fg-disabled "
+            className="inline-flex h-9 items-center gap-2 rounded-md border border-zinc-200 px-4 text-sm font-semibold hover:bg-zinc-50 disabled:opacity-50 dark:border-zinc-800 dark:hover:bg-zinc-900"
           >
-            {loadingMore && <IconLoader2 aria-hidden="true" className="h-4 w-4 animate-spin" />}
+            {loadingMore && <Loader2 aria-hidden="true" className="h-4 w-4 animate-spin" />}
             {t('archivedData.loadMore')}
           </button>
         </div>
       )}
 
       {pendingDeleteIds.length > 0 && (
-        <PageDialog aria-labelledby="permanent-delete-title" onClose={deleting ? undefined : () => setPendingDeleteIds([])} className="fixed inset-0 z-[100] flex items-center justify-center bg-overlay-backdrop p-4" >
-          <div    className="w-full max-w-md rounded-card bg-surface p-6 shadow-overlay ">
-            <h2 id="permanent-delete-title" className="text-title-section font-bold text-fg">
+        <PageDialog aria-labelledby="permanent-delete-title" onClose={deleting ? undefined : () => setPendingDeleteIds([])} className="fixed inset-0 z-[100] flex items-center justify-center bg-black/45 p-4" >
+          <div    className="w-full max-w-md rounded-xl bg-white p-6 shadow-2xl dark:bg-zinc-900">
+            <h2 id="permanent-delete-title" className="text-lg font-bold text-zinc-950 dark:text-zinc-50">
               {t('archivedData.deleteTitle')}
             </h2>
-            <p className="mt-2 text-sm text-fg-secondary ">
+            <p className="mt-2 text-sm leading-6 text-zinc-600 dark:text-zinc-300">
               {t('archivedData.deleteDescription', { count: pendingDeleteIds.length })}
             </p>
             <div className="mt-6 flex justify-end gap-2">
@@ -330,7 +336,7 @@ export default function ArchivedDataPanel() {
                 type="button"
                 onClick={() => setPendingDeleteIds([])}
                 disabled={deleting}
-                className="h-9 rounded-control border border-line px-4 text-sm font-semibold "
+                className="h-9 rounded-md border border-zinc-200 px-4 text-sm font-semibold dark:border-zinc-700"
               >
                 {t('cancel')}
               </button>
@@ -338,9 +344,9 @@ export default function ArchivedDataPanel() {
                 type="button"
                 onClick={() => void permanentlyDelete()}
                 disabled={deleting}
-                className="inline-flex h-9 items-center gap-2 rounded-control bg-action-danger px-4 text-sm font-semibold text-action-fg hover:bg-action-danger disabled:bg-disabled disabled:text-fg-disabled"
+                className="inline-flex h-9 items-center gap-2 rounded-md bg-red-600 px-4 text-sm font-semibold text-white hover:bg-red-700 disabled:opacity-50"
               >
-                {deleting && <IconLoader2 aria-hidden="true" className="h-4 w-4 animate-spin" />}
+                {deleting && <Loader2 aria-hidden="true" className="h-4 w-4 animate-spin" />}
                 {t('archivedData.confirmDelete')}
               </button>
             </div>

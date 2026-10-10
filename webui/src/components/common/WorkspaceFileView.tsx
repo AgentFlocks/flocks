@@ -20,9 +20,9 @@ function getDefaultPreviewPanelWidth(containerWidth = getViewportWidth()): numbe
   );
 }
 
-const paneClass = 'flex h-full min-h-0 flex-col overflow-hidden rounded-xl border border-line bg-surface dark:border-line dark:bg-surface';
-export const fileActionClass = 'p-1 text-fg-muted hover:text-fg-secondary rounded hover:bg-hover disabled:cursor-not-allowed disabled:opacity-50 dark:hover:bg-hover dark:hover:text-fg-secondary';
-export const previewActionClass = 'p-1.5 text-fg-muted hover:text-fg-secondary hover:bg-hover rounded dark:hover:bg-hover dark:hover:text-fg-secondary';
+const paneClass = 'flex flex-col rounded-xl border border-gray-200 bg-white dark:border-zinc-700 dark:bg-zinc-900 h-full min-h-0 overflow-hidden';
+export const fileActionClass = 'p-1 text-gray-400 hover:text-gray-600 rounded hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-50 dark:hover:bg-zinc-800 dark:hover:text-zinc-200';
+export const previewActionClass = 'p-1.5 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded dark:hover:bg-zinc-800 dark:hover:text-zinc-200';
 
 /** The file manager's measured list and resizable preview, without resource-specific behavior. */
 export function WorkspaceFileSplit({ list, preview, className = '' }: {
@@ -114,7 +114,7 @@ export function WorkspaceFileSplit({ list, preview, className = '' }: {
         aria-label={t('files.preview.resize')}
         title={t('files.preview.resize')}
         onPointerDown={handleResizeStart}
-        className="absolute left-0 top-0 z-10 h-full w-2 touch-none cursor-col-resize border-l border-transparent transition-colors hover:border-info hover:bg-info-soft active:border-info active:bg-info-soft"
+        className="absolute left-0 top-0 h-full w-2 touch-none cursor-col-resize border-l border-transparent transition-colors hover:border-sky-300 hover:bg-sky-50/70 active:border-sky-400 active:bg-sky-100 z-10"
       />}
       {preview}
     </div>}
@@ -123,15 +123,15 @@ export function WorkspaceFileSplit({ list, preview, className = '' }: {
 
 export function FileListTable({ header, children, className = '', ...props }: ComponentPropsWithoutRef<'table'> & { header: ReactNode }) {
   return <table {...props} className={`w-full text-sm ${className}`}>
-    <thead className="sticky top-0 bg-subtle dark:bg-surface"><tr>{header}</tr></thead>
+    <thead className="sticky top-0 bg-gray-50 dark:bg-zinc-900/95"><tr>{header}</tr></thead>
     <tbody>{children}</tbody>
   </table>;
 }
 
 export function FileListRow({ selected = false, className = '', ...props }: ComponentPropsWithoutRef<'tr'> & { selected?: boolean }) {
-  return <tr {...props} className={`group border-t border-line cursor-pointer transition-colors ${selected
-    ? 'bg-subtle dark:bg-selected'
-    : 'hover:bg-hover dark:hover:bg-hover'} ${className}`} />;
+  return <tr {...props} className={`group border-t border-gray-50 cursor-pointer transition-colors ${selected
+    ? 'bg-slate-100 dark:bg-zinc-800/70'
+    : 'hover:bg-gray-50 dark:hover:bg-zinc-900/70'} ${className}`} />;
 }
 
 export function FileListActions({ className = '', onClick, ...props }: ComponentPropsWithoutRef<'div'>) {
@@ -148,11 +148,11 @@ export function PreviewPanelHeader({ title, icon, actions, meta }: {
   meta?: ReactNode;
 }) {
   return <>
-    <div className="flex items-center gap-2 px-4 py-2.5 border-b border-line flex-shrink-0 dark:border-line">
+    <div className="flex items-center gap-2 px-4 py-2.5 border-b border-gray-100 dark:border-zinc-800 flex-shrink-0">
       {icon && <span className="text-sm flex-shrink-0">{icon}</span>}
-      <span className="flex-1 min-w-0 text-sm font-medium text-fg truncate dark:text-fg" title={title}>{title}</span>
+      <span className="flex-1 text-sm font-medium text-gray-800 dark:text-zinc-100 min-w-0 truncate" title={title}>{title}</span>
       {actions && <div className="flex items-center gap-1 flex-shrink-0">{actions}</div>}
     </div>
-    {meta && <div className="px-4 py-1.5 bg-subtle border-b border-line flex gap-4 text-xs text-fg-muted flex-shrink-0 dark:border-line dark:bg-subtle dark:text-fg-muted">{meta}</div>}
+    {meta && <div className="px-4 py-1.5 bg-gray-50 border-b border-gray-100 flex gap-4 text-xs text-gray-400 dark:border-zinc-800 dark:bg-zinc-800/50 dark:text-zinc-500 flex-shrink-0">{meta}</div>}
   </>;
 }

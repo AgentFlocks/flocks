@@ -1,14 +1,14 @@
 import { useEffect, useMemo, useReducer } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
-  IconArchive,
-  IconScript,
-  IconSettings as SettingsIcon,
-  IconUserCog,
-  IconNetwork,
-  IconMicrophone,
-  type TablerIcon,
-} from '@tabler/icons-react';
+  Archive,
+  Mic,
+  ScrollText,
+  Settings as SettingsIcon,
+  Shield,
+  UserCog,
+  type LucideIcon,
+} from 'lucide-react';
 import registry, { type ExtensionSettingsSection } from '@ext/registry';
 import { useAuth } from '@/contexts/AuthContext';
 import { useProductName } from '@/contexts/ProductNameContext';
@@ -33,7 +33,7 @@ export function isSettingsSectionId(value: string | undefined): value is Setting
 export interface SettingsSection {
   id: SettingsSectionId;
   name: string;
-  icon: TablerIcon;
+  icon: LucideIcon;
   adminOnly?: boolean;
   /** Rendered by a registered extension rather than a bundled page. */
   load?: ExtensionSettingsSection['load'];
@@ -146,12 +146,12 @@ export function useSettingsSectionGroups(): { groups: SettingsGroup[]; ready: bo
   const groups = useMemo<SettingsGroup[]>(() => {
     const byGroup: Record<SettingsGroup['id'], SettingsSection[]> = {
       preferences: [{ id: 'preferences', name: t('settingsPreferences'), icon: SettingsIcon }],
-      data: [{ id: 'archived-data', name: t('archivedData'), icon: IconArchive }],
+      data: [{ id: 'archived-data', name: t('archivedData'), icon: Archive }],
       system: [
-        { id: 'account', name: t('accountManagement'), icon: IconUserCog },
-        { id: 'network-proxy', name: t('networkProxy'), icon: IconNetwork, adminOnly: true },
-        { id: 'voice-input', name: t('voiceInput'), icon: IconMicrophone, adminOnly: true },
-        { id: 'system-logs', name: t('systemLog'), icon: IconScript },
+        { id: 'account', name: t('accountManagement'), icon: UserCog },
+        { id: 'network-proxy', name: t('networkProxy'), icon: Shield, adminOnly: true },
+        { id: 'voice-input', name: t('voiceInput'), icon: Mic, adminOnly: true },
+        { id: 'system-logs', name: t('systemLog'), icon: ScrollText },
       ],
     };
     for (const section of registry.settingsSections) {

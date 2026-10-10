@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { IconCopy, IconCheck } from '@tabler/icons-react';
+import { Check, Copy } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { useToast } from './Toast';
 import { copyText } from '@/utils/clipboard';
@@ -39,13 +39,13 @@ export default function CopyButton({
     <button
       onClick={handleCopy}
       aria-label={label ?? t('button.copy')}
-      className={className ?? 'p-1 rounded hover:bg-hover text-fg-muted hover:text-fg-secondary transition-colors flex-shrink-0'}
+      className={className ?? 'p-1 rounded hover:bg-gray-100 text-gray-400 hover:text-gray-600 transition-colors flex-shrink-0'}
       title={label ?? t('button.copy')}
     >
       <span className="inline-flex items-center gap-1.5">
         {copied
-          ? <IconCheck aria-hidden="true" className={`${size} text-success`} />
-          : <IconCopy aria-hidden="true" className={size} />}
+          ? <Check aria-hidden="true" className={`${size} text-green-500`} />
+          : <Copy aria-hidden="true" className={size} />}
         {label && <span>{label}</span>}
       </span>
     </button>

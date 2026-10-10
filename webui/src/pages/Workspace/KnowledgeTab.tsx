@@ -1,9 +1,5 @@
 import { useId, useState } from 'react';
-import {
-  IconDatabase,
-  IconFolderOpen,
-  IconSettings2,
-} from '@tabler/icons-react';
+import { Database, FolderOpen, Settings2 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { knowledgebaseAPI } from '@/api/knowledgebase';
 import { useAuth } from '@/contexts/AuthContext';
@@ -32,8 +28,8 @@ export default function KnowledgeTab({ active = true }: { active?: boolean }) {
   const datasetCount = useKnowledgeQuery(countsKey, async signal => (await knowledgebaseAPI.datasets({ page: 1, page_size: 1 }, signal)).total);
   const knownCount = (total: number | undefined) => typeof total === 'number' && Number.isFinite(total) && total >= 0 ? total : undefined;
   const tabs = [
-    { id: 'files' as const, label: t('knowledge.files.title'), count: knownCount(fileTotal), Icon: IconFolderOpen },
-    { id: 'datasets' as const, label: t('knowledge.datasets.title'), count: knownCount(datasetCount.data), Icon: IconDatabase },
+    { id: 'files' as const, label: t('knowledge.files.title'), count: knownCount(fileTotal), Icon: FolderOpen },
+    { id: 'datasets' as const, label: t('knowledge.datasets.title'), count: knownCount(datasetCount.data), Icon: Database },
   ];
   const changed = () => setRevision(value => value + 1);
   const navigateFolder = (id: string | undefined) => {
@@ -64,7 +60,7 @@ export default function KnowledgeTab({ active = true }: { active?: boolean }) {
           <Icon aria-hidden="true" /><span>{label}</span>{count !== undefined && <span className="kb-tab-count" aria-hidden="true">{count}</span>}
         </button>)}
       </div>
-      {canConfigure && <Button variant="quiet" className="kb-connection-button" onClick={() => setSettingsOpen(true)}><IconSettings2 aria-hidden="true" />{t('knowledge.connection.title')}</Button>}
+      {canConfigure && <Button variant="quiet" className="kb-connection-button" onClick={() => setSettingsOpen(true)}><Settings2 aria-hidden="true" />{t('knowledge.connection.title')}</Button>}
     </div>
     <div id={`${navigationId}-panel`} role="tabpanel" aria-labelledby={`${navigationId}-${page}`} className="kb-page-content">
       <LoadState loading={status.loading} error={status.error} retry={status.reload}>

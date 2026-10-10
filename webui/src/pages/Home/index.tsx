@@ -1,21 +1,21 @@
 import {
-  IconRobot,
-  IconBolt,
-  IconSparkles,
-  IconBrandGithub,
-  IconChevronDown,
-  IconChevronRight,
-  IconRouteSquare2,
-  IconMessage,
-  IconChartBar,
-  IconAlertCircle,
-  IconCalendarClock,
-  IconTool,
-  IconBook,
-  IconCpu,
-  IconLayoutDashboard,
-  IconLoader2,
-} from '@tabler/icons-react';
+  AlertCircle,
+  BarChart3,
+  BookOpen,
+  Bot,
+  CalendarClock,
+  ChevronDown,
+  ChevronRight,
+  Cpu,
+  Github,
+  LayoutDashboard,
+  Loader2,
+  MessageSquare,
+  Sparkles,
+  Workflow,
+  Wrench,
+  Zap,
+} from 'lucide-react';
 import { useCallback, useState } from 'react';
 import type { ReactNode } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
@@ -30,8 +30,8 @@ import { useProductName } from '@/contexts/ProductNameContext';
 const GITHUB_URL = 'https://github.com/AgentFlocks/flocks';
 const GITEE_URL = 'https://gitee.com/flocks/flocks';
 const GITEE_LOGO_URL = `${import.meta.env.BASE_URL}gitee-logo.png`;
-const STAT_CARD_CLASS = 'ui-card p-5';
-const STAT_LINK_CARD_CLASS = 'ui-card-interactive block p-5';
+const STAT_CARD_CLASS = 'bg-white rounded-xl p-6 border border-gray-200';
+const STAT_LINK_CARD_CLASS = `${STAT_CARD_CLASS} block transition-all duration-200 hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2`;
 
 function StatCard({
   title,
@@ -39,7 +39,7 @@ function StatCard({
   icon,
   to,
   interactiveClassName,
-  valueClassName = 'text-fg',
+  valueClassName = 'text-gray-900',
   children,
 }: {
   title: string;
@@ -53,10 +53,10 @@ function StatCard({
   const content = (
     <>
       <div className="flex items-center justify-between mb-2">
-        <span className="text-fg-secondary text-sm">{title}</span>
+        <span className="text-gray-600 text-sm">{title}</span>
         {icon}
       </div>
-      <div className={`text-3xl font-bold tabular-nums ${valueClassName}`}>{value}</div>
+      <div className={`text-xl font-bold ${valueClassName}`}>{value}</div>
       {children}
     </>
   );
@@ -122,24 +122,28 @@ export default function Home() {
           opens past the card's bottom edge on narrow viewports (the buttons wrap
           onto extra rows) and would otherwise be clipped. Only the decorative
           glows need clipping, so they get their own clipped layer. */}
-      <div className="relative rounded-card border border-line bg-surface px-6 lg:px-8 py-6 mb-6">
+      <div className="relative rounded-2xl bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 px-6 lg:px-12 py-8 mb-10">
+        <div aria-hidden="true" className="pointer-events-none absolute inset-0 overflow-hidden rounded-2xl">
+          <div className="absolute top-0 left-0 w-72 h-72 bg-red-600/10 rounded-full blur-3xl -translate-x-1/2 -translate-y-1/2"></div>
+          <div className="absolute bottom-0 right-0 w-96 h-96 bg-red-600/5 rounded-full blur-3xl translate-x-1/3 translate-y-1/3"></div>
+        </div>
 
         <div className="relative z-10 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-6">
           <div className="flex-1 min-w-0">
-            <div className="ui-badge ui-badge-brand mb-3">
-              <IconSparkles aria-hidden="true" className="w-4 h-4" />
+            <div className="inline-flex items-center px-3 py-1.5 bg-white/10 text-slate-300 rounded-full text-xs font-medium mb-4 border border-white/10">
+              <Sparkles aria-hidden="true" className="w-3.5 h-3.5 mr-1.5 text-red-400" />
               {t('badge')}
             </div>
 
-            <h1 className="text-title-page mb-2 text-fg">
-              <span className="text-brand">{productName}</span>
+            <h1 className="text-2xl font-extrabold mb-3 tracking-tight">
+              <span className="text-red-500">{productName}</span>
             </h1>
 
-            <p className="text-sm text-fg font-semibold mb-1">
+            <p className="text-sm text-white font-semibold mb-2">
               {t('subtitle')}
             </p>
 
-            <p className="text-sm text-fg-secondary max-w-2xl">
+            <p className="text-sm text-slate-400 leading-relaxed max-w-2xl">
               {t('description')}
             </p>
           </div>
@@ -149,10 +153,10 @@ export default function Home() {
               onClick={() =>
                 window.dispatchEvent(new Event('flocks:open-onboarding'))
               }
-              className="ui-btn ui-btn-primary"
+              className="inline-flex items-center px-6 py-2.5 bg-red-600 text-white rounded-lg font-semibold hover:bg-red-500 transition-colors shadow-lg shadow-red-900/40"
             >
               {t('getStarted')}
-              <IconChevronRight aria-hidden="true" className="w-4 h-4" />
+              <ChevronRight aria-hidden="true" className="ml-1.5 w-4 h-4" />
             </button>
 
             {canCreateWebUIContractPage ? (
@@ -160,12 +164,12 @@ export default function Home() {
                 type="button"
                 onClick={() => void handleCreateWebUIContractPage()}
                 disabled={creatingWebUIContractPageSession}
-                className="ui-btn"
+                className="inline-flex items-center px-6 py-2.5 bg-white/10 text-slate-100 rounded-lg font-semibold hover:bg-white/15 transition-colors border border-red-500/40 disabled:opacity-60 disabled:cursor-not-allowed"
               >
                 {creatingWebUIContractPageSession ? (
-                  <IconLoader2 aria-hidden="true" className="w-4 h-4 animate-spin" />
+                  <Loader2 aria-hidden="true" className="mr-2 w-4 h-4 animate-spin" />
                 ) : (
-                  <IconLayoutDashboard aria-hidden="true" className="w-4 h-4" />
+                  <LayoutDashboard aria-hidden="true" className="mr-2 w-4 h-4 text-red-300" />
                 )}
                 {t('createWebUIContractPage')}
               </button>
@@ -175,34 +179,34 @@ export default function Home() {
               <button
                 type="button"
                 onClick={() => setIsRepoMenuOpen((open) => !open)}
-                className="ui-btn"
+                className="inline-flex items-center px-6 py-2.5 bg-white/10 text-slate-200 rounded-lg font-semibold hover:bg-white/15 transition-colors border border-white/10"
               >
-                <IconBrandGithub aria-hidden="true" className="w-4 h-4" />
+                <Github aria-hidden="true" className="mr-2 w-4 h-4" />
                 {t('openSource')}
-                <IconChevronDown aria-hidden="true" className="w-4 h-4" />
+                <ChevronDown aria-hidden="true" className="ml-2 w-4 h-4" />
               </button>
 
               {isRepoMenuOpen ? (
-                <div className="absolute right-0 z-20 mt-2 min-w-52 overflow-hidden rounded-overlay border border-line bg-surface shadow-overlay">
+                <div className="absolute right-0 mt-2 rounded-lg border border-white/10 bg-slate-900/95 shadow-xl backdrop-blur z-20 min-w-52 overflow-hidden">
                   <a
                     href={GITHUB_URL}
                     target="_blank"
                     rel="noopener noreferrer"
-                    className="flex items-center px-4 py-2.5 text-sm text-fg hover:bg-hover transition-colors"
+                    className="flex items-center px-4 py-3 text-sm text-slate-200 hover:bg-white/10 transition-colors"
                   >
-                    <IconBrandGithub aria-hidden="true" className="mr-2 w-4 h-4" />
+                    <Github aria-hidden="true" className="mr-2 w-4 h-4" />
                     GitHub
                   </a>
                   <a
                     href={GITEE_URL}
                     target="_blank"
                     rel="noopener noreferrer"
-                    className="flex items-center px-4 py-2.5 text-sm text-fg hover:bg-hover transition-colors border-t border-line"
+                    className="flex items-center px-4 py-3 text-sm text-slate-200 hover:bg-white/10 transition-colors border-t border-white/10"
                   >
                     <img
                       src={GITEE_LOGO_URL}
                       alt="Gitee"
-                      className="mr-2 w-4 h-4 rounded-tag"
+                      className="mr-2 w-4 h-4 rounded-sm"
                     />
                     Gitee
                   </a>
@@ -218,56 +222,56 @@ export default function Home() {
         <Link
           to="/sessions"
           state={{ skipLastSelectedSessionRestore: true }}
-          className="group ui-card-interactive flex items-center gap-4 p-5"
+          className="group flex items-center gap-4 bg-white p-5 rounded-xl border border-gray-100 hover:border-sky-200 hover:shadow-md hover:shadow-sky-50 transition-all duration-200"
         >
-          <div className="w-11 h-11 bg-data-soft rounded-control flex items-center justify-center flex-shrink-0">
-            <IconMessage aria-hidden="true" className="w-5 h-5 text-data" />
+          <div className="w-11 h-11 bg-sky-50 rounded-xl flex items-center justify-center group-hover:bg-sky-100 transition-colors flex-shrink-0">
+            <MessageSquare aria-hidden="true" className="w-5 h-5 text-sky-500" />
           </div>
           <div className="flex-1 min-w-0">
-            <h3 className="text-sm font-semibold text-fg">
+            <h3 className="text-sm font-semibold text-gray-900">
               {t('quickActions.sessions.title')}
             </h3>
-            <p className="text-xs text-fg-secondary mt-0.5 truncate">
+            <p className="text-xs text-gray-400 mt-0.5 truncate">
               {t('quickActions.sessions.description')}
             </p>
           </div>
-          <IconChevronRight aria-hidden="true" className="w-4 h-4 text-fg-muted flex-shrink-0" />
+          <ChevronRight aria-hidden="true" className="w-4 h-4 text-gray-300 group-hover:text-sky-400 transition-colors flex-shrink-0" />
         </Link>
 
         <Link
           to="/workflows"
-          className="group ui-card-interactive flex items-center gap-4 p-5"
+          className="group flex items-center gap-4 bg-white p-5 rounded-xl border border-gray-100 hover:border-violet-200 hover:shadow-md hover:shadow-violet-50 transition-all duration-200"
         >
-          <div className="w-11 h-11 bg-ai-soft rounded-control flex items-center justify-center flex-shrink-0">
-            <IconRouteSquare2 aria-hidden="true" className="w-5 h-5 text-ai" />
+          <div className="w-11 h-11 bg-violet-50 rounded-xl flex items-center justify-center group-hover:bg-violet-100 transition-colors flex-shrink-0">
+            <Workflow aria-hidden="true" className="w-5 h-5 text-violet-500" />
           </div>
           <div className="flex-1 min-w-0">
-            <h3 className="text-sm font-semibold text-fg">
+            <h3 className="text-sm font-semibold text-gray-900">
               {t('quickActions.workflows.title')}
             </h3>
-            <p className="text-xs text-fg-secondary mt-0.5 truncate">
+            <p className="text-xs text-gray-400 mt-0.5 truncate">
               {t('quickActions.workflows.description')}
             </p>
           </div>
-          <IconChevronRight aria-hidden="true" className="w-4 h-4 text-fg-muted flex-shrink-0" />
+          <ChevronRight aria-hidden="true" className="w-4 h-4 text-gray-300 group-hover:text-violet-400 transition-colors flex-shrink-0" />
         </Link>
 
         <Link
           to="/agents"
-          className="group ui-card-interactive flex items-center gap-4 p-5"
+          className="group flex items-center gap-4 bg-white p-5 rounded-xl border border-gray-100 hover:border-emerald-200 hover:shadow-md hover:shadow-emerald-50 transition-all duration-200"
         >
-          <div className="w-11 h-11 bg-ai-soft rounded-control flex items-center justify-center flex-shrink-0">
-            <IconRobot aria-hidden="true" className="w-5 h-5 text-ai" />
+          <div className="w-11 h-11 bg-emerald-50 rounded-xl flex items-center justify-center group-hover:bg-emerald-100 transition-colors flex-shrink-0">
+            <Bot aria-hidden="true" className="w-5 h-5 text-emerald-500" />
           </div>
           <div className="flex-1 min-w-0">
-            <h3 className="text-sm font-semibold text-fg">
+            <h3 className="text-sm font-semibold text-gray-900">
               {t('quickActions.agents.title')}
             </h3>
-            <p className="text-xs text-fg-secondary mt-0.5 truncate">
+            <p className="text-xs text-gray-400 mt-0.5 truncate">
               {t('quickActions.agents.description')}
             </p>
           </div>
-          <IconChevronRight aria-hidden="true" className="w-4 h-4 text-fg-muted flex-shrink-0" />
+          <ChevronRight aria-hidden="true" className="w-4 h-4 text-gray-300 group-hover:text-emerald-400 transition-colors flex-shrink-0" />
         </Link>
       </div>
 
@@ -279,66 +283,73 @@ export default function Home() {
       ) : (
         <>
           {error && (
-            <div className="bg-danger-soft border border-danger rounded-card p-4 mb-6 flex items-center gap-3">
-              <IconAlertCircle aria-hidden="true" className="w-5 h-5 text-danger shrink-0" />
+            <div className="bg-red-50 border border-red-200 rounded-xl p-4 mb-6 flex items-center gap-3">
+              <AlertCircle aria-hidden="true" className="w-5 h-5 text-red-500 shrink-0" />
               <div>
-                <span className="text-sm font-medium text-danger">
+                <span className="text-sm font-medium text-red-900">
                   {t('stats.abnormal')}
                 </span>
-                <span className="text-sm text-danger ml-2">
+                <span className="text-sm text-red-600 ml-2">
                   {statsErrorHint}
                 </span>
               </div>
             </div>
           )}
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+          <div className="grid gap-6 grid-cols-2 md:grid-cols-4">
             <StatCard
               title={t('stats.agentCount')}
               value={stats?.agents.total ?? 0}
-              icon={<IconRobot aria-hidden="true" className="w-5 h-5 text-ai" />}
+              icon={<Bot aria-hidden="true" className="w-5 h-5 text-purple-500" />}
               to="/agents"
+              interactiveClassName="hover:border-purple-200 hover:shadow-purple-50 focus-visible:ring-purple-500"
             />
 
             <StatCard
               title={t('stats.workflowCount')}
               value={stats?.workflows.total ?? 0}
-              icon={<IconRouteSquare2 aria-hidden="true" className="w-5 h-5 text-data" />}
+              icon={<Workflow aria-hidden="true" className="w-5 h-5 text-teal-500" />}
               to="/workflows"
+              interactiveClassName="hover:border-teal-200 hover:shadow-teal-50 focus-visible:ring-teal-500"
             />
 
             <StatCard
               title={t('stats.skillCount')}
               value={stats?.skills.total ?? 0}
-              icon={<IconBook aria-hidden="true" className="w-5 h-5 text-ai" />}
+              icon={<BookOpen aria-hidden="true" className="w-5 h-5 text-green-500" />}
               to="/skills"
+              interactiveClassName="hover:border-green-200 hover:shadow-green-50 focus-visible:ring-green-500"
             />
 
             <StatCard
               title={t('stats.toolCount')}
               value={stats?.tools.total ?? 0}
-              icon={<IconTool aria-hidden="true" className="w-5 h-5 text-data" />}
+              icon={<Wrench aria-hidden="true" className="w-5 h-5 text-orange-500" />}
               to="/tools"
+              interactiveClassName="hover:border-orange-200 hover:shadow-orange-50 focus-visible:ring-orange-500"
             />
 
             <StatCard
               title={t('stats.weeklyTasks')}
               value={stats?.tasks.week ?? 0}
-              icon={<IconBolt aria-hidden="true" className="w-5 h-5 text-data" />}
+              icon={<Zap aria-hidden="true" className="w-5 h-5 text-amber-500" />}
               to="/tasks"
+              interactiveClassName="hover:border-amber-200 hover:shadow-amber-50 focus-visible:ring-amber-500"
             />
 
             <StatCard
               title={t('stats.activeScheduled')}
               value={stats?.tasks.scheduledActive ?? 0}
-              icon={<IconCalendarClock aria-hidden="true" className="w-5 h-5 text-ai" />}
+              icon={<CalendarClock aria-hidden="true" className="w-5 h-5 text-violet-500" />}
               to="/tasks"
+              interactiveClassName="hover:border-violet-200 hover:shadow-violet-50 focus-visible:ring-violet-500"
             />
 
             <StatCard
               title={t('stats.modelCount')}
               value={stats?.models.total ?? 0}
-              icon={<IconCpu aria-hidden="true" className="w-5 h-5 text-ai" />}
+              icon={<Cpu aria-hidden="true" className="w-5 h-5 text-pink-500" />}
               to="/models"
+              interactiveClassName="hover:border-pink-200 hover:shadow-pink-50 focus-visible:ring-pink-500"
             />
 
             <StatCard
@@ -350,20 +361,20 @@ export default function Home() {
               }
               valueClassName={
                 stats?.system.status === 'healthy'
-                  ? 'text-success'
-                  : 'text-danger'
+                  ? 'text-green-600'
+                  : 'text-red-600'
               }
               icon={
-                <IconChartBar aria-hidden="true"
+                <BarChart3 aria-hidden="true"
                   className={`w-5 h-5 ${
                     stats?.system.status === 'healthy'
-                      ? 'text-success'
-                      : 'text-danger'
+                      ? 'text-green-500'
+                      : 'text-red-500'
                   }`}
                 />
               }
             >
-              <div className="text-xs text-fg-muted mt-1">
+              <div className="text-xs text-gray-500 mt-1">
                 {stats?.system.status
                   ? t(`stats.statusMessage.${stats.system.status}`)
                   : ''}

@@ -2,7 +2,14 @@ import { pageActionLabel } from '../pageActionLabel';
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import { IconX, IconGitBranch, IconFileText, IconCode, IconFileCode, IconRobot } from '@tabler/icons-react';
+import {
+  Bot,
+  Code2,
+  FileJson,
+  FileText,
+  GitBranch,
+  X,
+} from 'lucide-react';
 import { workflowAPI, Workflow, WorkflowExecution, WorkflowNode } from '@/api/workflow';
 import { sessionApi } from '@/api/session';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
@@ -55,9 +62,9 @@ export default function WorkflowDetail() {
   const focusedExecutionId = searchParams.get('execId')?.trim() || '';
 
   const CANVAS_TABS: { id: CanvasTab; label: string; icon: React.ReactNode }[] = [
-    { id: 'flow', label: t('detail.canvasTabs.flow'), icon: <IconGitBranch aria-hidden="true" className="w-4 h-4" /> },
-    { id: 'md', label: t('detail.canvasTabs.md'), icon: <IconFileText aria-hidden="true" className="w-4 h-4" /> },
-    { id: 'json', label: t('detail.canvasTabs.json'), icon: <IconCode aria-hidden="true" className="w-4 h-4" /> },
+    { id: 'flow', label: t('detail.canvasTabs.flow'), icon: <GitBranch aria-hidden="true" className="w-3.5 h-3.5" /> },
+    { id: 'md', label: t('detail.canvasTabs.md'), icon: <FileText aria-hidden="true" className="w-3.5 h-3.5" /> },
+    { id: 'json', label: t('detail.canvasTabs.json'), icon: <Code2 aria-hidden="true" className="w-3.5 h-3.5" /> },
   ];
 
   const [workflow, setWorkflow] = useState<Workflow | null>(null);
@@ -613,17 +620,17 @@ export default function WorkflowDetail() {
   if (error || !workflow) {
     return (
       <div className="flex flex-col items-center justify-center h-full gap-4">
-        <p className="text-danger text-sm">{error || t('detail.notFound')}</p>
+        <p className="text-red-600 text-sm">{error || t('detail.notFound')}</p>
         <div className="flex gap-3">
           <button
             onClick={() => void loadWorkflow()}
-            className="px-4 py-2 bg-action text-action-fg text-sm rounded-control hover:bg-action-hover"
+            className="px-4 py-2 bg-red-600 text-white text-sm rounded-lg hover:bg-red-700"
           >
             {t('common:button.retry')}
           </button>
           <button
             onClick={() => navigate('/workflows')}
-            className="px-4 py-2 border border-line-control text-fg-secondary text-sm rounded-control hover:bg-hover"
+            className="px-4 py-2 border border-gray-300 text-gray-700 text-sm rounded-lg hover:bg-gray-50"
           >
             {t('detail.backToList')}
           </button>
@@ -633,7 +640,7 @@ export default function WorkflowDetail() {
   }
 
   return (
-    <div className="flex flex-col h-full bg-subtle overflow-hidden">
+    <div className="flex flex-col h-full bg-gray-50 overflow-hidden">
       {/* 顶部工具栏 */}
       <TopBar
         workflow={workflow}
@@ -645,10 +652,10 @@ export default function WorkflowDetail() {
       {/* 运行结果 Toast */}
       {runToast && (
         <div
-          className={`absolute top-16 left-1/2 -translate-x-1/2 z-50 px-4 py-2 rounded-control text-sm font-medium shadow-lg transition-all
- ${runToast.type === 'success'
-              ? 'bg-success-soft text-success'
-              : 'bg-danger-soft text-danger'
+          className={`absolute top-16 left-1/2 -translate-x-1/2 px-4 py-2 rounded-lg text-sm font-medium shadow-lg transition-all z-50
+            ${runToast.type === 'success'
+              ? 'bg-green-600 text-white'
+              : 'bg-red-600 text-white'
             }`}
         >
           {runToast.text}
@@ -660,21 +667,21 @@ export default function WorkflowDetail() {
         {/* 左侧画布区域（含三 Tab） */}
         <div className="relative z-0 flex flex-col flex-1 min-w-0 overflow-hidden">
           {/* Canvas Tab 栏（窄屏可横向滚动，不把 tab 文案挤成竖排） */}
-          <div className="flex items-center border-b border-line bg-surface flex-shrink-0 px-2 overflow-x-auto">
+          <div className="flex items-center border-b border-gray-200 bg-white px-2 flex-shrink-0 overflow-x-auto">
             {CANVAS_TABS.map((tab) => (
               <button
                 key={tab.id}
                 onClick={() => handleCanvasTabChange(tab.id)}
                 className={`flex items-center gap-1.5 px-3 py-2.5 text-xs font-medium transition-colors relative flex-shrink-0 whitespace-nowrap ${
                   canvasTab === tab.id
-                    ? 'text-danger'
-                    : 'text-fg-muted hover:text-fg-secondary'
+                    ? 'text-red-600'
+                    : 'text-gray-500 hover:text-gray-700'
                 }`}
               >
                 {tab.icon}
                 {tab.label}
                 {canvasTab === tab.id && (
-                  <span className="absolute bottom-0 left-0 right-0 h-0.5 bg-danger rounded-pill" />
+                  <span className="absolute bottom-0 left-0 right-0 h-0.5 bg-red-600 rounded-full" />
                 )}
               </button>
             ))}
@@ -682,13 +689,13 @@ export default function WorkflowDetail() {
 
           {/* MD 提示条 */}
             {canvasTab === 'md' && showMdHint && (
-            <div className="flex items-center justify-between gap-2 px-3 py-2 bg-danger-soft border-b border-danger text-xs text-danger flex-shrink-0">
+            <div className="flex items-center justify-between gap-2 px-3 py-2 bg-red-50 border-b border-red-100 text-xs text-red-700 flex-shrink-0">
               <span>{t('detail.mdUpdatedHint')}</span>
               <button aria-label={pageActionLabel('close')}
                 onClick={() => setShowMdHint(false)}
-                className="ui-btn-icon inline-flex items-center justify-center flex-shrink-0 text-danger hover:text-danger transition-colors"
+                className="text-red-400 hover:text-red-600 transition-colors flex-shrink-0"
               >
-                <IconX aria-hidden="true" className="w-4 h-4" />
+                <X aria-hidden="true" className="w-3.5 h-3.5" />
               </button>
             </div>
           )}
@@ -705,10 +712,10 @@ export default function WorkflowDetail() {
               {/* 流程图快捷操作 */}
               <button
                 onClick={handleFlocksHelp}
-                className="absolute left-3 top-2 z-20 inline-flex max-w-[calc(100%-7rem)] items-center gap-2 truncate whitespace-nowrap rounded-control border border-success bg-surface px-3 py-1.5 text-xs font-medium text-fg-secondary backdrop-blur transition-colors hover:border-success hover:bg-success-soft hover:text-success "
+                className="absolute left-3 top-2 inline-flex max-w-[calc(100%-7rem)] items-center gap-2 rounded-lg border border-emerald-100 bg-white/90 px-3 py-1.5 text-xs font-medium text-slate-700 backdrop-blur transition-colors hover:border-emerald-200 hover:bg-emerald-50/80 hover:text-emerald-700 focus:outline-none focus:ring-2 focus:ring-emerald-100 z-20 truncate whitespace-nowrap"
                 title={t('detail.flocksHelpTitle')}
               >
-                <IconRobot aria-hidden="true" className="h-4 w-4 flex-shrink-0 text-success" />
+                <Bot aria-hidden="true" className="h-4 w-4 text-emerald-500 flex-shrink-0" />
                 <span className="truncate">{t('detail.flocksHelp')}</span>
               </button>
             </div>
@@ -752,17 +759,17 @@ export default function WorkflowDetail() {
 
             {/* JSON */}
             {canvasTab === 'json' && (
-              <div className="absolute inset-0 overflow-y-auto bg-subtle p-4">
+              <div className="absolute inset-0 bg-gray-900 p-4 overflow-y-auto">
                 {/* 下载工作流文件按钮 - 右上角浮动 */}
                 <button
                   onClick={handleExport}
-                  className="absolute top-3 right-3 z-10 flex items-center gap-1.5 px-3 py-1.5 bg-subtle border border-line-control text-fg-placeholder text-xs rounded-control hover:bg-hover shadow-sm transition-colors"
+                  className="absolute top-3 right-3 flex items-center gap-1.5 px-3 py-1.5 bg-gray-700 border border-gray-600 text-gray-200 text-xs rounded-lg hover:bg-gray-600 shadow-sm transition-colors z-10"
                   title={t('detail.downloadJsonTitle')}
                 >
-                  <IconFileCode aria-hidden="true" className="w-4 h-4" />
+                  <FileJson aria-hidden="true" className="w-3.5 h-3.5" />
                   {t('detail.downloadJson')}
                 </button>
-                <pre className="text-xs text-fg-placeholder whitespace-pre font-mono">
+                <pre className="text-xs text-gray-200 leading-relaxed font-mono whitespace-pre">
                   {JSON.stringify(workflow.workflowJson, null, 2)}
                 </pre>
               </div>
@@ -773,7 +780,7 @@ export default function WorkflowDetail() {
         {/* 节点信息面板 — 并列在对话左侧，可关闭；窄屏铺满画布区域 */}
         {drawerNode && (
           <div className={narrowViewport ? 'absolute inset-0 z-30 flex bg-surface' : 'contents'}>
-            {!narrowViewport && <div className="w-px flex-shrink-0 bg-selected" />}
+            {!narrowViewport && <div className="w-px bg-gray-200 flex-shrink-0" />}
             <NodeInfoPanel
               node={drawerNode}
               workflow={workflow}
@@ -789,7 +796,7 @@ export default function WorkflowDetail() {
         {panelOpen && !narrowViewport && (
           <div
             onMouseDown={onDragStart}
-            className="relative z-20 w-1 flex-shrink-0 bg-selected hover:bg-danger active:bg-danger cursor-col-resize transition-colors duration-150 group"
+            className="relative w-1 bg-gray-200 hover:bg-red-400 active:bg-red-500 cursor-col-resize transition-colors duration-150 group z-20 flex-shrink-0"
             title={t('detail.dragAdjust')}
           >
             <div className="absolute inset-y-0 -left-1.5 -right-1.5" />

@@ -126,12 +126,12 @@ describe('AgentPage cards', () => {
     const nativeCard = (await screen.findByText('Rex 主智能体')).closest('div.group') as HTMLElement;
     const customCard = screen.getByText('分析智能体').closest('div.group') as HTMLElement;
 
-    expect(nativeCard).toHaveClass('bg-surface', 'border-line');
-    expect(customCard).toHaveClass('bg-surface', 'border-line');
+    expect(nativeCard).toHaveClass('bg-white', 'border-gray-200');
+    expect(customCard).toHaveClass('bg-white', 'border-gray-200');
     expect(nativeCard.querySelector('[style]')).not.toBeInTheDocument();
     expect(customCard.querySelector('[style]')).not.toBeInTheDocument();
-    expect(nativeCard.querySelector('svg')?.parentElement).toHaveClass('bg-subtle');
-    expect(customCard.querySelector('svg')?.parentElement).toHaveClass('bg-subtle');
+    expect(nativeCard.querySelector('svg')?.parentElement).toHaveClass('bg-gray-100');
+    expect(customCard.querySelector('svg')?.parentElement).toHaveClass('bg-gray-100');
     expect(within(nativeCard).getByText('内置')).not.toHaveClass('border');
     expect(within(customCard).getByText('自定义')).not.toHaveClass('border');
     expect(within(customCard).getByText('可委托')).not.toHaveClass('border');

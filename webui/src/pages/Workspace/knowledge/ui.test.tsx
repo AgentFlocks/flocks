@@ -20,7 +20,7 @@ describe('opt-in knowledge visuals', () => {
   it('leaves existing buttons unchanged and uses explicit variants for the knowledge skin', () => {
     render(<><Button>Existing</Button><Button variant="primary" size="small" disabled>Create set</Button></>);
     const existing = screen.getByRole('button', { name: 'Existing' });
-    expect(existing).toHaveClass('border-line', 'dark:border-line');
+    expect(existing).toHaveClass('border-gray-200', 'dark:border-zinc-700');
     expect(existing).not.toHaveClass('kb-button');
     const primary = screen.getByRole('button', { name: 'Create set' });
     expect(primary).toHaveClass('kb-button', 'kb-button--primary', 'kb-button--small');

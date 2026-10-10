@@ -1,38 +1,34 @@
 /*
- * Flocks UI 规范 v1.4 的设计 token（浅色 / 深色）。
+ * 语义变量（浅色 / 深色）。
  *
- * 变量名与规范文档（webui/UI_SPEC.md，源自设计稿 webui/design/flocks-ui-spec-v1.4.html）
- * 一一对应，设计侧改值时按同名替换即可。Tailwind 里通过 tailwind.config.js 暴露为
- * 语义类：bg-canvas / bg-surface / text-fg / text-fg-secondary / border-line /
- * bg-action / text-success / bg-success-soft / text-ai … 深色由 html.dark 切换，
- * 新界面写这些语义类即可，不需要再配 dark: 前缀。
- *
- * 规则：新界面不得再写裸色板类（gray-500 / red-600 …）或十六进制颜色，只能引用这里的
- * token；scripts/ui_spec_check.py 会按基线拦截新增的裸色板用法。
+ * 界面以 dev 分支的样式为准：dev 已有的页面直接写 Tailwind 色板类（bg-white、text-gray-500 …），
+ * 深色由 index.css 的 .dark 兼容表接管。这里的变量只给 v2 新增、dev 没有的界面
+ * （网络代理、语音输入等）以及 Hub 插件页面使用，取值对齐 dev 的配色：
+ * 浅色是 Tailwind gray + 品牌红，深色是 index.css 里的 --flocks-dark-* 那一套。
  */
 
 :root {
   /* 字体 */
-  --font-sans: Inter, system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
-  --font-mono: ui-monospace, "SFMono-Regular", Consolas, monospace;
+  --font-sans: Inter, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", monospace;
   --font-body: 14px;
-  --line-body: 22px;
+  --line-body: 20px;
   --weight-regular: 400;
   --weight-medium: 500;
   --weight-semibold: 600;
   --weight-bold: 700;
 
-  /* 几何 */
-  --radius-sm: 4px;        /* 标签 */
-  --radius-segment: 6px;   /* 分段内项 */
-  --radius-control: 8px;   /* 按钮、输入框、下拉触发器 */
-  --radius-card: 12px;     /* 卡片 */
-  --radius-overlay: 12px;  /* 弹窗、抽屉、菜单 */
+  /* 几何（对应 dev 常用的 rounded-md / rounded-lg / rounded-xl） */
+  --radius-sm: 4px;
+  --radius-segment: 6px;
+  --radius-control: 8px;
+  --radius-card: 12px;
+  --radius-overlay: 12px;
   --radius-pill: 999px;
-  --control-sm: 32px;
-  --control-md: 36px;
-  --control-lg: 40px;
-  --control-touch: 48px;
+  --control-sm: 28px;
+  --control-md: 32px;
+  --control-lg: 36px;
+  --control-touch: 44px;
   --border-width: 1px;
   --focus-width: 2px;
   --focus-offset: 2px;
@@ -43,10 +39,10 @@
   --overlay-onboarding: 768px;
 
   /* 动效 */
-  --motion-fast: 120ms;
-  --motion-normal: 180ms;
-  --motion-overlay: 240ms;
-  --motion-easing: cubic-bezier(0.2, 0, 0, 1);
+  --motion-fast: 150ms;
+  --motion-normal: 150ms;
+  --motion-overlay: 200ms;
+  --motion-easing: cubic-bezier(0.4, 0, 0.2, 1);
 
   /* 间距（4px 步长） */
   --space-0: 0px;
@@ -61,59 +57,59 @@
   --space-48: 48px;
   --space-64: 64px;
 
-  /* 背景层级 */
-  --bg-canvas: #f8fafc;
+  /* 背景层级：gray-50 页面、白色卡片、gray-100 次级底色 */
+  --bg-canvas: #f9fafb;
   --bg-surface: #ffffff;
-  --bg-subtle: #f1f5f9;
-  --bg-hover: #e2e8f0;
-  --bg-selected: #e2e8f0;
+  --bg-subtle: #f3f4f6;
+  --bg-hover: #f3f4f6;
+  --bg-selected: #f3f4f6;
 
-  /* 文字层级 */
-  --text-primary: #0f172a;
-  --text-secondary: #475569;
-  --text-muted: #64748b;
-  --text-placeholder: #94a3b8;
-  --text-link: #1d4ed8;
+  /* 文字层级：gray-900 / 700 / 500 / 400 */
+  --text-primary: #111827;
+  --text-secondary: #374151;
+  --text-muted: #6b7280;
+  --text-placeholder: #9ca3af;
+  --text-link: #2563eb;
 
-  /* 边框 */
-  --border-subtle: #e2e8f0;
-  --border-control: #64748b;
+  /* 边框：gray-200 分隔线、gray-300 控件 */
+  --border-subtle: #e5e7eb;
+  --border-control: #d1d5db;
 
-  /* 操作（品牌红） */
+  /* 操作（red-600 / 700 / 800） */
   --action-primary: #dc2626;
   --action-hover: #b91c1c;
   --action-pressed: #991b1b;
   --action-onPrimary: #ffffff;
-  --action-danger: #b91c1c;
+  --action-danger: #dc2626;
   --action-onDanger: #ffffff;
-  --focus-ring: #1d4ed8;
+  --focus-ring: #94a3b8;
 
   /* 功能状态：文字与底色成对使用 */
-  --status-success: #166534;
+  --status-success: #15803d;
   --status-successBg: #f0fdf4;
-  --status-warning: #92400e;
+  --status-warning: #b45309;
   --status-warningBg: #fffbeb;
-  --status-danger: #b91c1c;
+  --status-danger: #dc2626;
   --status-dangerBg: #fef2f2;
-  --status-info: #1e40af;
+  --status-info: #2563eb;
   --status-infoBg: #eff6ff;
 
-  /* 分类强调：AI 紫（模型 / Rex / 智能体）、数据青（情报 / 接口 / 连接）、品牌红 */
-  --accent-ai: #6d28d9;
+  /* 分类强调 */
+  --accent-ai: #7c3aed;
   --accent-aiBg: #f5f3ff;
   --accent-data: #0e7490;
   --accent-dataBg: #ecfeff;
-  --accent-brand: #b91c1c;
+  --accent-brand: #dc2626;
   --accent-brandBg: #fef2f2;
 
   /* 交互状态 */
-  --disabled-bg: #f1f5f9;
-  --disabled-text: #64748b;
-  --switch-on: #047857;
+  --disabled-bg: #f3f4f6;
+  --disabled-text: #9ca3af;
+  --switch-on: #64748b;
   --switch-thumb: #ffffff;
-  --shadow-overlay: 0 12px 32px rgba(15, 23, 42, 0.16);
-  /* 弹层遮罩（= bg-black/40，深浅色相同），给 ::backdrop 这类没法加类名的地方用 */
-  --overlay-backdrop: rgb(0 0 0 / 40%);
+  --shadow-overlay: 0 20px 25px -5px rgb(0 0 0 / 0.1), 0 8px 10px -6px rgb(0 0 0 / 0.1);
+  /* 弹层遮罩（= bg-black/30），给 ::backdrop 这类没法加类名的地方用 */
+  --overlay-backdrop: rgb(0 0 0 / 30%);
 
   color-scheme: light;
 }
@@ -121,26 +117,26 @@
 .dark {
   --bg-canvas: #252c35;
   --bg-surface: #303842;
-  --bg-subtle: #39434f;
-  --bg-hover: #46515e;
+  --bg-subtle: #3a434e;
+  --bg-hover: #3a434e;
   --bg-selected: #46515e;
 
   --text-primary: #d7dee8;
-  --text-secondary: #bcc6d0;
+  --text-secondary: #b8c2cc;
   --text-muted: #9aa7b4;
-  --text-placeholder: #9aa7b4;
-  --text-link: #bfdbfe;
+  --text-placeholder: rgb(184 194 204 / 0.78);
+  --text-link: #539bf5;
 
   --border-subtle: #4a5563;
-  --border-control: #9aa7b4;
+  --border-control: #5a6573;
 
   --action-primary: #dc2626;
   --action-hover: #b91c1c;
   --action-pressed: #991b1b;
   --action-onPrimary: #ffffff;
-  --action-danger: #b91c1c;
+  --action-danger: #dc2626;
   --action-onDanger: #ffffff;
-  --focus-ring: #93c5fd;
+  --focus-ring: #539bf5;
 
   --status-success: #86efac;
   --status-successBg: #14332a;
@@ -159,10 +155,11 @@
   --accent-brandBg: #3b2028;
 
   --disabled-bg: #303842;
-  --disabled-text: #778393;
-  --switch-on: #34d399;
+  --disabled-text: #9aa7b4;
+  --switch-on: #64748b;
   --switch-thumb: #ffffff;
-  --shadow-overlay: 0 12px 32px rgba(0, 0, 0, 0.4);
+  --shadow-overlay: 0 18px 48px rgb(28 33 40 / 0.38);
+  --overlay-backdrop: rgb(0 0 0 / 50%);
 
   color-scheme: dark;
 }

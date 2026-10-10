@@ -18,7 +18,35 @@
 
 import { useState, useCallback, useRef, useEffect, useLayoutEffect, useMemo, memo, type RefObject } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
-import { IconSend, IconLoader2, IconChevronDown, IconSquare, IconCopy, IconUser, IconFileText, IconDownload, IconAlertCircle, IconX, IconRefresh, IconPencil, IconDeviceFloppy, IconPhoto, IconPaperclip, IconPlus, IconArrowUp, IconClock, IconCircleCheck, IconCircleX, IconBrain, IconTrash, IconRobot, IconCheck, IconEye, IconListTree, IconBook, IconRouteSquare2 as WorkflowIcon } from '@tabler/icons-react';
+import {
+  AlertCircle,
+  ArrowUp,
+  BookOpen,
+  Bot,
+  Brain,
+  CheckCircle2,
+  ChevronDown,
+  Clock,
+  Copy,
+  Download,
+  Eye,
+  FileText,
+  ImageIcon,
+  ListTree,
+  Loader2,
+  Paperclip,
+  Pencil,
+  Plus,
+  RefreshCw,
+  Save,
+  Send,
+  Square,
+  Trash2,
+  User,
+  Workflow as WorkflowIcon,
+  X,
+  XCircle,
+} from 'lucide-react';
 import { StreamingMarkdown, useStreamingContent } from './StreamingMarkdown';
 import { useTranslation } from 'react-i18next';
 import LoadingSpinner from './LoadingSpinner';
@@ -137,16 +165,15 @@ interface ComposerReference {
 }
 
 const AGENT_AVATAR_COLORS: Record<string, string> = {
-  // Semantic category pairs (UI_SPEC.md) so avatars follow the light / dark theme.
-  rex: 'bg-brand-soft text-brand',
-  'rex-junior': 'bg-ai-soft text-ai',
-  explore: 'bg-data-soft text-data',
-  librarian: 'bg-warning-soft text-warning',
-  oracle: 'bg-info-soft text-info',
-  prometheus: 'bg-danger-soft text-danger',
-  hephaestus: 'bg-subtle text-fg-secondary',
-  'multimodal-looker': 'bg-success-soft text-success',
-  'self-improve': 'bg-selected text-fg',
+  rex: 'bg-red-600',
+  'rex-junior': 'bg-violet-600',
+  explore: 'bg-teal-700',
+  librarian: 'bg-amber-700',
+  oracle: 'bg-blue-600',
+  prometheus: 'bg-orange-700',
+  hephaestus: 'bg-slate-600',
+  'multimodal-looker': 'bg-pink-700',
+  'self-improve': 'bg-lime-700',
 };
 const CUSTOM_AGENT_AVATAR_COLORS = Object.values(AGENT_AVATAR_COLORS);
 
@@ -542,15 +569,15 @@ interface PendingContextUsageState {
 }
 
 const CONTEXT_SEGMENT_COLORS: Record<ContextUsageBreakdownSegment['key'], string> = {
-  systemPrompt: 'bg-selected',
-  toolDefinitions: 'bg-ai',
-  tools: 'bg-ai',
-  skillLoad: 'bg-warning',
-  agentDelegation: 'bg-success',
-  conversation: 'bg-selected',
-  reasoning: 'bg-ai',
-  draft: 'bg-info',
-  compactedHistory: 'bg-selected',
+  systemPrompt: 'bg-zinc-400',
+  toolDefinitions: 'bg-violet-400',
+  tools: 'bg-indigo-400',
+  skillLoad: 'bg-amber-400',
+  agentDelegation: 'bg-emerald-500',
+  conversation: 'bg-slate-500',
+  reasoning: 'bg-rose-400',
+  draft: 'bg-sky-400',
+  compactedHistory: 'bg-zinc-300',
 };
 
 const CONTEXT_SEGMENT_KEYS = new Set(Object.keys(CONTEXT_SEGMENT_COLORS));
@@ -941,12 +968,12 @@ function ContextUsageRing({
   const circumference = 2 * Math.PI * radius;
   const strokeDashoffset = circumference * (1 - clamped / 100);
   const strokeClass = clamped >= 90
-    ? 'stroke-danger'
+    ? 'stroke-red-500'
     : clamped >= 75
-      ? 'stroke-warning'
+      ? 'stroke-amber-500'
       : clamped >= 50
-        ? 'stroke-info'
-        : 'stroke-fg-muted';
+        ? 'stroke-sky-500'
+        : 'stroke-zinc-400';
   // Fixed prompt costs are only counted once the model has been called.
   const rows = breakdown.segments.filter((segment) => (
     segment.included || (segment.key !== 'systemPrompt' && segment.key !== 'toolDefinitions')
@@ -989,7 +1016,7 @@ function ContextUsageRing({
     >
       <button
         type="button"
-        className="relative inline-flex h-6 items-center gap-1 rounded-md px-1 text-xs font-medium tabular-nums text-fg-muted transition-colors hover:bg-hover hover:text-fg-secondary focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus dark:text-fg-muted dark:hover:bg-hover dark:hover:text-fg-secondary"
+        className="relative inline-flex h-6 items-center gap-1 rounded-md px-1 text-[10px] font-medium tabular-nums text-zinc-500 transition-colors hover:bg-zinc-200/60 hover:text-zinc-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-500 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-200"
         title={title}
         aria-label={title}
         aria-haspopup="menu"
@@ -997,7 +1024,7 @@ function ContextUsageRing({
         onClick={() => setOpen((value) => !value)}
       >
         <svg className="h-5 w-5 shrink-0 -rotate-90" viewBox="0 0 24 24" aria-hidden="true">
-          <circle cx="12" cy="12" r={radius} fill="none" strokeWidth="2" className="stroke-fg dark:stroke-fg" />
+          <circle cx="12" cy="12" r={radius} fill="none" strokeWidth="2" className="stroke-zinc-200 dark:stroke-zinc-800" />
           <circle
             cx="12"
             cy="12"
@@ -1017,24 +1044,24 @@ function ContextUsageRing({
         <div
           role="menu"
           aria-label={t('chat.contextUsage.title')}
-          className="absolute bottom-full right-0 z-50 mb-2 w-80 max-w-[calc(100vw-2rem)] rounded-lg border border-line bg-surface text-fg shadow-sm dark:border-line dark:bg-surface dark:text-fg-secondary dark:shadow-xl "
+          className="absolute bottom-full right-0 mb-2 w-80 max-w-[calc(100vw-2rem)] rounded-lg border border-zinc-200 bg-white text-zinc-800 shadow-sm dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-200 dark:shadow-xl dark:shadow-black/30 z-50"
         >
-          <div className="border-b border-line px-2.5 py-1.5 dark:border-line">
+          <div className="border-b border-zinc-100 px-2.5 py-1.5 dark:border-zinc-800">
             <div className="flex items-center justify-between gap-3">
               <div className="min-w-0">
-                <div className="truncate text-xs font-semibold text-fg-secondary dark:text-fg">{t('chat.contextUsage.title')}</div>
-                <div className="truncate text-xs text-fg-muted dark:text-fg-muted">
+                <div className="text-xs font-semibold text-zinc-700 dark:text-zinc-100 truncate">{t('chat.contextUsage.title')}</div>
+                <div className="text-[10px] text-zinc-400 dark:text-zinc-500 truncate">
                   {t('chat.contextUsage.tokens', {
                     used: formatTokenCount(usedTokens),
                     total: formatTokenCount(totalTokens),
                   })}
                 </div>
               </div>
-              <span className="shrink-0 rounded bg-canvas px-1.5 py-0.5 text-xs font-medium text-fg-muted dark:bg-subtle dark:text-fg-secondary">
+              <span className="rounded bg-zinc-50 px-1.5 py-0.5 text-[10px] font-medium text-zinc-500 dark:bg-zinc-800 dark:text-zinc-300 shrink-0">
                 {t('chat.contextUsage.full', { percent: clamped })}
               </span>
             </div>
-            <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-subtle dark:bg-subtle">
+            <div className="mt-1.5 h-1 rounded-full bg-zinc-100 dark:bg-zinc-800 overflow-hidden">
               <div
                 className="flex h-full overflow-hidden rounded-full"
                 style={{ width: `${clamped}%` }}
@@ -1058,15 +1085,15 @@ function ContextUsageRing({
               <div
                 key={segment.key}
                 role="menuitem"
-                className="flex min-w-0 items-center justify-between gap-3 rounded-md px-2 py-1.5 text-xs text-fg-secondary dark:text-fg-secondary"
+                className="flex items-center justify-between gap-3 rounded-md px-2 py-1.5 text-xs text-zinc-700 dark:text-zinc-300 min-w-0"
               >
                 <div className="flex min-w-0 items-center gap-2">
-                  <span className={`h-3 w-3 shrink-0 rounded-card ${segment.colorClass}`} />
-                  <span className="truncate font-medium text-fg dark:text-fg">
+                  <span className={`h-3 w-3 rounded-[3px] shrink-0 ${segment.colorClass}`} />
+                  <span className="font-medium text-zinc-800 dark:text-zinc-100 truncate">
                     {getContextUsageLabel(t, segment.key)}
                   </span>
                 </div>
-                <span className={segment.included ? 'shrink-0 text-fg-secondary dark:text-fg-secondary' : 'shrink-0 text-fg-muted dark:text-fg-muted'}>
+                <span className={segment.included ? 'text-zinc-600 dark:text-zinc-300 shrink-0' : 'text-zinc-400 dark:text-zinc-500 shrink-0'}>
                   {formatTokenCount(segment.included ? segment.tokens : 0)}
                 </span>
               </div>
@@ -1200,24 +1227,24 @@ export function getMessageBubbleClassName({
   isEditing: boolean;
 }): string {
   if (!isUser) {
-    const typographyClass = compact ? 'text-sm' : 'text-sm';
+    const typographyClass = compact ? 'text-sm' : 'text-[15px]';
 
-    return `w-full max-w-full min-w-0 rounded-card border border-line bg-subtle px-4 py-3 ${typographyClass} text-fg break-words`;
+    return `w-full max-w-full min-w-0 bg-transparent py-1 ${typographyClass} text-[#34393e] break-words dark:text-zinc-100`;
   }
 
   if (compact) {
     const widthClass = isEditing ? 'w-full max-w-full' : 'max-w-full';
 
-    return `${widthClass} min-w-0 px-4 py-3 rounded-card text-sm break-words shadow-sm border border-line bg-subtle text-fg`;
+    return `${widthClass} min-w-0 px-4 py-3 rounded-[20px] text-sm break-words shadow-sm border border-black/[0.07] bg-zinc-50 text-[#30343a] dark:border-white/[0.08] dark:bg-[#303842] dark:text-zinc-50 dark:shadow-none`;
   }
 
   const widthClass = isEditing ? 'w-full' : 'w-auto';
 
-  return `${widthClass} min-w-0 max-w-full px-4 py-3 rounded-card text-sm break-words shadow-sm border border-line bg-subtle text-fg`;
+  return `${widthClass} min-w-0 max-w-full px-5 py-3 rounded-[18px] text-sm break-words shadow-sm border border-black/[0.09] bg-zinc-50 text-[#30343a] dark:border-white/[0.10] dark:bg-[#303842] dark:text-zinc-50 dark:shadow-none`;
 }
 
 export function getInstructionDisplayBubbleClassName(compact: boolean): string {
-  return `${compact ? 'px-2.5 py-1.5' : 'px-3 py-2'} rounded-lg border border-danger bg-danger-soft text-sm text-danger shadow-none dark:border-danger dark:bg-danger-soft dark:text-danger`;
+  return `${compact ? 'px-2.5 py-1.5' : 'px-3 py-2'} rounded-lg border border-rose-100 bg-rose-50/80 text-sm text-rose-700 shadow-none dark:border-rose-500/30 dark:bg-rose-950/30 dark:text-rose-200`;
 }
 
 export function getMessageGroupClassName({
@@ -1242,7 +1269,7 @@ export function getMessageGroupClassName({
 
 export function getCompactionDividerClassName(compact: boolean): string {
   const messageInset = compact ? 'pl-[38px]' : 'pl-[42px]';
-  return `${compact ? 'my-3' : 'my-4'} flex w-full min-w-0 items-center gap-3 ${messageInset} pr-1 text-xs text-fg-muted`;
+  return `${compact ? 'my-3' : 'my-4'} flex items-center gap-3 w-full min-w-0 ${messageInset} pr-1 text-xs text-zinc-500`;
 }
 
 export function getRegenerateTruncateTarget(
@@ -1630,29 +1657,29 @@ function getGoalBannerTone(status: GoalBannerStatus): {
 } {
   if (status === 'completed') {
     return {
-      root: 'border-success bg-success-soft text-success',
-      dot: 'bg-success',
-      icon: <IconCircleCheck aria-hidden="true" className="h-4 w-4 text-success" />,
+      root: 'border-emerald-200 bg-emerald-50 text-emerald-900',
+      dot: 'bg-emerald-500',
+      icon: <CheckCircle2 aria-hidden="true" className="h-3.5 w-3.5 text-emerald-600" />,
     };
   }
   if (status === 'blocked') {
     return {
-      root: 'border-danger bg-danger-soft text-danger',
-      dot: 'bg-action',
-      icon: <IconAlertCircle aria-hidden="true" className="h-4 w-4 text-danger" />,
+      root: 'border-red-200 bg-red-50 text-red-900',
+      dot: 'bg-red-500',
+      icon: <AlertCircle aria-hidden="true" className="h-3.5 w-3.5 text-red-600" />,
     };
   }
   if (status === 'paused') {
     return {
-      root: 'border-warning bg-warning-soft text-warning',
-      dot: 'bg-warning',
-      icon: <IconClock aria-hidden="true" className="h-4 w-4 text-warning" />,
+      root: 'border-amber-200 bg-amber-50 text-amber-900',
+      dot: 'bg-amber-500',
+      icon: <Clock aria-hidden="true" className="h-3.5 w-3.5 text-amber-600" />,
     };
   }
   return {
-    root: 'border-info bg-info-soft text-info',
-    dot: 'bg-info',
-    icon: <IconListTree aria-hidden="true" className="h-4 w-4 text-info" />,
+    root: 'border-sky-200 bg-sky-50 text-sky-950',
+    dot: 'bg-sky-500',
+    icon: <ListTree aria-hidden="true" className="h-3.5 w-3.5 text-sky-600" />,
   };
 }
 
@@ -1674,18 +1701,18 @@ function GoalBanner({
       <span className="shrink-0 font-semibold">{statusLabel}</span>
       <span className="min-w-0 flex-1 truncate font-medium">{goal.objective}</span>
       {goal.reason && goal.status !== 'active' && (
-        <span className="hidden min-w-0 max-w-[35%] truncate text-xs opacity-70 sm:inline">
+        <span className="text-[11px] opacity-70 hidden min-w-0 max-w-[35%] truncate sm:inline">
           {goal.reason}
         </span>
       )}
       <button
         type="button"
         onClick={onDismiss}
-        className="ui-btn-icon ml-1 inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-current opacity-60 transition hover:bg-hover hover:opacity-100"
+        className="ml-1 inline-flex h-6 w-6 items-center justify-center rounded-md text-current opacity-60 transition hover:bg-black/5 hover:opacity-100 shrink-0"
         title={t('chat.goal.dismiss')}
         aria-label={t('chat.goal.dismiss')}
       >
-        <IconX aria-hidden="true" className="h-4 w-4" />
+        <X aria-hidden="true" className="h-3.5 w-3.5" />
       </button>
     </div>
   );
@@ -1725,40 +1752,40 @@ function QueuedPromptPanel({
   if (items.length === 0) return null;
 
   return (
-    <div className="mb-2 overflow-hidden rounded-xl border border-line bg-subtle dark:border-line dark:bg-surface">
+    <div className="mb-2 rounded-xl border border-zinc-200 bg-zinc-950/[0.02] dark:border-zinc-800 dark:bg-zinc-900/60 overflow-hidden">
       <button
         type="button"
         onClick={onToggle}
-        className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs font-medium text-fg-secondary transition-colors hover:bg-hover dark:text-fg-secondary dark:hover:bg-hover"
+        className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs font-medium text-zinc-600 transition-colors hover:bg-zinc-100/70 dark:text-zinc-300 dark:hover:bg-zinc-800"
       >
-        <IconChevronDown aria-hidden="true" className={`h-4 w-4 transition-transform ${expanded ? '' : '-rotate-90'}`} />
+        <ChevronDown aria-hidden="true" className={`h-3.5 w-3.5 transition-transform ${expanded ? '' : '-rotate-90'}`} />
         <span>{t('chat.queue.count', { count: items.length })}</span>
       </button>
       {expanded && (
-        <div className="max-h-40 overflow-y-auto border-t border-line dark:border-line">
+        <div className="max-h-40 border-t border-zinc-200 dark:border-zinc-800 overflow-y-auto">
           {items.map((item) => {
             const isEditing = editingId === item.id;
             const isBusy = actionId === item.id || item.status === 'executing';
             const text = getQueuedPromptText(item);
             const instructionLabel = parseInstructionDisplayText(text);
             return (
-              <div key={item.id} className="flex items-start gap-2 border-b border-line px-3 py-2 last:border-b-0 dark:border-line">
-                <div className="mt-1 h-2 w-2 flex-shrink-0 rounded-full border border-line-control dark:border-line-control" />
+              <div key={item.id} className="flex items-start gap-2 border-b border-zinc-100 px-3 py-2 last:border-b-0 dark:border-zinc-800">
+                <div className="mt-1 h-2 w-2 rounded-full border border-zinc-400 dark:border-zinc-500 flex-shrink-0" />
                 <div className="min-w-0 flex-1">
                   {isEditing ? (
                     <textarea
                       value={editingText}
                       onChange={(event) => onEditChange(event.target.value)}
-                      className="w-full resize-none rounded-lg border border-line bg-surface px-2 py-1.5 text-xs text-fg outline-none focus:border-line-control focus:ring-2 focus:ring-focus dark:border-line dark:bg-canvas dark:text-fg dark:focus:border-line dark:focus:ring-focus"
+                      className="w-full resize-none rounded-lg border border-zinc-200 bg-white px-2 py-1.5 text-xs text-zinc-800 outline-none focus:border-zinc-300 focus:ring-2 focus:ring-zinc-100 dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-100 dark:focus:border-zinc-700 dark:focus:ring-zinc-800/70"
                       rows={2}
                     />
                   ) : (
                     instructionLabel ? (
-                      <span className="inline-flex max-w-full items-center truncate rounded-md border border-danger bg-danger-soft px-2 py-1 text-xs font-semibold leading-none text-danger dark:border-danger dark:bg-danger-soft dark:text-danger">
+                      <span className="inline-flex items-center rounded-md border border-rose-100 bg-rose-50 px-2 py-1 text-xs font-semibold leading-none text-rose-700 dark:border-rose-500/30 dark:bg-rose-950/30 dark:text-rose-200 max-w-full truncate">
                         {instructionLabel}
                       </span>
                     ) : (
-                      <div className="line-clamp-2 text-xs text-fg-secondary dark:text-fg-secondary">{text || t('chat.queue.attachmentOnly')}</div>
+                      <div className="text-xs text-zinc-700 dark:text-zinc-300 line-clamp-2">{text || t('chat.queue.attachmentOnly')}</div>
                     )
                   )}
                 </div>
@@ -1769,19 +1796,19 @@ function QueuedPromptPanel({
                         type="button"
                         onClick={() => onEditSave(item)}
                         disabled={isBusy || !editingText.trim()}
-                        className="ui-btn-icon rounded p-1 text-fg-muted hover:bg-hover hover:text-fg disabled:bg-disabled disabled:text-fg-disabled dark:text-fg-muted dark:hover:bg-hover dark:hover:text-fg"
+                        className="rounded p-1 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-800 disabled:opacity-40 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
                         title={t('chat.save')}
                       >
-                        <IconDeviceFloppy aria-hidden="true" className="h-4 w-4" />
+                        <Save aria-hidden="true" className="h-3.5 w-3.5" />
                       </button>
                       <button
                         type="button"
                         onClick={onEditCancel}
                         disabled={isBusy}
-                        className="ui-btn-icon rounded p-1 text-fg-muted hover:bg-hover hover:text-fg disabled:bg-disabled disabled:text-fg-disabled dark:text-fg-muted dark:hover:bg-hover dark:hover:text-fg"
+                        className="rounded p-1 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-800 disabled:opacity-40 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
                         title={t('chat.cancel')}
                       >
-                        <IconX aria-hidden="true" className="h-4 w-4" />
+                        <X aria-hidden="true" className="h-3.5 w-3.5" />
                       </button>
                     </>
                   ) : (
@@ -1790,28 +1817,28 @@ function QueuedPromptPanel({
                         type="button"
                         onClick={() => onEditStart(item)}
                         disabled={isBusy}
-                        className="ui-btn-icon rounded p-1 text-fg-muted hover:bg-hover hover:text-fg disabled:bg-disabled disabled:text-fg-disabled dark:text-fg-muted dark:hover:bg-hover dark:hover:text-fg"
+                        className="rounded p-1 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-800 disabled:opacity-40 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
                         title={t('chat.queue.edit')}
                       >
-                        <IconPencil aria-hidden="true" className="h-4 w-4" />
+                        <Pencil aria-hidden="true" className="h-3.5 w-3.5" />
                       </button>
                       <button
                         type="button"
                         onClick={() => onRunNow(item)}
                         disabled={isBusy}
-                        className="ui-btn-icon rounded p-1 text-fg-muted hover:bg-hover hover:text-fg disabled:bg-disabled disabled:text-fg-disabled dark:text-fg-muted dark:hover:bg-hover dark:hover:text-fg"
+                        className="rounded p-1 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-800 disabled:opacity-40 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
                         title={t('chat.queue.runNow')}
                       >
-                        <IconArrowUp aria-hidden="true" className="h-4 w-4" />
+                        <ArrowUp aria-hidden="true" className="h-3.5 w-3.5" />
                       </button>
                       <button
                         type="button"
                         onClick={() => onRemove(item)}
                         disabled={isBusy}
-                        className="ui-btn-icon rounded p-1 text-fg-muted hover:bg-danger-soft hover:text-danger disabled:bg-disabled disabled:text-fg-disabled dark:text-fg-muted dark:hover:bg-danger-soft dark:hover:text-danger"
+                        className="rounded p-1 text-zinc-500 hover:bg-red-50 hover:text-red-600 disabled:opacity-40 dark:text-zinc-400 dark:hover:bg-red-950/40 dark:hover:text-red-300"
                         title={t('chat.queue.remove')}
                       >
-                        <IconTrash aria-hidden="true" className="h-4 w-4" />
+                        <Trash2 aria-hidden="true" className="h-3.5 w-3.5" />
                       </button>
                     </>
                   )}
@@ -2553,9 +2580,9 @@ export default function SessionChat({
     }
     focusedMessageRef.current = targetId;
     target.scrollIntoView({ block: 'center', behavior: 'smooth' });
-    target.classList.add('ring-2', 'ring-focus', 'ring-offset-2', 'ring-offset-surface', 'dark:ring-offset-line');
+    target.classList.add('ring-2', 'ring-sky-400', 'ring-offset-2', 'ring-offset-white', 'dark:ring-offset-zinc-950');
     window.setTimeout(() => {
-      target.classList.remove('ring-2', 'ring-focus', 'ring-offset-2', 'ring-offset-surface', 'dark:ring-offset-line');
+      target.classList.remove('ring-2', 'ring-sky-400', 'ring-offset-2', 'ring-offset-white', 'dark:ring-offset-zinc-950');
     }, 1800);
     onFocusMessageConsumed?.();
   }, [focusMessageId, loading, messages, focusMessage, onFocusMessageConsumed]);
@@ -4511,10 +4538,10 @@ export default function SessionChat({
 
   // ── Styling based on compact mode ──
   const msgAreaClass = compact
-    ? 'relative flex flex-col flex-1 min-h-0 overflow-y-auto bg-canvas px-4 py-4 dark:bg-canvas'
+    ? 'relative flex flex-col flex-1 bg-gray-50 px-4 py-4 dark:bg-zinc-950 min-h-0 overflow-y-auto'
     : pageCanvas
       ? 'relative flex flex-col flex-1 min-h-0 overflow-y-auto bg-transparent py-5'
-      : 'relative flex flex-col flex-1 min-h-0 overflow-y-auto bg-canvas py-6 dark:bg-canvas';
+      : 'relative flex flex-col flex-1 bg-gray-50 py-6 dark:bg-zinc-950 min-h-0 overflow-y-auto';
 
   const msgListClass = compact
     ? fullWidth ? 'space-y-3 w-full px-4' : 'space-y-3'
@@ -4537,9 +4564,9 @@ export default function SessionChat({
     <button
       onClick={handleAbort}
       title={t('chat.stopTitle')}
-      className="ui-btn-icon inline-flex h-8 w-8 items-center justify-center rounded-full border border-line-control bg-surface text-fg transition-colors hover:bg-hover"
+      className="inline-flex h-8 w-8 items-center justify-center rounded-full bg-zinc-800 text-white hover:bg-zinc-900 shadow-sm transition-all"
     >
-      <IconSquare aria-hidden="true" className="w-4 h-4 fill-current" />
+      <Square aria-hidden="true" className="w-3 h-3 fill-current" />
     </button>
   );
 
@@ -4557,19 +4584,19 @@ export default function SessionChat({
             <LoadingSpinner
               size="sm"
               delayMs={180}
-              className="opacity-60 [&_svg]:text-fg-muted dark:[&_svg]:text-fg-muted"
+              className="opacity-60 [&_svg]:text-zinc-400 dark:[&_svg]:text-zinc-500"
             />
           </div>
         ) : messagesError && messages.length === 0 ? (
           <div className="flex min-h-40 items-center justify-center px-6" role="alert">
             <div className="flex flex-col items-center gap-3 text-center">
-              <span className="text-sm text-fg-muted dark:text-fg-muted">
+              <span className="text-sm text-zinc-500 dark:text-zinc-400">
                 {t('chat.loadFailed')}
               </span>
               <button
                 type="button"
                 onClick={() => void refetch()}
-                className="rounded-lg border border-line bg-surface px-3 py-1.5 text-xs font-medium text-fg-secondary transition-colors hover:bg-hover dark:border-line dark:bg-surface dark:text-fg-secondary dark:hover:bg-hover"
+                className="rounded-lg border border-zinc-200 bg-white px-3 py-1.5 text-xs font-medium text-zinc-700 transition-colors hover:bg-zinc-50 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200 dark:hover:bg-zinc-800"
               >
                 {t('chat.retry')}
               </button>
@@ -4587,7 +4614,7 @@ export default function SessionChat({
               </div>
             )
           ) : (
-            <div className="text-center py-8 text-fg-muted text-sm">{effectiveEmptyText}</div>
+            <div className="text-center py-8 text-gray-400 text-sm">{effectiveEmptyText}</div>
           )
         ) : (
           <div ref={messagesContentRef} className={msgListClass}>
@@ -4675,7 +4702,7 @@ export default function SessionChat({
               <div className={`group relative ${!compact ? 'w-full' : ''} flex`}>
                 <div className={compact ? `flex gap-2.5 ${getMessageGroupClassName({ compact, isUser: false, isEditing: false })}` : 'flex w-full min-w-0'}>
                   <span
-                    className={`inline-flex items-center justify-center rounded-full ${getAgentAvatarColor(pendingAgentName)} font-bold shadow-sm ring-2 ring-line flex-shrink-0 dark:ring-focus ${
+                    className={`inline-flex items-center justify-center rounded-full ${getAgentAvatarColor(pendingAgentName)} text-white font-bold shadow-sm ring-2 ring-white dark:ring-zinc-950 flex-shrink-0 ${
                       compact ? 'w-7 h-7 text-xs' : 'w-8 h-8 text-sm'
                     } ${compact ? '' : 'absolute -left-10 top-1'}`}
                   >
@@ -4683,37 +4710,37 @@ export default function SessionChat({
                   </span>
                   <div className="flex flex-col items-start flex-1 min-w-0">
                     <div className={`flex items-center gap-2 ${compact ? 'h-7' : 'h-8'}`}>
-                      <span className="text-sm font-semibold text-fg-secondary dark:text-fg-secondary">{formatAgentName(pendingAgentName)}</span>
+                      <span className="text-sm font-semibold text-zinc-700 dark:text-zinc-300">{formatAgentName(pendingAgentName)}</span>
                     </div>
                     <div className="flex flex-col min-w-0 w-full">
-                      <div className={`${compact ? 'w-full max-w-full px-4 py-3 rounded-card' : 'w-full px-5 py-4 rounded-card'} text-sm break-words shadow-sm bg-warning-soft border border-warning dark:border-warning dark:bg-warning-soft dark:shadow-none`}>
-                        <div className="flex items-center gap-2 text-sm text-warning">
-                          <IconLoader2 aria-hidden="true" className="w-4 h-4 animate-spin text-warning" />
+                      <div className={`${compact ? 'w-full px-4 py-3 rounded-[20px] max-w-full' : 'w-full px-5 py-4 rounded-[24px]'} text-sm shadow-sm bg-amber-50 border border-amber-200 dark:border-amber-500/35 dark:bg-amber-950/30 dark:shadow-none break-words`}>
+                        <div className="flex items-center gap-2 text-sm text-amber-700">
+                          <Loader2 aria-hidden="true" className="w-4 h-4 animate-spin text-amber-500" />
                           <span>{compactingMessage || t('chat.compacting')}</span>
                         </div>
                         {compactionPercent !== null && (
                           <div className="mt-2">
-                            <div className="flex items-center justify-between text-xs text-warning mb-1">
+                            <div className="flex items-center justify-between text-[11px] text-amber-700/80 mb-1">
                               <span>{t('chat.compactionStage.overallProgressLabel')}</span>
                               <span>{compactionPercent}%</span>
                             </div>
-                            <div className="h-1 w-full rounded-full bg-warning-soft overflow-hidden">
+                            <div className="h-1 w-full rounded-full bg-amber-100 overflow-hidden">
                               <div
-                                className="h-full bg-warning transition-all duration-300"
+                                className="h-full bg-amber-500 transition-all duration-300"
                                 style={{ width: `${compactionPercent}%` }}
                               />
                             </div>
                           </div>
                         )}
                         {compactionStages.length > 0 && (
-                          <ul className="mt-2 space-y-0.5 text-xs text-warning max-h-32 overflow-y-auto">
+                          <ul className="mt-2 space-y-0.5 text-[11px] text-amber-700/80 max-h-32 overflow-y-auto">
                             {compactionStages
                               .map((entry, idx) => {
                                 const text = describeCompactionStage(entry, t);
                                 if (!text) return null;
                                 return (
                                   <li key={`${entry.stage}-${idx}-${entry.ts}`} className="flex gap-1.5">
-                                    <span className="text-warning">·</span>
+                                    <span className="text-amber-400">·</span>
                                     <span>{text}</span>
                                   </li>
                                 );
@@ -4736,8 +4763,8 @@ export default function SessionChat({
                 role="status"
               >
                 <div className={compact ? 'w-full' : 'flex w-full min-w-0'}>
-                  <div className="flex w-full items-center gap-2 rounded-card border border-warning bg-warning-soft px-3 py-2 text-xs text-warning">
-                    <IconLoader2 aria-hidden="true" className="h-3.5 w-3.5 flex-shrink-0 animate-spin text-warning" />
+                  <div className="flex w-full items-center gap-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-700 dark:border-amber-500/35 dark:bg-amber-950/30 dark:text-amber-300">
+                    <Loader2 aria-hidden="true" className="h-3.5 w-3.5 animate-spin text-amber-500 flex-shrink-0" />
                     <span className="min-w-0 break-words">{retryNoticeText}</span>
                   </div>
                 </div>
@@ -4749,7 +4776,7 @@ export default function SessionChat({
               <div className={`group relative ${!compact ? 'w-full' : ''} flex`}>
                 <div className={compact ? `flex gap-2.5 ${getMessageGroupClassName({ compact, isUser: false, isEditing: false })}` : 'flex w-full min-w-0'}>
                   <span
-                    className={`inline-flex items-center justify-center rounded-full ${getAgentAvatarColor(pendingAgentName)} font-bold shadow-sm ring-2 ring-line flex-shrink-0 dark:ring-focus ${
+                    className={`inline-flex items-center justify-center rounded-full ${getAgentAvatarColor(pendingAgentName)} text-white font-bold shadow-sm ring-2 ring-white dark:ring-zinc-950 flex-shrink-0 ${
                       compact ? 'w-7 h-7 text-xs' : 'w-8 h-8 text-sm'
                     } ${compact ? '' : 'absolute -left-10 top-1'}`}
                   >
@@ -4757,21 +4784,21 @@ export default function SessionChat({
                   </span>
                   <div className="flex flex-col items-start flex-1 min-w-0">
                     <div className={`flex items-center gap-2 ${compact ? 'h-7' : 'h-8'}`}>
-                      <span className="text-sm font-semibold text-fg-secondary dark:text-fg-secondary">{formatAgentName(pendingAgentName)}</span>
+                      <span className="text-sm font-semibold text-zinc-700 dark:text-zinc-300">{formatAgentName(pendingAgentName)}</span>
                     </div>
                     <div className="flex flex-col min-w-0 w-full">
                       <div className={getStandaloneThinkingBubbleClassName(compact)}>
                         {isDreaming ? (
-                          <div className="flex items-center gap-2 text-sm text-ai dark:text-ai">
-                            <IconLoader2 aria-hidden="true" className="w-4 h-4 animate-spin" />
+                          <div className="flex items-center gap-2 text-sm text-violet-600 dark:text-violet-300">
+                            <Loader2 aria-hidden="true" className="w-4 h-4 animate-spin" />
                             <span>{dreamingMessage || t('chat.dreaming')}</span>
                           </div>
                         ) : (
-                          <div className="flex items-center gap-2 text-sm text-fg-muted">
+                          <div className="flex items-center gap-2 text-sm text-gray-500">
                             <div className="flex gap-0.5">
-                              <div className="w-1.5 h-1.5 bg-selected rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
-                              <div className="w-1.5 h-1.5 bg-selected rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
-                              <div className="w-1.5 h-1.5 bg-selected rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
+                              <div className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
+                              <div className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
+                              <div className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
                             </div>
                           </div>
                         )}
@@ -4788,9 +4815,9 @@ export default function SessionChat({
 
       {/* Suggestions — shown before user sends any message */}
       {suggestions && suggestions.length > 0 && !hasUserMessage && !hideInput && (
-        <div className="flex-shrink-0 px-3 pt-2.5 pb-2 border-t border-line bg-surface dark:border-line dark:bg-canvas">
+        <div className="px-3 pt-2.5 pb-2 border-t border-gray-100 bg-white dark:border-zinc-800 dark:bg-zinc-950 flex-shrink-0">
           <div className="flex items-center gap-1.5 mb-2">
-            <span className="text-xs font-medium text-fg-muted">{t('chat.suggestions')}</span>
+            <span className="text-xs font-medium text-gray-400">{t('chat.suggestions')}</span>
           </div>
           <div className="flex flex-col gap-1.5 max-h-36 overflow-y-auto">
             {suggestions.map((q, i) => (
@@ -4798,7 +4825,7 @@ export default function SessionChat({
                 key={i}
                 onClick={() => setInput(q)}
                 disabled={sending}
-                className="text-left text-xs text-fg-secondary bg-canvas hover:bg-hover hover:text-fg border border-line hover:border-line-control rounded-lg px-2.5 py-2 transition-colors line-clamp-2 disabled:bg-disabled disabled:text-fg-disabled disabled:cursor-not-allowed"
+                className="text-left text-xs text-gray-600 bg-gray-50 hover:bg-gray-100 hover:text-gray-900 border border-gray-200 hover:border-gray-300 rounded-lg px-2.5 py-2 transition-colors disabled:opacity-40 disabled:cursor-not-allowed line-clamp-2"
               >
                 {q}
               </button>
@@ -4816,7 +4843,7 @@ export default function SessionChat({
 
       {/* Follow-up input */}
       {hideInput && (pendingPermissions[0] || permissionError) && (
-        <div className="flex-shrink-0 border-t border-warning bg-surface px-3 py-2 dark:border-warning dark:bg-canvas">
+        <div className="border-t border-amber-200/60 bg-white px-3 py-2 dark:border-amber-500/35 dark:bg-zinc-950 flex-shrink-0">
           <div className={!compact ? (fullWidth ? 'w-full px-5' : 'w-[min(76%,64rem)] mx-auto px-6') : ''}>
             <PermissionApprovalDialog
               request={pendingPermissions[0] ?? null}
@@ -4832,10 +4859,10 @@ export default function SessionChat({
         <div
           className={`flex-shrink-0 ${
             compact
-              ? 'bg-surface px-4 py-3 dark:bg-canvas'
+              ? 'bg-white px-4 py-3 dark:bg-zinc-950'
               : pageCanvas
                 ? 'bg-transparent px-7 pb-6 pt-2'
-                : 'bg-surface py-4 dark:bg-canvas'
+                : 'bg-white py-4 dark:bg-zinc-950'
           }`}
         >
           <div
@@ -4938,28 +4965,28 @@ export default function SessionChat({
                   if (event.target !== textareaRef.current) composerAddMenuButtonRef.current?.focus();
                 }
               }}
-              className={`${pageCanvas && !compact ? 'min-h-[124px] rounded-card shadow-none' : 'rounded-card'} border transition-all ${
+              className={`${pageCanvas && !compact ? 'rounded-[20px] shadow-[0_3px_12px_rgba(22,27,34,0.045)] min-h-[124px]' : 'rounded-2xl'} border transition-all ${
                 isCompacting
-                  ? 'border-warning bg-warning-soft dark:border-warning dark:bg-warning-soft'
+                  ? 'border-amber-200 bg-amber-50/30 dark:border-amber-500/35 dark:bg-amber-950/25'
                   : isDragOver
-                    ? 'border-info bg-info-soft ring-4 ring-focus dark:border-info dark:bg-info-soft dark:ring-focus'
+                    ? 'border-sky-300 bg-sky-50/60 ring-4 ring-sky-100 dark:border-sky-500/50 dark:bg-sky-950/35 dark:ring-sky-500/10'
                     : isStreaming
-                      ? 'border-line bg-canvas dark:border-line dark:bg-surface'
+                      ? 'border-zinc-200 bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-900/70'
                       : pageCanvas && !compact
-                        ? 'border-line bg-canvas border-line border-line focus-within:bg-surface focus-within:ring-4 border-line border-line dark:bg-surface border-line border-line dark:focus-within:bg-subtle border-line'
-                        : 'border-line bg-canvas hover:border-line-control focus-within:border-line-control focus-within:bg-surface focus-within:ring-4 focus-within:ring-focus dark:border-line dark:bg-surface dark:hover:border-line dark:focus-within:border-line dark:focus-within:bg-surface dark:focus-within:ring-focus'
+                        ? 'border-black/[0.09] bg-zinc-50 hover:border-black/[0.14] focus-within:border-black/[0.14] focus-within:bg-white focus-within:ring-4 focus-within:ring-black/[0.025] dark:border-white/[0.10] dark:bg-[#303842] dark:hover:border-white/[0.16] dark:focus-within:border-white/[0.16] dark:focus-within:bg-[#343d48] dark:focus-within:ring-white/[0.03]'
+                        : 'border-zinc-200 bg-zinc-50 hover:border-zinc-300 focus-within:border-zinc-300 focus-within:bg-white focus-within:ring-4 focus-within:ring-zinc-100 dark:border-zinc-800 dark:bg-zinc-900/70 dark:hover:border-zinc-700 dark:focus-within:border-zinc-700 dark:focus-within:bg-zinc-900 dark:focus-within:ring-zinc-800/60'
               }`}
             >
                 {/* Node reference chip */}
                 {nodeRef && (
                   <div className="flex items-center gap-1.5 px-3 pt-2.5 pb-1">
-                    <span className="w-1.5 h-1.5 rounded-full bg-selected flex-shrink-0" />
-                    <code className="text-xs font-mono font-semibold text-fg-secondary truncate flex-1 dark:text-fg-secondary">{nodeRef.id}</code>
-                    <span className="text-xs text-fg-muted flex-shrink-0 dark:text-fg-muted">{nodeRef.type}</span>
+                    <span className="w-1.5 h-1.5 rounded-full bg-slate-400 flex-shrink-0" />
+                    <code className="text-[11px] font-mono font-semibold text-slate-700 flex-1 dark:text-slate-200 truncate">{nodeRef.id}</code>
+                    <span className="text-[10px] text-slate-400 dark:text-slate-500 flex-shrink-0">{nodeRef.type}</span>
                     {onNodeRefDismiss && (
                       <button
                         onClick={onNodeRefDismiss}
-                        className="ml-1 text-fg-muted hover:text-fg-secondary transition-colors flex-shrink-0"
+                        className="ml-1 text-gray-400 hover:text-gray-600 transition-colors flex-shrink-0"
                         title={t('chat.removeNodeRef')}
                       >
                         <svg className="w-3 h-3" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2.5">
@@ -4980,13 +5007,13 @@ export default function SessionChat({
                         return (
                           <div
                             key={attachment.id}
-                            className={`relative flex-shrink-0 rounded-lg border overflow-hidden ${
-                              isUploading ? 'border-info bg-info-soft dark:border-info dark:bg-info-soft' : 'border-line bg-canvas dark:border-line dark:bg-surface'
+                            className={`relative rounded-lg border flex-shrink-0 overflow-hidden ${
+                              isUploading ? 'border-sky-200 bg-sky-50 dark:border-sky-500/35 dark:bg-sky-950/30' : 'border-gray-200 bg-gray-50 dark:border-zinc-800 dark:bg-zinc-900'
                             }`}
                           >
                             {isUploading ? (
                               <div className="w-16 h-16 flex items-center justify-center">
-                                <IconLoader2 aria-hidden="true" className="w-5 h-5 animate-spin text-info" />
+                                <Loader2 aria-hidden="true" className="w-5 h-5 animate-spin text-sky-500" />
                               </div>
                             ) : (
                               <img
@@ -5002,10 +5029,10 @@ export default function SessionChat({
                             <button
                               type="button"
                               onClick={() => handleRemoveAttachment(attachment.id)}
-                              className="ui-btn-icon absolute top-0.5 right-0.5 rounded-full bg-overlay-backdrop p-0.5 text-action-fg hover:bg-overlay-backdrop transition-colors"
+                              className="absolute top-0.5 right-0.5 rounded-full bg-black/50 p-0.5 text-white hover:bg-black/70 transition-colors"
                               title={t('chat.upload.remove')}
                             >
-                              <IconX aria-hidden="true" className="w-4 h-4" />
+                              <X aria-hidden="true" className="w-3 h-3" />
                             </button>
                           </div>
                         );
@@ -5014,46 +5041,46 @@ export default function SessionChat({
                       return (
                         <div
                           key={attachment.id}
-                          className={`inline-flex max-w-full items-center gap-2 rounded-lg border px-2.5 py-1.5 text-xs ${
+                          className={`inline-flex items-center gap-2 rounded-lg border px-2.5 py-1.5 text-xs max-w-full ${
                             isError
-                              ? 'border-danger bg-danger-soft text-danger'
+                              ? 'border-red-200 bg-red-50 text-red-700'
                               : isUploading
-                                ? 'border-info bg-info-soft text-info'
-                                : 'border-line bg-canvas text-fg-secondary dark:border-line dark:bg-surface dark:text-fg-secondary'
+                                ? 'border-sky-200 bg-sky-50 text-sky-700'
+                                : 'border-gray-200 bg-gray-50 text-gray-700 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-200'
                           }`}
                         >
                           {isUploading ? (
-                            <IconLoader2 aria-hidden="true" className="w-4 h-4 animate-spin flex-shrink-0" />
+                            <Loader2 aria-hidden="true" className="w-3.5 h-3.5 animate-spin flex-shrink-0" />
                           ) : isError ? (
-                            <IconAlertCircle aria-hidden="true" className="w-4 h-4 flex-shrink-0" />
+                            <AlertCircle aria-hidden="true" className="w-3.5 h-3.5 flex-shrink-0" />
                           ) : attachment.isImage ? (
-                            <IconPhoto aria-hidden="true" className="w-4 h-4 flex-shrink-0" />
+                            <ImageIcon aria-hidden="true" className="w-3.5 h-3.5 flex-shrink-0" />
                           ) : (
-                            <IconFileText aria-hidden="true" className="w-4 h-4 flex-shrink-0" />
+                            <FileText aria-hidden="true" className="w-3.5 h-3.5 flex-shrink-0" />
                           )}
                           <div className="min-w-0">
                             <div className="truncate font-medium">{attachment.name}</div>
                             {attachment.error && (
-                              <div className="truncate text-xs">{attachment.error}</div>
+                              <div className="text-[11px] truncate">{attachment.error}</div>
                             )}
                           </div>
                           {isError && !attachment.isImage && (
                             <button
                               type="button"
                               onClick={() => handleRetryAttachment(attachment.id)}
-                              className="ui-btn-icon rounded p-0.5 hover:bg-hover transition-colors"
+                              className="rounded p-0.5 hover:bg-white/70 transition-colors"
                               title={t('chat.upload.retry')}
                             >
-                              <IconRefresh aria-hidden="true" className="w-4 h-4" />
+                              <RefreshCw aria-hidden="true" className="w-3.5 h-3.5" />
                             </button>
                           )}
                           <button
                             type="button"
                             onClick={() => handleRemoveAttachment(attachment.id)}
-                            className="ui-btn-icon rounded p-0.5 hover:bg-hover transition-colors"
+                            className="rounded p-0.5 hover:bg-white/70 transition-colors"
                             title={t('chat.upload.remove')}
                           >
-                            <IconX aria-hidden="true" className="w-4 h-4" />
+                            <X aria-hidden="true" className="w-3.5 h-3.5" />
                           </button>
                         </div>
                       );
@@ -5061,7 +5088,7 @@ export default function SessionChat({
                   </div>
                 )}
                 {isDragOver && (
-                  <div className="px-4 pb-1 text-xs text-info">
+                  <div className="px-4 pb-1 text-[11px] text-sky-600">
                     {t('chat.upload.dropHint')}
                   </div>
                 )}
@@ -5072,19 +5099,19 @@ export default function SessionChat({
                   >
                     {composerReferences.map((reference) => {
                       const referenceStyle = reference.kind === 'subagent'
-                        ? 'border-info bg-info-soft text-info dark:border-info bg-info-soft dark:text-info'
+                        ? 'border-sky-200/80 bg-sky-50 text-sky-700 dark:border-sky-400/20 dark:bg-sky-400/[0.10] dark:text-sky-200'
                         : reference.kind === 'skill'
-                          ? 'border-success bg-success-soft text-success dark:border-success bg-success-soft dark:text-success'
-                          : 'border-warning bg-warning-soft text-warning dark:border-warning bg-warning-soft dark:text-warning';
+                          ? 'border-emerald-200/80 bg-emerald-50 text-emerald-700 dark:border-emerald-400/20 dark:bg-emerald-400/[0.10] dark:text-emerald-200'
+                          : 'border-amber-200/80 bg-amber-50 text-amber-700 dark:border-amber-400/20 dark:bg-amber-400/[0.10] dark:text-amber-200';
                       const ReferenceIcon = reference.kind === 'subagent'
-                        ? IconRobot
+                        ? Bot
                         : reference.kind === 'skill'
-                          ? IconBook
+                          ? BookOpen
                           : WorkflowIcon;
                       return (
                         <span
                           key={`${reference.kind}:${reference.value}`}
-                          className={`inline-flex h-7 max-w-full items-center gap-1.5 rounded-lg border px-2 text-xs font-medium shadow-none ${referenceStyle}`}
+                          className={`inline-flex h-7 items-center gap-1.5 rounded-lg border px-2 text-[11px] font-medium shadow-[0_1px_2px_rgba(22,27,34,0.03)] max-w-full ${referenceStyle}`}
                         >
                           <ReferenceIcon aria-hidden="true" className="h-3 w-3 shrink-0" />
                           <span className="shrink-0 opacity-65">
@@ -5102,13 +5129,13 @@ export default function SessionChat({
                               ));
                               textareaRef.current?.focus();
                             }}
-                            className="ui-btn-icon -mr-1 grid h-5 w-5 shrink-0 place-items-center rounded-md opacity-55 transition bg-hover hover:opacity-100 bg-hover"
+                            className="-mr-1 grid h-5 w-5 place-items-center rounded-md opacity-55 transition hover:bg-black/[0.06] hover:opacity-100 dark:hover:bg-white/[0.08] shrink-0"
                             aria-label={t('chat.references.remove', {
                               type: t(`chat.references.${reference.kind}`),
                               name: reference.value,
                             })}
                           >
-                            <IconX aria-hidden="true" className="h-4 w-4" />
+                            <X aria-hidden="true" className="h-3 w-3" />
                           </button>
                         </span>
                       );
@@ -5175,8 +5202,8 @@ export default function SessionChat({
                             ? t('chat.placeholderNodeRef', { nodeId: nodeRef.id })
                             : effectivePlaceholder
                     }
-                    className={`w-full resize-none bg-transparent text-sm outline-none placeholder:text-fg-muted dark:placeholder:text-fg-muted ${
-                      sending ? 'text-fg-muted cursor-not-allowed dark:text-fg-muted' : 'text-fg dark:text-fg'
+                    className={`w-full resize-none bg-transparent text-sm outline-none placeholder:text-[#7b838e] dark:placeholder:text-[#9aa7b4] ${
+                      sending ? 'text-zinc-400 cursor-not-allowed dark:text-zinc-500' : 'text-zinc-900 dark:text-zinc-100'
                     }`}
                     style={{
                       minHeight: `${effectiveComposerTextareaMinHeight}px`,
@@ -5188,7 +5215,7 @@ export default function SessionChat({
                 </div>
 
                 {/* Bottom toolbar inside the composer card */}
-                <div className="flex flex-wrap items-center gap-1 gap-y-1 px-2 pb-2 [&>*]:shrink-0">
+                <div className="flex items-center gap-1 px-2 pb-2 flex-wrap [&>*]:shrink-0">
                   <div className="relative" data-composer-add-menu>
                     <button
                       ref={composerAddMenuButtonRef}
@@ -5199,22 +5226,22 @@ export default function SessionChat({
                       aria-label={t('chat.addMenu.title')}
                       aria-haspopup="menu"
                       aria-expanded={showComposerAddMenu}
-                      className={`ui-btn-icon inline-flex h-8 w-8 items-center justify-center rounded-full transition-all duration-150 disabled:cursor-not-allowed disabled:bg-disabled disabled:text-fg-disabled ${
+                      className={`inline-flex h-8 w-8 items-center justify-center rounded-full transition-all duration-150 disabled:cursor-not-allowed disabled:opacity-40 ${
                         showComposerAddMenu
-                          ? 'bg-subtle text-fg bg-hover dark:text-fg'
-                          : 'text-fg-muted hover:bg-hover hover:text-fg dark:text-fg-muted bg-hover dark:hover:text-fg'
+                          ? 'bg-zinc-100 text-zinc-900 dark:bg-white/[0.09] dark:text-white'
+                          : 'text-zinc-500 hover:bg-white hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-white/[0.07] dark:hover:text-white'
                       }`}
                     >
-                      <IconPlus aria-hidden="true" className="h-5 w-5" />
+                      <Plus aria-hidden="true" className="h-[17px] w-[17px]" />
                     </button>
 
                     {showComposerAddMenu && (
                       <div
                         role="menu"
                         aria-label={t('chat.addMenu.title')}
-                        className="absolute bottom-full left-0 z-50 mb-2 w-[228px] max-w-[calc(100vw-2rem)] overflow-visible rounded-card border border-line bg-surface p-1.5 shadow-overlay backdrop-blur-xl border-line dark:bg-canvas "
+                        className="absolute bottom-full left-0 mb-2 w-[228px] max-w-[calc(100vw-2rem)] rounded-[14px] border border-black/[0.09] bg-white/95 p-1.5 shadow-[0_18px_46px_rgba(22,27,34,0.14),0_2px_8px_rgba(22,27,34,0.06)] backdrop-blur-xl dark:border-white/[0.11] dark:bg-[#252c35]/95 dark:shadow-[0_20px_48px_rgba(8,10,13,0.44)] z-50 overflow-visible"
                       >
-                        <div className="px-2.5 pb-1.5 pt-1 text-xs font-medium text-fg-muted dark:text-fg-muted">
+                        <div className="px-2.5 pb-1.5 pt-1 text-[11px] font-medium text-zinc-400 dark:text-zinc-500">
                           {t('chat.addMenu.title')}
                         </div>
                         <button
@@ -5224,15 +5251,15 @@ export default function SessionChat({
                             closeComposerAddMenu();
                             fileInputRef.current?.click();
                           }}
-                          className="group flex h-10 w-full items-center gap-2.5 rounded-card px-2 text-left text-sm font-medium text-fg-secondary transition-colors hover:bg-hover hover:text-fg dark:text-fg-secondary bg-hover dark:hover:text-fg"
+                          className="group flex h-10 w-full items-center gap-2.5 rounded-[9px] px-2 text-left text-[13px] font-medium text-zinc-700 transition-colors hover:bg-zinc-100/90 hover:text-zinc-950 dark:text-zinc-200 dark:hover:bg-white/[0.07] dark:hover:text-white"
                         >
-                          <span className="grid h-7 w-7 shrink-0 place-items-center text-fg-muted transition-colors group-hover:text-fg dark:text-fg-muted dark:group-hover:text-fg">
-                            <IconPaperclip aria-hidden="true" className="h-4 w-4" />
+                          <span className="grid h-7 w-7 place-items-center text-zinc-500 transition-colors group-hover:text-zinc-800 dark:text-zinc-400 dark:group-hover:text-white shrink-0">
+                            <Paperclip aria-hidden="true" className="h-3.5 w-3.5" />
                           </span>
                           <span className="min-w-0 flex-1 truncate">{t('chat.addMenu.files')}</span>
                         </button>
                         {composerAddMenuSlot && (
-                          <div className="mt-0.5 border-t border-line pt-0.5 border-line">
+                          <div className="mt-0.5 border-t border-zinc-100 pt-0.5 dark:border-white/[0.07]">
                             {typeof composerAddMenuSlot === 'function'
                               ? composerAddMenuSlot({
                                 closeMenu: closeComposerAddMenu,
@@ -5246,7 +5273,7 @@ export default function SessionChat({
                     )}
                   </div>
 
-                  <div className="mx-1 h-4 w-px shrink-0 bg-selected dark:bg-subtle" />
+                  <div className="mx-1 h-4 w-px bg-zinc-200 dark:bg-zinc-800 shrink-0" />
 
                   {toolbarSlot}
 
@@ -5294,9 +5321,9 @@ export default function SessionChat({
                       <button
                         onClick={handleSend}
                         title={hasUploadingFiles ? t('chat.upload.waiting') : t('chat.queue.enqueue')}
-                        className="ui-btn-icon inline-flex items-center justify-center rounded-control bg-action text-action-fg transition-colors hover:bg-action-hover"
+                        className="inline-flex h-8 w-8 items-center justify-center rounded-full bg-sky-500 text-white shadow-sm transition-all hover:bg-sky-600 hover:shadow"
                       >
-                        {sending || hasUploadingFiles ? <IconLoader2 aria-hidden="true" className="w-4 h-4 animate-spin" /> : <IconArrowUp aria-hidden="true" className="w-4 h-4" stroke={2} />}
+                        {sending || hasUploadingFiles ? <Loader2 aria-hidden="true" className="w-4 h-4 animate-spin" /> : <ArrowUp aria-hidden="true" className="w-4 h-4" strokeWidth={2} />}
                       </button>
                     )
                   ) : (
@@ -5305,13 +5332,13 @@ export default function SessionChat({
                       disabled={!canSend || composerBusy}
                       aria-label={t('chat.sendTitle')}
                       title={hasUploadingFiles ? t('chat.upload.waiting') : t('chat.sendTitle')}
-                      className={`ui-btn-icon inline-flex items-center justify-center rounded-control transition-all ${
+                      className={`inline-flex h-8 w-8 items-center justify-center rounded-full transition-all ${
                         canSend && !composerBusy
-                          ? 'bg-action text-action-fg hover:bg-action-hover'
-                          : 'cursor-not-allowed border border-line bg-disabled text-fg-disabled'
+                          ? 'bg-sky-500 text-white hover:bg-sky-600 shadow-sm hover:shadow'
+                          : 'cursor-not-allowed border border-zinc-300 bg-zinc-200 text-zinc-400 dark:border-[#5a6573] dark:bg-[#46515e] dark:text-[#b8c2cc]'
                       }`}
                     >
-                      {sending || hasUploadingFiles ? <IconLoader2 aria-hidden="true" className="w-4 h-4 animate-spin" /> : <IconArrowUp aria-hidden="true" className="w-4 h-4" stroke={2} />}
+                      {sending || hasUploadingFiles ? <Loader2 aria-hidden="true" className="w-4 h-4 animate-spin" /> : <ArrowUp aria-hidden="true" className="w-4 h-4" strokeWidth={2} />}
                     </button>
                   )}
                   {stopButton}
@@ -5356,10 +5383,10 @@ function AgentMentionDropdown({
 
   return (
     <div
-      className="absolute bottom-full left-0 right-0 z-50 mb-1 overflow-hidden rounded-lg border border-line bg-surface shadow-lg dark:border-line dark:bg-surface dark:shadow-xl "
+      className="absolute bottom-full left-0 right-0 mb-1 rounded-lg border border-gray-200 bg-white shadow-lg dark:border-zinc-800 dark:bg-zinc-900 dark:shadow-xl dark:shadow-black/30 z-50 overflow-hidden"
       onMouseDown={(e) => e.preventDefault()}
     >
-      <div className="border-b border-line bg-canvas px-3 py-1.5 text-xs font-semibold uppercase tracking-wide text-fg-muted dark:border-line dark:bg-canvas dark:text-fg-muted">
+      <div className="border-b border-gray-100 bg-gray-50 px-3 py-1.5 text-[10px] font-semibold uppercase tracking-wide text-gray-400 dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-500">
         {t('chat.mention.title')}
       </div>
       <div ref={listRef} className="max-h-64 overflow-y-auto p-1">
@@ -5371,18 +5398,18 @@ function AgentMentionDropdown({
               type="button"
               onClick={() => onSelect(agent)}
               onMouseDown={(e) => e.preventDefault()}
-              className={`flex w-full min-w-0 items-center gap-2 rounded-md px-2 py-1.5 text-left transition-colors ${
-                idx === selectedIndex ? 'bg-info-soft text-info dark:bg-info-soft dark:text-info' : 'text-fg hover:bg-hover dark:text-fg-secondary dark:hover:bg-hover'
+              className={`flex items-center gap-2 rounded-md px-2 py-1.5 text-left transition-colors w-full min-w-0 ${
+                idx === selectedIndex ? 'bg-sky-50 text-sky-800 dark:bg-sky-950/45 dark:text-sky-100' : 'text-gray-800 hover:bg-gray-50 dark:text-zinc-200 dark:hover:bg-zinc-800'
               }`}
             >
-              <IconRobot aria-hidden="true" className="h-4 w-4 shrink-0 text-fg-muted dark:text-fg-muted" />
+              <Bot aria-hidden="true" className="h-3.5 w-3.5 text-gray-400 dark:text-zinc-500 shrink-0" />
               <span className="shrink-0 font-mono text-sm font-semibold">@{agent.name}</span>
-              <span className="min-w-0 truncate text-xs text-fg-muted dark:text-fg-muted">{desc}</span>
+              <span className="text-xs text-gray-500 dark:text-zinc-400 min-w-0 truncate">{desc}</span>
             </button>
           );
         })}
       </div>
-      <div className="flex gap-3 border-t border-line bg-canvas px-3 py-1 text-xs text-fg-muted dark:border-line dark:bg-canvas dark:text-fg-muted">
+      <div className="flex gap-3 border-t border-gray-100 bg-gray-50 px-3 py-1 text-[10px] text-gray-400 dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-500">
         <span><kbd className="font-mono">↑↓</kbd> {t('chat.mention.navigate')}</span>
         <span><kbd className="font-mono">Enter</kbd>/<kbd className="font-mono">Tab</kbd> {t('chat.mention.select')}</span>
       </div>
@@ -5413,18 +5440,18 @@ function ContextFileCard({
   const label = mime?.split('/').pop()?.toUpperCase();
   const content = (
     <>
-      <IconFileText aria-hidden="true" className="h-4 w-4 flex-shrink-0 text-fg-muted" />
+      <FileText aria-hidden="true" className="h-4 w-4 text-slate-500 flex-shrink-0" />
       <span className="min-w-0 flex-1 truncate font-medium">{filename}</span>
-      {label && <span className="shrink-0 text-xs text-fg-muted">{label}</span>}
+      {label && <span className="text-[10px] text-slate-400 shrink-0">{label}</span>}
     </>
   );
   return (
-    <div className="flex min-w-0 max-w-full items-center gap-1 rounded-lg border border-line bg-canvas px-2 py-1.5 text-xs text-fg-secondary dark:border-line dark:bg-surface dark:text-fg-secondary">
+    <div className="flex items-center gap-1 rounded-lg border border-slate-200 bg-slate-50 px-2 py-1.5 text-xs text-slate-700 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200 min-w-0 max-w-full">
       {onOpen && resourceId ? (
         <button
           type="button"
           onClick={() => onOpen(resourceId)}
-          className="flex min-w-0 flex-1 items-center gap-2 text-left hover:text-fg dark:hover:text-fg"
+          className="flex flex-1 items-center gap-2 text-left hover:text-slate-900 dark:hover:text-white min-w-0"
           title={t('context.preview', 'Preview')}
         >
           {content}
@@ -5434,7 +5461,7 @@ function ContextFileCard({
           href={previewUrl}
           target="_blank"
           rel="noreferrer"
-          className="flex min-w-0 flex-1 items-center gap-2 hover:text-fg dark:hover:text-fg"
+          className="flex flex-1 items-center gap-2 hover:text-slate-900 dark:hover:text-white min-w-0"
         >
           {content}
         </a>
@@ -5446,10 +5473,10 @@ function ContextFileCard({
           href={downloadUrl}
           download={filename}
           onClick={(event) => event.stopPropagation()}
-          className="rounded p-1 text-fg-muted hover:bg-hover hover:text-fg-secondary dark:hover:bg-hover dark:hover:text-fg"
+          className="rounded p-1 text-slate-400 hover:bg-white hover:text-slate-700 dark:hover:bg-zinc-800 dark:hover:text-white"
           title={t('context.download', 'Download')}
         >
-          <IconDownload aria-hidden="true" className="h-4 w-4" />
+          <Download aria-hidden="true" className="h-3.5 w-3.5" />
         </a>
       )}
     </div>
@@ -5665,14 +5692,14 @@ function ProcessGroupDetails({
     <details
       open={effectiveOpen}
       data-testid="chat-process-group"
-      className="group/process mt-2 w-full first:mt-0 text-fg-muted dark:text-fg-secondary"
+      className="group/process mt-2 w-full first:mt-0 text-[#626874] dark:text-[#aab4bf]"
     >
       <summary
         onClick={handleSummaryClick}
-        className="flex min-h-7 cursor-pointer list-none items-center gap-2 text-sm font-medium transition-colors hover:text-fg dark:hover:text-fg [&::-webkit-details-marker]:hidden"
+        className="flex cursor-pointer list-none items-center gap-2 text-sm font-medium transition-colors hover:text-zinc-900 dark:hover:text-zinc-100 [&::-webkit-details-marker]:hidden min-h-7"
       >
         {summary}
-        <IconChevronDown aria-hidden="true" className="ml-0.5 h-4 w-4 flex-shrink-0 text-fg-muted transition-transform group-open/process:rotate-180 dark:text-fg-muted" />
+        <ChevronDown aria-hidden="true" className="ml-0.5 h-3 w-3 text-[#9da29f] transition-transform group-open/process:rotate-180 dark:text-zinc-500 flex-shrink-0" />
       </summary>
       {children}
     </details>
@@ -5721,11 +5748,11 @@ function ChatMessageBubbleInner({
   if (message.finish === 'summary') {
     return (
       <div className={getCompactionDividerClassName(compact)}>
-        <span className="h-px flex-1 bg-selected" />
-        <span className="shrink-0 px-1.5 font-medium text-fg-muted">
+        <span className="h-px flex-1 bg-zinc-200" />
+        <span className="px-1.5 font-medium text-zinc-500 shrink-0">
           {t('chat.contextCompressed')}
         </span>
-        <span className="h-px flex-1 bg-selected" />
+        <span className="h-px flex-1 bg-zinc-200" />
       </div>
     );
   }
@@ -5763,13 +5790,13 @@ function ChatMessageBubbleInner({
   const bubbleClass = instructionDisplayLabel
     ? getInstructionDisplayBubbleClassName(compact)
     : hasProcessOutput
-      ? `w-full max-w-full min-w-0 break-words ${compact ? 'text-sm' : 'text-sm'} text-fg dark:text-fg`
+      ? `w-full max-w-full min-w-0 break-words ${compact ? 'text-sm' : 'text-[15px]'} text-[#34393e] dark:text-zinc-100`
       : getMessageBubbleClassName({ compact, isUser, isEditing });
   const messageGroupClass = getMessageGroupClassName({ compact, isUser, isEditing });
   const actionBarClass = `flex items-center gap-1.5`;
   const editingActionBarClass = getEditingActionBarClassName();
-  const iconButtonClass = 'group/action relative inline-flex h-6 w-6 items-center justify-center rounded-full border border-transparent bg-transparent text-fg-muted transition-colors duration-150 hover:bg-hover hover:text-fg-secondary active:bg-surface focus-visible:bg-surface focus-visible:outline-none disabled:cursor-not-allowed disabled:bg-disabled disabled:text-fg-disabled dark:text-fg-muted bg-hover dark:hover:text-fg bg-hover bg-hover';
-  const tooltipClass = 'pointer-events-none absolute bottom-full left-1/2 z-10 mb-1.5 -translate-x-1/2 whitespace-nowrap rounded-md bg-subtle px-2 py-1 text-xs font-medium text-fg opacity-0 shadow-sm transition-opacity duration-150 group-hover/action:opacity-100';
+  const iconButtonClass = 'group/action relative inline-flex h-6 w-6 items-center justify-center rounded-full border border-transparent bg-transparent text-[#8b929d] transition-colors duration-150 hover:bg-white hover:text-[#4f5660] active:bg-white focus-visible:bg-white focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-40 dark:text-[#9aa7b4] dark:hover:bg-white/[0.08] dark:hover:text-zinc-100 dark:active:bg-white/[0.08] dark:focus-visible:bg-white/[0.08]';
+  const tooltipClass = 'pointer-events-none absolute bottom-full left-1/2 mb-1.5 -translate-x-1/2 rounded-md bg-gray-900 px-2 py-1 text-[11px] font-medium text-white opacity-0 shadow-sm transition-opacity duration-150 group-hover/action:opacity-100 z-10 whitespace-nowrap';
   const messageErrorText = isUser ? '' : getMessageErrorText(message);
   const visiblePartCount = parts.filter((part) => !isModelActivityPart(part)).length;
   const hasOnlyBlankTextParts = parts.length > 0 && parts.every((part) =>
@@ -5788,11 +5815,11 @@ function ChatMessageBubbleInner({
 
   const avatarSize = compact ? 'w-7 h-7 text-xs' : 'w-8 h-8 text-sm';
   const avatar = isUser ? (
-    <span className={`inline-flex items-center justify-center rounded-full bg-ai-soft text-ai shadow-sm ring-2 ring-line flex-shrink-0 dark:ring-focus ${avatarSize}`}>
-      <IconUser aria-hidden="true" className={compact ? 'w-4 h-4' : 'w-4 h-4'} />
+    <span className={`inline-flex items-center justify-center rounded-full bg-gradient-to-b from-sky-400 to-blue-500 text-white shadow-sm ring-2 ring-white dark:ring-zinc-950 flex-shrink-0 ${avatarSize}`}>
+      <User aria-hidden="true" className={compact ? 'w-3 h-3' : 'w-3.5 h-3.5'} />
     </span>
   ) : (
-    <span className={`inline-flex items-center justify-center rounded-full ${getAgentAvatarColor(rawAgentName)} font-bold shadow-sm ring-2 ring-line flex-shrink-0 dark:ring-focus ${avatarSize}`}>
+    <span className={`inline-flex items-center justify-center rounded-full ${getAgentAvatarColor(rawAgentName)} text-white font-bold shadow-sm ring-2 ring-white dark:ring-zinc-950 flex-shrink-0 ${avatarSize}`}>
       {agentName.charAt(0).toUpperCase()}
     </span>
   );
@@ -5814,15 +5841,15 @@ function ChatMessageBubbleInner({
           </div>
         ) : (
           messageErrorText ? (
-            <div className="flex items-start gap-2 py-1 text-sm text-danger" role="alert">
-              <IconAlertCircle aria-hidden="true" className="mt-0.5 h-4 w-4 flex-shrink-0 text-danger" />
+            <div className="flex items-start gap-2 py-1 text-sm text-red-700" role="alert">
+              <AlertCircle aria-hidden="true" className="mt-0.5 h-4 w-4 text-red-500 flex-shrink-0" />
               <span className="whitespace-pre-wrap break-words">{messageErrorText}</span>
             </div>
           ) : (
             <div className="flex items-center gap-1 py-1" aria-label={t('chat.thinking')}>
-              <span className="w-1.5 h-1.5 rounded-full bg-selected animate-bounce [animation-delay:-0.3s]" />
-              <span className="w-1.5 h-1.5 rounded-full bg-selected animate-bounce [animation-delay:-0.15s]" />
-              <span className="w-1.5 h-1.5 rounded-full bg-selected animate-bounce" />
+              <span className="w-1.5 h-1.5 rounded-full bg-zinc-400 animate-bounce [animation-delay:-0.3s]" />
+              <span className="w-1.5 h-1.5 rounded-full bg-zinc-400 animate-bounce [animation-delay:-0.15s]" />
+              <span className="w-1.5 h-1.5 rounded-full bg-zinc-400 animate-bounce" />
             </div>
           )
         )
@@ -5840,7 +5867,7 @@ function ChatMessageBubbleInner({
             value={editingText}
             onChange={(event) => onEditChange?.(event.target.value)}
             rows={Math.min(12, Math.max(4, editingText.split('\n').length + 1))}
-            className="w-full rounded-lg border border-info bg-info-soft px-3 py-2 text-sm text-fg focus:border-info focus:outline-none focus:ring-2 focus:ring-focus"
+            className="w-full rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-sm text-gray-900 focus:border-blue-300 focus:outline-none focus:ring-2 focus:ring-blue-100"
           />
         </div>
       ) : (
@@ -5905,7 +5932,7 @@ function ChatMessageBubbleInner({
                 const instructionLabel = isUser ? parseInstructionDisplayText(displayText) : null;
                 if (instructionLabel) {
                   return (
-                    <span className="inline-flex max-w-full items-center truncate text-sm font-semibold leading-none text-danger">
+                    <span className="inline-flex items-center text-sm font-semibold leading-none text-rose-700 max-w-full truncate">
                       {instructionLabel}
                     </span>
                   );
@@ -5913,16 +5940,16 @@ function ChatMessageBubbleInner({
                 return (
                   <>
                     {nodeRefMatch && (
-                      <div className="flex items-center gap-1.5 mb-2 bg-subtle border border-line rounded-md px-2 py-1">
-                        <span className="w-1.5 h-1.5 rounded-full bg-selected flex-shrink-0" />
-                        <code className="text-xs font-mono font-semibold text-fg-secondary truncate">{nodeRefMatch[1]}</code>
-                        <span className="text-xs text-fg-muted flex-shrink-0">{nodeRefMatch[2]}</span>
+                      <div className="flex items-center gap-1.5 mb-2 bg-gray-100 border border-gray-200 rounded-md px-2 py-1">
+                        <span className="w-1.5 h-1.5 rounded-full bg-gray-400 flex-shrink-0" />
+                        <code className="text-[10px] font-mono font-semibold text-gray-700 truncate">{nodeRefMatch[1]}</code>
+                        <span className="text-[9px] text-gray-500 flex-shrink-0">{nodeRefMatch[2]}</span>
                       </div>
                     )}
                     {processStep ? (
                       <div
                         data-testid="chat-process-text-step"
-                        className="min-w-0 py-1 text-sm leading-7 text-fg-muted dark:text-fg-muted"
+                        className="py-1 text-sm leading-7 text-[#686e6c] dark:text-zinc-400 min-w-0"
                       >
                         <StreamingMarkdown
                           content={displayText}
@@ -5969,28 +5996,28 @@ function ChatMessageBubbleInner({
                         aria-expanded={isExpanded}
                         onClick={() => togglePart(partKey)}
                         disabled={isThinking}
-                        className="flex min-h-7 w-full cursor-pointer items-center gap-2 text-left text-sm font-medium text-fg-muted transition-colors hover:text-fg disabled:cursor-default dark:text-fg-muted dark:hover:text-fg-secondary"
+                        className="flex w-full cursor-pointer items-center gap-2 text-left text-sm font-medium text-[#747a78] transition-colors hover:text-zinc-900 disabled:cursor-default dark:text-zinc-400 dark:hover:text-zinc-200 min-h-7"
                       >
-                        <span className="inline-grid h-[18px] w-[18px] flex-[0_0_18px] place-items-center text-ai">
+                        <span className="inline-grid h-[18px] w-[18px] flex-[0_0_18px] place-items-center text-violet-500">
                           {isThinking ? (
-                            <IconLoader2 aria-hidden="true" className="h-4 w-4 animate-spin" />
+                            <Loader2 aria-hidden="true" className="h-[15px] w-[15px] animate-spin" />
                           ) : (
-                            <IconBrain aria-hidden="true" className="h-4 w-4" />
+                            <Brain aria-hidden="true" className="h-[15px] w-[15px]" />
                           )}
                         </span>
                         <span className="shrink-0">{t('chat.process.deepThinking')}</span>
                         {!isExpanded && (
                           <span
                             data-testid="chat-process-reasoning-preview"
-                            className="min-w-0 truncate font-normal text-fg-muted dark:text-fg-muted"
+                            className="font-normal text-[#9da29f] dark:text-zinc-500 min-w-0 truncate"
                           >
                             {getThinkingFirstSentence(thinkingText)}
                           </span>
                         )}
-                        <IconChevronDown aria-hidden="true" className={`ml-0.5 h-4 w-4 flex-shrink-0 text-fg-muted transition-transform dark:text-fg-muted ${isExpanded ? 'rotate-180' : ''}`} />
+                        <ChevronDown aria-hidden="true" className={`ml-0.5 h-3 w-3 text-[#9da29f] transition-transform dark:text-zinc-500 flex-shrink-0 ${isExpanded ? 'rotate-180' : ''}`} />
                       </button>
                       {isExpanded && isVisible && (
-                        <div className="mb-[9px] ml-2 mt-[3px] max-h-52 overflow-y-auto whitespace-pre-wrap border-l border-line py-1.5 pl-[26px] pr-0 text-sm leading-7 text-fg-muted dark:border-line dark:text-fg-muted">
+                        <div className="mb-[9px] ml-2 mt-[3px] max-h-52 border-l border-[#e3e6e3] py-1.5 pl-[26px] pr-0 text-sm leading-7 text-[#686e6c] dark:border-zinc-700 dark:text-zinc-400 overflow-y-auto whitespace-pre-wrap">
                           <StreamingReasoningText
                             content={thinkingText}
                             isStreaming={isThinking}
@@ -6013,27 +6040,27 @@ function ChatMessageBubbleInner({
                     >
                       <div className={`flex items-center gap-2 px-2.5 py-1.5 rounded-md border text-xs transition-colors ${
                         isThinking
-                          ? 'bg-info-soft border-info'
-                          : 'bg-canvas border-line hover:bg-hover'
+                          ? 'bg-sky-50 border-sky-100'
+                          : 'bg-zinc-50 border-zinc-200 hover:bg-zinc-100'
                       }`}>
                         {isThinking ? (
                           <>
-                            <IconBrain aria-hidden="true" className="w-4 h-4 flex-shrink-0 text-ai" />
-                            <span className="text-ai">{t('chat.thinking')}</span>
+                            <Brain aria-hidden="true" className="w-3.5 h-3.5 text-violet-500 flex-shrink-0" />
+                            <span className="text-violet-600">{t('chat.thinking')}</span>
                           </>
                         ) : (
                           <>
-                            <IconBrain aria-hidden="true" className="w-4 h-4 flex-shrink-0 text-ai" />
-                            <span className="text-fg-muted truncate min-w-0">
+                            <Brain aria-hidden="true" className="w-3.5 h-3.5 text-violet-500 flex-shrink-0" />
+                            <span className="text-zinc-500 truncate min-w-0">
                               {thinkingText.slice(0, 80)}{thinkingText.length > 80 ? '…' : ''}
                             </span>
-                            <IconChevronDown aria-hidden="true" className={`w-4 h-4 ml-auto text-fg-muted flex-shrink-0 transition-transform ${isExpanded ? '' : '-rotate-90'}`} />
+                            <ChevronDown aria-hidden="true" className={`w-3 h-3 text-zinc-400 transition-transform ml-auto flex-shrink-0 ${isExpanded ? '' : '-rotate-90'}`} />
                           </>
                         )}
                       </div>
                     </button>
                     {isExpanded && isVisible && (
-                      <div className="mt-1 px-2.5 py-2 bg-canvas rounded-md border border-line text-xs text-fg-muted whitespace-pre-wrap font-mono leading-relaxed max-h-52 overflow-y-auto">
+                      <div className="mt-1 px-2.5 py-2 bg-zinc-50 rounded-md border border-zinc-200 text-[11px] text-zinc-500 font-mono leading-relaxed max-h-52 whitespace-pre-wrap overflow-y-auto">
                         <StreamingReasoningText
                           content={thinkingText}
                           isStreaming={isThinking}
@@ -6072,8 +6099,8 @@ function ChatMessageBubbleInner({
                 onOpenChange={(open) => onProcessGroupOpenChange?.(processGroupKey, open)}
                 summary={(
                   <>
-                    <span className="inline-grid h-[18px] w-[18px] flex-[0_0_18px] place-items-center text-fg-muted dark:text-fg-muted">
-                      <IconEye aria-hidden="true" className="h-4 w-4" />
+                    <span className="inline-grid h-[18px] w-[18px] flex-[0_0_18px] place-items-center text-[#8d9a95] dark:text-zinc-500">
+                      <Eye aria-hidden="true" className="h-4 w-4" />
                     </span>
                     <span className="min-w-0">
                       {t('chat.process.title', { count: group.length })}
@@ -6081,7 +6108,7 @@ function ChatMessageBubbleInner({
                     {processDurationMs !== null && (
                       <span
                         data-testid="chat-process-duration"
-                        className="shrink-0 text-xs font-normal text-fg-muted dark:text-fg-muted"
+                        className="text-xs font-normal text-[#9da29f] dark:text-zinc-500 shrink-0"
                       >
                         · {t('chat.process.duration', { duration: formatProcessDuration(processDurationMs) })}
                       </span>
@@ -6171,7 +6198,7 @@ function ChatMessageBubbleInner({
                           <img
                             src={imageUrl}
                             alt={part.filename || ''}
-                            className="h-24 w-24 rounded-lg border border-line bg-canvas object-cover cursor-zoom-in transition-transform hover:scale-[1.02]"
+                            className="h-24 w-24 rounded-lg border border-gray-200 bg-gray-50 object-cover cursor-zoom-in transition-transform hover:scale-[1.02]"
                             onClick={() => (
                               onOpenContextFile && resourceId
                                 ? onOpenContextFile(resourceId)
@@ -6182,10 +6209,10 @@ function ChatMessageBubbleInner({
                             <a
                               href={sessionApi.contextFileDownloadUrl(messageSessionId, resourceId)}
                               download={part.filename || 'image'}
-                              className="absolute bottom-1 right-1 rounded bg-overlay-backdrop p-1 text-action-fg opacity-0 transition-opacity hover:bg-overlay-backdrop group-hover/image:opacity-100"
+                              className="absolute bottom-1 right-1 rounded bg-black/55 p-1 text-white opacity-0 transition-opacity hover:bg-black/75 group-hover/image:opacity-100"
                               title={t('context.download', 'Download')}
                             >
-                              <IconDownload aria-hidden="true" className="h-4 w-4" />
+                              <Download aria-hidden="true" className="h-3.5 w-3.5" />
                             </a>
                           )}
                         </div>
@@ -6198,10 +6225,10 @@ function ChatMessageBubbleInner({
                       // there is no context resource to open, so show the
                       // plain chip, downloadable through the file route.
                       const href = part.url ? getRenderableFileUrl(part.url) : null;
-                      const chipClassName = 'inline-flex items-center gap-2 rounded-lg border border-line bg-canvas px-2.5 py-1.5 text-xs text-fg-secondary';
+                      const chipClassName = 'inline-flex items-center gap-2 rounded-lg border border-gray-200 bg-gray-50 px-2.5 py-1.5 text-xs text-gray-700';
                       const chipBody = (
                         <>
-                          <IconFileText aria-hidden="true" className="w-4 h-4 flex-shrink-0" />
+                          <FileText aria-hidden="true" className="w-3.5 h-3.5 flex-shrink-0" />
                           <span className="truncate max-w-[240px]">{part.filename || 'file'}</span>
                         </>
                       );
@@ -6210,7 +6237,7 @@ function ChatMessageBubbleInner({
                           key={part.id || `file-${i}`}
                           href={href}
                           download={part.filename || 'file'}
-                          className={`${chipClassName} hover:bg-hover`}
+                          className={`${chipClassName} hover:bg-gray-100`}
                         >
                           {chipBody}
                         </a>
@@ -6248,7 +6275,7 @@ function ChatMessageBubbleInner({
                       <button
                         type="button"
                         onClick={onOpenContext}
-                        className="text-xs font-medium text-fg-muted hover:text-fg dark:text-fg-muted dark:hover:text-fg-secondary"
+                        className="text-xs font-medium text-slate-500 hover:text-slate-800 dark:text-zinc-400 dark:hover:text-zinc-200"
                       >
                         {t('context.viewAll', 'View all in Context')}
                       </button>
@@ -6263,11 +6290,11 @@ function ChatMessageBubbleInner({
       {/* Streaming indicator */}
       {isActive && !isUser && visiblePartCount > 0 && (() => {
         return (
-          <div className="flex items-center gap-2 mt-2.5 pt-2 border-t border-line text-xs text-fg-muted">
+          <div className="flex items-center gap-2 mt-2.5 pt-2 border-t border-gray-100 text-xs text-gray-400">
             <div className="flex gap-0.5">
-              <div className="w-1.5 h-1.5 bg-selected rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
-              <div className="w-1.5 h-1.5 bg-selected rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
-              <div className="w-1.5 h-1.5 bg-selected rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
+              <div className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
+              <div className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
+              <div className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
             </div>
             <span>{t('chat.streaming')}</span>
           </div>
@@ -6285,7 +6312,7 @@ function ChatMessageBubbleInner({
               className={iconButtonClass}
               aria-label={t('chat.save')}
             >
-              <IconDeviceFloppy aria-hidden="true" className="w-4 h-4" />
+              <Save aria-hidden="true" className="w-3 h-3" />
               <span className={tooltipClass}>{t('chat.save')}</span>
             </button>
             {isUser && (
@@ -6295,7 +6322,7 @@ function ChatMessageBubbleInner({
                 className={iconButtonClass}
                 aria-label={t('chat.sendEdited')}
               >
-                <IconSend aria-hidden="true" className="w-4 h-4" />
+                <Send aria-hidden="true" className="w-3 h-3" />
                 <span className={tooltipClass}>{t('chat.sendEdited')}</span>
               </button>
             )}
@@ -6305,7 +6332,7 @@ function ChatMessageBubbleInner({
               className={iconButtonClass}
               aria-label={t('chat.cancel')}
             >
-              <IconX aria-hidden="true" className="w-4 h-4" />
+              <X aria-hidden="true" className="w-3 h-3" />
               <span className={tooltipClass}>{t('chat.cancel')}</span>
             </button>
           </>
@@ -6314,7 +6341,7 @@ function ChatMessageBubbleInner({
     </div>
   );
   const footerTimestamp = showTimestamp && message.timestamp
-    ? <span className="select-none text-xs text-fg-muted dark:text-fg-muted">{formatSmartTime(message.timestamp, i18n.language)}</span>
+    ? <span className="select-none text-[11px] text-[#8b929d] dark:text-[#9aa7b4]">{formatSmartTime(message.timestamp, i18n.language)}</span>
     : null;
   const footer = !compact && showActions && visiblePartCount > 0 && !isEditing ? (
     <div className={`mt-1.5 flex items-center ${
@@ -6331,7 +6358,7 @@ function ChatMessageBubbleInner({
                 className={iconButtonClass}
                 aria-label={t('chat.edit')}
               >
-                <IconPencil aria-hidden="true" className="w-4 h-4" />
+                <Pencil aria-hidden="true" className="w-3 h-3" />
                 <span className={tooltipClass}>{t('chat.edit')}</span>
               </button>
             )}
@@ -6341,7 +6368,7 @@ function ChatMessageBubbleInner({
               className={iconButtonClass}
               aria-label={t('chat.copy')}
             >
-              <IconCopy aria-hidden="true" className="w-4 h-4" />
+              <Copy aria-hidden="true" className="w-3 h-3" />
               <span className={tooltipClass}>{t('chat.copy')}</span>
             </button>
           </>
@@ -6353,7 +6380,7 @@ function ChatMessageBubbleInner({
               className={iconButtonClass}
               aria-label={t('chat.regenerate')}
             >
-              <IconRefresh aria-hidden="true" className={`w-4 h-4 ${isActionPending ? 'animate-spin' : ''}`} />
+              <RefreshCw aria-hidden="true" className={`w-3 h-3 ${isActionPending ? 'animate-spin' : ''}`} />
               <span className={tooltipClass}>{t('chat.regenerate')}</span>
             </button>}
             <button
@@ -6362,7 +6389,7 @@ function ChatMessageBubbleInner({
               className={iconButtonClass}
               aria-label={t('chat.copy')}
             >
-              <IconCopy aria-hidden="true" className="w-4 h-4" />
+              <Copy aria-hidden="true" className="w-3 h-3" />
               <span className={tooltipClass}>{t('chat.copy')}</span>
             </button>
           </>
@@ -6424,7 +6451,7 @@ function ChatMessageBubbleInner({
         </div>
         <div className="flex w-full min-w-0 flex-col items-start">
           <div className={`flex items-center gap-2 ${headerHeight}`}>
-            <span className="text-base font-semibold text-fg-muted dark:text-fg">
+            <span className="text-base font-semibold text-[#3f444a] dark:text-[#d7dee8]">
               {agentName}
             </span>
           </div>
@@ -6450,7 +6477,7 @@ function ChatMessageBubbleInner({
         {avatar}
         <div className="flex flex-col items-start flex-1 min-w-0">
           <div className={`flex items-center gap-2 ${headerHeight}`}>
-            <span className="text-sm font-semibold text-fg-secondary dark:text-fg-secondary">
+            <span className="text-sm font-semibold text-zinc-700 dark:text-zinc-300">
               {agentName}
             </span>
           </div>
@@ -6570,20 +6597,20 @@ function ChatQuestionResult({
   const isCompleted = status === 'completed';
   const isError = status === 'error';
   const answerLabelClass = isCompleted
-    ? 'text-success'
+    ? 'text-emerald-600'
     : isError
-    ? 'text-danger'
-    : 'text-fg-muted';
+    ? 'text-red-500'
+    : 'text-zinc-500';
   const answerChipClass = isCompleted
-    ? 'border-success bg-success-soft text-success'
+    ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
     : isError
-    ? 'border-danger bg-danger-soft text-danger'
-    : 'border-line bg-canvas text-fg-secondary';
+    ? 'border-red-200 bg-red-50 text-red-600'
+    : 'border-zinc-200 bg-zinc-50 text-zinc-600';
   const statusPillClass = isCompleted
-    ? 'bg-success-soft text-success'
+    ? 'bg-emerald-50 text-emerald-600'
     : isError
-    ? 'bg-danger-soft text-danger'
-    : 'bg-subtle text-fg-muted';
+    ? 'bg-red-50 text-red-500'
+    : 'bg-zinc-100 text-zinc-500';
   const firstQuestion = questions[0]?.header || questions[0]?.question || '';
   const questionDetails = questions.map((question, index) => {
     const answers = normalizeQuestionAnswer(rawAnswers[index]);
@@ -6596,25 +6623,25 @@ function ChatQuestionResult({
         className={`space-y-2 py-2 last:pb-0 ${processStep ? 'first:pt-0' : 'first:pt-2'}`}
       >
         <div className="grid grid-cols-[32px_minmax(0,1fr)] gap-2">
-          <span className="pt-0.5 text-xs font-medium text-fg-muted">
+          <span className="pt-0.5 text-[11px] font-medium text-zinc-400">
             {t('chat.questionResult.questionLabel')}
           </span>
           <div className="min-w-0">
             {question.header && (
-              <div className="mb-0.5 text-xs font-medium text-fg-muted">{question.header}</div>
+              <div className="mb-0.5 text-[11px] font-medium text-zinc-500">{question.header}</div>
             )}
-            <div className="text-xs leading-5 text-fg-secondary dark:text-fg-secondary">{question.question}</div>
+            <div className="text-xs leading-5 text-zinc-700 dark:text-zinc-300">{question.question}</div>
           </div>
         </div>
         <div className="grid grid-cols-[32px_minmax(0,1fr)] gap-2">
-          <span className={`pt-0.5 text-xs font-medium ${answerLabelClass}`}>
+          <span className={`pt-0.5 text-[11px] font-medium ${answerLabelClass}`}>
             {t('chat.questionResult.answerLabel')}
           </span>
           <div className="flex min-w-0 flex-wrap gap-1.5">
             {displayAnswers.map((answer, answerIndex) => (
               <span
                 key={`${answer}-${answerIndex}`}
-                className={`rounded-md border px-1.5 py-0.5 text-xs font-medium ${answerChipClass}`}
+                className={`rounded-md border px-1.5 py-0.5 text-[11px] font-medium ${answerChipClass}`}
               >
                 {answer}
               </span>
@@ -6628,7 +6655,7 @@ function ChatQuestionResult({
   if (processStep) {
     return (
       <details data-testid="chat-process-tool-step" className="group/tool min-w-0">
-        <summary className="flex min-h-7 cursor-pointer list-none items-center gap-2 text-sm font-medium text-fg-muted transition-colors hover:text-fg dark:text-fg-muted dark:hover:text-fg-secondary [&::-webkit-details-marker]:hidden">
+        <summary className="flex cursor-pointer list-none items-center gap-2 text-sm font-medium text-[#747a78] transition-colors hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-200 [&::-webkit-details-marker]:hidden min-h-7">
           <span
             className={`inline-grid h-[18px] w-[18px] flex-[0_0_18px] place-items-center ${statusIconColor}`}
             title={statusLabel}
@@ -6639,13 +6666,13 @@ function ChatQuestionResult({
           </span>
           <span className="min-w-0 flex-shrink-0">{actionLabel}</span>
           {firstQuestion && (
-            <span className="ml-0.5 min-w-0 truncate font-normal text-fg-muted dark:text-fg-muted">
+            <span className="ml-0.5 font-normal text-[#9a9f9c] dark:text-zinc-500 min-w-0 truncate">
               {firstQuestion}
             </span>
           )}
-          <IconChevronDown aria-hidden="true" className="ml-0.5 h-4 w-4 flex-shrink-0 text-fg-muted transition-transform group-open/tool:rotate-180 dark:text-fg-muted" />
+          <ChevronDown aria-hidden="true" className="ml-0.5 h-3 w-3 text-[#9da29f] transition-transform group-open/tool:rotate-180 dark:text-zinc-500 flex-shrink-0" />
         </summary>
-        <div className="mb-[9px] ml-2 mt-[3px] space-y-1.5 border-l border-line py-1.5 pl-[26px] pr-0 text-xs text-fg-muted dark:border-line dark:text-fg-muted">
+        <div className="mb-[9px] ml-2 mt-[3px] space-y-1.5 border-l border-[#e3e6e3] py-1.5 pl-[26px] pr-0 text-xs text-[#686e6c] dark:border-zinc-700 dark:text-zinc-400">
           {questionDetails}
         </div>
       </details>
@@ -6653,27 +6680,27 @@ function ChatQuestionResult({
   }
 
   return (
-    <details className="group/tool rounded-lg bg-canvas overflow-hidden">
-      <summary className="px-2.5 py-2 cursor-pointer list-none flex items-start gap-2 min-w-0 select-none hover:bg-hover transition-colors">
+    <details className="group/tool rounded-lg bg-zinc-50 overflow-hidden">
+      <summary className="px-2.5 py-2 cursor-pointer list-none flex items-start gap-2 select-none hover:bg-zinc-50 transition-colors min-w-0">
         <span className={`${statusIconColor} flex-shrink-0 mt-0.5`}>{statusIcon}</span>
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2 min-w-0">
-            <span className="font-medium text-fg-secondary text-xs whitespace-nowrap flex-shrink-0">{actionLabel}</span>
+            <span className="font-medium text-zinc-700 text-xs whitespace-nowrap flex-shrink-0">{actionLabel}</span>
             {firstQuestion && (
-              <span className="text-xs text-fg-muted truncate min-w-0">
+              <span className="text-[11px] text-zinc-400 truncate min-w-0">
                 {firstQuestion}
               </span>
             )}
           </div>
         </div>
         <div className="ml-auto flex items-center gap-1.5 flex-shrink-0 self-center">
-          <span className={`rounded-md px-1.5 py-0.5 text-xs font-medium ${statusPillClass}`}>
+          <span className={`rounded-md px-1.5 py-0.5 text-[11px] font-medium ${statusPillClass}`}>
             {displayStatus}
           </span>
-          <IconChevronDown aria-hidden="true" className="w-4 h-4 text-fg-muted transition-transform group-open/tool:rotate-180" />
+          <ChevronDown aria-hidden="true" className="w-3 h-3 text-zinc-400 transition-transform group-open/tool:rotate-180" />
         </div>
       </summary>
-      <div className="border-t border-line px-2.5 py-2 space-y-1.5 text-xs">
+      <div className="border-t border-zinc-200/60 px-2.5 py-2 space-y-1.5 text-xs">
         {questionDetails}
       </div>
     </details>
@@ -6819,57 +6846,57 @@ function ChatBashPayload({
     <div className="space-y-2">
       {command && (
         <div className="space-y-1">
-          <div className="text-xs font-medium text-fg-muted">{t('chat.bash.command')}</div>
-          <pre className="rounded-md bg-canvas p-2 text-xs leading-relaxed text-fg overflow-x-auto max-h-64 overflow-y-auto font-mono">
-            <span className="text-fg-muted">$ </span>{command}
+          <div className="text-[11px] font-medium text-zinc-500">{t('chat.bash.command')}</div>
+          <pre className="rounded-md bg-zinc-950 p-2 text-[11px] leading-relaxed text-zinc-100 max-h-64 font-mono overflow-x-auto overflow-y-auto">
+            <span className="text-zinc-500">$ </span>{command}
           </pre>
         </div>
       )}
 
-      <div className="flex flex-wrap items-center gap-1.5 text-xs">
+      <div className="flex items-center gap-1.5 text-[11px] flex-wrap">
         {workdir && (
-          <span className="rounded-md border border-line bg-surface px-1.5 py-0.5 text-fg-muted">
-            {t('chat.bash.workdir')} <span className="font-mono text-fg-secondary">{workdir}</span>
+          <span className="rounded-md border border-zinc-200 bg-white px-1.5 py-0.5 text-zinc-500">
+            {t('chat.bash.workdir')} <span className="font-mono text-zinc-600">{workdir}</span>
           </span>
         )}
         {duration && (
-          <span className="rounded-md border border-line bg-surface px-1.5 py-0.5 text-fg-muted">
+          <span className="rounded-md border border-zinc-200 bg-white px-1.5 py-0.5 text-zinc-500">
             {t('chat.bash.duration')} {duration}
           </span>
         )}
         {timeout !== undefined && (
-          <span className="rounded-md border border-line bg-surface px-1.5 py-0.5 text-fg-muted">
+          <span className="rounded-md border border-zinc-200 bg-white px-1.5 py-0.5 text-zinc-500">
             {t('chat.bash.timeout')} {timeout}ms
           </span>
         )}
         {output.timedOut && (
-          <span className="rounded-md border border-warning bg-warning-soft px-1.5 py-0.5 font-medium text-warning">
+          <span className="rounded-md border border-amber-200 bg-amber-50 px-1.5 py-0.5 font-medium text-amber-700">
             {t('chat.bash.timedOut')}
           </span>
         )}
         {output.aborted && (
-          <span className="rounded-md border border-line bg-subtle px-1.5 py-0.5 font-medium text-fg-secondary">
+          <span className="rounded-md border border-zinc-200 bg-zinc-100 px-1.5 py-0.5 font-medium text-zinc-600">
             {t('chat.bash.aborted')}
           </span>
         )}
       </div>
 
       {output.metadataLines.length > 0 && (
-        <div className="rounded-md bg-warning-soft px-2 py-1.5 text-xs leading-5 text-warning">
+        <div className="rounded-md bg-amber-50 px-2 py-1.5 text-[11px] leading-5 text-amber-700">
           {output.metadataLines.join(' · ')}
         </div>
       )}
 
       {output.errorSummary && !output.stderr && (
-        <div className="rounded-md bg-danger-soft px-2 py-1.5 text-xs leading-5 text-danger">
+        <div className="rounded-md bg-red-50 px-2 py-1.5 text-[11px] leading-5 text-red-600">
           {output.errorSummary}
         </div>
       )}
 
       {output.stdout && (
         <div className="space-y-1">
-          <div className="text-xs font-medium text-fg-muted">{t('chat.bash.stdout')}</div>
-          <pre className="rounded-md bg-canvas p-2 text-xs leading-relaxed text-success overflow-x-auto max-h-64 overflow-y-auto font-mono">
+          <div className="text-[11px] font-medium text-zinc-500">{t('chat.bash.stdout')}</div>
+          <pre className="rounded-md bg-zinc-950 p-2 text-[11px] leading-relaxed text-emerald-300 max-h-64 font-mono overflow-x-auto overflow-y-auto">
             {output.stdout}
           </pre>
         </div>
@@ -6877,8 +6904,8 @@ function ChatBashPayload({
 
       {output.output && (
         <div className="space-y-1">
-          <div className="text-xs font-medium text-fg-muted">{t('chat.bash.output')}</div>
-          <pre className="rounded-md bg-canvas p-2 text-xs leading-relaxed text-success overflow-x-auto max-h-64 overflow-y-auto font-mono">
+          <div className="text-[11px] font-medium text-zinc-500">{t('chat.bash.output')}</div>
+          <pre className="rounded-md bg-zinc-950 p-2 text-[11px] leading-relaxed text-emerald-300 max-h-64 font-mono overflow-x-auto overflow-y-auto">
             {output.output}
           </pre>
         </div>
@@ -6886,15 +6913,15 @@ function ChatBashPayload({
 
       {output.stderr && (
         <div className="space-y-1">
-          <div className="text-xs font-medium text-danger">{t('chat.bash.stderr')}</div>
-          <pre className="rounded-md bg-danger-soft p-2 text-xs text-danger overflow-x-auto max-h-64 overflow-y-auto font-mono">
+          <div className="text-[11px] font-medium text-red-500">{t('chat.bash.stderr')}</div>
+          <pre className="rounded-md bg-red-950 p-2 text-[11px] leading-relaxed text-red-100 max-h-64 font-mono overflow-x-auto overflow-y-auto">
             {output.stderr}
           </pre>
         </div>
       )}
 
       {!hasOutput && (
-        <div className="rounded-md bg-surface px-2 py-1.5 text-xs text-fg-muted border border-line">
+        <div className="rounded-md bg-white px-2 py-1.5 text-[11px] text-zinc-400 border border-zinc-200/70">
           {t('chat.bash.noOutput')}
         </div>
       )}
@@ -6941,27 +6968,27 @@ export function ChatToolPart({
   };
   const statusConfig: Record<string, StatusCfg> = {
     pending:   {
-      icon: <IconClock aria-hidden="true" className="w-4 h-4 flex-shrink-0" />,
-      iconColor: 'text-fg-muted',
-      pill: 'bg-subtle text-fg-muted',
+      icon: <Clock aria-hidden="true" className="w-3.5 h-3.5 flex-shrink-0" />,
+      iconColor: 'text-zinc-400',
+      pill: 'bg-zinc-100 text-zinc-500',
       label: t('chat.tool.pending'),
     },
     running:   {
-      icon: <IconLoader2 aria-hidden="true" className="w-4 h-4 flex-shrink-0 animate-spin" />,
-      iconColor: 'text-info',
-      pill: 'bg-info-soft text-info',
+      icon: <Loader2 aria-hidden="true" className="w-3.5 h-3.5 animate-spin flex-shrink-0" />,
+      iconColor: 'text-sky-500',
+      pill: 'bg-sky-50 text-sky-600',
       label: t('chat.tool.running'),
     },
     completed: {
-      icon: <IconCircleCheck aria-hidden="true" className="w-4 h-4 flex-shrink-0" />,
-      iconColor: 'text-success',
-      pill: 'bg-success-soft text-success',
+      icon: <CheckCircle2 aria-hidden="true" className="w-3.5 h-3.5 flex-shrink-0" />,
+      iconColor: 'text-green-500',
+      pill: 'bg-green-50 text-green-600',
       label: t('chat.tool.completed'),
     },
     error:     {
-      icon: <IconCircleX aria-hidden="true" className="w-4 h-4 flex-shrink-0" />,
-      iconColor: 'text-danger',
-      pill: 'bg-danger-soft text-danger',
+      icon: <XCircle aria-hidden="true" className="w-3.5 h-3.5 flex-shrink-0" />,
+      iconColor: 'text-red-400',
+      pill: 'bg-red-50 text-red-500',
       label: t('chat.tool.error'),
     },
   };
@@ -7019,12 +7046,12 @@ export function ChatToolPart({
     || inputSummary
     || displayTitle;
   const processStepIcon = isTodoTool
-    ? <IconListTree aria-hidden="true" className="h-4 w-4" />
+    ? <ListTree aria-hidden="true" className="h-[15px] w-[15px]" />
     : config.icon;
-  const processStepIconColor = isTodoTool ? 'text-fg-muted' : config.iconColor;
+  const processStepIconColor = isTodoTool ? 'text-slate-500' : config.iconColor;
   const statusBadgeClass = isTodoTool
-    ? 'text-xs font-medium text-fg-muted'
-    : `text-xs font-medium px-1.5 py-0.5 rounded-md ${config.pill}`;
+    ? 'text-[11px] font-medium text-zinc-500'
+    : `text-[11px] font-medium px-1.5 py-0.5 rounded-md ${config.pill}`;
 
   if (isWaitingForAnswer) {
     // Outer spacing is owned by the part wrapper in SessionChat's parts map.
@@ -7058,9 +7085,9 @@ export function ChatToolPart({
     <>
       {isTodoTool && todoEntries.length > 0 && (
         <div className="space-y-1.5">
-          <div className="flex items-center justify-between gap-3 text-xs font-medium text-fg-muted">
+          <div className="flex items-center justify-between gap-3 text-[11px] font-medium text-zinc-500">
             <span>{t('chat.tool.todoStages')}</span>
-            <span className="font-normal text-fg-muted">{todoEntries.length}</span>
+            <span className="font-normal text-zinc-400">{todoEntries.length}</span>
           </div>
           <TodoList items={todoEntries} />
         </div>
@@ -7073,7 +7100,7 @@ export function ChatToolPart({
       {showActionProgress && (
         <div
           data-testid="chat-tool-action-progress"
-          className="flex min-h-6 items-center gap-2 py-0.5 text-xs text-fg-muted dark:text-fg-muted"
+          className="flex items-center gap-2 py-0.5 text-xs text-[#8d9390] dark:text-zinc-500 min-h-6"
         >
           <span className="inline-flex items-center gap-0.5" aria-hidden="true">
             <span className="h-1 w-1 animate-pulse rounded-full bg-current" />
@@ -7086,10 +7113,10 @@ export function ChatToolPart({
 
       {showGenericToolPayload && safeToolInput && (
         <details>
-          <summary className="mb-1 cursor-pointer text-xs font-medium text-fg-muted transition-colors hover:text-fg-secondary dark:hover:text-fg-secondary">
+          <summary className="mb-1 cursor-pointer text-[11px] font-medium text-zinc-500 transition-colors hover:text-zinc-700 dark:hover:text-zinc-300">
             {t('chat.tool.inputParams')}
           </summary>
-          <pre className="overflow-x-auto rounded-md bg-canvas p-2 font-mono text-xs leading-relaxed text-fg">
+          <pre className="rounded-md bg-zinc-950 p-2 font-mono text-[11px] leading-relaxed text-zinc-300 overflow-x-auto">
             {JSON.stringify(safeToolInput, null, 2)}
           </pre>
         </details>
@@ -7097,23 +7124,23 @@ export function ChatToolPart({
 
       {showGenericToolPayload && status === 'completed' && state.output !== undefined && (
         <details open>
-          <summary className="mb-1 cursor-pointer text-xs font-medium text-fg-muted transition-colors hover:text-fg-secondary dark:hover:text-fg-secondary">
+          <summary className="mb-1 cursor-pointer text-[11px] font-medium text-zinc-500 transition-colors hover:text-zinc-700 dark:hover:text-zinc-300">
             {t('chat.tool.outputResult')}
           </summary>
-          <pre className="max-h-48 overflow-x-auto overflow-y-auto rounded-md bg-canvas p-2 font-mono text-xs leading-relaxed text-success">
+          <pre className="max-h-48 rounded-md bg-zinc-950 p-2 font-mono text-[11px] leading-relaxed text-green-400 overflow-x-auto overflow-y-auto">
             {formatToolPayload(state.output)}
           </pre>
         </details>
       )}
 
       {!isBashTool && status === 'error' && state.error && (
-        <div className="rounded-md border border-danger bg-danger-soft px-2.5 py-1.5 text-xs text-danger dark:border-danger dark:bg-danger-soft dark:text-danger">
+        <div className="rounded-md border border-red-100 bg-red-50 px-2.5 py-1.5 text-[11px] text-red-600 dark:border-red-900/60 dark:bg-red-950/40 dark:text-red-300">
           {state.error}
         </div>
       )}
 
       {state.time?.start && state.time?.end && (
-        <div className="text-right text-xs text-fg-muted">
+        <div className="text-right text-[10px] text-zinc-400">
           {((state.time.end - state.time.start) / 1000).toFixed(2)}s
         </div>
       )}
@@ -7124,7 +7151,7 @@ export function ChatToolPart({
     return (
       <>
         <details data-testid="chat-process-tool-step" data-tool-status={status} className="group/tool min-w-0">
-          <summary className="flex min-h-7 cursor-pointer list-none items-center gap-2 text-sm font-medium text-fg-muted transition-colors hover:text-fg dark:text-fg-muted dark:hover:text-fg-secondary [&::-webkit-details-marker]:hidden">
+          <summary className="flex cursor-pointer list-none items-center gap-2 text-sm font-medium text-[#747a78] transition-colors hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-200 [&::-webkit-details-marker]:hidden min-h-7">
             {/* The timeline shows the status as an icon only; keep the text for
                 assistive tech (and hover) so pending/running/completed/error stay
                 distinguishable without colour. */}
@@ -7138,13 +7165,13 @@ export function ChatToolPart({
             </span>
             <span className="min-w-0 flex-shrink-0">{processStepLabel}</span>
             {processStepDetail && (
-              <span className="ml-0.5 min-w-0 truncate font-normal text-fg-muted dark:text-fg-muted">
+              <span className="ml-0.5 font-normal text-[#9a9f9c] dark:text-zinc-500 min-w-0 truncate">
                 {processStepDetail}
               </span>
             )}
-            <IconChevronDown aria-hidden="true" className="ml-0.5 h-4 w-4 flex-shrink-0 text-fg-muted transition-transform group-open/tool:rotate-180 dark:text-fg-muted" />
+            <ChevronDown aria-hidden="true" className="ml-0.5 h-3 w-3 text-[#9da29f] transition-transform group-open/tool:rotate-180 dark:text-zinc-500 flex-shrink-0" />
           </summary>
-          <div className="mb-[9px] ml-2 mt-[3px] space-y-1.5 border-l border-line py-1.5 pl-[26px] pr-0 text-xs text-fg-muted dark:border-line dark:text-fg-muted">
+          <div className="mb-[9px] ml-2 mt-[3px] space-y-1.5 border-l border-[#e3e6e3] py-1.5 pl-[26px] pr-0 text-xs text-[#686e6c] dark:border-zinc-700 dark:text-zinc-400">
             {toolDetails}
           </div>
         </details>
@@ -7155,16 +7182,16 @@ export function ChatToolPart({
   return (
     <>
       {/* The part wrapper owns vertical spacing between process rows. */}
-      <details className="group/tool rounded-lg bg-canvas overflow-hidden">
-        <summary className="px-2.5 py-2 cursor-pointer list-none flex items-start gap-2 min-w-0 select-none hover:bg-hover transition-colors">
+      <details className="group/tool rounded-lg bg-zinc-50 overflow-hidden">
+        <summary className="px-2.5 py-2 cursor-pointer list-none flex items-start gap-2 select-none hover:bg-zinc-50 transition-colors min-w-0">
         <span className={`${config.iconColor} flex-shrink-0 mt-0.5`}>{config.icon}</span>
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2 min-w-0">
-            <span className="font-medium text-fg-secondary text-xs whitespace-nowrap flex-shrink-0">{toolDisplayName}</span>
+            <span className="font-medium text-zinc-700 text-xs whitespace-nowrap flex-shrink-0">{toolDisplayName}</span>
             {cardHeaderDetail && (
               <span
-                className={`text-xs truncate min-w-0 ${
-                  workflowHeaderSummary ? 'text-success' : 'text-fg-muted'
+                className={`text-[11px] truncate min-w-0 ${
+                  workflowHeaderSummary ? 'text-emerald-700' : 'text-zinc-400'
                 }`}
               >
                 {cardHeaderDetail}
@@ -7176,11 +7203,11 @@ export function ChatToolPart({
           <span className={statusBadgeClass}>
             {config.label}
           </span>
-          <IconChevronDown aria-hidden="true" className="w-4 h-4 text-fg-muted transition-transform group-open/tool:rotate-180" />
+          <ChevronDown aria-hidden="true" className="w-3 h-3 text-zinc-400 transition-transform group-open/tool:rotate-180" />
         </div>
       </summary>
 
-        <div className="space-y-1.5 border-t border-line px-2.5 py-2 text-xs">
+        <div className="space-y-1.5 border-t border-zinc-200/60 px-2.5 py-2 text-xs">
           {toolDetails}
         </div>
       </details>

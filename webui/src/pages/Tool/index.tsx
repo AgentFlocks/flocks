@@ -3,46 +3,43 @@ import PageDialog from '../PageDialog';
 import { useState, useMemo, useEffect, useCallback, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
-  IconTool,
-  IconSearch,
-  IconRefresh,
-  IconTestPipe,
-  IconLayoutGrid,
-  IconDatabase,
-  IconCloud,
-  IconX,
-  IconCircleCheck,
-  IconCircleX,
-  IconChevronLeft,
-  IconChevronRight,
-  IconAlertTriangle,
-  IconPlayerPlay,
-  IconInfoCircle,
-  IconPower,
-  IconPlugOff,
-  IconFileText,
-  IconChevronDown,
-  IconChevronUp,
-  IconServer,
-  IconArrowUp,
-  IconArrowDown,
-  IconFilter,
-  IconSettings,
-  IconActivity,
-  IconClock,
-  IconShield,
-  IconBolt,
-  IconPlus,
-  IconCode,
-  IconDownload,
-  IconStar,
-  IconExternalLink,
-  IconTag,
-  IconTrash,
-  IconEye,
-  IconEyeOff,
-  IconDeviceFloppy,
-} from '@tabler/icons-react';
+  Activity,
+  AlertTriangle,
+  ArrowDown,
+  ArrowUp,
+  CheckCircle,
+  ChevronLeft,
+  ChevronRight,
+  Clock,
+  Cloud,
+  Code,
+  Database,
+  Download,
+  ExternalLink,
+  Eye,
+  EyeOff,
+  FileText,
+  Filter,
+  Grid,
+  Info,
+  Play,
+  Plus,
+  Power,
+  PowerOff,
+  RefreshCw,
+  Save,
+  Search,
+  Server,
+  Settings,
+  Shield,
+  Star,
+  TestTube,
+  Trash2,
+  Wrench,
+  X,
+  XCircle,
+  Zap,
+} from 'lucide-react';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
 import EmptyState from '@/components/common/EmptyState';
 import { useToast } from '@/components/common/Toast';
@@ -89,13 +86,13 @@ interface TabConfig {
 
 /** Tool source categories use data or neutral accents; connection status is separate. */
 const SOURCE_BADGE: Record<string, { className: string }> = {
-  mcp: { className: 'bg-data-soft text-data' },
-  api: { className: 'bg-data-soft text-data' },
-  device: { className: 'bg-data-soft text-data' },
-  plugin_py: { className: 'bg-subtle text-fg-secondary' },
-  plugin_yaml: { className: 'bg-data-soft text-data' },
-  builtin: { className: 'bg-subtle text-fg-secondary' },
-  custom: { className: 'bg-subtle text-fg-secondary' },
+  mcp: { className: 'bg-slate-100 text-slate-800' },
+  api: { className: 'bg-purple-100 text-purple-800' },
+  device: { className: 'bg-amber-100 text-amber-800' },
+  plugin_py: { className: 'bg-blue-100 text-blue-800' },
+  plugin_yaml: { className: 'bg-violet-100 text-violet-800' },
+  builtin: { className: 'bg-green-100 text-green-800' },
+  custom: { className: 'bg-orange-100 text-orange-800' },
 };
 
 /** 功能类 label key map (category) - maps category key to i18n key */
@@ -171,10 +168,10 @@ export default function ToolPage() {
   const toast = useToast();
 
   const TABS: TabConfig[] = [
-    { key: 'all', label: t('tabs.all'), icon: <IconLayoutGrid aria-hidden="true" className="w-5 h-5" /> },
-    { key: 'mcp', label: t('tabs.mcp'), icon: <IconDatabase aria-hidden="true" className="w-5 h-5" /> },
-    { key: 'api', label: t('tabs.api'), icon: <IconCloud aria-hidden="true" className="w-5 h-5" /> },
-    { key: 'local', label: t('tabs.local'), icon: <IconCode aria-hidden="true" className="w-5 h-5" /> },
+    { key: 'all', label: t('tabs.all'), icon: <Grid aria-hidden="true" className="w-5 h-5" /> },
+    { key: 'mcp', label: t('tabs.mcp'), icon: <Database aria-hidden="true" className="w-5 h-5" /> },
+    { key: 'api', label: t('tabs.api'), icon: <Cloud aria-hidden="true" className="w-5 h-5" /> },
+    { key: 'local', label: t('tabs.local'), icon: <Code aria-hidden="true" className="w-5 h-5" /> },
   ];
 
   const [activeTab, setActiveTab] = useState<TabKey>(DEFAULT_TOOL_TAB);
@@ -597,8 +594,8 @@ export default function ToolPage() {
     return (
       <div className="flex items-center justify-center h-full">
         <div className="text-center">
-          <p className="text-danger mb-4">{error}</p>
-          <button onClick={() => void handleRefresh()} className="px-4 py-2 bg-subtle text-fg rounded-control hover:bg-hover">
+          <p className="text-red-600 mb-4">{error}</p>
+          <button onClick={() => void handleRefresh()} className="px-4 py-2 bg-slate-700 text-white rounded-lg hover:bg-slate-800">
             {t('button.retry')}
           </button>
         </div>
@@ -609,78 +606,78 @@ export default function ToolPage() {
   return (
     <div className="min-w-0 space-y-6" aria-busy={loading}>
       {/* Page Header — wraps on narrow viewports instead of squeezing the title */}
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="flex min-w-0 items-center gap-3">
-          <div className="shrink-0 text-danger">
-            <IconTool aria-hidden="true" className="w-8 h-8" />
+      <div className="flex items-center justify-between flex-wrap">
+        <div className="flex items-center gap-3 min-w-0">
+          <div className="text-red-600 shrink-0">
+            <Wrench aria-hidden="true" className="w-8 h-8" />
           </div>
           <div className="min-w-0">
-            <h1 className="text-title-page font-bold text-fg whitespace-nowrap">{t('pageTitle')}</h1>
-          <p className="mt-1 text-sm text-fg-muted whitespace-nowrap">
-            <span className="font-semibold text-fg-secondary">{enabledSummary.active}</span> {t('statusBadge.active')}
-            <span className="mx-1.5 text-fg-placeholder">·</span>
-            <span className="font-semibold text-fg-secondary">{enabledSummary.inactive}</span> {t('statusBadge.inactive')}
+            <h1 className="text-2xl font-bold text-gray-900 whitespace-nowrap">{t('pageTitle')}</h1>
+          <p className="mt-1 text-sm text-gray-500 whitespace-nowrap">
+            <span className="font-semibold text-gray-700">{enabledSummary.active}</span> {t('statusBadge.active')}
+            <span className="mx-1.5 text-gray-300">·</span>
+            <span className="font-semibold text-gray-700">{enabledSummary.inactive}</span> {t('statusBadge.inactive')}
           </p>
           </div>
         </div>
-        <div className="flex flex-wrap items-center gap-2">
+        <div className="flex items-center gap-2 flex-wrap">
           <PluginViewToggle value={viewMode} onChange={setViewMode} />
           <button
             onClick={handleRefresh}
             disabled={refreshing}
             title={refreshDone ? t('button.refreshDone') : t('button.refreshList')}
-            className={`ui-btn-icon inline-flex items-center justify-center inline-flex items-center px-3 py-2 border rounded-control text-sm font-medium transition-all ${
+            className={`inline-flex items-center px-3 py-2 border rounded-lg text-sm font-medium transition-all ${
               refreshDone
-                ? 'border-success text-success bg-success-soft'
-                : 'border-line-control text-fg-secondary bg-surface hover:bg-hover disabled:bg-disabled disabled:text-fg-disabled'
+                ? 'border-green-300 text-green-600 bg-green-50'
+                : 'border-gray-300 text-gray-700 bg-white hover:bg-gray-50 disabled:opacity-50'
             }`}
           >
-            <IconRefresh aria-hidden="true" className={`w-4 h-4 ${refreshing ? 'animate-spin' : ''}`} />
+            <RefreshCw aria-hidden="true" className={`w-4 h-4 ${refreshing ? 'animate-spin' : ''}`} />
           </button>
           <button
             onClick={() => setShowMCPSheet(true)}
-            className="inline-flex items-center px-4 py-2 border border-line-control rounded-control text-sm font-medium text-fg-secondary bg-surface hover:bg-hover transition-colors"
+            className="inline-flex items-center px-4 py-2 border border-gray-300 rounded-lg text-sm font-medium text-gray-700 bg-white hover:bg-gray-50 transition-colors"
           >
-            <IconDatabase aria-hidden="true" className="w-4 h-4 mr-1.5" />
+            <Database aria-hidden="true" className="w-4 h-4 mr-1.5" />
             {t('button.addMCP')}
           </button>
           <button
             onClick={() => setShowAPISheet(true)}
-            className="inline-flex items-center px-4 py-2 border border-line-control rounded-control text-sm font-medium text-fg-secondary bg-surface hover:bg-hover transition-colors"
+            className="inline-flex items-center px-4 py-2 border border-gray-300 rounded-lg text-sm font-medium text-gray-700 bg-white hover:bg-gray-50 transition-colors"
           >
-            <IconCloud aria-hidden="true" className="w-4 h-4 mr-1.5" />
+            <Cloud aria-hidden="true" className="w-4 h-4 mr-1.5" />
             {t('button.addAPI')}
           </button>
           <button
             onClick={() => setShowGenerateSheet(true)}
-            className="inline-flex items-center px-4 py-2 border border-transparent rounded-control text-sm font-medium text-action-fg bg-action hover:bg-action-hover transition-colors shadow-sm"
+            className="inline-flex items-center px-4 py-2 border border-transparent rounded-lg text-sm font-medium text-white bg-red-600 hover:bg-red-700 transition-colors shadow-sm"
           >
-            <IconPlus aria-hidden="true" className="w-4 h-4 mr-1.5" />
+            <Plus aria-hidden="true" className="w-4 h-4 mr-1.5" />
             {t('button.createTool')}
           </button>
         </div>
       </div>
 
       {/* Tabs row with search */}
-      <div className="border-b border-line">
+      <div className="border-b border-gray-200">
         <div className="flex min-h-14 flex-wrap items-center justify-between gap-x-4 gap-y-2">
-          <nav className="-mb-px flex max-w-full space-x-8 overflow-x-auto">
+          <nav className="-mb-px flex space-x-8 max-w-full overflow-x-auto">
             {TABS.map((tab) => (
               <button
                 key={tab.key}
                 onClick={() => handleTabChange(tab.key)}
-                className={`h-14 px-1 border-b-2 font-medium text-sm whitespace-nowrap transition-colors ${
+                className={`h-14 px-1 border-b-2 font-medium text-sm transition-colors whitespace-nowrap ${
                   activeTab === tab.key
-                    ? 'border-line-control text-fg'
-                    : 'border-transparent text-fg-muted hover:text-fg-secondary hover:border-line-control'
+                    ? 'border-slate-600 text-slate-800'
+                    : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
                 }`}
               >
                 <div className="flex h-full items-center">
-                  <span className={activeTab === tab.key ? 'text-fg-secondary' : 'text-fg-muted'}>
+                  <span className={activeTab === tab.key ? 'text-slate-700' : 'text-gray-400'}>
                     {tab.icon}
                   </span>
                   <span className="ml-2">{tab.label}</span>
-                  <span className="ml-2 inline-flex min-w-10 justify-center rounded-pill bg-subtle px-2.5 py-0.5 text-xs font-medium tabular-nums text-fg">
+                  <span className="ml-2 inline-flex justify-center rounded-full bg-gray-100 px-2.5 py-0.5 text-xs font-medium tabular-nums text-gray-900 min-w-10">
                     {tabCounts[tab.key] || 0}
                   </span>
                 </div>
@@ -690,31 +687,31 @@ export default function ToolPage() {
 
           {/* Query controls stay on the left; native actions remain above on the right. */}
           <div className="relative mb-px order-first w-full sm:w-auto">
-            <IconSearch aria-hidden="true" className="absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-fg-muted" />
+            <Search aria-hidden="true" className="absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-gray-400" />
             <input
               type="text"
               placeholder={t('search.placeholder')}
               value={searchQuery}
               onChange={(e) => handleSearchChange(e.target.value)}
-              className="ui-input w-full sm:w-64 pl-9 pr-4  text-sm border border-line-control rounded-control focus:border-transparent bg-surface"
+              className="pl-9 pr-4 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-400 focus:border-transparent bg-white w-full sm:w-64"
             />
           </div>
         </div>
       </div>
 
       {error && (
-        <div className="rounded-control border border-danger bg-danger-soft px-4 py-3 text-sm text-danger">
+        <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
           {error}
         </div>
       )}
 
       {activeTab === 'mcp' && catalogError && (
-        <div className="flex items-center justify-between rounded-control border border-warning bg-warning-soft px-4 py-3 text-sm text-warning">
+        <div className="flex items-center justify-between rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
           <span>{catalogError}</span>
           <button
             type="button"
             onClick={() => setCatalogRetryKey((value) => value + 1)}
-            className="rounded-control border border-warning bg-surface px-3 py-1.5 font-medium hover:bg-warning-soft"
+            className="rounded-md border border-amber-300 bg-white px-3 py-1.5 font-medium hover:bg-amber-100"
           >
             {t('button.retry')}
           </button>
@@ -759,13 +756,13 @@ export default function ToolPage() {
             viewMode={viewMode}
           />
         ) : isTabPageLoading ? (
-          <div className="flex min-h-[420px] items-center justify-center rounded-lg border border-line bg-surface">
+          <div className="flex items-center justify-center rounded-lg border border-gray-200 bg-white min-h-[420px]">
             <LoadingSpinner delayMs={180} />
           </div>
         ) : activeTab === 'local' ? (
           <div className="flex flex-col gap-4 md:flex-row">
             {toolGroupNav}
-          <div className="min-w-0 flex-1 overflow-x-auto rounded-control border border-line bg-surface">
+          <div className="flex-1 rounded-lg border border-gray-200 bg-white min-w-0 overflow-x-auto">
             <LocalTabContent
               tools={processedTools}
               searchQuery={searchQuery}
@@ -791,25 +788,25 @@ export default function ToolPage() {
           <div className="min-w-0 flex-1 space-y-4">
             {/* Inactive services callout */}
             {(mcpCatalogEntries.length > 0 || apiCatalogEntries.length > 0) && !searchQuery && (
-              <div className="flex items-center justify-between px-4 py-3 bg-subtle border border-line rounded-control text-sm">
-                <span className="text-fg-secondary">
-                  <span className="font-medium text-fg">{catalogEntries.length}</span> {t('summary.inactiveServicesAvailable')}
+              <div className="flex items-center justify-between px-4 py-3 bg-gray-50 border border-gray-200 rounded-lg text-sm">
+                <span className="text-gray-600">
+                  <span className="font-medium text-gray-800">{catalogEntries.length}</span> {t('summary.inactiveServicesAvailable')}
                 </span>
                 <div className="flex items-center gap-3">
                   {mcpCatalogEntries.length > 0 && (
                     <button
                       onClick={() => handleTabChange('mcp')}
-                      className="flex items-center gap-1 text-fg-secondary hover:text-fg font-medium"
+                      className="flex items-center gap-1 text-slate-700 hover:text-slate-900 font-medium"
                     >
-                      MCP <IconChevronRight aria-hidden="true" className="w-4 h-4" />
+                      MCP <ChevronRight aria-hidden="true" className="w-4 h-4" />
                     </button>
                   )}
                   {apiCatalogEntries.length > 0 && (
                     <button
                       onClick={() => handleTabChange('api')}
-                      className="flex items-center gap-1 text-ai hover:text-ai font-medium"
+                      className="flex items-center gap-1 text-purple-600 hover:text-purple-700 font-medium"
                     >
-                      API <IconChevronRight aria-hidden="true" className="w-4 h-4" />
+                      API <ChevronRight aria-hidden="true" className="w-4 h-4" />
                     </button>
                   )}
                 </div>
@@ -817,7 +814,7 @@ export default function ToolPage() {
             )}
             {totalTools === 0 ? (
               <EmptyState
-                icon={<IconTool aria-hidden="true" className="w-8 h-8" />}
+                icon={<Wrench aria-hidden="true" className="w-16 h-16" />}
                 title={searchQuery ? t('empty.noMatchingTools') : t('empty.noTools')}
                 description={searchQuery ? t('empty.adjustFilter') : t('empty.noToolsInCategory')}
               />
@@ -981,25 +978,25 @@ function SortFilterHeader({
       <div className="flex items-center gap-1">
         <button
           onClick={() => onSort(field)}
-          className={`flex items-center gap-0.5 hover:text-fg transition-colors ${isActive ? 'text-fg-secondary' : ''}`}
+          className={`flex items-center gap-0.5 hover:text-gray-900 transition-colors ${isActive ? 'text-slate-700' : ''}`}
         >
           {label}
-          {isActive && (sort.dir === 'asc' ? <IconArrowUp aria-hidden="true" className="w-4 h-4" /> : <IconArrowDown aria-hidden="true" className="w-4 h-4" />)}
+          {isActive && (sort.dir === 'asc' ? <ArrowUp aria-hidden="true" className="w-3 h-3" /> : <ArrowDown aria-hidden="true" className="w-3 h-3" />)}
         </button>
         <button aria-label={pageActionLabel('filter')}
           onClick={() => setOpen((v) => !v)}
-          className={`ui-btn-icon inline-flex items-center justify-center p-0.5 rounded-control hover:bg-hover transition-colors ${hasFilter ? 'text-fg-secondary' : 'text-fg-muted'}`}
+          className={`p-0.5 rounded hover:bg-gray-200 transition-colors ${hasFilter ? 'text-slate-600' : 'text-gray-400'}`}
         >
-          <IconFilter aria-hidden="true" className="w-4 h-4" />
+          <Filter aria-hidden="true" className="w-3 h-3" />
         </button>
       </div>
 
       {open && (
-        <div className="absolute left-0 top-full mt-1 z-20 bg-surface rounded-control shadow-lg border border-line py-2 min-w-[160px] max-h-60 overflow-y-auto">
+        <div className="absolute left-0 top-full mt-1 bg-white rounded-lg shadow-lg border border-gray-200 py-2 max-h-60 z-20 min-w-[160px] overflow-y-auto">
           {hasFilter && (
             <button
               onClick={() => { onClearFilter(field); setOpen(false); }}
-              className="w-full text-left px-3 py-1.5 text-xs text-fg-secondary hover:bg-hover"
+              className="w-full text-left px-3 py-1.5 text-xs text-slate-700 hover:bg-slate-50"
             >
               {t('button.clearFilter')}
             </button>
@@ -1008,14 +1005,14 @@ function SortFilterHeader({
             const checked = activeFilters.has(v);
             const displayLabel = renderLabel ? renderLabel(v) : v;
             return (
-              <label key={v} className="flex items-center px-3 py-1.5 hover:bg-hover cursor-pointer">
+              <label key={v} className="flex items-center px-3 py-1.5 hover:bg-gray-50 cursor-pointer">
                 <input
                   type="checkbox"
                   checked={checked}
                   onChange={() => onToggleFilter(field, v)}
-                  className="w-3.5 h-3.5 rounded-tag border-line-control text-fg-secondary mr-2"
+                  className="w-3.5 h-3.5 rounded border-gray-300 text-slate-600 focus:ring-slate-400 mr-2"
                 />
-                <span className="text-xs text-fg-secondary">{displayLabel}</span>
+                <span className="text-xs text-gray-700">{displayLabel}</span>
               </label>
             );
           })}
@@ -1037,7 +1034,7 @@ function SortFilterHeader({
 
   return (
     <th
-      className="px-6 py-3 text-left text-xs font-medium text-fg-muted uppercase tracking-wider relative whitespace-nowrap"
+      className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider relative whitespace-nowrap"
       ref={ref as React.RefObject<HTMLTableCellElement>}
     >
       {inner}
@@ -1326,11 +1323,11 @@ function LegacyMCPTabContent({
         <div className="flex items-center gap-1.5 flex-wrap flex-1 min-w-0">
           <button
             onClick={() => setSelectedCategory('all')}
-            className={`px-2.5 py-1 rounded-pill text-xs font-medium transition-colors ${selectedCategory === 'all' ? 'bg-subtle text-fg-secondary' : 'bg-subtle text-fg-secondary hover:bg-hover'}`}
+            className={`px-2.5 py-1 rounded-full text-xs font-medium transition-colors ${selectedCategory === 'all' ? 'bg-slate-100 text-slate-700' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}
           >{t('catalog.all')}</button>
           {Object.entries(catalogCategories).map(([id, cat]) =>
             catalogCategoryCounts[id] ? (
-              <button key={id} onClick={() => setSelectedCategory(id)} className={`px-2.5 py-1 rounded-pill text-xs font-medium transition-colors ${selectedCategory === id ? 'bg-subtle text-fg-secondary' : 'bg-subtle text-fg-secondary hover:bg-hover'}`}>
+              <button key={id} onClick={() => setSelectedCategory(id)} className={`px-2.5 py-1 rounded-full text-xs font-medium transition-colors ${selectedCategory === id ? 'bg-slate-100 text-slate-700' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}>
                 {cat.label} ({catalogCategoryCounts[id]})
               </button>
             ) : null
@@ -1338,9 +1335,9 @@ function LegacyMCPTabContent({
         </div>
         <button
           onClick={fetchServers}
-          className="inline-flex items-center px-3 py-2 text-sm text-fg-secondary bg-surface border border-line-control rounded-control hover:bg-hover flex-shrink-0"
+          className="inline-flex items-center px-3 py-2 text-sm text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 flex-shrink-0"
         >
-          <IconRefresh aria-hidden="true" className="w-4 h-4 mr-1.5" />
+          <RefreshCw aria-hidden="true" className="w-4 h-4 mr-1.5" />
           {t('mcp.refreshStatus')}
         </button>
       </div>
@@ -1348,7 +1345,7 @@ function LegacyMCPTabContent({
       {serversLoading && catalogLoading ? (
         <div className="flex justify-center py-12"><LoadingSpinner /></div>
       ) : userServers.length === 0 && filteredCatalog.length === 0 ? (
-        <EmptyState icon={<IconServer aria-hidden="true" className="w-8 h-8" />} title={t('mcp.noServers')} description={t('mcp.noServersDesc')} />
+        <EmptyState icon={<Server aria-hidden="true" className="w-16 h-16" />} title={t('mcp.noServers')} description={t('mcp.noServersDesc')} />
       ) : (
         <div className="grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
           {/* User-added servers (not from catalog) */}
@@ -1365,26 +1362,26 @@ function LegacyMCPTabContent({
                   if (isSelected) { setSelectedServer(null); setSelectedServerData(null); }
                   else { setSelectedServer(server.name); setSelectedServerData(server); }
                 }}
-                className={`relative bg-surface rounded-card border overflow-hidden cursor-pointer h-[180px] flex flex-col transition-all duration-150 ${isSelected ? 'border-line-control ring-2 ring-focus' : 'border-line shadow-sm hover:border-line-control'}`}
+                className={`relative bg-white rounded-xl border cursor-pointer h-[180px] flex flex-col transition-all duration-150 overflow-hidden ${isSelected ? 'border-slate-400 shadow-md ring-2 ring-slate-200' : 'border-gray-200 shadow-sm hover:shadow-md hover:border-gray-300'}`}
                 style={{ borderLeftWidth: 4, borderLeftColor: borderColor }}
               >
                 <div className="flex-1 px-4 pt-4 pb-2 min-h-0 flex flex-col gap-1.5">
                   <div className="flex items-start gap-1.5 flex-wrap">
-                    <span className="text-sm font-semibold text-fg truncate max-w-[120px]">{server.name}</span>
-                    <span className={`px-1.5 py-0.5 text-xs font-medium rounded-pill shrink-0 ${isActive ? 'bg-success-soft text-success' : isError ? 'bg-danger-soft text-danger' : 'bg-subtle text-fg-secondary'}`}>
+                    <span className="text-sm font-semibold text-gray-900 max-w-[120px] truncate">{server.name}</span>
+                    <span className={`px-1.5 py-0.5 text-xs font-medium rounded-full shrink-0 ${isActive ? 'bg-green-100 text-green-700' : isError ? 'bg-red-100 text-red-700' : 'bg-gray-100 text-gray-600'}`}>
                       {isActive ? t('statusBadge.active') : isError ? t('statusBadge.error') : t('statusBadge.inactive')}
                     </span>
-                    <span className="px-1.5 py-0.5 bg-subtle text-fg-secondary text-xs font-medium rounded-pill shrink-0">MCP</span>
+                    <span className="px-1.5 py-0.5 bg-slate-100 text-slate-700 text-xs font-medium rounded-full shrink-0">MCP</span>
                   </div>
-                  {server.url && <p className="text-xs text-fg-muted font-mono truncate">{server.url}</p>}
-                  <div className="flex items-center gap-1 text-xs text-fg-muted mt-auto">
-                    <IconTool aria-hidden="true" className="w-4 h-4 shrink-0" /><span>{serverTools.length} {t('mcp.tools')}</span>
+                  {server.url && <p className="text-xs text-gray-500 font-mono truncate">{server.url}</p>}
+                  <div className="flex items-center gap-1 text-xs text-gray-500 mt-auto">
+                    <Wrench aria-hidden="true" className="w-3 h-3 shrink-0" /><span>{serverTools.length} {t('mcp.tools')}</span>
                     <span className="mx-1">·</span>
-                    <IconFileText aria-hidden="true" className="w-4 h-4 shrink-0" /><span>{server.resources?.length || 0} {t('mcp.resources')}</span>
+                    <FileText aria-hidden="true" className="w-3 h-3 shrink-0" /><span>{server.resources?.length || 0} {t('mcp.resources')}</span>
                   </div>
                   {server.connected_at && (
                     <div className="flex items-center gap-1">
-                      <IconClock aria-hidden="true" className="w-4 h-4 shrink-0" /><span>{t('mcp.connectedFor', { duration: formatDuration(server.connected_at, t) })}</span>
+                      <Clock aria-hidden="true" className="w-3 h-3 shrink-0" /><span>{t('mcp.connectedFor', { duration: formatDuration(server.connected_at, t) })}</span>
                     </div>
                   )}
                 </div>
@@ -1405,37 +1402,37 @@ function LegacyMCPTabContent({
               <div
                 key={`catalog-${entry.id}`}
                 onClick={() => isActive ? setSelectedServer(isSelected ? null : entry.id) : undefined}
-                className={`relative bg-surface rounded-card border overflow-hidden h-[180px] flex flex-col transition-all duration-150 ${isActive ? 'cursor-pointer' : 'cursor-default'} ${isSelected ? 'border-line-control ring-2 ring-focus' : 'border-line shadow-sm hover:border-line-control'}`}
+                className={`relative bg-white rounded-xl border h-[180px] flex flex-col transition-all duration-150 overflow-hidden ${isActive ? 'cursor-pointer' : 'cursor-default'} ${isSelected ? 'border-slate-400 shadow-md ring-2 ring-slate-200' : 'border-gray-200 shadow-sm hover:shadow-md hover:border-gray-300'}`}
                 style={{ borderLeftWidth: 4, borderLeftColor: borderColor }}
               >
                 <div className="flex-1 px-4 pt-4 pb-2 min-h-0 flex flex-col gap-1.5">
                   <div className="flex items-start gap-1.5 flex-wrap">
-                    <span className="text-sm font-semibold text-fg truncate max-w-[120px]">{entry.name}</span>
-                    <span className={`px-1.5 py-0.5 text-xs font-medium rounded-pill shrink-0 ${isActive ? 'bg-success-soft text-success' : isError ? 'bg-danger-soft text-danger' : 'bg-subtle text-fg-secondary'}`}>
+                    <span className="text-sm font-semibold text-gray-900 max-w-[120px] truncate">{entry.name}</span>
+                    <span className={`px-1.5 py-0.5 text-xs font-medium rounded-full shrink-0 ${isActive ? 'bg-green-100 text-green-700' : isError ? 'bg-red-100 text-red-700' : 'bg-gray-100 text-gray-600'}`}>
                       {isActive ? t('statusBadge.active') : isError ? t('statusBadge.error') : t('statusBadge.inactive')}
                     </span>
-                    <span className="px-1.5 py-0.5 bg-subtle text-fg-secondary text-xs font-medium rounded-pill shrink-0">MCP</span>
+                    <span className="px-1.5 py-0.5 bg-slate-100 text-slate-700 text-xs font-medium rounded-full shrink-0">MCP</span>
                     {PRIORITY_IDS.has(entry.id) && (
-                      <span className="px-1.5 py-0.5 bg-warning-soft text-warning text-xs font-medium rounded-pill shrink-0">{t('mcp.recommended')}</span>
+                      <span className="px-1.5 py-0.5 bg-amber-100 text-amber-800 text-xs font-medium rounded-full shrink-0">{t('mcp.recommended')}</span>
                     )}
                   </div>
-                  <p className="text-xs text-fg-muted line-clamp-2 ">{getCatalogDescription(entry, i18n.language)}</p>
-                  <div className="flex items-center gap-2 text-xs text-fg-muted mt-auto">
-                    <span className={`px-1.5 py-0.5 rounded-tag text-xs font-medium ${LANG_COLORS[entry.language] || 'bg-subtle text-fg-secondary'}`}>{entry.language}</span>
-                    <span className="flex items-center gap-0.5"><IconStar aria-hidden="true" className="w-4 h-4" />{entry.stars}</span>
+                  <p className="text-xs text-gray-500 leading-relaxed line-clamp-2">{getCatalogDescription(entry, i18n.language)}</p>
+                  <div className="flex items-center gap-2 text-xs text-gray-500 mt-auto">
+                    <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${LANG_COLORS[entry.language] || 'bg-gray-100 text-gray-600'}`}>{entry.language}</span>
+                    <span className="flex items-center gap-0.5"><Star aria-hidden="true" className="w-3 h-3" />{entry.stars}</span>
                   </div>
                 </div>
-                <div className="border-t border-line px-4 py-2 flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
+                <div className="border-t border-gray-100 px-4 py-2 flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
                   {isActive ? (
                     <>
                       <button
                         onClick={() => setSelectedServer(isSelected ? null : entry.id)}
-                        className={`flex-1 flex items-center justify-center gap-1 py-1 px-2 border rounded-control text-xs font-medium transition-colors ${isSelected ? 'border-line-control text-fg bg-subtle' : 'border-line-control text-fg-secondary hover:bg-hover'}`}
+                        className={`flex-1 flex items-center justify-center gap-1 py-1 px-2 border rounded-lg text-xs font-medium transition-colors ${isSelected ? 'border-slate-300 text-slate-800 bg-slate-50' : 'border-gray-300 text-gray-700 hover:bg-gray-50'}`}
                       >
-                        <IconSettings aria-hidden="true" className="w-4 h-4" /> {t('mcp.manage')}
+                        <Settings aria-hidden="true" className="w-3 h-3" /> {t('mcp.manage')}
                       </button>
-                      <button onClick={(e) => handleDisconnect(entry.id, e)} className="ui-btn-icon inline-flex items-center justify-center flex items-center justify-center   border border-line-control text-fg-secondary rounded-control hover:bg-hover transition-colors" title={t('mcp.disconnectTitle')}>
-                        <IconPlugOff aria-hidden="true" className="w-4 h-4" />
+                      <button onClick={(e) => handleDisconnect(entry.id, e)} className="flex items-center justify-center w-7 h-7 border border-gray-300 text-gray-600 rounded-lg hover:bg-gray-100 transition-colors" title={t('mcp.disconnectTitle')}>
+                        <PowerOff aria-hidden="true" className="w-3.5 h-3.5" />
                       </button>
                     </>
                   ) : (
@@ -1450,19 +1447,19 @@ function LegacyMCPTabContent({
                           }
                         }}
                         disabled={installing === entry.id}
-                        className="flex-1 flex items-center justify-center gap-1 py-1 px-2 bg-subtle text-fg rounded-control text-xs font-medium hover:bg-hover disabled:bg-disabled disabled:text-fg-disabled transition-colors"
+                        className="flex-1 flex items-center justify-center gap-1 py-1 px-2 bg-slate-700 text-white rounded-lg text-xs font-medium hover:bg-slate-800 disabled:opacity-50 transition-colors"
                       >
-                        <IconDownload aria-hidden="true" className="w-4 h-4" />
+                        <Download aria-hidden="true" className="w-3 h-3" />
                         {installing === entry.id ? t('mcp.configuring') : t('button.install')}
                       </button>
                       <a
                         href={`https://github.com/${entry.github}`}
                         target="_blank"
                         rel="noopener noreferrer"
-                        className="flex items-center justify-center w-7 h-7 border border-line-control text-fg-muted rounded-control hover:bg-hover transition-colors"
+                        className="flex items-center justify-center w-7 h-7 border border-gray-300 text-gray-500 rounded-lg hover:bg-gray-50 transition-colors"
                         title="GitHub"
                       >
-                        <IconExternalLink aria-hidden="true" className="w-4 h-4" />
+                        <ExternalLink aria-hidden="true" className="w-3.5 h-3.5" />
                       </a>
                     </>
                   )}
@@ -1476,37 +1473,37 @@ function LegacyMCPTabContent({
       {/* Credential Input Modal */}
       {credModalEntry && (
         <>
-          <div className="fixed inset-0 bg-overlay-backdrop z-40" onClick={() => setCredModalEntry(null)} />
+          <div className="fixed inset-0 bg-black/40 z-40" onClick={() => setCredModalEntry(null)} />
           <PageDialog onClose={() => setCredModalEntry(null)} className="fixed inset-0 z-50 flex items-center justify-center p-4">
-            <div className="bg-surface rounded-card shadow-overlay w-full max-w-md" onClick={(e) => e.stopPropagation()}>
-              <div className="px-6 py-4 border-b border-line">
-                <h3 className="text-title-card font-semibold text-fg">{credModalEntry.name}</h3>
-                <p className="text-sm text-fg-muted mt-1">{t('credentials.configNote')}</p>
+            <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md" onClick={(e) => e.stopPropagation()}>
+              <div className="px-6 py-4 border-b border-gray-200">
+                <h3 className="text-lg font-semibold text-gray-900">{credModalEntry.name}</h3>
+                <p className="text-sm text-gray-500 mt-1">{t('credentials.configNote')}</p>
               </div>
               <div className="px-6 py-4 space-y-4">
                 {Object.entries(credModalEntry.env_vars).filter(([, spec]) => spec.secret).map(([key, spec]) => (
                   <div key={key}>
-                    <label className="block text-sm font-medium text-fg-secondary mb-1">{key}</label>
-                    <p className="text-xs text-fg-muted mb-1.5">{spec.description}</p>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">{key}</label>
+                    <p className="text-xs text-gray-500 mb-1.5">{spec.description}</p>
                     <input
                       type="password"
                       value={credValues[key] || ''}
                       onChange={(e) => setCredValues(prev => ({ ...prev, [key]: e.target.value }))}
                       placeholder={t('credentials.enterField', { field: key })}
-                      className="ui-input w-full px-3  text-sm border border-line-control rounded-control focus:border-transparent"
+                      className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-400 focus:border-transparent"
                     />
                   </div>
                 ))}
               </div>
-              <div className="px-6 py-4 border-t border-line flex gap-3 justify-end">
+              <div className="px-6 py-4 border-t border-gray-200 flex gap-3 justify-end">
                 <button
                   onClick={() => setCredModalEntry(null)}
-                  className="px-4 py-2 text-sm text-fg-secondary border border-line-control rounded-control hover:bg-hover transition-colors"
+                  className="px-4 py-2 text-sm text-gray-700 border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors"
                 >{t('button.cancel')}</button>
                 <button
                   onClick={handleCredSubmit}
                   disabled={installing === credModalEntry.id}
-                  className="ui-btn ui-btn-primary"
+                  className="px-4 py-2 text-sm text-white bg-slate-700 rounded-lg hover:bg-slate-800 disabled:opacity-50 transition-colors"
                 >
                   {installing === credModalEntry.id ? t('mcp.configuring') : t('button.confirmConfig')}
                 </button>
@@ -1523,7 +1520,7 @@ function LegacyMCPTabContent({
         const displayName = catEntry?.name || drawerServer.name;
         return (
           <PageDialog variant="panels" className="contents" onClose={() => { setSelectedServer(null); setSelectedServerData(null); setSelectedToolFromMCP(null); }}>
-            <div className="fixed inset-0 bg-overlay-backdrop z-40" onClick={() => { setSelectedServer(null); setSelectedServerData(null); setSelectedToolFromMCP(null); }} />
+            <div className="fixed inset-0 bg-black/40 z-40" onClick={() => { setSelectedServer(null); setSelectedServerData(null); setSelectedToolFromMCP(null); }} />
 
             {selectedToolFromMCP && (
               <MCPToolDetailPanel
@@ -1532,30 +1529,30 @@ function LegacyMCPTabContent({
               />
             )}
 
-            <div data-ui-overlay="drawer" className="fixed right-0 top-0 bottom-0 z-50 flex flex-col w-full bg-surface shadow-overlay" style={{ maxWidth: DETAIL_DRAWER_WIDTH }} onClick={(e) => e.stopPropagation()}>
-              <div className="flex-shrink-0 border-b border-line">
+            <div data-ui-overlay="drawer" className="fixed right-0 top-0 bottom-0 flex flex-col w-full bg-white shadow-2xl z-50" style={{ maxWidth: DETAIL_DRAWER_WIDTH }} onClick={(e) => e.stopPropagation()}>
+              <div className="border-b border-gray-200 flex-shrink-0">
                 <div className="flex items-center gap-3 px-6 py-4">
-                  <div className={`w-10 h-10 rounded-control flex items-center justify-center flex-shrink-0 ${drawerServer.status === 'connected' ? 'bg-success-soft' : drawerServer.status === 'error' || drawerServer.status === 'failed' ? 'bg-danger-soft' : 'bg-subtle'}`}>
-                    <IconDatabase aria-hidden="true" className={`w-5 h-5 ${drawerServer.status === 'connected' ? 'text-success' : drawerServer.status === 'error' || drawerServer.status === 'failed' ? 'text-danger' : 'text-fg-muted'}`} />
+                  <div className={`w-10 h-10 rounded-lg flex items-center justify-center flex-shrink-0 ${drawerServer.status === 'connected' ? 'bg-green-50' : drawerServer.status === 'error' || drawerServer.status === 'failed' ? 'bg-red-50' : 'bg-gray-50'}`}>
+                    <Database aria-hidden="true" className={`w-5 h-5 ${drawerServer.status === 'connected' ? 'text-green-600' : drawerServer.status === 'error' || drawerServer.status === 'failed' ? 'text-red-600' : 'text-gray-400'}`} />
                   </div>
                   <div className="flex-1 min-w-0">
-                    <h2 className="text-title-section font-semibold text-fg">{displayName}</h2>
-                    <p className="text-sm text-fg-muted">{t('mcp.serverConfig')}</p>
+                    <h2 className="text-lg font-semibold text-gray-900">{displayName}</h2>
+                    <p className="text-sm text-gray-500">{t('mcp.serverConfig')}</p>
                   </div>
-                  <button aria-label={pageActionLabel('close')} onClick={() => { setSelectedServer(null); setSelectedServerData(null); setSelectedToolFromMCP(null); }} className="ui-btn-icon inline-flex items-center justify-center text-fg-muted hover:text-fg-secondary p-2 rounded-control hover:bg-hover flex-shrink-0">
-                    <IconX aria-hidden="true" className="w-5 h-5" />
+                  <button aria-label={pageActionLabel('close')} onClick={() => { setSelectedServer(null); setSelectedServerData(null); setSelectedToolFromMCP(null); }} className="text-gray-400 hover:text-gray-600 p-2 rounded-lg hover:bg-gray-100 flex-shrink-0">
+                    <X aria-hidden="true" className="w-5 h-5" />
                   </button>
                 </div>
               </div>
               <div className="flex-1 overflow-y-auto">
                 {catEntry && (
-                  <div className="px-6 py-4 bg-subtle border-b border-line">
-                    <p className="text-sm text-fg-secondary">{getCatalogDescription(catEntry, i18n.language)}</p>
-                    <div className="flex items-center gap-3 mt-2 text-xs text-fg-muted">
-                      <span className={`px-1.5 py-0.5 rounded-tag font-medium ${LANG_COLORS[catEntry.language] || 'bg-subtle text-fg-secondary'}`}>{catEntry.language}</span>
-                      <span className="flex items-center gap-0.5"><IconStar aria-hidden="true" className="w-4 h-4" />{catEntry.stars}</span>
-                      <a href={`https://github.com/${catEntry.github}`} target="_blank" rel="noopener noreferrer" className="text-info hover:text-info flex items-center gap-0.5">
-                        <IconExternalLink aria-hidden="true" className="w-4 h-4" /> GitHub
+                  <div className="px-6 py-4 bg-gray-50 border-b border-gray-200">
+                    <p className="text-sm text-gray-600">{getCatalogDescription(catEntry, i18n.language)}</p>
+                    <div className="flex items-center gap-3 mt-2 text-xs text-gray-500">
+                      <span className={`px-1.5 py-0.5 rounded font-medium ${LANG_COLORS[catEntry.language] || 'bg-gray-100 text-gray-600'}`}>{catEntry.language}</span>
+                      <span className="flex items-center gap-0.5"><Star aria-hidden="true" className="w-3 h-3" />{catEntry.stars}</span>
+                      <a href={`https://github.com/${catEntry.github}`} target="_blank" rel="noopener noreferrer" className="text-sky-700 hover:text-sky-900 flex items-center gap-0.5">
+                        <ExternalLink aria-hidden="true" className="w-3 h-3" /> GitHub
                       </a>
                     </div>
                   </div>
@@ -1660,20 +1657,20 @@ function MCPServerDetailPanel({
   };
 
   return (
-    <div className="bg-surface" onClick={(e) => e.stopPropagation()}>
-      <div className="flex items-center border-b border-line px-5">
+    <div className="bg-white" onClick={(e) => e.stopPropagation()}>
+      <div className="flex items-center border-b border-gray-200 px-5">
         {([
-          { key: 'overview' as const, label: t('detail.tabs.overview'), icon: <IconInfoCircle aria-hidden="true" className="w-4 h-4" /> },
-          { key: 'tools' as const, label: t('detail.tabs.tools', { count: serverTools.length }), icon: <IconTool aria-hidden="true" className="w-4 h-4" /> },
-          { key: 'resources' as const, label: t('detail.tabs.resources', { count: serverDetail?.resources?.length || 0 }), icon: <IconFileText aria-hidden="true" className="w-4 h-4" /> },
+          { key: 'overview' as const, label: t('detail.tabs.overview'), icon: <Info aria-hidden="true" className="w-3.5 h-3.5" /> },
+          { key: 'tools' as const, label: t('detail.tabs.tools', { count: serverTools.length }), icon: <Wrench aria-hidden="true" className="w-3.5 h-3.5" /> },
+          { key: 'resources' as const, label: t('detail.tabs.resources', { count: serverDetail?.resources?.length || 0 }), icon: <FileText aria-hidden="true" className="w-3.5 h-3.5" /> },
         ]).map((tab) => (
           <button
             key={tab.key}
             onClick={() => setDetailTab(tab.key)}
             className={`flex items-center gap-1.5 px-4 py-3 text-sm font-medium border-b-2 transition-colors ${
               detailTab === tab.key
-                ? 'border-line-control text-fg'
-                : 'border-transparent text-fg-muted hover:text-fg-secondary'
+                ? 'border-slate-600 text-slate-800'
+                : 'border-transparent text-gray-500 hover:text-gray-700'
             }`}
           >
             {tab.icon}
@@ -1714,70 +1711,70 @@ function MCPServerDetailPanel({
             })()}
 
             <div className="grid grid-cols-2 gap-3">
-              <div className="rounded-control border border-line bg-subtle px-3 py-2 flex items-center justify-between">
+              <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 flex items-center justify-between">
                 <div>
-                  <div className="text-xs text-fg-muted">{t('detail.registeredTools')}</div>
-                  <div className="text-lg font-semibold text-fg">{serverDetail?.status?.tools_count ?? serverTools.length}</div>
+                  <div className="text-xs text-gray-500">{t('detail.registeredTools')}</div>
+                  <div className="text-lg font-semibold text-gray-900">{serverDetail?.status?.tools_count ?? serverTools.length}</div>
                 </div>
                 <button
                   onClick={handleRefreshTools}
                   disabled={refreshing || server.status !== 'connected'}
                   title={t('detail.refreshTools')}
-                  className="ui-btn-icon inline-flex items-center justify-center p-1.5 text-fg-muted hover:text-fg-secondary hover:bg-hover rounded-control disabled:bg-disabled disabled:text-fg-disabled transition-colors"
+                  className="p-1.5 text-gray-400 hover:text-gray-600 hover:bg-gray-200 rounded-md disabled:opacity-40 transition-colors"
                 >
-                  <IconRefresh aria-hidden="true" className={`w-4 h-4 ${refreshing ? 'animate-spin' : ''}`} />
+                  <RefreshCw aria-hidden="true" className={`w-4 h-4 ${refreshing ? 'animate-spin' : ''}`} />
                 </button>
               </div>
-              <div className="rounded-control border border-line bg-subtle px-3 py-2">
-                <div className="text-xs text-fg-muted">{t('detail.availableResources')}</div>
-                <div className="text-lg font-semibold text-fg">{serverDetail?.status?.resources_count ?? serverDetail?.resources?.length ?? 0}</div>
+              <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2">
+                <div className="text-xs text-gray-500">{t('detail.availableResources')}</div>
+                <div className="text-lg font-semibold text-gray-900">{serverDetail?.status?.resources_count ?? serverDetail?.resources?.length ?? 0}</div>
               </div>
             </div>
 
             <div className="flex items-center justify-end gap-2">
               {server.status === 'connected' ? (
-                <button onClick={onDisconnect} className="inline-flex items-center gap-2 px-4 py-2.5 border border-line-control text-fg-secondary rounded-control hover:bg-hover text-sm font-medium transition-colors">
-                  <IconPlugOff aria-hidden="true" className="w-4 h-4" />{t('detail.disconnectConn')}
+                <button onClick={onDisconnect} className="inline-flex items-center gap-2 px-4 py-2.5 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 text-sm font-medium transition-colors">
+                  <PowerOff aria-hidden="true" className="w-4 h-4" />{t('detail.disconnectConn')}
                 </button>
               ) : (
-                <button onClick={onConnect} className="ui-btn ui-btn-primary">
-                  <IconPower aria-hidden="true" className="w-4 h-4" />{t('detail.connectConn')}
+                <button onClick={onConnect} className="inline-flex items-center gap-2 px-4 py-2.5 bg-slate-700 text-white rounded-lg hover:bg-slate-800 text-sm font-medium transition-colors">
+                  <Power aria-hidden="true" className="w-4 h-4" />{t('detail.connectConn')}
                 </button>
               )}
               {onRemove && (
                 <button
                   onClick={onRemove}
-                  className="inline-flex items-center gap-2 px-4 py-2.5 border border-line-control text-fg-secondary rounded-control hover:bg-hover text-sm font-medium transition-colors"
+                  className="inline-flex items-center gap-2 px-4 py-2.5 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 text-sm font-medium transition-colors"
                 >
-                  <IconTrash aria-hidden="true" className="w-4 h-4" />{t('detail.removeServer')}
+                  <Trash2 aria-hidden="true" className="w-4 h-4" />{t('detail.removeServer')}
                 </button>
               )}
             </div>
           </div>
         ) : detailTab === 'tools' ? (
           serverTools.length === 0 ? (
-            <div className="text-center py-8 text-sm text-fg-muted">{t('detail.noRegisteredTools')}</div>
+            <div className="text-center py-8 text-sm text-gray-500">{t('detail.noRegisteredTools')}</div>
           ) : (
-            <div className="rounded-control border border-line overflow-hidden">
-              <table className="w-full table-fixed divide-y divide-line">
-                <thead className="bg-subtle">
+            <div className="rounded-lg border border-gray-200 overflow-hidden">
+              <table className="w-full table-fixed divide-y divide-gray-100">
+                <thead className="bg-gray-50">
                   <tr>
-                    <th className="w-2/5 px-4 py-2.5 text-left text-xs font-medium text-fg-muted uppercase">{t('detail.tableToolName')}</th>
-                    <th className="px-4 py-2.5 text-left text-xs font-medium text-fg-muted uppercase">{t('detail.tableDesc')}</th>
+                    <th className="w-2/5 px-4 py-2.5 text-left text-xs font-medium text-gray-500 uppercase">{t('detail.tableToolName')}</th>
+                    <th className="px-4 py-2.5 text-left text-xs font-medium text-gray-500 uppercase">{t('detail.tableDesc')}</th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-line">
+                <tbody className="divide-y divide-gray-100">
                   {serverTools.map((tool) => (
                     <tr
                       key={tool.name}
                       onClick={() => onSelectTool(tool)}
-                      className="hover:bg-hover cursor-pointer transition-colors"
+                      className="hover:bg-slate-50 cursor-pointer transition-colors"
                     >
                       <td className="px-4 py-3">
-                        <span className="text-sm font-medium text-fg font-mono break-all">{tool.name}</span>
+                        <span className="text-sm font-medium text-gray-900 font-mono break-all">{tool.name}</span>
                       </td>
                       <td className="px-4 py-3">
-                        <span className="text-sm text-fg-secondary line-clamp-2 ">{tool.description}</span>
+                        <span className="text-sm text-gray-600 leading-relaxed line-clamp-2">{tool.description}</span>
                       </td>
                     </tr>
                   ))}
@@ -1787,26 +1784,26 @@ function MCPServerDetailPanel({
           )
         ) : (
           (!serverDetail?.resources || serverDetail.resources.length === 0) ? (
-            <div className="text-center py-8 text-sm text-fg-muted">{t('detail.noResources')}</div>
+            <div className="text-center py-8 text-sm text-gray-500">{t('detail.noResources')}</div>
           ) : (
-            <div className="bg-surface rounded-control border border-line overflow-hidden">
+            <div className="bg-white rounded-lg border border-gray-200 overflow-hidden">
               <div className="overflow-x-auto">
-                <table className="min-w-full divide-y divide-line table-fixed">
-                  <thead className="bg-subtle">
+                <table className="divide-y divide-gray-100 table-fixed min-w-full">
+                  <thead className="bg-gray-50">
                     <tr>
-                      <th className="w-[25%] px-5 py-2.5 text-left text-xs font-medium text-fg-muted uppercase">{t('detail.tableResourceName')}</th>
-                      <th className="w-[35%] px-5 py-2.5 text-left text-xs font-medium text-fg-muted uppercase">URI</th>
-                      <th className="px-5 py-2.5 text-left text-xs font-medium text-fg-muted uppercase">{t('detail.tableDesc')}</th>
-                      <th className="w-[100px] px-5 py-2.5 text-left text-xs font-medium text-fg-muted uppercase whitespace-nowrap">{t('detail.tableType')}</th>
+                      <th className="w-[25%] px-5 py-2.5 text-left text-xs font-medium text-gray-500 uppercase">{t('detail.tableResourceName')}</th>
+                      <th className="w-[35%] px-5 py-2.5 text-left text-xs font-medium text-gray-500 uppercase">URI</th>
+                      <th className="px-5 py-2.5 text-left text-xs font-medium text-gray-500 uppercase">{t('detail.tableDesc')}</th>
+                      <th className="w-[100px] px-5 py-2.5 text-left text-xs font-medium text-gray-500 uppercase whitespace-nowrap">{t('detail.tableType')}</th>
                     </tr>
                   </thead>
-                  <tbody className="divide-y divide-line">
+                  <tbody className="divide-y divide-gray-100">
                     {serverDetail.resources.map((res) => (
-                      <tr key={res.uri} className="hover:bg-hover">
-                        <td className="px-5 py-2.5 truncate"><span className="text-sm font-medium text-fg">{res.name}</span></td>
-                        <td className="px-5 py-2.5 truncate"><span className="text-sm text-fg-secondary font-mono">{res.uri}</span></td>
-                        <td className="px-5 py-2.5"><span className="text-sm text-fg-secondary line-clamp-1">{res.description || '-'}</span></td>
-                        <td className="px-5 py-2.5 whitespace-nowrap"><span className="text-xs text-fg-muted font-mono">{res.mime_type || '-'}</span></td>
+                      <tr key={res.uri} className="hover:bg-gray-50">
+                        <td className="px-5 py-2.5 truncate"><span className="text-sm font-medium text-gray-900">{res.name}</span></td>
+                        <td className="px-5 py-2.5 truncate"><span className="text-sm text-gray-600 font-mono">{res.uri}</span></td>
+                        <td className="px-5 py-2.5"><span className="text-sm text-gray-600 line-clamp-1">{res.description || '-'}</span></td>
+                        <td className="px-5 py-2.5 whitespace-nowrap"><span className="text-xs text-gray-500 font-mono">{res.mime_type || '-'}</span></td>
                       </tr>
                     ))}
                   </tbody>
@@ -1857,23 +1854,23 @@ function MCPToolDetailPanel({ tool, onClose }: { tool: Tool; onClose: () => void
 
   return (
     <div
-      className="fixed top-0 bottom-0 z-50 flex flex-col bg-surface shadow-overlay border-r border-line"
+      className="fixed top-0 bottom-0 flex flex-col bg-white shadow-2xl border-r border-gray-200 z-50"
       style={{ right: DETAIL_DRAWER_WIDTH, width: TOOL_PANEL_WIDTH }}
       onClick={(e) => e.stopPropagation()}
     >
-      <div className="flex-shrink-0 border-b border-line">
+      <div className="border-b border-gray-200 flex-shrink-0">
         <div className="flex items-center gap-3 px-6 py-4">
-          <div className="w-8 h-8 bg-subtle rounded-control flex items-center justify-center flex-shrink-0">
-            <IconTool aria-hidden="true" className="w-4 h-4 text-fg-secondary" />
+          <div className="w-8 h-8 bg-gray-100 rounded-lg flex items-center justify-center flex-shrink-0">
+            <Wrench aria-hidden="true" className="w-4 h-4 text-gray-600" />
           </div>
           <div className="flex-1 min-w-0">
-            <h2 className="text-title-section font-semibold text-fg font-mono truncate">{tool.name}</h2>
+            <h2 className="text-lg font-semibold text-gray-900 font-mono truncate">{tool.name}</h2>
             {tool.source_name && (
-              <p className="text-xs text-fg-muted mt-0.5">{tool.source_name}</p>
+              <p className="text-xs text-gray-500 mt-0.5">{tool.source_name}</p>
             )}
           </div>
-          <button aria-label={pageActionLabel('close')} onClick={onClose} className="ui-btn-icon inline-flex items-center justify-center flex-shrink-0 p-1 rounded-control hover:bg-hover transition-colors">
-            <IconX aria-hidden="true" className="w-5 h-5 text-fg-muted" />
+          <button aria-label={pageActionLabel('close')} onClick={onClose} className="p-1 rounded hover:bg-gray-100 transition-colors flex-shrink-0">
+            <X aria-hidden="true" className="w-5 h-5 text-gray-400" />
           </button>
         </div>
         <div className="flex px-6">
@@ -1883,11 +1880,11 @@ function MCPToolDetailPanel({ tool, onClose }: { tool: Tool; onClose: () => void
               onClick={() => setSection(tab)}
               className={`flex items-center gap-1.5 px-4 py-2.5 text-sm font-medium border-b-2 transition-colors ${
                 section === tab
-                  ? 'border-line-control text-fg'
-                  : 'border-transparent text-fg-muted hover:text-fg-secondary hover:border-line-control'
+                  ? 'border-slate-700 text-slate-800'
+                  : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
               }`}
             >
-              {tab === 'info' ? <><IconInfoCircle aria-hidden="true" className="w-4 h-4" />{t('toolDetail.tabInfo')}</> : <><IconTestPipe aria-hidden="true" className="w-4 h-4" />{t('toolDetail.tabTest')}</>}
+              {tab === 'info' ? <><Info aria-hidden="true" className="w-3.5 h-3.5" />{t('toolDetail.tabInfo')}</> : <><TestTube aria-hidden="true" className="w-3.5 h-3.5" />{t('toolDetail.tabTest')}</>}
             </button>
           ))}
         </div>
@@ -1897,37 +1894,37 @@ function MCPToolDetailPanel({ tool, onClose }: { tool: Tool; onClose: () => void
         {section === 'info' ? (
           <div className="space-y-5">
             <div>
-              <label className="block text-sm font-medium text-fg-secondary mb-1.5">{t('toolDetail.description')}</label>
-              <p className="text-sm text-fg-secondary ">{tool.description || t('toolDetail.noDescription')}</p>
+              <label className="block text-sm font-medium text-gray-700 mb-1.5">{t('toolDetail.description')}</label>
+              <p className="text-sm text-gray-600 leading-relaxed">{tool.description || t('toolDetail.noDescription')}</p>
             </div>
             {tool.parameters && tool.parameters.length > 0 && (
               <div>
-                <label className="block text-sm font-medium text-fg-secondary mb-2">
+                <label className="block text-sm font-medium text-gray-700 mb-2">
                   {t('toolDetail.params', { count: tool.parameters.length })}
                 </label>
-                <div className="rounded-control border border-line overflow-hidden">
-                  <table className="min-w-full divide-y divide-line">
-                    <thead className="bg-subtle">
+                <div className="rounded-lg border border-gray-200 overflow-hidden">
+                  <table className="divide-y divide-gray-200 min-w-full">
+                    <thead className="bg-gray-50">
                       <tr>
-                        <th className="px-4 py-2 text-left text-xs font-medium text-fg-muted">{t('toolDetail.paramName')}</th>
-                        <th className="px-4 py-2 text-left text-xs font-medium text-fg-muted">{t('toolDetail.paramType')}</th>
-                        <th className="px-4 py-2 text-left text-xs font-medium text-fg-muted">{t('toolDetail.paramRequired')}</th>
-                        <th className="px-4 py-2 text-left text-xs font-medium text-fg-muted">{t('toolDetail.paramDesc')}</th>
+                        <th className="px-4 py-2 text-left text-xs font-medium text-gray-500">{t('toolDetail.paramName')}</th>
+                        <th className="px-4 py-2 text-left text-xs font-medium text-gray-500">{t('toolDetail.paramType')}</th>
+                        <th className="px-4 py-2 text-left text-xs font-medium text-gray-500">{t('toolDetail.paramRequired')}</th>
+                        <th className="px-4 py-2 text-left text-xs font-medium text-gray-500">{t('toolDetail.paramDesc')}</th>
                       </tr>
                     </thead>
-                    <tbody className="divide-y divide-line bg-surface">
+                    <tbody className="divide-y divide-gray-100 bg-white">
                       {tool.parameters.map((param: any, idx: number) => (
                         <tr key={idx}>
                           <td className="px-4 py-2.5">
-                            <code className="text-xs font-mono text-fg bg-subtle px-1.5 py-0.5 rounded-tag">{param.name}</code>
+                            <code className="text-xs font-mono text-gray-900 bg-gray-100 px-1.5 py-0.5 rounded">{param.name}</code>
                           </td>
-                          <td className="px-4 py-2.5 text-xs text-fg-muted">{param.type}</td>
+                          <td className="px-4 py-2.5 text-xs text-gray-500">{param.type}</td>
                           <td className="px-4 py-2.5">
                             {param.required
-                              ? <span className="text-xs text-fg-secondary font-medium">{t('toolDetail.yes')}</span>
-                              : <span className="text-xs text-fg-muted">{t('toolDetail.no')}</span>}
+                              ? <span className="text-xs text-slate-700 font-medium">{t('toolDetail.yes')}</span>
+                              : <span className="text-xs text-gray-400">{t('toolDetail.no')}</span>}
                           </td>
-                          <td className="px-4 py-2.5 text-xs text-fg-secondary">{param.description}</td>
+                          <td className="px-4 py-2.5 text-xs text-gray-600">{param.description}</td>
                         </tr>
                       ))}
                     </tbody>
@@ -1939,7 +1936,7 @@ function MCPToolDetailPanel({ tool, onClose }: { tool: Tool; onClose: () => void
         ) : (
           <div className="space-y-4">
             <div>
-              <label className="block text-sm font-medium text-fg-secondary mb-1.5">{t('toolDetail.selectFixture')}</label>
+              <label className="block text-sm font-medium text-gray-700 mb-1.5">{t('toolDetail.selectFixture')}</label>
               <select
                 value=""
                 disabled={fixturesLoading || fixtures.length === 0}
@@ -1949,7 +1946,7 @@ function MCPToolDetailPanel({ tool, onClose }: { tool: Tool; onClose: () => void
                     setTestParams(JSON.stringify(fixtures[idx].params, null, 2));
                   }
                 }}
-                className="ui-select w-full px-3  border border-line-control rounded-control text-sm bg-surface text-fg-muted disabled:bg-subtle disabled:cursor-not-allowed"
+                className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm bg-white focus:outline-none focus:ring-2 focus:ring-slate-400 text-gray-500 disabled:bg-gray-50 disabled:cursor-not-allowed"
               >
                 <option value="">
                   {fixturesLoading ? t('toolDetail.updating') : t('toolDetail.selectFixturePlaceholder')}
@@ -1962,40 +1959,40 @@ function MCPToolDetailPanel({ tool, onClose }: { tool: Tool; onClose: () => void
               </select>
             </div>
             <div>
-              <label className="block text-sm font-medium text-fg-secondary mb-2">{t('toolDetail.testParams')}</label>
+              <label className="block text-sm font-medium text-gray-700 mb-2">{t('toolDetail.testParams')}</label>
               <textarea
                 value={testParams}
                 onChange={(e) => setTestParams(e.target.value)}
                 placeholder='{"param": "value"}'
                 rows={6}
-                className="ui-textarea w-full px-4  border border-line-control rounded-control font-mono text-sm bg-subtle resize-none"
+                className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-400 font-mono text-sm bg-gray-50 resize-none"
               />
             </div>
             <button
               onClick={handleTest}
               disabled={testing || !tool.enabled}
-              className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-subtle text-fg rounded-control hover:bg-hover disabled:bg-disabled disabled:text-fg-disabled disabled:cursor-not-allowed font-medium text-sm transition-colors"
+              className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-slate-700 text-white rounded-lg hover:bg-slate-800 disabled:opacity-50 disabled:cursor-not-allowed font-medium text-sm transition-colors"
             >
               {testing
-                ? <><IconRefresh aria-hidden="true" className="w-4 h-4 animate-spin" />{t('toolDetail.executing')}</>
-                : <><IconPlayerPlay aria-hidden="true" className="w-4 h-4" />{t('toolDetail.runTest')}</>}
+                ? <><RefreshCw aria-hidden="true" className="w-4 h-4 animate-spin" />{t('toolDetail.executing')}</>
+                : <><Play aria-hidden="true" className="w-4 h-4" />{t('toolDetail.runTest')}</>}
             </button>
             {!tool.enabled && (
-              <p className="text-xs text-warning text-center">{t('toolDetail.disabledNote')}</p>
+              <p className="text-xs text-amber-600 text-center">{t('toolDetail.disabledNote')}</p>
             )}
             {testResult && (
               <div>
-                <label className="block text-sm font-medium text-fg-secondary mb-2">{t('toolDetail.testResult')}</label>
-                <div className={`rounded-control border p-4 ${testResult.success ? 'bg-success-soft border-success' : 'bg-danger-soft border-danger'}`}>
+                <label className="block text-sm font-medium text-gray-700 mb-2">{t('toolDetail.testResult')}</label>
+                <div className={`rounded-lg border p-4 ${testResult.success ? 'bg-green-50 border-green-200' : 'bg-red-50 border-red-200'}`}>
                   <div className="flex items-center mb-2">
                     {testResult.success
-                      ? <IconCircleCheck aria-hidden="true" className="w-4 h-4 text-success mr-2" />
-                      : <IconCircleX aria-hidden="true" className="w-4 h-4 text-danger mr-2" />}
-                    <span className={`text-sm font-medium ${testResult.success ? 'text-success' : 'text-danger'}`}>
+                      ? <CheckCircle aria-hidden="true" className="w-4 h-4 text-green-600 mr-2" />
+                      : <XCircle aria-hidden="true" className="w-4 h-4 text-red-600 mr-2" />}
+                    <span className={`text-sm font-medium ${testResult.success ? 'text-green-800' : 'text-red-800'}`}>
                       {testResult.success ? t('toolDetail.execSuccess') : t('toolDetail.execFailed')}
                     </span>
                   </div>
-                  <pre className="text-xs overflow-auto max-h-48 whitespace-pre-wrap break-all text-fg-secondary bg-surface rounded-tag p-2">
+                  <pre className="text-xs max-h-48 text-gray-700 bg-white/60 rounded p-2 overflow-auto whitespace-pre-wrap break-all">
                     {testResult.success
                       ? JSON.stringify(testResult.data, null, 2)
                       : testResult.error}
@@ -2085,7 +2082,7 @@ function MCPCredentialsCard({ serverName }: { serverName: string }) {
 
   if (loading) {
     return (
-      <div className="bg-surface rounded-control border border-line p-4">
+      <div className="bg-white rounded-lg border border-gray-200 p-4">
         <div className="flex justify-center py-4">
           <LoadingSpinner />
         </div>
@@ -2094,16 +2091,16 @@ function MCPCredentialsCard({ serverName }: { serverName: string }) {
   }
 
   return (
-    <div className="bg-surface rounded-control border border-line p-4">
+    <div className="bg-white rounded-lg border border-gray-200 p-4">
       <div className="flex items-center justify-between mb-3">
-        <h4 className="text-sm font-semibold text-fg flex items-center">
-          <IconShield aria-hidden="true" className="w-4 h-4 mr-2 text-fg-muted" />
+        <h4 className="text-sm font-semibold text-gray-900 flex items-center">
+          <Shield aria-hidden="true" className="w-4 h-4 mr-2 text-gray-500" />
           {t('credentials.title')}
         </h4>
         {credentials?.has_credential && !editing && (
           <button
             onClick={handleDelete}
-            className="text-xs text-fg-secondary hover:text-fg"
+            className="text-xs text-slate-600 hover:text-slate-800"
           >
             {t('credentials.delete')}
           </button>
@@ -2114,8 +2111,8 @@ function MCPCredentialsCard({ serverName }: { serverName: string }) {
         <div className="space-y-3">
           {credentials?.has_credential && credentials.secret_id && (
             <div className="flex items-center justify-between">
-              <span className="text-sm text-fg-muted">Secret ID</span>
-              <code className="text-sm font-mono bg-subtle px-2 py-1 rounded-tag">
+              <span className="text-sm text-gray-500">Secret ID</span>
+              <code className="text-sm font-mono bg-gray-100 px-2 py-1 rounded">
                 {credentials.secret_id}
               </code>
             </div>
@@ -2123,8 +2120,8 @@ function MCPCredentialsCard({ serverName }: { serverName: string }) {
           
           {credentials?.api_key_masked && (
             <div className="flex items-center justify-between">
-              <span className="text-sm text-fg-muted">API Key</span>
-              <code className="text-sm font-mono bg-subtle px-2 py-1 rounded-tag">
+              <span className="text-sm text-gray-500">API Key</span>
+              <code className="text-sm font-mono bg-gray-100 px-2 py-1 rounded">
                 {credentials.api_key_masked}
               </code>
             </div>
@@ -2133,14 +2130,14 @@ function MCPCredentialsCard({ serverName }: { serverName: string }) {
           <div className="flex gap-2 pt-2">
             <button
               onClick={() => setEditing(true)}
-              className="flex-1 px-3 py-2 border border-line-control rounded-control text-sm text-fg-secondary hover:bg-hover"
+              className="flex-1 px-3 py-2 border border-gray-300 rounded-lg text-sm text-gray-700 hover:bg-gray-50"
             >
               {credentials?.has_credential ? t('credentials.modify') : t('credentials.configure')}
             </button>
             {credentials?.has_credential && (
               <button
                 onClick={handleTest}
-                className="flex-1 px-3 py-2 border border-line-control rounded-control text-sm text-fg-secondary hover:bg-hover"
+                className="flex-1 px-3 py-2 border border-gray-300 rounded-lg text-sm text-gray-700 hover:bg-gray-50"
               >
                 {t('button.test')}
               </button>
@@ -2148,21 +2145,21 @@ function MCPCredentialsCard({ serverName }: { serverName: string }) {
           </div>
 
           {testResult && (
-            <div className={`p-2.5 rounded-tag text-xs ${
+            <div className={`p-2.5 rounded text-xs ${
               testResult.success 
-                ? 'bg-success-soft border border-success text-success'
-                : 'bg-danger-soft border border-danger text-danger'
+                ? 'bg-green-50 border border-green-200 text-green-700'
+                : 'bg-red-50 border border-red-200 text-red-700'
             }`}>
               <div className="flex items-start">
                 {testResult.success ? (
-                  <IconCircleCheck aria-hidden="true" className="w-4 h-4 mr-1.5 mt-0.5 flex-shrink-0" />
+                  <CheckCircle aria-hidden="true" className="w-3.5 h-3.5 mr-1.5 mt-0.5 flex-shrink-0" />
                 ) : (
-                  <IconCircleX aria-hidden="true" className="w-4 h-4 mr-1.5 mt-0.5 flex-shrink-0" />
+                  <XCircle aria-hidden="true" className="w-3.5 h-3.5 mr-1.5 mt-0.5 flex-shrink-0" />
                 )}
                 <div className="flex-1">
                   <div>{testResult.message}</div>
                   {testResult.latency_ms != null && (
-                    <div className="mt-1 text-fg-muted">{t('credentials.latency', { latency: testResult.latency_ms })}</div>
+                    <div className="mt-1 opacity-75">{t('credentials.latency', { latency: testResult.latency_ms })}</div>
                   )}
                 </div>
               </div>
@@ -2172,13 +2169,13 @@ function MCPCredentialsCard({ serverName }: { serverName: string }) {
       ) : (
         <div className="space-y-3">
           <div>
-            <label className="block text-xs text-fg-muted mb-1.5">API Key</label>
+            <label className="block text-xs text-gray-500 mb-1.5">API Key</label>
             <input
               type="password"
               value={apiKey}
               onChange={(e) => setApiKey(e.target.value)}
               placeholder={t('credentials.enterKey')}
-              className="ui-input w-full px-3  border border-line-control rounded-control text-sm font-mono"
+              className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm font-mono focus:outline-none focus:ring-2 focus:ring-slate-400"
             />
           </div>
 
@@ -2186,7 +2183,7 @@ function MCPCredentialsCard({ serverName }: { serverName: string }) {
             <button
               onClick={handleSave}
               disabled={saving}
-              className="ui-btn ui-btn-primary flex-1"
+              className="flex-1 px-3 py-2 bg-slate-700 text-white rounded-lg text-sm disabled:opacity-50 hover:bg-slate-800"
             >
               {saving ? t('credentials.saving') : t('credentials.save')}
             </button>
@@ -2195,15 +2192,15 @@ function MCPCredentialsCard({ serverName }: { serverName: string }) {
                 setEditing(false);
                 setApiKey('');
               }}
-              className="px-3 py-2 border border-line-control rounded-control text-sm text-fg-secondary hover:bg-hover"
+              className="px-3 py-2 border border-gray-300 rounded-lg text-sm text-gray-700 hover:bg-gray-50"
             >
               {t('credentials.cancel')}
             </button>
           </div>
 
-          <div className="p-2 bg-warning-soft border border-warning rounded-tag text-xs text-warning">
+          <div className="p-2 bg-amber-50 border border-amber-200 rounded text-xs text-amber-700">
             <div className="flex items-start">
-              <IconInfoCircle aria-hidden="true" className="w-4 h-4 mr-1.5 mt-0.5 flex-shrink-0" />
+              <Info aria-hidden="true" className="w-3.5 h-3.5 mr-1.5 mt-0.5 flex-shrink-0" />
               <div>{t('credentials.storageNote')}</div>
             </div>
           </div>
@@ -2429,11 +2426,11 @@ function LegacyAPITabContent({
       <div className="flex items-center gap-1.5 flex-wrap">
         <button
           onClick={() => setSelectedCategory('all')}
-          className={`px-2.5 py-1 rounded-pill text-xs font-medium transition-colors ${selectedCategory === 'all' ? 'bg-ai-soft text-ai' : 'bg-subtle text-fg-secondary hover:bg-hover'}`}
+          className={`px-2.5 py-1 rounded-full text-xs font-medium transition-colors ${selectedCategory === 'all' ? 'bg-purple-50 text-purple-700' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}
         >{t('api.filterAll')}</button>
         {Object.entries(catalogCategories).map(([id, cat]) =>
           catalogCategoryCounts[id] ? (
-            <button key={id} onClick={() => setSelectedCategory(id)} className={`px-2.5 py-1 rounded-pill text-xs font-medium transition-colors ${selectedCategory === id ? 'bg-ai-soft text-ai' : 'bg-subtle text-fg-secondary hover:bg-hover'}`}>
+            <button key={id} onClick={() => setSelectedCategory(id)} className={`px-2.5 py-1 rounded-full text-xs font-medium transition-colors ${selectedCategory === id ? 'bg-purple-50 text-purple-700' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}>
               {cat.label} ({catalogCategoryCounts[id]})
             </button>
           ) : null
@@ -2441,38 +2438,38 @@ function LegacyAPITabContent({
       </div>
 
       {modules.length === 0 && filteredCatalog.length === 0 ? (
-        <EmptyState icon={<IconCloud aria-hidden="true" className="w-8 h-8" />} title={t('api.noTools')} description={t('api.noToolsDesc')} />
+        <EmptyState icon={<Cloud aria-hidden="true" className="w-16 h-16" />} title={t('api.noTools')} description={t('api.noToolsDesc')} />
       ) : (
         <div className="grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
           {modules.map((moduleName) => {
             const moduleTools = toolsByModule[moduleName];
             const isSelected = selectedModule === moduleName;
             const svcStatus = apiStatuses[moduleName]?.status;
-            const borderColor = svcStatus === 'healthy' ? 'border-l-success' : svcStatus === 'error' ? 'border-l-danger' : 'border-l-line-control';
+            const borderColor = svcStatus === 'healthy' ? 'border-l-green-500' : svcStatus === 'error' ? 'border-l-red-500' : 'border-l-gray-300';
             return (
               <div
                 key={moduleName}
                 onClick={() => setSelectedModule(isSelected ? null : moduleName)}
-                className={`relative bg-surface rounded-card border border-l-4 ${borderColor} overflow-hidden cursor-pointer h-[180px] flex flex-col transition-all duration-150 ${isSelected ? 'border-line-control ring-2 ring-focus' : 'border-line shadow-sm hover:border-line-control'}`}
+                className={`relative bg-white rounded-xl border border-l-4 ${borderColor} cursor-pointer h-[180px] flex flex-col transition-all duration-150 overflow-hidden ${isSelected ? 'border-slate-400 shadow-md ring-2 ring-slate-200' : 'border-gray-200 shadow-sm hover:shadow-md hover:border-gray-300'}`}
               >
                 <div className="flex-1 px-4 pt-4 pb-2 min-h-0 flex flex-col gap-1.5">
                   <div className="flex items-start gap-1.5 flex-wrap">
-                    <span className="text-sm font-semibold text-fg truncate max-w-[120px] capitalize">{moduleName}</span>
-                    <span className="px-1.5 py-0.5 text-xs font-medium rounded-pill shrink-0 bg-success-soft text-success">
+                    <span className="text-sm font-semibold text-gray-900 max-w-[120px] capitalize truncate">{moduleName}</span>
+                    <span className="px-1.5 py-0.5 text-xs font-medium rounded-full bg-green-100 text-green-700 shrink-0">
                       {t('statusBadge.active')}
                     </span>
-                    <span className="px-1.5 py-0.5 bg-ai-soft text-ai text-xs font-medium rounded-pill shrink-0">API</span>
+                    <span className="px-1.5 py-0.5 bg-purple-100 text-purple-700 text-xs font-medium rounded-full shrink-0">API</span>
                   </div>
-                  <div className="flex items-center gap-1 text-xs text-fg-muted mt-auto">
-                    <IconTool aria-hidden="true" className="w-4 h-4 shrink-0" /><span>{moduleTools.length} {t('api.tools')}</span>
+                  <div className="flex items-center gap-1 text-xs text-gray-500 mt-auto">
+                    <Wrench aria-hidden="true" className="w-3 h-3 shrink-0" /><span>{moduleTools.length} {t('api.tools')}</span>
                     {apiStatuses[moduleName]?.latency_ms != null && (
-                      <span className="ml-auto text-xs text-fg-muted">{apiStatuses[moduleName].latency_ms}ms</span>
+                      <span className="text-[10px] text-gray-400 ml-auto">{apiStatuses[moduleName].latency_ms}ms</span>
                     )}
                   </div>
                 </div>
-                <div className="border-t border-line px-4 py-2 flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
-                  <button onClick={() => setSelectedModule(isSelected ? null : moduleName)} className={`flex-1 flex items-center justify-center gap-1 py-1 px-2 border rounded-control text-xs font-medium transition-colors ${isSelected ? 'border-ai text-ai bg-ai-soft' : 'border-line-control text-fg-secondary hover:bg-hover'}`}>
-                    <IconSettings aria-hidden="true" className="w-4 h-4" /> {t('api.manage')}
+                <div className="border-t border-gray-100 px-4 py-2 flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
+                  <button onClick={() => setSelectedModule(isSelected ? null : moduleName)} className={`flex-1 flex items-center justify-center gap-1 py-1 px-2 border rounded-lg text-xs font-medium transition-colors ${isSelected ? 'border-purple-300 text-purple-700 bg-purple-50' : 'border-gray-300 text-gray-700 hover:bg-gray-50'}`}>
+                    <Settings aria-hidden="true" className="w-3 h-3" /> {t('api.manage')}
                   </button>
                 </div>
               </div>
@@ -2486,27 +2483,27 @@ function LegacyAPITabContent({
             return (
               <div
                 key={`catalog-${entry.id}`}
-                className={`relative bg-surface rounded-card border overflow-hidden cursor-default h-[180px] flex flex-col transition-all duration-150 ${isSelected ? 'border-line-control ring-2 ring-focus' : 'border-line shadow-sm'}`}
+                className={`relative bg-white rounded-xl border cursor-default h-[180px] flex flex-col transition-all duration-150 overflow-hidden ${isSelected ? 'border-slate-400 shadow-md ring-2 ring-slate-200' : 'border-gray-200 shadow-sm'}`}
                 style={{ borderLeftWidth: 4, borderLeftColor: 'var(--border-subtle)' }}
               >
                 <div className="flex-1 px-4 pt-4 pb-2 min-h-0 flex flex-col gap-1.5">
                   <div className="flex items-start gap-1.5 flex-wrap">
-                    <span className="text-sm font-semibold text-fg truncate max-w-[120px]">{entry.name}</span>
-                    <span className="px-1.5 py-0.5 text-xs font-medium rounded-pill shrink-0 bg-subtle text-fg-secondary">
+                    <span className="text-sm font-semibold text-gray-900 max-w-[120px] truncate">{entry.name}</span>
+                    <span className="px-1.5 py-0.5 text-xs font-medium rounded-full bg-gray-100 text-gray-600 shrink-0">
                       {t('statusBadge.inactive')}
                     </span>
-                    <span className="px-1.5 py-0.5 bg-ai-soft text-ai text-xs font-medium rounded-pill shrink-0">API</span>
+                    <span className="px-1.5 py-0.5 bg-purple-100 text-purple-700 text-xs font-medium rounded-full shrink-0">API</span>
                     {PRIORITY_IDS.has(entry.id) && (
-                      <span className="px-1.5 py-0.5 bg-warning-soft text-warning text-xs font-medium rounded-pill shrink-0">{t('api.recommended')}</span>
+                      <span className="px-1.5 py-0.5 bg-amber-100 text-amber-800 text-xs font-medium rounded-full shrink-0">{t('api.recommended')}</span>
                     )}
                   </div>
-                  <p className="text-xs text-fg-muted line-clamp-2 ">{getCatalogDescription(entry, i18n.language)}</p>
-                  <div className="flex items-center gap-2 text-xs text-fg-muted mt-auto">
-                    <span className={`px-1.5 py-0.5 rounded-tag text-xs font-medium ${LANG_COLORS[entry.language] || 'bg-subtle text-fg-secondary'}`}>{entry.language}</span>
-                    <span className="flex items-center gap-0.5"><IconStar aria-hidden="true" className="w-4 h-4" />{entry.stars}</span>
+                  <p className="text-xs text-gray-500 leading-relaxed line-clamp-2">{getCatalogDescription(entry, i18n.language)}</p>
+                  <div className="flex items-center gap-2 text-xs text-gray-500 mt-auto">
+                    <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${LANG_COLORS[entry.language] || 'bg-gray-100 text-gray-600'}`}>{entry.language}</span>
+                    <span className="flex items-center gap-0.5"><Star aria-hidden="true" className="w-3 h-3" />{entry.stars}</span>
                   </div>
                 </div>
-                <div className="border-t border-line px-4 py-2 flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
+                <div className="border-t border-gray-100 px-4 py-2 flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
                   <button
                     onClick={() => {
                       if (entry.requires_auth && !isConfigured(entry.id)) {
@@ -2516,19 +2513,19 @@ function LegacyAPITabContent({
                       }
                     }}
                     disabled={installing === entry.id}
-                    className="flex-1 flex items-center justify-center gap-1 py-1 px-2 bg-subtle text-fg rounded-control text-xs font-medium hover:bg-hover disabled:bg-disabled disabled:text-fg-disabled transition-colors"
+                    className="flex-1 flex items-center justify-center gap-1 py-1 px-2 bg-slate-700 text-white rounded-lg text-xs font-medium hover:bg-slate-800 disabled:opacity-50 transition-colors"
                   >
-                    <IconDownload aria-hidden="true" className="w-4 h-4" />
+                    <Download aria-hidden="true" className="w-3 h-3" />
                     {installing === entry.id ? t('api.configuring') : t('button.install')}
                   </button>
                   <a
                     href={`https://github.com/${entry.github}`}
                     target="_blank"
                     rel="noopener noreferrer"
-                    className="flex items-center justify-center w-7 h-7 border border-line-control text-fg-muted rounded-control hover:bg-hover transition-colors"
+                    className="flex items-center justify-center w-7 h-7 border border-gray-300 text-gray-500 rounded-lg hover:bg-gray-50 transition-colors"
                     title="GitHub"
                   >
-                    <IconExternalLink aria-hidden="true" className="w-4 h-4" />
+                    <ExternalLink aria-hidden="true" className="w-3.5 h-3.5" />
                   </a>
                 </div>
               </div>
@@ -2540,34 +2537,34 @@ function LegacyAPITabContent({
       {/* Credential Input Modal */}
       {credModalEntry && (
         <>
-          <div className="fixed inset-0 bg-overlay-backdrop z-40" onClick={() => setCredModalEntry(null)} />
+          <div className="fixed inset-0 bg-black/40 z-40" onClick={() => setCredModalEntry(null)} />
           <PageDialog onClose={() => setCredModalEntry(null)} className="fixed inset-0 z-50 flex items-center justify-center p-4">
-            <div className="bg-surface rounded-card shadow-overlay w-full max-w-md" onClick={(e) => e.stopPropagation()}>
-              <div className="px-6 py-4 border-b border-line">
-                <h3 className="text-title-card font-semibold text-fg">{credModalEntry.name}</h3>
-                <p className="text-sm text-fg-muted mt-1">{t('credentials.configNote')}</p>
+            <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md" onClick={(e) => e.stopPropagation()}>
+              <div className="px-6 py-4 border-b border-gray-200">
+                <h3 className="text-lg font-semibold text-gray-900">{credModalEntry.name}</h3>
+                <p className="text-sm text-gray-500 mt-1">{t('credentials.configNote')}</p>
               </div>
               <div className="px-6 py-4 space-y-4">
                 {Object.entries(credModalEntry.env_vars).filter(([, spec]) => spec.secret).map(([key, spec]) => (
                   <div key={key}>
-                    <label className="block text-sm font-medium text-fg-secondary mb-1">{key}</label>
-                    <p className="text-xs text-fg-muted mb-1.5">{spec.description}</p>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">{key}</label>
+                    <p className="text-xs text-gray-500 mb-1.5">{spec.description}</p>
                     <input
                       type="password"
                       value={credValues[key] || ''}
                       onChange={(e) => setCredValues(prev => ({ ...prev, [key]: e.target.value }))}
                       placeholder={t('credentials.enterField', { field: key })}
-                      className="ui-input w-full px-3  text-sm border border-line-control rounded-control focus:border-transparent"
+                      className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-transparent"
                     />
                   </div>
                 ))}
               </div>
-              <div className="px-6 py-4 border-t border-line flex gap-3 justify-end">
-                <button onClick={() => setCredModalEntry(null)} className="px-4 py-2 text-sm text-fg-secondary border border-line-control rounded-control hover:bg-hover transition-colors">{t('button.cancel')}</button>
+              <div className="px-6 py-4 border-t border-gray-200 flex gap-3 justify-end">
+                <button onClick={() => setCredModalEntry(null)} className="px-4 py-2 text-sm text-gray-700 border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors">{t('button.cancel')}</button>
                 <button
                   onClick={handleCredSubmit}
                   disabled={installing === credModalEntry.id}
-                  className="px-4 py-2 text-sm text-action-fg bg-action rounded-control hover:bg-action-hover disabled:bg-disabled disabled:text-fg-disabled transition-colors"
+                  className="px-4 py-2 text-sm text-white bg-purple-600 rounded-lg hover:bg-purple-700 disabled:opacity-50 transition-colors"
                 >
                   {installing === credModalEntry.id ? t('api.configuring') : t('button.confirmConfig')}
                 </button>
@@ -2584,26 +2581,26 @@ function LegacyAPITabContent({
         const isCatalogOnly = !!catalogEntry && !modules.includes(selectedModule);
         return (
           <PageDialog variant="panels" className="contents" onClose={() => setSelectedModule(null)}>
-            <div className="fixed inset-0 bg-overlay-backdrop z-40" onClick={() => setSelectedModule(null)} />
-            <div data-ui-overlay="drawer" className="fixed right-0 top-0 bottom-0 z-50 flex flex-col w-full bg-surface shadow-overlay" style={{ maxWidth: DETAIL_DRAWER_WIDTH }} onClick={(e) => e.stopPropagation()}>
-              <div className="flex-shrink-0 border-b border-line">
+            <div className="fixed inset-0 bg-black/40 z-40" onClick={() => setSelectedModule(null)} />
+            <div data-ui-overlay="drawer" className="fixed right-0 top-0 bottom-0 flex flex-col w-full bg-white shadow-2xl z-50" style={{ maxWidth: DETAIL_DRAWER_WIDTH }} onClick={(e) => e.stopPropagation()}>
+              <div className="border-b border-gray-200 flex-shrink-0">
                 <div className="flex items-center gap-3 px-6 py-4">
-                  <div className="w-10 h-10 rounded-control flex items-center justify-center flex-shrink-0 bg-ai-soft">
-                    <IconCloud aria-hidden="true" className="w-5 h-5 text-ai" />
+                  <div className="w-10 h-10 rounded-lg flex items-center justify-center bg-purple-50 flex-shrink-0">
+                    <Cloud aria-hidden="true" className="w-5 h-5 text-purple-600" />
                   </div>
                   <div className="flex-1 min-w-0">
-                    <h2 className="text-title-section font-semibold text-fg">{displayName}</h2>
-                    <p className="text-sm text-fg-muted">{t('api.serviceConfig')}</p>
+                    <h2 className="text-lg font-semibold text-gray-900">{displayName}</h2>
+                    <p className="text-sm text-gray-500">{t('api.serviceConfig')}</p>
                   </div>
-                  <button aria-label={pageActionLabel('close')} onClick={() => setSelectedModule(null)} className="ui-btn-icon inline-flex items-center justify-center text-fg-muted hover:text-fg-secondary p-2 rounded-control hover:bg-hover flex-shrink-0">
-                    <IconX aria-hidden="true" className="w-5 h-5" />
+                  <button aria-label={pageActionLabel('close')} onClick={() => setSelectedModule(null)} className="text-gray-400 hover:text-gray-600 p-2 rounded-lg hover:bg-gray-100 flex-shrink-0">
+                    <X aria-hidden="true" className="w-5 h-5" />
                   </button>
                 </div>
               </div>
               <div className="flex-1 overflow-y-auto">
                 {catalogEntry && (
-                  <div className="px-6 py-4 bg-subtle border-b border-line">
-                    <p className="text-sm text-fg-secondary">{getCatalogDescription(catalogEntry, i18n.language)}</p>
+                  <div className="px-6 py-4 bg-gray-50 border-b border-gray-200">
+                    <p className="text-sm text-gray-600">{getCatalogDescription(catalogEntry, i18n.language)}</p>
                   </div>
                 )}
                 {isCatalogOnly ? (
@@ -2680,43 +2677,43 @@ function CatalogAPIDetailPanel({
   };
 
   return (
-    <div className="bg-surface" onClick={(e) => e.stopPropagation()}>
+    <div className="bg-white" onClick={(e) => e.stopPropagation()}>
       <div className="p-5">
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
           {/* Left: Service Info */}
           <div className="space-y-5">
-            <div className="bg-surface rounded-control border border-line p-4">
-              <h4 className="text-sm font-semibold text-fg mb-3 flex items-center">
-                <IconActivity aria-hidden="true" className="w-4 h-4 mr-2 text-ai" />
+            <div className="bg-white rounded-lg border border-gray-200 p-4">
+              <h4 className="text-sm font-semibold text-gray-900 mb-3 flex items-center">
+                <Activity aria-hidden="true" className="w-4 h-4 mr-2 text-purple-500" />
                 {t('serviceInfo.title')}
               </h4>
               <div className="space-y-3">
-                <div className="flex items-center justify-between"><span className="text-sm text-fg-muted">{t('serviceInfo.name')}</span><span className="text-sm text-fg font-medium">{entry.name}</span></div>
-                <div className="flex items-center justify-between"><span className="text-sm text-fg-muted">{t('serviceInfo.type')}</span><span className="px-2 py-0.5 rounded-pill text-xs font-medium bg-ai-soft text-ai">{t('serviceInfo.apiType')}</span></div>
-                <div className="flex items-center justify-between"><span className="text-sm text-fg-muted">{t('serviceInfo.category')}</span><span className="text-sm text-fg">{catalogCategories[entry.category]?.label || entry.category}</span></div>
-                <div className="flex items-center justify-between"><span className="text-sm text-fg-muted">{t('serviceInfo.language')}</span><span className="text-sm text-fg">{entry.language}</span></div>
-                <div className="pt-2"><span className="text-sm text-fg-muted block mb-1">{t('serviceInfo.description')}</span><p className="text-sm text-fg">{getCatalogDescription(entry, i18n.language)}</p></div>
+                <div className="flex items-center justify-between"><span className="text-sm text-gray-500">{t('serviceInfo.name')}</span><span className="text-sm text-gray-900 font-medium">{entry.name}</span></div>
+                <div className="flex items-center justify-between"><span className="text-sm text-gray-500">{t('serviceInfo.type')}</span><span className="px-2 py-0.5 rounded-full text-xs font-medium bg-purple-100 text-purple-800">{t('serviceInfo.apiType')}</span></div>
+                <div className="flex items-center justify-between"><span className="text-sm text-gray-500">{t('serviceInfo.category')}</span><span className="text-sm text-gray-900">{catalogCategories[entry.category]?.label || entry.category}</span></div>
+                <div className="flex items-center justify-between"><span className="text-sm text-gray-500">{t('serviceInfo.language')}</span><span className="text-sm text-gray-900">{entry.language}</span></div>
+                <div className="pt-2"><span className="text-sm text-gray-500 block mb-1">{t('serviceInfo.description')}</span><p className="text-sm text-gray-900">{getCatalogDescription(entry, i18n.language)}</p></div>
                 <div className="flex items-center justify-between">
-                  <span className="text-sm text-fg-muted">{t('serviceInfo.github')}</span>
-                  <a href={`https://github.com/${entry.github}`} target="_blank" rel="noopener noreferrer" className="text-sm text-info hover:text-info">{entry.github}</a>
+                  <span className="text-sm text-gray-500">{t('serviceInfo.github')}</span>
+                  <a href={`https://github.com/${entry.github}`} target="_blank" rel="noopener noreferrer" className="text-sm text-sky-700 hover:text-sky-900">{entry.github}</a>
                 </div>
                 {entry.requires_auth && (
-                  <div className="pt-2 border-t border-line">
-                    <span className="text-sm text-fg-muted block mb-2">{t('serviceInfo.requiredKeys')}</span>
+                  <div className="pt-2 border-t border-gray-100">
+                    <span className="text-sm text-gray-500 block mb-2">{t('serviceInfo.requiredKeys')}</span>
                     {Object.entries(entry.env_vars).filter(([,s]) => s.secret).map(([key, spec]) => (
                       <div key={key} className="flex items-center justify-between py-1">
-                        <code className="text-xs bg-subtle px-1.5 py-0.5 rounded-tag">{key}</code>
-                        <span className="text-xs text-fg-muted">{spec.description}</span>
+                        <code className="text-xs bg-gray-100 px-1.5 py-0.5 rounded">{key}</code>
+                        <span className="text-xs text-gray-500">{spec.description}</span>
                       </div>
                     ))}
                   </div>
                 )}
                 {entry.tags && entry.tags.length > 0 && (
-                  <div className="pt-2 border-t border-line">
-                    <span className="text-sm text-fg-muted block mb-2">{t('serviceInfo.tags')}</span>
+                  <div className="pt-2 border-t border-gray-100">
+                    <span className="text-sm text-gray-500 block mb-2">{t('serviceInfo.tags')}</span>
                     <div className="flex flex-wrap gap-1.5">
                       {entry.tags.map((tag: string) => (
-                        <span key={tag} className="px-2 py-0.5 bg-subtle text-fg-secondary text-xs rounded-tag">#{tag}</span>
+                        <span key={tag} className="px-2 py-0.5 bg-gray-100 text-gray-700 text-xs rounded">#{tag}</span>
                       ))}
                     </div>
                   </div>
@@ -2727,72 +2724,72 @@ function CatalogAPIDetailPanel({
 
           {/* Right: Quick Actions & Test */}
           <div className="space-y-5">
-            <div className="bg-surface rounded-control border border-line p-4">
-              <h4 className="text-sm font-semibold text-fg mb-3 flex items-center">
-                <IconBolt aria-hidden="true" className="w-4 h-4 mr-2 text-warning" />
+            <div className="bg-white rounded-lg border border-gray-200 p-4">
+              <h4 className="text-sm font-semibold text-gray-900 mb-3 flex items-center">
+                <Zap aria-hidden="true" className="w-4 h-4 mr-2 text-amber-500" />
                 {t('detail.quickActions')}
               </h4>
               <div className="space-y-2.5">
                 <button
                   onClick={handleTestConnect}
                   disabled={testing}
-                  className={`w-full flex items-center justify-center gap-2 px-4 py-2.5 border rounded-control text-sm font-medium transition-colors ${
-                    testing ? 'border-danger bg-danger-soft text-danger cursor-not-allowed' : 'bg-surface border-line-control text-fg-secondary hover:bg-hover'
+                  className={`w-full flex items-center justify-center gap-2 px-4 py-2.5 border rounded-lg text-sm font-medium transition-colors ${
+                    testing ? 'border-red-300 bg-red-50 text-red-600 cursor-not-allowed' : 'bg-white border-gray-300 text-gray-700 hover:bg-gray-50'
                   }`}
                 >
                   {testing ? (
-                    <><IconRefresh aria-hidden="true" className="w-4 h-4 animate-spin" />{t('button.testing')}</>
+                    <><RefreshCw aria-hidden="true" className="w-4 h-4 animate-spin" />{t('button.testing')}</>
                   ) : (
-                    <><IconActivity aria-hidden="true" className="w-4 h-4" />{t('button.testConnectivity')}</>
+                    <><Activity aria-hidden="true" className="w-4 h-4" />{t('button.testConnectivity')}</>
                   )}
                 </button>
                 <button
                   onClick={handleConnect}
-                  className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-subtle text-fg rounded-control text-sm font-medium hover:bg-hover transition-colors"
+                  className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-slate-700 text-white rounded-lg text-sm font-medium hover:bg-slate-800 transition-colors"
                 >
-                  <IconPower aria-hidden="true" className="w-4 h-4" />{t('detail.connectConn')}
+                  <Power aria-hidden="true" className="w-4 h-4" />{t('detail.connectConn')}
                 </button>
               </div>
             </div>
 
             {testing && (
-              <div className="p-3 rounded-control border border-danger bg-danger-soft text-danger">
+              <div className="p-3 rounded-lg border border-red-200 bg-red-50 text-red-700">
                 <div className="flex items-center">
                   <div className="relative mr-3">
-                    <div className="w-8 h-8 rounded-pill border-2 border-danger border-t-danger animate-spin" />
+                    <div className="w-8 h-8 rounded-full border-2 border-red-200 border-t-red-600 animate-spin" />
                   </div>
                   <div className="flex-1">
                     <div className="text-sm font-medium">{t('testing.connectivityTitle')}</div>
-                    <div className="text-xs mt-0.5 text-danger">
+                    <div className="text-xs mt-0.5 text-red-600">
                       {t('testing.connectivityDesc')}
                       <span className="ml-2 font-mono tabular-nums">{testElapsed.toFixed(1)}s</span>
                     </div>
                   </div>
                 </div>
-                <div className="mt-2.5 h-1 bg-danger-soft rounded-pill overflow-hidden">
-                  <div className="h-full bg-danger rounded-pill animate-pulse" style={{ width: `${Math.min(95, testElapsed * 8)}%`, transition: 'width 0.3s ease-out' }} />
+                <div className="mt-2.5 h-1 bg-red-100 rounded-full overflow-hidden">
+                  <div className="h-full bg-red-500 rounded-full animate-pulse" style={{ width: `${Math.min(95, testElapsed * 8)}%`, transition: 'width 0.3s ease-out' }} />
                 </div>
               </div>
             )}
 
             {!testing && testResult && (
-              <div className={`p-3 rounded-control border ${testResult.success ? 'bg-success-soft border-success' : 'bg-danger-soft border-danger'}`}>
+              <div className={`p-3 rounded-lg border ${testResult.success ? 'bg-green-50 border-green-200' : 'bg-red-50 border-red-200'}`}>
                 <div className="flex items-start">
                   {testResult.success ? (
-                    <IconCircleCheck aria-hidden="true" className="w-4 h-4 text-success mr-2 mt-0.5 flex-shrink-0" />
+                    <CheckCircle aria-hidden="true" className="w-4 h-4 text-green-600 mr-2 mt-0.5 flex-shrink-0" />
                   ) : (
-                    <IconCircleX aria-hidden="true" className="w-4 h-4 text-danger mr-2 mt-0.5 flex-shrink-0" />
+                    <XCircle aria-hidden="true" className="w-4 h-4 text-red-600 mr-2 mt-0.5 flex-shrink-0" />
                   )}
                   <div className="flex-1">
-                    <div className={`text-sm font-medium ${testResult.success ? 'text-success' : 'text-danger'}`}>
+                    <div className={`text-sm font-medium ${testResult.success ? 'text-green-800' : 'text-red-800'}`}>
                       {testResult.success ? t('testing.testSuccess') : t('testing.testFailed')}
                     </div>
-                    <div className={`text-xs mt-0.5 ${testResult.success ? 'text-success' : 'text-danger'}`}>{testResult.message}</div>
+                    <div className={`text-xs mt-0.5 ${testResult.success ? 'text-green-700' : 'text-red-700'}`}>{testResult.message}</div>
                     {testResult.latency_ms != null && (
-                      <div className={`text-xs mt-1 ${testResult.success ? 'text-success' : 'text-danger'} text-fg-muted`}>{t('testing.responseLatency', { latency: testResult.latency_ms })}</div>
+                      <div className={`text-xs mt-1 ${testResult.success ? 'text-green-600' : 'text-red-600'} opacity-75`}>{t('testing.responseLatency', { latency: testResult.latency_ms })}</div>
                     )}
                     {testResult.tool_tested && (
-                      <div className={`text-xs mt-0.5 ${testResult.success ? 'text-success' : 'text-danger'} text-fg-muted`}>{t('testing.testToolLabel', { tool: testResult.tool_tested })}</div>
+                      <div className={`text-xs mt-0.5 ${testResult.success ? 'text-green-600' : 'text-red-600'} opacity-75`}>{t('testing.testToolLabel', { tool: testResult.tool_tested })}</div>
                     )}
                   </div>
                 </div>
@@ -2812,8 +2809,8 @@ function CatalogAPIDetailPanel({
 function KvRow({ label, value }: { label: string; value: string }) {
   return (
     <div className="flex justify-between items-center py-2.5 px-4 gap-4">
-      <span className="text-sm text-fg-muted shrink-0">{label}</span>
-      <span className="text-sm text-fg truncate text-right">{value}</span>
+      <span className="text-sm text-gray-500 shrink-0">{label}</span>
+      <span className="text-sm text-gray-900 text-right truncate">{value}</span>
     </div>
   );
 }
@@ -2930,19 +2927,19 @@ function APIServiceDetailPanel({
   };
 
   return (
-    <div className="bg-surface" onClick={(e) => e.stopPropagation()}>
-      <div className="flex items-center border-b border-line px-5">
+    <div className="bg-white" onClick={(e) => e.stopPropagation()}>
+      <div className="flex items-center border-b border-gray-200 px-5">
         {([
-          { key: 'overview' as const, label: t('detail.tabs.overview'), icon: <IconInfoCircle aria-hidden="true" className="w-4 h-4" /> },
-          { key: 'tools' as const, label: t('detail.tabs.tools', { count: serviceTools.length }), icon: <IconTool aria-hidden="true" className="w-4 h-4" /> },
+          { key: 'overview' as const, label: t('detail.tabs.overview'), icon: <Info aria-hidden="true" className="w-3.5 h-3.5" /> },
+          { key: 'tools' as const, label: t('detail.tabs.tools', { count: serviceTools.length }), icon: <Wrench aria-hidden="true" className="w-3.5 h-3.5" /> },
         ]).map((tab) => (
           <button
             key={tab.key}
             onClick={() => setDetailTab(tab.key)}
             className={`flex items-center gap-1.5 px-4 py-3 text-sm font-medium border-b-2 transition-colors ${
               detailTab === tab.key
-                ? 'border-ai text-ai'
-                : 'border-transparent text-fg-muted hover:text-fg-secondary'
+                ? 'border-purple-500 text-purple-600'
+                : 'border-transparent text-gray-500 hover:text-gray-700'
             }`}
           >
             {tab.icon}
@@ -2956,7 +2953,7 @@ function APIServiceDetailPanel({
           <div className="flex justify-center py-8"><LoadingSpinner /></div>
         ) : detailTab === 'overview' ? (
           <div className="space-y-5">
-            <div className="rounded-control border border-line divide-y divide-line">
+            <div className="rounded-lg border border-gray-200 divide-y divide-gray-100">
               {(() => {
                 const status = quickTesting
                   ? 'testing'
@@ -2964,21 +2961,21 @@ function APIServiceDetailPanel({
                     ? (quickTestResult.success ? 'connected' : 'error')
                     : (initialStatus?.status || 'unknown');
                 const cfg: Record<string, { label: string; cls: string; dot: string }> = {
-                  connected: { label: t('statusBadge.connected'), cls: 'bg-success-soft text-success', dot: 'bg-success' },
-                  healthy:   { label: t('statusBadge.connected'), cls: 'bg-success-soft text-success', dot: 'bg-success' },
-                  testing:   { label: t('button.testing'), cls: 'bg-warning-soft text-warning', dot: 'bg-warning animate-pulse' },
-                  error:     { label: t('statusBadge.error'), cls: 'bg-danger-soft text-danger', dot: 'bg-danger' },
-                  unknown:   { label: t('statusBadge.unknown'), cls: 'bg-subtle text-fg-secondary', dot: 'bg-subtle' },
+                  connected: { label: t('statusBadge.connected'), cls: 'bg-green-100 text-green-800', dot: 'bg-green-500' },
+                  healthy:   { label: t('statusBadge.connected'), cls: 'bg-green-100 text-green-800', dot: 'bg-green-500' },
+                  testing:   { label: t('button.testing'), cls: 'bg-amber-100 text-amber-900', dot: 'bg-amber-500 animate-pulse' },
+                  error:     { label: t('statusBadge.error'), cls: 'bg-red-100 text-red-800', dot: 'bg-red-500' },
+                  unknown:   { label: t('statusBadge.unknown'), cls: 'bg-gray-100 text-gray-600', dot: 'bg-gray-400' },
                 };
                 const c = cfg[status] || cfg.unknown;
                 return (
                   <div className="flex justify-between items-center py-2.5 px-4 gap-4">
-                    <span className="text-sm text-fg-muted shrink-0">{t('detail.connectionStatus')}</span>
-                    <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-pill text-xs font-medium ${c.cls}`}>
-                      <span className={`w-1.5 h-1.5 rounded-pill ${c.dot}`} />
+                    <span className="text-sm text-gray-500 shrink-0">{t('detail.connectionStatus')}</span>
+                    <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium ${c.cls}`}>
+                      <span className={`w-1.5 h-1.5 rounded-full ${c.dot}`} />
                       {c.label}
                       {quickTestResult?.success && quickTestResult.latency_ms != null && (
-                        <span className="text-fg-muted">{'\u00b7'} {quickTestResult.latency_ms}ms</span>
+                        <span className="opacity-75">{'\u00b7'} {quickTestResult.latency_ms}ms</span>
                       )}
                     </span>
                   </div>
@@ -2993,36 +2990,36 @@ function APIServiceDetailPanel({
               {metadata?.category && <KvRow label={t('serviceInfo.category')} value={metadata.category} />}
               {metadata?.docs_url && (
                 <div className="flex justify-between items-center py-2.5 px-4 gap-4">
-                  <span className="text-sm text-fg-muted shrink-0">{t('serviceInfo.documentation')}</span>
-                  <a href={metadata.docs_url} target="_blank" rel="noopener noreferrer" className="text-sm text-info hover:text-info">
+                  <span className="text-sm text-gray-500 shrink-0">{t('serviceInfo.documentation')}</span>
+                  <a href={metadata.docs_url} target="_blank" rel="noopener noreferrer" className="text-sm text-sky-700 hover:text-sky-900">
                     {t('serviceInfo.viewDocs')} →
                   </a>
                 </div>
               )}
               {credentials?.secret_id && (
                 <div className="flex justify-between items-center py-2.5 px-4 gap-4">
-                  <span className="text-sm text-fg-muted shrink-0">Secret ID</span>
-                  <code className="text-sm font-mono bg-subtle px-2 py-1 rounded-tag truncate">{credentials.secret_id}</code>
+                  <span className="text-sm text-gray-500 shrink-0">Secret ID</span>
+                  <code className="text-sm font-mono bg-gray-100 px-2 py-1 rounded truncate">{credentials.secret_id}</code>
                 </div>
               )}
               {credentials !== null && (
                 <div className="flex items-center py-2 px-4 gap-3">
-                  <span className="text-sm text-fg-muted shrink-0">API Key</span>
+                  <span className="text-sm text-gray-500 shrink-0">API Key</span>
                   <div className="flex-1 flex items-center gap-1.5 min-w-0">
                     <input
                       type={showApiKey ? 'text' : 'password'}
                       value={apiKeyInput}
                       onChange={(e) => setApiKeyInput(e.target.value)}
                       placeholder={t('serviceInfo.enterApiKey')}
-                      className="ui-input flex-1 min-w-0 px-2  border border-line rounded-tag text-sm font-mono bg-subtle focus:bg-surface focus:border-line-control transition-colors"
+                      className="flex-1 px-2 py-1 border border-gray-200 rounded text-sm font-mono bg-gray-50 focus:outline-none focus:ring-1 focus:ring-slate-400 focus:bg-white focus:border-slate-400 transition-colors min-w-0"
                     />
                     <button
                       type="button"
                       onClick={() => setShowApiKey(v => !v)}
-                      className="ui-btn-icon inline-flex items-center justify-center shrink-0 text-fg-muted hover:text-fg-secondary p-1 rounded-control transition-colors"
+                      className="text-gray-400 hover:text-gray-600 p-1 rounded transition-colors shrink-0"
                       title={showApiKey ? t('detail.hide') : t('detail.show')}
                     >
-                      {showApiKey ? <IconEyeOff aria-hidden="true" className="w-4 h-4" /> : <IconEye aria-hidden="true" className="w-4 h-4" />}
+                      {showApiKey ? <EyeOff aria-hidden="true" className="w-3.5 h-3.5" /> : <Eye aria-hidden="true" className="w-3.5 h-3.5" />}
                     </button>
                     {apiKeyInput !== apiKeyOrigRef.current && (
                       <>
@@ -3030,15 +3027,15 @@ function APIServiceDetailPanel({
                           type="button"
                           onClick={handleSaveApiKey}
                           disabled={apiKeySaving || !apiKeyInput.trim()}
-                          className="ui-btn ui-btn-primary ui-btn-sm shrink-0"
+                          className="inline-flex items-center gap-1 px-2 py-1 bg-slate-700 text-white rounded text-xs font-medium hover:bg-slate-800 disabled:opacity-50 transition-colors shrink-0"
                         >
-                          {apiKeySaving ? <IconRefresh aria-hidden="true" className="w-4 h-4 animate-spin" /> : <IconDeviceFloppy aria-hidden="true" className="w-4 h-4" />}
+                          {apiKeySaving ? <RefreshCw aria-hidden="true" className="w-3 h-3 animate-spin" /> : <Save aria-hidden="true" className="w-3 h-3" />}
                           {t('button.save')}
                         </button>
                         <button
                           type="button"
                           onClick={() => setApiKeyInput(apiKeyOrigRef.current)}
-                          className="shrink-0 px-2 py-1 border border-line-control text-fg-secondary rounded-tag text-xs hover:bg-hover transition-colors"
+                          className="px-2 py-1 border border-gray-300 text-gray-600 rounded text-xs hover:bg-gray-50 transition-colors shrink-0"
                         >
                           {t('button.cancel')}
                         </button>
@@ -3054,41 +3051,41 @@ function APIServiceDetailPanel({
               <button
                 onClick={handleQuickTestConnectivity}
                 disabled={quickTesting}
-                className="inline-flex items-center justify-center gap-2 px-4 py-2.5 bg-surface border border-line-control text-fg-secondary rounded-control hover:bg-hover disabled:bg-disabled disabled:text-fg-disabled text-sm font-medium transition-colors"
+                className="inline-flex items-center justify-center gap-2 px-4 py-2.5 bg-white border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 disabled:opacity-50 text-sm font-medium transition-colors"
               >
-                {quickTesting ? <><IconRefresh aria-hidden="true" className="w-4 h-4 animate-spin" />{t('button.testing')}</> : <><IconActivity aria-hidden="true" className="w-4 h-4" />{t('button.testConnectivity')}</>}
+                {quickTesting ? <><RefreshCw aria-hidden="true" className="w-4 h-4 animate-spin" />{t('button.testing')}</> : <><Activity aria-hidden="true" className="w-4 h-4" />{t('button.testConnectivity')}</>}
               </button>
               {!quickTesting && quickTestResult && (
-                <div className={`flex items-start gap-2 rounded-control border p-3 text-sm ${quickTestResult.success ? 'bg-success-soft border-success text-success' : 'bg-danger-soft border-danger text-danger'}`}>
-                  {quickTestResult.success ? <IconCircleCheck aria-hidden="true" className="w-4 h-4 mt-0.5 flex-shrink-0" /> : <IconCircleX aria-hidden="true" className="w-4 h-4 mt-0.5 flex-shrink-0" />}
+                <div className={`flex items-start gap-2 rounded-lg border p-3 text-sm ${quickTestResult.success ? 'bg-green-50 border-green-200 text-green-800' : 'bg-red-50 border-red-200 text-red-800'}`}>
+                  {quickTestResult.success ? <CheckCircle aria-hidden="true" className="w-4 h-4 mt-0.5 flex-shrink-0" /> : <XCircle aria-hidden="true" className="w-4 h-4 mt-0.5 flex-shrink-0" />}
                   <span>{quickTestResult.message}</span>
-                  {quickTestResult.latency_ms != null && <span className="text-xs text-fg-muted"> {'\u00b7'} {quickTestResult.latency_ms}ms</span>}
+                  {quickTestResult.latency_ms != null && <span className="text-xs opacity-90"> {'\u00b7'} {quickTestResult.latency_ms}ms</span>}
                 </div>
               )}
             </div>
           </div>
         ) : (
           serviceTools.length === 0 ? (
-            <div className="text-center py-8 text-sm text-fg-muted">{t('serviceInfo.noServiceTools')}</div>
+            <div className="text-center py-8 text-sm text-gray-500">{t('serviceInfo.noServiceTools')}</div>
           ) : (
-            <div className="bg-surface rounded-control border border-line overflow-hidden">
+            <div className="bg-white rounded-lg border border-gray-200 overflow-hidden">
               <div className="overflow-x-auto">
-                <table className="min-w-full divide-y divide-line table-fixed">
-                  <thead className="bg-subtle">
+                <table className="divide-y divide-gray-100 table-fixed min-w-full">
+                  <thead className="bg-gray-50">
                     <tr>
-                      <th className="w-[30%] px-5 py-2.5 text-left text-xs font-medium text-fg-muted uppercase">{t('detail.tableToolName')}</th>
-                      <th className="px-5 py-2.5 text-left text-xs font-medium text-fg-muted uppercase">{t('detail.tableDesc')}</th>
-                      <th className="w-[100px] px-5 py-2.5 text-left text-xs font-medium text-fg-muted uppercase whitespace-nowrap">{t('detail.tableStatus')}</th>
-                      <th className="w-[120px] px-5 py-2.5 text-left text-xs font-medium text-fg-muted uppercase whitespace-nowrap">{t('detail.tableActions')}</th>
+                      <th className="w-[30%] px-5 py-2.5 text-left text-xs font-medium text-gray-500 uppercase">{t('detail.tableToolName')}</th>
+                      <th className="px-5 py-2.5 text-left text-xs font-medium text-gray-500 uppercase">{t('detail.tableDesc')}</th>
+                      <th className="w-[100px] px-5 py-2.5 text-left text-xs font-medium text-gray-500 uppercase whitespace-nowrap">{t('detail.tableStatus')}</th>
+                      <th className="w-[120px] px-5 py-2.5 text-left text-xs font-medium text-gray-500 uppercase whitespace-nowrap">{t('detail.tableActions')}</th>
                     </tr>
                   </thead>
-                  <tbody className="divide-y divide-line">
+                  <tbody className="divide-y divide-gray-100">
                     {serviceTools.map((tool) => (
-                      <tr key={tool.name} className="hover:bg-hover">
-                        <td className="px-5 py-2.5 truncate"><span className="text-sm font-medium text-fg font-mono">{tool.name}</span></td>
-                        <td className="px-5 py-2.5"><span className="text-sm text-fg-secondary line-clamp-1">{tool.description}</span></td>
+                      <tr key={tool.name} className="hover:bg-gray-50">
+                        <td className="px-5 py-2.5 truncate"><span className="text-sm font-medium text-gray-900 font-mono">{tool.name}</span></td>
+                        <td className="px-5 py-2.5"><span className="text-sm text-gray-600 line-clamp-1">{tool.description}</span></td>
                         <td className="px-5 py-2.5 whitespace-nowrap"><EnabledBadge enabled={tool.enabled} /></td>
-                        <td className="px-5 py-2.5 whitespace-nowrap"><button onClick={() => onSelectTool(tool)} className="text-sm text-info hover:text-info">{t('detail.testDetail')}</button></td>
+                        <td className="px-5 py-2.5 whitespace-nowrap"><button onClick={() => onSelectTool(tool)} className="text-sm text-sky-700 hover:text-sky-900">{t('detail.testDetail')}</button></td>
                       </tr>
                     ))}
                   </tbody>
@@ -3210,7 +3207,7 @@ function ProviderCredentialsCard({ providerId, onTestingStart, onTestingEnd }: {
 
   if (loading) {
     return (
-      <div className="bg-surface rounded-control border border-line p-4">
+      <div className="bg-white rounded-lg border border-gray-200 p-4">
         <div className="flex justify-center py-4">
           <LoadingSpinner />
         </div>
@@ -3219,16 +3216,16 @@ function ProviderCredentialsCard({ providerId, onTestingStart, onTestingEnd }: {
   }
 
   return (
-    <div className="bg-surface rounded-control border border-line p-4">
+    <div className="bg-white rounded-lg border border-gray-200 p-4">
       <div className="flex items-center justify-between mb-3">
-        <h4 className="text-sm font-semibold text-fg flex items-center">
-          <IconShield aria-hidden="true" className="w-4 h-4 mr-2 text-fg-muted" />
+        <h4 className="text-sm font-semibold text-gray-900 flex items-center">
+          <Shield aria-hidden="true" className="w-4 h-4 mr-2 text-gray-500" />
           {t('credentials.title')}
         </h4>
         {credentials?.has_credential && !editing && (
           <button
             onClick={handleDelete}
-            className="text-xs text-fg-secondary hover:text-fg"
+            className="text-xs text-slate-600 hover:text-slate-800"
           >
             {t('credentials.delete')}
           </button>
@@ -3239,8 +3236,8 @@ function ProviderCredentialsCard({ providerId, onTestingStart, onTestingEnd }: {
         <div className="space-y-3">
           {credentials?.has_credential && credentials.secret_id && (
             <div className="flex items-center justify-between">
-              <span className="text-sm text-fg-muted">Secret ID</span>
-              <code className="text-sm font-mono bg-subtle px-2 py-1 rounded-tag">
+              <span className="text-sm text-gray-500">Secret ID</span>
+              <code className="text-sm font-mono bg-gray-100 px-2 py-1 rounded">
                 {credentials.secret_id}
               </code>
             </div>
@@ -3248,8 +3245,8 @@ function ProviderCredentialsCard({ providerId, onTestingStart, onTestingEnd }: {
           
           {credentials?.api_key_masked && (
             <div className="flex items-center justify-between">
-              <span className="text-sm text-fg-muted">API Key</span>
-              <code className="text-sm font-mono bg-subtle px-2 py-1 rounded-tag">
+              <span className="text-sm text-gray-500">API Key</span>
+              <code className="text-sm font-mono bg-gray-100 px-2 py-1 rounded">
                 {credentials.api_key_masked}
               </code>
             </div>
@@ -3258,7 +3255,7 @@ function ProviderCredentialsCard({ providerId, onTestingStart, onTestingEnd }: {
           <div className="flex gap-2 pt-2">
             <button
             onClick={() => setEditing(true)}
-            className="flex-1 px-3 py-2 border border-line-control rounded-control text-sm text-fg-secondary hover:bg-hover"
+            className="flex-1 px-3 py-2 border border-gray-300 rounded-lg text-sm text-gray-700 hover:bg-gray-50"
           >
             {credentials?.has_credential ? t('credentials.modify') : t('credentials.configure')}
           </button>
@@ -3266,17 +3263,17 @@ function ProviderCredentialsCard({ providerId, onTestingStart, onTestingEnd }: {
               <button
                 onClick={handleTest}
                 disabled={testing}
-                className={`flex-1 flex items-center justify-center gap-1.5 px-3 py-2 border rounded-control text-sm transition-colors ${
+                className={`flex-1 flex items-center justify-center gap-1.5 px-3 py-2 border rounded-lg text-sm transition-colors ${
                   testing
-                    ? 'border-danger bg-danger-soft text-danger cursor-not-allowed'
-                    : 'border-line-control text-fg-secondary hover:bg-hover'
+                    ? 'border-red-300 bg-red-50 text-red-600 cursor-not-allowed'
+                    : 'border-gray-300 text-gray-700 hover:bg-gray-50'
                 }`}
                 title={t('credentials.testConnTitle')}
               >
                 {testing ? (
-                  <><IconRefresh aria-hidden="true" className="w-4 h-4 animate-spin" />{t('credentials.testing')}</>
+                  <><RefreshCw aria-hidden="true" className="w-3.5 h-3.5 animate-spin" />{t('credentials.testing')}</>
                 ) : (
-                  <><IconActivity aria-hidden="true" className="w-4 h-4" />{t('credentials.testConn')}</>
+                  <><Activity aria-hidden="true" className="w-3.5 h-3.5" />{t('credentials.testConn')}</>
                 )}
               </button>
             )}
@@ -3284,46 +3281,46 @@ function ProviderCredentialsCard({ providerId, onTestingStart, onTestingEnd }: {
 
           {/* Testing in-progress indicator */}
           {testing && (
-            <div className="p-3 rounded-control border border-danger bg-danger-soft text-danger">
+            <div className="p-3 rounded-lg border border-red-200 bg-red-50 text-red-700">
               <div className="flex items-center">
                 <div className="relative mr-3">
-                  <div className="w-8 h-8 rounded-pill border-2 border-danger border-t-danger animate-spin" />
+                  <div className="w-8 h-8 rounded-full border-2 border-red-200 border-t-red-600 animate-spin" />
                 </div>
                 <div className="flex-1">
                   <div className="text-sm font-medium">{t('credentials.testingProgress')}</div>
-                  <div className="text-xs mt-0.5 text-danger">
+                  <div className="text-xs mt-0.5 text-red-600">
                     {t('credentials.testingWait')}
                     <span className="ml-2 font-mono tabular-nums">{testElapsed.toFixed(1)}s</span>
                   </div>
                 </div>
               </div>
               {/* Progress bar animation */}
-              <div className="mt-2.5 h-1 bg-danger-soft rounded-pill overflow-hidden">
-                <div className="h-full bg-danger rounded-pill animate-pulse" style={{ width: `${Math.min(95, testElapsed * 8)}%`, transition: 'width 0.3s ease-out' }} />
+              <div className="mt-2.5 h-1 bg-red-100 rounded-full overflow-hidden">
+                <div className="h-full bg-red-500 rounded-full animate-pulse" style={{ width: `${Math.min(95, testElapsed * 8)}%`, transition: 'width 0.3s ease-out' }} />
               </div>
             </div>
           )}
 
           {/* Test result */}
           {!testing && testResult && (
-            <div className={`p-2.5 rounded-tag text-xs ${
+            <div className={`p-2.5 rounded text-xs ${
               testResult.success 
-                ? 'bg-success-soft border border-success text-success'
-                : 'bg-danger-soft border border-danger text-danger'
+                ? 'bg-green-50 border border-green-200 text-green-700'
+                : 'bg-red-50 border border-red-200 text-red-700'
             }`}>
               <div className="flex items-start">
                 {testResult.success ? (
-                  <IconCircleCheck aria-hidden="true" className="w-4 h-4 mr-1.5 mt-0.5 flex-shrink-0" />
+                  <CheckCircle aria-hidden="true" className="w-3.5 h-3.5 mr-1.5 mt-0.5 flex-shrink-0" />
                 ) : (
-                  <IconCircleX aria-hidden="true" className="w-4 h-4 mr-1.5 mt-0.5 flex-shrink-0" />
+                  <XCircle aria-hidden="true" className="w-3.5 h-3.5 mr-1.5 mt-0.5 flex-shrink-0" />
                 )}
                 <div className="flex-1">
                   <div>{testResult.message}</div>
                   {testResult.latency_ms != null && (
-                    <div className="mt-1 text-fg-muted">{t('credentials.latency')}: {testResult.latency_ms}ms</div>
+                    <div className="mt-1 opacity-75">{t('credentials.latency')}: {testResult.latency_ms}ms</div>
                   )}
                   {testResult.tool_tested && (
-                    <div className="mt-1 text-fg-muted text-xs">{t('credentials.toolTested')}: {testResult.tool_tested}</div>
+                    <div className="mt-1 opacity-75 text-xs">{t('credentials.toolTested')}: {testResult.tool_tested}</div>
                   )}
                 </div>
               </div>
@@ -3333,13 +3330,13 @@ function ProviderCredentialsCard({ providerId, onTestingStart, onTestingEnd }: {
       ) : (
         <div className="space-y-3">
           <div>
-            <label className="block text-xs text-fg-muted mb-1.5">API Key</label>
+            <label className="block text-xs text-gray-500 mb-1.5">API Key</label>
             <input
               type="password"
               value={apiKey}
               onChange={(e) => setApiKey(e.target.value)}
               placeholder={t('credentials.apiKeyPlaceholder')}
-              className="ui-input w-full px-3  border border-line-control rounded-control text-sm font-mono"
+              className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm font-mono focus:outline-none focus:ring-2 focus:ring-purple-500"
             />
           </div>
 
@@ -3347,7 +3344,7 @@ function ProviderCredentialsCard({ providerId, onTestingStart, onTestingEnd }: {
             <button
               onClick={handleSave}
               disabled={saving}
-              className="flex-1 px-3 py-2 bg-action text-action-fg rounded-control text-sm disabled:bg-disabled disabled:text-fg-disabled hover:bg-action-hover"
+              className="flex-1 px-3 py-2 bg-purple-600 text-white rounded-lg text-sm disabled:opacity-50 hover:bg-purple-700"
             >
               {saving ? t('credentials.saving') : t('credentials.save')}
             </button>
@@ -3356,15 +3353,15 @@ function ProviderCredentialsCard({ providerId, onTestingStart, onTestingEnd }: {
                 setEditing(false);
                 setApiKey('');
               }}
-              className="px-3 py-2 border border-line-control rounded-control text-sm text-fg-secondary hover:bg-hover"
+              className="px-3 py-2 border border-gray-300 rounded-lg text-sm text-gray-700 hover:bg-gray-50"
             >
               {t('common:button.cancel')}
             </button>
           </div>
 
-          <div className="p-2 bg-warning-soft border border-warning rounded-tag text-xs text-warning">
+          <div className="p-2 bg-amber-50 border border-amber-200 rounded text-xs text-amber-700">
             <div className="flex items-start">
-              <IconInfoCircle aria-hidden="true" className="w-4 h-4 mr-1.5 mt-0.5 flex-shrink-0" />
+              <Info aria-hidden="true" className="w-3.5 h-3.5 mr-1.5 mt-0.5 flex-shrink-0" />
               <div>{t('credentials.storageNote')}</div>
             </div>
           </div>
@@ -3426,17 +3423,16 @@ function ToolTable({
   //
   // Ratio 3 : 1 : 1.6 : 1 : 1  ≈ keeps the name comfortably wide while
   // distributing the rest so the small badge columns don't feel orphaned.
-  // Actions hold the group button and 管理 side by side (44px + the text button).
   const GRID_COLS =
-    '32px minmax(220px, 3fr) minmax(80px, 1fr) minmax(140px, 1.6fr) minmax(80px, 1fr) minmax(124px, 1.2fr)';
+    '32px minmax(220px, 3fr) minmax(80px, 1fr) minmax(140px, 1.6fr) minmax(80px, 1fr) minmax(90px, 1fr)';
 
   return (
-    <div className="bg-surface rounded-control border border-line overflow-x-auto flex flex-col">
+    <div className="bg-white rounded-lg border border-gray-200 flex flex-col overflow-x-auto">
       {/* Header (min-w keeps the grid columns intact; the wrapper scrolls on phones) */}
       <div
         className={viewMode === 'list'
-          ? 'grid min-w-[720px] items-center gap-3 px-4 py-2.5 bg-subtle border-b border-line text-xs font-medium text-fg-muted uppercase tracking-wide'
-          : 'flex flex-wrap items-center gap-4 px-4 py-2.5 bg-subtle border-b border-line text-xs font-medium text-fg-muted uppercase tracking-wide [&>:first-child]:hidden [&>:nth-child(2)]:hidden [&>:last-child]:hidden'}
+          ? 'grid items-center gap-3 px-4 py-2.5 bg-gray-50 border-b border-gray-200 text-[11px] font-medium text-gray-500 uppercase tracking-wide min-w-[720px]'
+          : 'flex items-center gap-4 px-4 py-2.5 bg-gray-50 border-b border-gray-200 text-[11px] font-medium text-gray-500 uppercase tracking-wide [&>:first-child]:hidden [&>:nth-child(2)]:hidden [&>:last-child]:hidden flex-wrap'}
         style={viewMode === 'list' ? { gridTemplateColumns: GRID_COLS } : undefined}
       >
         <div />
@@ -3486,7 +3482,7 @@ function ToolTable({
       </div>
 
       {/* Both layouts retain the same native fields and action callbacks. */}
-      <div className={viewMode === 'list' ? 'flex-1 divide-y divide-line' : 'grid gap-3 p-3 sm:grid-cols-2 xl:grid-cols-3'}>
+      <div className={viewMode === 'list' ? 'flex-1 divide-y divide-gray-100' : 'grid gap-3 p-3 sm:grid-cols-2 xl:grid-cols-3'}>
         {tools.map((tool) => {
           const sb = SOURCE_BADGE[tool.source] || SOURCE_BADGE.custom;
           const sourceLabel = getSourceLabel(tool.source, t);
@@ -3496,12 +3492,12 @@ function ToolTable({
             <div
               key={tool.name}
               {...groupDrag.dragProps(tool.name)}
-              className={`grid items-center gap-3 px-4 py-3 hover:bg-hover transition-colors${viewMode === 'cards' ? ' rounded-control border border-line bg-surface [&>:nth-child(n+3)]:col-span-2' : ' min-w-[720px]'}`}
+              className={`grid items-center gap-3 px-4 py-3 hover:bg-gray-50 transition-colors${viewMode === 'cards' ? ' rounded-lg border border-gray-200 bg-white [&>:nth-child(n+3)]:col-span-2' : ' min-w-[720px]'}`}
               style={{ gridTemplateColumns: viewMode === 'list' ? GRID_COLS : '32px minmax(0, 1fr)' }}
             >
               {/* Icon */}
-              <div className={`w-8 h-8 flex items-center justify-center rounded-control ${tool.enabled ? 'bg-subtle' : 'bg-subtle'}`}>
-                <IconTool aria-hidden="true" className={`w-4 h-4 ${tool.enabled ? 'text-fg-secondary' : 'text-fg-muted'}`} />
+              <div className={`w-8 h-8 flex items-center justify-center rounded-lg ${tool.enabled ? 'bg-gray-100' : 'bg-gray-50'}`}>
+                <Wrench aria-hidden="true" className={`w-4 h-4 ${tool.enabled ? 'text-gray-700' : 'text-gray-400'}`} />
               </div>
 
               {/* Name (no description, kept compact).
@@ -3517,24 +3513,22 @@ function ToolTable({
                   type="button"
                   onClick={() => onSelect(tool)}
                   title={tool.name}
-                  className="text-xs font-medium text-fg font-mono truncate
- hover:text-fg-secondary transition-colors
- focus-visible:underline text-left min-w-0"
+                  className="text-xs font-medium text-gray-900 font-mono hover:text-slate-700 transition-colors focus:outline-none focus-visible:underline text-left truncate min-w-0"
                 >
                   {tool.name}
                 </button>
-                <span className="text-xs text-fg-muted shrink-0">{categoryLabel}</span>
+                <span className="text-[10px] text-gray-400 shrink-0">{categoryLabel}</span>
               </div>
 
               {/* Source column */}
               <div className="text-center">
-                <span className={`inline-flex items-center px-1.5 py-0.5 rounded-tag text-xs font-medium ${sb.className}`}>
+                <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium ${sb.className}`}>
                   {sourceLabel}
                 </span>
               </div>
 
               {/* Provider column */}
-              <div className="text-xs text-fg-secondary truncate">
+              <div className="text-xs text-gray-600 truncate">
                 {tool.source_name || 'Flocks'}
               </div>
 
@@ -3545,12 +3539,12 @@ function ToolTable({
 
               {/* Actions column */}
               <div className="w-full flex flex-wrap items-center justify-center gap-1">
-                <PluginGroupButton grouping={groupDrag} itemKey={tool.name} iconOnly className="border border-line hover:border-line-control" />
+                <PluginGroupButton grouping={groupDrag} itemKey={tool.name} />
                 <button
                   onClick={() => onSelect(tool)}
-                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded-control border border-line text-fg-secondary text-xs font-medium hover:bg-hover hover:text-fg transition-colors"
+                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border border-gray-200 text-gray-600 text-xs font-medium hover:bg-gray-100 hover:text-gray-800 transition-colors"
                 >
-                  <IconSettings aria-hidden="true" className="w-4 h-4" />
+                  <Settings aria-hidden="true" className="w-3 h-3" />
                   {t('mcp.manage')}
                 </button>
               </div>
@@ -3610,25 +3604,25 @@ function Pagination({
   };
 
   return (
-    <div className="bg-surface px-6 py-4 border-t border-line flex items-center justify-between">
-      <div className="text-sm text-fg-secondary">{t('pagination.showing', { start: startItem, end: endItem, total: totalCount })}</div>
+    <div className="bg-white px-6 py-4 border-t border-gray-200 flex items-center justify-between">
+      <div className="text-sm text-gray-700">{t('pagination.showing', { start: startItem, end: endItem, total: totalCount })}</div>
       <div className="flex items-center space-x-1">
         <button aria-label={pageActionLabel('previous')}
           onClick={() => onPageChange(Math.max(1, currentPage - 1))}
           disabled={currentPage === 1}
-          className={`ui-btn-icon inline-flex items-center justify-center p-2 rounded-control text-sm ${currentPage === 1 ? 'text-fg-placeholder cursor-not-allowed' : 'text-fg-secondary hover:bg-hover'}`}
+          className={`p-2 rounded-md text-sm ${currentPage === 1 ? 'text-gray-300 cursor-not-allowed' : 'text-gray-600 hover:bg-gray-100'}`}
         >
-          <IconChevronLeft aria-hidden="true" className="w-4 h-4" />
+          <ChevronLeft aria-hidden="true" className="w-4 h-4" />
         </button>
         {getPages().map((page, i) =>
           typeof page === 'string' ? (
-            <span key={`e-${i}`} className="px-2 text-fg-muted">...</span>
+            <span key={`e-${i}`} className="px-2 text-gray-400">...</span>
           ) : (
             <button
               key={page}
               onClick={() => onPageChange(page)}
               aria-current={currentPage === page ? 'page' : undefined}
-              className={`px-3 py-1 rounded-control text-sm font-medium ${currentPage === page ? 'bg-selected text-fg' : 'text-fg-secondary hover:bg-selected'}`}
+              className={`px-3 py-1 rounded-md text-sm font-medium ${currentPage === page ? 'bg-slate-700 text-white' : 'text-gray-700 hover:bg-gray-100'}`}
             >
               {page}
             </button>
@@ -3637,9 +3631,9 @@ function Pagination({
         <button aria-label={pageActionLabel('next')}
           onClick={() => onPageChange(Math.min(totalPages, currentPage + 1))}
           disabled={currentPage === totalPages}
-          className={`ui-btn-icon inline-flex items-center justify-center p-2 rounded-control text-sm ${currentPage === totalPages ? 'text-fg-placeholder cursor-not-allowed' : 'text-fg-secondary hover:bg-hover'}`}
+          className={`p-2 rounded-md text-sm ${currentPage === totalPages ? 'text-gray-300 cursor-not-allowed' : 'text-gray-600 hover:bg-gray-100'}`}
         >
-          <IconChevronRight aria-hidden="true" className="w-4 h-4" />
+          <ChevronRight aria-hidden="true" className="w-4 h-4" />
         </button>
       </div>
     </div>
@@ -3755,29 +3749,29 @@ export function ToolDetailDrawer({
 
   return (
     <PageDialog variant="panels" className="contents" onClose={onClose}>
-      <div className="fixed inset-0 bg-overlay-backdrop z-40" onClick={onClose} />
+      <div className="fixed inset-0 bg-black/40 z-40" onClick={onClose} />
 
-      <div data-ui-overlay="drawer" className="fixed right-0 top-0 bottom-0 z-50 flex min-h-0 flex-col bg-surface shadow-overlay w-full max-w-drawer">
-        <div className="flex-shrink-0 border-b border-line">
+      <div data-ui-overlay="drawer" className="fixed right-0 top-0 bottom-0 flex flex-col bg-white shadow-2xl w-full max-w-[520px] z-50 min-h-0">
+        <div className="border-b border-gray-200 flex-shrink-0">
           <div className="flex items-center gap-3 px-6 py-4">
-            <div className="w-8 h-8 bg-subtle rounded-control flex items-center justify-center flex-shrink-0">
-              <IconTool aria-hidden="true" className="w-4 h-4 text-fg-secondary" />
+            <div className="w-8 h-8 bg-gray-100 rounded-lg flex items-center justify-center flex-shrink-0">
+              <Wrench aria-hidden="true" className="w-4 h-4 text-gray-600" />
             </div>
             <div className="flex-1 min-w-0">
-              <h2 className="text-title-section font-semibold text-fg font-mono truncate">{tool.name}</h2>
+              <h2 className="text-lg font-semibold text-gray-900 font-mono truncate">{tool.name}</h2>
               <div className="flex items-center gap-2 mt-0.5">
-                <span className={`inline-flex items-center px-1.5 py-0.5 rounded-tag text-xs font-medium ${sb.className}`}>
+                <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-xs font-medium ${sb.className}`}>
                   {sourceLabel}
                 </span>
                 {tool.source_name && (
-                  <span className="text-xs text-fg-muted truncate">{tool.source_name}</span>
+                  <span className="text-xs text-gray-500 truncate">{tool.source_name}</span>
                 )}
-                <span className="text-xs text-fg-muted">{t(`category.${CATEGORY_I18N_KEY[tool.category] || tool.category}`, { defaultValue: tool.category })}</span>
+                <span className="text-xs text-gray-400">{t(`category.${CATEGORY_I18N_KEY[tool.category] || tool.category}`, { defaultValue: tool.category })}</span>
               </div>
             </div>
             <div className="flex items-center gap-2 flex-shrink-0">
-              <button aria-label={pageActionLabel('close')} onClick={onClose} className="ui-btn-icon inline-flex items-center justify-center p-1 rounded-control hover:bg-hover transition-colors">
-                <IconX aria-hidden="true" className="w-5 h-5 text-fg-muted" />
+              <button aria-label={pageActionLabel('close')} onClick={onClose} className="p-1 rounded hover:bg-gray-100 transition-colors">
+                <X aria-hidden="true" className="w-5 h-5 text-gray-400" />
               </button>
             </div>
           </div>
@@ -3787,21 +3781,21 @@ export function ToolDetailDrawer({
               onClick={() => setSection('info')}
               className={`flex items-center gap-1.5 px-4 py-2.5 text-sm font-medium border-b-2 transition-colors ${
                 section === 'info'
-                  ? 'border-line-control text-fg'
-                  : 'border-transparent text-fg-muted hover:text-fg-secondary hover:border-line-control'
+                  ? 'border-slate-700 text-slate-800'
+                  : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
               }`}
             >
-              <IconInfoCircle aria-hidden="true" className="w-4 h-4" />{t('toolDetail.tabInfo')}
+              <Info aria-hidden="true" className="w-3.5 h-3.5" />{t('toolDetail.tabInfo')}
             </button>
             <button
               onClick={() => setSection('test')}
               className={`flex items-center gap-1.5 px-4 py-2.5 text-sm font-medium border-b-2 transition-colors ${
                 section === 'test'
-                  ? 'border-line-control text-fg'
-                  : 'border-transparent text-fg-muted hover:text-fg-secondary hover:border-line-control'
+                  ? 'border-slate-700 text-slate-800'
+                  : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
               }`}
             >
-              <IconTestPipe aria-hidden="true" className="w-4 h-4" />{t('toolDetail.tabTest')}
+              <TestTube aria-hidden="true" className="w-3.5 h-3.5" />{t('toolDetail.tabTest')}
             </button>
           </div>
         </div>
@@ -3810,15 +3804,15 @@ export function ToolDetailDrawer({
           {section === 'info' ? (
             <div className="space-y-5">
               <div>
-                <label className="block text-sm font-medium text-fg-secondary mb-1.5">{t('toolDetail.description')}</label>
-                <p className="text-sm text-fg-secondary whitespace-pre-wrap break-words [overflow-wrap:anywhere]">
+                <label className="block text-sm font-medium text-gray-700 mb-1.5">{t('toolDetail.description')}</label>
+                <p className="text-sm text-gray-600 leading-relaxed [overflow-wrap:anywhere] whitespace-pre-wrap break-words">
                   {getLocalizedToolDescription(tool, i18n.language) || t('toolDetail.noDescription')}
                 </p>
               </div>
 
               <div className="flex flex-wrap gap-4 items-start">
                 <div>
-                  <label className="block text-sm font-medium text-fg-secondary mb-1.5">{t('toolDetail.status')}</label>
+                  <label className="block text-sm font-medium text-gray-700 mb-1.5">{t('toolDetail.status')}</label>
                   <div className="flex items-center gap-2 flex-wrap">
                     <button
                       type="button"
@@ -3827,10 +3821,13 @@ export function ToolDetailDrawer({
                       aria-label={t('toolDetail.status')}
                       onClick={handleToggleEnabled}
                       disabled={toggling}
-                      className="ui-btn-icon inline-flex shrink-0 items-center justify-center rounded-control disabled:cursor-not-allowed">
-<span className="ui-switch" aria-hidden="true" aria-checked={enabled} aria-disabled={toggling} />
-</button>
-                    <span className={`text-sm font-medium ${enabled ? 'text-fg-secondary' : 'text-fg-muted'}`}>
+                      className={`relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus-visible:ring-2 focus-visible:ring-slate-400 focus-visible:ring-offset-2 disabled:opacity-50 ${enabled ? 'bg-slate-700' : 'bg-gray-200'}`}
+                    >
+                      <span
+                        className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow transition duration-200 ease-in-out ${enabled ? 'translate-x-5' : 'translate-x-0'}`}
+                      />
+                    </button>
+                    <span className={`text-sm font-medium ${enabled ? 'text-slate-700' : 'text-gray-400'}`}>
                       {toggling ? t('toolDetail.updating') : enabled ? t('toolDetail.enabled') : t('toolDetail.disabled')}
                     </span>
                     {customized && (
@@ -3840,14 +3837,14 @@ export function ToolDetailDrawer({
                             defaultValue: '当前状态来自用户自定义，YAML 默认值为 {{def}}',
                             def: enabledDefault ? t('toolDetail.enabled') : t('toolDetail.disabled'),
                           })}
-                          className="inline-flex items-center px-2 py-0.5 rounded-pill text-xs font-medium bg-warning-soft text-warning"
+                          className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-amber-100 text-amber-800"
                         >
                           {t('toolDetail.customized', { defaultValue: '已自定义' })}
                         </span>
                         <button
                           onClick={handleResetSetting}
                           disabled={resetting || toggling}
-                          className="inline-flex items-center px-2 py-0.5 rounded-tag text-xs font-medium text-fg-secondary hover:text-fg hover:bg-hover disabled:bg-disabled disabled:text-fg-disabled"
+                          className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium text-slate-600 hover:text-slate-900 hover:bg-gray-100 disabled:opacity-50"
                         >
                           {resetting
                             ? t('toolDetail.resetting', { defaultValue: '重置中…' })
@@ -3859,9 +3856,9 @@ export function ToolDetailDrawer({
                 </div>
                 {tool.requires_confirmation && (
                   <div>
-                    <label className="block text-sm font-medium text-fg-secondary mb-1.5">{t('toolDetail.security')}</label>
-                    <span className="inline-flex items-center px-2.5 py-1 rounded-pill text-xs font-medium bg-warning-soft text-warning">
-                      <IconAlertTriangle aria-hidden="true" className="w-4 h-4 mr-1" />{t('toolDetail.requiresConfirmation')}
+                    <label className="block text-sm font-medium text-gray-700 mb-1.5">{t('toolDetail.security')}</label>
+                    <span className="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium bg-amber-100 text-amber-800">
+                      <AlertTriangle aria-hidden="true" className="w-3.5 h-3.5 mr-1" />{t('toolDetail.requiresConfirmation')}
                     </span>
                   </div>
                 )}
@@ -3869,31 +3866,31 @@ export function ToolDetailDrawer({
 
               {tool.parameters && tool.parameters.length > 0 && (
                 <div>
-                  <label className="block text-sm font-medium text-fg-secondary mb-2">{t('toolDetail.params', { count: tool.parameters.length })}</label>
-                  <div className="rounded-control border border-line overflow-hidden">
+                  <label className="block text-sm font-medium text-gray-700 mb-2">{t('toolDetail.params', { count: tool.parameters.length })}</label>
+                  <div className="rounded-lg border border-gray-200 overflow-hidden">
                     <div className="overflow-x-auto">
-                      <table className="min-w-full table-fixed divide-y divide-line">
-                      <thead className="bg-subtle">
+                      <table className="table-fixed divide-y divide-gray-200 min-w-full">
+                      <thead className="bg-gray-50">
                         <tr>
-                          <th className="w-[28%] px-4 py-2 text-left text-xs font-medium text-fg-muted">{t('toolDetail.paramName')}</th>
-                          <th className="w-[16%] px-4 py-2 text-left text-xs font-medium text-fg-muted">{t('toolDetail.paramType')}</th>
-                          <th className="w-[14%] px-4 py-2 text-left text-xs font-medium text-fg-muted">{t('toolDetail.paramRequired')}</th>
-                          <th className="w-[42%] px-4 py-2 text-left text-xs font-medium text-fg-muted">{t('toolDetail.paramDesc')}</th>
+                          <th className="w-[28%] px-4 py-2 text-left text-xs font-medium text-gray-500">{t('toolDetail.paramName')}</th>
+                          <th className="w-[16%] px-4 py-2 text-left text-xs font-medium text-gray-500">{t('toolDetail.paramType')}</th>
+                          <th className="w-[14%] px-4 py-2 text-left text-xs font-medium text-gray-500">{t('toolDetail.paramRequired')}</th>
+                          <th className="w-[42%] px-4 py-2 text-left text-xs font-medium text-gray-500">{t('toolDetail.paramDesc')}</th>
                         </tr>
                       </thead>
-                      <tbody className="divide-y divide-line bg-surface">
+                      <tbody className="divide-y divide-gray-100 bg-white">
                         {tool.parameters.map((param: any, idx: number) => (
-                          <tr key={idx} className="hover:bg-hover">
+                          <tr key={idx} className="hover:bg-gray-50">
                             <td className="px-4 py-2.5 align-top">
-                              <code className="text-xs font-mono text-fg bg-subtle px-1.5 py-0.5 rounded-tag break-all">{param.name}</code>
+                              <code className="text-xs font-mono text-gray-900 bg-gray-100 px-1.5 py-0.5 rounded break-all">{param.name}</code>
                             </td>
-                            <td className="px-4 py-2.5 align-top text-xs text-fg-muted whitespace-pre-wrap break-words [overflow-wrap:anywhere]">{param.type}</td>
+                            <td className="px-4 py-2.5 align-top text-xs text-gray-500 [overflow-wrap:anywhere] whitespace-pre-wrap break-words">{param.type}</td>
                             <td className="px-4 py-2.5 align-top">
                               {param.required
-                                ? <span className="text-xs text-fg-secondary font-medium">{t('toolDetail.yes')}</span>
-                                : <span className="text-xs text-fg-muted">{t('toolDetail.no')}</span>}
+                                ? <span className="text-xs text-slate-700 font-medium">{t('toolDetail.yes')}</span>
+                                : <span className="text-xs text-gray-400">{t('toolDetail.no')}</span>}
                             </td>
-                            <td className="px-4 py-2.5 align-top text-xs text-fg-secondary whitespace-pre-wrap break-words [overflow-wrap:anywhere]">
+                            <td className="px-4 py-2.5 align-top text-xs text-gray-600 [overflow-wrap:anywhere] whitespace-pre-wrap break-words">
                               {param.description}
                             </td>
                           </tr>
@@ -3910,25 +3907,25 @@ export function ToolDetailDrawer({
                   <button
                     onClick={handleDelete}
                     disabled={deleting}
-                    className="inline-flex items-center gap-2 px-4 py-2.5 border border-danger text-danger rounded-control hover:bg-danger-soft text-sm font-medium transition-colors disabled:bg-disabled disabled:text-fg-disabled"
+                    className="inline-flex items-center gap-2 px-4 py-2.5 border border-red-300 text-red-700 rounded-lg hover:bg-red-50 text-sm font-medium transition-colors disabled:opacity-50"
                   >
-                    <IconTrash aria-hidden="true" className="w-4 h-4" />
+                    <Trash2 aria-hidden="true" className="w-4 h-4" />
                     {deleting ? t('button.deleting') : t('button.delete')}
                   </button>
                 </div>
               )}
 
               {tool.source === 'mcp' && (
-                <div className="bg-subtle border border-line rounded-control p-4">
-                  <h4 className="text-sm font-medium text-fg mb-1">{t('toolDetail.mcpToolTitle')}</h4>
-                  <p className="text-sm text-fg-secondary">{t('toolDetail.mcpToolDesc', { server: tool.source_name })}</p>
+                <div className="bg-slate-50 border border-slate-200 rounded-lg p-4">
+                  <h4 className="text-sm font-medium text-slate-900 mb-1">{t('toolDetail.mcpToolTitle')}</h4>
+                  <p className="text-sm text-slate-700">{t('toolDetail.mcpToolDesc', { server: tool.source_name })}</p>
                 </div>
               )}
             </div>
           ) : (
             <div className="space-y-4">
               <div>
-                <label className="block text-sm font-medium text-fg-secondary mb-1.5">{t('toolDetail.selectFixture')}</label>
+                <label className="block text-sm font-medium text-gray-700 mb-1.5">{t('toolDetail.selectFixture')}</label>
                 <select
                   value=""
                   disabled={fixturesLoading || fixtures.length === 0}
@@ -3938,7 +3935,7 @@ export function ToolDetailDrawer({
                       onTestParamsChange(JSON.stringify(fixtures[idx].params, null, 2));
                     }
                   }}
-                  className="ui-select w-full px-3  border border-line-control rounded-control text-sm bg-surface text-fg-muted disabled:bg-subtle disabled:cursor-not-allowed"
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm bg-white focus:outline-none focus:ring-2 focus:ring-slate-400 text-gray-500 disabled:bg-gray-50 disabled:cursor-not-allowed"
                 >
                   <option value="">
                     {fixturesLoading ? t('toolDetail.updating') : t('toolDetail.selectFixturePlaceholder')}
@@ -3951,45 +3948,45 @@ export function ToolDetailDrawer({
                 </select>
               </div>
               <div>
-                <label className="block text-sm font-medium text-fg-secondary mb-2">{t('toolDetail.testParams')}</label>
+                <label className="block text-sm font-medium text-gray-700 mb-2">{t('toolDetail.testParams')}</label>
                 <textarea
                   value={testParams}
                   onChange={(e) => onTestParamsChange(e.target.value)}
                   placeholder='{"param": "value"}'
                   rows={6}
-                  className="ui-textarea w-full px-4  border border-line-control rounded-control font-mono text-sm bg-subtle resize-none"
+                  className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-400 font-mono text-sm bg-gray-50 resize-none"
                 />
               </div>
               <button
                 onClick={onTest}
                 disabled={testing || !enabled || !canDirectTest}
-                className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-subtle text-fg rounded-control hover:bg-hover disabled:bg-disabled disabled:text-fg-disabled disabled:cursor-not-allowed font-medium text-sm transition-colors"
+                className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-slate-700 text-white rounded-lg hover:bg-slate-800 disabled:opacity-50 disabled:cursor-not-allowed font-medium text-sm transition-colors"
               >
                 {testing
-                  ? <><IconRefresh aria-hidden="true" className="w-4 h-4 animate-spin" />{t('toolDetail.executing')}</>
-                  : <><IconPlayerPlay aria-hidden="true" className="w-4 h-4" />{t('toolDetail.runTest')}</>}
+                  ? <><RefreshCw aria-hidden="true" className="w-4 h-4 animate-spin" />{t('toolDetail.executing')}</>
+                  : <><Play aria-hidden="true" className="w-4 h-4" />{t('toolDetail.runTest')}</>}
               </button>
               {!enabled && (
-                <p className="text-xs text-warning text-center">{t('toolDetail.disabledNote')}</p>
+                <p className="text-xs text-amber-600 text-center">{t('toolDetail.disabledNote')}</p>
               )}
               {canDirectTest ? null : (
-                <p className="text-xs text-warning text-center">{t('toolDetail.sessionTestOnly')}</p>
+                <p className="text-xs text-amber-600 text-center">{t('toolDetail.sessionTestOnly')}</p>
               )}
               {testResult && (
                 <div>
-                  <label className="block text-sm font-medium text-fg-secondary mb-2">{t('toolDetail.testResult')}</label>
-                  <div className={`rounded-control border p-4 ${testResult.success ? 'bg-success-soft border-success' : 'bg-danger-soft border-danger'}`}>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">{t('toolDetail.testResult')}</label>
+                  <div className={`rounded-lg border p-4 ${testResult.success ? 'bg-green-50 border-green-200' : 'bg-red-50 border-red-200'}`}>
                     <div className="flex items-center mb-2">
                       {testResult.success
-                        ? <IconCircleCheck aria-hidden="true" className="w-4 h-4 text-success mr-2" />
-                        : <IconCircleX aria-hidden="true" className="w-4 h-4 text-danger mr-2" />}
-                      <span className={`text-sm font-medium ${testResult.success ? 'text-success' : 'text-danger'}`}>
+                        ? <CheckCircle aria-hidden="true" className="w-4 h-4 text-green-600 mr-2" />
+                        : <XCircle aria-hidden="true" className="w-4 h-4 text-red-600 mr-2" />}
+                      <span className={`text-sm font-medium ${testResult.success ? 'text-green-800' : 'text-red-800'}`}>
                         {testResult.success ? t('toolDetail.execSuccess') : t('toolDetail.execFailed')}
                       </span>
                     </div>
-                    {testResult.error && <p className="text-sm text-danger mb-2">{testResult.error}</p>}
+                    {testResult.error && <p className="text-sm text-red-700 mb-2">{testResult.error}</p>}
                     {testResult.output != null && (
-                      <pre className="text-xs bg-surface p-3 rounded-control overflow-x-auto max-h-60 font-mono">
+                      <pre className="text-xs bg-white/60 p-3 rounded-md max-h-60 font-mono overflow-x-auto">
                         {typeof testResult.output === 'string'
                           ? testResult.output
                           : JSON.stringify(testResult.output, null, 2)}
@@ -4013,18 +4010,18 @@ export function ToolDetailDrawer({
 function StatusBadge({ status }: { status: string }) {
   const { t } = useTranslation('tool');
   const config: Record<string, { labelKey: string; className: string; dot: string }> = {
-    connected:    { labelKey: 'statusBadge.connected',    className: 'bg-success-soft text-success',  dot: 'bg-success' },
-    connecting:   { labelKey: 'statusBadge.connecting',   className: 'bg-warning-soft text-warning', dot: 'bg-warning animate-pulse' },
-    disconnected: { labelKey: 'statusBadge.disconnected', className: 'bg-subtle text-fg-secondary',    dot: 'bg-subtle' },
-    error:        { labelKey: 'statusBadge.error',        className: 'bg-danger-soft text-danger',      dot: 'bg-danger' },
-    failed:       { labelKey: 'statusBadge.failed',       className: 'bg-danger-soft text-danger',      dot: 'bg-danger' },
-    needs_auth:   { labelKey: 'statusBadge.needsAuth',    className: 'bg-warning-soft text-warning',  dot: 'bg-warning' },
-    disabled:     { labelKey: 'statusBadge.disabled',     className: 'bg-subtle text-fg-muted',    dot: 'bg-selected' },
+    connected:    { labelKey: 'statusBadge.connected',    className: 'bg-green-100 text-green-800',  dot: 'bg-green-500' },
+    connecting:   { labelKey: 'statusBadge.connecting',   className: 'bg-yellow-100 text-yellow-800', dot: 'bg-yellow-500 animate-pulse' },
+    disconnected: { labelKey: 'statusBadge.disconnected', className: 'bg-gray-100 text-gray-600',    dot: 'bg-gray-400' },
+    error:        { labelKey: 'statusBadge.error',        className: 'bg-red-100 text-red-800',      dot: 'bg-red-500' },
+    failed:       { labelKey: 'statusBadge.failed',       className: 'bg-red-100 text-red-800',      dot: 'bg-red-500' },
+    needs_auth:   { labelKey: 'statusBadge.needsAuth',    className: 'bg-amber-100 text-amber-800',  dot: 'bg-amber-500' },
+    disabled:     { labelKey: 'statusBadge.disabled',     className: 'bg-gray-100 text-gray-500',    dot: 'bg-gray-300' },
   };
   const c = config[status] || config.disconnected;
   return (
-    <span className={`inline-flex items-center px-2.5 py-0.5 rounded-pill text-xs font-medium ${c.className}`}>
-      <span className={`w-1.5 h-1.5 rounded-pill mr-1.5 ${c.dot}`} />
+    <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${c.className}`}>
+      <span className={`w-1.5 h-1.5 rounded-full mr-1.5 ${c.dot}`} />
       {t(c.labelKey)}
     </span>
   );
@@ -4034,16 +4031,16 @@ function StatusBadge({ status }: { status: string }) {
 function ApiStatusBadge({ status }: { status: string }) {
   const { t } = useTranslation('tool');
   const config: Record<string, { labelKey: string; className: string; dot: string }> = {
-    connected:      { labelKey: 'apiStatusBadge.connected',     className: 'bg-success-soft text-success', dot: 'bg-success' },
-    testing:        { labelKey: 'apiStatusBadge.testing',       className: 'bg-danger-soft text-danger',   dot: 'bg-danger animate-pulse' },
-    error:          { labelKey: 'apiStatusBadge.error',         className: 'bg-danger-soft text-danger',     dot: 'bg-danger' },
-    not_configured: { labelKey: 'apiStatusBadge.notConfigured', className: 'bg-warning-soft text-warning', dot: 'bg-warning' },
-    unknown:        { labelKey: 'apiStatusBadge.unknown',       className: 'bg-subtle text-fg-secondary',   dot: 'bg-subtle' },
+    connected:      { labelKey: 'apiStatusBadge.connected',     className: 'bg-green-100 text-green-800', dot: 'bg-green-500' },
+    testing:        { labelKey: 'apiStatusBadge.testing',       className: 'bg-red-100 text-red-800',   dot: 'bg-red-500 animate-pulse' },
+    error:          { labelKey: 'apiStatusBadge.error',         className: 'bg-red-100 text-red-800',     dot: 'bg-red-500' },
+    not_configured: { labelKey: 'apiStatusBadge.notConfigured', className: 'bg-amber-100 text-amber-800', dot: 'bg-amber-500' },
+    unknown:        { labelKey: 'apiStatusBadge.unknown',       className: 'bg-gray-100 text-gray-600',   dot: 'bg-gray-400' },
   };
   const c = config[status] || config.unknown;
   return (
-    <span className={`inline-flex items-center px-2.5 py-0.5 rounded-pill text-xs font-medium ${c.className}`}>
-      <span className={`w-1.5 h-1.5 rounded-pill mr-1.5 ${c.dot}`} />
+    <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${c.className}`}>
+      <span className={`w-1.5 h-1.5 rounded-full mr-1.5 ${c.dot}`} />
       {t(c.labelKey)}
     </span>
   );
@@ -4052,12 +4049,12 @@ function ApiStatusBadge({ status }: { status: string }) {
 function EnabledBadge({ enabled }: { enabled: boolean }) {
   const { t } = useTranslation('tool');
   return enabled ? (
-    <span className="inline-flex items-center px-2.5 py-0.5 rounded-pill text-xs font-medium bg-success-soft text-success">
-      <IconCircleCheck aria-hidden="true" className="w-4 h-4 mr-1" />{t('enabledBadge.enabled')}
+    <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800">
+      <CheckCircle aria-hidden="true" className="w-3 h-3 mr-1" />{t('enabledBadge.enabled')}
     </span>
   ) : (
-    <span className="inline-flex items-center px-2.5 py-0.5 rounded-pill text-xs font-medium bg-subtle text-fg-secondary">
-      <IconCircleX aria-hidden="true" className="w-4 h-4 mr-1" />{t('enabledBadge.disabled')}
+    <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-600">
+      <XCircle aria-hidden="true" className="w-3 h-3 mr-1" />{t('enabledBadge.disabled')}
     </span>
   );
 }
@@ -4068,12 +4065,12 @@ function EnabledBadge({ enabled }: { enabled: boolean }) {
 // ============================================================================
 
 const LANG_COLORS: Record<string, string> = {
-  python: 'bg-subtle text-fg-secondary',
-  typescript: 'bg-subtle text-fg-secondary',
-  go: 'bg-subtle text-fg-secondary',
-  rust: 'bg-subtle text-fg-secondary',
-  java: 'bg-subtle text-fg-secondary',
-  c: 'bg-subtle text-fg-secondary',
+  python: 'bg-red-100 text-red-700',
+  typescript: 'bg-sky-100 text-sky-700',
+  go: 'bg-cyan-100 text-cyan-700',
+  rust: 'bg-orange-100 text-orange-700',
+  java: 'bg-red-100 text-red-700',
+  c: 'bg-gray-100 text-gray-700',
 };
 
 // CatalogBrowser removed — catalog UI is now inline in MCPTabContent / APITabContent

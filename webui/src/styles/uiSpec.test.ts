@@ -10,8 +10,9 @@ import tailwindConfig from '../../tailwind.config.js'
 const tokens = readFileSync(path.join(__dirname, 'tokens.css'), 'utf8')
 
 // Exercise Tailwind's emitted CSS, not a second implementation of its config.
-// The authoritative light/dark values are separately compared with the design
-// HTML by scripts/ui_spec_check.py; this protects the utility-to-token wiring.
+// The interface follows the dev branch: Tailwind's default palette, type scale,
+// radii and shadows stay untouched, and the semantic tokens (kept for screens dev
+// does not have) stay wired to their CSS variables.
 const colorUtilities: Record<string, [string, string]> = {
   'bg-canvas': ['background-color', '--bg-canvas'],
   'bg-surface': ['background-color', '--bg-surface'],
@@ -68,14 +69,23 @@ const geometryUtilities: Record<string, [string, string]> = {
   'duration-overlay': ['transition-duration', '--motion-overlay'],
 }
 const typographyUtilities: Record<string, [string, string, string?]> = {
-  'text-xs': ['12px', '18px'],
-  'text-aux': ['12px', '18px'],
-  'text-sm': ['14px', '22px'],
-  'text-body': ['14px', '22px'],
+  'text-xs': ['0.75rem', '1rem'],
+  'text-sm': ['0.875rem', '1.25rem'],
+  'text-base': ['1rem', '1.5rem'],
+  'text-3xl': ['1.875rem', '2.25rem'],
+  'text-aux': ['12px', '16px'],
+  'text-body': ['14px', '20px'],
   'text-title-card': ['16px', '24px', '600'],
-  'text-title-section': ['20px', '28px', '600'],
+  'text-title-section': ['18px', '28px', '600'],
   'text-title-page': ['24px', '32px', '700'],
-  'text-3xl': ['28px', '36px'],
+}
+// Default Tailwind values the dev styling relies on (v2 had remapped all of them).
+const defaultUtilities: Record<string, [string, string]> = {
+  'bg-gray-50': ['background-color', 'rgb(249 250 251 / var(--tw-bg-opacity, 1))'],
+  'bg-zinc-100': ['background-color', 'rgb(244 244 245 / var(--tw-bg-opacity, 1))'],
+  'bg-primary-600': ['background-color', 'rgb(225 29 72 / var(--tw-bg-opacity, 1))'],
+  'rounded-md': ['border-radius', '0.375rem'],
+  'rounded-2xl': ['border-radius', '1rem'],
 }
 
 const declarations = new Map<string, Map<string, string>>()
@@ -84,7 +94,8 @@ beforeAll(async () => {
     ...Object.keys(colorUtilities),
     ...Object.keys(geometryUtilities),
     ...Object.keys(typographyUtilities),
-    'font-sans', 'font-mono', 'transition-colors',
+    ...Object.keys(defaultUtilities),
+    'font-sans', 'font-mono', 'transition-colors', 'shadow-sm',
   ]
   const result = await postcss([
     tailwindcss({
@@ -111,7 +122,7 @@ function lightToken(name: string) {
   return value
 }
 
-describe('Flocks UI specification utility contract', () => {
+describe('Dev-based theme contract', () => {
   it('emits every semantic colour as its theme-aware token', () => {
     for (const [utility, [name, token]] of Object.entries(colorUtilities)) {
       expect(property(utility, name), utility).toBe(`var(${token})`)
@@ -122,20 +133,18 @@ describe('Flocks UI specification utility contract', () => {
     for (const [utility, [name, token]] of Object.entries(geometryUtilities)) {
       expect(property(utility, name), utility).toBe(`var(${token})`)
     }
-    expect(property('transition-colors', 'transition-duration')).toBe('var(--motion-normal)')
-    expect(property('transition-colors', 'transition-timing-function')).toBe('var(--motion-easing)')
+    expect(property('transition-colors', 'transition-duration')).toBe('150ms')
+    expect(property('transition-colors', 'transition-timing-function')).toBe('cubic-bezier(0.4, 0, 0.2, 1)')
   })
 
-  it('preserves component dimensions that the design specifies outside its token table', () => {
-    // The HTML examples and UI_SPEC.md specify these dimensions directly;
-    // implementation tokens must not drift just because the HTML has no alias.
+  it('keeps the overlay sizes the remaining token users depend on', () => {
     expect(lightToken('--radius-segment')).toBe('6px')
     expect(lightToken('--overlay-modal')).toBe('560px')
     expect(lightToken('--overlay-drawer')).toBe('480px')
     expect(lightToken('--overlay-onboarding')).toBe('768px')
   })
 
-  it('keeps the 14/22 body, 12/18 auxiliary and heading/metric scales', () => {
+  it('keeps the Tailwind default type scale beside the semantic aliases', () => {
     for (const [utility, [size, lineHeight, weight]] of Object.entries(typographyUtilities)) {
       expect(property(utility, 'font-size'), utility).toBe(size)
       expect(property(utility, 'line-height'), utility).toBe(lineHeight)
@@ -152,5 +161,12 @@ describe('Flocks UI specification utility contract', () => {
       expect(utility, `font-${family}`).toBeTruthy()
       expect(normalize(utility!)).toBe(normalize(baseline!))
     }
+  })
+
+  it('does not remap the default palette, radii or small shadows', () => {
+    for (const [utility, [name, value]] of Object.entries(defaultUtilities)) {
+      expect(property(utility, name), utility).toBe(value)
+    }
+    expect(property('shadow-sm', '--tw-shadow')).not.toBe('none')
   })
 })

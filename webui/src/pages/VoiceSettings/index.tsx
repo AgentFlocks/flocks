@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { IconCircleCheck, IconCircleX, IconLoader2, IconMicrophone } from '@tabler/icons-react';
+import { CheckCircle, Loader2, Mic, XCircle } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import PageHeader from '@/components/common/PageHeader';
 import { voiceApi, VOICE_STATUS_CHANGED, type VoiceCaptureMode, type VoiceRecognitionScene, type VoiceSettings, type VoiceSettingsUpdate } from '@/api/voice';
@@ -58,13 +58,13 @@ export default function VoiceSettingsPage() {
   return (
     <div className="space-y-6">
       <PageHeader title={t('settings.title')} description={t('settings.description')} />
-      {loading && <div role="status" className="flex items-center gap-2 text-sm text-fg-secondary"><IconLoader2 aria-hidden="true" className="h-4 w-4 animate-spin" />{t('settings.loading')}</div>}
-      {error && <p role="alert" className="flex items-start gap-2 rounded-control bg-danger-soft px-3 py-2 text-sm text-danger"><IconCircleX aria-hidden="true" className="mt-0.5 h-4 w-4 shrink-0" />{error}</p>}
+      {loading && <div role="status" className="flex items-center gap-2 text-sm text-fg-secondary"><Loader2 aria-hidden="true" className="h-4 w-4 animate-spin" />{t('settings.loading')}</div>}
+      {error && <p role="alert" className="flex items-start gap-2 rounded-control bg-danger-soft px-3 py-2 text-sm text-danger"><XCircle aria-hidden="true" className="mt-0.5 h-4 w-4 shrink-0" />{error}</p>}
       {settings && (
         <section className="ui-card space-y-6">
           <div className="flex items-start justify-between gap-4">
             <div className="min-w-0">
-              <h2 className="flex items-center gap-2 text-base font-semibold text-fg"><IconMicrophone aria-hidden="true" className="h-4 w-4 shrink-0" />{t('settings.enable')}</h2>
+              <h2 className="flex items-center gap-2 text-base font-semibold text-fg"><Mic aria-hidden="true" className="h-4 w-4 shrink-0" />{t('settings.enable')}</h2>
               <p id="voice-enable-help" className="mt-2 text-sm text-fg-secondary">{t('settings.enableHelp')}</p>
             </div>
             <div className="flex shrink-0 items-center gap-2">
@@ -170,7 +170,7 @@ export default function VoiceSettingsPage() {
             <button type="submit" disabled={saving || Boolean(hotwordError)} className="ui-btn ui-btn-primary">{t('settings.saveRecognition')}</button>
           </form>
           <p className="text-xs text-fg-muted">{t('settings.privacy')}</p>
-          {notice && <p role="status" className="flex items-start gap-2 rounded-control bg-success-soft px-3 py-2 text-sm text-success"><IconCircleCheck aria-hidden="true" className="mt-0.5 h-4 w-4 shrink-0" />{notice}</p>}
+          {notice && <p role="status" className="flex items-start gap-2 rounded-control bg-success-soft px-3 py-2 text-sm text-success"><CheckCircle aria-hidden="true" className="mt-0.5 h-4 w-4 shrink-0" />{notice}</p>}
         </section>
       )}
     </div>

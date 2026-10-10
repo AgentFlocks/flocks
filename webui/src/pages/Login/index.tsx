@@ -4,7 +4,7 @@ import { useAuth } from '@/contexts/AuthContext';
 import PasswordInput from '@/components/common/PasswordInput';
 import AuthLayout from '@/components/layout/AuthLayout';
 import { useProductName } from '@/contexts/ProductNameContext';
-import { IconCircleX } from '@tabler/icons-react';
+import { XCircle } from 'lucide-react';
 
 export default function LoginPage() {
   const { t } = useTranslation('auth');
@@ -37,26 +37,26 @@ export default function LoginPage() {
     <AuthLayout>
       <form
         onSubmit={onSubmit}
-        className="w-full max-w-md bg-surface border border-line rounded-card p-6 shadow-sm space-y-4 "
+        className="w-full max-w-md bg-white border border-gray-200 rounded-xl p-6 shadow-sm space-y-4 dark:border-[#4a5563] dark:bg-[#303842] dark:shadow-xl dark:shadow-black/20"
       >
         <div>
-          <h1 className="text-title-page font-bold text-fg">{t('login.title', { productName })}</h1>
-          <p className="text-sm text-fg-muted mt-1 ">{t('login.description', { productName })}</p>
+          <h1 className="text-xl font-semibold text-gray-900 dark:text-[#d7dee8]">{t('login.title', { productName })}</h1>
+          <p className="text-sm text-gray-500 mt-1 dark:text-[#b8c2cc]">{t('login.description', { productName })}</p>
         </div>
         <div>
-          <label htmlFor="login-username" className="ui-label">{t('fields.username')}</label>
+          <label htmlFor="login-username" className="text-sm text-gray-700 block mb-1 dark:text-[#d7dee8]">{t('fields.username')}</label>
           <input
             id="login-username"
             value={username}
             onChange={(e) => setUsername(e.target.value)}
-            className="ui-input"
+            className="w-full border border-gray-300 rounded-lg px-3 py-2 outline-none focus:border-blue-500 dark:border-[#4a5563] dark:bg-[#252c35] dark:text-[#d7dee8] dark:placeholder:text-[#9aa7b4] dark:focus:border-[#539bf5]"
             placeholder={t('fields.usernamePlaceholder')}
             autoComplete="username"
             required
           />
         </div>
         <div>
-          <label htmlFor="login-password" className="ui-label">{t('fields.password')}</label>
+          <label htmlFor="login-password" className="text-sm text-gray-700 block mb-1 dark:text-[#d7dee8]">{t('fields.password')}</label>
           <PasswordInput
             id="login-password"
             value={password}
@@ -67,28 +67,28 @@ export default function LoginPage() {
           />
         </div>
         {error && (
-          <div role="alert" className="flex items-start gap-2 text-sm text-danger bg-danger-soft border border-danger rounded-control px-3 py-2">
-            <IconCircleX aria-hidden="true" className="mt-0.5 h-4 w-4 shrink-0" />
+          <div role="alert" className="text-sm text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2 dark:border-red-400/30 dark:bg-red-500/15 dark:text-red-200">
+            <XCircle aria-hidden="true" className="mt-0.5 h-4 w-4 shrink-0" />
             <span>{error}</span>
           </div>
         )}
         <button
           type="submit"
           disabled={submitting}
-          className="ui-btn ui-btn-primary ui-btn-lg w-full"
+          className="w-full bg-slate-900 text-white rounded-lg py-2.5 font-medium hover:bg-slate-800 disabled:opacity-60 dark:bg-[#46515e] dark:hover:bg-[#5a6573]"
         >
           {submitting ? t('actions.loggingIn') : t('actions.login')}
         </button>
-        <div className="space-y-2 text-xs text-fg-muted border-t border-line pt-3 ">
+        <div className="space-y-2 text-xs text-gray-500 border-t border-gray-100 pt-3 dark:border-[#4a5563] dark:text-[#b8c2cc]">
           <div>
             {t('login.recoverUsername', { productName })}
             {' '}
-            <code className="rounded-tag bg-subtle px-1.5 py-0.5 text-fg-secondary ">flocks admin list-users</code>
+            <code className="rounded bg-gray-100 px-1.5 py-0.5 text-gray-700 dark:bg-[#46515e] dark:text-[#d7dee8]">flocks admin list-users</code>
           </div>
           <div>
             {t('login.recoverPassword')}
             {' '}
-            <code className="rounded-tag bg-subtle px-1.5 py-0.5 text-fg-secondary ">flocks admin generate-one-time-password --username admin</code>
+            <code className="rounded bg-gray-100 px-1.5 py-0.5 text-gray-700 dark:bg-[#46515e] dark:text-[#d7dee8]">flocks admin generate-one-time-password --username admin</code>
           </div>
         </div>
       </form>

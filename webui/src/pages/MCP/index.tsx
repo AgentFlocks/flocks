@@ -1,18 +1,18 @@
 import { useState, useEffect, useMemo } from 'react';
 import {
-  IconServer,
-  IconRefresh,
-  IconPower,
-  IconPlugOff,
-  IconTool,
-  IconFileText,
-  IconDownload,
-  IconSearch,
-  IconExternalLink,
-  IconStar,
-  IconShield,
-  IconTag,
-} from '@tabler/icons-react';
+  Download,
+  ExternalLink,
+  FileText,
+  Power,
+  PowerOff,
+  RefreshCw,
+  Search,
+  Server,
+  Shield,
+  Star,
+  Tag,
+  Wrench,
+} from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import PageHeader from '@/components/common/PageHeader';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
@@ -24,12 +24,12 @@ import { getCatalogDescription } from '@/utils/mcpCatalog';
 type TabType = 'servers' | 'catalog';
 
 const LANG_COLORS: Record<string, string> = {
-  python: 'bg-subtle text-fg-secondary',
-  typescript: 'bg-subtle text-fg-secondary',
-  go: 'bg-subtle text-fg-secondary',
-  rust: 'bg-subtle text-fg-secondary',
-  java: 'bg-subtle text-fg-secondary',
-  c: 'bg-subtle text-fg-secondary',
+  python: 'bg-red-100 text-red-700',
+  typescript: 'bg-sky-100 text-sky-700',
+  go: 'bg-cyan-100 text-cyan-700',
+  rust: 'bg-orange-100 text-orange-700',
+  java: 'bg-red-100 text-red-700',
+  c: 'bg-gray-100 text-gray-700',
 };
 
 export default function MCPPage() {
@@ -41,20 +41,20 @@ export default function MCPPage() {
       <PageHeader tone="data"
         title={t('pageTitle')}
         description={t('pageDescription')}
-        icon={<IconServer aria-hidden="true" className="w-8 h-8" />}
+        icon={<Server aria-hidden="true" className="w-8 h-8" />}
       />
 
-      <div className="flex gap-1 mb-6 border-b border-line">
+      <div className="flex gap-1 mb-6 border-b border-gray-200">
         <button
           onClick={() => setTab('servers')}
           className={`px-4 py-2.5 text-sm font-medium border-b-2 transition-colors ${
             tab === 'servers'
-              ? 'border-danger text-danger'
-              : 'border-transparent text-fg-muted hover:text-fg-secondary'
+              ? 'border-red-600 text-red-600'
+              : 'border-transparent text-gray-500 hover:text-gray-700'
           }`}
         >
           <div className="flex items-center gap-2">
-            <IconServer aria-hidden="true" className="w-4 h-4" />
+            <Server aria-hidden="true" className="w-4 h-4" />
             {t('tabs.myServers')}
           </div>
         </button>
@@ -62,12 +62,12 @@ export default function MCPPage() {
           onClick={() => setTab('catalog')}
           className={`px-4 py-2.5 text-sm font-medium border-b-2 transition-colors ${
             tab === 'catalog'
-              ? 'border-danger text-danger'
-              : 'border-transparent text-fg-muted hover:text-fg-secondary'
+              ? 'border-red-600 text-red-600'
+              : 'border-transparent text-gray-500 hover:text-gray-700'
           }`}
         >
           <div className="flex items-center gap-2">
-            <IconDownload aria-hidden="true" className="w-4 h-4" />
+            <Download aria-hidden="true" className="w-4 h-4" />
             {t('tabs.catalog')}
           </div>
         </button>
@@ -133,8 +133,8 @@ function ServersTab() {
   if (error) return (
     <div className="flex items-center justify-center h-64">
       <div className="text-center">
-        <p className="text-danger mb-4">{error}</p>
-        <button onClick={fetchServers} className="px-4 py-2 bg-action text-action-fg rounded-control hover:bg-action-hover">Retry</button>
+        <p className="text-red-600 mb-4">{error}</p>
+        <button onClick={fetchServers} className="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700">Retry</button>
       </div>
     </div>
   );
@@ -142,41 +142,41 @@ function ServersTab() {
   return (
     <>
       <div className="flex items-center justify-between mb-4">
-        <div className="text-sm text-fg-secondary">{t('servers.count', { count: servers.length })}</div>
-        <button onClick={fetchServers} className="flex items-center gap-2 px-4 py-2 bg-action text-action-fg rounded-control hover:bg-action-hover">
-          <IconRefresh aria-hidden="true" className="w-4 h-4" /> {t('servers.refresh')}
+        <div className="text-sm text-gray-600">{t('servers.count', { count: servers.length })}</div>
+        <button onClick={fetchServers} className="flex items-center gap-2 px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700">
+          <RefreshCw aria-hidden="true" className="w-4 h-4" /> {t('servers.refresh')}
         </button>
       </div>
 
       <div className="flex gap-6 flex-1 overflow-hidden">
         <div className="w-96 flex-col overflow-y-auto space-y-3">
           {servers.length === 0 ? (
-            <EmptyState icon={<IconServer aria-hidden="true" className="w-8 h-8" />} title={t('servers.empty')} description={t('servers.emptyHint')} />
+            <EmptyState icon={<Server aria-hidden="true" className="w-12 h-12" />} title={t('servers.empty')} description={t('servers.emptyHint')} />
           ) : (
             servers.map((s) => (
               <div key={s.name} onClick={() => handleSelectServer(s)}
-                className={`bg-surface rounded-control shadow-sm border-2 p-4 cursor-pointer transition-all ${selectedServer?.name === s.name ? 'border-danger ring-2 ring-focus' : 'border-line hover:border-line-control'}`}>
+                className={`bg-white rounded-lg shadow-sm border-2 p-4 cursor-pointer transition-all ${selectedServer?.name === s.name ? 'border-red-500 ring-2 ring-red-200' : 'border-gray-200 hover:border-gray-300'}`}>
                 <div className="flex items-start justify-between mb-2">
-                  <h3 className="font-semibold text-fg">{s.name}</h3>
-                  <span className={`px-2 py-1 rounded-pill text-xs font-medium ${s.status === 'connected' ? 'bg-success-soft text-success' : s.status === 'error' ? 'bg-danger-soft text-danger' : 'bg-subtle text-fg-secondary'}`}>
+                  <h3 className="font-semibold text-gray-900">{s.name}</h3>
+                  <span className={`px-2 py-1 rounded-full text-xs font-medium ${s.status === 'connected' ? 'bg-green-100 text-green-800' : s.status === 'error' ? 'bg-red-100 text-red-800' : 'bg-gray-100 text-gray-600'}`}>
                     {s.status === 'connected' ? t('servers.connected') : s.status === 'error' ? t('servers.error') : t('servers.disconnected')}
                   </span>
                 </div>
-                {s.url && <p className="text-sm text-fg-secondary mb-3 font-mono">{s.url}</p>}
-                <div className="flex items-center gap-4 text-sm text-fg-secondary mb-3">
+                {s.url && <p className="text-sm text-gray-600 mb-3 font-mono">{s.url}</p>}
+                <div className="flex items-center gap-4 text-sm text-gray-600 mb-3">
                   <span>{s.tools.length} {t('servers.tools')}</span>
                   <span>{s.resources.length} {t('servers.resources')}</span>
                 </div>
                 <div className="flex items-center gap-2">
                   {s.status === 'connected' ? (
                     <button onClick={(e) => { e.stopPropagation(); handleDisconnect(s.name); }}
-                      className="flex-1 flex items-center justify-center gap-2 px-3 py-2 border border-line-control text-fg-secondary rounded-control hover:bg-hover">
-                      <IconPlugOff aria-hidden="true" className="w-4 h-4" /> {t('servers.disconnect')}
+                      className="flex-1 flex items-center justify-center gap-2 px-3 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50">
+                      <PowerOff aria-hidden="true" className="w-4 h-4" /> {t('servers.disconnect')}
                     </button>
                   ) : (
                     <button onClick={(e) => { e.stopPropagation(); handleConnect(s.name); }}
-                      className="flex-1 flex items-center justify-center gap-2 px-3 py-2 bg-action text-action-fg rounded-control hover:bg-action-hover">
-                      <IconPower aria-hidden="true" className="w-4 h-4" /> {t('servers.connect')}
+                      className="flex-1 flex items-center justify-center gap-2 px-3 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700">
+                      <Power aria-hidden="true" className="w-4 h-4" /> {t('servers.connect')}
                     </button>
                   )}
                 </div>
@@ -186,31 +186,31 @@ function ServersTab() {
         </div>
 
         {selectedServer && (
-          <div className="flex-1 bg-surface rounded-control shadow-sm border border-line overflow-hidden">
-            <div className="px-6 py-4 border-b border-line">
-              <h2 className="text-xl font-semibold text-fg">{selectedServer.name}</h2>
-              <p className="text-sm text-fg-secondary mt-1">{selectedServer.url}</p>
+          <div className="flex-1 bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden">
+            <div className="px-6 py-4 border-b border-gray-200">
+              <h2 className="text-xl font-semibold text-gray-900">{selectedServer.name}</h2>
+              <p className="text-sm text-gray-600 mt-1">{selectedServer.url}</p>
             </div>
             <div className="p-6 overflow-y-auto">
               <div className="mb-6">
                 <div className="flex items-center gap-2 mb-3">
-                  <IconTool aria-hidden="true" className="w-5 h-5 text-fg-secondary" />
-                  <h3 className="text-title-card font-semibold text-fg">{t('servers.tools')} ({selectedServer.tools.length})</h3>
+                  <Wrench aria-hidden="true" className="w-5 h-5 text-gray-700" />
+                  <h3 className="text-lg font-semibold text-gray-900">{t('servers.tools')} ({selectedServer.tools.length})</h3>
                 </div>
-                {selectedServer.tools.length === 0 ? <p className="text-sm text-fg-secondary">{t('servers.noTools')}</p> : (
+                {selectedServer.tools.length === 0 ? <p className="text-sm text-gray-600">{t('servers.noTools')}</p> : (
                   <div className="grid grid-cols-2 gap-2">
-                    {selectedServer.tools.map((tool) => <div key={tool} className="px-3 py-2 bg-subtle border border-line rounded-control text-sm">{tool}</div>)}
+                    {selectedServer.tools.map((tool) => <div key={tool} className="px-3 py-2 bg-gray-50 border border-gray-200 rounded-lg text-sm">{tool}</div>)}
                   </div>
                 )}
               </div>
               <div>
                 <div className="flex items-center gap-2 mb-3">
-                  <IconFileText aria-hidden="true" className="w-5 h-5 text-fg-secondary" />
-                  <h3 className="text-title-card font-semibold text-fg">{t('servers.resources')} ({selectedServer.resources.length})</h3>
+                  <FileText aria-hidden="true" className="w-5 h-5 text-gray-700" />
+                  <h3 className="text-lg font-semibold text-gray-900">{t('servers.resources')} ({selectedServer.resources.length})</h3>
                 </div>
-                {selectedServer.resources.length === 0 ? <p className="text-sm text-fg-secondary">{t('servers.noResources')}</p> : (
+                {selectedServer.resources.length === 0 ? <p className="text-sm text-gray-600">{t('servers.noResources')}</p> : (
                   <div className="grid grid-cols-2 gap-2">
-                    {selectedServer.resources.map((r) => <div key={r} className="px-3 py-2 bg-subtle border border-line rounded-control text-sm">{r}</div>)}
+                    {selectedServer.resources.map((r) => <div key={r} className="px-3 py-2 bg-gray-50 border border-gray-200 rounded-lg text-sm">{r}</div>)}
                   </div>
                 )}
               </div>
@@ -309,17 +309,17 @@ function CatalogTab() {
         <div className="space-y-1">
           <button
             onClick={() => setSelectedCategory('all')}
-            className={`w-full text-left px-3 py-2 rounded-control text-sm transition-colors ${selectedCategory === 'all' ? 'bg-danger-soft text-danger font-medium' : 'text-fg-secondary hover:bg-hover'}`}
+            className={`w-full text-left px-3 py-2 rounded-lg text-sm transition-colors ${selectedCategory === 'all' ? 'bg-red-50 text-red-700 font-medium' : 'text-gray-600 hover:bg-gray-50'}`}
           >
-            {t('catalog.all')} <span className="text-fg-muted ml-1">({categoryCounts.all || 0})</span>
+            {t('catalog.all')} <span className="text-gray-400 ml-1">({categoryCounts.all || 0})</span>
           </button>
           {Object.entries(categories).map(([id, cat]) => (
             <button
               key={id}
               onClick={() => setSelectedCategory(id)}
-              className={`w-full text-left px-3 py-2 rounded-control text-sm transition-colors ${selectedCategory === id ? 'bg-danger-soft text-danger font-medium' : 'text-fg-secondary hover:bg-hover'}`}
+              className={`w-full text-left px-3 py-2 rounded-lg text-sm transition-colors ${selectedCategory === id ? 'bg-red-50 text-red-700 font-medium' : 'text-gray-600 hover:bg-gray-50'}`}
             >
-              {t(`categories.${id}`, { defaultValue: cat.label })} <span className="text-fg-muted ml-1">({categoryCounts[id] || 0})</span>
+              {t(`categories.${id}`, { defaultValue: cat.label })} <span className="text-gray-400 ml-1">({categoryCounts[id] || 0})</span>
             </button>
           ))}
         </div>
@@ -329,17 +329,17 @@ function CatalogTab() {
       <div className="flex-1 flex flex-col overflow-hidden">
         {/* Search */}
         <div className="relative mb-4">
-          <IconSearch aria-hidden="true" className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-fg-muted" />
+          <Search aria-hidden="true" className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
           <input
             type="text"
             placeholder={t('catalog.searchPlaceholder')}
             value={searchQuery}
             onChange={e => setSearchQuery(e.target.value)}
-            className="ui-input w-full pl-10 pr-4  border border-line rounded-control text-sm focus:border-transparent"
+            className="w-full pl-10 pr-4 py-2.5 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-red-500 focus:border-transparent"
           />
         </div>
 
-        <div className="text-xs text-fg-muted mb-3">
+        <div className="text-xs text-gray-500 mb-3">
           {t('catalog.toolCount', { count: filtered.length })}
           {selectedCategory !== 'all' && categories[selectedCategory] && (
             <span> · {t(`categories.${selectedCategory}`, { defaultValue: categories[selectedCategory].label })}</span>
@@ -353,36 +353,36 @@ function CatalogTab() {
               <div
                 key={entry.id}
                 onClick={() => setSelectedEntry(entry)}
-                className={`bg-surface rounded-control border-2 p-4 cursor-pointer transition-all ${selectedEntry?.id === entry.id ? 'border-danger ring-2 ring-focus' : 'border-line hover:border-line-control'}`}
+                className={`bg-white rounded-lg border-2 p-4 cursor-pointer transition-all hover:shadow-md ${selectedEntry?.id === entry.id ? 'border-red-500 ring-2 ring-red-200' : 'border-gray-200 hover:border-gray-300'}`}
               >
                 <div className="flex items-start justify-between mb-2">
                   <div className="flex items-center gap-2">
-                    <h3 className="font-semibold text-fg text-sm">{entry.name}</h3>
-                    {entry.official && <span className="px-1.5 py-0.5 bg-warning-soft text-warning rounded-tag text-xs font-medium">{t('catalog.official')}</span>}
+                    <h3 className="font-semibold text-gray-900 text-sm">{entry.name}</h3>
+                    {entry.official && <span className="px-1.5 py-0.5 bg-yellow-100 text-yellow-700 rounded text-[10px] font-medium">{t('catalog.official')}</span>}
                   </div>
-                  <div className="flex items-center gap-1 text-xs text-fg-muted">
-                    <IconStar aria-hidden="true" className="w-4 h-4" />
+                  <div className="flex items-center gap-1 text-xs text-gray-400">
+                    <Star aria-hidden="true" className="w-3 h-3" />
                     {entry.stars}
                   </div>
                 </div>
-                <p className="text-xs text-fg-secondary mb-3 line-clamp-2">{getCatalogDescription(entry, i18n.language)}</p>
+                <p className="text-xs text-gray-600 mb-3 line-clamp-2">{getCatalogDescription(entry, i18n.language)}</p>
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-2">
-                    <span className={`px-2 py-0.5 rounded-tag text-xs font-medium ${LANG_COLORS[entry.language] || 'bg-subtle text-fg-secondary'}`}>
+                    <span className={`px-2 py-0.5 rounded text-[10px] font-medium ${LANG_COLORS[entry.language] || 'bg-gray-100 text-gray-600'}`}>
                       {entry.language}
                     </span>
                     {Object.values(entry.env_vars).some(v => v.secret) && (
-                      <span className="flex items-center gap-0.5 text-xs text-warning">
-                        <IconShield aria-hidden="true" className="w-4 h-4" /> {t('catalog.requiresSecret')}
+                      <span className="flex items-center gap-0.5 text-[10px] text-amber-600">
+                        <Shield aria-hidden="true" className="w-3 h-3" /> {t('catalog.requiresSecret')}
                       </span>
                     )}
                   </div>
                   <button
                     onClick={(e) => { e.stopPropagation(); handleInstall(entry); }}
                     disabled={installing === entry.id}
-                    className="flex items-center gap-1 px-3 py-1.5 bg-action text-action-fg rounded-control text-xs hover:bg-action-hover disabled:bg-disabled disabled:text-fg-disabled"
+                    className="flex items-center gap-1 px-3 py-1.5 bg-red-600 text-white rounded-lg text-xs hover:bg-red-700 disabled:opacity-50"
                   >
-                    <IconDownload aria-hidden="true" className="w-4 h-4" />
+                    <Download aria-hidden="true" className="w-3 h-3" />
                     {installing === entry.id ? t('catalog.installing') : t('catalog.install')}
                   </button>
                 </div>
@@ -390,51 +390,51 @@ function CatalogTab() {
             ))}
           </div>
           {filtered.length === 0 && (
-            <EmptyState icon={<IconSearch aria-hidden="true" className="w-8 h-8" />} title={t('catalog.noResults')} description={t('catalog.noResultsHint')} />
+            <EmptyState icon={<Search aria-hidden="true" className="w-12 h-12" />} title={t('catalog.noResults')} description={t('catalog.noResultsHint')} />
           )}
         </div>
       </div>
 
       {/* Right: detail panel */}
       {selectedEntry && (
-        <div className="w-80 flex-shrink-0 bg-surface rounded-control border border-line overflow-hidden flex flex-col">
-          <div className="px-5 py-4 border-b border-line">
+        <div className="w-80 bg-white rounded-lg border border-gray-200 flex flex-col flex-shrink-0 overflow-hidden">
+          <div className="px-5 py-4 border-b border-gray-200">
             <div className="flex items-center gap-2">
-              <h2 className="text-title-section font-semibold text-fg">{selectedEntry.name}</h2>
-              {selectedEntry.official && <span className="px-1.5 py-0.5 bg-warning-soft text-warning rounded-tag text-xs font-medium">{t('catalog.official')}</span>}
+              <h2 className="text-lg font-semibold text-gray-900">{selectedEntry.name}</h2>
+              {selectedEntry.official && <span className="px-1.5 py-0.5 bg-yellow-100 text-yellow-700 rounded text-[10px] font-medium">{t('catalog.official')}</span>}
             </div>
-            <p className="text-sm text-fg-secondary mt-1">{getCatalogDescription(selectedEntry, i18n.language)}</p>
+            <p className="text-sm text-gray-600 mt-1">{getCatalogDescription(selectedEntry, i18n.language)}</p>
           </div>
 
           <div className="flex-1 overflow-y-auto p-5 space-y-5">
             {/* Meta */}
             <div className="grid grid-cols-2 gap-3 text-sm">
               <div>
-                <span className="text-fg-muted text-xs">{t('catalog.language')}</span>
-                <p className="font-medium text-fg-secondary">{selectedEntry.language}</p>
+                <span className="text-gray-400 text-xs">{t('catalog.language')}</span>
+                <p className="font-medium text-gray-700">{selectedEntry.language}</p>
               </div>
               <div>
-                <span className="text-fg-muted text-xs">{t('catalog.license')}</span>
-                <p className="font-medium text-fg-secondary">{selectedEntry.license}</p>
+                <span className="text-gray-400 text-xs">{t('catalog.license')}</span>
+                <p className="font-medium text-gray-700">{selectedEntry.license}</p>
               </div>
               <div>
-                <span className="text-fg-muted text-xs">{t('catalog.transport')}</span>
-                <p className="font-medium text-fg-secondary">{selectedEntry.transport}</p>
+                <span className="text-gray-400 text-xs">{t('catalog.transport')}</span>
+                <p className="font-medium text-gray-700">{selectedEntry.transport}</p>
               </div>
               <div>
-                <span className="text-fg-muted text-xs">Stars</span>
-                <p className="font-medium text-fg-secondary">{selectedEntry.stars}</p>
+                <span className="text-gray-400 text-xs">Stars</span>
+                <p className="font-medium text-gray-700">{selectedEntry.stars}</p>
               </div>
             </div>
 
             {/* Tags */}
             <div>
-                <div className="flex items-center gap-1 text-xs text-fg-muted mb-2">
-                <IconTag aria-hidden="true" className="w-4 h-4" /> {t('catalog.tags')}
+                <div className="flex items-center gap-1 text-xs text-gray-400 mb-2">
+                <Tag aria-hidden="true" className="w-3 h-3" /> {t('catalog.tags')}
               </div>
               <div className="flex flex-wrap gap-1.5">
                 {selectedEntry.tags.map(tag => (
-                  <span key={tag} className="px-2 py-0.5 bg-subtle text-fg-secondary rounded-tag text-xs">{tag}</span>
+                  <span key={tag} className="px-2 py-0.5 bg-gray-100 text-gray-600 rounded text-xs">{tag}</span>
                 ))}
               </div>
             </div>
@@ -442,18 +442,18 @@ function CatalogTab() {
             {/* Env Vars */}
             {Object.keys(selectedEntry.env_vars).length > 0 && (
               <div>
-                <div className="flex items-center gap-1 text-xs text-fg-muted mb-2">
-                  <IconShield aria-hidden="true" className="w-4 h-4" /> {t('catalog.envVars')}
+                <div className="flex items-center gap-1 text-xs text-gray-400 mb-2">
+                  <Shield aria-hidden="true" className="w-3 h-3" /> {t('catalog.envVars')}
                 </div>
                 <div className="space-y-2">
                   {Object.entries(selectedEntry.env_vars).map(([key, spec]) => (
                     <div key={key} className="text-xs">
                       <div className="flex items-center gap-1">
-                        <code className="font-mono text-fg bg-subtle px-1.5 py-0.5 rounded-tag">{key}</code>
-                        {spec.required && <span className="text-danger">*</span>}
-                        {spec.secret && <IconShield aria-hidden="true" className="w-4 h-4 text-warning" />}
+                        <code className="font-mono text-gray-800 bg-gray-50 px-1.5 py-0.5 rounded">{key}</code>
+                        {spec.required && <span className="text-red-500">*</span>}
+                        {spec.secret && <Shield aria-hidden="true" className="w-3 h-3 text-amber-500" />}
                       </div>
-                      <p className="text-fg-muted mt-0.5">{spec.description}</p>
+                      <p className="text-gray-500 mt-0.5">{spec.description}</p>
                     </div>
                   ))}
                 </div>
@@ -463,10 +463,10 @@ function CatalogTab() {
             {/* System deps */}
             {selectedEntry.system_deps.length > 0 && (
               <div>
-                <div className="text-xs text-fg-muted mb-2">{t('catalog.systemDeps')}</div>
+                <div className="text-xs text-gray-400 mb-2">{t('catalog.systemDeps')}</div>
                 <div className="flex flex-wrap gap-1.5">
                   {selectedEntry.system_deps.map(dep => (
-                    <span key={dep} className="px-2 py-0.5 bg-warning-soft text-warning rounded-tag text-xs">{dep}</span>
+                    <span key={dep} className="px-2 py-0.5 bg-orange-50 text-orange-600 rounded text-xs">{dep}</span>
                   ))}
                 </div>
               </div>
@@ -475,8 +475,8 @@ function CatalogTab() {
             {/* Install command */}
             {selectedEntry.install.local_command && (
               <div>
-                <div className="text-xs text-fg-muted mb-2">{t('catalog.startCommand')}</div>
-                <code className="block text-xs bg-subtle text-success rounded-control p-3 font-mono overflow-x-auto">
+                <div className="text-xs text-gray-400 mb-2">{t('catalog.startCommand')}</div>
+                <code className="block text-xs bg-gray-900 text-green-400 rounded-lg p-3 font-mono overflow-x-auto">
                   {selectedEntry.install.local_command.join(' ')}
                 </code>
               </div>
@@ -487,21 +487,21 @@ function CatalogTab() {
               href={`https://github.com/${selectedEntry.github}`}
               target="_blank"
               rel="noopener noreferrer"
-              className="flex items-center gap-2 text-sm text-danger hover:text-danger"
+              className="flex items-center gap-2 text-sm text-red-600 hover:text-red-700"
             >
-              <IconExternalLink aria-hidden="true" className="w-4 h-4" />
+              <ExternalLink aria-hidden="true" className="w-4 h-4" />
               {t('catalog.githubRepo')}
             </a>
           </div>
 
           {/* Install button */}
-          <div className="p-4 border-t border-line">
+          <div className="p-4 border-t border-gray-200">
             <button
               onClick={() => handleInstall(selectedEntry)}
               disabled={installing === selectedEntry.id}
-              className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-action text-action-fg rounded-control hover:bg-action-hover disabled:bg-disabled disabled:text-fg-disabled font-medium"
+              className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-red-600 text-white rounded-lg hover:bg-red-700 disabled:opacity-50 font-medium"
             >
-              <IconDownload aria-hidden="true" className="w-4 h-4" />
+              <Download aria-hidden="true" className="w-4 h-4" />
               {installing === selectedEntry.id ? t('catalog.installing') : t('catalog.addToMyServers')}
             </button>
           </div>

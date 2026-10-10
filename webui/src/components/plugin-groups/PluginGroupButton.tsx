@@ -1,6 +1,4 @@
-import {
-  IconFolderDown,
-} from '@tabler/icons-react';
+import { FolderInput } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import type { GroupDrag } from './GroupNav';
 
@@ -25,11 +23,11 @@ export default function PluginGroupButton({ grouping, itemKey, className = '', i
         event.stopPropagation();
         grouping.requestMove(itemKey);
       }}
-      className={`inline-flex shrink-0 items-center rounded-control text-fg-muted hover:bg-hover hover:text-fg-secondary ${
-        iconOnly ? 'ui-btn-icon justify-center' : 'gap-1 px-1.5 py-1 text-xs'
+      className={`inline-flex shrink-0 items-center rounded text-[11px] text-gray-500 hover:bg-gray-100 hover:text-gray-700 ${
+        iconOnly ? 'h-7 w-7 justify-center' : 'gap-1 px-1.5 py-1'
       } ${className}`}
     >
-      <IconFolderDown className={iconOnly ? 'h-4 w-4' : 'h-3.5 w-3.5'} aria-hidden="true" />
+      <FolderInput className="h-3.5 w-3.5" aria-hidden="true" />
       {!iconOnly && t('groupAction')}
     </button>
   );

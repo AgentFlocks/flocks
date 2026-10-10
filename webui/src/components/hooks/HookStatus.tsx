@@ -6,7 +6,7 @@
 
 import { useTranslation } from 'react-i18next';
 import { useHooks } from '@/hooks/useHooks';
-import { IconRocket, IconCircleCheck, IconCircleX, IconActivity } from '@tabler/icons-react';
+import { Activity, CheckCircle, Rocket, XCircle } from 'lucide-react';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
 
 export default function HookStatus() {
@@ -15,7 +15,7 @@ export default function HookStatus() {
 
   if (loading) {
     return (
-      <div className="bg-surface rounded-lg shadow p-6">
+      <div className="bg-white rounded-lg shadow p-6">
         <div className="flex items-center justify-center py-8">
           <LoadingSpinner />
         </div>
@@ -25,13 +25,13 @@ export default function HookStatus() {
 
   if (error) {
     return (
-      <div className="bg-surface rounded-lg shadow p-6">
+      <div className="bg-white rounded-lg shadow p-6">
         <div className="flex items-center gap-2 mb-4">
-          <IconRocket aria-hidden="true" className="w-5 h-5" />
-          <h2 className="text-title-card font-semibold">{t('hookStatus.title')}</h2>
+          <Rocket aria-hidden="true" className="w-5 h-5" />
+          <h2 className="text-lg font-semibold">{t('hookStatus.title')}</h2>
         </div>
-        <div className="bg-danger-soft border border-danger rounded-lg p-4">
-          <p className="text-danger">{error}</p>
+        <div className="bg-red-50 border border-red-200 rounded-lg p-4">
+          <p className="text-red-700">{error}</p>
         </div>
       </div>
     );
@@ -42,48 +42,48 @@ export default function HookStatus() {
   }
 
   return (
-    <div className="bg-surface rounded-lg shadow">
+    <div className="bg-white rounded-lg shadow">
       {/* Header */}
-      <div className="px-6 py-4 border-b border-line">
+      <div className="px-6 py-4 border-b border-gray-200">
         <div className="flex items-center gap-2">
-          <IconRocket aria-hidden="true" className="w-5 h-5 text-danger" />
-          <h2 className="text-title-card font-semibold">{t('hookStatus.title')}</h2>
+          <Rocket aria-hidden="true" className="w-5 h-5 text-red-600" />
+          <h2 className="text-lg font-semibold">{t('hookStatus.title')}</h2>
         </div>
       </div>
 
       <div className="p-6 space-y-6">
         {/* Overall Status */}
         <div>
-          <h3 className="text-sm font-medium text-fg-secondary mb-3">{t('hookStatus.systemStatus')}</h3>
+          <h3 className="text-sm font-medium text-gray-700 mb-3">{t('hookStatus.systemStatus')}</h3>
           <div className="grid grid-cols-3 gap-4">
-            <div className="bg-canvas rounded-lg p-4">
+            <div className="bg-gray-50 rounded-lg p-4">
               <div className="flex items-center gap-2 mb-1">
                 {status.enabled ? (
-                  <IconCircleCheck aria-hidden="true" className="w-4 h-4 text-success" />
+                  <CheckCircle aria-hidden="true" className="w-4 h-4 text-green-600" />
                 ) : (
-                  <IconCircleX aria-hidden="true" className="w-4 h-4 text-fg-muted" />
+                  <XCircle aria-hidden="true" className="w-4 h-4 text-gray-400" />
                 )}
-                <span className="text-sm text-fg-secondary">{t('hookStatus.statusLabel')}</span>
+                <span className="text-sm text-gray-600">{t('hookStatus.statusLabel')}</span>
               </div>
-              <p className="text-title-card font-semibold">
+              <p className="text-lg font-semibold">
                 {status.enabled ? t('hookStatus.enabled') : t('hookStatus.disabled')}
               </p>
             </div>
             
-            <div className="bg-canvas rounded-lg p-4">
+            <div className="bg-gray-50 rounded-lg p-4">
               <div className="flex items-center gap-2 mb-1">
-                <IconActivity aria-hidden="true" className="w-4 h-4 text-danger" />
-                <span className="text-sm text-fg-secondary">{t('hookStatus.totalHandlers')}</span>
+                <Activity aria-hidden="true" className="w-4 h-4 text-red-600" />
+                <span className="text-sm text-gray-600">{t('hookStatus.totalHandlers')}</span>
               </div>
-              <p className="text-title-card font-semibold">{status.stats.total_handlers}</p>
+              <p className="text-lg font-semibold">{status.stats.total_handlers}</p>
             </div>
             
-            <div className="bg-canvas rounded-lg p-4">
+            <div className="bg-gray-50 rounded-lg p-4">
               <div className="flex items-center gap-2 mb-1">
-                <IconActivity aria-hidden="true" className="w-4 h-4 text-ai" />
-                <span className="text-sm text-fg-secondary">{t('hookStatus.eventKeys')}</span>
+                <Activity aria-hidden="true" className="w-4 h-4 text-purple-600" />
+                <span className="text-sm text-gray-600">{t('hookStatus.eventKeys')}</span>
               </div>
-              <p className="text-title-card font-semibold">{status.stats.total_event_keys}</p>
+              <p className="text-lg font-semibold">{status.stats.total_event_keys}</p>
             </div>
           </div>
         </div>
@@ -91,20 +91,20 @@ export default function HookStatus() {
         {/* Registered Hooks */}
         {status.stats.total_handlers > 0 && (
           <div>
-            <h3 className="text-sm font-medium text-fg-secondary mb-3">{t('hookStatus.registeredHooks')}</h3>
-            <div className="border border-line rounded-lg divide-y divide-line">
+            <h3 className="text-sm font-medium text-gray-700 mb-3">{t('hookStatus.registeredHooks')}</h3>
+            <div className="border border-gray-200 rounded-lg divide-y divide-gray-200">
               {Object.entries(status.stats.event_keys).map(([key, info]) => (
                 <div key={key} className="p-3">
                   <div className="flex items-center justify-between mb-1">
                     <div className="flex items-center gap-2">
-                      <div className="w-2 h-2 bg-action rounded-full animate-pulse" />
+                      <div className="w-2 h-2 bg-red-500 rounded-full animate-pulse" />
                       <span className="font-medium text-sm">{key}</span>
                     </div>
-                    <span className="text-xs text-fg-muted">
+                    <span className="text-xs text-gray-500">
                       {info.handler_count} {t('hookStatus.handlers')}
                     </span>
                   </div>
-                  <div className="ml-4 text-xs text-fg-secondary">
+                  <div className="ml-4 text-xs text-gray-600">
                     {info.handlers.join(', ')}
                   </div>
                 </div>

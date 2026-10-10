@@ -1,6 +1,6 @@
 import { useState, forwardRef } from 'react';
 import type { InputHTMLAttributes } from 'react';
-import { IconEye, IconEyeOff } from '@tabler/icons-react';
+import { Eye, EyeOff } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 type PasswordInputProps = Omit<InputHTMLAttributes<HTMLInputElement>, 'type'>;
@@ -11,7 +11,7 @@ const PasswordInput = forwardRef<HTMLInputElement, PasswordInputProps>(
     const { t } = useTranslation('auth');
 
     const baseClass =
-      'w-full border border-line-control rounded-lg px-3 py-2 pr-10 outline-none focus:border-info';
+      'w-full border border-gray-300 rounded-lg px-3 py-2 pr-10 outline-none focus:border-blue-500';
 
     return (
       <div className="relative">
@@ -26,9 +26,9 @@ const PasswordInput = forwardRef<HTMLInputElement, PasswordInputProps>(
           tabIndex={-1}
           onClick={() => setVisible((v) => !v)}
           aria-label={visible ? t('fields.hidePassword') : t('fields.showPassword')}
-          className="absolute inset-y-0 right-0 flex items-center px-3 text-fg-muted hover:text-fg-secondary focus:outline-none"
+          className="absolute inset-y-0 right-0 flex items-center px-3 text-gray-400 hover:text-gray-600 focus:outline-none"
         >
-          {visible ? <IconEyeOff aria-hidden="true" className="h-4 w-4" /> : <IconEye aria-hidden="true" className="h-4 w-4" />}
+          {visible ? <EyeOff aria-hidden="true" className="h-4 w-4" /> : <Eye aria-hidden="true" className="h-4 w-4" />}
         </button>
       </div>
     );

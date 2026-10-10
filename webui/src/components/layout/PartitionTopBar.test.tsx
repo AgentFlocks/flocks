@@ -2,7 +2,14 @@ import { describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, useLocation } from 'react-router-dom';
-import { IconBell, IconPlus, IconSettings, IconShieldCheck, IconSparkles, IconUser } from '@tabler/icons-react';
+import {
+  Bell,
+  Plus,
+  Settings,
+  ShieldCheck,
+  Sparkles,
+  User,
+} from 'lucide-react';
 import PartitionTopBar from './PartitionTopBar';
 
 vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: (key: string) => key }) }));
@@ -17,17 +24,17 @@ function renderBar() {
   render(<MemoryRouter>
     <PartitionTopBar
       items={[
-        { id: 'agent', name: 'Agent', icon: IconSparkles },
-        { id: 'workspace:soc_ui', name: 'SOC 工作区', icon: IconShieldCheck },
+        { id: 'agent', name: 'Agent', icon: Sparkles },
+        { id: 'workspace:soc_ui', name: 'SOC 工作区', icon: ShieldCheck },
       ]}
       activeId="agent"
       onSelect={onSelect}
-      action={{ href: '/scenes/suites', name: '添加场景', icon: IconPlus, badge: true }}
+      action={{ href: '/scenes/suites', name: '添加场景', icon: Plus, badge: true }}
       settingsGroups={[
-        { name: '偏好设置', items: [{ name: '外观', href: '/settings/preferences', icon: IconSettings }] },
+        { name: '偏好设置', items: [{ name: '外观', href: '/settings/preferences', icon: Settings }] },
         { name: '系统管理', items: [
-          { name: '用户管理', href: '/settings/account', icon: IconUser },
-          { name: '通知', href: '/settings/notifications', icon: IconBell },
+          { name: '用户管理', href: '/settings/account', icon: User },
+          { name: '通知', href: '/settings/notifications', icon: Bell },
         ] },
       ]}
     />

@@ -1,5 +1,11 @@
 import { useState, useEffect, createContext, useContext, useCallback, ReactNode } from 'react';
-import { IconX, IconCircleCheck, IconAlertCircle, IconAlertTriangle, IconInfoCircle } from '@tabler/icons-react';
+import {
+  AlertCircle,
+  AlertTriangle,
+  CheckCircle,
+  Info,
+  X,
+} from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 // Toast 类型
@@ -91,22 +97,22 @@ export function useOptionalToast() {
 }
 
 // Toast 配置
-const toastConfig: Record<ToastType, { icon: typeof IconCircleCheck; className: string }> = {
+const toastConfig: Record<ToastType, { icon: typeof CheckCircle; className: string }> = {
   success: {
-    icon: IconCircleCheck,
-    className: 'bg-success-soft border-success text-success',
+    icon: CheckCircle,
+    className: 'bg-green-50 border-green-200 text-green-800',
   },
   error: {
-    icon: IconAlertCircle,
-    className: 'bg-danger-soft border-danger text-danger',
+    icon: AlertCircle,
+    className: 'bg-red-50 border-red-200 text-red-800',
   },
   warning: {
-    icon: IconAlertTriangle,
-    className: 'bg-warning-soft border-warning text-warning',
+    icon: AlertTriangle,
+    className: 'bg-yellow-50 border-yellow-200 text-yellow-800',
   },
   info: {
-    icon: IconInfoCircle,
-    className: 'bg-info-soft border-info text-info',
+    icon: Info,
+    className: 'bg-red-50 border-red-200 text-red-800',
   },
 };
 
@@ -126,22 +132,22 @@ function Toast({ toast, onRemove }: { toast: ToastMessage; onRemove: () => void 
   return (
     <div
       data-ui-toast
-      className={`flex items-start gap-3 p-4 rounded-overlay border shadow-overlay animate-slide-in ${config.className}`}
+      className={`flex items-start gap-3 p-4 rounded-lg border shadow-lg animate-slide-in ${config.className}`}
       role="alert"
     >
       <Icon aria-hidden="true" className="w-5 h-5 flex-shrink-0 mt-0.5" />
       <div className="flex-1 min-w-0">
         <p className="font-medium text-sm">{toast.title}</p>
         {toast.description && (
-          <p className="mt-1 text-sm">{toast.description}</p>
+          <p className="mt-1 text-sm opacity-80">{toast.description}</p>
         )}
       </div>
       <button
         onClick={onRemove}
-        className="ui-btn ui-btn-ghost ui-btn-icon flex-shrink-0"
+        className="p-1 rounded hover:bg-black/10 transition-colors flex-shrink-0"
         aria-label={t('button.close')}
       >
-        <IconX aria-hidden="true" className="w-4 h-4" />
+        <X aria-hidden="true" className="w-4 h-4" />
       </button>
     </div>
   );
@@ -158,7 +164,7 @@ function ToastContainer({
   if (toasts.length === 0) return null;
 
   return (
-    <div className="fixed inset-x-4 bottom-4 z-50 flex flex-col gap-2 sm:left-auto sm:w-full sm:max-w-sm pointer-events-none">
+    <div className="fixed bottom-4 right-4 flex flex-col gap-2 pointer-events-none z-50 sm:left-auto sm:w-full sm:max-w-sm">
       {toasts.map((toast) => (
         <div key={toast.id} className="pointer-events-auto">
           <Toast toast={toast} onRemove={() => removeToast(toast.id)} />

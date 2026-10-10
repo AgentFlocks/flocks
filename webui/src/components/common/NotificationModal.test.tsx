@@ -51,7 +51,7 @@ describe('NotificationModal', () => {
 
     rerender(<NotificationModal {...props} acknowledgingIds={['notice']} />);
     fireEvent.keyDown(document, { key: 'Escape' });
-    fireEvent.click(document.querySelector('.bg-overlay-backdrop')!);
+    fireEvent.click(document.querySelector('[aria-hidden="true"].fixed')!);
     expect(onClose).not.toHaveBeenCalled();
     expect(close).toBeDisabled();
 

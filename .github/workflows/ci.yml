@@ -76,9 +76,6 @@ jobs:
       - name: Frontend lint
         run: npm run lint
 
-      - name: UI spec check (webui/UI_SPEC.md)
-        run: python3 ../scripts/ui_spec_check.py
-
       - name: Frontend tests
         run: npm run test:run
 

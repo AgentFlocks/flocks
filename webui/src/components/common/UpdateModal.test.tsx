@@ -202,7 +202,7 @@ describe('UpdateModal terminal states', () => {
     expect(dialog).toHaveAttribute('aria-modal', 'true');
     expect(screen.getByRole('button', { name: 'closeAction' })).toBeDisabled();
     fireEvent.keyDown(dialog, { key: 'Escape' });
-    fireEvent.click(document.querySelector('.bg-overlay-backdrop')!);
+    fireEvent.click(document.querySelector('div.fixed.inset-0')!);
     expect(onClose).not.toHaveBeenCalled();
   });
 

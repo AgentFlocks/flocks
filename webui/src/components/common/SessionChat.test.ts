@@ -1150,9 +1150,9 @@ describe('getMessageBubbleClassName', () => {
 
     expect(className).toContain('w-auto');
     expect(className.split(' ')).not.toContain('w-full');
-    expect(className).toContain('rounded-card');
+    expect(className).toContain('rounded-[18px]');
     expect(className).toContain('py-3');
-    expect(className).not.toContain('rounded-pill');
+    expect(className).not.toContain('rounded-[24px]');
     expect(className).not.toContain('py-4');
   });
 
@@ -1175,7 +1175,7 @@ describe('getMessageBubbleClassName', () => {
     });
 
     expect(className).toContain('w-full');
-    expect(className).toContain('text-sm');
+    expect(className).toContain('text-[15px]');
   });
 
   it('fills the fixed compact assistant message column', () => {
@@ -1189,19 +1189,19 @@ describe('getMessageBubbleClassName', () => {
     expect(className).toContain('max-w-full');
   });
 
-  it.each([false, true])('uses the specified message surface and spacing for assistant replies when compact=%s', (compact) => {
+  it.each([false, true])('keeps assistant replies in the transparent content flow when compact=%s', (compact) => {
     const className = getMessageBubbleClassName({
       compact,
       isUser: false,
       isEditing: false,
     });
 
-    expect(className).toContain('bg-subtle');
-    expect(className).toContain('border-line');
-    expect(className).toContain('rounded-card');
-    expect(className).toContain('px-4');
-    expect(className).toContain('py-3');
+    expect(className).toContain('bg-transparent');
+    expect(className).not.toContain('bg-white');
+    expect(className).not.toContain('border-zinc-200/90');
     expect(className).not.toContain('shadow-sm');
+    expect(className).not.toContain('rounded-[20px]');
+    expect(className).not.toContain('rounded-[24px]');
   });
 
   it('keeps compact user bubbles content-sized when not editing', () => {
@@ -1222,10 +1222,10 @@ describe('getMessageBubbleClassName', () => {
       isEditing: false,
     });
 
-    expect(className).toContain('bg-subtle');
-    expect(className).toContain('border-line');
-    expect(className).not.toContain('bg-info-soft');
-    expect(className).not.toContain('border-info');
+    expect(className).toContain('bg-zinc-50');
+    expect(className).toContain(compact ? 'border-black/[0.07]' : 'border-black/[0.09]');
+    expect(className).not.toContain('bg-sky-50');
+    expect(className).not.toContain('border-sky-100');
   });
 });
 
@@ -1627,7 +1627,7 @@ describe('SessionChat standalone thinking indicator', () => {
     }));
 
     await user.type(screen.getByPlaceholderText('请输入消息'), '接入设备');
-    await user.click(container.querySelector('button[class*="bg-action"]')!);
+    await user.click(container.querySelector('button[class*="bg-sky-500"]')!);
 
     await waitFor(() => {
       expect(container.querySelectorAll('.animate-bounce').length).toBeGreaterThanOrEqual(3);
@@ -1672,7 +1672,7 @@ describe('SessionChat standalone thinking indicator', () => {
     }));
 
     await user.type(screen.getByPlaceholderText('请输入消息'), '已连接涉笔');
-    await user.click(container.querySelector('button[class*="bg-action"]')!);
+    await user.click(container.querySelector('button[class*="bg-sky-500"]')!);
 
     await waitFor(() => {
       expect(container.querySelectorAll('.animate-bounce').length).toBeGreaterThanOrEqual(3);
@@ -1929,7 +1929,7 @@ describe('SessionChat delegated work stop controls', () => {
 
     fireEvent.change(screen.getByPlaceholderText('请输入消息'), { target: { value: 'Follow up' } });
     expect(screen.queryByTitle('chat.queue.enqueue')).not.toBeInTheDocument();
-    fireEvent.click(container.querySelector('button[class*="bg-action"]')!);
+    fireEvent.click(container.querySelector('button[class*="bg-sky-500"]')!);
     await waitFor(() => expect(clientPostMock).toHaveBeenCalledWith(
       '/api/session/sess-1/prompt_async', expect.any(Object),
     ));
@@ -2010,7 +2010,7 @@ describe('SessionChat delegated work stop controls', () => {
       expect(container.querySelectorAll('.animate-bounce')).toHaveLength(0);
       fireEvent.change(screen.getByPlaceholderText('请输入消息'), { target: { value: 'Try again' } });
       expect(screen.queryByTitle('chat.queue.enqueue')).not.toBeInTheDocument();
-      fireEvent.click(container.querySelector('button[class*="bg-action"]')!);
+      fireEvent.click(container.querySelector('button[class*="bg-sky-500"]')!);
       await waitFor(() => expect(clientPostMock).toHaveBeenCalledWith(
         '/api/session/sess-1/prompt_async', expect.any(Object),
       ));
@@ -2400,9 +2400,9 @@ describe('SessionChat composer controls', () => {
     expect(sendButton).toBeDisabled();
 
     // 禁用态走 tokens.css 的 disabled token，深色由 .dark 变量接管，不再写 dark: 字面色
-    expect(sendButton?.className).toContain('bg-disabled');
-    expect(sendButton?.className).toContain('text-fg-disabled');
-    expect(sendButton?.className).toContain('border-line');
+    expect(sendButton?.className).toContain('dark:bg-[#46515e]');
+    expect(sendButton?.className).toContain('dark:text-[#b8c2cc]');
+    expect(sendButton?.className).toContain('dark:border-[#5a6573]');
   });
 
   it('groups attachment and injected actions in the Add menu', async () => {
@@ -2435,7 +2435,7 @@ describe('SessionChat composer controls', () => {
     expect(addButton.className).not.toContain('shadow-');
     const filesMenuItem = screen.getByRole('menuitem', { name: '文件和图片' });
     const filesIconContainer = filesMenuItem.querySelector('svg')?.parentElement;
-    expect(filesIconContainer).not.toHaveClass('rounded-lg', 'border', 'bg-surface');
+    expect(filesIconContainer).not.toHaveClass('rounded-lg', 'border', 'bg-white');
     expect(filesIconContainer?.className).not.toContain('shadow-');
     await user.click(screen.getByRole('button', { name: '智能体' }));
     expect(within(screen.getByLabelText('已选择的资源')).getByText('explore')).toBeInTheDocument();
@@ -3594,7 +3594,7 @@ describe('SessionChat intermediate process collapse', () => {
     expect(processGroup.querySelector('summary')).toHaveClass('text-sm', 'font-medium');
     expect(processGroup.querySelector('summary')).not.toHaveClass('font-semibold');
     expect(processGroup.className).not.toContain('rounded-lg');
-    expect(processGroup.closest('[data-process-output="true"]')?.className).not.toContain('bg-surface');
+    expect(processGroup.closest('[data-process-output="true"]')?.className).not.toContain('bg-white');
     expect(screen.getByText('已读取当前 workflow.md。')).toBeInTheDocument();
 
     await user.click(screen.getByText('查看 2 个步骤'));
@@ -3606,7 +3606,7 @@ describe('SessionChat intermediate process collapse', () => {
     expect(screen.getByTestId('chat-process-reasoning-preview')).toHaveTextContent('需要先读取工作流文件。');
     expect(screen.getByTestId('chat-process-reasoning-preview')).not.toHaveTextContent('然后检查配置');
     expect(screen.getByTestId('chat-process-reasoning-preview')).not.toHaveClass('flex-1');
-    expect(screen.getByTestId('chat-process-reasoning-preview').nextElementSibling).toHaveClass('tabler-icon-chevron-down');
+    expect(screen.getByTestId('chat-process-reasoning-preview').nextElementSibling).toHaveClass('lucide-chevron-down');
     expect(screen.getByTestId('chat-process-tool-step')).toHaveTextContent('读取文件');
     // the timeline shows the tool status as an icon; its label must still be exposed
     const toolStep = screen.getByTestId('chat-process-tool-step');
@@ -5097,7 +5097,7 @@ describe('ChatMessageBubble session typography', () => {
       compact: false,
     }));
 
-    expect(screen.getByText('Rex')).toHaveClass('text-base', 'font-semibold', 'text-fg-muted');
+    expect(screen.getByText('Rex')).toHaveClass('text-base', 'font-semibold', 'text-[#3f444a]');
   });
 });
 
@@ -5125,16 +5125,16 @@ describe('ChatMessageBubble footer layout', () => {
 
     expect(footer).toHaveClass('justify-start', 'gap-1.5');
     expect(footer?.children[0]).toBe(actionGroup);
-    expect(footer?.children[1]).toHaveClass('text-xs', 'text-fg-muted');
-    expect(regenerateButton).toHaveClass('text-fg-muted');
+    expect(footer?.children[1]).toHaveClass('text-[11px]', 'text-[#8b929d]');
+    expect(regenerateButton).toHaveClass('text-[#8b929d]');
     expect(regenerateButton).toHaveClass(
       'border-transparent',
       'bg-transparent',
-      'hover:bg-hover',
-      'active:bg-surface',
-      'focus-visible:bg-surface',
+      'hover:bg-white',
+      'active:bg-white',
+      'focus-visible:bg-white',
     );
-    expect(regenerateButton).not.toHaveClass('border-line', 'bg-surface');
+    expect(regenerateButton).not.toHaveClass('border-gray-200/80', 'bg-white/80');
   });
 
   it('keeps the user timestamp before the action group', () => {
@@ -5159,7 +5159,7 @@ describe('ChatMessageBubble footer layout', () => {
     const footer = actionGroup?.parentElement;
 
     expect(footer).toHaveClass('justify-between');
-    expect(footer?.children[0]).toHaveClass('text-xs');
+    expect(footer?.children[0]).toHaveClass('text-[11px]');
     expect(footer?.children[1]).toBe(actionGroup);
   });
 });
@@ -5254,8 +5254,8 @@ describe('ChatToolPart bash rendering', () => {
     expect(text).not.toContain('输出结果');
     expect(text).not.toContain('退出码');
     expect(text).not.toContain('exit_code');
-    expect(screen.getByText('$')).toHaveClass('text-fg-muted');
-    expect(screen.getByText('$').closest('pre')).toHaveClass('bg-canvas');
+    expect(screen.getByText('$')).toHaveClass('text-zinc-500');
+    expect(screen.getByText('$').closest('pre')).toHaveClass('bg-zinc-950');
     expect(screen.getByText('$').closest('pre')).toHaveClass('max-h-64');
     expect(screen.getByText('tests passed').closest('pre')).toHaveClass('max-h-64');
   });
@@ -5313,10 +5313,10 @@ describe('ChatToolPart question result rendering', () => {
     const questionDetails = container.querySelector('details') as HTMLDetailsElement;
     expect(questionDetails).not.toBeNull();
     expect(questionDetails.open).toBe(false);
-    expect(screen.getByText('失败')).toHaveClass('text-danger');
-    expect(screen.getByText('回答')).toHaveClass('text-danger');
-    expect(screen.getByText('未回答')).toHaveClass('border-danger');
-    expect(screen.getByText('未回答')).toHaveClass('bg-danger-soft');
+    expect(screen.getByText('失败')).toHaveClass('text-red-500');
+    expect(screen.getByText('回答')).toHaveClass('text-red-500');
+    expect(screen.getByText('未回答')).toHaveClass('border-red-200');
+    expect(screen.getByText('未回答')).toHaveClass('bg-red-50');
   });
 });
 
@@ -6498,7 +6498,7 @@ describe('SessionChat compaction divider', () => {
     expect(dividerLabel).toBeInTheDocument();
     expect(dividerLabel).not.toHaveClass('rounded-full');
     expect(dividerLabel).not.toHaveClass('border');
-    expect(dividerLabel).not.toHaveClass('bg-surface');
+    expect(dividerLabel).not.toHaveClass('bg-white');
     expect(screen.getByText('old visible request')).toBeInTheDocument();
     expect(screen.getByText('current answer')).toBeInTheDocument();
   });

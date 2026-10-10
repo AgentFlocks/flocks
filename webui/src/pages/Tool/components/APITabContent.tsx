@@ -2,17 +2,17 @@ import { pageActionLabel } from '../../pageActionLabel';
 import PageDialog from '../../PageDialog';
 import { useState, useMemo, useCallback, useEffect } from 'react';
 import {
-  IconCloud,
-  IconTool,
-  IconSettings,
-  IconX,
-  IconDownload,
-  IconExternalLink,
-  IconStar,
-  IconPower,
-  IconPlugOff,
-  IconTrash,
-} from '@tabler/icons-react';
+  Cloud,
+  Download,
+  ExternalLink,
+  Power,
+  PowerOff,
+  Settings,
+  Star,
+  Trash2,
+  Wrench,
+  X,
+} from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { mcpAPI } from '@/api/mcp';
 import { providerAPI } from '@/api/provider';
@@ -41,15 +41,15 @@ import { extractErrorMessage } from '@/utils/error';
 
 const DETAIL_DRAWER_WIDTH = 480;
 const LANG_COLORS: Record<string, string> = {
-  python: 'bg-subtle text-fg-secondary',
-  typescript: 'bg-subtle text-fg-secondary',
-  go: 'bg-subtle text-fg-secondary',
-  rust: 'bg-subtle text-fg-secondary',
-  java: 'bg-subtle text-fg-secondary',
-  c: 'bg-subtle text-fg-secondary',
+  python: 'bg-red-100 text-red-700',
+  typescript: 'bg-sky-100 text-sky-700',
+  go: 'bg-cyan-100 text-cyan-700',
+  rust: 'bg-orange-100 text-orange-700',
+  java: 'bg-red-100 text-red-700',
+  c: 'bg-gray-100 text-gray-700',
 };
-const INSTALL_BUTTON_CLASS = 'flex-1 flex items-center justify-center gap-1 py-1 px-2 bg-success-soft text-success rounded-control text-xs font-medium hover:bg-success-soft disabled:bg-disabled disabled:text-fg-disabled transition-colors';
-const INSTALL_CONFIRM_BUTTON_CLASS = 'px-4 py-2 text-sm text-success bg-success-soft rounded-control hover:bg-success-soft disabled:bg-disabled disabled:text-fg-disabled transition-colors';
+const INSTALL_BUTTON_CLASS = 'flex-1 flex items-center justify-center gap-1 py-1 px-2 bg-green-600 text-white rounded-lg text-xs font-medium hover:bg-green-700 disabled:opacity-50 transition-colors';
+const INSTALL_CONFIRM_BUTTON_CLASS = 'px-4 py-2 text-sm text-white bg-green-600 rounded-lg hover:bg-green-700 disabled:opacity-50 transition-colors';
 
 interface APITabContentProps {
   tools: Tool[];
@@ -406,14 +406,14 @@ export default function APITabContent({
     <div className="flex flex-col gap-4 md:flex-row" aria-busy={!!query && toolSearchPending}>
       <GroupNav inventoryComplete={!servicesLoading && servicesError === null && !catalogLoading} preferenceKey="tools.api" {...deriveGroupNav(groupItems)} items={groupItems} selection={groupSelection} onSelect={setGroupSelection} onMove={moveGroup} onCreate={createGroup} onRename={changeGroup} onDelete={(name) => changeGroup(name, null)} {...groupDrag} />
       <div className="min-w-0 flex-1 space-y-4">
-      {servicesError !== null && <div role="alert" className="flex items-center justify-between gap-3 rounded-lg border border-danger bg-danger-soft px-4 py-3 text-sm text-danger">
+      {servicesError !== null && <div role="alert" className="flex items-center justify-between gap-3 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
         <span>{extractErrorMessage(servicesError, t('alert.refreshFailedTitle'))}</span>
         <button type="button" onClick={() => void fetchServices()} disabled={servicesLoading} className="shrink-0 rounded border px-3 py-1.5 disabled:opacity-50">{t('button.retry')}</button>
       </div>}
       <div className="flex items-center gap-1.5 flex-wrap">
         <button
           onClick={() => setSelectedCategory('all')}
-          className={`px-2.5 py-1 rounded-pill text-xs font-medium transition-colors ${selectedCategory === 'all' ? 'bg-ai-soft text-ai' : 'bg-subtle text-fg-secondary hover:bg-hover'}`}
+          className={`px-2.5 py-1 rounded-full text-xs font-medium transition-colors ${selectedCategory === 'all' ? 'bg-purple-50 text-purple-700' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}
           >
             {t('api.filterAll')}
           </button>
@@ -422,7 +422,7 @@ export default function APITabContent({
             <button
               key={id}
               onClick={() => setSelectedCategory(id)}
-              className={`px-2.5 py-1 rounded-pill text-xs font-medium transition-colors ${selectedCategory === id ? 'bg-ai-soft text-ai' : 'bg-subtle text-fg-secondary hover:bg-hover'}`}
+              className={`px-2.5 py-1 rounded-full text-xs font-medium transition-colors ${selectedCategory === id ? 'bg-purple-50 text-purple-700' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}
             >
               {cat.label} ({catalogCategoryCounts[id]})
             </button>
@@ -432,13 +432,13 @@ export default function APITabContent({
 
       {(servicesLoading && services.length === 0 && filteredCatalog.length === 0)
         || (query && toolSearchPending && visibleServices.length === 0 && visibleCatalog.length === 0) ? (
-        <div className="flex min-h-[360px] items-center justify-center rounded-control border border-line bg-surface">
+        <div className="flex items-center justify-center rounded-lg border border-gray-200 bg-white min-h-[360px]">
           <LoadingSpinner delayMs={180} />
         </div>
       ) : visibleServices.length === 0 && visibleCatalog.length === 0 && !catalogLoading ? (
-        <EmptyState icon={<IconCloud aria-hidden="true" className="w-8 h-8" />} title={t('api.noTools')} description={t('api.noToolsDesc')} />
+        <EmptyState icon={<Cloud aria-hidden="true" className="w-16 h-16" />} title={t('api.noTools')} description={t('api.noToolsDesc')} />
       ) : (
-        <div className={viewMode === 'list' ? 'bg-surface border border-line rounded-control overflow-x-auto divide-y divide-line' : 'grid gap-3 sm:grid-cols-2 xl:grid-cols-3'}>
+        <div className={viewMode === 'list' ? 'bg-white border border-gray-200 rounded-lg divide-y divide-gray-100 overflow-x-auto' : 'grid gap-3 sm:grid-cols-2 xl:grid-cols-3'}>
           {visibleServices.map((service) => {
             const isSelected = selectedServiceId === service.id;
             const rowDescription = getServiceDescription(service) || `${service.name} API service`;
@@ -447,12 +447,12 @@ export default function APITabContent({
               <div
                 key={service.id}
                 {...groupDrag.dragProps(service.id)}
-                className={`${viewMode === 'list' ? SERVICE_TAB_ROW_CLASS : SERVICE_TAB_CARD_CLASS} transition-colors ${isSelected ? 'bg-ai-soft' : `${viewMode === 'cards' ? 'bg-surface ' : ''}hover:bg-hover`}`}
+                className={`${viewMode === 'list' ? SERVICE_TAB_ROW_CLASS : SERVICE_TAB_CARD_CLASS} transition-colors ${isSelected ? 'bg-purple-50' : `${viewMode === 'cards' ? 'bg-white ' : ''}hover:bg-gray-50`}`}
                 style={{ gridTemplateColumns: viewMode === 'list' ? SERVICE_TAB_GRID_COLS : SERVICE_TAB_CARD_GRID_COLS }}
               >
                 {/* Icon */}
-                <div className={`w-8 h-8 flex items-center justify-center rounded-control ${service.enabled ? 'bg-ai-soft' : 'bg-subtle'}`}>
-                  <IconCloud aria-hidden="true" className={`w-4 h-4 ${service.enabled ? 'text-ai' : 'text-fg-muted'}`} />
+                <div className={`w-8 h-8 flex items-center justify-center rounded-lg ${service.enabled ? 'bg-purple-50' : 'bg-gray-50'}`}>
+                  <Cloud aria-hidden="true" className={`w-4 h-4 ${service.enabled ? 'text-purple-600' : 'text-gray-400'}`} />
                 </div>
 
                 {/* Name + description.
@@ -466,52 +466,52 @@ export default function APITabContent({
                   className={`${SERVICE_TAB_NAME_CELL} text-left group/name `}
                 >
                   <div className="flex items-center gap-1.5">
-                    <span className="text-sm font-semibold text-fg truncate transition-colors group-hover/name:text-ai group-focus-visible/name:underline">{service.name}</span>
+                    <span className="text-sm font-semibold text-gray-900 transition-colors group-hover/name:text-purple-700 group-focus-visible/name:underline truncate">{service.name}</span>
                     {service.version && (
-                      <span className="px-1.5 py-0.5 bg-info-soft text-info border border-info text-xs font-medium rounded-tag shrink-0" title={t('serviceInfo.version')}>
+                      <span className="px-1.5 py-0.5 bg-sky-50 text-sky-700 border border-sky-100 text-[10px] font-medium rounded shrink-0" title={t('serviceInfo.version')}>
                         v{service.version.replace(/^v/i, '')}
                       </span>
                     )}
                   </div>
-                  <p className="text-xs text-fg-muted truncate mt-0.5">{rowDescription}</p>
+                  <p className="text-xs text-gray-500 mt-0.5 truncate">{rowDescription}</p>
                 </button>
 
                 {/* Type column */}
                 <div className={SERVICE_TAB_BADGE_CELL}>
-                  <span className="px-1.5 py-0.5 bg-ai-soft text-ai text-xs font-medium rounded-tag">API</span>
+                  <span className="px-1.5 py-0.5 bg-purple-100 text-purple-700 text-[10px] font-medium rounded">API</span>
                 </div>
 
                 {/* Status column */}
                 <div className={SERVICE_TAB_BADGE_CELL}>
-                  <span className={`px-1.5 py-0.5 text-xs font-medium rounded-tag ${service.enabled ? 'bg-success-soft text-success' : 'bg-subtle text-fg-muted'}`}>
+                  <span className={`px-1.5 py-0.5 text-[10px] font-medium rounded ${service.enabled ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-500'}`}>
                     {service.enabled ? t('enabledBadge.enabled') : t('enabledBadge.disabled')}
                   </span>
                 </div>
 
                 {/* Stats column */}
-                <div className={`${SERVICE_TAB_STATS_CELL} gap-3 text-xs text-fg-muted`}>
-                  <span className="flex items-center gap-1"><IconTool aria-hidden="true" className="w-4 h-4" />{service.tool_count}</span>
+                <div className={`${SERVICE_TAB_STATS_CELL} gap-3 text-xs text-gray-400`}>
+                  <span className="flex items-center gap-1"><Wrench aria-hidden="true" className="w-3 h-3" />{service.tool_count}</span>
                   {service.latency_ms != null && <span>{service.latency_ms}ms</span>}
                 </div>
 
                 {/* Actions column */}
                 <div className={`${SERVICE_TAB_ACTIONS_CELL} flex-wrap gap-1.5`}>
-                  <PluginGroupButton grouping={groupDrag} itemKey={service.id} iconOnly className="border border-line hover:border-line-control" />
+                  <PluginGroupButton grouping={groupDrag} itemKey={service.id} />
                   {service.enabled ? (
                     <>
                       <button
                         onClick={() => setSelectedServiceId(isSelected ? null : service.id)}
-                        className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-control border text-xs font-medium transition-colors ${isSelected ? 'border-ai text-ai bg-ai-soft' : 'border-line text-fg-secondary hover:bg-hover'}`}
+                        className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border text-xs font-medium transition-colors ${isSelected ? 'border-purple-300 text-purple-700 bg-purple-50' : 'border-gray-200 text-gray-600 hover:bg-gray-100'}`}
                       >
-                        <IconSettings aria-hidden="true" className="w-4 h-4" />{t('mcp.manage')}
+                        <Settings aria-hidden="true" className="w-3 h-3" />{t('mcp.manage')}
                       </button>
                       <button
                         onClick={(e) => handleToggleEnabled(service.id, false, e)}
                         disabled={installing === service.id}
-                        className="ui-btn-icon inline-flex items-center justify-center p-1.5 rounded-control border border-danger text-danger hover:bg-danger-soft transition-colors disabled:bg-disabled disabled:text-fg-disabled"
+                        className="p-1.5 rounded-lg border border-red-200 text-red-400 hover:bg-red-50 transition-colors disabled:opacity-50"
                         title={t('detail.disableServer')}
                       >
-                        <IconPlugOff aria-hidden="true" className="w-4 h-4" />
+                        <PowerOff aria-hidden="true" className="w-3.5 h-3.5" />
                       </button>
                     </>
                   ) : (
@@ -519,26 +519,26 @@ export default function APITabContent({
                       <button
                         onClick={(e) => handleToggleEnabled(service.id, true, e)}
                         disabled={installing === service.id}
-                        className="inline-flex items-center gap-1 px-2.5 py-1 rounded-control bg-action text-action-fg text-xs font-medium hover:bg-action-hover disabled:bg-disabled disabled:text-fg-disabled transition-colors"
+                        className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-green-600 text-white text-xs font-medium hover:bg-green-700 disabled:opacity-50 transition-colors"
                       >
-                        <IconPower aria-hidden="true" className="w-4 h-4" />{installing === service.id ? t('mcp.configuring') : t('detail.enableServer')}
+                        <Power aria-hidden="true" className="w-3 h-3" />{installing === service.id ? t('mcp.configuring') : t('detail.enableServer')}
                       </button>
                       <button
                         onClick={() => setSelectedServiceId(isSelected ? null : service.id)}
-                        className="ui-btn-icon inline-flex items-center justify-center p-1.5 rounded-control border border-line text-fg-muted hover:bg-hover transition-colors"
+                        className="p-1.5 rounded-lg border border-gray-200 text-gray-400 hover:bg-gray-100 transition-colors"
                         title={t('mcp.manage')}
                       >
-                        <IconSettings aria-hidden="true" className="w-4 h-4" />
+                        <Settings aria-hidden="true" className="w-3.5 h-3.5" />
                       </button>
                     </>
                   )}
                   <button
                     onClick={(e) => { e.stopPropagation(); if (!service.builtin) handleDeleteService(service.id); }}
                     disabled={!!service.builtin || installing === service.id}
-                    className={`ui-btn-icon inline-flex items-center justify-center p-1.5 rounded-control border transition-colors ${service.builtin ? 'border-line text-fg-placeholder cursor-not-allowed' : 'border-danger text-danger hover:bg-danger-soft'}`}
+                    className={`p-1.5 rounded-lg border transition-colors ${service.builtin ? 'border-gray-100 text-gray-300 cursor-not-allowed' : 'border-red-100 text-red-400 hover:bg-red-50'}`}
                     title={service.builtin ? t('api.builtinCannotDelete') : t('button.delete')}
                   >
-                    <IconTrash aria-hidden="true" className="w-4 h-4" />
+                    <Trash2 aria-hidden="true" className="w-3.5 h-3.5" />
                   </button>
                 </div>
               </div>
@@ -549,44 +549,44 @@ export default function APITabContent({
             <div
               key={`catalog-${entry.id}`}
               {...groupDrag.dragProps(`catalog:${entry.id}`)}
-              className={`${viewMode === 'list' ? SERVICE_TAB_ROW_CLASS : `${SERVICE_TAB_CARD_CLASS} bg-surface`} cursor-default hover:bg-hover transition-colors`}
+              className={`${viewMode === 'list' ? SERVICE_TAB_ROW_CLASS : `${SERVICE_TAB_CARD_CLASS} bg-white`} cursor-default hover:bg-gray-50 transition-colors`}
               style={{ gridTemplateColumns: viewMode === 'list' ? SERVICE_TAB_GRID_COLS : SERVICE_TAB_CARD_GRID_COLS }}
             >
               {/* Icon */}
-              <div className="w-8 h-8 flex items-center justify-center rounded-control bg-subtle">
-                <IconCloud aria-hidden="true" className="w-4 h-4 text-fg-muted" />
+              <div className="w-8 h-8 flex items-center justify-center rounded-lg bg-gray-50">
+                <Cloud aria-hidden="true" className="w-4 h-4 text-gray-400" />
               </div>
 
               {/* Name + description */}
               <div className={SERVICE_TAB_NAME_CELL}>
                 <div className="flex items-center gap-1.5">
-                  <span className="text-sm font-semibold text-fg truncate">{entry.name}</span>
+                  <span className="text-sm font-semibold text-gray-900 truncate">{entry.name}</span>
                   {PRIORITY_IDS.has(entry.id) && (
-                    <span className="px-1.5 py-0.5 bg-warning-soft text-warning text-xs font-medium rounded-tag border border-warning shrink-0">{t('api.recommended')}</span>
+                    <span className="px-1.5 py-0.5 bg-amber-50 text-amber-700 text-[10px] font-medium rounded border border-amber-200 shrink-0">{t('api.recommended')}</span>
                   )}
                 </div>
-                <p className="text-xs text-fg-muted truncate mt-0.5">{getCatalogDescription(entry, i18n.language)}</p>
+                <p className="text-xs text-gray-500 mt-0.5 truncate">{getCatalogDescription(entry, i18n.language)}</p>
               </div>
 
               {/* Type column */}
               <div className={SERVICE_TAB_BADGE_CELL}>
-                <span className="px-1.5 py-0.5 bg-ai-soft text-ai text-xs font-medium rounded-tag">API</span>
+                <span className="px-1.5 py-0.5 bg-purple-100 text-purple-700 text-[10px] font-medium rounded">API</span>
               </div>
 
               {/* Status column */}
               <div className={SERVICE_TAB_BADGE_CELL}>
-                <span className="px-1.5 py-0.5 bg-subtle text-fg-muted text-xs font-medium rounded-tag">{t('statusBadge.inactive')}</span>
+                <span className="px-1.5 py-0.5 bg-gray-100 text-gray-500 text-[10px] font-medium rounded">{t('statusBadge.inactive')}</span>
               </div>
 
               {/* Stats column */}
-              <div className={`${SERVICE_TAB_STATS_CELL} gap-2 text-xs text-fg-muted`}>
-                <span className={`px-1.5 py-0.5 rounded-tag text-xs font-medium ${LANG_COLORS[entry.language] || 'bg-subtle text-fg-secondary'}`}>{entry.language}</span>
-                <span className="flex items-center gap-1"><IconStar aria-hidden="true" className="w-4 h-4" />{entry.stars}</span>
+              <div className={`${SERVICE_TAB_STATS_CELL} gap-2 text-xs text-gray-400`}>
+                <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${LANG_COLORS[entry.language] || 'bg-gray-100 text-gray-600'}`}>{entry.language}</span>
+                <span className="flex items-center gap-1"><Star aria-hidden="true" className="w-3 h-3" />{entry.stars}</span>
               </div>
 
               {/* Actions column */}
               <div className={`${SERVICE_TAB_ACTIONS_CELL} flex-wrap gap-1.5`}>
-                <PluginGroupButton grouping={groupDrag} itemKey={`catalog:${entry.id}`} iconOnly className="border border-line hover:border-line-control" />
+                <PluginGroupButton grouping={groupDrag} itemKey={`catalog:${entry.id}`} />
                 <button
                   onClick={() => {
                     if (entry.requires_auth && !isConfigured(entry.id)) {
@@ -596,19 +596,19 @@ export default function APITabContent({
                     }
                   }}
                   disabled={installing === entry.id}
-                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded-control bg-action text-action-fg text-xs font-medium hover:bg-action-hover disabled:bg-disabled disabled:text-fg-disabled transition-colors"
+                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-green-600 text-white text-xs font-medium hover:bg-green-700 disabled:opacity-50 transition-colors"
                 >
-                  <IconDownload aria-hidden="true" className="w-4 h-4" />{installing === entry.id ? t('api.configuring') : t('button.install')}
+                  <Download aria-hidden="true" className="w-3 h-3" />{installing === entry.id ? t('api.configuring') : t('button.install')}
                 </button>
                 {entry.github ? (
                   <a
                     href={`https://github.com/${entry.github}`}
                     target="_blank"
                     rel="noopener noreferrer"
-                    className="p-1.5 rounded-control border border-line text-fg-muted hover:bg-hover transition-colors"
+                    className="p-1.5 rounded-lg border border-gray-200 text-gray-400 hover:bg-gray-100 transition-colors"
                     title="GitHub"
                   >
-                    <IconExternalLink aria-hidden="true" className="w-4 h-4" />
+                    <ExternalLink aria-hidden="true" className="w-3.5 h-3.5" />
                   </a>
                 ) : (
                   <span className="w-7 h-7" aria-hidden="true" />
@@ -623,30 +623,30 @@ export default function APITabContent({
 
       {credModalEntry && (
         <>
-          <div className="fixed inset-0 bg-overlay-backdrop z-40" onClick={() => setCredModalEntry(null)} />
+          <div className="fixed inset-0 bg-black/40 z-40" onClick={() => setCredModalEntry(null)} />
           <PageDialog onClose={() => setCredModalEntry(null)} className="fixed inset-0 z-50 flex items-center justify-center p-4">
-            <div className="bg-surface rounded-card shadow-overlay w-full max-w-md" onClick={(e) => e.stopPropagation()}>
-              <div className="px-6 py-4 border-b border-line">
-                <h3 className="text-title-card font-semibold text-fg">{credModalEntry.name}</h3>
-                <p className="text-sm text-fg-muted mt-1">{t('alert.credDescHint')}</p>
+            <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md" onClick={(e) => e.stopPropagation()}>
+              <div className="px-6 py-4 border-b border-gray-200">
+                <h3 className="text-lg font-semibold text-gray-900">{credModalEntry.name}</h3>
+                <p className="text-sm text-gray-500 mt-1">{t('alert.credDescHint')}</p>
               </div>
               <div className="px-6 py-4 space-y-4">
                 {Object.entries(credModalEntry.env_vars).filter(([, spec]) => spec.secret).map(([key, spec]) => (
                   <div key={key}>
-                    <label className="block text-sm font-medium text-fg-secondary mb-1">{key}</label>
-                    <p className="text-xs text-fg-muted mb-1.5">{spec.description}</p>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">{key}</label>
+                    <p className="text-xs text-gray-500 mb-1.5">{spec.description}</p>
                     <input
                       type="password"
                       value={credValues[key] || ''}
                       onChange={(e) => setCredValues((prev) => ({ ...prev, [key]: e.target.value }))}
                       placeholder={t('credentials.enterField', { field: key })}
-                      className="ui-input w-full px-3  text-sm border border-line-control rounded-control focus:border-transparent"
+                      className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-transparent"
                     />
                   </div>
                 ))}
               </div>
-              <div className="px-6 py-4 border-t border-line flex gap-3 justify-end">
-                <button onClick={() => setCredModalEntry(null)} className="px-4 py-2 text-sm text-fg-secondary border border-line-control rounded-control hover:bg-hover transition-colors">
+              <div className="px-6 py-4 border-t border-gray-200 flex gap-3 justify-end">
+                <button onClick={() => setCredModalEntry(null)} className="px-4 py-2 text-sm text-gray-700 border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors">
                   {t('button.cancel')}
                 </button>
                 <button
@@ -667,26 +667,26 @@ export default function APITabContent({
         const displayName = catalogEntry?.name || selectedService.name || selectedServiceId;
         return (
           <PageDialog variant="panels" className="contents" onClose={() => setSelectedServiceId(null)}>
-            <div className="fixed inset-0 bg-overlay-backdrop z-40" onClick={() => setSelectedServiceId(null)} />
-            <div data-ui-overlay="drawer" className="fixed right-0 top-0 bottom-0 z-50 flex min-h-0 flex-col w-full bg-surface shadow-overlay" style={{ maxWidth: DETAIL_DRAWER_WIDTH }} onClick={(e) => e.stopPropagation()}>
-              <div className="flex-shrink-0 border-b border-line">
+            <div className="fixed inset-0 bg-black/40 z-40" onClick={() => setSelectedServiceId(null)} />
+            <div data-ui-overlay="drawer" className="fixed right-0 top-0 bottom-0 flex flex-col w-full bg-white shadow-2xl z-50 min-h-0" style={{ maxWidth: DETAIL_DRAWER_WIDTH }} onClick={(e) => e.stopPropagation()}>
+              <div className="border-b border-gray-200 flex-shrink-0">
                 <div className="flex items-center gap-3 px-6 py-4">
-                  <div className="w-10 h-10 rounded-control flex items-center justify-center flex-shrink-0 bg-ai-soft">
-                    <IconCloud aria-hidden="true" className="w-5 h-5 text-ai" />
+                  <div className="w-10 h-10 rounded-lg flex items-center justify-center bg-purple-50 flex-shrink-0">
+                    <Cloud aria-hidden="true" className="w-5 h-5 text-purple-600" />
                   </div>
                   <div className="flex-1 min-w-0">
-                    <h2 className="text-title-section font-semibold text-fg">{displayName}</h2>
-                    <p className="text-sm text-fg-muted">{t('api.serviceConfig')}</p>
+                    <h2 className="text-lg font-semibold text-gray-900">{displayName}</h2>
+                    <p className="text-sm text-gray-500">{t('api.serviceConfig')}</p>
                   </div>
-                  <button aria-label={pageActionLabel('close')} onClick={() => setSelectedServiceId(null)} className="ui-btn-icon inline-flex items-center justify-center text-fg-muted hover:text-fg-secondary p-2 rounded-control hover:bg-hover flex-shrink-0">
-                    <IconX aria-hidden="true" className="w-5 h-5" />
+                  <button aria-label={pageActionLabel('close')} onClick={() => setSelectedServiceId(null)} className="text-gray-400 hover:text-gray-600 p-2 rounded-lg hover:bg-gray-100 flex-shrink-0">
+                    <X aria-hidden="true" className="w-5 h-5" />
                   </button>
                 </div>
               </div>
               <div className="min-h-0 flex-1 overflow-y-auto">
                 {catalogEntry && (
-                  <div className="px-6 py-4 bg-subtle border-b border-line">
-                    <p className="text-sm text-fg-secondary whitespace-pre-wrap break-words [overflow-wrap:anywhere]">{getCatalogDescription(catalogEntry, i18n.language)}</p>
+                  <div className="px-6 py-4 bg-gray-50 border-b border-gray-200">
+                    <p className="text-sm text-gray-600 [overflow-wrap:anywhere] whitespace-pre-wrap break-words">{getCatalogDescription(catalogEntry, i18n.language)}</p>
                   </div>
                 )}
                 <APIServiceDetailPanel

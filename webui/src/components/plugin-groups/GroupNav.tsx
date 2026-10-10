@@ -1,11 +1,11 @@
 import { useEffect, useId, useRef, useState, type HTMLAttributes, type ReactNode } from 'react';
 import {
-  IconGripVertical,
-  IconPencil,
-  IconPlus,
-  IconTrash,
-  IconX,
-} from '@tabler/icons-react';
+  GripVertical,
+  Pencil,
+  Plus,
+  Trash2,
+  X,
+} from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { GroupActionCancelled, groupItemLabel, groupLabel, groupName, orderGroupNames, type GroupNavEntry, type GroupNavItem, type GroupSelection } from './groupView';
 
@@ -140,7 +140,7 @@ function GroupDialog({ titleId, onClose, busy, children }: {
     };
   }, []);
   return <dialog ref={ref} aria-modal="true" aria-labelledby={titleId} tabIndex={-1}
-    className="fixed inset-0 m-auto max-h-[calc(100vh-2rem)] w-[calc(100%-2rem)] max-w-md overflow-auto rounded-xl bg-surface p-5 shadow-xl backdrop:bg-overlay-backdrop"
+    className="fixed inset-0 max-h-[calc(100vh-2rem)] w-[calc(100%-2rem)] max-w-md rounded-xl bg-white p-5 shadow-xl backdrop:bg-black/30 m-auto overflow-auto"
     onCancel={(event) => { event.preventDefault(); if (!busy) onClose(); }}
     onKeyDown={(event) => {
       if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); if (!busy) onClose(); }
@@ -261,20 +261,20 @@ export default function GroupNav({
   const closeModal = () => { if (!busy) { setDialog(null); clearMovingItem?.(); setError(''); } };
   const navigationButton = (value: GroupSelection, label: string, count: number) => (
     <button type="button" title={label} onClick={() => onSelect(value)} aria-pressed={selection === value} aria-current={selection === value ? 'page' : undefined}
-      className={`flex min-w-0 flex-1 items-center justify-between gap-2 rounded-md px-2 py-2 text-left text-xs ${selection === value ? 'bg-subtle font-medium text-fg' : 'text-fg-secondary hover:bg-hover'}`}>
-      <span className="truncate">{label}</span><span className="tabular-nums text-fg-muted">{count}</span>
+      className={`flex flex-1 items-center justify-between gap-2 rounded-md px-2 py-2 text-left text-xs min-w-0 ${selection === value ? 'bg-slate-100 font-medium text-slate-800' : 'text-gray-600 hover:bg-gray-50'}`}>
+      <span className="truncate">{label}</span><span className="tabular-nums text-gray-400">{count}</span>
     </button>
   );
 
   return (
     <aside className={`w-full shrink-0 md:w-52 ${className}`} aria-label={t('title')}>
       <div className="mb-2 flex items-center justify-between gap-2 px-2">
-        <h2 className="text-xs font-semibold text-fg-secondary">{t('title')}</h2>
+        <h2 className="text-xs font-semibold text-gray-600">{t('title')}</h2>
         <button type="button" {...dropProps()} onClick={() => openCreate()} disabled={busy || !editableItems.length}
           title={!editableItems.length ? t('readOnly.noEditable') : t('create')} aria-label={t('create')}
-          className="rounded p-1 text-fg-muted hover:bg-hover disabled:opacity-40"><IconPlus aria-hidden="true" className="h-4 w-4" /></button>
+          className="rounded p-1 text-gray-500 hover:bg-gray-100 disabled:opacity-40"><Plus aria-hidden="true" className="h-4 w-4" /></button>
       </div>
-      <p className="mb-2 px-2 text-xs leading-4 text-fg-muted">{t('countsDescription')}</p>
+      <p className="mb-2 px-2 text-[11px] leading-4 text-gray-400">{t('countsDescription')}</p>
       <nav className="space-y-0.5">
         <div className="flex">{navigationButton(null, t('all'), total)}</div>
         <div className="flex" {...dropProps('')}>{navigationButton('', t('ungrouped'), ungroupedCount)}</div>
@@ -283,7 +283,7 @@ export default function GroupNav({
           const label = groupLabel(group, t);
           return <div key={group} className="flex items-center gap-0.5" {...dropProps(group, group)}>
             <button type="button" draggable aria-label={t('drag.reorderLabel', { name: label })}
-              title={t('drag.reorderHint')} className="rounded p-0.5 text-fg-placeholder hover:text-fg-muted"
+              title={t('drag.reorderHint')} className="rounded p-0.5 text-gray-300 hover:text-gray-500"
               onDragStart={(event) => {
                 const token = `${dialogTitleId}-${++orderSequence.current}`;
                 orderGesture.current = { token, name: group, element: event.currentTarget };
@@ -297,49 +297,49 @@ export default function GroupNav({
                 event.preventDefault();
                 const index = ordered.indexOf(group) + (event.key === 'ArrowUp' ? -1 : 1);
                 if (ordered[index]) reorder(group, ordered[index]);
-              }}><IconGripVertical aria-hidden="true" className="h-3 w-3" /></button>
+              }}><GripVertical aria-hidden="true" className="h-3 w-3" /></button>
             {navigationButton(group, label, entry.count)}
             <button type="button" disabled={busy || !!entry.readOnlyReason} title={entry.readOnlyReason || t('rename')}
               aria-label={t('renameNamed', { name: label })} onClick={() => { setName(group); setError(''); setDialog({ kind: 'rename', name: group }); }}
-              className="rounded p-1 text-fg-muted hover:bg-hover disabled:opacity-40"><IconPencil aria-hidden="true" className="h-3 w-3" /></button>
+              className="rounded p-1 text-gray-400 hover:bg-gray-100 disabled:opacity-40"><Pencil aria-hidden="true" className="h-3 w-3" /></button>
             <button type="button" disabled={busy || !!entry.readOnlyReason} title={entry.readOnlyReason || t('delete')}
               aria-label={t('deleteNamed', { name: label })} onClick={() => void run(() => onDelete(group))}
-              className="rounded p-1 text-fg-muted hover:bg-hover disabled:opacity-40"><IconTrash aria-hidden="true" className="h-3 w-3" /></button>
+              className="rounded p-1 text-gray-400 hover:bg-gray-100 disabled:opacity-40"><Trash2 aria-hidden="true" className="h-3 w-3" /></button>
           </div>;
         })}
       </nav>
-      {message && <p role="status" className="mt-3 px-2 text-xs text-fg-muted">{message}</p>}
-      {error && !modalOpen && <p role="alert" className="mt-3 whitespace-pre-wrap px-2 text-xs text-danger">{error}</p>}
+      {message && <p role="status" className="mt-3 px-2 text-xs text-gray-500">{message}</p>}
+      {error && !modalOpen && <p role="alert" className="mt-3 px-2 text-xs text-red-600 whitespace-pre-wrap">{error}</p>}
       {modalOpen && <GroupDialog key={dialog?.kind ?? 'move'} titleId={dialogTitleId} onClose={closeModal} busy={busy}>
           <div className="mb-3 flex items-center justify-between">
             <h3 id={dialogTitleId} className="text-sm font-semibold">{dialog ? t(`dialog.${dialog.kind}Title`) : t('dialog.moveTitle', { name: movingItem?.name })}</h3>
-            <button type="button" onClick={closeModal} disabled={busy} aria-label={t('close')}><IconX aria-hidden="true" className="h-4 w-4" /></button>
+            <button type="button" onClick={closeModal} disabled={busy} aria-label={t('close')}><X aria-hidden="true" className="h-4 w-4" /></button>
           </div>
           {dialog ? <>
-            <label className="block text-xs text-fg-secondary">{t('dialog.name')}
+            <label className="block text-xs text-gray-600">{t('dialog.name')}
               <input value={name} onChange={(event) => setName(event.target.value)} disabled={busy}
-                className="mt-1 w-full rounded border border-line-control px-3 py-2 text-sm" />
+                className="mt-1 w-full rounded border border-gray-300 px-3 py-2 text-sm" />
             </label>
-            {dialog.kind === 'create' && <label className="mt-3 block text-xs text-fg-secondary">{t('dialog.firstPlugin')}
+            {dialog.kind === 'create' && <label className="mt-3 block text-xs text-gray-600">{t('dialog.firstPlugin')}
               <select value={dialog.key} onChange={(event) => setDialog({ kind: 'create', key: event.target.value })} disabled={busy}
-                className="mt-1 w-full rounded border border-line-control px-3 py-2 text-sm">
+                className="mt-1 w-full rounded border border-gray-300 px-3 py-2 text-sm">
                 <option value="">{t('dialog.choosePlugin')}</option>
                 {editableItems.map((item) => <option key={item.key} value={item.key}>{groupItemLabel(item)}</option>)}
               </select>
             </label>}
-          </> : <label className="block text-xs text-fg-secondary">{t('dialog.destination')}
+          </> : <label className="block text-xs text-gray-600">{t('dialog.destination')}
             <select value={destination} onChange={(event) => setDestination(event.target.value)} disabled={busy}
-              className="mt-1 w-full rounded border border-line-control px-3 py-2 text-sm">
+              className="mt-1 w-full rounded border border-gray-300 px-3 py-2 text-sm">
               <option value="">{t('ungrouped')}</option>
               {ordered.map((group) => <option key={group} value={group}>{groupLabel(group, t)}</option>)}
             </select>
           </label>}
-          {error && <p role="alert" className="mt-3 whitespace-pre-wrap text-xs text-danger">{error}</p>}
+          {error && <p role="alert" className="mt-3 text-xs text-red-600 whitespace-pre-wrap">{error}</p>}
           <div className="mt-5 flex items-center justify-end gap-2">
-            {!dialog && movingItem && <button type="button" onClick={() => openCreate(movingItem.key)} disabled={busy} className="mr-auto text-xs text-fg-secondary">{t('create')}</button>}
+            {!dialog && movingItem && <button type="button" onClick={() => openCreate(movingItem.key)} disabled={busy} className="text-xs text-gray-600 mr-auto">{t('create')}</button>}
             <button type="button" onClick={closeModal} disabled={busy} className="rounded border px-3 py-1.5 text-xs">{t('cancel')}</button>
             <button type="button" disabled={busy} onClick={dialog ? submit : () => { if (movingItem && !movingItem.readOnlyReason) void run(() => onMove(movingItem.key, destination || null)); }}
-              className="rounded bg-action px-3 py-1.5 text-xs text-action-fg hover:bg-action-hover disabled:opacity-50">{busy ? t('saving') : t('save')}</button>
+              className="rounded bg-slate-700 px-3 py-1.5 text-xs text-white disabled:opacity-50">{busy ? t('saving') : t('save')}</button>
           </div>
       </GroupDialog>}
     </aside>

@@ -9,21 +9,21 @@ import {
   type TextareaHTMLAttributes,
 } from 'react';
 import {
-  IconAlertCircle,
-  IconCalendarClock,
-  IconCheck,
-  IconChevronDown,
-  IconChevronRight,
-  IconRobot,
-  IconWorld,
-  IconLoader2,
-  IconPlayerPlay,
-  IconRocket,
-  IconServer,
-  IconSquare,
-  IconTrash,
-  IconRouteSquare2 as WorkflowIcon,
-} from '@tabler/icons-react';
+  AlertCircle,
+  Bot,
+  CalendarClock,
+  Check,
+  ChevronDown,
+  ChevronRight,
+  Globe,
+  Loader2,
+  Play,
+  Rocket,
+  Server,
+  Square,
+  Trash2,
+  Workflow as WorkflowIcon,
+} from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import {
   resolveWorkflowServicePort,
@@ -56,9 +56,9 @@ const LEGACY_SINGLETON_TYPES: WorkflowTriggerType[] = ['schedule', 'kafka', 'sys
 const TEMPLATE_API_MODES = new Set(['api', 'publish', 'api_service', 'service']);
 const DEFAULT_PUBLISH_GUIDE_KINDS = ['api', 'syslog', 'kafka', 'webhook', 'schedule'] as const;
 const CARD_ACTION_GRID_CLASS = 'grid w-full grid-cols-3 items-center gap-2 sm:w-[276px] sm:justify-self-end';
-const CARD_ACTION_BUTTON_CLASS = 'inline-flex h-8 w-full items-center justify-center gap-1.5 whitespace-nowrap rounded-control border bg-surface px-2 text-xs font-medium disabled:bg-disabled disabled:text-fg-disabled';
-const CARD_ACTION_NEUTRAL_BUTTON_CLASS = `${CARD_ACTION_BUTTON_CLASS} border-line text-fg-secondary hover:border-line-control hover:bg-hover`;
-const CARD_ACTION_DANGER_BUTTON_CLASS = `${CARD_ACTION_BUTTON_CLASS} border-danger text-danger hover:bg-danger-soft`;
+const CARD_ACTION_BUTTON_CLASS = 'inline-flex h-8 w-full items-center justify-center gap-1.5 rounded-lg border bg-white px-2 text-xs font-medium disabled:opacity-60 whitespace-nowrap';
+const CARD_ACTION_NEUTRAL_BUTTON_CLASS = `${CARD_ACTION_BUTTON_CLASS} border-gray-200 text-gray-700 hover:border-gray-300 hover:bg-gray-50`;
+const CARD_ACTION_DANGER_BUTTON_CLASS = `${CARD_ACTION_BUTTON_CLASS} border-red-200 text-red-600 hover:bg-red-50`;
 
 interface TemplateView {
   hasApi: boolean;
@@ -403,23 +403,23 @@ function CardGuidePanel({
   const { t } = useTranslation('workflow');
   if (!onGuidePrompt) return null;
   return (
-    <div className="rounded-control border border-line bg-subtle px-3 py-3">
+    <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-3">
       <div className="flex items-center justify-between gap-3">
         <div className="flex min-w-0 items-start gap-2">
-          <span className="mt-0.5 inline-flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-control border border-line bg-surface text-fg-secondary">
-            <IconRobot aria-hidden="true" className="h-4 w-4" />
+          <span className="mt-0.5 inline-flex h-7 w-7 items-center justify-center rounded-lg border border-gray-200 bg-white text-gray-600 flex-shrink-0">
+            <Bot aria-hidden="true" className="h-3.5 w-3.5" />
           </span>
           <div className="min-w-0">
-            <div className="text-xs font-semibold text-fg">{t('detail.run.cardGuideTitle')}</div>
-            <div className="mt-0.5 text-xs text-fg-muted">{action.description}</div>
+            <div className="text-xs font-semibold text-zinc-800">{t('detail.run.cardGuideTitle')}</div>
+            <div className="mt-0.5 text-[11px] leading-relaxed text-zinc-500">{action.description}</div>
           </div>
         </div>
         <button
           type="button"
           onClick={() => onGuidePrompt(action.prompt, action.displayLabel)}
-          className="inline-flex h-8 flex-shrink-0 items-center gap-1.5 rounded-control border border-line bg-surface px-3 text-xs font-semibold text-fg-secondary hover:border-line-control hover:bg-hover"
+          className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-3 text-xs font-semibold text-gray-700 hover:border-gray-300 hover:bg-gray-50 flex-shrink-0"
         >
-          <IconRobot aria-hidden="true" className="h-4 w-4" />
+          <Bot aria-hidden="true" className="h-3.5 w-3.5" />
           {action.label}
         </button>
       </div>
@@ -445,22 +445,22 @@ function PublishGuidePanel({
   return (
     <div className={
       isEmpty
-        ? 'mx-auto w-full rounded-card border border-line bg-surface px-5 py-5 text-center shadow-sm'
-        : 'rounded-control border border-line bg-subtle px-3 py-2'
+        ? 'w-full rounded-xl border border-zinc-200 bg-white px-5 py-5 text-center shadow-sm mx-auto'
+        : 'rounded-lg border border-zinc-200 bg-zinc-50/60 px-3 py-2'
     }>
       <div className={
         isEmpty
           ? 'mb-4 flex flex-col items-center gap-2'
           : 'mb-2 flex items-start gap-2'
       }>
-        <span className={`${isEmpty ? 'h-9 w-9' : 'mt-0.5 h-7 w-7'} inline-flex flex-shrink-0 items-center justify-center rounded-control border border-danger bg-danger-soft text-danger`}>
-          <IconRobot aria-hidden="true" className="h-4 w-4" />
+        <span className={`${isEmpty ? 'h-9 w-9' : 'mt-0.5 h-7 w-7'} inline-flex items-center justify-center rounded-lg border border-rose-100 bg-rose-50 text-rose-500 flex-shrink-0`}>
+          <Bot aria-hidden="true" className="h-3.5 w-3.5" />
         </span>
         <div className="min-w-0">
-          <div className={`${isEmpty ? 'text-sm' : 'text-xs'} font-semibold text-fg`}>
+          <div className={`${isEmpty ? 'text-sm' : 'text-xs'} font-semibold text-zinc-800`}>
             {t('detail.run.guidePanelTitle')}
           </div>
-          <div className={`${isEmpty ? 'mt-1' : 'mt-0.5'} text-xs text-fg-muted`}>
+          <div className={`${isEmpty ? 'mt-1' : 'mt-0.5'} text-[11px] leading-relaxed text-zinc-500`}>
             {t('detail.run.guidePanelDesc')}
           </div>
         </div>
@@ -476,12 +476,12 @@ function PublishGuidePanel({
         {actions.map((action) => (
           <div
             key={action.key}
-            className={`${isEmpty ? 'w-full justify-between px-3' : 'min-w-fit px-2.5'} group inline-flex h-8 items-center gap-1.5 rounded-control border border-line bg-surface text-left text-fg-secondary transition-colors hover:border-danger hover:bg-danger-soft hover:text-danger`}
+            className={`${isEmpty ? 'w-full justify-between px-3' : 'px-2.5 min-w-fit'} group inline-flex h-8 items-center gap-1.5 rounded-lg border border-zinc-200 bg-white text-left text-zinc-700 transition-colors hover:border-rose-200 hover:bg-rose-50/80 hover:text-rose-600`}
           >
             <button
               type="button"
               onClick={() => onGuidePrompt?.(action.prompt, action.label)}
-              className="whitespace-nowrap text-xs font-semibold "
+              className="text-xs font-semibold leading-none whitespace-nowrap"
             >
               {action.label}
             </button>
@@ -507,16 +507,16 @@ function SectionHeader({
   return (
     <button
       onClick={onToggle}
-      className="w-full flex items-center justify-between px-4 py-3 bg-subtle border-b border-line hover:bg-hover transition-colors text-left"
+      className="w-full flex items-center justify-between px-4 py-3 bg-gray-50 border-b border-gray-100 hover:bg-gray-100 transition-colors text-left"
     >
-      <span className="text-xs font-semibold text-fg-secondary flex items-center gap-2">
+      <span className="text-xs font-semibold text-gray-700 flex items-center gap-2">
         {title}
         {badge}
       </span>
       {expanded ? (
-        <IconChevronDown aria-hidden="true" className="w-4 h-4 text-fg-muted" />
+        <ChevronDown aria-hidden="true" className="w-3.5 h-3.5 text-gray-400" />
       ) : (
-        <IconChevronRight aria-hidden="true" className="w-4 h-4 text-fg-muted" />
+        <ChevronRight aria-hidden="true" className="w-3.5 h-3.5 text-gray-400" />
       )}
     </button>
   );
@@ -524,7 +524,7 @@ function SectionHeader({
 
 function CapabilityTypePill({ children }: { children: ReactNode }) {
   return (
-    <span className="inline-flex h-5 items-center rounded-pill bg-subtle px-2 text-xs font-medium text-fg-secondary">
+    <span className="inline-flex h-5 items-center rounded-full bg-gray-100 px-2 text-[11px] font-medium text-gray-600">
       {children}
     </span>
   );
@@ -532,8 +532,8 @@ function CapabilityTypePill({ children }: { children: ReactNode }) {
 
 function EnabledStatusPill({ active }: { active: boolean }) {
   return (
-    <span className={`inline-flex h-5 items-center rounded-pill px-2 text-xs font-medium ${
-      active ? 'bg-success-soft text-success' : 'bg-subtle text-fg-muted'
+    <span className={`inline-flex h-5 items-center rounded-full px-2 text-[11px] font-medium ${
+      active ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-500'
     }`}>
       {active ? '启用' : '停用'}
     </span>
@@ -551,9 +551,9 @@ function Field({
 }) {
   return (
     <div className="space-y-1">
-      <label className="block text-xs font-medium text-fg-secondary">{label}</label>
+      <label className="block text-xs font-medium text-gray-600">{label}</label>
       {children}
-      {hint ? <p className="text-xs text-fg-muted">{hint}</p> : null}
+      {hint ? <p className="text-[11px] text-gray-400">{hint}</p> : null}
     </div>
   );
 }
@@ -562,7 +562,7 @@ function Input(props: InputHTMLAttributes<HTMLInputElement>) {
   return (
     <input
       {...props}
-      className={`w-full rounded-control border border-line px-3 py-2 text-xs ${props.className ?? ''}`}
+      className={`w-full rounded-lg border border-gray-200 px-3 py-2 text-xs focus:outline-none focus:ring-1 focus:ring-red-500 ${props.className ?? ''}`}
     />
   );
 }
@@ -571,7 +571,7 @@ function Select(props: SelectHTMLAttributes<HTMLSelectElement>) {
   return (
     <select
       {...props}
-      className={`w-full rounded-control border border-line bg-surface px-3 py-2 text-xs ${props.className ?? ''}`}
+      className={`w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-xs focus:outline-none focus:ring-1 focus:ring-red-500 ${props.className ?? ''}`}
     />
   );
 }
@@ -581,7 +581,7 @@ function TextArea(props: TextareaHTMLAttributes<HTMLTextAreaElement>) {
     <textarea
       {...props}
       spellCheck={false}
-      className={`w-full rounded-control border border-line px-3 py-2 text-xs font-mono ${props.className ?? ''}`}
+      className={`w-full rounded-lg border border-gray-200 px-3 py-2 text-xs font-mono focus:outline-none focus:ring-1 focus:ring-red-500 ${props.className ?? ''}`}
     />
   );
 }
@@ -641,9 +641,9 @@ function SyslogTriggerFields({
               // 合法时存数字（后端契约），非法时保留原文让用户看到所填内容，由 validateSyslogPort 统一判定
               onSourceChange({ port: validateSyslogPort(raw) ? raw : Number(raw) });
             }}
-            className={portError ? 'border-danger ' : ''}
+            className={portError ? 'border-red-500 ' : ''}
           />
-          {portError ? <p className="text-xs text-danger">{portError}</p> : null}
+          {portError ? <p className="text-xs text-red-600">{portError}</p> : null}
         </Field>
       </div>
       <Field label="Input Key">
@@ -750,12 +750,12 @@ function ScheduleTriggerFields({
           />
         </Field>
       )}
-      <label className="flex items-center gap-2 text-xs text-fg-secondary">
+      <label className="flex items-center gap-2 text-xs text-gray-600">
         <input
           type="checkbox"
           checked={Boolean(runtime.noOverlap ?? true)}
           onChange={(e) => onRuntimeChange({ noOverlap: e.target.checked })}
-          className="rounded-tag border-line-control text-danger "
+          className="rounded border-gray-300 text-red-600 focus:ring-red-500"
         />
         禁止重叠执行
       </label>
@@ -1087,7 +1087,7 @@ function PublishSection({
       title={t('detail.run.deleteService')}
       className={CARD_ACTION_DANGER_BUTTON_CLASS}
     >
-      <IconTrash aria-hidden="true" className="h-4 w-4" />
+      <Trash2 aria-hidden="true" className="h-3.5 w-3.5" />
       <span>{deleting ? '删除中' : '删除'}</span>
     </button>
   );
@@ -1099,16 +1099,16 @@ function PublishSection({
       aria-expanded={configExpanded}
       className={CARD_ACTION_NEUTRAL_BUTTON_CLASS}
     >
-      {configExpanded ? <IconChevronDown aria-hidden="true" className="h-4 w-4" /> : <IconChevronRight aria-hidden="true" className="h-4 w-4" />}
+      {configExpanded ? <ChevronDown aria-hidden="true" className="h-3.5 w-3.5" /> : <ChevronRight aria-hidden="true" className="h-3.5 w-3.5" />}
       <span>配置</span>
     </button>
   );
 
   const renderPublishConfig = (options?: { showApply?: boolean }) => (
     <div>
-      <div className="mb-2 text-xs font-medium text-fg-muted">{t('detail.run.serviceDriver')}</div>
+      <div className="mb-2 text-xs font-medium text-zinc-500">{t('detail.run.serviceDriver')}</div>
       <div className="flex flex-wrap items-center gap-2">
-        <div className="inline-flex rounded-control border border-line bg-subtle p-0.5">
+        <div className="inline-flex rounded-lg border border-gray-200 bg-gray-50 p-0.5">
           {(['local', 'docker'] as WorkflowServiceDriver[]).map((item) => {
             const selected = driver === item;
             return (
@@ -1117,13 +1117,13 @@ function PublishSection({
                 type="button"
                 onClick={() => setDriver(item)}
                 disabled={publishing || stopping || deleting}
-                className={`inline-flex h-8 items-center gap-2 rounded-control px-3 text-xs font-medium transition-colors disabled:cursor-not-allowed disabled:bg-disabled disabled:text-fg-disabled ${
+                className={`inline-flex h-8 items-center gap-2 rounded-md px-3 text-xs font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
                   selected
-                    ? 'bg-surface text-fg shadow-sm'
-                    : 'text-fg-muted hover:text-fg'
+                    ? 'bg-white text-gray-900 shadow-sm'
+                    : 'text-gray-500 hover:text-gray-800'
                 }`}
               >
-                {selected ? <IconCheck aria-hidden="true" className="h-4 w-4 text-fg-secondary" /> : null}
+                {selected ? <Check aria-hidden="true" className="h-3.5 w-3.5 text-gray-700" /> : null}
                 <span>{item === 'local' ? t('detail.run.driverLocal') : t('detail.run.driverDocker')}</span>
               </button>
             );
@@ -1134,17 +1134,17 @@ function PublishSection({
             type="button"
             onClick={handlePublish}
             disabled={publishing || stopping || deleting}
-            className="inline-flex h-8 items-center justify-center gap-1.5 whitespace-nowrap rounded-control border border-line bg-surface px-3 text-xs font-medium text-fg-secondary hover:border-line-control hover:bg-hover disabled:bg-disabled disabled:text-fg-disabled"
+            className="inline-flex h-8 items-center justify-center gap-1.5 rounded-lg border border-gray-200 bg-white px-3 text-xs font-medium text-gray-700 hover:border-gray-300 hover:bg-gray-50 disabled:opacity-60 whitespace-nowrap"
           >
-            <IconRocket aria-hidden="true" className="h-4 w-4" />
+            <Rocket aria-hidden="true" className="h-3.5 w-3.5" />
             {publishing ? t('detail.run.publishing') : t('detail.run.applyPublishConfig')}
           </button>
         ) : null}
       </div>
-      <div className="mt-2 text-xs text-fg-muted">
+      <div className="mt-2 text-[11px] leading-relaxed text-zinc-500">
         {driver === 'local' ? t('detail.run.driverLocalDesc') : t('detail.run.driverDockerDesc')}
       </div>
-      <label className="mt-4 block text-xs font-medium text-fg-muted" htmlFor={`workflow-service-port-${workflowId}`}>
+      <label className="mt-4 block text-xs font-medium text-zinc-500" htmlFor={`workflow-service-port-${workflowId}`}>
         {t('detail.run.servicePort')}
       </label>
       <input
@@ -1157,9 +1157,9 @@ function PublishSection({
         onChange={(event) => setPortInput(event.target.value)}
         disabled={publishing || stopping || deleting}
         placeholder={t('detail.run.servicePortPlaceholder')}
-        className="ui-input mt-2 h-10 w-full rounded-control border border-line-control bg-surface px-3.5 font-mono text-xs text-fg-secondary focus:border-line-control disabled:cursor-not-allowed disabled:bg-disabled disabled:text-fg-disabled"
+        className="mt-2 h-10 w-full rounded-lg border border-gray-300 bg-white px-3.5 font-mono text-xs text-zinc-700 outline-none focus:border-gray-500 disabled:cursor-not-allowed disabled:opacity-50"
       />
-      <div className="mt-2 text-xs text-fg-muted">
+      <div className="mt-2 text-[11px] leading-relaxed text-zinc-500">
         {t('detail.run.servicePortDesc')}
       </div>
     </div>
@@ -1168,7 +1168,7 @@ function PublishSection({
   const apiGuideAction = buildApiCardGuideAction(t, workflow, service, driver);
 
   return (
-    <div className="border-b border-line">
+    <div className="border-b border-gray-100">
       <SectionHeader
         title={t('detail.run.publishSection')}
         expanded={expanded}
@@ -1178,18 +1178,18 @@ function PublishSection({
       {expanded && (
         <div className="p-4 space-y-3">
           {loading ? (
-            <div className="flex items-center gap-2 text-xs text-fg-muted">
-              <IconLoader2 aria-hidden="true" className="w-4 h-4 animate-spin" />
+            <div className="flex items-center gap-2 text-xs text-gray-500">
+              <Loader2 aria-hidden="true" className="w-3.5 h-3.5 animate-spin" />
               加载中...
             </div>
           ) : service ? (
             <div className="space-y-3">
               <div
                 data-testid="api-publish-card"
-                className={`rounded-card border bg-surface transition-colors ${
+                className={`rounded-xl border bg-white transition-colors ${
                   configExpanded
-                    ? 'border-line-control'
-                    : 'border-line hover:bg-hover'
+                    ? 'border-gray-300'
+                    : 'border-gray-200 hover:bg-gray-50'
                 }`}
               >
                 <div className="grid grid-cols-1 items-center gap-4 px-4 py-4 sm:grid-cols-[minmax(0,1fr)_276px]">
@@ -1199,11 +1199,11 @@ function PublishSection({
                     className="flex min-h-[82px] min-w-0 flex-col justify-between text-left"
                   >
                     <div>
-                      <div className="truncate text-sm font-semibold text-fg">API 服务</div>
-                      <div className="mt-1 truncate text-xs text-fg-muted">
+                      <div className="text-sm font-semibold text-gray-900 truncate">API 服务</div>
+                      <div className="mt-1 text-[11px] text-gray-500 truncate">
                         {service.driver === 'docker' ? t('detail.run.driverDocker') : t('detail.run.driverLocal')}
                       </div>
-                      <div className="mt-1 truncate text-xs text-fg-muted">ID: api-service</div>
+                      <div className="mt-1 text-[11px] text-gray-400 truncate">ID: api-service</div>
                     </div>
                     <div className="mt-3 flex flex-wrap items-center gap-2">
                       <CapabilityTypePill>API</CapabilityTypePill>
@@ -1219,7 +1219,7 @@ function PublishSection({
                         disabled={publishing || deleting}
                         className={CARD_ACTION_NEUTRAL_BUTTON_CLASS}
                       >
-                        <IconPlayerPlay aria-hidden="true" className="h-4 w-4" />
+                        <Play aria-hidden="true" className="h-3.5 w-3.5" />
                         {publishing ? t('detail.run.publishing') : '启用'}
                       </button>
                     ) : (
@@ -1229,7 +1229,7 @@ function PublishSection({
                         disabled={stopping || deleting}
                         className={CARD_ACTION_NEUTRAL_BUTTON_CLASS}
                       >
-                        <IconSquare aria-hidden="true" className="h-4 w-4" />
+                        <Square aria-hidden="true" className="h-3.5 w-3.5" />
                         {stopping ? t('detail.run.stopping') : '停用'}
                       </button>
                     )}
@@ -1237,26 +1237,26 @@ function PublishSection({
                   </div>
                 </div>
                 {configExpanded ? (
-                  <div data-testid="api-publish-config" className="space-y-4 border-t border-line px-4 pb-4 pt-4">
+                  <div data-testid="api-publish-config" className="space-y-4 border-t border-gray-100 px-4 pb-4 pt-4">
                     {renderPublishConfig({ showApply: true })}
                     <CardGuidePanel action={apiGuideAction} onGuidePrompt={onGuidePrompt} />
                     <div>
-                      <div className="mb-2 text-xs font-medium text-fg-muted">Invoke URL</div>
-                      <div className="flex min-h-10 items-center gap-2 rounded-control border border-line-control bg-surface px-3.5 py-2">
-                        <span className="min-w-0 flex-1 truncate font-mono text-xs text-fg-secondary">{service.invokeUrl}</span>
+                      <div className="mb-2 text-xs font-medium text-zinc-500">Invoke URL</div>
+                      <div className="flex items-center gap-2 rounded-lg border border-gray-300 bg-white px-3.5 py-2 min-h-10">
+                        <span className="flex-1 font-mono text-xs text-zinc-700 min-w-0 truncate">{service.invokeUrl}</span>
                         <CopyButton text={service.invokeUrl ?? ''} />
                       </div>
                     </div>
                     <div>
-                      <div className="mb-2 text-xs font-medium text-fg-muted">API Key</div>
-                      <div className="flex min-h-10 items-center gap-2 rounded-control border border-line-control bg-surface px-3.5 py-2">
-                        <span className="min-w-0 flex-1 truncate font-mono text-xs text-fg-secondary">
+                      <div className="mb-2 text-xs font-medium text-zinc-500">API Key</div>
+                      <div className="flex items-center gap-2 rounded-lg border border-gray-300 bg-white px-3.5 py-2 min-h-10">
+                        <span className="flex-1 font-mono text-xs text-zinc-700 min-w-0 truncate">
                           {maskedValue(service.apiKey, apiKeyVisible)}
                         </span>
                         <button
                           type="button"
                           onClick={() => setApiKeyVisible((v) => !v)}
-                          className="text-xs font-medium text-danger hover:text-danger"
+                          className="text-xs font-medium text-red-500 hover:text-red-700"
                         >
                           {apiKeyVisible ? t('detail.run.apiKeyHide') : t('detail.run.apiKeyShow')}
                         </button>
@@ -1271,10 +1271,10 @@ function PublishSection({
             <div className="space-y-3">
               <div
                 data-testid="api-publish-card"
-                className={`rounded-card border bg-surface transition-colors ${
+                className={`rounded-xl border bg-white transition-colors ${
                   configExpanded
-                    ? 'border-line-control'
-                    : 'border-line hover:bg-hover'
+                    ? 'border-gray-300'
+                    : 'border-gray-200 hover:bg-gray-50'
                 }`}
               >
                 <div className="grid grid-cols-1 items-center gap-4 px-4 py-4 sm:grid-cols-[minmax(0,1fr)_276px]">
@@ -1284,9 +1284,9 @@ function PublishSection({
                     className="flex min-h-[82px] min-w-0 flex-col justify-between text-left"
                   >
                     <div>
-                      <div className="truncate text-sm font-semibold text-fg">API 服务</div>
-                      <div className="mt-1 truncate text-xs text-fg-muted">{t('detail.run.publishDesc')}</div>
-                      <div className="mt-1 truncate text-xs text-fg-muted">ID: api-service</div>
+                      <div className="text-sm font-semibold text-gray-900 truncate">API 服务</div>
+                      <div className="mt-1 text-[11px] text-gray-500 truncate">{t('detail.run.publishDesc')}</div>
+                      <div className="mt-1 text-[11px] text-gray-400 truncate">ID: api-service</div>
                     </div>
                     <div className="mt-3 flex flex-wrap items-center gap-2">
                       <CapabilityTypePill>API</CapabilityTypePill>
@@ -1301,13 +1301,13 @@ function PublishSection({
                       disabled={publishing}
                       className={CARD_ACTION_NEUTRAL_BUTTON_CLASS}
                     >
-                      <IconRocket aria-hidden="true" className="h-4 w-4" />
+                      <Rocket aria-hidden="true" className="h-3.5 w-3.5" />
                       {publishing ? t('detail.run.publishing') : '发布'}
                     </button>
                   </div>
                 </div>
                 {configExpanded ? (
-                  <div data-testid="api-publish-config" className="space-y-4 border-t border-line px-4 pb-4 pt-4">
+                  <div data-testid="api-publish-config" className="space-y-4 border-t border-gray-100 px-4 pb-4 pt-4">
                     <CardGuidePanel action={apiGuideAction} onGuidePrompt={onGuidePrompt} />
                     {renderPublishConfig()}
                   </div>
@@ -1316,8 +1316,8 @@ function PublishSection({
             </div>
           )}
           {error ? (
-            <div className="flex items-start gap-1.5 rounded-control bg-danger-soft px-3 py-2 text-xs text-danger">
-              <IconAlertCircle aria-hidden="true" className="w-4 h-4 mt-0.5 flex-shrink-0" />
+            <div className="flex items-start gap-1.5 rounded-lg bg-red-50 px-3 py-2 text-xs text-red-600">
+              <AlertCircle aria-hidden="true" className="w-3.5 h-3.5 mt-0.5 flex-shrink-0" />
               <span>{error}</span>
             </div>
           ) : null}
@@ -1375,7 +1375,7 @@ function TriggerEditor({
 
   if (!draft) {
     return (
-      <div className="rounded-card border border-dashed border-line px-4 py-8 text-center text-xs text-fg-muted">
+      <div className="rounded-xl border border-dashed border-gray-200 px-4 py-8 text-center text-xs text-gray-500">
         选择或创建一个 Trigger 后，在这里编辑配置。
       </div>
     );
@@ -1463,23 +1463,23 @@ function TriggerEditor({
   const triggerGuideAction = buildTriggerCardGuideAction(t, workflow, draft, status, inputsText);
 
   return (
-    <div className={embedded ? 'border-t border-line px-3 pb-3 pt-4 space-y-4' : 'rounded-card border border-line bg-surface p-4 space-y-4'}>
+    <div className={embedded ? 'border-t border-gray-100 px-3 pb-3 pt-4 space-y-4' : 'rounded-xl border border-gray-200 bg-white p-4 space-y-4'}>
       {showIdentityHeader ? (
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0">
-            <div className="text-sm font-semibold text-fg">{draft.name || draft.id}</div>
-            <div className="mt-1 text-xs text-fg-muted">
+            <div className="text-sm font-semibold text-gray-900">{draft.name || draft.id}</div>
+            <div className="mt-1 text-xs text-gray-500">
               {triggerTypeLabel(draft.type)} · {triggerSourceLabel(draft)}
             </div>
-            <div className="mt-1 text-xs text-fg-muted">ID: {draft.id}</div>
+            <div className="mt-1 text-[11px] text-gray-400">ID: {draft.id}</div>
           </div>
           <div className="flex items-center gap-2">
-            <label className="flex items-center gap-2 text-xs text-fg-secondary">
+            <label className="flex items-center gap-2 text-xs text-gray-600">
               <input
                 type="checkbox"
                 checked={!!draft.enabled}
                 onChange={(e) => updateDraft({ enabled: e.target.checked })}
-                className="rounded-tag border-line-control text-danger "
+                className="rounded border-gray-300 text-red-600 focus:ring-red-500"
               />
               启用
             </label>
@@ -1487,17 +1487,17 @@ function TriggerEditor({
               type="button"
               onClick={onDelete}
               disabled={deleting}
-              className="inline-flex items-center gap-1 rounded-control border border-danger px-2.5 py-1.5 text-xs font-medium text-danger hover:bg-danger-soft disabled:bg-disabled disabled:text-fg-disabled"
+              className="inline-flex items-center gap-1 rounded-lg border border-red-200 px-2.5 py-1.5 text-xs font-medium text-red-600 hover:bg-red-50 disabled:opacity-60"
             >
-              <IconTrash aria-hidden="true" className="w-4 h-4" />
+              <Trash2 aria-hidden="true" className="w-3.5 h-3.5" />
               {deleting ? '删除中...' : '删除'}
             </button>
           </div>
         </div>
       ) : (
         <div className="flex items-center justify-between gap-3">
-          <div className="text-xs font-semibold text-fg-secondary">编辑配置</div>
-          <div className="text-xs text-fg-muted">{draft.id}</div>
+          <div className="text-xs font-semibold text-gray-700">编辑配置</div>
+          <div className="text-[11px] text-gray-400">{draft.id}</div>
         </div>
       )}
 
@@ -1525,12 +1525,12 @@ function TriggerEditor({
               </Select>
             </Field>
             <Field label="逻辑路径" hint="仅用于说明来源，服务端实际入口固定且不可编辑">
-              <Input value={String(source.path ?? '')} readOnly className="bg-subtle text-fg-muted" />
+              <Input value={String(source.path ?? '')} readOnly className="bg-gray-50 text-gray-500" />
             </Field>
           </div>
           <Field label="实际调用地址">
-            <div className="flex items-center gap-2 rounded-control border border-line bg-subtle px-3 py-2">
-              <span className="min-w-0 flex-1 truncate font-mono text-xs text-fg-secondary">{webhookInvokeUrl}</span>
+            <div className="flex items-center gap-2 rounded-lg border border-gray-200 bg-gray-50 px-3 py-2">
+              <span className="flex-1 font-mono text-xs text-gray-700 min-w-0 truncate">{webhookInvokeUrl}</span>
               <CopyButton text={webhookInvokeUrl} />
             </div>
           </Field>
@@ -1593,7 +1593,7 @@ function TriggerEditor({
             </Select>
           </Field>
           {plugins.length === 0 ? (
-            <div className="text-xs text-fg-muted">
+            <div className="text-[11px] text-gray-400">
               当前没有可用的自定义 Trigger 插件。
             </div>
           ) : null}
@@ -1605,12 +1605,12 @@ function TriggerEditor({
       </Field>
 
       {status ? (
-        <div className="rounded-control border border-line bg-subtle px-3 py-3 text-xs text-fg-secondary space-y-1">
-          <div className="font-medium text-fg-secondary">运行状态</div>
+        <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-3 text-xs text-gray-600 space-y-1">
+          <div className="font-medium text-gray-700">运行状态</div>
           <div>state: {String(status.state ?? '-')}</div>
           {'nextRunAt' in status ? <div>nextRunAt: {formatTimestamp(status.nextRunAt as number | null)}</div> : null}
           {'lastRunAt' in status ? <div>lastRunAt: {formatTimestamp(status.lastRunAt as number | null)}</div> : null}
-          {status.error ? <div className="text-danger">error: {String(status.error)}</div> : null}
+          {status.error ? <div className="text-red-600">error: {String(status.error)}</div> : null}
         </div>
       ) : null}
 
@@ -1629,7 +1629,7 @@ function TriggerEditor({
               }
             }}
             disabled={runningOnce || saving}
-            className="rounded-control border border-line px-3 py-2 text-xs font-medium text-fg-secondary hover:bg-hover disabled:bg-disabled disabled:text-fg-disabled"
+            className="rounded-lg border border-gray-200 px-3 py-2 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-60"
           >
             {runningOnce ? '执行中...' : '立即执行一轮'}
           </button>
@@ -1641,27 +1641,27 @@ function TriggerEditor({
           }}
           disabled={saving || !!portError}
           title={portError || undefined}
-          className="rounded-control border border-line px-3 py-2 text-xs font-medium text-fg-secondary hover:bg-hover disabled:bg-disabled disabled:text-fg-disabled"
+          className="rounded-lg border border-gray-200 px-3 py-2 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-60"
         >
           {saving ? '保存中...' : '保存'}
         </button>
       </div>
 
       {jsonError ? (
-        <div className="flex items-start gap-1.5 rounded-control bg-danger-soft px-3 py-2 text-xs text-danger">
-          <IconAlertCircle aria-hidden="true" className="w-4 h-4 mt-0.5 flex-shrink-0" />
+        <div className="flex items-start gap-1.5 rounded-lg bg-red-50 px-3 py-2 text-xs text-red-600">
+          <AlertCircle aria-hidden="true" className="w-3.5 h-3.5 mt-0.5 flex-shrink-0" />
           <span>{jsonError}</span>
         </div>
       ) : null}
       {error ? (
-        <div className="flex items-start gap-1.5 rounded-control bg-danger-soft px-3 py-2 text-xs text-danger">
-          <IconAlertCircle aria-hidden="true" className="w-4 h-4 mt-0.5 flex-shrink-0" />
+        <div className="flex items-start gap-1.5 rounded-lg bg-red-50 px-3 py-2 text-xs text-red-600">
+          <AlertCircle aria-hidden="true" className="w-3.5 h-3.5 mt-0.5 flex-shrink-0" />
           <span>{error}</span>
         </div>
       ) : null}
       {success ? (
-        <div className="flex items-start gap-1.5 rounded-control bg-success-soft px-3 py-2 text-xs text-success">
-          <IconCheck aria-hidden="true" className="w-4 h-4 mt-0.5 flex-shrink-0" />
+        <div className="flex items-start gap-1.5 rounded-lg bg-green-50 px-3 py-2 text-xs text-green-700">
+          <Check aria-hidden="true" className="w-3.5 h-3.5 mt-0.5 flex-shrink-0" />
           <span>{success}</span>
         </div>
       ) : null}
@@ -1938,12 +1938,12 @@ function TriggersSection({
   };
 
   return (
-    <div className="border-b border-line">
+    <div className="border-b border-gray-100">
       <SectionHeader
         title={t('detail.run.triggerSection')}
         expanded={expanded}
         onToggle={() => setExpanded((v) => !v)}
-        badge={<span className="text-xs font-normal text-fg-muted">{records.length} 个</span>}
+        badge={<span className="text-xs font-normal text-gray-500">{records.length} 个</span>}
       />
       {expanded && (
         <div className="p-4 space-y-4">
@@ -1955,9 +1955,9 @@ function TriggersSection({
               }}
               disabled={!!getCreateDisabledReason('schedule')}
               title={getCreateDisabledReason('schedule')}
-              className="inline-flex items-center gap-1 rounded-control border border-line px-3 py-1.5 text-xs font-medium text-fg-secondary hover:bg-hover disabled:cursor-not-allowed disabled:bg-disabled disabled:text-fg-disabled"
+              className="inline-flex items-center gap-1 rounded-lg border border-gray-200 px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
             >
-              <IconCalendarClock aria-hidden="true" className="w-4 h-4" />
+              <CalendarClock aria-hidden="true" className="w-3.5 h-3.5" />
               Schedule
             </button>
             <button
@@ -1965,9 +1965,9 @@ function TriggersSection({
               onClick={() => {
                 void createTrigger('custom_webhook');
               }}
-              className="inline-flex items-center gap-1 rounded-control border border-line px-3 py-1.5 text-xs font-medium text-fg-secondary hover:bg-hover"
+              className="inline-flex items-center gap-1 rounded-lg border border-gray-200 px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50"
             >
-              <IconWorld aria-hidden="true" className="w-4 h-4" />
+              <Globe aria-hidden="true" className="w-3.5 h-3.5" />
               Webhook
             </button>
             <button
@@ -1977,9 +1977,9 @@ function TriggersSection({
               }}
               disabled={!!getCreateDisabledReason('syslog')}
               title={getCreateDisabledReason('syslog')}
-              className="inline-flex items-center gap-1 rounded-control border border-line px-3 py-1.5 text-xs font-medium text-fg-secondary hover:bg-hover disabled:cursor-not-allowed disabled:bg-disabled disabled:text-fg-disabled"
+              className="inline-flex items-center gap-1 rounded-lg border border-gray-200 px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
             >
-              <IconServer aria-hidden="true" className="w-4 h-4" />
+              <Server aria-hidden="true" className="w-3.5 h-3.5" />
               Syslog
             </button>
             <button
@@ -1989,22 +1989,22 @@ function TriggersSection({
               }}
               disabled={!!getCreateDisabledReason('kafka')}
               title={getCreateDisabledReason('kafka')}
-              className="inline-flex items-center gap-1 rounded-control border border-line px-3 py-1.5 text-xs font-medium text-fg-secondary hover:bg-hover disabled:cursor-not-allowed disabled:bg-disabled disabled:text-fg-disabled"
+              className="inline-flex items-center gap-1 rounded-lg border border-gray-200 px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
             >
-              <WorkflowIcon aria-hidden="true" className="w-4 h-4" />
+              <WorkflowIcon aria-hidden="true" className="w-3.5 h-3.5" />
               Kafka
             </button>
           </div>
 
           {hint ? (
-            <div className="rounded-card border border-info bg-info-soft px-3 py-3 text-xs text-info">
+            <div className="rounded-xl border border-blue-200 bg-blue-50 px-3 py-3 text-xs text-blue-700">
               {hint}
             </div>
           ) : null}
 
           {loading ? (
-            <div className="flex items-center gap-2 text-xs text-fg-muted">
-              <IconLoader2 aria-hidden="true" className="w-4 h-4 animate-spin" />
+            <div className="flex items-center gap-2 text-xs text-gray-500">
+              <Loader2 aria-hidden="true" className="w-3.5 h-3.5 animate-spin" />
               正在加载 Trigger...
             </div>
           ) : (
@@ -2017,10 +2017,10 @@ function TriggersSection({
                       <div
                         key={trigger.id}
                         data-testid={`trigger-card-${trigger.id}`}
-                        className={`rounded-card border bg-surface transition-colors ${
+                        className={`rounded-xl border bg-white transition-colors ${
                           isSelected
-                            ? 'border-line-control'
-                            : 'border-line hover:bg-hover'
+                            ? 'border-gray-300'
+                            : 'border-gray-200 hover:bg-gray-50'
                         }`}
                       >
                         <div className="grid grid-cols-1 items-center gap-4 px-4 py-4 sm:grid-cols-[minmax(0,1fr)_276px]">
@@ -2030,14 +2030,14 @@ function TriggersSection({
                             className="flex min-h-[82px] min-w-0 flex-col justify-between text-left"
                           >
                             <div>
-                              <div className="truncate text-sm font-semibold text-fg">{trigger.name || trigger.id}</div>
-                              <div className="mt-1 truncate text-xs text-fg-muted">{triggerSourceLabel(trigger)}</div>
-                              <div className="mt-1 truncate text-xs text-fg-muted">ID: {trigger.id}</div>
+                              <div className="text-sm font-semibold text-gray-900 truncate">{trigger.name || trigger.id}</div>
+                              <div className="mt-1 text-[11px] text-gray-500 truncate">{triggerSourceLabel(trigger)}</div>
+                              <div className="mt-1 text-[11px] text-gray-400 truncate">ID: {trigger.id}</div>
                             </div>
                             <div className="mt-3 flex flex-wrap items-center gap-2">
                               <CapabilityTypePill>{triggerTypeLabel(trigger.type)}</CapabilityTypePill>
                               <EnabledStatusPill active={!!trigger.enabled} />
-                              {status?.error ? <span className="text-danger">{String(status.error)}</span> : null}
+                              {status?.error ? <span className="text-red-600">{String(status.error)}</span> : null}
                             </div>
                           </button>
                           <div className={CARD_ACTION_GRID_CLASS}>
@@ -2047,7 +2047,7 @@ function TriggersSection({
                               aria-expanded={isSelected}
                               className={CARD_ACTION_NEUTRAL_BUTTON_CLASS}
                             >
-                              {isSelected ? <IconChevronDown aria-hidden="true" className="h-4 w-4" /> : <IconChevronRight aria-hidden="true" className="h-4 w-4" />}
+                              {isSelected ? <ChevronDown aria-hidden="true" className="h-3.5 w-3.5" /> : <ChevronRight aria-hidden="true" className="h-3.5 w-3.5" />}
                               配置
                             </button>
                             <button
@@ -2058,7 +2058,7 @@ function TriggersSection({
                               disabled={saving}
                               className={CARD_ACTION_NEUTRAL_BUTTON_CLASS}
                             >
-                              {trigger.enabled ? <IconSquare aria-hidden="true" className="h-4 w-4" /> : <IconPlayerPlay aria-hidden="true" className="h-4 w-4" />}
+                              {trigger.enabled ? <Square aria-hidden="true" className="h-3.5 w-3.5" /> : <Play aria-hidden="true" className="h-3.5 w-3.5" />}
                               {trigger.enabled ? '停用' : '启用'}
                             </button>
                             <button
@@ -2070,7 +2070,7 @@ function TriggersSection({
                               disabled={deleting}
                               className={CARD_ACTION_DANGER_BUTTON_CLASS}
                             >
-                              <IconTrash aria-hidden="true" className="h-4 w-4" />
+                              <Trash2 aria-hidden="true" className="h-3.5 w-3.5" />
                               删除
                             </button>
                           </div>
@@ -2107,7 +2107,7 @@ function TriggersSection({
                   })}
                 </div>
               ) : records.length === 0 ? (
-                <div className="rounded-card border border-dashed border-line px-4 py-8 text-center text-xs text-fg-muted">
+                <div className="rounded-xl border border-dashed border-gray-200 px-4 py-8 text-center text-xs text-gray-500">
                   还没有配置任何 Trigger。可以从上面的快捷按钮开始。
                 </div>
               ) : null}
@@ -2153,8 +2153,8 @@ export default function IntegrationTab({ workflow, onWorkflowUpdated, onGuidePro
   if (loadingConfig) {
     return (
       <div className="flex-1 min-h-0 overflow-y-auto">
-        <div className="p-4 flex items-center gap-2 text-xs text-fg-muted">
-          <IconLoader2 aria-hidden="true" className="w-4 h-4 animate-spin" />
+        <div className="p-4 flex items-center gap-2 text-xs text-gray-500">
+          <Loader2 aria-hidden="true" className="w-3.5 h-3.5 animate-spin" />
           正在读取发布配置...
         </div>
       </div>
@@ -2166,10 +2166,10 @@ export default function IntegrationTab({ workflow, onWorkflowUpdated, onGuidePro
   const showGuide = Boolean(onGuidePrompt && guideActions.length > 0);
 
   return (
-    <div className="flex-1 min-h-0 overflow-y-auto divide-y divide-line">
+    <div className="flex-1 divide-y divide-gray-100 min-h-0 overflow-y-auto">
       {configError ? (
-        <div className="flex items-start gap-1.5 bg-danger-soft px-4 py-3 text-xs text-danger">
-          <IconAlertCircle aria-hidden="true" className="w-4 h-4 mt-0.5 flex-shrink-0" />
+        <div className="flex items-start gap-1.5 bg-red-50 px-4 py-3 text-xs text-red-600">
+          <AlertCircle aria-hidden="true" className="w-3.5 h-3.5 mt-0.5 flex-shrink-0" />
           <span>{configError}</span>
         </div>
       ) : null}

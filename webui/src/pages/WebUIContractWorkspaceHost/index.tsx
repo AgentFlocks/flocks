@@ -1,7 +1,7 @@
 import { useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, Navigate, useParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import { IconAlertCircle, IconLoader2 } from '@tabler/icons-react';
+import { AlertCircle, Loader2 } from 'lucide-react';
 import {
   webuiContractPagesAPI,
   type WebUIContractWorkspaceListItem,
@@ -120,14 +120,14 @@ export default function WebUIContractWorkspaceHost() {
   const statusClassName = 'p-4 pt-20 lg:p-6';
 
   if (!workspaceId) {
-    return <div className={`${statusClassName} text-sm text-fg-muted`}>{t('workspace.missingWorkspaceId')}</div>;
+    return <div className={`${statusClassName} text-sm text-zinc-500`}>{t('workspace.missingWorkspaceId')}</div>;
   }
 
   if (loading) {
     if (!showLoading) return null;
     return (
-      <div className={`${statusClassName} flex items-center gap-2 text-sm text-fg-muted`}>
-        <IconLoader2 aria-hidden="true" className="h-4 w-4 animate-spin" />
+      <div className={`${statusClassName} flex items-center gap-2 text-sm text-zinc-500`}>
+        <Loader2 aria-hidden="true" className="h-4 w-4 animate-spin" />
         {t('workspace.loading')}
       </div>
     );
@@ -136,15 +136,15 @@ export default function WebUIContractWorkspaceHost() {
   if (error) {
     return (
       <div className={statusClassName}>
-        <div className="flex items-start gap-3 rounded-control border border-warning bg-warning-soft p-4 text-warning">
-          <IconAlertCircle aria-hidden="true" className="mt-0.5 h-5 w-5 flex-shrink-0" />
+        <div className="flex items-start gap-3 rounded-lg border border-amber-200 bg-amber-50 p-4 text-amber-900">
+          <AlertCircle aria-hidden="true" className="mt-0.5 h-5 w-5 flex-shrink-0" />
           <div>
             <div className="font-medium">{t('workspace.unavailableTitle')}</div>
             <div className="mt-1 text-sm">{error}</div>
             <button
               type="button"
               onClick={() => void fetchWorkspaces()}
-              className="mt-3 rounded-control border border-warning bg-surface px-3 py-1.5 text-sm hover:bg-warning-soft"
+              className="mt-3 rounded-lg border border-amber-300 bg-white px-3 py-1.5 text-sm hover:bg-amber-100"
             >
               {t('host.retry')}
             </button>
@@ -157,14 +157,14 @@ export default function WebUIContractWorkspaceHost() {
   if (!workspace) {
     if (missingSuite && missingSuite.workspaceEnabled === false) {
       return (
-        <div className="flex items-start gap-3 rounded-control border border-line bg-subtle p-4 text-fg-secondary ">
-          <IconAlertCircle aria-hidden="true" className="mt-0.5 h-5 w-5 flex-shrink-0" />
+        <div className="flex items-start gap-3 rounded-lg border border-zinc-200 bg-zinc-50 p-4 text-zinc-700 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-200">
+          <AlertCircle aria-hidden="true" className="mt-0.5 h-5 w-5 flex-shrink-0" />
           <div>
             <div className="font-medium">{t('workspace.disabledTitle')}</div>
             <div className="mt-1 text-sm">{t('workspace.disabledBody')}</div>
             <Link
               to="/scenes/suites"
-              className="mt-3 inline-flex rounded-control border border-line-control bg-surface px-3 py-1.5 text-sm hover:bg-hover "
+              className="mt-3 inline-flex rounded-lg border border-zinc-300 bg-white px-3 py-1.5 text-sm hover:bg-zinc-100 dark:border-zinc-700 dark:bg-transparent dark:text-zinc-200"
             >
               {t('workspace.proOnlyAction')}
             </Link>
@@ -174,14 +174,14 @@ export default function WebUIContractWorkspaceHost() {
     }
     if (missingSuite?.edition === 'pro') {
       return (
-        <div className="flex items-start gap-3 rounded-control border border-warning bg-warning-soft p-4 text-warning ">
-          <IconAlertCircle aria-hidden="true" className="mt-0.5 h-5 w-5 flex-shrink-0" />
+        <div className="flex items-start gap-3 rounded-lg border border-amber-200 bg-amber-50 p-4 text-amber-900 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-200">
+          <AlertCircle aria-hidden="true" className="mt-0.5 h-5 w-5 flex-shrink-0" />
           <div>
             <div className="font-medium">{t('workspace.proOnlyTitle')}</div>
             <div className="mt-1 text-sm">{t('workspace.proOnlyBody')}</div>
             <Link
               to="/scenes/suites"
-              className="mt-3 inline-flex rounded-control border border-warning bg-surface px-3 py-1.5 text-sm text-warning hover:bg-warning-soft "
+              className="mt-3 inline-flex rounded-lg border border-amber-300 bg-white px-3 py-1.5 text-sm text-amber-900 hover:bg-amber-100 dark:border-amber-800 dark:bg-transparent dark:text-amber-200"
             >
               {t('workspace.proOnlyAction')}
             </Link>
@@ -189,11 +189,11 @@ export default function WebUIContractWorkspaceHost() {
         </div>
       );
     }
-    return <div className={`${statusClassName} text-sm text-fg-muted`}>{t('workspace.notFound')}</div>;
+    return <div className={`${statusClassName} text-sm text-zinc-500`}>{t('workspace.notFound')}</div>;
   }
 
   if (pages.length === 0) {
-    return <div className={`${statusClassName} text-sm text-fg-muted`}>{t('workspace.empty')}</div>;
+    return <div className={`${statusClassName} text-sm text-zinc-500`}>{t('workspace.empty')}</div>;
   }
 
   if (!pageId) {
@@ -205,7 +205,7 @@ export default function WebUIContractWorkspaceHost() {
   }
 
   if (!currentPage) {
-    return <div className={`${statusClassName} text-sm text-fg-muted`}>{t('workspace.pageNotFound')}</div>;
+    return <div className={`${statusClassName} text-sm text-zinc-500`}>{t('workspace.pageNotFound')}</div>;
   }
 
   const pageContentClassName = currentSection?.contentPadding === 'none'
@@ -213,7 +213,7 @@ export default function WebUIContractWorkspaceHost() {
     : 'h-full min-w-0 overflow-x-auto p-6';
 
   return (
-    <div className="h-full min-h-0 overflow-hidden bg-subtle ">
+    <div className="bg-zinc-50 dark:bg-zinc-950 h-full min-h-0 overflow-hidden">
       <div className={pageContentClassName}>
         <PageRuntimeHost key={currentPage.id} pageId={currentPage.id} />
       </div>

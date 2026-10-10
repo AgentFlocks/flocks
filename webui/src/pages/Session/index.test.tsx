@@ -930,7 +930,7 @@ describe('SessionPage session actions menu', () => {
 
     expect(screen.getByTestId('session-chat')).toHaveAttribute('data-execution-mode', 'build');
     expect(agentButton).toHaveAttribute('aria-haspopup', 'menu');
-    expect(agentIconContainer).not.toHaveClass('rounded-control', 'border', 'bg-white');
+    expect(agentIconContainer).not.toHaveClass('rounded-lg', 'border', 'bg-white');
     expect(agentIconContainer?.className).not.toContain('shadow-');
   });
 
@@ -1672,7 +1672,7 @@ describe('SessionPage session actions menu', () => {
     const modelOption = within(modelMenu).getByRole('button', { name: /MiniMax M3/i });
     await user.hover(modelOption);
     expect(modelOption.getAttribute('title')).toContain('MiniMax M3\nMiniMax / minimax-m3');
-    const info = modelOption.querySelector('.tabler-icon-info-circle')?.parentElement;
+    const info = modelOption.querySelector('.lucide-info')?.parentElement;
     expect(info).not.toBeNull();
     await user.hover(info as HTMLElement);
     expect(screen.getByRole('tooltip')).toHaveTextContent('MiniMax M3');
@@ -1961,14 +1961,14 @@ describe('SessionPage session actions menu', () => {
     const searchDialog = screen.getByRole('dialog', { name: 'taskSearchDialog' });
     const searchInput = within(searchDialog).getByPlaceholderText('filterConversations');
     expect(searchDialog).toHaveClass('fixed', 'inset-0', 'justify-center');
-    expect(searchDialog.firstElementChild).toHaveClass('max-w-modal', 'rounded-card');
-    expect(newSessionButton.previousElementSibling).toHaveClass('left-2', 'h-4', 'w-4');
+    expect(searchDialog.firstElementChild).toHaveClass('max-w-[620px]', 'rounded-2xl');
+    expect(newSessionButton.previousElementSibling).toHaveClass('left-2', 'h-3.5', 'w-3.5');
     expect(searchButton.closest('div')).toContainElement(screen.getByText('managementTitle'));
     expect(searchInput).toHaveFocus();
-    expect(searchInput).toHaveClass('text-sm', 'font-medium');
+    expect(searchInput).toHaveClass('text-[15px]', 'font-medium');
     await user.click(within(searchDialog).getByRole('button', { name: 'closeTaskSearch' }));
-    expect(tasksHeading.closest('div')).toHaveClass('px-2', 'text-xs', 'text-fg-muted');
-    expect(projectsHeading.closest('div')).toHaveClass('px-2', 'text-xs', 'text-fg-muted');
+    expect(tasksHeading.closest('div')).toHaveClass('px-2', 'text-xs', 'text-zinc-500');
+    expect(projectsHeading.closest('div')).toHaveClass('px-2', 'text-xs', 'text-zinc-500');
     expect(tasksHeading.nextElementSibling).toHaveTextContent('(1)');
     expect(projectsHeading.nextElementSibling).toHaveTextContent('(0)');
     expect(tasksSection).not.toBeNull();
@@ -1986,7 +1986,7 @@ describe('SessionPage session actions menu', () => {
 
     const tasksToggle = screen.getByRole('button', { name: 'toggleTasks' });
     expect(tasksToggle).toContainElement(tasksHeading);
-    expect(tasksToggle.querySelector('svg')).toHaveClass('h-4', 'w-4');
+    expect(tasksToggle.querySelector('svg')).toHaveClass('h-3.5', 'w-3.5');
     expect(screen.queryByRole('button', { name: 'selectTasks' })).not.toBeInTheDocument();
     const createTaskButton = screen.getByRole('button', { name: 'createTaskSession' });
     expect(createTaskButton).toHaveClass(
@@ -2061,16 +2061,16 @@ describe('SessionPage session actions menu', () => {
     const sessionTitle = await within(workbenchSidebar).findByText('Original Session');
     const selectedRow = sessionTitle.closest('div.group');
 
-    expect(workbenchCanvas).toHaveClass('bg-canvas');
-    expect(workbenchSidebar).toHaveClass('bg-subtle');
+    expect(workbenchCanvas).toHaveClass('bg-[#fcfcfd]');
+    expect(workbenchSidebar).toHaveClass('dark:bg-[#252c35]');
     expect(workbenchSidebar).toHaveClass('h-full', 'border-r');
-    expect(workbenchSidebar).toHaveClass('border-line');
-    expect(workbenchSidebar).not.toHaveClass('rounded-card');
+    expect(workbenchSidebar).toHaveClass('border-black/[0.10]');
+    expect(workbenchSidebar).not.toHaveClass('rounded-2xl');
     expect(workbenchSidebar.className).not.toContain('shadow-');
-    expect(mainCanvas).toHaveClass('bg-canvas');
-    expect(within(mainCanvas as HTMLElement).getByRole('heading', { level: 2 })).toHaveClass('text-fg-secondary');
+    expect(mainCanvas).toHaveClass('bg-[#fcfcfd]');
+    expect(within(mainCanvas as HTMLElement).getByRole('heading', { level: 2 })).toHaveClass('text-[#555a61]');
     await waitFor(() => {
-      expect(selectedRow).toHaveClass('bg-selected');
+      expect(selectedRow).toHaveClass('dark:bg-[#3a434e]');
     });
   });
 
@@ -2225,7 +2225,7 @@ describe('SessionPage session actions menu', () => {
 
     await screen.findByText('Labs');
     const projectButton = screen.getByRole('button', { name: 'selectProject' });
-    expect(projectButton.querySelector('svg')).toHaveClass('h-4', 'w-4');
+    expect(projectButton.querySelector('svg')).toHaveClass('h-3.5', 'w-3.5');
     expect(projectButton.parentElement).toHaveClass('px-3');
     await user.click(screen.getByRole('button', { name: 'toggleProjects' }));
     expect(screen.queryByText('Labs')).not.toBeInTheDocument();
@@ -2375,7 +2375,7 @@ describe('SessionPage session actions menu', () => {
     const sessionTitle = await screen.findByText('Original Session');
     const sessionCard = sessionTitle.closest('[class*="cursor-pointer"]');
     expect(sessionCard).not.toBeNull();
-    expect(sessionCard).toHaveClass('min-h-[34px]', 'rounded-control', 'border-transparent');
+    expect(sessionCard).toHaveClass('min-h-[34px]', 'rounded-lg', 'border-transparent');
   });
 
   it('hides the channel title prefix until the session is renamed', async () => {
@@ -2950,8 +2950,8 @@ describe('SessionPage session actions menu', () => {
     await user.click(screen.getByRole('button', { name: 'moreActions' }));
 
     const menu = document.querySelector('[data-session-menu-portal]');
-    expect(menu).toHaveClass('w-[132px]', 'rounded-card', 'p-1');
-    expect(menu).not.toHaveClass('w-36', 'rounded-control');
+    expect(menu).toHaveClass('w-[132px]', 'rounded-[10px]', 'p-1');
+    expect(menu).not.toHaveClass('w-36', 'rounded-lg');
     expect(screen.getByRole('button', { name: 'rename' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'downloadJson' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'moveToProjectAction' })).toBeInTheDocument();
@@ -3119,14 +3119,14 @@ describe('SessionPage session actions menu', () => {
     const actionsTrigger = screen.getByRole('button', { name: 'moreActions' });
 
     expect(timestamp).not.toHaveClass('group-hover:opacity-0');
-    expect(timestamp).toHaveClass('text-fg-muted');
+    expect(timestamp).toHaveClass('text-zinc-500');
     expect(timestamp).toHaveAttribute('title', 'formatted-date');
-    expect(actionsTrigger).toHaveClass('hover:bg-hover');
-    expect(actionsTrigger).not.toHaveClass('bg-surface');
+    expect(actionsTrigger).toHaveClass('hover:bg-white');
+    expect(actionsTrigger).not.toHaveClass('hover:bg-white/80');
 
     await user.click(actionsTrigger);
 
-    expect(actionsTrigger).not.toHaveClass('bg-surface');
+    expect(actionsTrigger).not.toHaveClass('bg-white/80');
   });
 
   it('refreshes relative session timestamps every minute', () => {
@@ -4368,7 +4368,7 @@ describe('SessionPage session actions menu', () => {
     expect(menuButtons.indexOf(skillButton)).toBeLessThan(menuButtons.indexOf(workflowButton));
     for (const button of [skillButton, workflowButton]) {
       const iconContainer = button.querySelector('svg')?.parentElement;
-      expect(iconContainer).not.toHaveClass('rounded-control', 'border', 'bg-white');
+      expect(iconContainer).not.toHaveClass('rounded-lg', 'border', 'bg-white');
       expect(iconContainer?.className).not.toContain('shadow-');
     }
 
@@ -4546,7 +4546,7 @@ describe('SessionPage session actions menu', () => {
       await screen.findByRole('button', { name: 'executionMode.title' });
 
       const sidebar = document.querySelector('[data-session-sidebar]') as HTMLElement;
-      expect(sidebar).toHaveClass('w-sidebar');
+      expect(sidebar).toHaveClass('w-[282px]');
       expect(sidebar).toHaveClass('relative');
       expect(screen.getByRole('button', { name: 'hideHistory' })).toBeInTheDocument();
     });

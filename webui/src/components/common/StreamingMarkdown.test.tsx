@@ -369,9 +369,9 @@ describe('StreamingMarkdown', () => {
 
     expect(container.querySelector('code')).toHaveClass(
       'rounded-md',
-      'bg-subtle',
+      'bg-zinc-100/80',
       'font-normal',
-      'text-fg-secondary',
+      'text-zinc-700',
     );
     expect(container.querySelector('code')).not.toHaveClass('font-semibold');
   });

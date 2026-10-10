@@ -1,4 +1,4 @@
-import { IconAlertCircle, IconRefresh, IconCircleCheck, IconWifiOff } from '@tabler/icons-react';
+import { AlertCircle, CheckCircle, RefreshCw, WifiOff } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { useBackendStatus } from '@/hooks/useBackendStatus';
 
@@ -13,26 +13,26 @@ export function BackendStatusBanner() {
   const getBannerStyle = () => {
     switch (status) {
       case 'connecting':
-        return 'bg-warning-soft border-warning text-warning dark:border-warning dark:bg-warning-soft dark:text-warning';
+        return 'bg-yellow-50 border-yellow-200 text-yellow-800 dark:border-amber-500/35 dark:bg-amber-500/15 dark:text-amber-100';
       case 'disconnected':
-        return 'bg-danger-soft border-danger text-danger dark:border-danger dark:bg-danger-soft dark:text-danger';
+        return 'bg-red-50 border-red-200 text-red-800 dark:border-red-400/30 dark:bg-red-500/15 dark:text-red-100';
       case 'error':
-        return 'bg-danger-soft border-danger text-danger dark:border-danger dark:bg-danger-soft dark:text-danger';
+        return 'bg-red-50 border-red-200 text-red-800 dark:border-red-400/30 dark:bg-red-500/15 dark:text-red-100';
       default:
-        return 'bg-canvas border-line text-fg dark:border-line dark:bg-surface dark:text-fg';
+        return 'bg-gray-50 border-gray-200 text-gray-800 dark:border-[#4a5563] dark:bg-[#303842] dark:text-[#d7dee8]';
     }
   };
 
   const getIcon = () => {
     switch (status) {
       case 'connecting':
-        return <IconRefresh aria-hidden="true" className="w-5 h-5 animate-spin" />;
+        return <RefreshCw aria-hidden="true" className="w-5 h-5 animate-spin" />;
       case 'disconnected':
-        return <IconWifiOff aria-hidden="true" className="w-5 h-5" />;
+        return <WifiOff aria-hidden="true" className="w-5 h-5" />;
       case 'error':
-        return <IconAlertCircle aria-hidden="true" className="w-5 h-5" />;
+        return <AlertCircle aria-hidden="true" className="w-5 h-5" />;
       default:
-        return <IconCircleCheck aria-hidden="true" className="w-5 h-5" />;
+        return <CheckCircle aria-hidden="true" className="w-5 h-5" />;
     }
   };
 
@@ -72,9 +72,9 @@ export function BackendStatusBanner() {
           
           <button
             onClick={checkHealth}
-            className="px-4 py-2 bg-surface hover:bg-hover rounded-lg text-sm font-medium transition-colors duration-200 flex items-center space-x-2 dark:bg-subtle dark:hover:bg-hover"
+            className="px-4 py-2 bg-white/50 hover:bg-white/80 rounded-lg text-sm font-medium transition-colors duration-200 flex items-center space-x-2 dark:bg-[#46515e]/70 dark:hover:bg-[#5a6573]"
           >
-            <IconRefresh aria-hidden="true" className="w-4 h-4" />
+            <RefreshCw aria-hidden="true" className="w-4 h-4" />
             <span>{t('backend.retry')}</span>
           </button>
         </div>

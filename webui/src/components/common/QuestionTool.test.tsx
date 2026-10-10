@@ -45,7 +45,7 @@ describe('QuestionTool', () => {
     const confirmButton = screen.getByRole('button', { name: /确认/ });
     expect(confirmButton).toBeDisabled();
     expect(confirmButton).toHaveClass('flex-1');
-    expect(confirmButton).toHaveClass('bg-action');
+    expect(confirmButton).toHaveClass('bg-emerald-600');
     await user.click(screen.getByRole('button', { name: /确认/ }));
 
     expect(onAnswer).not.toHaveBeenCalled();

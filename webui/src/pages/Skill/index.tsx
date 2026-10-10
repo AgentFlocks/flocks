@@ -1,22 +1,6 @@
 import { pageActionLabel } from '../pageActionLabel';
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
-import {
-  IconBook,
-  IconSearch,
-  IconPlus,
-  IconRefresh,
-  IconSparkles,
-  IconFolderOpen,
-  IconCloudDownload,
-  IconAlertTriangle,
-  IconLoader2,
-  IconPencil,
-  IconChevronLeft,
-  IconChevronRight,
-  IconFilter,
-  IconCircleCheck,
-  IconCircleX,
-} from '@tabler/icons-react';
+import { AlertTriangle, BookOpen, CheckCircle, ChevronLeft, ChevronRight, CloudDownload, Filter, FolderOpen, Loader2, Pencil, Plus, RefreshCw, Search, Sparkles, XCircle } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import PageHeader from '@/components/common/PageHeader';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
@@ -327,8 +311,8 @@ export default function SkillPage() {
     return (
       <div className="flex items-center justify-center h-full">
         <div className="text-center">
-          <p className="text-danger mb-4">{error}</p>
-          <button onClick={() => void refreshSkillsAndFetch({ silent: false, invalidateOnError: true, force: true })} className="px-4 py-2 bg-action text-action-fg rounded-control hover:bg-action-hover">
+          <p className="text-red-600 mb-4">{error}</p>
+          <button onClick={() => void refreshSkillsAndFetch({ silent: false, invalidateOnError: true, force: true })} className="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700">
             {t('common:button.retry')}
           </button>
         </div>
@@ -341,20 +325,20 @@ export default function SkillPage() {
       <PageHeader tone="ai"
         title={t('pageTitle')}
         description={t('pageDescription')}
-        icon={<IconBook aria-hidden="true" className="w-8 h-8" />}
+        icon={<BookOpen aria-hidden="true" className="w-8 h-8" />}
       />
 
       {/* Toolbar: 搜索 · 来源 chips · 刷新/安装/创建 */}
-      <div className="px-4 py-2 border-b border-line flex flex-wrap items-center gap-3">
+      <div className="px-4 py-2 border-b border-gray-100 flex items-center gap-3 flex-wrap">
         {/* 搜索 */}
         <div className="relative w-full sm:w-64 min-w-0">
-          <IconSearch aria-hidden="true" className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-fg-muted pointer-events-none" />
+          <Search aria-hidden="true" className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400 pointer-events-none" />
           <input
             type="text"
             placeholder={t('searchPlaceholder')}
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
-            className="ui-input w-full pl-9 pr-3  border border-line rounded-control focus:border-line-control text-sm bg-surface"
+            className="w-full pl-9 pr-3 py-1.5 border border-gray-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-slate-300 focus:border-slate-400 text-sm bg-white"
           />
         </div>
 
@@ -368,32 +352,32 @@ export default function SkillPage() {
         />
 
         {/* 右侧操作：刷新 + 安装 + 创建 */}
-        <div className="ml-auto flex flex-wrap items-center gap-2">
+        <div className="flex items-center gap-2 ml-auto flex-wrap">
           <PluginViewToggle value={viewMode} onChange={setViewMode} />
           <button
             onClick={handleRefresh}
             disabled={refreshing}
             title={refreshDone ? t('refreshed') : t('refresh')}
-            className={`ui-btn-icon inline-flex items-center justify-center p-1.5 rounded-control border transition-all ${
+            className={`p-1.5 rounded-lg border transition-all ${
               refreshDone
-                ? 'border-success text-success'
-                : 'border-line text-fg-muted hover:bg-hover hover:text-fg-secondary disabled:bg-disabled disabled:text-fg-disabled'
+                ? 'border-green-200 text-green-600'
+                : 'border-gray-200 text-gray-400 hover:bg-gray-50 hover:text-gray-600 disabled:opacity-50'
             }`}
           >
-            <IconRefresh aria-hidden="true" className={`w-4 h-4 ${refreshing ? 'animate-spin' : ''}`} />
+            <RefreshCw aria-hidden="true" className={`w-3.5 h-3.5 ${refreshing ? 'animate-spin' : ''}`} />
           </button>
           <button
             onClick={() => setShowInstallDialog(true)}
-            className="inline-flex items-center gap-1.5 whitespace-nowrap px-3 py-1.5 border border-line-control text-fg-secondary bg-surface rounded-control hover:bg-hover transition-colors text-sm"
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 border border-gray-300 text-gray-700 bg-white rounded-lg hover:bg-gray-50 transition-colors text-sm whitespace-nowrap"
           >
-            <IconCloudDownload aria-hidden="true" className="w-4 h-4" />
+            <CloudDownload aria-hidden="true" className="w-4 h-4" />
             {t('installSkill')}
           </button>
           <button
             onClick={() => setShowCreateSheet(true)}
-            className="inline-flex items-center gap-1.5 whitespace-nowrap px-3 py-1.5 bg-action text-action-fg rounded-control hover:bg-action-hover transition-colors text-sm"
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors text-sm whitespace-nowrap"
           >
-            <IconPlus aria-hidden="true" className="w-4 h-4" />
+            <Plus aria-hidden="true" className="w-4 h-4" />
             {t('createSkill')}
           </button>
         </div>
@@ -406,23 +390,23 @@ export default function SkillPage() {
         {visibleSkills.length === 0 ? (
           // Truly empty inventory — show big EmptyState with CTAs
           <EmptyState
-            icon={<IconBook aria-hidden="true" className="w-8 h-8" />}
+            icon={<BookOpen aria-hidden="true" className="w-16 h-16" />}
             title={t('emptyState.noSkills')}
             description={t('emptyState.createFirst')}
             action={
               <div className="flex gap-2">
                 <button
                   onClick={() => setShowInstallDialog(true)}
-                  className="inline-flex items-center gap-2 px-4 py-2 border border-line-control text-fg-secondary bg-surface rounded-control hover:bg-hover"
+                  className="inline-flex items-center gap-2 px-4 py-2 border border-gray-300 text-gray-700 bg-white rounded-lg hover:bg-gray-50"
                 >
-                  <IconCloudDownload aria-hidden="true" className="w-5 h-5" />
+                  <CloudDownload aria-hidden="true" className="w-5 h-5" />
                   {t('installSkill')}
                 </button>
                 <button
                   onClick={() => setShowCreateSheet(true)}
-                  className="inline-flex items-center gap-2 px-4 py-2 bg-action text-action-fg rounded-control hover:bg-action-hover"
+                  className="inline-flex items-center gap-2 px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700"
                 >
-                  <IconPlus aria-hidden="true" className="w-5 h-5" />
+                  <Plus aria-hidden="true" className="w-5 h-5" />
                   {t('createSkill')}
                 </button>
               </div>
@@ -565,7 +549,7 @@ function SkillTable({
   if (viewMode === 'cards') {
     return (
       <>
-        <div className="mb-3 flex flex-wrap items-center gap-4 text-xs text-fg-muted">
+        <div className="mb-3 flex items-center gap-4 text-xs text-gray-500 flex-wrap">
           <ColumnFilterHeader
             label={t('table.source')} values={allSources} active={sourceColFilter}
             onToggle={onToggleSourceColFilter} onClear={onClearSourceColFilter}
@@ -587,11 +571,11 @@ function SkillTable({
             ))}
           </div>
         ) : (
-          <div className="flex flex-col items-center justify-center gap-3 rounded-xl border border-line bg-surface px-4 py-12 text-fg-muted">
-            <IconBook aria-hidden="true" className="h-10 w-10 text-fg-placeholder" />
+          <div className="flex flex-col items-center justify-center gap-3 rounded-xl border border-gray-200 bg-white px-4 py-12 text-gray-400">
+            <BookOpen aria-hidden="true" className="h-10 w-10 text-gray-300" />
             <div className="text-sm">{t('emptyState.noResults')}</div>
             {hasActiveFilter && <button type="button" onClick={onClearAllFilters}
-              className="rounded-lg border border-line px-3 py-1.5 text-xs text-fg-secondary hover:bg-hover">{t('filter.clear')}</button>}
+              className="rounded-lg border border-gray-200 px-3 py-1.5 text-xs text-gray-600 hover:bg-gray-50">{t('filter.clear')}</button>}
           </div>
         )}
       </>
@@ -599,18 +583,18 @@ function SkillTable({
   }
 
   return (
-    <div className="bg-surface border border-line rounded-card overflow-x-auto">
+    <div className="bg-white border border-gray-200 rounded-xl overflow-x-auto">
       {/* Below md the table keeps only name / enabled / actions so it fits a phone
           without horizontal scrolling (the type badge moves into the name cell and
           the action buttons stay on screen). From md up the 640px floor keeps the
           five columns usable; widths live on the header cells because table-fixed
           reads them from the first row and a hidden <col> cannot be dropped. */}
-      <table className="w-full table-fixed text-xs md:min-w-[640px]">
-        <thead className="bg-subtle text-fg-muted border-b border-line">
+      <table className="table-fixed text-xs w-full md:min-w-[640px]">
+        <thead className="bg-gray-50 text-gray-500 border-b border-gray-200">
           <tr>
-            <th className="hidden md:table-cell md:w-[104px] text-left px-4 py-2.5 font-medium whitespace-nowrap">{t('table.type')}</th>
-            <th className="text-left px-3 md:px-4 py-2.5 font-medium whitespace-nowrap">{t('table.name')}</th>
-            <th className="hidden md:table-cell md:w-[18%] text-left px-4 py-2.5 font-medium">
+            <th className="text-left px-4 py-2.5 font-medium hidden md:table-cell md:w-[104px] whitespace-nowrap">{t('table.type')}</th>
+            <th className="text-left font-medium px-3 md:px-4 py-2.5 whitespace-nowrap">{t('table.name')}</th>
+            <th className="text-left px-4 py-2.5 font-medium hidden md:table-cell md:w-[18%]">
               <ColumnFilterHeader
                 label={t('table.source')}
                 values={allSources}
@@ -619,7 +603,7 @@ function SkillTable({
                 onClear={onClearSourceColFilter}
               />
             </th>
-            <th className="hidden md:table-cell md:w-[132px] text-left px-4 py-2.5 font-medium">
+            <th className="text-left px-4 py-2.5 font-medium hidden md:table-cell md:w-[132px]">
               <ColumnFilterHeader
                 label={t('table.enabled')}
                 values={['enabled', 'disabled']}
@@ -631,10 +615,10 @@ function SkillTable({
             </th>
             {/* phone: the enable switch (icon-only) joins the group and edit buttons here,
                 three 44px touch targets */}
-            <th className="w-[156px] md:w-[128px] text-right px-2 md:px-4 py-2.5 font-medium">{t('table.actions')}</th>
+            <th className="text-right font-medium w-[156px] md:w-[128px] px-2 md:px-4 py-2.5">{t('table.actions')}</th>
           </tr>
         </thead>
-        <tbody className="divide-y divide-line">
+        <tbody className="divide-y divide-gray-100">
           {skills.map(skill => (
             <SkillRow
               key={skill.name}
@@ -651,14 +635,14 @@ function SkillTable({
           {skills.length === 0 && (
             <tr>
               <td colSpan={5} className="px-4 py-12">
-                <div className="flex flex-col items-center justify-center gap-3 text-fg-muted">
-                  <IconBook aria-hidden="true" className="w-8 h-8 text-fg-placeholder" />
+                <div className="flex flex-col items-center justify-center gap-3 text-gray-400">
+                  <BookOpen aria-hidden="true" className="w-10 h-10 text-gray-300" />
                   <div className="text-sm">{t('emptyState.noResults')}</div>
                   {hasActiveFilter && (
                     <button
                       type="button"
                       onClick={onClearAllFilters}
-                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-control border border-line text-xs text-fg-secondary hover:bg-hover hover:text-fg transition-colors"
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-gray-200 text-xs text-gray-600 hover:bg-gray-50 hover:text-gray-800 transition-colors"
                     >
                       {t('filter.clear')}
                     </button>
@@ -700,11 +684,11 @@ function SkillRow({ skill, isSelected, installingDeps, toggling, onSelect, onIns
     <tr
       {...grouping?.dragProps(skill.name)}
       className={`transition-colors ${
-        skill.disabled ? 'bg-subtle ' : 'hover:bg-hover '
-      } ${isSelected ? 'bg-subtle ' : ''}`}
+        skill.disabled ? 'bg-gray-50/40 dark:bg-zinc-900/30' : 'hover:bg-gray-50 dark:hover:bg-zinc-900/60'
+      } ${isSelected ? 'bg-slate-50 dark:bg-zinc-900/80' : ''}`}
     >
       {/* 类型列（phone 宽度下并入名称列） */}
-      <td className="hidden md:table-cell px-4 py-3">
+      <td className="px-4 py-3 hidden md:table-cell">
         <SourceTypeBadge isUser={isUser} />
       </td>
 
@@ -715,19 +699,19 @@ function SkillRow({ skill, isSelected, installingDeps, toggling, onSelect, onIns
           type="button"
           onClick={() => onSelect(skill)}
           title={t('table.edit')}
-          className="flex items-start gap-2.5 min-w-0 w-full text-left group/name "
+          className="flex items-start gap-2.5 text-left group/name focus:outline-none min-w-0 w-full"
         >
-          <span className="w-7 h-7 rounded-control flex items-center justify-center shrink-0 bg-subtle text-fg-muted mt-0.5">
+          <span className="w-7 h-7 rounded-lg flex items-center justify-center bg-gray-100 text-gray-400 mt-0.5 shrink-0">
             {isUser
-              ? <IconFolderOpen aria-hidden="true" className="w-4 h-4" />
-              : <IconSparkles aria-hidden="true" className="w-4 h-4" />
+              ? <FolderOpen aria-hidden="true" className="w-3.5 h-3.5" />
+              : <Sparkles aria-hidden="true" className="w-3.5 h-3.5" />
             }
           </span>
           <span className="min-w-0 flex-1">
-            <span className="block font-medium text-fg truncate transition-colors group-hover/name:text-fg-secondary group-focus-visible/name:underline">
+            <span className="block font-medium text-gray-900 transition-colors group-hover/name:text-slate-700 group-focus-visible/name:underline truncate">
               {skill.name}
             </span>
-            <span className="block text-xs text-fg-muted truncate mt-0.5">
+            <span className="block text-[11px] text-gray-400 mt-0.5 truncate">
               {skill.description || t('sheet.noDescription')}
             </span>
             <span className="md:hidden block mt-1 text-xs">
@@ -738,10 +722,10 @@ function SkillRow({ skill, isSelected, installingDeps, toggling, onSelect, onIns
                 missing dependencies, so the row stays quiet by default. */}
             {hasMissingDeps && (
               <span
-                className="text-xs text-warning truncate mt-0.5 flex items-center gap-1"
+                className="text-[11px] text-amber-600 mt-0.5 flex items-center gap-1 truncate"
                 title={(skill.missing ?? []).join(', ')}
               >
-                <IconAlertTriangle aria-hidden="true" className="w-4 h-4 shrink-0" />
+                <AlertTriangle aria-hidden="true" className="w-3 h-3 shrink-0" />
                 <span className="truncate">
                   {t('eligibility.missingDepsInline', {
                     list: (skill.missing ?? []).join(', '),
@@ -754,14 +738,14 @@ function SkillRow({ skill, isSelected, installingDeps, toggling, onSelect, onIns
       </td>
 
       {/* 来源列（phone 宽度下隐藏，详情在编辑抽屉里） */}
-      <td className="hidden md:table-cell max-w-0 px-4 py-3">
-        <span className="text-xs text-fg-muted font-mono truncate block" title={skill.location}>
+      <td className="max-w-0 px-4 py-3 hidden md:table-cell">
+        <span className="text-[11px] text-gray-400 font-mono block truncate" title={skill.location}>
           {skill.source ?? '-'}
         </span>
       </td>
 
       {/* 启用开关列：控制 skill 是否注入 Agent System Prompt（phone 宽度下并入操作列） */}
-      <td className="hidden md:table-cell whitespace-nowrap px-4 py-3">
+      <td className="px-4 py-3 hidden md:table-cell whitespace-nowrap">
         <SkillEnabledControl
           enabled={enabled}
           loading={toggling}
@@ -771,7 +755,7 @@ function SkillRow({ skill, isSelected, installingDeps, toggling, onSelect, onIns
       </td>
 
       {/* 操作列：编辑（+ 缺依赖时的安装按钮）；删除操作在编辑面板内 */}
-      <td className="px-2 md:px-4 py-3 text-right">
+      <td className="text-right px-2 md:px-4 py-3">
         <div className="flex items-center justify-end gap-1">
           <span className="md:hidden inline-flex">
             <SkillEnabledControl
@@ -782,19 +766,18 @@ function SkillRow({ skill, isSelected, installingDeps, toggling, onSelect, onIns
               onChange={(e) => onToggle(skill, e)}
             />
           </span>
-          {grouping && <PluginGroupButton grouping={grouping} itemKey={skill.name} iconOnly className="border border-line hover:border-line-control" />}
+          {grouping && <PluginGroupButton grouping={grouping} itemKey={skill.name} />}
           {hasMissingDeps && (
             <button
               onClick={(e) => onInstallDeps(skill, e)}
               disabled={installingDeps}
               title={t('eligibility.installDeps')}
               aria-label={t('eligibility.installDeps')}
-              className="inline-flex items-center gap-1 px-2 py-1 rounded-tag border border-line
- bg-surface text-fg-secondary hover:bg-hover transition-colors disabled:bg-disabled disabled:text-fg-disabled"
+              className="inline-flex items-center gap-1 px-2 py-1 rounded border border-gray-200 bg-white text-gray-600 hover:bg-gray-50 transition-colors disabled:opacity-50"
             >
               {installingDeps
-                ? <IconLoader2 aria-hidden="true" className="w-4 h-4 animate-spin" />
-                : <IconCloudDownload aria-hidden="true" className="w-4 h-4" />
+                ? <Loader2 aria-hidden="true" className="w-3 h-3 animate-spin" />
+                : <CloudDownload aria-hidden="true" className="w-3 h-3" />
               }
               {/* label only from md up: on a phone the icon button keeps the column narrow */}
               <span className="hidden md:inline">{installingDeps ? t('eligibility.installing') : t('eligibility.installDeps')}</span>
@@ -805,11 +788,9 @@ function SkillRow({ skill, isSelected, installingDeps, toggling, onSelect, onIns
             onClick={() => onSelect(skill)}
             title={t('table.edit')}
             aria-label={t('table.edit')}
-            className="ui-btn-icon inline-flex items-center justify-center p-1.5 rounded-control border border-line text-fg-muted
- hover:border-line-control hover:text-fg-secondary hover:bg-hover
- transition-colors"
+            className="p-1.5 rounded-md border border-gray-200 text-gray-500 hover:border-slate-300 hover:text-slate-700 hover:bg-gray-50 transition-colors"
           >
-            <IconPencil aria-hidden="true" className="w-4 h-4" />
+            <Pencil aria-hidden="true" className="w-3.5 h-3.5" />
           </button>
         </div>
       </td>
@@ -826,7 +807,7 @@ function SkillCard({ skill, isSelected, installingDeps, toggling, onSelect, onIn
   return (
     <article
       {...grouping?.dragProps(skill.name)}
-      className={`flex min-w-0 flex-col rounded-xl border bg-surface p-4 ${isSelected ? 'border-line-control ring-2 ring-focus' : 'border-line'} ${skill.disabled ? 'opacity-75' : ''}`}
+      className={`flex flex-col rounded-xl border bg-white p-4 min-w-0 ${isSelected ? 'border-slate-400 ring-2 ring-slate-200' : 'border-gray-200'} ${skill.disabled ? 'opacity-75' : ''}`}
     >
       <div className="mb-3 flex items-center justify-between gap-2">
         <SourceTypeBadge isUser={isUser} />
@@ -836,33 +817,33 @@ function SkillCard({ skill, isSelected, installingDeps, toggling, onSelect, onIn
       </div>
       <button type="button" onClick={() => onSelect(skill)} title={t('table.edit')}
         className="flex min-w-0 items-start gap-2.5 text-left group/name">
-        <span className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-subtle text-fg-muted">
-          {isUser ? <IconFolderOpen aria-hidden="true" className="h-3.5 w-3.5" /> : <IconSparkles aria-hidden="true" className="h-3.5 w-3.5" />}
+        <span className="mt-0.5 flex h-7 w-7 items-center justify-center rounded-lg bg-gray-100 text-gray-400 shrink-0">
+          {isUser ? <FolderOpen aria-hidden="true" className="h-3.5 w-3.5" /> : <Sparkles aria-hidden="true" className="h-3.5 w-3.5" />}
         </span>
         <span className="min-w-0 flex-1">
-          <span className="block truncate text-sm font-medium text-fg group-hover/name:text-fg-secondary">{skill.name}</span>
-          <span className="mt-1 line-clamp-2 text-xs leading-5 text-fg-muted">{skill.description || t('sheet.noDescription')}</span>
+          <span className="block text-sm font-medium text-gray-900 group-hover/name:text-slate-700 truncate">{skill.name}</span>
+          <span className="mt-1 block text-xs leading-5 text-gray-400 line-clamp-2">{skill.description || t('sheet.noDescription')}</span>
         </span>
       </button>
-      {hasMissingDeps && <div className="mt-2 flex items-start gap-1 text-xs text-warning" title={(skill.missing ?? []).join(', ')}>
-        <IconAlertTriangle aria-hidden="true" className="mt-0.5 h-3 w-3 shrink-0" />
+      {hasMissingDeps && <div className="mt-2 flex items-start gap-1 text-[11px] text-amber-600" title={(skill.missing ?? []).join(', ')}>
+        <AlertTriangle aria-hidden="true" className="mt-0.5 h-3 w-3 shrink-0" />
         <span>{t('eligibility.missingDepsInline', { list: (skill.missing ?? []).join(', ') })}</span>
       </div>}
-      <div className="mt-3 flex min-w-0 items-center gap-2 text-xs text-fg-muted">
+      <div className="mt-3 flex items-center gap-2 text-[11px] text-gray-400 min-w-0">
         <span className="shrink-0">{t('table.source')}</span>
         <span className="truncate font-mono" title={skill.location}>{skill.source ?? '-'}</span>
       </div>
-      <div className="mt-auto flex flex-wrap items-center justify-end gap-1 border-t border-line pt-3">
+      <div className="flex items-center justify-end gap-1 border-t border-gray-100 pt-3 mt-auto flex-wrap">
         {grouping && <PluginGroupButton grouping={grouping} itemKey={skill.name} />}
         {hasMissingDeps && <button onClick={(event) => onInstallDeps(skill, event)} disabled={installingDeps}
           title={t('eligibility.installDeps')}
-          className="inline-flex items-center gap-1 rounded border border-line bg-surface px-2 py-1 text-xs text-fg-secondary hover:bg-hover disabled:opacity-50">
-          {installingDeps ? <IconLoader2 aria-hidden="true" className="h-3 w-3 animate-spin" /> : <IconCloudDownload aria-hidden="true" className="h-3 w-3" />}
+          className="inline-flex items-center gap-1 rounded border border-gray-200 bg-white px-2 py-1 text-xs text-gray-600 hover:bg-gray-50 disabled:opacity-50">
+          {installingDeps ? <Loader2 aria-hidden="true" className="h-3 w-3 animate-spin" /> : <CloudDownload aria-hidden="true" className="h-3 w-3" />}
           {installingDeps ? t('eligibility.installing') : t('eligibility.installDeps')}
         </button>}
         <button type="button" onClick={() => onSelect(skill)} title={t('table.edit')} aria-label={t('table.edit')}
-          className="rounded-md border border-line p-1.5 text-fg-muted hover:border-line-control hover:bg-hover hover:text-fg-secondary">
-          <IconPencil aria-hidden="true" className="h-3.5 w-3.5" />
+          className="rounded-md border border-gray-200 p-1.5 text-gray-500 hover:border-slate-300 hover:bg-gray-50 hover:text-slate-700">
+          <Pencil aria-hidden="true" className="h-3.5 w-3.5" />
         </button>
       </div>
     </article>
@@ -879,19 +860,30 @@ function SkillEnabledControl({ enabled, loading, title, onChange, compact = fals
   /** Icon-only pill for phone widths, where the text pill does not fit next to the action buttons. */
   compact?: boolean;
 }) {
-  const { t } = useTranslation('common');
   return (
-    <span className="inline-flex items-center gap-2">
-      <button type="button" role="switch" aria-checked={enabled} aria-label={title || t('status.enabled')}
-        onClick={onChange} disabled={loading} title={title} className="ui-btn-icon inline-flex shrink-0 items-center justify-center rounded-control disabled:cursor-not-allowed">
-<span className="ui-switch" aria-hidden="true" aria-checked={enabled} aria-disabled={loading} />
-</button>
-      {!compact && (
-        <span className={`text-sm ${loading ? 'text-fg-disabled' : 'text-fg-secondary'}`}>
-          {t(loading ? 'status.loading' : enabled ? 'status.enabled' : 'status.disabled')}
+    <button
+      type="button"
+      role="switch"
+      aria-checked={enabled}
+      aria-label={title}
+      onClick={onChange}
+      disabled={loading}
+      title={title}
+      className="relative inline-flex shrink-0 rounded-full transition-opacity focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-300 focus-visible:ring-offset-2 disabled:cursor-wait disabled:opacity-75"
+    >
+      {compact ? (
+        <span className={`inline-flex h-7 w-7 items-center justify-center rounded-full ${enabled ? 'bg-green-100 text-green-800' : 'bg-gray-100 text-gray-600'}`}>
+          {enabled ? <CheckCircle aria-hidden="true" className="w-3.5 h-3.5" /> : <XCircle aria-hidden="true" className="w-3.5 h-3.5" />}
+        </span>
+      ) : (
+        <EnabledBadge enabled={enabled} />
+      )}
+      {loading && (
+        <span className="absolute inset-0 inline-flex items-center justify-center rounded-full bg-white/70 dark:bg-zinc-900/70">
+          <Loader2 className="w-3 h-3 animate-spin text-gray-500 dark:text-zinc-300" />
         </span>
       )}
-    </span>
+    </button>
   );
 }
 
@@ -899,15 +891,15 @@ function SourceTypeBadge({ isUser }: { isUser: boolean }) {
   const { t } = useTranslation('skill');
   if (isUser) {
     return (
-      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-tag border border-line bg-surface text-fg-muted whitespace-nowrap">
-        <IconFolderOpen aria-hidden="true" className="w-4 h-4" />
+      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded border border-gray-200 bg-white text-gray-500 whitespace-nowrap">
+        <FolderOpen aria-hidden="true" className="w-3 h-3" />
         {t('table.custom')}
       </span>
     );
   }
   return (
-    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-tag border border-line bg-subtle text-fg-muted whitespace-nowrap">
-      <IconSparkles aria-hidden="true" className="w-4 h-4" />
+    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded border border-gray-200 bg-gray-50 text-gray-500 whitespace-nowrap">
+      <Sparkles aria-hidden="true" className="w-3 h-3" />
       {t('table.builtin')}
     </span>
   );
@@ -940,7 +932,7 @@ function SourceFilterChips({
     <div
       role="tablist"
       aria-label={t('filter.aria')}
-      className="inline-flex items-center rounded-control border border-line bg-surface p-0.5 text-xs"
+      className="inline-flex items-center rounded-lg border border-gray-200 bg-white p-0.5 text-xs"
     >
       {chips.map((chip, idx) => {
         const active = chip.key === value;
@@ -951,16 +943,16 @@ function SourceFilterChips({
             role="tab"
             aria-selected={active}
             onClick={() => onChange(chip.key)}
-            className={`px-2.5 py-1 rounded-control transition-colors whitespace-nowrap ${
+            className={`px-2.5 py-1 rounded-md transition-colors whitespace-nowrap ${
               active
-                ? 'bg-selected text-fg'
-                : 'text-fg-muted hover:text-fg-secondary hover:bg-selected'
+                ? 'bg-slate-700 text-white'
+                : 'text-gray-500 hover:text-gray-700 hover:bg-gray-50'
             } ${idx > 0 ? 'ml-0.5' : ''}`}
           >
             <span>{chip.label}</span>
             <span
-              className={`ml-1.5 inline-block min-w-[1.25rem] px-1 rounded-tag text-xs tabular-nums ${
-                active ? 'bg-surface' : 'bg-subtle text-fg-muted'
+              className={`ml-1.5 inline-block px-1 rounded text-[10px] tabular-nums min-w-[1.25rem] ${
+                active ? 'bg-white/15' : 'bg-gray-100 text-gray-500'
               }`}
             >
               {chip.count}
@@ -1011,24 +1003,24 @@ function ColumnFilterHeader({
   return (
     <div ref={ref} className="relative inline-flex items-center whitespace-nowrap">
       <div className="flex items-center gap-1">
-        <span className={hasFilter ? 'text-danger' : ''}>{label}</span>
+        <span className={hasFilter ? 'text-red-600' : ''}>{label}</span>
         <button
           type="button"
           onClick={() => setOpen(v => !v)}
-          className={`ui-btn-icon inline-flex items-center justify-center p-0.5 rounded-control hover:bg-hover transition-colors ${
-            hasFilter ? 'text-danger' : 'text-fg-muted'
+          className={`p-0.5 rounded hover:bg-gray-200 transition-colors ${
+            hasFilter ? 'text-red-600' : 'text-gray-400'
           }`}
           aria-label={`${label} ${t('filter.aria')}`}
         >
-          <IconFilter aria-hidden="true" className="w-4 h-4" />
+          <Filter aria-hidden="true" className="w-3 h-3" />
         </button>
       </div>
       {open && (
-        <div className="absolute left-0 top-full mt-1 z-20 bg-surface rounded-control shadow-lg border border-line py-2 min-w-[160px] max-h-60 overflow-y-auto">
+        <div className="absolute left-0 top-full mt-1 bg-white rounded-lg shadow-lg border border-gray-200 py-2 max-h-60 z-20 min-w-[160px] overflow-y-auto">
           {hasFilter && (
             <button
               onClick={() => { onClear(); setOpen(false); }}
-              className="w-full text-left px-3 py-1.5 text-xs text-danger hover:bg-danger-soft"
+              className="w-full text-left px-3 py-1.5 text-xs text-red-600 hover:bg-red-50"
             >
               {t('filter.clear')}
             </button>
@@ -1039,15 +1031,15 @@ function ColumnFilterHeader({
             return (
               <label
                 key={v}
-                className="flex items-center px-3 py-1.5 hover:bg-hover cursor-pointer"
+                className="flex items-center px-3 py-1.5 hover:bg-gray-50 cursor-pointer"
               >
                 <input
                   type="checkbox"
                   checked={checked}
                   onChange={() => onToggle(v)}
-                  className="w-3.5 h-3.5 rounded-tag border-line-control text-danger mr-2"
+                  className="w-3.5 h-3.5 rounded border-gray-300 text-red-600 focus:ring-red-500 mr-2"
                 />
-                <span className="text-xs text-fg-secondary">{displayLabel}</span>
+                <span className="text-xs text-gray-700">{displayLabel}</span>
               </label>
             );
           })}
@@ -1069,23 +1061,23 @@ function PaginationBar({ total, page, totalPages, onPageChange }: {
   const start = (page - 1) * PAGE_SIZE + 1;
   const end = Math.min(total, page * PAGE_SIZE);
   return (
-    <div className="px-4 py-2 border-t border-line bg-surface flex items-center justify-between text-xs text-fg-muted">
+    <div className="px-4 py-2 border-t border-gray-200 bg-white flex items-center justify-between text-xs text-gray-500">
       <span>{t('pagination.info', { start, end, total })}</span>
       <div className="flex items-center gap-1">
         <button aria-label={pageActionLabel('previous')}
           onClick={() => onPageChange(Math.max(1, page - 1))}
           disabled={page <= 1}
-          className="ui-btn-icon inline-flex items-center justify-center p-1 rounded-control border border-line hover:bg-hover disabled:bg-disabled disabled:text-fg-disabled"
+          className="p-1 rounded border border-gray-200 hover:bg-gray-50 disabled:opacity-40"
         >
-          <IconChevronLeft aria-hidden="true" className="w-4 h-4" />
+          <ChevronLeft aria-hidden="true" className="w-3.5 h-3.5" />
         </button>
         <span className="min-w-16 text-center">{page} / {totalPages}</span>
         <button aria-label={pageActionLabel('next')}
           onClick={() => onPageChange(Math.min(totalPages, page + 1))}
           disabled={page >= totalPages}
-          className="ui-btn-icon inline-flex items-center justify-center p-1 rounded-control border border-line hover:bg-hover disabled:bg-disabled disabled:text-fg-disabled"
+          className="p-1 rounded border border-gray-200 hover:bg-gray-50 disabled:opacity-40"
         >
-          <IconChevronRight aria-hidden="true" className="w-4 h-4" />
+          <ChevronRight aria-hidden="true" className="w-3.5 h-3.5" />
         </button>
       </div>
     </div>

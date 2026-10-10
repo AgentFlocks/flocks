@@ -1390,7 +1390,7 @@ describe('Layout WebUI contract pages navigation', () => {
 
     await user.click(screen.getByRole('link', { name: 'go-soc-alerts' }));
     await waitFor(() => expect(activePartitionName()).toBe('partitionScene'));
-    expect(screen.getByRole('link', { name: '告警调查' })).toHaveClass('bg-surface');
+    expect(screen.getByRole('link', { name: '告警调查' })).toHaveClass('bg-white');
 
     await user.click(screen.getByRole('link', { name: 'go-sessions' }));
     await waitFor(() => expect(activePartitionName()).toBe('partitionAgent'));
@@ -1410,7 +1410,7 @@ describe('Layout WebUI contract pages navigation', () => {
     await user.click(screen.getByRole('button', { name: 'go-forward' }));
     await waitFor(() => expect(activeProbe().textContent).toBe('/contracts/webui/workspaces/soc_ui/soc-alerts'));
     expect(activePartitionName()).toBe('partitionScene');
-    expect(screen.getByRole('link', { name: '告警调查' })).toHaveClass('bg-surface');
+    expect(screen.getByRole('link', { name: '告警调查' })).toHaveClass('bg-white');
   });
 
   it('keeps privileged settings out of the member top-right menu', async () => {
@@ -2221,8 +2221,8 @@ describe('Layout WebUI contract pages navigation', () => {
 
     expect(sectionHeadings(container)).toEqual(['态势', '告警运营', 'AI 红队']);
     expect(screen.getByRole('button', { name: 'AI 红队' })).toHaveAttribute('aria-expanded', 'true');
-    expect(screen.getByRole('link', { name: '攻击面' })).toHaveClass('bg-surface');
-    expect(screen.getByRole('link', { name: '告警调查' })).not.toHaveClass('bg-surface');
+    expect(screen.getByRole('link', { name: '攻击面' })).toHaveClass('bg-white');
+    expect(screen.getByRole('link', { name: '告警调查' })).not.toHaveClass('bg-white');
     expect(activePartitionName()).toBe('partitionScene');
   });
 

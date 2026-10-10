@@ -1,6 +1,6 @@
 import { pageActionLabel } from '../../pageActionLabel';
 import { useTranslation } from 'react-i18next';
-import { IconChevronLeft, IconChevronRight } from '@tabler/icons-react';
+import { ChevronLeft, ChevronRight } from 'lucide-react';
 
 interface PaginationProps {
   currentPage: number;
@@ -40,28 +40,28 @@ export default function Pagination({
   };
 
   return (
-    <div className="bg-surface px-4 py-4 border-t border-line flex flex-wrap items-center justify-between gap-3">
-      <div className="text-sm text-fg-secondary">
+    <div className="bg-white px-6 py-4 border-t border-gray-200 flex items-center justify-between flex-wrap">
+      <div className="text-sm text-gray-700">
         {t('pagination.showing', { start: startItem, end: endItem, total: totalCount })}
       </div>
       <div className="flex items-center space-x-1">
         <button aria-label={pageActionLabel('previous')}
           onClick={() => onPageChange(Math.max(1, currentPage - 1))}
           disabled={currentPage === 1}
-          className={`ui-btn-icon inline-flex items-center justify-center p-2 rounded-control text-sm ${currentPage === 1 ? 'text-fg-placeholder cursor-not-allowed' : 'text-fg-secondary hover:bg-hover'}`}
+          className={`p-2 rounded-md text-sm ${currentPage === 1 ? 'text-gray-300 cursor-not-allowed' : 'text-gray-600 hover:bg-gray-100'}`}
         >
-          <IconChevronLeft aria-hidden="true" className="w-4 h-4" />
+          <ChevronLeft aria-hidden="true" className="w-4 h-4" />
         </button>
         {getPages().map((page, i) =>
           typeof page === 'string' ? (
-            <span key={`e-${i}`} className="px-2 text-fg-muted">...</span>
+            <span key={`e-${i}`} className="px-2 text-gray-400">...</span>
           ) : (
             <button
               key={page}
               aria-current={currentPage === page ? 'page' : undefined}
               onClick={() => onPageChange(page)}
-              className={`px-3 py-1 rounded-control text-sm font-medium ${
-                currentPage === page ? 'bg-selected text-fg' : 'text-fg-secondary hover:bg-hover'
+              className={`px-3 py-1 rounded-md text-sm font-medium ${
+                currentPage === page ? 'bg-red-600 text-white' : 'text-gray-700 hover:bg-gray-100'
               }`}
             >
               {page}
@@ -71,9 +71,9 @@ export default function Pagination({
         <button aria-label={pageActionLabel('next')}
           onClick={() => onPageChange(Math.min(totalPages, currentPage + 1))}
           disabled={currentPage === totalPages}
-          className={`ui-btn-icon inline-flex items-center justify-center p-2 rounded-control text-sm ${currentPage === totalPages ? 'text-fg-placeholder cursor-not-allowed' : 'text-fg-secondary hover:bg-hover'}`}
+          className={`p-2 rounded-md text-sm ${currentPage === totalPages ? 'text-gray-300 cursor-not-allowed' : 'text-gray-600 hover:bg-gray-100'}`}
         >
-          <IconChevronRight aria-hidden="true" className="w-4 h-4" />
+          <ChevronRight aria-hidden="true" className="w-4 h-4" />
         </button>
       </div>
     </div>

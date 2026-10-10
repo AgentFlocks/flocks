@@ -1,4 +1,4 @@
-import { IconCircleCheck, IconLoader2, IconX, IconCircleX } from '@tabler/icons-react';
+import { CheckCircle, Loader2, X, XCircle } from 'lucide-react';
 import type {
   HubCatalogEntry,
   HubInstallProgressEvent,
@@ -207,20 +207,20 @@ export default function SuiteInstallProgressPanel({ progress, language, onClose 
       : text.running;
 
   return (
-    <div className="fixed bottom-3 right-3 z-50 w-[280px] max-w-[calc(100vw-1.5rem)] rounded-lg border border-line bg-surface shadow-2xl">
-      <div className="px-3 py-2 border-b border-line flex items-start justify-between gap-2">
+    <div className="fixed bottom-3 right-3 w-[280px] max-w-[calc(100vw-1.5rem)] rounded-lg border border-gray-200 bg-white shadow-2xl z-50">
+      <div className="px-3 py-2 border-b border-gray-100 flex items-start justify-between gap-2">
         <div className="min-w-0">
-          <div className="flex items-center gap-1.5 text-xs font-semibold text-fg">
+          <div className="flex items-center gap-1.5 text-xs font-semibold text-gray-900">
             {progress.status === 'completed' ? (
-              <IconCircleCheck aria-hidden="true" className="w-4 h-4 text-success" />
+              <CheckCircle aria-hidden="true" className="w-3.5 h-3.5 text-green-600" />
             ) : progress.status === 'failed' ? (
-              <IconCircleX aria-hidden="true" className="w-4 h-4 text-danger" />
+              <XCircle aria-hidden="true" className="w-3.5 h-3.5 text-red-600" />
             ) : (
-              <IconLoader2 aria-hidden="true" className="w-4 h-4 animate-spin text-fg-secondary" />
+              <Loader2 aria-hidden="true" className="w-3.5 h-3.5 animate-spin text-slate-600" />
             )}
             <span>{text.title}</span>
           </div>
-          <div className="mt-0.5 truncate text-xs text-fg-muted">
+          <div className="mt-0.5 text-[10px] text-gray-500 truncate">
             {title}: {getSuiteDisplayName(progress, language)}
           </div>
         </div>
@@ -228,21 +228,21 @@ export default function SuiteInstallProgressPanel({ progress, language, onClose 
           onClick={onClose}
           aria-label={text.close}
           title={text.close}
-          className="ui-btn-icon shrink-0 rounded-md p-0.5 text-fg-muted hover:bg-hover hover:text-fg-secondary"
+          className="rounded-md p-0.5 text-gray-400 hover:bg-gray-100 hover:text-gray-700 shrink-0"
         >
-          <IconX aria-hidden="true" className="w-4 h-4" />
+          <X aria-hidden="true" className="w-3.5 h-3.5" />
         </button>
       </div>
 
       <div className="px-3 py-2">
-        <div className="flex items-center justify-between text-xs text-fg-muted">
+        <div className="flex items-center justify-between text-[10px] text-gray-500">
           <span>{text.progress}</span>
           <span>{settledCount} / {total}</span>
         </div>
-        <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-subtle">
+        <div className="mt-1.5 h-1 rounded-full bg-gray-100 overflow-hidden">
           <div
             className={`h-full rounded-full transition-all ${
-              progress.status === 'failed' ? 'bg-action' : progress.status === 'completed' ? 'bg-success' : 'bg-selected'
+              progress.status === 'failed' ? 'bg-red-500' : progress.status === 'completed' ? 'bg-green-500' : 'bg-slate-700'
             }`}
             style={{ width: `${percent}%` }}
           />
@@ -253,33 +253,33 @@ export default function SuiteInstallProgressPanel({ progress, language, onClose 
         {progress.items.map(item => (
           <div
             key={progressItemKey(item)}
-            className="grid grid-cols-[0.875rem_1fr_auto] items-center gap-1.5 rounded-md px-1.5 py-1.5 text-xs hover:bg-hover"
+            className="grid grid-cols-[0.875rem_1fr_auto] items-center gap-1.5 rounded-md px-1.5 py-1.5 text-[10px] hover:bg-gray-50"
           >
             <InstallProgressStatusIcon status={item.status} />
             <div className="min-w-0">
-              <div className="truncate font-medium text-fg">{getProgressItemDisplayName(item, language)}</div>
-              <div className="truncate text-xs text-fg-muted">
+              <div className="font-medium text-gray-800 truncate">{getProgressItemDisplayName(item, language)}</div>
+              <div className="text-[9px] text-gray-400 truncate">
                 {formatPluginTypeLabel(item.type, language)} · {item.id}
               </div>
-              {item.message && <div className="mt-0.5 truncate text-xs text-fg-muted">{item.message}</div>}
+              {item.message && <div className="mt-0.5 text-[9px] text-gray-500 truncate">{item.message}</div>}
             </div>
-            <span className={`rounded-full px-1.5 py-0.5 text-xs ${
+            <span className={`rounded-full px-1.5 py-0.5 text-[10px] ${
               item.status === 'installed'
-                ? 'bg-success-soft text-success'
+                ? 'bg-green-50 text-green-700'
                 : item.status === 'failed'
-                  ? 'bg-danger-soft text-danger'
+                  ? 'bg-red-50 text-red-700'
                   : item.status === 'skipped'
-                    ? 'bg-subtle text-fg-muted'
+                    ? 'bg-gray-100 text-gray-500'
                     : item.status === 'installing'
-                      ? 'bg-subtle text-fg-secondary'
-                      : 'bg-canvas text-fg-muted'
+                      ? 'bg-slate-100 text-slate-700'
+                      : 'bg-gray-50 text-gray-400'
             }`}>
               {text.statuses[item.status]}
             </span>
           </div>
         ))}
         {progress.items.length === 0 && (
-          <div className="px-2 py-4 text-center text-xs text-fg-muted">{text.statuses.pending}</div>
+          <div className="px-2 py-4 text-center text-[10px] text-gray-400">{text.statuses.pending}</div>
         )}
       </div>
     </div>
@@ -287,9 +287,9 @@ export default function SuiteInstallProgressPanel({ progress, language, onClose 
 }
 
 function InstallProgressStatusIcon({ status }: { status: HubInstallProgressItem['status'] }) {
-  if (status === 'installing') return <IconLoader2 aria-hidden="true" className="w-4 h-4 animate-spin text-fg-secondary" />;
-  if (status === 'installed' || status === 'completed') return <IconCircleCheck aria-hidden="true" className="w-4 h-4 text-success" />;
-  if (status === 'failed') return <IconCircleX aria-hidden="true" className="w-4 h-4 text-danger" />;
-  if (status === 'skipped') return <IconCircleCheck aria-hidden="true" className="w-4 h-4 text-fg-muted" />;
-  return <span className="ml-1 h-1.5 w-1.5 rounded-full bg-selected" />;
+  if (status === 'installing') return <Loader2 aria-hidden="true" className="w-3.5 h-3.5 animate-spin text-slate-600" />;
+  if (status === 'installed' || status === 'completed') return <CheckCircle aria-hidden="true" className="w-3.5 h-3.5 text-green-600" />;
+  if (status === 'failed') return <XCircle aria-hidden="true" className="w-3.5 h-3.5 text-red-600" />;
+  if (status === 'skipped') return <CheckCircle aria-hidden="true" className="w-3.5 h-3.5 text-gray-400" />;
+  return <span className="ml-1 h-1.5 w-1.5 rounded-full bg-gray-300" />;
 }

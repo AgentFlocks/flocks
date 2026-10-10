@@ -1,30 +1,30 @@
-import { IconX } from '@tabler/icons-react';
+import {
+  Activity,
+  AlertTriangle,
+  CheckCircle,
+  ChevronDown,
+  ChevronUp,
+  Download,
+  ExternalLink,
+  Eye,
+  EyeOff,
+  Loader2,
+  MessageSquare,
+  Plus,
+  Radio,
+  RefreshCw,
+  RotateCcw,
+  Save,
+  Trash2,
+  Wifi,
+  WifiOff,
+  X,
+  XCircle,
+} from 'lucide-react';
 import { pageActionLabel } from '../pageActionLabel';
 import PageDialog from '../PageDialog';
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { QRCodeSVG } from 'qrcode.react';
-import {
-  IconBroadcast,
-  IconDeviceFloppy,
-  IconDownload,
-  IconEye,
-  IconEyeOff,
-  IconPlus,
-  IconTrash,
-  IconCircleCheck,
-  IconCircleX,
-  IconAlertTriangle,
-  IconChevronDown,
-  IconChevronUp,
-  IconActivity,
-  IconMessage,
-  IconWifi,
-  IconWifiOff,
-  IconRefresh,
-  IconLoader2,
-  IconRotate,
-  IconExternalLink,
-} from '@tabler/icons-react';
 import { useTranslation } from 'react-i18next';
 import PageHeader from '@/components/common/PageHeader';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
@@ -513,13 +513,13 @@ function FieldRow({
   children: React.ReactNode;
 }) {
   return (
-    <div className="grid grid-cols-3 gap-4 items-start py-3 border-b border-line last:border-b-0">
+    <div className="grid grid-cols-3 gap-4 items-start py-3 border-b border-gray-100 last:border-b-0">
       <div className="col-span-1 pt-1">
-        <label className="text-sm font-medium text-fg-secondary">
+        <label className="text-sm font-medium text-gray-700">
           {label}
-          {required && <span className="text-danger ml-0.5">*</span>}
+          {required && <span className="text-red-500 ml-0.5">*</span>}
         </label>
-        {hint && <p className="text-xs text-fg-muted mt-0.5 ">{hint}</p>}
+        {hint && <p className="text-xs text-gray-400 mt-0.5 leading-relaxed">{hint}</p>}
       </div>
       <div className="col-span-2">{children}</div>
     </div>
@@ -544,7 +544,7 @@ function TextInput({
       onChange={(e) => onChange(e.target.value)}
       placeholder={placeholder}
       disabled={disabled}
-      className="ui-input w-full px-3  text-sm border border-line-control rounded-control disabled:bg-disabled disabled:text-fg-disabled"
+      className="w-full px-3 py-1.5 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-red-500 disabled:bg-gray-50 disabled:text-gray-400"
     />
   );
 }
@@ -616,7 +616,7 @@ function HostInput({
           onFocus={openAllOptions}
           placeholder={placeholder}
           disabled={disabled}
-          className="ui-input w-full px-3  pr-9 text-sm border border-line-control rounded-control disabled:bg-disabled disabled:text-fg-disabled"
+          className="w-full px-3 py-1.5 pr-9 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-red-500 disabled:bg-gray-50 disabled:text-gray-400"
         />
         <button
           type="button"
@@ -627,20 +627,20 @@ function HostInput({
             openAllOptions();
             inputRef.current?.focus();
           }}
-          className="ui-btn-icon inline-flex items-center justify-center absolute inset-y-0 right-0 flex items-center px-2.5 text-fg-muted hover:text-fg-secondary disabled:cursor-not-allowed disabled:text-fg-placeholder"
+          className="absolute inset-y-0 right-0 flex items-center px-2.5 text-gray-400 hover:text-gray-600 disabled:cursor-not-allowed disabled:text-gray-300"
         >
-          <IconChevronDown aria-hidden="true" className="w-4 h-4" />
+          <ChevronDown aria-hidden="true" className="w-4 h-4" />
         </button>
       </div>
 
       {open && !disabled && (
-        <div className="absolute left-0 right-0 top-full z-30 mt-1 max-h-[220px] overflow-y-auto rounded-control border border-line bg-surface shadow-lg">
+        <div className="absolute left-0 right-0 top-full mt-1 max-h-[220px] rounded-md border border-gray-200 bg-white shadow-lg z-30 overflow-y-auto">
           {visibleOptions.map((option) => (
             <button
               key={option.value}
               type="button"
-              className={`w-full px-3 py-2 text-left text-sm transition-colors hover:bg-danger-soft ${
-                option.value === value ? 'bg-danger-soft text-danger' : 'text-fg-secondary'
+              className={`w-full px-3 py-2 text-left text-sm transition-colors hover:bg-red-50 ${
+                option.value === value ? 'bg-red-50 text-red-700' : 'text-gray-700'
               }`}
               onMouseDown={(event) => event.preventDefault()}
               onClick={() => {
@@ -651,7 +651,7 @@ function HostInput({
               }}
             >
               <span className="block font-medium leading-5">{option.value}</span>
-              <span className="block text-xs text-fg-muted">{option.label}</span>
+              <span className="block text-xs leading-4 text-gray-400">{option.label}</span>
             </button>
           ))}
         </div>
@@ -677,14 +677,14 @@ function SecretInput({
         value={value}
         onChange={(e) => onChange(e.target.value)}
         placeholder={placeholder}
-        className="ui-input w-full px-3  pr-9 text-sm border border-line-control rounded-control"
+        className="w-full px-3 py-1.5 pr-9 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-red-500"
       />
       <button aria-label={pageActionLabel(show ? 'hidePassword' : 'showPassword')}
         type="button"
         onClick={() => setShow(!show)}
-        className="ui-btn-icon inline-flex items-center justify-center absolute inset-y-0 right-0 pr-2.5 flex items-center text-fg-muted hover:text-fg-secondary"
+        className="absolute inset-y-0 right-0 pr-2.5 flex items-center text-gray-400 hover:text-gray-600"
       >
-        {show ? <IconEyeOff aria-hidden="true" className="w-4 h-4" /> : <IconEye aria-hidden="true" className="w-4 h-4" />}
+        {show ? <EyeOff aria-hidden="true" className="w-4 h-4" /> : <Eye aria-hidden="true" className="w-4 h-4" />}
       </button>
     </div>
   );
@@ -711,13 +711,17 @@ function Toggle({
         aria-label={label || t(checked ? 'status.enabled' : 'status.disabled')}
         disabled={disabled}
         onClick={() => !disabled && onChange(!checked)}
-        className="ui-btn-icon inline-flex shrink-0 items-center justify-center rounded-control disabled:cursor-not-allowed">
-<span className="ui-switch" aria-hidden="true" aria-checked={checked} aria-disabled={disabled} />
-</button>
-      {label && <span className="text-sm text-fg-secondary">{label}</span>}
-      <span className={disabled ? 'text-sm text-fg-disabled' : 'text-sm text-fg-muted'}>
-        {t(checked ? 'status.enabled' : 'status.disabled')}
-      </span>
+        className={`relative inline-flex h-5 w-9 flex-shrink-0 rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-green-400 focus:ring-offset-1 ${
+          disabled ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'
+        } ${checked ? 'bg-green-500' : 'bg-gray-200'}`}
+      >
+        <span
+          className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out ${
+            checked ? 'translate-x-4' : 'translate-x-0'
+          }`}
+        />
+      </button>
+      {label && <span className="text-sm text-gray-600">{label}</span>}
     </div>
   );
 }
@@ -735,7 +739,7 @@ function Select({
     <select
       value={value}
       onChange={(e) => onChange(e.target.value)}
-      className="ui-select w-full px-3  text-sm border border-line-control rounded-control bg-surface"
+      className="w-full px-3 py-1.5 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-red-500 bg-white"
     >
       {options.map((opt) => (
         <option key={opt.value} value={opt.value}>
@@ -772,7 +776,7 @@ function NumberInput({
       pattern="[0-9]*"
       value={value}
       onChange={(e) => handleChange(e.target.value)}
-      className="ui-input w-full px-3  text-sm border border-line-control rounded-control"
+      className="w-full px-3 py-1.5 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-red-500"
     />
   );
 }
@@ -799,19 +803,19 @@ function TagsInput({
     }
   };
   return (
-    <div className="flex flex-wrap gap-1.5 min-h-[34px] px-2 py-1 border border-line-control rounded-control ">
+    <div className="flex gap-1.5 px-2 py-1 border border-gray-300 rounded-md focus-within:ring-2 focus-within:ring-red-500 flex-wrap min-h-[34px]">
       {value.map((tag) => (
         <span
           key={tag}
-          className="inline-flex items-center gap-1 px-2 py-0.5 text-xs bg-danger-soft text-danger rounded-tag"
+          className="inline-flex items-center gap-1 px-2 py-0.5 text-xs bg-red-100 text-red-800 rounded"
         >
           {tag}
           <button aria-label={pageActionLabel('delete')}
             type="button"
             onClick={() => onChange(value.filter((t) => t !== tag))}
-            className="ui-btn-icon inline-flex items-center justify-center hover:text-danger"
+            className="hover:text-red-900"
           >
-            <IconCircleX aria-hidden="true" className="w-4 h-4" />
+            <XCircle aria-hidden="true" className="w-3 h-3" />
           </button>
         </span>
       ))}
@@ -821,7 +825,7 @@ function TagsInput({
         onChange={(e) => setInputVal(e.target.value)}
         onKeyDown={handleKeyDown}
         placeholder={value.length === 0 ? placeholder : undefined}
-        className="ui-input flex-1 min-w-[100px] text-sm bg-transparent"
+        className="flex-1 text-sm outline-none bg-transparent py-0.5 min-w-[100px]"
       />
     </div>
   );
@@ -912,28 +916,28 @@ function ChannelSecurityFields({
           <button
             type="button"
             onClick={() => setVisibleAgentOpen((value) => !value)}
-            className="w-full px-3 py-1.5 text-sm border border-line-control rounded-control bg-surface text-left flex items-center justify-between gap-3"
+            className="w-full px-3 py-1.5 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-red-500 bg-white text-left flex items-center justify-between gap-3"
           >
-            <span className={`${selectedVisibleAgents.length === 0 ? 'text-fg-muted' : 'text-fg-secondary'} truncate`}>
+            <span className={`${selectedVisibleAgents.length === 0 ? 'text-gray-400' : 'text-gray-700'} truncate`}>
               {visibleAgentSummary}
             </span>
-            <IconChevronDown aria-hidden="true" className={`w-4 h-4 text-fg-muted transition-transform ${visibleAgentOpen ? 'rotate-180' : ''}`} />
+            <ChevronDown aria-hidden="true" className={`w-4 h-4 text-gray-400 transition-transform ${visibleAgentOpen ? 'rotate-180' : ''}`} />
           </button>
           {visibleAgentOpen && (
-            <div className="absolute z-20 mt-1 w-full max-h-64 overflow-y-auto rounded-control border border-line bg-surface shadow-lg">
+            <div className="absolute mt-1 w-full max-h-64 rounded-md border border-gray-200 bg-white shadow-lg z-20 overflow-y-auto">
               {agentOptions.length === 0 ? (
-                <div className="px-3 py-2 text-sm text-fg-muted">{t('security.visibleAgentsNoOptions')}</div>
+                <div className="px-3 py-2 text-sm text-gray-500">{t('security.visibleAgentsNoOptions')}</div>
               ) : (
                 agentOptions.map((item) => (
                   <label
                     key={item.value}
-                    className="flex items-center gap-2 px-3 py-2 text-sm text-fg-secondary hover:bg-hover cursor-pointer"
+                    className="flex items-center gap-2 px-3 py-2 text-sm text-gray-700 hover:bg-gray-50 cursor-pointer"
                   >
                     <input
                       type="checkbox"
                       checked={selectedVisibleSet.has(item.value)}
                       onChange={() => toggleVisibleAgent(item.value)}
-                      className="h-4 w-4 rounded-tag border-line-control text-danger "
+                      className="h-4 w-4 rounded border-gray-300 text-red-600 focus:ring-red-500"
                     />
                     <span className="truncate">{item.label} ({item.value})</span>
                   </label>
@@ -960,22 +964,22 @@ function Section({
 }) {
   const [open, setOpen] = useState(defaultOpen);
   return (
-    <div className="mb-4 border border-line rounded-control overflow-hidden">
+    <div className="mb-4 border border-gray-200 rounded-lg overflow-hidden">
       <button
         type="button"
         onClick={() => setOpen(!open)}
-        className="w-full flex items-center justify-between px-4 py-3 bg-subtle hover:bg-hover transition-colors text-left"
+        className="w-full flex items-center justify-between px-4 py-3 bg-gray-50 hover:bg-gray-100 transition-colors text-left"
       >
         <div>
-          <span className="text-sm font-semibold text-fg">{title}</span>
+          <span className="text-sm font-semibold text-gray-800">{title}</span>
           {description && (
-            <p className="text-xs text-fg-muted mt-0.5">{description}</p>
+            <p className="text-xs text-gray-500 mt-0.5">{description}</p>
           )}
         </div>
         {open ? (
-          <IconChevronUp aria-hidden="true" className="w-4 h-4 text-fg-muted flex-shrink-0" />
+          <ChevronUp aria-hidden="true" className="w-4 h-4 text-gray-400 flex-shrink-0" />
         ) : (
-          <IconChevronDown aria-hidden="true" className="w-4 h-4 text-fg-muted flex-shrink-0" />
+          <ChevronDown aria-hidden="true" className="w-4 h-4 text-gray-400 flex-shrink-0" />
         )}
       </button>
       {open && <div className="px-4 py-2">{children}</div>}
@@ -1009,9 +1013,9 @@ function GuideDownloadButton({
       <a
         href={href}
         download={download}
-        className="inline-flex items-center justify-center gap-1.5 rounded-control border border-info bg-surface px-3 py-2 text-sm font-medium text-info transition-colors hover:bg-info-soft hover:text-info"
+        className="inline-flex items-center justify-center gap-1.5 rounded-md border border-blue-300 bg-white px-3 py-2 text-sm font-medium text-blue-700 transition-colors hover:bg-blue-50 hover:text-blue-800"
       >
-        <IconDownload aria-hidden="true" className="w-4 h-4" />
+        <Download aria-hidden="true" className="w-4 h-4" />
         {label}
       </a>
     </div>
@@ -1073,32 +1077,32 @@ function ConnectionStatusPanel({ status, config, channelId }: ConnectionStatusPa
     border: string;
   }> = {
     connected: {
-      dot: 'bg-success shadow-success',
-      badge: 'bg-success-soft text-success',
+      dot: 'bg-green-500 shadow-green-200',
+      badge: 'bg-green-100 text-green-700',
       label: t('connection.connected'),
-      bg: 'bg-success-soft',
-      border: 'border-success',
+      bg: 'bg-green-50',
+      border: 'border-green-200',
     },
     error: {
-      dot: 'bg-danger shadow-danger',
-      badge: 'bg-danger-soft text-danger',
+      dot: 'bg-red-500 shadow-red-200',
+      badge: 'bg-red-100 text-red-700',
       label: t('connection.error'),
-      bg: 'bg-danger-soft',
-      border: 'border-danger',
+      bg: 'bg-red-50',
+      border: 'border-red-200',
     },
     connecting: {
-      dot: 'bg-warning shadow-warning',
-      badge: 'bg-warning-soft text-warning',
+      dot: 'bg-amber-400 shadow-amber-200',
+      badge: 'bg-amber-100 text-amber-700',
       label: isInGateway ? t('connection.connecting') : t('connection.enabledWaiting'),
-      bg: 'bg-warning-soft',
-      border: 'border-warning',
+      bg: 'bg-amber-50',
+      border: 'border-amber-200',
     },
     disabled: {
-      dot: 'bg-selected',
-      badge: 'bg-subtle text-fg-muted',
+      dot: 'bg-gray-300',
+      badge: 'bg-gray-100 text-gray-500',
       label: t('connection.channelDisabled'),
-      bg: 'bg-subtle',
-      border: 'border-line',
+      bg: 'bg-gray-50',
+      border: 'border-gray-200',
     },
   };
 
@@ -1108,52 +1112,52 @@ function ConnectionStatusPanel({ status, config, channelId }: ConnectionStatusPa
     {
       label: t('connection.uptime'),
       value: isConnected ? formatUptime(status?.uptime_seconds) : '--',
-      icon: <IconActivity aria-hidden="true" className="w-4 h-4 text-fg-muted" />,
+      icon: <Activity aria-hidden="true" className="w-3.5 h-3.5 text-gray-400" />,
     },
     {
       label: t('connection.lastMessage'),
       value: formatLastMessageAt(status?.last_message_at, t, i18n.language),
-      icon: <IconMessage aria-hidden="true" className="w-4 h-4 text-fg-muted" />,
+      icon: <MessageSquare aria-hidden="true" className="w-3.5 h-3.5 text-gray-400" />,
     },
     {
       label: t('connection.reconnects'),
       value: status?.reconnect_count != null ? String(status.reconnect_count) : '--',
-      icon: <IconRotate aria-hidden="true" className="w-4 h-4 text-fg-muted" />,
+      icon: <RotateCcw aria-hidden="true" className="w-3.5 h-3.5 text-gray-400" />,
     },
     {
       label: t('connection.totalErrors'),
       value: status?.error_count != null ? String(status.error_count) : '--',
-      icon: <IconAlertTriangle aria-hidden="true" className="w-4 h-4 text-fg-muted" />,
+      icon: <AlertTriangle aria-hidden="true" className="w-3.5 h-3.5 text-gray-400" />,
     },
   ];
 
   return (
-    <div className={`mb-5 rounded-card border ${sc.border} ${sc.bg} overflow-hidden`}>
+    <div className={`mb-5 rounded-xl border ${sc.border} ${sc.bg} overflow-hidden`}>
       {/* Status bar */}
       <div className="flex items-center gap-3 px-4 py-3">
         {/* Animated dot */}
         <div className="relative flex-shrink-0">
-          <div className={`w-3 h-3 rounded-pill ${sc.dot} shadow-md`} />
+          <div className={`w-3 h-3 rounded-full ${sc.dot} shadow-md`} />
           {connState === 'connected' && (
-            <div className="absolute inset-0 rounded-pill bg-success animate-ping text-fg-muted" />
+            <div className="absolute inset-0 rounded-full bg-green-400 animate-ping opacity-60" />
           )}
         </div>
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2">
-            <span className="text-sm font-semibold text-fg">{sc.label}</span>
+            <span className="text-sm font-semibold text-gray-800">{sc.label}</span>
             {isConnected && status?.uptime_seconds != null && (
-              <span className="text-xs text-fg-muted">
+              <span className="text-xs text-gray-400">
                 · {t('connection.running')} {formatUptime(status.uptime_seconds)}
               </span>
             )}
           </div>
           {status?.last_error && (
-            <p className="text-xs text-danger mt-0.5">
+            <p className="text-xs text-red-600 mt-0.5">
               {t('connection.failureReason')}
             </p>
           )}
         </div>
-        <span className={`flex-shrink-0 inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium rounded-pill ${sc.badge}`}>
+        <span className={`inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium rounded-full flex-shrink-0 ${sc.badge}`}>
           {channelId === 'feishu' && ((config as FeishuChannelConfig).connectionMode === 'webhook' ? 'Webhook' : 'WebSocket')}
           {channelId === 'wecom' && 'WebSocket'}
           {channelId === 'dingtalk' && 'Stream'}
@@ -1165,16 +1169,16 @@ function ConnectionStatusPanel({ status, config, channelId }: ConnectionStatusPa
       </div>
 
       {status?.last_error && (
-        <div className="border-t border-danger bg-surface px-4 py-3">
-          <div className="mb-1.5 flex items-center gap-1.5 text-xs font-semibold text-danger">
-            <IconAlertTriangle aria-hidden="true" className="h-4 w-4 flex-shrink-0" />
+        <div className="border-t border-red-100 bg-white/70 px-4 py-3">
+          <div className="mb-1.5 flex items-center gap-1.5 text-xs font-semibold text-red-700">
+            <AlertTriangle aria-hidden="true" className="h-3.5 w-3.5 flex-shrink-0" />
             {t('connection.failureReason')}
           </div>
-          <p className="whitespace-pre-wrap break-words text-sm text-danger">
+          <p className="text-sm leading-relaxed text-red-700 whitespace-pre-wrap break-words">
             {status.last_error}
           </p>
           {!isConnected && (
-            <p className="mt-1.5 text-xs text-danger">
+            <p className="mt-1.5 text-xs leading-relaxed text-red-500">
               {t('connection.retryAfterFix')}
             </p>
           )}
@@ -1183,14 +1187,14 @@ function ConnectionStatusPanel({ status, config, channelId }: ConnectionStatusPa
 
       {/* Metrics row */}
       {isEnabled && (
-        <div className="grid grid-cols-4 divide-x divide-line border-t border-line bg-surface">
+        <div className="grid grid-cols-4 divide-x divide-gray-200 border-t border-gray-200 bg-white/60">
           {metrics.map((m) => (
             <div key={m.label} className="flex flex-col items-center py-2.5 px-3">
-              <div className="flex items-center gap-1 text-fg-muted mb-0.5">
+              <div className="flex items-center gap-1 text-gray-400 mb-0.5">
                 {m.icon}
                 <span className="text-xs">{m.label}</span>
               </div>
-              <span className="text-sm font-semibold text-fg-secondary">{m.value}</span>
+              <span className="text-sm font-semibold text-gray-700">{m.value}</span>
             </div>
           ))}
         </div>
@@ -1216,14 +1220,14 @@ function ChannelCard({ meta, config, status, isSelected, onClick }: ChannelCardP
   const hasError = Boolean(status?.last_error);
 
   const dotColor = isConnected
-    ? 'bg-success'
+    ? 'bg-green-500'
     : hasError
-    ? 'bg-danger'
+    ? 'bg-red-500'
     : isInGateway
-    ? 'bg-warning'
+    ? 'bg-amber-400'
     : isEnabled
-    ? 'bg-warning'
-    : 'bg-selected';
+    ? 'bg-amber-300'
+    : 'bg-gray-300';
 
   const subText = isConnected
     ? t('card.running')
@@ -1239,21 +1243,21 @@ function ChannelCard({ meta, config, status, isSelected, onClick }: ChannelCardP
     <button
       type="button"
       onClick={onClick}
-      className={`w-40 flex-shrink-0 md:w-full text-left flex items-center gap-3 px-3 py-3 rounded-control border transition-all ${
+      className={`text-left flex items-center gap-3 px-3 py-3 rounded-lg border transition-all w-40 flex-shrink-0 md:w-full ${
         isSelected
-          ? 'border-danger bg-danger-soft shadow-sm'
-          : 'border-line bg-surface hover:border-line-control hover:bg-hover'
+          ? 'border-red-200 bg-red-50 shadow-sm'
+          : 'border-gray-200 bg-white hover:border-gray-300 hover:bg-gray-50'
       }`}
     >
       <ChannelIcon channelId={meta.id} />
       <div className="flex-1 min-w-0">
         <div className="flex items-center gap-1.5">
-          <span className={`text-sm font-medium ${isSelected ? 'text-danger' : 'text-fg'}`}>
+          <span className={`text-sm font-medium ${isSelected ? 'text-red-700' : 'text-gray-800'}`}>
             {t(`channelName.${meta.id}`, { defaultValue: meta.label })}
           </span>
-          <span className={`w-2 h-2 rounded-pill flex-shrink-0 ${dotColor}`} />
+          <span className={`w-2 h-2 rounded-full flex-shrink-0 ${dotColor}`} />
         </div>
-        <p className="text-xs text-fg-muted mt-0.5 truncate">{subText}</p>
+        <p className="text-xs text-gray-400 mt-0.5 truncate">{subText}</p>
       </div>
     </button>
   );
@@ -1456,8 +1460,8 @@ function FeishuPanel({ config, agentOptions, onChange }: FeishuPanelProps) {
         defaultOpen={false}
       >
         {!config.appId && accountKeys.length === 0 && (
-          <div className="flex items-start gap-2 px-3 py-2.5 mb-3 text-sm text-warning bg-warning-soft border border-warning rounded-control">
-            <IconAlertTriangle aria-hidden="true" className="w-4 h-4 flex-shrink-0 mt-0.5" />
+          <div className="flex items-start gap-2 px-3 py-2.5 mb-3 text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded-md">
+            <AlertTriangle aria-hidden="true" className="w-4 h-4 flex-shrink-0 mt-0.5" />
             <span>{t('feishu.multiAccountHint')}</span>
           </div>
         )}
@@ -1476,9 +1480,9 @@ function FeishuPanel({ config, agentOptions, onChange }: FeishuPanelProps) {
         <button
           type="button"
           onClick={addAccount}
-          className="mt-3 flex items-center gap-1.5 text-sm text-danger hover:text-danger"
+          className="mt-3 flex items-center gap-1.5 text-sm text-red-600 hover:text-red-700"
         >
-          <IconPlus aria-hidden="true" className="w-4 h-4" />
+          <Plus aria-hidden="true" className="w-4 h-4" />
           {t('feishu.addAccount')}
         </button>
       </Section>
@@ -1498,23 +1502,23 @@ function AccountCard({ id, config, onChange, onRename, onRemove }: AccountCardPr
   const { t } = useTranslation('channel');
   const [editingId, setEditingId] = useState(id);
   return (
-    <div className="border border-line rounded-control overflow-hidden">
-      <div className="flex items-center justify-between px-3 py-2 bg-subtle">
+    <div className="border border-gray-200 rounded-lg overflow-hidden">
+      <div className="flex items-center justify-between px-3 py-2 bg-gray-50">
         <input
           type="text"
           value={editingId}
           onChange={(e) => setEditingId(e.target.value)}
           onBlur={() => onRename(editingId)}
-          className="ui-input text-sm font-medium text-fg-secondary bg-transparent border-b border-dashed border-line-control focus:border-action flex-1 mr-2"
+          className="text-sm font-medium text-gray-700 bg-transparent border-b border-dashed border-gray-400 focus:outline-none focus:border-red-500 flex-1 mr-2"
         />
         <div className="flex items-center gap-2">
           <Toggle checked={config.enabled !== false} onChange={(v) => onChange({ enabled: v })} />
           <button aria-label={pageActionLabel('delete')}
             type="button"
             onClick={onRemove}
-            className="ui-btn-icon inline-flex items-center justify-center text-fg-muted hover:text-danger transition-colors"
+            className="text-gray-400 hover:text-red-500 transition-colors"
           >
-            <IconTrash aria-hidden="true" className="w-4 h-4" />
+            <Trash2 aria-hidden="true" className="w-4 h-4" />
           </button>
         </div>
       </div>
@@ -1615,7 +1619,7 @@ function WeComPanel({ config, agentOptions, onChange }: WeComPanelProps) {
           onVisibleAgentsChange={(v) => set('visibleAgents', v)}
         />
         <FieldRow label={t('wecom.groupTrigger')} hint={t('wecom.groupTriggerHint')}>
-          <span className="inline-block px-3 py-1.5 text-sm text-fg-muted border border-line rounded-control bg-subtle">
+          <span className="inline-block px-3 py-1.5 text-sm text-gray-500 border border-gray-200 rounded-md bg-gray-50">
             {t('wecom.triggerMention')}
           </span>
         </FieldRow>
@@ -1814,7 +1818,7 @@ function TelegramPanel({ config, agentOptions, onChange, onRefresh }: TelegramPa
         )}
 
         {/* Divider before access control */}
-        <div className="my-1 border-t border-line" />
+        <div className="my-1 border-t border-gray-100" />
 
         <FieldRow label={t('telegram.allowFromEnabled')} hint={t('telegram.allowFromEnabledHint')}>
           <Toggle
@@ -1833,14 +1837,14 @@ function TelegramPanel({ config, agentOptions, onChange, onRefresh }: TelegramPa
             </FieldRow>
 
             {/* Pairing sub-section */}
-            <div className="mt-1 rounded-control border border-info bg-info-soft p-4">
+            <div className="mt-1 rounded-lg border border-blue-100 bg-blue-50 p-4">
               <div className="flex items-start gap-2 mb-3">
-                <div className="flex-shrink-0 w-6 h-6 rounded-pill bg-info-soft flex items-center justify-center mt-0.5">
-                  <span className="text-info text-xs font-bold">→</span>
+                <div className="w-6 h-6 rounded-full bg-blue-100 flex items-center justify-center mt-0.5 flex-shrink-0">
+                  <span className="text-blue-600 text-xs font-bold">→</span>
                 </div>
                 <div>
-                  <p className="text-sm font-medium text-info">{t('telegram.pairing')}</p>
-                  <p className="text-xs text-info mt-0.5 ">{t('telegram.pairingDesc')}</p>
+                  <p className="text-sm font-medium text-blue-800">{t('telegram.pairing')}</p>
+                  <p className="text-xs text-blue-600 mt-0.5 leading-relaxed">{t('telegram.pairingDesc')}</p>
                 </div>
               </div>
               <div className="flex gap-2">
@@ -1851,18 +1855,18 @@ function TelegramPanel({ config, agentOptions, onChange, onRefresh }: TelegramPa
                   onKeyDown={(e) => e.key === 'Enter' && handlePair()}
                   placeholder={t('telegram.pairingCodePlaceholder')}
                   maxLength={6}
-                  className="ui-input flex-1 px-3  text-sm font-mono tracking-[0.3em] border border-info rounded-control bg-surface uppercase placeholder:tracking-normal"
+                  className="flex-1 px-3 py-1.5 text-sm font-mono tracking-[0.3em] border border-blue-200 rounded-md bg-white focus:outline-none focus:ring-2 focus:ring-blue-400 uppercase placeholder:tracking-normal"
                 />
                 <button
                   type="button"
                   onClick={handlePair}
                   disabled={!pairingCode.trim() || pairingState === 'loading'}
-                  className="flex items-center gap-1.5 px-4 py-1.5 text-sm bg-action text-action-fg rounded-control hover:bg-action-hover disabled:bg-disabled disabled:text-fg-disabled disabled:cursor-not-allowed transition-colors"
+                  className="flex items-center gap-1.5 px-4 py-1.5 text-sm bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
                 >
                   {pairingState === 'loading' ? (
-                    <IconLoader2 aria-hidden="true" className="w-4 h-4 animate-spin" />
+                    <Loader2 aria-hidden="true" className="w-4 h-4 animate-spin" />
                   ) : pairingState === 'done' ? (
-                    <IconCircleCheck aria-hidden="true" className="w-4 h-4" />
+                    <CheckCircle aria-hidden="true" className="w-4 h-4" />
                   ) : null}
                   {pairingState === 'loading'
                     ? t('telegram.pairingLoading')
@@ -1992,57 +1996,57 @@ function SlackPanel({
             <button
               type="button"
               onClick={handleDownloadManifest}
-              className="group flex min-h-[82px] items-center justify-between gap-3 rounded-control border border-danger bg-danger-soft px-4 py-3 text-left shadow-sm transition-all hover:-translate-y-0.5 hover:border-danger hover:bg-danger-soft "
+              className="group flex items-center justify-between gap-3 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-left shadow-sm transition-all hover:-translate-y-0.5 hover:border-red-300 hover:bg-red-100 hover:shadow-md focus:outline-none focus:ring-2 focus:ring-red-400 focus:ring-offset-1 min-h-[82px]"
             >
               <span className="flex min-w-0 items-center gap-3">
-                <span className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-control bg-surface text-danger shadow-sm">
-                  <IconDownload aria-hidden="true" className="h-5 w-5" />
+                <span className="flex h-10 w-10 items-center justify-center rounded-md bg-white text-red-600 shadow-sm flex-shrink-0">
+                  <Download aria-hidden="true" className="h-5 w-5" />
                 </span>
                 <span className="min-w-0">
-                  <span className="block text-sm font-semibold text-danger">{t('slack.downloadManifest')}</span>
-                  <span className="mt-0.5 block text-xs text-danger">{t('slack.downloadManifestDesc')}</span>
+                  <span className="block text-sm font-semibold text-red-700">{t('slack.downloadManifest')}</span>
+                  <span className="mt-0.5 block text-xs leading-relaxed text-red-600">{t('slack.downloadManifestDesc')}</span>
                 </span>
               </span>
-              <IconDownload aria-hidden="true" className="h-4 w-4 flex-shrink-0 text-danger transition-transform group-hover:translate-y-0.5" />
+              <Download aria-hidden="true" className="h-4 w-4 text-red-500 transition-transform group-hover:translate-y-0.5 flex-shrink-0" />
             </button>
             <a
               href={SLACK_APPS_URL}
               target="_blank"
               rel="noreferrer"
-              className="group flex min-h-[82px] items-center justify-between gap-3 rounded-control border border-danger bg-danger-soft px-4 py-3 text-left shadow-sm transition-all hover:-translate-y-0.5 hover:border-danger hover:bg-danger-soft "
+              className="group flex items-center justify-between gap-3 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-left shadow-sm transition-all hover:-translate-y-0.5 hover:border-red-300 hover:bg-red-100 hover:shadow-md focus:outline-none focus:ring-2 focus:ring-red-400 focus:ring-offset-1 min-h-[82px]"
             >
               <span className="flex min-w-0 items-center gap-3">
-                <span className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-control bg-surface text-danger shadow-sm">
-                  <IconMessage aria-hidden="true" className="h-5 w-5" />
+                <span className="flex h-10 w-10 items-center justify-center rounded-md bg-white text-red-600 shadow-sm flex-shrink-0">
+                  <MessageSquare aria-hidden="true" className="h-5 w-5" />
                 </span>
                 <span className="min-w-0">
-                  <span className="block text-sm font-semibold text-danger">{t('slack.openSlackApps')}</span>
-                  <span className="mt-0.5 block text-xs text-danger">{t('slack.openSlackAppsDesc')}</span>
+                  <span className="block text-sm font-semibold text-red-700">{t('slack.openSlackApps')}</span>
+                  <span className="mt-0.5 block text-xs leading-relaxed text-red-600">{t('slack.openSlackAppsDesc')}</span>
                 </span>
               </span>
-              <IconExternalLink aria-hidden="true" className="h-4 w-4 flex-shrink-0 text-danger transition-transform group-hover:-translate-y-0.5 group-hover:translate-x-0.5" />
+              <ExternalLink aria-hidden="true" className="h-4 w-4 text-red-500 transition-transform group-hover:-translate-y-0.5 group-hover:translate-x-0.5 flex-shrink-0" />
             </a>
           </div>
-          <ol className="grid gap-2 text-sm text-fg-secondary">
+          <ol className="grid gap-2 text-sm text-gray-600">
             <li className="flex gap-2">
-              <span className="mt-0.5 flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-pill bg-subtle text-xs font-semibold text-fg-secondary">1</span>
+              <span className="mt-0.5 flex h-5 w-5 items-center justify-center rounded-full bg-gray-100 text-xs font-semibold text-gray-600 flex-shrink-0">1</span>
               <span>{t('slack.stepCreateApp')}</span>
             </li>
             <li className="flex gap-2">
-              <span className="mt-0.5 flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-pill bg-subtle text-xs font-semibold text-fg-secondary">2</span>
+              <span className="mt-0.5 flex h-5 w-5 items-center justify-center rounded-full bg-gray-100 text-xs font-semibold text-gray-600 flex-shrink-0">2</span>
               <span>{t('slack.stepInstall')}</span>
             </li>
             <li className="flex gap-2">
-              <span className="mt-0.5 flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-pill bg-subtle text-xs font-semibold text-fg-secondary">3</span>
+              <span className="mt-0.5 flex h-5 w-5 items-center justify-center rounded-full bg-gray-100 text-xs font-semibold text-gray-600 flex-shrink-0">3</span>
               <span>{t('slack.stepTokens')}</span>
             </li>
             <li className="flex gap-2">
-              <span className="mt-0.5 flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-pill bg-subtle text-xs font-semibold text-fg-secondary">4</span>
+              <span className="mt-0.5 flex h-5 w-5 items-center justify-center rounded-full bg-gray-100 text-xs font-semibold text-gray-600 flex-shrink-0">4</span>
               <span>{t('slack.stepSaveEnable')}</span>
             </li>
           </ol>
-          <p className="flex items-start gap-1 text-xs text-danger">
-            <span className="text-sm font-semibold text-danger">*</span>
+          <p className="flex items-start gap-1 text-xs leading-relaxed text-red-800">
+            <span className="text-sm font-semibold leading-none text-red-600">*</span>
             <span>{t('slack.manifestHint')}</span>
           </p>
         </div>
@@ -2271,7 +2275,7 @@ function EmailPanel({ config, agentOptions, onChange }: EmailPanelProps) {
             options={EMAIL_IMAP_HOST_OPTIONS}
           />
           {showImapHostWarning && emailHostPreset && (
-            <p className="mt-1.5 text-xs font-medium text-danger">
+            <p className="mt-1.5 text-xs font-medium leading-relaxed text-red-600">
               {t('email.imapHostMismatchWarning', { expectedHost: emailHostPreset.imapHost })}
             </p>
           )}
@@ -2302,7 +2306,7 @@ function EmailPanel({ config, agentOptions, onChange }: EmailPanelProps) {
             options={EMAIL_SMTP_HOST_OPTIONS}
           />
           {showSmtpHostWarning && emailHostPreset && (
-            <p className="mt-1.5 text-xs font-medium text-danger">
+            <p className="mt-1.5 text-xs font-medium leading-relaxed text-red-600">
               {t('email.smtpHostMismatchWarning', { expectedHost: emailHostPreset.smtpHost })}
             </p>
           )}
@@ -2318,7 +2322,7 @@ function EmailPanel({ config, agentOptions, onChange }: EmailPanelProps) {
             ]}
           />
           {showNeteaseSmtpSecurityHint && (
-            <p className="mt-1.5 text-xs font-medium text-danger">
+            <p className="mt-1.5 text-xs font-medium leading-relaxed text-red-600">
               {t('email.neteaseSmtpSecurityHint')}
             </p>
           )}
@@ -2550,12 +2554,12 @@ function WhatsAppPanel({ config, onChange, onPairSuccess }: WhatsAppPanelProps) 
             type="button"
             onClick={() => startPairing(isPaired)}
             disabled={qrPhase === 'loading'}
-            className="flex items-center gap-2 px-4 py-2 text-sm font-medium bg-action text-action-fg rounded-control hover:bg-action-hover disabled:bg-disabled disabled:text-fg-disabled disabled:cursor-not-allowed transition-colors shadow-sm"
+            className="flex items-center gap-2 px-4 py-2 text-sm font-medium bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors shadow-sm"
           >
             {qrPhase === 'loading' ? (
-              <IconLoader2 aria-hidden="true" className="w-4 h-4 animate-spin" />
+              <Loader2 aria-hidden="true" className="w-4 h-4 animate-spin" />
             ) : (
-              <IconMessage aria-hidden="true" className="w-4 h-4" />
+              <MessageSquare aria-hidden="true" className="w-4 h-4" />
             )}
             {qrPhase === 'loading'
               ? t('whatsapp.qrLoading')
@@ -2564,28 +2568,28 @@ function WhatsAppPanel({ config, onChange, onPairSuccess }: WhatsAppPanelProps) 
                 : t('whatsapp.qrLoginButton')}
           </button>
           {isPaired && (
-            <p className="mt-1.5 text-xs text-success flex items-center gap-1">
-              <IconCircleCheck aria-hidden="true" className="w-4 h-4 text-success" />
+            <p className="mt-1.5 text-xs text-emerald-700 flex items-center gap-1">
+              <CheckCircle aria-hidden="true" className="w-3 h-3 text-emerald-500" />
               {t('whatsapp.sessionConfigured')}
             </p>
           )}
         </div>
 
         {showModal && (
-          <PageDialog onClose={closeQrModal} className="fixed inset-0 z-50 flex items-center justify-center bg-overlay-backdrop backdrop-blur-sm">
-            <div className="bg-surface rounded-card shadow-overlay p-6 w-80 flex flex-col items-center gap-4 relative">
+          <PageDialog onClose={closeQrModal} className="fixed inset-0 flex items-center justify-center bg-black/50 backdrop-blur-sm z-50">
+            <div className="bg-white rounded-2xl shadow-2xl p-6 w-80 flex flex-col items-center gap-4 relative">
               <button
                 type="button"
                 onClick={closeQrModal}
                 aria-label={pageActionLabel('close')}
-                className="ui-btn-icon absolute top-2 right-2 inline-flex items-center justify-center text-fg-muted hover:text-fg-secondary"
+                className="absolute top-3 right-3 text-gray-400 hover:text-gray-600 text-xl leading-none"
               >
-                <IconX aria-hidden="true" className="h-5 w-5" />
+                <X aria-hidden="true" className="h-5 w-5" />
               </button>
-              <h3 className="text-base font-semibold text-fg">{t('whatsapp.qrModalTitle')}</h3>
+              <h3 className="text-base font-semibold text-gray-800">{t('whatsapp.qrModalTitle')}</h3>
               {qrPhase === 'loading' && (
                 <div className="w-48 h-48 flex items-center justify-center">
-                  <IconLoader2 aria-hidden="true" className="w-8 h-8 animate-spin text-success" />
+                  <Loader2 aria-hidden="true" className="w-10 h-10 animate-spin text-emerald-500" />
                 </div>
               )}
               {qrPhase === 'scanning' && qrValue && (
@@ -2593,26 +2597,26 @@ function WhatsAppPanel({ config, onChange, onPairSuccess }: WhatsAppPanelProps) 
               )}
               {(qrPhase === 'connected' || qrPhase === 'complete') && (
                 <div className="w-48 h-48 flex flex-col items-center justify-center gap-2">
-                  <IconCircleCheck aria-hidden="true" className="w-8 h-8 text-success" />
-                  <p className="text-sm font-medium text-success">
+                  <CheckCircle aria-hidden="true" className="w-14 h-14 text-emerald-500" />
+                  <p className="text-sm font-medium text-emerald-700">
                     {qrPhase === 'complete' ? t('whatsapp.qrComplete') : t('whatsapp.qrConnected')}
                   </p>
                 </div>
               )}
               {qrPhase === 'error' && (
                 <div className="w-48 flex flex-col items-center gap-3">
-                  <IconCircleX aria-hidden="true" className="w-8 h-8 text-danger" />
-                  <p className="text-xs text-danger text-center break-all">{qrError || t('whatsapp.qrError')}</p>
+                  <XCircle aria-hidden="true" className="w-10 h-10 text-red-500" />
+                  <p className="text-xs text-red-600 text-center break-all">{qrError || t('whatsapp.qrError')}</p>
                   <button
                     type="button"
                     onClick={() => startPairing(isPaired)}
-                    className="px-4 py-1.5 text-sm bg-action text-action-fg rounded-control hover:bg-action-hover transition-colors"
+                    className="px-4 py-1.5 text-sm bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 transition-colors"
                   >
                     {t('whatsapp.qrRetry')}
                   </button>
                 </div>
               )}
-              <p className="text-xs text-fg-muted text-center ">
+              <p className="text-xs text-gray-500 text-center leading-relaxed">
                 {qrPhase === 'loading' && t('whatsapp.qrHintLoading')}
                 {qrPhase === 'scanning' && t('whatsapp.qrHintScanning')}
                 {qrPhase === 'connected' && t('whatsapp.qrHintConnected')}
@@ -2622,7 +2626,7 @@ function WhatsAppPanel({ config, onChange, onPairSuccess }: WhatsAppPanelProps) 
                 <button
                   type="button"
                   onClick={closeQrModal}
-                  className="w-full py-2 text-sm font-medium bg-action text-action-fg rounded-control hover:bg-action-hover transition-colors"
+                  className="w-full py-2 text-sm font-medium bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 transition-colors"
                 >
                   {t('whatsapp.qrDone')}
                 </button>
@@ -2631,7 +2635,7 @@ function WhatsAppPanel({ config, onChange, onPairSuccess }: WhatsAppPanelProps) 
           </PageDialog>
         )}
 
-        <div className="my-2 border-t border-line" />
+        <div className="my-2 border-t border-gray-100" />
 
         <FieldRow label={t('whatsapp.sessionPath')} hint={t('whatsapp.sessionPathHint')}>
           <TextInput
@@ -2920,18 +2924,18 @@ function WeixinPanel({ config, agentOptions, onChange, onQrLoginSuccess }: Weixi
             type="button"
             onClick={startQrLogin}
             disabled={qrPhase === 'loading'}
-            className="flex items-center gap-2 px-4 py-2 text-sm font-medium bg-action text-action-fg rounded-control hover:bg-action-hover disabled:bg-disabled disabled:text-fg-disabled disabled:cursor-not-allowed transition-colors shadow-sm"
+            className="flex items-center gap-2 px-4 py-2 text-sm font-medium bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors shadow-sm"
           >
             {qrPhase === 'loading' ? (
-              <IconLoader2 aria-hidden="true" className="w-4 h-4 animate-spin" />
+              <Loader2 aria-hidden="true" className="w-4 h-4 animate-spin" />
             ) : (
               <span className="text-base leading-none">▣</span>
             )}
             {qrPhase === 'loading' ? t('weixin.qrLoading') : t('weixin.qrLoginButton')}
           </button>
           {config.token && config.accountId && (
-            <p className="mt-1.5 text-xs text-fg-muted flex items-center gap-1">
-              <IconCircleCheck aria-hidden="true" className="w-4 h-4 text-success" />
+            <p className="mt-1.5 text-xs text-gray-500 flex items-center gap-1">
+              <CheckCircle aria-hidden="true" className="w-3 h-3 text-green-500" />
               {t('weixin.qrAlreadyLinked')}
             </p>
           )}
@@ -2939,36 +2943,36 @@ function WeixinPanel({ config, agentOptions, onChange, onQrLoginSuccess }: Weixi
 
         {/* QR modal overlay */}
         {showModal && (
-          <PageDialog onClose={closeQrModal} className="fixed inset-0 z-50 flex items-center justify-center bg-overlay-backdrop backdrop-blur-sm">
-            <div className="bg-surface rounded-card shadow-overlay p-6 w-80 flex flex-col items-center gap-4 relative">
+          <PageDialog onClose={closeQrModal} className="fixed inset-0 flex items-center justify-center bg-black/50 backdrop-blur-sm z-50">
+            <div className="bg-white rounded-2xl shadow-2xl p-6 w-80 flex flex-col items-center gap-4 relative">
               {/* Close button */}
               <button
                 type="button"
                 onClick={closeQrModal}
                 aria-label={pageActionLabel('close')}
-                className="ui-btn-icon absolute top-2 right-2 inline-flex items-center justify-center text-fg-muted hover:text-fg-secondary"
+                className="absolute top-3 right-3 text-gray-400 hover:text-gray-600 text-xl leading-none"
               >
-                <IconX aria-hidden="true" className="h-5 w-5" />
+                <X aria-hidden="true" className="h-5 w-5" />
               </button>
 
-              <h3 className="text-base font-semibold text-fg">{t('weixin.qrModalTitle')}</h3>
+              <h3 className="text-base font-semibold text-gray-800">{t('weixin.qrModalTitle')}</h3>
 
               {/* QR code display area */}
               {qrPhase === 'loading' && (
                 <div className="w-48 h-48 flex items-center justify-center">
-                  <IconLoader2 aria-hidden="true" className="w-8 h-8 animate-spin text-success" />
+                  <Loader2 aria-hidden="true" className="w-10 h-10 animate-spin text-green-500" />
                 </div>
               )}
               {(qrPhase === 'scanning' || qrPhase === 'scaned') && qrUrl && (
                 <div className="relative">
-                  <div className={`transition-opacity ${qrPhase === 'scaned' ? 'text-fg-muted' : 'opacity-100'}`}>
+                  <div className={`transition-opacity ${qrPhase === 'scaned' ? 'opacity-40' : 'opacity-100'}`}>
                     <QRCodeSVG value={qrUrl} size={192} />
                   </div>
                   {qrPhase === 'scaned' && (
                     <div className="absolute inset-0 flex items-center justify-center">
-                      <div className="bg-surface rounded-card px-3 py-2 text-center shadow">
-                        <IconCircleCheck aria-hidden="true" className="w-6 h-6 text-success mx-auto mb-1" />
-                        <p className="text-xs font-medium text-fg-secondary">{t('weixin.qrScaned')}</p>
+                      <div className="bg-white/90 rounded-xl px-3 py-2 text-center shadow">
+                        <CheckCircle aria-hidden="true" className="w-6 h-6 text-green-500 mb-1 mx-auto" />
+                        <p className="text-xs font-medium text-gray-700">{t('weixin.qrScaned')}</p>
                       </div>
                     </div>
                   )}
@@ -2976,18 +2980,18 @@ function WeixinPanel({ config, agentOptions, onChange, onQrLoginSuccess }: Weixi
               )}
               {qrPhase === 'confirmed' && (
                 <div className="w-48 h-48 flex flex-col items-center justify-center gap-2">
-                  <IconCircleCheck aria-hidden="true" className="w-8 h-8 text-success" />
-                  <p className="text-sm font-medium text-success">{t('weixin.qrConfirmed')}</p>
+                  <CheckCircle aria-hidden="true" className="w-14 h-14 text-green-500" />
+                  <p className="text-sm font-medium text-green-700">{t('weixin.qrConfirmed')}</p>
                 </div>
               )}
               {qrPhase === 'expired' && (
                 <div className="w-48 h-48 flex flex-col items-center justify-center gap-3">
-                  <IconAlertTriangle aria-hidden="true" className="w-8 h-8 text-warning" />
-                  <p className="text-sm text-fg-secondary text-center">{t('weixin.qrExpired')}</p>
+                  <AlertTriangle aria-hidden="true" className="w-10 h-10 text-amber-500" />
+                  <p className="text-sm text-gray-600 text-center">{t('weixin.qrExpired')}</p>
                   <button
                     type="button"
                     onClick={startQrLogin}
-                    className="px-4 py-1.5 text-sm bg-action text-action-fg rounded-control hover:bg-action-hover transition-colors"
+                    className="px-4 py-1.5 text-sm bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors"
                   >
                     {t('weixin.qrRefresh')}
                   </button>
@@ -2995,12 +2999,12 @@ function WeixinPanel({ config, agentOptions, onChange, onQrLoginSuccess }: Weixi
               )}
               {qrPhase === 'error' && (
                 <div className="w-48 flex flex-col items-center gap-3">
-                  <IconCircleX aria-hidden="true" className="w-8 h-8 text-danger" />
-                  <p className="text-xs text-danger text-center break-all">{qrError || t('weixin.qrError')}</p>
+                  <XCircle aria-hidden="true" className="w-10 h-10 text-red-500" />
+                  <p className="text-xs text-red-600 text-center break-all">{qrError || t('weixin.qrError')}</p>
                   <button
                     type="button"
                     onClick={startQrLogin}
-                    className="px-4 py-1.5 text-sm bg-action text-action-fg rounded-control hover:bg-action-hover transition-colors"
+                    className="px-4 py-1.5 text-sm bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors"
                   >
                     {t('weixin.qrRetry')}
                   </button>
@@ -3008,7 +3012,7 @@ function WeixinPanel({ config, agentOptions, onChange, onQrLoginSuccess }: Weixi
               )}
 
               {/* Status hint */}
-              <p className="text-xs text-fg-muted text-center ">
+              <p className="text-xs text-gray-500 text-center leading-relaxed">
                 {qrPhase === 'scanning' && t('weixin.qrHintScanning')}
                 {qrPhase === 'scaned' && t('weixin.qrHintScaned')}
                 {qrPhase === 'confirmed' && t('weixin.qrHintConfirmed')}
@@ -3020,7 +3024,7 @@ function WeixinPanel({ config, agentOptions, onChange, onQrLoginSuccess }: Weixi
                 <button
                   type="button"
                   onClick={closeQrModal}
-                  className="w-full py-2 text-sm font-medium bg-action text-action-fg rounded-control hover:bg-action-hover transition-colors"
+                  className="w-full py-2 text-sm font-medium bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors"
                 >
                   {t('weixin.qrDone')}
                 </button>
@@ -3029,7 +3033,7 @@ function WeixinPanel({ config, agentOptions, onChange, onQrLoginSuccess }: Weixi
           </PageDialog>
         )}
 
-        <div className="my-2 border-t border-line" />
+        <div className="my-2 border-t border-gray-100" />
 
         <FieldRow label="Token" required hint={t('weixin.tokenHint')}>
           <SecretInput
@@ -3162,43 +3166,44 @@ function DetailHeader({
 
   const saveIcon =
     isBusy ? (
-      <IconLoader2 aria-hidden="true" className="w-4 h-4 animate-spin" />
+      <Loader2 aria-hidden="true" className="w-4 h-4 animate-spin" />
     ) : (
-      <IconDeviceFloppy aria-hidden="true" className="w-4 h-4" />
+      <Save aria-hidden="true" className="w-4 h-4" />
     );
 
   return (
     // flex-wrap: on phone widths the action group (toggle / restart / save) drops
     // to its own line instead of squeezing the title to 0px and pushing the save
     // button past the panel edge.
-    <div className="px-6 py-4 border-b border-line flex flex-wrap items-center gap-4">
+    <div className="px-6 py-4 border-b border-gray-200 flex items-center gap-4 flex-wrap">
       <div className="flex-shrink-0"><ChannelIcon channelId={meta.id} size="md" /></div>
-      <div className="flex-1 min-w-0">
+      {/* basis-48: a zero flex-basis never triggers the wrap, so give the title block a real minimum. */}
+      <div className="flex-1 basis-48 min-w-0">
         <div className="flex items-center gap-2">
-          <h2 className="text-title-section font-semibold text-fg">{t(`channelName.${meta.id}`, { defaultValue: meta.label })}</h2>
+          <h2 className="text-lg font-semibold text-gray-900">{t(`channelName.${meta.id}`, { defaultValue: meta.label })}</h2>
           {isConnected ? (
-            <span className="inline-flex items-center gap-1 px-2 py-0.5 text-xs font-medium bg-success-soft text-success rounded-pill">
-              <IconWifi aria-hidden="true" className="w-4 h-4" />
+            <span className="inline-flex items-center gap-1 px-2 py-0.5 text-xs font-medium bg-green-100 text-green-700 rounded-full">
+              <Wifi aria-hidden="true" className="w-3 h-3" />
               {t('status.running')}
             </span>
           ) : isInGateway ? (
-            <span className="inline-flex items-center gap-1 px-2 py-0.5 text-xs font-medium bg-warning-soft text-warning rounded-pill">
-              <IconActivity aria-hidden="true" className="w-4 h-4" />
+            <span className="inline-flex items-center gap-1 px-2 py-0.5 text-xs font-medium bg-amber-100 text-amber-700 rounded-full">
+              <Activity aria-hidden="true" className="w-3 h-3" />
               {t('header.connecting')}
             </span>
           ) : isEnabled ? (
-            <span className="inline-flex items-center gap-1 px-2 py-0.5 text-xs font-medium bg-warning-soft text-warning rounded-pill">
-              <IconActivity aria-hidden="true" className="w-4 h-4" />
+            <span className="inline-flex items-center gap-1 px-2 py-0.5 text-xs font-medium bg-amber-100 text-amber-700 rounded-full">
+              <Activity aria-hidden="true" className="w-3 h-3" />
               {t('status.configured')}
             </span>
           ) : (
-            <span className="inline-flex items-center gap-1 px-2 py-0.5 text-xs font-medium bg-subtle text-fg-muted rounded-pill">
-              <IconWifiOff aria-hidden="true" className="w-4 h-4" />
+            <span className="inline-flex items-center gap-1 px-2 py-0.5 text-xs font-medium bg-gray-100 text-gray-500 rounded-full">
+              <WifiOff aria-hidden="true" className="w-3 h-3" />
               {t('status.disabled')}
             </span>
           )}
         </div>
-        <p className="text-xs text-fg-muted mt-0.5">
+        <p className="text-xs text-gray-400 mt-0.5">
           {meta.aliases.length > 0 && `${t('header.aliases')}${meta.aliases.join(', ')} · `}
           {[
             meta.capabilities.media && t('header.media'),
@@ -3212,7 +3217,7 @@ function DetailHeader({
       </div>
       <div className="flex items-center gap-2 flex-shrink-0 ml-auto">
         <div className="flex items-center gap-2 mr-1">
-          <span className="text-sm text-fg-muted">{t('enableChannel')}</span>
+          <span className="text-sm text-gray-500">{t('enableChannel')}</span>
           <Toggle checked={isEnabled} onChange={onToggleEnabled} disabled={isBusy} />
         </div>
         {isEnabled && (
@@ -3220,12 +3225,12 @@ function DetailHeader({
             onClick={onRestart}
             disabled={restarting || isBusy}
             title={t('restartHint')}
-            className="flex items-center gap-1.5 px-3 py-2 text-sm border border-line-control text-fg-secondary rounded-control hover:bg-hover disabled:bg-disabled disabled:text-fg-disabled transition-colors"
+            className="flex items-center gap-1.5 px-3 py-2 text-sm border border-gray-300 text-gray-600 rounded-lg hover:bg-gray-50 disabled:opacity-50 transition-colors"
           >
             {restarting ? (
-              <IconLoader2 aria-hidden="true" className="w-4 h-4 animate-spin" />
+              <Loader2 aria-hidden="true" className="w-4 h-4 animate-spin" />
             ) : (
-              <IconRotate aria-hidden="true" className="w-4 h-4" />
+              <RotateCcw aria-hidden="true" className="w-4 h-4" />
             )}
             {restarting ? t('restarting') : t('restart')}
           </button>
@@ -3233,7 +3238,7 @@ function DetailHeader({
         <button
           onClick={onSave}
           disabled={isBusy}
-          className="ui-btn ui-btn-primary"
+          className="flex items-center gap-1.5 px-4 py-2 text-sm bg-slate-800 text-white rounded-lg hover:bg-slate-900 disabled:opacity-50 transition-colors"
         >
           {saveIcon}
           {saveLabel}
@@ -3264,18 +3269,18 @@ function StatsStrip({
   return (
     <div className="flex gap-3 mb-4">
       {[
-        { label: t('stats.total'), value: total, icon: <IconBroadcast aria-hidden="true" className="w-4 h-4 text-fg-muted" /> },
-        { label: t('stats.enabled'), value: enabled, icon: <IconCircleCheck aria-hidden="true" className="w-4 h-4 text-fg-muted" /> },
-        { label: t('stats.running'), value: running, icon: <IconActivity aria-hidden="true" className="w-4 h-4 text-success" /> },
+        { label: t('stats.total'), value: total, icon: <Radio aria-hidden="true" className="w-4 h-4 text-gray-400" /> },
+        { label: t('stats.enabled'), value: enabled, icon: <CheckCircle aria-hidden="true" className="w-4 h-4 text-slate-500" /> },
+        { label: t('stats.running'), value: running, icon: <Activity aria-hidden="true" className="w-4 h-4 text-green-500" /> },
       ].map((stat) => (
         <div
           key={stat.label}
-          className="flex items-center gap-2 px-4 py-2.5 bg-surface rounded-control border border-line shadow-sm"
+          className="flex items-center gap-2 px-4 py-2.5 bg-white rounded-lg border border-gray-200 shadow-sm"
         >
           {stat.icon}
           <div>
-            <p className="text-lg font-semibold text-fg leading-none">{stat.value}</p>
-            <p className="text-xs text-fg-muted mt-0.5">{stat.label}</p>
+            <p className="text-lg font-semibold text-gray-900 leading-none">{stat.value}</p>
+            <p className="text-xs text-gray-400 mt-0.5">{stat.label}</p>
           </div>
         </div>
       ))}
@@ -3651,7 +3656,7 @@ export default function ChannelPage() {
       <PageHeader tone="data"
         title={t('pageTitle')}
         description={t('pageDescription')}
-        icon={<IconBroadcast aria-hidden="true" className="w-8 h-8" />}
+        icon={<Radio aria-hidden="true" className="w-8 h-8" />}
         action={
           <button
             onClick={async () => {
@@ -3660,13 +3665,13 @@ export default function ChannelPage() {
               setTimeout(() => setRefreshDone(false), 2000);
             }}
             disabled={refreshingStatus}
-            className={`flex items-center gap-1.5 px-3 py-2 text-sm border rounded-control transition-all ${
+            className={`flex items-center gap-1.5 px-3 py-2 text-sm border rounded-lg transition-all ${
               refreshDone
-                ? 'border-success text-success bg-success-soft'
-                : 'border-line-control text-fg-secondary hover:bg-hover'
+                ? 'border-green-300 text-green-600 bg-green-50'
+                : 'border-gray-300 text-gray-600 hover:bg-gray-50'
             }`}
           >
-            <IconRefresh aria-hidden="true" className={`w-4 h-4 transition-transform ${refreshingStatus ? 'animate-spin' : ''}`} />
+            <RefreshCw aria-hidden="true" className={`w-4 h-4 transition-transform ${refreshingStatus ? 'animate-spin' : ''}`} />
             {refreshingStatus ? t('refreshing') : refreshDone ? t('refreshed') : t('refreshStatus')}
           </button>
         }
@@ -3675,20 +3680,20 @@ export default function ChannelPage() {
       <StatsStrip channels={channels} statuses={statuses} />
 
       {channels.length === 0 ? (
-        <div className="flex-1 bg-surface rounded-control border border-line flex items-center justify-center">
+        <div className="flex-1 bg-white rounded-lg border border-gray-200 flex items-center justify-center">
           <EmptyState
-            icon={<IconBroadcast aria-hidden="true" className="w-8 h-8" />}
+            icon={<Radio aria-hidden="true" className="w-16 h-16" />}
             title={t('empty.title')}
             description={t('empty.description')}
           />
         </div>
       ) : (
-        <div className="flex flex-col md:flex-row gap-3 flex-1 overflow-hidden min-h-0">
+        <div className="flex gap-3 flex-1 flex-col md:flex-row overflow-hidden min-h-0">
           {/* Left: Channel List — on narrow screens it becomes a horizontal
               selector strip above the form instead of squeezing the form. */}
           <div
             data-testid="channel-list"
-            className="flex-shrink-0 flex flex-row gap-1.5 overflow-x-auto pb-1 md:w-56 md:flex-col md:overflow-x-visible md:overflow-y-auto md:pb-0 md:pr-0.5"
+            className="flex gap-1.5 flex-shrink-0 flex-row overflow-x-auto pb-1 md:w-56 md:flex-col md:overflow-x-visible md:overflow-y-auto md:pb-0 md:pr-0.5"
           >
             {channels.map((ch) => (
               <ChannelCard
@@ -3703,7 +3708,7 @@ export default function ChannelPage() {
           </div>
 
           {/* Right: Detail Panel */}
-          <div className="flex-1 bg-surface rounded-control shadow-sm border border-line overflow-hidden flex flex-col min-h-0">
+          <div className="flex-1 bg-white rounded-lg shadow-sm border border-gray-200 flex flex-col overflow-hidden min-h-0">
             {selectedMeta && selectedConfig ? (
               <>
                 <DetailHeader
@@ -3789,7 +3794,7 @@ export default function ChannelPage() {
             ) : (
               <div className="h-full flex items-center justify-center">
                 <EmptyState
-                  icon={<IconBroadcast aria-hidden="true" className="w-8 h-8" />}
+                  icon={<Radio aria-hidden="true" className="w-16 h-16" />}
                   title={t('empty.selectChannel')}
                   description={t('empty.selectChannelHint')}
                 />

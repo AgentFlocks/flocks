@@ -243,31 +243,31 @@ describe('Home create WebUI contract page entry', () => {
     expect(
       screen.getByRole('link', { name: 'stats.agentCount' }),
     ).toHaveAttribute('href', '/agents');
-    expect(screen.getByRole('link', { name: 'stats.agentCount' })).toHaveClass('ui-card-interactive');
+    expect(screen.getByRole('link', { name: 'stats.agentCount' })).toHaveClass('hover:border-purple-200');
     expect(
       screen.getByRole('link', { name: 'stats.workflowCount' }),
     ).toHaveAttribute('href', '/workflows');
-    expect(screen.getByRole('link', { name: 'stats.workflowCount' })).toHaveClass('ui-card-interactive');
+    expect(screen.getByRole('link', { name: 'stats.workflowCount' })).toHaveClass('hover:border-teal-200');
     expect(
       screen.getByRole('link', { name: 'stats.skillCount' }),
     ).toHaveAttribute('href', '/skills');
-    expect(screen.getByRole('link', { name: 'stats.skillCount' })).toHaveClass('ui-card-interactive');
+    expect(screen.getByRole('link', { name: 'stats.skillCount' })).toHaveClass('hover:border-green-200');
     expect(
       screen.getByRole('link', { name: 'stats.toolCount' }),
     ).toHaveAttribute('href', '/tools');
-    expect(screen.getByRole('link', { name: 'stats.toolCount' })).toHaveClass('ui-card-interactive');
+    expect(screen.getByRole('link', { name: 'stats.toolCount' })).toHaveClass('hover:border-orange-200');
     expect(
       screen.getByRole('link', { name: 'stats.weeklyTasks' }),
     ).toHaveAttribute('href', '/tasks');
-    expect(screen.getByRole('link', { name: 'stats.weeklyTasks' })).toHaveClass('ui-card-interactive');
+    expect(screen.getByRole('link', { name: 'stats.weeklyTasks' })).toHaveClass('hover:border-amber-200');
     expect(
       screen.getByRole('link', { name: 'stats.activeScheduled' }),
     ).toHaveAttribute('href', '/tasks');
-    expect(screen.getByRole('link', { name: 'stats.activeScheduled' })).toHaveClass('ui-card-interactive');
+    expect(screen.getByRole('link', { name: 'stats.activeScheduled' })).toHaveClass('hover:border-violet-200');
     expect(
       screen.getByRole('link', { name: 'stats.modelCount' }),
     ).toHaveAttribute('href', '/models');
-    expect(screen.getByRole('link', { name: 'stats.modelCount' })).toHaveClass('ui-card-interactive');
+    expect(screen.getByRole('link', { name: 'stats.modelCount' })).toHaveClass('hover:border-pink-200');
     expect(screen.getByText('stats.systemStatus').closest('a')).toBeNull();
   });
 });

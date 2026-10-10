@@ -49,10 +49,10 @@ export default function CommandDropdown({
 
   return (
     <div
-      className="absolute bottom-full left-0 right-0 mb-1 z-50 bg-surface border border-line rounded-lg shadow-lg overflow-hidden"
+      className="absolute bottom-full left-0 right-0 mb-1 bg-white border border-gray-200 rounded-lg shadow-lg z-50 overflow-hidden"
       onMouseDown={(e) => e.preventDefault()}
     >
-      <div className="px-3 py-1.5 text-xs font-semibold text-fg-muted uppercase tracking-wide border-b border-line bg-canvas">
+      <div className="px-3 py-1.5 text-[10px] font-semibold text-gray-400 uppercase tracking-wide border-b border-gray-100 bg-gray-50">
         Slash Commands
       </div>
       <div ref={listRef} className="overflow-y-auto" style={{ maxHeight: '240px' }}>
@@ -61,8 +61,8 @@ export default function CommandDropdown({
             key={cmd.name}
             className={`w-full text-left px-3 py-2 flex items-start gap-2 transition-colors ${
               idx === selectedIndex
-                ? 'bg-danger-soft text-danger'
-                : 'text-fg hover:bg-hover'
+                ? 'bg-red-50 text-red-700'
+                : 'text-gray-800 hover:bg-gray-50'
             }`}
             onClick={() => onSelect(cmd)}
             onMouseDown={(e) => e.preventDefault()}
@@ -70,13 +70,13 @@ export default function CommandDropdown({
             <span className="flex-shrink-0 font-mono text-sm font-semibold min-w-[120px]">
               /{cmd.name}
             </span>
-            <span className="text-xs text-fg-muted leading-relaxed mt-0.5">
+            <span className="text-xs text-gray-500 leading-relaxed mt-0.5">
               {cmd.description}
             </span>
           </button>
         ))}
       </div>
-      <div className="px-3 py-1 text-xs text-fg-muted border-t border-line bg-canvas flex gap-3">
+      <div className="px-3 py-1 text-[10px] text-gray-400 border-t border-gray-100 bg-gray-50 flex gap-3">
         <span><kbd className="font-mono">↑↓</kbd> 导航</span>
         <span><kbd className="font-mono">Enter</kbd>/<kbd className="font-mono">Tab</kbd> 选择</span>
         <span><kbd className="font-mono">Esc</kbd> 关闭</span>

@@ -89,7 +89,7 @@ export default function SessionActionsMenu({
   return createPortal(
     <div
       ref={menuRef}
-      className={`fixed z-50 overflow-x-hidden overflow-y-auto overscroll-contain rounded-card border border-line bg-surface p-1 shadow-overlay ${width === 220 ? 'w-[220px]' : 'w-[132px]'}`}
+      className={`fixed overscroll-contain rounded-[10px] border border-black/[0.11] bg-[#fdfdfc] p-1 shadow-[0_8px_24px_rgba(22,27,34,0.10)] dark:border-white/[0.10] dark:bg-[#303842] dark:shadow-[0_12px_32px_rgba(15,18,22,0.35)] z-50 overflow-x-hidden overflow-y-auto ${width === 220 ? 'w-[220px]' : 'w-[132px]'}`}
       style={{ width, visibility: 'hidden' }}
       data-session-menu-portal
       onClick={(event) => event.stopPropagation()}

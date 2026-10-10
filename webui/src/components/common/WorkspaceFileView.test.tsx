@@ -167,7 +167,7 @@ describe('file view presentation', () => {
       </FileListRow>
     </FileListTable>);
     expect(screen.getByRole('columnheader', { name: 'Name' }).closest('thead')).toHaveClass('sticky', 'top-0');
-    expect(screen.getByText('notes.md').closest('tr')).toHaveClass('bg-subtle');
+    expect(screen.getByText('notes.md').closest('tr')).toHaveClass('bg-slate-100');
     expect(screen.getByRole('button', { name: 'Delete' }).parentElement).toHaveClass('group-hover:opacity-100', 'group-focus-within:opacity-100');
     fireEvent.click(screen.getByRole('button', { name: 'Delete' }));
     expect(onDelete).toHaveBeenCalledOnce();
@@ -179,7 +179,7 @@ describe('file view presentation', () => {
   it('uses the same compact preview header and metadata shell with caller-owned actions', () => {
     render(<PreviewPanelHeader title="notes.md" icon={<span>file</span>} actions={<button>Download</button>} meta={<span>24 B</span>} />);
     expect(screen.getByTitle('notes.md').parentElement).toHaveClass('px-4', 'py-2.5', 'border-b');
-    expect(screen.getByText('24 B').parentElement).toHaveClass('px-4', 'py-1.5', 'bg-subtle');
+    expect(screen.getByText('24 B').parentElement).toHaveClass('px-4', 'py-1.5', 'bg-gray-50');
     expect(screen.getByRole('button', { name: 'Download' })).toBeInTheDocument();
   });
 });

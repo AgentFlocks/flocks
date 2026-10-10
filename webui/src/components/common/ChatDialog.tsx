@@ -5,7 +5,7 @@
  * 会话在用户首次发送消息时才创建，避免空会话污染会话列表。
  */
 import { useEffect, useId, useRef } from 'react';
-import { IconX, IconSparkles } from '@tabler/icons-react';
+import { Sparkles, X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import SessionChat from './SessionChat';
 import { useSessionChat } from '@/hooks/useSessionChat';
@@ -34,7 +34,7 @@ export default function ChatDialog({
   initialPrompt,
   placeholder,
   suggestions,
-  width = 'max-w-modal',
+  width = 'max-w-2xl',
 }: ChatDialogProps) {
   const { t } = useTranslation('common');
   const dialogRef = useRef<HTMLDivElement>(null);
@@ -62,26 +62,26 @@ export default function ChatDialog({
   if (!open) return null;
 
   return (
-    <div className="fixed inset-0 bg-overlay-backdrop flex items-center justify-center z-50" onClick={(event) => { if (event.target === event.currentTarget) onClose(); }}>
-      <div ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby={titleId} tabIndex={-1} data-ui-overlay="dialog" className={`bg-surface rounded-overlay shadow-overlay ${width} w-full mx-4 flex flex-col`} style={{ height: '75vh' }}>
+    <div className="fixed inset-0 bg-gray-600/75 flex items-center justify-center z-50" onClick={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+      <div ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby={titleId} tabIndex={-1} data-ui-overlay="dialog" className={`bg-white rounded-xl shadow-2xl ${width} w-full mx-4 flex flex-col`} style={{ height: '75vh' }}>
         {/* Header */}
-        <div className="px-4 sm:px-6 py-4 border-b border-line flex-shrink-0">
-          <div className="flex items-center justify-between gap-3">
+        <div className="border-b border-gray-200 px-4 sm:px-6 py-4 flex-shrink-0">
+          <div className="flex items-center justify-center">
             <div className="flex items-center gap-3">
-              <div className="w-8 h-8 rounded-control bg-ai-soft text-ai flex items-center justify-center">
-                <IconSparkles aria-hidden="true" className="w-5 h-5" />
+              <div className="w-9 h-9 rounded-lg bg-gradient-to-br from-red-500 to-purple-600 flex items-center justify-center">
+                <Sparkles aria-hidden="true" className="w-5 h-5 text-white" />
               </div>
               <div>
-                <h2 id={titleId} className="text-title-section text-fg">{title}</h2>
-                {subtitle && <p className="text-xs text-fg-muted mt-0.5">{subtitle}</p>}
+                <h2 id={titleId} className="text-lg font-semibold text-gray-900">{title}</h2>
+                {subtitle && <p className="text-xs text-gray-500 mt-0.5">{subtitle}</p>}
               </div>
             </div>
             <button
               onClick={onClose}
               aria-label={t('button.close')}
-              className="ui-btn ui-btn-ghost ui-btn-icon shrink-0 text-fg-muted"
+              className="text-gray-400 hover:text-gray-600 p-1.5 rounded-lg hover:bg-gray-100 transition-colors shrink-0"
             >
-              <IconX aria-hidden="true" className="w-5 h-5" />
+              <X aria-hidden="true" className="w-5 h-5" />
             </button>
           </div>
         </div>
@@ -100,9 +100,9 @@ export default function ChatDialog({
           onCreateAndSend={!sessionId ? (text, imageParts) => createAndSend({ text, imageParts }) : undefined}
           welcomeContent={!sessionId ? (
             <div className="text-center max-w-md">
-              <IconSparkles aria-hidden="true" className="w-8 h-8 text-ai mx-auto mb-3" />
-              <h3 className="text-title-card font-semibold text-fg mb-2">{t('chat.talkToRex')}</h3>
-              <p className="text-sm text-fg-muted">{t('chat.talkToRexHint')}</p>
+              <Sparkles aria-hidden="true" className="w-10 h-10 text-red-500 mb-3 mx-auto" />
+              <h3 className="text-lg font-semibold text-gray-900 mb-2">{t('chat.talkToRex')}</h3>
+              <p className="text-sm text-gray-500">{t('chat.talkToRexHint')}</p>
             </div>
           ) : undefined}
         />

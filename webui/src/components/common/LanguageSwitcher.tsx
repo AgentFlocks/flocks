@@ -1,4 +1,4 @@
-import { IconWorld } from '@tabler/icons-react';
+import { Globe } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 const LANGUAGES = [
@@ -27,10 +27,10 @@ export default function LanguageSwitcher({ collapsed = false }: LanguageSwitcher
     return (
       <button
         onClick={toggleLanguage}
-        className="ui-btn-icon flex items-center justify-center w-8 h-8 rounded-lg text-fg-muted hover:text-fg-secondary hover:bg-hover transition-colors dark:text-fg-muted dark:hover:bg-hover dark:hover:text-fg"
+        className="flex items-center justify-center w-8 h-8 rounded-lg text-zinc-400 hover:text-zinc-600 hover:bg-white/60 transition-colors dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
         title={t('switchLanguage')}
       >
-        <IconWorld aria-hidden="true" className="w-4 h-4" />
+        <Globe aria-hidden="true" className="w-4 h-4" />
       </button>
     );
   }
@@ -43,8 +43,8 @@ export default function LanguageSwitcher({ collapsed = false }: LanguageSwitcher
           onClick={() => handleChange(code)}
           className={`px-2.5 py-1 text-xs font-medium rounded-md transition-colors ${
             currentLang === code
-              ? 'bg-surface text-fg shadow-sm dark:bg-subtle dark:text-fg'
-              : 'text-fg-muted hover:bg-hover hover:text-fg dark:text-fg-muted dark:hover:bg-hover dark:hover:text-fg'
+              ? 'bg-white text-zinc-900 shadow-sm dark:bg-zinc-800 dark:text-zinc-50'
+              : 'text-zinc-500 hover:bg-white/60 hover:text-zinc-800 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100'
           }`}
         >
           {label}

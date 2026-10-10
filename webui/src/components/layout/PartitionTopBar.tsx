@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
 import { Link, useLocation } from 'react-router-dom';
-import { IconSettings, type TablerIcon } from '@tabler/icons-react';
+import { Settings, type LucideIcon } from 'lucide-react';
 import type { NavPartitionId } from '@/utils/navPartitions';
 
 const SETTINGS_MENU_CLOSE_DELAY_MS = 120;
@@ -22,15 +22,15 @@ function menuAnchorOf(button: HTMLElement | null): MenuAnchor {
 export interface PartitionTopBarItem {
   id: NavPartitionId;
   name: string;
-  icon: TablerIcon;
+  icon: LucideIcon;
 }
 
 interface PartitionTopBarProps {
   items: PartitionTopBarItem[];
   activeId: NavPartitionId | null;
   onSelect: (id: NavPartitionId) => void;
-  action?: { href: string; name: string; icon: TablerIcon; active?: boolean; badge?: boolean };
-  settingsGroups?: Array<{ name: string; items: Array<{ name: string; href: string; icon: TablerIcon; external?: boolean }> }>;
+  action?: { href: string; name: string; icon: LucideIcon; active?: boolean; badge?: boolean };
+  settingsGroups?: Array<{ name: string; items: Array<{ name: string; href: string; icon: LucideIcon; external?: boolean }> }>;
 }
 
 /**
@@ -105,7 +105,7 @@ export default function PartitionTopBar({
   // The settings menu does not rely on it: it is portalled to <body> at z-[55],
   // over any z-index a page picks (aside is z-50) and under app dialogs (z-[60]+).
   return (
-    <div data-partition-top-bar className="relative z-[35] flex h-topbar shrink-0 items-center gap-1 border-b border-line bg-subtle pl-16 pr-2 lg:pl-3">
+    <div data-partition-top-bar className="relative flex h-11 items-center gap-1 border-b border-zinc-200 bg-zinc-100 dark:border-zinc-800 dark:bg-zinc-900 z-[35] shrink-0 pl-16 pr-2 lg:pl-3">
       <div className="flex min-w-0 flex-1 items-center gap-1">
       <div
         role="tablist"
@@ -124,13 +124,13 @@ export default function PartitionTopBar({
               aria-current={active ? 'page' : undefined}
               onClick={() => onSelect(item.id)}
               title={item.name}
-              className={`flex h-8 shrink-0 items-center gap-2 rounded-segment px-2 sm:px-3 text-sm transition-colors ${
+              className={`flex h-8 items-center gap-2 rounded-lg text-sm font-semibold transition-colors shrink-0 px-2 sm:px-3 ${
                 active
-                  ? 'bg-selected font-semibold text-fg'
-                  : 'font-medium text-fg-secondary hover:bg-hover hover:text-fg'
+                  ? 'bg-white text-zinc-900 shadow-sm dark:bg-zinc-800 dark:text-zinc-50'
+                  : 'text-zinc-500 hover:bg-white/60 hover:text-zinc-800 dark:text-zinc-400 dark:hover:bg-zinc-800/60 dark:hover:text-zinc-100'
               }`}
             >
-              <Icon aria-hidden="true" className={`hidden h-4 w-4 shrink-0 sm:block ${active ? 'text-fg' : 'text-fg-muted'}`} />
+              <Icon aria-hidden="true" className={`h-4 w-4 hidden shrink-0 sm:block ${active ? 'text-zinc-600 dark:text-zinc-300' : 'text-zinc-400 dark:text-zinc-500'}`} />
               <span className="max-w-36 truncate sm:max-w-56">{item.name}</span>
             </button>
           );
@@ -142,15 +142,15 @@ export default function PartitionTopBar({
           title={action.name}
           aria-current={action.active ? 'page' : undefined}
           aria-label={action.name}
-          className={`inline-flex h-7 shrink-0 items-center gap-1 rounded-md border border-dashed px-2 text-xs font-normal transition-colors ${
+          className={`inline-flex h-7 items-center gap-1 rounded-md border border-dashed px-2 text-xs font-normal transition-colors shrink-0 ${
             action.active
-              ? 'border-line-control text-fg dark:border-line dark:text-fg'
-              : 'border-line-control text-fg-secondary hover:bg-hover hover:text-fg dark:border-line dark:text-fg-secondary dark:hover:bg-hover dark:hover:text-fg'
+              ? 'border-zinc-400 text-zinc-800 dark:border-zinc-600 dark:text-zinc-100'
+              : 'border-zinc-300 text-zinc-500 hover:bg-white/60 hover:text-zinc-800 dark:border-zinc-700 dark:text-zinc-400 dark:hover:bg-zinc-800/60 dark:hover:text-zinc-100'
           }`}
         >
-          <action.icon aria-hidden="true" className="h-4 w-4 shrink-0" />
+          <action.icon aria-hidden="true" className="h-3.5 w-3.5 shrink-0" />
           <span className="whitespace-nowrap">{action.name}</span>
-          {action.badge && <span className="rounded bg-success-soft px-1 text-xs font-semibold leading-4 text-success dark:bg-success-soft dark:text-success">NEW</span>}
+          {action.badge && <span className="rounded bg-emerald-100 px-1 text-[9px] font-semibold leading-4 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300">NEW</span>}
         </Link>
       )}
       </div>
@@ -181,8 +181,8 @@ export default function PartitionTopBar({
             if (settingsOpen) menuRef.current?.querySelector<HTMLElement>('[role="menuitem"]')?.focus();
             else { keyboardOpen.current = true; openSettings(); }
           }}
-          className={`ui-btn-icon flex h-8 w-8 items-center justify-center rounded-lg transition-colors ${activeId === 'settings' ? 'bg-surface text-fg dark:bg-subtle dark:text-fg' : 'text-fg-muted hover:bg-hover dark:text-fg-muted dark:hover:bg-hover'}`}>
-          <IconSettings aria-hidden="true" className="h-4 w-4" />
+          className={`flex h-8 w-8 items-center justify-center rounded-lg transition-colors ${activeId === 'settings' ? 'bg-white text-zinc-900 dark:bg-zinc-800 dark:text-zinc-50' : 'text-zinc-500 hover:bg-white/60 dark:text-zinc-400 dark:hover:bg-zinc-800'}`}>
+          <Settings aria-hidden="true" className="h-4 w-4" />
         </button>
         {settingsOpen && createPortal(
           <div ref={menuRef} data-topbar-settings-layer className="fixed z-[55] pt-1"
@@ -206,11 +206,11 @@ export default function PartitionTopBar({
                 const next = event.key === 'Home' ? 0 : event.key === 'End' ? entries.length - 1 : (index + (event.key === 'ArrowUp' ? -1 : 1) + entries.length) % entries.length;
                 entries[next]?.focus();
               }}
-              className="max-h-[calc(100dvh-3.5rem)] w-60 max-w-[calc(100vw-1rem)] overflow-y-auto rounded-xl border border-line bg-surface p-1.5 shadow-lg dark:border-line dark:bg-surface">
+              className="max-h-[calc(100dvh-3.5rem)] w-60 max-w-[calc(100vw-1rem)] rounded-xl border border-zinc-200 bg-white p-1.5 shadow-lg dark:border-zinc-700 dark:bg-zinc-900 overflow-y-auto">
               {settingsGroups.map((group) => <div key={group.name} role="group" aria-label={group.name}>
-                <p className="px-2 py-1.5 text-xs text-fg-muted">{group.name}</p>
+                <p className="px-2 py-1.5 text-xs text-zinc-400">{group.name}</p>
                 {group.items.map((item) => <Link key={item.href} to={item.href} role="menuitem" target={item.external ? '_blank' : undefined} rel={item.external ? 'noopener noreferrer' : undefined}
-                  onClick={() => setSettingsOpen(false)} className="flex items-center gap-2 rounded-lg px-2 py-2 text-sm text-fg-secondary hover:bg-hover focus:bg-hover dark:text-fg-secondary dark:hover:bg-hover dark:focus:bg-hover">
+                  onClick={() => setSettingsOpen(false)} className="flex items-center gap-2 rounded-lg px-2 py-2 text-sm text-zinc-700 hover:bg-zinc-100 focus:bg-zinc-100 dark:text-zinc-200 dark:hover:bg-zinc-800 dark:focus:bg-zinc-800">
                   <item.icon aria-hidden="true" className="h-4 w-4 shrink-0" /><span>{item.name}</span>
                 </Link>)}
               </div>)}

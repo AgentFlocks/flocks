@@ -1,7 +1,19 @@
 import { useState, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Workflow, WorkflowExecution } from '@/api/workflow';
-import { IconCalendar, IconUser, IconTag, IconActivity, IconClock, IconCircleCheck, IconCircleX, IconStack2, IconChevronDown, IconChevronRight, IconFileText } from '@tabler/icons-react';
+import {
+  Activity,
+  Calendar,
+  CheckCircle,
+  ChevronDown,
+  ChevronRight,
+  Clock,
+  FileText,
+  Layers,
+  Tag,
+  User,
+  XCircle,
+} from 'lucide-react';
 import RunTab from './RunTab';
 
 interface OverviewTabProps {
@@ -14,19 +26,19 @@ interface OverviewTabProps {
 
 function MetaRow({ icon, label, value }: { icon: ReactNode; label: string; value: ReactNode }) {
   return (
-    <div className="flex items-start gap-2.5 py-2.5 border-b border-line last:border-0">
-      <span className="text-fg-muted mt-0.5 flex-shrink-0">{icon}</span>
-      <span className="text-xs text-fg-muted w-16 flex-shrink-0 pt-0.5">{label}</span>
-      <span className="text-xs text-fg font-medium flex-1 break-all">{value}</span>
+    <div className="flex items-start gap-2.5 py-2.5 border-b border-gray-100 last:border-0">
+      <span className="text-gray-400 mt-0.5 flex-shrink-0">{icon}</span>
+      <span className="text-xs text-gray-500 w-16 pt-0.5 flex-shrink-0">{label}</span>
+      <span className="text-xs text-gray-800 font-medium flex-1 break-all">{value}</span>
     </div>
   );
 }
 
 function StatCard({ value, label, color }: { value: string | number; label: string; color: string }) {
   return (
-    <div className="rounded-control border border-line bg-subtle px-2.5 py-2">
-      <div className="text-xs text-fg-muted">{label}</div>
-      <div className={`mt-0.5 text-sm font-semibold tabular-nums ${color}`}>
+    <div className="rounded-md border border-gray-100 bg-gray-50/70 px-2.5 py-2">
+      <div className="text-[11px] leading-4 text-gray-500">{label}</div>
+      <div className={`mt-0.5 text-sm font-semibold leading-5 tabular-nums ${color}`}>
         {value}
       </div>
     </div>
@@ -37,14 +49,14 @@ function WorkflowFileList({ jsonPath, mdPath }: { jsonPath: string; mdPath: stri
   return (
     <div className="space-y-1.5 min-w-0">
       <div className="min-w-0">
-        <span className="text-xs text-fg-muted">workflow.json</span>
-        <code className="block mt-0.5 rounded-tag bg-subtle px-2 py-1 text-xs text-fg-secondary break-all">
+        <span className="text-[11px] text-gray-400">workflow.json</span>
+        <code className="block mt-0.5 rounded bg-gray-50 px-2 py-1 text-[11px] leading-4 text-gray-700 break-all">
           {jsonPath}
         </code>
       </div>
       <div className="min-w-0">
-        <span className="text-xs text-fg-muted">workflow.md</span>
-        <code className="block mt-0.5 rounded-tag bg-subtle px-2 py-1 text-xs text-fg-secondary break-all">
+        <span className="text-[11px] text-gray-400">workflow.md</span>
+        <code className="block mt-0.5 rounded bg-gray-50 px-2 py-1 text-[11px] leading-4 text-gray-700 break-all">
           {mdPath}
         </code>
       </div>
@@ -66,24 +78,24 @@ function CollapsibleSection({
   children: ReactNode;
 }) {
   return (
-    <section className="border-b border-line last:border-b-0">
+    <section className="border-b border-gray-100 last:border-b-0">
       <button
         type="button"
         onClick={onToggle}
-        className="w-full flex items-center justify-between gap-3 px-4 py-3 text-left hover:bg-hover transition-colors"
+        className="w-full flex items-center justify-between gap-3 px-4 py-3 text-left hover:bg-gray-50 transition-colors"
       >
         <div className="min-w-0">
-          <h3 className="text-sm font-semibold text-fg">{title}</h3>
+          <h3 className="text-sm font-semibold text-gray-900">{title}</h3>
           {summary && (
-            <div className="mt-0.5 text-xs text-fg-muted truncate">
+            <div className="mt-0.5 text-xs text-gray-400 truncate">
               {summary}
             </div>
           )}
         </div>
         {expanded ? (
-          <IconChevronDown aria-hidden="true" className="w-4 h-4 text-fg-muted flex-shrink-0" />
+          <ChevronDown aria-hidden="true" className="w-4 h-4 text-gray-400 flex-shrink-0" />
         ) : (
-          <IconChevronRight aria-hidden="true" className="w-4 h-4 text-fg-muted flex-shrink-0" />
+          <ChevronRight aria-hidden="true" className="w-4 h-4 text-gray-400 flex-shrink-0" />
         )}
       </button>
       {expanded && (
@@ -131,7 +143,7 @@ export default function OverviewTab({
   });
 
   return (
-    <div className="h-full overflow-y-auto bg-surface">
+    <div className="h-full bg-white overflow-y-auto">
       <CollapsibleSection
         title={t('detail.overview.configInfo')}
         summary={t('detail.overview.nodesAndEdges', {
@@ -142,9 +154,9 @@ export default function OverviewTab({
         onToggle={() => setConfigExpanded(v => !v)}
       >
         <div className="space-y-4">
-          <div className="divide-y divide-line">
+          <div className="divide-y divide-gray-100">
             <MetaRow
-              icon={<IconStack2 aria-hidden="true" className="w-4 h-4" />}
+              icon={<Layers aria-hidden="true" className="w-3.5 h-3.5" />}
               label={t('detail.overview.nodeCount')}
               value={t('detail.overview.nodesAndEdges', {
                 nodes: workflow.workflowJson.nodes.length,
@@ -152,36 +164,36 @@ export default function OverviewTab({
               })}
             />
             <MetaRow
-              icon={<IconTag aria-hidden="true" className="w-4 h-4" />}
+              icon={<Tag aria-hidden="true" className="w-3.5 h-3.5" />}
               label={t('detail.overview.category')}
               value={workflow.category}
             />
             {workflow.workflowJson.version && (
               <MetaRow
-                icon={<IconActivity aria-hidden="true" className="w-4 h-4" />}
+                icon={<Activity aria-hidden="true" className="w-3.5 h-3.5" />}
                 label={t('detail.overview.version')}
                 value={workflow.workflowJson.version}
               />
             )}
             {workflow.createdBy && (
               <MetaRow
-                icon={<IconUser aria-hidden="true" className="w-4 h-4" />}
+                icon={<User aria-hidden="true" className="w-3.5 h-3.5" />}
                 label={t('detail.overview.createdBy')}
                 value={workflow.createdBy}
               />
             )}
             <MetaRow
-              icon={<IconCalendar aria-hidden="true" className="w-4 h-4" />}
+              icon={<Calendar aria-hidden="true" className="w-3.5 h-3.5" />}
               label={t('detail.overview.createdAt')}
               value={createdAt}
             />
             <MetaRow
-              icon={<IconClock aria-hidden="true" className="w-4 h-4" />}
+              icon={<Clock aria-hidden="true" className="w-3.5 h-3.5" />}
               label={t('detail.overview.updatedAt')}
               value={updatedAt}
             />
             <MetaRow
-              icon={<IconFileText aria-hidden="true" className="w-4 h-4" />}
+              icon={<FileText aria-hidden="true" className="w-3.5 h-3.5" />}
               label={t('detail.overview.workflowFiles')}
               value={(
                 <WorkflowFileList
@@ -201,20 +213,20 @@ export default function OverviewTab({
         onToggle={() => setRunExpanded(v => !v)}
       >
         <div className="mb-3">
-          <h4 className="mb-1.5 text-xs font-semibold text-fg-muted">
+          <h4 className="mb-1.5 text-[11px] font-semibold text-gray-400">
             {t('detail.overview.runStats')}
           </h4>
           <div className="grid grid-cols-2 gap-1.5">
-            <StatCard value={stats.callCount}                   label={t('detail.overview.totalCalls')} color="text-fg" />
-            <StatCard value={`${successRate}%`}                 label={t('detail.overview.successRate')} color="text-success" />
-            <StatCard value={avgRuntime}                        label={t('detail.overview.avgRuntime')} color="text-danger" />
-            <StatCard value={stats.errorCount}                  label={t('detail.overview.errorCount')} color="text-danger" />
+            <StatCard value={stats.callCount}                   label={t('detail.overview.totalCalls')} color="text-gray-900" />
+            <StatCard value={`${successRate}%`}                 label={t('detail.overview.successRate')} color="text-green-600" />
+            <StatCard value={avgRuntime}                        label={t('detail.overview.avgRuntime')} color="text-red-600" />
+            <StatCard value={stats.errorCount}                  label={t('detail.overview.errorCount')} color="text-red-500" />
           </div>
           {stats.callCount > 0 && (
-            <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-fg-muted">
-              <IconCircleCheck aria-hidden="true" className="h-4 w-4 text-success" />
+            <div className="mt-2 flex items-center gap-x-2 gap-y-1 text-[11px] text-gray-500 flex-wrap">
+              <CheckCircle aria-hidden="true" className="h-3 w-3 text-green-500" />
               <span>{t('detail.overview.successTimes', { count: stats.successCount })}</span>
-              <IconCircleX aria-hidden="true" className="h-4 w-4 text-danger" />
+              <XCircle aria-hidden="true" className="h-3 w-3 text-red-400" />
               <span>{t('detail.overview.errorTimes', { count: stats.errorCount })}</span>
             </div>
           )}

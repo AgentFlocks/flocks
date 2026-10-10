@@ -12,7 +12,7 @@
 
 import { useRef } from 'react';
 import { useTranslation } from 'react-i18next';
-import { IconX } from '@tabler/icons-react';
+import { X } from 'lucide-react';
 import { useDialogFocus } from '@/hooks/useDialogFocus';
 
 interface ImageLightboxProps {
@@ -36,7 +36,7 @@ export default function ImageLightbox({ src, alt, onClose }: ImageLightboxProps)
       ref={dialogRef}
       tabIndex={-1}
       data-ui-overlay="dialog"
-      className="fixed inset-0 z-[100] flex items-center justify-center bg-overlay-backdrop backdrop-blur-sm p-6 cursor-zoom-out"
+      className="fixed inset-0 flex items-center justify-center bg-black/80 backdrop-blur-sm p-6 cursor-zoom-out z-[100]"
       onClick={onClose}
       role="dialog"
       aria-modal="true"
@@ -48,10 +48,10 @@ export default function ImageLightbox({ src, alt, onClose }: ImageLightboxProps)
           e.stopPropagation();
           onClose();
         }}
-        className="ui-btn ui-btn-icon absolute top-4 right-4 bg-surface text-fg"
+        className="absolute top-4 right-4 inline-flex items-center justify-center w-10 h-10 rounded-full bg-white/10 text-white hover:bg-white/20 transition-colors"
         aria-label={t('button.close')}
       >
-        <IconX aria-hidden="true" className="w-5 h-5" />
+        <X aria-hidden="true" className="w-5 h-5" />
       </button>
       <img
         src={src}

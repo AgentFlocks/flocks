@@ -1,4 +1,4 @@
-import { IconUserCog } from '@tabler/icons-react';
+import { UserCog } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import PageHeader from '@/components/common/PageHeader';
 import AdminUsersPage from '@/pages/AdminUsers';
@@ -11,10 +11,10 @@ export default function ConfigPage() {
       <PageHeader
         title={t('admin.pageTitle')}
         description={t('admin.pageDescription')}
-        icon={<IconUserCog aria-hidden="true" className="w-8 h-8" />}
+        icon={<UserCog aria-hidden="true" className="w-8 h-8" />}
       />
 
-      <div className="bg-surface rounded-card border border-line shadow-sm p-6">
+      <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-6">
         <AdminUsersPage />
       </div>
     </div>

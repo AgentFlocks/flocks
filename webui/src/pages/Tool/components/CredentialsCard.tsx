@@ -1,12 +1,12 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import {
-  IconShield,
-  IconInfoCircle,
-  IconCircleCheck,
-  IconCircleX,
-  IconRefresh,
-  IconActivity,
-} from '@tabler/icons-react';
+  Activity,
+  CheckCircle,
+  Info,
+  RefreshCw,
+  Shield,
+  XCircle,
+} from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
 import { useToast } from '@/components/common/Toast';
@@ -144,33 +144,33 @@ export default function CredentialsCard({
     }
   };
 
-  const accentBtn = 'bg-action hover:bg-action-hover';
+  const accentBtn = 'bg-red-600 hover:bg-red-700';
 
   if (loading) {
     return (
-      <div className="bg-surface rounded-control border border-line p-4">
+      <div className="bg-white rounded-lg border border-gray-200 p-4">
         <div className="flex justify-center py-4"><LoadingSpinner /></div>
       </div>
     );
   }
 
   return (
-    <div className="bg-surface rounded-control border border-line p-4">
+    <div className="bg-white rounded-lg border border-gray-200 p-4">
       <div className="flex items-center justify-between mb-3">
-        <h4 className="text-sm font-semibold text-fg flex items-center">
-          <IconShield aria-hidden="true" className="w-4 h-4 mr-2 text-fg-muted" />
+        <h4 className="text-sm font-semibold text-gray-900 flex items-center">
+          <Shield aria-hidden="true" className="w-4 h-4 mr-2 text-gray-500" />
           {t('credentials.title')}
         </h4>
         {credentials?.has_credential && !editing && !showDeleteConfirm && (
-          <button onClick={() => setShowDeleteConfirm(true)} className="text-xs text-danger hover:text-danger">
+          <button onClick={() => setShowDeleteConfirm(true)} className="text-xs text-red-600 hover:text-red-700">
             {t('credentials.delete')}
           </button>
         )}
         {showDeleteConfirm && (
           <div className="flex items-center gap-2">
-            <span className="text-xs text-danger">{t('alert.confirmDeleteCred')}</span>
-            <button onClick={handleDelete} className="text-xs text-action-fg bg-action-danger hover:bg-action-danger px-2 py-0.5 rounded-tag">{t('button.yes')}</button>
-            <button onClick={() => setShowDeleteConfirm(false)} className="text-xs text-fg-secondary hover:text-fg">{t('button.cancel')}</button>
+            <span className="text-xs text-red-600">{t('alert.confirmDeleteCred')}</span>
+            <button onClick={handleDelete} className="text-xs text-white bg-red-600 hover:bg-red-700 px-2 py-0.5 rounded">{t('button.yes')}</button>
+            <button onClick={() => setShowDeleteConfirm(false)} className="text-xs text-gray-600 hover:text-gray-800">{t('button.cancel')}</button>
           </div>
         )}
       </div>
@@ -179,21 +179,21 @@ export default function CredentialsCard({
         <div className="space-y-3">
           {credentials?.has_credential && credentials.secret_id && (
             <div className="flex items-center justify-between">
-              <span className="text-sm text-fg-muted">Secret ID</span>
-              <code className="text-sm font-mono bg-subtle px-2 py-1 rounded-tag">{credentials.secret_id}</code>
+              <span className="text-sm text-gray-500">Secret ID</span>
+              <code className="text-sm font-mono bg-gray-100 px-2 py-1 rounded">{credentials.secret_id}</code>
             </div>
           )}
           {credentials?.api_key_masked && (
             <div className="flex items-center justify-between">
-              <span className="text-sm text-fg-muted">API Key</span>
-              <code className="text-sm font-mono bg-subtle px-2 py-1 rounded-tag">{credentials.api_key_masked}</code>
+              <span className="text-sm text-gray-500">API Key</span>
+              <code className="text-sm font-mono bg-gray-100 px-2 py-1 rounded">{credentials.api_key_masked}</code>
             </div>
           )}
 
           <div className="flex gap-2 pt-2">
             <button
               onClick={() => setEditing(true)}
-              className="flex-1 px-3 py-2 border border-line-control rounded-control text-sm text-fg-secondary hover:bg-hover"
+              className="flex-1 px-3 py-2 border border-gray-300 rounded-lg text-sm text-gray-700 hover:bg-gray-50"
             >
               {credentials?.has_credential ? t('credentials.modify') : t('credentials.configure')}
             </button>
@@ -201,16 +201,16 @@ export default function CredentialsCard({
               <button
                 onClick={handleTest}
                 disabled={testing}
-                className={`flex-1 flex items-center justify-center gap-1.5 px-3 py-2 border rounded-control text-sm transition-colors ${
+                className={`flex-1 flex items-center justify-center gap-1.5 px-3 py-2 border rounded-lg text-sm transition-colors ${
                   testing
-                    ? 'border-danger bg-danger-soft text-danger cursor-not-allowed'
-                    : 'border-line-control text-fg-secondary hover:bg-hover'
+                    ? 'border-red-300 bg-red-50 text-red-600 cursor-not-allowed'
+                    : 'border-gray-300 text-gray-700 hover:bg-gray-50'
                 }`}
               >
                 {testing ? (
-                  <><IconRefresh aria-hidden="true" className="w-4 h-4 animate-spin" />{t('credentials.testing')}</>
+                  <><RefreshCw aria-hidden="true" className="w-3.5 h-3.5 animate-spin" />{t('credentials.testing')}</>
                 ) : (
-                  <><IconActivity aria-hidden="true" className="w-4 h-4" />{t('credentials.testConn')}</>
+                  <><Activity aria-hidden="true" className="w-3.5 h-3.5" />{t('credentials.testConn')}</>
                 )}
               </button>
             )}
@@ -218,22 +218,22 @@ export default function CredentialsCard({
 
           {/* Testing progress (optional timer) */}
           {testing && showTimer && (
-            <div className="p-3 rounded-control border border-danger bg-danger-soft text-danger">
+            <div className="p-3 rounded-lg border border-red-200 bg-red-50 text-red-700">
               <div className="flex items-center">
                 <div className="relative mr-3">
-                  <div className="w-8 h-8 rounded-pill border-2 border-danger border-t-danger animate-spin" />
+                  <div className="w-8 h-8 rounded-full border-2 border-red-200 border-t-red-600 animate-spin" />
                 </div>
                 <div className="flex-1">
                   <div className="text-sm font-medium">{t('credentials.testingProgress')}</div>
-                  <div className="text-xs mt-0.5 text-danger">
+                  <div className="text-xs mt-0.5 text-red-600">
                     {t('credentials.testingWait')}
                     <span className="ml-2 font-mono tabular-nums">{testElapsed.toFixed(1)}s</span>
                   </div>
                 </div>
               </div>
-              <div className="mt-2.5 h-1 bg-danger-soft rounded-pill overflow-hidden">
+              <div className="mt-2.5 h-1 bg-red-100 rounded-full overflow-hidden">
                 <div
-                  className="h-full bg-danger rounded-pill animate-pulse"
+                  className="h-full bg-red-500 rounded-full animate-pulse"
                   style={{ width: `${Math.min(95, testElapsed * 8)}%`, transition: 'width 0.3s ease-out' }}
                 />
               </div>
@@ -242,22 +242,22 @@ export default function CredentialsCard({
 
           {/* Test result */}
           {!testing && testResult && (
-            <div className={`p-2.5 rounded-tag text-xs ${
+            <div className={`p-2.5 rounded text-xs ${
               testResult.success
-                ? 'bg-success-soft border border-success text-success'
-                : 'bg-danger-soft border border-danger text-danger'
+                ? 'bg-green-50 border border-green-200 text-green-700'
+                : 'bg-red-50 border border-red-200 text-red-700'
             }`}>
               <div className="flex items-start">
                 {testResult.success
-                  ? <IconCircleCheck aria-hidden="true" className="w-4 h-4 mr-1.5 mt-0.5 flex-shrink-0" />
-                  : <IconCircleX aria-hidden="true" className="w-4 h-4 mr-1.5 mt-0.5 flex-shrink-0" />}
+                  ? <CheckCircle aria-hidden="true" className="w-3.5 h-3.5 mr-1.5 mt-0.5 flex-shrink-0" />
+                  : <XCircle aria-hidden="true" className="w-3.5 h-3.5 mr-1.5 mt-0.5 flex-shrink-0" />}
                 <div className="flex-1">
                   <div>{testResult.message}</div>
                   {testResult.latency_ms != null && (
-                    <div className="mt-1 text-fg-muted">{t('credentials.latency')}: {testResult.latency_ms}ms</div>
+                    <div className="mt-1 opacity-75">{t('credentials.latency')}: {testResult.latency_ms}ms</div>
                   )}
                   {testResult.tool_tested && (
-                    <div className="mt-1 text-fg-muted">{t('credentials.toolTested')}: {testResult.tool_tested}</div>
+                    <div className="mt-1 opacity-75">{t('credentials.toolTested')}: {testResult.tool_tested}</div>
                   )}
                 </div>
               </div>
@@ -267,33 +267,33 @@ export default function CredentialsCard({
       ) : (
         <div className="space-y-3">
           <div>
-            <label className="block text-xs text-fg-muted mb-1.5">API Key</label>
+            <label className="block text-xs text-gray-500 mb-1.5">API Key</label>
             <input
               type="password"
               value={apiKey}
               onChange={(e) => setApiKey(e.target.value)}
               placeholder={t('credentials.apiKeyPlaceholder')}
-              className={`w-full px-3 py-2 border border-line-control rounded-control text-sm font-mono `}
+              className={`w-full px-3 py-2 border border-gray-300 rounded-lg text-sm font-mono focus:outline-none focus:ring-2 `}
             />
           </div>
           <div className="flex gap-2 pt-2">
             <button
               onClick={handleSave}
               disabled={saving}
-              className={`flex-1 px-3 py-2 ${accentBtn} text-action-fg rounded-control text-sm disabled:bg-disabled disabled:text-fg-disabled`}
+              className={`flex-1 px-3 py-2 ${accentBtn} text-white rounded-lg text-sm disabled:opacity-50`}
             >
               {saving ? t('credentials.saving') : t('credentials.save')}
             </button>
             <button
               onClick={() => { setEditing(false); setApiKey(''); }}
-              className="px-3 py-2 border border-line-control rounded-control text-sm text-fg-secondary hover:bg-hover"
+              className="px-3 py-2 border border-gray-300 rounded-lg text-sm text-gray-700 hover:bg-gray-50"
             >
               {t('button.cancel')}
             </button>
           </div>
-          <div className="p-2 bg-warning-soft border border-warning rounded-tag text-xs text-warning">
+          <div className="p-2 bg-amber-50 border border-amber-200 rounded text-xs text-amber-700">
             <div className="flex items-start">
-              <IconInfoCircle aria-hidden="true" className="w-4 h-4 mr-1.5 mt-0.5 flex-shrink-0" />
+              <Info aria-hidden="true" className="w-3.5 h-3.5 mr-1.5 mt-0.5 flex-shrink-0" />
               <div>{t('credentials.storageNote')}</div>
             </div>
           </div>

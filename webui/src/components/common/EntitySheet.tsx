@@ -15,17 +15,17 @@
 import { lazy, Suspense, useState, useEffect, useRef, useId, useCallback, createContext, useContext } from 'react';
 import { useDialogFocus } from '@/hooks/useDialogFocus';
 import {
-  IconX,
-  IconFileText,
-  IconMessage,
-  IconLoader2,
-  IconAlertCircle,
-  IconArrowRight,
-  IconTestPipe,
-  IconSend,
-  IconRotate,
-  IconGripVertical,
-} from '@tabler/icons-react';
+  AlertCircle,
+  ArrowRight,
+  FileText,
+  GripVertical,
+  Loader2,
+  MessageSquare,
+  RotateCcw,
+  Send,
+  TestTube,
+  X,
+} from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import client from '@/api/client';
 import { buildInstructionDisplayText, type SessionChatDisplay } from '@/features/session-chat';
@@ -45,8 +45,8 @@ const LazySessionChat = lazy(() => import('./SessionChat'));
 
 function ChatPanelFallback() {
   return (
-    <div className="flex h-full items-center justify-center text-fg-muted">
-      <IconLoader2 aria-hidden="true" className="h-4 w-4 animate-spin" />
+    <div className="flex h-full items-center justify-center text-gray-400">
+      <Loader2 aria-hidden="true" className="h-4 w-4 animate-spin" />
     </div>
   );
 }
@@ -522,7 +522,7 @@ export default function EntitySheet({
   return (
     <EntitySheetContext.Provider value={{ openRex, openTest }}>
       {/* Backdrop */}
-      <div className="fixed inset-0 bg-overlay-backdrop z-40" onClick={submitLoading ? undefined : onClose} />
+      <div className="fixed inset-0 bg-black/40 z-40" onClick={submitLoading ? undefined : onClose} />
 
       {/* Drawer */}
       <div
@@ -533,42 +533,42 @@ export default function EntitySheet({
         aria-labelledby={headingId}
         data-ui-overlay="drawer"
         data-testid="entity-sheet-drawer"
-        className="fixed right-0 top-0 bottom-0 z-50 flex flex-col bg-surface shadow-2xl transition-colors"
+        className="fixed right-0 top-0 bottom-0 flex flex-col bg-white shadow-2xl transition-colors z-50"
         style={{ width: narrowViewport ? '100%' : drawerWidth, maxWidth: '100%' }}
       >
         {/* Drag handle (desktop only: a full-width sheet has nothing to resize against) */}
         {!narrowViewport && (
           <div
-            className={`absolute left-0 top-0 bottom-0 w-1 cursor-ew-resize hover:bg-action-hover transition-colors ${
-              isDragging ? 'bg-action' : ''
+            className={`absolute left-0 top-0 bottom-0 w-1 cursor-ew-resize hover:bg-red-400 transition-colors ${
+              isDragging ? 'bg-red-500' : ''
             }`}
             onMouseDown={handleDragStart}
           >
             <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2">
-              <IconGripVertical aria-hidden="true" className="w-4 h-6 text-fg hover:text-fg-muted" />
+              <GripVertical aria-hidden="true" className="w-3 h-6 text-gray-300 hover:text-gray-500" />
             </div>
           </div>
         )}
         {/* ── Header ── */}
-        <div className="flex-shrink-0 border-b border-line">
+        <div className="border-b border-gray-200 flex-shrink-0">
           <div className="flex items-center gap-3 px-6 py-4">
-            {icon && <div className="text-fg-muted flex-shrink-0">{icon}</div>}
-            <h2 id={headingId} className="text-title-section text-fg flex-1 min-w-0 break-words">
+            {icon && <div className="text-gray-500 flex-shrink-0">{icon}</div>}
+            <h2 id={headingId} className="text-lg font-semibold text-gray-900 flex-1 min-w-0 break-words">
               {title}
             </h2>
             <button
               onClick={onClose}
               disabled={submitLoading}
               aria-label={t('button.close')}
-              className="ui-btn ui-btn-ghost ui-btn-icon flex-shrink-0"
+              className="p-1 rounded hover:bg-gray-100 transition-colors flex-shrink-0"
             >
-              <IconX aria-hidden="true" className="w-5 h-5 text-fg-muted" />
+              <X aria-hidden="true" className="w-5 h-5 text-gray-400" />
             </button>
           </div>
 
           {/* Tabs */}
           {showTabs && (
-            <div className="ui-tabs w-full px-6" role="tablist" aria-label={title} onKeyDown={(event) => {
+            <div className="flex w-full px-6" role="tablist" aria-label={title} onKeyDown={(event) => {
               if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
               const tabs = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="tab"]'));
               const current = tabs.indexOf(document.activeElement as HTMLButtonElement);
@@ -581,7 +581,7 @@ export default function EntitySheet({
                 <SheetTab
                   active={activeTab === 'form'}
                   onClick={() => handleTabChange('form')}
-                  icon={<IconFileText aria-hidden="true" className="w-4 h-4" />}
+                  icon={<FileText aria-hidden="true" className="w-3.5 h-3.5" />}
                 >
                   {t('entity.tabDetails')}
                 </SheetTab>
@@ -590,7 +590,7 @@ export default function EntitySheet({
                 <SheetTab
                   active={activeTab === 'rex'}
                   onClick={() => handleTabChange('rex')}
-                  icon={<IconMessage aria-hidden="true" className="w-4 h-4" />}
+                  icon={<MessageSquare aria-hidden="true" className="w-3.5 h-3.5" />}
                 >
                   {t('entity.tabAIEdit')}
                 </SheetTab>
@@ -599,7 +599,7 @@ export default function EntitySheet({
                 <SheetTab
                   active={activeTab === 'test'}
                   onClick={() => setActiveTab('test')}
-                  icon={<IconTestPipe aria-hidden="true" className="w-4 h-4" />}
+                  icon={<TestTube aria-hidden="true" className="w-3.5 h-3.5" />}
                 >
                   {t('entity.tabTest')}
                 </SheetTab>
@@ -635,34 +635,34 @@ export default function EntitySheet({
                   />
                 </Suspense>
               ) : (
-                <div className="flex-1 min-h-0 overflow-y-auto bg-canvas px-4 py-4 flex flex-col items-center justify-center gap-2">
+                <div className="flex-1 bg-gray-50 px-4 py-4 flex flex-col items-center justify-center gap-2 min-h-0 overflow-y-auto">
                   {testError ? (
-                    <div className="flex items-center gap-2 text-sm text-danger bg-danger-soft border border-danger rounded-lg px-4 py-3 w-full">
-                      <IconAlertCircle aria-hidden="true" className="w-4 h-4 flex-shrink-0" />
+                    <div className="flex items-center gap-2 text-sm text-red-600 bg-red-50 border border-red-200 rounded-lg px-4 py-3 w-full">
+                      <AlertCircle aria-hidden="true" className="w-4 h-4 flex-shrink-0" />
                       {testError}
                     </div>
                   ) : (
                     <>
-                      <IconTestPipe aria-hidden="true" className="w-8 h-8 text-fg" />
-                      <p className="text-sm text-fg-muted">{t('entity.editAndSend')}</p>
+                      <TestTube aria-hidden="true" className="w-8 h-8 text-gray-300" />
+                      <p className="text-sm text-gray-400">{t('entity.editAndSend')}</p>
                     </>
                   )}
                 </div>
               )}
 
               {/* Input bar */}
-              <div className="flex-shrink-0 border-t border-line bg-surface px-4 py-3">
+              <div className="border-t border-gray-200 bg-white px-4 py-3 flex-shrink-0">
                 {testSessionId ? (
                   <button
                     onClick={handleResetTest}
-                    className="flex items-center gap-1.5 text-sm text-fg-muted hover:text-fg-secondary transition-colors"
+                    className="flex items-center gap-1.5 text-sm text-gray-500 hover:text-gray-700 transition-colors"
                   >
-                    <IconRotate aria-hidden="true" className="w-4 h-4" />
+                    <RotateCcw aria-hidden="true" className="w-3.5 h-3.5" />
                     {t('entity.reTest')}
                   </button>
                 ) : (
                   <div className="flex items-end gap-2">
-                    <div className="flex-1 border border-line-control rounded-lg px-3 py-2 focus-within:border-danger focus-within:ring-2 focus-within:ring-focus transition-all bg-surface">
+                    <div className="flex-1 border border-gray-300 rounded-lg px-3 py-2 focus-within:border-red-500 focus-within:ring-2 focus-within:ring-red-100 transition-all bg-white">
                       <textarea
                         ref={testTextareaRef}
                         value={testPrompt}
@@ -676,7 +676,7 @@ export default function EntitySheet({
                           }
                         }}
                         placeholder={t('entity.testInputPlaceholder')}
-                        className="w-full resize-none outline-none text-sm text-fg placeholder-fg-placeholder"
+                        className="w-full resize-none outline-none text-sm text-gray-900 placeholder-gray-400"
                         style={{ minHeight: '24px', maxHeight: '96px' }}
                         rows={1}
                         disabled={testLoading}
@@ -685,9 +685,9 @@ export default function EntitySheet({
                     <button
                       onClick={handleRunTest}
                       disabled={testLoading || !testPrompt.trim()}
-                      className="flex-shrink-0 px-3 py-2 h-[40px] bg-action text-action-fg rounded-lg hover:bg-action-hover disabled:bg-disabled disabled:text-fg-disabled disabled:cursor-not-allowed flex items-center gap-1 text-sm transition-colors"
+                      className="px-3 py-2 h-[40px] bg-red-600 text-white rounded-lg hover:bg-red-700 disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-1 text-sm transition-colors flex-shrink-0"
                     >
-                      {testLoading ? <IconLoader2 aria-hidden="true" className="w-4 h-4 animate-spin" /> : <IconSend aria-hidden="true" className="w-4 h-4" />}
+                      {testLoading ? <Loader2 aria-hidden="true" className="w-4 h-4 animate-spin" /> : <Send aria-hidden="true" className="w-4 h-4" />}
                     </button>
                   </div>
                 )}
@@ -700,21 +700,21 @@ export default function EntitySheet({
             <div className="h-full flex flex-col">
               {sessionError && (
                 <div className="flex flex-col items-center justify-center flex-1 gap-4 p-6 text-center">
-                  <div className="flex items-center gap-2 text-sm text-danger bg-danger-soft border border-danger rounded-lg px-4 py-3 w-full">
-                    <IconAlertCircle aria-hidden="true" className="w-4 h-4 flex-shrink-0" />
+                  <div className="flex items-center gap-2 text-sm text-red-600 bg-red-50 border border-red-200 rounded-lg px-4 py-3 w-full">
+                    <AlertCircle aria-hidden="true" className="w-4 h-4 flex-shrink-0" />
                     {sessionError}
                   </div>
                   <button
                     onClick={retryRexSession}
-                    className="px-4 py-2 bg-action text-action-fg text-sm rounded-lg hover:bg-action-hover transition-colors"
+                    className="px-4 py-2 bg-red-600 text-white text-sm rounded-lg hover:bg-red-700 transition-colors"
                   >
                     {t('entity.rexRetry')}
                   </button>
                 </div>
               )}
               {!sessionError && !rexSessionHydrated && (
-                <div className="flex items-center justify-center flex-1 text-sm text-fg-muted gap-2">
-                  <IconLoader2 aria-hidden="true" className="w-4 h-4 animate-spin" />
+                <div className="flex items-center justify-center flex-1 text-sm text-gray-400 gap-2">
+                  <Loader2 aria-hidden="true" className="w-4 h-4 animate-spin" />
                   {t('entity.startingRex')}
                 </div>
               )}
@@ -752,7 +752,7 @@ export default function EntitySheet({
                       hasRexGuideActions ? (
                         <GuidedCreatePanel
                           emptyTitle={rexGuideEmptyTitle ?? t('entity.rexReady')}
-                          icon={rexGuideIcon ?? <IconMessage aria-hidden="true" className="h-5 w-5" />}
+                          icon={rexGuideIcon ?? <MessageSquare aria-hidden="true" className="h-5 w-5" />}
                           title={rexGuidePanelTitle ?? t('entity.rexAssist')}
                           description={rexGuidePanelDesc ?? t('entity.rexReady')}
                           groups={rexWelcomeGuideGroups}
@@ -760,9 +760,9 @@ export default function EntitySheet({
                         />
                       ) : (
                         <div className="text-center max-w-md">
-                          <IconMessage aria-hidden="true" className="w-8 h-8 text-danger mx-auto mb-3" />
-                          <h3 className="text-title-card font-semibold text-fg mb-2">{t('entity.rexAssist')}</h3>
-                          <p className="text-sm text-fg-muted">{t('entity.rexReady')}</p>
+                          <MessageSquare aria-hidden="true" className="w-10 h-10 text-red-500 mb-3 mx-auto" />
+                          <h3 className="text-lg font-semibold text-gray-900 mb-2">{t('entity.rexAssist')}</h3>
+                          <p className="text-sm text-gray-500">{t('entity.rexReady')}</p>
                         </div>
                       )
                     )}
@@ -795,7 +795,7 @@ export default function EntitySheet({
 
         {/* ── Footer ── */}
         {(!showTabs || activeTab === 'form') && (
-          <div className="flex-shrink-0 border-t border-line bg-surface px-6 py-4">
+          <div className="border-t border-gray-200 bg-white px-6 py-4 flex-shrink-0">
             <div className="flex items-center justify-between gap-3">
               {/* Left: custom footer element and/or test button */}
               <div className="flex items-center gap-2">
@@ -803,9 +803,9 @@ export default function EntitySheet({
                 {onRunTest && !hideTest && (
                   <button
                     onClick={() => setActiveTab('test')}
-                    className="flex items-center gap-1.5 text-sm text-fg-muted border border-line-control rounded-lg px-3 py-1.5 hover:bg-hover transition-colors"
+                    className="flex items-center gap-1.5 text-sm text-gray-500 border border-gray-300 rounded-lg px-3 py-1.5 hover:bg-gray-50 transition-colors"
                   >
-                    <IconTestPipe aria-hidden="true" className="w-4 h-4" />
+                    <TestTube aria-hidden="true" className="w-3.5 h-3.5" />
                     {t('entity.testButton')}
                   </button>
                 )}
@@ -825,10 +825,10 @@ export default function EntitySheet({
 
         {/* ── Rex tab footer: extract / switch actions only ── */}
         {showRexFooter && (
-          <div className="flex-shrink-0 border-t border-line bg-surface px-6 py-3">
+          <div className="border-t border-gray-200 bg-white px-6 py-3 flex-shrink-0">
             {extractError && (
-              <p className="text-xs text-danger mb-2 flex items-center gap-1">
-                <IconAlertCircle aria-hidden="true" className="w-4 h-4" />
+              <p className="text-xs text-red-500 mb-2 flex items-center gap-1">
+                <AlertCircle aria-hidden="true" className="w-3 h-3" />
                 {extractError}
               </p>
             )}
@@ -837,9 +837,9 @@ export default function EntitySheet({
                 {!onExtractFromRex && activeRexSessionId && hasFormTab ? (
                   <button
                     onClick={() => setActiveTab('form')}
-                    className="flex items-center gap-1.5 text-sm text-fg-muted hover:text-fg-secondary transition-colors"
+                    className="flex items-center gap-1.5 text-sm text-gray-500 hover:text-gray-700 transition-colors"
                   >
-                    <IconArrowRight aria-hidden="true" className="w-4 h-4" />
+                    <ArrowRight aria-hidden="true" className="w-4 h-4" />
                     {t('entity.switchToForm')}
                   </button>
                 ) : null}
@@ -885,16 +885,16 @@ function SubmitButtons({
       <button
         onClick={onClose}
         disabled={submitLoading}
-        className="px-4 py-2 text-sm text-fg-secondary bg-subtle rounded-lg hover:bg-hover disabled:bg-disabled disabled:text-fg-disabled transition-colors"
+        className="px-4 py-2 text-sm text-gray-700 bg-gray-100 rounded-lg hover:bg-gray-200 disabled:opacity-50 transition-colors"
       >
         {cancelLabel}
       </button>
       <button
         onClick={onSubmit}
         disabled={submitDisabled || submitLoading}
-        className="px-4 py-2 text-sm bg-action text-action-fg rounded-lg hover:bg-action-hover disabled:bg-disabled disabled:text-fg-disabled disabled:cursor-not-allowed flex items-center gap-2 transition-colors"
+        className="px-4 py-2 text-sm bg-red-600 text-white rounded-lg hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2 transition-colors"
       >
-        {submitLoading && <IconLoader2 aria-hidden="true" className="w-4 h-4 animate-spin" />}
+        {submitLoading && <Loader2 aria-hidden="true" className="w-4 h-4 animate-spin" />}
         {submitLabel}
       </button>
     </div>
@@ -920,7 +920,11 @@ function SheetTab({
       role="tab"
       aria-selected={active}
       tabIndex={active ? 0 : -1}
-      className="ui-tab flex min-w-0 flex-1 items-center justify-center gap-2"
+      className={`flex min-w-0 flex-1 items-center justify-center gap-1.5 px-3 py-2.5 text-sm font-medium border-b-2 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-red-100 ${
+        active
+          ? 'border-red-600 text-red-600'
+          : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+      }`}
     >
       <span className="shrink-0">{icon}</span>
       <span className="truncate">{children}</span>

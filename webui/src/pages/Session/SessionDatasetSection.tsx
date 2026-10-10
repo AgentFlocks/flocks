@@ -2,13 +2,13 @@ import { Component, Suspense, useEffect, useRef, useState, type ReactNode } from
 import { useTranslation } from 'react-i18next';
 import { Link, useInRouterContext } from 'react-router-dom';
 import {
-  IconArrowRight,
-  IconCheck,
-  IconDatabase,
-  IconPlus,
-  IconRefresh,
-  IconX,
-} from '@tabler/icons-react';
+  ArrowRight,
+  Check,
+  Database,
+  Plus,
+  RefreshCw,
+  X,
+} from 'lucide-react';
 import { knowledgebaseAPI, type Dataset, type SessionDatasets } from '@/api/knowledgebase';
 import { useOptionalToast } from '@/components/common/Toast';
 import { Modal } from '@/pages/Workspace/knowledge/ui';
@@ -30,7 +30,7 @@ class DatasetBoundary extends Component<{ children: ReactNode; resetKey: number 
 
 function BoundaryFallback({ onRetry }: { onRetry: () => void }) {
   const { t } = useTranslation('session');
-  return <div role="alert" className="space-y-2 text-xs text-fg-muted"><p>{t('dataset.renderFailed')}</p><button type="button" className={buttonClass} onClick={onRetry}>{t('dataset.retry')}</button></div>;
+  return <div role="alert" className="space-y-2 text-xs text-zinc-500"><p>{t('dataset.renderFailed')}</p><button type="button" className={buttonClass} onClick={onRetry}>{t('dataset.retry')}</button></div>;
 }
 
 function rows(binding: SessionDatasets, catalog: Dataset[]): Dataset[] {
@@ -144,13 +144,13 @@ function DatasetBody({ sessionId }: { sessionId: string }) {
   const options = picking ? pickerRows(binding, catalog, draft) : [];
   const fileCount = (item: Dataset) => typeof item.document_count === 'number' && Number.isInteger(item.document_count) && item.document_count >= 0
     ? t('dataset.fileCount', { count: item.document_count }) : t('dataset.fileCountUnknown');
-  const manageLabel = <>{t('dataset.manage')}<IconArrowRight aria-hidden="true" /></>;
+  const manageLabel = <>{t('dataset.manage')}<ArrowRight aria-hidden="true" /></>;
   return <section aria-label={t('dataset.title')} className="session-knowledge">
     <div className="session-knowledge-heading">
-      <IconDatabase aria-hidden="true" className="h-4 w-4 text-fg-muted dark:text-fg-muted" />
-      <h3 className="truncate text-xs font-semibold text-fg-secondary dark:text-fg-secondary">{t('dataset.title')}</h3>
-      {binding && <span className="rounded bg-subtle px-1.5 py-0.5 text-xs text-fg-muted dark:bg-subtle dark:text-fg-muted">{binding.dataset_ids.length}</span>}
-      <button type="button" className="session-knowledge-icon-button" aria-label={t('dataset.refresh')} title={t('dataset.refresh')} disabled={loading || saving} onClick={() => void load()}><IconRefresh aria-hidden="true" /></button>
+      <Database aria-hidden="true" className="h-4 w-4 text-zinc-500 dark:text-zinc-400" />
+      <h3 className="text-xs font-semibold text-zinc-700 dark:text-zinc-200 truncate">{t('dataset.title')}</h3>
+      {binding && <span className="rounded bg-zinc-100 px-1.5 py-0.5 text-[10px] text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400">{binding.dataset_ids.length}</span>}
+      <button type="button" className="session-knowledge-icon-button" aria-label={t('dataset.refresh')} title={t('dataset.refresh')} disabled={loading || saving} onClick={() => void load()}><RefreshCw aria-hidden="true" /></button>
     </div>
     <p className="session-knowledge-hint">{t('dataset.scope')}</p>
     {loading && <p role="status" className="session-knowledge-message">{t('dataset.loading')}</p>}
@@ -159,18 +159,18 @@ function DatasetBody({ sessionId }: { sessionId: string }) {
     {binding && <>
       {selected.length === 0 && <p className="session-knowledge-empty">{t('dataset.empty')}</p>}
       <ul className="session-knowledge-cards">{selected.map(item => <li key={item.id} className="session-knowledge-card">
-        <span className="session-knowledge-avatar"><IconDatabase aria-hidden="true" /></span>
+        <span className="session-knowledge-avatar"><Database aria-hidden="true" /></span>
         <div className="session-knowledge-card-body">
           <strong title={item.name}>{item.name}</strong>
           <div className="session-knowledge-card-meta">
             <span>{fileCount(item)}</span>
-            <span className="session-knowledge-saved"><IconCheck aria-hidden="true" />{t('dataset.addedToSession')}</span>
+            <span className="session-knowledge-saved"><Check aria-hidden="true" />{t('dataset.addedToSession')}</span>
           </div>
         </div>
-        <button type="button" className="session-knowledge-icon-button" aria-label={t('dataset.remove', { name: item.name })} title={t('dataset.remove', { name: item.name })} onClick={() => openPicker(binding.dataset_ids.filter(id => id !== item.id), true)}><IconX aria-hidden="true" /></button>
+        <button type="button" className="session-knowledge-icon-button" aria-label={t('dataset.remove', { name: item.name })} title={t('dataset.remove', { name: item.name })} onClick={() => openPicker(binding.dataset_ids.filter(id => id !== item.id), true)}><X aria-hidden="true" /></button>
       </li>)}</ul>
       <div className="session-knowledge-actions">
-        <button type="button" className={buttonClass} onClick={() => openPicker(binding.dataset_ids, false)}><IconPlus aria-hidden="true" />{t('dataset.select')}</button>
+        <button type="button" className={buttonClass} onClick={() => openPicker(binding.dataset_ids, false)}><Plus aria-hidden="true" />{t('dataset.select')}</button>
         {inRouter ? <Link className="session-knowledge-manage" to="/workspace?tab=knowledge">{manageLabel}</Link> : <a className="session-knowledge-manage" href="/workspace?tab=knowledge">{manageLabel}</a>}
       </div>
     </>}
@@ -180,7 +180,7 @@ function DatasetBody({ sessionId }: { sessionId: string }) {
         <div className="session-knowledge-options">
           {options.map(item => <label key={item.id} className={`session-knowledge-choice${draft.includes(item.id) ? ' is-selected' : ''}`}>
             <input type="checkbox" aria-label={item.name} disabled={saving} checked={draft.includes(item.id)} onChange={() => { edited.current = true; setDraft(current => current.includes(item.id) ? current.filter(id => id !== item.id) : [...current, item.id]); }} />
-            <IconDatabase aria-hidden="true" /><span>{item.name}</span><small>{fileCount(item)}</small>
+            <Database aria-hidden="true" /><span>{item.name}</span><small>{fileCount(item)}</small>
           </label>)}
         </div>
         <div className="session-knowledge-picker-actions">
@@ -194,7 +194,7 @@ function DatasetBody({ sessionId }: { sessionId: string }) {
 
 function DatasetLoading() {
   const { t } = useTranslation('session');
-  return <p role="status" className="border-t border-line px-3 py-3 text-xs text-fg-muted dark:border-line">{t('dataset.loading')}</p>;
+  return <p role="status" className="border-t border-zinc-200 px-3 py-3 text-xs text-zinc-500 dark:border-zinc-800">{t('dataset.loading')}</p>;
 }
 
 export default function SessionDatasetSection({ sessionId }: { sessionId: string }) {

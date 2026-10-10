@@ -6,7 +6,7 @@ describe('tool source display', () => {
   it('renders device tools with a dedicated source label', () => {
     expect(SOURCE_BADGE.device).toMatchObject({
       label: 'Device',
-      className: 'bg-data-soft text-data',
+      className: 'bg-amber-100 text-amber-800',
     });
     expect(getSourceLabel('device')).toBe('Device');
   });

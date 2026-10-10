@@ -173,7 +173,7 @@ describe('SessionContextPanel', () => {
     const settings = screen.getByRole('region', { name: 'Context settings' });
     const datasets = within(settings).getByRole('region', { name: 'Knowledge Sets' });
     expect(within(settings).queryByRole('heading', { name: 'Context settings' })).not.toBeInTheDocument();
-    expect(within(datasets).getByRole('heading', { name: 'Knowledge Sets' })).toHaveClass('text-xs', 'font-semibold', 'text-fg-secondary');
+    expect(within(datasets).getByRole('heading', { name: 'Knowledge Sets' })).toHaveClass('text-xs', 'font-semibold', 'text-zinc-700');
     expect(skills.compareDocumentPosition(datasets) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     const output = screen.getByText('report.md');
     const progress = screen.getByText('Write report');

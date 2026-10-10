@@ -8,7 +8,7 @@ import {
   type RefObject,
 } from 'react';
 import { createPortal } from 'react-dom';
-import { IconCheck } from '@tabler/icons-react';
+import { Check } from 'lucide-react';
 
 const MENU_WIDTH = 520;
 const MAX_HEIGHT = 280;
@@ -122,7 +122,7 @@ export default function SessionComposerMenu({
     <div
       {...props}
       ref={menuRef}
-      className={`z-50 flex min-w-0 flex-col overflow-hidden rounded-overlay border border-line bg-surface shadow-overlay ${className ?? ''}`}
+      className={`flex flex-col rounded-lg border border-zinc-200 bg-white shadow-sm dark:border-zinc-800 dark:bg-zinc-900 dark:shadow-xl dark:shadow-black/30 z-50 min-w-0 overflow-hidden ${className ?? ''}`}
       style={{
         ...style,
         position: 'fixed',
@@ -163,29 +163,29 @@ export function SessionModeOption({
       {...props}
       type={type}
       title={`${label}\n${description}`}
-      className={`grid min-h-control w-full min-w-0 ${OPTION_COLUMNS} items-center gap-3 rounded-control border px-2.5 py-1.5 text-left transition-colors disabled:cursor-not-allowed disabled:bg-disabled disabled:text-fg-disabled ${
+      className={`grid min-h-control w-full min-w-0 ${OPTION_COLUMNS} items-center gap-3 rounded-lg border px-2.5 py-1.5 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-500 disabled:cursor-not-allowed disabled:opacity-50 ${
         selected
-          ? 'border-transparent bg-selected text-fg '
-          : 'border-transparent text-fg-secondary hover:bg-hover '
+          ? 'border-blue-300 bg-blue-50 text-zinc-950 shadow-sm dark:border-blue-500/60 dark:bg-blue-500/15 dark:text-zinc-50'
+          : 'border-transparent text-zinc-700 hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-zinc-800 dark:hover:text-zinc-50'
       } ${className ?? ''}`}
     >
-      <span className="flex min-w-0 items-center gap-1.5 overflow-hidden whitespace-nowrap text-sm font-medium ">
+      <span className="flex items-center gap-1.5 text-sm font-medium leading-[14px] min-w-0 overflow-hidden whitespace-nowrap">
         {icon && <span className="flex shrink-0 items-center" aria-hidden="true">{icon}</span>}
         <span className="min-w-0 truncate whitespace-nowrap">{label}</span>
       </span>
-      <span className={`min-w-0 truncate whitespace-nowrap text-xs ${
-        selected ? 'text-fg-secondary ' : 'text-fg-muted '
+      <span className={`text-[12px] leading-[18px] min-w-0 truncate whitespace-nowrap ${
+        selected ? 'text-zinc-700 dark:text-zinc-200' : 'text-zinc-500 dark:text-zinc-400'
       }`}>{description}</span>
-      <IconCheck aria-hidden="true" className={`h-4 w-4 text-brand ${selected ? '' : 'invisible'}`} />
+      <Check aria-hidden="true" className={`h-4 w-4 text-blue-600 dark:text-blue-300 ${selected ? '' : 'invisible'}`} />
     </button>
   );
 }
 
 export function SessionComposerMenuHeader({ title, hint }: { title: string; hint: string }) {
   return (
-    <div className="grid grid-cols-[minmax(0,112px)_minmax(0,1fr)] items-center gap-3 border-b border-line px-4 py-2 ">
-      <span title={title} className="min-w-0 truncate whitespace-nowrap text-xs font-semibold text-fg-secondary ">{title}</span>
-      <span title={hint} className="min-w-0 truncate whitespace-nowrap text-xs text-fg-muted ">{hint}</span>
+    <div className="grid grid-cols-[minmax(0,112px)_minmax(0,1fr)] items-center gap-3 border-b border-zinc-100 px-4 py-2 dark:border-zinc-800">
+      <span title={title} className="text-xs font-semibold leading-[18px] text-zinc-700 dark:text-zinc-100 min-w-0 truncate whitespace-nowrap">{title}</span>
+      <span title={hint} className="text-[12px] leading-[18px] text-zinc-400 dark:text-zinc-500 min-w-0 truncate whitespace-nowrap">{hint}</span>
     </div>
   );
 }

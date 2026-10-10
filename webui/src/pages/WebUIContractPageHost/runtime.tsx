@@ -42,9 +42,9 @@ declare global {
 
 export function Card({ title, children }: { title: string; children: ReactNode }) {
   return (
-    <div className="rounded-card border border-line bg-surface p-4 shadow-sm">
-      <h2 className="mb-2 text-title-section font-semibold text-fg">{title}</h2>
-      <div className="text-sm text-fg-secondary">{children}</div>
+    <div className="rounded-xl border border-zinc-200 bg-white p-4 shadow-sm">
+      <h2 className="mb-2 text-lg font-semibold text-zinc-900">{title}</h2>
+      <div className="text-sm text-zinc-700">{children}</div>
     </div>
   );
 }

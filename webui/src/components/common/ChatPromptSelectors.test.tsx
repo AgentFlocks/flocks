@@ -185,7 +185,7 @@ describe('ChatModelPicker', () => {
     const autoButton = screen.getByRole('button', { name: 'Auto' });
     expect(screen.queryByText('Primary then fallback')).not.toBeInTheDocument();
 
-    const info = autoButton.querySelector('.tabler-icon-info-circle')?.parentElement;
+    const info = autoButton.querySelector('.lucide-info')?.parentElement;
     expect(info).toBeInTheDocument();
     await user.hover(info!);
     expect(await screen.findByText('Primary then fallback')).toBeInTheDocument();

@@ -6,7 +6,13 @@
  */
 
 import { useState, useEffect, useRef } from 'react';
-import { IconRobot, IconChevronDown, IconChevronRight, IconExternalLink, IconCircleX } from '@tabler/icons-react';
+import {
+  Bot,
+  ChevronDown,
+  ChevronRight,
+  ExternalLink,
+  XCircle,
+} from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import type { MessagePart, ToolState } from '@/types';
 import { stripTaskMetadata } from '@/features/session-chat/display';
@@ -184,33 +190,33 @@ const STATUS_STYLE: Record<string, {
   pulse?: boolean;
 }> = {
   pending: {
-    barColor: 'bg-selected',
-    bgColor: 'bg-canvas',
-    borderColor: 'border-line',
-    textColor: 'text-fg-secondary',
-    badgeBg: 'bg-subtle text-fg-secondary',
+    barColor: 'bg-gray-300',
+    bgColor: 'bg-gray-50',
+    borderColor: 'border-gray-200',
+    textColor: 'text-gray-600',
+    badgeBg: 'bg-gray-100 text-gray-600',
   },
   running: {
-    barColor: 'bg-info',
-    bgColor: 'bg-info-soft',
-    borderColor: 'border-info',
-    textColor: 'text-info',
-    badgeBg: 'bg-info-soft text-info',
+    barColor: 'bg-sky-500',
+    bgColor: 'bg-sky-50/60',
+    borderColor: 'border-sky-200',
+    textColor: 'text-sky-700',
+    badgeBg: 'bg-sky-100 text-sky-700',
     pulse: true,
   },
   completed: {
-    barColor: 'bg-success',
-    bgColor: 'bg-success-soft',
-    borderColor: 'border-success',
-    textColor: 'text-success',
-    badgeBg: 'bg-success-soft text-success',
+    barColor: 'bg-emerald-500',
+    bgColor: 'bg-emerald-50/50',
+    borderColor: 'border-emerald-200',
+    textColor: 'text-emerald-700',
+    badgeBg: 'bg-emerald-100 text-emerald-700',
   },
   error: {
-    barColor: 'bg-action',
-    bgColor: 'bg-danger-soft',
-    borderColor: 'border-danger',
-    textColor: 'text-danger',
-    badgeBg: 'bg-danger-soft text-danger',
+    barColor: 'bg-red-500',
+    bgColor: 'bg-red-50/50',
+    borderColor: 'border-red-200',
+    textColor: 'text-red-700',
+    badgeBg: 'bg-red-100 text-red-700',
   },
 };
 
@@ -267,33 +273,33 @@ export default function DelegateTaskCard({ part, processStep = false }: Delegate
     return (
       <>
         <details data-testid="chat-process-delegate-step" className="group/delegate min-w-0">
-          <summary className="flex min-h-7 cursor-pointer list-none items-center gap-2 text-sm font-medium text-fg-muted transition-colors hover:text-fg dark:text-fg-muted dark:hover:text-fg-secondary [&::-webkit-details-marker]:hidden">
-            <span className="inline-grid h-[18px] w-[18px] flex-[0_0_18px] place-items-center text-ai dark:text-ai">
-              <IconRobot aria-hidden="true" className="h-4 w-4" />
+          <summary className="flex cursor-pointer list-none items-center gap-2 text-sm font-medium text-[#747a78] transition-colors hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-200 [&::-webkit-details-marker]:hidden min-h-7">
+            <span className="inline-grid h-[18px] w-[18px] flex-[0_0_18px] place-items-center text-violet-500 dark:text-violet-400">
+              <Bot aria-hidden="true" className="h-4 w-4" />
             </span>
-            <span className="min-w-0 flex-shrink-0 text-ai dark:text-ai">
+            <span className="text-violet-700 dark:text-violet-300 min-w-0 flex-shrink-0">
               {t('delegate.delegatedTo', { agent: info.agentName })}
             </span>
-            <span className="min-w-0 truncate font-normal text-fg-muted dark:text-fg-muted">
+            <span className="font-normal text-[#9a9f9c] dark:text-zinc-500 min-w-0 truncate">
               {info.description}
             </span>
             {info.isBackground && (
-              <span className="flex-shrink-0 rounded bg-ai-soft px-1 py-0.5 text-xs font-medium leading-none text-ai dark:bg-ai-soft dark:text-ai">
+              <span className="rounded bg-violet-100 px-1 py-0.5 text-[9px] font-medium leading-none text-violet-600 dark:bg-violet-950/70 dark:text-violet-300 flex-shrink-0">
                 {t('delegate.background')}
               </span>
             )}
-            <span className={`ml-auto flex flex-shrink-0 items-center gap-1 text-xs ${cfg.textColor}`}>
+            <span className={`flex items-center gap-1 text-[11px] ml-auto flex-shrink-0 ${cfg.textColor}`}>
               {cfg.pulse && (
-                <span className="h-1.5 w-1.5 rounded-full bg-info animate-pulse" />
+                <span className="h-1.5 w-1.5 rounded-full bg-sky-500 animate-pulse" />
               )}
               {t(`delegate.${info.status}`, { defaultValue: info.status })}
             </span>
-            <IconChevronDown aria-hidden="true" className="ml-0.5 h-4 w-4 flex-shrink-0 text-fg-muted transition-transform group-open/delegate:rotate-180 dark:text-fg-muted" />
+            <ChevronDown aria-hidden="true" className="ml-0.5 h-3 w-3 text-[#9da29f] transition-transform group-open/delegate:rotate-180 dark:text-zinc-500 flex-shrink-0" />
           </summary>
 
-          <div className="mb-[9px] ml-2 mt-[3px] space-y-2 border-l border-line py-1.5 pl-[26px] pr-0 text-xs text-fg-muted dark:border-line dark:text-fg-muted">
+          <div className="mb-[9px] ml-2 mt-[3px] space-y-2 border-l border-[#e3e6e3] py-1.5 pl-[26px] pr-0 text-xs text-[#686e6c] dark:border-zinc-700 dark:text-zinc-400">
             {elapsed !== null && elapsed > 0 && (
-              <div className="text-xs text-fg-muted dark:text-fg-muted">
+              <div className="text-[11px] text-zinc-400 dark:text-zinc-500">
                 {info.status === 'running' ? t('delegate.elapsedRunning') : t('delegate.elapsedDone')}
                 {' '}
                 {formatDuration(elapsed)}
@@ -304,24 +310,24 @@ export default function DelegateTaskCard({ part, processStep = false }: Delegate
             {info.status === 'running' && info.steps.length > 0 && (
               <div className="space-y-1">
                 {info.steps.map((step, index) => (
-                  <div key={`${step.tool}-${index}`} className="flex min-w-0 items-center gap-1.5 text-xs leading-snug">
+                  <div key={`${step.tool}-${index}`} className="flex items-center gap-1.5 text-[11px] leading-snug min-w-0">
                     <span className={
                       step.status === 'completed'
-                        ? 'text-success'
+                        ? 'text-emerald-500'
                         : step.status === 'error'
-                          ? 'text-danger'
-                          : 'text-info animate-pulse'
+                          ? 'text-red-500'
+                          : 'text-sky-400 animate-pulse'
                     }>
                       {step.status === 'completed' ? '✓' : step.status === 'error' ? '✗' : '◌'}
                     </span>
-                    <span className="w-16 flex-shrink-0 truncate font-mono text-xs text-fg-muted">
+                    <span className="w-16 font-mono text-[10px] text-zinc-500 flex-shrink-0 truncate">
                       {step.tool}
                     </span>
-                    <span className="truncate text-fg-muted">{step.title}</span>
+                    <span className="text-zinc-400 truncate">{step.title}</span>
                   </div>
                 ))}
                 {info.currentText && (
-                  <div className="truncate pl-4 text-xs italic text-fg-muted">
+                  <div className="pl-4 text-[10px] italic text-zinc-400 truncate">
                     ⋯ {info.currentText.slice(-80)}
                   </div>
                 )}
@@ -329,18 +335,18 @@ export default function DelegateTaskCard({ part, processStep = false }: Delegate
             )}
 
             {info.status === 'error' && info.error && (
-              <div className="flex items-start gap-1.5 rounded-md bg-danger-soft p-2 text-xs text-danger dark:bg-danger-soft dark:text-danger">
-                <IconCircleX aria-hidden="true" className="mt-0.5 h-4 w-4 flex-shrink-0" />
+              <div className="flex items-start gap-1.5 rounded-md bg-red-50 p-2 text-[11px] text-red-700 dark:bg-red-950/40 dark:text-red-300">
+                <XCircle aria-hidden="true" className="mt-0.5 h-3.5 w-3.5 flex-shrink-0" />
                 <span className="break-words">{info.error}</span>
               </div>
             )}
 
             {info.status === 'completed' && info.output && (
               <details>
-                <summary className="cursor-pointer select-none text-xs font-medium text-fg-muted hover:text-fg-secondary dark:text-fg-muted dark:hover:text-fg-secondary">
+                <summary className="cursor-pointer select-none text-[11px] font-medium text-zinc-500 hover:text-zinc-700 dark:text-zinc-400 dark:hover:text-zinc-200">
                   {t('delegate.resultSummary')}
                 </summary>
-                <div className="mt-1 max-h-40 overflow-y-auto whitespace-pre-wrap break-words rounded-md border border-line bg-surface p-2 text-xs leading-relaxed text-fg-secondary dark:border-line dark:bg-surface dark:text-fg-secondary">
+                <div className="mt-1 max-h-40 rounded-md border border-zinc-200 bg-white/70 p-2 text-[11px] leading-relaxed text-zinc-700 dark:border-zinc-700 dark:bg-zinc-900/70 dark:text-zinc-300 overflow-y-auto whitespace-pre-wrap break-words">
                   {truncateOutput(info.output)}
                 </div>
               </details>
@@ -353,15 +359,15 @@ export default function DelegateTaskCard({ part, processStep = false }: Delegate
                 setSheetOpen(true);
               }}
               disabled={!info.childSessionId}
-              className={`flex items-center gap-1 text-xs font-medium transition-colors group ${
+              className={`flex items-center gap-1 text-[11px] font-medium transition-colors group ${
                 info.childSessionId
-                  ? 'cursor-pointer text-ai hover:text-ai dark:text-ai dark:hover:text-ai'
-                  : 'cursor-not-allowed text-fg-muted dark:text-fg'
+                  ? 'cursor-pointer text-violet-600 hover:text-violet-800 dark:text-violet-400 dark:hover:text-violet-300'
+                  : 'cursor-not-allowed text-zinc-400 dark:text-zinc-600'
               }`}
             >
-              <IconExternalLink aria-hidden="true" className="h-4 w-4" />
+              <ExternalLink aria-hidden="true" className="h-3 w-3" />
               {t('delegate.viewExecution')}
-              <IconChevronRight aria-hidden="true" className="h-4 w-4 transition-transform group-hover:translate-x-0.5" />
+              <ChevronRight aria-hidden="true" className="h-3 w-3 transition-transform group-hover:translate-x-0.5" />
             </button>
           </div>
         </details>
@@ -390,28 +396,28 @@ export default function DelegateTaskCard({ part, processStep = false }: Delegate
           {/* Header row */}
           <div className="flex items-center gap-2">
             {/* Agent avatar */}
-            <span className="inline-flex items-center justify-center w-6 h-6 rounded-full bg-ai-soft text-ai text-xs font-bold flex-shrink-0 shadow-sm">
+            <span className="inline-flex items-center justify-center w-6 h-6 rounded-full bg-gradient-to-br from-violet-500 to-red-500 text-white text-[10px] font-bold shadow-sm flex-shrink-0">
               {info.agentName.charAt(0)}
             </span>
 
             <div className="flex-1 min-w-0">
               <div className="flex items-center gap-1.5">
-                <span className="text-xs font-semibold text-fg truncate">
+                <span className="text-xs font-semibold text-gray-800 truncate">
                   {info.agentName}
                 </span>
                 {info.isBackground && (
-                  <span className="text-xs px-1 py-0.5 rounded bg-ai-soft text-ai font-medium leading-none">
+                  <span className="text-[9px] px-1 py-0.5 rounded bg-violet-100 text-violet-600 font-medium leading-none">
                     {t('delegate.background')}
                   </span>
                 )}
               </div>
-              <p className="text-xs text-fg-muted truncate mt-0.5">{info.description}</p>
+              <p className="text-[11px] text-gray-500 mt-0.5 truncate">{info.description}</p>
             </div>
 
             {/* Status badge */}
-            <span className={`flex-shrink-0 text-xs font-semibold px-1.5 py-0.5 rounded-full leading-none ${cfg.badgeBg}`}>
+            <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded-full leading-none flex-shrink-0 ${cfg.badgeBg}`}>
               {cfg.pulse && (
-                <span className="inline-block w-1.5 h-1.5 rounded-full bg-info animate-pulse mr-1 align-middle" />
+                <span className="inline-block w-1.5 h-1.5 rounded-full bg-sky-500 animate-pulse mr-1 align-middle" />
               )}
               {t(`delegate.${info.status}`, { defaultValue: info.status })}
             </span>
@@ -419,7 +425,7 @@ export default function DelegateTaskCard({ part, processStep = false }: Delegate
 
           {/* Duration */}
           {elapsed !== null && elapsed > 0 && (
-            <div className="mt-1.5 text-xs text-fg-muted">
+            <div className="mt-1.5 text-[10px] text-gray-400">
               {info.status === 'running' ? `⏱ ${t('delegate.elapsedRunning')} ` : `⏱ ${t('delegate.elapsedDone')} `}
               {formatDuration(elapsed)}
               {info.stepCount > 0 && ` · ${info.stepCount} ${t('delegate.steps')}`}
@@ -428,26 +434,26 @@ export default function DelegateTaskCard({ part, processStep = false }: Delegate
 
           {/* Live activity stream */}
           {info.status === 'running' && info.steps.length > 0 && (
-            <div className="mt-2 space-y-0.5 py-1.5 px-2 rounded-md bg-surface border border-info">
+            <div className="mt-2 space-y-0.5 py-1.5 px-2 rounded-md bg-white/50 border border-sky-100">
               {info.steps.map((step, i) => (
-                <div key={i} className="flex items-center gap-1.5 text-xs leading-snug">
+                <div key={i} className="flex items-center gap-1.5 text-[11px] leading-snug">
                   <span className={
                     step.status === 'completed'
-                      ? 'text-success'
+                      ? 'text-emerald-500'
                       : step.status === 'error'
-                        ? 'text-danger'
-                        : 'text-info animate-pulse'
+                        ? 'text-red-500'
+                        : 'text-sky-400 animate-pulse'
                   }>
                     {step.status === 'completed' ? '✓' : step.status === 'error' ? '✗' : '◌'}
                   </span>
-                  <span className="font-mono text-xs text-fg-muted w-14 flex-shrink-0">
+                  <span className="font-mono text-[10px] text-gray-500 w-14 flex-shrink-0">
                     {step.tool}
                   </span>
-                  <span className="text-fg-muted truncate">{step.title}</span>
+                  <span className="text-gray-400 truncate">{step.title}</span>
                 </div>
               ))}
               {info.currentText && (
-                <div className="text-xs text-fg-muted italic truncate pt-0.5 pl-5">
+                <div className="text-[10px] text-gray-400 italic pt-0.5 pl-5 truncate">
                   ⋯ {info.currentText.slice(-80)}
                 </div>
               )}
@@ -456,8 +462,8 @@ export default function DelegateTaskCard({ part, processStep = false }: Delegate
 
           {/* Error */}
           {info.status === 'error' && info.error && (
-            <div className="mt-2 flex items-start gap-1.5 p-2 rounded-md bg-danger-soft text-danger text-xs">
-              <IconCircleX aria-hidden="true" className="w-4 h-4 flex-shrink-0 mt-0.5" />
+            <div className="mt-2 flex items-start gap-1.5 p-2 rounded-md bg-red-100/80 text-red-700 text-[11px]">
+              <XCircle aria-hidden="true" className="w-3.5 h-3.5 mt-0.5 flex-shrink-0" />
               <span className="break-words">{info.error}</span>
             </div>
           )}
@@ -465,10 +471,10 @@ export default function DelegateTaskCard({ part, processStep = false }: Delegate
           {/* Output preview */}
           {info.status === 'completed' && info.output && (
             <details className="mt-2">
-              <summary className="cursor-pointer text-xs font-medium text-fg-muted hover:text-fg-secondary select-none">
+              <summary className="cursor-pointer text-[11px] font-medium text-gray-500 hover:text-gray-700 select-none">
                 📤 {t('delegate.resultSummary')}
               </summary>
-              <div className="mt-1 p-2 bg-surface rounded-md border border-line text-xs text-fg-secondary whitespace-pre-wrap break-words max-h-40 overflow-y-auto leading-relaxed">
+              <div className="mt-1 p-2 bg-white/70 rounded-md border border-gray-100 text-[11px] text-gray-700 max-h-40 leading-relaxed whitespace-pre-wrap break-words overflow-y-auto">
                 {truncateOutput(info.output)}
               </div>
             </details>
@@ -481,15 +487,15 @@ export default function DelegateTaskCard({ part, processStep = false }: Delegate
               setSheetOpen(true);
             }}
             disabled={!info.childSessionId}
-            className={`mt-2 flex items-center gap-1 text-xs font-medium transition-colors group ${
+            className={`mt-2 flex items-center gap-1 text-[11px] font-medium transition-colors group ${
               info.childSessionId
-                ? 'text-danger hover:text-danger cursor-pointer'
-                : 'text-fg-muted cursor-not-allowed'
+                ? 'text-red-600 hover:text-red-800 cursor-pointer'
+                : 'text-gray-400 cursor-not-allowed'
             }`}
           >
-            <IconExternalLink aria-hidden="true" className="w-4 h-4" />
+            <ExternalLink aria-hidden="true" className="w-3 h-3" />
             {t('delegate.viewDialog')}
-            <IconChevronRight aria-hidden="true" className="w-4 h-4 transition-transform group-hover:translate-x-0.5" />
+            <ChevronRight aria-hidden="true" className="w-3 h-3 transition-transform group-hover:translate-x-0.5" />
           </button>
         </div>
       </div>

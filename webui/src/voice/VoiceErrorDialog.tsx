@@ -1,7 +1,7 @@
 import { useEffect, useId, useRef } from 'react';
 import type { RefObject } from 'react';
 import { createPortal } from 'react-dom';
-import { IconX } from '@tabler/icons-react';
+import { X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import './VoiceErrorDialog.css';
 
@@ -47,7 +47,7 @@ export default function VoiceErrorDialog({ message, onClose, returnFocusRef }: V
       <header className="flocks-voice-error-header">
         <h2 id={titleId}>{t('errorDialog.title')}</h2>
         <button ref={closeRef} type="button" onClick={onClose} className="flocks-voice-error-close" aria-label={t('errorDialog.close')}>
-          <IconX aria-hidden="true" size={18} />
+          <X aria-hidden="true" size={18} />
         </button>
       </header>
       <div id={bodyId} className="flocks-voice-error-body" tabIndex={0}>

@@ -1,7 +1,13 @@
 import PageSelectionGroup from '../PageSelectionGroup';
 import { useState, useEffect, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
-import { IconWorld, IconPlayerStop, IconLoader2, IconRefresh, IconExternalLink } from '@tabler/icons-react';
+import {
+  ExternalLink,
+  Globe,
+  Loader2,
+  RefreshCw,
+  StopCircle,
+} from 'lucide-react';
 import { resolveWorkflowServicePort, workflowAPI, WorkflowService } from '@/api/workflow';
 import { useToast } from '@/components/common/Toast';
 import EmptyState from '@/components/common/EmptyState';
@@ -42,38 +48,38 @@ function ServiceCard({
     : t('services.driverLocal');
 
   return (
-    <div className="bg-surface border border-line rounded-card p-5 space-y-4 shadow-sm">
+    <div className="bg-white border border-gray-200 rounded-xl p-5 space-y-4 shadow-sm">
       <div className="flex items-start justify-between gap-3">
         <div className="flex items-center gap-2 min-w-0">
-          <div className="w-8 h-8 rounded-control bg-subtle flex items-center justify-center flex-shrink-0">
-            <IconWorld aria-hidden="true" className="w-4 h-4 text-fg-secondary" />
+          <div className="w-8 h-8 rounded-lg bg-slate-100 flex items-center justify-center flex-shrink-0">
+            <Globe aria-hidden="true" className="w-4 h-4 text-slate-600" />
           </div>
           <div className="min-w-0">
-            <p className="text-sm font-semibold text-fg truncate">{service.workflowName}</p>
-            <p className="text-xs text-fg-muted mt-0.5">{t('services.publishedAt', { date: publishedDate })}</p>
+            <p className="text-sm font-semibold text-gray-900 truncate">{service.workflowName}</p>
+            <p className="text-xs text-gray-400 mt-0.5">{t('services.publishedAt', { date: publishedDate })}</p>
           </div>
         </div>
         <WorkflowStatusBadge status={service.status} variant="pill" />
       </div>
 
-      <div className="flex items-center justify-between gap-2 rounded-control bg-subtle border border-line px-3 py-2">
-        <span className="text-xs text-fg-muted">{t('services.serviceDriver')}</span>
-        <span className="text-xs font-medium text-fg-secondary">{driverLabel}</span>
+      <div className="flex items-center justify-between gap-2 rounded-lg bg-gray-50 border border-gray-200 px-3 py-2">
+        <span className="text-xs text-gray-500">{t('services.serviceDriver')}</span>
+        <span className="text-xs font-medium text-gray-700">{driverLabel}</span>
       </div>
 
       {/* Invoke URL */}
       <div>
-        <label className="block text-xs text-fg-muted mb-1">Invoke URL</label>
-        <div className="flex items-center gap-1 bg-subtle border border-line rounded-control px-2.5 py-2">
-          <span className="text-xs font-mono text-fg-secondary flex-1 truncate">{service.invokeUrl}</span>
+        <label className="block text-xs text-gray-400 mb-1">Invoke URL</label>
+        <div className="flex items-center gap-1 bg-gray-50 border border-gray-200 rounded-lg px-2.5 py-2">
+          <span className="text-xs font-mono text-gray-700 flex-1 truncate">{service.invokeUrl}</span>
           <a
             href={service.invokeUrl}
             target="_blank"
             rel="noopener noreferrer"
-            className="p-1 rounded-tag hover:bg-hover text-fg-muted hover:text-fg-secondary transition-colors flex-shrink-0"
+            className="p-1 rounded hover:bg-gray-200 text-gray-400 hover:text-gray-600 transition-colors flex-shrink-0"
             title={t('services.openInNewTab')}
           >
-            <IconExternalLink aria-hidden="true" className="w-4 h-4" />
+            <ExternalLink aria-hidden="true" className="w-3.5 h-3.5" />
           </a>
           <CopyButton text={service.invokeUrl} />
         </div>
@@ -81,12 +87,12 @@ function ServiceCard({
 
       {/* API Key */}
       <div>
-        <label className="block text-xs text-fg-muted mb-1">API Key</label>
-        <div className="flex items-center gap-1 bg-subtle border border-line rounded-control px-2.5 py-2">
-          <span className="text-xs font-mono text-fg-secondary flex-1 truncate">{maskedKey}</span>
+        <label className="block text-xs text-gray-400 mb-1">API Key</label>
+        <div className="flex items-center gap-1 bg-gray-50 border border-gray-200 rounded-lg px-2.5 py-2">
+          <span className="text-xs font-mono text-gray-700 flex-1 truncate">{maskedKey}</span>
           <button
             onClick={() => setKeyVisible(v => !v)}
-            className="text-xs text-fg-secondary hover:text-fg px-1 flex-shrink-0"
+            className="text-xs text-slate-600 hover:text-slate-800 px-1 flex-shrink-0"
           >
             {keyVisible ? t('services.hideKey') : t('services.showKey')}
           </button>
@@ -96,9 +102,9 @@ function ServiceCard({
 
       {/* Quick call example */}
       <div>
-        <label className="block text-xs text-fg-muted mb-1">{t('services.quickCall')}</label>
-        <div className="bg-subtle rounded-control px-3 py-2 relative overflow-x-auto">
-          <pre className="text-xs text-fg-placeholder font-mono whitespace-pre">{`curl -X POST ${service.invokeUrl} \\
+        <label className="block text-xs text-gray-400 mb-1">{t('services.quickCall')}</label>
+        <div className="bg-gray-900 rounded-lg px-3 py-2 relative overflow-x-auto">
+          <pre className="text-xs text-gray-300 font-mono whitespace-pre">{`curl -X POST ${service.invokeUrl} \\
   -H "X-API-Key: ${service.apiKey}" \\
   -H "Content-Type: application/json" \\
   -d '{"inputs": {}}'`}</pre>
@@ -113,18 +119,18 @@ function ServiceCard({
           <button
             onClick={onRestart}
             disabled={restarting || stopping}
-            className="flex items-center justify-center gap-2 py-2 border border-info text-info text-xs font-medium rounded-control hover:bg-info-soft disabled:bg-disabled disabled:text-fg-disabled transition-colors"
+            className="flex items-center justify-center gap-2 py-2 border border-blue-200 text-blue-600 text-xs font-medium rounded-lg hover:bg-blue-50 disabled:opacity-60 transition-colors"
           >
-            {restarting ? <IconLoader2 aria-hidden="true" className="w-4 h-4 animate-spin" /> : <IconRefresh aria-hidden="true" className="w-4 h-4" />}
+            {restarting ? <Loader2 aria-hidden="true" className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw aria-hidden="true" className="w-3.5 h-3.5" />}
             {restarting ? t('services.restarting') : t('services.restartService')}
           </button>
           {isRunning && (
             <button
               onClick={onStop}
               disabled={stopping || restarting}
-              className="flex items-center justify-center gap-2 py-2 border border-line-control text-fg-secondary text-xs font-medium rounded-control hover:bg-hover disabled:bg-disabled disabled:text-fg-disabled transition-colors"
+              className="flex items-center justify-center gap-2 py-2 border border-gray-300 text-gray-700 text-xs font-medium rounded-lg hover:bg-gray-50 disabled:opacity-60 transition-colors"
             >
-              {stopping ? <IconLoader2 aria-hidden="true" className="w-4 h-4 animate-spin" /> : <IconPlayerStop aria-hidden="true" className="w-4 h-4" />}
+              {stopping ? <Loader2 aria-hidden="true" className="w-3.5 h-3.5 animate-spin" /> : <StopCircle aria-hidden="true" className="w-3.5 h-3.5" />}
               {stopping ? t('services.stopping') : t('services.stopService')}
             </button>
           )}
@@ -207,20 +213,20 @@ export default function ServicesSection() {
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between gap-3">
-        <PageSelectionGroup className="flex ga">
+        <PageSelectionGroup className="flex gap-1 bg-gray-100 rounded-lg p-1">
           {FILTERS.map(f => (
             <button aria-pressed={filter === f.key}
               key={f.key}
               onClick={() => setFilter(f.key)}
-              className={`px-3 py-1.5 text-xs rounded-segment transition-colors ${
+              className={`px-3 py-1.5 text-xs rounded-md transition-colors ${
                 filter === f.key
-                  ? 'bg-selected text-fg font-medium'
-                  : 'text-fg-secondary hover:text-fg'
+                  ? 'bg-white text-slate-800 shadow-sm font-medium'
+                  : 'text-gray-600 hover:text-gray-900'
               }`}
             >
               {f.label}
               {f.key !== 'all' && (
-                <span className="ml-1 text-fg-muted">
+                <span className="ml-1 text-gray-400">
                   ({services.filter(s => s.status === f.key).length})
                 </span>
               )}
@@ -229,20 +235,20 @@ export default function ServicesSection() {
         </PageSelectionGroup>
         <button
           onClick={fetchServices}
-          className="flex items-center gap-1.5 px-3 py-1.5 text-xs text-fg-secondary border border-line rounded-control hover:bg-hover transition-colors"
+          className="flex items-center gap-1.5 px-3 py-1.5 text-xs text-gray-600 border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors"
         >
-          <IconRefresh aria-hidden="true" className="w-4 h-4" />
+          <RefreshCw aria-hidden="true" className="w-3.5 h-3.5" />
           {t('common:button.refresh')}
         </button>
       </div>
 
       {loading ? (
         <div className="flex items-center justify-center py-16">
-          <IconLoader2 aria-hidden="true" className="w-6 h-6 animate-spin text-fg-muted" />
+          <Loader2 aria-hidden="true" className="w-6 h-6 animate-spin text-gray-400" />
         </div>
       ) : filtered.length === 0 ? (
         <EmptyState
-          icon={<IconWorld aria-hidden="true" className="w-8 h-8" />}
+          icon={<Globe aria-hidden="true" className="w-10 h-10" />}
           title={t('services.emptyTitle')}
           description={t('services.emptyDescription')}
         />

@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react';
-import { IconMessage } from '@tabler/icons-react';
+import { MessageSquare } from 'lucide-react';
 import type { ChatGuideAction } from './ChatGuideDock';
 import GuideInfoIcon from './GuideInfoIcon';
 
@@ -67,25 +67,25 @@ export default function GuidedCreatePanel({
   return (
     <div className="flex min-h-[420px] w-full flex-col items-center justify-center px-5 py-8">
       {emptyTitle && (
-        <p className="mb-8 text-center text-sm font-medium text-fg-muted">
+        <p className="mb-8 text-center text-sm font-medium text-gray-400">
           {emptyTitle}
         </p>
       )}
-      <div className="flex max-h-[min(560px,calc(100vh-260px))] w-full max-w-[420px] flex-col overflow-hidden rounded-xl border border-line bg-surface px-5 py-5 text-center shadow-sm">
+      <div className="flex max-h-[min(560px,calc(100vh-260px))] w-full max-w-[420px] flex-col rounded-xl border border-gray-200 bg-white px-5 py-5 text-center shadow-sm overflow-hidden">
         <div className="flex-shrink-0">
-          <div className="mx-auto flex h-11 w-11 items-center justify-center rounded-xl border border-ai bg-ai-soft text-ai">
-            {icon ?? <IconMessage aria-hidden="true" className="h-5 w-5" />}
+          <div className="flex h-11 w-11 items-center justify-center rounded-xl border border-red-100 bg-red-50 text-red-500 mx-auto">
+            {icon ?? <MessageSquare aria-hidden="true" className="h-5 w-5" />}
           </div>
-          <h3 className="mt-4 text-sm font-semibold text-fg">
+          <h3 className="mt-4 text-sm font-semibold text-gray-900">
             {title}
           </h3>
-          <p className="mx-auto mt-2 max-w-[300px] text-xs leading-relaxed text-fg-muted">
+          <p className="mt-2 max-w-[300px] text-xs leading-relaxed text-gray-500 mx-auto">
             {description}
           </p>
         </div>
         <div
           data-testid={scrollTestId}
-          className="mt-4 min-h-0 space-y-4 overflow-y-auto pr-1 text-left [scrollbar-width:thin] [scrollbar-color:var(--border-control)_transparent]"
+          className="mt-4 space-y-4 pr-1 text-left [scrollbar-width:thin] [scrollbar-color:#e4e4e7_transparent] min-h-0 overflow-y-auto"
         >
           {visibleGroups.map((group) => (
             <GuidedCreateSection
@@ -112,7 +112,7 @@ function GuidedCreateSection({
 }) {
   return (
     <section>
-      <h4 className="mb-2 text-xs font-semibold text-fg-muted">{title}</h4>
+      <h4 className="mb-2 text-[11px] font-semibold text-gray-400">{title}</h4>
       <div
         data-testid={`guided-create-section-${title}`}
         className="flex flex-col gap-1.5"
@@ -120,7 +120,7 @@ function GuidedCreateSection({
         {actions.map((action) => (
           <div
             key={action.label}
-            className="group flex h-8 w-full items-center justify-between gap-3 rounded-lg border border-line bg-surface px-3 text-left text-xs font-semibold text-fg-secondary transition-colors hover:border-ai hover:bg-ai-soft hover:text-ai"
+            className="group flex h-8 w-full items-center justify-between gap-3 rounded-lg border border-gray-200 bg-white px-3 text-left text-xs font-semibold text-gray-700 transition-colors hover:border-rose-200 hover:bg-rose-50/70 hover:text-rose-600"
           >
             <button
               type="button"
@@ -132,7 +132,7 @@ function GuidedCreateSection({
             <GuideInfoIcon
               label={action.label}
               description={action.description}
-              className="group-hover:text-ai"
+              className="group-hover:text-rose-400"
             />
           </div>
         ))}

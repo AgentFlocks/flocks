@@ -138,7 +138,7 @@ describe('SessionModeOption', () => {
     expect(screen.getByText(label, { exact: true })).toHaveTextContent(label);
     expect(screen.getByText(description, { exact: true })).toHaveTextContent(description);
     expect(screen.getByText(label, { exact: true })).toHaveClass('truncate', 'whitespace-nowrap', 'min-w-0');
-    expect(screen.getByText(description, { exact: true })).toHaveClass('truncate', 'whitespace-nowrap', 'min-w-0', 'text-xs');
+    expect(screen.getByText(description, { exact: true })).toHaveClass('truncate', 'whitespace-nowrap', 'min-w-0', 'text-[12px]');
     expect(button.querySelector('[title]')).toBeNull();
   });
 
@@ -163,7 +163,7 @@ describe('SessionModeOption', () => {
     expect(button.children).toHaveLength(3);
     expect(button.lastElementChild).toBe(check);
     expect(check).not.toHaveClass('invisible');
-    expect(button).toHaveClass('border-transparent', 'bg-selected');
+    expect(button).toHaveClass('border-blue-300', 'bg-blue-50');
   });
 
   it('forwards radio-menu attributes and button behavior without imposing a role', () => {
@@ -223,7 +223,7 @@ describe('SessionComposerMenu', () => {
         expect(menu).toHaveAttribute(marker, 'true');
         expect(menu).toHaveAttribute('id', 'composer-menu');
         expect(menu).toHaveStyle({ position: 'fixed', color: 'rgb(255, 0, 0)', visibility: 'visible' });
-        expect(menu).toHaveClass('custom-menu', 'z-50', 'flex', 'flex-col', 'overflow-hidden', 'rounded-overlay', 'border-line', 'bg-surface');
+        expect(menu).toHaveClass('custom-menu', 'z-50', 'flex', 'flex-col', 'overflow-hidden', 'rounded-lg', 'border-zinc-200', 'dark:border-zinc-800');
         fireEvent.click(screen.getByRole('button', { name: 'Choose mode' }));
         expect(onClick).toHaveBeenCalledOnce();
         expect(nativeClick).toHaveReturnedWith(menu);

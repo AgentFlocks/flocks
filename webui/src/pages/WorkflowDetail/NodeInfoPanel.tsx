@@ -1,12 +1,21 @@
 import PageDialog from '../PageDialog';
-import { workflowNodeAppearance } from '../WorkflowEditor/nodeAppearance';
 /**
  * NodeInfoPanel — 并列在对话左侧的节点信息/编辑面板
  * 当用户点击画布节点时展开，可关闭。
  */
 import { useState, useEffect, useMemo, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
-import { IconX, IconAlertCircle, IconDeviceFloppy, IconLoader2, IconChevronDown, IconChevronRight, IconPlayerPlay, IconRotate, IconArrowsDiagonal } from '@tabler/icons-react';
+import {
+  AlertCircle,
+  ChevronDown,
+  ChevronRight,
+  Loader2,
+  Maximize2,
+  Play,
+  RotateCcw,
+  Save,
+  X,
+} from 'lucide-react';
 import {
   workflowAPI,
   Workflow,
@@ -28,10 +37,16 @@ const TYPE_LABEL: Record<string, string> = {
   tool: 'Tool', llm: 'LLM', http_request: 'HTTP', subworkflow: 'SubWorkflow',
 };
 
-const TYPE_COLOR = Object.fromEntries(Object.entries(workflowNodeAppearance).map(([type, appearance]) => [type, {
-  badge: `${appearance.text} ${appearance.accentBg} ${appearance.border}`,
-  dot: appearance.dot,
-}]));
+const TYPE_COLOR: Record<string, { badge: string; dot: string }> = {
+  python:       { badge: 'text-red-600   bg-red-50   border-red-200',   dot: 'bg-red-400'   },
+  logic:        { badge: 'text-emerald-600 bg-emerald-50 border-emerald-200', dot: 'bg-emerald-400' },
+  branch:       { badge: 'text-amber-600  bg-amber-50  border-amber-200',  dot: 'bg-amber-400'  },
+  loop:         { badge: 'text-purple-600 bg-purple-50 border-purple-200', dot: 'bg-purple-400' },
+  tool:         { badge: 'text-violet-600 bg-violet-50 border-violet-200', dot: 'bg-violet-400' },
+  llm:          { badge: 'text-pink-600   bg-pink-50   border-pink-200',   dot: 'bg-pink-400'   },
+  http_request: { badge: 'text-teal-600   bg-teal-50   border-teal-200',   dot: 'bg-teal-400'   },
+  subworkflow:  { badge: 'text-orange-600 bg-orange-50 border-orange-200', dot: 'bg-orange-400' },
+};
 
 function inferOutputKey(node: WorkflowNode): string {
   switch (node.type) {
@@ -87,7 +102,7 @@ function buildSuggestedNodeInputs(
 
 function NodeChip({ id }: { id: string }) {
   return (
-    <code className="text-xs font-mono font-semibold text-danger bg-danger-soft border border-danger px-1.5 py-0.5 rounded-tag whitespace-nowrap">
+    <code className="text-[11px] font-mono font-semibold text-red-700 bg-red-50 border border-red-100 px-1.5 py-0.5 rounded whitespace-nowrap">
       {id}
     </code>
   );
@@ -95,13 +110,13 @@ function NodeChip({ id }: { id: string }) {
 
 function FL({ children, required }: { children: React.ReactNode; required?: boolean }) {
   return (
-    <p className="text-xs font-semibold uppercase tracking-widest text-fg-muted mb-1.5">
-      {children}{required && <span className="text-danger ml-0.5 normal-case">*</span>}
+    <p className="text-[10px] font-semibold uppercase tracking-widest text-gray-400 mb-1.5">
+      {children}{required && <span className="text-red-400 ml-0.5 normal-case">*</span>}
     </p>
   );
 }
 
-const IB = 'w-full px-2.5 py-1.5 border border-line rounded-control text-xs bg-surface';
+const IB = 'w-full px-2.5 py-1.5 border border-gray-200 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-red-300 bg-white';
 
 function JsonField({ label, value, onChange, placeholder }: {
   label: string; value: unknown; onChange: (v: unknown) => void; placeholder?: string;
@@ -124,8 +139,8 @@ function JsonField({ label, value, onChange, placeholder }: {
   };
 
   const borderClass = err
-    ? 'border-danger '
-    : raw.trim() ? 'border-success ' : '';
+    ? 'border-red-300 focus:ring-red-300'
+    : raw.trim() ? 'border-green-200 focus:ring-green-300' : '';
 
   return (
     <div>
@@ -139,7 +154,7 @@ function JsonField({ label, value, onChange, placeholder }: {
         placeholder={placeholder || '{}'}
         spellCheck={false}
       />
-      {err && <p className="mt-1 text-xs text-danger flex items-center gap-1"><IconAlertCircle aria-hidden="true" className="w-4 h-4" />{err}</p>}
+      {err && <p className="mt-1 text-[11px] text-red-500 flex items-center gap-1"><AlertCircle aria-hidden="true" className="w-3 h-3" />{err}</p>}
     </div>
   );
 }
@@ -173,11 +188,11 @@ function ExpandedCodeEditor({
   }, [lineNumbers.length]);
 
   return (
-    <div className="flex h-full min-h-0 min-w-0 overflow-hidden rounded-card border border-line bg-subtle">
+    <div className="flex rounded-xl border border-[#4a5563] bg-[#252c35] h-full min-h-0 min-w-0 overflow-hidden">
       <div
         aria-hidden="true"
         data-testid="expanded-code-line-numbers"
-        className="flex-shrink-0 overflow-hidden select-none border-r border-line bg-canvas px-3 py-3 text-right font-mono text-xs text-fg-muted"
+        className="select-none border-r border-[#4a5563] bg-[#20262d] px-3 py-3 text-right font-mono text-[12px] leading-relaxed text-[#9aa7b4] flex-shrink-0 overflow-hidden"
       >
         <div ref={lineNumberTrackRef}>
           {lineNumbers.map((lineNumber) => (
@@ -194,7 +209,7 @@ function ExpandedCodeEditor({
         onScroll={syncLineNumberOffset}
         rows={24}
         wrap="off"
-        className="ui-textarea h-full min-h-0 min-w-0 w-full resize-none overflow-auto bg-subtle px-4  font-mono text-xs text-fg"
+        className="resize-none bg-[#252c35] px-4 py-3 font-mono text-[12px] leading-relaxed text-[#d7dee8] focus:outline-none focus:ring-2 focus:ring-[#539bf5] h-full min-h-0 min-w-0 w-full overflow-auto"
         placeholder={placeholder}
         spellCheck={false}
       />
@@ -213,11 +228,11 @@ function DataFlow({ node, edges }: { node: WorkflowNode; edges: WorkflowEdge[] }
   const outputKey = inferOutputKey(node);
 
   return (
-    <div className="rounded-card bg-subtle border border-line px-3 py-3 space-y-3 text-xs">
+    <div className="rounded-xl bg-gray-50 border border-gray-100 px-3 py-3 space-y-3 text-xs">
       <div>
         <FL>{t('detail.nodeInfo.inputSources')}</FL>
         {incoming.length === 0 ? (
-          <span className="text-xs text-fg-muted italic">{t('detail.nodeInfo.startNode')}</span>
+          <span className="text-[11px] text-gray-400 italic">{t('detail.nodeInfo.startNode')}</span>
         ) : (
           <div className="space-y-2">
             {incoming.map((edge, i) => {
@@ -226,22 +241,22 @@ function DataFlow({ node, edges }: { node: WorkflowNode; edges: WorkflowEdge[] }
               return (
                 <div key={i}>
                   <div className="flex items-center gap-1.5">
-                    <span className="text-fg-placeholder">←</span>
+                    <span className="text-gray-300">←</span>
                     <NodeChip id={edge.from} />
-                    {maps.length === 0 && consts.length === 0 && <span className="text-xs text-fg-muted">{t('detail.nodeInfo.triggerOnly')}</span>}
+                    {maps.length === 0 && consts.length === 0 && <span className="text-[10px] text-gray-400">{t('detail.nodeInfo.triggerOnly')}</span>}
                   </div>
                   {maps.map(([lk, src]) => (
-                    <div key={lk} className="flex items-baseline gap-1 pl-4 mt-0.5 font-mono text-xs">
-                      <span className="text-success font-semibold">{lk}</span>
-                      <span className="text-fg-placeholder">←</span>
-                      <span className="text-fg-muted truncate" title={src}>{src}</span>
+                    <div key={lk} className="flex items-baseline gap-1 pl-4 mt-0.5 font-mono text-[11px]">
+                      <span className="text-emerald-600 font-semibold">{lk}</span>
+                      <span className="text-gray-300">←</span>
+                      <span className="text-gray-500 truncate" title={src}>{src}</span>
                     </div>
                   ))}
                   {consts.map(([lk, v]) => (
-                    <div key={lk} className="flex items-baseline gap-1 pl-4 mt-0.5 font-mono text-xs">
-                      <span className="text-warning font-semibold">{lk}</span>
-                      <span className="text-fg-placeholder">=</span>
-                      <span className="text-fg-muted truncate">{JSON.stringify(v)}</span>
+                    <div key={lk} className="flex items-baseline gap-1 pl-4 mt-0.5 font-mono text-[11px]">
+                      <span className="text-amber-600 font-semibold">{lk}</span>
+                      <span className="text-gray-300">=</span>
+                      <span className="text-gray-500 truncate">{JSON.stringify(v)}</span>
                     </div>
                   ))}
                 </div>
@@ -250,24 +265,24 @@ function DataFlow({ node, edges }: { node: WorkflowNode; edges: WorkflowEdge[] }
           </div>
         )}
       </div>
-      <div className="border-t border-line" />
+      <div className="border-t border-gray-200" />
       <div>
         <FL>{t('detail.nodeInfo.outputDests')}</FL>
         <div className="space-y-1.5">
           {outputKey && node.type !== 'branch' && (
             <div className="flex items-center gap-1.5">
-              <span className="text-xs text-fg-muted">{t('detail.nodeInfo.outputKeyLabel')}</span>
-              <code className="text-xs font-mono font-semibold text-ai bg-ai-soft border border-ai px-1.5 py-0.5 rounded-tag">{outputKey}</code>
+              <span className="text-[10px] text-gray-400">{t('detail.nodeInfo.outputKeyLabel')}</span>
+              <code className="text-[11px] font-mono font-semibold text-purple-600 bg-purple-50 border border-purple-100 px-1.5 py-0.5 rounded">{outputKey}</code>
             </div>
           )}
-          {node.type === 'branch' && <span className="text-xs text-fg-muted italic">{t('detail.nodeInfo.routeByPath')}</span>}
+          {node.type === 'branch' && <span className="text-[11px] text-gray-400 italic">{t('detail.nodeInfo.routeByPath')}</span>}
           {outgoing.length === 0
-            ? <span className="text-xs text-fg-muted italic">{t('detail.nodeInfo.endNode')}</span>
+            ? <span className="text-[11px] text-gray-400 italic">{t('detail.nodeInfo.endNode')}</span>
             : outgoing.map((e, i) => (
                 <div key={i} className="flex items-center gap-1.5">
-                  <span className="text-fg-placeholder">→</span>
+                  <span className="text-gray-300">→</span>
                   <NodeChip id={e.to} />
-                  {e.label && <span className="text-xs text-fg-muted italic">{e.label}</span>}
+                  {e.label && <span className="text-[10px] text-gray-400 italic">{e.label}</span>}
                 </div>
               ))
           }
@@ -298,7 +313,7 @@ function RuntimeJsonBlock({ label, value, tone, copyable = true }: {
 }) {
   const { t } = useTranslation('workflow');
   const [expanded, setExpanded] = useState(true);
-  const bgClass = tone === 'amber' ? 'bg-warning-soft border-warning text-warning' : 'bg-success-soft border-success text-success';
+  const bgClass = tone === 'amber' ? 'bg-amber-50 border-amber-100 text-amber-900' : 'bg-green-50 border-green-100 text-green-900';
   const formattedValue = JSON.stringify(value, null, 2);
   const toggleLabel = expanded
     ? t('detail.nodeInfo.collapseJsonBlock', { label })
@@ -315,17 +330,17 @@ function RuntimeJsonBlock({ label, value, tone, copyable = true }: {
             onClick={() => setExpanded((value) => !value)}
             aria-label={toggleLabel}
             title={toggleLabel}
-            className="ui-btn-icon inline-flex items-center justify-center inline-flex items-center gap-1 rounded-control px-1.5 py-1 text-xs text-fg-muted transition-colors hover:bg-surface hover:text-fg-secondary"
+            className="inline-flex items-center gap-1 rounded-md px-1.5 py-1 text-[11px] text-gray-400 transition-colors hover:bg-white/70 hover:text-gray-600"
           >
             {expanded
-              ? <IconChevronDown aria-hidden="true" className="w-4 h-4" />
-              : <IconChevronRight aria-hidden="true" className="w-4 h-4" />}
+              ? <ChevronDown aria-hidden="true" className="w-3 h-3" />
+              : <ChevronRight aria-hidden="true" className="w-3 h-3" />}
           </button>
         </div>
       </div>
       {expanded && (
-        <div className={`rounded-control border px-2.5 py-2 ${bgClass}`}>
-          <pre className="text-xs font-mono whitespace-pre-wrap break-all">
+        <div className={`rounded-lg border px-2.5 py-2 ${bgClass}`}>
+          <pre className="text-[11px] font-mono whitespace-pre-wrap break-all">
             {formattedValue}
           </pre>
         </div>
@@ -341,7 +356,7 @@ function RuntimeSection({ nodeId, latestExecution }: { nodeId: string; latestExe
   const latestStep = runtimeSteps[runtimeSteps.length - 1];
 
   return (
-    <div className="rounded-card bg-subtle border border-line px-3 py-3 space-y-3 text-xs">
+    <div className="rounded-xl bg-slate-50 border border-slate-200 px-3 py-3 space-y-3 text-xs">
       <button
         type="button"
         onClick={() => setExpanded((value) => !value)}
@@ -350,7 +365,7 @@ function RuntimeSection({ nodeId, latestExecution }: { nodeId: string; latestExe
         <div className="min-w-0">
           <FL>{t('detail.nodeInfo.runtimeSection')}</FL>
           {runtimeSteps.length > 0 && (
-            <span className="text-xs text-fg-muted">
+            <span className="text-[10px] text-slate-500">
               {runtimeSteps.length > 1
                 ? t('detail.nodeInfo.runtimeCount', { count: runtimeSteps.length })
                 : t('detail.nodeInfo.runtimeLatest')}
@@ -358,23 +373,23 @@ function RuntimeSection({ nodeId, latestExecution }: { nodeId: string; latestExe
           )}
         </div>
         {expanded
-          ? <IconChevronDown aria-hidden="true" className="w-4 h-4 text-fg-muted flex-shrink-0" />
-          : <IconChevronRight aria-hidden="true" className="w-4 h-4 text-fg-muted flex-shrink-0" />}
+          ? <ChevronDown aria-hidden="true" className="w-3.5 h-3.5 text-slate-400 flex-shrink-0" />
+          : <ChevronRight aria-hidden="true" className="w-3.5 h-3.5 text-slate-400 flex-shrink-0" />}
       </button>
 
       {expanded && (
         <>
           {!latestExecution && (
-            <p className="text-xs text-fg-muted italic">{t('detail.nodeInfo.noRuntimeData')}</p>
+            <p className="text-[11px] text-gray-400 italic">{t('detail.nodeInfo.noRuntimeData')}</p>
           )}
 
           {latestExecution && !latestStep && (
-            <p className="text-xs text-fg-muted italic">{t('detail.nodeInfo.nodeNotExecutedYet')}</p>
+            <p className="text-[11px] text-gray-400 italic">{t('detail.nodeInfo.nodeNotExecutedYet')}</p>
           )}
 
           {latestStep && (
             <div className="space-y-3">
-              <div className="text-xs text-fg-muted">
+              <div className="text-[11px] text-slate-500">
                 {t('detail.nodeInfo.runtimeStatus', { status: latestExecution?.status ?? 'unknown' })}
               </div>
               {latestStep.inputs && Object.keys(latestStep.inputs).length > 0 && (
@@ -384,8 +399,8 @@ function RuntimeSection({ nodeId, latestExecution }: { nodeId: string; latestExe
                 <RuntimeJsonBlock label={t('detail.nodeInfo.runtimeOutputs')} value={latestStep.outputs} tone="green" />
               )}
               {latestStep.error && (
-                <div className="rounded-control border border-danger bg-danger-soft px-2.5 py-2">
-                  <p className="text-xs text-danger break-all">{latestStep.error}</p>
+                <div className="rounded-lg border border-red-100 bg-red-50 px-2.5 py-2">
+                  <p className="text-[11px] text-red-600 break-all">{latestStep.error}</p>
                 </div>
               )}
             </div>
@@ -457,7 +472,7 @@ function NodeRunSection({
   };
 
   return (
-    <div className="rounded-card bg-surface border border-line px-3 py-3 space-y-3 text-xs">
+    <div className="rounded-xl bg-white border border-gray-200 px-3 py-3 space-y-3 text-xs">
       <button
         type="button"
         onClick={() => setExpanded((value) => !value)}
@@ -465,19 +480,19 @@ function NodeRunSection({
       >
         <div className="min-w-0">
           <FL>{t('detail.nodeInfo.runNodeSection')}</FL>
-          <span className="text-xs text-fg-muted">
+          <span className="text-[10px] text-gray-500">
             {supported ? t('detail.nodeInfo.runNodeHint') : t('detail.nodeInfo.runNodeUnsupported')}
           </span>
         </div>
         {expanded
-          ? <IconChevronDown aria-hidden="true" className="w-4 h-4 text-fg-muted flex-shrink-0" />
-          : <IconChevronRight aria-hidden="true" className="w-4 h-4 text-fg-muted flex-shrink-0" />}
+          ? <ChevronDown aria-hidden="true" className="w-3.5 h-3.5 text-gray-400 flex-shrink-0" />
+          : <ChevronRight aria-hidden="true" className="w-3.5 h-3.5 text-gray-400 flex-shrink-0" />}
       </button>
 
       {expanded && (
         <div className="space-y-3">
           {!supported ? (
-            <p className="text-xs text-fg-muted italic">{t('detail.nodeInfo.runNodeUnsupportedDesc')}</p>
+            <p className="text-[11px] text-gray-400 italic">{t('detail.nodeInfo.runNodeUnsupportedDesc')}</p>
           ) : (
             <>
               <div className="space-y-2">
@@ -488,7 +503,7 @@ function NodeRunSection({
                       <button
                         type="button"
                         onClick={() => setRawInputs(JSON.stringify(latestRuntimeInputs, null, 2))}
-                        className="text-xs text-danger hover:text-danger"
+                        className="text-[11px] text-red-600 hover:text-red-700"
                       >
                         {t('detail.nodeInfo.useLatestInputs')}
                       </button>
@@ -496,9 +511,9 @@ function NodeRunSection({
                     <button
                       type="button"
                       onClick={() => setRawInputs(JSON.stringify(suggestedInputs, null, 2))}
-                      className="inline-flex items-center gap-1 text-xs text-fg-muted hover:text-fg-secondary"
+                      className="inline-flex items-center gap-1 text-[11px] text-gray-500 hover:text-gray-700"
                     >
-                      <IconRotate aria-hidden="true" className="w-4 h-4" />
+                      <RotateCcw aria-hidden="true" className="w-3 h-3" />
                       {t('detail.nodeInfo.restoreSuggestedInputs')}
                     </button>
                   </div>
@@ -507,20 +522,20 @@ function NodeRunSection({
                   <CopyButton
                     text={rawInputs}
                     size="w-3 h-3"
-                    className="absolute right-2 top-2 z-10 rounded-control border border-line bg-surface p-1.5 text-fg-muted shadow-sm transition-colors hover:bg-surface hover:text-fg-secondary"
+                    className="absolute right-2 top-2 rounded-md border border-gray-200 bg-white/95 p-1.5 text-gray-400 shadow-sm transition-colors hover:bg-white hover:text-gray-600 z-10"
                   />
                   <textarea
                     value={rawInputs}
                     onChange={(e) => setRawInputs(e.target.value)}
                     rows={6}
-                    className={`${IB} font-mono resize-y pr-10 ${inputError ? 'border-danger ' : ''}`}
+                    className={`${IB} font-mono resize-y pr-10 ${inputError ? 'border-red-300 focus:ring-red-300' : ''}`}
                     placeholder="{}"
                     spellCheck={false}
                   />
                 </div>
                 {inputError && (
-                  <p className="text-xs text-danger flex items-center gap-1">
-                    <IconAlertCircle aria-hidden="true" className="w-4 h-4" />
+                  <p className="text-[11px] text-red-500 flex items-center gap-1">
+                    <AlertCircle aria-hidden="true" className="w-3 h-3" />
                     {inputError}
                   </p>
                 )}
@@ -530,16 +545,16 @@ function NodeRunSection({
                 type="button"
                 onClick={handleRun}
                 disabled={running}
-                className="ui-btn ui-btn-primary ui-btn-sm w-full"
+                className="w-full flex items-center justify-center gap-1.5 py-2 rounded-lg text-xs font-semibold transition-colors bg-gray-900 text-white hover:bg-black disabled:opacity-50"
               >
-                {running ? <IconLoader2 aria-hidden="true" className="w-4 h-4 animate-spin" /> : <IconPlayerPlay aria-hidden="true" className="w-4 h-4" />}
+                {running ? <Loader2 aria-hidden="true" className="w-3.5 h-3.5 animate-spin" /> : <Play aria-hidden="true" className="w-3.5 h-3.5" />}
                 {running ? t('detail.nodeInfo.runningNode') : t('detail.nodeInfo.runNodeAction')}
               </button>
 
               {result && (
-                <div className="space-y-3 rounded-control border border-line bg-subtle px-3 py-3">
+                <div className="space-y-3 rounded-lg border border-gray-200 bg-gray-50 px-3 py-3">
                   <div className="flex items-center justify-between gap-2">
-                    <span className={`text-xs font-semibold ${result.success ? 'text-success' : 'text-danger'}`}>
+                    <span className={`text-[11px] font-semibold ${result.success ? 'text-green-600' : 'text-red-600'}`}>
                       {result.success ? t('detail.nodeInfo.runNodeSuccess') : t('detail.nodeInfo.runNodeError')}
                     </span>
                     <div className="flex items-center gap-2">
@@ -548,11 +563,11 @@ function NodeRunSection({
                           text={JSON.stringify(result.outputs, null, 2)}
                           label={t('detail.nodeInfo.copyOutput')}
                           size="w-3 h-3"
-                          className="inline-flex items-center rounded-control border border-line bg-surface px-2 py-1 text-xs text-fg-secondary transition-colors hover:bg-hover hover:text-fg"
+                          className="inline-flex items-center rounded-md border border-gray-200 bg-white px-2 py-1 text-[11px] text-gray-600 transition-colors hover:bg-gray-100 hover:text-gray-900"
                         />
                       )}
                       {result.duration_ms != null && (
-                        <span className="text-xs text-fg-muted">{(result.duration_ms / 1000).toFixed(2)}s</span>
+                        <span className="text-[11px] text-gray-400">{(result.duration_ms / 1000).toFixed(2)}s</span>
                       )}
                     </div>
                   </div>
@@ -567,7 +582,7 @@ function NodeRunSection({
                   {result.stdout && (
                     <div className="space-y-1.5">
                       <FL>{t('detail.nodeInfo.runNodeStdout')}</FL>
-                      <pre className="rounded-control border border-line bg-surface px-2.5 py-2 text-xs font-mono whitespace-pre-wrap break-all text-fg-secondary">
+                      <pre className="rounded-lg border border-gray-200 bg-white px-2.5 py-2 text-[11px] font-mono text-gray-700 whitespace-pre-wrap break-all">
                         {result.stdout}
                       </pre>
                     </div>
@@ -576,7 +591,7 @@ function NodeRunSection({
                   {result.error && (
                     <div className="space-y-1.5">
                       <FL>{t('detail.nodeInfo.runNodeError')}</FL>
-                      <pre className="rounded-control border border-danger bg-danger-soft px-2.5 py-2 text-xs font-mono whitespace-pre-wrap break-all text-danger">
+                      <pre className="rounded-lg border border-red-100 bg-red-50 px-2.5 py-2 text-[11px] font-mono text-red-700 whitespace-pre-wrap break-all">
                         {result.error}
                       </pre>
                     </div>
@@ -585,7 +600,7 @@ function NodeRunSection({
                   {result.traceback && (
                     <div className="space-y-1.5">
                       <FL>{t('detail.nodeInfo.runNodeTraceback')}</FL>
-                      <pre className="rounded-control border border-danger bg-danger-soft px-2.5 py-2 text-xs font-mono whitespace-pre-wrap break-all text-danger">
+                      <pre className="rounded-lg border border-red-100 bg-red-50 px-2.5 py-2 text-[11px] font-mono text-red-700 whitespace-pre-wrap break-all">
                         {result.traceback}
                       </pre>
                     </div>
@@ -648,21 +663,21 @@ export default function NodeInfoPanel({ node, workflow, latestExecution, width =
 
   return (
     <div
-      className="flex flex-col flex-shrink-0 bg-surface border-l border-line h-full overflow-hidden"
+      className="flex flex-col bg-white border-l border-gray-200 h-full flex-shrink-0 overflow-hidden"
       style={{ width }}
     >
       {/* Header */}
-      <div className="flex items-center gap-2 px-3 py-3 border-b border-line flex-shrink-0">
-        <span className={`w-2 h-2 rounded-pill flex-shrink-0 ${colors.dot}`} />
-        <span className={`text-xs font-semibold px-1.5 py-0.5 rounded-tag border ${colors.badge} flex-shrink-0`}>
+      <div className="flex items-center gap-2 px-3 py-3 border-b border-gray-100 flex-shrink-0">
+        <span className={`w-2 h-2 rounded-full flex-shrink-0 ${colors.dot}`} />
+        <span className={`text-[11px] font-semibold px-1.5 py-0.5 rounded border ${colors.badge} flex-shrink-0`}>
           {TYPE_LABEL[type] ?? type}
         </span>
-        <code className="flex-1 min-w-0 text-xs font-mono font-bold text-fg truncate">{node.id}</code>
+        <code className="flex-1 text-xs font-mono font-bold text-gray-800 min-w-0 truncate">{node.id}</code>
         {isStart && (
-          <span className="text-xs font-semibold px-1.5 py-0.5 rounded-tag bg-warning-soft text-warning border border-warning flex-shrink-0">{t('detail.nodeInfo.startBadge')}</span>
+          <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded bg-orange-50 text-orange-500 border border-orange-200 flex-shrink-0">{t('detail.nodeInfo.startBadge')}</span>
         )}
-        <button onClick={onClose} className="ui-btn-icon inline-flex items-center justify-center p-1 rounded-control hover:bg-hover text-fg-muted hover:text-fg-secondary transition-colors flex-shrink-0" title={t('detail.nodeInfo.close')}>
-          <IconX aria-hidden="true" className="w-4 h-4" />
+        <button onClick={onClose} className="p-1 rounded hover:bg-gray-100 text-gray-400 hover:text-gray-600 transition-colors flex-shrink-0" title={t('detail.nodeInfo.close')}>
+          <X aria-hidden="true" className="w-3.5 h-3.5" />
         </button>
       </div>
 
@@ -692,9 +707,9 @@ export default function NodeInfoPanel({ node, workflow, latestExecution, width =
                 <button
                   type="button"
                   onClick={() => setCodeEditorOpen(true)}
-                  className="inline-flex items-center gap-1 rounded-control border border-line px-2 py-1 text-xs text-fg-secondary hover:bg-hover hover:text-fg"
+                  className="inline-flex items-center gap-1 rounded-md border border-gray-200 px-2 py-1 text-[11px] text-gray-600 hover:bg-gray-50 hover:text-gray-900"
                 >
-                  <IconArrowsDiagonal aria-hidden="true" className="w-4 h-4" />
+                  <Maximize2 aria-hidden="true" className="w-3 h-3" />
                   {t('detail.nodeInfo.expandCodeEditor')}
                 </button>
               </div>
@@ -702,8 +717,7 @@ export default function NodeInfoPanel({ node, workflow, latestExecution, width =
                 value={form.code ?? ''}
                 onChange={(e) => set('code', e.target.value)}
                 rows={12}
-                className="ui-textarea w-full px-2.5  rounded-control text-xs font-mono resize-y
- bg-subtle text-fg border border-line"
+                className="w-full px-2.5 py-2.5 rounded-lg text-[11px] font-mono resize-y focus:outline-none focus:ring-2 focus:ring-red-400 bg-[#252c35] text-[#d7dee8] border border-[#4a5563] leading-relaxed"
                 placeholder={t('detail.nodeInfo.codePlaceholder')}
                 spellCheck={false}
               />
@@ -728,8 +742,8 @@ export default function NodeInfoPanel({ node, workflow, latestExecution, width =
           {(type === 'branch' || type === 'loop') && (
             <div className="space-y-2">
               <label className="flex items-center gap-2 cursor-pointer select-none">
-                <input type="checkbox" checked={!!form.join} onChange={(e) => set('join', e.target.checked)} className="w-3.5 h-3.5 rounded-tag text-danger" />
-                <span className="text-xs font-semibold uppercase tracking-widest text-fg-muted">{t('detail.nodeInfo.enableJoin')}</span>
+                <input type="checkbox" checked={!!form.join} onChange={(e) => set('join', e.target.checked)} className="w-3.5 h-3.5 rounded text-red-600" />
+                <span className="text-[10px] font-semibold uppercase tracking-widest text-gray-400">{t('detail.nodeInfo.enableJoin')}</span>
               </label>
               {form.join && (
                 <select value={form.join_mode ?? 'flat'} onChange={(e) => set('join_mode', e.target.value)} className={SL}>
@@ -814,44 +828,44 @@ export default function NodeInfoPanel({ node, workflow, latestExecution, width =
       </div>
 
       {/* Footer */}
-      <div className="flex-shrink-0 px-3 py-3 border-t border-line space-y-1.5">
+      <div className="px-3 py-3 border-t border-gray-100 space-y-1.5 flex-shrink-0">
         {saveErr && (
-          <p className="text-xs text-danger flex items-center gap-1"><IconAlertCircle aria-hidden="true" className="w-4 h-4 flex-shrink-0" />{saveErr}</p>
+          <p className="text-[11px] text-red-500 flex items-center gap-1"><AlertCircle aria-hidden="true" className="w-3 h-3 flex-shrink-0" />{saveErr}</p>
         )}
         <button
           onClick={handleSave}
           disabled={saving}
-          className="ui-btn ui-btn-primary ui-btn-sm w-full"
+          className="w-full flex items-center justify-center gap-1.5 py-2 rounded-lg text-xs font-semibold transition-colors bg-red-600 text-white hover:bg-red-700 disabled:opacity-50"
         >
-          {saving ? <><IconLoader2 aria-hidden="true" className="w-4 h-4 animate-spin" />{t('detail.nodeInfo.saving')}</>
+          {saving ? <><Loader2 aria-hidden="true" className="w-3.5 h-3.5 animate-spin" />{t('detail.nodeInfo.saving')}</>
             : savedOk ? t('detail.nodeInfo.saved')
-            : <><IconDeviceFloppy aria-hidden="true" className="w-4 h-4" />{t('detail.nodeInfo.saveNode')}</>}
+            : <><Save aria-hidden="true" className="w-3.5 h-3.5" />{t('detail.nodeInfo.saveNode')}</>}
         </button>
       </div>
 
       {isCodeNode && codeEditorOpen && (
-        <PageDialog aria-label={t('detail.nodeInfo.expandedCodeEditorTitle')} onClose={() => setCodeEditorOpen(false)} className="fixed inset-0 z-50 flex items-center justify-center bg-overlay-backdrop p-4">
+        <PageDialog aria-label={t('detail.nodeInfo.expandedCodeEditorTitle')} onClose={() => setCodeEditorOpen(false)} className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
           <div
 
 
 
-            className="flex h-[85vh] w-[min(96vw,960px)] min-h-0 min-w-0 flex-col overflow-hidden rounded-card border border-line bg-surface shadow-overlay"
+            className="flex flex-col rounded-2xl border border-gray-200 bg-white shadow-2xl h-[85vh] w-[min(96vw,960px)] min-h-0 min-w-0 overflow-hidden"
           >
-            <div className="flex items-center justify-between gap-3 border-b border-line px-4 py-3">
+            <div className="flex items-center justify-between gap-3 border-b border-gray-100 px-4 py-3">
               <div>
-                <p className="text-sm font-semibold text-fg">{t('detail.nodeInfo.expandedCodeEditorTitle')}</p>
-                <p className="text-xs text-fg-muted">{node.id}</p>
+                <p className="text-sm font-semibold text-gray-900">{t('detail.nodeInfo.expandedCodeEditorTitle')}</p>
+                <p className="text-xs text-gray-500">{node.id}</p>
               </div>
               <button
                 type="button"
                 onClick={() => setCodeEditorOpen(false)}
-                className="inline-flex items-center gap-1 rounded-control border border-line px-2.5 py-1.5 text-xs text-fg-secondary hover:bg-hover hover:text-fg"
+                className="inline-flex items-center gap-1 rounded-md border border-gray-200 px-2.5 py-1.5 text-xs text-gray-600 hover:bg-gray-50 hover:text-gray-900"
               >
-                <IconX aria-hidden="true" className="w-4 h-4" />
+                <X aria-hidden="true" className="w-3.5 h-3.5" />
                 {t('detail.nodeInfo.closeExpandedEditor')}
               </button>
             </div>
-            <div className="flex-1 min-h-0 min-w-0 bg-subtle p-4">
+            <div className="flex-1 bg-[#252c35] p-4 min-h-0 min-w-0">
               <ExpandedCodeEditor
                 value={form.code ?? ''}
                 onChange={(value) => set('code', value)}

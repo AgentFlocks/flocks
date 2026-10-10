@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
-import { IconAlertCircle, IconRobot } from '@tabler/icons-react';
+import { AlertCircle, Bot } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import SessionChat, {
   buildInstructionDisplayText,
@@ -326,13 +326,13 @@ export default function CreateChatTab({
   if (error) {
     return (
       <div className="flex flex-col items-center justify-center h-full gap-4 p-6 text-center">
-        <div className="flex items-center gap-2 text-xs text-danger bg-danger-soft border border-danger rounded-control px-3 py-2 w-full">
-          <IconAlertCircle aria-hidden="true" className="w-4 h-4 flex-shrink-0" />
+        <div className="flex items-center gap-2 text-xs text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2 w-full">
+          <AlertCircle aria-hidden="true" className="w-4 h-4 flex-shrink-0" />
           {error}
         </div>
         <button
           onClick={retry}
-          className="px-4 py-2 bg-action text-action-fg text-sm rounded-control hover:bg-action-hover transition-colors"
+          className="px-4 py-2 bg-red-600 text-white text-sm rounded-lg hover:bg-red-700 transition-colors"
         >
           {t('common:button.retry')}
         </button>
@@ -361,7 +361,7 @@ export default function CreateChatTab({
       welcomeContent={!sessionId ? (
         <GuidedCreatePanel
           emptyTitle={t('create.chat.emptyStateTitle')}
-          icon={<IconRobot aria-hidden="true" className="h-5 w-5" />}
+          icon={<Bot aria-hidden="true" className="h-5 w-5" />}
           title={t('create.chat.guidePanelTitle')}
           description={t('create.chat.guidePanelDesc')}
           groups={[

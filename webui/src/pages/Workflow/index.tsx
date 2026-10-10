@@ -1,20 +1,7 @@
 import { useState, useMemo, useEffect, useId, useCallback, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { useNavigate } from 'react-router-dom';
-import {
-  IconRouteSquare2 as WorkflowIcon,
-  IconPlus,
-  IconRefresh,
-  IconSparkles,
-  IconFolderOpen,
-  IconClock,
-  IconChevronRight,
-  IconCircleCheck,
-  IconCircleX,
-  IconCircleMinus,
-  IconLoader2,
-  type TablerIcon,
-} from '@tabler/icons-react';
+import { ChevronRight, Clock, FolderOpen, Plus, RefreshCw, Sparkles, Workflow as WorkflowIcon } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import PageHeader from '@/components/common/PageHeader';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
@@ -52,12 +39,12 @@ const STATUS_TOOLTIP_WIDTH = 224;
 const STATUS_TOOLTIP_MAX_HEIGHT = 240;
 const STATUS_TOOLTIP_GAP = 8;
 
-const CAPABILITY_STATUS_STYLES: Record<WorkflowCapabilityState, { text: string; background: string; icon: TablerIcon }> = {
-  unconfigured: { text: 'text-fg-muted', background: 'bg-subtle', icon: IconCircleMinus },
-  starting: { text: 'text-info', background: 'bg-info-soft', icon: IconLoader2 },
-  running: { text: 'text-success', background: 'bg-success-soft', icon: IconCircleCheck },
-  stopped: { text: 'text-fg-muted', background: 'bg-subtle', icon: IconCircleMinus },
-  error: { text: 'text-danger', background: 'bg-danger-soft', icon: IconCircleX },
+const CAPABILITY_STATUS_STYLES: Record<WorkflowCapabilityState, { text: string; dot: string }> = {
+  unconfigured: { text: 'text-gray-400', dot: 'bg-gray-300' },
+  starting: { text: 'text-gray-500', dot: 'bg-gray-400' },
+  running: { text: 'text-green-600', dot: 'bg-green-500' },
+  stopped: { text: 'text-red-600', dot: 'bg-red-500' },
+  error: { text: 'text-red-600', dot: 'bg-red-500' },
 };
 
 const TRIGGER_TYPE_LABEL_KEYS = {
@@ -171,10 +158,10 @@ export default function WorkflowPage() {
     return (
       <div className="flex items-center justify-center h-full">
         <div className="text-center">
-          <p className="text-danger mb-4">{error}</p>
+          <p className="text-red-600 mb-4">{error}</p>
           <button
             onClick={() => refetch()}
-            className="px-4 py-2 bg-action text-action-fg rounded-control hover:bg-action-hover"
+            className="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700"
           >
             {t('common:button.retry')}
           </button>
@@ -196,28 +183,28 @@ export default function WorkflowPage() {
         // the page header stays uniform with Skill/Agent pages.
       />
 
-      {error && <p role="alert" className="px-4 py-2 text-sm text-danger">{error}</p>}
+      {error && <p role="alert" className="px-4 py-2 text-sm text-red-600">{error}</p>}
       {/* Toolbar */}
-      <div className="px-4 py-2 border-b border-line flex flex-wrap items-center gap-3 min-w-0">
-        <div className="ml-auto flex items-center gap-2 shrink-0">
+      <div className="px-4 py-2 border-b border-gray-100 flex items-center gap-3 flex-wrap min-w-0">
+        <div className="flex items-center gap-2 ml-auto shrink-0">
           <PluginViewToggle value={viewMode} onChange={setViewMode} />
           <button
             onClick={handleRefresh}
             disabled={refreshing}
             title={refreshDone ? t('common:button.refreshed') : t('common:button.refresh')}
-            className={`ui-btn-icon inline-flex items-center justify-center p-1.5 rounded-control border transition-all ${
+            className={`p-1.5 rounded-lg border transition-all ${
               refreshDone
-                ? 'border-success text-success'
-                : 'border-line text-fg-muted hover:bg-hover hover:text-fg-secondary disabled:bg-disabled disabled:text-fg-disabled'
+                ? 'border-green-200 text-green-600'
+                : 'border-gray-200 text-gray-400 hover:bg-gray-50 hover:text-gray-600 disabled:opacity-50'
             }`}
           >
-            <IconRefresh aria-hidden="true" className={`w-4 h-4 ${refreshing ? 'animate-spin' : ''}`} />
+            <RefreshCw aria-hidden="true" className={`w-3.5 h-3.5 ${refreshing ? 'animate-spin' : ''}`} />
           </button>
           <button
             onClick={openFreshCreate}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-action text-action-fg rounded-control hover:bg-action-hover transition-colors text-sm whitespace-nowrap"
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors text-sm whitespace-nowrap"
           >
-            <IconPlus aria-hidden="true" className="w-4 h-4" />
+            <Plus aria-hidden="true" className="w-4 h-4" />
             {t('createWorkflow')}
           </button>
         </div>
@@ -232,15 +219,15 @@ export default function WorkflowPage() {
         <div className="min-w-0 flex-1 space-y-6">
         {workflows.length === 0 ? (
           <EmptyState
-            icon={<WorkflowIcon aria-hidden="true" className="w-8 h-8" />}
+            icon={<WorkflowIcon aria-hidden="true" className="w-16 h-16" />}
             title={t('emptyState.title')}
             description={t('emptyState.description')}
             action={
               <button
                 onClick={openFreshCreate}
-                className="inline-flex items-center gap-2 px-4 py-2 bg-action text-action-fg rounded-control hover:bg-action-hover"
+                className="inline-flex items-center gap-2 px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700"
               >
-                <IconPlus aria-hidden="true" className="w-5 h-5" />
+                <Plus aria-hidden="true" className="w-5 h-5" />
                 {t('createWorkflow')}
               </button>
             }
@@ -250,7 +237,7 @@ export default function WorkflowPage() {
             {showCustom && (
               <WorkflowSection
                 title={t('section.custom')}
-                icon={<IconFolderOpen aria-hidden="true" className="w-4 h-4" />}
+                icon={<FolderOpen aria-hidden="true" className="w-4 h-4" />}
                 workflows={customWorkflows}
                 groupSelection={groupSelection}
                 groupDrag={groupDrag}
@@ -260,7 +247,7 @@ export default function WorkflowPage() {
             {showBuiltin && (
               <WorkflowSection
                 title={t('section.builtin')}
-                icon={<IconSparkles aria-hidden="true" className="w-4 h-4" />}
+                icon={<Sparkles aria-hidden="true" className="w-4 h-4" />}
                 workflows={builtinWorkflows}
                 groupSelection={groupSelection}
                 groupDrag={groupDrag}
@@ -268,7 +255,7 @@ export default function WorkflowPage() {
               />
             )}
             {!showCustom && !showBuiltin && (
-              <p className="py-4 text-xs text-fg-muted">{t('emptyState.title')}</p>
+              <p className="py-4 text-xs text-gray-400">{t('emptyState.title')}</p>
             )}
           </>
         )}
@@ -316,12 +303,12 @@ function WorkflowSection({
     // in tests; visual styling is unchanged from the previous bare <div>.
     <section aria-label={title}>
       {/* Section header — same style as Agent page */}
-      <div className="flex items-start gap-3 mb-4 pl-3 border-l-2 border-line-control">
-        <span className="text-fg-muted mt-0.5">{icon}</span>
+      <div className="flex items-start gap-3 mb-4 pl-3 border-l-2 border-slate-300">
+        <span className="text-slate-400 mt-0.5">{icon}</span>
         <div>
           <div className="flex items-center gap-2">
-            <h2 className="text-sm font-semibold text-fg">{title}</h2>
-            <span className="text-xs font-medium px-1.5 py-0.5 rounded-tag bg-subtle text-fg-muted tabular-nums">
+            <h2 className="text-sm font-semibold text-gray-800">{title}</h2>
+            <span className="text-[11px] font-medium px-1.5 py-0.5 rounded bg-slate-100 text-slate-500 tabular-nums">
               {workflows.length}
             </span>
           </div>
@@ -340,7 +327,7 @@ function WorkflowSection({
       </div>
 
       {totalPages > 1 && (
-        <div className="mt-3 flex items-center justify-between text-xs text-fg-muted select-none">
+        <div className="mt-3 flex items-center justify-between text-xs text-gray-400 select-none">
           <span>
             {(page - 1) * PAGE_SIZE + 1}–{Math.min(workflows.length, page * PAGE_SIZE)} / {workflows.length}
           </span>
@@ -349,7 +336,7 @@ function WorkflowSection({
               type="button"
               disabled={page <= 1}
               onClick={() => setPage(p => p - 1)}
-              className="px-2 py-0.5 rounded-tag border border-line hover:bg-hover disabled:bg-disabled disabled:text-fg-disabled disabled:cursor-not-allowed"
+              className="px-2 py-0.5 rounded border border-gray-200 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed"
             >‹</button>
             {Array.from({ length: totalPages }, (_, i) => i + 1).map(p => (
               <button
@@ -357,8 +344,8 @@ function WorkflowSection({
                 type="button"
                 onClick={() => setPage(p)}
                 aria-current={p === page ? 'page' : undefined}
-                className={`w-6 h-5 rounded-tag text-xs font-medium transition-colors ${
-                  p === page ? 'bg-selected text-fg' : 'hover:bg-selected text-fg-muted'
+                className={`w-6 h-5 rounded text-[11px] font-medium transition-colors ${
+                  p === page ? 'bg-slate-700 text-white' : 'hover:bg-gray-100 text-gray-500'
                 }`}
               >{p}</button>
             ))}
@@ -366,7 +353,7 @@ function WorkflowSection({
               type="button"
               disabled={page >= totalPages}
               onClick={() => setPage(p => p + 1)}
-              className="px-2 py-0.5 rounded-tag border border-line hover:bg-hover disabled:bg-disabled disabled:text-fg-disabled disabled:cursor-not-allowed"
+              className="px-2 py-0.5 rounded border border-gray-200 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed"
             >›</button>
           </div>
         </div>
@@ -403,41 +390,37 @@ function WorkflowCard({ workflow, grouping, layout = 'cards' }: { workflow: Work
   return (
     <div
       onClick={() => navigate(`/workflows/${workflow.id}`)}
-      className={`group relative bg-surface rounded-card border border-line flex flex-col
- overflow-hidden cursor-pointer transition-all duration-150
- hover:border-line-control ${layout === 'list' ? 'sm:flex-row' : ''}`}
+      className={`group relative bg-white rounded-xl border border-gray-200 flex flex-col cursor-pointer transition-all duration-150 hover:border-gray-300 hover:shadow-md overflow-hidden ${layout === 'list' ? 'sm:flex-row' : ''}`}
     >
       {/* Card body */}
       <div className="flex-1 px-4 pt-3 pb-2 flex flex-col gap-2 min-w-0">
         {/* Avatar + name row */}
         <div className="flex items-start gap-2.5">
-          <div className="w-8 h-8 rounded-control flex items-center justify-center shrink-0 mt-0.5 bg-subtle">
-            <WorkflowIcon aria-hidden="true" className="w-4 h-4 text-fg-muted" />
+          <div className="w-8 h-8 rounded-lg flex items-center justify-center mt-0.5 bg-gray-100 shrink-0">
+            <WorkflowIcon aria-hidden="true" className="w-4 h-4 text-gray-500" />
           </div>
 
           <div className="min-w-0 flex-1">
             {/* Long names wrap to a second line instead of collapsing to "H…". */}
             <span
               title={displayName}
-              className="text-sm font-semibold text-fg line-clamp-2 break-words"
+              className="text-sm font-semibold text-gray-900 leading-snug line-clamp-2 break-words"
             >
               {displayName}
             </span>
             <div className="flex items-center gap-1 mt-0.5 flex-wrap">
               {/* Source badge */}
               {builtin ? (
-                <span className="inline-flex shrink-0 items-center whitespace-nowrap px-1.5 py-0.5 rounded-tag text-xs font-medium
- bg-info-soft text-info">
+                <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-blue-50 text-blue-600 shrink-0 whitespace-nowrap">
                   {t('badge.builtin')}
                 </span>
               ) : (
-                <span className="inline-flex shrink-0 items-center whitespace-nowrap px-1.5 py-0.5 rounded-tag text-xs font-medium
- bg-data-soft text-data">
+                <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-teal-50 text-teal-600 shrink-0 whitespace-nowrap">
                   {t('badge.custom')}
                 </span>
               )}
               {/* Node count */}
-              <span className="whitespace-nowrap text-xs text-fg-muted">
+              <span className="text-[10px] text-gray-400 whitespace-nowrap">
                 {workflow.nodeCount} {t('stats.nodes')}
               </span>
             </div>
@@ -445,12 +428,12 @@ function WorkflowCard({ workflow, grouping, layout = 'cards' }: { workflow: Work
 
           <div className="flex shrink-0 items-center gap-1">
             <PluginGroupButton grouping={grouping} itemKey={workflow.id} />
-            <IconChevronRight aria-hidden="true" className="w-4 h-4 text-fg-placeholder shrink-0 mt-1 group-hover:text-fg-muted transition-colors" />
+            <ChevronRight aria-hidden="true" className="w-4 h-4 text-gray-300 mt-1 group-hover:text-gray-500 transition-colors shrink-0" />
           </div>
         </div>
 
         {/* Description */}
-        <p className="text-xs text-fg-muted line-clamp-2">
+        <p className="text-xs text-gray-500 leading-relaxed line-clamp-2">
           {workflow.description || t('noDescription')}
         </p>
 
@@ -486,26 +469,26 @@ function WorkflowCard({ workflow, grouping, layout = 'cards' }: { workflow: Work
       </div>
 
       {/* Stats footer — kept from original, cleaned to white bg */}
-      <div className={`border-t border-line px-4 py-2.5 grid grid-cols-3 gap-2 ${layout === 'list' ? 'sm:w-72 sm:shrink-0 sm:items-center sm:border-t-0 sm:border-l' : ''}`}>
+      <div className={`border-t border-gray-100 px-4 py-2.5 grid grid-cols-3 gap-2 ${layout === 'list' ? 'sm:border-t-0 sm:border-l sm:w-72 sm:shrink-0 sm:items-center' : ''}`}>
         <div>
-          <div className="text-base font-bold text-fg tabular-nums">
+          <div className="text-base font-bold text-gray-900 tabular-nums">
             {workflow.stats.callCount}
           </div>
-          <div className="text-xs text-fg-muted">{t('stats.calls')}</div>
+          <div className="text-[10px] text-gray-500">{t('stats.calls')}</div>
         </div>
         <div>
           <div className="text-base font-bold tabular-nums"
-               style={{ color: workflow.stats.callCount > 0 ? 'var(--status-success)' : 'var(--text-muted)' }}>
+               style={{ color: workflow.stats.callCount > 0 ? '#16a34a' : '#9ca3af' }}>
             {successRate}{workflow.stats.callCount > 0 ? '%' : ''}
           </div>
-          <div className="text-xs text-fg-muted">{t('stats.successRate')}</div>
+          <div className="text-[10px] text-gray-500">{t('stats.successRate')}</div>
         </div>
         <div>
-          <div className="text-base font-bold text-fg tabular-nums flex items-center gap-0.5">
-            <IconClock aria-hidden="true" className="w-4 h-4 text-fg-muted shrink-0" />
+          <div className="text-base font-bold text-gray-900 tabular-nums flex items-center gap-0.5">
+            <Clock aria-hidden="true" className="w-3 h-3 text-gray-400 shrink-0" />
             {workflow.stats.avgRuntime > 0 ? `${workflow.stats.avgRuntime.toFixed(1)}s` : '—'}
           </div>
-          <div className="text-xs text-fg-muted">{t('stats.avgRuntime')}</div>
+          <div className="text-[10px] text-gray-500">{t('stats.avgRuntime')}</div>
         </div>
       </div>
     </div>
@@ -529,15 +512,14 @@ function CapabilityStatus({
     ? `${label}：${statusLabel}（${detailLabel}）`
     : `${label}：${statusLabel}`;
   const styles = CAPABILITY_STATUS_STYLES[state];
-  const Icon = styles.icon;
   return (
     <span
       aria-label={accessibleLabel}
       title={accessibleLabel}
-      className={`inline-flex shrink-0 items-center gap-1 rounded-tag px-1.5 py-0.5 whitespace-nowrap text-xs ${styles.background}`}
+      className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap text-[11px] leading-4"
     >
-      <Icon aria-hidden="true" className={`h-4 w-4 ${styles.text} ${state === 'starting' ? 'animate-spin' : ''}`} />
-      <span className="font-medium text-fg-muted">{label}</span>
+      <span className={`h-1.5 w-1.5 rounded-full ${styles.dot}`} />
+      <span className="font-medium text-gray-500">{label}</span>
       <span className={styles.text}>{statusLabel}</span>
     </span>
   );
@@ -619,8 +601,7 @@ function OverflowStatusList({ items }: { items: WorkflowTriggerStatusSummary[] }
         aria-label={`${t('integration.moreStatuses')}：${items.length}`}
         aria-expanded={position !== null}
         aria-describedby={position ? tooltipId : undefined}
-        className="ml-2 shrink-0 cursor-help text-xs font-medium text-fg-muted
- hover:text-fg-secondary focus-visible:text-fg-secondary"
+        className="ml-2 cursor-help text-[11px] leading-4 font-medium text-gray-400 hover:text-gray-600 focus-visible:outline-none focus-visible:text-gray-600 shrink-0"
         onMouseEnter={(event) => showTooltip(event.currentTarget)}
         onMouseLeave={scheduleHideTooltip}
         onFocus={(event) => showTooltip(event.currentTarget)}
@@ -638,14 +619,13 @@ function OverflowStatusList({ items }: { items: WorkflowTriggerStatusSummary[] }
         <div
           id={tooltipId}
           role="tooltip"
-          className={`pointer-events-auto fixed z-[1000] flex w-56 max-w-[calc(100vw-1rem)] -translate-x-full flex-col
- rounded-control border border-line bg-surface px-3 py-2 shadow-lg
- ${position.placement === 'top' ? '-translate-y-full' : ''}`}
+          className={`pointer-events-auto fixed flex w-56 max-w-[calc(100vw-1rem)] -translate-x-full flex-col rounded-lg border border-gray-200 bg-white px-3 py-2 shadow-lg z-[1000]
+                      ${position.placement === 'top' ? '-translate-y-full' : ''}`}
           style={{ left: position.x, top: position.y, maxHeight: position.maxHeight }}
           onMouseEnter={cancelScheduledHide}
           onMouseLeave={scheduleHideTooltip}
         >
-          <div className="mb-1.5 shrink-0 text-xs font-semibold text-fg-secondary">
+          <div className="mb-1.5 text-[11px] font-semibold text-gray-700 shrink-0">
             {t('integration.moreStatuses')}
           </div>
           <div className="min-h-0 space-y-1.5 overflow-y-auto">
@@ -661,9 +641,9 @@ function OverflowStatusList({ items }: { items: WorkflowTriggerStatusSummary[] }
           </div>
           <div
             className={`absolute right-3 border-4 border-transparent
- ${position.placement === 'top'
-              ? 'top-full border-t-line'
-              : 'bottom-full border-b-line'}`}
+                        ${position.placement === 'top'
+              ? 'top-full border-t-gray-200'
+              : 'bottom-full border-b-gray-200'}`}
           />
         </div>,
         document.body,

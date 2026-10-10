@@ -4,19 +4,19 @@ import type { ChangeEvent, ComponentType, ReactNode } from 'react';
 import { Navigate, useParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import {
-  IconCheck,
-  IconPhoto,
-  IconLanguage,
-  IconDeviceDesktop,
-  IconMoon,
-  IconRotate,
-  IconDeviceFloppy,
-  IconShieldCheck,
-  IconSun,
-  IconForms,
-  IconUpload,
-  type TablerIcon,
-} from '@tabler/icons-react';
+  Check,
+  ImageIcon,
+  Languages,
+  Monitor,
+  Moon,
+  RotateCcw,
+  Save,
+  ShieldCheck,
+  Sun,
+  TextCursorInput,
+  Upload,
+  type LucideIcon,
+} from 'lucide-react';
 import RoutePageSkeleton from '@/components/common/RoutePageSkeleton';
 import { ThemeContext } from '@/contexts/ThemeContext';
 import { useProductName } from '@/contexts/ProductNameContext';
@@ -55,20 +55,20 @@ function PreferenceRow({
   description,
   children,
 }: {
-  icon: TablerIcon;
+  icon: LucideIcon;
   title: string;
   description: string;
   children: ReactNode;
 }) {
   return (
-    <section className="flex flex-col gap-4 border-b border-line py-6 last:border-b-0 md:grid md:grid-cols-[minmax(0,1fr)_20rem] md:items-center md:gap-8">
+    <section className="flex-col border-b border-zinc-200 py-6 last:border-b-0 dark:border-zinc-800 flex gap-4 md:grid md:grid-cols-[minmax(0,1fr)_20rem] md:items-center md:gap-8">
       <div className="flex min-w-0 items-start gap-3">
-        <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-control bg-subtle text-fg-muted ">
+        <span className="flex h-9 w-9 items-center justify-center rounded-lg bg-zinc-100 text-zinc-500 dark:bg-zinc-900 dark:text-zinc-400 shrink-0">
           <Icon aria-hidden="true" className="h-5 w-5" />
         </span>
         <div className="min-w-0">
-          <h3 className="text-sm font-semibold text-fg ">{title}</h3>
-          <p className="mt-1 text-sm text-fg-muted ">{description}</p>
+          <h3 className="text-sm font-semibold text-zinc-950 dark:text-zinc-100">{title}</h3>
+          <p className="mt-1 text-sm text-zinc-500 dark:text-zinc-400">{description}</p>
         </div>
       </div>
       <div className="flex w-full justify-start md:justify-end">
@@ -86,7 +86,7 @@ function SegmentedOption({
 }: {
   active: boolean;
   children: ReactNode;
-  icon: TablerIcon;
+  icon: LucideIcon;
   onClick: () => void;
 }) {
   return (
@@ -94,15 +94,15 @@ function SegmentedOption({
       type="button"
       aria-pressed={active}
       onClick={onClick}
-      className={`inline-flex h-control-sm min-w-0 flex-1 items-center justify-center gap-2 whitespace-nowrap rounded-segment px-3 text-sm font-semibold transition-colors ${
+      className={`inline-flex h-9 flex-1 items-center justify-center gap-2 rounded-md px-3 text-sm font-semibold transition-colors min-w-0 whitespace-nowrap ${
         active
-          ? 'bg-selected text-fg '
-          : 'text-fg-secondary hover:bg-selected hover:text-fg '
+          ? 'bg-zinc-950 text-white dark:bg-zinc-100 dark:text-zinc-950'
+          : 'text-zinc-600 hover:bg-zinc-100 hover:text-zinc-950 dark:text-zinc-300 dark:hover:bg-zinc-800 dark:hover:text-white'
       }`}
     >
       <Icon aria-hidden="true" className="h-4 w-4" />
       {children}
-      {active && <IconCheck aria-hidden="true" className="h-4 w-4" />}
+      {active && <Check aria-hidden="true" className="h-3.5 w-3.5" />}
     </button>
   );
 }
@@ -118,23 +118,24 @@ function PreferenceSwitch({
   label: string;
   onChange: () => void;
 }) {
-  const { t } = useTranslation('common');
   return (
-    <span className="inline-flex items-center gap-2">
-      <button
+    <button
       type="button"
       role="switch"
       aria-checked={checked}
       aria-label={label}
       disabled={disabled}
       onClick={onChange}
-        className="ui-btn-icon inline-flex shrink-0 items-center justify-center rounded-control disabled:cursor-not-allowed">
-<span className="ui-switch" aria-hidden="true" aria-checked={checked} aria-disabled={disabled} />
-</button>
-      <span className={disabled ? 'text-sm text-fg-disabled' : 'text-sm text-fg-secondary'}>
-        {t(checked ? 'status.enabled' : 'status.disabled')}
-      </span>
-    </span>
+      className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-zinc-400 focus-visible:ring-offset-2 disabled:cursor-wait disabled:opacity-60 ${
+        checked ? 'bg-zinc-950 dark:bg-zinc-100' : 'bg-zinc-300 dark:bg-zinc-700'
+      }`}
+    >
+      <span
+        className={`pointer-events-none inline-block h-5 w-5 rounded-full bg-white shadow transition-transform dark:bg-zinc-950 ${
+          checked ? 'translate-x-5' : 'translate-x-0.5'
+        }`}
+      />
+    </button>
   );
 }
 
@@ -266,14 +267,14 @@ function PreferencesPanel() {
 
   return (
     <div className="mx-auto w-full max-w-5xl">
-      <header className="border-b border-line pb-6 ">
-        <h1 className="text-title-page font-bold tracking-normal text-fg">{t('settingsPreferences')}</h1>
-        <p className="mt-2 text-sm text-fg-muted ">{t('settingsPreferencesDescription')}</p>
+      <header className="border-b border-zinc-200 pb-6 dark:border-zinc-800">
+        <h1 className="text-2xl font-bold tracking-normal text-zinc-950 dark:text-zinc-50">{t('settingsPreferences')}</h1>
+        <p className="mt-2 text-sm text-zinc-500 dark:text-zinc-400">{t('settingsPreferencesDescription')}</p>
       </header>
 
       <div className="mt-2">
         <PreferenceRow
-          icon={IconForms}
+          icon={TextCursorInput}
           title={t('displayName')}
           description={t('displayNameDescription')}
         >
@@ -283,9 +284,9 @@ function PreferencesPanel() {
               onChange={(event) => setDisplayNameDraft(event.target.value)}
               maxLength={48}
               placeholder={t('displayNamePlaceholder')}
-              className="ui-input h-9 w-full rounded-control border border-line bg-surface px-3 text-sm text-fg transition-colors placeholder:text-fg-muted focus:border-line-control"
+              className="h-9 w-full rounded-lg border border-zinc-200 bg-white px-3 text-sm text-zinc-900 outline-none transition-colors placeholder:text-zinc-400 focus:border-zinc-400 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-100 dark:placeholder:text-zinc-500 dark:focus:border-zinc-600"
             />
-            <div className="text-xs text-fg-muted ">
+            <div className="text-xs text-zinc-500 dark:text-zinc-400">
               {t('displayNameCurrent', { name: productName })}
             </div>
             <div className="flex gap-2">
@@ -293,9 +294,9 @@ function PreferencesPanel() {
                 type="button"
                 onClick={() => void handleSaveDisplayName()}
                 disabled={savingDisplayName || !displayNameChanged}
-                className="ui-btn ui-btn-primary flex-1"
+                className="inline-flex h-9 flex-1 items-center justify-center gap-2 rounded-md bg-zinc-950 px-3 text-sm font-semibold text-white transition-colors hover:bg-zinc-800 disabled:cursor-not-allowed disabled:bg-zinc-200 disabled:text-zinc-500 dark:bg-zinc-100 dark:text-zinc-950 dark:hover:bg-zinc-200 dark:disabled:bg-zinc-800 dark:disabled:text-zinc-500"
               >
-                <IconDeviceFloppy aria-hidden="true" className="h-4 w-4" />
+                <Save aria-hidden="true" className="h-4 w-4" />
                 {t('saveDisplayName')}
               </button>
               <button
@@ -304,25 +305,25 @@ function PreferencesPanel() {
                 disabled={savingDisplayName || !configuredDisplayName}
                 title={t('resetDisplayName')}
                 aria-label={t('resetDisplayName')}
-                className="ui-btn-icon inline-flex items-center justify-center inline-flex   items-center justify-center rounded-control border border-line text-fg-muted transition-colors hover:bg-hover hover:text-fg disabled:cursor-not-allowed disabled:bg-disabled disabled:text-fg-disabled "
+                className="inline-flex h-9 w-10 items-center justify-center rounded-md border border-zinc-200 text-zinc-500 transition-colors hover:bg-zinc-100 hover:text-zinc-950 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-800 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-50"
               >
-                <IconRotate aria-hidden="true" className="h-4 w-4" />
+                <RotateCcw aria-hidden="true" className="h-4 w-4" />
               </button>
             </div>
           </div>
         </PreferenceRow>
 
         <PreferenceRow
-          icon={IconPhoto}
+          icon={ImageIcon}
           title={t('favicon')}
           description={t('faviconDescription')}
         >
           <div className="flex w-full flex-col gap-3 md:max-w-64">
             <div className="flex items-center gap-3">
-              <span className="flex h-11 w-11 items-center justify-center rounded-control border border-line bg-surface ">
-                <img src={faviconUrl} alt="" className="h-7 w-7 rounded-tag object-contain" />
+              <span className="flex h-11 w-11 items-center justify-center rounded-lg border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900">
+                <img src={faviconUrl} alt="" className="h-7 w-7 rounded-sm object-contain" />
               </span>
-              <div className="min-w-0 text-xs text-fg-muted ">
+              <div className="text-xs text-zinc-500 dark:text-zinc-400 min-w-0">
                 {hasCustomFavicon ? t('faviconCustom') : t('faviconDefault')}
               </div>
             </div>
@@ -338,9 +339,9 @@ function PreferencesPanel() {
                 type="button"
                 onClick={() => faviconInputRef.current?.click()}
                 disabled={savingFavicon}
-                className="ui-btn ui-btn-primary flex-1"
+                className="inline-flex h-9 flex-1 items-center justify-center gap-2 rounded-md bg-zinc-950 px-3 text-sm font-semibold text-white transition-colors hover:bg-zinc-800 disabled:cursor-not-allowed disabled:bg-zinc-200 disabled:text-zinc-500 dark:bg-zinc-100 dark:text-zinc-950 dark:hover:bg-zinc-200 dark:disabled:bg-zinc-800 dark:disabled:text-zinc-500"
               >
-                <IconUpload aria-hidden="true" className="h-4 w-4" />
+                <Upload aria-hidden="true" className="h-4 w-4" />
                 {t('uploadFavicon')}
               </button>
               <button
@@ -349,30 +350,30 @@ function PreferencesPanel() {
                 disabled={savingFavicon || !hasCustomFavicon}
                 title={t('resetFavicon')}
                 aria-label={t('resetFavicon')}
-                className="ui-btn-icon inline-flex items-center justify-center inline-flex   items-center justify-center rounded-control border border-line text-fg-muted transition-colors hover:bg-hover hover:text-fg disabled:cursor-not-allowed disabled:bg-disabled disabled:text-fg-disabled "
+                className="inline-flex h-9 w-10 items-center justify-center rounded-md border border-zinc-200 text-zinc-500 transition-colors hover:bg-zinc-100 hover:text-zinc-950 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-800 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-50"
               >
-                <IconRotate aria-hidden="true" className="h-4 w-4" />
+                <RotateCcw aria-hidden="true" className="h-4 w-4" />
               </button>
             </div>
           </div>
         </PreferenceRow>
 
         <PreferenceRow
-          icon={IconLanguage}
+          icon={Languages}
           title={t('language')}
           description={t('languageDescription')}
         >
-          <PageSelectionGroup className="grid w-56 grid-cols-2">
+          <PageSelectionGroup className="grid w-56 grid-cols-2 rounded-lg border border-zinc-200 bg-white p-1 dark:border-zinc-800 dark:bg-zinc-900">
             <SegmentedOption
               active={language === 'en-US'}
-              icon={IconLanguage}
+              icon={Languages}
               onClick={() => void i18n.changeLanguage('en-US')}
             >
               EN
             </SegmentedOption>
             <SegmentedOption
               active={language === 'zh-CN'}
-              icon={IconLanguage}
+              icon={Languages}
               onClick={() => void i18n.changeLanguage('zh-CN')}
             >
               中
@@ -381,28 +382,28 @@ function PreferencesPanel() {
         </PreferenceRow>
 
         <PreferenceRow
-          icon={theme === 'dark' ? IconMoon : IconSun}
+          icon={theme === 'dark' ? Moon : Sun}
           title={t('theme')}
           description={t('themeDescription')}
         >
-          <PageSelectionGroup className="grid w-full grid-cols-3">
+          <PageSelectionGroup className="grid w-full grid-cols-3 rounded-lg border border-zinc-200 bg-white p-1 dark:border-zinc-800 dark:bg-zinc-900">
             <SegmentedOption
               active={themeMode === 'system'}
-              icon={IconDeviceDesktop}
+              icon={Monitor}
               onClick={() => setTheme('system')}
             >
               {t('systemTheme')}
             </SegmentedOption>
             <SegmentedOption
               active={themeMode === 'light'}
-              icon={IconSun}
+              icon={Sun}
               onClick={() => setTheme('light')}
             >
               {t('lightTheme')}
             </SegmentedOption>
             <SegmentedOption
               active={themeMode === 'dark'}
-              icon={IconMoon}
+              icon={Moon}
               onClick={() => setTheme('dark')}
             >
               {t('darkTheme')}
@@ -411,7 +412,7 @@ function PreferencesPanel() {
         </PreferenceRow>
 
         <PreferenceRow
-          icon={IconShieldCheck}
+          icon={ShieldCheck}
           title={t('toolFailureAutoDisable')}
           description={t('toolFailureAutoDisableDescription')}
         >

@@ -1,10 +1,5 @@
 import { useId, useState } from 'react';
-import {
-  IconArrowsDiagonal,
-  IconDownload,
-  IconLink,
-  IconX,
-} from '@tabler/icons-react';
+import { Download, Link2, Maximize2, X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { knowledgebaseAPI, type Dataset, type KnowledgeFile } from '@/api/knowledgebase';
 import { FilePreviewRenderer, PreviewModal, type PreviewFileAccess } from '@/components/common/FilePreview';
@@ -57,10 +52,10 @@ export default function FilePreview({ file, onClose, onLinked, fileAccess = acce
       title={file.name}
       icon={fileIcon(node)}
       actions={<>
-        {onLinked && <button type="button" title={t('knowledge.files.associate')} className={previewActionClass} onClick={() => setLinking(true)}><IconLink aria-hidden="true" className="h-4 w-4" /></button>}
-        <a href={fileAccess.downloadUrl(file.id)} download={file.name} title={t('knowledge.files.download')} className={previewActionClass}><IconDownload aria-hidden="true" className="h-4 w-4" /></a>
-        <button type="button" title={t('files.preview.fullscreen')} className={previewActionClass} onClick={() => setFullscreen(true)}><IconArrowsDiagonal aria-hidden="true" className="h-4 w-4" /></button>
-        <button type="button" title={t('knowledge.files.closePreview')} className={previewActionClass} onClick={onClose}><IconX aria-hidden="true" className="h-4 w-4" /></button>
+        {onLinked && <button type="button" title={t('knowledge.files.associate')} className={previewActionClass} onClick={() => setLinking(true)}><Link2 aria-hidden="true" className="h-4 w-4" /></button>}
+        <a href={fileAccess.downloadUrl(file.id)} download={file.name} title={t('knowledge.files.download')} className={previewActionClass}><Download aria-hidden="true" className="h-4 w-4" /></a>
+        <button type="button" title={t('files.preview.fullscreen')} className={previewActionClass} onClick={() => setFullscreen(true)}><Maximize2 aria-hidden="true" className="h-4 w-4" /></button>
+        <button type="button" title={t('knowledge.files.closePreview')} className={previewActionClass} onClick={onClose}><X aria-hidden="true" className="h-4 w-4" /></button>
       </>}
       meta={<>
         <span>{file.size == null ? '—' : formatBytes(file.size)}</span>
@@ -69,7 +64,7 @@ export default function FilePreview({ file, onClose, onLinked, fileAccess = acce
       </>}
     />
     <div className="min-h-0 flex-1 overflow-hidden">
-      {query.error ? <p role="alert" className="p-4 text-sm text-fg-muted">{query.error}</p> : (
+      {query.error ? <p role="alert" className="p-4 text-sm text-gray-500">{query.error}</p> : (
         <FilePreviewRenderer node={node} content={content} editing={false} editContent={null} truncated={false} previewLimitBytes={null} fileAccess={fileAccess} onEditChange={() => {}} />
       )}
     </div>
@@ -104,9 +99,9 @@ function AssociateFile({ fileId, onClose, onLinked }: { fileId: string; onClose:
   };
   return <Modal title={t('knowledge.files.associate')} onClose={() => { if (!busy) onClose(); }}>
     <form className="space-y-4" onSubmit={event => { event.preventDefault(); void submit(); }}>
-      <p className="text-sm text-fg-muted">{t('knowledge.files.associateHint')}</p>
+      <p className="text-sm text-gray-500">{t('knowledge.files.associateHint')}</p>
       <input disabled={busy} value={q} onChange={event => { setQ(event.target.value); setPage(1); }} placeholder={t('knowledge.datasets.search')} className={inputClass} />
-      <p className="text-xs text-fg-muted">{t('knowledge.datasets.pageSearch')}</p>
+      <p className="text-xs text-gray-500">{t('knowledge.datasets.pageSearch')}</p>
       <LoadState loading={query.loading} error={query.error} retry={query.reload}>
         <fieldset disabled={busy} className="space-y-2">
           <legend className="text-sm font-medium">{t('knowledge.files.targetDataset')}</legend>
@@ -114,7 +109,7 @@ function AssociateFile({ fileId, onClose, onLinked }: { fileId: string; onClose:
             <input type="radio" name={radioName} value={dataset.id} checked={selected?.id === dataset.id} onChange={() => setSelected(dataset)} />
             <span className="min-w-0 truncate">{dataset.name}</span>
           </label>)}
-          {query.data?.items.length === 0 && <p className="text-sm text-fg-muted">{t('knowledge.datasets.empty')}</p>}
+          {query.data?.items.length === 0 && <p className="text-sm text-gray-500">{t('knowledge.datasets.empty')}</p>}
         </fieldset>
         {query.data && <Pagination page={page} total={query.data.total} onChange={setPage} />}
       </LoadState>

@@ -1,4 +1,6 @@
-# Flocks WebUI 界面规范（v1.4）
+# Flocks WebUI 界面规范（v1.4，已停用）
+
+> 2026-10-10 起界面以 flocksdev 的 dev 分支为准：沿用 dev 的写法（Tailwind 默认色板类加 index.css 的 `.dark` 兼容表、lucide-react 图标），不再按本文件。`scripts/ui_spec_check.py` 已从 CI 移除。`src/styles/tokens.css` 里的语义变量只给 v2 新增、dev 没有的界面和 Hub 插件页面用，取值已对齐 dev 的配色。下面的内容只作历史参考。
 
 所有新界面都按这份规范写，已有页面逐步对齐。设计源是 `webui/design/flocks-ui-spec-v1.4.html`（浅色 / 深色并排的组件样板，直接用浏览器打开），这里只写开发要遵守的那部分。token 落在代码里：`src/styles/tokens.css`（CSS 变量）、`tailwind.config.js`（语义类）、`src/styles/index.css`（全局基线与 `ui-*` 组件类），`scripts/ui_spec_check.py` 负责拦截新增的不合规写法。
 

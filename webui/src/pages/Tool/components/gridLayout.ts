@@ -57,4 +57,4 @@ export const SERVICE_TAB_ACTIONS_CELL = 'flex items-center justify-end flex-1 ba
  */
 export const SERVICE_TAB_CARD_GRID_COLS = '32px minmax(0, 1fr)';
 export const SERVICE_TAB_CARD_CLASS =
-  'grid items-center gap-3 px-4 py-3 rounded-control border border-line [&>:nth-child(5)]:col-span-2 [&>:nth-child(6)]:col-span-2';
+  'grid items-center gap-3 px-4 py-3 rounded-lg border border-gray-200 [&>:nth-child(5)]:col-span-2 [&>:nth-child(6)]:col-span-2';

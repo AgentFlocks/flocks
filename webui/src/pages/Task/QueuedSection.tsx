@@ -4,16 +4,16 @@ import PageSelectionGroup from '../PageSelectionGroup';
 import { lazy, Suspense, useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
-  IconListCheck,
-  IconPlayerPlay,
-  IconRotate,
-  IconCircleX,
-  IconTrash,
-  IconChevronLeft,
-  IconChevronRight,
-  IconGripVertical,
-  IconX,
-} from '@tabler/icons-react';
+  ChevronLeft,
+  ChevronRight,
+  GripVertical,
+  ListTodo,
+  Play,
+  RotateCcw,
+  Trash2,
+  X,
+  XCircle,
+} from 'lucide-react';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
 import EmptyState from '@/components/common/EmptyState';
 import { useToast } from '@/components/common/Toast';
@@ -30,7 +30,7 @@ const LazySessionChat = lazy(() => import('@/components/common/SessionChat'));
 
 function SessionChatFallback() {
   return (
-    <div className="flex flex-1 min-h-0 items-center justify-center text-fg-muted">
+    <div className="flex flex-1 items-center justify-center text-gray-400 min-h-0">
       <LoadingSpinner />
     </div>
   );
@@ -253,19 +253,19 @@ export default function QueuedSection({ onRefreshGlobal }: { onRefreshGlobal: ()
   };
 
   if (loading && effectiveTasks.length === 0) return <div className="flex justify-center py-12"><LoadingSpinner delayMs={180} /></div>;
-  if (error) return <div className="text-center py-12 text-danger">{error}</div>;
+  if (error) return <div className="text-center py-12 text-red-500">{error}</div>;
 
   return (
     <div className="space-y-3">
       {/* 窄屏下「已选 N 项 / 批量取消 / 批量删除」换到下一行，按钮文案不逐字竖排 */}
-      <div className="flex flex-wrap items-center justify-between gap-2 whitespace-nowrap">
-        <PageSelectionGroup className="flex ga">
+      <div className="flex items-center justify-between flex-wrap whitespace-nowrap">
+        <PageSelectionGroup className="flex gap-1 bg-gray-100 rounded-lg p-1">
           {QUEUED_FILTERS.map(f => (
             <button aria-pressed={filterKey === f.key}
               key={f.key}
               onClick={() => handleFilterChange(f.key)}
-              className={`px-3 py-1.5 text-sm rounded-segment transition-colors ${
-                filterKey === f.key ? 'bg-selected text-fg font-medium' : 'text-fg-secondary hover:text-fg'
+              className={`px-3 py-1.5 text-sm rounded-md transition-colors ${
+                filterKey === f.key ? 'bg-white text-slate-800 shadow-sm font-medium' : 'text-gray-600 hover:text-gray-900'
               }`}
             >
               {f.label}
@@ -274,17 +274,17 @@ export default function QueuedSection({ onRefreshGlobal }: { onRefreshGlobal: ()
         </PageSelectionGroup>
         {hasVisibleSelection && (
           <div className="flex items-center gap-2">
-            <span className="text-sm text-fg-muted">{t('queued.selectedCount', { count: visibleSelectedIds.length })}</span>
-            <button onClick={handleBatchCancel} className="px-3 py-1.5 text-sm bg-warning-soft text-warning rounded-control hover:bg-warning-soft">{t('queued.batchCancel')}</button>
-            <button onClick={handleBatchDelete} className="px-3 py-1.5 text-sm bg-danger-soft text-danger rounded-control hover:bg-danger-soft">{t('queued.batchDelete')}</button>
+            <span className="text-sm text-gray-500">{t('queued.selectedCount', { count: visibleSelectedIds.length })}</span>
+            <button onClick={handleBatchCancel} className="px-3 py-1.5 text-sm bg-yellow-50 text-yellow-700 rounded-md hover:bg-yellow-100">{t('queued.batchCancel')}</button>
+            <button onClick={handleBatchDelete} className="px-3 py-1.5 text-sm bg-red-50 text-red-700 rounded-md hover:bg-red-100">{t('queued.batchDelete')}</button>
           </div>
         )}
       </div>
 
-      <div className="bg-surface rounded-card border border-line overflow-hidden">
+      <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
         {effectiveTasks.length === 0 ? (
           <EmptyState
-            icon={<IconListCheck aria-hidden="true" className="w-8 h-8" />}
+            icon={<ListTodo aria-hidden="true" className="w-8 h-8" />}
             title={t('queued.emptyTitle')}
             description={t('queued.emptyDescription')}
           />
@@ -294,45 +294,45 @@ export default function QueuedSection({ onRefreshGlobal }: { onRefreshGlobal: ()
                 whitespace-nowrap 让单元格保持自然宽度靠容器滚动，而不是把「已完成」「用户」逐字竖排 */}
             <div className="overflow-x-auto">
             <table className="w-full text-sm whitespace-nowrap">
-              <thead className="bg-subtle border-b border-line">
+              <thead className="bg-gray-50 border-b border-gray-200">
                 <tr>
                   <th className="w-10 px-3 py-3">
                     <input
                       type="checkbox"
                       checked={allVisibleSelected}
                       onChange={handleToggleSelectAll}
-                      className="rounded-tag border-line-control"
+                      className="rounded border-gray-300"
                     />
                   </th>
-                  <th className="text-left px-3 py-3 font-medium text-fg-secondary">{t('queued.colStatus')}</th>
-                  <th className="text-left px-3 py-3 font-medium text-fg-secondary">{t('queued.colSource')}</th>
-                  <th className="text-left px-3 py-3 font-medium text-fg-secondary">{t('queued.colName')}</th>
-                  <th className="text-left px-3 py-3 font-medium text-fg-secondary">{t('queued.colMode')}</th>
-                  <th className="text-left px-3 py-3 font-medium text-fg-secondary">{t('queued.colPriority')}</th>
-                  <th className="text-left px-3 py-3 font-medium text-fg-secondary">{t('queued.colTime')}</th>
+                  <th className="text-left px-3 py-3 font-medium text-gray-600">{t('queued.colStatus')}</th>
+                  <th className="text-left px-3 py-3 font-medium text-gray-600">{t('queued.colSource')}</th>
+                  <th className="text-left px-3 py-3 font-medium text-gray-600">{t('queued.colName')}</th>
+                  <th className="text-left px-3 py-3 font-medium text-gray-600">{t('queued.colMode')}</th>
+                  <th className="text-left px-3 py-3 font-medium text-gray-600">{t('queued.colPriority')}</th>
+                  <th className="text-left px-3 py-3 font-medium text-gray-600">{t('queued.colTime')}</th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-line">
+              <tbody className="divide-y divide-gray-100">
                 {effectiveTasks.map(task => (
                   <tr
                     key={task.id}
                     onClick={() => openDetail(task)}
-                    className={`cursor-pointer transition-colors ${selectedId === task.id ? 'bg-subtle' : 'hover:bg-hover'}`}
+                    className={`cursor-pointer transition-colors ${selectedId === task.id ? 'bg-slate-50' : 'hover:bg-gray-50'}`}
                   >
                     <td className="px-3 py-3" onClick={e => e.stopPropagation()}>
-                      <input type="checkbox" checked={selectedTasks.has(task.id)} onChange={() => toggleSelect(task.id)} className="rounded-tag border-line-control" />
+                      <input type="checkbox" checked={selectedTasks.has(task.id)} onChange={() => toggleSelect(task.id)} className="rounded border-gray-300" />
                     </td>
                     <td className="px-3 py-3"><StatusBadge status={task.status} /></td>
                     <td className="px-3 py-3"><SourceBadge sourceType={task.source?.sourceType ?? 'user_conversation'} /></td>
-                    <td className="px-3 py-3 font-medium text-fg max-w-[200px] truncate">
+                    <td className="px-3 py-3 font-medium text-gray-900 max-w-[200px] truncate">
                       {task.deliveryStatus === 'unread' && task.status === 'completed' && (
-                        <span className="w-1.5 h-1.5 bg-info rounded-pill inline-block mr-1.5 mb-0.5 align-middle" />
+                        <span className="w-1.5 h-1.5 bg-sky-500 rounded-full inline-block mr-1.5 mb-0.5 align-middle" />
                       )}
                       {task.title}
                     </td>
                     <td className="px-3 py-3"><ModeBadge mode={task.executionMode} agent={task.agentName} /></td>
                     <td className="px-3 py-3"><PriorityBadge priority={task.priority} /></td>
-                    <td className="px-3 py-3 text-fg-muted text-xs whitespace-nowrap">
+                    <td className="px-3 py-3 text-gray-400 text-xs whitespace-nowrap">
                       {task.startedAt
                         ? formatTime(task.startedAt)
                         : task.queuedAt
@@ -344,16 +344,16 @@ export default function QueuedSection({ onRefreshGlobal }: { onRefreshGlobal: ()
               </tbody>
             </table>
             </div>
-            <div className="flex items-center justify-between px-4 py-3 border-t border-line bg-subtle">
-              <span className="text-sm text-fg-muted">
+            <div className="flex items-center justify-between px-4 py-3 border-t border-gray-200 bg-gray-50">
+              <span className="text-sm text-gray-500">
                 {t('queued.pagination', { total, page: page + 1, totalPages })}
               </span>
               <div className="flex gap-2">
-                <button aria-label={pageActionLabel('previous')} onClick={() => handlePageChange(Math.max(0, page - 1))} disabled={page === 0} className="ui-btn-icon inline-flex items-center justify-center p-1.5 rounded-control hover:bg-hover disabled:bg-disabled disabled:text-fg-disabled disabled:cursor-not-allowed">
-                  <IconChevronLeft aria-hidden="true" className="w-4 h-4" />
+                <button aria-label={pageActionLabel('previous')} onClick={() => handlePageChange(Math.max(0, page - 1))} disabled={page === 0} className="p-1.5 rounded hover:bg-gray-200 disabled:opacity-30 disabled:cursor-not-allowed">
+                  <ChevronLeft aria-hidden="true" className="w-4 h-4" />
                 </button>
-                <button aria-label={pageActionLabel('next')} onClick={() => handlePageChange(Math.min(totalPages - 1, page + 1))} disabled={page >= totalPages - 1} className="ui-btn-icon inline-flex items-center justify-center p-1.5 rounded-control hover:bg-hover disabled:bg-disabled disabled:text-fg-disabled disabled:cursor-not-allowed">
-                  <IconChevronRight aria-hidden="true" className="w-4 h-4" />
+                <button aria-label={pageActionLabel('next')} onClick={() => handlePageChange(Math.min(totalPages - 1, page + 1))} disabled={page >= totalPages - 1} className="p-1.5 rounded hover:bg-gray-200 disabled:opacity-30 disabled:cursor-not-allowed">
+                  <ChevronRight aria-hidden="true" className="w-4 h-4" />
                 </button>
               </div>
             </div>
@@ -415,63 +415,63 @@ function QueuedDetailPanel({ task, onClose, onAction, onRefresh }: {
 
   return (
     <PageDialog variant="panels" className="contents" onClose={onClose}>
-      <div className="fixed inset-0 bg-overlay-backdrop z-40" onClick={onClose} />
+      <div className="fixed inset-0 bg-black/40 z-40" onClick={onClose} />
       <div data-ui-overlay="drawer"
-        className="fixed right-0 top-0 bottom-0 z-50 flex flex-col bg-surface shadow-overlay transition-colors"
+        className="fixed right-0 top-0 bottom-0 flex flex-col bg-white shadow-2xl transition-colors z-50"
         style={{ width: drawerWidth, maxWidth: '100%' }}
         onClick={(e) => e.stopPropagation()}
       >
         <div
-          className={`absolute -left-1 top-0 bottom-0 z-10 w-3 cursor-ew-resize transition-colors ${
-            isDragging ? 'bg-danger' : 'hover:bg-danger'
+          className={`absolute -left-1 top-0 bottom-0 w-3 cursor-ew-resize transition-colors z-10 ${
+            isDragging ? 'bg-red-500/10' : 'hover:bg-red-400/10'
           }`}
           onMouseDown={handleDragStart}
         >
           <div className={`absolute inset-y-0 left-1/2 w-px -translate-x-1/2 ${
-            isDragging ? 'bg-danger' : 'bg-selected'
+            isDragging ? 'bg-red-500' : 'bg-gray-200'
           }`} />
           <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2">
-            <IconGripVertical aria-hidden="true" className={`w-4 h-6 ${isDragging ? 'text-danger' : 'text-fg-placeholder hover:text-fg-muted'}`} />
+            <GripVertical aria-hidden="true" className={`w-3 h-6 ${isDragging ? 'text-red-500' : 'text-gray-300 hover:text-gray-500'}`} />
           </div>
         </div>
-        <div className="flex items-center justify-between px-6 py-4 border-b border-line flex-shrink-0">
-          <h3 className="font-semibold text-fg truncate pr-2">{task.title}</h3>
-          <button aria-label={pageActionLabel('close')} onClick={onClose} className="ui-btn-icon inline-flex items-center justify-center p-1 rounded-control hover:bg-hover flex-shrink-0">
-            <IconX aria-hidden="true" className="w-4 h-4 text-fg-muted" />
+        <div className="flex items-center justify-between px-6 py-4 border-b border-gray-200 flex-shrink-0">
+          <h3 className="font-semibold text-gray-900 pr-2 truncate">{task.title}</h3>
+          <button aria-label={pageActionLabel('close')} onClick={onClose} className="p-1 rounded hover:bg-gray-100 flex-shrink-0">
+            <X aria-hidden="true" className="w-4 h-4 text-gray-400" />
           </button>
         </div>
 
-        <div className="px-6 py-4 border-b border-line flex-shrink-0 space-y-2.5">
+        <div className="px-6 py-4 border-b border-gray-100 space-y-2.5 flex-shrink-0">
           <div className="flex items-center gap-2 flex-wrap">
             <StatusBadge status={task.status} />
             <PriorityBadge priority={task.priority} />
             <ModeBadge mode={task.executionMode} agent={task.agentName} />
             {task.durationMs != null && (
-              <span className="text-xs text-fg-muted">{formatDuration(task.durationMs)}</span>
+              <span className="text-xs text-gray-400">{formatDuration(task.durationMs)}</span>
             )}
           </div>
 
           {task.description && (
-            <p className="text-xs text-fg-muted break-words">{task.description}</p>
+            <p className="text-xs text-gray-500 break-words">{task.description}</p>
           )}
 
           {(task.executionInputSnapshot?.tags?.length ?? 0) > 0 && (
             <div className="flex flex-wrap gap-1">
-              {task.executionInputSnapshot.tags.map((tag: string) => <span key={tag} className="px-1.5 py-0.5 bg-subtle text-fg-muted rounded-tag text-xs">{tag}</span>)}
+              {task.executionInputSnapshot.tags.map((tag: string) => <span key={tag} className="px-1.5 py-0.5 bg-gray-100 text-gray-500 rounded text-xs">{tag}</span>)}
             </div>
           )}
 
           <div className="flex flex-wrap gap-1.5">
             {!['completed', 'cancelled', 'failed'].includes(task.status) && (
-              <ActionButton icon={<IconCircleX aria-hidden="true" className="w-4 h-4" />} label={t('queued.actionCancel')} onClick={() => onAction('cancel', task.id)} color="gray" />
+              <ActionButton icon={<XCircle aria-hidden="true" className="w-3 h-3" />} label={t('queued.actionCancel')} onClick={() => onAction('cancel', task.id)} color="gray" />
             )}
             {task.status === 'failed' && (
-              <ActionButton icon={<IconRotate aria-hidden="true" className="w-4 h-4" />} label={t('queued.actionRetry')} onClick={() => onAction('retry', task.id)} color="blue" />
+              <ActionButton icon={<RotateCcw aria-hidden="true" className="w-3 h-3" />} label={t('queued.actionRetry')} onClick={() => onAction('retry', task.id)} color="blue" />
             )}
             {['completed', 'cancelled', 'failed'].includes(task.status) && (
-              <ActionButton icon={<IconPlayerPlay aria-hidden="true" className="w-4 h-4" />} label={t('queued.actionRerun')} onClick={() => onAction('rerun', task.id)} color="green" />
+              <ActionButton icon={<Play aria-hidden="true" className="w-3 h-3" />} label={t('queued.actionRerun')} onClick={() => onAction('rerun', task.id)} color="green" />
             )}
-            <ActionButton icon={<IconTrash aria-hidden="true" className="w-4 h-4" />} label={t('queued.actionDelete')} onClick={() => onAction('delete', task.id)} color="red" />
+            <ActionButton icon={<Trash2 aria-hidden="true" className="w-3 h-3" />} label={t('queued.actionDelete')} onClick={() => onAction('delete', task.id)} color="red" />
           </div>
         </div>
 
@@ -542,11 +542,11 @@ function QueuedWorkflowDetail({ task, emptyText }: { task: TaskExecution; emptyT
     <div className="flex-1 min-h-0 overflow-hidden">
       <div className="h-full overflow-y-auto px-6 py-4">
         <div className="space-y-4 pb-10">
-          <div className="rounded-control border border-line bg-subtle px-4 py-3">
-            <div className="text-xs font-medium uppercase tracking-wide text-fg-muted">
+          <div className="rounded-lg border border-slate-200 bg-slate-50 px-4 py-3">
+            <div className="text-xs font-medium uppercase tracking-wide text-slate-500">
               {t('queued.workflowId')}
             </div>
-            <div className="mt-1 break-all font-mono text-sm text-fg-secondary">
+            <div className="mt-1 font-mono text-sm text-slate-700 break-all">
               {task.workflowID || '--'}
             </div>
           </div>
@@ -554,18 +554,18 @@ function QueuedWorkflowDetail({ task, emptyText }: { task: TaskExecution; emptyT
           {hasInputPayload && (
             <div>
               <div className="mb-2 flex items-center justify-between gap-3">
-                <h4 className="text-sm font-semibold text-fg-secondary">
+                <h4 className="text-sm font-semibold text-gray-700">
                   {t('queued.workflowInput')}
                 </h4>
                 <button
                   type="button"
                   onClick={() => void handleCopy(inputText)}
-                  className="rounded-control border border-line px-2.5 py-1 text-xs font-medium text-fg-secondary transition-colors hover:bg-hover hover:text-fg"
+                  className="rounded-md border border-slate-200 px-2.5 py-1 text-xs font-medium text-slate-600 transition-colors hover:bg-slate-50 hover:text-slate-900"
                 >
                   {tCommon('button.copy')}
                 </button>
               </div>
-              <pre className="overflow-x-auto rounded-control bg-subtle p-4 text-xs text-fg-placeholder">
+              <pre className="rounded-lg bg-gray-900 p-4 text-xs text-gray-200 overflow-x-auto">
                 {inputText}
               </pre>
             </div>
@@ -574,14 +574,14 @@ function QueuedWorkflowDetail({ task, emptyText }: { task: TaskExecution; emptyT
           {displayedResultText && (
             <div>
               <div className="mb-2 flex items-center justify-between gap-3">
-                <h4 className="text-sm font-semibold text-fg-secondary">
+                <h4 className="text-sm font-semibold text-gray-700">
                   {t('queued.workflowResult')}
                 </h4>
                 <div className="flex items-center gap-2">
                   <button
                     type="button"
                     onClick={() => void handleCopy(displayedResultText)}
-                    className="rounded-control border border-line px-2.5 py-1 text-xs font-medium text-fg-secondary transition-colors hover:bg-hover hover:text-fg"
+                    className="rounded-md border border-slate-200 px-2.5 py-1 text-xs font-medium text-slate-600 transition-colors hover:bg-slate-50 hover:text-slate-900"
                   >
                     {tCommon('button.copy')}
                   </button>
@@ -589,13 +589,13 @@ function QueuedWorkflowDetail({ task, emptyText }: { task: TaskExecution; emptyT
                     type="button"
                     onClick={() => setShowFormattedResult(true)}
                     disabled={!formattedResultText || showFormattedResult}
-                    className="rounded-control border border-line px-2.5 py-1 text-xs font-medium text-fg-secondary transition-colors hover:bg-hover hover:text-fg disabled:cursor-not-allowed disabled:bg-disabled disabled:text-fg-disabled disabled:hover:bg-surface disabled:hover:text-fg-secondary"
+                    className="rounded-md border border-slate-200 px-2.5 py-1 text-xs font-medium text-slate-600 transition-colors hover:bg-slate-50 hover:text-slate-900 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-white disabled:hover:text-slate-600"
                   >
                     {t('queued.workflowJsonFormat')}
                   </button>
                 </div>
               </div>
-              <pre className="overflow-x-auto whitespace-pre-wrap rounded-control bg-subtle p-4 text-xs text-fg-placeholder">
+              <pre className="rounded-lg bg-gray-900 p-4 text-xs text-gray-200 overflow-x-auto whitespace-pre-wrap">
                 {displayedResultText}
               </pre>
             </div>
@@ -603,17 +603,17 @@ function QueuedWorkflowDetail({ task, emptyText }: { task: TaskExecution; emptyT
 
           {task.error && (
             <div>
-              <h4 className="mb-2 text-sm font-semibold text-danger">
+              <h4 className="mb-2 text-sm font-semibold text-red-700">
                 {t('queued.workflowError')}
               </h4>
-              <div className="rounded-control border border-danger bg-danger-soft p-4 text-sm text-danger whitespace-pre-wrap">
+              <div className="rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-800 whitespace-pre-wrap">
                 {task.error}
               </div>
             </div>
           )}
 
           {!task.error && !resultText && (
-            <div className="rounded-control border border-dashed border-line bg-subtle px-4 py-6 text-sm text-fg-muted">
+            <div className="rounded-lg border border-dashed border-slate-200 bg-slate-50 px-4 py-6 text-sm text-slate-500">
               {emptyText}
             </div>
           )}

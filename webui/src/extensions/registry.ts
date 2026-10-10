@@ -1,5 +1,5 @@
 import type { ComponentType } from 'react';
-import type { TablerIcon } from '@tabler/icons-react';
+import { type LucideIcon } from 'lucide-react';
 
 /**
  * Build-time WebUI extension registry.
@@ -34,7 +34,7 @@ export interface ExtensionNavItem {
   labelKey: string;
   /** Namespace of `labelKey` (default `nav`). Must be bundled synchronously for sidebar items. */
   ns?: string;
-  icon: TablerIcon;
+  icon: LucideIcon;
   adminOnly?: boolean;
   order?: number;
   /** `sidebar` (default) appends to a sidebar section; `accountMenu` adds an entry to the account dropdown. */
@@ -56,7 +56,7 @@ export interface ExtensionSettingsSection {
   group: 'preferences' | 'data' | 'system';
   labelKey: string;
   ns?: string;
-  icon: TablerIcon;
+  icon: LucideIcon;
   adminOnly?: boolean;
   order?: number;
   load: ExtensionLoader;

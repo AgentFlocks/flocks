@@ -6,28 +6,34 @@
  */
 
 import { useTranslation } from 'react-i18next';
-import { IconCircleCheck, IconCircleX, IconClock, IconCircleMinus, IconLoader2 } from '@tabler/icons-react';
+import {
+  CheckCircle,
+  CircleMinus,
+  Clock,
+  Loader2,
+  XCircle,
+} from 'lucide-react';
 
 interface StatusConfig {
   className: string;
   dot: string;
-  icon?: typeof IconCircleCheck;
+  icon?: typeof CheckCircle;
 }
 
 const STATUS_STYLE_MAP: Record<string, StatusConfig> = {
-  running:    { className: 'bg-info-soft text-info', dot: 'bg-info', icon: IconLoader2 },
-  cancelling: { className: 'bg-warning-soft text-warning', dot: 'bg-warning' },
-  publishing: { className: 'bg-warning-soft text-warning', dot: 'bg-warning' },
-  success:    { className: 'bg-success-soft text-success',  dot: 'bg-success' },
-  SUCCEEDED:  { className: 'bg-success-soft text-success',  dot: 'bg-success' },
-  error:      { className: 'bg-danger-soft text-danger',      dot: 'bg-action' },
-  FAILED:     { className: 'bg-danger-soft text-danger',      dot: 'bg-action' },
-  timeout:    { className: 'bg-warning-soft text-warning', dot: 'bg-warning' },
-  cancelled:  { className: 'bg-subtle text-fg-secondary',    dot: 'bg-selected' },
-  stopped:    { className: 'bg-subtle text-fg-muted',    dot: 'bg-selected' },
+  running:    { className: 'bg-green-100 text-green-700', dot: 'bg-green-500', icon: Loader2 },
+  cancelling: { className: 'bg-amber-100 text-amber-700', dot: 'bg-amber-500' },
+  publishing: { className: 'bg-yellow-100 text-yellow-700', dot: 'bg-yellow-500' },
+  success:    { className: 'bg-green-100 text-green-700',  dot: 'bg-green-500' },
+  SUCCEEDED:  { className: 'bg-green-100 text-green-700',  dot: 'bg-green-500' },
+  error:      { className: 'bg-red-100 text-red-700',      dot: 'bg-red-500' },
+  FAILED:     { className: 'bg-red-100 text-red-700',      dot: 'bg-red-500' },
+  timeout:    { className: 'bg-orange-100 text-orange-700', dot: 'bg-orange-500' },
+  cancelled:  { className: 'bg-gray-100 text-gray-600',    dot: 'bg-gray-500' },
+  stopped:    { className: 'bg-gray-100 text-gray-500',    dot: 'bg-gray-400' },
 };
 
-const FALLBACK: StatusConfig = { className: 'bg-subtle text-fg-muted', dot: 'bg-selected' };
+const FALLBACK: StatusConfig = { className: 'bg-gray-100 text-gray-500', dot: 'bg-gray-400' };
 
 interface WorkflowStatusBadgeProps {
   status: string;
@@ -38,7 +44,7 @@ export default function WorkflowStatusBadge({ status, variant = 'badge' }: Workf
   const { t } = useTranslation('common');
   const cfg = STATUS_STYLE_MAP[status] ?? FALLBACK;
   const label = t(`workflowStatus.${status}`, { defaultValue: status });
-  const Icon = cfg.icon ?? (['success', 'SUCCEEDED'].includes(status) ? IconCircleCheck : ['error', 'FAILED'].includes(status) ? IconCircleX : ['cancelling', 'publishing', 'timeout'].includes(status) ? IconClock : IconCircleMinus);
+  const Icon = cfg.icon ?? (['success', 'SUCCEEDED'].includes(status) ? CheckCircle : ['error', 'FAILED'].includes(status) ? XCircle : ['cancelling', 'publishing', 'timeout'].includes(status) ? Clock : CircleMinus);
 
   if (variant === 'pill') {
     return (
@@ -50,7 +56,7 @@ export default function WorkflowStatusBadge({ status, variant = 'badge' }: Workf
   }
 
   return (
-    <span className={`ui-badge font-medium ${cfg.className}`}>
+    <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-xs font-medium ${cfg.className}`}>
       <Icon aria-hidden="true" className={`h-4 w-4 shrink-0 ${status === 'running' ? 'animate-spin motion-reduce:animate-none' : ''}`} />
       {label}
     </span>

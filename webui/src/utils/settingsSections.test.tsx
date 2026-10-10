@@ -1,6 +1,6 @@
 import { act, renderHook, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { IconShield } from '@tabler/icons-react';
+import { Shield } from 'lucide-react';
 
 const gateCheck = vi.fn<() => Promise<boolean>>();
 
@@ -13,7 +13,7 @@ vi.mock('@ext/registry', () => ({
         id: 'ext-gated',
         group: 'system',
         labelKey: 'extGated',
-        icon: IconShield,
+        icon: Shield,
         adminOnly: true,
         load: () => Promise.resolve({ default: () => null }),
         gate: { check: () => gateCheck(), refreshOn: ['ext-gate-changed'] },

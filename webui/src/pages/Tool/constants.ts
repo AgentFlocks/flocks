@@ -1,4 +1,4 @@
-import { IconLayoutGrid, IconDatabase, IconCloud, IconCode } from '@tabler/icons-react';
+import { Cloud as CloudIcon, Code as CodeIcon, Database as DatabaseIcon, Grid as GridIcon } from 'lucide-react';
 import { createElement } from 'react';
 import type { TabKey } from './types';
 
@@ -16,22 +16,22 @@ export const TABS: TabOption[] = [
   { key: 'local', labelKey: 'tabs.local', sourceFilter: 'plugin_py' },
 ];
 
-export const TAB_ICONS = { Grid: IconLayoutGrid, Database: IconDatabase, Cloud: IconCloud, Code: IconCode };
+export const TAB_ICONS = { Grid: GridIcon, Database: DatabaseIcon, Cloud: CloudIcon, Code: CodeIcon };
 export function getTabIcon(key: TabKey) {
-  const icons = [IconLayoutGrid, IconDatabase, IconCloud, IconCode];
+  const icons = [GridIcon, DatabaseIcon, CloudIcon, CodeIcon];
   const i = ['all', 'mcp', 'api', 'local'].indexOf(key);
-  return createElement(icons[i] ?? IconLayoutGrid, { className: 'w-5 h-5', 'aria-hidden': 'true' });
+  return createElement(icons[i] ?? GridIcon, { className: 'w-5 h-5', 'aria-hidden': 'true' });
 }
 
 /** Source badge: labelKey for i18n (tool.source.*) for builtin/custom; label for proper nouns MCP/API. */
 export const SOURCE_BADGE: Record<string, { label?: string; labelKey?: string; className: string }> = {
-  mcp: { label: 'MCP', className: 'bg-data-soft text-data' },
-  api: { label: 'API', className: 'bg-data-soft text-data' },
-  device: { label: 'Device', className: 'bg-data-soft text-data' },
-  plugin_py: { labelKey: 'source.local', className: 'bg-subtle text-fg-secondary' },
-  plugin_yaml: { label: 'API Plugin', className: 'bg-data-soft text-data' },
-  builtin: { labelKey: 'source.builtin', className: 'bg-subtle text-fg-secondary' },
-  custom: { labelKey: 'source.custom', className: 'bg-subtle text-fg-secondary' },
+  mcp: { label: 'MCP', className: 'bg-red-100 text-red-800' },
+  api: { label: 'API', className: 'bg-purple-100 text-purple-800' },
+  device: { label: 'Device', className: 'bg-amber-100 text-amber-800' },
+  plugin_py: { labelKey: 'source.local', className: 'bg-blue-100 text-blue-800' },
+  plugin_yaml: { label: 'API Plugin', className: 'bg-violet-100 text-violet-800' },
+  builtin: { labelKey: 'source.builtin', className: 'bg-green-100 text-green-800' },
+  custom: { labelKey: 'source.custom', className: 'bg-orange-100 text-orange-800' },
 };
 
 /** Category key -> i18n key (tool.category.*). */

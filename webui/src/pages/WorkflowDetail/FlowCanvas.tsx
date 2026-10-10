@@ -1,5 +1,4 @@
 import { pageActionLabel } from '../pageActionLabel';
-import { workflowNodeAppearance, workflowNodeColor } from '../WorkflowEditor/nodeAppearance';
 import { useState, useCallback, useContext, useEffect, useMemo, useRef, memo, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
@@ -19,7 +18,24 @@ import {
   NodeProps,
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
-import { IconCode, IconBolt, IconGitBranch, IconRotateClockwise, IconRotate, IconX, IconChevronRight, IconChevronUp, IconChevronDown, IconTool, IconSparkles, IconWorld, IconRouteSquare2, IconZoomIn, IconZoomOut, IconMaximize } from '@tabler/icons-react';
+import {
+  ChevronDown,
+  ChevronRight,
+  ChevronUp,
+  Code2,
+  GitBranch,
+  Globe,
+  RotateCcw,
+  RotateCw,
+  Scan,
+  Sparkles,
+  Workflow,
+  Wrench,
+  X,
+  Zap,
+  ZoomIn,
+  ZoomOut,
+} from 'lucide-react';
 import { WorkflowJSON, WorkflowNode as APINode } from '@/api/workflow';
 import { ThemeContext } from '@/contexts/ThemeContext';
 import {
@@ -35,26 +51,172 @@ import { WorkflowTrigger } from '@/api/workflow';
 // Node type config
 // ─────────────────────────────────────────────
 
-const TYPE_CONFIG = workflowNodeAppearance;
+interface NodeStyle {
+  bg: string;
+  border: string;
+  text: string;
+  handleColor: string;
+  accentBg: string;
+  dot: string;
+}
+
+const TYPE_CONFIG: Record<string, NodeStyle> = {
+  python: {
+    bg: 'bg-white',
+    border: 'border-red-400',
+    text: 'text-red-600',
+    handleColor: '!bg-red-400',
+    accentBg: 'bg-red-50',
+    dot: 'bg-red-400',
+  },
+  logic: {
+    bg: 'bg-white',
+    border: 'border-emerald-400',
+    text: 'text-emerald-600',
+    handleColor: '!bg-emerald-400',
+    accentBg: 'bg-emerald-50',
+    dot: 'bg-emerald-400',
+  },
+  branch: {
+    bg: 'bg-white',
+    border: 'border-amber-400',
+    text: 'text-amber-600',
+    handleColor: '!bg-amber-400',
+    accentBg: 'bg-amber-50',
+    dot: 'bg-amber-400',
+  },
+  loop: {
+    bg: 'bg-white',
+    border: 'border-purple-400',
+    text: 'text-purple-600',
+    handleColor: '!bg-purple-400',
+    accentBg: 'bg-purple-50',
+    dot: 'bg-purple-400',
+  },
+  tool: {
+    bg: 'bg-white',
+    border: 'border-violet-400',
+    text: 'text-violet-600',
+    handleColor: '!bg-violet-400',
+    accentBg: 'bg-violet-50',
+    dot: 'bg-violet-400',
+  },
+  llm: {
+    bg: 'bg-white',
+    border: 'border-pink-400',
+    text: 'text-pink-600',
+    handleColor: '!bg-pink-400',
+    accentBg: 'bg-pink-50',
+    dot: 'bg-pink-400',
+  },
+  http_request: {
+    bg: 'bg-white',
+    border: 'border-teal-400',
+    text: 'text-teal-600',
+    handleColor: '!bg-teal-400',
+    accentBg: 'bg-teal-50',
+    dot: 'bg-teal-400',
+  },
+  subworkflow: {
+    bg: 'bg-white',
+    border: 'border-orange-400',
+    text: 'text-orange-600',
+    handleColor: '!bg-orange-400',
+    accentBg: 'bg-orange-50',
+    dot: 'bg-orange-400',
+  },
+  schedule: {
+    bg: 'bg-white',
+    border: 'border-sky-400',
+    text: 'text-sky-600',
+    handleColor: '!bg-sky-400',
+    accentBg: 'bg-sky-50',
+    dot: 'bg-sky-400',
+  },
+  webhook: {
+    bg: 'bg-white',
+    border: 'border-cyan-400',
+    text: 'text-cyan-700',
+    handleColor: '!bg-cyan-400',
+    accentBg: 'bg-cyan-50',
+    dot: 'bg-cyan-400',
+  },
+  custom_webhook: {
+    bg: 'bg-white',
+    border: 'border-cyan-400',
+    text: 'text-cyan-700',
+    handleColor: '!bg-cyan-400',
+    accentBg: 'bg-cyan-50',
+    dot: 'bg-cyan-400',
+  },
+  kafka: {
+    bg: 'bg-white',
+    border: 'border-indigo-400',
+    text: 'text-indigo-700',
+    handleColor: '!bg-indigo-400',
+    accentBg: 'bg-indigo-50',
+    dot: 'bg-indigo-400',
+  },
+  syslog: {
+    bg: 'bg-white',
+    border: 'border-lime-400',
+    text: 'text-lime-700',
+    handleColor: '!bg-lime-400',
+    accentBg: 'bg-lime-50',
+    dot: 'bg-lime-400',
+  },
+  internal_event: {
+    bg: 'bg-white',
+    border: 'border-blue-400',
+    text: 'text-blue-700',
+    handleColor: '!bg-blue-400',
+    accentBg: 'bg-blue-50',
+    dot: 'bg-blue-400',
+  },
+  custom_adapter: {
+    bg: 'bg-white',
+    border: 'border-fuchsia-400',
+    text: 'text-fuchsia-700',
+    handleColor: '!bg-fuchsia-400',
+    accentBg: 'bg-fuchsia-50',
+    dot: 'bg-fuchsia-400',
+  },
+  manual: {
+    bg: 'bg-white',
+    border: 'border-slate-400',
+    text: 'text-slate-700',
+    handleColor: '!bg-slate-400',
+    accentBg: 'bg-slate-50',
+    dot: 'bg-slate-400',
+  },
+  plugin: {
+    bg: 'bg-white',
+    border: 'border-fuchsia-400',
+    text: 'text-fuchsia-700',
+    handleColor: '!bg-fuchsia-400',
+    accentBg: 'bg-fuchsia-50',
+    dot: 'bg-fuchsia-400',
+  },
+};
 
 const TYPE_ICONS: Record<string, React.ReactNode> = {
-  python: <IconCode aria-hidden="true" className="w-4 h-4" />,
-  logic: <IconBolt aria-hidden="true" className="w-4 h-4" />,
-  branch: <IconGitBranch aria-hidden="true" className="w-4 h-4" />,
-  loop: <IconRotateClockwise aria-hidden="true" className="w-4 h-4" />,
-  tool: <IconTool aria-hidden="true" className="w-4 h-4" />,
-  llm: <IconSparkles aria-hidden="true" className="w-4 h-4" />,
-  http_request: <IconWorld aria-hidden="true" className="w-4 h-4" />,
-  subworkflow: <IconRouteSquare2 aria-hidden="true" className="w-4 h-4" />,
-  schedule: <IconRotateClockwise aria-hidden="true" className="w-4 h-4" />,
-  webhook: <IconWorld aria-hidden="true" className="w-4 h-4" />,
-  custom_webhook: <IconWorld aria-hidden="true" className="w-4 h-4" />,
-  kafka: <IconRouteSquare2 aria-hidden="true" className="w-4 h-4" />,
-  syslog: <IconBolt aria-hidden="true" className="w-4 h-4" />,
-  internal_event: <IconSparkles aria-hidden="true" className="w-4 h-4" />,
-  custom_adapter: <IconTool aria-hidden="true" className="w-4 h-4" />,
-  manual: <IconCode aria-hidden="true" className="w-4 h-4" />,
-  plugin: <IconTool aria-hidden="true" className="w-4 h-4" />,
+  python: <Code2 aria-hidden="true" className="w-3.5 h-3.5" />,
+  logic: <Zap aria-hidden="true" className="w-3.5 h-3.5" />,
+  branch: <GitBranch aria-hidden="true" className="w-3.5 h-3.5" />,
+  loop: <RotateCw aria-hidden="true" className="w-3.5 h-3.5" />,
+  tool: <Wrench aria-hidden="true" className="w-3.5 h-3.5" />,
+  llm: <Sparkles aria-hidden="true" className="w-3.5 h-3.5" />,
+  http_request: <Globe aria-hidden="true" className="w-3.5 h-3.5" />,
+  subworkflow: <Workflow aria-hidden="true" className="w-3.5 h-3.5" />,
+  schedule: <RotateCw aria-hidden="true" className="w-3.5 h-3.5" />,
+  webhook: <Globe aria-hidden="true" className="w-3.5 h-3.5" />,
+  custom_webhook: <Globe aria-hidden="true" className="w-3.5 h-3.5" />,
+  kafka: <Workflow aria-hidden="true" className="w-3.5 h-3.5" />,
+  syslog: <Zap aria-hidden="true" className="w-3.5 h-3.5" />,
+  internal_event: <Sparkles aria-hidden="true" className="w-3.5 h-3.5" />,
+  custom_adapter: <Wrench aria-hidden="true" className="w-3.5 h-3.5" />,
+  manual: <Code2 aria-hidden="true" className="w-3.5 h-3.5" />,
+  plugin: <Wrench aria-hidden="true" className="w-3.5 h-3.5" />,
 };
 
 const TYPE_LABELS: Record<string, string> = {
@@ -126,11 +288,11 @@ const ViewNode = memo(function ViewNode({ data, selected }: NodeProps) {
   return (
     <div
       className={`
- ${cfg.bg} ${cfg.border} border-2 rounded-card shadow-sm
- w-[220px] cursor-pointer select-none
- transition-all duration-150
- ${selected ? 'ring-2 ring-offset-1 ring-focus' : ''}
- `}
+        ${cfg.bg} ${cfg.border} border-2 rounded-xl shadow-sm
+        w-[220px] cursor-pointer select-none
+        transition-all duration-150
+        ${selected ? 'shadow-md ring-2 ring-offset-1 ring-red-300' : 'hover:shadow-md'}
+      `}
       onClick={() => {
         if (!d.isTrigger) d.onNodeClick?.(d.label);
       }}
@@ -138,7 +300,7 @@ const ViewNode = memo(function ViewNode({ data, selected }: NodeProps) {
       <Handle
         type="target"
         position={Position.Top}
-        className={`!w-2.5 !h-2.5 ${cfg.handleColor} !border-2 !border-line`}
+        className={`!w-2.5 !h-2.5 ${cfg.handleColor} !border-2 !border-white`}
       />
 
       {/* Type badge header */}
@@ -146,12 +308,12 @@ const ViewNode = memo(function ViewNode({ data, selected }: NodeProps) {
         <span className={cfg.text}>{icon}</span>
         <span className={`text-xs font-semibold ${cfg.text}`}>{typeLabel}</span>
         {d.isStart && (
-          <span className="ml-auto text-xs bg-subtle text-fg-secondary px-1.5 py-0.5 rounded-pill font-medium ">
+          <span className="text-xs bg-orange-100 text-orange-600 px-1.5 py-0.5 rounded-full font-medium leading-none ml-auto">
             {t('detail.flow.startBadge')}
           </span>
         )}
         {d.isTrigger && (
-          <span className="ml-auto text-xs bg-data-soft text-data px-1.5 py-0.5 rounded-pill font-medium ">
+          <span className="text-xs bg-sky-100 text-sky-700 px-1.5 py-0.5 rounded-full font-medium leading-none ml-auto">
             Trigger
           </span>
         )}
@@ -159,18 +321,18 @@ const ViewNode = memo(function ViewNode({ data, selected }: NodeProps) {
 
       {/* Node ID */}
       <div className="px-3 py-2">
-        <div className="text-sm font-semibold text-fg truncate font-mono ">
+        <div className="text-sm font-semibold text-gray-800 font-mono leading-tight truncate">
           {d.label}
         </div>
         {d.description ? (
-          <p className="text-xs text-fg-muted mt-1 line-clamp-2 ">
+          <p className="text-xs text-gray-500 mt-1 leading-relaxed line-clamp-2">
             {d.description}
           </p>
         ) : (
-          <p className="text-xs text-fg-placeholder mt-1 italic">{t('detail.flow.noDescription')}</p>
+          <p className="text-xs text-gray-300 mt-1 italic">{t('detail.flow.noDescription')}</p>
         )}
         {d.join && (
-          <div className="mt-2 inline-flex rounded-pill border border-info bg-info-soft px-2 py-0.5 text-xs font-semibold text-info">
+          <div className="mt-2 inline-flex rounded-full border border-sky-200 bg-sky-50 px-2 py-0.5 text-[10px] font-semibold text-sky-700">
             Join: {d.joinMode || 'flat'}
           </div>
         )}
@@ -179,8 +341,8 @@ const ViewNode = memo(function ViewNode({ data, selected }: NodeProps) {
       {/* Click hint */}
       {!d.isTrigger && (
         <div className="px-3 pb-2 flex items-center justify-end">
-          <span className="text-xs text-fg-placeholder flex items-center gap-0.5">
-            {t('detail.flow.details')} <IconChevronRight aria-hidden="true" className="w-4 h-4" />
+          <span className="text-xs text-gray-300 flex items-center gap-0.5">
+            {t('detail.flow.details')} <ChevronRight aria-hidden="true" className="w-3 h-3" />
           </span>
         </div>
       )}
@@ -191,7 +353,7 @@ const ViewNode = memo(function ViewNode({ data, selected }: NodeProps) {
           id={handle.id === 'default' ? undefined : handle.id}
           type="source"
           position={Position.Bottom}
-          className={`!w-2.5 !h-2.5 ${cfg.handleColor} !border-2 !border-line`}
+          className={`!w-2.5 !h-2.5 ${cfg.handleColor} !border-2 !border-white`}
           style={{ left: `${handle.left}%` }}
         />
       ))}
@@ -221,36 +383,36 @@ function NodeDetailModal({ node, isStart, onClose }: NodeDetailModalProps) {
 
   return (
     <div
-      className="absolute inset-0 z-50 flex items-center justify-center bg-overlay-backdrop backdrop-blur-[1px]"
+      className="absolute inset-0 flex items-center justify-center bg-black/20 backdrop-blur-[1px] z-50"
       onClick={onClose}
     >
       <div
-        className="bg-surface rounded-card shadow-overlay w-[480px] max-h-[70vh] flex flex-col overflow-hidden"
+        className="bg-white rounded-2xl shadow-2xl w-[480px] max-h-[70vh] flex flex-col overflow-hidden"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Modal header */}
-        <div className={`${cfg.accentBg} px-5 py-4 flex items-start justify-between gap-3 border-b border-line`}>
+        <div className={`${cfg.accentBg} px-5 py-4 flex items-start justify-between gap-3 border-b border-gray-100`}>
           <div className="flex items-center gap-2.5">
-            <div className={`w-8 h-8 rounded-control ${cfg.accentBg} border ${cfg.border} flex items-center justify-center`}>
+            <div className={`w-8 h-8 rounded-lg ${cfg.accentBg} border ${cfg.border} flex items-center justify-center`}>
               <span className={cfg.text}>{icon}</span>
             </div>
             <div>
               <div className="flex items-center gap-2">
                 <span className={`text-xs font-semibold ${cfg.text}`}>{t('detail.flow.nodeLabel', { type: typeLabel })}</span>
                 {isStart && (
-                  <span className="text-xs bg-subtle text-fg-secondary px-1.5 py-0.5 rounded-pill font-medium">
+                  <span className="text-xs bg-orange-100 text-orange-600 px-1.5 py-0.5 rounded-full font-medium">
                     {t('detail.flow.startBadge')}
                   </span>
                 )}
               </div>
-              <h2 className="text-title-section font-bold text-fg font-mono mt-0.5">{node.id}</h2>
+              <h2 className="text-lg font-bold text-gray-900 font-mono mt-0.5">{node.id}</h2>
             </div>
           </div>
           <button aria-label={pageActionLabel('close')}
             onClick={onClose}
-            className="ui-btn-icon inline-flex items-center justify-center text-fg-muted hover:text-fg-secondary transition-colors p-1 rounded-control hover:bg-surface"
+            className="text-gray-400 hover:text-gray-700 transition-colors p-1 rounded-lg hover:bg-white/60"
           >
-            <IconX aria-hidden="true" className="w-5 h-5" />
+            <X aria-hidden="true" className="w-5 h-5" />
           </button>
         </div>
 
@@ -258,18 +420,18 @@ function NodeDetailModal({ node, isStart, onClose }: NodeDetailModalProps) {
         <div className="overflow-y-auto flex-1 p-5 space-y-4">
           {/* Description */}
           <section>
-            <h3 className="text-xs font-semibold text-fg-muted uppercase tracking-wider mb-1.5">{t('detail.flow.descSection')}</h3>
-            <p className="text-sm text-fg-secondary ">
-              {node.description || <span className="italic text-fg-muted">{t('detail.flow.noDescription')}</span>}
+            <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-1.5">{t('detail.flow.descSection')}</h3>
+            <p className="text-sm text-gray-700 leading-relaxed">
+              {node.description || <span className="italic text-gray-400">{t('detail.flow.noDescription')}</span>}
             </p>
           </section>
 
           {/* Code */}
           {node.code && (
             <section>
-              <h3 className="text-xs font-semibold text-fg-muted uppercase tracking-wider mb-1.5">{t('detail.flow.codeSection')}</h3>
-              <div className="bg-subtle rounded-card p-4 overflow-auto max-h-48">
-                <pre className="text-xs font-mono text-fg-placeholder whitespace-pre ">
+              <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-1.5">{t('detail.flow.codeSection')}</h3>
+              <div className="bg-gray-950 rounded-xl p-4 max-h-48 overflow-auto">
+                <pre className="text-xs font-mono text-gray-200 leading-relaxed whitespace-pre">
                   {node.code}
                 </pre>
               </div>
@@ -279,8 +441,8 @@ function NodeDetailModal({ node, isStart, onClose }: NodeDetailModalProps) {
           {/* Select key */}
           {node.select_key && (
             <section>
-              <h3 className="text-xs font-semibold text-fg-muted uppercase tracking-wider mb-1.5">{t('detail.flow.branchKeySection')}</h3>
-              <code className="inline-block text-xs font-mono bg-subtle text-fg px-2.5 py-1 rounded-control">
+              <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-1.5">{t('detail.flow.branchKeySection')}</h3>
+              <code className="inline-block text-xs font-mono bg-gray-100 text-gray-800 px-2.5 py-1 rounded-lg">
                 {node.select_key}
               </code>
             </section>
@@ -289,9 +451,9 @@ function NodeDetailModal({ node, isStart, onClose }: NodeDetailModalProps) {
           {/* Join settings */}
           {node.join && (
             <section>
-              <h3 className="text-xs font-semibold text-fg-muted uppercase tracking-wider mb-1.5">{t('detail.flow.mergeSection')}</h3>
+              <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-1.5">{t('detail.flow.mergeSection')}</h3>
               <div className="flex items-center gap-2">
-                <span className="text-xs bg-subtle text-fg-secondary px-2 py-1 rounded-control">
+                <span className="text-xs bg-gray-100 text-gray-700 px-2 py-1 rounded-lg">
                   {t('detail.flow.mergeMode')}<strong>{node.join_mode || 'flat'}</strong>
                 </span>
               </div>
@@ -300,20 +462,20 @@ function NodeDetailModal({ node, isStart, onClose }: NodeDetailModalProps) {
 
           {/* Raw fields summary */}
           <section>
-            <h3 className="text-xs font-semibold text-fg-muted uppercase tracking-wider mb-1.5">{t('detail.flow.propertiesSection')}</h3>
+            <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-1.5">{t('detail.flow.propertiesSection')}</h3>
             <div className="grid grid-cols-2 gap-2">
-              <div className="bg-subtle rounded-control p-2.5">
-                <div className="text-xs text-fg-muted">{t('detail.flow.nodeId')}</div>
-                <div className="text-xs font-mono font-medium text-fg mt-0.5 break-all">{node.id}</div>
+              <div className="bg-gray-50 rounded-lg p-2.5">
+                <div className="text-xs text-gray-500">{t('detail.flow.nodeId')}</div>
+                <div className="text-xs font-mono font-medium text-gray-800 mt-0.5 break-all">{node.id}</div>
               </div>
-              <div className="bg-subtle rounded-control p-2.5">
-                <div className="text-xs text-fg-muted">{t('detail.flow.nodeType')}</div>
-                <div className="text-xs font-medium text-fg mt-0.5">{node.type}</div>
+              <div className="bg-gray-50 rounded-lg p-2.5">
+                <div className="text-xs text-gray-500">{t('detail.flow.nodeType')}</div>
+                <div className="text-xs font-medium text-gray-800 mt-0.5">{node.type}</div>
               </div>
               {node.join !== undefined && (
-                <div className="bg-subtle rounded-control p-2.5">
-                  <div className="text-xs text-fg-muted">Join</div>
-                  <div className="text-xs font-medium text-fg mt-0.5">{String(node.join)}</div>
+                <div className="bg-gray-50 rounded-lg p-2.5">
+                  <div className="text-xs text-gray-500">Join</div>
+                  <div className="text-xs font-medium text-gray-800 mt-0.5">{String(node.join)}</div>
                 </div>
               )}
             </div>
@@ -511,10 +673,10 @@ function CanvasControlButton({
       type="button"
       onClick={onClick}
       aria-label={label}
-      className="group relative flex h-8 w-full items-center justify-center text-fg-muted transition-colors hover:bg-hover hover:text-fg-secondary "
+      className="group relative flex h-8 w-full items-center justify-center text-slate-500 transition-colors hover:bg-slate-50 hover:text-slate-700 focus:outline-none focus:ring-2 focus:ring-red-100 dark:text-zinc-300 dark:hover:bg-zinc-800 dark:hover:text-zinc-50 dark:focus:ring-zinc-700"
     >
       {children}
-      <span className="pointer-events-none absolute right-full top-1/2 z-20 mr-2 -translate-y-1/2 whitespace-nowrap rounded-control bg-subtle px-2 py-1 text-xs font-medium text-fg opacity-0 shadow-sm transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100 ">
+      <span className="pointer-events-none absolute right-full top-1/2 mr-2 -translate-y-1/2 rounded-md bg-slate-900 px-2 py-1 text-[11px] font-medium text-white opacity-0 shadow-sm transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100 dark:bg-zinc-800 dark:text-zinc-50 z-20 whitespace-nowrap">
         {label}
       </span>
     </button>
@@ -651,33 +813,39 @@ function FlowCanvasInner({ workflowJson, editable = false, onNodeClick: external
         fitViewOptions={{ padding: 0.2 }}
         proOptions={{ hideAttribution: true }}
       >
-        <Background variant={BackgroundVariant.Dots} gap={20} size={1} color="var(--border-subtle)" />
+        <Background variant={BackgroundVariant.Dots} gap={20} size={1} color={isDark ? '#5a6573' : '#e2e8f0'} />
         {showMiniMap && (
           <MiniMap
             nodeColor={(node) => {
+              const colors: Record<string, string> = {
+                python: '#60a5fa',
+                logic: '#34d399',
+                branch: '#fbbf24',
+                loop: '#c084fc',
+              };
               const d = node.data as unknown as ViewNodeData | undefined;
-              return workflowNodeColor(d?.nodeType ?? '');
+              return colors[d?.nodeType ?? ''] ?? '#94a3b8';
             }}
-            className="!rounded-control !border !border-line !bg-surface !shadow-none "
-            maskColor="var(--overlay-backdrop)"
+            className="!rounded-lg !border !border-slate-200 !bg-white/95 !shadow-none dark:!border-zinc-700 dark:!bg-zinc-900"
+            maskColor={isDark ? 'rgba(34, 39, 46, 0.72)' : 'rgba(241, 245, 249, 0.68)'}
           />
         )}
       </ReactFlow>
 
       <div className="absolute right-4 top-4 z-20 flex w-9 flex-col items-stretch gap-1 overflow-visible">
         {!controlsCollapsed && (
-          <div className="flex w-full flex-col divide-y divide-line overflow-visible rounded-control border border-line bg-surface backdrop-blur ">
+          <div className="flex w-full flex-col divide-y divide-slate-100 rounded-lg border border-slate-200 bg-white/90 backdrop-blur dark:divide-zinc-800 dark:border-zinc-700 dark:bg-zinc-900/90 overflow-visible">
             <CanvasControlButton label={t('detail.flowControls.zoomIn')} onClick={handleZoomIn}>
-              <IconZoomIn aria-hidden="true" className="h-4 w-4" stroke={2} />
+              <ZoomIn aria-hidden="true" className="h-4 w-4" strokeWidth={2} />
             </CanvasControlButton>
             <CanvasControlButton label={t('detail.flowControls.zoomOut')} onClick={handleZoomOut}>
-              <IconZoomOut aria-hidden="true" className="h-4 w-4" stroke={2} />
+              <ZoomOut aria-hidden="true" className="h-4 w-4" strokeWidth={2} />
             </CanvasControlButton>
             <CanvasControlButton label={t('detail.flowControls.fitView')} onClick={handleFitView}>
-              <IconMaximize aria-hidden="true" className="h-4 w-4" stroke={2} />
+              <Scan aria-hidden="true" className="h-4 w-4" strokeWidth={2} />
             </CanvasControlButton>
             <CanvasControlButton label={t('detail.resetLayout')} onClick={resetLayout}>
-              <IconRotate aria-hidden="true" className="h-4 w-4" stroke={2} />
+              <RotateCcw aria-hidden="true" className="h-4 w-4" strokeWidth={2} />
             </CanvasControlButton>
           </div>
         )}
@@ -685,12 +853,12 @@ function FlowCanvasInner({ workflowJson, editable = false, onNodeClick: external
           type="button"
           onClick={() => setControlsCollapsed((prev) => !prev)}
           aria-label={t(controlsCollapsed ? 'detail.flowControls.expand' : 'detail.flowControls.collapse')}
-          className="flex h-8 w-full items-center justify-center rounded-control border border-line bg-surface text-fg-muted backdrop-blur transition-colors hover:bg-hover hover:text-fg-secondary "
+          className="flex h-8 w-full items-center justify-center rounded-lg border border-slate-200 bg-white/90 text-slate-500 backdrop-blur transition-colors hover:bg-slate-50 hover:text-slate-700 focus:outline-none focus:ring-2 focus:ring-red-100 dark:border-zinc-700 dark:bg-zinc-900/90 dark:text-zinc-300 dark:hover:bg-zinc-800 dark:hover:text-zinc-50 dark:focus:ring-zinc-700"
         >
           {controlsCollapsed ? (
-            <IconChevronDown aria-hidden="true" className="h-4 w-4" stroke={2} />
+            <ChevronDown aria-hidden="true" className="h-4 w-4" strokeWidth={2} />
           ) : (
-            <IconChevronUp aria-hidden="true" className="h-4 w-4" stroke={2} />
+            <ChevronUp aria-hidden="true" className="h-4 w-4" strokeWidth={2} />
           )}
         </button>
       </div>

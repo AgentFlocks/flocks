@@ -73,7 +73,7 @@ export default defineConfig({
             return 'flow-vendor';
           }
 
-          if (id.includes('/@tabler/icons-react/')) {
+          if (id.includes('/lucide-react/')) {
             return 'icons-vendor';
           }
         },

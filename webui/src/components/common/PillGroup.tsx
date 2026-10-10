@@ -1,7 +1,7 @@
 export interface PillOption<T extends string> {
   value: T;
   label: string;
-  /** @deprecated Selection uses the shared semantic style in both themes. */
+  /** Tailwind classes applied when this option is selected */
   activeClass?: string;
 }
 
@@ -17,7 +17,7 @@ export default function PillGroup<T extends string>({
   disabled?: boolean;
 }) {
   return (
-    <div className="ui-segmented flex flex-wrap gap-1" role="group">
+    <div className="flex flex-wrap gap-2" role="group">
       {options.map((opt) => (
         <button
           key={opt.value}
@@ -38,11 +38,11 @@ export default function PillGroup<T extends string>({
             onChange(options[next].value);
             event.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>('button')[next]?.focus();
           }}
-          className={`px-3 py-1.5 rounded-segment text-sm transition-colors ${
+          className={`px-3 py-1.5 rounded-full text-sm font-medium border transition-colors ${
             value === opt.value
-              ? 'bg-selected text-fg font-semibold'
-              : 'bg-transparent text-fg-secondary hover:bg-hover'
-          } ${disabled ? 'bg-disabled text-fg-disabled cursor-not-allowed' : 'cursor-pointer'}`}
+              ? opt.activeClass ?? 'bg-slate-600 text-white border-slate-600'
+              : 'bg-white text-gray-500 border-gray-300 hover:border-gray-400 hover:text-gray-700'
+          } ${disabled ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}`}
         >
           {opt.label}
         </button>
