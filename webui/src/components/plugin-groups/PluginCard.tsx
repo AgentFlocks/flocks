@@ -46,7 +46,8 @@ export function PluginSourceTag({ builtin, label }: { builtin: boolean; label: s
   );
 }
 
-const iconButtonClass = 'inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-700 disabled:cursor-not-allowed disabled:text-gray-300 disabled:hover:bg-transparent';
+// Disabled icons must read dimmer than enabled ones in both themes (gray-300 is the brighter tone on dark).
+const iconButtonClass = 'inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-700 disabled:cursor-not-allowed disabled:text-gray-300 disabled:hover:bg-transparent dark:disabled:text-zinc-600';
 
 export default function PluginCard({
   icon, title, tags, status, description, emptyDescription, meta, layout = 'cards', selected = false, muted = false,
