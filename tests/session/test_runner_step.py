@@ -1757,7 +1757,7 @@ async def test_to_chat_messages_restores_provider_reasoning_fields_from_metadata
     )
     runner = SessionRunner(session=session, static_cache={})
     runner.provider_id = "alibaba"
-    runner.model_id = "qwen3-max"
+    runner.model_id = "qwen3.6-plus"
 
     monkeypatch.setattr(
         runner_mod.Provider,
@@ -2161,7 +2161,7 @@ async def test_to_chat_messages_keeps_reasoning_only_assistant_message(monkeypat
     )
     runner = SessionRunner(session=session, static_cache={})
     runner.provider_id = "alibaba"
-    runner.model_id = "qwen3-max"
+    runner.model_id = "qwen3.6-plus"
 
     monkeypatch.setattr(
         runner_mod.Provider,
@@ -2265,7 +2265,7 @@ async def test_to_chat_messages_wraps_only_queued_user_messages():
 async def test_to_chat_messages_skips_reasoning_only_aborted_assistant(monkeypatch):
     runner = _make_runner("ses_runner_aborted_reasoning_only")
     runner.provider_id = "alibaba"
-    runner.model_id = "qwen3-max"
+    runner.model_id = "qwen3.6-plus"
 
     monkeypatch.setattr(
         runner_mod.Provider,
