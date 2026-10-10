@@ -20,6 +20,13 @@ import { useDefaultModelVision } from '@/hooks/useDefaultModelVision';
 import { workflowAPI, Workflow } from '@/api/workflow';
 import client from '@/api/client';
 import type { ImagePartData } from '@/utils/imageUpload';
+import {
+  addWorkflowLinks,
+  pickLinkedWorkflow,
+  workflowLinksFromMessages,
+  workflowLinksFromToolPart,
+  type WorkflowLinkKind,
+} from './workflowSessionLinks';
 
 const FALLBACK_POLL_MS = 10_000;
 const WORKFLOW_CHAT_AGENT_NAME = 'rex';
@@ -176,10 +183,69 @@ export default function CreateChatTab({
   const [snapshotReady, setSnapshotReady] = useState(false);
   const onWorkflowCreatedRef = useRef(onWorkflowCreated);
   onWorkflowCreatedRef.current = onWorkflowCreated;
+  // Workflows this chat's own tool calls wrote. Only these can be attached:
+  // other users' workflows show up in the same global list and may announce
+  // themselves through workflow.created as well.
+  const workflowLinksRef = useRef<Map<string, WorkflowLinkKind>>(new Map());
+  // Candidates already checked against the stored conversation. A tool part is
+  // stored with its input before the tool runs, so once a candidate exists one
+  // successful read settles it; later calls arrive as live tool events.
+  const checkedCandidateIdsRef = useRef<Set<string>>(new Set());
+  const linkSessionIdRef = useRef<string | null>(sessionId ?? null);
+  const linkBackfillRef = useRef<Promise<void> | null>(null);
 
   useEffect(() => {
     onSessionChange?.(sessionId ?? null);
   }, [onSessionChange, sessionId]);
+
+  useEffect(() => {
+    linkSessionIdRef.current = sessionId ?? null;
+    workflowLinksRef.current = new Map();
+    checkedCandidateIdsRef.current = new Set();
+    linkBackfillRef.current = null;
+  }, [sessionId]);
+
+  // Read the stored conversation for candidates it has not been checked
+  // against yet: the page may have been reloaded mid-creation or missed SSE.
+  const backfillWorkflowLinks = useCallback(async (candidateIds: string[]) => {
+    if (!sessionId) return;
+    const uncheckedIds = () => candidateIds.filter((id) => (
+      !workflowLinksRef.current.has(id) && !checkedCandidateIdsRef.current.has(id)
+    ));
+    if (uncheckedIds().length === 0) return;
+    // A read already in flight may predate these candidates: wait for it,
+    // then read again only for what it did not settle.
+    if (linkBackfillRef.current) await linkBackfillRef.current;
+    const unchecked = uncheckedIds();
+    if (unchecked.length === 0) return;
+    if (linkBackfillRef.current) {
+      // Another caller started a read after the one awaited above, so it
+      // already covers these candidates' tool calls; use its result.
+      await linkBackfillRef.current;
+      return;
+    }
+    const backfill = client.get(`/api/session/${sessionId}/message`, {
+      params: { include_archived: true },
+    })
+      .then((response) => {
+        if (linkSessionIdRef.current !== sessionId) return;
+        addWorkflowLinks(workflowLinksRef.current, workflowLinksFromMessages(response.data));
+        unchecked.forEach((id) => checkedCandidateIdsRef.current.add(id));
+      })
+      .catch(() => {
+        // Left unchecked so the next poll retries.
+      })
+      .finally(() => {
+        if (linkBackfillRef.current === backfill) linkBackfillRef.current = null;
+      });
+    linkBackfillRef.current = backfill;
+    await backfill;
+  }, [sessionId]);
+
+  const checkWorkflowLinked = useCallback(async (workflowId: string) => {
+    await backfillWorkflowLinks([workflowId]);
+    return workflowLinksRef.current.has(workflowId);
+  }, [backfillWorkflowLinks]);
 
   // Snapshot existing workflow IDs on mount
   useEffect(() => {
@@ -224,13 +290,14 @@ export default function CreateChatTab({
       pendingWorkflowEventIdsRef.current.add(workflowId);
       return;
     }
+    if (!(await checkWorkflowLinked(workflowId))) return;
     try {
       const res = await workflowAPI.get(workflowId);
       attachCreatedWorkflow(res.data);
     } catch {
       // The workflow file may still be settling; polling can recover it.
     }
-  }, [attachCreatedWorkflow, snapshotReady]);
+  }, [attachCreatedWorkflow, checkWorkflowLinked, snapshotReady]);
 
   // Check for new workflows (used by fallback polling and post-stream refresh)
   const detectNewWorkflow = useCallback(async () => {
@@ -248,11 +315,14 @@ export default function CreateChatTab({
         const createdAt = Number(w.createdAt ?? 0);
         return !(startedAt > 0 && createdAt > 0 && createdAt < startedAt - 500);
       });
-      if (freshCandidates.length === 1) {
-        await attachCreatedWorkflowById(freshCandidates[0].id);
+      if (freshCandidates.length === 0) return;
+      await backfillWorkflowLinks(freshCandidates.map((w) => w.id));
+      const linked = pickLinkedWorkflow(freshCandidates, workflowLinksRef.current);
+      if (linked) {
+        await attachCreatedWorkflowById(linked.id);
       }
     } catch { /* ignore */ }
-  }, [attachCreatedWorkflowById, creationStartedAt, snapshotReady]);
+  }, [attachCreatedWorkflowById, backfillWorkflowLinks, creationStartedAt, snapshotReady]);
 
   useEffect(() => {
     if (!snapshotReady) return;
@@ -271,14 +341,22 @@ export default function CreateChatTab({
     }
   }, [attachCreatedWorkflowById, detectNewWorkflow, snapshotReady]);
 
-  // SSE: react to workflow.created events immediately
+  // SSE: learn which workflows this chat's tool calls write, and react to
+  // workflow.created immediately when it names one of them.
   const handleSSEEvent = useCallback(
     (event: SSEChatEvent) => {
+      if (event.type === 'message.part.updated') {
+        const part = event.properties?.part;
+        if (part?.sessionID === sessionId) {
+          addWorkflowLinks(workflowLinksRef.current, workflowLinksFromToolPart(part));
+        }
+        return;
+      }
       if (event.type === 'workflow.created' && event.properties?.id) {
         void attachCreatedWorkflowById(String(event.properties.id));
       }
     },
-    [attachCreatedWorkflowById],
+    [attachCreatedWorkflowById, sessionId],
   );
 
   // Primary: check right after AI finishes streaming
