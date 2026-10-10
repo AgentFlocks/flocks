@@ -704,6 +704,66 @@ describe('SessionChat provider retry notice', () => {
       .toContain('模型请求被限流（429），正在第 3/5 次重试');
   });
 
+  it('recovers the retry state when the message load toggles loading mid-poll', async () => {
+    // The real useSessionMessages starts with loading=false and flips to true
+    // once its fetch starts, which re-runs the recovery effect while the first
+    // status poll is still in flight (FL-BUG-002).
+    let setLoading: (value: boolean) => void = () => {};
+    useSessionMessagesMock.mockImplementation(() => {
+      const [loading, setLoadingState] = React.useState(false);
+      setLoading = setLoadingState;
+      return {
+        messages: [userMessage],
+        loading,
+        error: null,
+        refetch: vi.fn(),
+        addMessage: vi.fn(),
+        updateMessage: vi.fn(),
+        updateMessagePart: vi.fn(),
+        removeMessage: vi.fn(),
+        clearMessages: vi.fn(),
+        replaceMessageText: vi.fn(),
+        markMessageStopped: vi.fn(),
+        truncateAfterMessage: vi.fn(),
+      };
+    });
+    const statusPolls: Array<(value: unknown) => void> = [];
+    clientGetMock.mockImplementation((url: string) => {
+      if (url === '/api/session/status') {
+        return new Promise((resolve) => { statusPolls.push(resolve); });
+      }
+      return Promise.resolve({ data: {} });
+    });
+
+    render(React.createElement(SessionChat, { sessionId: 'sess-1', live: true }));
+    await act(async () => { await Promise.resolve(); });
+    expect(statusPolls.length).toBeGreaterThan(0);
+
+    act(() => { setLoading(true); });
+    act(() => { setLoading(false); });
+    await act(async () => { await Promise.resolve(); });
+
+    await act(async () => {
+      statusPolls.splice(0).forEach((resolve) => resolve({
+        data: {
+          'sess-1': {
+            type: 'retry',
+            attempt: 1,
+            maxAttempts: 5,
+            message: 'Rate Limited',
+            next: Date.now() + 15000,
+            rateLimited: true,
+          },
+        },
+      }));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(screen.getByTestId('session-retry-notice').textContent)
+      .toContain('模型请求被限流（429），正在第 1/5 次重试');
+  });
+
   it('ignores a status poll that lands after the consumer switched sessions', async () => {
     // WorkflowDetail/ChatTab swaps sessionId without remounting; a slow poll
     // for the old session must not paint its retry notice onto the new one.
