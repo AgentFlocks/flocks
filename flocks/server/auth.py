@@ -291,7 +291,10 @@ async def apply_auth_for_request(request: HTTPConnection):
         result = await _apply_auth_for_request(request)
         _blocked, auth_token, user = result
         extension_context: dict[str, Any] = {}
-        for adapter in _auth_context_adapters.values():
+        # Extensions re-register their adapters at runtime (Flocks Pro does
+        # when its licence or security config changes), possibly while this
+        # request is awaiting one; iterate over a snapshot.
+        for adapter in list(_auth_context_adapters.values()):
             supplied = await adapter(request, user)
             if isinstance(supplied, Mapping):
                 extension_context.update(supplied)
