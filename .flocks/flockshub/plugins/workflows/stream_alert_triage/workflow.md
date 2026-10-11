@@ -95,6 +95,7 @@ load_dedup_file -> concurrent_triage -> commit_cursor -> summarize
 ## 研判与持久化
 
 - 同批相同 `dedup_key` 只研判 leader，followers 复用结果。
+- 情报查询调用微步 MCP 的 `threatbook_mcp_ip_query`、`threatbook_mcp_domain_query`、`threatbook_mcp_vuln_query`；MCP 服务名是 `threatbook` 的旧配置自动改用 `threatbook_*` 这一组。IP、域名或漏洞情报工具没有注册时，每次执行打印一行 `[triage] WARNING`，研判照常进行。
 - 跨批命中 `triage_cache.pkl` 时直接复用，不调用 LLM；缓存锁覆盖 cache miss、LLM 研判和保存阶段，避免并发执行重复研判相同批次。
 - 缓存使用 run 级唯一临时文件原子保存；保存失败会抛出异常并阻止生产游标提交。
 - 默认 `triage_output_mode=soc_db`；也支持 `jsonl`、`both` 和 `none`。

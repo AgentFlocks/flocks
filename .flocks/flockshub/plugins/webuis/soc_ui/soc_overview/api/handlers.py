@@ -1,5 +1,4 @@
 import json
-import math
 import re
 import time
 from collections import Counter
@@ -19,7 +18,6 @@ DEFAULT_TABLE = "alert_records"
 DEFAULT_RECORD_COLUMN = "record_json"
 DEFAULT_DATE_COLUMN = "asset_date"
 DEFAULT_EVENT_TIME_COLUMN = "event_time"
-SIMULATED_TIME_BUCKETS = 24
 MAX_OVERVIEW_RECORDS = 50_000
 MAX_OVERVIEW_BYTES = 32 * 1024 * 1024
 MAX_RECORD_BYTES = 64 * 1024
@@ -186,18 +184,32 @@ def _triage_attack_verdict_value(record):
 
 
 def _triage_attack_success_value(record):
-    raw_verdict = _norm(record.get("triage_attack_verdict") or "unknown")
-    verdict = _triage_attack_verdict_value(record)
-    result = _norm(record.get("triage_attack_success") or "unknown")
-    if verdict == "attack" and result in {"success", "failed", "unknown"}:
-        return result
-    if verdict != "attack":
+    # Same precedence as the posture dashboard's SQL projection: an explicit
+    # result string wins; older records carry the outcome in the verdict
+    # ("attack_success" / "attack_failed") or as a boolean result.
+    if _triage_attack_verdict_value(record) != "attack":
         return "unknown"
-    if raw_verdict == "attack_success" or record.get("triage_attack_success") is True:
+    raw_result = record.get("triage_attack_success")
+    result = str(raw_result).strip().lower() if raw_result is not None else ""
+    if result in {"success", "failed", "unknown"}:
+        return result
+    raw_verdict = _norm(record.get("triage_attack_verdict"))
+    if raw_verdict == "attack_success":
         return "success"
     if raw_verdict == "attack_failed":
         return "failed"
+    if result in {"1", "true"}:
+        return "success"
     return "unknown"
+
+
+def _has_triage_result(record):
+    """Rows the triage workflow wrote (the posture dashboard's triage filter)."""
+    return bool(
+        str(record.get("triage_status") or "").strip()
+        or str(record.get("_triage_persisted_at") or "").strip()
+        or record.get("triage_report") is not None
+    )
 
 
 def get_stats(ctx, request):
@@ -240,14 +252,14 @@ def _get_stats(request):
     sample_mode = bool(asset_denoise_files or asset_triage_files)
     if asset_denoise_files:
         denoise_files = asset_denoise_files
-    if asset_triage_files:
-        triage_files = asset_triage_files
+    # alert_records holds the triaged first-seen alerts, so the same rows carry
+    # the model verdicts the triage statistics are built from (as on the
+    # posture dashboard). Nothing is estimated when a field is missing.
+    triage_files = asset_triage_files or asset_denoise_files
 
     workflow_stats = _get_workflow_call_count("stream_alert_denoise", date=start_date)
     denoise = _read_denoise(denoise_files)
     triage = _read_triage(triage_files)
-    if triage["totalRecords"] == 0 and denoise["totalRaw"] > 0:
-        triage = _simulate_triage_from_denoise(denoise_files)
     sources = _build_sources(denoise["sourceCounter"] or triage["sourceCounter"])
     closed_loop = _build_closed_loop(triage)
     pipeline = _build_pipeline(denoise, triage)
@@ -302,114 +314,14 @@ def _get_stats(request):
         "topThreats": _counter_items(triage["threatCounter"] or denoise["threatCounter"], 14),
         "riskLevels": _counter_items(triage["riskCounter"], 5),
         "timeline": {
-            "labels": _series_labels(max(len(denoise["seriesRaw"]), len(triage["seriesTotal"]))),
-            "window": _timeline_window(start_date, end_date, len(denoise["seriesRaw"])),
+            "labels": [_asset_file_date(path) for path in denoise_files],
+            "window": _timeline_window(start_date, end_date),
             "denoiseRaw": denoise["seriesRaw"],
             "denoiseUnique": denoise["seriesUnique"],
             "triageTotal": triage["seriesTotal"],
             "triageAttack": triage["seriesAttack"],
         },
     }
-
-
-def _simulate_triage_from_denoise(paths):
-    total_records = 0
-    parse_errors = 0
-    source_counter = Counter()
-    threat_counter = Counter()
-    risk_counter = Counter()
-    verdict_counter = Counter()
-    profile_counters = _new_profile_counters()
-    event_start = None
-    event_end = None
-    series_total = []
-    series_attack = []
-
-    for path in paths:
-        file_total = 0
-        file_attack = 0
-        for obj in _iter_source_records(path):
-            if obj is None:
-                parse_errors += 1
-                continue
-            if obj.get("_type") == "file_header" or obj.get("is_duplicate") is True:
-                continue
-            total_records += 1
-            file_total += 1
-            verdict = _dedup_record_verdict(obj)
-            verdict_counter[verdict] += 1
-            if verdict in {"attack_success", "attack", "attack_failed"}:
-                file_attack += 1
-            source_counter[_norm(obj.get("_source_type") or obj.get("source_type") or obj.get("device_type"))] += 1
-            threat_counter[_norm(obj.get("threat_name"))] += 1
-            risk_counter[_norm(obj.get("risk_level"))] += 1
-            _update_profile_counters(obj, profile_counters)
-            event_start, event_end = _merge_record_time(event_start, event_end, obj)
-        series_total.append(file_total)
-        series_attack.append(file_attack)
-
-    attack_success = verdict_counter["attack_success"]
-    attack = verdict_counter["attack"]
-    attack_failed = verdict_counter["attack_failed"]
-    attack_total = attack_success + attack + attack_failed
-    benign = verdict_counter["benign"]
-    unknown = verdict_counter["unknown"]
-    new_triaged = round(total_records * 0.22)
-    cache_hit = round(total_records * 0.68)
-    followers_reused = max(total_records - new_triaged - cache_hit, 0)
-
-    series_total = _expand_series(series_total, total_records, seed=17)
-    series_attack = _expand_series(series_attack, attack_total, seed=19)
-
-    return {
-        "totalRecords": total_records,
-        "batchTotal": total_records,
-        "newTriaged": new_triaged,
-        "cacheHit": cache_hit,
-        "triageFailed": 0,
-        "followersReused": followers_reused,
-        "attackTotal": attack_total,
-        "attackSuccess": attack_success,
-        "attack": attack,
-        "attackFailed": attack_failed,
-        "benign": benign,
-        "unknown": unknown,
-        "attackRate": _ratio(attack_total, total_records),
-        "successRate": _ratio(attack_success, attack_total),
-        "cacheRate": _ratio(cache_hit + followers_reused, total_records),
-        "coverageRate": _ratio(total_records, total_records),
-        "headers": 0,
-        "files": len(paths),
-        "parseErrors": parse_errors,
-        "eventStart": _format_event_time(event_start),
-        "eventEnd": _format_event_time(event_end),
-        "sourceCounter": source_counter,
-        "threatCounter": threat_counter,
-        "riskCounter": risk_counter,
-        "statusCounter": Counter({"simulated": total_records}),
-        **profile_counters,
-        "seriesTotal": series_total,
-        "seriesAttack": series_attack,
-    }
-
-
-def _dedup_record_verdict(obj):
-    threat_level = _norm(obj.get("threat_level"))
-    threat_result = _norm(obj.get("threat_result"))
-    status = _safe_int(obj.get("rsp_status_code"))
-    body_len = _safe_int(obj.get("rsp_body_len"))
-
-    if threat_level in {"benign", "info", "low"}:
-        return "benign"
-    if threat_result in {"success", "succeeded"}:
-        return "attack_success"
-    if threat_result in {"failed", "blocked"} or status in {401, 403, 404, 405, 406, 410}:
-        return "attack_failed"
-    if status == 200 and body_len > 0:
-        return "attack_success"
-    if threat_level == "attack" or obj.get("threat_name"):
-        return "attack"
-    return "unknown"
 
 
 def _normalize_date(value):
@@ -663,13 +575,11 @@ def _build_event_range(date_range, denoise, triage):
     }
 
 
-def _timeline_window(start_date, end_date, series_length):
+def _timeline_window(start_date, end_date):
     if start_date != end_date:
         days = len(list(_date_span(start_date, end_date)))
         return f"{days} 天范围聚合"
-    if series_length >= SIMULATED_TIME_BUCKETS:
-        return "近 24 小时分布"
-    return "按批次统计"
+    return "按日统计"
 
 
 def _asset_file_role(path):
@@ -717,8 +627,8 @@ def _read_denoise(paths, workflow_call_count: int = 0):
         series_unique.append(max(file_raw - file_duplicates, 0))
 
     total_unique = max(total_raw - duplicates, 0)
-    series_raw = _expand_series(series_raw, total_raw, seed=7)
-    series_unique = _expand_series(series_unique, total_unique, seed=11)
+    series_raw = _per_date_series(series_raw)
+    series_unique = _per_date_series(series_unique)
 
     return {
         "totalRaw": total_raw,
@@ -778,6 +688,9 @@ def _read_triage(paths):
                 ):
                     header_sums[key] += _safe_int(obj.get(key))
                 continue
+            if not _has_triage_result(obj):
+                # Migrated alert rows may never have been triaged.
+                continue
 
             total_records += 1
             file_total += 1
@@ -825,8 +738,8 @@ def _read_triage(paths):
     benign = verdict_counter["non_attack"]
     unknown = verdict_counter["unknown"]
 
-    series_total = _expand_series(series_total, total_records, seed=23)
-    series_attack = _expand_series(series_attack, attack_total, seed=29)
+    series_total = _per_date_series(series_total)
+    series_attack = _per_date_series(series_attack)
 
     return {
         "totalRecords": total_records,
@@ -890,49 +803,9 @@ def _update_profile_counters(obj, counters, *, triage_result=False):
     counters["portCounter"][port] += 1
 
 
-def _expand_series(values, total, *, seed):
-    values = [max(_safe_int(value), 0) for value in values if _safe_int(value) > 0]
-    total = _safe_int(total)
-    if total <= 0:
-        return []
-    if len(values) >= 8:
-        return values
-    return _simulate_time_series(total, SIMULATED_TIME_BUCKETS, seed=seed)
-
-
-def _simulate_time_series(total, buckets, *, seed):
-    if total <= 0 or buckets <= 0:
-        return []
-    spike_a = (seed * 3 + 5) % buckets
-    spike_b = (seed * 5 + 11) % buckets
-    weights = []
-    for hour in range(buckets):
-        workday = 1.0 if 8 <= hour <= 22 else 0.34
-        wave = 1.0 + 0.46 * math.sin((hour + seed) * 0.68) + 0.22 * math.sin((hour + seed) * 1.31)
-        spike = 1.0
-        if hour == spike_a:
-            spike += 1.05
-        if hour == spike_b:
-            spike += 0.72
-        if 14 <= hour <= 16:
-            spike += 0.45
-        weights.append(max(0.08, workday * wave * spike))
-
-    weight_sum = sum(weights) or 1
-    exact = [total * weight / weight_sum for weight in weights]
-    series = [int(value) for value in exact]
-    remainder = total - sum(series)
-    order = sorted(range(buckets), key=lambda index: exact[index] - series[index], reverse=True)
-    for index in order[:remainder]:
-        series[index] += 1
-    return series
-
-
-def _series_labels(length):
-    if length == SIMULATED_TIME_BUCKETS:
-        return [f"{hour:02d}:00" for hour in range(SIMULATED_TIME_BUCKETS)]
-    return [f"B{index + 1:02d}" for index in range(length)]
-
+def _per_date_series(values):
+    """Counts per selected date in date order; never a synthesized curve."""
+    return [max(_safe_int(value), 0) for value in values]
 
 
 def _build_field_stats(paths):
@@ -1071,7 +944,9 @@ def _build_closed_loop(triage):
     total = triage["totalRecords"]
     auto_closed = triage["attackFailed"] + triage["benign"]
     manual = triage["unknown"]
-    pending = triage["triageFailed"] + triage["unknown"]
+    # A failed triage is already counted under its (normally unknown) verdict;
+    # adding triageFailed again counted the same row twice.
+    pending = triage["unknown"]
     resolved = max(total - pending, 0)
     return {
         "autoClosed": auto_closed,

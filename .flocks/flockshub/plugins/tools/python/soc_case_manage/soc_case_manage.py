@@ -62,6 +62,10 @@ OPERATIONS = (
     "update_improvement", "close", "reopen",
 )
 HUMAN_OPERATIONS = frozenset({"decide_action", "verify_action"})
+# The investigation agent only records findings and proposals (its prompt says
+# so); executing an approved plan and closing or reopening stay with operators.
+INVESTIGATOR_AGENTS = frozenset({"soc-investigator"})
+INVESTIGATOR_FORBIDDEN = frozenset({"execute_action", "close", "reopen"})
 _NO_SESSION = frozenset({"", "default", "http-tool"})
 _SECRET_KEYS = frozenset({
     "authorization", "cookie", "setcookie", "password", "passwd", "secret",
@@ -88,6 +92,7 @@ decide_action: action_id, decision=approve|reject, reason. Authenticated human U
 execute_action: action_id ONLY; requires a writable real session/message in the tool HTTP envelope or agent
 context. Uses the stored approved plan and all device tool gates. A blocked action may be retried with a
 NEW idempotency key in the SAME session after policy approval; running/unknown actions cannot be retried.
+The soc-investigator agent cannot execute_action, close or reopen; an operator does.
 verify_action: action_id, verdict=verified|failed|inconclusive, summary, fresh evidence_ids. Human only.
 For an unknown/running attempt proven NOT executed, also set execution_occurred=false and verdict=failed;
 this permits a human rejection, never an automatic retry.
@@ -169,6 +174,11 @@ async def _actor_for(ctx: ToolContext, operation: str):
     kind = "service" if service else "agent" if is_agent else "human"
     if operation in HUMAN_OPERATIONS and kind != "human":
         raise CaseError("human_required", "Approval and outcome verification require a human in the authenticated UI", 403)
+    # The runtime names the agent running this call; a session keeps the agent
+    # it was created with even after the user switches to another one.
+    agent = str(ctx.agent or "") or str(getattr(session, "agent", "") or "")
+    if is_agent and operation in INVESTIGATOR_FORBIDDEN and agent in INVESTIGATOR_AGENTS:
+        raise CaseError("operator_required", "The investigation agent cannot execute actions or close or reopen cases", 403)
     if operation == "execute_action" and session is None:
         raise CaseError("session_required", "Device actions require a writable real session and message", 403)
     actor = Actor(user_id=principal.id, kind=kind, is_admin=principal.role == "admin" and not service)

@@ -223,3 +223,57 @@ async def test_an_alert_row_id_is_matched_before_any_record_id(tool) -> None:
     with pytest.raises(tool.CaseError) as ambiguous:
         await asyncio.to_thread(open_case, "shared")
     assert ambiguous.value.code == "ambiguous_alert"
+
+
+@pytest.fixture
+def sessions(tool, monkeypatch):
+    """Sessions _actor_for can look up; the caller is an active analyst account."""
+    known: dict[str, object] = {}
+    principal = SimpleNamespace(id="analyst", status="active", must_reset_password=False, role="member")
+
+    async def get_session(session_id):
+        return known.get(session_id)
+
+    async def get_message(session_id, message_id):
+        return {"id": message_id}
+
+    monkeypatch.setattr(tool, "get_current_auth_user", lambda: principal)
+    monkeypatch.setattr(tool, "Session", SimpleNamespace(get_by_id=get_session))
+    monkeypatch.setattr(tool, "Message", SimpleNamespace(get=get_message))
+    monkeypatch.setattr(tool, "SessionPolicy", SimpleNamespace(can_read=lambda s, p: True, can_write=lambda s, p: True))
+    known["investigation"] = SimpleNamespace(agent="soc-investigator", owner_user_id="analyst")
+    known["chat"] = SimpleNamespace(agent="rex", owner_user_id="analyst")
+    return known
+
+
+def _caller(session_id: str, agent: str = "", *, http: bool = False) -> SimpleNamespace:
+    extra = {"http_permission_denied": {}} if http else {"agent_execution_session": True}
+    return SimpleNamespace(extra=extra, session_id=session_id, message_id="message-1", agent=agent)
+
+
+@pytest.mark.parametrize("operation", ["execute_action", "close", "reopen"])
+async def test_the_investigation_agent_cannot_execute_close_or_reopen(tool, sessions, operation) -> None:
+    with pytest.raises(tool.CaseError) as refused:
+        await tool._actor_for(_caller("investigation", "soc-investigator"), operation)
+    assert (refused.value.code, refused.value.status_code) == ("operator_required", 403)
+    # The session's own agent decides even when the context does not name one.
+    with pytest.raises(tool.CaseError, match="investigation agent"):
+        await tool._actor_for(_caller("investigation"), operation)
+
+
+@pytest.mark.parametrize("operation", ["get", "add_evidence", "decide_hypothesis", "propose_action", "record_review"])
+async def test_the_investigation_agent_still_investigates_and_proposes(tool, sessions, operation) -> None:
+    actor, _ = await tool._actor_for(_caller("investigation", "soc-investigator"), operation)
+    assert actor.kind == "agent"
+
+
+async def test_operators_and_other_agents_keep_execute_and_close(tool, sessions) -> None:
+    operator, _ = await tool._actor_for(_caller("investigation", http=True), "execute_action")
+    assert operator.kind == "human"
+    for operation in ("execute_action", "close", "reopen"):
+        agent, _ = await tool._actor_for(_caller("chat", "rex"), operation)
+        assert agent.kind == "agent"
+        # The user switched an investigation session to another agent: the
+        # running agent decides, not the one the session was created with.
+        switched, _ = await tool._actor_for(_caller("investigation", "rex"), operation)
+        assert switched.kind == "agent"

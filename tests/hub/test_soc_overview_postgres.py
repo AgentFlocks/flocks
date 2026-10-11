@@ -78,6 +78,67 @@ def test_overview_real_pg_aggregates_and_reuses_range_query(soc_database):
     assert handlers._request_state.get() is None
 
 
+def test_overview_reports_the_model_verdicts_instead_of_estimating_them(soc_database):
+    # Raw fields that the removed estimate read as "attack succeeded" on every row.
+    first = datetime(2026, 9, 3, 10, 0)
+    rows = []
+    for index in range(10):
+        verdict, result = ("attack", "failed") if index == 0 else ("non_attack", "unknown")
+        cached = index < 3
+        record = {
+            "id": f"alert-{index}", "time": int((first + timedelta(minutes=index)).timestamp()),
+            "threat_name": "SQL injection", "_source_type": "tdp", "threat_result": "success",
+            "rsp_status_code": 200, "rsp_body_len": 120, "is_duplicate": False, "dedup_key": f"key-{index}",
+            "triage_attack_verdict": verdict, "triage_attack_success": result,
+            "triage_source": "cache" if cached else "triaged", "triage_status": "cached" if cached else "ok",
+        }
+        rows.append((uuid4().hex, index + 1, "2026-09-03", record["time"], json.dumps(record)))
+    with sync_query.connect() as db:
+        db.executemany("INSERT INTO alert_records VALUES (?, ?, ?, ?, ?::jsonb)", rows)
+
+    result = stats(load("soc_overview/api/handlers.py"), date="2026-09-03")
+
+    assert {item["key"]: item["value"] for item in result["verdicts"]} == {
+        "attack_success": 0, "attack": 0, "attack_failed": 1, "non_attack": 9, "unknown": 0,
+    }
+    assert (result["triage"]["totalRecords"], result["triage"]["newTriaged"], result["triage"]["cacheHit"]) == (10, 7, 3)
+    assert result["timeline"] == {
+        "labels": ["2026-09-03"], "window": "按日统计",
+        "denoiseRaw": [10], "denoiseUnique": [10], "triageTotal": [10], "triageAttack": [1],
+    }
+
+
+def test_overview_counts_each_triage_row_once_and_reads_legacy_outcomes(soc_database):
+    records = [
+        {"triage_status": "ok", "triage_attack_verdict": "non_attack", "triage_attack_success": "unknown"},
+        {"triage_status": "failed", "triage_attack_verdict": "unknown", "triage_attack_success": "unknown"},
+        # Older rows kept the outcome in the verdict, with a boolean or no result.
+        {"triage_status": "ok", "triage_attack_verdict": "attack_failed", "triage_attack_success": False},
+        {"triage_status": "ok", "triage_attack_verdict": "attack_failed"},
+        {"triage_status": "ok", "triage_attack_verdict": "attack_success"},
+        {"triage_status": "ok", "triage_attack_verdict": "attack", "triage_attack_success": True},
+        # A migrated alert that was never triaged.
+        {"threat_name": "not triaged"},
+    ]
+    start = int(datetime(2026, 9, 4, 9, 0).timestamp())
+    with sync_query.connect() as db:
+        db.executemany("INSERT INTO alert_records VALUES (?, ?, ?, ?, ?::jsonb)", [
+            (uuid4().hex, index + 1, "2026-09-04", start + index, json.dumps({"id": str(index), **record}))
+            for index, record in enumerate(records)
+        ])
+
+    result = stats(load("soc_overview/api/handlers.py"), date="2026-09-04")
+
+    assert {item["key"]: item["value"] for item in result["verdicts"]} == {
+        "attack_success": 2, "attack": 0, "attack_failed": 2, "non_attack": 1, "unknown": 1,
+    }
+    assert (result["triage"]["totalRecords"], result["triage"]["triageFailed"], result["denoise"]["totalRaw"]) == (6, 1, 7)
+    # The failed row is pending once, not once as failed and again as unknown.
+    assert result["closedLoop"] == {
+        "autoClosed": 3, "resolved": 5, "manualDecision": 1, "pending": 1, "resolutionRate": round(5 / 6, 4),
+    }
+
+
 def test_overview_missing_tables_returns_empty_without_database_files():
     result = stats(load("soc_overview/api/handlers.py"), date="2026-09-01")
     assert result["denoise"]["totalRaw"] == 0
