@@ -8,6 +8,7 @@ from typing import Any
 import pytest
 from httpx import AsyncClient
 
+from flocks.hooks.pipeline import HookBase, HookPipeline
 from flocks.server.routes import workflow as workflow_routes
 from flocks.workflow import fs_store
 
@@ -873,6 +874,89 @@ async def test_webhook_route_authorizes_and_dispatches_trigger(
     assert body["inputs"]["payload"] == {"severity": "high"}
     assert isinstance(body["deliveryId"], str)
     assert "result" not in body
+
+
+@pytest.fixture
+def _stop_workflow_trigger_ingress():
+    """Register an ingress hook that refuses workflow trigger runs, as Pro does."""
+
+    class _StopTriggerIngress(HookBase):
+        def __init__(self) -> None:
+            self.operations: list[str] = []
+
+        async def ingress_before(self, ctx):
+            self.operations.append(str(ctx.input.get("operation")))
+            return {"execution": {"stop": True, "detail": "headless_evidence_missing"}}
+
+    hook = _StopTriggerIngress()
+    HookPipeline.reset()
+    HookPipeline._initialized = True
+    HookPipeline.register("test.workflow.trigger.ingress", hook)
+    yield hook
+    HookPipeline.reset()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("path", "request_kwargs"),
+    [
+        (
+            "/api/workflow/wf-1/triggers/hook-default/test",
+            {"json": {"body": {"severity": "high"}}},
+        ),
+        (
+            "/webhook/workflows/wf-1/hook-default",
+            {"headers": {"x-api-key": "demo-secret"}, "json": {"severity": "high"}},
+        ),
+    ],
+)
+async def test_trigger_routes_answer_extension_stop_with_403_and_reason(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+    _stop_workflow_trigger_ingress,
+    path: str,
+    request_kwargs: dict[str, Any],
+) -> None:
+    monkeypatch.setattr(
+        workflow_routes,
+        "_read_workflow_from_fs",
+        lambda workflow_id: {
+            "id": workflow_id,
+            "workflowJson": {
+                "start": "n1",
+                "nodes": [{"id": "n1", "type": "python", "code": "result = {'ok': True}"}],
+                "edges": [],
+                "triggers": [
+                    {
+                        "id": "hook-default",
+                        "type": "custom_webhook",
+                        "enabled": True,
+                        "auth": {"type": "api_key", "apiKey": "demo-secret"},
+                        "mapping": {"payload": "$.body"},
+                    }
+                ],
+            },
+        },
+    )
+
+    async def _must_not_run(**_kwargs: Any) -> dict[str, Any]:
+        raise AssertionError("a refused trigger run must not execute the workflow")
+
+    # The real trigger runtime runs the ingress lifecycle; only its effect is
+    # replaced, so the refusal travels the same way it does in production.
+    monkeypatch.setattr(
+        workflow_routes.default_trigger_runtime,
+        "_execute_workflow_effect",
+        _must_not_run,
+    )
+
+    response = await client.post(path, **request_kwargs)
+
+    assert response.status_code == 403, response.text
+    assert response.json()["message"] == (
+        "Workflow trigger stopped by extension: headless_evidence_missing"
+    )
+    assert _stop_workflow_trigger_ingress.operations == ["workflow.trigger.execute"]
 
 
 @pytest.mark.asyncio

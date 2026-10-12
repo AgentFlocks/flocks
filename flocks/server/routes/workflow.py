@@ -94,7 +94,7 @@ from flocks.workflow.triggers.compat import (
     syslog_trigger_to_legacy_config,
 )
 from flocks.config.config import Config
-from flocks.hooks.execution import current_execution_context
+from flocks.hooks.execution import ExecutionStopped, current_execution_context
 from flocks.storage.storage import Storage
 from flocks.server.routes.event import publish_event
 from flocks.tool import ToolContext
@@ -3349,6 +3349,31 @@ async def preview_workflow_trigger_mapping(
     )
 
 
+async def _dispatch_trigger_event(
+    *,
+    workflow_id: str,
+    workflow_json: Dict[str, Any],
+    trigger: TriggerDefinition,
+    event: TriggerEvent,
+) -> Dict[str, Any]:
+    """Dispatch a trigger event, answering an extension's refusal with 403."""
+    try:
+        return await default_trigger_runtime.dispatch_event(
+            workflow_id=workflow_id,
+            workflow_json=workflow_json,
+            trigger=trigger,
+            event=event,
+        )
+    except ExecutionStopped as exc:
+        # The message is the reason the extension gave (for example Flocks
+        # Pro's "headless_evidence_missing"); pass it on so the caller does
+        # not have to read the server log to learn why the run was refused.
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Workflow trigger stopped by extension: {exc}",
+        ) from exc
+
+
 @router.post("/workflow/{workflow_id}/triggers/{trigger_id}/test")
 async def test_workflow_trigger(
     workflow_id: str,
@@ -3369,7 +3394,7 @@ async def test_workflow_trigger(
         query=payload.query,
         path_params=payload.path_params,
     )
-    result = await default_trigger_runtime.dispatch_event(
+    result = await _dispatch_trigger_event(
         workflow_id=workflow_id,
         workflow_json=workflow_json,
         trigger=trigger,
@@ -3484,7 +3509,7 @@ async def invoke_workflow_webhook_trigger(
         raw=body,
         source=(trigger.source or {}).get("path") or str(request.url.path),
     )
-    result = await default_trigger_runtime.dispatch_event(
+    result = await _dispatch_trigger_event(
         workflow_id=workflow_id,
         workflow_json=workflow_json,
         trigger=trigger,
