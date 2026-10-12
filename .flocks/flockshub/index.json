@@ -14685,7 +14685,7 @@
       "nameCn": "流式HTTP降噪工作流",
       "description": "Streaming alert denoise and deduplication pipeline with Syslog/API input.",
       "descriptionCn": "流式告警降噪与去重工作流，支持 Syslog 和 API 输入。",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "category": "workflow-automation",
       "tags": [
         "siem",
@@ -14708,7 +14708,7 @@
       "nameCn": "HTTP研判工作流",
       "description": "Downstream alert triage workflow that writes triage results to SOC DB by default with optional JSONL output.",
       "descriptionCn": "下游告警研判工作流，默认写入 SOC DB，并保留 JSONL 输出配置。",
-      "version": "1.1.1",
+      "version": "1.1.2",
       "category": "workflow-automation",
       "tags": [
         "siem",
@@ -14731,7 +14731,7 @@
       "nameCn": "SOC 工作区场景套件",
       "description": "Composite installer for the Flocks SOC workspace: pages, tools, denoise workflow, and triage workflow.",
       "descriptionCn": "Flocks SOC 工作区组件安装器：包含页面、工具、降噪工作流和研判工作流。",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "category": "workflow-automation",
       "tags": [
         "siem",
