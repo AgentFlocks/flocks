@@ -94,7 +94,7 @@ class XdrAdapter:
             if 'severities' not in properties.get('api_params', {}).get('properties', {}):
                 raise ContractError('请更新 XDR API 工具：联调抽样需要事件等级筛选能力')
         ctx = ToolContext(session_id=self.session_id, message_id=message_id, agent='rex')
-        capture = OutputCapture(tool_name)
+        capture = OutputCapture(tool_name, private=True)
         ctx._output_capture = capture
         try:
             result = await ToolRegistry.execute(
@@ -170,6 +170,7 @@ def page_items(value):
 
 
 def normalize(device, raw):
+    from .event_details import normalize_basics
     # Native incidents use ascending incidentSeverity; legacy riskLevel has
     # the opposite direction. Never fall back from a present but invalid native
     # field, or a conflicting legacy value could override the actual response.
@@ -190,9 +191,12 @@ def normalize(device, raw):
         'incidentThreatClass': raw['incidentThreatClass'][:160] if isinstance(raw.get('incidentThreatClass'), str) else '',
         'incidentThreatType': raw['incidentThreatType'][:160] if isinstance(raw.get('incidentThreatType'), str) else '',
         'host': str(raw.get('hostIp') or '')[:200],
-        'alertIds': [str(x)[:200] for x in raw.get('alertIds', [])] if isinstance(raw.get('alertIds'), list) else [],
+        'alertIds': list(dict.fromkeys(x for x in raw.get('alertIds', [])
+                                      if isinstance(x, str) and x and len(x) <= 200)) if isinstance(raw.get('alertIds'), list) else [],
         'closure': 'open', 'disposition': '待人工确认',
         'dealStatus': raw.get('dealStatus') if type(raw.get('dealStatus')) is int else None,
+        'startTime': raw.get('startTime') if type(raw.get('startTime')) is int else None,
         'endTime': raw.get('endTime') if type(raw.get('endTime')) is int else None,
+        'basics': normalize_basics(raw),
         'reason': ('XDR 事件等级 incidentSeverity 2–4（中危、高危、严重）' if native else 'XDR 旧版 riskLevel 0–2') if risk == 'risk' else '缺少明确忽略依据，保持待判定',
     }

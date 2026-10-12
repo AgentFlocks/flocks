@@ -6,6 +6,7 @@ completion is durable before XDR I/O and becomes handled only after readback.
 import asyncio
 import json
 import re
+from datetime import datetime, timedelta, timezone
 from typing import Literal
 from uuid import UUID
 
@@ -14,9 +15,9 @@ from pydantic import BaseModel, ConfigDict
 from flocks.session.interaction_policy import require_interactive
 from flocks.session.session import Session
 from . import disposition as d, diagnostics as diag
-from .adapter import ContractError
+from .adapter import ContractError, XdrAdapter
 from .automatic import read_event
-from .models import COMPONENT_ID
+from .models import COMPONENT_ID, MonitoringPolicy
 from .store import connection, rows, write, encode
 
 _UNSET = object()
@@ -218,3 +219,70 @@ async def recheck(owner, notice_id, adapter_factory=d.DispositionAdapter):
         raise ValueError('处置记录不属于当前监测项目')
     await d.recheck(owner, previous['id'], adapter_factory, defer_exports=True)
     return await snapshot(notice)
+
+
+async def _active_policy(policy):
+    """Readbacks run only as part of an active, currently bound monitor round."""
+    from flocks.hub import local
+    entry = local.get_record('component', policy.scope)
+    if not entry or not entry.enabled:
+        return False
+    installed = await rows(
+        "SELECT i.policy FROM monitor_installations i JOIN task_schedulers s ON s.id=i.scheduler_id "
+        "WHERE i.owner=? AND i.scope=? AND i.project=? AND i.installed=1 AND i.ready=1 AND s.status='active'",
+        (policy.owner, policy.scope, policy.project))
+    return bool(installed and MonitoringPolicy.model_validate_json(installed[0]['policy']) == policy)
+
+
+async def recheck_pending(policy, *, limit=10, timeout_seconds=60, adapter_factory=XdrAdapter):
+    """Automatically verify existing manual writes; never initiate another write.
+
+    No reply/delivery status creates work here: only a durable prior human
+    completion intent can be selected. Both the total round budget and each
+    readback are bounded, leaving failed/unknown items for a later round.
+    """
+    result = {'checked': 0, 'verified': 0, 'pending': 0, 'errors': []}
+    if not await _active_policy(policy):
+        return result
+    cutoff = (datetime.now(timezone.utc) - timedelta(seconds=120)).isoformat()
+    candidates = await rows(
+        "SELECT m.id,m.notice_id FROM monitor_mail_manual m "
+        "JOIN monitor_mail_notices n ON n.id=m.notice_id AND n.owner=m.owner AND n.project=m.project "
+        "JOIN monitor_dispositions d ON d.id=m.id AND d.owner=m.owner AND d.project=m.project "
+        "AND d.event_key=n.event_key AND d.scope=n.scope "
+        "WHERE m.owner=? AND m.project=? AND n.scope=? AND m.state='handled' AND d.mode='mail_manual' "
+        "AND (d.status IN ('pending','mismatch') OR (d.status='writing' AND d.updated_at<=?)) "
+        "ORDER BY d.updated_at,m.created_at,m.id LIMIT ?",
+        (policy.owner, policy.project, policy.scope, cutoff, max(1, min(int(limit), 50))))
+    deadline = asyncio.get_running_loop().time() + max(0, min(float(timeout_seconds), 120))
+    warning = '人工处置状态回查暂未完成；保留待回查，后续监测轮次继续核验，不会重复写回。'
+    for candidate in candidates:
+        remaining = deadline - asyncio.get_running_loop().time()
+        if remaining <= 0 or not await _active_policy(policy):
+            break
+        result['checked'] += 1
+        try:
+            async def readback():
+                _, actual, _ = await bound_notice(policy.owner, candidate['notice_id'])
+                if actual != policy:
+                    raise ContractError('监测绑定已变化，等待后续轮次核验')
+                return await d.recheck(policy.owner, candidate['id'], adapter_factory, defer_exports=True)
+            updated = await asyncio.wait_for(readback(), timeout=min(15, remaining))
+            if updated['status'] == 'verified':
+                result['verified'] += 1
+            else:
+                result['pending'] += 1
+                if updated.get('error'):
+                    result['errors'].append(warning)
+        except Exception:
+            # Cancellation propagates to pause/stop the round. A per-item error
+            # must not prevent another incident's readback or affect its state.
+            # Rotate unsuccessful entries so a removed device cannot starve
+            # later items; never overwrite a result already verified elsewhere.
+            await write("UPDATE monitor_dispositions SET error=?,updated_at=? WHERE owner=? AND project=? AND id=? "
+                        "AND status IN ('writing','pending','mismatch')",
+                        (warning, d.stamp(), policy.owner, policy.project, candidate['id']))
+            result['pending'] += 1
+            result['errors'].append(warning)
+    result['errors'] = list(dict.fromkeys(result['errors']))
+    return result

@@ -59,6 +59,7 @@ class OutboundDelivery:
             return [DeliveryResult(
                 channel_id=ctx.channel_id, message_id="",
                 success=False, error=f"Channel '{ctx.channel_id}' not registered",
+                delivery_state="not_sent",
             )]
 
         text = ctx.text
@@ -76,6 +77,7 @@ class OutboundDelivery:
                 return [DeliveryResult(
                     channel_id=ctx.channel_id, message_id="",
                     success=True,
+                    delivery_state="not_sent",
                 )]
             if "text" in hook_ctx.output:
                 text = hook_ctx.output["text"]
@@ -83,7 +85,7 @@ class OutboundDelivery:
             log.warning("channel.delivery.hook_before_failed", {"error": str(e)})
             if ctx.single_message:
                 return [DeliveryResult(channel_id=ctx.channel_id, message_id="", success=False,
-                                       error="Notification hook failed")]
+                                       error="Notification hook failed", delivery_state="not_sent")]
 
         formatted_text = plugin.format_message(text) if text else ""
 
@@ -103,10 +105,11 @@ class OutboundDelivery:
         chunks = plugin.chunk_text(formatted_text, plugin.text_chunk_limit)
         if ctx.single_message and len(chunks) != 1:
             return [DeliveryResult(channel_id=ctx.channel_id, message_id="", success=False,
-                                   error="Notification must fit in one message")]
+                                   error="Notification must fit in one message", delivery_state="not_sent")]
         if not chunks:
             return [DeliveryResult(
                 channel_id=ctx.channel_id, message_id="", success=True,
+                delivery_state="not_sent",
             )]
 
         limiter = cls._get_limiter(ctx.channel_id, plugin)

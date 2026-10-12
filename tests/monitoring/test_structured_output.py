@@ -118,7 +118,9 @@ async def test_large_pages_real_registry_complete_round_and_cursor(setup, list_f
     outcome = json.loads((await rows('SELECT result FROM monitor_attempts'))[0]['result'])
     assert outcome['analyzed'] == 20 and outcome['deferred'] == 85 and outcome['errors'] == []
     first = setup.display[0]
-    assert first.truncated and isinstance(first.output, str)
+    assert not first.truncated and first.metadata == {'private_output': True}
+    assert 'BODY_SECRET' not in first.output
+    assert not list(truncation._OUTPUT_DIR.iterdir())
     with pytest.raises(json.JSONDecodeError):
         json.loads(first.output)
     assert 'structured_output' not in first.model_dump()
@@ -173,7 +175,9 @@ async def test_business_selection_after_real_tool_capture(setup, monkeypatch, mo
     assert {call['uuid'] for call in setup.calls if call['action'] == 'get_entities'} == admitted_ids
     assert [call['page_num'] for call in setup.calls if call['action'] == 'list'] == [1, 2, 3]
     assert setup.after.await_count == len(setup.calls) == 3 + len(admitted_ids)
-    assert setup.display[0].truncated and setup.display[1].truncated
+    assert not setup.display[0].truncated and not setup.display[1].truncated
+    assert all(value.metadata == {'private_output': True} for value in setup.display)
+    assert not list(truncation._OUTPUT_DIR.iterdir())
     assert result.action == ('error' if mode == 'unknown' else 'stop')
     assert bool(await rows('SELECT * FROM monitor_cursors')) is (mode != 'unknown')
     messages = await Message.list_with_parts(attempt['session_id'])

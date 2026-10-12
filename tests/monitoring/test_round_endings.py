@@ -42,13 +42,17 @@ async def context(tmp_path, monkeypatch):
         capabilities.Capability('fixture-cap', 'xdr', policy.tool, 'xdr', 'Fixture XDR', 'unknown'),
     ], [])))
     monkeypatch.setattr(investigation.Agent, 'list', AsyncMock(return_value=[]))
-    monkeypatch.setattr(capabilities, 'query', AsyncMock(return_value=(
-        {'data': {'item': [{'hostIp': '192.0.2.1', 'gptResult': 40, 'threatLevel': 1}]}}, {'action': 'get_entities'},
-    )))
+    async def query(policy, session, message, capability, event, entity):
+        if entity == 'proof':
+            return {'data': [{'uuId': event['id'], 'alertTimeLine': []}]}, {'action': 'get_proof', 'uuid': event['id']}
+        assert entity == 'host'
+        return {'data': {'item': [{'hostIp': event['host'], 'gptResult': 40, 'threatLevel': 1}]}}, {'action': 'get_entities', 'uuid': event['id'], 'entity_type': entity}
+    monkeypatch.setattr(capabilities, 'query', query)
     async def choose(agent, data):
-        if not data['evidence']:
+        hosts = [proof for proof in data['evidence'] if proof['kind'] == 'host' and proof['success']]
+        if not hosts:
             return investigation.Choice(action='query', capability='fixture-cap', entity='host', reason='核验主机证据')
-        return investigation.Choice(action='finish', verdict='benign', evidence_ids=['evidence-1'], reason='取得明确误报及安全实体证据')
+        return investigation.Choice(action='finish', verdict='benign', evidence_ids=[proof['id'] for proof in hosts], reason='取得明确误报及安全实体证据')
     monkeypatch.setattr(investigation, 'choose', choose)
     class Adapter:
         def __init__(self, policy, session):
@@ -104,8 +108,14 @@ async def test_normal_business_outcomes_finish_without_partial_status(context, m
     assert facts['closure'] == 'open'  # task completion is not incident closure
     if scenario != 'empty':
         case = (await rows('SELECT * FROM monitor_investigations'))[0]
-        assert case['state'] == 'ready' and json.loads(case['result'])['verdict'] == 'benign'
-        assert len(json.loads(case['evidence'])) == 1
+        conclusion = json.loads(case['result'])
+        assert case['state'] == 'ready' and conclusion['verdict'] == 'unknown'
+        # A completed task is not an all-clear: these fixtures lack bound alert
+        # details, so even the proposed benign opinion remains unconfirmed.
+        assert any('告警编号' in gap for gap in conclusion['gaps'])
+        evidence = json.loads(case['evidence'])
+        assert [proof['kind'] for proof in evidence] == ['proof', 'host']
+        assert all(proof['success'] for proof in evidence)
     assert all(step['status'] == 'completed' for step in await rows('SELECT * FROM monitor_steps'))
     assert not await rows('SELECT * FROM monitor_dispositions')
 
@@ -394,7 +404,7 @@ async def test_reply_failures_are_not_confused_with_normal_waiting_or_human_revi
 
 async def test_shared_query_budget_defers_unstarted_cases_without_spending_retries(context):
     context.events[:] = [dict(context.events[0], uuId=f'event-{index:02d}') for index in range(20)]
-    for round_index in range(3):
+    for round_index in range(4):
         execution = context.execution if round_index == 0 else await TaskManager.create_execution_from_scheduler(
             context.scheduler, trigger_type=ExecutionTriggerType.RUN_ONCE, enqueue=False)
         result = await runtime.run(execution, context.policy, context.adapter)
@@ -405,12 +415,45 @@ async def test_shared_query_budget_defers_unstarted_cases_without_spending_retri
         cases = await rows('SELECT * FROM monitor_investigations ORDER BY event_key')
         assert len(cases) == 20
         assert all(case['state'] != 'needs_review' for case in cases)
-        if round_index == 0:
-            assert facts['analyzed'] == 12 and facts['deferred'] == 8
-            assert sum(case['attempts'] == 0 and case['state'] == 'pending' for case in cases) == 8
-        else:
-            assert facts['analyzed'] == 20 and facts['deferred'] == 0
-            assert all(case['state'] == 'ready' and case['attempts'] == 1 for case in cases)
+        analyzed = min(20, (round_index + 1) * 6)  # Each case needs incident proof and host evidence.
+        assert facts['analyzed'] == analyzed and facts['deferred'] == 20 - analyzed
+        assert sum(case['attempts'] == 0 and case['state'] == 'pending' for case in cases) == 20 - analyzed
+        assert all(case['attempts'] == 1 for case in cases if case['state'] == 'ready')
+        if round_index == 3:
+            assert all(case['state'] == 'ready' for case in cases)
+
+
+@pytest.mark.parametrize('invalid_cache', ['expired', 'evidence_revision', 'old_schema'])
+async def test_exhausted_budget_does_not_reuse_invalid_ready_cache_or_start_retry(context, monkeypatch, invalid_cache):
+    context.events[:] = [dict(context.events[0], uuId=f'event-{index:02d}') for index in range(20)]
+    await runtime.run(context.execution, context.policy, context.adapter)
+    ready = (await rows("SELECT * FROM monitor_investigations WHERE state='ready' ORDER BY event_key"))[0]
+    evidence, conclusion = json.loads(ready['evidence']), json.loads(ready['result'])
+    assert len(evidence) == 2 and conclusion['evidence_schema'] == investigation.EVIDENCE_SCHEMA
+    if invalid_cache == 'expired':
+        evidence[0]['retrieved_at'] = '2000-01-01T00:00:00+00:00'
+    elif invalid_cache == 'evidence_revision':
+        evidence[0]['event_revision'] = 'a-different-event-version'
+    else:
+        conclusion['evidence_schema'] = investigation.EVIDENCE_SCHEMA - 1
+    await write('UPDATE monitor_investigations SET evidence=?,result=? WHERE event_key=?',
+                (encode(evidence), encode(conclusion), ready['event_key']))
+    query = AsyncMock(wraps=capabilities.query)
+    investigate = AsyncMock(wraps=investigation.investigate)
+    monkeypatch.setattr(capabilities, 'query', query)
+    monkeypatch.setattr(investigation, 'investigate', investigate)
+    execution = await TaskManager.create_execution_from_scheduler(
+        context.scheduler, trigger_type=ExecutionTriggerType.RUN_ONCE, enqueue=False)
+    result = await runtime.run(execution, context.policy, context.adapter)
+    attempt, _, _ = await ending()
+    facts = json.loads(attempt['result'])
+    assert result.action == 'stop' and attempt['status'] == 'completed'
+    assert query.await_count == context.policy.investigation_calls == 12
+    assert facts['analyzed'] == 11 and facts['deferred'] == 9
+    assert all(call.args[1]['key'] != ready['event_key'] for call in investigate.await_args_list)
+    unchanged = (await rows('SELECT * FROM monitor_investigations WHERE event_key=?', (ready['event_key'],)))[0]
+    assert unchanged['attempts'] == ready['attempts'] == 1
+    assert unchanged['evidence'] == encode(evidence) and unchanged['result'] == encode(conclusion)
 
 
 async def test_steps_persist_readable_evidence_sections_without_model_reasoning(context):
@@ -796,3 +839,20 @@ async def test_report_failure_is_independently_retryable_without_busy_or_false_t
     monkeypatch.setattr(reports, 'render' if where == 'render' else 'export_report', original)
     await reports.retry_exports()
     assert (await rows('SELECT * FROM monitor_reports'))[0]['status'] == 'updated'
+
+
+@pytest.mark.parametrize('raised', [True, False])
+async def test_manual_readback_is_automatic_and_does_not_fail_investigation_round(context, monkeypatch, raised):
+    from flocks.monitoring import mail_manual
+    context.events.clear()
+    readback = AsyncMock(side_effect=RuntimeError('PRIVATE') if raised else None,
+                        return_value={'checked': 1, 'verified': 0, 'pending': 1, 'errors': ['状态回查暂未完成']})
+    monkeypatch.setattr(mail_manual, 'recheck_pending', readback)
+    result = await runtime.run(context.execution, context.policy, context.adapter)
+    assert result.action == 'stop'
+    readback.assert_awaited_once_with(context.policy)
+    attempt, _, _ = await ending()
+    facts = json.loads(attempt['result'])
+    assert attempt['status'] == 'completed' and not attempt['error'] and not facts['errors']
+    assert facts['mail']['manual_readback']['errors'] and facts['mail']['warnings']
+    assert 'PRIVATE' not in str(facts)

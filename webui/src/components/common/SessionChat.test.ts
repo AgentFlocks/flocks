@@ -6663,6 +6663,100 @@ describe('structured monitoring step narration', () => {
   });
 });
 
+describe('monitoring incident packet evidence', () => {
+  const packet = (extra: Record<string, unknown> = {}) => ({
+    evidence_id: 'evidence-1', source: '股份 XDR', field: 'requestBody', label: '请求正文',
+    text: '{"orderBy":"@@version"}', truncated: false, alert_id: 'alert-1', ...extra,
+  });
+  const message = (packets: unknown, sections: unknown = [{ label: '调查结论', text: 'SQL 可疑请求，利用结果待核对。' }]) => makeMessage({
+    role: 'assistant', agent: 'security-monitor', parts: [{
+      id: 'packet-result', type: 'text', text: '旧版调查摘要', metadata: {
+        monitoringSummary: true, monitoringSections: sections, monitoringPackets: packets,
+      },
+    }] as any,
+  });
+
+  it('keeps each packet folded even during investigation and expands only the chosen item', async () => {
+    render(React.createElement(ChatMessageBubble, { message: message([
+      packet({ field: 'requestHead', label: '请求头', text: 'GET /search HTTP/1.1' }),
+      packet(), packet({ field: 'responseHead', label: '响应头', text: 'HTTP/1.1 200 OK' }),
+      packet({ field: 'responseBody', label: '响应正文', text: '{"result":"ok"}' }),
+    ]), isActive: true }));
+    const packets = screen.getAllByTestId('monitor-packet');
+    expect(packets).toHaveLength(4);
+    packets.forEach(item => expect(item).not.toHaveAttribute('open'));
+    await userEvent.click(within(packets[1]).getByText('请求正文'));
+    expect(packets[1]).toHaveAttribute('open');
+    expect(packets[0]).not.toHaveAttribute('open');
+    expect(packets[2]).not.toHaveAttribute('open');
+    expect(within(packets[1]).getByText('{"orderBy":"@@version"}').tagName).toBe('PRE');
+  });
+
+  it('renders HTTP markup as text without HTML, Markdown links or scripts', async () => {
+    const payload = '<img src=x onerror=alert(1)><script>window.bad=true</script> [link](https://packet.invalid)';
+    const { container } = render(React.createElement(ChatMessageBubble, { message: message([packet({ text: payload })]) }));
+    const item = screen.getByTestId('monitor-packet');
+    await userEvent.click(within(item).getByText('请求正文'));
+    expect(within(item).getByText(payload)).toBeVisible();
+    expect(item.querySelector('pre')).toHaveTextContent(payload);
+    expect(item.querySelector('img,script')).toBeNull();
+    expect(container.querySelector('a[href="https://packet.invalid"]')).toBeNull();
+  });
+
+  it('shows alert and evidence identities separately across multiple alerts', () => {
+    render(React.createElement(ChatMessageBubble, { message: message([
+      packet(), packet({ evidence_id: 'evidence-2', alert_id: 'alert-2', source: '同方 XDR' }),
+    ]) }));
+    const packets = screen.getAllByTestId('monitor-packet');
+    expect(packets[0]).toHaveTextContent('evidence-1');
+    expect(packets[0]).toHaveTextContent('告警：alert-1');
+    expect(packets[0]).toHaveTextContent('股份 XDR');
+    expect(packets[1]).toHaveTextContent('evidence-2');
+    expect(packets[1]).toHaveTextContent('告警：alert-2');
+    expect(packets[1]).toHaveTextContent('同方 XDR');
+  });
+
+  it('keeps truncation and missing content explicit rather than treating them as safe', async () => {
+    render(React.createElement(ChatMessageBubble, { message: message([
+      packet({ truncated: true, text: '只有部分 SQL 片段' }),
+      packet({ evidence_id: 'evidence-2', alert_id: '', field: 'responseBody', label: '响应正文', text: '' }),
+    ]) }));
+    const packets = screen.getAllByTestId('monitor-packet');
+    expect(packets[0]).toHaveTextContent('已截断 · 内容不完整');
+    expect(packets[1]).toHaveTextContent('告警：编号未提供');
+    await userEvent.click(within(packets[0]).getByText('请求正文'));
+    await userEvent.click(within(packets[1]).getByText('响应正文'));
+    expect(within(packets[0]).getByText(/未展示部分不能按安全/)).toBeVisible();
+    expect(within(packets[1]).getByText(/未取得可展示的报文内容/)).toBeVisible();
+  });
+
+  it('ignores invalid packet metadata and retains ordinary summaries', () => {
+    render(React.createElement(ChatMessageBubble, { message: message([
+      null, {}, packet({ text: { html: 'bad' } }), packet({ field: 'unknown' }),
+      packet({ source: 1 }), packet({ evidence_id: [] }), packet({ label: null }),
+    ]) }));
+    expect(screen.queryByTestId('monitor-packets')).not.toBeInTheDocument();
+    expect(screen.getByText('SQL 可疑请求，利用结果待核对。')).toBeVisible();
+  });
+
+  it('limits unusually long client metadata and reports its truncation', () => {
+    render(React.createElement(ChatMessageBubble, { message: message([packet({ text: 'x'.repeat(20_000) })]) }));
+    const item = screen.getByTestId('monitor-packet');
+    expect(item).toHaveTextContent('已截断 · 内容不完整');
+    expect(item.querySelector('pre')?.textContent?.length).toBe(16_000);
+  });
+
+  it('supports old summary fallback and late arrival of packet metadata', () => {
+    const old = message(undefined, []);
+    const { rerender } = render(React.createElement(ChatMessageBubble, { message: old }));
+    expect(screen.getByText('旧版调查摘要')).toBeVisible();
+    expect(screen.queryByTestId('monitor-packets')).not.toBeInTheDocument();
+    rerender(React.createElement(ChatMessageBubble, { message: message([packet()], []) }));
+    expect(screen.getByText('旧版调查摘要')).toBeVisible();
+    expect(screen.getByTestId('monitor-packet')).not.toHaveAttribute('open');
+  });
+});
+
 describe('monitoring round end cards', () => {
   const summary = '读取 0 条事件，无需处置。本轮未发送邮件，告警闭环状态未改变。';
   const nextStep = '等待下一轮定时监测。';

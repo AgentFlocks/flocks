@@ -158,7 +158,7 @@ async def test_capabilities_select_each_devices_own_tool(monkeypatch, tmp_path):
     bound = policy(tmp_path, devices=['first', 'second'], tool='legacy',
                    device_tools={'first': 'sangfor_xdr_incidents__one', 'second': 'sangfor_xdr_incidents__two'})
     catalog, unavailable = await capabilities.discover(bound)
-    assert unavailable == []
+    assert unavailable and all('关联告警查询' in message for message in unavailable)
     assert [(item.device, item.tool, item.kind) for item in catalog] == [
         ('first', 'sangfor_xdr_incidents__one', 'xdr'), ('second', 'sangfor_xdr_incidents__two', 'xdr')]
     assert [item.device for item in capabilities.for_event(catalog, {'device': 'second'})] == ['second']

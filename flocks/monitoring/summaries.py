@@ -3,7 +3,8 @@ from dataclasses import dataclass, field
 import unicodedata
 
 MAX_DETAILS = 48_000
-ENTITY_LABELS = {'host': '主机', 'file': '文件', 'process': '进程', 'ip': '外部 IP', 'innerip': '内部 IP', 'dns': '域名'}
+ENTITY_LABELS = {'host': '主机', 'file': '文件', 'process': '进程', 'ip': '外部 IP', 'innerip': '内部 IP', 'dns': '域名',
+                 'proof': '事件举证与时间线', 'alerts': '关联告警基本信息', 'alert_proof': '告警请求、响应及举证'}
 STATUS_LABELS = {0: '待处置', 10: '处置中', 30: '已防护', 40: '处置完成', 50: '已挂起', 60: '忽略', 70: '已遏制'}
 
 
@@ -13,6 +14,7 @@ class Summary:
     details: str = ''
     success: bool = True
     sections: list[dict[str, str]] = field(default_factory=list)
+    packets: list[dict] = field(default_factory=list)
 
 
 def step_purpose(name, params):

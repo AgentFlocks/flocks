@@ -30,13 +30,19 @@ async def policy(tmp_path, monkeypatch):
     async def discover(policy):
         return [c.Capability(device, device, policy.tool, 'xdr', 'Fixture XDR', 'unknown') for device in policy.devices], []
     async def choose(agent, data):
-        if not data['evidence']:
+        hosts = [proof for proof in data['evidence'] if proof['kind'] == 'host' and proof['success']]
+        if not hosts:
             return i.Choice(action='query', capability=data['event']['device'], reason='核对主机', entity='host')
-        return i.Choice(action='finish', verdict='risk', evidence_ids=['evidence-1'], reason='有主机证据，需负责人跟进')
+        return i.Choice(action='finish', verdict='risk', evidence_ids=[proof['id'] for proof in hosts], reason='有主机证据，需负责人跟进')
+    async def query(policy, session, message, capability, event, entity):
+        if entity == 'proof':
+            return {'data': [{'uuId': event['id'], 'alertTimeLine': []}]}, {'action': 'get_proof', 'uuid': event['id']}
+        assert entity == 'host'
+        return {'data': {'item': [{'hostIp': event['host'], 'threatLevel': 3}]}}, {'action': 'get_entities', 'uuid': event['id'], 'entity_type': entity}
     monkeypatch.setattr(c, 'discover', discover)
     monkeypatch.setattr(i.Agent, 'list', AsyncMock(return_value=[]))
     monkeypatch.setattr(i, 'choose', choose)
-    monkeypatch.setattr(c, 'query', AsyncMock(return_value=({'data': {'item': [{'hostIp': '192.0.2.1', 'threatLevel': 3}]}}, {'action': 'get_entities'})))
+    monkeypatch.setattr(c, 'query', query)
     return MonitoringPolicy(owner='owner', project=project.id, directory=str(directory), devices=['xdr-1'])
 
 async def scheduler_for(policy):
@@ -130,7 +136,13 @@ async def test_native_rounds_dashboard_report_idempotence(policy):
     assert data['events'][0]['closure'] == 'open'
     messages = await Message.list_with_parts(attempts[0]['session_id'])
     tools = [p for m in messages for p in m.parts if p.type == 'tool']
-    assert len(tools) == 10 and all(p.state.status == 'completed' for p in tools)
+    assert all(p.state.status == 'completed' for p in tools)
+    queries = [p.state.input.get('entity') for p in tools if p.tool.startswith('调查取证：')]
+    assert queries == ['proof', 'host']  # The second round reuses the saved investigation.
+    assert sum(p.tool == '智能体调查结果' for p in tools) == 2
+    saved = json.loads((await rows('SELECT evidence FROM monitor_investigations'))[0]['evidence'])
+    assert [proof['kind'] for proof in saved] == ['proof', 'host']
+    assert all(proof['success'] for proof in saved)
     assert len(await rows("SELECT * FROM monitor_investigations WHERE state='ready'")) == 1
     await export_report(policy.owner, policy.scope, day)
     first = (await rows('SELECT * FROM monitor_reports'))[0]

@@ -519,6 +519,8 @@ class Tool:
 
     async def execute(self, ctx: ToolContext, **kwargs) -> ToolResult:
         """Execute the tool with given parameters and context"""
+        from flocks.tool.structured_output import PRIVATE_ERROR, is_private_capture
+        private_output = is_private_capture(ctx, self.info.name)
         try:
             raw_kwargs = dict(kwargs)
 
@@ -767,6 +769,10 @@ class Tool:
                         "type": type(result.output).__name__,
                         "truncated": bool(result.truncated),
                     }
+                error_message = (str(terminal_error) if terminal_error is not None
+                                 else result.error if result and not result.success else None)
+                if private_output and error_message:
+                    error_message = PRIVATE_ERROR
                 outcome = ToolExecutionOutcome(
                     status=terminal_status,
                     duration_ms=duration_ms,
@@ -775,11 +781,7 @@ class Tool:
                         if terminal_error is not None
                         else None
                     ),
-                    error_message=(
-                        str(terminal_error)
-                        if terminal_error is not None
-                        else (result.error if result and not result.success else None)
-                    ),
+                    error_message=error_message,
                     result_summary=summary,
                 )
                 try:
@@ -790,19 +792,20 @@ class Tool:
                 except Exception as after_exc:
                     log.error("tool.execute.after_hook.error", {
                         "tool": self.info.name,
-                        "error": str(after_exc),
+                        "error": PRIVATE_ERROR if private_output else str(after_exc),
                     })
             if result is None:
                 raise RuntimeError("Tool execution did not produce a result")
 
             from flocks.monitoring import diagnostics as monitor_diag
             monitor_diag.tool_result('tool.raw', result)
-            from flocks.tool.structured_output import capture_output
+            from flocks.tool.structured_output import capture_output, hide_private_output
             capture_output(ctx, self.info.name, result)
+            hidden = hide_private_output(ctx, self.info.name, result)
 
             with monitor_diag.span('tool.normalize'):
                 # Auto-truncate output unless the tool already handled it
-                if result.success and not result.truncated:
+                if result.success and not result.truncated and not hidden:
                     from flocks.tool.truncation import truncate_output
                     output_text = result.output
                     if output_text is not None and not isinstance(output_text, str):
@@ -840,12 +843,12 @@ class Tool:
                 raise
             log.error("tool.execute.error", {
                 "tool": self.info.name,
-                "error": str(e),
+                "error": PRIVATE_ERROR if private_output else str(e),
                 "error_type": type(e).__name__,
             })
             return ToolResult(
                 success=False,
-                error=str(e)
+                error=PRIVATE_ERROR if private_output else str(e)
             )
 
 

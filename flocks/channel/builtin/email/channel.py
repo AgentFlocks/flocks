@@ -58,6 +58,14 @@ IMAP_CLIENT_ID = (
 )
 
 
+class _EmailNotSent(RuntimeError):
+    """Per-attempt proof that SMTP did not accept this message."""
+
+    def __init__(self, cause: Exception) -> None:
+        super().__init__(str(cause))
+        self.cause = cause
+
+
 class EmailChannel(ChannelPlugin):
     """Single-mailbox Email channel."""
 
@@ -68,6 +76,24 @@ class EmailChannel(ChannelPlugin):
         self._seen_uids_max = 5000
         self._thread_context: dict[str, dict[str, str]] = {}
         self._mail_health = {direction: self._empty_health() for direction in ('receive', 'send')}
+        self._send_active: Optional[bool] = None
+        self._send_abort: Optional[asyncio.Event] = None
+
+    @property
+    def send_ready(self) -> bool:
+        """An enabled channel may try SMTP even while IMAP is reconnecting.
+
+        Readiness is permission to attempt delivery, not a delivery receipt or
+        a claim that SMTP is healthy. Explicit stop/disable always revokes it.
+        """
+        if self._config.get('enabled') is False or (self._send_abort is not None and self._send_abort.is_set()):
+            return False
+        active = self.status.connected if self._send_active is None else self._send_active
+        return bool(active and self._resolved)
+
+    def _require_send_enabled(self) -> None:
+        if self._config.get('enabled') is False or (self._send_active is not None and not self.send_ready):
+            raise _EmailNotSent(ValueError('邮件通道已停用，未发送'))
 
     @staticmethod
     def _empty_health() -> dict[str, Any]:
@@ -216,11 +242,13 @@ class EmailChannel(ChannelPlugin):
         self._resolved = resolved_config(config)
         self._on_message = on_message
         self._mail_health = {direction: self._empty_health() for direction in ('receive', 'send')}
+        self._send_abort = abort_event or asyncio.Event()
+        self._send_active = config.get('enabled', True) is True
 
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, self._test_connections)
 
-        abort = abort_event or asyncio.Event()
+        abort = self._send_abort
         while not abort.is_set():
             try:
                 messages = await loop.run_in_executor(None, self._fetch_new_messages)
@@ -274,6 +302,7 @@ class EmailChannel(ChannelPlugin):
                 continue
 
     async def stop(self) -> None:
+        self._send_active = False
         self._health_stage('receive', 'stopped')
         self._mail_health['receive'] = {**self._mail_health['receive'], 'state': 'unavailable', 'next_retry_at': None}
         self.mark_disconnected()
@@ -286,6 +315,7 @@ class EmailChannel(ChannelPlugin):
                 message_id="",
                 success=False,
                 error="Email send requires a valid recipient email address",
+                delivery_state="not_sent",
             )
 
         try:
@@ -307,18 +337,22 @@ class EmailChannel(ChannelPlugin):
                 message_id=message_id,
                 chat_id=target,
                 success=True,
+                delivery_state="accepted",
             )
         except asyncio.CancelledError as exc:
             self._health_failure('send', exc)
             raise
         except Exception as exc:
-            self._health_failure('send', exc)
+            known_not_sent = isinstance(exc, _EmailNotSent)
+            cause = exc.cause if known_not_sent else exc
+            self._health_failure('send', cause)
             return DeliveryResult(
                 channel_id="email",
                 message_id="",
                 success=False,
                 error=f"Email send failed: {exc}",
-                retryable=self._is_retryable(exc),
+                retryable=known_not_sent and self._is_retryable(cause),
+                delivery_state="not_sent" if known_not_sent else "unknown",
             )
 
     async def send_media(self, ctx: OutboundContext) -> DeliveryResult:
@@ -329,6 +363,7 @@ class EmailChannel(ChannelPlugin):
                 message_id="",
                 success=False,
                 error="Email send_media requires a valid recipient email address",
+                delivery_state="not_sent",
             )
         if not ctx.media_url:
             return await self.send_text(ctx)
@@ -362,18 +397,22 @@ class EmailChannel(ChannelPlugin):
                 message_id=message_id,
                 chat_id=target,
                 success=True,
+                delivery_state="accepted",
             )
         except asyncio.CancelledError as exc:
             self._health_failure('send', exc)
             raise
         except Exception as exc:
-            self._health_failure('send', exc)
+            known_not_sent = isinstance(exc, _EmailNotSent)
+            cause = exc.cause if known_not_sent else exc
+            self._health_failure('send', cause)
             return DeliveryResult(
                 channel_id="email",
                 message_id="",
                 success=False,
                 error=f"Email send_media failed: {exc}",
-                retryable=self._is_retryable(exc),
+                retryable=known_not_sent and self._is_retryable(cause),
+                delivery_state="not_sent" if known_not_sent else "unknown",
             )
 
     def _test_connections(self) -> None:
@@ -708,6 +747,65 @@ class EmailChannel(ChannelPlugin):
         stable_message_id: Optional[str] = None,
         new_thread: bool = False,
     ) -> str:
+        smtp = None
+        try:
+            self._require_send_enabled()
+            msg = self._prepare_email(to_addr, body, reply_to_msg_id, thread_id,
+                                      attachment_path, subject_override, stable_message_id, new_thread)
+            self._health_stage('send', 'connect')
+            smtp = self._connect_smtp()
+            self._health_stage('send', 'authenticate')
+            self._authenticate_smtp(smtp)
+        except _EmailNotSent:
+            self._close_smtp(smtp)
+            raise
+        except Exception as exc:
+            self._close_smtp(smtp)
+            # No call to send_message has occurred, including for TLS/auth errors.
+            raise _EmailNotSent(exc) from exc
+        try:
+            # Stop/config changes may happen during an outbound hook or connect.
+            # Recheck before DATA rather than trusting the earlier preflight.
+            self._require_send_enabled()
+            self._health_stage('send', 'send')
+            smtp.send_message(msg)
+        except (smtplib.SMTPRecipientsRefused, smtplib.SMTPSenderRefused,
+                smtplib.SMTPHeloError, smtplib.SMTPNotSupportedError) as exc:
+            # These smtplib failures occur before DATA is accepted.
+            raise _EmailNotSent(exc) from exc
+        except smtplib.SMTPDataError as exc:
+            # A negative DATA response proves rejection. Lost/invalid responses
+            # remain unknown and cannot safely authorize a duplicate delivery.
+            if 400 <= exc.smtp_code < 600:
+                raise _EmailNotSent(exc) from exc
+            raise
+        finally:
+            self._close_smtp(smtp)
+        return str(msg['Message-ID'])
+
+    @staticmethod
+    def _close_smtp(smtp: Any) -> None:
+        if smtp is None:
+            return
+        try:
+            smtp.quit()
+        except Exception:
+            try:
+                smtp.close()
+            except Exception:
+                pass  # Cleanup never overwrites the original acceptance fact.
+
+    def _prepare_email(
+        self,
+        to_addr: str,
+        body: str,
+        reply_to_msg_id: Optional[str],
+        thread_id: Optional[str],
+        attachment_path: Optional[Path],
+        subject_override: Optional[str],
+        stable_message_id: Optional[str],
+        new_thread: bool,
+    ) -> MIMEMultipart:
         cfg = self._resolved
         msg = MIMEMultipart()
         msg["From"] = cfg["address"]
@@ -747,19 +845,7 @@ class EmailChannel(ChannelPlugin):
             )
             msg.attach(part)
 
-        self._health_stage('send', 'connect')
-        smtp = self._connect_smtp()
-        try:
-            self._health_stage('send', 'authenticate')
-            self._authenticate_smtp(smtp)
-            self._health_stage('send', 'send')
-            smtp.send_message(msg)
-        finally:
-            try:
-                smtp.quit()
-            except Exception:
-                smtp.close()
-        return message_id
+        return msg
 
     def _resolve_thread_context(
         self,

@@ -27,8 +27,9 @@ async def test_suite_installs_owned_agent_and_uninstalls_payload_but_keeps_busin
     assert record.installedBy == f'component:{COMPONENT_ID}'
     assert Path(record.installPath, 'agent.yaml').is_file()
     assert (await component.resolve()).name == component.AGENT_ID
-    assert component.diagnostic_state() == {'installed': True, 'enabled': True, 'version': '1.0.0',
+    assert component.diagnostic_state() == {'installed': True, 'enabled': True, 'version': '1.0.1',
                                             'required_contract': 1, 'definition_valid': True}
+    assert '请求头' in Path(record.installPath, 'prompt.md').read_text()
     # No built-in definition can mask a component update.
     from flocks.agent.agent_factory import scan_and_load, _BUILTIN_AGENTS_DIR
     assert not (_BUILTIN_AGENTS_DIR / 'security_monitor/agent.yaml').exists()
@@ -87,7 +88,7 @@ async def test_updating_shared_agent_preserves_ownership_and_does_not_remove_it_
     local.save_installed_record(standalone.model_copy(update={'version': '0.9.0'}))
     await installer.install_plugin('component', COMPONENT_ID)
     updated = local.get_record('agent', component.AGENT_ID)
-    assert updated.version == '1.0.0' and updated.installedBy is None
+    assert updated.version == '1.0.1' and updated.installedBy is None
     await installer.uninstall_plugin('component', COMPONENT_ID)
     assert local.get_record('agent', component.AGENT_ID) is not None
     assert (await component.resolve()).name == component.AGENT_ID

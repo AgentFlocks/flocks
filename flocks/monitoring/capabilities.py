@@ -8,7 +8,7 @@ from pathlib import Path
 from flocks.tool.registry import ToolRegistry, ToolContext
 from flocks.tool.structured_output import OutputCapture, StructuredOutputError
 from flocks.session.interaction_policy import investigation_call_scope
-from .adapter import ContractError
+from .adapter import ContractError, response_items
 from .store import rows
 
 
@@ -27,12 +27,14 @@ class Capability:
 
     @property
     def entities(self):
+        if self.kind == 'xdr_alerts':
+            return ('alerts', 'alert_proof')
         return ('host', 'file', 'process', 'ip', 'innerip', 'dns', 'proof') if self.kind == 'xdr' else ('related',)
 
 
 def for_event(catalog, event):
     """Never advertise another XDR device as a source for this event's UUID."""
-    return [cap for cap in catalog if cap.kind != 'xdr' or cap.device == event.get('device')]
+    return [cap for cap in catalog if cap.kind not in {'xdr', 'xdr_alerts'} or cap.device == event.get('device')]
 
 
 def resolve_choice(catalog, event, name):
@@ -76,10 +78,14 @@ async def discover(policy, *, include_unbound=False):
             continue
         candidates = [t for t in ToolRegistry.list_tools() if t.enabled and t.source == 'device'
                       and t.provider == device.storage_key and not t.requires_confirmation]
+        alert_sources = []
         for info in candidates:
             kind, skill = None, ''
             if device.id in policy.devices and info.name == policy.tool_for(device.id):
                 kind = 'xdr'
+            elif (device.id in policy.devices and device.service_id == 'sangfor_xdr'
+                  and info.name.split('__')[0] == 'sangfor_xdr_alerts'):
+                kind = 'xdr_alerts'
             elif device.service_id == 'tdp_api' and info.name.split('__')[0] == 'tdp_log_search':
                 try:
                     await tdp_skill()
@@ -91,7 +97,7 @@ async def discover(policy, *, include_unbound=False):
                 kind = 'sig'
             if not kind or await get_device_tool_enabled(device.id, info.name) is False:
                 continue
-            required_fields = ('host', 'auth_code') if kind == 'xdr' else ('base_url', 'api_key', 'secret')
+            required_fields = ('host', 'auth_code') if kind in {'xdr', 'xdr_alerts'} else ('base_url', 'api_key', 'secret')
             if not all(device.fields_set.get(field) for field in required_fields):
                 unavailable.append(f'{device.name}：设备地址或认证配置不完整，未开放自动查询')
                 continue
@@ -102,13 +108,30 @@ async def discover(policy, *, include_unbound=False):
                 unavailable.append(f'{device.name}：工具允许覆盖地址或认证，尚未开放自动查询')
                 continue
             required = {'xdr': {'action', 'uuid', 'entity_type'},
+                        'xdr_alerts': {'action', 'uuid', 'uuids', 'start_time', 'end_time',
+                                       'time_field', 'page_num', 'page_size'},
                         'tdp': {'action', 'time_from', 'time_to', 'sql', 'size'},
                         'sig': {'action', 'body'}}[kind]
             if not required <= props.keys():
                 unavailable.append(f'{device.name}：查询接口字段不符合受控契约')
                 continue
-            capabilities.append(Capability(f'cap-{len(capabilities)+1}', device.id, info.name, kind,
-                                           device.name[:100], str(device.status), skill))
+            if kind == 'xdr_alerts':
+                actions = props['action'].get('enum', [])
+                if not isinstance(actions, list) or not all(action in actions for action in ('list', 'get_proof')):
+                    unavailable.append(f'{device.name}：告警接口缺少只读列表或举证动作，未开放关联告警查询')
+                    continue
+                alert_sources.append((info, skill))
+            else:
+                capabilities.append(Capability(f'cap-{len(capabilities)+1}', device.id, info.name, kind,
+                                               device.name[:100], str(device.status), skill))
+        if device.id in policy.devices and device.service_id == 'sangfor_xdr':
+            if len(alert_sources) == 1:
+                info, skill = alert_sources[0]
+                capabilities.append(Capability(f'cap-{len(capabilities)+1}', device.id, info.name, 'xdr_alerts',
+                                               device.name[:100], str(device.status), skill))
+            else:
+                reason = '存在多个匹配工具' if alert_sources else '工具缺失、停用或契约不完整'
+                unavailable.append(f'{device.name}：关联告警查询{reason}；仍可调查事件及实体，HTTP请求响应可能缺失')
         if 'edr' in device.service_id.lower():
             unavailable.append(f'{device.name}：当前 EDR 工具尚缺少受控设备绑定，未自动调用')
     return capabilities, list(dict.fromkeys(unavailable))[:30]
@@ -146,18 +169,94 @@ async def tdp_timestamp():
     return int(output)
 
 
-async def query(policy, session_id, message_id, capability, event, kind):
+MAX_RELATED_ALERTS = 5
+
+
+def related_alert_ids(event):
+    """Only IDs persisted from the original XDR event, never model targets."""
+    values = event.get('alertIds')
+    if not isinstance(values, list):
+        return []
+    return list(dict.fromkeys(value for value in values if isinstance(value, str)
+                              and value and value not in {'.', '..'} and len(value) <= 200
+                              and not any(char in value for char in '/\\?#\r\n')))
+
+
+def _bound_alert_response(value, params, *, incomplete=False):
+    """Do not accept another event's alert as evidence, even from a valid tool."""
+    data = value.get('data')
+    if params['action'] == 'get_proof':
+        if not isinstance(data, dict) or data.get('uuId') != params['uuid']:
+            raise ContractError('告警举证编号与原事件关联告警不一致，未采用该证据')
+        return value
+    items = response_items(data)
+    wanted = set(params['uuids'])
+    if any(not isinstance(item, dict) or not isinstance(item.get('uuId'), str)
+           or item['uuId'] not in wanted for item in items):
+        raise ContractError('告警列表包含原事件之外的告警，未采用该证据')
+    identifiers = [item['uuId'] for item in items]
+    total = data.get('total')
+    if total is not None and (type(total) is not int or total < 0):
+        raise ContractError('关联告警列表 total 无效，未采用该证据')
+    incomplete = (incomplete or set(identifiers) != wanted or len(identifiers) != len(set(identifiers))
+                  or (total is not None and total != len(items)))
+    return {**value, '_monitor_partial': incomplete}
+
+
+def _bound_incident_proof(value, identifier):
+    """The documented incident proof response is data[].uuId, not an ID-less blob."""
+    items = value.get('data')
+    if (not isinstance(items, list) or not items
+            or any(not isinstance(item, dict) or item.get('uuId') != identifier for item in items)):
+        raise ContractError('事件举证未明确匹配原事件编号，未采用其时间线或关联告警编号')
+    return value
+
+
+async def query(policy, session_id, message_id, capability, event, kind, *, alert_id=''):
     await assert_active(policy)
     current, _ = await discover(policy)
     if not any((c.device, c.tool, c.kind) == (capability.device, capability.tool, capability.kind) for c in current):
         raise ContractError('数据源或工具已停用，未执行查询')
-    if capability.kind == 'xdr':
+    coverage_incomplete = False
+    if capability.kind == 'xdr_alerts':
+        identifiers = related_alert_ids(event)
+        if capability.device != event['device'] or kind not in {'alerts', 'alert_proof'}:
+            raise ContractError('只能查询原设备中与本事件关联的告警')
+        if not identifiers:
+            raise ContractError('原事件没有可信的关联告警编号，未执行告警查询')
+        if kind == 'alert_proof':
+            if alert_id not in identifiers:
+                raise ContractError('告警编号不属于原事件的关联告警，未执行查询')
+            params = {'action': 'get_proof', 'uuid': alert_id}
+        else:
+            if alert_id:
+                raise ContractError('关联告警列表不接受额外告警目标')
+            window = event.get('investigationWindow') or {}
+            start, end = window.get('start'), window.get('end')
+            if type(start) is not int or type(end) is not int or not 0 < end - start <= 86400:
+                raise ContractError('原事件关联告警查询时间范围无效')
+            # The handler always adds a time filter, including UUID-list reads.
+            # Earlier related alerts must not disappear just because this
+            # monitoring run's window starts later than the incident itself.
+            first = event.get('startTime')
+            if type(first) is int and 0 <= first <= end:
+                start = min(start, first)
+            else:
+                coverage_incomplete = True
+            params = {'action': 'list', 'uuids': identifiers[:MAX_RELATED_ALERTS],
+                      'start_time': start, 'end_time': end, 'time_field': 'lastTime',
+                      'page_num': 1, 'page_size': MAX_RELATED_ALERTS}
+    elif capability.kind == 'xdr':
+        if alert_id:
+            raise ContractError('事件实体查询不接受告警目标')
         if capability.device != event['device'] or kind not in {'host', 'file', 'process', 'ip', 'innerip', 'dns', 'proof'}:
             raise ContractError('只能查询原事件的受控实体或举证信息')
         params = {'action': 'get_proof' if kind == 'proof' else 'get_entities', 'uuid': event['id']}
         if kind != 'proof':
             params['entity_type'] = kind
     else:
+        if alert_id:
+            raise ContractError('跨设备关联查询不接受告警目标')
         # Cross-device lookup is constrained to the root host and time window;
         # the model cannot invent an unrelated target or widen the query.
         try:
@@ -177,7 +276,7 @@ async def query(policy, session_id, message_id, capability, event, kind):
                       'sql': f"net.src_ip = '{host}' OR net.dest_ip = '{host}'"}
         else:
             params = {'action': 'asset_list', 'body': {'pageNo': 1, 'pageSize': 50, 'search': host}}
-    capture = OutputCapture(capability.tool)
+    capture = OutputCapture(capability.tool, private=True)
     context = ToolContext(session_id=session_id, message_id=message_id, agent='security-monitor')
     context._output_capture = capture
     try:
@@ -193,6 +292,11 @@ async def query(policy, session_id, message_id, capability, event, kind):
             raise ContractError('关联查询返回无效结构或失败结果')
         if type(value.get('code')) is bool or value.get('code') not in (None, 0, '0', 200, '200', 'Success'):
             raise ContractError('关联查询返回业务错误')
+        if capability.kind == 'xdr_alerts':
+            value = _bound_alert_response(value, params,
+                                          incomplete=coverage_incomplete or len(identifiers) > MAX_RELATED_ALERTS)
+        elif capability.kind == 'xdr' and kind == 'proof':
+            value = _bound_incident_proof(value, event['id'])
         return value, params
     except (StructuredOutputError, ValueError, TimeoutError):
         raise ContractError('关联查询结果不完整、无法解析或超时；不能视为没有风险') from None
@@ -200,41 +304,9 @@ async def query(policy, session_id, message_id, capability, event, kind):
         del context._output_capture
 
 
-# Only these known security facts enter model context. No command lines,
-# arbitrary HTTP payloads, credentials, authentication headers or raw mail.
-FACT_KEYS = frozenset({'data', 'item', 'list', 'items', 'records', 'result', 'results', 'total', 'count',
-    'id', 'uuId', 'uuid', 'name', 'hostId', 'hostIp', 'ip', 'srcIp', 'destIp', 'src_ip', 'dest_ip',
-    'net.src_ip', 'net.dest_ip', 'threat.name', 'threat.level', 'threat.result', 'time', 'timestamp',
-    'startTime', 'endTime', 'fileName', 'fileHash', 'md5', 'sha256', 'processName', 'domain',
-    'threatLevel', 'incidentSeverity', 'dealStatus', 'gptResult', 'threatDefineName',
-    'edrDealStatusInfo', 'ndrDealStatusInfo', 'status', 'isPermanent', 'expireTime'})
-
-
 def facts(value):
-    budget, omitted = [100], [False]
-    def keep(item, depth=0):
-        if depth > 8 or budget[0] <= 0:
-            omitted[0] = True
-            return None
-        budget[0] -= 1
-        if isinstance(item, dict):
-            if depth and any(key not in FACT_KEYS for key in item):
-                omitted[0] = True
-            total = item.get('total')
-            listed = [val for key, val in item.items() if key in {'item', 'list', 'items', 'records'} and isinstance(val, list)]
-            if type(total) is int and listed and any(total > len(val) for val in listed):
-                omitted[0] = True
-            return {key: keep(val, depth+1) for key, val in item.items() if key in FACT_KEYS}
-        if isinstance(item, list):
-            if len(item) > 20:
-                omitted[0] = True
-            return [keep(val, depth+1) for val in item[:20]]
-        if isinstance(item, str):
-            if len(item) > 160:
-                omitted[0] = True
-            return item[:160]
-        return item if item is None or type(item) in (bool, int, float) else None
-    safe = keep(value)
-    if not safe or len(json.dumps(safe)) > 4000:
-        return {}, True
-    return safe, omitted[0]
+    from .event_details import safe_facts
+    partial = bool(isinstance(value, dict) and value.get('_monitor_partial'))
+    source = {key: item for key, item in value.items() if key != '_monitor_partial'} if isinstance(value, dict) else value
+    safe, omitted = safe_facts(source)
+    return safe, partial or omitted

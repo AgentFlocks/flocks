@@ -9,6 +9,8 @@ import math
 MAX_BYTES = 8 * 1024 * 1024
 MAX_NODES = 100_000
 MAX_DEPTH = 64
+PRIVATE_OUTPUT = '受控查询结果已通过内部数据通道传递；原始内容不在通用工具输出中展示。'
+PRIVATE_ERROR = '受控查询失败；原始错误内容未公开，请查看设备状态及安全诊断记录。'
 
 
 class StructuredOutputError(ValueError):
@@ -60,8 +62,11 @@ def bounded_copy(value):
 
 
 class OutputCapture:
-    def __init__(self, tool_name):
+    def __init__(self, tool_name, *, private=False):
         self.tool_name = tool_name
+        # Internal consumers sanitize their own bounded summaries. Never pass
+        # their raw HTTP evidence to generic display truncation or its files.
+        self.private = private
         self.result = self.value = None
         self.error = None
 
@@ -96,3 +101,25 @@ def capture_output(ctx, tool_name, result):
     capture = getattr(ctx, '_output_capture', None)
     if isinstance(capture, OutputCapture):
         capture.accept(tool_name, result)
+
+
+def is_private_capture(ctx, tool_name):
+    capture = getattr(ctx, '_output_capture', None)
+    return isinstance(capture, OutputCapture) and capture.tool_name == tool_name and capture.private is True
+
+
+def hide_private_output(ctx, tool_name, result):
+    """Mask only the display result, after its bounded in-memory capture.
+
+    Success/truncation remain untouched: a pre-truncated or over-budget result
+    still fails ``take`` rather than becoming a successful complete response.
+    """
+    if not is_private_capture(ctx, tool_name):
+        return False
+    result.output = PRIVATE_OUTPUT
+    if not result.success or result.error:
+        result.error = PRIVATE_ERROR
+    result.metadata = {'private_output': True}
+    result.title = None
+    result.attachments = None
+    return True

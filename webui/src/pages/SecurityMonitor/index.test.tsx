@@ -6,6 +6,8 @@ const mocks = vi.hoisted(() => ({ overview: vi.fn(), report: vi.fn(), start: vi.
 vi.mock('@/api/securityMonitoring', async importOriginal => ({ ...(await importOriginal<any>()), monitoringApi: mocks }));
 vi.mock('@/hooks/useSSE', () => ({ useSSE: (options: any) => { mocks.subscription = options; return {}; } }));
 vi.mock('@/components/common/SessionChat', () => ({ default: ({ sessionId, hideInput, live }: any) => <div data-testid="native-chat">{sessionId} {hideInput && 'readonly'} {live && 'live'}</div> }));
+vi.mock('./EventList', () => ({ default: ({ onOpenRound }: any) => <section aria-label="事件列表内容"><button onClick={() => onOpenRound({ sessionID: 'event-session', messageID: 'event-anchor', businessDate: '2026-10-01' })}>查看事件调查对话</button></section> }));
+function RouteObserver() { const location = useLocation(); return <output data-testid="location">{location.pathname}{location.search}</output>; }
 const data = {
  businessDate: '2026-09-23', timezone: 'Asia/Shanghai', sessionID: 'real-session', nextRun: null, scheduledNextRun: '2026-09-23T02:10:00Z',
  installation: { installed: true, ready: true, status: 'active', reason: null },
@@ -33,8 +35,26 @@ it('uses a primary readonly live session with workspace links behind More', asyn
  expect(await screen.findByTestId('native-chat')).toHaveTextContent('real-session readonly live');
  expect(screen.getByLabelText('更多监测功能').parentElement).not.toHaveAttribute('open');
  fireEvent.click(screen.getByLabelText('更多监测功能'));
- expect(within(screen.getByRole('navigation')).getAllByRole('link')).toHaveLength(4);
+ expect(within(screen.getByRole('navigation')).getAllByRole('link')).toHaveLength(5);
+ expect(screen.getByRole('link', { name: '事件列表' })).toHaveAttribute('href', '/suites/host-security-monitor/events');
  expect(screen.getByText('在工作台打开')).toHaveAttribute('href', '/sessions?session=real-session&focusMessage=anchor');
+});
+
+it('preserves the original dashboard event records beside the new event list entry', async () => {
+ render(<MemoryRouter initialEntries={['/suites/host-security-monitor/dashboard']}><SecurityMonitor /></MemoryRouter>);
+ expect(await screen.findByRole('heading', { name: '事件明细 · 处置记录' })).toBeInTheDocument();
+ expect(screen.getByText('风险记录')).toBeInTheDocument();
+ expect(screen.getByRole('link', { name: '打开事件列表' })).toHaveAttribute('href', '/suites/host-security-monitor/events');
+});
+
+it('loads the event page independently of the daily overview and opens conversations only after a click', async () => {
+ mocks.overview.mockRejectedValue(new Error('daily overview unavailable'));
+ render(<MemoryRouter initialEntries={['/suites/host-security-monitor/events']}><SecurityMonitor /><RouteObserver /></MemoryRouter>);
+ expect(await screen.findByRole('region', { name: '事件列表内容' })).toBeInTheDocument();
+ expect(screen.getByTestId('location')).toHaveTextContent('/suites/host-security-monitor/events');
+ fireEvent.click(screen.getByRole('button', { name: '查看事件调查对话' }));
+ expect(screen.getByTestId('location')).toHaveTextContent('/sessions?session=event-session&focusMessage=event-anchor');
+ expect(mocks.start).not.toHaveBeenCalled();
 });
 it('uses fact metrics, filters risks and never claims disposition', async () => {
  render(<MemoryRouter initialEntries={['/suites/host-security-monitor/dashboard']}><SecurityMonitor /></MemoryRouter>);

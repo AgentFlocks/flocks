@@ -26,9 +26,10 @@ async def test_full_installed_path_no_direct_ready_or_result_seeding(monkeypatch
     # Exercise the real installed agent path and ToolRegistry without contacting
     # a configured external model. The model chooses, the adapter executes.
     async def choice(agent, data):
-        if not data['evidence']:
+        hosts = [proof for proof in data['evidence'] if proof['kind'] == 'host' and proof['success']]
+        if not hosts:
             return investigation.Choice(action='query', capability=data['capabilities'][0]['id'], entity='host', reason='核对原事件主机')
-        return investigation.Choice(action='finish', verdict='unknown', evidence_ids=['evidence-1'], reason='主机列表为空，仍待核查')
+        return investigation.Choice(action='finish', verdict='unknown', evidence_ids=[proof['id'] for proof in hosts], reason='主机列表为空，仍待核查')
     monkeypatch.setattr(investigation, 'choose', choice)
     monkeypatch.setattr(investigation.Agent, 'list', AsyncMock(return_value=[]))
     if symlinked_workspace:
@@ -45,11 +46,15 @@ async def test_full_installed_path_no_direct_ready_or_result_seeding(monkeypatch
     calls = []
     async def handler(ctx, action, **kwargs):
         calls.append(action)
-        assert action in {'list', 'get_entities'}
+        assert action in {'list', 'get_entities', 'get_proof'}
         if action == 'list':
             assert kwargs['deal_statuses'] == [0, 10] and kwargs['white_status'] == ['未加白', '部分加白']
             assert not kwargs.get('api_params', {}).get('severities')
             return ToolResult(success=True, output={'code': 0, 'data': {'list': [{'uuId': 'fixture-event', 'incidentSeverity': 2, 'name': '隔离测试数据', 'dealStatus': 0, 'whiteStatus': '未加白'}], 'total': 1}})
+        if action == 'get_proof':
+            assert kwargs['uuid'] == 'fixture-event'
+            return ToolResult(success=True, output={'code': 0, 'data': [{'uuId': 'fixture-event', 'alertTimeLine': []}]})
+        assert kwargs['uuid'] == 'fixture-event' and kwargs['entity_type'] == 'host'
         return ToolResult(success=True, output={'code': 0, 'data': {'list': []}})
     parameters = [ToolParameter(name=k, type=ParameterType.STRING if k in {'action','uuid','entity_type'} else ParameterType.INTEGER, required=k == 'action')
                   for k in ('action','start_time','end_time','page_num','page_size','uuid','entity_type')]
@@ -85,7 +90,7 @@ async def test_full_installed_path_no_direct_ready_or_result_seeding(monkeypatch
         assert len(attempts) == 1 and attempts[0]['status'] == 'completed'
         data = await snapshot(user.id, COMPONENT_ID, attempts[0]['business_date'])
         assert data['metrics']['events'] == 1 and data['report']['status'] == 'updated'
-        assert calls == ['list', 'get_entities']
+        assert calls == ['list', 'get_proof', 'get_entities']
         if symlinked_workspace:
             assert list((storage / 'workspace/outputs' / attempts[0]['business_date']).glob('host-security-monitor-*.md'))
     finally:

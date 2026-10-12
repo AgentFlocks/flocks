@@ -37,6 +37,7 @@ CREATE TABLE IF NOT EXISTS monitor_attempts (
  finished_at TEXT, status TEXT NOT NULL, error TEXT, result TEXT NOT NULL DEFAULT '{}',
  navigation_confirmed INTEGER NOT NULL DEFAULT 0);
 CREATE INDEX IF NOT EXISTS monitor_attempts_day ON monitor_attempts(owner, scope, business_date);
+CREATE INDEX IF NOT EXISTS monitor_attempts_project_day ON monitor_attempts(owner, scope, project, business_date, sequence);
 CREATE TABLE IF NOT EXISTS monitor_steps (
  id TEXT PRIMARY KEY, attempt_id TEXT NOT NULL, message_id TEXT NOT NULL, part_id TEXT NOT NULL,
  tool TEXT NOT NULL, input TEXT NOT NULL, status TEXT NOT NULL, started_at TEXT NOT NULL,
@@ -44,6 +45,7 @@ CREATE TABLE IF NOT EXISTS monitor_steps (
 CREATE TABLE IF NOT EXISTS monitor_observations (
  attempt_id TEXT NOT NULL, event_key TEXT NOT NULL, data TEXT NOT NULL,
  PRIMARY KEY(attempt_id, event_key));
+CREATE INDEX IF NOT EXISTS monitor_observations_event ON monitor_observations(event_key, attempt_id);
 CREATE TABLE IF NOT EXISTS monitor_cursors (
  owner TEXT NOT NULL, scope TEXT NOT NULL, device TEXT NOT NULL, through_time INTEGER NOT NULL,
  PRIMARY KEY(owner, scope, device));
@@ -99,6 +101,10 @@ CREATE TABLE IF NOT EXISTS monitor_mail_manual (
  id TEXT PRIMARY KEY, notice_id TEXT NOT NULL, owner TEXT NOT NULL, project TEXT NOT NULL,
  state TEXT NOT NULL, created_at TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS monitor_mail_manual_notice ON monitor_mail_manual(owner,notice_id,created_at);
+CREATE TABLE IF NOT EXISTS monitor_mail_retries (
+ id TEXT PRIMARY KEY, notice_id TEXT NOT NULL, owner TEXT NOT NULL, project TEXT NOT NULL,
+ state TEXT NOT NULL, mail_state TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS monitor_mail_retries_notice ON monitor_mail_retries(owner,notice_id);
 CREATE TABLE IF NOT EXISTS monitor_mail_cursors (
  mailbox TEXT PRIMARY KEY, validity TEXT NOT NULL, last_uid INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS monitor_mail_unparsed (

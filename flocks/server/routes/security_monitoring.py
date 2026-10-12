@@ -14,6 +14,7 @@ from flocks.monitoring.store import rows
 from flocks.monitoring.reports import snapshot, newest_timeline_content
 from flocks.monitoring.mailflow import MailSettingsRequest
 from flocks.monitoring.mail_manual import ManualMailRequest
+from flocks.monitoring.mail_retry import RetryMailRequest
 from flocks.monitoring.configuration import ConfigurationRequest
 from flocks.monitoring.disposition import DispositionRequest
 from flocks.monitoring.automatic import AutomaticRequest
@@ -79,6 +80,45 @@ async def resolve_day(owner, requested=None):
 async def overview(day: str | None = None, user=Depends(require_user)):
     day = await resolve_day(user.id, day)
     return await snapshot(user.id, COMPONENT_ID, day)
+
+
+async def _event_list_read(operation):
+    try:
+        return await asyncio.wait_for(operation, timeout=15)
+    except (FileNotFoundError, LookupError) as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    except Exception:
+        raise HTTPException(503, '事件记录暂时无法读取，请稍后重试；不能据此判断没有事件') from None
+
+
+@router.get('/events')
+async def event_list(
+    start_date: str = Query(min_length=10, max_length=10),
+    end_date: str = Query(min_length=10, max_length=10),
+    window_hours: int = Query(default=12, ge=1, le=24),
+    group: bool = True,
+    include_backlog: bool = True,
+    device: str | None = Query(default=None, max_length=200),
+    risk: Literal['risk', 'unknown', 'ignored', 'benign'] | None = None,
+    handling: Literal['open', 'closed', 'ignored', 'contained'] | None = None,
+    search: str | None = Query(default=None, max_length=200),
+    offset: int = Query(default=0, ge=0, le=1000),
+    limit: int = Query(default=25, ge=1, le=100),
+    user=Depends(require_user),
+):
+    from flocks.monitoring.event_list import list_events
+    return await _event_list_read(list_events(user.id, COMPONENT_ID,
+        start_date=start_date, end_date=end_date, window_hours=window_hours,
+        group=group, include_backlog=include_backlog, device=device, risk=risk,
+        handling=handling, search=search, offset=offset, limit=limit))
+
+
+@router.get('/events/detail')
+async def event_detail(event_key: str = Query(min_length=1, max_length=1000), user=Depends(require_user)):
+    from flocks.monitoring.event_list import detail
+    return await _event_list_read(detail(user.id, COMPONENT_ID, event_key))
 
 
 async def _control(action, owner):
@@ -161,6 +201,22 @@ async def _manual_mail_action(action, owner):
 async def manual_mail_status(notice_id: UUID, body: ManualMailRequest, user=Depends(require_user)):
     from flocks.monitoring.mail_manual import change
     return await _manual_mail_action(change(user.id, str(notice_id), body), user.id)
+
+
+@router.post('/mail/notices/{notice_id}/retry')
+async def retry_mail(notice_id: UUID, body: RetryMailRequest, user=Depends(require_user)):
+    from flocks.monitoring.mail_retry import retry
+    try:
+        result = await retry(user.id, str(notice_id), body)
+    except FileNotFoundError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except Exception:
+        raise HTTPException(503, '重试发送结果未确认，请刷新记录；重试请求应沿用原请求编号') from None
+    from flocks.monitoring.runtime import publish
+    await publish('monitor.control.changed', {'owner': user.id})
+    return result
 
 
 @router.post('/mail/notices/{notice_id}/manual-status/recheck')

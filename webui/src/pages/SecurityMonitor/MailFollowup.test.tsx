@@ -3,12 +3,16 @@ import { beforeEach, expect, it, vi } from "vitest";
 import { MemoryRouter } from "react-router-dom";
 import MailFollowup from "./MailFollowup";
 import client from "@/api/client";
-import type { MailManualStatus } from "@/api/securityMonitoring";
+import type {
+  MailManualStatus,
+  MailRetryResult,
+} from "@/api/securityMonitoring";
 
 const mocks = vi.hoisted(() => ({
   mail: vi.fn(),
   setMailManualStatus: vi.fn(),
   recheckMailManualStatus: vi.fn(),
+  retryMailNotice: vi.fn(),
 }));
 vi.mock("@/api/securityMonitoring", async (importOriginal) => ({
   ...(await importOriginal<object>()),
@@ -417,7 +421,7 @@ it("marks a notice handled only after the server confirms XDR state", async () =
   ).not.toBeInTheDocument();
 });
 
-it("keeps a pending write distinct from handled and provides a readback action", async () => {
+it("automatically waits for pending write readback without a human action", async () => {
   setManualNotice(
     manual({
       available: false,
@@ -426,27 +430,23 @@ it("keeps a pending write distinct from handled and provides a readback action",
       reason: "写回结果待确认",
     }),
   );
-  mocks.recheckMailManualStatus.mockResolvedValue({
-    data: manual({
-      available: false,
-      state: "handled",
-      reason: "XDR 已回查确认",
-    }),
-  });
+
   render(
     <MemoryRouter>
       <MailFollowup />
     </MemoryRouter>,
   );
   expect(
-    await screen.findByText("待回查 · 尚未确认已处置"),
+    await screen.findByText("系统将自动回查 · 尚未确认已处置"),
   ).toBeInTheDocument();
   expect(
     screen.queryByRole("button", { name: "标记已处置：event" }),
   ).not.toBeInTheDocument();
-  fireEvent.click(screen.getByRole("button", { name: "回查处置状态：event" }));
-  expect(await screen.findByText("已处置 · XDR 已确认")).toBeInTheDocument();
-  expect(mocks.recheckMailManualStatus).toHaveBeenCalledWith("notice");
+  expect(
+    screen.queryByRole("button", { name: /回查/ }),
+  ).not.toBeInTheDocument();
+  expect(screen.queryByText("已处置 · XDR 已确认")).not.toBeInTheDocument();
+  expect(mocks.recheckMailManualStatus).not.toHaveBeenCalled();
   expect(mocks.setMailManualStatus).not.toHaveBeenCalled();
 });
 
@@ -504,7 +504,7 @@ it("keeps a stable request ID for an uncertain retry and supports intranet HTTP"
       /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/,
     );
     fireEvent.click(screen.getByRole("button", { name: "标记已处置：event" }));
-    await screen.findByText("待回查 · 尚未确认已处置");
+    await screen.findByText("系统将自动回查 · 尚未确认已处置");
     expect(mocks.setMailManualStatus.mock.calls[1][1]).toEqual(first);
   } finally {
     randomUUID.mockRestore();
@@ -617,4 +617,256 @@ it("uses the newest feedback state instead of an older verified reply", async ()
   const row = (await screen.findByText("待跟进告警")).closest("tr")!;
   expect(within(row).getByText("已收到，待下轮处理")).toBeInTheDocument();
   expect(within(row).queryByText("目标状态已回查确认")).not.toBeInTheDocument();
+});
+
+function failedNotice() {
+  return {
+    ...data.notices[0],
+    state: "queued",
+    error: "SMTP recipient rejected",
+    manual: manual(),
+    retry: { available: true, reason: "发送失败，可以重试" },
+  };
+}
+
+it("retries only eligible failed mail and retains the alert awaiting feedback", async () => {
+  const failed = failedNotice();
+  mocks.mail.mockResolvedValue({ data: { ...data, notices: [failed] } });
+  let finish: (result: { data: MailRetryResult }) => void = () => {};
+  mocks.retryMailNotice.mockImplementation(
+    () =>
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+  );
+  render(
+    <MemoryRouter>
+      <MailFollowup />
+    </MemoryRouter>,
+  );
+  const retry = await screen.findByRole("button", { name: "重试发送：event" });
+  fireEvent.click(retry);
+  fireEvent.click(retry);
+  expect(mocks.retryMailNotice).toHaveBeenCalledTimes(1);
+  expect(retry).toBeDisabled();
+  expect(
+    screen.getByRole("button", { name: "标记已处置：event" }),
+  ).toBeDisabled();
+  expect(
+    screen.getByRole("button", { name: "标记未处置：event" }),
+  ).toBeDisabled();
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  expect(mocks.retryMailNotice).toHaveBeenCalledWith("notice", {
+    request_id: expect.stringMatching(/^[a-f0-9-]{36}$/i),
+  });
+  const sent: MailRetryResult = {
+    state: "sent",
+    error: null,
+    retry: { available: false, reason: "已发送，等待回信" },
+  };
+  mocks.mail.mockResolvedValue({
+    data: { ...data, notices: [{ ...failed, ...sent }] },
+  });
+  await act(async () => finish({ data: sent }));
+  expect(
+    await screen.findByText("邮件已发送；告警继续保留，等待处置反馈。"),
+  ).toBeInTheDocument();
+  expect(screen.getByText("已发送")).toBeInTheDocument();
+  expect(screen.getByText("尚无回信")).toBeInTheDocument();
+  expect(screen.getByText("未处置")).toBeInTheDocument();
+  expect(screen.queryByText("已处置 · XDR 已确认")).not.toBeInTheDocument();
+  expect(
+    screen.queryByRole("button", { name: "重试发送：event" }),
+  ).not.toBeInTheDocument();
+  expect(mocks.mail).toHaveBeenCalledTimes(2);
+  expect(mocks.setMailManualStatus).not.toHaveBeenCalled();
+});
+
+it("does not offer retries for sent, unknown, or server-ineligible mail", async () => {
+  mocks.mail.mockResolvedValue({
+    data: {
+      ...data,
+      notices: [
+        {
+          ...data.notices[0],
+          retry: { available: false, reason: "已发送，等待回信" },
+        },
+        {
+          ...failedNotice(),
+          id: "unknown",
+          state: "send_unknown",
+          retry: { available: false, reason: "投递结果未知，不可重复发送" },
+        },
+        {
+          ...failedNotice(),
+          id: "forbidden",
+          retry: { available: false, reason: "原设备已停用" },
+        },
+      ],
+    },
+  });
+  render(
+    <MemoryRouter>
+      <MailFollowup />
+    </MemoryRouter>,
+  );
+  await screen.findByText("已发送，等待回信");
+  expect(
+    screen.queryByRole("button", { name: /重试发送/ }),
+  ).not.toBeInTheDocument();
+  expect(screen.getByText("投递结果未知，不可重复发送")).toBeInTheDocument();
+  expect(screen.getByText("原设备已停用")).toBeInTheDocument();
+  expect(mocks.retryMailNotice).not.toHaveBeenCalled();
+});
+
+it.each([new Error("network timeout"), { response: { status: 502 } }])(
+  "reuses the sending request ID after an uncertain transport response: %s",
+  async (error) => {
+    mocks.mail.mockResolvedValue({
+      data: { ...data, notices: [failedNotice()] },
+    });
+    mocks.retryMailNotice.mockRejectedValueOnce(error);
+    mocks.retryMailNotice.mockResolvedValueOnce({
+      data: {
+        state: "queued",
+        error: "SMTP rejected",
+        retry: { available: true, reason: "可以重试" },
+      },
+    });
+    render(
+      <MemoryRouter>
+        <MailFollowup />
+      </MemoryRouter>,
+    );
+    fireEvent.click(
+      await screen.findByRole("button", { name: "重试发送：event" }),
+    );
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "重试沿用原请求",
+    );
+    expect(
+      screen.getByRole("button", { name: "标记已处置：event" }),
+    ).toBeDisabled();
+    const first = mocks.retryMailNotice.mock.calls[0][1];
+    fireEvent.click(screen.getByRole("button", { name: "重试发送：event" }));
+    await screen.findByText("本次发送结果已更新；告警继续保留，等待处置反馈。");
+    expect(mocks.retryMailNotice.mock.calls[1][1]).toEqual(first);
+    expect(screen.getByText("未处置")).toBeInTheDocument();
+  },
+);
+
+it("starts a new request after the server definitively reports another send failure", async () => {
+  mocks.mail.mockResolvedValue({
+    data: { ...data, notices: [failedNotice()] },
+  });
+  mocks.retryMailNotice.mockResolvedValue({
+    data: {
+      state: "queued",
+      error: "SMTP rejected",
+      retry: { available: true, reason: "可以重试" },
+    },
+  });
+  render(
+    <MemoryRouter>
+      <MailFollowup />
+    </MemoryRouter>,
+  );
+  fireEvent.click(
+    await screen.findByRole("button", { name: "重试发送：event" }),
+  );
+  await screen.findByText("本次发送结果已更新；告警继续保留，等待处置反馈。");
+  const first = mocks.retryMailNotice.mock.calls[0][1];
+  fireEvent.click(screen.getByRole("button", { name: "重试发送：event" }));
+  await screen.findByText("本次发送结果已更新；告警继续保留，等待处置反馈。");
+  expect(mocks.retryMailNotice.mock.calls[1][1].request_id).not.toBe(
+    first.request_id,
+  );
+});
+
+it("refreshes server permissions after rejection and never suggests a completed disposition", async () => {
+  mocks.mail.mockResolvedValueOnce({
+    data: { ...data, notices: [failedNotice()] },
+  });
+  mocks.mail.mockResolvedValue({
+    data: {
+      ...data,
+      notices: [
+        {
+          ...failedNotice(),
+          retry: { available: false, reason: "已收到反馈，禁止重发" },
+        },
+      ],
+    },
+  });
+  mocks.retryMailNotice.mockRejectedValue({
+    response: { status: 409, data: { detail: "已收到反馈，禁止重发" } },
+  });
+  render(
+    <MemoryRouter>
+      <MailFollowup />
+    </MemoryRouter>,
+  );
+  fireEvent.click(
+    await screen.findByRole("button", { name: "重试发送：event" }),
+  );
+  expect(await screen.findByRole("alert")).toHaveTextContent(
+    "已收到反馈，禁止重发",
+  );
+  expect(
+    screen.queryByRole("button", { name: /重试发送/ }),
+  ).not.toBeInTheDocument();
+  expect(screen.queryByText("已处置 · XDR 已确认")).not.toBeInTheDocument();
+});
+
+it("sends notice-specific retry request IDs through the API", async () => {
+  const { monitoringApi: api } = await vi.importActual<
+    typeof import("@/api/securityMonitoring")
+  >("@/api/securityMonitoring");
+  const post = vi.spyOn(client, "post").mockResolvedValue({ data: {} });
+  try {
+    await api.retryMailNotice("notice/1", { request_id: "request" });
+    expect(post).toHaveBeenLastCalledWith(
+      "/api/monitoring/host-security-monitor/mail/notices/notice%2F1/retry",
+      { request_id: "request" },
+    );
+  } finally {
+    post.mockRestore();
+  }
+});
+
+it("resolves a lost response from refreshed delivery facts without leaving a resend prompt", async () => {
+  mocks.mail.mockResolvedValueOnce({
+    data: { ...data, notices: [failedNotice()] },
+  });
+  mocks.mail.mockResolvedValue({
+    data: {
+      ...data,
+      notices: [
+        {
+          ...failedNotice(),
+          state: "sent",
+          error: null,
+          retry: { available: false, reason: "已发送，等待回信" },
+        },
+      ],
+    },
+  });
+  mocks.retryMailNotice.mockRejectedValue(new Error("network timeout"));
+  render(
+    <MemoryRouter>
+      <MailFollowup />
+    </MemoryRouter>,
+  );
+  fireEvent.click(
+    await screen.findByRole("button", { name: "重试发送：event" }),
+  );
+  await screen.findByText("邮件已发送；告警继续保留，等待处置反馈。");
+  expect(
+    screen.queryByRole("button", { name: /重试发送/ }),
+  ).not.toBeInTheDocument();
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  expect(
+    screen.getByRole("button", { name: "标记已处置：event" }),
+  ).toBeEnabled();
+  expect(screen.getByText("未处置")).toBeInTheDocument();
 });

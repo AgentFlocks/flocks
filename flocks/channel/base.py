@@ -12,7 +12,7 @@ import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Awaitable, Callable, Optional
+from typing import Any, Awaitable, Callable, Literal, Optional
 
 
 class ChatType(str, Enum):
@@ -90,6 +90,9 @@ class DeliveryResult:
     success: bool = True
     error: Optional[str] = None
     retryable: bool = False
+    # Transport acceptance, independent of application success. Older plugins
+    # make no claim; only a confirmed not_sent result permits safe resending.
+    delivery_state: Literal["unknown", "not_sent", "accepted"] = "unknown"
 
 
 class NonRetryableChannelError(RuntimeError):

@@ -124,6 +124,7 @@ class Recorder:
         await publish('message.part.updated', {'sessionID': self.session_id, 'part': part.model_dump(mode='json', by_alias=True)})
         text = TextPart(sessionID=self.session_id, messageID=message, text=summary.text,
                         metadata={'monitoringSummary': True, 'toolPartID': part_id, 'details': summary.details,
+                                  'monitoringPackets': summary.packets,
                                   'monitoringSections': summary.sections or [
                                       {'label': '实际发现' if summary.success else '未完成原因', 'text': summary.text}]})
         await Message.add_part(self.session_id, message, text)
@@ -196,6 +197,11 @@ async def run(execution, policy, adapter_factory=XdrAdapter):
     try:
         if not policy.devices:
             raise ContractError('未绑定可用数据源')
+        from .mail_manual import recheck_pending
+        manual_readback = await mail_followup('disposition.recheck',
+            lambda: recheck_pending(policy),
+            {'checked': 0, 'verified': 0, 'pending': 0, 'unavailable': True,
+             'errors': ['人工处置回查暂未完成；已保存的处理标签保留，后续监测轮次自动核验。']})
         feedback_unavailable = {'processed': 0, 'verified': 0, 'pending': 0, 'unavailable': True,
                                 'errors': ['回信处理暂未完成；已保存反馈保留待自动核验，实际处理进度请查看邮件跟进记录。']}
         reply_high = await mail_followup('mail.receive',
@@ -245,7 +251,21 @@ async def run(execution, policy, adapter_factory=XdrAdapter):
             # Otherwise a busy batch could exhaust three retries before a later
             # event has ever had a chance to query a single source.
             if budget.calls >= policy.investigation_calls or budget.models >= policy.investigation_calls * 2 + 3:
-                break
+                cached = await rows('SELECT * FROM monitor_investigations WHERE owner=? AND project=? AND event_key=?',
+                                    (policy.owner, policy.project, event['key']))
+                if not cached or cached[0]['state'] != 'ready':
+                    continue
+                case = cached[0]
+                canonical = json.loads(case['event'])
+                evidence = json.loads(case['evidence'])
+                cached_result = json.loads(case['result'])
+                # A completed, fresh investigation costs no calls to project
+                # into this round. An expired or changed one needs a real retry
+                # and must wait for a later round with available budget.
+                if (cached_result.get('evidence_schema') != investigation.EVIDENCE_SCHEMA
+                        or investigation.fingerprint(event) != investigation.fingerprint(canonical)
+                        or investigation.fresh_evidence(evidence, canonical) != evidence):
+                    continue
             await investigation.investigate(policy, event, recorder, budget)
             outcome = event['investigation']
             if (outcome.get('attempted_this_round', True)
@@ -284,14 +304,14 @@ async def run(execution, policy, adapter_factory=XdrAdapter):
             {'enabled': automatic_enabled, 'receive': {'state': 'unknown'}, 'send': {'state': 'unknown'},
              'errors': ['邮件连接状态暂无法读取；不据此判断投递失败或没有回信。']})
         mail_warnings = list(dict.fromkeys(
-            feedback.get('errors', []) + notification.get('errors', [])
+            manual_readback.get('errors', []) + feedback.get('errors', []) + notification.get('errors', [])
             + (mail_health.get('errors', []) if automatic_enabled else [])))
         result['investigation_backlog'] = await investigation.status_summary(policy)
         # Backlog describes durable incident work, not a fresh round failure.
         # A retry that actually fails above still contributes a current error.
         errors[:] = list(dict.fromkeys(errors))
         result['mail'] = {'feedback': feedback, 'notification': notification, 'enabled': automatic_enabled,
-                          'health': mail_health, 'warnings': mail_warnings}
+                          'health': mail_health, 'warnings': mail_warnings, 'manual_readback': manual_readback}
         result['disposition'] = '根据责任人反馈或允许的人工标记更新告警并回查' if automatic_enabled else '只读监测'
         # Waiting for a reply is normal completion; a failed investigation is not.
         status = 'failed' if errors else 'completed'

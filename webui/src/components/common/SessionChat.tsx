@@ -5076,6 +5076,46 @@ function MonitoringEvidence({ details, active }: { details: string; active: bool
   </details>;
 }
 
+const monitoringPacketLabels: Record<string, string> = {
+  requestHead: '请求头', requestBody: '请求正文', responseHead: '响应头', responseBody: '响应正文',
+};
+
+function MonitoringPackets({ value }: { value: unknown }) {
+  if (!Array.isArray(value)) return null;
+  const packets = value.slice(0, 24).flatMap(item => {
+    if (!item || typeof item !== 'object') return [];
+    const row = item as Record<string, unknown>;
+    if (['evidence_id', 'source', 'field', 'label', 'text'].some(key => typeof row[key] !== 'string')) return [];
+    const field = row.field as string;
+    if (!Object.prototype.hasOwnProperty.call(monitoringPacketLabels, field)) return [];
+    const evidence = (row.evidence_id as string).trim();
+    const source = (row.source as string).trim();
+    if (!evidence || !source) return [];
+    const text = row.text as string;
+    return [{ evidence: evidence.slice(0, 200), source: source.slice(0, 200), field,
+      label: monitoringPacketLabels[field], text: text.slice(0, 16_000),
+      alert: typeof row.alert_id === 'string' ? row.alert_id.slice(0, 200) : '',
+      truncated: row.truncated === true || text.length > 16_000 }];
+  });
+  if (!packets.length) return null;
+  return <section aria-label="请求与响应证据" data-testid="monitor-packets" className="mt-4 space-y-2 border-t border-sky-100 pt-3 dark:border-sky-900">
+    <h5 className="text-xs font-semibold text-sky-800 dark:text-sky-300">请求与响应证据 · 已脱敏</h5>
+    <p className="text-xs text-slate-500 dark:text-slate-400">按告警和证据编号核对；点击单项展开报文，HTTP 状态码不代表攻击成功。</p>
+    {packets.map((packet, index) => <details key={`${packet.evidence}-${packet.alert}-${packet.field}-${index}`} data-testid="monitor-packet" className="overflow-hidden rounded-xl border border-sky-100 bg-white dark:border-sky-900 dark:bg-slate-900">
+      <summary className="cursor-pointer px-3 py-2.5 text-sm font-medium text-slate-800 dark:text-slate-200">
+        <span>{packet.label}</span>
+        <span className="ml-2 text-xs font-normal text-sky-700 dark:text-sky-300">{packet.evidence}</span>
+        {packet.truncated && <span className="ml-2 rounded bg-sky-50 px-1.5 py-0.5 text-xs font-normal text-sky-800 dark:bg-sky-950 dark:text-sky-300">已截断 · 内容不完整</span>}
+        <span className="mt-1 block break-words text-xs font-normal text-slate-500 dark:text-slate-400">告警：{packet.alert || '编号未提供'} · 来源：{packet.source}</span>
+      </summary>
+      <div className="border-t border-sky-100 p-3 dark:border-sky-900">
+        {packet.truncated && <p className="mb-2 text-xs font-medium text-sky-800 dark:text-sky-300">仅展示已取得的报文片段，未展示部分不能按安全或不存在攻击处理。</p>}
+        <pre className="max-h-96 overflow-auto whitespace-pre-wrap break-words rounded-lg bg-[#eaf4ff] p-3 font-mono text-xs leading-6 text-[#17212b] dark:bg-sky-950 dark:text-slate-200">{packet.text || '未取得可展示的报文内容；请查看本步骤证据缺口。'}</pre>
+      </div>
+    </details>)}
+  </section>;
+}
+
 function MonitoringStepSummary({ part, toolPart, isActive }: { part: MessagePart; toolPart?: MessagePart; isActive: boolean }) {
   const monitor = useContext(MonitoringViewContext);
   const details = typeof part.metadata?.details === 'string' ? part.metadata.details : '';
@@ -5090,6 +5130,7 @@ function MonitoringStepSummary({ part, toolPart, isActive }: { part: MessagePart
   if (!sections.length) return (
     <div data-testid="monitor-step-summary" className="text-sm leading-7">
       <p className="whitespace-pre-wrap break-words">{part.text}</p>
+      <MonitoringPackets value={part.metadata?.monitoringPackets} />
       {details && (monitor ? <MonitoringEvidence details={details} active={isActive} /> : <details className="mt-1" open={isActive || undefined}>
         <summary className="cursor-pointer text-gray-500">查看本步骤的结果与依据</summary>
         <div className="mt-1 whitespace-pre-wrap break-words">{details}</div>
@@ -5118,6 +5159,7 @@ function MonitoringStepSummary({ part, toolPart, isActive }: { part: MessagePart
           </div>;
         })}
       </dl>
+      <MonitoringPackets value={part.metadata?.monitoringPackets} />
       {details && (monitor ? <MonitoringEvidence details={details} active={isActive} /> : <details className="mt-3 border-t border-zinc-100 pt-2 dark:border-zinc-800" open={isActive || undefined}>
         <summary className="cursor-pointer text-xs font-medium text-zinc-500 hover:text-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-200">查看本步骤的结果与依据</summary>
         <div className="mt-2 whitespace-pre-wrap break-words rounded-lg bg-zinc-50 p-3 text-sm dark:bg-zinc-950/60">{details}</div>

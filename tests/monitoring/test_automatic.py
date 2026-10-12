@@ -88,6 +88,10 @@ async def actual_tool(auto, monkeypatch):
             return ToolResult(success=True, output={'code': 'Success'})
         if '/entities/' in path:
             return ToolResult(success=True, output={'code': 'Success', **copy.deepcopy(auto.responses[path.rsplit('/', 1)[-1]])})
+        if path.endswith('/proof'):
+            return ToolResult(success=True, output={'code': 'Success', 'data': [
+                {'uuId': auto.raw['uuId'], 'alertTimeLine': []},
+            ]})
         return ToolResult(success=True, output={'code': 'Success', 'data': {'item': [copy.deepcopy(auto.raw)], 'total': 1}})
     monkeypatch.setitem(fn.__globals__, '_run_request', send)
     monkeypatch.setattr(ToolRegistry, '_tools', {tool.info.name: tool})
@@ -460,9 +464,10 @@ async def test_native_two_round_mail_feedback_flow(auto, actual_tool, connected_
     monkeypatch.setattr(capabilities, 'discover', AsyncMock(return_value=(catalog, [])))
     monkeypatch.setattr(investigation.Agent, 'list', AsyncMock(return_value=[]))
     async def choose(agent, data):
-        if not data['evidence']:
+        hosts = [proof for proof in data['evidence'] if proof['kind'] == 'host' and proof['success']]
+        if not hosts:
             return investigation.Choice(action='query', capability='cap-1', entity='host', reason='核对事件关联主机')
-        return investigation.Choice(action='finish', verdict='unknown', evidence_ids=['evidence-1'], reason='保留主机查询事实，仍需负责人核查')
+        return investigation.Choice(action='finish', verdict='unknown', evidence_ids=[proof['id'] for proof in hosts], reason='保留主机查询事实，仍需负责人核查')
     monkeypatch.setattr(investigation, 'choose', choose)
     if not authenticated:
         connected_email._resolved.update(authservId='', requireAuthenticatedSender=False)
@@ -475,7 +480,10 @@ async def test_native_two_round_mail_feedback_flow(auto, actual_tool, connected_
     notices = await rows('SELECT * FROM monitor_mail_notices')
     assert len(notices) == 1 and notices[0]['state'] == 'sent'
     assert (await rows('SELECT state FROM monitor_investigations'))[0]['state'] == 'ready'
-    assert '智能体调查参考' in notices[0]['body']
+    assert all(text in notices[0]['body'] for text in ('调查摘要', '调查结论', '关键证据', '仍需负责人核查'))
+    evidence = json.loads((await rows('SELECT evidence FROM monitor_investigations'))[0]['evidence'])
+    assert [proof['kind'] for proof in evidence] == ['proof', 'host']
+    assert all(proof['success'] for proof in evidence)
     assert len(outbound) == 1 and outbound[0]['Message-ID'] == notices[0]['message_id']
     assert outbound[0]['To'] == 'person@example.com'
     assert not outbound[0]['In-Reply-To']
@@ -636,7 +644,7 @@ async def test_partial_evidence_can_request_investigation_without_claiming_safet
     result = await m.notify_batch(auto.policy, auto.session.id, [auto.event], Recorder(), auto.adapter)
     assert result['sent'] == 1 and result['pending'] == 0 and auto.send.called
     n = (await rows('SELECT * FROM monitor_mail_notices'))[0]
-    assert '证据不完整' in n['body'] and '文件：证据未取得' in n['body']
+    assert '证据不完整' in n['body'] and '文件查询未取得' in n['body']
     assert '[开发联调]' not in n['subject'] and not writes(auto)
 
 
@@ -645,7 +653,10 @@ async def test_proven_no_smtp_attempt_is_retryable_but_unknown_send_is_not(auto)
     n = await notice(auto)
     assert n['state'] == 'queued' and '连接' in n['error']
     auto.send.side_effect = None
-    assert (await notice(auto))['state'] == 'sent'
+    assert (await notice(auto))['state'] == 'queued'
+    from flocks.monitoring.mail_retry import retry, RetryMailRequest
+    from uuid import uuid4
+    assert (await retry('owner', n['id'], RetryMailRequest(request_id=uuid4())))['state'] == 'sent'
     await notice(auto)
     assert auto.send.await_count == 2 and not writes(auto)
 

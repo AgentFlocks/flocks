@@ -84,7 +84,7 @@ function DispositionBadge({ notice }: { notice: Notice }) {
       )}
       {notice.manual?.state === "pending" && (
         <p className="text-xs text-blue-700 dark:text-blue-300">
-          待回查 · 尚未确认已处置
+          系统将自动回查 · 尚未确认已处置
         </p>
       )}
       {notice.manual?.state === "failed" && (
@@ -134,7 +134,7 @@ function applyManual(notice: Notice, manual: MailManualStatus): Notice {
 }
 
 function DeliveryBadge({ notice }: { notice: Notice }) {
-  return notice.state === "queued" && notice.error ? (
+  return ["queued", "failed"].includes(notice.state) && notice.error ? (
     <span className="inline-flex rounded-md bg-amber-50 px-2 py-1 text-xs font-medium text-amber-800 dark:bg-amber-950/40 dark:text-amber-300">
       发送失败 · 待重试
     </span>
@@ -469,6 +469,12 @@ export default function MailFollowup() {
   const [offset, setOffset] = useState(0);
   const [loading, setLoading] = useState(false),
     [selection, setSelection] = useState<Selection | null>(null);
+  const [retryBusy, setRetryBusy] = useState<Record<string, boolean>>({});
+  const [retryErrors, setRetryErrors] = useState<Record<string, string>>({});
+  const [retryMessages, setRetryMessages] = useState<Record<string, string>>(
+    {},
+  );
+  const retryRequests = useRef(new Map<string, { request_id: string }>());
   const [manualBusy, setManualBusy] = useState<Record<string, boolean>>({});
   const [manualErrors, setManualErrors] = useState<Record<string, string>>({});
   const [uncertainTargets, setUncertainTargets] = useState<
@@ -486,6 +492,22 @@ export default function MailFollowup() {
       const r = await monitoringApi.mail(offset, "sent");
       if (id === sequence.current) {
         setData(r.data);
+        for (const notice of r.data.notices) {
+          if (
+            ["sent", "send_unknown"].includes(notice.state) &&
+            retryRequests.current.has(notice.id)
+          ) {
+            retryRequests.current.delete(notice.id);
+            setRetryErrors((old) => ({ ...old, [notice.id]: "" }));
+            setRetryMessages((old) => ({
+              ...old,
+              [notice.id]:
+                notice.state === "sent"
+                  ? "邮件已发送；告警继续保留，等待处置反馈。"
+                  : "投递结果仍未确认，系统不会重复发送；告警继续保留。",
+            }));
+          }
+        }
         setError("");
       }
     } catch {
@@ -511,7 +533,7 @@ export default function MailFollowup() {
     setError("");
     setOffset(nextOffset);
   };
-  const updateManual = async (notice: Notice, target?: ManualTarget) => {
+  const updateManual = async (notice: Notice, target: ManualTarget) => {
     if (inFlight.current.has(notice.id)) return;
     if (
       target &&
@@ -522,19 +544,17 @@ export default function MailFollowup() {
     setManualBusy((old) => ({ ...old, [notice.id]: true }));
     setManualErrors((old) => ({ ...old, [notice.id]: "" }));
     try {
-      let result;
-      if (target) {
-        let request = manualRequests.current.get(notice.id);
-        if (request && request.state !== target) return;
-        if (!request) {
-          request = { request_id: requestId(), state: target };
-          manualRequests.current.set(notice.id, request);
-        }
-        result = await monitoringApi.setMailManualStatus(notice.id, request);
-      } else {
-        result = await monitoringApi.recheckMailManualStatus(notice.id);
+      let request = manualRequests.current.get(notice.id);
+      if (request && request.state !== target) return;
+      if (!request) {
+        request = { request_id: requestId(), state: target };
+        manualRequests.current.set(notice.id, request);
       }
-      // An older poll must not replace the result of this write/recheck.
+      const result = await monitoringApi.setMailManualStatus(
+        notice.id,
+        request,
+      );
+      // An older poll must not replace the result of this write.
       sequence.current++;
       setLoading(false);
       setData((old) =>
@@ -570,6 +590,71 @@ export default function MailFollowup() {
     } finally {
       inFlight.current.delete(notice.id);
       setManualBusy((old) => ({ ...old, [notice.id]: false }));
+    }
+  };
+  const retryNotice = async (notice: Notice) => {
+    if (!notice.retry?.available || inFlight.current.has(notice.id)) return;
+    inFlight.current.add(notice.id);
+    setRetryBusy((old) => ({ ...old, [notice.id]: true }));
+    setRetryErrors((old) => ({ ...old, [notice.id]: "" }));
+    setRetryMessages((old) => ({ ...old, [notice.id]: "" }));
+    let request = retryRequests.current.get(notice.id);
+    if (!request) {
+      request = { request_id: requestId() };
+      retryRequests.current.set(notice.id, request);
+    }
+    try {
+      const result = await monitoringApi.retryMailNotice(notice.id, request);
+      retryRequests.current.delete(notice.id);
+      // Preserve disposition and reply facts: sending a mail does not resolve an alert.
+      sequence.current++;
+      setData((old) =>
+        old
+          ? {
+              ...old,
+              notices: old.notices.map((n) =>
+                n.id === notice.id ? { ...n, ...result.data } : n,
+              ),
+            }
+          : old,
+      );
+      setSelection((old) =>
+        old?.kind === "sent" && old.record.id === notice.id
+          ? { ...old, record: { ...old.record, ...result.data } }
+          : old,
+      );
+      setRetryMessages((old) => ({
+        ...old,
+        [notice.id]:
+          result.data.state === "sent"
+            ? "邮件已发送；告警继续保留，等待处置反馈。"
+            : "本次发送结果已更新；告警继续保留，等待处置反馈。",
+      }));
+      if (result.data.error)
+        setRetryErrors((old) => ({ ...old, [notice.id]: result.data.error! }));
+      await refresh();
+    } catch (err: unknown) {
+      const response = (
+        err as { response?: { status?: number; data?: { detail?: unknown } } }
+      )?.response;
+      if (
+        response?.status &&
+        [400, 401, 403, 404, 409, 422].includes(response.status)
+      ) {
+        retryRequests.current.delete(notice.id);
+      }
+      const detail = response?.data?.detail;
+      setRetryErrors((old) => ({
+        ...old,
+        [notice.id]:
+          typeof detail === "string"
+            ? detail
+            : "发送请求结果未确认，请重试同一操作；重试沿用原请求，避免重复发送。",
+      }));
+      await refresh();
+    } finally {
+      inFlight.current.delete(notice.id);
+      setRetryBusy((old) => ({ ...old, [notice.id]: false }));
     }
   };
   const notices = (data?.notices || []).slice().sort((a, b) => {
@@ -662,8 +747,10 @@ export default function MailFollowup() {
         </p>
       )}
       <p className="mb-4 rounded-lg bg-blue-50 px-4 py-3 text-xs leading-relaxed text-blue-800 dark:bg-blue-950/30 dark:text-blue-200">
-        每条告警单独发一封邮件。仅发信失败或尚无回信时可人工标记：选择“已处置”将向该告警所属
-        XDR 写回处置完成，并回查确认；“未处置”仅记录跟进状态，不回退 XDR 状态。
+        每条告警单独发一封邮件。发送失败可点击“重试发送”；已发送但尚无回信时不重复发信。
+        发信失败或一直未回信的告警持续保留，直到收到反馈或人工标记“已处置”。
+        人工仅操作重试发送与处置标签：选择“已处置”将向该告警所属 XDR
+        写回处置完成，系统自动回查； “未处置”仅记录跟进状态，不回退 XDR 状态。
       </p>
       <section className="overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm dark:border-gray-800 dark:bg-gray-900">
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-gray-100 px-4 py-3 dark:border-gray-800">
@@ -739,8 +826,52 @@ export default function MailFollowup() {
                       >
                         {n.recipient}
                       </td>
-                      <td className={cell}>
-                        <DeliveryBadge notice={n} />
+                      <td className={cell} onClick={(e) => e.stopPropagation()}>
+                        <div className="space-y-2">
+                          <DeliveryBadge notice={n} />
+                          {n.retry?.available && (
+                            <button
+                              className={`${button} text-blue-700 dark:text-blue-300`}
+                              disabled={
+                                retryBusy[n.id] ||
+                                manualBusy[n.id] ||
+                                !!uncertainTargets[n.id]
+                              }
+                              aria-label={`重试发送：${n.event.id}`}
+                              onClick={() => void retryNotice(n)}
+                            >
+                              <RefreshCw
+                                size={13}
+                                className={
+                                  retryBusy[n.id] ? "animate-spin" : ""
+                                }
+                                aria-hidden="true"
+                              />
+                              {retryBusy[n.id] ? "发送中…" : "重试发送"}
+                            </button>
+                          )}
+                          {n.retry?.reason && (
+                            <p className="text-xs leading-relaxed text-gray-500">
+                              {n.retry.reason}
+                            </p>
+                          )}
+                          {retryErrors[n.id] && (
+                            <p
+                              role="alert"
+                              className="text-xs text-amber-700 dark:text-amber-300"
+                            >
+                              {retryErrors[n.id]}
+                            </p>
+                          )}
+                          {retryMessages[n.id] && (
+                            <p
+                              role="status"
+                              className="text-xs text-blue-700 dark:text-blue-300"
+                            >
+                              {retryMessages[n.id]}
+                            </p>
+                          )}
+                        </div>
                       </td>
                       <td className={cell}>
                         <ReplyBadge notice={n} />
@@ -748,22 +879,15 @@ export default function MailFollowup() {
                       <td className={cell} onClick={(e) => e.stopPropagation()}>
                         <div className="space-y-2">
                           <DispositionBadge notice={n} />
-                          {n.manual?.state === "pending" ? (
-                            <button
-                              className={button}
-                              disabled={manualBusy[n.id]}
-                              onClick={() => void updateManual(n)}
-                              aria-label={`回查处置状态：${n.event.id}`}
-                            >
-                              {manualBusy[n.id] ? "回查中…" : "回查状态"}
-                            </button>
-                          ) : (
+                          {n.manual?.state !== "pending" &&
                             n.manual?.available && (
                               <div className="flex flex-wrap gap-2">
                                 <button
                                   className={`${button} text-emerald-700 dark:text-emerald-300`}
                                   disabled={
                                     manualBusy[n.id] ||
+                                    retryBusy[n.id] ||
+                                    retryRequests.current.has(n.id) ||
                                     n.manual.state === "handled" ||
                                     uncertainTargets[n.id] === "unhandled"
                                   }
@@ -778,6 +902,8 @@ export default function MailFollowup() {
                                   className={button}
                                   disabled={
                                     manualBusy[n.id] ||
+                                    retryBusy[n.id] ||
+                                    retryRequests.current.has(n.id) ||
                                     n.manual.state === "unhandled" ||
                                     uncertainTargets[n.id] === "handled"
                                   }
@@ -789,8 +915,7 @@ export default function MailFollowup() {
                                   标记未处置
                                 </button>
                               </div>
-                            )
-                          )}
+                            )}
                           {n.manual?.reason && (
                             <p className="text-xs leading-relaxed text-gray-500">
                               {n.manual.reason}

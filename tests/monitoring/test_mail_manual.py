@@ -269,3 +269,194 @@ async def test_rebound_project_does_not_inherit_manual_closure(case):
     result=await snapshot('owner',case.policy.scope,day)
     assert result['events'][0]['closure']=='open'
     assert not result['events'][0].get('dispositionRecord')
+
+
+async def active_monitor(case):
+    from flocks.task.manager import TaskManager
+    scheduler = await TaskManager.create_scheduler(title='readback', context={'monitoring': case.policy.model_dump()})
+    await write('UPDATE monitor_installations SET scheduler_id=?', (scheduler.id,))
+    return scheduler
+
+
+async def test_background_readback_verifies_prior_manual_write_without_repeating_it(case):
+    await active_monitor(case)
+    case.fail = True
+    assert (await change(case))['state'] == 'pending'
+    await received(case)  # A later reply is unnecessary for this prior user decision.
+    before = len(case.calls)
+    with unattended_scope():
+        result = await manual.recheck_pending(case.policy, adapter_factory=case.adapter)
+    assert result == {'checked': 1, 'verified': 1, 'pending': 0, 'errors': []}
+    assert [p['action'] for _, p in case.calls[before:]] == ['list']
+    assert len([p for _, p in case.calls if p['action'] == 'update_status']) == 1
+    assert (await manual.snapshot(await notice(case)))['state'] == 'handled'
+    assert (await manual.recheck_pending(case.policy, adapter_factory=case.adapter))['checked'] == 0
+
+
+@pytest.mark.parametrize('delivery,reply,manual_state', [
+    ('sent', False, None), ('queued', False, None), ('sent', True, None),
+    ('sent', False, 'unhandled'),
+])
+async def test_delivery_or_waiting_reply_never_creates_background_disposition(case, delivery, reply, manual_state):
+    await active_monitor(case)
+    await write('UPDATE monitor_mail_notices SET state=?,error=?', (delivery, '发送失败' if delivery == 'queued' else None))
+    if manual_state:
+        await change(case, request(manual_state))
+    if reply:
+        await received(case)
+    assert (await manual.recheck_pending(case.policy, adapter_factory=case.adapter))['checked'] == 0
+    assert not case.calls and not await rows('SELECT * FROM monitor_dispositions')
+    assert (await notice(case))['state'] == delivery
+
+
+async def test_paused_monitor_keeps_manual_pending_until_resumed(case):
+    scheduler = await active_monitor(case)
+    case.fail = True
+    await change(case)
+    before = len(case.calls)
+    await write("UPDATE task_schedulers SET status='disabled' WHERE id=?", (scheduler.id,))
+    assert (await manual.recheck_pending(case.policy, adapter_factory=case.adapter))['checked'] == 0
+    assert len(case.calls) == before
+    await write("UPDATE task_schedulers SET status='active' WHERE id=?", (scheduler.id,))
+    assert (await manual.recheck_pending(case.policy, adapter_factory=case.adapter))['verified'] == 1
+
+
+@pytest.mark.parametrize('change_binding', ['project', 'device', 'owner'])
+async def test_background_manual_readback_rejects_changed_binding(case, change_binding):
+    await active_monitor(case)
+    case.fail = True
+    await change(case)
+    before = len(case.calls)
+    if change_binding == 'project':
+        await write('UPDATE monitor_mail_manual SET project=?', ('other-project',))
+    elif change_binding == 'device':
+        replacement = case.policy.model_copy(update={'devices': ['other-device']})
+        await write('UPDATE monitor_installations SET policy=?', (encode(replacement.model_dump()),))
+    else:
+        await write('UPDATE monitor_mail_manual SET owner=?', ('other-owner',))
+    assert (await manual.recheck_pending(case.policy, adapter_factory=case.adapter))['checked'] == 0
+    assert len(case.calls) == before
+
+
+async def test_background_stale_writing_is_read_only_and_fresh_write_is_not_checked(case):
+    from datetime import timedelta
+    await active_monitor(case)
+    case.fail = True
+    await change(case)
+    before = len(case.calls)
+    await write("UPDATE monitor_dispositions SET status='writing'")
+    assert (await manual.recheck_pending(case.policy, adapter_factory=case.adapter))['checked'] == 0
+    assert len(case.calls) == before
+    await write('UPDATE monitor_dispositions SET updated_at=?', ((datetime.now(timezone.utc) - timedelta(minutes=3)).isoformat(),))
+    result = await manual.recheck_pending(case.policy, adapter_factory=case.adapter)
+    assert result['verified'] == 1 and case.calls[-1][1]['action'] == 'list'
+
+
+async def add_pending_readback(case, suffix):
+    event = normalize('device', {'uuId': f'event-{suffix}', 'dealStatus': 0, 'endTime': 100})
+    nid, mid = str(uuid4()), str(uuid4())
+    await write('INSERT INTO monitor_observations VALUES(?,?,?)', ('attempt', event['key'], encode(event)))
+    await write('INSERT INTO monitor_mail_notices(id,owner,scope,project,event_key,recipient,revision,mailbox,message_id,subject,body,event,state,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+        (nid, 'owner', case.policy.scope, case.policy.project, event['key'], 'person@example.com', 'rev', 'mailbox', f'<{suffix}@example.com>', 'notice', 'body', encode(event), 'sent', d.stamp(), d.stamp()))
+    await write('INSERT INTO monitor_mail_manual VALUES(?,?,?,?,?,?)', (mid, nid, 'owner', case.policy.project, 'handled', d.stamp()))
+    await write('INSERT INTO monitor_dispositions(id,owner,scope,event_key,comment,status,created_at,updated_at,mode,target_status,project,session_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',
+        (mid, 'owner', case.policy.scope, event['key'], '人工处理', 'pending', d.stamp(), d.stamp(), 'mail_manual', 40, case.policy.project, 'daily'))
+    return mid
+
+
+async def test_background_readback_failure_does_not_block_next_and_budget_is_bounded(case):
+    await active_monitor(case)
+    case.fail = True
+    await change(case)
+    second = await add_pending_readback(case, 'second')
+    third = await add_pending_readback(case, 'third')
+    case.statuses = [TimeoutError('PRIVATE'), {'uuId': 'event-second', 'dealStatus': 40}]
+    result = await manual.recheck_pending(case.policy, limit=2, adapter_factory=case.adapter)
+    assert result['checked'] == 2 and result['verified'] == 1 and result['pending'] == 1
+    assert result['errors'] and 'PRIVATE' not in str(result)
+    assert (await d.record('owner', second))['status'] == 'verified'
+    assert (await d.record('owner', third))['status'] == 'pending'
+    count = len(case.calls)
+    assert (await manual.recheck_pending(case.policy, timeout_seconds=0, adapter_factory=case.adapter))['checked'] == 0
+    assert len(case.calls) == count
+
+
+async def test_background_readback_timeout_retains_work_and_cancellation_propagates(case, monkeypatch):
+    await active_monitor(case)
+    case.fail = True
+    await change(case)
+    entered = asyncio.Event()
+    async def hang(*args, **kwargs):
+        entered.set()
+        await asyncio.Event().wait()
+    monkeypatch.setattr(d, 'recheck', hang)
+    result = await manual.recheck_pending(case.policy, timeout_seconds=.01)
+    assert result['checked'] == 1 and result['pending'] == 1 and result['errors']
+    assert (await manual.snapshot(await notice(case)))['state'] == 'pending'
+    entered.clear()
+    task = asyncio.create_task(manual.recheck_pending(case.policy))
+    await asyncio.wait_for(entered.wait(), 2)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
+async def test_default_background_adapter_executes_real_read_only_tool_under_unattended_policy(case, monkeypatch):
+    from contextlib import asynccontextmanager
+    from pathlib import Path
+    import inspect
+    import yaml
+    from flocks.session.interaction_policy import monitoring_read_scope
+    from flocks.tool.registry import ToolRegistry, ToolResult
+    from flocks.tool.tool_loader import yaml_to_tool
+    await active_monitor(case)
+    case.fail = True
+    await change(case)
+    path = Path(__file__).resolve().parents[2] / '.flocks/plugins/tools/device/sangfor_xdr_v2_2/sangfor_xdr_incidents.yaml'
+    tool = yaml_to_tool(yaml.safe_load(path.read_text()), path)
+    fn = inspect.getclosurevars(tool.handler).nonlocals['fn']
+    calls = []
+    async def send(method, path, data=None, params=None):
+        calls.append((path, data))
+        return ToolResult(success=True, output={'code': 'Success', 'data': {'item': [{'uuId': 'event', 'dealStatus': 40}], 'total': 1}})
+    monkeypatch.setitem(fn.__globals__, '_run_request', send)
+    monkeypatch.setattr(ToolRegistry, '_tools', {tool.info.name: tool})
+    monkeypatch.setattr(ToolRegistry, '_initialized', True)
+    monkeypatch.setattr(ToolRegistry, '_sync_configured_enabled_states', lambda: None)
+    monkeypatch.setattr(ToolRegistry, '_resolve_device_target', AsyncMock(return_value=('device', None)))
+    monkeypatch.setattr('flocks.tool.device.store.get_device_tool_enabled', AsyncMock(return_value=True))
+    @asynccontextmanager
+    async def credentials(device):
+        yield True
+    monkeypatch.setattr('flocks.tool.credential_context.activate_device_credentials', credentials)
+    with unattended_scope(), monitoring_read_scope(case.policy.tool, case.policy.devices):
+        result = await manual.recheck_pending(case.policy)
+    assert result['verified'] == 1, result
+    assert len(calls) == 1 and calls[0][0].endswith('/list')
+    assert calls[0][1]['uuIds'] == ['event'] and calls[0][1]['dealStatus'] == []
+
+
+async def test_background_mismatch_remains_pending_until_later_readback_matches(case):
+    await active_monitor(case)
+    case.statuses = [0, 10, 10, 40]
+    assert (await change(case))['state'] == 'pending'
+    first = await manual.recheck_pending(case.policy, adapter_factory=case.adapter)
+    assert first['checked'] == 1 and first['pending'] == 1 and first['verified'] == 0
+    assert (await manual.snapshot(await notice(case)))['state'] == 'pending'
+    assert (await manual.recheck_pending(case.policy, adapter_factory=case.adapter))['verified'] == 1
+    assert len([p for _, p in case.calls if p['action'] == 'update_status']) == 1
+
+
+async def test_pause_between_automatic_readbacks_keeps_next_incident_pending(case):
+    scheduler = await active_monitor(case)
+    case.fail = True
+    await change(case)
+    second = await add_pending_readback(case, 'second')
+    class PauseAfterFirst(case.adapter):
+        async def call(self, *args):
+            result = await super().call(*args)
+            await write("UPDATE task_schedulers SET status='disabled' WHERE id=?", (scheduler.id,))
+            return result
+    result = await manual.recheck_pending(case.policy, adapter_factory=PauseAfterFirst)
+    assert result['checked'] == 1 and result['verified'] == 1
+    assert (await d.record('owner', second))['status'] == 'pending'

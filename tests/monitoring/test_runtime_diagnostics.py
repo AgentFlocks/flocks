@@ -92,7 +92,8 @@ async def test_real_tool_display_truncation_preserves_machine_result(monkeypatch
     normalized = next(r for r in captured if r['event'] == 'tool.normalized')
     structured = next(r for r in captured if r['event'] == 'adapter.structured')
     assert raw['value_type'] == 'dict' and raw['items'] == 100 and not raw['truncated']
-    assert normalized['value_type'] == 'str' and normalized['truncated'] and normalized['has_saved_output']
+    assert normalized['value_type'] == 'str' and not normalized['truncated'] and not normalized['has_saved_output']
+    assert not list(output_dir.glob('*'))
     assert structured['value_type'] == 'dict' and structured['items'] == 100
     assert not any(r['event'] == 'adapter.failure' for r in captured)
     assert raw['call'] == normalized['call'] == structured['call']

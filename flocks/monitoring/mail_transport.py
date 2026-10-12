@@ -16,18 +16,28 @@ REQUIRE_AUTHENTICATED_FEEDBACK = False
 
 
 class TransportNotReady(ValueError):
-    """A known preflight failure; no SMTP request has been attempted."""
+    """Delivery was not accepted: preflight failed or SMTP explicitly rejected it.
+
+    Only this positive transport fact permits a new send attempt. A timeout
+    after sending DATA is uncertain and must not be classified as this error.
+    """
 
 
 def mailbox_key(cfg):
     return hashlib.sha256(json.dumps([cfg.get(k, '') for k in ('imapHost', 'imapPort', 'username', 'address')]).encode()).hexdigest()
 
 
-def transport(recipient=None):
+def transport(recipient=None, *, for_send=False):
     plugin = default_registry.get('email')
     cfg = getattr(plugin, '_resolved', {})
-    if not plugin or not plugin.status.connected or not cfg:
+    if not plugin or not cfg:
         raise ValueError('请先连接 Flocks 邮件通道')
+    # Configuration still requires the original connected-channel check. An
+    # existing notification can attempt SMTP independently of IMAP polling,
+    # while the plugin's lifecycle gate rejects an explicit stop or disable.
+    ready = getattr(plugin, 'send_ready', plugin.status.connected) if for_send else plugin.status.connected
+    if not ready:
+        raise ValueError('邮件通道已停用或尚未启动，请先启用邮件通道' if for_send else '请先连接 Flocks 邮件通道')
     if REQUIRE_AUTHENTICATED_FEEDBACK and not cfg.get('authservId'):
         raise ValueError('邮件通道需配置可信 authservId，以核验责任人回信身份')
     if recipient and not cfg.get('allowAll') and recipient not in parse_allowed_senders(cfg):
@@ -37,7 +47,7 @@ def transport(recipient=None):
 
 async def send(notice, session_id):
     try:
-        _, cfg = transport(notice['recipient'])
+        _, cfg = transport(notice['recipient'], for_send=True)
     except ValueError as exc:
         raise TransportNotReady(str(exc)) from exc
     if mailbox_key(cfg) != notice['mailbox']:
@@ -46,6 +56,8 @@ async def send(notice, session_id):
                           subject=notice['subject'], message_id=notice['message_id'],
                           new_thread=True, single_message=True, format_hint='plain')
     results = await OutboundDelivery.deliver(ctx, max_retries=1, session_id=session_id)
+    if len(results) == 1 and getattr(results[0], 'delivery_state', 'unknown') == 'not_sent':
+        raise TransportNotReady(results[0].error or '邮件未发送，请检查邮件通道后重试')
     return len(results) == 1 and results[0].success and results[0].message_id == notice['message_id']
 
 

@@ -95,7 +95,7 @@ _ENUMS = {
     'entity_type': {'host', 'file', 'process', 'ip', 'innerip', 'dns'},
     'stage': {'dispatch', 'run', 'session.prepare', 'query.device', 'query.events', 'query.entities',
               'correlate', 'tool.execute', 'tool.handler', 'tool.normalize', 'report.export', 'step.other',
-              'disposition.confirm', 'disposition.recheck', 'automatic.mark', 'mail.configure', 'mail.send', 'mail.receive', 'mail.interpret', 'mail.resolve', 'mail.mark', 'mail.manual.mark', 'mail.readback',
+              'disposition.confirm', 'disposition.recheck', 'automatic.mark', 'mail.configure', 'mail.send', 'mail.receive', 'mail.interpret', 'mail.resolve', 'mail.mark', 'mail.manual.mark', 'mail.retry', 'mail.readback',
               'control.action', 'control.publish', 'control.snapshot', 'pause.installation', 'pause.disable', 'pause.executions', 'pause.cancel'},
     'action': {'list', 'get_entities', 'get_proof', 'update_status', 'other'},
     'outcome': {'ok', 'error', 'cancelled', 'completed', 'failed', 'partial', 'interrupted', 'running', 'unknown'},
