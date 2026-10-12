@@ -166,6 +166,50 @@ describe('SceneSuitesPage', () => {
     await waitFor(() => expect(hubAPI.sceneSuites).toHaveBeenCalledTimes(2));
   });
 
+  it('requires a Pro suite\'s own licence under Pro before it can be installed', async () => {
+    flocksproUsersApi.hasCapability.mockResolvedValue(true);
+    hubAPI.sceneSuites.mockResolvedValue({ data: [SOC, { ...CODE_AUDIT, licensed: false, licenseState: 'unlicensed' }] });
+    renderPage();
+
+    const audit = await waitFor(() => card('code-audit-workspace'));
+    await waitFor(() => {
+      expect(within(audit).getByRole('link', { name: '导入授权' })).toHaveAttribute('href', '/settings/suite-licenses');
+    });
+    expect(within(audit).getByText('未授权')).toBeInTheDocument();
+    expect(within(audit).getByText(/需要单独授权/)).toBeInTheDocument();
+    expect(within(audit).queryByRole('button', { name: '安装' })).not.toBeInTheDocument();
+    expect(within(audit).queryByRole('link', { name: '去升级' })).not.toBeInTheDocument();
+  });
+
+  it('keeps uninstall, and nothing else, for an installed suite whose licence lapsed', async () => {
+    flocksproUsersApi.hasCapability.mockResolvedValue(true);
+    hubAPI.sceneSuites.mockResolvedValue({ data: [{
+      ...CODE_AUDIT, installedVersion: '1.0.0', state: 'updateAvailable', workspaceEnabled: true,
+      licensed: false, licenseState: 'expired',
+    }] });
+    renderPage();
+
+    const audit = await waitFor(() => card('code-audit-workspace'));
+    await waitFor(() => expect(within(audit).getByText('授权已过期')).toBeInTheDocument());
+    expect(within(audit).getByRole('button', { name: '卸载' })).toBeInTheDocument();
+    expect(within(audit).queryByRole('button', { name: '更新' })).not.toBeInTheDocument();
+    expect(within(audit).queryByRole('button', { name: '停用' })).not.toBeInTheDocument();
+  });
+
+  it('shows when a licensed Pro suite\'s licence ends', async () => {
+    flocksproUsersApi.hasCapability.mockResolvedValue(true);
+    const expires = Date.UTC(2027, 0, 31, 12);
+    hubAPI.sceneSuites.mockResolvedValue({ data: [{ ...CODE_AUDIT, licensed: true, licenseState: 'commercial', licenseExpiresAt: expires }] });
+    renderPage();
+
+    const audit = await waitFor(() => card('code-audit-workspace'));
+    await waitFor(() => {
+      expect(within(audit).getByText(new RegExp(`授权至 ${new Date(expires).toLocaleDateString('zh-CN')}`))).toBeInTheDocument();
+    });
+    expect(await within(audit).findByRole('button', { name: '安装' })).toBeInTheDocument();
+    expect(within(audit).queryByText('未授权')).not.toBeInTheDocument();
+  });
+
   it('shows per-component install progress while a suite installs', async () => {
     flocksproUsersApi.hasCapability.mockResolvedValue(true);
     // Drive the progress callback the way the server stream would.

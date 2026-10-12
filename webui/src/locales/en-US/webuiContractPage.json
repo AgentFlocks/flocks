@@ -32,6 +32,9 @@
     "proOnlyBody": "This is the open-source edition. Extension scenes such as code audit and AI redteam need Flocks Pro and their suite installed.",
     "proOnlyAction": "Open scene suites",
     "disabledTitle": "This scene is disabled",
-    "disabledBody": "The scene workspace is turned off, so its pages are unavailable. Enable it again in scene suites."
+    "disabledBody": "The scene workspace is turned off, so its pages are unavailable. Enable it again in scene suites.",
+    "unlicensedTitle": "This scene suite is not licensed",
+    "unlicensedBody": "Each scene suite of the Pro enterprise edition is licensed on its own. This suite has no licence in force; import its licence file to open it.",
+    "unlicensedAction": "Import a licence"
   }
 }

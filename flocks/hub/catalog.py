@@ -13,7 +13,7 @@ from functools import lru_cache, wraps
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
-from flocks.hub import local, tool_tree
+from flocks.hub import local, sealed, tool_tree
 from flocks.hub.models import HubCatalogEntry, HubIndex, HubIndexEntry, HubPluginManifest, HubTaxonomy, PluginType
 from flocks.hub.paths import extension_hub_roots, get_bundled_hub_root, owning_hub_root
 from flocks.utils.log import Log
@@ -323,6 +323,16 @@ def manifest_relative_path(plugin_type: PluginType, plugin_id: str) -> str:
 
 
 def load_manifest(plugin_type: PluginType, plugin_id: str) -> HubPluginManifest:
+    # During an install the manifest of what was unsealed is the one that
+    # counts, whatever the source lists by now.
+    pinned = sealed.staged_manifest(plugin_type, plugin_id)
+    if pinned is not None:
+        return pinned
+    # A sealed package's own manifest wins over a bundled listing of the
+    # same plugin: the bundled one only announces what the package delivers.
+    delivered = sealed.sealed_manifest(plugin_type, plugin_id)
+    if delivered is not None:
+        return delivered
     path = manifest_path(plugin_type, plugin_id)
     if path.is_file():
         return HubPluginManifest.model_validate(_read_json(path))
@@ -777,6 +787,7 @@ def _catalog_entries_cache_key() -> tuple[tuple[str, int, int], ...]:
         _path_signature(root / "index.json"),
         _path_signature(root / "taxonomy.json"),
         *(_path_signature(extension_root / "index.json") for extension_root in extension_hub_roots()),
+        (f"sealed:{sealed.sealed_signature()}", 0, 0),
         *_installed_plugins_cache_key(),
         *local.tool_discovery_signature(),
         *_system_plugin_roots_cache_key(),
@@ -789,10 +800,16 @@ def _build_catalog_entries(
 ) -> tuple[HubCatalogEntry, ...]:
     records = local.load_installed_records()
     inferred_installs = local.infer_local_installs()
+    delivered = sealed.sealed_plugins_or_empty()
     entries = [
         _entry_from_index(item, records, inferred_installs)
         for item in load_index().plugins
+        if (item.type, item.id) not in delivered
     ]
+    entries.extend(
+        _entry_from_sealed(plugin.manifest, records, inferred_installs)
+        for plugin in delivered.values()
+    )
     seen: set[tuple[PluginType, str]] = {(entry.type, entry.id) for entry in entries}
     for (system_type, system_id), root in _system_plugin_roots().items():
         if (system_type, system_id) in seen:
@@ -939,6 +956,7 @@ def clear_catalog_caches() -> None:
     load_index.cache_clear()
     load_taxonomy.cache_clear()
     _manifest_path_lookup.cache_clear()
+    sealed.clear_sealed_cache()
     _cached_system_plugin_roots.cache_clear()
     _cached_bundled_tool_roots.cache_clear()
 
@@ -1151,6 +1169,44 @@ def _entry_from_index(
     )
 
 
+def _entry_from_sealed(
+    manifest: HubPluginManifest,
+    records: dict[str, local.InstalledPluginRecord],
+    inferred_installs: dict[tuple[PluginType, str], Path],
+) -> HubCatalogEntry:
+    """Catalog entry for a plugin a sealed package delivers: listed from its
+    manifest, installed state as for any bundled plugin."""
+    record = records.get(f"{manifest.type}:{manifest.id}")
+    install_path, record = _resolve_install_path(manifest.type, manifest.id, record, inferred_installs)
+    state, installed_version = _catalog_install_state(manifest.type, install_path, record, manifest.version)
+    if not _os_compatible(manifest):
+        state = "incompatible"
+    return HubCatalogEntry(
+        id=manifest.id,
+        type=manifest.type,
+        name=manifest.name,
+        nameCn=manifest.nameCn,
+        description=manifest.description,
+        descriptionCn=getattr(manifest, "descriptionCn", None),
+        version=manifest.version,
+        category=manifest.category,
+        tags=_safe_tags(manifest.tags),
+        useCases=manifest.useCases,
+        domains=manifest.domains,
+        capabilities=manifest.capabilities,
+        trust=manifest.trust,
+        riskLevel=manifest.risk.level,
+        edition=manifest.edition,
+        state=state,
+        installedVersion=installed_version,
+        source="sealed",
+        # Where the plugin sits in its package, so it groups with its kind.
+        manifestPath=(sealed.payload_path(manifest) / "manifest.json").as_posix(),
+        installPath=str(install_path) if install_path else None,
+        native=False,
+    )
+
+
 def _entry_from_system_manifest(manifest: HubPluginManifest, root: Path) -> HubCatalogEntry:
     return HubCatalogEntry(
         id=manifest.id,
@@ -1248,13 +1304,17 @@ def _entry_from_bundled_tool(
 
 def list_manifests() -> list[HubPluginManifest]:
     index = load_index()
+    delivered = sealed.sealed_plugins_or_empty()
     result: list[HubPluginManifest] = []
     for item in index.plugins:
+        if (item.type, item.id) in delivered:
+            continue
         try:
             path = manifest_path(item.type, item.id)
             result.append(HubPluginManifest.model_validate(_read_json(path)))
         except Exception:
             continue
+    result.extend(plugin.manifest for plugin in delivered.values())
     return result
 
 

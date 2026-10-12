@@ -2,31 +2,35 @@
   "schemaVersion": "hub.plugin.v1",
   "id": "code-audit-workspace",
   "type": "component",
-  "name": "Code Audit Workspace Component",
+  "name": "Code Vulnerability Audit Suite",
   "nameCn": "代码漏洞审计场景套件",
-  "description": "Composite installer for the Flocks code audit workspace.",
+  "description": "Flocks code vulnerability audit workspace installer.",
   "descriptionCn": "Flocks 代码漏洞审计工作区场景安装器。",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "author": "Flocks Team",
-  "license": "MIT",
+  "license": "Commercial",
   "homepage": "",
-  "category": "workflow-automation",
+  "category": "devtools",
   "tags": [
-    "integration"
+    "api-security",
+    "web-security",
+    "vulnerability"
   ],
   "useCases": [
+    "vulnerability-management",
     "security-reporting"
   ],
   "domains": [
-    "security-ops"
+    "devops"
   ],
   "capabilities": [
-    "workflow"
+    "file-analysis",
+    "llm-agent"
   ],
   "trust": "official",
   "edition": "pro",
   "source": {
-    "kind": "bundled",
+    "kind": "sealed",
     "path": "plugins/components/code-audit-workspace"
   },
   "compatibility": {
@@ -50,8 +54,10 @@
     "filesystem": "read"
   },
   "risk": {
-    "level": "low",
-    "reasons": []
+    "level": "medium",
+    "reasons": [
+      "Starts and cancels local code audits after explicit user actions."
+    ]
   },
   "entrypoints": [
     "component.json"

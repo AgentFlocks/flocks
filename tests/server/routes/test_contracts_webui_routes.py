@@ -179,6 +179,7 @@ async def test_list_webui_workspaces_returns_grouped_pages(client: AsyncClient, 
                 },
             ],
             "suiteId": "scene-suite",
+            "licensed": None,
             "native": False,
             "locked": False,
         }

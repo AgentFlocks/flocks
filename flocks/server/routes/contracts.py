@@ -29,6 +29,15 @@ async def execute_webui_contract_operation(
     body: dict[str, Any] | None = Body(default=None),
     user: AuthUser = Depends(require_user),
 ):
+    # A page's data contract is part of the page: a pro-edition suite's page
+    # serves it only while that suite's own licence is in force. A contract
+    # path that is not a page id (``test/records``) names no page of the page
+    # store, so there is no page licence to ask about; the runtime decides.
+    from flocks.contracts.webui.store import PAGE_ID_RE
+    from flocks.server.routes.webui import _require_suite_license
+
+    if PAGE_ID_RE.fullmatch(page_path):
+        await _require_suite_license(page_path)
     try:
         runtime = await asyncio.to_thread(_get_runtime)
         response = await asyncio.to_thread(runtime.execute,

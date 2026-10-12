@@ -155,6 +155,14 @@ export interface HubSceneSuite {
   /** Installed / latest version of the suite's page package (can lag behind the suite). */
   workspaceVersion?: string | null;
   workspaceLatestVersion?: string | null;
+  /**
+   * A pro-edition suite's own licence (each one is licensed separately);
+   * null for an open-edition suite and when no suite licences apply.
+   */
+  licensed?: boolean | null;
+  licenseState?: string | null;
+  /** Epoch ms; null when the licence does not expire. */
+  licenseExpiresAt?: number | null;
 }
 
 export interface HubUpdatePlanPage {

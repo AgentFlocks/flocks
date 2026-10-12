@@ -6,12 +6,19 @@ import { setupSSEMock } from '@/test/mocks/sse';
 import { ThemeContext } from '@/contexts/ThemeContext';
 import { PaneActiveContext } from '@/components/layout/PaneActiveContext';
 
-const { useWebUIContractPagesMock } = vi.hoisted(() => ({
+const { useWebUIContractPagesMock, sceneSuitesMock } = vi.hoisted(() => ({
   useWebUIContractPagesMock: vi.fn(),
+  sceneSuitesMock: vi.fn(),
 }));
 
 vi.mock('@/hooks/useWebUIContractPages', () => ({
   useWebUIContractPages: useWebUIContractPagesMock,
+}));
+
+vi.mock('@/api/hub', () => ({
+  hubAPI: {
+    sceneSuites: sceneSuitesMock,
+  },
 }));
 
 vi.mock('@/pages/WebUIContractPageHost/PageRuntimeHost', () => ({
@@ -54,6 +61,7 @@ describe('WebUIContractWorkspaceHost', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     localStorage.clear();
+    sceneSuitesMock.mockResolvedValue({ data: [] });
     useWebUIContractPagesMock.mockReturnValue({
       pages: [],
       loading: false,
@@ -133,6 +141,71 @@ describe('WebUIContractWorkspaceHost', () => {
         },
       ],
     });
+  });
+
+  it('sends a scene whose Pro suite is not licensed to the licence settings', async () => {
+    useWebUIContractPagesMock.mockReturnValue({ pages: [], loading: false, error: null, refetch: vi.fn(), workspaces: [] });
+    sceneSuitesMock.mockResolvedValue({
+      data: [{ id: 'code-audit-workspace', edition: 'pro', workspaceId: 'code_audit_ui', licensed: false, licenseState: 'expired' }],
+    });
+
+    renderHostAt('/contracts/webui/workspaces/code_audit_ui');
+
+    expect(await screen.findByText('workspace.unlicensedTitle')).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'workspace.unlicensedAction' })).toHaveAttribute('href', '/settings/suite-licenses');
+    expect(screen.queryByText('workspace.proOnlyTitle')).not.toBeInTheDocument();
+  });
+
+  it('still asks for the upgrade when no suite licence applies', async () => {
+    useWebUIContractPagesMock.mockReturnValue({ pages: [], loading: false, error: null, refetch: vi.fn(), workspaces: [] });
+    sceneSuitesMock.mockResolvedValue({
+      data: [{ id: 'code-audit-workspace', edition: 'pro', workspaceId: 'code_audit_ui', licensed: null }],
+    });
+
+    renderHostAt('/contracts/webui/workspaces/code_audit_ui');
+
+    expect(await screen.findByText('workspace.proOnlyTitle')).toBeInTheDocument();
+    expect(screen.queryByText('workspace.unlicensedTitle')).not.toBeInTheDocument();
+  });
+
+  it('keeps an installed workspace of an unlicensed Pro suite closed and points to the licence settings', async () => {
+    const lockedWorkspace = {
+      id: 'code_audit_ui',
+      title: '代码漏洞审计工作区',
+      route: '/contracts/webui/workspaces/code_audit_ui',
+      icon: 'FileSearch',
+      order: 20,
+      enabled: true,
+      placement: 'sceneWorkspace',
+      defaultPageId: 'code-security-workspace',
+      suiteId: 'code-audit-workspace',
+      licensed: false,
+      locked: true,
+      pages: [],
+    };
+    useWebUIContractPagesMock.mockReturnValue({ pages: [], loading: false, error: null, refetch: vi.fn(), workspaces: [lockedWorkspace] });
+
+    renderHostAt('/contracts/webui/workspaces/code_audit_ui');
+
+    expect(await screen.findByText('workspace.unlicensedTitle')).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'workspace.unlicensedAction' })).toHaveAttribute('href', '/settings/suite-licenses');
+    expect(screen.queryByText('workspace.proOnlyTitle')).not.toBeInTheDocument();
+  });
+
+  it('keeps a locked workspace whose suite needs Pro on the upgrade notice', async () => {
+    useWebUIContractPagesMock.mockReturnValue({
+      pages: [], loading: false, error: null, refetch: vi.fn(),
+      workspaces: [{
+        id: 'code_audit_ui', title: '代码漏洞审计工作区', route: '/contracts/webui/workspaces/code_audit_ui',
+        icon: 'FileSearch', order: 20, enabled: true, placement: 'sceneWorkspace',
+        suiteId: 'code-audit-workspace', locked: true, pages: [],
+      }],
+    });
+
+    renderHostAt('/contracts/webui/workspaces/code_audit_ui');
+
+    expect(await screen.findByText('workspace.proOnlyTitle')).toBeInTheDocument();
+    expect(screen.queryByText('workspace.unlicensedTitle')).not.toBeInTheDocument();
   });
 
   it('redirects the workspace root to its default page', async () => {

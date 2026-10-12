@@ -95,6 +95,23 @@ export default function WebUIContractWorkspaceHost() {
     </div>
   );
 
+  // Pro is active, but this suite is licensed on its own and that licence is not in force.
+  const unlicensedNotice = (
+    <div className="flex items-start gap-3 rounded-lg border border-amber-200 bg-amber-50 p-4 text-amber-900 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-200">
+      <AlertCircle aria-hidden="true" className="mt-0.5 h-5 w-5 flex-shrink-0" />
+      <div>
+        <div className="font-medium">{t('workspace.unlicensedTitle')}</div>
+        <div className="mt-1 text-sm">{t('workspace.unlicensedBody')}</div>
+        <Link
+          to="/settings/suite-licenses"
+          className="mt-3 inline-flex rounded-lg border border-amber-300 bg-white px-3 py-1.5 text-sm text-amber-900 hover:bg-amber-100 dark:border-amber-800 dark:bg-transparent dark:text-amber-200"
+        >
+          {t('workspace.unlicensedAction')}
+        </Link>
+      </div>
+    </div>
+  );
+
   if (!workspaceId) {
     return <div className="text-sm text-zinc-500">{t('workspace.missingWorkspaceId')}</div>;
   }
@@ -146,12 +163,14 @@ export default function WebUIContractWorkspaceHost() {
         </div>
       );
     }
+    if (missingSuite?.edition === 'pro' && missingSuite.licensed === false) return unlicensedNotice;
     if (missingSuite?.edition === 'pro') return proOnlyNotice;
     return <div className="text-sm text-zinc-500">{t('workspace.notFound')}</div>;
   }
 
-  // Installed, but its suite needs a Pro license that is not active.
-  if (workspace.locked) return proOnlyNotice;
+  // Installed, but locked: its suite needs a Pro license that is not active,
+  // or its own suite licence, which is not in force.
+  if (workspace.locked) return workspace.licensed === false ? unlicensedNotice : proOnlyNotice;
 
   if (pages.length === 0) {
     return <div className="text-sm text-zinc-500">{t('workspace.empty')}</div>;

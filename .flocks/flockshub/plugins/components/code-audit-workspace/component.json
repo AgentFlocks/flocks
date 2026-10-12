@@ -1,10 +1,10 @@
 {
   "schemaVersion": "hub.component.v1",
   "id": "code-audit-workspace",
-  "name": "Code Audit Workspace",
-  "nameCn": "代码审计工作区",
-  "description": "Composite package for the Flocks code audit workspace WebUI.",
-  "descriptionCn": "Flocks 代码审计工作区组件包，包含 WebUI 页面。",
+  "name": "Code Vulnerability Audit Workspace",
+  "nameCn": "代码漏洞审计工作区",
+  "description": "Composite package for the Flocks code vulnerability audit workspace.",
+  "descriptionCn": "Flocks 代码漏洞审计工作区组件包，包含 WebUI 页面。",
   "components": [
     {
       "type": "webui",

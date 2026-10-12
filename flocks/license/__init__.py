@@ -34,6 +34,10 @@ class AlwaysOkLicenseChecker:
     async def status(cls) -> dict[str, Any]:
         return {"activated": True, "active": True, "status": "oss"}
 
+    @classmethod
+    async def feature_status(cls, feature: str | None = None) -> dict[str, Any]:
+        return {"active": True, "status": "oss", "details": {}}
+
 
 class _LicenseService:
     _checker: type[LicenseChecker] = AlwaysOkLicenseChecker
@@ -61,6 +65,19 @@ class _LicenseService:
     async def status(cls) -> dict[str, Any]:
         return await cls._checker.status()
 
+    @classmethod
+    async def feature_status(cls, feature: str | None = None) -> dict[str, Any]:
+        """One feature's verdict with whatever the checker says about it.
+
+        ``feature_status`` is optional for a checker: one without it is asked
+        ``is_active`` and the answer carries no details.
+        """
+        method = getattr(cls._checker, "feature_status", None)
+        if callable(method):
+            return dict(await method(feature=feature) or {})
+        active = await cls._checker.is_active(feature=feature)
+        return {"active": bool(active), "status": "active" if active else "inactive", "details": {}}
+
 
 def is_pro_edition_status(status: dict[str, Any]) -> bool:
     """Whether a checker status grants the Pro edition (the OSS default never does)."""
@@ -73,6 +90,7 @@ get_checker = _LicenseService.get_checker
 is_license_active = _LicenseService.is_active
 assert_license_active = _LicenseService.assert_active
 license_status = _LicenseService.status
+license_feature_status = _LicenseService.feature_status
 
 __all__ = [
     "LicenseChecker",
@@ -83,5 +101,6 @@ __all__ = [
     "assert_license_active",
     "license_status",
     "is_pro_edition_status",
+    "license_feature_status",
 ]
 

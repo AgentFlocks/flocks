@@ -85,8 +85,8 @@ def test_extension_replaces_placeholder_and_adds_its_packages(extension_root: Pa
     by_key = {(item.type, item.id): item for item in load_index().plugins}
     assert by_key[("component", "code-audit-workspace")].version == "2.0.0"
     assert ("webui", "ext_demo_ui") in by_key
-    # The bundled placeholder page stays listed; only the suite points elsewhere.
-    assert ("webui", "code_audit_ui") in by_key
+    # The open hub only announces the suite: its pages come with the suite.
+    assert ("webui", "code_audit_ui") not in by_key
 
     assert manifest_path("component", "code-audit-workspace").is_relative_to(extension_root)
     assert [ref.id for ref in load_manifest("component", "code-audit-workspace").components] == ["ext_demo_ui"]

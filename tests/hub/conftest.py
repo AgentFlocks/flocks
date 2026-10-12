@@ -28,3 +28,21 @@ def isolated_hub_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     Skill.clear_cache()
     yield {"home": home, "config_dir": config_dir, "data_dir": data_dir, "project_dir": project_dir}
     Skill.clear_cache()
+
+
+@pytest.fixture()
+def pro_checker():
+    """Register a suite-licensing checker for one test (see tests.license_fakes)."""
+    from tests.license_fakes import registered_pro_checker
+
+    with registered_pro_checker() as checker:
+        yield checker
+
+
+@pytest.fixture()
+def sealed_suites():
+    """Register a source delivering the pro suites sealed (see tests.sealed_fakes)."""
+    from tests.sealed_fakes import registered_sealed_source
+
+    with registered_sealed_source() as source:
+        yield source

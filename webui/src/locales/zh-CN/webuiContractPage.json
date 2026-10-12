@@ -32,6 +32,9 @@
     "proOnlyBody": "当前是开源版，代码审计、AI 红队这类扩展场景要升级到 Flocks Pro 并安装对应套件后才能进入。",
     "proOnlyAction": "去场景套件",
     "disabledTitle": "该场景已停用",
-    "disabledBody": "这个场景工作区被停用了，页面暂时打不开。到场景套件里重新启用即可恢复。"
+    "disabledBody": "这个场景工作区被停用了，页面暂时打不开。到场景套件里重新启用即可恢复。",
+    "unlicensedTitle": "该场景套件未授权",
+    "unlicensedBody": "Pro 企业版的每个场景套件单独授权。这个套件还没有授权，或授权已失效，导入它的授权文件后即可进入。",
+    "unlicensedAction": "去导入授权"
   }
 }

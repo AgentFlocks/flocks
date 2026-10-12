@@ -205,6 +205,13 @@ class WebUIPagesStore:
     def page_exists(self, page_id: str) -> bool:
         return self._find_page_dir(self.validate_page_id(page_id)) is not None
 
+    def workspace_id_for_page(self, page_id: str) -> Optional[str]:
+        """The workspace an existing page belongs to; None for a standalone page."""
+        page_dir = self._find_page_dir(self.validate_page_id(page_id))
+        if page_dir is None:
+            return None
+        return self.workspace_id_for_path(page_dir)
+
     def _assert_writable_relative(self, relative_path: str) -> Path:
         if not relative_path or Path(relative_path).is_absolute():
             raise ValueError("absolute path is not allowed")

@@ -24,7 +24,9 @@ PluginState = Literal[
 
 
 class HubSource(BaseModel):
-    kind: Literal["bundled", "github", "cloud"] = "bundled"
+    # "sealed": the payload is delivered encrypted by an extension and only
+    # unsealed while it is installed (see flocks.hub.sealed).
+    kind: Literal["bundled", "github", "cloud", "sealed"] = "bundled"
     path: Optional[str] = None
     repo: Optional[str] = None
     ref: Optional[str] = None

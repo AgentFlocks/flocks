@@ -30,6 +30,17 @@ from flocks.contracts.webui.models import (
 from flocks.contracts.webui.store import WebUIPagesStore, webui_contract_page_route
 from flocks.hub.catalog import load_manifest, scene_suite_workspace_owners
 from flocks.license import is_pro_edition_status, license_status
+from flocks.hub.suite_license import (
+    SuiteOwnershipUnknown,
+    clear_page_suite_cache,
+    edition_status,
+    is_open_edition,
+    is_pro_suite,
+    pro_suite_for_page,
+    runtime_suite_license,
+    shipped_page_owners,
+    suite_license,
+)
 from flocks.server.routes.event import publish_event
 from flocks.utils.log import Log
 
@@ -159,9 +170,81 @@ def _normalize_import_manifest(extracted_root: Path, page_id: str) -> None:
     )
 
 
+async def _require_suite_license(page_id: str) -> None:
+    """Serve a pro-edition suite's page only while that suite's own licence
+    is in force. The built-in checker enforces nothing here; see
+    flocks.hub.suite_license."""
+    try:
+        suite_id = await asyncio.to_thread(pro_suite_for_page, page_id, _store)
+    except SuiteOwnershipUnknown as exc:
+        if is_open_edition(await edition_status()):
+            return
+        # Undecided is not "no licence needed".
+        log.warning("webui.page.suite_ownership_unknown", {"pageId": page_id, "error": str(exc)})
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="暂时无法确认这个页面属于哪个场景套件，请稍后重试。",
+        ) from exc
+    if suite_id is None:
+        return
+    verdict = await runtime_suite_license(suite_id)
+    if verdict is None or verdict.licensed:
+        return
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail=(
+            f"该场景套件（{suite_id}）未授权或授权已失效（{verdict.state or 'unlicensed'}），"
+            "请在系统设置的「场景套件授权」中导入授权文件。"
+        ),
+    )
+
+
+def _maybe_pro_suite(suite_id: Optional[str]) -> bool:
+    """For listings: a suite whose edition cannot be read counts as one that
+    needs its own licence, so it stays hidden unless the checker says it is
+    licensed. (Page access itself is decided by _require_suite_license.)"""
+    try:
+        return is_pro_suite(suite_id)
+    except SuiteOwnershipUnknown:
+        return bool(suite_id)
+
+
+async def _pro_suite_verdicts(suite_ids: set[str]) -> dict[str, bool]:
+    """Licence verdicts for the given pro-edition suites; empty when nothing is enforced."""
+    if not suite_ids or is_open_edition(await edition_status()):
+        return {}
+    ordered = sorted(suite_ids)
+    verdicts = await asyncio.gather(*(suite_license(suite_id) for suite_id in ordered))
+    return {suite_id: verdict.licensed for suite_id, verdict in zip(ordered, verdicts)}
+
+
 @router.get("/contracts/webui/pages", response_model=list[WebUIPageListItem])
 async def list_webui_pages(enabled_only: bool = Query(False, alias="enabledOnly")):
-    return _store.list_pages(enabled_only=enabled_only)
+    def load() -> tuple[list[WebUIPageListItem], dict[str, str]]:
+        pages = _store.list_pages(enabled_only=enabled_only)
+        workspace_owners = {
+            workspace_id: suite_id
+            for workspace_id, suite_id in scene_suite_workspace_owners().items()
+            if _maybe_pro_suite(suite_id)
+        }
+        try:
+            # By page id first, as for serving: a suite page copied or
+            # imported outside its workspace is still the suite's.
+            by_id = shipped_page_owners(_store)
+        except SuiteOwnershipUnknown as exc:
+            log.warning("webui.pages.suite_ownership_unknown", {"error": str(exc)})
+            by_id = {}
+        owners = {}
+        for page in pages:
+            suite_id = by_id.get(page.id) or workspace_owners.get(page.workspaceId or "")
+            if suite_id:
+                owners[page.id] = suite_id
+        return pages, owners
+
+    pages, owners = await asyncio.to_thread(load)
+    licensed = await _pro_suite_verdicts(set(owners.values()))
+    # A suite that is not licensed has no pages to offer anywhere.
+    return [page for page in pages if licensed.get(owners.get(page.id, ""), True)]
 
 
 @router.get("/contracts/webui/workspaces", response_model=list[WebUIWorkspaceListItem])
@@ -171,11 +254,29 @@ async def list_webui_workspaces(enabled_only: bool = Query(False, alias="enabled
     except Exception as exc:
         log.warning("webui.workspaces.license_status_failed", {"error": str(exc)})
         pro_active = False
+
     # Directory scans plus the hub catalog signature: keep them off the event loop.
-    workspaces = await asyncio.to_thread(
-        lambda: _attach_scene_suites(_store.list_workspaces(enabled_only=enabled_only), pro_active=pro_active)
-    )
-    return [workspace for workspace in workspaces if not (enabled_only and workspace.locked)]
+    def load() -> tuple[list[WebUIWorkspaceListItem], set[str]]:
+        workspaces = _attach_scene_suites(_store.list_workspaces(enabled_only=enabled_only), pro_active=pro_active)
+        if not pro_active:
+            return workspaces, set()
+        return workspaces, {w.suiteId for w in workspaces if w.suiteId and _maybe_pro_suite(w.suiteId)}
+
+    workspaces, pro_suites = await asyncio.to_thread(load)
+    # Under Pro each pro-edition suite needs its own licence as well; one
+    # without it is locked like any Pro scene without Pro.
+    licensed = await _pro_suite_verdicts(pro_suites)
+    result = []
+    for workspace in workspaces:
+        verdict = licensed.get(workspace.suiteId or "")
+        if verdict is not None:
+            workspace = workspace.model_copy(update={"licensed": verdict, "locked": workspace.locked or not verdict})
+        # The navigation (enabledOnly) leaves locked scenes out; the scene
+        # manager lists them, locked.
+        if enabled_only and workspace.locked:
+            continue
+        result.append(workspace)
+    return result
 
 
 def _suite_edition(suite_id: str) -> str:
@@ -278,6 +379,7 @@ async def create_webui_page(req: WebUIPageCreateRequest, _admin: object = Depend
 @router.get("/contracts/webui/pages/{page_id}", response_model=WebUIPageDetail)
 async def get_webui_page(page_id: str):
     page_id = _page_id_or_400(page_id)
+    await _require_suite_license(page_id)
     try:
         return _store.get_page(page_id)
     except FileNotFoundError as exc:
@@ -287,6 +389,7 @@ async def get_webui_page(page_id: str):
 @router.put("/contracts/webui/pages/{page_id}", response_model=WebUIPageSaveResponse)
 async def save_webui_page(page_id: str, req: WebUIPageSaveRequest, _admin: object = Depends(require_admin)):
     page_id = _page_id_or_400(page_id)
+    await _require_suite_license(page_id)
     nav_changed = False
     try:
         if req.manifest is not None:
@@ -343,6 +446,7 @@ async def save_webui_page(page_id: str, req: WebUIPageSaveRequest, _admin: objec
 @router.post("/contracts/webui/pages/{page_id}/build", response_model=WebUIPageBuildMeta)
 async def build_webui_page(page_id: str, _admin: object = Depends(require_admin)):
     page_id = _page_id_or_400(page_id)
+    await _require_suite_license(page_id)
     try:
         build = _builder.build(page_id)
     except FileNotFoundError as exc:
@@ -363,6 +467,7 @@ async def build_webui_page(page_id: str, _admin: object = Depends(require_admin)
 
 @router.get("/contracts/webui/pages/{page_id}/bundle.js")
 async def get_webui_page_bundle(page_id: str, v: Optional[str] = Query(None)):
+    await _require_suite_license(_page_id_or_400(page_id))
     try:
         bundle_path = _store.bundle_path(page_id)
         if not bundle_path.is_file():
@@ -379,6 +484,7 @@ async def get_webui_page_bundle(page_id: str, v: Optional[str] = Query(None)):
 
 @router.get("/contracts/webui/pages/{page_id}/assets/{asset_path:path}")
 async def get_webui_page_asset(page_id: str, asset_path: str):
+    await _require_suite_license(_page_id_or_400(page_id))
     try:
         path = _store.asset_path(page_id, asset_path)
         if not path.is_file():
@@ -391,12 +497,14 @@ async def get_webui_page_asset(page_id: str, asset_path: str):
 @router.get("/contracts/webui/pages/{page_id}/api")
 async def list_webui_page_api_routes(page_id: str):
     page_id = _page_id_or_400(page_id)
+    await _require_suite_license(page_id)
     return await _api_runtime.list_routes(page_id)
 
 
 @router.post("/contracts/webui/pages/{page_id}/api/reload")
 async def reload_webui_page_api(page_id: str, _admin: object = Depends(require_admin)):
     page_id = _page_id_or_400(page_id)
+    await _require_suite_license(page_id)
     routes = await _api_runtime.reload_page(page_id)
     await publish_event("contracts.webui.pages.api_changed", {"id": page_id, "routes": routes})
     return {"routes": routes}
@@ -409,12 +517,14 @@ async def reload_webui_page_api(page_id: str, _admin: object = Depends(require_a
 async def dispatch_webui_page_api(page_id: str, api_path: str, request: Request):
     user = require_user(request)
     page_id = _page_id_or_400(page_id)
+    await _require_suite_license(page_id)
     return await _api_runtime.dispatch(page_id, api_path, request, user)
 
 
 @router.get("/contracts/webui/pages/{page_id}/export")
 async def export_webui_page(page_id: str, _admin: object = Depends(require_admin)):
     page_id = _page_id_or_400(page_id)
+    await _require_suite_license(page_id)
     page_path = _store.page_dir(page_id)
     if not page_path.is_dir():
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"page not found: {page_id}")
@@ -494,10 +604,14 @@ async def import_webui_page(
             _normalize_import_manifest(extracted_root, page_id)
             if _store.page_exists(page_id) and not overwrite:
                 raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"page already exists: {page_id}")
+            # A suite's page imported again under its id is still that suite's
+            # page, and replacing it needs the same licence as serving it.
+            await _require_suite_license(page_id)
             target = _store.root_page_dir(page_id)
             if target.exists():
                 shutil.rmtree(target)
             shutil.move(str((temp_root / page_id).resolve()), str(target))
+        clear_page_suite_cache()
         try:
             build = _builder.build(page_id)
             if build.status == "ready":

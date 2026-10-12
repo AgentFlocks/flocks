@@ -19,9 +19,15 @@ from flocks.hub.catalog import (
     load_taxonomy,
 )
 from flocks.hub.files import file_tree, read_file_content
-from flocks.license import is_pro_edition_status, license_status
-from flocks.hub.installer import install_plugin, uninstall_plugin, update_plugin
-from flocks.hub.update_protection import UpdateConfirmationRequired, build_plan, public_plan
+from flocks.hub.installer import install_plugin, preview_plan, uninstall_plugin, update_plugin
+from flocks.hub.suite_license import (
+    clear_page_suite_cache,
+    edition_status,
+    install_decision,
+    is_open_edition,
+    suite_license,
+)
+from flocks.hub.update_protection import UpdateConfirmationRequired, public_plan
 from flocks.hub.models import (
     HubCatalogEntry,
     HubFileContent,
@@ -84,6 +90,7 @@ def _guard_legacy_removed_plugin(plugin_type: PluginType, plugin_id: str) -> Non
 
 
 def _clear_hub_runtime_caches() -> None:
+    clear_page_suite_cache()
     clear_catalog_caches()
     try:
         from flocks.tool.device.plugin_index import clear_device_template_cache
@@ -247,6 +254,12 @@ class SceneSuiteEntry(BaseModel):
     # there while the suite version itself has not moved.
     workspaceVersion: Optional[str] = None
     workspaceLatestVersion: Optional[str] = None
+    # A pro-edition suite's own licence (each one is licensed separately),
+    # when the registered licence checker licenses suites. None for an
+    # open-edition suite and under the built-in checker.
+    licensed: Optional[bool] = None
+    licenseState: Optional[str] = None
+    licenseExpiresAt: Optional[int] = None  # epoch ms; None when it does not expire
 
 
 def _suite_workspace_id(plugin_id: str) -> Optional[str]:
@@ -263,7 +276,25 @@ def _suite_workspace_id(plugin_id: str) -> Optional[str]:
 @router.get("/hub/scene-suites", response_model=list[SceneSuiteEntry])
 async def hub_scene_suites(_user: object = Depends(require_user)):
     """Scene suites with the same install state exposed in the Hub catalog."""
-    return await asyncio.to_thread(_load_scene_suites)
+    suites = await asyncio.to_thread(_load_scene_suites)
+    return await _attach_suite_licenses(suites)
+
+
+async def _attach_suite_licenses(suites: list[SceneSuiteEntry]) -> list[SceneSuiteEntry]:
+    """Fill in each pro-edition suite's own licence verdict."""
+    pro = [suite for suite in suites if suite.edition == "pro"]
+    if not pro or is_open_edition(await edition_status()):
+        return suites
+    verdicts = await asyncio.gather(*(suite_license(suite.id) for suite in pro))
+    by_id = {suite.id: verdict for suite, verdict in zip(pro, verdicts)}
+    return [
+        suite.model_copy(update={
+            "licensed": by_id[suite.id].licensed,
+            "licenseState": by_id[suite.id].state,
+            "licenseExpiresAt": by_id[suite.id].expires_at,
+        }) if suite.id in by_id else suite
+        for suite in suites
+    ]
 
 
 def _load_scene_suites() -> list[SceneSuiteEntry]:
@@ -308,6 +339,8 @@ def _load_scene_suites() -> list[SceneSuiteEntry]:
 async def _publish_scene_suites_changed(plugin_type: PluginType, plugin_id: str, action: str) -> None:
     from flocks.server.routes.event import publish_event
 
+    # Which pages belong to a Pro suite may have changed with this action.
+    clear_page_suite_cache()
     try:
         suite_ids = [plugin_id] if plugin_type == "component" else []
         if plugin_type != "component":
@@ -328,22 +361,17 @@ async def _publish_scene_suites_changed(plugin_type: PluginType, plugin_id: str,
 
 
 async def _assert_edition_allowed(plugin_type: PluginType, plugin_id: str) -> None:
-    """Pro-only suites stay listed in the catalog but only install under Pro."""
-    try:
-        manifest = load_manifest(plugin_type, plugin_id)
-    except Exception:
+    """Pro-only suites stay listed in the catalog but only install under Pro,
+    and each such suite only with its own suite licence."""
+    decision = await install_decision(plugin_type, plugin_id)
+    if decision.allowed:
         return
-    if getattr(manifest, "edition", "oss") != "pro":
-        return
-    try:
-        status_payload = await license_status()
-    except Exception:
-        status_payload = {}
-    if not is_pro_edition_status(status_payload):
+    if decision.reason == "edition_required":
         raise HTTPException(
             status_code=403,
             detail="该套件需要 Flocks Pro 授权后才能安装，请先在系统设置中升级。",
         )
+    raise HTTPException(status_code=403, detail=decision.message)
 
 
 @router.post("/hub/plugins/{plugin_type}/{plugin_id}/install", response_model=InstalledPluginRecord)
@@ -431,7 +459,7 @@ async def hub_preview_update(
     _guard_legacy_removed_plugin(plugin_type, plugin_id)
     await _assert_edition_allowed(plugin_type, plugin_id)
     try:
-        return public_plan(await asyncio.to_thread(build_plan, plugin_type, plugin_id, req.scope))
+        return public_plan(await preview_plan(plugin_type, plugin_id, req.scope))
     except Exception as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 

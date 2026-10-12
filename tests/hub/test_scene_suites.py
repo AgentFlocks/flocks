@@ -32,10 +32,21 @@ def test_suite_resolves_to_its_workspace(suite_id: str, workspace_id: str):
     assert _suite_workspace_id(suite_id) == workspace_id
 
 
-def test_pro_workspaces_are_scene_workspaces():
+def test_pro_workspaces_are_scene_workspaces(sealed_suites):
     for workspace_id in ("code_audit_ui", "ai_redteam_ui"):
         manifest = load_manifest("webui", workspace_id)
         assert manifest.edition == "pro"
+        assert manifest.source.kind == "sealed"
+
+
+def test_open_source_hub_only_announces_pro_suites():
+    # The pro suites' pages are delivered sealed by an extension; the hub
+    # bundled here lists the suites and carries none of their contents.
+    for suite_id in ("code-audit-workspace", "ai-redteam-workspace"):
+        assert load_manifest("component", suite_id).source.kind == "sealed"
+    for workspace_id in ("code_audit_ui", "ai_redteam_ui"):
+        with pytest.raises(FileNotFoundError):
+            load_manifest("webui", workspace_id)
 
 
 @pytest.mark.asyncio
@@ -56,9 +67,33 @@ async def test_oss_may_not_install_a_pro_suite(suite_id: str):
 
 
 @pytest.mark.asyncio
-async def test_pro_license_unlocks_a_pro_suite(monkeypatch):
-    async def pro_status():
-        return {"activated": True, "active": True, "status": "pro"}
+async def test_pro_license_alone_does_not_unlock_a_pro_suite(pro_checker):
+    # Each Pro suite is licensed on its own: the platform licence is not enough.
+    with pytest.raises(HTTPException) as excinfo:
+        await _assert_edition_allowed("component", "code-audit-workspace")
 
-    monkeypatch.setattr("flocks.server.routes.hub.license_status", pro_status)
+    assert excinfo.value.status_code == 403
+    assert "单独授权" in excinfo.value.detail
+
+
+@pytest.mark.asyncio
+async def test_suite_license_unlocks_its_own_suite_only(pro_checker, sealed_suites):
+    pro_checker.licensed = {"code-audit-workspace"}
+
     await _assert_edition_allowed("component", "code-audit-workspace")
+    # The suite's pages ship with it and are covered by the same licence.
+    await _assert_edition_allowed("webui", "code_audit_ui")
+    with pytest.raises(HTTPException):
+        await _assert_edition_allowed("component", "ai-redteam-workspace")
+    with pytest.raises(HTTPException):
+        await _assert_edition_allowed("webui", "ai_redteam_ui")
+
+
+@pytest.mark.asyncio
+async def test_suite_license_needs_an_active_platform_license(pro_checker):
+    pro_checker.licensed = {"code-audit-workspace"}
+    pro_checker.platform_active = False
+
+    with pytest.raises(HTTPException) as excinfo:
+        await _assert_edition_allowed("component", "code-audit-workspace")
+    assert "Flocks Pro" in excinfo.value.detail

@@ -172,6 +172,26 @@ def register_content_source(
     register_source(source, priority=priority, exclusive_kinds=exclusive_kinds)
 
 
+def register_sealed_hub_source(source: Any) -> None:
+    """Register a source of hub packages delivered sealed.
+
+    The catalog lists what the source says its packages hold; a package's
+    contents are unsealed only while it is installed or its update is
+    previewed, into a private staging directory that is removed afterwards.
+    See :mod:`flocks.hub.sealed` for the interface a source implements.
+    """
+
+    from flocks.hub.sealed import register_sealed_source
+
+    register_sealed_source(source)
+
+
+def unregister_sealed_hub_source(source: Any) -> None:
+    from flocks.hub.sealed import unregister_sealed_source
+
+    unregister_sealed_source(source)
+
+
 def register_response_transform(
     transform: Any,
     *,
@@ -410,6 +430,8 @@ __all__ = [
     "register_license_checker",
     "register_response_transform",
     "register_route_provider",
+    "register_sealed_hub_source",
+    "unregister_sealed_hub_source",
     "register_lifecycle_hook",
     "register_event_hook",
     "register_public_path",
