@@ -26,6 +26,10 @@ _workflow_cancel_events: dict[str, threading.Event] = {}
 _workflow_done_events: dict[str, threading.Event] = {}
 
 
+class TaskExecutionStopped(RuntimeError):
+    """The task's agent run was stopped before it finished."""
+
+
 class TaskExecutor:
     @classmethod
     def request_runtime_cancel(cls, execution: TaskExecution) -> bool:
@@ -84,6 +88,11 @@ class TaskExecutor:
             final_status = TaskStatus.COMPLETED
             execution.result_summary = result
             execution.delivery_status = DeliveryStatus.UNREAD
+        except TaskExecutionStopped as exc:
+            # Stopped by the user (e.g. from the task's session): a failure
+            # would be retried automatically, so record it as cancelled.
+            final_status = TaskStatus.CANCELLED
+            execution.error = str(exc)
         except Exception as exc:
             final_status = TaskStatus.FAILED
             execution.error = str(exc)
@@ -155,7 +164,7 @@ class TaskExecutor:
                 f"({_TASK_ABSOLUTE_TIMEOUT_S // 3600}h)"
             )
         if completed.status == "cancelled":
-            raise RuntimeError(completed.error or "Agent execution was cancelled")
+            raise TaskExecutionStopped(completed.error or "Agent execution was cancelled")
         if completed.status == "error":
             raise RuntimeError(completed.error or "Agent execution failed")
         return completed.output

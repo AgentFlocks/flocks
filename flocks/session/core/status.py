@@ -151,12 +151,21 @@ class SessionStatus:
     def list(cls) -> Dict[str, SessionStatusInfo]:
         """
         List all session statuses
-        
+
+        Covers every instance, not only the current one: a loop records its
+        status in the instance it runs in, and task / background sessions run
+        outside the request's instance, so a refreshed client used to see them
+        idle while they still ran. The current instance wins for a session
+        recorded in several.
+
         Returns:
             Dictionary mapping session IDs to their status
         """
-        state = cls._get_state()
-        return dict(state)
+        merged: Dict[str, SessionStatusInfo] = {}
+        for state in list(cls._state.values()):
+            merged.update(state)
+        merged.update(cls._get_state())
+        return merged
     
     @classmethod
     def set(cls, session_id: str, status: SessionStatusInfo) -> None:

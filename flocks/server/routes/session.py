@@ -809,9 +809,9 @@ async def _publish_context_usage_update(
     summary="Get session status",
     description="Retrieve the current status of all sessions (idle, busy, retry)",
 )
-async def get_session_status() -> Dict[str, Any]:
+async def get_session_status(http_request: Request) -> Dict[str, Any]:
     """
-    Get session status for all sessions
+    Get session status for all sessions the caller can read
     
     Returns a dictionary mapping session IDs to their status:
     - idle: Session is not processing
@@ -825,16 +825,33 @@ async def get_session_status() -> Dict[str, Any]:
     
     from flocks.session.agent_inbox import AgentInbox
 
+    current_user = require_user(http_request)
     statuses = SessionStatus.list()
-    return {
-        session_id: {
+    readable: Dict[str, bool] = {}
+
+    async def can_read(session_id: str) -> bool:
+        # The list spans every instance, so it must not show sessions (or
+        # their ancestry) that the caller could not open one by one.
+        if session_id not in readable:
+            session = await _get_session_by_id_unfiltered(session_id)
+            readable[session_id] = session is not None and SessionPolicy.can_read(session, current_user)
+        return readable[session_id]
+
+    visible: Dict[str, Any] = {}
+    for session_id, status in statuses.items():
+        if not await can_read(session_id):
+            continue
+        visible[session_id] = {
             **status.model_dump(),
-            "ancestorSessionIDs": AgentInbox.ancestors(session_id),
+            "ancestorSessionIDs": [
+                ancestor_id
+                for ancestor_id in AgentInbox.ancestors(session_id)
+                if await can_read(ancestor_id)
+            ],
             "turn": get_turn_state(session_id).model_dump(by_alias=True),
             "context": get_context_state(session_id).model_dump(by_alias=True),
         }
-        for session_id, status in statuses.items()
-    }
+    return visible
 
 
 async def _build_session_runtime_status(session: SessionModel) -> SessionRuntimeStatusResponse:

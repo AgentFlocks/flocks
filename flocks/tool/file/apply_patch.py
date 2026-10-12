@@ -232,6 +232,14 @@ def apply_chunks(content: str, chunks: List[PatchChunk]) -> str:
     return "\n".join(lines)
 
 
+def _read_file_state(path: str) -> Optional[str]:
+    """Current text of ``path`` (None when absent), read like the hunks are."""
+    if not os.path.exists(path):
+        return None
+    with open(path, 'r', encoding='utf-8', errors='replace') as f:
+        return f.read()
+
+
 def generate_diff(filepath: str, old_content: str, new_content: str) -> str:
     """Generate unified diff"""
     old_lines = old_content.splitlines(keepends=True)
@@ -322,6 +330,9 @@ async def apply_patch_tool(
     # Process hunks and collect changes
     file_changes: List[Dict[str, Any]] = []
     total_diff = ""
+    # What each touched path held when the patch was computed, to refuse
+    # writing a stale result after a permission wait.
+    states_before: Dict[str, Optional[str]] = {}
     
     for hunk in hunks:
         try:
@@ -330,6 +341,7 @@ async def apply_patch_tool(
             move_resolution = await resolve_tool_path(ctx, hunk.move_path) if hunk.move_path else None
 
             if hunk.type == "add":
+                states_before[filepath] = _read_file_state(filepath)
                 old_content = ""
                 new_content = hunk.contents if hunk.contents.endswith("\n") or not hunk.contents else hunk.contents + "\n"
                 diff = generate_diff(filepath, old_content, new_content)
@@ -362,6 +374,9 @@ async def apply_patch_tool(
                 
                 change_type = "move" if hunk.move_path else "update"
                 move_filepath = move_resolution.resolved_path if move_resolution else None
+                states_before[filepath] = old_content
+                if move_filepath:
+                    states_before[move_filepath] = _read_file_state(move_filepath)
                 
                 file_changes.append({
                     "displayPath": resolution.display_path,
@@ -389,6 +404,7 @@ async def apply_patch_tool(
                 with open(filepath, 'r', encoding='utf-8', errors='replace') as f:
                     old_content = f.read()
                 
+                states_before[filepath] = old_content
                 diff = generate_diff(filepath, old_content, "")
                 
                 file_changes.append({
@@ -433,7 +449,32 @@ async def apply_patch_tool(
                     "Only the current session plan file may be changed in Plan mode."
                 ),
             )
-    
+
+    # Explicit edit rules (session, agent, delegating session) apply here.
+    # A move changes its source (displayPath) as well as its destination.
+    await ctx.ask(
+        permission="edit",
+        patterns=list(dict.fromkeys(
+            pattern
+            for c in file_changes
+            for pattern in (c["displayPath"], c["permissionPattern"])
+        )),
+        always=["*"],
+        metadata={"tool": "apply_patch", "diff": total_diff},
+    )
+    changed_meanwhile = [
+        path for path, before in states_before.items()
+        if _read_file_state(path) != before
+    ]
+    if changed_meanwhile:
+        return ToolResult(
+            success=False,
+            error=(
+                f"{', '.join(changed_meanwhile)} changed while waiting for permission; "
+                "read it again and redo the patch."
+            ),
+        )
+
     # Apply changes
     changed_files = []
     

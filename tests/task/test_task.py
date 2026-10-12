@@ -537,6 +537,64 @@ async def test_background_task_fails_fast_when_user_input_is_required(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("loop_metadata", "expected"),
+    [({"aborted": True}, "cancelled"), ({}, "completed")],
+)
+async def test_existing_session_run_stopped_from_the_session_is_cancelled(
+    monkeypatch: pytest.MonkeyPatch,
+    loop_metadata: dict,
+    expected: str,
+):
+    # The task session's stop button aborts the loop, which returns normally.
+    loop_run = AsyncMock(return_value=SimpleNamespace(last_message=None, metadata=loop_metadata))
+    monkeypatch.setattr(background_module.SessionLoop, "run", loop_run)
+
+    manager = BackgroundManager()
+    task = await manager.run_existing_session(
+        "ses_task_stop", "scheduled", "rex", allow_user_questions=False,
+    )
+    finished = await manager.wait_for(task.id, timeout_ms=5000)
+
+    assert finished is not None
+    assert finished.status == expected
+
+
+@pytest.mark.asyncio
+async def test_task_stopped_from_its_session_is_cancelled_not_retried(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    manager = TaskManager(max_concurrent=1, poll_interval=999, scheduler_interval=999)
+    scheduler = await TaskManager.create_scheduler(
+        title="会话里停止",
+        mode=SchedulerMode.CRON,
+        trigger=TaskTrigger(cron="0 3 * * *", timezone="Asia/Shanghai"),
+        workspace_directory=str(tmp_path / "workspace"),
+    )
+    execution = await TaskManager.create_execution_from_scheduler(
+        scheduler,
+        trigger_type=ExecutionTriggerType.RUN_ONCE,
+        enqueue=False,
+    )
+    monkeypatch.setattr(
+        TaskExecutor, "_create_task_session", AsyncMock(return_value="ses_stopped_task"),
+    )
+    monkeypatch.setattr(
+        background_module.SessionLoop,
+        "run",
+        AsyncMock(return_value=SimpleNamespace(last_message=None, metadata={"aborted": True})),
+    )
+
+    await manager._run_execution(execution)
+
+    stopped = await TaskManager.get_execution(execution.id)
+    assert stopped.status == TaskStatus.CANCELLED
+    assert stopped.retry.retry_after is None
+    assert stopped.retry.retry_count == 0
+
+
+@pytest.mark.asyncio
 async def test_existing_background_session_pins_agent_identity(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -933,6 +991,52 @@ async def test_queue_dequeue_respects_claimed_slots_before_running_status(tmp_pa
     next_claimed = await queue.dequeue()
     assert next_claimed is not None
     assert next_claimed.id == second.id
+
+
+@pytest.mark.asyncio
+async def test_executions_without_workspace_directory_get_their_own(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    frozen = datetime(2026, 10, 10, 8, 36, 33, 400000, tzinfo=timezone.utc)
+
+    class _SameSecond(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return frozen if tz else frozen.replace(tzinfo=None)
+
+    # Two "run now" clicks in the same second used to share
+    # tasks/<date>/exec-<epoch seconds> and overwrite each other's files.
+    monkeypatch.setattr(task_manager_module, "datetime", _SameSecond)
+    first_scheduler = await TaskManager.create_scheduler(
+        title="独立任务 A",
+        mode=SchedulerMode.CRON,
+        trigger=TaskTrigger(cron="0 3 * * *", timezone="Asia/Shanghai"),
+    )
+    second_scheduler = await TaskManager.create_scheduler(
+        title="独立任务 B",
+        mode=SchedulerMode.CRON,
+        trigger=TaskTrigger(cron="0 3 * * *", timezone="Asia/Shanghai"),
+    )
+    pinned_scheduler = await TaskManager.create_scheduler(
+        title="指定目录",
+        mode=SchedulerMode.CRON,
+        trigger=TaskTrigger(cron="0 3 * * *", timezone="Asia/Shanghai"),
+        workspace_directory=str(tmp_path / "shared"),
+    )
+
+    first = await TaskManager.rerun_scheduler(first_scheduler.id)
+    second = await TaskManager.rerun_scheduler(second_scheduler.id)
+    again = await TaskManager.rerun_scheduler(first_scheduler.id)
+    pinned = await TaskManager.rerun_scheduler(pinned_scheduler.id)
+
+    directories = [first.workspace_directory, second.workspace_directory, again.workspace_directory]
+    assert len(set(directories)) == 3
+    for execution in (first, second, again):
+        assert Path(execution.workspace_directory).name == execution.id
+        stored = await TaskManager.get_execution(execution.id)
+        assert stored.workspace_directory == execution.workspace_directory
+    assert pinned.workspace_directory == str(tmp_path / "shared")
 
 
 @pytest.mark.asyncio

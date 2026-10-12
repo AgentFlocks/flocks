@@ -1,7 +1,12 @@
 import os
 import shutil
 
-from flocks.tool.path_utils import resolve_tool_path
+from flocks.tool.path_utils import (
+    ask_edit_permission,
+    resolve_tool_path,
+    tree_entries,
+    tree_permission_patterns,
+)
 from flocks.tool.registry import (
     ParameterType,
     ToolCategory,
@@ -29,6 +34,16 @@ async def delete_tool(ctx: ToolContext, path: str) -> ToolResult:
     source = resolution.resolved_path
     if not os.path.exists(source):
         return ToolResult(success=False, error=f"Path not found: {source}", title=resolution.display_path)
+    def planned_patterns() -> list[str]:
+        # rmtree removes links as links, so nothing is reached through them.
+        return tree_permission_patterns(resolution.permission_pattern, source, tree_entries(source))
+
+    if not await ask_edit_permission(ctx, "delete", planned_patterns, {"filepath": source}):
+        return ToolResult(
+            success=False,
+            error=f"{source} changed while waiting for permission; check it again and retry.",
+            title=resolution.display_path,
+        )
     if os.path.isdir(source):
         shutil.rmtree(source)
     else:
