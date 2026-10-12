@@ -107,14 +107,15 @@ Rex 引导用户时必须遵守：
 
 - TDP 原始 JSON 或扁平字段。
 - SkyEye 原始 JSON 或扁平字段。
-- Syslog 包裹的 TDP / SkyEye JSON，JSON 放在 `syslog_message.message`。
+- Syslog 包裹的 TDP / SkyEye JSON 或深信服 SIP SE 报文，JSON 放在 `syslog_message.message`。
 - 混合批次，单条告警会再次按字段特征识别。
 
 来源识别规则：
 
 | 线索 | 识别结果 |
 | --- | --- |
-| `source_log_type` 显式为 `tdp` 或 `skyeye` | 使用显式值 |
+| `source_log_type` 显式为 `tdp`、`skyeye` 或 `sangfor-sip` | 使用显式值 |
+| SE 封装的 `log_type=secevent/alarm` 或对应 JSON 字段特征 | Sangfor SIP |
 | Syslog `app_name` 或 `hostname` 包含 `tdp` | TDP |
 | Syslog `app_name` 或 `hostname` 包含 `skyeye` | SkyEye |
 | JSON 有嵌套 `net`、`behave_uuid`、`flow_id`、`net_real_src_ip`、`net_http_url`、`threat_suuid` | TDP |
@@ -133,10 +134,32 @@ Rex 引导用户时必须遵守：
 | `req_host` / `req_user_agent` | HTTP Host 和 User-Agent |
 | `req_body` / `rsp_body` | 请求体和响应体 |
 | `threat_name` / `threat_type` | 威胁名称和类型 |
-| `_source_type` | `tdp` 或 `skyeye` |
+| `_source_type` | `tdp`、`skyeye` 或 `sangfor-sip` |
 | `_syslog_meta` | Syslog 元数据，仅 Syslog 输入时存在 |
 
 如果用户要接入 TDP 平台做告警检索、下载 PCAP 或页面调查，必须另行遵循 `tdp-use` skill；本文只描述本工作流处理 TDP 格式告警的输入字段。
+
+### 深信服 SIP SE 输入与字段语义
+
+SE 报文结构为 `[<PRI>]时间|!secevent或alarm|!设备IP|!JSON对象`。监听器支持 `format=auto` 或 `format=se`，只拆分前三个 `|!`，保留正文中的同名字符。`format` 表示报文格式，业务来源为 `sangfor-sip`。
+
+解析器只移除 JSON 边界的 BOM、尾部 NUL 和空白，原始报文保留在 `raw`。正文内部非法 NUL、截断 JSON、非对象正文会返回 `parse_status=error` 和 `parse_error`；降噪接收节点据此执行失败，避免空跑成功。有效的 `data` 对象优先使用，同时兼容旧监听器传入完整 SE 报文。
+
+| 标准字段 | secevent | alarm |
+| --- | --- | --- |
+| `sip` / `dip` | `src_ip` / `dst_ip` | `attack_ip` / `suffer_ip` |
+| `time` | `log_time`，回退 `firstTime` | `last_time`，回退 `first_time` |
+| `threat_level` | 威胁等级 `suspect_level` | 威胁等级 `reliability` |
+| `certainty_level` | 确定性等级 `threat_level` | 不提供 |
+| `threat_severity` | `emergency`，缺失时回退威胁等级 | 同左 |
+| `threat_result` | 0 未知、1 失败、2/3 成功 | 0 失败、1 未知（尝试）、2/3 成功 |
+| `direction` | 根据本地资产 `ip` 与源/目的 IP 判断，无法确定时 unknown | `asset_direction`：1 in、2 lateral、3 out、0 unknown |
+
+原始 `attack_state` 保留，状态 3 的失陷语义可从原值读取。`emergency` 映射为 info / medium / high / critical。`attack_direction` 仅为访问关系，不用于替代内外网方向。`0.0.0.0` 表示未知地址，不能用本地资产 IP 补成虚假的目的地址。缺失的 HTTP 字段不从普通举证中猜测。
+
+`_sip_raw` 完整保留原始 JSON，包括举证、原理、建议、标签、列表字段和厂商枚举；研判节点读取这些内容及 IOC。新工作流与包含 `flocks.ingest.syslog.sangfor` 的应用版本一起更新；仅复制工作流文件到旧版应用不构成完整升级。
+
+未显式指定去重字段时，按每条告警的来源选择默认值，混合批次同样生效。SIP 精确字段为 `device_ip`、`device_id`、`_sip_variant`、`asset_ip`、`sip`、`dip`、`threat_rule_id`、`threat_name`、`attack_state`、`threat_ioc`，相似度字段为 `req_http_url`、`threat_msg`、`threat_ioc`、`_sip_raw.event_evidence`。SIP 使用独立的 key 命名空间，不执行 HTTP URI 改写；显式传入 `strict_fields` / `lsh_fields` 时使用用户指定字段。
 
 ## 5. 输出去向
 
@@ -183,12 +206,12 @@ Rex 引导用户时必须遵守：
 
 | 参数 | 默认值 | 说明 |
 | --- | --- | --- |
-| `source_log_type` | 自动识别，失败默认 `tdp` | 可显式指定 `tdp` 或 `skyeye` |
+| `source_log_type` | 自动识别，失败默认 `tdp` | 可显式指定 `tdp`、`skyeye` 或 `sangfor-sip` |
 | `filter_enabled` | `true` | 是否启用过滤 |
 | `dedup_enabled` | `true` | 是否启用 LSH 去重和状态持久化 |
 | `threshold` | `0.7` | MinHash LSH 相似度阈值，越高越严格 |
-| `strict_fields` | `["sip", "dip"]` | 生成 `dedup_key` 前必须精确参与的字段 |
-| `lsh_fields` | `["req_http_url", "req_body", "rsp_body"]` | 参与 URI 归一化和 5-gram 相似度的字段 |
+| `strict_fields` | 按来源选择；TDP/SkyEye 为 `["sip", "dip"]` | 生成 `dedup_key` 前必须精确参与的字段 |
+| `lsh_fields` | 按来源选择；TDP/SkyEye 为 `["req_http_url", "req_body", "rsp_body"]` | 参与 URI 归一化和 5-gram 相似度的字段 |
 | `max_field_len` | `500` | 每个参与字段截断长度 |
 | `max_dedup_keys` | `100000` | 持久化去重 key 和 LSH cluster 上限，小于 1 时回退 100000 |
 
@@ -196,6 +219,7 @@ Rex 引导用户时必须遵守：
 
 - TDP 告警：保留非扫描、HTTP、方向为 `in`、`out` 或 `lateral` 的告警。
 - SkyEye 告警：扫描类走 `alert_scan_direction_in`，非扫描类按 HTTP 入向处理。
+- Sangfor SIP：保留非扫描安全事件和告警，包括非 HTTP 事件；保留真实协议及未知方向。
 - 扫描判断：`threat_name` 包含“扫描”且不包含 `webshell`。
 - HTTP 判断：`application_layer_protocol`、`net_type` 或 `net_app_proto` 任一字段包含 `http`。
 - `filter_enabled=false` 时，所有归一化告警进入去重，`_process_type=filter_disabled`。
