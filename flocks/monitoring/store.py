@@ -1,8 +1,22 @@
 """Monitoring facts in tasks.db. Short, dedicated transactions avoid shared-connection races."""
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
+from contextvars import ContextVar
+import asyncio
 import json
 import aiosqlite
 from flocks.task.store import TaskStore
+
+_diagnostic_reads = ContextVar('monitor_diagnostic_reads', default=False)
+
+
+@contextmanager
+def read_only_diagnostics():
+    """Download-only scope; normal monitoring reads retain their behavior."""
+    token = _diagnostic_reads.set(True)
+    try:
+        yield
+    finally:
+        _diagnostic_reads.reset(token)
 
 DDL = '''
 CREATE TABLE IF NOT EXISTS monitor_installations (
@@ -100,7 +114,8 @@ CREATE TABLE IF NOT EXISTS monitor_reports (
 @asynccontextmanager
 async def connection():
     await TaskStore.init()
-    async with aiosqlite.connect(TaskStore.get_db_path(), timeout=30) as db:
+    from flocks.task.diagnostics import observed_connect
+    async with observed_connect(TaskStore.get_db_path(), timeout=30) as db:
         db.row_factory = aiosqlite.Row
         await db.executescript(DDL)
         await db.execute('BEGIN IMMEDIATE')  # Serialize additive migrations across concurrent readers.
@@ -156,6 +171,9 @@ async def connection():
 
 
 async def rows(sql, args=()):
+    if _diagnostic_reads.get():
+        from .diagnostic_state import read_rows
+        return await asyncio.to_thread(read_rows, sql, args)
     async with connection() as db:
         async with db.execute(sql, args) as cursor:
             return [dict(row) for row in await cursor.fetchall()]

@@ -36,6 +36,7 @@ HEARTBEAT_SECONDS = 30
 _current = ContextVar('monitor_diagnostics', default=None)
 _call = ContextVar('monitor_diagnostic_call', default=None)
 _export_lock = threading.Lock()
+INFRASTRUCTURE_EVENTS = {'db.operation', 'db.transaction', 'service.error', 'service.recovered', 'service.heartbeat'}
 
 
 def opaque(value):
@@ -74,6 +75,12 @@ def shape(value):
 
 _TYPES = {'str', 'dict', 'list', 'int', 'float', 'bool', 'bytes', 'NoneType', 'other'}
 _ENUMS = {
+    'service': {'scheduler', 'executor'},
+    'db_kind': {'task', 'monitoring'},
+    'db_phase': {'execute', 'executemany', 'executescript', 'commit', 'rollback', 'close'},
+    'db_error': {'busy', 'busy_snapshot', 'locked', 'readonly', 'io', 'corruption', 'full', 'constraint', 'other'},
+    'sql_verb': {'SELECT', 'UPDATE', 'INSERT', 'DELETE', 'BEGIN', 'COMMIT', 'ROLLBACK', 'PRAGMA', 'CREATE', 'ALTER', 'DROP'},
+    'control_action': {'start', 'pause', 'mail_settings', 'other'},
     'model_failure': {'timeout', 'authentication', 'permission', 'rate_limit', 'unavailable', 'connection', 'request', 'other'},
     'error_kind': {'dependency', 'model_format', 'model_truncated', 'model_protocol', 'query_transient', 'budget', 'cancelled', 'system'},
     'validation_field': {'action', 'reason', 'capability', 'entity', 'agent', 'verdict', 'evidence_ids', 'gaps', 'document'},
@@ -84,11 +91,12 @@ _ENUMS = {
     'model_stop': {'stop', 'end_turn', 'completed', 'length', 'max_tokens', 'tool_calls', 'content_filter', 'other'},
     'event': {'trace.start', 'trace.end', 'progress', 'stage.start', 'stage.end', 'query.window',
               'tool.raw', 'tool.normalized', 'adapter.result', 'adapter.structured', 'adapter.decoded', 'adapter.failure',
-              'mail.received', 'mail.result', 'mail.interpreted', 'mail.analyzed', 'mail.evidence', 'investigation.query', 'investigation.model', 'investigation.validation', 'investigation.recovery', 'query.sample', 'page.validated', 'run.result', 'dispatch.result', 'background.result'},
+              'mail.received', 'mail.result', 'mail.interpreted', 'mail.analyzed', 'mail.evidence', 'investigation.query', 'investigation.model', 'investigation.validation', 'investigation.recovery', 'query.sample', 'page.validated', 'run.result', 'dispatch.result', 'background.result', 'control.result', 'control.lock'} | INFRASTRUCTURE_EVENTS,
     'entity_type': {'host', 'file', 'process', 'ip', 'innerip', 'dns'},
     'stage': {'dispatch', 'run', 'session.prepare', 'query.device', 'query.events', 'query.entities',
               'correlate', 'tool.execute', 'tool.handler', 'tool.normalize', 'report.export', 'step.other',
-              'disposition.confirm', 'disposition.recheck', 'automatic.mark', 'mail.configure', 'mail.send', 'mail.receive', 'mail.interpret', 'mail.resolve', 'mail.mark', 'mail.manual.mark', 'mail.readback'},
+              'disposition.confirm', 'disposition.recheck', 'automatic.mark', 'mail.configure', 'mail.send', 'mail.receive', 'mail.interpret', 'mail.resolve', 'mail.mark', 'mail.manual.mark', 'mail.readback',
+              'control.action', 'control.publish', 'control.snapshot', 'pause.installation', 'pause.disable', 'pause.executions', 'pause.cancel'},
     'action': {'list', 'get_entities', 'get_proof', 'update_status', 'other'},
     'outcome': {'ok', 'error', 'cancelled', 'completed', 'failed', 'partial', 'interrupted', 'running', 'unknown'},
     'reason': {'unavailable', 'permission', 'tool_failed', 'non_json', 'not_object', 'business_error', 'structured_output', 'ambiguous_reply', 'model_failed', 'send_unknown', 'write_unknown'},
@@ -103,11 +111,19 @@ _NUMBERS = {'schema', 'pid', 'seq', 'elapsed_ms', 'duration_ms', 'length', 'item
             'window_seconds', 'devices', 'max_pages', 'timeout_seconds', 'json_position', 'json_line',
             'json_column', 'events', 'errors', 'suppressed', 'calls', 'call', 'loop_lag_ms', 'total',
             'consecutive_failures', 'input_tokens', 'output_tokens', 'total_tokens', 'request_max_tokens',
-            'validation_count', 'models', 'revision', 'correction_attempt', 'failure_count'}
+            'validation_count', 'models', 'revision', 'correction_attempt', 'failure_count',
+            'sqlite_error_code', 'transaction_age_ms', 'timeout_ms'}
 _BOOLS = {'success', 'truncated', 'has_error', 'has_saved_output', 'cursor_present',
+          'transaction_open', 'transaction_open_before',
+          'control_lock_busy',
           'has_tool_calls', 'retry_exhausted',
           'authenticated_sender', 'sender_verification_bypassed', 'development_sample', 'preferred_severity', 'malicious'}
-_IDS = {'trace', 'owner', 'scope', 'execution', 'device', 'notice', 'reply', 'project', 'event_id', 'provider_id', 'request_id_hash'}
+_IDS = {'trace', 'owner', 'scope', 'execution', 'device', 'notice', 'reply', 'project', 'event_id', 'provider_id', 'request_id_hash', 'connection', 'database', 'operation', 'target_execution'}
+
+
+def _source_location(value):
+    return isinstance(value, str) and len(value) <= 240 and '..' not in value and bool(
+        re.fullmatch(r'flocks/[A-Za-z0-9_/.-]+\.py:[A-Za-z_][A-Za-z0-9_]*:[0-9]{1,7}', value))
 
 
 def safe_record(fields):
@@ -124,6 +140,16 @@ def safe_record(fields):
             result[key] = value
         elif key in {'error_type', 'cause_error_type'} and isinstance(value, str) and re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]{0,79}', value):
             result[key] = value
+        elif key in {'code_location', 'transaction_origin'} and _source_location(value):
+            result[key] = value
+        elif key == 'error_frames' and isinstance(value, list):
+            result[key] = [item for item in value[:8] if _source_location(item)]
+        elif key == 'sql_table' and isinstance(value, str) and re.fullmatch(r'(task|monitor)_[a-z_]{1,48}', value):
+            result[key] = value
+        elif key == 'sqlite_error_name' and isinstance(value, str):
+            import sqlite3
+            if value.startswith('SQLITE_') and value in vars(sqlite3):
+                result[key] = value
         elif key == 'http_status' and type(value) is int and 100 <= value <= 599:
             result[key] = value
         elif key == 'version' and isinstance(value, str) and re.fullmatch(r'[A-Za-z0-9.+_-]{1,64}', value):
@@ -301,6 +327,20 @@ def event(name, *, failure=False, **fields):
             pass
 
 
+def infrastructure_event(name, **fields):
+    """Record infrastructure even when scheduling fails before a trace exists."""
+    if name not in INFRASTRUCTURE_EVENTS:
+        return
+    try:
+        trace = _current.get()
+        identity = trace.ids if trace else {}
+        _sink.submit({**fields, **identity, 'schema': 1, 'version': __version__, 'pid': os.getpid(),
+                      'trace': uuid.uuid4().hex, 'seq': 1, 'event': name,
+                      'timestamp': datetime.now(timezone.utc).isoformat()})
+    except Exception:
+        _note_health('record_error')
+
+
 def tool_result(name, value):
     # Most registry calls are unrelated to monitoring; do no output inspection
     # at all on those calls. Unusual third-party outputs cannot break a tool.
@@ -317,16 +357,21 @@ def tool_result(name, value):
 def span(stage, **fields):
     started = time.monotonic()
     event('stage.start', stage=stage, **fields)
-    outcome, error = 'ok', None
+    outcome, error = 'ok', {}
     try:
         yield
     except BaseException as exc:
         outcome = 'cancelled' if isinstance(exc, asyncio.CancelledError) else 'error'
-        error = type(exc).__name__
+        error = {'error_type': type(exc).__name__}
+        try:
+            from flocks.task.diagnostics import error_fields
+            error = error_fields(exc)
+        except Exception:
+            pass
         raise
     finally:
-        event('stage.end', failure=outcome != 'ok', stage=stage, outcome=outcome, error_type=error,
-              duration_ms=round((time.monotonic() - started) * 1000, 2), **fields)
+        event('stage.end', failure=outcome != 'ok', stage=stage, outcome=outcome,
+              duration_ms=round((time.monotonic() - started) * 1000, 2), **{**fields, **error})
 
 
 @contextmanager
@@ -431,8 +476,10 @@ def build_state():
     # A source digest also distinguishes unpacked deployments without Git metadata.
     digest = hashlib.sha256()
     try:
-        for path in sorted(Path(__file__).parent.glob('*.py')):
-            digest.update(path.name.encode())
+        for path in sorted([*Path(__file__).parent.glob('*.py'),
+                            *(root / 'flocks/task').glob('*.py'),
+                            root / 'flocks/server/routes/security_monitoring.py']):
+            digest.update(path.relative_to(root).as_posix().encode())
             digest.update(path.read_bytes())
         state['monitor_source_sha256'] = digest.hexdigest()
     except OSError:
@@ -445,10 +492,14 @@ def export_bundle(owner, scope):
     if not _export_lock.acquire(blocking=False):
         raise RuntimeError('diagnostic_export_busy')
     try:
-        records = {}
+        records, infrastructure = {}, {}
         ids = dict(owner=opaque(owner), scope=opaque(scope))
         def add(raw):
             row = safe_record(raw)
+            if row.get('event') in INFRASTRUCTURE_EVENTS:
+                if 'owner' not in row or all(row.get(k) == v for k, v in ids.items()):
+                    infrastructure[(row.get('trace'), row.get('seq'))] = row
+                return
             if all(row.get(k) == v for k, v in ids.items()) and row.get('event'):
                 records[(row.get('trace'), row.get('seq'))] = row
         root = get_log_dir() / 'security-monitor'
@@ -482,12 +533,20 @@ def export_bundle(owner, scope):
         selected = sorted(records.values(), key=lambda r: (r.get('timestamp', ''), r.get('seq', 0)))
         capped = len(selected) > 5000
         selected = selected[-5000:]
+        infrastructure = sorted(infrastructure.values(), key=lambda r: r.get('timestamp', ''))
+        infrastructure_capped = len(infrastructure) > 2000
+        infrastructure = infrastructure[-2000:]
+        from flocks.task.diagnostics import snapshot as infrastructure_snapshot
+        from .diagnostic_state import task_state
         build = build_state()
         return {'schema': 1, 'component': 'host-security-monitor', 'version': __version__, 'component_version': build['component_version'], 'build': build, 'mail_policy': 'mail-feedback-v1',
                 'exported_at': datetime.now(timezone.utc).isoformat(),
                 'coverage': 'recent_rotating_logs', 'record_count': len(selected), 'capped': capped,
                 'first_record_at': selected[0].get('timestamp') if selected else None,
                 'last_record_at': selected[-1].get('timestamp') if selected else None,
-                'health': {**health, 'read_errors': read_errors}, 'records': selected}
+                'health': {**health, 'read_errors': read_errors}, 'records': selected,
+                'infrastructure': {'records': infrastructure, 'record_count': len(infrastructure),
+                                   'capped': infrastructure_capped, 'runtime': infrastructure_snapshot(),
+                                   'monitoring': task_state(owner, scope)}}
     finally:
         _export_lock.release()

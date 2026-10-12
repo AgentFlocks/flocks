@@ -657,23 +657,25 @@ class TaskManager:
 
         while self._running:
             try:
-                now = time.monotonic()
-                if now - self._last_retry_check >= _RETRY_CHECK_INTERVAL_S:
-                    self._last_retry_check = now
-                    await self._process_retry_queue()
-                if now - self._last_stale_recovery_check >= _STALE_RECOVERY_INTERVAL_S:
-                    self._last_stale_recovery_check = now
-                    await self._recover_stale_active_executions()
-                if (
-                    now - self._last_orphaned_queue_recovery_check
-                    >= _ORPHANED_QUEUE_RECOVERY_INTERVAL_S
-                ):
-                    self._last_orphaned_queue_recovery_check = now
-                    await self._recover_orphaned_queued_executions()
-                execution = await self.queue.dequeue()
-                if execution:
-                    task = asyncio.create_task(self._run_execution(execution))
-                    task.add_done_callback(self._on_task_done)
+                from .diagnostics import cycle
+                with cycle('executor'):
+                    now = time.monotonic()
+                    if now - self._last_retry_check >= _RETRY_CHECK_INTERVAL_S:
+                        self._last_retry_check = now
+                        await self._process_retry_queue()
+                    if now - self._last_stale_recovery_check >= _STALE_RECOVERY_INTERVAL_S:
+                        self._last_stale_recovery_check = now
+                        await self._recover_stale_active_executions()
+                    if (
+                        now - self._last_orphaned_queue_recovery_check
+                        >= _ORPHANED_QUEUE_RECOVERY_INTERVAL_S
+                    ):
+                        self._last_orphaned_queue_recovery_check = now
+                        await self._recover_orphaned_queued_executions()
+                    execution = await self.queue.dequeue()
+                    if execution:
+                        task = asyncio.create_task(self._run_execution(execution))
+                        task.add_done_callback(self._on_task_done)
             except Exception as exc:
                 log.error("manager.loop_error", {"error": str(exc)})
             await asyncio.sleep(self._poll_interval)

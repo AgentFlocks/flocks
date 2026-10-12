@@ -51,8 +51,10 @@ async def diagnostics(user=Depends(require_user)):
     except (TimeoutError, RuntimeError, OSError):
         raise HTTPException(503, '诊断日志暂时无法读取，请稍后重试') from None
     from flocks.monitoring.mailflow import diagnostic_state
+    from flocks.monitoring.store import read_only_diagnostics
     try:
-        bundle['mail'] = await asyncio.wait_for(diagnostic_state(user.id), timeout=5)
+        with read_only_diagnostics():
+            bundle['mail'] = await asyncio.wait_for(diagnostic_state(user.id), timeout=5)
     except Exception as exc:
         bundle['mail'] = {'snapshot_available': False, **safe_record({'error_type': type(exc).__name__})}
     stamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
@@ -80,17 +82,26 @@ async def overview(day: str | None = None, user=Depends(require_user)):
 
 
 async def _control(action, owner):
-    try:
-        await action(owner)
-    except FileNotFoundError as exc:
-        raise HTTPException(404, str(exc)) from exc
-    except ValueError as exc:
-        raise HTTPException(409, str(exc)) from exc
-    except Exception:
-        raise HTTPException(500, '监测操作未完成，请刷新状态后重试') from None
-    from flocks.server.routes.event import publish_event
-    await publish_event('monitor.control.changed', {'owner': owner})
-    return await snapshot(owner, COMPONENT_ID, await resolve_day(owner))
+    from flocks.monitoring import diagnostics as diag
+    operation = {'start_monitoring': 'start', 'pause_monitoring': 'pause'}.get(getattr(action, '__name__', ''), 'other')
+    async with diag.trace_scope(owner, COMPONENT_ID, 'control:' + operation) as trace:
+        try:
+            with diag.span('control.action', control_action=operation):
+                await action(owner)
+        except FileNotFoundError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except Exception:
+            raise HTTPException(500, '监测操作未完成，请刷新状态后重试') from None
+        from flocks.server.routes.event import publish_event
+        with diag.span('control.publish', control_action=operation):
+            await publish_event('monitor.control.changed', {'owner': owner})
+        with diag.span('control.snapshot', control_action=operation):
+            response = await snapshot(owner, COMPONENT_ID, await resolve_day(owner))
+        trace.outcome = 'ok'
+        diag.event('control.result', control_action=operation, outcome='ok')
+        return response
 
 
 @router.get('/configuration')

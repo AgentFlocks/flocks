@@ -13,6 +13,7 @@ from pydantic import BaseModel
 
 from flocks.storage.storage import Storage
 from flocks.utils.log import Log
+from .diagnostics import observe
 
 from .models import (
     DeliveryStatus,
@@ -63,10 +64,12 @@ class TaskStore:
         db_path.parent.mkdir(parents=True, exist_ok=True)
 
         async def _open_and_migrate() -> None:
-            cls._conn = await aiosqlite.connect(
+            raw = await aiosqlite.connect(
                 db_path,
                 timeout=Storage._sqlite_timeout_s,
             )
+            cls._conn = observe(raw, kind='task', database=db_path,
+                                timeout_ms=round(Storage._sqlite_timeout_s * 1000))
             cls._conn.text_factory = cls._decode_legacy_text
             await Storage.configure_connection(cls._conn)
             await cls._conn.executescript(_TASKS_DDL)

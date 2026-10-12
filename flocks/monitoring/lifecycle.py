@@ -3,6 +3,7 @@ import asyncio
 import hashlib
 import json
 import os
+import time
 from pathlib import Path
 from flocks.auth.context import get_current_auth_user
 from flocks.hub import local
@@ -221,10 +222,16 @@ async def _disable_round_retries(scheduler):
 
 
 async def _pause_monitor(entry):
-    await write('UPDATE monitor_installations SET activation_pending=0 WHERE owner=? AND scope=?', (entry['owner'], COMPONENT_ID))
-    await TaskManager.disable_scheduler(entry['scheduler_id'])
-    for execution in await TaskStore.list_active_executions_for_scheduler(entry['scheduler_id']):
-        await TaskManager.cancel_execution(execution.id)
+    from . import diagnostics as diag
+    with diag.span('pause.installation'):
+        await write('UPDATE monitor_installations SET activation_pending=0 WHERE owner=? AND scope=?', (entry['owner'], COMPONENT_ID))
+    with diag.span('pause.disable'):
+        await TaskManager.disable_scheduler(entry['scheduler_id'])
+    with diag.span('pause.executions'):
+        active = await TaskStore.list_active_executions_for_scheduler(entry['scheduler_id'])
+    for execution in active:
+        with diag.span('pause.cancel', target_execution=diag.opaque(execution.id)):
+            await TaskManager.cancel_execution(execution.id)
 
 
 async def pause_for_agent_change(*, removing=False):
@@ -241,7 +248,11 @@ async def pause_for_agent_change(*, removing=False):
 
 async def start_monitoring(owner):
     """Recheck capabilities, queue the first round now, then resume cron slots."""
+    from . import diagnostics as diag
+    waiting = time.monotonic()
+    diag.event('control.lock', control_action='start', outcome='running', control_lock_busy=_lock.locked())
     async with _lock:
+        diag.event('control.lock', control_action='start', outcome='ok', duration_ms=round((time.monotonic() - waiting) * 1000, 2))
         record = local.get_record('component', COMPONENT_ID)
         if not record:
             raise FileNotFoundError('请先在添加场景中安装安全运营监测')
@@ -288,8 +299,13 @@ async def start_monitoring(owner):
 
 
 async def pause_monitoring(owner):
+    from . import diagnostics as diag
+    waiting = time.monotonic()
+    diag.event('control.lock', control_action='pause', outcome='running', control_lock_busy=_lock.locked())
     async with _lock:
-        entry, _, _ = await _owned_installation(owner)
+        diag.event('control.lock', control_action='pause', outcome='ok', duration_ms=round((time.monotonic() - waiting) * 1000, 2))
+        with diag.span('pause.installation'):
+            entry, _, _ = await _owned_installation(owner)
         await _pause_monitor(entry)
 
 

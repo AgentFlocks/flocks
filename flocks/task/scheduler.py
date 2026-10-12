@@ -8,6 +8,7 @@ from flocks.utils.log import Log
 
 from .models import ExecutionTriggerType, SchedulerMode, SchedulerStatus, TaskTrigger
 from .store import TaskStore
+from .diagnostics import cycle
 
 log = Log.create(service="task.scheduler")
 
@@ -54,7 +55,8 @@ class TaskScheduler:
     async def _loop(self) -> None:
         while self._running:
             try:
-                await self._tick()
+                with cycle('scheduler'):
+                    await self._tick()
             except Exception as exc:
                 log.error("scheduler.tick_error", {"error": str(exc)})
             await asyncio.sleep(self._check_interval)
