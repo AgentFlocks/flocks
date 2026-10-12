@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { hubAPI, type HubPluginType, type HubUpdatePlan } from '@/api/hub';
+import { hubAPI, type HubPluginType, type HubUpdatePlan, type HubUpdatePlanPage } from '@/api/hub';
 
 export function useProtectedHubUpdate() {
   const { i18n } = useTranslation();
@@ -81,11 +81,20 @@ export function useProtectedHubUpdate() {
       <section ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby="hub-update-confirm-title" className="flex max-h-[85vh] w-full max-w-xl flex-col rounded-xl bg-white p-6 shadow-xl dark:bg-zinc-900">
         <h2 id="hub-update-confirm-title" className="text-lg font-semibold">{zh ? '备份并覆盖现有组件' : 'Back up and overwrite existing components'}</h2>
         <p className="my-3 text-sm text-gray-600 dark:text-zinc-300">{zh
-          ? '无论是否修改过组件，更新都会覆盖现有内容。继续后会先完整备份本次将被替换的组件，再安装官方版本；备份失败会停止更新。'
-          : 'Updating overwrites existing content, whether or not you have changed it. Continuing first backs up the components being replaced, then installs the official release. A failed backup stops the update.'}</p>
+          ? '无论是否修改过组件，官方文件都会被覆盖为新版本；你在工作区里自建的页面会保留。继续后会先完整备份本次将被替换的组件，再安装官方版本；备份失败会停止更新。'
+          : 'Official files are overwritten with the new release whether or not you have changed them; pages you added to a workspace are kept. Continuing first backs up the components being replaced, then installs the official release. A failed backup stops the update.'}</p>
         <div className="min-h-0 overflow-y-auto text-sm">
           {plan.items.filter(item => item.requiresConfirmation).map(item => <div key={`${item.type}:${item.id}`} className="mb-4">
             <p className="font-medium">{item.name} <span className="text-gray-500">({item.id})</span></p>
+            {item.keepPages?.length ? <p className="mt-1 text-gray-600 dark:text-zinc-300">
+              {zh ? '保留自建页面：' : 'Keeps pages you added: '}{pageNames(item.keepPages, zh)}
+            </p> : null}
+            {item.replacePages?.length ? <p className="mt-1 text-amber-700 dark:text-amber-400">
+              {zh
+                ? '以下自建页面与新版官方页面的 ID 或目录冲突，会被官方页面替换，原文件只留在备份里：'
+                : 'These added pages conflict with official pages by ID or folder, so the official pages replace them; only the backup keeps the originals: '}
+              {pageNames(item.replacePages, zh)}
+            </p> : null}
           </div>)}
         </div>
         <div className="mt-4 flex justify-end gap-3">
@@ -101,4 +110,8 @@ export function useProtectedHubUpdate() {
     </div>}
   </>;
   return { update, dialog };
+}
+
+function pageNames(pages: HubUpdatePlanPage[], zh: boolean): string {
+  return pages.map(page => (page.title && page.title !== page.id ? `${page.title} (${page.id})` : page.id)).join(zh ? '、' : ', ');
 }

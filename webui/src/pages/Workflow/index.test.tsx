@@ -19,7 +19,9 @@ beforeEach(() => {
 });
 
 vi.mock('@/api/workflow', () => ({ workflowAPI: nativeWorkflowAPI }));
-vi.mock('@/components/common/Toast', () => ({ useToast: () => ({ warning: toastWarning }) }));
+vi.mock('@/components/common/Toast', async (importOriginal) => ({
+  // Keep the module's other exports (GroupNav uses useOptionalToast).
+  ...(await importOriginal<typeof import('@/components/common/Toast')>()), useToast: () => ({ warning: toastWarning }) }));
 
 vi.mock('react-router-dom', () => ({
   useNavigate: () => mockNavigate,
@@ -543,5 +545,104 @@ describe('WorkflowPage', () => {
 
     await user.unhover(overflowStatus);
     await waitFor(() => expect(screen.queryByRole('tooltip')).not.toBeInTheDocument());
+  });
+
+  it('窄卡片放不下第二个 Trigger 时把它收进 +N 浮层，不再裁切', async () => {
+    const user = userEvent.setup();
+    // jsdom has no layout. Give the status line 200px and every element a
+    // width of 10px per character, so after API (50) and Syslog (80) the Kafka
+    // status (70) plus the "+N" button no longer fit.
+    Object.defineProperty(HTMLElement.prototype, 'clientWidth', {
+      configurable: true,
+      get(this: HTMLElement) {
+        return this.getAttribute('aria-label') === '发布与触发状态' ? 200 : 0;
+      },
+    });
+    const rectSpy = vi.spyOn(Element.prototype, 'getBoundingClientRect').mockImplementation(function (this: Element) {
+      const width = (this.textContent || '').length * 10;
+      return { x: 0, y: 0, width, height: 16, top: 0, left: 0, right: width, bottom: 16, toJSON: () => ({}) } as DOMRect;
+    });
+    try {
+      mockUseWorkflows.mockReturnValue({
+        workflows: [makeWorkflow({
+          integrationStatus: {
+            api: { configured: true, state: 'running' },
+            trigger: {
+              configured: true,
+              state: 'running',
+              count: 4,
+              items: [
+                { id: 'syslog-default', type: 'syslog', state: 'running' },
+                { id: 'kafka-default', type: 'kafka', state: 'running' },
+                { id: 'schedule-default', type: 'schedule', state: 'running' },
+                { id: 'webhook-default', type: 'webhook', state: 'running' },
+              ],
+            },
+          },
+        })],
+        loading: false,
+        error: null,
+        refetch: vi.fn(),
+      });
+
+      render(<WorkflowPage />);
+
+      expect(screen.getByLabelText('Syslog：启用')).toBeInTheDocument();
+      expect(screen.queryByLabelText('Kafka：启用')).not.toBeInTheDocument();
+      const overflowStatus = screen.getByRole('button', { name: '更多状态：3' });
+      await user.hover(overflowStatus);
+      const tooltip = screen.getByRole('tooltip');
+      expect(within(tooltip).getByText('Kafka')).toBeInTheDocument();
+      expect(within(tooltip).getByText('Schedule')).toBeInTheDocument();
+      expect(within(tooltip).getByText('Webhook')).toBeInTheDocument();
+    } finally {
+      rectSpy.mockRestore();
+      delete (HTMLElement.prototype as { clientWidth?: number }).clientWidth;
+    }
+  });
+
+  it('Trigger 数量不变但标签变宽时重新测量', () => {
+    // 230px line, 10px per character: Syslog + Kafka fit next to API and "+2";
+    // the same slot becoming "Schedule" (wider) must push it into "+N".
+    Object.defineProperty(HTMLElement.prototype, 'clientWidth', {
+      configurable: true,
+      get(this: HTMLElement) {
+        return this.getAttribute('aria-label') === '发布与触发状态' ? 230 : 0;
+      },
+    });
+    const rectSpy = vi.spyOn(Element.prototype, 'getBoundingClientRect').mockImplementation(function (this: Element) {
+      const width = (this.textContent || '').length * 10;
+      return { x: 0, y: 0, width, height: 16, top: 0, left: 0, right: width, bottom: 16, toJSON: () => ({}) } as DOMRect;
+    });
+    const withSecondTrigger = (type: 'kafka' | 'schedule') => makeWorkflow({
+      integrationStatus: {
+        api: { configured: true, state: 'running' },
+        trigger: {
+          configured: true,
+          state: 'running',
+          count: 4,
+          items: [
+            { id: 'trigger-1', type: 'syslog', state: 'running' },
+            { id: 'trigger-2', type, state: 'running' },
+            { id: 'trigger-3', type: 'webhook', state: 'running' },
+            { id: 'trigger-4', type: 'webhook', state: 'running' },
+          ],
+        },
+      },
+    });
+    try {
+      mockUseWorkflows.mockReturnValue({ workflows: [withSecondTrigger('kafka')], loading: false, error: null, refetch: vi.fn() });
+      const view = render(<WorkflowPage />);
+      expect(screen.getByRole('button', { name: '更多状态：2' })).toBeInTheDocument();
+
+      mockUseWorkflows.mockReturnValue({ workflows: [withSecondTrigger('schedule')], loading: false, error: null, refetch: vi.fn() });
+      view.rerender(<WorkflowPage />);
+
+      expect(screen.getByRole('button', { name: '更多状态：3' })).toBeInTheDocument();
+      expect(screen.queryByLabelText('Schedule：启用')).not.toBeInTheDocument();
+    } finally {
+      rectSpy.mockRestore();
+      delete (HTMLElement.prototype as { clientWidth?: number }).clientWidth;
+    }
   });
 });

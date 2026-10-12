@@ -6,7 +6,7 @@ export default function PluginGroupButton({ grouping, itemKey, className = '', i
   grouping: Pick<GroupDrag, 'requestMove'>;
   itemKey: string;
   className?: string;
-  /** Drop the visible label where the row has no room for it (tables, narrow cards); the accessible name stays. */
+  /** Card footers show icons with tooltips only. */
   iconOnly?: boolean;
 }) {
   const { t } = useTranslation('pluginGroups');
@@ -23,9 +23,9 @@ export default function PluginGroupButton({ grouping, itemKey, className = '', i
         event.stopPropagation();
         grouping.requestMove(itemKey);
       }}
-      className={`inline-flex shrink-0 items-center rounded text-[11px] text-gray-500 hover:bg-gray-100 hover:text-gray-700 ${
-        iconOnly ? 'h-7 w-7 justify-center' : 'gap-1 px-1.5 py-1'
-      } ${className}`}
+      className={iconOnly
+        ? `inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-700 ${className}`
+        : `inline-flex shrink-0 items-center gap-1 rounded px-1.5 py-1 text-[11px] text-gray-500 hover:bg-gray-100 hover:text-gray-700 ${className}`}
     >
       <FolderInput className="h-3.5 w-3.5" aria-hidden="true" />
       {!iconOnly && t('groupAction')}

@@ -31,7 +31,7 @@ async def test_real_generated_ids_keep_cancel_and_wait_isolated(monkeypatch, kin
     release = asyncio.Event()
     handles = []
 
-    async def run(task, _input):
+    async def run(task, _input, **_kwargs):
         handles.append(asyncio.current_task())
         task.status = "running"
         await release.wait()
@@ -67,7 +67,7 @@ async def test_wait_timeout_leaves_task_available_for_later_wait(monkeypatch):
     manager = BackgroundManager()
     release = asyncio.Event()
 
-    async def run(task, _input):
+    async def run(task, _input, **_kwargs):
         await release.wait()
         task.status = "completed"
 
@@ -89,7 +89,7 @@ async def test_wait_timeout_leaves_task_available_for_later_wait(monkeypatch):
 async def test_cancelling_waiter_still_cancels_owned_execution(monkeypatch):
     manager = BackgroundManager()
 
-    async def run(task, _input):
+    async def run(task, _input, **_kwargs):
         await asyncio.Event().wait()
 
     monkeypatch.setattr(manager, "_run_task", run)
@@ -112,7 +112,7 @@ async def test_completed_handles_release_context_but_keep_history(monkeypatch, k
     class Carrier:
         pass
 
-    async def run(task, _input):
+    async def run(task, _input, **_kwargs):
         assert isinstance(carrier_var.get(), Carrier)
         task.status = "completed"
         task.output = "saved result"
@@ -151,7 +151,7 @@ async def test_done_callback_consumes_unexpected_exception(monkeypatch):
             consumed.append(self)
             return super().exception()
 
-    async def run(task, _input):
+    async def run(task, _input, **_kwargs):
         raise RuntimeError("unexpected lifecycle failure")
 
     monkeypatch.setattr(manager, "_run_task", run)

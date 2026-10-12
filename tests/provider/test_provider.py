@@ -159,7 +159,7 @@ def test_dynamic_openai_compatible_provider_prefers_max_completion_tokens(monkey
 
 def test_resolve_model_infers_interleaved_for_runtime_discovered_reasoning_model(monkeypatch):
     provider_model = SimpleNamespace(
-        id="qwen3-max",
+        id="qwen3.6-plus",
         capabilities=SimpleNamespace(interleaved=None),
     )
     fake_provider = SimpleNamespace(
@@ -173,7 +173,7 @@ def test_resolve_model_infers_interleaved_for_runtime_discovered_reasoning_model
     monkeypatch.setattr(Provider, "_providers", {"openai-compatible": fake_provider})
     monkeypatch.setattr(Provider, "_models", {})
 
-    resolved = Provider.resolve_model("openai-compatible", "qwen3-max")
+    resolved = Provider.resolve_model("openai-compatible", "qwen3.6-plus")
 
     assert resolved is provider_model
     assert resolved.capabilities.interleaved == {

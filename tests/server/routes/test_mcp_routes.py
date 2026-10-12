@@ -1666,3 +1666,77 @@ class TestMcpRoutes:
         assert raw_state["mcp"]["threatbook_mcp"] == old_config
         assert secret_state["threatbook_mcp_key"] == "old-key"
         assert connect_attempts[-1] == old_config["url"]
+
+
+class TestMcpStaticRoutesAndRefresh:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("prefix", ["/api/mcp", "/mcp"])
+    async def test_collection_reads_are_not_taken_for_server_names(
+        self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch, prefix: str,
+    ):
+        """GET /tools and /resources used to land on GET /{name} (FL-BUG-005)."""
+        from flocks.mcp import McpToolRegistry, get_manager
+        from flocks.mcp.types import McpResource
+
+        monkeypatch.setattr(McpToolRegistry, "get_all_servers", lambda: ["alpha"])
+        monkeypatch.setattr(McpToolRegistry, "get_server_tools", lambda name: [f"{name}_lookup"])
+        monkeypatch.setattr(get_manager(), "_resources_cache", {
+            "alpha": [McpResource(name="Runbook", uri="file:///runbook.md", server="alpha")],
+        })
+
+        tools = await client.get(f"{prefix}/tools")
+        resources = await client.get(f"{prefix}/resources")
+
+        assert tools.status_code == 200, tools.text
+        assert tools.json() == ["alpha_lookup"]
+        assert resources.status_code == 200, resources.text
+        assert resources.json() == {
+            "alpha:file:///runbook.md": {
+                "name": "Runbook",
+                "uri": "file:///runbook.md",
+                "description": None,
+                "mime_type": None,
+                "server": "alpha",
+            },
+        }
+
+    @pytest.mark.asyncio
+    async def test_refresh_unknown_server_returns_404(
+        self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch,
+    ):
+        """A server that was never configured is a missing resource, not a 500 (FL-BUG-007)."""
+        monkeypatch.setattr(mcp_routes, "_load_raw_mcp_server_config", lambda name: None)
+
+        resp = await client.post("/api/mcp/autotest-missing-resource-8f9ea73b/refresh")
+
+        assert resp.status_code == 404, resp.text
+        assert "MCP server not found" in resp.json()["message"]
+
+    @pytest.mark.asyncio
+    async def test_refresh_configured_but_disconnected_server_returns_409(
+        self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch,
+    ):
+        monkeypatch.setattr(
+            mcp_routes,
+            "_load_raw_mcp_server_config",
+            lambda name: {"type": "remote", "url": "https://example.invalid/mcp"},
+        )
+
+        resp = await client.post("/api/mcp/offline-server/refresh")
+
+        assert resp.status_code == 409, resp.text
+        assert "not connected" in resp.json()["message"]
+
+    @pytest.mark.asyncio
+    async def test_refresh_failure_of_connected_server_stays_500(
+        self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch,
+    ):
+        async def broken_refresh(name: str) -> int:
+            raise RuntimeError("tools/list failed")
+
+        monkeypatch.setattr(mcp_routes.MCP, "refresh_tools", broken_refresh)
+
+        resp = await client.post("/api/mcp/alpha/refresh")
+
+        assert resp.status_code == 500
+        assert "tools/list failed" in resp.json()["message"]

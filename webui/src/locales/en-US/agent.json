@@ -25,7 +25,11 @@
     "delegatable": "Delegatable",
     "delete": "Delete",
     "edit": "Edit",
-    "nativeDeleteDisabled": "Built-in agents cannot be deleted"
+    "nativeDeleteDisabled": "Built-in agents cannot be deleted",
+    "protected": "Extension built-in",
+    "protectedDeleteDisabled": "Agents built into an extension cannot be deleted",
+    "protectedDelegateDisabled": "Delegation of an agent built into an extension cannot be changed",
+    "protectedEditDisabled": "Built into an extension; its prompt is protected and cannot be viewed or edited"
   },
   "filter": {
     "all": "All",

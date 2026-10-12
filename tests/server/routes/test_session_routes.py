@@ -19,6 +19,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from fastapi import HTTPException, status
 from httpx import AsyncClient
+from flocks.agent.agent import AgentInfo
 from flocks.auth.context import API_TOKEN_SERVICE_USER_ID, AuthUser
 from flocks.hooks.execution import (
     ExecutionStopped,
@@ -2211,7 +2212,7 @@ class TestSessionMessagesRemaining:
 
         monkeypatch.setattr(
             "flocks.agent.registry.Agent.get",
-            AsyncMock(return_value=SimpleNamespace(name="rex", model=None)),
+            AsyncMock(return_value=AgentInfo(name="rex", model=None)),
         )
         monkeypatch.setattr(
             session_routes,
@@ -2314,7 +2315,7 @@ class TestSessionMessagesRemaining:
         user_message = SimpleNamespace(agent="rex")
         monkeypatch.setattr(
             "flocks.agent.registry.Agent.get",
-            AsyncMock(return_value=SimpleNamespace(name="rex", model=None)),
+            AsyncMock(return_value=AgentInfo(name="rex", model=None)),
         )
         monkeypatch.setattr(
             "flocks.session.session.Session.get_by_id",
@@ -2364,7 +2365,7 @@ class TestSessionMessagesRemaining:
         user_message = SimpleNamespace(agent="rex")
         monkeypatch.setattr(
             "flocks.agent.registry.Agent.get",
-            AsyncMock(return_value=SimpleNamespace(name="rex", model=None)),
+            AsyncMock(return_value=AgentInfo(name="rex", model=None)),
         )
         monkeypatch.setattr(
             "flocks.session.session.Session.get_by_id",
@@ -2463,7 +2464,7 @@ class TestSessionMessagesRemaining:
         )
         monkeypatch.setattr(
             "flocks.agent.registry.Agent.get",
-            AsyncMock(return_value=SimpleNamespace(name="rex", model=None)),
+            AsyncMock(return_value=AgentInfo(name="rex", model=None)),
         )
         monkeypatch.setattr("flocks.provider.provider.Provider._ensure_initialized", lambda: None)
         monkeypatch.setattr("flocks.config.config.Config.get", AsyncMock(return_value=SimpleNamespace()))
@@ -2540,7 +2541,7 @@ class TestSessionMessagesRemaining:
         )
         monkeypatch.setattr(
             "flocks.agent.registry.Agent.get",
-            AsyncMock(return_value=SimpleNamespace(name="rex", model=None)),
+            AsyncMock(return_value=AgentInfo(name="rex", model=None)),
         )
         monkeypatch.setattr("flocks.provider.provider.Provider._ensure_initialized", lambda: None)
         monkeypatch.setattr("flocks.config.config.Config.get", AsyncMock(return_value=SimpleNamespace()))
@@ -2968,20 +2969,56 @@ class TestSessionUtilities:
             AgentInbox._inboxes.pop(grandchild, None)
 
     @pytest.mark.asyncio
-    async def test_session_metrics(self, client: AsyncClient):
-        """GET /api/session/metrics route is registered (may return 404 if route order issue)."""
-        resp = await client.get("/api/session/metrics")
-        # NOTE: /metrics is defined after /{sessionID} in session.py, so FastAPI may route
-        # "metrics" as a sessionID and return 404.  We accept any non-405 response here.
-        assert resp.status_code != status.HTTP_405_METHOD_NOT_ALLOWED
+    @pytest.mark.parametrize("prefix", ["/api/session", "/session"])
+    async def test_session_metrics(self, client: AsyncClient, prefix: str):
+        """GET /metrics is not read as a session ID (FL-BUG-005)."""
+        resp = await client.get(f"{prefix}/metrics")
+        assert resp.status_code == status.HTTP_200_OK, resp.text
+        body = resp.json()
+        assert body["status"] == "success"
+        assert "global" in body["metrics"]
 
     @pytest.mark.asyncio
-    async def test_recent_sessions(self, client: AsyncClient):
-        """GET /api/session/recent route is registered."""
-        await client.post("/api/session", json={"title": "Recent"})
-        resp = await client.get("/api/session/recent")
-        # Same route-order caveat as /metrics – accept any non-405 response.
-        assert resp.status_code != status.HTTP_405_METHOD_NOT_ALLOWED
+    @pytest.mark.parametrize("prefix", ["/api/session", "/session"])
+    async def test_recent_sessions(self, client: AsyncClient, prefix: str):
+        """GET /recent is not read as a session ID and lists newest first (FL-BUG-005)."""
+        older = (await client.post("/api/session", json={"title": "Recent older"})).json()
+        newer = (await client.post("/api/session", json={"title": "Recent newer"})).json()
+        resp = await client.get(f"{prefix}/recent", params={"limit": 2})
+        assert resp.status_code == status.HTTP_200_OK, resp.text
+        assert [item["id"] for item in resp.json()] == [newer["id"], older["id"]]
+
+    @pytest.mark.asyncio
+    async def test_recent_sessions_only_lists_sessions_the_caller_can_read(
+        self,
+        client: AsyncClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """Reachable again, /recent must filter like GET /session, not list everyone's."""
+        alice = AuthUser(id="usr_alice", username="alice", role="member", status="active")
+        bob = AuthUser(id="usr_bob", username="bob", role="member", status="active")
+        mine = await Session.create(
+            project_id="recent_visibility",
+            directory="/tmp",
+            title="alice-private",
+            owner_user_id=alice.id,
+            owner_username=alice.username,
+        )
+        theirs = await Session.create(
+            project_id="recent_visibility",
+            directory="/tmp",
+            title="bob-private",
+            owner_user_id=bob.id,
+            owner_username=bob.username,
+        )
+
+        monkeypatch.setattr(session_routes, "require_user", lambda _request: alice)
+        resp = await client.get("/api/session/recent", params={"limit": 10})
+
+        assert resp.status_code == status.HTTP_200_OK, resp.text
+        ids = [item["id"] for item in resp.json()]
+        assert mine.id in ids
+        assert theirs.id not in ids
 
 
 # ===========================================================================

@@ -125,11 +125,13 @@ def start_child(ctx, child_id, child_agent, execute):
         def finished(delivered):
             if AgentInbox._children.get(child_id) == (ctx.session_id, delivered):
                 AgentInbox._children.pop(child_id, None)
+                AgentInbox._report_to.pop(child_id, None)
                 AgentInbox.wake(child_id, ctx.event_publish_callback)
 
         finalizer.add_done_callback(finished)
 
     task = fire_and_forget(run(), label="agent.child", name=f"child:{child_id}")
     AgentInbox._children[child_id] = (ctx.session_id, task)
+    AgentInbox._report_to[child_id] = parent_inbox
     track(task)
     task.add_done_callback(completed)

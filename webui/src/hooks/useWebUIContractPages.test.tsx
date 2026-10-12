@@ -26,6 +26,27 @@ describe('useWebUIContractPages', () => {
     listWorkspacesMock.mockResolvedValue({ data: [] });
   });
 
+  it('reloads navigation once after the event stream reconnects, however many consumers are mounted', async () => {
+    listMock.mockResolvedValue({ data: [] });
+    // The layout and a workspace host both use the hook.
+    renderHook(() => useWebUIContractPages());
+    renderHook(() => useWebUIContractPages());
+    await waitFor(() => expect(listMock).toHaveBeenCalledTimes(1));
+    act(() => { sse.open(); });
+
+    const hidden = new Event('pagehide');
+    Object.defineProperty(hidden, 'persisted', { value: true });
+    const shown = new Event('pageshow');
+    Object.defineProperty(shown, 'persisted', { value: true });
+    act(() => { window.dispatchEvent(hidden); window.dispatchEvent(shown); });
+    act(() => { sse.open(); });
+
+    await waitFor(() => expect(listMock).toHaveBeenCalledTimes(2));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(listMock).toHaveBeenCalledTimes(2);
+    expect(listWorkspacesMock).toHaveBeenCalledTimes(2);
+  });
+
   it('loads enabled WebUI contract pages for navigation', async () => {
     listMock.mockResolvedValueOnce({
       data: [

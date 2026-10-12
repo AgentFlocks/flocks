@@ -275,7 +275,10 @@ async def test_real_session_loop_with_streaming_provider(runtime, monkeypatch, s
     monkeypatch.setattr(Provider, "get", lambda _: FakeProvider())
     monkeypatch.setattr(Provider, "get_model", lambda _: None)
     monkeypatch.setattr(Provider, "resolve_model", lambda *_: None)
-    monkeypatch.setattr(SessionRunner, "_build_callable_tool_schema", AsyncMock(return_value=[]))
+    # Only tools offered in the turn's schema are callable. "denied" offers
+    # read anyway, so the execute-time --disallowed-tools check must still hold.
+    offered = [{"type": "function", "function": {"name": "read"}}] if scenario in {"tools", "denied"} else []
+    monkeypatch.setattr(SessionRunner, "_build_callable_tool_schema", AsyncMock(return_value=offered))
     monkeypatch.setattr(SessionRunner, "_build_turn_prompt_context", AsyncMock(return_value=None))
     monkeypatch.setattr(SessionPrompt, "build_system_prompt_blocks", AsyncMock(return_value=[]))
     monkeypatch.setattr(MemoryBootstrap, "bootstrap", AsyncMock(return_value={}))
@@ -340,3 +343,21 @@ async def test_config_field_names_override_existing_json_aliases(monkeypatch, tm
     assert value.default_agent == "new"
     assert value.provider["p"].options.base_url == "https://example.invalid"
     assert original.default_agent == "old"
+
+
+async def test_headless_rejects_a_session_dedicated_to_another_agent(runtime, monkeypatch):
+    from flocks.session.message import Message
+    from flocks.session.session import DEDICATED_AGENT_POLICY_METADATA_KEY, Session
+    from flocks.session.session_loop import SessionLoop
+    session = await Session.create(project_id="default", directory=str(runtime), agent="rex")
+    await Session.mutate_metadata(
+        session.project_id, session.id,
+        lambda metadata: {**metadata, DEDICATED_AGENT_POLICY_METADATA_KEY: {"agent": "isolated-security", "version": 1}},
+    )
+    loop = AsyncMock()
+    monkeypatch.setattr(SessionLoop, "run", loop)
+    result = await run_headless(ExecOptions(runtime, prompt="hi", session_id=session.id))
+    assert not result["success"]
+    assert "dedicated to agent" in result["error"]
+    assert await Message.list(session.id, include_archived=True) == []
+    loop.assert_not_called()

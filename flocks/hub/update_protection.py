@@ -19,6 +19,7 @@ from pydantic import ValidationError
 from flocks.config.config import Config
 from flocks.hub import local
 from flocks.hub.catalog import load_manifest
+from flocks.hub.custom_pages import classify_pages
 from flocks.hub.files import plugin_root
 from flocks.hub.security import SKIP_NAMES
 
@@ -140,6 +141,12 @@ def build_plan(plugin_type: str, plugin_id: str, scope: str = "global") -> dict:
         # File snapshots only detect concurrent writes; they never waive protection.
         exists = target.exists() or (access is not None and access.exists())
         requires = (kind, identifier) in protected and (exists or matching_record is not None)
+        # Pages admins added to an installed WebUI package survive the update;
+        # the dialog names them, and any the release now replaces.
+        pages = {}
+        if kind == "webui":
+            keep, replace = classify_pages(target, source, matching_record.fileHashes if matching_record else None)
+            pages = {"keepPages": keep, "replacePages": replace}
         items.append(
             {
                 "type": kind,
@@ -148,6 +155,7 @@ def build_plan(plugin_type: str, plugin_id: str, scope: str = "global") -> dict:
                 "installedVersion": version,
                 "version": release.version,
                 "requiresConfirmation": requires,
+                **pages,
                 "_roots": {"package": str(target), **({"access": str(access)} if access is not None else {})},
                 "_current": current,
                 "_official": official,

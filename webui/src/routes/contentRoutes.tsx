@@ -168,10 +168,6 @@ export const contentRoutes: RouteObject[] = [
   { path: '*', element: <Navigate to="/" replace /> },
 ];
 
-/** Pages whose content is a fixed-height viewer: they get a bounded flex box
- *  (no page scroll) instead of the min-h-full wrapper. */
-export const BOUNDED_HEIGHT_PATH_PATTERNS = ['/settings/system-logs'];
-
 /** Pages that manage their own scrolling and fill the content area edge to edge. */
 export const FULL_SCREEN_PATH_PATTERNS = [
   '/workflows/create',

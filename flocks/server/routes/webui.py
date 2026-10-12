@@ -28,7 +28,8 @@ from flocks.contracts.webui.models import (
     WebUIWorkspaceListItem,
 )
 from flocks.contracts.webui.store import WebUIPagesStore, webui_contract_page_route
-from flocks.hub.catalog import scene_suite_workspace_owners
+from flocks.hub.catalog import load_manifest, scene_suite_workspace_owners
+from flocks.license import is_pro_edition_status, license_status
 from flocks.server.routes.event import publish_event
 from flocks.utils.log import Log
 
@@ -165,15 +166,33 @@ async def list_webui_pages(enabled_only: bool = Query(False, alias="enabledOnly"
 
 @router.get("/contracts/webui/workspaces", response_model=list[WebUIWorkspaceListItem])
 async def list_webui_workspaces(enabled_only: bool = Query(False, alias="enabledOnly")):
+    try:
+        pro_active = is_pro_edition_status(await license_status())
+    except Exception as exc:
+        log.warning("webui.workspaces.license_status_failed", {"error": str(exc)})
+        pro_active = False
     # Directory scans plus the hub catalog signature: keep them off the event loop.
-    return await asyncio.to_thread(
-        lambda: _attach_scene_suites(_store.list_workspaces(enabled_only=enabled_only))
+    workspaces = await asyncio.to_thread(
+        lambda: _attach_scene_suites(_store.list_workspaces(enabled_only=enabled_only), pro_active=pro_active)
     )
+    return [workspace for workspace in workspaces if not (enabled_only and workspace.locked)]
 
 
-def _attach_scene_suites(workspaces: list[WebUIWorkspaceListItem]) -> list[WebUIWorkspaceListItem]:
+def _suite_edition(suite_id: str) -> str:
+    try:
+        return getattr(load_manifest("component", suite_id), "edition", "oss")
+    except Exception:
+        return "oss"
+
+
+def _attach_scene_suites(
+    workspaces: list[WebUIWorkspaceListItem],
+    *,
+    pro_active: bool = False,
+) -> list[WebUIWorkspaceListItem]:
     """Tag each workspace with the scene suite that ships it and drop
-    user-root scene workspaces no suite knows about.
+    user-root scene workspaces no suite knows about. A workspace whose suite
+    needs Pro is marked locked while no Pro license is active.
 
     Scenes reach the user root (~/.flocks/plugins/contracts/webui) only through
     the suite manager, so a ``sceneWorkspace`` directory there without a suite
@@ -197,7 +216,8 @@ def _attach_scene_suites(workspaces: list[WebUIWorkspaceListItem]) -> list[WebUI
                 _hidden_scene_workspaces_logged.add(workspace.id)
                 log.info("webui.workspaces.unmanaged_scene_hidden", {"workspaceId": workspace.id})
             continue
-        result.append(workspace.model_copy(update={"suiteId": suite_id}))
+        locked = bool(suite_id) and not pro_active and _suite_edition(suite_id) == "pro"
+        result.append(workspace.model_copy(update={"suiteId": suite_id, "locked": locked}))
     return result
 
 

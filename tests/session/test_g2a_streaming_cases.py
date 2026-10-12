@@ -339,6 +339,7 @@ async def test_tool_success_and_error_states_and_callbacks():
         session_id="ses_sp_test",
         assistant_message=_make_assistant_msg(),
         agent=_make_agent(),
+        allowed_tool_names=["echo"],
         event_publish_callback=cb,
         tool_start_callback=tool_start,
         tool_end_callback=tool_end,

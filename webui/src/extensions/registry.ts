@@ -39,8 +39,16 @@ export interface ExtensionNavItem {
   order?: number;
   /** `sidebar` (default) appends to a sidebar section; `accountMenu` adds an entry to the account dropdown. */
   placement?: 'sidebar' | 'accountMenu';
-  /** Sidebar section to append to (default `agentHub`). */
+  /**
+   * Where a `sidebar` entry goes (default `agentHub`). The agent hub lives in
+   * the account menu's integrations group; the other sections append to the
+   * Agent workspace's sidebar menu.
+   */
   section?: 'home' | 'aiWorkbench' | 'sceneWorkspaces' | 'agentHub';
+  /** `accountMenu` entries only: draw the row as a framed call-to-action. */
+  highlight?: boolean;
+  /** `accountMenu` entries only: short tag at the end of the row (e.g. `PRO`). */
+  badge?: string;
 }
 
 export interface ExtensionSettingsGate {
@@ -108,7 +116,11 @@ export interface WebUIExtensionRegistry {
    * asks for the default channel.
    */
   updateChannel?: string;
-  /** Return `true` to hide a default nav item or settings section by id. */
+  /**
+   * Return `true` to hide a default nav item or settings section by id. The
+   * sidebar group ids of earlier releases (`aiWorkbench`, `agentHub`,
+   * `customPages`) still hide every entry those groups held.
+   */
   hideDefault?: (id: string) => boolean;
 }
 

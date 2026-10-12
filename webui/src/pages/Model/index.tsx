@@ -192,17 +192,20 @@ export default function ModelPage() {
   const providerLoadSeqRef = useRef(0);
   const handleSelectProviderRef = useRef<(p: EnrichedProvider) => Promise<void>>(null!);
 
+  const refreshProvidersSoon = useCallback(() => {
+    if (sseRefetchTimer.current) clearTimeout(sseRefetchTimer.current);
+    sseRefetchTimer.current = window.setTimeout(() => {
+      refetch();
+      if (selectedProviderRef.current) handleSelectProviderRef.current(selectedProviderRef.current);
+    }, 500);
+  }, [refetch]);
   useSSE({
     url: '/api/event',
     onEvent: useCallback((evt) => {
-      if (evt.type === 'provider.updated') {
-        if (sseRefetchTimer.current) clearTimeout(sseRefetchTimer.current);
-        sseRefetchTimer.current = window.setTimeout(() => {
-          refetch();
-          if (selectedProviderRef.current) handleSelectProviderRef.current(selectedProviderRef.current);
-        }, 500);
-      }
-    }, [refetch]),
+      if (evt.type === 'provider.updated') refreshProvidersSoon();
+    }, [refreshProvidersSoon]),
+    // Changes made while the stream was down (or the page sat in the back/forward cache) are not replayed.
+    onReconnect: refreshProvidersSoon,
     reconnect: { maxRetries: 5, initialDelay: 2000 },
   });
 
@@ -2328,7 +2331,7 @@ function getDefaultReasoningToggleValue(providerId: string, modelId: string): bo
   if (providerId === 'groq') return true;
 
   if (['threatbook-cn-llm', 'threatbook-io-llm', 'alibaba', 'moonshot'].includes(providerId)) {
-    if (lowered.includes('qwen3-max') || lowered.includes('qwen3.6-plus')) return true;
+    if (lowered.includes('qwen3.6-plus')) return true;
   }
 
   return true;

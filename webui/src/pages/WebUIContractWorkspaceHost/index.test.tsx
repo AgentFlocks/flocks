@@ -1,23 +1,23 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
-import { MemoryRouter, Route, Routes } from 'react-router-dom';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { Link, MemoryRouter, Route, Routes } from 'react-router-dom';
 import WebUIContractWorkspaceHost from './index';
 import { setupSSEMock } from '@/test/mocks/sse';
 import { ThemeContext } from '@/contexts/ThemeContext';
 import { PaneActiveContext } from '@/components/layout/PaneActiveContext';
 
-const { listWorkspacesMock } = vi.hoisted(() => ({
-  listWorkspacesMock: vi.fn(),
+const { useWebUIContractPagesMock } = vi.hoisted(() => ({
+  useWebUIContractPagesMock: vi.fn(),
 }));
 
-vi.mock('@/api/webuiContractPages', () => ({
-  webuiContractPagesAPI: {
-    listWorkspaces: listWorkspacesMock,
-  },
+vi.mock('@/hooks/useWebUIContractPages', () => ({
+  useWebUIContractPages: useWebUIContractPagesMock,
 }));
 
 vi.mock('@/pages/WebUIContractPageHost/PageRuntimeHost', () => ({
-  default: ({ pageId }: { pageId?: string }) => <div>page:{pageId}</div>,
+  default: ({ pageId, initialBuildHash }: { pageId?: string; initialBuildHash?: string }) => (
+    <div data-build-hash={initialBuildHash}>page:{pageId}</div>
+  ),
 }));
 
 vi.mock('react-i18next', () => ({
@@ -38,13 +38,28 @@ function renderHostAt(path: string) {
 }
 
 describe('WebUIContractWorkspaceHost', () => {
+  it('resets page-local task state when the sidebar links to the same page again', async () => {
+    const route = '/contracts/webui/workspaces/scene_workspace/ops-overview';
+    render(<MemoryRouter initialEntries={[route]}>
+      <Link to={route}>Home</Link>
+      <Routes><Route path="/contracts/webui/workspaces/:workspaceId/:pageId?" element={<WebUIContractWorkspaceHost />} /></Routes>
+    </MemoryRouter>);
+    const previous = await screen.findByText('page:ops-overview');
+    fireEvent.click(screen.getByRole('link', {name:'Home'}));
+    await waitFor(() => expect(screen.getByText('page:ops-overview')).not.toBe(previous));
+  });
+
   setupSSEMock();
 
   beforeEach(() => {
     vi.clearAllMocks();
     localStorage.clear();
-    listWorkspacesMock.mockResolvedValue({
-      data: [
+    useWebUIContractPagesMock.mockReturnValue({
+      pages: [],
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+      workspaces: [
         {
           id: 'scene_workspace',
           title: '场景工作区',
@@ -130,8 +145,9 @@ describe('WebUIContractWorkspaceHost', () => {
   });
 
   it('falls back to the first ready page when the default page id is unknown', async () => {
-    listWorkspacesMock.mockResolvedValue({
-      data: [
+    useWebUIContractPagesMock.mockReturnValue({
+      pages: [], loading: false, error: null, refetch: vi.fn(),
+      workspaces: [
         {
           id: 'scene_workspace',
           title: '场景工作区',
@@ -223,6 +239,7 @@ describe('WebUIContractWorkspaceHost', () => {
     await waitFor(() => {
       expect(screen.getByText('page:risk-dashboard')).toBeInTheDocument();
     });
+    expect(screen.getByText('page:risk-dashboard')).toHaveAttribute('data-build-hash', 'posture');
     expect(screen.getByText('page:risk-dashboard').parentElement).not.toHaveClass('p-6');
     await waitFor(() => {
       expect(setTemporaryThemeOverride).toHaveBeenCalledWith('dark');

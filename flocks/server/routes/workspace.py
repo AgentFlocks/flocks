@@ -701,6 +701,8 @@ async def move_item(body: MoveRequest):
         raise HTTPException(status_code=404, detail=f"Source not found: {body.src}")
     if dst.exists():
         raise HTTPException(status_code=409, detail=f"Destination already exists: {body.dst}")
+    # Reject before mkdir below, which would otherwise leave new folders
+    # inside the source tree when shutil.move then refuses the move.
     if src.is_dir() and dst.is_relative_to(src):
         raise HTTPException(
             status_code=400,

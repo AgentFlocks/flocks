@@ -34,11 +34,14 @@ from flocks.workflow.tool_context import (
     build_workflow_tool_context,
     cleanup_workflow_tool_context,
 )
+from flocks.workflow.triggers.models import workflow_trigger_definitions_from_json
 
 WORKFLOW_POLLER_CONFIG_PREFIX = "workflow_poller_config/"
 DEFAULT_INTERVAL_SECONDS = 30
 DEFAULT_TIMEOUT_SECONDS = 7200
 RUN_SHUTDOWN_GRACE_SECONDS = 1.0
+# Legacy poller configs predate unified triggers and carry no trigger id.
+DEFAULT_SCHEDULE_TRIGGER_ID = "schedule-default"
 
 log = Log.create(service="workflow.poller")
 
@@ -49,6 +52,19 @@ def _now_ms() -> int:
 
 def _today_string() -> str:
     return datetime.now().strftime("%Y-%m-%d")
+
+
+def _schedule_trigger_id(workflow_json: Any) -> str:
+    """Return the id of the workflow's schedule trigger (at most one exists)."""
+    if isinstance(workflow_json, dict):
+        try:
+            triggers = workflow_trigger_definitions_from_json(workflow_json)
+        except Exception:
+            triggers = []
+        for trigger in triggers:
+            if trigger.type == "schedule" and trigger.id:
+                return trigger.id
+    return DEFAULT_SCHEDULE_TRIGGER_ID
 
 
 class WorkflowPollerManager:
@@ -80,6 +96,7 @@ class WorkflowPollerManager:
             "noOverlap": bool(raw.get("noOverlap", True)),
             "inputs": dict(inputs),
             "updatedAt": raw.get("updatedAt"),
+            "triggerId": DEFAULT_SCHEDULE_TRIGGER_ID,
         }
 
     def _cleanup_done_runs(self, workflow_id: str) -> int:
@@ -115,7 +132,7 @@ class WorkflowPollerManager:
         inputs["_poller_run_id"] = run_id
         inputs["_flocks"] = {
             "trigger": {
-                "id": "schedule-default",
+                "id": config.get("triggerId") or DEFAULT_SCHEDULE_TRIGGER_ID,
                 "type": "schedule",
                 "source": "poller",
                 "deliveryId": run_id,
@@ -298,6 +315,7 @@ class WorkflowPollerManager:
                 "error": err,
             }
             return self.get_status(workflow_id)
+        config["triggerId"] = _schedule_trigger_id(workflow_json)
 
         try:
             workflow_plan = build_workflow_execution_plan(Workflow.from_dict(workflow_json))
@@ -365,6 +383,7 @@ class WorkflowPollerManager:
             self._status[workflow_id] = current
             return self.get_status(workflow_id)
 
+        config["triggerId"] = _schedule_trigger_id(workflow_json)
         return await self._execute_run(workflow_id, workflow_json, config)
 
     async def _poller_loop(
@@ -453,6 +472,7 @@ class WorkflowPollerManager:
         cancel_events = self._run_cancel_events.setdefault(workflow_id, set())
         cancel_events.add(cancel_event)
         inputs = self._build_inputs(config)
+        trigger_id = inputs["_flocks"]["trigger"]["id"]
         try:
             exec_data = await create_execution_record(
                 workflow_id, input_params=inputs,
@@ -520,7 +540,7 @@ class WorkflowPollerManager:
                     "currentNodeId": result.last_node_id,
                     "currentPhase": status_value,
                     "currentStepIndex": step_count,
-                    "triggerId": "schedule-default",
+                    "triggerId": trigger_id,
                     "triggerType": "schedule",
                     "deliveryId": inputs.get("_flocks", {}).get("trigger", {}).get("deliveryId"),
                     "attempt": 1,
@@ -553,7 +573,7 @@ class WorkflowPollerManager:
                     "errorMessage": str(exc),
                     "executionLog": [],
                     "currentPhase": status_value,
-                    "triggerId": "schedule-default",
+                    "triggerId": trigger_id,
                     "triggerType": "schedule",
                     "deliveryId": inputs.get("_flocks", {}).get("trigger", {}).get("deliveryId"),
                     "attempt": 1,

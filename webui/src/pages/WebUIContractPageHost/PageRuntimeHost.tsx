@@ -5,6 +5,7 @@ import {
   type ReactNode,
   useCallback,
   useEffect,
+  useRef,
   useState,
 } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -62,9 +63,10 @@ class WebUIContractPageErrorBoundary extends Component<
 
 interface PageRuntimeHostProps {
   pageId?: string;
+  initialBuildHash?: string;
 }
 
-export default function PageRuntimeHost({ pageId }: PageRuntimeHostProps) {
+export default function PageRuntimeHost({ pageId, initialBuildHash }: PageRuntimeHostProps) {
   const { t } = useTranslation('webuiContractPage');
   const tr = useCallback(
     (key: string) => i18n.t(key, { ns: 'webuiContractPage' }),
@@ -74,42 +76,58 @@ export default function PageRuntimeHost({ pageId }: PageRuntimeHostProps) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [buildHash, setBuildHash] = useState('');
+  const buildHashRef = useRef('');
+  buildHashRef.current = buildHash;
+  // The build on screen loaded fine (a reconnect can then skip reloading it).
+  const healthyRef = useRef(false);
+  healthyRef.current = Boolean(PageComponent) && !error;
+  // Loads are numbered: an update event and a reconnect check can overlap, and
+  // an earlier, slower answer must not replace a newer build.
+  const loadSeqRef = useRef(0);
   const showLoading = useDelayedVisible(loading ? 180 : 0);
 
-  const loadBundle = useCallback(async (hash: string) => {
+  const loadBundle = useCallback(async (hash: string, isCurrent: () => boolean) => {
     if (!pageId || !hash) return;
     const base = getApiBase();
     const url = `${base}/api/contracts/webui/pages/${encodeURIComponent(pageId)}/bundle.js?v=${encodeURIComponent(hash)}`;
     // The runtime is installed right before the bundle evaluates, inside the loader.
     const component = await loadWebUIContractPageBundle(url, tr('host.bundleMissingExport'), pageId);
+    if (!isCurrent()) return;
     setPageComponent(() => component);
     setError(null);
   }, [pageId, tr]);
 
   const refreshPage = useCallback(async (hash?: string) => {
     if (!pageId) return;
+    const seq = ++loadSeqRef.current;
+    const isCurrent = () => loadSeqRef.current === seq;
     setLoading(true);
     try {
-      const response = await webuiContractPagesAPI.get(pageId);
-      const nextHash = hash || response.data.build.hash;
-      setBuildHash(nextHash);
-      if (response.data.build.status !== 'ready' || !nextHash) {
-        setPageComponent(null);
-        setError(response.data.build.error || tr('host.notBuilt'));
-        return;
+      let nextHash = hash;
+      if (!nextHash) {
+        const response = await webuiContractPagesAPI.get(pageId);
+        if (!isCurrent()) return;
+        nextHash = response.data.build.hash;
+        if (response.data.build.status !== 'ready' || !nextHash) {
+          setPageComponent(null);
+          setError(response.data.build.error || tr('host.notBuilt'));
+          return;
+        }
       }
-      await loadBundle(nextHash);
+      setBuildHash(nextHash);
+      await loadBundle(nextHash, isCurrent);
     } catch (err: unknown) {
+      if (!isCurrent()) return;
       setPageComponent(null);
       setError(err instanceof Error ? err.message : tr('host.loadFailed'));
     } finally {
-      setLoading(false);
+      if (isCurrent()) setLoading(false);
     }
   }, [loadBundle, pageId, tr]);
 
   useEffect(() => {
-    void refreshPage();
-  }, [refreshPage]);
+    void refreshPage(initialBuildHash);
+  }, [initialBuildHash, refreshPage]);
 
   useSSE({
     url: '/api/event',
@@ -121,6 +139,7 @@ export default function PageRuntimeHost({ pageId }: PageRuntimeHostProps) {
         return;
       }
       if (evt.type === 'contracts.webui.pages.build_failed' && evt.properties?.id === pageId) {
+        loadSeqRef.current += 1;
         setError((evt.properties?.error as string | undefined) || tr('host.buildFailed'));
         setLoading(false);
         return;
@@ -134,13 +153,33 @@ export default function PageRuntimeHost({ pageId }: PageRuntimeHostProps) {
         setLoading(false);
       }
     }, [pageId, refreshPage, tr]),
+    // Build events sent while the stream was down are not replayed: re-read the
+    // build. A healthy page on the same build stays mounted; a failed build shows
+    // its error; anything else (a new build, a page that failed to load) reloads.
+    onReconnect: useCallback(() => {
+      if (!pageId) return;
+      const seq = loadSeqRef.current;
+      void webuiContractPagesAPI.get(pageId).then((response) => {
+        // A load that started meanwhile (an update event) is newer than this answer.
+        if (loadSeqRef.current !== seq) return;
+        const build = response.data.build;
+        if (build.status === 'failed') {
+          loadSeqRef.current += 1;
+          setError(build.error || tr('host.buildFailed'));
+          setLoading(false);
+          return;
+        }
+        if (build.status !== 'ready' || !build.hash) return;
+        if (build.hash === buildHashRef.current && healthyRef.current) return;
+        void refreshPage(build.hash);
+      }).catch(() => undefined);
+    }, [pageId, refreshPage, tr]),
     reconnect: { maxRetries: 5, initialDelay: 2000 },
   });
 
-  // Contract pages render full-bleed (no layout padding) and the mobile layout
-  // floats its menu button over the top-left corner, so the host's own status
-  // views keep clear of it; custom page components manage their own layout.
-  const statusClassName = 'p-4 pt-20 lg:p-6';
+  // Contract pages render full-bleed (no layout padding), so the host's own
+  // status views bring their own; custom page components manage their own layout.
+  const statusClassName = 'p-4 lg:p-6';
 
   if (!pageId) {
     return <div className={`${statusClassName} text-sm text-zinc-500`}>{t('host.missingPageId')}</div>;

@@ -14,7 +14,11 @@ const { mockUseAgents, nativeAPI, sheetSpy, toastWarning } = vi.hoisted(() => ({
 }));
 
 vi.mock('@/api/agent', () => ({ agentAPI: nativeAPI }));
-vi.mock('@/components/common/Toast', () => ({ useToast: () => ({ warning: toastWarning }) }));
+vi.mock('@/components/common/Toast', async (importOriginal) => ({
+  // Keep the module's other exports (GroupNav uses useOptionalToast).
+  ...(await importOriginal<typeof import('@/components/common/Toast')>()),
+  useToast: () => ({ warning: toastWarning }),
+}));
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -140,8 +144,8 @@ describe('AgentPage business groups and native layouts', () => {
     render(<AgentPage />);
     await screen.findByTitle('Engineering');
     fireEvent.click(screen.getByRole('button', { name: 'view.list' }));
-    const nativeRow = screen.getByText('内置智能体').closest('div.group') as HTMLElement;
-    const customRow = screen.getByText('分析智能体').closest('div.group') as HTMLElement;
+    const nativeRow = screen.getByText('内置智能体').closest('.group') as HTMLElement;
+    const customRow = screen.getByText('分析智能体').closest('.group') as HTMLElement;
     expect(nativeRow).toHaveClass('lg:flex-row');
     expect(within(nativeRow).getByRole('button', { name: '删除' })).toBeDisabled();
     expect(within(customRow).getByText('原生描述')).toBeInTheDocument();
@@ -156,7 +160,7 @@ describe('AgentPage business groups and native layouts', () => {
     fireEvent.click(screen.getByRole('button', { name: 'view.cards' }));
     expect(screen.getByTestId('agent-sheet')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Close sheet' }));
-    fireEvent.click(within(screen.getByText('分析智能体').closest('div.group') as HTMLElement).getByRole('button', { name: '删除' }));
+    fireEvent.click(within(screen.getByText('分析智能体').closest('.group') as HTMLElement).getByRole('button', { name: '删除' }));
     await waitFor(() => expect(nativeAPI.delete).toHaveBeenCalledWith('analyst'));
     expect(refetch).toHaveBeenCalled();
     expect(nativeAPI.update).not.toHaveBeenCalled();
@@ -167,7 +171,7 @@ describe('AgentPage business groups and native layouts', () => {
     const refetch = useInventory([custom, makeAgent({ name: 'other', group: 'Engineering' })]);
     render(<AgentPage />);
     if (viewMode === 'list') fireEvent.click(screen.getByRole('button', { name: 'view.list' }));
-    const source = screen.getByText('user-primary').closest('div.group')?.parentElement as HTMLElement;
+    const source = screen.getByText('user-primary').closest('.group')?.parentElement as HTMLElement;
     fireEvent.click(within(source).getByRole('button', { name: 'editGroup' }));
     expect(screen.queryByTestId('agent-sheet')).not.toBeInTheDocument();
     fireEvent.change(screen.getByRole('combobox'), { target: { value: 'Engineering' } });
@@ -185,12 +189,12 @@ describe('AgentPage business groups and native layouts', () => {
       makeAgent({ name: 'user-agent', native: true, group: 'Mixed', group_readonly: false }),
     ]);
     render(<AgentPage />);
-    const locked = screen.getByText('rex').closest('div.group')!.parentElement!;
+    const locked = screen.getByText('rex').closest('.group')!.parentElement!;
     const dataTransfer = { setData: vi.fn() };
     expect(fireEvent.dragStart(locked, { dataTransfer })).toBe(false);
     expect(dataTransfer.setData).not.toHaveBeenCalled();
     expect(toastWarning).toHaveBeenLastCalledWith('pluginGroups:readOnly.system');
-    expect(fireEvent.dragStart(screen.getByText('core-sub').closest('div.group')!.parentElement!, { dataTransfer })).toBe(false);
+    expect(fireEvent.dragStart(screen.getByText('core-sub').closest('.group')!.parentElement!, { dataTransfer })).toBe(false);
     fireEvent.click(within(locked).getByRole('button', { name: 'editGroup' }));
     expect(toastWarning).toHaveBeenCalledTimes(3);
     expect(nativeAPI.update).not.toHaveBeenCalled();
@@ -202,7 +206,7 @@ describe('AgentPage business groups and native layouts', () => {
     fireEvent.click(screen.getByRole('button', { name: 'create' }));
     expect(within(screen.getByRole('combobox')).getAllByRole('option').map((option) => option.getAttribute('value'))).toEqual(['', 'user-agent']);
     fireEvent.click(screen.getByRole('button', { name: 'cancel' }));
-    fireEvent.keyDown(screen.getByText('user-agent').closest('div.group')!.parentElement!, { key: 'm', altKey: true });
+    fireEvent.keyDown(screen.getByText('user-agent').closest('.group')!.parentElement!, { key: 'm', altKey: true });
     fireEvent.change(screen.getByRole('combobox'), { target: { value: '' } });
     fireEvent.click(screen.getByRole('button', { name: 'save' }));
     await waitFor(() => expect(nativeAPI.update).toHaveBeenCalledExactlyOnceWith('user-agent', { group: null }));
@@ -214,7 +218,7 @@ describe('AgentPage business groups and native layouts', () => {
     nativeAPI.list.mockResolvedValue({ data: [{ ...agent, group_readonly: true }] });
     vi.spyOn(window, 'confirm').mockReturnValue(true);
     render(<AgentPage />);
-    if (operation === 'move') fireEvent.keyDown(screen.getByText('changed').closest('div.group')!.parentElement!, { key: 'm', altKey: true });
+    if (operation === 'move') fireEvent.keyDown(screen.getByText('changed').closest('.group')!.parentElement!, { key: 'm', altKey: true });
     else fireEvent.click(screen.getByRole('button', { name: operation === 'create' ? 'create' : `${operation}Named` }));
     if (operation === 'create' || operation === 'rename') fireEvent.change(screen.getByRole('textbox'), { target: { value: 'New' } });
     if (operation === 'create') fireEvent.change(screen.getByRole('combobox'), { target: { value: 'changed' } });
@@ -241,7 +245,7 @@ describe('AgentPage business groups and native layouts', () => {
     const refetch = useInventory([makeAgent({ name: 'still-visible', group: 'Engineering' })]);
     refetch.mockRejectedValue(new Error('offline'));
     render(<AgentPage />);
-    fireEvent.keyDown(screen.getByText('still-visible').closest('div.group')?.parentElement as HTMLElement, { key: 'm', altKey: true });
+    fireEvent.keyDown(screen.getByText('still-visible').closest('.group')?.parentElement as HTMLElement, { key: 'm', altKey: true });
     fireEvent.change(screen.getByRole('combobox'), { target: { value: '' } });
     fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'save' }));
     await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('offline'));

@@ -169,7 +169,9 @@ vi.mock('react-i18next', () => ({
   }),
 }));
 
-vi.mock('@/components/common/Toast', () => ({
+vi.mock('@/components/common/Toast', async (importOriginal) => ({
+  // Keep the module's other exports (GroupNav uses useOptionalToast).
+  ...(await importOriginal<typeof import('@/components/common/Toast')>()),
   useToast: () => ({
     success: mocks.toastSuccess,
     error: mocks.toastError,
@@ -388,17 +390,16 @@ describe('DeviceIntegrationPage', () => {
     mocks.getSessionMessagesPage.mockResolvedValue({ items: [] });
   });
 
-  it('clears the floating mobile menu button as a full-screen page', async () => {
+  it('pads itself evenly as a full-screen page', async () => {
     const { container } = render(<DeviceIntegrationPage />);
 
     await screen.findByText('设备接入');
 
-    // Layout renders /devices without its padded wrapper, so the page must
-    // reproduce the wrapper's "pt-16 below lg" offset itself.
+    // Layout renders /devices without its padded wrapper. The navigation button
+    // now sits in the workspace header, so no extra top offset is needed.
     const root = container.firstElementChild;
     expect(root).toHaveClass('p-6');
-    expect(root).toHaveClass('pt-16');
-    expect(root).toHaveClass('lg:pt-6');
+    expect(root).not.toHaveClass('pt-16');
   });
 
   it('stacks the room sidebar above the device list below md', async () => {

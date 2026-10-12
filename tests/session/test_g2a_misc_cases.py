@@ -252,6 +252,7 @@ async def test_hook_stage_failure_is_fail_closed_for_streamed_calls():
     HookPipeline.register("crash", Crash(), critical=True)
     cb = AsyncMock()
     proc = _make_processor(event_callback=cb)
+    proc.set_allowed_tool_names(["g2a_echo"])
     with (
         patch("flocks.session.streaming.stream_processor.Message.store_part", new=AsyncMock()),
         patch("flocks.session.streaming.stream_processor.Message.update_part", new=AsyncMock()),

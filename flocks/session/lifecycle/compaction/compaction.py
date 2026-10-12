@@ -983,6 +983,12 @@ class SessionCompaction:
            ``FLOCKS_COMPACTION_FLUSH_TIMEOUT`` (default
            ``_DEFAULT_FLUSH_TIMEOUT_SECONDS``, currently 90s).
         """
+        from flocks.session.session import Session
+
+        session = await Session.get_by_id_unfiltered(session_id)
+        if session is not None and not session.memory_enabled:
+            return
+
         kwargs = dict(
             session_id=session_id,
             summary=summary_text,
@@ -1943,6 +1949,9 @@ class SessionCompaction:
                         "executionMode": getattr(turn_user, "executionMode", None),
                     }
                     turn_fields = {k: v for k, v in turn_fields.items() if v}
+                # turn_fields' agent also preserves an isolated session's agent,
+                # so a synthetic user message can't widen its tool set back to
+                # Rex's default.
                 await Message.create(
                     session_id=session_id,
                     role=MessageRole.USER,

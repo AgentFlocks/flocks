@@ -11,6 +11,7 @@ Reads files from the local filesystem, supporting:
 import os
 import asyncio
 import time
+import json
 import base64
 import mimetypes
 from pathlib import Path
@@ -90,6 +91,49 @@ def _read_text_window(filepath, offset, limit, max_bytes, max_line_length):
             index += 1
 
 
+def _read_line_slice(filepath, line_index, column_start, column_count):
+    """Read one character slice of one line without materializing the file.
+
+    Returns ``(selected, total_columns)``, or ``None`` when the file has no
+    line ``line_index``. The file is opened like ``_read_text_window`` so line
+    numbers match ordinary reads, and the same scan budget applies.
+    """
+    index = 0
+    consumed = 0
+    deadline = time.monotonic() + MAX_TEXT_SCAN_SECONDS
+
+    def next_segment():
+        nonlocal consumed
+        if time.monotonic() >= deadline or consumed >= MAX_TEXT_SCAN_CHARS:
+            raise ValueError("Requested line exceeds the read scan budget; use a text search for this file")
+        segment = stream.readline(min(65536, MAX_TEXT_SCAN_CHARS - consumed))
+        consumed += len(segment)
+        return segment
+
+    with open(filepath, "r", encoding="utf-8", errors="replace") as stream:
+        segment = next_segment()
+        while segment and index < line_index:
+            if segment.endswith("\n"):
+                index += 1
+            segment = next_segment()
+        if not segment:
+            return None
+        # Keep only the requested characters; the rest of the line is counted.
+        length = 0
+        selected = []
+        while segment:
+            text = segment[:-1] if segment.endswith("\n") else segment
+            lo = max(column_start - length, 0)
+            hi = min(column_start + column_count - length, len(text))
+            if lo < hi:
+                selected.append(text[lo:hi])
+            length += len(text)
+            if segment.endswith("\n"):
+                break
+            segment = next_segment()
+        return "".join(selected), length
+
+
 # Binary file extensions
 BINARY_EXTENSIONS = {
     '.zip', '.tar', '.gz', '.exe', '.dll', '.so', '.class', '.jar', '.war',
@@ -113,7 +157,8 @@ Usage:
 - filePath may be absolute, use `~`, or be relative to the current project directory
 - By default, it reads up to 2000 lines starting from the beginning of the file
 - For files longer than 2000 lines, you MUST use offset and limit to read in segments (e.g. offset=0 limit=2000, then offset=2000 limit=2000, etc.)
-- Any lines longer than 2000 characters will be truncated
+- Any lines longer than 2000 characters will be truncated in ordinary line mode
+- To read a long line completely, set offset to its zero-based line number and columnOffset to 0; use columnLimit for the character chunk size. Continue using next_column until has_more is false. Column mode returns JSON for one line and never writes files.
 - Text results are returned with a 5-digit, zero-padded 1-based line number prefix in the form `00001| `
 - You may call multiple independent tools in the same response. Prefer separate parallel Read calls when multiple files are likely to be useful.
 - If you read a file that exists but has empty contents you will receive a system reminder warning in place of file contents.
@@ -229,13 +274,25 @@ def find_similar_files(directory: str, filename: str, max_suggestions: int = 3) 
             required=False,
             default=DEFAULT_READ_LIMIT
         ),
+        ToolParameter(
+            name="columnOffset", type=ParameterType.INTEGER,
+            description="Optional zero-based character offset within the line selected by offset; enables single-line column mode.",
+            required=False,
+        ),
+        ToolParameter(
+            name="columnLimit", type=ParameterType.INTEGER,
+            description="Optional character count in column mode; defaults to the configured line length limit.",
+            required=False,
+        ),
     ]
 )
 async def read_tool(
     ctx: ToolContext,
     filePath: str,
     offset: Optional[int] = None,
-    limit: Optional[int] = None
+    limit: Optional[int] = None,
+    columnOffset: Optional[int] = None,
+    columnLimit: Optional[int] = None,
 ) -> ToolResult:
     """
     Read a file from the local filesystem
@@ -297,10 +354,12 @@ async def read_tool(
     filepath = resolution.resolved_path
     title = resolution.display_path
     
-    return await asyncio.to_thread(_read_resolved, ctx, filepath, title, offset, limit)
+    return await asyncio.to_thread(
+        _read_resolved, ctx, filepath, title, offset, limit, columnOffset, columnLimit,
+    )
 
 
-def _read_resolved(ctx, filepath, title, offset, limit):
+def _read_resolved(ctx, filepath, title, offset, limit, columnOffset=None, columnLimit=None):
     # Check file exists
     if not os.path.exists(filepath):
         directory = os.path.dirname(filepath)
@@ -420,6 +479,37 @@ def _read_resolved(ctx, filepath, title, offset, limit):
     effective_max_line_length = get_read_max_line_length()
     read_limit = min(limit if limit is not None else effective_max_lines, effective_max_lines)
     read_offset = offset if offset is not None else 0
+
+    if columnOffset is not None or columnLimit is not None:
+        column_start = columnOffset if columnOffset is not None else 0
+        column_count = columnLimit if columnLimit is not None else effective_max_line_length
+        if read_offset < 0 or column_start < 0 or column_count < 1 or limit not in (None, 1, DEFAULT_READ_LIMIT):
+            return ToolResult(success=False, error="Column mode requires nonnegative offset/columnOffset, positive columnLimit and a single line.", title=title)
+        try:
+            found = _read_line_slice(
+                filepath, read_offset, column_start, min(column_count, effective_max_bytes),
+            )
+        except Exception as exc:
+            return ToolResult(success=False, error=f"Failed to read file: {exc}", title=title)
+        if found is None:
+            return ToolResult(success=False, error="Line offset is beyond the end of the file.", title=title)
+        chunk, total_columns = found
+        if column_start > total_columns:
+            return ToolResult(success=False, error="Column offset is beyond the end of the line.", title=title)
+        # Bound each response by the existing byte budget; the next column makes
+        # every remaining character reachable, even on multi-megabyte lines.
+        selected = chunk.encode("utf-8")[:effective_max_bytes].decode("utf-8", errors="ignore")
+        if not selected and column_start < total_columns:
+            return ToolResult(success=False, error="The byte budget cannot hold the next character.", title=title)
+        column_end = column_start + len(selected)
+        payload = {
+            "format": "line_slice", "line": read_offset + 1,
+            "column_start": column_start, "column_end": column_end,
+            "total_columns": total_columns, "text": selected,
+            "has_more": column_end < total_columns, "next_column": column_end,
+        }
+        return ToolResult(success=True, output=json.dumps(payload, ensure_ascii=False), title=title)
+
     try:
         raw_lines, has_more_lines, total_lines, truncated_by_bytes, long_lines = _read_text_window(
             filepath, read_offset, read_limit, effective_max_bytes, effective_max_line_length,

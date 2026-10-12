@@ -101,6 +101,81 @@ app.command(
     help="Direct browser control via the built-in CDP runtime",
 )(browser_command)
 
+CLI_EXTENSION_ENTRY_POINT_GROUP = "flocks.cli"
+
+
+def _register_extension_commands(target: typer.Typer) -> None:
+    """Add command groups that installed packages declare under ``flocks.cli``.
+
+    The entry point name is the command name and must not shadow a built-in
+    one; its object is a ``typer.Typer`` or a callable returning one. A broken
+    extension is reported on stderr and never takes the CLI down.
+    """
+    from importlib.metadata import entry_points
+
+    taken = {group.name for group in target.registered_groups} | {
+        command.name for command in target.registered_commands
+    }
+    for entry_point in entry_points(group=CLI_EXTENSION_ENTRY_POINT_GROUP):
+        if entry_point.name in taken:
+            continue
+        try:
+            loaded = entry_point.load()
+            sub_app = loaded if isinstance(loaded, typer.Typer) else loaded()
+            if not isinstance(sub_app, typer.Typer):
+                raise TypeError(f"{entry_point.value} did not provide a typer.Typer")
+        except Exception as exc:  # noqa: BLE001 - extensions must not break the CLI
+            print(f"flocks: skipped CLI extension {entry_point.name!r}: {exc}", file=sys.stderr)
+            continue
+        target.add_typer(sub_app, name=entry_point.name)
+        taken.add(entry_point.name)
+
+
+def _should_load_cli_extensions(target: typer.Typer) -> bool:
+    """Whether this invocation might need a `flocks.cli` extension.
+
+    Loading an extension imports its whole engine (the code-audit extension
+    alone is ~300ms). Built-in commands never need it, so skip loading when the
+    invoked command is a built-in; still load for an unknown command (possibly
+    an extension), for help, and for shell completion.
+    """
+    if os.environ.get("_FLOCKS_COMPLETE") or os.environ.get("_TYPER_COMPLETE_ARGS"):
+        return True
+
+    # The first positional token is the subcommand. Skip options and the value
+    # that follows a value-taking global option in its space-separated form
+    # (only `--log-level`), so `flocks --log-level DEBUG status` still resolves
+    # to `status` rather than treating "DEBUG" as the command.
+    tokens: list[str] = []
+    skip_next = False
+    for arg in sys.argv[1:]:
+        if skip_next:
+            skip_next = False
+            continue
+        if arg == "--log-level":
+            skip_next = True
+            continue
+        if arg.startswith("-"):
+            continue
+        tokens.append(arg)
+    if not tokens:
+        return True  # no args → help lists every command, extensions included
+
+    def command_name(info: typer.models.CommandInfo) -> str:
+        # `@app.command()` leaves name=None; Typer derives it from the callback
+        # (lowercased, underscores become hyphens) only at invocation time.
+        if info.name:
+            return info.name
+        callback = info.callback
+        return (getattr(callback, "__name__", "") or "").lower().replace("_", "-")
+
+    builtin = {group.name for group in target.registered_groups} | {
+        command_name(command) for command in target.registered_commands
+    }
+    builtin.discard("")
+    return tokens[0] not in builtin
+
+
 console = Console()
 
 _SERVICE_PREFIX_RE = re.compile(r"\[(flocks|daemon|watchdog)\]")
@@ -692,6 +767,12 @@ def tui(
             except subprocess.TimeoutExpired:
                 server_process.kill()
             console.print("[green]✓ Server stopped[/green]")
+
+
+# Extension command groups load last, after every built-in is registered, so
+# the built-in set is complete when deciding whether an extension is needed.
+if _should_load_cli_extensions(app):
+    _register_extension_commands(app)
 
 
 if __name__ == "__main__":

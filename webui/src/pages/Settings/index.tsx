@@ -1,11 +1,11 @@
 import PageSelectionGroup from '../PageSelectionGroup';
 import { Suspense, lazy, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import type { ChangeEvent, ComponentType, ReactNode } from 'react';
-import { Navigate, useParams } from 'react-router-dom';
+import { Link, Navigate, useParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import {
-  Check,
   ImageIcon,
+  Settings2,
   Languages,
   Monitor,
   Moon,
@@ -18,6 +18,7 @@ import {
   type LucideIcon,
 } from 'lucide-react';
 import RoutePageSkeleton from '@/components/common/RoutePageSkeleton';
+import PageHeader from '@/components/common/PageHeader';
 import { ThemeContext } from '@/contexts/ThemeContext';
 import { useProductName } from '@/contexts/ProductNameContext';
 import { useToast } from '@/components/common/Toast';
@@ -26,6 +27,7 @@ import { toolFailureConfigApi } from '@/api/toolFailureConfig';
 import {
   isSettingsSectionId,
   useSettingsSectionGroups,
+  type SettingsSection,
   type SettingsSectionId,
 } from '@/utils/settingsSections';
 import { preloadI18nNamespaces } from '@/i18nResources';
@@ -94,15 +96,15 @@ function SegmentedOption({
       type="button"
       aria-pressed={active}
       onClick={onClick}
-      className={`inline-flex h-9 flex-1 items-center justify-center gap-2 rounded-md px-3 text-sm font-semibold transition-colors min-w-0 whitespace-nowrap ${
+      className={`inline-flex h-9 min-w-0 flex-1 items-center justify-center gap-1.5 whitespace-nowrap rounded-md px-2 text-sm font-semibold transition-colors max-[359px]:px-1 ${
         active
           ? 'bg-zinc-950 text-white dark:bg-zinc-100 dark:text-zinc-950'
           : 'text-zinc-600 hover:bg-zinc-100 hover:text-zinc-950 dark:text-zinc-300 dark:hover:bg-zinc-800 dark:hover:text-white'
       }`}
     >
-      <Icon aria-hidden="true" className="h-4 w-4" />
+      {/* Icons keep their size (dropped on very narrow screens); the filled background marks the selected option. */}
+      <Icon aria-hidden="true" className="h-4 w-4 shrink-0 max-[359px]:hidden" />
       {children}
-      {active && <Check aria-hidden="true" className="h-3.5 w-3.5" />}
     </button>
   );
 }
@@ -266,13 +268,14 @@ function PreferencesPanel() {
   };
 
   return (
-    <div className="mx-auto w-full max-w-5xl">
-      <header className="border-b border-zinc-200 pb-6 dark:border-zinc-800">
-        <h1 className="text-2xl font-bold tracking-normal text-zinc-950 dark:text-zinc-50">{t('settingsPreferences')}</h1>
-        <p className="mt-2 text-sm text-zinc-500 dark:text-zinc-400">{t('settingsPreferencesDescription')}</p>
-      </header>
+    <div>
+      <PageHeader
+        title={t('settingsPreferences')}
+        description={t('settingsPreferencesDescription')}
+        icon={<Settings2 className="h-8 w-8" />}
+      />
 
-      <div className="mt-2">
+      <div className="rounded-xl border border-zinc-200 bg-white px-6 dark:border-zinc-800 dark:bg-zinc-900">
         <PreferenceRow
           icon={TextCursorInput}
           title={t('displayName')}
@@ -438,6 +441,38 @@ function extensionSectionPage(section: ExtensionSettingsSection): ComponentType 
   return page;
 }
 
+/** Horizontal tabs across the management pages; only sections this user may open are listed. */
+function SettingsTabs({ sections, activeId }: { sections: SettingsSection[]; activeId: SettingsSectionId }) {
+  const { t } = useTranslation('nav');
+  return (
+    <nav aria-label={t('settingsTitle')} className="border-b border-zinc-200 dark:border-zinc-800">
+      <div className="-mb-px flex gap-1 overflow-x-auto" role="tablist">
+        {sections.map((section) => {
+          const active = section.id === activeId;
+          const Icon = section.icon;
+          return (
+            <Link
+              key={section.id}
+              to={`/settings/${section.id}`}
+              role="tab"
+              aria-selected={active}
+              aria-current={active ? 'page' : undefined}
+              className={`inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap border-b-2 px-3 py-3 text-sm font-medium transition-colors ${
+                active
+                  ? 'border-red-600 text-zinc-950 dark:text-zinc-50'
+                  : 'border-transparent text-zinc-500 hover:border-zinc-300 hover:text-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-200'
+              }`}
+            >
+              <Icon aria-hidden="true" className="h-4 w-4" />
+              {section.name}
+            </Link>
+          );
+        })}
+      </div>
+    </nav>
+  );
+}
+
 function SettingsContent({ sectionId }: { sectionId: SettingsSectionId }) {
   if (sectionId === 'preferences') return <PreferencesPanel />;
 
@@ -478,10 +513,27 @@ export default function SettingsPage() {
     return <Navigate to="/settings/preferences" replace />;
   }
 
-  const visible = groups.flatMap((group) => group.items).some((item) => item.id === sectionId);
+  const sections = groups.flatMap((group) => group.items);
+  const visible = sections.some((item) => item.id === sectionId);
   if (!visible) {
     return <Navigate to="/settings/preferences" replace />;
   }
 
-  return <SettingsContent sectionId={sectionId} />;
+  // A section with its own account-menu entry (an extension's upgrade page, for
+  // example) is reached from there; the tabs cover the management pages.
+  const accountMenuHrefs = new Set(
+    registry.navItems.filter((item) => item.placement === 'accountMenu').map((item) => item.href),
+  );
+  const tabs = sections.filter((item) => !accountMenuHrefs.has(`/settings/${item.id}`));
+  return (
+    <div className="flex h-full min-h-0 flex-col">
+      <SettingsTabs sections={tabs} activeId={sectionId} />
+      <div className="min-h-0 flex-1 overflow-auto">
+        {/* Every tab starts at the tabs' left edge, a fixed gap below them, at one width. */}
+        <div data-testid="settings-content" className="w-full max-w-6xl pb-8 pt-6">
+          <SettingsContent sectionId={sectionId} />
+        </div>
+      </div>
+    </div>
+  );
 }

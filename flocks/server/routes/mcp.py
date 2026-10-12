@@ -30,6 +30,7 @@ from flocks.mcp import (
     McpServerInfo,
 )
 from flocks.mcp.catalog import McpCatalog
+from flocks.mcp.errors import McpServerNotConnectedError
 from flocks.mcp.types import normalize_mcp_group
 from flocks.mcp.auth import McpAuth
 from flocks.mcp.installer import preflight_install, preflight_uninstall
@@ -909,8 +910,9 @@ async def update_mcp_server(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# Aggregate tool/resource listings must be declared before the dynamic
-# ``/{name}`` route, otherwise FastAPI matches ``/tools`` as name="tools".
+# Static collection reads stay above GET /{name}: routes match in
+# registration order, so a later /tools or /resources would be taken for a
+# server named "tools" or "resources".
 
 @router.get(
     "/tools",
@@ -923,11 +925,11 @@ async def get_mcp_tools():
     """Get all available MCP tools (returns tool names)"""
     try:
         from flocks.mcp import McpToolRegistry
-        
+
         tool_names = []
         for server_name in McpToolRegistry.get_all_servers():
             tool_names.extend(McpToolRegistry.get_server_tools(server_name))
-        
+
         return sorted(tool_names)
     except Exception as e:
         log.error("mcp.tools.error", {"error": str(e)})
@@ -1165,6 +1167,14 @@ async def refresh_mcp_tools(
     try:
         count = await MCP.refresh_tools(name)
         return count
+    except McpServerNotConnectedError:
+        # Same existence rule as GET /{name}: known if connected once or configured.
+        if not await MCP.get_server_info(name) and not _load_raw_mcp_server_config(name):
+            raise HTTPException(status_code=404, detail=f"MCP server not found: {name}")
+        raise HTTPException(
+            status_code=409,
+            detail=f"MCP server not connected: {name}. Connect it before refreshing tools.",
+        )
     except Exception as e:
         log.error("mcp.refresh.error", {"name": name, "error": str(e)})
         raise HTTPException(status_code=500, detail=str(e))

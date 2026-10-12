@@ -2455,9 +2455,7 @@ export default function DeviceIntegrationPage() {
   // ──────────────────────────────────────────────────────────────────────────
 
   return (
-    // Full-screen page (Layout skips its padded wrapper): clear the floating
-    // mobile menu button the same way the shared wrapper does below lg.
-    <div className="h-full flex flex-col bg-gray-50 p-6 pt-16 lg:pt-6 overflow-hidden">
+    <div className="h-full flex flex-col p-6 bg-gray-50 overflow-hidden">
       <PageHeader tone="data"
         title={t('pageTitle')}
         description={t('pageDescription')}

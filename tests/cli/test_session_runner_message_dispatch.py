@@ -24,7 +24,7 @@ async def test_plain_text_persists_and_reaches_session_loop(monkeypatch, tmp_pat
         agent="rex", model="test-provider/test-model", auto_confirm=True,
     )
     runner._session = SimpleNamespace(id="cli-regression-session")
-    monkeypatch.setattr(Agent, "get", AsyncMock(return_value=SimpleNamespace(name="rex")))
+    monkeypatch.setattr(Agent, "get", AsyncMock(return_value=SimpleNamespace(name="rex", require_dedicated_session=False)))
     monkeypatch.setattr(Provider, "get", Mock(return_value=SimpleNamespace(is_configured=lambda: True)))
     create_message = AsyncMock()
     run_loop = AsyncMock(return_value=SimpleNamespace(action="stop", message="done"))

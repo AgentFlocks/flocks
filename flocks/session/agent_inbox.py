@@ -54,6 +54,8 @@ class AgentInbox:
     _wakes: dict[str, asyncio.Task] = {}
     # Includes submitted children that have not entered SessionLoop yet.
     _children: dict[str, tuple[str, asyncio.Task]] = {}
+    # The inbox each of those jobs delivers to; once stopped, it drops results.
+    _report_to: dict[str, Inbox] = {}
     _finalizers: set[asyncio.Task] = set()
     # Backoff for a wake that found the session lease held: about 45 s in all,
     # past the 30 s expiry of a lease whose holder died.
@@ -332,6 +334,46 @@ class AgentInbox:
             children = {sid for sid in children
                         if getattr(cls._inboxes.get(sid), "category", None) == only_category}
         return children
+
+    @classmethod
+    def has_pending_reports(cls, session_id: str) -> bool:
+        """Whether delegated work can still report back to this session.
+
+        A subagent reports to the session that delegated it, its first result
+        and every later follow-up, so the whole delegation tree counts: an idle
+        child is still pending while its own subagent runs.  Sessions that are
+        only filed under this one (a WebUI fork) never report back."""
+        from flocks.session.session_loop import SessionLoop
+
+        # A job left over from a stopped run delivers into a closed inbox.
+        jobs = {
+            sid: parent for sid, (parent, _) in cls._children.items()
+            if not getattr(cls._report_to.get(sid), "stopped", False)
+        }
+        delegated: dict[str, set[str]] = {}
+        for sid, parent in jobs.items():
+            delegated.setdefault(parent, set()).add(sid)
+        for sid, box in cls._inboxes.items():
+            if box.parent_id and box.result_callback_factory is not None and not box.stopped:
+                delegated.setdefault(box.parent_id, set()).add(sid)
+
+        seen = {session_id}
+        pending = list(delegated.get(session_id, ()))
+        while pending:
+            sid = pending.pop()
+            if sid in seen:
+                continue
+            seen.add(sid)
+            box = cls._inboxes.get(sid)
+            if (
+                sid in jobs
+                or sid in cls._wakes
+                or SessionLoop.is_running(sid)
+                or (box is not None and box.messages)
+            ):
+                return True
+            pending.extend(delegated.get(sid, ()))
+        return False
 
     @classmethod
     def close(cls, session_id: str) -> None:

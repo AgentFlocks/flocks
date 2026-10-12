@@ -53,7 +53,9 @@ async def provider_runtime(runtime, monkeypatch):
     monkeypatch.setattr(HookPipeline, "run_tool_after", AsyncMock(return_value=None))
     monkeypatch.setattr(Provider, "get_model", lambda _: None)
     monkeypatch.setattr(Provider, "resolve_model", lambda *_: None)
-    monkeypatch.setattr(SessionRunner, "_build_callable_tool_schema", AsyncMock(return_value=[]))
+    # Only tools offered in the turn's schema are callable; offer the stub read tool.
+    monkeypatch.setattr(SessionRunner, "_build_callable_tool_schema",
+                        AsyncMock(return_value=[{"type": "function", "function": {"name": "read"}}]))
     monkeypatch.setattr(SessionRunner, "_build_turn_prompt_context", AsyncMock(return_value=None))
     monkeypatch.setattr(SessionPrompt, "build_system_prompt_blocks", AsyncMock(return_value=[]))
     monkeypatch.setattr(MemoryBootstrap, "bootstrap", AsyncMock(return_value={}))

@@ -24,7 +24,6 @@ def _reset_state() -> None:
     WorkflowStore._handle = None
     WorkflowStore._init_pid = None
     WorkflowStore._db_path = None
-    WorkflowStore._completion_lock = None
 
 
 @pytest.fixture(autouse=True)
@@ -36,6 +35,59 @@ async def isolated_workflow_store(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     yield
     await WorkflowStore.close()
     _reset_state()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_initialization_keeps_one_transaction_handle(monkeypatch) -> None:
+    import flocks.workflow.store as store_module
+
+    await Storage.init()
+    real_open = store_module.open_transaction
+    opened = []
+
+    async def tracked_open(*args, **kwargs):
+        handle = await real_open(*args, **kwargs)
+        opened.append(handle)
+        return handle
+
+    monkeypatch.setattr(store_module, "open_transaction", tracked_open)
+    await asyncio.gather(*(WorkflowStore.init() for _ in range(10)))
+    assert len(opened) == 1
+    assert WorkflowStore._handle is opened[0]
+
+
+@pytest.mark.asyncio
+async def test_cancelled_initialization_closes_the_handle(monkeypatch) -> None:
+    import flocks.workflow.store as store_module
+
+    await Storage.init()
+    entered = asyncio.Event()
+    closed = []
+
+    class BlockedHandle:
+        def transaction(self):
+            return self
+
+        async def __aenter__(self):
+            entered.set()
+            await asyncio.Event().wait()
+
+        async def __aexit__(self, *_exc):
+            return False
+
+        async def close(self):
+            closed.append(self)
+
+    handle = BlockedHandle()
+    monkeypatch.setattr(store_module, "open_transaction", AsyncMock(return_value=handle))
+    task = asyncio.create_task(WorkflowStore.init())
+    await asyncio.wait_for(entered.wait(), timeout=10)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert closed == [handle]
+    assert WorkflowStore._handle is None
+    assert not WorkflowStore._initialized
 
 
 @pytest.mark.asyncio

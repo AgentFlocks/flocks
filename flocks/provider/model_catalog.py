@@ -299,6 +299,56 @@ def list_catalog_provider_ids() -> List[str]:
     return list(_raw_catalog.keys())
 
 
+def get_retired_model_ids(provider_id: str) -> frozenset[str]:
+    """Model IDs withdrawn from a built-in provider, including saved snapshots."""
+    return frozenset(get_raw_catalog().get(provider_id, {}).get("retired_models", []))
+
+
+def _remove_retired_model_config(data: Dict[str, Any]) -> bool:
+    """Remove withdrawn catalog models and their routing/settings references."""
+    retired_keys = {
+        f"{provider_id}/{model_id}"
+        for provider_id in list_catalog_provider_ids()
+        for model_id in get_retired_model_ids(provider_id)
+    }
+    dirty = False
+    for provider_id, pconfig in (data.get("provider") or {}).items():
+        models = pconfig.get("models")
+        if isinstance(models, dict):
+            for model_id in get_retired_model_ids(provider_id):
+                if model_id in models:
+                    del models[model_id]
+                    dirty = True
+
+    settings = data.get("model_settings") or {}
+    for key in retired_keys:
+        if key in settings:
+            del settings[key]
+            dirty = True
+
+    defaults = data.get("default_models") or {}
+    for model_type, config in list(defaults.items()):
+        if isinstance(config, dict) and f"{config.get('provider_id')}/{config.get('model_id')}" in retired_keys:
+            del defaults[model_type]
+            dirty = True
+
+    for field in ("model", "small_model", "smallModel"):
+        if data.get(field) in retired_keys:
+            del data[field]
+            dirty = True
+
+    fallbacks = data.get("fallback_providers") or []
+    active_fallbacks = [
+        entry for entry in fallbacks
+        if f"{entry.get('provider_id')}/{entry.get('model_id')}" not in retired_keys
+    ]
+    if active_fallbacks != fallbacks:
+        data["fallback_providers"] = active_fallbacks
+        dirty = True
+
+    return dirty
+
+
 def sync_catalog_models_to_config() -> int:
     """Sync new models from catalog.json into flocks.json for existing providers.
 
@@ -307,8 +357,9 @@ def sync_catalog_models_to_config() -> int:
     gets a snapshot at first-add time.  This function adds any missing catalog
     models to existing provider entries so they appear automatically.
 
-    Only *new* model IDs are added; existing model entries are never modified
-    or removed, preserving user customizations.
+    Missing model IDs are added. Explicitly retired catalog models and their
+    default/fallback/settings references are removed; other entries and user
+    customizations are preserved.
 
     NOTE: If a user manually removes a catalog model from flocks.json, it will
     be re-added on next startup.  This is intentional — there is currently no
@@ -320,12 +371,9 @@ def sync_catalog_models_to_config() -> int:
     from flocks.config.config_writer import ConfigWriter
 
     data = ConfigWriter._read_raw()
-    providers = data.get("provider", {})
-    if not providers:
-        return 0
-
+    providers = data.get("provider") or {}
     catalog_provider_ids = set(list_catalog_provider_ids())
-    dirty = False
+    dirty = _remove_retired_model_config(data)
     total_added = 0
 
     for provider_id, pconfig in providers.items():

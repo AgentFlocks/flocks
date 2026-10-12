@@ -245,7 +245,7 @@ class TestResolveModel:
         )
         monkeypatch.setattr(
             "flocks.agent.registry.Agent.get",
-            AsyncMock(return_value=SimpleNamespace(name="rex", model=None)),
+            AsyncMock(return_value=SimpleNamespace(name="rex", model=None, require_dedicated_session=False)),
         )
         update_mock = AsyncMock(
             return_value=SimpleNamespace(
@@ -325,6 +325,7 @@ class TestResolveModel:
         agent = SimpleNamespace(
             name="rex",
             model={"providerID": "agent-provider", "modelID": "agent-model"},
+            require_dedicated_session=False,
         )
         fallback_message = SimpleNamespace(
             id="msg_assistant",
@@ -436,7 +437,7 @@ class TestResolveModel:
             model_auto=True,
             category="task",
         )
-        agent = SimpleNamespace(name="rex", model=None)
+        agent = SimpleNamespace(name="rex", model=None, require_dedicated_session=False)
         resolve = AsyncMock(return_value=("direct", "direct-model", "session"))
         default_llm = AsyncMock()
         validate = AsyncMock()
@@ -542,7 +543,7 @@ class TestResolveModel:
         )
         monkeypatch.setattr(
             "flocks.agent.registry.Agent.get",
-            AsyncMock(return_value=SimpleNamespace(name="rex", model=None)),
+            AsyncMock(return_value=SimpleNamespace(name="rex", model=None, require_dedicated_session=False)),
         )
         monkeypatch.setattr("flocks.session.session.Session.update", AsyncMock())
         monkeypatch.setattr("flocks.provider.provider.Provider._ensure_initialized", lambda: None)

@@ -8,7 +8,7 @@ import asyncio
 import time
 from typing import Dict, Optional, Any, List
 from flocks.mcp.client import McpClient
-from flocks.mcp.errors import is_method_not_found_error
+from flocks.mcp.errors import McpServerNotConnectedError, is_method_not_found_error
 from flocks.mcp.types import (
     McpStatus,
     McpStatusInfo,
@@ -345,24 +345,13 @@ class McpServerManager:
         """Return current status without triggering MCP initialization."""
         return self._status.copy(), self._initialized
 
-    async def resources(self) -> Dict[str, McpResource]:
-        """Aggregate resources across all connected servers, keyed by URI.
-
-        Used by ``GET /api/mcp/resources``. Keys are the resource URIs; when the
-        same URI is exposed by more than one server it is namespaced as
-        ``<server>:<uri>`` so entries never overwrite each other.
-        """
-        if not self._initialized:
-            await self.init()
-
-        aggregated: Dict[str, McpResource] = {}
-        for resources in self._resources_cache.values():
-            for resource in resources:
-                key = str(resource.uri)
-                if key in aggregated:
-                    key = f"{resource.server}:{key}"
-                aggregated[key] = resource
-        return aggregated
+    def resources(self) -> Dict[str, McpResource]:
+        """Cached resources of every server, keyed ``<server>:<uri>``."""
+        return {
+            f"{server}:{resource.uri}": resource
+            for server, resources in self._resources_cache.items()
+            for resource in resources
+        }
 
     async def get_server_info(self, name: str) -> Optional[McpServerInfo]:
         """
@@ -510,7 +499,7 @@ class McpServerManager:
             Number of updated tools
         """
         if name not in self._clients:
-            raise ValueError(f"Server not connected: {name}")
+            raise McpServerNotConnectedError(f"Server not connected: {name}")
 
         async with self._lock:
             try:

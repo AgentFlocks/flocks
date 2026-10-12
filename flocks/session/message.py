@@ -1356,21 +1356,6 @@ class Message:
             cls._storage_revisions[session_id] = revision
 
     @classmethod
-    async def _persist_messages(cls, session_id: str) -> None:
-        """Save an explicit snapshot only if no peer has changed it."""
-        from flocks.session import message_pages
-        messages = [cls._normalize_assistant_message(m).model_dump()
-                    for m in cls._messages_cache.get(session_id, [])]
-        async with Storage.transaction() as db:
-            revision = await message_pages.lock_session(db, session_id)
-            if cls._storage_revisions.get(session_id, 0) != revision:
-                raise MessageCacheInvalidatedError("Cannot save an obsolete message snapshot")
-            await message_pages.replace_metadata(db, session_id, messages)
-            await message_pages.sync_document(db, session_id)
-            revision = await message_pages.bump_revision(db, session_id)
-        cls._record_storage_revision(session_id, revision)
-
-    @classmethod
     async def _persist_parts(cls, session_id: str, *, message_id: Optional[str] = None,
                              dirty_only: bool = True) -> None:
         """Flush pending deltas; clean history is never rewritten."""
@@ -1385,6 +1370,50 @@ class Message:
                 # request context. A fresh reader reloads the committed state.
                 cls._parts_dirty.get(session_id, set()).discard(mid)
                 cls._parts_dirty_owners.get(session_id, {}).pop(mid, None)
+
+    @classmethod
+    def _forget_refused_message(cls, session_id: str, message_id: str) -> None:
+        """Drop a message the database refused from this process's cache."""
+        messages = cls._messages_cache.get(session_id)
+        if messages is not None:
+            for index, cached in enumerate(messages):
+                if cached.id == message_id:
+                    del messages[index]
+                    break
+            cls._rebuild_id_index(session_id)
+        cls._parts_cache.get(session_id, {}).pop(message_id, None)
+
+    @staticmethod
+    async def _require_claimed_agent(db: Any, session_id: str, message: MessageInfo) -> None:
+        """Refuse another agent's new user message in a dedicated session.
+
+        The caller holds the session's message lock, which the claim
+        transaction takes first too, so claiming a session and writing its
+        first message never interleave, even across processes. That relies on
+        READ COMMITTED reading the claim committed while this transaction
+        waited; the share lock makes a stricter isolation level fail instead
+        of reading a stale snapshot.
+        """
+        from flocks.session.session import (
+            DEDICATED_AGENT_POLICY_METADATA_KEY,
+            SessionAgentMismatchError,
+        )
+
+        row = await db.fetch_one(
+            "SELECT value -> 'metadata' -> ?::text FROM runtime_state "
+            "WHERE key LIKE 'session:%' AND value ->> 'id' = ? LIMIT 1 FOR SHARE",
+            (DEDICATED_AGENT_POLICY_METADATA_KEY, session_id),
+        )
+        policy = row[0] if row else None
+        policy = json.loads(policy) if isinstance(policy, str) else policy
+        if (
+            isinstance(policy, dict)
+            and policy.get("version") == 1
+            and policy.get("agent") != getattr(message, "agent", None)
+        ):
+            raise SessionAgentMismatchError(
+                f"Session {session_id} is dedicated to agent {policy.get('agent')!r}"
+            )
 
     @classmethod
     async def _persist_indexed_state(
@@ -1428,6 +1457,8 @@ class Message:
                         current = {**current, **patch}
                         model = UserMessageInfo if current.get("role") == "user" else AssistantMessageInfo
                         message = model.model_validate(cls._normalize_stored_message(current, session_id))
+                    elif current is None and message.role == MessageRole.USER:
+                        await cls._require_claimed_agent(db, session_id, message)
                     await message_pages.upsert(db, session_id, message)
                 elif current is not None:
                     model = UserMessageInfo if current.get("role") == "user" else AssistantMessageInfo
@@ -1542,6 +1573,11 @@ class Message:
                     time=kwargs.pop("time"),
                     **kwargs
                 )
+                # Refuse before the cache sees it when the session is already
+                # dedicated to another agent; the check under the message lock
+                # in _persist_indexed_state still has the final word.
+                async with Storage.transaction() as db:
+                    await cls._require_claimed_agent(db, session_id, message)
             else:  # ASSISTANT or SYSTEM
                 # Provide required fields for AssistantMessageInfo
                 message = AssistantMessageInfo(
@@ -1594,12 +1630,18 @@ class Message:
             cls._parts_cache[session_id][message.id].append(part)
             
             # Persist to storage
-            await cls._persist_indexed_state(
-                session_id,
-                message.id,
-                include_messages=True,
-                include_parts=True,
-            )
+            from flocks.session.session import SessionAgentMismatchError
+
+            try:
+                await cls._persist_indexed_state(
+                    session_id,
+                    message.id,
+                    include_messages=True,
+                    include_parts=True,
+                )
+            except SessionAgentMismatchError:
+                cls._forget_refused_message(session_id, message.id)
+                raise
             
             log.info("message.created", {
                 "id": message.id,

@@ -69,6 +69,7 @@ def _make_processor(session_id="ses_gate_once"):
         session_id=session_id,
         assistant_message=message,
         agent=agent,
+        allowed_tool_names=[TOOL_NAME],
     )
 
 

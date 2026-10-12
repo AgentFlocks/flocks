@@ -1,14 +1,16 @@
 import type { ReactNode } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { act, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { __resetAgentsResourceForTesting } from '@/hooks/useAgents';
 import PageDialog from '../PageDialog';
 import AgentPage from './index';
 
-const { listMock, refreshMock } = vi.hoisted(() => ({
+const { listMock, refreshMock, deleteMock, setDelegatableMock } = vi.hoisted(() => ({
   listMock: vi.fn(),
   refreshMock: vi.fn(),
+  deleteMock: vi.fn(),
+  setDelegatableMock: vi.fn(),
 }));
 
 vi.mock('react-i18next', () => ({
@@ -30,6 +32,10 @@ vi.mock('react-i18next', () => ({
       'badge.delegatable': '可委托',
       'badge.delete': '删除',
       'badge.edit': '编辑',
+      'badge.protected': 'Pro 内置',
+      'badge.protectedDeleteDisabled': 'Pro 内置不可删',
+      'badge.protectedEditDisabled': '提示词受保护',
+      'badge.protectedDelegateDisabled': 'Pro 内置不可改委托',
       'form.enabled': '启用',
       'form.enabledTip': '允许委派',
       'form.disabledTip': '禁止委派',
@@ -43,6 +49,8 @@ vi.mock('@/api/agent', () => ({
   agentAPI: {
     list: listMock,
     refresh: refreshMock,
+    delete: deleteMock,
+    setDelegatable: setDelegatableMock,
   },
 }));
 
@@ -53,7 +61,11 @@ vi.mock('@/components/common/PageHeader', () => ({
 }));
 
 // Group writes report failures through toasts; these tests never trigger them.
-vi.mock('@/components/common/Toast', () => ({ useToast: () => ({ warning: vi.fn(), error: vi.fn(), success: vi.fn() }) }));
+vi.mock('@/components/common/Toast', async (importOriginal) => ({
+  // Keep the module's other exports (GroupNav uses useOptionalToast).
+  ...(await importOriginal<typeof import('@/components/common/Toast')>()),
+  useToast: () => ({ warning: vi.fn(), error: vi.fn(), success: vi.fn() }),
+}));
 
 vi.mock('@/components/common/LoadingSpinner', () => ({
   default: () => <div>loading</div>,
@@ -106,6 +118,46 @@ beforeEach(() => {
   refreshMock.mockResolvedValue({ data: { count: 1 } });
 });
 
+describe('AgentPage protected prompts', () => {
+  it('shows a sealed agent as built in, without opening it for editing or deleting it', async () => {
+    const sealed = makeAgent({ name: 'code-security', nameCn: '代码安全审计', mode: 'primary', promptProtected: true, group: 'Engineering' });
+    const custom = makeAgent({ name: 'analyst', nameCn: '分析智能体', mode: 'primary', group: 'Engineering' });
+    listMock.mockResolvedValue({ data: [sealed, custom] });
+    render(<AgentPage />);
+    const card = await screen.findByTestId('agent-card-code-security');
+    expect(within(card).getByText('Pro 内置')).toBeInTheDocument();
+    const edit = within(card).getByRole('button', { name: '编辑' });
+    const remove = within(card).getByRole('button', { name: '删除' });
+    expect(edit).toBeDisabled();
+    expect(edit).toHaveAttribute('title', '提示词受保护');
+    expect(remove).toBeDisabled();
+    expect(remove).toHaveAttribute('title', 'Pro 内置不可删');
+    fireEvent.click(edit);
+    fireEvent.click(within(card).getByText('代码安全审计'));
+    expect(screen.queryByRole('dialog', { name: '编辑 Agent' })).not.toBeInTheDocument();
+    expect(deleteMock).not.toHaveBeenCalled();
+
+    const other = screen.getByTestId('agent-card-analyst');
+    fireEvent.click(within(other).getByRole('button', { name: '编辑' }));
+    expect(screen.getByRole('dialog', { name: '编辑 Agent' })).toBeInTheDocument();
+  });
+
+  it('shows a sealed sub-agent\'s delegation but keeps its switch disabled with the reason', async () => {
+    const sealed = makeAgent({ name: 'sealed-sub', mode: 'subagent', promptProtected: true, delegatable: false });
+    const custom = makeAgent({ name: 'open-sub', mode: 'subagent', delegatable: false });
+    listMock.mockResolvedValue({ data: [sealed, custom] });
+    render(<AgentPage />);
+    const sealedCard = await screen.findByTestId('agent-card-sealed-sub');
+    const sealedSwitch = within(sealedCard).getByRole('switch', { name: '启用' });
+    expect(sealedSwitch).toBeDisabled();
+    expect(sealedSwitch).toHaveAttribute('aria-description', 'Pro 内置不可改委托');
+    expect(within(sealedCard).getByText('enabledBadge.disabled')).toBeInTheDocument();
+    fireEvent.click(sealedSwitch);
+    expect(within(screen.getByTestId('agent-card-open-sub')).getByRole('switch')).toBeEnabled();
+    expect(setDelegatableMock).not.toHaveBeenCalled();
+  });
+});
+
 describe('AgentPage cards', () => {
   it('使用与工作流卡片一致的纯色扁平样式', async () => {
     listMock.mockResolvedValue({
@@ -123,8 +175,8 @@ describe('AgentPage cards', () => {
 
     render(<AgentPage />);
 
-    const nativeCard = (await screen.findByText('Rex 主智能体')).closest('div.group') as HTMLElement;
-    const customCard = screen.getByText('分析智能体').closest('div.group') as HTMLElement;
+    const nativeCard = (await screen.findByText('Rex 主智能体')).closest('.group') as HTMLElement;
+    const customCard = screen.getByText('分析智能体').closest('.group') as HTMLElement;
 
     expect(nativeCard).toHaveClass('bg-white', 'border-gray-200');
     expect(customCard).toHaveClass('bg-white', 'border-gray-200');

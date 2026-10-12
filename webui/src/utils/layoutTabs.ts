@@ -56,16 +56,18 @@ export function saveOpenTabs(records: OpenTabRecord[]): void {
  * Whether `pathname` lives under the sidebar entry `href`: exact match, or a
  * sub-route of it. Home (`/`) only matches exactly.
  */
-export function isPathWithinHref(pathname: string, href: string): boolean {
-  if (href === '/') return pathname === '/';
-  return pathname === href || pathname.startsWith(`${href}/`);
+export function isPathWithinHref(pathname: string, href: string, search = ''): boolean {
+  const [base, query = ''] = href.split('?');
+  const pathMatches = pathname === base || (base !== '/' && pathname.startsWith(`${base}/`));
+  const params = new URLSearchParams(search);
+  return pathMatches && Array.from(new URLSearchParams(query)).every(([key, value]) => params.get(key) === value);
 }
 
 /** The sidebar entry that owns `pathname`; the longest matching href wins. */
-export function findActiveTabHref(hrefs: string[], pathname: string): string | null {
+export function findActiveTabHref(hrefs: string[], pathname: string, search = ''): string | null {
   let best: string | null = null;
   for (const href of hrefs) {
-    if (!isPathWithinHref(pathname, href)) continue;
+    if (!isPathWithinHref(pathname, href, search)) continue;
     if (best === null || href.length > best.length) best = href;
   }
   return best;

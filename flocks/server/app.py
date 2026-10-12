@@ -538,6 +538,15 @@ async def lifespan(app: FastAPI):
     if background_tasks:
         await asyncio.gather(*background_tasks, return_exceptions=True)
 
+    # Extension services (e.g. Pro webhook consumers) stop while sessions and
+    # storage are still available to them.
+    try:
+        from flocks.extensions import run_shutdown_hooks
+
+        await run_shutdown_hooks()
+    except Exception as exc:
+        log.warning("extensions.shutdown_hooks_failed", {"error": str(exc)})
+
     try:
         from flocks.console.scheduler import ConsoleSyncScheduler
 

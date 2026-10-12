@@ -23,8 +23,11 @@ from datetime import datetime
 from flocks.utils.log import Log
 from flocks.utils.id import Identifier
 from flocks.session.session import (
+    DEDICATED_AGENT_POLICY_METADATA_KEY,
     Session,
+    SessionInactiveError,
     SessionInfo,
+    SessionNotFoundError,
     is_model_auto_session_category,
 )
 from flocks.session.message import Message, MessageInfo, MessageRole
@@ -100,6 +103,7 @@ class LoopContext:
     model_id: str
     agent_name: str
     step: int = 0
+    max_steps_reached: bool = False
     abort_event: asyncio.Event = field(default_factory=asyncio.Event)
     # SessionContext interface for decoupled session access
     session_ctx: Optional[Any] = None  # Type: Optional[SessionContext]
@@ -140,6 +144,9 @@ class LoopContext:
     turn_additional_context: Optional[str] = None
     stop_hook_active: bool = False
     session_start_pending: bool = False
+    execution_activity: Dict[str, Any] = field(default_factory=dict, repr=False)
+    # Goal verdict on the turn that ended the loop ("inactive" without a goal).
+    goal_verdict: Optional[str] = None
 
     @property
     def trace_step(self) -> int:
@@ -945,7 +952,37 @@ class SessionLoop:
                 action="error",
                 error=f"Session {session_id} is {session.status}",
             )
-        if working_directory:
+        effective_agent_name = agent_name or session.agent or "rex"
+        from flocks.session.agent_policy import (
+            AgentSessionPolicyError,
+            prepare_session_for_agent,
+        )
+
+        runtime_agent = None
+        try:
+            from flocks.agent.registry import Agent
+
+            runtime_agent = await Agent.get(effective_agent_name)
+            if runtime_agent is None:
+                return LoopResult(
+                    action="error",
+                    error=f"Agent {effective_agent_name!r} is not available",
+                )
+            session = await prepare_session_for_agent(session, runtime_agent)
+        except AgentSessionPolicyError as exc:
+            log.warning("loop.agent_session_policy_rejected", {
+                "session_id": session_id,
+                "agent": effective_agent_name,
+                "error": str(exc),
+            })
+            return LoopResult(action="error", error=str(exc))
+        if working_directory and not (
+            isinstance(getattr(session, "metadata", None), dict)
+            and isinstance(
+                session.metadata.get(DEDICATED_AGENT_POLICY_METADATA_KEY),
+                dict,
+            )
+        ):
             session = session.model_copy(update={"directory": working_directory})
         
         # Resolve model when not explicitly provided
@@ -997,7 +1034,7 @@ class SessionLoop:
             session=session,
             provider_id=provider_id,
             model_id=model_id,
-            agent_name=agent_name or session.agent or "rex",
+            agent_name=effective_agent_name,
             session_ctx=session_ctx,
             trace_step_offset=trace_offset,
             auto_failover=auto_failover,
@@ -1074,10 +1111,16 @@ class SessionLoop:
                 # sent since then is left to the next one, woken by run().
                 if (ctx.should_abort() or result.error or (ctx.inbox is not None and ctx.inbox.stopped)
                         or not AgentInbox.get(session_id).messages):
+                    await cls._settle_todos(ctx, result)
                     return result
         except asyncio.CancelledError:
             # Cancelled between steps (a cancelled step is handled in _run_loop).
             cls._end_cancelled_loop(ctx)
+            # Settle in its own task: the cancellation must reach the caller now.
+            from flocks.session.background_tasks import track_background_task
+            track_background_task(fire_and_forget(
+                cls._settle_todos(ctx, None), label="loop.todo_settle",
+            ))
             raise
         except Exception as e:
             log.error("loop.error", {"session_id": session_id, "error": str(e)})
@@ -1096,12 +1139,14 @@ class SessionLoop:
                 })
             except Exception as exc:
                 log.warn("loop.error.event_error", {"error": str(exc)})
-            return LoopResult(
+            result = LoopResult(
                 action="error",
                 error=str(e),
                 provider_id=ctx.provider_id,
                 model_id=ctx.model_id,
             )
+            await cls._settle_todos(ctx, result)
+            return result
         finally:
             try:
                 clear_turn_state(session_id)
@@ -1136,6 +1181,65 @@ class SessionLoop:
                 if not Session.is_lifecycle_transitioning(session_id) and await InteractionQueue.list(session_id):
                     from flocks.server.routes.session import _schedule_prompt_queue_drain
                     await _schedule_prompt_queue_drain(session_id, session.directory)
+
+    @classmethod
+    async def _settle_todos(cls, ctx: LoopContext, result: Optional[LoopResult]) -> None:
+        """Leave no todo in progress once this run is over (see Todo.settle).
+
+        ``result`` is None for a cancelled run.  The decision is taken under
+        the session write lock, so a todo write or a stop that lands in the
+        meantime is neither overwritten nor missed.
+        """
+        session_id = ctx.session.id
+        try:
+            from flocks.server.routes.question import has_pending_questions
+            from flocks.session.agent_inbox import AgentInbox
+            from flocks.session.features.todo import Todo
+
+            if not Todo.has_in_progress(await Todo.get_snapshot(session_id)):
+                return  # most runs: nothing to settle, no lock taken
+            last = result.last_message if result is not None else None
+            agent_finished = (
+                result is not None
+                and result.action != "error"
+                and not result.error
+                and last is not None
+                and getattr(last, "finish", None) == "stop"
+                and not getattr(last, "error", None)
+                # A goal that is paused, blocked or waiting is not done.
+                and ctx.goal_verdict in (None, "inactive", "complete")
+            )
+
+            async def settle() -> None:
+                current = await Todo.get_snapshot(session_id)
+                # No await from here to the write, so a stop or a newer run
+                # that comes in while reading is still seen.
+                active = cls._active_loops.get(session_id)
+                if active is not None and active is not ctx:
+                    return  # a newer run owns the list now
+                stopped = ctx.should_abort() or (ctx.inbox is not None and ctx.inbox.stopped)
+                # The plan is still live while the user owes an answer or
+                # delegated work can report back (to a stopped run it cannot).
+                if not stopped and (
+                    has_pending_questions(session_id) or AgentInbox.has_pending_reports(session_id)
+                ):
+                    return
+                finished = agent_finished and not stopped
+                todos = Todo.settle(current, finished=finished)
+                if todos is None:
+                    return
+                await Todo.update(session_id, todos)
+                log.info("loop.todo_settled", {
+                    "session_id": session_id,
+                    "finished": finished,
+                    "cleared": not todos,
+                })
+
+            await Session.run_active_write(session_id, settle)
+        except (SessionInactiveError, SessionNotFoundError):
+            pass  # archived or deleted while running
+        except Exception as exc:
+            log.warn("loop.todo_settle.error", {"session_id": session_id, "error": str(exc)})
 
     @staticmethod
     async def _resolve_model(
@@ -1572,8 +1676,14 @@ class SessionLoop:
                 session_start_pending=ctx.session_start_pending,
             )
             runner._step = ctx.trace_step
+            ctx.execution_activity = runner.execution_activity
 
-            step_result = await runner._process_step(messages, last_user)
+            try:
+                step_result = await runner._process_step(messages, last_user)
+            finally:
+                ctx.execution_activity["state"] = "processing"
+                ctx.execution_activity["active_tools"] = {}
+            ctx.max_steps_reached |= bool(getattr(runner, "max_steps_reached", False))
             if runner._session_start_fired:
                 ctx.session_start_pending = False
             failure = step_result.failure
@@ -1671,6 +1781,36 @@ class SessionLoop:
                 event_payload,
             )
 
+    @staticmethod
+    async def _dedicated_agent_violation(
+        session_id: str,
+        messages: List[MessageInfo],
+        step_agent: Optional[str],
+    ) -> Optional[str]:
+        """Re-check a dedicated-agent claim against the step about to run.
+
+        Claims and new user messages share a database lock, but a foreign user
+        message can still be in storage from before the claim checks existed,
+        from an import, or from an older process. It must neither pick the
+        agent for this step nor reach the dedicated agent's context.
+        """
+        current = await Session.get_by_id_unfiltered(session_id)
+        metadata = getattr(current, "metadata", None)
+        policy = (
+            metadata.get(DEDICATED_AGENT_POLICY_METADATA_KEY)
+            if isinstance(metadata, dict)
+            else None
+        )
+        if not (isinstance(policy, dict) and policy.get("version") == 1):
+            return None
+        claimed = policy.get("agent")
+        if step_agent != claimed or any(
+            msg.role == MessageRole.USER and getattr(msg, "agent", None) != claimed
+            for msg in messages
+        ):
+            return f"Session {session_id} is dedicated to agent {claimed!r}"
+        return None
+
     @classmethod
     async def _run_loop(
         cls,
@@ -1691,6 +1831,7 @@ class SessionLoop:
         """
         last_message: Optional[MessageInfo] = None
         loop_error: Optional[str] = None
+        loop_error_code: Optional[str] = None
         retry_preparation = False
 
         while not ctx.should_abort():
@@ -1794,6 +1935,23 @@ class SessionLoop:
                     step=ctx.step,
                     stop_reason="no_user_message",
                 )
+                break
+
+            policy_violation = await cls._dedicated_agent_violation(
+                ctx.session.id,
+                messages,
+                getattr(last_user, "agent", None) or ctx.agent_name,
+            )
+            if policy_violation:
+                log.warning("loop.agent_session_policy_rejected", {
+                    "session_id": ctx.session.id,
+                    "step": ctx.step,
+                    "error": policy_violation,
+                })
+                loop_error = policy_violation
+                loop_error_code = "agent_session_policy"
+                if callbacks.on_error:
+                    await callbacks.on_error(policy_violation)
                 break
 
             last_assistant_parts = (
@@ -2486,8 +2644,15 @@ class SessionLoop:
                 step_result = await step_task
             except asyncio.CancelledError:
                 log.info("loop.step_cancelled", {"session_id": ctx.session.id, "step": ctx.step})
+                if ctx.should_abort():
+                    # The user's Stop: abort() cancelled the step and already
+                    # ended this execution; finish the loop normally.
+                    break
+                # Any other cancel (the task running this loop, e.g. a background
+                # worker cancelled by its manager) must reach the caller instead of
+                # turning into a normal stop; end the cancelled execution first.
                 cls._end_cancelled_loop(ctx)
-                break
+                raise
             finally:
                 ctx._current_step_task = None
                 log.debug("loop.step_complete", {
@@ -2505,6 +2670,7 @@ class SessionLoop:
             # Handle result
             if step_result.action == "stop":
                 loop_error = step_result.error
+                loop_error_code = getattr(step_result, "error_code", None)
                 # Report error if step failed
                 if step_result.error and callbacks.on_error:
                     await callbacks.on_error(step_result.error)
@@ -2526,6 +2692,8 @@ class SessionLoop:
 
                 await cls._record_turn_diffs(ctx, last_user)
 
+                if loop_error_code:
+                    break
                 queued_user = await cls._detect_queued_user_message(
                     ctx.session.id,
                     post_messages,
@@ -2551,6 +2719,7 @@ class SessionLoop:
                     })
                     continue
 
+                ctx.goal_verdict = None
                 if not step_result.error and last_message is not None and runtime_controls.get() is None:
                     try:
                         content_result = Message.get_text_content(last_message)
@@ -2583,6 +2752,7 @@ class SessionLoop:
                         provider_id=ctx.provider_id,
                         model_id=ctx.model_id,
                     )
+                    ctx.goal_verdict = goal_decision.verdict
                     if goal_decision.status in {"completed", "blocked", "paused"} and goal_decision.objective:
                         await cls._publish_runtime_event(callbacks, "session.goal.updated", {
                             "sessionID": ctx.session.id,
@@ -2699,15 +2869,19 @@ class SessionLoop:
         
         # Return result
         return LoopResult(
-            action="error" if ctx.auto_failover and loop_error else "stop",
+            action="error" if loop_error else "stop",
             last_message=last_message,
-            error=loop_error if ctx.auto_failover else None,
+            error=loop_error,
             provider_id=ctx.provider_id,
             model_id=ctx.model_id,
             metadata={
                 "steps": ctx.step,
+                "trace_step": ctx.trace_step,
+                "max_steps_reached": ctx.max_steps_reached,
                 "session_id": ctx.session.id,
                 "last_compaction_step": ctx.last_compaction_step,
+                **({"stop_reason": loop_error} if loop_error else {}),
+                **({"error_code": loop_error_code} if loop_error_code else {}),
                 **({"aborted": True} if ctx.should_abort() else {}),
             },
         )

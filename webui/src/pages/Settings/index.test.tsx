@@ -172,14 +172,35 @@ describe('SettingsPage', () => {
     expect(await screen.findByText('channels page')).toBeInTheDocument();
   });
 
-  it('renders only the section content: the layout sidebar owns the settings menu', async () => {
+  it('switches between management pages with tabs at the top, whatever the workspace sidebar shows', async () => {
+    const user = userEvent.setup();
     const { container } = renderSettings('/settings/system-logs');
 
     expect(await screen.findByText('system logs page')).toBeInTheDocument();
     expect(container.querySelector('aside')).toBeNull();
-    expect(screen.queryByRole('button', { name: 'settingsBack' })).not.toBeInTheDocument();
-    expect(screen.queryByRole('navigation', { name: 'settingsTitle' })).not.toBeInTheDocument();
-    expect(screen.queryByRole('link', { name: 'accountManagement' })).not.toBeInTheDocument();
+    const tabs = screen.getByRole('navigation', { name: 'settingsTitle' });
+    await waitFor(() => expect(within(tabs).getAllByRole('tab').map((tab) => tab.textContent)).toEqual([
+      // Security config and audit logs are extension sections; a stock build has none.
+      'settingsPreferences', 'archivedData', 'accountManagement', 'networkProxy', 'voiceInput', 'systemLog',
+    ]));
+    expect(within(tabs).getByRole('tab', { name: 'systemLog' })).toHaveAttribute('aria-selected', 'true');
+    expect(within(tabs).queryByRole('tab', { name: /flocks/i })).not.toBeInTheDocument();
+
+    await user.click(within(tabs).getByRole('tab', { name: 'archivedData' }));
+    expect(await screen.findByText('archived data page')).toBeInTheDocument();
+    expect(within(tabs).getByRole('tab', { name: 'archivedData' })).toHaveAttribute('aria-selected', 'true');
+  });
+
+  it('lists only the tabs a member may open', async () => {
+    useAuth.mockReturnValue({
+      user: { id: 'user-2', username: 'member', role: 'member', status: 'active', must_reset_password: false },
+    });
+    renderSettings('/settings/preferences');
+
+    const tabs = await screen.findByRole('navigation', { name: 'settingsTitle' });
+    expect(within(tabs).getAllByRole('tab').map((tab) => tab.textContent)).toEqual([
+      'settingsPreferences', 'archivedData', 'accountManagement', 'systemLog',
+    ]);
   });
 
   it('renders archived data management for local users', async () => {

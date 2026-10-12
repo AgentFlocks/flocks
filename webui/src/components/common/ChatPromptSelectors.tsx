@@ -241,6 +241,7 @@ export function useChatModelOptions({ enableAuto = false }: { enableAuto?: boole
     effectiveModelOption,
     modelPickerAutoOption,
     primaryModelOption,
+    resolvedDefaultModelInitialized,
     selectAuto,
     selectModelKey,
     selectedModelAuto,

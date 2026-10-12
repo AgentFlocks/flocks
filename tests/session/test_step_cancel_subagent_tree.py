@@ -162,12 +162,12 @@ def sleep_blocker(entered):
 @pytest.mark.parametrize("phase", ["stream", "budget_wait", "sleep"])
 async def test_cancelled_execution_stops_its_subagents_and_is_not_revived(tmp_path, monkeypatch, loops, phase):
     monkeypatch.setattr("flocks.tool.agent.delegate_task.is_delegatable", lambda _: True)
-    parent = await make(tmp_path, agent="rex_junior")  # e.g. started by a workflow node
+    parent = await make(tmp_path, agent="rex-junior")  # e.g. started by a workflow node
     await Message.create(parent.id, MessageRole.USER, "investigate")
     receipt_msg = await Message.create(parent.id, MessageRole.ASSISTANT, "")
 
     async def delegate(call_id, tool_finished):
-        ctx = ToolContext(parent.id, receipt_msg.id, call_id=call_id, agent="rex_junior",
+        ctx = ToolContext(parent.id, receipt_msg.id, call_id=call_id, agent="rex-junior",
                           extra={"agent_execution_session": True, "tool_finished": tool_finished})
         receipt = await delegate_task_tool(ctx, subagent_type="explore", prompt=call_id, model="p/m")
         assert receipt.success
@@ -235,7 +235,7 @@ async def test_cancelled_execution_stops_its_subagents_and_is_not_revived(tmp_pa
 
 
 async def test_cancel_in_stream_stops_subagents_before_draining_tool_calls(tmp_path, monkeypatch, loops):
-    parent = await make(tmp_path, agent="rex_junior")
+    parent = await make(tmp_path, agent="rex-junior")
     await Message.create(parent.id, MessageRole.USER, "investigate")
     child = await make(tmp_path, parent=parent)
 
@@ -270,7 +270,7 @@ async def test_cancel_in_stream_stops_subagents_before_draining_tool_calls(tmp_p
 
 
 async def test_cancel_outside_a_step_also_stops_subagents(tmp_path, monkeypatch, loops):
-    parent = await make(tmp_path, agent="rex_junior")
+    parent = await make(tmp_path, agent="rex-junior")
     await Message.create(parent.id, MessageRole.USER, "investigate")
     child = await make(tmp_path, parent=parent)  # started by an earlier execution, still running
 
@@ -364,7 +364,7 @@ async def test_task_only_abort_reaches_never_run_child_woken_by_message(tmp_path
 
 async def test_delegation_finishing_after_its_parent_was_closed_does_not_start(tmp_path, monkeypatch, loops):
     monkeypatch.setattr("flocks.tool.agent.delegate_task.is_delegatable", lambda _: True)
-    parent = await make(tmp_path, agent="rex_junior")
+    parent = await make(tmp_path, agent="rex-junior")
     assistant = await Message.create(parent.id, MessageRole.ASSISTANT, "")
     preparing, resume = asyncio.Event(), asyncio.Event()
 
@@ -375,7 +375,7 @@ async def test_delegation_finishing_after_its_parent_was_closed_does_not_start(t
     monkeypatch.setattr("flocks.session.execution_profile.upsert_session_execution_profile", upsert_profile)
     finished = asyncio.Event()
     finished.set()
-    ctx = ToolContext(parent.id, assistant.id, call_id="call-late", agent="rex_junior",
+    ctx = ToolContext(parent.id, assistant.id, call_id="call-late", agent="rex-junior",
                       extra={"agent_execution_session": True, "tool_finished": finished})
     call = asyncio.create_task(delegate_task_tool(ctx, subagent_type="explore", prompt="late", model="p/m"))
     await asyncio.wait_for(preparing.wait(), 2)
@@ -395,7 +395,7 @@ async def test_delegation_waiting_for_permission_does_not_start_once_its_parent_
     tmp_path, monkeypatch, loops,
 ):
     monkeypatch.setattr("flocks.tool.agent.delegate_task.is_delegatable", lambda _: True)
-    parent = await make(tmp_path, agent="rex_junior")
+    parent = await make(tmp_path, agent="rex-junior")
     assistant = await Message.create(parent.id, MessageRole.ASSISTANT, "")
     asking, approve = asyncio.Event(), asyncio.Event()
 
@@ -405,7 +405,7 @@ async def test_delegation_waiting_for_permission_does_not_start_once_its_parent_
 
     finished = asyncio.Event()
     finished.set()
-    ctx = ToolContext(parent.id, assistant.id, call_id="call-asking", agent="rex_junior",
+    ctx = ToolContext(parent.id, assistant.id, call_id="call-asking", agent="rex-junior",
                       permission_callback=permission,
                       extra={"agent_execution_session": True, "tool_finished": finished})
     call = asyncio.create_task(delegate_task_tool(ctx, subagent_type="explore", prompt="asking", model="p/m"))
@@ -424,7 +424,7 @@ async def test_delegation_waiting_for_permission_does_not_start_once_its_parent_
 
 async def test_delegation_after_its_parent_ended_does_not_ask_for_permission(tmp_path, monkeypatch, loops):
     monkeypatch.setattr("flocks.tool.agent.delegate_task.is_delegatable", lambda _: True)
-    parent = await make(tmp_path, agent="rex_junior")
+    parent = await make(tmp_path, agent="rex-junior")
     assistant = await Message.create(parent.id, MessageRole.ASSISTANT, "")
     ended = AgentInbox.bind(parent.id)  # pinned by the step, which was cancelled before this ran
     SessionLoop.end_cancelled_execution(parent.id)
@@ -433,7 +433,7 @@ async def test_delegation_after_its_parent_ended_does_not_ask_for_permission(tmp
     async def permission(request):
         asked.append(request.permission)
 
-    ctx = ToolContext(parent.id, assistant.id, call_id="call-late", agent="rex_junior",
+    ctx = ToolContext(parent.id, assistant.id, call_id="call-late", agent="rex-junior",
                       permission_callback=permission,
                       extra={"agent_execution_session": True, "agent_inbox": ended})
     result = await delegate_task_tool(ctx, subagent_type="explore", prompt="late", model="p/m")
@@ -450,12 +450,12 @@ async def test_delegation_still_in_the_tool_pipeline_does_not_start_after_cancel
     from flocks.tool.registry import ToolRegistry
 
     monkeypatch.setattr("flocks.tool.agent.delegate_task.is_delegatable", lambda _: True)
-    parent = await make(tmp_path, agent="rex_junior")
+    parent = await make(tmp_path, agent="rex-junior")
     assistant = await Message.create(parent.id, MessageRole.ASSISTANT, "")
     ToolRegistry.init()
     AgentInbox.bind(parent.id)  # what SessionLoop.run does for the live execution
     processor = StreamProcessor(session_id=parent.id, assistant_message=assistant,
-                                agent=SimpleNamespace(name="rex_junior"))
+                                agent=SimpleNamespace(name="rex-junior"), allowed_tool_names=["delegate_task"])
     paused, resume = asyncio.Event(), asyncio.Event()
 
     async def sandbox_meta(*args, **kwargs):  # an await of the tool pipeline before the tool runs
@@ -481,7 +481,7 @@ async def test_delegation_still_in_the_tool_pipeline_does_not_start_after_cancel
 
 
 async def test_input_after_a_cancel_cleanup_is_left_to_the_next_execution(tmp_path, monkeypatch, loops):
-    parent = await make(tmp_path, agent="rex_junior")
+    parent = await make(tmp_path, agent="rex-junior")
     await Message.create(parent.id, MessageRole.USER, "investigate")
     wakes = []
     monkeypatch.setattr(AgentInbox, "wake", lambda session_id, publisher=None: wakes.append(session_id))

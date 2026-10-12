@@ -90,6 +90,8 @@ export function useToast() {
 const silentToast = {
   success() {},
   error() {},
+  warning() {},
+  info() {},
 };
 
 export function useOptionalToast() {
@@ -133,7 +135,7 @@ function Toast({ toast, onRemove }: { toast: ToastMessage; onRemove: () => void 
     <div
       data-ui-toast
       className={`flex items-start gap-3 p-4 rounded-lg border shadow-lg animate-slide-in ${config.className}`}
-      role="alert"
+      role={toast.type === 'error' || toast.type === 'warning' ? 'alert' : 'status'}
     >
       <Icon aria-hidden="true" className="w-5 h-5 flex-shrink-0 mt-0.5" />
       <div className="flex-1 min-w-0">
@@ -164,7 +166,7 @@ function ToastContainer({
   if (toasts.length === 0) return null;
 
   return (
-    <div className="fixed bottom-4 right-4 flex flex-col gap-2 pointer-events-none z-50 sm:left-auto sm:w-full sm:max-w-sm">
+    <div className="fixed right-4 top-[4.25rem] z-[100] flex w-[calc(100%-2rem)] max-w-sm flex-col gap-2 pointer-events-none" aria-live="polite">
       {toasts.map((toast) => (
         <div key={toast.id} className="pointer-events-auto">
           <Toast toast={toast} onRemove={() => removeToast(toast.id)} />

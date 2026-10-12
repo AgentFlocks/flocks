@@ -40,6 +40,10 @@ RUNTIME_EVENT_PREFIXES = (
     "context.",
     "permission.",
 )
+# Client-control commands published through /tui/*. Their properties are
+# copied from the request body, so a sessionID inside them is caller-chosen
+# data, not a routing key.
+CONTROL_EVENT_PREFIXES = ("tui.",)
 EVENT_QUEUE_MAXSIZE = max(100, int(os.getenv("FLOCKS_EVENT_QUEUE_MAXSIZE", "1000")))
 EVENT_QUEUE_DROP_TO = max(0, min(
     EVENT_QUEUE_MAXSIZE - 1,
@@ -53,6 +57,11 @@ EVENT_QUEUE_COALESCE_AT = max(1, min(
 
 # Current directory context for SSE events
 _current_directory: str = os.getcwd()
+
+
+def _is_control_event(event: dict) -> bool:
+    event_type = event.get("type")
+    return isinstance(event_type, str) and event_type.startswith(CONTROL_EVENT_PREFIXES)
 
 
 def _event_session_id(event: dict) -> Optional[str]:
@@ -305,11 +314,13 @@ class EventBroadcaster:
           schedulers) or by the API-token service identity go to admins.
         - ``session.deleted`` for a row that is already gone goes to the
           deleting user (as above) and to admins.
+        - Client-control events (``tui.*``) always follow the publisher rules
+          above, even when their properties carry a sessionID.
         """
         async with self._lock:
             clients = list(self._clients.items())
 
-        session_id = _event_session_id(event)
+        session_id = None if _is_control_event(event) else _event_session_id(event)
         if not session_id:
             actor = get_current_auth_user()
             for queue, user in clients:

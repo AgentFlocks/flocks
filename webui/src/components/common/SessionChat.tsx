@@ -204,6 +204,11 @@ function getMessagePartDisplayText(part: MessagePart, hideTaskMetadata = false):
 }
 
 export interface SessionChatProps {
+  /** Domain-authorized transport; shares the workbench UI without generic session writes. */
+  transport?: { messages?: Message[]; disabled?: boolean; send: (text: string) => Promise<unknown>; stop?: () => Promise<unknown> };
+  draftKey?: string;
+  renderMessageFooter?: (message: Message) => React.ReactNode;
+
   /** When null/undefined, only welcomeContent + input are rendered (lazy session). */
   sessionId?: string | null;
   /** Subscribe to SSE for live streaming updates */
@@ -260,6 +265,8 @@ export interface SessionChatProps {
   welcomeContent?: React.ReactNode | ((setInput: (text: string) => void) => React.ReactNode);
   /** Extra content rendered below the conversation area and above the composer. */
   conversationBottomSlot?: React.ReactNode | ((actions: ConversationBottomSlotActions) => React.ReactNode);
+  /** Content above the messages that scrolls with them, e.g. the run a follow-up chat is about. */
+  conversationTopSlot?: React.ReactNode;
   /** Called when SSE connection status changes */
   onSseStatusChange?: (status: SSEConnectionStatus) => void;
   /** Forward SSE events with properties to parent (global events like session.updated) */
@@ -1886,6 +1893,9 @@ function formatComposerReference(reference: ComposerReference): string {
 }
 
 export default function SessionChat({
+  transport,
+  draftKey,
+  renderMessageFooter,
   sessionId,
   live = false,
   placeholder,
@@ -1907,6 +1917,7 @@ export default function SessionChat({
   display,
   welcomeContent,
   conversationBottomSlot,
+  conversationTopSlot,
   onSseStatusChange,
   onSSEEvent,
   onError,
@@ -1957,7 +1968,7 @@ export default function SessionChat({
   // Restore any persisted draft on first mount so navigating away (e.g.
   // sidebar → Agents → back to Sessions) doesn't wipe the user's half-typed
   // message. Subsequent session changes are re-hydrated by the effect below.
-  const [input, setInput] = useState<string>(() => readChatDraft(sessionId));
+  const [input, setInput] = useState<string>(() => readChatDraft(draftKey ?? sessionId));
   const composerBusyOwners = useRef(new Set<string>());
   const [composerBusy, setComposerBusy] = useState(false);
   const setComposerExtensionBusy = useCallback((owner: string, busy: boolean) => {
@@ -2367,7 +2378,7 @@ export default function SessionChat({
     [successfulDocAttachments, successfulImageAttachments],
   );
   const hasUploadingFiles = attachments.some((attachment) => attachment.status === 'uploading');
-  const canSend = !sending && !hasUploadingFiles &&
+  const canSend = !transport?.disabled && !sending && !hasUploadingFiles &&
     (
       !!input.trim()
       || composerReferences.length > 0
@@ -2413,7 +2424,7 @@ export default function SessionChat({
 
 
   const {
-    messages,
+    messages: sessionMessages,
     loading,
     error: messagesError,
     refetch,
@@ -2435,6 +2446,7 @@ export default function SessionChat({
     focusMessage,
   } =
     useSessionMessages(sessionId || undefined);
+  const messages = transport?.messages ?? sessionMessages;
 
   const loadHistoryPage = useCallback(async (direction: 'older' | 'newer') => {
     historyScrollLockRef.current = true;
@@ -3259,7 +3271,6 @@ export default function SessionChat({
     // Swap the draft when the session changes — needed for callers that
     // don't force a remount (Session/index.tsx does, but other consumers
     // such as WorkflowDetail/ChatTab may swap sessionId without a remount).
-    setInput(readChatDraft(sessionId));
     setComposerReferences([]);
     setProcessGroupOpenState(readProcessGroupOpenState(sessionId));
   }, [sessionId, clearPendingQuestions, discardAttachments]);
@@ -3283,13 +3294,17 @@ export default function SessionChat({
     });
   }, [fetchPendingPermissions]);
 
+  useEffect(() => {
+    setInput(readChatDraft(draftKey ?? sessionId));
+  }, [draftKey ?? sessionId]);
+
   // Persist the draft on every keystroke. localStorage writes are synchronous
   // and cheap, so debouncing isn't worth the added latency on send (which
   // depends on the draft being flushed). Drafts are removed when ``input``
   // becomes empty (e.g. after a successful send).
   useEffect(() => {
-    writeChatDraft(sessionId, input);
-  }, [sessionId, input]);
+    writeChatDraft(draftKey ?? sessionId, input);
+  }, [draftKey ?? sessionId, input]);
 
   // Recover streaming state after page refresh / session switch
   useEffect(() => {
@@ -3305,11 +3320,16 @@ export default function SessionChat({
     // reconcileSessionStatusAfterReconnect does.
     const statusRevision = sessionStatusRevisionRef.current;
     let cancelled = false;
+    // Set once the poll has an answer, even a superseded one. A poll cancelled
+    // before that hands the check back to the next run (see cleanup below).
+    let settled = false;
 
     const checkStatus = async () => {
       try {
         const res = await client.get('/api/session/status');
-        if (cancelled || statusRevision !== sessionStatusRevisionRef.current) return;
+        if (cancelled) return;
+        settled = true;
+        if (statusRevision !== sessionStatusRevisionRef.current) return;
         const status = res.data[sessionId];
         if (status?.type === 'busy' && !suppressStreamingUntilIdleRef.current) {
           sessionBusyRef.current = true;
@@ -3344,7 +3364,9 @@ export default function SessionChat({
           sessionBusyRef.current = false;
         }
       } catch {
-        if (cancelled || statusRevision !== sessionStatusRevisionRef.current) return;
+        if (cancelled) return;
+        settled = true;
+        if (statusRevision !== sessionStatusRevisionRef.current) return;
         const lastMsg = messagesRef.current[messagesRef.current.length - 1];
         if (lastMsg?.role === 'assistant' && !lastMsg.finish) {
           setIsStreaming(true);
@@ -3359,7 +3381,16 @@ export default function SessionChat({
       }
     };
     void checkStatus();
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+      // The message load flips ``loading`` false -> true right after mount,
+      // which re-runs this effect and cancels the poll still in flight. Without
+      // this reset the later ``loading=false`` run would skip the session as
+      // already checked, so a reload during a retry showed an idle chat.
+      if (!settled && statusCheckedRef.current === sessionId) {
+        statusCheckedRef.current = null;
+      }
+    };
   }, [sessionId, loading, fetchPendingQuestions]);
 
   // A remote proxy or a reconnect boundary can delay or lose the one-shot
@@ -3837,7 +3868,15 @@ export default function SessionChat({
 
   const handleComposerPrompt = async (text: string, options?: PromptDisplayOptions) => {
     const trimmed = text.trim();
-    if (!trimmed || sending) return;
+    if (!trimmed || sending || transport?.disabled) return;
+    if (transport) {
+      setSending(true);
+      setInput('');
+      try { await transport.send(trimmed); }
+      catch { setInput(trimmed); }
+      finally { setSending(false); }
+      return;
+    }
 
     setInput('');
     setShowCommandDropdown(false);
@@ -3888,6 +3927,16 @@ export default function SessionChat({
 
   const handleSend = async () => {
     if (!canSend || composerBusyOwners.current.size > 0) return;
+    if (transport) {
+      const text = input.trim();
+      if (!text) return;
+      setSending(true);
+      setInput('');
+      try { await transport.send(text); }
+      catch { setInput(text); }
+      finally { setSending(false); }
+      return;
+    }
     const draftText = input.trim();
     const referencesToSend = [...composerReferences];
     const referenceText = referencesToSend.map(formatComposerReference).join(' ');
@@ -4179,7 +4228,8 @@ export default function SessionChat({
     setIsStreaming(false);
     setSending(false);
     try {
-      await client.post(`/api/session/${sessionId}/abort`);
+      if (transport?.stop) await transport.stop();
+      else await client.post(`/api/session/${sessionId}/abort`);
       if (lastAsstMsg?.id) {
         markMessageStopped(lastAsstMsg.id);
       }
@@ -4193,7 +4243,7 @@ export default function SessionChat({
       setIsStreaming(isStreaming);
       setSending(sending);
     }
-  }, [isStreaming, markMessageStopped, sending, sessionId]);
+  }, [isStreaming, markMessageStopped, sending, sessionId, transport?.stop]);
 
   const handleQueuedEditStart = useCallback((item: QueuedPrompt) => {
     startQueuedEdit(item);
@@ -4579,6 +4629,7 @@ export default function SessionChat({
         onScroll={handleScroll}
         style={{ scrollbarGutter: 'stable' }}
       >
+        {conversationTopSlot}
         {loading && messages.length === 0 ? (
           <div className="flex justify-center py-8">
             <LoadingSpinner
@@ -4604,16 +4655,16 @@ export default function SessionChat({
           </div>
         ) : messages.length === 0 ? (
           welcomeContent ? (
-            typeof welcomeContent === 'function' ? (
-              <div className="flex items-center justify-center" style={{ minHeight: '100%' }}>
-                {welcomeContent((text) => { setInput(text); textareaRef.current?.focus(); })}
-              </div>
-            ) : (
-              <div className="flex items-center justify-center" style={{ minHeight: '100%' }}>
-                {welcomeContent}
-              </div>
-            )
-          ) : (
+            // Below top content the welcome follows it instead of filling the view.
+            <div
+              className={`flex items-center justify-center ${conversationTopSlot ? 'py-6' : ''}`}
+              style={conversationTopSlot ? undefined : { minHeight: '100%' }}
+            >
+              {typeof welcomeContent === 'function'
+                ? welcomeContent((text) => { setInput(text); textareaRef.current?.focus(); })
+                : welcomeContent}
+            </div>
+          ) : conversationTopSlot ? null : (
             <div className="text-center py-8 text-gray-400 text-sm">{effectiveEmptyText}</div>
           )
         ) : (
@@ -4627,6 +4678,7 @@ export default function SessionChat({
               </div>
             )}
             <ChatMessageTimeline
+              renderMessageFooter={renderMessageFooter}
               items={historyItems}
               scrollContainerRef={scrollContainerRef}
               focusMessageId={focusMessageId}
@@ -4657,6 +4709,7 @@ export default function SessionChat({
               onOpenContext={onOpenContext}
             />
             <ChatMessageTimeline
+              renderMessageFooter={renderMessageFooter}
               items={tailItems}
               pendingQuestions={pendingQuestions}
               onQuestionAnswer={handleQuestionAnswer}
@@ -4952,9 +5005,9 @@ export default function SessionChat({
               onSelect={(agent) => insertMention(agent.name)}
             />
             <div
-              onDragOver={handleComposerDragOver}
+              onDragOver={transport ? undefined : handleComposerDragOver}
               onDragLeave={handleComposerDragLeave}
-              onDrop={handleComposerDrop}
+              onDrop={transport ? undefined : handleComposerDrop}
               onKeyDown={(event) => {
                 if (showComposerAddMenu && event.key === 'Escape' && !event.defaultPrevented) {
                   event.preventDefault();
@@ -4965,7 +5018,7 @@ export default function SessionChat({
                   if (event.target !== textareaRef.current) composerAddMenuButtonRef.current?.focus();
                 }
               }}
-              className={`${pageCanvas && !compact ? 'rounded-[20px] shadow-[0_3px_12px_rgba(22,27,34,0.045)] min-h-[124px]' : 'rounded-2xl'} border transition-all ${
+              className={`${pageCanvas && !compact ? 'min-h-[124px] rounded-[20px] shadow-[0_3px_12px_rgba(22,27,34,0.045)]' : 'rounded-2xl'} border transition-all ${
                 isCompacting
                   ? 'border-amber-200 bg-amber-50/30 dark:border-amber-500/35 dark:bg-amber-950/25'
                   : isDragOver
@@ -5191,7 +5244,7 @@ export default function SessionChat({
                     onBlur={() => { setTimeout(() => { setShowCommandDropdown(false); setMentionRange(null); }, 100); }}
                     onCompositionStart={() => { isComposingRef.current = true; }}
                     onCompositionEnd={() => { isComposingRef.current = false; }}
-                    onPaste={handleComposerPaste}
+                    onPaste={transport ? undefined : handleComposerPaste}
                     onKeyDown={handleKeyDown}
                     placeholder={
                       isCompacting
@@ -5209,19 +5262,20 @@ export default function SessionChat({
                       minHeight: `${effectiveComposerTextareaMinHeight}px`,
                       maxHeight: `${effectiveComposerTextareaMaxHeight}px`,
                     }}
-                    disabled={sending}
+                    disabled={sending || transport?.disabled}
                     rows={1}
                   />
                 </div>
 
                 {/* Bottom toolbar inside the composer card */}
-                <div className="flex items-center gap-1 px-2 pb-2 flex-wrap [&>*]:shrink-0">
-                  <div className="relative" data-composer-add-menu>
+                {/* Wraps onto a second line when a narrow composer cannot fit every control. */}
+                <div className="flex flex-wrap items-center gap-1 px-2 pb-2">
+                  <div className="relative" data-composer-add-menu hidden={!!transport}>
                     <button
                       ref={composerAddMenuButtonRef}
                       type="button"
                       onClick={toggleComposerAddMenu}
-                      disabled={sending}
+                      disabled={sending || transport?.disabled}
                       title={t('chat.addMenu.title')}
                       aria-label={t('chat.addMenu.title')}
                       aria-haspopup="menu"
@@ -5232,7 +5286,7 @@ export default function SessionChat({
                           : 'text-zinc-500 hover:bg-white hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-white/[0.07] dark:hover:text-white'
                       }`}
                     >
-                      <Plus aria-hidden="true" className="h-[17px] w-[17px]" />
+                      <Plus aria-hidden="true" className="h-[17px] w-[17px]" strokeWidth={2} />
                     </button>
 
                     {showComposerAddMenu && (
@@ -5299,49 +5353,52 @@ export default function SessionChat({
                   />
 
                   {centerToolbarSlot && (
-                    <div className="ml-1 max-w-full">
+                    // Starts from its narrowest usable width (a shortened model name), so the row
+                    // shrinks the model name first and only wraps when even that does not fit.
+                    <div className="ml-1 min-w-0 max-w-max grow basis-44">
                       {centerToolbarSlot}
                     </div>
                   )}
 
-                  <div className="flex-1" />
+                  {/* Usage and send stay together on the right, also when they wrap to their own line. */}
+                  <div className="ml-auto flex shrink-0 items-center gap-1">
+                    {resolvedContextWindowTokens > 0 && (
+                      <ContextUsageRing
+                        percent={contextUsagePercent}
+                        title={contextUsageTitle}
+                        usedTokens={estimatedContextTokens}
+                        totalTokens={resolvedContextWindowTokens}
+                        breakdown={contextUsageBreakdown}
+                      />
+                    )}
 
-                  {resolvedContextWindowTokens > 0 && (
-                    <ContextUsageRing
-                      percent={contextUsagePercent}
-                      title={contextUsageTitle}
-                      usedTokens={estimatedContextTokens}
-                      totalTokens={resolvedContextWindowTokens}
-                      breakdown={contextUsageBreakdown}
-                    />
-                  )}
-
-                  {isStreaming ? (
-                    canSend && !composerBusy && (
+                    {isStreaming ? (
+                      canSend && !composerBusy && (
+                        <button
+                          onClick={handleSend}
+                          title={hasUploadingFiles ? t('chat.upload.waiting') : t('chat.queue.enqueue')}
+                          className="inline-flex h-8 w-8 items-center justify-center rounded-full bg-sky-500 text-white shadow-sm transition-all hover:bg-sky-600 hover:shadow"
+                        >
+                          {sending || hasUploadingFiles ? <Loader2 aria-hidden="true" className="w-4 h-4 animate-spin" /> : <ArrowUp aria-hidden="true" className="w-4 h-4" strokeWidth={2.5} />}
+                        </button>
+                      )
+                    ) : (
                       <button
                         onClick={handleSend}
-                        title={hasUploadingFiles ? t('chat.upload.waiting') : t('chat.queue.enqueue')}
-                        className="inline-flex h-8 w-8 items-center justify-center rounded-full bg-sky-500 text-white shadow-sm transition-all hover:bg-sky-600 hover:shadow"
+                        disabled={!canSend || composerBusy}
+                        aria-label={t('chat.sendTitle')}
+                        title={hasUploadingFiles ? t('chat.upload.waiting') : t('chat.sendTitle')}
+                        className={`inline-flex h-8 w-8 items-center justify-center rounded-full transition-all ${
+                          canSend && !composerBusy
+                            ? 'bg-sky-500 text-white hover:bg-sky-600 shadow-sm hover:shadow'
+                            : 'cursor-not-allowed border border-zinc-300 bg-zinc-200 text-zinc-400 dark:border-[#5a6573] dark:bg-[#46515e] dark:text-[#b8c2cc]'
+                        }`}
                       >
-                        {sending || hasUploadingFiles ? <Loader2 aria-hidden="true" className="w-4 h-4 animate-spin" /> : <ArrowUp aria-hidden="true" className="w-4 h-4" strokeWidth={2} />}
+                        {sending || hasUploadingFiles ? <Loader2 aria-hidden="true" className="w-4 h-4 animate-spin" /> : <ArrowUp aria-hidden="true" className="w-4 h-4" strokeWidth={2.5} />}
                       </button>
-                    )
-                  ) : (
-                    <button
-                      onClick={handleSend}
-                      disabled={!canSend || composerBusy}
-                      aria-label={t('chat.sendTitle')}
-                      title={hasUploadingFiles ? t('chat.upload.waiting') : t('chat.sendTitle')}
-                      className={`inline-flex h-8 w-8 items-center justify-center rounded-full transition-all ${
-                        canSend && !composerBusy
-                          ? 'bg-sky-500 text-white hover:bg-sky-600 shadow-sm hover:shadow'
-                          : 'cursor-not-allowed border border-zinc-300 bg-zinc-200 text-zinc-400 dark:border-[#5a6573] dark:bg-[#46515e] dark:text-[#b8c2cc]'
-                      }`}
-                    >
-                      {sending || hasUploadingFiles ? <Loader2 aria-hidden="true" className="w-4 h-4 animate-spin" /> : <ArrowUp aria-hidden="true" className="w-4 h-4" strokeWidth={2} />}
-                    </button>
-                  )}
-                  {stopButton}
+                    )}
+                    {stopButton}
+                  </div>
                 </div>
             </div>
           </div>
@@ -5517,6 +5574,7 @@ interface ChatMessageTimelineProps extends Omit<ChatMessageBubbleProps, 'message
   scrollContainerRef?: RefObject<HTMLDivElement | null>;
   focusMessageId?: string | null;
   onFocusMessageConsumed?: () => void;
+  renderMessageFooter?: (message: Message) => React.ReactNode;
 }
 
 function ChatMessageTimelineInner({
@@ -5524,6 +5582,7 @@ function ChatMessageTimelineInner({
   scrollContainerRef,
   focusMessageId,
   onFocusMessageConsumed,
+  renderMessageFooter,
   pendingQuestions,
   onQuestionAnswer,
   onQuestionReject,
@@ -5648,6 +5707,7 @@ function ChatMessageTimelineInner({
             onOpenContextFile={onOpenContextFile}
             onOpenContext={onOpenContext}
           />
+          {renderMessageFooter?.(message)}
         </div>
       ))}
     </div>

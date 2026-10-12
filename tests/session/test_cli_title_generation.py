@@ -420,6 +420,7 @@ class TestProcessMessageTitleGeneration:
 
         mock_agent = MagicMock()
         mock_agent.name = "rex"
+        mock_agent.require_dedicated_session = False
         mock_provider_inst = MagicMock()
         mock_provider_inst.is_configured = MagicMock(return_value=True)
         title_generate_mock = AsyncMock(return_value="Test Title")
@@ -476,6 +477,7 @@ class TestProcessMessageTitleGeneration:
 
         mock_agent = MagicMock()
         mock_agent.name = "rex"
+        mock_agent.require_dedicated_session = False
         mock_provider_inst = MagicMock()
         mock_provider_inst.is_configured = MagicMock(return_value=True)
         title_generate_mock = AsyncMock(return_value=None)

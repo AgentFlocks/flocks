@@ -7,7 +7,7 @@ import {
   type Location,
   type RouteObject,
 } from 'react-router-dom';
-import { BOUNDED_HEIGHT_PATH_PATTERNS, FULL_SCREEN_PATH_PATTERNS } from '@/routes/contentRoutes';
+import { FULL_SCREEN_PATH_PATTERNS } from '@/routes/contentRoutes';
 import { PaneActiveContext } from './PaneActiveContext';
 
 export interface KeepAlivePane {
@@ -27,10 +27,6 @@ export function isFullScreenPath(pathname: string): boolean {
   return FULL_SCREEN_PATH_PATTERNS.some((pattern) => matchPath(pattern, pathname) !== null);
 }
 
-export function isBoundedHeightPath(pathname: string): boolean {
-  return BOUNDED_HEIGHT_PATH_PATTERNS.some((pattern) => matchPath(pattern, pathname) !== null);
-}
-
 interface PaneProps {
   active: boolean;
   location: Location;
@@ -42,7 +38,6 @@ function Pane({ active, location, routes }: PaneProps) {
   // inside it, so a hidden tab never reacts to the active tab's route.
   const element = useRoutes(routes, location);
   const fullScreen = isFullScreenPath(location.pathname);
-  const boundedHeight = isBoundedHeightPath(location.pathname);
   // Descendants with transition-all can delay inherited visibility changes.
   // Hide the whole pane immediately with opacity while preserving its layout.
   return (
@@ -54,14 +49,7 @@ function Pane({ active, location, routes }: PaneProps) {
           inert={!active}
           data-keep-alive-pane={active ? 'active' : 'inactive'}
         >
-          {fullScreen ? element : boundedHeight ? (
-            // A fixed-height viewer (its own <pre> scrolls and auto-scroll relies
-            // on that) gets a bounded flex box instead of the min-h-full wrapper
-            // the long-form pages use, which would let it grow to the full log.
-            <div className="flex h-full min-h-0 flex-col p-6">
-              <div className="flex min-h-0 flex-1 flex-col">{element}</div>
-            </div>
-          ) : (
+          {fullScreen ? element : (
             <div className="h-full overflow-y-auto">
               <div className="p-6 min-h-full shrink-0">{element}</div>
             </div>

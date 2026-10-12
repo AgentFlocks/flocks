@@ -1,30 +1,34 @@
+import type { LucideIcon } from 'lucide-react';
 import {
-  Activity as ActivityIcon,
-  AlertTriangle as AlertTriangleIcon,
-  BarChart3 as BarChart3Icon,
-  FileText as FileTextIcon,
-  FolderOpen as FolderOpenIcon,
-  LayoutDashboard as LayoutDashboardIcon,
-  LineChart as LineChartIcon,
-  ShieldCheck as ShieldCheckIcon,
-  Shield as ShieldIcon,
-  Table as TableIcon,
-  type LucideIcon,
+  Activity,
+  AlertTriangle,
+  BarChart3,
+  FileText,
+  FolderOpen,
+  Home,
+  LayoutDashboard,
+  ListTodo,
+  LineChart,
+  Shield,
+  ShieldCheck,
+  Table,
 } from 'lucide-react';
 
 const ICON_MAP: Record<string, LucideIcon> = {
-  LayoutDashboard: LayoutDashboardIcon,
-  BarChart3: BarChart3Icon,
-  LineChart: LineChartIcon,
-  Table: TableIcon,
-  FileText: FileTextIcon,
-  FolderOpen: FolderOpenIcon,
-  Shield: ShieldIcon,
-  ShieldCheck: ShieldCheckIcon,
-  AlertTriangle: AlertTriangleIcon,
-  Activity: ActivityIcon,
+  LayoutDashboard,
+  BarChart3,
+  LineChart,
+  Table,
+  FileText,
+  FolderOpen,
+  Shield,
+  ShieldCheck,
+  AlertTriangle,
+  Activity,
+  Home,
+  ListTodo,
 };
 
 export function resolveWebUIContractPageIcon(name: string): LucideIcon {
-  return ICON_MAP[name] || LayoutDashboardIcon;
+  return ICON_MAP[name] || LayoutDashboard;
 }

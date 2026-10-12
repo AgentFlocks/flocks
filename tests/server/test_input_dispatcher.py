@@ -124,8 +124,9 @@ class TestDispatchUserInput:
             write,
             *,
             expected_generation=None,
+            expected_agent=None,
         ):
-            del expected_generation
+            del expected_generation, expected_agent
             return await write()
 
         async def fake_dispatch(event, sink):
@@ -414,6 +415,115 @@ class TestDispatchUserInput:
 
 
 class TestSessionRoutesUseDispatcher:
+    @pytest.mark.asyncio
+    async def test_prompt_async_applies_dedicated_directory_before_instance_bootstrap(
+        self,
+        monkeypatch,
+        tmp_path,
+    ):
+        from flocks.server.routes import session as session_routes
+
+        hostile = tmp_path / "hostile"
+        isolated = tmp_path / "isolated"
+        hostile.mkdir()
+        isolated.mkdir()
+        session = SimpleNamespace(
+            id="ses_prebootstrap",
+            directory=str(hostile),
+            agent="dedicated-agent",
+            metadata={},
+        )
+        prepared = SimpleNamespace(
+            id=session.id,
+            directory=str(isolated),
+            agent="dedicated-agent",
+            metadata={
+                "_dedicated_agent_policy": {
+                    "agent": "dedicated-agent",
+                    "version": 1,
+                }
+            },
+        )
+        agent = SimpleNamespace(
+            name="dedicated-agent",
+            mode="primary",
+            hidden=False,
+            tags=[],
+            require_dedicated_session=True,
+        )
+        prepare = AsyncMock(return_value=prepared)
+        bootstrapped_directories = []
+
+        async def fake_provide(*, directory, init, fn):
+            del init, fn
+            bootstrapped_directories.append(directory)
+
+        monkeypatch.setattr(
+            "flocks.session.session.Session.get_by_id",
+            AsyncMock(return_value=session),
+        )
+        monkeypatch.setattr(
+            "flocks.agent.registry.Agent.get",
+            AsyncMock(return_value=agent),
+        )
+        monkeypatch.setattr(
+            "flocks.session.agent_policy.prepare_session_for_agent",
+            prepare,
+        )
+        monkeypatch.setattr("flocks.project.instance.Instance.provide", fake_provide)
+
+        response = await session_routes.send_session_message_async(
+            session.id,
+            session_routes.PromptRequest(
+                parts=[{"type": "text", "text": "scan"}],
+                agent=agent.name,
+            ),
+        )
+        await asyncio.sleep(0)
+
+        assert response["status"] == "accepted"
+        prepare.assert_awaited_once_with(session, agent)
+        assert bootstrapped_directories == [str(isolated.resolve())]
+
+    @pytest.mark.asyncio
+    async def test_dispatch_claims_bound_dedicated_agent_before_input(
+        self,
+        monkeypatch,
+    ):
+        from flocks.server.routes import session as session_routes
+
+        session = SimpleNamespace(id="ses_dedicated", agent="dedicated-agent")
+        agent = SimpleNamespace(name="dedicated-agent", require_dedicated_session=True)
+        prepare = AsyncMock(return_value=session)
+        dispatch = AsyncMock()
+        monkeypatch.setattr(
+            "flocks.agent.registry.Agent.get",
+            AsyncMock(return_value=agent),
+        )
+        monkeypatch.setattr(
+            "flocks.session.agent_policy.prepare_session_for_agent",
+            prepare,
+        )
+        monkeypatch.setattr(
+            "flocks.input.dispatcher.dispatch_user_input",
+            dispatch,
+        )
+
+        await session_routes._dispatch_sse_input(
+            session.id,
+            session,
+            UserInputEvent(
+                source_type="webui",
+                sessionID=session.id,
+                text="scan this tree",
+                parts=[{"type": "text", "text": "scan this tree"}],
+            ),
+            "/tmp/project",
+        )
+
+        prepare.assert_awaited_once_with(session, agent)
+        dispatch.assert_awaited_once()
+
     @pytest.mark.asyncio
     async def test_goal_mode_publishes_active_goal_before_llm(self, monkeypatch):
         from flocks.input.events import UserInputEvent

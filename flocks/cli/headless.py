@@ -181,6 +181,7 @@ async def run_headless(options: ExecOptions, emit: Callable[[dict], None] | None
     from flocks.provider.provider import Provider
     from flocks.session.message import FilePart, Message, MessageRole
     from flocks.session.runner import RunnerCallbacks
+    from flocks.session.session import Session
     from flocks.session.session_loop import LoopCallbacks, SessionLoop
     from flocks.tool.registry import ToolRegistry
     from flocks.sandbox.config import resolve_sandbox_config_for_agent
@@ -240,12 +241,16 @@ async def run_headless(options: ExecOptions, emit: Callable[[dict], None] | None
         if options.schema is not None:
             prompt = (prompt or "Continue the previous task.") + "\nReturn only JSON matching this JSON Schema:\n" + json.dumps(options.schema, ensure_ascii=False)
         if prompt is not None:
-            user = await Message.create(
-                session_id=session.id, role=MessageRole.USER, content=prompt,
-                agent=agent_name, model={"providerID": provider_id, "modelID": model_id},
-            )
-            for attachment in options.images:
-                await Message.add_part(session.id, user.id, FilePart(sessionID=session.id, messageID=user.id, **attachment))
+            async def append_prompt():
+                user = await Message.create(
+                    session_id=session.id, role=MessageRole.USER, content=prompt,
+                    agent=agent_name, model={"providerID": provider_id, "modelID": model_id},
+                )
+                for attachment in options.images:
+                    await Message.add_part(session.id, user.id, FilePart(sessionID=session.id, messageID=user.id, **attachment))
+            # Like the HTTP and channel entry points: a session dedicated to
+            # another agent rejects the prompt before anything is written.
+            await Session.run_active_write(session.id, append_prompt, expected_agent=agent_name)
 
         async def on_text(delta):
             emit({"type": "text_delta", "delta": delta})

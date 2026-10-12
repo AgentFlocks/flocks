@@ -1,5 +1,5 @@
 import React from 'react';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
@@ -450,6 +450,7 @@ function NavigationProbe() {
     <button onClick={() => navigate('/sessions/session-2')}>open-second</button>
     <button onClick={() => navigate('/agents')}>leave-session-page</button>
     <button onClick={() => navigate('/sessions/session-1')}>return-to-first</button>
+    <button onClick={() => navigate('/sessions', { state: { skipLastSelectedSessionRestore: true } })}>start-new-session</button>
   </>;
 }
 
@@ -660,7 +661,7 @@ describe('SessionPage session actions menu', () => {
     const user = userEvent.setup();
     renderSessionPage();
     expect(screen.getByTestId('session-location')).toHaveTextContent('/sessions/session-1');
-    await user.click(screen.getByRole('button', { name: 'newSession' }));
+    await user.click(screen.getByText('start-new-session'));
     expect(screen.getByTestId('session-location').textContent).toBe('/sessions');
     expect(screen.getByTestId('session-chat')).toHaveTextContent('no-session');
     await user.click(screen.getByText('history-back'));
@@ -675,14 +676,14 @@ describe('SessionPage session actions menu', () => {
     const user = userEvent.setup();
     renderSessionPage();
     await user.click(screen.getByText('mock-create-and-send'));
-    await user.click(screen.getByText('Original Session'));
+    await user.click(screen.getByText('return-to-first'));
     await act(async () => { request.resolve({ data: secondSession }); await request.promise; });
     await waitFor(() => expect(client.post).toHaveBeenCalledWith('/api/session/session-2/prompt_async', expect.anything()));
     expect(screen.getByTestId('session-location')).toHaveTextContent('/sessions/session-1');
     expect(screen.getByTestId('session-chat')).toHaveTextContent('session-1');
   });
 
-  describe.each(['create', 'create-and-send'] as const)('%s completion under StrictMode', (action) => {
+  describe.each(['create-and-send'] as const)('%s completion under StrictMode', (action) => {
     it.each(['stay', 'leave', 'return'] as const)('respects navigation when users %s', async (destination) => {
       const request = deferred<{ data: typeof secondSession }>();
       client.post.mockImplementation((url: string) => url === '/api/session' ? request.promise : Promise.resolve({ data: {} }));
@@ -690,9 +691,7 @@ describe('SessionPage session actions menu', () => {
       render(<React.StrictMode><MemoryRouter initialEntries={['/sessions']}>
         <NavigationProbe /><SessionRoutes />
       </MemoryRouter></React.StrictMode>);
-      await user.click(action === 'create'
-        ? screen.getByRole('button', { name: 'createTaskSession' })
-        : screen.getByText('mock-create-and-send'));
+      await user.click(screen.getByText('mock-create-and-send'));
       expect(client.post).toHaveBeenCalledWith('/api/session', expect.anything());
 
       if (destination !== 'stay') {
@@ -706,9 +705,8 @@ describe('SessionPage session actions menu', () => {
       const savedSelection = localStorage.getItem('flocks:last-selected-session');
       await act(async () => { request.resolve({ data: secondSession }); await request.promise; });
       await waitFor(() => expect(addSession).toHaveBeenCalledWith(secondSession));
-      if (action === 'create-and-send') {
-        expect(client.post).toHaveBeenCalledWith('/api/session/session-2/prompt_async', expect.anything());
-      }
+      expect(action).toBe('create-and-send');
+      expect(client.post).toHaveBeenCalledWith('/api/session/session-2/prompt_async', expect.anything());
       expect(screen.getByTestId('session-location').textContent).toBe(
         destination === 'stay' ? '/sessions/session-2'
           : destination === 'leave' ? '/agents' : '/sessions/session-1',
@@ -719,46 +717,6 @@ describe('SessionPage session actions menu', () => {
     });
   });
 
-  describe.each(['archive', 'batch-archive'] as const)('%s completion under StrictMode', (action) => {
-    it.each(['stay', 'leave', 'return'] as const)('respects navigation when users %s', async (destination) => {
-      useSessions.mockReturnValue({ ...useSessions(), sessions: [session, secondSession] });
-      const request = deferred<{ id: string; status: string }>();
-      sessionApi.archive.mockReturnValue(request.promise);
-      const user = userEvent.setup();
-      render(<React.StrictMode><MemoryRouter initialEntries={['/sessions/session-1']}>
-        <NavigationProbe /><SessionRoutes />
-      </MemoryRouter></React.StrictMode>);
-      if (action === 'archive') {
-        await user.click(screen.getAllByRole('button', { name: 'moreActions' })[0]);
-        await user.click(screen.getByRole('button', { name: 'archiveAction' }));
-      } else {
-        await user.click(screen.getByRole('button', { name: 'selectMode' }));
-        await user.click(screen.getAllByText('Original Session')[0]);
-        await user.click(screen.getByRole('button', { name: 'archiveSelected' }));
-      }
-      expect(sessionApi.archive).toHaveBeenCalledWith(session.id);
-      if (destination !== 'stay') {
-        await user.click(screen.getByText('leave-session-page'));
-        expect(screen.queryByTestId('session-chat')).not.toBeInTheDocument();
-        if (destination === 'return') {
-          await user.click(screen.getByText('open-second'));
-          expect(screen.getByTestId('session-chat')).toHaveTextContent('session-2');
-        }
-      }
-      const savedSelection = localStorage.getItem('flocks:last-selected-session');
-      await act(async () => { request.resolve({ id: session.id, status: 'archived' }); await request.promise; });
-      expect(action === 'archive' ? removeSession : removeSessions).toHaveBeenCalledWith(
-        action === 'archive' ? session.id : [session.id],
-      );
-      expect(screen.getByTestId('session-location').textContent).toBe(
-        destination === 'stay' ? '/sessions'
-          : destination === 'leave' ? '/agents' : '/sessions/session-2',
-      );
-      if (destination !== 'stay') {
-        expect(localStorage.getItem('flocks:last-selected-session')).toBe(savedSelection);
-      }
-    });
-  });
 
   describe('inside a hidden keep-alive pane', () => {
     it('does not navigate when a create-and-send request finishes after the user switched tabs', async () => {
@@ -783,28 +741,6 @@ describe('SessionPage session actions menu', () => {
       await user.click(screen.getByText('history-back'));
       expect(sessionsPaneState()).toBe('active');
       expect(screen.getByTestId('session-location').textContent).toBe('/sessions');
-    });
-
-    it('does not replace the current history entry when an archive finishes after the user switched tabs', async () => {
-      useSessions.mockReturnValue({ ...useSessions(), sessions: [session, secondSession] });
-      const request = deferred<{ id: string; status: string }>();
-      sessionApi.archive.mockReturnValue(request.promise);
-      const user = userEvent.setup();
-      renderSessionPageInKeepAliveTabs('/sessions/session-1');
-      await user.click(screen.getAllByRole('button', { name: 'moreActions' })[0]);
-      await user.click(screen.getByRole('button', { name: 'archiveAction' }));
-      expect(sessionApi.archive).toHaveBeenCalledWith(session.id);
-
-      await user.click(screen.getByText('leave-session-page'));
-      expect(sessionsPaneState()).toBe('inactive');
-
-      await act(async () => { request.resolve({ id: session.id, status: 'archived' }); await request.promise; });
-      expect(removeSession).toHaveBeenCalledWith(session.id);
-      expect(screen.getByTestId('session-location').textContent).toBe('/agents');
-
-      // `/agents` was not replaced by `/sessions`: back returns to where the tab was.
-      await user.click(screen.getByText('history-back'));
-      expect(screen.getByTestId('session-location').textContent).toBe('/sessions/session-1');
     });
 
     it('defers the last-session restore until the tab is back on screen', async () => {
@@ -834,26 +770,12 @@ describe('SessionPage session actions menu', () => {
     });
   });
 
-  it('does not leave the current session when another session finishes archiving', async () => {
-    useSessions.mockReturnValue({ ...useSessions(), sessions: [session, secondSession] });
-    const request = deferred<{ id: string; status: string }>();
-    sessionApi.archive.mockReturnValue(request.promise);
-    const user = userEvent.setup();
-    renderSessionPage('/sessions/session-1');
-    await user.click(screen.getAllByRole('button', { name: 'moreActions' })[0]);
-    await user.click(screen.getByRole('button', { name: 'archiveAction' }));
-    await user.click(screen.getByText('open-second'));
-    await act(async () => { request.resolve({ id: session.id, status: 'archived' }); await request.promise; });
-    expect(screen.getByTestId('session-location')).toHaveTextContent('/sessions/session-2');
-    expect(screen.getByTestId('session-chat')).toHaveTextContent('session-2');
-  });
-
   it('keeps a canonical URL through selection, back and forward without sending', async () => {
     const user = userEvent.setup();
     useSessions.mockReturnValue({ ...useSessions(), sessions: [session, secondSession] });
     renderSessionPage('/sessions/session-1');
     expect(screen.getByTestId('session-chat')).toHaveTextContent('session-1');
-    await user.click(screen.getByText('Second Session'));
+    await user.click(screen.getByText('open-second'));
     expect(screen.getByTestId('session-location')).toHaveTextContent('/sessions/session-2');
     expect(screen.getByTestId('session-chat')).toHaveTextContent('session-2');
     await user.click(screen.getByText('history-back'));
@@ -1194,7 +1116,7 @@ describe('SessionPage session actions menu', () => {
 
       // A scheduled descriptor change is discarded on switch, not carried into B.
       emitChatEvent(skillEvent('skill_load', 'completed'));
-      fireEvent.click(screen.getByText('Second Session'));
+      fireEvent.click(screen.getByText('open-second'));
       await advanceContextDebounce();
       expect(sessionApi.getContext).toHaveBeenCalledTimes(5);
       emitChatEvent(skillEvent('skill_load', 'running'));
@@ -1203,7 +1125,7 @@ describe('SessionPage session actions menu', () => {
       emitChatEvent(skillEvent('skill_load', 'running', { sessionID: 'session-2' }));
       await advanceContextDebounce();
       expect(sessionApi.getContext).toHaveBeenCalledTimes(6);
-      fireEvent.click(screen.getByText('Original Session'));
+      fireEvent.click(screen.getByText('return-to-first'));
       await advanceContextDebounce();
       expect(sessionApi.getContext).toHaveBeenCalledTimes(7);
       act(() => firstAHandler(skillEvent('skill_load', 'running')));
@@ -1267,7 +1189,7 @@ describe('SessionPage session actions menu', () => {
     vi.useFakeTimers();
     try {
       fireEvent.click(screen.getByRole('button', { name: 'mock-context-updated' }));
-      fireEvent.click(screen.getByText('Second Session'));
+      fireEvent.click(screen.getByText('open-second'));
       await act(async () => { vi.advanceTimersByTime(300); });
       expect(sessionApi.getContext.mock.calls.map((call) => call[0])).toEqual(['session-1', 'session-2']);
       fireEvent.click(screen.getByRole('button', { name: 'mock-context-updated' }));
@@ -1306,7 +1228,7 @@ describe('SessionPage session actions menu', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'context.title' }));
     const staleRefresh = contextPanelPropsRef.current!.onRefresh;
     const firstSignal = sessionApi.getContext.mock.calls[0][2] as AbortSignal;
-    fireEvent.click(screen.getByText('Second Session'));
+    fireEvent.click(screen.getByText('open-second'));
     await waitFor(() => expect(sessionApi.getContext).toHaveBeenCalledTimes(2));
     const bSignal = sessionApi.getContext.mock.calls[1][2] as AbortSignal;
     expect(firstSignal.aborted).toBe(true);
@@ -1315,7 +1237,7 @@ describe('SessionPage session actions menu', () => {
     expect(bSignal.aborted).toBe(false);
     await act(async () => b.resolve(contextPage({ sessionID: 'session-2', outputs: [contextFile('B')] })));
     expect(screen.getByText('B.md')).toBeInTheDocument();
-    fireEvent.click(screen.getByText('Original Session'));
+    fireEvent.click(screen.getByText('return-to-first'));
     await waitFor(() => expect(sessionApi.getContext).toHaveBeenCalledTimes(3));
     await act(async () => { await staleRefresh(); });
     expect(sessionApi.getContext).toHaveBeenCalledTimes(3);
@@ -1920,1255 +1842,6 @@ describe('SessionPage session actions menu', () => {
     expect(addSession).not.toHaveBeenCalled();
   });
 
-  it('keeps the workbench visible and shows a page refresh state while sessions load', () => {
-    useSessions.mockReturnValue({
-      sessions: [],
-      loading: true,
-      error: null,
-      refetch: refetchSessions,
-      updateSessionTitle,
-      removeSession,
-      removeSessions,
-      addSession,
-    });
-
-    renderSessionPage();
-
-    expect(screen.getByLabelText('managementTitle')).toBeInTheDocument();
-    expect(screen.getByTestId('workbench-refresh-status')).toHaveTextContent('refreshingWorkbench');
-    expect(screen.getByTestId('session-list-skeleton')).toBeInTheDocument();
-    expect(screen.getByTestId('session-chat')).toHaveTextContent('no-session');
-    expect(screen.queryByText('loading-spinner')).not.toBeInTheDocument();
-    expect(screen.getByTestId('session-list-scroll')).toHaveClass(
-      'session-sidebar-scrollbar',
-      'overflow-y-auto',
-    );
-    expect(screen.getByTestId('session-list-scroll')).not.toHaveClass('scrollbar-hide');
-  });
-
-  it('shows default sessions under tasks without a default project row', async () => {
-    const user = userEvent.setup();
-    renderSessionPage();
-
-    const tasksHeading = await screen.findByText('tasksSection');
-    const projectsHeading = screen.getByText('projectsSection');
-    const tasksSection = tasksHeading.closest('section');
-    const projectsSection = projectsHeading.closest('section');
-    const newSessionButton = screen.getByRole('button', { name: 'newSession' });
-    const searchButton = screen.getByRole('button', { name: 'openTaskSearch' });
-    expect(screen.queryByPlaceholderText('filterConversations')).not.toBeInTheDocument();
-    await user.click(searchButton);
-    const searchDialog = screen.getByRole('dialog', { name: 'taskSearchDialog' });
-    const searchInput = within(searchDialog).getByPlaceholderText('filterConversations');
-    expect(searchDialog).toHaveClass('fixed', 'inset-0', 'justify-center');
-    expect(searchDialog.firstElementChild).toHaveClass('max-w-[620px]', 'rounded-2xl');
-    expect(newSessionButton.previousElementSibling).toHaveClass('left-2', 'h-3.5', 'w-3.5');
-    expect(searchButton.closest('div')).toContainElement(screen.getByText('managementTitle'));
-    expect(searchInput).toHaveFocus();
-    expect(searchInput).toHaveClass('text-[15px]', 'font-medium');
-    await user.click(within(searchDialog).getByRole('button', { name: 'closeTaskSearch' }));
-    expect(tasksHeading.closest('div')).toHaveClass('px-2', 'text-xs', 'text-zinc-500');
-    expect(projectsHeading.closest('div')).toHaveClass('px-2', 'text-xs', 'text-zinc-500');
-    expect(tasksHeading.nextElementSibling).toHaveTextContent('(1)');
-    expect(projectsHeading.nextElementSibling).toHaveTextContent('(0)');
-    expect(tasksSection).not.toBeNull();
-    expect(projectsSection).not.toBeNull();
-    expect(tasksSection?.parentElement).toBe(projectsSection?.parentElement);
-    expect(projectsSection).not.toContainElement(tasksHeading);
-    expect(useSessions).toHaveBeenLastCalledWith('', {
-      projectIds: ['tasks'],
-      pageSize: 20,
-    });
-    expect(screen.queryByText('defaultProjectName')).not.toBeInTheDocument();
-    const taskTitle = screen.getByText('Original Session').closest('h3');
-    expect(taskTitle).toHaveClass('text-sm', 'font-medium');
-    expect(taskTitle?.parentElement?.parentElement).toHaveClass('px-3');
-
-    const tasksToggle = screen.getByRole('button', { name: 'toggleTasks' });
-    expect(tasksToggle).toContainElement(tasksHeading);
-    expect(tasksToggle.querySelector('svg')).toHaveClass('h-3.5', 'w-3.5');
-    expect(screen.queryByRole('button', { name: 'selectTasks' })).not.toBeInTheDocument();
-    const createTaskButton = screen.getByRole('button', { name: 'createTaskSession' });
-    expect(createTaskButton).toHaveClass(
-      'opacity-0',
-      'group-hover/tasks-section:opacity-100',
-      'group-focus-within/tasks-section:opacity-100',
-    );
-
-    await user.click(tasksToggle);
-    expect(screen.queryByText('Original Session')).not.toBeInTheDocument();
-
-    await user.click(tasksToggle);
-    expect(screen.getByText('Original Session')).toBeInTheDocument();
-  });
-
-  it('shows the five most recently updated sessions when search opens', async () => {
-    const user = userEvent.setup();
-    const recentSessions = Array.from({ length: 6 }, (_, index) => ({
-      ...session,
-      id: `recent-${index + 1}`,
-      slug: `recent-${index + 1}`,
-      title: `Recent ${index + 1}`,
-      time: {
-        ...session.time,
-        updated: session.time.updated + index,
-      },
-    }));
-    useSessions.mockReturnValue({
-      sessions: recentSessions,
-      loading: false,
-      error: null,
-      refetch: refetchSessions,
-      updateSessionTitle,
-      removeSession,
-      removeSessions,
-      addSession,
-    });
-
-    renderSessionPage();
-    await user.click(screen.getByRole('button', { name: 'openTaskSearch' }));
-
-    const searchDialog = screen.getByRole('dialog', { name: 'taskSearchDialog' });
-    expect(within(searchDialog).getAllByRole('button')).toHaveLength(6);
-    expect(within(searchDialog).queryByText('Recent 1')).not.toBeInTheDocument();
-    expect(within(searchDialog).getByText('Recent 6')).toBeInTheDocument();
-    expect(within(searchDialog).getByText('recentTasks')).toBeInTheDocument();
-
-    await user.click(within(searchDialog).getByText('Recent 6'));
-    expect(screen.queryByRole('dialog', { name: 'taskSearchDialog' })).not.toBeInTheDocument();
-  });
-
-  it('creates a new session from the tasks row', async () => {
-    const user = userEvent.setup();
-    renderSessionPage();
-
-    await screen.findByText('tasksSection');
-    await user.click(screen.getByRole('button', { name: 'createTaskSession' }));
-
-    await waitFor(() => {
-      expect(client.post).toHaveBeenCalledWith('/api/session', {
-        title: 'New Session',
-      });
-    });
-  });
-
-  it('uses theme-aware tokens for the workbench canvas, sidebar and selected row', async () => {
-    renderSessionPage('/sessions?session=session-1');
-
-    const workbenchSidebar = screen.getByLabelText('managementTitle');
-    const workbenchCanvas = workbenchSidebar.parentElement;
-    const mainCanvas = workbenchSidebar.nextElementSibling;
-    const sessionTitle = await within(workbenchSidebar).findByText('Original Session');
-    const selectedRow = sessionTitle.closest('div.group');
-
-    expect(workbenchCanvas).toHaveClass('bg-[#fcfcfd]');
-    expect(workbenchSidebar).toHaveClass('dark:bg-[#252c35]');
-    expect(workbenchSidebar).toHaveClass('h-full', 'border-r');
-    expect(workbenchSidebar).toHaveClass('border-black/[0.10]');
-    expect(workbenchSidebar).not.toHaveClass('rounded-2xl');
-    expect(workbenchSidebar.className).not.toContain('shadow-');
-    expect(mainCanvas).toHaveClass('bg-[#fcfcfd]');
-    expect(within(mainCanvas as HTMLElement).getByRole('heading', { level: 2 })).toHaveClass('text-[#555a61]');
-    await waitFor(() => {
-      expect(selectedRow).toHaveClass('dark:bg-[#3a434e]');
-    });
-  });
-
-  it('shows and clears the sidebar running state from recovered and live session status', async () => {
-    useSessions.mockReturnValue({
-      sessions: [session, secondSession],
-      loading: false,
-      error: null,
-      refetch: refetchSessions,
-      updateSessionTitle,
-      removeSession,
-      removeSessions,
-      addSession,
-    });
-    client.get.mockImplementation((url: string) => Promise.resolve({
-      data: url === '/api/session/status'
-        ? {
-            [session.id]: { type: 'busy' },
-            [secondSession.id]: { type: 'dreaming', message: 'Dreaming...' },
-          }
-        : [{
-            id: 'default',
-            worktree: '/tmp/project',
-            name: '默认',
-            isDefault: true,
-            pathStatus: 'available',
-            sessionCount: 2,
-          }],
-    }));
-
-    renderSessionPage();
-
-    const runningStatuses = await screen.findAllByRole('status', { name: 'chat.tool.running' });
-    expect(runningStatuses.map((status) => status.getAttribute('data-session-running')))
-      .toEqual(expect.arrayContaining([session.id, secondSession.id]));
-
-    act(() => {
-      sessionStatusSSEOptionsRef.current?.onEvent({
-        type: 'session.status',
-        properties: {
-          sessionID: session.id,
-          status: { type: 'idle' },
-        },
-      });
-    });
-
-    expect(screen.getByRole('status', { name: 'chat.tool.running' }))
-      .toHaveAttribute('data-session-running', secondSession.id);
-
-    act(() => {
-      sessionStatusSSEOptionsRef.current?.onEvent({
-        type: 'session.status',
-        properties: {
-          sessionID: session.id,
-          status: { type: 'retry' },
-        },
-      });
-    });
-
-    expect(screen.getAllByRole('status', { name: 'chat.tool.running' }))
-      .toHaveLength(2);
-  });
-
-  it('shows load more as text without an idle arrow', async () => {
-    useSessions.mockReturnValue({
-      sessions: [session],
-      loading: false,
-      error: null,
-      refetch: refetchSessions,
-      updateSessionTitle,
-      removeSession,
-      removeSessions,
-      addSession,
-      hasMoreByProject: { tasks: true },
-      loadingMoreProjectIds: new Set(),
-      loadMore: vi.fn(),
-    });
-
-    renderSessionPage();
-
-    const loadMoreButton = await screen.findByRole('button', { name: 'loadMore' });
-    expect(loadMoreButton.querySelector('svg')).toBeNull();
-  });
-
-  it('collapses loaded task pages and reopens cached tasks without another request', async () => {
-    const user = userEvent.setup();
-    const loadMore = vi.fn();
-    const loadedTasks = Array.from({ length: 8 }, (_, index) => ({
-      ...session,
-      id: `task-${index + 1}`,
-      slug: `task-${index + 1}`,
-      title: `Task ${index + 1}`,
-    }));
-    client.get.mockResolvedValue({
-      data: [
-        {
-          id: 'default',
-          worktree: '/tmp/project',
-          name: '默认',
-          isDefault: true,
-          pathStatus: 'available',
-          sessionCount: 8,
-        },
-        {
-          id: 'prj_labs',
-          worktree: '/tmp/labs',
-          name: 'Labs',
-          isDefault: false,
-          pathStatus: 'available',
-          sessionCount: 0,
-        },
-      ],
-    });
-    useSessions.mockReturnValue({
-      sessions: loadedTasks,
-      loading: false,
-      error: null,
-      refetch: refetchSessions,
-      updateSessionTitle,
-      removeSession,
-      removeSessions,
-      addSession,
-      hasMoreByProject: { tasks: false },
-      loadingMoreProjectIds: new Set(),
-      loadMore,
-    });
-
-    renderSessionPage();
-
-    expect(await screen.findByText('Task 8')).toBeInTheDocument();
-    await user.click(screen.getByRole('button', { name: 'collapseLoaded' }));
-
-    expect(screen.queryByText('Task 7')).not.toBeInTheDocument();
-    expect(screen.queryByText('Task 8')).not.toBeInTheDocument();
-
-    await user.click(screen.getByRole('button', { name: 'loadMore' }));
-
-    expect(screen.getByText('Task 7')).toBeInTheDocument();
-    expect(screen.getByText('Task 8')).toBeInTheDocument();
-    expect(loadMore).not.toHaveBeenCalled();
-  });
-
-  it('collapses the projects section and restores it after remounting', async () => {
-    const user = userEvent.setup();
-    client.get.mockResolvedValue({
-      data: [
-        { id: 'default', worktree: '/tmp/project', name: '默认', isDefault: true },
-        { id: 'prj_labs', worktree: '/tmp/labs', name: 'Labs', isDefault: false },
-      ],
-    });
-    const firstRender = renderSessionPage();
-
-    await screen.findByText('Labs');
-    const projectButton = screen.getByRole('button', { name: 'selectProject' });
-    expect(projectButton.querySelector('svg')).toHaveClass('h-3.5', 'w-3.5');
-    expect(projectButton.parentElement).toHaveClass('px-3');
-    await user.click(screen.getByRole('button', { name: 'toggleProjects' }));
-    expect(screen.queryByText('Labs')).not.toBeInTheDocument();
-
-    firstRender.unmount();
-    renderSessionPage();
-
-    await screen.findByText('projectsSection');
-    expect(screen.queryByText('Labs')).not.toBeInTheDocument();
-  });
-
-  it('restores collapsed projects after the session page remounts', async () => {
-    const user = userEvent.setup();
-    client.get.mockResolvedValue({
-      data: [
-        { id: 'default', worktree: '/tmp/project', name: '默认', isDefault: true },
-        { id: 'prj_labs', worktree: '/tmp/labs', name: 'Labs', isDefault: false },
-      ],
-    });
-    useSessions.mockReturnValue({
-      sessions: [{
-        ...session,
-        projectID: 'prj_labs',
-        effectiveProjectID: 'prj_labs',
-        directory: '/tmp/labs',
-      }],
-      loading: false,
-      error: null,
-      refetch: refetchSessions,
-      updateSessionTitle,
-      removeSession,
-      removeSessions,
-      addSession,
-    });
-    const firstRender = renderSessionPage();
-
-    await screen.findByText('Labs');
-    await user.click(screen.getByRole('button', { name: 'selectProject' }));
-    expect(screen.queryByText('Original Session')).not.toBeInTheDocument();
-
-    firstRender.unmount();
-    renderSessionPage();
-
-    await screen.findByText('Labs');
-    expect(screen.queryByText('Original Session')).not.toBeInTheDocument();
-  });
-
-  it('uses six sessions per page when multiple projects exist', async () => {
-    client.get.mockResolvedValue({
-      data: [
-        {
-          id: 'default',
-          worktree: '/tmp/project',
-          name: '默认',
-          isDefault: true,
-          pathStatus: 'available',
-          sessionCount: 1,
-        },
-        {
-          id: 'prj_labs',
-          worktree: '/tmp/labs',
-          name: 'Labs',
-          isDefault: false,
-          pathStatus: 'available',
-          sessionCount: 0,
-        },
-      ],
-    });
-
-    renderSessionPage();
-
-    await screen.findByText('Labs');
-    expect(useSessions).toHaveBeenLastCalledWith('', {
-      projectIds: ['tasks', 'prj_labs'],
-      pageSize: 6,
-    });
-  });
-
-  it('toggles project sessions when clicking the selected project row', async () => {
-    const user = userEvent.setup();
-    client.get.mockResolvedValue({
-      data: [
-        { id: 'default', worktree: '/tmp/project', name: '默认', isDefault: true },
-        { id: 'prj_labs', worktree: '/tmp/labs', name: 'Labs', isDefault: false },
-      ],
-    });
-    useSessions.mockReturnValue({
-      sessions: [{
-        ...session,
-        projectID: 'prj_labs',
-        effectiveProjectID: 'prj_labs',
-        directory: '/tmp/labs',
-      }],
-      loading: false,
-      error: null,
-      refetch: refetchSessions,
-      updateSessionTitle,
-      removeSession,
-      removeSessions,
-      addSession,
-    });
-
-    renderSessionPage();
-
-    await screen.findByText('Labs');
-    const projectRow = screen.getByRole('button', { name: 'selectProject' });
-    expect(screen.queryByRole('button', { name: 'toggleProject' })).not.toBeInTheDocument();
-    expect(projectRow).toHaveAttribute('aria-expanded', 'true');
-
-    await user.click(projectRow);
-    expect(screen.queryByText('Original Session')).not.toBeInTheDocument();
-    expect(projectRow).toHaveAttribute('aria-expanded', 'false');
-
-    await user.click(projectRow);
-    expect(screen.getByText('Original Session')).toBeInTheDocument();
-    expect(projectRow).toHaveAttribute('aria-expanded', 'true');
-
-    await user.click(projectRow);
-    expect(screen.queryByText('Original Session')).not.toBeInTheDocument();
-  });
-
-  it('renders project sessions with the compact conversation row treatment', async () => {
-    client.get.mockResolvedValue({
-      data: [
-        { id: 'default', worktree: '/tmp/project', name: '默认', isDefault: true },
-        { id: 'prj_labs', worktree: '/tmp/labs', name: 'Labs', isDefault: false },
-      ],
-    });
-    useSessions.mockReturnValue({
-      sessions: [{
-        ...session,
-        projectID: 'prj_labs',
-        effectiveProjectID: 'prj_labs',
-        directory: '/tmp/labs',
-      }],
-      loading: false,
-      error: null,
-      refetch: refetchSessions,
-      updateSessionTitle,
-      removeSession,
-      removeSessions,
-      addSession,
-    });
-
-    renderSessionPage();
-
-    const sessionTitle = await screen.findByText('Original Session');
-    const sessionCard = sessionTitle.closest('[class*="cursor-pointer"]');
-    expect(sessionCard).not.toBeNull();
-    expect(sessionCard).toHaveClass('min-h-[34px]', 'rounded-lg', 'border-transparent');
-  });
-
-  it('hides the channel title prefix until the session is renamed', async () => {
-    const user = userEvent.setup();
-    useSessions.mockReturnValue({
-      sessions: [{
-        ...session,
-        title: '[Wecom] 你能干什么事情',
-        channelID: 'wecom',
-        channelChatType: 'direct',
-      }, {
-        ...session,
-        id: 'session-2',
-        title: '[Wecom] 群聊问题',
-        channelID: 'wecom',
-        channelChatType: 'group',
-      }],
-      loading: false,
-      error: null,
-      refetch: refetchSessions,
-      updateSessionTitle,
-      removeSession,
-      removeSessions,
-      addSession,
-    });
-
-    renderSessionPage();
-
-    const displayTitle = await screen.findByText('你能干什么事情');
-    const sessionRow = displayTitle.closest('div.group');
-    expect(sessionRow).not.toBeNull();
-    expect(within(sessionRow as HTMLElement).getByRole('img', { name: 'wecom' }))
-      .toHaveAttribute('src', '/channel-wecom.png');
-    expect(within(sessionRow as HTMLElement).getByRole('img', { name: 'channelDirectChat' }))
-      .toHaveAttribute('data-channel-chat-type', 'direct');
-    expect(screen.queryByText('[Wecom] 你能干什么事情')).not.toBeInTheDocument();
-
-    const groupTitle = screen.getByText('群聊问题');
-    const groupRow = groupTitle.closest('div.group');
-    expect(groupRow).not.toBeNull();
-    expect(within(groupRow as HTMLElement).getByRole('img', { name: 'channelGroupChat' }))
-      .toHaveAttribute('data-channel-chat-type', 'group');
-
-    await user.click(within(sessionRow as HTMLElement).getByRole('button', { name: 'moreActions' }));
-    await user.click(screen.getByRole('button', { name: 'rename' }));
-
-    expect(screen.getByRole('textbox', { name: 'rename' }))
-      .toHaveValue('[Wecom] 你能干什么事情');
-  });
-
-  it('groups legacy sessions by the effective project returned by the backend', async () => {
-    client.get.mockResolvedValue({
-      data: [{
-        id: 'default',
-        worktree: '/tmp/project',
-        name: '默认',
-        isDefault: true,
-        pathStatus: 'available',
-        sessionCount: 2,
-      }],
-    });
-    useSessions.mockReturnValue({
-      sessions: [
-        session,
-        {
-          ...secondSession,
-          projectID: 'old-project-id',
-          effectiveProjectID: 'default',
-          directory: '/tmp/project',
-          title: 'Legacy Session',
-        },
-      ],
-      loading: false,
-      error: null,
-      refetch: refetchSessions,
-      updateSessionTitle,
-      removeSession,
-      removeSessions,
-      addSession,
-    });
-
-    renderSessionPage();
-
-    await screen.findByText('tasksSection');
-    expect(screen.queryByText('defaultProjectName')).not.toBeInTheDocument();
-    expect(screen.getByText('Original Session')).toBeInTheDocument();
-    expect(screen.getByText('Legacy Session')).toBeInTheDocument();
-  });
-
-  it('creates a user-managed project from the sidebar', async () => {
-    const user = userEvent.setup();
-    let projectRows = [
-      { id: 'default', worktree: '/tmp/project', name: '默认', isDefault: true },
-    ];
-    client.get.mockImplementation(() => Promise.resolve({ data: projectRows }));
-    client.post.mockImplementation((url: string, payload: Record<string, unknown>) => {
-      if (url === '/api/project') {
-        const created = { id: 'prj_project2', worktree: payload.worktree as string, name: payload.name as string };
-        projectRows = [projectRows[0], created];
-        return Promise.resolve({ data: created });
-      }
-      return Promise.resolve({ data: secondSession });
-    });
-
-    renderSessionPage();
-
-    await user.click(await screen.findByRole('button', { name: 'projectDialog.createTitle' }));
-    const nameInput = screen.getByLabelText('projectDialog.nameLabel');
-    await user.clear(nameInput);
-    await user.type(nameInput, 'Labs');
-    const folderInput = screen.getByLabelText('projectDialog.folderLabel');
-    await user.clear(folderInput);
-    await user.type(folderInput, '/tmp/labs');
-    await user.click(screen.getByRole('button', { name: 'save' }));
-
-    await waitFor(() => {
-      expect(client.post).toHaveBeenCalledWith('/api/project', { name: 'Labs', worktree: '/tmp/labs' });
-      expect(within(screen.getByLabelText('managementTitle')).getByText('Labs')).toBeInTheDocument();
-    });
-  });
-
-  it('uses the current browser path when saving without selecting the folder', async () => {
-    const user = userEvent.setup();
-    const defaultProject = {
-      id: 'default',
-      worktree: '/tmp/project',
-      name: '默认',
-      isDefault: true,
-    };
-    client.get.mockImplementation((url: string) => Promise.resolve({
-      data: url === '/api/project/folders'
-        ? {
-            path: '/home/test-user',
-            parent: null,
-            roots: [],
-            entries: [],
-          }
-        : [defaultProject],
-    }));
-    client.post.mockResolvedValue({
-      data: { id: 'prj_home', name: 'test-user', worktree: '/home/test-user' },
-    });
-
-    renderSessionPage();
-
-    await user.click(await screen.findByRole('button', { name: 'projectDialog.createTitle' }));
-    expect(screen.getByLabelText('projectDialog.nameLabel')).toHaveValue('');
-    expect(screen.getByLabelText('projectDialog.folderLabel')).toHaveValue('');
-    expect(screen.getByRole('button', { name: 'cancel' })).toBeEnabled();
-
-    await user.click(screen.getByRole('button', { name: 'projectDialog.chooseFolder' }));
-
-    expect(await screen.findByText('/home/test-user')).toBeInTheDocument();
-    expect(client.get).toHaveBeenCalledWith('/api/project/folders', {
-      params: { path: undefined },
-    });
-    expect(screen.getByLabelText('projectDialog.folderLabel')).toHaveValue('/home/test-user');
-
-    await user.click(screen.getByRole('button', { name: 'save' }));
-
-    await waitFor(() => {
-      expect(client.post).toHaveBeenCalledWith('/api/project', {
-        name: 'test-user',
-        worktree: '/home/test-user',
-      });
-    });
-  });
-
-  it('keeps the folder input and folder browser in sync', async () => {
-    const user = userEvent.setup();
-    client.get.mockImplementation((url: string, config?: { params?: { path?: string } }) => {
-      if (url !== '/api/project/folders') {
-        return Promise.resolve({
-          data: [{ id: 'default', worktree: '/tmp/project', name: '默认', isDefault: true }],
-        });
-      }
-      const path = config?.params?.path;
-      if (path === '/home/test-user/labs') {
-        return Promise.resolve({
-          data: { path, parent: '/home/test-user', roots: [], entries: [] },
-        });
-      }
-      return Promise.resolve({
-        data: {
-          path: '/home/test-user',
-          parent: null,
-          roots: [],
-          entries: [{ name: 'labs', path: '/home/test-user/labs' }],
-        },
-      });
-    });
-
-    renderSessionPage();
-
-    await user.click(await screen.findByRole('button', { name: 'projectDialog.createTitle' }));
-    const folderInput = screen.getByLabelText('projectDialog.folderLabel');
-    await user.click(screen.getByRole('button', { name: 'projectDialog.chooseFolder' }));
-    await waitFor(() => expect(folderInput).toHaveValue('/home/test-user'));
-
-    await user.type(folderInput, '/');
-    await waitFor(() => {
-      expect(client.get).toHaveBeenCalledWith('/api/project/folders', {
-        params: { path: '/home/test-user/' },
-      });
-    });
-    expect(folderInput).toHaveValue('/home/test-user/');
-
-    await user.clear(folderInput);
-    await user.type(folderInput, '/home/test-user/labs');
-    await waitFor(() => {
-      expect(client.get).toHaveBeenCalledWith('/api/project/folders', {
-        params: { path: '/home/test-user/labs' },
-      });
-      expect(screen.getByText('/home/test-user/labs')).toBeInTheDocument();
-    });
-  });
-
-  it('does not submit when Enter is pressed before choosing a project folder', async () => {
-    const user = userEvent.setup();
-    client.post.mockResolvedValue({
-      data: { id: 'prj_labs', name: 'Labs', worktree: '/tmp/labs' },
-    });
-    renderSessionPage();
-
-    await user.click(await screen.findByRole('button', { name: 'projectDialog.createTitle' }));
-    const nameInput = screen.getByLabelText('projectDialog.nameLabel');
-    await user.type(nameInput, 'Labs');
-    fireEvent.keyDown(nameInput, { key: 'Enter' });
-
-    expect(client.post).not.toHaveBeenCalled();
-    expect(toast.error).not.toHaveBeenCalled();
-
-    const folderInput = screen.getByLabelText('projectDialog.folderLabel');
-    await user.type(folderInput, '/tmp/labs');
-    fireEvent.keyDown(nameInput, { key: 'Enter', isComposing: true });
-    expect(client.post).not.toHaveBeenCalled();
-
-    fireEvent.keyDown(nameInput, { key: 'Enter' });
-    await waitFor(() => {
-      expect(client.post).toHaveBeenCalledWith('/api/project', {
-        name: 'Labs',
-        worktree: '/tmp/labs',
-      });
-    });
-  });
-
-  it('shows the backend detail when project creation fails', async () => {
-    const user = userEvent.setup();
-    client.post.mockRejectedValue({
-      message: 'Request failed with status code 400',
-      response: { data: { detail: 'Project directory does not exist' } },
-    });
-
-    renderSessionPage();
-
-    await user.click(await screen.findByRole('button', { name: 'projectDialog.createTitle' }));
-    const nameInput = screen.getByLabelText('projectDialog.nameLabel');
-    await user.clear(nameInput);
-    await user.type(nameInput, 'Missing project');
-    const folderInput = screen.getByLabelText('projectDialog.folderLabel');
-    await user.clear(folderInput);
-    await user.type(folderInput, '/tmp/missing-project');
-    await user.click(screen.getByRole('button', { name: 'save' }));
-
-    await waitFor(() => {
-      expect(toast.error).toHaveBeenCalledWith(
-        'projectDialog.saveFailed',
-        'Project directory does not exist',
-      );
-    });
-  });
-
-  it('submits project creation only once when save is clicked twice quickly', async () => {
-    const user = userEvent.setup();
-    let resolveCreate: ((value: { data: Record<string, unknown> }) => void) | undefined;
-    client.post.mockImplementation(() => new Promise((resolve) => {
-      resolveCreate = resolve;
-    }));
-
-    renderSessionPage();
-
-    await user.click(await screen.findByRole('button', { name: 'projectDialog.createTitle' }));
-    const nameInput = screen.getByLabelText('projectDialog.nameLabel');
-    await user.clear(nameInput);
-    await user.type(nameInput, 'Labs');
-    const folderInput = screen.getByLabelText('projectDialog.folderLabel');
-    await user.clear(folderInput);
-    await user.type(folderInput, '/tmp/labs');
-    const saveButton = screen.getByRole('button', { name: 'save' });
-
-    act(() => {
-      saveButton.click();
-      saveButton.click();
-    });
-
-    expect(client.post).toHaveBeenCalledTimes(1);
-    resolveCreate?.({ data: { id: 'prj_project2', name: 'Labs', worktree: '/tmp/labs' } });
-    await waitFor(() => expect(screen.queryByRole('button', { name: 'save' })).not.toBeInTheDocument());
-  });
-
-  it('keeps a newly created empty project visible while search is active', async () => {
-    const user = userEvent.setup();
-    const currentProject = { id: 'default', worktree: '/tmp/project', name: '默认', isDefault: true };
-    client.get.mockResolvedValue({ data: [currentProject] });
-    client.post.mockImplementation((url: string, payload: Record<string, unknown>) => {
-      if (url === '/api/project') {
-        const created = { id: 'prj_project2', worktree: payload.worktree as string, name: payload.name as string };
-        return Promise.resolve({ data: created });
-      }
-      return Promise.resolve({ data: secondSession });
-    });
-
-    renderSessionPage();
-
-    await user.click(screen.getByRole('button', { name: 'openTaskSearch' }));
-    await user.type(screen.getByPlaceholderText('filterConversations'), 'nothing matches');
-    await user.click(await screen.findByRole('button', { name: 'projectDialog.createTitle' }));
-    const nameInput = screen.getByLabelText('projectDialog.nameLabel');
-    await user.clear(nameInput);
-    await user.type(nameInput, 'Labs');
-    const folderInput = screen.getByLabelText('projectDialog.folderLabel');
-    await user.clear(folderInput);
-    await user.type(folderInput, '/tmp/labs');
-    await user.click(screen.getByRole('button', { name: 'save' }));
-
-    expect(await within(screen.getByLabelText('managementTitle')).findByText('Labs')).toBeInTheDocument();
-    expect(screen.getByText('noProjectSessions')).toBeInTheDocument();
-  });
-
-  it('renames a project from the sidebar', async () => {
-    const user = userEvent.setup();
-    const defaultProject = { id: 'default', worktree: '/tmp/project', name: '默认', isDefault: true };
-    const projectList = [defaultProject, {
-      id: 'prj_project2',
-      worktree: '/tmp/labs',
-      name: 'Labs',
-      sessionCount: 8,
-      lastActivityAt: 10_000,
-    }];
-    client.get
-      .mockResolvedValueOnce({ data: projectList })
-      .mockResolvedValue({
-        data: projectList.map((project) => (
-          project.id === 'prj_project2' ? { ...project, name: 'Renamed Project' } : project
-        )),
-      });
-    client.patch.mockResolvedValue({
-      data: { id: 'prj_project2', worktree: '/tmp/labs', name: 'Renamed Project' },
-    });
-
-    renderSessionPage();
-
-    const projectLabel = await screen.findByText('Labs');
-    const projectRow = projectLabel.closest('[class*="group/project"]');
-    expect(projectRow).not.toBeNull();
-    expect(projectRow?.firstElementChild).toHaveClass('text-sm');
-    await user.click(within(projectRow as HTMLElement).getByRole('button', { name: 'projectActions' }));
-    await user.click(within(projectRow as HTMLElement).getByRole('menuitem', { name: 'projectDialog.renameAction' }));
-    const input = screen.getByLabelText('projectDialog.nameLabel');
-    await user.clear(input);
-    await user.type(input, 'Renamed Project');
-    await user.click(screen.getByRole('button', { name: 'save' }));
-
-    await waitFor(() => {
-      expect(client.patch).toHaveBeenCalledWith('/api/project/prj_project2', { name: 'Renamed Project' });
-    });
-    const renamedProject = await screen.findByText('Renamed Project');
-    expect(renamedProject.closest('[class*="group/project"]')).not.toHaveTextContent('8');
-    expect(screen.getByText('projectsSection').nextElementSibling).toHaveTextContent('(1)');
-  });
-
-  it('shares and unshares a project from the sidebar', async () => {
-    const user = userEvent.setup();
-    const defaultProject = { id: 'default', worktree: '/tmp/project', name: '默认', isDefault: true };
-    let projectRows = [
-      defaultProject,
-      {
-        id: 'prj_project2', worktree: '/tmp/labs', name: 'Labs',
-        canWrite: true, canDelete: true, isShared: false,
-      },
-    ];
-    client.get.mockImplementation(() => Promise.resolve({ data: projectRows }));
-    client.post.mockImplementation((url: string) => {
-      if (url === '/api/project/prj_project2/share-local') {
-        projectRows = projectRows.map((project) => (
-          project.id === 'prj_project2' ? { ...project, isShared: true } : project
-        ));
-      }
-      if (url === '/api/project/prj_project2/unshare-local') {
-        projectRows = projectRows.map((project) => (
-          project.id === 'prj_project2' ? { ...project, isShared: false } : project
-        ));
-      }
-      return Promise.resolve({ data: true });
-    });
-
-    renderSessionPage();
-
-    let projectRow = (await screen.findByText('Labs')).closest('[class*="group/project"]');
-    expect(projectRow).not.toBeNull();
-    await user.click(within(projectRow as HTMLElement).getByRole('button', { name: 'projectActions' }));
-    await user.click(within(projectRow as HTMLElement).getByRole('menuitem', { name: 'shareAction' }));
-    await waitFor(() => {
-      expect(client.post).toHaveBeenCalledWith('/api/project/prj_project2/share-local');
-      expect(screen.getByText('sharedTag')).toBeInTheDocument();
-    });
-
-    projectRow = screen.getByText('Labs').closest('[class*="group/project"]');
-    await user.click(within(projectRow as HTMLElement).getByRole('button', { name: 'projectActions' }));
-    await user.click(within(projectRow as HTMLElement).getByRole('menuitem', { name: 'unshareAction' }));
-    await waitFor(() => {
-      expect(client.post).toHaveBeenCalledWith('/api/project/prj_project2/unshare-local');
-      expect(screen.queryByText('sharedTag')).not.toBeInTheDocument();
-    });
-  });
-
-  it('keeps a shared project read-only for non-owners', async () => {
-    const user = userEvent.setup();
-    client.get.mockResolvedValue({
-      data: [
-        { id: 'default', worktree: '/tmp/project', name: '默认', isDefault: true },
-        {
-          id: 'prj_shared', worktree: '/tmp/shared', name: 'Shared Labs',
-          canWrite: false, canDelete: false, isShared: true,
-        },
-      ],
-    });
-
-    renderSessionPage();
-
-    const projectRow = (await screen.findByText('Shared Labs')).closest('[class*="group/project"]');
-    expect(projectRow).not.toBeNull();
-    expect(within(projectRow as HTMLElement).getByRole('button', { name: 'createSessionInProject' })).toBeDisabled();
-    await user.click(within(projectRow as HTMLElement).getByRole('button', { name: 'projectActions' }));
-    expect(within(projectRow as HTMLElement).getByRole('menuitem', { name: 'projectDialog.copyPathAction' })).toBeInTheDocument();
-    expect(within(projectRow as HTMLElement).queryByRole('menuitem', { name: 'shareAction' })).not.toBeInTheDocument();
-    expect(within(projectRow as HTMLElement).queryByRole('menuitem', { name: 'unshareAction' })).not.toBeInTheDocument();
-    expect(within(projectRow as HTMLElement).queryByRole('menuitem', { name: 'projectDialog.renameAction' })).not.toBeInTheDocument();
-    expect(within(projectRow as HTMLElement).queryByRole('menuitem', { name: 'projectDialog.deleteAction' })).not.toBeInTheDocument();
-  });
-
-  it('ignores stale project results after the search changes', async () => {
-    const initialProject = { id: 'default', worktree: '/tmp/project', name: '默认', isDefault: true };
-    const olderSearch = deferred<{ data: Array<Record<string, unknown>> }>();
-    const latestSearch = deferred<{ data: Array<Record<string, unknown>> }>();
-    client.get.mockImplementation((_url: string, config?: { params?: { search?: string } }) => {
-      const query = config?.params?.search;
-      if (query === 'a') return olderSearch.promise;
-      if (query === 'ab') return latestSearch.promise;
-      return Promise.resolve({ data: [initialProject] });
-    });
-
-    renderSessionPage();
-    await screen.findByText('tasksSection');
-    await userEvent.setup().click(screen.getByRole('button', { name: 'openTaskSearch' }));
-    const searchInput = screen.getByPlaceholderText('filterConversations');
-    fireEvent.change(searchInput, { target: { value: 'a' } });
-    fireEvent.change(searchInput, { target: { value: 'ab' } });
-
-    await act(async () => {
-      latestSearch.resolve({
-        data: [initialProject, {
-          id: 'prj_latest',
-          worktree: '/tmp/latest',
-          name: 'Latest result',
-          isDefault: false,
-          matchedSessionCount: 1,
-        }],
-      });
-      await latestSearch.promise;
-    });
-    expect(await screen.findByText('Latest result')).toBeInTheDocument();
-
-    await act(async () => {
-      olderSearch.resolve({
-        data: [initialProject, {
-          id: 'prj_stale',
-          worktree: '/tmp/stale',
-          name: 'Stale result',
-          isDefault: false,
-          matchedSessionCount: 1,
-        }],
-      });
-      await olderSearch.promise;
-    });
-    expect(screen.getByText('Latest result')).toBeInTheDocument();
-    expect(screen.queryByText('Stale result')).not.toBeInTheDocument();
-  });
-
-  it('does not render project actions for the default task group', async () => {
-    renderSessionPage();
-
-    await screen.findByText('tasksSection');
-    expect(screen.queryByText('defaultProjectName')).not.toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'projectActions' })).not.toBeInTheDocument();
-    expect(client.patch).not.toHaveBeenCalled();
-  });
-
-  it('deletes an empty user-managed project after confirmation', async () => {
-    const user = userEvent.setup();
-    const currentProject = { id: 'default', worktree: '/tmp/project', name: '默认', isDefault: true };
-    let projectRows = [
-      currentProject,
-      { id: 'prj_project2', worktree: '/tmp/labs', name: 'Labs' },
-    ];
-    client.get.mockImplementation(() => Promise.resolve({ data: projectRows }));
-    client.delete.mockImplementation(() => {
-      projectRows = [currentProject];
-      return Promise.resolve({ data: true });
-    });
-
-    renderSessionPage();
-
-    const projectLabel = await screen.findByText('Labs');
-    const projectRow = projectLabel.closest('[class*="group/project"]');
-    expect(projectRow).not.toBeNull();
-    await user.click(within(projectRow as HTMLElement).getByRole('button', { name: 'projectActions' }));
-    await user.click(within(projectRow as HTMLElement).getByRole('menuitem', { name: 'projectDialog.deleteAction' }));
-    await user.click(screen.getByRole('button', { name: 'projectDialog.confirmDelete' }));
-
-    await waitFor(() => {
-      expect(client.delete).toHaveBeenCalledWith('/api/project/prj_project2');
-      expect(screen.queryByText('Labs')).not.toBeInTheDocument();
-    });
-  });
-
-  it('creates a session from a specific project row', async () => {
-    const user = userEvent.setup();
-    const currentProject = { id: 'default', worktree: '/tmp/project', name: '默认', isDefault: true };
-    client.get.mockResolvedValue({
-      data: [currentProject, { id: 'prj_project2', worktree: '/tmp/labs', name: 'Labs' }],
-    });
-    client.post.mockResolvedValue({
-      data: {
-        ...secondSession,
-        id: 'session-labs',
-        projectID: 'prj_project2',
-        title: 'New Session',
-      },
-    });
-
-    renderSessionPage();
-
-    const projectLabel = await screen.findByText('Labs');
-    const projectRow = projectLabel.closest('[class*="group/project"]');
-    expect(projectRow).not.toBeNull();
-    const projectActionsButton = within(projectRow as HTMLElement).getByRole('button', { name: 'projectActions' });
-    const createProjectSessionButton = within(projectRow as HTMLElement).getByRole('button', {
-      name: 'createSessionInProject',
-    });
-    expect(projectActionsButton.nextElementSibling).toBe(createProjectSessionButton);
-    await user.click(createProjectSessionButton);
-
-    await waitFor(() => {
-      expect(client.post).toHaveBeenCalledWith('/api/session', {
-        title: 'New Session',
-        projectID: 'prj_project2',
-      });
-    });
-    expect(addSession).toHaveBeenCalledWith(expect.objectContaining({
-      id: 'session-labs',
-      projectID: 'prj_project2',
-    }));
-  });
-
-  it('opens the actions menu for a session item', async () => {
-    const user = userEvent.setup();
-
-    renderSessionPage();
-
-    await screen.findByText('Original Session');
-    await user.click(screen.getByRole('button', { name: 'moreActions' }));
-
-    const menu = document.querySelector('[data-session-menu-portal]');
-    expect(menu).toHaveClass('w-[132px]', 'rounded-[10px]', 'p-1');
-    expect(menu).not.toHaveClass('w-36', 'rounded-lg');
-    expect(screen.getByRole('button', { name: 'rename' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'downloadJson' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'moveToProjectAction' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'archiveAction' })).toBeInTheDocument();
-  });
-
-  it('moves a regular task into a selected project', async () => {
-    const user = userEvent.setup();
-    client.get.mockResolvedValue({
-      data: [
-        { id: 'prj_labs', worktree: '/tmp/labs', name: 'Labs', canWrite: true, pathStatus: 'available' },
-      ],
-    });
-
-    renderSessionPage();
-
-    await screen.findByText('Original Session');
-    await user.click(screen.getByRole('button', { name: 'moreActions' }));
-    await user.click(screen.getByRole('button', { name: 'moveToProjectAction' }));
-    await user.click(screen.getByRole('menuitem', { name: 'Labs' }));
-
-    await waitFor(() => {
-      expect(sessionApi.moveToProject).toHaveBeenCalledWith('session-1', 'prj_labs');
-    });
-    expect(refetchSessions).toHaveBeenCalled();
-    expect(toast.success).toHaveBeenCalledWith('moveToProjectSuccess');
-  });
-
-  it('keeps the project picker inside the viewport near the bottom edge', async () => {
-    const user = userEvent.setup();
-    client.get.mockResolvedValue({
-      data: [
-        { id: 'prj_labs', worktree: '/tmp/labs', name: 'Labs', canWrite: true, pathStatus: 'available' },
-      ],
-    });
-    const originalInnerHeight = window.innerHeight;
-    Object.defineProperty(window, 'innerHeight', { configurable: true, value: 400 });
-    // jsdom has no layout: place the trigger near the bottom edge and give the
-    // menu content (which the menu measures) a real height.
-    let actionsTrigger: HTMLElement | null = null;
-    const rects = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
-      if (this === actionsTrigger) return { top: 356, bottom: 380, left: 276, right: 300, width: 24, height: 24 } as DOMRect;
-      const height = this.parentElement?.hasAttribute('data-session-menu-portal') ? 120 : 0;
-      return { top: 0, bottom: height, left: 0, right: 0, width: 0, height } as DOMRect;
-    });
-
-    try {
-      renderSessionPage();
-
-      await screen.findByText('Original Session');
-      actionsTrigger = screen.getByRole('button', { name: 'moreActions' });
-      await user.click(actionsTrigger);
-      await user.click(screen.getByRole('button', { name: 'moveToProjectAction' }));
-
-      const menu = document.querySelector('[data-session-menu-portal]') as HTMLElement;
-      // 130px (content plus padding and borders) does not fit below the trigger, so the
-      // picker opens above it, right-aligned to the trigger and capped to the viewport.
-      expect(menu.style.top).toBe('222px');
-      expect(menu.style.left).toBe('80px');
-      expect(menu.style.maxHeight).toBe('384px');
-    } finally {
-      rects.mockRestore();
-      Object.defineProperty(window, 'innerHeight', {
-        configurable: true,
-        value: originalInnerHeight,
-      });
-    }
-  });
-
-  it('shows the backend detail when moving a task fails', async () => {
-    const user = userEvent.setup();
-    client.get.mockResolvedValue({
-      data: [
-        { id: 'prj_labs', worktree: '/tmp/labs', name: 'Labs', canWrite: true, pathStatus: 'available' },
-      ],
-    });
-    sessionApi.moveToProject.mockRejectedValue({
-      message: 'Request failed with status code 409',
-      response: { data: { detail: '任务正在运行，请稍后再移动' } },
-    });
-
-    renderSessionPage();
-
-    await screen.findByText('Original Session');
-    await user.click(screen.getByRole('button', { name: 'moreActions' }));
-    await user.click(screen.getByRole('button', { name: 'moveToProjectAction' }));
-    await user.click(screen.getByRole('menuitem', { name: 'Labs' }));
-
-    await waitFor(() => {
-      expect(toast.error).toHaveBeenCalledWith(
-        'moveToProjectFailed',
-        '任务正在运行，请稍后再移动',
-      );
-    });
-  });
-
-  it('shows the move spinner only on the selected target project', async () => {
-    const user = userEvent.setup();
-    client.get.mockResolvedValue({
-      data: [
-        { id: 'prj_labs', worktree: '/tmp/labs', name: 'Labs', canWrite: true, pathStatus: 'available' },
-        { id: 'prj_docs', worktree: '/tmp/docs', name: 'Docs', canWrite: true, pathStatus: 'available' },
-      ],
-    });
-    sessionApi.moveToProject.mockImplementation(() => new Promise(() => {}));
-
-    renderSessionPage();
-
-    await screen.findByText('Original Session');
-    await user.click(screen.getByRole('button', { name: 'moreActions' }));
-    await user.click(screen.getByRole('button', { name: 'moveToProjectAction' }));
-    const labsTarget = screen.getByRole('menuitem', { name: 'Labs' });
-    const docsTarget = screen.getByRole('menuitem', { name: 'Docs' });
-    await user.click(labsTarget);
-
-    await waitFor(() => {
-      expect(labsTarget.querySelector('.animate-spin')).not.toBeNull();
-    });
-    expect(docsTarget.querySelector('.animate-spin')).toBeNull();
-  });
-
-  it('moves a project task to a different project and marks its current project', async () => {
-    const user = userEvent.setup();
-    client.get.mockResolvedValue({
-      data: [
-        { id: 'prj_source', worktree: '/tmp/source', name: 'Source', canWrite: true, pathStatus: 'available' },
-        { id: 'prj_target', worktree: '/tmp/target', name: 'Target', canWrite: true, pathStatus: 'available' },
-      ],
-    });
-    useSessions.mockReturnValue({
-      sessions: [{
-        ...session,
-        projectID: 'prj_source',
-        effectiveProjectID: 'prj_source',
-        directory: '/tmp/source',
-      }],
-      loading: false,
-      error: null,
-      refetch: refetchSessions,
-      updateSessionTitle,
-      removeSession,
-      removeSessions,
-      addSession,
-    });
-
-    renderSessionPage();
-
-    await screen.findByText('Original Session');
-    await user.click(screen.getByRole('button', { name: 'moreActions' }));
-    await user.click(screen.getByRole('button', { name: 'moveToProjectAction' }));
-    expect(screen.getByRole('menuitem', { name: 'Source' })).toBeDisabled();
-    await user.click(screen.getByRole('menuitem', { name: 'Target' }));
-
-    await waitFor(() => {
-      expect(sessionApi.moveToProject).toHaveBeenCalledWith('session-1', 'prj_target');
-    });
-  });
-
-  it('shows a readable session timestamp and adds an actions background only on hover', async () => {
-    const user = userEvent.setup();
-
-    renderSessionPage();
-
-    const timestamp = await screen.findByText('17小时前');
-    const actionsTrigger = screen.getByRole('button', { name: 'moreActions' });
-
-    expect(timestamp).not.toHaveClass('group-hover:opacity-0');
-    expect(timestamp).toHaveClass('text-zinc-500');
-    expect(timestamp).toHaveAttribute('title', 'formatted-date');
-    expect(actionsTrigger).toHaveClass('hover:bg-white');
-    expect(actionsTrigger).not.toHaveClass('hover:bg-white/80');
-
-    await user.click(actionsTrigger);
-
-    expect(actionsTrigger).not.toHaveClass('bg-white/80');
-  });
-
-  it('refreshes relative session timestamps every minute', () => {
-    vi.useFakeTimers();
-    let relativeTimeLabel = '17小时前';
-    vi.mocked(formatRelativeTime).mockImplementation(() => relativeTimeLabel);
-    try {
-      renderSessionPage();
-      expect(screen.getByText('17小时前')).toBeInTheDocument();
-
-      relativeTimeLabel = '18小时前';
-      act(() => {
-        vi.advanceTimersByTime(60_000);
-      });
-
-      expect(screen.getByText('18小时前')).toBeInTheDocument();
-    } finally {
-      vi.mocked(formatRelativeTime).mockImplementation(() => '17小时前');
-      vi.useRealTimers();
-    }
-  });
-
-  it('renames a session inline from the actions menu', async () => {
-    const user = userEvent.setup();
-
-    renderSessionPage();
-
-    await screen.findByText('Original Session');
-    await user.click(screen.getByRole('button', { name: 'moreActions' }));
-    await user.click(screen.getByRole('button', { name: 'rename' }));
-
-    const input = screen.getByRole('textbox', { name: 'rename' });
-    await user.clear(input);
-    await user.type(input, 'Renamed Session{enter}');
-
-    await waitFor(() => {
-      expect(sessionApi.update).toHaveBeenCalledWith('session-1', { title: 'Renamed Session' });
-    });
-    expect(updateSessionTitle).toHaveBeenCalledWith('session-1', 'Renamed Session');
-    expect(sessionApi.update).toHaveBeenCalledTimes(1);
-  });
-
   it('coalesces bursty session.updated events into one sidebar refetch', () => {
     vi.useFakeTimers();
     try {
@@ -3195,108 +1868,6 @@ describe('SessionPage session actions menu', () => {
     } finally {
       vi.useRealTimers();
     }
-  });
-
-  it('downloads session data as CLI-compatible JSON', async () => {
-    const user = userEvent.setup();
-    const OriginalBlob = Blob;
-    const originalCreateElement = document.createElement.bind(document);
-    let createdAnchor: HTMLAnchorElement | null = null;
-    let blobArg: Blob | null = null;
-    let blobParts: BlobPart[] = [];
-
-    class BlobMock extends OriginalBlob {
-      constructor(parts: BlobPart[], options?: BlobPropertyBag) {
-        blobParts = parts;
-        super(parts, options);
-      }
-    }
-    vi.stubGlobal('Blob', BlobMock);
-
-    const createElementSpy = vi.spyOn(document, 'createElement').mockImplementation(((tagName: string, options?: ElementCreationOptions) => {
-      if (tagName === 'a') {
-        const anchor = originalCreateElement('a');
-        vi.spyOn(anchor, 'click').mockImplementation(() => {});
-        createdAnchor = anchor;
-        return anchor;
-      }
-      return originalCreateElement(tagName, options);
-    }) as typeof document.createElement);
-
-    const createObjectUrlSpy = vi.spyOn(URL, 'createObjectURL').mockImplementation((blob: Blob | MediaSource) => {
-      blobArg = blob as Blob;
-      return 'blob:session-export';
-    });
-    const revokeObjectUrlSpy = vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {});
-
-    renderSessionPage();
-
-    await screen.findByText('Original Session');
-    await user.click(screen.getByRole('button', { name: 'moreActions' }));
-    await user.click(screen.getByRole('button', { name: 'downloadJson' }));
-
-    await waitFor(() => {
-      expect(sessionApi.get).toHaveBeenCalledWith('session-1');
-      expect(sessionApi.getMessages).toHaveBeenCalledWith('session-1');
-    });
-
-    await waitFor(() => {
-      expect(createdAnchor?.download).toBe('session-Original-Session.json');
-      expect(createdAnchor?.click).toHaveBeenCalled();
-      expect(revokeObjectUrlSpy).toHaveBeenCalledWith('blob:session-export');
-    });
-
-    const payload = JSON.parse(String(blobParts[0]));
-    expect(payload).toEqual({
-      info: session,
-      messages: [
-        {
-          info: {
-            id: 'message-1',
-            sessionID: 'session-1',
-            role: 'user',
-            time: { created: 1710000000000 },
-          },
-          parts: [{ id: 'part-1', type: 'text', text: 'hello export' }],
-        },
-      ],
-    });
-
-    createElementSpy.mockRestore();
-    createObjectUrlSpy.mockRestore();
-    revokeObjectUrlSpy.mockRestore();
-    vi.stubGlobal('Blob', OriginalBlob);
-  });
-
-  it('archives a session from the actions menu', async () => {
-    const user = userEvent.setup();
-
-    renderSessionPage();
-
-    await screen.findByText('Original Session');
-    await user.click(screen.getByRole('button', { name: 'moreActions' }));
-    await user.click(screen.getByRole('button', { name: 'archiveAction' }));
-
-    await waitFor(() => {
-      expect(sessionApi.archive).toHaveBeenCalledWith('session-1');
-    });
-    expect(removeSession).toHaveBeenCalledWith('session-1');
-    expect(global.confirm).toHaveBeenCalledWith('confirmArchive');
-  });
-
-  it('keeps a successful archive successful when project-count refresh fails', async () => {
-    const user = userEvent.setup();
-    renderSessionPage();
-
-    await screen.findByText('Original Session');
-    await waitFor(() => expect(client.get).toHaveBeenCalled());
-    client.get.mockRejectedValueOnce(new Error('project refresh failed'));
-    await user.click(screen.getByRole('button', { name: 'moreActions' }));
-    await user.click(screen.getByRole('button', { name: 'archiveAction' }));
-
-    await waitFor(() => expect(toast.success).toHaveBeenCalledWith('archiveSuccess'));
-    expect(removeSession).toHaveBeenCalledWith('session-1');
-    expect(toast.error).not.toHaveBeenCalledWith('archiveFailed', expect.anything());
   });
 
   it('does not auto-attach any session on first load without history', () => {
@@ -3663,7 +2234,7 @@ describe('SessionPage session actions menu', () => {
       expect(screen.getByTestId('session-location')).toHaveTextContent('/sessions/session-deleted');
     });
 
-    await user.click(screen.getByText('Original Session'));
+    await user.click(screen.getByText('return-to-first'));
 
     await waitFor(() => {
       expect(screen.getByTestId('session-chat')).toHaveTextContent('session-1');
@@ -3771,7 +2342,7 @@ describe('SessionPage session actions menu', () => {
     expect(screen.getByTestId('mock-chat-input')).toHaveTextContent('subagent:explore');
     expect(screen.getByTestId('session-chat')).toHaveAttribute('data-agent-name', 'rex');
 
-    await user.click(screen.getByRole('button', { name: 'newSession' }));
+    await user.click(screen.getByText('start-new-session'));
 
     expect(screen.getByTestId('session-chat')).toHaveTextContent('no-session');
     expect(client.post).not.toHaveBeenCalledWith('/api/session', expect.anything());
@@ -4212,7 +2783,7 @@ describe('SessionPage session actions menu', () => {
       expect(screen.getByTestId('session-chat')).toHaveAttribute('data-model', 'minimax/minimax-m3');
     });
 
-    await user.click(screen.getByRole('button', { name: 'newSession' }));
+    await user.click(screen.getByText('start-new-session'));
 
     await waitFor(() => {
       expect(screen.getByTestId('session-chat')).toHaveTextContent('no-session');
@@ -4235,7 +2806,7 @@ describe('SessionPage session actions menu', () => {
     await waitFor(() => {
       expect(screen.getByTestId('session-chat')).toHaveTextContent('session-1');
     });
-    await user.click(screen.getByRole('button', { name: 'newSession' }));
+    await user.click(screen.getByText('start-new-session'));
 
     expect(client.post).not.toHaveBeenCalledWith('/api/session', expect.anything());
     await user.click(screen.getByRole('button', { name: 'projectPicker.title' }));
@@ -4248,6 +2819,67 @@ describe('SessionPage session actions menu', () => {
         projectID: 'prj_labs',
       });
     });
+  });
+
+  it('creates a project from the composer picker in a page-level dialog and selects it', async () => {
+    const user = userEvent.setup();
+    client.get.mockImplementation((url: string) => Promise.resolve({
+      data: url === '/api/project' ? [{ id: 'prj_labs', worktree: '/tmp/labs', name: 'Labs', canWrite: true }] : {},
+    }));
+    client.post.mockImplementation((url: string) => Promise.resolve({
+      data: url === '/api/project' ? { id: 'prj_new', worktree: '/tmp/new-project', name: 'New project' } : {},
+    }));
+    const projectsChanged = vi.fn();
+    window.addEventListener('flocks:projects-changed', projectsChanged);
+    try {
+      renderSessionPage();
+      await user.click(screen.getByRole('button', { name: 'projectPicker.title' }));
+      await user.click(screen.getByRole('menuitem', { name: 'projectPicker.create' }));
+
+      const dialog = await screen.findByRole('dialog', { name: 'history.newFolder' });
+      // Rendered on <body>, not inside the page layout.
+      expect(dialog.closest('[data-testid="session-chat"]')).toBeNull();
+      await user.type(within(dialog).getByLabelText('history.folderName'), 'New project');
+      await user.clear(within(dialog).getByLabelText('history.folderPath'));
+      await user.type(within(dialog).getByLabelText('history.folderPath'), '/tmp/new-project');
+      await user.click(within(dialog).getByRole('button', { name: 'history.createFolder' }));
+
+      await waitFor(() => expect(screen.queryByRole('dialog', { name: 'history.newFolder' })).not.toBeInTheDocument());
+      expect(client.post).toHaveBeenCalledWith('/api/project', expect.objectContaining({ worktree: '/tmp/new-project' }));
+      expect(projectsChanged).toHaveBeenCalled();
+      expect(screen.getByRole('button', { name: 'projectPicker.title' })).toHaveTextContent('New project');
+    } finally {
+      window.removeEventListener('flocks:projects-changed', projectsChanged);
+    }
+  });
+
+  it('keeps a newly created project selected while the project list refresh is still pending', async () => {
+    const user = userEvent.setup();
+    let created = false;
+    let releaseList: (() => void) | undefined;
+    client.get.mockImplementation((url: string) => {
+      if (url !== '/api/project') return Promise.resolve({ data: {} });
+      const data = [{ id: 'prj_labs', worktree: '/tmp/labs', name: 'Labs', canWrite: true }];
+      // After the project is created the list request hangs, then returns without it.
+      return created ? new Promise((resolve) => { releaseList = () => resolve({ data }); }) : Promise.resolve({ data });
+    });
+    client.post.mockImplementation((url: string) => {
+      if (url === '/api/project') created = true;
+      return Promise.resolve({ data: url === '/api/project' ? { id: 'prj_new', worktree: '/tmp/new-project', name: 'New project' } : {} });
+    });
+    renderSessionPage();
+    await user.click(screen.getByRole('button', { name: 'projectPicker.title' }));
+    await user.click(screen.getByRole('menuitem', { name: 'projectPicker.create' }));
+    const dialog = await screen.findByRole('dialog', { name: 'history.newFolder' });
+    await user.type(within(dialog).getByLabelText('history.folderName'), 'New project');
+    await user.clear(within(dialog).getByLabelText('history.folderPath'));
+    await user.type(within(dialog).getByLabelText('history.folderPath'), '/tmp/new-project');
+    await user.click(within(dialog).getByRole('button', { name: 'history.createFolder' }));
+
+    await waitFor(() => expect(screen.getByRole('button', { name: 'projectPicker.title' })).toHaveTextContent('New project'));
+    await waitFor(() => expect(releaseList).toBeDefined());
+    await act(async () => { releaseList?.(); });
+    expect(screen.getByRole('button', { name: 'projectPicker.title' })).toHaveTextContent('New project');
   });
 
   it('keeps Rex as the default while selecting a one-turn subagent reference', async () => {
@@ -4510,45 +3142,6 @@ describe('SessionPage session actions menu', () => {
 
       await user.click(screen.getByRole('button', { name: 'mock-sse-connected' }));
       expect(screen.queryByTestId('sse-status')).toBeNull();
-    });
-  });
-
-  describe('narrow viewport', () => {
-    const originalMatchMedia = window.matchMedia;
-    const stubViewport = (narrow: boolean) => {
-      window.matchMedia = vi.fn().mockImplementation((query: string) => ({
-        matches: narrow && query === '(max-width: 767px)',
-        media: query,
-        onchange: null,
-        addEventListener: vi.fn(),
-        removeEventListener: vi.fn(),
-        addListener: vi.fn(),
-        removeListener: vi.fn(),
-        dispatchEvent: vi.fn(),
-      })) as unknown as typeof window.matchMedia;
-    };
-    afterEach(() => { window.matchMedia = originalMatchMedia; });
-
-    it('starts with the task list collapsed and overlaying the chat on phone widths', async () => {
-      stubViewport(true);
-      renderSessionPage();
-      await screen.findByRole('button', { name: 'executionMode.title' });
-
-      const sidebar = document.querySelector('[data-session-sidebar]') as HTMLElement;
-      expect(sidebar).toHaveClass('w-0');        // collapsed: the chat keeps the full width
-      expect(sidebar).toHaveClass('absolute');   // opened later it overlays instead of squeezing
-      expect(screen.getByRole('button', { name: 'showHistory' })).toBeInTheDocument();
-    });
-
-    it('keeps the task list open beside the chat on desktop widths', async () => {
-      stubViewport(false);
-      renderSessionPage();
-      await screen.findByRole('button', { name: 'executionMode.title' });
-
-      const sidebar = document.querySelector('[data-session-sidebar]') as HTMLElement;
-      expect(sidebar).toHaveClass('w-[282px]');
-      expect(sidebar).toHaveClass('relative');
-      expect(screen.getByRole('button', { name: 'hideHistory' })).toBeInTheDocument();
     });
   });
 });

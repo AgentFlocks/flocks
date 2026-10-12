@@ -37,7 +37,8 @@ describe('i18n lazy namespaces', () => {
     expect(zhSession.managementTitle).toBe('工作台');
     expect(zhSession.sessionCount).toBe('{{count}} 个任务');
     expect(zhSession.collapseLoaded).toBe('收起');
-    expect(zhSession.newSession).toBe('新建任务');
+    // The blank chat is titled after the sidebar entry that opens it.
+    expect(zhSession.newSession).toBe('Rex 新会话');
     expect(zhSession.createSession).toBe('新建任务');
     expect(zhSession.createSessionInProject).toBe('在项目 {{project}} 中新建任务');
     expect(zhSession.projectDialog.newSessionAction).toBe('新建任务');
@@ -50,7 +51,7 @@ describe('i18n lazy namespaces', () => {
     expect(enSession.managementTitle).toBe('Workbench');
     expect(enSession.sessionCount).toBe('{{count}} tasks');
     expect(enSession.collapseLoaded).toBe('Show less');
-    expect(enSession.newSession).toBe('New Task');
+    expect(enSession.newSession).toBe('New Rex session');
     expect(enSession.createSession).toBe('New Task');
     expect(enSession.createSessionInProject).toBe('New task in project {{project}}');
     expect(enSession.projectDialog.newSessionAction).toBe('New task');

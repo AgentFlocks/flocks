@@ -1,3 +1,4 @@
+import WorkbenchSidePanel from '@/components/common/WorkbenchSidePanel';
 import { useState, Component, type ReactNode, type ErrorInfo } from 'react';
 import { Trash2 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
@@ -142,15 +143,7 @@ export default function RightPanel({
   ];
 
   return (
-    <div
-      className={
-        overlay
-          // Phone widths: cover the canvas area instead of sharing the row.
-          ? `absolute inset-0 z-40 flex min-w-0 flex-col bg-surface overflow-hidden ${open ? '' : 'hidden'}`
-          : "relative flex flex-col bg-white border-l border-gray-200 transition-[width] duration-300 ease-in-out z-10 min-w-0 flex-shrink-0 overflow-hidden"
-      }
-      style={overlay ? undefined : { width: open ? width : 0 }}
-    >
+    <WorkbenchSidePanel open={open} width={width} overlay={overlay}>
       {/* Tab bar */}
       <div className="flex border-b border-gray-100 flex-shrink-0">
         {TABS.map((tab) => (
@@ -219,6 +212,6 @@ export default function RightPanel({
           </button>
         </div>
       )}
-    </div>
+    </WorkbenchSidePanel>
   );
 }

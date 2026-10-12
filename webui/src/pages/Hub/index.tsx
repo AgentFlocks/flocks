@@ -894,16 +894,16 @@ function HubTable({ items, actionId, tagLabels, language, text, onSelect, onActi
   const narrow = useNarrowViewport();
   return (
     <div className="bg-white border border-gray-200 rounded-xl min-h-full overflow-x-auto">
-      {/* From md up the 720px floor keeps five columns usable; widths live on the
-          header cells because table-fixed reads them from the first row and a
-          hidden <col> cannot be dropped. */}
+      {/* From md up the 720px floor keeps five columns usable, split like the dev
+          table (7 / 38 / 31 / 10 / 14); widths live on the header cells because
+          table-fixed reads them from the first row and a hidden <col> cannot be dropped. */}
       <table className="table-fixed text-xs w-full md:min-w-[720px]">
         <thead className="bg-gray-50 text-gray-500">
           <tr>
-            <th className="text-left px-3 py-2 font-medium hidden md:table-cell md:w-[84px]">{text.type}</th>
-            <th className="text-left px-3 py-2 font-medium">{text.name}</th>
+            <th className="text-left px-3 py-2 font-medium hidden md:table-cell md:w-[7%]">{text.type}</th>
+            <th className="text-left px-3 py-2 font-medium md:w-[38%]">{text.name}</th>
             <th className="text-left px-3 py-2 font-medium hidden md:table-cell md:w-[31%]">Tag</th>
-            <th className="text-left px-3 py-2 font-medium hidden md:table-cell md:w-[88px]">{text.status}</th>
+            <th className="text-left px-3 py-2 font-medium hidden md:table-cell md:w-[10%]">{text.status}</th>
             <th className="text-right px-3 py-2 font-medium w-[64px] md:w-[14%]">{text.action}</th>
           </tr>
         </thead>

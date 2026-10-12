@@ -109,9 +109,9 @@ async def test_hook_denials_do_not_count_toward_auto_disable(isolated_registry, 
 
 
 def test_recognised_alias_is_dropped_when_canonical_key_present():
-    from flocks.tool.registry import _remap_schema_kwargs
+    from flocks.tool.registry import remap_schema_kwargs
 
-    remapped, aliases = _remap_schema_kwargs({"filePath": "a", "file_path": "b"}, ["filePath"])
+    remapped, aliases = remap_schema_kwargs({"filePath": "a", "file_path": "b"}, ["filePath"])
 
     assert remapped == {"filePath": "a"}
     assert aliases == {"file_path": "filePath"}

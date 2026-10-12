@@ -849,10 +849,16 @@ class Provider:
         # readers (e.g. a session calling ``get_models()`` on another
         # thread) never observe a half-rebuilt list.
         models_config = getattr(pconfig, "models", None)
-        if models_config:
+        if models_config is not None:
+            from flocks.provider.model_catalog import get_retired_model_ids
+
+            retired_model_ids = get_retired_model_ids(pid)
             desired_models: List[ModelInfo] = []
             if isinstance(models_config, dict):
                 for model_id, model_data in models_config.items():
+                    # Older or higher-priority config can retain withdrawn models.
+                    if model_id in retired_model_ids:
+                        continue
                     try:
                         # Handle both dict and object formats
                         if hasattr(model_data, "model_dump"):

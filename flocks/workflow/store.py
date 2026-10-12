@@ -51,15 +51,20 @@ class WorkflowStore:
     _init_lock_key = None
 
     @classmethod
+    def _lock(cls) -> asyncio.Lock:
+        """Lifecycle lock shared by init and close, one per process and loop."""
+        key = (os.getpid(), asyncio.get_running_loop())
+        if cls._init_lock_key != key:
+            cls._init_lock, cls._init_lock_key = asyncio.Lock(), key
+        return cls._init_lock
+
+    @classmethod
     def get_db_path(cls) -> Path:
         return Storage.get_workflow_db_path()
 
     @classmethod
     async def init(cls) -> None:
-        key = (os.getpid(), asyncio.get_running_loop())
-        if cls._init_lock_key != key:
-            cls._init_lock, cls._init_lock_key = asyncio.Lock(), key
-        async with cls._init_lock:
+        async with cls._lock():
             await cls._initialize()
 
     @classmethod
@@ -87,12 +92,13 @@ class WorkflowStore:
     async def close(cls) -> None:
         from flocks.workflow.ownership import close_execution_leases
         await close_execution_leases()
-        if cls._handle:
-            await cls._handle.close()
-        cls._handle = None
-        cls._initialized = False
-        cls._init_pid = None
-        cls._db_path = None
+        async with cls._lock():
+            if cls._handle:
+                await cls._handle.close()
+            cls._handle = None
+            cls._initialized = False
+            cls._init_pid = None
+            cls._db_path = None
 
     @classmethod
     async def _db(cls):

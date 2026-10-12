@@ -170,8 +170,14 @@ async def test_lifespan_cleans_replaced_files_without_upgrade_recovery(
         types.SimpleNamespace(Instance=types.SimpleNamespace(dispose_all=fake_async_noop)),
     )
 
+    import flocks.extensions as extensions
+
+    monkeypatch.setattr(extensions, "_shutdown_hooks", [])
+    extensions.register_shutdown_hook("test.extension", lambda: dream_scheduler_events.append("extension"))
+
     async with app_module.lifespan(SimpleNamespace()):
         pass
 
     assert events == ["cleanup_replaced_files"]
-    assert dream_scheduler_events == ["start", "stop"]
+    # Extension services stop before the runtime services they depend on.
+    assert dream_scheduler_events == ["start", "extension", "stop"]

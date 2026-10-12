@@ -642,3 +642,31 @@ async def test_session_title_update_invalidates_project_search_stats(
     refreshed = await client.get("/api/project", params={"search": "triage"})
     assert refreshed.status_code == status.HTTP_200_OK
     assert refreshed.json()[0]["matchedSessionCount"] == 1
+
+
+@pytest.mark.asyncio
+async def test_project_removal_can_keep_its_tasks_as_ungrouped(
+    client: AsyncClient,
+    tmp_path: Path,
+):
+    worktree = tmp_path / "keep-tasks"
+    project = (await client.post("/api/project", json={"name": "Keep", "worktree": str(worktree)})).json()
+    session_id = (
+        await client.post("/api/session", json={"title": "Still here", "projectID": project["id"]})
+    ).json()["id"]
+
+    response = await client.delete(f"/api/project/{project['id']}", params={"keepSessions": "true"})
+
+    assert response.status_code == status.HTTP_200_OK
+    assert [item["id"] for item in (await client.get("/api/project")).json()] == []
+    session = (await client.get(f"/api/session/{session_id}")).json()
+    assert session["status"] == "active"
+    ungrouped = (await client.get("/api/session", params={"view": "list", "manager": "true", "projectID": "tasks"})).json()
+    assert session_id in [item["id"] for item in ungrouped]
+    assert worktree.is_dir()
+
+    # Adding the folder again brings the task back under it.
+    restored = (await client.post("/api/project", json={"name": "Keep", "worktree": str(worktree)})).json()
+    assert restored["id"] == project["id"]
+    grouped = (await client.get("/api/session", params={"view": "list", "manager": "true", "projectID": project["id"]})).json()
+    assert session_id in [item["id"] for item in grouped]

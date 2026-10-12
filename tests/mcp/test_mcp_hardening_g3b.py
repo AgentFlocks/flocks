@@ -75,7 +75,7 @@ async def test_refresh_timeout_keeps_old_tools(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_resources_aggregate(monkeypatch):
-    """TOL-0772: 聚合 resources() 跨服务器返回，键为 uri。"""
+    """TOL-0772: 聚合 resources() 跨服务器返回，键为 ``<server>:<uri>``（与上游 dev 一致）。"""
     manager = McpServerManager()
     manager._resources_cache = {
         "s1": [McpResource(name="a", uri="demo://a", server="s1")],
@@ -85,11 +85,10 @@ async def test_resources_aggregate(monkeypatch):
         ],
     }
     manager._initialized = True
-    result = await manager.resources()
-    assert "demo://a" in result and "demo://b" in result
-    # 同 uri 冲突时被命名空间化，不互相覆盖
-    assert "s2:demo://a" in result
-    assert result["demo://b"].server == "s2"
+    result = manager.resources()
+    # 同 uri 出现在两个服务器上时各占一个键，不互相覆盖
+    assert set(result) == {"s1:demo://a", "s2:demo://a", "s2:demo://b"}
+    assert result["s2:demo://b"].server == "s2"
 
 
 def test_adapter_resolves_name_conflict(monkeypatch):

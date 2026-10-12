@@ -29,6 +29,7 @@ const mocks = vi.hoisted(() => ({
   revealCredentials: vi.fn(),
   setCredentials: vi.fn(),
   testCredentials: vi.fn(),
+  sseOptions: null as null | { onReconnect?: () => void },
 }));
 
 vi.mock('react-i18next', () => ({
@@ -77,7 +78,9 @@ vi.mock('@/hooks/useProviders', () => ({
 }));
 
 vi.mock('@/hooks/useSSE', () => ({
-  useSSE: () => undefined,
+  useSSE: (options: { onReconnect?: () => void }) => {
+    mocks.sseOptions = options;
+  },
 }));
 
 vi.mock('@/components/common/Toast', () => ({
@@ -279,6 +282,20 @@ describe('ModelPage add provider dialog', () => {
     await user.click(screen.getByRole('button', { name: /ThreatBook-io-llm/i }));
     keyLink = screen.getByRole('link', { name: 'form.claimFreeKey' });
     expect(keyLink).toHaveAttribute('href', 'https://portal.agentflocks.com/');
+  });
+
+  it('reloads providers after the event stream reconnects', async () => {
+    renderWithRouter(<ModelPage />);
+    await waitFor(() => expect(mocks.sseOptions?.onReconnect).toEqual(expect.any(Function)));
+    vi.useFakeTimers();
+    try {
+      // provider.updated events sent while the stream was down are not replayed.
+      mocks.sseOptions!.onReconnect!();
+      vi.advanceTimersByTime(600);
+      expect(mocks.refetch).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('blocks openai-compatible creation until Base URL is filled and submits once provided', async () => {

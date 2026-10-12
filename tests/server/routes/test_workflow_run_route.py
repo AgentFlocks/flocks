@@ -235,6 +235,100 @@ async def test_update_workflow_rejects_unmapped_edges_when_strict(
     write_workflow.assert_not_called()
 
 
+def _strict_saved_workflow(metadata=None):
+    edge = {"from": "prepare_message", "to": "transform_message", "order": 0, "mapping": {"message_text": "message_text"}}
+    workflow_json = _two_node_workflow_json(edge)
+    workflow_json["metadata"] = metadata or {
+        "runtime": {"strict_edge_mapping": True, "dataflow_mode": "vertex_cache"},
+        "node_timeout_s": 30,
+    }
+    return {
+        "id": "wf-1",
+        "name": "existing workflow",
+        "category": "default",
+        "status": "draft",
+        "createdAt": 1,
+        "updatedAt": 1,
+        "source": "global",
+        "workflowJson": workflow_json,
+        "markdownContent": None,
+        "editMarkdownContent": None,
+        "group_readonly": False,
+    }
+
+
+def _patch_saved_workflow(monkeypatch: pytest.MonkeyPatch, existing: dict) -> list[dict]:
+    writes: list[dict] = []
+
+    def _fake_write_workflow_to_fs(workflow_id, workflow_json, meta, *args, **kwargs):
+        writes.append(workflow_json)
+
+    monkeypatch.setattr(workflow_module, "resolve_workflow_from_fs", lambda _workflow_id: (Path("unused"), dict(existing)))
+    monkeypatch.setattr(workflow_module, "_write_workflow_to_fs", _fake_write_workflow_to_fs)
+    monkeypatch.setattr(workflow_module, "_get_workflow_stats", AsyncMock(return_value={}))
+    monkeypatch.setattr(workflow_module, "publish_event", AsyncMock(return_value=None))
+    return writes
+
+
+@pytest.mark.asyncio
+async def test_update_without_metadata_keeps_saved_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A nodes-only update must not drop strict mapping (FL-BUG-001)."""
+    existing = _strict_saved_workflow()
+    writes = _patch_saved_workflow(monkeypatch, existing)
+    updated = {key: value for key, value in existing["workflowJson"].items() if key != "metadata"}
+    updated["nodes"] = [dict(updated["nodes"][0], code="outputs['message_text'] = 'changed'"), updated["nodes"][1]]
+
+    result = await workflow_module.update_workflow("wf-1", workflow_module.WorkflowUpdateRequest(workflowJson=updated))
+
+    assert result.workflowJson["metadata"] == existing["workflowJson"]["metadata"]
+    assert writes[0]["metadata"]["runtime"] == {"strict_edge_mapping": True, "dataflow_mode": "vertex_cache"}
+    assert writes[0]["nodes"][0]["code"] == "outputs['message_text'] = 'changed'"
+
+
+@pytest.mark.asyncio
+async def test_update_without_metadata_still_rejects_unmapped_edges(monkeypatch: pytest.MonkeyPatch) -> None:
+    existing = _strict_saved_workflow()
+    writes = _patch_saved_workflow(monkeypatch, existing)
+    unmapped = _two_node_workflow_json({"from": "prepare_message", "to": "transform_message", "order": 0})
+
+    with pytest.raises(workflow_module.HTTPException) as exc_info:
+        await workflow_module.update_workflow("wf-1", workflow_module.WorkflowUpdateRequest(workflowJson=unmapped))
+
+    assert exc_info.value.status_code == 400
+    assert "Workflow strict edge mapping failed" in str(exc_info.value.detail)
+    assert writes == []
+
+
+@pytest.mark.asyncio
+async def test_update_metadata_without_runtime_inherits_saved_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
+    existing = _strict_saved_workflow()
+    writes = _patch_saved_workflow(monkeypatch, existing)
+    unmapped = _two_node_workflow_json({"from": "prepare_message", "to": "transform_message", "order": 0})
+    unmapped["metadata"] = {"runtime": None, "node_timeout_s": 60}
+
+    with pytest.raises(workflow_module.HTTPException) as exc_info:
+        await workflow_module.update_workflow("wf-1", workflow_module.WorkflowUpdateRequest(workflowJson=unmapped))
+
+    assert exc_info.value.status_code == 400
+    assert writes == []
+
+
+@pytest.mark.asyncio
+async def test_update_explicit_runtime_values_win_over_saved_ones(monkeypatch: pytest.MonkeyPatch) -> None:
+    existing = _strict_saved_workflow()
+    writes = _patch_saved_workflow(monkeypatch, existing)
+    unmapped = _two_node_workflow_json({"from": "prepare_message", "to": "transform_message", "order": 0})
+    unmapped["metadata"] = {"runtime": {"strict_edge_mapping": False}, "node_timeout_s": 60}
+
+    result = await workflow_module.update_workflow("wf-1", workflow_module.WorkflowUpdateRequest(workflowJson=unmapped))
+
+    assert result.workflowJson["metadata"] == {
+        "runtime": {"strict_edge_mapping": False, "dataflow_mode": "vertex_cache"},
+        "node_timeout_s": 60,
+    }
+    assert writes[0]["edges"][0].get("mapping") is None
+
+
 @pytest.mark.asyncio
 async def test_run_workflow_execution_task_reuses_existing_mcp_without_reinit(
     monkeypatch: pytest.MonkeyPatch,
@@ -820,3 +914,128 @@ async def test_save_syslog_config_persists_listener_settings(
     assert saved_config["inputKey"] == "syslog_message"
     assert persisted_triggers == [["syslog-default"]]
     restart_workflow.assert_awaited_once_with("wf-input")
+
+
+_UNMAPPED_EDGE = {"from": "prepare_message", "to": "transform_message", "order": 0}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("saved_metadata", "request_metadata"),
+    [
+        # Same section, other spelling: the inherited snake_case value is read first.
+        ({"runtime": {"strict_edge_mapping": False}}, {"runtime": {"strictEdgeMapping": True}}),
+        # Other location: the inherited root flag is read before any runtime section.
+        ({"strict_edge_mapping": False, "runtime": {}}, {"runtime": {"strict_edge_mapping": True}}),
+    ],
+)
+async def test_update_explicit_strict_alias_beats_inherited_spellings(
+    monkeypatch: pytest.MonkeyPatch,
+    saved_metadata: dict,
+    request_metadata: dict,
+) -> None:
+    existing = _strict_saved_workflow(saved_metadata)
+    writes = _patch_saved_workflow(monkeypatch, existing)
+    unmapped = _two_node_workflow_json(_UNMAPPED_EDGE)
+    unmapped["metadata"] = request_metadata
+
+    with pytest.raises(workflow_module.HTTPException) as exc_info:
+        await workflow_module.update_workflow("wf-1", workflow_module.WorkflowUpdateRequest(workflowJson=unmapped))
+
+    assert exc_info.value.status_code == 400
+    assert writes == []
+
+
+@pytest.mark.asyncio
+async def test_update_explicit_opt_out_alias_is_honoured(monkeypatch: pytest.MonkeyPatch) -> None:
+    existing = _strict_saved_workflow({"runtime": {"strict_edge_mapping": True, "dataflow_mode": "vertex_cache"}})
+    writes = _patch_saved_workflow(monkeypatch, existing)
+    unmapped = _two_node_workflow_json(_UNMAPPED_EDGE)
+    unmapped["metadata"] = {"runtime": {"strictEdgeMapping": False}}
+
+    result = await workflow_module.update_workflow("wf-1", workflow_module.WorkflowUpdateRequest(workflowJson=unmapped))
+
+    assert result.workflowJson["metadata"]["runtime"] == {"dataflow_mode": "vertex_cache", "strictEdgeMapping": False}
+    assert len(writes) == 1
+
+
+@pytest.mark.asyncio
+async def test_update_explicit_dataflow_alias_is_not_shadowed(monkeypatch: pytest.MonkeyPatch) -> None:
+    from flocks.workflow.execution_plan import resolve_workflow_dataflow_mode
+
+    existing = _strict_saved_workflow({"runtime": {"strict_edge_mapping": True, "dataflow_mode": "vertex_cache"}})
+    _patch_saved_workflow(monkeypatch, existing)
+    updated = dict(existing["workflowJson"], metadata={"runtime": {"dataflowMode": "legacy"}})
+
+    result = await workflow_module.update_workflow("wf-1", workflow_module.WorkflowUpdateRequest(workflowJson=updated))
+
+    assert resolve_workflow_dataflow_mode(result.workflowJson["metadata"]) == "legacy"
+    assert result.workflowJson["metadata"]["runtime"]["strict_edge_mapping"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("section", "key"),
+    [
+        ("runtime", "strict_edge_mapping"),
+        ("runtime", "strictEdgeMapping"),
+        ("runtime_defaults", "strict_edge_mapping"),
+    ],
+)
+async def test_update_null_strict_setting_counts_as_unset(
+    monkeypatch: pytest.MonkeyPatch,
+    section: str,
+    key: str,
+) -> None:
+    existing = _strict_saved_workflow({section: {"strict_edge_mapping": True, "dataflow_mode": "vertex_cache"}})
+    writes = _patch_saved_workflow(monkeypatch, existing)
+    unmapped = _two_node_workflow_json(_UNMAPPED_EDGE)
+    unmapped["metadata"] = {section: {key: None}}
+
+    with pytest.raises(workflow_module.HTTPException) as exc_info:
+        await workflow_module.update_workflow("wf-1", workflow_module.WorkflowUpdateRequest(workflowJson=unmapped))
+
+    assert exc_info.value.status_code == 400
+    assert writes == []
+
+
+@pytest.mark.asyncio
+async def test_update_null_dataflow_setting_keeps_saved_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    from flocks.workflow.execution_plan import resolve_workflow_dataflow_mode
+
+    existing = _strict_saved_workflow({"runtime": {"strict_edge_mapping": True, "dataflow_mode": "vertex_cache"}})
+    _patch_saved_workflow(monkeypatch, existing)
+    updated = dict(existing["workflowJson"], metadata={"runtime": {"dataflow_mode": None}})
+
+    result = await workflow_module.update_workflow("wf-1", workflow_module.WorkflowUpdateRequest(workflowJson=updated))
+
+    assert resolve_workflow_dataflow_mode(result.workflowJson["metadata"]) == "vertex_cache"
+
+
+@pytest.mark.asyncio
+async def test_run_workflow_reports_a_dedicated_session_conflict_as_409(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from fastapi import HTTPException
+
+    from flocks.session.session import SessionAgentMismatchError
+
+    monkeypatch.setattr(
+        workflow_module,
+        "_read_workflow_from_fs",
+        lambda _workflow_id: {"workflowJson": _minimal_workflow_json()},
+    )
+    monkeypatch.setattr(
+        workflow_module,
+        "_build_workflow_tool_context",
+        AsyncMock(side_effect=SessionAgentMismatchError("Session s-1 is dedicated to agent 'isolated'")),
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        await workflow_module.run_workflow_endpoint(
+            "wf-1",
+            workflow_module.WorkflowRunRequest(session_id="s-1", agent="rex"),
+        )
+
+    assert exc_info.value.status_code == 409
+    assert "dedicated to agent" in exc_info.value.detail

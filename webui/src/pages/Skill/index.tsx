@@ -1,13 +1,12 @@
 import { pageActionLabel } from '../pageActionLabel';
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
-import { AlertTriangle, BookOpen, CheckCircle, ChevronLeft, ChevronRight, CloudDownload, Filter, FolderOpen, Loader2, Pencil, Plus, RefreshCw, Search, Sparkles, XCircle } from 'lucide-react';
+import { AlertTriangle, BookOpen, ChevronLeft, ChevronRight, CloudDownload, Filter, FolderOpen, Loader2, Pencil, Plus, RefreshCw, Search, Sparkles } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import PageHeader from '@/components/common/PageHeader';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
 import EmptyState from '@/components/common/EmptyState';
 import { useToast } from '@/components/common/Toast';
 import { isSkillDefinitionReadOnly, skillAPI, Skill } from '@/api/skill';
-import { EnabledBadge } from '@/pages/Tool/components/badges';
 import SkillSheet from './SkillSheet';
 import SkillInstallDialog from './SkillInstallDialog';
 import GroupNav, { useGroupDrag, type GroupDrag } from '@/components/plugin-groups/GroupNav';
@@ -15,6 +14,11 @@ import { deriveGroupNav, matchesGroup, saveGroupItems, type GroupSelection } fro
 import { usePluginViewMode } from '@/hooks/usePluginViewMode';
 import PluginViewToggle from '@/components/plugin-groups/PluginViewToggle';
 import PluginGroupButton from '@/components/plugin-groups/PluginGroupButton';
+import PluginCard, { PLUGIN_CARD_GRID_CLASS, PluginSourceTag } from '@/components/plugin-groups/PluginCard';
+import EnabledToggle from '@/components/plugin-groups/EnabledToggle';
+import { EnabledBadge } from '@/pages/Tool/components/badges';
+import EnabledSwitch from '@/components/plugin-groups/EnabledSwitch';
+import { requestConfirm } from '@/components/common/ConfirmDialog';
 
 const PAGE_SIZE = 25;
 
@@ -272,6 +276,23 @@ export default function SkillPage() {
     }
   };
 
+  const handleDeleteSkill = async (skill: Skill) => {
+    if (!isUserManaged(skill)) return;
+    const ok = await requestConfirm({
+      description: t('sheet.deleteConfirm', { name: skill.name }),
+      confirmText: t('sheet.delete'),
+      variant: 'danger',
+    });
+    if (!ok) return;
+    try {
+      await skillAPI.delete(skill.name);
+      if (sheetSkill?.name === skill.name) setSheetSkill(null);
+      await refreshSkillsAndFetch({ silent: true, invalidateOnError: true, force: true });
+    } catch (err: unknown) {
+      showErrorToast(t('sheet.deleteFailed'), err instanceof Error ? err.message : String(err));
+    }
+  };
+
   const handleInstallDeps = async (skill: Skill, e: React.MouseEvent) => {
     e.stopPropagation();
     setInstallingDeps(prev => ({ ...prev, [skill.name]: true }));
@@ -452,6 +473,7 @@ export default function SkillPage() {
               setGroupSelection(null);
             }}
             onSelect={handleSelectSkill}
+            onDelete={(skill) => void handleDeleteSkill(skill)}
             onInstallDeps={handleInstallDeps}
             onToggle={handleToggle}
           />
@@ -534,6 +556,7 @@ interface SkillTableProps {
   onSelect: (skill: Skill) => void;
   onInstallDeps: (skill: Skill, e: React.MouseEvent) => void;
   onToggle: (skill: Skill, e: React.MouseEvent) => void;
+  onDelete: (skill: Skill) => void;
 }
 
 function SkillTable({
@@ -542,7 +565,7 @@ function SkillTable({
   enabledFilter, onToggleEnabledFilter, onClearEnabledFilter,
   allSources, sourceColFilter, onToggleSourceColFilter, onClearSourceColFilter,
   hasActiveFilter, onClearAllFilters,
-  onSelect, onInstallDeps, onToggle,
+  onSelect, onInstallDeps, onToggle, onDelete,
 }: SkillTableProps) {
   const { t } = useTranslation('skill');
 
@@ -561,13 +584,13 @@ function SkillTable({
           />
         </div>
         {skills.length > 0 ? (
-          <div className="grid gap-3 grid-cols-1 sm:grid-cols-2 xl:grid-cols-3">
+          <div className={PLUGIN_CARD_GRID_CLASS}>
             {skills.map((skill) => (
               <SkillCard key={skill.name} skill={skill} grouping={grouping}
                 isSelected={selectedSkill?.name === skill.name}
                 installingDeps={installingDeps[skill.name] ?? false}
                 toggling={togglingSkills[skill.name] ?? false}
-                onSelect={onSelect} onInstallDeps={onInstallDeps} onToggle={onToggle} />
+                onSelect={onSelect} onInstallDeps={onInstallDeps} onToggle={onToggle} onDelete={onDelete} />
             ))}
           </div>
         ) : (
@@ -588,12 +611,14 @@ function SkillTable({
           without horizontal scrolling (the type badge moves into the name cell and
           the action buttons stay on screen). From md up the 640px floor keeps the
           five columns usable; widths live on the header cells because table-fixed
-          reads them from the first row and a hidden <col> cannot be dropped. */}
-      <table className="table-fixed text-xs w-full md:min-w-[640px]">
+          reads them from the first row and a hidden <col> cannot be dropped. From md
+          up the table has no set width, so it lays out like the dev table: the
+          8 / 46 / 18 / 14 / 14 split as hints, content minimums kept. */}
+      <table className="table-fixed text-xs w-full md:w-auto md:min-w-[max(100%,40rem)]">
         <thead className="bg-gray-50 text-gray-500 border-b border-gray-200">
           <tr>
-            <th className="text-left px-4 py-2.5 font-medium hidden md:table-cell md:w-[104px] whitespace-nowrap">{t('table.type')}</th>
-            <th className="text-left font-medium px-3 md:px-4 py-2.5 whitespace-nowrap">{t('table.name')}</th>
+            <th className="text-left px-4 py-2.5 font-medium hidden md:table-cell md:w-[8%] whitespace-nowrap">{t('table.type')}</th>
+            <th className="text-left font-medium px-3 md:px-4 py-2.5 whitespace-nowrap md:w-[46%]">{t('table.name')}</th>
             <th className="text-left px-4 py-2.5 font-medium hidden md:table-cell md:w-[18%]">
               <ColumnFilterHeader
                 label={t('table.source')}
@@ -603,7 +628,7 @@ function SkillTable({
                 onClear={onClearSourceColFilter}
               />
             </th>
-            <th className="text-left px-4 py-2.5 font-medium hidden md:table-cell md:w-[132px]">
+            <th className="text-left px-4 py-2.5 font-medium hidden md:table-cell md:w-[14%]">
               <ColumnFilterHeader
                 label={t('table.enabled')}
                 values={['enabled', 'disabled']}
@@ -615,7 +640,7 @@ function SkillTable({
             </th>
             {/* phone: the enable switch (icon-only) joins the group and edit buttons here,
                 three 44px touch targets */}
-            <th className="text-right font-medium w-[156px] md:w-[128px] px-2 md:px-4 py-2.5">{t('table.actions')}</th>
+            <th className="text-right font-medium w-[156px] md:w-[14%] px-2 md:px-4 py-2.5">{t('table.actions')}</th>
           </tr>
         </thead>
         <tbody className="divide-y divide-gray-100">
@@ -668,6 +693,7 @@ interface SkillRowProps {
   onSelect: (skill: Skill) => void;
   onInstallDeps: (skill: Skill, e: React.MouseEvent) => void;
   onToggle: (skill: Skill, e: React.MouseEvent) => void;
+  onDelete?: (skill: Skill) => void;
 }
 
 function SkillRow({ skill, isSelected, installingDeps, toggling, onSelect, onInstallDeps, onToggle, grouping }: SkillRowProps) {
@@ -745,8 +771,8 @@ function SkillRow({ skill, isSelected, installingDeps, toggling, onSelect, onIns
       </td>
 
       {/* 启用开关列：控制 skill 是否注入 Agent System Prompt（phone 宽度下并入操作列） */}
-      <td className="px-4 py-3 hidden md:table-cell whitespace-nowrap">
-        <SkillEnabledControl
+      <td className="hidden whitespace-nowrap px-4 py-3 md:table-cell">
+        <EnabledToggle
           enabled={enabled}
           loading={toggling}
           title={enabled ? t('toggle.enabledTip') : t('toggle.disabledTip')}
@@ -758,7 +784,7 @@ function SkillRow({ skill, isSelected, installingDeps, toggling, onSelect, onIns
       <td className="text-right px-2 md:px-4 py-3">
         <div className="flex items-center justify-end gap-1">
           <span className="md:hidden inline-flex">
-            <SkillEnabledControl
+            <EnabledToggle
               enabled={enabled}
               loading={toggling}
               compact
@@ -798,94 +824,56 @@ function SkillRow({ skill, isSelected, installingDeps, toggling, onSelect, onIns
   );
 }
 
-function SkillCard({ skill, isSelected, installingDeps, toggling, onSelect, onInstallDeps, onToggle, grouping }: SkillRowProps) {
+function SkillCard({ skill, isSelected, installingDeps, toggling, onSelect, onInstallDeps, onToggle, onDelete, grouping }: SkillRowProps) {
   const { t } = useTranslation('skill');
   const isUser = isUserManaged(skill);
   const enabled = !skill.disabled;
   const hasMissingDeps = skill.eligible === false && (skill.install_specs?.length ?? 0) > 0;
 
   return (
-    <article
-      {...grouping?.dragProps(skill.name)}
-      className={`flex flex-col rounded-xl border bg-white p-4 min-w-0 ${isSelected ? 'border-slate-400 ring-2 ring-slate-200' : 'border-gray-200'} ${skill.disabled ? 'opacity-75' : ''}`}
-    >
-      <div className="mb-3 flex items-center justify-between gap-2">
-        <SourceTypeBadge isUser={isUser} />
-        <SkillEnabledControl enabled={enabled} loading={toggling}
-          title={enabled ? t('toggle.enabledTip') : t('toggle.disabledTip')}
-          onChange={(event) => onToggle(skill, event)} />
-      </div>
-      <button type="button" onClick={() => onSelect(skill)} title={t('table.edit')}
-        className="flex min-w-0 items-start gap-2.5 text-left group/name">
-        <span className="mt-0.5 flex h-7 w-7 items-center justify-center rounded-lg bg-gray-100 text-gray-400 shrink-0">
-          {isUser ? <FolderOpen aria-hidden="true" className="h-3.5 w-3.5" /> : <Sparkles aria-hidden="true" className="h-3.5 w-3.5" />}
-        </span>
-        <span className="min-w-0 flex-1">
-          <span className="block text-sm font-medium text-gray-900 group-hover/name:text-slate-700 truncate">{skill.name}</span>
-          <span className="mt-1 block text-xs leading-5 text-gray-400 line-clamp-2">{skill.description || t('sheet.noDescription')}</span>
-        </span>
-      </button>
-      {hasMissingDeps && <div className="mt-2 flex items-start gap-1 text-[11px] text-amber-600" title={(skill.missing ?? []).join(', ')}>
-        <AlertTriangle aria-hidden="true" className="mt-0.5 h-3 w-3 shrink-0" />
-        <span>{t('eligibility.missingDepsInline', { list: (skill.missing ?? []).join(', ') })}</span>
-      </div>}
-      <div className="mt-3 flex items-center gap-2 text-[11px] text-gray-400 min-w-0">
-        <span className="shrink-0">{t('table.source')}</span>
-        <span className="truncate font-mono" title={skill.location}>{skill.source ?? '-'}</span>
-      </div>
-      <div className="flex items-center justify-end gap-1 border-t border-gray-100 pt-3 mt-auto flex-wrap">
-        {grouping && <PluginGroupButton grouping={grouping} itemKey={skill.name} />}
-        {hasMissingDeps && <button onClick={(event) => onInstallDeps(skill, event)} disabled={installingDeps}
-          title={t('eligibility.installDeps')}
-          className="inline-flex items-center gap-1 rounded border border-gray-200 bg-white px-2 py-1 text-xs text-gray-600 hover:bg-gray-50 disabled:opacity-50">
-          {installingDeps ? <Loader2 aria-hidden="true" className="h-3 w-3 animate-spin" /> : <CloudDownload aria-hidden="true" className="h-3 w-3" />}
-          {installingDeps ? t('eligibility.installing') : t('eligibility.installDeps')}
-        </button>}
-        <button type="button" onClick={() => onSelect(skill)} title={t('table.edit')} aria-label={t('table.edit')}
-          className="rounded-md border border-gray-200 p-1.5 text-gray-500 hover:border-slate-300 hover:bg-gray-50 hover:text-slate-700">
-          <Pencil aria-hidden="true" className="h-3.5 w-3.5" />
+    <PluginCard
+      icon={isUser ? <FolderOpen className="h-4 w-4" /> : <Sparkles className="h-4 w-4" />}
+      title={skill.name}
+      tags={<PluginSourceTag builtin={!isUser} label={isUser ? t('table.custom') : t('table.builtin')} />}
+      status={<EnabledBadge enabled={enabled} />}
+      statusControl={<EnabledSwitch enabled={enabled} loading={toggling} label={t('table.enabled')}
+        title={enabled ? t('toggle.enabledTip') : t('toggle.disabledTip')}
+        onChange={(event) => onToggle(skill, event)} />}
+      description={skill.description}
+      emptyDescription={t('sheet.noDescription')}
+      meta={<>
+        {hasMissingDeps && <div className="mb-1 flex items-start gap-1 text-amber-600" title={(skill.missing ?? []).join(', ')}>
+          <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />
+          <span>{t('eligibility.missingDepsInline', { list: (skill.missing ?? []).join(', ') })}</span>
+        </div>}
+        <div className="flex min-w-0 items-center gap-2">
+          <span className="shrink-0">{t('table.source')}</span>
+          <span className="truncate font-mono" title={skill.location}>{skill.source ?? '-'}</span>
+        </div>
+      </>}
+      selected={isSelected}
+      muted={skill.disabled}
+      onOpen={() => onSelect(skill)}
+      deleteLabel={t('sheet.delete')}
+      onDelete={isUser && onDelete ? () => onDelete(skill) : undefined}
+      deleteDisabledReason={isUser ? undefined : t('sheet.deleteBuiltinTip')}
+      groupButton={grouping ? <PluginGroupButton grouping={grouping} itemKey={skill.name} iconOnly /> : undefined}
+      extraActions={hasMissingDeps ? (
+        <button type="button" onClick={(event) => onInstallDeps(skill, event)} disabled={installingDeps}
+          title={installingDeps ? t('eligibility.installing') : t('eligibility.installDeps')}
+          aria-label={t('eligibility.installDeps')}
+          className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-700 disabled:opacity-50">
+          {installingDeps ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <CloudDownload className="h-3.5 w-3.5" />}
         </button>
-      </div>
-    </article>
+      ) : undefined}
+      editLabel={t('table.edit')}
+      dragProps={grouping?.dragProps(skill.name)}
+      testId={`skill-card-${skill.name}`}
+    />
   );
 }
 
 // ─── Sub-components ───────────────────────────────────────────────────────────
-
-function SkillEnabledControl({ enabled, loading, title, onChange, compact = false }: {
-  enabled: boolean;
-  loading: boolean;
-  title?: string;
-  onChange: (e: React.MouseEvent) => void;
-  /** Icon-only pill for phone widths, where the text pill does not fit next to the action buttons. */
-  compact?: boolean;
-}) {
-  return (
-    <button
-      type="button"
-      role="switch"
-      aria-checked={enabled}
-      aria-label={title}
-      onClick={onChange}
-      disabled={loading}
-      title={title}
-      className="relative inline-flex shrink-0 rounded-full transition-opacity focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-300 focus-visible:ring-offset-2 disabled:cursor-wait disabled:opacity-75"
-    >
-      {compact ? (
-        <span className={`inline-flex h-7 w-7 items-center justify-center rounded-full ${enabled ? 'bg-green-100 text-green-800' : 'bg-gray-100 text-gray-600'}`}>
-          {enabled ? <CheckCircle aria-hidden="true" className="w-3.5 h-3.5" /> : <XCircle aria-hidden="true" className="w-3.5 h-3.5" />}
-        </span>
-      ) : (
-        <EnabledBadge enabled={enabled} />
-      )}
-      {loading && (
-        <span className="absolute inset-0 inline-flex items-center justify-center rounded-full bg-white/70 dark:bg-zinc-900/70">
-          <Loader2 className="w-3 h-3 animate-spin text-gray-500 dark:text-zinc-300" />
-        </span>
-      )}
-    </button>
-  );
-}
 
 function SourceTypeBadge({ isUser }: { isUser: boolean }) {
   const { t } = useTranslation('skill');

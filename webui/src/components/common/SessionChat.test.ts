@@ -705,6 +705,66 @@ describe('SessionChat provider retry notice', () => {
       .toContain('模型请求被限流（429），正在第 3/5 次重试');
   });
 
+  it('recovers the retry state when the message load toggles loading mid-poll', async () => {
+    // The real useSessionMessages starts with loading=false and flips to true
+    // once its fetch starts, which re-runs the recovery effect while the first
+    // status poll is still in flight (FL-BUG-002).
+    let setLoading: (value: boolean) => void = () => {};
+    useSessionMessagesMock.mockImplementation(() => {
+      const [loading, setLoadingState] = React.useState(false);
+      setLoading = setLoadingState;
+      return {
+        messages: [userMessage],
+        loading,
+        error: null,
+        refetch: vi.fn(),
+        addMessage: vi.fn(),
+        updateMessage: vi.fn(),
+        updateMessagePart: vi.fn(),
+        removeMessage: vi.fn(),
+        clearMessages: vi.fn(),
+        replaceMessageText: vi.fn(),
+        markMessageStopped: vi.fn(),
+        truncateAfterMessage: vi.fn(),
+      };
+    });
+    const statusPolls: Array<(value: unknown) => void> = [];
+    clientGetMock.mockImplementation((url: string) => {
+      if (url === '/api/session/status') {
+        return new Promise((resolve) => { statusPolls.push(resolve); });
+      }
+      return Promise.resolve({ data: {} });
+    });
+
+    render(React.createElement(SessionChat, { sessionId: 'sess-1', live: true }));
+    await act(async () => { await Promise.resolve(); });
+    expect(statusPolls.length).toBeGreaterThan(0);
+
+    act(() => { setLoading(true); });
+    act(() => { setLoading(false); });
+    await act(async () => { await Promise.resolve(); });
+
+    await act(async () => {
+      statusPolls.splice(0).forEach((resolve) => resolve({
+        data: {
+          'sess-1': {
+            type: 'retry',
+            attempt: 1,
+            maxAttempts: 5,
+            message: 'Rate Limited',
+            next: Date.now() + 15000,
+            rateLimited: true,
+          },
+        },
+      }));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(screen.getByTestId('session-retry-notice').textContent)
+      .toContain('模型请求被限流（429），正在第 1/5 次重试');
+  });
+
   it('ignores a status poll that lands after the consumer switched sessions', async () => {
     // WorkflowDetail/ChatTab swaps sessionId without remounting; a slow poll
     // for the old session must not paint its retry notice onto the new one.
@@ -7271,6 +7331,55 @@ describe('areChatMessagePartsRenderEqual', () => {
   });
 });
 
+it('uses an authorized transport with native messages and restores failed drafts', async () => {
+  const send = vi.fn().mockRejectedValueOnce(new Error('offline')).mockResolvedValueOnce(undefined);
+  const messages: Message[] = [{ id: 'answer', sessionID: '', role: 'assistant', timestamp: 0, finish: 'stop', parts: [{ id: 'text', type: 'text', text: 'Audit result: seven findings' }] }];
+  const view = render(React.createElement(SessionChat, { transport: { messages, send, disabled: true } }));
+  expect(await screen.findByText('Audit result: seven findings')).toBeVisible();
+  view.rerender(React.createElement(SessionChat, { transport: { messages, send } }));
+  const input = screen.getByPlaceholderText('请输入消息');
+  await userEvent.type(input, 'explain{enter}');
+  await waitFor(() => expect(input).toHaveValue('explain'));
+  expect(send).toHaveBeenCalledWith('explain');
+  await userEvent.type(input, '{enter}');
+  await waitFor(() => expect(input).toHaveValue(''));
+  expect(send).toHaveBeenCalledTimes(2);
+});
+
+it('scrolls top content with the conversation and places the welcome after it', async () => {
+  const top = React.createElement('div', { 'data-testid': 'run-record' }, 'execution record');
+  const welcome = React.createElement('p', null, 'ask about the audit');
+  const view = render(React.createElement(SessionChat, {
+    transport: { messages: [], send: vi.fn() }, conversationTopSlot: top, welcomeContent: welcome,
+  }));
+  const record = screen.getByTestId('run-record');
+  const prompt = screen.getByText('ask about the audit');
+  expect(record.compareDocumentPosition(prompt) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  // Without top content the welcome fills the view; below it, it only follows the record.
+  expect(prompt.parentElement).not.toHaveStyle({ minHeight: '100%' });
+  expect(record.parentElement).toBe(prompt.parentElement?.parentElement);
+
+  view.rerender(React.createElement(SessionChat, { transport: { messages: [], send: vi.fn() }, conversationTopSlot: top }));
+  expect(screen.getByTestId('run-record')).toBeVisible();
+  expect(screen.queryByText('暂无消息')).not.toBeInTheDocument();
+
+  const answer: Message[] = [{ id: 'a', sessionID: '', role: 'assistant', timestamp: 0, finish: 'stop', parts: [{ id: 't', type: 'text', text: 'seven findings' }] }];
+  view.rerender(React.createElement(SessionChat, { transport: { messages: answer, send: vi.fn() }, conversationTopSlot: top }));
+  const reply = await screen.findByText('seven findings');
+  expect(screen.getByTestId('run-record').compareDocumentPosition(reply) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+});
+
+it('keeps a task draft when its native session arrives and after reopening', async () => {
+  const draftKey = 'audit:task-draft';
+  const transport = { send: vi.fn() };
+  const view = render(React.createElement(SessionChat, { draftKey, transport }));
+  await userEvent.type(screen.getByPlaceholderText('请输入消息'), 'pending question');
+  view.rerender(React.createElement(SessionChat, { draftKey, sessionId: 'native-audit', transport }));
+  expect(screen.getByPlaceholderText('请输入消息')).toHaveValue('pending question');
+  view.unmount();
+  render(React.createElement(SessionChat, { draftKey, sessionId: 'native-audit', transport }));
+  expect(screen.getByPlaceholderText('请输入消息')).toHaveValue('pending question');
+});
 
 describe('process duration across model/tool boundaries', () => {
   const done = { id: 'done', type: 'tool', tool: 'read', state: {
