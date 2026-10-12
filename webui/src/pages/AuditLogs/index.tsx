@@ -6,6 +6,7 @@ import PageHeader from '@/components/common/PageHeader';
 import { useAuth } from '@/contexts/AuthContext';
 import { flocksproAuditApi, type AuditEventItem } from '@/api/flocksproAudit';
 import { flocksproUsersApi } from '@/api/flocksproUsers';
+import { toAuditUtcTimestamp } from './time';
 
 const PAGE_SIZE = 20;
 const EXPORT_PAGE_SIZE = 500;
@@ -25,11 +26,6 @@ const EMPTY_FILTERS: AuditFilters = {
   startAt: '',
   endAt: '',
 };
-
-function toLocalTimestampOrEmpty(value: string): string | undefined {
-  if (!value) return undefined;
-  return value.length === 16 ? `${value}:00` : value;
-}
 
 function formatLocalTime(value: string): string {
   if (!value) return '-';
@@ -51,7 +47,20 @@ function payloadPreview(item: AuditEventItem): string {
 }
 
 function payloadFullText(item: AuditEventItem): string {
-  const data = item.payload ?? item.metadata ?? {};
+  const context: Record<string, unknown> = {};
+  for (const key of ['reason', 'phase', 'entry'] as const) {
+    if (item[key]?.trim()) context[key] = item[key];
+  }
+  const payload = item.payload ?? item.metadata ?? {};
+  const distinctMetadata = item.payload && item.metadata
+    && JSON.stringify(item.payload) !== JSON.stringify(item.metadata);
+  const data = Object.keys(context).length || distinctMetadata
+    ? {
+        ...context,
+        ...(Object.keys(payload).length ? { payload } : {}),
+        ...(distinctMetadata ? { metadata: item.metadata } : {}),
+      }
+    : payload;
   const serialized = JSON.stringify(data, null, 2);
   return !serialized || serialized === '{}' ? '-' : serialized;
 }
@@ -145,8 +154,8 @@ function buildAuditQuery(filters: AuditFilters) {
     event_type: filters.eventType || undefined,
     username: filters.actorId || undefined,
     result: filters.result || undefined,
-    start_at: toLocalTimestampOrEmpty(filters.startAt),
-    end_at: toLocalTimestampOrEmpty(filters.endAt),
+    start_at: toAuditUtcTimestamp(filters.startAt),
+    end_at: toAuditUtcTimestamp(filters.endAt),
     sort_by: 'created_at',
     order: 'desc' as const,
   };
@@ -195,7 +204,9 @@ export default function AuditLogsPage() {
       setOffset(nextOffset);
     } catch (err: any) {
       const code = err?.response?.status;
-      if (code === 403) {
+      if (err instanceof RangeError) {
+        setError(t('audit.errors.invalidTime', { defaultValue: '请选择有效的开始和结束时间' }));
+      } else if (code === 403) {
         setError(t('audit.errors.forbidden'));
       } else {
         setError(err?.response?.data?.message || err?.message || t('audit.errors.fetch'));
@@ -274,7 +285,9 @@ export default function AuditLogsPage() {
       link.remove();
       URL.revokeObjectURL(url);
     } catch (err: any) {
-      setError(err?.response?.data?.message || err?.message || t('audit.errors.export'));
+      setError(err instanceof RangeError
+        ? t('audit.errors.invalidTime', { defaultValue: '请选择有效的开始和结束时间' })
+        : err?.response?.data?.message || err?.message || t('audit.errors.export'));
     } finally {
       setExporting(false);
     }
