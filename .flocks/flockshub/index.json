@@ -14640,7 +14640,7 @@
       "name": "SOC Workspace WebUI",
       "description": "SOC workspace for posture, overview, alert investigation, incident response and retrospective review.",
       "descriptionCn": "SOC 工作区，包含态势、SOC 总览、告警调查、事件响应与复盘。",
-      "version": "1.2.3",
+      "version": "1.2.4",
       "category": "workflow-automation",
       "tags": [
         "siem",
@@ -14708,7 +14708,7 @@
       "nameCn": "HTTP研判工作流",
       "description": "Downstream alert triage workflow that writes triage results to SOC DB by default with optional JSONL output.",
       "descriptionCn": "下游告警研判工作流，默认写入 SOC DB，并保留 JSONL 输出配置。",
-      "version": "1.1.1",
+      "version": "1.1.2",
       "category": "workflow-automation",
       "tags": [
         "siem",
@@ -14855,7 +14855,7 @@
       "name": "Flocks SOC Case Management",
       "description": "Persistent SOC investigation, immutable evidence, human-approved device response and verified incident retrospectives through the Flocks tool lifecycle.",
       "descriptionCn": "SOC 事件调查、证据、人工审批处置与效果核验、复盘改进；设备操作遵循 Flocks 原工具执行与策略链。",
-      "version": "1.0.3",
+      "version": "1.0.4",
       "category": "integration",
       "tags": [
         "siem",

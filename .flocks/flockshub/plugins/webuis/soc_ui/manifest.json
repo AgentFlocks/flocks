@@ -5,7 +5,7 @@
   "name": "SOC Workspace WebUI",
   "description": "SOC workspace for posture, overview, alert investigation, incident response and retrospective review.",
   "descriptionCn": "SOC 工作区，包含态势、SOC 总览、告警调查、事件响应与复盘。",
-  "version": "1.2.3",
+  "version": "1.2.4",
   "author": "Flocks Team",
   "license": "MIT",
   "homepage": "",
