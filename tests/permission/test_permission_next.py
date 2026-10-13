@@ -256,3 +256,137 @@ async def test_request_is_persisted_before_callback_can_reply(permission_storage
         request_id=request_id,
     ) == "always"
     assert await Storage.get(f"{PermissionNext._PENDING_PREFIX}{request_id}") is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ending", ["replied", "timed_out", "cancelled"])
+async def test_settled_request_is_announced_and_dropped(
+    permission_storage,
+    monkeypatch: pytest.MonkeyPatch,
+    ending: str,
+) -> None:
+    # The session and every session that delegated to it show the request;
+    # each needs to hear once nobody waits on it any more.
+    published: list[tuple[str, dict]] = []
+
+    async def _publish(event_type: str, properties: dict = None, directory: str = None):
+        published.append((event_type, properties or {}))
+
+    monkeypatch.setattr("flocks.server.routes.event.publish_event", _publish)
+    request_id = f"per_settled_{ending}"
+    ask_task = asyncio.create_task(
+        PermissionNext.ask(
+            session_id="ses_settled",
+            permission="edit",
+            patterns=["notes.md"],
+            ruleset=[],
+            metadata={},
+            request_id=request_id,
+            timeout_seconds=0 if ending == "timed_out" else None,
+        )
+    )
+    if ending != "timed_out":
+        while request_id not in PermissionNext._pending:
+            await asyncio.sleep(0)
+    if ending == "replied":
+        await PermissionNext.reply(request_id, "allow", session_id="ses_settled")
+        assert await asyncio.wait_for(ask_task, timeout=2) == "allow"
+    elif ending == "cancelled":
+        ask_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await ask_task
+    else:
+        with pytest.raises(asyncio.TimeoutError):
+            await ask_task
+
+    settled = [props for event_type, props in published if event_type == "permission.replied"]
+    assert settled == [{
+        "requestID": request_id,
+        "sessionID": "ses_settled",
+        "reply": "allow" if ending == "replied" else None,
+    }]
+    assert request_id not in PermissionNext._pending
+    assert await Storage.get(f"{PermissionNext._PENDING_PREFIX}{request_id}") is None
+
+
+@pytest.mark.asyncio
+async def test_every_request_names_the_sessions_that_delegated_its_session(
+    permission_storage,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Confirmations that reach PermissionNext.ask directly (Pro policy, tool
+    # routes) must show in the delegating chat just like runner requests.
+    from types import SimpleNamespace
+
+    sessions = {
+        "ses_root": SimpleNamespace(id="ses_root", category="user", parent_id=None),
+        "ses_child": SimpleNamespace(id="ses_child", category="task", parent_id="ses_root"),
+        "ses_grandchild": SimpleNamespace(id="ses_grandchild", category="task", parent_id="ses_child"),
+    }
+
+    async def _get_by_id(session_id: str):
+        return sessions.get(session_id)
+
+    published: list[tuple[str, dict]] = []
+
+    async def _publish(event_type: str, properties: dict = None, directory: str = None):
+        published.append((event_type, properties or {}))
+
+    monkeypatch.setattr("flocks.session.session.Session.get_by_id", _get_by_id)
+    monkeypatch.setattr("flocks.server.routes.event.publish_event", _publish)
+
+    for session_id, metadata in (("ses_grandchild", {}), ("ses_root", {}), ("ses_child", {"delegationChain": ["kept"]})):
+        with pytest.raises(asyncio.TimeoutError):
+            await PermissionNext.ask(
+                session_id=session_id,
+                permission="network",
+                patterns=["example.com"],
+                ruleset=[],
+                metadata=metadata,
+                timeout_seconds=0,
+            )
+
+    chains = [
+        props["metadata"].get("delegationChain")
+        for event_type, props in published
+        if event_type == "permission.request"
+    ]
+    assert chains == [["ses_child", "ses_root"], None, ["kept"]]
+
+
+@pytest.mark.asyncio
+async def test_request_stopped_while_being_announced_is_still_dropped(
+    permission_storage,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    published: list[tuple[str, dict]] = []
+
+    async def _publish(event_type: str, properties: dict = None, directory: str = None):
+        published.append((event_type, properties or {}))
+
+    announcing = asyncio.Event()
+
+    async def _slow_listener(_request: PermissionRequestInfo) -> None:
+        announcing.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr("flocks.server.routes.event.publish_event", _publish)
+    PermissionNext.set_callbacks(_slow_listener, None)
+    request_id = "per_stopped_while_announced"
+    ask_task = asyncio.create_task(PermissionNext.ask(
+        session_id="ses_announce",
+        permission="edit",
+        patterns=["notes.md"],
+        ruleset=[],
+        metadata={},
+        request_id=request_id,
+    ))
+    await asyncio.wait_for(announcing.wait(), timeout=2)
+
+    ask_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await ask_task
+
+    assert request_id not in PermissionNext._pending
+    assert await Storage.get(f"{PermissionNext._PENDING_PREFIX}{request_id}") is None
+    assert ("permission.replied", {"requestID": request_id, "sessionID": "ses_announce", "reply": None}) in published

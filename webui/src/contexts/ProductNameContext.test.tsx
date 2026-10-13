@@ -16,11 +16,12 @@ vi.mock("@/api/uiConfig", () => ({
 }));
 
 function ProductNames() {
-  const { productName, proProductName } = useProductName();
+  const { productName, proProductName, logoUrl } = useProductName();
   return (
     <div>
       <span data-testid="product-name">{productName}</span>
       <span data-testid="pro-product-name">{proProductName}</span>
+      <span data-testid="logo-url">{logoUrl ?? "none"}</span>
     </div>
   );
 }
@@ -49,6 +50,7 @@ describe("ProductNameProvider", () => {
     expect(screen.getByTestId("pro-product-name")).toHaveTextContent(
       "Flocks Pro",
     );
+    expect(screen.getByTestId("logo-url")).toHaveTextContent("/favicon.svg");
   });
 
   it("uses the configured display name for Pro surfaces", async () => {
@@ -70,5 +72,6 @@ describe("ProductNameProvider", () => {
     expect(screen.getByTestId("pro-product-name")).toHaveTextContent(
       "Acme SOC",
     );
+    expect(screen.getByTestId("logo-url")).toHaveTextContent("none");
   });
 });

@@ -6,6 +6,8 @@ Ported from oh-my-opencode background agent manager behavior.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Dict, Optional, Any, List
@@ -24,6 +26,24 @@ log = Log.create(service="background.manager")
 _INACTIVITY_TIMEOUT_SECONDS = 300  # 5 minutes
 # 看门狗检查间隔（秒）
 _WATCHDOG_CHECK_INTERVAL = 30
+
+
+def _cancel_requested() -> bool:
+    """Whether the running task itself was cancelled.
+
+    Supervision also reports a stopped loop (the session's stop button) as a
+    cancellation so the run is not recorded as completed; only a real cancel
+    goes on to whoever awaits the task.
+    """
+    current = asyncio.current_task()
+    return current is not None and current.cancelling() > 0
+
+
+def _new_task_id() -> str:
+    # Keep the whole ascending id: its leading characters only encode the time,
+    # so a truncated id is shared by every task started within the same minutes
+    # and the later task overwrites the earlier one in _tasks / _task_handles.
+    return f"bg_{Identifier.ascending('task')}"
 
 
 @dataclass
@@ -50,7 +70,9 @@ class BackgroundTask:
     allow_user_questions: bool = True
     provider_id: Optional[str] = None
     model_id: Optional[str] = None
+    execution_capsule: Optional[dict] = None
     completion_injected: bool = False
+    execution_metadata: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -94,7 +116,7 @@ class BackgroundManager:
         return self._tasks.get(task_id)
 
     async def launch(self, input_data: LaunchInput) -> BackgroundTask:
-        task_id = f"bg_{Identifier.ascending('task')[:8]}"
+        task_id = _new_task_id()
         task = BackgroundTask(
             id=task_id,
             status="pending",
@@ -115,7 +137,7 @@ class BackgroundManager:
         return task
 
     async def resume(self, input_data: ResumeInput) -> BackgroundTask:
-        task_id = f"bg_{Identifier.ascending('task')[:8]}"
+        task_id = _new_task_id()
         task = BackgroundTask(
             id=task_id,
             status="pending",
@@ -148,6 +170,8 @@ class BackgroundManager:
         parent_model: Optional[dict] = None,
         provider_id: Optional[str] = None,
         model_id: Optional[str] = None,
+        execution_capsule: Optional[dict] = None,
+        start_gate: Optional[asyncio.Event] = None,
     ) -> BackgroundTask:
         """Run the session loop on an already-created session.
 
@@ -155,7 +179,14 @@ class BackgroundManager:
         This is used by TaskExecutor which creates the session upfront so that
         the task record can hold sessionID at the moment it becomes RUNNING.
         """
-        task_id = f"bg_{Identifier.ascending('task')[:8]}"
+        self._validate_execution_capsule(
+            execution_capsule,
+            session_id=session_id,
+            agent=agent,
+            provider_id=provider_id,
+            model_id=model_id,
+        )
+        task_id = _new_task_id()
         task = BackgroundTask(
             id=task_id,
             status="pending",
@@ -171,18 +202,84 @@ class BackgroundManager:
             allow_user_questions=allow_user_questions,
             provider_id=provider_id,
             model_id=model_id,
+            execution_capsule=(
+                dict(execution_capsule)
+                if execution_capsule is not None
+                else None
+            ),
         )
         self._tasks[task_id] = task
-        handle = asyncio.create_task(self._run_existing_session(task, session_id))
+        handle = asyncio.create_task(
+            self._run_existing_session(task, session_id, start_gate=start_gate)
+        )
         self._task_handles[task_id] = handle
         return task
 
-    async def _run_existing_session(self, task: BackgroundTask, session_id: str) -> None:
+    @staticmethod
+    def _validate_execution_capsule(
+        capsule: Optional[dict],
+        *,
+        session_id: str,
+        agent: str,
+        provider_id: Optional[str],
+        model_id: Optional[str],
+    ) -> None:
+        if capsule is None:
+            return
+        expected = {
+            "session_id": session_id,
+            "agent_name": agent,
+            "provider_id": provider_id,
+            "model_id": model_id,
+        }
+        mismatches = [
+            name
+            for name, value in expected.items()
+            if capsule.get(name) != value
+        ]
+        persisted_digest = capsule.get("capsule_digest")
+        payload = {
+            name: value
+            for name, value in capsule.items()
+            if name != "capsule_digest"
+        }
+        calculated_digest = hashlib.sha256(
+            json.dumps(
+                payload,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
+        ).hexdigest()
+        if persisted_digest != calculated_digest:
+            mismatches.append("capsule_digest")
+        if mismatches:
+            raise ValueError(
+                "Background execution capsule does not match: "
+                + ", ".join(mismatches)
+            )
+
+    async def _run_existing_session(
+        self,
+        task: BackgroundTask,
+        session_id: str,
+        *,
+        start_gate: Optional[asyncio.Event] = None,
+    ) -> None:
+        if start_gate is not None:
+            await start_gate.wait()
         async with self._semaphore:
             task.started_at = int(datetime.now().timestamp() * 1000)
             task.last_activity_at = task.started_at
             task.status = "running"
             try:
+                self._validate_execution_capsule(
+                    task.execution_capsule,
+                    session_id=session_id,
+                    agent=task.agent,
+                    provider_id=task.provider_id,
+                    model_id=task.model_id,
+                )
                 callbacks = self._build_activity_callbacks(task)
                 result = await self._run_session_with_watchdog(
                     task,
@@ -191,6 +288,7 @@ class BackgroundManager:
                     allow_user_questions=task.allow_user_questions,
                     provider_id=task.provider_id,
                     model_id=task.model_id,
+                    agent_name=task.agent,
                 )
                 output = ""
                 if result.last_message:
@@ -203,7 +301,8 @@ class BackgroundManager:
                 task.status = "cancelled"
                 task.completed_at = int(datetime.now().timestamp() * 1000)
                 await self._inject_parent_completion(task)
-                raise
+                if _cancel_requested():
+                    raise
             except Exception as exc:
                 log.error("background.existing_session.error", {"error": str(exc), "task_id": task.id})
                 task.error = str(exc)
@@ -388,11 +487,11 @@ class BackgroundManager:
 
         for tid in task_ids:
             handle = self._task_handles.get(tid)
-            if not handle:
+            # A finished task keeps its outcome and completion time.
+            if not handle or handle.done():
                 continue
-            if not handle.done():
-                handle.cancel()
-                cancelled += 1
+            handle.cancel()
+            cancelled += 1
             task = self._tasks.get(tid)
             if task:
                 task.status = "cancelled"
@@ -401,8 +500,11 @@ class BackgroundManager:
 
     def cancel_by_session_id(self, session_id: str) -> int:
         """Cancel all background tasks associated with a given session ID."""
+        # A completed task may still be handing its result to the parent
+        # session; cancelling it then would turn the result into a cancel.
         task_ids = [
-            t.id for t in self._tasks.values() if t.session_id == session_id
+            t.id for t in self._tasks.values()
+            if t.session_id == session_id and t.status in ("pending", "running")
         ]
         cancelled = 0
         for tid in task_ids:
@@ -435,11 +537,15 @@ class BackgroundManager:
         async def _on_text_delta(_text: str) -> None:
             _touch()
 
+        async def _publish_event(event: str, payload: Dict[str, Any]) -> None:
+            _touch()
+            await publish_event(event, payload)
+
         runner_cbs = RunnerCallbacks(on_text_delta=_on_text_delta)
         return LoopCallbacks(
             on_step_start=_on_step_start,
             runner_callbacks=runner_cbs,
-            event_publish_callback=publish_event,
+            event_publish_callback=_publish_event,
         )
 
     async def _run_session_with_watchdog(
@@ -452,6 +558,7 @@ class BackgroundManager:
         allow_user_questions: bool = True,
         provider_id: Optional[str] = None,
         model_id: Optional[str] = None,
+        agent_name: Optional[str] = None,
     ):
         """运行 SessionLoop，若超过 timeout_seconds 无任何活跃交互则取消并抛出异常。"""
         inactivity_triggered: list[bool] = [False]
@@ -462,6 +569,7 @@ class BackgroundManager:
                 session_id,
                 provider_id=provider_id,
                 model_id=model_id,
+                agent_name=agent_name,
                 callbacks=callbacks,
             )
         )
@@ -503,6 +611,19 @@ class BackgroundManager:
         watchdog_task = asyncio.create_task(_watchdog())
         try:
             result = await loop_task
+            task.execution_metadata = dict(getattr(result, "metadata", {}) or {})
+            # A loop may return after catching cancellation. Preserve the watchdog
+            # or caller's termination intent instead of reporting completion.
+            current = asyncio.current_task()
+            if (
+                inactivity_triggered[0]
+                or question_blocked[0]
+                or task.execution_metadata.get("aborted")
+                or (current is not None and current.cancelling())
+            ):
+                raise asyncio.CancelledError
+            if getattr(result, "action", None) == "error":
+                raise RuntimeError(getattr(result, "error", None) or "Background session loop failed")
             return result
         except asyncio.CancelledError:
             if question_blocked[0]:
@@ -603,7 +724,8 @@ class BackgroundManager:
                 task.status = "cancelled"
                 task.completed_at = int(datetime.now().timestamp() * 1000)
                 await self._inject_parent_completion(task)
-                raise
+                if _cancel_requested():
+                    raise
             except Exception as exc:
                 log.error("background.task.error", {"error": str(exc), "task_id": task.id})
                 task.error = str(exc)
@@ -643,7 +765,8 @@ class BackgroundManager:
                 task.status = "cancelled"
                 task.completed_at = int(datetime.now().timestamp() * 1000)
                 await self._inject_parent_completion(task)
-                raise
+                if _cancel_requested():
+                    raise
             except Exception as exc:
                 log.error("background.resume.error", {"error": str(exc), "task_id": task.id})
                 task.error = str(exc)
@@ -661,3 +784,26 @@ _manager_state = Instance.state(_create_manager)
 
 def get_background_manager() -> BackgroundManager:
     return _manager_state()
+
+
+def all_background_managers() -> List[BackgroundManager]:
+    """Managers of every instance.
+
+    A task lives in the manager of the instance that launched it: scheduled
+    tasks run outside any request's instance, so a request only reaching its
+    own manager would not see them.
+    """
+    return _manager_state.all_values()
+
+
+def cancel_background_runs_for_session(session_id: str) -> int:
+    """Cancel the background runs of a session, whichever instance started them."""
+    return sum(manager.cancel_by_session_id(session_id) for manager in all_background_managers())
+
+
+def cancel_background_runs_for_parent(parent_session_id: str) -> int:
+    """Cancel the background runs a session spawned, whichever instance holds them."""
+    return sum(
+        manager.cancel_by_parent_session_id(parent_session_id)
+        for manager in all_background_managers()
+    )

@@ -19,7 +19,7 @@ def test_prepare_reasoning_promotes_internal_reasoning_for_promote_policy():
 
     prepared = prepare_reasoning_for_replay(
         provider_id="alibaba",
-        model_id="qwen3-max",
+        model_id="qwen3.6-plus",
         message=message,
         interleaved={
             "field": "reasoning_content",
@@ -213,7 +213,7 @@ def test_format_openai_messages_serializes_reasoning_content_without_include_rea
 def test_prepare_reasoning_then_format_openai_messages_emits_provider_payload():
     prepared = prepare_reasoning_for_replay(
         provider_id="alibaba",
-        model_id="qwen3-max",
+        model_id="qwen3.6-plus",
         message=ChatMessage(
             role="assistant",
             content="",

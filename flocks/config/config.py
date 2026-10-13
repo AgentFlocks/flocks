@@ -172,6 +172,11 @@ class AgentConfig(BaseModel):
     delegatable: Optional[bool] = Field(None, description="Whether this agent can be called via delegate_task")
     strategy: Optional[Literal["react", "plan_and_execute", "read_only", "explore"]] = None
     tools: Optional[Dict[str, bool]] = Field(None, description="@deprecated Use 'permission'")
+    skills: Optional[List[str]] = Field(None, description="Trusted skills loaded for this agent")
+    prompt_profile: Optional[Literal["standard", "isolated"]] = Field(
+        None,
+        alias="promptProfile",
+    )
 
     @field_validator("permission", mode="before")
     @classmethod
@@ -229,6 +234,21 @@ class ProviderOptionsConfig(BaseModel):
     enterprise_url: Optional[str] = Field(None, alias="enterpriseUrl")
     set_cache_key: Optional[bool] = Field(None, alias="setCacheKey")
     timeout: Optional[Union[int, Literal[False]]] = None
+    max_concurrent_requests: Optional[int] = Field(
+        None,
+        alias="maxConcurrentRequests",
+        ge=0,
+        description=(
+            "Cap on concurrent model requests to this provider across the "
+            "whole process (sessions, subagents, tasks and workflow llm nodes "
+            "share it). A response that only fans out to subagents stays "
+            "inside it; once it runs an inline tool it gives its slot up for "
+            "the rest of that response, so generating requests can exceed the "
+            "cap until that stream ends. Title, compaction, goal and memory "
+            "calls bypass it entirely. 0 disables the cap. Overrides "
+            "concurrency.maxConcurrentRequests."
+        ),
+    )
 
 
 class ModelVariantConfig(BaseModel):
@@ -467,6 +487,39 @@ class UIConfig(BaseModel):
         if any(ord(ch) < 32 or ord(ch) == 127 for ch in normalized):
             raise ValueError("faviconPath must not contain control characters")
         return normalized
+
+
+class ConcurrencyConfig(BaseModel):
+    """Process-wide limits on model requests and subagent fan-out."""
+    model_config = {"extra": "allow", "populate_by_name": True}
+
+    max_concurrent_requests: Optional[int] = Field(
+        None,
+        alias="maxConcurrentRequests",
+        ge=0,
+        description=(
+            "Default cap on generating model requests per provider. Every caller "
+            "in the process (interactive sessions, foreground subagents, "
+            "scheduled/background tasks, workflow llm nodes) shares it; requests "
+            "beyond the cap queue in-process instead of hitting the provider's "
+            "own limit and failing with HTTP 429. A response that only fans out "
+            "to subagents stays inside the cap; once it runs an inline tool it "
+            "gives its slot up for the rest of that response, so generating "
+            "requests can exceed the cap until the stream ends. Title, "
+            "compaction, goal and memory calls bypass it entirely. 0 disables "
+            "the cap. Falls back to FLOCKS_LLM_MAX_CONCURRENT_REQUESTS, then 8."
+        ),
+    )
+    max_parallel_subagents: Optional[int] = Field(
+        None,
+        alias="maxParallelSubagents",
+        ge=0,
+        description=(
+            "How many sibling delegate_task calls from one model response run at "
+            "the same time; the rest start as earlier ones finish. 0 disables "
+            "the cap. Falls back to FLOCKS_SUBAGENT_MAX_PARALLEL, then 4."
+        ),
+    )
 
 
 class ExperimentalConfig(BaseModel):
@@ -800,6 +853,8 @@ class ConfigInfo(BaseModel):
     disabled_providers: Optional[List[str]] = None
     enabled_providers: Optional[List[str]] = None
     model: Optional[str] = None
+    default_models: Optional[Dict[str, Any]] = None
+    api_services: Optional[Dict[str, Any]] = None
     small_model: Optional[str] = Field(None, alias="smallModel")
     fallback_providers: Optional[List[FallbackProviderConfig]] = None
     default_agent: Optional[str] = Field(None, alias="defaultAgent")
@@ -843,7 +898,19 @@ class ConfigInfo(BaseModel):
         description="Repeated tool-failure handling.",
     )
     experimental: Optional[ExperimentalConfig] = None
-    
+    concurrency: Optional[ConcurrencyConfig] = Field(
+        None,
+        description="Process-wide model request / subagent concurrency limits.",
+    )
+    # Workflow engine settings, read raw by flocks.workflow.runner
+    workflow: Optional[Dict[str, Any]] = Field(
+        None,
+        description=(
+            "Workflow engine settings. Keys: llm.max_concurrency (concurrent LLM "
+            "calls on the workflow loop; default 8, 0 = unlimited)."
+        ),
+    )
+
     # Memory system configuration (added for memory system integration)
     memory: Optional[Any] = Field(
         None,
@@ -1517,6 +1584,12 @@ class Config:
         Returns:
             Complete merged configuration
         """
+        from flocks.config.runtime import runtime_config
+
+        override = runtime_config.get()
+        if override is not None:
+            return override
+
         if cls._cached_config is not None:
             return cls._cached_config
         
@@ -1657,6 +1730,9 @@ class Config:
                     channel_cfg = channels.get(channel_id)
                     if isinstance(channel_cfg, dict):
                         channel_cfg.pop("allowFrom", None)
+        from flocks.config.runtime import runtime_config
+        if runtime_config.get() is not None:
+            raise RuntimeError("Configuration writes are disabled during a runtime override")
         config_file.write_text(json.dumps(config_data, indent=2), encoding="utf-8")
         
         # Clear cache

@@ -73,18 +73,33 @@ async def test_status_by_id_preserves_retry_details(client, session_id: str) -> 
         session.directory,
         lambda: SessionStatus.set(
             session_id,
-            SessionStatusRetry(attempt=2, message="Rate limited", next=123456789),
+            SessionStatusRetry(
+                attempt=2,
+                message="Rate limited",
+                next=123456789,
+                maxAttempts=5,
+                rateLimited=True,
+                providerID="prov",
+                modelID="m",
+            ),
         ),
     )
 
     response = await client.get(f"/api/session/{session_id}/status")
 
     assert response.status_code == status.HTTP_200_OK
+    # The poll carries the same fields the session.status SSE event does, so a
+    # client that refreshes mid-backoff keeps the 429 classification and the
+    # retry budget instead of falling back to a generic failure notice.
     assert response.json()["status"] == {
         "type": "retry",
         "attempt": 2,
         "message": "Rate limited",
         "next": 123456789,
+        "maxAttempts": 5,
+        "rateLimited": True,
+        "providerID": "prov",
+        "modelID": "m",
     }
     assert response.json()["isProcessing"] is True
 
@@ -272,6 +287,50 @@ async def test_status_by_id_resolves_the_session_directory(client, tmp_path) -> 
 
     assert response.status_code == status.HTTP_200_OK
     assert response.json()["status"] == {"type": "busy"}
+
+
+@pytest.mark.asyncio
+async def test_status_list_includes_sessions_running_outside_the_request_instance(
+    client, tmp_path,
+) -> None:
+    # The task manager runs task sessions with no instance context, and other
+    # loops may run under another directory; a refreshed chat restores its
+    # running state (and stop button) from this list.
+    task_loop = (await client.post("/api/session", json={"title": "task loop"})).json()["id"]
+    other_dir = (await client.post("/api/session", json={"title": "other dir"})).json()["id"]
+    SessionStatus.set(task_loop, SessionStatusBusy())
+    await _set_status_for_directory(
+        str(tmp_path.resolve()),
+        lambda: SessionStatus.set(
+            other_dir,
+            SessionStatusRetry(attempt=1, message="rate limited", next=0),
+        ),
+    )
+
+    response = await client.get("/api/session/status")
+
+    assert response.status_code == status.HTTP_200_OK
+    payload = response.json()
+    assert payload[task_loop]["type"] == "busy"
+    assert payload[other_dir]["type"] == "retry"
+
+
+@pytest.mark.asyncio
+async def test_status_list_leaves_out_sessions_the_caller_cannot_read(
+    client, session_id: str, tmp_path, monkeypatch,
+) -> None:
+    await _set_status_for_directory(
+        str(tmp_path.resolve()),
+        lambda: SessionStatus.set(session_id, SessionStatusBusy()),
+    )
+    SessionStatus.set("ses_never_stored", SessionStatusBusy())
+    viewer = AuthUser(id="usr_other", username="other", role="user", status="active")
+    monkeypatch.setattr(session_routes, "require_user", lambda _request: viewer)
+
+    response = await client.get("/api/session/status")
+
+    assert response.status_code == status.HTTP_200_OK
+    assert response.json() == {}
 
 
 @pytest.mark.asyncio

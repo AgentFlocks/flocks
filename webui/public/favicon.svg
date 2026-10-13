@@ -1,21 +1,15 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
   <defs>
-    <linearGradient id="bg" x1="12" y1="8" x2="52" y2="56" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#1e293b" />
-      <stop offset="1" stop-color="#0f172a" />
-    </linearGradient>
-    <linearGradient id="accent" x1="18" y1="12" x2="46" y2="52" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#ef4444" />
-      <stop offset="1" stop-color="#b91c1c" />
+    <linearGradient id="flocks-logo-split" x1="0" y1="0" x2="64" y2="0" gradientUnits="userSpaceOnUse">
+      <stop offset="0.5" stop-color="#d02218" />
+      <stop offset="0.5" stop-color="#a11a15" />
     </linearGradient>
   </defs>
-  <rect x="6" y="6" width="52" height="52" rx="14" fill="url(#bg)" />
+  <circle cx="32" cy="32" r="32" fill="url(#flocks-logo-split)" />
   <path
-    d="M23 18h20v6H29v8h12v6H29v14h-6V18Z"
-    fill="#f8fafc"
-  />
-  <path
-    d="M40 16l1.8 4.4L46 22.2l-4.2 1.7L40 28l-1.8-4.1L34 22.2l4.2-1.8L40 16Z"
-    fill="url(#accent)"
+    d="M27.01 17.5L31.29 10.18A0.73 0.73 0 0 1 32.55 10.19L45.02 31.97A0.73 0.73 0 0 1 45.01 32.71L40.77 39.82A0.73 0.73 0 0 1 39.52 39.81L27.01 18.23A0.73 0.73 0 0 1 27.01 17.5Z
+       M22.21 26.6L30.66 26.54A0.73 0.73 0 0 1 31.29 27.65L18.54 48.85A0.73 0.73 0 0 1 17.92 49.2L9.41 49.26A0.73 0.73 0 0 1 8.79 48.15L21.59 26.95A0.73 0.73 0 0 1 22.21 26.6Z
+       M24.65 40.7L49.89 40.7A0.73 0.73 0 0 1 50.51 41.06L54.69 48.12A0.73 0.73 0 0 1 54.07 49.22L28.85 49.22A0.73 0.73 0 0 1 28.23 48.86L24.03 41.8A0.73 0.73 0 0 1 24.65 40.7Z"
+    fill="#fdfcfd"
   />
 </svg>

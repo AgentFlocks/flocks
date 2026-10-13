@@ -7,6 +7,9 @@ export interface AuditEventItem {
   action: string;
   status: string;
   result: string;
+  reason?: string | null;
+  phase?: string | null;
+  entry?: string | null;
   user_id?: string | null;
   user_name?: string | null;
   actor_id?: string | null;

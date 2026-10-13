@@ -9,6 +9,7 @@ Reads files from the local filesystem, supporting:
 """
 
 import os
+import json
 import base64
 import mimetypes
 from pathlib import Path
@@ -59,7 +60,8 @@ Usage:
 - filePath may be absolute, use `~`, or be relative to the current project directory
 - By default, it reads up to 2000 lines starting from the beginning of the file
 - For files longer than 2000 lines, you MUST use offset and limit to read in segments (e.g. offset=0 limit=2000, then offset=2000 limit=2000, etc.)
-- Any lines longer than 2000 characters will be truncated
+- Any lines longer than 2000 characters will be truncated in ordinary line mode
+- To read a long line completely, set offset to its zero-based line number and columnOffset to 0; use columnLimit for the character chunk size. Continue using next_column until has_more is false. Column mode returns JSON for one line and never writes files.
 - Text results are returned with a 5-digit, zero-padded 1-based line number prefix in the form `00001| `
 - You may call multiple independent tools in the same response. Prefer separate parallel Read calls when multiple files are likely to be useful.
 - If you read a file that exists but has empty contents you will receive a system reminder warning in place of file contents.
@@ -175,13 +177,25 @@ def find_similar_files(directory: str, filename: str, max_suggestions: int = 3) 
             required=False,
             default=DEFAULT_READ_LIMIT
         ),
+        ToolParameter(
+            name="columnOffset", type=ParameterType.INTEGER,
+            description="Optional zero-based character offset within the line selected by offset; enables single-line column mode.",
+            required=False,
+        ),
+        ToolParameter(
+            name="columnLimit", type=ParameterType.INTEGER,
+            description="Optional character count in column mode; defaults to the configured line length limit.",
+            required=False,
+        ),
     ]
 )
 async def read_tool(
     ctx: ToolContext,
     filePath: str,
     offset: Optional[int] = None,
-    limit: Optional[int] = None
+    limit: Optional[int] = None,
+    columnOffset: Optional[int] = None,
+    columnLimit: Optional[int] = None,
 ) -> ToolResult:
     """
     Read a file from the local filesystem
@@ -197,13 +211,44 @@ async def read_tool(
     Returns:
         ToolResult with file contents
     """
+    from flocks.session.runtime_controls import runtime_controls
+    sandbox = ctx.extra.get("sandbox", {})
+    read_roots = [sandbox.get("workspace_dir")]
     try:
-        resolution = await resolve_tool_path(
-            ctx,
-            filePath,
-            allow_host_memory=True,
-            allow_host_skills=True,
-        )
+        if runtime_controls.get() is not None and sandbox.get("workspace_access") == "ro":
+            workspace = Path(sandbox["workspace_dir"]).expanduser()
+            project = Path(sandbox["agent_workspace_dir"]).expanduser()
+            mount = Path(sandbox.get("container_workdir", "/workspace"))
+            path = Path(filePath.strip()).expanduser()
+            if path.is_absolute() and (path.is_relative_to(project) or path.is_relative_to(workspace)):
+                # Host paths are checked before the container aliases: a container
+                # workdir such as <T>/mount is also a prefix of a project at <T>/mount/project.
+                if path.is_relative_to(project) and not path.is_relative_to(workspace):
+                    read_roots = [str(project)]
+            elif path.is_relative_to("/agent"):
+                path = project / path.relative_to("/agent")
+                read_roots = [str(project)]
+            elif path.is_relative_to(mount):
+                path = workspace / path.relative_to(mount)
+            elif not path.is_absolute():
+                # Relative reads prefer existing workspace files, then project files.
+                read_roots = [str(workspace), str(project)]
+            filePath = str(path)
+
+        for root in read_roots:
+            read_ctx = ctx
+            if root != sandbox.get("workspace_dir"):
+                import copy
+                read_ctx = copy.copy(ctx)
+                read_ctx.extra = {**ctx.extra, "sandbox": {**sandbox, "workspace_dir": root}}
+            resolution = await resolve_tool_path(
+                read_ctx,
+                filePath,
+                allow_host_memory=True,
+                allow_host_skills=True,
+            )
+            if os.path.exists(resolution.resolved_path):
+                break
     except ValueError as exc:
         return ToolResult(
             success=False,
@@ -331,6 +376,30 @@ async def read_tool(
 
     read_limit = limit if limit is not None else effective_max_lines
     read_offset = offset if offset is not None else 0
+
+    if columnOffset is not None or columnLimit is not None:
+        column_start = columnOffset if columnOffset is not None else 0
+        column_count = columnLimit if columnLimit is not None else effective_max_line_length
+        if read_offset < 0 or column_start < 0 or column_count < 1 or limit not in (None, 1, DEFAULT_READ_LIMIT):
+            return ToolResult(success=False, error="Column mode requires nonnegative offset/columnOffset, positive columnLimit and a single line.", title=title)
+        if read_offset >= len(all_lines):
+            return ToolResult(success=False, error="Line offset is beyond the end of the file.", title=title)
+        line = all_lines[read_offset]
+        if column_start > len(line):
+            return ToolResult(success=False, error="Column offset is beyond the end of the line.", title=title)
+        # Bound each response by the existing byte budget; the next column makes
+        # every remaining character reachable, even on multi-megabyte lines.
+        selected = line[column_start:column_start + min(column_count, effective_max_bytes)].encode("utf-8")[:effective_max_bytes].decode("utf-8", errors="ignore")
+        if not selected and column_start < len(line):
+            return ToolResult(success=False, error="The byte budget cannot hold the next character.", title=title)
+        column_end = column_start + len(selected)
+        payload = {
+            "format": "line_slice", "line": read_offset + 1,
+            "column_start": column_start, "column_end": column_end,
+            "total_columns": len(line), "text": selected,
+            "has_more": column_end < len(line), "next_column": column_end,
+        }
+        return ToolResult(success=True, output=json.dumps(payload, ensure_ascii=False), title=title)
 
     # Read lines with byte limit
     raw_lines: List[str] = []

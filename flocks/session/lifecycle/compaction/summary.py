@@ -277,12 +277,12 @@ async def summarize_single_pass(
         # per-message head/tail preservation: the early head slices of every
         # turn would be silently dropped, defeating the entire reason for
         # per-message truncation.  The upstream
-        # ``_prune_chat_messages_for_summary`` (MD5 dedup + 1-line summaries
-        # for old middle messages) is the place where total budget gets
-        # enforced; if that pass already ran and content is still over
-        # ``target_chars``, the right action is to send it anyway and rely
-        # on the model's full input window — modern models accept well
-        # above ``usable_context × 0.5`` for a single user message.
+        # ``_prune_chat_messages_for_summary`` (MD5 dedup, compressed tool
+        # output for old middle messages, then a token budget of half the
+        # usable context) is the place where total budget gets enforced; if
+        # that pass already ran and content is still over ``target_chars``,
+        # the right action is to send it anyway and rely on the model's full
+        # input window.
         text = _serialize_messages_per_truncate(chat_messages)
     else:
         # Legacy path retained for callers that only have a pre-joined string.

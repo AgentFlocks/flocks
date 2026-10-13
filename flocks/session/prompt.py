@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 import hashlib
 import json
 import os
+import re
 import sys
 from pathlib import Path
 from datetime import datetime
@@ -34,6 +35,15 @@ if TYPE_CHECKING:
 
 # Output token maximum
 OUTPUT_TOKEN_MAX = int(os.getenv("FLOCKS_OUTPUT_TOKEN_MAX", "32000"))
+
+# CJK punctuation, ideographs, kana, Hangul and full-width forms.  Tokenizers
+# spend about one token per such character, versus roughly four characters per
+# token for ASCII text, so counting them as chars/4 under-reported Chinese
+# sessions ~4x.
+_CJK_CHAR_RE = re.compile(
+    r"[\u3000-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af\uf900-\ufaff\uff00-\uffef]"
+)
+
 SystemPromptCache = Dict[str, Any]
 AsyncPromptFactory = Callable[[], Awaitable[Optional[str]]]
 StringPromptFactory = Callable[[], Optional[str]]
@@ -461,17 +471,21 @@ class SessionPrompt:
 
     @classmethod
     def count_tokens(cls, text: str) -> int:
-        """Count tokens using fast chars/4 rough estimate.
+        """Count tokens using a fast character-based estimate.
 
-        Returns ``len(text) // 4`` directly — no tiktoken, no model call.
-        Fast enough for every-step overflow detection while staying within
-        the same order of magnitude as provider-side counts.  The fixed
-        85 % × context_window overflow threshold tolerates the slack from
-        this rough estimate without needing a safety margin.
+        ASCII text counts as ``len(text) // 4``; each CJK character counts as
+        one token — no tiktoken, no model call.  Fast enough for every-step
+        overflow detection while staying within the same order of magnitude
+        as provider-side counts.  The fixed 85 % × context_window overflow
+        threshold tolerates the remaining slack without a safety margin.
         """
         if not text:
             return 0
-        return len(text) // 4
+        if text.isascii():
+            return len(text) // 4
+        # ``sub`` counts in C; iterating matches cost ~2x on long CJK text.
+        cjk_chars = len(text) - len(_CJK_CHAR_RE.sub("", text))
+        return cjk_chars + (len(text) - cjk_chars) // 4
     
     @classmethod
     def count_message_tokens(cls, messages: List[Any]) -> int:
@@ -497,7 +511,7 @@ class SessionPrompt:
     
     @classmethod
     def estimate_tokens(cls, text: str) -> int:
-        """Alias for :meth:`count_tokens` — both return ``len(text) // 4``.
+        """Alias for :meth:`count_tokens` — both return the same estimate.
 
         Kept for callers that still import ``estimate_tokens`` by name (pruning,
         a handful of log statements, legacy tests).  ``count_tokens`` is the
@@ -631,9 +645,9 @@ class SessionPrompt:
             content = msg.get("content", "")
         elif hasattr(msg, "content"):
             content = msg.content or ""
-        total += cls.count_tokens(content)
 
         # Message parts (tool inputs/outputs, text parts, reasoning)
+        parts: list = []
         try:
             parts = await Message.parts(msg_id or "", session_id)
             for part in parts:
@@ -675,6 +689,12 @@ class SessionPrompt:
                 "message_id": msg_id or '?', "error": str(_e),
             })
             total += 50
+        if not parts:
+            # The runner sends a message's parts.  An in-memory assistant
+            # message also carries its text as ``content`` (set by
+            # ``Message.update``, never persisted), so counting both would
+            # count that text twice.
+            total += cls.count_tokens(content)
 
         if cacheable:
             cls._message_token_cache[msg_id] = total
@@ -920,6 +940,21 @@ class SessionPrompt:
         )
 
     @classmethod
+    def _build_isolated_tool_guidance_prompt(
+        cls,
+        use_text_tool_call_mode: bool = False,
+    ) -> str:
+        """Build tool guidance that never references undeclared helper tools."""
+        if use_text_tool_call_mode:
+            return prompt_strings._build_minimax_tool_instructions()
+        return """## Tool Calling Rules
+
+Use only tools whose callable schemas are provided for this turn.
+Treat every schema as strict: copy tool and parameter names exactly, omit unknown parameters, and never call an unavailable tool.
+Invoke tools only through the native API tool-calling mechanism; never print tool-call JSON or XML as response text.
+Do not repeat an identical tool call in the same response."""
+
+    @classmethod
     def _build_memory_guidance_prompt(
         cls,
         prompt_tool_names: Iterable[str],
@@ -1044,12 +1079,55 @@ class SessionPrompt:
         """Build the small runtime environment block used by system subagents."""
         working_dir = session_directory or os.getcwd()
         today = datetime.now().strftime("%A %b %d, %Y")
+        # Resolve from Flocks itself, not the audit target or session directory.
+        source_root = Path(__file__).resolve().parents[2]
+        venv = source_root / ".venv"
+        python = venv / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")
+        available = (source_root / "pyproject.toml").is_file() and python.is_file()
         return "\n".join([
             "## Environment",
             f"Current working directory: {working_dir}",
             f"Platform: {platform.system().lower()}",
             f"Today's date: {today}",
+            f"Default host Python virtual environment: {venv}",
+            f"Default host Python interpreter: {python}",
+            f"Flocks source .venv available: {'yes' if available else 'no'}",
+            "For host-side Python work, default to this Flocks source .venv, independently of the current working directory. "
+            "Invoke its interpreter by a quoted absolute path; use that interpreter with -m pip, -m pytest, or other modules. "
+            "In PowerShell, use the & call operator before the quoted interpreter path. "
+            "No activate command is needed; bare python/pip commands are not guaranteed to select this environment. "
+            "If this environment is unavailable, report the missing environment before Python-dependent work. "
+            "This is the host helper environment, not the environment of the project being worked on. "
+            "Container commands use the container's Python; do not assume this host path exists inside a container.",
         ])
+
+    @classmethod
+    async def _build_agent_skills_prompt(
+        cls,
+        skill_names: Iterable[str],
+    ) -> str:
+        """Load host-selected Agent skills as trusted system instructions."""
+        from flocks.skill.skill import Skill
+
+        names = list(dict.fromkeys(
+            str(name).strip() for name in skill_names if str(name).strip()
+        ))
+        sections: List[str] = []
+        for name in names:
+            skill = await Skill.get(name)
+            if skill is None or Skill.is_disabled(name):
+                raise ValueError(f"Configured Agent skill is unavailable: {name}")
+            try:
+                content = Path(skill.location).read_text(encoding="utf-8").strip()
+            except OSError as exc:
+                raise ValueError(f"Failed to load configured Agent skill {name}: {exc}") from exc
+            if content:
+                sections.append("\n".join([
+                    f"## Trusted Agent Skill: {name}",
+                    f"Base directory: {Path(skill.location).parent}",
+                    content,
+                ]))
+        return cls._join_prompt_parts(sections)
 
     @classmethod
     async def _is_builtin_system_subagent_session(
@@ -1130,6 +1208,7 @@ class SessionPrompt:
         session_id: str,
         session_directory: Optional[str],
         agent_prompt: Optional[str],
+        agent_skills_prompt: str,
         turn_context: TurnPromptContext,
         static_cache: Optional[SystemPromptCache],
     ) -> List[SystemPromptBlock]:
@@ -1154,6 +1233,16 @@ class SessionPrompt:
         )
         if agent_block is not None:
             blocks.append(agent_block)
+
+        skills_block = cls._build_cached_prompt_block(
+            static_cache=static_cache,
+            name="agent_skills",
+            cache_scope="agent",
+            digest_inputs={"skill_prompt": agent_skills_prompt},
+            builder=lambda: agent_skills_prompt,
+        )
+        if skills_block is not None:
+            blocks.append(skills_block)
 
         environment_block = cls._build_cached_prompt_block(
             static_cache=static_cache,
@@ -1185,6 +1274,8 @@ class SessionPrompt:
         session_directory: Optional[str],
         agent_name: str,
         agent_prompt: Optional[str],
+        agent_skill_names: Iterable[str] = (),
+        prompt_profile: str = "standard",
         provider_id: str,
         model_id: str,
         execution_mode_prompt: Optional[str] = None,
@@ -1203,6 +1294,50 @@ class SessionPrompt:
         """
         turn_context = turn_context or TurnPromptContext()
         vcs = "git" if session_directory else None
+        normalized_agent_skill_names = tuple(dict.fromkeys(
+            str(name).strip()
+            for name in agent_skill_names
+            if str(name).strip()
+        ))
+        agent_skills_prompt = await cls._build_agent_skills_prompt(
+            normalized_agent_skill_names,
+        )
+        if prompt_profile == "isolated":
+            values = [
+                ("flocks_config_guard", "global", get_prompt_flocks_config_guard().strip()),
+                ("tool_protocol", "provider", cls._build_isolated_tool_guidance_prompt(
+                    use_text_tool_call_mode=use_text_tool_call_mode,
+                )),
+                ("agent_identity", "agent", cls._normalize_prompt_text(agent_prompt)),
+                ("agent_skills", "agent", agent_skills_prompt),
+                ("execution_mode", "runtime", cls._normalize_prompt_text(execution_mode_prompt)),
+                ("minimal_environment", "runtime_tail", cls._build_minimal_environment(session_directory)),
+            ]
+            isolated_blocks = []
+            for name, scope, content in values:
+                block = cls._build_cached_prompt_block(
+                    static_cache=static_cache,
+                    name=name,
+                    cache_scope=scope,
+                    digest_inputs={"content": content},
+                    builder=lambda: content,
+                )
+                if block is not None:
+                    isolated_blocks.append(block)
+            cls._append_turn_tail_blocks(
+                blocks=isolated_blocks,
+                turn_context=replace(turn_context, additional_context=None),
+                static_cache=static_cache,
+                session_id=session_id,
+            )
+            cls._print_system_prompts_for_debug(
+                session_id=session_id,
+                agent_name=agent_name,
+                provider_id=provider_id,
+                model_id=model_id,
+                blocks=isolated_blocks,
+            )
+            return isolated_blocks
         minimal_prompt = turn_context.minimal_prompt
         if minimal_prompt is None:
             minimal_prompt = await cls._is_builtin_system_subagent_session(
@@ -1214,6 +1349,7 @@ class SessionPrompt:
                 session_id=session_id,
                 session_directory=session_directory,
                 agent_prompt=agent_prompt,
+                agent_skills_prompt=agent_skills_prompt,
                 turn_context=turn_context,
                 static_cache=static_cache,
             )
@@ -1292,6 +1428,17 @@ class SessionPrompt:
                 cache_scope="agent",
                 digest_inputs={"agent_name": agent_name, "agent_prompt": agent_prompt or ""},
                 builder=lambda: cls._normalize_prompt_text(agent_prompt),
+            ),
+            cls._build_cached_prompt_block(
+                static_cache=static_cache,
+                name="agent_skills",
+                cache_scope="agent",
+                digest_inputs={
+                    "agent_name": agent_name,
+                    "skill_names": normalized_agent_skill_names,
+                    "skill_prompt": agent_skills_prompt,
+                },
+                builder=lambda: agent_skills_prompt,
             ),
             cls._build_cached_prompt_block(
                 static_cache=static_cache,
@@ -1448,6 +1595,8 @@ class SessionPrompt:
         session_directory: Optional[str],
         agent_name: str,
         agent_prompt: Optional[str],
+        agent_skill_names: Iterable[str] = (),
+        prompt_profile: str = "standard",
         provider_id: str,
         model_id: str,
         execution_mode_prompt: Optional[str] = None,
@@ -1476,7 +1625,7 @@ class SessionPrompt:
             device_asset_prompt_factory is not None,
             device_revision is not None,
         ))
-        if legacy_context_requested:
+        if legacy_context_requested and prompt_profile != "isolated":
             resolved_context = turn_context or TurnPromptContext()
             minimal_prompt = resolved_context.minimal_prompt
             if minimal_prompt is None:
@@ -1524,6 +1673,8 @@ class SessionPrompt:
             session_directory=session_directory,
             agent_name=agent_name,
             agent_prompt=agent_prompt,
+            agent_skill_names=agent_skill_names,
+            prompt_profile=prompt_profile,
             provider_id=provider_id,
             model_id=model_id,
             execution_mode_prompt=execution_mode_prompt,

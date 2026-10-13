@@ -154,8 +154,23 @@ class AgentInfo(BaseModel):
     # Concrete callable tool names resolved from agent.yaml.
     tools: Optional[List[str]] = Field(default=None)
 
+    # Trusted skills loaded into this agent's system prompt at runtime.
+    skills: List[str] = Field(default_factory=list)
+
+    # "isolated" omits host identity/workspace/memory context and exposes only
+    # explicitly declared tools. Session history isolation remains controlled
+    # separately by require_dedicated_session.
+    prompt_profile: Literal["standard", "isolated"] = Field(
+        default="standard",
+        alias="promptProfile",
+    )
+
     model: Optional[AgentModel] = None
     prompt: Optional[str] = None
+    # Set by a package that ships its prompt sealed (e.g. an obfuscated plugin): the
+    # core still runs the prompt, but the API never serves it back and the
+    # definition cannot be edited or deleted through it.
+    prompt_protected: bool = Field(default=False, alias="promptProtected")
     options: Dict[str, Any] = Field(default_factory=dict)
     steps: Optional[int] = Field(default=None, description="Max steps")
 
@@ -177,6 +192,15 @@ class AgentInfo(BaseModel):
     # e.g. ["security"] marks an agent as cybersecurity-domain relevant,
     # which the Web UI uses to decide whether to surface the agent.
     tags: List[str] = Field(default_factory=list)
+
+    # Optional session isolation policy for agents that must not inherit the
+    # caller's workspace instructions, memory, or callable-tool state.
+    session_directory: Optional[str] = Field(default=None, alias="sessionDirectory")
+    memory_enabled: Optional[bool] = Field(default=None, alias="memoryEnabled")
+    require_dedicated_session: bool = Field(
+        default=False,
+        alias="requireDedicatedSession",
+    )
 
     _validate_group = field_validator("group", mode="before")(normalize_agent_group)
 

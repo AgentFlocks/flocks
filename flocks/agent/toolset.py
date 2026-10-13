@@ -20,7 +20,6 @@ log = Log.create(service="agent.toolset")
 def get_all_enabled_tool_names() -> List[str]:
     from flocks.tool.registry import ToolRegistry
 
-    ToolRegistry.init()
     return [
         tool.name
         for tool in ToolRegistry.list_tools()
@@ -32,7 +31,6 @@ def get_all_enabled_builtin_tool_names() -> List[str]:
     """Return enabled built-in tool names, excluding plugins and dynamic tools."""
     from flocks.tool.registry import ToolRegistry
 
-    ToolRegistry.init()
     builtin_tool_names: List[str] = []
     for tool in ToolRegistry.list_tools():
         if tool.name in {"invalid", "_noop"} or not getattr(tool, "enabled", True):

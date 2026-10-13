@@ -567,6 +567,27 @@ async def edit_tool(
                 error=evolution_error,
                 title=title,
             )
+
+    # Explicit edit rules (session, agent, delegating session) apply here.
+    await ctx.ask(
+        permission="edit",
+        patterns=[resolution.permission_pattern],
+        always=["*"],
+        metadata={"tool": "edit", "filepath": filepath, "diff": diff},
+    )
+    # The replacement was computed before a possibly long permission wait;
+    # writing it over a file changed meanwhile would undo that change.
+    try:
+        with open(filepath, "r", encoding="utf-8", errors="replace", newline="") as file_handle:
+            changed_meanwhile = file_handle.read() != raw_content_old
+    except OSError:
+        changed_meanwhile = True
+    if changed_meanwhile:
+        return ToolResult(
+            success=False,
+            error=f"File {filepath} changed while waiting for permission; read it again and redo the edit.",
+            title=title,
+        )
     try:
         with open(filepath, "w", encoding="utf-8", newline="") as file_handle:
             file_handle.write(content_new)

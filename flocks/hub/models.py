@@ -126,7 +126,8 @@ class InstalledPluginRecord(BaseModel):
     scope: Literal["global", "project"] = "global"
     checksum: Optional[str] = None
     installPath: Optional[str] = None
-    # Legacy field retained for record compatibility; never used to waive backup.
+    # WebUI packages: the release's payload hashes at install, which tell pages
+    # admins added from shipped ones on the next update. Never used to waive backup.
     fileHashes: Optional[dict[str, str]] = None
     backupPath: Optional[str] = None
 

@@ -2,12 +2,12 @@
 
 ## 1. 功能概述
 
-`stream_alert_denoise` 是一个 HTTP 的告警降噪工作流。
+`stream_alert_denoise` 支持 HTTP 告警及深信服 SIP 安全事件的降噪工作流。
 
 它主要解决三件事：
 
-- 把 TDP / SkyEye 来源的告警整理成统一字段。
-- 过滤掉扫描、非 HTTP 或低价值噪声。
+- 把 TDP / SkyEye / Sangfor SIP 来源的告警整理成统一字段。
+- 过滤扫描及不符合来源策略的噪声，保留非 HTTP 的 SIP 安全事件。
 - 判断告警是否重复，只把更值得关注的告警输出并写入结果文件。
 
 适用场景：
@@ -35,7 +35,7 @@ receive_alert -> normalize -> filter_logs -> dedup_and_write
 | 顺序 | 节点 | 作用 |
 | --- | --- | --- |
 | 1 | `receive_alert` | 接收输入，判断输入模式和来源类型。 |
-| 2 | `normalize` | 把 TDP / SkyEye 的不同字段统一成标准告警字段。 |
+| 2 | `normalize` | 把 TDP / SkyEye / Sangfor SIP 的不同字段统一成标准告警字段。 |
 | 3 | `filter_logs` | 按规则过滤扫描、非 HTTP 或低价值日志。 |
 | 4 | `dedup_and_write` | 计算去重结果，标记重复告警，写入 JSONL 结果文件。 |
 
@@ -68,12 +68,12 @@ receive_alert -> normalize -> filter_logs -> dedup_and_write
 
 | 参数 | 默认值 | 说明 |
 | --- | --- | --- |
-| `source_log_type` | 自动识别 | 可手动指定 `tdp` 或 `skyeye`。 |
+| `source_log_type` | 自动识别 | 可手动指定 `tdp`、`skyeye` 或 `sangfor-sip`。 |
 | `filter_enabled` | `true` | 是否启用过滤阶段。 |
 | `dedup_enabled` | `true` | 是否启用跨批次去重。 |
 | `threshold` | `0.7` | 相似度阈值；越高越严格。 |
-| `strict_fields` | `["sip", "dip"]` | 去重时必须精确匹配的字段。 |
-| `lsh_fields` | `["req_http_url", "req_body", "rsp_body"]` | 去重时参与相似度判断的字段。 |
+| `strict_fields` | 按来源选择；TDP/SkyEye 为 `["sip", "dip"]` | 去重时必须精确匹配的字段。 |
+| `lsh_fields` | 按来源选择；TDP/SkyEye 为 `["req_http_url", "req_body", "rsp_body"]` | 去重时参与相似度判断的字段。 |
 | `max_dedup_keys` | `100000` | 持久化去重 key 的最大数量。 |
 
 ### 3.3 Syslog 输入示例
@@ -113,7 +113,7 @@ receive_alert -> normalize -> filter_logs -> dedup_and_write
 这个节点负责回答两个问题：
 
 - 告警是从哪里来的？
-- 它应该按 TDP 还是 SkyEye 格式解析？
+- 它应该按哪一种设备格式解析？
 
 处理逻辑：
 
@@ -143,7 +143,7 @@ receive_alert -> normalize -> filter_logs -> dedup_and_write
 | `req_body` | 请求正文。 |
 | `rsp_body` | 响应正文。 |
 | `threat_name` | 威胁名称。 |
-| `_source_type` | 来源类型，`tdp` 或 `skyeye`。 |
+| `_source_type` | 来源类型，`tdp`、`skyeye` 或 `sangfor-sip`。 |
 | `_syslog_meta` | Syslog 元数据，仅 Syslog 输入时存在。 |
 
 你通常会在这里修改：
@@ -160,7 +160,7 @@ receive_alert -> normalize -> filter_logs -> dedup_and_write
 
 - 保留 HTTP 告警。
 - 保留方向为 `in`、`out`、`lateral` 的非扫描告警。
-- 过滤扫描、非 HTTP 或低价值日志。
+- 过滤扫描及不符合来源策略的日志；SIP 非扫描安全事件可以是非 HTTP。
 
 如果传入：
 
@@ -292,3 +292,7 @@ receive_alert -> normalize -> filter_logs -> dedup_and_write
 - [ ] 去重结果符合预期。
 - [ ] 输出字段和结果文件格式清晰。
 - [ ] 发布页只展示当前配置启用的能力。
+
+## 深信服 SIP 适配
+
+SIP 支持 `secevent` 和 `alarm` 两类 SE 报文，处理边界 NUL，完整保留原始 JSON 举证到 `_sip_raw`。两类攻击结果枚举分别归一化，原始 `attack_state` 保留用于去重；alarm 方向使用 `asset_direction`。非 HTTP 安全事件保留真实协议分类。默认去重字段按每条记录的来源选择，支持混合批次及显式覆盖。具体字段、错误状态和升级要求见同目录 `guide.md` 的深信服 SIP 章节。

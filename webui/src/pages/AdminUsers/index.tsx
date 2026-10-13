@@ -322,7 +322,7 @@ export default function AdminUsersPage() {
     <div className="space-y-6">
       <div className="flex items-start justify-between gap-4">
         <div>
-          <h1 className="text-xl font-semibold text-gray-900">{t('admin.sectionTitle')}</h1>
+          <h2 className="text-base font-semibold text-gray-900">{t('admin.listTitle')}</h2>
           <p className="mt-1 text-sm text-gray-500">{sectionDescription}</p>
           {showProAdminView && quota && (
             <p className="mt-2 text-xs text-gray-500">

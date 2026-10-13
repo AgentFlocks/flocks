@@ -6,7 +6,7 @@ import hashlib
 from pathlib import Path
 
 from flocks.hub.models import HubFileContent, HubFileNode, PluginType
-from flocks.hub.paths import get_bundled_hub_root, safe_relative_path
+from flocks.hub.paths import owning_hub_root, safe_relative_path
 
 
 _TEXT_EXTENSIONS = {
@@ -34,8 +34,7 @@ def plugin_root(plugin_type: PluginType, plugin_id: str, *, prefer_bundled: bool
             return system_root.resolve()
 
     root = published_manifest.parent.resolve()
-    bundled = get_bundled_hub_root().resolve()
-    if bundled not in root.parents and root != bundled:
+    if owning_hub_root(root) is None:
         raise ValueError("plugin path escapes hub root")
     return root
 

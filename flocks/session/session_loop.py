@@ -23,8 +23,11 @@ from datetime import datetime
 from flocks.utils.log import Log
 from flocks.utils.id import Identifier
 from flocks.session.session import (
+    DEDICATED_AGENT_POLICY_METADATA_KEY,
     Session,
+    SessionInactiveError,
     SessionInfo,
+    SessionNotFoundError,
     is_model_auto_session_category,
 )
 from flocks.session.message import Message, MessageInfo, MessageRole
@@ -43,8 +46,15 @@ from flocks.session.lifecycle.compaction import (
 )
 from flocks.session.lifecycle.compaction.compaction import _get_compaction_history
 from flocks.session.prompt import SessionPrompt
+from flocks.session.context_usage import (
+    build_context_usage_snapshot,
+    estimate_observed_context_tokens,
+    has_observation_baseline,
+    latest_observation,
+)
 from flocks.provider.provider import Provider
 from flocks.session.goal import GoalManager
+from flocks.session.runtime_controls import runtime_controls
 
 
 log = Log.create(service="session.loop")
@@ -52,6 +62,10 @@ log = Log.create(service="session.loop")
 
 MAX_OVERFLOW_COMPACTION_ATTEMPTS = 3
 POST_COMPACTION_COOLDOWN_STEPS = 2
+# Minimum spacing between mid-turn composer-meter pushes for one session.
+CONTEXT_USAGE_PUSH_INTERVAL_SECONDS = 1.5
+# Longest an overflow waits for the meter to show its pre-cleanup size.
+CONTEXT_USAGE_PUSH_WAIT_SECONDS = 5.0
 RATE_LIMIT_COOLDOWN_SECONDS = 60.0
 CHAIN_EXHAUSTION_COOLDOWN_SECONDS = 5.0
 
@@ -82,6 +96,7 @@ class LoopContext:
     model_id: str
     agent_name: str
     step: int = 0
+    max_steps_reached: bool = False
     abort_event: asyncio.Event = field(default_factory=asyncio.Event)
     # SessionContext interface for decoupled session access
     session_ctx: Optional[Any] = None  # Type: Optional[SessionContext]
@@ -89,6 +104,8 @@ class LoopContext:
     trace_step_offset: int = 0
     # Track current step asyncio.Task so abort() can cancel it immediately
     _current_step_task: Optional[asyncio.Task] = field(default=None, repr=False)
+    # This execution's agent inbox generation (bound when the loop starts)
+    inbox: Optional[Any] = field(default=None, repr=False)
     # Memory bootstrap data loaded once on step 1; passed to each SessionRunner
     memory_bootstrap_data: Optional[Dict[str, Any]] = field(default=None, repr=False)
     # Reusable runner artifacts that stay stable across steps in the same loop.
@@ -105,6 +122,9 @@ class LoopContext:
     # with a current message estimate so tool output produced after that model
     # call cannot be missed.
     last_observed_prompt_tokens: int = 0
+    # Mid-turn ``context.usage.updated`` pushes (throttled, never awaited).
+    last_context_usage_push_at: float = 0.0
+    context_usage_push_task: Optional[asyncio.Task] = field(default=None, repr=False)
     auto_failover: bool = False
     # Entrypoint authorization is separate from persisted model_auto. Only a
     # WebUI message route may set this bit; non-WebUI entrypoints use the default.
@@ -112,10 +132,14 @@ class LoopContext:
     model_candidates: List[RuntimeModel] = field(default_factory=list)
     candidate_index: int = 0
     model_candidate_policy: Literal["fixed", "automatic", "configured"] = "automatic"
+    auto_candidates_initialized: bool = False
     turn_user_id: Optional[str] = None
     turn_additional_context: Optional[str] = None
     stop_hook_active: bool = False
     session_start_pending: bool = False
+    execution_activity: Dict[str, Any] = field(default_factory=dict, repr=False)
+    # Goal verdict on the turn that ended the loop ("inactive" without a goal).
+    goal_verdict: Optional[str] = None
 
     @property
     def trace_step(self) -> int:
@@ -147,6 +171,8 @@ class LoopCallbacks:
     # Runner-level callbacks (text delta, tool events, permissions, etc.)
     # Type: Optional[RunnerCallbacks] - using Any to avoid circular import
     runner_callbacks: Optional[Any] = None
+    # Destination-bound delivery for inbox continuations, not the initial run.
+    on_background_result: Optional[Callable[["LoopResult"], Awaitable[None]]] = None
 
 
 @dataclass
@@ -431,29 +457,86 @@ class SessionLoop:
         return cls._active_loops.get(session_id)
     
     @classmethod
-    def abort(cls, session_id: str) -> bool:
-        """Abort running loop"""
+    def abort(cls, session_id: str, *, only_category: Optional[str] = None) -> bool:
+        """Abort running loop; ``only_category`` filters the descendants it stops."""
+        from flocks.session.agent_inbox import AgentInbox
         ctx = cls._active_loops.get(session_id)
+        inbox = AgentInbox._inboxes.get(session_id)
+        if inbox and AgentInbox.dispatch(inbox, lambda: cls.abort(session_id, only_category=only_category)):
+            return ctx is not None
+        AgentInbox.stop(session_id, only_category=only_category)
         if ctx:
             ctx.signal_abort()
             return True
         return False
     
     @classmethod
-    def abort_children(cls, parent_session_id: str) -> int:
-        """Abort all child loops whose session.parent_id matches, recursively."""
+    def abort_children(cls, parent_session_id: str, *, only_category: Optional[str] = None) -> int:
+        """Abort all child loops whose session.parent_id matches, recursively.
+
+        ``only_category`` restricts the abort to children of that session
+        category, so a caller can stop the subagent sessions it spawned
+        (``category="task"``) without touching sessions the user created from
+        the same parent (WebUI "new from parent", ``category="user"``).
+        The filter holds all the way down, including the agent inbox tree: a
+        user session's own subagents are its children, not this parent's. A
+        filtered call also reaches children with no loop running right now
+        (submitted but not started yet, or idle while their own children
+        still run), which only the inbox tree knows about.
+        """
         aborted = 0
         child_ids = [
             sid for sid, ctx in list(cls._active_loops.items())
             if getattr(ctx.session, 'parent_id', None) == parent_session_id
+            and (
+                only_category is None
+                or getattr(ctx.session, 'category', 'user') == only_category
+            )
         ]
         for sid in child_ids:
             ctx = cls._active_loops.get(sid)
             if ctx and not ctx.should_abort():
-                ctx.signal_abort()
+                cls.abort(sid, only_category=only_category)
                 aborted += 1
-            aborted += cls.abort_children(sid)
+            aborted += cls.abort_children(sid, only_category=only_category)
+        if only_category is not None:
+            from flocks.session.agent_inbox import AgentInbox
+            for sid in AgentInbox.child_ids(parent_session_id, only_category=only_category) - set(child_ids):
+                cls.abort(sid, only_category=only_category)
         return aborted
+
+    @classmethod
+    def end_cancelled_execution(cls, session_id: str) -> None:
+        """Stop what a cancelled, not aborted, execution left running.
+
+        Subagents report back through the session's agent inbox. A user abort
+        has already stopped them and closed it (abort()). Cancellation by
+        whoever awaits this loop (a workflow node timeout cancelling the
+        delegate_task future, a background-task watchdog, session lifecycle)
+        has not. Close the inbox, so a stopped child's late "Sub-agent
+        stopped" report cannot wake this session again, then stop its
+        subagents. Only category "task": a session the user created from this
+        one (WebUI "new from parent") is a child by parent_id too but keeps
+        running. Delegations still in flight see the closed inbox and do not
+        start their child (delegate_task checks before submitting).
+        """
+        from flocks.session.agent_inbox import AgentInbox
+        AgentInbox.close(session_id)
+        cls.abort_children(session_id, only_category="task")
+
+    @classmethod
+    def _end_cancelled_loop(cls, ctx: LoopContext) -> None:
+        """end_cancelled_execution() for a cancel the runner did not handle.
+
+        The runner does it before draining tool calls when the cancel lands in
+        the model stream; this covers every other await of the step and the
+        loop between steps. Skipped after a user abort, which stopped all of
+        it already, and once done for this execution: input that reached a
+        new inbox generation since then belongs to the next execution.
+        """
+        if ctx.should_abort() or (ctx.inbox is not None and ctx.inbox.stopped):
+            return
+        cls.end_cancelled_execution(ctx.session.id)
 
     @classmethod
     async def _publish_runtime_event(
@@ -471,6 +554,83 @@ class SessionLoop:
                 "event": event_name,
                 "error": str(exc),
             })
+
+    @classmethod
+    def _schedule_context_usage_push(
+        cls,
+        ctx: LoopContext,
+        callbacks: "LoopCallbacks",
+        *,
+        force: bool = False,
+    ) -> None:
+        """Refresh the composer context meter between steps of a turn.
+
+        The route only publishes usage when the turn ends, so a long tool
+        loop left the meter frozen at its pre-turn value.  The snapshot is
+        built in the background and throttled so it never delays a step.
+        ``force`` (after pruning or compaction changed the prompt) skips the
+        throttle and publishes after any push still in flight, so a snapshot
+        taken before the cleanup cannot land last.
+        """
+        publish = callbacks.event_publish_callback
+        if publish is None:
+            return
+        now = time.monotonic()
+        pending = ctx.context_usage_push_task
+        pending = pending if pending is not None and not pending.done() else None
+        if not force and (
+            pending is not None
+            or now - ctx.last_context_usage_push_at < CONTEXT_USAGE_PUSH_INTERVAL_SECONDS
+        ):
+            return
+        ctx.last_context_usage_push_at = now
+        session_id = ctx.session.id
+
+        async def _push() -> None:
+            if pending is not None:
+                try:
+                    await pending
+                except Exception:
+                    pass
+            try:
+                snapshot = await build_context_usage_snapshot(
+                    session_id,
+                    session=ctx.session,
+                    provider_id=ctx.provider_id,
+                    model_id=ctx.model_id,
+                )
+                await publish("context.usage.updated", snapshot.model_dump(by_alias=True))
+            except Exception as exc:
+                log.debug("loop.context_usage_push_failed", {
+                    "session_id": session_id,
+                    "error": str(exc),
+                })
+
+        ctx.context_usage_push_task = fire_and_forget(
+            _push(),
+            label="context_usage_push",
+            name=f"context_usage:{session_id}",
+        )
+
+    @classmethod
+    async def _push_context_usage_before_cleanup(
+        cls,
+        ctx: LoopContext,
+        callbacks: "LoopCallbacks",
+    ) -> None:
+        """Publish the size that triggered an overflow before cleanup starts.
+
+        A push still building its snapshot would otherwise read the history
+        mid-prune and show the pruned figure under "Compacting context", which
+        looks like compaction started far below the threshold.
+        """
+        cls._schedule_context_usage_push(ctx, callbacks, force=True)
+        task = ctx.context_usage_push_task
+        if task is not None and not task.done():
+            # ``wait`` neither raises for a cancelled push nor cancels it when
+            # this loop is cancelled; the timeout keeps a slow snapshot from
+            # holding up compaction.
+            await asyncio.wait({task}, timeout=CONTEXT_USAGE_PUSH_WAIT_SECONDS)
 
     @classmethod
     async def _publish_turn_stopped(
@@ -504,9 +664,11 @@ class SessionLoop:
         if not callbacks.event_publish_callback:
             return
         try:
+            from flocks.session.agent_inbox import AgentInbox
             await callbacks.event_publish_callback("session.status", {
                 "sessionID": session_id,
                 "status": {"type": status},
+                "ancestorSessionIDs": AgentInbox.ancestors(session_id),
             })
         except Exception as exc:
             log.debug("loop.session_status.publish_failed", {
@@ -619,6 +781,8 @@ class SessionLoop:
                     )
                 ):
                     active_ctx.auto_failover_allowed = True
+                    from flocks.session.agent_inbox import AgentInbox
+                    AgentInbox.get(session_id).auto_failover_allowed = True
             return LoopResult(
                 action="queued",
                 error="Loop already running",
@@ -641,7 +805,37 @@ class SessionLoop:
                 action="error",
                 error=f"Session {session_id} is {session.status}",
             )
-        if working_directory:
+        effective_agent_name = agent_name or session.agent or "rex"
+        from flocks.session.agent_policy import (
+            AgentSessionPolicyError,
+            prepare_session_for_agent,
+        )
+
+        runtime_agent = None
+        try:
+            from flocks.agent.registry import Agent
+
+            runtime_agent = await Agent.get(effective_agent_name)
+            if runtime_agent is None:
+                return LoopResult(
+                    action="error",
+                    error=f"Agent {effective_agent_name!r} is not available",
+                )
+            session = await prepare_session_for_agent(session, runtime_agent)
+        except AgentSessionPolicyError as exc:
+            log.warning("loop.agent_session_policy_rejected", {
+                "session_id": session_id,
+                "agent": effective_agent_name,
+                "error": str(exc),
+            })
+            return LoopResult(action="error", error=str(exc))
+        if working_directory and not (
+            isinstance(getattr(session, "metadata", None), dict)
+            and isinstance(
+                session.metadata.get(DEDICATED_AGENT_POLICY_METADATA_KEY),
+                dict,
+            )
+        ):
             session = session.model_copy(update={"directory": working_directory})
         
         # Resolve model when not explicitly provided
@@ -693,7 +887,7 @@ class SessionLoop:
             session=session,
             provider_id=provider_id,
             model_id=model_id,
-            agent_name=agent_name or session.agent or "rex",
+            agent_name=effective_agent_name,
             session_ctx=session_ctx,
             trace_step_offset=trace_offset,
             auto_failover=auto_failover,
@@ -736,27 +930,51 @@ class SessionLoop:
                     error="Loop already running",
                 )
             cls._active_loops[session_id] = ctx
+            from flocks.session.agent_inbox import AgentInbox
+            inbox = AgentInbox.bind(session_id)
+            ctx.inbox = inbox
+            inbox.parent_id = session.parent_id
+            inbox.category = getattr(session, "category", None)
+            inbox.auto_failover_allowed = ctx.auto_failover_allowed
+            if callbacks and callbacks.on_background_result:
+                inbox.on_result = callbacks.on_background_result
         
         # Set status to busy
         SessionStatus.set(session_id, SessionStatusBusy())
-        await cls._publish_session_status(callbacks or LoopCallbacks(), session_id, "busy")
         
-        # Mark orphaned running tool parts as error (e.g. from server restart).
-        # Wrapped in try/except so cleanup failures never block the session loop.
         try:
-            from flocks.session.orphan_tools import abort_orphan_running_parts
+            # Mark orphaned running tool parts as error (e.g. from server restart).
+            # Wrapped in try/except so cleanup failures never block the session loop.
+            try:
+                from flocks.session.orphan_tools import abort_orphan_running_parts
 
-            await abort_orphan_running_parts(session_id)
-        except Exception as exc:
-            log.warn("loop.orphan_cleanup_failed", {
-                "session_id": session_id,
-                "error": str(exc),
-            })
+                await abort_orphan_running_parts(session_id)
+            except Exception as exc:
+                log.warn("loop.orphan_cleanup_failed", {
+                    "session_id": session_id,
+                    "error": str(exc),
+                })
         
-        try:
+            await cls._publish_session_status(callbacks or LoopCallbacks(), session_id, "busy")
             # Run loop iteration
-            result = await cls._run_loop(ctx, callbacks or LoopCallbacks())
-            return result
+            from flocks.session.agent_inbox import AgentInbox
+            while True:
+                result = await cls._run_loop(ctx, callbacks or LoopCallbacks())
+                # A cancelled execution ends here (its inbox is closed); input
+                # sent since then is left to the next one, woken in finally.
+                if (ctx.should_abort() or result.error or (ctx.inbox is not None and ctx.inbox.stopped)
+                        or not AgentInbox.get(session_id).messages):
+                    await cls._settle_todos(ctx, result)
+                    return result
+        except asyncio.CancelledError:
+            # Cancelled between steps (a cancelled step is handled in _run_loop).
+            cls._end_cancelled_loop(ctx)
+            # Settle in its own task: the cancellation must reach the caller now.
+            from flocks.session.background_tasks import track_background_task
+            track_background_task(fire_and_forget(
+                cls._settle_todos(ctx, None), label="loop.todo_settle",
+            ))
+            raise
         except Exception as e:
             log.error("loop.error", {"session_id": session_id, "error": str(e)})
             # Report error to callbacks so CLI/TUI can display it
@@ -774,33 +992,102 @@ class SessionLoop:
                 })
             except Exception as exc:
                 log.warn("loop.error.event_error", {"error": str(exc)})
-            return LoopResult(
+            result = LoopResult(
                 action="error",
                 error=str(e),
                 provider_id=ctx.provider_id,
                 model_id=ctx.model_id,
             )
+            await cls._settle_todos(ctx, result)
+            return result
         finally:
-            # Clean up
-            if session_id in cls._active_loops:
-                del cls._active_loops[session_id]
-            clear_turn_state(session_id)
-            
-            # Set status to idle
-            SessionStatus.set(session_id, SessionStatusIdle())
-            await cls._publish_session_status(callbacks or LoopCallbacks(), session_id, "idle")
-            
-            # Touch session (update timestamp)
-            await Session.touch(session.project_id, session_id)
-
-            # Publish idle event
             try:
-                from flocks.bus.bus import Bus
-                from flocks.bus.events import SessionIdle
-                await Bus.publish(SessionIdle, {"sessionID": session_id})
-            except Exception as exc:
-                log.warn("loop.idle.event_error", {"error": str(exc)})
-    
+                clear_turn_state(session_id)
+            
+                # Set status to idle
+                SessionStatus.set(session_id, SessionStatusIdle())
+                await cls._publish_session_status(callbacks or LoopCallbacks(), session_id, "idle")
+            
+                # Touch session (update timestamp)
+                await Session.touch(session.project_id, session_id)
+
+                # Publish idle event
+                try:
+                    from flocks.bus.bus import Bus
+                    from flocks.bus.events import SessionIdle
+                    await Bus.publish(SessionIdle, {"sessionID": session_id})
+                except Exception as exc:
+                    log.warn("loop.idle.event_error", {"error": str(exc)})
+            finally:
+                cls._active_loops.pop(session_id, None)
+                from flocks.session.agent_inbox import AgentInbox
+                AgentInbox.wake(session_id, (callbacks or LoopCallbacks()).event_publish_callback)
+                # Agent-triggered loops have no HTTP prompt chain to drain the
+                # user's existing queue when they finish.
+                from flocks.session.interaction_queue import InteractionQueue
+                if not Session.is_lifecycle_transitioning(session_id) and await InteractionQueue.list(session_id):
+                    from flocks.server.routes.session import _schedule_prompt_queue_drain
+                    await _schedule_prompt_queue_drain(session_id, session.directory)
+
+    @classmethod
+    async def _settle_todos(cls, ctx: LoopContext, result: Optional[LoopResult]) -> None:
+        """Leave no todo in progress once this run is over (see Todo.settle).
+
+        ``result`` is None for a cancelled run.  The decision is taken under
+        the session write lock, so a todo write or a stop that lands in the
+        meantime is neither overwritten nor missed.
+        """
+        session_id = ctx.session.id
+        try:
+            from flocks.server.routes.question import has_pending_questions
+            from flocks.session.agent_inbox import AgentInbox
+            from flocks.session.features.todo import Todo
+
+            if not Todo.has_in_progress(await Todo.get_snapshot(session_id)):
+                return  # most runs: nothing to settle, no lock taken
+            last = result.last_message if result is not None else None
+            agent_finished = (
+                result is not None
+                and result.action != "error"
+                and not result.error
+                and last is not None
+                and getattr(last, "finish", None) == "stop"
+                and not getattr(last, "error", None)
+                # A goal that is paused, blocked or waiting is not done.
+                and ctx.goal_verdict in (None, "inactive", "complete")
+            )
+
+            async def settle() -> None:
+                current = await Todo.get_snapshot(session_id)
+                # No await from here to the write, so a stop or a newer run
+                # that comes in while reading is still seen.
+                active = cls._active_loops.get(session_id)
+                if active is not None and active is not ctx:
+                    return  # a newer run owns the list now
+                stopped = ctx.should_abort() or (ctx.inbox is not None and ctx.inbox.stopped)
+                # The plan is still live while the user owes an answer or
+                # delegated work can report back (to a stopped run it cannot).
+                if not stopped and (
+                    has_pending_questions(session_id) or AgentInbox.has_pending_reports(session_id)
+                ):
+                    return
+                finished = agent_finished and not stopped
+                todos = Todo.settle(current, finished=finished)
+                if todos is None:
+                    return
+                await Todo.update(session_id, todos)
+                log.info("loop.todo_settled", {
+                    "session_id": session_id,
+                    "finished": finished,
+                    "cleared": not todos,
+                })
+
+            await Session.run_active_write(session_id, settle)
+        except (SessionInactiveError, SessionNotFoundError):
+            pass  # archived or deleted while running
+        except Exception as exc:
+            log.warn("loop.todo_settle.error", {"session_id": session_id, "error": str(exc)})
+
     @staticmethod
     async def _resolve_model(
         session: Any,
@@ -952,7 +1239,36 @@ class SessionLoop:
             )
         )
         cls._select_candidate(ctx, next_index)
+        ctx.auto_candidates_initialized = True
         return next_index
+
+    @classmethod
+    async def _pending_real_user(
+        cls,
+        ctx: LoopContext,
+        messages: List[MessageInfo],
+        last_user: MessageInfo,
+    ) -> Optional[MessageInfo]:
+        """Find the human turn hidden by inbox input, without replaying old hooks."""
+        parts = await Message.parts(last_user.id, ctx.session.id)
+        if not any(bool(getattr(part, "synthetic", False)) for part in parts):
+            return last_user
+
+        from flocks.session.agent_inbox import AgentInbox
+        prepared_id = ctx.turn_user_id or AgentInbox.get(ctx.session.id).prepared_user_id
+        # An assistant can be created after a queued human input while still
+        # answering the previous turn. Its parent, not its own ID, is the boundary.
+        handled_ids = {getattr(msg, "parentID", None) for msg in messages
+                       if msg.role == MessageRole.ASSISTANT}
+        for msg in reversed(messages):
+            if msg.role != MessageRole.USER:
+                continue
+            if msg.id == prepared_id or msg.id in handled_ids:
+                break
+            parts = await Message.parts(msg.id, ctx.session.id)
+            if not any(bool(getattr(part, "synthetic", False)) for part in parts):
+                return msg
+        return None
 
     @classmethod
     async def _prepare_auto_turn(
@@ -1207,8 +1523,14 @@ class SessionLoop:
                 session_start_pending=ctx.session_start_pending,
             )
             runner._step = ctx.trace_step
+            ctx.execution_activity = runner.execution_activity
 
-            step_result = await runner._process_step(messages, last_user)
+            try:
+                step_result = await runner._process_step(messages, last_user)
+            finally:
+                ctx.execution_activity["state"] = "processing"
+                ctx.execution_activity["active_tools"] = {}
+            ctx.max_steps_reached |= bool(getattr(runner, "max_steps_reached", False))
             if runner._session_start_fired:
                 ctx.session_start_pending = False
             failure = step_result.failure
@@ -1326,27 +1648,35 @@ class SessionLoop:
         """
         last_message: Optional[MessageInfo] = None
         loop_error: Optional[str] = None
-        
+        loop_error_code: Optional[str] = None
+        retry_preparation = False
+
         while not ctx.should_abort():
+            from flocks.session.agent_inbox import AgentInbox
+            await AgentInbox.drain(ctx.session.id, callbacks)
+            if ctx.should_abort():
+                break
             # Set status to busy
             SessionStatus.set(ctx.session.id, SessionStatusBusy())
-            
-            ctx.step += 1
-            turn_state = set_turn_state(
-                ctx.session.id,
-                step=ctx.step,
-                status="started",
-                queued_message_detected=False,
-            )
-            await cls._publish_runtime_event(callbacks, "turn.started", turn_state.model_dump(by_alias=True))
-            log.info("loop.step", {
-                "session_id": ctx.session.id,
-                "step": ctx.step,
-            })
-            
-            # Callback: step start
-            if callbacks.on_step_start:
-                await callbacks.on_step_start(ctx.step)
+            retrying_preparation = retry_preparation
+            retry_preparation = False
+            if not retrying_preparation:
+                ctx.step += 1
+                turn_state = set_turn_state(
+                    ctx.session.id,
+                    step=ctx.step,
+                    status="started",
+                    queued_message_detected=False,
+                )
+                await cls._publish_runtime_event(callbacks, "turn.started", turn_state.model_dump(by_alias=True))
+                log.info("loop.step", {
+                    "session_id": ctx.session.id,
+                    "step": ctx.step,
+                })
+
+                # Callback: step start
+                if callbacks.on_step_start:
+                    await callbacks.on_step_start(ctx.step)
             
             # Get messages via SessionContext interface
             messages_started_at = asyncio.get_event_loop().time()
@@ -1443,13 +1773,23 @@ class SessionLoop:
                 last_message = last_assistant
                 break
 
-            if await cls._prepare_auto_turn(ctx, last_user):
+            turn_user = await cls._pending_real_user(ctx, messages, last_user)
+            if turn_user and await cls._prepare_auto_turn(ctx, turn_user):
                 ctx.turn_additional_context = None
                 ctx.stop_hook_active = False
-                await cls._run_user_prompt_before_hook(ctx, last_user)
-            
+                await cls._run_user_prompt_before_hook(ctx, turn_user)
+                AgentInbox.get(ctx.session.id).prepared_user_id = turn_user.id
+            if turn_user is None and ctx.auto_failover and ctx.auto_failover_allowed and not ctx.auto_candidates_initialized:
+                # A fresh inbox wake may contain only synthetic input. It still
+                # needs a failover chain, but must not re-run a human turn's hooks.
+                from flocks.config.config import Config
+                await cls._reset_auto_turn_candidates(
+                    ctx, ctx.model_candidates[0], last_user.id, config=await Config.get(),
+                )
+            AgentInbox.get(ctx.session.id).auto_failover_allowed = ctx.auto_failover_allowed
+
             # Bootstrap memory on first step (once per loop, stored in ctx)
-            if ctx.step == 1 and ctx.session.memory_enabled and ctx.memory_bootstrap_data is None:
+            if ctx.step == 1 and not retrying_preparation and ctx.session.memory_enabled and ctx.memory_bootstrap_data is None:
                 try:
                     from flocks.memory.bootstrap import MemoryBootstrap
                     ctx.memory_bootstrap_data = await MemoryBootstrap(
@@ -1470,7 +1810,7 @@ class SessionLoop:
             # may cancel this task before it finishes).
             # generate_title_after_first_message is idempotent: if this task saves
             # the title first, the safety-net call returns immediately.
-            if ctx.step == 1 and not ctx.auto_failover:
+            if ctx.step == 1 and not retrying_preparation and not ctx.auto_failover and runtime_controls.get() is None:
                 try:
                     from flocks.session.lifecycle.title import SessionTitle
                     # UserMessageInfo.model is Dict[str, str] {"providerID": ..., "modelID": ...}
@@ -1609,9 +1949,13 @@ class SessionLoop:
                     input_tokens = tokens_dict.get("input", 0)
                     _cache = tokens_dict.get("cache") or {}
                     cache_read = _cache.get("read", 0) if isinstance(_cache, dict) else 0
+                    # ``input`` excludes cached tokens on both sides of the
+                    # cache: a cold-cache call reports most of its prompt as
+                    # ``cache.write``.
+                    cache_write = _cache.get("write", 0) if isinstance(_cache, dict) else 0
                     output_tokens = tokens_dict.get("output", 0)
                     reasoning_tokens = tokens_dict.get("reasoning", 0)
-                    observed_prompt_tokens = input_tokens + cache_read
+                    observed_prompt_tokens = input_tokens + cache_read + cache_write
                     reported_total = observed_prompt_tokens + output_tokens + reasoning_tokens
 
                     # Provider usage describes the prompt before the latest
@@ -1632,27 +1976,44 @@ class SessionLoop:
                         ),
                         len(messages) - 1,
                     )
+                    observed_index = last_finished_index
+                    observed_total = reported_total if observed_prompt_tokens > 0 else 0
+                    if observed_total <= 0:
+                        # A step can end without provider usage (a stream cut
+                        # mid tool call, a provider that omits it).  Judge by
+                        # the latest call that did report usage plus what came
+                        # after it, as the composer meter does: the
+                        # message-only estimate leaves out the system prompt
+                        # and tool definitions.
+                        earlier = latest_observation(messages[:last_finished_index])
+                        if (
+                            earlier is not None
+                            and earlier.prompt_tokens > 0
+                            and has_observation_baseline(ctx.session.id, earlier.message_id)
+                        ):
+                            observed_index = earlier.index
+                            observed_total = earlier.used_tokens
 
-                    async def _estimate_effective_tokens() -> tuple[int, int, str]:
-                        if observed_prompt_tokens > 0:
-                            tool_result_tokens = (
-                                await SessionPrompt.estimate_tool_result_tokens(
-                                    ctx.session.id,
-                                    last_finished.id,
-                                )
+                    async def _estimate_effective_tokens() -> tuple[int, int, str, int]:
+                        if observed_total > 0:
+                            # Shared with the composer meter, and subtracts
+                            # what cleanup removed since the observed call so
+                            # a pruned prompt is not judged by stale usage.
+                            (
+                                observed_effective,
+                                delta_tokens,
+                                freed_tokens,
+                            ) = await estimate_observed_context_tokens(
+                                ctx.session.id,
+                                messages,
+                                observed_index,
+                                observed_total,
                             )
-                            later_tokens = (
-                                await SessionPrompt.estimate_full_context_tokens(
-                                    ctx.session.id,
-                                    messages[last_finished_index + 1:],
-                                    policy=compaction_policy,
-                                )
-                            )
-                            delta_tokens = tool_result_tokens + later_tokens
                             return (
-                                reported_total + delta_tokens,
+                                observed_effective,
                                 delta_tokens,
                                 "observed+estimated_delta",
+                                freed_tokens,
                             )
 
                         estimated_tokens = (
@@ -1662,12 +2023,13 @@ class SessionLoop:
                                 policy=compaction_policy,
                             )
                         )
-                        return max(reported_total, estimated_tokens), estimated_tokens, "estimated"
+                        return max(reported_total, estimated_tokens), estimated_tokens, "estimated", 0
 
                     (
                         effective_tokens,
                         estimated_component_tokens,
                         decision_source,
+                        freed_tokens,
                     ) = await _estimate_effective_tokens()
                     tokens_dict = {
                         "input": effective_tokens,
@@ -1680,9 +2042,13 @@ class SessionLoop:
                         "effective_tokens": effective_tokens,
                         "observed_tokens": reported_total,
                         "estimated_component_tokens": estimated_component_tokens,
+                        "freed_tokens": freed_tokens,
                         "message_count": len(messages),
                         "overflow_threshold": compaction_policy.overflow_threshold,
                     })
+                    # The observed call's baseline is recorded now, so a
+                    # concurrent meter snapshot cannot capture it post-cleanup.
+                    cls._schedule_context_usage_push(ctx, callbacks)
                     
                     try:
                         _tok_cache = tokens_dict.get("cache") or {}
@@ -1754,6 +2120,9 @@ class SessionLoop:
                                             compaction_policy.overflow_threshold
                                         ),
                                     })
+                                    # Below the threshold nothing overflows, so
+                                    # this skips no summary; the overflow check
+                                    # below would pass it through the same way.
                                     if effective_tokens <= compaction_policy.overflow_threshold:
                                         turn_state = set_turn_state(
                                             ctx.session.id,
@@ -1870,6 +2239,8 @@ class SessionLoop:
                                     await callbacks.on_error(_error_msg)
                                 break
 
+                            await cls._push_context_usage_before_cleanup(ctx, callbacks)
+
                             # Recovery step 1: try truncating oversized tool
                             # results (once per run, matches OpenClaw
                             # toolResultTruncationAttempted)
@@ -1922,6 +2293,10 @@ class SessionLoop:
                                             log.info("loop.overflow_resolved_by_truncation", {
                                                 "session_id": ctx.session.id,
                                             })
+                                            # The meter still shows the size before
+                                            # cleanup, and the next step's push falls
+                                            # inside the throttle window.
+                                            cls._schedule_context_usage_push(ctx, callbacks, force=True)
                                             # Do NOT reset overflow_compaction_attempts
                                             # (matches OpenClaw OC-65)
                                             continue
@@ -2024,6 +2399,7 @@ class SessionLoop:
                                     "attempt": ctx.overflow_compaction_attempts,
                                     "cooldownUntilStep": ctx.step + POST_COMPACTION_COOLDOWN_STEPS,
                                 })
+                                cls._schedule_context_usage_push(ctx, callbacks, force=True)
                             
                             # Continuation user message is now created inside
                             # SessionCompaction.process() (matching Flocks).
@@ -2034,6 +2410,18 @@ class SessionLoop:
                     except Exception as e:
                         log.error("loop.compaction_overflow_check_error", {"error": str(e)})
             
+            if ctx.should_abort():
+                break
+            if AgentInbox.get(ctx.session.id).messages:
+                retry_preparation = True
+                continue  # Rebuild context without consuming a model step.
+
+            if not ctx.last_context_usage_push_at:
+                # Nothing pushed yet this turn (a new session has no model call
+                # to examine above), so the meter still shows the snapshot
+                # taken before the model was known, without the system prompt.
+                cls._schedule_context_usage_push(ctx, callbacks)
+
             # Process single step — wrap in a Task so abort() can cancel it immediately
             # rather than waiting for the current tool call to finish.
             step_task = asyncio.create_task(
@@ -2050,7 +2438,15 @@ class SessionLoop:
                 step_result = await step_task
             except asyncio.CancelledError:
                 log.info("loop.step_cancelled", {"session_id": ctx.session.id, "step": ctx.step})
-                break
+                if ctx.should_abort():
+                    # The user's Stop: abort() cancelled the step and already
+                    # ended this execution; finish the loop normally.
+                    break
+                # Any other cancel (the task running this loop, e.g. a background
+                # worker cancelled by its manager) must reach the caller instead of
+                # turning into a normal stop; end the cancelled execution first.
+                cls._end_cancelled_loop(ctx)
+                raise
             finally:
                 ctx._current_step_task = None
                 log.debug("loop.step_complete", {
@@ -2066,6 +2462,7 @@ class SessionLoop:
             # Handle result
             if step_result.action == "stop":
                 loop_error = step_result.error
+                loop_error_code = getattr(step_result, "error_code", None)
                 # Report error if step failed
                 if step_result.error and callbacks.on_error:
                     await callbacks.on_error(step_result.error)
@@ -2085,6 +2482,8 @@ class SessionLoop:
                     None,
                 )
 
+                if loop_error_code:
+                    break
                 queued_user = await cls._detect_queued_user_message(
                     ctx.session.id,
                     post_messages,
@@ -2110,7 +2509,8 @@ class SessionLoop:
                     })
                     continue
 
-                if not step_result.error and last_message is not None:
+                ctx.goal_verdict = None
+                if not step_result.error and last_message is not None and runtime_controls.get() is None:
                     try:
                         content_result = Message.get_text_content(last_message)
                         last_response = (
@@ -2142,6 +2542,7 @@ class SessionLoop:
                         provider_id=ctx.provider_id,
                         model_id=ctx.model_id,
                     )
+                    ctx.goal_verdict = goal_decision.verdict
                     if goal_decision.status in {"completed", "blocked", "paused"} and goal_decision.objective:
                         await cls._publish_runtime_event(callbacks, "session.goal.updated", {
                             "sessionID": ctx.session.id,
@@ -2258,15 +2659,19 @@ class SessionLoop:
         
         # Return result
         return LoopResult(
-            action="error" if ctx.auto_failover and loop_error else "stop",
+            action="error" if loop_error else "stop",
             last_message=last_message,
-            error=loop_error if ctx.auto_failover else None,
+            error=loop_error,
             provider_id=ctx.provider_id,
             model_id=ctx.model_id,
             metadata={
                 "steps": ctx.step,
+                "trace_step": ctx.trace_step,
+                "max_steps_reached": ctx.max_steps_reached,
                 "session_id": ctx.session.id,
                 "last_compaction_step": ctx.last_compaction_step,
+                **({"stop_reason": loop_error} if loop_error else {}),
+                **({"error_code": loop_error_code} if loop_error_code else {}),
                 **({"aborted": True} if ctx.should_abort() else {}),
             },
         )

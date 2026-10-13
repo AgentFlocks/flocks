@@ -19,7 +19,7 @@ from flocks.hub.catalog import (
     load_taxonomy,
 )
 from flocks.hub.files import file_tree, read_file_content
-from flocks.license import license_status
+from flocks.license import is_pro_edition_status, license_status
 from flocks.hub.installer import install_plugin, uninstall_plugin, update_plugin
 from flocks.hub.update_protection import UpdateConfirmationRequired, build_plan, public_plan
 from flocks.hub.models import (
@@ -312,7 +312,8 @@ async def _publish_scene_suites_changed(plugin_type: PluginType, plugin_id: str,
         suite_ids = [plugin_id] if plugin_type == "component" else []
         if plugin_type != "component":
             # Updating a child also changes its suite's update/completeness
-            # state. Refresh other open scene views without a manual reload.
+            # state. Refresh the acting user's other open scene views
+            # without a manual reload.
             entries = await asyncio.to_thread(list_catalog, plugin_type="component")
             for entry in entries:
                 refs = load_manifest("component", entry.id).components
@@ -338,8 +339,7 @@ async def _assert_edition_allowed(plugin_type: PluginType, plugin_id: str) -> No
         status_payload = await license_status()
     except Exception:
         status_payload = {}
-    edition = str(status_payload.get("status") or "").lower()
-    if edition == "oss" or not status_payload.get("active"):
+    if not is_pro_edition_status(status_payload):
         raise HTTPException(
             status_code=403,
             detail="该套件需要 Flocks Pro 授权后才能安装，请先在系统设置中升级。",

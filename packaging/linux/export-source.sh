@@ -15,7 +15,8 @@
 #   --verify-only  run just the deny-list check on an already exported tree
 #
 # In both modes the development-only directories are dropped and the result is checked
-# against a deny list of runtime/secret file names; any hit aborts the export. The
+# against a deny list of runtime/secret file names and of credential-like content (AWS key
+# ids, JWTs, private key blocks, internal threatbook-inc.cn host names); any hit aborts the export. The
 # destination gets a `.source-export.json` stamp ({commit, dirty, mode}) so a later build
 # step can tell an exported tree from a raw checkout.
 # Prints "commit=<sha> dirty=<0|1> mode=<clean|dirty>" on success.
@@ -64,6 +65,42 @@ verify_tree() {
     while IFS= read -r offender; do printf '  %s\n' "$offender" >&2; done <<< "$offenders"
     return 1
   fi
+  # content: what every secret scanner reports as a credential (AWS access key ids, JWTs, private
+  # key blocks) and internal host names must not ship either, not even as documentation examples:
+  # customers scan what they receive. Use placeholders like <ACCESS_KEY_ID> / <JWT> instead.
+  # (AWS's own documentation sample key ids, AKIAIOSFODNN7EXAMPLE and AKIAI44QH8DHBEXAMPLE, are let
+  #  through like every scanner does: they are published as never valid)
+  # Only the build outputs pruned above are skipped, by path: a directory further down that merely
+  # shares their name (some skill's assets/dist) ships, so it is scanned.
+  local -a targets=()
+  local entry hits="" rc=0
+  while IFS= read -r -d '' entry; do
+    case "$entry" in
+      ./.venv|./webui|./webui/node_modules|./webui/dist) ;;
+      *) targets+=("$entry") ;;
+    esac
+  done < <(cd "$dest" && find . -mindepth 1 -maxdepth 1 -print0 && if [[ -d webui ]]; then find ./webui -mindepth 1 -maxdepth 1 -print0; fi)
+  if [[ ${#targets[@]} -gt 0 ]]; then
+    hits="$(
+      cd "$dest" && grep -rIHoE \
+        -e 'AKIA[0-9A-Z]{16}' \
+        -e 'eyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}' \
+        -e '-----BEGIN ([A-Z0-9]+ )*PRIVATE KEY( BLOCK)?-----' \
+        -e 'threatbook-inc\.cn' \
+        -- "${targets[@]}"
+    )" || rc=$?
+  fi
+  # grep: 0 = hits, 1 = none, 2 = some file could not be read, and a file nobody read is not a clean one
+  if (( rc > 1 )); then
+    echo "export-source: the content check could not read every file (grep exit ${rc}); refusing to export" >&2
+    return 1
+  fi
+  offenders="$(printf '%s\n' "$hits" | grep -vE ':(AKIAIOSFODNN7EXAMPLE|AKIAI44QH8DHBEXAMPLE)$' | cut -d: -f1 | sort -u || true)"
+  if [[ -n "$offenders" ]]; then
+    echo "export-source: refusing to ship credential-like strings or internal host names in:" >&2
+    while IFS= read -r offender; do printf '  %s\n' "$offender" >&2; done <<< "$offenders"
+    return 1
+  fi
   [[ -f "$dest/pyproject.toml" && -f "$dest/uv.lock" && -d "$dest/flocks" ]] || fail "export is incomplete (pyproject.toml / uv.lock / flocks/ missing)."
 }
 
@@ -92,6 +129,10 @@ PATHSPEC=(
   ':(exclude)packaging' ':(exclude)npm-wrapper' ':(exclude)docs' ':(exclude)assets'
   ':(exclude).github' ':(exclude).claude'
   ':(exclude,glob)**/__pycache__/**' ':(exclude,glob)**/.pytest_cache/**'
+  # WebUI unit tests and their helpers: not part of the build (tsconfig excludes them) and full of
+  # fixtures such as internal host names
+  ':(exclude,glob)webui/**/*.test.ts' ':(exclude,glob)webui/**/*.test.tsx'
+  ':(exclude,glob)webui/**/*.spec.ts' ':(exclude,glob)webui/**/*.spec.tsx' ':(exclude)webui/src/test'
   ':(exclude,glob)**/.mypy_cache/**' ':(exclude,glob)**/.ruff_cache/**' ':(exclude,glob)**/*.pyc'
 )
 

@@ -21,6 +21,7 @@ from datetime import datetime
 from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
 
+from flocks.auth.context import API_TOKEN_SERVICE_USER_ID, get_current_auth_user
 from flocks.server.auth import require_user
 from flocks.utils.log import Log
 from flocks.utils.id import Identifier
@@ -39,6 +40,10 @@ RUNTIME_EVENT_PREFIXES = (
     "context.",
     "permission.",
 )
+# Client-control commands published through /tui/*. Their properties are
+# copied from the request body, so a sessionID inside them is caller-chosen
+# data, not a routing key.
+CONTROL_EVENT_PREFIXES = ("tui.",)
 EVENT_QUEUE_MAXSIZE = max(100, int(os.getenv("FLOCKS_EVENT_QUEUE_MAXSIZE", "1000")))
 EVENT_QUEUE_DROP_TO = max(0, min(
     EVENT_QUEUE_MAXSIZE - 1,
@@ -52,6 +57,11 @@ EVENT_QUEUE_COALESCE_AT = max(1, min(
 
 # Current directory context for SSE events
 _current_directory: str = os.getcwd()
+
+
+def _is_control_event(event: dict) -> bool:
+    event_type = event.get("type")
+    return isinstance(event_type, str) and event_type.startswith(CONTROL_EVENT_PREFIXES)
 
 
 def _event_session_id(event: dict) -> Optional[str]:
@@ -112,6 +122,18 @@ async def _get_event_session(session_id: str) -> Optional["SessionInfo"]:
         return None
     finally:
         reset_current_auth_user(token)
+
+
+def _is_actor_event_recipient(user: "AuthUser", actor: Optional["AuthUser"]) -> bool:
+    """Whether a subscriber may receive a non-session event.
+
+    Mirrors ``SessionPolicy``: a user's own events stay with that user, while
+    events with no user in context or from the API-token service identity
+    are system-owned and go to admins (the service identity is admin too).
+    """
+    if actor is None or actor.id == API_TOKEN_SERVICE_USER_ID:
+        return user.role == "admin"
+    return user.id == actor.id
 
 
 def _snapshot_key(event: dict) -> Optional[tuple[str, str, str]]:
@@ -228,9 +250,12 @@ def get_event_directory() -> str:
     return _current_directory
 
 
-# Global event queue for broadcasting
+# Per-subscriber event routing for SSE clients
 class EventBroadcaster:
-    """Broadcast events to all connected SSE clients"""
+    """Route events to the connected SSE clients entitled to them.
+
+    There is no broadcast-to-everyone mode; see ``publish`` for the rules.
+    """
     
     _instance: Optional["EventBroadcaster"] = None
     
@@ -240,7 +265,7 @@ class EventBroadcaster:
         queue_drop_to: Optional[int] = None,
         queue_coalesce_at: Optional[int] = None,
     ) -> None:
-        self._clients: dict[EventQueue, Optional["AuthUser"]] = {}
+        self._clients: dict[EventQueue, "AuthUser"] = {}
         self._lock = asyncio.Lock()
         self._queue_maxsize = max(1, queue_maxsize)
         self._queue_drop_to = max(
@@ -265,8 +290,10 @@ class EventBroadcaster:
             cls._instance = EventBroadcaster()
         return cls._instance
     
-    async def subscribe(self, user: Optional["AuthUser"] = None) -> EventQueue:
-        """Subscribe a new client"""
+    async def subscribe(self, user: "AuthUser") -> EventQueue:
+        """Subscribe a new client on behalf of an authenticated user"""
+        if user is None:
+            raise ValueError("SSE subscribers must be authenticated")
         queue = EventQueue(maxsize=self._queue_maxsize)
         async with self._lock:
             self._clients[queue] = user
@@ -278,36 +305,48 @@ class EventBroadcaster:
             self._clients.pop(queue, None)
     
     async def publish(self, event: dict) -> None:
-        """Publish event to all clients"""
+        """Deliver an event only to the subscribers entitled to it.
+
+        - Events tied to a session go to users who can read that session.
+        - Other events go to every connection of the user whose request or
+          run published them (the auth user in the publisher's context).
+        - Events published with no user in context (file watchers,
+          schedulers) or by the API-token service identity go to admins.
+        - Client-control events (``tui.*``) always follow the publisher rules
+          above, even when their properties carry a sessionID.
+        """
         async with self._lock:
             clients = list(self._clients.items())
 
-        session = None
-        session_id = _event_session_id(event)
-        if session_id:
-            try:
-                session = await _get_event_session(session_id)
-            except Exception as exc:
-                log.warning("event.session_access_lookup_failed", {
-                    "session_id": session_id,
-                    "event_type": event.get("type"),
-                    "error": str(exc),
-                })
-                return
-            if session is None:
-                log.debug("event.session_access_missing", {
-                    "session_id": session_id,
-                    "event_type": event.get("type"),
-                })
-                return
+        session_id = None if _is_control_event(event) else _event_session_id(event)
+        if not session_id:
+            actor = get_current_auth_user()
+            for queue, user in clients:
+                if _is_actor_event_recipient(user, actor):
+                    self._publish_to_queue(queue, event)
+            return
 
-        if session is not None:
-            from flocks.session.policy import SessionPolicy
+        try:
+            session = await _get_event_session(session_id)
+        except Exception as exc:
+            log.warning("event.session_access_lookup_failed", {
+                "session_id": session_id,
+                "event_type": event.get("type"),
+                "error": str(exc),
+            })
+            return
+        if session is None:
+            log.debug("event.session_access_missing", {
+                "session_id": session_id,
+                "event_type": event.get("type"),
+            })
+            return
+
+        from flocks.session.policy import SessionPolicy
 
         for queue, user in clients:
-            if session is not None and user is not None and not SessionPolicy.can_read(session, user):
-                continue
-            self._publish_to_queue(queue, event)
+            if SessionPolicy.can_read(session, user):
+                self._publish_to_queue(queue, event)
 
     def _publish_to_queue(self, queue: EventQueue, event: dict) -> None:
         # Preserve the event cadence for healthy clients. Once a subscriber is
@@ -438,7 +477,11 @@ def create_runtime_event(runtime_type: str, properties: dict = None) -> dict:
 # Helper to publish events
 async def publish_event(event_type: str, properties: dict = None, directory: str = None):
     """
-    Publish an event to all SSE clients.
+    Publish an event to the SSE clients entitled to it.
+    
+    Recipients are resolved by ``EventBroadcaster.publish``: session readers
+    for session events, otherwise the auth user of the current context (or
+    admins for system-originated events). Nothing is sent to every user.
     
     Events are sent in direct Event format (type + properties) for TUI compatibility.
     The /event endpoint expects direct events, not wrapped in GlobalEvent.

@@ -113,6 +113,40 @@ async def test_apply_auth_for_request_resets_context_when_adapter_fails(monkeypa
 
 
 @pytest.mark.asyncio
+async def test_apply_auth_for_request_survives_adapter_reregistration_mid_request(monkeypatch):
+    """An extension may swap its adapters while a request is awaiting one."""
+    authenticated = AuthUser(
+        id="usr_adapter",
+        username="adapter-user",
+        role="member",
+        status="active",
+    )
+
+    async def apply_authenticated_request(_request):
+        return None, set_current_auth_user(authenticated), authenticated
+
+    async def late_adapter(_request, _user):
+        return {"late": True}
+
+    async def reloading_adapter(_request, _user):
+        # What a runtime security reload does to the registry.
+        auth_module.unregister_auth_context_adapter("reloading-test-adapter")
+        auth_module.register_auth_context_adapter("late-test-adapter", late_adapter)
+        return {"reloading": True}
+
+    monkeypatch.setattr(auth_module, "_apply_auth_for_request", apply_authenticated_request)
+    monkeypatch.setattr(auth_module, "_auth_context_adapters", {})
+    auth_module.register_auth_context_adapter("reloading-test-adapter", reloading_adapter)
+    request = _make_request()
+    _, token, user = await auth_module.apply_auth_for_request(request)
+    try:
+        assert user is authenticated
+        assert request.state.extension_context == {"reloading": True}
+    finally:
+        auth_module.clear_auth_context(token)
+
+
+@pytest.mark.asyncio
 async def test_apply_auth_for_request_non_browser_loopback_rejects_without_token_by_default(monkeypatch):
     monkeypatch.setattr(auth_module, "get_secret_manager", lambda: _FakeSecrets({auth_module.API_TOKEN_SECRET_ID: "abc123"}))
     monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)

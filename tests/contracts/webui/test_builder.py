@@ -30,3 +30,20 @@ def test_builder_rejects_entry_outside_page_dir(built_store: WebUIPagesStore):
 
     with pytest.raises(ValueError, match="invalid entry path"):
         builder.build("build-page")
+
+
+@pytest.mark.skipif(resolve_esbuild_bin() is None, reason="esbuild is not installed")
+def test_pages_can_import_the_visibility_and_event_hooks_from_the_sdk(built_store: WebUIPagesStore):
+    source = built_store.page_dir("build-page") / "src" / "index.tsx"
+    source.write_text(
+        "import { usePaneActive, useServerEvents } from '@flocks/webui-contract-sdk';\n"
+        "export default function Page() {\n"
+        "  const active = usePaneActive ? usePaneActive() : true;\n"
+        "  if (useServerEvents) useServerEvents(() => undefined, { enabled: active });\n"
+        "  return <div>{String(active)}</div>;\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    meta = WebUIPageBuilder(built_store).build("build-page")
+    assert meta.status == "ready", meta.error
+

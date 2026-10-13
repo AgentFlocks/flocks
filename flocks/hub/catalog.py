@@ -6,13 +6,19 @@ import json
 import platform
 import re
 import threading
-from functools import lru_cache
+from collections import OrderedDict
+from concurrent.futures import Future, InvalidStateError
+from contextvars import ContextVar
+from functools import lru_cache, wraps
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
-from flocks.hub import local
+from flocks.hub import local, tool_tree
 from flocks.hub.models import HubCatalogEntry, HubIndex, HubIndexEntry, HubPluginManifest, HubTaxonomy, PluginType
-from flocks.hub.paths import get_bundled_hub_root
+from flocks.hub.paths import extension_hub_roots, get_bundled_hub_root, owning_hub_root
+from flocks.utils.log import Log
+
+log = Log.create(service="hub.catalog")
 
 _LEGACY_REMOVED_PLUGINS: dict[tuple[PluginType, str], dict[str, Optional[str]]] = {
     ("agent", "alert-triage-agent"): {
@@ -33,17 +39,57 @@ _TOOL_TYPE_DIRS = frozenset({"api", "device", "python", "mcp", "generated"})
 _SKIP_PLUGIN_DIRS = frozenset({"__pycache__"})
 _PATH_SIGNATURE_MISSING = -1
 _CATALOG_ENTRIES_LOCK = threading.Lock()
+_CATALOG_GENERATION = 0
+_CATALOG_SNAPSHOTS = OrderedDict()
+_CATALOG_BUILDS = {}
+_BUILD_MEMO = ContextVar('hub_build_memo', default=None)
+_BUILD_GENERATION = ContextVar('hub_build_generation', default=None)
 
 
+def _cache_generation():
+    building = _BUILD_GENERATION.get()
+    return _CATALOG_GENERATION if building is None else building
+
+
+def _finish_build(future, error=None, value=None):
+    try:
+        if error is None:
+            future.set_result(value)
+        else:
+            future.set_exception(error)
+    except InvalidStateError:
+        pass  # An explicit refresh already woke this build's waiters.
+
+
+def _once_per_build(fn):
+    """Reuse parsed manifests within one build, never across users/refreshes."""
+    @wraps(fn)
+    def wrapped(*args, **kwargs):
+        memo = _BUILD_MEMO.get()
+        if memo is None:
+            return fn(*args, **kwargs)
+        key = (fn, args, tuple(sorted(kwargs.items())))
+        if key not in memo:
+            memo[key] = fn(*args, **kwargs)
+        return memo[key]
+    return wrapped
+
+
+def _safe_yaml(text):
+    import yaml
+    # Both loaders use SafeConstructor; C acceleration is optional.
+    return yaml.load(text, Loader=getattr(yaml, 'CSafeLoader', yaml.SafeLoader))
+
+
+@_once_per_build
 def _read_json(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+@_once_per_build
 def _read_yaml(path: Path) -> dict[str, Any]:
     try:
-        import yaml
-
-        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        data = _safe_yaml(path.read_text(encoding="utf-8")) or {}
         return data if isinstance(data, dict) else {}
     except Exception:
         return {}
@@ -119,6 +165,7 @@ def legacy_removed_plugin_message(plugin_type: PluginType, plugin_id: str) -> Op
     return f"{plugin_type}:{plugin_id} has been removed. {reason}"
 
 
+@_once_per_build
 def _frontmatter(path: Path) -> dict[str, Any]:
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
@@ -129,40 +176,98 @@ def _frontmatter(path: Path) -> dict[str, Any]:
     for index in range(1, len(lines)):
         if lines[index].strip() == "---":
             try:
-                import yaml
-
-                data = yaml.safe_load("\n".join(lines[1:index])) or {}
+                data = _safe_yaml("\n".join(lines[1:index])) or {}
                 return data if isinstance(data, dict) else {}
             except Exception:
                 return {}
     return {}
 
 
-@lru_cache(maxsize=1)
-def load_index() -> HubIndex:
-    root = get_bundled_hub_root()
+def _read_index(root: Path) -> Optional[HubIndex]:
     path = root / "index.json"
     if not path.is_file():
-        return HubIndex(schemaVersion="hub.index.v1", plugins=[])
+        return None
     return HubIndex.model_validate(_read_json(path))
 
 
-@lru_cache(maxsize=1)
-def load_taxonomy() -> HubTaxonomy:
-    root = get_bundled_hub_root()
-    path = root / "taxonomy.json"
+def _index_signatures() -> tuple[tuple[str, int, int], ...]:
+    """Signatures of the bundled index and each extension index, in merge order."""
+    return (
+        _path_signature(get_bundled_hub_root() / "index.json"),
+        *(_path_signature(root / "index.json") for root in extension_hub_roots()),
+    )
+
+
+@lru_cache(maxsize=8)
+def _load_merged_index(signatures, generation) -> tuple[HubIndex, dict[tuple[str, str], Path]]:
+    """The bundled index with extension entries merged in, plus each entry's root.
+
+    Keyed by every index file's signature, so editing the bundled or an
+    extension index, or registering another extension root, reloads it.
+    """
+    bundled_root = Path(signatures[0][0]).parent
+    index = _read_index(bundled_root) or HubIndex(schemaVersion="hub.index.v1", plugins=[])
+    plugins = list(index.plugins)
+    owners = {(item.type, item.id): bundled_root.resolve() for item in plugins}
+    for signature in signatures[1:]:
+        root = Path(signature[0]).parent
+        try:
+            extension_index = _read_index(root)
+        except Exception as exc:
+            log.warn("hub.extension_index.invalid", {"root": str(root), "error": str(exc)})
+            continue
+        for item in extension_index.plugins if extension_index else []:
+            key = (item.type, item.id)
+            position = next((i for i, current in enumerate(plugins) if (current.type, current.id) == key), None)
+            if position is None:
+                plugins.append(item)
+            else:
+                plugins[position] = item
+            owners[key] = root
+    return index.model_copy(update={"plugins": plugins}), owners
+
+
+@_once_per_build
+def _merged_index() -> tuple[HubIndex, dict[tuple[str, str], Path]]:
+    return _load_merged_index(_index_signatures(), _cache_generation())
+
+
+def load_index() -> HubIndex:
+    return _merged_index()[0]
+
+
+@lru_cache(maxsize=8)
+def _load_taxonomy(signature, generation) -> HubTaxonomy:
+    path = Path(signature[0])
     if not path.is_file():
         return HubTaxonomy(schemaVersion="hub.taxonomy.v1")
     return HubTaxonomy.model_validate(_read_json(path))
 
 
-@lru_cache(maxsize=1)
-def _manifest_path_lookup() -> dict[tuple[str, str], str]:
-    return {(item.type, item.id): item.manifestPath for item in load_index().plugins}
+@_once_per_build
+def load_taxonomy() -> HubTaxonomy:
+    return _load_taxonomy(_path_signature(get_bundled_hub_root() / 'taxonomy.json'), _cache_generation())
 
 
-def manifest_path(plugin_type: PluginType, plugin_id: str) -> Path:
-    root = get_bundled_hub_root()
+@lru_cache(maxsize=8)
+def _manifest_lookup(signatures, generation) -> dict[tuple[str, str], tuple[Path, str]]:
+    index, owners = _load_merged_index(signatures, generation)
+    return {(item.type, item.id): (owners[(item.type, item.id)], item.manifestPath) for item in index.plugins}
+
+
+@_once_per_build
+def _manifest_path_lookup() -> dict[tuple[str, str], tuple[Path, str]]:
+    return _manifest_lookup(_index_signatures(), _cache_generation())
+
+
+# Preserve existing explicit refresh/test hooks on the public readers.
+load_index.cache_clear = _load_merged_index.cache_clear
+_merged_index.cache_clear = _load_merged_index.cache_clear
+load_taxonomy.cache_clear = _load_taxonomy.cache_clear
+_manifest_path_lookup.cache_clear = _manifest_lookup.cache_clear
+
+
+def _direct_manifest_path(root: Path, plugin_type: PluginType, plugin_id: str) -> Optional[Path]:
     direct = root / "plugins" / f"{plugin_type}s" / plugin_id / "manifest.json"
     if direct.is_file():
         return direct
@@ -174,14 +279,47 @@ def manifest_path(plugin_type: PluginType, plugin_id: str) -> Path:
         tool_direct = root / "plugins" / "tools" / "device" / plugin_id / "manifest.json"
         if tool_direct.is_file():
             return tool_direct
-    manifest_rel = _manifest_path_lookup().get((plugin_type, plugin_id))
-    if manifest_rel:
-        path = (root / manifest_rel).resolve()
-        bundled = root.resolve()
-        if bundled not in path.parents and path != bundled:
-            raise ValueError("manifest path escapes hub root")
-        return path
-    return direct
+    return None
+
+
+def _indexed_manifest_path(root: Path, manifest_rel: str) -> Path:
+    path = (root / manifest_rel).resolve()
+    resolved_root = root.resolve()
+    if resolved_root not in path.parents and path != resolved_root:
+        raise ValueError("manifest path escapes hub root")
+    return path
+
+
+def _within_root(path: Path, root: Path) -> bool:
+    resolved, resolved_root = path.resolve(), root.resolve()
+    return resolved == resolved_root or resolved_root in resolved.parents
+
+
+def manifest_path(plugin_type: PluginType, plugin_id: str) -> Path:
+    # Extension roots come first: they may replace a bundled placeholder.
+    for extension_root in reversed(extension_hub_roots()):
+        direct = _direct_manifest_path(extension_root, plugin_type, plugin_id)
+        if direct is not None:
+            if not _within_root(direct, extension_root):
+                raise ValueError("manifest path escapes hub root")
+            return direct
+    root = get_bundled_hub_root()
+    indexed = _manifest_path_lookup().get((plugin_type, plugin_id))
+    if indexed is not None and indexed[0] != root.resolve():
+        return _indexed_manifest_path(*indexed)
+    direct = _direct_manifest_path(root, plugin_type, plugin_id)
+    if direct is not None:
+        return direct
+    if indexed is not None:
+        return _indexed_manifest_path(*indexed)
+    return root / "plugins" / f"{plugin_type}s" / plugin_id / "manifest.json"
+
+
+def manifest_relative_path(plugin_type: PluginType, plugin_id: str) -> str:
+    """Manifest path relative to the hub root that ships the plugin."""
+    path = manifest_path(plugin_type, plugin_id)
+    root = owning_hub_root(path) or get_bundled_hub_root()
+    return str(path.resolve().relative_to(root))
 
 
 def load_manifest(plugin_type: PluginType, plugin_id: str) -> HubPluginManifest:
@@ -265,6 +403,7 @@ def _base_manifest(
     )
 
 
+@_once_per_build
 def _skill_manifest(plugin_id: str, root: Path) -> Optional[HubPluginManifest]:
     skill_file = root / "SKILL.md"
     if not skill_file.is_file():
@@ -285,6 +424,7 @@ def _skill_manifest(plugin_id: str, root: Path) -> Optional[HubPluginManifest]:
     )
 
 
+@_once_per_build
 def _agent_manifest(plugin_id: str, root: Path) -> Optional[HubPluginManifest]:
     agent_file = root / "agent.yaml"
     if not agent_file.is_file():
@@ -314,6 +454,7 @@ def _agent_manifest(plugin_id: str, root: Path) -> Optional[HubPluginManifest]:
     )
 
 
+@_once_per_build
 def _workflow_manifest(plugin_id: str, root: Path) -> Optional[HubPluginManifest]:
     workflow_file = root / "workflow.json"
     if not workflow_file.is_file() and not (root / "workflow.md").is_file():
@@ -420,6 +561,7 @@ def _provider_integration_type(provider: dict[str, Any]) -> Optional[str]:
     return cleaned or None
 
 
+@_once_per_build
 def _tool_manifest(plugin_id: str, root: Path) -> Optional[HubPluginManifest]:
     if not _has_direct_tool_payload(root):
         return None
@@ -521,6 +663,7 @@ def _discover_system_plugin_roots() -> dict[tuple[PluginType, str], Path]:
 @lru_cache(maxsize=8)
 def _cached_system_plugin_roots(
     _signature: tuple[tuple[str, int, int], ...],
+    _generation: int,
 ) -> tuple[tuple[PluginType, str, Path], ...]:
     return tuple(
         (plugin_type, plugin_id, path)
@@ -528,10 +671,11 @@ def _cached_system_plugin_roots(
     )
 
 
+@_once_per_build
 def _system_plugin_roots() -> dict[tuple[PluginType, str], Path]:
     return {
         (plugin_type, plugin_id): path
-        for plugin_type, plugin_id, path in _cached_system_plugin_roots(_system_plugin_roots_cache_key())
+        for plugin_type, plugin_id, path in _cached_system_plugin_roots(_system_plugin_roots_cache_key(), _cache_generation())
     }
 
 
@@ -584,6 +728,7 @@ def _discover_bundled_tool_roots() -> dict[tuple[PluginType, str], Path]:
 @lru_cache(maxsize=8)
 def _cached_bundled_tool_roots(
     _signature: tuple[tuple[str, int, int], ...],
+    _generation: int,
 ) -> tuple[tuple[PluginType, str, Path], ...]:
     return tuple(
         (plugin_type, plugin_id, path)
@@ -591,10 +736,11 @@ def _cached_bundled_tool_roots(
     )
 
 
+@_once_per_build
 def _bundled_tool_roots() -> dict[tuple[PluginType, str], Path]:
     return {
         (plugin_type, plugin_id): path
-        for plugin_type, plugin_id, path in _cached_bundled_tool_roots(_bundled_tool_roots_cache_key())
+        for plugin_type, plugin_id, path in _cached_bundled_tool_roots(_bundled_tool_roots_cache_key(), _cache_generation())
     }
 
 
@@ -630,14 +776,15 @@ def _catalog_entries_cache_key() -> tuple[tuple[str, int, int], ...]:
     return (
         _path_signature(root / "index.json"),
         _path_signature(root / "taxonomy.json"),
+        *(_path_signature(extension_root / "index.json") for extension_root in extension_hub_roots()),
         *_installed_plugins_cache_key(),
+        *local.tool_discovery_signature(),
         *_system_plugin_roots_cache_key(),
         *_bundled_tool_roots_cache_key(),
     )
 
 
-@lru_cache(maxsize=8)
-def _cached_catalog_entries(
+def _build_catalog_entries(
     _signature: tuple[tuple[str, int, int], ...],
 ) -> tuple[HubCatalogEntry, ...]:
     records = local.load_installed_records()
@@ -714,19 +861,86 @@ def _cached_catalog_entries(
 
 
 def _catalog_entries_snapshot() -> tuple[HubCatalogEntry, ...]:
-    signature = _catalog_entries_cache_key()
-    with _CATALOG_ENTRIES_LOCK:
-        return _cached_catalog_entries(signature)
+    while True:
+        generation = _CATALOG_GENERATION
+        signature = _catalog_entries_cache_key()
+        key = (generation, signature)
+        # The global lock protects only in-memory bookkeeping. No filesystem
+        # work, parsing, logging or waits for other builders happen under it.
+        _CATALOG_ENTRIES_LOCK.acquire()
+        try:
+            if generation != _CATALOG_GENERATION:
+                continue
+            entries = _CATALOG_SNAPSHOTS.get(key)
+            if entries is not None:
+                _CATALOG_SNAPSHOTS.move_to_end(key)
+            build = _CATALOG_BUILDS.get(key)
+            owner = entries is None and build is None
+            if owner:
+                build = Future()
+                _CATALOG_BUILDS[key] = build
+        finally:
+            _CATALOG_ENTRIES_LOCK.release()
+        if entries is not None:
+            return entries
+        future = build
+        if not owner:
+            shared = future.result()
+            if shared is not None and generation == _CATALOG_GENERATION:
+                return shared
+            # Refresh superseded the builder; recompute the signature before
+            # serving anything. Ordinary joined reads need not scan twice.
+            continue
+        try:
+            token = _BUILD_MEMO.set({})
+            generation_token = _BUILD_GENERATION.set(generation)
+            try:
+                def check_current():
+                    if generation != _CATALOG_GENERATION:
+                        raise tool_tree.Superseded()
+                with tool_tree.checking(check_current), local.discovery_scope():
+                    entries = _build_catalog_entries(signature)
+            finally:
+                _BUILD_GENERATION.reset(generation_token)
+                _BUILD_MEMO.reset(token)
+            with _CATALOG_ENTRIES_LOCK:
+                if generation == _CATALOG_GENERATION:
+                    _CATALOG_SNAPSHOTS[key] = entries
+                    _CATALOG_SNAPSHOTS.move_to_end(key)
+                    while len(_CATALOG_SNAPSHOTS) > 8:
+                        _CATALOG_SNAPSHOTS.popitem(last=False)
+                _CATALOG_BUILDS.pop(key, None)
+            _finish_build(future, value=entries)
+            if generation == _CATALOG_GENERATION:
+                return entries
+        except tool_tree.Superseded:
+            with _CATALOG_ENTRIES_LOCK:
+                _CATALOG_BUILDS.pop(key, None)
+            _finish_build(future)
+            continue
+        except BaseException as exc:
+            with _CATALOG_ENTRIES_LOCK:
+                _CATALOG_BUILDS.pop(key, None)
+            _finish_build(future, exc)
+            raise
 
 
 def clear_catalog_caches() -> None:
     """Clear Hub filesystem discovery caches after installs or explicit refreshes."""
+    global _CATALOG_GENERATION
+    with _CATALOG_ENTRIES_LOCK:
+        _CATALOG_GENERATION += 1
+        _CATALOG_SNAPSHOTS.clear()
+        superseded = list(_CATALOG_BUILDS.values())
+        _CATALOG_BUILDS.clear()
+    tool_tree.clear()
+    for future in superseded:
+        _finish_build(future)
     load_index.cache_clear()
     load_taxonomy.cache_clear()
     _manifest_path_lookup.cache_clear()
     _cached_system_plugin_roots.cache_clear()
     _cached_bundled_tool_roots.cache_clear()
-    _cached_catalog_entries.cache_clear()
 
 
 def system_plugin_root(plugin_type: PluginType, plugin_id: str) -> Optional[Path]:
@@ -852,7 +1066,7 @@ def _entry_from_manifest(manifest: HubPluginManifest) -> HubCatalogEntry:
         state=state,
         installedVersion=installed_version,
         source=manifest.source.kind,
-        manifestPath=str(manifest_path(manifest.type, manifest.id).relative_to(get_bundled_hub_root())),
+        manifestPath=manifest_relative_path(manifest.type, manifest.id),
         installPath=str(install_path) if install_path else None,
         native=False,
     )
@@ -1022,12 +1236,11 @@ def _entry_from_bundled_tool(
 
 
 def list_manifests() -> list[HubPluginManifest]:
-    root = get_bundled_hub_root()
     index = load_index()
     result: list[HubPluginManifest] = []
     for item in index.plugins:
-        path = root / item.manifestPath
         try:
+            path = manifest_path(item.type, item.id)
             result.append(HubPluginManifest.model_validate(_read_json(path)))
         except Exception:
             continue

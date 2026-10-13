@@ -37,7 +37,9 @@ export function PermissionApprovalDialog({
   const command = typeof request.metadata.command === 'string'
     ? request.metadata.command.trim()
     : '';
-  const description = command || request.toolID || request.permission;
+  // File edits carry their path in the patterns: show what would be written.
+  const target = (request.patterns || []).filter((pattern) => pattern && pattern !== '*').join(' ');
+  const description = command || [request.toolID || request.permission, target].filter(Boolean).join(' ');
   const confirmOptions = Array.isArray(request.metadata.network_confirm_options)
     ? request.metadata.network_confirm_options
       .map((item) => (typeof item === 'string' ? item.trim().toLowerCase() : ''))

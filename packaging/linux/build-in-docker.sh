@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 #
-# One-click build of the Linux offline installer inside a CentOS Stream 9 container.
+# One-click build of the Linux offline installer inside a RHEL 8.10 (UBI 8.10) container:
+# built against glibc 2.28, the package runs on RHEL / Rocky / Alma 8 and newer (see glibc_floor
+# in versions.manifest.json; the build fails if anything shipped needs a newer glibc).
 # Produces packaging/linux/Output/<arch>/flocks-offline.run (+ .sha256, versions.json).
 #
 # Usage:
@@ -22,7 +24,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 DOCKER="${DOCKER:-docker}"
-IMAGE="quay.io/centos/centos:stream9"
+# the build image is pinned next to the toolchain versions (versions.manifest.json: build_image)
+IMAGE="$(sed -n 's/^[[:space:]]*"build_image"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$SCRIPT_DIR/versions.manifest.json")"
+[[ -n "$IMAGE" ]] || { printf '[build-in-docker] error: no build_image in versions.manifest.json\n' >&2; exit 1; }
 ARCHES=""
 FLOCKSPRO_WHEEL=""
 PRO_RELEASE_ID=""
@@ -48,7 +52,7 @@ while [[ $# -gt 0 ]]; do
     --image) IMAGE="$2"; shift 2 ;;
     --keep-container) KEEP=1; shift ;;
     --allow-dirty) ALLOW_DIRTY=1; shift ;;
-    -h|--help) sed -n '2,17p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,19p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) fail "unknown argument: $1" ;;
   esac
 done

@@ -168,3 +168,32 @@ async def test_pipeline_runs_canonical_lifecycle_handlers() -> None:
         HookStage.TOOL_AFTER,
         HookStage.TURN_AFTER,
     ]
+
+
+@pytest.mark.asyncio
+async def test_tool_input_rewrite_stage_only_dispatches_to_rewrite_handlers() -> None:
+    """tool.input.rewrite must not re-fire tool_before hooks (that was the double fire)."""
+    HookPipeline._initialized = True
+    seen: list[str] = []
+
+    class _Rewriter(HookBase):
+        async def tool_input_rewrite(self, ctx) -> None:  # noqa: ANN001
+            seen.append("rewrite")
+            ctx.input["tool"]["input"] = {"ip": "10.1.2.3"}
+
+    class _Policy(HookBase):
+        async def tool_before(self, ctx) -> None:  # noqa: ANN001
+            seen.append("before")
+
+    HookPipeline.register("rewriter", _Rewriter())
+    HookPipeline.register("policy", _Policy())
+
+    ctx = await HookPipeline.run_tool_input_rewrite(
+        {"sessionID": "ses_rw", "tool": {"name": "ip_query", "input": {"ip": "[IP_1]"}}}
+    )
+
+    assert ctx.stage == HookStage.TOOL_INPUT_REWRITE
+    assert seen == ["rewrite"]
+    assert ctx.input["tool"]["input"] == {"ip": "10.1.2.3"}
+    assert hasattr(HookBase, "tool_input_rewrite")
+    assert hasattr(HookPipeline, "run_tool_input_rewrite")

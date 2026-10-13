@@ -106,20 +106,29 @@ def resolve_tool_preserve_turns(tool_name: str) -> int:
 DEFAULT_COMPACTION_PROMPT = """\
 Summarize the conversation above into a structured compaction summary. \
 The new session will NOT have access to the original conversation, so \
-preserve all information needed to continue seamlessly.
+preserve all information needed to continue seamlessly: the agent must be \
+able to resume the same task, plan and progress without starting over.
 
 Your summary MUST include these sections (use exact headings):
+
+## User Requests
+Every request, correction and preference the user stated, in order, \
+quoted or near-verbatim (for example where output should be saved or \
+what to avoid). Do not merge them into a vague goal or drop specifics.
 
 ## Decisions
 Key decisions made during the conversation (architecture choices, \
 approaches selected, trade-offs accepted).
 
 ## Current Task
-What is currently being worked on — the active goal and its status.
+What was being worked on right before this summary: the active goal, \
+what is already done (files created or changed, commands run and their \
+results) and the exact next step.
 
 ## Open TODOs
-Remaining tasks, unresolved issues, or next steps that were planned \
-but not yet completed. Use a checklist format.
+The current plan as a checklist. If a todo list was kept with the todo \
+tool, reproduce its items in order with their status (completed / in \
+progress / pending) rather than writing a new plan.
 
 ## Key Files & Identifiers
 Exact file paths, function/class/variable names, API endpoints, \

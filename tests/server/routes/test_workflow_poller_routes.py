@@ -203,3 +203,57 @@ async def test_run_poller_once_returns_latest_status(
     assert response.status_code == 200, response.text
     assert response.json()["status"]["lastStatus"] == "success"
     assert response.json()["status"]["selectedCount"] == 5
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("endpoint", "trigger_type", "manager_path", "body"),
+    [
+        ("poller-config", "schedule", "flocks.workflow.poller_manager.default_manager", {"enabled": True, "intervalSeconds": 60}),
+        ("kafka-config", "kafka", "flocks.ingest.kafka.manager.default_manager", {"enabled": False, "inputTopic": "alerts"}),
+        ("syslog-config", "syslog", "flocks.ingest.syslog.manager.default_manager", {"enabled": False, "port": 5514}),
+    ],
+)
+async def test_legacy_config_save_edits_the_existing_trigger_in_place(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+    endpoint: str,
+    trigger_type: str,
+    manager_path: str,
+    body: dict[str, Any],
+) -> None:
+    """A custom trigger id survives the legacy save path instead of a 409 (FL-BUG-009)."""
+    persisted: list[list[Any]] = []
+    custom_id = f"autotest-{trigger_type}"
+
+    async def _fake_put_config(workflow_id: str, config: dict[str, Any], *, kind: str | None = None) -> None:
+        return None
+
+    async def _fake_persist(_workflow_id: str, workflow_data: dict[str, Any], triggers: list[Any]) -> dict[str, Any]:
+        persisted.append(list(triggers))
+        return workflow_data
+
+    async def _fake_restart(workflow_id: str) -> dict[str, Any]:
+        return {"workflowId": workflow_id, "state": "running"}
+
+    monkeypatch.setattr(
+        workflow_routes,
+        "_read_workflow_from_fs",
+        lambda workflow_id: {
+            "workflowJson": {
+                "start": "n1",
+                "nodes": [],
+                "edges": [],
+                "triggers": [{"id": custom_id, "type": trigger_type, "enabled": True}],
+            }
+        },
+    )
+    monkeypatch.setattr(workflow_routes.WorkflowStore, "put_config", _fake_put_config)
+    monkeypatch.setattr(workflow_routes, "_persist_workflow_triggers", _fake_persist)
+    monkeypatch.setattr(manager_path, SimpleNamespace(restart_workflow=_fake_restart))
+
+    response = await client.post(f"/api/workflow/wf-1/{endpoint}", json=body)
+
+    assert response.status_code == 200, response.text
+    same_type = [trigger for trigger in persisted[0] if trigger.type == trigger_type]
+    assert [trigger.id for trigger in same_type] == [custom_id]

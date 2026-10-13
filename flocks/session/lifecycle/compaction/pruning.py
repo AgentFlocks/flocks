@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import time
-from typing import Optional, Any
+from typing import Optional, Any, Awaitable, Callable
 
 from flocks.utils.log import Log
 from flocks.session.prompt import SessionPrompt
@@ -15,6 +15,49 @@ from .models import (
 )
 
 log = Log.create(service="session.compaction.pruning")
+
+# Extensions may preserve domain evidence before destructive context cleanup.
+# These callbacks run at compaction boundaries, never during tool execution.
+_tool_output_preservers: dict[str, Callable[[str], Awaitable[None]]] = {}
+
+
+def register_tool_output_preserver(name: str, callback: Callable[[str], Awaitable[None]]) -> None:
+    _tool_output_preservers[name] = callback
+
+
+# Text-part metadata flag on the synthetic user message written after an
+# automatic compaction (see ``SessionCompaction._archive_and_write_summary``).
+COMPACTION_CONTINUATION_METADATA_KEY = "compactionContinuation"
+
+
+async def _persist_changed_parts(session_id: str, message_id: str) -> None:
+    """Persist a message's parts after compaction changed them in place.
+
+    The runner reuses its converted chat messages while a message's parts
+    revision is unchanged, so without the bump the next request would still
+    carry the tool output that was just cleared.
+    """
+    from flocks.session.message import Message
+
+    Message._touch_parts_revision(session_id, message_id)
+    await Message._persist_parts(session_id, message_id=message_id)
+
+
+def starts_user_turn(parts: list) -> bool:
+    """Whether a user message starts a new turn for tool-output retention.
+
+    The continuation written after an automatic compaction (and a manual
+    compaction request) resumes the task in progress.  Counting it as a turn
+    made the prune right after compaction expire the ``read`` / ``bash``
+    output of the very step the agent was on.
+    """
+    for part in parts or []:
+        if getattr(part, "type", None) == "compaction":
+            return False
+        metadata = getattr(part, "metadata", None) or {}
+        if metadata.get(COMPACTION_CONTINUATION_METADATA_KEY):
+            return False
+    return True
 
 
 async def prune(
@@ -72,13 +115,13 @@ async def prune(
     for msg in reversed(messages):
         role = msg.role.value if hasattr(msg.role, 'value') else msg.role
 
-        if role == "user":
+        msg_parts = await Message.parts(msg.id, session_id)
+        if role == "user" and starts_user_turn(msg_parts):
             user_turns_seen += 1
 
         if hasattr(msg, "metadata") and msg.metadata.get("summary"):
             break
 
-        msg_parts = await Message.parts(msg.id, session_id)
         for part in reversed(msg_parts):
             if part.type == "tool":
                 state = getattr(part, 'state', None)
@@ -142,7 +185,7 @@ async def prune(
 
         try:
             for mid in affected_msg_ids:
-                await Message._persist_parts(session_id, message_id=mid)
+                await _persist_changed_parts(session_id, mid)
             if not affected_msg_ids:
                 await Message._persist_parts(session_id)
         except Exception as persist_err:
@@ -214,6 +257,23 @@ async def validate_preserved_messages(
             boundary_assistant_ids.append(msg.id)
             break
 
+    # The newest step is what the agent resumes from after a compaction (the
+    # file it just read, the command it just ran).  When the kept tail is
+    # only that step it is also the "boundary", and compacting it wiped the
+    # very output the continuation depends on.
+    newest_assistant_id = next(
+        (
+            msg.id
+            for msg in reversed(preserved)
+            if (msg.role.value if hasattr(msg.role, 'value') else msg.role) == "assistant"
+            and getattr(msg, 'finish', None) != "summary"
+        ),
+        None,
+    )
+    boundary_assistant_ids = [
+        mid for mid in boundary_assistant_ids if mid != newest_assistant_id
+    ]
+
     for mid in boundary_assistant_ids:
         try:
             parts = await Message.parts(mid, session_id)
@@ -235,8 +295,9 @@ async def validate_preserved_messages(
                 time_info["compacted"] = now_ms
                 compacted_count += 1
             if compacted_count:
+                SessionPrompt.invalidate_message_cache(mid)
                 try:
-                    await Message._persist_parts(session_id, message_id=mid)
+                    await _persist_changed_parts(session_id, mid)
                 except Exception as pe:
                     log.warn("compaction.boundary_persist_error", {"error": str(pe)})
                 log.info("compaction.boundary_tools_compacted", {
@@ -324,9 +385,11 @@ async def _repair_tool_pairing(
                         repaired += 1
                         affected_msg_ids.add(msg.id)
 
+    if affected_msg_ids:
+        SessionPrompt.invalidate_message_cache(affected_msg_ids)
     for mid in affected_msg_ids:
         try:
-            await Message._persist_parts(session_id, message_id=mid)
+            await _persist_changed_parts(session_id, mid)
         except Exception as pe:
             log.warn("compaction.repair_pairing_persist_error", {"error": str(pe)})
 
@@ -366,6 +429,16 @@ async def truncate_oversized_tool_outputs(
     messages = await Message.list(session_id)
     truncated_count = 0
     affected_msg_ids: set[str] = set()
+    preserved = False
+
+    async def preserve_outputs() -> None:
+        nonlocal preserved
+        if not preserved:
+            # Propagate failures before changing any output; evidence must not
+            # silently disappear when its owner cannot preserve it.
+            for callback in tuple(_tool_output_preservers.values()):
+                await callback(session_id)
+            preserved = True
 
     all_tool_parts: list[tuple[str, Any]] = []
 
@@ -395,7 +468,11 @@ async def truncate_oversized_tool_outputs(
                 state.output = output
 
             if len(output) > max_chars:
+                await preserve_outputs()
                 state.output = _truncate(output, max_chars)
+                # The runner sends the cached prompt-facing copy, not
+                # ``state.output``; refresh it or the cut never reaches the model.
+                Message._prepare_tool_output_cache(part)
                 truncated_count += 1
                 affected_msg_ids.add(msg.id)
 
@@ -411,6 +488,7 @@ async def truncate_oversized_tool_outputs(
         total_tool_chars += len(out) if isinstance(out, str) else len(str(out))
 
     if total_tool_chars > total_budget:
+        await preserve_outputs()
         chars_to_free = total_tool_chars - total_budget
         freed = 0
         for mid, part in all_tool_parts:
@@ -421,6 +499,7 @@ async def truncate_oversized_tool_outputs(
             if out_len <= len(COMPACT_PLACEHOLDER):
                 continue
             part.state.output = COMPACT_PLACEHOLDER
+            Message._prepare_tool_output_cache(part)
             freed += out_len - len(COMPACT_PLACEHOLDER)
             truncated_count += 1
             affected_msg_ids.add(mid)
@@ -435,7 +514,7 @@ async def truncate_oversized_tool_outputs(
     if truncated_count:
         try:
             for mid in affected_msg_ids:
-                await Message._persist_parts(session_id, message_id=mid)
+                await _persist_changed_parts(session_id, mid)
         except Exception as persist_err:
             log.warn("compaction.oversized_persist_error", {"error": str(persist_err)})
 

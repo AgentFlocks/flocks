@@ -25,6 +25,12 @@
     "custom": "Custom"
   },
 
+  "card": {
+    "enabledSwitch": "Enabled",
+    "enableTip": "Disabled — click to enable this tool",
+    "disableTip": "Enabled — click to disable this tool"
+  },
+
   "search": {
     "placeholder": "Search tools..."
   },

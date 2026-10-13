@@ -1,6 +1,8 @@
-# Build the Linux offline installer (flocks-offline.run) for CentOS Stream 9 / RHEL 9
-# compatible hosts, for x86_64 and aarch64 (matrix on native runners). Runs inside a
-# CentOS Stream 9 container so the bundled virtualenv is built against the target glibc.
+# Build the Linux offline installer (flocks-offline.run) for RHEL 8 / 9 compatible hosts
+# (glibc >= 2.28), for x86_64 and aarch64 (matrix on native runners). Runs inside a RHEL 8.10
+# (UBI 8.10) container, the build_image of packaging/linux/versions.manifest.json, so every
+# wheel in the bundled virtualenv is picked for glibc 2.28; the build fails if a shipped binary
+# still needs more (glibc_floor.py).
 # Manual runs upload one artifact per arch; published releases also get both .run files
 # attached as release assets (flocks-offline-<arch>.run; the customer renames it to
 # flocks-offline.run as the manual says).
@@ -37,7 +39,7 @@ jobs:
             runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
     container:
-      image: quay.io/centos/centos:stream9
+      image: registry.access.redhat.com/ubi8/ubi:8.10
     steps:
       - name: Install build prerequisites
         run: |

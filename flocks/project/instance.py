@@ -101,8 +101,17 @@ class StateManager:
             for disposers in list(self._disposers.values()):
                 disposers.pop(state_id, None)
 
+        def all_values() -> list[T]:
+            """This accessor's state in every directory that has initialized it."""
+            return [
+                states[state_id]
+                for states in list(self._states.values())
+                if state_id in states
+            ]
+
         accessor.invalidate = invalidate  # type: ignore[attr-defined]
         accessor.invalidate_all = invalidate_all  # type: ignore[attr-defined]
+        accessor.all_values = all_values  # type: ignore[attr-defined]
         return accessor
     
     async def dispose(self, key: str) -> None:
@@ -199,16 +208,16 @@ class Instance:
                 
                 cls._cache[directory] = asyncio.create_task(create_context())
         
-        # Wait for context to be ready.  If initialization fails, drop the
-        # failed task so a later request can retry after transient storage or
-        # startup recovery completes.
+        # A cancelled waiter must not cancel shared initialization. Only evict
+        # failed/cancelled initializers so later requests can retry them.
         task = cls._cache[directory]
         try:
-            ctx = await task
-        except Exception:
-            async with cls._lock:
-                if cls._cache.get(directory) is task:
-                    cls._cache.pop(directory, None)
+            ctx = await asyncio.shield(task)
+        except (Exception, asyncio.CancelledError):
+            if task.done() and (task.cancelled() or task.exception() is not None):
+                async with cls._lock:
+                    if cls._cache.get(directory) is task:
+                        cls._cache.pop(directory, None)
             raise
         
         # Execute fn within context

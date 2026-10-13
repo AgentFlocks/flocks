@@ -27,6 +27,44 @@ from .models import (
 log = Log.create(service="task.store")
 
 
+_EXECUTION_UPDATE_SQL = """
+    UPDATE task_executions SET
+      title=?, description=?, priority=?, source=?, trigger_type=?, status=?,
+      delivery_status=?, queued_at=?, started_at=?, completed_at=?, duration_ms=?,
+      session_id=?, result_summary=?, error=?, execution_input_snapshot=?,
+      workspace_directory=?, retry=?, execution_mode=?, agent_name=?, workflow_id=?,
+      updated_at=?
+    """
+
+
+def _execution_update_values(execution: TaskExecution) -> tuple[Any, ...]:
+    """Values for ``_EXECUTION_UPDATE_SQL`` plus the trailing ``id``."""
+    return (
+        execution.title,
+        execution.description,
+        execution.priority.value,
+        _json(execution.source),
+        execution.trigger_type.value,
+        execution.status.value,
+        execution.delivery_status.value,
+        _iso(execution.queued_at),
+        _iso(execution.started_at),
+        _iso(execution.completed_at),
+        execution.duration_ms,
+        execution.session_id,
+        execution.result_summary,
+        execution.error,
+        _json(execution.execution_input_snapshot),
+        execution.workspace_directory,
+        _json(execution.retry),
+        execution.execution_mode.value,
+        execution.agent_name,
+        execution.workflow_id,
+        execution.updated_at.isoformat(),
+        execution.id,
+    )
+
+
 class TaskStore:
     _initialized = False
     _conn: Optional[aiosqlite.Connection] = None
@@ -582,46 +620,111 @@ class TaskStore:
         return [cls._row_to_execution(row) for row in rows]
 
     @classmethod
+    async def list_active_executions_for_session(
+        cls, session_id: str
+    ) -> List[TaskExecution]:
+        db = await cls._db()
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """
+            SELECT * FROM task_executions
+            WHERE session_id = ?
+              AND status IN ('pending', 'queued', 'running')
+            ORDER BY created_at ASC
+            """,
+            (session_id,),
+        ) as cur:
+            rows = await cur.fetchall()
+        return [cls._row_to_execution(row) for row in rows]
+
+    @classmethod
     async def update_execution(cls, execution: TaskExecution) -> TaskExecution:
         execution.touch()
         db = await cls._db()
-        await db.execute(
+        await db.execute(_EXECUTION_UPDATE_SQL + "WHERE id=?", _execution_update_values(execution))
+        await db.commit()
+        return execution
+
+    @classmethod
+    async def update_active_execution(cls, execution: TaskExecution) -> bool:
+        """Write the whole row only while the stored execution has not finished.
+
+        A run that ends after it was cancelled must not overwrite the
+        cancellation; returns False when the row had already finished.
+        """
+        execution.touch()
+        db = await cls._db()
+        cur = await db.execute(
+            _EXECUTION_UPDATE_SQL + "WHERE id=? AND status IN ('pending', 'queued', 'running')",
+            _execution_update_values(execution),
+        )
+        await db.commit()
+        return cur.rowcount > 0
+
+    @classmethod
+    async def cancel_active_execution(
+        cls,
+        execution_id: str,
+        *,
+        completed_at: datetime,
+        duration_ms: Optional[int],
+        error: str,
+    ) -> bool:
+        """Mark a pending, queued or running execution cancelled.
+
+        Only the status columns change, so a session id the dispatcher wrote
+        meanwhile survives.  Returns False when the execution had already
+        finished or does not exist.
+        """
+        db = await cls._db()
+        cur = await db.execute(
             """
             UPDATE task_executions SET
-              title=?, description=?, priority=?, source=?, trigger_type=?, status=?,
-              delivery_status=?, queued_at=?, started_at=?, completed_at=?, duration_ms=?,
-              session_id=?, result_summary=?, error=?, execution_input_snapshot=?,
-              workspace_directory=?, retry=?, execution_mode=?, agent_name=?, workflow_id=?,
-              updated_at=?
-            WHERE id=?
+              status = 'cancelled',
+              completed_at = COALESCE(completed_at, ?),
+              duration_ms = COALESCE(duration_ms, ?),
+              error = COALESCE(error, ?),
+              updated_at = ?
+            WHERE id = ? AND status IN ('pending', 'queued', 'running')
             """,
             (
-                execution.title,
-                execution.description,
-                execution.priority.value,
-                _json(execution.source),
-                execution.trigger_type.value,
-                execution.status.value,
-                execution.delivery_status.value,
-                _iso(execution.queued_at),
-                _iso(execution.started_at),
-                _iso(execution.completed_at),
-                execution.duration_ms,
-                execution.session_id,
-                execution.result_summary,
-                execution.error,
-                _json(execution.execution_input_snapshot),
-                execution.workspace_directory,
-                _json(execution.retry),
-                execution.execution_mode.value,
-                execution.agent_name,
-                execution.workflow_id,
-                execution.updated_at.isoformat(),
-                execution.id,
+                _iso(completed_at),
+                duration_ms,
+                error,
+                datetime.now(timezone.utc).isoformat(),
+                execution_id,
             ),
         )
         await db.commit()
-        return execution
+        return cur.rowcount > 0
+
+    @classmethod
+    async def start_execution_session(
+        cls,
+        execution_id: str,
+        session_id: Optional[str],
+        *,
+        started_at: datetime,
+    ) -> bool:
+        """Record the session of an execution that is about to run.
+
+        Never revives a finished row: returns False when the execution was
+        cancelled (or finished) meanwhile, and then nothing is written.
+        """
+        db = await cls._db()
+        cur = await db.execute(
+            """
+            UPDATE task_executions SET
+              session_id = ?,
+              status = 'running',
+              started_at = COALESCE(started_at, ?),
+              updated_at = ?
+            WHERE id = ? AND status IN ('pending', 'queued', 'running')
+            """,
+            (session_id, _iso(started_at), datetime.now(timezone.utc).isoformat(), execution_id),
+        )
+        await db.commit()
+        return cur.rowcount > 0
 
     @classmethod
     async def delete_execution(cls, execution_id: str) -> bool:
