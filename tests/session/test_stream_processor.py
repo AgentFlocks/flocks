@@ -193,6 +193,32 @@ class TestTextAccumulation:
         callback.assert_called_with("test")
 
     @pytest.mark.asyncio
+    async def test_text_callback_gets_each_piece_once_without_a_publisher(self):
+        # Headless runs (flocks exec) pass no event_publish_callback.
+        pieces = []
+        proc = _make_processor(text_callback=AsyncMock(side_effect=pieces.append))
+        await proc.process_event(TextStartEvent())
+        await proc.process_event(TextDeltaEvent(text="你好"))
+        await proc.process_event(TextDeltaEvent(text=" [x]"))
+        assert pieces == ["你好", " [x]"]
+
+    @pytest.mark.asyncio
+    async def test_text_callback_is_not_repeated_while_publishing_is_throttled(self):
+        pieces = []
+        proc = _make_processor(text_callback=AsyncMock(side_effect=pieces.append), event_callback=AsyncMock())
+        await proc.process_event(TextStartEvent())
+        # Past the always-publish first 50 characters, events within 50 ms are skipped.
+        for chunk in ["a" * 60, "b", "c", "d"]:
+            await proc.process_event(TextDeltaEvent(text=chunk))
+        assert "".join(pieces) == "a" * 60 + "bcd"
+
+    def test_appended_delta_never_resends_text(self):
+        # A partial tag shown earlier is hidden once recognisable; nothing is resent.
+        assert StreamProcessor._appended_delta("abc <tool", "abc") == ""
+        assert StreamProcessor._appended_delta("abc", "abc  def") == "  def"
+        assert StreamProcessor._appended_delta("abc <tool", "abc  def") == " def"
+
+    @pytest.mark.asyncio
     async def test_text_end_finalizes_part(self):
         proc = _make_processor()
         with patch("flocks.session.streaming.stream_processor.Message.store_part", new=AsyncMock()):

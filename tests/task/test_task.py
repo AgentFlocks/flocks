@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import io
+import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from rich.console import Console
 
 from flocks.cli.commands import task as task_cli_commands
 import flocks.task.background as background_module
@@ -1215,7 +1218,7 @@ async def test_store_init_normalizes_legacy_paused_execution(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_cli_list_tasks_accepts_legacy_paused_status(monkeypatch: pytest.MonkeyPatch):
+async def test_cli_list_tasks_accepts_legacy_paused_status(capsys: pytest.CaptureFixture[str]):
     scheduler = await TaskManager.create_scheduler(
         title="CLI 兼容 paused 查询",
         mode=SchedulerMode.ONCE,
@@ -1231,13 +1234,49 @@ async def test_cli_list_tasks_accepts_legacy_paused_status(monkeypatch: pytest.M
     await TaskStore.update_execution(execution)
     await TaskManager.disable_scheduler(scheduler.id)
 
-    printed: list[object] = []
-    monkeypatch.setattr(task_cli_commands.console, "print", lambda *args, **kwargs: printed.append(args))
-
     await task_cli_commands._list_tasks("paused", None, 10, "json")
+    executions = json.loads(capsys.readouterr().out)
     await task_cli_commands._list_tasks("paused", "scheduled", 10, "json")
+    schedulers = json.loads(capsys.readouterr().out)
 
-    assert printed
+    assert [item["id"] for item in executions] == [execution.id]
+    assert [item["id"] for item in schedulers] == [scheduler.id]
+
+
+@pytest.mark.asyncio
+async def test_cli_show_execution_reads_its_snapshot(monkeypatch: pytest.MonkeyPatch):
+    scheduler = await TaskManager.create_scheduler(
+        title="Literal [red]TASK[/red] 执行详情",
+        mode=SchedulerMode.ONCE,
+        trigger=TaskTrigger(run_immediately=False),
+        skills=["triage", "report"],
+        category="ops",
+    )
+    execution = await TaskManager.create_execution_from_scheduler(
+        scheduler,
+        trigger_type=ExecutionTriggerType.RUN_ONCE,
+        enqueue=False,
+    )
+    execution.session_id = "ses_task_show"
+    execution.result_summary = "- [x] done\n- [/x] closing tag"
+    await TaskStore.update_execution(execution)
+
+    rendered: list[object] = []
+    monkeypatch.setattr(task_cli_commands.console, "print", lambda *args, **kwargs: rendered.append(args[0]))
+
+    await task_cli_commands._show_task(execution.id)
+
+    out = Console(file=io.StringIO(), width=200)
+    out.print(rendered[0])
+    text = out.file.getvalue()
+    assert f"ID:       {execution.id}" in text
+    assert f"Scheduler: {scheduler.id}" in text
+    assert "Session:  ses_task_show" in text
+    assert "Skills:   triage, report" in text
+    assert "Category: ops" in text
+    # Stored text is shown as written, not read as Rich markup.
+    assert "Literal [red]TASK[/red] 执行详情" in text
+    assert "- [x] done" in text and "- [/x] closing tag" in text
 
 
 @pytest.mark.asyncio

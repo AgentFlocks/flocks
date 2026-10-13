@@ -1578,6 +1578,53 @@ class TestChannelDeliveryCallbacks:
         assert deliver.await_args.kwargs == {"session_id": "original_session"}
         parts.assert_awaited_with("background_message", session_id="original_session")
 
+    async def test_streaming_card_preview_keeps_every_delta(self, monkeypatch):
+        """Deltas arrive once each; repeated and overlapping pieces must all reach the card."""
+        from flocks.channel.builtin.feishu.streaming_card import StreamingCard
+        from flocks.channel.inbound.dispatcher import ChannelDeliveryCallbacks, InboundDispatcher
+        from flocks.session.session_loop import LoopResult
+
+        card = StreamingCard(config={}, account_id="acc", chat_id="chat_1")
+        previews = []
+
+        async def start():
+            card._card_id = "card_1"
+            return "card_message"
+
+        async def finalize(final_text):
+            # What the chat showed while streaming, before the final text replaces it.
+            previews.append(card._pending_text if card._pending_text is not None else card._current_text)
+
+        card.start = start
+        card.finalize = finalize
+        card.abort = AsyncMock()
+        card._update_card_content = AsyncMock()
+        deltas = ["x" * 60, "哈", "哈", "ab", "b", "ba"]
+
+        async def run_loop(binding, loop_callbacks):
+            for delta in deltas:
+                await loop_callbacks.runner_callbacks.on_text_delta(delta)
+            return LoopResult(action="stop", last_message=SimpleNamespace(id="message_1"))
+
+        monkeypatch.setattr(InboundDispatcher, "_run_session_loop", run_loop)
+        cb = ChannelDeliveryCallbacks(channel_id="feishu", account_id="acc", chat_id="chat_1", session_id="session_1")
+        msg = InboundMessage(
+            channel_id="feishu", account_id="acc", chat_id="chat_1",
+            sender_id="sender_1", message_id="reply_1", text="hello",
+        )
+        with patch(
+            "flocks.channel.builtin.feishu.streaming_card.StreamingCard", return_value=card,
+        ), patch(
+            "flocks.channel.inbound.dispatcher._extract_message_text",
+            new_callable=AsyncMock, return_value="".join(deltas),
+        ):
+            await InboundDispatcher._run_agent_with_streaming(
+                SimpleNamespace(session_id="session_1", agent_id="rex"), cb, msg, {},
+            )
+
+        assert previews == ["".join(deltas)]
+        card.abort.assert_not_awaited()
+
     async def test_background_reply_does_not_retain_or_reuse_streaming_callbacks(self, monkeypatch):
         from flocks.channel.inbound.dispatcher import ChannelDeliveryCallbacks, InboundDispatcher
         from flocks.session.session_loop import LoopResult

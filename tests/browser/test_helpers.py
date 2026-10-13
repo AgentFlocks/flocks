@@ -583,6 +583,148 @@ def test_load_state_restores_cookies_and_storage(tmp_path) -> None:
     assert result["localStorageItemsApplied"] == 1
 
 
+def _no_reload_harness(tmp_path, current_url: str):
+    state_file = tmp_path / "auth-state.json"
+    state_file.write_text(
+        json.dumps(
+            {
+                "cookies": [{"name": "sid", "value": "secret", "domain": ".example.com", "path": "/"}],
+                "origins": [
+                    {"origin": "https://example.com", "localStorage": [{"name": "token", "value": "abc"}]},
+                    {"origin": "https://other.example", "localStorage": [{"name": "theme", "value": "dark"}]},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    calls = {"cdp": [], "goto": [], "storage": []}
+
+    def fake_cdp(method, **kwargs):
+        calls["cdp"].append((method, kwargs))
+        if method == "Target.createTarget":
+            return {"targetId": "tmp-tab"}
+        if method == "Target.attachToTarget":
+            return {"sessionId": "tmp-session"}
+        return {}
+
+    def fake_evaluate(expression, session_id=None, await_promise=False):
+        assert "location.origin" in expression and session_id == "tmp-session"
+        return json.dumps(["https://other.example", "complete"])
+
+    def fake_set(storage_name, entries, session_id=None):
+        calls["storage"].append((session_id, entries))
+        return len(entries)
+
+    patches = (
+        patch("flocks.browser.helpers.cdp", side_effect=fake_cdp),
+        patch("flocks.browser.helpers.goto_url", side_effect=lambda url: calls["goto"].append(url)),
+        patch("flocks.browser.helpers.wait_for_load"),
+        patch("flocks.browser.helpers.current_tab", return_value={"url": current_url}),
+        patch("flocks.browser.helpers._runtime_evaluate", side_effect=fake_evaluate),
+        patch("flocks.browser.helpers._set_storage_entries", side_effect=fake_set),
+    )
+    return state_file, calls, patches
+
+
+@pytest.mark.parametrize("url", [None, "https://example.com/dashboard"])
+def test_load_state_no_reload_keeps_the_open_page(tmp_path, url) -> None:
+    state_file, calls, patches = _no_reload_harness(tmp_path, "https://example.com/dashboard")
+
+    with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
+        result = helpers.load_state(state_file, url=url, reload=False)
+
+    methods = [method for method, _ in calls["cdp"]]
+    # The open page is never navigated or reloaded ...
+    assert calls["goto"] == []
+    assert "Page.reload" not in methods
+    # ... its own origin is written in place, the other origin from a closed-again background tab.
+    assert calls["storage"] == [
+        (None, [{"name": "token", "value": "abc"}]),
+        ("tmp-session", [{"name": "theme", "value": "dark"}]),
+    ]
+    assert ("Target.createTarget", {"url": "about:blank", "background": True}) in calls["cdp"]
+    assert ("Page.navigate", {"session_id": "tmp-session", "url": "https://other.example/"}) in calls["cdp"]
+    assert ("Target.closeTarget", {"targetId": "tmp-tab"}) in calls["cdp"]
+    assert result["finalUrl"] == "https://example.com/dashboard"
+    assert result["localStorageItemsApplied"] == 2
+
+
+def test_load_state_no_reload_treats_a_trailing_slash_as_the_same_page(tmp_path) -> None:
+    state_file, calls, patches = _no_reload_harness(tmp_path, "https://example.com/")
+
+    with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
+        helpers.load_state(state_file, url="https://example.com", reload=False)
+
+    assert calls["goto"] == []
+
+
+@pytest.mark.parametrize("reload", [False, True])
+def test_load_state_follows_an_explicit_hash_route(tmp_path, reload) -> None:
+    # A hash-routed app: "#/dashboard" is a different page from "#/login".
+    state_file, calls, patches = _no_reload_harness(tmp_path, "https://example.com/#/login")
+
+    with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
+        result = helpers.load_state(state_file, url="https://example.com/#/dashboard", reload=reload)
+
+    assert calls["goto"][-1:] == ["https://example.com/#/dashboard"]
+    assert "Page.reload" not in [method for method, _ in calls["cdp"]]
+    assert result["finalUrl"] == "https://example.com/#/dashboard"
+
+
+def test_background_tab_waits_out_a_navigating_context(tmp_path) -> None:
+    calls = []
+    answers = iter([
+        RuntimeError("Cannot find default execution context"),
+        json.dumps(["about:blank", "complete"]),
+        json.dumps(["https://other.example", "complete"]),
+    ])
+
+    def fake_cdp(method, **kwargs):
+        calls.append(method)
+        return {"targetId": "tmp-tab"} if method == "Target.createTarget" else {"sessionId": "tmp-session"}
+
+    def fake_evaluate(expression, session_id=None, await_promise=False):
+        answer = next(answers)
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    with (
+        patch("flocks.browser.helpers.cdp", side_effect=fake_cdp),
+        patch("flocks.browser.helpers._runtime_evaluate", side_effect=fake_evaluate),
+        patch("flocks.browser.helpers._set_storage_entries", side_effect=lambda name, entries, session_id=None: len(entries)),
+        patch("flocks.browser.helpers.time.sleep"),
+    ):
+        applied = helpers._set_storage_in_background_tab("https://other.example", [{"name": "k", "value": "v"}])
+
+    assert applied == 1
+    assert calls[-1] == "Target.closeTarget"
+
+
+@pytest.mark.parametrize("failure", ["other error", "timeout"])
+def test_background_tab_is_closed_when_storage_cannot_be_written(tmp_path, failure) -> None:
+    calls = []
+
+    def fake_cdp(method, **kwargs):
+        calls.append(method)
+        return {"targetId": "tmp-tab"} if method == "Target.createTarget" else {"sessionId": "tmp-session"}
+
+    def fake_evaluate(expression, session_id=None, await_promise=False):
+        if failure == "other error":
+            raise RuntimeError("Target crashed")
+        return json.dumps(["about:blank", "complete"])
+
+    with (
+        patch("flocks.browser.helpers.cdp", side_effect=fake_cdp),
+        patch("flocks.browser.helpers._runtime_evaluate", side_effect=fake_evaluate),
+        patch("flocks.browser.helpers.time.sleep"),
+        pytest.raises(RuntimeError, match="Target crashed" if failure == "other error" else "timed out"),
+    ):
+        helpers._set_storage_in_background_tab("https://other.example", [], timeout=0)
+
+    assert calls[-1] == "Target.closeTarget"
+
+
 def test_summarize_state_reports_storage_state_shape(tmp_path) -> None:
     state_file = tmp_path / "auth-state.json"
     state_file.write_text(

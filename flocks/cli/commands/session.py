@@ -98,9 +98,12 @@ async def _list_sessions(
         all_sessions = all_sessions[:max_count]
     
     if not all_sessions:
-        console.print("[dim]No sessions found[/dim]")
+        if format == "json":
+            typer.echo("[]")
+        else:
+            console.print("[dim]No sessions found[/dim]")
         return
-    
+
     # Output
     if format == "json":
         json_data = [
@@ -114,7 +117,8 @@ async def _list_sessions(
             }
             for s in all_sessions
         ]
-        console.print(json.dumps(json_data, indent=2))
+        # Not console.print: Rich wraps long strings and eats [markup].
+        typer.echo(json.dumps(json_data, indent=2))
     else:
         # Table format
         table = Table(show_header=True, header_style="bold cyan")
