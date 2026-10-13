@@ -20,7 +20,7 @@ const {
   getNotificationAckStatus: vi.fn(),
   flocksproUsersApi: { hasCapability: vi.fn(), getLicenseStatus: vi.fn() },
   consoleUpgradeApi: { getProPackageStatus: vi.fn() },
-  productNameContextValue: { productName: 'Flocks', proProductName: 'Flocks Pro', configuredDisplayName: null as string | null },
+  productNameContextValue: { productName: 'Flocks', proProductName: 'Flocks Pro', configuredDisplayName: null as string | null, logoUrl: '/favicon.svg' as string | null },
   useAuth: vi.fn(),
   useWebUIContractPages: vi.fn(),
   useSceneSuiteUpdates: vi.fn(() => ({ hasUnseenSuites: false })),
@@ -104,6 +104,7 @@ function sceneWorkspace(id: string, title: string, over: Record<string, any> = {
 beforeEach(() => {
   vi.clearAllMocks();
   localStorage.clear();
+  Object.assign(productNameContextValue, { productName: 'Flocks', configuredDisplayName: null, logoUrl: '/favicon.svg' });
   useAuth.mockReturnValue({ user: { id: 'u1', username: 'admin', role: 'admin' }, logout: vi.fn() });
   onboardingAPI.getStatus.mockResolvedValue({ data: { completed: true } });
   checkUpdate.mockResolvedValue({ has_update: false, current_version: '2026.9.1' });
@@ -125,6 +126,21 @@ describe('Layout chrome', () => {
     expect(screen.getByText('Flocks')).toBeInTheDocument();
     expect(screen.getByText('agentWorkspace')).toBeInTheDocument();
     expect(screen.getByTestId('history-panel')).toBeInTheDocument();
+  });
+
+  it('shows the Flocks logo beside the product name', () => {
+    renderAt('/');
+    const header = document.querySelector('[data-workspace-header]') as HTMLElement;
+    expect(header.querySelector('img[data-brand-logo]')).toHaveAttribute('src', '/favicon.svg');
+  });
+
+  it('keeps the initial mark for a custom product name', () => {
+    Object.assign(productNameContextValue, { productName: 'Acme SOC', configuredDisplayName: 'Acme SOC', logoUrl: null });
+    renderAt('/');
+    const header = document.querySelector('[data-workspace-header]') as HTMLElement;
+    expect(header.querySelector('img[data-brand-logo]')).toBeNull();
+    expect(within(header).getByText('A')).toBeInTheDocument();
+    expect(within(header).getByText('Acme SOC')).toBeInTheDocument();
   });
 
   it('lists enabled scenes and the scene manager in the switcher', async () => {
