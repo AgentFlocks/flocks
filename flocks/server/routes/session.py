@@ -2282,8 +2282,8 @@ async def _abort_session_processing(sessionID: str) -> bool:
     # Cancel background sub-agent tasks spawned by this session
     bg_cancelled = 0
     try:
-        from flocks.task.background import get_background_manager
-        bg_cancelled = get_background_manager().cancel_by_parent_session_id(sessionID)
+        from flocks.task.background import cancel_background_runs_for_parent
+        bg_cancelled = cancel_background_runs_for_parent(sessionID)
     except Exception as exc:
         log.warn("session.abort.bg_cancel_error", {"error": str(exc)})
 

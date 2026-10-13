@@ -1,6 +1,8 @@
 """Task Executor — dispatch a task execution instance."""
 
 import asyncio
+import contextvars
+import functools
 import threading
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -28,6 +30,19 @@ _workflow_done_events: dict[str, threading.Event] = {}
 
 class TaskExecutionStopped(RuntimeError):
     """The task's agent run was stopped before it finished."""
+
+
+def _release_workflow_run(
+    execution_id: str,
+    cancel_event: threading.Event,
+    done_event: threading.Event,
+) -> None:
+    done_event.set()
+    with _workflow_cancel_lock:
+        if _workflow_cancel_events.get(execution_id) is cancel_event:
+            _workflow_cancel_events.pop(execution_id, None)
+        if _workflow_done_events.get(execution_id) is done_event:
+            _workflow_done_events.pop(execution_id, None)
 
 
 class TaskExecutor:
@@ -62,7 +77,11 @@ class TaskExecutor:
             session_id = await cls._create_task_session(execution, scheduler)
 
         execution.session_id = session_id
-        await TaskStore.update_execution(execution)
+        if not await TaskStore.start_execution_session(
+            execution.id, session_id, started_at=execution.started_at
+        ):
+            # Cancelled while the session was being created: do not start it.
+            return await TaskStore.get_execution(execution.id) or execution
 
         if session_id:
             try:
@@ -98,10 +117,6 @@ class TaskExecutor:
             execution.error = str(exc)
             log.error("task.dispatch.failed", {"id": execution.id, "error": str(exc)})
 
-        current = await TaskStore.get_execution(execution.id)
-        if current and current.status != TaskStatus.RUNNING:
-            return current
-
         completed_at = datetime.now(timezone.utc)
         execution.status = final_status
         execution.completed_at = completed_at
@@ -109,7 +124,9 @@ class TaskExecutor:
             execution.duration_ms = int(
                 (completed_at - execution.started_at).total_seconds() * 1000
             )
-        await TaskStore.update_execution(execution)
+        if not await TaskStore.update_active_execution(execution):
+            # Cancelled (or otherwise finished) while it ran: keep that outcome.
+            return await TaskStore.get_execution(execution.id) or execution
         return execution
 
     @classmethod
@@ -144,12 +161,29 @@ class TaskExecutor:
         if not session_id:
             raise RuntimeError("Agent task session was not created")
         manager = get_background_manager()
+        # Register the run first, held at the gate, then read the record: a
+        # cancel landing from here on finds the run, one that landed earlier
+        # (after the record said running, before any run existed) is in the
+        # record.
+        start_gate = asyncio.Event()
         bg_task = await manager.run_existing_session(
             session_id=session_id,
             description=execution.title,
             agent=execution.agent_name,
             allow_user_questions=False,
+            start_gate=start_gate,
         )
+        opened = False
+        try:
+            if not await cls._still_running(execution.id):
+                raise TaskExecutionStopped("Cancelled before the agent run started")
+            start_gate.set()
+            opened = True
+        finally:
+            if not opened:
+                # Stopped, the read failed, or this coroutine was cancelled:
+                # never leave the held run behind.
+                manager.cancel(bg_task.id)
         completed = await manager.wait_for(
             bg_task.id,
             timeout_ms=_TASK_ABSOLUTE_TIMEOUT_S * 1000,
@@ -179,27 +213,61 @@ class TaskExecutor:
 
         if not execution.workflow_id:
             raise ValueError("workflow execution_mode requires workflow_id")
-        workflow_data = read_workflow_from_fs(execution.workflow_id)
-        if workflow_data is None:
-            raise FileNotFoundError(f"Workflow not found: {execution.workflow_id}")
-        snapshot = execution.execution_input_snapshot or {}
-        inputs = snapshot.get("context") or scheduler.context or {}
-        context_kwargs: dict[str, Any] = {}
-        execution_context = current_execution_context()
-        if execution_context:
-            context_kwargs["execution_context"] = execution_context
-        tool_context = await build_workflow_tool_context(
-            workflow_id=execution.workflow_id,
-            action_name="task",
-            **context_kwargs,
-        )
-        result = await asyncio.to_thread(
-            cls._run_workflow_sync,
-            execution.id,
-            workflow_data["workflowJson"],
-            inputs,
-            tool_context,
-        )
+        # Register the cancel event before anything is awaited, then read the
+        # record (see _run_agent_session).  Once the worker thread has the
+        # events it owns them: it releases them when it really exits.
+        cancel_event = threading.Event()
+        done_event = threading.Event()
+        with _workflow_cancel_lock:
+            _workflow_cancel_events[execution.id] = cancel_event
+            _workflow_done_events[execution.id] = done_event
+        handed_off = False
+        try:
+            if not await cls._still_running(execution.id):
+                raise TaskExecutionStopped("Cancelled before the workflow started")
+            workflow_data = read_workflow_from_fs(execution.workflow_id)
+            if workflow_data is None:
+                raise FileNotFoundError(f"Workflow not found: {execution.workflow_id}")
+            snapshot = execution.execution_input_snapshot or {}
+            inputs = snapshot.get("context") or scheduler.context or {}
+            context_kwargs: dict[str, Any] = {}
+            execution_context = current_execution_context()
+            if execution_context:
+                context_kwargs["execution_context"] = execution_context
+            tool_context = await build_workflow_tool_context(
+                workflow_id=execution.workflow_id,
+                action_name="task",
+                **context_kwargs,
+            )
+            if cancel_event.is_set():
+                raise TaskExecutionStopped("Cancelled before the workflow started")
+            # Like asyncio.to_thread, but the thread is not abandoned when
+            # this coroutine is cancelled (dispatch timeout, shutdown).
+            worker = asyncio.get_running_loop().run_in_executor(
+                None,
+                functools.partial(
+                    contextvars.copy_context().run,
+                    cls._run_workflow_sync,
+                    execution.id,
+                    workflow_data["workflowJson"],
+                    inputs,
+                    tool_context,
+                    cancel_event,
+                    done_event,
+                ),
+            )
+            handed_off = True
+            worker.add_done_callback(lambda done: done.cancelled() or done.exception())
+            try:
+                result = await asyncio.shield(worker)
+            except asyncio.CancelledError:
+                # Ask the still running thread to stop; its cancel event stays
+                # registered until it exits, so later cancels still reach it.
+                cancel_event.set()
+                raise
+        finally:
+            if not handed_off:
+                _release_workflow_run(execution.id, cancel_event, done_event)
         result_status = getattr(result, "status", None)
         if result_status == "CANCELLED":
             raise RuntimeError(result.error or "Workflow execution cancelled")
@@ -216,31 +284,38 @@ class TaskExecutor:
         workflow: dict[str, Any],
         inputs: Dict[str, Any],
         tool_context: Any = None,
+        cancel_event: Optional[threading.Event] = None,
+        done_event: Optional[threading.Event] = None,
     ):
+        """Run the workflow with the events _trigger_workflow registered; release them on exit."""
         from flocks.workflow.runner import run_workflow
 
-        cancel_event = threading.Event()
-        done_event = threading.Event()
-        with _workflow_cancel_lock:
-            _workflow_cancel_events[execution_id] = cancel_event
-            _workflow_done_events[execution_id] = done_event
+        cancel = cancel_event if cancel_event is not None else threading.Event()
+        done = done_event if done_event is not None else threading.Event()
         try:
+            if cancel.is_set():
+                # Cancelled while it waited for a pool thread: run_workflow
+                # would still set up (install dependencies) before it checks.
+                raise TaskExecutionStopped("Cancelled before the workflow started")
             return run_workflow(
                 workflow=workflow,
                 inputs=inputs,
                 timeout_s=_TASK_ABSOLUTE_TIMEOUT_S,
-                cancel=cancel_event.is_set,
+                cancel=cancel.is_set,
                 tool_context=tool_context,
             )
         finally:
-            done_event.set()
-            with _workflow_cancel_lock:
-                current_cancel = _workflow_cancel_events.get(execution_id)
-                if current_cancel is cancel_event:
-                    _workflow_cancel_events.pop(execution_id, None)
-                current_done = _workflow_done_events.get(execution_id)
-                if current_done is done_event:
-                    _workflow_done_events.pop(execution_id, None)
+            _release_workflow_run(execution_id, cancel, done)
+
+    @staticmethod
+    async def _still_running(execution_id: str) -> bool:
+        """Whether the record still lets this run start.
+
+        A missing record does not: deleting a running execution cancels it
+        and then removes the row, which can land in between.
+        """
+        latest = await TaskStore.get_execution(execution_id)
+        return latest is not None and latest.status == TaskStatus.RUNNING
 
     @classmethod
     async def _resolve_task_session_context(
