@@ -1244,8 +1244,15 @@ class InboundDispatcher:
         try:
             from flocks.session.runner import RunnerCallbacks
 
+            streamed_text = ""
+
             async def _on_text_delta(delta: str) -> None:
-                await card.append(delta)
+                # Each delta arrives exactly once. The card merges by overlap and
+                # drops a piece already present in its text (a repeated "哈"),
+                # so it is given the reply so far, which it takes as is.
+                nonlocal streamed_text
+                streamed_text += delta
+                await card.append(streamed_text)
 
             runner_cbs = RunnerCallbacks(on_text_delta=_on_text_delta)
             loop_callbacks = callbacks.to_loop_callbacks(runner_callbacks=runner_cbs)

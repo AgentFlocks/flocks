@@ -11,6 +11,7 @@ from typing import Optional
 
 import typer
 from rich.console import Console
+from rich.markup import escape
 from rich.panel import Panel
 from rich.table import Table
 
@@ -131,7 +132,8 @@ async def _list_tasks(status_val, type_val, limit, fmt):
         )
 
     if fmt == "json":
-        console.print(json.dumps([t.model_dump(mode="json") for t in tasks], indent=2, default=str))
+        # Not console.print: Rich wraps long strings and eats [markup].
+        typer.echo(json.dumps([t.model_dump(mode="json") for t in tasks], indent=2, default=str))
         return
 
     table = Table(title=f"Tasks ({total} total)", show_header=True, header_style="bold cyan")
@@ -197,25 +199,34 @@ async def _show_task(task_id: str):
     else:
         type_value = "execution"
     display_tz = resolve_task_timezone_name(task)
+    # Executions carry no skills/category of their own; they keep the
+    # scheduler's values from when they were created in the input snapshot.
+    snapshot = getattr(task, "execution_input_snapshot", None) or {}
+    skills = getattr(task, "skills", None) or snapshot.get("skills") or []
+    category = getattr(task, "category", None) or snapshot.get("category")
     lines = [
-        f"[bold]{task.title}[/bold]",
+        f"[bold]{escape(task.title)}[/bold]",
         f"ID:       {task.id}",
         f"Type:     {type_value}",
         f"Status:   {task.status.value}",
         f"Priority: {task.priority.value}",
         f"Mode:     {task.execution_mode.value}",
     ]
+    if getattr(task, "scheduler_id", None):
+        lines.append(f"Scheduler: {task.scheduler_id}")
+    if getattr(task, "session_id", None):
+        lines.append(f"Session:  {task.session_id}")
     if task.execution_mode.value == "agent":
-        lines.append(f"Agent:    {task.agent_name}")
+        lines.append(f"Agent:    {escape(task.agent_name)}")
     if task.workflow_id:
-        lines.append(f"Workflow: {task.workflow_id}")
-    if task.skills:
-        lines.append(f"Skills:   {', '.join(task.skills)}")
-    if task.category:
-        lines.append(f"Category: {task.category}")
+        lines.append(f"Workflow: {escape(task.workflow_id)}")
+    if skills:
+        lines.append(f"Skills:   {escape(', '.join(skills))}")
+    if category:
+        lines.append(f"Category: {escape(str(category))}")
     lines.append(f"Created:  {format_task_datetime(task.created_at, display_tz)}")
     if task.description:
-        lines.append(f"Desc:     {task.description}")
+        lines.append(f"Desc:     {escape(task.description)}")
     if getattr(task, "trigger", None):
         if task.trigger.cron:
             lines.append(f"Cron:     {task.trigger.cron} ({task.trigger.timezone})")
@@ -230,9 +241,9 @@ async def _show_task(task_id: str):
     if getattr(task, "duration_ms", None) is not None:
         lines.append(f"Duration: {_fmt_duration(task.duration_ms)}")
     if getattr(task, "result_summary", None):
-        lines.append(f"\n[bold]Result:[/bold]\n{task.result_summary}")
+        lines.append(f"\n[bold]Result:[/bold]\n{escape(task.result_summary)}")
     if getattr(task, "error", None):
-        lines.append(f"\n[red]Error:[/red] {task.error}")
+        lines.append(f"\n[red]Error:[/red] {escape(task.error)}")
 
     console.print(Panel("\n".join(lines), border_style="cyan"))
 

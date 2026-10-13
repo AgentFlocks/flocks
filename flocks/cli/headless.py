@@ -148,30 +148,58 @@ async def build_config(options: ExecOptions) -> ConfigInfo:
     return ConfigInfo.model_validate(data)
 
 
-async def resolve_session(options: ExecOptions):
+async def validate_model(value: str, config: ConfigInfo) -> tuple[str, str]:
+    """Return (provider, model) for an explicit --model whose provider can run.
+
+    The model ID itself is not looked up: OpenAI-compatible gateways and local
+    providers serve models that no catalog lists, and the turn path accepts them.
+    """
+    from flocks.provider.provider import Provider
+
+    provider_id, separator, model_id = value.partition("/")
+    if not separator or not provider_id.strip() or not model_id.strip():
+        raise ValueError("--model must be provider/model")
+    await Provider.init()
+    await Provider.apply_config(config)
+    provider = Provider.get(provider_id)
+    if provider is None or not provider.is_configured():
+        raise ValueError(f"Provider is not configured: {provider_id}")
+    return provider_id, model_id
+
+
+async def resolve_session(options: ExecOptions, model: tuple[str, str] | None = None):
+    """Find or create the session; an explicit ``model`` is pinned to it, as the WebUI does."""
+    from functools import cache
     from flocks.project.project import Project
     from flocks.session.session import Session
 
     if options.last and options.session_id:
         raise ValueError("--session and --last are mutually exclusive")
     project = (await Project.from_directory(str(options.directory)))["project"]
-    worktree = Project.worktree_for_directory(str(options.directory))
+    worktree_of = cache(Project.worktree_for_directory)
+    worktree = worktree_of(str(options.directory))
     def matches(session):
-        return bool(session.directory and Project.worktree_for_directory(session.directory) == worktree)
+        return bool(session.directory and worktree_of(session.directory) == worktree)
+    pinned = Session.explicit_model_updates(*model) if model else {}
     if options.session_id:
         session = await Session.get_by_id(options.session_id)
         if session is None or not matches(session):
             raise ValueError(f"Session not found in current worktree: {options.session_id}")
         if session.status != "active":
             raise ValueError(f"Session is {session.status}: {session.id}")
-        return session
-    if options.last:
-        sessions = await Session.list(project.id)
+    elif options.last:
+        # The worktree is the scope, as for --session: sessions of any project count.
+        sessions = await Session.list_all()
         sessions = [s for s in sessions if not s.parent_id and s.status == "active" and matches(s)]
         if not sessions:
             raise ValueError("No active session in current worktree")
-        return max(sessions, key=lambda s: s.time.updated)
-    return await Session.create(project_id=project.id, directory=str(options.directory), agent=options.agent)
+        session = max(sessions, key=lambda s: s.time.updated)
+    else:
+        return await Session.create(project_id=project.id, directory=str(options.directory),
+                                    agent=options.agent, **pinned)
+    if pinned:
+        session = await Session.update(session.project_id, session.id, **pinned) or session
+    return session
 
 
 async def run_headless(options: ExecOptions, emit: Callable[[dict], None] | None = None) -> dict:
@@ -196,7 +224,9 @@ async def run_headless(options: ExecOptions, emit: Callable[[dict], None] | None
         policy_token = runtime_controls.set(controls)
         Agent.invalidate_cache()
         controls.check_budget()
-        session = await resolve_session(options)
+        # Checked before any session is created or changed, so a bad --model leaves none behind.
+        requested_model = await validate_model(options.model, config) if options.model else None
+        session = await resolve_session(options, requested_model)
         result["session_id"] = session.id
         emit({"type": "session", "session_id": session.id})
         if options.create_only:
@@ -216,13 +246,10 @@ async def run_headless(options: ExecOptions, emit: Callable[[dict], None] | None
             )
             if sandbox is None:
                 raise RuntimeError("Required sandbox is unavailable")
-        await Provider.init()
-        await Provider.apply_config(config)
-        provider_id = model_id = None
-        if options.model:
-            if "/" not in options.model:
-                raise ValueError("--model must be provider/model")
-            provider_id, model_id = options.model.split("/", 1)
+        if requested_model is None:
+            await Provider.init()
+            await Provider.apply_config(config)
+        provider_id, model_id = requested_model or (None, None)
         provider_id, model_id = await SessionLoop._resolve_model(session.model_copy(update={"agent": agent_name}), provider_id, model_id)
         provider = Provider.get(provider_id)
         if provider is None or not provider.is_configured():
