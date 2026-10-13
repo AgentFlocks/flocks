@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildWebUIContractWorkspaceSections, getLocalizedWebUIContractTitle } from './webuiContractWorkspaceSections';
+import { buildWebUIContractWorkspaceSections, getLocalizedWebUIContractTitle, findWorkspaceSection, workspaceSectionHref } from './webuiContractWorkspaceSections';
 import type { WebUIContractWorkspaceListItem } from '@/api/webuiContractPages';
 
 const workspace: WebUIContractWorkspaceListItem = {
@@ -69,5 +69,33 @@ describe('webuiContractWorkspaceSections localization', () => {
 
     expect(sections[0].label).toBe('告警运营');
     expect(sections[0].pages.map((page) => page.title)).toEqual(['SOC 总览', '告警调查']);
+  });
+});
+
+ it('distinguishes home and audit list even when they share a page implementation', () => {
+   const sections = buildWebUIContractWorkspaceSections({...workspace, sections:[
+     {id:'home',label:'首页',pageIds:['soc-overview']},
+     {id:'audits',label:'审计列表',pageIds:['soc-overview'],query:{view:'audits'}},
+   ]});
+   expect(workspaceSectionHref('/workspace', sections[0])).toBe('/workspace/soc-overview');
+   expect(workspaceSectionHref('/workspace', sections[1])).toBe('/workspace/soc-overview?view=audits');
+   expect(findWorkspaceSection(sections, 'soc-overview','')?.id).toBe('home');
+   expect(findWorkspaceSection(sections, 'soc-overview','?view=audits&scan_id=123')?.id).toBe('audits');
+ });
+
+describe('webuiContractWorkspaceSections flat sections', () => {
+  it('passes the flat flag and icon through, defaulting to grouped sections', () => {
+    const flat = buildWebUIContractWorkspaceSections({
+      ...workspace,
+      sections: [
+        { id: 'home', label: '首页', labelEn: 'Home', flat: true, icon: ' Home ', pageIds: ['soc-overview'] },
+        { id: 'operations', label: '告警运营', pageIds: ['soc-overview', 'soc-alerts'] },
+      ],
+    }, 'en-US');
+    expect(flat.map((section) => [section.id, section.label, section.flat, section.icon])).toEqual([
+      ['home', 'Home', true, 'Home'],
+      ['operations', '告警运营', false, null],
+    ]);
+    expect(buildWebUIContractWorkspaceSections({ ...workspace, sections: [] }, 'zh-CN')[0]).toMatchObject({ flat: false, icon: null });
   });
 });

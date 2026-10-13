@@ -21,6 +21,7 @@ vi.mock('react-i18next', () => ({
         'delegate.steps': '步',
         'delegate.resultSummary': '结果摘要',
         'delegate.viewExecution': '查看执行过程',
+        'delegate.viewDialog': '查看执行过程',
         'delegate.subTask': '子任务',
       };
       return (translations[key] ?? key).replace(
@@ -187,5 +188,69 @@ describe('DelegateTaskCard process step', () => {
     fireEvent.click(screen.getByRole('button', { name: /查看执行过程/ }));
 
     expect(screen.getByTestId('delegate-detail-sheet')).toHaveTextContent('ses-child');
+  });
+});
+
+describe('independent asynchronous delegates', () => {
+  it.each([false, true])('hides submitted result metadata in both card layouts (nested: %s)', (nested) => {
+    const result = 'Child finished\n<task_metadata>\nsession_id: ses-internal\n</task_metadata>';
+    const metadata = { sessionId: 'ses-child', submitted: true, status: 'completed', result };
+    const part = {
+      id: 'part-submitted', type: 'tool', tool: 'delegate_task',
+      state: {
+        status: 'completed', input: { subagent_type: 'explore', description: 'Inspect' },
+        output: { status: 'submitted', child_session_id: 'ses-child' },
+        metadata: nested ? { metadata } : metadata,
+      },
+    } as MessagePart;
+
+    expect(extractDelegateInfo(part.state, 'task')).toMatchObject({
+      childSessionId: 'ses-child', output: 'Child finished',
+    });
+    for (const processStep of [false, true]) {
+      const view = render(<DelegateTaskCard part={part} processStep={processStep} />);
+      fireEvent.click(screen.getByText(/结果摘要/));
+      expect(view.container).toHaveTextContent('Child finished');
+      expect(view.container).not.toHaveTextContent('task_metadata');
+      expect(view.container).not.toHaveTextContent('ses-internal');
+      fireEvent.click(screen.getByRole('button', { name: /查看执行过程/ }));
+      expect(screen.getByTestId('delegate-detail-sheet')).toHaveTextContent('ses-child');
+      view.unmount();
+    }
+  });
+
+  it.each([false, true])('hides submitted error metadata (nested: %s)', (nested) => {
+    const metadata = {
+      sessionId: 'ses-child', submitted: true, status: 'error',
+      result: 'Failed to inspect\n<TASK_METADATA>\nsession_id: ses-internal',
+    };
+    const state = {
+      status: 'completed' as const,
+      input: { subagent_type: 'explore', description: 'Inspect' },
+      metadata: nested ? { metadata } : metadata,
+    };
+    expect(extractDelegateInfo(state, 'task')).toMatchObject({
+      error: 'Failed to inspect', output: 'Failed to inspect', childSessionId: 'ses-child',
+    });
+    const view = render(<DelegateTaskCard part={{ id: 'part-error', type: 'tool', tool: 'delegate_task', state } as MessagePart} />);
+    expect(view.container).toHaveTextContent('Failed to inspect');
+    expect(view.container).not.toHaveTextContent('ses-internal');
+    expect(view.container).not.toHaveTextContent('TASK_METADATA');
+    view.unmount();
+  });
+
+  it('keeps a returned submission running until the child result event arrives', () => {
+    const state = {
+      status: 'completed' as const, input: { subagent_type: 'explore', description: 'Inspect' },
+      output: { status: 'submitted', child_session_id: 'child-one' },
+      metadata: { sessionId: 'child-one', submitted: true, status: 'running' },
+      time: { start: 100, end: 101 },
+    };
+    expect(extractDelegateInfo(state, 'task')).toMatchObject({
+      childSessionId: 'child-one', status: 'running', output: undefined,
+    });
+    expect(extractDelegateInfo({ ...state, metadata: {
+      ...state.metadata, status: 'completed', result: 'Child finished', finished_at: 250,
+    } }, 'task')).toMatchObject({ status: 'completed', output: 'Child finished', durationMs: 150 });
   });
 });

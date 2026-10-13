@@ -7,6 +7,7 @@ agent lifecycle stages:
 - session.start
 - llm.call.before
 - llm.call.after
+- tool.input.rewrite
 - tool.execute.before
 - tool.execute.after
 - turn.after
@@ -38,6 +39,11 @@ class HookStage:
     SESSION_START = "session.start"
     LLM_BEFORE = "llm.call.before"
     LLM_AFTER = "llm.call.after"
+    # Runs once per session tool call on the model-emitted input, before
+    # validation, before tool.execute.before and before execution.  Hooks
+    # that rewrite the input (e.g. restore redaction placeholders) implement
+    # ``tool_input_rewrite``; they see the raw input, not the redacted view.
+    TOOL_INPUT_REWRITE = "tool.input.rewrite"
     TOOL_BEFORE = "tool.execute.before"
     TOOL_AFTER = "tool.execute.after"
     TURN_AFTER = "turn.after"
@@ -66,6 +72,7 @@ _DEFAULT_STAGE_TIMEOUTS: Dict[str, float] = {
     HookStage.SESSION_START: 5.0,
     HookStage.LLM_BEFORE: 5.0,
     HookStage.LLM_AFTER: 5.0,
+    HookStage.TOOL_INPUT_REWRITE: 5.0,
     HookStage.TOOL_BEFORE: 5.0,
     HookStage.TOOL_AFTER: 5.0,
     HookStage.TURN_AFTER: 5.0,
@@ -88,6 +95,8 @@ class HookContext:
     # must not be able to resume the effect by replacing ``output.execution``.
     execution_stop_requested: bool = False
     execution_stop_detail: str | None = None
+    execution_stop_source: str | None = None
+    execution_stop_stage: str | None = None
 
 
 class HookBase:
@@ -101,6 +110,9 @@ class HookBase:
         return None
 
     async def llm_after(self, ctx: HookContext) -> None:  # pragma: no cover - default no-op
+        return None
+
+    async def tool_input_rewrite(self, ctx: HookContext) -> None:  # pragma: no cover - default no-op
         return None
 
     async def tool_before(self, ctx: HookContext) -> None:  # pragma: no cover - default no-op
@@ -331,6 +343,14 @@ class HookPipeline:
         output_data: Optional[Dict[str, Any]] = None,
     ) -> HookContext:
         return await cls._run_stage(HookStage.LLM_AFTER, input_data, output_data)
+
+    @classmethod
+    async def run_tool_input_rewrite(
+        cls,
+        input_data: Dict[str, Any],
+        output_data: Optional[Dict[str, Any]] = None,
+    ) -> HookContext:
+        return await cls._run_stage(HookStage.TOOL_INPUT_REWRITE, input_data, output_data)
 
     @classmethod
     async def run_tool_before(
@@ -616,7 +636,6 @@ class HookPipeline:
                     )
                 else:
                     await cls._invoke_handler(handler, ctx)
-                cls._latch_execution_stop(ctx)
             except asyncio.TimeoutError as exc:
                 duration_ms = int((time.perf_counter() - handler_started_at) * 1000)
                 log.warning("hook.timeout", {
@@ -639,6 +658,10 @@ class HookPipeline:
                 })
                 if entry.fail_policy != FailPolicy.ISOLATE:
                     raise
+            finally:
+                # A failing isolated hook may already have requested a stop.
+                # Attribute that request before another hook sees shared output.
+                cls._latch_execution_stop(ctx, source=entry.name)
         log.debug("hook.stage_complete", {
             "stage": stage,
             "handler_count": handler_count,
@@ -647,7 +670,7 @@ class HookPipeline:
         return ctx
 
     @staticmethod
-    def _latch_execution_stop(ctx: HookContext) -> None:
+    def _latch_execution_stop(ctx: HookContext, *, source: str | None = None) -> None:
         """Remember a generic stop request even if later hooks mutate output.
 
         This is intentionally limited to the pre-existing generic
@@ -656,16 +679,17 @@ class HookPipeline:
         it and for supplying an opaque detail string.
         """
         execution = ctx.output.get("execution")
-        if not isinstance(execution, dict) or execution.get("stop") is not True:
+        if (
+            ctx.execution_stop_requested
+            or not isinstance(execution, dict)
+            or execution.get("stop") is not True
+        ):
             return
         ctx.execution_stop_requested = True
-        if ctx.execution_stop_detail is None:
-            detail = execution.get("detail")
-            ctx.execution_stop_detail = (
-                str(detail)
-                if detail is not None
-                else "operation stopped by extension"
-            )
+        ctx.execution_stop_source = source
+        ctx.execution_stop_stage = ctx.stage
+        detail = execution.get("detail")
+        ctx.execution_stop_detail = str(detail) if detail is not None else None
 
     @classmethod
     def _register_plugin_extension_point(cls) -> None:
@@ -717,6 +741,7 @@ class HookPipeline:
             HookStage.SESSION_START: ("session_start",),
             HookStage.LLM_BEFORE: ("llm_before",),
             HookStage.LLM_AFTER: ("llm_after",),
+            HookStage.TOOL_INPUT_REWRITE: ("tool_input_rewrite",),
             HookStage.TOOL_BEFORE: ("tool_before",),
             HookStage.TOOL_AFTER: ("tool_after",),
             HookStage.TURN_AFTER: ("turn_after", "turn_finish"),

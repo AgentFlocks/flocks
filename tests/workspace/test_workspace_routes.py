@@ -1103,6 +1103,34 @@ class TestMove:
         )
         assert r.status_code == 400
 
+    def test_move_directory_into_itself_is_rejected_without_side_effects(self, workspace_client):
+        """Used to 500 after mkdir had already created child/ in the source (FL-BUG-008)."""
+        ws = _ws(workspace_client)
+        src = ws / "outputs" / "case"
+        src.mkdir()
+        (src / "keep.txt").write_text("keep")
+        before = sorted(str(p.relative_to(src)) for p in src.rglob("*"))
+
+        r = _client(workspace_client).post(
+            "/api/workspace/move",
+            json={"src": "outputs/case", "dst": "outputs/case/child/moved"},
+        )
+
+        assert r.status_code == 400
+        assert "into itself" in r.json()["detail"]
+        assert sorted(str(p.relative_to(src)) for p in src.rglob("*")) == before
+
+    def test_move_directory_to_sibling_with_shared_prefix(self, workspace_client):
+        ws = _ws(workspace_client)
+        (ws / "outputs" / "case").mkdir()
+        (ws / "outputs" / "case" / "f.txt").write_text("x")
+        r = _client(workspace_client).post(
+            "/api/workspace/move",
+            json={"src": "outputs/case", "dst": "outputs/case-archive/case"},
+        )
+        assert r.status_code == 200
+        assert (ws / "outputs" / "case-archive" / "case" / "f.txt").read_text() == "x"
+
 
 # ─── Reveal in file manager ──────────────────────────────────────────────────
 

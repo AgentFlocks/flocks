@@ -7,10 +7,11 @@ tools while preserving Flocks' existing relative-path compatibility.
 
 from __future__ import annotations
 
+import asyncio
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from flocks.project.instance import Instance
 from flocks.tool.registry import ToolContext
@@ -77,6 +78,104 @@ def safe_relpath(path: str, start: Optional[str]) -> str:
         return os.path.relpath(path, start)
     except ValueError:
         return path
+
+
+class DirectoryLinkLoop(ValueError):
+    """A directory link points back at one of its own ancestors."""
+
+
+def tree_entries(root: str, *, follow_links: bool = False) -> list[str]:
+    """Relative paths of ``root`` ("") and of every entry below it.
+
+    Deleting, copying or moving a directory changes every file under it, so
+    path rules written for any of them must see the request.
+    ``follow_links`` mirrors ``copytree(symlinks=False)``, which copies what a
+    directory link points at, once for every link that reaches it; ``rmtree``
+    and renames keep links as links. A link back into its own ancestors would
+    make that copy endless, so it raises :class:`DirectoryLinkLoop`.
+    """
+    entries = [""]
+    if not os.path.isdir(root) or (os.path.islink(root) and not follow_links):
+        return entries
+    pending = [(root, "", (os.path.realpath(root),))]
+    while pending:
+        directory, prefix, ancestors = pending.pop()
+        try:
+            names = sorted(os.listdir(directory))
+        except OSError:
+            continue
+        for name in names:
+            path = os.path.join(directory, name)
+            relative = os.path.join(prefix, name) if prefix else name
+            entries.append(relative)
+            if not os.path.isdir(path) or (os.path.islink(path) and not follow_links):
+                continue
+            real = os.path.realpath(path)
+            if real in ancestors:
+                raise DirectoryLinkLoop(f"{path} links back to {real}")
+            pending.append((path, relative, ancestors + (real,)))
+    return entries
+
+
+def tree_permission_patterns(
+    base_pattern: str,
+    base_path: str,
+    entries: list[str],
+    *,
+    worktree: Optional[str] = None,
+) -> list[str]:
+    """Permission patterns for ``entries`` taken from or landing at ``base_path``.
+
+    With ``worktree`` (where the tree lands), an entry whose real location
+    differs because a symlink is on the way is also named by that location:
+    the write goes there.
+    """
+    patterns: list[str] = []
+    for relative in entries:
+        patterns.append(os.path.join(base_pattern, relative) if relative else base_pattern)
+        if worktree is not None:
+            logical = os.path.normpath(os.path.join(base_path, relative) if relative else base_path)
+            real = os.path.realpath(logical)
+            if real != logical:
+                patterns.append(safe_relpath(real, worktree))
+    return list(dict.fromkeys(patterns))
+
+
+async def ask_edit_permission(
+    ctx: ToolContext,
+    tool: str,
+    planned_patterns: Callable[[], list[str]],
+    metadata: dict,
+) -> bool:
+    """Ask for ``edit`` on the paths an operation will change.
+
+    The paths are listed again once the (possibly long) permission wait is
+    over; False means they changed meanwhile (new files, a target that became
+    a directory, a new link) and the approval no longer covers the operation.
+    Walking a large tree takes a while, so the first listing runs off the
+    event loop. The last one stays on it, with no await between it and the
+    caller's operation, so nothing else in the process can change the tree in
+    between.
+    """
+    patterns = await asyncio.to_thread(planned_patterns)
+    await ctx.ask(
+        permission="edit",
+        patterns=patterns,
+        always=["*"],
+        metadata={"tool": tool, **metadata},
+    )
+    return set(planned_patterns()) == set(patterns)
+
+
+def landing_location(source: str, target: str, target_pattern: str) -> tuple[str, str]:
+    """Path and permission pattern of where ``shutil.move`` / ``copy2`` put ``source``.
+
+    Both drop the source inside ``target`` when it is an existing directory.
+    """
+    if os.path.isdir(target):
+        name = os.path.basename(os.path.normpath(source))
+        return os.path.join(target, name), os.path.join(target_pattern, name)
+    return target, target_pattern
 
 
 def normalize_user_path(path: str) -> str:

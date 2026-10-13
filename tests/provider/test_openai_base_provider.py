@@ -963,6 +963,56 @@ class TestOpenAIBaseProviderStreamingUsage:
         return provider, create
 
     @pytest.mark.asyncio
+    async def test_chat_stream_marks_cache_already_counted_in_prompt_tokens(self):
+        """LiteLLM counts Claude's cache into prompt_tokens and repeats it at the
+        top level; the stream usage says so, so it is not added twice."""
+        from openai.types import CompletionUsage
+
+        from flocks.provider.provider import ChatMessage
+        from flocks.session.runner import SessionRunner
+
+        provider, create = self._build_provider_with_stream()
+        content_chunk = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    delta=SimpleNamespace(content="hello", tool_calls=None),
+                    finish_reason=None,
+                )
+            ],
+            usage=None,
+        )
+        usage_chunk = SimpleNamespace(
+            choices=[],
+            usage=CompletionUsage(
+                prompt_tokens=53_000,
+                completion_tokens=300,
+                total_tokens=53_300,
+                cache_read_input_tokens=50_000,
+                cache_creation_input_tokens=2_000,
+                prompt_tokens_details={"cached_tokens": 50_000, "cache_creation_tokens": 2_000},
+            ),
+        )
+        finish_chunk = SimpleNamespace(
+            choices=[SimpleNamespace(delta=None, finish_reason="stop")],
+            usage=None,
+        )
+        create.return_value = _stream_from_chunks(content_chunk, usage_chunk, finish_chunk)
+
+        chunks = [
+            chunk
+            async for chunk in provider.chat_stream(
+                "claude-via-litellm",
+                [ChatMessage(role="user", content="hello")],
+            )
+        ]
+
+        usage = chunks[-1].usage
+        assert usage["prompt_tokens"] == 53_000
+        assert usage["cache_tokens_in_prompt"] == 52_000
+        tokens = SessionRunner._build_tokens_update(usage)
+        assert tokens["input"] + tokens["cache"]["read"] + tokens["cache"]["write"] == 53_000
+
+    @pytest.mark.asyncio
     async def test_chat_stream_includes_usage_and_attaches_to_terminal_chunk(self):
         provider, create = self._build_provider_with_stream()
 

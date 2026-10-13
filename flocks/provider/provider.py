@@ -4,10 +4,12 @@ AI Provider management
 Manages different AI model providers (Anthropic, OpenAI, Google, etc.)
 """
 
+import asyncio
 from enum import Enum
 import json
 import os
 import threading
+import weakref
 from typing import Any, AsyncIterator, Dict, List, Optional, Union
 
 from pydantic import BaseModel, Field, PrivateAttr
@@ -847,10 +849,16 @@ class Provider:
         # readers (e.g. a session calling ``get_models()`` on another
         # thread) never observe a half-rebuilt list.
         models_config = getattr(pconfig, "models", None)
-        if models_config:
+        if models_config is not None:
+            from flocks.provider.model_catalog import get_retired_model_ids
+
+            retired_model_ids = get_retired_model_ids(pid)
             desired_models: List[ModelInfo] = []
             if isinstance(models_config, dict):
                 for model_id, model_data in models_config.items():
+                    # Older or higher-priority config can retain withdrawn models.
+                    if model_id in retired_model_ids:
+                        continue
                     try:
                         # Handle both dict and object formats
                         if hasattr(model_data, "model_dump"):
@@ -1070,12 +1078,107 @@ class Provider:
         return await provider.embed_batch(texts, model=model, **kwargs)
 
 
+def _running_loop() -> Optional[asyncio.AbstractEventLoop]:
+    try:
+        return asyncio.get_running_loop()
+    except RuntimeError:
+        return None
+
+
+_NO_CLIENT = object()
+
+
+class LoopBoundClientSlot:
+    """Descriptor behind ``BaseProvider._client``: one SDK client per event loop.
+
+    The SDK clients (``AsyncOpenAI`` / ``AsyncAnthropic`` / ...) wrap an
+    ``httpx.AsyncClient`` whose pooled connections and locks are bound to the
+    event loop that created them. One flocks process drives providers from two
+    loops: the uvicorn server loop (interactive sessions) and the dedicated
+    ``flocks-workflow-llm-loop`` thread (workflow tools, ``llm.ask``,
+    ``delegate_task`` subagents). Handing a single client to both loops shows
+    up as ``RuntimeError: ... is bound to a different event loop`` (which the
+    OpenAI SDK reports as ``APIConnectionError: Connection error.``) or as a
+    lost wake-up when a connection lock is released from the other thread.
+
+    Providers keep their ``if self._client is None: self._client = X`` code;
+    this descriptor makes the attribute per-loop:
+
+    * reading returns the client owned by the running loop (``None`` if the
+      loop has none yet);
+    * assigning a client stores it for the running loop;
+    * assigning ``None`` drops every loop's client (config change / reset).
+
+    A client assigned with no running loop (sync setup code, tests injecting
+    fakes) is adopted by the first loop that reads it. Loops are weak keys, so
+    a closed loop's client is released with the loop.
+    """
+
+    def __set_name__(self, owner: type, name: str) -> None:
+        self._by_loop_attr = f"{name}__by_loop"
+        self._unbound_attr = f"{name}__unbound"
+        # Writes happen only when a client is created / reset, so one lock for
+        # every provider is plenty; reads take an immutable mapping snapshot.
+        self._lock = threading.Lock()
+
+    def __get__(self, obj: Any, objtype: Optional[type] = None) -> Any:
+        if obj is None:
+            return self
+        state = obj.__dict__
+        loop = _running_loop()
+        by_loop = state.get(self._by_loop_attr)
+        if loop is not None and by_loop is not None:
+            try:
+                return by_loop[loop]
+            except KeyError:
+                pass
+        client = state.get(self._unbound_attr, _NO_CLIENT)
+        if client is _NO_CLIENT:
+            return None
+        if loop is None:
+            return client
+        with self._lock:
+            client = state.pop(self._unbound_attr, _NO_CLIENT)
+            if client is _NO_CLIENT:
+                # Another loop adopted it first; it is that loop's now.
+                by_loop = state.get(self._by_loop_attr)
+                return by_loop.get(loop) if by_loop is not None else None
+            self._store_locked(obj, loop, client)
+        return client
+
+    def __set__(self, obj: Any, value: Any) -> None:
+        state = obj.__dict__
+        with self._lock:
+            if value is None:
+                state.pop(self._by_loop_attr, None)
+                state.pop(self._unbound_attr, None)
+                return
+            loop = _running_loop()
+            if loop is None:
+                state[self._unbound_attr] = value
+                return
+            self._store_locked(obj, loop, value)
+
+    def _store_locked(self, obj: Any, loop: asyncio.AbstractEventLoop, client: Any) -> None:
+        # Copy-on-write so a ``copy.copy``'d provider never shares the mapping
+        # with its source, and readers on the other loop see a whole mapping.
+        existing = obj.__dict__.get(self._by_loop_attr)
+        updated: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, Any]" = weakref.WeakKeyDictionary(
+            existing if existing is not None else {}
+        )
+        updated[loop] = client
+        obj.__dict__[self._by_loop_attr] = updated
+
+
 class BaseProvider:
     """Base class for AI providers"""
 
     # Subclasses set this to their catalog.json ID to enable metadata enrichment
     # in get_model_definitions(). Leave empty for providers without a catalog entry.
     CATALOG_ID: str = ""
+
+    # Per-event-loop SDK client cache; see LoopBoundClientSlot.
+    _client = LoopBoundClientSlot()
 
     def __init__(self, provider_id: str, name: str):
         self.id = provider_id

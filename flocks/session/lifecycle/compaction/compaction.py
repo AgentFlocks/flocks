@@ -38,6 +38,21 @@ log = Log.create(service="session.compaction")
 # contract for compaction itself.  See ``_emit_progress`` below.
 ProgressCallback = Callable[[str, Dict[str, Any]], Awaitable[None]]
 
+# Budget for re-injecting the user's archived requests after an automatic
+# compaction (see ``_build_post_compaction_context``), by context tier value.
+_POST_COMPACTION_REQUEST_CHARS = {"medium": 4000, "large": 8000, "xlarge": 8000}
+_POST_COMPACTION_REQUEST_ITEM_CHARS = 2000
+
+# Share of the usable context the verbatim tail kept by a compaction may use.
+# The summary covers everything archived, and a larger tail would leave the
+# prompt close enough to the threshold to compact again on the next step.
+_PRESERVED_TAIL_CONTEXT_RATIO = 0.30
+
+
+def _role_of(message: Any) -> str:
+    role = getattr(message, "role", "")
+    return getattr(role, "value", role) or ""
+
 
 # ---------------------------------------------------------------------------
 # Iterative summary state (E1 — see docs/design/context-compaction-v2.md §E1)
@@ -396,9 +411,11 @@ def _flush_timeout_seconds() -> float:
 #   Pass 1 — MD5 dedup: messages with identical content outside the tail are
 #             replaced with a 1-line back-reference placeholder.
 #   Pass 2 — Large-content compression: messages outside the tail with
-#             >``_PRE_PRUNE_THRESHOLD_CHARS`` characters are reduced to a
-#             single informative line so the summarizer sees a compact record
-#             of every turn rather than raw multi-KB blobs.
+#             >``_PRE_PRUNE_THRESHOLD_CHARS`` characters have their tool
+#             input/output reduced to a single informative line so the
+#             summarizer sees a compact record of every turn rather than raw
+#             multi-KB blobs.  User messages and the assistant's own text are
+#             kept (see ``_compress_message_for_summary``).
 #
 # "Tail" = the most recent messages that fit within
 # ``overflow_threshold × _PRE_PRUNE_TAIL_RATIO`` tokens; head = first
@@ -407,6 +424,13 @@ def _flush_timeout_seconds() -> float:
 _PRE_PRUNE_THRESHOLD_CHARS = 200   # messages longer than this are candidates
 _PRE_PRUNE_TAIL_RATIO      = 0.20  # fraction of overflow_threshold kept as tail
 _PRE_PRUNE_HEAD_N          = 3     # always protect the first N messages (hermes: protect_first_n)
+_PRE_PRUNE_NARRATIVE_CHARS = 1200  # own text kept per compressed assistant message
+_SUMMARY_INPUT_BUDGET_RATIO = 0.5  # share of usable context the transcript may use
+_SUMMARY_INPUT_USER_CHARS  = 1000  # middle user messages shrink to this when over budget
+
+# Start of a ``[tool: name] input: …`` / ``output: …`` block written by
+# ``SessionCompaction._extract_chat_messages`` after the message's own text.
+_TOOL_BLOCK_START_RE = re.compile(r"^\[tool(?::[^\]]*)?\] (?:input|output): ", re.MULTILINE)
 
 
 def _md5_short(text: str) -> str:
@@ -439,6 +463,26 @@ def _summarize_message_to_line(role: str, content: str) -> str:
     return f"[{role}] {preview} ({line_count} lines, {char_count:,} chars)"
 
 
+def _compress_message_for_summary(role: str, content: str) -> str:
+    """Shrink an old message for the summarizer without losing what was said.
+
+    User messages stay verbatim: they carry the requirements, and collapsing
+    them to an 80-char preview is how task background went missing after a
+    compaction.  For other roles only the bulky tool input/output collapses to
+    one line; the model's own text (plans, findings) is kept, capped.
+    """
+    if role == "user":
+        return content
+    match = _TOOL_BLOCK_START_RE.search(content)
+    narrative = (content if match is None else content[:match.start()]).strip()
+    if len(narrative) > _PRE_PRUNE_NARRATIVE_CHARS:
+        narrative = narrative[:_PRE_PRUNE_NARRATIVE_CHARS].rstrip() + "…"
+    if match is None:
+        return narrative
+    tool_line = _summarize_message_to_line(role, content[match.start():])
+    return f"{narrative}\n{tool_line}" if narrative else tool_line
+
+
 def _prune_chat_messages_for_summary(
     chat_messages: list,
     policy: Optional["CompactionPolicy"],
@@ -451,11 +495,14 @@ def _prune_chat_messages_for_summary(
       1. MD5 dedup — older messages with identical content get a 1-line
          back-reference; the most recent copy is preserved intact.
       2. Large-content compression — remaining old messages whose content
-         exceeds ``_PRE_PRUNE_THRESHOLD_CHARS`` are replaced by a single
-         informative line via ``_summarize_message_to_line``.
+         exceeds ``_PRE_PRUNE_THRESHOLD_CHARS`` are shrunk by
+         ``_compress_message_for_summary`` (user messages are kept as-is).
+      3. Budget — ``_fit_summary_input_budget`` shrinks further if the
+         transcript would still outgrow half of the usable context.
 
     "Tail" budget = ``overflow_threshold × _PRE_PRUNE_TAIL_RATIO`` tokens
-    (converted to chars × 4).  Head = first ``_PRE_PRUNE_HEAD_N`` messages.
+    (measured with ``SessionPrompt.count_tokens``).  Head = first
+    ``_PRE_PRUNE_HEAD_N`` messages.
     """
     if not chat_messages:
         return chat_messages
@@ -463,34 +510,30 @@ def _prune_chat_messages_for_summary(
     n = len(chat_messages)
     head_n = min(_PRE_PRUNE_HEAD_N, n)
 
-    # Derive tail budget — two-step conversion so the unit math is auditable:
-    #   overflow_threshold is in tokens (85 % × context_window),
-    #   tail_budget_tokens is the slice we want to keep raw,
-    #   tail_budget_chars converts back via the chars/4 estimate the rest
-    #   of the file speaks in.
+    # Tail budget in tokens (overflow_threshold is 85 % × context_window).
+    # Counted with the CJK-aware estimator: sizing it as chars × 4 let an
+    # all-Chinese tail grow to roughly four times the intended budget.
     if policy and policy.overflow_threshold > 0:
         tail_budget_tokens = int(policy.overflow_threshold * _PRE_PRUNE_TAIL_RATIO)
     else:
         tail_budget_tokens = 20_000  # ~20 K tokens default when no policy
-    tail_budget_chars = tail_budget_tokens * 4
 
     # Walk backward to find the tail boundary index
     tail_start = n
     accumulated = 0
     for i in range(n - 1, head_n - 1, -1):
-        msg = chat_messages[i]
-        content = msg.content if hasattr(msg, "content") else ""
-        if not isinstance(content, str):
-            content = str(content)
-        msg_chars = len(content)
-        if accumulated + msg_chars > tail_budget_chars and (n - i) >= 3:
+        msg_tokens = SessionPrompt.count_tokens(_content_text(chat_messages[i]))
+        if accumulated + msg_tokens > tail_budget_tokens and (n - i) >= 3:
             tail_start = i + 1
             break
-        accumulated += msg_chars
+        accumulated += msg_tokens
         tail_start = i
 
     # Ensure at least head_n messages are excluded from pruning
     tail_start = max(tail_start, head_n)
+    # Messages from here on are the recent tail proper; anchoring the latest
+    # user message below may pull older steps of its turn in front of it.
+    recent_tail_start = tail_start
 
     # CRITICAL: ensure the most recent user message is in the tail.
     # If a huge tool output occupies all of tail_budget_chars, the latest
@@ -542,11 +585,96 @@ def _prune_chat_messages_for_summary(
             result.append(_make_chat_message(msg, new_content))
             continue
 
-        # Pass 2: compress large old message to 1 line
+        # Pass 2: compress large old message
         role = msg.role if hasattr(msg, "role") else "unknown"
-        new_content = _summarize_message_to_line(role, content)
-        result.append(_make_chat_message(msg, new_content))
+        new_content = _compress_message_for_summary(role, content)
+        if new_content == content:
+            result.append(msg)
+        else:
+            result.append(_make_chat_message(msg, new_content))
 
+    return _fit_summary_input_budget(
+        chat_messages, result, head_n, tail_start, recent_tail_start, policy,
+    )
+
+
+def _content_text(message: Any) -> str:
+    content = message.content if hasattr(message, "content") else ""
+    return content if isinstance(content, str) else str(content)
+
+
+def _fit_summary_input_budget(
+    original: list,
+    result: list,
+    head_n: int,
+    tail_start: int,
+    recent_tail_start: int,
+    policy: Optional["CompactionPolicy"],
+) -> list:
+    """Pass 3: keep the summary transcript within half of the usable context.
+
+    Passes 1-2 keep user messages and the assistant's own text, which on a
+    long session (hundreds of steps with reasoning the provider never counted
+    in the prompt) can outgrow the model's window and make the summary call
+    itself fail.  Over budget, the oldest middle assistant messages go back
+    to a single line first, then middle user messages are shortened, then the
+    older assistant steps that anchoring the latest user message pulled into
+    the tail (the whole current turn on a follow-up turn).  The head, the
+    anchored user message and the recent tail are never touched.
+    """
+    usable = policy.usable_context if policy and policy.usable_context > 0 else 96_000
+    budget = int(usable * _SUMMARY_INPUT_BUDGET_RATIO)
+    total = sum(SessionPrompt.count_tokens(_content_text(message)) for message in result)
+    if total <= budget:
+        return result
+
+    for index in range(head_n, tail_start):
+        if total <= budget:
+            break
+        message = result[index]
+        role = message.role if hasattr(message, "role") else "unknown"
+        if role == "user":
+            continue
+        current = _content_text(message)
+        line = _summarize_message_to_line(role, _content_text(original[index]))
+        if len(line) < len(current):
+            total -= SessionPrompt.count_tokens(current) - SessionPrompt.count_tokens(line)
+            result[index] = _make_chat_message(message, line)
+
+    half = _SUMMARY_INPUT_USER_CHARS // 2
+    for index in range(head_n, tail_start):
+        if total <= budget:
+            break
+        message = result[index]
+        current = _content_text(message)
+        if getattr(message, "role", "") != "user" or len(current) <= _SUMMARY_INPUT_USER_CHARS:
+            continue
+        shortened = current[:half] + "\n…(truncated)…\n" + current[-half:]
+        total -= SessionPrompt.count_tokens(current) - SessionPrompt.count_tokens(shortened)
+        result[index] = _make_chat_message(message, shortened)
+
+    # Older steps of the anchored turn: keep their own text first, then
+    # collapse them to one line if that is still not enough.
+    for shrink in (_compress_message_for_summary, _summarize_message_to_line):
+        for index in range(tail_start, recent_tail_start):
+            if total <= budget:
+                break
+            message = result[index]
+            role = message.role if hasattr(message, "role") else "unknown"
+            if role == "user":
+                continue
+            current = _content_text(message)
+            line = shrink(role, _content_text(original[index]))
+            if len(line) >= len(current):
+                continue
+            total -= SessionPrompt.count_tokens(current) - SessionPrompt.count_tokens(line)
+            result[index] = _make_chat_message(message, line)
+
+    if total > budget:
+        log.warn("compaction.pre_prune.over_budget", {
+            "estimated_tokens": total,
+            "budget_tokens": budget,
+        })
     return result
 
 
@@ -855,6 +983,12 @@ class SessionCompaction:
            ``FLOCKS_COMPACTION_FLUSH_TIMEOUT`` (default
            ``_DEFAULT_FLUSH_TIMEOUT_SECONDS``, currently 90s).
         """
+        from flocks.session.session import Session
+
+        session = await Session.get_by_id_unfiltered(session_id)
+        if session is not None and not session.memory_enabled:
+            return
+
         kwargs = dict(
             session_id=session_id,
             summary=summary_text,
@@ -1114,6 +1248,21 @@ class SessionCompaction:
         chat_messages = _prune_chat_messages_for_summary(
             original_chat_messages, policy,
         )
+        # Older ``todo`` tool calls are collapsed above, so hand the
+        # summarizer the live list for its "Open TODOs" section.
+        try:
+            todos_text = await cls._todo_list_text(session_id)
+        except Exception as todo_err:
+            log.debug("compaction.process.todos_error", {"error": str(todo_err)})
+            todos_text = ""
+        if todos_text:
+            chat_messages = [
+                *chat_messages,
+                ChatMessage(
+                    role="system",
+                    content=f"Todo list at compaction time (from the todo tool):\n{todos_text}",
+                ),
+            ]
 
         loaded_total_chars = sum(len(m.content) for m in chat_messages)
         log.info("compaction.process.messages_loaded", {
@@ -1727,6 +1876,16 @@ class SessionCompaction:
             if len(all_msgs) > preserve_last:
                 cutoff_idx = len(all_msgs) - preserve_last
 
+        if policy and policy.usable_context > 0:
+            cutoff_idx = max(
+                cutoff_idx,
+                await cls._tail_budget_cutoff(
+                    session_id,
+                    all_msgs,
+                    int(policy.usable_context * _PRESERVED_TAIL_CONTEXT_RATIO),
+                ),
+            )
+
         to_delete = all_msgs[:cutoff_idx]
 
         deleted_count = 0
@@ -1770,11 +1929,31 @@ class SessionCompaction:
                 post_compaction_text = await cls._build_post_compaction_context(
                     session_id, policy=policy,
                 )
+                # Carry the turn's agent, model and mode over: the loop reads
+                # them from the latest user message, and the defaults would
+                # silently switch a plan-mode or non-rex turn after compaction.
+                turn_user = next(
+                    (m for m in all_msgs if m.id == parent_id and _role_of(m) == "user"),
+                    None,
+                )
+                turn_fields: Dict[str, Any] = {}
+                if turn_user is not None:
+                    turn_fields = {
+                        "agent": getattr(turn_user, "agent", None) or "rex",
+                        "model": getattr(turn_user, "model", None),
+                        "executionMode": getattr(turn_user, "executionMode", None),
+                    }
+                    turn_fields = {k: v for k, v in turn_fields.items() if v}
+                # turn_fields' agent also preserves an isolated session's agent,
+                # so a synthetic user message can't widen its tool set back to
+                # Rex's default.
                 await Message.create(
                     session_id=session_id,
                     role=MessageRole.USER,
                     content=post_compaction_text,
                     synthetic=True,
+                    part_metadata={pruning.COMPACTION_CONTINUATION_METADATA_KEY: True},
+                    **turn_fields,
                 )
                 log.info("compaction.continuation_message_created", {
                     "session_id": session_id,
@@ -1788,6 +1967,33 @@ class SessionCompaction:
         return "continue"
 
     @classmethod
+    async def _tail_budget_cutoff(
+        cls,
+        session_id: str,
+        messages: list,
+        budget_tokens: int,
+    ) -> int:
+        """Index before which messages fall outside the preserved-tail budget.
+
+        Walks back from the newest message and always keeps the latest
+        assistant step (with what follows it), so the agent still sees the
+        output it was working with.
+        """
+        kept_tokens = 0
+        kept_assistant = False
+        for index in range(len(messages) - 1, -1, -1):
+            message = messages[index]
+            if getattr(message, "finish", None) == "summary":
+                continue
+            tokens = await SessionPrompt.estimate_full_context_tokens(session_id, [message])
+            if kept_assistant and kept_tokens + tokens > budget_tokens:
+                return index + 1
+            kept_tokens += tokens
+            if _role_of(message) == "assistant":
+                kept_assistant = True
+        return 0
+
+    @classmethod
     async def _build_post_compaction_context(
         cls,
         session_id: str,
@@ -1795,23 +2001,55 @@ class SessionCompaction:
     ) -> str:
         """Build the post-compaction continuation message.
 
-        Re-injects critical session context that may be lost after compaction,
-        similar to OpenClaw's post-compaction system event injection.
-        Only injects project rules for medium+ context window models to avoid
-        bloating the context on small models.
+        The summary is written by a model and routinely paraphrases or drops
+        details, so the facts the next step cannot work without are
+        re-injected verbatim: what the user asked for (the archived requests)
+        and the live todo list.  Without them the agent tended to restart the
+        task and write a fresh, different plan.  Project rules are added for
+        medium+ context windows, mirroring OpenClaw's post-compaction event.
         """
         from .policy import ContextTier
 
+        tier = policy.tier if policy else ContextTier.MEDIUM
         parts = [
-            "The conversation history has been compacted. "
-            "A summary of previous context is provided above.",
+            "The conversation history before this point was compacted to free "
+            "up context. The assistant message above summarizes it; the most "
+            "recent steps before that summary are kept verbatim.",
             "",
-            "Continue if you have next steps.",
+            "Continue if you have next steps: resume the current task exactly "
+            "where it left off. Do not restart it, do not re-plan work that is "
+            "already done, and do not ask the user to repeat information. Keep "
+            "using the existing todo list and update it as items complete.",
         ]
+
+        if tier != ContextTier.SMALL:
+            try:
+                requests_text = await cls._archived_user_requests_text(
+                    session_id,
+                    max_chars=_POST_COMPACTION_REQUEST_CHARS.get(tier.value, 4000),
+                )
+            except Exception as e:
+                log.debug("compaction.post_context.requests_error", {"error": str(e)})
+                requests_text = ""
+            if requests_text:
+                parts.append("")
+                parts.append(
+                    "Earlier user requests (verbatim; the summary may paraphrase them):"
+                )
+                parts.append(requests_text)
+
+        try:
+            todos_text = await cls._todo_list_text(session_id)
+        except Exception as e:
+            log.debug("compaction.post_context.todos_error", {"error": str(e)})
+            todos_text = ""
+        if todos_text:
+            parts.append("")
+            parts.append("Current todo list (from the todo tool):")
+            parts.append(todos_text)
 
         # Only inject project rules for models with sufficient context window.
         # Small-tier models cannot afford the extra tokens.
-        tier = policy.tier if policy else ContextTier.MEDIUM
         if tier in (ContextTier.SMALL,):
             return "\n".join(parts)
 
@@ -1819,7 +2057,6 @@ class SessionCompaction:
             from flocks.session.session import Session
             session_info = await Session.get_by_id(session_id)
             if session_info and session_info.directory:
-                import os
                 max_rules_chars = 4000 if tier in (ContextTier.LARGE, ContextTier.XLARGE) else 2000
                 for rules_file in ["AGENTS.md", ".flocks/rules/rules.md"]:
                     rules_path = os.path.join(session_info.directory, rules_file)
@@ -1835,3 +2072,60 @@ class SessionCompaction:
             log.debug("compaction.post_context.rules_error", {"error": str(e)})
 
         return "\n".join(parts)
+
+    @classmethod
+    async def _archived_user_requests_text(cls, session_id: str, *, max_chars: int) -> str:
+        """Bulleted, verbatim text of the user's own messages that were archived.
+
+        Messages still in the conversation are skipped (the model sees them
+        as-is), as are system-generated ones.  When the budget is tight the
+        first request and the most recent ones win.  The first one is labelled:
+        it is usually the task itself, but in a long-lived session (an IM
+        channel) it can be an unrelated task from days ago.
+        """
+        from flocks.session.message import Message
+
+        requests: list[str] = []
+        for msg in await Message.list(session_id, include_archived=True):
+            if _role_of(msg) != "user" or not getattr(msg, "compacted", None):
+                continue
+            parts = await Message.parts(msg.id, session_id)
+            if parts and all(bool(getattr(part, "synthetic", None)) for part in parts):
+                continue
+            text = "\n".join(
+                (getattr(part, "text", "") or "").strip()
+                for part in parts
+                if getattr(part, "type", None) == "text"
+                and not getattr(part, "synthetic", None)
+                and not getattr(part, "ignored", None)
+            ).strip()
+            if not text or text.splitlines()[0].strip().startswith("/compact"):
+                continue
+            requests.append(cls._strip_tool_content(text, _POST_COMPACTION_REQUEST_ITEM_CHARS))
+
+        if not requests:
+            return ""
+        first, rest = requests[0], requests[1:]
+        budget = max_chars - len(first)
+        recent: list[str] = []
+        for text in reversed(rest):
+            if len(text) > budget:
+                break
+            recent.insert(0, text)
+            budget -= len(text)
+        lines = [f"- (earliest request in this session) {first}"]
+        omitted = len(rest) - len(recent)
+        if omitted:
+            lines.append(f"- ({omitted} more request(s) in between; see the summary)")
+        lines.extend(f"- {text}" for text in recent)
+        return "\n".join(lines)
+
+    @staticmethod
+    async def _todo_list_text(session_id: str) -> str:
+        """Render the session's todo list as a checklist, or ``""`` if empty."""
+        from flocks.session.features.todo import Todo
+
+        todos = await Todo.get(session_id)
+        return "\n".join(
+            f"- [{todo.status}] {todo.content}" for todo in todos if todo.content
+        )

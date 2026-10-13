@@ -4,6 +4,14 @@ import path from 'path';
 
 export default defineConfig({
   plugins: [react()],
+  server: {
+    fs: {
+      allow: [
+        __dirname,
+        path.resolve(__dirname, '../flocks/knowledgebase'),
+      ],
+    },
+  },
   test: {
     globals: true,
     environment: 'jsdom',
@@ -15,6 +23,7 @@ export default defineConfig({
     },
   },
   resolve: {
+    dedupe: ['react', 'react-dom'],
     alias: {
       '@': path.resolve(__dirname, './src'),
     },

@@ -39,6 +39,34 @@ describe('protected Hub updates', () => {
     expect(hubAPI.update).toHaveBeenCalledWith('component', 'soc-workspace', 'global', { confirmationToken: 'first', confirmChanges: true });
   });
 
+  it('names the custom pages the update keeps and the ones official pages replace', async () => {
+    hubAPI.previewUpdate.mockResolvedValue({ data: { ...changedPlan, items: [
+      changedPlan.items[0],
+      {
+        ...changedPlan.items[1],
+        keepPages: [
+          { id: 'my-threats', title: '威胁看板', path: 'my_threats' },
+          { id: 'my-assets', title: 'my-assets', path: 'my_assets' },
+        ],
+        replacePages: [{ id: 'soc-dashboard', title: '我的态势', path: 'my_dashboard' }],
+      },
+    ] } });
+    render(<Harness />);
+    await userEvent.click(screen.getByRole('button', { name: '更新' }));
+    await screen.findByRole('dialog');
+    expect(screen.getByText(/你在工作区里自建的页面会保留/)).toBeInTheDocument();
+    expect(screen.getByText(/保留自建页面/)).toHaveTextContent('保留自建页面：威胁看板 (my-threats)、my-assets');
+    expect(screen.getByText(/会被官方页面替换/)).toHaveTextContent('我的态势 (soc-dashboard)');
+  });
+
+  it('shows no page lines when an update keeps or replaces no custom pages', async () => {
+    render(<Harness />);
+    await userEvent.click(screen.getByRole('button', { name: '更新' }));
+    await screen.findByRole('dialog');
+    expect(screen.queryByText(/保留自建页面/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/会被官方页面替换/)).not.toBeInTheDocument();
+  });
+
   it('lists all affected components and cancellation leaves the whole suite unchanged', async () => {
     render(<Harness />);
     await userEvent.click(screen.getByRole('button', { name: '更新' }));

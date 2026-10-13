@@ -7,7 +7,12 @@ import json
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
-from flocks.hooks.execution import current_execution_context, execute_with_hooks
+from flocks.hooks.execution import (
+    ExecutionStopped,
+    current_execution_context,
+    execute_with_hooks,
+    execution_stop_diagnostics,
+)
 from flocks.hooks.pipeline import HookPipeline
 from flocks.utils.log import Log
 from flocks.workflow.execution_store import (
@@ -217,25 +222,102 @@ class TriggerRuntime:
         workflow_json: Dict[str, Any],
         trigger: TriggerDefinition,
         mapped_inputs: Dict[str, Any],
+        verified_auth: Optional[Dict[str, str]] = None,
     ) -> Dict[str, Any]:
-        action_payload = {
+        action_payload: Dict[str, Any] = {
             "operation": "workflow.trigger.execute",
             "transport": "headless",
             "workflow_id": workflow_id,
             "trigger": trigger,
             "inputs": mapped_inputs,
         }
-        return await execute_with_hooks(
-            action_payload,
-            lambda: self._execute_workflow_effect(
+        if verified_auth:
+            # Only the webhook route sets this, after it checked the caller
+            # against the trigger's own API key or HMAC secret; nothing here
+            # comes from the request body.  Such a run carries the same
+            # compatibility marker as the syslog / Kafka adapters, plus what
+            # was verified, instead of being refused for lacking an identity.
+            action_payload["legacy_compat"] = True
+            action_payload["evidence"] = dict(verified_auth)
+        started = False
+
+        async def effect() -> Dict[str, Any]:
+            nonlocal started
+            started = True
+            return await self._execute_workflow_effect(
                 workflow_id=workflow_id,
                 workflow_json=workflow_json,
                 trigger=trigger,
                 mapped_inputs=mapped_inputs,
-            ),
-            before=HookPipeline.run_ingress_before,
-            after=HookPipeline.run_ingress_after,
+            )
+
+        try:
+            return await execute_with_hooks(
+                action_payload,
+                effect,
+                before=HookPipeline.run_ingress_before,
+                after=HookPipeline.run_ingress_after,
+            )
+        except ExecutionStopped as exc:
+            # A stop after the run (from an after-hook) is not a refusal: the
+            # run already has its own record.
+            if not started:
+                await self._record_refused_run(
+                    workflow_id=workflow_id,
+                    trigger=trigger,
+                    mapped_inputs=mapped_inputs,
+                    error=exc,
+                )
+            raise
+
+    async def _record_refused_run(
+        self,
+        *,
+        workflow_id: str,
+        trigger: TriggerDefinition,
+        mapped_inputs: Dict[str, Any],
+        error: ExecutionStopped,
+    ) -> None:
+        """Leave a failed run in the workflow history when an extension refuses it.
+
+        The caller already gets the refusal in the response; without a record
+        the workflow page showed nothing at all for the delivery.
+        """
+        trigger_meta = mapped_inputs.get("_flocks", {}).get("trigger", {})
+        # Only the neutral stop facts: an extension's detail is free text that
+        # may carry payload values, and is never persisted.
+        facts = execution_stop_diagnostics(error)
+        where = ", ".join(
+            f"{label}={facts[key]}"
+            for key, label in (("stop_source", "hook"), ("stop_stage", "stage"))
+            if facts.get(key)
         )
+        try:
+            exec_data = await create_execution_record(workflow_id, input_params=mapped_inputs)
+            exec_data.update(
+                {
+                    "status": "error",
+                    "finishedAt": _now_ms(),
+                    "duration": 0.0,
+                    "errorMessage": "Run refused by extension" + (f" ({where})" if where else ""),
+                    "executionLog": [],
+                    "stepCount": 0,
+                    "currentPhase": "error",
+                    "currentStepIndex": 0,
+                    "triggerId": trigger.id,
+                    "triggerType": trigger.type,
+                    "deliveryId": trigger_meta.get("deliveryId"),
+                    "attempt": trigger_meta.get("attempt"),
+                    "triggerSource": trigger_meta.get("source"),
+                }
+            )
+            await record_execution_result(workflow_id, exec_data["id"], exec_data, steps=[])
+        except Exception as exc:
+            log.warning("trigger.refused_run.record_failed", {
+                "workflow_id": workflow_id,
+                "trigger_id": trigger.id,
+                "error": str(exc),
+            })
 
     async def _execute_workflow_effect(
         self,
@@ -332,6 +414,7 @@ class TriggerRuntime:
         workflow_json: Dict[str, Any],
         trigger: TriggerDefinition,
         event: TriggerEvent,
+        verified_auth: Optional[Dict[str, str]] = None,
     ) -> Dict[str, Any]:
         async def _executor(mapped_inputs: Dict[str, Any]) -> Dict[str, Any]:
             return await self._execute_workflow(
@@ -339,6 +422,7 @@ class TriggerRuntime:
                 workflow_json=workflow_json,
                 trigger=trigger,
                 mapped_inputs=mapped_inputs,
+                verified_auth=verified_auth,
             )
 
         return await self._dispatcher.dispatch(trigger=trigger, event=event, executor=_executor)

@@ -21,7 +21,9 @@ const { listAllToolPages, mcpAPI, mcpDetailProps, toastWarning } = vi.hoisted(()
 vi.mock('@/api/mcp', () => ({
   mcpAPI,
 }));
-vi.mock('@/components/common/Toast', () => ({ useToast: () => ({ warning: toastWarning }) }));
+vi.mock('@/components/common/Toast', async (importOriginal) => ({
+  // Keep the module's other exports (GroupNav uses useOptionalToast).
+  ...(await importOriginal<typeof import('@/components/common/Toast')>()), useToast: () => ({ warning: toastWarning }) }));
 
 vi.mock('@/api/tool', () => ({
   listAllToolPages,

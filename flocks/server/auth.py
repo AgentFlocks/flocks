@@ -95,6 +95,30 @@ PUBLIC_PATH_REGEXES = (
     re.compile(r"^/webhook/workflows/[^/]+/[^/]+/?$"),
 )
 
+# Extensions add their own self-authenticating endpoints (signed webhooks)
+# through flocks.extensions.register_public_path; the warning above applies.
+_EXTENSION_PUBLIC_PATH_REGEXES: list[re.Pattern[str]] = []
+
+
+def register_public_path_pattern(pattern: str | re.Pattern[str]) -> re.Pattern[str]:
+    """Exempt paths that ``pattern`` matches in full from the auth guard (idempotent).
+
+    Matching uses ``fullmatch``, so neither a missing anchor nor an alternation
+    such as ``^/a|/b$`` can widen the exemption to a path prefix.
+    """
+    if isinstance(pattern, str):
+        compiled = re.compile(pattern)
+    elif isinstance(pattern, re.Pattern) and isinstance(pattern.pattern, str):
+        compiled = pattern
+    else:
+        raise TypeError("Public path patterns must be str or a compiled str pattern")
+    # The same text with other flags (re.IGNORECASE) matches other paths, so both count.
+    for existing in _EXTENSION_PUBLIC_PATH_REGEXES:
+        if (existing.pattern, existing.flags) == (compiled.pattern, compiled.flags):
+            return existing
+    _EXTENSION_PUBLIC_PATH_REGEXES.append(compiled)
+    return compiled
+
 
 def should_use_secure_cookie(request: Request) -> bool:
     forced = os.getenv("FLOCKS_COOKIE_SECURE", "").strip().lower()
@@ -159,7 +183,9 @@ def auth_middleware_exempt(path: str) -> bool:
         return True
     if any(path.startswith(prefix) for prefix in PUBLIC_PREFIXES):
         return True
-    return any(pattern.match(path) for pattern in PUBLIC_PATH_REGEXES)
+    if any(pattern.match(path) for pattern in PUBLIC_PATH_REGEXES):
+        return True
+    return any(pattern.fullmatch(path) for pattern in _EXTENSION_PUBLIC_PATH_REGEXES)
 
 
 _PASSWORD_RESET_ALLOWED = frozenset({
@@ -265,7 +291,10 @@ async def apply_auth_for_request(request: HTTPConnection):
         result = await _apply_auth_for_request(request)
         _blocked, auth_token, user = result
         extension_context: dict[str, Any] = {}
-        for adapter in _auth_context_adapters.values():
+        # Extensions re-register their adapters at runtime (Flocks Pro does
+        # when its licence or security config changes), possibly while this
+        # request is awaiting one; iterate over a snapshot.
+        for adapter in list(_auth_context_adapters.values()):
             supplied = await adapter(request, user)
             if isinstance(supplied, Mapping):
                 extension_context.update(supplied)

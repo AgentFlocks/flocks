@@ -183,6 +183,7 @@ def test_list_workspaces_returns_grouped_pages(tmp_path):
             {
                 "id": "operations",
                 "label": "调查列表",
+                "query": {"view": "audits"},
                 "pageIds": ["ops-overview", "investigation-list"],
                 "defaultPageId": "ops-overview",
                 "contentPadding": "comfortable",
@@ -205,6 +206,8 @@ def test_list_workspaces_returns_grouped_pages(tmp_path):
     assert len(workspaces[0].sections) == 1
     assert workspaces[0].sections[0].id == "operations"
     assert workspaces[0].sections[0].label == "调查列表"
+    assert workspaces[0].sections[0].query == {"view": "audits"}
+    assert workspaces[0].model_dump()["sections"][0]["query"] == {"view": "audits"}
     assert workspaces[0].sections[0].pageIds == ["ops-overview", "investigation-list"]
     assert workspaces[0].sections[0].defaultPageId == "ops-overview"
     assert workspaces[0].sections[0].contentPadding == "comfortable"
@@ -320,3 +323,28 @@ def test_manifest_roundtrip(store: WebUIPagesStore):
     assert manifest.route == "/contracts/webui/roundtrip"
     raw = json.loads((store.page_dir("roundtrip") / "manifest.json").read_text(encoding="utf-8"))
     assert raw["route"] == "/contracts/webui/roundtrip"
+
+
+def test_list_workspaces_keeps_flat_sections_and_their_icons(tmp_path):
+    user_root = tmp_path / "user" / "contracts" / "webui"
+    _write_workspace(
+        user_root,
+        "scene_workspace",
+        "场景工作区",
+        default_page_id="ops-overview",
+        sections=[
+            {"id": "home", "label": "首页", "flat": True, "icon": "Home", "pageIds": ["ops-overview"]},
+            {"id": "tasks", "label": "任务列表", "flat": True, "pageIds": ["ops-overview"], "query": {"view": "audits"}},
+            {"id": "grouped", "label": "分组", "pageIds": ["ops-overview"]},
+        ],
+    )
+    _write_page_at(user_root, "scene_workspace/ops_overview", "ops-overview", "Ops Overview", order=10)
+    store = WebUIPagesStore(root=user_root, project_root=None, legacy_root=None)
+
+    sections = store.list_workspaces()[0].model_dump()["sections"]
+
+    assert [(item["id"], item["flat"], item["icon"]) for item in sections] == [
+        ("home", True, "Home"),
+        ("tasks", True, None),
+        ("grouped", False, None),
+    ]

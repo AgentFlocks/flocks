@@ -55,6 +55,18 @@ function handleNavigationEvent(event: SSEEvent): void {
   refreshAfterSuiteChange();
 }
 
+// The shared stream tells every mounted consumer about the same reconnect
+// (the layout and a workspace host both subscribe): reload navigation once.
+let navigationRecoveryQueued = false;
+function recoverNavigationAfterReconnect(): void {
+  if (navigationRecoveryQueued) return;
+  navigationRecoveryQueued = true;
+  queueMicrotask(() => {
+    navigationRecoveryQueued = false;
+    refreshAfterSuiteChange();
+  });
+}
+
 export function __resetWebUIContractPagesResourceForTesting(): void {
   webuiContractNavResource.resetForTesting();
 }
@@ -89,6 +101,8 @@ export function useWebUIContractPages() {
   useSSE({
     url: '/api/event',
     onEvent: handleNavigationEvent,
+    // Navigation changes made while the stream was down are not replayed.
+    onReconnect: recoverNavigationAfterReconnect,
     reconnect: { maxRetries: 5, initialDelay: 2000 },
   });
 

@@ -11,6 +11,7 @@ from typing import Optional
 
 import typer
 from rich.console import Console
+from rich.markup import escape
 from rich.panel import Panel
 from rich.table import Table
 
@@ -26,6 +27,23 @@ task_app = typer.Typer(
 console = Console()
 
 
+def _run_task_command(operation):
+    """Close invocation-owned stores before asyncio tears down the event loop."""
+    from flocks.cli.runtime import close_cli_resources
+    from flocks.task.store import TaskStore
+
+    async def execute():
+        try:
+            return await operation
+        finally:
+            try:
+                await TaskStore.close()
+            finally:
+                await close_cli_resources()
+
+    return asyncio.run(execute())
+
+
 # ------------------------------------------------------------------
 # Default: dashboard
 # ------------------------------------------------------------------
@@ -34,13 +52,13 @@ console = Console()
 def task_default(ctx: typer.Context):
     """Show task dashboard (default when no subcommand given)."""
     if ctx.invoked_subcommand is None:
-        asyncio.run(_dashboard())
+        _run_task_command(_dashboard())
 
 
 @task_app.command("dashboard")
 def task_dashboard():
     """Show task center overview."""
-    asyncio.run(_dashboard())
+    _run_task_command(_dashboard())
 
 
 async def _dashboard():
@@ -83,7 +101,7 @@ def task_list(
     format: str = typer.Option("table", "--format", help="Output format: table | json"),
 ):
     """List tasks."""
-    asyncio.run(_list_tasks(status, task_type, limit, format))
+    _run_task_command(_list_tasks(status, task_type, limit, format))
 
 
 async def _list_tasks(status_val, type_val, limit, fmt):
@@ -114,7 +132,8 @@ async def _list_tasks(status_val, type_val, limit, fmt):
         )
 
     if fmt == "json":
-        console.print(json.dumps([t.model_dump(mode="json") for t in tasks], indent=2, default=str))
+        # Not console.print: Rich wraps long strings and eats [markup].
+        typer.echo(json.dumps([t.model_dump(mode="json") for t in tasks], indent=2, default=str))
         return
 
     table = Table(title=f"Tasks ({total} total)", show_header=True, header_style="bold cyan")
@@ -155,7 +174,7 @@ async def _list_tasks(status_val, type_val, limit, fmt):
 @task_app.command("show")
 def task_show(task_id: str = typer.Argument(..., help="Task ID")):
     """Show task details."""
-    asyncio.run(_show_task(task_id))
+    _run_task_command(_show_task(task_id))
 
 
 async def _show_task(task_id: str):
@@ -180,25 +199,34 @@ async def _show_task(task_id: str):
     else:
         type_value = "execution"
     display_tz = resolve_task_timezone_name(task)
+    # Executions carry no skills/category of their own; they keep the
+    # scheduler's values from when they were created in the input snapshot.
+    snapshot = getattr(task, "execution_input_snapshot", None) or {}
+    skills = getattr(task, "skills", None) or snapshot.get("skills") or []
+    category = getattr(task, "category", None) or snapshot.get("category")
     lines = [
-        f"[bold]{task.title}[/bold]",
+        f"[bold]{escape(task.title)}[/bold]",
         f"ID:       {task.id}",
         f"Type:     {type_value}",
         f"Status:   {task.status.value}",
         f"Priority: {task.priority.value}",
         f"Mode:     {task.execution_mode.value}",
     ]
+    if getattr(task, "scheduler_id", None):
+        lines.append(f"Scheduler: {task.scheduler_id}")
+    if getattr(task, "session_id", None):
+        lines.append(f"Session:  {task.session_id}")
     if task.execution_mode.value == "agent":
-        lines.append(f"Agent:    {task.agent_name}")
+        lines.append(f"Agent:    {escape(task.agent_name)}")
     if task.workflow_id:
-        lines.append(f"Workflow: {task.workflow_id}")
-    if task.skills:
-        lines.append(f"Skills:   {', '.join(task.skills)}")
-    if task.category:
-        lines.append(f"Category: {task.category}")
+        lines.append(f"Workflow: {escape(task.workflow_id)}")
+    if skills:
+        lines.append(f"Skills:   {escape(', '.join(skills))}")
+    if category:
+        lines.append(f"Category: {escape(str(category))}")
     lines.append(f"Created:  {format_task_datetime(task.created_at, display_tz)}")
     if task.description:
-        lines.append(f"Desc:     {task.description}")
+        lines.append(f"Desc:     {escape(task.description)}")
     if getattr(task, "trigger", None):
         if task.trigger.cron:
             lines.append(f"Cron:     {task.trigger.cron} ({task.trigger.timezone})")
@@ -213,9 +241,9 @@ async def _show_task(task_id: str):
     if getattr(task, "duration_ms", None) is not None:
         lines.append(f"Duration: {_fmt_duration(task.duration_ms)}")
     if getattr(task, "result_summary", None):
-        lines.append(f"\n[bold]Result:[/bold]\n{task.result_summary}")
+        lines.append(f"\n[bold]Result:[/bold]\n{escape(task.result_summary)}")
     if getattr(task, "error", None):
-        lines.append(f"\n[red]Error:[/red] {task.error}")
+        lines.append(f"\n[red]Error:[/red] {escape(task.error)}")
 
     console.print(Panel("\n".join(lines), border_style="cyan"))
 
@@ -238,7 +266,7 @@ def task_create(
     prompt: Optional[str] = typer.Option(None, "--prompt", help="User prompt"),
 ):
     """Create a new task."""
-    asyncio.run(_create_task(title, description, task_type, priority, mode, agent, workflow, skill or [], cron, prompt))
+    _run_task_command(_create_task(title, description, task_type, priority, mode, agent, workflow, skill or [], cron, prompt))
 
 
 async def _create_task(title, description, task_type, priority, mode, agent, workflow, skills, cron, prompt):
@@ -301,7 +329,7 @@ def task_queue(
     resume: bool = typer.Option(False, "--resume", help="Resume queue"),
 ):
     """View or control the task queue."""
-    asyncio.run(_queue(pause, resume))
+    _run_task_command(_queue(pause, resume))
 
 
 async def _queue(pause: bool, resume: bool):
@@ -337,7 +365,7 @@ async def _queue(pause: bool, resume: bool):
 @task_app.command("scheduled")
 def task_scheduled():
     """List all scheduled tasks."""
-    asyncio.run(_scheduled())
+    _run_task_command(_scheduled())
 
 
 async def _scheduled():
@@ -379,7 +407,7 @@ async def _scheduled():
 @task_app.command("cancel")
 def task_cancel(task_id: str = typer.Argument(..., help="Task ID")):
     """Cancel a task."""
-    asyncio.run(_cancel(task_id))
+    _run_task_command(_cancel(task_id))
 
 
 async def _cancel(task_id: str):
@@ -398,7 +426,7 @@ async def _cancel(task_id: str):
 @task_app.command("retry")
 def task_retry(task_id: str = typer.Argument(..., help="Task ID")):
     """Retry a failed task."""
-    asyncio.run(_retry(task_id))
+    _run_task_command(_retry(task_id))
 
 
 async def _retry(task_id: str):
@@ -417,7 +445,7 @@ async def _retry(task_id: str):
 @task_app.command("rerun")
 def task_rerun(task_id: str = typer.Argument(..., help="Task ID")):
     """Rerun a task (stop if running, requeue)."""
-    asyncio.run(_rerun(task_id))
+    _run_task_command(_rerun(task_id))
 
 
 async def _rerun(task_id: str):

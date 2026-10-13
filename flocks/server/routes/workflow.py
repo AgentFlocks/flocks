@@ -7,6 +7,7 @@ Provides API endpoints for workflow CRUD, execution, history, and AI generation.
 from __future__ import annotations
 
 import asyncio
+import copy
 import hashlib
 import hmac
 import json
@@ -75,6 +76,7 @@ from flocks.workflow.triggers import (
     TriggerDefinition,
     TriggerEvent,
     build_trigger_event,
+    default_trigger_id,
     preview_trigger_mapping,
     set_workflow_json_triggers,
     workflow_json_declares_triggers,
@@ -92,7 +94,7 @@ from flocks.workflow.triggers.compat import (
     syslog_trigger_to_legacy_config,
 )
 from flocks.config.config import Config
-from flocks.hooks.execution import current_execution_context
+from flocks.hooks.execution import ExecutionStopped, current_execution_context
 from flocks.storage.storage import Storage
 from flocks.server.routes.event import publish_event
 from flocks.tool import ToolContext
@@ -513,6 +515,80 @@ def _apply_new_workflow_runtime_defaults(workflow_json: Dict[str, Any]) -> Dict[
     metadata["runtime"] = runtime
     normalized["metadata"] = metadata
     return normalized
+
+
+_RUNTIME_METADATA_SECTIONS = ("runtime", "runtime_defaults", "runtimeDefaults")
+# Each setting is read from the metadata root or any runtime section, under
+# either spelling (workflow_lint / execution_plan resolve them in that order).
+_RUNTIME_SETTING_ALIASES = (
+    ("strict_edge_mapping", "strictEdgeMapping"),
+    ("dataflow_mode", "dataflowMode"),
+)
+_RUNTIME_SETTING_KEYS = frozenset(alias for aliases in _RUNTIME_SETTING_ALIASES for alias in aliases)
+
+
+def _metadata_sets(metadata: Dict[str, Any], aliases: tuple[str, ...]) -> bool:
+    scopes = [metadata, *(metadata.get(section) for section in _RUNTIME_METADATA_SECTIONS)]
+    return any(
+        isinstance(scope, dict) and any(scope.get(alias) is not None for alias in aliases)
+        for scope in scopes
+    )
+
+
+def _inherit_saved_workflow_metadata(
+    incoming: Dict[str, Any],
+    saved: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Fill metadata an update left out from the saved definition.
+
+    The editor echoes metadata back, but API callers often send only nodes and
+    edges; replacing metadata wholesale dropped strict edge mapping, so
+    mapping-less edges then passed lint. Omitted metadata keeps the saved
+    block. Otherwise runtime sections keep their saved keys under the request's
+    own; a setting the request spells anywhere (null counts as unset) drops
+    every saved spelling of it, so an inherited alias cannot outrank it.
+    """
+    saved_metadata = saved.get("metadata") if isinstance(saved, dict) else None
+    merged = dict(incoming)
+    if not isinstance(saved_metadata, dict) or not saved_metadata:
+        return merged
+    incoming_metadata = merged.get("metadata")
+    if not isinstance(incoming_metadata, dict):
+        merged["metadata"] = copy.deepcopy(saved_metadata)
+        return merged
+
+    overridden = {
+        alias
+        for aliases in _RUNTIME_SETTING_ALIASES
+        if _metadata_sets(incoming_metadata, aliases)
+        for alias in aliases
+    }
+    metadata = dict(incoming_metadata)
+    for aliases in _RUNTIME_SETTING_ALIASES:
+        for alias in aliases:
+            if alias not in overridden and metadata.get(alias) is None and alias in saved_metadata:
+                metadata[alias] = copy.deepcopy(saved_metadata[alias])
+    for section in _RUNTIME_METADATA_SECTIONS:
+        saved_section = saved_metadata.get(section)
+        if not isinstance(saved_section, dict):
+            continue
+        inherited = {
+            key: copy.deepcopy(value)
+            for key, value in saved_section.items()
+            if key not in overridden
+        }
+        incoming_section = metadata.get(section)
+        if isinstance(incoming_section, dict):
+            # A null setting means "not given" here too, like at the root.
+            inherited.update(
+                (key, value)
+                for key, value in incoming_section.items()
+                if value is not None or key not in _RUNTIME_SETTING_KEYS
+            )
+        if inherited:
+            metadata[section] = inherited
+    merged["metadata"] = metadata
+    return merged
 
 
 def _strict_edge_mapping_lint_errors(workflow: Workflow) -> List[Dict[str, Any]]:
@@ -1069,6 +1145,17 @@ def _replace_or_append_trigger(
     return updated
 
 
+def _legacy_singleton_trigger_id(triggers: List[TriggerDefinition], trigger_type: str) -> str:
+    """Id for a legacy poller/kafka/syslog config save.
+
+    These endpoints edit the workflow's only trigger of that type, so they keep
+    its id (run history and status are keyed by it) instead of appending a
+    ``<type>-default`` sibling that the singleton check would reject.
+    """
+    existing = next((item for item in triggers if item.type == trigger_type), None)
+    return existing.id if existing is not None and existing.id else default_trigger_id(trigger_type)
+
+
 def _disable_legacy_trigger_of_type(
     workflow_id: str,
     trigger_type: str,
@@ -1572,6 +1659,52 @@ async def create_workflow(req: WorkflowCreateRequest):
         raise HTTPException(status_code=500, detail=f"Failed to create workflow: {str(e)}")
 
 
+# Stays above GET /workflow/{workflow_id}: routes match in registration
+# order, so a later /workflow/stats would be read as a workflow ID.
+@router.get("/workflow/stats", response_model=WorkflowStatsResponse)
+async def get_aggregate_stats():
+    """
+    Get aggregate workflow statistics
+
+    Returns statistics across all workflows.
+    """
+    try:
+        aggregate = {
+            "workflowId": None,
+            "callCount": 0,
+            "successCount": 0,
+            "errorCount": 0,
+            "totalRuntime": 0.0,
+            "avgRuntime": 0.0,
+            "thumbsUp": 0,
+            "thumbsDown": 0,
+        }
+
+        all_workflows = _list_workflows_from_fs()
+        workflow_count = 0
+        for wf in all_workflows:
+            try:
+                stats = await _get_workflow_stats(wf["id"])
+                aggregate["callCount"] += stats.get("callCount", 0)
+                aggregate["successCount"] += stats.get("successCount", 0)
+                aggregate["errorCount"] += stats.get("errorCount", 0)
+                aggregate["totalRuntime"] += stats.get("totalRuntime", 0.0)
+                aggregate["thumbsUp"] += stats.get("thumbsUp", 0)
+                aggregate["thumbsDown"] += stats.get("thumbsDown", 0)
+                workflow_count += 1
+            except Exception:
+                continue
+
+        if aggregate["callCount"] > 0:
+            aggregate["avgRuntime"] = aggregate["totalRuntime"] / aggregate["callCount"]
+
+        log.info("workflow.stats.aggregate", {"workflows": workflow_count})
+        return WorkflowStatsResponse(**aggregate)
+    except Exception as e:
+        log.error("workflow.stats.error", {"error": str(e)})
+        raise HTTPException(status_code=500, detail=f"Failed to get statistics: {str(e)}")
+
+
 @router.get("/workflow/{workflow_id}", response_model=WorkflowResponse)
 async def get_workflow(workflow_id: str):
     """
@@ -1645,7 +1778,9 @@ async def update_workflow(workflow_id: str, req: WorkflowUpdateRequest):
             data["status"] = req.status
         if req.workflow_json is not None:
             try:
-                workflow_model = Workflow.from_dict(req.workflow_json)
+                # Lint and save the merged definition, not the bare request body.
+                incoming_json = _inherit_saved_workflow_metadata(req.workflow_json, workflow_json)
+                workflow_model = Workflow.from_dict(incoming_json)
                 strict_mapping_errors = _strict_edge_mapping_lint_errors(workflow_model)
                 if strict_mapping_errors:
                     raise HTTPException(
@@ -1658,7 +1793,7 @@ async def update_workflow(workflow_id: str, req: WorkflowUpdateRequest):
                         status_code=400,
                         detail=(f"Workflow schema lint failed: {schema_errors[:5]}"),
                     )
-                workflow_json = dict(req.workflow_json)
+                workflow_json = incoming_json
                 if isinstance(workflow_json.get("metadata"), dict):
                     workflow_json["metadata"] = dict(workflow_json["metadata"])
                     workflow_json["metadata"].pop("group", None)
@@ -2184,50 +2319,6 @@ async def get_execution_details(
 # =============================================================================
 # API Endpoints - Workflow Statistics
 # =============================================================================
-
-
-@router.get("/workflow/stats", response_model=WorkflowStatsResponse)
-async def get_aggregate_stats():
-    """
-    Get aggregate workflow statistics
-
-    Returns statistics across all workflows.
-    """
-    try:
-        aggregate = {
-            "workflowId": None,
-            "callCount": 0,
-            "successCount": 0,
-            "errorCount": 0,
-            "totalRuntime": 0.0,
-            "avgRuntime": 0.0,
-            "thumbsUp": 0,
-            "thumbsDown": 0,
-        }
-
-        all_workflows = _list_workflows_from_fs()
-        workflow_count = 0
-        for wf in all_workflows:
-            try:
-                stats = await _get_workflow_stats(wf["id"])
-                aggregate["callCount"] += stats.get("callCount", 0)
-                aggregate["successCount"] += stats.get("successCount", 0)
-                aggregate["errorCount"] += stats.get("errorCount", 0)
-                aggregate["totalRuntime"] += stats.get("totalRuntime", 0.0)
-                aggregate["thumbsUp"] += stats.get("thumbsUp", 0)
-                aggregate["thumbsDown"] += stats.get("thumbsDown", 0)
-                workflow_count += 1
-            except Exception:
-                continue
-
-        if aggregate["callCount"] > 0:
-            aggregate["avgRuntime"] = aggregate["totalRuntime"] / aggregate["callCount"]
-
-        log.info("workflow.stats.aggregate", {"workflows": workflow_count})
-        return WorkflowStatsResponse(**aggregate)
-    except Exception as e:
-        log.error("workflow.stats.error", {"error": str(e)})
-        raise HTTPException(status_code=500, detail=f"Failed to get statistics: {str(e)}")
 
 
 @router.get("/workflow/{workflow_id}/stats", response_model=WorkflowStatsResponse)
@@ -3258,6 +3349,33 @@ async def preview_workflow_trigger_mapping(
     )
 
 
+async def _dispatch_trigger_event(
+    *,
+    workflow_id: str,
+    workflow_json: Dict[str, Any],
+    trigger: TriggerDefinition,
+    event: TriggerEvent,
+    verified_auth: Optional[Dict[str, str]] = None,
+) -> Dict[str, Any]:
+    """Dispatch a trigger event, answering an extension's refusal with 403."""
+    try:
+        return await default_trigger_runtime.dispatch_event(
+            workflow_id=workflow_id,
+            workflow_json=workflow_json,
+            trigger=trigger,
+            event=event,
+            verified_auth=verified_auth,
+        )
+    except ExecutionStopped as exc:
+        # The message is the reason the extension gave (for example Flocks
+        # Pro's "headless_evidence_missing"); pass it on so the caller does
+        # not have to read the server log to learn why the run was refused.
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Workflow trigger stopped by extension: {exc}",
+        ) from exc
+
+
 @router.post("/workflow/{workflow_id}/triggers/{trigger_id}/test")
 async def test_workflow_trigger(
     workflow_id: str,
@@ -3278,7 +3396,7 @@ async def test_workflow_trigger(
         query=payload.query,
         path_params=payload.path_params,
     )
-    result = await default_trigger_runtime.dispatch_event(
+    result = await _dispatch_trigger_event(
         workflow_id=workflow_id,
         workflow_json=workflow_json,
         trigger=trigger,
@@ -3316,13 +3434,19 @@ def _normalize_hmac_signature(signature: Optional[str]) -> Optional[str]:
     return value
 
 
+def _webhook_secret_fingerprint(secret: str) -> str:
+    """Secret-safe stable id of a trigger key, as the service runtime emits it."""
+    return f"sha256:{hashlib.sha256(secret.encode('utf-8')).hexdigest()}"
+
+
 def _authorize_webhook_trigger(
     trigger: TriggerDefinition,
     headers: Dict[str, str],
     query: Dict[str, str],
     *,
     raw_body: bytes,
-) -> None:
+) -> Dict[str, str]:
+    """Check the caller against the trigger's own secret and say what passed."""
     auth = trigger.auth
     auth_type = _webhook_auth_type(trigger)
     if auth is None or auth_type in {"none", ""}:
@@ -3338,7 +3462,7 @@ def _authorize_webhook_trigger(
         actual = headers.get(header_name) or query.get(auth.queryParam or "api_key")
         if actual != expected:
             raise HTTPException(status_code=401, detail="Invalid webhook API key")
-        return
+        return {"auth_scheme": "api_key", "api_key_id": _webhook_secret_fingerprint(expected)}
     if auth_type == "hmac":
         expected = _resolve_trigger_secret(auth.secretRef)
         if not expected:
@@ -3351,7 +3475,7 @@ def _authorize_webhook_trigger(
         ).hexdigest()
         if not signature or not hmac.compare_digest(signature, expected_signature):
             raise HTTPException(status_code=401, detail="Invalid webhook signature")
-        return
+        return {"auth_scheme": "hmac", "key_id": _webhook_secret_fingerprint(expected)}
     raise HTTPException(status_code=400, detail=f"Unsupported webhook auth type: {auth.type}")
 
 
@@ -3376,7 +3500,7 @@ async def invoke_workflow_webhook_trigger(
     headers = {key.lower(): value for key, value in request.headers.items()}
     query = {key: value for key, value in request.query_params.items()}
     raw_body = await request.body()
-    _authorize_webhook_trigger(trigger, headers, query, raw_body=raw_body)
+    verified_auth = _authorize_webhook_trigger(trigger, headers, query, raw_body=raw_body)
 
     try:
         body = json.loads(raw_body.decode("utf-8"))
@@ -3393,11 +3517,12 @@ async def invoke_workflow_webhook_trigger(
         raw=body,
         source=(trigger.source or {}).get("path") or str(request.url.path),
     )
-    result = await default_trigger_runtime.dispatch_event(
+    result = await _dispatch_trigger_event(
         workflow_id=workflow_id,
         workflow_json=workflow_json,
         trigger=trigger,
         event=event,
+        verified_auth=verified_auth,
     )
     return {
         "ok": True,
@@ -3435,9 +3560,10 @@ async def save_kafka_config(workflow_id: str, req: KafkaConfigRequest):
             "updatedAt": int(time.time() * 1000),
         }
         await WorkflowStore.put_config(workflow_id, config, kind="workflow_kafka_config")
+        triggers = await _get_workflow_trigger_defs(workflow_id, data)
         unified_trigger = TriggerDefinition.model_validate(
             {
-                "id": "kafka-default",
+                "id": _legacy_singleton_trigger_id(triggers, "kafka"),
                 "type": "kafka",
                 "enabled": req.enabled,
                 "source": {
@@ -3453,7 +3579,6 @@ async def save_kafka_config(workflow_id: str, req: KafkaConfigRequest):
                 "updatedAt": config["updatedAt"],
             }
         )
-        triggers = await _get_workflow_trigger_defs(workflow_id, data)
         updated_triggers = _replace_or_append_trigger(triggers, unified_trigger)
         _validate_trigger_type_constraints(updated_triggers)
         await _persist_workflow_triggers(
@@ -3550,9 +3675,10 @@ async def save_workflow_poller_config(workflow_id: str, req: WorkflowPollerConfi
             "updatedAt": int(time.time() * 1000),
         }
         await WorkflowStore.put_config(workflow_id, config, kind="workflow_poller_config")
+        triggers = await _get_workflow_trigger_defs(workflow_id, data)
         unified_trigger = TriggerDefinition.model_validate(
             {
-                "id": "schedule-default",
+                "id": _legacy_singleton_trigger_id(triggers, "schedule"),
                 "type": "schedule",
                 "enabled": req.enabled,
                 "source": trigger_source,
@@ -3564,7 +3690,6 @@ async def save_workflow_poller_config(workflow_id: str, req: WorkflowPollerConfi
                 "updatedAt": config["updatedAt"],
             }
         )
-        triggers = await _get_workflow_trigger_defs(workflow_id, data)
         updated_triggers = _replace_or_append_trigger(triggers, unified_trigger)
         _validate_trigger_type_constraints(updated_triggers)
         await _persist_workflow_triggers(
@@ -3666,9 +3791,10 @@ async def save_syslog_config(workflow_id: str, req: SyslogConfigRequest):
             "updatedAt": int(time.time() * 1000),
         }
         await WorkflowStore.put_config(workflow_id, config, kind="workflow_syslog_config")
+        triggers = await _get_workflow_trigger_defs(workflow_id, data)
         unified_trigger = TriggerDefinition.model_validate(
             {
-                "id": "syslog-default",
+                "id": _legacy_singleton_trigger_id(triggers, "syslog"),
                 "type": "syslog",
                 "enabled": req.enabled,
                 "source": {
@@ -3683,7 +3809,6 @@ async def save_syslog_config(workflow_id: str, req: SyslogConfigRequest):
                 "updatedAt": config["updatedAt"],
             }
         )
-        triggers = await _get_workflow_trigger_defs(workflow_id, data)
         updated_triggers = _replace_or_append_trigger(triggers, unified_trigger)
         _validate_trigger_type_constraints(updated_triggers)
         await _persist_workflow_triggers(

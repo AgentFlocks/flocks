@@ -35,7 +35,9 @@ from flocks.session.background_tasks import (
     track_background_task,
 )
 from flocks.session.session import (
+    DEDICATED_AGENT_POLICY_METADATA_KEY,
     Session,
+    SessionAgentMismatchError,
     SessionInactiveError,
     SessionInfo as SessionModel,
     SessionNotFoundError,
@@ -588,6 +590,7 @@ async def _persist_active_session_write(
     operation,
     *,
     expected_generation: Optional[int] = None,
+    expected_agent: Optional[str] = None,
 ):
     """Linearize a durable route write with archive/delete transitions."""
     try:
@@ -595,6 +598,7 @@ async def _persist_active_session_write(
             session_id,
             operation,
             expected_generation=expected_generation,
+            expected_agent=expected_agent,
         )
     except SessionNotFoundError as exc:
         raise HTTPException(
@@ -605,6 +609,11 @@ async def _persist_active_session_write(
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="已归档会话不可修改，请先恢复",
+        ) from exc
+    except SessionAgentMismatchError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
         ) from exc
 
 
@@ -639,6 +648,54 @@ async def _require_agent_usable_for_chat(agent_name: Optional[str]) -> None:
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f'Agent "{agent_name}" is disabled',
         )
+
+
+async def _prepare_session_agent_before_bootstrap(
+    session: SessionModel,
+    requested_agent: Optional[str],
+) -> tuple[SessionModel, str]:
+    """Apply agent isolation before any project-scoped runtime is initialized."""
+    from flocks.agent.registry import Agent
+    from flocks.session.agent_policy import (
+        AgentSessionPolicyError,
+        prepare_session_for_agent,
+    )
+
+    await _require_agent_usable_for_chat(requested_agent)
+    metadata = getattr(session, "metadata", None)
+    policy = (
+        metadata.get(DEDICATED_AGENT_POLICY_METADATA_KEY)
+        if isinstance(metadata, dict)
+        else None
+    )
+    claimed_agent = (
+        policy.get("agent")
+        if isinstance(policy, dict) and policy.get("version") == 1
+        else None
+    )
+    stored_agent = getattr(session, "agent", None)
+    if not requested_agent and not claimed_agent and not stored_agent:
+        return session, DEFAULT_AGENT
+    agent_name = (
+        requested_agent
+        or claimed_agent
+        or stored_agent
+        or await Agent.default_agent()
+    )
+    agent = await Agent.get(agent_name)
+    if agent is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f'Agent "{agent_name}" is not available',
+        )
+    try:
+        prepared = await prepare_session_for_agent(session, agent)
+    except AgentSessionPolicyError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
+    return prepared, agent_name
 
 
 def _is_hidden_from_session_manager(session: SessionModel) -> bool:
@@ -752,9 +809,9 @@ async def _publish_context_usage_update(
     summary="Get session status",
     description="Retrieve the current status of all sessions (idle, busy, retry)",
 )
-async def get_session_status() -> Dict[str, Any]:
+async def get_session_status(http_request: Request) -> Dict[str, Any]:
     """
-    Get session status for all sessions
+    Get session status for all sessions the caller can read
     
     Returns a dictionary mapping session IDs to their status:
     - idle: Session is not processing
@@ -766,15 +823,35 @@ async def get_session_status() -> Dict[str, Any]:
     from flocks.session.core.status import SessionStatus
     from flocks.session.core.turn_state import get_turn_state, get_context_state
     
+    from flocks.session.agent_inbox import AgentInbox
+
+    current_user = require_user(http_request)
     statuses = SessionStatus.list()
-    return {
-        session_id: {
+    readable: Dict[str, bool] = {}
+
+    async def can_read(session_id: str) -> bool:
+        # The list spans every instance, so it must not show sessions (or
+        # their ancestry) that the caller could not open one by one.
+        if session_id not in readable:
+            session = await _get_session_by_id_unfiltered(session_id)
+            readable[session_id] = session is not None and SessionPolicy.can_read(session, current_user)
+        return readable[session_id]
+
+    visible: Dict[str, Any] = {}
+    for session_id, status in statuses.items():
+        if not await can_read(session_id):
+            continue
+        visible[session_id] = {
             **status.model_dump(),
+            "ancestorSessionIDs": [
+                ancestor_id
+                for ancestor_id in AgentInbox.ancestors(session_id)
+                if await can_read(ancestor_id)
+            ],
             "turn": get_turn_state(session_id).model_dump(by_alias=True),
             "context": get_context_state(session_id).model_dump(by_alias=True),
         }
-        for session_id, status in statuses.items()
-    }
+    return visible
 
 
 async def _build_session_runtime_status(session: SessionModel) -> SessionRuntimeStatusResponse:
@@ -1209,6 +1286,58 @@ async def create_session(http_request: Request, request: Optional[SessionCreateR
     return await _session_to_response_with_goal(session)
 
 
+
+
+# Static reads stay above GET /{sessionID}: routes match in registration
+# order, so a later /metrics or /recent would be read as a session ID.
+
+@router.get("/metrics")
+async def get_metrics():
+    """
+    Get system-wide monitoring metrics
+
+    Returns metrics including:
+    - Tool call parsing success/failure rates
+    - Repair strategy success rates
+    - Top failing tools
+    - Recent failure details
+    """
+    monitor = get_monitor()
+    metrics = monitor.get_metrics()
+
+    return {
+        "status": "success",
+        "metrics": metrics,
+    }
+
+
+@router.get("/recent")
+async def get_recent_sessions(
+    request: Request,
+    limit: int = Query(10, ge=1, le=50, description="Number of sessions"),
+):
+    """
+    Get recent sessions
+
+    Returns the most recently updated sessions the caller may read, with the
+    same visibility rules as ``GET /session``.
+    """
+    # Every parameter is passed explicitly: called as a plain function, the
+    # omitted ones would arrive as FastAPI ``Query`` objects, not None.
+    return await list_sessions(
+        request,
+        view=None,
+        manager=None,
+        directory=None,
+        projectID=None,
+        roots=None,
+        start=None,
+        search=None,
+        limit=limit,
+        offset=None,
+        category=None,
+        session_status="active",
+    )
 
 
 @router.get(
@@ -2153,8 +2282,8 @@ async def _abort_session_processing(sessionID: str) -> bool:
     # Cancel background sub-agent tasks spawned by this session
     bg_cancelled = 0
     try:
-        from flocks.task.background import get_background_manager
-        bg_cancelled = get_background_manager().cancel_by_parent_session_id(sessionID)
+        from flocks.task.background import cancel_background_runs_for_parent
+        bg_cancelled = cancel_background_runs_for_parent(sessionID)
     except Exception as exc:
         log.warn("session.abort.bg_cancel_error", {"error": str(exc)})
 
@@ -2336,6 +2465,10 @@ async def summarize_session(sessionID: str, request: SummarizeRequest, http_requ
             current_agent = msg.agent or DEFAULT_AGENT
             break
 
+    session, _ = await _prepare_session_agent_before_bootstrap(
+        session,
+        current_agent,
+    )
     working_directory = await _resolve_session_working_directory(session)
     
     async def _run_in_background():
@@ -3181,6 +3314,20 @@ async def _prepare_replay_runtime(
     }
 
 
+async def _stop_replay_execution(session_id: str) -> None:
+    """Stop and join the previous execution tree before rewinding history."""
+    from flocks.session.agent_inbox import AgentInbox
+
+    # Capture descendants and tasks before cancellation can unregister them.
+    session_ids, tasks = AgentInbox.snapshot_tree(session_id)
+    await _abort_session_processing(session_id)
+    if not await AgentInbox.wait_for_tree(session_ids, tasks):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Timed out waiting for previous session execution to stop",
+        )
+
+
 async def _run_existing_user_message(
     session_id: str,
     session,
@@ -3367,10 +3514,15 @@ async def resend_session_message(
             detail=str(exc),
         ) from exc
 
+    session, _ = await _prepare_session_agent_before_bootstrap(
+        session,
+        getattr(message, "agent", None),
+    )
     working_directory = await _resolve_session_working_directory(session)
 
     async def _handle_resend() -> None:
         runtime = await _prepare_replay_runtime(sessionID, message)
+        await _stop_replay_execution(sessionID)
         updated_session = await SessionRevert.revert(sessionID, messageID)
         await Message.update_part(sessionID, messageID, text_part.id, text=text)
         await _publish_text_part_update(sessionID, messageID, text_part.id, text)
@@ -3470,10 +3622,15 @@ async def regenerate_session_message(
             detail=str(exc),
         ) from exc
 
+    session, _ = await _prepare_session_agent_before_bootstrap(
+        session,
+        getattr(parent_message, "agent", None),
+    )
     working_directory = await _resolve_session_working_directory(session)
 
     async def _handle_regenerate() -> None:
         runtime = await _prepare_replay_runtime(sessionID, parent_message)
+        await _stop_replay_execution(sessionID)
         updated_session = await SessionRevert.revert(sessionID, parent_message_id)
         refreshed_parent = await Message.get(sessionID, parent_message_id)
         if not refreshed_parent:
@@ -3536,6 +3693,10 @@ async def send_session_message(sessionID: str, request: PromptRequest, http_requ
     _require_session_write_access(session, current_user)
     lifecycle_generation = Session.lifecycle_generation(sessionID)
     
+    session, _ = await _prepare_session_agent_before_bootstrap(
+        session,
+        request.agent,
+    )
     working_directory = await _resolve_session_working_directory(session)
     _validate_execution_mode_request(request)
     if request.execution_mode == SessionExecutionMode.GOAL:
@@ -3974,9 +4135,20 @@ async def _process_session_message_impl(
     # ------------------------------------------------------------------
     # 2. Resolve agent and model (5-level priority)
     # ------------------------------------------------------------------
-    await _require_agent_usable_for_chat(request.agent)
-    agent_name = request.agent or await Agent.default_agent()
+    agent_name = request.agent or session.agent or await Agent.default_agent()
     agent = await Agent.get(agent_name) or await Agent.get(DEFAULT_AGENT)
+    try:
+        from flocks.session.agent_policy import (
+            AgentSessionPolicyError,
+            prepare_session_for_agent,
+        )
+
+        session = await prepare_session_for_agent(session, agent)
+    except AgentSessionPolicyError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
     
     auto_failover = bool(
         is_model_auto_session_category(getattr(session, "category", "user"))
@@ -4066,6 +4238,7 @@ async def _process_session_message_impl(
             synthetic=True if _is_no_reply else None,
         ),
         expected_generation=lifecycle_generation,
+        expected_agent=agent_name,
     )
     user_message_id = user_message.id
     
@@ -4740,17 +4913,25 @@ async def _drain_prompt_queue_locked(session_id: str, working_directory: str) ->
                 continue
 
             event = _event_from_queued_prompt(item, working_directory)
+            session, _ = await _prepare_session_agent_before_bootstrap(
+                session,
+                event.agent,
+            )
+            item_working_directory = await _resolve_session_working_directory(session)
+            event.working_directory = item_working_directory
             log.info("session.prompt_queue.dispatch", {
                 "sessionID": session_id,
                 "queueID": item.id,
             })
-            # Restore the item's captured context, not an unrelated worker's.
+            # A queue item may be dispatched by a different worker task than the
+            # request that submitted it. Restore the item's captured context (e.g.
+            # trusted identity transfer) and never inherit unrelated worker state.
             with execution_context_scope(item.execution_context or {}, inherit=False):
                 await Instance.provide(
-                    directory=working_directory,
+                    directory=item_working_directory,
                     init=instance_bootstrap,
                     fn=lambda: _dispatch_sse_input(
-                        session_id, session, event, working_directory
+                        session_id, session, event, item_working_directory
                     ),
                 )
         finally:
@@ -4869,7 +5050,18 @@ async def _dispatch_sse_input(sessionID: str, session, event, working_directory:
     from flocks.session.message import Message, MessageRole
     from flocks.utils.id import Identifier
 
-    agent_name = event.agent or "rex"
+    from flocks.agent.registry import Agent
+    from flocks.session.agent_policy import prepare_session_for_agent
+
+    agent_name = (
+        event.agent
+        or getattr(session, "agent", None)
+        or await Agent.default_agent()
+    )
+    agent = await Agent.get(agent_name) or await Agent.get(DEFAULT_AGENT)
+    if agent is None:
+        raise ValueError(f"Agent {agent_name!r} is not available")
+    session = await prepare_session_for_agent(session, agent)
     lifecycle_generation = event.metadata.get("_sessionLifecycleGeneration")
     if not isinstance(lifecycle_generation, int):
         lifecycle_generation = Session.lifecycle_generation(sessionID)
@@ -4900,6 +5092,7 @@ async def _dispatch_sse_input(sessionID: str, session, event, working_directory:
                 part_id=user_part_id,
             ),
             expected_generation=lifecycle_generation,
+            expected_agent=message_agent,
         )
         await publish_event("message.updated", {
             "info": {
@@ -5257,7 +5450,6 @@ async def run_prompt_queue_item_now(
     import os
 
     from flocks.session.interaction_queue import InteractionQueue, QueueItemNotFoundError
-    from flocks.session.session_loop import SessionLoop
 
     session = await _get_session_by_id_unfiltered(sessionID)
     if not session:
@@ -5274,9 +5466,9 @@ async def run_prompt_queue_item_now(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     await _publish_prompt_queue(sessionID)
 
-    if SessionLoop.is_running(sessionID):
-        await abort_session(sessionID)
-        await _wait_for_session_idle(sessionID)
+    # The parent may already be idle while its independent children still run.
+    await abort_session(sessionID)
+    await _wait_for_session_idle(sessionID)
 
     await _schedule_prompt_queue_drain(sessionID, working_directory)
     return {"status": "accepted", "sessionID": sessionID, "queueID": queueID}
@@ -5311,10 +5503,13 @@ async def send_session_message_async(
         _require_session_write_access(session, current_user)
         uploader_user_id = current_user.id
     lifecycle_generation = Session.lifecycle_generation(sessionID)
-
+    
+    session, _ = await _prepare_session_agent_before_bootstrap(
+        session,
+        request.agent,
+    )
     working_directory = await _resolve_session_working_directory(session)
     _validate_execution_mode_request(request)
-    await _require_agent_usable_for_chat(request.agent)
     
     log.info("session.prompt_async.accepted", {
         "sessionID": sessionID,
@@ -5442,8 +5637,11 @@ async def send_session_command(sessionID: str, request: CommandRequest, http_req
         _require_session_write_access(session, current_user)
     lifecycle_generation = Session.lifecycle_generation(sessionID)
 
+    session, _ = await _prepare_session_agent_before_bootstrap(
+        session,
+        request.agent,
+    )
     working_directory = await _resolve_session_working_directory(session)
-    await _require_agent_usable_for_chat(request.agent)
     raw_arguments = request.arguments
     if not raw_arguments and request.arguments_json is not None:
         raw_arguments = json.dumps(request.arguments_json, ensure_ascii=False)
@@ -5625,26 +5823,6 @@ async def respond_to_permission(
 # Monitoring & Metrics Routes
 # =============================================================================
 
-@router.get("/metrics")
-async def get_metrics():
-    """
-    Get system-wide monitoring metrics
-    
-    Returns metrics including:
-    - Tool call parsing success/failure rates
-    - Repair strategy success rates
-    - Top failing tools
-    - Recent failure details
-    """
-    monitor = get_monitor()
-    metrics = monitor.get_metrics()
-    
-    return {
-        "status": "success",
-        "metrics": metrics,
-    }
-
-
 @router.get("/{sessionID}/metrics")
 async def get_session_metrics(sessionID: str):
     """
@@ -5676,40 +5854,6 @@ async def get_session_metrics(sessionID: str):
 # =============================================================================
 # WebUI Enhancement Routes
 # =============================================================================
-
-@router.get("/recent")
-async def get_recent_sessions(limit: int = Query(10, ge=1, le=50, description="Number of sessions")):
-    """
-    Get recent sessions
-    
-    Returns list of recently active sessions for WebUI home page.
-    """
-    try:
-        # Get all sessions
-        sessions_result = await Session.list()
-        
-        # Convert to response format
-        sessions = []
-        for session_model in sessions_result:
-            try:
-                session_dict = session_model.model_dump(mode="json", by_alias=True)
-                sessions.append(SessionResponse(**session_dict))
-            except Exception as e:
-                log.warning("session.recent.skip", {"session_id": session_model.id, "error": str(e)})
-                continue
-        
-        # Sort by updated time (most recent first)
-        sessions.sort(key=lambda s: s.time.updated, reverse=True)
-        
-        # Limit results
-        sessions = sessions[:limit]
-        
-        log.info("session.recent", {"count": len(sessions), "limit": limit})
-        return sessions
-    except Exception as e:
-        log.error("session.recent.error", {"error": str(e)})
-        raise HTTPException(status_code=500, detail=f"Failed to get recent sessions: {str(e)}")
-
 
 @router.get("/{sessionID}/statistics")
 async def get_session_statistics(sessionID: str):

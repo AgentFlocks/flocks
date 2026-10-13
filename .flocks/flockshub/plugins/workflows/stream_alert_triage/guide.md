@@ -209,3 +209,7 @@ LLM、情报查询、缓存 miss 和持久化耗时会降低实际吞吐。超�
 5. 汇总输入模式、批次限制、输出方式、poller 状态、`noOverlap`、游标路径和剩余缺口。
 
 查配置不得修改文件、触发研判、调用情报工具、写缓存、写 SOC DB、写 JSONL、修改生产游标或启动服务。
+
+## 深信服 SIP 研判输入
+
+对于 `_source_type=sangfor-sip` 的归一化告警，研判读取 `_sip_raw` 中的举证、原理、处置建议、标签及 IOC，并保留两类攻击结果枚举的解释。未知协议保持 unknown，未知 IP 不参与情报查询；URL/IOC 列表逐项处理。厂商攻击结果作为告警事实提供给模型，不替代模型生成的 `triage_attack_verdict` 与 `triage_attack_success`。

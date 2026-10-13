@@ -23,7 +23,7 @@ import { useTranslation } from 'react-i18next';
 import LoadingSpinner from './LoadingSpinner';
 import { QuestionTool, type QuestionItem } from './QuestionTool';
 import { PermissionApprovalDialog, type PermissionDecision } from './PermissionApprovalDialog';
-import DelegateTaskCard, { isDelegateTool, shouldRenderDelegateTaskCard } from './DelegateTaskCard';
+import DelegateTaskCard, { extractDelegateInfo, isDelegateTool, shouldRenderDelegateTaskCard } from './DelegateTaskCard';
 import CommandDropdown, { isSlashCommandName, parseSlashCommand } from './CommandDropdown';
 import ImageLightbox from './ImageLightbox';
 import { TodoList, buildTodoSummary, pickTodoEntries } from './TodoList';
@@ -63,10 +63,12 @@ import {
   fetchSessionChatCommands,
   getQueuedPromptText,
   parseInstructionDisplayText,
+  readSessionRetryStatus,
   resolveSessionChatSSEAction,
   shouldForwardSSEEventToParent,
   stripTaskMetadata,
   type CompactionStage,
+  type SessionRetryStatus,
   usePendingQuestions,
   useSessionContextUsage,
   useSessionPromptQueue,
@@ -92,6 +94,22 @@ export {
 // ============================================================================
 
 export type MergedMessage = Message & { _merged?: boolean };
+
+/**
+ * Whether a permission request belongs in this chat: its own, or one from a
+ * subagent it delegated to (the user is waiting here, not in the subagent's
+ * session). The backend names the delegating sessions on the request.
+ */
+export function isPermissionRequestForSession(
+  requestSessionID: string,
+  metadata: Record<string, unknown> | undefined,
+  sessionId: string | null | undefined,
+): boolean {
+  if (!sessionId || !requestSessionID) return false;
+  if (requestSessionID === sessionId) return true;
+  const chain = metadata?.delegationChain;
+  return Array.isArray(chain) && chain.includes(sessionId);
+}
 
 /** Node reference shown above the chat input as a dismissible chip */
 export interface NodeRef {
@@ -131,6 +149,37 @@ interface ComposerReference {
   value: string;
 }
 
+const AGENT_AVATAR_COLORS: Record<string, string> = {
+  rex: 'bg-red-600',
+  'rex-junior': 'bg-violet-600',
+  explore: 'bg-teal-700',
+  librarian: 'bg-amber-700',
+  oracle: 'bg-blue-600',
+  prometheus: 'bg-orange-700',
+  hephaestus: 'bg-slate-600',
+  'multimodal-looker': 'bg-pink-700',
+  'self-improve': 'bg-lime-700',
+};
+const CUSTOM_AGENT_AVATAR_COLORS = Object.values(AGENT_AVATAR_COLORS);
+
+function getAgentAvatarColor(agent: string): string {
+  const name = agent.trim().toLowerCase().replace(/_/g, '-');
+  if (Object.prototype.hasOwnProperty.call(AGENT_AVATAR_COLORS, name)) return AGENT_AVATAR_COLORS[name];
+  // Custom agents keep the same color across sessions, reloads and message order.
+  let hash = 0;
+  for (const character of name) hash = (Math.imul(hash, 31) + character.codePointAt(0)!) >>> 0;
+  return CUSTOM_AGENT_AVATAR_COLORS[hash % CUSTOM_AGENT_AVATAR_COLORS.length];
+}
+
+function getAgentSender(parts: MessagePart[]) {
+  for (const part of parts) {
+    const sender = part.synthetic && part.metadata?.communication;
+    if (sender?.source_type === 'agent' && typeof sender.source_agent === 'string'
+      && typeof sender.source_session_id === 'string') return sender;
+  }
+  return undefined;
+}
+
 function getMessagePartDisplayText(part: MessagePart, hideTaskMetadata = false): string {
   const metadataDisplayText = part.metadata?.displayText ?? part.metadata?.display_text;
   const displayText = typeof metadataDisplayText === 'string' && metadataDisplayText
@@ -140,6 +189,11 @@ function getMessagePartDisplayText(part: MessagePart, hideTaskMetadata = false):
 }
 
 export interface SessionChatProps {
+  /** Domain-authorized transport; shares the workbench UI without generic session writes. */
+  transport?: { messages?: Message[]; disabled?: boolean; send: (text: string) => Promise<unknown>; stop?: () => Promise<unknown> };
+  draftKey?: string;
+  renderMessageFooter?: (message: Message) => React.ReactNode;
+
   /** When null/undefined, only welcomeContent + input are rendered (lazy session). */
   sessionId?: string | null;
   /** Subscribe to SSE for live streaming updates */
@@ -196,6 +250,8 @@ export interface SessionChatProps {
   welcomeContent?: React.ReactNode | ((setInput: (text: string) => void) => React.ReactNode);
   /** Extra content rendered below the conversation area and above the composer. */
   conversationBottomSlot?: React.ReactNode | ((actions: ConversationBottomSlotActions) => React.ReactNode);
+  /** Content above the messages that scrolls with them, e.g. the run a follow-up chat is about. */
+  conversationTopSlot?: React.ReactNode;
   /** Called when SSE connection status changes */
   onSseStatusChange?: (status: SSEConnectionStatus) => void;
   /** Forward SSE events with properties to parent (global events like session.updated) */
@@ -274,10 +330,13 @@ interface ComposerAttachment {
 }
 
 const APPROX_CHARS_PER_TOKEN = 4;
+// Mirrors SessionPrompt.count_tokens: CJK characters cost about one token each.
+const CJK_CHAR_RE = /[\u3000-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af\uf900-\ufaff\uff00-\uffef]/g;
 
 function countTokensLikeCompaction(text: string | null | undefined): number {
   if (!text) return 0;
-  return Math.floor(text.length / APPROX_CHARS_PER_TOKEN);
+  const cjkChars = text.match(CJK_CHAR_RE)?.length ?? 0;
+  return cjkChars + Math.floor((text.length - cjkChars) / APPROX_CHARS_PER_TOKEN);
 }
 
 const INSIGNIFICANT_THINKING_TEXT_RE = /^[\p{P}\p{S}]+$/u;
@@ -685,6 +744,33 @@ function adjustContextSegmentTokens(
   return 0;
 }
 
+// Rows are estimates; the total is what the provider reported. The backend
+// folds an observed surplus into "conversation", but most of it is tokenizer
+// drift that belongs to every row (a two-message chat is not 3K tokens of
+// conversation), so take it back out and scale all rows to the total instead.
+// An estimate above the total (uncounted history reasoning) scales down.
+function scaleContextSegmentsToObservedTotal(
+  segments: ContextUsageBreakdownSegment[],
+  estimatedTokens: number,
+  usedTokens: number,
+): void {
+  if (usedTokens <= 0 || usedTokens === estimatedTokens) return;
+  if (usedTokens > estimatedTokens) {
+    adjustContextSegmentTokens(segments, 'conversation', -(usedTokens - estimatedTokens));
+  }
+  const counted = segments.filter((segment) => segment.included && segment.tokens > 0);
+  const countedTokens = counted.reduce((total, segment) => total + segment.tokens, 0);
+  if (countedTokens <= 0 || countedTokens === usedTokens) return;
+  let assigned = 0;
+  let largest = counted[0];
+  counted.forEach((segment) => {
+    segment.tokens = Math.floor((segment.tokens * usedTokens) / countedTokens);
+    assigned += segment.tokens;
+    if (segment.tokens > largest.tokens) largest = segment;
+  });
+  largest.tokens += usedTokens - assigned;
+}
+
 function normalizeFixedContextSegments(
   segments: ContextUsageBreakdownSegment[],
 ): ContextUsageBreakdownSegment[] {
@@ -751,15 +837,15 @@ export function buildContextUsageBreakdown(
     const includedToolDefinitionTokens = serverSegments.reduce((total, segment) => (
       segment.key === 'toolDefinitions' && segment.included ? total + segment.tokens : total
     ), 0);
-    const estimatedSnapshotTokens = snapshot.estimatedTokens > 0
-      ? snapshot.estimatedTokens
-      : snapshot.usedTokens || 0;
-    if (includeSnapshotUsage && !useLocalMessageUsage) {
-      adjustContextSegmentTokens(
-        segments,
-        'conversation',
-        -Math.max(0, (snapshot.usedTokens || 0) - estimatedSnapshotTokens),
-      );
+    // ``usedTokens`` is the figure the backend compares against the
+    // compaction threshold (provider-reported usage, including the system
+    // prompt and tool definitions), so the meter reaches that threshold when
+    // compaction actually starts.
+    const snapshotUsedTokens = snapshot.usedTokens > 0
+      ? snapshot.usedTokens
+      : snapshot.estimatedTokens || 0;
+    if (includeSnapshotUsage && !useLocalMessageUsage && snapshot.estimatedTokens > 0) {
+      scaleContextSegmentsToObservedTotal(segments, snapshot.estimatedTokens, snapshotUsedTokens);
     }
     const pendingTokenDeltas = includeSnapshotUsage ? options?.pendingTokenDeltas || {} : {};
     const pendingTokenDeltaTotal = Object.entries(pendingTokenDeltas).reduce(
@@ -780,15 +866,20 @@ export function buildContextUsageBreakdown(
               0,
               (
                 useLocalMessageUsage
-                  ? activeBreakdown?.usedTokens || 0
-                  : estimatedSnapshotTokens - includedSystemPromptTokens - includedToolDefinitionTokens
+                  ? includedSystemPromptTokens
+                    + includedToolDefinitionTokens
+                    + (activeBreakdown?.usedTokens || 0)
+                  : snapshotUsedTokens
               ) + pendingTokenDeltaTotal,
             )
           : 0
       ) + draftTokens,
       compactedTokens: Math.max(0, snapshot.compactedTokens || 0),
+      // Before the first model call nothing is sent yet, so the fixed
+      // prompt costs are listed but not counted.
       segments: normalizeFixedContextSegments(segments).map((segment) => (
-        segment.key === 'systemPrompt' || segment.key === 'toolDefinitions'
+        !includeSnapshotUsage
+          && (segment.key === 'systemPrompt' || segment.key === 'toolDefinitions')
           ? { ...segment, included: false }
           : segment
       )),
@@ -875,8 +966,9 @@ function ContextUsageRing({
       : clamped >= 50
         ? 'stroke-sky-500'
         : 'stroke-zinc-400';
+  // Fixed prompt costs are only counted once the model has been called.
   const rows = breakdown.segments.filter((segment) => (
-    segment.key !== 'systemPrompt' && segment.key !== 'toolDefinitions'
+    segment.included || (segment.key !== 'systemPrompt' && segment.key !== 'toolDefinitions')
   ));
   const activeSegments = breakdown.segments.filter((segment) => segment.included && segment.tokens > 0);
 
@@ -1085,7 +1177,7 @@ export function mergeConsecutiveAssistantMessages(messages: Message[]): MergedMe
       continue;
     }
 
-    if (msg.role !== 'assistant') {
+    if (msg.role !== 'assistant' || getAgentSender(msg.parts)) {
       result.push(msg);
       continue;
     }
@@ -1094,6 +1186,7 @@ export function mergeConsecutiveAssistantMessages(messages: Message[]): MergedMe
     if (
       last &&
       last.role === 'assistant' &&
+      !getAgentSender(last.parts) &&
       last._merged &&
       last.finish !== 'summary' &&
       !!last.compacted === !!msg.compacted
@@ -1159,8 +1252,9 @@ export function getMessageGroupClassName({
   return isEditing ? 'w-full max-w-full' : 'w-fit max-w-[88%]';
 }
 
-export function getCompactionDividerClassName(compact: boolean): string {
-  const messageInset = compact ? 'pl-[38px]' : 'pl-[42px]';
+export function getCompactionDividerClassName(compact: boolean, inset = true): string {
+  // Inset into the assistant content column; bodies drawn without an avatar have none.
+  const messageInset = !inset ? 'pl-0' : compact ? 'pl-[38px]' : 'pl-[42px]';
   return `${compact ? 'my-3' : 'my-4'} flex w-full min-w-0 items-center gap-3 ${messageInset} pr-1 text-xs text-zinc-500`;
 }
 
@@ -1778,6 +1872,9 @@ function formatComposerReference(reference: ComposerReference): string {
 }
 
 export default function SessionChat({
+  transport,
+  draftKey,
+  renderMessageFooter,
   sessionId,
   live = false,
   placeholder,
@@ -1799,6 +1896,7 @@ export default function SessionChat({
   display,
   welcomeContent,
   conversationBottomSlot,
+  conversationTopSlot,
   onSseStatusChange,
   onSSEEvent,
   onError,
@@ -1849,7 +1947,7 @@ export default function SessionChat({
   // Restore any persisted draft on first mount so navigating away (e.g.
   // sidebar → Agents → back to Sessions) doesn't wipe the user's half-typed
   // message. Subsequent session changes are re-hydrated by the effect below.
-  const [input, setInput] = useState<string>(() => readChatDraft(sessionId));
+  const [input, setInput] = useState<string>(() => readChatDraft(draftKey ?? sessionId));
   const [submittedModelPromptSessionId, setSubmittedModelPromptSessionId] = useState<string | null>(null);
   const [pendingContextUsage, setPendingContextUsage] = useState<PendingContextUsageState>({
     sessionId: null,
@@ -1930,6 +2028,10 @@ export default function SessionChat({
   const [compactingMessage, setCompactingMessage] = useState('');
   const [isDreaming, setIsDreaming] = useState(false);
   const [dreamingMessage, setDreamingMessage] = useState('');
+  // Backend retry state (provider 429 / 5xx). Without this the chat only shows
+  // the generic thinking dots for the whole backoff window.
+  const [retryStatus, setRetryStatus] = useState<SessionRetryStatus | null>(null);
+  const [retryCountdownSeconds, setRetryCountdownSeconds] = useState<number | null>(null);
   const [goalBanner, setGoalBanner] = useState<GoalBannerState | null>(null);
   const [dismissedGoalKey, setDismissedGoalKey] = useState(() => readDismissedGoalKey(sessionId));
   useEffect(() => {
@@ -1964,6 +2066,44 @@ export default function SessionChat({
   const [processGroupOpenState, setProcessGroupOpenState] = useState<ProcessGroupOpenState>(() => (
     readProcessGroupOpenState(sessionId)
   ));
+
+  // Seconds until the backend's next provider attempt, refreshed while the
+  // retry notice is visible so the user can see the wait shrinking.
+  useEffect(() => {
+    const nextAt = retryStatus?.next;
+    if (!retryStatus || typeof nextAt !== 'number') {
+      setRetryCountdownSeconds(null);
+      return undefined;
+    }
+    const update = () => {
+      setRetryCountdownSeconds(Math.max(0, Math.ceil((nextAt - Date.now()) / 1000)));
+    };
+    update();
+    const timer = window.setInterval(update, 500);
+    return () => window.clearInterval(timer);
+  }, [retryStatus]);
+
+  const retryNoticeText = useMemo(() => {
+    if (!retryStatus) return '';
+    const attempt = retryStatus.maxAttempts
+      ? `${retryStatus.attempt}/${retryStatus.maxAttempts}`
+      : `${retryStatus.attempt}`;
+    // Provider SDKs put the whole JSON error body in the message; keep the
+    // notice to one line.
+    const rawReason = (retryStatus.message || '').trim();
+    const reason = rawReason.length > 120 ? `${rawReason.slice(0, 117)}…` : rawReason;
+    const base = retryStatus.rateLimited
+      ? t('chat.retryNotice.rateLimited', { attempt })
+      : t('chat.retryNotice.transient', {
+        attempt,
+        reason: reason || t('chat.retryNotice.unknownReason'),
+      });
+    if (retryCountdownSeconds !== null && retryCountdownSeconds > 0) {
+      return `${base}${t('chat.retryNotice.countdown', { seconds: retryCountdownSeconds })}`;
+    }
+    return base;
+  }, [retryStatus, retryCountdownSeconds, t]);
+
   // Live compaction progress, populated by ``session.compaction_progress`` SSE
   // events emitted by the backend. ``chunk_done`` arrivals are non-deterministic
   // (parallel ``asyncio.gather``) so we deduplicate by ``data.chunk`` index.
@@ -2105,6 +2245,19 @@ export default function SessionChat({
       });
     }
   }, [refreshContextUsage, resolvePendingContextUsage, sessionId]);
+  // Prompts the latest snapshot already counts no longer need their
+  // optimistic estimate. Without this the meter stayed on the pre-send
+  // baseline for the whole turn and only jumped once the turn ended (or the
+  // page was reloaded), even though the backend pushes usage between steps.
+  useEffect(() => {
+    const includedUserMessageIds = activeContextUsageSnapshot?.recentUserMessageIDs;
+    if (!sessionId || !activeContextUsageSnapshot || !includedUserMessageIds?.length) return;
+    const pending = pendingContextUsageRef.current;
+    if (pending.sessionId !== sessionId) return;
+    const coveredKeys = Object.keys(pending.entries)
+      .filter((key) => includedUserMessageIds.includes(key));
+    resolvePendingContextUsage(coveredKeys, sessionId, activeContextUsageSnapshot);
+  }, [activeContextUsageSnapshot, resolvePendingContextUsage, sessionId]);
   const isCompactingRef = useRef(false);
   const prevStreamingRef = useRef(false);
   // Tracks "sessionId::message" key to prevent double-send in React StrictMode
@@ -2200,7 +2353,7 @@ export default function SessionChat({
     [successfulDocAttachments, successfulImageAttachments],
   );
   const hasUploadingFiles = attachments.some((attachment) => attachment.status === 'uploading');
-  const canSend = !sending && !hasUploadingFiles &&
+  const canSend = !transport?.disabled && !sending && !hasUploadingFiles &&
     (
       !!input.trim()
       || composerReferences.length > 0
@@ -2244,7 +2397,7 @@ export default function SessionChat({
   }, []);
 
   const {
-    messages,
+    messages: sessionMessages,
     loading,
     error: messagesError,
     refetch,
@@ -2258,6 +2411,75 @@ export default function SessionChat({
     truncateAfterMessage,
   } =
     useSessionMessages(sessionId || undefined);
+  const messages = transport?.messages ?? sessionMessages;
+
+  // A historical receipt describes the submission, not the child's *current*
+  // activity. Receipts identify direct children; runtime ancestry also includes
+  // grandchildren and descendants whose receipts are outside the loaded page.
+  const childSessionIds = useMemo(() => [...new Set(messages.flatMap((message) => (
+    message.sessionID === sessionId && message.role === 'assistant'
+      ? message.parts.flatMap((part) => {
+          if ((part.type !== 'tool' && part.type !== 'toolCall') || !shouldRenderDelegateTaskCard(part)) return [];
+          const childId = extractDelegateInfo(part.state || {}, '').childSessionId;
+          return childId && childId !== sessionId ? [childId] : [];
+        })
+      : []
+  )))].sort(), [messages, sessionId]);
+  const childStatusScope = JSON.stringify([sessionId, childSessionIds]);
+  const childSessionIdsRef = useRef(childSessionIds);
+  childSessionIdsRef.current = childSessionIds;
+  const currentChildStatusScopeRef = useRef(childStatusScope);
+  currentChildStatusScopeRef.current = childStatusScope;
+  const descendantSessionIdsRef = useRef(new Set<string>());
+  const childStatusRequestRef = useRef(0);
+  const childStatusRevisionRef = useRef<Record<string, number>>({});
+  const [childStatuses, setChildStatuses] = useState<{
+    scope: string;
+    active: Record<string, boolean>;
+  }>({ scope: childStatusScope, active: {} });
+  const hasRunningDelegates = childStatuses.scope === childStatusScope
+    && Object.values(childStatuses.active).some(Boolean);
+  const canStop = Boolean(sessionId) && (isStreaming || hasRunningDelegates);
+
+  const refreshChildStatuses = useCallback(async () => {
+    const ids = childSessionIdsRef.current;
+    if (!sessionId) return;
+    const request = ++childStatusRequestRef.current;
+    const revisions = { ...childStatusRevisionRef.current };
+    try {
+      const response = await client.get('/api/session/status');
+      if (request !== childStatusRequestRef.current || currentChildStatusScopeRef.current !== childStatusScope) return;
+      const tracked = new Set([...ids, ...descendantSessionIdsRef.current]);
+      for (const [id, status] of Object.entries(response.data || {})) {
+        const ancestors = (status as { ancestorSessionIDs?: string[] })?.ancestorSessionIDs;
+        if (Array.isArray(ancestors) && ancestors.includes(sessionId)) {
+          tracked.add(id);
+          descendantSessionIdsRef.current.add(id);
+        }
+      }
+      setChildStatuses((current) => {
+        const active = current.scope === childStatusScope ? { ...current.active } : {};
+        for (const id of tracked) {
+          // An SSE update received during the request is newer than its snapshot.
+          if ((childStatusRevisionRef.current[id] || 0) !== (revisions[id] || 0)) continue;
+          active[id] = isActiveSessionStatus(response.data?.[id]);
+        }
+        return { scope: childStatusScope, active };
+      });
+    } catch {
+      // Keep the last known activity until the next status event or reconnect.
+    }
+  }, [childStatusScope, sessionId]);
+
+  useEffect(() => {
+    childStatusRequestRef.current += 1;
+    childStatusRevisionRef.current = {};
+    descendantSessionIdsRef.current = new Set();
+    setChildStatuses((current) => current.scope === childStatusScope
+      ? current : { scope: childStatusScope, active: {} });
+    void refreshChildStatuses();
+    return () => { childStatusRequestRef.current += 1; };
+  }, [childStatusScope, refreshChildStatuses]);
 
   useEffect(() => {
     setSubmittedModelPromptSessionId(null);
@@ -2417,12 +2639,32 @@ export default function SessionChat({
   const pendingQuestionsRef = useRef(pendingQuestions);
   useEffect(() => { pendingQuestionsRef.current = pendingQuestions; }, [pendingQuestions]);
 
+  // A list response can be overtaken by events: a request settled meanwhile
+  // must not come back, one announced meanwhile must not be dropped, and
+  // anything the list leaves out that was known before it is stale.
+  const settledPermissionIdsRef = useRef(new Set<string>());
+  const permissionChangeSeqRef = useRef(0);
+  const permissionAnnouncedAtRef = useRef(new Map<string, number>());
+  const permissionFetchSeqRef = useRef(0);
+  const permissionAppliedSeqRef = useRef(0);
+  const permissionSessionGenerationRef = useRef(0);
+
   const addPendingPermission = useCallback((request: PendingPermission) => {
+    permissionChangeSeqRef.current += 1;
+    if (settledPermissionIdsRef.current.has(request.id)) return;
+    permissionAnnouncedAtRef.current.set(request.id, permissionChangeSeqRef.current);
     setPendingPermissions((previous) => (
       previous.some((item) => item.id === request.id)
         ? previous
         : [...previous, request]
     ));
+  }, []);
+
+  const settlePendingPermission = useCallback((requestId: string) => {
+    permissionChangeSeqRef.current += 1;
+    settledPermissionIdsRef.current.add(requestId);
+    permissionAnnouncedAtRef.current.delete(requestId);
+    setPendingPermissions((previous) => previous.filter((item) => item.id !== requestId));
   }, []);
 
   const fetchPendingPermissions = useCallback(async () => {
@@ -2431,9 +2673,34 @@ export default function SessionChat({
       return;
     }
     const targetSessionId = sessionId;
+    const sessionGeneration = permissionSessionGenerationRef.current;
+    const fetchSeq = ++permissionFetchSeqRef.current;
+    const changeSeq = permissionChangeSeqRef.current;
     const requests = await permissionApi.list();
-    if (activePermissionSessionRef.current !== targetSessionId) return;
-    setPendingPermissions(requests.filter((item) => item.sessionID === targetSessionId));
+    // A newer answer already shown, or a switch to another session (even one
+    // coming back to this session), makes this answer stale. While a newer
+    // request is still out (or has failed) this one is the best there is.
+    if (
+      fetchSeq <= permissionAppliedSeqRef.current
+      || sessionGeneration !== permissionSessionGenerationRef.current
+      || activePermissionSessionRef.current !== targetSessionId
+    ) return;
+    permissionAppliedSeqRef.current = fetchSeq;
+    const settled = settledPermissionIdsRef.current;
+    const fetched = requests.filter((item) => (
+      isPermissionRequestForSession(item.sessionID, item.metadata, targetSessionId)
+      && !settled.has(item.id)
+    ));
+    const fetchedIds = new Set(fetched.map((item) => item.id));
+    // Only requests announced after this list was asked for are newer than it.
+    setPendingPermissions((previous) => [
+      ...fetched,
+      ...previous.filter((item) => (
+        !fetchedIds.has(item.id)
+        && !settled.has(item.id)
+        && (permissionAnnouncedAtRef.current.get(item.id) ?? 0) > changeSeq
+      )),
+    ]);
   }, [sessionId]);
 
   const handlePermissionReply = useCallback(async (decision: PermissionDecision) => {
@@ -2453,14 +2720,21 @@ export default function SessionChat({
           always: decision === 'always',
         });
       }
-      setPendingPermissions((previous) => previous.filter((item) => item.id !== request.id));
+      settlePendingPermission(request.id);
     } catch (error: unknown) {
+      if ((error as { response?: { status?: number } })?.response?.status === 404) {
+        // Answered elsewhere (the subagent's own chat) or no longer awaited:
+        // drop it so it does not hold up the requests behind it.
+        settlePendingPermission(request.id);
+        void fetchPendingPermissions().catch(() => {});
+        return;
+      }
       const message = error instanceof Error ? error.message : String(error);
       setPermissionError(message || '提交确认失败，请重试。');
     } finally {
       setPermissionSubmitting(false);
     }
-  }, [pendingPermissions, permissionSubmitting]);
+  }, [pendingPermissions, permissionSubmitting, fetchPendingPermissions, settlePendingPermission]);
 
   const sseEnabled = Boolean(sessionId) && (live || isStreaming || !hideInput);
 
@@ -2491,21 +2765,48 @@ export default function SessionChat({
 
   const handleSSEEvent = useCallback(
     (event: SSEChatEvent) => {
+      // The same SSE connection also carries child activity. Do not route child
+      // events through the parent's message/streaming action reducer.
+      const childId = event.properties?.sessionID;
+      if (
+        event.type === 'session.status'
+        && typeof childId === 'string'
+        && childId !== sessionId
+        && (childSessionIdsRef.current.includes(childId)
+          || descendantSessionIdsRef.current.has(childId)
+          || (sessionId && Array.isArray(event.properties?.ancestorSessionIDs)
+            && event.properties.ancestorSessionIDs.includes(sessionId)))
+        && typeof event.properties?.status?.type === 'string'
+      ) {
+        descendantSessionIdsRef.current.add(childId);
+        childStatusRevisionRef.current[childId] = (childStatusRevisionRef.current[childId] || 0) + 1;
+        setChildStatuses((current) => ({
+          scope: childStatusScope,
+          active: {
+            ...(current.scope === childStatusScope ? current.active : {}),
+            [childId]: isActiveSessionStatus(event.properties?.status),
+          },
+        }));
+      }
       // Forward only global events or events relevant to this chat. The global
       // stream can be very noisy when multiple sessions run in parallel.
       if (shouldForwardSSEEventToParent(event, sessionId)) onSSEEvent?.(event);
 
       const properties = event.properties;
+      const requestSessionID = typeof properties?.sessionID === 'string' ? properties.sessionID : '';
+      const requestMetadata = properties?.metadata && typeof properties.metadata === 'object'
+        ? properties.metadata as Record<string, unknown>
+        : {};
       if (
         event.type === 'permission.request'
         && properties
-        && properties.sessionID === sessionId
+        && isPermissionRequestForSession(requestSessionID, requestMetadata, sessionId)
       ) {
         const requestID = typeof properties.requestID === 'string' ? properties.requestID : '';
         if (requestID) {
           addPendingPermission({
             id: requestID,
-            sessionID: sessionId ?? '',
+            sessionID: requestSessionID,
             messageID: typeof properties.messageID === 'string' ? properties.messageID : '',
             toolID: typeof properties.tool?.name === 'string'
               ? properties.tool.name
@@ -2519,13 +2820,16 @@ export default function SessionChat({
             always: Array.isArray(properties.always)
               ? properties.always.filter((pattern): pattern is string => typeof pattern === 'string')
               : [],
-            metadata: properties.metadata && typeof properties.metadata === 'object'
-              ? properties.metadata as Record<string, unknown>
-              : {},
+            metadata: requestMetadata,
             time: { created: Date.now() },
           });
           setPermissionError(null);
         }
+      }
+      // A request is settled once for every chat showing it (the subagent's
+      // own and the ones that delegated to it).
+      if (event.type === 'permission.replied' && typeof properties?.requestID === 'string') {
+        settlePendingPermission(properties.requestID);
       }
 
       const action = resolveSessionChatSSEAction(event, sessionId);
@@ -2543,6 +2847,7 @@ export default function SessionChat({
           setIsStreaming(false);
           setIsDreaming(false);
           setDreamingMessage('');
+          setRetryStatus(null);
           setGoalBanner(null);
           setDismissedGoalKey('');
           setSubmittedModelPromptSessionId(null);
@@ -2562,6 +2867,18 @@ export default function SessionChat({
             isCompactingRef.current = false;
             setIsDreaming(false);
             setDreamingMessage('');
+            setRetryStatus(null);
+          } else if (action.statusType === 'retry') {
+            sessionBusyRef.current = true;
+            if (
+              !abortingRef.current &&
+              !suppressStreamingUntilIdleRef.current
+            ) setIsStreaming(true);
+            setIsCompacting(false);
+            isCompactingRef.current = false;
+            setIsDreaming(false);
+            setDreamingMessage('');
+            setRetryStatus(action.retry ?? { attempt: 1, message: action.message });
           } else if (action.statusType === 'compacting') {
             sessionBusyRef.current = true;
             if (
@@ -2596,6 +2913,7 @@ export default function SessionChat({
             setCompactingMessage('');
             setIsDreaming(false);
             setDreamingMessage('');
+            setRetryStatus(null);
             setCompactionStages([]);
             refetch();
             refreshContextUsageAfterTurn({ skipIfFreshMs: 500 });
@@ -2658,6 +2976,10 @@ export default function SessionChat({
         }
         case 'message-part-updated': {
           const part = action.part as Pick<MessagePart, 'id' | 'type' | 'state'>;
+          // A finished tool part can be a sub-agent's late receipt while this
+          // session is still backing off; only fresh output ends the retry.
+          const finishedToolPart = (part.type === 'tool' || part.type === 'toolCall') && !isActiveToolPart(part);
+          if (!finishedToolPart) setRetryStatus((current) => (current ? null : current));
           if (part.id) {
             if (isActiveToolPart(part)) {
               activeToolPartIdsRef.current.add(part.id);
@@ -2731,6 +3053,7 @@ export default function SessionChat({
           setIsCompacting(false);
           setIsDreaming(false);
           setDreamingMessage('');
+          setRetryStatus(null);
           setCompactionStages([]);
           stopContextUsageRefreshing();
           refreshContextUsageAfterTurn({ skipIfFreshMs: 500 });
@@ -2743,6 +3066,7 @@ export default function SessionChat({
     },
     [
       sessionId,
+      childStatusScope,
       updateMessage,
       updateMessagePart,
       removeMessage,
@@ -2759,6 +3083,7 @@ export default function SessionChat({
       removeByRequestId,
       applyPromptQueueItems,
       addPendingPermission,
+      settlePendingPermission,
       onSSEEvent,
       onError,
       scrollToBottom,
@@ -2822,6 +3147,11 @@ export default function SessionChat({
           setCompactingMessage('');
           setCompactionStages([]);
         }
+        // A retry event missed while the stream was down is recovered from
+        // the poll; any other active state means the backoff is over.
+        setRetryStatus(status?.type === 'retry'
+          ? (readSessionRetryStatus(status) ?? { attempt: 1, message: status.message })
+          : null);
         return;
       }
 
@@ -2833,6 +3163,7 @@ export default function SessionChat({
       isCompactingRef.current = false;
       setCompactingMessage('');
       setCompactionStages([]);
+      setRetryStatus(null);
     } catch {
       // Keep the current activity state when reconnect status cannot be verified.
     }
@@ -2844,6 +3175,7 @@ export default function SessionChat({
     onReconnect: () => {
       if (!sessionId) return;
       void reconcileSessionStatusAfterReconnect();
+      void refreshChildStatuses();
       refetch();
       void refreshContextUsage();
       fetchPromptQueue();
@@ -2909,6 +3241,7 @@ export default function SessionChat({
     setCompactingMessage('');
     setIsDreaming(false);
     setDreamingMessage('');
+    setRetryStatus(null);
     setCompactionStages([]);
     setGoalBanner(null);
     setDismissedGoalKey('');
@@ -2924,11 +3257,13 @@ export default function SessionChat({
     isAtBottomRef.current = true;
     clearPendingQuestions();
     setPendingPermissions([]);
+    settledPermissionIdsRef.current = new Set();
+    permissionAnnouncedAtRef.current = new Map();
+    permissionSessionGenerationRef.current += 1;
     setPermissionError(null);
     // Swap the draft when the session changes — needed for callers that
     // don't force a remount (Session/index.tsx does, but other consumers
     // such as WorkflowDetail/ChatTab may swap sessionId without a remount).
-    setInput(readChatDraft(sessionId));
     setComposerReferences([]);
     setProcessGroupOpenState(readProcessGroupOpenState(sessionId));
   }, [sessionId, clearPendingQuestions, discardAttachments]);
@@ -2946,35 +3281,65 @@ export default function SessionChat({
     fetchPromptQueue();
   }, [fetchPromptQueue]);
 
+  // Keep after the session reset effect above: that one bumps the session
+  // generation, and a list requested before the bump is dropped as stale.
   useEffect(() => {
     fetchPendingPermissions().catch((err) => {
       console.warn('[SessionChat] Failed to fetch pending permissions:', err);
     });
   }, [fetchPendingPermissions]);
 
+  useEffect(() => {
+    setInput(readChatDraft(draftKey ?? sessionId));
+  }, [draftKey ?? sessionId]);
+
   // Persist the draft on every keystroke. localStorage writes are synchronous
   // and cheap, so debouncing isn't worth the added latency on send (which
   // depends on the draft being flushed). Drafts are removed when ``input``
   // becomes empty (e.g. after a successful send).
   useEffect(() => {
-    writeChatDraft(sessionId, input);
-  }, [sessionId, input]);
+    writeChatDraft(draftKey ?? sessionId, input);
+  }, [draftKey ?? sessionId, input]);
 
   // Recover streaming state after page refresh / session switch
   useEffect(() => {
     if (!sessionId || loading) return;
     if (statusCheckedRef.current === sessionId) return;
     statusCheckedRef.current = sessionId;
+    // The poll is in flight across awaits, and this closure keeps the
+    // sessionId it started with. By the time it lands the consumer may have
+    // swapped sessions (callers like WorkflowDetail/ChatTab reuse this
+    // component without remounting) or an SSE status may already have
+    // superseded it — both bump the revision, so comparing it is what tells
+    // a stale response apart, the same way
+    // reconcileSessionStatusAfterReconnect does.
+    const statusRevision = sessionStatusRevisionRef.current;
+    let cancelled = false;
+    // Set once the poll has an answer, even a superseded one. A poll cancelled
+    // before that hands the check back to the next run (see cleanup below).
+    let settled = false;
 
     const checkStatus = async () => {
       try {
         const res = await client.get('/api/session/status');
+        if (cancelled) return;
+        settled = true;
+        if (statusRevision !== sessionStatusRevisionRef.current) return;
         const status = res.data[sessionId];
         if (status?.type === 'busy' && !suppressStreamingUntilIdleRef.current) {
           sessionBusyRef.current = true;
           setIsStreaming(true);
           setIsDreaming(false);
           setDreamingMessage('');
+          setRetryStatus(null);
+        } else if (status?.type === 'retry' && !suppressStreamingUntilIdleRef.current) {
+          // The backend is sleeping between provider retries; the turn is
+          // still running even though nothing is streaming yet.
+          sessionBusyRef.current = true;
+          setIsStreaming(true);
+          setIsDreaming(false);
+          setDreamingMessage('');
+          setRetryStatus(readSessionRetryStatus(status) ?? { attempt: 1, message: status.message });
         } else if (status?.type === 'compacting' && !suppressStreamingUntilIdleRef.current) {
           sessionBusyRef.current = true;
           setIsStreaming(true);
@@ -2994,22 +3359,34 @@ export default function SessionChat({
           sessionBusyRef.current = false;
         }
       } catch {
-        if (messages.length > 0) {
-          const lastMsg = messages[messages.length - 1];
-          if (lastMsg.role === 'assistant' && !lastMsg.finish) {
-            setIsStreaming(true);
-          }
+        if (cancelled) return;
+        settled = true;
+        if (statusRevision !== sessionStatusRevisionRef.current) return;
+        const lastMsg = messagesRef.current[messagesRef.current.length - 1];
+        if (lastMsg?.role === 'assistant' && !lastMsg.finish) {
+          setIsStreaming(true);
         }
       }
 
+      if (statusRevision !== sessionStatusRevisionRef.current) return;
       try {
         await fetchPendingQuestions(sessionId);
       } catch (err) {
         console.warn('[SessionChat] Failed to recover pending questions:', err);
       }
     };
-    checkStatus();
-  }, [sessionId, loading, messages, fetchPendingQuestions]);
+    void checkStatus();
+    return () => {
+      cancelled = true;
+      // The message load flips ``loading`` false -> true right after mount,
+      // which re-runs this effect and cancels the poll still in flight. Without
+      // this reset the later ``loading=false`` run would skip the session as
+      // already checked, so a reload during a retry showed an idle chat.
+      if (!settled && statusCheckedRef.current === sessionId) {
+        statusCheckedRef.current = null;
+      }
+    };
+  }, [sessionId, loading, fetchPendingQuestions]);
 
   // A remote proxy or a reconnect boundary can delay or lose the one-shot
   // question.asked event. Reconcile only while the session is active; the
@@ -3478,7 +3855,15 @@ export default function SessionChat({
 
   const handleComposerPrompt = async (text: string, options?: PromptDisplayOptions) => {
     const trimmed = text.trim();
-    if (!trimmed || sending) return;
+    if (!trimmed || sending || transport?.disabled) return;
+    if (transport) {
+      setSending(true);
+      setInput('');
+      try { await transport.send(trimmed); }
+      catch { setInput(trimmed); }
+      finally { setSending(false); }
+      return;
+    }
 
     setInput('');
     setShowCommandDropdown(false);
@@ -3529,6 +3914,16 @@ export default function SessionChat({
 
   const handleSend = async () => {
     if (!canSend) return;
+    if (transport) {
+      const text = input.trim();
+      if (!text) return;
+      setSending(true);
+      setInput('');
+      try { await transport.send(text); }
+      catch { setInput(text); }
+      finally { setSending(false); }
+      return;
+    }
     const draftText = input.trim();
     const referencesToSend = [...composerReferences];
     const referenceText = referencesToSend.map(formatComposerReference).join(' ');
@@ -3808,10 +4203,10 @@ export default function SessionChat({
   const handleAbort = useCallback(async () => {
     if (!sessionId) return;
     // Record the ID of the message being aborted so we can ignore its finish event later.
-    const lastAsstMsg = [...messagesRef.current].reverse().find(
+    const lastAsstMsg = isStreaming ? [...messagesRef.current].reverse().find(
       (m) => m.role === 'assistant' && !m.finish,
-    );
-    const shouldRestoreActivity = isStreaming || sending || sessionBusyRef.current || Boolean(lastAsstMsg?.id);
+    ) : undefined;
+    const wasSessionBusy = sessionBusyRef.current;
     abortedMessageIdRef.current = lastAsstMsg?.id || null;
     abortingRef.current = true;
     suppressStreamingUntilIdleRef.current = true;
@@ -3819,7 +4214,8 @@ export default function SessionChat({
     setIsStreaming(false);
     setSending(false);
     try {
-      await client.post(`/api/session/${sessionId}/abort`);
+      if (transport?.stop) await transport.stop();
+      else await client.post(`/api/session/${sessionId}/abort`);
       if (lastAsstMsg?.id) {
         markMessageStopped(lastAsstMsg.id);
       }
@@ -3829,13 +4225,11 @@ export default function SessionChat({
       abortingRef.current = false;
       abortedMessageIdRef.current = null;
       suppressStreamingUntilIdleRef.current = false;
-      if (shouldRestoreActivity) {
-        sessionBusyRef.current = true;
-        setIsStreaming(true);
-        if (sending) setSending(true);
-      }
+      sessionBusyRef.current = wasSessionBusy;
+      setIsStreaming(isStreaming);
+      setSending(sending);
     }
-  }, [isStreaming, markMessageStopped, sending, sessionId]);
+  }, [isStreaming, markMessageStopped, sending, sessionId, transport?.stop]);
 
   const handleQueuedEditStart = useCallback((item: QueuedPrompt) => {
     startQueuedEdit(item);
@@ -4153,7 +4547,7 @@ export default function SessionChat({
 
     for (let idx = 0; idx < merged.length; idx++) {
       const msg = merged[idx];
-      if (msg.parts.length > 0 && msg.parts.every(p => p.synthetic)) {
+      if (msg.parts.length > 0 && msg.parts.every(p => p.synthetic) && !getAgentSender(msg.parts)) {
         skipIndices.add(idx);
         continue;
       }
@@ -4188,6 +4582,15 @@ export default function SessionChat({
     writeDismissedGoalKey(sessionId, goalKey);
     setDismissedGoalKey(goalKey);
   }, [sessionId, visibleGoalBanner]);
+  const stopButton = canStop && (
+    <button
+      onClick={handleAbort}
+      title={t('chat.stopTitle')}
+      className="inline-flex h-8 w-8 items-center justify-center rounded-full bg-zinc-800 text-white hover:bg-zinc-900 shadow-sm transition-all"
+    >
+      <Square className="w-3 h-3 fill-current" />
+    </button>
+  );
 
   return (
     <div className={`flex flex-col min-h-0 ${className}`}>
@@ -4198,6 +4601,7 @@ export default function SessionChat({
         onScroll={handleScroll}
         style={{ scrollbarGutter: 'stable' }}
       >
+        {conversationTopSlot}
         {loading && messages.length === 0 ? (
           <div className="flex justify-center py-8">
             <LoadingSpinner
@@ -4223,21 +4627,22 @@ export default function SessionChat({
           </div>
         ) : messages.length === 0 ? (
           welcomeContent ? (
-            typeof welcomeContent === 'function' ? (
-              <div className="flex items-center justify-center" style={{ minHeight: '100%' }}>
-                {welcomeContent((text) => { setInput(text); textareaRef.current?.focus(); })}
-              </div>
-            ) : (
-              <div className="flex items-center justify-center" style={{ minHeight: '100%' }}>
-                {welcomeContent}
-              </div>
-            )
-          ) : (
+            // Below top content the welcome follows it instead of filling the view.
+            <div
+              className={`flex items-center justify-center ${conversationTopSlot ? 'py-6' : ''}`}
+              style={conversationTopSlot ? undefined : { minHeight: '100%' }}
+            >
+              {typeof welcomeContent === 'function'
+                ? welcomeContent((text) => { setInput(text); textareaRef.current?.focus(); })
+                : welcomeContent}
+            </div>
+          ) : conversationTopSlot ? null : (
             <div className="text-center py-8 text-gray-400 text-sm">{effectiveEmptyText}</div>
           )
         ) : (
           <div ref={messagesContentRef} className={msgListClass}>
             <ChatMessageTimeline
+              renderMessageFooter={renderMessageFooter}
               items={historyItems}
               pendingQuestions={pendingQuestions}
               onQuestionAnswer={handleQuestionAnswer}
@@ -4265,6 +4670,7 @@ export default function SessionChat({
               onOpenContext={onOpenContext}
             />
             <ChatMessageTimeline
+              renderMessageFooter={renderMessageFooter}
               items={tailItems}
               pendingQuestions={pendingQuestions}
               onQuestionAnswer={handleQuestionAnswer}
@@ -4297,7 +4703,7 @@ export default function SessionChat({
               <div className={`group relative ${!compact ? 'w-full' : ''} flex`}>
                 <div className={compact ? `flex gap-2.5 ${getMessageGroupClassName({ compact, isUser: false, isEditing: false })}` : 'flex w-full min-w-0'}>
                   <span
-                    className={`inline-flex items-center justify-center rounded-full bg-red-500 text-white font-bold shadow-sm ring-2 ring-white flex-shrink-0 dark:ring-zinc-950 ${
+                    className={`inline-flex items-center justify-center rounded-full ${getAgentAvatarColor(pendingAgentName)} text-white font-bold shadow-sm ring-2 ring-white flex-shrink-0 dark:ring-zinc-950 ${
                       compact ? 'w-7 h-7 text-xs' : 'w-8 h-8 text-sm'
                     } ${compact ? '' : 'absolute -left-10 top-1'}`}
                   >
@@ -4350,12 +4756,28 @@ export default function SessionChat({
               </div>
             )}
 
+            {/* Provider retry notice: the backend is backing off (429 / 5xx) before the next attempt */}
+            {retryStatus && isStreaming && !isCompacting && (
+              <div
+                className={`group relative ${!compact ? 'w-full' : ''} flex`}
+                data-testid="session-retry-notice"
+                role="status"
+              >
+                <div className={compact ? 'w-full' : 'flex w-full min-w-0'}>
+                  <div className="flex w-full items-center gap-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-700 dark:border-amber-500/35 dark:bg-amber-950/30 dark:text-amber-300">
+                    <Loader2 className="h-3.5 w-3.5 flex-shrink-0 animate-spin text-amber-500" />
+                    <span className="min-w-0 break-words">{retryNoticeText}</span>
+                  </div>
+                </div>
+              </div>
+            )}
+
             {/* Standalone thinking indicator when no incomplete message exists */}
             {(isStreaming || sending) && !isCompacting && !(messages.length > 0 && messages[messages.length - 1].role === 'assistant' && !messages[messages.length - 1].finish) && (
               <div className={`group relative ${!compact ? 'w-full' : ''} flex`}>
                 <div className={compact ? `flex gap-2.5 ${getMessageGroupClassName({ compact, isUser: false, isEditing: false })}` : 'flex w-full min-w-0'}>
                   <span
-                    className={`inline-flex items-center justify-center rounded-full bg-red-500 text-white font-bold shadow-sm ring-2 ring-white flex-shrink-0 dark:ring-zinc-950 ${
+                    className={`inline-flex items-center justify-center rounded-full ${getAgentAvatarColor(pendingAgentName)} text-white font-bold shadow-sm ring-2 ring-white flex-shrink-0 dark:ring-zinc-950 ${
                       compact ? 'w-7 h-7 text-xs' : 'w-8 h-8 text-sm'
                     } ${compact ? '' : 'absolute -left-10 top-1'}`}
                   >
@@ -4410,6 +4832,13 @@ export default function SessionChat({
               </button>
             ))}
           </div>
+        </div>
+      )}
+
+      {/* Live detail views can stop work without exposing a follow-up composer. */}
+      {hideInput && live && canStop && (
+        <div className="flex flex-shrink-0 justify-end px-4 py-3">
+          {stopButton}
         </div>
       )}
 
@@ -4524,9 +4953,9 @@ export default function SessionChat({
               onSelect={(agent) => insertMention(agent.name)}
             />
             <div
-              onDragOver={handleComposerDragOver}
+              onDragOver={transport ? undefined : handleComposerDragOver}
               onDragLeave={handleComposerDragLeave}
-              onDrop={handleComposerDrop}
+              onDrop={transport ? undefined : handleComposerDrop}
               className={`${pageCanvas && !compact ? 'min-h-[124px] rounded-[20px] shadow-[0_3px_12px_rgba(22,27,34,0.045)]' : 'rounded-2xl'} border transition-all ${
                 isCompacting
                   ? 'border-amber-200 bg-amber-50/30 dark:border-amber-500/35 dark:bg-amber-950/25'
@@ -4752,7 +5181,7 @@ export default function SessionChat({
                     onBlur={() => { setTimeout(() => { setShowCommandDropdown(false); setMentionRange(null); }, 100); }}
                     onCompositionStart={() => { isComposingRef.current = true; }}
                     onCompositionEnd={() => { isComposingRef.current = false; }}
-                    onPaste={handleComposerPaste}
+                    onPaste={transport ? undefined : handleComposerPaste}
                     onKeyDown={handleKeyDown}
                     placeholder={
                       isCompacting
@@ -4770,18 +5199,19 @@ export default function SessionChat({
                       minHeight: `${effectiveComposerTextareaMinHeight}px`,
                       maxHeight: `${effectiveComposerTextareaMaxHeight}px`,
                     }}
-                    disabled={sending}
+                    disabled={sending || transport?.disabled}
                     rows={1}
                   />
                 </div>
 
                 {/* Bottom toolbar inside the composer card */}
-                <div className="flex items-center gap-1 px-2 pb-2">
-                  <div className="relative" data-composer-add-menu>
+                {/* Wraps onto a second line when a narrow composer cannot fit every control. */}
+                <div className="flex flex-wrap items-center gap-1 px-2 pb-2">
+                  <div className="relative" data-composer-add-menu hidden={!!transport}>
                     <button
                       type="button"
                       onClick={toggleComposerAddMenu}
-                      disabled={sending}
+                      disabled={sending || transport?.disabled}
                       title={t('chat.addMenu.title')}
                       aria-label={t('chat.addMenu.title')}
                       aria-haspopup="menu"
@@ -4838,26 +5268,27 @@ export default function SessionChat({
                   {toolbarSlot}
 
                   {centerToolbarSlot && (
-                    <div className="ml-1">
+                    // Starts from its narrowest usable width (a shortened model name), so the row
+                    // shrinks the model name first and only wraps when even that does not fit.
+                    <div className="ml-1 min-w-0 max-w-max grow basis-44">
                       {centerToolbarSlot}
                     </div>
                   )}
 
-                  <div className="flex-1" />
+                  {/* Usage and send stay together on the right, also when they wrap to their own line. */}
+                  <div className="ml-auto flex shrink-0 items-center gap-1">
+                    {resolvedContextWindowTokens > 0 && (
+                      <ContextUsageRing
+                        percent={contextUsagePercent}
+                        title={contextUsageTitle}
+                        usedTokens={estimatedContextTokens}
+                        totalTokens={resolvedContextWindowTokens}
+                        breakdown={contextUsageBreakdown}
+                      />
+                    )}
 
-                  {resolvedContextWindowTokens > 0 && (
-                    <ContextUsageRing
-                      percent={contextUsagePercent}
-                      title={contextUsageTitle}
-                      usedTokens={estimatedContextTokens}
-                      totalTokens={resolvedContextWindowTokens}
-                      breakdown={contextUsageBreakdown}
-                    />
-                  )}
-
-                  {isStreaming ? (
-                    <>
-                      {canSend && (
+                    {isStreaming ? (
+                      canSend && (
                         <button
                           onClick={handleSend}
                           title={hasUploadingFiles ? t('chat.upload.waiting') : t('chat.queue.enqueue')}
@@ -4865,29 +5296,23 @@ export default function SessionChat({
                         >
                           {sending || hasUploadingFiles ? <Loader2 className="w-4 h-4 animate-spin" /> : <ArrowUp className="w-4 h-4" strokeWidth={2.5} />}
                         </button>
-                      )}
+                      )
+                    ) : (
                       <button
-                        onClick={handleAbort}
-                        title={t('chat.stopTitle')}
-                        className="inline-flex h-8 w-8 items-center justify-center rounded-full bg-zinc-800 text-white hover:bg-zinc-900 shadow-sm transition-all"
+                        onClick={handleSend}
+                        disabled={!canSend}
+                        title={hasUploadingFiles ? t('chat.upload.waiting') : undefined}
+                        className={`inline-flex h-8 w-8 items-center justify-center rounded-full transition-all ${
+                          canSend
+                            ? 'bg-sky-500 text-white hover:bg-sky-600 shadow-sm hover:shadow'
+                            : 'cursor-not-allowed border border-zinc-300 bg-zinc-200 text-zinc-400 dark:border-[#5a6573] dark:bg-[#46515e] dark:text-[#b8c2cc]'
+                        }`}
                       >
-                        <Square className="w-3 h-3 fill-current" />
+                        {sending || hasUploadingFiles ? <Loader2 className="w-4 h-4 animate-spin" /> : <ArrowUp className="w-4 h-4" strokeWidth={2.5} />}
                       </button>
-                    </>
-                  ) : (
-                    <button
-                      onClick={handleSend}
-                      disabled={!canSend}
-                      title={hasUploadingFiles ? t('chat.upload.waiting') : undefined}
-                      className={`inline-flex h-8 w-8 items-center justify-center rounded-full transition-all ${
-                        canSend
-                          ? 'bg-sky-500 text-white hover:bg-sky-600 shadow-sm hover:shadow'
-                          : 'cursor-not-allowed border border-zinc-300 bg-zinc-200 text-zinc-400 dark:border-[#5a6573] dark:bg-[#46515e] dark:text-[#b8c2cc]'
-                      }`}
-                    >
-                      {sending || hasUploadingFiles ? <Loader2 className="w-4 h-4 animate-spin" /> : <ArrowUp className="w-4 h-4" strokeWidth={2.5} />}
-                    </button>
-                  )}
+                    )}
+                    {stopButton}
+                  </div>
                 </div>
             </div>
           </div>
@@ -5043,6 +5468,8 @@ export interface ChatMessageBubbleProps {
   processGroupOpenState?: ProcessGroupOpenState;
   onProcessGroupOpenChange?: (key: string, open: boolean) => void;
   compact?: boolean;
+  /** Message body only: no avatar or agent name, for a caller that draws its own sender frame. */
+  bare?: boolean;
   onCopy?: (text: string) => void;
   editingMessageId?: string | null;
   editingText?: string;
@@ -5060,10 +5487,12 @@ export interface ChatMessageBubbleProps {
 
 interface ChatMessageTimelineProps extends Omit<ChatMessageBubbleProps, 'message' | 'isActive'> {
   items: ChatTimelineItem[];
+  renderMessageFooter?: (message: Message) => React.ReactNode;
 }
 
 function ChatMessageTimelineInner({
   items,
+  renderMessageFooter,
   pendingQuestions,
   onQuestionAnswer,
   onQuestionReject,
@@ -5075,6 +5504,7 @@ function ChatMessageTimelineInner({
   processGroupOpenState,
   onProcessGroupOpenChange,
   compact,
+  bare,
   onCopy,
   editingMessageId,
   editingText,
@@ -5107,6 +5537,7 @@ function ChatMessageTimelineInner({
             processGroupOpenState={processGroupOpenState}
             onProcessGroupOpenChange={onProcessGroupOpenChange}
             compact={compact}
+            bare={bare}
             onCopy={onCopy}
             editingMessageId={editingMessageId}
             editingText={editingText}
@@ -5121,6 +5552,7 @@ function ChatMessageTimelineInner({
             onOpenContextFile={onOpenContextFile}
             onOpenContext={onOpenContext}
           />
+          {renderMessageFooter?.(message)}
         </div>
       ))}
     </>
@@ -5193,6 +5625,7 @@ function ChatMessageBubbleInner({
   processGroupOpenState,
   onProcessGroupOpenChange,
   compact = true,
+  bare = false,
   onCopy,
   editingMessageId,
   editingText = '',
@@ -5208,8 +5641,9 @@ function ChatMessageBubbleInner({
   onOpenContext,
 }: ChatMessageBubbleProps) {
   const { t, i18n } = useTranslation('session');
-  const isUser = message.role === 'user';
   const parts: MessagePart[] = Array.isArray(message.parts) ? message.parts : [];
+  const sender = getAgentSender(parts);
+  const isUser = message.role === 'user' && !sender;
   const processElapsedClock = useProcessElapsedClock(isActive && collapseIntermediateSteps);
   const { getPartExpanded, togglePart } = useReasoningToggle(parts, message.finish);
   // Lightbox state for inline image previews. Browsers block top-level
@@ -5219,7 +5653,7 @@ function ChatMessageBubbleInner({
   const [previewImage, setPreviewImage] = useState<{ url: string; alt?: string } | null>(null);
   if (message.finish === 'summary') {
     return (
-      <div className={getCompactionDividerClassName(compact)}>
+      <div className={getCompactionDividerClassName(compact, !bare)}>
         <span className="h-px flex-1 bg-zinc-200" />
         <span className="shrink-0 px-1.5 font-medium text-zinc-500">
           {t('chat.contextCompressed')}
@@ -5228,13 +5662,13 @@ function ChatMessageBubbleInner({
       </div>
     );
   }
-  const rawAgentName = message.agent || 'rex';
+  const rawAgentName = sender?.source_agent || message.agent || 'rex';
   const agentName = rawAgentName.charAt(0).toUpperCase() + rawAgentName.slice(1);
 
   const getTextContent = () => {
     const text = parts
       .filter((p) => p.type === 'text' && p.text)
-      .map((p) => p.text)
+      .map((p) => sender ? getMessagePartDisplayText(p) : p.text)
       .join('\n\n');
     return isUser ? text : stripTaskMetadata(text);
   };
@@ -5291,7 +5725,7 @@ function ChatMessageBubbleInner({
       <User className={compact ? 'w-3 h-3' : 'w-3.5 h-3.5'} />
     </span>
   ) : (
-    <span className={`inline-flex items-center justify-center rounded-full bg-red-500 text-white font-bold shadow-sm ring-2 ring-white flex-shrink-0 dark:ring-zinc-950 ${avatarSize}`}>
+    <span className={`inline-flex items-center justify-center rounded-full ${getAgentAvatarColor(rawAgentName)} text-white font-bold shadow-sm ring-2 ring-white flex-shrink-0 dark:ring-zinc-950 ${avatarSize}`}>
       {agentName.charAt(0).toUpperCase()}
     </span>
   );
@@ -5841,7 +6275,7 @@ function ChatMessageBubbleInner({
           </>
         ) : (
           <>
-            <button
+            {!sender && <button
               onClick={() => void onRegenerate?.(targetMessageId)}
               disabled={actionsDisabled || isActionPending}
               className={iconButtonClass}
@@ -5849,7 +6283,7 @@ function ChatMessageBubbleInner({
             >
               <RefreshCw className={`w-3 h-3 ${isActionPending ? 'animate-spin' : ''}`} />
               <span className={tooltipClass}>{t('chat.regenerate')}</span>
-            </button>
+            </button>}
             <button
               onClick={() => onCopy?.(getTextContent())}
               disabled={isActionPending}
@@ -5865,6 +6299,26 @@ function ChatMessageBubbleInner({
       {!isUser && footerTimestamp}
     </div>
   ) : null;
+
+  if (bare) {
+    return (
+      <div className={`group relative flex w-full min-w-0${isUser ? ' justify-end' : ''}`}>
+        <div className={`flex min-w-0 flex-col ${
+          isUser ? `items-end ${isEditing ? 'w-full' : 'max-w-[88%]'}` : 'w-full items-start'
+        }`}>
+          {bubble}
+          {footer}
+        </div>
+        {previewImage && (
+          <ImageLightbox
+            src={previewImage.url}
+            alt={previewImage.alt}
+            onClose={() => setPreviewImage(null)}
+          />
+        )}
+      </div>
+    );
+  }
 
   if (isUser) {
     if (!compact) {
@@ -6681,6 +7135,7 @@ export function ChatToolPart({
  */
 export const ChatMessageBubble = memo(ChatMessageBubbleInner, (prev, next) => {
   if (prev.isActive !== next.isActive) return false;
+  if (prev.bare !== next.bare) return false;
   if (prev.showActions !== next.showActions) return false;
   if (prev.collapseIntermediateSteps !== next.collapseIntermediateSteps) return false;
   if (prev.processGroupsDefaultOpen !== next.processGroupsDefaultOpen) return false;
@@ -6693,6 +7148,7 @@ export const ChatMessageBubble = memo(ChatMessageBubbleInner, (prev, next) => {
   if (prev.onOpenContextFile !== next.onOpenContextFile) return false;
   if (prev.onOpenContext !== next.onOpenContext) return false;
   if (prev.message.finish !== next.message.finish) return false;
+  if (prev.message.role !== next.message.role || prev.message.agent !== next.message.agent) return false;
   const prevParts = prev.message.parts as any[] | undefined;
   const nextParts = next.message.parts as any[] | undefined;
   if ((prevParts?.length ?? 0) !== (nextParts?.length ?? 0)) return false;

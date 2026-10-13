@@ -8,10 +8,12 @@ from pathlib import Path
 from typing import List, Optional
 
 from fastapi import APIRouter, HTTPException, Query, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from flocks.auth.context import AuthUser
 from flocks.project.project import (
+    PROJECT_SCOPE_PATTERN,
+    WORKBENCH_PROJECT_SCOPE,
     Project,
     ProjectDeletionError,
     ProjectInfo,
@@ -40,6 +42,7 @@ class ProjectCreateRequest(BaseModel):
 
     worktree: str
     name: Optional[str] = None
+    scope: str = Field(WORKBENCH_PROJECT_SCOPE, pattern=PROJECT_SCOPE_PATTERN)
 
 
 class FolderEntry(BaseModel):
@@ -116,14 +119,29 @@ async def _list_project_summaries(user: AuthUser, search: Optional[str]) -> List
     ]
 
 
+async def list_project_summaries(user: AuthUser, search: Optional[str] = None) -> List[ProjectInfo]:
+    """Every live project of *user* with session counts, whatever its scope."""
+    return await _list_project_summaries(user, search)
+
+
 @router.get("", response_model=List[ProjectInfo], include_in_schema=False)
 @router.get("/", response_model=List[ProjectInfo], summary="List projects")
-async def list_projects(request: Request, search: Optional[str] = Query(None)):
-    """List user-registered project folders."""
+async def list_projects(
+    request: Request,
+    search: Optional[str] = Query(None),
+    scope: str = Query(WORKBENCH_PROJECT_SCOPE, pattern=PROJECT_SCOPE_PATTERN),
+):
+    """List user-registered project folders.
+
+    The default scope is the session manager's. Another scope lists that
+    extension's folders together with the workbench ones it may reuse.
+    """
 
     user = require_user(request)
     try:
-        return await _list_project_summaries(user, search)
+        projects = await _list_project_summaries(user, search)
+        visible_scopes = {WORKBENCH_PROJECT_SCOPE, scope}
+        return [project for project in projects if (project.scope or WORKBENCH_PROJECT_SCOPE) in visible_scopes]
     except Exception as exc:
         log.error("project.list.error", {"error": str(exc)})
         raise HTTPException(status_code=500, detail=str(exc)) from exc
@@ -140,8 +158,11 @@ async def create_project(request: Request, payload: ProjectCreateRequest):
             owner_id=user.id,
             name=payload.name,
             worktree=payload.worktree,
+            scope=payload.scope,
         )
     except ProjectPathConflictError as exc:
+        if exc.project.scope != payload.scope:
+            raise HTTPException(status_code=409, detail="该目录已在另一工作区登记，请选择其他目录") from exc
         return exc.project
     except ProjectNameConflictError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -287,14 +308,25 @@ async def unshare_project_local(project_id: str, request: Request):
 
 
 @router.delete("/{project_id}", response_model=bool, summary="Delete project")
-async def delete_project(project_id: str, request: Request):
-    """Archive project tasks and hide the project while preserving project files."""
+async def delete_project(
+    project_id: str,
+    request: Request,
+    keep_sessions: bool = Query(False, alias="keepSessions"),
+):
+    """Hide the project while preserving project files.
+
+    By default its tasks are archived with it. With ``keepSessions`` they stay
+    active: tasks of a hidden project are listed as ungrouped, and adding the
+    folder again brings them back under it.
+    """
 
     user = require_user(request)
     try:
         async with Project.lifecycle_guard(project_id):
             if await Project.get(project_id, owner_id=user.id) is None:
                 raise ValueError(f"Project {project_id} not found")
+            if keep_sessions:
+                return await Project.delete(project_id, owner_id=user.id)
 
             project_sessions = [
                 session

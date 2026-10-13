@@ -1,11 +1,15 @@
 import { useState, useEffect, useMemo } from 'react';
-import { Bot, Plus, Cpu, RefreshCw, Pencil, Trash2, Shield, Zap, Loader2 } from 'lucide-react';
+import { Bot, Plus, Cpu, RefreshCw, Shield, Zap } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import PageHeader from '@/components/common/PageHeader';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
 import EmptyState from '@/components/common/EmptyState';
 import { useToast } from '@/components/common/Toast';
 import PluginGroupButton from '@/components/plugin-groups/PluginGroupButton';
+import PluginCard, { PLUGIN_CARD_GRID_CLASS, PluginSourceTag } from '@/components/plugin-groups/PluginCard';
+import EnabledSwitch from '@/components/plugin-groups/EnabledSwitch';
+import { EnabledBadge } from '@/pages/Tool/components/badges';
+import { requestConfirm } from '@/components/common/ConfirmDialog';
 import { useAgents } from '@/hooks/useAgents';
 import { agentAPI, Agent } from '@/api/agent';
 import { getAgentDisplayDescription, getAgentDisplayName } from '@/utils/agentDisplay';
@@ -80,7 +84,7 @@ export default function AgentPage() {
   );
 
   const handleDelete = async (name: string) => {
-    if (!confirm(t('confirmDelete', { name }))) return;
+    if (!(await requestConfirm({ description: t('confirmDelete', { name }), confirmText: t('badge.delete'), variant: 'danger' }))) return;
     try {
       await agentAPI.delete(name);
       if (editingAgent?.name === name) setEditingAgent(null);
@@ -370,14 +374,14 @@ function AgentSection({
   const [page, setPage] = useState(1);
 
   // Per-source counts for the filter chips
-  const builtinCount = useMemo(() => agents.filter(a => a.native).length, [agents]);
-  const customCount  = useMemo(() => agents.filter(a => !a.native).length, [agents]);
+  const builtinCount = useMemo(() => agents.filter(isBuiltinAgent).length, [agents]);
+  const customCount  = useMemo(() => agents.filter(a => !isBuiltinAgent(a)).length, [agents]);
 
   const filtered = agents.filter((agent) => {
     if (!matchesGroup(agent.group, groupSelection)) return false;
     if (!showSourceFilter) return true;
-    if (sourceFilter === 'builtin') return agent.native;
-    if (sourceFilter === 'custom') return !agent.native;
+    if (sourceFilter === 'builtin') return isBuiltinAgent(agent);
+    if (sourceFilter === 'custom') return !isBuiltinAgent(agent);
     return true;
   });
 
@@ -463,7 +467,7 @@ function AgentSection({
             {t(`filter.${sourceFilter}` as any)} — {t('emptyState.title')}
           </p>
         ) : (
-          <div className={viewMode === 'cards' ? 'grid gap-3 grid-cols-2 lg:grid-cols-3 xl:grid-cols-4' : 'space-y-2'}>
+          <div className={viewMode === 'cards' ? PLUGIN_CARD_GRID_CLASS : 'space-y-2'}>
             {displayed.map((agent) => (
               <div key={agent.name} className="min-w-0 [&>div]:h-full" {...groupDrag.dragProps(agent.name)}>
                 <AgentCard
@@ -500,6 +504,11 @@ function AgentSection({
 // Agent Card
 // ============================================================================
 
+/** Shipped with the product rather than made by the user: core built-ins and sealed (Pro) agents. */
+function isBuiltinAgent(agent: Agent): boolean {
+  return !!agent.native || !!agent.promptProtected;
+}
+
 interface AgentCardProps {
   grouping: GroupDrag;
   layout?: PluginViewMode;
@@ -526,167 +535,54 @@ function AgentCard({
   const { t } = useTranslation('agent');
   const displayName = getAgentDisplayName(agent, displayLang);
   const displayDesc = getAgentDisplayDescription(agent, displayLang);
-  const showDelegatableToggle = agent.mode === 'subagent';
+  // Delegation applies to sub-agents. A sealed definition keeps its own setting
+  // (the API refuses changes), so its switch stays disabled and says why.
+  const showDelegation = agent.mode === 'subagent';
+  const sourceLabel = agent.promptProtected ? t('badge.protected') : agent.native ? t('badge.native') : t('badge.custom');
+  const deleteDisabledReason = agent.promptProtected
+    ? t('badge.protectedDeleteDisabled')
+    : agent.native ? t('badge.nativeDeleteDisabled') : undefined;
 
   return (
-    <div
-      className={`
-        group relative bg-white rounded-xl border flex flex-col overflow-hidden ${layout === 'list' ? 'lg:flex-row' : ''}
-        cursor-pointer transition-all duration-150
-        ${isSelected
-          ? 'border-slate-400 shadow-md ring-2 ring-slate-200'
-          : 'border-gray-200 hover:border-gray-300 hover:shadow-md'
-        }
-      `}
-      onClick={onClick}
-    >
-      {/* Card body */}
-      <div className={`flex-1 px-4 pt-3 pb-2 flex flex-col gap-2 min-w-0 ${layout === 'list' ? 'sm:flex-row sm:items-center sm:gap-4' : ''}`}>
-        {/* Avatar + Name row */}
-        <div className={`flex items-start gap-2.5 min-w-0 ${layout === 'list' ? 'sm:w-52 sm:shrink-0' : ''}`}>
-          <div className="w-8 h-8 rounded-lg flex items-center justify-center shrink-0 mt-0.5 bg-gray-100">
-            <Bot className="w-4 h-4 text-gray-500" />
-          </div>
-
-          <div className="min-w-0 flex-1">
-            <span className="block text-sm font-semibold text-gray-900 truncate leading-snug">
-              {displayName}
-            </span>
-            {/* Badges row: source badge (always shown) + delegatable */}
-            <div className="flex items-center gap-1 mt-0.5 flex-wrap">
-              {/* Source badge: built-in vs custom — styled distinctly */}
-              {agent.native
-                ? (
-                  <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium
-                                   bg-blue-50 text-blue-600">
-                    {t('badge.native')}
-                  </span>
-                )
-                : (
-                  <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium
-                                   bg-teal-50 text-teal-600">
-                    {t('badge.custom')}
-                  </span>
-                )
-              }
-              {agent.delegatable && (
-                <span className="inline-flex items-center px-1.5 py-0.5 rounded bg-gray-50 text-gray-500 text-[10px] font-medium">
-                  {t('badge.delegatable')}
-                </span>
-              )}
-            </div>
-          </div>
-        </div>
-
-        {/* Description */}
-        <p className={`text-xs text-gray-500 leading-relaxed line-clamp-2 ${layout === 'list' ? 'flex-1' : ''}`}>
-          {displayDesc || t('common:empty.noDescription')}
-        </p>
-
-        {/* Model chip */}
-        {agent.model && (
-          <div className={`self-start inline-flex items-center gap-1 text-[10px] text-gray-400 ${layout === 'list' ? 'sm:w-32 sm:shrink-0 sm:self-center' : ''}`}>
-            <Cpu className="w-3 h-3 shrink-0" />
-            <span className="truncate max-w-[120px]">
-              {agent.model.modelID}
-            </span>
-          </div>
+    <PluginCard
+      layout={layout}
+      icon={<Bot className="h-4 w-4" />}
+      title={displayName}
+      tags={<>
+        <PluginSourceTag builtin={isBuiltinAgent(agent)} label={sourceLabel} />
+        {agent.delegatable && (
+          <span className="inline-flex items-center rounded bg-gray-50 px-1.5 py-0.5 text-[10px] font-medium text-gray-500">{t('badge.delegatable')}</span>
         )}
-      </div>
-
-      {/* Footer — delete / enable / edit */}
-      <div
-        className={`border-t border-gray-100 px-3 py-2 flex items-center justify-between ${layout === 'list' ? 'lg:border-t-0 lg:border-l lg:gap-4 lg:shrink-0' : ''}`}
-        onClick={(e) => e.stopPropagation()}
-      >
-        {/* Delete — disabled for built-in agents */}
-        {agent.native ? (
-          <button
-            type="button"
-            disabled
-            title={t('badge.nativeDeleteDisabled')}
-            className="inline-flex shrink-0 whitespace-nowrap items-center gap-1 px-1 py-1 rounded-md text-[11px] font-medium
-                       text-gray-300 cursor-not-allowed select-none"
-          >
-            <Trash2 className="w-3 h-3" />
-            {t('badge.delete')}
-          </button>
-        ) : (
-          <button
-            type="button"
-            onClick={(e) => { e.stopPropagation(); onDelete(agent.name); }}
-            title={t('badge.delete')}
-            className="inline-flex shrink-0 whitespace-nowrap items-center gap-1 px-1 py-1 rounded-md text-[11px] font-medium
-                       text-gray-400 hover:text-red-600 hover:bg-red-50 transition-colors"
-          >
-            <Trash2 className="w-3 h-3" />
-            {t('badge.delete')}
-          </button>
-        )}
-
-        <div className="flex shrink-0 flex-nowrap items-center justify-end gap-1 whitespace-nowrap">
-          <PluginGroupButton grouping={grouping} itemKey={agent.name} />
-          {showDelegatableToggle && (
-            <div className="flex items-center gap-1.5">
-              <span className="text-[11px] font-medium text-gray-400">
-                {t('form.enabled')}
-              </span>
-              <ToggleSwitch
-                enabled={!!agent.delegatable}
-                loading={toggling}
-                title={agent.delegatable ? t('form.enabledTip') : t('form.disabledTip')}
-                onChange={(e) => {
-                  e.stopPropagation();
-                  onToggleDelegatable(agent, !agent.delegatable);
-                }}
-              />
-            </div>
-          )}
-
-          <button
-            type="button"
-            onClick={onClick}
-            title={t('badge.edit')}
-            aria-label={t('badge.edit')}
-            className="inline-flex shrink-0 whitespace-nowrap items-center gap-1 px-1 py-1 rounded-md text-[11px] font-medium text-gray-400
-                       hover:text-slate-700 hover:bg-gray-50 transition-colors"
-          >
-            <Pencil className="w-3 h-3" />
-            {t('badge.edit')}
-          </button>
-        </div>
-      </div>
-    </div>
+      </>}
+      status={showDelegation ? <EnabledBadge enabled={!!agent.delegatable} /> : undefined}
+      statusControl={showDelegation ? (
+        <EnabledSwitch
+          enabled={!!agent.delegatable}
+          loading={toggling}
+          label={t('form.enabled')}
+          title={agent.delegatable ? t('form.enabledTip') : t('form.disabledTip')}
+          disabledReason={agent.promptProtected ? t('badge.protectedDelegateDisabled') : undefined}
+          onChange={() => onToggleDelegatable(agent, !agent.delegatable)}
+        />
+      ) : undefined}
+      description={displayDesc}
+      emptyDescription={t('common:empty.noDescription')}
+      meta={agent.model ? (
+        <span className="inline-flex max-w-full items-center gap-1">
+          <Cpu className="h-3 w-3 shrink-0" />
+          <span className="truncate" title={agent.model.modelID}>{agent.model.modelID}</span>
+        </span>
+      ) : undefined}
+      selected={isSelected}
+      onOpen={onClick}
+      deleteLabel={t('badge.delete')}
+      onDelete={deleteDisabledReason ? undefined : () => onDelete(agent.name)}
+      deleteDisabledReason={deleteDisabledReason}
+      groupButton={<PluginGroupButton grouping={grouping} itemKey={agent.name} iconOnly />}
+      editLabel={t('badge.edit')}
+      editDisabledReason={agent.promptProtected ? t('badge.protectedEditDisabled') : undefined}
+      testId={`agent-card-${agent.name}`}
+    />
   );
 }
 
-function ToggleSwitch({ enabled, loading, title, onChange }: {
-  enabled: boolean;
-  loading: boolean;
-  title?: string;
-  onChange: (e: React.MouseEvent) => void;
-}) {
-  return (
-    <button
-      type="button"
-      role="switch"
-      aria-checked={enabled}
-      onClick={onChange}
-      disabled={loading}
-      title={title}
-      className={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full border-2 border-transparent
-        transition-colors duration-150 focus:outline-none disabled:cursor-wait
-        ${enabled ? 'bg-slate-500' : 'bg-gray-200'}`}
-    >
-      {loading
-        ? <Loader2 className="absolute inset-0 m-auto w-3 h-3 text-white animate-spin" />
-        : (
-          <span className={`pointer-events-none inline-block h-4 w-4 rounded-full bg-white shadow
-            transform transition-transform duration-150
-            ${enabled ? 'translate-x-4' : 'translate-x-0'}`}
-          />
-        )
-      }
-    </button>
-  );
-}

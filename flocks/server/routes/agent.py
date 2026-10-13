@@ -60,6 +60,21 @@ class AgentModelInfo(BaseModel):
     providerID: str
 
 
+# Agents whose package seals their prompt: readable by the runtime only.
+PROTECTED_PROMPT_DETAIL = "This agent's prompt is protected and cannot be read or changed"
+
+
+async def _protected_agent(name: str) -> Optional[AgentInfoModel]:
+    """The sealed definition behind *name*, also when ``enabled_agents`` hides it."""
+    registered = Agent.registered(name)
+    if registered is not None and registered.prompt_protected:
+        return registered
+    current = await Agent.get(name)
+    if current is not None and current.prompt_protected:
+        return current
+    return None
+
+
 class AgentResponse(BaseModel):
     """
     Agent response - Flocks TUI compatible format.
@@ -81,6 +96,8 @@ class AgentResponse(BaseModel):
     permission: List[Dict[str, Any]] = Field(default_factory=list)
     model: Optional[AgentModelInfo] = None
     prompt: Optional[str] = None
+    # The prompt is sealed by the package that registered the agent; ``prompt`` is omitted.
+    promptProtected: bool = False
     options: Dict[str, Any] = Field(default_factory=dict)
     delegatable: bool = True
     steps: Optional[int] = None
@@ -137,11 +154,12 @@ def agent_to_response(
         color=agent.color,
         permission=permission or [],
         model=model_info,
-        prompt=agent.prompt,
+        prompt=None if agent.prompt_protected else agent.prompt,
+        promptProtected=agent.prompt_protected,
         options=agent.options,
         delegatable=delegatable,
         steps=agent.steps,
-        skills=skills or [],
+        skills=list(agent.skills if skills is None else skills),
         tools=tools or [],
         tags=agent.tags,
     )
@@ -176,6 +194,7 @@ def _agent_data_to_info(agent_data: Dict[str, Any]) -> AgentInfoModel:
         native=False,
         hidden=False,
         delegatable=delegatable,
+        skills=agent_data.get("skills", []),
     )
 
 
@@ -243,6 +262,16 @@ async def _load_custom_agent_extras(name: str) -> tuple[List[str], List[str], Li
         return [], [], []
 
 
+async def _load_custom_agent_overlay(name: str) -> Optional[Dict[str, Any]]:
+    """The stored overlay of *name*, or None when nothing was stored."""
+    from flocks.storage.storage import Storage
+    try:
+        data = await Storage.read(f"agent/custom/{name}")
+    except Exception:
+        return None
+    return data if isinstance(data, dict) else None
+
+
 def _get_all_tool_names() -> List[str]:
     """Return all registered tool names, initialising ToolRegistry if needed."""
     from flocks.tool.registry import ToolRegistry
@@ -273,12 +302,21 @@ async def _build_single_agent_response(
     all_tool_names: List[str],
 ) -> AgentResponse:
     """Build AgentResponse for one agent, resolving model overrides and tools/skills."""
+    skills = list(agent.skills)
     if agent.native:
         tools = _compute_native_agent_tools(agent, all_tool_names)
-        skills: List[str] = []
         permission: List[Dict[str, Any]] = []
     else:
-        skills, tools, permission = await _load_custom_agent_extras(agent.name)
+        # A stored overlay (YAML agents edited in the UI, storage-backed agents)
+        # is what the user saved; agents registered at runtime have none and
+        # report their own definition.
+        overlay = await _load_custom_agent_overlay(agent.name) or {}
+        permission = normalize_permission_items(overlay.get("permission"))
+        tools = list(agent.tools or [])
+        if isinstance(overlay.get("skills"), list):
+            skills = list(overlay["skills"])
+        if isinstance(overlay.get("tools"), list):
+            tools = list(overlay["tools"])
     override = overrides.get(agent.name, {})
     model_override = {k: override[k] for k in ("modelID", "providerID") if k in override} or None
     temperature_override = override.get("temperature")
@@ -356,6 +394,8 @@ async def get_agent_prompt(name: str):
         agent = await Agent.get(name)
         if not agent:
             raise HTTPException(status_code=404, detail=f"Agent {name} not found")
+        if agent.prompt_protected:
+            raise HTTPException(status_code=403, detail=PROTECTED_PROMPT_DETAIL)
         return {"prompt": agent.prompt or ""}
     except HTTPException:
         raise
@@ -427,6 +467,8 @@ async def create_agent(req: AgentCreateRequest):
     from flocks.storage.storage import Storage
 
     try:
+        if await _protected_agent(req.name) is not None:
+            raise HTTPException(status_code=409, detail=f"Agent {req.name} already exists")
         existing = await Agent.get(req.name)
         if existing is None:
             selected = await Agent.get_group_definition(req.name)
@@ -495,6 +537,21 @@ async def update_agent(name: str, req: AgentUpdateRequest):
     from flocks.storage.storage import Storage
 
     try:
+        protected = await _protected_agent(name)
+        if protected is not None:
+            # Only the group can change, as a config overlay: the Storage and YAML
+            # branches below would re-register an unsealed definition.
+            if req.model_fields_set - {"group"}:
+                raise HTTPException(status_code=403, detail=PROTECTED_PROMPT_DETAIL)
+            if await Agent.get(name) is None:
+                # Hidden by enabled_agents: like every other read, it is not there.
+                raise HTTPException(status_code=404, detail=f"Agent {name} not found")
+            if "group" in req.model_fields_set:
+                if protected.group_readonly and req.group != normalize_agent_group(protected.group):
+                    raise HTTPException(status_code=403, detail="System agent group is read-only")
+                if not protected.group_readonly:
+                    await _save_agent_group_override(protected, req.group)
+            return await get_agent(name)
         group_agent = None
         use_group_override = False
         if "group" in req.model_fields_set:
@@ -594,6 +651,10 @@ async def update_agent(name: str, req: AgentUpdateRequest):
                 updates["model"] = req.model.model_dump()
             if req.delegatable is not None:
                 updates["delegatable"] = req.delegatable
+            if req.skills is not None:
+                updates["skills"] = req.skills
+            if req.tools is not None:
+                updates["tools"] = req.tools
 
             if use_group_override:
                 await _save_agent_group_override(group_agent, req.group)
@@ -641,6 +702,8 @@ async def update_agent(name: str, req: AgentUpdateRequest):
                     )
                 if req.delegatable is not None:
                     agent.delegatable = req.delegatable
+                if req.skills is not None:
+                    agent.skills = list(req.skills)
                 if req.tools is not None:
                     agent.tools = req.tools
                     agent.permission = permission_items_to_ruleset(extras.get("permission"))
@@ -673,6 +736,8 @@ async def update_agent_delegatable(name: str, req: AgentDelegatableUpdateRequest
     from flocks.storage.storage import Storage
 
     try:
+        if await _protected_agent(name) is not None:
+            raise HTTPException(status_code=403, detail=PROTECTED_PROMPT_DETAIL)
         agent = await Agent.get(name)
         if not agent:
             raise HTTPException(status_code=404, detail=f"Agent {name} not found")
@@ -727,6 +792,8 @@ async def delete_agent(name: str):
     from flocks.storage.storage import Storage
 
     try:
+        if await _protected_agent(name) is not None:
+            raise HTTPException(status_code=403, detail=PROTECTED_PROMPT_DETAIL)
         deleted_storage = False
         deleted_yaml = False
 
@@ -734,13 +801,11 @@ async def delete_agent(name: str):
         # AND a YAML file (e.g. YAML base + Storage overlay from edits).
 
         agent_key = f"agent/custom/{name}"
-        try:
-            await Storage.read(agent_key)
-            await Storage.remove(agent_key)
+        # Storage.read returns None for a missing key instead of raising, so
+        # only the removal result tells whether a Storage entry existed.
+        if await Storage.remove(agent_key):
             deleted_storage = True
             log.info("agent.deleted", {"name": name, "source": "storage"})
-        except Storage.NotFoundError:
-            pass
 
         if delete_yaml_agent(name):
             deleted_yaml = True
@@ -786,7 +851,9 @@ async def update_agent_model(name: str, req: AgentModelUpdateRequest):
         if not agent:
             raise HTTPException(status_code=404, detail=f"Agent {name} not found")
 
-        if agent.native:
+        # Sealed definitions take a model override too: rewriting them from a
+        # Storage or YAML record would re-register an unsealed copy.
+        if agent.native or agent.prompt_protected:
             async with _get_overrides_lock():
                 overrides = await _load_model_overrides()
                 entry = overrides.get(name, {})

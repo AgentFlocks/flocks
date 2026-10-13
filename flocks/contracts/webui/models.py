@@ -52,6 +52,7 @@ class WebUIWorkspaceSectionManifest(BaseModel):
     id: str = Field(..., description="Stable section identifier")
     label: str = Field(..., description="Section label")
     labelEn: Optional[str] = Field(None, description="English section label", alias="labelEn")
+    query: dict[str, str] = Field(default_factory=dict, description="Query parameters for this navigation view")
     pageIds: list[str] = Field(
         default_factory=list,
         description="Page ids in this section",
@@ -72,6 +73,11 @@ class WebUIWorkspaceSectionManifest(BaseModel):
         description="Temporary theme override while viewing pages in this section",
         alias="themeOverride",
     )
+    flat: bool = Field(
+        False,
+        description="Show the section as one navigation item named by its label, without a group header",
+    )
+    icon: Optional[str] = Field(None, description="Icon of the navigation item of a flat section")
 
 
 class WebUIPageBuildMeta(BaseModel):
@@ -135,6 +141,9 @@ class WebUIWorkspaceListItem(BaseModel):
     # Checked into the project (<project>/.flocks/plugins/contracts/webui)
     # rather than installed into the user root.
     native: bool = False
+    # Its suite needs the Pro edition, which is not active: the workspace stays
+    # installed but must not open until a license is active again.
+    locked: bool = False
 
 
 class WebUIPageDetail(BaseModel):

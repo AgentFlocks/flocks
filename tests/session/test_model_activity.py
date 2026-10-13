@@ -117,6 +117,7 @@ async def test_timing_markers_do_not_bypass_doom_loop_detection(recording, monke
     proc = StreamProcessor(
         session_id="session-timing", assistant_message=SimpleNamespace(id="message-timing"),
         agent=SimpleNamespace(name="rex"), model_activity=activity,
+        allowed_tool_names=["read"],
     )
     parts = []
     for index in range(3):

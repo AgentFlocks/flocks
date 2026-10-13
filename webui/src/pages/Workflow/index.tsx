@@ -29,17 +29,20 @@ import { deriveGroupNav, matchesGroup, saveGroupItems, type GroupSelection } fro
 import PluginViewToggle from '@/components/plugin-groups/PluginViewToggle';
 import { usePluginViewMode, type PluginViewMode } from '@/hooks/usePluginViewMode';
 import { workflowAPI } from '@/api/workflow';
+import { useFittingStatusCount } from './statusFit';
 
 function isBuiltin(workflow: WorkflowSummary): boolean {
   return workflow.source === 'project';
 }
 
 // ---------------------------------------------------------------------------
-// Types
+// Constants
 // ---------------------------------------------------------------------------
 
-type SourceFilter = 'all' | 'builtin' | 'custom';
 const PAGE_SIZE = 12;
+// Columns follow the section's own width (the group nav already takes part of
+// the viewport), so cards never shrink below the width their header row needs.
+const CARD_GRID_CLASS = 'grid gap-3 grid-cols-[repeat(auto-fill,minmax(min(20rem,100%),1fr))]';
 const MAX_VISIBLE_TRIGGER_STATUSES = 2;
 const STATUS_TOOLTIP_WIDTH = 224;
 const STATUS_TOOLTIP_MAX_HEIGHT = 240;
@@ -90,7 +93,6 @@ export default function WorkflowPage() {
   const { workflows, loading, error, refetch } = useWorkflows();
   const [refreshing, setRefreshing] = useState(false);
   const [refreshDone, setRefreshDone] = useState(false);
-  const [sourceFilter, setSourceFilter] = useState<SourceFilter>('all');
   const [viewMode, setViewMode] = usePluginViewMode('workflow', 'cards');
   const [groupSelection, setGroupSelection] = useState<GroupSelection>(null);
   const asGroupItem = (workflow: WorkflowSummary) => ({
@@ -127,8 +129,14 @@ export default function WorkflowPage() {
     });
   };
 
-  const builtinWorkflows = useMemo(() => workflows.filter(isBuiltin), [workflows]);
-  const customWorkflows  = useMemo(() => workflows.filter(w => !isBuiltin(w)), [workflows]);
+  // The group nav is the only filter; built-in / custom is expressed by the
+  // sections themselves, so their counts always match the cards shown.
+  const groupWorkflows   = useMemo(
+    () => workflows.filter((workflow) => matchesGroup(workflow.group, groupSelection)),
+    [workflows, groupSelection],
+  );
+  const builtinWorkflows = useMemo(() => groupWorkflows.filter(isBuiltin), [groupWorkflows]);
+  const customWorkflows  = useMemo(() => groupWorkflows.filter(w => !isBuiltin(w)), [groupWorkflows]);
 
   const handleRefresh = async () => {
     if (refreshing) return;
@@ -171,15 +179,8 @@ export default function WorkflowPage() {
     );
   }
 
-  const filterChips: { key: SourceFilter; label: string; count: number }[] = [
-    { key: 'all',     label: t('filter.all'),     count: workflows.length },
-    { key: 'builtin', label: t('filter.builtin'), count: builtinWorkflows.length },
-    { key: 'custom',  label: t('filter.custom'),  count: customWorkflows.length },
-  ];
-
-  const showBuiltin = sourceFilter !== 'custom' && builtinWorkflows.length > 0;
-  const showCustom  = sourceFilter !== 'builtin' && customWorkflows.length > 0;
-  const isEmpty     = !showBuiltin && !showCustom;
+  const showBuiltin = builtinWorkflows.length > 0;
+  const showCustom  = customWorkflows.length > 0;
 
   return (
     <div className="h-full flex flex-col">
@@ -187,46 +188,13 @@ export default function WorkflowPage() {
         title={t('pageTitle')}
         description={t('pageDescription')}
         icon={<WorkflowIcon className="w-8 h-8" />}
-        // Refresh / create actions intentionally moved to the toolbar below so
-        // the page header stays uniform with Skill/Agent pages and the
-        // segmented source filter shares a row with its primary actions.
+        // Refresh / create actions intentionally live in the toolbar below so
+        // the page header stays uniform with Skill/Agent pages.
       />
 
       {error && <p role="alert" className="px-4 py-2 text-sm text-red-600">{error}</p>}
       {/* Toolbar */}
       <div className="px-4 py-2 border-b border-gray-100 flex items-center gap-3">
-        {/* Source filter — same segmented-control style as Skill / Agent pages */}
-        <div
-          role="tablist"
-          aria-label={t('filter.aria')}
-          className="inline-flex items-center rounded-lg border border-gray-200 bg-white p-0.5 text-xs"
-        >
-          {filterChips.map((chip, idx) => {
-            const active = chip.key === sourceFilter;
-            return (
-              <button
-                key={chip.key}
-                type="button"
-                role="tab"
-                aria-selected={active}
-                onClick={() => setSourceFilter(chip.key)}
-                className={`px-2.5 py-1 rounded-md transition-colors whitespace-nowrap ${
-                  active
-                    ? 'bg-slate-700 text-white'
-                    : 'text-gray-500 hover:text-gray-700 hover:bg-gray-50'
-                } ${idx > 0 ? 'ml-0.5' : ''}`}
-              >
-                <span>{chip.label}</span>
-                <span className={`ml-1.5 inline-block min-w-[1.25rem] px-1 rounded text-[10px] tabular-nums ${
-                  active ? 'bg-white/15' : 'bg-gray-100 text-gray-500'
-                }`}>
-                  {chip.count}
-                </span>
-              </button>
-            );
-          })}
-        </div>
-
         <div className="ml-auto flex items-center gap-2">
           <PluginViewToggle value={viewMode} onChange={setViewMode} />
           <button
@@ -258,7 +226,7 @@ export default function WorkflowPage() {
       >
         <GroupNav inventoryComplete={!loading && !error} preferenceKey="workflow" {...deriveGroupNav(groupItems)} items={groupItems} selection={groupSelection} onSelect={setGroupSelection} onMove={moveGroup} onCreate={createGroup} onRename={changeGroup} onDelete={(name) => changeGroup(name, null)} {...groupDrag} />
         <div className="min-w-0 flex-1 space-y-6">
-        {isEmpty ? (
+        {workflows.length === 0 ? (
           <EmptyState
             icon={<WorkflowIcon className="w-16 h-16" />}
             title={t('emptyState.title')}
@@ -295,6 +263,9 @@ export default function WorkflowPage() {
                 viewMode={viewMode}
               />
             )}
+            {!showCustom && !showBuiltin && (
+              <p className="py-4 text-xs text-gray-400">{t('emptyState.title')}</p>
+            )}
           </>
         )}
         </div>
@@ -322,17 +293,18 @@ function WorkflowSection({
   groupDrag: GroupDrag;
   viewMode: PluginViewMode;
 }) {
-  const { t, i18n } = useTranslation('workflow');
   const [page, setPage] = useState(1);
-  const filtered = workflows.filter((workflow) => matchesGroup(workflow.group, groupSelection));
-  const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
+  const totalPages = Math.max(1, Math.ceil(workflows.length / PAGE_SIZE));
+  // `workflows` is already narrowed to the selected group; restart paging on switch.
   useEffect(() => { setPage(1); }, [groupSelection]);
 
+  // Functional update: this runs in the same commit as the reset above, and a
+  // plain setPage(totalPages) would override it with the stale page.
   useEffect(() => {
-    if (page > totalPages) setPage(totalPages);
+    if (page > totalPages) setPage((current) => Math.min(current, totalPages));
   }, [totalPages, page]);
 
-  const displayed = filtered.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
+  const displayed = workflows.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
 
   return (
     // Use a labelled <section> so the grouping is exposed as a landmark
@@ -354,8 +326,7 @@ function WorkflowSection({
 
       {/* Grid — min-height anchors layout to avoid jump when pagination hides rows */}
       <div style={{ minHeight: totalPages > 1 ? 540 : undefined }}>
-        {displayed.length === 0 && <p className="py-4 text-xs text-gray-400">{t('emptyState.title')}</p>}
-        <div className={viewMode === 'cards' ? 'grid gap-3 grid-cols-2 lg:grid-cols-3 xl:grid-cols-4' : 'space-y-2'}>
+        <div className={viewMode === 'cards' ? CARD_GRID_CLASS : 'space-y-2'}>
           {displayed.map(workflow => (
             <div key={workflow.id} className="min-w-0 [&>div]:h-full" {...groupDrag.dragProps(workflow.id)}>
               <WorkflowCard workflow={workflow} layout={viewMode} grouping={groupDrag} />
@@ -367,7 +338,7 @@ function WorkflowSection({
       {totalPages > 1 && (
         <div className="mt-3 flex items-center justify-between text-xs text-gray-400 select-none">
           <span>
-            {(page - 1) * PAGE_SIZE + 1}–{Math.min(filtered.length, page * PAGE_SIZE)} / {filtered.length}
+            {(page - 1) * PAGE_SIZE + 1}–{Math.min(workflows.length, page * PAGE_SIZE)} / {workflows.length}
           </span>
           <div className="flex items-center gap-1">
             <button
@@ -421,8 +392,26 @@ function WorkflowCard({ workflow, grouping, layout = 'cards' }: { workflow: Work
     items: [],
   };
   const triggerItems = triggerStatus.items ?? [];
-  const visibleTriggerItems = triggerItems.slice(0, MAX_VISIBLE_TRIGGER_STATUSES);
-  const hiddenTriggerItems = triggerItems.slice(MAX_VISIBLE_TRIGGER_STATUSES);
+  const candidateTriggerItems = triggerItems.slice(0, MAX_VISIBLE_TRIGGER_STATUSES);
+  // Long labels (e.g. at phone width) may not all fit next to API: show only
+  // what fits and move the rest into the "+N" list instead of clipping them.
+  const statusLineRef = useRef<HTMLDivElement>(null);
+  const statusSampleRef = useRef<HTMLDivElement>(null);
+  const statusSampleKey = [
+    `${t('integration.api')}:${t(CAPABILITY_STATUS_LABEL_KEYS[apiStatus.state])}`,
+    ...candidateTriggerItems.map(trigger => (
+      `${t(TRIGGER_TYPE_LABEL_KEYS[trigger.type])}:${t(CAPABILITY_STATUS_LABEL_KEYS[trigger.state])}`
+    )),
+  ].join('|');
+  const fittingTriggerCount = useFittingStatusCount(
+    statusLineRef,
+    statusSampleRef,
+    candidateTriggerItems.length,
+    triggerItems.length,
+    statusSampleKey,
+  );
+  const visibleTriggerItems = triggerItems.slice(0, fittingTriggerCount);
+  const hiddenTriggerItems = triggerItems.slice(fittingTriggerCount);
 
   return (
     <div
@@ -440,24 +429,28 @@ function WorkflowCard({ workflow, grouping, layout = 'cards' }: { workflow: Work
           </div>
 
           <div className="min-w-0 flex-1">
-            <span className="block text-sm font-semibold text-gray-900 truncate leading-snug">
+            {/* Long names wrap to a second line instead of collapsing to "H…". */}
+            <span
+              title={displayName}
+              className="text-sm font-semibold text-gray-900 leading-snug line-clamp-2 break-words"
+            >
               {displayName}
             </span>
             <div className="flex items-center gap-1 mt-0.5 flex-wrap">
               {/* Source badge */}
               {builtin ? (
-                <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium
+                <span className="inline-flex shrink-0 items-center whitespace-nowrap px-1.5 py-0.5 rounded text-[10px] font-medium
                                  bg-blue-50 text-blue-600">
                   {t('badge.builtin')}
                 </span>
               ) : (
-                <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium
+                <span className="inline-flex shrink-0 items-center whitespace-nowrap px-1.5 py-0.5 rounded text-[10px] font-medium
                                  bg-teal-50 text-teal-600">
                   {t('badge.custom')}
                 </span>
               )}
               {/* Node count */}
-              <span className="text-[10px] text-gray-400">
+              <span className="whitespace-nowrap text-[10px] text-gray-400">
                 {workflow.nodeCount} {t('stats.nodes')}
               </span>
             </div>
@@ -475,6 +468,7 @@ function WorkflowCard({ workflow, grouping, layout = 'cards' }: { workflow: Work
         </p>
 
         <div
+          ref={statusLineRef}
           className="mt-auto pt-1 h-5 flex items-center min-w-0"
           aria-label={t('integration.aria')}
         >
@@ -501,6 +495,34 @@ function WorkflowCard({ workflow, grouping, layout = 'cards' }: { workflow: Work
           </div>
           {hiddenTriggerItems.length > 0 && (
             <OverflowStatusList items={hiddenTriggerItems} />
+          )}
+          {candidateTriggerItems.length > 0 && (
+            // Invisible copy of the row, read by useFittingStatusCount: lead
+            // status, candidates, then a worst-case "+N" sample. Zero width
+            // with clipping keeps it from widening the card's scroll area;
+            // its shrink-0 children still lay out at their natural widths.
+            <div
+              ref={statusSampleRef}
+              aria-hidden="true"
+              className="pointer-events-none invisible absolute left-0 top-0 flex w-0 items-center gap-x-3 overflow-hidden whitespace-nowrap"
+            >
+              <CapabilityStatus
+                decorative
+                label={t('integration.api')}
+                state={apiStatus.state}
+                statusLabel={t(CAPABILITY_STATUS_LABEL_KEYS[apiStatus.state])}
+              />
+              {candidateTriggerItems.map(trigger => (
+                <CapabilityStatus
+                  key={trigger.id}
+                  decorative
+                  label={t(TRIGGER_TYPE_LABEL_KEYS[trigger.type])}
+                  state={trigger.state}
+                  statusLabel={t(CAPABILITY_STATUS_LABEL_KEYS[trigger.state])}
+                />
+              ))}
+              <span className="ml-2 shrink-0 text-[11px] leading-4 font-medium">+{triggerItems.length}</span>
+            </div>
           )}
         </div>
       </div>
@@ -536,10 +558,13 @@ function CapabilityStatus({
   label,
   state,
   statusLabel,
+  decorative = false,
 }: {
   label: string;
   state: WorkflowCapabilityState;
   statusLabel: string;
+  /** Measurement copy: no accessible name or tooltip of its own. */
+  decorative?: boolean;
 }) {
   const { t } = useTranslation('workflow');
   const detailLabel = state === 'running'
@@ -551,8 +576,8 @@ function CapabilityStatus({
   const styles = CAPABILITY_STATUS_STYLES[state];
   return (
     <span
-      aria-label={accessibleLabel}
-      title={accessibleLabel}
+      aria-label={decorative ? undefined : accessibleLabel}
+      title={decorative ? undefined : accessibleLabel}
       className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap text-[11px] leading-4"
     >
       <span className={`h-1.5 w-1.5 rounded-full ${styles.dot}`} />

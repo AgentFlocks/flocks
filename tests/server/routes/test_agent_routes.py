@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi import status
@@ -549,6 +550,21 @@ class TestAgentCreate:
         assert get_resp.json()["name"] == "test-agent"
 
     @pytest.mark.asyncio
+    async def test_created_agent_skills_are_available_to_runtime(self, client: AsyncClient):
+        from flocks.agent.registry import Agent
+
+        resp = await client.post(
+            "/api/agent",
+            json={**_AGENT_PAYLOAD, "skills": ["secure-review"]},
+        )
+
+        assert resp.status_code == status.HTTP_200_OK
+        assert resp.json()["skills"] == ["secure-review"]
+        agent = await Agent.get("test-agent")
+        assert agent is not None
+        assert agent.skills == ["secure-review"]
+
+    @pytest.mark.asyncio
     async def test_created_agent_survives_registry_reload(self, client: AsyncClient):
         """Storage-backed custom agents remain visible after process cache reload."""
         from flocks.agent.registry import Agent
@@ -678,6 +694,57 @@ class TestAgentUpdate:
         resp = await client.put("/api/agent/test-agent", json=updated)
         assert resp.status_code == status.HTTP_200_OK
         assert resp.json()["description"] == "Updated description"
+
+    @pytest.mark.asyncio
+    async def test_yaml_agent_writes_skills_and_tools_to_yaml(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ):
+        from flocks.agent.agent import AgentInfo
+        from flocks.agent.registry import Agent
+        from flocks.server.routes import agent as agent_routes
+        from flocks.storage.storage import Storage
+
+        runtime_agent = AgentInfo(
+            name="yaml-agent",
+            native=False,
+            skills=["old-skill"],
+            tools=["old-tool"],
+        )
+        update_yaml = MagicMock(return_value=True)
+        storage_write = AsyncMock()
+        monkeypatch.setattr(Storage, "read", AsyncMock(return_value=None))
+        monkeypatch.setattr(Storage, "write", storage_write)
+        monkeypatch.setattr(agent_routes, "find_yaml_agent", lambda _name: tmp_path / "agent.yaml")
+        monkeypatch.setattr(agent_routes, "update_yaml_agent", update_yaml)
+        monkeypatch.setattr(Agent, "get", AsyncMock(return_value=runtime_agent))
+        monkeypatch.setattr(agent_routes, "_load_model_overrides", AsyncMock(return_value={}))
+        monkeypatch.setattr(agent_routes, "_load_delegatable_overrides", lambda: {})
+        monkeypatch.setattr(agent_routes, "_get_all_tool_names_async", AsyncMock(return_value=[]))
+
+        response = await agent_routes.update_agent(
+            "yaml-agent",
+            agent_routes.AgentUpdateRequest(skills=[], tools=[]),
+        )
+
+        update_yaml.assert_called_once_with(
+            "yaml-agent",
+            {"skills": [], "tools": []},
+        )
+        storage_write.assert_awaited_once_with(
+            "agent/custom/yaml-agent",
+            {"skills": [], "tools": [], "permission": [{
+                "permission": "question",
+                "pattern": "*",
+                "action": "deny",
+                "source": "agent_tools",
+            }]},
+        )
+        assert runtime_agent.skills == []
+        assert runtime_agent.tools == []
+        assert response.skills == []
+        assert response.tools == []
 
     @pytest.mark.asyncio
     async def test_update_nonexistent_agent_returns_404(self, client: AsyncClient):
@@ -827,6 +894,33 @@ class TestAgentDelete:
         # The important thing is it does NOT crash (5xx).
         assert resp.status_code < 500
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("prefix", ["/api/agent", "/agent", "/app/agent"])
+    async def test_delete_missing_agent_returns_404(self, client: AsyncClient, prefix: str):
+        """Storage.read returns None for a missing key; that is not a deletion (FL-BUG-006)."""
+        resp = await client.delete(f"{prefix}/autotest-missing-resource-8f9ea73b")
+        assert resp.status_code == status.HTTP_404_NOT_FOUND
+        assert "not found" in resp.json()["message"]
+
+    @pytest.mark.asyncio
+    async def test_delete_builtin_agent_keeps_its_settings(
+        self,
+        client: AsyncClient,
+        _isolated_delegatable_settings: Path,
+    ):
+        """A refused delete must not run the cleanup that follows a real one."""
+        from flocks.agent.registry import Agent, is_delegatable
+
+        await Agent.state()
+        patch_resp = await client.patch("/api/agent/explore/delegatable", json={"delegatable": False})
+        assert patch_resp.status_code == status.HTTP_200_OK
+
+        resp = await client.delete("/api/agent/explore")
+
+        assert resp.status_code == status.HTTP_404_NOT_FOUND
+        assert is_delegatable("explore") is False
+        assert (await client.get("/api/agent/explore")).status_code == status.HTTP_200_OK
+
 
 # ===========================================================================
 # Test / Run
@@ -861,3 +955,164 @@ class TestAgentRun:
             json={"message": "hi"},
         )
         assert resp.status_code == status.HTTP_404_NOT_FOUND
+
+
+# ===========================================================================
+# Protected prompts (agents registered by a sealed package)
+# ===========================================================================
+
+class TestProtectedAgentPrompt:
+    @pytest.fixture
+    def sealed_agent(self, native_group_agents):
+        from flocks.agent.agent import AgentInfo
+        from flocks.agent.registry import Agent
+
+        sealed = AgentInfo(
+            name="sealed-demo",
+            group="Package",
+            description="Sealed",
+            mode="primary",
+            prompt="SECRET-SEALED-PROMPT",
+            prompt_protected=True,
+        )
+        plain = AgentInfo(name="plain-demo", description="Plain", mode="primary", prompt="Plain prompt")
+        Agent.register(sealed.name, sealed)
+        Agent.register(plain.name, plain)
+        Agent.invalidate_cache()
+        try:
+            yield sealed
+        finally:
+            Agent.unregister(sealed.name)
+            Agent.unregister(plain.name)
+            Agent.invalidate_cache()
+
+    @pytest.mark.asyncio
+    async def test_list_and_get_omit_the_prompt(self, client, sealed_agent):
+        listed = await client.get("/api/agent")
+        assert listed.status_code == 200, listed.text
+        item = next(agent for agent in listed.json() if agent["name"] == "sealed-demo")
+        assert item["prompt"] is None
+        assert item["promptProtected"] is True
+        assert "SECRET-SEALED-PROMPT" not in listed.text
+
+        one = await client.get("/api/agent/sealed-demo")
+        assert one.status_code == 200, one.text
+        assert one.json()["prompt"] is None
+        assert one.json()["promptProtected"] is True
+
+        plain = await client.get("/api/agent/plain-demo")
+        assert plain.json()["prompt"] == "Plain prompt"
+        assert plain.json()["promptProtected"] is False
+
+    @pytest.mark.asyncio
+    async def test_prompt_endpoint_refuses_protected_agents(self, client, sealed_agent):
+        response = await client.get("/api/agent/sealed-demo/prompt")
+        assert response.status_code == 403
+        assert "SECRET-SEALED-PROMPT" not in response.text
+        plain = await client.get("/api/agent/plain-demo/prompt")
+        assert plain.status_code == 200
+        assert plain.json() == {"prompt": "Plain prompt"}
+
+    @pytest.mark.asyncio
+    async def test_definition_edits_and_deletion_are_refused(self, client, sealed_agent):
+        from flocks.agent.registry import Agent
+
+        edited = await client.put("/api/agent/sealed-demo", json={"prompt": "replaced", "description": "changed"})
+        assert edited.status_code == 403
+        deleted = await client.delete("/api/agent/sealed-demo")
+        assert deleted.status_code == 403
+        current = await Agent.get("sealed-demo")
+        assert current is not None
+        assert current.prompt == "SECRET-SEALED-PROMPT"
+        assert current.description == "Sealed"
+
+    @pytest.mark.asyncio
+    async def test_group_moves_still_work(self, client, sealed_agent):
+        response = await client.put("/api/agent/sealed-demo", json={"group": "Moved"})
+        assert response.status_code == 200, response.text
+        assert response.json()["group"] == "Moved"
+        assert response.json()["prompt"] is None
+
+    @pytest.mark.asyncio
+    async def test_a_stale_storage_record_never_unseals_the_agent(self, client, sealed_agent):
+        from flocks.agent.registry import Agent
+        from flocks.storage.storage import Storage
+
+        await Storage.write(
+            "agent/custom/sealed-demo",
+            {"name": "sealed-demo", "prompt": "OLD STORAGE PROMPT", "mode": "primary", "description": "Old"},
+        )
+        moved = await client.put("/api/agent/sealed-demo", json={"group": "Moved"})
+        assert moved.status_code == 200, moved.text
+        assert moved.json()["promptProtected"] is True
+        assert moved.json()["prompt"] is None
+        model = await client.put(
+            "/api/agent/sealed-demo/model",
+            json={"model": {"providerID": "provider", "modelID": "model-x"}},
+        )
+        assert model.status_code == 200, model.text
+        assert model.json()["promptProtected"] is True
+        assert model.json()["prompt"] is None
+        assert model.json()["model"] == {"providerID": "provider", "modelID": "model-x"}
+        delegatable = await client.patch("/api/agent/sealed-demo/delegatable", json={"delegatable": True})
+        assert delegatable.status_code == 403
+        edited = await client.put("/api/agent/sealed-demo", json={"prompt": "replaced"})
+        assert edited.status_code == 403
+        current = Agent.registered("sealed-demo")
+        assert current is sealed_agent
+        assert current.prompt == "SECRET-SEALED-PROMPT"
+        assert current.prompt_protected is True
+        assert "OLD STORAGE PROMPT" not in (await client.get("/api/agent")).text
+
+    @pytest.mark.asyncio
+    async def test_hidden_by_enabled_agents_the_name_stays_reserved(self, client, sealed_agent):
+        from flocks.agent.registry import Agent
+        from flocks.config.config import Config
+        from flocks.config.config_writer import ConfigWriter
+
+        config_path = ConfigWriter._get_config_path()
+        original = config_path.read_text() if config_path.exists() else None
+        raw = json.loads(original) if original else {}
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        config_path.write_text(json.dumps({**raw, "enabled_agents": ["rex", "plain-demo"]}))
+        Config.clear_cache()
+        Agent.invalidate_cache()
+        try:
+            assert (await client.get("/api/agent/sealed-demo")).status_code == 404
+            created = await client.post("/api/agent", json={**_AGENT_PAYLOAD, "name": "sealed-demo", "prompt": "takeover"})
+            assert created.status_code == 409
+            assert (await client.put("/api/agent/sealed-demo", json={"description": "x"})).status_code == 403
+            assert (await client.delete("/api/agent/sealed-demo")).status_code == 403
+            hidden_move = await client.put("/api/agent/sealed-demo", json={"group": "HiddenMove"})
+            assert hidden_move.status_code == 404
+            assert "HiddenMove" not in config_path.read_text()
+        finally:
+            if original is None:
+                config_path.write_text("{}")
+            else:
+                config_path.write_text(original)
+            Config.clear_cache()
+            Agent.invalidate_cache()
+        restored = await client.get("/api/agent/sealed-demo")
+        assert restored.status_code == 200, restored.text
+        assert restored.json()["promptProtected"] is True
+        assert restored.json()["prompt"] is None
+        assert Agent.registered("sealed-demo").prompt == "SECRET-SEALED-PROMPT"
+
+
+def test_registry_refuses_to_replace_a_sealed_registration():
+    from flocks.agent.agent import AgentInfo
+    from flocks.agent.registry import Agent
+
+    sealed = AgentInfo(name="sealed-registry-demo", prompt="secret", prompt_protected=True)
+    Agent.register(sealed.name, sealed)
+    try:
+        with pytest.raises(PermissionError):
+            Agent.register(sealed.name, AgentInfo(name=sealed.name, prompt="takeover"))
+        assert Agent.registered(sealed.name) is sealed
+        resealed = AgentInfo(name=sealed.name, prompt="secret v2", prompt_protected=True)
+        Agent.register(sealed.name, resealed)
+        assert Agent.registered(sealed.name) is resealed
+    finally:
+        Agent.unregister(sealed.name)
+        Agent.invalidate_cache()

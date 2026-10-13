@@ -5,7 +5,9 @@ import {
   BarChart3,
   FileText,
   FolderOpen,
+  Home,
   LayoutDashboard,
+  ListTodo,
   LineChart,
   Shield,
   ShieldCheck,
@@ -23,6 +25,8 @@ const ICON_MAP: Record<string, LucideIcon> = {
   ShieldCheck,
   AlertTriangle,
   Activity,
+  Home,
+  ListTodo,
 };
 
 export function resolveWebUIContractPageIcon(name: string): LucideIcon {

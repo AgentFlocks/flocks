@@ -282,6 +282,33 @@ function getOrCreateSharedConnection(url: string, withCredentials: boolean): Sha
   return connection;
 }
 
+// A page kept in the back/forward cache keeps its event streams open. Each one
+// holds one of the six connections a browser allows per host over HTTP/1.1, so
+// a few cached pages leave the next page's requests queued until the cache
+// evicts them (about a minute in Chrome). Drop the streams when the page is
+// hidden for a navigation and reconnect, with recovery, if it comes back.
+function suspendSharedConnections() {
+  for (const connection of sharedConnections.values()) {
+    clearReconnectTimeout(connection);
+    if (!connection.eventSource) continue;
+    closeEventSource(connection);
+    connection.recoveryPending = true;
+    notifyStatus(connection, 'disconnected');
+  }
+}
+
+function resumeSharedConnections(event: Event) {
+  if (!(event as PageTransitionEvent).persisted) return;
+  for (const connection of sharedConnections.values()) {
+    if (!connection.eventSource && hasActiveSubscribers(connection)) connectShared(connection);
+  }
+}
+
+if (typeof window !== 'undefined') {
+  window.addEventListener('pagehide', suspendSharedConnections);
+  window.addEventListener('pageshow', resumeSharedConnections);
+}
+
 export function useSSE({ 
   url, 
   onEvent, 

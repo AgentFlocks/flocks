@@ -50,12 +50,6 @@
   },
   "noDescription": "No description",
   "totalCount": "{{total}} workflows",
-  "filter": {
-    "all": "All",
-    "builtin": "Built-in",
-    "custom": "Custom",
-    "aria": "Filter by source"
-  },
   "badge": {
     "builtin": "Built-in",
     "custom": "Custom"

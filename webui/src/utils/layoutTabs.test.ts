@@ -30,6 +30,17 @@ describe('layoutTabs', () => {
     expect(findActiveTabHref(items.map((item) => item.href), '/settings/account')).toBeNull();
   });
 
+  it('keeps audit home and list tabs distinct by query while ignoring task parameters', () => {
+    const route = '/contracts/webui/workspaces/code_security/code-security-workspace';
+    const hrefs = [route, `${route}?view=audits`];
+    expect(findActiveTabHref(hrefs, route, '?view=audits&scan_id=scan-1')).toBe(hrefs[1]);
+    expect(findActiveTabHref(hrefs, route, '?scan_id=scan-1')).toBe(route);
+    expect(isPathWithinHref(route, hrefs[1], '?view=home')).toBe(false);
+    expect(resolveOpenTabs(hrefs.map(href => ({ href })), [
+      { href: route, path: route }, { href: hrefs[1], path: `${hrefs[1]}&scan_id=scan-1` },
+    ])).toHaveLength(2);
+  });
+
   it('resolves stored records in order, keeps their last path, drops unknown and duplicated hrefs', () => {
     const tabs = resolveOpenTabs(items, [
       { href: '/workflows', path: '/workflows/wf-1' },

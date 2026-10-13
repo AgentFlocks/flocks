@@ -12,7 +12,9 @@ const { mockUseAgents, nativeAPI, sheetSpy, toastWarning } = vi.hoisted(() => ({
 }));
 
 vi.mock('@/api/agent', () => ({ agentAPI: nativeAPI }));
-vi.mock('@/components/common/Toast', () => ({ useToast: () => ({ warning: toastWarning }) }));
+vi.mock('@/components/common/Toast', async (importOriginal) => ({
+  // Keep the module's other exports (GroupNav uses useOptionalToast).
+  ...(await importOriginal<typeof import('@/components/common/Toast')>()), useToast: () => ({ warning: toastWarning }) }));
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -41,6 +43,10 @@ vi.mock('react-i18next', () => ({
       'badge.delegatable': '可委托',
       'badge.delete': '删除',
       'badge.edit': '编辑',
+      'badge.protected': 'Pro 内置',
+      'badge.protectedDeleteDisabled': 'Pro 内置不可删',
+      'badge.protectedEditDisabled': '提示词受保护',
+      'badge.protectedDelegateDisabled': 'Pro 内置不可改委托',
       'form.enabled': '启用',
       'form.enabledTip': '允许委派',
       'form.disabledTip': '禁止委派',
@@ -138,8 +144,8 @@ describe('AgentPage business groups and native layouts', () => {
     render(<AgentPage />);
     await screen.findByTitle('Engineering');
     fireEvent.click(screen.getByRole('button', { name: 'view.list' }));
-    const nativeRow = screen.getByText('内置智能体').closest('div.group') as HTMLElement;
-    const customRow = screen.getByText('分析智能体').closest('div.group') as HTMLElement;
+    const nativeRow = screen.getByText('内置智能体').closest('.group') as HTMLElement;
+    const customRow = screen.getByText('分析智能体').closest('.group') as HTMLElement;
     expect(nativeRow).toHaveClass('lg:flex-row');
     expect(within(nativeRow).getByRole('button', { name: '删除' })).toBeDisabled();
     expect(within(customRow).getByText('原生描述')).toBeInTheDocument();
@@ -154,7 +160,7 @@ describe('AgentPage business groups and native layouts', () => {
     fireEvent.click(screen.getByRole('button', { name: 'view.cards' }));
     expect(screen.getByTestId('agent-sheet')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Close sheet' }));
-    fireEvent.click(within(screen.getByText('分析智能体').closest('div.group') as HTMLElement).getByRole('button', { name: '删除' }));
+    fireEvent.click(within(screen.getByText('分析智能体').closest('.group') as HTMLElement).getByRole('button', { name: '删除' }));
     await waitFor(() => expect(nativeAPI.delete).toHaveBeenCalledWith('analyst'));
     expect(refetch).toHaveBeenCalled();
     expect(nativeAPI.update).not.toHaveBeenCalled();
@@ -165,7 +171,7 @@ describe('AgentPage business groups and native layouts', () => {
     const refetch = useInventory([custom, makeAgent({ name: 'other', group: 'Engineering' })]);
     render(<AgentPage />);
     if (viewMode === 'list') fireEvent.click(screen.getByRole('button', { name: 'view.list' }));
-    const source = screen.getByText('user-primary').closest('div.group')?.parentElement as HTMLElement;
+    const source = screen.getByText('user-primary').closest('.group')?.parentElement as HTMLElement;
     fireEvent.click(within(source).getByRole('button', { name: 'editGroup' }));
     expect(screen.queryByTestId('agent-sheet')).not.toBeInTheDocument();
     fireEvent.change(screen.getByRole('combobox'), { target: { value: 'Engineering' } });
@@ -183,12 +189,12 @@ describe('AgentPage business groups and native layouts', () => {
       makeAgent({ name: 'user-agent', native: true, group: 'Mixed', group_readonly: false }),
     ]);
     render(<AgentPage />);
-    const locked = screen.getByText('rex').closest('div.group')!.parentElement!;
+    const locked = screen.getByText('rex').closest('.group')!.parentElement!;
     const dataTransfer = { setData: vi.fn() };
     expect(fireEvent.dragStart(locked, { dataTransfer })).toBe(false);
     expect(dataTransfer.setData).not.toHaveBeenCalled();
     expect(toastWarning).toHaveBeenLastCalledWith('pluginGroups:readOnly.system');
-    expect(fireEvent.dragStart(screen.getByText('core-sub').closest('div.group')!.parentElement!, { dataTransfer })).toBe(false);
+    expect(fireEvent.dragStart(screen.getByText('core-sub').closest('.group')!.parentElement!, { dataTransfer })).toBe(false);
     fireEvent.click(within(locked).getByRole('button', { name: 'editGroup' }));
     expect(toastWarning).toHaveBeenCalledTimes(3);
     expect(nativeAPI.update).not.toHaveBeenCalled();
@@ -200,7 +206,7 @@ describe('AgentPage business groups and native layouts', () => {
     fireEvent.click(screen.getByRole('button', { name: 'create' }));
     expect(within(screen.getByRole('combobox')).getAllByRole('option').map((option) => option.getAttribute('value'))).toEqual(['', 'user-agent']);
     fireEvent.click(screen.getByRole('button', { name: 'cancel' }));
-    fireEvent.keyDown(screen.getByText('user-agent').closest('div.group')!.parentElement!, { key: 'm', altKey: true });
+    fireEvent.keyDown(screen.getByText('user-agent').closest('.group')!.parentElement!, { key: 'm', altKey: true });
     fireEvent.change(screen.getByRole('combobox'), { target: { value: '' } });
     fireEvent.click(screen.getByRole('button', { name: 'save' }));
     await waitFor(() => expect(nativeAPI.update).toHaveBeenCalledExactlyOnceWith('user-agent', { group: null }));
@@ -212,7 +218,7 @@ describe('AgentPage business groups and native layouts', () => {
     nativeAPI.list.mockResolvedValue({ data: [{ ...agent, group_readonly: true }] });
     vi.spyOn(window, 'confirm').mockReturnValue(true);
     render(<AgentPage />);
-    if (operation === 'move') fireEvent.keyDown(screen.getByText('changed').closest('div.group')!.parentElement!, { key: 'm', altKey: true });
+    if (operation === 'move') fireEvent.keyDown(screen.getByText('changed').closest('.group')!.parentElement!, { key: 'm', altKey: true });
     else fireEvent.click(screen.getByRole('button', { name: operation === 'create' ? 'create' : `${operation}Named` }));
     if (operation === 'create' || operation === 'rename') fireEvent.change(screen.getByRole('textbox'), { target: { value: 'New' } });
     if (operation === 'create') fireEvent.change(screen.getByRole('combobox'), { target: { value: 'changed' } });
@@ -239,13 +245,53 @@ describe('AgentPage business groups and native layouts', () => {
     const refetch = useInventory([makeAgent({ name: 'still-visible', group: 'Engineering' })]);
     refetch.mockRejectedValue(new Error('offline'));
     render(<AgentPage />);
-    fireEvent.keyDown(screen.getByText('still-visible').closest('div.group')?.parentElement as HTMLElement, { key: 'm', altKey: true });
+    fireEvent.keyDown(screen.getByText('still-visible').closest('.group')?.parentElement as HTMLElement, { key: 'm', altKey: true });
     fireEvent.change(screen.getByRole('combobox'), { target: { value: '' } });
     fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'save' }));
     await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('offline'));
     expect(screen.getByText('still-visible')).toBeInTheDocument();
     expect(nativeAPI.update).toHaveBeenCalledWith('still-visible', { group: null });
     expect(nativeAPI.refresh).not.toHaveBeenCalled();
+  });
+});
+
+describe('AgentPage protected prompts', () => {
+  it('shows a sealed agent as built in, without opening it for editing or deleting it', async () => {
+    const sealed = makeAgent({ name: 'code-security', nameCn: '代码安全审计', mode: 'primary', promptProtected: true, group: 'Engineering' });
+    const custom = makeAgent({ name: 'analyst', nameCn: '分析智能体', mode: 'primary', group: 'Engineering' });
+    useInventory([sealed, custom]);
+    render(<AgentPage />);
+    const card = await screen.findByTestId('agent-card-code-security');
+    expect(within(card).getByText('Pro 内置')).toBeInTheDocument();
+    const edit = within(card).getByRole('button', { name: '编辑' });
+    const remove = within(card).getByRole('button', { name: '删除' });
+    expect(edit).toBeDisabled();
+    expect(edit).toHaveAttribute('title', '提示词受保护');
+    expect(remove).toBeDisabled();
+    expect(remove).toHaveAttribute('title', 'Pro 内置不可删');
+    fireEvent.click(edit);
+    fireEvent.click(within(card).getByText('代码安全审计'));
+    expect(screen.queryByTestId('agent-sheet')).not.toBeInTheDocument();
+    expect(nativeAPI.delete).not.toHaveBeenCalled();
+
+    const other = screen.getByTestId('agent-card-analyst');
+    fireEvent.click(within(other).getByRole('button', { name: '编辑' }));
+    expect(screen.getByTestId('agent-sheet')).toBeInTheDocument();
+  });
+
+  it('shows a sealed sub-agent\'s delegation but keeps its switch disabled with the reason', async () => {
+    const sealed = makeAgent({ name: 'sealed-sub', mode: 'subagent', promptProtected: true, delegatable: false });
+    const custom = makeAgent({ name: 'open-sub', mode: 'subagent', delegatable: false });
+    useInventory([sealed, custom]);
+    render(<AgentPage />);
+    const sealedCard = await screen.findByTestId('agent-card-sealed-sub');
+    const sealedSwitch = within(sealedCard).getByRole('switch', { name: '启用' });
+    expect(sealedSwitch).toBeDisabled();
+    expect(sealedSwitch).toHaveAttribute('aria-description', 'Pro 内置不可改委托');
+    expect(within(sealedCard).getByText('enabledBadge.disabled')).toBeInTheDocument();
+    fireEvent.click(sealedSwitch);
+    expect(within(screen.getByTestId('agent-card-open-sub')).getByRole('switch')).toBeEnabled();
+    expect(nativeAPI.setDelegatable).not.toHaveBeenCalled();
   });
 });
 
@@ -269,8 +315,8 @@ describe('AgentPage cards', () => {
 
     render(<AgentPage />);
 
-    const nativeCard = screen.getByText('Rex 主智能体').closest('div.group') as HTMLElement;
-    const customCard = screen.getByText('分析智能体').closest('div.group') as HTMLElement;
+    const nativeCard = screen.getByText('Rex 主智能体').closest('.group') as HTMLElement;
+    const customCard = screen.getByText('分析智能体').closest('.group') as HTMLElement;
 
     expect(nativeCard).toHaveClass('bg-white', 'border-gray-200');
     expect(customCard).toHaveClass('bg-white', 'border-gray-200');

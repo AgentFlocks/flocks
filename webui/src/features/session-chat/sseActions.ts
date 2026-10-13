@@ -10,6 +10,17 @@ export type SessionMessageInfo = Partial<Message> & {
   time?: { completed?: number | boolean | null };
 };
 
+export type SessionRetryStatus = {
+  attempt: number;
+  maxAttempts?: number;
+  message?: string;
+  /** Epoch milliseconds of the next attempt. */
+  next?: number;
+  rateLimited?: boolean;
+  providerID?: string;
+  modelID?: string;
+};
+
 export type CompactionStage =
   | 'load'
   | 'strategy'
@@ -22,7 +33,7 @@ export type CompactionStage =
 export type SessionChatSSEAction =
   | { kind: 'ignore' }
   | { kind: 'session-cleared' }
-  | { kind: 'session-status'; statusType?: string; message?: string }
+  | { kind: 'session-status'; statusType?: string; message?: string; retry?: SessionRetryStatus }
   | { kind: 'message-updated'; info: SessionMessageInfo }
   | { kind: 'message-removed'; messageID: string }
   | { kind: 'message-part-updated'; part: MessagePart; delta?: string }
@@ -49,6 +60,23 @@ function readSessionStatusType(status: unknown): string | undefined {
   return undefined;
 }
 
+function readNumber(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+}
+
+export function readSessionRetryStatus(status: unknown): SessionRetryStatus | undefined {
+  if (!isRecord(status) || status.type !== 'retry') return undefined;
+  return {
+    attempt: readNumber(status.attempt) ?? 1,
+    maxAttempts: readNumber(status.maxAttempts),
+    message: typeof status.message === 'string' ? status.message : undefined,
+    next: readNumber(status.next),
+    rateLimited: status.rateLimited === true,
+    providerID: typeof status.providerID === 'string' ? status.providerID : undefined,
+    modelID: typeof status.modelID === 'string' ? status.modelID : undefined,
+  };
+}
+
 export function resolveSessionChatSSEAction(
   event: SSEChatEvent,
   sessionId?: string | null,
@@ -70,6 +98,7 @@ export function resolveSessionChatSSEAction(
       message: isRecord(properties.status) && typeof properties.status.message === 'string'
         ? properties.status.message
         : undefined,
+      retry: readSessionRetryStatus(properties.status),
     };
   }
 

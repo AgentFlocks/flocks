@@ -14,7 +14,7 @@ import asyncio
 import time
 from collections import OrderedDict, deque
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 from flocks.channel.base import ChatType, InboundMessage, OutboundContext
 from flocks.channel.inbound.session_binding import (
@@ -26,6 +26,9 @@ from flocks.hooks.execution import execute_with_hooks
 from flocks.hooks.pipeline import HookPipeline
 from flocks.identity import ChannelIngressProvenance
 from flocks.utils.log import Log
+
+if TYPE_CHECKING:
+    from flocks.session.session_loop import LoopResult
 
 log = Log.create(service="channel.dispatcher")
 
@@ -237,6 +240,21 @@ class ChannelDeliveryCallbacks:
             session_id=self.session_id,
         )
 
+    async def on_background_result(self, result: LoopResult) -> None:
+        """Deliver a background wake's reply without retaining per-run streaming callbacks."""
+        if (
+            result.action != "stop"
+            or result.error
+            or result.metadata.get("aborted")
+            or not result.last_message
+            or getattr(result.last_message, "error", None)
+            or not self.session_id
+        ):
+            return
+        text = await _extract_message_text(self.session_id, result.last_message)
+        if text and text.strip():
+            await self.deliver_text(text)
+
     def to_loop_callbacks(self, runner_callbacks=None):
         """Convert to a LoopCallbacks dataclass understood by SessionLoop."""
         from flocks.session.session_loop import LoopCallbacks
@@ -245,6 +263,7 @@ class ChannelDeliveryCallbacks:
             on_error=self.on_error,
             event_publish_callback=self._publish_sse_event,
             runner_callbacks=runner_callbacks,
+            on_background_result=self.on_background_result,
         )
 
     @staticmethod
@@ -1225,8 +1244,15 @@ class InboundDispatcher:
         try:
             from flocks.session.runner import RunnerCallbacks
 
+            streamed_text = ""
+
             async def _on_text_delta(delta: str) -> None:
-                await card.append(delta)
+                # Each delta arrives exactly once. The card merges by overlap and
+                # drops a piece already present in its text (a repeated "哈"),
+                # so it is given the reply so far, which it takes as is.
+                nonlocal streamed_text
+                streamed_text += delta
+                await card.append(streamed_text)
 
             runner_cbs = RunnerCallbacks(on_text_delta=_on_text_delta)
             loop_callbacks = callbacks.to_loop_callbacks(runner_callbacks=runner_cbs)
@@ -1278,6 +1304,7 @@ class InboundDispatcher:
                 model,
                 agent,
             ),
+            expected_agent=agent,
         )
 
     @staticmethod

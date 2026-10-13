@@ -426,7 +426,15 @@ async def write_tool(
 
     # Generate diff
     diff = trim_diff(generate_diff(filepath, old_content, content))
-    
+
+    # Explicit edit/write rules (session, agent, delegating session) apply here.
+    await ctx.ask(
+        permission="edit",
+        patterns=[resolution.permission_pattern],
+        always=["*"],
+        metadata={"tool": "write", "filepath": filepath, "diff": diff},
+    )
+
     # Create parent directory if needed
     parent_dir = os.path.dirname(filepath)
     if parent_dir and not os.path.exists(parent_dir):
