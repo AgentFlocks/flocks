@@ -4,13 +4,15 @@ import EventList from './EventList';
 import RoundTimeline from './RoundTimeline';
 import { newestRunsFirst, roundBusinessConclusion, roundFactSummary, roundRecoverySummary } from './roundSummary';
 import { StreamingMarkdown } from '@/components/common/StreamingMarkdown';
-import { getApiBase } from '@/api/client';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { memo, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { ShieldCheck, ArrowUpRight, RefreshCw, Play, Pause, Loader2, Download, CalendarDays, Clock3, Mail, Settings2, CheckCircle2, CircleX, MoreHorizontal, History, Activity } from 'lucide-react';
 import SessionChat from '@/components/common/SessionChat';
-import { monitoringApi, MONITOR_PATH, type MonitorSnapshot, type MonitorRun } from '@/api/securityMonitoring';
-import { useSSE } from '@/hooks/useSSE';
+import { monitoringApi, MONITOR_PATH, type MonitorRun } from '@/api/securityMonitoring';
+import { useMonitorOverview } from './useMonitorOverview';
+
+const MonitorSessionChat = memo(SessionChat);
+const CHAT_DISPLAY = { compact: false, showActions: false, showTimestamp: true, collapseIntermediateSteps: false, processGroupsDefaultOpen: true, processGroupsOpenWhileActive: true };
 
 const labels: Record<string, string> = { completed: '完成', partial: '完成', failed: '失败', interrupted: '失败', running: '执行中', queued: '排队', cancelled: '失败', risk: '风险', unknown: '待判定', ignored: '可忽略', pending: '待生成', updated: '已更新', active: '已启用', disabled: '已停用' };
 const fmt = (value: string | null, tz: string) => value ? new Date(value).toLocaleString('zh-CN', { timeZone: tz, hour12: false }) : '—';
@@ -32,8 +34,9 @@ export default function SecurityMonitor() {
   const location = useLocation(), navigate = useNavigate();
   const view = location.pathname.endsWith('/events') ? 'events' : location.pathname.endsWith('/configuration') ? 'configuration' : location.pathname.endsWith('/mail') ? 'mail' : location.pathname.endsWith('/dashboard') ? 'dashboard' : location.pathname.endsWith('/report') ? 'report' : 'session';
   const [day, setDay] = useState('');
-  const [data, setData] = useState<MonitorSnapshot | null>(null);
-  const [error, setError] = useState('');
+  const { data, error, isCurrentSnapshot, refresh, refreshAfterChange, suspendRefresh, resumeRefresh } = useMonitorOverview(day);
+  const [sessionVisited, setSessionVisited] = useState(view === 'session');
+  useEffect(() => { if (view === 'session') setSessionVisited(true); }, [view]);
   const [chatNotice, setChatNotice] = useState('');
   const [filter, setFilter] = useState('all');
   const [report, setReport] = useState<{ key: string; content: string } | null>(null);
@@ -58,19 +61,11 @@ export default function SecurityMonitor() {
   const [exportError, setExportError] = useState('');
   const exportPending = useRef(false);
   const controlPending = useRef(false);
-  const refreshSequence = useRef(0);
-  const refresh = useCallback(async () => {
-    const sequence = ++refreshSequence.current;
-    try { const result = await monitoringApi.overview(day || undefined); if (sequence === refreshSequence.current) { setData(result.data); setError(''); } }
-    catch { if (sequence === refreshSequence.current) setError('数据更新失败，当前内容可能已过期。'); }
-  }, [day]);
-  useEffect(() => { void refresh(); const timer = window.setInterval(() => void refresh(), 10000); return () => { window.clearInterval(timer); refreshSequence.current++; }; }, [refresh]);
-  useSSE({ url: `${getApiBase()}/api/event`, onEvent: event => { if (event.type === 'monitor.execution.started' || event.type === 'monitor.execution.finished' || event.type === 'task.updated' || event.type === 'monitor.control.changed') void refresh(); }, onReconnect: () => void refresh() });
   const control = async (action: 'start' | 'pause') => {
     if (controlPending.current) return;
     controlPending.current = true;
     setControlBusy(true); setControlError(''); setControlMessage('');
-    refreshSequence.current++;
+    suspendRefresh();
     try {
       const result = await monitoringApi[action]();
       setControlMessage(action === 'start' ? `监测已启动，首轮立即进入执行队列；下次定时执行：${fmt(result.data.scheduledNextRun, result.data.timezone)}` : '监测已暂停，未完成轮次已取消。');
@@ -79,13 +74,13 @@ export default function SecurityMonitor() {
       const detail = payload?.detail ?? payload?.message;
       setControlError(typeof detail === 'string' ? detail : '监测操作未完成，请刷新状态后重试。');
     } finally {
-      await refresh();
+      await resumeRefresh();
       setConfigurationRevision(value => value + 1);
       controlPending.current = false; setControlBusy(false);
     }
   };
-  const selectedDate = day || data?.businessDate || '';
-  const snapshotMatchesDate = !!data && data.businessDate === selectedDate;
+  const selectedDate = day || (isCurrentSnapshot ? data?.businessDate : data ? dateInZone(data.timezone) : '') || '';
+  const snapshotMatchesDate = isCurrentSnapshot && !!data && data.businessDate === selectedDate;
   const reportKey = data ? `${selectedDate}:${reportKind}:${data.report.version}` : '';
   useEffect(() => {
     if (view !== 'report' || !data || !snapshotMatchesDate) return;
@@ -126,6 +121,8 @@ export default function SecurityMonitor() {
   const workbenchRun = data?.runs.find(run => run.status === 'running') || latestRun;
   const workbenchLink = data?.sessionID ? `/sessions?session=${encodeURIComponent(data.sessionID)}${workbenchRun?.message_id ? `&focusMessage=${encodeURIComponent(workbenchRun.message_id)}` : ''}` : null;
   const historySelected = !!day && day !== dateInZone(data?.timezone || 'Asia/Shanghai');
+  const chatActive = view === 'session' && snapshotMatchesDate;
+  const chatMonitoring = useMemo(() => ({ active: chatActive, running: !!active, paused: !monitoringEnabled, historical: historySelected, hidePageNotices: true, onPageNotice: setChatNotice }), [chatActive, !!active, monitoringEnabled, historySelected]);
   const orderedRuns = newestRunsFirst(data?.runs || []);
   const healthErrors = data?.mail?.enabled ? data.mail.health?.errors || [] : [];
   const menuAction = 'flex w-full items-center gap-2 rounded-lg px-3 py-2.5 text-left text-sm text-slate-700 hover:bg-sky-50 focus-visible:bg-sky-50 dark:text-slate-200 dark:hover:bg-sky-950 dark:focus-visible:bg-sky-950';
@@ -165,11 +162,13 @@ export default function SecurityMonitor() {
     {view === 'dashboard' && controlMessage && <p role="status" className="sr-only">{controlMessage}</p>}
     {view === 'dashboard' && healthErrors.length > 0 && <div role="alert" className="flex shrink-0 items-center justify-between gap-3 border-b border-sky-200 bg-sky-50 px-5 py-2 text-xs dark:border-sky-900 dark:bg-sky-950"><span className="flex min-w-0 items-center gap-2"><CircleX size={14} className="shrink-0" /><span className="truncate">邮件通道异常：{healthErrors.join('；')}</span></span><button className="shrink-0 font-semibold underline" onClick={() => setDrawer('health')}>查看原因</button></div>}
     {historySelected && view === 'session' && <div className="flex shrink-0 items-center justify-between border-b border-sky-100 bg-sky-50 px-5 py-1.5 text-xs dark:border-sky-900 dark:bg-sky-950"><span>历史会话 · {day}</span><button className="font-medium underline" onClick={() => setDay('')}>回到今天</button></div>}
-    {view === 'events' ? <EventList timezone={data?.timezone} refreshKey={configurationRevision + reportRetry} onOpenRound={({ sessionID, messageID }) => drill(sessionID, messageID)} /> : view === 'configuration' ? <Configuration refreshKey={configurationRevision} onChanged={refresh} /> : !data ? <p className="p-6">正在加载监测事实…</p> : <>
+    {sessionVisited && data && <div hidden={!chatActive} aria-hidden={!chatActive} className={`${chatActive ? 'flex' : 'hidden'} min-h-0 flex-1 flex-col`} aria-label="监测动态对话">
+        {data.sessionID ? <MonitorSessionChat sessionId={data.sessionID} hideInput monitoring={chatMonitoring} display={CHAT_DISPLAY} live={chatActive} className="min-h-0 flex-1" /> : <div className="m-auto max-w-sm px-6 py-12 text-center"><ShieldCheck size={32} className="mx-auto mb-4 text-[#168a5b]" /><h2 className="font-semibold">{historySelected ? '所选日期暂无监测对话' : '监测对话已准备好'}</h2><p className="mt-2 text-sm leading-6 text-slate-500">{historySelected ? '可以切换历史日期，或回到今天。' : '启动后，查询、调查、邮件跟进和本轮总结会在这里动态展开。'}</p></div>}
+      </div>}
+    {view === 'session' && data && !snapshotMatchesDate && <p role="status" className="p-6 text-sm text-slate-500">正在读取所选日期的监测对话…</p>}
+    {view === 'events' ? <EventList timezone={data?.timezone} refreshKey={configurationRevision + reportRetry} onOpenRound={({ sessionID, messageID }) => drill(sessionID, messageID)} /> : view === 'configuration' ? <Configuration refreshKey={configurationRevision} onChanged={refreshAfterChange} /> : !data ? <p className="p-6">正在加载监测事实…</p> : <>
       {view === 'dashboard' && (!data.installation.installed || !data.installation.ready) ? <div className="mx-6 mt-4 rounded-lg border border-amber-300 p-4 text-sm">{data.installation.installed ? '已安装但未就绪' : '尚未安装'}：{data.installation.reason}。<Link className="ml-2 text-blue-600" to="/scenes/suites?workspace=host-security-monitor">管理场景</Link></div> : null}
-      {view === 'mail' ? <MailFollowup /> : view === 'session' ? <div className="flex min-h-0 flex-1 flex-col" aria-label="监测动态对话">
-        {data.sessionID ? <SessionChat sessionId={data.sessionID} hideInput monitoring={{ running: !!active, paused: !monitoringEnabled, historical: historySelected, hidePageNotices: true, onPageNotice: setChatNotice }} display={{ compact: false, showActions: false, showTimestamp: true, collapseIntermediateSteps: false, processGroupsDefaultOpen: true, processGroupsOpenWhileActive: true }} live className="min-h-0 flex-1" /> : <div className="m-auto max-w-sm px-6 py-12 text-center"><ShieldCheck size={32} className="mx-auto mb-4 text-[#168a5b]" /><h2 className="font-semibold">{historySelected ? '所选日期暂无监测对话' : '监测对话已准备好'}</h2><p className="mt-2 text-sm leading-6 text-slate-500">{historySelected ? '可以切换历史日期，或回到今天。' : '启动后，查询、调查、邮件跟进和本轮总结会在这里动态展开。'}</p></div>}
-      </div> : <div className="min-h-0 flex-1 overflow-auto p-6">
+      {view === 'mail' ? <MailFollowup /> : view === 'session' ? null : <div className="min-h-0 flex-1 overflow-auto p-6">
         {view === 'report' ? <section aria-label="每日报告内容" className={`${card} mx-auto max-w-6xl`}>
           <div className="mb-5 flex flex-wrap items-center justify-between gap-4 border-b border-gray-100 pb-5 dark:border-gray-700"><div><h2 className="flex items-center gap-2 text-lg font-semibold"><CalendarDays size={19} className="text-blue-600" />每日报告</h2><p className="mt-1 text-sm text-gray-500">选择日期，查看当天执行时间线和告警总结。</p></div><div className="flex flex-wrap items-center gap-2"><label className="flex items-center gap-2 text-sm font-medium">报告日期<input aria-label="报告日期" type="date" value={selectedDate} max={dateInZone(data.timezone)} onChange={e => changeDate(e.target.value)} className="rounded-lg border border-gray-200 bg-transparent px-3 py-2 dark:border-gray-600" /></label><button onClick={() => changeDate('')} className="rounded-lg border border-gray-200 px-3 py-2 text-sm hover:bg-gray-50 dark:border-gray-600 dark:hover:bg-gray-700">今天</button><button onClick={() => changeDate(previousDay(dateInZone(data.timezone)))} className="rounded-lg border border-gray-200 px-3 py-2 text-sm hover:bg-gray-50 dark:border-gray-600 dark:hover:bg-gray-700">昨天</button></div></div>
           <div className="mb-5 flex flex-wrap items-center justify-between gap-3"><div className="inline-flex rounded-lg bg-gray-100 p-1 dark:bg-gray-900">{([['timeline', '执行时间线'], ['summary', '当日告警总结']] as const).map(([kind, label]) => <button key={kind} className={`rounded-md px-4 py-2 text-sm font-medium ${reportKind === kind ? 'bg-white text-blue-600 shadow-sm dark:bg-gray-700 dark:text-blue-300' : 'text-gray-500 hover:text-gray-800 dark:hover:text-gray-200'}`} aria-pressed={reportKind === kind} onClick={() => setReportKind(kind)}>{label}</button>)}</div><button disabled={!currentReport || !!reportError || data.report.status !== 'updated'} onClick={download} className="inline-flex items-center gap-1.5 text-sm text-blue-600 disabled:opacity-40"><Download size={15} />下载 Markdown</button></div>

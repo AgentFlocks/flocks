@@ -2,10 +2,10 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import { MemoryRouter, useLocation } from 'react-router-dom';
 import { beforeEach, expect, it, vi } from 'vitest';
 import SecurityMonitor from './index';
-const mocks = vi.hoisted(() => ({ overview: vi.fn(), report: vi.fn(), start: vi.fn(), pause: vi.fn(), diagnostics: vi.fn(), configuration: vi.fn(), saveConfiguration: vi.fn(), setInvestigationEngine: vi.fn(), subscription: null as any }));
+const mocks = vi.hoisted(() => ({ overview: vi.fn(), report: vi.fn(), start: vi.fn(), pause: vi.fn(), diagnostics: vi.fn(), configuration: vi.fn(), saveConfiguration: vi.fn(), setInvestigationEngine: vi.fn(), subscription: null as any, chatRender: vi.fn() }));
 vi.mock('@/api/securityMonitoring', async importOriginal => ({ ...(await importOriginal<any>()), monitoringApi: mocks }));
 vi.mock('@/hooks/useSSE', () => ({ useSSE: (options: any) => { mocks.subscription = options; return {}; } }));
-vi.mock('@/components/common/SessionChat', () => ({ default: ({ sessionId, hideInput, live }: any) => <div data-testid="native-chat">{sessionId} {hideInput && 'readonly'} {live && 'live'}</div> }));
+vi.mock('@/components/common/SessionChat', () => ({ default: ({ sessionId, hideInput, live, monitoring }: any) => { mocks.chatRender(); return <div data-testid="native-chat" data-active={monitoring?.active} data-live={live}>{sessionId} {hideInput && 'readonly'} {live && 'live'}</div>; } }));
 vi.mock('./EventList', () => ({ default: ({ onOpenRound }: any) => <section aria-label="事件列表内容"><button onClick={() => onOpenRound({ sessionID: 'event-session', messageID: 'event-anchor', businessDate: '2026-10-01' })}>查看事件调查对话</button></section> }));
 function RouteObserver() { const location = useLocation(); return <output data-testid="location">{location.pathname}{location.search}</output>; }
 const data = {
@@ -220,6 +220,7 @@ it('hides the old report and disables downloading until the newly selected date 
  expect(screen.queryByText('旧日期报告')).not.toBeInTheDocument();
  expect(screen.getByRole('button', { name: '下载 Markdown' })).toBeDisabled();
  expect(screen.getByText('正在读取所选日期的报告…')).toBeInTheDocument();
+ await waitFor(() => expect(mocks.overview).toHaveBeenLastCalledWith('2026-09-20'));
  await act(async () => finish({ data: { ...data, businessDate: '2026-09-20', runs: [], report: { status: 'pending', version: 0 } } }));
  expect(await screen.findByText('所选日期暂无监测记录')).toBeInTheDocument();
  expect(screen.queryByText('旧日期报告')).not.toBeInTheDocument();
@@ -271,6 +272,7 @@ it('clears previous timeline details while loading another date and starts its n
  expect(screen.queryByText('此前日期的详细报告')).not.toBeInTheDocument();
  expect(screen.queryByRole('list', { name: '执行轮次时间线' })).not.toBeInTheDocument();
  expect(screen.getByRole('button', { name: '下载 Markdown' })).toBeDisabled();
+ await waitFor(() => expect(mocks.overview).toHaveBeenLastCalledWith('2026-09-20'));
  await act(async () => finish({ data: { ...data, businessDate: '2026-09-20', runs: [{ ...data.runs[0], summary: '当前日期的详细报告' }] } }));
  expect(await screen.findByRole('button', { name: /第 1 轮/ })).toHaveAttribute('aria-expanded', 'false');
  expect(screen.queryByText('当前日期的详细报告')).not.toBeInTheDocument();
@@ -307,13 +309,13 @@ it('keeps a historical conversation while showing live global starts and finishe
  fireEvent.keyDown(document, { key: 'Escape' });
  running = true;
  await act(async () => mocks.subscription.onEvent({ type: 'monitor.execution.started' }));
- expect(screen.getByRole('region', { name: '监测控制' })).toHaveTextContent('本轮执行中');
+ await waitFor(() => expect(screen.getByRole('region', { name: '监测控制' })).toHaveTextContent('本轮执行中'));
  expect(screen.getByRole('region', { name: '监测控制' })).toHaveTextContent('下次：本轮结束后等待调度');
  expect(screen.getByTestId('native-chat')).toHaveTextContent('historical-session');
  expect(mocks.overview).toHaveBeenLastCalledWith('2026-09-20');
  running = false;
  await act(async () => mocks.subscription.onEvent({ type: 'monitor.execution.finished' }));
- expect(screen.getByRole('region', { name: '监测控制' })).toHaveTextContent('等待下一轮');
+ await waitFor(() => expect(screen.getByRole('region', { name: '监测控制' })).toHaveTextContent('等待下一轮'));
  expect(screen.getByTestId('native-chat')).toHaveTextContent('historical-session');
 });
 
@@ -436,7 +438,7 @@ it('opens the full configuration page from the compact menu without starting mon
  fireEvent.click(screen.getByRole('link', { name: '监测配置' }));
  expect(await screen.findByRole('heading', { name: '监测配置' })).toBeInTheDocument();
  expect(screen.getByTestId('route')).toHaveTextContent('/suites/host-security-monitor/configuration');
- expect(screen.queryByTestId('native-chat')).not.toBeInTheDocument();
+ expect(screen.getByTestId('native-chat')).not.toBeVisible();
  expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
  expect(mocks.start).not.toHaveBeenCalled();
  expect(mocks.saveConfiguration).not.toHaveBeenCalled();
@@ -471,4 +473,62 @@ it('keeps the dashboard read-only and directs manual handling to the notice list
  expect(screen.getByRole('link', {name: '在邮件跟进中查看和处理'})).toHaveAttribute('href', '/suites/host-security-monitor/mail');
  expect(screen.queryByRole('button', {name: '确认已处置'})).not.toBeInTheDocument();
  expect(screen.queryByRole('button', {name: '回查状态'})).not.toBeInTheDocument();
+});
+
+
+it('preserves the mounted conversation and scroll position across tabs and pauses hidden live work', async () => {
+ render(<MemoryRouter initialEntries={['/suites/host-security-monitor/session']}><SecurityMonitor /></MemoryRouter>);
+ const chat = await screen.findByTestId('native-chat');
+ chat.scrollTop = 640;
+ expect(chat).toHaveAttribute('data-active', 'true');
+ fireEvent.click(screen.getByLabelText('更多监测功能'));
+ fireEvent.click(screen.getByRole('link', { name: '总结看板' }));
+ expect(screen.getByTestId('native-chat')).toBe(chat);
+ expect(chat).not.toBeVisible();
+ expect(chat).toHaveAttribute('data-active', 'false');
+ expect(chat).toHaveAttribute('data-live', 'false');
+ fireEvent.click(screen.getByLabelText('更多监测功能'));
+ fireEvent.click(screen.getByRole('link', { name: '每日报告' }));
+ expect(screen.getByTestId('native-chat')).toBe(chat);
+ fireEvent.click(screen.getByLabelText('更多监测功能'));
+ fireEvent.click(screen.getByRole('link', { name: '事件列表' }));
+ expect(screen.getByTestId('native-chat')).toBe(chat);
+ fireEvent.click(screen.getByLabelText('更多监测功能'));
+ fireEvent.click(screen.getByRole('link', { name: '监测对话' }));
+ expect(chat).toBeVisible();
+ expect(chat).toHaveAttribute('data-active', 'true');
+ expect(chat).toHaveAttribute('data-live', 'true');
+ expect(chat.scrollTop).toBe(640);
+});
+
+it('mounts the conversation only after its first visit and avoids rerendering it for unchanged overview facts', async () => {
+ render(<MemoryRouter initialEntries={['/suites/host-security-monitor/dashboard']}><SecurityMonitor /></MemoryRouter>);
+ await screen.findByText('风险记录');
+ expect(screen.queryByTestId('native-chat')).not.toBeInTheDocument();
+ fireEvent.click(screen.getByLabelText('更多监测功能'));
+ fireEvent.click(screen.getByRole('link', { name: '监测对话' }));
+ await screen.findByTestId('native-chat');
+ const renderCount = mocks.chatRender.mock.calls.length;
+ mocks.overview.mockResolvedValue({ data: { ...data, metrics: { ...data.metrics, attempts: 4 } } });
+ fireEvent.click(screen.getByLabelText('更多监测功能'));
+ fireEvent.click(screen.getByRole('button', { name: '刷新' }));
+ await waitFor(() => expect(mocks.overview).toHaveBeenCalledTimes(2));
+ expect(mocks.chatRender).toHaveBeenCalledTimes(renderCount);
+});
+
+it('hides old conversation facts while a newly selected business date is loading', async () => {
+ render(<MemoryRouter initialEntries={['/suites/host-security-monitor/session']}><SecurityMonitor /></MemoryRouter>);
+ const chat = await screen.findByTestId('native-chat');
+ let finish!: (value: unknown) => void;
+ mocks.overview.mockImplementation(() => new Promise(resolve => { finish = resolve; }));
+ fireEvent.click(screen.getByLabelText('更多监测功能'));
+ fireEvent.click(screen.getByRole('button', { name: '查看历史日期' }));
+ fireEvent.change(screen.getByLabelText('业务日期'), { target: { value: '2026-09-20' } });
+ expect(chat).not.toBeVisible();
+ expect(chat).toHaveAttribute('data-active', 'false');
+ expect(screen.getByText('正在读取所选日期的监测对话…')).toBeVisible();
+ await waitFor(() => expect(mocks.overview).toHaveBeenLastCalledWith('2026-09-20'));
+ await act(async () => finish({ data: { ...data, businessDate: '2026-09-20', sessionID: 'history-session' } }));
+ expect(chat).toHaveTextContent('history-session');
+ expect(chat).toBeVisible();
 });

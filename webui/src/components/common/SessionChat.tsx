@@ -16,7 +16,7 @@
  * - Support optional copy actions, timestamps, and related affordances
  */
 
-import { useState, useCallback, useRef, useEffect, useMemo, memo, createContext, useContext } from 'react';
+import { useState, useCallback, useRef, useEffect, useMemo, memo, createContext, useContext, useLayoutEffect } from 'react';
 import { Send, Loader2, ChevronDown, Square, Copy, User, FileText, Download, AlertCircle, X, RefreshCw, Pencil, Save, ImageIcon, Paperclip, Plus, ArrowUp, Clock, CheckCircle2, XCircle, Brain, Trash2, Bot, Check, Eye, ListTree, BookOpen, Workflow as WorkflowIcon } from 'lucide-react';
 import { StreamingMarkdown, useStreamingContent } from './StreamingMarkdown';
 import { useTranslation } from 'react-i18next';
@@ -28,6 +28,8 @@ import CommandDropdown, { isSlashCommandName, parseSlashCommand } from './Comman
 import ImageLightbox from './ImageLightbox';
 import { TodoList, buildTodoSummary, pickTodoEntries } from './TodoList';
 export { buildTodoSummary } from './TodoList';
+import { MonitoringViewportContext, MonitoringMessageViewport, MonitoringDeferredDetails, useMonitoringDisclosure } from './MonitoringViewport';
+import { useMonitoringMessageMerge } from '@/hooks/useMonitoringMessageMerge';
 import { useMonitoringPresentation } from '@/hooks/useMonitoringPresentation';
 import { useSessionMessages } from '@/hooks/useSessions';
 import { useSSE, type SSEConnectionStatus } from '@/hooks/useSSE';
@@ -144,7 +146,7 @@ const MonitoringViewContext = createContext(false);
 
 export interface SessionChatProps {
   /** Dedicated monitoring surface; ordinary workbench rendering is unchanged. */
-  monitoring?: { running: boolean; paused: boolean; historical?: boolean; hidePageNotices?: boolean; onPageNotice?: (notice: string) => void };
+  monitoring?: { active?: boolean; running: boolean; paused: boolean; historical?: boolean; hidePageNotices?: boolean; onPageNotice?: (notice: string) => void };
   /** When null/undefined, only welcomeContent + input are rendered (lazy session). */
   sessionId?: string | null;
   /** Subscribe to SSE for live streaming updates */
@@ -2146,6 +2148,8 @@ export default function SessionChat({
   const focusedViewportRef = useRef(!!focusMessageId);
   const focusHighlightRef = useRef<{ target: HTMLElement; timeout: number } | null>(null);
   const isAtBottomRef = useRef(!focusMessageId);
+  const monitoringVisibleRef = useRef(true);
+  monitoringVisibleRef.current = monitoring?.active !== false;
   const [showScrollToLatest, setShowScrollToLatest] = useState(false);
   const scrollToBottomRafRef = useRef<number | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -2231,11 +2235,11 @@ export default function SessionChat({
   }, [mentionAgents, mentionQuery]);
 
   const scrollToBottom = useCallback(() => {
-    if (pendingFocusRef.current || focusedViewportRef.current || !isAtBottomRef.current) return;
+    if (!monitoringVisibleRef.current || pendingFocusRef.current || focusedViewportRef.current || !isAtBottomRef.current) return;
     if (scrollToBottomRafRef.current !== null) return;
     scrollToBottomRafRef.current = requestAnimationFrame(() => {
       scrollToBottomRafRef.current = null;
-      if (!pendingFocusRef.current && !focusedViewportRef.current && isAtBottomRef.current) {
+      if (monitoringVisibleRef.current && !pendingFocusRef.current && !focusedViewportRef.current && isAtBottomRef.current) {
         messagesEndRef.current?.scrollIntoView({ behavior: 'instant' });
       }
     });
@@ -2255,7 +2259,7 @@ export default function SessionChat({
     rafScheduledRef.current = true;
     requestAnimationFrame(() => {
       const el = scrollContainerRef.current;
-      if (el && !pendingFocusRef.current && !focusedViewportRef.current) {
+      if (el && monitoringVisibleRef.current && !pendingFocusRef.current && !focusedViewportRef.current) {
         isAtBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight <= SCROLL_BOTTOM_THRESHOLD_PX;
         setShowScrollToLatest(!isAtBottomRef.current);
       }
@@ -2270,6 +2274,10 @@ export default function SessionChat({
   const {
     messages,
     loading,
+    hasMore,
+    loadingMore,
+    loadMoreError,
+    loadMore,
     error: messagesError,
     refetch,
     addMessage,
@@ -2281,7 +2289,7 @@ export default function SessionChat({
     markMessageStopped,
     truncateAfterMessage,
   } =
-    useSessionMessages(sessionId || undefined);
+    useSessionMessages(sessionId || undefined, monitoring ? { pageSize: 50, enabled: monitoring.active !== false } : undefined);
 
   useEffect(() => {
     setSubmittedModelPromptSessionId(null);
@@ -2467,7 +2475,7 @@ export default function SessionChat({
     }
   }, [pendingPermissions, permissionSubmitting]);
 
-  const sseEnabled = Boolean(sessionId) && (live || isStreaming || !hideInput);
+  const sseEnabled = Boolean(sessionId) && monitoring?.active !== false && (live || isStreaming || !hideInput);
 
   useEffect(() => {
     goalHydrationVersionRef.current += 1;
@@ -2879,7 +2887,7 @@ export default function SessionChat({
   }, [messages, scrollToBottom]);
 
   useEffect(() => {
-    if (!isStreaming && !sending && !isCompacting) return;
+    if (monitoring?.active === false || (!monitoring && !isStreaming && !sending && !isCompacting)) return;
     const target = messagesContentRef.current;
     if (!target || typeof ResizeObserver === 'undefined') return;
 
@@ -2888,7 +2896,7 @@ export default function SessionChat({
     });
     observer.observe(target);
     return () => observer.disconnect();
-  }, [isStreaming, sending, isCompacting, scrollToBottom]);
+  }, [isStreaming, sending, isCompacting, scrollToBottom, !!monitoring, monitoring?.active, messages.length > 0, sessionId]);
 
   // Auto-resize textarea
   const autoResize = useCallback(() => {
@@ -3028,20 +3036,20 @@ export default function SessionChat({
   // question.asked event. Reconcile only while the session is active; the
   // hook ignores responses made stale by a newer SSE update.
   useEffect(() => {
-    if (!sessionId || (!isStreaming && !sending)) return;
+    if (monitoring?.active === false || !sessionId || (!isStreaming && !sending)) return;
     const timer = setInterval(() => {
       fetchPendingQuestions(sessionId).catch((err) => {
         console.warn('[SessionChat] Failed to reconcile pending questions:', err);
       });
     }, PENDING_QUESTION_RECONCILE_MS);
     return () => clearInterval(timer);
-  }, [sessionId, isStreaming, sending, fetchPendingQuestions]);
+  }, [sessionId, isStreaming, sending, fetchPendingQuestions, monitoring?.active]);
 
   // Refetch when page becomes visible again
   useEffect(() => {
     if (!sessionId) return;
     const handler = () => {
-      if (document.visibilityState === 'visible') {
+      if (document.visibilityState === 'visible' && monitoring?.active !== false) {
         refetch();
         fetchPromptQueue();
         fetchPendingQuestions(sessionId).catch((err) => {
@@ -3051,7 +3059,7 @@ export default function SessionChat({
     };
     document.addEventListener('visibilitychange', handler);
     return () => document.removeEventListener('visibilitychange', handler);
-  }, [sessionId, refetch, fetchPromptQueue, fetchPendingQuestions]);
+  }, [sessionId, refetch, fetchPromptQueue, fetchPendingQuestions, monitoring?.active]);
 
   // Backup refetch when compaction ends — covers SSE reconnect scenarios
   // where the session.status event may have been missed.
@@ -3899,7 +3907,7 @@ export default function SessionChat({
 
   // Fallback polling to detect completion when SSE events are missed
   useEffect(() => {
-    if (!isStreaming || !sessionId) return;
+    if (monitoring?.active === false || !isStreaming || !sessionId) return;
     let questionRecoveryInFlight = false;
     const timer = setInterval(async () => {
       try {
@@ -3981,7 +3989,7 @@ export default function SessionChat({
       } catch { /* ignore */ }
     }, FALLBACK_POLL_MS);
     return () => clearInterval(timer);
-  }, [isStreaming, sessionId, refetch]);
+  }, [isStreaming, sessionId, refetch, monitoring?.active]);
 
   // Copy text to clipboard
   const handleCopy = useCallback((text: string) => {
@@ -4161,7 +4169,7 @@ export default function SessionChat({
   }, [editingMessageId, messages, resetEditingState]);
 
   const monitoringPresentation = useMonitoringPresentation({
-    messages, sessionId, enabled: !!monitoring,
+    messages, sessionId, enabled: !!monitoring && monitoring.active !== false,
     ready: live && sseStatus === 'connected' && !monitoring?.historical && !focusMessageId,
     interrupted: monitoring?.paused, liveKeys: monitoringLiveKeys.current,
   });
@@ -4171,14 +4179,15 @@ export default function SessionChat({
     const start = messages.reduce((last, message, index) => message.role === 'user' ? index : last, 0);
     return messages.slice(start).some(message => message.parts.some(part => part.metadata?.monitoringRoundEnd === true));
   }, [messages, !!monitoring]);
-  useEffect(() => { if (monitoring) scrollToBottom(); }, [displayMessages, monitoring, scrollToBottom]);
+  useEffect(() => { if (monitoring && monitoring.active !== false) scrollToBottom(); }, [displayMessages, monitoring, scrollToBottom]);
 
   // ── Merged messages ──
   // Archived-by-compaction messages stay visible in the UI timeline. The
   // summary message itself renders as a divider, so multiple compactions
   // naturally appear as multiple chronological separators.
+  const monitoringMerged = useMonitoringMessageMerge(displayMessages, !!monitoring);
   const { merged, skipIndices } = useMemo(() => {
-    const merged = mergeConsecutiveAssistantMessages(displayMessages);
+    const merged = monitoring ? monitoringMerged : mergeConsecutiveAssistantMessages(displayMessages);
     const skipIndices = new Set<number>();
 
     for (let idx = 0; idx < merged.length; idx++) {
@@ -4190,11 +4199,59 @@ export default function SessionChat({
     }
 
     return { merged, skipIndices };
-  }, [displayMessages]);
+  }, [displayMessages, monitoringMerged, !!monitoring]);
   const timelineItems = useMemo(() => (
     buildChatTimelineItems({ messages: merged, skipIndices, isStreaming: monitoring ? monitoring.running : isStreaming })
   ), [isStreaming, merged, skipIndices, monitoring?.running]);
   const { historyItems, tailItems } = useStableChatTimelineSegments(timelineItems);
+  const [historyAnchorMessage, setHistoryAnchorMessage] = useState<string | null>(null);
+  const monitoringViewport = useMemo(() => monitoring ? {
+    root: scrollContainerRef, active: monitoring.active !== false, focusMessageId: focusMessageId || historyAnchorMessage,
+  } : null, [!!monitoring, monitoring?.active, focusMessageId, historyAnchorMessage]);
+  const wasMonitoringVisible = useRef(monitoring?.active !== false);
+  useEffect(() => {
+    const visible = monitoring?.active !== false;
+    if (monitoring && visible && !wasMonitoringVisible.current) {
+      monitoringLiveKeys.current.clear();
+    }
+    wasMonitoringVisible.current = visible;
+  }, [monitoring?.active, refetch]);
+  const olderScrollAnchor = useRef<{ selector: string; top: number } | null>(null);
+  const loadOlderMessages = useCallback(async () => {
+    const container = scrollContainerRef.current;
+    if (!container || loadingMore) return;
+    const top = container.getBoundingClientRect().top;
+    // A page can start halfway through one merged assistant group. Its leading
+    // message ID changes when older messages arrive; the step ID stays stable.
+    const part = Array.from(container.querySelectorAll<HTMLElement>('[data-monitor-part-id]'))
+      .find(node => node.getBoundingClientRect().bottom > top);
+    const anchor = part || Array.from(container.querySelectorAll<HTMLElement>('[data-message-id]'))
+      .find(node => node.getBoundingClientRect().bottom > top);
+    if (anchor) {
+      olderScrollAnchor.current = {
+        selector: part ? `[data-monitor-part-id="${CSS.escape(part.dataset.monitorPartId!)}"]` : `[data-message-id="${CSS.escape(anchor.dataset.messageId!)}"]`,
+        top: anchor.getBoundingClientRect().top,
+      };
+      setHistoryAnchorMessage(anchor.closest<HTMLElement>('[data-message-id]')?.dataset.messageId || null);
+    }
+    focusedViewportRef.current = true;
+    isAtBottomRef.current = false;
+    setShowScrollToLatest(true);
+    await loadMore();
+  }, [loadMore, loadingMore]);
+  useLayoutEffect(() => {
+    const anchor = olderScrollAnchor.current;
+    const container = scrollContainerRef.current;
+    if (!anchor || !container) return;
+    const element = container.querySelector<HTMLElement>(anchor.selector);
+    if (element) container.scrollTop += element.getBoundingClientRect().top - anchor.top;
+    if (!loadingMore) { olderScrollAnchor.current = null; setHistoryAnchorMessage(null); }
+  }, [messages, loadingMore]);
+  // Anchors can refer to an older round outside the first page.
+  useEffect(() => {
+    if (monitoring && focusMessageId && !loading && !loadingMore && hasMore && !messagesError && !loadMoreError
+      && !messages.some(message => message.id === focusMessageId)) void loadMore();
+  }, [!!monitoring, focusMessageId, loading, loadingMore, hasMore, messagesError, loadMoreError, messages, loadMore]);
 
   useEffect(() => {
     const targetId = String(focusMessageId || '').trim();
@@ -4263,7 +4320,7 @@ export default function SessionChat({
   }, [messagesError, live, sseStatus, monitoring?.onPageNotice]);
 
   return (
-    <MonitoringViewContext.Provider value={!!monitoring}><div className={`flex flex-col min-h-0 ${className}`}>
+    <MonitoringViewportContext.Provider value={monitoringViewport}><MonitoringViewContext.Provider value={!!monitoring}><div className={`flex flex-col min-h-0 ${className}`}>
       {monitoring && !monitoring.hidePageNotices && monitoringPresentation.pending && <div role="status" className="flex shrink-0 items-center justify-between gap-3 border-b border-sky-100 bg-[#eaf4ff] px-5 py-1.5 text-xs text-[#17212b] dark:border-sky-900 dark:bg-sky-950 dark:text-sky-100"><span>{latestRoundEnded ? '本轮已结束，正在展示本轮记录' : '正在按执行顺序展示新步骤'}</span><button className="shrink-0 font-semibold underline" onClick={monitoringPresentation.skip}>直接查看全部</button></div>}
       {monitoring && !monitoring.hidePageNotices && live && ['disconnected', 'reconnecting', 'failed'].includes(sseStatus) && <p role="status" className="shrink-0 border-b border-slate-200 px-5 py-2 text-xs dark:border-slate-700">对话实时连接中断，正在尝试恢复；当前显示已保存的记录。</p>}
       {/* Messages area */}
@@ -4322,6 +4379,13 @@ export default function SessionChat({
           )
         ) : (
           <div ref={messagesContentRef} className={msgListClass}>
+            {monitoring && hasMore && <div className="text-center">
+              <button type="button" disabled={loadingMore} onClick={() => void loadOlderMessages()}
+                className="rounded-lg border border-sky-200 bg-white px-4 py-2 text-sm text-sky-700 disabled:opacity-50 dark:bg-slate-900">
+                {loadingMore ? '正在读取历史记录…' : '加载更早的监测记录'}
+              </button>
+              {loadMoreError && <p role="alert" className="mt-2 text-xs text-slate-600">历史记录读取失败，已显示的内容保留，请重试。</p>}
+            </div>}
             <ChatMessageTimeline
               items={historyItems}
               pendingQuestions={pendingQuestions}
@@ -4993,7 +5057,7 @@ export default function SessionChat({
           onClose={() => setComposerPreview(null)}
         />
       )}
-    </div></MonitoringViewContext.Provider>
+    </div></MonitoringViewContext.Provider></MonitoringViewportContext.Provider>
   );
 }
 
@@ -5066,13 +5130,11 @@ function isMonitoringRoundEnd(part: MessagePart): boolean {
     && ['completed', 'failed'].includes(String(part.metadata.roundStatus));
 }
 
-function MonitoringEvidence({ details, active }: { details: string; active: boolean }) {
-  const [open, setOpen] = useState(active);
-  const touched = useRef(false);
-  useEffect(() => { if (!touched.current) setOpen(active); }, [active]);
+function MonitoringEvidence({ details, active, id }: { details: string; active: boolean; id: string }) {
+  const [open, setOpen] = useMonitoringDisclosure(`evidence:${id}`, active);
   return <details open={open} className="mt-3 border-t border-sky-100 pt-3 dark:border-sky-900">
-    <summary onClick={event => { event.preventDefault(); touched.current = true; setOpen(value => !value); }} className="cursor-pointer text-xs font-semibold text-sky-700 dark:text-sky-300">查看本步骤的结果与依据</summary>
-    <div className="mt-2 whitespace-pre-wrap break-words rounded-lg bg-[#eaf4ff] p-3 text-sm text-[#17212b] dark:bg-sky-950 dark:text-slate-200">{details}</div>
+    <summary onClick={event => { event.preventDefault(); setOpen(!open); }} className="cursor-pointer text-xs font-semibold text-sky-700 dark:text-sky-300">查看本步骤的结果与依据</summary>
+    {open && <div className="mt-2 whitespace-pre-wrap break-words rounded-lg bg-[#eaf4ff] p-3 text-sm text-[#17212b] dark:bg-sky-950 dark:text-slate-200">{details}</div>}
   </details>;
 }
 
@@ -5101,18 +5163,18 @@ function MonitoringPackets({ value }: { value: unknown }) {
   return <section aria-label="请求与响应证据" data-testid="monitor-packets" className="mt-4 space-y-2 border-t border-sky-100 pt-3 dark:border-sky-900">
     <h5 className="text-xs font-semibold text-sky-800 dark:text-sky-300">请求与响应证据 · 已脱敏</h5>
     <p className="text-xs text-slate-500 dark:text-slate-400">按告警和证据编号核对；点击单项展开报文，HTTP 状态码不代表攻击成功。</p>
-    {packets.map((packet, index) => <details key={`${packet.evidence}-${packet.alert}-${packet.field}-${index}`} data-testid="monitor-packet" className="overflow-hidden rounded-xl border border-sky-100 bg-white dark:border-sky-900 dark:bg-slate-900">
-      <summary className="cursor-pointer px-3 py-2.5 text-sm font-medium text-slate-800 dark:text-slate-200">
+    {packets.map((packet, index) => <MonitoringDeferredDetails key={`${packet.evidence}-${packet.alert}-${packet.field}-${index}`} cacheKey={`packet:${packet.evidence}:${packet.alert}:${packet.field}:${index}`} testId="monitor-packet" className="overflow-hidden rounded-xl border border-sky-100 bg-white dark:border-sky-900 dark:bg-slate-900"
+      summary={<>
         <span>{packet.label}</span>
         <span className="ml-2 text-xs font-normal text-sky-700 dark:text-sky-300">{packet.evidence}</span>
         {packet.truncated && <span className="ml-2 rounded bg-sky-50 px-1.5 py-0.5 text-xs font-normal text-sky-800 dark:bg-sky-950 dark:text-sky-300">已截断 · 内容不完整</span>}
         <span className="mt-1 block break-words text-xs font-normal text-slate-500 dark:text-slate-400">告警：{packet.alert || '编号未提供'} · 来源：{packet.source}</span>
-      </summary>
-      <div className="border-t border-sky-100 p-3 dark:border-sky-900">
+      </>}
+      renderBody={() => <div className="border-t border-sky-100 p-3 dark:border-sky-900">
         {packet.truncated && <p className="mb-2 text-xs font-medium text-sky-800 dark:text-sky-300">仅展示已取得的报文片段，未展示部分不能按安全或不存在攻击处理。</p>}
         <pre className="max-h-96 overflow-auto whitespace-pre-wrap break-words rounded-lg bg-[#eaf4ff] p-3 font-mono text-xs leading-6 text-[#17212b] dark:bg-sky-950 dark:text-slate-200">{packet.text || '未取得可展示的报文内容；请查看本步骤证据缺口。'}</pre>
-      </div>
-    </details>)}
+      </div>}
+    />)}
   </section>;
 }
 
@@ -5131,7 +5193,7 @@ function MonitoringStepSummary({ part, toolPart, isActive }: { part: MessagePart
     <div data-testid="monitor-step-summary" className="text-sm leading-7">
       <p className="whitespace-pre-wrap break-words">{part.text}</p>
       <MonitoringPackets value={part.metadata?.monitoringPackets} />
-      {details && (monitor ? <MonitoringEvidence details={details} active={isActive} /> : <details className="mt-1" open={isActive || undefined}>
+      {details && (monitor ? <MonitoringEvidence id={part.id} details={details} active={isActive} /> : <details className="mt-1" open={isActive || undefined}>
         <summary className="cursor-pointer text-gray-500">查看本步骤的结果与依据</summary>
         <div className="mt-1 whitespace-pre-wrap break-words">{details}</div>
       </details>)}
@@ -5160,7 +5222,7 @@ function MonitoringStepSummary({ part, toolPart, isActive }: { part: MessagePart
         })}
       </dl>
       <MonitoringPackets value={part.metadata?.monitoringPackets} />
-      {details && (monitor ? <MonitoringEvidence details={details} active={isActive} /> : <details className="mt-3 border-t border-zinc-100 pt-2 dark:border-zinc-800" open={isActive || undefined}>
+      {details && (monitor ? <MonitoringEvidence id={part.id} details={details} active={isActive} /> : <details className="mt-3 border-t border-zinc-100 pt-2 dark:border-zinc-800" open={isActive || undefined}>
         <summary className="cursor-pointer text-xs font-medium text-zinc-500 hover:text-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-200">查看本步骤的结果与依据</summary>
         <div className="mt-2 whitespace-pre-wrap break-words rounded-lg bg-zinc-50 p-3 text-sm dark:bg-zinc-950/60">{details}</div>
       </details>)}
@@ -5335,7 +5397,7 @@ function ChatMessageTimelineInner({
   return (
     <>
       {items.map(({ message, isActive }) => (
-        <div key={message.id} data-message-id={message.id} className="rounded-md transition-shadow duration-300">
+        <MonitoringMessageViewport key={message.id} id={message.id} sourceIds={message._sourceMessageIds} active={isActive}>
           <ChatMessageBubble
             message={message}
             isActive={isActive}
@@ -5364,7 +5426,7 @@ function ChatMessageTimelineInner({
             onOpenContextFile={onOpenContextFile}
             onOpenContext={onOpenContext}
           />
-        </div>
+        </MonitoringMessageViewport>
       ))}
     </>
   );
@@ -5630,7 +5692,7 @@ function ChatMessageBubbleInner({
             // wrapper div, `first:` always matched and the gap collapsed
             // to zero between, e.g., a tool card and the next thinking
             // block, making them look glued together.
-            <div key={part.id || i} className={processStep ? 'min-w-0' : 'mt-2 first:mt-0'}>
+            <div key={part.id || i} data-monitor-part-id={monitor ? part.id : undefined} className={processStep ? 'min-w-0' : 'mt-2 first:mt-0'}>
               {/* Text */}
               {part.type === 'text' && (() => {
                 if (!isUser && isMonitoringRoundEnd(part)) return <MonitoringRoundEndCard part={part} />;
@@ -6663,9 +6725,7 @@ export function ChatToolPart({
   openWhileActive = false,
 }: ChatToolPartProps) {
   const monitor = useContext(MonitoringViewContext);
-  const [monitorOpen, setMonitorOpen] = useState(openWhileActive);
-  const monitorTouched = useRef(false);
-  useEffect(() => { if (monitor && !monitorTouched.current) setMonitorOpen(openWhileActive); }, [monitor, openWhileActive]);
+  const [monitorOpen, setMonitorOpen] = useMonitoringDisclosure(`tool:${part.id}`, openWhileActive);
   const { t } = useTranslation('session');
   const toolName = part.tool || 'unknown';
 
@@ -6803,7 +6863,7 @@ export function ChatToolPart({
     );
   }
 
-  const toolDetails = (
+  const renderToolDetails = () => (
     <>
       {isTodoTool && todoEntries.length > 0 && (
         <div className="space-y-1.5">
@@ -6834,14 +6894,10 @@ export function ChatToolPart({
       )}
 
       {showGenericToolPayload && safeToolInput && (
-        <details>
-          <summary className="mb-1 cursor-pointer text-[11px] font-medium text-zinc-500 transition-colors hover:text-zinc-700 dark:hover:text-zinc-300">
-            {t('chat.tool.inputParams')}
-          </summary>
-          <pre className="overflow-x-auto rounded-md bg-zinc-950 p-2 font-mono text-[11px] leading-relaxed text-zinc-300">
+        <MonitoringDeferredDetails cacheKey={`input:${part.id}`} summary={t('chat.tool.inputParams')}
+          renderBody={() => <pre className="overflow-x-auto rounded-md bg-zinc-950 p-2 font-mono text-[11px] leading-relaxed text-zinc-300">
             {JSON.stringify(safeToolInput, null, 2)}
-          </pre>
-        </details>
+          </pre>} />
       )}
 
       {showGenericToolPayload && status === 'completed' && state.output !== undefined && (
@@ -6872,8 +6928,8 @@ export function ChatToolPart({
   if (processStep) {
     return (
       <>
-        <details data-testid="chat-process-tool-step" className="group/tool min-w-0" open={openWhileActive || undefined}>
-          <summary className="flex min-h-7 cursor-pointer list-none items-center gap-2 text-sm font-medium text-[#747a78] transition-colors hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-200 [&::-webkit-details-marker]:hidden">
+        <details data-testid="chat-process-tool-step" className="group/tool min-w-0" open={monitor ? monitorOpen : openWhileActive || undefined}>
+          <summary onClick={monitor ? event => { event.preventDefault(); setMonitorOpen(!monitorOpen); } : undefined} className="flex min-h-7 cursor-pointer list-none items-center gap-2 text-sm font-medium text-[#747a78] transition-colors hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-200 [&::-webkit-details-marker]:hidden">
             <span className={`inline-grid h-[18px] w-[18px] flex-[0_0_18px] place-items-center ${processStepIconColor}`}>
               {processStepIcon}
             </span>
@@ -6886,7 +6942,7 @@ export function ChatToolPart({
             <ChevronDown className="ml-0.5 h-3 w-3 flex-shrink-0 text-[#9da29f] transition-transform group-open/tool:rotate-180 dark:text-zinc-500" />
           </summary>
           <div className="mb-[9px] ml-2 mt-[3px] space-y-1.5 border-l border-[#e3e6e3] py-1.5 pl-[26px] pr-0 text-xs text-[#686e6c] dark:border-zinc-700 dark:text-zinc-400">
-            {toolDetails}
+            {(!monitor || monitorOpen) && renderToolDetails()}
           </div>
         </details>
       </>
@@ -6897,7 +6953,7 @@ export function ChatToolPart({
     <>
       {/* The part wrapper owns vertical spacing between process rows. */}
       <details className={monitor ? `group/tool overflow-hidden rounded-xl border ${status === 'error' ? 'border-slate-400 bg-white dark:border-slate-600 dark:bg-slate-900' : 'border-[#bedcf5] bg-[#eaf4ff] dark:border-sky-900 dark:bg-sky-950'}` : 'group/tool rounded-lg bg-zinc-50 overflow-hidden'} open={monitor ? monitorOpen : openWhileActive || undefined}>
-        <summary onClick={monitor ? event => { event.preventDefault(); monitorTouched.current = true; setMonitorOpen(value => !value); } : undefined} className="px-3 py-3 cursor-pointer list-none flex items-start gap-2 min-w-0 select-none transition-colors">
+        <summary onClick={monitor ? event => { event.preventDefault(); setMonitorOpen(!monitorOpen); } : undefined} className="px-3 py-3 cursor-pointer list-none flex items-start gap-2 min-w-0 select-none transition-colors">
         <span className={`${config.iconColor} flex-shrink-0 mt-0.5`}>{config.icon}</span>
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2 min-w-0">
@@ -6922,7 +6978,7 @@ export function ChatToolPart({
       </summary>
 
         <div className="space-y-1.5 border-t border-zinc-200/60 px-2.5 py-2 text-xs">
-          {toolDetails}
+          {(!monitor || monitorOpen) && renderToolDetails()}
         </div>
       </details>
     </>

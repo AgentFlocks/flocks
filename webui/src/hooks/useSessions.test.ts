@@ -1352,3 +1352,246 @@ describe('model activity part updates', () => {
     expect(JSON.parse(JSON.stringify(closed))[0].parts).toEqual([{ ...start, time: { start: 1000, end: 11000 } }]);
   });
 });
+
+
+describe('useSessionMessages opt-in paging', () => {
+  function item(id: number, text = `message ${id}`, sessionID = 'sess-1') {
+    return {
+      info: { id: `m${id}`, sessionID, role: 'assistant', time: { created: id * 100 }, finish: 'completed' },
+      parts: [{ id: `p${id}`, messageID: `m${id}`, sessionID, type: 'text', text }],
+    };
+  }
+  function page(ids: number[], hasMore = true, sessionID = 'sess-1') {
+    return { data: { items: ids.map((id) => item(id, undefined, sessionID)), hasMore, nextBefore: hasMore ? `m${ids[0]}` : null } };
+  }
+  afterEach(() => {
+    vi.mocked(client.get).mockReset();
+    vi.mocked(client.get).mockResolvedValue({ data: [] });
+  });
+
+  it('requests only the bounded recent page and does not refetch when options identity changes', async () => {
+    vi.mocked(client.get).mockResolvedValueOnce(page([49, 50]));
+    const { result, rerender } = renderHook(() => useSessionMessages('sess-1', { pageSize: 50 }));
+    await act(async () => {});
+    rerender();
+    expect(client.get).toHaveBeenCalledTimes(1);
+    expect(client.get).toHaveBeenCalledWith('/api/session/sess-1/message', {
+      params: { include_archived: true, page: true, limit: 50 },
+    });
+    expect(result.current.messages.map((message) => message.id)).toEqual(['m49', 'm50']);
+    expect(result.current.hasMore).toBe(true);
+  });
+
+  it('prepends earlier messages using the cursor and preserves cached message identities', async () => {
+    const olderPage = deferred<any>();
+    vi.mocked(client.get).mockResolvedValueOnce(page([3, 4])).mockReturnValueOnce(olderPage.promise);
+    const { result } = renderHook(() => useSessionMessages('sess-1', { pageSize: 2 }));
+    await act(async () => {});
+    const current = result.current.messages;
+    let first!: Promise<void>;
+    let duplicate!: Promise<void>;
+    act(() => {
+      first = result.current.loadMore();
+      duplicate = result.current.loadMore();
+    });
+    expect(first).toBe(duplicate);
+    expect(result.current.loadingMore).toBe(true);
+    expect(client.get).toHaveBeenLastCalledWith('/api/session/sess-1/message', {
+      params: { include_archived: true, page: true, limit: 2, before: 'm3' },
+    });
+    await act(async () => { olderPage.resolve(page([1, 2], false)); await first; });
+    expect(result.current.messages.map((message) => message.id)).toEqual(['m1', 'm2', 'm3', 'm4']);
+    expect(result.current.messages[2]).toBe(current[0]);
+    expect(result.current.messages[3]).toBe(current[1]);
+    expect(result.current.hasMore).toBe(false);
+    expect(result.current.loadingMore).toBe(false);
+  });
+
+  it('refreshes only the recent page without dropping loaded history or resetting its cursor', async () => {
+    const refresh = deferred<any>();
+    vi.mocked(client.get)
+      .mockResolvedValueOnce(page([5, 6]))
+      .mockResolvedValueOnce(page([3, 4]))
+      .mockReturnValueOnce(refresh.promise)
+      .mockResolvedValueOnce(page([1, 2], false));
+    const { result } = renderHook(() => useSessionMessages('sess-1', { pageSize: 2 }));
+    await act(async () => {});
+    await act(async () => { await result.current.loadMore(); });
+    const existing = result.current.messages;
+    let pending!: Promise<void>;
+    act(() => {
+      pending = result.current.refetch();
+      expect(result.current.refetch()).toBe(pending);
+    });
+    expect(result.current.loading).toBe(false);
+    await act(async () => { refresh.resolve(page([6, 7])); await pending; });
+    expect(result.current.messages.map((message) => message.id)).toEqual(['m3', 'm4', 'm5', 'm6', 'm7']);
+    expect(result.current.messages[0]).toBe(existing[0]);
+    expect(result.current.messages[3]).toBe(existing[3]);
+    await act(async () => { await result.current.loadMore(); });
+    expect(client.get).toHaveBeenLastCalledWith('/api/session/sess-1/message', {
+      params: { include_archived: true, page: true, limit: 2, before: 'm3' },
+    });
+    expect(result.current.messages).toHaveLength(7);
+  });
+
+  it('fills a gap created while hidden before continuing to older cached history', async () => {
+    vi.mocked(client.get)
+      .mockResolvedValueOnce(page([4, 5]))
+      .mockResolvedValueOnce(page([8, 9]))
+      .mockResolvedValueOnce(page([6, 7]))
+      .mockResolvedValueOnce(page([4, 5]))
+      .mockResolvedValueOnce(page([1, 2, 3], false));
+    const { result } = renderHook(() => useSessionMessages('sess-1', { pageSize: 3 }));
+    await act(async () => {});
+    await act(async () => { await result.current.refetch(); });
+    expect(result.current.messages.map((message) => message.id)).toEqual(['m4', 'm5', 'm8', 'm9']);
+    await act(async () => { await result.current.loadMore(); });
+    expect(vi.mocked(client.get).mock.calls[vi.mocked(client.get).mock.calls.length - 1]?.[1]?.params.before).toBe('m8');
+    await act(async () => { await result.current.loadMore(); });
+    expect(vi.mocked(client.get).mock.calls[vi.mocked(client.get).mock.calls.length - 1]?.[1]?.params.before).toBe('m6');
+    await act(async () => { await result.current.loadMore(); });
+    expect(vi.mocked(client.get).mock.calls[vi.mocked(client.get).mock.calls.length - 1]?.[1]?.params.before).toBe('m4');
+    expect(result.current.messages.map((message) => message.id)).toEqual(Array.from({ length: 9 }, (_, i) => `m${i + 1}`));
+    expect(result.current.hasMore).toBe(false);
+  });
+
+  it('retains newer SSE parts while overlapping history and refresh requests finish', async () => {
+    const history = deferred<any>();
+    const refresh = deferred<any>();
+    vi.mocked(client.get).mockResolvedValueOnce(page([3, 4]))
+      .mockReturnValueOnce(history.promise).mockReturnValueOnce(refresh.promise);
+    const { result } = renderHook(() => useSessionMessages('sess-1', { pageSize: 2 }));
+    await act(async () => {});
+    let historyPromise!: Promise<void>;
+    act(() => { historyPromise = result.current.loadMore(); });
+    act(() => { result.current.updateMessagePart({ ...item(2).parts[0], text: 'new SSE evidence' }); });
+    let refreshPromise!: Promise<void>;
+    act(() => { refreshPromise = result.current.refetch(); });
+    await act(async () => { refresh.resolve(page([3, 4])); await refreshPromise; });
+    await act(async () => { history.resolve(page([1, 2], false)); await historyPromise; });
+    expect(result.current.messages.map((message) => message.id)).toEqual(['m1', 'm2', 'm3', 'm4']);
+    expect(result.current.messages.find((message) => message.id === 'm2')?.parts[0].text).toBe('new SSE evidence');
+  });
+
+  it('keeps optimistic new messages and streamed edits against an older recent-page response', async () => {
+    const refresh = deferred<any>();
+    vi.mocked(client.get).mockResolvedValueOnce(page([3, 4])).mockReturnValueOnce(refresh.promise);
+    const { result } = renderHook(() => useSessionMessages('sess-1', { pageSize: 2 }));
+    await act(async () => {});
+    let pending!: Promise<void>;
+    act(() => { pending = result.current.refetch(); });
+    act(() => {
+      result.current.updateMessagePart({ ...item(4).parts[0], text: 'latest' });
+      result.current.addMessage(makeMsg({ id: 'm5', timestamp: 500 }));
+    });
+    await act(async () => { refresh.resolve(page([3, 4])); await pending; });
+    expect(result.current.messages.map((message) => message.id)).toEqual(['m3', 'm4', 'm5']);
+    expect(result.current.messages[1].parts[0].text).toBe('latest');
+  });
+
+  it('ignores an earlier history response after changing session', async () => {
+    const history = deferred<any>();
+    vi.mocked(client.get).mockResolvedValueOnce(page([3, 4]))
+      .mockReturnValueOnce(history.promise).mockResolvedValueOnce(page([8, 9], false, 'sess-2'));
+    const { result, rerender } = renderHook(({ id }) => useSessionMessages(id, { pageSize: 2 }), { initialProps: { id: 'sess-1' } });
+    await act(async () => {});
+    let pending!: Promise<void>;
+    act(() => { pending = result.current.loadMore(); });
+    rerender({ id: 'sess-2' });
+    await act(async () => {});
+    await act(async () => { history.resolve(page([1, 2], false)); await pending; });
+    expect(result.current.messages.map((message) => message.id)).toEqual(['m8', 'm9']);
+    expect(result.current.hasMore).toBe(false);
+    expect(result.current.loadingMore).toBe(false);
+  });
+
+  it('does not resurrect cleared history from a pending history request', async () => {
+    const history = deferred<any>();
+    vi.mocked(client.get).mockResolvedValueOnce(page([3, 4])).mockReturnValueOnce(history.promise);
+    const { result } = renderHook(() => useSessionMessages('sess-1', { pageSize: 2 }));
+    await act(async () => {});
+    let pending!: Promise<void>;
+    act(() => { pending = result.current.loadMore(); result.current.clearMessages(); });
+    await act(async () => { history.resolve(page([1, 2], false)); await pending; });
+    expect(result.current.messages).toEqual([]);
+    expect(result.current.hasMore).toBe(false);
+    expect(result.current.loadingMore).toBe(false);
+  });
+
+  it('invalidates pending history when a recent refresh returns an authoritative empty snapshot', async () => {
+    const history = deferred<any>();
+    vi.mocked(client.get).mockResolvedValueOnce(page([3, 4])).mockReturnValueOnce(history.promise).mockResolvedValueOnce(page([], false));
+    const { result } = renderHook(() => useSessionMessages('sess-1', { pageSize: 2 }));
+    await act(async () => {});
+    let pending!: Promise<void>;
+    act(() => { pending = result.current.loadMore(); });
+    await act(async () => { await result.current.refetch(); });
+    await act(async () => { history.resolve(page([1, 2], false)); await pending; });
+    expect(result.current.messages).toEqual([]);
+    expect(result.current.hasMore).toBe(false);
+    expect(result.current.loadingMore).toBe(false);
+  });
+
+  it('keeps history and cursor on failure so loading older records can be retried', async () => {
+    vi.mocked(client.get).mockResolvedValueOnce(page([3, 4]))
+      .mockRejectedValueOnce(new Error('temporarily unavailable')).mockResolvedValueOnce(page([1, 2], false));
+    const { result } = renderHook(() => useSessionMessages('sess-1', { pageSize: 2 }));
+    await act(async () => {});
+    await act(async () => { await result.current.loadMore(); });
+    expect(result.current.messages).toHaveLength(2);
+    expect(result.current.hasMore).toBe(true);
+    expect(result.current.loadMoreError).toBe('temporarily unavailable');
+    expect(result.current.error).toBeNull();
+    await act(async () => { await result.current.loadMore(); });
+    expect(result.current.messages).toHaveLength(4);
+    expect(result.current.loadMoreError).toBeNull();
+  });
+
+  it('does not fetch while hidden and reloads the latest page once on activation', async () => {
+    vi.mocked(client.get).mockResolvedValueOnce(page([3, 4])).mockResolvedValueOnce(page([4, 5]));
+    const { result, rerender } = renderHook(({ enabled }) => useSessionMessages('sess-1', { pageSize: 2, enabled }), { initialProps: { enabled: false } });
+    await act(async () => {});
+    expect(client.get).not.toHaveBeenCalled();
+    expect(result.current.loading).toBe(false);
+    rerender({ enabled: true });
+    await act(async () => {});
+    expect(client.get).toHaveBeenCalledTimes(1);
+    const cached = result.current.messages;
+    rerender({ enabled: false });
+    expect(result.current.messages).toBe(cached);
+    expect(client.get).toHaveBeenCalledTimes(1);
+    rerender({ enabled: true });
+    await act(async () => {});
+    expect(client.get).toHaveBeenCalledTimes(2);
+    expect(result.current.messages.map((message) => message.id)).toEqual(['m3', 'm4', 'm5']);
+  });
+
+  it('defers loading a changed session while the monitoring tab is hidden', async () => {
+    vi.mocked(client.get).mockResolvedValueOnce(page([3, 4])).mockResolvedValueOnce(page([8, 9], false, 'sess-2'));
+    const { result, rerender } = renderHook(({ id, enabled }) => useSessionMessages(id, { pageSize: 2, enabled }), { initialProps: { id: 'sess-1', enabled: true } });
+    await act(async () => {});
+    rerender({ id: 'sess-2', enabled: false });
+    expect(client.get).toHaveBeenCalledTimes(1);
+    expect(result.current.messages).toEqual([]);
+    expect(result.current.loading).toBe(false);
+    rerender({ id: 'sess-2', enabled: true });
+    await act(async () => {});
+    expect(client.get).toHaveBeenCalledTimes(2);
+    expect(result.current.messages.map((message) => message.id)).toEqual(['m8', 'm9']);
+  });
+
+
+  it('keeps the history cursor retriable when the server returns a non-advancing page', async () => {
+    vi.mocked(client.get).mockResolvedValueOnce(page([3, 4])).mockResolvedValueOnce(page([3, 4]));
+    const { result } = renderHook(() => useSessionMessages('sess-1', { pageSize: 2 }));
+    await act(async () => {});
+    await act(async () => { await result.current.loadMore(); });
+    expect(result.current.hasMore).toBe(true);
+    expect(result.current.loadingMore).toBe(false);
+    expect(result.current.loadMoreError).toContain('cursor did not advance');
+    expect(result.current.messages).toHaveLength(2);
+    expect(client.get).toHaveBeenCalledTimes(2);
+  });
+
+});

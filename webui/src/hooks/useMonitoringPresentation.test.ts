@@ -102,3 +102,130 @@ it('shows snapshot-only parts immediately without flushing the genuine live queu
   act(() => vi.advanceTimersByTime(2000));
   expect(ids(result.current.messages)).toEqual(['query', 'result', 'end', 'saved']);
 });
+
+describe('incremental monitoring presentation', () => {
+  it('never rescans unchanged historical parts during SSE updates, animation ticks or skip', () => {
+    let historyReads = 0;
+    const history = Array.from({ length: 120 }, (_, messageIndex) => msg(
+      Array.from({ length: 24 }, (_, partIndex) => {
+        const item = part(`history-${messageIndex}-${partIndex}`);
+        Object.defineProperty(item, 'id', { get: () => { historyReads += 1; return `history-${messageIndex}-${partIndex}`; } });
+        return item;
+      }), { id: `history-${messageIndex}` },
+    ));
+    const { result, rerender } = renderHook(props => useMonitoringPresentation(props), { initialProps: { ...base, messages: history } });
+    expect(result.current.messages).toBe(history);
+    historyReads = 0;
+    const live = msg([part('query'), part('lookup'), part('result'), part('summary')]);
+    rerender({ ...base, messages: [...history, live] });
+    expect(historyReads).toBe(0);
+    history.forEach((message, index) => expect(result.current.messages[index]).toBe(message));
+    act(() => vi.advanceTimersByTime(450));
+    expect(historyReads).toBe(0);
+    history.forEach((message, index) => expect(result.current.messages[index]).toBe(message));
+    rerender({ ...base, messages: [...history, { ...live, parts: [...live.parts, part('end')] }] });
+    expect(historyReads).toBe(0);
+    act(() => result.current.skip());
+    expect(historyReads).toBe(0);
+    expect(result.current.pending).toBe(false);
+  });
+
+  it('prepends older pages immediately without replaying them or losing the live queue', () => {
+    const recent = msg([part('recent')], { id: 'recent' });
+    const { result, rerender } = renderHook(props => useMonitoringPresentation(props), { initialProps: { ...base, messages: [recent] } });
+    const live = msg([part('query'), part('result'), part('end')]);
+    rerender({ ...base, messages: [recent, live] });
+    expect(ids(result.current.messages)).toEqual(['recent', 'query']);
+    const older = msg([part('older1'), part('older2')], { id: 'older' });
+    const source = [older, recent, live];
+    rerender({ ...base, messages: source });
+    expect(ids(result.current.messages)).toEqual(['older1', 'older2', 'recent', 'query']);
+    expect(result.current.messages[0]).toBe(older);
+    expect(result.current.messages[1]).toBe(recent);
+    expect(result.current.pending).toBe(true);
+    act(() => vi.advanceTimersByTime(450));
+    act(() => vi.advanceTimersByTime(450));
+    expect(result.current.messages).toBe(source);
+    expect(result.current.pending).toBe(false);
+  });
+
+  it('does not replay prepended history even when its keys were live earlier', () => {
+    const liveKeys = new Set(['old:old1', 'old:old2']);
+    const recent = msg([part('recent')], { id: 'recent' });
+    const { result, rerender } = renderHook(props => useMonitoringPresentation(props), { initialProps: { ...base, messages: [recent], liveKeys } });
+    const history = msg([part('old1'), part('old2')], { id: 'old' });
+    const source = [history, recent];
+    rerender({ ...base, messages: source, liveKeys });
+    expect(result.current.messages).toBe(source);
+    expect(result.current.pending).toBe(false);
+  });
+
+  it('keeps a partial message reference when an update only changes a later queued message', () => {
+    const { result, rerender } = renderHook(props => useMonitoringPresentation(props), { initialProps: { ...base, messages: [] as Message[] } });
+    const first = msg([part('query'), part('result')]);
+    const later = msg([part('end')], { id: 'later' });
+    rerender({ ...base, messages: [first, later] });
+    const presented = result.current.messages[0];
+    rerender({ ...base, messages: [first, { ...later, parts: [part('end', { text: 'Updated summary' })] }] });
+    expect(result.current.messages[0]).toBe(presented);
+    act(() => vi.advanceTimersByTime(450));
+    act(() => vi.advanceTimersByTime(450));
+    expect(result.current.messages[1].parts[0].text).toBe('Updated summary');
+  });
+
+  it('removes queued parts that disappear during reconciliation and releases later results', () => {
+    const { result, rerender } = renderHook(props => useMonitoringPresentation(props), { initialProps: { ...base, messages: [] as Message[] } });
+    const first = msg([part('query'), part('discarded')]);
+    const later = msg([part('result')], { id: 'later' });
+    rerender({ ...base, messages: [first, later] });
+    const source = [msg([first.parts[0]]), later];
+    rerender({ ...base, messages: source });
+    act(() => vi.advanceTimersByTime(450));
+    expect(result.current.messages).toBe(source);
+    expect(ids(result.current.messages)).toEqual(['query', 'result']);
+  });
+
+  it('detects legacy in-place appends while leaving the source and historical messages unchanged', () => {
+    const source = msg([part('query')]);
+    const { result, rerender } = renderHook(props => useMonitoringPresentation(props), { initialProps: { ...base, messages: [source] } });
+    source.parts.push(part('lookup'), part('result'), part('end'));
+    rerender({ ...base, messages: [source] });
+    expect(ids(result.current.messages)).toEqual(['query', 'lookup']);
+    expect(source.parts).toHaveLength(4);
+    act(() => vi.advanceTimersByTime(450));
+    act(() => vi.advanceTimersByTime(450));
+    expect(result.current.messages[0]).toBe(source);
+  });
+
+  it.each(['request_user_input', 'permission'])('immediately exposes %s and all preceding steps', tool => {
+    const { result, rerender } = renderHook(props => useMonitoringPresentation(props), { initialProps: { ...base, messages: [] as Message[] } });
+    const parts = [part('query'), part('result')];
+    rerender({ ...base, messages: [msg(parts)] });
+    const source = [msg([...parts, part('approval', { type: 'tool', tool })])];
+    rerender({ ...base, messages: source });
+    expect(result.current.messages).toBe(source);
+    expect(result.current.pending).toBe(false);
+  });
+
+  it('flushes a burst beyond the 32 part queue instead of building an unbounded backlog', () => {
+    const { result, rerender } = renderHook(props => useMonitoringPresentation(props), { initialProps: { ...base, messages: [] as Message[] } });
+    const source = [msg(Array.from({ length: 40 }, (_, index) => part(`step-${index}`)))];
+    Object.freeze(source[0].parts);
+    Object.freeze(source[0]);
+    rerender({ ...base, messages: source });
+    expect(result.current.messages).toBe(source);
+    expect(result.current.pending).toBe(false);
+  });
+});
+
+it('follows authoritative source order when reconciliation reorders queued parts', () => {
+  const { result, rerender } = renderHook(props => useMonitoringPresentation(props), { initialProps: { ...base, messages: [] as Message[] } });
+  const query = part('query'); const first = part('first'); const second = part('second');
+  rerender({ ...base, messages: [msg([query, first, second])] });
+  rerender({ ...base, messages: [msg([query, second, first])] });
+  expect(ids(result.current.messages)).toEqual(['query']);
+  act(() => vi.advanceTimersByTime(450));
+  expect(ids(result.current.messages)).toEqual(['query', 'second']);
+  act(() => vi.advanceTimersByTime(450));
+  expect(ids(result.current.messages)).toEqual(['query', 'second', 'first']);
+});

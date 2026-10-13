@@ -6837,3 +6837,91 @@ it('routes monitoring page notices out of the conversation while preserving ordi
   view.rerender(React.createElement(SessionChat, { sessionId: 'sess-1', hideInput: true }));
   expect(await screen.findByText('消息加载失败')).toBeInTheDocument();
 });
+
+
+describe('monitoring performance integration', () => {
+  it('opts into bounded history and stops live subscriptions when the retained tab is hidden', () => {
+    const props = { sessionId: 'sess-1', hideInput: true, live: true, monitoring: { active: true, running: false, paused: true } };
+    const { rerender } = render(React.createElement(SessionChat, props));
+    expect(useSessionMessagesMock).toHaveBeenLastCalledWith('sess-1', { pageSize: 50, enabled: true });
+    rerender(React.createElement(SessionChat, { ...props, live: false, monitoring: { ...props.monitoring, active: false } }));
+    expect(useSessionMessagesMock).toHaveBeenLastCalledWith('sess-1', { pageSize: 50, enabled: false });
+    expect(useSSEOptionsRef.current.enabled).toBe(false);
+  });
+
+  it('defers serialization of finished tool output until opened and preserves active steps', () => {
+    const serialize = vi.fn(() => 'large diagnostic payload');
+    useSessionMessagesMock.mockReturnValue({ ...useSessionMessagesMock(), messages: [makeMessage({ id: 'tool-msg', finish: 'stop', parts: [{ id: 'big-tool', type: 'tool', tool: '查询 XDR 事件', state: { status: 'completed', input: {}, output: { toJSON: serialize } } }] as any })] });
+    render(React.createElement(SessionChat, { sessionId: 'sess-1', hideInput: true, monitoring: { running: false, paused: true }, display: { collapseIntermediateSteps: false } }));
+    expect(serialize).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByText('查询 XDR 事件'));
+    expect(serialize).toHaveBeenCalled();
+    expect(screen.getByText(/large diagnostic payload/)).toBeInTheDocument();
+  });
+
+  it('loads older records explicitly and reports a history fetch error without removing current messages', async () => {
+    const loadMore = vi.fn().mockResolvedValue(undefined);
+    useSessionMessagesMock.mockReturnValue({ ...useSessionMessagesMock(), hasMore: true, loadingMore: false, loadMore, loadMoreError: 'offline', messages: [makeMessage({ id: 'recent', finish: 'stop', parts: [{ id: 'text', type: 'text', text: 'current saved result' }] as any })] });
+    render(React.createElement(SessionChat, { sessionId: 'sess-1', hideInput: true, monitoring: { running: false, paused: true } }));
+    await userEvent.click(screen.getByText('加载更早的监测记录'));
+    expect(loadMore).toHaveBeenCalledTimes(1);
+    expect(screen.getByText(/历史记录读取失败/)).toBeInTheDocument();
+    expect(screen.getByText('current saved result')).toBeInTheDocument();
+  });
+});
+
+
+it('keeps a visible idle monitoring conversation at the tail as deferred bodies acquire their real height', async () => {
+  const resizeCallbacks: (() => void)[] = [];
+  vi.stubGlobal('ResizeObserver', class {
+    constructor(callback: () => void) { resizeCallbacks.push(callback); }
+    observe() {} disconnect() {}
+  });
+  const scroll = vi.mocked(window.HTMLElement.prototype.scrollIntoView);
+  useSessionMessagesMock.mockReturnValue({ ...useSessionMessagesMock(), messages: [makeMessage({ id: 'resized', finish: 'stop', parts: [{ id: 'text', type: 'text', text: 'saved round' }] as any })] });
+  const props = { sessionId: 'sess-1', hideInput: true, monitoring: { active: true, running: false, paused: true } };
+  const { rerender } = render(React.createElement(SessionChat, props));
+  await waitFor(() => expect(scroll).toHaveBeenCalled());
+  scroll.mockClear();
+  act(() => resizeCallbacks.forEach(callback => callback()));
+  await waitFor(() => expect(scroll).toHaveBeenCalled());
+  rerender(React.createElement(SessionChat, { ...props, monitoring: { ...props.monitoring, active: false } }));
+  scroll.mockClear();
+  act(() => resizeCallbacks.forEach(callback => callback()));
+  await new Promise(resolve => setTimeout(resolve, 30));
+  expect(scroll).not.toHaveBeenCalled();
+  vi.unstubAllGlobals();
+});
+
+
+it('does not automatically retry a failed older-page request while locating a historical round', () => {
+  const loadMore = vi.fn();
+  useSessionMessagesMock.mockReturnValue({ ...useSessionMessagesMock(), hasMore: true, loadingMore: false, loadMore, loadMoreError: 'offline' });
+  render(React.createElement(SessionChat, { sessionId: 'sess-1', hideInput: true, focusMessageId: 'old-round', monitoring: { running: false, paused: true } }));
+  expect(loadMore).not.toHaveBeenCalled();
+});
+
+
+it('preserves a stable step anchor when an older page extends the first assistant group', async () => {
+  const part = { id: 'stable-step', messageID: 'current-assistant', type: 'text', text: 'currently reading this step' };
+  const current = makeMessage({ id: 'current-assistant', finish: 'stop', parts: [part] as any });
+  const earlier = makeMessage({ id: 'earlier-assistant', finish: 'stop', parts: [{ id: 'older-step', type: 'text', text: 'older evidence' }] as any });
+  const loadMore = vi.fn().mockResolvedValue(undefined);
+  const value = { ...useSessionMessagesMock(), hasMore: true, loadingMore: false, loadMore, messages: [current] };
+  useSessionMessagesMock.mockReturnValue(value);
+  const props = { sessionId: 'sess-1', hideInput: true, monitoring: { running: false, paused: true } };
+  const { container, rerender } = render(React.createElement(SessionChat, props));
+  const viewport = container.querySelector('.overflow-y-auto') as HTMLElement;
+  const rect = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
+    const isStep = this.dataset.monitorPartId === 'stable-step';
+    const top = isStep ? (this.closest('[data-message-id]')?.getAttribute('data-message-id') === 'earlier-assistant' ? 600 : 200) : 0;
+    return { top, bottom: top + 100, height: 100, left: 0, right: 100, width: 100, x: 0, y: top, toJSON() {} } as DOMRect;
+  });
+  await userEvent.click(screen.getByText('加载更早的监测记录'));
+  useSessionMessagesMock.mockReturnValue({ ...value, messages: [earlier, current] });
+  rerender(React.createElement(SessionChat, props));
+  expect(container.querySelector('[data-message-id="current-assistant"]')).toBeNull();
+  expect(container.querySelector('[data-monitor-part-id="stable-step"]')).toBeInTheDocument();
+  expect(viewport.scrollTop).toBe(400);
+  rect.mockRestore();
+});

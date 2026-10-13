@@ -453,7 +453,70 @@ export function useSessions(search = '', options?: UseSessionsOptions) {
   };
 }
 
-export function useSessionMessages(sessionId?: string) {
+type SessionMessagesOptions = {
+  /** Opt in to recent-page loading; ordinary workbench conversations stay unchanged. */
+  pageSize?: number;
+  /** Hidden monitoring tabs keep their cache without issuing automatic requests. */
+  enabled?: boolean;
+};
+
+type LoadedMessageRange = {
+  ids: Set<string>;
+  oldestId?: string;
+  before: string | null;
+};
+
+// A refresh after a long hidden interval can leave a gap between the new page
+// and cached history. Keep contiguous ranges so Load more fills that gap first.
+function mergeLoadedMessageRanges(
+  ranges: LoadedMessageRange[],
+  fetched: Message[],
+  before: string | null,
+  history: boolean,
+): LoadedMessageRange[] {
+  const fetchedIds = new Set(fetched.map((message) => message.id));
+  const matching = ranges.filter((range, index) => (
+    (history && index === 0) || fetched.some((message) => range.ids.has(message.id))
+  ));
+  if (before === null) {
+    const retainedIds = history ? ranges.flatMap((range) => [...range.ids]) : [];
+    return [{ ids: new Set([...retainedIds, ...fetchedIds]), oldestId: fetched[0]?.id, before: null }];
+  }
+  const oldest = matching[matching.length - 1];
+  const extendsOldest = !oldest || fetchedIds.has(oldest.oldestId ?? '') || (history && matching.length === 1);
+  const merged: LoadedMessageRange = {
+    ids: new Set([...matching.flatMap((range) => [...range.ids]), ...fetchedIds]),
+    oldestId: extendsOldest ? fetched[0]?.id : oldest.oldestId,
+    before: extendsOldest ? before : oldest.before,
+  };
+  return [merged, ...ranges.filter((range) => !matching.includes(range))];
+}
+
+function mergePagedFetchedMessages(prev: Message[], fetched: Message[], protectedIds: Set<string>): Message[] {
+  const mergedFetched = mergeFetchedMessages(prev, fetched);
+  const updates = new Map(mergedFetched.map((message) => [message.id, message]));
+  const existingIds = new Set(prev.map((message) => message.id));
+  const merged = prev.map((message) => {
+    const update = updates.get(message.id);
+    if (!update) return message;
+    if (protectedIds.has(message.id)) {
+      // A part can arrive before its message metadata; keep streamed content but
+      // use the server creation time instead of the placeholder's arrival time.
+      return message.timestamp === update.timestamp ? message : { ...message, timestamp: update.timestamp };
+    }
+    // Only the bounded response page is compared; unchanged cached history keeps
+    // its identity and does not re-render or re-enter the presentation queue.
+    return JSON.stringify(message) === JSON.stringify(update) ? message : update;
+  });
+  merged.push(...mergedFetched.filter((message) => !existingIds.has(message.id)));
+  merged.sort((a, b) => a.timestamp - b.timestamp);
+  return normalizeMessageOrder(merged);
+}
+
+export function useSessionMessages(sessionId?: string, options?: SessionMessagesOptions) {
+  const pageSize = options?.pageSize && Number.isFinite(options.pageSize)
+    ? Math.max(1, Math.floor(options.pageSize)) : undefined;
+  const enabled = options?.enabled !== false;
   const [messages, setMessages] = useState<Message[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -462,90 +525,190 @@ export function useSessionMessages(sessionId?: string) {
   const provisionalMessageIdsRef = useRef<Set<string>>(new Set());
   const messageMutationVersionsRef = useRef<Map<string, number>>(new Map());
   const mutationVersionRef = useRef(0);
+  const [hasMore, setHasMore] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [loadMoreError, setLoadMoreError] = useState<string | null>(null);
+  const rangesRef = useRef<LoadedMessageRange[]>([]);
+  const generationRef = useRef(0);
+  const hasLoadedPageRef = useRef(false);
+  const refreshPromiseRef = useRef<Promise<void> | null>(null);
+  const historyPromiseRef = useRef<Promise<void> | null>(null);
+  const historyEpochRef = useRef(0);
 
   const markMessageMutation = (messageId: string) => {
     mutationVersionRef.current += 1;
     messageMutationVersionsRef.current.set(messageId, mutationVersionRef.current);
   };
 
-  const fetchMessages = useCallback(async () => {
-    if (!sessionId || activeSessionIdRef.current !== sessionId) return;
+  const fetchMessages = useCallback((): Promise<void> => {
+    if (!sessionId || activeSessionIdRef.current !== sessionId) return Promise.resolve();
+    if (pageSize && refreshPromiseRef.current) return refreshPromiseRef.current;
 
     const requestSessionId = sessionId;
     const requestId = ++requestIdRef.current;
+    const requestGeneration = generationRef.current;
     const requestMutationVersion = mutationVersionRef.current;
     const isCurrentRequest = () => (
       activeSessionIdRef.current === requestSessionId
+      && generationRef.current === requestGeneration
       && requestIdRef.current === requestId
     );
-    
-    try {
-      setLoading(true);
-      setError(null);
-      const startMark = 'session:messages:start';
-      if (typeof performance !== 'undefined') performance.mark(startMark);
-      const response = await client.get(`/api/session/${sessionId}/message`, {
-        params: { include_archived: true },
-      });
-      markMeasure('session:messages', startMark);
-      if (!isCurrentRequest()) return;
-      const messagesData = transformMessageResponse(response.data);
-      const protectedMessageIds = new Set(
-        Array.from(messageMutationVersionsRef.current.entries())
-          .filter(([, version]) => version > requestMutationVersion)
-          .map(([messageId]) => messageId),
-      );
-      messagesData.forEach((message) => {
-        if (!protectedMessageIds.has(message.id)) {
-          provisionalMessageIdsRef.current.delete(message.id);
+    const request = (async () => {
+      try {
+        setLoading(!pageSize || !hasLoadedPageRef.current);
+        setError(null);
+        const startMark = 'session:messages:start';
+        if (typeof performance !== 'undefined') performance.mark(startMark);
+        const response = await client.get(`/api/session/${sessionId}/message`, {
+          params: { include_archived: true, ...(pageSize ? { page: true, limit: pageSize } : {}) },
+        });
+        markMeasure('session:messages', startMark);
+        if (!isCurrentRequest()) return;
+        const messagesData = transformMessageResponse(response.data);
+        const protectedMessageIds = new Set(
+          Array.from(messageMutationVersionsRef.current.entries())
+            .filter(([, version]) => version > requestMutationVersion)
+            .map(([messageId]) => messageId),
+        );
+        messagesData.forEach((message) => {
+          if (!protectedMessageIds.has(message.id)) provisionalMessageIdsRef.current.delete(message.id);
+        });
+        // Paging and refresh may overlap. Keep versions until session reset so a
+        // newer response cannot remove the protection needed by an older one.
+        if (!pageSize) {
+          messageMutationVersionsRef.current.forEach((version, messageId) => {
+            if (version <= requestMutationVersion) messageMutationVersionsRef.current.delete(messageId);
+          });
         }
-      });
-      messageMutationVersionsRef.current.forEach((version, messageId) => {
-        if (version <= requestMutationVersion) {
-          messageMutationVersionsRef.current.delete(messageId);
+        if (pageSize) {
+          if (response.data?.hasMore && !response.data.nextBefore) {
+            throw new Error('Message history cursor is missing; please retry');
+          }
+          const before = response.data?.hasMore && typeof response.data.nextBefore === 'string'
+            ? response.data.nextBefore : null;
+          if (before === null) {
+            // An authoritative complete snapshot supersedes any older history
+            // request (for example after a conversation was cleared).
+            historyEpochRef.current += 1;
+            historyPromiseRef.current = null;
+            setLoadingMore(false);
+          }
+          rangesRef.current = mergeLoadedMessageRanges(rangesRef.current, messagesData, before, false);
+          setHasMore(!!rangesRef.current[0]?.before);
+          hasLoadedPageRef.current = true;
+          setMessages(prev => before === null
+            ? mergeCompleteFetchedMessages(prev, messagesData, provisionalMessageIdsRef.current, protectedMessageIds)
+            : mergePagedFetchedMessages(prev, messagesData, protectedMessageIds));
+        } else {
+          setMessages(prev => mergeCompleteFetchedMessages(
+            prev, messagesData, provisionalMessageIdsRef.current, protectedMessageIds,
+          ));
         }
+      } catch (err: any) {
+        if (isCurrentRequest()) setError(err.message || 'Failed to fetch messages');
+      } finally {
+        if (isCurrentRequest()) setLoading(false);
+      }
+    })();
+    if (pageSize) {
+      refreshPromiseRef.current = request;
+      void request.finally(() => {
+        if (refreshPromiseRef.current === request) refreshPromiseRef.current = null;
       });
-      setMessages(prev => mergeCompleteFetchedMessages(
-        prev,
-        messagesData,
-        provisionalMessageIdsRef.current,
-        protectedMessageIds,
-      ));
-    } catch (err: any) {
-      if (isCurrentRequest()) {
-        setError(err.message || 'Failed to fetch messages');
-      }
-    } finally {
-      if (isCurrentRequest()) {
-        setLoading(false);
-      }
     }
-  }, [sessionId]);
+    return request;
+  }, [sessionId, pageSize]);
+
+  const loadMore = useCallback((): Promise<void> => {
+    if (!pageSize || !sessionId || activeSessionIdRef.current !== sessionId) return Promise.resolve();
+    if (historyPromiseRef.current) return historyPromiseRef.current;
+    const before = rangesRef.current[0]?.before;
+    if (!before) return Promise.resolve();
+    const requestGeneration = generationRef.current;
+    const requestHistoryEpoch = historyEpochRef.current;
+    const requestMutationVersion = mutationVersionRef.current;
+    const isCurrentRequest = () => (
+      activeSessionIdRef.current === sessionId && generationRef.current === requestGeneration
+      && historyEpochRef.current === requestHistoryEpoch
+    );
+    const request = (async () => {
+      setLoadingMore(true);
+      setLoadMoreError(null);
+      try {
+        const response = await client.get(`/api/session/${sessionId}/message`, {
+          params: { include_archived: true, page: true, limit: pageSize, before },
+        });
+        if (!isCurrentRequest()) return;
+        const fetched = transformMessageResponse(response.data);
+        const protectedIds = new Set(
+          Array.from(messageMutationVersionsRef.current.entries())
+            .filter(([, version]) => version > requestMutationVersion)
+            .map(([messageId]) => messageId),
+        );
+        if (response.data?.hasMore && (
+          typeof response.data.nextBefore !== 'string' || !response.data.nextBefore || response.data.nextBefore === before
+        )) {
+          throw new Error('Message history cursor did not advance; please retry');
+        }
+        const nextBefore = response.data?.hasMore ? response.data.nextBefore as string : null;
+        // A concurrent recent-page refresh may have added a newer disconnected
+        // range. Merge into the range this request actually extends.
+        const rangeIndex = rangesRef.current.findIndex((range) => range.before === before);
+        if (rangeIndex >= 0) {
+          rangesRef.current = [
+            ...rangesRef.current.slice(0, rangeIndex),
+            ...mergeLoadedMessageRanges(rangesRef.current.slice(rangeIndex), fetched, nextBefore, true),
+          ];
+        }
+        setHasMore(!!rangesRef.current[0]?.before);
+        setMessages(prev => mergePagedFetchedMessages(prev, fetched, protectedIds));
+      } catch (err: any) {
+        if (isCurrentRequest()) setLoadMoreError(err.message || 'Failed to load earlier messages');
+      } finally {
+        if (isCurrentRequest()) setLoadingMore(false);
+      }
+    })();
+    historyPromiseRef.current = request;
+    void request.finally(() => {
+      if (historyPromiseRef.current === request) historyPromiseRef.current = null;
+    });
+    return request;
+  }, [sessionId, pageSize]);
 
   // Reset state synchronously before paint when session changes
   // to prevent flash of welcome screen (useEffect runs AFTER paint)
   useLayoutEffect(() => {
     activeSessionIdRef.current = sessionId;
+    generationRef.current += 1;
+    rangesRef.current = [];
+    hasLoadedPageRef.current = false;
+    refreshPromiseRef.current = null;
+    historyPromiseRef.current = null;
+    setHasMore(false);
+    setLoadingMore(false);
+    setLoadMoreError(null);
     provisionalMessageIdsRef.current.clear();
     messageMutationVersionsRef.current.clear();
     mutationVersionRef.current = 0;
     setMessages([]);
     setError(null);
-    if (sessionId) {
-      setLoading(true);
-    } else {
-      setLoading(false);
-    }
-  }, [sessionId]);
+    setLoading(!!sessionId && enabled);
+    // `enabled` controls automatic requests, not the lifetime of cached history.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionId, pageSize]);
 
   useEffect(() => {
-    fetchMessages();
-  }, [fetchMessages]);
+    if (enabled) void fetchMessages();
+  }, [fetchMessages, enabled]);
 
   return {
     messages,
     loading,
     error,
+    hasMore,
+    loadingMore,
+    loadMoreError,
+    loadMore,
     refetch: fetchMessages,
     addMessage: (message: Message) => {
       provisionalMessageIdsRef.current.add(message.id);
@@ -655,6 +818,14 @@ export function useSessionMessages(sessionId?: string) {
     },
     clearMessages: () => {
       requestIdRef.current += 1;
+      generationRef.current += 1;
+      rangesRef.current = [];
+      hasLoadedPageRef.current = false;
+      refreshPromiseRef.current = null;
+      historyPromiseRef.current = null;
+      setHasMore(false);
+      setLoadingMore(false);
+      setLoadMoreError(null);
       provisionalMessageIdsRef.current.clear();
       messageMutationVersionsRef.current.clear();
       mutationVersionRef.current = 0;
