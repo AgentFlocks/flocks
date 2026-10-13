@@ -39,6 +39,7 @@ describe('WebUIContractPage runtime', () => {
     expect(sdk).toBeTruthy();
     expect(sdk!.Markdown).toEqual(expect.any(Function));
     expect(sdk!.useLanguage).toEqual(expect.any(Function));
+    expect(sdk!.SessionTranscript.supportsInline).toBe(true);
     await sdk!.api.page.get('/stats');
     expect(getSpy).toHaveBeenCalledWith('/api/contracts/webui/pages/dash-1/api/stats', undefined);
     getSpy.mockRestore();

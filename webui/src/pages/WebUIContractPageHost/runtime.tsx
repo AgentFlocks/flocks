@@ -20,6 +20,8 @@ const LazySessionTranscript = lazy(() => import('@/components/common/SessionTran
 export function SessionTranscript(props: ComponentProps<typeof SessionTranscriptComponent>) {
   return <Suspense fallback={<div aria-busy="true" />}><LazySessionTranscript {...props} /></Suspense>;
 }
+/** Lets page bundles check that this host renders `variant="inline"` (older hosts ignore it). */
+SessionTranscript.supportsInline = true;
 
 interface MarkdownRendererProps {
   content: string;

@@ -1788,6 +1788,11 @@ describe('getCompactionDividerClassName', () => {
   it('uses the compact assistant inset in compact layout', () => {
     expect(getCompactionDividerClassName(true)).toContain('pl-[38px]');
   });
+
+  it('is not inset for message bodies drawn without an avatar column', () => {
+    expect(getCompactionDividerClassName(true, false)).not.toContain('pl-[38px]');
+    expect(getCompactionDividerClassName(false, false)).not.toContain('pl-[42px]');
+  });
 });
 
 describe('getEditingActionBarClassName', () => {
@@ -7586,5 +7591,35 @@ describe('agent communication', () => {
     render(React.createElement(SessionChat, { sessionId: 'sess-1', hideInput: true }));
     expect(screen.getByText('Halfway through the investigation')).toBeInTheDocument();
     expect(screen.queryByText('hidden reminder')).not.toBeInTheDocument();
+  });
+});
+
+describe('ChatMessageBubble without its sender frame', () => {
+  it('renders only the message body when the caller draws the sender', () => {
+    const message = {
+      id: 'msg-bare',
+      sessionID: 'sess-1',
+      role: 'assistant',
+      agent: 'rex',
+      timestamp: Date.now(),
+      finish: 'stop',
+      parts: [
+        { id: 'tool-read', sessionID: 'sess-1', type: 'tool', tool: 'read', state: { status: 'completed', input: { filePath: 'app.py' }, output: 'ok' } },
+        { id: 'text-answer', sessionID: 'sess-1', type: 'text', text: 'Threat model submitted.' },
+      ],
+    } as any;
+    // The same message object across renders: switching the frame must not be skipped by the memo.
+    const { container, rerender } = render(React.createElement(ChatMessageBubble, { message, collapseIntermediateSteps: true }));
+    expect(screen.getByText('Rex')).toBeInTheDocument();
+    expect(container.querySelector('.rounded-full.bg-red-600')).not.toBeNull();
+
+    rerender(React.createElement(ChatMessageBubble, { message, collapseIntermediateSteps: true, bare: true }));
+    expect(screen.getByText('Threat model submitted.')).toBeInTheDocument();
+    expect(screen.getByTestId('chat-process-group')).toBeInTheDocument();
+    expect(screen.queryByText('Rex')).toBeNull();
+    expect(container.querySelector('.rounded-full.bg-red-600')).toBeNull();
+
+    rerender(React.createElement(ChatMessageBubble, { message, collapseIntermediateSteps: true }));
+    expect(screen.getByText('Rex')).toBeInTheDocument();
   });
 });
