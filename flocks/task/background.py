@@ -487,11 +487,11 @@ class BackgroundManager:
 
         for tid in task_ids:
             handle = self._task_handles.get(tid)
-            if not handle:
+            # A finished task keeps its outcome and completion time.
+            if not handle or handle.done():
                 continue
-            if not handle.done():
-                handle.cancel()
-                cancelled += 1
+            handle.cancel()
+            cancelled += 1
             task = self._tasks.get(tid)
             if task:
                 task.status = "cancelled"
@@ -500,8 +500,11 @@ class BackgroundManager:
 
     def cancel_by_session_id(self, session_id: str) -> int:
         """Cancel all background tasks associated with a given session ID."""
+        # A completed task may still be handing its result to the parent
+        # session; cancelling it then would turn the result into a cancel.
         task_ids = [
-            t.id for t in self._tasks.values() if t.session_id == session_id
+            t.id for t in self._tasks.values()
+            if t.session_id == session_id and t.status in ("pending", "running")
         ]
         cancelled = 0
         for tid in task_ids:
@@ -781,3 +784,26 @@ _manager_state = Instance.state(_create_manager)
 
 def get_background_manager() -> BackgroundManager:
     return _manager_state()
+
+
+def all_background_managers() -> List[BackgroundManager]:
+    """Managers of every instance.
+
+    A task lives in the manager of the instance that launched it: scheduled
+    tasks run outside any request's instance, so a request only reaching its
+    own manager would not see them.
+    """
+    return _manager_state.all_values()
+
+
+def cancel_background_runs_for_session(session_id: str) -> int:
+    """Cancel the background runs of a session, whichever instance started them."""
+    return sum(manager.cancel_by_session_id(session_id) for manager in all_background_managers())
+
+
+def cancel_background_runs_for_parent(parent_session_id: str) -> int:
+    """Cancel the background runs a session spawned, whichever instance holds them."""
+    return sum(
+        manager.cancel_by_parent_session_id(parent_session_id)
+        for manager in all_background_managers()
+    )

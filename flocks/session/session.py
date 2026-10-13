@@ -1278,9 +1278,9 @@ class Session:
                     "error": str(exc),
                 })
             try:
-                from flocks.task.background import get_background_manager
+                from flocks.task.background import cancel_background_runs_for_parent
 
-                get_background_manager().cancel_by_parent_session_id(session_id)
+                cancel_background_runs_for_parent(session_id)
             except Exception as exc:
                 log.warn("session.archive.background_cleanup_error", {
                     "id": session_id,

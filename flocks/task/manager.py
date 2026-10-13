@@ -439,15 +439,26 @@ class TaskManager:
         execution = await TaskStore.get_execution(execution_id)
         if not execution or execution.is_terminal:
             return execution
+        completed_at = datetime.now(timezone.utc)
+        duration_ms = (
+            int((completed_at - execution.started_at).total_seconds() * 1000)
+            if execution.started_at
+            else None
+        )
+        # Only the status columns: the dispatcher may be writing the session
+        # id of a run it is starting right now.
+        cancelled = await TaskStore.cancel_active_execution(
+            execution_id,
+            completed_at=completed_at,
+            duration_ms=duration_ms,
+            error="Cancelled from task queue.",
+        )
+        execution = await TaskStore.get_execution(execution_id) or execution
+        if not cancelled:
+            return execution
+        # Stop the run only after the record says cancelled: a run interrupted
+        # while it still says running is queued again by _run_execution.
         await cls._cancel_execution_runtime(execution)
-        execution.status = TaskStatus.CANCELLED
-        execution.completed_at = execution.completed_at or datetime.now(timezone.utc)
-        if execution.started_at and execution.duration_ms is None:
-            execution.duration_ms = int(
-                (execution.completed_at - execution.started_at).total_seconds() * 1000
-            )
-        execution.error = execution.error or "Cancelled from task queue."
-        execution = await TaskStore.update_execution(execution)
         await TaskStore.finish_queue_ref(execution_id)
         mgr = cls._instance
         if mgr:
@@ -920,9 +931,11 @@ class TaskManager:
             return
 
         try:
-            from flocks.task.background import get_background_manager
+            from flocks.task.background import cancel_background_runs_for_session
 
-            get_background_manager().cancel_by_session_id(session_id)
+            # The run lives in the manager of the task loop, not of the
+            # request that cancels it.
+            cancel_background_runs_for_session(session_id)
         except Exception:
             pass
 

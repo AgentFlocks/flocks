@@ -3355,6 +3355,7 @@ async def _dispatch_trigger_event(
     workflow_json: Dict[str, Any],
     trigger: TriggerDefinition,
     event: TriggerEvent,
+    verified_auth: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
     """Dispatch a trigger event, answering an extension's refusal with 403."""
     try:
@@ -3363,6 +3364,7 @@ async def _dispatch_trigger_event(
             workflow_json=workflow_json,
             trigger=trigger,
             event=event,
+            verified_auth=verified_auth,
         )
     except ExecutionStopped as exc:
         # The message is the reason the extension gave (for example Flocks
@@ -3432,13 +3434,19 @@ def _normalize_hmac_signature(signature: Optional[str]) -> Optional[str]:
     return value
 
 
+def _webhook_secret_fingerprint(secret: str) -> str:
+    """Secret-safe stable id of a trigger key, as the service runtime emits it."""
+    return f"sha256:{hashlib.sha256(secret.encode('utf-8')).hexdigest()}"
+
+
 def _authorize_webhook_trigger(
     trigger: TriggerDefinition,
     headers: Dict[str, str],
     query: Dict[str, str],
     *,
     raw_body: bytes,
-) -> None:
+) -> Dict[str, str]:
+    """Check the caller against the trigger's own secret and say what passed."""
     auth = trigger.auth
     auth_type = _webhook_auth_type(trigger)
     if auth is None or auth_type in {"none", ""}:
@@ -3454,7 +3462,7 @@ def _authorize_webhook_trigger(
         actual = headers.get(header_name) or query.get(auth.queryParam or "api_key")
         if actual != expected:
             raise HTTPException(status_code=401, detail="Invalid webhook API key")
-        return
+        return {"auth_scheme": "api_key", "api_key_id": _webhook_secret_fingerprint(expected)}
     if auth_type == "hmac":
         expected = _resolve_trigger_secret(auth.secretRef)
         if not expected:
@@ -3467,7 +3475,7 @@ def _authorize_webhook_trigger(
         ).hexdigest()
         if not signature or not hmac.compare_digest(signature, expected_signature):
             raise HTTPException(status_code=401, detail="Invalid webhook signature")
-        return
+        return {"auth_scheme": "hmac", "key_id": _webhook_secret_fingerprint(expected)}
     raise HTTPException(status_code=400, detail=f"Unsupported webhook auth type: {auth.type}")
 
 
@@ -3492,7 +3500,7 @@ async def invoke_workflow_webhook_trigger(
     headers = {key.lower(): value for key, value in request.headers.items()}
     query = {key: value for key, value in request.query_params.items()}
     raw_body = await request.body()
-    _authorize_webhook_trigger(trigger, headers, query, raw_body=raw_body)
+    verified_auth = _authorize_webhook_trigger(trigger, headers, query, raw_body=raw_body)
 
     try:
         body = json.loads(raw_body.decode("utf-8"))
@@ -3514,6 +3522,7 @@ async def invoke_workflow_webhook_trigger(
         workflow_json=workflow_json,
         trigger=trigger,
         event=event,
+        verified_auth=verified_auth,
     )
     return {
         "ok": True,

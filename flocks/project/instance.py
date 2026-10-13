@@ -101,8 +101,17 @@ class StateManager:
             for disposers in list(self._disposers.values()):
                 disposers.pop(state_id, None)
 
+        def all_values() -> list[T]:
+            """This accessor's state in every directory that has initialized it."""
+            return [
+                states[state_id]
+                for states in list(self._states.values())
+                if state_id in states
+            ]
+
         accessor.invalidate = invalidate  # type: ignore[attr-defined]
         accessor.invalidate_all = invalidate_all  # type: ignore[attr-defined]
+        accessor.all_values = all_values  # type: ignore[attr-defined]
         return accessor
     
     async def dispose(self, key: str) -> None:
