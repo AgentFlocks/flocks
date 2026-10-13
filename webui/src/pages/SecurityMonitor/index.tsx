@@ -15,7 +15,7 @@ import { useMonitorOverview } from './useMonitorOverview';
 const MonitorSessionChat = memo(SessionChat);
 const CHAT_DISPLAY = { compact: false, showActions: false, showTimestamp: true, collapseIntermediateSteps: false, processGroupsDefaultOpen: true, processGroupsOpenWhileActive: true };
 
-const labels: Record<string, string> = { completed: '完成', partial: '完成', failed: '失败', interrupted: '失败', running: '执行中', queued: '排队', cancelled: '失败', risk: '确认风险', benign: '无风险 · 已忽略', unknown: '证据不足 · 暂忽略', ignored: '已忽略', pending: '待生成', updated: '已更新', active: '已启用', disabled: '已停用' };
+const labels: Record<string, string> = { completed: '完成', partial: '完成', failed: '失败', interrupted: '失败', running: '执行中', queued: '排队', cancelled: '失败', risk: '确认风险', benign: '无风险 · 待忽略', unknown: '证据不足 · 待观察', ignored: '已忽略', pending: '待生成', updated: '已更新', active: '已启用', disabled: '已停用' };
 const fmt = (value: string | null, tz: string) => value ? new Date(value).toLocaleString('zh-CN', { timeZone: tz, hour12: false }) : '—';
 const card = 'rounded-xl border border-gray-200 bg-white p-5 dark:border-gray-700 dark:bg-gray-800';
 const runStatus = (status: string) => status === 'partial' ? 'completed' : ['interrupted', 'cancelled'].includes(status) ? 'failed' : status;

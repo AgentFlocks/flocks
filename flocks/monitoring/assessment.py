@@ -10,7 +10,7 @@ from .event_details import redact_text
 
 STATUSES = ('risk_open', 'risk_closed', 'benign', 'insufficient')
 LABELS = {'risk_open': '有风险 · 处置中', 'risk_closed': '有风险 · 已处置',
-          'benign': '无风险 · 已忽略', 'insufficient': '证据不足 · 暂忽略'}
+          'benign': '无风险 · 待忽略', 'insufficient': '证据不足 · 待观察'}
 # Tiny field-presence projections use the same keys as the original raw facts.
 FACT_KEYS = {
     'srcIp', 'srcIps', 'sourceIp', 'src_ip', 'net.src_ip', 'dstIp', 'dstIps',
@@ -183,8 +183,41 @@ def assess_event(event, investigation=None, evidence=None, *, handling=None):
         blocking.append('尚未明确证实存在风险，也未取得可确认无风险的依据。')
     if not risk and not benign:
         reason = '证据不足，暂不通知责任人；尚未排除风险。' + (blocking[0] if blocking else reason)
-    return {'policy_version': 1, 'event_revision': version, 'status': status, 'label': LABELS[status], 'verdict': 'risk' if risk else 'benign' if benign else 'unknown',
+    return {'policy_version': 2, 'event_revision': version, 'status': status, 'label': LABELS[status], 'verdict': 'risk' if risk else 'benign' if benign else 'unknown',
             'notify_eligible': bool(risk and not closed), 'reason': reason, 'gaps': list(dict.fromkeys(blocking))[:6],
             'is_current': bool(current), 'evidence_supported': bool(supported), 'evidence_ids': [p['id'] for p in bound],
-            'ignored_locally': status in {'benign', 'insufficient'},
+            'ignored_locally': False,
+            'suspected_risk': bool(result.get('suspected_risk') or verdict == 'risk' and not risk),
             'risk_excluded': bool(benign)}
+
+
+def apply_followup(assessment, event, followup):
+    """Project lifecycle facts without changing the evidence verdict."""
+    from .followup import event_version
+    value = dict(assessment)
+    if not isinstance(followup, dict) or followup.get('event_version') != event_version(event):
+        return value
+    state = followup.get('state')
+    if state == 'invalidated':
+        return value
+    target = followup.get('target_status')
+    value.update(lifecycle=state, observation_rounds=followup.get('watch_count', 0),
+                 target_status=target, external=bool(followup.get('external')),
+                 lifecycle_reason=followup.get('reason') or '', ended=bool(followup.get('closed')))
+    if state == 'external_closed':
+        value.update(label='已由外部处置 · 已结束', notify_eligible=False)
+    elif state == 'verified':
+        if followup.get('observed_status') == 40:
+            value.update(label='有风险 · 已处置' if value['verdict'] == 'risk' else '已处置 · 已结束',
+                         status='risk_closed' if value['verdict'] == 'risk' else value['status'], notify_eligible=False)
+        elif followup.get('observed_status') == 60:
+            value.update(label='无风险 · 已忽略' if value['verdict'] == 'benign' else '证据不足 · 已忽略', notify_eligible=False)
+    elif target == 60 and state in {'queued', 'writing', 'pending'}:
+        prefix = '无风险' if value['verdict'] == 'benign' else '证据不足 · 观察期已满'
+        value['label'] = prefix + (' · 待下一轮忽略' if state == 'queued' else ' · 忽略结果待回查')
+    elif state == 'watching':
+        native, legacy = event.get('incidentSeverity'), event.get('riskLevel')
+        high = type(native) is int and native in {3, 4} or type(legacy) is int and legacy in {0, 1}
+        value['label'] = ('有风险线索 · 证据不足 · 待观察（处置中）' if value.get('suspected_risk') else
+                          '高风险存疑 · 证据不足 · 待观察' if high else '证据不足 · 待观察')
+    return value

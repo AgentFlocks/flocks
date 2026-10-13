@@ -8,6 +8,7 @@ from flocks.channel.outbound.deliver import OutboundDelivery
 from flocks.channel.registry import default_registry
 from flocks.channel.builtin.email.config import parse_allowed_senders
 from flocks.task.store import TaskStore
+from .mail_template import TEMPLATE_VERSION
 
 # Temporary development policy, explicitly requested for target-machine testing.
 # From/allowlist matching does not authenticate a sender. Restore this to True
@@ -60,7 +61,7 @@ async def send(notice, session_id):
     except (ValueError, TypeError):
         event = {}
     presentation = event.get('mail_presentation', {}) if isinstance(event, dict) else {}
-    html_body = presentation.get('html_body') if isinstance(presentation, dict) and presentation.get('version') == 1 else None
+    html_body = presentation.get('html_body') if isinstance(presentation, dict) and presentation.get('version') in {1, TEMPLATE_VERSION} else None
     html_body = html_body if isinstance(html_body, str) and len(html_body) <= 100_000 else None
     ctx = OutboundContext(channel_id='email', to=notice['recipient'], text=notice['body'],
                           subject=notice['subject'], message_id=notice['message_id'],

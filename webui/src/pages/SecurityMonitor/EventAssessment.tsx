@@ -7,8 +7,8 @@ import type {
 export const assessmentLabels: Record<EventAssessmentStatus, string> = {
   risk_open: "有风险 · 处置中",
   risk_closed: "有风险 · 已处置",
-  benign: "无风险 · 已忽略",
-  insufficient: "证据不足 · 暂忽略",
+  benign: "无风险 · 待忽略",
+  insufficient: "证据不足 · 待观察",
 };
 
 export function assessmentStatus(member: EventMember): EventAssessmentStatus {
@@ -18,7 +18,7 @@ export function assessmentStatus(member: EventMember): EventAssessmentStatus {
   return "insufficient";
 }
 
-export function AssessmentBadge({ status }: { status: EventAssessmentStatus }) {
+export function AssessmentBadge({ status, label }: { status: EventAssessmentStatus; label?: string }) {
   const color =
     status === "benign" || status === "risk_closed"
       ? "bg-emerald-50 text-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-300"
@@ -36,7 +36,7 @@ export function AssessmentBadge({ status }: { status: EventAssessmentStatus }) {
       ) : (
         <CheckCircle2 size={12} />
       )}
-      {assessmentLabels[status]}
+      {label || assessmentLabels[status]}
     </span>
   );
 }

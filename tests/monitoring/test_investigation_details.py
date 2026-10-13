@@ -169,12 +169,13 @@ async def test_mail_uses_same_story_and_preserves_one_notice(auto):
     sent = await notice(auto)
     assert sent['state'] == 'sent'
     body = sent['body']
-    assert all(section in body for section in ('基本信息', '调查结论', '关键证据', '事件经过', '请您处理'))
-    assert '@@version' in body and '已确认存在注入尝试' in body
+    assert all(section in body for section in ('基本信息', '调查结论', '关键证据', '事件经过', '总结和处置建议'))
+    assert 'SQL' in body and '注入' in body
+    assert '@@version' not in body
     assert all(noise not in body for noise in ('evidence-1', 'PRIVATE_SECRET', '旧版本摘要', '告警编号'))
     assert '其他联动查询' not in body and '文件：0' not in body
     presentation = json.loads(sent['event'])['mail_presentation']['html_body']
-    assert '@@version' in presentation and 'PRIVATE_SECRET' not in presentation
+    assert 'SQL' in presentation and '@@version' not in presentation and 'PRIVATE_SECRET' not in presentation
     assert len(await rows('SELECT * FROM monitor_mail_notices')) == 1
     await notice(auto)
     assert auto.send.await_count == 1

@@ -28,6 +28,7 @@ import { MONITOR_PATH } from "@/api/securityMonitoring";
 import {
   monitoringEventsApi,
   type EventAssessmentStatus,
+  type EventEvidenceCard,
   type EventDetailResponse,
   type EventListResponse,
   type EventListRow,
@@ -42,6 +43,7 @@ import {
   readableEvidence,
 } from "./EventAssessment";
 import { MONITOR_PAGE_SIZE } from "./Pagination";
+import { EvidenceCards } from "./EvidenceCards";
 
 type Period = "day" | "week" | "month" | "custom";
 type Props = {
@@ -220,6 +222,12 @@ function StoryDetails({
   const timeline = records(overview.timeline || story.timeline);
   const evidence = records(overview.evidence || story.key_evidence);
   const packets = records(story.packets);
+  const hasEvidenceCards =
+    Array.isArray(overview.evidence_cards) ||
+    Array.isArray(story.evidence_cards);
+  const evidenceCards = records(
+    overview.evidence_cards || story.evidence_cards,
+  ) as unknown as EventEvidenceCard[];
   const gaps = Array.isArray(overview.gaps)
     ? strings(overview.gaps)
     : [...strings(story.gaps), ...strings(result.gaps)];
@@ -233,6 +241,11 @@ function StoryDetails({
   const explanation =
     readableEvidence(text(overview.conclusion, originalExplanation)) ||
     "尚未形成可读的调查结论。";
+  const canShowOperatorCopy = state === "ready" && !historical && result.confidence === "high" &&
+    detail.event.assessment?.is_current === true && detail.event.assessment?.evidence_supported === true &&
+    detail.event.assessment.verdict !== "unknown";
+  const operatorSummary = canShowOperatorCopy ? readableEvidence(text(overview.operator_summary || story.operator_summary, "")) : "";
+  const operatorExplanation = canShowOperatorCopy ? strings(overview.operator_explanation || story.operator_explanation).map(readableEvidence).filter(Boolean).slice(0, 3) : [];
   return (
     <div className="space-y-5">
       <section className="rounded-xl border border-sky-100 bg-sky-50/60 p-4 dark:border-sky-900 dark:bg-sky-950/30">
@@ -246,16 +259,29 @@ function StoryDetails({
             : investigationLabels[state] || "尚无调查结论"}
         </p>
         <div className="mb-3">
-          <AssessmentBadge status={assessmentStatus(detail.event)} />
+          <AssessmentBadge
+            status={assessmentStatus(detail.event)}
+            label={detail.event.assessment?.label}
+          />
+          {!!detail.event.assessment?.observation_rounds && (
+            <span className="ml-2 text-xs text-slate-500">
+              已观察 {detail.event.assessment.observation_rounds} 轮
+            </span>
+          )}
           {assessmentStatus(detail.event) === "insufficient" && (
             <p className="mt-2 text-xs text-slate-500">
               暂不通知责任人，尚未排除风险。
             </p>
           )}
         </div>
-        <p className="whitespace-pre-wrap break-words text-sm leading-7">
-          {explanation}
-        </p>
+        {operatorSummary ? (
+          <div className="space-y-2">
+            <p className="break-words text-sm font-semibold leading-7">{operatorSummary}</p>
+            {operatorExplanation.map((line, index) => <p key={index} className="break-words text-sm leading-7">{line}</p>)}
+          </div>
+        ) : (
+          <p className="whitespace-pre-wrap break-words text-sm leading-7">{explanation}</p>
+        )}
       </section>
       {historical && Object.keys(history).length > 0 && (
         <details className="rounded-lg border border-slate-200 p-3 dark:border-slate-700">
@@ -314,7 +340,13 @@ function StoryDetails({
           </ol>
         </section>
       )}
-      {evidence.length > 0 && (
+      {hasEvidenceCards && (
+        <EvidenceCards
+          cards={evidenceCards}
+          formatTime={(value) => formatTime(value, timezone)}
+        />
+      )}
+      {!hasEvidenceCards && evidence.length > 0 && (
         <section>
           <h3 className="mb-3 text-sm font-semibold">关键证据</h3>
           <ul className="space-y-2">
@@ -336,7 +368,7 @@ function StoryDetails({
           </ul>
         </section>
       )}
-      {packets.length > 0 && (
+      {!hasEvidenceCards && packets.length > 0 && (
         <section>
           <h3 className="mb-3 text-sm font-semibold">请求与响应证据</h3>
           <div className="space-y-2">
@@ -410,6 +442,8 @@ function StoryDetails({
               conclusion: originalExplanation,
               basics,
               key_evidence: evidence,
+              evidence_cards: evidenceCards,
+              original_evidence: detail.investigation?.evidence,
               timeline,
               gaps,
             },
@@ -1287,7 +1321,32 @@ export default function EventList({
                                     key={status}
                                     className="flex flex-wrap items-center gap-1.5"
                                   >
-                                    <AssessmentBadge status={status} />
+                                    <AssessmentBadge
+                                      status={status}
+                                      label={(() => {
+                                        const labels = [
+                                          ...new Set(
+                                            row.members
+                                              .filter(
+                                                (member) =>
+                                                  assessmentStatus(member) ===
+                                                  status,
+                                              )
+                                              .map(
+                                                (member) =>
+                                                  member.assessment?.label,
+                                              )
+                                              .filter(Boolean),
+                                          ),
+                                        ];
+                                        return labels.length > 1
+                                          ? "包含不同跟进状态"
+                                          : labels[0] ||
+                                              (row.assessment_status !== "mixed"
+                                                ? row.assessment_label
+                                                : undefined);
+                                      })()}
+                                    />
                                     {row.grouped && (
                                       <span className="text-xs tabular-nums text-slate-500">
                                         {counts[status]} 条
@@ -1359,7 +1418,19 @@ export default function EventList({
                                       <div className="flex flex-wrap items-center gap-3">
                                         <AssessmentBadge
                                           status={assessmentStatus(member)}
+                                          label={member.assessment?.label}
                                         />
+                                        {!!member.assessment
+                                          ?.observation_rounds && (
+                                          <span className="text-xs text-slate-500">
+                                            已观察{" "}
+                                            {
+                                              member.assessment
+                                                .observation_rounds
+                                            }{" "}
+                                            轮
+                                          </span>
+                                        )}
                                         <button
                                           aria-label={`查看子事件详情：${member.id}`}
                                           onClick={() => openRow(row, member)}
@@ -1478,7 +1549,15 @@ export default function EventList({
                         )}
                       </p>
                       <div className="mt-2 flex flex-wrap items-center gap-2">
-                        <AssessmentBadge status={assessmentStatus(member)} />
+                        <AssessmentBadge
+                          status={assessmentStatus(member)}
+                          label={member.assessment?.label}
+                        />
+                        {!!member.assessment?.observation_rounds && (
+                          <span className="text-xs text-slate-500">
+                            已观察 {member.assessment.observation_rounds} 轮
+                          </span>
+                        )}
                         <span className="text-xs text-slate-500">
                           <MemberConclusion member={member} />
                         </span>
@@ -1499,7 +1578,19 @@ export default function EventList({
                 <div className="mt-3 flex flex-wrap items-center gap-2">
                   <AssessmentBadge
                     status={assessmentStatus(detail?.event || currentMember)}
+                    label={(detail?.event || currentMember).assessment?.label}
                   />
+                  {!!(detail?.event || currentMember).assessment
+                    ?.observation_rounds && (
+                    <span className="text-xs text-slate-500">
+                      已观察{" "}
+                      {
+                        (detail?.event || currentMember).assessment
+                          ?.observation_rounds
+                      }{" "}
+                      轮
+                    </span>
+                  )}
                   <span className="text-xs text-slate-500">
                     XDR 状态：
                     {xdrLabels[

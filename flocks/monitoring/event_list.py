@@ -11,7 +11,8 @@ import re
 from zoneinfo import ZoneInfo
 
 from .event_details import redact_text, _SECRET_NAME, build_story, readable_story
-from .assessment import assess_event, same_evidence_version, STATUSES, LABELS, FACT_KEYS
+from .assessment import assess_event, same_evidence_version, STATUSES, FACT_KEYS
+from .followup import projection as followup_projection, PROJECTION_COLUMNS
 from contextlib import contextmanager
 import asyncio
 import sqlite3
@@ -168,6 +169,8 @@ def _extract_iocs(event, investigation, tz):
 
 
 def _handling(event, disposition, observed_at, tz):
+    if event.get('source_terminal_unmatched'):
+        return 'open'
     actual = event.get('dealStatus')
     label = CLOSURES.get(actual, 'open') if type(actual) is int else 'open'
     if disposition.get('status') == 'verified':
@@ -182,7 +185,7 @@ def _handling(event, disposition, observed_at, tz):
     return label
 
 
-def _summarize(row, investigation, disposition, notice, reply_count, names, tz):
+def _summarize(row, investigation, disposition, notice, reply_count, names, tz, followup=None):
     event = _json(row['data'], {})
     if not isinstance(event, dict):
         event = {}
@@ -215,6 +218,8 @@ def _summarize(row, investigation, disposition, notice, reply_count, names, tz):
     iocs, warnings = _extract_iocs(event, investigation, tz) if valid_identity else ({}, ['事件标识不完整，未作自动合并。'])
     handling = _handling(event, disposition, row['started_at'], tz)
     assessment = assess_event(event, investigation, handling=handling)
+    from .assessment import apply_followup
+    assessment = apply_followup(assessment, event, followup)
     risk = assessment['verdict']
     notice_state = notice.get('state')
     basics = event.get('basics') if isinstance(event.get('basics'), dict) else {}
@@ -300,7 +305,7 @@ def group_events(members, window_hours=24, enabled=True):
             'first_seen_at': min(m['first_seen_at'] for m in members), 'last_seen_at': max(m['last_seen_at'] for m in members),
             'risk': risk, 'handling': handling, 'closure_counts': counts,
             'assessment_status': assessment_status, 'assessment_counts': assessment_counts,
-            'assessment_label': LABELS.get(assessment_status, '包含不同研判结果'),
+            'assessment_label': members[0]['assessment']['label'] if len({m['assessment']['label'] for m in members}) == 1 else '包含不同跟进状态',
             'in_period': any(m['in_period'] for m in members), 'carried_over': any(m['carried_over'] for m in members),
             'is_backlog': any(m['carried_over'] for m in members),
             'mail': {field: sum(bool(m['mail'][field]) for m in members) for field in ('sent', 'replied', 'failed')},
@@ -332,7 +337,7 @@ def _read_connection():
 def _event_projection(column):
     # Project only correlation/list facts in SQLite. Packet bodies, stories and
     # model context are not loaded/decoded for every monthly list refresh.
-    keys = ('key', 'id', 'device', 'device_name', 'host', 'name', 'risk', 'dealStatus',
+    keys = ('key', 'id', 'device', 'device_name', 'host', 'name', 'risk', 'source_terminal_unmatched', 'dealStatus',
             'startTime', 'endTime', 'incidentSeverity', 'riskLevel', 'incidentThreatClass',
             'incidentThreatType', 'alertIds', 'development_sample', 'basics')
     safe = f"CASE WHEN json_valid({column}) THEN {column} ELSE '{{}}' END"
@@ -384,7 +389,7 @@ def _assessment_projection():
 
 def _result_projection(column):
     safe = f"CASE WHEN json_valid({column}) THEN {column} ELSE '{{}}' END"
-    fields = ('verdict', 'confidence', 'risk_confirmed', 'blocking_gaps', 'evidence_ids', 'gaps')
+    fields = ('verdict', 'confidence', 'suspected_risk', 'risk_confirmed', 'blocking_gaps', 'evidence_ids', 'gaps')
     return 'json_object(' + ','.join(f"'{key}'," + (f"json(CASE json_type({safe},'$.risk_confirmed') WHEN 'true' THEN 'true' ELSE 'false' END)" if key == 'risk_confirmed' else f"json_extract({safe},'$.{key}')") for key in fields) + f",'reason',substr(json_extract({safe},'$.reason'),1,1500))"
 
 
@@ -448,7 +453,7 @@ def _list_events(owner, scope, *, start_date, end_date, window_hours=24, device=
             'WHERE x.owner=? AND x.scope=? AND x.project=? AND x.event_key=s.event_key ORDER BY x.created_at DESC,x.rowid DESC LIMIT 1) '
             "WHERE s.in_period=1 OR COALESCE(CASE WHEN d.status='verified' AND julianday(d.updated_at)>=julianday(current.started_at) "
             'AND d.observed_status=d.target_status THEN CASE WHEN d.target_status IN (40,60) THEN 1 ELSE 0 END END, '
-            "CASE WHEN json_extract(CASE WHEN json_valid(current.data) THEN current.data ELSE '{}' END,'$.dealStatus') IN (40,60) THEN 1 ELSE 0 END)=0 "
+            "CASE WHEN json_extract(CASE WHEN json_valid(current.data) THEN current.data ELSE '{}' END,'$.source_terminal_unmatched')=1 THEN 0 WHEN json_extract(CASE WHEN json_valid(current.data) THEN current.data ELSE '{}' END,'$.dealStatus') IN (40,60) THEN 1 ELSE 0 END)=0 "
             'ORDER BY s.in_period DESC,s.selected_sequence DESC,s.event_key LIMIT ?',
             (owner, scope, project, start_date, end_date, end_date, int(include_backlog), start_date,
              owner, scope, project, MAX_EVENTS+1)) if project else []
@@ -457,7 +462,7 @@ def _list_events(owner, scope, *, start_date, end_date, window_hours=24, device=
             truncated = True
             warnings.append(f'选定范围超过 {MAX_EVENTS} 条独立事件，本次只展示最近观察到的 {MAX_EVENTS} 条；筛选与统计仅覆盖已加载事件，请缩小日期范围。')
         keys = [c['event_key'] for c in candidates]
-        observations, investigations, dispositions, notices, replies = [], [], [], [], []
+        observations, investigations, dispositions, notices, replies, followups = [], [], [], [], [], []
         # Batching keeps parameter counts below SQLite's older 999-variable
         # default. All joins include the exact current installation project.
         for index in range(0, len(keys), 200):
@@ -478,6 +483,7 @@ def _list_events(owner, scope, *, start_date, end_date, window_hours=24, device=
                 'NOT json_valid(i.event) OR NOT json_valid(i.evidence) OR NOT json_valid(i.result) AS data_truncated '
                 f'FROM monitor_investigations i WHERE i.owner=? AND i.project=? AND i.event_key IN ({marks})',
                 (owner, project, *batch))
+            followups += _select(db, f'SELECT {PROJECTION_COLUMNS} FROM monitor_event_followup WHERE owner=? AND scope=? AND project=? AND event_key IN ({marks})', args)
             dispositions += _select(db,
                 'SELECT d.* FROM monitor_dispositions d WHERE d.owner=? AND d.scope=? AND d.project=? '
                 f'AND d.event_key IN ({marks}) AND d.rowid=(SELECT x.rowid FROM monitor_dispositions x '
@@ -496,6 +502,8 @@ def _list_events(owner, scope, *, start_date, end_date, window_hours=24, device=
                 "OR (json_valid(r.payload) AND json_array_length(CASE WHEN json_valid(r.payload) THEN r.payload ELSE '{}' END,'$.notice_ids')=1 AND EXISTS(SELECT 1 FROM json_each(CASE WHEN json_valid(r.payload) THEN r.payload ELSE '{}' END,'$.notice_ids') j WHERE j.value=n.id))) "
                 f'WHERE n.owner=? AND n.scope=? AND n.project=? AND n.id IN ({marks}) AND r.state NOT IN (\'unrelated\',\'forwarding\') GROUP BY n.id',
                 (owner, scope, project, *batch))
+    from .followup import projection
+    followups = {r['event_key']: projection(r) for r in followups}
     investigations = {r['event_key']: r for r in investigations}
     dispositions = {r['event_key']: r for r in dispositions}
     notices = {r['event_key']: r for r in notices}
@@ -511,7 +519,7 @@ def _list_events(owner, scope, *, start_date, end_date, window_hours=24, device=
             warnings.append('部分事件或证据未能完整读取；列表保留事件概要，请打开详情或缩小查询范围。')
         notice = notices.get(row['event_key'], {})
         member = _summarize(row, case, dispositions.get(row['event_key'], {}), notice,
-                            replies.get(notice.get('id'), 0), names, tz)
+                            replies.get(notice.get('id'), 0), names, tz, followups.get(row['event_key']))
         if member[0]['in_period'] or include_backlog and member[0]['handling'] not in {'closed', 'ignored'}:
             all_members.append(member)
         if any('前 50 条' in note for note in member[0]['warnings']):
@@ -569,6 +577,7 @@ def _detail(owner, scope, event_key):
             'FROM monitor_observations o JOIN monitor_attempts a ON a.id=o.attempt_id '
             'WHERE a.owner=? AND a.scope=? AND a.project=? AND o.event_key=?',
             (owner, scope, project, event_key))[0]
+        followups = _select(db, f'SELECT {PROJECTION_COLUMNS} FROM monitor_event_followup WHERE owner=? AND scope=? AND project=? AND event_key=?', (owner, scope, project, event_key))
         cases = _select(db,
             'SELECT state,substr(event,1,?) AS event,substr(evidence,1,?) AS evidence,substr(result,1,?) AS result,updated_at, '
             'length(event)>? OR length(evidence)>? OR length(result)>? AS data_truncated '
@@ -612,7 +621,7 @@ def _detail(owner, scope, event_key):
         'started_at': row['observed_at'], 'session_id': row['sessionID'], 'message_id': row['messageID'],
         'first_seen_at': seen['first_seen_at'], 'last_seen_at': seen['last_seen_at']},
         case, dispositions[0] if dispositions else {}, notice or {}, len(replies),
-        policy.get('device_names') if isinstance(policy.get('device_names'), dict) else {}, tz)
+        policy.get('device_names') if isinstance(policy.get('device_names'), dict) else {}, tz, followup_projection(followups[0]) if followups else None)
     event.update(summary)
     investigation['is_current'] = summary['investigation']['is_current']
     if summary['investigation']['state'] == 'stale':
@@ -621,8 +630,11 @@ def _detail(owner, scope, event_key):
         investigation['state'] = 'stale'
         investigation['result'] = {'verdict': 'unknown', 'reason': summary['investigation']['reason'],
             'gaps': ['当前事件版本与历史取证版本不同，旧证据未用来自动关联或判定安全。']}
-    story = build_story(event, investigation['evidence'] if isinstance(investigation['evidence'], list) else [],
-                        investigation['result'] if isinstance(investigation['result'], dict) else {})
+    from .evidence_presenter import bound_evidence
+    canonical = investigation['event'] if isinstance(investigation['event'], dict) else {}
+    current_proofs = bound_evidence(event, investigation['evidence'], canonical=canonical)
+    story = build_story(event, current_proofs,
+                        investigation['result'] if isinstance(investigation['result'], dict) else {}, canonical=canonical)
     overview = readable_story({**story, 'verdict': summary['assessment']['verdict'],
         'conclusion': summary['assessment']['reason'], 'gaps': summary['assessment']['gaps']})
     output = {'event': event, 'overview': overview, 'story': story, 'investigation': investigation, 'dispositions': dispositions, 'notice': notice,

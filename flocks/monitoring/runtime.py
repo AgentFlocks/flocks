@@ -111,7 +111,7 @@ class Recorder:
             await write("UPDATE monitor_steps SET status='failed',finished_at=?,error=? WHERE id=?", (now().isoformat(), error, step_id))
             explanation = f'{failure_context}{name}未完成：{error}。'
             if name == '查询 XDR 事件':
-                explanation += '本设备本轮事件批次未提交，上次查询进度保持不变；不能把失败视为 0 条事件。'
+                explanation += '本设备已成功读取的事件保留在列表；查询未完整结束，上次查询进度保持不变，不能把失败视为 0 条事件。'
             elif name == '查询关联主机':
                 explanation += '已查询的事件保留，本次关联数据不完整。'
             await self.finish_part(message.id, part.id, state, Summary(explanation))
@@ -135,7 +135,7 @@ class Recorder:
             await publish('message.updated', {'sessionID': self.session_id, 'info': info.model_dump(mode='json', by_alias=True)})
 
 
-async def query_device(adapter, device, start, end, recorder, *, selection=None):
+async def query_device(adapter, device, start, end, recorder, *, selection=None, on_page=None):
     from .pagination import IncidentPages
     batch = IncidentPages(device, selection)
     for page in range(1, adapter.policy.max_pages + 1):
@@ -145,6 +145,8 @@ async def query_device(adapter, device, start, end, recorder, *, selection=None)
             value = await adapter.call(device, params, message_id)
             items, total = page_items(value)
             selected, complete = batch.add(items, total, params['page_size'])
+            if on_page is not None:
+                await on_page([batch.events[item['uuId']] for item in selected], complete)
             if not complete and page == adapter.policy.max_pages:
                 raise ContractError('达到分页预算，查询未完成')
             display = {'device': device, 'device_name': getattr(adapter.policy, 'device_names', {}).get(device, device), 'page': page, 'received': len(items), 'total': total}
@@ -180,7 +182,7 @@ async def run(execution, policy, adapter_factory=XdrAdapter):
     trigger_message = await emit_message(session.id, f'系统自动监测 · {started.astimezone(ZoneInfo(policy.timezone)).strftime("%H:%M:%S")} · {mode_label}', role=MessageRole.USER)
     query_description = '查询待处置、处置中且未加白或部分加白的 XDR 事件，并关联分析。'
     device_description = '监测设备：' + '、'.join(policy.device_names.get(device, device) for device in policy.devices) + '。'
-    await emit_message(session.id, '本轮安全运营监测开始。' + device_description + query_description + ('先处理此前收到的回信，再查询新事件并按设备逐条通知对应责任人。' if automatic_enabled else '邮件跟进未启用，本轮只查询分析。'), message_id=message_id, parent_id=trigger_message.id, agent=agent_name)
+    await emit_message(session.id, '本轮安全运营监测开始。' + device_description + query_description + ('先处理此前收到的回信，再查询新事件并按设备逐条通知对应责任人。' if automatic_enabled else '邮件跟进未启用；无风险及观察期满的忽略仍由后续轮次核验执行。'), message_id=message_id, parent_id=trigger_message.id, agent=agent_name)
     sequence = (await rows('SELECT sequence FROM monitor_attempts WHERE id=?', (attempt_id,)))[0]['sequence']
     from flocks.session.core.status import SessionStatus, SessionStatusBusy, SessionStatusIdle
     SessionStatus.set(session.id, SessionStatusBusy())
@@ -193,13 +195,15 @@ async def run(execution, policy, adapter_factory=XdrAdapter):
     adapter = adapter_factory(policy, session.id)
     errors, observed = [], []
     query_errors = 0
+    successful_checks = set()
     status, summary = 'failed', ''
     try:
         if not policy.devices:
             raise ContractError('未绑定可用数据源')
+        from . import followup
         from .mail_manual import recheck_pending
         manual_readback = await mail_followup('disposition.recheck',
-            lambda: recheck_pending(policy),
+            lambda: recheck_pending(policy, session_id=session.id, before=started.isoformat()),
             {'checked': 0, 'verified': 0, 'pending': 0, 'unavailable': True,
              'errors': ['人工处置回查暂未完成；已保存的处理标签保留，后续监测轮次自动核验。']})
         feedback_unavailable = {'processed': 0, 'verified': 0, 'pending': 0, 'unavailable': True,
@@ -209,6 +213,7 @@ async def run(execution, policy, adapter_factory=XdrAdapter):
         feedback = (await mail_followup('mail.interpret',
             lambda: process_replies(policy, session.id, reply_high, recorder), feedback_unavailable)
             if reply_high is not None else feedback_unavailable)
+        lifecycle = await followup.process_due(policy, session.id, attempt_id, recorder=recorder)
         from . import investigation
         budget = investigation.Budget()
         backlog = await investigation.pending(policy)
@@ -217,37 +222,66 @@ async def run(execution, policy, adapter_factory=XdrAdapter):
             end = int(started.timestamp())
             start = (cursor[0]['through_time'] - 600) if cursor else end - 86400
             diag.event('query.window', device=diag.opaque(device), window_seconds=max(0, end - start), cursor_present=bool(cursor), development_sample=False)
-            try:
-                with diag.span('query.device', device=diag.opaque(device)):
-                    events = await query_device(adapter, device, start, end, recorder)
+            page_indices = {}
+            async def save_page(events, complete):
                 async with connection() as db:
                     for event in events:
+                        event.update(risk='unknown', device_name=policy.device_names.get(device, device),
+                                     investigationWindow={'start': max(start, end-86400), 'end': end}, query_batch_complete=False)
+                        await investigation.enqueue(db, policy, event, started.isoformat())
+                        await db.execute('INSERT OR REPLACE INTO monitor_observations VALUES(?,?,?)', (attempt_id, event['key'], encode(event)))
+                for event in events:
+                    if event['key'] in page_indices:
+                        observed[page_indices[event['key']]] = event
+                    else:
+                        page_indices[event['key']] = len(observed)
+                        observed.append(event)
+            try:
+                with diag.span('query.device', device=diag.opaque(device)):
+                    events = await query_device(adapter, device, start, end, recorder, on_page=save_page)
+                async with connection() as db:
+                    for event in events:
+                        event['query_batch_complete'] = True
                         event['risk'] = 'unknown'  # Source severity only prioritizes investigation.
                         event['device_name'] = policy.device_names.get(device, device)
                         event['investigationWindow'] = {'start': max(start, end-86400), 'end': end}
                         await investigation.enqueue(db, policy, event, started.isoformat())
-                        await db.execute('INSERT INTO monitor_observations VALUES(?,?,?)', (attempt_id, event['key'], encode(event)))
+                        await db.execute('INSERT OR REPLACE INTO monitor_observations VALUES(?,?,?)', (attempt_id, event['key'], encode(event)))
                     await db.execute('INSERT INTO monitor_cursors VALUES(?,?,?,?) ON CONFLICT(owner,scope,device) DO UPDATE SET through_time=MAX(through_time,excluded.through_time)',
                                          (policy.owner, policy.scope, device, end))
-                observed.extend(events)
+                for event in events:
+                    if event['key'] not in page_indices:
+                        page_indices[event['key']] = len(observed)
+                        observed.append(event)
+                successful_checks.update(event['key'] for event in events)
             except ContractError as exc:
                 errors.append(f"{policy.device_names.get(device, device)}：{exc}")
                 query_errors += 1
         current_events = {event['key']: event for event in observed}
+        from .reconciliation import recheck_existing
+        historic, exact_checked, reconciliation = await recheck_existing(policy, adapter, recorder, attempt_id, set(current_events))
+        successful_checks.update(exact_checked)
+        history_events = {event['key']: event for event in historic}
         resumed = []
         for event in backlog:
-            resumed.append(current_events.get(event['key'], event))
+            selected = current_events.get(event['key'], history_events.get(event['key'], event))
+            if selected.get('dealStatus') in {40, 60}:
+                continue
+            resumed.append(selected)
             if event['key'] not in current_events:
                 await write('INSERT OR IGNORE INTO monitor_observations VALUES(?,?,?)',
                             (attempt_id, event['key'], encode(event)))
         resumed_keys = {event['key'] for event in resumed}
         observed = resumed + [event for event in observed if event['key'] not in resumed_keys]
+        included = {event['key'] for event in observed}
+        observed.extend(event for event in historic if event['key'] not in included)
         # A fresh query can return an event already waiting for investigation.
         # Keep source counts separate: a resumed case is not a newly read alert,
         # and the overlap must not inflate the merged observation count.
         event_sources = {'query_events': len(current_events), 'resumed_events': len(resumed_keys),
-                         'query_resumed_overlap': len(current_events.keys() & resumed_keys)}
-        for event in observed[:20]:
+                         'query_resumed_overlap': len(current_events.keys() & resumed_keys),
+                         'rechecked_events': len(set(history_events) - set(current_events) - resumed_keys)}
+        for event in [e for e in observed if e.get('dealStatus') not in {40, 60}][:20]:
             # Unstarted work is deferred, not a failed investigation attempt.
             # Otherwise a busy batch could exhaust three retries before a later
             # event has ever had a chance to query a single source.
@@ -288,6 +322,9 @@ async def run(execution, policy, adapter_factory=XdrAdapter):
                 if not event.get('assessment'):
                     from .assessment import assess_event
                     event['assessment'] = assess_event(event)
+                saved_followup = await followup.observe(policy, event, attempt_id, query_complete=event['key'] in successful_checks) if event.get('dealStatus') not in {40, 60} else (await followup.snapshot(policy, event['key'])).get(event['key'])
+                from .assessment import apply_followup
+                event['assessment'] = apply_followup(event['assessment'], event, saved_followup)
                 event['risk'] = event['assessment']['verdict']
                 event['reason'] = event['assessment']['reason']
                 await write('UPDATE monitor_observations SET data=? WHERE attempt_id=? AND event_key=?', (encode(event), attempt_id, event['key']))
@@ -302,6 +339,7 @@ async def run(execution, policy, adapter_factory=XdrAdapter):
             return result, result, analysis_summary(result, observed, groups)
         result = await recorder.call('关联分析', {'policy': 'xdr-risk-v1'}, analyze)
         result['development_sample'] = False
+        result['followup'] = {**lifecycle, 'reconciliation': reconciliation, 'observation_rounds': policy.observation_rounds}
         # Only completed investigations can propose a new follow-up.
         mail_events = [event for event in observed if event.get('assessment', {}).get('notify_eligible')]
         notification = await mail_followup('mail.send',
@@ -321,7 +359,7 @@ async def run(execution, policy, adapter_factory=XdrAdapter):
         errors[:] = list(dict.fromkeys(errors))
         result['mail'] = {'feedback': feedback, 'notification': notification, 'enabled': automatic_enabled,
                           'health': mail_health, 'warnings': mail_warnings, 'manual_readback': manual_readback}
-        result['disposition'] = '根据责任人反馈或允许的人工标记更新告警并回查' if automatic_enabled else '只读监测'
+        result['disposition'] = '下一轮执行已保存的忽略或处置意图并回查；风险通知依设备责任人配置发送'
         # Waiting for a reply is normal completion; a failed investigation is not.
         status = 'failed' if errors else 'completed'
         summary = round_summary(status, result, observed, feedback, notification, automatic_enabled, False)

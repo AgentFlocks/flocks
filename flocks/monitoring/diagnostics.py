@@ -539,7 +539,7 @@ def export_bundle(owner, scope):
         from flocks.task.diagnostics import snapshot as infrastructure_snapshot
         from .diagnostic_state import task_state
         build = build_state()
-        return {'schema': 1, 'component': 'host-security-monitor', 'version': __version__, 'component_version': build['component_version'], 'build': build, 'mail_policy': 'mail-feedback-v1',
+        return {'schema': 1, 'component': 'host-security-monitor', 'version': __version__, 'component_version': build['component_version'], 'build': build, 'mail_policy': 'mail-feedback-v1', 'disposition_policy': 'next-round-v1',
                 'exported_at': datetime.now(timezone.utc).isoformat(),
                 'coverage': 'recent_rotating_logs', 'record_count': len(selected), 'capped': capped,
                 'first_record_at': selected[0].get('timestamp') if selected else None,

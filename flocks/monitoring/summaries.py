@@ -122,6 +122,8 @@ def event_sources_summary(result, total):
     text += f"，纳入历史待办 {result['resumed_events']} 条"
     if result['query_resumed_overlap']:
         text += f"（其中 {result['query_resumed_overlap']} 条也被本轮查询命中，已合并去重）"
+    if result.get('rechecked_events'):
+        text += f"，另核验历史事件 {result['rechecked_events']} 条"
     return text + f'，本轮共纳入 {total} 条事件'
 
 
@@ -229,6 +231,14 @@ def round_summary(status, result, observed, feedback, notification, enabled, dev
             text += '本轮没有新增调查故障；上述历史故障待恢复，不代表本轮再次失败。'
         if backlog.get('needs_review'):
             text += '业务待人工核对不会在下轮自动续查。'
+    lifecycle = result.get('followup', {})
+    if lifecycle:
+        text += f"\n状态跟进：本轮核验前轮意图 {lifecycle.get('processed', 0)} 条，回查确认 {lifecycle.get('verified', 0)} 条；新产生的忽略意图留待下一轮执行。中低风险证据不足默认观察 {lifecycle.get('observation_rounds', 6)} 轮，高风险存疑持续保留。"
+        if lifecycle.get('reconciliation', {}).get('external_closed'):
+            text += f"按原事件编号确认 {lifecycle['reconciliation']['external_closed']} 条已由外部处置结束。"
+        warnings = lifecycle.get('errors', []) + lifecycle.get('reconciliation', {}).get('errors', [])
+        if warnings:
+            text += '\n跟进待核验：' + '；'.join(warnings[:5])
     if enabled:
         sent = '发送计数暂不可用' if notification.get('unavailable') else f"发送 {notification['sent']} 封"
         received = ('回信处理进度暂不可用' if feedback.get('unavailable') else
@@ -251,7 +261,7 @@ def round_summary(status, result, observed, feedback, notification, enabled, dev
                 text += '\n邮件跟进提示（不影响本轮任务结果）：' + '；'.join(health['errors'])
             text += '。当前不能把处理回信 0 封解释为没有新回信。'
     else:
-        text += '\n邮件跟进未启用，本轮只做查询和分析，没有发信或修改状态。需要邮件协同时，请配置责任人邮箱并启用邮件跟进。'
+        text += '\n邮件跟进未启用，本轮不发送责任人邮件；忽略或处置是否已执行，以本轮状态跟进和 XDR 回查记录为准。需要邮件协同时，请配置责任人邮箱并启用邮件跟进。'
     if development:
         text += '\n本轮仅统计随机样本，不代表全部告警；测试标记忽略不代表威胁已消除。'
     return text

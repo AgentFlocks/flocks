@@ -480,6 +480,16 @@ async def notify_batch(policy, session_id, observed, recorder, adapter_factory=M
     return result
 
 
+def feedback_version_matches(event, raw):
+    from .adapter import normalize
+    from .followup import event_version
+    expected_end = event.get('notified_end_time', event.get('endTime'))
+    expected_host = event.get('notified_host', event.get('host'))
+    return (raw.get('uuId') == event['id'] and expected_end is not None and raw.get('endTime') == expected_end
+            and (raw.get('hostIp') or '') == (expected_host or '')
+            and (not isinstance(event.get('basics'), dict) or event_version({**normalize(event['device'], raw), 'development_sample': False}) == event_version({**event, 'development_sample': False})))
+
+
 async def mark_item(policy, item, session_id, adapter_factory=MailAdapter):
     notice = (await rows('SELECT * FROM monitor_mail_notices WHERE id=? AND owner=? AND project=?', (item['notice_id'], policy.owner, policy.project)))[0]
     async with d._locks.setdefault((policy.owner, notice['event_key']), asyncio.Lock()):
@@ -499,13 +509,17 @@ async def mark_item(policy, item, session_id, adapter_factory=MailAdapter):
         previous = await rows('SELECT * FROM monitor_dispositions WHERE owner=? AND scope=? AND id=?', (policy.owner, policy.scope, item['id']))
         if previous:
             with diag.span('mail.readback', notice=diag.opaque(notice['id'])):
-                current = await d.read_status(adapter, event)
+                checked = await read_event(adapter, event)
+                current = checked.get('dealStatus')
+                if not feedback_version_matches(event, checked):
+                    await d.finish(policy.owner, item['id'], 'pending', current, error='回查出现新活动，旧反馈未确认闭环', defer_exports=True)
+                    return 'pending'
             state = 'verified' if d.matches_status(item['target'], current) else 'mismatch'
             await d.finish(policy.owner, item['id'], state, current, defer_exports=True)
             return state
         if event.get('development_sample') is True:
             raise ValueError('已退出联调模式，旧测试回信不能发起新的状态写入')
-        unresolved = await rows("SELECT * FROM monitor_dispositions WHERE owner=? AND scope=? AND event_key=? AND status IN ('writing','pending','mismatch')",
+        unresolved = await rows("SELECT * FROM monitor_dispositions WHERE owner=? AND scope=? AND event_key=? AND status IN ('queued','writing','pending','mismatch')",
                                 (policy.owner, policy.scope, notice['event_key']))
         if unresolved:
             raise ContractError('已有处置待回查，暂不发起新写入')
@@ -535,7 +549,11 @@ async def mark_item(policy, item, session_id, adapter_factory=MailAdapter):
                 attempted = True
                 await d.operation(adapter, event, {'action': 'update_status', 'uuids': [event['id']], 'deal_status': item['target'], 'deal_comment': comment}, '按责任人回信标记 XDR 状态')
             with diag.span('mail.readback', notice=diag.opaque(notice['id'])):
-                current = await d.read_status(adapter, event)
+                checked = await read_event(adapter, event)
+                current = checked.get('dealStatus')
+                if not feedback_version_matches(event, checked):
+                    await d.finish(policy.owner, item['id'], 'pending', current, error='回查出现新活动，旧反馈未确认闭环', defer_exports=True)
+                    return 'pending'
             state = 'verified' if d.matches_status(item['target'], current) else 'mismatch'
             await d.finish(policy.owner, item['id'], state, current, defer_exports=True)
         except (Exception, asyncio.CancelledError) as exc:

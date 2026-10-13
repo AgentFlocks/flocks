@@ -14833,7 +14833,7 @@
       "name": "Security Operations Monitoring",
       "nameCn": "安全运营监测",
       "description": "多台 XDR 按设备配置责任人与邮箱；智能体调查、邮件协同与回查确认",
-      "version": "1.12.0",
+      "version": "1.13.0",
       "category": "workflow-automation",
       "trust": "official",
       "riskLevel": "medium",
@@ -14846,7 +14846,7 @@
       "nameCn": "监测运营智能体",
       "description": "A suite-managed investigation role using the bounded monitoring runtime.",
       "descriptionCn": "安全运营监测套件的调查智能体：按原事件选择只读证据，解释关联、判断与缺口。",
-      "version": "1.0.2",
+      "version": "1.0.3",
       "category": "workflow-automation",
       "tags": [
         "xdr",

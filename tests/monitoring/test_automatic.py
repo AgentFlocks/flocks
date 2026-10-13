@@ -503,7 +503,7 @@ async def test_native_two_round_mail_feedback_flow(auto, actual_tool, connected_
     notices = await rows('SELECT * FROM monitor_mail_notices')
     assert len(notices) == 1 and notices[0]['state'] == 'sent'
     assert (await rows('SELECT state FROM monitor_investigations'))[0]['state'] == 'ready'
-    assert all(text in notices[0]['body'] for text in ('调查结论', '关键证据', 'worm.exe', '请您处理'))
+    assert all(text in notices[0]['body'] for text in ('调查结论', '关键证据', 'worm.exe', '总结和处置建议'))
     assert 'evidence-' not in notices[0]['body'] and '告警编号' not in notices[0]['body']
     evidence = json.loads((await rows('SELECT evidence FROM monitor_investigations'))[0]['evidence'])
     assert [proof['kind'] for proof in evidence] == ['proof', 'file']

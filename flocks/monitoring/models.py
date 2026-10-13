@@ -43,6 +43,9 @@ class MonitoringPolicy(BaseModel):
     correlation_devices: list[str] = Field(default_factory=list)
     correlation_notes: list[str] = Field(default_factory=list)
     max_pages: int = Field(default=1000, ge=1, le=10000)
+    # Distinct, complete observation rounds before accepting uncertain low/medium risk.
+    # Zero retains observation indefinitely; confirmed benign cases remain eligible.
+    observation_rounds: int = Field(default=6, ge=0, le=144)
     # Accept older saved policies but retire the development execution mode.
     development_sample: Literal[False] = False
 

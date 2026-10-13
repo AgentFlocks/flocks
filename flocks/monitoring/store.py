@@ -59,6 +59,15 @@ CREATE TABLE IF NOT EXISTS monitor_investigation_versions (
  event TEXT NOT NULL, evidence TEXT NOT NULL, result TEXT NOT NULL, state TEXT NOT NULL,
  attempts INTEGER NOT NULL, archived_at TEXT NOT NULL,
  PRIMARY KEY(owner,project,event_key,revision));
+CREATE TABLE IF NOT EXISTS monitor_event_followup (
+ owner TEXT NOT NULL, scope TEXT NOT NULL, project TEXT NOT NULL, device TEXT NOT NULL,
+ event_key TEXT NOT NULL, policy_revision TEXT NOT NULL, event_version TEXT NOT NULL,
+ event TEXT NOT NULL, decision TEXT NOT NULL DEFAULT '{}', state TEXT NOT NULL DEFAULT 'watching',
+ watch_count INTEGER NOT NULL DEFAULT 0, last_round TEXT, queued_round TEXT,
+ target_status INTEGER, disposition_id TEXT, result TEXT NOT NULL DEFAULT '{}',
+ created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+ PRIMARY KEY(owner,scope,project,device,event_key));
+CREATE INDEX IF NOT EXISTS monitor_event_followup_due ON monitor_event_followup(owner,scope,project,state,queued_round);
 CREATE TABLE IF NOT EXISTS monitor_dispositions (
  id TEXT NOT NULL, owner TEXT NOT NULL, scope TEXT NOT NULL, event_key TEXT NOT NULL,
  comment TEXT NOT NULL, status TEXT NOT NULL, observed_status INTEGER, error TEXT,

@@ -41,6 +41,9 @@ class Choice(BaseModel):
     verdict: Literal['risk', 'unknown', 'benign'] = 'unknown'
     confidence: Literal['high', 'medium', 'low'] = 'low'
     risk_confirmed: bool = False
+    suspected_risk: bool = False
+    operator_summary: str = Field(default="", max_length=120)
+    operator_explanation: list[str] = Field(default_factory=list, max_length=3)
     blocking_gaps: list[str] = Field(default_factory=list, max_length=12)
     evidence_ids: list[str] = Field(default_factory=list, max_length=24)
     gaps: list[str] = Field(default_factory=list, max_length=12)
@@ -383,7 +386,7 @@ async def choose(agent_name, data):
         '先核对事件与关联告警的基本信息、真实时间线、主机文件/进程或Web请求响应。'
         'Web攻击必须说明具体攻击语句在哪里、响应说明什么、是否能证实利用成功；HTTP200不等于攻击成功。'
         '缺包、截断、空查询及context_excerpt只表示证据不足，不能独立支持误报。'
-        'finish明确填写confidence(high/medium/low)、risk_confirmed、blocking_gaps。只有已核实的具体恶意行为能给出high且risk_confirmed=true；'
+        'finish明确填写confidence(high/medium/low)、risk_confirmed、suspected_risk、blocking_gaps。operator_summary用一句120字内白话概述结论，operator_explanation最多3句解释已核实行为；不用工具编号、内部枚举、时间戳或未证实推断。只有已核实的具体恶意行为能给出high且risk_confirmed=true；'
         '仅等级、attackState/attackResult、gptResult、告警名称或一条普通DNS连接不能证实风险。DGA须有实际随机域名/异常查询行为等事实。'
         '有充分证据排除风险才可benign；否则unknown。blocking_gaps只填妨碍风险判断的关键缺口，gaps可填不影响已证实风险的补充定位信息。'
         '结论先说明发生什么、为什么需要处置或为什么暂无充分依据，避免重复编号、枚举或工具错误。'
@@ -654,6 +657,7 @@ class Investigator:
                 checked = assess_event(self.event, {'event': self.event, 'state': 'ready',
                     'result': choice.model_dump(), 'evidence': self.evidence})
                 if choice.verdict in {'risk', 'benign'} and checked['verdict'] == 'unknown':
+                    choice.suspected_risk = choice.suspected_risk or choice.verdict == 'risk'
                     choice.verdict = 'unknown'
                     choice.risk_confirmed = False
                     choice.blocking_gaps = list(dict.fromkeys([*checked['gaps'], *choice.blocking_gaps]))[:12]
@@ -800,8 +804,8 @@ async def investigate(policy, event, recorder, budget=None):
     if state == 'ready':
         next_step = ('风险已确认，进入原事件复核和单封责任人通知；当前未修改 XDR。'
             if event['assessment']['notify_eligible'] else
-            '已证实无风险，本地记录为已忽略，不发送邮件。' if event['assessment']['risk_excluded'] else
-            '当前证据不足，本地暂忽略并保留事件，不发送邮件；尚未排除风险。')
+            '已证实无风险，不发送邮件；已保存忽略意图，下一轮核对原事件后标记忽略并回查。' if event['assessment']['risk_excluded'] else
+            f'当前证据不足，保留待观察，不发送邮件；中低风险完成{policy.observation_rounds}轮有效观察后安排下一轮忽略，高风险或风险存疑持续保留。' if policy.observation_rounds else '当前证据不足，持续保留待观察，不自动忽略。')
     event['investigation']['next_step'] = next_step
     event['story'] = build_story({**event, 'alertIds': trusted_alert_ids(event, evidence)}, evidence, result)
     summary = f"{event_label(event)}：{result.get('reason', '尚未形成调查结论')}。"

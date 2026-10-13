@@ -26,7 +26,7 @@ def test_confirmed_behavior_can_notify_and_local_tag_never_writes_status():
     assessed = assess_event(current, case(current))
     assert assessed['status'] == 'risk_open' and assessed['notify_eligible']
     assert current['dealStatus'] == 0
-    assert assessed['policy_version'] == 1 and assessed['event_revision'] == fingerprint(current)
+    assert assessed['policy_version'] == 2 and assessed['event_revision'] == fingerprint(current)
 
 
 @pytest.mark.parametrize('facts', [

@@ -606,7 +606,8 @@ async def test_system_failure_only_fails_round_when_retry_actually_runs(context,
     assert result['query_events'] == int(query_hits_waiting_event)
     assert result['resumed_events'] == result['query_resumed_overlap'] == 0
     assert '历史故障待恢复，不代表本轮再次失败' in card.text
-    assert not await rows("SELECT * FROM monitor_steps WHERE attempt_id=? AND status='failed'", (attempt['id'],))
+    failed_steps = await rows("SELECT * FROM monitor_steps WHERE attempt_id=? AND status='failed'", (attempt['id'],))
+    assert all(step['tool'] == '核对历史事件状态' for step in failed_steps)
     if query_hits_waiting_event:
         snapshot = json.loads((await rows('SELECT data FROM monitor_observations WHERE attempt_id=?', (attempt['id'],)))[0]['data'])
         assert snapshot['investigation']['state'] == 'system_wait'
@@ -642,7 +643,8 @@ async def test_exhausted_history_remains_visible_without_failing_new_round(conte
     assert outcome.action == 'stop' and attempt['status'] == 'completed'
     assert choose.await_count == 1
     assert '已停止自动恢复' in card.text and '暂停并重新启动' in attempt['next_step']
-    assert not await rows("SELECT * FROM monitor_steps WHERE attempt_id=? AND status='failed'", (attempt['id'],))
+    failed_steps = await rows("SELECT * FROM monitor_steps WHERE attempt_id=? AND status='failed'", (attempt['id'],))
+    assert all(step['tool'] == '核对历史事件状态' for step in failed_steps)
 
 
 @pytest.mark.parametrize('query_hits_history', [False, True])
@@ -873,7 +875,10 @@ async def test_manual_readback_is_automatic_and_does_not_fail_investigation_roun
     monkeypatch.setattr(mail_manual, 'recheck_pending', readback)
     result = await runtime.run(context.execution, context.policy, context.adapter)
     assert result.action == 'stop'
-    readback.assert_awaited_once_with(context.policy)
+    readback.assert_awaited_once()
+    assert readback.call_args.args == (context.policy,)
+    assert readback.call_args.kwargs['session_id'] == context.execution.session_id
+    assert readback.call_args.kwargs['before'] == context.execution.started_at.isoformat()
     attempt, _, _ = await ending()
     facts = json.loads(attempt['result'])
     assert attempt['status'] == 'completed' and not attempt['error'] and not facts['errors']

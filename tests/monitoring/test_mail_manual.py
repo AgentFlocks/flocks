@@ -1,6 +1,6 @@
 """Human fallback is notice-scoped, durable, and never repeats an XDR write."""
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from uuid import uuid4
 from unittest.mock import AsyncMock
@@ -22,11 +22,13 @@ async def case(tmp_path, monkeypatch):
     directory.mkdir()
     project = await Project.create(owner_id='owner', name='monitor', worktree=str(directory))
     policy = MonitoringPolicy(owner='owner', project=project.id, directory=str(directory), devices=['device'])
+    from flocks.monitoring.sessions import ensure_daily
+    session, _ = await ensure_daily(policy, datetime.now(timezone.utc))
     event = normalize('device', {'uuId': 'event', 'name': 'fixture', 'incidentSeverity': 4, 'dealStatus': 0, 'endTime': 100})
     await write('INSERT INTO monitor_installations(owner,scope,project,policy,ready) VALUES(?,?,?,?,1)',
                 ('owner', policy.scope, project.id, encode(policy.model_dump())))
     await write('INSERT INTO monitor_attempts(id,execution_id,owner,project,scope,business_date,session_id,message_id,started_at,status) VALUES(?,?,?,?,?,?,?,?,?,?)',
-                ('attempt', 'execution', 'owner', project.id, policy.scope, datetime.now(timezone.utc).date().isoformat(), 'daily', 'message', d.stamp(), 'completed'))
+                ('attempt', 'execution', 'owner', project.id, policy.scope, datetime.now(timezone.utc).date().isoformat(), session.id, 'message', d.stamp(), 'completed'))
     await write('INSERT INTO monitor_observations VALUES(?,?,?)', ('attempt', event['key'], encode(event)))
     await write('INSERT INTO monitor_mail_settings VALUES(?,?,?,?,?,?,?,?,?)',
                 ('owner', policy.scope, project.id, 'person@example.com', 'person', 1, 'rev', 'mailbox', d.stamp()))
@@ -35,7 +37,7 @@ async def case(tmp_path, monkeypatch):
                 (nid, 'owner', policy.scope, project.id, event['key'], 'person@example.com', 'rev', 'mailbox', '<notice@example.com>', 'notice', 'body', encode(event), 'sent', d.stamp(), d.stamp()))
     monkeypatch.setattr('flocks.hub.local.get_record', lambda *_: SimpleNamespace(enabled=True))
     monkeypatch.setattr(mailflow, '_locks', {})
-    state = SimpleNamespace(policy=policy, event=event, notice=nid, calls=[], statuses=[0, 40], fail=False)
+    state = SimpleNamespace(policy=policy, event=event, notice=nid, session=session, calls=[], statuses=[0, 40], fail=False)
     class Adapter:
         def __init__(self, policy, session_id): self.policy, self.session_id = policy, session_id
         async def call(self, device, params, message):
@@ -45,7 +47,7 @@ async def case(tmp_path, monkeypatch):
                 return {'code': 'Success', 'data': {}}
             current = state.statuses.pop(0)
             if isinstance(current, Exception): raise current
-            raw = current if isinstance(current, dict) else {'uuId': 'event', 'dealStatus': current, 'endTime': 100}
+            raw = current if isinstance(current, dict) else {'uuId': 'event', 'name': 'fixture', 'incidentSeverity': 4, 'dealStatus': current, 'endTime': 100}
             return {'code': 'Success', 'data': {'item': [raw], 'total': 1}}
     state.adapter = Adapter
     return state
@@ -63,6 +65,16 @@ async def change(case, req=None):
     return await manual.change('owner', case.notice, req or request(), case.adapter)
 
 
+async def consume_queued(case):
+    """A separate subsequent round consumes feedback persisted by change()."""
+    installed = (await rows('SELECT scheduler_id FROM monitor_installations WHERE owner=?', ('owner',)))[0]
+    if not installed['scheduler_id']:
+        await active_monitor(case)
+    await manual.recheck_pending(case.policy, session_id=case.session.id,
+        before=(datetime.now(timezone.utc) + timedelta(seconds=1)).isoformat(), adapter_factory=case.adapter)
+    return await manual.snapshot(await notice(case))
+
+
 async def received(case, payload=None):
     rid = str(uuid4())
     await write('INSERT INTO monitor_mail_replies(id,owner,project,mailbox,message_id,sender,payload,state,received_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)',
@@ -75,7 +87,10 @@ async def test_unhandled_is_local_then_handled_writes_and_readbacks_once(case):
     assert local['state'] == 'unhandled' and local['available'] and not case.calls
     req = request()
     a, b = await asyncio.gather(change(case, req), change(case, req))
-    assert a == b and a['state'] == 'handled' and not a['available']
+    assert a == b and a['state'] == 'pending' and not a['available']
+    assert not case.calls  # Button only persists intent; no XDR call in this round.
+    assert (await rows('SELECT status FROM monitor_dispositions'))[0]['status'] == 'queued'
+    assert (await consume_queued(case))['state'] == 'handled'
     assert [p['action'] for _, p in case.calls] == ['list', 'update_status', 'list']
     mutation = case.calls[1][1]
     assert mutation['uuids'] == ['event'] and mutation['deal_status'] == 40
@@ -113,7 +128,8 @@ async def test_reply_saved_before_interpretation_removes_manual_entry(case, stat
 async def test_unknown_write_only_rechecks_even_after_reply_arrives(case):
     case.fail = True
     req = request()
-    result = await change(case, req)
+    assert (await change(case, req))['state'] == 'pending'
+    result = await consume_queued(case)
     assert result['state'] == 'pending' and not result['available'] and 'PRIVATE' not in str(result)
     assert (await change(case, req))['state'] == 'pending'
     with pytest.raises(ValueError): await change(case, request('unhandled'))
@@ -125,6 +141,7 @@ async def test_unknown_write_only_rechecks_even_after_reply_arrives(case):
 
 async def test_late_reply_and_send_retry_cannot_override_manual_completion(case):
     await change(case)
+    await consume_queued(case)
     before = list(case.calls)
     with pytest.raises(ValueError, match='人工处置'):
         await mailflow.mark_item(case.policy, {'notice_id':case.notice}, 'session')
@@ -151,7 +168,8 @@ async def test_changed_event_activity_does_not_close_new_alarm(case):
     event = {**case.event, 'notified_end_time': 100}
     await write('UPDATE monitor_mail_notices SET event=?', (encode(event),))
     case.statuses = [{'uuId':'event','dealStatus':0,'endTime':200}]
-    result = await change(case)
+    assert (await change(case))['state'] == 'pending'
+    result = await consume_queued(case)
     assert result['state'] == 'failed' and '新活动' in result['error']
     assert all(p['action']!='update_status' for _,p in case.calls)
 
@@ -203,7 +221,8 @@ async def test_legacy_free_text_reply_never_exposes_manual_button(case):
 async def test_failed_notice_uses_observation_snapshot_before_completion(case):
     await write("UPDATE monitor_mail_notices SET state='queued',error='发送失败'")
     case.statuses = [{'uuId':'event','dealStatus':0,'endTime':200}]
-    result = await change(case)
+    assert (await change(case))['state'] == 'pending'
+    result = await consume_queued(case)
     assert result['state']=='failed' and '新活动' in result['error']
     assert all(p['action']!='update_status' for _,p in case.calls)
 
@@ -211,7 +230,8 @@ async def test_failed_notice_uses_observation_snapshot_before_completion(case):
 async def test_completion_is_not_downgraded_by_report_export_failure(case, monkeypatch):
     export = AsyncMock(side_effect=OSError('report unavailable'))
     monkeypatch.setattr('flocks.monitoring.reports.export_report',export)
-    assert (await change(case))['state']=='handled'
+    assert (await change(case))['state'] == 'pending'
+    assert (await consume_queued(case))['state'] == 'handled'
     assert not export.called
     assert (await rows('SELECT status FROM monitor_reports'))[0]['status']=='pending'
 
@@ -220,13 +240,14 @@ async def test_concurrent_send_skip_keeps_human_notice_visible(case, monkeypatch
     await write("UPDATE monitor_mail_notices SET state='queued',error='发送失败'")
     monkeypatch.setattr(mailflow,'authorized',AsyncMock(return_value={'enabled':1}))
     async def closed_by_human(*args, **kwargs):
-        assert (await change(case))['state']=='handled'
+        assert (await change(case))['state'] == 'pending'
         return None
     monkeypatch.setattr(mailflow,'read_event',closed_by_human)
     result=await mailflow.notify_one(case.policy,await notice(case),'session',lambda *a:None)
     assert result=='already_attempted'
     row=(await mailflow.history('owner'))['notices'][0]
-    assert row['manual']['state']=='handled' and row['state']=='queued'
+    assert row['manual']['state'] == 'pending' and row['state'] == 'queued'
+    assert not case.calls
 
 
 async def test_new_manual_endpoint_validates_identity_and_payload(case, monkeypatch):
@@ -249,12 +270,14 @@ async def test_two_devices_with_same_event_id_write_only_notice_device(case):
     case.policy = case.policy.model_copy(update={'devices':['device','second'],
         'device_tools':{'device':'tool_a','second':'tool_b'}})
     await write('UPDATE monitor_installations SET policy=?', (encode(case.policy.model_dump()),))
-    second = normalize('second', {'uuId':'event','endTime':100,'dealStatus':0})
+    second = normalize('second', {'uuId':'event','name':'fixture','incidentSeverity':4,'endTime':100,'dealStatus':0})
     await write('INSERT INTO monitor_observations VALUES(?,?,?)', ('attempt',second['key'],encode(second)))
     original=await notice(case); case.notice=str(uuid4())
     await write('INSERT INTO monitor_mail_notices(id,owner,scope,project,event_key,recipient,revision,mailbox,message_id,subject,body,event,state,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
         (case.notice,'owner',case.policy.scope,case.policy.project,second['key'],'second@example.com','rev','mailbox','<second@example.com>','second','body',encode(second),'sent',d.stamp(),d.stamp()))
-    assert (await change(case))['state']=='handled'
+    assert (await change(case))['state'] == 'pending'
+    assert not case.calls
+    assert (await consume_queued(case))['state'] == 'handled'
     assert {device for device,_ in case.calls}=={'second'}
     records=await rows('SELECT * FROM monitor_dispositions')
     assert len(records)==1 and records[0]['event_key']==second['key']
@@ -264,6 +287,7 @@ async def test_two_devices_with_same_event_id_write_only_notice_device(case):
 async def test_rebound_project_does_not_inherit_manual_closure(case):
     from flocks.monitoring.reports import snapshot
     await change(case)
+    await consume_queued(case)
     await write('UPDATE monitor_attempts SET project=?', ('new-project',))
     day=(await rows('SELECT business_date FROM monitor_attempts'))[0]['business_date']
     result=await snapshot('owner',case.policy.scope,day)
@@ -282,6 +306,7 @@ async def test_background_readback_verifies_prior_manual_write_without_repeating
     await active_monitor(case)
     case.fail = True
     assert (await change(case))['state'] == 'pending'
+    await consume_queued(case)
     await received(case)  # A later reply is unnecessary for this prior user decision.
     before = len(case.calls)
     with unattended_scope():
@@ -313,6 +338,7 @@ async def test_paused_monitor_keeps_manual_pending_until_resumed(case):
     scheduler = await active_monitor(case)
     case.fail = True
     await change(case)
+    await consume_queued(case)
     before = len(case.calls)
     await write("UPDATE task_schedulers SET status='disabled' WHERE id=?", (scheduler.id,))
     assert (await manual.recheck_pending(case.policy, adapter_factory=case.adapter))['checked'] == 0
@@ -326,6 +352,7 @@ async def test_background_manual_readback_rejects_changed_binding(case, change_b
     await active_monitor(case)
     case.fail = True
     await change(case)
+    await consume_queued(case)
     before = len(case.calls)
     if change_binding == 'project':
         await write('UPDATE monitor_mail_manual SET project=?', ('other-project',))
@@ -343,6 +370,7 @@ async def test_background_stale_writing_is_read_only_and_fresh_write_is_not_chec
     await active_monitor(case)
     case.fail = True
     await change(case)
+    await consume_queued(case)
     before = len(case.calls)
     await write("UPDATE monitor_dispositions SET status='writing'")
     assert (await manual.recheck_pending(case.policy, adapter_factory=case.adapter))['checked'] == 0
@@ -360,7 +388,7 @@ async def add_pending_readback(case, suffix):
         (nid, 'owner', case.policy.scope, case.policy.project, event['key'], 'person@example.com', 'rev', 'mailbox', f'<{suffix}@example.com>', 'notice', 'body', encode(event), 'sent', d.stamp(), d.stamp()))
     await write('INSERT INTO monitor_mail_manual VALUES(?,?,?,?,?,?)', (mid, nid, 'owner', case.policy.project, 'handled', d.stamp()))
     await write('INSERT INTO monitor_dispositions(id,owner,scope,event_key,comment,status,created_at,updated_at,mode,target_status,project,session_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',
-        (mid, 'owner', case.policy.scope, event['key'], '人工处理', 'pending', d.stamp(), d.stamp(), 'mail_manual', 40, case.policy.project, 'daily'))
+        (mid, 'owner', case.policy.scope, event['key'], '人工处理', 'pending', d.stamp(), d.stamp(), 'mail_manual', 40, case.policy.project, case.session.id))
     return mid
 
 
@@ -368,9 +396,10 @@ async def test_background_readback_failure_does_not_block_next_and_budget_is_bou
     await active_monitor(case)
     case.fail = True
     await change(case)
+    await consume_queued(case)
     second = await add_pending_readback(case, 'second')
     third = await add_pending_readback(case, 'third')
-    case.statuses = [TimeoutError('PRIVATE'), {'uuId': 'event-second', 'dealStatus': 40}]
+    case.statuses = [TimeoutError('PRIVATE'), {'uuId': 'event-second', 'dealStatus': 40, 'endTime': 100}]
     result = await manual.recheck_pending(case.policy, limit=2, adapter_factory=case.adapter)
     assert result['checked'] == 2 and result['verified'] == 1 and result['pending'] == 1
     assert result['errors'] and 'PRIVATE' not in str(result)
@@ -385,11 +414,12 @@ async def test_background_readback_timeout_retains_work_and_cancellation_propaga
     await active_monitor(case)
     case.fail = True
     await change(case)
+    await consume_queued(case)
     entered = asyncio.Event()
     async def hang(*args, **kwargs):
         entered.set()
         await asyncio.Event().wait()
-    monkeypatch.setattr(d, 'recheck', hang)
+    monkeypatch.setattr(manual, '_readback_manual', hang)
     result = await manual.recheck_pending(case.policy, timeout_seconds=.01)
     assert result['checked'] == 1 and result['pending'] == 1 and result['errors']
     assert (await manual.snapshot(await notice(case)))['state'] == 'pending'
@@ -412,13 +442,14 @@ async def test_default_background_adapter_executes_real_read_only_tool_under_una
     await active_monitor(case)
     case.fail = True
     await change(case)
+    await consume_queued(case)
     path = Path(__file__).resolve().parents[2] / '.flocks/plugins/tools/device/sangfor_xdr_v2_2/sangfor_xdr_incidents.yaml'
     tool = yaml_to_tool(yaml.safe_load(path.read_text()), path)
     fn = inspect.getclosurevars(tool.handler).nonlocals['fn']
     calls = []
     async def send(method, path, data=None, params=None):
         calls.append((path, data))
-        return ToolResult(success=True, output={'code': 'Success', 'data': {'item': [{'uuId': 'event', 'dealStatus': 40}], 'total': 1}})
+        return ToolResult(success=True, output={'code': 'Success', 'data': {'item': [{'uuId': 'event', 'name': 'fixture', 'incidentSeverity': 4, 'endTime': 100, 'dealStatus': 40}], 'total': 1}})
     monkeypatch.setitem(fn.__globals__, '_run_request', send)
     monkeypatch.setattr(ToolRegistry, '_tools', {tool.info.name: tool})
     monkeypatch.setattr(ToolRegistry, '_initialized', True)
@@ -440,6 +471,7 @@ async def test_background_mismatch_remains_pending_until_later_readback_matches(
     await active_monitor(case)
     case.statuses = [0, 10, 10, 40]
     assert (await change(case))['state'] == 'pending'
+    await consume_queued(case)
     first = await manual.recheck_pending(case.policy, adapter_factory=case.adapter)
     assert first['checked'] == 1 and first['pending'] == 1 and first['verified'] == 0
     assert (await manual.snapshot(await notice(case)))['state'] == 'pending'
@@ -451,6 +483,7 @@ async def test_pause_between_automatic_readbacks_keeps_next_incident_pending(cas
     scheduler = await active_monitor(case)
     case.fail = True
     await change(case)
+    await consume_queued(case)
     second = await add_pending_readback(case, 'second')
     class PauseAfterFirst(case.adapter):
         async def call(self, *args):
@@ -460,3 +493,41 @@ async def test_pause_between_automatic_readbacks_keeps_next_incident_pending(cas
     result = await manual.recheck_pending(case.policy, adapter_factory=PauseAfterFirst)
     assert result['checked'] == 1 and result['verified'] == 1
     assert (await d.record('owner', second))['status'] == 'pending'
+
+
+async def test_manual_completion_waits_for_a_later_round_cutoff(case):
+    await active_monitor(case)
+    cutoff = d.stamp()
+    assert (await change(case))['state'] == 'pending'
+    current = await manual.recheck_pending(case.policy, before=cutoff, session_id=case.session.id, adapter_factory=case.adapter)
+    assert current['checked'] == 0 and not case.calls
+    later = await manual.recheck_pending(case.policy, before=(datetime.now(timezone.utc) + timedelta(seconds=1)).isoformat(),
+                                        session_id=case.session.id, adapter_factory=case.adapter)
+    assert later['verified'] == 1
+    assert len([params for _, params in case.calls if params['action'] == 'update_status']) == 1
+
+
+async def test_queued_manual_feedback_survives_restart_without_immediate_io(case, monkeypatch):
+    import json
+    await active_monitor(case)
+    req = request()
+    assert (await change(case, req))['state'] == 'pending'
+    assert not case.calls
+    monkeypatch.setattr(d, '_locks', {})
+    monkeypatch.setattr(mailflow, '_locks', {})
+    restored = MonitoringPolicy.model_validate_json((await rows('SELECT policy FROM monitor_installations'))[0]['policy'])
+    result = await manual.recheck_pending(restored, session_id=case.session.id,
+        before=(datetime.now(timezone.utc) + timedelta(seconds=1)).isoformat(), adapter_factory=case.adapter)
+    assert result['verified'] == 1
+    assert (await change(case, req))['state'] == 'handled'
+    assert len([params for _, params in case.calls if params['action'] == 'update_status']) == 1
+
+
+@pytest.mark.parametrize('changed', [{'endTime': 200}, {'hostIp': '10.1.1.2'}])
+async def test_old_queue_cannot_claim_completed_new_activity(case, changed):
+    await active_monitor(case)
+    assert (await change(case))['state'] == 'pending'
+    case.statuses = [{'uuId': 'event', 'dealStatus': 40, 'endTime': 100, **changed}]
+    result = await consume_queued(case)
+    assert result['state'] == 'failed'
+    assert not any(params['action'] == 'update_status' for _, params in case.calls)

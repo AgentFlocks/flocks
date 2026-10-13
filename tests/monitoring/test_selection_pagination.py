@@ -155,8 +155,8 @@ async def test_injected_selection_persists_only_matches_and_keeps_cursor_atomic(
     project = await Project.create(owner_id='owner', name='selection-fixture', worktree=str(directory))
     policy = MonitoringPolicy(development_sample=False, owner='owner', project=project.id, directory=str(directory), devices=['fixture'])
     original = runtime.query_device
-    async def selected(*args):
-        return await original(*args, selection=RULE)
+    async def selected(*args, **kwargs):
+        return await original(*args, selection=RULE, **kwargs)
     monkeypatch.setattr(runtime, 'query_device', selected)
     # Investigation is a separate bounded contract. This test preserves the
     # real query transaction and injects only its model-driven continuation.
@@ -191,9 +191,9 @@ async def test_injected_selection_persists_only_matches_and_keeps_cursor_atomic(
     data = await snapshot(policy.owner, policy.scope, attempt['business_date'])
     cursor = (await rows('SELECT * FROM monitor_cursors'))[0]
     entity_ids = [call['uuid'] for call in calls if call['action'] == 'get_entities']
-    expected = 2 if mode == 'matches' else 0
+    expected = 2 if mode == 'matches' else 1 if mode in {'late_failure', 'unknown'} else 0
     assert len(data['events']) == data['metrics']['events'] == json.loads(attempt['result'])['events'] == expected
-    assert entity_ids == (['event-0', 'event-104'] if expected else [])
+    assert entity_ids == (['event-0', 'event-104'] if mode == 'matches' else ['event-0'] if expected else [])
     assert len(await rows('SELECT * FROM monitor_observations')) == expected
     if mode in {'late_failure', 'unknown'}:
         assert attempt['status'] == 'failed' and cursor['through_time'] == 1000

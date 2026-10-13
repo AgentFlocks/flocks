@@ -338,7 +338,7 @@ def _text(value, limit=800):
     return _clip(value, limit)[0]
 
 
-def build_story(event, evidence, result=None):
+def build_story(event, evidence, result=None, *, canonical=None):
     """Build an evidence-linked story, keeping collection and event times apart."""
     event = event if isinstance(event, dict) else {}
     evidence = evidence if isinstance(evidence, list) else []
@@ -489,6 +489,11 @@ def build_story(event, evidence, result=None):
     if isinstance(requested, list) and any(str(ref) not in refs for ref in requested):
         gap('调查结论引用了未取得成功结果的证据；该结论需继续核对')
     story['evidence_ids'] = [str(ref) for ref in requested if str(ref) in refs] if isinstance(requested, list) else []
+    from .evidence_presenter import evidence_cards
+    story['evidence_cards'] = evidence_cards(event, evidence, canonical=canonical)
+    story['operator_summary'] = _readable_text(result.get('operator_summary') or '', 200)
+    story['operator_explanation'] = [_readable_text(v, 400) for v in result.get('operator_explanation', [])[:3]
+                                     if isinstance(v, str)] if isinstance(result.get('operator_explanation'), list) else []
     return story
 
 
@@ -642,4 +647,7 @@ def readable_story(story):
             break
     return {'basics': selected, 'conclusion': _readable_text(story.get('conclusion'), 1200),
             'verdict': story.get('verdict', 'unknown'), 'evidence': evidence,
+            'evidence_cards': story.get('evidence_cards', []),
+            'operator_summary': story.get('operator_summary', ''),
+            'operator_explanation': story.get('operator_explanation', []),
             'timeline': timeline, 'gaps': gaps}

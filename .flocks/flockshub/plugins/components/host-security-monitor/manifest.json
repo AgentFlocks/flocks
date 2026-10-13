@@ -5,8 +5,8 @@
   "name": "Security Operations Monitoring",
   "nameCn": "安全运营监测",
   "description": "Model-directed monitoring investigation with persistent evidence, bounded serial scheduling and verified mail follow-up.",
-  "descriptionCn": "多 XDR 证据研判；同类事件24小时聚合，仅已证实风险通知责任人，邮件反馈后回查处置。",
-  "version": "1.12.0",
+  "descriptionCn": "多 XDR 证据研判与可展开证据；六轮观察，下一轮状态标记和回查，确认风险逐条邮件通知。",
+  "version": "1.13.0",
   "author": "Flocks Team",
   "license": "MIT",
   "homepage": "",
@@ -58,7 +58,7 @@
   "risk": {
     "level": "medium",
     "reasons": [
-      "启用邮件跟进后向配置的责任人发送告警；核验回信后同步 XDR 状态，不执行主机隔离或查杀",
+      "确认风险后向责任人发送单条告警邮件；无风险与中低风险观察到期事件可在下一轮标记忽略，明确完成反馈后标记处置完成并回查，不执行隔离或查杀",
       "关联查询仅使用项目绑定设备；TDP 时间计算使用固定的本地 Python 命令，模型无通用 Shell 权限"
     ]
   },
@@ -90,7 +90,8 @@
     "monitor.mail-retry.v1",
     "monitor.incident-evidence.v1",
     "monitor.event-list.v1",
-    "monitor.confirmed-risk.v1"
+    "monitor.confirmed-risk.v1",
+    "monitor.next-round-disposition.v1"
   ],
   "edition": "oss"
 }

@@ -772,7 +772,12 @@ it("keeps all four assessment outcomes distinct even when the group contains clo
       host: `192.0.2.${index + 1}`,
       assessment: {
         status,
-        label: status,
+        label: {
+          risk_open: "有风险 · 处置中",
+          risk_closed: "有风险 · 已处置",
+          benign: "无风险 · 已忽略",
+          insufficient: "证据不足 · 暂忽略",
+        }[status],
         verdict:
           status === "benign"
             ? "benign"
@@ -932,7 +937,191 @@ it("does not turn an unqualified legacy malicious label into a confirmed result"
   renderPage();
   await screen.findByText("独立事件");
   const item = within(screen.getAllByRole("row")[1]);
-  expect(item.getByText("证据不足 · 暂忽略")).toBeInTheDocument();
+  expect(item.getByText("证据不足 · 待观察")).toBeInTheDocument();
   expect(item.queryByText("有风险 · 已处置")).not.toBeInTheDocument();
   expect(item.queryByText("无风险 · 已忽略")).not.toBeInTheDocument();
 });
+
+it("renders structured evidence summaries ahead of expandable original fields", async () => {
+  const value = detail({
+    overview: {
+      conclusion: "发现异常 DNS 活动，仍需观察。",
+      evidence_cards: [
+        {
+          id: "proof-1",
+          summary: "XDR记录主机持续查询随机域名，提供异常解析行为依据。",
+          source: "股份 XDR",
+          time: "2026-10-12T02:59:00Z",
+          fields: [
+            { key: "domain", label: "影响域名", value: ["random.example"] },
+          ],
+          raw: { alertId: "alert-original", domain: "random.example" },
+          query: { action: "list" },
+        },
+      ],
+    },
+  });
+  vi.mocked(monitoringEventsApi.detail).mockResolvedValue(value as never);
+  renderPage();
+  fireEvent.click(
+    await screen.findByRole("button", { name: "查看事件详情：group-a" }),
+  );
+  const dialog = screen.getByRole("dialog");
+  const synopsis = await within(dialog).findByText(
+    "XDR记录主机持续查询随机域名，提供异常解析行为依据。",
+  );
+  const panel = synopsis.closest("details")!;
+  expect(panel).not.toHaveAttribute("open");
+  expect(synopsis).not.toHaveTextContent("alert-original");
+  expect(
+    within(dialog).queryByText("命中相同 IOC 域名 suspicious.example"),
+  ).not.toBeInTheDocument();
+  fireEvent.click(synopsis.closest("summary")!);
+  expect(panel).toHaveAttribute("open");
+  expect(within(panel).getByText("random.example")).toBeInTheDocument();
+});
+
+it("keeps observation and externally-ended follow-up labels instead of overwriting with generic insufficient badges", async () => {
+  const watching = member({
+    assessment: {
+      status: "insufficient",
+      label: "证据不足 · 待观察",
+      verdict: "unknown",
+      notify_eligible: false,
+      reason: "待后续证据",
+      lifecycle: "observing",
+      observation_rounds: 2,
+    },
+  });
+  const ended = member({
+    id: "event-2",
+    key: "device-a:incident:event-2",
+    assessment: {
+      status: "insufficient",
+      label: "已由他人处置 · 已结束",
+      verdict: "unknown",
+      notify_eligible: false,
+      reason: "XDR已回查处置状态",
+      lifecycle: "external_closed",
+      ended: true,
+      external: true,
+    },
+  });
+  vi.mocked(monitoringEventsApi.list).mockResolvedValue(
+    response({
+      items: [
+        row({
+          members: [watching, ended],
+          assessment_counts: { insufficient: 2 },
+          assessment_status: "insufficient",
+          assessment_label: "包含不同跟进状态",
+        }),
+      ],
+    }) as never,
+  );
+  renderPage();
+  const aggregate = within(
+    (await screen.findByText("包含不同跟进状态")).closest("tr")!,
+  );
+  expect(aggregate.queryByText("证据不足 · 暂忽略")).not.toBeInTheDocument();
+  fireEvent.click(
+    aggregate.getByRole("button", { name: "展开子事件：group-a" }),
+  );
+  expect(
+    screen.getByText("证据不足 · 待观察", { selector: "span" }),
+  ).toBeInTheDocument();
+  expect(screen.getByText("已由他人处置 · 已结束")).toBeInTheDocument();
+  expect(screen.getByText("已观察 2 轮")).toBeInTheDocument();
+});
+
+it("shows concise operator copy only for current ready high-confidence evidence-backed conclusions", async () => {
+  const value = detail({
+    overview: {
+      conclusion: "原始调查依据保留在技术明细。",
+      operator_summary: "已确认主机持续访问恶意目标，需要处置。",
+      operator_explanation: [
+        "网络记录显示连续异常访问。",
+        "对应异常程序尚未清理。",
+      ],
+    },
+  });
+  value.data.event.assessment = {
+    ...value.data.event.assessment!,
+    is_current: true,
+    evidence_supported: true,
+  };
+  value.data.event.investigation = {
+    state: "ready",
+    is_current: true,
+    verdict: "risk",
+  };
+  value.data.investigation!.is_current = true;
+  value.data.investigation!.result!.verdict = "risk";
+  value.data.investigation!.result!.confidence = "high";
+  vi.mocked(monitoringEventsApi.detail).mockResolvedValue(value as never);
+  renderPage();
+  fireEvent.click(
+    await screen.findByRole("button", { name: "查看事件详情：group-a" }),
+  );
+  const dialog = screen.getByRole("dialog");
+  const summary = await within(dialog).findByText(
+    "已确认主机持续访问恶意目标，需要处置。",
+  );
+  expect(summary).toHaveClass("font-semibold");
+  expect(
+    within(dialog).getByText("网络记录显示连续异常访问。"),
+  ).toBeInTheDocument();
+  expect(
+    within(dialog).getByText("对应异常程序尚未清理。"),
+  ).toBeInTheDocument();
+  expect(
+    within(dialog).queryByText("原始调查依据保留在技术明细。"),
+  ).not.toBeInTheDocument();
+});
+
+it.each([
+  { confidence: "low", verdict: "risk" as const, evidenceSupported: true },
+  { confidence: "high", verdict: "unknown" as const, evidenceSupported: true },
+])(
+  "keeps the assessed reason when operator prose is unqualified: $confidence / $verdict",
+  async ({ confidence, verdict, evidenceSupported }) => {
+    const assessedReason = "证据不足，继续观察；尚未证实感染。";
+    const value = detail({
+      overview: {
+        conclusion: assessedReason,
+        operator_summary: "错误宣称已经确认感染，需要立即处置。",
+        operator_explanation: ["不应展示为确证依据的旧模型文案。"],
+      },
+    });
+    value.data.event.assessment = {
+      status: "insufficient",
+      label: "证据不足 · 待观察",
+      verdict,
+      notify_eligible: false,
+      reason: assessedReason,
+      is_current: true,
+      evidence_supported: evidenceSupported,
+    };
+    value.data.event.investigation = {
+      state: "ready",
+      is_current: true,
+      verdict,
+    };
+    value.data.investigation!.is_current = true;
+    value.data.investigation!.result!.verdict = verdict;
+    value.data.investigation!.result!.confidence = confidence;
+    vi.mocked(monitoringEventsApi.detail).mockResolvedValue(value as never);
+    renderPage();
+    fireEvent.click(
+      await screen.findByRole("button", { name: "查看事件详情：group-a" }),
+    );
+    const dialog = screen.getByRole("dialog");
+    expect(await within(dialog).findByText(assessedReason)).toBeInTheDocument();
+    expect(
+      within(dialog).queryByText("错误宣称已经确认感染，需要立即处置。"),
+    ).not.toBeInTheDocument();
+    expect(
+      within(dialog).queryByText("不应展示为确证依据的旧模型文案。"),
+    ).not.toBeInTheDocument();
+  },
+);

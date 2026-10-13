@@ -8,6 +8,13 @@ export type EventAssessmentStatus =
   | "benign"
   | "insufficient";
 export interface EventAssessment {
+  lifecycle?: string;
+  observation_rounds?: number;
+  target_status?: number | null;
+  external?: boolean;
+  ended?: boolean;
+  suspected_risk?: boolean;
+  lifecycle_reason?: string;
   status: EventAssessmentStatus;
   label: string;
   verdict: "risk" | "benign" | "unknown";
@@ -129,13 +136,30 @@ export interface EventListResponse {
   truncated: boolean;
   warnings: string[];
 }
+export interface EventEvidenceCard {
+  id: string;
+  kind?: "network" | "domain" | "file" | "process" | "request" | "observation";
+  summary: string;
+  source: string;
+  time?: string | number | null;
+  partial?: boolean;
+  boundary?: string;
+  fields?: { key: string; label: string; value: unknown }[];
+  packets?: { field: string; label: string; text: string; truncated?: boolean }[];
+  query?: unknown;
+  raw?: unknown;
+  evidence_id?: string;
+}
 export interface EventDetailResponse {
   story?: Record<string, unknown>;
   overview?: {
     basics?: Record<string, unknown>;
     conclusion?: string;
+    operator_summary?: string;
+    operator_explanation?: string[];
     verdict?: string;
     evidence?: { text: string; time?: string | number }[];
+    evidence_cards?: EventEvidenceCard[];
     timeline?: { time: string | number; text: string }[];
     gaps?: string[];
   };

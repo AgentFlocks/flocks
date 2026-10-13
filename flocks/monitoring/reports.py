@@ -36,6 +36,8 @@ async def snapshot(owner, scope, day):
             'AND EXISTS(SELECT 1 FROM monitor_observations o JOIN monitor_attempts a ON a.id=o.attempt_id '
             'WHERE a.owner=i.owner AND a.scope=? AND a.project=i.project AND a.business_date=? AND o.event_key=i.event_key)',
             (owner, owner, scope, scope, day))
+        from .followup import PROJECTION_COLUMNS
+        followups = await select(f'SELECT {PROJECTION_COLUMNS} FROM monitor_event_followup f WHERE owner=? AND scope=? AND project=(SELECT project FROM monitor_installations WHERE owner=? AND scope=?) AND EXISTS(SELECT 1 FROM monitor_observations o JOIN monitor_attempts a ON a.id=o.attempt_id WHERE a.owner=f.owner AND a.scope=f.scope AND a.project=f.project AND a.business_date=? AND o.event_key=f.event_key)', (owner, scope, owner, scope, day))
         mail_notices = await select('SELECT id,state,created_at,updated_at,sent_at FROM monitor_mail_notices WHERE owner=? AND project=(SELECT project FROM monitor_installations WHERE owner=? AND scope=?)', (owner, owner, scope))
         mail_replies = await select('SELECT state,received_at FROM monitor_mail_replies WHERE owner=? AND project=(SELECT project FROM monitor_installations WHERE owner=? AND scope=?)', (owner, owner, scope))
         mail_settings = await select('SELECT enabled FROM monitor_mail_settings WHERE owner=? AND project=(SELECT project FROM monitor_installations WHERE owner=? AND scope=?)', (owner, owner, scope))
@@ -56,7 +58,7 @@ async def snapshot(owner, scope, day):
         events[item['event_key']] = event
     for disposition in dispositions:
         event = events.get(disposition['event_key'])
-        if event is None or disposition['mode'] in ('automatic', 'mail', 'mail_manual') and disposition['project'] != event['projectID']:
+        if event is None or disposition['mode'] in ('automatic', 'mail', 'mail_manual', 'followup') and disposition['project'] != event['projectID']:
             continue
         event['dispositionRecord'] = disposition
         # Re-sampling an unchanged terminal event must not undo a verified test.
@@ -70,7 +72,9 @@ async def snapshot(owner, scope, day):
         from .disposition import status_label
         event['disposition'] = f"{status_label(disposition['target_status'])}，回查确认" if verified else '待确认处置结果' if disposition['status'] in ('writing', 'pending', 'mismatch') else '待跟进'
     cases = {case['event_key']: case for case in investigations}
-    from .assessment import assess_event
+    from .assessment import assess_event, apply_followup
+    from .followup import projection
+    followups = {item['event_key']: projection(item) for item in followups}
     for event in events.values():
         # Keep the daily projection aligned with the event ledger and notification
         # rule. Old severity-only observations are not confirmed risk findings.
@@ -79,7 +83,7 @@ async def snapshot(owner, scope, day):
             handling='closed' if event.get('closure') == 'closed' else None)
         from .investigation import fingerprint
         historic = (isinstance(persisted_assessment, dict)
-            and persisted_assessment.get('policy_version') == 1
+            and persisted_assessment.get('policy_version') in {1, 2}
             and persisted_assessment.get('event_revision') == fingerprint(event)
             and persisted_assessment.get('status') in {'risk_open', 'risk_closed', 'benign', 'insufficient'})
         # A new activity version cannot rewrite the facts of a historical day.
@@ -90,6 +94,12 @@ async def snapshot(owner, scope, day):
             event['closure'] = 'closed'
             event['closureSource'] = 'xdr'
             event['disposition'] = 'XDR 来源状态为处置完成'
+        event['assessment'] = apply_followup(event['assessment'], event, followups.get(event['key']))
+        lifecycle = followups.get(event['key'], {})
+        if event['assessment'].get('ended') and lifecycle.get('observed_status') in {40, 60}:
+            event['closure'] = 'closed' if lifecycle['observed_status'] == 40 else 'ignored'
+            event['closureSource'] = 'external' if lifecycle.get('external') else 'monitor_verified'
+            event['disposition'] = event['assessment']['label']
         event['risk'] = event['assessment']['verdict']
         event['reason'] = event['assessment']['reason']
         if event['closure'] == 'ignored':
@@ -156,7 +166,7 @@ async def snapshot(owner, scope, day):
                         'unknown': sum(e['risk'] == 'unknown' for e in events.values()),
                         'benign': sum(e['assessment']['status'] == 'benign' for e in events.values()),
                         'insufficient': sum(e['assessment']['status'] == 'insufficient' for e in events.values()),
-                        'ignored': sum(e['risk'] in ('ignored', 'benign') for e in events.values())},
+                        'ignored': sum(e.get('closure') == 'ignored' for e in events.values())},
             'mail': {'enabled': bool(mail_settings and mail_settings[0]['enabled']), 'health': mail_health,
                      'sentToday': sum(n['state']=='sent' and datetime.fromisoformat(n['sent_at'] or n['updated_at']).astimezone(tz).date().isoformat()==day for n in mail_notices),
                      'receivedToday': sum(datetime.fromisoformat(r['received_at']).astimezone(tz).date().isoformat()==day for r in mail_replies),

@@ -105,17 +105,19 @@ async def test_persisted_step_results_and_order(tmp_path, monkeypatch, mode):
     assert '本轮' in ending and '邮件跟进未启用' in ending
     if mode == 'empty':
         assert '当前时间范围和筛选条件下没有可分析事件' in ending
-    if mode in ('query_failure', 'late_failure'):
+    if mode == 'query_failure':
         assert '不能据此说没有告警' in ending
+    elif mode == 'late_failure':
+        assert '已保存查询结果 100 条' in ending and '不能把失败视为 0 条事件' in combined
     if mode == 'empty':
         assert '本轮 XDR 安全事件查询到 0 条事件' in combined
         assert len(calls) == 1 and len(texts) == 2
         assert '本轮查询返回 0 条，纳入历史待办 0 条' in texts[-1].text
     elif mode in ('query_failure', 'late_failure'):
         assert attempt['status'] == 'failed'
-        assert not await rows('SELECT * FROM monitor_observations')
+        assert len(await rows('SELECT * FROM monitor_observations')) == (100 if mode == 'late_failure' else 0)
         assert not await rows('SELECT * FROM monitor_cursors')
-        assert '关联分析已跳过' in combined
+        assert ('已保存查询结果 100 条' if mode == 'late_failure' else '关联分析已跳过') in combined
         assert '上次查询进度保持不变' in combined
         assert '本轮 XDR 安全事件查询到 0 条事件' not in combined
         assert any(step['status'] == 'failed' for step in steps)

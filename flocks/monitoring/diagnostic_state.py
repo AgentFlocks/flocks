@@ -42,7 +42,9 @@ def task_state(owner, scope):
         with read_only_connection() as db:
             journal = db.execute('PRAGMA journal_mode').fetchone()[0]
             state['journal_mode'] = journal if journal in {'wal', 'delete', 'truncate', 'persist', 'memory', 'off'} else 'unknown'
-            row = db.execute('SELECT scheduler_id,installed,ready FROM monitor_installations '
+            columns = {item[1] for item in db.execute('PRAGMA table_info(monitor_installations)')}
+            extras = ',project,policy' if {'project','policy'} <= columns else ''
+            row = db.execute('SELECT scheduler_id,installed,ready' + extras + ' FROM monitor_installations '
                              'WHERE owner=? AND scope=?', (owner, scope)).fetchone()
             if row is None:
                 return {**state, 'snapshot_available': True, 'installed': False}
@@ -56,6 +58,11 @@ def task_state(owner, scope):
                                 'GROUP BY status', (row['scheduler_id'],)).fetchall()
             executions = db.execute('SELECT id,status,created_at,started_at,completed_at FROM task_executions '
                                     'WHERE scheduler_id=? ORDER BY created_at DESC LIMIT 5', (row['scheduler_id'],)).fetchall()
+            followup_counts = {}
+            if extras and db.execute("SELECT 1 FROM sqlite_master WHERE name='monitor_event_followup'").fetchone():
+                followup_counts = {item['state']: item['n'] for item in db.execute('SELECT state,COUNT(*) AS n FROM monitor_event_followup WHERE owner=? AND scope=? AND project=? GROUP BY state', (owner, scope, row['project'])).fetchall()}
+            policy = json.loads(row['policy']) if extras else {}
+            observation_rounds = policy.get('observation_rounds', 6)
             overdue = None
             if next_run:
                 parsed = datetime.fromisoformat(next_run)
@@ -65,6 +72,7 @@ def task_state(owner, scope):
             return {**state, 'snapshot_available': True, 'installed': bool(row['installed']), 'ready': bool(row['ready']),
                     'scheduler_present': scheduler is not None,
                     'scheduler_status': scheduler['status'] if scheduler and scheduler['status'] in {'active', 'disabled', 'paused', 'completed'} else 'unknown',
+                    'followup_counts': followup_counts, 'observation_rounds': observation_rounds if type(observation_rounds) is int else None,
                     'next_run': next_run, 'overdue_seconds': overdue,
                     'execution_counts': {item['status']: item['n'] for item in counts if item['status'] in {'pending', 'queued', 'running', 'completed', 'failed', 'cancelled'}},
                     'recent_executions': [{'execution': opaque(item['id']), 'status': item['status'] if item['status'] in {'pending', 'queued', 'running', 'completed', 'failed', 'cancelled'} else 'unknown',

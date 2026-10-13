@@ -245,7 +245,10 @@ async def test_full_pagination_missing_page_does_not_advance_cursor(policy):
     result = await run(execution, policy, Failed)
     assert result.action == 'error'
     assert not await rows('SELECT * FROM monitor_cursors')
-    assert not await rows('SELECT * FROM monitor_observations')
+    observed = await rows('SELECT * FROM monitor_observations')
+    assert len(observed) == 100  # Successful first page survives the later failure.
+    assert all(json.loads(item['data'])['query_batch_complete'] is False for item in observed)
+    assert all(item['watch_count'] == 0 for item in await rows('SELECT * FROM monitor_event_followup'))
 
 @pytest.mark.asyncio
 async def test_empty_events_complete_but_entity_failure_fails(policy, monkeypatch):

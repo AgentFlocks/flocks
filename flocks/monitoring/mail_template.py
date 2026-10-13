@@ -12,10 +12,10 @@ from zoneinfo import ZoneInfo
 
 from .event_details import FIELD_LABELS, normalize_basics, redact_text
 
-TEMPLATE_VERSION = 1
-_IDS = re.compile(r'\b(?:incident|alert)-[A-Za-z0-9-]+\b|\b[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\b', re.I)
-_REFS = re.compile(r'\[?\bevidence[-_]\d+\b\]?', re.I)
-_RAW_ENUM = re.compile(r'\b(?:gptResult|attack_result|attackResult|attackState|attack_state|incidentSeverity|threatLevel|firstTime|lastTime)\s*[=:：]\s*[\w.-]+(?:[（(][^）)]*[）)])?', re.I)
+TEMPLATE_VERSION = 2
+_IDS = re.compile(r'(?<![A-Za-z0-9_-])(?:(?:incident|alert)-[A-Za-z0-9-]+|[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})(?![A-Za-z0-9_-])', re.I)
+_REFS = re.compile(r'\[?(?<![A-Za-z0-9_-])(?:evidence|cap)[-_]\d+(?![A-Za-z0-9_-])\]?', re.I)
+_RAW_ENUM = re.compile(r'(?<![A-Za-z0-9_])(?:gptResult|attack_result|attackResult|attackState|attack_state|incidentSeverity|threatLevel|firstTime|lastTime)\s*(?:[=:：]|为)\s*[\w./-]+(?:[（(][^）)]*[）)])?', re.I)
 _INTERNAL = re.compile(r'查询失败|查询未完成|item\s*返回|authserv|预算|剩余调用|未绑定|模型|evidence|traceback|json|SQL 可疑片段只证明|状态码本身不证明', re.I)
 
 
@@ -44,6 +44,7 @@ def readable_text(value, limit=500):
     text = re.sub(r'\b(?:WAIT_DEAL|BLOCK_FAILED|BLOCK_SUCCESS|UNBLOCK_SUCCESS|DEAL_SUCCESS)\b',
                   lambda m: {'WAIT_DEAL': '待处置', 'BLOCK_FAILED': '阻断未成功', 'BLOCK_SUCCESS': '已阻断',
                              'UNBLOCK_SUCCESS': '已解除阻断', 'DEAL_SUCCESS': '已完成处置'}[m[0]], text)
+    text = re.sub(r'[（(]\s*[）)]', '', text)
     text = re.sub(r'\s+', ' ', text)
     text = re.sub(r'(?:[；;,，]\s*){2,}', '；', text)
     text = re.sub(r'\s*([，。；：])\s*', r'\1', text).strip(' ；;，,:：。[]')
@@ -79,30 +80,88 @@ def _severity(basics):
     return text if text in {'严重', '高危', '中危', '低危', '信息', '未分级'} else '未提供'
 
 
-def _conclusion(story):
-    sentences = re.split(r'(?<=[。！？])|\n+', _text(story.get('conclusion'), 4000))
-    cleaned = [readable_text(s, 240) for s in sentences if s.strip()]
-    useful = [s for s in cleaned if not _INTERNAL.search(s)]
-    useful = [s for s in useful if s and not re.fullmatch(r'[\W\d]+', s)]
-    # Keep the owner's immediate decision separate from investigation prose.
-    return '；'.join(useful[:3])[:420] or '已取得与本事件一致的异常行为证据，确认存在安全风险，需要责任人核查并处置。'
+def _sentence(value, limit=180, *, max_sentences=1):
+    """Accept an operator sentence only when it contains no execution metadata."""
+    raw = str(value or '')
+    # First/last observations do not establish uninterrupted activity. Keep
+    # the actual dates in the source timeline rather than guessed durations.
+    duration_claim = re.search(r'(?:持续|连续|长达|已有|近|约)\s*(?:约\s*)?[一二三四五六七八九十百零两\d.]+\s*(?:个?月|年|天|周|小时|分钟)', raw)
+    if (duration_claim or _REFS.search(raw) or _IDS.search(raw) or _RAW_ENUM.search(raw)
+            or re.search(r'gptResult|attack_result|attackResult|attackState|incidentSeverity|threatLevel|firstTime|lastTime', raw, re.I)
+            or re.search(r'(?<![A-Za-z0-9_])\d{10,13}(?![A-Za-z0-9_])', raw)):
+        return ''
+    value = readable_text(value, 2000)
+    if value in {'None', 'null'}:
+        return ''
+    if not value or _INTERNAL.search(value) or len(re.findall(r'[。！？]', value)) > max_sentences:
+        return ''
+    # Never publish a clipped sentence with a missing condition or negation.
+    # Long audit reasons remain in the incident details instead.
+    if len(value) > limit:
+        return ''
+    return value.rstrip('。；; ') + '。'
+
+
+def _conclusion(event, story, facts):
+    """Lead with a decision, then separate its concrete supporting observations.
+
+    The caller has already enforced confirmed-risk eligibility. The operator
+    fields are generated during that same investigation, not by a new model
+    call. Historical results fall back to structured observations, never to a
+    truncated wall of technical reasoning.
+    """
+    summary = _sentence(story.get('operator_summary'), 120)
+    if not summary:
+        host = _text(event.get('host') or story.get('basics', {}).get('host'), 100)
+        summary = f'已确认主机 {host} 存在需要处置的安全风险。' if host else '本事件已确认存在安全风险，需要责任人处置。'
+    explanation = []
+    for value in story.get('operator_explanation', [])[:3] if isinstance(story.get('operator_explanation'), list) else []:
+        sentence = _sentence(value)
+        if sentence and sentence != summary and sentence not in explanation:
+            explanation.append(sentence)
+    historic = _sentence(story.get('conclusion'), 180)
+    if not explanation and historic and historic != summary:
+        explanation.append(historic)
+    if len(explanation) < 2:
+        for fact in facts:
+            sentence = _sentence(fact.get('narrative') or fact.get('summary'), 240, max_sentences=2)
+            if sentence and sentence != summary and sentence not in explanation:
+                explanation.append(sentence)
+            if len(explanation) == 2 or sentence.count('。') == 2:
+                break
+    return summary, explanation[:3]
 
 
 def _timeline(story, timezone_name):
-    entries = [item for item in story.get('timeline', [])[:40] if isinstance(item, dict)]
+    cards = story.get('evidence_cards')
+    verified_refs = {card.get('evidence_id') for card in cards if isinstance(card, dict) and card.get('evidence_id')} if isinstance(cards, list) else None
+    entries = [item for item in story.get('timeline', [])[:40] if isinstance(item, dict)
+               and (verified_refs is None or item.get('evidence_id') in verified_refs or item.get('evidence_id') == '事件基础信息')]
     # Alert first/last activity and concrete endpoints make the chronology
     # useful to an operator. They are source facts, never collection timestamps.
     for item in story.get('alert_details', [])[:20]:
-        if not isinstance(item, dict):
+        if not isinstance(item, dict) or verified_refs is not None and item.get('evidence_id') not in verified_refs:
             continue
         name = readable_text(item.get('name'), 100)
         if not name:
             continue
         activity = name
         if item.get('src_ip') and item.get('dst_ip'):
-            activity += f"；主机 {_text(item['src_ip'], 80)} → {_text(item['dst_ip'], 80)}"
-            if item.get('dst_port'):
-                activity += '，目的端口 ' + _text(item['dst_port'], 50)
+            source, destination = _text(item['src_ip'], 80), _text(item['dst_ip'], 80)
+            port = _text(item.get('dst_port'), 50)
+            dns = bool(re.fullmatch(r'53(?:[、,; ]53)*', port))
+            if dns:
+                activity = f'主机 {source} 向 DNS 服务器 {destination} 发起域名解析请求'
+                if item.get('domain'):
+                    domains = item['domain'] if isinstance(item['domain'], list) else re.split(r'[、，,;；\s]+', str(item['domain']))
+                    activity += '，涉及 ' + '、'.join(_text(value, 100) for value in domains[:3])
+                    if len(domains) > 3:
+                        activity += ' 等域名'
+                activity += '；来源记录行为「' + name + '」'
+            else:
+                activity += f'；主机 {source} → {destination}'
+                if port:
+                    activity += '，目的端口 ' + port
         for field, label in (('start_time', '首次记录'), ('end_time', '最近记录'), ('alert_time', '记录')):
             if item.get(field) is not None:
                 entries.append({'time': item[field], 'text': label + '「' + activity + '」'})
@@ -122,10 +181,15 @@ def _timeline(story, timezone_name):
     result = [(time, text) for time, text in result if not any(
         time == other_time and text != other_text and '「' in other_text and text in other_text
         for other_time, other_text in result)]
-    return result[:12]
+    concrete = [(time, text) for time, text in result if text.startswith(('首次记录「', '最近记录「', '记录「'))]
+    result = [(time, text) for time, text in result if not any(
+        time == other_time and text != other_text and (text.startswith('XDR 记录事件')
+        or '：' in text and text.rsplit('：', 1)[-1] in other_text)
+        for other_time, other_text in concrete)]
+    return result if len(result) <= 12 else [*result[:6], *result[-6:]]
 
 
-def _evidence(story, timezone_name):
+def _legacy_evidence(story, timezone_name):
     """Project structured recorded activity, avoiding a dump of raw fields."""
     result, seen = [], set()
     for item in story.get('alert_details', [])[:20]:
@@ -234,18 +298,135 @@ def _evidence(story, timezone_name):
     return result[:6]
 
 
-def _handling_advice(name, host):
-    """Owner tasks suggested by event type, never claims of actions executed."""
+def _evidence(story, timezone_name):
+    """One observation per line, with a short meaning followed by source facts."""
+    cards = story.get('evidence_cards')
+    result, seen = [], set()
+    if isinstance(cards, list):
+        # These cards come from the same bounded, sanitized query results as
+        # the incident details. Do not re-interpret private raw source fields.
+        allowed = {'影响主机', '主机', '源 IP', '目的 IP', '目的端口', '影响域名', '域名',
+                   '请求地址', 'URL', '文件名称', '文件路径', '病毒名称', '进程名称', '命令行',
+                   '来源发生时间', '告警时间', '首次发生时间', '最近发生时间', '威胁子类型', '文件创建时间',
+                   '来源情报标签', '来源威胁定义', '请求方法'}
+        for card in cards[:30]:
+            if not isinstance(card, dict):
+                continue
+            summary = readable_text(card.get('summary'), 300)
+            if not summary:
+                continue
+            details = []
+            fields = card.get('fields', []) if isinstance(card.get('fields'), list) else []
+            by_kind = {
+                'network': {'src_ip', 'dst_ip', 'dst_port', 'domain'},
+                'domain': {'domain', 'intelligenceTag', 'threatDefineName'},
+                'file': {'file_name', 'file_path', 'virus_name', 'file_created_at'},
+                'process': {'process_name', 'command_line'},
+                'request': {'url', 'method'},
+            }
+            selected = by_kind.get(card.get('kind'))
+            priority = {'domain': 0, 'virus_name': 1, 'process_name': 2, 'command_line': 3, 'file_path': 4, 'file_name': 5, 'dst_ip': 6, 'dst_port': 7, 'src_ip': 8}
+            fields = sorted((field for field in fields if isinstance(field, dict)), key=lambda field: priority.get(field.get('key'), 20))
+            for field in fields:
+                if field.get('label') not in allowed or selected is not None and field.get('key') not in selected:
+                    continue
+                title = field['label']
+                value = field.get('value')
+                if value is None or value == '' or value == []:
+                    continue
+                if title in {'来源发生时间', '告警时间', '首次发生时间', '最近发生时间'}:
+                    continue  # the card's explicit source time is displayed once
+                if isinstance(value, list):
+                    value = '、'.join(str(item) for item in value[:3]) + ('等' if len(value) > 3 else '')
+                elif title in {'影响域名', '域名'}:
+                    values = re.split(r'[、，,;；\s]+', str(value))
+                    value = '、'.join(values[:3]) + ('等' if len(values) > 3 else '')
+                if field.get('key') == 'file_created_at':
+                    value = display_time(value, timezone_name)
+                    if value:
+                        details.append('文件创建于 ' + value)
+                    continue
+                if title == '命令行':
+                    value = redact_text(str(value))[:180]
+                else:
+                    value = readable_text(value, 180)
+                if value:
+                    details.append(title + '：' + value)
+            stamp = display_time(card.get('time'), timezone_name)
+            source = readable_text(card.get('source'), 70)
+            kind = card.get('kind')
+            values = {field.get('key'): field.get('value') for field in fields}
+            port = values.get('dst_port')
+            ports = port if isinstance(port, list) else [port]
+            dns = bool(ports) and all(str(value) == '53' for value in ports)
+            headlines = {
+                'network': '记录到主机的DNS解析请求，提供相关域名访问依据。' if dns else '记录到主机对目标地址的访问，提供外联行为依据。',
+                'domain': '提供关联域名及其情报，供核对该域名的威胁性质。',
+                'file': '定位到相关文件，提供检出样本及存放位置依据。',
+                'process': '记录到相关程序的执行，提供进程及启动方式依据。',
+                'request': '请求记录中出现SQL注入特征，支持攻击尝试判断。' if 'SQL' in summary else '提供请求与响应记录，供核对实际访问内容。',
+            }
+            headline = source + headlines[kind] if kind in headlines else summary
+            tag = readable_text(values.get('intelligenceTag') or values.get('threatDefineName'), 45)
+            if tag and kind == 'network':
+                activity = 'DNS查询' if dns else '网络访问'
+                headline = f'{source}记录到涉及「{tag}」的{activity}，支持相关风险判断。'
+            elif tag and kind == 'domain':
+                headline = f'{source}将关联域名标记为「{tag}」，提供域名风险线索。'
+            detail = '；'.join(details[:4])
+            if source and not summary.startswith(source):
+                detail = '来源：' + source + ('；' + detail if detail else '')
+            marker = (headline, detail, stamp)
+            if marker in seen:
+                continue
+            result.append({'time': stamp or '发生时间不详（来源未提供）',
+                           'summary': headline.rstrip('。') + '。', 'narrative': summary, 'detail': detail})
+            seen.add(marker)
+            if len(result) == 6:
+                break
+        return result
+    # Compatibility with saved investigations created before evidence cards.
+    # Their raw facts stay in the detail page; the mail retains only selected
+    # observations and their qualified meaning.
+    for fact in _legacy_evidence(story, timezone_name):
+        meaning = fact.get('meaning', '').strip()
+        text = fact.get('text', '').strip()
+        if not text:
+            continue
+        # Preserve execution syntax in the detail, but put its significance
+        # first. DNS observations support a query, not an established C2 link.
+        dns = bool(re.search(r'目的端口[ ：]*53(?:\D|$)', text))
+        if dns:
+            summary = 'DNS记录证明主机发起了域名解析请求，提供相关访问行为依据。'
+            text = text.replace('发起通信', '发起DNS查询').replace(' 通信', '发起DNS查询')
+        elif '来源记录进程' in text or '程序执行' in text:
+            summary = '进程与命令行记录提供程序执行及启动方式的依据。'
+        elif '来源记录文件' in text:
+            summary = '文件记录提供定位相关样本及其来源的依据。'
+        else:
+            summary = meaning or '来源记录提供本事件相关行为的依据。'
+        marker = (summary, text)
+        if marker not in seen:
+            result.append({'time': fact.get('time', ''), 'summary': summary, 'detail': text})
+            seen.add(marker)
+    return result[:6]
+
+
+def _handling_advice(name, host=''):
+    """A concrete, brief recommendation, never a claim of executed actions."""
     lower = name.lower()
-    if any(term in lower for term in ('蠕虫', '病毒', '木马', 'dga', '挖矿', '远控')):
-        return f'请排查主机 {host} 的可疑进程、启动项及异常域名访问；按本单位流程处理恶意项，并复查异常通信是否停止。'
-    if any(term in lower for term in ('sql', '注入', '目录遍历', 'web', '跨站')):
-        return f'请核查主机 {host} 的相关访问日志、异常请求及服务暴露情况，处理攻击来源和可利用的问题，并复查是否存在异常操作。'
+    # fakewebsite is a DNS/phishing threat family, not a Web application flaw.
+    if any(term in lower for term in ('fakewebsite', 'phishing', 'dga', '域名', '钓鱼')):
+        return '隔离受影响主机，清理恶意项，阻断恶意域名并复查。'
+    if any(term in lower for term in ('蠕虫', '病毒', '木马', '挖矿', '远控', '恶意软件')):
+        return '隔离受影响主机，清除恶意程序及启动项，复查异常外联。'
+    if any(term in lower for term in ('sql', '注入', '目录遍历', '跨站', '漏洞')):
+        return '阻断攻击来源，修复受影响接口并清除入侵遗留，复查利用迹象。'
     if any(term in lower for term in ('登录', '口令', '密码', '爆破')):
-        return f'请核查主机 {host} 的账号登录日志、来源地址及成功登录情况，处理异常账号或访问，并复查是否仍有异常活动。'
+        return '停用异常账号并重置凭据，限制异常登录来源，复查访问记录。'
     if any(term in lower for term in ('shell', 'netcat', '命令', '进程')):
-        return f'请核查主机 {host} 的相关进程、命令行及外联连接，确认业务归属，处理未经授权的活动并复查。'
-    return f'请核查主机 {host} 的上述异常活动，并按本单位安全处置要求处理和复查。'
+        return '隔离受影响主机，终止恶意进程并清除持久化项，复查外联。'
+    return '隔离受影响资产，按上述证据清除恶意项并复查异常是否停止。'
 
 
 def render_notification(event, story, responsible_name='', *, timezone_name='Asia/Shanghai'):
@@ -263,31 +444,27 @@ def render_notification(event, story, responsible_name='', *, timezone_name='Asi
     period = start + (' — ' + end if end and end != start else '') if start else end or '来源未提供'
     details = [('监测设备', device), ('影响主机', host), ('风险等级', _severity(basics)),
                ('发生时间', period), ('处置责任人', person)]
-    conclusion = _conclusion(story)
     evidence = _evidence(story, timezone_name)
+    conclusion, explanation = _conclusion(event, story, evidence)
     timeline = _timeline(story, timezone_name)
-    # Nonblocking investigation limitations can help the owner locate a threat.
-    # Technical diagnostics and unresolved judgement gaps never appear in mail.
-    gaps = [readable_text(g, 160) for g in story.get('gaps', [])
-            if isinstance(g, str) and not _INTERNAL.search(g) and
-            re.search(r'感染途径|变种|样本|文件位置|所属(?:业务|人员)|根因', g)]
-    gaps = list(dict.fromkeys(g for g in gaps if g))[:2]
-    actions = [_handling_advice(name, host),
-               '完成后请直接回复本邮件，说明处理措施、处理结果及复查情况；如暂未完成，请说明当前进展。',
-               '系统将在后续监测中读取回复、核对处理结果，并更新事件状态。']
+    advice = _handling_advice(name, host)
+    # A notification is a request to remedy a confirmed risk, not another
+    # request for the owner to repeat the investigation. Nonblocking forensic
+    # gaps remain available in the incident detail page.
+    actions = ['完成后请直接回复本邮件，说明处理措施和结果；如暂未完成，请说明当前进展。',
+               '系统将在下一轮监测中读取反馈，更新事件状态并回查确认。']
     footer = '事件编号：' + _text(event.get('id'), 160)
     subject = re.sub(r'[\r\n]', ' ', f'安全事件处置通知 · {name} · {device} · {host}')[:240]
-    lines = [f'{person}：', '', f'【需要处置】{name}', '', '调查结论', conclusion, '', '基本信息']
+    lines = [f'{person}：', '', f'【需要处置】{name}', '', '调查结论', conclusion, *explanation, '', '基本信息']
     lines += [f'{title}：{value}' for title, value in details]
     lines += ['', '关键证据']
-    lines += [f'- {fact["time"] + "：" if fact["time"] else ""}{fact["text"]}。{fact["meaning"]}' for fact in evidence]
+    lines += [f'- {fact["summary"]} {fact["time"] + "；" if fact["time"] else ""}{fact["detail"]}' for fact in evidence]
     if not evidence:
         lines.append('- 风险判断依据见上述调查结论。')
     lines += ['', '事件经过']
     lines += [f'- {time}：{text}' for time, text in timeline] or ['- 来源未提供可还原的详细发生时间，请结合上述行为核查。']
-    if gaps:
-        lines += ['', '处置时请补充核查', *['- ' + gap for gap in gaps]]
-    lines += ['', '请您处理', *['- ' + action for action in actions], '', footer,
+    lines += ['', '总结和处置建议', '总结：' + conclusion, '处置建议：' + advice]
+    lines += ['', '反馈方式', *['- ' + action for action in actions], '', footer,
               '如另起邮件反馈，请带上此事件编号，便于关联本次处置。']
     text = '\n'.join(lines)
 
@@ -303,19 +480,28 @@ def render_notification(event, story, responsible_name='', *, timezone_name='Asi
     table = '<table role="presentation" style="width:100%;border-collapse:collapse">' + ''.join(
         f'<tr><th style="text-align:left;vertical-align:top;width:100px;padding:7px 0;color:#64746c;font-weight:normal">{e(title)}</th>'
         f'<td style="padding:7px 0;color:#1c2c25">{e(value)}</td></tr>' for title, value in details) + '</table>'
-    evidence_html = bullets([f'{"<strong>" + e(fact["time"]) + "</strong><br>" if fact["time"] else ""}{e(fact["text"])}。<br><span style="color:#566b62">{e(fact["meaning"])}</span>' for fact in evidence]) if evidence else '<p>风险判断依据见上述调查结论。</p>'
+    evidence_html = bullets([f'<strong style="color:#1d4434">{e(fact["summary"])}</strong> '
+                             f'<span style="color:#526b5c">{e(fact["time"])}</span>'
+                             + (f'；{e(fact["detail"])}' if fact["detail"] else '')
+                             for fact in evidence]) if evidence else '<p>风险判断依据见上述调查结论。</p>'
+    def time_html(value):
+        clock, _, zone = str(value).partition('（')
+        return f'<span style="white-space:nowrap">{e(clock.strip())}</span>' + (f'<br><span style="font-size:12px">{e("（" + zone)}</span>' if zone else '')
+
     timeline_html = '<table role="presentation" style="width:100%;border-collapse:collapse">' + ''.join(
-        f'<tr><td style="padding:9px 12px 9px 0;width:165px;vertical-align:top;color:#456a5a;border-bottom:1px solid #edf2ef">{e(time)}</td>'
+        f'<tr><td style="padding:9px 12px 9px 0;width:165px;vertical-align:top;color:#456a5a;border-bottom:1px solid #edf2ef">{time_html(time)}</td>'
         f'<td style="padding:9px 0;vertical-align:top;border-bottom:1px solid #edf2ef">{e(description)}</td></tr>' for time, description in timeline) + '</table>' if timeline else '<p>来源未提供可还原的详细发生时间，请结合上述行为核查。</p>'
     html = ('<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"></head>'
             '<body style="margin:0;background:#f3f7f5;color:#202c26;font-family:Arial,\'Microsoft YaHei\',sans-serif;font-size:14px;line-height:1.75">'
             '<div style="max-width:720px;margin:24px auto;background:#ffffff;border:1px solid #dce9e1;border-radius:12px;padding:28px">'
             '<p style="margin:0 0 8px;color:#276747;font-size:13px;font-weight:bold">Flocks 安全运营 · 需要处置</p>'
             f'<h1 style="font-size:23px;line-height:1.45;margin:0 0 18px;color:#142b20">{e(name)}</h1><p>{e(person)}：</p>'
-            + section('调查结论', f'<div style="background:#ecf7f0;border-left:4px solid #35a06c;padding:14px 18px;border-radius:4px">{e(conclusion)}</div>')
+            + section('调查结论', f'<div style="background:#ecf7f0;border-left:4px solid #35a06c;padding:14px 18px;border-radius:4px"><strong>{e(conclusion)}</strong>'
+                      + ''.join(f'<p style="margin:8px 0 0">{e(sentence)}</p>' for sentence in explanation) + '</div>')
             + section('基本信息', table) + section('关键证据', evidence_html) + section('事件经过', timeline_html)
-            + (section('处置时请补充核查', bullets([e(gap) for gap in gaps])) if gaps else '')
-            + section('请您处理', bullets([e(action) for action in actions]))
+            + section('总结和处置建议', f'<p style="margin:0 0 8px">{e(conclusion)}</p>'
+                      + f'<p style="margin:0;padding:12px 16px;background:#edf5ff;border-radius:6px"><strong>处置建议：</strong>{e(advice)}</p>')
+            + section('反馈方式', bullets([e(action) for action in actions]))
             + f'<div style="margin-top:26px;padding-top:16px;border-top:1px solid #e3ece6;font-size:12px;color:#697a70;word-break:break-all">{e(footer)}<br>如另起邮件反馈，请带上此事件编号，便于关联本次处置。</div>'
             '</div></body></html>')
     return Notification(subject=subject, text=text, html=html)

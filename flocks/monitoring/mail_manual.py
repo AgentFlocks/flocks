@@ -13,10 +13,10 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict
 
 from flocks.session.interaction_policy import require_interactive
-from flocks.session.session import Session
 from . import disposition as d, diagnostics as diag
-from .adapter import ContractError, XdrAdapter
+from .adapter import ContractError
 from .automatic import read_event
+from .followup import event_version
 from .models import COMPONENT_ID, MonitoringPolicy
 from .store import connection, rows, write, encode
 
@@ -81,7 +81,7 @@ async def completion_claimed(owner, notice_id):
     return bool(await rows("SELECT 1 FROM monitor_mail_manual m JOIN monitor_dispositions d "
                            "ON d.id=m.id AND d.owner=m.owner AND d.scope=? "
                            "WHERE m.owner=? AND m.notice_id=? AND m.state='handled' "
-                           "AND d.status IN ('writing','pending','mismatch','verified') LIMIT 1",
+                           "AND d.status IN ('queued','writing','pending','mismatch','verified') LIMIT 1",
                            (COMPONENT_ID, owner, notice_id)))
 
 
@@ -96,7 +96,7 @@ async def snapshot(notice, *, previous=_UNSET, reply_present=None):
         result.update(state=state, request_id=previous['id'], error=previous['error'],
                       updated_at=previous['updated_at'] or previous['created_at'])
         if state in ('handled', 'pending'):
-            result['reason'] = '已处置并经 XDR 回查确认' if state == 'handled' else '处置已提交，等待回查；不会重复写回'
+            result['reason'] = '已处置并经 XDR 回查确认' if state == 'handled' else '已保存处理反馈，等待下一轮写回并回查' if previous['status'] == 'queued' else '处置已提交，等待回查；不会重复写回'
             return result
     event = notice['event'] if isinstance(notice['event'], dict) else json.loads(notice['event'])
     if event.get('development_sample'):
@@ -149,7 +149,7 @@ async def change(owner, notice_id, request: ManualMailRequest, adapter_factory=d
             async with connection() as db:
                 await db.execute('BEGIN IMMEDIATE')
                 unresolved = await db.execute("SELECT 1 FROM monitor_dispositions WHERE owner=? AND scope=? AND event_key=? "
-                                              "AND status IN ('writing','pending','mismatch') LIMIT 1",
+                                              "AND status IN ('queued','writing','pending','mismatch') LIMIT 1",
                                               (owner, COMPONENT_ID, notice['event_key']))
                 if await unresolved.fetchone():
                     raise ValueError('此告警已有处置待回查，不能再次提交')
@@ -158,55 +158,89 @@ async def change(owner, notice_id, request: ManualMailRequest, adapter_factory=d
                 if request.state == 'handled':
                     await db.execute('INSERT INTO monitor_dispositions(id,owner,scope,event_key,comment,status,created_at,updated_at,mode,target_status,project,decision) '
                                      'VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',
-                                     (request_id, owner, COMPONENT_ID, notice['event_key'], comment, 'writing', stamp, stamp,
-                                      'mail_manual', 40, policy.project, encode({'notice': notice_id, 'actor': owner})))
+                                     (request_id, owner, COMPONENT_ID, notice['event_key'], comment, 'queued', stamp, stamp,
+                                      'mail_manual', 40, policy.project, encode({'notice': notice_id, 'actor': owner, 'policy': policy.model_dump(mode='json'), 'event_version': event_version(event)})))
         if request.state == 'unhandled':
             return await snapshot(notice)
-        attempted = False
-        async with diag.trace_scope(owner, COMPONENT_ID, request_id):
-            try:
-                session = await Session.create(project_id=policy.project, directory=policy.directory,
-                    title='安全运营监测 · 发信人工处置', owner_user_id=owner,
-                    metadata={'monitorDisposition': request_id, 'monitorNotice': notice_id})
-                await write('UPDATE monitor_dispositions SET session_id=? WHERE owner=? AND id=?', (session.id, owner, request_id))
-                from .runtime import emit_message
-                from flocks.session.message import MessageRole
-                await emit_message(session.id, f'人工确认事件 {event["id"]} 已处置；写回 XDR 状态 40 并回查。通知：{notice_id}', role=MessageRole.USER)
-                adapter = adapter_factory(policy, session.id)
-                raw = await read_event(adapter, event)
-                current = raw.get('dealStatus')
-                if type(current) is not int or current not in d.LIST_RESPONSE_STATUSES:
-                    raise ContractError('XDR 当前处置状态无法识别')
-                if current == 40:
-                    await d.finish(owner, request_id, 'verified', current, defer_exports=True)
-                else:
-                    if current not in (0, 10, 30, 70):
-                        raise ContractError('XDR 状态已变化，不能覆盖已忽略或挂起的告警')
-                    # Never close new activity based on an older notification.
-                    expected_end = event.get('notified_end_time', event.get('endTime'))
-                    expected_host = event.get('notified_host', event.get('host'))
-                    if expected_end is None:
-                        raise ContractError('原告警缺少时间快照，无法确认是否出现新活动，本次未写回')
-                    if raw.get('endTime') != expected_end:
-                        raise ContractError('通知后告警出现新活动，本次未写回状态')
-                    if (raw.get('hostIp') or '') != (expected_host or ''):
-                        raise ContractError('通知后告警主机变化，本次未写回状态')
-                    async with lock(owner):
-                        _, actual, _ = await bound_notice(owner, notice_id)
-                        if actual != policy:
-                            raise ContractError('监测设备配置已变化，本次未写回状态')
-                        attempted = True
-                        with diag.span('mail.manual.mark', notice=diag.opaque(notice_id)):
-                            await d.operation(adapter, event, {'action': 'update_status', 'uuids': [event['id']],
-                                'deal_status': 40, 'deal_comment': comment}, '人工处理：将原告警标记为已处置')
-                    current = await d.read_status(adapter, event)
-                    await d.finish(owner, request_id, 'verified' if current == 40 else 'mismatch', current, defer_exports=True)
-            except BaseException as exc:
-                error = str(exc) if isinstance(exc, ContractError) else '处置未完成，请回查 XDR 状态；不会重复写入'
-                await d.finish(owner, request_id, 'pending' if attempted else 'failed', error=error, defer_exports=True)
-                if not isinstance(exc, Exception):
-                    raise
         return await snapshot(notice)
+
+
+async def _apply_queued(policy, candidate, session_id, adapter_factory):
+    """Apply a durable prior-round human feedback; unknown writes only recheck."""
+    from .mailflow import lock
+    owner, request_id, notice_id = policy.owner, candidate['id'], candidate['notice_id']
+    notice, actual, event = await bound_notice(owner, notice_id)
+    record = (await rows('SELECT * FROM monitor_dispositions WHERE owner=? AND id=?', (owner, request_id)))[0]
+    if record['status'] != 'queued':
+        return record
+    if actual != policy or json.loads(record['decision']).get('policy') != policy.model_dump(mode='json'):
+        await d.finish(owner, request_id, 'failed', error='监测配置已变化，旧人工反馈未写回', defer_exports=True)
+        return {'status': 'failed'}
+    comment = record['comment']
+    attempted = False
+    async with diag.trace_scope(owner, COMPONENT_ID, request_id):
+        try:
+            await write("UPDATE monitor_dispositions SET status='writing',session_id=?,updated_at=? WHERE owner=? AND id=? AND status='queued'", (session_id, d.stamp(), owner, request_id))
+            adapter = adapter_factory(policy, session_id)
+            raw = await read_event(adapter, event)
+            current = raw.get('dealStatus')
+            if type(current) is not int or current not in d.LIST_RESPONSE_STATUSES:
+                raise ContractError('XDR 当前处置状态无法识别')
+            if raw.get('endTime') != event.get('notified_end_time', event.get('endTime')) or (raw.get('hostIp') or '') != (event.get('notified_host', event.get('host')) or ''):
+                raise ContractError('通知后事件活动变化，旧反馈不能关闭新活动')
+            from .mailflow import feedback_version_matches
+            if not feedback_version_matches(event, raw):
+                raise ContractError('事件活动版本与原通知不一致，旧反馈未覆盖新活动')
+            if current == 40:
+                await d.finish(owner, request_id, 'verified', current, defer_exports=True)
+            else:
+                if current not in (0, 10, 30, 70):
+                    raise ContractError('XDR 状态已变化，不能覆盖已忽略或挂起的告警')
+                # Never close new activity based on an older notification.
+                expected_end = event.get('notified_end_time', event.get('endTime'))
+                expected_host = event.get('notified_host', event.get('host'))
+                if expected_end is None:
+                    raise ContractError('原告警缺少时间快照，无法确认是否出现新活动，本次未写回')
+                if raw.get('endTime') != expected_end:
+                    raise ContractError('通知后告警出现新活动，本次未写回状态')
+                if (raw.get('hostIp') or '') != (expected_host or ''):
+                    raise ContractError('通知后告警主机变化，本次未写回状态')
+                async with lock(owner):
+                    _, actual, _ = await bound_notice(owner, notice_id)
+                    if actual != policy or not await _active_policy(policy):
+                        raise ContractError('监测设备配置已变化，本次未写回状态')
+                    attempted = True
+                    with diag.span('mail.manual.mark', notice=diag.opaque(notice_id)):
+                        await d.operation(adapter, event, {'action': 'update_status', 'uuids': [event['id']],
+                            'deal_status': 40, 'deal_comment': comment}, '人工处理：将原告警标记为已处置')
+                checked = await read_event(adapter, event)
+                from .mailflow import feedback_version_matches
+                if not feedback_version_matches(event, checked):
+                    raise ContractError('写后回查出现新活动，旧反馈未确认闭环')
+                current = checked.get('dealStatus')
+                await d.finish(owner, request_id, 'verified' if current == 40 else 'mismatch', current, defer_exports=True)
+        except BaseException as exc:
+            error = str(exc) if isinstance(exc, ContractError) else '处置未完成，请回查 XDR 状态；不会重复写入'
+            await d.finish(owner, request_id, 'pending' if attempted else 'failed', error=error, defer_exports=True)
+            if not isinstance(exc, Exception):
+                raise
+    return (await rows('SELECT status,error FROM monitor_dispositions WHERE owner=? AND id=?', (owner, request_id)))[0]
+
+
+async def _readback_manual(owner, record_id, adapter_factory, *, session_id=None):
+    record = (await rows('SELECT * FROM monitor_dispositions WHERE owner=? AND id=?', (owner, record_id)))[0]
+    links = await rows('SELECT notice_id FROM monitor_mail_manual WHERE owner=? AND project=? AND id=?', (owner, record['project'], record_id))
+    if not links:
+        raise ContractError('未找到原人工处置通知，保留待回查')
+    notice_id = links[0]['notice_id']
+    _, policy, event = await bound_notice(owner, notice_id)
+    adapter = adapter_factory(policy, session_id or record.get('session_id'))
+    raw = await read_event(adapter, event)
+    from .mailflow import feedback_version_matches
+    state = ('verified' if raw.get('dealStatus') == 40 else 'mismatch') if feedback_version_matches(event, raw) else 'pending'
+    await d.finish(owner, record_id, state, raw.get('dealStatus'),
+                   error=None if state == 'verified' else '原事件版本或目标状态尚未回查确认；不重复写入', defer_exports=True)
+    return {'status': state, 'error': None if state == 'verified' else '待回查'}
 
 
 async def recheck(owner, notice_id, adapter_factory=d.DispositionAdapter):
@@ -217,7 +251,9 @@ async def recheck(owner, notice_id, adapter_factory=d.DispositionAdapter):
         raise ValueError('尚无已提交的人工处置')
     if previous['project'] != policy.project:
         raise ValueError('处置记录不属于当前监测项目')
-    await d.recheck(owner, previous['id'], adapter_factory, defer_exports=True)
+    if previous['status'] == 'queued':
+        raise ValueError('处理反馈已保存，等待下一轮监测写回')
+    await _readback_manual(owner, previous['id'], adapter_factory)
     return await snapshot(notice)
 
 
@@ -234,8 +270,8 @@ async def _active_policy(policy):
     return bool(installed and MonitoringPolicy.model_validate_json(installed[0]['policy']) == policy)
 
 
-async def recheck_pending(policy, *, limit=10, timeout_seconds=60, adapter_factory=XdrAdapter):
-    """Automatically verify existing manual writes; never initiate another write.
+async def recheck_pending(policy, *, limit=10, timeout_seconds=60, adapter_factory=None, session_id=None, before=None):
+    """Consume queued prior human feedback and verify existing uncertain writes.
 
     No reply/delivery status creates work here: only a durable prior human
     completion intent can be selected. Both the total round budget and each
@@ -244,16 +280,20 @@ async def recheck_pending(policy, *, limit=10, timeout_seconds=60, adapter_facto
     result = {'checked': 0, 'verified': 0, 'pending': 0, 'errors': []}
     if not await _active_policy(policy):
         return result
+    if adapter_factory is None:
+        from .followup import FollowupAdapter
+        adapter_factory = FollowupAdapter
+    round_cutoff = before or d.stamp()
     cutoff = (datetime.now(timezone.utc) - timedelta(seconds=120)).isoformat()
     candidates = await rows(
-        "SELECT m.id,m.notice_id FROM monitor_mail_manual m "
+        "SELECT m.id,m.notice_id,n.event_key,d.status FROM monitor_mail_manual m "
         "JOIN monitor_mail_notices n ON n.id=m.notice_id AND n.owner=m.owner AND n.project=m.project "
         "JOIN monitor_dispositions d ON d.id=m.id AND d.owner=m.owner AND d.project=m.project "
         "AND d.event_key=n.event_key AND d.scope=n.scope "
         "WHERE m.owner=? AND m.project=? AND n.scope=? AND m.state='handled' AND d.mode='mail_manual' "
-        "AND (d.status IN ('pending','mismatch') OR (d.status='writing' AND d.updated_at<=?)) "
+        "AND ((d.status='queued' AND m.created_at<?) OR d.status IN ('pending','mismatch') OR (d.status='writing' AND d.updated_at<=?)) "
         "ORDER BY d.updated_at,m.created_at,m.id LIMIT ?",
-        (policy.owner, policy.project, policy.scope, cutoff, max(1, min(int(limit), 50))))
+        (policy.owner, policy.project, policy.scope, round_cutoff, cutoff, max(1, min(int(limit), 50))))
     deadline = asyncio.get_running_loop().time() + max(0, min(float(timeout_seconds), 120))
     warning = '人工处置状态回查暂未完成；保留待回查，后续监测轮次继续核验，不会重复写回。'
     for candidate in candidates:
@@ -266,7 +306,12 @@ async def recheck_pending(policy, *, limit=10, timeout_seconds=60, adapter_facto
                 _, actual, _ = await bound_notice(policy.owner, candidate['notice_id'])
                 if actual != policy:
                     raise ContractError('监测绑定已变化，等待后续轮次核验')
-                return await d.recheck(policy.owner, candidate['id'], adapter_factory, defer_exports=True)
+                if candidate['status'] == 'queued':
+                    if session_id is None:
+                        return {'status': 'pending'}
+                    async with d._locks.setdefault((policy.owner, candidate['event_key']), asyncio.Lock()):
+                        return await _apply_queued(policy, candidate, session_id, adapter_factory)
+                return await _readback_manual(policy.owner, candidate['id'], adapter_factory, session_id=session_id)
             updated = await asyncio.wait_for(readback(), timeout=min(15, remaining))
             if updated['status'] == 'verified':
                 result['verified'] += 1

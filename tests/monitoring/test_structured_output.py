@@ -150,8 +150,8 @@ async def test_business_selection_after_real_tool_capture(setup, monkeypatch, mo
         domain[str(i)] = IncidentState(disposition, whitelisted)
     rule = monitoring_selection(lambda raw: domain[raw['uuId']])
     query_device = runtime.query_device
-    async def selected_query(*args):
-        return await query_device(*args, selection=rule)
+    async def selected_query(*args, **kwargs):
+        return await query_device(*args, selection=rule, **kwargs)
     monkeypatch.setattr(runtime, 'query_device', selected_query)
     def payload(action, params):
         if action == 'get_entities':
@@ -167,7 +167,7 @@ async def test_business_selection_after_real_tool_capture(setup, monkeypatch, mo
         result = await run(execution, setup.policy)
     attempt = (await rows('SELECT * FROM monitor_attempts'))[0]
     projection = await snapshot(setup.policy.owner, setup.policy.scope, attempt['business_date'])
-    expected_ids = {str(i) for i in range(100) if i % 6 in {0, 1}} | {'200'} if mode == 'mixed' else set()
+    expected_ids = ({str(i) for i in range(100) if i % 6 in {0, 1}} | ({'200'} if mode == 'mixed' else set())) if mode != 'all_excluded' else set()
     assert {event['id'] for event in projection['events']} == expected_ids
     assert projection['metrics']['events'] == len(expected_ids)
     admitted_ids = {str(i) for i in range(100) if i % 6 in {0, 1}}
