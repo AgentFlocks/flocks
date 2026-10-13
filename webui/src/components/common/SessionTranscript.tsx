@@ -23,9 +23,14 @@ export interface TranscriptMessage {
 }
 
 /** Read-only rendering of a transcript the caller may show, using the workbench timeline. */
-export default function SessionTranscript({ messages, running = false }: {
+export default function SessionTranscript({ messages, running = false, variant = 'timeline' }: {
   messages: TranscriptMessage[];
   running?: boolean;
+  /**
+   * `inline`: the message bodies only (steps, thinking, answers), at chat size,
+   * for a caller that already shows who is speaking, as a chat message of its own.
+   */
+  variant?: 'timeline' | 'inline';
 }) {
   const [processGroupOpenState, setProcessGroupOpenState] = useState<Record<string, boolean>>({});
   const onProcessGroupOpenChange = useCallback((key: string, open: boolean) => {
@@ -63,9 +68,10 @@ export default function SessionTranscript({ messages, running = false }: {
       isStreaming: running,
     });
   }, [messages, running]);
+  const inline = variant === 'inline';
   return (
-    <div className="min-w-0 space-y-6 py-4 pl-10 pr-2">
-      <ChatMessageTimeline items={items} compact={false} collapseIntermediateSteps
+    <div className={inline ? 'min-w-0 space-y-3' : 'min-w-0 space-y-6 py-4 pl-10 pr-2'}>
+      <ChatMessageTimeline items={items} compact={inline} bare={inline} collapseIntermediateSteps
         processGroupOpenState={processGroupOpenState} onProcessGroupOpenChange={onProcessGroupOpenChange}
         processGroupsOpenWhileActive showTimestamp={false} showActions={false} />
     </div>

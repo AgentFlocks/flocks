@@ -1252,8 +1252,9 @@ export function getMessageGroupClassName({
   return isEditing ? 'w-full max-w-full' : 'w-fit max-w-[88%]';
 }
 
-export function getCompactionDividerClassName(compact: boolean): string {
-  const messageInset = compact ? 'pl-[38px]' : 'pl-[42px]';
+export function getCompactionDividerClassName(compact: boolean, inset = true): string {
+  // Inset into the assistant content column; bodies drawn without an avatar have none.
+  const messageInset = !inset ? 'pl-0' : compact ? 'pl-[38px]' : 'pl-[42px]';
   return `${compact ? 'my-3' : 'my-4'} flex w-full min-w-0 items-center gap-3 ${messageInset} pr-1 text-xs text-zinc-500`;
 }
 
@@ -5467,6 +5468,8 @@ export interface ChatMessageBubbleProps {
   processGroupOpenState?: ProcessGroupOpenState;
   onProcessGroupOpenChange?: (key: string, open: boolean) => void;
   compact?: boolean;
+  /** Message body only: no avatar or agent name, for a caller that draws its own sender frame. */
+  bare?: boolean;
   onCopy?: (text: string) => void;
   editingMessageId?: string | null;
   editingText?: string;
@@ -5501,6 +5504,7 @@ function ChatMessageTimelineInner({
   processGroupOpenState,
   onProcessGroupOpenChange,
   compact,
+  bare,
   onCopy,
   editingMessageId,
   editingText,
@@ -5533,6 +5537,7 @@ function ChatMessageTimelineInner({
             processGroupOpenState={processGroupOpenState}
             onProcessGroupOpenChange={onProcessGroupOpenChange}
             compact={compact}
+            bare={bare}
             onCopy={onCopy}
             editingMessageId={editingMessageId}
             editingText={editingText}
@@ -5620,6 +5625,7 @@ function ChatMessageBubbleInner({
   processGroupOpenState,
   onProcessGroupOpenChange,
   compact = true,
+  bare = false,
   onCopy,
   editingMessageId,
   editingText = '',
@@ -5647,7 +5653,7 @@ function ChatMessageBubbleInner({
   const [previewImage, setPreviewImage] = useState<{ url: string; alt?: string } | null>(null);
   if (message.finish === 'summary') {
     return (
-      <div className={getCompactionDividerClassName(compact)}>
+      <div className={getCompactionDividerClassName(compact, !bare)}>
         <span className="h-px flex-1 bg-zinc-200" />
         <span className="shrink-0 px-1.5 font-medium text-zinc-500">
           {t('chat.contextCompressed')}
@@ -6293,6 +6299,26 @@ function ChatMessageBubbleInner({
       {!isUser && footerTimestamp}
     </div>
   ) : null;
+
+  if (bare) {
+    return (
+      <div className={`group relative flex w-full min-w-0${isUser ? ' justify-end' : ''}`}>
+        <div className={`flex min-w-0 flex-col ${
+          isUser ? `items-end ${isEditing ? 'w-full' : 'max-w-[88%]'}` : 'w-full items-start'
+        }`}>
+          {bubble}
+          {footer}
+        </div>
+        {previewImage && (
+          <ImageLightbox
+            src={previewImage.url}
+            alt={previewImage.alt}
+            onClose={() => setPreviewImage(null)}
+          />
+        )}
+      </div>
+    );
+  }
 
   if (isUser) {
     if (!compact) {
@@ -7109,6 +7135,7 @@ export function ChatToolPart({
  */
 export const ChatMessageBubble = memo(ChatMessageBubbleInner, (prev, next) => {
   if (prev.isActive !== next.isActive) return false;
+  if (prev.bare !== next.bare) return false;
   if (prev.showActions !== next.showActions) return false;
   if (prev.collapseIntermediateSteps !== next.collapseIntermediateSteps) return false;
   if (prev.processGroupsDefaultOpen !== next.processGroupsDefaultOpen) return false;
