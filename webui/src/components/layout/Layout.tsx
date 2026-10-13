@@ -181,7 +181,7 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
   const confirm = useConfirm();
   const { t, i18n } = useTranslation('nav');
   const { t: tAuth } = useTranslation('auth');
-  const { productName, proProductName } = useProductName();
+  const { productName, proProductName, logoUrl } = useProductName();
 
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [collapsed, setCollapsed] = useState(readSidebarCollapsed);
@@ -938,6 +938,7 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
 
       <WorkspaceHeader
         productName={productName}
+        logoUrl={logoUrl}
         update={headerUpdate}
         workspaces={headerWorkspaces}
         currentWorkspace={navStateReady ? currentWorkspace : null}
