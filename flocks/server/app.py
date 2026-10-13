@@ -503,6 +503,12 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         log.warning("knowledgebase.integration.start_failed", {"error_type": type(exc).__name__})
 
+    # Extension services (e.g. Pro's scheduled audits) start on this loop once
+    # the server is ready, without holding up requests.
+    from flocks.extensions import run_startup_hooks
+
+    _schedule_startup_phase(app, log, "extensions.startup_hooks", run_startup_hooks)
+
     blocking_startup_ms = int((time.perf_counter() - startup_started_at) * 1000)
     log.info("server.startup.ready", {
         "blocking_duration_ms": blocking_startup_ms,
