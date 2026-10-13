@@ -67,21 +67,25 @@ class RuntimeControls:
     def record_usage(self, usage: dict, pricing: Any, *, previous_usage: dict | None = None) -> None:
         """Record a request snapshot minus its previously accounted snapshot."""
         from flocks.provider.cost_calculator import CostCalculator
+        from flocks.provider.token_usage import resolve_usage
 
         if not previous_usage:
             self.requests += 1
         previous_usage = previous_usage or {}
-        self.input_tokens += usage.get("prompt_tokens", 0) - previous_usage.get("prompt_tokens", 0)
-        self.output_tokens += usage.get("completion_tokens", 0) - previous_usage.get("completion_tokens", 0)
+        # Whole prompts, cache counted once (flocks.provider.token_usage).
+        current, previous = resolve_usage(usage), resolve_usage(previous_usage)
+        self.input_tokens += current.prompt - previous.prompt
+        self.output_tokens += current.output - previous.output
         if pricing is not None:
             # Price complete snapshots: late cache details can reduce the cost.
             cost_delta = 0.0
-            for snapshot, sign in ((usage, 1), (previous_usage, -1)):
+            for snapshot, sign in ((current, 1), (previous, -1)):
                 cost = CostCalculator.calculate(
-                    input_tokens=snapshot.get("prompt_tokens", 0),
-                    output_tokens=snapshot.get("completion_tokens", 0),
-                    cached_tokens=snapshot.get("cache_read_input_tokens", 0),
-                    cache_write_tokens=snapshot.get("cache_creation_input_tokens", 0),
+                    input_tokens=snapshot.prompt,
+                    output_tokens=snapshot.output,
+                    cached_tokens=snapshot.cache_read,
+                    cache_write_tokens=snapshot.cache_write,
+                    reasoning_tokens=snapshot.reasoning,
                     pricing=pricing,
                 )
                 cost_delta += sign * cost.total_cost

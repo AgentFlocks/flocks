@@ -305,3 +305,103 @@ def test_stats_backfill_command_renders_summary(monkeypatch) -> None:
     assert "USAGE BACKFILL" in result.stdout
     assert "Inserted Records" in result.stdout
     assert "4" in result.stdout
+
+
+def test_cache_rows_say_not_reported_when_no_call_reported_cache() -> None:
+    rows = stats_cmd._cache_rows(TokenStats(input=20, output=10, requests=3))
+
+    assert rows == [("Cache Read", "not reported"), ("Cache Write", "not reported")]
+
+
+def test_cache_rows_show_hit_rate_over_reporting_calls() -> None:
+    rows = stats_cmd._cache_rows(TokenStats(
+        input=30_000,
+        cache_read=9_092,
+        requests=3,
+        cache_reported_requests=2,
+        cache_reported_read=8_192,
+        cache_reported_input=10_000,
+    ))
+
+    assert rows == [
+        ("Cache Read", "9.1K"),
+        ("Cache Write", "0"),
+        ("Cache Hit Rate", "81.9%"),
+        ("Cache Reported", "2/3 calls"),
+    ]
+
+
+def test_cache_rows_keep_pre_upgrade_cache_tokens_without_a_hit_rate() -> None:
+    rows = stats_cmd._cache_rows(TokenStats(input=100, cache_read=900, requests=1))
+
+    assert rows == [("Cache Read", "900"), ("Cache Write", "0")]
+
+
+@pytest.mark.asyncio
+async def test_aggregate_stats_counts_calls_that_reported_cache(monkeypatch) -> None:
+    session = _build_session()
+
+    def record(record_id: str, cached: int, reported):
+        return UsageRecord(
+            id=record_id,
+            provider_id="threatbook-cn-llm",
+            model_id="deepseek-v4-flash-0731",
+            session_id=session.id,
+            message_id=f"msg-{record_id}",
+            input_tokens=1_000,
+            output_tokens=10,
+            cached_tokens=cached,
+            cache_reported=reported,
+            total_tokens=1_010,
+            created_at=stats_cmd.datetime.now(stats_cmd.UTC),
+        )
+
+    records = [record("a", 800, True), record("b", 0, False), record("c", 0, None), record("d", 50, None)]
+
+    async def fake_resolve_project_sessions(project_filter):
+        return [session]
+
+    async def fake_get_usage_records(**kwargs):
+        return records
+
+    async def fake_get_usage_stats(**kwargs):
+        return type("UsageStats", (), {"summary": type("Summary", (), {"cost_by_currency": []})()})()
+
+    async def fake_collect_message_metrics(session_ids):
+        return 4, {}
+
+    monkeypatch.setattr(stats_cmd, "_resolve_project_sessions", fake_resolve_project_sessions)
+    monkeypatch.setattr(stats_cmd, "get_usage_records", fake_get_usage_records)
+    monkeypatch.setattr(stats_cmd, "get_usage_stats", fake_get_usage_stats)
+    monkeypatch.setattr(stats_cmd, "_collect_message_metrics", fake_collect_message_metrics)
+
+    result = await stats_cmd._aggregate_stats(days=None, project_filter=None)
+
+    assert result.total_tokens.requests == 4
+    assert result.total_tokens.cache_reported_requests == 1
+    assert result.total_tokens.cache_reported_read == 800
+    assert result.total_tokens.cache_reported_input == 1_000
+    assert result.total_tokens.cache_read == 850
+
+
+def test_stats_command_renders_unreported_cache(monkeypatch) -> None:
+    async def fake_storage_init() -> None:
+        return None
+
+    async def fake_aggregate_stats(days, project):
+        return SessionStats(
+            total_sessions=1,
+            total_messages=2,
+            total_tokens=TokenStats(input=20, output=10, requests=2),
+            tool_usage={},
+            model_usage={},
+            days=1,
+        )
+
+    monkeypatch.setattr(stats_cmd.Storage, "init", fake_storage_init)
+    monkeypatch.setattr(stats_cmd, "_aggregate_stats", fake_aggregate_stats)
+
+    result = runner.invoke(stats_cmd.stats_app, [])
+
+    assert result.exit_code == 0
+    assert "not reported" in result.stdout
