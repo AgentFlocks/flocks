@@ -565,3 +565,81 @@ def story_text(story, mail=False):
         parts.append('请求与响应（已脱敏；按纯文本显示）\n' + '\n\n'.join(
             f'[{packet["evidence_id"]}] {packet["label"]} · {packet["source"]}\n{packet["text"]}' for packet in story['packets']))
     return _clip('\n\n'.join(parts), 12_000 if mail else 48_000)[0]
+
+
+def _readable_text(value, limit=900):
+    """Remove machine bookkeeping from a business excerpt, retaining facts."""
+    text = _text(value, 4000)
+    text = re.sub(r'\[?evidence-\d+\]?[：:·\s]*', '', text, flags=re.I)
+    text = re.sub(r'\bincident-[a-z\d-]{12,}\b', '本事件', text, flags=re.I)
+    text = re.sub(r'告警编号[：:]\s*(?:alert-[a-z\d-]+[、，,;；\s]*)+', '', text, flags=re.I)
+    text = re.sub(r'\balert-[a-z\d-]{12,}\b', '关联告警', text, flags=re.I)
+    text = re.sub(r'\b(?:gptResult|attackState|attack_result|attackResult|incidentSeverity)\s*[=:]\s*[-\d]+', '', text)
+    text = re.sub(r'[；;]\s*[；;]+', '；', text)
+    text = re.sub(r'^[\s；;：:·]+|[\s；;：:·]+$', '', text)
+    text = re.sub(r'[ \t]{2,}', ' ', text)
+    return text[:limit]
+
+
+def readable_story(story):
+    """Business overview beside expandable, unchanged source evidence.
+
+    This is deterministic presentation, not a second model or a new verdict.
+    Original stories, proof references and raw packets remain available for
+    audit; the concise view avoids repeating operational bookkeeping.
+    """
+    basics = story.get('basics') if isinstance(story.get('basics'), dict) else {}
+    selected = {key: basics[key] for key in ('event_id', 'name', 'host', 'start_time', 'end_time',
+                'data_source', 'source_device') if basics.get(key) not in (None, '', [])}
+    selected['device'] = story.get('device', '')
+    if basics.get('severity') is not None:
+        selected['severity'] = _severity_text(basics)
+    timeline, evidence, seen = [], [], set()
+    for entry in story.get('timeline', []):
+        if not isinstance(entry, dict):
+            continue
+        text = _readable_text(entry.get('text'), 600)
+        marker = (str(entry.get('time')), text)
+        if text and marker not in seen:
+            seen.add(marker)
+            timeline.append({'time': entry.get('time'), 'text': text})
+    for record in story.get('alert_details', []):
+        if not isinstance(record, dict):
+            continue
+        source = record.get('src_ip') or record.get('host')
+        destination = record.get('dst_ip')
+        name = _readable_text(record.get('name') or '关联行为', 160)
+        endpoint = str(destination) if destination else ''
+        if endpoint and record.get('dst_port') is not None:
+            endpoint += ':' + str(record['dst_port'])
+        detail = f'{source} 向 {endpoint} 发起访问；{name}' if source and endpoint else name
+        for key, phase in (('start_time', '来源记录该行为首次出现'), ('end_time', '来源记录该行为最近出现')):
+            when = record.get(key)
+            text = phase + '：' + detail
+            marker = (str(when), text)
+            if _when(when) is not None and marker not in seen:
+                seen.add(marker)
+                timeline.append({'time': when, 'text': text})
+    timeline.sort(key=lambda entry: _when(entry['time']) or 0)
+    seen.clear()
+    for entry in story.get('key_evidence', []):
+        if not isinstance(entry, dict):
+            continue
+        text = _readable_text(entry.get('text'), 900)
+        if text and text not in seen:
+            seen.add(text)
+            evidence.append({'text': text})
+        if len(evidence) >= 6:
+            break
+    gaps = []
+    for item in story.get('gaps', []):
+        text = _readable_text(item, 300)
+        # Identity checks and missing behaviour/packets are materially useful;
+        # routine source diagnostics stay in the detailed audit sections.
+        if text and text not in gaps:
+            gaps.append(text)
+        if len(gaps) >= 3:
+            break
+    return {'basics': selected, 'conclusion': _readable_text(story.get('conclusion'), 1200),
+            'verdict': story.get('verdict', 'unknown'), 'evidence': evidence,
+            'timeline': timeline, 'gaps': gaps}

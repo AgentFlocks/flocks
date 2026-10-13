@@ -97,22 +97,23 @@ async def _event_list_read(operation):
 async def event_list(
     start_date: str = Query(min_length=10, max_length=10),
     end_date: str = Query(min_length=10, max_length=10),
-    window_hours: int = Query(default=12, ge=1, le=24),
+    window_hours: int = Query(default=24, ge=1, le=24),
     group: bool = True,
     include_backlog: bool = True,
     device: str | None = Query(default=None, max_length=200),
     risk: Literal['risk', 'unknown', 'ignored', 'benign'] | None = None,
     handling: Literal['open', 'closed', 'ignored', 'contained'] | None = None,
+    assessment: Literal['risk_open', 'risk_closed', 'benign', 'insufficient'] | None = None,
     search: str | None = Query(default=None, max_length=200),
     offset: int = Query(default=0, ge=0, le=1000),
-    limit: int = Query(default=25, ge=1, le=100),
+    limit: int = Query(default=10, ge=1, le=100),
     user=Depends(require_user),
 ):
     from flocks.monitoring.event_list import list_events
     return await _event_list_read(list_events(user.id, COMPONENT_ID,
         start_date=start_date, end_date=end_date, window_hours=window_hours,
         group=group, include_backlog=include_backlog, device=device, risk=risk,
-        handling=handling, search=search, offset=offset, limit=limit))
+        handling=handling, assessment=assessment, search=search, offset=offset, limit=limit))
 
 
 @router.get('/events/detail')

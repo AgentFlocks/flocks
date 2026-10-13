@@ -2,6 +2,21 @@ import client from "./client";
 import { MONITOR_API } from "./securityMonitoring";
 
 export type EventHandling = "open" | "closed" | "ignored" | "contained";
+export type EventAssessmentStatus =
+  | "risk_open"
+  | "risk_closed"
+  | "benign"
+  | "insufficient";
+export interface EventAssessment {
+  status: EventAssessmentStatus;
+  label: string;
+  verdict: "risk" | "benign" | "unknown";
+  notify_eligible: boolean;
+  reason: string;
+  gaps?: string[];
+  is_current?: boolean;
+  evidence_supported?: boolean;
+}
 export interface MonitorEventQuery {
   start_date: string;
   end_date: string;
@@ -14,6 +29,7 @@ export interface MonitorEventQuery {
   device?: string;
   risk?: string;
   handling?: string;
+  assessment?: EventAssessmentStatus;
 }
 export interface EventMember {
   key: string;
@@ -23,6 +39,7 @@ export interface EventMember {
   device_name: string;
   host: string;
   risk: string;
+  assessment?: EventAssessment;
   handling: EventHandling;
   deal_status?: number | string | null;
   observed_at?: string | null;
@@ -71,6 +88,11 @@ export interface EventListRow {
   last_seen_at?: string | null;
   risk: string;
   handling: EventHandling;
+  assessment_counts?: Partial<Record<EventAssessmentStatus, number>>;
+  assessment_status?: EventAssessmentStatus | "mixed";
+  assessment_label?: string;
+  hosts?: string[];
+  host_count?: number;
   mail: { sent: number; replied: number; failed: number };
   ioc_matches: { type: string; value: string }[];
   merge_reason: string;
@@ -89,6 +111,7 @@ export interface EventListResponse {
   offset: number;
   limit: number;
   metrics: {
+    assessment_counts?: Partial<Record<EventAssessmentStatus, number>>;
     events: number;
     events_in_range?: number;
     backlog_events?: number;
@@ -107,6 +130,15 @@ export interface EventListResponse {
   warnings: string[];
 }
 export interface EventDetailResponse {
+  story?: Record<string, unknown>;
+  overview?: {
+    basics?: Record<string, unknown>;
+    conclusion?: string;
+    verdict?: string;
+    evidence?: { text: string; time?: string | number }[];
+    timeline?: { time: string | number; text: string }[];
+    gaps?: string[];
+  };
   event: EventMember & Record<string, unknown>;
   investigation?: {
     state?: string;

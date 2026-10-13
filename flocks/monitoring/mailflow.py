@@ -6,14 +6,15 @@ from time import monotonic
 from uuid import uuid4, uuid5, NAMESPACE_URL
 from pydantic import BaseModel, ConfigDict, StrictBool, Field, field_validator
 from . import disposition as d, mail_transport as transport, diagnostics as diag
-from .adapter import XdrAdapter, ContractError
+from .adapter import XdrAdapter, ContractError, normalize
 from .automatic import read_event
 from .models import COMPONENT_ID, MonitoringPolicy
 from .store import connection, rows, write, encode
-from .status_rules import ENTITY_TYPES, select_status, malicious_evidence
 from . import sampling
-from .summaries import Summary, event_label, label, evidence_summary, ENTITY_LABELS, STATUS_LABELS
-from .event_details import build_story, story_text, normalize_basics, redact_text
+from .summaries import Summary, event_label, label, STATUS_LABELS
+from .event_details import build_story
+from .mail_template import TEMPLATE_VERSION, render_notification
+from .assessment import assess_event, same_evidence_version
 from flocks.session.interaction_policy import require_interactive, automatic_mark_scope
 
 _locks = {}
@@ -262,25 +263,44 @@ async def cutoff(owner, project, before=None):
     return data[0]['high']
 
 
+async def notification_assessment(policy, event, *, with_case=False):
+    """Use the same verified facts as the event list, never incident severity."""
+    found = await rows('SELECT * FROM monitor_investigations WHERE owner=? AND project=? AND event_key=?',
+                       (policy.owner, policy.project, event['key']))
+    case = found[0] if found else event.get('investigation', {})
+    assessment = assess_event(event, case)
+    return (assessment, case) if with_case else assessment
+
+
 async def queue_notices(policy, observed, session_id):
     config = await settings(policy.owner)
     if not config['enabled'] or config['project'] != policy.project:
         return
     stamp = d.stamp()
     routes = {device: await settings(policy.owner, device) for device in {event['device'] for event in observed}}
+    # Unknown/benign events remain in the incident list, not the outbound queue.
+    # A later confirmed risk can still create its first notification.
+    eligible = {event['key']: await notification_assessment(policy, event) for event in observed}
     async with connection() as db:
         for event in observed:
             config = routes[event['device']]
             if not config['enabled'] or not config['recipient']:
                 continue
             event['device_name'] = config.get('device_name', event['device'])
-            if event.get('development_sample') is True:
-                continue  # Retained historical samples cannot issue new mail.
+            if event.get('development_sample') is True or not eligible[event['key']]['notify_eligible']:
+                continue  # Historical tests and uncertain decisions never send.
             await db.execute("UPDATE monitor_mail_notices SET event_key='legacy-sample:' || id, "
                              "state=CASE WHEN state='queued' THEN 'skipped' ELSE state END, "
                              "error=CASE WHEN state='queued' THEN '已退出联调，历史测试通知不再发送' ELSE error END "
                              "WHERE owner=? AND project=? AND event_key=? AND json_extract(event,'$.development_sample')=1",
                              (policy.owner, policy.project, event['key']))
+            # A pre-send version change may have skipped an otherwise eligible
+            # intent. Reuse it only after a new current risk decision; delivered
+            # and ambiguous messages never enter this path.
+            await db.execute("UPDATE monitor_mail_notices SET state='queued',error=NULL,event=?,updated_at=? "
+                "WHERE owner=? AND project=? AND event_key=? AND state='skipped' AND sent_at IS NULL "
+                "AND revision=? AND recipient=? AND mailbox=?",
+                (encode(event), stamp, policy.owner, policy.project, event['key'], config['revision'], config['recipient'], config['mailbox']))
             nid = str(uuid4())
             await db.execute('INSERT OR IGNORE INTO monitor_mail_notices(id,owner,scope,project,event_key,recipient,revision,mailbox,message_id,subject,body,event,state,error,session_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
                              (nid, policy.owner, policy.scope, policy.project, event['key'], config['recipient'], config['revision'], config['mailbox'],
@@ -315,66 +335,45 @@ async def notify_one(policy, notice, session_id, adapter_factory=MailAdapter, *,
     raw = await read_event(adapter, event, eligible=True)
     if raw is None:
         return await skip('事件已离开通知查询范围')
-    responses, failures, failure_reasons = {}, [], {}
-    for kind in ENTITY_TYPES:
-        try:
-            responses[kind] = await d.operation(adapter, event, {'action': 'get_entities', 'uuid': event['id'], 'entity_type': kind}, f'核对关联{ENTITY_LABELS[kind]}证据')
-        except ContractError as exc:
-            failures.append(kind)
-            failure_reasons[kind] = str(exc)
-        except TimeoutError:
-            failures.append(kind)
-            failure_reasons[kind] = '实体查询超时，未取得可用结果'
-    decision = select_status(raw, responses, failures=failures)
-    decision.evidence['failedReasons'].update(failure_reasons)
-    development = False
-    malicious = malicious_evidence(decision)
-    diag.event('mail.analyzed', notice=diag.opaque(notice['id']), development_sample=development,
-               malicious=malicious, errors=len(decision.evidence['failedQueries']))
-    assessment = evidence_summary(event, decision, development=development)
-    event['assessment'] = {'text': assessment.text, 'details': assessment.details, 'evidence': decision.evidence,
-                           'malicious': malicious, 'purpose': 'development_mail_loop' if development else 'followup'}
-    for kind in ENTITY_TYPES:
-        data = decision.evidence['entities'].get(kind, {})
-        diag.event('mail.evidence', entity_type=kind, success=kind not in decision.evidence['failedQueries'],
-                   items=data.get('count'), notice=diag.opaque(notice['id']))
+    # Recheck the original event, including its activity/host/status fingerprint.
+    # A stored risk opinion must never authorize a new version of the event.
+    current = {**event, **normalize(event['device'], raw),
+               'device_name': config.get('device_name', event['device'])}
+    assessment, case = await notification_assessment(policy, current, with_case=True)
+    current['assessment'] = {'text': assessment['reason'], 'details': '', **assessment}
+    diag.event('mail.analyzed', notice=diag.opaque(notice['id']), development_sample=False,
+               malicious=assessment['notify_eligible'], errors=0)
     recorder = d.operation_recorder.get()
     if recorder:
         async def explain(_):
-            return None, {'malicious': malicious, 'failed_entities': decision.evidence['failedQueries'],
-                          'development_sample': development, 'writes': 0}, assessment
-        await recorder.call('说明分析结论与发信原因', {'event': event['id']}, explain)
-    # Recheck current XDR evidence: an older model opinion must not hide a new
-    # malicious finding or incomplete query returned immediately before sending.
-    if decision.target in (40, 60):
-        reason = '分析未发现需要责任人继续处置的事项；不发送通知，不自动修改 XDR 状态。' + assessment.text
-        return await skip(reason, event)
-    event['notified_end_time'] = raw.get('endTime')
-    # Reuse the same evidence-linked narrative seen in the monitoring chat.
-    # Transport, deduplication and the fresh pre-send decision above are unchanged.
-    story = event.get('story')
-    if not isinstance(story, dict):
-        story = build_story({**event, 'basics': normalize_basics(raw)}, [], event.get('investigation'))
-    if (raw.get('endTime') != event.get('endTime')
-            or raw.get('hostIp') and raw.get('hostIp') != event.get('host')):
-        story = {**story, 'gaps': [*story.get('gaps', []),
-            f'发信前发现事件时间或主机信息更新；下述详细调查仅对应此前版本（截至 {event.get("endTime", "未知")}），新增活动尚未完成详细核查。当前主机：{label(raw.get("hostIp"))}；最近发生时间：{label(raw.get("endTime"))}。']}
-    advice = story_text(story, mail=True) + '\n\n发信前状态复核\n' + assessment.text
-    if failures:
-        advice += '\n未取得的关键依据：' + '；'.join(
-            f'{ENTITY_LABELS[kind]}查询未取得（{label(failure_reasons.get(kind), "查询未完成")}）' for kind in failures)
-    event['analysis'] = advice
-    event['notified_status'] = raw.get('dealStatus')
-    event['notified_host'] = raw.get('hostIp')
-    subject = re.sub(r'[\r\n]', ' ', f"安全告警处理通知 · {config.get('device_name', event['device'])} · {event['id']} · {event['name']}")[:240]
-    body = (f"{config['responsible_name'] or '责任人'}：\n请核查以下安全告警并处置。\n\n"
-            f"监测设备：{config.get('device_name', event['device'])}\n设备编号：{event['device']}\n"
-            f"事件编号：{event['id']}\n事件名称：{event['name']}\n主机：{event['host'] or '未知'}\n"
-            f"调查摘要：\n{advice}\n\n"
-            "请核查并处理这条告警。完成后用自己的话说明处理结果和措施；可以回复本邮件，也可以新写邮件提供上述事件编号。\n"
-            "Flocks 会在下一轮监测中读取反馈，核对后标记事件状态并回查。\n"
-            f"通知编号：{notice['id']}")
-    body = redact_text(body)
+            return None, {'notify_eligible': assessment['notify_eligible'],
+                          'verdict': assessment['verdict'], 'writes': 0}, Summary(assessment['reason'])
+        await recorder.call('核对调查结论与通知条件', {'event': event['id']}, explain)
+    if not assessment['notify_eligible']:
+        return await skip('未达到已确认风险的通知条件：' + assessment['reason'] + '；不发信，不修改 XDR 状态。', current)
+    same_version = same_evidence_version(event, current)
+    event = current
+    # A queue intent can outlive its investigation version. Always render the
+    # currently accepted evidence, never a stale story saved in that intent.
+    result = json.loads(case['result']) if isinstance(case.get('result'), str) else case.get('result', case)
+    proofs = json.loads(case['evidence']) if isinstance(case.get('evidence'), str) else case.get('evidence', [])
+    story = build_story(event, proofs, result)
+    event['story'] = story
+    saved_presentation = event.get('mail_presentation', {})
+    prepared = (manual_retry and same_version and notice.get('subject') and notice.get('body')
+                and isinstance(saved_presentation, dict)
+                and saved_presentation.get('version') == TEMPLATE_VERSION
+                and isinstance(saved_presentation.get('html_body'), str))
+    if prepared:
+        # Only a revalidated, same-version risk notice can reuse prepared mail.
+        # Its Message-ID, subject and both bodies remain stable on retry.
+        subject, body = notice['subject'], notice['body']
+    else:
+        presentation = render_notification(event, story, config['responsible_name'], timezone_name=policy.timezone)
+        subject, body = presentation.subject, presentation.text
+        saved_presentation = {'version': TEMPLATE_VERSION, 'html_body': presentation.html}
+    event.update(notified_end_time=raw.get('endTime'), notified_status=raw.get('dealStatus'),
+                 notified_host=raw.get('hostIp'), analysis=body, mail_presentation=saved_presentation)
     async with lock(policy.owner):
         if await completion_claimed(policy.owner, notice['id']):
             return 'already_attempted'
@@ -388,7 +387,7 @@ async def notify_one(policy, notice, session_id, adapter_factory=MailAdapter, *,
                                    (subject, body, encode(event), session_id, d.stamp(), notice['id']))
             if cur.rowcount != 1:
                 return 'already_attempted'
-        notice.update(subject=subject, body=body)
+        notice.update(subject=subject, body=body, event=encode(event))
         return await deliver_notice(notice, session_id, recorder)
 
 

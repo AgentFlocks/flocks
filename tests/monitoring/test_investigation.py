@@ -665,6 +665,7 @@ async def test_expired_ready_result_is_atomically_invalidated_before_a_crash(cas
     monkeypatch.setattr(i, 'now', lambda: clock[0])
     monkeypatch.setattr(i, 'choose', decide)
     await i.investigate(case.policy, case.event, case.recorder)
+    prior = (await rows('SELECT result FROM monitor_investigations'))[0]['result']
     clock[0] += timedelta(minutes=31)
     original = i.Investigator.drive
     monkeypatch.setattr(i.Investigator, 'drive', AsyncMock(side_effect=SimulatedCrash))
@@ -674,7 +675,7 @@ async def test_expired_ready_result_is_atomically_invalidated_before_a_crash(cas
     assert saved['state'] == 'pending' and saved['result'] == '{}' and saved['evidence'] == '[]'
     assert saved['revision'] == 2
     history = (await rows('SELECT * FROM monitor_investigation_versions'))[0]
-    assert history['state'] == 'ready' and json.loads(history['result'])['verdict'] == 'risk'
+    assert history['state'] == 'ready' and history['result'] == prior
     monkeypatch.setattr(i.Investigator, 'drive', original)
     await i.investigate(case.policy, case.event, case.recorder)
     assert case.event['investigation']['state'] == 'ready' and case.query.await_count == 2
@@ -712,3 +713,28 @@ async def test_terminal_result_and_recovery_schedule_commit_together(case, monke
         assert saved['error_kind'] == ('cancelled' if outcome == 'cancel' else 'dependency')
         assert saved['failure_count'] == (0 if outcome == 'cancel' else 1)
         assert saved['next_retry_at'] and json.loads(saved['result'])['reason']
+
+
+async def test_status_only_update_keeps_confirmed_evidence_but_new_activity_reopens(case, monkeypatch):
+    case.query.return_value = ({'data': {'item': [{'commandLine': '/tmp/worm --persist'}]}}, {})
+    async def confirmed(agent, data):
+        if not data['evidence']:
+            return await decide(agent, data)
+        return i.Choice(action='finish', verdict='risk', confidence='high', risk_confirmed=True,
+            evidence_ids=['evidence-1'], reason='恶意进程正在建立持久化，需要清理。')
+    monkeypatch.setattr(i, 'choose', confirmed)
+    await i.investigate(case.policy, case.event, case.recorder)
+    assert case.event['assessment']['status'] == 'risk_open'
+    closed = {**case.event, 'dealStatus': 40}
+    async with connection() as db:
+        await i.enqueue(db, case.policy, closed, i.now().isoformat())
+    await i.investigate(case.policy, closed, case.recorder)
+    assert closed['assessment']['status'] == 'risk_closed'
+    assert not closed['assessment']['notify_eligible'] and case.query.await_count == 1
+    assert not await rows('SELECT * FROM monitor_investigation_versions')
+    changed = {**closed, 'endTime': 102}
+    async with connection() as db:
+        await i.enqueue(db, case.policy, changed, i.now().isoformat())
+    saved = (await rows('SELECT * FROM monitor_investigations'))[0]
+    assert saved['state'] == 'pending' and saved['evidence'] == '[]'
+    assert len(await rows('SELECT * FROM monitor_investigation_versions')) == 1

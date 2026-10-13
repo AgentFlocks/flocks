@@ -304,6 +304,21 @@ def enable_fixture_mail(context, monkeypatch):
         'enabled': True, 'project': context.policy.project, 'revision': 'fixture-revision',
         'recipient': 'responsible@example.invalid', 'mailbox': 'fixture-mailbox',
     }))
+    # Delivery outcome tests use a confirmed malicious behavior, rather than
+    # borrowing the source severity as a reason to send an email.
+    async def query(policy, session, message, capability, event, entity):
+        if entity == 'proof':
+            return {'data': [{'uuId': event['id'], 'alertTimeLine': []}]}, {'action': 'get_proof', 'uuid': event['id']}
+        return {'data': {'item': [{'hostIp': event['host'], 'commandLine': '/tmp/worm --persist'}]}}, {'action': 'get_entities', 'uuid': event['id'], 'entity_type': entity}
+    async def choose(agent, data):
+        hosts = [proof for proof in data['evidence'] if proof['kind'] == 'host' and proof['success']]
+        if not hosts:
+            return investigation.Choice(action='query', capability='fixture-cap', entity='host', reason='核验主机进程')
+        return investigation.Choice(action='finish', verdict='risk', confidence='high', risk_confirmed=True,
+            evidence_ids=[proof['id'] for proof in hosts], reason='主机存在持久化恶意进程，需要责任人清理。')
+    monkeypatch.setattr(capabilities, 'query', query)
+    monkeypatch.setattr(investigation, 'choose', choose)
+
 
 
 async def assert_recorded_step(attempt, tool_name, *, failed):
@@ -328,7 +343,11 @@ async def test_notification_failure_is_visible_without_failing_investigation_rou
     enable_fixture_mail(context, monkeypatch)
     context.events.clear()
     event = {'key': 'xdr:incident:old', 'id': 'old', 'device': 'xdr', 'name': 'Earlier incident'}
-    await mailflow.queue_notices(context.policy, [event], 'earlier-session')
+    # Seed the already-accepted historical delivery at the service boundary;
+    # the fresh round below still performs its real evidence investigation.
+    with monkeypatch.context() as patch:
+        patch.setattr(mailflow, 'notification_assessment', AsyncMock(return_value={'notify_eligible': True}))
+        await mailflow.queue_notices(context.policy, [event], 'earlier-session')
     # The notification batch and Recorder persist actual state. Only the
     # network-facing one-notice service is simulated for each transport result.
     async def notify(policy, notice, session, adapter_factory):
@@ -358,7 +377,11 @@ async def test_existing_sent_notification_deduplicates_without_marking_round_fai
     from flocks.monitoring.adapter import normalize
     enable_fixture_mail(context, monkeypatch)
     event = normalize('xdr', context.events[0])
-    await mailflow.queue_notices(context.policy, [event], 'earlier-session')
+    # Seed the already-accepted historical delivery at the service boundary;
+    # the fresh round below still performs its real evidence investigation.
+    with monkeypatch.context() as patch:
+        patch.setattr(mailflow, 'notification_assessment', AsyncMock(return_value={'notify_eligible': True}))
+        await mailflow.queue_notices(context.policy, [event], 'earlier-session')
     await write("UPDATE monitor_mail_notices SET state='sent'")
     send = AsyncMock(side_effect=AssertionError('must not re-send'))
     monkeypatch.setattr(mailflow, 'notify_one', send)

@@ -11,6 +11,7 @@ from pydantic import ValidationError
 from flocks.config.config import Config
 from flocks.monitoring import configuration as c, lifecycle, mailflow as m
 from flocks.monitoring.adapter import normalize
+from flocks.monitoring.investigation import EVIDENCE_SCHEMA, fingerprint
 from flocks.monitoring.models import MonitoringPolicy
 from flocks.monitoring.sessions import ensure_daily
 from flocks.monitoring.store import encode, rows, write
@@ -98,6 +99,20 @@ async def notify(setup):
                 ('attempt', 'exec', 'owner', policy.project, policy.scope, day, session.id, 'message', m.d.stamp(), 'completed'))
     for event in events:
         await write('INSERT INTO monitor_observations VALUES(?,?,?)', ('attempt', event['key'], encode(event)))
+        device = event['device']
+        proof = {'id': 'evidence-' + device, 'kind': 'file', 'success': True, 'partial': False,
+                 'event': event['id'], 'device': device, 'event_revision': fingerprint(event),
+                 'query_key': [device, policy.device_tools[device], 'file'],
+                 'schema': EVIDENCE_SCHEMA, 'retrieved_at': m.d.stamp(),
+                 'facts': {'data': {'item': [{'fileName': device + '-worm.exe',
+                                            'virusName': 'Worm.Test.' + device}]}}}
+        decision = {'verdict': 'risk', 'confidence': 'high', 'risk_confirmed': True,
+                    'blocking_gaps': [], 'evidence_ids': [proof['id']], 'gaps': [],
+                    'reason': '本设备检出恶意文件 ' + device + '-worm.exe，需要清理复查。',
+                    'evidence_schema': EVIDENCE_SCHEMA}
+        await write('INSERT INTO monitor_investigations(owner,project,event_key,event,evidence,result,state,updated_at) '
+                    'VALUES(?,?,?,?,?,?,?,?)', ('owner', policy.project, event['key'], encode(event),
+                        encode([proof]), encode(decision), 'ready', m.d.stamp()))
     result = await m.notify_batch(policy, session.id, events, Recorder(), Adapter)
     assert result['sent'] == 2 and not result['errors']
     notices = {json.loads(n['event'])['device']: n for n in await rows('SELECT * FROM monitor_mail_notices')}
@@ -173,6 +188,8 @@ async def test_two_notices_and_reply_only_write_original_device(setup):
         assert notice['recipient'] == device + '@example.com'
         assert '监测设备：机房' + device in notice['body']
         assert notice['event_key'] == f'{device}:incident:same-event'
+        assert device + '-worm.exe' in notice['body']
+        assert ('b' if device == 'a' else 'a') + '-worm.exe' not in notice['body']
     again = await m.notify_batch(state.policy, state.session.id, state.events, Recorder(), state.adapter)
     assert again['sent'] == 0 and m.transport.send.await_count == 2
     await receive(state)

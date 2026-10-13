@@ -124,6 +124,10 @@ class OutboundDelivery:
                 silent=ctx.silent,
                 subject=ctx.subject, message_id=ctx.message_id,
                 new_thread=ctx.new_thread, single_message=ctx.single_message,
+                # A hook/formatter mutation must not leave an older HTML copy
+                # bypassing its change; chunked messages have no HTML mapping.
+                html_body=(ctx.html_body if ctx.single_message and len(chunks) == 1
+                           and text == ctx.text and chunk == ctx.text else None),
             )
 
             await limiter.acquire()

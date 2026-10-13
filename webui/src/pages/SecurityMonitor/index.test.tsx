@@ -476,6 +476,45 @@ it('keeps the dashboard read-only and directs manual handling to the notice list
 });
 
 
+it('paginates round and event detail tables in ten rows, preserves the page on refresh and resets filters', async () => {
+ const runs = Array.from({ length: 12 }, (_, index) => ({ ...data.runs[0], id: `run-${index}`, started_at: `2026-09-23T${String(index).padStart(2, '0')}:00:00Z` }));
+ const events = Array.from({ length: 12 }, (_, index) => ({ ...data.events[index % 2], key: `event-${index}`, name: `分页事件${index}` }));
+ mocks.overview.mockResolvedValue({ data: { ...data, runs, events } });
+ render(<MemoryRouter initialEntries={['/suites/host-security-monitor/dashboard']}><SecurityMonitor /></MemoryRouter>);
+ await screen.findByText('轮次明细');
+ const rounds = screen.getByText('轮次明细').parentElement!;
+ const eventTable = screen.getByText('事件明细 · 处置记录').closest('div.rounded-xl')!;
+ expect(within(rounds).getAllByRole('row')).toHaveLength(11);
+ expect(within(eventTable as HTMLElement).getAllByRole('row')).toHaveLength(11);
+ expect(screen.queryByText('分页事件10')).not.toBeInTheDocument();
+ fireEvent.click(screen.getByRole('button', { name: '轮次明细下一页' }));
+ fireEvent.click(screen.getByRole('button', { name: '事件明细与处置记录下一页' }));
+ expect(screen.getByText('分页事件10')).toBeInTheDocument();
+ expect(screen.queryByText('分页事件0')).not.toBeInTheDocument();
+ await act(async () => { mocks.subscription.onEvent({ type: 'monitor.execution.finished' }); });
+ expect(within(rounds).getByText('第 2 / 2 页')).toBeInTheDocument();
+ expect(within(eventTable as HTMLElement).getByText('第 2 / 2 页')).toBeInTheDocument();
+ fireEvent.change(screen.getByLabelText('风险筛选'), { target: { value: 'risk' } });
+ expect(within(eventTable as HTMLElement).getByText('第 1 / 1 页')).toBeInTheDocument();
+ expect(screen.getByText('分页事件0')).toBeInTheDocument();
+});
+
+it('clamps detail-table pages after refreshed data shrinks instead of leaving an empty page', async () => {
+ const runs = Array.from({ length: 12 }, (_, index) => ({ ...data.runs[0], id: `run-${index}` }));
+ const events = Array.from({ length: 12 }, (_, index) => ({ ...data.events[0], key: `event-${index}`, name: `缩减事件${index}` }));
+ mocks.overview.mockResolvedValue({ data: { ...data, runs, events } });
+ render(<MemoryRouter initialEntries={['/suites/host-security-monitor/dashboard']}><SecurityMonitor /></MemoryRouter>);
+ await screen.findByText('轮次明细');
+ fireEvent.click(screen.getByRole('button', { name: '轮次明细下一页' }));
+ fireEvent.click(screen.getByRole('button', { name: '事件明细与处置记录下一页' }));
+ mocks.overview.mockResolvedValue({ data: { ...data, runs: runs.slice(0, 2), events: events.slice(0, 2) } });
+ await act(async () => { mocks.subscription.onEvent({ type: 'monitor.execution.finished' }); });
+ await screen.findByText('缩减事件0');
+ expect(screen.getByRole('button', { name: '轮次明细上一页' })).toBeDisabled();
+ expect(screen.getByRole('button', { name: '事件明细与处置记录上一页' })).toBeDisabled();
+});
+
+
 it('preserves the mounted conversation and scroll position across tabs and pauses hidden live work', async () => {
  render(<MemoryRouter initialEntries={['/suites/host-security-monitor/session']}><SecurityMonitor /></MemoryRouter>);
  const chat = await screen.findByTestId('native-chat');

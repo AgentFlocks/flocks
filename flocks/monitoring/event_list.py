@@ -1,4 +1,4 @@
-"""Read-only, current-state event follow-up with conservative IOC grouping.
+"""Read-only event follow-up, with device-scoped 24-hour presentation groups.
 
 Grouping is a presentation aid. It never changes incident identities, mail
 idempotency, disposition records, or the daily dashboard/report projection.
@@ -10,7 +10,8 @@ import json
 import re
 from zoneinfo import ZoneInfo
 
-from .event_details import redact_text, _SECRET_NAME
+from .event_details import redact_text, _SECRET_NAME, build_story, readable_story
+from .assessment import assess_event, same_evidence_version, STATUSES, LABELS, FACT_KEYS
 from contextlib import contextmanager
 import asyncio
 import sqlite3
@@ -124,7 +125,7 @@ def _extract_iocs(event, investigation, tz):
     if len(proofs) > 50:
         warnings.append('列表仅采用此事件前 50 条明确 IOC；未读取部分不参与关联。')
     from .investigation import fingerprint
-    if fingerprint(canonical) != fingerprint(event):
+    if not same_evidence_version(canonical, event):
         return {}, ['最新事件版本与已保存取证版本不同，未用旧证据自动合并。']
     for proof in proofs[:50] if compact else proofs[:24]:
         if (not isinstance(proof, dict) or proof.get('success') not in (True, 1)
@@ -201,7 +202,7 @@ def _summarize(row, investigation, disposition, notice, reply_count, names, tz):
     canonical = _json(investigation.get('event'), {})
     canonical = canonical if isinstance(canonical, dict) else {}
     from .investigation import fingerprint
-    current_investigation = bool(canonical and fingerprint(canonical) == fingerprint(event))
+    current_investigation = same_evidence_version(canonical, event)
     if current_investigation and investigation.get('state') == 'ready' and result.get('verdict') in ('risk', 'unknown', 'benign'):
         risk = result['verdict']
     investigation_state = investigation.get('state') or 'pending'
@@ -213,6 +214,8 @@ def _summarize(row, investigation, disposition, notice, reply_count, names, tz):
     first, last = _event_times(event, tz)
     iocs, warnings = _extract_iocs(event, investigation, tz) if valid_identity else ({}, ['事件标识不完整，未作自动合并。'])
     handling = _handling(event, disposition, row['started_at'], tz)
+    assessment = assess_event(event, investigation, handling=handling)
+    risk = assessment['verdict']
     notice_state = notice.get('state')
     basics = event.get('basics') if isinstance(event.get('basics'), dict) else {}
     from .disposition import matches_status
@@ -224,7 +227,7 @@ def _summarize(row, investigation, disposition, notice, reply_count, names, tz):
     summary = {'key': key, 'id': event_id or key, 'name': _text(event.get('name'), 300) or '名称未提供',
         'device': device, 'device_name': _text(names.get(device) or event.get('device_name') or device, 200),
         'host': _text(event.get('host') or basics.get('host'), 200),
-        'risk': risk, 'handling': handling, 'handling_source': 'monitor_verified' if disposition_verified else 'xdr',
+        'risk': risk, 'assessment': assessment, 'identity_valid': valid_identity, 'handling': handling, 'handling_source': 'monitor_verified' if disposition_verified else 'xdr',
         'in_period': bool(row.get('in_period', True)), 'carried_over': not bool(row.get('in_period', True)),
         'is_backlog': not bool(row.get('in_period', True)), 'deal_status': event.get('dealStatus'),
         'observed_at': row['started_at'], 'first_seen_at': row['first_seen_at'], 'last_seen_at': row['last_seen_at'],
@@ -244,21 +247,32 @@ def _summarize(row, investigation, disposition, notice, reply_count, names, tz):
     return summary, iocs, first, last
 
 
-def group_events(members, window_hours=12, enabled=True):
-    """Whole-group time span and a common IOC prevent transitive bridges."""
+def _event_type(name):
+    """Only normalize presentation spacing/case; never merge unlike attacks."""
+    return re.sub(r'\s+', '', name).casefold() if isinstance(name, str) else ''
+
+
+def group_events(members, window_hours=24, enabled=True):
+    """Same device and named event type; whole-group span prevents bridges.
+
+    Hosts and outcomes may differ. This groups rows, not incident identities,
+    notifications, evidence, or permissions. Missing times remain independent.
+    """
     groups = []
     for member, iocs, first, last in sorted(members, key=lambda item: (item[2] or datetime.min.replace(tzinfo=timezone.utc), item[0]['key'])):
-        host = _host(member['host'])
+        event_type = _event_type(member['name'])
         chosen = None
-        if enabled and host and first and last and iocs and (last-first).total_seconds() <= window_hours * 3600:
+        valid = bool(member.get('identity_valid', True) and member['device'] and event_type and member['name'] != '名称未提供' and first and last
+                     and (last-first).total_seconds() <= window_hours * 3600)
+        if enabled and valid:
             for group in groups:
-                if (group['device'] == member['device'] and group['_host'] == host and group['_common'] & iocs.keys()
-                        and group['_first'] and (max(last, group['_last']) - min(first, group['_first'])).total_seconds() <= window_hours * 3600):
+                if (group['device'] == member['device'] and group['_type'] == event_type and group['_first']
+                        and (max(last, group['_last']) - min(first, group['_first'])).total_seconds() <= window_hours * 3600):
                     chosen = group
                     break
         if chosen is None:
-            chosen = {'device': member['device'], '_host': host, '_first': first, '_last': last,
-                '_common': set(iocs), 'members': []}
+            chosen = {'device': member['device'], '_type': event_type, '_first': first, '_last': last,
+                      '_common': set(iocs), 'members': []}
             groups.append(chosen)
         else:
             chosen['_first'] = min(chosen['_first'], first)
@@ -272,20 +286,27 @@ def group_events(members, window_hours=12, enabled=True):
         counts = {state: sum(m['handling'] == state for m in members) for state in ('open', 'closed', 'ignored', 'contained')}
         handling = ('open' if counts['open'] else 'contained' if counts['contained'] else
                     'ignored' if counts['ignored'] == len(members) else 'closed')
+        assessment_counts = {state: sum(m['assessment']['status'] == state for m in members) for state in STATUSES}
+        outcomes = [state for state in STATUSES if assessment_counts[state]]
+        assessment_status = outcomes[0] if len(outcomes) == 1 else 'mixed'
         keys = sorted(m['key'] for m in members)
-        risk = next((value for value in ('risk', 'unknown', 'benign', 'ignored') if any(m['risk'] == value for m in members)), 'unknown')
+        risk = next((value for value in ('risk', 'unknown', 'benign') if any(m['risk'] == value for m in members)), 'unknown')
+        hosts = sorted({_host(m['host']) or m['host'] for m in members if m['host']})
         output.append({'id': 'group:' + sha256('\0'.join(keys).encode()).hexdigest()[:24] if len(members) > 1 else primary['key'],
             'event_keys': keys, 'grouped': len(members) > 1, 'member_count': len(members),
-            'name': primary['name'], 'device': primary['device'], 'device_name': primary['device_name'], 'host': primary['host'],
+            'name': primary['name'], 'device': primary['device'], 'device_name': primary['device_name'],
+            'host': hosts[0] if len(hosts) == 1 else '', 'hosts': hosts, 'host_count': len(hosts),
             'first_event_at': _iso(group['_first']), 'last_event_at': _iso(group['_last']),
             'first_seen_at': min(m['first_seen_at'] for m in members), 'last_seen_at': max(m['last_seen_at'] for m in members),
             'risk': risk, 'handling': handling, 'closure_counts': counts,
+            'assessment_status': assessment_status, 'assessment_counts': assessment_counts,
+            'assessment_label': LABELS.get(assessment_status, '包含不同研判结果'),
             'in_period': any(m['in_period'] for m in members), 'carried_over': any(m['carried_over'] for m in members),
             'is_backlog': any(m['carried_over'] for m in members),
             'mail': {field: sum(bool(m['mail'][field]) for m in members) for field in ('sent', 'replied', 'failed')},
             'ioc_matches': [{'type': kind, 'value': value} for kind, value in sorted(group['_common'])] if len(members) > 1 else [],
-            'merge_reason': (f'同一 XDR、同一主机，共享明确恶意 IOC；全部成员事件发生时间跨度不超过 {window_hours} 小时。'
-                             if len(members) > 1 else '未找到同时满足同设备、同主机、共同可信 IOC 和事件时间范围的其他事件，保持独立显示。'),
+            'merge_reason': (f'同一 XDR、同类安全事件，整组发生时间跨度不超过 {window_hours} 小时；可涉及不同主机。仅合并展示，各子事件独立研判和处置。'
+                             if len(members) > 1 else '当前未找到同一设备、同类事件且在聚合时间范围内的其他事件；缺少发生时间的事件保持独立。'),
             'members': members})
     return sorted(output, key=lambda item: (item['last_seen_at'], item['id']), reverse=True)
 
@@ -345,6 +366,28 @@ def _ioc_projection():
         AND CAST(e.key AS INTEGER)<200 LIMIT 51))"""
 
 
+def _assessment_projection():
+    """Bounded proof identities and field presence, without loading packet text."""
+    keys = ','.join("'" + key + "'" for key in sorted(FACT_KEYS))
+    safe = "CASE WHEN json_valid(i.evidence) THEN i.evidence ELSE '[]' END"
+    return f"""(SELECT json_group_array(json_object(
+        'id',substr(json_extract(p.value,'$.id'),1,100),'event',substr(json_extract(p.value,'$.event'),1,300),
+        'device',substr(json_extract(p.value,'$.device'),1,200),'tool',substr(json_extract(p.value,'$.tool'),1,100),
+        'kind',substr(json_extract(p.value,'$.kind'),1,50),'event_revision',substr(json_extract(p.value,'$.event_revision'),1,100),
+        'success',json_extract(p.value,'$.success'),'partial',json_extract(p.value,'$.partial'),
+        'fact_fields',json((SELECT json_group_array(key) FROM (
+            SELECT DISTINCT t.key FROM json_tree(CASE WHEN json_type(p.value,'$.facts') IN ('object','array') THEN json_extract(p.value,'$.facts') ELSE '{{}}' END) t
+            WHERE t.key IN ({keys}) AND t.type IN ('text','integer','real','array')
+            AND t.value IS NOT NULL AND t.value NOT IN ('','[]') LIMIT 80)))))
+        FROM (SELECT value FROM json_each({safe}) WHERE type='object' LIMIT 24) p)"""
+
+
+def _result_projection(column):
+    safe = f"CASE WHEN json_valid({column}) THEN {column} ELSE '{{}}' END"
+    fields = ('verdict', 'confidence', 'risk_confirmed', 'blocking_gaps', 'evidence_ids', 'gaps')
+    return 'json_object(' + ','.join(f"'{key}'," + (f"json(CASE json_type({safe},'$.risk_confirmed') WHEN 'true' THEN 'true' ELSE 'false' END)" if key == 'risk_confirmed' else f"json_extract({safe},'$.{key}')") for key in fields) + f",'reason',substr(json_extract({safe},'$.reason'),1,1500))"
+
+
 def _select(db, sql, args=()):
     cursor = db.execute(sql, args)
     return [dict(row) for row in cursor.fetchall()]
@@ -373,8 +416,8 @@ def _dates(start_date, end_date):
     return first.isoformat(), last.isoformat()
 
 
-def _list_events(owner, scope, *, start_date, end_date, window_hours=12, device=None,
-                      risk=None, handling=None, search=None, offset=0, limit=25, group=True, include_backlog=True):
+def _list_events(owner, scope, *, start_date, end_date, window_hours=24, device=None,
+                      risk=None, handling=None, assessment=None, search=None, offset=0, limit=10, group=True, include_backlog=True):
     """Period membership is observation-based; handling facts remain current."""
     start_date, end_date = _dates(start_date, end_date)
     if type(window_hours) is not int or not 1 <= window_hours <= 24:
@@ -383,6 +426,8 @@ def _list_events(owner, scope, *, start_date, end_date, window_hours=12, device=
         raise ValueError('分页参数无效')
     if risk not in (None, '', 'risk', 'unknown', 'ignored', 'benign') or handling not in (None, '', 'open', 'closed', 'ignored', 'contained'):
         raise ValueError('事件筛选状态无效')
+    if assessment not in (None, '', *STATUSES):
+        raise ValueError('研判结果筛选状态无效')
     if search is not None and (not isinstance(search, str) or len(search) > 200):
         raise ValueError('搜索内容不能超过 200 字符')
     warnings, truncated = [], False
@@ -429,8 +474,7 @@ def _list_events(owner, scope, *, start_date, end_date, window_hours=12, device=
                 args)
             investigations += _select(db,
                 f'SELECT i.event_key,i.state,{_event_projection("i.event")} AS event,{_ioc_projection()} AS ioc_rows, '
-                "json_object('verdict',json_extract(CASE WHEN json_valid(i.result) THEN i.result ELSE '{}' END,'$.verdict'),"
-                "'reason',substr(json_extract(CASE WHEN json_valid(i.result) THEN i.result ELSE '{}' END,'$.reason'),1,1500)) AS result,i.updated_at, "
+                f'{_assessment_projection()} AS assessment_proofs,{_result_projection("i.result")} AS result,i.updated_at, '
                 'NOT json_valid(i.event) OR NOT json_valid(i.evidence) OR NOT json_valid(i.result) AS data_truncated '
                 f'FROM monitor_investigations i WHERE i.owner=? AND i.project=? AND i.event_key IN ({marks})',
                 (owner, project, *batch))
@@ -464,7 +508,7 @@ def _list_events(owner, scope, *, start_date, end_date, window_hours=12, device=
         case = investigations.get(row['event_key'], {})
         if row['data_truncated'] or case.get('data_truncated'):
             truncated = True
-            warnings.append('部分事件或证据超出列表读取上限；相关事件可能保持独立，请打开详情或缩小查询范围。')
+            warnings.append('部分事件或证据未能完整读取；列表保留事件概要，请打开详情或缩小查询范围。')
         notice = notices.get(row['event_key'], {})
         member = _summarize(row, case, dispositions.get(row['event_key'], {}), notice,
                             replies.get(notice.get('id'), 0), names, tz)
@@ -472,11 +516,12 @@ def _list_events(owner, scope, *, start_date, end_date, window_hours=12, device=
             all_members.append(member)
         if any('前 50 条' in note for note in member[0]['warnings']):
             truncated = True
-            warnings.append('部分事件 IOC 超出列表提取上限，仅使用已加载 IOC 保守关联。')
+            warnings.append('部分事件的关联指标只加载了概要；同类事件聚合不依赖这些指标，完整证据请查看详情。')
     devices = sorted({(m[0]['device'], m[0]['device_name']) for m in all_members if m[0]['device']})
     needle = search.casefold().strip() if search else ''
     members = [m for m in all_members if (not device or m[0]['device'] == device)
         and (not risk or m[0]['risk'] == risk) and (not handling or m[0]['handling'] == handling)
+        and (not assessment or m[0]['assessment']['status'] == assessment)
         and (not needle or needle in ' '.join(str(m[0].get(k, '')) for k in ('id', 'name', 'host', 'device_name')).casefold()
              or any(needle in ioc['value'].casefold() for ioc in m[0]['iocs']))]
     items = group_events(members, window_hours, enabled=group)
@@ -485,6 +530,7 @@ def _list_events(owner, scope, *, start_date, end_date, window_hours=12, device=
         'events_in_range': sum(m[0]['in_period'] for m in members), 'backlog_events': sum(m[0]['carried_over'] for m in members),
         'groups': sum(item['grouped'] for item in items), 'ungrouped': sum(not item['grouped'] for item in items),
         **{state: sum(m[0]['handling'] == state for m in members) for state in ('open', 'closed', 'ignored', 'contained')},
+        'assessment_counts': {state: sum(m[0]['assessment']['status'] == state for m in members) for state in STATUSES},
         'mail_sent': sum(m[0]['mail']['sent'] for m in members), 'mail_replied': sum(m[0]['mail']['replied'] for m in members)}
     return {'start_date': start_date, 'end_date': end_date, 'timezone': str(tz), 'window_hours': window_hours,
         'items': items[offset:offset+limit], 'total': len(items), 'has_more': len(items) > offset+limit,
@@ -575,16 +621,20 @@ def _detail(owner, scope, event_key):
         investigation['state'] = 'stale'
         investigation['result'] = {'verdict': 'unknown', 'reason': summary['investigation']['reason'],
             'gaps': ['当前事件版本与历史取证版本不同，旧证据未用来自动关联或判定安全。']}
-    output = {'event': event, 'investigation': investigation, 'dispositions': dispositions, 'notice': notice,
+    story = build_story(event, investigation['evidence'] if isinstance(investigation['evidence'], list) else [],
+                        investigation['result'] if isinstance(investigation['result'], dict) else {})
+    overview = readable_story({**story, 'verdict': summary['assessment']['verdict'],
+        'conclusion': summary['assessment']['reason'], 'gaps': summary['assessment']['gaps']})
+    output = {'event': event, 'overview': overview, 'story': story, 'investigation': investigation, 'dispositions': dispositions, 'notice': notice,
         'observations': [{k: v for k, v in row.items() if k not in {'data', 'data_truncated'}} for row in observations],
         'timezone': str(tz), 'truncated': truncated, 'warnings': list(dict.fromkeys(warnings))}
     return _redacted(output)
 
 
-async def list_events(owner, scope, *, start_date, end_date, window_hours=12, device=None,
-                      risk=None, handling=None, search=None, offset=0, limit=25, group=True, include_backlog=True):
+async def list_events(owner, scope, *, start_date, end_date, window_hours=24, device=None,
+                      risk=None, handling=None, assessment=None, search=None, offset=0, limit=10, group=True, include_backlog=True):
     return await asyncio.to_thread(_list_events, owner, scope, start_date=start_date, end_date=end_date,
-        window_hours=window_hours, device=device, risk=risk, handling=handling, search=search,
+        window_hours=window_hours, device=device, risk=risk, handling=handling, assessment=assessment, search=search,
         offset=offset, limit=limit, group=group, include_backlog=include_backlog)
 
 

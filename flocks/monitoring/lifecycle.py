@@ -30,6 +30,7 @@ CORE_CAPABILITIES.add('monitor.mail-manual.v1')
 CORE_CAPABILITIES.add('monitor.mail-retry.v1')
 CORE_CAPABILITIES.add('monitor.incident-evidence.v1')
 CORE_CAPABILITIES.add('monitor.event-list.v1')
+CORE_CAPABILITIES.add('monitor.confirmed-risk.v1')
 
 
 def validate_manifest(manifest, package=None):

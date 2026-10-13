@@ -147,20 +147,34 @@ def test_failed_query_retry_limit_survives_context_projection():
 
 
 async def test_mail_uses_same_story_and_preserves_one_notice(auto):
-    from flocks.monitoring.event_details import build_story
+    from flocks.monitoring.event_details import build_story, safe_facts
     from flocks.monitoring.store import write, encode
     proof = {'id': 'evidence-1', 'kind': 'alert_proof', 'success': True, 'partial': False,
+             'event': auto.event['id'], 'device': auto.event['device'],
+             'event_revision': i.fingerprint(auto.event), 'schema': i.EVIDENCE_SCHEMA,
              'facts': {'data': {'uuId': 'alert-example', 'proof': {
                  'requestHead': 'POST /search HTTP/1.1',
                  'requestBody': '{"orderBy":"@@version", "token":"PRIVATE_SECRET"}',
                  'responseHead': 'HTTP/1.1 200 OK', 'responseBody': '{}'}}}}
-    auto.event['story'] = build_story(auto.event, [proof], {'reason': '发现注入尝试，尚不能证明利用成功', 'evidence_ids': ['evidence-1']})
+    proof['facts'], proof['partial'] = safe_facts(proof['facts'])
+    decision = {'verdict': 'risk', 'confidence': 'high', 'risk_confirmed': True, 'blocking_gaps': [],
+                'reason': '请求包含注入语句，已确认存在注入尝试；利用是否成功仍需责任人核查。',
+                'evidence_ids': ['evidence-1'], 'evidence_schema': i.EVIDENCE_SCHEMA}
+    # The accepted DB investigation is authoritative. An old story on the queue
+    # event cannot substitute a different verdict or introduce unsanitized text.
+    auto.event['story'] = {'conclusion': '旧版本摘要 PRIVATE_SECRET，不应作为通知依据'}
+    await write('UPDATE monitor_investigations SET event=?,evidence=?,result=?,state=?',
+                (encode(auto.event), encode([proof]), encode(decision), 'ready'))
     await write('UPDATE monitor_observations SET data=?', (encode(auto.event),))
     sent = await notice(auto)
     assert sent['state'] == 'sent'
     body = sent['body']
-    assert '事件基本信息' in body and '调查结论' in body and '关键证据' in body
-    assert '@@version' in body and 'evidence-1' in body and 'PRIVATE_SECRET' not in body
+    assert all(section in body for section in ('基本信息', '调查结论', '关键证据', '事件经过', '请您处理'))
+    assert '@@version' in body and '已确认存在注入尝试' in body
+    assert all(noise not in body for noise in ('evidence-1', 'PRIVATE_SECRET', '旧版本摘要', '告警编号'))
     assert '其他联动查询' not in body and '文件：0' not in body
+    presentation = json.loads(sent['event'])['mail_presentation']['html_body']
+    assert '@@version' in presentation and 'PRIVATE_SECRET' not in presentation
+    assert len(await rows('SELECT * FROM monitor_mail_notices')) == 1
     await notice(auto)
     assert auto.send.await_count == 1

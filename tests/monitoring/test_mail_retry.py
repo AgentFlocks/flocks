@@ -153,8 +153,9 @@ async def test_notified_incident_outside_new_query_window_remains_pending(auto):
     auto.leave_scope = True
     await notice(auto)
     result = await retry.retry('owner', n['id'], request())
-    assert result['state'] == 'sent'
-    assert auto.send.call_args.args[0]['body'] == n['body'] and not writes(auto)
+    assert result['state'] == 'queued'
+    assert auto.send.await_count == 1 and not writes(auto)
+    assert '离开' in result['error']
     assert (await m.history('owner'))['notices'][0]['disposition_state'] == 'unhandled'
 
 

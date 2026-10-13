@@ -25,20 +25,20 @@ BASE = '/api/monitoring/host-security-monitor/events'
 DATES = {'start_date': '2026-10-01', 'end_date': '2026-10-12'}
 
 
-async def test_http_passes_current_owner_and_conservative_defaults(client, monkeypatch):
+async def test_http_passes_current_owner_and_24_hour_ten_row_defaults(client, monkeypatch):
     read = AsyncMock(return_value={'items': [], 'total': 0})
     monkeypatch.setattr(event_list, 'list_events', read)
     response = await client.get(BASE, params=DATES)
     assert response.status_code == 200
     args, kwargs = read.call_args
     assert args == ('owner', COMPONENT_ID)
-    assert kwargs['window_hours'] == 12 and kwargs['include_backlog'] and kwargs['group']
-    assert kwargs['limit'] == 25
+    assert kwargs['window_hours'] == 24 and kwargs['include_backlog'] and kwargs['group']
+    assert kwargs['limit'] == 10
 
 
 @pytest.mark.parametrize('extra', [
     {'window_hours': 0}, {'window_hours': 25}, {'limit': 101},
-    {'offset': -1}, {'risk': 'safe'}, {'handling': 'done'}, {'search': 'a' * 201},
+    {'offset': -1}, {'assessment': 'safe'}, {'risk': 'safe'}, {'handling': 'done'}, {'search': 'a' * 201},
 ])
 async def test_http_rejects_invalid_filters_before_read(client, monkeypatch, extra):
     read = AsyncMock()
@@ -89,3 +89,11 @@ async def test_http_timeout_is_unavailable_not_no_events(client, monkeypatch):
     monkeypatch.setattr(api.asyncio, 'wait_for', short_wait)
     response = await client.get(BASE, params=DATES)
     assert response.status_code == 503
+
+
+async def test_http_forwards_business_assessment_filter(client, monkeypatch):
+    read = AsyncMock(return_value={'items': [], 'total': 0})
+    monkeypatch.setattr(event_list, 'list_events', read)
+    response = await client.get(BASE, params={**DATES, 'assessment': 'insufficient'})
+    assert response.status_code == 200
+    assert read.call_args.kwargs['assessment'] == 'insufficient'

@@ -328,7 +328,7 @@ class EmailChannel(ChannelPlugin):
                 ctx.reply_to_id,
                 ctx.thread_id,
                 None,
-                ctx.subject, ctx.message_id, ctx.new_thread,
+                ctx.subject, ctx.message_id, ctx.new_thread, ctx.html_body,
             )
             self.record_message()
             self._health_success('send', 'send')
@@ -746,12 +746,13 @@ class EmailChannel(ChannelPlugin):
         subject_override: Optional[str] = None,
         stable_message_id: Optional[str] = None,
         new_thread: bool = False,
+        html_body: Optional[str] = None,
     ) -> str:
         smtp = None
         try:
             self._require_send_enabled()
             msg = self._prepare_email(to_addr, body, reply_to_msg_id, thread_id,
-                                      attachment_path, subject_override, stable_message_id, new_thread)
+                                      attachment_path, subject_override, stable_message_id, new_thread, html_body)
             self._health_stage('send', 'connect')
             smtp = self._connect_smtp()
             self._health_stage('send', 'authenticate')
@@ -805,9 +806,10 @@ class EmailChannel(ChannelPlugin):
         subject_override: Optional[str],
         stable_message_id: Optional[str],
         new_thread: bool,
+        html_body: Optional[str] = None,
     ) -> MIMEMultipart:
         cfg = self._resolved
-        msg = MIMEMultipart()
+        msg = MIMEMultipart("alternative" if html_body and attachment_path is None else "mixed")
         msg["From"] = cfg["address"]
         msg["To"] = to_addr
 
@@ -830,7 +832,12 @@ class EmailChannel(ChannelPlugin):
         msg["Date"] = formatdate(localtime=True)
         message_id = stable_message_id or f"<flocks-{uuid.uuid4().hex[:12]}@{self._message_id_domain()}>"
         msg["Message-ID"] = message_id
-        msg.attach(MIMEText(body or "", "plain", "utf-8"))
+        content = MIMEMultipart("alternative") if html_body and attachment_path is not None else msg
+        content.attach(MIMEText(body or "", "plain", "utf-8"))
+        if html_body:
+            content.attach(MIMEText(html_body, "html", "utf-8"))
+        if content is not msg:
+            msg.attach(content)
 
         if attachment_path is not None:
             with attachment_path.open("rb") as handle:

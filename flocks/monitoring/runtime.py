@@ -222,6 +222,7 @@ async def run(execution, policy, adapter_factory=XdrAdapter):
                     events = await query_device(adapter, device, start, end, recorder)
                 async with connection() as db:
                     for event in events:
+                        event['risk'] = 'unknown'  # Source severity only prioritizes investigation.
                         event['device_name'] = policy.device_names.get(device, device)
                         event['investigationWindow'] = {'start': max(start, end-86400), 'end': end}
                         await investigation.enqueue(db, policy, event, started.isoformat())
@@ -262,8 +263,9 @@ async def run(execution, policy, adapter_factory=XdrAdapter):
                 # A completed, fresh investigation costs no calls to project
                 # into this round. An expired or changed one needs a real retry
                 # and must wait for a later round with available budget.
+                from .assessment import same_evidence_version
                 if (cached_result.get('evidence_schema') != investigation.EVIDENCE_SCHEMA
-                        or investigation.fingerprint(event) != investigation.fingerprint(canonical)
+                        or not same_evidence_version(event, canonical)
                         or investigation.fresh_evidence(evidence, canonical) != evidence):
                     continue
             await investigation.investigate(policy, event, recorder, budget)
@@ -283,9 +285,16 @@ async def run(execution, policy, adapter_factory=XdrAdapter):
                     groups.setdefault(key, []).append(event['key'])
             for event in observed:
                 event['related'] = [x for x in groups.get((event['device'], event['host']), []) if x != event['key']]
+                if not event.get('assessment'):
+                    from .assessment import assess_event
+                    event['assessment'] = assess_event(event)
+                event['risk'] = event['assessment']['verdict']
+                event['reason'] = event['assessment']['reason']
                 await write('UPDATE monitor_observations SET data=? WHERE attempt_id=? AND event_key=?', (encode(event), attempt_id, event['key']))
             result = {'events': len(observed), **event_sources, 'risk': sum(e['risk'] == 'risk' for e in observed),
-                      'unknown': sum(e['risk'] == 'unknown' for e in observed), 'ignored': 0,
+                      'unknown': sum(e['risk'] == 'unknown' for e in observed),
+                      'benign': sum(e['risk'] == 'benign' for e in observed),
+                      'ignored': sum(e['risk'] == 'benign' for e in observed),
                       'analyzed': sum(e.get('investigation', {}).get('state') == 'ready' for e in observed),
                       'deferred': sum(not e.get('investigation') or e['investigation']['state'] == 'deferred' for e in observed),
                       'query_complete': query_errors == 0,
@@ -294,7 +303,7 @@ async def run(execution, policy, adapter_factory=XdrAdapter):
         result = await recorder.call('关联分析', {'policy': 'xdr-risk-v1'}, analyze)
         result['development_sample'] = False
         # Only completed investigations can propose a new follow-up.
-        mail_events = [event for event in observed if event.get('investigation', {}).get('state') == 'ready']
+        mail_events = [event for event in observed if event.get('assessment', {}).get('notify_eligible')]
         notification = await mail_followup('mail.send',
             lambda: notify_batch(policy, session.id, mail_events, recorder),
             {'sent': 0, 'pending': 0, 'unavailable': True,

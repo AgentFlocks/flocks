@@ -1,10 +1,17 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  Fragment,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { Link } from "react-router-dom";
 import {
   ArrowDownRight,
   ArrowUpRight,
   CalendarDays,
-  CheckCircle2,
+  ChevronDown,
   ChevronLeft,
   ChevronRight,
   CircleDot,
@@ -20,6 +27,7 @@ import {
 import { MONITOR_PATH } from "@/api/securityMonitoring";
 import {
   monitoringEventsApi,
+  type EventAssessmentStatus,
   type EventDetailResponse,
   type EventListResponse,
   type EventListRow,
@@ -27,6 +35,13 @@ import {
   type MonitorEventQuery,
 } from "@/api/securityMonitoringEvents";
 import { Sheet } from "./MailFollowup";
+import {
+  AssessmentBadge,
+  assessmentLabels,
+  assessmentStatus,
+  readableEvidence,
+} from "./EventAssessment";
+import { MONITOR_PAGE_SIZE } from "./Pagination";
 
 type Period = "day" | "week" | "month" | "custom";
 type Props = {
@@ -47,19 +62,6 @@ const handlingLabels: Record<string, string> = {
   closed: "已处置",
   ignored: "已忽略",
   contained: "已遏制 · 需跟进",
-};
-const riskLabels: Record<string, string> = {
-  risk: "风险线索",
-  unknown: "待判定",
-  ignored: "可忽略",
-  benign: "未见恶意",
-};
-const verdictLabels: Record<string, string> = {
-  malicious: "恶意",
-  benign: "未见恶意",
-  unknown: "证据不足",
-  suspicious: "可疑",
-  risk: "风险",
 };
 const investigationLabels: Record<string, string> = {
   stale: "历史版本待核对",
@@ -150,51 +152,6 @@ function responseError(error: unknown, fallback: string) {
   const payload = record(record(record(error).response).data);
   return typeof payload.detail === "string" ? payload.detail : fallback;
 }
-function HandlingBadge({ state }: { state: string }) {
-  const done = state === "closed" || state === "ignored";
-  return (
-    <span
-      className={`inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs font-medium ${done ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300" : "bg-sky-50 text-sky-800 dark:bg-sky-950/50 dark:text-sky-200"}`}
-    >
-      {done ? <CheckCircle2 size={12} /> : <CircleDot size={12} />}
-      {handlingLabels[state] || "状态待核对"}
-    </span>
-  );
-}
-function Progress({ row }: { row: EventListRow }) {
-  const finished = row.closure_counts
-    ? row.closure_counts.closed + row.closure_counts.ignored
-    : row.members.filter((member) =>
-        ["closed", "ignored"].includes(member.handling),
-      ).length;
-  const contained =
-    row.closure_counts?.contained ??
-    row.members.filter((member) => member.handling === "contained").length;
-  return (
-    <div className="min-w-24 space-y-1.5">
-      {finished === row.member_count && row.member_count > 1 ? (
-        <span className="inline-flex items-center gap-1 rounded-md bg-emerald-50 px-2 py-1 text-xs font-medium text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300">
-          <CheckCircle2 size={12} />
-          全部已终结
-        </span>
-      ) : (
-        <HandlingBadge state={row.handling} />
-      )}
-      <p className="text-xs text-slate-500">
-        终结 {finished}/{row.member_count}
-        {contained > 0 && ` · 遏制 ${contained}`}
-      </p>
-      <div className="h-1 overflow-hidden rounded-full bg-sky-100 dark:bg-sky-950">
-        <div
-          className="h-full rounded-full bg-emerald-500"
-          style={{
-            width: `${row.member_count ? (finished / row.member_count) * 100 : 0}%`,
-          }}
-        />
-      </div>
-    </div>
-  );
-}
 function MemberConclusion({ member }: { member: EventMember }) {
   if (
     member.investigation?.is_current === false &&
@@ -205,7 +162,7 @@ function MemberConclusion({ member }: { member: EventMember }) {
   return (
     <span>
       {member.investigation?.state === "ready"
-        ? `${investigationLabels.ready} · ${verdictLabels[member.investigation.verdict || "unknown"] || "需核对结论"}`
+        ? investigationLabels.ready
         : investigationLabels[member.investigation?.state || ""] ||
           "尚无调查结论"}
     </span>
@@ -231,17 +188,19 @@ function StoryDetails({
     detail.investigation?.historical_result ||
       (historical && detail.investigation?.state !== "stale" ? result : null),
   );
-  const story = historical ? {} : record(result.story || detail.event.story);
-  const basics = record(story.basics || detail.event.basics);
+  const story = historical
+    ? {}
+    : record(detail.story || result.story || detail.event.story);
+  const overview = historical ? {} : record(detail.overview);
+  const basics = record(overview.basics || story.basics || detail.event.basics);
   const basicLabels: Record<string, string> = {
-    event_id: "事件 ID",
-    alert_ids: "原始告警 ID",
-    name: "告警名称",
+    name: "事件名称",
+    device: "监测设备",
     alert_time: "告警时间",
     start_time: "首次发生",
     end_time: "最近发生",
     host: "关联主机",
-    severity: "来源等级原值",
+    severity: "来源风险等级",
     data_source: "数据来源",
     source_device: "来源设备",
     src_ip: "源 IP",
@@ -258,17 +217,22 @@ function StoryDetails({
     process_name: "进程",
     command_line: "命令行",
   };
-  const timeline = records(story.timeline);
-  const evidence = records(story.key_evidence);
+  const timeline = records(overview.timeline || story.timeline);
+  const evidence = records(overview.evidence || story.key_evidence);
   const packets = records(story.packets);
-  const gaps = [...strings(story.gaps), ...strings(result.gaps)];
-  const explanation = text(
+  const gaps = Array.isArray(overview.gaps)
+    ? strings(overview.gaps)
+    : [...strings(story.gaps), ...strings(result.gaps)];
+  const originalExplanation = text(
     historical
       ? detail.event.investigation?.reason ||
           "原事件已更新，旧调查结论仅供历史查看；当前事件仍需重新核对。"
       : result.reason || detail.event.reason || story.conclusion,
     "尚未形成有证据支持的调查结论。",
   );
+  const explanation =
+    readableEvidence(text(overview.conclusion, originalExplanation)) ||
+    "尚未形成可读的调查结论。";
   return (
     <div className="space-y-5">
       <section className="rounded-xl border border-sky-100 bg-sky-50/60 p-4 dark:border-sky-900 dark:bg-sky-950/30">
@@ -280,10 +244,15 @@ function StoryDetails({
           {historical
             ? investigationLabels.stale
             : investigationLabels[state] || "尚无调查结论"}
-          {!historical && result.verdict
-            ? ` · ${verdictLabels[String(result.verdict)] || text(result.verdict)}`
-            : ""}
         </p>
+        <div className="mb-3">
+          <AssessmentBadge status={assessmentStatus(detail.event)} />
+          {assessmentStatus(detail.event) === "insufficient" && (
+            <p className="mt-2 text-xs text-slate-500">
+              暂不通知责任人，尚未排除风险。
+            </p>
+          )}
+        </div>
         <p className="whitespace-pre-wrap break-words text-sm leading-7">
           {explanation}
         </p>
@@ -338,10 +307,7 @@ function StoryDetails({
                   {formatTime(item.time, timezone)}
                 </time>
                 <p className="mt-1 break-words text-sm leading-6">
-                  {text(item.text)}
-                </p>
-                <p className="mt-1 text-xs text-slate-500">
-                  证据：{text(item.evidence_id)}
+                  {readableEvidence(text(item.text))}
                 </p>
               </li>
             ))}
@@ -357,11 +323,13 @@ function StoryDetails({
                 key={index}
                 className="rounded-lg border border-slate-100 p-3 text-sm leading-6 dark:border-slate-800"
               >
-                <span className="mb-1 block text-xs font-medium text-emerald-700 dark:text-emerald-400">
-                  {text(item.evidence_id)}
-                </span>
+                {item.time || item.timestamp ? (
+                  <time className="mb-1 block text-xs font-medium text-sky-700 dark:text-sky-300">
+                    {formatTime(item.time || item.timestamp, timezone)}
+                  </time>
+                ) : null}
                 <span className="whitespace-pre-wrap break-words">
-                  {text(item.text)}
+                  {readableEvidence(text(item.text))}
                 </span>
               </li>
             ))}
@@ -416,12 +384,40 @@ function StoryDetails({
         <section className="rounded-lg border border-amber-200 bg-amber-50/50 p-3 dark:border-amber-900 dark:bg-amber-950/20">
           <h3 className="text-sm font-semibold">证据缺口与待跟进</h3>
           <ul className="mt-2 list-disc space-y-1 pl-4 text-xs leading-6">
-            {[...new Set(gaps)].map((item, index) => (
-              <li key={index}>{item}</li>
-            ))}
+            {[...new Set(gaps.map(readableEvidence).filter(Boolean))]
+              .slice(0, 3)
+              .map((item, index) => (
+                <li key={index}>{item}</li>
+              ))}
           </ul>
+          {gaps.length > 3 && (
+            <p className="mt-2 text-xs text-slate-500">
+              更多查询限制见下方技术明细。
+            </p>
+          )}
         </section>
       )}
+      <details className="rounded-lg border border-slate-200 p-3 dark:border-slate-700">
+        <summary className="cursor-pointer text-sm font-medium">
+          技术明细与原始依据
+        </summary>
+        <p className="mt-2 text-xs leading-6 text-slate-500">
+          以下保留来源原文和证据编号，供排障追溯；不改变上方研判结论。
+        </p>
+        <pre className="mt-3 max-h-96 overflow-auto whitespace-pre-wrap break-words text-xs leading-6">
+          {JSON.stringify(
+            {
+              conclusion: originalExplanation,
+              basics,
+              key_evidence: evidence,
+              timeline,
+              gaps,
+            },
+            null,
+            2,
+          )}
+        </pre>
+      </details>
       {strings(story.boundaries).length > 0 && (
         <p className="text-xs leading-6 text-slate-500">
           {strings(story.boundaries).join(" ")}
@@ -589,10 +585,12 @@ export default function EventList({
   const [range, setRange] = useState(() => periodRange("week", timezone));
   const [group, setGroup] = useState(true);
   const [includeBacklog, setIncludeBacklog] = useState(true);
-  const [windowHours, setWindowHours] = useState(12);
+  const [windowHours, setWindowHours] = useState(24);
   const [device, setDevice] = useState("");
-  const [risk, setRisk] = useState("");
-  const [handling, setHandling] = useState("");
+  const [assessment, setAssessment] = useState<EventAssessmentStatus | "">("");
+  const [expandedRows, setExpandedRows] = useState<Set<string>>(
+    () => new Set(),
+  );
   const [search, setSearch] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
   const [offset, setOffset] = useState(0);
@@ -628,7 +626,7 @@ export default function EventList({
     calendarTimezone,
     range,
   };
-  const limit = 25;
+  const limit = MONITOR_PAGE_SIZE;
   const dateError =
     !range.start || !range.end
       ? "请选择完整的起止日期。"
@@ -664,8 +662,7 @@ export default function EventList({
       offset,
       limit,
       ...(device && { device }),
-      ...(risk && { risk }),
-      ...(handling && { handling }),
+      ...(assessment && { assessment }),
       ...(debouncedSearch && { search: debouncedSearch }),
     }),
     [
@@ -675,8 +672,7 @@ export default function EventList({
       windowHours,
       offset,
       device,
-      risk,
-      handling,
+      assessment,
       debouncedSearch,
     ],
   );
@@ -697,6 +693,12 @@ export default function EventList({
       .then((response) => {
         if (sequence !== listSequence.current || controller.signal.aborted)
           return;
+        const lastOffset =
+          Math.max(0, Math.ceil(response.data.total / limit) - 1) * limit;
+        if (offset > lastOffset) {
+          setOffset(lastOffset);
+          return;
+        }
         setData(response.data);
         setDevices(response.data.devices || []);
         for (const item of response.data.devices || [])
@@ -780,9 +782,9 @@ export default function EventList({
     action();
     setOffset(0);
   }, []);
-  const openRow = (row: EventListRow) => {
+  const openRow = (row: EventListRow, member?: EventMember) => {
     setSelected(row);
-    setMemberKey(row.members[0]?.key || row.event_keys[0] || "");
+    setMemberKey(member?.key || row.members[0]?.key || row.event_keys[0] || "");
   };
   const closeDetail = () => {
     setSelected(null);
@@ -794,7 +796,7 @@ export default function EventList({
   const sourceTimezone = data?.timezone || calendarTimezone;
   const metrics = data?.metrics;
   const totalPages = data ? Math.max(1, Math.ceil(data.total / limit)) : 1;
-  const activeFilters = !!device || !!risk || !!handling || !!search;
+  const activeFilters = !!device || !!assessment || !!search;
   const openRound = (
     sessionID: string,
     messageID: string,
@@ -816,7 +818,8 @@ export default function EventList({
               事件列表
             </h2>
             <p className="mt-1 text-xs leading-6 text-slate-500">
-              按日、周、月跟踪事件；关联分组仅整理展示，保留每条事件和各自处置记录。
+              保留每条已查询的事件；同一 XDR
+              的同类事件按时间聚合，展开后查看各主机与研判结论。
             </p>
           </div>
           <button
@@ -899,7 +902,7 @@ export default function EventList({
           </label>
           <span className="text-xs text-slate-400">{sourceTimezone}</span>
         </div>
-        <div className="mt-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-[minmax(180px,1.8fr)_minmax(150px,1fr)_minmax(120px,0.8fr)_minmax(140px,0.8fr)_auto]">
+        <div className="mt-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-[minmax(180px,1.8fr)_minmax(150px,1fr)_minmax(180px,1fr)_auto]">
           <label className="relative">
             <span className="sr-only">搜索事件</span>
             <Search
@@ -937,30 +940,17 @@ export default function EventList({
             ))}
           </select>
           <select
-            aria-label="风险分类筛选"
-            value={risk}
+            aria-label="研判结果筛选"
+            value={assessment}
             className={field}
             onChange={(event) =>
-              changeFilter(() => setRisk(event.target.value))
+              changeFilter(() =>
+                setAssessment(event.target.value as EventAssessmentStatus | ""),
+              )
             }
           >
-            <option value="">全部风险分类</option>
-            {Object.entries(riskLabels).map(([value, label]) => (
-              <option key={value} value={value}>
-                {label}
-              </option>
-            ))}
-          </select>
-          <select
-            aria-label="处置状态筛选"
-            value={handling}
-            className={field}
-            onChange={(event) =>
-              changeFilter(() => setHandling(event.target.value))
-            }
-          >
-            <option value="">全部处置状态</option>
-            {Object.entries(handlingLabels).map(([value, label]) => (
+            <option value="">全部研判结果</option>
+            {Object.entries(assessmentLabels).map(([value, label]) => (
               <option key={value} value={value}>
                 {label}
               </option>
@@ -974,8 +964,7 @@ export default function EventList({
                   setSearch("");
                   setDebouncedSearch("");
                   setDevice("");
-                  setRisk("");
-                  setHandling("");
+                  setAssessment("");
                 })
               }
             >
@@ -1001,7 +990,7 @@ export default function EventList({
           <label
             className={`inline-flex items-center gap-2 ${!group ? "opacity-40" : ""}`}
           >
-            同主机、同 IOC，时间跨度不超过
+            同一 XDR、同类事件，时间跨度不超过
             <select
               aria-label="关联时间窗口"
               value={windowHours}
@@ -1031,7 +1020,7 @@ export default function EventList({
             包含此前未完成
           </label>
           <span className="text-slate-400">
-            无法确认关联时独立显示；不跨 XDR 合并。
+            可跨主机聚合；各事件独立研判、独立通知，不跨 XDR 合并。
           </span>
         </div>
       </div>
@@ -1077,7 +1066,7 @@ export default function EventList({
           </ul>
         )}
         <div
-          className="mb-4 grid grid-cols-2 gap-3 xl:grid-cols-4"
+          className="mb-4 grid grid-cols-2 gap-3 xl:grid-cols-3 2xl:grid-cols-6"
           aria-label="事件统计"
         >
           {[
@@ -1101,22 +1090,20 @@ export default function EventList({
                 : "已关闭关联分组",
               icon: <Layers3 size={17} />,
             },
-            {
-              label: "未闭环 / 已遏制",
-              value: metrics
-                ? `${metrics.open} / ${metrics.contained}`
-                : undefined,
-              hint: `已处置 ${metrics?.closed ?? "—"} · 已忽略 ${metrics?.ignored ?? "—"}`,
+            ...Object.entries(assessmentLabels).map(([status, label]) => ({
+              label,
+              value:
+                metrics?.assessment_counts?.[status as EventAssessmentStatus],
+              hint:
+                status === "insufficient"
+                  ? "未排除风险，暂不通知"
+                  : status === "benign"
+                    ? "有依据排除风险"
+                    : status === "risk_closed"
+                      ? "按已保存处置事实"
+                      : "已证实风险，等待处置闭环",
               icon: <CircleDot size={17} />,
-            },
-            {
-              label: "已发信 / 已回信",
-              value: metrics
-                ? `${metrics.mail_sent} / ${metrics.mail_replied}`
-                : undefined,
-              hint: "按原事件统计，不代表处置完成",
-              icon: <Mail size={17} />,
-            },
+            })),
           ].map((item) => (
             <div
               key={item.label}
@@ -1167,16 +1154,15 @@ export default function EventList({
             </div>
           ) : data ? (
             <div className="overflow-x-auto">
-              <table className="w-full min-w-[1000px] text-left text-sm">
+              <table className="w-full min-w-[920px] text-left text-sm">
                 <thead className="bg-sky-50/60 text-xs text-slate-500 dark:bg-sky-950/20">
                   <tr>
                     {[
                       "最近观察 / 发生",
-                      "设备 / 主机",
-                      "事件 / 关联依据",
-                      "原事件数",
-                      "处置进度",
-                      "邮件进度",
+                      "监测设备",
+                      "安全事件",
+                      "事件 / 主机数",
+                      "研判结果",
                       "详情",
                     ].map((label) => (
                       <th key={label} className="px-4 py-3 font-medium">
@@ -1186,104 +1172,212 @@ export default function EventList({
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
-                  {data.items.map((row) => (
-                    <tr
-                      key={row.id}
-                      className="align-top transition-colors hover:bg-sky-50/50 dark:hover:bg-sky-950/20"
-                    >
-                      <td className="whitespace-nowrap px-4 py-4">
-                        <p className="text-xs font-medium">
-                          {formatTime(row.last_seen_at, sourceTimezone)}
-                        </p>
-                        <p className="mt-1.5 text-xs text-slate-400">
-                          发生：{formatTime(row.last_event_at, sourceTimezone)}
-                        </p>
-                      </td>
-                      <td className="max-w-48 px-4 py-4">
-                        <p className="break-words font-medium">
-                          {row.device_name || row.device || "设备未提供"}
-                        </p>
-                        <p className="mt-1.5 break-all text-xs text-slate-500">
-                          {row.host || "主机未提供"}
-                        </p>
-                      </td>
-                      <td className="max-w-[420px] px-4 py-4">
-                        <button
-                          onClick={() => openRow(row)}
-                          className="text-left font-semibold leading-6 text-slate-800 hover:text-emerald-700 hover:underline dark:text-slate-100 dark:hover:text-emerald-300"
-                        >
-                          {row.name || "未命名事件"}
-                        </button>
-                        <div className="mt-1.5 flex flex-wrap items-center gap-2 text-xs">
-                          <span
-                            className={`rounded px-1.5 py-0.5 ${row.grouped ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300" : "bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-400"}`}
-                          >
-                            {row.grouped ? "规则关联组" : "独立事件"}
-                          </span>
-                          <span className="text-slate-500">
-                            {riskLabels[row.risk] || "分类未提供"}
-                          </span>
-                          <span className="text-slate-400">
-                            已研判{" "}
-                            {
-                              row.members.filter(
-                                (member) =>
-                                  member.investigation?.state === "ready" &&
-                                  member.investigation.is_current !== false,
-                              ).length
-                            }
-                            /{row.member_count}
-                          </span>
-                          {row.is_backlog && (
-                            <span className="text-sky-700 dark:text-sky-300">
-                              此前持续跟进
-                            </span>
-                          )}
-                        </div>
-                        <p className="mt-1.5 break-all text-xs leading-5 text-slate-500">
-                          {row.grouped
-                            ? row.ioc_matches
-                                .map(
-                                  (ioc) =>
-                                    `${ioc.type.toLowerCase().includes("domain") ? "域名" : "IP"} ${ioc.value}`,
-                                )
-                                .join(" · ") || row.merge_reason
-                            : row.members[0]?.id || row.event_keys[0]}
-                        </p>
-                        {row.grouped && (
-                          <p className="mt-1 text-xs text-slate-400">
-                            {row.merge_reason}
-                          </p>
+                  {data.items.map((row) => {
+                    const counts =
+                      row.assessment_counts ||
+                      row.members.reduce<
+                        Partial<Record<EventAssessmentStatus, number>>
+                      >((result, member) => {
+                        const status = assessmentStatus(member);
+                        result[status] = (result[status] || 0) + 1;
+                        return result;
+                      }, {});
+                    const hosts =
+                      row.host_count ??
+                      new Set(
+                        row.members
+                          .map((member) => member.host)
+                          .filter(Boolean),
+                      ).size;
+                    const expanded = expandedRows.has(row.id);
+                    return (
+                      <Fragment key={row.id}>
+                        <tr className="align-top transition-colors hover:bg-sky-50/50 dark:hover:bg-sky-950/20">
+                          <td className="whitespace-nowrap px-4 py-4">
+                            <p className="text-xs font-medium">
+                              {formatTime(row.last_seen_at, sourceTimezone)}
+                            </p>
+                            <p className="mt-1.5 text-xs text-slate-400">
+                              发生：
+                              {formatTime(row.first_event_at, sourceTimezone)}
+                            </p>
+                            {row.grouped && (
+                              <p className="mt-1 text-xs text-slate-400">
+                                至{" "}
+                                {formatTime(row.last_event_at, sourceTimezone)}
+                              </p>
+                            )}
+                          </td>
+                          <td className="max-w-48 break-words px-4 py-4 font-medium">
+                            {row.device_name || row.device || "设备未提供"}
+                          </td>
+                          <td className="max-w-[360px] px-4 py-4">
+                            <button
+                              onClick={() =>
+                                row.grouped
+                                  ? setExpandedRows((previous) => {
+                                      const next = new Set(previous);
+                                      if (next.has(row.id)) next.delete(row.id);
+                                      else next.add(row.id);
+                                      return next;
+                                    })
+                                  : openRow(row)
+                              }
+                              className="text-left font-semibold leading-6 hover:text-emerald-700 hover:underline dark:hover:text-emerald-300"
+                            >
+                              {row.name || "未命名事件"}
+                            </button>
+                            <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
+                              <span
+                                className={`rounded px-1.5 py-0.5 ${row.grouped ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300" : "bg-slate-100 text-slate-500 dark:bg-slate-800"}`}
+                              >
+                                {row.grouped ? "同类事件聚合" : "独立事件"}
+                              </span>
+                              {row.is_backlog && (
+                                <span className="text-sky-700 dark:text-sky-300">
+                                  此前持续跟进
+                                </span>
+                              )}
+                            </div>
+                            {row.grouped ? (
+                              <button
+                                aria-expanded={expanded}
+                                aria-label={`${expanded ? "收起" : "展开"}子事件：${row.id}`}
+                                onClick={() =>
+                                  setExpandedRows((previous) => {
+                                    const next = new Set(previous);
+                                    if (next.has(row.id)) next.delete(row.id);
+                                    else next.add(row.id);
+                                    return next;
+                                  })
+                                }
+                                className="mt-2 inline-flex items-center gap-1 text-xs font-medium text-sky-700 dark:text-sky-300"
+                              >
+                                <ChevronDown
+                                  size={14}
+                                  className={expanded ? "rotate-180" : ""}
+                                />
+                                {expanded ? "收起" : "展开"} {row.member_count}{" "}
+                                条子事件
+                              </button>
+                            ) : (
+                              <p className="mt-2 text-xs text-slate-500">
+                                {row.members[0]?.host || "主机未提供"}
+                              </p>
+                            )}
+                          </td>
+                          <td className="px-4 py-4">
+                            <p className="font-semibold tabular-nums">
+                              {row.member_count} 条
+                            </p>
+                            <p className="mt-2 text-xs text-slate-500">
+                              {hosts} 台主机
+                            </p>
+                          </td>
+                          <td className="px-4 py-4">
+                            <div className="space-y-2">
+                              {(
+                                Object.keys(
+                                  assessmentLabels,
+                                ) as EventAssessmentStatus[]
+                              )
+                                .filter((status) => (counts[status] || 0) > 0)
+                                .map((status) => (
+                                  <div
+                                    key={status}
+                                    className="flex flex-wrap items-center gap-1.5"
+                                  >
+                                    <AssessmentBadge status={status} />
+                                    {row.grouped && (
+                                      <span className="text-xs tabular-nums text-slate-500">
+                                        {counts[status]} 条
+                                      </span>
+                                    )}
+                                  </div>
+                                ))}
+                            </div>
+                            {(counts.insufficient || 0) > 0 && (
+                              <p className="mt-2 text-xs text-slate-500">
+                                尚未排除风险
+                              </p>
+                            )}
+                            {row.members.some((member) =>
+                              [
+                                "running",
+                                "pending",
+                                "deferred",
+                                "system_wait",
+                              ].includes(member.investigation?.state || ""),
+                            ) && (
+                              <p className="mt-2 text-xs text-sky-700 dark:text-sky-300">
+                                仍有事件待研判
+                              </p>
+                            )}
+                          </td>
+                          <td className="px-4 py-4">
+                            <button
+                              onClick={() => openRow(row)}
+                              aria-label={`查看事件详情：${row.id}`}
+                              className="inline-flex items-center gap-1 whitespace-nowrap text-xs font-semibold text-emerald-700 hover:underline dark:text-emerald-300"
+                            >
+                              查看
+                              <ArrowDownRight size={14} />
+                            </button>
+                          </td>
+                        </tr>
+                        {expanded && row.grouped && (
+                          <tr>
+                            <td
+                              colSpan={6}
+                              className="bg-sky-50/40 px-5 py-4 dark:bg-sky-950/10"
+                            >
+                              <div className="mb-3 text-xs text-slate-500">
+                                {row.merge_reason}
+                                。聚合只整理展示，每条事件各自研判和处置。
+                              </div>
+                              <div className="max-h-96 overflow-auto rounded-lg border border-sky-100 bg-white dark:border-sky-900 dark:bg-slate-900">
+                                <ul className="divide-y divide-slate-100 dark:divide-slate-800">
+                                  {row.members.map((member) => (
+                                    <li
+                                      key={member.key}
+                                      className="flex flex-wrap items-center justify-between gap-3 px-4 py-3"
+                                    >
+                                      <div className="min-w-0 flex-1">
+                                        <p className="text-sm font-medium">
+                                          {member.host || "主机未提供"} ·{" "}
+                                          {member.name}
+                                        </p>
+                                        <p className="mt-1 text-xs text-slate-500">
+                                          {formatTime(
+                                            member.event_end_at ||
+                                              member.event_at,
+                                            sourceTimezone,
+                                          )}{" "}
+                                          · {member.id}
+                                        </p>
+                                      </div>
+                                      <div className="flex flex-wrap items-center gap-3">
+                                        <AssessmentBadge
+                                          status={assessmentStatus(member)}
+                                        />
+                                        <button
+                                          aria-label={`查看子事件详情：${member.id}`}
+                                          onClick={() => openRow(row, member)}
+                                          className="text-xs font-semibold text-sky-700 hover:underline dark:text-sky-300"
+                                        >
+                                          事件详情
+                                        </button>
+                                      </div>
+                                    </li>
+                                  ))}
+                                </ul>
+                              </div>
+                            </td>
+                          </tr>
                         )}
-                      </td>
-                      <td className="px-4 py-4 font-semibold tabular-nums">
-                        {row.member_count}
-                      </td>
-                      <td className="px-4 py-4">
-                        <Progress row={row} />
-                      </td>
-                      <td className="whitespace-nowrap px-4 py-4 text-xs">
-                        <p className="font-medium text-sky-700 dark:text-sky-300">
-                          发信 {row.mail.sent} / 回信 {row.mail.replied}
-                        </p>
-                        {row.mail.failed > 0 && (
-                          <p className="mt-1.5 text-amber-700 dark:text-amber-300">
-                            发送失败 {row.mail.failed}
-                          </p>
-                        )}
-                      </td>
-                      <td className="px-4 py-4">
-                        <button
-                          onClick={() => openRow(row)}
-                          aria-label={`查看事件详情：${row.id}`}
-                          className="inline-flex items-center gap-1 whitespace-nowrap text-xs font-semibold text-emerald-700 hover:underline dark:text-emerald-300"
-                        >
-                          查看
-                          <ArrowDownRight size={14} />
-                        </button>
-                      </td>
-                    </tr>
-                  ))}
+                      </Fragment>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
@@ -1293,7 +1387,8 @@ export default function EventList({
           {data && (
             <div className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-100 px-4 py-3 text-xs text-slate-500 dark:border-slate-800">
               <span>
-                共 {data.total} 个展示条目 · {data.metrics.events} 条原事件
+                共 {data.total} 个展示条目 · {data.metrics.events} 条原事件 ·
+                每页 {limit} 条
               </span>
               <div className="flex items-center gap-2">
                 <button
@@ -1326,7 +1421,7 @@ export default function EventList({
       </div>
       {selected && (
         <Sheet
-          title={selected.grouped ? "关联事件组详情" : "事件详情"}
+          title={selected.grouped ? "同类事件组详情" : "事件详情"}
           close={closeDetail}
         >
           <div className="space-y-5">
@@ -1335,13 +1430,16 @@ export default function EventList({
                 {selected.name}
               </h3>
               <p className="mt-2 text-xs leading-6 text-slate-500">
-                {selected.device_name || selected.device} · 主机{" "}
-                {selected.host || "未提供"} · {selected.member_count} 条原事件
+                {selected.device_name || selected.device} ·{" "}
+                {selected.grouped
+                  ? `覆盖 ${selected.host_count ?? new Set(selected.members.map((member) => member.host).filter(Boolean)).size} 台主机`
+                  : `主机 ${selected.host || "未提供"}`}{" "}
+                · {selected.member_count} 条原事件
               </p>
               {selected.grouped && (
                 <div className="mt-3 rounded-lg bg-sky-50 p-3 text-xs leading-6 dark:bg-sky-950/30">
                   <p className="font-semibold text-sky-800 dark:text-sky-200">
-                    关联依据：{selected.merge_reason}
+                    聚合规则：{selected.merge_reason}
                   </p>
                   <p className="break-all">
                     {selected.ioc_matches
@@ -1349,7 +1447,7 @@ export default function EventList({
                       .join("；")}
                   </p>
                   <p className="mt-1 text-slate-500">
-                    规则关联便于跟踪，不代表已证实为同一次攻击。下方每条事件的邮件和处置状态保持独立。
+                    同类聚合便于浏览，不代表同一次攻击。每条事件独立研判、通知和处置。
                   </p>
                 </div>
               )}
@@ -1371,13 +1469,16 @@ export default function EventList({
                       className={`block w-full rounded-lg border p-3 text-left ${memberKey === member.key ? "border-emerald-300 bg-emerald-50/50 dark:border-emerald-800 dark:bg-emerald-950/30" : "border-slate-100 hover:bg-sky-50 dark:border-slate-800 dark:hover:bg-sky-950/30"}`}
                     >
                       <p className="break-words text-sm font-medium">
-                        {member.name}
+                        {member.host || "主机未提供"} · {member.name}
                       </p>
                       <p className="mt-1 break-all text-xs text-slate-500">
-                        {member.id || member.key}
+                        {formatTime(
+                          member.event_end_at || member.event_at,
+                          sourceTimezone,
+                        )}
                       </p>
                       <div className="mt-2 flex flex-wrap items-center gap-2">
-                        <HandlingBadge state={member.handling} />
+                        <AssessmentBadge status={assessmentStatus(member)} />
                         <span className="text-xs text-slate-500">
                           <MemberConclusion member={member} />
                         </span>
@@ -1396,9 +1497,20 @@ export default function EventList({
                   </span>
                 </p>
                 <div className="mt-3 flex flex-wrap items-center gap-2">
-                  <HandlingBadge
-                    state={detail?.event.handling || currentMember.handling}
+                  <AssessmentBadge
+                    status={assessmentStatus(detail?.event || currentMember)}
                   />
+                  <span className="text-xs text-slate-500">
+                    XDR 状态：
+                    {xdrLabels[
+                      String(
+                        detail?.event.deal_status ?? currentMember.deal_status,
+                      )
+                    ] ||
+                      handlingLabels[
+                        detail?.event.handling || currentMember.handling
+                      ]}
+                  </span>
                   <span className="text-xs text-slate-500">
                     <MemberConclusion member={detail?.event || currentMember} />
                   </span>

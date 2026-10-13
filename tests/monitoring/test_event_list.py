@@ -67,7 +67,7 @@ async def listing(**kwargs):
     return await event_list.list_events('owner', COMPONENT_ID, start_date=DAY, end_date=DAY, **kwargs)
 
 
-async def test_same_device_exact_host_common_ioc_groups_and_keeps_members():
+async def test_same_device_same_type_groups_and_keeps_members():
     await install()
     for event in [incident('one'), incident('two', hour=3)]:
         await observe(event)
@@ -76,7 +76,7 @@ async def test_same_device_exact_host_common_ioc_groups_and_keeps_members():
     assert result['metrics']['events'] == 2 and result['metrics']['groups'] == 1
     assert result['items'][0]['member_count'] == 2
     assert result['items'][0]['ioc_matches'] == [{'type': 'domain', 'value': 'bad.example'}]
-    assert result['window_hours'] == 12
+    assert result['window_hours'] == 24 and result['limit'] == 10
     before = await rows('SELECT * FROM monitor_observations')
     assert len(before) == 2
     assert await rows('SELECT * FROM monitor_mail_notices') == []
@@ -84,7 +84,7 @@ async def test_same_device_exact_host_common_ioc_groups_and_keeps_members():
 
 
 @pytest.mark.parametrize('changed', [
-    {'device': 'b'}, {'host': '192.0.2.11'}, {'host': ''}, {'startTime': None, 'endTime': None},
+    {'device': 'b'}, {'name': '另一类安全事件'}, {'name': ''}, {'startTime': None, 'endTime': None},
     {'startTime': 0, 'endTime': 0},
 ])
 async def test_missing_identity_time_or_different_device_never_merges(changed):
@@ -97,7 +97,7 @@ async def test_missing_identity_time_or_different_device_never_merges(changed):
     assert (await listing())['total'] == 2
 
 
-async def test_entire_group_time_span_and_common_ioc_prevent_bridge_chains():
+async def test_whole_group_time_span_prevents_bridges_without_requiring_common_ioc():
     await install()
     for identifier, hour, iocs in [('one', 0, ['x.example']), ('two', 2, ['x.example', 'y.example']), ('three', 4, ['y.example'])]:
         event = incident(identifier, hour=hour)
@@ -106,7 +106,7 @@ async def test_entire_group_time_span_and_common_ioc_prevent_bridge_chains():
     result = await listing(window_hours=3)
     assert sorted(item['member_count'] for item in result['items']) == [1, 2]
     result = await listing(window_hours=6)
-    assert sorted(item['member_count'] for item in result['items']) == [1, 2]
+    assert sorted(item['member_count'] for item in result['items']) == [3]
 
 
 async def test_repeat_observations_deduplicate_and_latest_disposition_updates_old_day():
@@ -141,7 +141,7 @@ async def test_current_project_owner_and_scope_do_not_leak():
 
 
 @pytest.mark.parametrize('kind', ['failed', 'other_device', 'other_event', 'wrong_revision', 'safe', 'host_ip'])
-async def test_untrusted_iocs_cannot_group(kind):
+async def test_presentation_groups_never_promote_untrusted_iocs_to_facts(kind):
     await install()
     for identifier in ('one', 'two'):
         event = incident(identifier)
@@ -164,7 +164,10 @@ async def test_untrusted_iocs_cannot_group(kind):
                 facts={'data': {'item': [{'ip': event['host'], 'threatLevel': 3}]}})
         await observe(event)
         await investigate(event, evidence=[proof])
-    assert (await listing())['metrics']['groups'] == 0
+    result = await listing()
+    assert result['metrics']['groups'] == 1
+    assert result['items'][0]['ioc_matches'] == []
+    assert all(m['assessment']['status'] == 'insufficient' for m in result['items'][0]['members'])
 
 
 async def test_canonical_host_and_current_revision_must_match():
@@ -175,8 +178,8 @@ async def test_canonical_host_and_current_revision_must_match():
         await investigate(old)
         await observe({**old, 'host': '192.0.2.20'}, suffix='new')
     result = await listing()
-    assert result['total'] == 2
-    assert all(item['members'][0]['investigation']['state'] == 'stale' for item in result['items'])
+    assert result['total'] == 1
+    assert all(member['investigation']['state'] == 'stale' for item in result['items'] for member in item['members'])
     detail = await event_list.detail('owner', COMPONENT_ID, 'a:incident:one')
     assert detail['investigation']['state'] == 'stale'
     assert detail['investigation']['result']['verdict'] == 'unknown'
@@ -379,8 +382,9 @@ async def test_ip_and_host_normalization_are_exact_and_do_not_expand_subnets():
             'facts': {'data': {'item': [{'ip': ip, 'threatLevel': 3}]}}}
         await investigate(event, evidence=[proof])
     result = await listing()
-    assert sorted(item['member_count'] for item in result['items']) == [1, 2]
-    assert next(item for item in result['items'] if item['grouped'])['ioc_matches'] == [{'type': 'ip', 'value': '2001:db8::9'}]
+    assert sorted(item['member_count'] for item in result['items']) == [3]
+    assert result['items'][0]['host_count'] == 2
+    assert result['items'][0]['ioc_matches'] == [{'type': 'ip', 'value': '2001:db8::9'}]
 
 
 async def test_large_packets_not_read_in_list_projection_and_ioc_cap_is_explicit():
@@ -393,3 +397,100 @@ async def test_large_packets_not_read_in_list_projection_and_ioc_cap_is_explicit
     assert result['truncated']
     assert len(result['items'][0]['members'][0]['iocs']) == 50
     assert 'PRIVATE_PACKET' not in encode(result)
+
+
+async def test_same_type_across_hosts_and_unjudged_events_are_visible_without_iocs():
+    await install()
+    for event in [incident('one', host='192.0.2.11', risk='benign'),
+                  incident('two', host='192.0.2.12', risk='unknown'),
+                  incident('three', device='b', host='192.0.2.13', risk='ignored')]:
+        await observe(event)
+    result = await listing()
+    assert result['metrics']['events'] == 3
+    assert sorted(item['member_count'] for item in result['items']) == [1, 2]
+    grouped = next(item for item in result['items'] if item['grouped'])
+    assert grouped['host_count'] == 2
+    assert grouped['assessment_counts']['insufficient'] == 2
+    assert await rows('SELECT * FROM monitor_dispositions') == []
+
+
+async def test_mixed_assessments_remain_separate_in_group_and_filters_match_original_members():
+    await install()
+    for identifier, verdict, status in [('risk', 'risk', 0), ('closed', 'risk', 40),
+                                         ('safe', 'benign', 0), ('uncertain', 'unknown', 0)]:
+        event = incident(identifier, dealStatus=status)
+        proof = {'id': 'evidence-1', 'event': identifier, 'device': 'a', 'success': True,
+                 'event_revision': fingerprint(event), 'kind': 'alert_proof',
+                 'facts': {'data': {'requestBody': 'UNION SELECT value FROM users'}}}
+        await observe(event)
+        await investigate(event, evidence=[proof], result={'verdict': verdict,
+            'reason': '原始请求与调查结论对应', 'confidence': 'high',
+            'risk_confirmed': verdict == 'risk', 'blocking_gaps': [], 'evidence_ids': ['evidence-1']})
+    result = await listing()
+    item = result['items'][0]
+    assert item['assessment_status'] == 'mixed'
+    assert item['assessment_counts'] == {'risk_open': 1, 'risk_closed': 1, 'benign': 1, 'insufficient': 1}
+    assert result['metrics']['assessment_counts'] == item['assessment_counts']
+    for state in item['assessment_counts']:
+        selected = await listing(assessment=state)
+        assert selected['metrics']['events'] == 1
+        member = selected['items'][0]['members'][0]
+        assert member['assessment']['status'] == state
+        detailed = await event_list.detail('owner', COMPONENT_ID, member['key'])
+        assert detailed['event']['assessment'] == member['assessment']
+        assert detailed['overview']['conclusion'] and detailed['story']['key_evidence']
+
+
+async def test_type_group_does_not_chain_across_more_than_24_hours():
+    await install()
+    start = incident('one')['startTime']
+    for identifier, hours in [('one', 0), ('two', 20), ('three', 40)]:
+        await observe(incident(identifier, startTime=start+hours*3600, endTime=start+hours*3600))
+    result = await listing()
+    assert sorted(item['member_count'] for item in result['items']) == [1, 2]
+
+
+async def test_compact_assessment_does_not_return_large_packet_data():
+    await install()
+    event = incident()
+    await observe(event)
+    proof = {'id': 'evidence-1', 'event': event['id'], 'device': event['device'], 'success': True,
+             'event_revision': fingerprint(event), 'kind': 'alert_proof',
+             'facts': {'requestBody': 'PRIVATE_PAYLOAD' * 100_000}}
+    await investigate(event, evidence=[proof], result={'verdict': 'risk', 'reason': '已证实恶意请求',
+        'confidence': 'high', 'risk_confirmed': True, 'blocking_gaps': [], 'evidence_ids': ['evidence-1']})
+    result = await listing()
+    assert result['items'][0]['members'][0]['assessment']['status'] == 'risk_open'
+    assert 'PRIVATE_PAYLOAD' not in encode(result)
+
+
+async def test_status_only_refresh_keeps_confirmed_risk_closed_in_list_and_detail():
+    await install()
+    old = incident(basics={'deal_status': 0})
+    await observe(old)
+    proof = {'id': 'evidence-1', 'event': old['id'], 'device': 'a', 'success': True,
+             'event_revision': fingerprint(old), 'kind': 'alert_proof',
+             'facts': {'requestBody': 'UNION SELECT value FROM users'}}
+    await investigate(old, evidence=[proof], result={'verdict': 'risk', 'reason': '已确认恶意请求',
+        'confidence': 'high', 'risk_confirmed': True, 'blocking_gaps': [], 'evidence_ids': ['evidence-1']})
+    completed = {**old, 'dealStatus': 40, 'basics': {'deal_status': 40}}
+    await observe(completed, suffix='completed')
+    member = (await listing())['items'][0]['members'][0]
+    assert member['assessment']['status'] == 'risk_closed'
+    assert member['investigation']['state'] == 'ready' and member['investigation']['is_current']
+    detailed = await event_list.detail('owner', COMPONENT_ID, old['key'])
+    assert detailed['event']['assessment'] == member['assessment']
+    assert detailed['investigation']['state'] == 'ready'
+
+
+@pytest.mark.parametrize('facts', ['not-json', None, 123, ['unstructured']])
+async def test_malformed_fact_payload_is_insufficient_not_a_list_failure(facts):
+    await install()
+    event = incident()
+    await observe(event)
+    await investigate(event, evidence=[{'id': 'evidence-1', 'event': event['id'], 'device': 'a',
+        'event_revision': fingerprint(event), 'success': True, 'facts': facts}], result={'verdict': 'risk',
+        'reason': '无法核实来源', 'confidence': 'high', 'risk_confirmed': True,
+        'blocking_gaps': [], 'evidence_ids': ['evidence-1']})
+    member = (await listing())['items'][0]['members'][0]
+    assert member['assessment']['status'] == 'insufficient'

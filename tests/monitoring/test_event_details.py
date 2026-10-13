@@ -313,3 +313,24 @@ def test_credential_variants_are_redacted_before_facts_story_mail_and_model_cont
         packet = facts['data']['proof']['requestBody']
         assert '--boundary' in packet and ('name="orderBy"' in packet or 'name=orderBy' in packet)
         assert 'Content-Disposition' in packet
+
+
+def test_business_overview_omits_bookkeeping_and_keeps_source_timeline_and_original_proofs():
+    from flocks.monitoring.event_details import readable_story
+    story = {
+        'basics': {'event_id': 'incident-00000000-0000-0000-0000-000000000000', 'name': 'DGA行为',
+                   'host': '10.1.2.3', 'alert_ids': ['alert-00000000-0000-0000-0000-000000000001']},
+        'device': '股份 XDR', 'verdict': 'risk',
+        'conclusion': '事件 incident-00000000-0000-0000-0000-000000000000 有真实异常DNS请求 [evidence-2]。',
+        'key_evidence': [{'evidence_id': 'evidence-2', 'text': '[evidence-2] 告警编号：alert-00000000-0000-0000-0000-000000000001；主机存在异常查询'}],
+        'alert_details': [{'name': '随机域名查询', 'start_time': 1791860154, 'end_time': 1791860390,
+                           'src_ip': '10.1.2.3', 'dst_ip': '223.5.5.5', 'dst_port': 53}],
+        'timeline': [], 'gaps': [],
+    }
+    overview = readable_story(story)
+    assert 'alert_ids' not in overview['basics']
+    assert 'evidence-2' not in overview['conclusion']
+    assert 'alert-0000' not in overview['evidence'][0]['text']
+    assert [item['time'] for item in overview['timeline']] == [1791860154, 1791860390]
+    assert '223.5.5.5:53' in overview['timeline'][0]['text']
+    assert story['key_evidence'][0]['evidence_id'] == 'evidence-2'

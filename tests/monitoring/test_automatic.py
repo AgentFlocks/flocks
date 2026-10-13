@@ -14,6 +14,7 @@ from flocks.monitoring import automatic as a, disposition as d, mailflow as m
 from flocks.monitoring.adapter import normalize, ContractError
 from flocks.monitoring.models import MonitoringPolicy
 from flocks.monitoring.mail_transport import send as send_through_email_channel
+from flocks.monitoring.mailflow import MailAdapter as RealMailAdapter
 from flocks.monitoring.reports import snapshot
 from flocks.monitoring.sessions import ensure_daily
 from flocks.monitoring.status_rules import ENTITY_TYPES
@@ -37,6 +38,7 @@ async def auto(tmp_path, monkeypatch):
     raw = {'uuId': 'event', 'name': 'fixture', 'incidentSeverity': 4, 'dealStatus': 0,
            'whiteStatus': '未加白', 'gptResult': 170, 'endTime': 100}
     event = normalize('device', raw)
+    event['investigationWindow'] = {'start': 0, 'end': 100}
     session, day = await ensure_daily(policy, datetime.now(timezone.utc))
     await write('INSERT INTO monitor_installations(owner,scope,project,policy,ready,scheduler_id) VALUES(?,?,?,?,1,?)',
                 ('owner', policy.scope, project.id, encode(policy.model_dump()), scheduler.id))
@@ -67,11 +69,26 @@ async def auto(tmp_path, monkeypatch):
                 return {'code': 'Success', 'data': {'item': [], 'total': 0}}
             return {'code': 'Success', 'data': {'item': [copy.deepcopy(state.raw)], 'total': 1}}
     state.adapter = Fake
+    monkeypatch.setattr(m, 'MailAdapter', Fake)
     await write('INSERT INTO monitor_mail_settings VALUES(?,?,?,?,?,?,?,?,?)', ('owner', policy.scope, project.id, 'person@example.com', '值班', 1, 'revision', 'mailbox', d.stamp()))
     monkeypatch.setattr(m, '_locks', {})
     monkeypatch.setattr(m, '_round_locks', {})
     state.send = AsyncMock(return_value=True)
     monkeypatch.setattr(m.transport, 'send', state.send)
+    # Mail/feedback tests start from an actually completed, evidence-bound risk
+    # investigation; source severity alone no longer authorizes a notification.
+    from flocks.monitoring.investigation import fingerprint, EVIDENCE_SCHEMA
+    proof = {'id': 'evidence-1', 'success': True, 'partial': False, 'event': event['id'],
+             'device': event['device'], 'event_revision': fingerprint(event), 'kind': 'file',
+             'query_key': ['device', policy.tool, 'file'], 'retrieved_at': d.stamp(),
+             'window': event['investigationWindow'], 'schema': EVIDENCE_SCHEMA,
+             'facts': {'data': {'item': [{'fileName': 'worm.exe', 'virusName': 'Worm.Test'}]}}}
+    decision = {'verdict': 'risk', 'confidence': 'high', 'risk_confirmed': True,
+                'blocking_gaps': [], 'evidence_ids': ['evidence-1'], 'gaps': [],
+                'reason': '发现恶意文件 worm.exe，需要清理并复查主机。', 'evidence_schema': EVIDENCE_SCHEMA}
+    await write('INSERT INTO monitor_investigations(owner,project,event_key,event,evidence,result,state,updated_at) '
+                'VALUES(?,?,?,?,?,?,?,?)', ('owner', project.id, event['key'], encode(event), encode([proof]),
+                    encode(decision), 'ready', d.stamp()))
     return state
 
 
@@ -81,6 +98,7 @@ async def actual_tool(auto, monkeypatch):
     tool = yaml_to_tool(yaml.safe_load(path.read_text()), path)
     fn = inspect.getclosurevars(tool.handler).nonlocals['fn']
     calls = []
+    monkeypatch.setattr(m, 'MailAdapter', RealMailAdapter)
     async def send(method, path, data=None, params=None):
         calls.append((path, data))
         if path.endswith('/dealstatus'):
@@ -463,11 +481,16 @@ async def test_native_two_round_mail_feedback_flow(auto, actual_tool, connected_
     catalog = [capabilities.Capability('cap-1', 'device', auto.policy.tool, 'xdr', 'Synthetic XDR', 'unknown')]
     monkeypatch.setattr(capabilities, 'discover', AsyncMock(return_value=(catalog, [])))
     monkeypatch.setattr(investigation.Agent, 'list', AsyncMock(return_value=[]))
+    # Exercise investigation -> actual MIME delivery -> inbound -> next-round
+    # write and readback, without relying on a seeded verdict or a real model.
+    await write('DELETE FROM monitor_investigations')
+    auto.responses['file']['data']['item'] = [{'fileName': 'worm.exe', 'virusName': 'Worm.Test', 'threatLevel': 3}]
     async def choose(agent, data):
-        hosts = [proof for proof in data['evidence'] if proof['kind'] == 'host' and proof['success']]
-        if not hosts:
-            return investigation.Choice(action='query', capability='cap-1', entity='host', reason='核对事件关联主机')
-        return investigation.Choice(action='finish', verdict='unknown', evidence_ids=[proof['id'] for proof in hosts], reason='保留主机查询事实，仍需负责人核查')
+        files = [proof for proof in data['evidence'] if proof['kind'] == 'file' and proof['success']]
+        if not files:
+            return investigation.Choice(action='query', capability='cap-1', entity='file', reason='核对事件恶意文件')
+        return investigation.Choice(action='finish', verdict='risk', confidence='high', risk_confirmed=True,
+            evidence_ids=[proof['id'] for proof in files], reason='检出恶意文件 worm.exe，需要负责人清理并复查主机。')
     monkeypatch.setattr(investigation, 'choose', choose)
     if not authenticated:
         connected_email._resolved.update(authservId='', requireAuthenticatedSender=False)
@@ -480,12 +503,18 @@ async def test_native_two_round_mail_feedback_flow(auto, actual_tool, connected_
     notices = await rows('SELECT * FROM monitor_mail_notices')
     assert len(notices) == 1 and notices[0]['state'] == 'sent'
     assert (await rows('SELECT state FROM monitor_investigations'))[0]['state'] == 'ready'
-    assert all(text in notices[0]['body'] for text in ('调查摘要', '调查结论', '关键证据', '仍需负责人核查'))
+    assert all(text in notices[0]['body'] for text in ('调查结论', '关键证据', 'worm.exe', '请您处理'))
+    assert 'evidence-' not in notices[0]['body'] and '告警编号' not in notices[0]['body']
     evidence = json.loads((await rows('SELECT evidence FROM monitor_investigations'))[0]['evidence'])
-    assert [proof['kind'] for proof in evidence] == ['proof', 'host']
+    assert [proof['kind'] for proof in evidence] == ['proof', 'file']
     assert all(proof['success'] for proof in evidence)
     assert len(outbound) == 1 and outbound[0]['Message-ID'] == notices[0]['message_id']
     assert outbound[0]['To'] == 'person@example.com'
+    assert outbound[0].get_content_type() == 'multipart/alternative'
+    parts = outbound[0].get_payload()
+    assert [part.get_content_type() for part in parts] == ['text/plain', 'text/html']
+    assert parts[0].get_payload(decode=True).decode('utf-8') == notices[0]['body']
+    assert '<html' in parts[1].get_payload(decode=True).decode('utf-8')
     assert not outbound[0]['In-Reply-To']
     assert '[开发联调]' not in notices[0]['subject']
     assert '测试邮件' not in notices[0]['body']
@@ -620,32 +649,29 @@ async def test_historical_attempted_write_only_finishes_readback(auto, migrated)
     assert len(writes(auto)) == 1 and auto.send.await_count == 1
 
 
-@pytest.mark.parametrize('gpt,definition,threat,sent', [
-    (170, [], None, True),  # Unknown evidence still needs the responsible person.
-    (40, ['业务行为'], 1, False),
-    (160, ['业务行为'], 1, False),
-    (10, [], 3, True),
-    (20, [], 3, True),
+@pytest.mark.parametrize('gpt,definition,threat', [
+    (170, [], None), (40, ['业务行为'], 1), (160, ['业务行为'], 1), (10, [], 3), (20, [], 3),
 ])
-async def test_formal_mail_only_notifies_when_followup_needed(auto, gpt, definition, threat, sent):
+async def test_source_scores_do_not_override_confirmed_behavioral_investigation(auto, gpt, definition, threat):
     auto.raw.update(gptResult=gpt, threatDefineName=definition)
     if threat is not None:
         auto.responses['file']['data']['item'] = [{'threatLevel': threat}]
     n = await notice(auto)
-    assert n['state'] == ('sent' if sent else 'skipped')
-    assert auto.send.await_count == int(sent)
-    assert '即使无需处置或证据不足也发送' not in n['body']
-    assert not writes(auto)
+    assert n['state'] == 'sent' and auto.send.await_count == 1
+    assert 'worm.exe' in n['body'] and 'gptResult' not in n['body']
+    assert [call['action'] for call in auto.calls] == ['list'] and not writes(auto)
 
 
-async def test_partial_evidence_can_request_investigation_without_claiming_safety(auto):
-    auto.raw['gptResult'] = 10
-    auto.responses['file'] = {'data': {}}
+async def test_blocking_evidence_gap_never_notifies_or_claims_safety(auto):
+    case = (await rows('SELECT * FROM monitor_investigations'))[0]
+    result = json.loads(case['result'])
+    result.update(verdict='unknown', confidence='low', risk_confirmed=False,
+                  blocking_gaps=['未取得判断恶意活动所需的关键证据'])
+    await write('UPDATE monitor_investigations SET result=?', (encode(result),))
     result = await m.notify_batch(auto.policy, auto.session.id, [auto.event], Recorder(), auto.adapter)
-    assert result['sent'] == 1 and result['pending'] == 0 and auto.send.called
-    n = (await rows('SELECT * FROM monitor_mail_notices'))[0]
-    assert '证据不完整' in n['body'] and '文件查询未取得' in n['body']
-    assert '[开发联调]' not in n['subject'] and not writes(auto)
+    assert result['sent'] == result['pending'] == 0
+    assert not auto.send.called and not writes(auto)
+    assert not await rows('SELECT * FROM monitor_mail_notices')
 
 
 async def test_proven_no_smtp_attempt_is_retryable_but_unknown_send_is_not(auto):
@@ -800,14 +826,27 @@ async def test_unparsed_message_is_recorded_without_blocking_other_mail(auto, mo
     assert len(await rows('SELECT * FROM monitor_mail_unparsed')) == 2
 
 
-async def test_old_benign_investigation_cannot_hide_fresh_malicious_evidence(auto):
-    auto.event['investigation'] = {'verdict': 'benign', 'state': 'ready', 'reason': '之前实体为安全', 'evidence_ids': []}
-    auto.raw['gptResult'] = 10
-    auto.responses['file']['data']['item'] = [{'threatLevel': 3}]
-    n = await notice(auto)
+async def test_new_activity_requires_new_behavioral_investigation_before_notification(auto):
+    case = (await rows('SELECT * FROM monitor_investigations'))[0]
+    decision = json.loads(case['result'])
+    decision.update(verdict='benign', risk_confirmed=False, reason='原事件为合法业务活动')
+    await write('UPDATE monitor_investigations SET result=?', (encode(decision),))
+    auto.raw.update(endTime=101, gptResult=10)
+    current = normalize('device', auto.raw)
+    await m.notify_batch(auto.policy, auto.session.id, [current], Recorder(), auto.adapter)
+    assert not auto.send.called and not await rows('SELECT * FROM monitor_mail_notices')
+    # Reclassification only follows a new, current-version concrete finding.
+    from flocks.monitoring.investigation import fingerprint
+    proof = json.loads(case['evidence'])[0]
+    proof['event_revision'] = fingerprint(current)
+    decision.update(verdict='risk', confidence='high', risk_confirmed=True,
+                    reason='新活动中检出恶意文件 worm.exe，需清理复查')
+    await write('UPDATE monitor_investigations SET event=?,evidence=?,result=?',
+                (encode(current), encode([proof]), encode(decision)))
+    await m.notify_batch(auto.policy, auto.session.id, [current], Recorder(), auto.adapter)
+    n = (await rows('SELECT * FROM monitor_mail_notices'))[0]
     assert n['state'] == 'sent' and auto.send.await_count == 1
-    assert json.loads(n['event'])['assessment']['malicious'] is True
-    assert not writes(auto)
+    assert json.loads(n['event'])['assessment']['notify_eligible'] is True and not writes(auto)
 
 
 async def test_mail_history_pages_sent_and_delivery_unknown_but_not_unsent(auto):
@@ -815,6 +854,12 @@ async def test_mail_history_pages_sent_and_delivery_unknown_but_not_unsent(auto)
     sent_ids = []
     for index, state in enumerate(states):
         event = {**auto.event, 'key': f'device:incident:event-{index}', 'id': f'event-{index}'}
+        from flocks.monitoring.investigation import fingerprint
+        case = (await rows('SELECT * FROM monitor_investigations LIMIT 1'))[0]
+        proof = json.loads(case['evidence'])[0]
+        proof.update(event=event['id'], event_revision=fingerprint(event))
+        await write('INSERT INTO monitor_investigations(owner,project,event_key,event,evidence,result,state,updated_at) VALUES(?,?,?,?,?,?,?,?)',
+                    ('owner', auto.policy.project, event['key'], encode(event), encode([proof]), case['result'], 'ready', d.stamp()))
         await m.queue_notices(auto.policy, [event], auto.session.id)
         n = (await rows('SELECT * FROM monitor_mail_notices WHERE event_key=?', (event['key'],)))[0]
         stamp = f'2026-09-25T{index:02d}:00:00+00:00'

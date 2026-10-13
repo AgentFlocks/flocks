@@ -79,6 +79,8 @@ class OutboundContext:
     message_id: Optional[str] = None
     new_thread: bool = False
     single_message: bool = False
+    # Optional, caller-rendered email alternative; text remains the fallback.
+    html_body: Optional[str] = None
 
 
 @dataclass

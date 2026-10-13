@@ -72,6 +72,10 @@ async def test_confirm_write_readback_and_deduplication(setup):
     assert all(c['white_status'] == [] and c['deal_statuses'] == [] and c['start_time'] == 0 for c in setup.calls if c['action'] == 'list')
     data = await snapshot('owner', setup.policy.scope, setup.day)
     assert data['metrics']['closed'] == 1 and data['metrics']['openRisk'] == 0
+    # A confirmed state write is factual even when the old observation only
+    # had a source severity; it must not invent a confirmed security verdict.
+    assert data['metrics']['risk'] == 0 and data['metrics']['unknown'] == 1
+    assert data['events'][0]['assessment']['status'] == 'insufficient'
     assert data['events'][0]['closure'] == 'closed'
     report = (await rows('SELECT * FROM monitor_reports'))[0]
     assert '已闭环（XDR 回查确认）' in report['content']
@@ -88,7 +92,9 @@ async def test_only_exact_confirmed_status_closes(setup, readback):
     result = await confirm(setup)
     assert result['status'] in ('pending', 'mismatch')
     data = await snapshot('owner', setup.policy.scope, setup.day)
-    assert data['metrics']['closed'] == 0 and data['metrics']['openRisk'] == 1
+    assert data['metrics']['closed'] == 0 and data['metrics']['openRisk'] == 0
+    assert data['metrics']['unknown'] == 1 and data['metrics']['risk'] == 0
+    assert data['events'][0]['assessment']['status'] == 'insufficient'
     assert len([c for c in setup.calls if c['action'] == 'update_status']) == 1
     setup.statuses = [40]
     result = await d.recheck('owner', result['id'], setup.adapter)
@@ -246,3 +252,33 @@ async def test_legacy_route_cannot_bypass_notice_manual_boundary(setup, monkeypa
         response = await client.post(path, json=body)
         assert response.status_code == 409 and '邮件跟进' in response.json()['detail']
         assert mock.call_count == 0
+
+
+async def test_confirmed_risk_is_open_until_exact_readback_then_counted_risk_closed(setup):
+    from flocks.monitoring.investigation import fingerprint
+    event = setup.event
+    proof = {'id': 'evidence-1', 'event': event['id'], 'device': event['device'],
+             'event_revision': fingerprint(event), 'success': True,
+             'facts': {'requestBody': 'id=1 UNION SELECT passwd FROM users'}}
+    result = {'verdict': 'risk', 'confidence': 'high', 'risk_confirmed': True,
+              'reason': '原始请求已证实SQL注入行为，需要处置。',
+              'blocking_gaps': [], 'evidence_ids': ['evidence-1']}
+    await write('INSERT INTO monitor_investigations(owner,project,event_key,event,evidence,result,state,updated_at) '
+                'VALUES(?,?,?,?,?,?,?,?)',
+                ('owner', setup.policy.project, event['key'], encode(event), encode([proof]),
+                 encode(result), 'ready', d.stamp()))
+    before = await snapshot('owner', setup.policy.scope, setup.day)
+    assert before['metrics']['risk'] == 1 and before['metrics']['openRisk'] == 1
+    assert before['events'][0]['assessment']['status'] == 'risk_open'
+    setup.statuses = [0, 10]
+    pending = await confirm(setup)
+    assert pending['status'] == 'mismatch'
+    incomplete = await snapshot('owner', setup.policy.scope, setup.day)
+    assert incomplete['metrics']['openRisk'] == 1 and incomplete['metrics']['closed'] == 0
+    setup.statuses = [40]
+    assert (await d.recheck('owner', pending['id'], setup.adapter))['status'] == 'verified'
+    completed = await snapshot('owner', setup.policy.scope, setup.day)
+    assert completed['metrics']['risk'] == 1 and completed['metrics']['openRisk'] == 0
+    assert completed['metrics']['riskClosed'] == 1 and completed['metrics']['closed'] == 1
+    assert completed['events'][0]['assessment']['status'] == 'risk_closed'
+    assert [call['action'] for call in setup.calls].count('update_status') == 1

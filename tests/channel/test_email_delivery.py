@@ -236,3 +236,52 @@ async def test_stop_during_outbound_hook_prevents_smtp_send(outbound, monkeypatc
     with pytest.raises(mail_transport.TransportNotReady):
         await mail_transport.send(notice, 'session')
     assert not smtp.payloads
+
+
+async def test_monitor_notification_delivers_html_and_plain_alternative_once(outbound, monkeypatch):
+    import json
+    from email import policy
+    from email.parser import BytesParser
+    channel, notice = outbound
+    html = '<html><body><h1>已确认风险</h1><p>请核查异常外联。</p></body></html>'
+    notice['event'] = json.dumps({'mail_presentation': {'version': 1, 'html_body': html}})
+    smtp = ScriptedSMTP()
+    monkeypatch.setattr(channel, '_connect_smtp', lambda: smtp)
+    assert await mail_transport.send(notice, 'session') is True
+    assert len(smtp.payloads) == 1
+    message = BytesParser(policy=policy.default).parsebytes(smtp.payloads[0])
+    assert message.get_content_type() == 'multipart/alternative'
+    assert [part.get_content_type() for part in message.iter_parts()] == ['text/plain', 'text/html']
+    assert message.get_body(preferencelist=('plain',)).get_content().strip() == notice['body']
+    assert message.get_body(preferencelist=('html',)).get_content().strip() == html
+    assert str(message['Message-ID']) == notice['message_id']
+    assert str(message['Subject']) == notice['subject']
+
+
+async def test_outbound_hook_text_change_drops_stale_html(outbound, monkeypatch):
+    import json
+    from email import policy
+    from email.parser import BytesParser
+    channel, notice = outbound
+    notice['event'] = json.dumps({'mail_presentation': {'version': 1, 'html_body': '<p>old body</p>'}})
+    monkeypatch.setattr(HookPipeline, 'run_channel_outbound_before',
+                        AsyncMock(return_value=SimpleNamespace(output={'text': 'approved replacement'})))
+    smtp = ScriptedSMTP()
+    monkeypatch.setattr(channel, '_connect_smtp', lambda: smtp)
+    assert await mail_transport.send(notice, 'session') is True
+    message = BytesParser(policy=policy.default).parsebytes(smtp.payloads[0])
+    assert message.get_body(preferencelist=('plain',)).get_content().strip() == 'approved replacement'
+    assert message.get_body(preferencelist=('html',)) is None
+
+
+def test_html_alternative_and_attachment_have_separate_mime_parts(outbound, tmp_path):
+    channel, notice = outbound
+    attachment = tmp_path / 'evidence.txt'
+    attachment.write_text('fixture')
+    message = channel._prepare_email(notice['recipient'], notice['body'], None, None, attachment,
+                                     notice['subject'], notice['message_id'], True, '<p>已确认风险</p>')
+    assert message.get_content_type() == 'multipart/mixed'
+    parts = message.get_payload()
+    assert len(parts) == 2 and parts[0].get_content_type() == 'multipart/alternative'
+    assert parts[1].get_content_disposition() == 'attachment'
+    assert [part.get_content_type() for part in parts[0].get_payload()] == ['text/plain', 'text/html']

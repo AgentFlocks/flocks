@@ -26,7 +26,7 @@ from .summaries import Summary, event_label, label, ENTITY_LABELS
 from .event_details import build_story, story_sections, story_text
 
 ENGINE = 'agent-v1'
-EVIDENCE_SCHEMA = 2
+EVIDENCE_SCHEMA = 3
 _MODEL_BUDGET = ContextVar('monitor_investigation_model_budget', default=None)
 
 
@@ -39,6 +39,9 @@ class Choice(BaseModel):
     alert_id: str = Field(default='', max_length=200)
     agent: str = Field(default='', max_length=100)
     verdict: Literal['risk', 'unknown', 'benign'] = 'unknown'
+    confidence: Literal['high', 'medium', 'low'] = 'low'
+    risk_confirmed: bool = False
+    blocking_gaps: list[str] = Field(default_factory=list, max_length=12)
     evidence_ids: list[str] = Field(default_factory=list, max_length=24)
     gaps: list[str] = Field(default_factory=list, max_length=12)
 
@@ -204,7 +207,8 @@ async def enqueue(db, policy, event, stamp):
     cursor = await db.execute('SELECT * FROM monitor_investigations WHERE owner=? AND project=? AND event_key=?',
                               (policy.owner, policy.project, event['key']))
     old = await cursor.fetchone()
-    if old and fingerprint(json.loads(old['event'])) == fingerprint(event):
+    from .assessment import same_evidence_version
+    if old and same_evidence_version(json.loads(old['event']), event):
         return
     if old:
         await archive(db, policy, old, stamp)
@@ -297,7 +301,7 @@ def validate_choice(choice, data):
         if not choice.evidence_ids or any(ref not in known or not known[ref]['success'] for ref in choice.evidence_ids):
             raise InvestigationError('调查结论缺少可核实的成功查询依据，保留待续查',
                                      'model_format', [issue('evidence_ids', 'invalid_reference')])
-    if any(len(gap) > 300 for gap in choice.gaps):
+    if any(len(gap) > 300 for gap in [*choice.gaps, *choice.blocking_gaps]):
         raise InvestigationError('调查缺口说明超过预算', 'model_format', [issue('gaps', 'over_budget')])
     return choice
 
@@ -373,12 +377,16 @@ async def choose(agent_name, data):
         raise InvestigationError('调查模型不可用，已有证据保留，等待模型服务恢复', 'dependency')
     options = model_options(provider, model)
     contract = ('只返回一个简短 JSON 决策，不调用通用工具，不输出思考过程或长篇报告。'
-        'reason 最多 600 字，gaps 每项最多 300 字。query 必须选择 query_options 内的一组 capability/entity；'
+        'reason 最多 600 字，gaps/blocking_gaps 每项最多 300 字。query 必须选择 query_options 内的一组 capability/entity；'
         'capability 是 cap-编号，不是工具名称。参数中的设备、事件和时间由程序绑定，不得更改。'
         'consult 只能选 consult_agents；finish 必须引用 finish_evidence_ids 中的成功证据。'
         '先核对事件与关联告警的基本信息、真实时间线、主机文件/进程或Web请求响应。'
         'Web攻击必须说明具体攻击语句在哪里、响应说明什么、是否能证实利用成功；HTTP200不等于攻击成功。'
         '缺包、截断、空查询及context_excerpt只表示证据不足，不能独立支持误报。'
+        'finish明确填写confidence(high/medium/low)、risk_confirmed、blocking_gaps。只有已核实的具体恶意行为能给出high且risk_confirmed=true；'
+        '仅等级、attackState/attackResult、gptResult、告警名称或一条普通DNS连接不能证实风险。DGA须有实际随机域名/异常查询行为等事实。'
+        '有充分证据排除风险才可benign；否则unknown。blocking_gaps只填妨碍风险判断的关键缺口，gaps可填不影响已证实风险的补充定位信息。'
+        '结论先说明发生什么、为什么需要处置或为什么暂无充分依据，避免重复编号、枚举或工具错误。'
         'attackState为0尝试1失败2成功3失陷；attackResult为0尝试1成功2失败3失陷，不得混用。'
         '用事件发生时间还原经过，retrieved_at只是取证时间。对无新增价值的联动一句带过，关键发现引用证据。'
         'alert_proof必须选择query_options中的alert_id，不得自行编造。'
@@ -633,15 +641,23 @@ class Investigator:
                     choice.gaps = list(dict.fromkeys([*choice.gaps, '模型使用了证据摘录，未读取完整报文；未读取部分不能排除风险']))[:12]
                 # Partial data cannot support an all-clear conclusion. A model's
                 # benign opinion never authorizes mail suppression/status writes.
-                if choice.verdict == 'benign' and (choice.gaps or self.context_incomplete or not has_benign_facts(self.evidence)
+                if choice.verdict == 'benign' and (choice.blocking_gaps or self.context_incomplete
                                                  or any(e['partial'] or not e['success'] for e in self.evidence)):
                     choice.verdict = 'unknown'
-                    choice.reason = '模型提出的安全判断缺少完整、明确的 XDR 误报和实体安全证据，保留待判定。'
+                    choice.reason = '模型提出的安全判断仍有关键证据缺口，暂不通知，尚未排除风险。'
                     choice.gaps.append('不能把空结果、低等级或不完整查询视为安全')
                 unresolved = [proof for proof in self.evidence if not proof['success'] and not any(
                     later['success'] and later['query_key'] == proof['query_key'] for later in self.evidence)]
                 if unresolved:
                     choice.gaps = list(dict.fromkeys(['存在查询失败的来源，当前结论仅适用于已取得证据，不能排除遗漏风险', *choice.gaps]))[:12]
+                from .assessment import assess_event
+                checked = assess_event(self.event, {'event': self.event, 'state': 'ready',
+                    'result': choice.model_dump(), 'evidence': self.evidence})
+                if choice.verdict in {'risk', 'benign'} and checked['verdict'] == 'unknown':
+                    choice.verdict = 'unknown'
+                    choice.risk_confirmed = False
+                    choice.blocking_gaps = list(dict.fromkeys([*checked['gaps'], *choice.blocking_gaps]))[:12]
+                    choice.reason = (choice.reason[:380] + '。证据不足，保留待判定；暂不通知责任人。')[:600]
                 return choice
             if choice.action == 'consult':
                 if depth or self.budget.consults >= 2 or choice.agent not in {a.name for a in agents}:
@@ -681,7 +697,8 @@ async def investigate(policy, event, recorder, budget=None):
     canonical = json.loads(case['event'])
     # Observation query windows can move even when the underlying event has not
     # changed. Resume against the persisted, device-bound investigation window.
-    if fingerprint(event) != fingerprint(canonical):
+    from .assessment import same_evidence_version
+    if not same_evidence_version(event, canonical):
         raise InvestigationError('调查事件版本已变化，等待下一轮重新读取', 'system')
     event['investigationWindow'] = canonical['investigationWindow']
     evidence, result = json.loads(case['evidence']), json.loads(case['result'])
@@ -694,12 +711,15 @@ async def investigate(policy, event, recorder, budget=None):
         usable = fresh_evidence(evidence, canonical, at)
         # Fresh failed records explain gaps; retry bounds count only calls in
         # the current attempt, so they never permanently block a recovered tool.
-        if usable != evidence or state == 'ready' and result.get('evidence_schema') != EVIDENCE_SCHEMA:
+        rebind = fingerprint(canonical) != fingerprint(event)
+        if usable != evidence or state == 'ready' and result.get('evidence_schema') != EVIDENCE_SCHEMA or rebind and state != 'ready':
             async with connection() as db:
                 await archive(db, policy, case, at.isoformat())
-                await db.execute('UPDATE monitor_investigations SET evidence=?,result=?,state=?,revision=revision+1 '
+                if rebind:
+                    canonical, usable = dict(event), []
+                await db.execute('UPDATE monitor_investigations SET event=?,evidence=?,result=?,state=?,revision=revision+1 '
                     'WHERE owner=? AND project=? AND event_key=?',
-                    (encode(usable), '{}', 'pending' if state == 'ready' else state,
+                    (encode(canonical), encode(usable), '{}', 'pending' if state == 'ready' else state,
                      policy.owner, policy.project, event['key']))
             evidence, result = usable, {}
             revision += 1
@@ -768,7 +788,20 @@ async def investigate(policy, event, recorder, budget=None):
         'attempted_this_round': attempted_this_round,
         'evidence_count': len(evidence), 'next_retry_at': next_retry_at,
         'error_kind': error_kind, 'retry_exhausted': exhausted, 'revision': revision}
+    # Bind the human-facing decision to the same persisted incident revision
+    # and successful evidence used by the investigator, never its source level.
+    from .assessment import assess_event
+    event['investigation']['event_revision'] = fingerprint(event)
+    event['assessment'] = assess_event(event, {'event': canonical, 'result': result,
+        'evidence': evidence, 'state': state})
+    event['risk'] = event['assessment']['verdict']
+    event['reason'] = event['assessment']['reason']
     next_step = recovery_next_step(state, next_retry_at, exhausted)
+    if state == 'ready':
+        next_step = ('风险已确认，进入原事件复核和单封责任人通知；当前未修改 XDR。'
+            if event['assessment']['notify_eligible'] else
+            '已证实无风险，本地记录为已忽略，不发送邮件。' if event['assessment']['risk_excluded'] else
+            '当前证据不足，本地暂忽略并保留事件，不发送邮件；尚未排除风险。')
     event['investigation']['next_step'] = next_step
     event['story'] = build_story({**event, 'alertIds': trusted_alert_ids(event, evidence)}, evidence, result)
     summary = f"{event_label(event)}：{result.get('reason', '尚未形成调查结论')}。"

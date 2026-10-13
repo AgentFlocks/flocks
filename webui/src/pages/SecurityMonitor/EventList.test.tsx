@@ -30,6 +30,13 @@ const member = (overrides: Partial<EventMember> = {}): EventMember => ({
   device_name: "股份 XDR",
   host: "192.0.2.10",
   risk: "risk",
+  assessment: {
+    status: "insufficient",
+    label: "证据不足 · 暂忽略",
+    verdict: "unknown",
+    notify_eligible: false,
+    reason: "尚未取得足够证据",
+  },
   handling: "open",
   handling_source: "xdr",
   first_seen_at: "2026-10-12T01:00:00Z",
@@ -73,6 +80,13 @@ const row = (overrides: Partial<EventListRow> = {}): EventListRow => ({
       id: "event-2",
       name: "相同域名外联",
       handling: "closed",
+      assessment: {
+        status: "risk_closed",
+        label: "有风险 · 已处置",
+        verdict: "risk",
+        notify_eligible: true,
+        reason: "已取得恶意行为证据",
+      },
       investigation: { state: "ready", verdict: "malicious" },
     }),
   ],
@@ -86,12 +100,12 @@ const response = (
     start_date: "2026-10-12",
     end_date: "2026-10-14",
     timezone: "Asia/Shanghai",
-    window_hours: 12,
+    window_hours: 24,
     items: [row()],
     total: 1,
     has_more: false,
     offset: 0,
-    limit: 25,
+    limit: 10,
     metrics: {
       events: 2,
       events_in_range: 1,
@@ -123,6 +137,13 @@ const detail = (
       ...member(),
       handling: "closed",
       handling_source: "monitor_verified",
+      assessment: {
+        status: "risk_closed",
+        label: "有风险 · 已处置",
+        verdict: "risk",
+        notify_eligible: true,
+        reason: "已取得恶意行为证据",
+      },
     },
     investigation: {
       state: "ready",
@@ -219,9 +240,9 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-it("defaults to this week, twelve-hour correlation and persistent backlog without making grouped mail into closure", async () => {
+it("defaults to this week and 24-hour same-type aggregation with five rows while preserving unknown results", async () => {
   renderPage();
-  await screen.findByText("规则关联组");
+  await screen.findByText("同类事件聚合");
   expect(screen.getByRole("button", { name: "本周" })).toHaveAttribute(
     "aria-pressed",
     "true",
@@ -229,30 +250,31 @@ it("defaults to this week, twelve-hour correlation and persistent backlog withou
   expect(monitoringEventsApi.list).toHaveBeenCalledWith(
     expect.objectContaining({
       group: true,
-      window_hours: 12,
+      window_hours: 24,
       include_backlog: true,
       offset: 0,
-      limit: 25,
+      limit: 10,
     }),
     expect.any(AbortSignal),
   );
   expect(screen.getByText("期间观察 1 · 此前跟进 1")).toBeInTheDocument();
-  expect(screen.getByText("终结 1/2")).toBeInTheDocument();
+  const aggregate = within(screen.getAllByRole("row")[1]);
+  expect(aggregate.getByText("证据不足 · 暂忽略")).toBeInTheDocument();
+  expect(aggregate.getByText("有风险 · 已处置")).toBeInTheDocument();
+  expect(aggregate.getByText("尚未排除风险")).toBeInTheDocument();
   expect(
-    within(screen.getAllByRole("row")[1]).getByText("未闭环"),
-  ).toBeInTheDocument();
-  expect(screen.getByText("发信 2 / 回信 1")).toBeInTheDocument();
+    screen.queryByRole("columnheader", { name: "处置进度" }),
+  ).not.toBeInTheDocument();
   expect(
-    within(screen.getAllByRole("row")[1]).getByText("风险线索"),
-  ).toBeInTheDocument();
+    screen.queryByRole("columnheader", { name: "邮件进度" }),
+  ).not.toBeInTheDocument();
   expect(screen.queryByText("已确认风险")).not.toBeInTheDocument();
-  expect(screen.queryByText("全部已终结")).not.toBeInTheDocument();
   expect(screen.queryByText("事件邮件主题")).not.toBeInTheDocument();
 });
 
-it("supports device and handling filters, disables correlation window when grouping is off and guards reversed dates", async () => {
+it("supports device and assessment filters, disables correlation window when grouping is off and guards reversed dates", async () => {
   renderPage();
-  await screen.findByText("规则关联组");
+  await screen.findByText("同类事件聚合");
   fireEvent.change(screen.getByRole("combobox", { name: "设备筛选" }), {
     target: { value: "device-b" },
   });
@@ -262,12 +284,12 @@ it("supports device and handling filters, disables correlation window when group
       expect.any(AbortSignal),
     ),
   );
-  fireEvent.change(screen.getByRole("combobox", { name: "处置状态筛选" }), {
-    target: { value: "open" },
+  fireEvent.change(screen.getByRole("combobox", { name: "研判结果筛选" }), {
+    target: { value: "risk_open" },
   });
   await waitFor(() =>
     expect(monitoringEventsApi.list).toHaveBeenLastCalledWith(
-      expect.objectContaining({ device: "device-b", handling: "open" }),
+      expect.objectContaining({ device: "device-b", assessment: "risk_open" }),
       expect.any(AbortSignal),
     ),
   );
@@ -309,8 +331,8 @@ it("discards delayed responses from an earlier filter instead of replacing the c
       }) as never,
     );
   renderPage();
-  fireEvent.change(screen.getByRole("combobox", { name: "处置状态筛选" }), {
-    target: { value: "closed" },
+  fireEvent.change(screen.getByRole("combobox", { name: "研判结果筛选" }), {
+    target: { value: "risk_closed" },
   });
   expect(
     await screen.findByRole("button", { name: "当前设备的事件" }),
@@ -332,7 +354,7 @@ it("opens each original event with current facts, safe packets, independent mail
   fireEvent.click(
     await screen.findByRole("button", { name: "查看事件详情：group-a" }),
   );
-  const dialog = screen.getByRole("dialog", { name: "关联事件组详情" });
+  const dialog = screen.getByRole("dialog", { name: "同类事件组详情" });
   expect(
     await within(dialog).findByText("请求含注入片段，利用结果仍需核对"),
   ).toBeInTheDocument();
@@ -342,7 +364,7 @@ it("opens each original event with current facts, safe packets, independent mail
   );
   expect(
     within(dialog).getByText(
-      "规则关联便于跟踪，不代表已证实为同一次攻击。下方每条事件的邮件和处置状态保持独立。",
+      "同类聚合便于浏览，不代表同一次攻击。每条事件独立研判、通知和处置。",
     ),
   ).toBeInTheDocument();
   expect(
@@ -421,7 +443,7 @@ it("paginates after grouping and resets to the first page when filtering changes
   fireEvent.click(await screen.findByRole("button", { name: "事件下一页" }));
   await waitFor(() =>
     expect(monitoringEventsApi.list).toHaveBeenLastCalledWith(
-      expect.objectContaining({ offset: 25 }),
+      expect.objectContaining({ offset: 10 }),
       expect.any(AbortSignal),
     ),
   );
@@ -516,6 +538,7 @@ it("pauses background refresh in hidden tabs and updates both list and open deta
           row({
             closure_counts: { open: 0, closed: 2, ignored: 0, contained: 0 },
             handling: "closed",
+            assessment_counts: { risk_closed: 2 },
           }),
         ],
       }) as never,
@@ -538,7 +561,10 @@ it("pauses background refresh in hidden tabs and updates both list and open deta
     });
     expect(monitoringEventsApi.list).toHaveBeenCalledTimes(2);
     expect(monitoringEventsApi.detail).toHaveBeenCalledTimes(2);
-    expect(screen.getByText("终结 2/2")).toBeInTheDocument();
+    expect(
+      within(screen.getAllByRole("row")[1]).getByText("有风险 · 已处置")
+        .parentElement,
+    ).toHaveTextContent("2 条");
     expect(
       within(screen.getByRole("dialog")).getByText("当前已更新的调查结论"),
     ).toBeInTheDocument();
@@ -638,7 +664,9 @@ it("explains independent records and keeps a missing XDR disposition explicitly 
     await within(dialog).findByText("尚未取得 XDR 处置状态，按未闭环跟踪。"),
   ).toBeInTheDocument();
   expect(within(dialog).getByText(`关联说明：${reason}`)).toBeInTheDocument();
-  expect(within(dialog).getByText("未闭环")).toBeInTheDocument();
+  expect(
+    within(dialog).getAllByText("证据不足 · 暂忽略").length,
+  ).toBeGreaterThan(0);
   expect(within(dialog).queryByText("已处置")).not.toBeInTheDocument();
 });
 
@@ -684,7 +712,7 @@ it("keeps a historical ready verdict out of current investigation progress and l
     }) as never,
   );
   renderPage();
-  await screen.findByText("已研判 0/1");
+  await screen.findByText("证据不足 · 暂忽略", { selector: "span" });
   fireEvent.click(
     screen.getByRole("button", { name: "查看事件详情：single-a" }),
   );
@@ -704,4 +732,207 @@ it("keeps a historical ready verdict out of current investigation progress and l
   expect(
     within(dialog).queryByText("已有调查结论 · 未见恶意"),
   ).not.toBeInTheDocument();
+});
+
+it("expands a same-device event group across hosts and opens the chosen original without merging its outcome", async () => {
+  renderPage();
+  const toggle = await screen.findByRole("button", {
+    name: "展开子事件：group-a",
+  });
+  expect(toggle).toHaveAttribute("aria-expanded", "false");
+  expect(
+    screen.queryByRole("button", { name: "查看子事件详情：event-2" }),
+  ).not.toBeInTheDocument();
+  fireEvent.click(toggle);
+  expect(
+    screen.getByRole("button", { name: "收起子事件：group-a" }),
+  ).toHaveAttribute("aria-expanded", "true");
+  fireEvent.click(
+    screen.getByRole("button", { name: "查看子事件详情：event-2" }),
+  );
+  await waitFor(() =>
+    expect(monitoringEventsApi.detail).toHaveBeenLastCalledWith(
+      "device-a:incident:event-2",
+      expect.any(AbortSignal),
+    ),
+  );
+});
+
+it("keeps all four assessment outcomes distinct even when the group contains closed and insufficient events", async () => {
+  const statuses = [
+    "risk_open",
+    "risk_closed",
+    "benign",
+    "insufficient",
+  ] as const;
+  const members = statuses.map((status, index) =>
+    member({
+      key: `member-${index}`,
+      id: `event-${index}`,
+      host: `192.0.2.${index + 1}`,
+      assessment: {
+        status,
+        label: status,
+        verdict:
+          status === "benign"
+            ? "benign"
+            : status === "insufficient"
+              ? "unknown"
+              : "risk",
+        notify_eligible: status.startsWith("risk"),
+        reason: "来源证据结论",
+      },
+    }),
+  );
+  vi.mocked(monitoringEventsApi.list).mockResolvedValue(
+    response({
+      items: [
+        row({
+          member_count: 4,
+          members,
+          assessment_counts: {
+            risk_open: 1,
+            risk_closed: 1,
+            benign: 1,
+            insufficient: 1,
+          },
+          assessment_status: "mixed",
+          host_count: 4,
+        }),
+      ],
+    }) as never,
+  );
+  renderPage();
+  await screen.findByText("同类事件聚合");
+  const aggregate = within(screen.getAllByRole("row")[1]);
+  expect(aggregate.getByText("有风险 · 处置中")).toBeInTheDocument();
+  expect(aggregate.getByText("有风险 · 已处置")).toBeInTheDocument();
+  expect(aggregate.getByText("无风险 · 已忽略")).toBeInTheDocument();
+  expect(aggregate.getByText("证据不足 · 暂忽略")).toBeInTheDocument();
+  expect(aggregate.getByText("4 台主机")).toBeInTheDocument();
+  expect(aggregate.getByText("尚未排除风险")).toBeInTheDocument();
+});
+
+it("clamps event paging after the total shrinks and keeps page size at ten", async () => {
+  vi.mocked(monitoringEventsApi.list).mockResolvedValue(
+    response({ total: 12, has_more: true }) as never,
+  );
+  renderPage();
+  fireEvent.click(await screen.findByRole("button", { name: "事件下一页" }));
+  await waitFor(() =>
+    expect(monitoringEventsApi.list).toHaveBeenLastCalledWith(
+      expect.objectContaining({ offset: 10, limit: 10 }),
+      expect.any(AbortSignal),
+    ),
+  );
+  vi.mocked(monitoringEventsApi.list).mockResolvedValue(
+    response({ total: 2 }) as never,
+  );
+  fireEvent.click(await screen.findByRole("button", { name: "刷新" }));
+  await waitFor(() =>
+    expect(monitoringEventsApi.list).toHaveBeenLastCalledWith(
+      expect.objectContaining({ offset: 0, limit: 10 }),
+      expect.any(AbortSignal),
+    ),
+  );
+  expect(screen.getByRole("button", { name: "事件上一页" })).toBeDisabled();
+});
+
+it("puts opaque evidence identifiers in collapsed technical details while retaining clear facts", async () => {
+  const original =
+    "[evidence-2] 告警编号：alert-ef05bbee-0056-4934-ab83-ec1791860330；10:59 主机访问大量随机域名，支持异常 DNS 通信判断";
+  const value = detail();
+  const story = value.data.investigation!.result!.story as Record<
+    string,
+    unknown
+  >;
+  story.key_evidence = [{ evidence_id: "evidence-2", text: original }];
+  vi.mocked(monitoringEventsApi.detail).mockResolvedValue(value as never);
+  renderPage();
+  fireEvent.click(
+    await screen.findByRole("button", { name: "查看事件详情：group-a" }),
+  );
+  const dialog = screen.getByRole("dialog");
+  const readable = await within(dialog).findByText(
+    "10:59 主机访问大量随机域名，支持异常 DNS 通信判断",
+  );
+  expect(readable).not.toHaveTextContent("evidence-2");
+  expect(readable).not.toHaveTextContent("alert-");
+  expect(
+    within(dialog).getByText("技术明细与原始依据").closest("details"),
+  ).not.toHaveAttribute("open");
+  expect(
+    within(dialog).getByText(/"evidence_id": "evidence-2"/),
+  ).toBeInTheDocument();
+});
+
+it("uses the readable overview for operators and preserves full source facts in technical details", async () => {
+  const value = detail({
+    overview: {
+      basics: { name: "异常 DNS 通信", host: "192.0.2.10", device: "股份 XDR" },
+      conclusion:
+        "主机在短时间内多次查询随机域名，已确认存在异常通信，需要排查恶意程序。",
+      evidence: [{ text: "10:59 起持续查询随机域名，佐证异常 DNS 通信。" }],
+      timeline: [
+        { time: "2026-10-12T02:59:00Z", text: "主机开始查询随机域名。" },
+      ],
+      gaps: ["尚未取得主机侧进程证据，无法确定感染程序。"],
+    },
+  });
+  value.data.story = value.data.investigation!.result!.story as Record<
+    string,
+    unknown
+  >;
+  delete value.data.investigation!.result!.story;
+  vi.mocked(monitoringEventsApi.detail).mockResolvedValue(value as never);
+  renderPage();
+  fireEvent.click(
+    await screen.findByRole("button", { name: "查看事件详情：group-a" }),
+  );
+  const dialog = screen.getByRole("dialog");
+  expect(
+    await within(dialog).findByText(
+      "主机在短时间内多次查询随机域名，已确认存在异常通信，需要排查恶意程序。",
+    ),
+  ).toBeInTheDocument();
+  expect(
+    within(dialog).getByText("10:59 起持续查询随机域名，佐证异常 DNS 通信。"),
+  ).toBeInTheDocument();
+  expect(
+    within(dialog).getByText("主机开始查询随机域名。"),
+  ).toBeInTheDocument();
+  expect(
+    within(dialog).getByText("尚未取得主机侧进程证据，无法确定感染程序。"),
+  ).toBeInTheDocument();
+  expect(
+    within(dialog)
+      .getByText(/"conclusion": "请求含注入片段，利用结果仍需核对"/)
+      .closest("details"),
+  ).not.toHaveAttribute("open");
+});
+
+it("does not turn an unqualified legacy malicious label into a confirmed result", async () => {
+  const unverified = member({
+    assessment: undefined,
+    investigation: { state: "ready", verdict: "malicious" },
+    handling: "closed",
+  });
+  vi.mocked(monitoringEventsApi.list).mockResolvedValue(
+    response({
+      items: [
+        row({
+          grouped: false,
+          member_count: 1,
+          members: [unverified],
+          event_keys: [unverified.key],
+        }),
+      ],
+    }) as never,
+  );
+  renderPage();
+  await screen.findByText("独立事件");
+  const item = within(screen.getAllByRole("row")[1]);
+  expect(item.getByText("证据不足 · 暂忽略")).toBeInTheDocument();
+  expect(item.queryByText("有风险 · 已处置")).not.toBeInTheDocument();
+  expect(item.queryByText("无风险 · 已忽略")).not.toBeInTheDocument();
 });

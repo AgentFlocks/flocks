@@ -132,7 +132,12 @@ async def test_native_rounds_dashboard_report_idempotence(policy):
     data = await snapshot(policy.owner, policy.scope, day)
     assert [r['id'] for r in data['runs']] == [r['id'] for r in reversed(attempts)]
     assert data['metrics']['events'] == 1 and data['metrics']['started'] == 2
-    assert data['metrics']['risk'] == 1 and data['events'][0]['incidentSeverity'] == 4
+    # Severity and a host identifier are source facts, not proof of an attack.
+    assert data['metrics']['risk'] == 0 and data['metrics']['unknown'] == 1
+    assert data['events'][0]['incidentSeverity'] == 4
+    assert data['events'][0]['assessment']['status'] == 'insufficient'
+    assert not data['events'][0]['assessment']['notify_eligible']
+    assert await rows('SELECT * FROM monitor_mail_notices') == []
     assert data['events'][0]['closure'] == 'open'
     messages = await Message.list_with_parts(attempts[0]['session_id'])
     tools = [p for m in messages for p in m.parts if p.type == 'tool']

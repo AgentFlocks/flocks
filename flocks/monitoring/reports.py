@@ -27,6 +27,15 @@ async def snapshot(owner, scope, day):
         current_run = await select("SELECT a.id,a.session_id,a.message_id,a.started_at FROM monitor_attempts a JOIN monitor_installations i ON i.owner=a.owner AND i.scope=a.scope AND i.project=a.project WHERE a.owner=? AND a.scope=? AND a.status='running' AND i.installed=1 ORDER BY a.sequence DESC LIMIT 1", (owner, scope))
         observations = await select('SELECT o.*,a.sequence,a.session_id,a.message_id,a.started_at,a.project FROM monitor_observations o JOIN monitor_attempts a ON a.id=o.attempt_id WHERE a.owner=? AND a.scope=? AND a.business_date=? ORDER BY a.sequence', (owner, scope, day))
         dispositions = await select('SELECT * FROM monitor_dispositions WHERE owner=? AND scope=? ORDER BY created_at', (owner, scope))
+        from .event_list import _assessment_projection, _event_projection, _result_projection
+        investigations = await select(
+            f'SELECT i.event_key,i.state,{_event_projection("i.event")} AS event,'
+            f'{_assessment_projection()} AS assessment_proofs,{_result_projection("i.result")} AS result '
+            'FROM monitor_investigations i WHERE i.owner=? AND i.project='
+            '(SELECT project FROM monitor_installations WHERE owner=? AND scope=?) '
+            'AND EXISTS(SELECT 1 FROM monitor_observations o JOIN monitor_attempts a ON a.id=o.attempt_id '
+            'WHERE a.owner=i.owner AND a.scope=? AND a.project=i.project AND a.business_date=? AND o.event_key=i.event_key)',
+            (owner, owner, scope, scope, day))
         mail_notices = await select('SELECT id,state,created_at,updated_at,sent_at FROM monitor_mail_notices WHERE owner=? AND project=(SELECT project FROM monitor_installations WHERE owner=? AND scope=?)', (owner, owner, scope))
         mail_replies = await select('SELECT state,received_at FROM monitor_mail_replies WHERE owner=? AND project=(SELECT project FROM monitor_installations WHERE owner=? AND scope=?)', (owner, owner, scope))
         mail_settings = await select('SELECT enabled FROM monitor_mail_settings WHERE owner=? AND project=(SELECT project FROM monitor_installations WHERE owner=? AND scope=?)', (owner, owner, scope))
@@ -60,10 +69,33 @@ async def snapshot(owner, scope, day):
         event['closure'] = {40: 'closed', 60: 'ignored', 70: 'contained'}.get(disposition['target_status'], 'open') if verified else 'open'
         from .disposition import status_label
         event['disposition'] = f"{status_label(disposition['target_status'])}，回查确认" if verified else '待确认处置结果' if disposition['status'] in ('writing', 'pending', 'mismatch') else '待跟进'
+    cases = {case['event_key']: case for case in investigations}
+    from .assessment import assess_event
     for event in events.values():
+        # Keep the daily projection aligned with the event ledger and notification
+        # rule. Old severity-only observations are not confirmed risk findings.
+        persisted_assessment = event.get('assessment', {})
+        current_assessment = assess_event(event, cases.get(event['key'], {}),
+            handling='closed' if event.get('closure') == 'closed' else None)
+        from .investigation import fingerprint
+        historic = (isinstance(persisted_assessment, dict)
+            and persisted_assessment.get('policy_version') == 1
+            and persisted_assessment.get('event_revision') == fingerprint(event)
+            and persisted_assessment.get('status') in {'risk_open', 'risk_closed', 'benign', 'insufficient'})
+        # A new activity version cannot rewrite the facts of a historical day.
+        event['assessment'] = (persisted_assessment if historic and not current_assessment['is_current'] else current_assessment)
+        if event.get('closure') == 'closed' and event['assessment']['verdict'] == 'risk':
+            event['assessment'] = {**event['assessment'], 'status': 'risk_closed', 'label': '有风险 · 已处置', 'notify_eligible': False}
+        if event['assessment']['status'] == 'risk_closed' and event.get('closure') != 'closed':
+            event['closure'] = 'closed'
+            event['closureSource'] = 'xdr'
+            event['disposition'] = 'XDR 来源状态为处置完成'
+        event['risk'] = event['assessment']['verdict']
+        event['reason'] = event['assessment']['reason']
         if event['closure'] == 'ignored':
             event['originalRisk'] = event['risk']
-            event['risk'] = 'ignored'
+            # Source ignore is kept as a closure fact, never promoted to benign.
+            pass
     installation = installations[0] if installations else None
     automatic = False  # Legacy evidence-only writes are retired.
     queue = [entry for entry in auto_queue if installation and entry['project'] == installation['project']]
@@ -117,11 +149,14 @@ async def snapshot(owner, scope, day):
                         'investigatedEvents': investigated_events,
                         'investigationCompletedEvents': completed_investigations,
                         'investigationCompletionRate': completed_investigations / investigated_events if investigated_events else None,
-                        'openRisk': sum(e['risk'] == 'risk' and e['closure'] != 'closed' for e in events.values()),
+                        'openRisk': sum(e['assessment']['status'] == 'risk_open' for e in events.values()),
                         'closed': sum(e['closure'] == 'closed' for e in events.values()),
+                        'riskClosed': sum(e['assessment']['status'] == 'risk_closed' for e in events.values()),
                         'contained': sum(e['closure'] == 'contained' for e in events.values()),
                         'unknown': sum(e['risk'] == 'unknown' for e in events.values()),
-                        'ignored': sum(e['risk'] == 'ignored' for e in events.values())},
+                        'benign': sum(e['assessment']['status'] == 'benign' for e in events.values()),
+                        'insufficient': sum(e['assessment']['status'] == 'insufficient' for e in events.values()),
+                        'ignored': sum(e['risk'] in ('ignored', 'benign') for e in events.values())},
             'mail': {'enabled': bool(mail_settings and mail_settings[0]['enabled']), 'health': mail_health,
                      'sentToday': sum(n['state']=='sent' and datetime.fromisoformat(n['sent_at'] or n['updated_at']).astimezone(tz).date().isoformat()==day for n in mail_notices),
                      'receivedToday': sum(datetime.fromisoformat(r['received_at']).astimezone(tz).date().isoformat()==day for r in mail_replies),
@@ -133,7 +168,7 @@ async def snapshot(owner, scope, day):
 
 def render(data):
     metrics = data['metrics']
-    lines = [f"# 安全运营监测执行时间线 · {data['businessDate']}", '', f"业务时区：{data['timezone']}。每十分钟触发检查；同一监测串行执行，忙碌时只保留一次待执行任务。逐条邮件通知责任人，下一轮解读回信、标记并回查。状态标记不代表组件执行了主机隔离或修复。", '',
+    lines = [f"# 安全运营监测执行时间线 · {data['businessDate']}", '', f"业务时区：{data['timezone']}。每十分钟触发检查；同一监测串行执行，忙碌时只保留一次待执行任务。仅已证实需处置的风险逐条邮件通知责任人，下一轮解读回信、标记并回查。无风险和证据不足在本地分别记录，后者尚未排除风险。状态标记不代表组件执行了主机隔离或修复。", '',
              f"启动轮次：{metrics['started']}；尝试：{metrics['attempts']}；去重事件：{metrics['events']}；风险：{metrics['risk']}；待判定：{metrics['unknown']}。", '']
     lines += [f"未闭环风险：{metrics['openRisk']}；处置完成：{metrics['closed']}；已遏制：{metrics['contained']}；已忽略：{metrics['ignored']}。", '']
     if any(r['result'].get('development_sample') for r in data['runs']):

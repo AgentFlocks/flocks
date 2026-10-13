@@ -129,17 +129,17 @@ def analysis_summary(result, events, groups):
     related = [keys for keys in groups.values() if len(keys) > 1]
     if not events and result['errors']:
         return Summary('关联分析已跳过：事件查询未完整成功，没有可分析的完整事件批次。不能将此次失败理解为查询到 0 条事件。此前收到的回信是否完成跟进，以本轮回信及回查记录为准。')
-    text = f"关联结果已整理：{event_sources_summary(result, len(events))}，形成 {len(related)} 个同设备、同主机关联组，涉及 {sum(map(len, related))} 条事件；按等级初筛风险 {result['risk']} 条、待判定 {result['unknown']} 条。"
+    text = f"关联结果已整理：{event_sources_summary(result, len(events))}，形成 {len(related)} 个同设备、同主机关联组，涉及 {sum(map(len, related))} 条事件；确认风险 {result['risk']} 条、无风险 {result.get('benign', 0)} 条、证据不足 {result['unknown']} 条。"
     text += f"其中 {result.get('analyzed', 0)} 条已有调查结论。"
     if result['errors']:
         text += f"有 {len(result['errors'])} 项查询或调查未完成，结果不完整；请查看对应失败步骤。"
     if len(events) == 1:
         text += '本轮只有一条事件，因此没有多事件关联组；这不表示没有关联主机。'
-    text += '这里按事件等级做初筛，不等于已经确认恶意；是否需要处置还须结合具体实体证据核对。状态标记与闭环结果以回查事实为准。'
+    text += '只有当前版本、引用实际行为证据且高置信确认的风险才通知责任人；无风险和证据不足分别在事件列表保留，后者尚未排除风险。处置完成以 XDR 回查事实为准。'
     by_key = {event['key']: event for event in events}
     lines = (f"{i}. 主机：{label(by_key[keys[0]].get('host'), limit=100)}；关联事件：" + '；'.join(event_label(by_key[key]) for key in keys[:20]) + (f'；另 {len(keys)-20} 条事件见上方各页查询明细' if len(keys) > 20 else '') + '。'
              for i, keys in enumerate(related, 1))
-    lines = list(lines) + [f"事件：{event_label(event)}；初筛依据：{label(event.get('reason'), limit=500)}；与本轮同设备、同主机的其他事件关联 {len(event.get('related', []))} 条。" for event in events]
+    lines = list(lines) + [f"事件：{event_label(event)}；研判说明：{label(event.get('reason'), limit=500)}；与本轮同设备、同主机的其他事件关联 {len(event.get('related', []))} 条。" for event in events]
     return Summary(text, detail_lines(lines, len(lines)))
 
 
@@ -196,7 +196,7 @@ def operation_summary(event, params, value):
 
 
 def round_summary(status, result, observed, feedback, notification, enabled, development):
-    text = f"本轮{ {'completed': '完成', 'failed': '失败'}[status]}：{event_sources_summary(result, len(observed))}，初筛风险 {result['risk']} 条，待判定 {result['unknown']} 条。"
+    text = f"本轮{ {'completed': '完成', 'failed': '失败'}[status]}：{event_sources_summary(result, len(observed))}，确认风险 {result['risk']} 条，无风险 {result.get('benign', 0)} 条，证据不足 {result['unknown']} 条。"
     if status == 'completed':
         text += '本轮执行已结束；告警是否需要跟进、是否已闭环分别记录。'
     text += f"其中 {result.get('analyzed', 0)} 条已有调查结论。"

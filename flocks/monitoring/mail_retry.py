@@ -102,27 +102,12 @@ async def retry(owner, notice_id, request: RetryMailRequest, adapter_factory=Non
                         title='安全运营监测 · 重试告警通知', owner_user_id=owner,
                         metadata={'monitorNotice': notice_id, 'monitorMailRetry': request_id})
                     session_id = session.id
-                if notice['subject'] and notice['body']:
-                    async with mailflow.lock(owner):
-                        # A reply may arrive while opening the session. Recheck
-                        # both the recipient binding and feedback before SMTP.
-                        current, actual, _ = await manual.bound_notice(owner, notice_id)
-                        if actual != policy:
-                            raise ContractError('监测配置已变化，未发送')
-                        await authorized(policy, notice['revision'], event['device'])
-                        eligibility = await snapshot(current)
-                        if not eligibility['available']:
-                            raise ValueError(eligibility['reason'])
-                        await write("UPDATE monitor_mail_notices SET state='sending',session_id=?,updated_at=? WHERE id=?",
-                                    (session_id, d.stamp(), notice_id))
-                        with diag.span('mail.retry', notice=diag.opaque(notice_id)):
-                            await mailflow.deliver_notice(notice, session_id)
-                else:
-                    # Failure before content preparation: redo only read queries
-                    # needed to prepare the single original notice, never mark XDR.
-                    await write("UPDATE monitor_mail_notices SET state='queued' WHERE id=?", (notice_id,))
-                    await asyncio.wait_for(mailflow.notify_one(policy, notice, session_id,
-                        adapter_factory or mailflow.MailAdapter, manual_retry=True), timeout=120)
+                # All retries recheck the current incident and confirmed risk.
+                # notify_one preserves prepared v2 content after that check;
+                # a legacy unsupported notification cannot bypass the gate.
+                await write("UPDATE monitor_mail_notices SET state='queued' WHERE id=?", (notice_id,))
+                await asyncio.wait_for(mailflow.notify_one(policy, notice, session_id,
+                    adapter_factory or mailflow.MailAdapter, manual_retry=True), timeout=120)
             except BaseException as exc:
                 # An SMTP exception is already persisted as unknown by deliver;
                 # do not relabel it as known failure. Unsent failures stay visible.

@@ -52,9 +52,19 @@ async def send(notice, session_id):
         raise TransportNotReady(str(exc)) from exc
     if mailbox_key(cfg) != notice['mailbox']:
         raise TransportNotReady('邮件账号已变化，请重新保存邮件跟进配置')
+    # Persisted presentation survives a manual retry without generating a new
+    # message. Older notices keep their original plain-text delivery.
+    event = notice.get('event', {})
+    try:
+        event = json.loads(event) if isinstance(event, str) else event
+    except (ValueError, TypeError):
+        event = {}
+    presentation = event.get('mail_presentation', {}) if isinstance(event, dict) else {}
+    html_body = presentation.get('html_body') if isinstance(presentation, dict) and presentation.get('version') == 1 else None
+    html_body = html_body if isinstance(html_body, str) and len(html_body) <= 100_000 else None
     ctx = OutboundContext(channel_id='email', to=notice['recipient'], text=notice['body'],
                           subject=notice['subject'], message_id=notice['message_id'],
-                          new_thread=True, single_message=True, format_hint='plain')
+                          new_thread=True, single_message=True, format_hint='plain', html_body=html_body)
     results = await OutboundDelivery.deliver(ctx, max_retries=1, session_id=session_id)
     if len(results) == 1 and getattr(results[0], 'delivery_state', 'unknown') == 'not_sent':
         raise TransportNotReady(results[0].error or '邮件未发送，请检查邮件通道后重试')
