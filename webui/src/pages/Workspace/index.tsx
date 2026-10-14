@@ -120,7 +120,7 @@ export default function WorkspacePage() {
         icon={<FolderOpen className="w-8 h-8" />}
       />
 
-      <div className="flex gap-1 px-1 mb-4 border-b border-gray-200">
+      <div className="flex gap-1 px-1 mb-4 border-b border-gray-200 max-md:overflow-x-auto">
         <TabButton active={activeTab === 'files'} onClick={() => setActiveTab('files')} icon={<FolderOpen className="w-4 h-4" />} label={t('tabs.files')} />
         <TabButton active={activeTab === 'memory'} onClick={() => setActiveTab('memory')} icon={<Brain className="w-4 h-4" />} label={t('tabs.memory')} />
         <TabButton active={activeTab === 'knowledge'} onClick={() => setActiveTab('knowledge')} icon={<Database className="w-4 h-4" />} label={t('tabs.knowledge')} />
@@ -140,7 +140,7 @@ function TabButton({ active, onClick, icon, label }: {
   return (
     <button
       onClick={onClick}
-      className={`flex items-center gap-2 px-4 py-2 text-sm font-medium border-b-2 transition-colors -mb-px ${
+      className={`flex items-center gap-2 px-4 py-2 text-sm font-medium border-b-2 transition-colors -mb-px max-md:shrink-0 max-md:whitespace-nowrap max-md:px-3 ${
         active ? 'border-slate-700 text-slate-800' : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
       }`}
     >

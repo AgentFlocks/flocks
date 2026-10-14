@@ -4680,7 +4680,7 @@ export default function SessionChat({
     : fullWidth
       ? 'space-y-5 w-full px-12'
       : pageCanvas
-        ? 'space-y-[18px] w-full max-w-[760px] mx-auto px-7'
+        ? 'space-y-[18px] w-full max-w-[760px] mx-auto px-7 max-md:px-4'
         : 'space-y-5 w-[min(76%,64rem)] mx-auto px-6';
   const visibleGoalBanner = goalBanner && getGoalBannerKey(goalBanner) !== dismissedGoalKey
     ? goalBanner
@@ -4837,7 +4837,7 @@ export default function SessionChat({
                   <span
                     className={`inline-flex items-center justify-center rounded-full ${getAgentAvatarColor(pendingAgentName)} text-white font-bold shadow-sm ring-2 ring-white dark:ring-zinc-950 flex-shrink-0 ${
                       compact ? 'w-7 h-7 text-xs' : 'w-8 h-8 text-sm'
-                    } ${compact ? '' : 'absolute -left-10 top-1'}`}
+                    } ${compact ? '' : 'absolute -left-10 top-1 max-md:hidden'}`}
                   >
                     {formatAgentName(pendingAgentName).charAt(0).toUpperCase()}
                   </span>
@@ -4911,7 +4911,7 @@ export default function SessionChat({
                   <span
                     className={`inline-flex items-center justify-center rounded-full ${getAgentAvatarColor(pendingAgentName)} text-white font-bold shadow-sm ring-2 ring-white dark:ring-zinc-950 flex-shrink-0 ${
                       compact ? 'w-7 h-7 text-xs' : 'w-8 h-8 text-sm'
-                    } ${compact ? '' : 'absolute -left-10 top-1'}`}
+                    } ${compact ? '' : 'absolute -left-10 top-1 max-md:hidden'}`}
                   >
                     {formatAgentName(pendingAgentName).charAt(0).toUpperCase()}
                   </span>
@@ -4994,7 +4994,7 @@ export default function SessionChat({
             compact
               ? 'bg-white px-4 py-3 dark:bg-zinc-950'
               : pageCanvas
-                ? 'bg-transparent px-7 pb-6 pt-2'
+                ? 'bg-transparent px-7 pb-6 pt-2 max-md:px-4 max-md:pb-4'
                 : 'bg-white py-4 dark:bg-zinc-950'
           }`}
         >
@@ -6354,7 +6354,7 @@ function ChatMessageBubbleInner({
                             <a
                               href={sessionApi.contextFileDownloadUrl(messageSessionId, resourceId)}
                               download={part.filename || 'image'}
-                              className="absolute bottom-1 right-1 rounded bg-black/55 p-1 text-white opacity-0 transition-opacity hover:bg-black/75 group-hover/image:opacity-100"
+                              className="absolute bottom-1 right-1 rounded bg-black/55 p-1 text-white opacity-0 transition-opacity hover:bg-black/75 group-hover/image:opacity-100 max-md:opacity-100"
                               title={t('context.download', 'Download')}
                             >
                               <Download aria-hidden="true" className="h-3.5 w-3.5" />
@@ -6611,7 +6611,7 @@ function ChatMessageBubbleInner({
   if (!compact) {
     return (
       <div className="group relative flex w-full min-w-0">
-        <div className="absolute -left-10 top-1">
+        <div className="absolute -left-10 top-1 max-md:hidden">
           {avatar}
         </div>
         <div className="flex w-full min-w-0 flex-col items-start">

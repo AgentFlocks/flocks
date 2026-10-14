@@ -144,7 +144,7 @@ export default function AgentPage() {
 
       {error && <p role="alert" className="px-4 py-2 text-sm text-red-600">{error}</p>}
       {/* Toolbar — mirrors the Skill page toolbar style */}
-      <div className="px-4 py-2 border-b border-gray-100 flex items-center gap-2">
+      <div className="px-4 py-2 border-b border-gray-100 flex items-center gap-2 max-md:px-0">
         <span className="text-xs text-gray-400 select-none">
           {t('totalCount', { total: primaryAgents.length + subAgents.length })}
         </span>
@@ -164,7 +164,7 @@ export default function AgentPage() {
           </button>
           <button
             onClick={() => setShowCreateSheet(true)}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors text-sm"
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors text-sm max-md:whitespace-nowrap"
           >
             <Plus className="w-4 h-4" />
             {t('createSubAgent')}
@@ -175,7 +175,7 @@ export default function AgentPage() {
       {/* scrollbar-gutter: stable reserves the scrollbar track width even when the
           scrollbar is absent, preventing the layout shift that occurs when filters
           toggle between many results (scrollbar visible) and few results (no bar). */}
-      <div className="flex-1 min-h-0 overflow-y-auto px-4 py-4 flex flex-col gap-4 md:flex-row" style={{ scrollbarGutter: 'stable' }}>
+      <div className="flex-1 min-h-0 overflow-y-auto px-4 py-4 flex flex-col gap-4 md:flex-row max-md:px-0" style={{ scrollbarGutter: 'stable' }}>
         <GroupNav inventoryComplete={!loading && !error} preferenceKey="agent" {...deriveGroupNav(groupItems)} items={groupItems} selection={groupSelection} onSelect={setGroupSelection} onMove={moveGroup} onCreate={createGroup} onRename={changeGroup} onDelete={(name) => changeGroup(name, null)} {...groupDrag} />
         <div className="min-w-0 flex-1 space-y-6">
         {agents.length === 0 ? (

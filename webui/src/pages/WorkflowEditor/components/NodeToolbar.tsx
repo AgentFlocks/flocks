@@ -39,13 +39,13 @@ export default function NodeToolbar({ onAddNode }: NodeToolbarProps) {
   ];
 
   return (
-    <div className="fixed left-4 top-24 bg-white rounded-lg shadow-lg border border-gray-200 p-4 w-64 z-10">
+    <div className="fixed left-4 top-24 bg-white rounded-lg shadow-lg border border-gray-200 p-4 w-64 z-10 max-md:bottom-2 max-md:left-2 max-md:right-2 max-md:top-auto max-md:max-h-[45vh] max-md:w-auto max-md:overflow-y-auto max-md:p-3">
       <div className="flex items-center gap-2 mb-4">
         <Plus className="w-5 h-5 text-gray-700" />
         <h3 className="text-sm font-semibold text-gray-900">{t('editor.toolbar.addNode')}</h3>
       </div>
 
-      <div className="space-y-1.5">
+      <div className="space-y-1.5 max-md:grid max-md:grid-cols-2 max-md:gap-1.5 max-md:space-y-0">
         {nodeTypes.map(({ type, icon: Icon, label, descKey, color }) => {
           const colors = colorClasses[color];
           return (

@@ -1680,3 +1680,20 @@
     .ui-btn-icon, .ui-btn-icon.ui-btn-sm { min-width: var(--control-touch); }
   }
 }
+
+/* Phones only: wide content scrolls sideways instead of being squeezed into a
+   one-character column or cut off at the screen edge. Desktop is untouched. */
+@media (max-width: 767px) {
+  /* Markdown tables (chat replies, previews, workflow docs). */
+  .prose table {
+    display: block;
+    width: max-content;
+    max-width: 100%;
+    overflow-x: auto;
+  }
+
+  .prose th,
+  .prose td {
+    white-space: nowrap;
+  }
+}

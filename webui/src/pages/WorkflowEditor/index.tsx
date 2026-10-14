@@ -823,19 +823,19 @@ export default function WorkflowEditor() {
   }
 
   return (
-    <div className="h-screen flex flex-col bg-gray-50 dark:bg-zinc-950">
-      {/* 顶部工具栏 */}
-      <div className="bg-white border-b border-gray-200 px-6 py-4 flex items-center justify-between dark:border-zinc-800 dark:bg-zinc-950">
-        <div className="flex items-center gap-4">
+    <div className="h-screen flex flex-col bg-gray-50 dark:bg-zinc-950 max-md:h-full">
+      {/* 顶部工具栏（手机：操作按钮单独一行，可左右滑动） */}
+      <div className="bg-white border-b border-gray-200 px-6 py-4 flex items-center justify-between dark:border-zinc-800 dark:bg-zinc-950 max-md:flex-wrap max-md:gap-2 max-md:px-4 max-md:py-3">
+        <div className="flex items-center gap-4 max-md:min-w-0 max-md:gap-2">
           <button
             onClick={() => navigate('/workflows')}
             className="p-2 hover:bg-gray-100 rounded-lg transition-colors dark:text-zinc-300 dark:hover:bg-zinc-800"
           >
             <ArrowLeft className="w-5 h-5" />
           </button>
-          <div>
-            <h1 className="text-xl font-semibold text-gray-900 dark:text-zinc-100">{getWorkflowDisplayName(workflow, i18n.language)}</h1>
-            <p className="text-sm text-gray-500 dark:text-zinc-400">{workflow.description || t('editor.noDescription')}</p>
+          <div className="max-md:min-w-0">
+            <h1 className="text-xl font-semibold text-gray-900 dark:text-zinc-100 max-md:truncate max-md:text-base">{getWorkflowDisplayName(workflow, i18n.language)}</h1>
+            <p className="text-sm text-gray-500 dark:text-zinc-400 max-md:truncate max-md:text-xs">{workflow.description || t('editor.noDescription')}</p>
           </div>
           {validationResult && (
             <div className="flex items-center gap-2">
@@ -851,7 +851,7 @@ export default function WorkflowEditor() {
           )}
         </div>
 
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-3 max-md:w-full max-md:gap-2 max-md:overflow-x-auto max-md:[&>button]:shrink-0 max-md:[&>button]:whitespace-nowrap max-md:[&>button]:px-3">
           <button
             onClick={() => setShowNodeToolbar(!showNodeToolbar)}
             className={`flex items-center gap-2 px-4 py-2 border border-gray-300 rounded-lg transition-colors ${
@@ -973,6 +973,7 @@ export default function WorkflowEditor() {
           <Background variant={BackgroundVariant.Dots} gap={12} size={1} color={isDark ? '#5a6573' : '#e2e8f0'} />
           <Controls />
           <MiniMap
+            className="max-md:!hidden"
             nodeColor={(node) => {
               return nodeMiniMapColors[node.type as keyof typeof nodeMiniMapColors] ?? '#94a3b8';
             }}
@@ -981,7 +982,7 @@ export default function WorkflowEditor() {
           />
           
           {/* 图例 */}
-          <Panel position="top-left" className="bg-white rounded-lg shadow-lg p-4 dark:border dark:border-zinc-800 dark:bg-zinc-900 dark:shadow-xl dark:shadow-black/30">
+          <Panel position="top-left" className="bg-white rounded-lg shadow-lg p-4 dark:border dark:border-zinc-800 dark:bg-zinc-900 dark:shadow-xl dark:shadow-black/30 max-md:hidden">
             <h3 className="text-sm font-semibold text-gray-900 mb-3 dark:text-zinc-100">{t('editor.nodeTypesLabel')}</h3>
             <div className="space-y-2">
               {Object.entries(nodeColors).map(([type, colors]) => (
@@ -994,7 +995,7 @@ export default function WorkflowEditor() {
           </Panel>
 
           {/* 统计信息 */}
-          <Panel position="top-right" className="bg-white rounded-lg shadow-lg p-4 dark:border dark:border-zinc-800 dark:bg-zinc-900 dark:shadow-xl dark:shadow-black/30">
+          <Panel position="top-right" className="bg-white rounded-lg shadow-lg p-4 dark:border dark:border-zinc-800 dark:bg-zinc-900 dark:shadow-xl dark:shadow-black/30 max-md:hidden">
             <h3 className="text-sm font-semibold text-gray-900 mb-3 dark:text-zinc-100">{t('editor.statsLabel')}</h3>
             <div className="space-y-2 text-xs text-gray-600 dark:text-zinc-300">
               <div className="flex justify-between gap-4">

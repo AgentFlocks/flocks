@@ -74,7 +74,7 @@ export default function HeaderMenu({
   };
 
   return (
-    <div ref={rootRef} className="relative">
+    <div ref={rootRef} className="relative max-md:min-w-0">
       <button
         ref={buttonRef}
         type="button"
@@ -106,7 +106,8 @@ export default function HeaderMenu({
           role="menu"
           aria-label={label}
           onKeyDown={onMenuKeyDown}
-          className={`absolute top-full z-[60] mt-2 max-h-[calc(100dvh-5rem)] max-w-[calc(100vw-1.5rem)] overflow-y-auto rounded-xl border border-zinc-200 bg-white p-1.5 shadow-lg dark:border-zinc-700 dark:bg-zinc-900 ${align === 'right' ? 'right-0' : 'left-0'} ${menuClassName}`}
+          // Phones: a full-width sheet under the header, so a menu opened mid-bar cannot run off the screen.
+          className={`absolute top-full z-[60] mt-2 max-h-[calc(100dvh-5rem)] max-w-[calc(100vw-1.5rem)] overflow-y-auto rounded-xl border border-zinc-200 bg-white p-1.5 shadow-lg dark:border-zinc-700 dark:bg-zinc-900 ${align === 'right' ? 'right-0' : 'left-0'} ${menuClassName} max-md:fixed max-md:inset-x-3 max-md:top-14 max-md:w-auto`}
         >
           {children(close)}
         </div>

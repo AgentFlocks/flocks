@@ -52,10 +52,10 @@ export function BackendStatusBanner() {
   return (
     <div className={`fixed top-0 left-0 right-0 lg:left-64 z-50 border-b ${getBannerStyle()} transition-all duration-300`}>
       <div className="px-4 py-3">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center space-x-3">
+        <div className="flex items-center justify-between max-md:flex-wrap max-md:gap-2">
+          <div className="flex items-center space-x-3 max-md:min-w-0">
             {getIcon()}
-            <div>
+            <div className="max-md:min-w-0">
               <div className="font-medium">{getMessage()}</div>
               {status === 'connecting' && (
                 <div className="text-sm opacity-75 mt-1">
@@ -72,7 +72,7 @@ export function BackendStatusBanner() {
           
           <button
             onClick={checkHealth}
-            className="px-4 py-2 bg-white/50 hover:bg-white/80 rounded-lg text-sm font-medium transition-colors duration-200 flex items-center space-x-2 dark:bg-[#46515e]/70 dark:hover:bg-[#5a6573]"
+            className="px-4 py-2 bg-white/50 hover:bg-white/80 rounded-lg text-sm font-medium transition-colors duration-200 flex items-center space-x-2 dark:bg-[#46515e]/70 dark:hover:bg-[#5a6573] max-md:whitespace-nowrap"
           >
             <RefreshCw className="w-4 h-4" />
             <span>{t('backend.retry')}</span>

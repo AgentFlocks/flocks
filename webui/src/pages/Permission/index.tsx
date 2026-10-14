@@ -124,8 +124,8 @@ export default function PermissionPage() {
             <div className="text-sm font-medium text-gray-700 mb-2">
               {t('pending.title', { count: pending.length })}
             </div>
-            <div className="bg-white rounded-lg shadow-sm border border-amber-200 overflow-hidden">
-              <table className="min-w-full divide-y divide-gray-200">
+            <div className="bg-white rounded-lg shadow-sm border border-amber-200 overflow-hidden max-md:overflow-x-auto">
+              <table className="min-w-full divide-y divide-gray-200 max-md:min-w-[40rem]">
                 <thead className="bg-amber-50">
                   <tr>
                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">{t('pending.session')}</th>
@@ -169,8 +169,8 @@ export default function PermissionPage() {
             }
           />
         ) : (
-          <div className="bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden">
-            <table className="min-w-full divide-y divide-gray-200">
+          <div className="bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden max-md:overflow-x-auto">
+            <table className="min-w-full divide-y divide-gray-200 max-md:min-w-[40rem]">
               <thead className="bg-gray-50">
                 <tr>
                   <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">

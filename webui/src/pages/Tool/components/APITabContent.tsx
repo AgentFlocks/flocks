@@ -418,7 +418,7 @@ export default function APITabContent({
       ) : visibleServices.length === 0 && visibleCatalog.length === 0 && !catalogLoading ? (
         <EmptyState icon={<Cloud className="w-16 h-16" />} title={t('api.noTools')} description={t('api.noToolsDesc')} />
       ) : (
-        <div className={viewMode === 'list' ? 'bg-white border border-gray-200 rounded-lg overflow-hidden divide-y divide-gray-100' : 'grid gap-3 sm:grid-cols-2 xl:grid-cols-3'}>
+        <div className={viewMode === 'list' ? 'bg-white border border-gray-200 rounded-lg overflow-hidden divide-y divide-gray-100 max-md:overflow-x-auto' : 'grid gap-3 sm:grid-cols-2 xl:grid-cols-3'}>
           {visibleServices.map((service) => {
             const isSelected = selectedServiceId === service.id;
             const rowDescription = getServiceDescription(service) || `${service.name} API service`;
@@ -427,7 +427,7 @@ export default function APITabContent({
               <div
                 key={service.id}
                 {...groupDrag.dragProps(service.id)}
-                className={`grid items-center gap-3 px-4 py-3 transition-colors ${isSelected ? 'bg-purple-50' : 'hover:bg-gray-50'}${viewMode === 'cards' ? ' rounded-lg border border-gray-200 bg-white [&>:nth-child(5)]:col-span-2 [&>:nth-child(6)]:col-span-2' : ''}`}
+                className={`grid items-center gap-3 px-4 py-3 transition-colors ${isSelected ? 'bg-purple-50' : 'hover:bg-gray-50'}${viewMode === 'cards' ? ' rounded-lg border border-gray-200 bg-white [&>:nth-child(5)]:col-span-2 [&>:nth-child(6)]:col-span-2' : ' max-md:min-w-[48rem]'}`}
                 style={{ gridTemplateColumns: viewMode === 'list' ? SERVICE_TAB_GRID_COLS : '32px minmax(0, 1fr)' }}
               >
                 {/* Icon */}
@@ -529,7 +529,7 @@ export default function APITabContent({
             <div
               key={`catalog-${entry.id}`}
               {...groupDrag.dragProps(`catalog:${entry.id}`)}
-              className={`grid items-center gap-3 px-4 py-3 cursor-default hover:bg-gray-50 transition-colors${viewMode === 'cards' ? ' rounded-lg border border-gray-200 bg-white [&>:nth-child(5)]:col-span-2 [&>:nth-child(6)]:col-span-2' : ''}`}
+              className={`grid items-center gap-3 px-4 py-3 cursor-default hover:bg-gray-50 transition-colors${viewMode === 'cards' ? ' rounded-lg border border-gray-200 bg-white [&>:nth-child(5)]:col-span-2 [&>:nth-child(6)]:col-span-2' : ' max-md:min-w-[48rem]'}`}
               style={{ gridTemplateColumns: viewMode === 'list' ? SERVICE_TAB_GRID_COLS : '32px minmax(0, 1fr)' }}
             >
               {/* Icon */}

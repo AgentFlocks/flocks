@@ -993,7 +993,7 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
         </button>
       </aside>
 
-      <div className={`flex h-screen flex-col pt-14 transition-[padding] ${collapsed ? 'lg:pl-16' : 'lg:pl-64'}`}>
+      <div className={`flex h-screen flex-col pt-14 transition-[padding] max-md:h-[100dvh] ${collapsed ? 'lg:pl-16' : 'lg:pl-64'}`}>
         <main className="relative flex-1 overflow-hidden bg-gray-50 dark:bg-zinc-950">
           <KeepAlivePanes panes={keepAlivePanes} activeHref={activePaneHref} location={location} routes={contentRoutes} />
         </main>

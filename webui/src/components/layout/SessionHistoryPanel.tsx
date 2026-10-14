@@ -673,7 +673,7 @@ export default function SessionHistoryPanel({ collapsed, onExpandSidebar, onNavi
   };
 
   const iconButtonClass = 'grid h-7 w-7 shrink-0 place-items-center rounded-lg text-zinc-400 transition-colors hover:bg-zinc-200/70 hover:text-zinc-700 dark:hover:bg-zinc-800 dark:hover:text-zinc-200';
-  const rowMenuButtonClass = 'grid h-6 w-6 shrink-0 place-items-center rounded text-zinc-400 opacity-0 transition-all hover:bg-black/[0.06] hover:text-zinc-700 focus:opacity-100 group-hover:opacity-100 dark:hover:bg-white/[0.08] dark:hover:text-zinc-200';
+  const rowMenuButtonClass = 'grid h-6 w-6 shrink-0 place-items-center rounded text-zinc-400 opacity-0 transition-all hover:bg-black/[0.06] hover:text-zinc-700 focus:opacity-100 group-hover:opacity-100 dark:hover:bg-white/[0.08] dark:hover:text-zinc-200 max-md:opacity-100';
   // Folder (project) actions are always visible: they are the project's entry points, not row extras.
   const folderActionButtonClass = 'grid h-6 w-6 shrink-0 place-items-center rounded text-zinc-400 transition-colors hover:bg-black/[0.06] hover:text-zinc-700 disabled:opacity-50 dark:hover:bg-white/[0.08] dark:hover:text-zinc-200';
 

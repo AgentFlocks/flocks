@@ -603,15 +603,15 @@ export default function ToolPage() {
   }
 
   return (
-    <div className="min-w-0 space-y-6" aria-busy={loading}>
-      {/* Page Header */}
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-3">
-          <div className="text-red-600">
+    <div className="min-w-0 space-y-6 max-md:space-y-4" aria-busy={loading}>
+      {/* Page Header (phones: actions wrap under the title) */}
+      <div className="flex items-center justify-between max-md:flex-wrap max-md:gap-3">
+        <div className="flex items-center gap-3 max-md:min-w-0">
+          <div className="text-red-600 max-md:shrink-0">
             <Wrench className="w-8 h-8" />
           </div>
-          <div>
-            <h1 className="text-2xl font-bold text-gray-900">{t('pageTitle')}</h1>
+          <div className="max-md:min-w-0">
+            <h1 className="text-2xl font-bold text-gray-900 max-md:text-xl">{t('pageTitle')}</h1>
           <p className="mt-1 text-sm text-gray-500">
             <span className="font-semibold text-gray-700">{enabledSummary.active}</span> {t('statusBadge.active')}
             <span className="mx-1.5 text-gray-300">·</span>
@@ -619,7 +619,7 @@ export default function ToolPage() {
           </p>
           </div>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 max-md:flex-wrap">
           <PluginViewToggle value={viewMode} onChange={setViewMode} />
           <button
             onClick={handleRefresh}
@@ -659,8 +659,8 @@ export default function ToolPage() {
 
       {/* Tabs row with search */}
       <div className="border-b border-gray-200">
-        <div className="flex min-h-14 items-center justify-between">
-          <nav className="-mb-px flex space-x-8">
+        <div className="flex min-h-14 items-center justify-between max-md:flex-wrap">
+          <nav className="-mb-px flex space-x-8 max-md:w-full max-md:space-x-6 max-md:overflow-x-auto">
             {TABS.map((tab) => (
               <button
                 key={tab.key}
@@ -685,14 +685,14 @@ export default function ToolPage() {
           </nav>
 
           {/* Query controls stay on the left; native actions remain above on the right. */}
-          <div className="relative mb-px order-first">
+          <div className="relative mb-px order-first max-md:w-full">
             <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-gray-400" />
             <input
               type="text"
               placeholder={t('search.placeholder')}
               value={searchQuery}
               onChange={(e) => handleSearchChange(e.target.value)}
-              className="w-64 pl-9 pr-4 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-400 focus:border-transparent bg-white"
+              className="w-64 pl-9 pr-4 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-400 focus:border-transparent bg-white max-md:w-full"
             />
           </div>
         </div>
@@ -1787,7 +1787,7 @@ function MCPServerDetailPanel({
           ) : (
             <div className="bg-white rounded-lg border border-gray-200 overflow-hidden">
               <div className="overflow-x-auto">
-                <table className="min-w-full divide-y divide-gray-100 table-fixed">
+                <table className="min-w-full divide-y divide-gray-100 table-fixed max-md:min-w-[36rem]">
                   <thead className="bg-gray-50">
                     <tr>
                       <th className="w-[25%] px-5 py-2.5 text-left text-xs font-medium text-gray-500 uppercase">{t('detail.tableResourceName')}</th>
@@ -1901,8 +1901,8 @@ function MCPToolDetailPanel({ tool, onClose }: { tool: Tool; onClose: () => void
                 <label className="block text-sm font-medium text-gray-700 mb-2">
                   {t('toolDetail.params', { count: tool.parameters.length })}
                 </label>
-                <div className="rounded-lg border border-gray-200 overflow-hidden">
-                  <table className="min-w-full divide-y divide-gray-200">
+                <div className="rounded-lg border border-gray-200 overflow-hidden max-md:overflow-x-auto">
+                  <table className="min-w-full divide-y divide-gray-200 max-md:min-w-[32rem]">
                     <thead className="bg-gray-50">
                       <tr>
                         <th className="px-4 py-2 text-left text-xs font-medium text-gray-500">{t('toolDetail.paramName')}</th>
@@ -3069,7 +3069,7 @@ function APIServiceDetailPanel({
           ) : (
             <div className="bg-white rounded-lg border border-gray-200 overflow-hidden">
               <div className="overflow-x-auto">
-                <table className="min-w-full divide-y divide-gray-100 table-fixed">
+                <table className="min-w-full divide-y divide-gray-100 table-fixed max-md:min-w-[36rem]">
                   <thead className="bg-gray-50">
                     <tr>
                       <th className="w-[30%] px-5 py-2.5 text-left text-xs font-medium text-gray-500 uppercase">{t('detail.tableToolName')}</th>
@@ -3463,12 +3463,13 @@ function ToolTable({
   const GRID_COLS =
     '32px minmax(220px, 3fr) minmax(80px, 1fr) minmax(140px, 1.6fr) minmax(80px, 1fr) minmax(90px, 1fr)';
 
+  // Phones: the list scrolls sideways at its full column width instead of clipping the right columns.
   return (
-    <div className="bg-white rounded-lg border border-gray-200 overflow-hidden flex flex-col">
+    <div className="bg-white rounded-lg border border-gray-200 overflow-hidden flex flex-col max-md:overflow-x-auto">
       {/* Header */}
       <div
         className={viewMode === 'list'
-          ? 'grid items-center gap-3 px-4 py-2.5 bg-gray-50 border-b border-gray-200 text-[11px] font-medium text-gray-500 uppercase tracking-wide'
+          ? 'grid items-center gap-3 px-4 py-2.5 bg-gray-50 border-b border-gray-200 text-[11px] font-medium text-gray-500 uppercase tracking-wide max-md:min-w-[46rem]'
           : 'flex flex-wrap items-center gap-4 px-4 py-2.5 bg-gray-50 border-b border-gray-200 text-[11px] font-medium text-gray-500 uppercase tracking-wide [&>:first-child]:hidden [&>:nth-child(2)]:hidden [&>:last-child]:hidden'}
         style={viewMode === 'list' ? { gridTemplateColumns: GRID_COLS } : undefined}
       >
@@ -3560,7 +3561,7 @@ function ToolTable({
             <div
               key={tool.name}
               {...groupDrag.dragProps(tool.name)}
-              className="grid items-center gap-3 px-4 py-3 hover:bg-gray-50 transition-colors"
+              className="grid items-center gap-3 px-4 py-3 hover:bg-gray-50 transition-colors max-md:min-w-[46rem]"
               style={{ gridTemplateColumns: GRID_COLS }}
             >
               {/* Icon */}
@@ -3674,9 +3675,9 @@ function Pagination({
   };
 
   return (
-    <div className="bg-white px-6 py-4 border-t border-gray-200 flex items-center justify-between">
+    <div className="bg-white px-6 py-4 border-t border-gray-200 flex items-center justify-between max-md:flex-wrap max-md:gap-2 max-md:px-4">
       <div className="text-sm text-gray-700">{t('pagination.showing', { start: startItem, end: endItem, total: totalCount })}</div>
-      <div className="flex items-center space-x-1">
+      <div className="flex items-center space-x-1 max-md:flex-wrap max-md:gap-y-1">
         <button
           onClick={() => onPageChange(Math.max(1, currentPage - 1))}
           disabled={currentPage === 1}
@@ -3934,7 +3935,7 @@ export function ToolDetailDrawer({
                   <label className="block text-sm font-medium text-gray-700 mb-2">{t('toolDetail.params', { count: tool.parameters.length })}</label>
                   <div className="rounded-lg border border-gray-200 overflow-hidden">
                     <div className="overflow-x-auto">
-                      <table className="min-w-full table-fixed divide-y divide-gray-200">
+                      <table className="min-w-full table-fixed divide-y divide-gray-200 max-md:min-w-[32rem]">
                       <thead className="bg-gray-50">
                         <tr>
                           <th className="w-[28%] px-4 py-2 text-left text-xs font-medium text-gray-500">{t('toolDetail.paramName')}</th>

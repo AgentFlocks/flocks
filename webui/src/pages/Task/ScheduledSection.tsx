@@ -54,7 +54,7 @@ export default function ScheduledSection({ onRefreshGlobal }: { onRefreshGlobal:
 
   return (
     <>
-      <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
+      <div className="bg-white rounded-xl border border-gray-200 overflow-hidden max-md:overflow-x-auto">
         {tasks.length === 0 ? (
           <div className="p-8">
             <EmptyState
@@ -65,7 +65,7 @@ export default function ScheduledSection({ onRefreshGlobal }: { onRefreshGlobal:
           </div>
         ) : (
           <>
-            <table className="w-full text-sm">
+            <table className="w-full text-sm max-md:min-w-[44rem]">
               <thead className="bg-gray-50 border-b border-gray-200">
                 <tr>
                   <th className="text-left px-4 py-3 font-medium text-gray-600 w-24">{t('scheduled.colStatus')}</th>

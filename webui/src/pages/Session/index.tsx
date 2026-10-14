@@ -180,7 +180,7 @@ function ComposerResourcePicker({
         <ChevronRight className={`h-3.5 w-3.5 shrink-0 text-zinc-400 transition-transform ${open ? '-rotate-90' : ''}`} />
       </button>
       {open && (
-        <div className="absolute bottom-0 left-[calc(100%+0.5rem)] z-[60] w-[300px] max-w-[calc(100vw-2rem)] overflow-hidden rounded-[14px] border border-black/[0.09] bg-white/95 shadow-[0_18px_46px_rgba(22,27,34,0.14),0_2px_8px_rgba(22,27,34,0.06)] backdrop-blur-xl dark:border-white/[0.11] dark:bg-[#252c35]/95 dark:shadow-[0_20px_48px_rgba(8,10,13,0.44)]">
+        <div className="absolute bottom-0 left-[calc(100%+0.5rem)] z-[60] w-[300px] max-w-[calc(100vw-2rem)] overflow-hidden max-md:left-0 rounded-[14px] border border-black/[0.09] bg-white/95 shadow-[0_18px_46px_rgba(22,27,34,0.14),0_2px_8px_rgba(22,27,34,0.06)] backdrop-blur-xl dark:border-white/[0.11] dark:bg-[#252c35]/95 dark:shadow-[0_20px_48px_rgba(8,10,13,0.44)]">
           <div className="flex min-h-12 items-center justify-between gap-3 border-b border-zinc-100 px-3 py-2 dark:border-white/[0.08]">
             <span className="min-w-0 truncate text-[12px] font-semibold text-zinc-800 dark:text-zinc-100">
               {title}
@@ -1892,7 +1892,7 @@ export default function SessionPage() {
           </div>
 
           {selectedSessionId && selectedSession && !activeSessionError && (
-            <CopyButton text={new URL(sessionPath(selectedSessionId), window.location.origin).href} label={t('copyLink')} />
+            <CopyButton text={new URL(sessionPath(selectedSessionId), window.location.origin).href} label={t('copyLink')} labelClassName="max-md:sr-only" />
           )}
 
           {workbenchRefreshing && (
@@ -1905,7 +1905,7 @@ export default function SessionPage() {
               type="button"
               disabled={!activeChatSessionId}
               onClick={() => setContextPanelOpen((open) => !open)}
-              className={`flex h-8 items-center gap-1.5 rounded-lg px-2.5 text-xs font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
+              className={`flex h-8 items-center gap-1.5 rounded-lg px-2.5 text-xs font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-40 max-md:shrink-0 max-md:whitespace-nowrap ${
                 contextPanelOpen
                   ? 'bg-violet-50 text-violet-700 dark:bg-violet-500/15 dark:text-violet-200'
                   : 'text-[#7b8087] hover:bg-black/[0.04] hover:text-[#202328] dark:text-[#9aa7b4] dark:hover:bg-white/[0.06] dark:hover:text-white'
@@ -2026,7 +2026,7 @@ export default function SessionPage() {
                 <ChevronRight className={`h-3.5 w-3.5 shrink-0 text-zinc-400 transition-transform ${showAgentOptions ? '-rotate-90' : ''}`} />
               </button>
               {showAgentOptions && (
-                <div className="absolute bottom-0 left-[calc(100%+0.5rem)] z-[60] w-[300px] max-w-[calc(100vw-2rem)] overflow-hidden rounded-[14px] border border-black/[0.09] bg-white/95 shadow-[0_18px_46px_rgba(22,27,34,0.14),0_2px_8px_rgba(22,27,34,0.06)] backdrop-blur-xl dark:border-white/[0.11] dark:bg-[#252c35]/95 dark:shadow-[0_20px_48px_rgba(8,10,13,0.44)]">
+                <div className="absolute bottom-0 left-[calc(100%+0.5rem)] z-[60] w-[300px] max-w-[calc(100vw-2rem)] overflow-hidden max-md:left-0 rounded-[14px] border border-black/[0.09] bg-white/95 shadow-[0_18px_46px_rgba(22,27,34,0.14),0_2px_8px_rgba(22,27,34,0.06)] backdrop-blur-xl dark:border-white/[0.11] dark:bg-[#252c35]/95 dark:shadow-[0_20px_48px_rgba(8,10,13,0.44)]">
                   <div className="flex min-h-12 items-center justify-between gap-3 border-b border-zinc-100 px-3 py-2 dark:border-white/[0.08]">
                     <div className="min-w-0">
                       <div className="text-[12px] font-semibold text-zinc-800 dark:text-zinc-100">{t('agentPicker.title')}</div>
@@ -2233,7 +2233,7 @@ export default function SessionPage() {
                 )}
               </div>
               {!activeChatSessionId && (
-              <div className="relative" data-project-selector>
+              <div className="relative max-md:static" data-project-selector>
                 <button
                   type="button"
                   onClick={() => {
@@ -2316,8 +2316,9 @@ export default function SessionPage() {
             </div>
           }
           centerToolbarSlot={
-            // The model picker gives way first on a narrow composer (its name truncates).
-            <div className="flex min-w-0 items-center gap-1">
+            // The model picker gives way first on a narrow composer (its name truncates);
+            // on phones the permission picker can drop to the next line (longer English labels).
+            <div className="flex min-w-0 items-center gap-1 max-md:flex-wrap">
               <div ref={modelSelectorRef} className="relative w-[132px] min-w-[72px] shrink" data-model-selector>
               <button
                 type="button"

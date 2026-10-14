@@ -80,8 +80,8 @@ export default function AdminUsersPage() {
         </div>
       </div>
 
-      <div className="bg-white border border-gray-200 rounded-xl overflow-hidden">
-        <table className="w-full text-sm">
+      <div className="bg-white border border-gray-200 rounded-xl overflow-hidden max-md:overflow-x-auto">
+        <table className="w-full text-sm max-md:min-w-[36rem]">
           <thead className="bg-gray-50 text-gray-600">
             <tr>
               <th className="text-left px-4 py-3">{t('admin.columnUsername')}</th>

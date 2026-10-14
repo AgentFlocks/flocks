@@ -39,11 +39,11 @@ export default function Pagination({
   };
 
   return (
-    <div className="bg-white px-6 py-4 border-t border-gray-200 flex items-center justify-between">
+    <div className="bg-white px-6 py-4 border-t border-gray-200 flex items-center justify-between max-md:flex-wrap max-md:gap-2 max-md:px-4">
       <div className="text-sm text-gray-700">
         {t('pagination.showing', { start: startItem, end: endItem, total: totalCount })}
       </div>
-      <div className="flex items-center space-x-1">
+      <div className="flex items-center space-x-1 max-md:flex-wrap max-md:gap-y-1">
         <button
           onClick={() => onPageChange(Math.max(1, currentPage - 1))}
           disabled={currentPage === 1}

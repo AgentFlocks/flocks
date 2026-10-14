@@ -510,7 +510,7 @@ function FieldRow({
   children: React.ReactNode;
 }) {
   return (
-    <div className="grid grid-cols-3 gap-4 items-start py-3 border-b border-gray-100 last:border-b-0">
+    <div className="grid grid-cols-3 gap-4 items-start py-3 border-b border-gray-100 last:border-b-0 max-md:grid-cols-1 max-md:gap-2">
       <div className="col-span-1 pt-1">
         <label className="text-sm font-medium text-gray-700">
           {label}
@@ -518,7 +518,7 @@ function FieldRow({
         </label>
         {hint && <p className="text-xs text-gray-400 mt-0.5 leading-relaxed">{hint}</p>}
       </div>
-      <div className="col-span-2">{children}</div>
+      <div className="col-span-2 max-md:col-span-1 max-md:min-w-0">{children}</div>
     </div>
   );
 }
@@ -1238,7 +1238,7 @@ function ChannelCard({ meta, config, status, isSelected, onClick }: ChannelCardP
     <button
       type="button"
       onClick={onClick}
-      className={`w-full text-left flex items-center gap-3 px-3 py-3 rounded-lg border transition-all ${
+      className={`w-full text-left flex items-center gap-3 px-3 py-3 rounded-lg border transition-all max-md:w-44 max-md:shrink-0 ${
         isSelected
           ? 'border-red-200 bg-red-50 shadow-sm'
           : 'border-gray-200 bg-white hover:border-gray-300 hover:bg-gray-50'
@@ -3165,10 +3165,10 @@ function DetailHeader({
     );
 
   return (
-    <div className="px-6 py-4 border-b border-gray-200 flex items-center gap-4">
+    <div className="px-6 py-4 border-b border-gray-200 flex items-center gap-4 max-md:flex-wrap max-md:gap-3 max-md:px-4">
       <div className="flex-shrink-0"><ChannelIcon channelId={meta.id} size="md" /></div>
       <div className="flex-1 min-w-0">
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 max-md:flex-wrap">
           <h2 className="text-lg font-semibold text-gray-900">{t(`channelName.${meta.id}`, { defaultValue: meta.label })}</h2>
           {isConnected ? (
             <span className="inline-flex items-center gap-1 px-2 py-0.5 text-xs font-medium bg-green-100 text-green-700 rounded-full">
@@ -3204,7 +3204,7 @@ function DetailHeader({
             .join(' · ')}
         </p>
       </div>
-      <div className="flex items-center gap-2 flex-shrink-0">
+      <div className="flex items-center gap-2 flex-shrink-0 max-md:w-full max-md:flex-wrap max-md:justify-end">
         <div className="flex items-center gap-2 mr-1">
           <span className="text-sm text-gray-500">{t('enableChannel')}</span>
           <Toggle checked={isEnabled} onChange={onToggleEnabled} disabled={isBusy} />
@@ -3256,7 +3256,7 @@ function StatsStrip({
   const total = channels.length;
 
   return (
-    <div className="flex gap-3 mb-4">
+    <div className="flex gap-3 mb-4 max-md:grid max-md:grid-cols-3 max-md:gap-2">
       {[
         { label: t('stats.total'), value: total, icon: <Radio className="w-4 h-4 text-gray-400" /> },
         { label: t('stats.enabled'), value: enabled, icon: <CheckCircle className="w-4 h-4 text-slate-500" /> },
@@ -3264,10 +3264,10 @@ function StatsStrip({
       ].map((stat) => (
         <div
           key={stat.label}
-          className="flex items-center gap-2 px-4 py-2.5 bg-white rounded-lg border border-gray-200 shadow-sm"
+          className="flex items-center gap-2 px-4 py-2.5 bg-white rounded-lg border border-gray-200 shadow-sm max-md:min-w-0 max-md:px-2.5"
         >
           {stat.icon}
-          <div>
+          <div className="max-md:min-w-0">
             <p className="text-lg font-semibold text-gray-900 leading-none">{stat.value}</p>
             <p className="text-xs text-gray-400 mt-0.5">{stat.label}</p>
           </div>
@@ -3677,9 +3677,9 @@ export default function ChannelPage() {
           />
         </div>
       ) : (
-        <div className="flex gap-3 flex-1 overflow-hidden min-h-0">
-          {/* Left: Channel List */}
-          <div className="w-56 flex-shrink-0 flex flex-col gap-1.5 overflow-y-auto pr-0.5">
+        <div className="flex gap-3 flex-1 overflow-hidden min-h-0 max-md:flex-col max-md:overflow-visible">
+          {/* Left: Channel List (phones: a row of chips that scrolls sideways) */}
+          <div className="w-56 flex-shrink-0 flex flex-col gap-1.5 overflow-y-auto pr-0.5 max-md:w-full max-md:flex-row max-md:overflow-x-auto max-md:overflow-y-hidden max-md:pb-1 max-md:pr-0">
             {channels.map((ch) => (
               <ChannelCard
                 key={ch.id}
@@ -3707,7 +3707,7 @@ export default function ChannelPage() {
                   onToggleEnabled={handleToggleEnabled}
                 />
 
-                <div className="flex-1 overflow-y-auto p-6">
+                <div className="flex-1 overflow-y-auto p-6 max-md:p-4">
                   {/* Connection status — always shown at top of config area */}
                   <ConnectionStatusPanel
                     status={statuses[selectedId!]}

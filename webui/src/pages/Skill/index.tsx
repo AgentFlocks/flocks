@@ -363,9 +363,9 @@ export default function SkillPage() {
       />
 
       {/* Toolbar: 搜索 · 来源 chips · 刷新/安装/创建 */}
-      <div className="px-4 py-2 border-b border-gray-100 flex flex-wrap items-center gap-3">
+      <div className="px-4 py-2 border-b border-gray-100 flex flex-wrap items-center gap-3 max-md:px-0">
         {/* 搜索 */}
-        <div className="relative w-64">
+        <div className="relative w-64 max-md:w-full">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400 pointer-events-none" />
           <input
             type="text"
@@ -386,7 +386,7 @@ export default function SkillPage() {
         />
 
         {/* 右侧操作：刷新 + 安装 + 创建 */}
-        <div className="ml-auto flex items-center gap-2">
+        <div className="ml-auto flex items-center gap-2 max-md:flex-wrap">
           <PluginViewToggle value={viewMode} onChange={setViewMode} />
           <button
             onClick={handleRefresh}
@@ -402,14 +402,14 @@ export default function SkillPage() {
           </button>
           <button
             onClick={() => setShowInstallDialog(true)}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 border border-gray-300 text-gray-700 bg-white rounded-lg hover:bg-gray-50 transition-colors text-sm"
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 border border-gray-300 text-gray-700 bg-white rounded-lg hover:bg-gray-50 transition-colors text-sm max-md:whitespace-nowrap"
           >
             <CloudDownload className="w-4 h-4" />
             {t('installSkill')}
           </button>
           <button
             onClick={() => setShowCreateSheet(true)}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors text-sm"
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors text-sm max-md:whitespace-nowrap"
           >
             <Plus className="w-4 h-4" />
             {t('createSkill')}
@@ -420,7 +420,7 @@ export default function SkillPage() {
       <div className="flex min-h-0 flex-1 flex-col gap-3 pt-3 md:flex-row">
         <GroupNav inventoryComplete={!loading && !error} preferenceKey="skill" {...deriveGroupNav(groupItems)} items={groupItems} selection={groupSelection} onSelect={setGroupSelection} onMove={moveGroup} onCreate={createGroup} onRename={changeGroup} onDelete={(name) => changeGroup(name, null)} {...groupDrag} />
         <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-      <div className="flex-1 overflow-y-auto px-4 py-3">
+      <div className="flex-1 overflow-y-auto px-4 py-3 max-md:px-0">
         {visibleSkills.length === 0 ? (
           // Truly empty inventory — show big EmptyState with CTAs
           <EmptyState

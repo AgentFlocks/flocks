@@ -247,13 +247,13 @@ export default function QueuedSection({ onRefreshGlobal }: { onRefreshGlobal: ()
 
   return (
     <div className="space-y-3">
-      <div className="flex items-center justify-between">
-        <div className="flex gap-1 bg-gray-100 rounded-lg p-1">
+      <div className="flex items-center justify-between max-md:flex-wrap max-md:gap-2">
+        <div className="flex gap-1 bg-gray-100 rounded-lg p-1 max-md:max-w-full max-md:overflow-x-auto">
           {QUEUED_FILTERS.map(f => (
             <button
               key={f.key}
               onClick={() => handleFilterChange(f.key)}
-              className={`px-3 py-1.5 text-sm rounded-md transition-colors ${
+              className={`px-3 py-1.5 text-sm rounded-md transition-colors max-md:shrink-0 max-md:whitespace-nowrap ${
                 filterKey === f.key ? 'bg-white text-slate-800 shadow-sm font-medium' : 'text-gray-600 hover:text-gray-900'
               }`}
             >
@@ -262,7 +262,7 @@ export default function QueuedSection({ onRefreshGlobal }: { onRefreshGlobal: ()
           ))}
         </div>
         {hasVisibleSelection && (
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 max-md:flex-wrap">
             <span className="text-sm text-gray-500">{t('queued.selectedCount', { count: visibleSelectedIds.length })}</span>
             <button onClick={handleBatchCancel} className="px-3 py-1.5 text-sm bg-yellow-50 text-yellow-700 rounded-md hover:bg-yellow-100">{t('queued.batchCancel')}</button>
             <button onClick={handleBatchDelete} className="px-3 py-1.5 text-sm bg-red-50 text-red-700 rounded-md hover:bg-red-100">{t('queued.batchDelete')}</button>
@@ -270,7 +270,7 @@ export default function QueuedSection({ onRefreshGlobal }: { onRefreshGlobal: ()
         )}
       </div>
 
-      <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
+      <div className="bg-white rounded-xl border border-gray-200 overflow-hidden max-md:overflow-x-auto">
         {effectiveTasks.length === 0 ? (
           <EmptyState
             icon={<ListTodo className="w-8 h-8" />}
@@ -279,7 +279,7 @@ export default function QueuedSection({ onRefreshGlobal }: { onRefreshGlobal: ()
           />
         ) : (
           <>
-            <table className="w-full text-sm">
+            <table className="w-full text-sm max-md:min-w-[44rem]">
               <thead className="bg-gray-50 border-b border-gray-200">
                 <tr>
                   <th className="w-10 px-3 py-3">
@@ -402,12 +402,12 @@ function QueuedDetailPanel({ task, onClose, onAction, onRefresh }: {
     <>
       <div className="fixed inset-0 bg-black/40 z-40" onClick={onClose} />
       <div
-        className="fixed right-0 top-0 bottom-0 z-50 flex flex-col bg-white shadow-2xl transition-colors"
+        className="fixed right-0 top-0 bottom-0 z-50 flex flex-col bg-white shadow-2xl transition-colors max-md:!w-full"
         style={{ width: drawerWidth, maxWidth: '100%' }}
         onClick={(e) => e.stopPropagation()}
       >
         <div
-          className={`absolute -left-1 top-0 bottom-0 z-10 w-3 cursor-ew-resize transition-colors ${
+          className={`absolute -left-1 top-0 bottom-0 z-10 w-3 cursor-ew-resize transition-colors max-md:hidden ${
             isDragging ? 'bg-red-500/10' : 'hover:bg-red-400/10'
           }`}
           onMouseDown={handleDragStart}
@@ -419,7 +419,7 @@ function QueuedDetailPanel({ task, onClose, onAction, onRefresh }: {
             <GripVertical className={`w-3 h-6 ${isDragging ? 'text-red-500' : 'text-gray-300 hover:text-gray-500'}`} />
           </div>
         </div>
-        <div className="flex items-center justify-between px-6 py-4 border-b border-gray-200 flex-shrink-0">
+        <div className="flex items-center justify-between px-6 py-4 border-b border-gray-200 flex-shrink-0 max-md:px-4">
           <h3 className="font-semibold text-gray-900 truncate pr-2">{task.title}</h3>
           <button onClick={onClose} className="p-1 rounded hover:bg-gray-100 flex-shrink-0">
             <X className="w-4 h-4 text-gray-400" />

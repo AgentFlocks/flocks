@@ -83,12 +83,12 @@ export default function WorkspaceHeader({
   return (
     <header
       data-workspace-header
-      className="fixed inset-x-0 top-0 z-50 flex h-14 items-center gap-2 border-b border-zinc-200 bg-white px-3 sm:gap-4 sm:px-5 dark:border-zinc-800 dark:bg-zinc-900"
+      className="fixed inset-x-0 top-0 z-50 flex h-14 items-center gap-2 border-b border-zinc-200 bg-white px-3 sm:gap-4 sm:px-5 dark:border-zinc-800 dark:bg-zinc-900 max-md:gap-1"
     >
       <button
         type="button"
         onClick={onOpenMobileNav}
-        className={`${ICON_BUTTON_CLASS} lg:hidden`}
+        className={`${ICON_BUTTON_CLASS} lg:hidden max-md:shrink-0`}
         aria-label={t('openNav')}
         title={t('openNav')}
       >
@@ -125,7 +125,7 @@ export default function WorkspaceHeader({
       <HeaderMenu
         label={t('switchWorkspace')}
         title={current?.name ?? t('switchWorkspace')}
-        triggerClassName="flex h-9 min-w-0 max-w-[11rem] items-center gap-2 rounded-lg px-2 text-sm font-semibold text-zinc-800 transition-colors hover:bg-zinc-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-zinc-400 sm:max-w-xs sm:px-3 dark:text-zinc-100 dark:hover:bg-zinc-800"
+        triggerClassName="flex h-9 min-w-0 max-w-[11rem] items-center gap-2 rounded-lg px-2 text-sm font-semibold text-zinc-800 transition-colors hover:bg-zinc-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-zinc-400 sm:max-w-xs sm:px-3 dark:text-zinc-100 dark:hover:bg-zinc-800 max-md:w-full max-md:gap-1.5"
         trigger={(
           <>
             {CurrentIcon && <CurrentIcon className="hidden h-4 w-4 shrink-0 text-zinc-500 sm:block dark:text-zinc-400" />}

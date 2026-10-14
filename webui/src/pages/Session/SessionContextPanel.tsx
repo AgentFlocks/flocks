@@ -581,7 +581,7 @@ export default function SessionContextPanel({
                       <span className="text-[10px] text-zinc-400">{item.kind === 'project' ? t('context.project') : t('context.folder')}</span>
                     </button>
                     {item.kind === 'folder' && (
-                      <button type="button" onClick={() => void removeFolder(item)} className="mr-1 rounded p-1 text-zinc-300 opacity-0 hover:bg-zinc-100 hover:text-red-500 group-hover:opacity-100 dark:hover:bg-zinc-700"><X className="h-3 w-3" /></button>
+                      <button type="button" onClick={() => void removeFolder(item)} className="mr-1 rounded p-1 text-zinc-300 opacity-0 hover:bg-zinc-100 hover:text-red-500 group-hover:opacity-100 dark:hover:bg-zinc-700 max-md:opacity-100"><X className="h-3 w-3" /></button>
                     )}
                   </div>
                 ))}
@@ -673,10 +673,10 @@ function FileRows({
             </span>
             {file.size != null && <span className="text-[10px] text-zinc-400">{formatBytes(file.size)}</span>}
           </button>
-          <button type="button" onClick={() => onFocusMessage(file.sourceMessageID)} className="rounded p-1 text-zinc-300 opacity-0 hover:bg-zinc-100 hover:text-zinc-600 group-hover:opacity-100 dark:hover:bg-zinc-700" title={t('context.locateMessage')}>
+          <button type="button" onClick={() => onFocusMessage(file.sourceMessageID)} className="rounded p-1 text-zinc-300 opacity-0 hover:bg-zinc-100 hover:text-zinc-600 group-hover:opacity-100 dark:hover:bg-zinc-700 max-md:opacity-100" title={t('context.locateMessage')}>
             <ArrowLeft className="h-3 w-3" />
           </button>
-          <a href={sessionApi.contextFileDownloadUrl(sessionId, file.resourceID)} download={file.displayName} className="mr-1 rounded p-1 text-zinc-300 opacity-0 hover:bg-zinc-100 hover:text-zinc-600 group-hover:opacity-100 dark:hover:bg-zinc-700" title={t('context.download')}>
+          <a href={sessionApi.contextFileDownloadUrl(sessionId, file.resourceID)} download={file.displayName} className="mr-1 rounded p-1 text-zinc-300 opacity-0 hover:bg-zinc-100 hover:text-zinc-600 group-hover:opacity-100 dark:hover:bg-zinc-700 max-md:opacity-100" title={t('context.download')}>
             <Download className="h-3 w-3" />
           </a>
         </div>

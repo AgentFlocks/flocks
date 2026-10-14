@@ -525,11 +525,11 @@ export default function ModelPage() {
         onEditFallbacks={() => setShowFallbackModelsDialog(true)}
       />
 
-      {/* Main Content: Provider List + Detail Panel */}
-      <div className="flex gap-3 flex-1 overflow-hidden min-h-0">
+      {/* Main Content: Provider List + Detail Panel (phones: list above the detail) */}
+      <div className="flex gap-3 flex-1 overflow-hidden min-h-0 max-md:flex-col max-md:overflow-visible">
         {/* Provider List */}
-        <div className="w-64 flex-shrink-0 flex flex-col min-w-0">
-          <div className="flex-1 overflow-y-auto space-y-1.5 pr-1">
+        <div className="w-64 flex-shrink-0 flex flex-col min-w-0 max-md:w-full">
+          <div className="flex-1 overflow-y-auto space-y-1.5 pr-1 max-md:max-h-64 max-md:pr-0">
             {configuredProviders.length === 0 ? (
               <div className="flex flex-col items-center justify-center py-12 text-center">
                 <div className="w-16 h-16 rounded-full bg-gray-100 flex items-center justify-center mb-3">

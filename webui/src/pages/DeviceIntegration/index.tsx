@@ -1603,8 +1603,8 @@ function DeviceConfigPanel({
                     <p className="text-sm">{t('tools.empty')}</p>
                   </div>
                 ) : (
-                  <div className="rounded-xl border border-zinc-100 overflow-hidden">
-                    <table className="w-full table-fixed divide-y divide-zinc-100">
+                  <div className="rounded-xl border border-zinc-100 overflow-hidden max-md:overflow-x-auto">
+                    <table className="w-full table-fixed divide-y divide-zinc-100 max-md:min-w-[32rem]">
                       <thead className="bg-zinc-50">
                         <tr>
                           <th className="w-[38%] px-4 py-2.5 text-left text-xs font-medium text-zinc-500">{t('tools.colName')}</th>
@@ -1812,7 +1812,7 @@ function GroupSidebar({ groups, devices, selectedGroupId, onSelect, onRename, on
   return (
     // self-stretch ensures the panel fills the full flex-row height so the
     // right border reaches the bottom even when there are few rooms.
-    <div className="w-52 flex-shrink-0 border-r border-zinc-200 flex flex-col h-full bg-zinc-50">
+    <div className="w-52 flex-shrink-0 border-r border-zinc-200 flex flex-col h-full bg-zinc-50 max-md:h-52 max-md:w-full max-md:border-b max-md:border-r-0">
       {/* Header */}
       <div className="px-3 py-2.5 flex items-center justify-between flex-shrink-0">
         <span className="text-[11px] font-semibold text-zinc-400 uppercase tracking-wider">{t('sidebar.heading')}</span>
@@ -1911,7 +1911,7 @@ function GroupSidebar({ groups, devices, selectedGroupId, onSelect, onRename, on
 
                   {/* Hover action buttons */}
                   <div
-                    className="device-room-actions-fade absolute right-1 inset-y-0 hidden group-hover/room:flex items-center gap-0.5 pl-4"
+                    className="device-room-actions-fade absolute right-1 inset-y-0 hidden group-hover/room:flex items-center gap-0.5 pl-4 max-md:data-[selected=true]:flex"
                     data-selected={isSelected ? 'true' : 'false'}
                   >
                     <button
@@ -2416,7 +2416,7 @@ export default function DeviceIntegrationPage() {
   // ──────────────────────────────────────────────────────────────────────────
 
   return (
-    <div className="h-full flex flex-col p-6 bg-gray-50 overflow-hidden">
+    <div className="h-full flex flex-col p-6 bg-gray-50 overflow-hidden max-md:p-4">
       <PageHeader
         title={t('pageTitle')}
         description={t('pageDescription')}
@@ -2443,8 +2443,8 @@ export default function DeviceIntegrationPage() {
         }
       />
 
-      {/* Content: sidebar + main area */}
-      <div className="flex-1 min-h-0 flex overflow-hidden">
+      {/* Content: sidebar + main area (phones: rooms above the devices) */}
+      <div className="flex-1 min-h-0 flex overflow-hidden max-md:flex-col">
         {/* Left: room sidebar */}
         {!loading && (
           <GroupSidebar
@@ -2460,13 +2460,13 @@ export default function DeviceIntegrationPage() {
         )}
 
         {/* Right: main device area */}
-        <div className="flex-1 flex flex-col overflow-hidden">
+        <div className="flex-1 flex flex-col overflow-hidden max-md:min-h-0">
           {loading ? (
             <div className="flex-1 flex items-center justify-center"><LoadingSpinner /></div>
           ) : (
             <>
               {/* Room / aggregate header bar */}
-              <div className="px-6 py-3 border-b border-zinc-100 flex items-center gap-3 flex-shrink-0">
+              <div className="px-6 py-3 border-b border-zinc-100 flex items-center gap-3 flex-shrink-0 max-md:flex-wrap max-md:gap-x-3 max-md:gap-y-1 max-md:px-0">
                 {selectedGroup ? (
                   <>
                     <Server className="w-4 h-4 text-zinc-400 flex-shrink-0" />
@@ -2521,7 +2521,7 @@ export default function DeviceIntegrationPage() {
               </div>
 
               {/* Device content area */}
-              <div className="flex-1 overflow-y-auto px-6 py-6">
+              <div className="flex-1 overflow-y-auto px-6 py-6 max-md:px-0 max-md:py-4">
                 {devices.length === 0 ? (
                   /* Global empty state — no devices at all */
                   <div className="flex flex-col items-center justify-center py-24 gap-4">
