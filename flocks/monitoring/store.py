@@ -59,6 +59,11 @@ CREATE TABLE IF NOT EXISTS monitor_investigation_versions (
  event TEXT NOT NULL, evidence TEXT NOT NULL, result TEXT NOT NULL, state TEXT NOT NULL,
  attempts INTEGER NOT NULL, archived_at TEXT NOT NULL,
  PRIMARY KEY(owner,project,event_key,revision));
+CREATE TABLE IF NOT EXISTS monitor_model_recovery (
+ owner TEXT NOT NULL, project TEXT NOT NULL, device TEXT NOT NULL,
+ provider TEXT NOT NULL, model TEXT NOT NULL, failures INTEGER NOT NULL DEFAULT 0,
+ model_failure TEXT, next_retry_at TEXT, probe_until TEXT, updated_at TEXT NOT NULL,
+ PRIMARY KEY(owner,project,device,provider,model));
 CREATE TABLE IF NOT EXISTS monitor_event_followup (
  owner TEXT NOT NULL, scope TEXT NOT NULL, project TEXT NOT NULL, device TEXT NOT NULL,
  event_key TEXT NOT NULL, policy_revision TEXT NOT NULL, event_version TEXT NOT NULL,

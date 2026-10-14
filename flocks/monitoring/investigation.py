@@ -19,8 +19,9 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from flocks.agent.registry import Agent
 from flocks.config.config import Config
 from flocks.provider.provider import Provider, ChatMessage
-from . import capabilities, diagnostics as diag
+from . import capabilities, diagnostics as diag, model_recovery
 from .adapter import ContractError
+from .query_time import QueryTimeError, normalize_window
 from .store import rows, write, encode, connection
 from .summaries import Summary, event_label, label, ENTITY_LABELS
 from .event_details import build_story, story_sections, story_text
@@ -28,6 +29,7 @@ from .event_details import build_story, story_sections, story_text
 ENGINE = 'agent-v1'
 EVIDENCE_SCHEMA = 3
 _MODEL_BUDGET = ContextVar('monitor_investigation_model_budget', default=None)
+_MODEL_SCOPE = ContextVar('monitor_investigation_model_scope', default=None)
 
 
 class Choice(BaseModel):
@@ -54,6 +56,7 @@ class Budget:
         self.calls = 0
         self.models = 0
         self.consults = 0
+        self.model_failures = {}
 
 
 def evidence_description(proof):
@@ -166,10 +169,12 @@ def model_evidence(event, evidence):
 
 
 class InvestigationError(ContractError):
-    def __init__(self, message, kind='system', issues=None):
+    def __init__(self, message, kind='system', issues=None, *, details=None, next_retry_at=None):
         super().__init__(message)
         self.kind = kind
         self.issues = issues or []
+        self.details = details or {}
+        self.next_retry_at = next_retry_at
 
 
 RETRY_DELAYS = (600, 1200)
@@ -191,9 +196,18 @@ def parse_time(value):
 def fresh_evidence(evidence, event, at=None):
     at = at or now()
     version = fingerprint(event)
+    try:
+        window = normalize_window(event.get('investigationWindow'))
+    except QueryTimeError:
+        return []
+    def same_window(proof):
+        try:
+            return normalize_window(proof.get('window')) == window
+        except QueryTimeError:
+            return False
     return [proof for proof in evidence if proof.get('schema') == EVIDENCE_SCHEMA and proof.get('event_revision') == version
             and proof.get('event') == event['id']
-            and proof.get('window') == event.get('investigationWindow')
+            and same_window(proof)
             and (stamp := parse_time(proof.get('retrieved_at'))) is not None
             and timedelta(0) <= at - stamp <= EVIDENCE_TTL]
 
@@ -212,17 +226,58 @@ async def enqueue(db, policy, event, stamp):
     old = await cursor.fetchone()
     from .assessment import same_evidence_version
     if old and same_evidence_version(json.loads(old['event']), event):
+        previous = json.loads(old['event'])
+        try:
+            normalize_window(previous.get('investigationWindow'))
+        except QueryTimeError:
+            try:
+                repaired_window = normalize_window(event.get('investigationWindow'))
+            except QueryTimeError:
+                return
+            # Only a new, authorized source observation may repair a broken
+            # persisted window. Never move old evidence into the new window.
+            await archive(db, policy, old, stamp)
+            keep_model_wait = old['error_kind'] in {'model_transient', 'model_cooldown', 'dependency'}
+            retained_failure = {}
+            if keep_model_wait:
+                prior_result = json.loads(old['result'])
+                retained_failure = {'verdict': 'unknown', **{key: prior_result[key] for key in (
+                    'reason', 'failure_stage', 'model_provider', 'model_id', 'model_agent', 'model_failure',
+                    'http_status', 'error_type') if key in prior_result}}
+            await db.execute('UPDATE monitor_investigations SET event=?,evidence=?,result=?,state=?,revision=revision+1,'
+                'updated_at=?,failure_count=?,next_retry_at=?,error_kind=?,retry_exhausted=? '
+                'WHERE owner=? AND project=? AND event_key=?',
+                (encode({**event, 'investigationWindow': repaired_window}), '[]', encode(retained_failure),
+                 'system_wait' if keep_model_wait else 'pending', stamp,
+                 old['failure_count'] if keep_model_wait else 0, old['next_retry_at'] if keep_model_wait else None,
+                 old['error_kind'] if keep_model_wait else None, old['retry_exhausted'] if keep_model_wait else 0,
+                 policy.owner, policy.project, event['key']))
         return
     if old:
         await archive(db, policy, old, stamp)
         # New activity invalidates event-derived verdicts and evidence. Retain
         # systemic cooldowns: frequent event updates must not defeat backoff.
         waiting = old['state'] == 'system_wait'
+        repaired_time = False
+        old_window_invalid = False
+        try:
+            normalize_window(json.loads(old['event']).get('investigationWindow'))
+        except QueryTimeError:
+            old_window_invalid = True
+        if (old['error_kind'] == 'query_time' or old_window_invalid) and old['error_kind'] not in {
+                'dependency', 'model_transient', 'model_cooldown'}:
+            try:
+                normalize_window(event.get('investigationWindow'))
+            except QueryTimeError:
+                pass
+            else:
+                waiting, repaired_time = False, True
         await db.execute('UPDATE monitor_investigations SET event=?,evidence=?,result=?,state=?,revision=revision+1,'
-            'updated_at=?,next_retry_at=?,error_kind=?,retry_exhausted=? WHERE owner=? AND project=? AND event_key=?',
+            'updated_at=?,next_retry_at=?,error_kind=?,retry_exhausted=?,failure_count=? WHERE owner=? AND project=? AND event_key=?',
             (encode(event), '[]', old['result'] if waiting else '{}', 'system_wait' if waiting else 'pending', stamp,
              old['next_retry_at'] if waiting else None, old['error_kind'] if waiting else None,
-             old['retry_exhausted'] if waiting else 0, policy.owner, policy.project, event['key']))
+             old['retry_exhausted'] if waiting else 0, 0 if repaired_time else old['failure_count'],
+             policy.owner, policy.project, event['key']))
     else:
         await db.execute('INSERT INTO monitor_investigations(owner,project,event_key,event,updated_at) VALUES(?,?,?,?,?)',
                          (policy.owner, policy.project, event['key'], encode(event), stamp))
@@ -247,13 +302,15 @@ async def pending(policy):
 async def status_summary(policy=None, *, owner=None, project=None):
     owner, project = (policy.owner, policy.project) if policy else (owner, project)
     scope, params = policy_filter(policy) if policy else ('', ())
-    stored = await rows('SELECT state,next_retry_at,updated_at,retry_exhausted FROM monitor_investigations '
+    stored = await rows('SELECT state,next_retry_at,updated_at,retry_exhausted,error_kind FROM monitor_investigations '
                         'WHERE owner=? AND project=?' + scope, (owner, project, *params))
     result = {state: sum(row['state'] == state for row in stored)
               for state in ('pending', 'deferred', 'system_wait', 'needs_review', 'ready')}
     waiting = [row for row in stored if row['state'] in ('pending', 'deferred', 'system_wait', 'needs_review')]
     retries = [row['next_retry_at'] for row in waiting if row['next_retry_at'] and not row['retry_exhausted']]
     result.update(retry_exhausted=sum(bool(row['retry_exhausted']) for row in waiting),
+                  query_time_blocked=sum(row['state'] == 'system_wait' and row['error_kind'] == 'query_time'
+                                         and bool(row['retry_exhausted']) for row in waiting),
                   earliest_retry_at=min(retries, default=None),
                   oldest_updated_at=min((row['updated_at'] for row in waiting), default=None))
     return result
@@ -359,7 +416,7 @@ def validation_issues(exc):
     return result
 
 
-async def choose(agent_name, data):
+async def agent_model(agent_name):
     from .agent_component import AGENT_ID, resolve
     if agent_name == AGENT_ID:
         try:
@@ -374,6 +431,42 @@ async def choose(agent_name, data):
              if agent.model else await Config.resolve_default_llm())
     if not model:
         raise InvestigationError('未配置调查模型，已有证据保留，等待恢复模型配置', 'dependency')
+    return agent, model
+
+
+def model_scope(model):
+    scope = _MODEL_SCOPE.get()
+    return (*scope, model['provider_id'], model['model_id']) if scope else None
+
+
+def cooldown_error(health, model, agent_name='security-monitor'):
+    diag.event('investigation.model_gate', gate_state='cooldown', error_kind='model_cooldown',
+               failure_stage='model', model_failure=health['model_failure'],
+               model_provider=model['provider_id'], model_id=model['model_id'],
+               retry_delay_seconds=max(0, int(((parse_time(health['next_retry_at']) or now()) - now()).total_seconds())))
+    return InvestigationError('调查模型处于故障退避期，本次未重复请求；已有证据保留，后续轮次自动探测恢复',
+        'model_cooldown', next_retry_at=health['next_retry_at'], details={
+            'failure_stage': 'model', 'model_failure': health['model_failure'],
+            'model_provider': model['provider_id'], 'model_id': model['model_id'], 'model_agent': agent_name})
+
+
+async def preflight_model(agent_name, policy, event, budget):
+    # Avoid spending scarce query units on cases that cannot be interpreted in
+    # this round. Resolve the *current* model so a configuration change does not
+    # inherit another provider/model's cooldown.
+    scope_prefix = (policy.owner, policy.project, event['device'])
+    if (not any(key[:3] == scope_prefix for key in budget.model_failures)
+            and not await model_recovery.has_failure(*scope_prefix)):
+        return
+    _, model = await agent_model(agent_name)
+    scope = (*scope_prefix, model['provider_id'], model['model_id'])
+    health = budget.model_failures.get(scope) or await model_recovery.blocked(scope, now())
+    if health:
+        raise cooldown_error(health, model, agent_name)
+
+
+async def choose(agent_name, data):
+    agent, model = await agent_model(agent_name)
     await Provider.apply_config(provider_id=model['provider_id'])
     provider = Provider.get(model['provider_id'])
     if not provider:
@@ -404,15 +497,22 @@ async def choose(agent_name, data):
             messages.append(ChatMessage(role='user', content=encode({'correction': previous.issues,
                 'instruction': '上一个决策未通过校验且未执行。仅纠正这些字段，输出一个简短完整 JSON；不要重复已成功查询。'})))
         active_budget = _MODEL_BUDGET.get()
+        budget = active_budget[0] if active_budget else None
+        if active_budget and budget.models >= active_budget[1]:
+            raise InvestigationError('本轮模型决策预算已用完，已保存证据，下一轮继续', 'budget')
+        scope = model_scope(model)
+        if scope:
+            health = (budget.model_failures.get(scope) if budget else None) or await model_recovery.acquire(scope, now())
+            if health:
+                raise cooldown_error(health, model, agent_name)
         if active_budget:
-            budget, limit = active_budget
-            if budget.models >= limit:
-                raise InvestigationError('本轮模型决策预算已用完，已保存证据，下一轮继续', 'budget')
             budget.models += 1
         started = time.monotonic()
         try:
-            response = await asyncio.wait_for(provider.chat(model['model_id'], messages, **options), 90)
+            response = await asyncio.wait_for(provider.chat(model['model_id'], messages, **options), model_recovery.REQUEST_TIMEOUT)
         except asyncio.CancelledError:
+            if scope:
+                await model_recovery.release(scope)
             raise
         except Exception as exc:
             failure = diag.model_error(exc)
@@ -420,7 +520,8 @@ async def choose(agent_name, data):
                 model_provider=model['provider_id'], model_id=model['model_id'],
                 request_max_tokens=options['max_tokens'], correction_attempt=correction,
                 duration_ms=int((time.monotonic()-started)*1000), **failure,
-                error_kind='dependency', has_error=True, success=False)
+                failure_stage='model', error_kind='model_transient' if scope and failure['model_failure'] in
+                model_recovery.TRANSIENT_FAILURES else 'dependency', has_error=True, success=False)
             reason = {
                 'timeout': '调查模型请求超时，已有证据保留，等待模型服务恢复',
                 'authentication': '调查模型认证失败，请检查模型凭据；已有证据保留',
@@ -429,7 +530,24 @@ async def choose(agent_name, data):
                 'unavailable': '调查模型服务暂时不可用，已有证据保留，等待服务恢复',
                 'connection': '调查模型连接失败，已有证据保留，请检查网络和模型服务',
             }.get(failure['model_failure'], '调查模型请求失败，请检查模型服务、配置和访问权限；已有证据保留')
-            raise InvestigationError(reason, 'dependency') from None
+            details = {**failure, 'failure_stage': 'model',
+                       'model_provider': model['provider_id'], 'model_id': model['model_id'], 'model_agent': agent_name}
+            kind, retry_at = 'dependency', None
+            if scope and failure['model_failure'] in model_recovery.TRANSIENT_FAILURES:
+                health = await model_recovery.failed(scope, failure['model_failure'], now())
+                if budget:
+                    budget.model_failures[scope] = health
+                kind, retry_at = 'model_transient', health['next_retry_at']
+                if failure.get('http_status') == 504:
+                    reason = '调查模型网关超时（HTTP 504），已有证据保留'
+                elif failure['model_failure'] == 'timeout' and isinstance(exc, TimeoutError):
+                    reason = f'调查模型请求超时（单次最多等待 {model_recovery.REQUEST_TIMEOUT} 秒），已有证据保留'
+                reason += '；本轮不再请求同一模型，后续轮次按退避计划重试'
+            elif scope:
+                await model_recovery.release(scope)
+            raise InvestigationError(reason, kind, details=details, next_retry_at=retry_at) from None
+        if scope:
+            await model_recovery.succeeded(scope, now())
         finish_reason = response.finish_reason
         usage = getattr(response, 'usage', {}) or {}
         usage_fields = {}
@@ -504,6 +622,8 @@ class Investigator:
                      'retrieved_at': now().isoformat(), 'success': False, 'partial': True, 'facts': {}}
             if alert_id:
                 proof['alert_id'] = alert_id
+            failure = None
+            trace_fields = {}
             try:
                 target = {**self.event, 'alertIds': trusted_alert_ids(self.event, self.evidence)}
                 options = {'alert_id': alert_id} if entity == 'alert_proof' else {}
@@ -511,14 +631,26 @@ class Investigator:
                                                         capability, target, entity, **options)
                 safe, partial = capabilities.facts(value)
                 proof.update(success=True, partial=partial, facts=safe, query=params)
-            except (ContractError, OSError) as exc:
-                proof['error'] = str(exc) if isinstance(exc, ContractError) else '关联查询环境不可用'
+            except Exception as exc:
+                from flocks.task.diagnostics import error_fields
+                trace_fields = error_fields(exc)
+                details = {'failure_stage': 'query_time' if isinstance(exc, QueryTimeError) else 'query',
+                           'error_type': type(exc).__name__, 'failure_source': capability.name,
+                           'failure_tool': capability.tool}
+                if isinstance(exc, QueryTimeError):
+                    details.update(error_code=exc.code, time_field=exc.field)
+                kind = 'query_time' if isinstance(exc, QueryTimeError) else 'query_transient' if isinstance(exc, (ContractError, OSError)) else 'system'
+                reason = (str(exc) if isinstance(exc, ContractError) else '关联查询连接或环境不可用，已有证据保留'
+                          if isinstance(exc, OSError) else f'关联查询发生程序错误（{type(exc).__name__}），已有证据保留；请导出诊断日志定位查询实现')
+                proof.update(error=reason, **details)
+                failure = InvestigationError(reason, kind, details=details)
             self.evidence.append(proof)
             await self.save(self.evidence, {'specialists': self.advice}, 'pending')
             diag.event('investigation.query', success=proof['success'], truncated=proof['partial'],
-                       device=diag.opaque(capability.device), calls=self.budget.calls)
+                       device=diag.opaque(capability.device), calls=self.budget.calls,
+                       **{**trace_fields, **(failure.details if failure else {})})
             if not proof['success']:
-                raise InvestigationError(proof['error'], 'query_transient')
+                raise failure
             story = build_story(self.event, [proof])
             names = {'proof': '事件举证与时间线', 'alerts': '关联告警基本信息', 'alert_proof': '告警请求、响应及举证', 'related': '跨设备关联'}
             content = ENTITY_LABELS.get(entity, names.get(entity, entity))
@@ -534,7 +666,9 @@ class Investigator:
         try:
             await self.recorder.call('调查取证：' + capability.name,
                 {'event': self.event['id'], 'tool': capability.tool, 'entity': entity, **({'alert_id': alert_id} if alert_id else {})}, query)
-        except ContractError:
+        except ContractError as exc:
+            if isinstance(exc, InvestigationError) and exc.kind in {'query_time', 'system'}:
+                raise
             # The error is checkpointed. Other available sources can still help.
             pass
 
@@ -575,6 +709,7 @@ class Investigator:
         return gaps
 
     async def drive(self, agent_name='security-monitor', *, depth=0):
+        await preflight_model(agent_name, self.policy, self.event, self.budget)
         self.catalog, self.unavailable = await capabilities.discover(self.policy)
         self.unavailable = list(dict.fromkeys(self.unavailable + self.policy.correlation_notes))[:30]
         agents = [a for a in await Agent.list() if a.delegatable and not a.hidden and 'security' in a.tags
@@ -616,11 +751,15 @@ class Investigator:
                 }
                 before = self.budget.models
                 token = _MODEL_BUDGET.set((self.budget, self.policy.investigation_calls * 2 + 3))
+                count_fallback = True
                 try:
                     choice = validate_choice(await choose(agent_name, data), data)
+                except InvestigationError as exc:
+                    count_fallback = exc.kind not in {'model_cooldown', 'budget'}
+                    raise
                 finally:
                     _MODEL_BUDGET.reset(token)
-                    if self.budget.models == before:
+                    if count_fallback and self.budget.models == before:
                         self.budget.models += 1
                 source = next((c for c in allowed_catalog if c.id == choice.capability), None)
                 method = (f"建议使用 {source.name if source else '待核验的数据源'} 查询{ENTITY_LABELS.get(choice.entity, {'proof': '举证', 'related': '关联'}.get(choice.entity, choice.entity))}证据。" if choice.action == 'query' else
@@ -704,10 +843,19 @@ async def investigate(policy, event, recorder, budget=None):
     from .assessment import same_evidence_version
     if not same_evidence_version(event, canonical):
         raise InvestigationError('调查事件版本已变化，等待下一轮重新读取', 'system')
-    event['investigationWindow'] = canonical['investigationWindow']
+    event['investigationWindow'] = canonical.get('investigationWindow')
     evidence, result = json.loads(case['evidence']), json.loads(case['result'])
     state, next_retry_at, error_kind = case['state'], case['next_retry_at'], case['error_kind']
     exhausted, failures = bool(case['retry_exhausted']), case['failure_count']
+    if (state in {'deferred', 'system_wait'} and result.get('failure_stage') == 'model'
+            and result.get('model_provider') and result.get('model_id')):
+        try:
+            _, current_model = await agent_model(result.get('model_agent', 'security-monitor'))
+        except InvestigationError:
+            pass  # Missing/broken configuration is not evidence of recovery.
+        else:
+            if (current_model['provider_id'], current_model['model_id']) != (result['model_provider'], result['model_id']):
+                state, next_retry_at, error_kind, exhausted, failures = 'pending', None, None, False, 0
     attempted_this_round = False
     at = now()
     due = not exhausted and (not next_retry_at or (parse_time(next_retry_at) or at) <= at)
@@ -745,14 +893,23 @@ async def investigate(policy, event, recorder, budget=None):
                     (encode(evidence), encode(result), state, now().isoformat(), failures,
                      next_retry_at, error_kind, int(exhausted), policy.owner, policy.project, event['key']))
         diag.event('investigation.recovery', investigation_state=state, error_kind=error_kind or 'system',
-                   failure_count=failures, retry_exhausted=exhausted, revision=revision)
+                   failure_count=failures, retry_exhausted=exhausted, revision=revision,
+                   **{key: result[key] for key in ('failure_stage', 'model_failure', 'http_status', 'error_type',
+                        'error_code', 'time_field', 'model_provider', 'model_id') if key in result})
     if state in ('pending', 'deferred', 'system_wait') and due:
         attempted_this_round = True
         await write('UPDATE monitor_investigations SET attempts=attempts+1 WHERE owner=? AND project=? AND event_key=?',
                     (policy.owner, policy.project, event['key']))
         worker = Investigator(policy, event, recorder, evidence, save, budget or Budget())
         worker.advice = result.get('specialists', [])[:2]
+        scope_token = _MODEL_SCOPE.set((policy.owner, policy.project, event['device']))
         try:
+            normalized_window = normalize_window(event.get('investigationWindow'), source='事件调查')
+            if normalized_window != canonical.get('investigationWindow'):
+                canonical = {**canonical, 'investigationWindow': normalized_window}
+                await write('UPDATE monitor_investigations SET event=? WHERE owner=? AND project=? AND event_key=?',
+                            (encode(canonical), policy.owner, policy.project, event['key']))
+            event['investigationWindow'] = normalized_window
             choice = await worker.drive()
             result, state = choice.model_dump(), 'ready'
             failures, next_retry_at, error_kind, exhausted = 0, None, None, False
@@ -769,25 +926,46 @@ async def investigate(policy, event, recorder, budget=None):
                 'error_kind': error_kind, 'retry_exhausted': exhausted, 'revision': revision}
             raise
         except Exception as exc:
-            error_kind = exc.kind if isinstance(exc, InvestigationError) else (
+            error_kind = exc.kind if isinstance(exc, (InvestigationError, QueryTimeError)) else (
                 'query_transient' if isinstance(exc, (OSError, TimeoutError)) else 'system')
             if error_kind == 'budget' and any(not proof['success'] and proof.get('attempt_id') == worker.attempt_id
                     for proof in evidence):
                 error_kind = 'query_transient'
-                exc = InvestigationError('关联查询失败且本轮预算已用完，调查未完成；证据保留，等待恢复后重试', error_kind)
-            if error_kind == 'budget':
+                failed_proof = next(proof for proof in reversed(evidence) if not proof['success'] and proof.get('attempt_id') == worker.attempt_id)
+                exc = InvestigationError('关联查询失败且本轮预算已用完，调查未完成；证据保留，等待恢复后重试', error_kind,
+                    details={key: failed_proof[key] for key in ('failure_stage', 'error_type', 'error_code',
+                        'failure_source', 'failure_tool') if key in failed_proof})
+            if error_kind == 'model_cooldown':
+                state, next_retry_at, exhausted = 'deferred', exc.next_retry_at, False
+                attempted_this_round = False
+                await write('UPDATE monitor_investigations SET attempts=MAX(0,attempts-1) WHERE owner=? AND project=? AND event_key=?',
+                            (policy.owner, policy.project, event['key']))
+            elif error_kind == 'model_transient':
+                state, failures, next_retry_at, exhausted = 'system_wait', failures + 1, exc.next_retry_at, False
+            elif error_kind == 'query_time':
+                # Retrying identical malformed parameters cannot repair them.
+                # A fresh authorized XDR observation can replace this window.
+                state, failures, next_retry_at, exhausted = 'system_wait', failures + 1, None, True
+            elif error_kind == 'budget':
                 state, next_retry_at = 'deferred', (now() + timedelta(minutes=10)).isoformat()
             else:
                 state, failures = 'system_wait', failures + 1
                 exhausted = failures > len(RETRY_DELAYS)
                 next_retry_at = None if exhausted else (now() + timedelta(seconds=RETRY_DELAYS[failures-1])).isoformat()
+            details = (exc.details if isinstance(exc, InvestigationError) else
+                       {'failure_stage': 'query_time', 'error_code': exc.code, 'time_field': exc.field, 'error_type': type(exc).__name__}
+                       if isinstance(exc, QueryTimeError) else
+                       {'failure_stage': 'internal', 'error_type': type(exc).__name__})
             result = {'verdict': 'unknown',
-                      'reason': str(exc) if isinstance(exc, ContractError) else '调查服务暂不可用，请检查模型或导出诊断日志',
+                      'reason': str(exc) if isinstance(exc, ContractError) else
+                      f'调查程序发生内部错误（{type(exc).__name__}），已有证据保留；请导出诊断日志定位，不能据此判定无风险',
                       'gaps': ['调查尚未完成'], 'evidence_ids': [proof['id'] for proof in evidence if proof['success']],
-                      'specialists': worker.advice}
+                      'specialists': worker.advice, **details}
             if isinstance(exc, InvestigationError) and exc.issues:
                 result['validation_errors'] = exc.issues
             await save_recovery()
+        finally:
+            _MODEL_SCOPE.reset(scope_token)
     event['investigation'] = {'engine': ENGINE, 'state': state, **result,
         'attempted_this_round': attempted_this_round,
         'evidence_count': len(evidence), 'next_retry_at': next_retry_at,
@@ -801,6 +979,8 @@ async def investigate(policy, event, recorder, budget=None):
     event['risk'] = event['assessment']['verdict']
     event['reason'] = event['assessment']['reason']
     next_step = recovery_next_step(state, next_retry_at, exhausted)
+    if error_kind == 'query_time':
+        next_step = '查询时间参数无效，未继续执行该调查；已有记录保留，等待后续成功查询提供有效窗口后重新取证。'
     if state == 'ready':
         next_step = ('风险已确认，进入原事件复核和单封责任人通知；当前未修改 XDR。'
             if event['assessment']['notify_eligible'] else
@@ -816,8 +996,10 @@ async def investigate(policy, event, recorder, budget=None):
         summary += '仍需核对：' + '；'.join(result['gaps']) + '。'
     summary += next_step
     async def finish(_):
+        from .summaries import investigation_failure_summary
         return None, event['investigation'], Summary(summary, story_text({**event['story'], 'packets': []}), success=state == 'ready' or not attempted_this_round, packets=event['story']['packets'], sections=[
             *story_sections(event['story']),
+            *([{'label': '未完成原因', 'text': investigation_failure_summary(event['investigation'])}] if state != 'ready' else []),
             {'label': '调查状态', 'text': f"{'已形成调查结论' if state == 'ready' else '调查尚未完成'}；保存 {len(evidence)} 项查询记录，其中 {sum(bool(e['success']) for e in evidence)} 项返回成功。"},
             {'label': '下一步', 'text': next_step},
         ])

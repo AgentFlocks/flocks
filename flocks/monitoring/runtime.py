@@ -193,7 +193,7 @@ async def run(execution, policy, adapter_factory=XdrAdapter):
                       'attemptID': attempt_id, 'sequence': sequence, 'businessDate': day, 'startedAt': started.isoformat()})
     recorder = Recorder(session.id, attempt_id, confirm_start, trigger_message.id, agent=agent_name)
     adapter = adapter_factory(policy, session.id)
-    errors, observed = [], []
+    errors, observed, investigation_failures = [], [], []
     query_errors = 0
     successful_checks = set()
     status, summary = 'failed', ''
@@ -307,7 +307,21 @@ async def run(execution, policy, adapter_factory=XdrAdapter):
             if (outcome.get('attempted_this_round', True)
                     and outcome['state'] not in {'ready', 'deferred', 'needs_review'}):
                 from .summaries import label
-                errors.append('智能体调查未完成：' + label(outcome.get('reason'), '执行服务异常，证据和待办已保存', 240))
+                reason = label(outcome.get('reason'), '执行服务异常，证据和待办已保存', 240)
+                failure = {
+                    'event_id': event['id'], 'event_name': label(event.get('name'), '未命名事件', 160),
+                    'device': event['device'],
+                    'device_name': label(event.get('device_name') or policy.device_names.get(event['device']), event['device'], 100),
+                    'reason': reason,
+                    **{key: outcome[key] for key in ('failure_stage', 'failure_source', 'failure_tool', 'error_kind', 'error_type', 'error_code', 'time_field',
+                        'model_failure', 'http_status', 'next_retry_at', 'retry_exhausted') if outcome.get(key) is not None},
+                }
+                investigation_failures.append(failure)
+                errors.append(f"设备「{failure['device_name']}」· {failure['event_name']}：智能体调查未完成：{reason}")
+                diag.event('investigation.failure', failure=True, event_id=diag.opaque(event['key']),
+                           device=diag.opaque(event['device']),
+                           **{key: failure[key] for key in ('failure_stage', 'error_kind', 'error_type', 'error_code', 'time_field',
+                               'model_failure', 'http_status', 'retry_exhausted') if key in failure})
             await write('UPDATE monitor_observations SET data=? WHERE attempt_id=? AND event_key=?',
                         (encode(event), attempt_id, event['key']))
         async def analyze(_):
@@ -334,6 +348,9 @@ async def run(execution, policy, adapter_factory=XdrAdapter):
                       'ignored': sum(e['risk'] == 'benign' for e in observed),
                       'analyzed': sum(e.get('investigation', {}).get('state') == 'ready' for e in observed),
                       'deferred': sum(not e.get('investigation') or e['investigation']['state'] == 'deferred' for e in observed),
+                      'investigation_incomplete': sum(e['risk'] == 'unknown' and not e.get('assessment', {}).get('ended')
+                          and e.get('investigation', {}).get('state') != 'ready' for e in observed),
+                      'investigation_failures': investigation_failures,
                       'query_complete': query_errors == 0,
                       'errors': errors, 'disposition': '待跟进', 'closure': 'open'}
             return result, result, analysis_summary(result, observed, groups)

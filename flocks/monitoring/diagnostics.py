@@ -32,6 +32,12 @@ MAX_BYTES = 2 * 1024 * 1024
 BACKUPS = 3
 MAX_EVENTS = 200
 MAX_ERRORS = 20
+# Exact-ID history reads can consume the ordinary trace budget before the
+# investigator starts. Reserve a separate, bounded budget for decisions and
+# recovery so the cause survives even in a busy round.
+MAX_INVESTIGATION_SIGNALS = 96
+INVESTIGATION_SIGNALS = {'investigation.model', 'investigation.recovery',
+                         'investigation.failure', 'investigation.model_gate', 'query.time_validation'}
 HEARTBEAT_SECONDS = 30
 _current = ContextVar('monitor_diagnostics', default=None)
 _call = ContextVar('monitor_diagnostic_call', default=None)
@@ -82,7 +88,14 @@ _ENUMS = {
     'sql_verb': {'SELECT', 'UPDATE', 'INSERT', 'DELETE', 'BEGIN', 'COMMIT', 'ROLLBACK', 'PRAGMA', 'CREATE', 'ALTER', 'DROP'},
     'control_action': {'start', 'pause', 'mail_settings', 'other'},
     'model_failure': {'timeout', 'authentication', 'permission', 'rate_limit', 'unavailable', 'connection', 'request', 'other'},
-    'error_kind': {'dependency', 'model_format', 'model_truncated', 'model_protocol', 'query_transient', 'budget', 'cancelled', 'system'},
+    'error_kind': {'dependency', 'model_format', 'model_truncated', 'model_protocol', 'query_transient',
+                   'query_time', 'model_transient', 'model_cooldown', 'budget', 'cancelled', 'system'},
+    'failure_stage': {'model', 'query', 'query_time', 'internal'},
+    'gate_state': {'open', 'cooldown', 'probe', 'recovered'},
+    'time_field': {'start', 'end', 'current', 'window'},
+    'time_value_type': _TYPES,
+    'error_code': {'missing_value', 'invalid_timestamp', 'missing_window', 'invalid_order',
+                   'window_too_wide', 'future_window'},
     'validation_field': {'action', 'reason', 'capability', 'entity', 'agent', 'verdict', 'evidence_ids', 'gaps', 'document'},
     'validation_code': {'missing', 'invalid_type', 'invalid_json', 'extra_field', 'invalid_value', 'unknown_capability', 'ambiguous_capability', 'wrong_device', 'unsupported_entity', 'unknown_agent', 'invalid_reference', 'duplicate_query', 'over_budget'},
     'investigation_state': {'pending', 'deferred', 'system_wait', 'needs_review', 'ready'},
@@ -91,7 +104,7 @@ _ENUMS = {
     'model_stop': {'stop', 'end_turn', 'completed', 'length', 'max_tokens', 'tool_calls', 'content_filter', 'other'},
     'event': {'trace.start', 'trace.end', 'progress', 'stage.start', 'stage.end', 'query.window',
               'tool.raw', 'tool.normalized', 'adapter.result', 'adapter.structured', 'adapter.decoded', 'adapter.failure',
-              'mail.received', 'mail.result', 'mail.interpreted', 'mail.analyzed', 'mail.evidence', 'investigation.query', 'investigation.model', 'investigation.validation', 'investigation.recovery', 'query.sample', 'page.validated', 'run.result', 'dispatch.result', 'background.result', 'control.result', 'control.lock'} | INFRASTRUCTURE_EVENTS,
+              'mail.received', 'mail.result', 'mail.interpreted', 'mail.analyzed', 'mail.evidence', 'investigation.query', 'investigation.model', 'investigation.validation', 'investigation.recovery', 'query.sample', 'page.validated', 'run.result', 'dispatch.result', 'background.result', 'control.result', 'control.lock'} | INFRASTRUCTURE_EVENTS | INVESTIGATION_SIGNALS,
     'entity_type': {'host', 'file', 'process', 'ip', 'innerip', 'dns'},
     'stage': {'dispatch', 'run', 'session.prepare', 'query.device', 'query.events', 'query.entities',
               'correlate', 'tool.execute', 'tool.handler', 'tool.normalize', 'report.export', 'step.other',
@@ -112,7 +125,7 @@ _NUMBERS = {'schema', 'pid', 'seq', 'elapsed_ms', 'duration_ms', 'length', 'item
             'json_column', 'events', 'errors', 'suppressed', 'calls', 'call', 'loop_lag_ms', 'total',
             'consecutive_failures', 'input_tokens', 'output_tokens', 'total_tokens', 'request_max_tokens',
             'validation_count', 'models', 'revision', 'correction_attempt', 'failure_count',
-            'sqlite_error_code', 'transaction_age_ms', 'timeout_ms'}
+            'sqlite_error_code', 'transaction_age_ms', 'timeout_ms', 'retry_delay_seconds'}
 _BOOLS = {'success', 'truncated', 'has_error', 'has_saved_output', 'cursor_present',
           'transaction_open', 'transaction_open_before',
           'control_lock_busy',
@@ -291,12 +304,14 @@ class Trace:
         self.id = uuid.uuid4().hex
         self.started = time.monotonic()
         self.ids = dict(owner=opaque(owner), scope=opaque(scope), execution=opaque(execution))
-        self.sequence = self.logged = self.error_logged = self.suppressed = self.calls = 0
+        self.sequence = self.logged = self.error_logged = self.signal_logged = self.suppressed = self.calls = 0
         self.outcome = 'unknown'
 
     def emit(self, name, *, failure=False, terminal=False, **fields):
         if not terminal:
-            if failure and self.error_logged < MAX_ERRORS:
+            if name in INVESTIGATION_SIGNALS and self.signal_logged < MAX_INVESTIGATION_SIGNALS:
+                self.signal_logged += 1
+            elif failure and self.error_logged < MAX_ERRORS:
                 self.error_logged += 1
             elif self.logged < MAX_EVENTS:
                 self.logged += 1

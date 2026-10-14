@@ -23,9 +23,12 @@ async def next_step_for(attempt, active):
         parts.append(f'已保存 {pending} 条待续查或延期调查，后续轮次按额度继续。')
     if backlog.get('earliest_retry_at'):
         parts.append(f"允许自动续查的待办最早不早于 {backlog['earliest_retry_at']} 在后续轮次恢复；不包括已停止自动恢复或需人工核对的事件。")
-    if backlog.get('system_wait'):
-        if backlog.get('retry_exhausted'):
-            parts.append(f"{backlog['retry_exhausted']} 条已停止自动恢复；修复依赖后，暂停并重新启动监测可重新尝试。")
+    parameter_blocked = backlog.get('query_time_blocked', 0)
+    stopped = max(0, backlog.get('retry_exhausted', 0) - parameter_blocked)
+    if parameter_blocked:
+        parts.append(f'{parameter_blocked} 条时间参数异常待修复；正式 XDR 查询提供合法时间窗口后重新调查，不重复发送错误参数。')
+    if stopped:
+        parts.append(f"{stopped} 条已停止自动恢复；修复依赖后，暂停并重新启动监测可重新尝试。")
     if backlog.get('needs_review'):
         parts.append(f"{backlog['needs_review']} 条需人工核对，不再自动续查；请查看对应事件的调查依据。")
     return ''.join(parts)

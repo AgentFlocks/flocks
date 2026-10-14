@@ -134,7 +134,7 @@ async def test_persisted_step_results_and_order(tmp_path, monkeypatch, mode):
         assert any(step['tool'] == '调查取证：Fixture XDR' for step in steps)
         assert '原事件' in combined
         result = json.loads(attempt['result'])
-        assert f"确认风险 {result['risk']} 条、无风险 {result.get('benign', 0)} 条、证据不足 {result['unknown']} 条" in texts[-1].text
+        assert f"确认风险 {result['risk']} 条、无风险 {result.get('benign', 0)} 条、待判定 {result['unknown']} 条" in texts[-1].text
         if mode == 'partial':
             assert attempt['status'] == 'failed'
             assert '关联实体响应缺失' in combined

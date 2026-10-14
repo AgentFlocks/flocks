@@ -3,7 +3,7 @@ import { Link } from 'react-router-dom';
 import { CalendarDays, CheckCircle2, ChevronDown, Clock3, ExternalLink, Loader2, XCircle } from 'lucide-react';
 import type { MonitorRun } from '@/api/securityMonitoring';
 
-import { newestRunsFirst, normalizeRoundStatus, roundBusinessConclusion, roundFactSummary, roundRecoverySummary } from './roundSummary';
+import { failureStageLabel, newestRunsFirst, normalizeRoundStatus, roundBusinessConclusion, roundFactSummary, roundInvestigationFailures, roundRecoverySummary } from './roundSummary';
 export { roundBusinessConclusion } from './roundSummary';
 
 function displayTime(value: string | null | undefined, timezone: string, date = false) {
@@ -44,6 +44,7 @@ export default function RoundTimeline({ runs, timezone }: { runs: MonitorRun[]; 
         const Icon = complete ? CheckCircle2 : failed ? XCircle : status === 'running' ? Loader2 : Clock3;
         const tone = failed ? 'text-red-600 dark:text-red-400' : complete ? 'text-emerald-600 dark:text-emerald-400' : 'text-blue-600 dark:text-blue-400';
         const detailsId = `monitor-round-details-${run.id}`;
+        const failures = roundInvestigationFailures(run);
         return <li key={run.id} data-testid="round-timeline-node" className="relative pb-4 pl-6 last:pb-0">
           <span className={`absolute -left-[9px] top-4 rounded-full bg-white dark:bg-gray-800 ${tone}`}><Icon aria-hidden="true" size={17} className={status === 'running' ? 'animate-spin' : ''} /></span>
           <div className={`overflow-hidden rounded-xl border ${open ? 'border-blue-200 dark:border-blue-900' : 'border-gray-200 dark:border-gray-700'}`}>
@@ -72,12 +73,27 @@ export default function RoundTimeline({ runs, timezone }: { runs: MonitorRun[]; 
                 <div><dt className="inline">结束时间：</dt><dd className="inline">{run.finished_at ? displayTime(run.finished_at, timezone, true) : status === 'running' ? '执行中' : '未记录'}</dd></div>
               </dl>
               <div className="whitespace-pre-wrap break-words leading-7">{run.summary || run.error || '本轮未记录完整摘要，请查看工具事实或原始对话。'}</div>
-              {run.error && run.error !== run.summary && <p className="whitespace-pre-wrap break-words rounded-lg bg-red-50 p-3 text-red-700 dark:bg-red-950/40 dark:text-red-300"><strong>异常原因：</strong>{run.error}</p>}
+              {failures.length > 0 ? <section aria-label="本轮调查异常" className="rounded-lg bg-red-50 p-3 text-red-700 dark:bg-red-950/40 dark:text-red-300">
+                <h4 className="font-semibold">异常原因 · 本轮调查未完成</h4>
+                <p className="mt-1 text-xs leading-6">已保存证据和待办；程序未完成不代表事件无风险，也不代表告警已处置。</p>
+                <ul className="mt-3 space-y-3">
+                  {failures.map((failure, failureIndex) => <li key={`${failure.event_id || 'event'}-${failureIndex}`} className="space-y-1 border-t border-red-100 pt-2 first:border-0 first:pt-0 dark:border-red-900">
+                    <p className="font-medium">{failure.device_name || failure.device || '来源未记录'} · {failure.event_name || '事件调查'}</p>
+                    {failure.event_id && <p className="break-all text-xs">事件编号：{failure.event_id}</p>}
+                    <p><strong>发生环节：</strong>{failureStageLabel(failure.failure_stage)}{failure.failure_source && ` · ${failure.failure_source}`}</p>
+                    <p className="whitespace-pre-wrap break-words"><strong>具体原因：</strong>{failure.reason || '未记录完整原因，请查看失败步骤与诊断日志。'}</p>
+                    <p><strong>恢复安排：</strong>{failure.failure_stage === 'query_time' ? '暂停使用无效时间参数；等待后续正式 XDR 查询取得合法调查时间窗口后重新调查。事件与已有证据保留，不判定为无风险。'
+                      : failure.retry_exhausted ? '已停止自动重试；修复后暂停并重新启动监测，已有证据保留。'
+                      : failure.next_retry_at ? `最早在 ${displayTime(failure.next_retry_at, timezone, true)} 之后的监测轮次重试；监测暂停时不会执行。`
+                        : '请按下方“下一步”安排恢复；本轮不会把未完成调查当作安全结论。'}</p>
+                  </li>)}
+                </ul>
+              </section> : run.error && run.error !== run.summary && <p className="whitespace-pre-wrap break-words rounded-lg bg-red-50 p-3 text-red-700 dark:bg-red-950/40 dark:text-red-300"><strong>异常原因：</strong>{run.error}</p>}
               {run.next_step && <p className="whitespace-pre-wrap break-words rounded-lg bg-white p-3 dark:bg-gray-800"><strong>下一步：</strong>{run.next_step}</p>}
               <div><h4 className="mb-2 text-xs font-semibold text-gray-500 dark:text-gray-400">工具执行事实</h4>
                 {run.steps.length === 0 ? <p className="text-xs text-gray-500">本轮未记录工具步骤。</p> : <ol aria-label="本轮工具记录" className="space-y-2">
                   {run.steps.map(step => <li key={step.id} className="rounded-lg border border-gray-200 bg-white px-3 py-2 dark:border-gray-700 dark:bg-gray-800">
-                    <details><summary className="cursor-pointer text-sm"><span className="font-medium">{step.tool}</span><span className={`ml-3 text-xs ${['failed', 'error'].includes(step.status) ? 'text-red-600' : 'text-gray-500'}`}>{({ completed: '完成', failed: '失败', error: '失败', running: '执行中', queued: '排队' } as Record<string, string>)[step.status] || '待核对'}</span></summary>
+                    <details><summary className="cursor-pointer text-sm"><span className="font-medium">{step.tool}</span><span className={`ml-3 text-xs ${['failed', 'error'].includes(step.status) ? 'text-red-600' : 'text-gray-500'}`}>{step.tool === '关联分析' && step.status === 'completed' ? '结果汇总完成 · 不代表调查全部成功' : ({ completed: '完成', failed: '失败', error: '失败', running: '执行中', queued: '排队' } as Record<string, string>)[step.status] || '待核对'}</span></summary>
                       <div className="mt-3 space-y-2 text-xs leading-6">
                         {step.error && <p className="whitespace-pre-wrap break-words text-red-600">{step.error}</p>}
                         {step.input != null && <div><strong>输入参数</strong><pre className="mt-1 max-h-60 overflow-auto whitespace-pre-wrap break-words rounded bg-gray-50 p-2 dark:bg-gray-900">{plainFact(step.input)}</pre></div>}

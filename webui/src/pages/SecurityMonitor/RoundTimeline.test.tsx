@@ -58,7 +58,7 @@ it.each([
   [{ status: 'partial', result: { events: 0, errors: ['旧轮次证据不足'] } }, '调查待续查'],
   [{ status: 'failed', result: { events: 0 }, steps: [{ id: 'query', tool: '查询 XDR 事件', status: 'failed' }] }, '查询失败 · 待重试'],
   [{ status: 'failed', steps: [{ id: 'investigation', tool: '智能体调查结果', status: 'failed' }] }, '调查失败 · 待核对'],
-  [{ status: 'failed', result: { mail: { notification: { errors: ['连接失败'] } } } }, '邮件跟进失败'],
+  [{ status: 'failed', result: { mail: { notification: { errors: ['连接失败'] } } } }, '本轮执行失败 · 展开查看原因'],
   [{ status: 'cancelled' }, '任务中断'],
   [{ status: 'running' }, '调查执行中'],
 ] as [Partial<MonitorRun>, string][])('uses persisted facts for the concise outcome %#', (overrides, label) => {
@@ -128,14 +128,15 @@ it('keeps an old failed result as recorded instead of silently recoloring its hi
   expect(node).not.toHaveTextContent('本轮查询 0 条');
 });
 
-it('identifies model request and mail readiness failures without dumping the investigation narrative', () => {
+it('identifies model failure without treating mailbox readiness as a task failure', () => {
   show([run({ status: 'failed', summary: '事件长篇调查正文仅用于展开查看', result: {
     events: 14, query_events: 0, resumed_events: 14, analyzed: 2,
     errors: ['智能体调查未完成：调查模型请求失败，请检查模型服务、配置和访问权限'],
     mail: { health: { enabled: true, errors: ['收信连接暂不可用'], receive: { state: 'unavailable' }, send: { state: 'unknown' } } },
   } })]);
   const node = screen.getByTestId('round-timeline-node');
-  expect(node).toHaveTextContent('调查模型请求失败 · 邮件连接未就绪');
+  expect(node).toHaveTextContent('调查模型请求失败');
+  expect(node).not.toHaveTextContent('邮件连接未就绪');
   expect(node).toHaveTextContent('本轮查询 0 条 · 历史续查 14 条 · 已有调查结论 2 条');
   expect(screen.queryByText('事件长篇调查正文仅用于展开查看')).not.toBeInTheDocument();
 });
@@ -157,6 +158,79 @@ it.each(['调查模型请求超时', '调查模型认证失败', '调查模型�
     expect(screen.getByRole('button', { name: /第 1 轮/ })).toHaveTextContent(failure);
   },
 );
+
+it('identifies a TDP time-validation failure and waits for a valid source window without claiming retries were exhausted', () => {
+  show([run({ status: 'failed', error: '智能体调查未完成：通用错误', result: {
+    events: 18, analyzed: 2, investigation_incomplete: 16,
+    investigation_failures: [{ event_id: 'incident-time', event_name: '可疑外联事件', device_name: '四季青 XDR',
+      failure_stage: 'query_time', failure_source: 'TDP', error_kind: 'query_time',
+      reason: 'TDP 关联查询未执行：原事件调查时间窗口缺少结束时间', retry_exhausted: true }],
+    mail: { health: { enabled: true, errors: ['收信未配置'], receive: { state: 'unavailable' }, send: { state: 'unknown' } } },
+  }, steps: [{ id: 'summary', tool: '关联分析', status: 'completed' }] })]);
+  const node = screen.getByTestId('round-timeline-node');
+  expect(node).toHaveTextContent('关联查询时间参数异常');
+  expect(node).toHaveTextContent('调查未完成 16 条');
+  expect(node).not.toHaveTextContent('邮件连接未就绪');
+  fireEvent.click(within(node).getByRole('button'));
+  const failure = screen.getByRole('region', { name: '本轮调查异常' });
+  expect(failure).toHaveTextContent('四季青 XDR · 可疑外联事件');
+  expect(failure).toHaveTextContent('incident-time');
+  expect(failure).toHaveTextContent('发生环节：关联查询时间参数校验 · TDP');
+  expect(failure).toHaveTextContent('原事件调查时间窗口缺少结束时间');
+  expect(failure).toHaveTextContent('等待后续正式 XDR 查询取得合法调查时间窗口后重新调查');
+  expect(failure).toHaveTextContent('事件与已有证据保留，不判定为无风险');
+  expect(failure).not.toHaveTextContent('已停止自动重试');
+  expect(failure).not.toHaveTextContent('暂停并重新启动');
+  expect(failure).not.toHaveTextContent('检查模型');
+  expect(node).toHaveTextContent('结果汇总完成 · 不代表调查全部成功');
+});
+
+it('uses structured model 504 and query failure categories instead of guessing from the narrative', () => {
+  show([run({ status: 'failed', result: { investigation_failures: [
+    { failure_stage: 'model', http_status: 504, model_failure: 'timeout', reason: '网关未及时返回', next_retry_at: '2026-10-13T10:22:25Z' },
+    { failure_stage: 'query', error_type: 'TypeError', reason: '关联查询发生程序错误（TypeError）', retry_exhausted: true },
+  ] } })]);
+  const node = screen.getByTestId('round-timeline-node');
+  expect(node).toHaveTextContent('调查模型网关超时 · 关联取证查询失败');
+  fireEvent.click(within(node).getByRole('button'));
+  expect(screen.getByRole('region', { name: '本轮调查异常' })).toHaveTextContent('已停止自动重试');
+  expect(screen.getByRole('region', { name: '本轮调查异常' })).toHaveTextContent('2026/10/13 18:22:25');
+  expect(screen.getByRole('region', { name: '本轮调查异常' })).toHaveTextContent('监测暂停时不会执行');
+});
+
+it('reads safe failure metadata from persisted failed step output when a round projection lacks it', () => {
+  show([run({ status: 'failed', steps: [{ id: 'fault', tool: '智能体调查结果', status: 'failed',
+    input: { event: 'incident-program' }, output: JSON.stringify({ state: 'system_wait', failure_stage: 'internal',
+      reason: '调查程序发生内部异常', error_type: 'TypeError' }) }] })]);
+  const node = screen.getByTestId('round-timeline-node');
+  expect(node).toHaveTextContent('调查程序异常');
+  fireEvent.click(within(node).getByRole('button'));
+  const failure = screen.getByRole('region', { name: '本轮调查异常' });
+  expect(failure).toHaveTextContent('事件编号：incident-program');
+  expect(failure).toHaveTextContent('发生环节：调查程序执行');
+  expect(failure).not.toHaveTextContent('调查模型');
+});
+
+it.each([
+  { title: 'authoritative empty failure array', result: { investigation_failures: [] },
+    tool: '智能体调查结果', output: { state: 'system_wait', attempted_this_round: true } },
+  { title: 'model cooldown deferred work', result: { deferred: 1 },
+    tool: '智能体调查结果', output: { state: 'deferred', attempted_this_round: false } },
+  { title: 'historical fault not attempted this round', result: {},
+    tool: '智能体调查结果', output: { state: 'system_wait', attempted_this_round: false } },
+  { title: 'intermediate query failure later recovered', result: {},
+    tool: '调查取证：TDP', output: { state: 'system_wait', attempted_this_round: true } },
+])('does not mislabel $title as a new investigation failure', ({ result, tool, output }) => {
+  show([run({ result: { events: 2, analyzed: 1, investigation_incomplete: 1, ...result },
+    steps: [{ id: 'saved-step', tool, status: 'failed', output: { failure_stage: 'model',
+      reason: '历史模型失败或等待模型冷却', ...output } }] })]);
+  const node = screen.getByTestId('round-timeline-node');
+  expect(node).toHaveTextContent('调查未完成 1 条');
+  expect(node).not.toHaveTextContent('调查完成 ·');
+  expect(within(node).getByText('完成')).toBeInTheDocument();
+  fireEvent.click(within(node).getByRole('button'));
+  expect(screen.queryByRole('region', { name: '本轮调查异常' })).not.toBeInTheDocument();
+});
 
 
 it('keeps chronological round numbers while showing newest first without mutating input', () => {

@@ -1,5 +1,6 @@
 """Deterministic, bounded plain-text step summaries from already queried facts."""
 from dataclasses import dataclass, field
+import re
 import unicodedata
 
 MAX_DETAILS = 48_000
@@ -35,7 +36,7 @@ def step_purpose(name, params):
     if name in {'调查等待人工核对', '调查等待恢复', '调查等待重试'}:
         return event + '本轮未执行此事件调查；展示已保存的状态和恢复安排，不重复调用查询或模型。'
     if name == '关联分析':
-        return '整理本轮事件的设备与主机关联，分别统计已完成调查、待办和初筛结果。'
+        return '整理本轮事件的设备与主机关联，分别统计已完成调查、待办和初筛结果；本步骤完成只表示结果汇总完成，不代表每条事件都已调查成功。'
     if name == '发送告警通知':
         return event + '将这一条事件及核对依据发给配置的责任人，并记录本次投递结果。'
     if name == '解读回信并跟进状态':
@@ -71,6 +72,49 @@ def detail_lines(lines, total):
 def event_label(event):
     source = f"设备「{label(event['device_name'])}」· " if event.get('device_name') else ''
     return source + f"{label(event.get('name'), '名称未提供')}（ID：{label(event.get('uuId') or event.get('id'), limit=100)}）"
+
+
+def failure_stage_label(stage):
+    """Name a recorded execution boundary, without guessing from provider text."""
+    return {'model': '调查模型请求', 'query': '关联取证查询',
+            'query_time': '关联查询时间参数校验', 'internal': '调查程序执行'}.get(stage, '事件调查')
+
+
+def investigation_failure_summary(outcome):
+    """Render safe structured failures; raw exception bodies never belong here."""
+    reason = label(outcome.get('reason'), '调查尚未完成，已有证据和待办保留', 600)
+    stage = outcome.get('failure_stage')
+    if stage not in {'model', 'query', 'query_time', 'internal'}:
+        return reason  # Older persisted records retain their original explanation.
+    source = label(outcome.get('failure_source'), '', 100)
+    tool = label(outcome.get('failure_tool'), '', 100)
+    target = ' / '.join(value for value in (source, tool) if value)
+    text = failure_stage_label(stage) + (f'（{target}）' if target else '') + '：' + reason
+    status = outcome.get('http_status')
+    if type(status) is int and 100 <= status <= 599 and f'HTTP {status}' not in reason:
+        text += f'；HTTP {status}'
+    error_type = outcome.get('error_type')
+    if (stage in {'query', 'internal'} and isinstance(error_type, str)
+            and re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]{0,79}', error_type) and error_type not in reason):
+        text += f'；异常类型：{error_type}'
+    return text
+
+
+def investigation_progress_summary(result, events):
+    """Separate a completed inconclusive assessment from work that never finished."""
+    recorded = any(isinstance(event.get('investigation'), dict) for event in events)
+    supplied = result.get('investigation_incomplete')
+    if not recorded and type(supplied) is not int:
+        return ''  # Legacy records cannot establish which unknowns were uninvestigated.
+    def state(event):
+        value = event.get('investigation')
+        return value.get('state') if isinstance(value, dict) else None
+    incomplete = (max(0, supplied) if type(supplied) is int else
+                  sum(state(event) != 'ready' and event.get('risk') == 'unknown'
+                      and not event.get('assessment', {}).get('ended') for event in events))
+    inconclusive = (sum(state(event) == 'ready' and event.get('risk') == 'unknown'
+                        for event in events) if recorded else max(0, result.get('unknown', 0) - incomplete))
+    return f'已完成调查但证据不足 {inconclusive} 条；调查未完成 {incomplete} 条。'
 
 
 def incident_type(event):
@@ -131,10 +175,12 @@ def analysis_summary(result, events, groups):
     related = [keys for keys in groups.values() if len(keys) > 1]
     if not events and result['errors']:
         return Summary('关联分析已跳过：事件查询未完整成功，没有可分析的完整事件批次。不能将此次失败理解为查询到 0 条事件。此前收到的回信是否完成跟进，以本轮回信及回查记录为准。')
-    text = f"关联结果已整理：{event_sources_summary(result, len(events))}，形成 {len(related)} 个同设备、同主机关联组，涉及 {sum(map(len, related))} 条事件；确认风险 {result['risk']} 条、无风险 {result.get('benign', 0)} 条、证据不足 {result['unknown']} 条。"
+    text = f"关联结果已整理：{event_sources_summary(result, len(events))}，形成 {len(related)} 个同设备、同主机关联组，涉及 {sum(map(len, related))} 条事件；确认风险 {result['risk']} 条、无风险 {result.get('benign', 0)} 条、待判定 {result['unknown']} 条。"
     text += f"其中 {result.get('analyzed', 0)} 条已有调查结论。"
+    text += investigation_progress_summary(result, events)
     if result['errors']:
         text += f"有 {len(result['errors'])} 项查询或调查未完成，结果不完整；请查看对应失败步骤。"
+        text += '本步骤完成只表示结果汇总完成，不代表事件调查全部成功；程序故障不能当作证据不足或无风险结论。'
     if len(events) == 1:
         text += '本轮只有一条事件，因此没有多事件关联组；这不表示没有关联主机。'
     text += '只有当前版本、引用实际行为证据且高置信确认的风险才通知责任人；无风险和证据不足分别在事件列表保留，后者尚未排除风险。处置完成以 XDR 回查事实为准。'
@@ -198,10 +244,11 @@ def operation_summary(event, params, value):
 
 
 def round_summary(status, result, observed, feedback, notification, enabled, development):
-    text = f"本轮{ {'completed': '完成', 'failed': '失败'}[status]}：{event_sources_summary(result, len(observed))}，确认风险 {result['risk']} 条，无风险 {result.get('benign', 0)} 条，证据不足 {result['unknown']} 条。"
+    text = f"本轮{ {'completed': '完成', 'failed': '失败'}[status]}：{event_sources_summary(result, len(observed))}，确认风险 {result['risk']} 条，无风险 {result.get('benign', 0)} 条，待判定 {result['unknown']} 条。"
     if status == 'completed':
         text += '本轮执行已结束；告警是否需要跟进、是否已闭环分别记录。'
     text += f"其中 {result.get('analyzed', 0)} 条已有调查结论。"
+    text += investigation_progress_summary(result, observed)
     if result.get('deferred'):
         text += f"另有 {result['deferred']} 条已保存待后续轮次调查。"
     if result['errors']:
@@ -214,19 +261,31 @@ def round_summary(status, result, observed, feedback, notification, enabled, dev
         if investigation:
             state = {'ready': '已形成调查结论', 'pending': '已保存，待续查', 'deferred': '本轮额度用完，已延期',
                      'system_wait': '系统故障，调查尚未恢复', 'needs_review': '需人工核对，不再自动续查'}.get(investigation['state'], '待核对')
-            text += f"\n智能体调查：{event_label(event)} · {state}。{investigation.get('reason', '')}"
+            if investigation.get('error_kind') == 'model_cooldown':
+                state = '模型退避中，本轮未重复调查'
+            elif investigation.get('error_kind') == 'query_time':
+                state = '时间参数待修复，调查未完成'
+            reason = investigation_failure_summary(investigation) if investigation['state'] != 'ready' else investigation.get('reason', '')
+            text += f"\n智能体调查：{event_label(event)} · {state}。{reason}"
             if investigation['state'] in {'pending', 'deferred'}:
-                text += '下一轮优先读取已有证据继续调查。'
+                text += (f"已保存退避计划；不早于 {label(investigation.get('next_retry_at'), '后续计划监测')} 再次尝试。"
+                         if investigation.get('error_kind') == 'model_cooldown' else '下一轮优先读取已有证据继续调查。')
             elif investigation['state'] == 'system_wait':
-                text += ('自动恢复次数已用完；请修复依赖后暂停并重新启动监测，再次尝试。' if investigation.get('retry_exhausted') else
+                text += ('等待正式 XDR 查询提供合法时间窗口后重新调查；不会重复发送错误参数。'
+                         if investigation.get('error_kind') == 'query_time' else
+                         '自动恢复次数已用完；请修复依赖后暂停并重新启动监测，再次尝试。' if investigation.get('retry_exhausted') else
                          f"已保存恢复计划；不早于 {label(investigation.get('next_retry_at'), '下一次计划监测')} 再次尝试。")
     backlog = result.get('investigation_backlog', {})
     if any(backlog.get(key) for key in ('pending', 'deferred', 'system_wait', 'needs_review')):
         text += ('\n历史与当前未完成调查：'
                  f"待续查 {backlog.get('pending', 0)} 条、额度延期 {backlog.get('deferred', 0)} 条、"
                  f"系统故障 {backlog.get('system_wait', 0)} 条、业务待人工核对 {backlog.get('needs_review', 0)} 条。")
-        if backlog.get('retry_exhausted'):
-            text += f"其中 {backlog['retry_exhausted']} 条已停止自动恢复，需修复后手动重新启动。"
+        parameter_blocked = backlog.get('query_time_blocked', 0)
+        stopped = max(0, backlog.get('retry_exhausted', 0) - parameter_blocked)
+        if parameter_blocked:
+            text += f"其中 {parameter_blocked} 条等待正式 XDR 查询修复时间窗口，不重复发送错误参数。"
+        if stopped:
+            text += f"其中 {stopped} 条已停止自动恢复，需修复后手动重新启动。"
         if backlog.get('system_wait') and status == 'completed':
             text += '本轮没有新增调查故障；上述历史故障待恢复，不代表本轮再次失败。'
         if backlog.get('needs_review'):

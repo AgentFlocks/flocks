@@ -9,6 +9,7 @@ from flocks.tool.registry import ToolRegistry, ToolContext
 from flocks.tool.structured_output import OutputCapture, StructuredOutputError
 from flocks.session.interaction_policy import investigation_call_scope
 from .adapter import ContractError, response_items
+from .query_time import normalize_window, tdp_window
 from .store import rows
 
 
@@ -154,15 +155,23 @@ async def assert_active(policy):
 async def tdp_timestamp():
     # The TDP skill requires a dynamically calculated Python timestamp through
     # uv. The command is constant: no model/query text reaches a shell.
-    process = await asyncio.create_subprocess_exec(
-        'bash', '-c', 'uv run --no-project python -c "from datetime import datetime, timezone; print(int(datetime.now(timezone.utc).timestamp()))"',
-        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+    try:
+        process = await asyncio.create_subprocess_exec(
+            'bash', '-c', 'uv run --no-project python -c "from datetime import datetime, timezone; print(int(datetime.now(timezone.utc).timestamp()))"',
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+    except OSError:
+        raise ContractError('TDP 动态时间计算环境不可用，未执行关联查询；请核对 bash、uv 和 Python') from None
     try:
         output, _ = await asyncio.wait_for(process.communicate(), 15)
-    except BaseException:
+    except BaseException as exc:
         if process.returncode is None:
-            process.kill()
+            try:
+                process.kill()
+            except ProcessLookupError:
+                pass  # The process may exit between returncode and kill.
         await process.wait()
+        if isinstance(exc, TimeoutError):
+            raise ContractError('TDP 动态时间计算超时，未执行关联查询；请核对时间计算环境') from None
         raise
     if process.returncode or not output.strip().isdigit():
         raise ContractError('TDP 动态时间计算失败')
@@ -231,10 +240,8 @@ async def query(policy, session_id, message_id, capability, event, kind, *, aler
         else:
             if alert_id:
                 raise ContractError('关联告警列表不接受额外告警目标')
-            window = event.get('investigationWindow') or {}
-            start, end = window.get('start'), window.get('end')
-            if type(start) is not int or type(end) is not int or not 0 < end - start <= 86400:
-                raise ContractError('原事件关联告警查询时间范围无效')
+            window = normalize_window(event.get('investigationWindow'), source='XDR 关联告警查询')
+            start, end = window['start'], window['end']
             # The handler always adds a time filter, including UUID-list reads.
             # Earlier related alerts must not disappear just because this
             # monitoring run's window starts later than the incident itself.
@@ -267,10 +274,11 @@ async def query(policy, session_id, message_id, capability, event, kind, *, aler
             raise ContractError('原事件缺少有效主机 IP，不能可靠地定位跨设备查询') from None
         if capability.kind == 'tdp':
             await tdp_skill()
-            end = min(await tdp_timestamp(), event['investigationWindow']['end'])
-            start = event['investigationWindow']['start']
-            if not 0 < end - start <= 86400:
-                raise ContractError('TDP 关联时间范围无效或超过 24 小时')
+            # Validate persisted data before comparing it with the dynamic
+            # clock. Historic string/null values must not reach min/subtract.
+            window = normalize_window(event.get('investigationWindow'), source='TDP 关联查询')
+            window = tdp_window(window, await tdp_timestamp())
+            start, end = window['start'], window['end']
             params = {'action': 'search', 'time_from': start, 'time_to': end,
                       'net_data_type': ['attack', 'risk', 'action'], 'size': 50,
                       'sql': f"net.src_ip = '{host}' OR net.dest_ip = '{host}'"}

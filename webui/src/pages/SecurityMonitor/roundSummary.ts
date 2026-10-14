@@ -1,4 +1,4 @@
-import type { MonitorRun } from '@/api/securityMonitoring';
+import type { MonitorInvestigationFailure, MonitorRun } from '@/api/securityMonitoring';
 
 export const normalizeRoundStatus = (status: string) => status === 'partial' ? 'completed'
   : ['interrupted', 'cancelled'].includes(status) ? 'failed' : status;
@@ -10,6 +10,34 @@ const objectValue = (value: unknown): Record<string, unknown> | null => {
   return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null;
 };
 
+export const failureStageLabel = (stage: MonitorInvestigationFailure['failure_stage']) => stage ? ({
+  model: '调查模型请求', query: '关联取证查询', query_time: '关联查询时间参数校验', internal: '调查程序执行',
+}[stage]) : '事件调查';
+
+/** Only failures from the current attempt; mailbox readiness and old backlogs are independent. */
+export function roundInvestigationFailures(run: MonitorRun): MonitorInvestigationFailure[] {
+  if (Array.isArray(run.result?.investigation_failures)) return run.result.investigation_failures;
+  return run.steps.filter(step => step.tool === '智能体调查结果' && ['failed', 'error'].includes(step.status)).flatMap(step => {
+    const output = objectValue(step.output);
+    if (!output || output.state !== 'system_wait' || output.attempted_this_round === false
+      || !['model', 'query', 'query_time', 'internal'].includes(String(output.failure_stage))) return [];
+    return [{ ...output, event_id: objectValue(step.input)?.event } as MonitorInvestigationFailure];
+  });
+}
+
+function failureConclusion(failure: MonitorInvestigationFailure): string {
+  if (failure.failure_stage === 'query_time') return '关联查询时间参数异常';
+  if (failure.failure_stage === 'query') return '关联取证查询失败';
+  if (failure.failure_stage === 'internal') return '调查程序异常';
+  if (failure.failure_stage === 'model') {
+    if (failure.http_status === 504) return '调查模型网关超时';
+    return ({ timeout: '调查模型请求超时', authentication: '调查模型认证失败', permission: '调查模型访问被拒绝',
+      rate_limit: '调查模型请求受到限流', unavailable: '调查模型服务暂时不可用', connection: '调查模型连接失败',
+    } as Record<string, string>)[failure.model_failure || failure.error_kind?.replace(/^model_/, '') || ''] || '调查模型请求失败';
+  }
+  return '事件调查未完成';
+}
+
 /** Summaries describe persisted round facts, never infer incident closure or new failures from a backlog. */
 export function roundBusinessConclusion(run: MonitorRun): string {
   const status = normalizeRoundStatus(run.status);
@@ -17,13 +45,15 @@ export function roundBusinessConclusion(run: MonitorRun): string {
   if (status === 'running') return run.steps.find(step => step.status === 'running')?.tool || '调查执行中';
   if (status === 'queued') return '等待执行';
   if (status === 'failed') {
+    const failures = roundInvestigationFailures(run);
+    if (failures.length) return [...new Set(failures.map(failureConclusion))].join(' · ');
     const errors = [...(facts?.errors || []), run.error || '', ...run.steps.filter(step => ['failed', 'error'].includes(step.status)).map(step => step.error || '')].join('；');
     const causes: string[] = [];
-    const modelFailure = ['调查模型请求超时', '调查模型认证失败', '调查模型访问被拒绝', '调查模型请求受到限流', '调查模型服务暂时不可用', '调查模型连接失败', '调查模型请求失败'].find(cause => errors.includes(cause));
+    const modelFailure = ['调查模型网关超时', '调查模型请求超时', '调查模型认证失败', '调查模型访问被拒绝', '调查模型请求受到限流', '调查模型服务暂时不可用', '调查模型连接失败', '调查模型请求失败'].find(cause => errors.includes(cause));
     if (modelFailure) causes.push(modelFailure);
     else if (/模型.*(?:不完整|完整决策|格式无效|截断|空决策|未正常结束)/.test(errors)) causes.push('模型决策未完成');
-    if (facts?.mail?.notification?.errors?.length || facts?.mail?.feedback?.errors?.length) causes.push('邮件跟进失败');
-    else if (facts?.mail?.health?.errors?.length) causes.push('邮件连接未就绪');
+    if (/关联查询.*(?:时间参数|时间窗口)/.test(errors)) causes.push('关联查询时间参数异常');
+    else if (/关联查询发生程序错误|调查程序发生/.test(errors)) causes.push('调查程序异常');
     if (causes.length) return causes.join(' · ');
     const failedTools = run.steps.filter(step => ['failed', 'error'].includes(step.status)).map(step => step.tool);
     if (failedTools.some(tool => /调查|智能体/.test(tool))) return '调查失败 · 待核对';
@@ -44,6 +74,7 @@ export function roundBusinessConclusion(run: MonitorRun): string {
   if (run.steps.some(step => objectValue(step.output)?.duplicate === true)) return '通知已去重 · 本轮未重发';
   if (facts?.errors?.length) return '调查待续查'; // older partial records retain their evidence gaps
   if (count(facts?.events) === 0) return '零事件 · 无需新通知';
+  if (count(facts?.investigation_incomplete)) return `本轮已结束 · ${facts?.investigation_incomplete} 条调查待跟进`;
   if ((count(facts?.analyzed) || 0) > 0) return facts?.mail?.enabled === false
     ? '调查完成 · 邮件未启用' : '调查完成 · 无新增通知';
   return '本轮已结束 · 详见记录';
@@ -59,6 +90,7 @@ export function roundFactSummary(run: MonitorRun): string {
   if (count(facts.query_resumed_overlap)) parts.push(`其中 ${facts.query_resumed_overlap} 条重叠`);
   if (queried === undefined && resumed === undefined && count(facts.events) !== undefined) parts.push(`本轮处理 ${facts.events} 条（来源未记录）`);
   if (count(facts.analyzed) !== undefined) parts.push(`已有调查结论 ${facts.analyzed} 条`);
+  if (count(facts.investigation_incomplete)) parts.push(`调查未完成 ${facts.investigation_incomplete} 条`);
   return parts.join(' · ');
 }
 

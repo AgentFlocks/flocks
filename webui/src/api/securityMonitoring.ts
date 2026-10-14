@@ -7,11 +7,20 @@ export interface MonitorStep {
   input?: unknown; output?: unknown; error?: string | null;
   started_at?: string; finished_at?: string | null;
 }
+export interface MonitorInvestigationFailure {
+  event_id?: string; event_name?: string; device?: string; device_name?: string;
+  failure_stage?: 'model' | 'query' | 'query_time' | 'internal';
+  error_kind?: string; reason?: string; model_failure?: string;
+  http_status?: number; error_type?: string; failure_source?: string; failure_tool?: string;
+  next_retry_at?: string | null; retry_exhausted?: boolean;
+}
 export interface MonitorRunResult {
   events?: number; risk?: number; unknown?: number; analyzed?: number; deferred?: number;
   query_events?: number; resumed_events?: number; query_resumed_overlap?: number; query_complete?: boolean;
-  investigation_backlog?: { system_wait?: number; earliest_retry_at?: string | null; retry_exhausted?: number };
+  investigation_backlog?: { system_wait?: number; earliest_retry_at?: string | null; retry_exhausted?: number; query_time_blocked?: number };
   errors?: string[];
+  investigation_incomplete?: number;
+  investigation_failures?: MonitorInvestigationFailure[];
   mail?: {
     enabled?: boolean;
     notification?: { sent?: number; pending?: number; errors?: string[] };
