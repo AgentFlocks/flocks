@@ -7,6 +7,7 @@ is recovered exclusively by reading the original incident again.
 import asyncio
 import hashlib
 import json
+from datetime import datetime, timezone
 from uuid import uuid4
 
 from flocks.session.interaction_policy import automatic_mark_scope
@@ -19,7 +20,19 @@ from .store import connection, encode, rows, write
 
 PROJECTION_COLUMNS = 'event_key,state,watch_count,last_round,queued_round,target_status,disposition_id,event_version,policy_revision,result'
 _TERMINAL = {'verified', 'external_closed'}
+_LOCALLY_ENDED = 'monitoring_ended'
+MONITORING_ENDED_REASON = 'XDR 本轮完整查询未返回此事件，保留原研判和历史记录，停止后续自动跟进；未确认风险消除或实际处置结果。'
 _UNCERTAIN = {'writing', 'pending'}
+_LIFECYCLE_FIELDS = ('monitoring_end', 'monitoring_restore', 'source_present_at',
+                     'source_present_version', 'source_present_round')
+
+
+def _time(value):
+    try:
+        stamp = datetime.fromisoformat(value.replace('Z', '+00:00'))
+        return stamp if stamp.tzinfo else stamp.replace(tzinfo=timezone.utc)
+    except (AttributeError, TypeError, ValueError):
+        return None
 
 
 def policy_revision(policy):
@@ -110,7 +123,148 @@ def projection(item):
             'event_version': item['event_version'], 'policy_revision': item['policy_revision'],
             'observed_status': result.get('observed_status'), 'reason': result.get('reason'),
             'external': item['state'] == 'external_closed',
-            'closed': item['state'] in _TERMINAL, 'result': result}
+            'closed': item['state'] in _TERMINAL | {_LOCALLY_ENDED},
+            'xdr_closed': item['state'] in _TERMINAL,
+            'monitoring_ended': item['state'] == _LOCALLY_ENDED, 'result': result}
+
+
+async def is_monitoring_ended(owner, project, event_key, *, scope='host-security-monitor'):
+    """A local lifecycle guard; no assumption about the remote XDR state."""
+    return bool(await rows('SELECT 1 FROM monitor_event_followup WHERE owner=? AND scope=? AND project=? '
+        'AND event_key=? AND state=? LIMIT 1', (owner, scope, project, event_key, _LOCALLY_ENDED)))
+
+
+async def feedback_expired(owner, project, event_key, received_at, *, scope='host-security-monitor'):
+    """Feedback predating an end/reappearance boundary cannot reopen old work."""
+    found = await rows('SELECT state,result FROM monitor_event_followup WHERE owner=? AND scope=? AND project=? AND event_key=?',
+                       (owner, scope, project, event_key))
+    if not found:
+        return False
+    if found[0]['state'] == _LOCALLY_ENDED:
+        return True
+    result = json.loads(found[0]['result'])
+    ended_at = _time(result.get('monitoring_end', {}).get('ended_at'))
+    if not ended_at:
+        return False
+    restored_at = _time(result.get('monitoring_restore', {}).get('restored_at'))
+    cutoff = max(ended_at, restored_at) if restored_at else ended_at
+    received = _time(received_at)
+    return received is None or received <= cutoff
+
+
+async def end_missing(policy, event, round_id):
+    """Close local monitoring after an authoritative complete-list absence.
+
+    Completeness is the caller's responsibility. This function never performs
+    XDR I/O; only known unstarted manual intents are cancelled. Unknown-write
+    audits remain intact and are never treated as verified remediation.
+    """
+    if not isinstance(round_id, str) or not round_id:
+        raise ValueError('结束监测必须具有稳定轮次编号')
+    identity = _identity(policy, event)
+    from .mailflow import lock as mail_lock
+    async with d._locks.setdefault((policy.owner, event['key']), asyncio.Lock()):
+        # Same ordering as mail completion/retry: an already-started operation
+        # finishes before ending; no later mail send/write can cross this gate.
+        async with mail_lock(policy.owner):
+            verified = [audit for status in (40, 60)
+                        if (audit := await _verified_local_disposition(policy, event, status))]
+            async with connection() as db:
+                await db.execute('BEGIN IMMEDIATE')
+                cursor = await db.execute('SELECT * FROM monitor_event_followup WHERE owner=? AND scope=? AND project=? AND device=? AND event_key=?', identity)
+                old_row = await cursor.fetchone()
+                old = dict(old_row) if old_row else None
+                if old and old['state'] in _TERMINAL | {_LOCALLY_ENDED}:
+                    return projection(old)
+                previous = json.loads(old['result']) if old else {}
+                last_present = _time(previous.get('source_present_at'))
+                verified = [audit for audit in verified if _time(audit['updated_at']) is not None
+                            and (last_present is None or _time(audit['updated_at']) >= last_present)]
+                if verified:
+                    audit = max(verified, key=lambda value: _time(value['updated_at']))
+                    result = {**previous, 'reason': '此前 XDR 写后回查已确认目标状态，保留真实处置结果。',
+                              'observed_status': audit['observed_status']}
+                    if old:
+                        await db.execute("UPDATE monitor_event_followup SET state='verified',event=?,event_version=?,queued_round=NULL,"
+                            'target_status=?,disposition_id=?,result=?,updated_at=? WHERE owner=? AND scope=? AND project=? AND device=? AND event_key=?',
+                            (encode(event), event_version(event), audit['target_status'], audit['id'], encode(result), d.stamp(), *identity))
+                    else:
+                        await db.execute('INSERT INTO monitor_event_followup(owner,scope,project,device,event_key,policy_revision,event_version,event,'
+                            'state,target_status,disposition_id,result,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                            (*identity, policy_revision(policy), event_version(event), encode(event), 'verified',
+                             audit['target_status'], audit['id'], encode(result), d.stamp(), d.stamp()))
+                    cursor = await db.execute('SELECT * FROM monitor_event_followup WHERE owner=? AND scope=? AND project=? AND device=? AND event_key=?', identity)
+                    return projection(dict(await cursor.fetchone()))
+                result = {**previous, 'reason': MONITORING_ENDED_REASON,
+                    'monitoring_end': {'round_id': round_id, 'ended_at': d.stamp(),
+                        'previous_state': old['state'] if old else None,
+                        'previous_target': old['target_status'] if old else None,
+                        'previous_queued_round': old['queued_round'] if old else None},
+                    'xdr_closed': False, 'external': False}
+                if old:
+                    await db.execute('UPDATE monitor_event_followup SET state=?,event=?,event_version=?,queued_round=NULL,'
+                        'target_status=NULL,result=?,updated_at=? WHERE owner=? AND scope=? AND project=? AND device=? AND event_key=?',
+                        (_LOCALLY_ENDED, encode(event), event_version(event), encode(result), d.stamp(), *identity))
+                else:
+                    await db.execute('INSERT INTO monitor_event_followup(owner,scope,project,device,event_key,policy_revision,event_version,event,'
+                        'decision,state,result,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                        (*identity, policy_revision(policy), event_version(event), encode(event),
+                         encode(event.get('assessment') or {}), _LOCALLY_ENDED, encode(result), d.stamp(), d.stamp()))
+                await db.execute("UPDATE monitor_mail_notices SET state='skipped',error=?,updated_at=? "
+                    "WHERE owner=? AND scope=? AND project=? AND event_key=? AND state='queued' AND error IS NULL AND sent_at IS NULL",
+                    (MONITORING_ENDED_REASON, d.stamp(), policy.owner, policy.scope, policy.project, event['key']))
+                await db.execute("UPDATE monitor_dispositions SET status='failed',error=?,updated_at=? "
+                    "WHERE owner=? AND scope=? AND project=? AND event_key=? AND mode='mail_manual' AND status='queued'",
+                    ('事件未再检出，旧人工反馈意图已取消，未发起 XDR 写入', d.stamp(),
+                     policy.owner, policy.scope, policy.project, event['key']))
+                cursor = await db.execute('SELECT * FROM monitor_event_followup WHERE owner=? AND scope=? AND project=? AND device=? AND event_key=?', identity)
+                return projection(dict(await cursor.fetchone()))
+
+
+async def restore_present(policy, event, round_id):
+    """Only an actually returned source record can release local disappearance."""
+    if not isinstance(round_id, str) or not round_id:
+        raise ValueError('恢复监测必须具有稳定轮次编号')
+    identity = _identity(policy, event)
+    async with d._locks.setdefault((policy.owner, event['key']), asyncio.Lock()):
+        async with connection() as db:
+            await db.execute('BEGIN IMMEDIATE')
+            cursor = await db.execute('SELECT * FROM monitor_event_followup WHERE owner=? AND scope=? AND project=? AND device=? AND event_key=?', identity)
+            old_row = await cursor.fetchone()
+            if not old_row:
+                source = {'source_present_at': d.stamp(), 'source_present_version': event_version(event),
+                          'source_present_round': round_id}
+                await db.execute('INSERT INTO monitor_event_followup(owner,scope,project,device,event_key,policy_revision,event_version,event,'
+                    'state,result,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',
+                    (*identity, policy_revision(policy), event_version(event), encode(event), 'watching', encode(source), d.stamp(), d.stamp()))
+                cursor = await db.execute('SELECT * FROM monitor_event_followup WHERE owner=? AND scope=? AND project=? AND device=? AND event_key=?', identity)
+                return projection(dict(await cursor.fetchone()))
+            old = dict(old_row)
+            previous = json.loads(old['result'])
+            source = {'source_present_at': d.stamp(), 'source_present_version': event_version(event),
+                      'source_present_round': round_id}
+            reopened = (old['state'] in _TERMINAL and type(event.get('dealStatus')) is int
+                        and event['dealStatus'] in {0, 10})
+            if old['state'] != _LOCALLY_ENDED and not reopened:
+                result = {**previous, **source}
+                await db.execute('UPDATE monitor_event_followup SET result=? WHERE owner=? AND scope=? AND project=? AND device=? AND event_key=?',
+                                 (encode(result), *identity))
+                return projection({**old, 'result': encode(result)})
+            same = old['event_version'] == event_version(event)
+            decision = json.loads(old['decision'])
+            result = {**previous, 'reason': 'XDR 本轮明确返回待处置或处置中状态，已重新打开本地监测；历史处置审计保留。' if reopened else
+                      'XDR 本轮再次返回此事件，已恢复本地监测；旧忽略意图不自动恢复。',
+                'monitoring_restore': {'round_id': round_id, 'restored_at': d.stamp()},
+                'observed_rounds': previous.get('observed_rounds', []) if same and not reopened else [],
+                'observed_status': event.get('dealStatus'),
+                'xdr_closed': False, 'external': False, **source}
+            state = 'risk_open' if same and decision.get('verdict') == 'risk' else 'watching'
+            await db.execute('UPDATE monitor_event_followup SET state=?,event=?,event_version=?,policy_revision=?,watch_count=?,last_round=?,queued_round=NULL,'
+                'target_status=NULL,result=?,updated_at=? WHERE owner=? AND scope=? AND project=? AND device=? AND event_key=? AND state=?',
+                (state, encode(event), event_version(event), policy_revision(policy), old['watch_count'] if same and not reopened else 0,
+                 old['last_round'] if same and not reopened else None, encode(result), d.stamp(), *identity, old['state']))
+            cursor = await db.execute('SELECT * FROM monitor_event_followup WHERE owner=? AND scope=? AND project=? AND device=? AND event_key=?', identity)
+            return projection(dict(await cursor.fetchone()))
 
 
 async def snapshot(policy, event_key=None, *, include_event=False):
@@ -148,6 +302,8 @@ async def observe(policy, event, round_id, *, query_complete=True):
         cursor = await db.execute('SELECT * FROM monitor_event_followup WHERE owner=? AND scope=? AND project=? AND device=? AND event_key=?', identity)
         existing = await cursor.fetchone()
         old = dict(existing) if existing else None
+        if old and old['state'] == _LOCALLY_ENDED:
+            return projection(old)  # A cached investigation cannot restore source presence.
         same = bool(old and old['policy_revision'] == revision and old['event_version'] == version)
         if same and old['state'] in _TERMINAL and event.get('dealStatus') not in {40,60} and query_complete:
             same = False  # Source explicitly reopened; preserve audit, release old closure.
@@ -155,7 +311,9 @@ async def observe(policy, event, round_id, *, query_complete=True):
             return projection(old)
         count = old['watch_count'] if same else 0
         last_round = old['last_round'] if same else None
-        previous_result = json.loads(old['result']) if same else {}
+        old_result = json.loads(old['result']) if old else {}
+        lifecycle = {key: old_result[key] for key in _LIFECYCLE_FIELDS if key in old_result}
+        previous_result = old_result if same else {}
         observed_rounds = previous_result.get('observed_rounds', [])
         observed_rounds = [v for v in observed_rounds if isinstance(v, str)] if isinstance(observed_rounds, list) else []
         if last_round and last_round not in observed_rounds:
@@ -178,7 +336,7 @@ async def observe(policy, event, round_id, *, query_complete=True):
                          'decision=excluded.decision,state=excluded.state,watch_count=excluded.watch_count,last_round=excluded.last_round,'
                          'queued_round=excluded.queued_round,target_status=excluded.target_status,disposition_id=NULL,result=excluded.result,updated_at=excluded.updated_at',
                          (*identity, revision, version, encode(event), encode(assessment), state, count, last_round,
-                          round_id if target else None, target, encode({'reason': reason, 'observed_rounds': observed_rounds[:144], 'decision_kind': assessment['verdict'] if assessment['verdict'] in {'benign', 'risk'} else 'uncertain'}), stamp, stamp))
+                          round_id if target else None, target, encode({**lifecycle, 'reason': reason, 'observed_rounds': observed_rounds[:144], 'decision_kind': assessment['verdict'] if assessment['verdict'] in {'benign', 'risk'} else 'uncertain'}), stamp, stamp))
         cursor = await db.execute('SELECT * FROM monitor_event_followup WHERE owner=? AND scope=? AND project=? AND device=? AND event_key=?', identity)
         return projection(dict(await cursor.fetchone()))
 
@@ -207,6 +365,8 @@ class FollowupAdapter(XdrAdapter):
         identifiers = params.get('uuids')
         if device not in self.policy.devices or not isinstance(identifiers, list) or len(identifiers) != 1:
             raise PermissionError('下一轮标记每次只允许操作一个受控事件')
+        if await is_monitoring_ended(self.policy.owner, self.policy.project, f'{device}:incident:{identifiers[0]}', scope=self.policy.scope):
+            raise ContractError('事件未再检出，已停止跟进，不再自动修改此事件的 XDR 状态')
         # This adapter is internal and only used after durable intent selection.
         if params.get('deal_status') not in {40, 60}:
             raise PermissionError('下一轮只允许已授权的处置完成或忽略状态')

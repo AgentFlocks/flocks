@@ -295,6 +295,9 @@ def round_summary(status, result, observed, feedback, notification, enabled, dev
         text += f"\n状态跟进：本轮核验前轮意图 {lifecycle.get('processed', 0)} 条，回查确认 {lifecycle.get('verified', 0)} 条；新产生的忽略意图留待下一轮执行。中低风险证据不足默认观察 {lifecycle.get('observation_rounds', 6)} 轮，高风险存疑持续保留。"
         if lifecycle.get('reconciliation', {}).get('external_closed'):
             text += f"按原事件编号确认 {lifecycle['reconciliation']['external_closed']} 条已由外部处置结束。"
+        if lifecycle.get('reconciliation', {}).get('monitoring_ended'):
+            text += (f"完整 XDR 查询未再返回 {lifecycle['reconciliation']['monitoring_ended']} 条历史事件，已归档；"
+                     '保留原研判与历史记录，不再自动观察或跟进。')
         warnings = lifecycle.get('errors', []) + lifecycle.get('reconciliation', {}).get('errors', [])
         if warnings:
             text += '\n跟进待核验：' + '；'.join(warnings[:5])

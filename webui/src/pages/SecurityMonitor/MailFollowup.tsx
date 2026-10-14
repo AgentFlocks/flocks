@@ -30,6 +30,7 @@ type Selection =
 const PAGE_SIZE = 100;
 const states: Record<string, string> = {
   queued: "等待发送",
+  blocked: "邮件通道异常 · 未发送",
   sending: "正在发送",
   sent: "已发送",
   send_unknown: "发送结果待确认",
@@ -43,6 +44,7 @@ const states: Record<string, string> = {
   unrelated: "已转回普通邮件会话",
   forwarding: "正在转交普通会话",
   waiting_reply: "等待回信",
+  monitoring_ended: "已归档",
 };
 const label = (s: string) => states[s] || s;
 const date = (s: string) =>
@@ -50,7 +52,7 @@ const date = (s: string) =>
 const button =
   "inline-flex items-center justify-center gap-1.5 rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-600 transition-colors hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-40 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-300 dark:hover:bg-gray-800";
 const cell = "px-4 py-4 align-top";
-type ManualTarget = "handled" | "unhandled";
+type ManualTarget = "handled" | "ignored" | "unhandled";
 
 function requestId() {
   if (crypto.randomUUID) return crypto.randomUUID();
@@ -68,6 +70,9 @@ function DispositionBadge({ notice }: { notice: Notice }) {
   const handled =
     notice.disposition_state === "handled" ||
     (!notice.disposition_state && notice.manual?.state === "handled");
+  const ignored =
+    notice.disposition_state === "ignored" ||
+    notice.manual?.state === "ignored";
   const source =
     notice.disposition_source || (notice.manual?.state ? "manual" : null);
   return (
@@ -75,16 +80,28 @@ function DispositionBadge({ notice }: { notice: Notice }) {
       <span
         className={`inline-flex rounded-md px-2 py-1 text-xs font-medium ${handled ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300" : "bg-blue-50 text-blue-700 dark:bg-blue-950/40 dark:text-blue-300"}`}
       >
-        {handled ? "已处置 · XDR 已确认" : "未处置"}
+        {notice.manual?.state === "pending"
+          ? notice.manual.target_status === 60
+            ? "待下一轮忽略"
+            : "待下一轮标记已处置"
+          : handled
+            ? "已处置 · XDR 已确认"
+            : ignored
+              ? "已忽略 · XDR 已确认"
+              : "未处置"}
       </span>
       {source && (
         <p className="text-xs text-gray-500">
-          {source === "reply" ? "回信自动更新" : "人工标记"}
+          {source === "reply"
+            ? "回信自动更新"
+            : source === "xdr"
+              ? "XDR 已确认"
+              : "人工标记"}
         </p>
       )}
       {notice.manual?.state === "pending" && (
         <p className="text-xs text-blue-700 dark:text-blue-300">
-          系统将自动回查 · 尚未确认已处置
+          系统将在下一轮标记并回查
         </p>
       )}
       {notice.manual?.state === "failed" && (
@@ -119,9 +136,9 @@ function applyManual(notice: Notice, manual: MailManualStatus): Notice {
   return {
     ...notice,
     manual,
-    ...(manual.state === "handled"
+    ...(["handled", "ignored"].includes(manual.state || "")
       ? ({
-          disposition_state: "handled",
+          disposition_state: manual.state as "handled" | "ignored",
           disposition_source: "manual",
         } as const)
       : manual.state === "unhandled" && notice.disposition_state !== "handled"
@@ -134,9 +151,11 @@ function applyManual(notice: Notice, manual: MailManualStatus): Notice {
 }
 
 function DeliveryBadge({ notice }: { notice: Notice }) {
-  return ["queued", "failed"].includes(notice.state) && notice.error ? (
+  return notice.state === "blocked" ? (
+    <StatusBadge state="blocked" />
+  ) : ["queued", "failed"].includes(notice.state) && notice.error ? (
     <span className="inline-flex rounded-md bg-amber-50 px-2 py-1 text-xs font-medium text-amber-800 dark:bg-amber-950/40 dark:text-amber-300">
-      发送失败 · 待重试
+      {notice.sent_at ? "重发未成功 · 此前已发送" : "未发送 · 可重试"}
     </span>
   ) : (
     <StatusBadge state={notice.state} />
@@ -158,7 +177,7 @@ function StatusBadge({ state }: { state: string }) {
   const tone =
     state === "verified"
       ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300"
-      : ["needs_review", "mismatch", "failed"].includes(state)
+      : ["needs_review", "mismatch", "failed", "blocked"].includes(state)
         ? "bg-amber-50 text-amber-800 dark:bg-amber-950/40 dark:text-amber-300"
         : "bg-blue-50 text-blue-700 dark:bg-blue-950/40 dark:text-blue-300";
   return (
@@ -265,7 +284,7 @@ function NoticeDetail({ notice }: { notice: Notice }) {
   return (
     <div className="space-y-6">
       <dl className="grid grid-cols-2 gap-5">
-        <DetailField title="发送时间">
+        <DetailField title={notice.sent_at ? "首次发送时间" : "记录时间"}>
           {date(notice.sent_at || notice.created_at)}
         </DetailField>
         <DetailField title="收件人">{notice.recipient}</DetailField>
@@ -295,7 +314,15 @@ function NoticeDetail({ notice }: { notice: Notice }) {
           <ReplyBadge notice={notice} />
         </DetailField>
       </dl>
-      {notice.manual && (
+      {notice.manual?.notes && (
+        <div className="rounded-lg bg-sky-50 p-3 text-sm dark:bg-sky-950/30">
+          <p className="mb-1 text-xs text-gray-500">人工备注</p>
+          <p className="whitespace-pre-wrap break-words">
+            {notice.manual.notes}
+          </p>
+        </div>
+      )}
+      {notice.manual?.reason && !notice.manual.available && (
         <div className="space-y-1 rounded-lg bg-blue-50 p-3 text-sm text-blue-800 dark:bg-blue-950/30 dark:text-blue-200">
           <p>{notice.manual.reason}</p>
           {notice.manual.updated_at && (
@@ -474,14 +501,20 @@ export default function MailFollowup() {
   const [retryMessages, setRetryMessages] = useState<Record<string, string>>(
     {},
   );
-  const retryRequests = useRef(new Map<string, { request_id: string }>());
+  const retryRequests = useRef(
+    new Map<string, { request_id: string; expected_updated_at?: string }>(),
+  );
+  const [notes, setNotes] = useState<Record<string, string>>({});
   const [manualBusy, setManualBusy] = useState<Record<string, boolean>>({});
   const [manualErrors, setManualErrors] = useState<Record<string, string>>({});
   const [uncertainTargets, setUncertainTargets] = useState<
     Record<string, ManualTarget | undefined>
   >({});
   const manualRequests = useRef(
-    new Map<string, { request_id: string; state: ManualTarget }>(),
+    new Map<
+      string,
+      { request_id: string; state: ManualTarget; notes: string }
+    >(),
   );
   const inFlight = useRef(new Set<string>());
   const sequence = useRef(0);
@@ -503,7 +536,7 @@ export default function MailFollowup() {
               ...old,
               [notice.id]:
                 notice.state === "sent"
-                  ? "邮件已发送；告警继续保留，等待处置反馈。"
+                  ? "邮件已发送。"
                   : "投递结果仍未确认，系统不会重复发送；告警继续保留。",
             }));
           }
@@ -547,7 +580,11 @@ export default function MailFollowup() {
       let request = manualRequests.current.get(notice.id);
       if (request && request.state !== target) return;
       if (!request) {
-        request = { request_id: requestId(), state: target };
+        request = {
+          request_id: requestId(),
+          state: target,
+          notes: (notes[notice.id] ?? notice.manual?.notes ?? "").trim(),
+        };
         manualRequests.current.set(notice.id, request);
       }
       const result = await monitoringApi.setMailManualStatus(
@@ -600,7 +637,12 @@ export default function MailFollowup() {
     setRetryMessages((old) => ({ ...old, [notice.id]: "" }));
     let request = retryRequests.current.get(notice.id);
     if (!request) {
-      request = { request_id: requestId() };
+      request = {
+        request_id: requestId(),
+        ...(notice.updated_at
+          ? { expected_updated_at: notice.updated_at }
+          : {}),
+      };
       retryRequests.current.set(notice.id, request);
     }
     try {
@@ -626,9 +668,7 @@ export default function MailFollowup() {
       setRetryMessages((old) => ({
         ...old,
         [notice.id]:
-          result.data.state === "sent"
-            ? "邮件已发送；告警继续保留，等待处置反馈。"
-            : "本次发送结果已更新；告警继续保留，等待处置反馈。",
+          result.data.state === "sent" ? "邮件已发送。" : "发送结果已更新。",
       }));
       if (result.data.error)
         setRetryErrors((old) => ({ ...old, [notice.id]: result.data.error! }));
@@ -702,9 +742,6 @@ export default function MailFollowup() {
           <h2 className="text-base font-semibold text-gray-900 dark:text-gray-100">
             邮件跟进
           </h2>
-          <p className="mt-1 text-xs leading-relaxed text-gray-500">
-            每条告警集中展示发信、回信和处置状态。邮件已发送或收到回复均不代表处置完成；邮件状态和是否有回信不决定监测任务成败。
-          </p>
         </div>
         <div className="flex shrink-0 flex-wrap justify-end gap-2">
           <Link className={button} to={`${MONITOR_PATH}/configuration`}>
@@ -746,12 +783,6 @@ export default function MailFollowup() {
           封邮件未能解析，原信保留在邮箱中，请核对并导出诊断日志。其他回信继续处理。
         </p>
       )}
-      <p className="mb-4 rounded-lg bg-blue-50 px-4 py-3 text-xs leading-relaxed text-blue-800 dark:bg-blue-950/30 dark:text-blue-200">
-        每条告警单独发一封邮件。发送失败可点击“重试发送”；已发送但尚无回信时不重复发信。
-        发信失败或一直未回信的告警持续保留，直到收到反馈或人工标记“已处置”。
-        人工仅操作重试发送与处置标签：选择“已处置”将向该告警所属 XDR
-        写回处置完成，系统自动回查； “未处置”仅记录跟进状态，不回退 XDR 状态。
-      </p>
       <section className="overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm dark:border-gray-800 dark:bg-gray-900">
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-gray-100 px-4 py-3 dark:border-gray-800">
           <h3 id="mail-records-title" className="text-sm font-semibold">
@@ -759,7 +790,8 @@ export default function MailFollowup() {
           </h3>
           {data && (
             <p className="text-xs text-gray-500">
-              已发送 {data.counts.sent || 0} 封 · 已收到 {replyCount} 封回信
+              已发送 {data.counts.sent || 0} 条告警通知 · 已收到 {replyCount}{" "}
+              封回信
             </p>
           )}
         </div>
@@ -779,7 +811,7 @@ export default function MailFollowup() {
           )}
           {data && !empty && (
             <div className="overflow-x-auto">
-              <table className="w-full min-w-[1240px] table-fixed text-left text-sm">
+              <table className="w-full min-w-[1120px] table-fixed text-left text-sm">
                 <caption className="sr-only">
                   告警邮件跟进，按时间从新到旧，包含发信、回信和处置状态
                 </caption>
@@ -788,8 +820,7 @@ export default function MailFollowup() {
                     <th className="w-40 px-4 py-3">发送 / 记录时间</th>
                     <th className="px-4 py-3">关联事件 / ID</th>
                     <th className="w-44 px-4 py-3">责任人邮箱</th>
-                    <th className="w-36 px-4 py-3">发信状态</th>
-                    <th className="w-36 px-4 py-3">回信状态</th>
+                    <th className="w-48 px-4 py-3">邮件状态</th>
                     <th className="w-60 px-4 py-3">处置标签 / 操作</th>
                     <th className="w-24 px-4 py-3">
                       <span className="sr-only">详情</span>
@@ -829,6 +860,7 @@ export default function MailFollowup() {
                       <td className={cell} onClick={(e) => e.stopPropagation()}>
                         <div className="space-y-2">
                           <DeliveryBadge notice={n} />
+                          <ReplyBadge notice={n} />
                           {n.retry?.available && (
                             <button
                               className={`${button} text-blue-700 dark:text-blue-300`}
@@ -837,7 +869,7 @@ export default function MailFollowup() {
                                 manualBusy[n.id] ||
                                 !!uncertainTargets[n.id]
                               }
-                              aria-label={`重试发送：${n.event.id}`}
+                              aria-label={`${n.state === "sent" ? "重新发送" : "重试发送"}：${n.event.id}`}
                               onClick={() => void retryNotice(n)}
                             >
                               <RefreshCw
@@ -847,10 +879,14 @@ export default function MailFollowup() {
                                 }
                                 aria-hidden="true"
                               />
-                              {retryBusy[n.id] ? "发送中…" : "重试发送"}
+                              {retryBusy[n.id]
+                                ? "发送中…"
+                                : n.state === "sent"
+                                  ? "重新发送"
+                                  : "重试发送"}
                             </button>
                           )}
-                          {n.retry?.reason && (
+                          {n.retry?.reason && !n.retry.available && (
                             <p className="text-xs leading-relaxed text-gray-500">
                               {n.retry.reason}
                             </p>
@@ -873,12 +909,35 @@ export default function MailFollowup() {
                           )}
                         </div>
                       </td>
-                      <td className={cell}>
-                        <ReplyBadge notice={n} />
-                      </td>
                       <td className={cell} onClick={(e) => e.stopPropagation()}>
                         <div className="space-y-2">
                           <DispositionBadge notice={n} />
+                          {n.manual?.available && (
+                            <textarea
+                              aria-label={`处置备注：${n.event.id}`}
+                              placeholder="备注（可选）"
+                              maxLength={2000}
+                              rows={2}
+                              className="w-full rounded-lg border border-gray-200 bg-transparent p-2 text-xs dark:border-gray-700"
+                              value={notes[n.id] ?? n.manual.notes ?? ""}
+                              disabled={
+                                manualBusy[n.id] ||
+                                retryBusy[n.id] ||
+                                !!uncertainTargets[n.id]
+                              }
+                              onChange={(e) =>
+                                setNotes((old) => ({
+                                  ...old,
+                                  [n.id]: e.target.value,
+                                }))
+                              }
+                            />
+                          )}
+                          {n.manual?.notes && (
+                            <p className="whitespace-pre-wrap break-words text-xs text-gray-500">
+                              备注：{n.manual.notes}
+                            </p>
+                          )}
                           {n.manual?.state !== "pending" &&
                             n.manual?.available && (
                               <div className="flex flex-wrap gap-2">
@@ -889,7 +948,8 @@ export default function MailFollowup() {
                                     retryBusy[n.id] ||
                                     retryRequests.current.has(n.id) ||
                                     n.manual.state === "handled" ||
-                                    uncertainTargets[n.id] === "unhandled"
+                                    (!!uncertainTargets[n.id] &&
+                                      uncertainTargets[n.id] !== "handled")
                                   }
                                   aria-label={`标记已处置：${n.event.id}`}
                                   onClick={() =>
@@ -899,13 +959,35 @@ export default function MailFollowup() {
                                   {manualBusy[n.id] ? "处理中…" : "标记已处置"}
                                 </button>
                                 <button
+                                  className={`${button} text-amber-700 dark:text-amber-300`}
+                                  disabled={
+                                    manualBusy[n.id] ||
+                                    retryBusy[n.id] ||
+                                    retryRequests.current.has(n.id) ||
+                                    (!!uncertainTargets[n.id] &&
+                                      uncertainTargets[n.id] !== "ignored")
+                                  }
+                                  aria-label={`标记忽略：${n.event.id}`}
+                                  onClick={() =>
+                                    void updateManual(n, "ignored")
+                                  }
+                                >
+                                  标记忽略
+                                </button>
+                                <button
                                   className={button}
                                   disabled={
                                     manualBusy[n.id] ||
                                     retryBusy[n.id] ||
                                     retryRequests.current.has(n.id) ||
-                                    n.manual.state === "unhandled" ||
-                                    uncertainTargets[n.id] === "handled"
+                                    (n.manual.state === "unhandled" &&
+                                      (
+                                        notes[n.id] ??
+                                        n.manual.notes ??
+                                        ""
+                                      ).trim() === (n.manual.notes ?? "")) ||
+                                    (!!uncertainTargets[n.id] &&
+                                      uncertainTargets[n.id] !== "unhandled")
                                   }
                                   aria-label={`标记未处置：${n.event.id}`}
                                   onClick={() =>
@@ -916,7 +998,7 @@ export default function MailFollowup() {
                                 </button>
                               </div>
                             )}
-                          {n.manual?.reason && (
+                          {n.manual?.reason && !n.manual.available && (
                             <p className="text-xs leading-relaxed text-gray-500">
                               {n.manual.reason}
                             </p>
@@ -961,9 +1043,6 @@ export default function MailFollowup() {
                 aria-hidden="true"
               />
               <p>暂无告警邮件记录</p>
-              <p className="text-xs">
-                已发送、发送失败或结果待确认的通知会显示在这里。
-              </p>
             </div>
           )}
         </div>
@@ -998,9 +1077,6 @@ export default function MailFollowup() {
           <h3 className="text-sm font-semibold">
             待关联回信 · {unmatchedReplies.length} 封
           </h3>
-          <p className="mt-1 text-xs text-gray-500">
-            回信已保存，尚未关联到具体告警；不需要人工审批。
-          </p>
           <ul className="mt-3 divide-y divide-gray-100 dark:divide-gray-800">
             {unmatchedReplies.map((reply) => (
               <li

@@ -75,6 +75,9 @@ async def auto(tmp_path, monkeypatch):
     monkeypatch.setattr(m, '_round_locks', {})
     state.send = AsyncMock(return_value=True)
     monkeypatch.setattr(m.transport, 'send', state.send)
+    monkeypatch.setattr(m, 'health_snapshot', AsyncMock(return_value={
+        'enabled': True, 'send': {'state': 'healthy'}, 'receive': {'state': 'healthy'}, 'errors': [],
+    }))
     # Mail/feedback tests start from an actually completed, evidence-bound risk
     # investigation; source severity alone no longer authorizes a notification.
     from flocks.monitoring.investigation import fingerprint, EVIDENCE_SCHEMA
@@ -849,7 +852,7 @@ async def test_new_activity_requires_new_behavioral_investigation_before_notific
     assert json.loads(n['event'])['assessment']['notify_eligible'] is True and not writes(auto)
 
 
-async def test_mail_history_pages_sent_and_delivery_unknown_but_not_unsent(auto):
+async def test_mail_history_pages_include_pending_notices_and_delivery_results(auto):
     states = ['sent', 'queued', 'sent', 'skipped', 'send_unknown', 'sent']
     sent_ids = []
     for index, state in enumerate(states):
@@ -865,12 +868,14 @@ async def test_mail_history_pages_sent_and_delivery_unknown_but_not_unsent(auto)
         stamp = f'2026-09-25T{index:02d}:00:00+00:00'
         await write('UPDATE monitor_mail_notices SET state=?,created_at=?,updated_at=?,sent_at=? WHERE id=?',
                     (state, '2026-09-24T00:00:00+00:00', stamp, stamp if state == 'sent' else None, n['id']))
-        if state in ('sent', 'send_unknown'): sent_ids.append(n['id'])
+        if state in ('sent', 'send_unknown', 'queued'): sent_ids.append(n['id'])
     first = await m.history('owner', limit=2, tab='sent')
     second = await m.history('owner', limit=2, offset=2, tab='sent')
     assert [n['id'] for n in first['notices']] == sent_ids[::-1][:2]
-    assert [n['id'] for n in second['notices']] == sent_ids[::-1][2:]
-    assert first['has_more'] is True and second['has_more'] is False
+    assert [n['id'] for n in second['notices']] == sent_ids[::-1][2:4]
+    third = await m.history('owner', limit=2, offset=4, tab='sent')
+    assert [n['id'] for n in third['notices']] == sent_ids[::-1][4:]
+    assert first['has_more'] is True and second['has_more'] is True and not third['has_more']
     assert first['notices'][0]['sent_at'] == '2026-09-25T05:00:00+00:00'
     assert first['replies'] == second['replies'] == []
     assert first['counts']['sent'] == 3

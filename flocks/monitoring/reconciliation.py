@@ -1,4 +1,4 @@
-"""Exact-ID follow-up for previously seen incidents omitted by an incremental list."""
+"""Reconcile complete source membership and explicit exact-ID status facts."""
 import asyncio
 import json
 
@@ -7,6 +7,44 @@ from .assessment import apply_followup, assess_event
 from .automatic import read_event
 from .store import rows, write, encode, connection
 from .summaries import Summary
+
+
+async def finish_missing(policy, current_keys, completed_devices, round_id):
+    """A complete source snapshot can end monitoring, never prove remediation.
+
+    Incremental absence and failed/partial pagination cannot enter this path.
+    Keep all past facts; this only ends local follow-up for the absent event.
+    """
+    from . import followup
+    devices = set(completed_devices) & set(policy.devices)
+    if not devices:
+        return set()
+    marks = ','.join('?' for _ in devices)
+    candidates = await rows(
+        'WITH latest AS (SELECT o.event_key,MAX(a.sequence) AS sequence '
+        'FROM monitor_observations o JOIN monitor_attempts a ON a.id=o.attempt_id '
+        'WHERE a.owner=? AND a.scope=? AND a.project=? GROUP BY o.event_key) '
+        'SELECT o.event_key,o.data FROM latest l JOIN monitor_attempts a ON a.sequence=l.sequence '
+        'JOIN monitor_observations o ON o.attempt_id=a.id AND o.event_key=l.event_key '
+        'LEFT JOIN monitor_event_followup f ON f.owner=a.owner AND f.scope=a.scope '
+        'AND f.project=a.project AND f.event_key=o.event_key '
+        f"WHERE json_valid(o.data) AND json_type(o.data)='object' AND json_extract(o.data,'$.device') IN ({marks}) "
+        "AND COALESCE(json_extract(o.data,'$.dealStatus'),-1) NOT IN (40,60) "
+        "AND COALESCE(f.state,'') NOT IN ('verified','external_closed','monitoring_ended')",
+        (policy.owner, policy.scope, policy.project, *sorted(devices)))
+    ended = set()
+    for item in candidates:
+        if item['event_key'] in current_keys:
+            continue
+        event = json.loads(item['data'])
+        if (not event.get('id') or event.get('device') not in devices
+                or item['event_key'] != f"{event['device']}:incident:{event['id']}"):
+            continue
+        event['key'] = item['event_key']
+        state = await followup.end_missing(policy, event, round_id)
+        if state and state['state'] == 'monitoring_ended':
+            ended.add(item['event_key'])
+    return ended
 
 
 async def recheck_existing(policy, adapter, recorder, round_id, current_keys, *, limit=12, timeout_seconds=60):
@@ -26,7 +64,7 @@ async def recheck_existing(policy, adapter, recorder, round_id, current_keys, *,
         'LEFT JOIN monitor_event_followup f ON f.owner=a.owner AND f.scope=a.scope AND f.project=a.project AND f.event_key=o.event_key '
         f"WHERE json_valid(o.data) AND json_type(o.data)='object' AND json_extract(o.data,'$.device') IN ({marks}) "
         "AND (COALESCE(json_extract(o.data,'$.dealStatus'),-1) NOT IN (40,60) OR json_extract(o.data,'$.source_terminal_unmatched')=1) "
-        "AND COALESCE(f.state,'') NOT IN ('verified','external_closed') "
+        "AND COALESCE(f.state,'') NOT IN ('verified','external_closed','monitoring_ended') "
         + exclude_sql + ' ORDER BY COALESCE(f.updated_at,\'\'),a.sequence LIMIT ?',
         (policy.owner, policy.scope, policy.project, *policy.devices, *excluded, min(100, limit)))
     result, checked_keys = [], set()

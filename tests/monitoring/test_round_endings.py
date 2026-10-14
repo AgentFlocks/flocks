@@ -302,7 +302,7 @@ def enable_fixture_mail(context, monkeypatch):
     from flocks.monitoring import mailflow
     monkeypatch.setattr(mailflow, 'settings', AsyncMock(return_value={
         'enabled': True, 'project': context.policy.project, 'revision': 'fixture-revision',
-        'recipient': 'responsible@example.invalid', 'mailbox': 'fixture-mailbox',
+        'recipient': 'responsible@example.invalid', 'responsible_name': '模拟责任人', 'mailbox': 'fixture-mailbox',
     }))
     # Delivery outcome tests use a confirmed malicious behavior, rather than
     # borrowing the source severity as a reason to send an email.
@@ -346,7 +346,7 @@ async def test_notification_failure_is_visible_without_failing_investigation_rou
     # Seed the already-accepted historical delivery at the service boundary;
     # the fresh round below still performs its real evidence investigation.
     with monkeypatch.context() as patch:
-        patch.setattr(mailflow, 'notification_assessment', AsyncMock(return_value={'notify_eligible': True}))
+        patch.setattr(mailflow, 'notification_assessment', AsyncMock(return_value=({'notify_eligible': True, 'verdict': 'risk', 'reason': '模拟风险'}, {'result': {'verdict': 'risk', 'reason': '模拟风险'}, 'evidence': []})))
         await mailflow.queue_notices(context.policy, [event], 'earlier-session')
     # The notification batch and Recorder persist actual state. Only the
     # network-facing one-notice service is simulated for each transport result.
@@ -380,7 +380,7 @@ async def test_existing_sent_notification_deduplicates_without_marking_round_fai
     # Seed the already-accepted historical delivery at the service boundary;
     # the fresh round below still performs its real evidence investigation.
     with monkeypatch.context() as patch:
-        patch.setattr(mailflow, 'notification_assessment', AsyncMock(return_value={'notify_eligible': True}))
+        patch.setattr(mailflow, 'notification_assessment', AsyncMock(return_value=({'notify_eligible': True, 'verdict': 'risk', 'reason': '模拟风险'}, {'result': {'verdict': 'risk', 'reason': '模拟风险'}, 'evidence': []})))
         await mailflow.queue_notices(context.policy, [event], 'earlier-session')
     await write("UPDATE monitor_mail_notices SET state='sent'")
     send = AsyncMock(side_effect=AssertionError('must not re-send'))
@@ -557,7 +557,7 @@ async def test_mail_stage_cancellation_still_stops_monitoring(context, monkeypat
     assert attempt['status'] == 'failed' and '中断' in card.text
 
 
-async def test_zero_event_round_exposes_old_system_failure_and_retry_plan(context, monkeypatch):
+async def test_zero_event_round_ends_missing_system_failure_without_retry_plan(context, monkeypatch):
     monkeypatch.setattr(investigation, 'choose', AsyncMock(side_effect=ContractError('调查模型没有返回完整决策')))
     await runtime.run(context.execution, context.policy, context.adapter)
     context.events.clear()
@@ -565,13 +565,14 @@ async def test_zero_event_round_exposes_old_system_failure_and_retry_plan(contex
     attempt, _, card = await ending()
     facts = json.loads(attempt['result'])
     assert outcome.action == 'stop'
-    assert facts['events'] == 0  # cooldown prevents a repeated model call
-    assert facts['investigation_backlog']['system_wait'] == 1
+    assert facts['events'] == 0
+    assert facts['investigation_backlog']['system_wait'] == 0
+    assert facts['followup']['reconciliation']['monitoring_ended'] == 1
     assert facts['errors'] == [] and not attempt['error']
     assert facts['query_events'] == 0 and facts['resumed_events'] == 0
-    assert '系统故障 1 条' in card.text
-    assert '历史故障待恢复，不代表本轮再次失败' in card.text
-    assert '不早于' in attempt['next_step']
+    assert '已归档' in card.text
+    assert '历史故障待恢复' not in card.text
+    assert '不早于' not in attempt['next_step']
 
 
 @pytest.mark.parametrize('query_hits_waiting_event', [False, True])
@@ -601,11 +602,16 @@ async def test_system_failure_only_fails_round_when_retry_actually_runs(context,
     attempt, _, card = await ending()
     result = json.loads(attempt['result'])
     assert second.action == 'stop' and attempt['status'] == 'completed'
-    assert result['errors'] == [] and result['investigation_backlog']['system_wait'] == 1
+    assert result['errors'] == []
+    assert result['investigation_backlog']['system_wait'] == int(query_hits_waiting_event)
     assert choose.await_count == 1
     assert result['query_events'] == int(query_hits_waiting_event)
     assert result['resumed_events'] == result['query_resumed_overlap'] == 0
-    assert '历史故障待恢复，不代表本轮再次失败' in card.text
+    if query_hits_waiting_event:
+        assert '历史故障待恢复，不代表本轮再次失败' in card.text
+    else:
+        assert result['followup']['reconciliation']['monitoring_ended'] == 1
+        assert '已归档' in card.text
     failed_steps = await rows("SELECT * FROM monitor_steps WHERE attempt_id=? AND status='failed'", (attempt['id'],))
     assert all(step['tool'] == '核对历史事件状态' for step in failed_steps)
     if query_hits_waiting_event:
@@ -620,6 +626,13 @@ async def test_system_failure_only_fails_round_when_retry_actually_runs(context,
     third = await runtime.run(context.execution, context.policy, context.adapter)
     attempt, _, _ = await ending()
     result = json.loads(attempt['result'])
+    if not query_hits_waiting_event:
+        assert third.action == 'stop' and attempt['status'] == 'completed'
+        assert choose.await_count == 1 and result['errors'] == []
+        assert result['events'] == result['resumed_events'] == 0
+        case = (await rows('SELECT * FROM monitor_investigations'))[0]
+        assert case['failure_count'] == case['attempts'] == 1
+        return
     assert third.action == 'error' and attempt['status'] == 'failed'
     assert choose.await_count == 2 and len(result['errors']) == 1
     assert result['query_events'] == int(query_hits_waiting_event)
@@ -642,7 +655,12 @@ async def test_exhausted_history_remains_visible_without_failing_new_round(conte
     attempt, _, card = await ending()
     assert outcome.action == 'stop' and attempt['status'] == 'completed'
     assert choose.await_count == 1
-    assert '已停止自动恢复' in card.text and '暂停并重新启动' in attempt['next_step']
+    if query_hits_waiting_event:
+        assert '已停止自动恢复' in card.text and '暂停并重新启动' in attempt['next_step']
+    else:
+        assert '已归档' in card.text
+        assert '暂停并重新启动' not in attempt['next_step']
+        assert json.loads(attempt['result'])['followup']['reconciliation']['monitoring_ended'] == 1
     failed_steps = await rows("SELECT * FROM monitor_steps WHERE attempt_id=? AND status='failed'", (attempt['id'],))
     assert all(step['tool'] == '核对历史事件状态' for step in failed_steps)
 
@@ -661,19 +679,21 @@ async def test_resumed_work_counts_are_separate_from_current_query(context, monk
     attempt, _, card = await ending()
     result = json.loads(attempt['result'])
     assert outcome.action == 'stop'
-    assert result['events'] == result['analyzed'] == result['resumed_events'] == 1
+    assert result['events'] == result['analyzed'] == result['resumed_events'] == int(query_hits_history)
     assert result['query_events'] == result['query_resumed_overlap'] == int(query_hits_history)
-    assert f'本轮查询返回 {int(query_hits_history)} 条，纳入历史待办 1 条' in card.text
-    assert '本轮共纳入 1 条事件' in card.text
     assert '读取 1 条事件' not in card.text
     if query_hits_history:
+        assert '本轮查询返回 1 条，纳入历史待办 1 条' in card.text
+        assert '本轮共纳入 1 条事件' in card.text
         assert '已合并去重' in card.text
+    else:
+        assert result['followup']['reconciliation']['monitoring_ended'] == 1
+        assert '已归档' in card.text
 
 
 async def test_manual_review_is_not_promised_automatic_resumption(context):
     await runtime.run(context.execution, context.policy, context.adapter)
     await write("UPDATE monitor_investigations SET state='needs_review'")
-    context.events.clear()
     outcome = await runtime.run(context.execution, context.policy, context.adapter)
     attempt, _, card = await ending()
     assert outcome.action == 'stop'

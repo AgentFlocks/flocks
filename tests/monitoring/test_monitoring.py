@@ -77,7 +77,7 @@ async def test_legacy_development_policy_queries_all_devices_with_production_fil
     assert {json.loads(row['data'])['device'] for row in observations} == {'xdr-1', 'xdr-2'}
     calls = [c for c in FixtureAdapter.calls if c['action'] == 'list']
     assert len(calls) == 2
-    assert calls[0]['start_time'] == (123456 - 600 if has_cursor else calls[0]['end_time'] - 86400)
+    assert all(call['start_time'] == call['end_time'] - 86400 for call in calls)
     assert all(call['deal_statuses'] == [0, 10] and call['white_status'] == ['未加白', '部分加白'] for call in calls)
     assert all(call['page_size'] == 100 for call in calls)
     report = (await rows('SELECT * FROM monitor_reports'))[0]
@@ -198,7 +198,8 @@ async def test_export_failure_retry_does_not_query(policy, monkeypatch):
 
 @pytest.mark.parametrize('payload', [{}, {'data': {}}, {'data': {'list': [{'name': 'missing ID'}]}}, {'data': {'list': [], 'total': '5'}}])
 def test_unknown_contract_never_becomes_no_events(payload):
-    with pytest.raises(ContractError): page_items(payload)
+    with pytest.raises(ContractError):
+        page_items(payload)
 
 @pytest.mark.parametrize('risk', [3, 4, None, '1', 99])
 def test_unknown_not_ignored(risk):
@@ -214,7 +215,8 @@ def test_native_incident_severity_takes_precedence(severity, risk):
     assert event['riskLevel'] is None
     assert event['incidentSeverity'] == (severity if type(severity) is int and severity in {-1, 1, 2, 3, 4} else None)
     assert event['incidentThreatClass'] == '恶意软件' and event['incidentThreatType'] == '木马'
-    if risk == 'risk': assert 'incidentSeverity' in event['reason']
+    if risk == 'risk':
+        assert 'incidentSeverity' in event['reason']
 
 
 @pytest.mark.parametrize('level,risk', [(0,'risk'), (1,'risk'), (2,'risk'), (3,'unknown'), (4,'unknown'), (5,'unknown')])
@@ -228,9 +230,11 @@ async def test_full_pagination_missing_page_does_not_advance_cursor(policy):
     class Paged(FixtureAdapter):
         fail = False
         async def call(self, device, params, message):
-            if params['action'] != 'list': return await super().call(device, params, message)
+            if params['action'] != 'list':
+                return await super().call(device, params, message)
             page = params['page_num']
-            if page == 2 and self.fail: raise ContractError('fixture page unavailable')
+            if page == 2 and self.fail:
+                raise ContractError('fixture page unavailable')
             items = [{'uuId': str(i), 'riskLevel': 1} for i in (range(100) if page == 1 else range(100, 105))]
             return {'data': {'list': items, 'total': 105}}
     class QuietRecorder:
@@ -238,8 +242,10 @@ async def test_full_pagination_missing_page_does_not_advance_cursor(policy):
     adapter = Paged(policy, 'fixture')
     assert len(await query_device(adapter, 'xdr-1', 0, 100, QuietRecorder())) == 105
     adapter.fail = True
-    with pytest.raises(ContractError): await query_device(adapter, 'xdr-1', 0, 100, QuietRecorder())
-    class Failed(Paged): fail = True
+    with pytest.raises(ContractError):
+        await query_device(adapter, 'xdr-1', 0, 100, QuietRecorder())
+    class Failed(Paged):
+        fail = True
     scheduler = await scheduler_for(policy)
     execution = await TaskManager.create_execution_from_scheduler(scheduler, trigger_type=ExecutionTriggerType.RUN_ONCE, enqueue=False)
     result = await run(execution, policy, Failed)
@@ -270,7 +276,8 @@ async def test_144_online_slots_and_downtime_missing(policy):
     stamp = datetime(2026, 9, 22, 16, tzinfo=timezone.utc)
     scheduler.trigger.next_run = stamp
     await TaskStore.update_scheduler(scheduler)
-    for n in range(144): await admit_slots(scheduler, stamp + timedelta(minutes=10*n))
+    for n in range(144):
+        await admit_slots(scheduler, stamp + timedelta(minutes=10*n))
     assert len(await rows('SELECT * FROM monitor_slots')) == 144
     assert len(await rows('SELECT * FROM task_execution_queue_refs')) == 1
     assert len(await rows("SELECT * FROM monitor_slots WHERE status='coalesced'")) == 143

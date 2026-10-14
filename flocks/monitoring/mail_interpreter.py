@@ -89,7 +89,8 @@ def validate(result, payload, notices):
     current = new_text(payload['text'])
     context = payload['text'] + '\n' + str(payload.get('subject') or '')
     headers = ' '.join(str(payload.get(k) or '') for k in ('reply_to_id', 'thread_id', 'references'))
-    header_ids = {n['id'] for n in notices if n['message_id'] in re.findall(r'<[^<>\s]+>', headers)}
+    header_tokens = set(re.findall(r'<[^<>\s]+>', headers))
+    header_ids = {n['id'] for n in notices if header_tokens.intersection([n['message_id'], *n.get('delivery_message_ids', [])])}
     unique = set()
     validated = []
     for item in parsed.items:

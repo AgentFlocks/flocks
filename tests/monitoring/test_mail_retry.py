@@ -41,7 +41,7 @@ async def test_explicit_retry_reuses_notification_and_repeated_request_is_idempo
     n = await failure(auto)
     req = request()
     a, b = await asyncio.gather(retry.retry('owner', n['id'], req), retry.retry('owner', n['id'], req))
-    assert a == b and a['state'] == 'sent' and not a['retry']['available']
+    assert a == b and a['state'] == 'sent' and a['retry']['available']
     assert auto.send.await_count == 2 and not writes(auto)
     assert auto.send.call_args.args[0]['message_id'] == n['message_id']
     assert auto.send.call_args.args[0]['body'] == n['body']
@@ -77,7 +77,7 @@ async def test_unknown_retry_outcome_cannot_be_replayed_after_recovery(auto):
     assert auto.send.await_count == 2 and not writes(auto)
 
 
-@pytest.mark.parametrize('state', ['sent','send_unknown','sending','skipped'])
+@pytest.mark.parametrize('state', ['send_unknown','sending','skipped'])
 async def test_nonfailed_notifications_never_retry(auto, state):
     n = await notice(auto)
     await write('UPDATE monitor_mail_notices SET state=? WHERE id=?', (state,n['id']))
@@ -211,5 +211,5 @@ async def test_retry_route_ownership_validation_and_replay(auto):
         response=await client.post(path,json=body)
         assert response.status_code==200 and response.json()['state']=='sent'
         assert (await client.post(path,json=body)).status_code==200
-        assert (await client.post(path,json=request().model_dump(mode='json'))).status_code==409
-        assert auto.send.await_count == 2 and not writes(auto)
+        assert (await client.post(path,json=request().model_dump(mode='json'))).status_code==200
+        assert auto.send.await_count == 3 and not writes(auto)

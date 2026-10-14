@@ -8,9 +8,10 @@ import re
 
 from .event_details import redact_text
 
-STATUSES = ('risk_open', 'risk_closed', 'benign', 'insufficient')
+STATUSES = ('risk_open', 'risk_closed', 'benign', 'insufficient', 'ended')
 LABELS = {'risk_open': '有风险 · 处置中', 'risk_closed': '有风险 · 已处置',
-          'benign': '无风险 · 待忽略', 'insufficient': '证据不足 · 待观察'}
+          'benign': '无风险 · 待忽略', 'insufficient': '证据不足 · 待观察',
+          'ended': '已归档'}
 # Tiny field-presence projections use the same keys as the original raw facts.
 FACT_KEYS = {
     'srcIp', 'srcIps', 'sourceIp', 'src_ip', 'net.src_ip', 'dstIp', 'dstIps',
@@ -204,14 +205,28 @@ def apply_followup(assessment, event, followup):
     value.update(lifecycle=state, observation_rounds=followup.get('watch_count', 0),
                  target_status=target, external=bool(followup.get('external')),
                  lifecycle_reason=followup.get('reason') or '', ended=bool(followup.get('closed')))
-    if state == 'external_closed':
-        value.update(label='已由外部处置 · 已结束', notify_eligible=False)
+    if state == 'monitoring_ended':
+        ended_reason = (followup.get('reason') or
+                        'XDR 本轮完整查询未返回此事件，保留原研判和历史记录，停止后续自动跟进；未确认风险消除或实际处置结果。')
+        value.update(status='ended', label=LABELS['ended'], ended=True, external=False,
+                     xdr_closed=False, monitoring_ended=True, notify_eligible=False,
+                     investigation_reason=value.get('reason', ''), reason=ended_reason, lifecycle_reason=ended_reason)
+        if type(event.get('dealStatus')) is int and event['dealStatus'] in {40, 60}:
+            value.update(status='risk_closed' if value['verdict'] == 'risk' and event['dealStatus'] == 40 else 'ended',
+                         label='来源已处置' if event['dealStatus'] == 40 else '来源已忽略',
+                         xdr_closed=True, monitoring_ended=False,
+                         reason='XDR 来源记录已返回终态，保留来源状态；不据此推断操作人员或威胁消除。',
+                         lifecycle_reason='XDR 来源记录已返回终态，保留来源状态；不据此推断操作人员或威胁消除。')
+    elif state == 'external_closed':
+        value.update(label='已确认外部处置', notify_eligible=False, xdr_closed=True,
+                     status='risk_closed' if value['verdict'] == 'risk' and followup.get('observed_status') == 40 else 'ended')
     elif state == 'verified':
         if followup.get('observed_status') == 40:
-            value.update(label='有风险 · 已处置' if value['verdict'] == 'risk' else '已处置 · 已结束',
-                         status='risk_closed' if value['verdict'] == 'risk' else value['status'], notify_eligible=False)
+            value.update(label='有风险 · 已处置' if value['verdict'] == 'risk' else '已处置',
+                         status='risk_closed' if value['verdict'] == 'risk' else 'ended', xdr_closed=True, notify_eligible=False)
         elif followup.get('observed_status') == 60:
-            value.update(label='无风险 · 已忽略' if value['verdict'] == 'benign' else '证据不足 · 已忽略', notify_eligible=False)
+            value.update(label='无风险 · 已忽略' if value['verdict'] == 'benign' else '有风险 · 已忽略' if value['verdict'] == 'risk' else '证据不足 · 已忽略',
+                         status='benign' if value['verdict'] == 'benign' else 'ended', xdr_closed=True, notify_eligible=False)
     elif target == 60 and state in {'queued', 'writing', 'pending'}:
         prefix = '无风险' if value['verdict'] == 'benign' else '证据不足 · 观察期已满'
         value['label'] = prefix + (' · 待下一轮忽略' if state == 'queued' else ' · 忽略结果待回查')

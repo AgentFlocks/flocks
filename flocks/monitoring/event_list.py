@@ -3,7 +3,7 @@
 Grouping is a presentation aid. It never changes incident identities, mail
 idempotency, disposition records, or the daily dashboard/report projection.
 """
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from hashlib import sha256
 import ipaddress
 import json
@@ -26,6 +26,7 @@ MAX_LIST_JSON = 48_000
 MAX_DETAIL_JSON = 256_000
 MAX_DETAIL_ROWS = 200
 CLOSURES = {40: 'closed', 60: 'ignored', 70: 'contained'}
+HANDLING_STATES = ('open', 'closed', 'ignored', 'contained', 'ended')
 
 
 def _json(value, default):
@@ -220,6 +221,10 @@ def _summarize(row, investigation, disposition, notice, reply_count, names, tz, 
     assessment = assess_event(event, investigation, handling=handling)
     from .assessment import apply_followup
     assessment = apply_followup(assessment, event, followup)
+    monitoring_ended = bool(assessment.get('ended') and assessment.get('lifecycle') == 'monitoring_ended'
+                            and handling not in {'closed', 'ignored'})
+    if monitoring_ended:
+        handling = 'ended'
     risk = assessment['verdict']
     notice_state = notice.get('state')
     basics = event.get('basics') if isinstance(event.get('basics'), dict) else {}
@@ -232,11 +237,13 @@ def _summarize(row, investigation, disposition, notice, reply_count, names, tz, 
     summary = {'key': key, 'id': event_id or key, 'name': _text(event.get('name'), 300) or '名称未提供',
         'device': device, 'device_name': _text(names.get(device) or event.get('device_name') or device, 200),
         'host': _text(event.get('host') or basics.get('host'), 200),
-        'risk': risk, 'assessment': assessment, 'identity_valid': valid_identity, 'handling': handling, 'handling_source': 'monitor_verified' if disposition_verified else 'xdr',
+        'risk': risk, 'assessment': assessment, 'identity_valid': valid_identity, 'handling': handling,
+        'handling_source': 'monitoring' if monitoring_ended else 'monitor_verified' if disposition_verified else 'xdr',
         'in_period': bool(row.get('in_period', True)), 'carried_over': not bool(row.get('in_period', True)),
         'is_backlog': not bool(row.get('in_period', True)), 'deal_status': event.get('dealStatus'),
         'observed_at': row['started_at'], 'first_seen_at': row['first_seen_at'], 'last_seen_at': row['last_seen_at'],
-        'event_at': _iso(first), 'event_end_at': _iso(last),
+        'event_at': _iso(first), 'event_end_at': _iso(last), 'occurrence_at': _iso(last),
+        'occurrence_time_unknown': last is None,
         'sessionID': row['session_id'], 'messageID': row['message_id'],
         'investigation': {'state': investigation_state,
             'verdict': investigation_verdict, 'reason': investigation_reason,
@@ -255,6 +262,12 @@ def _summarize(row, investigation, disposition, notice, reply_count, names, tz, 
 def _event_type(name):
     """Only normalize presentation spacing/case; never merge unlike attacks."""
     return re.sub(r'\s+', '', name).casefold() if isinstance(name, str) else ''
+
+
+def _occurrence_order(member):
+    """Source occurrence only; observation audit times never break a time tie."""
+    value = _time(member.get('occurrence_at') or member.get('event_end_at') or member.get('event_at'), timezone.utc)
+    return value is not None, value or datetime.min.replace(tzinfo=timezone.utc), member['key']
 
 
 def group_events(members, window_hours=24, enabled=True):
@@ -286,16 +299,11 @@ def group_events(members, window_hours=24, enabled=True):
         chosen['members'].append(member)
     output = []
     for group in groups:
-        members = sorted(group['members'], key=lambda m: (m['last_seen_at'], m['key']), reverse=True)
+        members = sorted(group['members'], key=_occurrence_order, reverse=True)
         primary = members[0]
-        counts = {state: sum(m['handling'] == state for m in members) for state in ('open', 'closed', 'ignored', 'contained')}
-        handling = ('open' if counts['open'] else 'contained' if counts['contained'] else
-                    'ignored' if counts['ignored'] == len(members) else 'closed')
+        counts = {state: sum(m['handling'] == state for m in members) for state in HANDLING_STATES}
         assessment_counts = {state: sum(m['assessment']['status'] == state for m in members) for state in STATUSES}
-        outcomes = [state for state in STATUSES if assessment_counts[state]]
-        assessment_status = outcomes[0] if len(outcomes) == 1 else 'mixed'
         keys = sorted(m['key'] for m in members)
-        risk = next((value for value in ('risk', 'unknown', 'benign') if any(m['risk'] == value for m in members)), 'unknown')
         hosts = sorted({_host(m['host']) or m['host'] for m in members if m['host']})
         output.append({'id': 'group:' + sha256('\0'.join(keys).encode()).hexdigest()[:24] if len(members) > 1 else primary['key'],
             'event_keys': keys, 'grouped': len(members) > 1, 'member_count': len(members),
@@ -303,9 +311,10 @@ def group_events(members, window_hours=24, enabled=True):
             'host': hosts[0] if len(hosts) == 1 else '', 'hosts': hosts, 'host_count': len(hosts),
             'first_event_at': _iso(group['_first']), 'last_event_at': _iso(group['_last']),
             'first_seen_at': min(m['first_seen_at'] for m in members), 'last_seen_at': max(m['last_seen_at'] for m in members),
-            'risk': risk, 'handling': handling, 'closure_counts': counts,
-            'assessment_status': assessment_status, 'assessment_counts': assessment_counts,
-            'assessment_label': members[0]['assessment']['label'] if len({m['assessment']['label'] for m in members}) == 1 else '包含不同跟进状态',
+            'risk': primary['risk'], 'handling': primary['handling'], 'closure_counts': counts,
+            'primary_event_key': primary['key'], 'assessment': primary['assessment'],
+            'assessment_status': primary['assessment']['status'], 'assessment_counts': assessment_counts,
+            'assessment_label': primary['assessment']['label'],
             'in_period': any(m['in_period'] for m in members), 'carried_over': any(m['carried_over'] for m in members),
             'is_backlog': any(m['carried_over'] for m in members),
             'mail': {field: sum(bool(m['mail'][field]) for m in members) for field in ('sent', 'replied', 'failed')},
@@ -313,7 +322,7 @@ def group_events(members, window_hours=24, enabled=True):
             'merge_reason': (f'同一 XDR、同类安全事件，整组发生时间跨度不超过 {window_hours} 小时；可涉及不同主机。仅合并展示，各子事件独立研判和处置。'
                              if len(members) > 1 else '当前未找到同一设备、同类事件且在聚合时间范围内的其他事件；缺少发生时间的事件保持独立。'),
             'members': members})
-    return sorted(output, key=lambda item: (item['last_seen_at'], item['id']), reverse=True)
+    return sorted(output, key=lambda item: _occurrence_order(item['members'][0]), reverse=True)
 
 
 @contextmanager
@@ -346,6 +355,31 @@ def _event_projection(column):
             return f"json(CASE json_type({safe},'$.{key}') WHEN 'true' THEN 'true' WHEN 'false' THEN 'false' ELSE 'null' END)"
         return f"json_extract({safe},'$.{key}')"
     return 'json_object(' + ','.join(f"'{key}',{extract(key)}" for key in keys) + ')'
+
+
+def _time_projection(column):
+    """Only bounded source time fields reach the SQLite occurrence parser."""
+    safe = f"CASE WHEN json_valid({column}) THEN {column} ELSE '{{}}' END"
+    def extract(path):
+        return (f"CASE json_type({safe},'{path}') WHEN 'integer' THEN json_extract({safe},'{path}') "
+                f"WHEN 'real' THEN json_extract({safe},'{path}') "
+                f"WHEN 'text' THEN substr(json_extract({safe},'{path}'),1,80) ELSE NULL END")
+    return (f"json_object('startTime',{extract('$.startTime')},'endTime',{extract('$.endTime')},"
+            f"'basics',json_object('start_time',{extract('$.basics.start_time')},"
+            f"'end_time',{extract('$.basics.end_time')},'alert_time',{extract('$.basics.alert_time')}))")
+
+
+def _register_event_functions(db, tz):
+    def occurrence(value):
+        event = _json(value, {})
+        _, last = _event_times(event if isinstance(event, dict) else {}, tz)
+        return last.timestamp() if last else None
+    def version(value):
+        from .followup import event_version
+        event = _json(value, {})
+        return event_version(event) if isinstance(event, dict) else None
+    db.create_function('monitor_event_occurrence', 1, occurrence, deterministic=True)
+    db.create_function('monitor_event_version', 1, version, deterministic=True)
 
 
 def _ioc_projection():
@@ -423,13 +457,13 @@ def _dates(start_date, end_date):
 
 def _list_events(owner, scope, *, start_date, end_date, window_hours=24, device=None,
                       risk=None, handling=None, assessment=None, search=None, offset=0, limit=10, group=True, include_backlog=True):
-    """Period membership is observation-based; handling facts remain current."""
+    """Period membership/order follow source occurrence; handling remains current."""
     start_date, end_date = _dates(start_date, end_date)
     if type(window_hours) is not int or not 1 <= window_hours <= 24:
         raise ValueError('关联窗口必须为 1 至 24 小时')
     if type(offset) is not int or not 0 <= offset <= MAX_EVENTS or type(limit) is not int or not 1 <= limit <= 100:
         raise ValueError('分页参数无效')
-    if risk not in (None, '', 'risk', 'unknown', 'ignored', 'benign') or handling not in (None, '', 'open', 'closed', 'ignored', 'contained'):
+    if risk not in (None, '', 'risk', 'unknown', 'ignored', 'benign') or handling not in (None, '', *HANDLING_STATES):
         raise ValueError('事件筛选状态无效')
     if assessment not in (None, '', *STATUSES):
         raise ValueError('研判结果筛选状态无效')
@@ -440,27 +474,35 @@ def _list_events(owner, scope, *, start_date, end_date, window_hours=24, device=
         if db:
             db.execute('BEGIN')
         project, policy, tz = _installation(db, owner, scope)
+        if db:
+            _register_event_functions(db, tz)
+        period_start = datetime.fromisoformat(start_date).replace(tzinfo=tz).timestamp()
+        period_end = (datetime.fromisoformat(end_date) + timedelta(days=1)).replace(tzinfo=tz).timestamp()
         candidates = _select(db,
-            'WITH visible AS (SELECT o.event_key,o.data,a.sequence,a.started_at,a.business_date '
+            'WITH visible AS (SELECT o.event_key,o.data,a.sequence,a.started_at '
             'FROM monitor_observations o JOIN monitor_attempts a ON a.id=o.attempt_id '
             'WHERE a.owner=? AND a.scope=? AND a.project=?), '
-            'selected AS (SELECT event_key,MAX(sequence) AS selected_sequence,MAX(business_date BETWEEN ? AND ?) AS in_period '
-            'FROM visible WHERE business_date<=? AND (? OR business_date>=?) GROUP BY event_key), '
-            'newest AS (SELECT event_key,MAX(sequence) AS sequence FROM visible GROUP BY event_key) '
-            'SELECT s.event_key,s.selected_sequence,s.in_period FROM selected s '
-            'JOIN newest n ON n.event_key=s.event_key JOIN visible current ON current.event_key=n.event_key AND current.sequence=n.sequence '
+            'newest AS (SELECT event_key,MAX(sequence) AS sequence FROM visible GROUP BY event_key), '
+            'current AS (SELECT v.*,monitor_event_occurrence(' + _time_projection('v.data') + ') AS occurrence '
+            'FROM newest n JOIN visible v ON v.event_key=n.event_key AND v.sequence=n.sequence) '
+            'SELECT current.event_key,current.sequence AS selected_sequence, '
+            '(current.occurrence>=? AND current.occurrence<?) AS in_period FROM current '
             'LEFT JOIN monitor_dispositions d ON d.rowid=(SELECT x.rowid FROM monitor_dispositions x '
-            'WHERE x.owner=? AND x.scope=? AND x.project=? AND x.event_key=s.event_key ORDER BY x.created_at DESC,x.rowid DESC LIMIT 1) '
-            "WHERE s.in_period=1 OR COALESCE(CASE WHEN d.status='verified' AND julianday(d.updated_at)>=julianday(current.started_at) "
+            'WHERE x.owner=? AND x.scope=? AND x.project=? AND x.event_key=current.event_key ORDER BY x.created_at DESC,x.rowid DESC LIMIT 1) '
+            'LEFT JOIN monitor_event_followup f ON f.owner=? AND f.scope=? AND f.project=? AND f.event_key=current.event_key '
+            'WHERE (current.occurrence>=? AND current.occurrence<?) OR '
+            '(? AND (current.occurrence<? OR current.occurrence IS NULL) AND '
+            "NOT (COALESCE(f.state,'')='monitoring_ended' AND COALESCE(f.event_version,'')=monitor_event_version(" + _event_projection('current.data') + ')) '
+            "AND COALESCE(CASE WHEN d.status='verified' AND julianday(d.updated_at)>=julianday(current.started_at) "
             'AND d.observed_status=d.target_status THEN CASE WHEN d.target_status IN (40,60) THEN 1 ELSE 0 END END, '
-            "CASE WHEN json_extract(CASE WHEN json_valid(current.data) THEN current.data ELSE '{}' END,'$.source_terminal_unmatched')=1 THEN 0 WHEN json_extract(CASE WHEN json_valid(current.data) THEN current.data ELSE '{}' END,'$.dealStatus') IN (40,60) THEN 1 ELSE 0 END)=0 "
-            'ORDER BY s.in_period DESC,s.selected_sequence DESC,s.event_key LIMIT ?',
-            (owner, scope, project, start_date, end_date, end_date, int(include_backlog), start_date,
-             owner, scope, project, MAX_EVENTS+1)) if project else []
+            "CASE WHEN json_extract(CASE WHEN json_valid(current.data) THEN current.data ELSE '{}' END,'$.source_terminal_unmatched')=1 THEN 0 WHEN json_extract(CASE WHEN json_valid(current.data) THEN current.data ELSE '{}' END,'$.dealStatus') IN (40,60) THEN 1 ELSE 0 END)=0) "
+            'ORDER BY current.occurrence IS NULL,current.occurrence DESC,current.event_key DESC LIMIT ?',
+            (owner, scope, project, period_start, period_end, owner, scope, project, owner, scope, project,
+             period_start, period_end, int(include_backlog), period_start, MAX_EVENTS+1)) if project else []
         if len(candidates) > MAX_EVENTS:
             candidates = candidates[:MAX_EVENTS]
             truncated = True
-            warnings.append(f'选定范围超过 {MAX_EVENTS} 条独立事件，本次只展示最近观察到的 {MAX_EVENTS} 条；筛选与统计仅覆盖已加载事件，请缩小日期范围。')
+            warnings.append(f'选定范围超过 {MAX_EVENTS} 条独立事件，本次只展示发生时间最近的 {MAX_EVENTS} 条（未知时间置后）；筛选与统计仅覆盖已加载事件，请缩小日期范围。')
         keys = [c['event_key'] for c in candidates]
         observations, investigations, dispositions, notices, replies, followups = [], [], [], [], [], []
         # Batching keeps parameter counts below SQLite's older 999-variable
@@ -520,7 +562,7 @@ def _list_events(owner, scope, *, start_date, end_date, window_hours=24, device=
         notice = notices.get(row['event_key'], {})
         member = _summarize(row, case, dispositions.get(row['event_key'], {}), notice,
                             replies.get(notice.get('id'), 0), names, tz, followups.get(row['event_key']))
-        if member[0]['in_period'] or include_backlog and member[0]['handling'] not in {'closed', 'ignored'}:
+        if member[0]['in_period'] or include_backlog and member[0]['handling'] not in {'closed', 'ignored', 'ended'}:
             all_members.append(member)
         if any('前 50 条' in note for note in member[0]['warnings']):
             truncated = True
@@ -537,7 +579,8 @@ def _list_events(owner, scope, *, start_date, end_date, window_hours=24, device=
         'period_events': sum(m[0]['in_period'] for m in members), 'carried_over': sum(m[0]['carried_over'] for m in members),
         'events_in_range': sum(m[0]['in_period'] for m in members), 'backlog_events': sum(m[0]['carried_over'] for m in members),
         'groups': sum(item['grouped'] for item in items), 'ungrouped': sum(not item['grouped'] for item in items),
-        **{state: sum(m[0]['handling'] == state for m in members) for state in ('open', 'closed', 'ignored', 'contained')},
+        **{state: sum(m[0]['handling'] == state for m in members) for state in HANDLING_STATES},
+        'unknown_time_events': sum(m[0]['occurrence_time_unknown'] for m in members),
         'assessment_counts': {state: sum(m[0]['assessment']['status'] == state for m in members) for state in STATUSES},
         'mail_sent': sum(m[0]['mail']['sent'] for m in members), 'mail_replied': sum(m[0]['mail']['replied'] for m in members)}
     return {'start_date': start_date, 'end_date': end_date, 'timezone': str(tz), 'window_hours': window_hours,
@@ -546,7 +589,7 @@ def _list_events(owner, scope, *, start_date, end_date, window_hours=24, device=
         'devices': [{'id': identifier, 'name': name} for identifier, name in devices],
         'truncated': truncated, 'warnings': list(dict.fromkeys(warnings)),
         'include_backlog': bool(include_backlog),
-        'date_basis': '选定期间观察到的事件与可选的此前未完成事件分开计数；调查、邮件和处置展示当前最新事实。筛选后仅对匹配事件作可视化分组，关联采用原事件发生时间。'}
+        'date_basis': '按安全事件最近发生时间归属日期并从近到远排列；缺少最近发生时间时使用首次发生时间，发生时间未知的未结束事件单独保留且置后，不使用监测观察时间替代。此前未结束事件可选纳入；聚合主行展示最新发生子事件的研判，各子事件保留独立状态。'}
 
 
 def _detail(owner, scope, event_key):

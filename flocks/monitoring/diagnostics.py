@@ -104,7 +104,7 @@ _ENUMS = {
     'model_stop': {'stop', 'end_turn', 'completed', 'length', 'max_tokens', 'tool_calls', 'content_filter', 'other'},
     'event': {'trace.start', 'trace.end', 'progress', 'stage.start', 'stage.end', 'query.window',
               'tool.raw', 'tool.normalized', 'adapter.result', 'adapter.structured', 'adapter.decoded', 'adapter.failure',
-              'mail.received', 'mail.result', 'mail.interpreted', 'mail.analyzed', 'mail.evidence', 'investigation.query', 'investigation.model', 'investigation.validation', 'investigation.recovery', 'query.sample', 'page.validated', 'run.result', 'dispatch.result', 'background.result', 'control.result', 'control.lock'} | INFRASTRUCTURE_EVENTS | INVESTIGATION_SIGNALS,
+              'mail.received', 'mail.result', 'mail.interpreted', 'mail.analyzed', 'mail.evidence', 'investigation.query', 'investigation.model', 'investigation.validation', 'investigation.recovery', 'query.sample', 'page.validated', 'source.membership', 'run.result', 'dispatch.result', 'background.result', 'control.result', 'control.lock'} | INFRASTRUCTURE_EVENTS | INVESTIGATION_SIGNALS,
     'entity_type': {'host', 'file', 'process', 'ip', 'innerip', 'dns'},
     'stage': {'dispatch', 'run', 'session.prepare', 'query.device', 'query.events', 'query.entities',
               'correlate', 'tool.execute', 'tool.handler', 'tool.normalize', 'report.export', 'step.other',
@@ -113,7 +113,7 @@ _ENUMS = {
     'action': {'list', 'get_entities', 'get_proof', 'update_status', 'other'},
     'outcome': {'ok', 'error', 'cancelled', 'completed', 'failed', 'partial', 'interrupted', 'running', 'unknown'},
     'reason': {'unavailable', 'permission', 'tool_failed', 'non_json', 'not_object', 'business_error', 'structured_output', 'ambiguous_reply', 'model_failed', 'send_unknown', 'write_unknown'},
-    'mail_state': {'queued','sending','sent','send_unknown','pending','interpreted','needs_review','verified','failed','mismatch','skipped','unrelated'},
+    'mail_state': {'queued','blocked','sending','sent','send_unknown','pending','interpreted','needs_review','verified','failed','mismatch','skipped','unrelated','monitoring_ended'},
     'text_kind': {'empty', 'html', 'json_like', 'fenced', 'text'},
     'code_kind': {'absent', 'zero', 'http_ok', 'xdr_success', 'other'},
     'list_field': {'list', 'item', 'both', 'none'},
@@ -125,7 +125,7 @@ _NUMBERS = {'schema', 'pid', 'seq', 'elapsed_ms', 'duration_ms', 'length', 'item
             'json_column', 'events', 'errors', 'suppressed', 'calls', 'call', 'loop_lag_ms', 'total',
             'consecutive_failures', 'input_tokens', 'output_tokens', 'total_tokens', 'request_max_tokens',
             'validation_count', 'models', 'revision', 'correction_attempt', 'failure_count',
-            'sqlite_error_code', 'transaction_age_ms', 'timeout_ms', 'retry_delay_seconds'}
+            'sqlite_error_code', 'transaction_age_ms', 'timeout_ms', 'retry_delay_seconds', 'monitoring_ended'}
 _BOOLS = {'success', 'truncated', 'has_error', 'has_saved_output', 'cursor_present',
           'transaction_open', 'transaction_open_before',
           'control_lock_busy',

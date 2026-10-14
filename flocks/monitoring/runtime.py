@@ -182,7 +182,7 @@ async def run(execution, policy, adapter_factory=XdrAdapter):
     trigger_message = await emit_message(session.id, f'系统自动监测 · {started.astimezone(ZoneInfo(policy.timezone)).strftime("%H:%M:%S")} · {mode_label}', role=MessageRole.USER)
     query_description = '查询待处置、处置中且未加白或部分加白的 XDR 事件，并关联分析。'
     device_description = '监测设备：' + '、'.join(policy.device_names.get(device, device) for device in policy.devices) + '。'
-    await emit_message(session.id, '本轮安全运营监测开始。' + device_description + query_description + ('先处理此前收到的回信，再查询新事件并按设备逐条通知对应责任人。' if automatic_enabled else '邮件跟进未启用；无风险及观察期满的忽略仍由后续轮次核验执行。'), message_id=message_id, parent_id=trigger_message.id, agent=agent_name)
+    await emit_message(session.id, '本轮安全运营监测开始。' + device_description + query_description + ('先核对各设备当前监测事件，归档未再返回的历史事件，再处理此前反馈并按设备逐条通知对应责任人。' if automatic_enabled else '邮件跟进未启用；无风险及观察期满的忽略仍由后续轮次核验执行。'), message_id=message_id, parent_id=trigger_message.id, agent=agent_name)
     sequence = (await rows('SELECT sequence FROM monitor_attempts WHERE id=?', (attempt_id,)))[0]['sequence']
     from flocks.session.core.status import SessionStatus, SessionStatusBusy, SessionStatusIdle
     SessionStatus.set(session.id, SessionStatusBusy())
@@ -196,32 +196,27 @@ async def run(execution, policy, adapter_factory=XdrAdapter):
     errors, observed, investigation_failures = [], [], []
     query_errors = 0
     successful_checks = set()
+    completed_devices = set()
     status, summary = 'failed', ''
     try:
         if not policy.devices:
             raise ContractError('未绑定可用数据源')
         from . import followup
         from .mail_manual import recheck_pending
-        manual_readback = await mail_followup('disposition.recheck',
-            lambda: recheck_pending(policy, session_id=session.id, before=started.isoformat()),
-            {'checked': 0, 'verified': 0, 'pending': 0, 'unavailable': True,
-             'errors': ['人工处置回查暂未完成；已保存的处理标签保留，后续监测轮次自动核验。']})
         feedback_unavailable = {'processed': 0, 'verified': 0, 'pending': 0, 'unavailable': True,
                                 'errors': ['回信处理暂未完成；已保存反馈保留待自动核验，实际处理进度请查看邮件跟进记录。']}
         reply_high = await mail_followup('mail.receive',
             lambda: cutoff(policy.owner, policy.project, before=started.isoformat()), None)
-        feedback = (await mail_followup('mail.interpret',
-            lambda: process_replies(policy, session.id, reply_high, recorder), feedback_unavailable)
-            if reply_high is not None else feedback_unavailable)
-        lifecycle = await followup.process_due(policy, session.id, attempt_id, recorder=recorder)
         from . import investigation
         budget = investigation.Budget()
         backlog = await investigation.pending(policy)
         for device in policy.devices:
-            cursor = await rows('SELECT through_time FROM monitor_cursors WHERE owner=? AND scope=? AND device=?', (policy.owner, policy.scope, device))
             end = int(started.timestamp())
-            start = (cursor[0]['through_time'] - 600) if cursor else end - 86400
-            diag.event('query.window', device=diag.opaque(device), window_seconds=max(0, end - start), cursor_present=bool(cursor), development_sample=False)
+            # Membership requires a complete active-range snapshot. Absence
+            # from an incremental last-update window says nothing about a
+            # previously returned incident still being in the source list.
+            start = end - 86400
+            diag.event('query.window', device=diag.opaque(device), window_seconds=86400, cursor_present=False, development_sample=False)
             page_indices = {}
             async def save_page(events, complete):
                 async with connection() as db:
@@ -231,6 +226,7 @@ async def run(execution, policy, adapter_factory=XdrAdapter):
                         await investigation.enqueue(db, policy, event, started.isoformat())
                         await db.execute('INSERT OR REPLACE INTO monitor_observations VALUES(?,?,?)', (attempt_id, event['key'], encode(event)))
                 for event in events:
+                    await followup.restore_present(policy, event, attempt_id)
                     if event['key'] in page_indices:
                         observed[page_indices[event['key']]] = event
                     else:
@@ -254,16 +250,32 @@ async def run(execution, policy, adapter_factory=XdrAdapter):
                         page_indices[event['key']] = len(observed)
                         observed.append(event)
                 successful_checks.update(event['key'] for event in events)
+                completed_devices.add(device)
             except ContractError as exc:
                 errors.append(f"{policy.device_names.get(device, device)}：{exc}")
                 query_errors += 1
         current_events = {event['key']: event for event in observed}
-        from .reconciliation import recheck_existing
+        from .reconciliation import recheck_existing, finish_missing
+        ended_keys = await finish_missing(policy, set(current_events), completed_devices, attempt_id)
+        diag.event('source.membership', devices=len(completed_devices), events=len(current_events), monitoring_ended=len(ended_keys))
+        # Determine membership before consuming any old status-write intent.
+        manual_readback = await mail_followup('disposition.recheck',
+            lambda: recheck_pending(policy, session_id=session.id, before=started.isoformat()),
+            {'checked': 0, 'verified': 0, 'pending': 0, 'unavailable': True,
+             'errors': ['人工处置回查暂未完成；已保存的处理标签保留，后续监测轮次自动核验。']})
+        feedback = (await mail_followup('mail.interpret',
+            lambda: process_replies(policy, session.id, reply_high, recorder), feedback_unavailable)
+            if reply_high is not None else feedback_unavailable)
+        lifecycle = await followup.process_due(policy, session.id, attempt_id, recorder=recorder)
         historic, exact_checked, reconciliation = await recheck_existing(policy, adapter, recorder, attempt_id, set(current_events))
+        reconciliation['monitoring_ended'] = len(ended_keys)
+        reconciliation['complete_snapshot_devices'] = len(completed_devices)
         successful_checks.update(exact_checked)
         history_events = {event['key']: event for event in historic}
         resumed = []
         for event in backlog:
+            if event['key'] in ended_keys:
+                continue
             selected = current_events.get(event['key'], history_events.get(event['key'], event))
             if selected.get('dealStatus') in {40, 60}:
                 continue
@@ -281,7 +293,16 @@ async def run(execution, policy, adapter_factory=XdrAdapter):
         event_sources = {'query_events': len(current_events), 'resumed_events': len(resumed_keys),
                          'query_resumed_overlap': len(current_events.keys() & resumed_keys),
                          'rechecked_events': len(set(history_events) - set(current_events) - resumed_keys)}
-        for event in [e for e in observed if e.get('dealStatus') not in {40, 60}][:20]:
+        source_followups = await followup.snapshot(policy)
+        from .assessment import assess_event, apply_followup
+        for event in observed:
+            state = source_followups.get(event['key'])
+            if state and state.get('closed'):
+                cases = await rows('SELECT * FROM monitor_investigations WHERE owner=? AND project=? AND event_key=?',
+                                   (policy.owner, policy.project, event['key']))
+                event['assessment'] = apply_followup(assess_event(event, cases[0] if cases else None), event, state)
+                event['risk'] = event['assessment']['verdict']
+        for event in [e for e in observed if e.get('dealStatus') not in {40, 60} and not e.get('assessment', {}).get('ended')][:20]:
             # Unstarted work is deferred, not a failed investigation attempt.
             # Otherwise a busy batch could exhaust three retries before a later
             # event has ever had a chance to query a single source.
@@ -336,7 +357,7 @@ async def run(execution, policy, adapter_factory=XdrAdapter):
                 if not event.get('assessment'):
                     from .assessment import assess_event
                     event['assessment'] = assess_event(event)
-                saved_followup = await followup.observe(policy, event, attempt_id, query_complete=event['key'] in successful_checks) if event.get('dealStatus') not in {40, 60} else (await followup.snapshot(policy, event['key'])).get(event['key'])
+                saved_followup = await followup.observe(policy, event, attempt_id, query_complete=event['key'] in successful_checks) if event.get('dealStatus') not in {40, 60} and not event.get('assessment', {}).get('ended') else (await followup.snapshot(policy, event['key'])).get(event['key'])
                 from .assessment import apply_followup
                 event['assessment'] = apply_followup(event['assessment'], event, saved_followup)
                 event['risk'] = event['assessment']['verdict']
@@ -347,7 +368,7 @@ async def run(execution, policy, adapter_factory=XdrAdapter):
                       'benign': sum(e['risk'] == 'benign' for e in observed),
                       'ignored': sum(e['risk'] == 'benign' for e in observed),
                       'analyzed': sum(e.get('investigation', {}).get('state') == 'ready' for e in observed),
-                      'deferred': sum(not e.get('investigation') or e['investigation']['state'] == 'deferred' for e in observed),
+                      'deferred': sum((not e.get('investigation') or e['investigation']['state'] == 'deferred') and not e.get('assessment', {}).get('ended') for e in observed),
                       'investigation_incomplete': sum(e['risk'] == 'unknown' and not e.get('assessment', {}).get('ended')
                           and e.get('investigation', {}).get('state') != 'ready' for e in observed),
                       'investigation_failures': investigation_failures,

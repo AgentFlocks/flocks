@@ -10,13 +10,13 @@ from datetime import datetime, timedelta, timezone
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from flocks.session.interaction_policy import require_interactive
 from . import disposition as d, diagnostics as diag
 from .adapter import ContractError
 from .automatic import read_event
-from .followup import event_version
+from .followup import event_version, is_monitoring_ended
 from .models import COMPONENT_ID, MonitoringPolicy
 from .store import connection, rows, write, encode
 
@@ -26,14 +26,34 @@ _UNSET = object()
 class ManualMailRequest(BaseModel):
     model_config = ConfigDict(extra='forbid')
     request_id: UUID
-    state: Literal['handled', 'unhandled']
+    state: Literal['handled', 'ignored', 'unhandled']
+    notes: str = Field(default='', max_length=2000)
+
+    @field_validator('notes')
+    @classmethod
+    def clean_notes(cls, value):
+        return value.strip()
 
 
 def explicit_reference(notice, payload):
     event = notice['event'] if isinstance(notice['event'], dict) else json.loads(notice['event'])
     hints = ' '.join(str(payload.get(k) or '') for k in ('text', 'subject', 'reply_to_id', 'thread_id', 'references'))
-    return (notice['message_id'] in hints or notice['id'] in hints or
+    return (any(mid in hints for mid in [notice['message_id'], *notice.get('delivery_message_ids', [])] if mid) or notice['id'] in hints or
             bool(re.search(r'(?<![\w-])' + re.escape(event['id']) + r'(?![\w-])', hints)))
+
+
+async def delivery_references(notices):
+    """Retain reply association to every explicit resend, including old mail."""
+    by_id = {n['id']: n for n in notices}
+    identifiers = list(by_id)
+    for index in range(0, len(identifiers), 200):
+        batch = identifiers[index:index+200]
+        marks = ','.join('?' for _ in batch)
+        for attempt in await rows(f'SELECT owner,project,notice_id,message_id FROM monitor_mail_retries WHERE notice_id IN ({marks}) AND message_id IS NOT NULL', batch):
+            notice = by_id[attempt['notice_id']]
+            if (not notice.get('owner') or notice['owner'] == attempt['owner']) and (not notice.get('project') or notice['project'] == attempt['project']):
+                notice.setdefault('delivery_message_ids', []).append(attempt['message_id'])
+    return notices
 
 
 async def has_reply(notice):
@@ -46,8 +66,9 @@ async def has_reply(notice):
                          (notice['owner'], notice['project'], notice['mailbox'], notice['recipient'], notice['created_at']))
     if not replies:
         return False
-    peers = await rows('SELECT id,event,message_id FROM monitor_mail_notices WHERE owner=? AND project=? AND mailbox=? AND recipient=?',
+    peers = await rows('SELECT id,owner,project,event,message_id FROM monitor_mail_notices WHERE owner=? AND project=? AND mailbox=? AND recipient=?',
                        (notice['owner'], notice['project'], notice['mailbox'], notice['recipient']))
+    await delivery_references(peers)
     for reply in replies:
         resolved = await rows('SELECT notice_id FROM monitor_mail_items WHERE owner=? AND reply_id=?',
                               (notice['owner'], reply['id']))
@@ -70,7 +91,7 @@ async def has_reply(notice):
 
 
 async def latest(notice):
-    found = await rows('SELECT m.*,d.status,d.error,d.updated_at FROM monitor_mail_manual m '
+    found = await rows('SELECT m.*,d.status,d.error,d.updated_at,d.target_status FROM monitor_mail_manual m '
                        'LEFT JOIN monitor_dispositions d ON d.id=m.id AND d.owner=m.owner AND d.scope=? '
                        'WHERE m.owner=? AND m.notice_id=? ORDER BY m.created_at DESC,m.rowid DESC LIMIT 1',
                        (COMPONENT_ID, notice['owner'], notice['id']))
@@ -80,33 +101,46 @@ async def latest(notice):
 async def completion_claimed(owner, notice_id):
     return bool(await rows("SELECT 1 FROM monitor_mail_manual m JOIN monitor_dispositions d "
                            "ON d.id=m.id AND d.owner=m.owner AND d.scope=? "
-                           "WHERE m.owner=? AND m.notice_id=? AND m.state='handled' "
+                           "WHERE m.owner=? AND m.notice_id=? AND m.state IN ('handled','ignored') "
                            "AND d.status IN ('queued','writing','pending','mismatch','verified') LIMIT 1",
                            (COMPONENT_ID, owner, notice_id)))
 
 
-async def snapshot(notice, *, previous=_UNSET, reply_present=None):
+async def snapshot(notice, *, previous=_UNSET, reply_present=None, monitoring_ended=None, source_closed=None):
     if previous is _UNSET:
         previous = await latest(notice)
-    result = {'available': False, 'reason': '', 'state': None, 'request_id': None, 'error': None, 'updated_at': None}
+    result = {'available': False, 'reason': '', 'state': None, 'request_id': None, 'error': None, 'updated_at': None, 'notes': '', 'target_status': None}
+    lifecycle = []
+    if type(monitoring_ended) is not bool or type(source_closed) is not bool:
+        lifecycle = await rows('SELECT state FROM monitor_event_followup WHERE owner=? AND scope=? AND project=? AND event_key=?',
+                               (notice['owner'], notice['scope'], notice['project'], notice['event_key']))
+    state = lifecycle[0]['state'] if lifecycle else None
+    ended = monitoring_ended if type(monitoring_ended) is bool else state == 'monitoring_ended'
+    closed = source_closed if type(source_closed) is bool else state in ('verified', 'external_closed')
+    result['source_closed'] = closed
     if previous:
         state = ('unhandled' if previous['state'] == 'unhandled' else
-                 'handled' if previous['status'] == 'verified' else
+                 previous['state'] if previous['status'] == 'verified' else
                  'failed' if previous['status'] == 'failed' else 'pending')
         result.update(state=state, request_id=previous['id'], error=previous['error'],
-                      updated_at=previous['updated_at'] or previous['created_at'])
-        if state in ('handled', 'pending'):
-            result['reason'] = '已处置并经 XDR 回查确认' if state == 'handled' else '已保存处理反馈，等待下一轮写回并回查' if previous['status'] == 'queued' else '处置已提交，等待回查；不会重复写回'
+                      updated_at=previous['updated_at'] or previous['created_at'], notes=previous.get('notes', ''),
+                      target_status=previous.get('target_status'))
+        if not ended and state in ('handled', 'ignored', 'pending'):
+            result['reason'] = ('已忽略并经 XDR 回查确认' if state == 'ignored' else '已处置并经 XDR 回查确认') if state in ('handled', 'ignored') else '已保存处理反馈，等待下一轮写回并回查' if previous['status'] == 'queued' else '处置已提交，等待回查；不会重复写回'
             return result
+    if ended:
+        result.update(monitoring_ended=True, reason='XDR 本轮未返回此事件，事件未再检出，已停止跟进；历史邮件和处置审计保留，不再提交状态标记')
+        return result
+    if closed:
+        result['reason'] = 'XDR 已确认处置状态，不再重复通知或标记'
+        return result
     event = notice['event'] if isinstance(notice['event'], dict) else json.loads(notice['event'])
     if event.get('development_sample'):
         result['reason'] = '历史联调通知不支持正式处置'
     elif (await has_reply(notice) if reply_present is None else reply_present):
         result['reason'] = '已收到回信，由程序自动解读并跟进'
-    elif notice['state'] == 'send_unknown' or notice['state'] in ('queued', 'failed') and notice.get('error'):
-        result.update(available=True, reason='发信失败或投递结果未确认，可记录人工处理结果')
-    elif notice['state'] == 'sent':
-        result.update(available=True, reason='尚未收到对应回信，可记录人工处理结果')
+    elif notice['state'] in ('sent', 'blocked', 'send_unknown', 'queued', 'failed'):
+        result.update(available=True)
     else:
         result['reason'] = '已收到回信，由程序自动解读并跟进' if notice['state'] == 'sent' else '仅发信失败或尚无回信时可人工处理'
     return result
@@ -138,14 +172,16 @@ async def change(owner, notice_id, request: ManualMailRequest, adapter_factory=d
             notice, policy, event = await bound_notice(owner, notice_id)
             existing = await rows('SELECT * FROM monitor_mail_manual WHERE id=? AND owner=?', (request_id, owner))
             if existing:
-                if existing[0]['notice_id'] != notice_id or existing[0]['state'] != request.state:
+                if existing[0]['notice_id'] != notice_id or existing[0]['state'] != request.state or existing[0].get('notes', '') != request.notes:
                     raise ValueError('请求标识已用于其他操作')
                 return await snapshot(notice)
             eligibility = await snapshot(notice)
             if not eligibility['available']:
                 raise ValueError(eligibility['reason'])
             stamp = d.stamp()
-            comment = f'Flocks 用户人工标记已处置（通知 {notice_id}）'
+            target = {'handled': 40, 'ignored': 60}.get(request.state)
+            comment = f'Flocks 用户人工标记{"忽略" if target == 60 else "已处置"}（通知 {notice_id}）' + (f'；备注：{request.notes}' if request.notes else '')
+            comment = comment[:2048]  # XDR contract limit; the full notes remain in the local audit.
             async with connection() as db:
                 await db.execute('BEGIN IMMEDIATE')
                 unresolved = await db.execute("SELECT 1 FROM monitor_dispositions WHERE owner=? AND scope=? AND event_key=? "
@@ -153,13 +189,13 @@ async def change(owner, notice_id, request: ManualMailRequest, adapter_factory=d
                                               (owner, COMPONENT_ID, notice['event_key']))
                 if await unresolved.fetchone():
                     raise ValueError('此告警已有处置待回查，不能再次提交')
-                await db.execute('INSERT INTO monitor_mail_manual VALUES(?,?,?,?,?,?)',
-                                 (request_id, notice_id, owner, policy.project, request.state, stamp))
-                if request.state == 'handled':
+                await db.execute('INSERT INTO monitor_mail_manual(id,notice_id,owner,project,state,created_at,notes) VALUES(?,?,?,?,?,?,?)',
+                                 (request_id, notice_id, owner, policy.project, request.state, stamp, request.notes))
+                if target is not None:
                     await db.execute('INSERT INTO monitor_dispositions(id,owner,scope,event_key,comment,status,created_at,updated_at,mode,target_status,project,decision) '
                                      'VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',
                                      (request_id, owner, COMPONENT_ID, notice['event_key'], comment, 'queued', stamp, stamp,
-                                      'mail_manual', 40, policy.project, encode({'notice': notice_id, 'actor': owner, 'policy': policy.model_dump(mode='json'), 'event_version': event_version(event)})))
+                                      'mail_manual', target, policy.project, encode({'notice': notice_id, 'actor': owner, 'notes': request.notes, 'policy': policy.model_dump(mode='json'), 'event_version': event_version(event)})))
         if request.state == 'unhandled':
             return await snapshot(notice)
         return await snapshot(notice)
@@ -171,12 +207,17 @@ async def _apply_queued(policy, candidate, session_id, adapter_factory):
     owner, request_id, notice_id = policy.owner, candidate['id'], candidate['notice_id']
     notice, actual, event = await bound_notice(owner, notice_id)
     record = (await rows('SELECT * FROM monitor_dispositions WHERE owner=? AND id=?', (owner, request_id)))[0]
+    if await is_monitoring_ended(owner, policy.project, notice['event_key'], scope=policy.scope):
+        return {**record, 'monitoring_ended': True}
     if record['status'] != 'queued':
         return record
     if actual != policy or json.loads(record['decision']).get('policy') != policy.model_dump(mode='json'):
         await d.finish(owner, request_id, 'failed', error='监测配置已变化，旧人工反馈未写回', defer_exports=True)
         return {'status': 'failed'}
     comment = record['comment']
+    target = record['target_status']
+    if target not in {40, 60}:
+        raise ContractError('人工处置目标状态不支持')
     attempted = False
     async with diag.trace_scope(owner, COMPONENT_ID, request_id):
         try:
@@ -191,7 +232,7 @@ async def _apply_queued(policy, candidate, session_id, adapter_factory):
             from .mailflow import feedback_version_matches
             if not feedback_version_matches(event, raw):
                 raise ContractError('事件活动版本与原通知不一致，旧反馈未覆盖新活动')
-            if current == 40:
+            if current == target:
                 await d.finish(owner, request_id, 'verified', current, defer_exports=True)
             else:
                 if current not in (0, 10, 30, 70):
@@ -212,13 +253,13 @@ async def _apply_queued(policy, candidate, session_id, adapter_factory):
                     attempted = True
                     with diag.span('mail.manual.mark', notice=diag.opaque(notice_id)):
                         await d.operation(adapter, event, {'action': 'update_status', 'uuids': [event['id']],
-                            'deal_status': 40, 'deal_comment': comment}, '人工处理：将原告警标记为已处置')
+                            'deal_status': target, 'deal_comment': comment}, '人工处理：将原告警标记为' + ('忽略' if target == 60 else '已处置'))
                 checked = await read_event(adapter, event)
                 from .mailflow import feedback_version_matches
                 if not feedback_version_matches(event, checked):
                     raise ContractError('写后回查出现新活动，旧反馈未确认闭环')
                 current = checked.get('dealStatus')
-                await d.finish(owner, request_id, 'verified' if current == 40 else 'mismatch', current, defer_exports=True)
+                await d.finish(owner, request_id, 'verified' if current == target else 'mismatch', current, defer_exports=True)
         except BaseException as exc:
             error = str(exc) if isinstance(exc, ContractError) else '处置未完成，请回查 XDR 状态；不会重复写入'
             await d.finish(owner, request_id, 'pending' if attempted else 'failed', error=error, defer_exports=True)
@@ -234,10 +275,12 @@ async def _readback_manual(owner, record_id, adapter_factory, *, session_id=None
         raise ContractError('未找到原人工处置通知，保留待回查')
     notice_id = links[0]['notice_id']
     _, policy, event = await bound_notice(owner, notice_id)
+    if await is_monitoring_ended(owner, policy.project, event['key'], scope=policy.scope):
+        return {**record, 'monitoring_ended': True}
     adapter = adapter_factory(policy, session_id or record.get('session_id'))
     raw = await read_event(adapter, event)
     from .mailflow import feedback_version_matches
-    state = ('verified' if raw.get('dealStatus') == 40 else 'mismatch') if feedback_version_matches(event, raw) else 'pending'
+    state = ('verified' if raw.get('dealStatus') == record['target_status'] else 'mismatch') if feedback_version_matches(event, raw) else 'pending'
     await d.finish(owner, record_id, state, raw.get('dealStatus'),
                    error=None if state == 'verified' else '原事件版本或目标状态尚未回查确认；不重复写入', defer_exports=True)
     return {'status': state, 'error': None if state == 'verified' else '待回查'}
@@ -247,7 +290,7 @@ async def recheck(owner, notice_id, adapter_factory=d.DispositionAdapter):
     await require_interactive()
     notice, policy, _ = await bound_notice(owner, notice_id)
     previous = await latest(notice)
-    if not previous or previous['state'] != 'handled':
+    if not previous or previous['state'] not in ('handled', 'ignored'):
         raise ValueError('尚无已提交的人工处置')
     if previous['project'] != policy.project:
         raise ValueError('处置记录不属于当前监测项目')
@@ -290,7 +333,7 @@ async def recheck_pending(policy, *, limit=10, timeout_seconds=60, adapter_facto
         "JOIN monitor_mail_notices n ON n.id=m.notice_id AND n.owner=m.owner AND n.project=m.project "
         "JOIN monitor_dispositions d ON d.id=m.id AND d.owner=m.owner AND d.project=m.project "
         "AND d.event_key=n.event_key AND d.scope=n.scope "
-        "WHERE m.owner=? AND m.project=? AND n.scope=? AND m.state='handled' AND d.mode='mail_manual' "
+        "WHERE m.owner=? AND m.project=? AND n.scope=? AND m.state IN ('handled','ignored') AND d.mode='mail_manual' "
         "AND ((d.status='queued' AND m.created_at<?) OR d.status IN ('pending','mismatch') OR (d.status='writing' AND d.updated_at<=?)) "
         "ORDER BY d.updated_at,m.created_at,m.id LIMIT ?",
         (policy.owner, policy.project, policy.scope, round_cutoff, cutoff, max(1, min(int(limit), 50))))
@@ -300,6 +343,8 @@ async def recheck_pending(policy, *, limit=10, timeout_seconds=60, adapter_facto
         remaining = deadline - asyncio.get_running_loop().time()
         if remaining <= 0 or not await _active_policy(policy):
             break
+        if await is_monitoring_ended(policy.owner, policy.project, candidate['event_key'], scope=policy.scope):
+            continue  # Preserve an uncertain write audit; absence is not confirmation.
         result['checked'] += 1
         try:
             async def readback():

@@ -14833,7 +14833,7 @@
       "name": "Security Operations Monitoring",
       "nameCn": "安全运营监测",
       "description": "多台 XDR 责任人配置；受控关联调查、模型退避恢复、明确异常归因与邮件闭环",
-      "version": "1.13.1",
+      "version": "1.15.0",
       "category": "workflow-automation",
       "trust": "official",
       "riskLevel": "medium",

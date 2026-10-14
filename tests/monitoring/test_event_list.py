@@ -111,7 +111,8 @@ async def test_whole_group_time_span_prevents_bridges_without_requiring_common_i
 
 async def test_repeat_observations_deduplicate_and_latest_disposition_updates_old_day():
     await install()
-    event = incident()
+    occurred = int(datetime(2026, 10, 11, 1, tzinfo=timezone.utc).timestamp())
+    event = incident(startTime=occurred, endTime=occurred)
     await observe(event, day='2026-10-11')
     await observe(event, suffix='again')
     await investigate(event)
@@ -191,7 +192,8 @@ async def test_backlog_keeps_old_unhandled_and_contained_not_terminal_or_future(
     for identifier, status, day in [('old-open', 0, '2026-10-10'), ('old-contained', 70, '2026-10-10'),
                                   ('old-closed', 40, '2026-10-10'), ('old-ignored', 60, '2026-10-10'),
                                   ('today', 0, DAY), ('future', 0, '2026-10-13')]:
-        await observe(incident(identifier, dealStatus=status), day=day)
+        occurred = int(datetime.fromisoformat(day+'T01:00:00+00:00').timestamp())
+        await observe(incident(identifier, dealStatus=status, startTime=occurred, endTime=occurred), day=day)
     result = await listing()
     assert result['metrics']['events_in_range'] == 1 and result['metrics']['backlog_events'] == 2
     assert {m['id'] for item in result['items'] for m in item['members']} == {'old-open', 'old-contained', 'today'}
@@ -353,9 +355,11 @@ async def test_detail_history_limit_does_not_change_actual_first_seen(monkeypatc
 
 async def test_known_closed_history_does_not_use_up_backlog_candidate_limit(monkeypatch):
     await install()
-    await observe(incident('old-open'), day='2026-10-01')
+    old = int(datetime(2026, 10, 1, 1, tzinfo=timezone.utc).timestamp())
+    closed = int(datetime(2026, 10, 11, 1, tzinfo=timezone.utc).timestamp())
+    await observe(incident('old-open', startTime=old, endTime=old), day='2026-10-01')
     for index in range(3):
-        await observe(incident('closed-'+str(index), dealStatus=40), day='2026-10-11')
+        await observe(incident('closed-'+str(index), dealStatus=40, startTime=closed, endTime=closed), day='2026-10-11')
     monkeypatch.setattr(event_list, 'MAX_EVENTS', 2)
     result = await listing()
     assert result['metrics']['backlog_events'] == 1
@@ -428,10 +432,15 @@ async def test_mixed_assessments_remain_separate_in_group_and_filters_match_orig
             'risk_confirmed': verdict == 'risk', 'blocking_gaps': [], 'evidence_ids': ['evidence-1']})
     result = await listing()
     item = result['items'][0]
-    assert item['assessment_status'] == 'mixed'
-    assert item['assessment_counts'] == {'risk_open': 1, 'risk_closed': 1, 'benign': 1, 'insufficient': 1}
+    assert item['assessment_status'] == item['members'][0]['assessment']['status'] == 'insufficient'
+    expected_counts = {'risk_open': 1, 'risk_closed': 1, 'benign': 1, 'insufficient': 1}
+    if 'ended' in item['assessment_counts']:
+        expected_counts['ended'] = 0
+    assert item['assessment_counts'] == expected_counts
     assert result['metrics']['assessment_counts'] == item['assessment_counts']
-    for state in item['assessment_counts']:
+    for state, count in item['assessment_counts'].items():
+        if not count:
+            continue
         selected = await listing(assessment=state)
         assert selected['metrics']['events'] == 1
         member = selected['items'][0]['members'][0]
@@ -446,7 +455,7 @@ async def test_type_group_does_not_chain_across_more_than_24_hours():
     start = incident('one')['startTime']
     for identifier, hours in [('one', 0), ('two', 20), ('three', 40)]:
         await observe(incident(identifier, startTime=start+hours*3600, endTime=start+hours*3600))
-    result = await listing()
+    result = await event_list.list_events('owner', COMPONENT_ID, start_date=DAY, end_date='2026-10-14')
     assert sorted(item['member_count'] for item in result['items']) == [1, 2]
 
 

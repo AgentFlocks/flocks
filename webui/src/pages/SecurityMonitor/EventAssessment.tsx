@@ -9,6 +9,7 @@ export const assessmentLabels: Record<EventAssessmentStatus, string> = {
   risk_closed: "有风险 · 已处置",
   benign: "无风险 · 待忽略",
   insufficient: "证据不足 · 待观察",
+  ended: "已归档",
 };
 
 export function assessmentStatus(member: EventMember): EventAssessmentStatus {
@@ -20,7 +21,9 @@ export function assessmentStatus(member: EventMember): EventAssessmentStatus {
 
 export function AssessmentBadge({ status, label }: { status: EventAssessmentStatus; label?: string }) {
   const color =
-    status === "benign" || status === "risk_closed"
+    status === "ended"
+      ? "bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-300"
+      : status === "benign" || status === "risk_closed"
       ? "bg-emerald-50 text-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-300"
       : status === "risk_open"
         ? "bg-amber-50 text-amber-800 dark:bg-amber-950/40 dark:text-amber-200"
@@ -31,7 +34,7 @@ export function AssessmentBadge({ status, label }: { status: EventAssessmentStat
     >
       {status === "risk_open" ? (
         <ShieldAlert size={12} />
-      ) : status === "insufficient" ? (
+      ) : status === "insufficient" || status === "ended" ? (
         <CircleDot size={12} />
       ) : (
         <CheckCircle2 size={12} />

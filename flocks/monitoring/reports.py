@@ -85,7 +85,7 @@ async def snapshot(owner, scope, day):
         historic = (isinstance(persisted_assessment, dict)
             and persisted_assessment.get('policy_version') in {1, 2}
             and persisted_assessment.get('event_revision') == fingerprint(event)
-            and persisted_assessment.get('status') in {'risk_open', 'risk_closed', 'benign', 'insufficient'})
+            and persisted_assessment.get('status') in {'risk_open', 'risk_closed', 'benign', 'insufficient', 'ended'})
         # A new activity version cannot rewrite the facts of a historical day.
         event['assessment'] = (persisted_assessment if historic and not current_assessment['is_current'] else current_assessment)
         if event.get('closure') == 'closed' and event['assessment']['verdict'] == 'risk':
@@ -96,10 +96,18 @@ async def snapshot(owner, scope, day):
             event['disposition'] = 'XDR 来源状态为处置完成'
         event['assessment'] = apply_followup(event['assessment'], event, followups.get(event['key']))
         lifecycle = followups.get(event['key'], {})
-        if event['assessment'].get('ended') and lifecycle.get('observed_status') in {40, 60}:
+        if event['assessment'].get('ended') and event['assessment'].get('xdr_closed') and event.get('dealStatus') in {40, 60}:
+            event['closure'] = 'closed' if event['dealStatus'] == 40 else 'ignored'
+            event['closureSource'] = 'xdr'
+            event['disposition'] = event['assessment']['label']
+        elif event['assessment'].get('ended') and lifecycle.get('xdr_closed') and lifecycle.get('observed_status') in {40, 60}:
             event['closure'] = 'closed' if lifecycle['observed_status'] == 40 else 'ignored'
             event['closureSource'] = 'external' if lifecycle.get('external') else 'monitor_verified'
             event['disposition'] = event['assessment']['label']
+        elif event['assessment'].get('monitoring_ended') and not event['assessment'].get('xdr_closed'):
+            event['closure'] = 'ended'
+            event['closureSource'] = 'monitoring'
+            event['disposition'] = '已归档：XDR 本轮查询未返回，保留原研判与历史记录'
         event['risk'] = event['assessment']['verdict']
         event['reason'] = event['assessment']['reason']
         if event['closure'] == 'ignored':
@@ -163,12 +171,13 @@ async def snapshot(owner, scope, day):
                         'closed': sum(e['closure'] == 'closed' for e in events.values()),
                         'riskClosed': sum(e['assessment']['status'] == 'risk_closed' for e in events.values()),
                         'contained': sum(e['closure'] == 'contained' for e in events.values()),
-                        'unknown': sum(e['risk'] == 'unknown' for e in events.values()),
+                        'unknown': sum(e['risk'] == 'unknown' and not e['assessment'].get('ended') for e in events.values()),
                         'benign': sum(e['assessment']['status'] == 'benign' for e in events.values()),
                         'insufficient': sum(e['assessment']['status'] == 'insufficient' for e in events.values()),
-                        'ignored': sum(e.get('closure') == 'ignored' for e in events.values())},
+                        'ignored': sum(e.get('closure') == 'ignored' for e in events.values()),
+                        'monitoringEnded': sum(e.get('closure') == 'ended' for e in events.values())},
             'mail': {'enabled': bool(mail_settings and mail_settings[0]['enabled']), 'health': mail_health,
-                     'sentToday': sum(n['state']=='sent' and datetime.fromisoformat(n['sent_at'] or n['updated_at']).astimezone(tz).date().isoformat()==day for n in mail_notices),
+                     'sentToday': sum(bool(n['sent_at'] or n['state']=='sent') and datetime.fromisoformat(n['sent_at'] or n['updated_at']).astimezone(tz).date().isoformat()==day for n in mail_notices),
                      'receivedToday': sum(datetime.fromisoformat(r['received_at']).astimezone(tz).date().isoformat()==day for r in mail_replies),
                      'pending': sum(r['state'] in ('pending','interpreted') for r in mail_replies),
                      'needsReview': sum(r['state']=='needs_review' for r in mail_replies),
@@ -190,7 +199,7 @@ def render(data):
             name = str(event['name']).replace('\n', ' ')
             for char in ('\\', '[', ']', '*', '_', '`', '<', '>'):
                 name = name.replace(char, '\\' + char)
-            closure = {'closed': '已闭环（XDR 回查确认）', 'contained': '已遏制（XDR 回查确认，仍需跟进）', 'ignored': '已忽略（XDR 回查确认）'}.get(event['closure'], '未闭环')
+            closure = {'closed': '已闭环（XDR 回查确认）', 'contained': '已遏制（XDR 回查确认，仍需跟进）', 'ignored': '已忽略（XDR 回查确认）', 'ended': '已归档（XDR 未再返回）'}.get(event['closure'], '未闭环')
             lines += [f"- {name} · {event['risk']} · {closure}；[关联对话](/sessions?session={event['sessionID']}&focusMessage={event['messageID']})"]
             if event.get('dispositionRecord'):
                 item = event['dispositionRecord']
@@ -231,13 +240,14 @@ def render_summary(data):
     lines = [f"# 当日告警总结 · {data['businessDate']}", '',
              f"当天执行 {m['started']} 轮，查询到 {m['events']} 条去重事件。风险 {m['risk']} 条，待判定 {m['unknown']} 条。",
              f"处置完成 {m['closed']} 条，已遏制 {m['contained']} 条，已忽略 {m['ignored']} 条，仍未闭环风险 {m['openRisk']} 条。", '',
+             f"当天记录事件中，截至报告生成有 {m.get('monitoringEnded', 0)} 条未再检出、停止跟进（XDR 完整查询未返回），不计为已确认处置或风险消除。", '',
              '## 邮件与处置进展', '',
              f"当天确认发送 {mail.get('sentToday', 0)} 封，收到 {mail.get('receivedToday', 0)} 封回复。",
              f"截至当前，待处理回复 {mail.get('pending', 0)} 封，反馈待核验 {mail.get('needsReview', 0)} 封，发件结果未知 {mail.get('sendUnknown', 0)} 封。",
              '邮件状态与是否收到回信不决定监测任务成败；发信失败或未收到回信时，可在发信记录更新处置状态。', '',
              '## 需要继续跟进', '']
     for event in data['events']:
-        if event['closure'] not in ('closed', 'ignored'):
+        if event['closure'] not in ('closed', 'ignored', 'ended'):
             name = str(event['name']).replace('\n', ' ')
             for char in ('\\', '[', ']', '*', '_', '`', '<', '>'):
                 name = name.replace(char, '\\' + char)

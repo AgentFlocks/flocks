@@ -1,12 +1,13 @@
 import client from "./client";
 import { MONITOR_API } from "./securityMonitoring";
 
-export type EventHandling = "open" | "closed" | "ignored" | "contained";
+export type EventHandling = "open" | "closed" | "ignored" | "contained" | "ended";
 export type EventAssessmentStatus =
   | "risk_open"
   | "risk_closed"
   | "benign"
-  | "insufficient";
+  | "insufficient"
+  | "ended";
 export interface EventAssessment {
   lifecycle?: string;
   observation_rounds?: number;
@@ -54,6 +55,8 @@ export interface EventMember {
   last_seen_at?: string | null;
   event_at?: string | number | null;
   event_end_at?: string | number | null;
+  occurrence_at?: string | number | null;
+  occurrence_time_unknown?: boolean;
   investigation?: {
     state?: string;
     verdict?: string;
@@ -78,7 +81,7 @@ export interface EventMember {
   sessionID?: string;
   messageID?: string;
   is_backlog?: boolean;
-  handling_source?: "xdr" | "monitor_verified";
+  handling_source?: "xdr" | "monitor_verified" | "monitoring";
 }
 export interface EventListRow {
   id: string;
@@ -91,6 +94,7 @@ export interface EventListRow {
   host: string;
   first_event_at?: string | number | null;
   last_event_at?: string | number | null;
+  primary_event_key?: string;
   first_seen_at?: string | null;
   last_seen_at?: string | null;
   risk: string;
@@ -98,6 +102,7 @@ export interface EventListRow {
   assessment_counts?: Partial<Record<EventAssessmentStatus, number>>;
   assessment_status?: EventAssessmentStatus | "mixed";
   assessment_label?: string;
+  assessment?: EventAssessment;
   hosts?: string[];
   host_count?: number;
   mail: { sent: number; replied: number; failed: number };
@@ -105,7 +110,7 @@ export interface EventListRow {
   merge_reason: string;
   members: EventMember[];
   is_backlog?: boolean;
-  closure_counts?: Record<EventHandling, number>;
+  closure_counts?: Partial<Record<EventHandling, number>>;
 }
 export interface EventListResponse {
   start_date: string;
@@ -129,6 +134,7 @@ export interface EventListResponse {
     closed: number;
     ignored: number;
     contained: number;
+    ended?: number;
     mail_sent: number;
     mail_replied: number;
   };

@@ -52,6 +52,9 @@ async def setup(tmp_path, monkeypatch):
     monkeypatch.setattr(m, '_locks', {})
     monkeypatch.setattr(m, '_round_locks', {})
     monkeypatch.setattr(m.transport, 'send', AsyncMock(return_value=True))
+    monkeypatch.setattr(m, 'health_snapshot', AsyncMock(return_value={
+        'enabled': True, 'send': {'state': 'healthy'}, 'receive': {'state': 'healthy'}, 'errors': [],
+    }))
     return SimpleNamespace(policy=policy, scheduler=scheduler, catalog=catalog)
 
 

@@ -294,16 +294,23 @@ async def pending(policy):
     scope, params = policy_filter(policy)
     stored = await rows("SELECT event FROM monitor_investigations WHERE owner=? AND project=? "
         "AND state IN ('pending','deferred','system_wait') AND retry_exhausted=0 "
-        "AND (next_retry_at IS NULL OR julianday(next_retry_at)<=julianday(?))" + scope +
-        ' ORDER BY updated_at,event_key LIMIT 20', (policy.owner, policy.project, now().isoformat(), *params))
+        "AND (next_retry_at IS NULL OR julianday(next_retry_at)<=julianday(?)) "
+        "AND NOT EXISTS (SELECT 1 FROM monitor_event_followup f WHERE f.owner=monitor_investigations.owner "
+        "AND f.project=monitor_investigations.project AND f.scope=? AND f.event_key=monitor_investigations.event_key "
+        "AND f.device=json_extract(monitor_investigations.event,'$.device') AND f.state='monitoring_ended')" + scope +
+        ' ORDER BY updated_at,event_key LIMIT 20', (policy.owner, policy.project, now().isoformat(), policy.scope, *params))
     return [json.loads(row['event']) for row in stored]
 
 
 async def status_summary(policy=None, *, owner=None, project=None):
+    from .models import COMPONENT_ID
     owner, project = (policy.owner, policy.project) if policy else (owner, project)
     scope, params = policy_filter(policy) if policy else ('', ())
     stored = await rows('SELECT state,next_retry_at,updated_at,retry_exhausted,error_kind FROM monitor_investigations '
-                        'WHERE owner=? AND project=?' + scope, (owner, project, *params))
+                        "WHERE owner=? AND project=? AND NOT EXISTS (SELECT 1 FROM monitor_event_followup f "
+                        "WHERE f.owner=monitor_investigations.owner AND f.project=monitor_investigations.project AND f.scope=? "
+                        "AND f.event_key=monitor_investigations.event_key AND f.device=json_extract(monitor_investigations.event,'$.device') "
+                        "AND f.state='monitoring_ended')" + scope, (owner, project, policy.scope if policy else COMPONENT_ID, *params))
     result = {state: sum(row['state'] == state for row in stored)
               for state in ('pending', 'deferred', 'system_wait', 'needs_review', 'ready')}
     waiting = [row for row in stored if row['state'] in ('pending', 'deferred', 'system_wait', 'needs_review')]

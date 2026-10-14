@@ -78,9 +78,6 @@ it("lists sent notices without exposing subjects or bodies until details are ope
   ).toBeInTheDocument();
   expect(screen.getByText("event")).toBeInTheDocument();
   expect(screen.getByText("总部 XDR")).toBeInTheDocument();
-  expect(
-    screen.getByText(/邮件已发送或收到回复均不代表处置完成/),
-  ).toBeInTheDocument();
   expect(screen.queryByText("告警通知")).not.toBeInTheDocument();
   expect(screen.queryByText("一条告警")).not.toBeInTheDocument();
   expect(screen.getByText("尚无回信")).toBeInTheDocument();
@@ -121,7 +118,7 @@ it("shows failed and uncertain deliveries returned by the server alongside sent 
     </MemoryRouter>,
   );
   await screen.findByText("发送失败告警");
-  expect(screen.getByText("发送失败 · 待重试")).toBeInTheDocument();
+  expect(screen.getByText("未发送 · 可重试")).toBeInTheDocument();
   expect(screen.getByText("发送结果待确认")).toBeInTheDocument();
   expect(screen.getByText("待确认投递")).toBeInTheDocument();
   const rows = screen.getAllByRole("row");
@@ -405,6 +402,7 @@ it("marks a notice handled only after the server confirms XDR state", async () =
   expect(mocks.setMailManualStatus).toHaveBeenCalledWith("notice", {
     request_id: expect.stringMatching(/^[a-f0-9-]{36}$/i),
     state: "handled",
+    notes: "",
   });
   await act(async () =>
     finish({
@@ -437,7 +435,7 @@ it("automatically waits for pending write readback without a human action", asyn
     </MemoryRouter>,
   );
   expect(
-    await screen.findByText("系统将自动回查 · 尚未确认已处置"),
+    await screen.findByText("系统将在下一轮标记并回查"),
   ).toBeInTheDocument();
   expect(
     screen.queryByRole("button", { name: "标记已处置：event" }),
@@ -467,8 +465,8 @@ it("records unhandled without pretending to change XDR to an earlier status", as
   expect(mocks.setMailManualStatus).toHaveBeenCalledWith("notice", {
     request_id: expect.any(String),
     state: "unhandled",
+    notes: "",
   });
-  expect(screen.getByText(/不回退 XDR 状态/)).toBeInTheDocument();
 });
 
 it("keeps a stable request ID for an uncertain retry and supports intranet HTTP", async () => {
@@ -504,7 +502,7 @@ it("keeps a stable request ID for an uncertain retry and supports intranet HTTP"
       /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/,
     );
     fireEvent.click(screen.getByRole("button", { name: "标记已处置：event" }));
-    await screen.findByText("系统将自动回查 · 尚未确认已处置");
+    await screen.findByText("系统将在下一轮标记并回查");
     expect(mocks.setMailManualStatus.mock.calls[1][1]).toEqual(first);
   } finally {
     randomUUID.mockRestore();
@@ -619,6 +617,21 @@ it("uses the newest feedback state instead of an older verified reply", async ()
   expect(within(row).queryByText("目标状态已回查确认")).not.toBeInTheDocument();
 });
 
+it("labels archived feedback as no longer detected without implying confirmed external handling", async () => {
+  mocks.mail.mockResolvedValue({ data: { ...data, replies: [], notices: [{ ...data.notices[0],
+    reply_received: true, items: [{ id: "archived", state: "monitoring_ended", target: 40,
+      reason: "XDR本轮查询未返回此事件，保留原研判和历史记录，不再自动观察或跟进。" }],
+  }] } });
+  render(<MemoryRouter><MailFollowup /></MemoryRouter>);
+  const row = (await screen.findByText("待跟进告警")).closest("tr")!;
+  expect(within(row).getByText("已归档")).toBeInTheDocument();
+  expect(within(row).queryByText(/已结束|其他人员处置|目标状态已回查确认/)).not.toBeInTheDocument();
+  fireEvent.click(within(row).getByRole("button", { name: "查看发信详情：event" }));
+  const dialog = screen.getByRole("dialog", { name: "告警邮件详情" });
+  expect(within(dialog).getAllByText("已归档").length).toBeGreaterThan(0);
+  expect(within(dialog).queryByText(/已结束|其他人员处置|目标状态已回查确认/)).not.toBeInTheDocument();
+});
+
 function failedNotice() {
   return {
     ...data.notices[0],
@@ -669,7 +682,7 @@ it("retries only eligible failed mail and retains the alert awaiting feedback", 
   });
   await act(async () => finish({ data: sent }));
   expect(
-    await screen.findByText("邮件已发送；告警继续保留，等待处置反馈。"),
+    await screen.findByText("邮件已发送。"),
   ).toBeInTheDocument();
   expect(screen.getByText("已发送")).toBeInTheDocument();
   expect(screen.getByText("尚无回信")).toBeInTheDocument();
@@ -749,7 +762,7 @@ it.each([new Error("network timeout"), { response: { status: 502 } }])(
     ).toBeDisabled();
     const first = mocks.retryMailNotice.mock.calls[0][1];
     fireEvent.click(screen.getByRole("button", { name: "重试发送：event" }));
-    await screen.findByText("本次发送结果已更新；告警继续保留，等待处置反馈。");
+    await screen.findByText("发送结果已更新。");
     expect(mocks.retryMailNotice.mock.calls[1][1]).toEqual(first);
     expect(screen.getByText("未处置")).toBeInTheDocument();
   },
@@ -774,10 +787,10 @@ it("starts a new request after the server definitively reports another send fail
   fireEvent.click(
     await screen.findByRole("button", { name: "重试发送：event" }),
   );
-  await screen.findByText("本次发送结果已更新；告警继续保留，等待处置反馈。");
+  await screen.findByText("发送结果已更新。");
   const first = mocks.retryMailNotice.mock.calls[0][1];
   fireEvent.click(screen.getByRole("button", { name: "重试发送：event" }));
-  await screen.findByText("本次发送结果已更新；告警继续保留，等待处置反馈。");
+  await screen.findByText("发送结果已更新。");
   expect(mocks.retryMailNotice.mock.calls[1][1].request_id).not.toBe(
     first.request_id,
   );
@@ -860,7 +873,7 @@ it("resolves a lost response from refreshed delivery facts without leaving a res
   fireEvent.click(
     await screen.findByRole("button", { name: "重试发送：event" }),
   );
-  await screen.findByText("邮件已发送；告警继续保留，等待处置反馈。");
+  await screen.findByText("邮件已发送。");
   expect(
     screen.queryByRole("button", { name: /重试发送/ }),
   ).not.toBeInTheDocument();
@@ -869,4 +882,61 @@ it("resolves a lost response from refreshed delivery facts without leaving a res
     screen.getByRole("button", { name: "标记已处置：event" }),
   ).toBeEnabled();
   expect(screen.getByText("未处置")).toBeInTheDocument();
+});
+
+it("merges mail statuses, hides eligibility boilerplate and allows unanswered-mail resend", async () => {
+  const sent = { ...data.notices[0], updated_at: "2026-10-14T00:00:00Z", retry: { available: true, reason: "已发送，告警保留未处置，等待责任人反馈" }, manual: manual({ reason: "尚未收到对应回信，可记录人工处理结果" }) };
+  mocks.mail.mockResolvedValue({ data: { ...data, notices: [sent] } });
+  mocks.retryMailNotice.mockResolvedValue({ data: { state: "sent", error: null, retry: { available: true, reason: "" } } });
+  render(<MemoryRouter><MailFollowup /></MemoryRouter>);
+  const retry = await screen.findByRole("button", { name: "重新发送：event" });
+  expect(screen.getByRole("columnheader", { name: "邮件状态" })).toBeInTheDocument();
+  expect(screen.queryByRole("columnheader", { name: "发信状态" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("columnheader", { name: "回信状态" })).not.toBeInTheDocument();
+  expect(screen.queryByText(sent.retry.reason)).not.toBeInTheDocument();
+  expect(screen.queryByText(sent.manual.reason)).not.toBeInTheDocument();
+  fireEvent.click(retry);
+  await screen.findByText("邮件已发送。");
+  expect(mocks.retryMailNotice).toHaveBeenCalledWith("notice", { request_id: expect.any(String), expected_updated_at: sent.updated_at });
+});
+
+it("persists ignore and notes as next-round intent before XDR confirmation", async () => {
+  setManualNotice();
+  mocks.setMailManualStatus.mockResolvedValue({ data: manual({ available: false, state: "pending", target_status: 60, notes: "经核实为授权测试，按要求忽略", reason: "等待下一轮标记并回查" }) });
+  render(<MemoryRouter><MailFollowup /></MemoryRouter>);
+  fireEvent.change(await screen.findByRole("textbox", { name: "处置备注：event" }), { target: { value: "经核实为授权测试，按要求忽略" } });
+  fireEvent.click(screen.getByRole("button", { name: "标记忽略：event" }));
+  await screen.findByText("待下一轮忽略");
+  expect(mocks.setMailManualStatus).toHaveBeenCalledWith("notice", { request_id: expect.any(String), state: "ignored", notes: "经核实为授权测试，按要求忽略" });
+  expect(screen.queryByText("已忽略 · XDR 已确认")).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "标记忽略：event" })).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "查看发信详情：event" }));
+  const dialog = screen.getByRole("dialog");
+  expect(within(dialog).getByText("人工备注")).toBeInTheDocument();
+  expect(within(dialog).getByText("经核实为授权测试，按要求忽略")).toBeInTheDocument();
+});
+
+it("retains channel-blocked notices and prepared content for preview and resend", async () => {
+  const blocked = { ...failedNotice(), state: "blocked", subject: "预备发送的风险通知", body: "已确认恶意文件，需要清理", error: "邮件通道异常，未发送" };
+  mocks.mail.mockResolvedValue({ data: { ...data, notices: [blocked] } });
+  render(<MemoryRouter><MailFollowup /></MemoryRouter>);
+  await screen.findByText("邮件通道异常 · 未发送");
+  expect(screen.getByRole("button", { name: "重试发送：event" })).toBeEnabled();
+  expect(screen.queryByText(blocked.body)).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "查看发信详情：event" }));
+  const dialog = screen.getByRole("dialog");
+  expect(within(dialog).getByText(blocked.subject)).toBeInTheDocument();
+  expect(within(dialog).getByText(blocked.body)).toBeInTheDocument();
+  expect(within(dialog).getByText(blocked.error)).toBeInTheDocument();
+});
+
+it("shows verified ignore and displays notes as plain text", async () => {
+  const ignored = { ...data.notices[0], disposition_state: "ignored", manual: manual({ available: false, state: "ignored", notes: "<img src=x onerror=alert(1)>人工备注", reason: "已忽略并经 XDR 回查确认" }) };
+  mocks.mail.mockResolvedValue({ data: { ...data, notices: [ignored] } });
+  render(<MemoryRouter><MailFollowup /></MemoryRouter>);
+  expect(await screen.findByText("已忽略 · XDR 已确认")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "查看发信详情：event" }));
+  const dialog = screen.getByRole("dialog");
+  expect(within(dialog).getByText(ignored.manual.notes!)).toBeInTheDocument();
+  expect(dialog.querySelector("img")).toBeNull();
 });

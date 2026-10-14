@@ -102,7 +102,7 @@ async def test_unhandled_is_local_then_handled_writes_and_readbacks_once(case):
 
 
 @pytest.mark.parametrize('state,error,allowed', [('sent',None,True), ('send_unknown','unknown',True), ('queued','failed',True),
-    ('queued',None,False), ('sending',None,False), ('skipped',None,False)])
+    ('queued',None,True), ('sending',None,False), ('skipped',None,False)])
 async def test_manual_button_only_for_delivery_failure_or_no_reply(case, state, error, allowed):
     await write('UPDATE monitor_mail_notices SET state=?,error=? WHERE id=?', (state,error,case.notice))
     assert (await manual.snapshot(await notice(case)))['available'] is allowed
@@ -205,7 +205,7 @@ async def test_route_uses_authenticated_owner_and_notice_id(monkeypatch):
     action.assert_awaited_once_with('owner',str(notice_id),req)
 
 
-@pytest.mark.parametrize('fields',[{'state':'ignored'},{'state':'handled','device':'other'},{'state':'handled','target':60}])
+@pytest.mark.parametrize('fields',[{'state':'invalid'},{'state':'handled','device':'other'},{'state':'handled','target':60}])
 def test_manual_payload_does_not_accept_target_override(fields):
     with pytest.raises(ValidationError): request(**fields)
 
@@ -260,7 +260,7 @@ async def test_new_manual_endpoint_validates_identity_and_payload(case, monkeypa
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),base_url='http://fixture') as client:
         body=request('unhandled').model_dump(mode='json')
         assert (await client.post(path,json={**body,'owner':'other'})).status_code==422
-        assert (await client.post(path,json={**body,'state':'ignored'})).status_code==422
+        assert (await client.post(path,json={**body,'state':'invalid'})).status_code==422
         response=await client.post(path,json=body)
         assert response.status_code==200 and response.json()['state']=='unhandled'
         assert (await client.post(path.replace(case.notice,str(uuid4())),json=body)).status_code==404
@@ -386,7 +386,7 @@ async def add_pending_readback(case, suffix):
     await write('INSERT INTO monitor_observations VALUES(?,?,?)', ('attempt', event['key'], encode(event)))
     await write('INSERT INTO monitor_mail_notices(id,owner,scope,project,event_key,recipient,revision,mailbox,message_id,subject,body,event,state,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
         (nid, 'owner', case.policy.scope, case.policy.project, event['key'], 'person@example.com', 'rev', 'mailbox', f'<{suffix}@example.com>', 'notice', 'body', encode(event), 'sent', d.stamp(), d.stamp()))
-    await write('INSERT INTO monitor_mail_manual VALUES(?,?,?,?,?,?)', (mid, nid, 'owner', case.policy.project, 'handled', d.stamp()))
+    await write('INSERT INTO monitor_mail_manual(id,notice_id,owner,project,state,created_at) VALUES(?,?,?,?,?,?)', (mid, nid, 'owner', case.policy.project, 'handled', d.stamp()))
     await write('INSERT INTO monitor_dispositions(id,owner,scope,event_key,comment,status,created_at,updated_at,mode,target_status,project,session_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',
         (mid, 'owner', case.policy.scope, event['key'], '人工处理', 'pending', d.stamp(), d.stamp(), 'mail_manual', 40, case.policy.project, case.session.id))
     return mid

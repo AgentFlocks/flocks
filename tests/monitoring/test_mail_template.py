@@ -116,7 +116,7 @@ async def test_fresh_activity_invalidates_old_result_then_reanalysis_can_send(au
     auto.raw['endTime'] += 1
     await m.notify_batch(auto.policy, auto.session.id, [auto.event], Recorder(), auto.adapter)
     notice = (await rows('SELECT * FROM monitor_mail_notices'))[0]
-    assert notice['state'] == 'skipped' and not notice['body']
+    assert notice['state'] == 'skipped' and notice['body']  # Prepared preview is retained; no delivery occurred.
     auto.send.assert_not_awaited()
     auto.event = normalize('device', auto.raw)
     await investigation(auto)
