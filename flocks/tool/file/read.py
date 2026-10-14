@@ -10,6 +10,8 @@ Reads files from the local filesystem, supporting:
 
 import os
 import asyncio
+import errno
+import stat
 import time
 import json
 import base64
@@ -17,10 +19,11 @@ import mimetypes
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 
+from flocks.tool import nofollow
 from flocks.tool.registry import (
     ToolRegistry, ToolCategory, ToolParameter, ParameterType, ToolResult, ToolContext
 )
-from flocks.tool.path_utils import resolve_tool_path
+from flocks.tool.path_utils import changed_before_asking, resolve_tool_path
 from flocks.tool.tool_output_limits import (
     get_read_max_lines,
     get_read_max_bytes,
@@ -46,15 +49,43 @@ MAX_TEXT_SCAN_CHARS = 16 * 1024 * 1024
 MAX_TEXT_SCAN_SECONDS = 5.0
 
 
+def _rewind(fd):
+    try:
+        os.lseek(fd, 0, os.SEEK_SET)
+    except OSError:
+        pass  # a pipe or a device: read on from where it is
+
+
+def _open_text(source):
+    """A text stream over ``source``: a path, or an open descriptor read from its start.
+
+    A descriptor is left open for its owner.
+    """
+    if isinstance(source, int):
+        _rewind(source)
+        return open(source, "r", encoding="utf-8", errors="replace", closefd=False)
+    return open(source, "r", encoding="utf-8", errors="replace")
+
+
+def _read_from_start(fd, size):
+    """Up to ``size`` bytes of the open file ``fd`` from its start."""
+    _rewind(fd)
+    with open(fd, "rb", closefd=False) as stream:
+        return stream.read(size)
+
+
 def _read_text_window(filepath, offset, limit, max_bytes, max_line_length):
-    """Read a bounded window without materializing the rest of the file."""
+    """Read a bounded window without materializing the rest of the file.
+
+    ``filepath`` may also be a descriptor the caller opened.
+    """
     lines = []
     index = 0
     consumed = 0
     output_bytes = 0
     shortened = False
     deadline = time.monotonic() + MAX_TEXT_SCAN_SECONDS
-    with open(filepath, "r", encoding="utf-8", errors="replace") as stream:
+    with _open_text(filepath) as stream:
         while True:
             if time.monotonic() >= deadline or consumed >= MAX_TEXT_SCAN_CHARS:
                 raise ValueError("Requested offset/window exceeds the read scan budget; use search or a smaller file")
@@ -110,7 +141,7 @@ def _read_line_slice(filepath, line_index, column_start, column_count):
         consumed += len(segment)
         return segment
 
-    with open(filepath, "r", encoding="utf-8", errors="replace") as stream:
+    with _open_text(filepath) as stream:
         segment = next_segment()
         while segment and index < line_index:
             if segment.endswith("\n"):
@@ -186,25 +217,37 @@ def is_binary_file(filepath: str) -> bool:
     try:
         with open(filepath, 'rb') as f:
             # Read first 4KB
-            chunk = f.read(4096)
-            if not chunk:
-                return False
-            
-            # Check for null bytes
-            if b'\x00' in chunk:
-                return True
-            
-            # Count non-printable characters
-            non_printable = sum(
-                1 for byte in chunk
-                if byte < 9 or (byte > 13 and byte < 32)
-            )
-            
-            # If >30% non-printable, consider binary
-            return non_printable / len(chunk) > 0.3
-            
+            return _looks_binary(f.read(4096))
     except Exception:
         return False
+
+
+def _is_binary_open_file(fd: int, filepath: str) -> bool:
+    """:func:`is_binary_file` for ``filepath`` already open as ``fd``."""
+    if Path(filepath).suffix.lower() in BINARY_EXTENSIONS:
+        return True
+    try:
+        return _looks_binary(_read_from_start(fd, 4096))
+    except OSError:
+        return False
+
+
+def _looks_binary(chunk: bytes) -> bool:
+    if not chunk:
+        return False
+
+    # Check for null bytes
+    if b'\x00' in chunk:
+        return True
+
+    # Count non-printable characters
+    non_printable = sum(
+        1 for byte in chunk
+        if byte < 9 or (byte > 13 and byte < 32)
+    )
+
+    # If >30% non-printable, consider binary
+    return non_printable / len(chunk) > 0.3
 
 
 def get_mime_type(filepath: str) -> str:
@@ -234,7 +277,8 @@ def find_similar_files(directory: str, filename: str, max_suggestions: int = 3) 
         List of similar file paths
     """
     try:
-        entries = os.listdir(directory)
+        # Listed without following a link on the way, like the file is opened.
+        entries = nofollow.listdir(directory)
         filename_lower = filename.lower()
         
         suggestions = []
@@ -362,8 +406,13 @@ async def read_tool(
 
 
 def _read_resolved(ctx, filepath, title, offset, limit, columnOffset=None, columnLimit=None):
-    # Check file exists
-    if not os.path.exists(filepath):
+    # The file is opened once, every directory on the way without following
+    # a link: one put there after the path was checked is not read through.
+    try:
+        fd = nofollow.open_file(filepath, os.O_RDONLY)
+    except nofollow.LinkOnTheWay:
+        return ToolResult(success=False, error=changed_before_asking(filepath), title=title)
+    except (FileNotFoundError, NotADirectoryError):
         directory = os.path.dirname(filepath)
         basename = os.path.basename(filepath)
         
@@ -379,7 +428,19 @@ def _read_resolved(ctx, filepath, title, offset, limit, columnOffset=None, colum
             error=error_msg,
             title=title
         )
-    
+    except OSError as exc:
+        return ToolResult(success=False, error=f"Failed to read file: {exc}", title=title)
+    try:
+        return _read_open_file(ctx, fd, filepath, title, offset, limit, columnOffset, columnLimit)
+    finally:
+        os.close(fd)
+
+
+def _read_open_file(ctx, fd, filepath, title, offset, limit, columnOffset, columnLimit):
+    if stat.S_ISDIR(os.fstat(fd).st_mode):
+        error = IsADirectoryError(errno.EISDIR, os.strerror(errno.EISDIR), filepath)
+        return ToolResult(success=False, error=f"Failed to read file: {error}", title=title)
+
     # Get MIME type
     mime_type = get_mime_type(filepath)
     
@@ -391,8 +452,7 @@ def _read_resolved(ctx, filepath, title, offset, limit, columnOffset=None, colum
     
     if is_image:
         try:
-            with open(filepath, 'rb') as f:
-                content = f.read(MAX_ATTACHMENT_BYTES + 1)
+            content = _read_from_start(fd, MAX_ATTACHMENT_BYTES + 1)
             if len(content) > MAX_ATTACHMENT_BYTES:
                 raise ValueError(f'Attachment exceeds {MAX_ATTACHMENT_BYTES} bytes; use a smaller file')
             
@@ -425,8 +485,7 @@ def _read_resolved(ctx, filepath, title, offset, limit, columnOffset=None, colum
     # Handle PDFs
     if mime_type == 'application/pdf':
         try:
-            with open(filepath, 'rb') as f:
-                content = f.read(MAX_ATTACHMENT_BYTES + 1)
+            content = _read_from_start(fd, MAX_ATTACHMENT_BYTES + 1)
             if len(content) > MAX_ATTACHMENT_BYTES:
                 raise ValueError(f'Attachment exceeds {MAX_ATTACHMENT_BYTES} bytes; use a smaller file')
             
@@ -457,7 +516,7 @@ def _read_resolved(ctx, filepath, title, offset, limit, columnOffset=None, colum
             )
     
     # Check if binary
-    if is_binary_file(filepath):
+    if _is_binary_open_file(fd, filepath):
         return ToolResult(
             success=False,
             error=f"Cannot read binary file: {filepath}",
@@ -489,7 +548,7 @@ def _read_resolved(ctx, filepath, title, offset, limit, columnOffset=None, colum
             return ToolResult(success=False, error="Column mode requires nonnegative offset/columnOffset, positive columnLimit and a single line.", title=title)
         try:
             found = _read_line_slice(
-                filepath, read_offset, column_start, min(column_count, effective_max_bytes),
+                fd, read_offset, column_start, min(column_count, effective_max_bytes),
             )
         except Exception as exc:
             return ToolResult(success=False, error=f"Failed to read file: {exc}", title=title)
@@ -514,7 +573,7 @@ def _read_resolved(ctx, filepath, title, offset, limit, columnOffset=None, colum
 
     try:
         raw_lines, has_more_lines, total_lines, truncated_by_bytes, long_lines = _read_text_window(
-            filepath, read_offset, read_limit, effective_max_bytes, effective_max_line_length,
+            fd, read_offset, read_limit, effective_max_bytes, effective_max_line_length,
         )
     except Exception as exc:
         return ToolResult(success=False, error=f"Failed to read file: {exc}", title=title)

@@ -13,6 +13,7 @@ from difflib import unified_diff
 from pathlib import Path
 from typing import Optional
 
+from flocks.tool import nofollow
 from flocks.tool.registry import (
     ToolRegistry, ToolCategory, ToolParameter, ParameterType, ToolResult, ToolContext
 )
@@ -397,24 +398,24 @@ async def write_tool(
     # Get relative title for display
     title = resolution.display_path
     
-    # Nothing is read through a path that moved since it was checked.
+    # Nothing is read through a path that moved since it was checked, nor
+    # through a link put on the way while it is read.
     if moved_since_resolved(filepath):
         return ToolResult(success=False, error=changed_before_asking(filepath), title=title)
 
     # Check if file exists and get old content
-    exists = os.path.exists(filepath)
-    old_content = ""
-    
-    if exists:
-        try:
-            with open(filepath, 'r', encoding='utf-8', errors='replace') as f:
-                old_content = f.read()
-        except Exception as e:
-            return ToolResult(
-                success=False,
-                error=checked_error((filepath,), f"Failed to read existing file: {str(e)}"),
-                title=title
-            )
+    try:
+        existing = nofollow.read_text(filepath)
+    except nofollow.LinkOnTheWay:
+        return ToolResult(success=False, error=changed_before_asking(filepath), title=title)
+    except Exception as e:
+        return ToolResult(
+            success=False,
+            error=checked_error((filepath,), f"Failed to read existing file: {str(e)}"),
+            title=title
+        )
+    exists = existing is not None
+    old_content = existing.text if existing is not None else ""
 
     if (
         ctx.agent == "self-improve"
@@ -453,18 +454,18 @@ async def write_tool(
             "pattern_base": resolution.worktree,
         },
     )
+    changed = f"{filepath} changed while waiting for permission; check it again and retry."
     if paths_changed(identities):
-        return ToolResult(
-            success=False,
-            error=f"{filepath} changed while waiting for permission; check it again and retry.",
-            title=title,
-        )
+        return ToolResult(success=False, error=changed, title=title)
 
-    # Create parent directory if needed
+    # Create parent directory if needed, opening each one on the way without
+    # following a link.
     parent_dir = os.path.dirname(filepath)
     if parent_dir and not os.path.exists(parent_dir):
         try:
-            os.makedirs(parent_dir, exist_ok=True)
+            nofollow.makedirs(parent_dir)
+        except nofollow.LinkOnTheWay:
+            return ToolResult(success=False, error=changed, title=title)
         except Exception as e:
             return ToolResult(
                 success=False,
@@ -472,10 +473,11 @@ async def write_tool(
                 title=title
             )
     
-    # Write file
+    # Write the file the request was about: the one read above, or none.
     try:
-        with open(filepath, 'w', encoding='utf-8') as f:
-            f.write(content)
+        nofollow.write_text(filepath, content, expect=existing.identity if existing is not None else None)
+    except (nofollow.LinkOnTheWay, nofollow.StaleFile):
+        return ToolResult(success=False, error=changed, title=title)
     except Exception as e:
         return ToolResult(
             success=False,

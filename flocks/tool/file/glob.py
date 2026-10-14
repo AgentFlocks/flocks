@@ -9,13 +9,17 @@ Fast file pattern matching tool that:
 
 import os
 import asyncio
+import contextlib
+import fnmatch
+import functools
 import shutil
 from typing import Optional, List, Dict, Any, AsyncIterator
 
+from flocks.tool import nofollow
 from flocks.tool.registry import (
     ToolRegistry, ToolCategory, ToolParameter, ParameterType, ToolResult, ToolContext
 )
-from flocks.tool.path_utils import resolve_tool_path
+from flocks.tool.path_utils import changed_before_asking, resolve_tool_path
 from flocks.utils.log import Log
 
 
@@ -53,6 +57,8 @@ async def ripgrep_files(
     """
     Find files using ripgrep
     
+    Links are not followed: what one points at may be anyone's.
+
     Args:
         rg_path: Path to ripgrep
         cwd: Working directory
@@ -65,7 +71,6 @@ async def ripgrep_files(
         rg_path,
         "--files",
         "--hidden",
-        "--follow",
         "--no-messages"
     ]
     
@@ -74,17 +79,24 @@ async def ripgrep_files(
     
     proc = await asyncio.create_subprocess_exec(
         *args,
+        stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         cwd=cwd
     )
     
-    async for line in proc.stdout:
-        filepath = line.decode('utf-8', errors='replace').strip()
-        if filepath:
-            yield filepath
-    
-    await proc.wait()
+    try:
+        async for line in proc.stdout:
+            filepath = line.decode('utf-8', errors='replace').strip()
+            if filepath:
+                yield filepath
+    finally:
+        # The caller may stop reading early: ripgrep is not left running,
+        # and what is left in its pipes is read so it can be reaped.
+        if proc.returncode is None:
+            with contextlib.suppress(ProcessLookupError):
+                proc.kill()
+        await proc.communicate()
 
 
 def fallback_glob(
@@ -92,8 +104,12 @@ def fallback_glob(
     pattern: str
 ) -> List[str]:
     """
-    Fallback glob implementation using Python's glob module
+    Fallback glob implementation matching like Python's glob module
     
+    Matches ``glob(recursive=True, include_hidden=True)`` would make --
+    hidden files included, like ripgrep's --hidden -- over regular files
+    reached without following a link, like ripgrep.
+
     Args:
         cwd: Working directory
         pattern: Glob pattern
@@ -101,22 +117,47 @@ def fallback_glob(
     Returns:
         List of matching file paths
     """
-    import glob as python_glob
-    
-    # Normalize pattern
+    # Normalize pattern; Windows takes either separator, as glob does there.
+    if os.altsep:
+        pattern = pattern.replace(os.sep, os.altsep)
     if not pattern.startswith("**/"):
         pattern = "**/" + pattern
-    
-    full_pattern = os.path.join(cwd, pattern)
+    pattern_parts = pattern.split("/")
     
     matches = []
-    # include_hidden mirrors ripgrep's --hidden so both paths agree
-    for filepath in python_glob.glob(full_pattern, recursive=True, include_hidden=True):
-        if os.path.isfile(filepath):
-            rel_path = os.path.relpath(filepath, cwd)
-            matches.append(rel_path)
+    with nofollow.directory(cwd) as root:
+        for rel_path, _holder, _name in nofollow.walk_files(root):
+            if _glob_matches(pattern_parts, rel_path.split(os.sep)):
+                matches.append(rel_path)
     
     return matches
+
+
+def _glob_matches(pattern_parts: List[str], path_parts: List[str]) -> bool:
+    """Whether a path matches a pattern, both split at "/", the way recursive glob does."""
+
+    @functools.cache
+    def matches_from(pattern_index: int, path_index: int) -> bool:
+        if pattern_index == len(pattern_parts):
+            return path_index == len(path_parts)
+        part = pattern_parts[pattern_index]
+        if part == "**":
+            # Any number of directories, none included.
+            return any(
+                matches_from(pattern_index + 1, index) for index in range(path_index, len(path_parts) + 1)
+            )
+        return (
+            path_index < len(path_parts)
+            and fnmatch.fnmatch(path_parts[path_index], part)
+            and matches_from(pattern_index + 1, path_index + 1)
+        )
+
+    return matches_from(0, 0)
+
+
+async def _as_async(paths: List[str]) -> AsyncIterator[str]:
+    for path in paths:
+        yield path
 
 
 @ToolRegistry.register_function(
@@ -174,46 +215,36 @@ async def glob_tool(
     truncated = False
     
     try:
-        if rg_path:
-            async for filepath in ripgrep_files(rg_path, search_path, [pattern]):
-                if len(files) >= MAX_FILES:
-                    truncated = True
-                    break
-                
-                full_path = os.path.join(search_path, filepath)
-                try:
-                    stat = os.stat(full_path)
-                    mtime = stat.st_mtime
-                except OSError:
-                    mtime = 0
-                
-                files.append({
-                    'path': full_path,
-                    'mtime': mtime
-                })
-        else:
-            global _ripgrep_fallback_logged
-            if not _ripgrep_fallback_logged:
-                _ripgrep_fallback_logged = True
-                log.info("glob.ripgrep_not_found", {"fallback": "python_glob"})
+        # The search directory is opened once without following a link, and
+        # every name found is checked against it the same way: ripgrep walks
+        # by path, and a link put on the way while it runs would bring names
+        # of someone else's files.
+        with nofollow.directory(search_path) as root:
+            if rg_path:
+                found = ripgrep_files(rg_path, root.child_cwd(), [pattern])
+            else:
+                global _ripgrep_fallback_logged
+                if not _ripgrep_fallback_logged:
+                    _ripgrep_fallback_logged = True
+                    log.info("glob.ripgrep_not_found", {"fallback": "python_glob"})
+                found = _as_async(fallback_glob(search_path, pattern))
             
-            for filepath in fallback_glob(search_path, pattern):
-                if len(files) >= MAX_FILES:
-                    truncated = True
-                    break
+            async with contextlib.aclosing(found):
+                async for filepath in found:
+                    status = nofollow.file_status(root, filepath)
+                    if status is None:
+                        continue
+                    if len(files) >= MAX_FILES:
+                        truncated = True
+                        break
+
+                    files.append({
+                        'path': os.path.join(search_path, filepath),
+                        'mtime': status.st_mtime
+                    })
                 
-                full_path = os.path.join(search_path, filepath)
-                try:
-                    stat = os.stat(full_path)
-                    mtime = stat.st_mtime
-                except OSError:
-                    mtime = 0
-                
-                files.append({
-                    'path': full_path,
-                    'mtime': mtime
-                })
-                
+    except nofollow.LinkOnTheWay:
+        return ToolResult(success=False, error=changed_before_asking(search_path), title=title)
     except Exception as e:
         return ToolResult(
             success=False,

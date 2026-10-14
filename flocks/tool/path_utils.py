@@ -9,12 +9,12 @@ from __future__ import annotations
 
 import asyncio
 import os
-import stat
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional, Sequence
 
 from flocks.project.instance import Instance
+from flocks.tool import nofollow
 from flocks.tool.registry import ToolContext
 from flocks.config.config import get_user_plugins_root
 
@@ -82,95 +82,35 @@ def safe_relpath(path: str, start: Optional[str]) -> str:
         return path
 
 
-class DirectoryLinkLoop(ValueError):
-    """A directory link points back at one of its own ancestors."""
-
-
 class TreeChanged(ValueError):
     """A directory was replaced (by a link, say) while the tree was being listed."""
 
 
-def tree_entries(root: str, *, follow_links: bool = False) -> list[str]:
+def tree_entries(root: str) -> list[str]:
     """Relative paths of ``root`` ("") and of every entry below it.
 
     Deleting, copying or moving a directory changes every file under it, so
-    path rules written for any of them must see the request.
-    ``follow_links`` mirrors ``copytree(symlinks=False)``, which copies what a
-    directory link points at, once for every link that reaches it; ``rmtree``
-    and renames keep links as links. A link back into its own ancestors would
-    make that copy endless, so it raises :class:`DirectoryLinkLoop`.
-
-    Without ``follow_links``, a directory that is not the one checked just
-    before it was read -- replaced by a link to someone else's files, say --
-    raises :class:`TreeChanged`: what was read there is not this tree.
+    path rules written for any of them must see the request. The tree is
+    listed the way those operations go through it: each directory through
+    its own descriptor, links as links. A link where ``root`` or a directory
+    listed in it was -- someone else's files put on the way -- raises
+    :class:`TreeChanged`: what would be read there is not this tree.
     """
-    entries = [""]
-    if not os.path.isdir(root) or (os.path.islink(root) and not follow_links):
-        return entries
-    canonical_root = os.path.realpath(root)
-    pending = [(root, "", (canonical_root,))]
-    while pending:
-        directory, prefix, ancestors = pending.pop()
-        if not follow_links:
-            # Queued as a real directory reached without links: still one, and
-            # still reached that way (no link put on the way), before and after
-            # it is read.
-            expected = os.path.join(canonical_root, prefix) if prefix else canonical_root
-            identity = _directory_identity(directory)
-            if identity is None or os.path.realpath(directory) != expected:
-                raise TreeChanged(f"{directory} changed while the tree was listed")
-        try:
-            names = sorted(os.listdir(directory))
-        except OSError:
-            continue
-        if not follow_links and (
-            _directory_identity(directory) != identity or os.path.realpath(directory) != expected
-        ):
-            raise TreeChanged(f"{directory} changed while the tree was listed")
-        for name in names:
-            path = os.path.join(directory, name)
-            relative = os.path.join(prefix, name) if prefix else name
-            entries.append(relative)
-            if not os.path.isdir(path) or (os.path.islink(path) and not follow_links):
-                continue
-            real = os.path.realpath(path)
-            if real in ancestors:
-                raise DirectoryLinkLoop(f"{path} links back to {real}")
-            pending.append((path, relative, ancestors + (real,)))
-    return entries
-
-
-def _directory_identity(path: str) -> Optional[tuple[int, int]]:
-    """(device, inode) of a real directory at ``path``; None for anything else."""
     try:
-        status = os.lstat(path)
-    except OSError:
-        return None
-    return (status.st_dev, status.st_ino) if stat.S_ISDIR(status.st_mode) else None
+        return nofollow.tree(root)
+    except nofollow.LinkOnTheWay as exc:
+        raise TreeChanged(str(exc)) from None
 
 
-def tree_permission_patterns(
-    base_pattern: str,
-    base_path: str,
-    entries: list[str],
-    *,
-    worktree: Optional[str] = None,
-) -> list[str]:
-    """Permission patterns for ``entries`` taken from or landing at ``base_path``.
+def tree_permission_patterns(base_pattern: str, entries: list[str]) -> list[str]:
+    """Permission patterns for ``entries`` taken from or landing at ``base_pattern``.
 
-    With ``worktree`` (where the tree lands), an entry whose real location
-    differs because a symlink is on the way is also named by that location:
-    the write goes there.
+    The operations never go through a link (see :mod:`flocks.tool.nofollow`),
+    so where an entry is written or removed is its own path.
     """
-    patterns: list[str] = []
-    for relative in entries:
-        patterns.append(os.path.join(base_pattern, relative) if relative else base_pattern)
-        if worktree is not None:
-            logical = os.path.normpath(os.path.join(base_path, relative) if relative else base_path)
-            real = os.path.realpath(logical)
-            if real != logical:
-                patterns.append(safe_relpath(real, worktree))
-    return list(dict.fromkeys(patterns))
+    return list(dict.fromkeys(
+        os.path.join(base_pattern, relative) if relative else base_pattern for relative in entries
+    ))
 
 
 PathIdentity = tuple[str, str, Optional[tuple[int, int]]]
@@ -195,7 +135,7 @@ def moved_since_resolved(*paths: str) -> list[str]:
 
 
 def changed_before_asking(path: str) -> str:
-    return f"{path} changed after it was checked; check it again and retry."
+    return nofollow.changed_message(path)
 
 
 def checked_error(paths: Sequence[str], message: str) -> str:

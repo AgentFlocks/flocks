@@ -10,15 +10,27 @@ import asyncio
 import datetime as dt
 import html as html_lib
 import importlib
+import os
 import re
+import shutil
+import stat
 import subprocess
+import tempfile
 import xml.etree.ElementTree as ET
 import zipfile
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Optional
 
 from defusedxml import ElementTree as DefusedET
 
+from flocks.tool import nofollow
+from flocks.tool.path_utils import (
+    changed_before_asking,
+    moved_since_resolved,
+    paths_changed,
+    resolve_tool_path,
+    resolved_identities,
+)
 from flocks.tool.registry import (
     ParameterType,
     ToolCategory,
@@ -163,6 +175,12 @@ def _default_output_path(input_file: Path) -> Path:
     return output_dir / f"{_sanitize_stem(input_file)}_{suffix}.md"
 
 
+def _workspace_dir() -> Path:
+    workspace = WorkspaceManager.get_instance()
+    workspace.ensure_dirs()
+    return workspace.get_workspace_dir().resolve()
+
+
 def _resolve_input_path(input_path: str) -> Path:
     path = Path(input_path).expanduser()
     if path.is_absolute():
@@ -173,15 +191,25 @@ def _resolve_input_path(input_path: str) -> Path:
     return workspace.resolve_workspace_path(str(path))
 
 
-def _resolve_output_path(input_file: Path, output_path: str | None) -> Path:
+def _resolve_output_path(input_file: Path, output_path: str | None, sandbox_root: Optional[str] = None) -> Path:
+    """Where the markdown goes; in a sandbox, below its workspace instead of the Flocks workspace."""
     if not output_path:
-        return _default_output_path(input_file)
+        if sandbox_root is None:
+            return _default_output_path(input_file)
+        suffix = input_file.suffix.lower().lstrip(".") or "file"
+        return (
+            Path(sandbox_root) / "outputs" / dt.date.today().isoformat()
+            / f"{_sanitize_stem(input_file)}_{suffix}.md"
+        )
 
     path = Path(output_path).expanduser()
     if not path.is_absolute():
-        workspace = WorkspaceManager.get_instance()
-        workspace.ensure_dirs()
-        path = workspace.get_workspace_dir() / output_path
+        if sandbox_root is not None:
+            path = Path(sandbox_root) / output_path
+        else:
+            workspace = WorkspaceManager.get_instance()
+            workspace.ensure_dirs()
+            path = workspace.get_workspace_dir() / output_path
     if path.suffix.lower() != ".md":
         path = path.with_suffix(".md")
     return path.resolve()
@@ -589,6 +617,25 @@ def _extract_with_pandoc(file_path: Path) -> str:
     return _normalize_markdown(result.stdout)
 
 
+def _parse_private_copy(source: str) -> tuple[str, str, list[str]]:
+    """Run the extractors on a private copy of ``source``, read without following a link.
+
+    The parsers open files by path; the copy keeps them on the document the
+    checked path holds, whatever is put on the way to it meanwhile.
+    """
+    with tempfile.TemporaryDirectory(prefix="flocks-doc-") as directory:
+        copy = Path(directory) / Path(source).name
+        fd = nofollow.open_file(source, os.O_RDONLY)
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise IsADirectoryError(f"Not a regular file: {source}")
+            with open(fd, "rb", closefd=False) as reader, open(copy, "xb") as writer:
+                shutil.copyfileobj(reader, writer, 1024 * 1024)
+        finally:
+            os.close(fd)
+        return _run_extractors(copy)
+
+
 def _run_extractors(file_path: Path) -> tuple[str, str, list[str]]:
     extractors: list[tuple[str, Callable[[Path], str]]]
     suffix = file_path.suffix.lower()
@@ -670,7 +717,8 @@ def _run_extractors(file_path: Path) -> tuple[str, str, list[str]]:
     description=(
         "Parse a PDF, Office, or HTML document into Markdown and write the "
         "result to an .md file. If output_path is omitted, the markdown file "
-        "is written to the Flocks workspace outputs directory for today."
+        "is written to the Flocks workspace outputs directory for today "
+        "(in a sandbox, to outputs/<today> in the sandbox workspace)."
     ),
     category=ToolCategory.FILE,
     parameters=[
@@ -688,7 +736,8 @@ def _run_extractors(file_path: Path) -> tuple[str, str, list[str]]:
             type=ParameterType.STRING,
             description=(
                 "Optional output markdown path. Absolute paths are used directly. "
-                "Relative paths are resolved inside the Flocks workspace directory."
+                "Relative paths are resolved inside the Flocks workspace directory "
+                "(in a sandbox, inside the sandbox workspace)."
             ),
             required=False,
         ),
@@ -707,9 +756,20 @@ async def doc_parser(
     output_path: str | None = None,
     overwrite: bool = True,
 ) -> ToolResult:
-    input_file = _resolve_input_path(input_path)
-    if not input_file.exists():
-        return ToolResult(success=False, error=f"Input file not found: {input_file}")
+    # Both paths are checked like every file tool's: inside the sandbox
+    # workspace when there is one, and against the policy bindings -- which
+    # name the path as given, so that is what is passed on.
+    try:
+        _resolve_input_path(input_path)  # a relative path must stay inside the workspace
+        input_resolution = await resolve_tool_path(ctx, input_path, base_dir=str(_workspace_dir()))
+    except ValueError as exc:
+        return ToolResult(success=False, error=str(exc))
+    input_file = Path(input_resolution.resolved_path)
+    try:
+        if nofollow.status(str(input_file)) is None:
+            return ToolResult(success=False, error=f"Input file not found: {input_file}")
+    except nofollow.LinkOnTheWay:
+        return ToolResult(success=False, error=changed_before_asking(str(input_file)))
     if input_file.suffix.lower() not in SUPPORTED_SUFFIXES:
         supported = ", ".join(sorted(SUPPORTED_SUFFIXES))
         return ToolResult(
@@ -717,11 +777,45 @@ async def doc_parser(
             error=f"Unsupported file type: {input_file.suffix or '(none)'}. Supported: {supported}",
         )
 
-    output_file = _resolve_output_path(input_file, output_path)
-    if output_file.exists() and not overwrite:
+    sandbox = ctx.extra.get("sandbox") if ctx.extra else None
+    if isinstance(sandbox, dict) and sandbox.get("workspace_access") == "ro":
+        # same gate as write/edit/apply_patch: a read-only workspace must not be written
+        return ToolResult(
+            success=False,
+            error=(
+                "doc_parser is blocked in sandbox read-only workspace mode: it writes a markdown file. "
+                "Set sandbox.workspace_access to 'rw' to allow writes."
+            ),
+        )
+    try:
+        output_file = _resolve_output_path(input_file, output_path, input_resolution.sandbox_root)
+        if output_path and Path(output_path).suffix.lower() == ".md":
+            # Given as is: checked by that name.
+            output_resolution = await resolve_tool_path(
+                ctx, output_path,
+                base_dir=input_resolution.sandbox_root or str(_workspace_dir()),
+            )
+        else:
+            output_resolution = await resolve_tool_path(ctx, str(output_file))
+    except ValueError as exc:
+        return ToolResult(success=False, error=str(exc))
+    output_file = Path(output_resolution.resolved_path)
+    target = str(output_file)
+    try:
+        existing = nofollow.status(target)
+    except nofollow.LinkOnTheWay:
+        return ToolResult(success=False, error=changed_before_asking(target))
+    if existing is not None and stat.S_ISDIR(existing.st_mode):
+        return ToolResult(success=False, error=f"Output path is a directory: {output_file}")
+    if existing is not None and not overwrite:
         return ToolResult(success=False, error=f"Output file already exists: {output_file}")
 
-    markdown, parser_name, errors = await asyncio.to_thread(_run_extractors, input_file)
+    try:
+        markdown, parser_name, errors = await asyncio.to_thread(_parse_private_copy, str(input_file))
+    except nofollow.LinkOnTheWay:
+        return ToolResult(success=False, error=changed_before_asking(str(input_file)))
+    except OSError as exc:
+        return ToolResult(success=False, error=f"Failed to read document: {exc}")
     if not markdown:
         error_lines = "\n".join(errors) if errors else "No parser produced content."
         return ToolResult(
@@ -729,8 +823,31 @@ async def doc_parser(
             error=f"Failed to parse document: {input_file.name}\n{error_lines}",
         )
 
-    output_file.parent.mkdir(parents=True, exist_ok=True)
-    output_file.write_text(markdown + "\n", encoding="utf-8")
+    # The markdown is written like any other file a tool writes: edit rules
+    # apply, and the file written is the one the request was about.
+    if moved_since_resolved(target):
+        return ToolResult(success=False, error=changed_before_asking(target))
+    identities = resolved_identities(target)
+    await ctx.ask(
+        permission="edit",
+        patterns=[output_resolution.permission_pattern],
+        always=["*"],
+        metadata={
+            "tool": "doc_parser", "filepath": target, "source": str(input_file),
+            "pattern_base": output_resolution.worktree,
+        },
+    )
+    changed = f"{target} changed while waiting for permission; check it again and retry."
+    if paths_changed(identities):
+        return ToolResult(success=False, error=changed)
+    try:
+        nofollow.write_text(
+            target, markdown + "\n", expect=None if existing is None else nofollow.identity(existing),
+        )
+    except (nofollow.LinkOnTheWay, nofollow.StaleFile):
+        return ToolResult(success=False, error=changed)
+    except OSError as exc:
+        return ToolResult(success=False, error=f"Failed to write markdown: {exc}")
     return ToolResult(
         success=True,
         output={

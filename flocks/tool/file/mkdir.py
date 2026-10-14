@@ -1,5 +1,4 @@
-import os
-
+from flocks.tool import nofollow
 from flocks.tool.path_utils import (
     changed_before_asking,
     moved_since_resolved,
@@ -41,10 +40,12 @@ async def mkdir_tool(ctx: ToolContext, path: str) -> ToolResult:
         always=["*"],
         metadata={"tool": "mkdir", "filepath": resolved, "pattern_base": resolution.worktree},
     )
+    changed = f"{resolved} changed while waiting for permission; check it again and retry."
     if paths_changed(identities):
-        return ToolResult(
-            success=False,
-            error=f"{resolved} changed while waiting for permission; check it again and retry.",
-        )
-    os.makedirs(resolved, exist_ok=True)
+        return ToolResult(success=False, error=changed)
+    try:
+        # Every directory on the way is opened without following a link.
+        nofollow.makedirs(resolved)
+    except nofollow.LinkOnTheWay:
+        return ToolResult(success=False, error=changed)
     return ToolResult(success=True, output=f"Created directory: {resolved}", metadata={"path": resolved})

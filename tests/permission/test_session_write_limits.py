@@ -23,6 +23,7 @@ from flocks.tool.file.mkdir import mkdir_tool
 from flocks.tool.file.move import move_tool
 from flocks.tool.file.write import write_tool
 from flocks.tool.registry import ToolContext
+from tests.helpers.filesystem_races import swap_after_listing
 
 
 def _ruleset(*rules: tuple[str, str]) -> list[PermissionRule]:
@@ -478,22 +479,17 @@ async def test_an_inner_link_retargeted_while_listing_brings_nothing_of_theirs(
 async def test_a_directory_replaced_by_a_link_as_it_is_listed_is_not_asked_about(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tool: str,
 ) -> None:
-    """``src/sub`` is a real directory when queued and a link to their files when read."""
+    """``src/sub`` is a real directory when ``src`` is listed and a link to their files when read."""
     src = tmp_path / "src"
     (src / "sub").mkdir(parents=True)
     (src / "sub" / "mine.txt").write_text("mine\n", encoding="utf-8")
     other = tmp_path / "other_user"
     other.mkdir()
     (other / "their-private-name.txt").write_text("theirs\n", encoding="utf-8")
-    list_directory = os.listdir
-
-    def list_after_the_swap(path):
-        if os.fspath(path) == str(src / "sub") and not (src / "sub").is_symlink():
-            (src / "sub").rename(tmp_path / "parked")
-            (src / "sub").symlink_to(other, target_is_directory=True)
-        return list_directory(path)
-
-    monkeypatch.setattr(os, "listdir", list_after_the_swap)
+    swap_after_listing(monkeypatch, src, "sub", lambda: (
+        (src / "sub").rename(tmp_path / "parked"),
+        (src / "sub").symlink_to(other, target_is_directory=True),
+    ))
     requests: list = []
 
     async def _approve(request) -> None:
@@ -589,14 +585,26 @@ async def test_an_error_after_a_swap_while_reading_quotes_nothing_of_theirs(
     (work / "report.txt").write_text("mine\n", encoding="utf-8")
     (other / "report.txt").write_text("their private line\n", encoding="utf-8")
     module = importlib.import_module(f"flocks.tool.file.{tool}")
+    open_by_descriptor = os.open
 
-    def open_after_the_swap(file, *args, **kwargs):
-        if str(file).endswith("report.txt") and not work.is_symlink():
+    def swap() -> None:
+        if not work.is_symlink():
             work.rename(tmp_path / "parked")
             work.symlink_to(other, target_is_directory=True)
+
+    def open_after_the_swap(file, *args, **kwargs):
+        if str(file).endswith("report.txt"):
+            swap()
         return builtins.open(file, *args, **kwargs)
 
+    def open_descriptor_after_the_swap(file, *args, **kwargs):
+        if str(file).endswith("report.txt"):
+            swap()
+        return open_by_descriptor(file, *args, **kwargs)
+
+    # By path (builtins.open) or through the directory's descriptor (os.open).
     monkeypatch.setattr(module, "open", open_after_the_swap, raising=False)
+    monkeypatch.setattr(os, "open", open_descriptor_after_the_swap)
     requests: list = []
 
     async def _approve(request) -> None:
@@ -625,9 +633,8 @@ async def test_an_error_after_a_swap_while_reading_quotes_nothing_of_theirs(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("tool", ["copy", "move"])
-async def test_landing_through_a_link_in_the_target_is_judged_where_it_writes(
-    tmp_path: Path, monkeypatch, tool: str,
+async def test_landing_through_a_link_named_as_the_target_is_judged_where_it_writes(
+    tmp_path: Path, monkeypatch,
 ) -> None:
     (tmp_path / "protected").mkdir()
     (tmp_path / "dest").mkdir()
@@ -636,16 +643,30 @@ async def test_landing_through_a_link_in_the_target_is_judged_where_it_writes(
     (tmp_path / "src" / "sub" / "x.txt").write_text("new\n", encoding="utf-8")
     ctx = _rule_ctx(tmp_path, monkeypatch, *PROTECTED)
 
+    # dest/sub, as named, is protected/ once resolved: the file would land there.
     with pytest.raises(PermissionError):
-        if tool == "copy":
-            # copytree merges src into dest and writes dest/sub/x.txt, i.e. protected/x.txt.
-            await copy_tool(ctx=ctx, sourcePath="src", targetPath="dest")
-        else:
-            # dest/sub is an existing directory: the file lands in protected/.
-            await move_tool(ctx=ctx, sourcePath="src/sub/x.txt", targetPath="dest/sub")
+        await move_tool(ctx=ctx, sourcePath="src/sub/x.txt", targetPath="dest/sub")
 
     assert not (tmp_path / "protected" / "x.txt").exists()
     assert (tmp_path / "src" / "sub" / "x.txt").exists()
+
+
+@pytest.mark.asyncio
+async def test_a_link_inside_the_target_is_replaced_not_written_through(tmp_path: Path, monkeypatch) -> None:
+    """Merging into a tree, a link standing where the source has a directory is replaced by it."""
+    (tmp_path / "protected").mkdir()
+    (tmp_path / "dest").mkdir()
+    (tmp_path / "dest" / "sub").symlink_to(tmp_path / "protected", target_is_directory=True)
+    (tmp_path / "src" / "sub").mkdir(parents=True)
+    (tmp_path / "src" / "sub" / "x.txt").write_text("new\n", encoding="utf-8")
+    ctx = _rule_ctx(tmp_path, monkeypatch, *PROTECTED)
+
+    result = await copy_tool(ctx=ctx, sourcePath="src", targetPath="dest")
+
+    assert result.success is True, result.error
+    assert not (tmp_path / "dest" / "sub").is_symlink()
+    assert (tmp_path / "dest" / "sub" / "x.txt").read_text(encoding="utf-8") == "new\n"
+    assert list((tmp_path / "protected").iterdir()) == []
 
 
 @pytest.mark.asyncio

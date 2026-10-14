@@ -296,7 +296,8 @@ def test_apply_patch_safe_relpath_falls_back_to_absolute(monkeypatch):
     def fake_relpath(_path, _start):
         raise ValueError("cross-drive")
 
-    monkeypatch.setattr(apply_patch_module.os.path, "relpath", fake_relpath)
+    # apply_patch's helper is the shared one from path_utils.
+    monkeypatch.setattr(path_utils_module.os.path, "relpath", fake_relpath)
 
     path = "C:\\Users\\Example\\file.txt"
     assert apply_patch_module._safe_relpath(path, "D:\\workspace") == path
