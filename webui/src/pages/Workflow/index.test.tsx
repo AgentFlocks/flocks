@@ -315,24 +315,6 @@ describe('WorkflowPage', () => {
     );
   });
 
-  it('卡片网格在窄屏为单列，创建按钮不换行', () => {
-    mockUseWorkflows.mockReturnValue({
-      workflows: [makeWorkflow({ id: 'wf-a', name: 'A' })],
-      loading: false,
-      error: null,
-      refetch: vi.fn(),
-    });
-
-    const { container } = render(<WorkflowPage />);
-
-    // auto-fill with a min(20rem, 100%) track: one column on a phone, more as width allows
-    const grid = Array.from(container.querySelectorAll<HTMLElement>('.grid'))
-      .find((element) => element.className.includes('auto-fill'));
-    expect(grid?.className).toContain('minmax(min(20rem,100%),1fr)');
-    const createButton = screen.getAllByRole('button', { name: /创建工作流/ })[0];
-    expect(createButton.className).toContain('whitespace-nowrap');
-  });
-
   it('只保留左侧业务分组一个筛选入口，分区计数跟随所选分组', () => {
     mockUseWorkflows.mockReturnValue({
       workflows: [

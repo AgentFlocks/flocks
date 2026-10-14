@@ -12,19 +12,18 @@
  * 3. 传入 onRunTest 启用「测试」Tab
  */
 
-import { lazy, Suspense, useState, useEffect, useRef, useId, useCallback, createContext, useContext } from 'react';
-import { useDialogFocus } from '@/hooks/useDialogFocus';
+import { lazy, Suspense, useState, useEffect, useRef, useCallback, createContext, useContext } from 'react';
 import {
+  X,
+  FileText,
+  MessageSquare,
+  Loader2,
   AlertCircle,
   ArrowRight,
-  FileText,
-  GripVertical,
-  Loader2,
-  MessageSquare,
-  RotateCcw,
-  Send,
   TestTube,
-  X,
+  Send,
+  RotateCcw,
+  GripVertical,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import client from '@/api/client';
@@ -36,8 +35,8 @@ import GuidedCreatePanel, { type GuidedCreateGroup } from './GuidedCreatePanel';
 import type { Agent } from '@/api/agent';
 import {
   SIDE_PANEL_MIN_WIDTH,
+  getInitialSidePanelWidth,
   getMaxSidePanelWidth,
-  useNarrowViewport,
 } from './sidePanelSizing';
 // ─── Context ──────────────────────────────────────────────────────────────────
 
@@ -46,7 +45,7 @@ const LazySessionChat = lazy(() => import('./SessionChat'));
 function ChatPanelFallback() {
   return (
     <div className="flex h-full items-center justify-center text-gray-400">
-      <Loader2 aria-hidden="true" className="h-4 w-4 animate-spin" />
+      <Loader2 className="h-4 w-4 animate-spin" />
     </div>
   );
 }
@@ -227,11 +226,8 @@ export default function EntitySheet({
   footerLeft,
 }: EntitySheetProps) {
   const { t } = useTranslation('common');
-  const drawerRef = useRef<HTMLDivElement>(null);
-  const headingId = useId();
-  useDialogFocus(drawerRef, open, submitLoading ? undefined : onClose);
   const supportsVision = useDefaultModelVision();
-  const resolvedInitialWidth = () => initialWidth ?? 480;
+  const resolvedInitialWidth = () => initialWidth ?? getInitialSidePanelWidth();
   const resolvedMaxWidth = maxWidth ?? getMaxSidePanelWidth();
   const showTabs = !(hideRex && hideTest);
   const hasFormTab = !hideForm;
@@ -260,9 +256,6 @@ export default function EntitySheet({
   const [rexSessionHydrated, setRexSessionHydrated] = useState(() => !rexSessionStorageKey);
   const [drawerWidth, setDrawerWidth] = useState(resolvedInitialWidth);
   const [isDragging, setIsDragging] = useState(false);
-  // Phone-width viewports (< 768px) cannot fit a 240px+ drawer beside the
-  // page, so the sheet takes the full width there and is not resizable.
-  const narrowViewport = useNarrowViewport();
   const dragStartX = useRef(0);
   const dragStartWidth = useRef(resolvedInitialWidth());
 
@@ -522,66 +515,47 @@ export default function EntitySheet({
   return (
     <EntitySheetContext.Provider value={{ openRex, openTest }}>
       {/* Backdrop */}
-      <div className="fixed inset-0 bg-black/40 z-40" onClick={submitLoading ? undefined : onClose} />
+      <div className="fixed inset-0 bg-black/40 z-40" onClick={onClose} />
 
       {/* Drawer */}
       <div
-        ref={drawerRef}
-        tabIndex={-1}
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby={headingId}
-        data-ui-overlay="drawer"
-        data-testid="entity-sheet-drawer"
-        className="fixed right-0 top-0 bottom-0 flex flex-col bg-white shadow-2xl transition-colors z-50"
-        style={{ width: narrowViewport ? '100%' : drawerWidth, maxWidth: '100%' }}
+        className="fixed right-0 top-0 bottom-0 z-50 flex flex-col bg-white shadow-2xl transition-colors"
+        style={{ width: drawerWidth, maxWidth: '100%' }}
       >
-        {/* Drag handle (desktop only: a full-width sheet has nothing to resize against) */}
-        {!narrowViewport && (
-          <div
-            className={`absolute left-0 top-0 bottom-0 w-1 cursor-ew-resize hover:bg-red-400 transition-colors ${
-              isDragging ? 'bg-red-500' : ''
-            }`}
-            onMouseDown={handleDragStart}
-          >
-            <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2">
-              <GripVertical aria-hidden="true" className="w-3 h-6 text-gray-300 hover:text-gray-500" />
-            </div>
+        {/* Drag handle */}
+        <div
+          className={`absolute left-0 top-0 bottom-0 w-1 cursor-ew-resize hover:bg-red-400 transition-colors ${
+            isDragging ? 'bg-red-500' : ''
+          }`}
+          onMouseDown={handleDragStart}
+        >
+          <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2">
+            <GripVertical className="w-3 h-6 text-gray-300 hover:text-gray-500" />
           </div>
-        )}
+        </div>
         {/* ── Header ── */}
-        <div className="border-b border-gray-200 flex-shrink-0">
+        <div className="flex-shrink-0 border-b border-gray-200">
           <div className="flex items-center gap-3 px-6 py-4">
             {icon && <div className="text-gray-500 flex-shrink-0">{icon}</div>}
-            <h2 id={headingId} className="text-lg font-semibold text-gray-900 flex-1 min-w-0 break-words">
+            <h2 className="text-lg font-semibold text-gray-900 flex-1 min-w-0 break-words">
               {title}
             </h2>
             <button
               onClick={onClose}
-              disabled={submitLoading}
-              aria-label={t('button.close')}
-              className="p-1 rounded hover:bg-gray-100 transition-colors flex-shrink-0"
+              className="flex-shrink-0 p-1 rounded hover:bg-gray-100 transition-colors"
             >
-              <X aria-hidden="true" className="w-5 h-5 text-gray-400" />
+              <X className="w-5 h-5 text-gray-400" />
             </button>
           </div>
 
           {/* Tabs */}
           {showTabs && (
-            <div className="flex w-full px-6" role="tablist" aria-label={title} onKeyDown={(event) => {
-              if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
-              const tabs = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="tab"]'));
-              const current = tabs.indexOf(document.activeElement as HTMLButtonElement);
-              const next = event.key === 'Home' ? 0 : event.key === 'End' ? tabs.length - 1 : (current + (event.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length;
-              event.preventDefault();
-              tabs[next]?.focus();
-              tabs[next]?.click();
-            }}>
+            <div className="flex w-full px-6">
               {hasFormTab && (
                 <SheetTab
                   active={activeTab === 'form'}
                   onClick={() => handleTabChange('form')}
-                  icon={<FileText aria-hidden="true" className="w-3.5 h-3.5" />}
+                  icon={<FileText className="w-3.5 h-3.5" />}
                 >
                   {t('entity.tabDetails')}
                 </SheetTab>
@@ -590,7 +564,7 @@ export default function EntitySheet({
                 <SheetTab
                   active={activeTab === 'rex'}
                   onClick={() => handleTabChange('rex')}
-                  icon={<MessageSquare aria-hidden="true" className="w-3.5 h-3.5" />}
+                  icon={<MessageSquare className="w-3.5 h-3.5" />}
                 >
                   {t('entity.tabAIEdit')}
                 </SheetTab>
@@ -599,7 +573,7 @@ export default function EntitySheet({
                 <SheetTab
                   active={activeTab === 'test'}
                   onClick={() => setActiveTab('test')}
-                  icon={<TestTube aria-hidden="true" className="w-3.5 h-3.5" />}
+                  icon={<TestTube className="w-3.5 h-3.5" />}
                 >
                   {t('entity.tabTest')}
                 </SheetTab>
@@ -635,15 +609,15 @@ export default function EntitySheet({
                   />
                 </Suspense>
               ) : (
-                <div className="flex-1 bg-gray-50 px-4 py-4 flex flex-col items-center justify-center gap-2 min-h-0 overflow-y-auto">
+                <div className="flex-1 min-h-0 overflow-y-auto bg-gray-50 px-4 py-4 flex flex-col items-center justify-center gap-2">
                   {testError ? (
                     <div className="flex items-center gap-2 text-sm text-red-600 bg-red-50 border border-red-200 rounded-lg px-4 py-3 w-full">
-                      <AlertCircle aria-hidden="true" className="w-4 h-4 flex-shrink-0" />
+                      <AlertCircle className="w-4 h-4 flex-shrink-0" />
                       {testError}
                     </div>
                   ) : (
                     <>
-                      <TestTube aria-hidden="true" className="w-8 h-8 text-gray-300" />
+                      <TestTube className="w-8 h-8 text-gray-300" />
                       <p className="text-sm text-gray-400">{t('entity.editAndSend')}</p>
                     </>
                   )}
@@ -651,13 +625,13 @@ export default function EntitySheet({
               )}
 
               {/* Input bar */}
-              <div className="border-t border-gray-200 bg-white px-4 py-3 flex-shrink-0">
+              <div className="flex-shrink-0 border-t border-gray-200 bg-white px-4 py-3">
                 {testSessionId ? (
                   <button
                     onClick={handleResetTest}
                     className="flex items-center gap-1.5 text-sm text-gray-500 hover:text-gray-700 transition-colors"
                   >
-                    <RotateCcw aria-hidden="true" className="w-3.5 h-3.5" />
+                    <RotateCcw className="w-3.5 h-3.5" />
                     {t('entity.reTest')}
                   </button>
                 ) : (
@@ -685,9 +659,9 @@ export default function EntitySheet({
                     <button
                       onClick={handleRunTest}
                       disabled={testLoading || !testPrompt.trim()}
-                      className="px-3 py-2 h-[40px] bg-red-600 text-white rounded-lg hover:bg-red-700 disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-1 text-sm transition-colors flex-shrink-0"
+                      className="flex-shrink-0 px-3 py-2 h-[40px] bg-red-600 text-white rounded-lg hover:bg-red-700 disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-1 text-sm transition-colors"
                     >
-                      {testLoading ? <Loader2 aria-hidden="true" className="w-4 h-4 animate-spin" /> : <Send aria-hidden="true" className="w-4 h-4" />}
+                      {testLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
                     </button>
                   </div>
                 )}
@@ -701,7 +675,7 @@ export default function EntitySheet({
               {sessionError && (
                 <div className="flex flex-col items-center justify-center flex-1 gap-4 p-6 text-center">
                   <div className="flex items-center gap-2 text-sm text-red-600 bg-red-50 border border-red-200 rounded-lg px-4 py-3 w-full">
-                    <AlertCircle aria-hidden="true" className="w-4 h-4 flex-shrink-0" />
+                    <AlertCircle className="w-4 h-4 flex-shrink-0" />
                     {sessionError}
                   </div>
                   <button
@@ -714,7 +688,7 @@ export default function EntitySheet({
               )}
               {!sessionError && !rexSessionHydrated && (
                 <div className="flex items-center justify-center flex-1 text-sm text-gray-400 gap-2">
-                  <Loader2 aria-hidden="true" className="w-4 h-4 animate-spin" />
+                  <Loader2 className="w-4 h-4 animate-spin" />
                   {t('entity.startingRex')}
                 </div>
               )}
@@ -752,7 +726,7 @@ export default function EntitySheet({
                       hasRexGuideActions ? (
                         <GuidedCreatePanel
                           emptyTitle={rexGuideEmptyTitle ?? t('entity.rexReady')}
-                          icon={rexGuideIcon ?? <MessageSquare aria-hidden="true" className="h-5 w-5" />}
+                          icon={rexGuideIcon ?? <MessageSquare className="h-5 w-5" />}
                           title={rexGuidePanelTitle ?? t('entity.rexAssist')}
                           description={rexGuidePanelDesc ?? t('entity.rexReady')}
                           groups={rexWelcomeGuideGroups}
@@ -760,7 +734,7 @@ export default function EntitySheet({
                         />
                       ) : (
                         <div className="text-center max-w-md">
-                          <MessageSquare aria-hidden="true" className="w-10 h-10 text-red-500 mb-3 mx-auto" />
+                          <MessageSquare className="w-10 h-10 text-red-500 mx-auto mb-3" />
                           <h3 className="text-lg font-semibold text-gray-900 mb-2">{t('entity.rexAssist')}</h3>
                           <p className="text-sm text-gray-500">{t('entity.rexReady')}</p>
                         </div>
@@ -795,7 +769,7 @@ export default function EntitySheet({
 
         {/* ── Footer ── */}
         {(!showTabs || activeTab === 'form') && (
-          <div className="border-t border-gray-200 bg-white px-6 py-4 flex-shrink-0">
+          <div className="flex-shrink-0 border-t border-gray-200 bg-white px-6 py-4">
             <div className="flex items-center justify-between gap-3">
               {/* Left: custom footer element and/or test button */}
               <div className="flex items-center gap-2">
@@ -805,7 +779,7 @@ export default function EntitySheet({
                     onClick={() => setActiveTab('test')}
                     className="flex items-center gap-1.5 text-sm text-gray-500 border border-gray-300 rounded-lg px-3 py-1.5 hover:bg-gray-50 transition-colors"
                   >
-                    <TestTube aria-hidden="true" className="w-3.5 h-3.5" />
+                    <TestTube className="w-3.5 h-3.5" />
                     {t('entity.testButton')}
                   </button>
                 )}
@@ -825,10 +799,10 @@ export default function EntitySheet({
 
         {/* ── Rex tab footer: extract / switch actions only ── */}
         {showRexFooter && (
-          <div className="border-t border-gray-200 bg-white px-6 py-3 flex-shrink-0">
+          <div className="flex-shrink-0 border-t border-gray-200 bg-white px-6 py-3">
             {extractError && (
               <p className="text-xs text-red-500 mb-2 flex items-center gap-1">
-                <AlertCircle aria-hidden="true" className="w-3 h-3" />
+                <AlertCircle className="w-3 h-3" />
                 {extractError}
               </p>
             )}
@@ -839,7 +813,7 @@ export default function EntitySheet({
                     onClick={() => setActiveTab('form')}
                     className="flex items-center gap-1.5 text-sm text-gray-500 hover:text-gray-700 transition-colors"
                   >
-                    <ArrowRight aria-hidden="true" className="w-4 h-4" />
+                    <ArrowRight className="w-4 h-4" />
                     {t('entity.switchToForm')}
                   </button>
                 ) : null}
@@ -894,7 +868,7 @@ function SubmitButtons({
         disabled={submitDisabled || submitLoading}
         className="px-4 py-2 text-sm bg-red-600 text-white rounded-lg hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2 transition-colors"
       >
-        {submitLoading && <Loader2 aria-hidden="true" className="w-4 h-4 animate-spin" />}
+        {submitLoading && <Loader2 className="w-4 h-4 animate-spin" />}
         {submitLabel}
       </button>
     </div>
@@ -917,9 +891,6 @@ function SheetTab({
   return (
     <button
       onClick={onClick}
-      role="tab"
-      aria-selected={active}
-      tabIndex={active ? 0 : -1}
       className={`flex min-w-0 flex-1 items-center justify-center gap-1.5 px-3 py-2.5 text-sm font-medium border-b-2 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-red-100 ${
         active
           ? 'border-red-600 text-red-600'

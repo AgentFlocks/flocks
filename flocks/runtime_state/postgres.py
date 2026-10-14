@@ -14,6 +14,7 @@ import json
 from datetime import datetime, timedelta, timezone
 from typing import Any, List, Optional, Sequence, Tuple
 
+from flocks.db.idempotent_ddl import schema_script_to_run
 from flocks.runtime_state.store import ExecutionOwnership, StateEntry
 from flocks.utils.log import Log
 
@@ -77,7 +78,9 @@ class PostgresRuntimeStateStore:
         async with pool.acquire() as conn:
             async with conn.transaction():
                 await conn.execute("SELECT pg_advisory_xact_lock(hashtext($1))", "flocks.runtime.schema")
-                await conn.execute(";\n".join(SCHEMA_STATEMENTS))
+                script = await schema_script_to_run(conn, ";\n".join(SCHEMA_STATEMENTS))
+                if script is not None:
+                    await conn.execute(script)
         log.info("runtime_state.postgres.ready", {})
 
     async def close(self) -> None:

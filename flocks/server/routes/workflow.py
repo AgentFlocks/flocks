@@ -3506,6 +3506,35 @@ async def preview_workflow_trigger_mapping(
     )
 
 
+async def _dispatch_trigger_event(
+    *,
+    workflow_id: str,
+    workflow_json: Dict[str, Any],
+    trigger: TriggerDefinition,
+    event: TriggerEvent,
+    verified_auth: Optional[Dict[str, str]] = None,
+) -> Dict[str, Any]:
+    """Dispatch a trigger event: 400 for a bad filter, 403 when an extension refuses."""
+    try:
+        return await default_trigger_runtime.dispatch_event(
+            workflow_id=workflow_id,
+            workflow_json=workflow_json,
+            trigger=trigger,
+            event=event,
+            verified_auth=verified_auth,
+        )
+    except TriggerDispatchError as exc:
+        raise HTTPException(status_code=400, detail=f"Trigger filter error: {exc}") from exc
+    except ExecutionStopped as exc:
+        # The message is the reason the extension gave (for example an
+        # ingress policy's "headless_evidence_missing"); pass it on so the
+        # caller does not have to read the server log to learn why.
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Workflow trigger stopped by extension: {exc}",
+        ) from exc
+
+
 @router.post("/workflow/{workflow_id}/triggers/{trigger_id}/test")
 async def test_workflow_trigger(
     workflow_id: str,
@@ -3526,17 +3555,12 @@ async def test_workflow_trigger(
         query=payload.query,
         path_params=payload.path_params,
     )
-    try:
-        result = await default_trigger_runtime.dispatch_event(
-            workflow_id=workflow_id,
-            workflow_json=workflow_json,
-            trigger=trigger,
-            event=event,
-        )
-    except TriggerDispatchError as exc:
-        raise HTTPException(status_code=400, detail=f"Trigger filter error: {exc}")
-    except ExecutionStopped as exc:
-        raise HTTPException(status_code=403, detail=f"Trigger execution stopped by policy: {exc}")
+    result = await _dispatch_trigger_event(
+        workflow_id=workflow_id,
+        workflow_json=workflow_json,
+        trigger=trigger,
+        event=event,
+    )
     return {
         "ok": True,
         "trigger": _trigger_to_api_dict(trigger),
@@ -3604,6 +3628,18 @@ def _register_webhook_delivery(key: str, delivery_id: str) -> Optional[str]:
     return None
 
 
+def _dispatch_stopped_before_run(exc: BaseException) -> bool:
+    """Whether a failed trigger dispatch ended before the workflow could run.
+
+    A filter error, or an extension refusing the event in ``ingress.before``;
+    the 400/403 raised for them carries the original as its cause.
+    """
+    cause = exc.__cause__ if isinstance(exc, HTTPException) else exc
+    if isinstance(cause, TriggerDispatchError):
+        return True
+    return isinstance(cause, ExecutionStopped) and cause.stop_stage == "ingress.before"
+
+
 def _resolve_trigger_secret(secret_ref: Optional[str]) -> Optional[str]:
     if not secret_ref:
         return None
@@ -3624,13 +3660,19 @@ def _normalize_hmac_signature(signature: Optional[str]) -> Optional[str]:
     return value
 
 
+def _webhook_secret_fingerprint(secret: str) -> str:
+    """Secret-safe stable id of a trigger key, as the service runtime emits it."""
+    return f"sha256:{hashlib.sha256(secret.encode('utf-8')).hexdigest()}"
+
+
 def _authorize_webhook_trigger(
     trigger: TriggerDefinition,
     headers: Dict[str, str],
     query: Dict[str, str],
     *,
     raw_body: bytes,
-) -> None:
+) -> Dict[str, str]:
+    """Check the caller against the trigger's own secret and say what passed."""
     auth = trigger.auth
     auth_type = _webhook_auth_type(trigger)
     if auth is None or auth_type in {"none", ""}:
@@ -3646,7 +3688,7 @@ def _authorize_webhook_trigger(
         actual = headers.get(header_name) or query.get(auth.queryParam or "api_key")
         if not actual or not hmac.compare_digest(str(actual).encode("utf-8"), str(expected).encode("utf-8")):
             raise HTTPException(status_code=401, detail="Invalid webhook API key")
-        return
+        return {"auth_scheme": "api_key", "api_key_id": _webhook_secret_fingerprint(expected)}
     if auth_type == "hmac":
         expected = _resolve_trigger_secret(auth.secretRef)
         if not expected:
@@ -3659,7 +3701,7 @@ def _authorize_webhook_trigger(
         ).hexdigest()
         if not signature or not hmac.compare_digest(signature, expected_signature):
             raise HTTPException(status_code=401, detail="Invalid webhook signature")
-        return
+        return {"auth_scheme": "hmac", "key_id": _webhook_secret_fingerprint(expected)}
     raise HTTPException(status_code=400, detail=f"Unsupported webhook auth type: {auth.type}")
 
 
@@ -3684,7 +3726,7 @@ async def invoke_workflow_webhook_trigger(
     headers = {key.lower(): value for key, value in request.headers.items()}
     query = {key: value for key, value in request.query_params.items()}
     raw_body = await request.body()
-    _authorize_webhook_trigger(trigger, headers, query, raw_body=raw_body)
+    verified_auth = _authorize_webhook_trigger(trigger, headers, query, raw_body=raw_body)
 
     try:
         body = json.loads(raw_body.decode("utf-8"))
@@ -3705,6 +3747,7 @@ async def invoke_workflow_webhook_trigger(
     )
     delivery_key = _webhook_delivery_key(workflow_id, trigger_id, client_delivery_id, raw_body)
     original_delivery_id = _register_webhook_delivery(delivery_key, event.source.deliveryId or "")
+    registered = _webhook_deliveries.get(delivery_key)
     if original_delivery_id is not None:
         log.info(
             "workflow.webhook.duplicate_delivery",
@@ -3719,16 +3762,21 @@ async def invoke_workflow_webhook_trigger(
             "deliveryId": original_delivery_id,
         }
     try:
-        result = await default_trigger_runtime.dispatch_event(
+        result = await _dispatch_trigger_event(
             workflow_id=workflow_id,
             workflow_json=workflow_json,
             trigger=trigger,
             event=event,
+            verified_auth=verified_auth,
         )
-    except TriggerDispatchError as exc:
-        raise HTTPException(status_code=400, detail=f"Trigger filter error: {exc}")
-    except ExecutionStopped as exc:
-        raise HTTPException(status_code=403, detail=f"Trigger execution stopped by policy: {exc}")
+    except BaseException as exc:
+        # A delivery refused before the workflow ran may be sent again (say,
+        # once the operator fixed what the 403 named) and must not then be
+        # dropped as a duplicate. Any other failure may follow side effects,
+        # so it stays recorded and a retry is answered as a duplicate.
+        if _dispatch_stopped_before_run(exc) and _webhook_deliveries.get(delivery_key) is registered:
+            _webhook_deliveries.pop(delivery_key, None)
+        raise
     return {
         "ok": True,
         "duplicate": False,

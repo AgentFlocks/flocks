@@ -110,26 +110,4 @@ describe('TopBar', () => {
 
     expect(screen.getByText('当前阶段：取消中 · 节点：run workflow')).toBeInTheDocument();
   });
-
-  // 375px 下 Layout 的固定汉堡按钮占据左上角（fixed top-0 left-0 h-16 px-4），顶栏需留出左侧空位（lg 起恢复 px-4）
-  it('narrow viewport: leaves room for the fixed hamburger on the left', () => {
-    const { container } = render(
-      <MemoryRouter>
-        <TopBar
-          workflow={{
-            id: 'wf-1', name: '测试工作流', category: 'security', status: 'active', createdAt: 0, updatedAt: 0,
-            stats: { callCount: 0, successCount: 0, errorCount: 0, totalRuntime: 0, avgRuntime: 0, thumbsUp: 0, thumbsDown: 0 },
-            workflowJson: { start: 'node-1', nodes: [{ id: 'node-1', type: 'python' }], edges: [] },
-          }}
-          latestExecution={null}
-          panelOpen
-          onTogglePanel={vi.fn()}
-        />
-      </MemoryRouter>,
-    );
-    const root = container.firstElementChild as HTMLElement;
-    expect(root).toHaveClass('pl-14');
-    expect(root).toHaveClass('lg:pl-4');
-    expect(root).not.toHaveClass('px-4');
-  });
 });

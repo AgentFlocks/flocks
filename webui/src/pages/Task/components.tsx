@@ -1,11 +1,4 @@
-import {
-  AlertCircle,
-  Bot,
-  Calendar,
-  CheckCircle2,
-  Loader2,
-  Workflow as WorkflowIcon,
-} from 'lucide-react';
+import { CheckCircle2, AlertCircle, Loader2, Calendar, Bot, Workflow } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { TaskStatus, ExecutionMode, DashboardCounts } from '@/api/task';
 import { STATUS_CONFIG, PRIORITY_CONFIG, SOURCE_CONFIG } from './helpers';
@@ -42,8 +35,8 @@ export function SourceBadge({ sourceType }: { sourceType: string }) {
 
 export function ModeBadge({ mode, agent }: { mode: ExecutionMode; agent: string }) {
   if (mode === 'workflow')
-    return <span className="inline-flex items-center gap-1 text-xs text-purple-600"><WorkflowIcon aria-hidden="true" className="w-3 h-3" /> Workflow</span>;
-  return <span className="inline-flex items-center gap-1 text-xs text-slate-600"><Bot aria-hidden="true" className="w-3 h-3" /> {agent}</span>;
+    return <span className="inline-flex items-center gap-1 text-xs text-purple-600"><Workflow className="w-3 h-3" /> Workflow</span>;
+  return <span className="inline-flex items-center gap-1 text-xs text-slate-600"><Bot className="w-3 h-3" /> {agent}</span>;
 }
 
 export function ActionButton({ icon, label, onClick, color }: {
@@ -66,10 +59,10 @@ export function ActionButton({ icon, label, onClick, color }: {
 export function DashboardCards({ counts }: { counts: DashboardCounts | null }) {
   const { t } = useTranslation('task');
   const cards = [
-    { label: t('dashboard.completedWeek'),   value: counts?.completed_week ?? 0,  icon: <CheckCircle2 aria-hidden="true" className="w-5 h-5 text-emerald-500" />, bg: 'bg-emerald-50' },
-    { label: t('dashboard.scheduledActive'), value: counts?.scheduled_active ?? 0, icon: <Calendar aria-hidden="true" className="w-5 h-5 text-purple-500" />,     bg: 'bg-purple-50' },
-    { label: t('dashboard.running'),         value: counts?.running ?? 0,          icon: <Loader2 aria-hidden="true" className="w-5 h-5 text-sky-600" />,         bg: 'bg-sky-50' },
-    { label: t('dashboard.failedWeek'),      value: counts?.failed_week ?? 0,      icon: <AlertCircle aria-hidden="true" className="w-5 h-5 text-red-500" />,      bg: 'bg-red-50' },
+    { label: t('dashboard.completedWeek'),   value: counts?.completed_week ?? 0,  icon: <CheckCircle2 className="w-5 h-5 text-emerald-500" />, bg: 'bg-emerald-50' },
+    { label: t('dashboard.scheduledActive'), value: counts?.scheduled_active ?? 0, icon: <Calendar className="w-5 h-5 text-purple-500" />,     bg: 'bg-purple-50' },
+    { label: t('dashboard.running'),         value: counts?.running ?? 0,          icon: <Loader2 className="w-5 h-5 text-sky-600" />,         bg: 'bg-sky-50' },
+    { label: t('dashboard.failedWeek'),      value: counts?.failed_week ?? 0,      icon: <AlertCircle className="w-5 h-5 text-red-500" />,      bg: 'bg-red-50' },
   ];
   return (
     <div className="grid grid-cols-2 md:grid-cols-4 gap-3">

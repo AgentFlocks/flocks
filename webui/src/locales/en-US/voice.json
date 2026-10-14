@@ -59,7 +59,7 @@
     "sceneSecurityInternet": "Security and internet",
     "recognitionSceneHelp": "The scene provides fixed topic context to ASR. It does not read or upload chat history or change the recognition model. Applies to the next recording after saving.",
     "sceneGeneralHelp": "For everyday conversation. Add your own product names or terms in the custom vocabulary field below.",
-    "sceneSecurityInternetHelp": "Provides context for the product names Flocks / FlocksPro and security terms such as NDR, EDR, SIEM and SOAR. Your custom vocabulary stays unchanged; add your own product names or terms below.",
+    "sceneSecurityInternetHelp": "Provides context for the product name Flocks and security terms such as NDR, EDR, SIEM and SOAR. Your custom vocabulary stays unchanged; add your own product names or terms below.",
     "captureMode": "Microphone capture mode",
     "captureVoice": "Voice processing (default)",
     "captureRaw": "Raw capture",

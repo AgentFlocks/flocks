@@ -38,12 +38,10 @@ export default function NodeToolbar({ onAddNode }: NodeToolbarProps) {
     { type: 'subworkflow', icon: Workflow, label: 'SubWorkflow', descKey: 'editor.toolbar.subworkflowDesc', color: 'orange' },
   ];
 
-  // Positioned inside the canvas container (not the viewport): with ``fixed``
-  // it landed underneath the app sidebar and could not be clicked.
   return (
-    <div className="bg-white rounded-lg shadow-lg border border-gray-200 p-4 w-64 max-w-[calc(100%-2rem)] absolute left-4 top-4 z-10 max-h-[calc(100%-9rem)] overflow-y-auto">
+    <div className="fixed left-4 top-24 bg-white rounded-lg shadow-lg border border-gray-200 p-4 w-64 z-10">
       <div className="flex items-center gap-2 mb-4">
-        <Plus aria-hidden="true" className="w-5 h-5 text-gray-700" />
+        <Plus className="w-5 h-5 text-gray-700" />
         <h3 className="text-sm font-semibold text-gray-900">{t('editor.toolbar.addNode')}</h3>
       </div>
 
@@ -56,7 +54,7 @@ export default function NodeToolbar({ onAddNode }: NodeToolbarProps) {
               onClick={() => onAddNode(type)}
               className={`w-full flex items-center gap-3 p-2.5 rounded-lg border-2 ${colors.bg} ${colors.border} transition-all duration-200 hover:shadow-md`}
             >
-              <Icon aria-hidden="true" className={`w-4 h-4 flex-shrink-0 ${colors.icon}`} />
+              <Icon className={`w-4 h-4 flex-shrink-0 ${colors.icon}`} />
               <div className="flex-1 text-left">
                 <div className={`text-xs font-semibold ${colors.text}`}>{label}</div>
                 <div className="text-xs text-gray-500">{t(descKey)}</div>

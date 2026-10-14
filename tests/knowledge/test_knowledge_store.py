@@ -31,6 +31,15 @@ requires_pg = pytest.mark.skipif(not DSN, reason="FLOCKS_TEST_PG_DSN is not set"
 SPEC = EmbeddingSpec(model="test-embed", dimensions=4, provider="local")
 
 
+def _schema_dsn():
+    """The test's own schema (tests/conftest.py), not the bare test database.
+
+    ANN results depend on every row in the table: rows other runs left in a
+    shared schema crowd out this test's own.
+    """
+    return os.environ["FLOCKS_DB_DSN"]
+
+
 def unit(*values):
     norm = math.sqrt(sum(v * v for v in values)) or 1.0
     return [v / norm for v in values]
@@ -72,7 +81,7 @@ def test_unrestricted_scope_is_recognised():
 
 @pytest.fixture
 async def store():
-    s = PostgresKnowledgeStore(DSN)
+    s = PostgresKnowledgeStore(_schema_dsn())
     await s.initialize()
     yield s
     await s.close()
@@ -308,7 +317,7 @@ async def test_search_ef_survives_pool_connection_reset(store, base_id, monkeypa
 
     import asyncpg
 
-    other = await asyncpg.connect(DSN)
+    other = await asyncpg.connect(_schema_dsn())
     try:
         await other.fetchval("SELECT '[1]'::vector")
         assert await other.fetchval("SHOW hnsw.ef_search") == "40"
@@ -375,7 +384,7 @@ async def test_concurrent_publishes_of_one_base_are_serialised(base_id):
     """
     import asyncio
 
-    first, second = PostgresKnowledgeStore(DSN), PostgresKnowledgeStore(DSN)
+    first, second = PostgresKnowledgeStore(_schema_dsn()), PostgresKnowledgeStore(_schema_dsn())
     await first.initialize()
     await second.initialize()
     try:

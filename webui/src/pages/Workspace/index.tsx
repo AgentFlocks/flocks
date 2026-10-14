@@ -1,38 +1,22 @@
-import { pageActionLabel } from '../pageActionLabel';
 import { useState, useEffect, useCallback, useMemo, useRef, useReducer } from 'react';
 import { useLocation } from 'react-router-dom';
 import KnowledgeTab from './KnowledgeTab';
 import {
-  AlertTriangle,
-  ArrowLeft,
-  Brain,
-  ChevronDown,
-  ChevronRight,
-  ChevronUp,
-  Database,
-  Download,
-  Edit3,
-  FolderOpen,
-  FolderPlus,
-  Maximize2,
-  RefreshCw,
-  Save,
-  Search,
-  Trash2,
-  Upload,
-  X,
+  FolderOpen, Upload, Download, Trash2, Edit3, Save,
+  X, ChevronRight, ChevronDown, ChevronUp, RefreshCw, FolderPlus,
+  Brain, AlertTriangle, Search, ArrowLeft, Maximize2, Database,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import PageHeader from '@/components/common/PageHeader';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
 import { useToast } from '@/components/common/Toast';
 import { useConfirm } from '@/components/common/ConfirmDialog';
-import { extractErrorMessage } from '@/utils/error';
 import {
   workspaceAPI, WorkspaceNode, WorkspaceProject, formatBytes, formatDate, fileIcon,
 } from '@/api/workspace';
 import { FilePreviewRenderer, PreviewModal, type PreviewFileAccess } from '@/components/common/FilePreview';
 import { WorkspaceFileSplit, FileListTable, FileListRow, FileListActions, PreviewPanelHeader, fileActionClass, previewActionClass } from '@/components/common/WorkspaceFileView';
+import { extractErrorMessage } from '@/utils/error';
 
 // ─── Types ────────────────────────────────────────────────────────────────
 
@@ -133,13 +117,13 @@ export default function WorkspacePage() {
       <PageHeader
         title="Workspace"
         description={t('description')}
-        icon={<FolderOpen aria-hidden="true" className="w-8 h-8" />}
+        icon={<FolderOpen className="w-8 h-8" />}
       />
 
       <div className="flex gap-1 px-1 mb-4 border-b border-gray-200">
-        <TabButton active={activeTab === 'files'} onClick={() => setActiveTab('files')} icon={<FolderOpen aria-hidden="true" className="w-4 h-4" />} label={t('tabs.files')} />
-        <TabButton active={activeTab === 'memory'} onClick={() => setActiveTab('memory')} icon={<Brain aria-hidden="true" className="w-4 h-4" />} label={t('tabs.memory')} />
-        <TabButton active={activeTab === 'knowledge'} onClick={() => setActiveTab('knowledge')} icon={<Database aria-hidden="true" className="w-4 h-4" />} label={t('tabs.knowledge')} />
+        <TabButton active={activeTab === 'files'} onClick={() => setActiveTab('files')} icon={<FolderOpen className="w-4 h-4" />} label={t('tabs.files')} />
+        <TabButton active={activeTab === 'memory'} onClick={() => setActiveTab('memory')} icon={<Brain className="w-4 h-4" />} label={t('tabs.memory')} />
+        <TabButton active={activeTab === 'knowledge'} onClick={() => setActiveTab('knowledge')} icon={<Database className="w-4 h-4" />} label={t('tabs.knowledge')} />
       </div>
 
       <div className="min-h-0 flex-1 overflow-hidden">
@@ -191,7 +175,7 @@ function SortHeaderButton({
       }`}
     >
       <span>{label}</span>
-      <Icon aria-hidden="true" className={`w-3 h-3 ${active ? 'opacity-100' : 'opacity-0'}`} />
+      <Icon className={`w-3 h-3 ${active ? 'opacity-100' : 'opacity-0'}`} />
     </button>
   );
 }
@@ -212,7 +196,7 @@ function FilesTab() {
   // Preview/edit panel — consolidated into a reducer
   const [panel, dispatchPanel] = useReducer(panelReducer, PANEL_INIT);
 
-  // IconUpload / new-dir state
+  // Upload / new-dir state
   const [uploading, setUploading] = useState(false);
   const [newDir, setNewDir] = useState<{ show: boolean; name: string }>({ show: false, name: '' });
   const [dragOver, setDragOver] = useState(false);
@@ -410,13 +394,13 @@ function FilesTab() {
       <>
         {/* Toolbar */}
         <div className="flex items-center gap-2 px-4 py-2 border-b border-gray-100 flex-shrink-0">
-          <div className="flex items-center gap-1 flex-1 text-sm text-gray-600 min-w-0">
+          <div className="flex items-center gap-1 flex-1 min-w-0 text-sm text-gray-600">
             {breadcrumbs.map((crumb, i) => {
               const path = breadcrumbs.slice(1, i + 1).join('/');
               const isLast = i === breadcrumbs.length - 1;
               return (
                 <span key={i} className="flex items-center gap-1">
-                  {i > 0 && <ChevronRight aria-hidden="true" className="w-3 h-3 text-gray-300 flex-shrink-0" />}
+                  {i > 0 && <ChevronRight className="w-3 h-3 text-gray-300 flex-shrink-0" />}
                   <button
                     onClick={() => !isLast && loadDir(path)}
                     className={`truncate ${isLast ? 'text-gray-900 font-medium' : 'text-sky-700 hover:underline'}`}
@@ -430,7 +414,7 @@ function FilesTab() {
           <div className="flex items-center gap-1 flex-shrink-0">
             {currentPath && (
               <button onClick={() => loadDir(currentPath.split('/').slice(0, -1).join('/'))} title={t('files.back')} className="p-1.5 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded">
-                <ArrowLeft aria-hidden="true" className="w-4 h-4" />
+                <ArrowLeft className="w-4 h-4" />
               </button>
             )}
             <button
@@ -439,10 +423,10 @@ function FilesTab() {
               title={t('files.refresh')}
               className="p-1.5 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded disabled:opacity-50 disabled:cursor-not-allowed"
             >
-              <RefreshCw aria-hidden="true" className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
+              <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
             </button>
             <button onClick={() => setNewDir({ show: true, name: '' })} title={t('files.newDir')} className="p-1.5 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded">
-              <FolderPlus aria-hidden="true" className="w-4 h-4" />
+              <FolderPlus className="w-4 h-4" />
             </button>
             <button
               onClick={() => fileInputRef.current?.click()}
@@ -450,7 +434,7 @@ function FilesTab() {
               title={t('files.upload')}
               className="p-1.5 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded"
             >
-              <Upload aria-hidden="true" className="w-4 h-4" />
+              <Upload className="w-4 h-4" />
             </button>
             <input ref={fileInputRef} type="file" multiple className="hidden" onChange={(e) => handleUpload(e.target.files)} />
           </div>
@@ -458,7 +442,7 @@ function FilesTab() {
 
         {newDir.show && (
           <div className="flex items-center gap-2 px-4 py-2 bg-slate-50 border-b border-slate-100">
-            <FolderPlus aria-hidden="true" className="w-4 h-4 text-slate-600 flex-shrink-0" />
+            <FolderPlus className="w-4 h-4 text-slate-600 flex-shrink-0" />
             <input
               autoFocus
               value={newDir.name}
@@ -471,14 +455,14 @@ function FilesTab() {
               className="flex-1 text-sm bg-transparent border-none outline-none text-gray-800"
             />
             <button onClick={handleCreateDir} className="text-xs px-2 py-1 bg-slate-700 text-white rounded hover:bg-slate-800">{t('files.create')}</button>
-            <button aria-label={pageActionLabel('close')} onClick={() => setNewDir({ show: false, name: '' })} className="text-gray-400 hover:text-gray-600">
-              <X aria-hidden="true" className="w-4 h-4" />
+            <button onClick={() => setNewDir({ show: false, name: '' })} className="text-gray-400 hover:text-gray-600">
+              <X className="w-4 h-4" />
             </button>
           </div>
         )}
 
         <div
-          className={`flex-1 relative min-h-0 overflow-y-auto ${dragOver ? 'ring-2 ring-sky-400 ring-inset bg-sky-50/80' : ''}`}
+          className={`min-h-0 flex-1 overflow-y-auto relative ${dragOver ? 'ring-2 ring-sky-400 ring-inset bg-sky-50/80' : ''}`}
           onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
           onDragLeave={() => setDragOver(false)}
           onDrop={(e) => { e.preventDefault(); setDragOver(false); handleUpload(e.dataTransfer.files); }}
@@ -486,7 +470,7 @@ function FilesTab() {
           {dragOver && (
             <div className="absolute inset-0 flex items-center justify-center z-10 pointer-events-none">
               <div className="flex flex-col items-center gap-2 text-sky-700">
-                <Upload aria-hidden="true" className="w-8 h-8" />
+                <Upload className="w-8 h-8" />
                 <span className="text-sm font-medium">{t('files.dropHere')}</span>
               </div>
             </div>
@@ -496,7 +480,7 @@ function FilesTab() {
             <div className="flex items-center justify-center h-32"><LoadingSpinner /></div>
           ) : items.length === 0 ? (
             <div className="flex flex-col items-center justify-center h-32 text-gray-400">
-              <FolderOpen aria-hidden="true" className="w-8 h-8 mb-2 opacity-40" />
+              <FolderOpen className="w-8 h-8 mb-2 opacity-40" />
               <p className="text-sm">{t('files.emptyDir')}</p>
             </div>
           ) : (
@@ -524,16 +508,16 @@ function FilesTab() {
                     selected={panel.node?.path === item.path}
                   >
                     <td className="px-4 py-2 text-sm">{fileIcon(item)}</td>
-                    <td className="max-w-0 px-2 py-2 font-medium text-gray-800 dark:text-zinc-100 truncate">
+                    <td className="max-w-0 truncate px-2 py-2 font-medium text-gray-800 dark:text-zinc-100">
                       <span className="block truncate">{item.name}</span>
                     </td>
                     {showSizeColumn && (
-                      <td className="px-4 py-2 text-right tabular-nums text-gray-400 dark:text-zinc-500 whitespace-nowrap">
+                      <td className="whitespace-nowrap px-4 py-2 text-right tabular-nums text-gray-400 dark:text-zinc-500">
                         {item.type === 'file' ? formatBytes(item.size ?? 0) : '—'}
                       </td>
                     )}
                     {showModifiedColumn && (
-                      <td className="px-4 py-2 text-right text-xs text-gray-400 dark:text-zinc-500 whitespace-nowrap">
+                      <td className="whitespace-nowrap px-4 py-2 text-right text-xs text-gray-400 dark:text-zinc-500">
                         {formatDate(item.modified_at)}
                       </td>
                     )}
@@ -541,14 +525,14 @@ function FilesTab() {
                       <FileListActions>
                         {item.type === 'file' && (
                           <a href={workspaceAPI.downloadUrl(item.path)} download={item.name} title={t('files.download')} className={fileActionClass}>
-                            <Download aria-hidden="true" className="w-3.5 h-3.5" />
+                            <Download className="w-3.5 h-3.5" />
                           </a>
                         )}
                         <button onClick={() => handleReveal(item)} title={t('files.reveal')} className={fileActionClass}>
-                          <FolderOpen aria-hidden="true" className="w-3.5 h-3.5" />
+                          <FolderOpen className="w-3.5 h-3.5" />
                         </button>
                         <button onClick={() => handleDelete(item)} title={t('files.delete')} className="p-1 text-gray-400 hover:text-slate-700 rounded hover:bg-slate-100">
-                          <Trash2 aria-hidden="true" className="w-3.5 h-3.5" />
+                          <Trash2 className="w-3.5 h-3.5" />
                         </button>
                       </FileListActions>
                     </td>
@@ -560,7 +544,7 @@ function FilesTab() {
 
         {uploading && (
           <div className="px-4 py-2 bg-slate-50 text-sm text-slate-700 flex items-center gap-2 border-t border-slate-100">
-            <RefreshCw aria-hidden="true" className="w-3.5 h-3.5 animate-spin" />
+            <RefreshCw className="w-3.5 h-3.5 animate-spin" />
             {t('files.uploading')}
           </div>
         )}
@@ -579,30 +563,30 @@ function FilesTab() {
             actions={<>
               {panel.node.is_text_file && !panel.editing && !panel.truncated && (
                 <button onClick={() => dispatchPanel({ type: 'start_edit' })} title={t('files.edit')} className="p-1.5 text-gray-400 hover:text-slate-700 hover:bg-slate-100 rounded">
-                  <Edit3 aria-hidden="true" className="w-4 h-4" />
+                  <Edit3 className="w-4 h-4" />
                 </button>
               )}
               {panel.editing && (
                 <>
                   <button onClick={handleSave} disabled={panel.saving} title={t('files.save')} className="p-1.5 text-green-600 hover:bg-green-50 rounded">
-                    <Save aria-hidden="true" className="w-4 h-4" />
+                    <Save className="w-4 h-4" />
                   </button>
                   <button onClick={() => dispatchPanel({ type: 'cancel_edit' })} title={t('files.cancel')} className="p-1.5 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded">
-                    <X aria-hidden="true" className="w-4 h-4" />
+                    <X className="w-4 h-4" />
                   </button>
                 </>
               )}
               <a href={workspaceAPI.downloadUrl(panel.node.path)} download={panel.node.name} title={t('files.download')} className={previewActionClass}>
-                <Download aria-hidden="true" className="w-4 h-4" />
+                <Download className="w-4 h-4" />
               </a>
               <button onClick={() => handleReveal(panel.node!)} title={t('files.reveal')} className={previewActionClass}>
-                <FolderOpen aria-hidden="true" className="w-4 h-4" />
+                <FolderOpen className="w-4 h-4" />
               </button>
               <button onClick={() => setPreviewModalOpen(true)} title={t('files.preview.fullscreen')} className={previewActionClass}>
-                <Maximize2 aria-hidden="true" className="w-4 h-4" />
+                <Maximize2 className="w-4 h-4" />
               </button>
               <button onClick={() => dispatchPanel({ type: 'close' })} title={t('files.close')} className={previewActionClass}>
-                <X aria-hidden="true" className="w-4 h-4" />
+                <X className="w-4 h-4" />
               </button>
             </>}
             meta={<>
@@ -766,8 +750,8 @@ function MemoryTreeNode({
       >
         {isDirectory ? (
           isExpanded
-            ? <ChevronDown aria-hidden="true" className="w-3.5 h-3.5 text-gray-400 flex-shrink-0" />
-            : <ChevronRight aria-hidden="true" className="w-3.5 h-3.5 text-gray-400 flex-shrink-0" />
+            ? <ChevronDown className="w-3.5 h-3.5 flex-shrink-0 text-gray-400" />
+            : <ChevronRight className="w-3.5 h-3.5 flex-shrink-0 text-gray-400" />
         ) : (
           <span className="w-3.5 flex-shrink-0" />
         )}
@@ -920,19 +904,19 @@ function MemoryTab() {
 
   return (
     <div className="flex h-full gap-4">
-      <div className="w-72 bg-white rounded-xl border border-gray-200 flex flex-col flex-shrink-0 overflow-hidden">
+      <div className="w-72 flex-shrink-0 bg-white rounded-xl border border-gray-200 flex flex-col overflow-hidden">
         <div className="px-3 py-2.5 border-b border-gray-100 flex items-center gap-2">
-          <Brain aria-hidden="true" className="w-4 h-4 text-purple-500 flex-shrink-0" />
+          <Brain className="w-4 h-4 text-purple-500 flex-shrink-0" />
           <span className="text-sm font-medium text-gray-700">{t('memory.title')}</span>
-          <span className="text-xs text-gray-400 bg-gray-100 px-1.5 py-0.5 rounded-full ml-auto">{fileCount}</span>
+          <span className="ml-auto text-xs text-gray-400 bg-gray-100 px-1.5 py-0.5 rounded-full">{fileCount}</span>
           <button onClick={load} title={t('memory.refresh')} className="text-gray-400 hover:text-gray-600">
-            <RefreshCw aria-hidden="true" className="w-3.5 h-3.5" />
+            <RefreshCw className="w-3.5 h-3.5" />
           </button>
         </div>
 
         <div className="px-3 py-2 border-b border-gray-100">
           <div className="relative">
-            <Search aria-hidden="true" className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-400" />
+            <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-400" />
             <input
               value={search}
               onChange={(e) => setSearch(e.target.value)}
@@ -947,13 +931,13 @@ function MemoryTab() {
             <div className="flex items-center justify-center h-24"><LoadingSpinner /></div>
           ) : loadState === 'error' ? (
             <div className="flex flex-col items-center justify-center h-24 text-gray-400 text-sm gap-2">
-              <AlertTriangle aria-hidden="true" className="w-5 h-5 text-orange-400" />
+              <AlertTriangle className="w-5 h-5 text-orange-400" />
               <span>{t('memory.loadFailed')}</span>
               <button onClick={load} className="text-xs text-sky-700 hover:underline">{t('memory.retry')}</button>
             </div>
           ) : filtered.length === 0 ? (
             <div className="flex flex-col items-center justify-center h-24 text-gray-400 text-sm">
-              <Brain aria-hidden="true" className="w-6 h-6 mb-1 opacity-40" />
+              <Brain className="w-6 h-6 mb-1 opacity-40" />
               {memoryView.length === 0 ? t('memory.noFiles') : t('memory.noMatch')}
             </div>
           ) : (
@@ -974,7 +958,7 @@ function MemoryTab() {
 
       </div>
 
-      <div className="flex-1 bg-white rounded-xl border border-gray-200 flex flex-col min-w-0 overflow-hidden">
+      <div className="flex-1 min-w-0 bg-white rounded-xl border border-gray-200 flex flex-col overflow-hidden">
         {selected ? (
           <>
             <div className="flex items-center gap-3 px-4 py-2.5 border-b border-gray-100 flex-shrink-0">
@@ -1000,13 +984,13 @@ function MemoryTab() {
                   title={t('files.edit')}
                   className="p-1.5 text-gray-400 hover:text-slate-700 hover:bg-slate-100 rounded"
                 >
-                  <Edit3 aria-hidden="true" className="w-4 h-4" />
+                  <Edit3 className="w-4 h-4" />
                 </button>
               )}
               {editing && (
                 <>
                   <button onClick={handleSave} disabled={saving} title={t('files.save')} className="p-1.5 text-green-600 hover:bg-green-50 rounded">
-                    <Save aria-hidden="true" className="w-4 h-4" />
+                    <Save className="w-4 h-4" />
                   </button>
                   <button
                     onClick={() => {
@@ -1016,15 +1000,15 @@ function MemoryTab() {
                     title={t('files.cancel')}
                     className="p-1.5 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded"
                   >
-                    <X aria-hidden="true" className="w-4 h-4" />
+                    <X className="w-4 h-4" />
                   </button>
                 </>
               )}
               <a href={workspaceAPI.memoryDownloadUrl(selected.path)} download={selected.name} title={t('files.download')} className="p-1.5 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded">
-                <Download aria-hidden="true" className="w-4 h-4" />
+                <Download className="w-4 h-4" />
               </a>
               <button onClick={() => setPreviewModalOpen(true)} title={t('files.preview.fullscreen')} className="p-1.5 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded">
-                <Maximize2 aria-hidden="true" className="w-4 h-4" />
+                <Maximize2 className="w-4 h-4" />
               </button>
             </div>
             <div className="flex-1 min-h-0 overflow-hidden">
@@ -1033,7 +1017,7 @@ function MemoryTab() {
               )}
               {contentState === 'error' && (
                 <div className="flex flex-col items-center justify-center h-24 gap-2 text-gray-400">
-                  <AlertTriangle aria-hidden="true" className="w-5 h-5 text-orange-400" />
+                  <AlertTriangle className="w-5 h-5 text-orange-400" />
                   <span className="text-sm">{t('memory.readFailed')}</span>
                   <button onClick={() => handleSelect(selected)} className="text-xs text-sky-700 hover:underline">{t('memory.retry')}</button>
                 </div>
@@ -1064,7 +1048,7 @@ function MemoryTab() {
           </>
         ) : (
           <div className="flex-1 flex flex-col items-center justify-center gap-3 text-gray-400">
-            <Brain aria-hidden="true" className="w-12 h-12 opacity-20" />
+            <Brain className="w-12 h-12 opacity-20" />
             <p className="text-sm">{t('memory.selectPrompt')}</p>
             <p className="text-xs text-center px-8">{t('memory.selectDesc')}</p>
           </div>

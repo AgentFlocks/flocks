@@ -20,7 +20,7 @@ function ErrorDisplay({ error, onRetry }: { error: Error; onRetry: () => void })
   return (
     <div className="p-4 text-xs text-red-600 space-y-2">
       <p className="font-semibold">{t('detail.rightPanel.renderError')}</p>
-      <pre className="bg-red-50 rounded p-2 max-h-60 whitespace-pre-wrap overflow-auto">
+      <pre className="whitespace-pre-wrap bg-red-50 rounded p-2 overflow-auto max-h-60">
         {error.message}
         {'\n'}
         {error.stack}
@@ -70,8 +70,6 @@ interface RightPanelProps {
   latestExecution?: WorkflowExecution | null;
   open: boolean;
   width?: number;
-  /** Render as a full-size overlay of the canvas area (phone widths). */
-  overlay?: boolean;
   activeTab?: RightPanelTabId;
   chatLaunchRequest?: WorkflowChatLaunchRequest | null;
   onChatLaunchRequestHandled?: (id: number) => void;
@@ -104,7 +102,6 @@ export default function RightPanel({
   focusExecutionId,
   selectedNode, onDeselectNode,
   onDelete,
-  overlay = false,
 }: RightPanelProps) {
   const { t, i18n } = useTranslation('workflow');
   const confirm = useConfirm();
@@ -143,7 +140,7 @@ export default function RightPanel({
   ];
 
   return (
-    <WorkbenchSidePanel open={open} width={width} overlay={overlay}>
+    <WorkbenchSidePanel open={open} width={width}>
       {/* Tab bar */}
       <div className="flex border-b border-gray-100 flex-shrink-0">
         {TABS.map((tab) => (
@@ -207,7 +204,7 @@ export default function RightPanel({
             disabled={deleting}
             className="flex items-center gap-1.5 px-3 py-1.5 text-xs text-red-600 border border-red-200 rounded-lg hover:bg-red-50 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
           >
-            <Trash2 aria-hidden="true" className="w-3.5 h-3.5" />
+            <Trash2 className="w-3.5 h-3.5" />
             {deleting ? t('detail.rightPanel.deleting') : t('detail.rightPanel.deleteWorkflow')}
           </button>
         </div>

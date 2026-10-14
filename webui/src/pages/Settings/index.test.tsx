@@ -181,7 +181,7 @@ describe('SettingsPage', () => {
     const tabs = screen.getByRole('navigation', { name: 'settingsTitle' });
     await waitFor(() => expect(within(tabs).getAllByRole('tab').map((tab) => tab.textContent)).toEqual([
       // Security config and audit logs are extension sections; a stock build has none.
-      'settingsPreferences', 'archivedData', 'accountManagement', 'networkProxy', 'voiceInput', 'systemLog',
+      'settingsPreferences', 'archivedData', 'accountManagement', 'systemLog', 'networkProxy', 'voiceInput',
     ]));
     expect(within(tabs).getByRole('tab', { name: 'systemLog' })).toHaveAttribute('aria-selected', 'true');
     expect(within(tabs).queryByRole('tab', { name: /flocks/i })).not.toBeInTheDocument();

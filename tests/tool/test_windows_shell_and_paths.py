@@ -12,7 +12,6 @@ from flocks.tool import path_utils as path_utils_module
 from flocks.tool.code import bash as bash_module
 from flocks.tool.code import lsp_tool as lsp_module
 from flocks.tool.file import apply_patch as apply_patch_module
-from flocks.tool.file import edit as edit_module
 from flocks.tool.file import write as write_module
 from flocks.tool.registry import ToolContext, ToolResult
 
@@ -273,22 +272,22 @@ async def test_write_tool_uses_absolute_path_when_relpath_fails(tmp_path, monkey
     assert requests[-1].patterns == [str(target)]
 
 
-def test_write_safe_relpath_keeps_relative_paths():
-    """Normal relative path behavior should remain unchanged."""
-    rel_path = write_module._safe_relpath("/tmp/project/file.txt", "/tmp/project")
+def test_safe_relpath_keeps_relative_paths():
+    """Normal relative path behavior should remain unchanged (write / edit share this helper)."""
+    rel_path = path_utils_module.safe_relpath("/tmp/project/file.txt", "/tmp/project")
     assert rel_path == "file.txt"
 
 
-def test_edit_safe_relpath_falls_back_to_absolute(monkeypatch):
-    """Edit helper should keep absolute paths on relpath failures."""
+def test_safe_relpath_falls_back_to_absolute(monkeypatch):
+    """The shared helper should keep absolute paths on relpath failures."""
 
     def fake_relpath(_path, _start):
         raise ValueError("cross-drive")
 
-    monkeypatch.setattr(edit_module.os.path, "relpath", fake_relpath)
+    monkeypatch.setattr(path_utils_module.os.path, "relpath", fake_relpath)
 
     path = "C:\\Users\\Example\\file.txt"
-    assert edit_module._safe_relpath(path, "D:\\workspace") == path
+    assert path_utils_module.safe_relpath(path, "D:\\workspace") == path
 
 
 def test_apply_patch_safe_relpath_falls_back_to_absolute(monkeypatch):

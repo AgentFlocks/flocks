@@ -1,6 +1,19 @@
-import { pageActionLabel } from '../pageActionLabel';
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
-import { AlertTriangle, BookOpen, ChevronLeft, ChevronRight, CloudDownload, Filter, FolderOpen, Loader2, Pencil, Plus, RefreshCw, Search, Sparkles } from 'lucide-react';
+import {
+  BookOpen,
+  Search,
+  Plus,
+  RefreshCw,
+  Sparkles,
+  FolderOpen,
+  CloudDownload,
+  AlertTriangle,
+  Loader2,
+  Pencil,
+  ChevronLeft,
+  ChevronRight,
+  Filter,
+} from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import PageHeader from '@/components/common/PageHeader';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
@@ -343,17 +356,17 @@ export default function SkillPage() {
 
   return (
     <div className="h-full flex flex-col">
-      <PageHeader tone="ai"
+      <PageHeader
         title={t('pageTitle')}
         description={t('pageDescription')}
-        icon={<BookOpen aria-hidden="true" className="w-8 h-8" />}
+        icon={<BookOpen className="w-8 h-8" />}
       />
 
       {/* Toolbar: 搜索 · 来源 chips · 刷新/安装/创建 */}
-      <div className="px-4 py-2 border-b border-gray-100 flex items-center gap-3 flex-wrap">
+      <div className="px-4 py-2 border-b border-gray-100 flex flex-wrap items-center gap-3">
         {/* 搜索 */}
-        <div className="relative w-full sm:w-64 min-w-0">
-          <Search aria-hidden="true" className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400 pointer-events-none" />
+        <div className="relative w-64">
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400 pointer-events-none" />
           <input
             type="text"
             placeholder={t('searchPlaceholder')}
@@ -373,7 +386,7 @@ export default function SkillPage() {
         />
 
         {/* 右侧操作：刷新 + 安装 + 创建 */}
-        <div className="flex items-center gap-2 ml-auto flex-wrap">
+        <div className="ml-auto flex items-center gap-2">
           <PluginViewToggle value={viewMode} onChange={setViewMode} />
           <button
             onClick={handleRefresh}
@@ -385,20 +398,20 @@ export default function SkillPage() {
                 : 'border-gray-200 text-gray-400 hover:bg-gray-50 hover:text-gray-600 disabled:opacity-50'
             }`}
           >
-            <RefreshCw aria-hidden="true" className={`w-3.5 h-3.5 ${refreshing ? 'animate-spin' : ''}`} />
+            <RefreshCw className={`w-3.5 h-3.5 ${refreshing ? 'animate-spin' : ''}`} />
           </button>
           <button
             onClick={() => setShowInstallDialog(true)}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 border border-gray-300 text-gray-700 bg-white rounded-lg hover:bg-gray-50 transition-colors text-sm whitespace-nowrap"
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 border border-gray-300 text-gray-700 bg-white rounded-lg hover:bg-gray-50 transition-colors text-sm"
           >
-            <CloudDownload aria-hidden="true" className="w-4 h-4" />
+            <CloudDownload className="w-4 h-4" />
             {t('installSkill')}
           </button>
           <button
             onClick={() => setShowCreateSheet(true)}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors text-sm whitespace-nowrap"
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors text-sm"
           >
-            <Plus aria-hidden="true" className="w-4 h-4" />
+            <Plus className="w-4 h-4" />
             {t('createSkill')}
           </button>
         </div>
@@ -411,7 +424,7 @@ export default function SkillPage() {
         {visibleSkills.length === 0 ? (
           // Truly empty inventory — show big EmptyState with CTAs
           <EmptyState
-            icon={<BookOpen aria-hidden="true" className="w-16 h-16" />}
+            icon={<BookOpen className="w-16 h-16" />}
             title={t('emptyState.noSkills')}
             description={t('emptyState.createFirst')}
             action={
@@ -420,14 +433,14 @@ export default function SkillPage() {
                   onClick={() => setShowInstallDialog(true)}
                   className="inline-flex items-center gap-2 px-4 py-2 border border-gray-300 text-gray-700 bg-white rounded-lg hover:bg-gray-50"
                 >
-                  <CloudDownload aria-hidden="true" className="w-5 h-5" />
+                  <CloudDownload className="w-5 h-5" />
                   {t('installSkill')}
                 </button>
                 <button
                   onClick={() => setShowCreateSheet(true)}
                   className="inline-flex items-center gap-2 px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700"
                 >
-                  <Plus aria-hidden="true" className="w-5 h-5" />
+                  <Plus className="w-5 h-5" />
                   {t('createSkill')}
                 </button>
               </div>
@@ -572,7 +585,7 @@ function SkillTable({
   if (viewMode === 'cards') {
     return (
       <>
-        <div className="mb-3 flex items-center gap-4 text-xs text-gray-500 flex-wrap">
+        <div className="mb-3 flex flex-wrap items-center gap-4 text-xs text-gray-500">
           <ColumnFilterHeader
             label={t('table.source')} values={allSources} active={sourceColFilter}
             onToggle={onToggleSourceColFilter} onClear={onClearSourceColFilter}
@@ -595,7 +608,7 @@ function SkillTable({
           </div>
         ) : (
           <div className="flex flex-col items-center justify-center gap-3 rounded-xl border border-gray-200 bg-white px-4 py-12 text-gray-400">
-            <BookOpen aria-hidden="true" className="h-10 w-10 text-gray-300" />
+            <BookOpen className="h-10 w-10 text-gray-300" />
             <div className="text-sm">{t('emptyState.noResults')}</div>
             {hasActiveFilter && <button type="button" onClick={onClearAllFilters}
               className="rounded-lg border border-gray-200 px-3 py-1.5 text-xs text-gray-600 hover:bg-gray-50">{t('filter.clear')}</button>}
@@ -607,19 +620,19 @@ function SkillTable({
 
   return (
     <div className="bg-white border border-gray-200 rounded-xl overflow-x-auto">
-      {/* Below md the table keeps only name / enabled / actions so it fits a phone
-          without horizontal scrolling (the type badge moves into the name cell and
-          the action buttons stay on screen). From md up the 640px floor keeps the
-          five columns usable; widths live on the header cells because table-fixed
-          reads them from the first row and a hidden <col> cannot be dropped. From md
-          up the table has no set width, so it lays out like the dev table: the
-          8 / 46 / 18 / 14 / 14 split as hints, content minimums kept. */}
-      <table className="table-fixed text-xs w-full md:w-auto md:min-w-[max(100%,40rem)]">
+      <table className="min-w-[max(100%,40rem)] table-fixed text-xs">
+        <colgroup>
+          <col style={{ width: '8%' }} />
+          <col style={{ width: '46%' }} />
+          <col style={{ width: '18%' }} />
+          <col style={{ width: '14%' }} />
+          <col style={{ width: '14%' }} />
+        </colgroup>
         <thead className="bg-gray-50 text-gray-500 border-b border-gray-200">
           <tr>
-            <th className="text-left px-4 py-2.5 font-medium hidden md:table-cell md:w-[8%] whitespace-nowrap">{t('table.type')}</th>
-            <th className="text-left font-medium px-3 md:px-4 py-2.5 whitespace-nowrap md:w-[46%]">{t('table.name')}</th>
-            <th className="text-left px-4 py-2.5 font-medium hidden md:table-cell md:w-[18%]">
+            <th className="text-left px-4 py-2.5 font-medium">{t('table.type')}</th>
+            <th className="text-left px-4 py-2.5 font-medium">{t('table.name')}</th>
+            <th className="text-left px-4 py-2.5 font-medium">
               <ColumnFilterHeader
                 label={t('table.source')}
                 values={allSources}
@@ -628,7 +641,7 @@ function SkillTable({
                 onClear={onClearSourceColFilter}
               />
             </th>
-            <th className="text-left px-4 py-2.5 font-medium hidden md:table-cell md:w-[14%]">
+            <th className="text-left px-4 py-2.5 font-medium">
               <ColumnFilterHeader
                 label={t('table.enabled')}
                 values={['enabled', 'disabled']}
@@ -638,9 +651,7 @@ function SkillTable({
                 renderLabel={(v) => v === 'enabled' ? t('filter.enabled') : t('filter.disabled')}
               />
             </th>
-            {/* phone: the enable switch (icon-only) joins the group and edit buttons here,
-                three 44px touch targets */}
-            <th className="text-right font-medium w-[156px] md:w-[14%] px-2 md:px-4 py-2.5">{t('table.actions')}</th>
+            <th className="text-right px-4 py-2.5 font-medium">{t('table.actions')}</th>
           </tr>
         </thead>
         <tbody className="divide-y divide-gray-100">
@@ -661,7 +672,7 @@ function SkillTable({
             <tr>
               <td colSpan={5} className="px-4 py-12">
                 <div className="flex flex-col items-center justify-center gap-3 text-gray-400">
-                  <BookOpen aria-hidden="true" className="w-10 h-10 text-gray-300" />
+                  <BookOpen className="w-10 h-10 text-gray-300" />
                   <div className="text-sm">{t('emptyState.noResults')}</div>
                   {hasActiveFilter && (
                     <button
@@ -713,45 +724,42 @@ function SkillRow({ skill, isSelected, installingDeps, toggling, onSelect, onIns
         skill.disabled ? 'bg-gray-50/40 dark:bg-zinc-900/30' : 'hover:bg-gray-50 dark:hover:bg-zinc-900/60'
       } ${isSelected ? 'bg-slate-50 dark:bg-zinc-900/80' : ''}`}
     >
-      {/* 类型列（phone 宽度下并入名称列） */}
-      <td className="px-4 py-3 hidden md:table-cell">
+      {/* 类型列 */}
+      <td className="px-4 py-3">
         <SourceTypeBadge isUser={isUser} />
       </td>
 
       {/* 名称 + 描述列（含内嵌的缺依赖警告）— 整块作为打开 SkillSheet 的点击区，
           mirrors the Hub catalog row pattern (`Hub/index.tsx` HubTable). */}
-      <td className="max-w-0 px-3 md:px-4 py-3">
+      <td className="max-w-0 px-4 py-3">
         <button
           type="button"
           onClick={() => onSelect(skill)}
           title={t('table.edit')}
-          className="flex items-start gap-2.5 text-left group/name focus:outline-none min-w-0 w-full"
+          className="flex items-start gap-2.5 min-w-0 w-full text-left group/name focus:outline-none"
         >
-          <span className="w-7 h-7 rounded-lg flex items-center justify-center bg-gray-100 text-gray-400 mt-0.5 shrink-0">
+          <span className="w-7 h-7 rounded-lg flex items-center justify-center shrink-0 bg-gray-100 text-gray-400 mt-0.5">
             {isUser
-              ? <FolderOpen aria-hidden="true" className="w-3.5 h-3.5" />
-              : <Sparkles aria-hidden="true" className="w-3.5 h-3.5" />
+              ? <FolderOpen className="w-3.5 h-3.5" />
+              : <Sparkles className="w-3.5 h-3.5" />
             }
           </span>
           <span className="min-w-0 flex-1">
-            <span className="block font-medium text-gray-900 transition-colors group-hover/name:text-slate-700 group-focus-visible/name:underline truncate">
+            <span className="block font-medium text-gray-900 truncate transition-colors group-hover/name:text-slate-700 group-focus-visible/name:underline">
               {skill.name}
             </span>
-            <span className="block text-[11px] text-gray-400 mt-0.5 truncate">
+            <span className="block text-[11px] text-gray-400 truncate mt-0.5">
               {skill.description || t('sheet.noDescription')}
-            </span>
-            <span className="md:hidden block mt-1 text-xs">
-              <SourceTypeBadge isUser={isUser} />
             </span>
             {/* The old "Status" column collapsed to this single inline
                 warning — only rendered when the skill is actually
                 missing dependencies, so the row stays quiet by default. */}
             {hasMissingDeps && (
               <span
-                className="text-[11px] text-amber-600 mt-0.5 flex items-center gap-1 truncate"
+                className="text-[11px] text-amber-600 truncate mt-0.5 flex items-center gap-1"
                 title={(skill.missing ?? []).join(', ')}
               >
-                <AlertTriangle aria-hidden="true" className="w-3 h-3 shrink-0" />
+                <AlertTriangle className="w-3 h-3 shrink-0" />
                 <span className="truncate">
                   {t('eligibility.missingDepsInline', {
                     list: (skill.missing ?? []).join(', '),
@@ -763,15 +771,15 @@ function SkillRow({ skill, isSelected, installingDeps, toggling, onSelect, onIns
         </button>
       </td>
 
-      {/* 来源列（phone 宽度下隐藏，详情在编辑抽屉里） */}
-      <td className="max-w-0 px-4 py-3 hidden md:table-cell">
-        <span className="text-[11px] text-gray-400 font-mono block truncate" title={skill.location}>
+      {/* 来源列 */}
+      <td className="max-w-0 px-4 py-3">
+        <span className="text-[11px] text-gray-400 font-mono truncate block" title={skill.location}>
           {skill.source ?? '-'}
         </span>
       </td>
 
-      {/* 启用开关列：控制 skill 是否注入 Agent System Prompt（phone 宽度下并入操作列） */}
-      <td className="hidden whitespace-nowrap px-4 py-3 md:table-cell">
+      {/* 启用开关列：控制 skill 是否注入 Agent System Prompt */}
+      <td className="whitespace-nowrap px-4 py-3">
         <EnabledToggle
           enabled={enabled}
           loading={toggling}
@@ -781,32 +789,22 @@ function SkillRow({ skill, isSelected, installingDeps, toggling, onSelect, onIns
       </td>
 
       {/* 操作列：编辑（+ 缺依赖时的安装按钮）；删除操作在编辑面板内 */}
-      <td className="text-right px-2 md:px-4 py-3">
+      <td className="px-4 py-3 text-right">
         <div className="flex items-center justify-end gap-1">
-          <span className="md:hidden inline-flex">
-            <EnabledToggle
-              enabled={enabled}
-              loading={toggling}
-              compact
-              title={enabled ? t('toggle.enabledTip') : t('toggle.disabledTip')}
-              onChange={(e) => onToggle(skill, e)}
-            />
-          </span>
           {grouping && <PluginGroupButton grouping={grouping} itemKey={skill.name} />}
           {hasMissingDeps && (
             <button
               onClick={(e) => onInstallDeps(skill, e)}
               disabled={installingDeps}
               title={t('eligibility.installDeps')}
-              aria-label={t('eligibility.installDeps')}
-              className="inline-flex items-center gap-1 px-2 py-1 rounded border border-gray-200 bg-white text-gray-600 hover:bg-gray-50 transition-colors disabled:opacity-50"
+              className="inline-flex items-center gap-1 px-2 py-1 rounded border border-gray-200
+                         bg-white text-gray-600 hover:bg-gray-50 transition-colors disabled:opacity-50"
             >
               {installingDeps
-                ? <Loader2 aria-hidden="true" className="w-3 h-3 animate-spin" />
-                : <CloudDownload aria-hidden="true" className="w-3 h-3" />
+                ? <Loader2 className="w-3 h-3 animate-spin" />
+                : <CloudDownload className="w-3 h-3" />
               }
-              {/* label only from md up: on a phone the icon button keeps the column narrow */}
-              <span className="hidden md:inline">{installingDeps ? t('eligibility.installing') : t('eligibility.installDeps')}</span>
+              {installingDeps ? t('eligibility.installing') : t('eligibility.installDeps')}
             </button>
           )}
           <button
@@ -814,9 +812,11 @@ function SkillRow({ skill, isSelected, installingDeps, toggling, onSelect, onIns
             onClick={() => onSelect(skill)}
             title={t('table.edit')}
             aria-label={t('table.edit')}
-            className="p-1.5 rounded-md border border-gray-200 text-gray-500 hover:border-slate-300 hover:text-slate-700 hover:bg-gray-50 transition-colors"
+            className="p-1.5 rounded-md border border-gray-200 text-gray-500
+                       hover:border-slate-300 hover:text-slate-700 hover:bg-gray-50
+                       transition-colors"
           >
-            <Pencil aria-hidden="true" className="w-3.5 h-3.5" />
+            <Pencil className="w-3.5 h-3.5" />
           </button>
         </div>
       </td>
@@ -880,14 +880,14 @@ function SourceTypeBadge({ isUser }: { isUser: boolean }) {
   if (isUser) {
     return (
       <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded border border-gray-200 bg-white text-gray-500 whitespace-nowrap">
-        <FolderOpen aria-hidden="true" className="w-3 h-3" />
+        <FolderOpen className="w-3 h-3" />
         {t('table.custom')}
       </span>
     );
   }
   return (
     <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded border border-gray-200 bg-gray-50 text-gray-500 whitespace-nowrap">
-      <Sparkles aria-hidden="true" className="w-3 h-3" />
+      <Sparkles className="w-3 h-3" />
       {t('table.builtin')}
     </span>
   );
@@ -939,7 +939,7 @@ function SourceFilterChips({
           >
             <span>{chip.label}</span>
             <span
-              className={`ml-1.5 inline-block px-1 rounded text-[10px] tabular-nums min-w-[1.25rem] ${
+              className={`ml-1.5 inline-block min-w-[1.25rem] px-1 rounded text-[10px] tabular-nums ${
                 active ? 'bg-white/15' : 'bg-gray-100 text-gray-500'
               }`}
             >
@@ -1000,11 +1000,11 @@ function ColumnFilterHeader({
           }`}
           aria-label={`${label} ${t('filter.aria')}`}
         >
-          <Filter aria-hidden="true" className="w-3 h-3" />
+          <Filter className="w-3 h-3" />
         </button>
       </div>
       {open && (
-        <div className="absolute left-0 top-full mt-1 bg-white rounded-lg shadow-lg border border-gray-200 py-2 max-h-60 z-20 min-w-[160px] overflow-y-auto">
+        <div className="absolute left-0 top-full mt-1 z-20 bg-white rounded-lg shadow-lg border border-gray-200 py-2 min-w-[160px] max-h-60 overflow-y-auto">
           {hasFilter && (
             <button
               onClick={() => { onClear(); setOpen(false); }}
@@ -1052,20 +1052,20 @@ function PaginationBar({ total, page, totalPages, onPageChange }: {
     <div className="px-4 py-2 border-t border-gray-200 bg-white flex items-center justify-between text-xs text-gray-500">
       <span>{t('pagination.info', { start, end, total })}</span>
       <div className="flex items-center gap-1">
-        <button aria-label={pageActionLabel('previous')}
+        <button
           onClick={() => onPageChange(Math.max(1, page - 1))}
           disabled={page <= 1}
           className="p-1 rounded border border-gray-200 hover:bg-gray-50 disabled:opacity-40"
         >
-          <ChevronLeft aria-hidden="true" className="w-3.5 h-3.5" />
+          <ChevronLeft className="w-3.5 h-3.5" />
         </button>
         <span className="min-w-16 text-center">{page} / {totalPages}</span>
-        <button aria-label={pageActionLabel('next')}
+        <button
           onClick={() => onPageChange(Math.min(totalPages, page + 1))}
           disabled={page >= totalPages}
           className="p-1 rounded border border-gray-200 hover:bg-gray-50 disabled:opacity-40"
         >
-          <ChevronRight aria-hidden="true" className="w-3.5 h-3.5" />
+          <ChevronRight className="w-3.5 h-3.5" />
         </button>
       </div>
     </div>

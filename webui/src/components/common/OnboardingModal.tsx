@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import {
@@ -26,7 +26,6 @@ import {
 } from '@/api/onboarding';
 import type { CatalogProvider } from '@/types';
 import { getDefaultThreatBookRegion, THREATBOOK_REGION_CONFIG } from '@/constants/threatbook';
-import { useDialogFocus } from '@/hooks/useDialogFocus';
 
 const MODEL_KEY_LINK = 'https://portal.agentflocks.com';
 
@@ -118,9 +117,9 @@ function ValidationPanel({
       <div className="flex items-start gap-2">
         {!minimal && (
           status.tone === 'success' ? (
-            <CheckCircle2 aria-hidden="true" className={`w-4 h-4 mt-0.5 flex-shrink-0 ${styles.icon}`} />
+            <CheckCircle2 className={`w-4 h-4 mt-0.5 flex-shrink-0 ${styles.icon}`} />
           ) : (
-            <XCircle aria-hidden="true" className={`w-4 h-4 mt-0.5 flex-shrink-0 ${styles.icon}`} />
+            <XCircle className={`w-4 h-4 mt-0.5 flex-shrink-0 ${styles.icon}`} />
           )
         )}
         <div className="min-w-0 flex-1">
@@ -144,7 +143,7 @@ function ValidationPanel({
                   <div
                     key={key}
                     className={minimal
-                      ? 'flex items-center gap-x-2 gap-y-1 text-[11px] flex-wrap'
+                      ? 'flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px]'
                       : 'border-t border-white/70 pt-2 first:border-t-0 first:pt-0'}
                   >
                     <div className={`${minimal ? 'contents' : 'flex items-center justify-between gap-2'}`}>
@@ -229,7 +228,7 @@ function StatusMetric({ label, value }: { label: string; value: string }) {
   return (
     <div className="rounded-lg border border-gray-100 bg-white px-3 py-2">
       <p className="text-[11px] text-gray-500">{label}</p>
-      <p className="mt-1 text-sm font-medium text-gray-900 break-words">{value}</p>
+      <p className="mt-1 break-words text-sm font-medium text-gray-900">{value}</p>
     </div>
   );
 }
@@ -303,7 +302,6 @@ function OnboardingSecretInput({
         onChange={(event) => onChange(event.target.value)}
         placeholder={placeholder}
         autoComplete="off"
-        aria-label={placeholder}
         className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 pr-10 text-xs transition-all placeholder-gray-300 focus:border-red-400 focus:outline-none focus:ring-2 focus:ring-red-400/50"
       />
       <button
@@ -311,14 +309,13 @@ function OnboardingSecretInput({
         onClick={onToggleVisibility}
         disabled={revealing || (!hasStoredKey && !value)}
         title={visible ? hideLabel : showLabel}
-        aria-label={visible ? hideLabel : showLabel}
         className="absolute inset-y-0 right-0 flex w-10 items-center justify-center text-gray-400 transition-colors hover:text-gray-600 disabled:cursor-not-allowed disabled:opacity-50"
       >
         {revealing
-          ? <Loader2 aria-hidden="true" className="h-4 w-4 animate-spin" />
+          ? <Loader2 className="h-4 w-4 animate-spin" />
           : visible
-            ? <EyeOff aria-hidden="true" className="h-4 w-4" />
-            : <Eye aria-hidden="true" className="h-4 w-4" />}
+            ? <EyeOff className="h-4 w-4" />
+            : <Eye className="h-4 w-4" />}
       </button>
     </div>
   );
@@ -335,20 +332,17 @@ function SkipConfirmDialog({
   onCancel: () => void;
   onConfirm: () => void;
 }) {
-  const dialogRef = useRef<HTMLDivElement>(null);
-  const titleId = useId();
-  useDialogFocus(dialogRef, Boolean(target), onCancel);
   if (!target) return null;
 
   const isModel = target === 'model';
 
   return (
-    <div className="absolute inset-0 flex items-center justify-center bg-black/25 px-4 z-10" onClick={(event) => { if (event.target === event.currentTarget) onCancel(); }}>
-      <div ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby={titleId} tabIndex={-1} data-ui-overlay="dialog" className="w-full max-w-md rounded-xl border border-gray-200 bg-white p-5 shadow-2xl">
+    <div className="absolute inset-0 z-10 flex items-center justify-center bg-black/25 px-4">
+      <div className="w-full max-w-md rounded-xl border border-gray-200 bg-white p-5 shadow-2xl">
         <div className="flex items-start gap-3">
-          <AlertTriangle aria-hidden="true" className="mt-0.5 h-5 w-5 text-amber-500 flex-shrink-0" />
+          <AlertTriangle className="mt-0.5 h-5 w-5 flex-shrink-0 text-amber-500" />
           <div className="min-w-0 flex-1">
-            <h3 id={titleId} className="text-sm font-semibold text-gray-900">
+            <h3 className="text-sm font-semibold text-gray-900">
               {isModel ? t('onboarding.bootstrap.skipModelTitle') : t('onboarding.bootstrap.skipIntelTitle')}
             </h3>
             <p className="mt-2 text-sm leading-6 text-gray-600">
@@ -379,8 +373,6 @@ function SkipConfirmDialog({
 
 export default function OnboardingModal({ onClose }: OnboardingModalProps) {
   const { t, i18n } = useTranslation('common');
-  const dialogRef = useRef<HTMLDivElement>(null);
-  const titleId = useId();
   const navigate = useNavigate();
   const defaultIntelRegion = useMemo(() => getDefaultThreatBookRegion(i18n.language), [i18n.language]);
 
@@ -418,8 +410,6 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
   const [intelKeyRevealing, setIntelKeyRevealing] = useState(false);
   const [intelSkipped, setIntelSkipped] = useState(false);
   const [intelRuntimeStatus, setIntelRuntimeStatus] = useState<ThreatBookIntelStatus | null>(null);
-  const isBusy = starting || primarySaving || intelSaving || primaryKeyRevealing || intelKeyRevealing;
-  useDialogFocus(dialogRef, true, isBusy ? undefined : onClose);
 
   const refreshOnboardingStatus = useCallback(async (silent = false) => {
     if (!silent) setStatusLoading(true);
@@ -1013,7 +1003,6 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
               value={primaryProviderIsThreatBook ? THREATBOOK_FREE_PROVIDER_OPTION : primaryProviderId}
               onChange={(event) => handlePrimaryProviderChange(event.target.value)}
               disabled={primaryKeyRevealing || primarySaving}
-              aria-label={t('onboarding.bootstrap.providerLabel')}
               className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-xs transition-all focus:border-red-400 focus:outline-none focus:ring-2 focus:ring-red-400/50"
             >
               {providerOptions.hasThreatBook && (
@@ -1040,7 +1029,6 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
                   setPrimaryModelId(event.target.value);
                   setPrimaryStatus(null);
                 }}
-                aria-label={t('onboarding.bootstrap.modelLabel')}
                 className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-xs transition-all focus:border-red-400 focus:outline-none focus:ring-2 focus:ring-red-400/50"
               >
                 {selectedPrimaryProvider.models.map((model) => (
@@ -1059,7 +1047,6 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
                 setPrimaryStatus(null);
               }}
               placeholder={t('onboarding.bootstrap.thirdPartyModelIdPlaceholder')}
-              aria-label={t('onboarding.bootstrap.modelLabel')}
               className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-xs transition-all placeholder-gray-300 focus:border-red-400 focus:outline-none focus:ring-2 focus:ring-red-400/50"
             />
           ))}
@@ -1073,7 +1060,6 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
                 setPrimaryStatus(null);
               }}
               placeholder={t('onboarding.bootstrap.thirdPartyBaseUrlPlaceholder')}
-              aria-label={t('onboarding.bootstrap.thirdPartyBaseUrlPlaceholder')}
               className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-xs transition-all placeholder-gray-300 focus:border-red-400 focus:outline-none focus:ring-2 focus:ring-red-400/50"
             />
           )}
@@ -1122,7 +1108,7 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
                 rel="noopener noreferrer"
                 className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-amber-300 bg-white px-3 py-2 text-xs font-medium text-amber-700 transition-colors hover:border-amber-400 hover:bg-amber-50"
               >
-                <ExternalLink aria-hidden="true" className="h-3 w-3" />
+                <ExternalLink className="h-3 w-3" />
                 {t('onboarding.bootstrap.modelKeyLink')}
               </a>
             )}
@@ -1285,7 +1271,7 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
               rel="noopener noreferrer"
               className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-amber-300 bg-white px-3 py-2 text-xs font-medium text-amber-700 transition-colors hover:border-amber-400 hover:bg-amber-50"
             >
-              <ExternalLink aria-hidden="true" className="h-3 w-3" />
+              <ExternalLink className="h-3 w-3" />
               {t('onboarding.bootstrap.intelKeyLink')}
             </a>
             <button
@@ -1361,19 +1347,17 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
       };
 
   return (
-    <div className="fixed inset-0 flex items-center justify-center bg-black/40 backdrop-blur-[2px] z-[70]" onClick={(event) => { if (event.target === event.currentTarget && !isBusy && !skipConfirm) onClose(); }}>
-      <div ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby={titleId} tabIndex={-1} data-ui-overlay="dialog" className="relative mx-4 flex max-h-[90vh] w-full max-w-3xl flex-col rounded-2xl bg-white shadow-2xl overflow-hidden">
+    <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/40 backdrop-blur-[2px]">
+      <div className="relative mx-4 flex max-h-[90vh] w-full max-w-3xl flex-col overflow-hidden rounded-2xl bg-white shadow-2xl">
         <div className="relative px-6 pb-4 pt-5">
           <div className="absolute left-0 right-0 top-0 h-1 bg-green-500" />
           <button
             onClick={onClose}
-            aria-label={t('button.close')}
-            disabled={isBusy}
             className="absolute right-4 top-4 rounded-lg p-1 text-gray-300 transition-colors hover:bg-gray-100 hover:text-gray-500"
           >
-            <X aria-hidden="true" className="h-4 w-4" />
+            <X className="h-4 w-4" />
           </button>
-          <h2 id={titleId} className="pr-8 text-lg font-bold text-gray-900">{t('onboarding.title')}</h2>
+          <h2 className="pr-8 text-lg font-bold text-gray-900">{t('onboarding.title')}</h2>
           <div className="mt-5 flex flex-wrap items-center gap-3">
             <StepPill
               active={step === 'model'}
@@ -1432,7 +1416,7 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
                   <span className="h-4 w-4 animate-spin rounded-full border-2 border-white/40 border-t-white" />
                 )}
                 {footerPrimaryAction.label}
-                {!starting && <ArrowRight aria-hidden="true" className="h-4 w-4" />}
+                {!starting && <ArrowRight className="h-4 w-4" />}
               </button>
             </div>
           </div>

@@ -4,7 +4,6 @@ import { useAuth } from '@/contexts/AuthContext';
 import PasswordInput from '@/components/common/PasswordInput';
 import AuthLayout from '@/components/layout/AuthLayout';
 import { useProductName } from '@/contexts/ProductNameContext';
-import { XCircle } from 'lucide-react';
 
 export default function LoginPage() {
   const { t } = useTranslation('auth');
@@ -44,9 +43,8 @@ export default function LoginPage() {
           <p className="text-sm text-gray-500 mt-1 dark:text-[#b8c2cc]">{t('login.description', { productName })}</p>
         </div>
         <div>
-          <label htmlFor="login-username" className="text-sm text-gray-700 block mb-1 dark:text-[#d7dee8]">{t('fields.username')}</label>
+          <label className="text-sm text-gray-700 block mb-1 dark:text-[#d7dee8]">{t('fields.username')}</label>
           <input
-            id="login-username"
             value={username}
             onChange={(e) => setUsername(e.target.value)}
             className="w-full border border-gray-300 rounded-lg px-3 py-2 outline-none focus:border-blue-500 dark:border-[#4a5563] dark:bg-[#252c35] dark:text-[#d7dee8] dark:placeholder:text-[#9aa7b4] dark:focus:border-[#539bf5]"
@@ -56,9 +54,8 @@ export default function LoginPage() {
           />
         </div>
         <div>
-          <label htmlFor="login-password" className="text-sm text-gray-700 block mb-1 dark:text-[#d7dee8]">{t('fields.password')}</label>
+          <label className="text-sm text-gray-700 block mb-1 dark:text-[#d7dee8]">{t('fields.password')}</label>
           <PasswordInput
-            id="login-password"
             value={password}
             onChange={(e) => setPassword(e.target.value)}
             placeholder={t('fields.passwordPlaceholder')}
@@ -67,9 +64,8 @@ export default function LoginPage() {
           />
         </div>
         {error && (
-          <div role="alert" className="text-sm text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2 dark:border-red-400/30 dark:bg-red-500/15 dark:text-red-200">
-            <XCircle aria-hidden="true" className="mt-0.5 h-4 w-4 shrink-0" />
-            <span>{error}</span>
+          <div className="text-sm text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2 dark:border-red-400/30 dark:bg-red-500/15 dark:text-red-200">
+            {error}
           </div>
         )}
         <button

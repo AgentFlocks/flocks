@@ -1,20 +1,20 @@
 import {
-  AlertCircle,
-  BarChart3,
-  BookOpen,
   Bot,
-  CalendarClock,
+  Zap,
+  Sparkles,
+  Github,
   ChevronDown,
   ChevronRight,
+  Workflow,
+  MessageSquare,
+  BarChart3,
+  AlertCircle,
+  CalendarClock,
+  Wrench,
+  BookOpen,
   Cpu,
-  Github,
   LayoutDashboard,
   Loader2,
-  MessageSquare,
-  Sparkles,
-  Workflow,
-  Wrench,
-  Zap,
 } from 'lucide-react';
 import { useCallback, useState } from 'react';
 import type { ReactNode } from 'react';
@@ -118,20 +118,15 @@ export default function Home() {
   return (
     <div className="max-w-7xl mx-auto">
       {/* Hero Section */}
-      {/* No overflow-hidden on the card itself: the repository dropdown below
-          opens past the card's bottom edge on narrow viewports (the buttons wrap
-          onto extra rows) and would otherwise be clipped. Only the decorative
-          glows need clipping, so they get their own clipped layer. */}
-      <div className="relative rounded-2xl bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 px-6 lg:px-12 py-8 mb-10">
-        <div aria-hidden="true" className="pointer-events-none absolute inset-0 overflow-hidden rounded-2xl">
-          <div className="absolute top-0 left-0 w-72 h-72 bg-red-600/10 rounded-full blur-3xl -translate-x-1/2 -translate-y-1/2"></div>
-          <div className="absolute bottom-0 right-0 w-96 h-96 bg-red-600/5 rounded-full blur-3xl translate-x-1/3 translate-y-1/3"></div>
-        </div>
+      <div className="relative overflow-hidden rounded-2xl bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 px-6 lg:px-12 py-8 mb-10">
+        {/* Subtle red glow accent */}
+        <div className="absolute top-0 left-0 w-72 h-72 bg-red-600/10 rounded-full blur-3xl -translate-x-1/2 -translate-y-1/2"></div>
+        <div className="absolute bottom-0 right-0 w-96 h-96 bg-red-600/5 rounded-full blur-3xl translate-x-1/3 translate-y-1/3"></div>
 
         <div className="relative z-10 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-6">
           <div className="flex-1 min-w-0">
             <div className="inline-flex items-center px-3 py-1.5 bg-white/10 text-slate-300 rounded-full text-xs font-medium mb-4 border border-white/10">
-              <Sparkles aria-hidden="true" className="w-3.5 h-3.5 mr-1.5 text-red-400" />
+              <Sparkles className="w-3.5 h-3.5 mr-1.5 text-red-400" />
               {t('badge')}
             </div>
 
@@ -156,7 +151,7 @@ export default function Home() {
               className="inline-flex items-center px-6 py-2.5 bg-red-600 text-white rounded-lg font-semibold hover:bg-red-500 transition-colors shadow-lg shadow-red-900/40"
             >
               {t('getStarted')}
-              <ChevronRight aria-hidden="true" className="ml-1.5 w-4 h-4" />
+              <ChevronRight className="ml-1.5 w-4 h-4" />
             </button>
 
             {canCreateWebUIContractPage ? (
@@ -167,9 +162,9 @@ export default function Home() {
                 className="inline-flex items-center px-6 py-2.5 bg-white/10 text-slate-100 rounded-lg font-semibold hover:bg-white/15 transition-colors border border-red-500/40 disabled:opacity-60 disabled:cursor-not-allowed"
               >
                 {creatingWebUIContractPageSession ? (
-                  <Loader2 aria-hidden="true" className="mr-2 w-4 h-4 animate-spin" />
+                  <Loader2 className="mr-2 w-4 h-4 animate-spin" />
                 ) : (
-                  <LayoutDashboard aria-hidden="true" className="mr-2 w-4 h-4 text-red-300" />
+                  <LayoutDashboard className="mr-2 w-4 h-4 text-red-300" />
                 )}
                 {t('createWebUIContractPage')}
               </button>
@@ -181,20 +176,20 @@ export default function Home() {
                 onClick={() => setIsRepoMenuOpen((open) => !open)}
                 className="inline-flex items-center px-6 py-2.5 bg-white/10 text-slate-200 rounded-lg font-semibold hover:bg-white/15 transition-colors border border-white/10"
               >
-                <Github aria-hidden="true" className="mr-2 w-4 h-4" />
+                <Github className="mr-2 w-4 h-4" />
                 {t('openSource')}
-                <ChevronDown aria-hidden="true" className="ml-2 w-4 h-4" />
+                <ChevronDown className="ml-2 w-4 h-4" />
               </button>
 
               {isRepoMenuOpen ? (
-                <div className="absolute right-0 mt-2 rounded-lg border border-white/10 bg-slate-900/95 shadow-xl backdrop-blur z-20 min-w-52 overflow-hidden">
+                <div className="absolute right-0 mt-2 min-w-52 overflow-hidden rounded-lg border border-white/10 bg-slate-900/95 shadow-xl backdrop-blur">
                   <a
                     href={GITHUB_URL}
                     target="_blank"
                     rel="noopener noreferrer"
                     className="flex items-center px-4 py-3 text-sm text-slate-200 hover:bg-white/10 transition-colors"
                   >
-                    <Github aria-hidden="true" className="mr-2 w-4 h-4" />
+                    <Github className="mr-2 w-4 h-4" />
                     GitHub
                   </a>
                   <a
@@ -224,8 +219,8 @@ export default function Home() {
           state={{ skipLastSelectedSessionRestore: true }}
           className="group flex items-center gap-4 bg-white p-5 rounded-xl border border-gray-100 hover:border-sky-200 hover:shadow-md hover:shadow-sky-50 transition-all duration-200"
         >
-          <div className="w-11 h-11 bg-sky-50 rounded-xl flex items-center justify-center group-hover:bg-sky-100 transition-colors flex-shrink-0">
-            <MessageSquare aria-hidden="true" className="w-5 h-5 text-sky-500" />
+          <div className="w-11 h-11 bg-sky-50 rounded-xl flex items-center justify-center flex-shrink-0 group-hover:bg-sky-100 transition-colors">
+            <MessageSquare className="w-5 h-5 text-sky-500" />
           </div>
           <div className="flex-1 min-w-0">
             <h3 className="text-sm font-semibold text-gray-900">
@@ -235,15 +230,15 @@ export default function Home() {
               {t('quickActions.sessions.description')}
             </p>
           </div>
-          <ChevronRight aria-hidden="true" className="w-4 h-4 text-gray-300 group-hover:text-sky-400 transition-colors flex-shrink-0" />
+          <ChevronRight className="w-4 h-4 text-gray-300 group-hover:text-sky-400 flex-shrink-0 transition-colors" />
         </Link>
 
         <Link
           to="/workflows"
           className="group flex items-center gap-4 bg-white p-5 rounded-xl border border-gray-100 hover:border-violet-200 hover:shadow-md hover:shadow-violet-50 transition-all duration-200"
         >
-          <div className="w-11 h-11 bg-violet-50 rounded-xl flex items-center justify-center group-hover:bg-violet-100 transition-colors flex-shrink-0">
-            <Workflow aria-hidden="true" className="w-5 h-5 text-violet-500" />
+          <div className="w-11 h-11 bg-violet-50 rounded-xl flex items-center justify-center flex-shrink-0 group-hover:bg-violet-100 transition-colors">
+            <Workflow className="w-5 h-5 text-violet-500" />
           </div>
           <div className="flex-1 min-w-0">
             <h3 className="text-sm font-semibold text-gray-900">
@@ -253,15 +248,15 @@ export default function Home() {
               {t('quickActions.workflows.description')}
             </p>
           </div>
-          <ChevronRight aria-hidden="true" className="w-4 h-4 text-gray-300 group-hover:text-violet-400 transition-colors flex-shrink-0" />
+          <ChevronRight className="w-4 h-4 text-gray-300 group-hover:text-violet-400 flex-shrink-0 transition-colors" />
         </Link>
 
         <Link
           to="/agents"
           className="group flex items-center gap-4 bg-white p-5 rounded-xl border border-gray-100 hover:border-emerald-200 hover:shadow-md hover:shadow-emerald-50 transition-all duration-200"
         >
-          <div className="w-11 h-11 bg-emerald-50 rounded-xl flex items-center justify-center group-hover:bg-emerald-100 transition-colors flex-shrink-0">
-            <Bot aria-hidden="true" className="w-5 h-5 text-emerald-500" />
+          <div className="w-11 h-11 bg-emerald-50 rounded-xl flex items-center justify-center flex-shrink-0 group-hover:bg-emerald-100 transition-colors">
+            <Bot className="w-5 h-5 text-emerald-500" />
           </div>
           <div className="flex-1 min-w-0">
             <h3 className="text-sm font-semibold text-gray-900">
@@ -271,7 +266,7 @@ export default function Home() {
               {t('quickActions.agents.description')}
             </p>
           </div>
-          <ChevronRight aria-hidden="true" className="w-4 h-4 text-gray-300 group-hover:text-emerald-400 transition-colors flex-shrink-0" />
+          <ChevronRight className="w-4 h-4 text-gray-300 group-hover:text-emerald-400 flex-shrink-0 transition-colors" />
         </Link>
       </div>
 
@@ -284,7 +279,7 @@ export default function Home() {
         <>
           {error && (
             <div className="bg-red-50 border border-red-200 rounded-xl p-4 mb-6 flex items-center gap-3">
-              <AlertCircle aria-hidden="true" className="w-5 h-5 text-red-500 shrink-0" />
+              <AlertCircle className="w-5 h-5 text-red-500 shrink-0" />
               <div>
                 <span className="text-sm font-medium text-red-900">
                   {t('stats.abnormal')}
@@ -295,11 +290,11 @@ export default function Home() {
               </div>
             </div>
           )}
-          <div className="grid gap-6 grid-cols-2 md:grid-cols-4">
+          <div className="grid md:grid-cols-4 gap-6">
             <StatCard
               title={t('stats.agentCount')}
               value={stats?.agents.total ?? 0}
-              icon={<Bot aria-hidden="true" className="w-5 h-5 text-purple-500" />}
+              icon={<Bot className="w-5 h-5 text-purple-500" />}
               to="/agents"
               interactiveClassName="hover:border-purple-200 hover:shadow-purple-50 focus-visible:ring-purple-500"
             />
@@ -307,7 +302,7 @@ export default function Home() {
             <StatCard
               title={t('stats.workflowCount')}
               value={stats?.workflows.total ?? 0}
-              icon={<Workflow aria-hidden="true" className="w-5 h-5 text-teal-500" />}
+              icon={<Workflow className="w-5 h-5 text-teal-500" />}
               to="/workflows"
               interactiveClassName="hover:border-teal-200 hover:shadow-teal-50 focus-visible:ring-teal-500"
             />
@@ -315,7 +310,7 @@ export default function Home() {
             <StatCard
               title={t('stats.skillCount')}
               value={stats?.skills.total ?? 0}
-              icon={<BookOpen aria-hidden="true" className="w-5 h-5 text-green-500" />}
+              icon={<BookOpen className="w-5 h-5 text-green-500" />}
               to="/skills"
               interactiveClassName="hover:border-green-200 hover:shadow-green-50 focus-visible:ring-green-500"
             />
@@ -323,7 +318,7 @@ export default function Home() {
             <StatCard
               title={t('stats.toolCount')}
               value={stats?.tools.total ?? 0}
-              icon={<Wrench aria-hidden="true" className="w-5 h-5 text-orange-500" />}
+              icon={<Wrench className="w-5 h-5 text-orange-500" />}
               to="/tools"
               interactiveClassName="hover:border-orange-200 hover:shadow-orange-50 focus-visible:ring-orange-500"
             />
@@ -331,7 +326,7 @@ export default function Home() {
             <StatCard
               title={t('stats.weeklyTasks')}
               value={stats?.tasks.week ?? 0}
-              icon={<Zap aria-hidden="true" className="w-5 h-5 text-amber-500" />}
+              icon={<Zap className="w-5 h-5 text-amber-500" />}
               to="/tasks"
               interactiveClassName="hover:border-amber-200 hover:shadow-amber-50 focus-visible:ring-amber-500"
             />
@@ -339,7 +334,7 @@ export default function Home() {
             <StatCard
               title={t('stats.activeScheduled')}
               value={stats?.tasks.scheduledActive ?? 0}
-              icon={<CalendarClock aria-hidden="true" className="w-5 h-5 text-violet-500" />}
+              icon={<CalendarClock className="w-5 h-5 text-violet-500" />}
               to="/tasks"
               interactiveClassName="hover:border-violet-200 hover:shadow-violet-50 focus-visible:ring-violet-500"
             />
@@ -347,7 +342,7 @@ export default function Home() {
             <StatCard
               title={t('stats.modelCount')}
               value={stats?.models.total ?? 0}
-              icon={<Cpu aria-hidden="true" className="w-5 h-5 text-pink-500" />}
+              icon={<Cpu className="w-5 h-5 text-pink-500" />}
               to="/models"
               interactiveClassName="hover:border-pink-200 hover:shadow-pink-50 focus-visible:ring-pink-500"
             />
@@ -365,7 +360,7 @@ export default function Home() {
                   : 'text-red-600'
               }
               icon={
-                <BarChart3 aria-hidden="true"
+                <BarChart3
                   className={`w-5 h-5 ${
                     stats?.system.status === 'healthy'
                       ? 'text-green-500'

@@ -1,44 +1,45 @@
-import { pageActionLabel } from '../pageActionLabel';
-import PageDialog from '../PageDialog';
 import { useState, useMemo, useEffect, useCallback, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
-  Activity,
-  AlertTriangle,
-  ArrowDown,
-  ArrowUp,
+  Wrench,
+  Search,
+  RefreshCw,
+  TestTube,
+  Grid,
+  Database,
+  Cloud,
+  X,
   CheckCircle,
+  XCircle,
   ChevronLeft,
   ChevronRight,
-  Clock,
-  Cloud,
-  Code,
-  Database,
-  Download,
-  ExternalLink,
-  Eye,
-  EyeOff,
-  FileText,
-  Filter,
-  Grid,
-  Info,
+  AlertTriangle,
   Play,
-  Plus,
+  Info,
   Power,
   PowerOff,
-  RefreshCw,
-  Save,
-  Search,
+  FileText,
+  ChevronDown,
+  ChevronUp,
   Server,
+  ArrowUp,
+  ArrowDown,
+  Filter,
   Settings,
+  Activity,
+  Clock,
   Shield,
-  Star,
-  TestTube,
-  Trash2,
-  Wrench,
-  X,
-  XCircle,
   Zap,
+  Plus,
+  Code,
+  Download,
+  Star,
+  ExternalLink,
+  Tag,
+  Trash2,
+  Eye,
+  EyeOff,
+  Save,
 } from 'lucide-react';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
 import { useDelayedVisible } from '@/hooks/useDelayedVisible';
@@ -86,7 +87,7 @@ interface TabConfig {
   icon: React.ReactNode;
 }
 
-/** Tool source categories use data or neutral accents; connection status is separate. */
+/** 类别 badge (source) - preserve existing Tool page colors while fixing device label rendering */
 const SOURCE_BADGE: Record<string, { className: string }> = {
   mcp: { className: 'bg-slate-100 text-slate-800' },
   api: { className: 'bg-purple-100 text-purple-800' },
@@ -122,7 +123,7 @@ const SOURCE_SORT_ORDER: Record<string, number> = {
 const PAGE_SIZE = TOOL_PAGE_SIZE;
 
 /** MCP/API 服务器详情抽屉宽度（px） */
-const DETAIL_DRAWER_WIDTH = 480;
+const DETAIL_DRAWER_WIDTH = 560;
 /** MCP 工具详情面板宽度（px），叠加在抽屉左侧 */
 const TOOL_PANEL_WIDTH = 720;
 
@@ -170,10 +171,10 @@ export default function ToolPage() {
   const toast = useToast();
 
   const TABS: TabConfig[] = [
-    { key: 'all', label: t('tabs.all'), icon: <Grid aria-hidden="true" className="w-5 h-5" /> },
-    { key: 'mcp', label: t('tabs.mcp'), icon: <Database aria-hidden="true" className="w-5 h-5" /> },
-    { key: 'api', label: t('tabs.api'), icon: <Cloud aria-hidden="true" className="w-5 h-5" /> },
-    { key: 'local', label: t('tabs.local'), icon: <Code aria-hidden="true" className="w-5 h-5" /> },
+    { key: 'all', label: t('tabs.all'), icon: <Grid className="w-5 h-5" /> },
+    { key: 'mcp', label: t('tabs.mcp'), icon: <Database className="w-5 h-5" /> },
+    { key: 'api', label: t('tabs.api'), icon: <Cloud className="w-5 h-5" /> },
+    { key: 'local', label: t('tabs.local'), icon: <Code className="w-5 h-5" /> },
   ];
 
   const [activeTab, setActiveTab] = useState<TabKey>(DEFAULT_TOOL_TAB);
@@ -603,22 +604,22 @@ export default function ToolPage() {
 
   return (
     <div className="min-w-0 space-y-6" aria-busy={loading}>
-      {/* Page Header — wraps on narrow viewports instead of squeezing the title */}
-      <div className="flex items-center justify-between flex-wrap">
-        <div className="flex items-center gap-3 min-w-0">
-          <div className="text-red-600 shrink-0">
-            <Wrench aria-hidden="true" className="w-8 h-8" />
+      {/* Page Header */}
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-3">
+          <div className="text-red-600">
+            <Wrench className="w-8 h-8" />
           </div>
-          <div className="min-w-0">
-            <h1 className="text-2xl font-bold text-gray-900 whitespace-nowrap">{t('pageTitle')}</h1>
-          <p className="mt-1 text-sm text-gray-500 whitespace-nowrap">
+          <div>
+            <h1 className="text-2xl font-bold text-gray-900">{t('pageTitle')}</h1>
+          <p className="mt-1 text-sm text-gray-500">
             <span className="font-semibold text-gray-700">{enabledSummary.active}</span> {t('statusBadge.active')}
             <span className="mx-1.5 text-gray-300">·</span>
             <span className="font-semibold text-gray-700">{enabledSummary.inactive}</span> {t('statusBadge.inactive')}
           </p>
           </div>
         </div>
-        <div className="flex items-center gap-2 flex-wrap">
+        <div className="flex items-center gap-2">
           <PluginViewToggle value={viewMode} onChange={setViewMode} />
           <button
             onClick={handleRefresh}
@@ -630,27 +631,27 @@ export default function ToolPage() {
                 : 'border-gray-300 text-gray-700 bg-white hover:bg-gray-50 disabled:opacity-50'
             }`}
           >
-            <RefreshCw aria-hidden="true" className={`w-4 h-4 ${refreshing ? 'animate-spin' : ''}`} />
+            <RefreshCw className={`w-4 h-4 ${refreshing ? 'animate-spin' : ''}`} />
           </button>
           <button
             onClick={() => setShowMCPSheet(true)}
             className="inline-flex items-center px-4 py-2 border border-gray-300 rounded-lg text-sm font-medium text-gray-700 bg-white hover:bg-gray-50 transition-colors"
           >
-            <Database aria-hidden="true" className="w-4 h-4 mr-1.5" />
+            <Database className="w-4 h-4 mr-1.5" />
             {t('button.addMCP')}
           </button>
           <button
             onClick={() => setShowAPISheet(true)}
             className="inline-flex items-center px-4 py-2 border border-gray-300 rounded-lg text-sm font-medium text-gray-700 bg-white hover:bg-gray-50 transition-colors"
           >
-            <Cloud aria-hidden="true" className="w-4 h-4 mr-1.5" />
+            <Cloud className="w-4 h-4 mr-1.5" />
             {t('button.addAPI')}
           </button>
           <button
             onClick={() => setShowGenerateSheet(true)}
             className="inline-flex items-center px-4 py-2 border border-transparent rounded-lg text-sm font-medium text-white bg-red-600 hover:bg-red-700 transition-colors shadow-sm"
           >
-            <Plus aria-hidden="true" className="w-4 h-4 mr-1.5" />
+            <Plus className="w-4 h-4 mr-1.5" />
             {t('button.createTool')}
           </button>
         </div>
@@ -658,13 +659,13 @@ export default function ToolPage() {
 
       {/* Tabs row with search */}
       <div className="border-b border-gray-200">
-        <div className="flex min-h-14 flex-wrap items-center justify-between gap-x-4 gap-y-2">
-          <nav className="-mb-px flex space-x-8 max-w-full overflow-x-auto">
+        <div className="flex min-h-14 items-center justify-between">
+          <nav className="-mb-px flex space-x-8">
             {TABS.map((tab) => (
               <button
                 key={tab.key}
                 onClick={() => handleTabChange(tab.key)}
-                className={`h-14 px-1 border-b-2 font-medium text-sm transition-colors whitespace-nowrap ${
+                className={`h-14 px-1 border-b-2 font-medium text-sm whitespace-nowrap transition-colors ${
                   activeTab === tab.key
                     ? 'border-slate-600 text-slate-800'
                     : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
@@ -675,7 +676,7 @@ export default function ToolPage() {
                     {tab.icon}
                   </span>
                   <span className="ml-2">{tab.label}</span>
-                  <span className="ml-2 inline-flex justify-center rounded-full bg-gray-100 px-2.5 py-0.5 text-xs font-medium tabular-nums text-gray-900 min-w-10">
+                  <span className="ml-2 inline-flex min-w-10 justify-center rounded-full bg-gray-100 px-2.5 py-0.5 text-xs font-medium tabular-nums text-gray-900">
                     {tabCounts[tab.key] || 0}
                   </span>
                 </div>
@@ -684,14 +685,14 @@ export default function ToolPage() {
           </nav>
 
           {/* Query controls stay on the left; native actions remain above on the right. */}
-          <div className="relative mb-px order-first w-full sm:w-auto">
-            <Search aria-hidden="true" className="absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-gray-400" />
+          <div className="relative mb-px order-first">
+            <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-gray-400" />
             <input
               type="text"
               placeholder={t('search.placeholder')}
               value={searchQuery}
               onChange={(e) => handleSearchChange(e.target.value)}
-              className="pl-9 pr-4 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-400 focus:border-transparent bg-white w-full sm:w-64"
+              className="w-64 pl-9 pr-4 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-400 focus:border-transparent bg-white"
             />
           </div>
         </div>
@@ -754,13 +755,13 @@ export default function ToolPage() {
             viewMode={viewMode}
           />
         ) : isTabPageLoading ? (
-          <div className="flex items-center justify-center rounded-lg border border-gray-200 bg-white min-h-[420px]">
+          <div className="flex min-h-[420px] items-center justify-center rounded-lg border border-gray-200 bg-white">
             <LoadingSpinner delayMs={180} />
           </div>
         ) : activeTab === 'local' ? (
           <div className="flex flex-col gap-4 md:flex-row">
             {toolGroupNav}
-          <div className="flex-1 rounded-lg border border-gray-200 bg-white min-w-0 overflow-x-auto">
+          <div className="min-w-0 flex-1 overflow-hidden rounded-lg border border-gray-200 bg-white">
             <LocalTabContent
               tools={processedTools}
               searchQuery={searchQuery}
@@ -796,7 +797,7 @@ export default function ToolPage() {
                       onClick={() => handleTabChange('mcp')}
                       className="flex items-center gap-1 text-slate-700 hover:text-slate-900 font-medium"
                     >
-                      MCP <ChevronRight aria-hidden="true" className="w-4 h-4" />
+                      MCP <ChevronRight className="w-4 h-4" />
                     </button>
                   )}
                   {apiCatalogEntries.length > 0 && (
@@ -804,7 +805,7 @@ export default function ToolPage() {
                       onClick={() => handleTabChange('api')}
                       className="flex items-center gap-1 text-purple-600 hover:text-purple-700 font-medium"
                     >
-                      API <ChevronRight aria-hidden="true" className="w-4 h-4" />
+                      API <ChevronRight className="w-4 h-4" />
                     </button>
                   )}
                 </div>
@@ -812,9 +813,9 @@ export default function ToolPage() {
             )}
             {totalTools === 0 ? (
               <EmptyState
-                icon={<Wrench aria-hidden="true" className="w-16 h-16" />}
-                title={searchQuery ? t('empty.noMatchingTools') : t('empty.noTools')}
-                description={searchQuery ? t('empty.adjustFilter') : t('empty.noToolsInCategory')}
+                icon={<Wrench className="w-16 h-16" />}
+                title={t('empty.noTools')}
+                description={searchQuery ? t('empty.tryOtherKeywords') : t('empty.noToolsInCategory')}
               />
             ) : (
               <ToolTable
@@ -979,18 +980,18 @@ function SortFilterHeader({
           className={`flex items-center gap-0.5 hover:text-gray-900 transition-colors ${isActive ? 'text-slate-700' : ''}`}
         >
           {label}
-          {isActive && (sort.dir === 'asc' ? <ArrowUp aria-hidden="true" className="w-3 h-3" /> : <ArrowDown aria-hidden="true" className="w-3 h-3" />)}
+          {isActive && (sort.dir === 'asc' ? <ArrowUp className="w-3 h-3" /> : <ArrowDown className="w-3 h-3" />)}
         </button>
-        <button aria-label={pageActionLabel('filter')}
+        <button
           onClick={() => setOpen((v) => !v)}
           className={`p-0.5 rounded hover:bg-gray-200 transition-colors ${hasFilter ? 'text-slate-600' : 'text-gray-400'}`}
         >
-          <Filter aria-hidden="true" className="w-3 h-3" />
+          <Filter className="w-3 h-3" />
         </button>
       </div>
 
       {open && (
-        <div className="absolute left-0 top-full mt-1 bg-white rounded-lg shadow-lg border border-gray-200 py-2 max-h-60 z-20 min-w-[160px] overflow-y-auto">
+        <div className="absolute left-0 top-full mt-1 z-20 bg-white rounded-lg shadow-lg border border-gray-200 py-2 min-w-[160px] max-h-60 overflow-y-auto">
           {hasFilter && (
             <button
               onClick={() => { onClearFilter(field); setOpen(false); }}
@@ -1335,7 +1336,7 @@ function LegacyMCPTabContent({
           onClick={fetchServers}
           className="inline-flex items-center px-3 py-2 text-sm text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 flex-shrink-0"
         >
-          <RefreshCw aria-hidden="true" className="w-4 h-4 mr-1.5" />
+          <RefreshCw className="w-4 h-4 mr-1.5" />
           {t('mcp.refreshStatus')}
         </button>
       </div>
@@ -1343,16 +1344,16 @@ function LegacyMCPTabContent({
       {serversLoading && catalogLoading ? (
         <div className="flex justify-center py-12"><LoadingSpinner /></div>
       ) : userServers.length === 0 && filteredCatalog.length === 0 ? (
-        <EmptyState icon={<Server aria-hidden="true" className="w-16 h-16" />} title={t('mcp.noServers')} description={t('mcp.noServersDesc')} />
+        <EmptyState icon={<Server className="w-16 h-16" />} title={t('mcp.noServers')} description={t('mcp.noServersDesc')} />
       ) : (
-        <div className="grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+        <div className="grid gap-4 grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
           {/* User-added servers (not from catalog) */}
           {userServers.map((server) => {
             const serverTools = toolsByServer[server.name] || [];
             const isSelected = selectedServer === server.name;
             const isActive = server.status === 'connected';
             const isError = server.status === 'error';
-            const borderColor = isActive ? 'var(--status-success)' : isError ? 'var(--status-danger)' : 'var(--border-subtle)';
+            const borderColor = isActive ? '#10B981' : isError ? '#EF4444' : '#9CA3AF';
             return (
               <div
                 key={server.name}
@@ -1360,12 +1361,12 @@ function LegacyMCPTabContent({
                   if (isSelected) { setSelectedServer(null); setSelectedServerData(null); }
                   else { setSelectedServer(server.name); setSelectedServerData(server); }
                 }}
-                className={`relative bg-white rounded-xl border cursor-pointer h-[180px] flex flex-col transition-all duration-150 overflow-hidden ${isSelected ? 'border-slate-400 shadow-md ring-2 ring-slate-200' : 'border-gray-200 shadow-sm hover:shadow-md hover:border-gray-300'}`}
+                className={`relative bg-white rounded-xl border overflow-hidden cursor-pointer h-[180px] flex flex-col transition-all duration-150 ${isSelected ? 'border-slate-400 shadow-md ring-2 ring-slate-200' : 'border-gray-200 shadow-sm hover:shadow-md hover:border-gray-300'}`}
                 style={{ borderLeftWidth: 4, borderLeftColor: borderColor }}
               >
                 <div className="flex-1 px-4 pt-4 pb-2 min-h-0 flex flex-col gap-1.5">
                   <div className="flex items-start gap-1.5 flex-wrap">
-                    <span className="text-sm font-semibold text-gray-900 max-w-[120px] truncate">{server.name}</span>
+                    <span className="text-sm font-semibold text-gray-900 truncate max-w-[120px]">{server.name}</span>
                     <span className={`px-1.5 py-0.5 text-xs font-medium rounded-full shrink-0 ${isActive ? 'bg-green-100 text-green-700' : isError ? 'bg-red-100 text-red-700' : 'bg-gray-100 text-gray-600'}`}>
                       {isActive ? t('statusBadge.active') : isError ? t('statusBadge.error') : t('statusBadge.inactive')}
                     </span>
@@ -1373,13 +1374,13 @@ function LegacyMCPTabContent({
                   </div>
                   {server.url && <p className="text-xs text-gray-500 font-mono truncate">{server.url}</p>}
                   <div className="flex items-center gap-1 text-xs text-gray-500 mt-auto">
-                    <Wrench aria-hidden="true" className="w-3 h-3 shrink-0" /><span>{serverTools.length} {t('mcp.tools')}</span>
+                    <Wrench className="w-3 h-3 shrink-0" /><span>{serverTools.length} {t('mcp.tools')}</span>
                     <span className="mx-1">·</span>
-                    <FileText aria-hidden="true" className="w-3 h-3 shrink-0" /><span>{server.resources?.length || 0} {t('mcp.resources')}</span>
+                    <FileText className="w-3 h-3 shrink-0" /><span>{server.resources?.length || 0} {t('mcp.resources')}</span>
                   </div>
                   {server.connected_at && (
                     <div className="flex items-center gap-1">
-                      <Clock aria-hidden="true" className="w-3 h-3 shrink-0" /><span>{t('mcp.connectedFor', { duration: formatDuration(server.connected_at, t) })}</span>
+                      <Clock className="w-3 h-3 shrink-0" /><span>{t('mcp.connectedFor', { duration: formatDuration(server.connected_at, t) })}</span>
                     </div>
                   )}
                 </div>
@@ -1393,19 +1394,19 @@ function LegacyMCPTabContent({
             const serverStatus = serverObj?.status;
             const isActive = serverStatus === 'connected';
             const isError = serverStatus === 'error';
-            const borderColor = isActive ? 'var(--status-success)' : isError ? 'var(--status-danger)' : 'var(--border-subtle)';
+            const borderColor = isActive ? '#10B981' : isError ? '#EF4444' : '#9CA3AF';
             const isSelected = selectedServer === entry.id;
 
             return (
               <div
                 key={`catalog-${entry.id}`}
                 onClick={() => isActive ? setSelectedServer(isSelected ? null : entry.id) : undefined}
-                className={`relative bg-white rounded-xl border h-[180px] flex flex-col transition-all duration-150 overflow-hidden ${isActive ? 'cursor-pointer' : 'cursor-default'} ${isSelected ? 'border-slate-400 shadow-md ring-2 ring-slate-200' : 'border-gray-200 shadow-sm hover:shadow-md hover:border-gray-300'}`}
+                className={`relative bg-white rounded-xl border overflow-hidden h-[180px] flex flex-col transition-all duration-150 ${isActive ? 'cursor-pointer' : 'cursor-default'} ${isSelected ? 'border-slate-400 shadow-md ring-2 ring-slate-200' : 'border-gray-200 shadow-sm hover:shadow-md hover:border-gray-300'}`}
                 style={{ borderLeftWidth: 4, borderLeftColor: borderColor }}
               >
                 <div className="flex-1 px-4 pt-4 pb-2 min-h-0 flex flex-col gap-1.5">
                   <div className="flex items-start gap-1.5 flex-wrap">
-                    <span className="text-sm font-semibold text-gray-900 max-w-[120px] truncate">{entry.name}</span>
+                    <span className="text-sm font-semibold text-gray-900 truncate max-w-[120px]">{entry.name}</span>
                     <span className={`px-1.5 py-0.5 text-xs font-medium rounded-full shrink-0 ${isActive ? 'bg-green-100 text-green-700' : isError ? 'bg-red-100 text-red-700' : 'bg-gray-100 text-gray-600'}`}>
                       {isActive ? t('statusBadge.active') : isError ? t('statusBadge.error') : t('statusBadge.inactive')}
                     </span>
@@ -1414,10 +1415,10 @@ function LegacyMCPTabContent({
                       <span className="px-1.5 py-0.5 bg-amber-100 text-amber-800 text-xs font-medium rounded-full shrink-0">{t('mcp.recommended')}</span>
                     )}
                   </div>
-                  <p className="text-xs text-gray-500 leading-relaxed line-clamp-2">{getCatalogDescription(entry, i18n.language)}</p>
+                  <p className="text-xs text-gray-500 line-clamp-2 leading-relaxed">{getCatalogDescription(entry, i18n.language)}</p>
                   <div className="flex items-center gap-2 text-xs text-gray-500 mt-auto">
                     <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${LANG_COLORS[entry.language] || 'bg-gray-100 text-gray-600'}`}>{entry.language}</span>
-                    <span className="flex items-center gap-0.5"><Star aria-hidden="true" className="w-3 h-3" />{entry.stars}</span>
+                    <span className="flex items-center gap-0.5"><Star className="w-3 h-3" />{entry.stars}</span>
                   </div>
                 </div>
                 <div className="border-t border-gray-100 px-4 py-2 flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
@@ -1427,10 +1428,10 @@ function LegacyMCPTabContent({
                         onClick={() => setSelectedServer(isSelected ? null : entry.id)}
                         className={`flex-1 flex items-center justify-center gap-1 py-1 px-2 border rounded-lg text-xs font-medium transition-colors ${isSelected ? 'border-slate-300 text-slate-800 bg-slate-50' : 'border-gray-300 text-gray-700 hover:bg-gray-50'}`}
                       >
-                        <Settings aria-hidden="true" className="w-3 h-3" /> {t('mcp.manage')}
+                        <Settings className="w-3 h-3" /> {t('mcp.manage')}
                       </button>
                       <button onClick={(e) => handleDisconnect(entry.id, e)} className="flex items-center justify-center w-7 h-7 border border-gray-300 text-gray-600 rounded-lg hover:bg-gray-100 transition-colors" title={t('mcp.disconnectTitle')}>
-                        <PowerOff aria-hidden="true" className="w-3.5 h-3.5" />
+                        <PowerOff className="w-3.5 h-3.5" />
                       </button>
                     </>
                   ) : (
@@ -1447,7 +1448,7 @@ function LegacyMCPTabContent({
                         disabled={installing === entry.id}
                         className="flex-1 flex items-center justify-center gap-1 py-1 px-2 bg-slate-700 text-white rounded-lg text-xs font-medium hover:bg-slate-800 disabled:opacity-50 transition-colors"
                       >
-                        <Download aria-hidden="true" className="w-3 h-3" />
+                        <Download className="w-3 h-3" />
                         {installing === entry.id ? t('mcp.configuring') : t('button.install')}
                       </button>
                       <a
@@ -1457,7 +1458,7 @@ function LegacyMCPTabContent({
                         className="flex items-center justify-center w-7 h-7 border border-gray-300 text-gray-500 rounded-lg hover:bg-gray-50 transition-colors"
                         title="GitHub"
                       >
-                        <ExternalLink aria-hidden="true" className="w-3.5 h-3.5" />
+                        <ExternalLink className="w-3.5 h-3.5" />
                       </a>
                     </>
                   )}
@@ -1472,7 +1473,7 @@ function LegacyMCPTabContent({
       {credModalEntry && (
         <>
           <div className="fixed inset-0 bg-black/40 z-40" onClick={() => setCredModalEntry(null)} />
-          <PageDialog onClose={() => setCredModalEntry(null)} className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
             <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md" onClick={(e) => e.stopPropagation()}>
               <div className="px-6 py-4 border-b border-gray-200">
                 <h3 className="text-lg font-semibold text-gray-900">{credModalEntry.name}</h3>
@@ -1507,7 +1508,7 @@ function LegacyMCPTabContent({
                 </button>
               </div>
             </div>
-          </PageDialog>
+          </div>
         </>
       )}
 
@@ -1517,7 +1518,7 @@ function LegacyMCPTabContent({
         const catEntry = catalogEntries.find(e => e.id === selectedServer);
         const displayName = catEntry?.name || drawerServer.name;
         return (
-          <PageDialog variant="panels" className="contents" onClose={() => { setSelectedServer(null); setSelectedServerData(null); setSelectedToolFromMCP(null); }}>
+          <>
             <div className="fixed inset-0 bg-black/40 z-40" onClick={() => { setSelectedServer(null); setSelectedServerData(null); setSelectedToolFromMCP(null); }} />
 
             {selectedToolFromMCP && (
@@ -1527,18 +1528,18 @@ function LegacyMCPTabContent({
               />
             )}
 
-            <div data-ui-overlay="drawer" className="fixed right-0 top-0 bottom-0 flex flex-col w-full bg-white shadow-2xl z-50" style={{ maxWidth: DETAIL_DRAWER_WIDTH }} onClick={(e) => e.stopPropagation()}>
-              <div className="border-b border-gray-200 flex-shrink-0">
+            <div className="fixed right-0 top-0 bottom-0 z-50 flex flex-col w-full bg-white shadow-2xl" style={{ maxWidth: DETAIL_DRAWER_WIDTH }} onClick={(e) => e.stopPropagation()}>
+              <div className="flex-shrink-0 border-b border-gray-200">
                 <div className="flex items-center gap-3 px-6 py-4">
                   <div className={`w-10 h-10 rounded-lg flex items-center justify-center flex-shrink-0 ${drawerServer.status === 'connected' ? 'bg-green-50' : drawerServer.status === 'error' || drawerServer.status === 'failed' ? 'bg-red-50' : 'bg-gray-50'}`}>
-                    <Database aria-hidden="true" className={`w-5 h-5 ${drawerServer.status === 'connected' ? 'text-green-600' : drawerServer.status === 'error' || drawerServer.status === 'failed' ? 'text-red-600' : 'text-gray-400'}`} />
+                    <Database className={`w-5 h-5 ${drawerServer.status === 'connected' ? 'text-green-600' : drawerServer.status === 'error' || drawerServer.status === 'failed' ? 'text-red-600' : 'text-gray-400'}`} />
                   </div>
                   <div className="flex-1 min-w-0">
                     <h2 className="text-lg font-semibold text-gray-900">{displayName}</h2>
                     <p className="text-sm text-gray-500">{t('mcp.serverConfig')}</p>
                   </div>
-                  <button aria-label={pageActionLabel('close')} onClick={() => { setSelectedServer(null); setSelectedServerData(null); setSelectedToolFromMCP(null); }} className="text-gray-400 hover:text-gray-600 p-2 rounded-lg hover:bg-gray-100 flex-shrink-0">
-                    <X aria-hidden="true" className="w-5 h-5" />
+                  <button onClick={() => { setSelectedServer(null); setSelectedServerData(null); setSelectedToolFromMCP(null); }} className="text-gray-400 hover:text-gray-600 p-2 rounded-lg hover:bg-gray-100 flex-shrink-0">
+                    <X className="w-5 h-5" />
                   </button>
                 </div>
               </div>
@@ -1548,9 +1549,9 @@ function LegacyMCPTabContent({
                     <p className="text-sm text-gray-600">{getCatalogDescription(catEntry, i18n.language)}</p>
                     <div className="flex items-center gap-3 mt-2 text-xs text-gray-500">
                       <span className={`px-1.5 py-0.5 rounded font-medium ${LANG_COLORS[catEntry.language] || 'bg-gray-100 text-gray-600'}`}>{catEntry.language}</span>
-                      <span className="flex items-center gap-0.5"><Star aria-hidden="true" className="w-3 h-3" />{catEntry.stars}</span>
+                      <span className="flex items-center gap-0.5"><Star className="w-3 h-3" />{catEntry.stars}</span>
                       <a href={`https://github.com/${catEntry.github}`} target="_blank" rel="noopener noreferrer" className="text-sky-700 hover:text-sky-900 flex items-center gap-0.5">
-                        <ExternalLink aria-hidden="true" className="w-3 h-3" /> GitHub
+                        <ExternalLink className="w-3 h-3" /> GitHub
                       </a>
                     </div>
                   </div>
@@ -1566,7 +1567,7 @@ function LegacyMCPTabContent({
                 />
               </div>
             </div>
-          </PageDialog>
+          </>
         );
       })()}
     </div>
@@ -1658,9 +1659,9 @@ function MCPServerDetailPanel({
     <div className="bg-white" onClick={(e) => e.stopPropagation()}>
       <div className="flex items-center border-b border-gray-200 px-5">
         {([
-          { key: 'overview' as const, label: t('detail.tabs.overview'), icon: <Info aria-hidden="true" className="w-3.5 h-3.5" /> },
-          { key: 'tools' as const, label: t('detail.tabs.tools', { count: serverTools.length }), icon: <Wrench aria-hidden="true" className="w-3.5 h-3.5" /> },
-          { key: 'resources' as const, label: t('detail.tabs.resources', { count: serverDetail?.resources?.length || 0 }), icon: <FileText aria-hidden="true" className="w-3.5 h-3.5" /> },
+          { key: 'overview' as const, label: t('detail.tabs.overview'), icon: <Info className="w-3.5 h-3.5" /> },
+          { key: 'tools' as const, label: t('detail.tabs.tools', { count: serverTools.length }), icon: <Wrench className="w-3.5 h-3.5" /> },
+          { key: 'resources' as const, label: t('detail.tabs.resources', { count: serverDetail?.resources?.length || 0 }), icon: <FileText className="w-3.5 h-3.5" /> },
         ]).map((tab) => (
           <button
             key={tab.key}
@@ -1720,7 +1721,7 @@ function MCPServerDetailPanel({
                   title={t('detail.refreshTools')}
                   className="p-1.5 text-gray-400 hover:text-gray-600 hover:bg-gray-200 rounded-md disabled:opacity-40 transition-colors"
                 >
-                  <RefreshCw aria-hidden="true" className={`w-4 h-4 ${refreshing ? 'animate-spin' : ''}`} />
+                  <RefreshCw className={`w-4 h-4 ${refreshing ? 'animate-spin' : ''}`} />
                 </button>
               </div>
               <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2">
@@ -1732,11 +1733,11 @@ function MCPServerDetailPanel({
             <div className="flex items-center justify-end gap-2">
               {server.status === 'connected' ? (
                 <button onClick={onDisconnect} className="inline-flex items-center gap-2 px-4 py-2.5 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 text-sm font-medium transition-colors">
-                  <PowerOff aria-hidden="true" className="w-4 h-4" />{t('detail.disconnectConn')}
+                  <PowerOff className="w-4 h-4" />{t('detail.disconnectConn')}
                 </button>
               ) : (
                 <button onClick={onConnect} className="inline-flex items-center gap-2 px-4 py-2.5 bg-slate-700 text-white rounded-lg hover:bg-slate-800 text-sm font-medium transition-colors">
-                  <Power aria-hidden="true" className="w-4 h-4" />{t('detail.connectConn')}
+                  <Power className="w-4 h-4" />{t('detail.connectConn')}
                 </button>
               )}
               {onRemove && (
@@ -1744,7 +1745,7 @@ function MCPServerDetailPanel({
                   onClick={onRemove}
                   className="inline-flex items-center gap-2 px-4 py-2.5 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 text-sm font-medium transition-colors"
                 >
-                  <Trash2 aria-hidden="true" className="w-4 h-4" />{t('detail.removeServer')}
+                  <Trash2 className="w-4 h-4" />{t('detail.removeServer')}
                 </button>
               )}
             </div>
@@ -1772,7 +1773,7 @@ function MCPServerDetailPanel({
                         <span className="text-sm font-medium text-gray-900 font-mono break-all">{tool.name}</span>
                       </td>
                       <td className="px-4 py-3">
-                        <span className="text-sm text-gray-600 leading-relaxed line-clamp-2">{tool.description}</span>
+                        <span className="text-sm text-gray-600 line-clamp-2 leading-relaxed">{tool.description}</span>
                       </td>
                     </tr>
                   ))}
@@ -1786,7 +1787,7 @@ function MCPServerDetailPanel({
           ) : (
             <div className="bg-white rounded-lg border border-gray-200 overflow-hidden">
               <div className="overflow-x-auto">
-                <table className="divide-y divide-gray-100 table-fixed min-w-full">
+                <table className="min-w-full divide-y divide-gray-100 table-fixed">
                   <thead className="bg-gray-50">
                     <tr>
                       <th className="w-[25%] px-5 py-2.5 text-left text-xs font-medium text-gray-500 uppercase">{t('detail.tableResourceName')}</th>
@@ -1852,14 +1853,14 @@ function MCPToolDetailPanel({ tool, onClose }: { tool: Tool; onClose: () => void
 
   return (
     <div
-      className="fixed top-0 bottom-0 flex flex-col bg-white shadow-2xl border-r border-gray-200 z-50"
+      className="fixed top-0 bottom-0 z-50 flex flex-col bg-white shadow-2xl border-r border-gray-200"
       style={{ right: DETAIL_DRAWER_WIDTH, width: TOOL_PANEL_WIDTH }}
       onClick={(e) => e.stopPropagation()}
     >
-      <div className="border-b border-gray-200 flex-shrink-0">
+      <div className="flex-shrink-0 border-b border-gray-200">
         <div className="flex items-center gap-3 px-6 py-4">
           <div className="w-8 h-8 bg-gray-100 rounded-lg flex items-center justify-center flex-shrink-0">
-            <Wrench aria-hidden="true" className="w-4 h-4 text-gray-600" />
+            <Wrench className="w-4 h-4 text-gray-600" />
           </div>
           <div className="flex-1 min-w-0">
             <h2 className="text-lg font-semibold text-gray-900 font-mono truncate">{tool.name}</h2>
@@ -1867,8 +1868,8 @@ function MCPToolDetailPanel({ tool, onClose }: { tool: Tool; onClose: () => void
               <p className="text-xs text-gray-500 mt-0.5">{tool.source_name}</p>
             )}
           </div>
-          <button aria-label={pageActionLabel('close')} onClick={onClose} className="p-1 rounded hover:bg-gray-100 transition-colors flex-shrink-0">
-            <X aria-hidden="true" className="w-5 h-5 text-gray-400" />
+          <button onClick={onClose} className="flex-shrink-0 p-1 rounded hover:bg-gray-100 transition-colors">
+            <X className="w-5 h-5 text-gray-400" />
           </button>
         </div>
         <div className="flex px-6">
@@ -1882,7 +1883,7 @@ function MCPToolDetailPanel({ tool, onClose }: { tool: Tool; onClose: () => void
                   : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
               }`}
             >
-              {tab === 'info' ? <><Info aria-hidden="true" className="w-3.5 h-3.5" />{t('toolDetail.tabInfo')}</> : <><TestTube aria-hidden="true" className="w-3.5 h-3.5" />{t('toolDetail.tabTest')}</>}
+              {tab === 'info' ? <><Info className="w-3.5 h-3.5" />{t('toolDetail.tabInfo')}</> : <><TestTube className="w-3.5 h-3.5" />{t('toolDetail.tabTest')}</>}
             </button>
           ))}
         </div>
@@ -1901,7 +1902,7 @@ function MCPToolDetailPanel({ tool, onClose }: { tool: Tool; onClose: () => void
                   {t('toolDetail.params', { count: tool.parameters.length })}
                 </label>
                 <div className="rounded-lg border border-gray-200 overflow-hidden">
-                  <table className="divide-y divide-gray-200 min-w-full">
+                  <table className="min-w-full divide-y divide-gray-200">
                     <thead className="bg-gray-50">
                       <tr>
                         <th className="px-4 py-2 text-left text-xs font-medium text-gray-500">{t('toolDetail.paramName')}</th>
@@ -1972,8 +1973,8 @@ function MCPToolDetailPanel({ tool, onClose }: { tool: Tool; onClose: () => void
               className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-slate-700 text-white rounded-lg hover:bg-slate-800 disabled:opacity-50 disabled:cursor-not-allowed font-medium text-sm transition-colors"
             >
               {testing
-                ? <><RefreshCw aria-hidden="true" className="w-4 h-4 animate-spin" />{t('toolDetail.executing')}</>
-                : <><Play aria-hidden="true" className="w-4 h-4" />{t('toolDetail.runTest')}</>}
+                ? <><RefreshCw className="w-4 h-4 animate-spin" />{t('toolDetail.executing')}</>
+                : <><Play className="w-4 h-4" />{t('toolDetail.runTest')}</>}
             </button>
             {!tool.enabled && (
               <p className="text-xs text-amber-600 text-center">{t('toolDetail.disabledNote')}</p>
@@ -1984,13 +1985,13 @@ function MCPToolDetailPanel({ tool, onClose }: { tool: Tool; onClose: () => void
                 <div className={`rounded-lg border p-4 ${testResult.success ? 'bg-green-50 border-green-200' : 'bg-red-50 border-red-200'}`}>
                   <div className="flex items-center mb-2">
                     {testResult.success
-                      ? <CheckCircle aria-hidden="true" className="w-4 h-4 text-green-600 mr-2" />
-                      : <XCircle aria-hidden="true" className="w-4 h-4 text-red-600 mr-2" />}
+                      ? <CheckCircle className="w-4 h-4 text-green-600 mr-2" />
+                      : <XCircle className="w-4 h-4 text-red-600 mr-2" />}
                     <span className={`text-sm font-medium ${testResult.success ? 'text-green-800' : 'text-red-800'}`}>
                       {testResult.success ? t('toolDetail.execSuccess') : t('toolDetail.execFailed')}
                     </span>
                   </div>
-                  <pre className="text-xs max-h-48 text-gray-700 bg-white/60 rounded p-2 overflow-auto whitespace-pre-wrap break-all">
+                  <pre className="text-xs overflow-auto max-h-48 whitespace-pre-wrap break-all text-gray-700 bg-white/60 rounded p-2">
                     {testResult.success
                       ? JSON.stringify(testResult.data, null, 2)
                       : testResult.error}
@@ -2092,7 +2093,7 @@ function MCPCredentialsCard({ serverName }: { serverName: string }) {
     <div className="bg-white rounded-lg border border-gray-200 p-4">
       <div className="flex items-center justify-between mb-3">
         <h4 className="text-sm font-semibold text-gray-900 flex items-center">
-          <Shield aria-hidden="true" className="w-4 h-4 mr-2 text-gray-500" />
+          <Shield className="w-4 h-4 mr-2 text-gray-500" />
           {t('credentials.title')}
         </h4>
         {credentials?.has_credential && !editing && (
@@ -2145,14 +2146,14 @@ function MCPCredentialsCard({ serverName }: { serverName: string }) {
           {testResult && (
             <div className={`p-2.5 rounded text-xs ${
               testResult.success 
-                ? 'bg-green-50 border border-green-200 text-green-700'
+                ? 'bg-green-50 border border-green-200 text-green-700' 
                 : 'bg-red-50 border border-red-200 text-red-700'
             }`}>
               <div className="flex items-start">
                 {testResult.success ? (
-                  <CheckCircle aria-hidden="true" className="w-3.5 h-3.5 mr-1.5 mt-0.5 flex-shrink-0" />
+                  <CheckCircle className="w-3.5 h-3.5 mr-1.5 mt-0.5 flex-shrink-0" />
                 ) : (
-                  <XCircle aria-hidden="true" className="w-3.5 h-3.5 mr-1.5 mt-0.5 flex-shrink-0" />
+                  <XCircle className="w-3.5 h-3.5 mr-1.5 mt-0.5 flex-shrink-0" />
                 )}
                 <div className="flex-1">
                   <div>{testResult.message}</div>
@@ -2198,7 +2199,7 @@ function MCPCredentialsCard({ serverName }: { serverName: string }) {
 
           <div className="p-2 bg-amber-50 border border-amber-200 rounded text-xs text-amber-700">
             <div className="flex items-start">
-              <Info aria-hidden="true" className="w-3.5 h-3.5 mr-1.5 mt-0.5 flex-shrink-0" />
+              <Info className="w-3.5 h-3.5 mr-1.5 mt-0.5 flex-shrink-0" />
               <div>{t('credentials.storageNote')}</div>
             </div>
           </div>
@@ -2436,9 +2437,9 @@ function LegacyAPITabContent({
       </div>
 
       {modules.length === 0 && filteredCatalog.length === 0 ? (
-        <EmptyState icon={<Cloud aria-hidden="true" className="w-16 h-16" />} title={t('api.noTools')} description={t('api.noToolsDesc')} />
+        <EmptyState icon={<Cloud className="w-16 h-16" />} title={t('api.noTools')} description={t('api.noToolsDesc')} />
       ) : (
-        <div className="grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+        <div className="grid gap-4 grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
           {modules.map((moduleName) => {
             const moduleTools = toolsByModule[moduleName];
             const isSelected = selectedModule === moduleName;
@@ -2448,26 +2449,26 @@ function LegacyAPITabContent({
               <div
                 key={moduleName}
                 onClick={() => setSelectedModule(isSelected ? null : moduleName)}
-                className={`relative bg-white rounded-xl border border-l-4 ${borderColor} cursor-pointer h-[180px] flex flex-col transition-all duration-150 overflow-hidden ${isSelected ? 'border-slate-400 shadow-md ring-2 ring-slate-200' : 'border-gray-200 shadow-sm hover:shadow-md hover:border-gray-300'}`}
+                className={`relative bg-white rounded-xl border border-l-4 ${borderColor} overflow-hidden cursor-pointer h-[180px] flex flex-col transition-all duration-150 ${isSelected ? 'border-slate-400 shadow-md ring-2 ring-slate-200' : 'border-gray-200 shadow-sm hover:shadow-md hover:border-gray-300'}`}
               >
                 <div className="flex-1 px-4 pt-4 pb-2 min-h-0 flex flex-col gap-1.5">
                   <div className="flex items-start gap-1.5 flex-wrap">
-                    <span className="text-sm font-semibold text-gray-900 max-w-[120px] capitalize truncate">{moduleName}</span>
-                    <span className="px-1.5 py-0.5 text-xs font-medium rounded-full bg-green-100 text-green-700 shrink-0">
+                    <span className="text-sm font-semibold text-gray-900 truncate max-w-[120px] capitalize">{moduleName}</span>
+                    <span className="px-1.5 py-0.5 text-xs font-medium rounded-full shrink-0 bg-green-100 text-green-700">
                       {t('statusBadge.active')}
                     </span>
                     <span className="px-1.5 py-0.5 bg-purple-100 text-purple-700 text-xs font-medium rounded-full shrink-0">API</span>
                   </div>
                   <div className="flex items-center gap-1 text-xs text-gray-500 mt-auto">
-                    <Wrench aria-hidden="true" className="w-3 h-3 shrink-0" /><span>{moduleTools.length} {t('api.tools')}</span>
+                    <Wrench className="w-3 h-3 shrink-0" /><span>{moduleTools.length} {t('api.tools')}</span>
                     {apiStatuses[moduleName]?.latency_ms != null && (
-                      <span className="text-[10px] text-gray-400 ml-auto">{apiStatuses[moduleName].latency_ms}ms</span>
+                      <span className="ml-auto text-[10px] text-gray-400">{apiStatuses[moduleName].latency_ms}ms</span>
                     )}
                   </div>
                 </div>
                 <div className="border-t border-gray-100 px-4 py-2 flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
                   <button onClick={() => setSelectedModule(isSelected ? null : moduleName)} className={`flex-1 flex items-center justify-center gap-1 py-1 px-2 border rounded-lg text-xs font-medium transition-colors ${isSelected ? 'border-purple-300 text-purple-700 bg-purple-50' : 'border-gray-300 text-gray-700 hover:bg-gray-50'}`}>
-                    <Settings aria-hidden="true" className="w-3 h-3" /> {t('api.manage')}
+                    <Settings className="w-3 h-3" /> {t('api.manage')}
                   </button>
                 </div>
               </div>
@@ -2481,13 +2482,13 @@ function LegacyAPITabContent({
             return (
               <div
                 key={`catalog-${entry.id}`}
-                className={`relative bg-white rounded-xl border cursor-default h-[180px] flex flex-col transition-all duration-150 overflow-hidden ${isSelected ? 'border-slate-400 shadow-md ring-2 ring-slate-200' : 'border-gray-200 shadow-sm'}`}
-                style={{ borderLeftWidth: 4, borderLeftColor: 'var(--border-subtle)' }}
+                className={`relative bg-white rounded-xl border overflow-hidden cursor-default h-[180px] flex flex-col transition-all duration-150 ${isSelected ? 'border-slate-400 shadow-md ring-2 ring-slate-200' : 'border-gray-200 shadow-sm'}`}
+                style={{ borderLeftWidth: 4, borderLeftColor: '#9CA3AF' }}
               >
                 <div className="flex-1 px-4 pt-4 pb-2 min-h-0 flex flex-col gap-1.5">
                   <div className="flex items-start gap-1.5 flex-wrap">
-                    <span className="text-sm font-semibold text-gray-900 max-w-[120px] truncate">{entry.name}</span>
-                    <span className="px-1.5 py-0.5 text-xs font-medium rounded-full bg-gray-100 text-gray-600 shrink-0">
+                    <span className="text-sm font-semibold text-gray-900 truncate max-w-[120px]">{entry.name}</span>
+                    <span className="px-1.5 py-0.5 text-xs font-medium rounded-full shrink-0 bg-gray-100 text-gray-600">
                       {t('statusBadge.inactive')}
                     </span>
                     <span className="px-1.5 py-0.5 bg-purple-100 text-purple-700 text-xs font-medium rounded-full shrink-0">API</span>
@@ -2495,10 +2496,10 @@ function LegacyAPITabContent({
                       <span className="px-1.5 py-0.5 bg-amber-100 text-amber-800 text-xs font-medium rounded-full shrink-0">{t('api.recommended')}</span>
                     )}
                   </div>
-                  <p className="text-xs text-gray-500 leading-relaxed line-clamp-2">{getCatalogDescription(entry, i18n.language)}</p>
+                  <p className="text-xs text-gray-500 line-clamp-2 leading-relaxed">{getCatalogDescription(entry, i18n.language)}</p>
                   <div className="flex items-center gap-2 text-xs text-gray-500 mt-auto">
                     <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${LANG_COLORS[entry.language] || 'bg-gray-100 text-gray-600'}`}>{entry.language}</span>
-                    <span className="flex items-center gap-0.5"><Star aria-hidden="true" className="w-3 h-3" />{entry.stars}</span>
+                    <span className="flex items-center gap-0.5"><Star className="w-3 h-3" />{entry.stars}</span>
                   </div>
                 </div>
                 <div className="border-t border-gray-100 px-4 py-2 flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
@@ -2513,7 +2514,7 @@ function LegacyAPITabContent({
                     disabled={installing === entry.id}
                     className="flex-1 flex items-center justify-center gap-1 py-1 px-2 bg-slate-700 text-white rounded-lg text-xs font-medium hover:bg-slate-800 disabled:opacity-50 transition-colors"
                   >
-                    <Download aria-hidden="true" className="w-3 h-3" />
+                    <Download className="w-3 h-3" />
                     {installing === entry.id ? t('api.configuring') : t('button.install')}
                   </button>
                   <a
@@ -2523,7 +2524,7 @@ function LegacyAPITabContent({
                     className="flex items-center justify-center w-7 h-7 border border-gray-300 text-gray-500 rounded-lg hover:bg-gray-50 transition-colors"
                     title="GitHub"
                   >
-                    <ExternalLink aria-hidden="true" className="w-3.5 h-3.5" />
+                    <ExternalLink className="w-3.5 h-3.5" />
                   </a>
                 </div>
               </div>
@@ -2536,7 +2537,7 @@ function LegacyAPITabContent({
       {credModalEntry && (
         <>
           <div className="fixed inset-0 bg-black/40 z-40" onClick={() => setCredModalEntry(null)} />
-          <PageDialog onClose={() => setCredModalEntry(null)} className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
             <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md" onClick={(e) => e.stopPropagation()}>
               <div className="px-6 py-4 border-b border-gray-200">
                 <h3 className="text-lg font-semibold text-gray-900">{credModalEntry.name}</h3>
@@ -2568,7 +2569,7 @@ function LegacyAPITabContent({
                 </button>
               </div>
             </div>
-          </PageDialog>
+          </div>
         </>
       )}
 
@@ -2578,20 +2579,20 @@ function LegacyAPITabContent({
         const displayName = catalogEntry?.name || selectedModule;
         const isCatalogOnly = !!catalogEntry && !modules.includes(selectedModule);
         return (
-          <PageDialog variant="panels" className="contents" onClose={() => setSelectedModule(null)}>
+          <>
             <div className="fixed inset-0 bg-black/40 z-40" onClick={() => setSelectedModule(null)} />
-            <div data-ui-overlay="drawer" className="fixed right-0 top-0 bottom-0 flex flex-col w-full bg-white shadow-2xl z-50" style={{ maxWidth: DETAIL_DRAWER_WIDTH }} onClick={(e) => e.stopPropagation()}>
-              <div className="border-b border-gray-200 flex-shrink-0">
+            <div className="fixed right-0 top-0 bottom-0 z-50 flex flex-col w-full bg-white shadow-2xl" style={{ maxWidth: DETAIL_DRAWER_WIDTH }} onClick={(e) => e.stopPropagation()}>
+              <div className="flex-shrink-0 border-b border-gray-200">
                 <div className="flex items-center gap-3 px-6 py-4">
-                  <div className="w-10 h-10 rounded-lg flex items-center justify-center bg-purple-50 flex-shrink-0">
-                    <Cloud aria-hidden="true" className="w-5 h-5 text-purple-600" />
+                  <div className="w-10 h-10 rounded-lg flex items-center justify-center flex-shrink-0 bg-purple-50">
+                    <Cloud className="w-5 h-5 text-purple-600" />
                   </div>
                   <div className="flex-1 min-w-0">
                     <h2 className="text-lg font-semibold text-gray-900">{displayName}</h2>
                     <p className="text-sm text-gray-500">{t('api.serviceConfig')}</p>
                   </div>
-                  <button aria-label={pageActionLabel('close')} onClick={() => setSelectedModule(null)} className="text-gray-400 hover:text-gray-600 p-2 rounded-lg hover:bg-gray-100 flex-shrink-0">
-                    <X aria-hidden="true" className="w-5 h-5" />
+                  <button onClick={() => setSelectedModule(null)} className="text-gray-400 hover:text-gray-600 p-2 rounded-lg hover:bg-gray-100 flex-shrink-0">
+                    <X className="w-5 h-5" />
                   </button>
                 </div>
               </div>
@@ -2619,7 +2620,7 @@ function LegacyAPITabContent({
                 )}
               </div>
             </div>
-          </PageDialog>
+          </>
         );
       })()}
     </div>
@@ -2682,7 +2683,7 @@ function CatalogAPIDetailPanel({
           <div className="space-y-5">
             <div className="bg-white rounded-lg border border-gray-200 p-4">
               <h4 className="text-sm font-semibold text-gray-900 mb-3 flex items-center">
-                <Activity aria-hidden="true" className="w-4 h-4 mr-2 text-purple-500" />
+                <Activity className="w-4 h-4 mr-2 text-purple-500" />
                 {t('serviceInfo.title')}
               </h4>
               <div className="space-y-3">
@@ -2724,7 +2725,7 @@ function CatalogAPIDetailPanel({
           <div className="space-y-5">
             <div className="bg-white rounded-lg border border-gray-200 p-4">
               <h4 className="text-sm font-semibold text-gray-900 mb-3 flex items-center">
-                <Zap aria-hidden="true" className="w-4 h-4 mr-2 text-amber-500" />
+                <Zap className="w-4 h-4 mr-2 text-amber-500" />
                 {t('detail.quickActions')}
               </h4>
               <div className="space-y-2.5">
@@ -2736,16 +2737,16 @@ function CatalogAPIDetailPanel({
                   }`}
                 >
                   {testing ? (
-                    <><RefreshCw aria-hidden="true" className="w-4 h-4 animate-spin" />{t('button.testing')}</>
+                    <><RefreshCw className="w-4 h-4 animate-spin" />{t('button.testing')}</>
                   ) : (
-                    <><Activity aria-hidden="true" className="w-4 h-4" />{t('button.testConnectivity')}</>
+                    <><Activity className="w-4 h-4" />{t('button.testConnectivity')}</>
                   )}
                 </button>
                 <button
                   onClick={handleConnect}
                   className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-slate-700 text-white rounded-lg text-sm font-medium hover:bg-slate-800 transition-colors"
                 >
-                  <Power aria-hidden="true" className="w-4 h-4" />{t('detail.connectConn')}
+                  <Power className="w-4 h-4" />{t('detail.connectConn')}
                 </button>
               </div>
             </div>
@@ -2774,9 +2775,9 @@ function CatalogAPIDetailPanel({
               <div className={`p-3 rounded-lg border ${testResult.success ? 'bg-green-50 border-green-200' : 'bg-red-50 border-red-200'}`}>
                 <div className="flex items-start">
                   {testResult.success ? (
-                    <CheckCircle aria-hidden="true" className="w-4 h-4 text-green-600 mr-2 mt-0.5 flex-shrink-0" />
+                    <CheckCircle className="w-4 h-4 text-green-600 mr-2 mt-0.5 flex-shrink-0" />
                   ) : (
-                    <XCircle aria-hidden="true" className="w-4 h-4 text-red-600 mr-2 mt-0.5 flex-shrink-0" />
+                    <XCircle className="w-4 h-4 text-red-600 mr-2 mt-0.5 flex-shrink-0" />
                   )}
                   <div className="flex-1">
                     <div className={`text-sm font-medium ${testResult.success ? 'text-green-800' : 'text-red-800'}`}>
@@ -2808,7 +2809,7 @@ function KvRow({ label, value }: { label: string; value: string }) {
   return (
     <div className="flex justify-between items-center py-2.5 px-4 gap-4">
       <span className="text-sm text-gray-500 shrink-0">{label}</span>
-      <span className="text-sm text-gray-900 text-right truncate">{value}</span>
+      <span className="text-sm text-gray-900 truncate text-right">{value}</span>
     </div>
   );
 }
@@ -2928,8 +2929,8 @@ function APIServiceDetailPanel({
     <div className="bg-white" onClick={(e) => e.stopPropagation()}>
       <div className="flex items-center border-b border-gray-200 px-5">
         {([
-          { key: 'overview' as const, label: t('detail.tabs.overview'), icon: <Info aria-hidden="true" className="w-3.5 h-3.5" /> },
-          { key: 'tools' as const, label: t('detail.tabs.tools', { count: serviceTools.length }), icon: <Wrench aria-hidden="true" className="w-3.5 h-3.5" /> },
+          { key: 'overview' as const, label: t('detail.tabs.overview'), icon: <Info className="w-3.5 h-3.5" /> },
+          { key: 'tools' as const, label: t('detail.tabs.tools', { count: serviceTools.length }), icon: <Wrench className="w-3.5 h-3.5" /> },
         ]).map((tab) => (
           <button
             key={tab.key}
@@ -3009,15 +3010,15 @@ function APIServiceDetailPanel({
                       value={apiKeyInput}
                       onChange={(e) => setApiKeyInput(e.target.value)}
                       placeholder={t('serviceInfo.enterApiKey')}
-                      className="flex-1 px-2 py-1 border border-gray-200 rounded text-sm font-mono bg-gray-50 focus:outline-none focus:ring-1 focus:ring-slate-400 focus:bg-white focus:border-slate-400 transition-colors min-w-0"
+                      className="flex-1 min-w-0 px-2 py-1 border border-gray-200 rounded text-sm font-mono bg-gray-50 focus:outline-none focus:ring-1 focus:ring-slate-400 focus:bg-white focus:border-slate-400 transition-colors"
                     />
                     <button
                       type="button"
                       onClick={() => setShowApiKey(v => !v)}
-                      className="text-gray-400 hover:text-gray-600 p-1 rounded transition-colors shrink-0"
+                      className="shrink-0 text-gray-400 hover:text-gray-600 p-1 rounded transition-colors"
                       title={showApiKey ? t('detail.hide') : t('detail.show')}
                     >
-                      {showApiKey ? <EyeOff aria-hidden="true" className="w-3.5 h-3.5" /> : <Eye aria-hidden="true" className="w-3.5 h-3.5" />}
+                      {showApiKey ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
                     </button>
                     {apiKeyInput !== apiKeyOrigRef.current && (
                       <>
@@ -3025,15 +3026,15 @@ function APIServiceDetailPanel({
                           type="button"
                           onClick={handleSaveApiKey}
                           disabled={apiKeySaving || !apiKeyInput.trim()}
-                          className="inline-flex items-center gap-1 px-2 py-1 bg-slate-700 text-white rounded text-xs font-medium hover:bg-slate-800 disabled:opacity-50 transition-colors shrink-0"
+                          className="shrink-0 inline-flex items-center gap-1 px-2 py-1 bg-slate-700 text-white rounded text-xs font-medium hover:bg-slate-800 disabled:opacity-50 transition-colors"
                         >
-                          {apiKeySaving ? <RefreshCw aria-hidden="true" className="w-3 h-3 animate-spin" /> : <Save aria-hidden="true" className="w-3 h-3" />}
+                          {apiKeySaving ? <RefreshCw className="w-3 h-3 animate-spin" /> : <Save className="w-3 h-3" />}
                           {t('button.save')}
                         </button>
                         <button
                           type="button"
                           onClick={() => setApiKeyInput(apiKeyOrigRef.current)}
-                          className="px-2 py-1 border border-gray-300 text-gray-600 rounded text-xs hover:bg-gray-50 transition-colors shrink-0"
+                          className="shrink-0 px-2 py-1 border border-gray-300 text-gray-600 rounded text-xs hover:bg-gray-50 transition-colors"
                         >
                           {t('button.cancel')}
                         </button>
@@ -3051,11 +3052,11 @@ function APIServiceDetailPanel({
                 disabled={quickTesting}
                 className="inline-flex items-center justify-center gap-2 px-4 py-2.5 bg-white border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 disabled:opacity-50 text-sm font-medium transition-colors"
               >
-                {quickTesting ? <><RefreshCw aria-hidden="true" className="w-4 h-4 animate-spin" />{t('button.testing')}</> : <><Activity aria-hidden="true" className="w-4 h-4" />{t('button.testConnectivity')}</>}
+                {quickTesting ? <><RefreshCw className="w-4 h-4 animate-spin" />{t('button.testing')}</> : <><Activity className="w-4 h-4" />{t('button.testConnectivity')}</>}
               </button>
               {!quickTesting && quickTestResult && (
                 <div className={`flex items-start gap-2 rounded-lg border p-3 text-sm ${quickTestResult.success ? 'bg-green-50 border-green-200 text-green-800' : 'bg-red-50 border-red-200 text-red-800'}`}>
-                  {quickTestResult.success ? <CheckCircle aria-hidden="true" className="w-4 h-4 mt-0.5 flex-shrink-0" /> : <XCircle aria-hidden="true" className="w-4 h-4 mt-0.5 flex-shrink-0" />}
+                  {quickTestResult.success ? <CheckCircle className="w-4 h-4 mt-0.5 flex-shrink-0" /> : <XCircle className="w-4 h-4 mt-0.5 flex-shrink-0" />}
                   <span>{quickTestResult.message}</span>
                   {quickTestResult.latency_ms != null && <span className="text-xs opacity-90"> {'\u00b7'} {quickTestResult.latency_ms}ms</span>}
                 </div>
@@ -3068,7 +3069,7 @@ function APIServiceDetailPanel({
           ) : (
             <div className="bg-white rounded-lg border border-gray-200 overflow-hidden">
               <div className="overflow-x-auto">
-                <table className="divide-y divide-gray-100 table-fixed min-w-full">
+                <table className="min-w-full divide-y divide-gray-100 table-fixed">
                   <thead className="bg-gray-50">
                     <tr>
                       <th className="w-[30%] px-5 py-2.5 text-left text-xs font-medium text-gray-500 uppercase">{t('detail.tableToolName')}</th>
@@ -3217,7 +3218,7 @@ function ProviderCredentialsCard({ providerId, onTestingStart, onTestingEnd }: {
     <div className="bg-white rounded-lg border border-gray-200 p-4">
       <div className="flex items-center justify-between mb-3">
         <h4 className="text-sm font-semibold text-gray-900 flex items-center">
-          <Shield aria-hidden="true" className="w-4 h-4 mr-2 text-gray-500" />
+          <Shield className="w-4 h-4 mr-2 text-gray-500" />
           {t('credentials.title')}
         </h4>
         {credentials?.has_credential && !editing && (
@@ -3269,9 +3270,9 @@ function ProviderCredentialsCard({ providerId, onTestingStart, onTestingEnd }: {
                 title={t('credentials.testConnTitle')}
               >
                 {testing ? (
-                  <><RefreshCw aria-hidden="true" className="w-3.5 h-3.5 animate-spin" />{t('credentials.testing')}</>
+                  <><RefreshCw className="w-3.5 h-3.5 animate-spin" />{t('credentials.testing')}</>
                 ) : (
-                  <><Activity aria-hidden="true" className="w-3.5 h-3.5" />{t('credentials.testConn')}</>
+                  <><Activity className="w-3.5 h-3.5" />{t('credentials.testConn')}</>
                 )}
               </button>
             )}
@@ -3303,14 +3304,14 @@ function ProviderCredentialsCard({ providerId, onTestingStart, onTestingEnd }: {
           {!testing && testResult && (
             <div className={`p-2.5 rounded text-xs ${
               testResult.success 
-                ? 'bg-green-50 border border-green-200 text-green-700'
+                ? 'bg-green-50 border border-green-200 text-green-700' 
                 : 'bg-red-50 border border-red-200 text-red-700'
             }`}>
               <div className="flex items-start">
                 {testResult.success ? (
-                  <CheckCircle aria-hidden="true" className="w-3.5 h-3.5 mr-1.5 mt-0.5 flex-shrink-0" />
+                  <CheckCircle className="w-3.5 h-3.5 mr-1.5 mt-0.5 flex-shrink-0" />
                 ) : (
-                  <XCircle aria-hidden="true" className="w-3.5 h-3.5 mr-1.5 mt-0.5 flex-shrink-0" />
+                  <XCircle className="w-3.5 h-3.5 mr-1.5 mt-0.5 flex-shrink-0" />
                 )}
                 <div className="flex-1">
                   <div>{testResult.message}</div>
@@ -3359,7 +3360,7 @@ function ProviderCredentialsCard({ providerId, onTestingStart, onTestingEnd }: {
 
           <div className="p-2 bg-amber-50 border border-amber-200 rounded text-xs text-amber-700">
             <div className="flex items-start">
-              <Info aria-hidden="true" className="w-3.5 h-3.5 mr-1.5 mt-0.5 flex-shrink-0" />
+              <Info className="w-3.5 h-3.5 mr-1.5 mt-0.5 flex-shrink-0" />
               <div>{t('credentials.storageNote')}</div>
             </div>
           </div>
@@ -3463,12 +3464,12 @@ function ToolTable({
     '32px minmax(220px, 3fr) minmax(80px, 1fr) minmax(140px, 1.6fr) minmax(80px, 1fr) minmax(90px, 1fr)';
 
   return (
-    <div className="bg-white rounded-lg border border-gray-200 flex flex-col overflow-x-auto">
-      {/* Header (min-w keeps the grid columns intact; the wrapper scrolls on phones) */}
+    <div className="bg-white rounded-lg border border-gray-200 overflow-hidden flex flex-col">
+      {/* Header */}
       <div
         className={viewMode === 'list'
-          ? 'grid items-center gap-3 px-4 py-2.5 bg-gray-50 border-b border-gray-200 text-[11px] font-medium text-gray-500 uppercase tracking-wide min-w-[720px]'
-          : 'flex items-center gap-4 px-4 py-2.5 bg-gray-50 border-b border-gray-200 text-[11px] font-medium text-gray-500 uppercase tracking-wide [&>:first-child]:hidden [&>:nth-child(2)]:hidden [&>:last-child]:hidden flex-wrap'}
+          ? 'grid items-center gap-3 px-4 py-2.5 bg-gray-50 border-b border-gray-200 text-[11px] font-medium text-gray-500 uppercase tracking-wide'
+          : 'flex flex-wrap items-center gap-4 px-4 py-2.5 bg-gray-50 border-b border-gray-200 text-[11px] font-medium text-gray-500 uppercase tracking-wide [&>:first-child]:hidden [&>:nth-child(2)]:hidden [&>:last-child]:hidden'}
         style={viewMode === 'list' ? { gridTemplateColumns: GRID_COLS } : undefined}
       >
         <div />
@@ -3559,13 +3560,12 @@ function ToolTable({
             <div
               key={tool.name}
               {...groupDrag.dragProps(tool.name)}
-              // Phone widths scroll the table sideways instead of crushing its columns.
-              className="grid min-w-[720px] items-center gap-3 px-4 py-3 hover:bg-gray-50 transition-colors"
+              className="grid items-center gap-3 px-4 py-3 hover:bg-gray-50 transition-colors"
               style={{ gridTemplateColumns: GRID_COLS }}
             >
               {/* Icon */}
               <div className={`w-8 h-8 flex items-center justify-center rounded-lg ${tool.enabled ? 'bg-gray-100' : 'bg-gray-50'}`}>
-                <Wrench aria-hidden="true" className={`w-4 h-4 ${tool.enabled ? 'text-gray-700' : 'text-gray-400'}`} />
+                <Wrench className={`w-4 h-4 ${tool.enabled ? 'text-gray-700' : 'text-gray-400'}`} />
               </div>
 
               {/* Name (no description, kept compact).
@@ -3581,7 +3581,9 @@ function ToolTable({
                   type="button"
                   onClick={() => onSelect(tool)}
                   title={tool.name}
-                  className="text-xs font-medium text-gray-900 font-mono hover:text-slate-700 transition-colors focus:outline-none focus-visible:underline text-left truncate min-w-0"
+                  className="text-xs font-medium text-gray-900 font-mono truncate
+                             hover:text-slate-700 transition-colors
+                             focus:outline-none focus-visible:underline text-left min-w-0"
                 >
                   {tool.name}
                 </button>
@@ -3612,7 +3614,7 @@ function ToolTable({
                   onClick={() => onSelect(tool)}
                   className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border border-gray-200 text-gray-600 text-xs font-medium hover:bg-gray-100 hover:text-gray-800 transition-colors"
                 >
-                  <Settings aria-hidden="true" className="w-3 h-3" />
+                  <Settings className="w-3 h-3" />
                   {t('mcp.manage')}
                 </button>
               </div>
@@ -3675,12 +3677,12 @@ function Pagination({
     <div className="bg-white px-6 py-4 border-t border-gray-200 flex items-center justify-between">
       <div className="text-sm text-gray-700">{t('pagination.showing', { start: startItem, end: endItem, total: totalCount })}</div>
       <div className="flex items-center space-x-1">
-        <button aria-label={pageActionLabel('previous')}
+        <button
           onClick={() => onPageChange(Math.max(1, currentPage - 1))}
           disabled={currentPage === 1}
           className={`p-2 rounded-md text-sm ${currentPage === 1 ? 'text-gray-300 cursor-not-allowed' : 'text-gray-600 hover:bg-gray-100'}`}
         >
-          <ChevronLeft aria-hidden="true" className="w-4 h-4" />
+          <ChevronLeft className="w-4 h-4" />
         </button>
         {getPages().map((page, i) =>
           typeof page === 'string' ? (
@@ -3689,19 +3691,18 @@ function Pagination({
             <button
               key={page}
               onClick={() => onPageChange(page)}
-              aria-current={currentPage === page ? 'page' : undefined}
               className={`px-3 py-1 rounded-md text-sm font-medium ${currentPage === page ? 'bg-slate-700 text-white' : 'text-gray-700 hover:bg-gray-100'}`}
             >
               {page}
             </button>
           )
         )}
-        <button aria-label={pageActionLabel('next')}
+        <button
           onClick={() => onPageChange(Math.min(totalPages, currentPage + 1))}
           disabled={currentPage === totalPages}
           className={`p-2 rounded-md text-sm ${currentPage === totalPages ? 'text-gray-300 cursor-not-allowed' : 'text-gray-600 hover:bg-gray-100'}`}
         >
-          <ChevronRight aria-hidden="true" className="w-4 h-4" />
+          <ChevronRight className="w-4 h-4" />
         </button>
       </div>
     </div>
@@ -3816,14 +3817,14 @@ export function ToolDetailDrawer({
   };
 
   return (
-    <PageDialog variant="panels" className="contents" onClose={onClose}>
+    <>
       <div className="fixed inset-0 bg-black/40 z-40" onClick={onClose} />
 
-      <div data-ui-overlay="drawer" className="fixed right-0 top-0 bottom-0 flex flex-col bg-white shadow-2xl w-full max-w-[520px] z-50 min-h-0">
-        <div className="border-b border-gray-200 flex-shrink-0">
+      <div className="fixed right-0 top-0 bottom-0 z-50 flex min-h-0 flex-col bg-white shadow-2xl w-[520px] max-w-full">
+        <div className="flex-shrink-0 border-b border-gray-200">
           <div className="flex items-center gap-3 px-6 py-4">
             <div className="w-8 h-8 bg-gray-100 rounded-lg flex items-center justify-center flex-shrink-0">
-              <Wrench aria-hidden="true" className="w-4 h-4 text-gray-600" />
+              <Wrench className="w-4 h-4 text-gray-600" />
             </div>
             <div className="flex-1 min-w-0">
               <h2 className="text-lg font-semibold text-gray-900 font-mono truncate">{tool.name}</h2>
@@ -3838,8 +3839,8 @@ export function ToolDetailDrawer({
               </div>
             </div>
             <div className="flex items-center gap-2 flex-shrink-0">
-              <button aria-label={pageActionLabel('close')} onClick={onClose} className="p-1 rounded hover:bg-gray-100 transition-colors">
-                <X aria-hidden="true" className="w-5 h-5 text-gray-400" />
+              <button onClick={onClose} className="p-1 rounded hover:bg-gray-100 transition-colors">
+                <X className="w-5 h-5 text-gray-400" />
               </button>
             </div>
           </div>
@@ -3853,7 +3854,7 @@ export function ToolDetailDrawer({
                   : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
               }`}
             >
-              <Info aria-hidden="true" className="w-3.5 h-3.5" />{t('toolDetail.tabInfo')}
+              <Info className="w-3.5 h-3.5" />{t('toolDetail.tabInfo')}
             </button>
             <button
               onClick={() => setSection('test')}
@@ -3863,7 +3864,7 @@ export function ToolDetailDrawer({
                   : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
               }`}
             >
-              <TestTube aria-hidden="true" className="w-3.5 h-3.5" />{t('toolDetail.tabTest')}
+              <TestTube className="w-3.5 h-3.5" />{t('toolDetail.tabTest')}
             </button>
           </div>
         </div>
@@ -3873,7 +3874,7 @@ export function ToolDetailDrawer({
             <div className="space-y-5">
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1.5">{t('toolDetail.description')}</label>
-                <p className="text-sm text-gray-600 leading-relaxed [overflow-wrap:anywhere] whitespace-pre-wrap break-words">
+                <p className="text-sm text-gray-600 leading-relaxed whitespace-pre-wrap break-words [overflow-wrap:anywhere]">
                   {getLocalizedToolDescription(tool, i18n.language) || t('toolDetail.noDescription')}
                 </p>
               </div>
@@ -3883,13 +3884,9 @@ export function ToolDetailDrawer({
                   <label className="block text-sm font-medium text-gray-700 mb-1.5">{t('toolDetail.status')}</label>
                   <div className="flex items-center gap-2 flex-wrap">
                     <button
-                      type="button"
-                      role="switch"
-                      aria-checked={enabled}
-                      aria-label={t('toolDetail.status')}
                       onClick={handleToggleEnabled}
                       disabled={toggling}
-                      className={`relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus-visible:ring-2 focus-visible:ring-slate-400 focus-visible:ring-offset-2 disabled:opacity-50 ${enabled ? 'bg-slate-700' : 'bg-gray-200'}`}
+                      className={`relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none disabled:opacity-50 ${enabled ? 'bg-slate-700' : 'bg-gray-200'}`}
                     >
                       <span
                         className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow transition duration-200 ease-in-out ${enabled ? 'translate-x-5' : 'translate-x-0'}`}
@@ -3926,7 +3923,7 @@ export function ToolDetailDrawer({
                   <div>
                     <label className="block text-sm font-medium text-gray-700 mb-1.5">{t('toolDetail.security')}</label>
                     <span className="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium bg-amber-100 text-amber-800">
-                      <AlertTriangle aria-hidden="true" className="w-3.5 h-3.5 mr-1" />{t('toolDetail.requiresConfirmation')}
+                      <AlertTriangle className="w-3.5 h-3.5 mr-1" />{t('toolDetail.requiresConfirmation')}
                     </span>
                   </div>
                 )}
@@ -3937,7 +3934,7 @@ export function ToolDetailDrawer({
                   <label className="block text-sm font-medium text-gray-700 mb-2">{t('toolDetail.params', { count: tool.parameters.length })}</label>
                   <div className="rounded-lg border border-gray-200 overflow-hidden">
                     <div className="overflow-x-auto">
-                      <table className="table-fixed divide-y divide-gray-200 min-w-full">
+                      <table className="min-w-full table-fixed divide-y divide-gray-200">
                       <thead className="bg-gray-50">
                         <tr>
                           <th className="w-[28%] px-4 py-2 text-left text-xs font-medium text-gray-500">{t('toolDetail.paramName')}</th>
@@ -3952,13 +3949,13 @@ export function ToolDetailDrawer({
                             <td className="px-4 py-2.5 align-top">
                               <code className="text-xs font-mono text-gray-900 bg-gray-100 px-1.5 py-0.5 rounded break-all">{param.name}</code>
                             </td>
-                            <td className="px-4 py-2.5 align-top text-xs text-gray-500 [overflow-wrap:anywhere] whitespace-pre-wrap break-words">{param.type}</td>
+                            <td className="px-4 py-2.5 align-top text-xs text-gray-500 whitespace-pre-wrap break-words [overflow-wrap:anywhere]">{param.type}</td>
                             <td className="px-4 py-2.5 align-top">
                               {param.required
                                 ? <span className="text-xs text-slate-700 font-medium">{t('toolDetail.yes')}</span>
                                 : <span className="text-xs text-gray-400">{t('toolDetail.no')}</span>}
                             </td>
-                            <td className="px-4 py-2.5 align-top text-xs text-gray-600 [overflow-wrap:anywhere] whitespace-pre-wrap break-words">
+                            <td className="px-4 py-2.5 align-top text-xs text-gray-600 whitespace-pre-wrap break-words [overflow-wrap:anywhere]">
                               {param.description}
                             </td>
                           </tr>
@@ -3977,7 +3974,7 @@ export function ToolDetailDrawer({
                     disabled={deleting}
                     className="inline-flex items-center gap-2 px-4 py-2.5 border border-red-300 text-red-700 rounded-lg hover:bg-red-50 text-sm font-medium transition-colors disabled:opacity-50"
                   >
-                    <Trash2 aria-hidden="true" className="w-4 h-4" />
+                    <Trash2 className="w-4 h-4" />
                     {deleting ? t('button.deleting') : t('button.delete')}
                   </button>
                 </div>
@@ -4031,8 +4028,8 @@ export function ToolDetailDrawer({
                 className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-slate-700 text-white rounded-lg hover:bg-slate-800 disabled:opacity-50 disabled:cursor-not-allowed font-medium text-sm transition-colors"
               >
                 {testing
-                  ? <><RefreshCw aria-hidden="true" className="w-4 h-4 animate-spin" />{t('toolDetail.executing')}</>
-                  : <><Play aria-hidden="true" className="w-4 h-4" />{t('toolDetail.runTest')}</>}
+                  ? <><RefreshCw className="w-4 h-4 animate-spin" />{t('toolDetail.executing')}</>
+                  : <><Play className="w-4 h-4" />{t('toolDetail.runTest')}</>}
               </button>
               {!enabled && (
                 <p className="text-xs text-amber-600 text-center">{t('toolDetail.disabledNote')}</p>
@@ -4046,15 +4043,15 @@ export function ToolDetailDrawer({
                   <div className={`rounded-lg border p-4 ${testResult.success ? 'bg-green-50 border-green-200' : 'bg-red-50 border-red-200'}`}>
                     <div className="flex items-center mb-2">
                       {testResult.success
-                        ? <CheckCircle aria-hidden="true" className="w-4 h-4 text-green-600 mr-2" />
-                        : <XCircle aria-hidden="true" className="w-4 h-4 text-red-600 mr-2" />}
+                        ? <CheckCircle className="w-4 h-4 text-green-600 mr-2" />
+                        : <XCircle className="w-4 h-4 text-red-600 mr-2" />}
                       <span className={`text-sm font-medium ${testResult.success ? 'text-green-800' : 'text-red-800'}`}>
                         {testResult.success ? t('toolDetail.execSuccess') : t('toolDetail.execFailed')}
                       </span>
                     </div>
                     {testResult.error && <p className="text-sm text-red-700 mb-2">{testResult.error}</p>}
                     {testResult.output != null && (
-                      <pre className="text-xs bg-white/60 p-3 rounded-md max-h-60 font-mono overflow-x-auto">
+                      <pre className="text-xs bg-white/60 p-3 rounded-md overflow-x-auto max-h-60 font-mono">
                         {typeof testResult.output === 'string'
                           ? testResult.output
                           : JSON.stringify(testResult.output, null, 2)}
@@ -4067,7 +4064,7 @@ export function ToolDetailDrawer({
           )}
         </div>
       </div>
-    </PageDialog>
+    </>
   );
 }
 
@@ -4118,11 +4115,11 @@ function EnabledBadge({ enabled }: { enabled: boolean }) {
   const { t } = useTranslation('tool');
   return enabled ? (
     <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800">
-      <CheckCircle aria-hidden="true" className="w-3 h-3 mr-1" />{t('enabledBadge.enabled')}
+      <CheckCircle className="w-3 h-3 mr-1" />{t('enabledBadge.enabled')}
     </span>
   ) : (
     <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-600">
-      <XCircle aria-hidden="true" className="w-3 h-3 mr-1" />{t('enabledBadge.disabled')}
+      <XCircle className="w-3 h-3 mr-1" />{t('enabledBadge.disabled')}
     </span>
   );
 }

@@ -35,36 +35,6 @@ function renderBenefit(acknowledgingIds: string[] = []) {
 }
 
 describe('NotificationModal', () => {
-  const notice = { id: 'notice', kind: 'benefit' as const, title: 'Benefit', highlights: [], priority: 100 };
-
-  it('traps focus and refuses Escape or backdrop closure while acknowledging', () => {
-    const onClose = vi.fn();
-    const props = { notifications: [notice], onAcknowledge: vi.fn(), onDismissForever: vi.fn(), onClose };
-    const { rerender } = render(<NotificationModal {...props} />);
-    const close = screen.getByRole('button', { name: 'close' });
-    const confirm = screen.getByRole('button', { name: 'gotIt' });
-    expect(close).toHaveFocus();
-    fireEvent.keyDown(close, { key: 'Tab', shiftKey: true });
-    expect(confirm).toHaveFocus();
-    fireEvent.keyDown(confirm, { key: 'Tab' });
-    expect(close).toHaveFocus();
-
-    rerender(<NotificationModal {...props} acknowledgingIds={['notice']} />);
-    fireEvent.keyDown(document, { key: 'Escape' });
-    fireEvent.click(document.querySelector('[aria-hidden="true"].fixed')!);
-    expect(onClose).not.toHaveBeenCalled();
-    expect(close).toBeDisabled();
-
-    rerender(<NotificationModal {...props} />);
-    fireEvent.keyDown(document, { key: 'Escape' });
-    expect(onClose).toHaveBeenCalledTimes(1);
-  });
-
-  it('does not mount or lock focus when there are no notifications', () => {
-    render(<NotificationModal notifications={[]} onAcknowledge={vi.fn()} onDismissForever={vi.fn()} onClose={vi.fn()} />);
-    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
-  });
-
   it('renders the holiday benefit with a complete local code, Markdown and safe top-up link', () => {
     renderBenefit();
     expect(screen.getByRole('heading', { name: '双节过渡保障' })).toBeInTheDocument();
@@ -92,8 +62,7 @@ describe('NotificationModal', () => {
     expect(onAcknowledge).toHaveBeenCalledTimes(1);
     expect(onDismissForever).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole('button', { name: 'close' }));
-    // useDialogFocus listens on document
-    fireEvent.keyDown(document, { key: 'Escape' });
+    fireEvent.keyDown(window, { key: 'Escape' });
     fireEvent.click(document.querySelector('[aria-hidden="true"].fixed')!);
     expect(onClose).toHaveBeenCalledTimes(3);
     fireEvent.click(screen.getByRole('button', { name: 'dismissThis' }));
@@ -103,7 +72,7 @@ describe('NotificationModal', () => {
   it('blocks repeat dismissal, Escape and backdrop clicks while saving', () => {
     const { onAcknowledge, onClose, onDismissForever } = renderBenefit([benefit.id]);
     for (const button of screen.getAllByRole('button')) expect(button).toBeDisabled();
-    fireEvent.keyDown(document, { key: 'Escape' });
+    fireEvent.keyDown(window, { key: 'Escape' });
     fireEvent.click(document.querySelector('[aria-hidden="true"].fixed')!);
     expect(onClose).not.toHaveBeenCalled();
     expect(onAcknowledge).not.toHaveBeenCalled();
@@ -116,14 +85,15 @@ describe('NotificationModal', () => {
     trigger.focus();
     const before = document.body.style.overflow;
     const { unmount } = renderBenefit();
+    expect(screen.getByRole('dialog')).toHaveFocus();
+    expect(document.body.style.overflow).toBe('hidden');
     const close = screen.getByRole('button', { name: 'close' });
     const confirm = screen.getByRole('button', { name: 'gotIt' });
-    // the shared dialog focus starts on the first control
+    fireEvent.keyDown(window, { key: 'Tab' });
     expect(close).toHaveFocus();
-    expect(document.body.style.overflow).toBe('hidden');
-    fireEvent.keyDown(document, { key: 'Tab', shiftKey: true });
+    fireEvent.keyDown(window, { key: 'Tab', shiftKey: true });
     expect(confirm).toHaveFocus();
-    fireEvent.keyDown(document, { key: 'Tab' });
+    fireEvent.keyDown(window, { key: 'Tab' });
     expect(close).toHaveFocus();
     unmount();
     expect(trigger).toHaveFocus();
@@ -144,8 +114,7 @@ describe('NotificationModal', () => {
     const outside = document.createElement('button');
     document.body.appendChild(outside);
     outside.focus();
-    fireEvent.keyDown(document, { key: 'Tab' });
-    // every button is disabled while saving, so the scrollable notice is the first stop
+    fireEvent.keyDown(window, { key: 'Tab' });
     expect(screen.getByRole('region')).toHaveFocus();
     outside.remove();
   });
@@ -190,5 +159,10 @@ describe('NotificationModal', () => {
     expect(link).toHaveAttribute('rel', 'noopener noreferrer');
     expect(screen.getByText('危险链接')).not.toHaveAttribute('href', 'javascript:alert(1)');
     expect(document.querySelector('script')).toBeNull();
+  });
+
+  it('does not mount or lock focus when there are no notifications', () => {
+    render(<NotificationModal notifications={[]} onAcknowledge={vi.fn()} onDismissForever={vi.fn()} onClose={vi.fn()} />);
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
   });
 });

@@ -4,13 +4,12 @@
  * 使用 useSessionChat 创建会话，通过 SessionChat 展示对话并支持追问。
  * 会话在用户首次发送消息时才创建，避免空会话污染会话列表。
  */
-import { useEffect, useId, useRef } from 'react';
-import { Sparkles, X } from 'lucide-react';
+import { useEffect } from 'react';
+import { X, Sparkles } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import SessionChat from './SessionChat';
 import { useSessionChat } from '@/hooks/useSessionChat';
 import { useDefaultModelVision } from '@/hooks/useDefaultModelVision';
-import { useDialogFocus } from '@/hooks/useDialogFocus';
 
 interface ChatDialogProps {
   open: boolean;
@@ -37,9 +36,6 @@ export default function ChatDialog({
   width = 'max-w-2xl',
 }: ChatDialogProps) {
   const { t } = useTranslation('common');
-  const dialogRef = useRef<HTMLDivElement>(null);
-  const titleId = useId();
-  useDialogFocus(dialogRef, open, onClose);
   const supportsVision = useDefaultModelVision();
   const {
     sessionId,
@@ -62,26 +58,25 @@ export default function ChatDialog({
   if (!open) return null;
 
   return (
-    <div className="fixed inset-0 bg-gray-600/75 flex items-center justify-center z-50" onClick={(event) => { if (event.target === event.currentTarget) onClose(); }}>
-      <div ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby={titleId} tabIndex={-1} data-ui-overlay="dialog" className={`bg-white rounded-xl shadow-2xl ${width} w-full mx-4 flex flex-col`} style={{ height: '75vh' }}>
+    <div className="fixed inset-0 bg-gray-600/75 flex items-center justify-center z-50">
+      <div className={`bg-white rounded-xl shadow-2xl ${width} w-full mx-4 flex flex-col`} style={{ height: '75vh' }}>
         {/* Header */}
-        <div className="border-b border-gray-200 px-4 sm:px-6 py-4 flex-shrink-0">
+        <div className="px-5 py-4 border-b border-gray-200 flex-shrink-0">
           <div className="flex items-center justify-center">
             <div className="flex items-center gap-3">
               <div className="w-9 h-9 rounded-lg bg-gradient-to-br from-red-500 to-purple-600 flex items-center justify-center">
-                <Sparkles aria-hidden="true" className="w-5 h-5 text-white" />
+                <Sparkles className="w-5 h-5 text-white" />
               </div>
               <div>
-                <h2 id={titleId} className="text-lg font-semibold text-gray-900">{title}</h2>
+                <h2 className="text-lg font-semibold text-gray-900">{title}</h2>
                 {subtitle && <p className="text-xs text-gray-500 mt-0.5">{subtitle}</p>}
               </div>
             </div>
             <button
               onClick={onClose}
-              aria-label={t('button.close')}
-              className="text-gray-400 hover:text-gray-600 p-1.5 rounded-lg hover:bg-gray-100 transition-colors shrink-0"
+              className="text-gray-400 hover:text-gray-600 p-1.5 rounded-lg hover:bg-gray-100 transition-colors"
             >
-              <X aria-hidden="true" className="w-5 h-5" />
+              <X className="w-5 h-5" />
             </button>
           </div>
         </div>
@@ -100,7 +95,7 @@ export default function ChatDialog({
           onCreateAndSend={!sessionId ? (text, imageParts) => createAndSend({ text, imageParts }) : undefined}
           welcomeContent={!sessionId ? (
             <div className="text-center max-w-md">
-              <Sparkles aria-hidden="true" className="w-10 h-10 text-red-500 mb-3 mx-auto" />
+              <Sparkles className="w-10 h-10 text-red-500 mx-auto mb-3" />
               <h3 className="text-lg font-semibold text-gray-900 mb-2">{t('chat.talkToRex')}</h3>
               <p className="text-sm text-gray-500">{t('chat.talkToRexHint')}</p>
             </div>

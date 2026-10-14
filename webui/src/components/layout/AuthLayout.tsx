@@ -17,7 +17,7 @@ export default function AuthLayout({ children }: AuthLayoutProps) {
   const currentLang = i18n.language;
 
   return (
-    <div className="bg-gray-50 flex flex-col dark:bg-[#252c35] min-h-screen">
+    <div className="min-h-screen bg-gray-50 flex flex-col dark:bg-[#252c35]">
       <div className="flex justify-end px-4 pt-4">
         <div
           className="inline-flex items-center gap-1 rounded-full border border-gray-200 bg-white px-2 py-1 shadow-sm dark:border-[#4a5563] dark:bg-[#303842]"
@@ -30,7 +30,6 @@ export default function AuthLayout({ children }: AuthLayoutProps) {
               key={code}
               type="button"
               onClick={() => i18n.changeLanguage(code)}
-              aria-pressed={currentLang === code}
               className={`px-2.5 py-1 text-xs font-medium rounded-full transition-colors ${
                 currentLang === code
                   ? 'bg-slate-900 text-white dark:bg-[#46515e] dark:text-white'

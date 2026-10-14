@@ -12,6 +12,7 @@ from contextlib import asynccontextmanager
 from typing import Any, Optional, Sequence
 
 from flocks.db.dialect import Dialect, PostgresDialect
+from flocks.db.idempotent_ddl import schema_script_to_run
 from flocks.db.markers import rewrite_markers
 from flocks.db.result import Execution, Result
 from flocks.runtime_state.postgres import PostgresRuntimeStateStore, _like_prefix
@@ -75,6 +76,11 @@ class PostgresTransaction:
             # row["column"], iteration over values, and dict(row). Turning it
             # into a dict breaks existing positional consumers (notably auth).
             return Result(records, rowcount=len(records))
+        if not params and head.startswith(("CREATE", "ALTER")):
+            # Schema statements run at every start: see flocks.db.idempotent_ddl.
+            statement = await schema_script_to_run(self._connection, statement)
+            if statement is None:
+                return Result(rowcount=0)
         status = await self._connection.execute(statement, *tuple(params))
         return Result(rowcount=_affected(status))
 
@@ -100,8 +106,14 @@ class PostgresTransaction:
         return dict(record) if record is not None else None
 
     async def executescript(self, script: str) -> None:
-        """Send static schema SQL in one round trip within its transaction."""
-        await self._connection.execute(script)
+        """Send static schema SQL in one round trip within its transaction.
+
+        Statements PostgreSQL would skip are left out first, so a start does
+        not lock tables another process is writing (flocks.db.idempotent_ddl).
+        """
+        script = await schema_script_to_run(self._connection, script)
+        if script is not None:
+            await self._connection.execute(script)
 
     async def commit(self) -> None:
         # asyncpg commits when the surrounding transaction block exits, and

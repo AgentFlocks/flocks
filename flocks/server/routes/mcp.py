@@ -51,7 +51,7 @@ from flocks.mcp.utils import (
 from flocks.config.config import Config
 from flocks.config.config_writer import ConfigWriter
 from flocks.security import get_secret_manager
-from flocks.security.secrets import get_mcp_secret_id
+from flocks.security.secrets import SecretChanges, get_mcp_secret_id, recording_secret_changes
 from flocks.server.auth import API_TOKEN_SECRET_ID, get_request_ip, get_request_user_agent, require_admin
 from flocks.server.config_mutation import serialized_config_mutation
 from flocks.server.threatbook_regions import (
@@ -527,14 +527,13 @@ async def test_mcp_connection(
 async def _restore_threatbook_mcp_setup(
     name: str,
     config_snapshot: Dict[str, Any],
-    secret_snapshot: Dict[str, Any],
+    secret_changes: SecretChanges,
     previous_config: Optional[Dict[str, Any]],
     was_connected: bool,
 ) -> None:
     """Restore persisted and runtime state after a failed ThreatBook apply."""
-    secrets = get_secret_manager()
     ConfigWriter._write_raw(config_snapshot)
-    secrets._save(secret_snapshot)
+    secret_changes.revert()
 
     from flocks.tool.tool_loader import delete_mcp_config, save_mcp_config
 
@@ -605,7 +604,6 @@ async def configure_threatbook_mcp(
 
     secrets = get_secret_manager()
     config_snapshot = copy.deepcopy(ConfigWriter._read_raw())
-    secret_snapshot = copy.deepcopy(secrets._load())
     previous_config = copy.deepcopy(_load_raw_mcp_server_config(name))
     runtime_status = await MCP.status()
     previous_status = runtime_status.get(name)
@@ -625,42 +623,43 @@ async def configure_threatbook_mcp(
         "enabled": True,
     }
 
-    try:
-        secrets.set(secret_id, api_key)
-        _persist_mcp_server_config(name, next_config)
+    with recording_secret_changes() as secret_changes:
+        try:
+            secrets.set(secret_id, api_key)
+            _persist_mcp_server_config(name, next_config)
 
-        if previous_status is not None:
-            await MCP.remove(name)
-        resolved_config = await _load_mcp_server_config(name)
-        if not resolved_config or not await MCP.connect(name, resolved_config):
-            raise ValueError("ThreatBook MCP could not reconnect after saving")
+            if previous_status is not None:
+                await MCP.remove(name)
+            resolved_config = await _load_mcp_server_config(name)
+            if not resolved_config or not await MCP.connect(name, resolved_config):
+                raise ValueError("ThreatBook MCP could not reconnect after saving")
 
-        tools_count = await MCP.refresh_tools(name)
-        return ThreatBookMcpConfigureResponse(
-            success=True,
-            message="ThreatBook MCP configured and connected successfully",
-            region=request.region,
-            endpoint=endpoint,
-            connected=True,
-            tools_count=tools_count,
-        )
-    except Exception as exc:
-        await _restore_threatbook_mcp_setup(
-            name,
-            config_snapshot,
-            secret_snapshot,
-            previous_config,
-            was_connected,
-        )
-        log.error("mcp.threatbook.configure_failed", {
-            "name": name,
-            "region": request.region,
-            "error": str(exc),
-        })
-        raise HTTPException(
-            status_code=500,
-            detail=f"ThreatBook MCP configuration failed: {exc}",
-        ) from exc
+            tools_count = await MCP.refresh_tools(name)
+            return ThreatBookMcpConfigureResponse(
+                success=True,
+                message="ThreatBook MCP configured and connected successfully",
+                region=request.region,
+                endpoint=endpoint,
+                connected=True,
+                tools_count=tools_count,
+            )
+        except Exception as exc:
+            await _restore_threatbook_mcp_setup(
+                name,
+                config_snapshot,
+                secret_changes,
+                previous_config,
+                was_connected,
+            )
+            log.error("mcp.threatbook.configure_failed", {
+                "name": name,
+                "region": request.region,
+                "error": str(exc),
+            })
+            raise HTTPException(
+                status_code=500,
+                detail=f"ThreatBook MCP configuration failed: {exc}",
+            ) from exc
 
 
 @router.post(

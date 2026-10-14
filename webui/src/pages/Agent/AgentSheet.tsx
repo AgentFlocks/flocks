@@ -9,7 +9,7 @@
  */
 
 import { useState, useEffect, useMemo } from 'react';
-import { Bot, Lock, Sparkles } from 'lucide-react';
+import { Bot, Sparkles, Lock } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { agentAPI, Agent } from '@/api/agent';
 import { sessionApi } from '@/api/session';
@@ -329,7 +329,7 @@ export default function AgentSheet({ agent, onClose, onSaved }: AgentSheetProps)
       mode={isEdit ? 'edit' : 'create'}
       entityType="Agent"
       entityName={agent?.name}
-      icon={<Bot aria-hidden="true" className="w-5 h-5" />}
+      icon={<Bot className="w-5 h-5" />}
       rexSystemContext={buildRexContext(formData, isEdit, isNative)}
       rexWelcomeMessage={buildRexWelcome(isEdit, agent?.name, isNative)}
       rexGuideGroups={guideGroups}
@@ -338,7 +338,7 @@ export default function AgentSheet({ agent, onClose, onSaved }: AgentSheetProps)
         ? t(isNative ? 'edit.nativeGuidePanelDesc' : 'edit.guidePanelDesc', { name: agent?.name ?? formData.name })
         : t('create.guidePanelDesc')}
       rexGuideEmptyTitle={isEdit ? t('edit.emptyStateTitle') : t('create.emptyStateTitle')}
-      rexGuideIcon={<Bot aria-hidden="true" className="h-5 w-5" />}
+      rexGuideIcon={<Bot className="h-5 w-5" />}
       initialTab={isEdit ? 'rex' : undefined}
       rexSessionStorageKey={isEdit && agent?.name ? `agent-edit:${agent.name}` : undefined}
       {...rexComposerControls}
@@ -441,7 +441,7 @@ function AgentFormContent({
       {/* Native read-only banner */}
       {nativeReadOnly && (
         <div className="flex items-center gap-2 px-3 py-2 bg-amber-50 border border-amber-200 rounded-lg text-xs text-amber-700">
-          <Lock aria-hidden="true" className="w-3.5 h-3.5 shrink-0" />
+          <Lock className="w-3.5 h-3.5 shrink-0" />
           {t('form.nativeReadOnlyMessage')}
         </div>
       )}
@@ -530,7 +530,7 @@ function AgentFormContent({
               onClick={() => openRex()}
               className="flex items-center gap-1 text-xs text-sky-700 hover:text-sky-900 transition-colors"
             >
-              <Sparkles aria-hidden="true" className="w-3.5 h-3.5" />
+              <Sparkles className="w-3.5 h-3.5" />
               {t('form.rexAssistWrite')}
             </button>
           )}
@@ -553,7 +553,7 @@ function AgentFormContent({
         {/* Mode: 创建时固定为 subagent，编辑时显示当前模式（只读） */}
         {!nameEditable && (
           <div className="flex items-center gap-3">
-            <span className="w-14 text-sm font-medium text-gray-700 shrink-0">{t('form.mode')}</span>
+            <span className="w-14 shrink-0 text-sm font-medium text-gray-700">{t('form.mode')}</span>
             <PillGroup
               options={[
                 { value: 'primary', label: t('form.primaryModeLabel'), activeClass: 'bg-sky-600 text-white border-sky-600' },
@@ -567,7 +567,7 @@ function AgentFormContent({
         )}
 
         <div className="flex items-center gap-3">
-          <span className="w-14 text-sm font-medium text-gray-700 shrink-0">{t('form.model')}</span>
+          <span className="w-14 shrink-0 text-sm font-medium text-gray-700">{t('form.model')}</span>
           <select
             value={formData.modelKey}
             onChange={(e) => update({ modelKey: e.target.value })}
@@ -587,7 +587,7 @@ function AgentFormContent({
         </div>
 
         <div className="flex items-center gap-3">
-          <span className="w-14 text-sm font-medium text-gray-700 shrink-0">{t('form.temperature')}</span>
+          <span className="w-14 shrink-0 text-sm font-medium text-gray-700">{t('form.temperature')}</span>
           <input
             type="number"
             min="0"
@@ -627,7 +627,7 @@ function AgentFormContent({
         ) : allTools.length === 0 ? (
           <p className="text-sm text-gray-400 py-2">{t('form.noTools')}</p>
         ) : (
-          <div className={`border rounded-lg divide-y max-h-80 pr-3 overflow-y-auto ${nativeReadOnly ? 'border-gray-300 bg-gray-100 select-none divide-gray-200' : 'border-gray-200 divide-gray-100'}`}>
+          <div className={`border rounded-lg divide-y max-h-80 overflow-y-auto pr-3 ${nativeReadOnly ? 'border-gray-300 bg-gray-100 select-none divide-gray-200' : 'border-gray-200 divide-gray-100'}`}>
             <label className={`flex items-center gap-3 px-3 py-2 sticky top-0 z-10 ${nativeReadOnly ? 'bg-gray-100 cursor-not-allowed' : 'bg-gray-50 cursor-pointer hover:bg-gray-100 transition-colors'}`}>
               <input
                 type="checkbox"
@@ -710,7 +710,7 @@ function AgentFormContent({
           ) : allSkills.length === 0 ? (
             <p className="text-sm text-gray-400 py-2">{t('form.noSkills')}</p>
           ) : (
-            <div className={`border rounded-lg divide-y max-h-64 pr-3 overflow-y-auto ${nativeReadOnly ? 'border-gray-300 bg-gray-100 select-none divide-gray-200' : 'border-gray-200 divide-gray-100'}`}>
+            <div className={`border rounded-lg divide-y max-h-64 overflow-y-auto pr-3 ${nativeReadOnly ? 'border-gray-300 bg-gray-100 select-none divide-gray-200' : 'border-gray-200 divide-gray-100'}`}>
               <label className={`flex items-center gap-3 px-3 py-2 sticky top-0 z-10 ${nativeReadOnly ? 'bg-gray-100 cursor-not-allowed' : 'bg-gray-50 cursor-pointer hover:bg-gray-100 transition-colors'}`}>
                 <input
                   type="checkbox"

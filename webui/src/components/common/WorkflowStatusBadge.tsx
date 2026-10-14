@@ -6,22 +6,14 @@
  */
 
 import { useTranslation } from 'react-i18next';
-import {
-  CheckCircle,
-  CircleMinus,
-  Clock,
-  Loader2,
-  XCircle,
-} from 'lucide-react';
 
 interface StatusConfig {
   className: string;
   dot: string;
-  icon?: typeof CheckCircle;
 }
 
 const STATUS_STYLE_MAP: Record<string, StatusConfig> = {
-  running:    { className: 'bg-green-100 text-green-700', dot: 'bg-green-500', icon: Loader2 },
+  running:    { className: 'bg-green-100 text-green-700', dot: 'bg-green-500' },
   cancelling: { className: 'bg-amber-100 text-amber-700', dot: 'bg-amber-500' },
   publishing: { className: 'bg-yellow-100 text-yellow-700', dot: 'bg-yellow-500' },
   success:    { className: 'bg-green-100 text-green-700',  dot: 'bg-green-500' },
@@ -44,12 +36,11 @@ export default function WorkflowStatusBadge({ status, variant = 'badge' }: Workf
   const { t } = useTranslation('common');
   const cfg = STATUS_STYLE_MAP[status] ?? FALLBACK;
   const label = t(`workflowStatus.${status}`, { defaultValue: status });
-  const Icon = cfg.icon ?? (['success', 'SUCCEEDED'].includes(status) ? CheckCircle : ['error', 'FAILED'].includes(status) ? XCircle : ['cancelling', 'publishing', 'timeout'].includes(status) ? Clock : CircleMinus);
 
   if (variant === 'pill') {
     return (
       <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium ${cfg.className}`}>
-        <Icon aria-hidden="true" className={`h-4 w-4 shrink-0 ${status === 'running' ? 'animate-spin motion-reduce:animate-none' : ''}`} />
+        <span className={`w-1.5 h-1.5 rounded-full ${cfg.dot}`} />
         {label}
       </span>
     );
@@ -57,7 +48,6 @@ export default function WorkflowStatusBadge({ status, variant = 'badge' }: Workf
 
   return (
     <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-xs font-medium ${cfg.className}`}>
-      <Icon aria-hidden="true" className={`h-4 w-4 shrink-0 ${status === 'running' ? 'animate-spin motion-reduce:animate-none' : ''}`} />
       {label}
     </span>
   );

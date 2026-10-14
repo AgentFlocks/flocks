@@ -1,19 +1,7 @@
 import { useState, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Workflow, WorkflowExecution } from '@/api/workflow';
-import {
-  Activity,
-  Calendar,
-  CheckCircle,
-  ChevronDown,
-  ChevronRight,
-  Clock,
-  FileText,
-  Layers,
-  Tag,
-  User,
-  XCircle,
-} from 'lucide-react';
+import { Calendar, User, Tag, Activity, Clock, CheckCircle, XCircle, Layers, ChevronDown, ChevronRight, FileText } from 'lucide-react';
 import RunTab from './RunTab';
 
 interface OverviewTabProps {
@@ -28,7 +16,7 @@ function MetaRow({ icon, label, value }: { icon: ReactNode; label: string; value
   return (
     <div className="flex items-start gap-2.5 py-2.5 border-b border-gray-100 last:border-0">
       <span className="text-gray-400 mt-0.5 flex-shrink-0">{icon}</span>
-      <span className="text-xs text-gray-500 w-16 pt-0.5 flex-shrink-0">{label}</span>
+      <span className="text-xs text-gray-500 w-16 flex-shrink-0 pt-0.5">{label}</span>
       <span className="text-xs text-gray-800 font-medium flex-1 break-all">{value}</span>
     </div>
   );
@@ -93,9 +81,9 @@ function CollapsibleSection({
           )}
         </div>
         {expanded ? (
-          <ChevronDown aria-hidden="true" className="w-4 h-4 text-gray-400 flex-shrink-0" />
+          <ChevronDown className="w-4 h-4 text-gray-400 flex-shrink-0" />
         ) : (
-          <ChevronRight aria-hidden="true" className="w-4 h-4 text-gray-400 flex-shrink-0" />
+          <ChevronRight className="w-4 h-4 text-gray-400 flex-shrink-0" />
         )}
       </button>
       {expanded && (
@@ -143,7 +131,7 @@ export default function OverviewTab({
   });
 
   return (
-    <div className="h-full bg-white overflow-y-auto">
+    <div className="h-full overflow-y-auto bg-white">
       <CollapsibleSection
         title={t('detail.overview.configInfo')}
         summary={t('detail.overview.nodesAndEdges', {
@@ -156,7 +144,7 @@ export default function OverviewTab({
         <div className="space-y-4">
           <div className="divide-y divide-gray-100">
             <MetaRow
-              icon={<Layers aria-hidden="true" className="w-3.5 h-3.5" />}
+              icon={<Layers className="w-3.5 h-3.5" />}
               label={t('detail.overview.nodeCount')}
               value={t('detail.overview.nodesAndEdges', {
                 nodes: workflow.workflowJson.nodes.length,
@@ -164,36 +152,36 @@ export default function OverviewTab({
               })}
             />
             <MetaRow
-              icon={<Tag aria-hidden="true" className="w-3.5 h-3.5" />}
+              icon={<Tag className="w-3.5 h-3.5" />}
               label={t('detail.overview.category')}
               value={workflow.category}
             />
             {workflow.workflowJson.version && (
               <MetaRow
-                icon={<Activity aria-hidden="true" className="w-3.5 h-3.5" />}
+                icon={<Activity className="w-3.5 h-3.5" />}
                 label={t('detail.overview.version')}
                 value={workflow.workflowJson.version}
               />
             )}
             {workflow.createdBy && (
               <MetaRow
-                icon={<User aria-hidden="true" className="w-3.5 h-3.5" />}
+                icon={<User className="w-3.5 h-3.5" />}
                 label={t('detail.overview.createdBy')}
                 value={workflow.createdBy}
               />
             )}
             <MetaRow
-              icon={<Calendar aria-hidden="true" className="w-3.5 h-3.5" />}
+              icon={<Calendar className="w-3.5 h-3.5" />}
               label={t('detail.overview.createdAt')}
               value={createdAt}
             />
             <MetaRow
-              icon={<Clock aria-hidden="true" className="w-3.5 h-3.5" />}
+              icon={<Clock className="w-3.5 h-3.5" />}
               label={t('detail.overview.updatedAt')}
               value={updatedAt}
             />
             <MetaRow
-              icon={<FileText aria-hidden="true" className="w-3.5 h-3.5" />}
+              icon={<FileText className="w-3.5 h-3.5" />}
               label={t('detail.overview.workflowFiles')}
               value={(
                 <WorkflowFileList
@@ -223,10 +211,10 @@ export default function OverviewTab({
             <StatCard value={stats.errorCount}                  label={t('detail.overview.errorCount')} color="text-red-500" />
           </div>
           {stats.callCount > 0 && (
-            <div className="mt-2 flex items-center gap-x-2 gap-y-1 text-[11px] text-gray-500 flex-wrap">
-              <CheckCircle aria-hidden="true" className="h-3 w-3 text-green-500" />
+            <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-gray-500">
+              <CheckCircle className="h-3 w-3 text-green-500" />
               <span>{t('detail.overview.successTimes', { count: stats.successCount })}</span>
-              <XCircle aria-hidden="true" className="h-3 w-3 text-red-400" />
+              <XCircle className="h-3 w-3 text-red-400" />
               <span>{t('detail.overview.errorTimes', { count: stats.errorCount })}</span>
             </div>
           )}

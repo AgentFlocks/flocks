@@ -31,12 +31,12 @@ export default function ChannelIcon({
   const maskIcon = CHANNEL_MASK_ICON[id];
   const containerClass = compact
     ? `${containerSize} inline-flex shrink-0 items-center justify-center`
-    : `${containerSize} flex items-center justify-center rounded-xl border border-gray-100 shadow-sm shrink-0`;
+    : `${containerSize} flex shrink-0 items-center justify-center rounded-xl border border-gray-100 shadow-sm`;
 
   if (!src && !maskIcon) {
     const fallbackClass = compact
       ? containerClass
-      : `${containerSize} flex items-center justify-center rounded-xl bg-gray-100 shrink-0`;
+      : `${containerSize} flex shrink-0 items-center justify-center rounded-xl bg-gray-100`;
     return (
       <span className={fallbackClass} data-channel-icon={id}>
         <MessageSquare

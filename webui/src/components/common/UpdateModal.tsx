@@ -1,24 +1,23 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import {
+  X,
+  RefreshCw,
   ArrowUpCircle,
-  BellOff,
   CheckCircle,
+  XCircle,
+  Loader2,
+  Sparkles,
   Container,
   HardDrive,
-  Loader2,
-  RefreshCw,
+  BellOff,
   ShieldCheck,
-  Sparkles,
-  X,
-  XCircle,
 } from 'lucide-react';
 import NoticeCard, { NoticePrimaryAction } from './NoticeCard';
 import { useTranslation } from 'react-i18next';
 import { checkUpdate, applyUpdate, IncompleteUpdateError, UpdateStreamTimeoutError, VersionInfo, UpdateProgress, DEFAULT_UPDATE_CHANNEL } from '@/api/update';
 import { checkRestartReadiness } from '@/utils/restartPolling';
 import { UPDATE_DISMISSED_KEY, buildUpdateDismissalKey } from '@/utils/updateDismissal';
-import { useDialogFocus } from '@/hooks/useDialogFocus';
 
 // ------------------------------------------------------------------ //
 
@@ -80,6 +79,8 @@ export default function UpdateModal({
   const [info, setInfo] = useState<VersionInfo | null>(initialInfo ?? null);
   const [checking, setChecking] = useState(false);
   const [upgrading, setUpgrading] = useState(false);
+  // Keeps the progress card up after an upgrade that failed before any step
+  // arrived, so its error stays on screen.
   const [upgradeAttempted, setUpgradeAttempted] = useState(false);
   const [steps, setSteps] = useState<UpdateProgress[]>([]);
   const [error, setError] = useState<string | null>(initialInfo?.error ?? null);
@@ -156,16 +157,7 @@ export default function UpdateModal({
   }, [canUpgrade, channel, i18n.language, info, t]);
 
   const isBusy = upgrading || restarting;
-  const completed = !isBusy && !error && steps.some((step) => step.stage === 'done');
   const showProgressDialog = upgradeAttempted || upgrading || restarting || steps.length > 0;
-  const dialogRef = useRef<HTMLDivElement>(null);
-  useDialogFocus(dialogRef, showProgressDialog, isBusy ? undefined : onClose);
-  // dev only ever shows the amber "upgrading" card; v2 also reports the outcome, in the same palette family.
-  const progressTone = isBusy
-    ? 'border-amber-200 bg-gradient-to-br from-amber-50 via-orange-50 to-rose-50'
-    : completed ? 'border-emerald-200 bg-gradient-to-br from-emerald-50 via-teal-50 to-cyan-50' : 'border-red-200 bg-red-50';
-  const progressIconBg = isBusy ? 'bg-amber-500' : completed ? 'bg-emerald-500' : 'bg-red-500';
-  const ProgressIcon = isBusy ? ArrowUpCircle : completed ? CheckCircle : XCircle;
   const safeClose = () => {
     if (!isBusy) onClose();
   };
@@ -208,16 +200,16 @@ export default function UpdateModal({
     return (
       <div key={index} className="flex items-start gap-2.5 py-1 text-sm">
         {isError
-          ? <XCircle aria-hidden="true" className="mt-0.5 w-4 h-4 text-red-500 flex-shrink-0" />
+          ? <XCircle className="mt-0.5 w-4 h-4 text-red-500 flex-shrink-0" />
           : isSpinning
-          ? <Loader2 aria-hidden="true" className="mt-0.5 w-4 h-4 text-blue-500 animate-spin flex-shrink-0" />
-          : <CheckCircle aria-hidden="true" className="mt-0.5 w-4 h-4 text-green-500 flex-shrink-0" />
+          ? <Loader2 className="mt-0.5 w-4 h-4 text-blue-500 animate-spin flex-shrink-0" />
+          : <CheckCircle className="mt-0.5 w-4 h-4 text-green-500 flex-shrink-0" />
         }
         <div className="min-w-0 flex-1">
           <div className="flex min-w-0 items-center gap-2">
             <span className={isError ? 'text-red-600' : 'text-gray-700'}>{label}</span>
             {!isError && !isSpinning && (
-              <span className="text-xs text-gray-400 min-w-0 truncate">{detail}</span>
+              <span className="min-w-0 truncate text-xs text-gray-400">{detail}</span>
             )}
           </div>
           {hasDownloadProgress && (
@@ -231,7 +223,7 @@ export default function UpdateModal({
                       total: formatBytes(step.total_bytes),
                     })}
               </div>
-              <div className="h-1.5 rounded-full bg-gray-100 overflow-hidden">
+              <div className="h-1.5 overflow-hidden rounded-full bg-gray-100">
                 <div
                   className={`h-full rounded-full bg-amber-500 transition-all ${downloadPercent === null ? 'w-1/2 animate-pulse' : ''}`}
                   style={downloadPercent === null ? undefined : { width: `${downloadPercent}%` }}
@@ -252,46 +244,38 @@ export default function UpdateModal({
     showProgressDialog ? (
       <>
         <div
-          className="fixed inset-0 bg-black/30 z-[90]"
+          className="fixed inset-0 z-[90] bg-black/30"
           onClick={safeClose}
         />
 
         <div className="fixed inset-0 z-[100] flex items-center justify-center pointer-events-none">
           <div
-            ref={dialogRef}
-            role="dialog"
-            aria-modal="true"
-            aria-label={modalTitle}
-            tabIndex={-1}
-            data-ui-overlay="dialog"
-            className="pointer-events-auto flex w-full max-w-md max-h-[calc(100dvh-2rem)] mx-4 flex-col bg-white rounded-2xl shadow-2xl border border-gray-200 overflow-hidden"
+            className="pointer-events-auto w-full max-w-md mx-4 bg-white rounded-2xl shadow-2xl border border-gray-200 overflow-hidden"
             onClick={(e) => e.stopPropagation()}
           >
-            <div className="flex items-center justify-between border-b border-gray-100 shrink-0 px-4 sm:px-6 py-4">
+            <div className="flex items-center justify-between px-4 py-3 border-b border-gray-100">
               <div className="flex items-center gap-2">
-                <Sparkles aria-hidden="true" className="w-4 h-4 text-gray-500" />
-                <h2 className="text-sm font-semibold text-gray-800">{modalTitle}</h2>
+                <Sparkles className="w-4 h-4 text-gray-500" />
+                <span className="text-sm font-semibold text-gray-800">{modalTitle}</span>
               </div>
               <button
-                aria-label={t('closeAction')}
                 onClick={safeClose}
                 disabled={isBusy}
                 className="p-1 text-gray-400 hover:text-gray-600 rounded transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
               >
-                <X aria-hidden="true" className="w-4 h-4" />
+                <X className="w-4 h-4" />
               </button>
             </div>
 
-            <div className="min-h-0 flex-1 overflow-y-auto">
-            <div className="px-4 sm:px-6 pt-4 pb-2">
-              <div className={`rounded-2xl border p-4 shadow-sm ${progressTone}`}>
+            <div className="px-4 pt-4 pb-2">
+              <div className="rounded-2xl border border-amber-200 bg-gradient-to-br from-amber-50 via-orange-50 to-rose-50 p-4 shadow-sm">
                 <div className="flex items-start gap-3">
-                  <span className={`flex h-10 w-10 items-center justify-center rounded-full ${progressIconBg} text-white shadow-sm`}>
-                    <ProgressIcon aria-hidden="true" className="h-5 w-5" />
+                  <span className="flex h-10 w-10 items-center justify-center rounded-full bg-amber-500 text-white shadow-sm">
+                    <ArrowUpCircle className="h-5 w-5" />
                   </span>
                   <div className="min-w-0 flex-1">
                     <div className="text-sm font-semibold text-amber-950">
-                      {isBusy ? t('upgrading') : completed ? t('upgradeComplete') : t('upgradeFailed')}
+                      {upgrading || restarting ? t('upgrading') : t('newVersionTitle')}
                     </div>
                     {latestDisplayVersion && (
                       <div className="mt-1 text-2xl font-bold text-amber-900">
@@ -299,7 +283,7 @@ export default function UpdateModal({
                       </div>
                     )}
                     <p className="mt-2 text-sm leading-6 text-amber-800">
-                      {t(isBusy ? 'confirmUpgradeDesc' : completed ? 'upgradeCompleteDesc' : 'upgradeFailedDesc')}
+                      {t('confirmUpgradeDesc')}
                     </p>
                   </div>
                 </div>
@@ -320,34 +304,33 @@ export default function UpdateModal({
             {error && (
               <div className="px-4 pb-3">
                 <div className="flex items-start gap-2 text-xs text-red-600 bg-red-50 rounded-lg p-2.5">
-                  <XCircle aria-hidden="true" className="w-3.5 h-3.5 mt-0.5 flex-shrink-0" />
-                  <span className="min-w-0 break-words">{error}</span>
+                  <XCircle className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
+                  <span>{error}</span>
                 </div>
               </div>
             )}
 
-            </div>
-            <div className="flex items-center gap-2 px-4 sm:px-6 py-4 shrink-0 flex-wrap">
+            <div className="px-4 pb-4 flex items-center gap-2 flex-wrap">
               {upgrading && !restarting && (
                 <span className="flex items-center gap-1.5 text-xs text-gray-500">
-                  <Loader2 aria-hidden="true" className="w-3.5 h-3.5 animate-spin" />
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
                   {t('upgrading')}
                 </span>
               )}
 
               {restarting && (
                 <span className="flex items-center gap-1.5 text-xs text-blue-600">
-                  <Loader2 aria-hidden="true" className="w-3.5 h-3.5 animate-spin" />
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
                   {t('waitingRestart')}
                 </span>
               )}
 
-              {!isBusy && (
+              {!isBusy && error && (
                 <button
                   onClick={safeClose}
-                  className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-gray-600 bg-gray-100 hover:bg-gray-200 rounded-lg transition-colors ml-auto"
+                  className="ml-auto flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-gray-600 bg-gray-100 hover:bg-gray-200 rounded-lg transition-colors"
                 >
-                  {t('closeAction')}
+                  {t('laterAction')}
                 </button>
               )}
             </div>
@@ -385,7 +368,7 @@ export default function UpdateModal({
               // package upgrades, so the Docker guidance would be misleading.
               <div className="mt-2 rounded-xl border border-blue-200 bg-blue-50 px-3 py-2.5 text-xs text-blue-700">
                 <div className="flex items-center gap-1.5 font-medium">
-                  <ShieldCheck aria-hidden="true" className="w-4 h-4 flex-shrink-0" />
+                  <ShieldCheck className="w-4 h-4 flex-shrink-0" />
                   {t('managedModeTitle')}
                 </div>
                 <p className="mt-1">{t('managedModeDesc')}</p>
@@ -395,9 +378,9 @@ export default function UpdateModal({
               <div className="mt-2 rounded-xl border border-blue-200 bg-blue-50 px-3 py-2.5 text-xs text-blue-800">
                 <div className="flex items-center gap-1.5 font-medium">
                   {info.deploy_mode === 'offline' ? (
-                    <HardDrive aria-hidden="true" className="w-3.5 h-3.5 flex-shrink-0" />
+                    <HardDrive className="w-3.5 h-3.5 flex-shrink-0" />
                   ) : (
-                    <Container aria-hidden="true" className="w-3.5 h-3.5 flex-shrink-0" />
+                    <Container className="w-3.5 h-3.5 flex-shrink-0" />
                   )}
                   {t(info.deploy_mode === 'offline' ? 'offlineModeTitle' : 'dockerModeTitle')}
                 </div>
@@ -420,7 +403,7 @@ export default function UpdateModal({
               <span className="text-gray-400">{t('latestVersion')}</span>
               <div className="flex items-center gap-1.5">
                 {checking ? (
-                  <Loader2 aria-hidden="true" className="w-3 h-3 text-gray-400 animate-spin" />
+                  <Loader2 className="w-3 h-3 text-gray-400 animate-spin" />
                 ) : latestDisplayVersion ? (
                   <>
                     <span className="font-medium text-gray-700">{formatUpdateVersion(latestDisplayVersion)}</span>
@@ -443,7 +426,7 @@ export default function UpdateModal({
               disabled={checking}
               className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-gray-600 bg-gray-100 hover:bg-gray-200 rounded-lg disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
             >
-              <RefreshCw aria-hidden="true" className={`w-3.5 h-3.5 ${checking ? 'animate-spin' : ''}`} />
+              <RefreshCw className={`w-3.5 h-3.5 ${checking ? 'animate-spin' : ''}`} />
               {t('checkUpdate')}
             </button>
 
@@ -466,14 +449,14 @@ export default function UpdateModal({
                 className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-gray-400 hover:text-gray-600 transition-colors"
                 title={t('dismissAction')}
               >
-                <BellOff aria-hidden="true" className="w-3.5 h-3.5" />
+                <BellOff className="w-3.5 h-3.5" />
                 {t('dismissAction')}
               </button>
             )}
 
             {canUpgrade && info?.has_update && info.update_allowed !== false && (
               <NoticePrimaryAction onClick={handleUpgrade} className="ml-auto">
-                <ArrowUpCircle aria-hidden="true" className="w-3.5 h-3.5" />
+                <ArrowUpCircle className="w-3.5 h-3.5" />
                 {t('confirmAction')}
               </NoticePrimaryAction>
             )}

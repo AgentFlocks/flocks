@@ -18,6 +18,7 @@ import json
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Sequence
 
+from flocks.db.idempotent_ddl import schema_script_to_run
 from flocks.knowledge.models import (
     AccessScope,
     Chunk,
@@ -142,7 +143,9 @@ class PostgresKnowledgeStore:
         async with pool.acquire() as conn:
             async with conn.transaction():
                 await conn.execute("SELECT pg_advisory_xact_lock(hashtext($1))", "flocks.knowledge.schema")
-                await conn.execute(";\n".join(SCHEMA_STATEMENTS))
+                script = await schema_script_to_run(conn, ";\n".join(SCHEMA_STATEMENTS))
+                if script is not None:
+                    await conn.execute(script)
         log.info("knowledge.postgres.ready", {})
 
     async def close(self) -> None:

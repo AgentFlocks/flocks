@@ -21,7 +21,7 @@ from flocks.config.config_writer import ConfigWriter
 from flocks.mcp import MCP, McpStatus
 from flocks.provider.provider import Provider
 from flocks.provider.types import ModelType
-from flocks.security import get_secret_manager
+from flocks.security.secrets import SecretChanges, recording_secret_changes
 from flocks.server.config_mutation import serialized_config_mutation
 from flocks.server.routes.default_model import (
     SetDefaultModelRequest,
@@ -365,38 +365,37 @@ async def _reload_runtime_state() -> None:
         log.warning("onboarding.reload_runtime.failed", {"error": str(exc)})
 
 
-def _snapshot_config_and_secret_state() -> tuple[Dict[str, Any], Dict[str, Any]]:
-    """Capture config/secrets so callers can safely restore on failure."""
-    secrets = get_secret_manager()
-    return copy.deepcopy(ConfigWriter._read_raw()), copy.deepcopy(secrets._load())
+def _snapshot_config_state() -> Dict[str, Any]:
+    """Capture config so callers can restore it on failure (secrets are tracked per key)."""
+    return copy.deepcopy(ConfigWriter._read_raw())
 
 
 async def _restore_config_and_secret_state(
     config_snapshot: Dict[str, Any],
-    secret_snapshot: Dict[str, Any],
+    secret_changes: SecretChanges,
 ) -> None:
-    """Restore config/secrets and refresh runtime state."""
-    secrets = get_secret_manager()
+    """Restore config, take back the secrets written meanwhile and refresh runtime state."""
     ConfigWriter._write_raw(config_snapshot)
-    secrets._save(secret_snapshot)
+    secret_changes.revert()
     await _reload_runtime_state()
 
 
 @asynccontextmanager
 async def _temporary_config_and_secret_state():
-    """Snapshot config + secrets so validate can reuse real write/test paths safely."""
-    config_snapshot, secret_snapshot = _snapshot_config_and_secret_state()
+    """Snapshot config and record secret writes so validate can reuse real write/test paths safely."""
+    config_snapshot = _snapshot_config_state()
 
-    try:
-        yield
-    finally:
-        await _restore_config_and_secret_state(config_snapshot, secret_snapshot)
+    with recording_secret_changes() as secret_changes:
+        try:
+            yield
+        finally:
+            await _restore_config_and_secret_state(config_snapshot, secret_changes)
 
 
 @asynccontextmanager
 async def _rollback_on_apply_failure(mcp_name: Optional[str] = None):
     """Rollback onboarding writes if apply fails part-way through."""
-    config_snapshot, secret_snapshot = _snapshot_config_and_secret_state()
+    config_snapshot = _snapshot_config_state()
     previous_mcp_config = (
         copy.deepcopy(_load_raw_mcp_server_config(mcp_name)) if mcp_name else None
     )
@@ -411,21 +410,22 @@ async def _rollback_on_apply_failure(mcp_name: Optional[str] = None):
             )
         except Exception:
             was_mcp_connected = False
-    try:
-        yield
-    except Exception:
-        if mcp_name:
-            await _restore_threatbook_mcp_setup(
-                mcp_name,
-                config_snapshot,
-                secret_snapshot,
-                previous_mcp_config,
-                was_mcp_connected,
-            )
-            await _reload_runtime_state()
-        else:
-            await _restore_config_and_secret_state(config_snapshot, secret_snapshot)
-        raise
+    with recording_secret_changes() as secret_changes:
+        try:
+            yield
+        except Exception:
+            if mcp_name:
+                await _restore_threatbook_mcp_setup(
+                    mcp_name,
+                    config_snapshot,
+                    secret_changes,
+                    previous_mcp_config,
+                    was_mcp_connected,
+                )
+                await _reload_runtime_state()
+            else:
+                await _restore_config_and_secret_state(config_snapshot, secret_changes)
+            raise
 
 
 async def _test_provider_or_service_with_temp_credentials(

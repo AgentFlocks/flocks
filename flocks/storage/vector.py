@@ -18,6 +18,7 @@ from uuid import uuid4
 from datetime import datetime
 
 from flocks.db.params import Params, in_clause
+from flocks.db.retry import retry_deadlock_once
 from flocks.db.search import (
     MEMORY_COLUMNS,
     RANK_ALIAS,
@@ -621,6 +622,21 @@ async def replace_memory_file_index(
     before_replace: Optional[Callable[[Any, Dict[str, Any]], Awaitable[None]]] = None,
 ) -> int:
     """Atomically replace one Memory file's metadata, chunks, and FTS rows."""
+    return await retry_deadlock_once(
+        lambda: _replace_memory_file_index_once(
+            db_path, file_entry=file_entry, chunks=chunks, before_replace=before_replace,
+        ),
+        name="memory.replace_file_index",
+    )
+
+
+async def _replace_memory_file_index_once(
+    db_path: Path,
+    *,
+    file_entry: Dict[str, Any],
+    chunks: List[Dict[str, Any]],
+    before_replace: Optional[Callable[[Any, Dict[str, Any]], Awaitable[None]]] = None,
+) -> int:
     scope = file_entry["scope"]
     scope_id = file_entry["scope_id"]
     path = file_entry["path"]

@@ -1,6 +1,6 @@
 import React from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import OnboardingModal from './OnboardingModal';
@@ -149,10 +149,10 @@ function makeValidation(resourceResults: Record<string, any> = {}) {
   };
 }
 
-function renderOnboarding(onClose = vi.fn()) {
+function renderOnboarding() {
   return render(
     <MemoryRouter>
-      <OnboardingModal onClose={onClose} />
+      <OnboardingModal onClose={vi.fn()} />
     </MemoryRouter>,
   );
 }
@@ -232,36 +232,6 @@ describe('OnboardingModal', () => {
     expect(screen.queryByText('onboarding.bootstrap.modelRegionTitle')).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'onboarding.bootstrap.regionChina' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'onboarding.bootstrap.regionGlobal' })).not.toBeInTheDocument();
-  });
-
-  it('Escape closes the skip confirmation before the onboarding dialog', async () => {
-    const user = userEvent.setup();
-    const onClose = vi.fn();
-    renderOnboarding(onClose);
-    await screen.findByRole('button', { name: 'onboarding.bootstrap.savePrimary' });
-    const skip = screen.getByRole('button', { name: 'onboarding.bootstrap.skipPage' });
-    await user.click(skip);
-    expect(screen.getAllByRole('dialog')).toHaveLength(2);
-    await user.keyboard('{Escape}');
-    expect(screen.getAllByRole('dialog')).toHaveLength(1);
-    expect(skip).toHaveFocus();
-    expect(onClose).not.toHaveBeenCalled();
-    await user.keyboard('{Escape}');
-    expect(onClose).toHaveBeenCalledTimes(1);
-  });
-
-  it('keeps onboarding open while model credentials are being validated', async () => {
-    const user = userEvent.setup();
-    const onClose = vi.fn();
-    onboardingAPI.validate.mockImplementationOnce(() => new Promise(() => {}));
-    renderOnboarding(onClose);
-    await screen.findByRole('button', { name: 'onboarding.bootstrap.savePrimary' });
-    await user.type(screen.getByPlaceholderText('onboarding.bootstrap.modelKeyPlaceholder'), 'tb-key');
-    await user.click(screen.getByRole('button', { name: 'onboarding.bootstrap.savePrimary' }));
-    expect(screen.getByRole('button', { name: 'button.close' })).toBeDisabled();
-    await user.keyboard('{Escape}');
-    fireEvent.click(document.querySelector('div.fixed.inset-0')!);
-    expect(onClose).not.toHaveBeenCalled();
   });
 
   it('saves ThreatBook model setup without applying intelligence API or MCP services', async () => {

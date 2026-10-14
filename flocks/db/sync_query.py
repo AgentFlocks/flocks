@@ -186,6 +186,12 @@ class Connection:
         head = re.sub(r"\A(?:\s|--[^\n]*(?:\n|$)|/\*.*?\*/)*", "", statement, flags=re.S)
         if head.upper().startswith(("SELECT", "WITH", "SHOW", "VALUES", "EXPLAIN")) or re.search(r"\bRETURNING\b", head, re.I):
             return Query(self, statement, tuple(params))
+        if not params and head.upper().startswith(("CREATE", "ALTER")):
+            # Schema statements run at every start: see flocks.db.idempotent_ddl.
+            from flocks.db.idempotent_ddl import schema_script_to_run
+            statement = self._run(schema_script_to_run(self._connection, statement))
+            if statement is None:
+                return ""
         status = self._run(self._connection.execute(statement, *tuple(params), timeout=self.timeout))
         return status
 

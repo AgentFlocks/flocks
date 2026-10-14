@@ -524,8 +524,8 @@ def test_soc_dashboard_triage_outcomes_partition_records(tmp_path: Path):
     assert triage["benign"] == 2
     assert triage["unknown"] == 3
     assert triage["triageFailed"] == 2
-    assert first_fact == ("threat-name-0", "threat-type-0", "low", "High")
-    assert normalized_non_attack == ("non_attack", "unknown")
+    assert tuple(first_fact) == ("threat-name-0", "threat-type-0", "low", "High")
+    assert tuple(normalized_non_attack) == ("non_attack", "unknown")
     assert dict(triage["threatTypeCounter"]) == {
         f"threat-type-{index}": 1 for index in range(len(records))
     }

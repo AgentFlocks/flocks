@@ -5,15 +5,14 @@ Routes for listing and managing background tasks spawned by agents.
 Moved from agent.py to avoid route conflict with /api/agent/{name}.
 """
 
-from typing import List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 
 from flocks.auth.context import AuthUser
 from flocks.server.auth import require_user
 from flocks.session.policy import SessionPolicy
-from flocks.session.session import Session
 from flocks.utils.log import Log
 
 router = APIRouter()
@@ -38,35 +37,55 @@ class BackgroundTaskResponse(BaseModel):
     completedAt: Optional[int] = Field(None, description="Completed timestamp (ms)")
 
 
-def _get_background_manager():
-    """Return the per-instance background manager, or None when unavailable."""
-    try:
-        from flocks.task.background import get_background_manager
+def _background_managers() -> List[Any]:
+    # Tasks live in the manager of the instance that launched them (scheduled
+    # tasks run outside any request's instance), so look at all of them.
+    from flocks.task.background import all_background_managers
 
-        return get_background_manager()
-    except Exception as exc:
-        log.warning("background_task.manager_unavailable", {"error": str(exc)})
-        return None
+    return all_background_managers()
 
 
-async def _can_access_task(task, user: AuthUser, *, write: bool) -> bool:
-    """A task is visible to whoever can read its parent session (or its own
-    session); cancelling requires write access on it. Same rules as the
-    session list, so admins see exactly what they can see there."""
-    for session_id in (task.parent_session_id, task.session_id):
-        if not session_id:
-            continue
-        session = await Session.get_by_id(session_id)
-        if session is None:
-            continue
-        allowed = (
-            SessionPolicy.can_write(session, user)
-            if write
-            else SessionPolicy.can_read(session, user)
-        )
-        if allowed:
-            return True
-    return False
+def _find_task(task_id: str) -> Tuple[Any, Any]:
+    for manager in _background_managers():
+        task = manager.get_task(task_id)
+        if task is not None:
+            return manager, task
+    return None, None
+
+
+async def _task_session_access(
+    task: Any,
+    user: AuthUser,
+    sessions: Optional[Dict[str, Any]] = None,
+) -> Tuple[bool, bool]:
+    """(can_read, can_write) for the session the task runs in.
+
+    The task's own session decides; its parent session stands in only while
+    the task has not been given one yet. A session that is referenced but
+    cannot be read (deleted, or the read failed) grants nothing: there are
+    several users, a task keeps its prompt and output in memory after its
+    session is gone, and an admin could not read that session while it
+    existed. A task tied to no session at all is ownerless runtime state,
+    visible to admins only. ``sessions`` caches lookups across the tasks of
+    one request.
+    """
+    from flocks.session.session import Session
+
+    session_id = task.session_id or task.parent_session_id
+    if not session_id:
+        is_admin = SessionPolicy.is_admin(user)
+        return is_admin, is_admin
+    cache = sessions if sessions is not None else {}
+    if session_id not in cache:
+        cache[session_id] = await Session.get_by_id_unfiltered(session_id)
+    session = cache[session_id]
+    if session is None:
+        return False, False
+    return SessionPolicy.can_read(session, user), SessionPolicy.can_write(session, user)
+
+
+def _not_found(task_id: str) -> HTTPException:
+    return HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Task {task_id} not found")
 
 
 def _task_to_response(task) -> BackgroundTaskResponse:
@@ -92,21 +111,25 @@ async def list_background_tasks(user: AuthUser = Depends(require_user)):
     """
     List background tasks
 
-    Returns the background tasks (pending, running, completed) whose parent
-    session the caller can read.
+    Returns the background tasks (pending, running, finished) of the sessions
+    the caller can read.
     """
     try:
-        manager = _get_background_manager()
-        if not manager:
-            return []
+        tasks = [
+            task
+            for manager in _background_managers()
+            for task in manager.list_tasks()
+        ]
         visible = []
-        for task in manager.list_tasks():
-            if await _can_access_task(task, user, write=False):
+        sessions: Dict[str, Any] = {}
+        for task in sorted(tasks, key=lambda item: item.created_at):
+            can_read, _ = await _task_session_access(task, user, sessions)
+            if can_read:
                 visible.append(_task_to_response(task))
         return visible
     except Exception as e:
         log.error("background_task.list.error", {"error": str(e)})
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Failed to list background tasks")
 
 
 @router.get("/{task_id}", response_model=BackgroundTaskResponse, summary="Get background task")
@@ -116,21 +139,13 @@ async def get_background_task(task_id: str, user: AuthUser = Depends(require_use
 
     Returns detailed information about a specific background task.
     """
-    try:
-        manager = _get_background_manager()
-        if not manager:
-            raise HTTPException(status_code=404, detail="Background manager not available")
-        task = manager.get_task(task_id)
-        if not task:
-            raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
-        if not await _can_access_task(task, user, write=False):
-            raise HTTPException(status_code=403, detail="Not allowed to view this task")
-        return _task_to_response(task)
-    except HTTPException:
-        raise
-    except Exception as e:
-        log.error("background_task.get.error", {"error": str(e), "task_id": task_id})
-        raise HTTPException(status_code=500, detail=str(e))
+    _, task = _find_task(task_id)
+    if task is None:
+        raise _not_found(task_id)
+    can_read, _ = await _task_session_access(task, user)
+    if not can_read:
+        raise _not_found(task_id)
+    return _task_to_response(task)
 
 
 @router.post("/{task_id}/cancel", summary="Cancel background task")
@@ -140,20 +155,45 @@ async def cancel_background_task(task_id: str, user: AuthUser = Depends(require_
 
     Cancels a running or pending background task.
     """
-    try:
-        manager = _get_background_manager()
-        if not manager:
-            raise HTTPException(status_code=404, detail="Background manager not available")
-        task = manager.get_task(task_id)
-        if task is not None and not await _can_access_task(task, user, write=True):
-            raise HTTPException(status_code=403, detail="Only the session owner can cancel this task")
-        cancelled = manager.cancel(task_id=task_id)
-        if cancelled == 0:
-            raise HTTPException(status_code=404, detail=f"Task {task_id} not found or already completed")
-        log.info("background_task.cancelled", {"task_id": task_id})
-        return {"status": "success", "message": f"Task {task_id} cancelled", "cancelled": cancelled}
-    except HTTPException:
-        raise
-    except Exception as e:
-        log.error("background_task.cancel.error", {"error": str(e), "task_id": task_id})
-        raise HTTPException(status_code=500, detail=str(e))
+    manager, task = _find_task(task_id)
+    if task is None:
+        raise _not_found(task_id)
+    can_read, can_write = await _task_session_access(task, user)
+    if not can_read:
+        raise _not_found(task_id)
+    if not can_write:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No permission to cancel this task")
+    if task.status not in ("pending", "running"):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Task {task_id} has already finished",
+        )
+    if task.session_id:
+        from flocks.task.manager import TaskManager
+        from flocks.task.store import TaskStore
+
+        executions = await TaskStore.list_active_executions_for_session(task.session_id)
+        if executions:
+            # The run of a scheduled task: cancel it as the task center does.
+            # Cancelling only the background run made the task manager queue
+            # the execution again.
+            for execution in executions:
+                await TaskManager.cancel_execution(execution.id)
+            log.info("background_task.cancelled", {
+                "task_id": task_id,
+                "task_executions": [execution.id for execution in executions],
+            })
+            return {
+                "status": "success",
+                "message": f"Task {task_id} cancelled",
+                "cancelled": 1,
+                "taskExecutionIds": [execution.id for execution in executions],
+            }
+    cancelled = manager.cancel(task_id=task_id)
+    if cancelled == 0:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Task {task_id} has already finished",
+        )
+    log.info("background_task.cancelled", {"task_id": task_id})
+    return {"status": "success", "message": f"Task {task_id} cancelled", "cancelled": cancelled}

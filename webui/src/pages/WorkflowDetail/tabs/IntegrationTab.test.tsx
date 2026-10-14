@@ -782,16 +782,21 @@ describe('Syslog trigger port validation (WFL-0316)', () => {
     render(<IntegrationTab workflow={workflow} onGuidePrompt={vi.fn()} />);
     // 记录行有名称按钮与展开箭头两个按钮都带该名称，点第一个（名称按钮）即可选中并展开「编辑配置」
     await user.click((await screen.findAllByRole('button', { name: /Syslog Listener/ }))[0]);
-    const port = await screen.findByRole('textbox', { name: 'Port' });
+    // dev keeps the port a number input (spinbutton); letters never reach it.
+    const port = await screen.findByRole('spinbutton', { name: 'Port' });
     const save = screen.getByRole('button', { name: '保存' });
     return { user, port, save };
   }
 
-  it.each(['0', '70000', 'abc'])('shows the range error and disables 保存 for port %s', async (value) => {
+  it.each([
+    ['0', 0],
+    ['70000', 70000],
+    ['abc', null],
+  ])('shows the range error and disables 保存 for port %s', async (value, shown) => {
     const { user, port, save } = await openSyslogPanel();
     await user.clear(port);
     await user.type(port, value);
-    expect(port).toHaveValue(value);
+    expect(port).toHaveValue(shown);
     expect(screen.getByText(SYSLOG_PORT_RANGE_ERROR)).toBeInTheDocument();
     expect(save).toBeDisabled();
     await user.click(save);
@@ -802,7 +807,7 @@ describe('Syslog trigger port validation (WFL-0316)', () => {
     const { user, port, save } = await openSyslogPanel();
     await user.clear(port);
     await user.type(port, '65535');
-    expect(port).toHaveValue('65535');
+    expect(port).toHaveValue(65535);
     expect(screen.queryByText(SYSLOG_PORT_RANGE_ERROR)).not.toBeInTheDocument();
     expect(save).toBeEnabled();
   });

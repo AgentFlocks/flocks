@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { ChevronsLeft, ChevronsRight, ChevronUp } from 'lucide-react';
+import { ChevronUp, ChevronsLeft, ChevronsRight } from 'lucide-react';
 import GuideInfoIcon from './GuideInfoIcon';
 
 export interface ChatGuideAction {
@@ -76,7 +76,7 @@ export default function ChatGuideDock({
   const renderActionButton = (action: ChatGuideAction, variant: 'rail' | 'panel') => (
     <div
       key={action.label}
-      className={`group inline-flex h-8 items-center rounded-lg border border-zinc-200 bg-white text-zinc-700 transition-colors hover:border-rose-200 hover:bg-rose-50/70 hover:text-rose-600 max-w-full ${
+      className={`group inline-flex h-8 max-w-full items-center rounded-lg border border-zinc-200 bg-white text-zinc-700 transition-colors hover:border-rose-200 hover:bg-rose-50/70 hover:text-rose-600 ${
         variant === 'rail' ? 'flex-shrink-0' : 'min-w-0'
       }`}
     >
@@ -84,7 +84,7 @@ export default function ChatGuideDock({
         type="button"
         disabled={disabled}
         onClick={() => handleStartPrompt(action)}
-        className="flex h-full flex-1 items-center rounded-l-lg pl-2.5 pr-1 text-left text-xs font-semibold leading-none disabled:cursor-not-allowed disabled:opacity-50 min-w-0 truncate whitespace-nowrap"
+        className="flex h-full min-w-0 flex-1 items-center truncate whitespace-nowrap rounded-l-lg pl-2.5 pr-1 text-left text-xs font-semibold leading-none disabled:cursor-not-allowed disabled:opacity-50"
       >
         {action.label}
       </button>
@@ -97,9 +97,9 @@ export default function ChatGuideDock({
       {panelOpen && !collapsed && (
         <div
           data-testid="chat-guide-expanded-panel"
-          className="absolute bottom-full left-0 right-0 mb-2 h-56 max-h-[calc(100vh-12rem)] rounded-xl border border-zinc-200 bg-white/95 p-2 shadow-lg backdrop-blur z-30 overflow-hidden"
+          className="absolute bottom-full left-0 right-0 z-30 mb-2 h-56 max-h-[calc(100vh-12rem)] overflow-hidden rounded-xl border border-zinc-200 bg-white/95 p-2 shadow-lg backdrop-blur"
         >
-          <div className="flex h-full flex-col gap-3 pr-1 [scrollbar-width:thin] [scrollbar-color:#d4d4d8_transparent] dark:[scrollbar-color:#545d68_transparent] overflow-y-auto">
+          <div className="flex h-full flex-col gap-3 overflow-y-auto pr-1 [scrollbar-width:thin] [scrollbar-color:#d4d4d8_transparent] dark:[scrollbar-color:#545d68_transparent]">
             {actionGroups.map((group, groupIndex) => (
               <section key={group.title || `group-${groupIndex}`} className="min-w-0">
                 {shouldShowGroupTitle && group.title && (
@@ -125,12 +125,12 @@ export default function ChatGuideDock({
             return next;
           });
         }}
-        className="flex h-8 w-8 items-center justify-center rounded-lg border border-zinc-200 bg-white text-zinc-400 transition-colors hover:border-rose-200 hover:bg-rose-50/70 hover:text-rose-500 flex-shrink-0"
+        className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg border border-zinc-200 bg-white text-zinc-400 transition-colors hover:border-rose-200 hover:bg-rose-50/70 hover:text-rose-500"
         title={collapsed ? expandTitle : collapseTitle}
         aria-label={collapsed ? expandTitle : collapseTitle}
         aria-expanded={!collapsed}
       >
-        {collapsed ? <ChevronsRight aria-hidden="true" className="h-3.5 w-3.5" /> : <ChevronsLeft aria-hidden="true" className="h-3.5 w-3.5" />}
+        {collapsed ? <ChevronsRight className="h-3.5 w-3.5" /> : <ChevronsLeft className="h-3.5 w-3.5" />}
       </button>
 
       <div
@@ -155,7 +155,7 @@ export default function ChatGuideDock({
         <button
           type="button"
           onClick={() => setPanelOpen((value) => !value)}
-          className={`inline-flex h-8 w-8 items-center justify-center rounded-lg border bg-white transition-colors flex-shrink-0 ${
+          className={`inline-flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg border bg-white transition-colors ${
             panelOpen
               ? 'border-rose-200 text-rose-500'
               : 'border-zinc-200 text-zinc-400 hover:border-rose-200 hover:bg-rose-50/70 hover:text-rose-500'
@@ -164,7 +164,7 @@ export default function ChatGuideDock({
           aria-label={panelOpen ? collapseTitle : expandTitle}
           aria-expanded={panelOpen}
         >
-          <ChevronUp aria-hidden="true" className={`h-3.5 w-3.5 transition-transform ${panelOpen ? 'rotate-180' : ''}`} />
+          <ChevronUp className={`h-3.5 w-3.5 transition-transform ${panelOpen ? 'rotate-180' : ''}`} />
         </button>
       )}
     </div>

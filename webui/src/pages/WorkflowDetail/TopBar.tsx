@@ -30,13 +30,13 @@ export default function TopBar({ workflow, latestExecution, panelOpen, onToggleP
   const isRunning = latestExecution?.status === 'running';
 
   return (
-    <div className="bg-white border-b border-gray-200 flex items-center gap-3 min-h-14 pl-14 pr-4 py-2 flex-shrink-0 z-10 lg:pl-4">
+    <div className="min-h-14 bg-white border-b border-gray-200 px-4 py-2 flex items-center gap-3 flex-shrink-0 z-10">
       {/* Back button */}
       <Link
         to="/workflows"
         className="flex items-center gap-1.5 text-gray-500 hover:text-gray-800 transition-colors text-sm font-medium"
       >
-        <ArrowLeft aria-hidden="true" className="w-4 h-4" />
+        <ArrowLeft className="w-4 h-4" />
         {t('pageTitle')}
       </Link>
 
@@ -71,9 +71,9 @@ export default function TopBar({ workflow, latestExecution, panelOpen, onToggleP
           title={panelOpen ? t('detail.topBar.collapsePanel') : t('detail.topBar.expandPanel')}
         >
           {panelOpen ? (
-            <PanelRightClose aria-hidden="true" className="w-4 h-4" />
+            <PanelRightClose className="w-4 h-4" />
           ) : (
-            <PanelRight aria-hidden="true" className="w-4 h-4" />
+            <PanelRight className="w-4 h-4" />
           )}
         </button>
       </div>

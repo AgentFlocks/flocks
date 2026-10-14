@@ -72,7 +72,14 @@ export interface ExtensionSettingsSection {
   gate?: ExtensionSettingsGate;
 }
 
-export type SlotName = 'session.settings' | 'channel.settings' | 'layout.version' | 'layout.notifications' | 'chat.composer';
+export type SlotName =
+  | 'session.settings'
+  | 'channel.settings'
+  | 'layout.version'
+  | 'layout.notifications'
+  | 'chat.composer'
+  /** Replaces the account list on the account-management settings page. */
+  | 'settings.account';
 
 /** Optional composer tools can hold the draft while an asynchronous input is active. */
 export interface ChatComposerSlotContext extends Record<string, unknown> {

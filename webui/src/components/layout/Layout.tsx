@@ -199,7 +199,7 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
   const confirm = useConfirm();
   const { t, i18n } = useTranslation('nav');
   const { t: tAuth } = useTranslation('auth');
-  const { productName } = useProductName();
+  const { productName, logoUrl } = useProductName();
 
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [collapsed, setCollapsed] = useState(readSidebarCollapsed);
@@ -959,6 +959,7 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
 
       <WorkspaceHeader
         productName={productName}
+        logoUrl={logoUrl}
         update={headerUpdate}
         workspaces={headerWorkspaces}
         currentWorkspace={navStateReady ? currentWorkspace : null}
@@ -972,15 +973,12 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
         taskCounts={taskCounts ? { running: taskCounts.running ?? 0, queued: taskCounts.queued ?? 0 } : null}
         onOpenShortcuts={openShortcuts}
         onOpenMobileNav={() => setSidebarOpen(true)}
-        mobileNavOpen={sidebarOpen}
       />
 
       {sidebarOpen && <div className="fixed inset-0 top-14 z-30 bg-zinc-900/40 lg:hidden" onClick={() => setSidebarOpen(false)} />}
 
-      {/* Off-canvas on narrow screens: `invisible` while closed keeps its links
-          out of the tab order (visibility flips after the slide-out). */}
       <aside
-        className={`fixed bottom-0 left-0 top-14 z-40 max-w-[calc(100vw-2rem)] border-r border-zinc-200 bg-zinc-100 transition-[transform,visibility] dark:border-zinc-800 dark:bg-zinc-950 lg:translate-x-0 ${collapsed ? 'w-16' : 'w-64'} ${sidebarOpen ? 'translate-x-0' : '-translate-x-full invisible lg:visible'}`}
+        className={`fixed bottom-0 left-0 top-14 z-40 border-r border-zinc-200 bg-zinc-100 transition-transform dark:border-zinc-800 dark:bg-zinc-950 lg:translate-x-0 ${collapsed ? 'w-16' : 'w-64'} ${sidebarOpen ? 'translate-x-0' : '-translate-x-full'}`}
       >
         {sidebar}
         <button

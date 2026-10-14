@@ -317,15 +317,17 @@ async def read_tool(
             project = Path(sandbox["agent_workspace_dir"]).expanduser()
             mount = Path(sandbox.get("container_workdir", "/workspace"))
             path = Path(filePath.strip()).expanduser()
-            if path.is_relative_to("/agent"):
+            if path.is_absolute() and (path.is_relative_to(project) or path.is_relative_to(workspace)):
+                # Host paths are checked before the container aliases: a container
+                # workdir such as <T>/mount is also a prefix of a project at <T>/mount/project.
+                if path.is_relative_to(project) and not path.is_relative_to(workspace):
+                    read_roots = [str(project)]
+            elif path.is_relative_to("/agent"):
                 path = project / path.relative_to("/agent")
                 read_roots = [str(project)]
             elif path.is_relative_to(mount):
                 path = workspace / path.relative_to(mount)
-            elif path.is_absolute():
-                if path.is_relative_to(project) and not path.is_relative_to(workspace):
-                    read_roots = [str(project)]
-            else:
+            elif not path.is_absolute():
                 # Relative reads prefer existing workspace files, then project files.
                 read_roots = [str(workspace), str(project)]
             filePath = str(path)

@@ -422,7 +422,9 @@ async def test_stop_workflow_keeps_unfinished_run_tracked_until_thread_exits(
     assert manager.get_status("wf-stop")["activeRuns"] == 1
 
     release_run.set()
-    for _ in range(100):
+    # Up to 10 s: a loaded machine can take well over a second to finish the
+    # worker thread and its bookkeeping (it took longer than 1 s under the full suite).
+    for _ in range(1000):
         if manager.get_status("wf-stop")["activeRuns"] == 0:
             break
         await asyncio.sleep(0.01)

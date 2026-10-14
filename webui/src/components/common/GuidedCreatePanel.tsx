@@ -71,21 +71,21 @@ export default function GuidedCreatePanel({
           {emptyTitle}
         </p>
       )}
-      <div className="flex max-h-[min(560px,calc(100vh-260px))] w-full max-w-[420px] flex-col rounded-xl border border-gray-200 bg-white px-5 py-5 text-center shadow-sm overflow-hidden">
+      <div className="flex max-h-[min(560px,calc(100vh-260px))] w-full max-w-[420px] flex-col overflow-hidden rounded-xl border border-gray-200 bg-white px-5 py-5 text-center shadow-sm">
         <div className="flex-shrink-0">
-          <div className="flex h-11 w-11 items-center justify-center rounded-xl border border-red-100 bg-red-50 text-red-500 mx-auto">
-            {icon ?? <MessageSquare aria-hidden="true" className="h-5 w-5" />}
+          <div className="mx-auto flex h-11 w-11 items-center justify-center rounded-xl border border-red-100 bg-red-50 text-red-500">
+            {icon ?? <MessageSquare className="h-5 w-5" />}
           </div>
           <h3 className="mt-4 text-sm font-semibold text-gray-900">
             {title}
           </h3>
-          <p className="mt-2 max-w-[300px] text-xs leading-relaxed text-gray-500 mx-auto">
+          <p className="mx-auto mt-2 max-w-[300px] text-xs leading-relaxed text-gray-500">
             {description}
           </p>
         </div>
         <div
           data-testid={scrollTestId}
-          className="mt-4 space-y-4 pr-1 text-left [scrollbar-width:thin] [scrollbar-color:#e4e4e7_transparent] min-h-0 overflow-y-auto"
+          className="mt-4 min-h-0 space-y-4 overflow-y-auto pr-1 text-left [scrollbar-width:thin] [scrollbar-color:#e4e4e7_transparent]"
         >
           {visibleGroups.map((group) => (
             <GuidedCreateSection

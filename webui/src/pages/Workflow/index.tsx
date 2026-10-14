@@ -1,7 +1,15 @@
 import { useState, useMemo, useEffect, useId, useCallback, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { useNavigate } from 'react-router-dom';
-import { ChevronRight, Clock, FolderOpen, Plus, RefreshCw, Sparkles, Workflow as WorkflowIcon } from 'lucide-react';
+import {
+  Workflow as WorkflowIcon,
+  Plus,
+  RefreshCw,
+  Sparkles,
+  FolderOpen,
+  Clock,
+  ChevronRight,
+} from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import PageHeader from '@/components/common/PageHeader';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
@@ -176,18 +184,18 @@ export default function WorkflowPage() {
 
   return (
     <div className="h-full flex flex-col">
-      <PageHeader tone="ai"
+      <PageHeader
         title={t('pageTitle')}
         description={t('pageDescription')}
-        icon={<WorkflowIcon aria-hidden="true" className="w-8 h-8" />}
+        icon={<WorkflowIcon className="w-8 h-8" />}
         // Refresh / create actions intentionally live in the toolbar below so
         // the page header stays uniform with Skill/Agent pages.
       />
 
       {error && <p role="alert" className="px-4 py-2 text-sm text-red-600">{error}</p>}
       {/* Toolbar */}
-      <div className="px-4 py-2 border-b border-gray-100 flex items-center gap-3 flex-wrap min-w-0">
-        <div className="flex items-center gap-2 ml-auto shrink-0">
+      <div className="px-4 py-2 border-b border-gray-100 flex items-center gap-3">
+        <div className="ml-auto flex items-center gap-2">
           <PluginViewToggle value={viewMode} onChange={setViewMode} />
           <button
             onClick={handleRefresh}
@@ -199,13 +207,13 @@ export default function WorkflowPage() {
                 : 'border-gray-200 text-gray-400 hover:bg-gray-50 hover:text-gray-600 disabled:opacity-50'
             }`}
           >
-            <RefreshCw aria-hidden="true" className={`w-3.5 h-3.5 ${refreshing ? 'animate-spin' : ''}`} />
+            <RefreshCw className={`w-3.5 h-3.5 ${refreshing ? 'animate-spin' : ''}`} />
           </button>
           <button
             onClick={openFreshCreate}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors text-sm whitespace-nowrap"
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors text-sm"
           >
-            <Plus aria-hidden="true" className="w-4 h-4" />
+            <Plus className="w-4 h-4" />
             {t('createWorkflow')}
           </button>
         </div>
@@ -220,7 +228,7 @@ export default function WorkflowPage() {
         <div className="min-w-0 flex-1 space-y-6">
         {workflows.length === 0 ? (
           <EmptyState
-            icon={<WorkflowIcon aria-hidden="true" className="w-16 h-16" />}
+            icon={<WorkflowIcon className="w-16 h-16" />}
             title={t('emptyState.title')}
             description={t('emptyState.description')}
             action={
@@ -228,7 +236,7 @@ export default function WorkflowPage() {
                 onClick={openFreshCreate}
                 className="inline-flex items-center gap-2 px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700"
               >
-                <Plus aria-hidden="true" className="w-5 h-5" />
+                <Plus className="w-5 h-5" />
                 {t('createWorkflow')}
               </button>
             }
@@ -238,7 +246,7 @@ export default function WorkflowPage() {
             {showCustom && (
               <WorkflowSection
                 title={t('section.custom')}
-                icon={<FolderOpen aria-hidden="true" className="w-4 h-4" />}
+                icon={<FolderOpen className="w-4 h-4" />}
                 workflows={customWorkflows}
                 groupSelection={groupSelection}
                 groupDrag={groupDrag}
@@ -248,7 +256,7 @@ export default function WorkflowPage() {
             {showBuiltin && (
               <WorkflowSection
                 title={t('section.builtin')}
-                icon={<Sparkles aria-hidden="true" className="w-4 h-4" />}
+                icon={<Sparkles className="w-4 h-4" />}
                 workflows={builtinWorkflows}
                 groupSelection={groupSelection}
                 groupDrag={groupDrag}
@@ -344,7 +352,6 @@ function WorkflowSection({
                 key={p}
                 type="button"
                 onClick={() => setPage(p)}
-                aria-current={p === page ? 'page' : undefined}
                 className={`w-6 h-5 rounded text-[11px] font-medium transition-colors ${
                   p === page ? 'bg-slate-700 text-white' : 'hover:bg-gray-100 text-gray-500'
                 }`}
@@ -409,14 +416,16 @@ function WorkflowCard({ workflow, grouping, layout = 'cards' }: { workflow: Work
   return (
     <div
       onClick={() => navigate(`/workflows/${workflow.id}`)}
-      className={`group relative bg-white rounded-xl border border-gray-200 flex flex-col cursor-pointer transition-all duration-150 hover:border-gray-300 hover:shadow-md overflow-hidden ${layout === 'list' ? 'sm:flex-row' : ''}`}
+      className={`group relative bg-white rounded-xl border border-gray-200 flex flex-col
+                 overflow-hidden cursor-pointer transition-all duration-150
+                 hover:border-gray-300 hover:shadow-md ${layout === 'list' ? 'sm:flex-row' : ''}`}
     >
       {/* Card body */}
       <div className="flex-1 px-4 pt-3 pb-2 flex flex-col gap-2 min-w-0">
         {/* Avatar + name row */}
         <div className="flex items-start gap-2.5">
-          <div className="w-8 h-8 rounded-lg flex items-center justify-center mt-0.5 bg-gray-100 shrink-0">
-            <WorkflowIcon aria-hidden="true" className="w-4 h-4 text-gray-500" />
+          <div className="w-8 h-8 rounded-lg flex items-center justify-center shrink-0 mt-0.5 bg-gray-100">
+            <WorkflowIcon className="w-4 h-4 text-gray-500" />
           </div>
 
           <div className="min-w-0 flex-1">
@@ -430,16 +439,18 @@ function WorkflowCard({ workflow, grouping, layout = 'cards' }: { workflow: Work
             <div className="flex items-center gap-1 mt-0.5 flex-wrap">
               {/* Source badge */}
               {builtin ? (
-                <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-blue-50 text-blue-600 shrink-0 whitespace-nowrap">
+                <span className="inline-flex shrink-0 items-center whitespace-nowrap px-1.5 py-0.5 rounded text-[10px] font-medium
+                                 bg-blue-50 text-blue-600">
                   {t('badge.builtin')}
                 </span>
               ) : (
-                <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-teal-50 text-teal-600 shrink-0 whitespace-nowrap">
+                <span className="inline-flex shrink-0 items-center whitespace-nowrap px-1.5 py-0.5 rounded text-[10px] font-medium
+                                 bg-teal-50 text-teal-600">
                   {t('badge.custom')}
                 </span>
               )}
               {/* Node count */}
-              <span className="text-[10px] text-gray-400 whitespace-nowrap">
+              <span className="whitespace-nowrap text-[10px] text-gray-400">
                 {workflow.nodeCount} {t('stats.nodes')}
               </span>
             </div>
@@ -447,7 +458,7 @@ function WorkflowCard({ workflow, grouping, layout = 'cards' }: { workflow: Work
 
           <div className="flex shrink-0 items-center gap-1">
             <PluginGroupButton grouping={grouping} itemKey={workflow.id} />
-            <ChevronRight aria-hidden="true" className="w-4 h-4 text-gray-300 mt-1 group-hover:text-gray-500 transition-colors shrink-0" />
+            <ChevronRight className="w-4 h-4 text-gray-300 shrink-0 mt-1 group-hover:text-gray-500 transition-colors" />
           </div>
         </div>
 
@@ -517,7 +528,7 @@ function WorkflowCard({ workflow, grouping, layout = 'cards' }: { workflow: Work
       </div>
 
       {/* Stats footer — kept from original, cleaned to white bg */}
-      <div className={`border-t border-gray-100 px-4 py-2.5 grid grid-cols-3 gap-2 ${layout === 'list' ? 'sm:border-t-0 sm:border-l sm:w-72 sm:shrink-0 sm:items-center' : ''}`}>
+      <div className={`border-t border-gray-100 px-4 py-2.5 grid grid-cols-3 gap-2 ${layout === 'list' ? 'sm:w-72 sm:shrink-0 sm:items-center sm:border-t-0 sm:border-l' : ''}`}>
         <div>
           <div className="text-base font-bold text-gray-900 tabular-nums">
             {workflow.stats.callCount}
@@ -533,7 +544,7 @@ function WorkflowCard({ workflow, grouping, layout = 'cards' }: { workflow: Work
         </div>
         <div>
           <div className="text-base font-bold text-gray-900 tabular-nums flex items-center gap-0.5">
-            <Clock aria-hidden="true" className="w-3 h-3 text-gray-400 shrink-0" />
+            <Clock className="w-3 h-3 text-gray-400 shrink-0" />
             {workflow.stats.avgRuntime > 0 ? `${workflow.stats.avgRuntime.toFixed(1)}s` : '—'}
           </div>
           <div className="text-[10px] text-gray-500">{t('stats.avgRuntime')}</div>
@@ -652,7 +663,8 @@ function OverflowStatusList({ items }: { items: WorkflowTriggerStatusSummary[] }
         aria-label={`${t('integration.moreStatuses')}：${items.length}`}
         aria-expanded={position !== null}
         aria-describedby={position ? tooltipId : undefined}
-        className="ml-2 cursor-help text-[11px] leading-4 font-medium text-gray-400 hover:text-gray-600 focus-visible:outline-none focus-visible:text-gray-600 shrink-0"
+        className="ml-2 shrink-0 cursor-help text-[11px] leading-4 font-medium text-gray-400
+                   hover:text-gray-600 focus-visible:outline-none focus-visible:text-gray-600"
         onMouseEnter={(event) => showTooltip(event.currentTarget)}
         onMouseLeave={scheduleHideTooltip}
         onFocus={(event) => showTooltip(event.currentTarget)}
@@ -670,13 +682,14 @@ function OverflowStatusList({ items }: { items: WorkflowTriggerStatusSummary[] }
         <div
           id={tooltipId}
           role="tooltip"
-          className={`pointer-events-auto fixed flex w-56 max-w-[calc(100vw-1rem)] -translate-x-full flex-col rounded-lg border border-gray-200 bg-white px-3 py-2 shadow-lg z-[1000]
+          className={`pointer-events-auto fixed z-[1000] flex w-56 max-w-[calc(100vw-1rem)] -translate-x-full flex-col
+                      rounded-lg border border-gray-200 bg-white px-3 py-2 shadow-lg
                       ${position.placement === 'top' ? '-translate-y-full' : ''}`}
           style={{ left: position.x, top: position.y, maxHeight: position.maxHeight }}
           onMouseEnter={cancelScheduledHide}
           onMouseLeave={scheduleHideTooltip}
         >
-          <div className="mb-1.5 text-[11px] font-semibold text-gray-700 shrink-0">
+          <div className="mb-1.5 shrink-0 text-[11px] font-semibold text-gray-700">
             {t('integration.moreStatuses')}
           </div>
           <div className="min-h-0 space-y-1.5 overflow-y-auto">

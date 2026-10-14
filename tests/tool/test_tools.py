@@ -245,8 +245,8 @@ class TestReadTool:
         assert "not found" in result.error.lower()
     
     @pytest.mark.asyncio
-    async def test_read_permission_requested(self, tool_context_with_permission, test_files):
-        """Test that read requests permission"""
+    async def test_read_does_not_prompt_for_permission(self, tool_context_with_permission, test_files):
+        """Reads are governed by the filesystem control hooks, not by a prompt of the tool itself."""
         result = await ToolRegistry.execute(
             "read",
             ctx=tool_context_with_permission,
@@ -255,8 +255,7 @@ class TestReadTool:
         
         assert result.success
         permissions = tool_context_with_permission._permissions_requested
-        assert len(permissions) > 0
-        assert any(p.permission == "read" for p in permissions)
+        assert not any(p.permission == "read" for p in permissions)
 
 
 class TestWriteTool:

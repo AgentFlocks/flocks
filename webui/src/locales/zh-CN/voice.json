@@ -59,7 +59,7 @@
     "sceneSecurityInternet": "安全与互联网",
     "recognitionSceneHelp": "场景只向 ASR 提供固定主题背景，不读取或上传聊天历史，也不更换识别模型。保存后从下一次录音生效。",
     "sceneGeneralHelp": "适合日常对话。可在下方常用词框补充自有产品名或术语。",
-    "sceneSecurityInternetHelp": "为 Flocks / FlocksPro 产品名及 NDR、EDR、SIEM、SOAR 等安全术语提供背景。不会改动常用词列表；可在下方补充自有产品名或术语。",
+    "sceneSecurityInternetHelp": "为 Flocks 产品名及 NDR、EDR、SIEM、SOAR 等安全术语提供背景。不会改动常用词列表；可在下方补充自有产品名或术语。",
     "captureMode": "麦克风采集模式",
     "captureVoice": "语音增强（默认）",
     "captureRaw": "原始采集",

@@ -2,10 +2,34 @@
 Pytest configuration and global fixtures
 """
 
+import importlib.metadata
 import os
 from pathlib import Path
 
 import pytest
+
+
+_installed_entry_points = importlib.metadata.entry_points
+
+
+def _core_entry_points(**params):
+    """``importlib.metadata.entry_points`` without other packages' ``flocks.*`` entries.
+
+    A development venv usually has a package such as Flocks Pro installed next to
+    Core. Its ``flocks.plugins`` / ``flocks.plugins.critical`` / ``flocks.cli``
+    entry points would load while these tests build an app or import the CLI and
+    replace Core behaviour (workspace layout, identity, licensing, commands), so
+    the suite would test that package instead of Core, which Core's CI never has.
+    Tests of entry-point loading install their own fakes over this one.
+    """
+    kept = importlib.metadata.EntryPoints(
+        entry_point
+        for entry_point in _installed_entry_points()
+        if not entry_point.group.startswith("flocks.")
+        or entry_point.dist is None
+        or entry_point.dist.name == "flocks"
+    )
+    return kept.select(**params) if params else kept
 
 
 @pytest.fixture(autouse=True)
@@ -79,6 +103,12 @@ def pytest_configure(config):
     )
     for marker_name, (_, reason) in _API_KEY_MARKERS.items():
         config.addinivalue_line("markers", f"{marker_name}: skip if {reason}")
+    # Before collection: importing flocks.cli.main already loads CLI extensions.
+    importlib.metadata.entry_points = _core_entry_points
+
+
+def pytest_unconfigure(config):
+    importlib.metadata.entry_points = _installed_entry_points
 
 
 def pytest_runtest_setup(item):

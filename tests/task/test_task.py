@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import io
+import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from rich.console import Console
 
 from flocks.cli.commands import task as task_cli_commands
 import flocks.task.background as background_module
@@ -537,6 +540,68 @@ async def test_background_task_fails_fast_when_user_input_is_required(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("loop_metadata", "expected"),
+    [({"aborted": True}, "cancelled"), ({}, "completed")],
+)
+async def test_existing_session_run_stopped_from_the_session_is_cancelled(
+    monkeypatch: pytest.MonkeyPatch,
+    loop_metadata: dict,
+    expected: str,
+):
+    # The task session's stop button aborts the loop, which returns normally.
+    loop_run = AsyncMock(return_value=SimpleNamespace(last_message=None, metadata=loop_metadata))
+    monkeypatch.setattr(background_module.SessionLoop, "run", loop_run)
+
+    manager = BackgroundManager()
+    task = await manager.run_existing_session(
+        "ses_task_stop", "scheduled", "rex", allow_user_questions=False,
+    )
+    finished = await manager.wait_for(task.id, timeout_ms=5000)
+
+    assert finished is not None
+    assert finished.status == expected
+
+
+@pytest.mark.asyncio
+async def test_task_stopped_from_its_session_is_cancelled_not_retried(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    manager = TaskManager(max_concurrent=1, poll_interval=999, scheduler_interval=999)
+    scheduler = await TaskManager.create_scheduler(
+        title="会话里停止",
+        mode=SchedulerMode.CRON,
+        trigger=TaskTrigger(cron="0 3 * * *", timezone="Asia/Shanghai"),
+        workspace_directory=str(tmp_path / "workspace"),
+    )
+    execution = await TaskManager.create_execution_from_scheduler(
+        scheduler,
+        trigger_type=ExecutionTriggerType.RUN_ONCE,
+        enqueue=False,
+    )
+    # Dispatch claims only what a dequeue already marked running.
+    execution.status = TaskStatus.RUNNING
+    execution.started_at = datetime.now(timezone.utc)
+    execution = await TaskStore.update_execution(execution)
+    monkeypatch.setattr(
+        TaskExecutor, "_create_task_session", AsyncMock(return_value="ses_stopped_task"),
+    )
+    monkeypatch.setattr(
+        background_module.SessionLoop,
+        "run",
+        AsyncMock(return_value=SimpleNamespace(last_message=None, metadata={"aborted": True})),
+    )
+
+    await manager._run_execution(execution)
+
+    stopped = await TaskManager.get_execution(execution.id)
+    assert stopped.status == TaskStatus.CANCELLED
+    assert stopped.retry.retry_after is None
+    assert stopped.retry.retry_count == 0
+
+
+@pytest.mark.asyncio
 async def test_existing_background_session_pins_agent_identity(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -859,6 +924,10 @@ async def test_trigger_workflow_resolves_workflow_id_from_filesystem(
         workflowID="local-script-runner",
         executionInputSnapshot={"context": {"source": "snapshot"}},
     )
+    # Only a run whose record still says running is started.
+    await TaskStore.create_scheduler(scheduler)
+    execution.status = TaskStatus.RUNNING
+    await TaskStore.create_execution(execution)
 
     result = await TaskExecutor._trigger_workflow(execution, scheduler)
 
@@ -933,6 +1002,52 @@ async def test_queue_dequeue_respects_claimed_slots_before_running_status(tmp_pa
     next_claimed = await queue.dequeue()
     assert next_claimed is not None
     assert next_claimed.id == second.id
+
+
+@pytest.mark.asyncio
+async def test_executions_without_workspace_directory_get_their_own(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    frozen = datetime(2026, 10, 10, 8, 36, 33, 400000, tzinfo=timezone.utc)
+
+    class _SameSecond(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return frozen if tz else frozen.replace(tzinfo=None)
+
+    # Two "run now" clicks in the same second used to share
+    # tasks/<date>/exec-<epoch seconds> and overwrite each other's files.
+    monkeypatch.setattr(task_manager_module, "datetime", _SameSecond)
+    first_scheduler = await TaskManager.create_scheduler(
+        title="独立任务 A",
+        mode=SchedulerMode.CRON,
+        trigger=TaskTrigger(cron="0 3 * * *", timezone="Asia/Shanghai"),
+    )
+    second_scheduler = await TaskManager.create_scheduler(
+        title="独立任务 B",
+        mode=SchedulerMode.CRON,
+        trigger=TaskTrigger(cron="0 3 * * *", timezone="Asia/Shanghai"),
+    )
+    pinned_scheduler = await TaskManager.create_scheduler(
+        title="指定目录",
+        mode=SchedulerMode.CRON,
+        trigger=TaskTrigger(cron="0 3 * * *", timezone="Asia/Shanghai"),
+        workspace_directory=str(tmp_path / "shared"),
+    )
+
+    first = await TaskManager.rerun_scheduler(first_scheduler.id)
+    second = await TaskManager.rerun_scheduler(second_scheduler.id)
+    again = await TaskManager.rerun_scheduler(first_scheduler.id)
+    pinned = await TaskManager.rerun_scheduler(pinned_scheduler.id)
+
+    directories = [first.workspace_directory, second.workspace_directory, again.workspace_directory]
+    assert len(set(directories)) == 3
+    for execution in (first, second, again):
+        assert Path(execution.workspace_directory).name == execution.id
+        stored = await TaskManager.get_execution(execution.id)
+        assert stored.workspace_directory == execution.workspace_directory
+    assert pinned.workspace_directory == str(tmp_path / "shared")
 
 
 @pytest.mark.asyncio
@@ -1107,7 +1222,7 @@ async def test_store_init_normalizes_legacy_paused_execution(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_cli_list_tasks_accepts_legacy_paused_status(monkeypatch: pytest.MonkeyPatch):
+async def test_cli_list_tasks_accepts_legacy_paused_status(capsys: pytest.CaptureFixture[str]):
     scheduler = await TaskManager.create_scheduler(
         title="CLI 兼容 paused 查询",
         mode=SchedulerMode.ONCE,
@@ -1123,13 +1238,49 @@ async def test_cli_list_tasks_accepts_legacy_paused_status(monkeypatch: pytest.M
     await TaskStore.update_execution(execution)
     await TaskManager.disable_scheduler(scheduler.id)
 
-    printed: list[object] = []
-    monkeypatch.setattr(task_cli_commands.console, "print", lambda *args, **kwargs: printed.append(args))
-
     await task_cli_commands._list_tasks("paused", None, 10, "json")
+    executions = json.loads(capsys.readouterr().out)
     await task_cli_commands._list_tasks("paused", "scheduled", 10, "json")
+    schedulers = json.loads(capsys.readouterr().out)
 
-    assert printed
+    assert [item["id"] for item in executions] == [execution.id]
+    assert [item["id"] for item in schedulers] == [scheduler.id]
+
+
+@pytest.mark.asyncio
+async def test_cli_show_execution_reads_its_snapshot(monkeypatch: pytest.MonkeyPatch):
+    scheduler = await TaskManager.create_scheduler(
+        title="Literal [red]TASK[/red] 执行详情",
+        mode=SchedulerMode.ONCE,
+        trigger=TaskTrigger(run_immediately=False),
+        skills=["triage", "report"],
+        category="ops",
+    )
+    execution = await TaskManager.create_execution_from_scheduler(
+        scheduler,
+        trigger_type=ExecutionTriggerType.RUN_ONCE,
+        enqueue=False,
+    )
+    execution.session_id = "ses_task_show"
+    execution.result_summary = "- [x] done\n- [/x] closing tag"
+    await TaskStore.update_execution(execution)
+
+    rendered: list[object] = []
+    monkeypatch.setattr(task_cli_commands.console, "print", lambda *args, **kwargs: rendered.append(args[0]))
+
+    await task_cli_commands._show_task(execution.id)
+
+    out = Console(file=io.StringIO(), width=200)
+    out.print(rendered[0])
+    text = out.file.getvalue()
+    assert f"ID:       {execution.id}" in text
+    assert f"Scheduler: {scheduler.id}" in text
+    assert "Session:  ses_task_show" in text
+    assert "Skills:   triage, report" in text
+    assert "Category: ops" in text
+    # Stored text is shown as written, not read as Rich markup.
+    assert "Literal [red]TASK[/red] 执行详情" in text
+    assert "- [x] done" in text and "- [/x] closing tag" in text
 
 
 @pytest.mark.asyncio
@@ -1316,3 +1467,389 @@ async def test_task_page_notice_does_not_touch_legacy_tables():
     await db.execute("INSERT INTO tasks (id) VALUES (?)", ("legacy-retained",))
     assert await TaskManager.get_task_page_notice() is None
     assert await db.fetch_one("SELECT id FROM tasks WHERE id = ?", ("legacy-retained",)) == ("legacy-retained",)
+
+
+@pytest.mark.asyncio
+async def test_cancel_from_a_request_stops_the_agent_run_and_does_not_requeue(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """The task loop's runs live in the manager of no instance; a request cancels from its own."""
+    from flocks.project.instance import Instance
+
+    background_module._manager_state.invalidate_all()
+    started = asyncio.Event()
+    stopped: list[str] = []
+
+    async def hanging_loop(session_id, **_kwargs):
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            stopped.append(session_id)
+            raise
+
+    monkeypatch.setattr(background_module.SessionLoop, "run", hanging_loop)
+    monkeypatch.setattr(TaskExecutor, "_create_task_session", AsyncMock(return_value="ses_cancel_from_request"))
+    manager = TaskManager(max_concurrent=1, poll_interval=999, scheduler_interval=999)
+    scheduler = await TaskManager.create_scheduler(
+        title="请求里取消",
+        mode=SchedulerMode.CRON,
+        trigger=TaskTrigger(cron="0 3 * * *", timezone="Asia/Shanghai"),
+        workspace_directory=str(tmp_path / "workspace"),
+    )
+    execution = await TaskManager.create_execution_from_scheduler(
+        scheduler,
+        trigger_type=ExecutionTriggerType.RUN_ONCE,
+        enqueue=False,
+    )
+    execution.status = TaskStatus.RUNNING
+    await TaskStore.update_execution(execution)
+    run = asyncio.create_task(manager._run_execution(execution))
+    await asyncio.wait_for(started.wait(), timeout=5)
+
+    request_dir = tmp_path / "request-cwd"
+    request_dir.mkdir()
+
+    async def cancel_in_request() -> None:
+        await TaskManager.cancel_execution(execution.id)
+
+    await Instance.provide(directory=str(request_dir), fn=cancel_in_request)
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(run, timeout=5)
+
+    assert stopped == ["ses_cancel_from_request"]
+    final = await TaskManager.get_execution(execution.id)
+    assert final.status == TaskStatus.CANCELLED
+    assert final.session_id == "ses_cancel_from_request"
+    background_module._manager_state.invalidate_all()
+
+
+async def _cron_execution(tmp_path: Path, title: str) -> TaskExecution:
+    scheduler = await TaskManager.create_scheduler(
+        title=title,
+        mode=SchedulerMode.CRON,
+        trigger=TaskTrigger(cron="0 3 * * *", timezone="Asia/Shanghai"),
+        workspace_directory=str(tmp_path / "workspace"),
+    )
+    execution = await TaskManager.create_execution_from_scheduler(
+        scheduler,
+        trigger_type=ExecutionTriggerType.RUN_ONCE,
+        enqueue=False,
+    )
+    execution.status = TaskStatus.RUNNING
+    return await TaskStore.update_execution(execution)
+
+
+@pytest.mark.asyncio
+async def test_cancel_while_the_session_is_being_created_does_not_start_the_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    execution = await _cron_execution(tmp_path, "创建会话时取消")
+    loop_run = AsyncMock()
+
+    async def create_session_while_cancelled(*_args, **_kwargs):
+        # The cancel lands after dispatch read the execution, before the session exists.
+        await TaskManager.cancel_execution(execution.id)
+        return "ses_created_after_cancel"
+
+    monkeypatch.setattr(TaskExecutor, "_create_task_session", create_session_while_cancelled)
+    monkeypatch.setattr(background_module.SessionLoop, "run", loop_run)
+    manager = TaskManager(max_concurrent=1, poll_interval=999, scheduler_interval=999)
+
+    await manager._run_execution(execution)
+
+    loop_run.assert_not_awaited()
+    final = await TaskManager.get_execution(execution.id)
+    assert final.status == TaskStatus.CANCELLED
+
+
+@pytest.mark.asyncio
+async def test_a_run_that_ends_after_its_cancel_keeps_the_cancellation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    execution = await _cron_execution(tmp_path, "取消后才结束")
+    running = asyncio.Event()
+    release = asyncio.Event()
+
+    async def loop_until_released(_session_id, **_kwargs):
+        running.set()
+        await release.wait()
+        return SimpleNamespace(last_message=None, metadata={})
+
+    monkeypatch.setattr(TaskExecutor, "_create_task_session", AsyncMock(return_value="ses_late_finish"))
+    monkeypatch.setattr(background_module.SessionLoop, "run", loop_until_released)
+    manager = TaskManager(max_concurrent=1, poll_interval=999, scheduler_interval=999)
+    run = asyncio.create_task(manager._run_execution(execution))
+    await asyncio.wait_for(running.wait(), timeout=5)
+
+    # Recorded as cancelled while the run, not reached by the cancel, carries on.
+    assert await TaskStore.cancel_active_execution(
+        execution.id,
+        completed_at=datetime.now(timezone.utc),
+        duration_ms=None,
+        error="Cancelled from task queue.",
+    )
+    release.set()
+    await asyncio.wait_for(run, timeout=5)
+
+    final = await TaskManager.get_execution(execution.id)
+    assert final.status == TaskStatus.CANCELLED
+    assert final.session_id == "ses_late_finish"
+
+
+@pytest.mark.asyncio
+async def test_cancel_by_session_leaves_finished_background_tasks_alone():
+    manager = BackgroundManager()
+
+    async def _noop() -> None:
+        return None
+
+    finished = asyncio.create_task(_noop())
+    await finished
+    manager._tasks["bg_done"] = BackgroundTask(
+        id="bg_done", status="completed", description="d", prompt="p", agent="rex",
+        session_id="ses_done", completed_at=1_700_000_000_000,
+    )
+    manager._task_handles["bg_done"] = finished
+
+    assert manager.cancel_by_session_id("ses_done") == 0
+    assert (manager._tasks["bg_done"].status, manager._tasks["bg_done"].completed_at) == ("completed", 1_700_000_000_000)
+
+
+@pytest.mark.asyncio
+async def test_cancel_by_session_spares_a_completed_task_still_reporting_to_its_parent():
+    manager = BackgroundManager()
+    reporting = asyncio.Event()
+
+    async def _inject_parent_completion() -> None:
+        await reporting.wait()
+
+    handle = asyncio.create_task(_inject_parent_completion())
+    manager._tasks["bg_reporting"] = BackgroundTask(
+        id="bg_reporting", status="completed", description="d", prompt="p", agent="rex",
+        session_id="ses_reporting", parent_session_id="ses_parent", completed_at=1_700_000_000_000,
+    )
+    manager._task_handles["bg_reporting"] = handle
+
+    try:
+        assert manager.cancel_by_session_id("ses_reporting") == 0
+        await asyncio.sleep(0)
+        assert not handle.cancelled()
+        assert manager._tasks["bg_reporting"].status == "completed"
+    finally:
+        reporting.set()
+        await handle
+
+
+@pytest.mark.asyncio
+async def test_cancel_before_the_agent_run_is_registered_still_stops_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import flocks.server.routes.event as event_routes
+
+    execution = await _cron_execution(tmp_path, "登记运行前取消")
+    loop_run = AsyncMock(return_value=SimpleNamespace(last_message=None, metadata={}))
+    original_publish = event_routes.publish_event
+
+    async def publish_then_cancel(event, payload, *args, **kwargs):
+        # Dispatch announces the run (record running, session set) before any
+        # run exists; the cancel lands right there.
+        if event == "task.updated" and payload.get("status") == "running":
+            await TaskManager.cancel_execution(execution.id)
+            return None
+        return await original_publish(event, payload, *args, **kwargs)
+
+    monkeypatch.setattr(TaskExecutor, "_create_task_session", AsyncMock(return_value="ses_before_register"))
+    monkeypatch.setattr(event_routes, "publish_event", publish_then_cancel)
+    monkeypatch.setattr(background_module.SessionLoop, "run", loop_run)
+    manager = TaskManager(max_concurrent=1, poll_interval=999, scheduler_interval=999)
+
+    await manager._run_execution(execution)
+    await asyncio.sleep(0)
+
+    loop_run.assert_not_awaited()
+    final = await TaskManager.get_execution(execution.id)
+    assert final.status == TaskStatus.CANCELLED
+    assert final.session_id == "ses_before_register"
+
+
+@pytest.mark.asyncio
+async def test_cancel_before_the_workflow_run_is_registered_still_stops_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from flocks.workflow import fs_store, runner, tool_context
+
+    execution = await _cron_execution(tmp_path, "工作流登记前取消")
+    execution.execution_mode = ExecutionMode.WORKFLOW
+    execution.workflow_id = "wf-before-register"
+    execution = await TaskStore.update_execution(execution)
+    started: list[dict] = []
+
+    async def build_context_then_cancel(**_kwargs):
+        # The cancel lands while the context is built, before the workflow runs.
+        await TaskManager.cancel_execution(execution.id)
+        return None
+
+    def run_workflow(**kwargs):
+        started.append(kwargs)
+        return SimpleNamespace(status="SUCCEEDED", error=None, outputs={"ok": True})
+
+    monkeypatch.setattr(
+        fs_store,
+        "read_workflow_from_fs",
+        lambda _workflow_id: {"workflowJson": {"name": "w", "start": "s", "nodes": [], "edges": []}},
+    )
+    monkeypatch.setattr(tool_context, "build_workflow_tool_context", build_context_then_cancel)
+    monkeypatch.setattr(runner, "run_workflow", run_workflow)
+    manager = TaskManager(max_concurrent=1, poll_interval=999, scheduler_interval=999)
+
+    await manager._run_execution(execution)
+
+    assert started == []
+    final = await TaskManager.get_execution(execution.id)
+    assert final.status == TaskStatus.CANCELLED
+
+
+@pytest.mark.asyncio
+async def test_cancel_then_delete_before_the_agent_run_is_registered_still_stops_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import flocks.server.routes.event as event_routes
+
+    execution = await _cron_execution(tmp_path, "取消并删除")
+    loop_run = AsyncMock(return_value=SimpleNamespace(last_message=None, metadata={}))
+    original_publish = event_routes.publish_event
+
+    async def publish_then_delete(event, payload, *args, **kwargs):
+        if event == "task.updated" and payload.get("status") == "running":
+            # Deleting a running execution cancels it, then removes the row.
+            await TaskManager.delete_execution(execution.id)
+            return None
+        return await original_publish(event, payload, *args, **kwargs)
+
+    monkeypatch.setattr(TaskExecutor, "_create_task_session", AsyncMock(return_value="ses_deleted"))
+    monkeypatch.setattr(event_routes, "publish_event", publish_then_delete)
+    monkeypatch.setattr(background_module.SessionLoop, "run", loop_run)
+    manager = TaskManager(max_concurrent=1, poll_interval=999, scheduler_interval=999)
+
+    await manager._run_execution(execution)
+    await asyncio.sleep(0)
+
+    loop_run.assert_not_awaited()
+    assert await TaskManager.get_execution(execution.id) is None
+
+
+@pytest.mark.asyncio
+async def test_a_failed_record_read_does_not_leave_the_held_agent_run_behind(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    execution = await _cron_execution(tmp_path, "读取记录失败")
+    loop_run = AsyncMock(return_value=SimpleNamespace(last_message=None, metadata={}))
+
+    async def unreadable(_execution_id: str) -> bool:
+        raise RuntimeError("record read failed")
+
+    monkeypatch.setattr(background_module.SessionLoop, "run", loop_run)
+    monkeypatch.setattr(TaskExecutor, "_still_running", staticmethod(unreadable))
+
+    with pytest.raises(RuntimeError, match="record read failed"):
+        await TaskExecutor._run_agent_session(execution, "ses_unreadable")
+    await asyncio.sleep(0)
+
+    held = [
+        (manager, task)
+        for manager in background_module.all_background_managers()
+        for task in manager.list_tasks()
+        if task.session_id == "ses_unreadable"
+    ]
+    assert len(held) == 1
+    manager, task = held[0]
+    assert task.status == "cancelled"
+    assert manager._task_handles[task.id].done()
+    loop_run.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_dispatch_keeps_the_running_workflow_reachable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import threading
+
+    import flocks.task.executor as executor_module
+    from flocks.workflow import fs_store, runner, tool_context
+
+    execution = await _cron_execution(tmp_path, "工作流线程还在跑")
+    execution.execution_mode = ExecutionMode.WORKFLOW
+    execution.workflow_id = "wf-still-running"
+    execution = await TaskStore.update_execution(execution)
+    scheduler = await TaskStore.get_scheduler(execution.scheduler_id)
+    started = threading.Event()
+    release = threading.Event()
+    cancel_seen: list[bool] = []
+
+    def run_workflow(*, cancel, **_kwargs):
+        started.set()
+        release.wait(5)
+        cancel_seen.append(cancel())
+        return SimpleNamespace(status="CANCELLED", error="cancelled", outputs=None)
+
+    monkeypatch.setattr(
+        fs_store,
+        "read_workflow_from_fs",
+        lambda _workflow_id: {"workflowJson": {"name": "w", "start": "s", "nodes": [], "edges": []}},
+    )
+    monkeypatch.setattr(tool_context, "build_workflow_tool_context", AsyncMock(return_value=None))
+    monkeypatch.setattr(runner, "run_workflow", run_workflow)
+
+    dispatch = asyncio.create_task(TaskExecutor._trigger_workflow(execution, scheduler))
+    assert await asyncio.to_thread(started.wait, 5)
+    dispatch.cancel()  # what the dispatch guard's timeout does
+    with pytest.raises(asyncio.CancelledError):
+        await dispatch
+
+    try:
+        # The thread still runs; the manager's follow-up cancel has to reach it.
+        assert TaskExecutor.request_runtime_cancel(execution) is True
+    finally:
+        release.set()
+    for _ in range(250):
+        if execution.id not in executor_module._workflow_cancel_events:
+            break
+        await asyncio.sleep(0.02)
+
+    assert cancel_seen == [True]
+    assert execution.id not in executor_module._workflow_cancel_events
+    assert execution.id not in executor_module._workflow_done_events
+
+
+def test_a_workflow_cancelled_while_queued_for_a_thread_never_starts(monkeypatch: pytest.MonkeyPatch):
+    import threading
+
+    import flocks.task.executor as executor_module
+    from flocks.task.executor import TaskExecutionStopped
+    from flocks.workflow import runner
+
+    started: list[dict] = []
+    monkeypatch.setattr(runner, "run_workflow", lambda **kwargs: started.append(kwargs))
+    cancel_event = threading.Event()
+    done_event = threading.Event()
+    with executor_module._workflow_cancel_lock:
+        executor_module._workflow_cancel_events["txe_queued"] = cancel_event
+        executor_module._workflow_done_events["txe_queued"] = done_event
+    cancel_event.set()  # the dispatch was cancelled before a pool thread picked this up
+
+    with pytest.raises(TaskExecutionStopped):
+        TaskExecutor._run_workflow_sync("txe_queued", {"nodes": []}, {}, None, cancel_event, done_event)
+
+    assert started == []
+    assert done_event.is_set()
+    assert "txe_queued" not in executor_module._workflow_cancel_events
+    assert "txe_queued" not in executor_module._workflow_done_events

@@ -1,13 +1,6 @@
-import { pageActionLabel } from '../../pageActionLabel';
 import { useEffect, useState } from 'react';
 import { Edge } from '@xyflow/react';
-import {
-  AlertCircle,
-  GitBranch,
-  Hash,
-  Settings,
-  X,
-} from 'lucide-react';
+import { AlertCircle, GitBranch, Hash, Settings, X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 interface EdgeData {
@@ -75,7 +68,7 @@ export default function EdgePropertyPanel({ selectedEdge, onClose, onUpdate }: E
   };
 
   return (
-    <div className="fixed right-0 top-0 h-full w-96 bg-white shadow-2xl border-l border-gray-200 flex flex-col max-w-full z-50">
+    <div className="fixed right-0 top-0 h-full w-96 bg-white shadow-2xl border-l border-gray-200 z-50 flex flex-col">
       <div className="flex items-center justify-between p-4 border-b border-gray-200 bg-gray-50">
         <div>
           <h2 className="text-lg font-semibold text-gray-900">Edge Properties</h2>
@@ -83,15 +76,15 @@ export default function EdgePropertyPanel({ selectedEdge, onClose, onUpdate }: E
             {selectedEdge.source} → {selectedEdge.target}
           </p>
         </div>
-        <button aria-label={pageActionLabel('close')} onClick={onClose} className="p-2 hover:bg-gray-200 rounded-lg transition-colors">
-          <X aria-hidden="true" className="w-5 h-5" />
+        <button onClick={onClose} className="p-2 hover:bg-gray-200 rounded-lg transition-colors">
+          <X className="w-5 h-5" />
         </button>
       </div>
 
       <div className="flex-1 overflow-y-auto p-4 space-y-4">
         <div>
           <label className="flex items-center gap-2 text-sm font-medium text-gray-700 mb-2">
-            <GitBranch aria-hidden="true" className="w-4 h-4" />
+            <GitBranch className="w-4 h-4" />
             Label
           </label>
           <input
@@ -108,7 +101,7 @@ export default function EdgePropertyPanel({ selectedEdge, onClose, onUpdate }: E
 
         <div>
           <label className="flex items-center gap-2 text-sm font-medium text-gray-700 mb-2">
-            <Hash aria-hidden="true" className="w-4 h-4" />
+            <Hash className="w-4 h-4" />
             Order
           </label>
           <input
@@ -122,7 +115,7 @@ export default function EdgePropertyPanel({ selectedEdge, onClose, onUpdate }: E
 
         <div>
           <label className="flex items-center gap-2 text-sm font-medium text-gray-700 mb-2">
-            <Settings aria-hidden="true" className="w-4 h-4" />
+            <Settings className="w-4 h-4" />
             Mapping
           </label>
           <textarea
@@ -137,7 +130,7 @@ export default function EdgePropertyPanel({ selectedEdge, onClose, onUpdate }: E
 
         <div>
           <label className="flex items-center gap-2 text-sm font-medium text-gray-700 mb-2">
-            <Settings aria-hidden="true" className="w-4 h-4" />
+            <Settings className="w-4 h-4" />
             Const
           </label>
           <textarea
@@ -152,7 +145,7 @@ export default function EdgePropertyPanel({ selectedEdge, onClose, onUpdate }: E
 
         {error && (
           <div className="flex items-center gap-2 rounded-lg border border-red-200 bg-red-50 p-3 text-xs text-red-700">
-            <AlertCircle aria-hidden="true" className="w-4 h-4 flex-shrink-0" />
+            <AlertCircle className="w-4 h-4 flex-shrink-0" />
             {error}
           </div>
         )}

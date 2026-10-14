@@ -1,21 +1,10 @@
-import PageDialog from '../PageDialog';
 /**
  * NodeInfoPanel — 并列在对话左侧的节点信息/编辑面板
  * 当用户点击画布节点时展开，可关闭。
  */
 import { useState, useEffect, useMemo, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
-import {
-  AlertCircle,
-  ChevronDown,
-  ChevronRight,
-  Loader2,
-  Maximize2,
-  Play,
-  RotateCcw,
-  Save,
-  X,
-} from 'lucide-react';
+import { X, AlertCircle, Save, Loader2, ChevronDown, ChevronRight, Play, RotateCcw, Maximize2 } from 'lucide-react';
 import {
   workflowAPI,
   Workflow,
@@ -154,7 +143,7 @@ function JsonField({ label, value, onChange, placeholder }: {
         placeholder={placeholder || '{}'}
         spellCheck={false}
       />
-      {err && <p className="mt-1 text-[11px] text-red-500 flex items-center gap-1"><AlertCircle aria-hidden="true" className="w-3 h-3" />{err}</p>}
+      {err && <p className="mt-1 text-[11px] text-red-500 flex items-center gap-1"><AlertCircle className="w-3 h-3" />{err}</p>}
     </div>
   );
 }
@@ -188,11 +177,11 @@ function ExpandedCodeEditor({
   }, [lineNumbers.length]);
 
   return (
-    <div className="flex rounded-xl border border-[#4a5563] bg-[#252c35] h-full min-h-0 min-w-0 overflow-hidden">
+    <div className="flex h-full min-h-0 min-w-0 overflow-hidden rounded-xl border border-[#4a5563] bg-[#252c35]">
       <div
         aria-hidden="true"
         data-testid="expanded-code-line-numbers"
-        className="select-none border-r border-[#4a5563] bg-[#20262d] px-3 py-3 text-right font-mono text-[12px] leading-relaxed text-[#9aa7b4] flex-shrink-0 overflow-hidden"
+        className="flex-shrink-0 overflow-hidden select-none border-r border-[#4a5563] bg-[#20262d] px-3 py-3 text-right font-mono text-[12px] leading-relaxed text-[#9aa7b4]"
       >
         <div ref={lineNumberTrackRef}>
           {lineNumbers.map((lineNumber) => (
@@ -209,7 +198,7 @@ function ExpandedCodeEditor({
         onScroll={syncLineNumberOffset}
         rows={24}
         wrap="off"
-        className="resize-none bg-[#252c35] px-4 py-3 font-mono text-[12px] leading-relaxed text-[#d7dee8] focus:outline-none focus:ring-2 focus:ring-[#539bf5] h-full min-h-0 min-w-0 w-full overflow-auto"
+        className="h-full min-h-0 min-w-0 w-full resize-none overflow-auto bg-[#252c35] px-4 py-3 font-mono text-[12px] leading-relaxed text-[#d7dee8] focus:outline-none focus:ring-2 focus:ring-[#539bf5]"
         placeholder={placeholder}
         spellCheck={false}
       />
@@ -300,7 +289,7 @@ export interface NodeInfoPanelProps {
   node: WorkflowNode;
   workflow: Workflow;
   latestExecution?: WorkflowExecution | null;
-  width?: number | string;
+  width?: number;
   onClose: () => void;
   onSaved: (updated: Workflow) => void;
 }
@@ -333,8 +322,8 @@ function RuntimeJsonBlock({ label, value, tone, copyable = true }: {
             className="inline-flex items-center gap-1 rounded-md px-1.5 py-1 text-[11px] text-gray-400 transition-colors hover:bg-white/70 hover:text-gray-600"
           >
             {expanded
-              ? <ChevronDown aria-hidden="true" className="w-3 h-3" />
-              : <ChevronRight aria-hidden="true" className="w-3 h-3" />}
+              ? <ChevronDown className="w-3 h-3" />
+              : <ChevronRight className="w-3 h-3" />}
           </button>
         </div>
       </div>
@@ -373,8 +362,8 @@ function RuntimeSection({ nodeId, latestExecution }: { nodeId: string; latestExe
           )}
         </div>
         {expanded
-          ? <ChevronDown aria-hidden="true" className="w-3.5 h-3.5 text-slate-400 flex-shrink-0" />
-          : <ChevronRight aria-hidden="true" className="w-3.5 h-3.5 text-slate-400 flex-shrink-0" />}
+          ? <ChevronDown className="w-3.5 h-3.5 text-slate-400 flex-shrink-0" />
+          : <ChevronRight className="w-3.5 h-3.5 text-slate-400 flex-shrink-0" />}
       </button>
 
       {expanded && (
@@ -485,8 +474,8 @@ function NodeRunSection({
           </span>
         </div>
         {expanded
-          ? <ChevronDown aria-hidden="true" className="w-3.5 h-3.5 text-gray-400 flex-shrink-0" />
-          : <ChevronRight aria-hidden="true" className="w-3.5 h-3.5 text-gray-400 flex-shrink-0" />}
+          ? <ChevronDown className="w-3.5 h-3.5 text-gray-400 flex-shrink-0" />
+          : <ChevronRight className="w-3.5 h-3.5 text-gray-400 flex-shrink-0" />}
       </button>
 
       {expanded && (
@@ -513,7 +502,7 @@ function NodeRunSection({
                       onClick={() => setRawInputs(JSON.stringify(suggestedInputs, null, 2))}
                       className="inline-flex items-center gap-1 text-[11px] text-gray-500 hover:text-gray-700"
                     >
-                      <RotateCcw aria-hidden="true" className="w-3 h-3" />
+                      <RotateCcw className="w-3 h-3" />
                       {t('detail.nodeInfo.restoreSuggestedInputs')}
                     </button>
                   </div>
@@ -522,7 +511,7 @@ function NodeRunSection({
                   <CopyButton
                     text={rawInputs}
                     size="w-3 h-3"
-                    className="absolute right-2 top-2 rounded-md border border-gray-200 bg-white/95 p-1.5 text-gray-400 shadow-sm transition-colors hover:bg-white hover:text-gray-600 z-10"
+                    className="absolute right-2 top-2 z-10 rounded-md border border-gray-200 bg-white/95 p-1.5 text-gray-400 shadow-sm transition-colors hover:bg-white hover:text-gray-600"
                   />
                   <textarea
                     value={rawInputs}
@@ -535,7 +524,7 @@ function NodeRunSection({
                 </div>
                 {inputError && (
                   <p className="text-[11px] text-red-500 flex items-center gap-1">
-                    <AlertCircle aria-hidden="true" className="w-3 h-3" />
+                    <AlertCircle className="w-3 h-3" />
                     {inputError}
                   </p>
                 )}
@@ -547,7 +536,7 @@ function NodeRunSection({
                 disabled={running}
                 className="w-full flex items-center justify-center gap-1.5 py-2 rounded-lg text-xs font-semibold transition-colors bg-gray-900 text-white hover:bg-black disabled:opacity-50"
               >
-                {running ? <Loader2 aria-hidden="true" className="w-3.5 h-3.5 animate-spin" /> : <Play aria-hidden="true" className="w-3.5 h-3.5" />}
+                {running ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Play className="w-3.5 h-3.5" />}
                 {running ? t('detail.nodeInfo.runningNode') : t('detail.nodeInfo.runNodeAction')}
               </button>
 
@@ -582,7 +571,7 @@ function NodeRunSection({
                   {result.stdout && (
                     <div className="space-y-1.5">
                       <FL>{t('detail.nodeInfo.runNodeStdout')}</FL>
-                      <pre className="rounded-lg border border-gray-200 bg-white px-2.5 py-2 text-[11px] font-mono text-gray-700 whitespace-pre-wrap break-all">
+                      <pre className="rounded-lg border border-gray-200 bg-white px-2.5 py-2 text-[11px] font-mono whitespace-pre-wrap break-all text-gray-700">
                         {result.stdout}
                       </pre>
                     </div>
@@ -591,7 +580,7 @@ function NodeRunSection({
                   {result.error && (
                     <div className="space-y-1.5">
                       <FL>{t('detail.nodeInfo.runNodeError')}</FL>
-                      <pre className="rounded-lg border border-red-100 bg-red-50 px-2.5 py-2 text-[11px] font-mono text-red-700 whitespace-pre-wrap break-all">
+                      <pre className="rounded-lg border border-red-100 bg-red-50 px-2.5 py-2 text-[11px] font-mono whitespace-pre-wrap break-all text-red-700">
                         {result.error}
                       </pre>
                     </div>
@@ -600,7 +589,7 @@ function NodeRunSection({
                   {result.traceback && (
                     <div className="space-y-1.5">
                       <FL>{t('detail.nodeInfo.runNodeTraceback')}</FL>
-                      <pre className="rounded-lg border border-red-100 bg-red-50 px-2.5 py-2 text-[11px] font-mono text-red-700 whitespace-pre-wrap break-all">
+                      <pre className="rounded-lg border border-red-100 bg-red-50 px-2.5 py-2 text-[11px] font-mono whitespace-pre-wrap break-all text-red-700">
                         {result.traceback}
                       </pre>
                     </div>
@@ -663,7 +652,7 @@ export default function NodeInfoPanel({ node, workflow, latestExecution, width =
 
   return (
     <div
-      className="flex flex-col bg-white border-l border-gray-200 h-full flex-shrink-0 overflow-hidden"
+      className="flex flex-col flex-shrink-0 bg-white border-l border-gray-200 h-full overflow-hidden"
       style={{ width }}
     >
       {/* Header */}
@@ -672,12 +661,12 @@ export default function NodeInfoPanel({ node, workflow, latestExecution, width =
         <span className={`text-[11px] font-semibold px-1.5 py-0.5 rounded border ${colors.badge} flex-shrink-0`}>
           {TYPE_LABEL[type] ?? type}
         </span>
-        <code className="flex-1 text-xs font-mono font-bold text-gray-800 min-w-0 truncate">{node.id}</code>
+        <code className="flex-1 min-w-0 text-xs font-mono font-bold text-gray-800 truncate">{node.id}</code>
         {isStart && (
           <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded bg-orange-50 text-orange-500 border border-orange-200 flex-shrink-0">{t('detail.nodeInfo.startBadge')}</span>
         )}
         <button onClick={onClose} className="p-1 rounded hover:bg-gray-100 text-gray-400 hover:text-gray-600 transition-colors flex-shrink-0" title={t('detail.nodeInfo.close')}>
-          <X aria-hidden="true" className="w-3.5 h-3.5" />
+          <X className="w-3.5 h-3.5" />
         </button>
       </div>
 
@@ -709,7 +698,7 @@ export default function NodeInfoPanel({ node, workflow, latestExecution, width =
                   onClick={() => setCodeEditorOpen(true)}
                   className="inline-flex items-center gap-1 rounded-md border border-gray-200 px-2 py-1 text-[11px] text-gray-600 hover:bg-gray-50 hover:text-gray-900"
                 >
-                  <Maximize2 aria-hidden="true" className="w-3 h-3" />
+                  <Maximize2 className="w-3 h-3" />
                   {t('detail.nodeInfo.expandCodeEditor')}
                 </button>
               </div>
@@ -717,7 +706,8 @@ export default function NodeInfoPanel({ node, workflow, latestExecution, width =
                 value={form.code ?? ''}
                 onChange={(e) => set('code', e.target.value)}
                 rows={12}
-                className="w-full px-2.5 py-2.5 rounded-lg text-[11px] font-mono resize-y focus:outline-none focus:ring-2 focus:ring-red-400 bg-[#252c35] text-[#d7dee8] border border-[#4a5563] leading-relaxed"
+                className="w-full px-2.5 py-2.5 rounded-lg text-[11px] font-mono resize-y focus:outline-none focus:ring-2 focus:ring-red-400
+                           bg-[#252c35] text-[#d7dee8] border border-[#4a5563] leading-relaxed"
                 placeholder={t('detail.nodeInfo.codePlaceholder')}
                 spellCheck={false}
               />
@@ -828,28 +818,28 @@ export default function NodeInfoPanel({ node, workflow, latestExecution, width =
       </div>
 
       {/* Footer */}
-      <div className="px-3 py-3 border-t border-gray-100 space-y-1.5 flex-shrink-0">
+      <div className="flex-shrink-0 px-3 py-3 border-t border-gray-100 space-y-1.5">
         {saveErr && (
-          <p className="text-[11px] text-red-500 flex items-center gap-1"><AlertCircle aria-hidden="true" className="w-3 h-3 flex-shrink-0" />{saveErr}</p>
+          <p className="text-[11px] text-red-500 flex items-center gap-1"><AlertCircle className="w-3 h-3 flex-shrink-0" />{saveErr}</p>
         )}
         <button
           onClick={handleSave}
           disabled={saving}
           className="w-full flex items-center justify-center gap-1.5 py-2 rounded-lg text-xs font-semibold transition-colors bg-red-600 text-white hover:bg-red-700 disabled:opacity-50"
         >
-          {saving ? <><Loader2 aria-hidden="true" className="w-3.5 h-3.5 animate-spin" />{t('detail.nodeInfo.saving')}</>
+          {saving ? <><Loader2 className="w-3.5 h-3.5 animate-spin" />{t('detail.nodeInfo.saving')}</>
             : savedOk ? t('detail.nodeInfo.saved')
-            : <><Save aria-hidden="true" className="w-3.5 h-3.5" />{t('detail.nodeInfo.saveNode')}</>}
+            : <><Save className="w-3.5 h-3.5" />{t('detail.nodeInfo.saveNode')}</>}
         </button>
       </div>
 
       {isCodeNode && codeEditorOpen && (
-        <PageDialog aria-label={t('detail.nodeInfo.expandedCodeEditorTitle')} onClose={() => setCodeEditorOpen(false)} className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
           <div
-
-
-
-            className="flex flex-col rounded-2xl border border-gray-200 bg-white shadow-2xl h-[85vh] w-[min(96vw,960px)] min-h-0 min-w-0 overflow-hidden"
+            role="dialog"
+            aria-modal="true"
+            aria-label={t('detail.nodeInfo.expandedCodeEditorTitle')}
+            className="flex h-[85vh] w-[min(96vw,960px)] min-h-0 min-w-0 flex-col overflow-hidden rounded-2xl border border-gray-200 bg-white shadow-2xl"
           >
             <div className="flex items-center justify-between gap-3 border-b border-gray-100 px-4 py-3">
               <div>
@@ -861,11 +851,11 @@ export default function NodeInfoPanel({ node, workflow, latestExecution, width =
                 onClick={() => setCodeEditorOpen(false)}
                 className="inline-flex items-center gap-1 rounded-md border border-gray-200 px-2.5 py-1.5 text-xs text-gray-600 hover:bg-gray-50 hover:text-gray-900"
               >
-                <X aria-hidden="true" className="w-3.5 h-3.5" />
+                <X className="w-3.5 h-3.5" />
                 {t('detail.nodeInfo.closeExpandedEditor')}
               </button>
             </div>
-            <div className="flex-1 bg-[#252c35] p-4 min-h-0 min-w-0">
+            <div className="flex-1 min-h-0 min-w-0 bg-[#252c35] p-4">
               <ExpandedCodeEditor
                 value={form.code ?? ''}
                 onChange={(value) => set('code', value)}
@@ -873,7 +863,7 @@ export default function NodeInfoPanel({ node, workflow, latestExecution, width =
               />
             </div>
           </div>
-        </PageDialog>
+        </div>
       )}
     </div>
   );

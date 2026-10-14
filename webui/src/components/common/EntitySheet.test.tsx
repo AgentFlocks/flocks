@@ -1,10 +1,8 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { useState } from 'react';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import SessionChat from '@/components/common/SessionChat';
 import EntitySheet from '@/components/common/EntitySheet';
-import { DialogFocusProvider } from '@/contexts/DialogFocusContext';
 
 const { mockClientGet, mockClientPost, mockConversationHasMessages, mockUseSessionChat } = vi.hoisted(() => ({
   mockClientGet: vi.fn(),
@@ -143,30 +141,6 @@ describe('EntitySheet', () => {
     });
   });
 
-  it('returns focus to the mouse trigger when opening from BODY without browser button focus', async () => {
-    function Launcher() {
-      const [open, setOpen] = useState(false);
-      return <>
-        <button onClick={() => setOpen(true)}><span>创建子 Agent</span></button>
-        {open && <EntitySheet {...defaultProps} onClose={() => setOpen(false)}><div>Form content</div></EntitySheet>}
-      </>;
-    }
-    const user = userEvent.setup();
-    render(<DialogFocusProvider><Launcher /></DialogFocusProvider>);
-    const trigger = screen.getByRole('button', { name: '创建子 Agent' });
-    const label = screen.getByText('创建子 Agent');
-    expect(document.body).toHaveFocus();
-    // Unlike user.click, these events intentionally do not focus the button:
-    // this is the default mouse behavior on macOS WebKit/Safari.
-    fireEvent(label, new MouseEvent('pointerdown', { bubbles: true, button: 0 }));
-    expect(document.body).toHaveFocus();
-    fireEvent.click(label);
-    expect(screen.getByRole('dialog')).toBeInTheDocument();
-    await user.keyboard('{Escape}');
-    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
-    expect(trigger).toHaveFocus();
-  });
-
   describe('Tab navigation', () => {
     it('should default to Rex tab in create mode', () => {
       render(
@@ -176,8 +150,8 @@ describe('EntitySheet', () => {
       );
 
       expect(screen.getByText('工作台')).toBeInTheDocument();
-      expect(screen.getByRole('tab', { name: '详情' })).toHaveClass('flex-1');
-      expect(screen.getByRole('tab', { name: '工作台' })).toHaveClass('flex-1');
+      expect(screen.getByRole('button', { name: '详情' })).toHaveClass('flex-1');
+      expect(screen.getByRole('button', { name: '工作台' })).toHaveClass('flex-1');
     });
 
     it('should default to Form tab in edit mode', () => {
@@ -607,53 +581,6 @@ describe('EntitySheet', () => {
 
       const submitButton = screen.getByText('创建');
       expect(submitButton).toBeDisabled();
-    });
-  });
-
-  describe('Viewport width', () => {
-    const originalMatchMedia = window.matchMedia;
-
-    function stubViewport(narrow: boolean) {
-      window.matchMedia = vi.fn().mockImplementation((query: string) => ({
-        matches: narrow && query === '(max-width: 767px)',
-        media: query,
-        onchange: null,
-        addEventListener: vi.fn(),
-        removeEventListener: vi.fn(),
-        addListener: vi.fn(),
-        removeListener: vi.fn(),
-        dispatchEvent: vi.fn(),
-      })) as unknown as typeof window.matchMedia;
-    }
-
-    afterEach(() => {
-      window.matchMedia = originalMatchMedia;
-    });
-
-    it('takes the full width and drops the resize handle on phone-width viewports', () => {
-      stubViewport(true);
-      const { container } = render(
-        <EntitySheet {...defaultProps}>
-          <div>Form content</div>
-        </EntitySheet>,
-      );
-
-      const drawer = screen.getByTestId('entity-sheet-drawer');
-      expect(drawer.style.width).toBe('100%');
-      expect(container.querySelector('.cursor-ew-resize')).toBeNull();
-    });
-
-    it('keeps a pixel width and the resize handle on desktop viewports', () => {
-      stubViewport(false);
-      const { container } = render(
-        <EntitySheet {...defaultProps} width={480}>
-          <div>Form content</div>
-        </EntitySheet>,
-      );
-
-      const drawer = screen.getByTestId('entity-sheet-drawer');
-      expect(drawer.style.width).toBe('480px');
-      expect(container.querySelector('.cursor-ew-resize')).not.toBeNull();
     });
   });
 });

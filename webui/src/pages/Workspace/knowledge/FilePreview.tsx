@@ -52,10 +52,10 @@ export default function FilePreview({ file, onClose, onLinked, fileAccess = acce
       title={file.name}
       icon={fileIcon(node)}
       actions={<>
-        {onLinked && <button type="button" title={t('knowledge.files.associate')} className={previewActionClass} onClick={() => setLinking(true)}><Link2 aria-hidden="true" className="h-4 w-4" /></button>}
-        <a href={fileAccess.downloadUrl(file.id)} download={file.name} title={t('knowledge.files.download')} className={previewActionClass}><Download aria-hidden="true" className="h-4 w-4" /></a>
-        <button type="button" title={t('files.preview.fullscreen')} className={previewActionClass} onClick={() => setFullscreen(true)}><Maximize2 aria-hidden="true" className="h-4 w-4" /></button>
-        <button type="button" title={t('knowledge.files.closePreview')} className={previewActionClass} onClick={onClose}><X aria-hidden="true" className="h-4 w-4" /></button>
+        {onLinked && <button type="button" title={t('knowledge.files.associate')} className={previewActionClass} onClick={() => setLinking(true)}><Link2 className="h-4 w-4" /></button>}
+        <a href={fileAccess.downloadUrl(file.id)} download={file.name} title={t('knowledge.files.download')} className={previewActionClass}><Download className="h-4 w-4" /></a>
+        <button type="button" title={t('files.preview.fullscreen')} className={previewActionClass} onClick={() => setFullscreen(true)}><Maximize2 className="h-4 w-4" /></button>
+        <button type="button" title={t('knowledge.files.closePreview')} className={previewActionClass} onClick={onClose}><X className="h-4 w-4" /></button>
       </>}
       meta={<>
         <span>{file.size == null ? '—' : formatBytes(file.size)}</span>

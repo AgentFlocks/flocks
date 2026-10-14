@@ -21,7 +21,7 @@ RECOGNITION_CONTEXTS = {
     "general": "",
     "security_internet": (
         "这是一段网络安全与互联网技术讨论，会中英文混说。"
-        "Flocks、FlocksPro 是智能体平台；Flux 是另一款用于 GitOps 的持续交付工具。"
+        "Flocks 是智能体平台；Flux 是另一款用于 GitOps 的持续交付工具。"
         "NDR 是网络检测与响应，EDR 是终端检测与响应；SIEM、SOAR 用于安全运营。"
         "内容涉及安全产品、协议缩写和开源组件。"
     ),

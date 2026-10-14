@@ -1,11 +1,5 @@
 import { useEffect, useId, useRef, useState, type HTMLAttributes, type ReactNode } from 'react';
-import {
-  GripVertical,
-  Pencil,
-  Plus,
-  Trash2,
-  X,
-} from 'lucide-react';
+import { GripVertical, Pencil, Plus, Trash2, X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { useOptionalToast } from '@/components/common/Toast';
 import { GroupActionCancelled, groupItemLabel, groupLabel, groupName, orderGroupNames, type GroupNavEntry, type GroupNavItem, type GroupSelection } from './groupView';
@@ -141,7 +135,7 @@ function GroupDialog({ titleId, onClose, busy, children }: {
     };
   }, []);
   return <dialog ref={ref} aria-modal="true" aria-labelledby={titleId} tabIndex={-1}
-    className="fixed inset-0 max-h-[calc(100vh-2rem)] w-[calc(100%-2rem)] max-w-md rounded-xl bg-white p-5 shadow-xl backdrop:bg-black/30 m-auto overflow-auto"
+    className="fixed inset-0 m-auto max-h-[calc(100vh-2rem)] w-[calc(100%-2rem)] max-w-md overflow-auto rounded-xl bg-white p-5 shadow-xl backdrop:bg-black/30"
     onCancel={(event) => { event.preventDefault(); if (!busy) onClose(); }}
     onKeyDown={(event) => {
       if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); if (!busy) onClose(); }
@@ -262,7 +256,7 @@ export default function GroupNav({
   const closeModal = () => { if (!busy) { setDialog(null); clearMovingItem?.(); setError(''); } };
   const navigationButton = (value: GroupSelection, label: string, count: number) => (
     <button type="button" title={label} onClick={() => onSelect(value)} aria-pressed={selection === value} aria-current={selection === value ? 'page' : undefined}
-      className={`flex flex-1 items-center justify-between gap-2 rounded-md px-2 py-2 text-left text-xs min-w-0 ${selection === value ? 'bg-slate-100 font-medium text-slate-800' : 'text-gray-600 hover:bg-gray-50'}`}>
+      className={`flex min-w-0 flex-1 items-center justify-between gap-2 rounded-md px-2 py-2 text-left text-xs ${selection === value ? 'bg-slate-100 font-medium text-slate-800' : 'text-gray-600 hover:bg-gray-50'}`}>
       <span className="truncate">{label}</span><span className="tabular-nums text-gray-400">{count}</span>
     </button>
   );
@@ -273,7 +267,7 @@ export default function GroupNav({
         <h2 className="text-xs font-semibold text-gray-600">{t('title')}</h2>
         <button type="button" {...dropProps()} onClick={() => openCreate()} disabled={busy || !editableItems.length}
           title={!editableItems.length ? t('readOnly.noEditable') : t('create')} aria-label={t('create')}
-          className="rounded p-1 text-gray-500 hover:bg-gray-100 disabled:opacity-40"><Plus aria-hidden="true" className="h-4 w-4" /></button>
+          className="rounded p-1 text-gray-500 hover:bg-gray-100 disabled:opacity-40"><Plus className="h-4 w-4" /></button>
       </div>
       <p className="mb-2 px-2 text-[11px] leading-4 text-gray-400">{t('countsDescription')}</p>
       <nav className="space-y-0.5">
@@ -297,14 +291,14 @@ export default function GroupNav({
                 event.preventDefault();
                 const index = ordered.indexOf(group) + (event.key === 'ArrowUp' ? -1 : 1);
                 if (ordered[index]) reorder(group, ordered[index]);
-              }}><GripVertical aria-hidden="true" className="h-3 w-3" /></button>
+              }}><GripVertical className="h-3 w-3" /></button>
             {navigationButton(group, label, entry.count)}
             <button type="button" disabled={busy || !!entry.readOnlyReason} title={entry.readOnlyReason || t('rename')}
               aria-label={t('renameNamed', { name: label })} onClick={() => { setName(group); setError(''); setDialog({ kind: 'rename', name: group }); }}
-              className="rounded p-1 text-gray-400 hover:bg-gray-100 disabled:opacity-40"><Pencil aria-hidden="true" className="h-3 w-3" /></button>
+              className="rounded p-1 text-gray-400 hover:bg-gray-100 disabled:opacity-40"><Pencil className="h-3 w-3" /></button>
             <button type="button" disabled={busy || !!entry.readOnlyReason} title={entry.readOnlyReason || t('delete')}
               aria-label={t('deleteNamed', { name: label })} onClick={() => void run(() => onDelete(group))}
-              className="rounded p-1 text-gray-400 hover:bg-gray-100 disabled:opacity-40"><Trash2 aria-hidden="true" className="h-3 w-3" /></button>
+              className="rounded p-1 text-gray-400 hover:bg-gray-100 disabled:opacity-40"><Trash2 className="h-3 w-3" /></button>
           </div>;
         })}
         <div className="flex" {...dropProps('')}>{navigationButton('', t('ungrouped'), ungroupedCount)}</div>
@@ -313,7 +307,7 @@ export default function GroupNav({
       {modalOpen && <GroupDialog key={dialog?.kind ?? 'move'} titleId={dialogTitleId} onClose={closeModal} busy={busy}>
           <div className="mb-3 flex items-center justify-between">
             <h3 id={dialogTitleId} className="text-sm font-semibold">{dialog ? t(`dialog.${dialog.kind}Title`) : t('dialog.moveTitle', { name: movingItem?.name })}</h3>
-            <button type="button" onClick={closeModal} disabled={busy} aria-label={t('close')}><X aria-hidden="true" className="h-4 w-4" /></button>
+            <button type="button" onClick={closeModal} disabled={busy} aria-label={t('close')}><X className="h-4 w-4" /></button>
           </div>
           {dialog ? <>
             <label className="block text-xs text-gray-600">{t('dialog.name')}
@@ -334,9 +328,9 @@ export default function GroupNav({
               {ordered.map((group) => <option key={group} value={group}>{groupLabel(group, t)}</option>)}
             </select>
           </label>}
-          {error && <p role="alert" className="mt-3 text-xs text-red-600 whitespace-pre-wrap">{error}</p>}
+          {error && <p role="alert" className="mt-3 whitespace-pre-wrap text-xs text-red-600">{error}</p>}
           <div className="mt-5 flex items-center justify-end gap-2">
-            {!dialog && movingItem && <button type="button" onClick={() => openCreate(movingItem.key)} disabled={busy} className="text-xs text-gray-600 mr-auto">{t('create')}</button>}
+            {!dialog && movingItem && <button type="button" onClick={() => openCreate(movingItem.key)} disabled={busy} className="mr-auto text-xs text-gray-600">{t('create')}</button>}
             <button type="button" onClick={closeModal} disabled={busy} className="rounded border px-3 py-1.5 text-xs">{t('cancel')}</button>
             <button type="button" disabled={busy} onClick={dialog ? submit : () => { if (movingItem && !movingItem.readOnlyReason) void run(() => onMove(movingItem.key, destination || null)); }}
               className="rounded bg-slate-700 px-3 py-1.5 text-xs text-white disabled:opacity-50">{busy ? t('saving') : t('save')}</button>

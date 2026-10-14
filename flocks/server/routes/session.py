@@ -814,7 +814,7 @@ async def _publish_context_usage_update(
 )
 async def get_session_status(request: Request) -> Dict[str, Any]:
     """
-    Get session status for all sessions
+    Get session status for all sessions the caller can read
     
     Returns a dictionary mapping session IDs to their status:
     - idle: Session is not processing
@@ -826,9 +826,9 @@ async def get_session_status(request: Request) -> Dict[str, Any]:
     from flocks.session.core.status import SessionStatus
     from flocks.session.core.turn_state import get_turn_state, get_context_state
     
-    current_user = require_user(request)
     from flocks.session.agent_inbox import AgentInbox
 
+    current_user = require_user(request)
     statuses = SessionStatus.list()
     from flocks.storage.storage import Storage
     async with Storage.transaction() as db:
@@ -846,21 +846,34 @@ async def get_session_status(request: Request) -> Dict[str, Any]:
             WHERE COALESCE(document.value ->> 'status', 'active') <> 'deleted'""",
             (list(statuses),),
         )
+    readable: Dict[str, bool] = {}
+
+    async def can_read(session_id: str) -> bool:
+        # The map spans every instance, so it must not show sessions (or
+        # their ancestry) that the caller could not open one by one.
+        if session_id not in readable:
+            session = await _get_session_by_id_unfiltered(session_id)
+            readable[session_id] = session is not None and SessionPolicy.can_read(session, current_user)
+        return readable[session_id]
+
     result: Dict[str, Any] = {}
     for raw, peer_busy in rows:
         session = (SessionModel.model_validate_json(raw) if isinstance(raw, str)
                    else SessionModel.model_validate(raw))
         session_id = session.id
+        readable[session_id] = SessionPolicy.can_read(session, current_user)
+        if not readable[session_id]:
+            continue
         session_status = statuses.get(session_id)
         if session_status is None or (peer_busy and session_status.type == "idle"):
             session_status = SessionStatusBusy()
-        # Only expose sessions the caller may read; other users' session IDs
-        # and activity must not leak through the global status map.
-        if not SessionPolicy.can_read(session, current_user):
-            continue
         result[session_id] = {
             **session_status.model_dump(),
-            "ancestorSessionIDs": AgentInbox.ancestors(session_id),
+            "ancestorSessionIDs": [
+                ancestor_id
+                for ancestor_id in AgentInbox.ancestors(session_id)
+                if await can_read(ancestor_id)
+            ],
             "turn": get_turn_state(session_id).model_dump(by_alias=True),
             "context": get_context_state(session_id).model_dump(by_alias=True),
         }
@@ -2456,8 +2469,8 @@ async def _abort_session_processing(sessionID: str) -> bool:
     # Cancel background sub-agent tasks spawned by this session
     bg_cancelled = 0
     try:
-        from flocks.task.background import get_background_manager
-        bg_cancelled = get_background_manager().cancel_by_parent_session_id(sessionID)
+        from flocks.task.background import cancel_background_runs_for_parent
+        bg_cancelled = cancel_background_runs_for_parent(sessionID)
     except Exception as exc:
         log.warn("session.abort.bg_cancel_error", {"error": str(exc)})
 

@@ -1,7 +1,6 @@
-import { pageActionLabel } from '../../pageActionLabel';
 import { useState, useEffect, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
-import { ArrowDown, ArrowUp, Filter } from 'lucide-react';
+import { ArrowUp, ArrowDown, Filter } from 'lucide-react';
 import type { SortState, SortField, ColumnFilters } from '../types';
 
 interface SortFilterHeaderProps {
@@ -53,18 +52,18 @@ export default function SortFilterHeader({
           className={`flex items-center gap-0.5 hover:text-gray-900 transition-colors ${isActive ? 'text-red-600' : ''}`}
         >
           {label}
-          {isActive && (sort.dir === 'asc' ? <ArrowUp aria-hidden="true" className="w-3 h-3" /> : <ArrowDown aria-hidden="true" className="w-3 h-3" />)}
+          {isActive && (sort.dir === 'asc' ? <ArrowUp className="w-3 h-3" /> : <ArrowDown className="w-3 h-3" />)}
         </button>
-        <button aria-label={pageActionLabel('filter')}
+        <button
           onClick={() => setOpen((v) => !v)}
           className={`p-0.5 rounded hover:bg-gray-200 transition-colors ${hasFilter ? 'text-red-600' : 'text-gray-400'}`}
         >
-          <Filter aria-hidden="true" className="w-3 h-3" />
+          <Filter className="w-3 h-3" />
         </button>
       </div>
 
       {open && (
-        <div className="absolute left-0 top-full mt-1 bg-white rounded-lg shadow-lg border border-gray-200 py-2 max-h-60 z-20 min-w-[160px] overflow-y-auto">
+        <div className="absolute left-0 top-full mt-1 z-20 bg-white rounded-lg shadow-lg border border-gray-200 py-2 min-w-[160px] max-h-60 overflow-y-auto">
           {hasFilter && (
             <button
               onClick={() => { onClearFilter(field); setOpen(false); }}

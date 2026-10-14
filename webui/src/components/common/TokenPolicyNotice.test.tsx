@@ -72,14 +72,14 @@ it('traps keyboard focus and restores scrolling and focus on unmount', () => {
   trigger.focus();
   const previousOverflow = document.body.style.overflow;
   const { unmount } = render(<TokenPolicyNotice onPresented={vi.fn()} onClose={vi.fn()} />);
+  expect(screen.getByRole('dialog')).toHaveFocus();
   expect(document.body.style.overflow).toBe('hidden');
   const close = screen.getByRole('button', { name: 'close' });
   const confirm = screen.getByRole('button', { name: 'gotIt' });
-  expect(close).toHaveFocus();
   close.focus();
-  fireEvent.keyDown(close, { key: 'Tab', shiftKey: true });
+  fireEvent.keyDown(window, { key: 'Tab', shiftKey: true });
   expect(confirm).toHaveFocus();
-  fireEvent.keyDown(confirm, { key: 'Tab' });
+  fireEvent.keyDown(window, { key: 'Tab' });
   expect(close).toHaveFocus();
   unmount();
   expect(document.body.style.overflow).toBe(previousOverflow);

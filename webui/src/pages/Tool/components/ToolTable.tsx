@@ -52,10 +52,10 @@ export default function ToolTable({
   };
 
   return (
-    <div className="bg-white rounded-lg border border-gray-200 flex flex-col overflow-x-auto">
-      {/* Header row (min-w keeps columns intact; wrapper scrolls on narrow viewports) */}
+    <div className="bg-white rounded-lg border border-gray-200 overflow-hidden flex flex-col">
+      {/* Header row */}
       <div
-        className="grid items-center gap-3 px-4 py-2.5 bg-gray-50 border-b border-gray-200 text-[11px] font-medium text-gray-500 uppercase tracking-wide min-w-[640px]"
+        className="grid items-center gap-3 px-4 py-2.5 bg-gray-50 border-b border-gray-200 text-[11px] font-medium text-gray-500 uppercase tracking-wide"
         style={{ gridTemplateColumns: GRID_COLS }}
       >
         <div />
@@ -115,7 +115,7 @@ export default function ToolTable({
           return (
             <div
               key={tool.name}
-              className="grid items-center gap-3 px-4 py-3 hover:bg-gray-50 cursor-pointer transition-colors min-w-[640px]"
+              className="grid items-center gap-3 px-4 py-3 hover:bg-gray-50 cursor-pointer transition-colors"
               style={{ gridTemplateColumns: GRID_COLS }}
               onClick={() => onSelect(tool)}
             >
@@ -124,17 +124,16 @@ export default function ToolTable({
 
               {/* Icon */}
               <div className={`w-8 h-8 flex items-center justify-center rounded-lg ${tool.enabled ? 'bg-gray-100' : 'bg-gray-50'}`}>
-                <Wrench aria-hidden="true" className={`w-4 h-4 ${tool.enabled ? 'text-gray-700' : 'text-gray-400'}`} />
+                <Wrench className={`w-4 h-4 ${tool.enabled ? 'text-gray-700' : 'text-gray-400'}`} />
               </div>
 
               {/* Name + description */}
               <div className="min-w-0">
                 <div className="flex items-center gap-1.5">
                   <span className="text-sm font-medium text-gray-900 font-mono truncate">{tool.name}</span>
-                  {/* gray-500 keeps the category tag ≥4.5:1 on white (gray-400 was 2.5:1) */}
                   <span className="text-[10px] text-gray-400 shrink-0">{categoryLabel}</span>
                 </div>
-                <p className="text-xs text-gray-500 mt-0.5 truncate">{tool.description}</p>
+                <p className="text-xs text-gray-500 truncate mt-0.5">{tool.description}</p>
               </div>
 
               {/* Source column */}

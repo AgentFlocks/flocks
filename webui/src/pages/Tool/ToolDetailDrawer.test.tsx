@@ -177,9 +177,11 @@ describe('ToolDetailDrawer', () => {
       message: 'Request failed with status code 403',
     });
     const alertSpy = vi.spyOn(window, 'alert').mockImplementation(() => {});
-    render(<ToolDetailDrawer {...drawerProps} />);
+    const { container } = render(<ToolDetailDrawer {...drawerProps} />);
 
-    const toggle = screen.getByRole('switch');
+    // dev's enable toggle is a plain button (no switch role): the h-6 w-11 pill.
+    const toggle = container.ownerDocument.querySelector('button.h-6.w-11') as HTMLButtonElement;
+    expect(toggle).toBeTruthy();
     fireEvent.click(toggle);
     await waitFor(() => expect(alertSpy).toHaveBeenCalledWith('仅管理员可执行该操作'));
     expect(screen.getByText('启用')).toBeInTheDocument();

@@ -12,8 +12,6 @@ interface CreateRightPanelProps {
   workflow: Workflow | null;
   open: boolean;
   width?: number;
-  /** Render as a full-size overlay of the editor area (phone widths). */
-  overlay?: boolean;
   onWorkflowCreated: (workflow: Workflow) => void;
   onWorkflowUpdated?: (workflow: Workflow) => void;
   initialChatSessionId?: string | null;
@@ -27,7 +25,6 @@ export default function CreateRightPanel({
   workflow,
   open,
   width = 320,
-  overlay = false,
   onWorkflowCreated,
   onWorkflowUpdated,
   initialChatSessionId,
@@ -73,13 +70,8 @@ export default function CreateRightPanel({
 
   return (
     <div
-      className={
-        overlay
-          // Phone widths: cover the editor area instead of sharing the row.
-          ? `absolute inset-0 z-40 flex flex-col bg-surface overflow-hidden ${open ? '' : 'hidden'}`
-          : "flex flex-col bg-white border-l border-gray-200 transition-[width] duration-300 ease-in-out flex-shrink-0 overflow-hidden"
-      }
-      style={overlay ? undefined : { width: open ? width : 0 }}
+      className="flex flex-col bg-white border-l border-gray-200 flex-shrink-0 overflow-hidden transition-[width] duration-300 ease-in-out"
+      style={{ width: open ? width : 0 }}
     >
       <div className="flex border-b border-gray-100 flex-shrink-0">
         {TABS.map((tab) => (
@@ -89,7 +81,7 @@ export default function CreateRightPanel({
             className={`
               flex-1 py-3 text-xs font-medium transition-colors relative
               ${activeTab === tab.id ? 'text-red-600' : 'text-gray-500 hover:text-gray-700'}
- `}
+            `}
           >
             {tab.label}
             {activeTab === tab.id && (
@@ -124,7 +116,7 @@ export default function CreateRightPanel({
             <div className="flex min-h-0 flex-1 items-center justify-center p-6">
               <div className="flex max-w-[260px] flex-col items-center gap-3 rounded-xl border border-dashed border-gray-200 bg-gray-50/70 px-5 py-6 text-center">
                 <div className="flex h-10 w-10 items-center justify-center rounded-xl border border-red-100 bg-red-50 text-red-500">
-                  <Rocket aria-hidden="true" className="h-4 w-4" />
+                  <Rocket className="h-4 w-4" />
                 </div>
                 <div>
                   <p className="text-sm font-semibold text-gray-800">{t('create.publish.emptyTitle')}</p>

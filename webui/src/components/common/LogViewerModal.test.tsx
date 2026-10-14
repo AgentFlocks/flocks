@@ -10,18 +10,11 @@ vi.mock('@/api/logs', () => ({
   },
 }));
 
-it('keeps the loaded log controls keyboard reachable inside the dialog', async () => {
+it('loads the latest log and closes from the backdrop', async () => {
   const onClose = vi.fn();
   render(<LogViewerModal open onClose={onClose} />);
   expect(await screen.findByText('service ready')).toBeInTheDocument();
-  expect(screen.getByRole('dialog', { name: 'logs.title' })).toHaveAttribute('aria-modal', 'true');
-  const fileSelect = screen.getByRole('combobox', { name: 'logs.file' });
-  const close = screen.getByRole('button', { name: 'common:button.close' });
-  fileSelect.focus();
-  fireEvent.keyDown(fileSelect, { key: 'Tab', shiftKey: true });
-  expect(close).toHaveFocus();
-  fireEvent.keyDown(close, { key: 'Tab' });
-  expect(fileSelect).toHaveFocus();
-  fireEvent.keyDown(fileSelect, { key: 'Escape' });
+  expect(screen.getByRole('heading', { name: 'logs.title' })).toBeInTheDocument();
+  fireEvent.click(document.querySelector('div.fixed.inset-0.z-40')!);
   expect(onClose).toHaveBeenCalledTimes(1);
 });

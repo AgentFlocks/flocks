@@ -9,10 +9,9 @@ vi.mock('react-i18next', () => ({
 }));
 
 describe('WorkflowStatusBadge', () => {
-  it('renders running status as a informational badge with a progress icon', () => {
+  it('renders running status as a healthy green badge', () => {
     render(<WorkflowStatusBadge status="running" />);
 
     expect(screen.getByText('running')).toHaveClass('bg-green-100', 'text-green-700');
-    expect(screen.getByText('running').querySelector('svg')).toBeInTheDocument();
   });
 });

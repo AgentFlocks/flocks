@@ -39,7 +39,9 @@ export function PermissionApprovalDialog({
   const command = typeof request.metadata.command === 'string'
     ? request.metadata.command.trim()
     : '';
-  const description = command || request.toolID || request.permission;
+  // File edits carry their path in the patterns: show what would be written.
+  const target = (request.patterns || []).filter((pattern) => pattern && pattern !== '*').join(' ');
+  const description = command || [request.toolID || request.permission, target].filter(Boolean).join(' ');
   const confirmOptions = Array.isArray(request.metadata.network_confirm_options)
     ? request.metadata.network_confirm_options
       .map((item) => (typeof item === 'string' ? item.trim().toLowerCase() : ''))
@@ -50,22 +52,22 @@ export function PermissionApprovalDialog({
 
   return (
     <div
-      className="mb-2 flex items-center gap-3 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2.5 shadow-sm dark:border-amber-500/35 dark:bg-amber-950/25 min-w-0 flex-wrap"
+      className="mb-2 flex min-w-0 items-center gap-3 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2.5 shadow-sm dark:border-amber-500/35 dark:bg-amber-950/25"
       role="alertdialog"
       aria-labelledby="permission-approval-title"
     >
-      <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-amber-100 dark:bg-amber-950/50 shrink-0">
-        <AlertTriangle aria-hidden="true" className="h-4 w-4 text-amber-700 dark:text-amber-300" />
+      <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-amber-100 dark:bg-amber-950/50">
+        <AlertTriangle className="h-4 w-4 text-amber-700 dark:text-amber-300" />
       </div>
       <div className="min-w-0 flex-1">
         <div id="permission-approval-title" className="text-sm font-medium text-zinc-900 dark:text-zinc-100">
           {t('chat.permission.title')}
         </div>
-        <code className="mt-0.5 block font-mono text-xs text-zinc-700 dark:text-zinc-200 truncate" title={description}>
+        <code className="mt-0.5 block truncate font-mono text-xs text-zinc-700 dark:text-zinc-200" title={description}>
           $ {description}
         </code>
       </div>
-      <div className="flex items-center gap-1.5 flex-wrap">
+      <div className="flex shrink-0 items-center gap-1.5">
         <button
           type="button"
           autoFocus
@@ -81,7 +83,7 @@ export function PermissionApprovalDialog({
           onClick={() => onReply(networkTargetTrustEnabled ? 'trust_network_target' : 'always')}
           className="inline-flex items-center gap-1 rounded-lg border border-amber-400 px-3 py-1.5 text-xs font-medium text-amber-800 transition-colors hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-60 dark:text-amber-200 dark:hover:bg-amber-900/40"
         >
-          <ShieldCheck aria-hidden="true" className="h-3.5 w-3.5" />
+          <ShieldCheck className="h-3.5 w-3.5" />
           {networkTargetTrustEnabled ? t('chat.permission.alwaysTarget') : t('chat.permission.always')}
         </button>
         {networkTrustEnabled && (
@@ -100,7 +102,7 @@ export function PermissionApprovalDialog({
           onClick={() => onReply('allow')}
           className="inline-flex items-center gap-1 rounded-lg bg-amber-600 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-amber-700 disabled:cursor-not-allowed disabled:opacity-60"
         >
-          {submitting && <Loader2 aria-hidden="true" className="h-3.5 w-3.5 animate-spin" />}
+          {submitting && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
           {t('chat.permission.allowOnce')}
         </button>
       </div>

@@ -1,4 +1,3 @@
-import { pageActionLabel } from '../../pageActionLabel';
 import { useTranslation } from 'react-i18next';
 import { ChevronLeft, ChevronRight } from 'lucide-react';
 
@@ -40,17 +39,17 @@ export default function Pagination({
   };
 
   return (
-    <div className="bg-white px-6 py-4 border-t border-gray-200 flex items-center justify-between flex-wrap">
+    <div className="bg-white px-6 py-4 border-t border-gray-200 flex items-center justify-between">
       <div className="text-sm text-gray-700">
         {t('pagination.showing', { start: startItem, end: endItem, total: totalCount })}
       </div>
       <div className="flex items-center space-x-1">
-        <button aria-label={pageActionLabel('previous')}
+        <button
           onClick={() => onPageChange(Math.max(1, currentPage - 1))}
           disabled={currentPage === 1}
           className={`p-2 rounded-md text-sm ${currentPage === 1 ? 'text-gray-300 cursor-not-allowed' : 'text-gray-600 hover:bg-gray-100'}`}
         >
-          <ChevronLeft aria-hidden="true" className="w-4 h-4" />
+          <ChevronLeft className="w-4 h-4" />
         </button>
         {getPages().map((page, i) =>
           typeof page === 'string' ? (
@@ -58,7 +57,6 @@ export default function Pagination({
           ) : (
             <button
               key={page}
-              aria-current={currentPage === page ? 'page' : undefined}
               onClick={() => onPageChange(page)}
               className={`px-3 py-1 rounded-md text-sm font-medium ${
                 currentPage === page ? 'bg-red-600 text-white' : 'text-gray-700 hover:bg-gray-100'
@@ -68,12 +66,12 @@ export default function Pagination({
             </button>
           ),
         )}
-        <button aria-label={pageActionLabel('next')}
+        <button
           onClick={() => onPageChange(Math.min(totalPages, currentPage + 1))}
           disabled={currentPage === totalPages}
           className={`p-2 rounded-md text-sm ${currentPage === totalPages ? 'text-gray-300 cursor-not-allowed' : 'text-gray-600 hover:bg-gray-100'}`}
         >
-          <ChevronRight aria-hidden="true" className="w-4 h-4" />
+          <ChevronRight className="w-4 h-4" />
         </button>
       </div>
     </div>

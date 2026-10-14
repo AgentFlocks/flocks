@@ -390,32 +390,6 @@ describe('DeviceIntegrationPage', () => {
     mocks.getSessionMessagesPage.mockResolvedValue({ items: [] });
   });
 
-  it('pads itself evenly as a full-screen page', async () => {
-    const { container } = render(<DeviceIntegrationPage />);
-
-    await screen.findByText('设备接入');
-
-    // Layout renders /devices without its padded wrapper. The navigation button
-    // now sits in the workspace header, so no extra top offset is needed.
-    const root = container.firstElementChild;
-    expect(root).toHaveClass('p-6');
-    expect(root).not.toHaveClass('pt-16');
-  });
-
-  it('stacks the room sidebar above the device list below md', async () => {
-    render(<DeviceIntegrationPage />);
-
-    const sidebar = await screen.findByTestId('device-room-sidebar');
-    expect(sidebar).toHaveClass('w-full');
-    expect(sidebar).toHaveClass('md:w-52');
-    // The room list caps its own height on phones (the business groups below it cap theirs).
-    const roomList = within(sidebar).getByTestId('device-room-list');
-    expect(roomList).toHaveClass('max-h-36');
-    expect(roomList).toHaveClass('md:max-h-none');
-    expect(sidebar.parentElement).toHaveClass('flex-col');
-    expect(sidebar.parentElement).toHaveClass('md:flex-row');
-  });
-
   it('keeps business groups and rooms independent in one rail, with metadata-only native writes', async () => {
     localStorage.clear();
     let devices = ['One', 'Two', 'Three'].map((name, index) => ({
@@ -435,7 +409,7 @@ describe('DeviceIntegrationPage', () => {
     render(<DeviceIntegrationPage />);
     await screen.findByText('Device One');
     const businessNav = screen.getByRole('complementary', { name: 'title' });
-    const rail = businessNav.closest('[data-testid="device-room-sidebar"]') as HTMLElement;
+    const rail = businessNav.closest('div.w-52') as HTMLElement;
     expect(rail).toBeInTheDocument();
     fireEvent.click(within(businessNav).getByRole('button', { name: 'Ops 2' }));
     fireEvent.click(within(rail).getByText('Room One'));
@@ -476,7 +450,7 @@ describe('DeviceIntegrationPage', () => {
     render(<DeviceIntegrationPage />);
     await screen.findByText('Device 0');
     const nav = screen.getByRole('complementary', { name: 'title' });
-    fireEvent.click(within(nav.closest('[data-testid="device-room-sidebar"]') as HTMLElement).getByText('Room One'));
+    fireEvent.click(within(nav.closest('div.w-52') as HTMLElement).getByText('Room One'));
     expect(screen.queryByText('Device 1')).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'renameNamed' }));
     fireEvent.change(screen.getByRole('textbox', { name: 'dialog.name' }), { target: { value: 'New' } });
@@ -1243,14 +1217,12 @@ describe('DeviceIntegrationPage', () => {
     const cardTitle = await screen.findByText('TDP-test-02');
     await user.click(cardTitle);
 
-    const backdrop = await screen.findByLabelText('关闭设备配置面板');
-    expect(backdrop).toHaveAttribute('tabindex', '-1');
-    expect(backdrop).not.toHaveFocus();
+    expect(await screen.findByRole('button', { name: '关闭设备配置面板' })).toBeInTheDocument();
 
-    await user.click(backdrop);
+    await user.click(screen.getByRole('button', { name: '关闭设备配置面板' }));
 
     await waitFor(() => {
-      expect(screen.queryByLabelText('关闭设备配置面板')).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: '关闭设备配置面板' })).not.toBeInTheDocument();
     });
   });
 
@@ -1928,5 +1900,17 @@ describe('DeviceIntegrationPage', () => {
       expect(mocks.revealDeviceCredentials).toHaveBeenCalledWith('device-1', 'api_key');
       expect(screen.getByDisplayValue('long-real-onesec-api-key-Cd4Y')).toBeInTheDocument();
     });
+  });
+
+  it('pads itself evenly as a full-screen page', async () => {
+    const { container } = render(<DeviceIntegrationPage />);
+
+    await screen.findByText('设备接入');
+
+    // Layout renders /devices without its padded wrapper. The navigation button
+    // now sits in the workspace header, so no extra top offset is needed.
+    const root = container.firstElementChild;
+    expect(root).toHaveClass('p-6');
+    expect(root).not.toHaveClass('pt-16');
   });
 });

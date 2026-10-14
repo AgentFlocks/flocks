@@ -1,20 +1,8 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
-  Activity,
-  CheckCircle,
-  Eye,
-  EyeOff,
-  FileText,
-  Info,
-  Power,
-  PowerOff,
-  RefreshCw,
-  Save,
-  Trash2,
-  Wrench,
-  XCircle,
-  Zap,
+  Info, Wrench, FileText, Activity, Zap, RefreshCw, Power, PowerOff,
+  CheckCircle, XCircle, Cloud, Database, AlertTriangle, Eye, EyeOff, Save, Trash2,
 } from 'lucide-react';
 import type { Tool } from '@/api/tool';
 import type { MCPCatalogCategory, MCPCatalogEntry, MCPCredentials, MCPServer, MCPServerDetail } from '@/types';
@@ -51,13 +39,13 @@ function KvRowValue({ value }: { value: string }) {
         onBlur={() => setShowTooltip(false)}
       >
         <span
-          className="block text-sm text-gray-900 text-right cursor-help max-w-full truncate"
+          className="block max-w-full text-sm text-gray-900 truncate text-right cursor-help"
           tabIndex={0}
         >
           {value}
         </span>
         {showTooltip && (
-          <div className="absolute right-0 top-full mt-2 w-max max-w-[360px] rounded-lg bg-gray-900 px-3 py-2 text-left text-xs leading-relaxed text-white shadow-lg z-20 break-words">
+          <div className="absolute right-0 top-full z-20 mt-2 w-max max-w-[360px] rounded-lg bg-gray-900 px-3 py-2 text-left text-xs leading-relaxed text-white shadow-lg break-words">
             {value}
           </div>
         )}
@@ -228,9 +216,9 @@ export function MCPServerDetailPanel({
     <div className="bg-white" onClick={(e) => e.stopPropagation()}>
       <div className="flex items-center border-b border-gray-200 px-5">
         {([
-          { key: 'overview' as const, label: t('detail.tabs.overview'), icon: <Info aria-hidden="true" className="w-3.5 h-3.5" /> },
-          { key: 'tools' as const, label: t('detail.tabs.tools', { count: serverTools.length }), icon: <Wrench aria-hidden="true" className="w-3.5 h-3.5" /> },
-          { key: 'resources' as const, label: t('detail.tabs.resources', { count: serverDetail?.resources?.length || 0 }), icon: <FileText aria-hidden="true" className="w-3.5 h-3.5" /> },
+          { key: 'overview' as const, label: t('detail.tabs.overview'), icon: <Info className="w-3.5 h-3.5" /> },
+          { key: 'tools' as const, label: t('detail.tabs.tools', { count: serverTools.length }), icon: <Wrench className="w-3.5 h-3.5" /> },
+          { key: 'resources' as const, label: t('detail.tabs.resources', { count: serverDetail?.resources?.length || 0 }), icon: <FileText className="w-3.5 h-3.5" /> },
         ]).map((tab) => (
           <button
             key={tab.key}
@@ -292,7 +280,7 @@ export function MCPServerDetailPanel({
                   title={t('detail.refreshTools')}
                   className="p-1.5 text-gray-400 hover:text-gray-600 hover:bg-gray-200 rounded-md disabled:opacity-40 transition-colors"
                 >
-                  <RefreshCw aria-hidden="true" className={`w-4 h-4 ${refreshing ? 'animate-spin' : ''}`} />
+                  <RefreshCw className={`w-4 h-4 ${refreshing ? 'animate-spin' : ''}`} />
                 </button>
               </div>
               <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2">
@@ -316,32 +304,32 @@ export function MCPServerDetailPanel({
                     disabled={savingConfig}
                     className="inline-flex items-center gap-2 px-4 py-2.5 bg-red-600 text-white rounded-lg hover:bg-red-700 text-sm font-medium transition-colors disabled:opacity-50"
                   >
-                    {savingConfig ? <RefreshCw aria-hidden="true" className="w-4 h-4 animate-spin" /> : <Save aria-hidden="true" className="w-4 h-4" />}
+                    {savingConfig ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
                     {savingConfig ? t('button.saving') : t('button.save')}
                   </button>
                 </>
               )}
               {server.status === 'connected' ? (
                 <button onClick={onDisconnect} className="inline-flex items-center gap-2 px-4 py-2.5 border border-red-300 text-red-700 rounded-lg hover:bg-red-50 text-sm font-medium transition-colors">
-                  <PowerOff aria-hidden="true" className="w-4 h-4" />{t('detail.disconnectConn')}
+                  <PowerOff className="w-4 h-4" />{t('detail.disconnectConn')}
                 </button>
               ) : server.status === 'disabled' ? (
                 <button onClick={handleToggleEnabled} disabled={savingConfig} className="inline-flex items-center gap-2 px-4 py-2.5 bg-green-600 text-white rounded-lg hover:bg-green-700 text-sm font-medium transition-colors disabled:opacity-50">
-                  <Power aria-hidden="true" className="w-4 h-4" />{t('detail.enableServer')}
+                  <Power className="w-4 h-4" />{t('detail.enableServer')}
                 </button>
               ) : (
                 <button onClick={onConnect} className="inline-flex items-center gap-2 px-4 py-2.5 bg-red-600 text-white rounded-lg hover:bg-red-700 text-sm font-medium transition-colors">
-                  <Power aria-hidden="true" className="w-4 h-4" />{t('detail.connectConn')}
+                  <Power className="w-4 h-4" />{t('detail.connectConn')}
                 </button>
               )}
               {server.status !== 'disabled' && (
                 <button onClick={handleToggleEnabled} disabled={savingConfig} className="inline-flex items-center gap-2 px-4 py-2.5 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 text-sm font-medium transition-colors disabled:opacity-50">
-                  <PowerOff aria-hidden="true" className="w-4 h-4" />{t('detail.disableServer')}
+                  <PowerOff className="w-4 h-4" />{t('detail.disableServer')}
                 </button>
               )}
               {onRemove && (
                 <button onClick={onRemove} className="inline-flex items-center gap-2 px-4 py-2.5 border border-red-300 text-red-700 rounded-lg hover:bg-red-50 text-sm font-medium transition-colors">
-                  <Trash2 aria-hidden="true" className="w-4 h-4" />{t('detail.removeServer')}
+                  <Trash2 className="w-4 h-4" />{t('detail.removeServer')}
                 </button>
               )}
             </div>
@@ -362,7 +350,7 @@ export function MCPServerDetailPanel({
                   {serverTools.map((tool) => (
                     <tr key={tool.name} onClick={() => onSelectTool(tool)} className="hover:bg-red-50 cursor-pointer transition-colors">
                       <td className="px-4 py-3"><span className="text-sm font-medium text-gray-900 font-mono break-all">{tool.name}</span></td>
-                      <td className="px-4 py-3"><span className="text-sm text-gray-600 leading-relaxed line-clamp-2">{tool.description}</span></td>
+                      <td className="px-4 py-3"><span className="text-sm text-gray-600 line-clamp-2 leading-relaxed">{tool.description}</span></td>
                     </tr>
                   ))}
                 </tbody>
@@ -374,7 +362,7 @@ export function MCPServerDetailPanel({
         ) : (
           <div className="bg-white rounded-lg border border-gray-200 overflow-hidden">
             <div className="overflow-x-auto">
-              <table className="divide-y divide-gray-100 table-fixed min-w-full">
+              <table className="min-w-full divide-y divide-gray-100 table-fixed">
                 <thead className="bg-gray-50">
                   <tr>
                     <th className="w-[25%] px-5 py-2.5 text-left text-xs font-medium text-gray-500 uppercase">{t('detail.tableResourceName')}</th>
@@ -455,7 +443,7 @@ export function CatalogAPIDetailPanel({
           <div className="space-y-5">
             <div className="bg-white rounded-lg border border-gray-200 p-4">
               <h4 className="text-sm font-semibold text-gray-900 mb-3 flex items-center">
-                <Activity aria-hidden="true" className="w-4 h-4 mr-2 text-purple-500" />
+                <Activity className="w-4 h-4 mr-2 text-purple-500" />
                 {t('serviceInfo.title')}
               </h4>
               <div className="space-y-3">
@@ -496,7 +484,7 @@ export function CatalogAPIDetailPanel({
           <div className="space-y-5">
             <div className="bg-white rounded-lg border border-gray-200 p-4">
               <h4 className="text-sm font-semibold text-gray-900 mb-3 flex items-center">
-                <Zap aria-hidden="true" className="w-4 h-4 mr-2 text-amber-500" />
+                <Zap className="w-4 h-4 mr-2 text-amber-500" />
                 {t('detail.quickActions')}
               </h4>
               <div className="space-y-2.5">
@@ -505,10 +493,10 @@ export function CatalogAPIDetailPanel({
                   disabled={testing}
                   className={`w-full flex items-center justify-center gap-2 px-4 py-2.5 border rounded-lg text-sm font-medium transition-colors ${testing ? 'border-red-300 bg-red-50 text-red-600 cursor-not-allowed' : 'bg-white border-gray-300 text-gray-700 hover:bg-gray-50'}`}
                 >
-                  {testing ? <><RefreshCw aria-hidden="true" className="w-4 h-4 animate-spin" />{t('button.testing')}</> : <><Activity aria-hidden="true" className="w-4 h-4" />{t('button.testConnectivity')}</>}
+                  {testing ? <><RefreshCw className="w-4 h-4 animate-spin" />{t('button.testing')}</> : <><Activity className="w-4 h-4" />{t('button.testConnectivity')}</>}
                 </button>
                 <button onClick={handleConnect} className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-red-600 text-white rounded-lg text-sm font-medium hover:bg-red-700 transition-colors">
-                  <Power aria-hidden="true" className="w-4 h-4" />{t('detail.connectConn')}
+                  <Power className="w-4 h-4" />{t('detail.connectConn')}
                 </button>
               </div>
             </div>
@@ -536,7 +524,7 @@ export function CatalogAPIDetailPanel({
             {!testing && testResult && (
               <div className={`p-3 rounded-lg border ${testResult.success ? 'bg-green-50 border-green-200' : 'bg-red-50 border-red-200'}`}>
                 <div className="flex items-start">
-                  {testResult.success ? <CheckCircle aria-hidden="true" className="w-4 h-4 text-green-600 mr-2 mt-0.5 flex-shrink-0" /> : <XCircle aria-hidden="true" className="w-4 h-4 text-red-600 mr-2 mt-0.5 flex-shrink-0" />}
+                  {testResult.success ? <CheckCircle className="w-4 h-4 text-green-600 mr-2 mt-0.5 flex-shrink-0" /> : <XCircle className="w-4 h-4 text-red-600 mr-2 mt-0.5 flex-shrink-0" />}
                   <div className="flex-1">
                     <div className={`text-sm font-medium ${testResult.success ? 'text-green-800' : 'text-red-800'}`}>
                       {testResult.success ? t('testing.testSuccess') : t('testing.testFailed')}
@@ -808,8 +796,8 @@ export function APIServiceDetailPanel({
     <div className="bg-white" onClick={(e) => e.stopPropagation()}>
       <div className="flex items-center border-b border-gray-200 px-5">
         {([
-          { key: 'overview' as const, label: t('detail.tabs.overview'), icon: <Info aria-hidden="true" className="w-3.5 h-3.5" /> },
-          { key: 'tools' as const, label: t('detail.tabs.tools', { count: serviceTools.length }), icon: <Wrench aria-hidden="true" className="w-3.5 h-3.5" /> },
+          { key: 'overview' as const, label: t('detail.tabs.overview'), icon: <Info className="w-3.5 h-3.5" /> },
+          { key: 'tools' as const, label: t('detail.tabs.tools', { count: serviceTools.length }), icon: <Wrench className="w-3.5 h-3.5" /> },
         ]).map((tab) => (
           <button
             key={tab.key}
@@ -892,23 +880,23 @@ export function APIServiceDetailPanel({
 
                     return (
                       <div key={field.key} className="flex items-center gap-3">
-                        <span className="text-sm text-gray-500 w-20 shrink-0">{label}</span>
+                        <span className="text-sm text-gray-500 shrink-0 w-20">{label}</span>
                         <div className="flex-1 flex items-center gap-1.5 min-w-0">
                           <input
                             type={isSensitive && !visible ? 'password' : 'text'}
                             value={value}
                             onChange={(e) => setFormValues((prev) => ({ ...prev, [field.key]: e.target.value }))}
                             placeholder={placeholder}
-                            className="flex-1 px-2 py-1 border border-gray-200 rounded text-sm bg-gray-50 focus:outline-none focus:ring-1 focus:ring-red-400 focus:bg-white focus:border-red-400 transition-colors min-w-0"
+                            className="flex-1 min-w-0 px-2 py-1 border border-gray-200 rounded text-sm bg-gray-50 focus:outline-none focus:ring-1 focus:ring-red-400 focus:bg-white focus:border-red-400 transition-colors"
                           />
                           {isSensitive && (
                             <button
                               type="button"
                               onClick={() => setFieldVisibility((prev) => ({ ...prev, [field.key]: !prev[field.key] }))}
-                              className="text-gray-400 hover:text-gray-600 p-1 rounded transition-colors shrink-0"
+                              className="shrink-0 text-gray-400 hover:text-gray-600 p-1 rounded transition-colors"
                               title={visible ? t('detail.hide') : t('detail.show')}
                             >
-                              {visible ? <EyeOff aria-hidden="true" className="w-3.5 h-3.5" /> : <Eye aria-hidden="true" className="w-3.5 h-3.5" />}
+                              {visible ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
                             </button>
                           )}
                         </div>
@@ -921,15 +909,15 @@ export function APIServiceDetailPanel({
                         type="button"
                         onClick={handleSaveCredentials}
                         disabled={apiKeySaving}
-                        className="inline-flex items-center gap-1 px-2 py-1 bg-red-600 text-white rounded text-xs font-medium hover:bg-red-700 disabled:opacity-50 transition-colors shrink-0"
+                        className="shrink-0 inline-flex items-center gap-1 px-2 py-1 bg-red-600 text-white rounded text-xs font-medium hover:bg-red-700 disabled:opacity-50 transition-colors"
                       >
-                        {apiKeySaving ? <RefreshCw aria-hidden="true" className="w-3 h-3 animate-spin" /> : <Save aria-hidden="true" className="w-3 h-3" />}
+                        {apiKeySaving ? <RefreshCw className="w-3 h-3 animate-spin" /> : <Save className="w-3 h-3" />}
                         {t('button.save')}
                       </button>
                       <button
                         type="button"
                         onClick={() => setFormValues({ ...formValuesOrigRef.current })}
-                        className="px-2 py-1 border border-gray-300 text-gray-600 rounded text-xs hover:bg-gray-50 transition-colors shrink-0"
+                        className="shrink-0 px-2 py-1 border border-gray-300 text-gray-600 rounded text-xs hover:bg-gray-50 transition-colors"
                       >
                         {t('button.cancel')}
                       </button>
@@ -947,7 +935,6 @@ export function APIServiceDetailPanel({
                   type="button"
                   role="switch"
                   aria-checked={!!verifySsl}
-                  aria-label={t('serviceInfo.sslVerify', { defaultValue: 'SSL 验证' })}
                   onClick={() => onToggleVerifySsl?.(!verifySsl)}
                   className={`relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer items-center rounded-full transition-colors duration-200 focus:outline-none focus:ring-2 focus:ring-purple-500 focus:ring-offset-1 ${verifySsl ? 'bg-purple-600' : 'bg-gray-300'}`}
                 >
@@ -961,14 +948,14 @@ export function APIServiceDetailPanel({
 
             <div className="flex flex-col gap-2">
               <button onClick={handleQuickTestConnectivity} disabled={quickTesting} className="inline-flex items-center justify-center gap-2 px-4 py-2.5 bg-white border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 disabled:opacity-50 text-sm font-medium transition-colors">
-                {quickTesting ? <><RefreshCw aria-hidden="true" className="w-4 h-4 animate-spin" />{t('button.testing')}</> : <><Activity aria-hidden="true" className="w-4 h-4" />{t('button.testConnectivity')}</>}
+                {quickTesting ? <><RefreshCw className="w-4 h-4 animate-spin" />{t('button.testing')}</> : <><Activity className="w-4 h-4" />{t('button.testConnectivity')}</>}
               </button>
               <div className="flex gap-2">
                 <button
                   onClick={() => onToggleEnabled?.(!enabled)}
                   className={`flex-1 inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg text-sm font-medium transition-colors ${enabled ? 'border border-gray-300 text-gray-700 bg-white hover:bg-gray-50' : 'bg-green-600 text-white hover:bg-green-700'}`}
                 >
-                  {enabled ? <PowerOff aria-hidden="true" className="w-4 h-4" /> : <Power aria-hidden="true" className="w-4 h-4" />}
+                  {enabled ? <PowerOff className="w-4 h-4" /> : <Power className="w-4 h-4" />}
                   {enabled ? t('detail.disableServer') : t('detail.enableServer')}
                 </button>
                 <button
@@ -977,13 +964,13 @@ export function APIServiceDetailPanel({
                   className={`inline-flex items-center justify-center gap-2 px-4 py-2.5 border rounded-lg text-sm font-medium transition-colors ${builtin ? 'border-gray-200 text-gray-400 bg-gray-50 cursor-not-allowed' : 'border-red-200 text-red-600 bg-white hover:bg-red-50'}`}
                   title={builtin ? t('api.builtinCannotDelete') : t('button.delete')}
                 >
-                  <Trash2 aria-hidden="true" className="w-4 h-4" />
+                  <Trash2 className="w-4 h-4" />
                   {t('button.delete')}
                 </button>
               </div>
               {!quickTesting && quickTestResult && (
                 <div className={`flex items-start gap-2 rounded-lg border p-3 text-sm ${quickTestResult.success ? 'bg-green-50 border-green-200 text-green-800' : 'bg-red-50 border-red-200 text-red-800'}`}>
-                  {quickTestResult.success ? <CheckCircle aria-hidden="true" className="w-4 h-4 mt-0.5 flex-shrink-0" /> : <XCircle aria-hidden="true" className="w-4 h-4 mt-0.5 flex-shrink-0" />}
+                  {quickTestResult.success ? <CheckCircle className="w-4 h-4 mt-0.5 flex-shrink-0" /> : <XCircle className="w-4 h-4 mt-0.5 flex-shrink-0" />}
                   <span>{quickTestResult.message}</span>
                   {quickTestResult.latency_ms != null && <span className="text-xs opacity-90"> · {quickTestResult.latency_ms}ms</span>}
                 </div>
@@ -995,7 +982,7 @@ export function APIServiceDetailPanel({
         ) : (
           <div className="bg-white rounded-lg border border-gray-200 overflow-hidden">
             <div className="overflow-x-auto">
-              <table className="divide-y divide-gray-100 table-fixed min-w-full">
+              <table className="min-w-full divide-y divide-gray-100 table-fixed">
                 <thead className="bg-gray-50">
                   <tr>
                     <th className="w-[30%] px-5 py-2.5 text-left text-xs font-medium text-gray-500 uppercase">{t('detail.tableToolName')}</th>

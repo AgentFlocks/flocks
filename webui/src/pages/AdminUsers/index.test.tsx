@@ -1,6 +1,5 @@
-// Regression (PLT-0907): clicking the dimmed area outside the one-time-password
-// dialog must close it and log out. The centering wrapper (z-50) covers the
-// backdrop (z-40), so the outside-click handler has to live on the wrapper.
+// The open product's account page: the signed-in account and a one-time
+// password reset for it (dev's markup; member management is the extension's).
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import AdminUsersPage from './index';
@@ -18,28 +17,21 @@ vi.mock('@/components/common/CopyButton', () => ({ default: () => <button type="
 vi.mock('@/components/common/PageHeader', () => ({ default: ({ title, actions }: any) => <div><h1>{title}</h1>{actions}</div> }));
 vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: (k: string) => k, i18n: { language: 'zh-CN' } }) }));
 
-describe('AdminUsersPage credential modal', () => {
-  it('closes and logs out when the dimmed area outside the dialog is clicked', async () => {
+describe('AdminUsersPage', () => {
+  it('lists the signed-in account with every column', () => {
     render(<AdminUsersPage />);
-    fireEvent.click(screen.getByText('admin.resetAction'));
-    await waitFor(() => expect(screen.getByText('admin.resetDialogTitle')).toBeTruthy());
-    // The element a real pointer hits on the dimmed area is the z-50 wrapper.
-    const wrapper = screen.getByText('admin.resetDialogTitle').closest('.z-50') as HTMLElement;
-    expect(wrapper).toBeTruthy();
-    fireEvent.click(wrapper);
-    await waitFor(() => expect(screen.queryByText('admin.resetDialogTitle')).toBeNull());
-    expect(logout).toHaveBeenCalledTimes(1);
+    expect(screen.getByText('admin')).toBeInTheDocument();
+    expect(screen.getAllByRole('columnheader').map((cell) => cell.textContent)).toEqual([
+      'admin.columnUsername', 'admin.columnRole', 'admin.columnLastLogin', 'admin.columnActions',
+    ]);
   });
-});
 
-describe('AdminUsersPage narrow viewport', () => {
-  // 375px 下卡片只有 291px 宽，带 whitespace-nowrap 的「最近登录」列会把表格撑出 overflow-hidden 卡片、裁掉「重置密码」；<md 隐藏该列
-  it('hides the last-login column below md so the action column stays reachable', async () => {
+  it('shows the one-time password after a reset and logs out once it is acknowledged', async () => {
     render(<AdminUsersPage />);
-    const th = await screen.findByText('admin.columnLastLogin');
-    expect(th).toHaveClass('hidden');
-    expect(th).toHaveClass('md:table-cell');
-    const actionTh = screen.getByText('admin.columnActions');
-    expect(actionTh).not.toHaveClass('hidden');
+    fireEvent.click(screen.getByRole('button', { name: 'admin.resetAction' }));
+    expect(await screen.findByText('OTP-1234-5678')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'admin.resetDialogDone' }));
+    await waitFor(() => expect(logout).toHaveBeenCalledTimes(1));
+    expect(screen.queryByText('OTP-1234-5678')).not.toBeInTheDocument();
   });
 });

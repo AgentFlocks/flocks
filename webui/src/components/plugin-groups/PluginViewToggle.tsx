@@ -8,7 +8,7 @@ export default function PluginViewToggle({ value, onChange }: {
 }) {
   const { t } = useTranslation('pluginGroups');
   return (
-    <div role="group" aria-label={t('view.label')} className="inline-flex rounded-lg border border-gray-200 bg-white p-0.5 shrink-0">
+    <div role="group" aria-label={t('view.label')} className="inline-flex shrink-0 rounded-lg border border-gray-200 bg-white p-0.5">
       {([{ mode: 'cards', Icon: LayoutGrid }, { mode: 'list', Icon: List }] as const).map(({ mode, Icon }) => (
         <button
           key={mode}

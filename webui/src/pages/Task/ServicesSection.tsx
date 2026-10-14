@@ -1,13 +1,6 @@
-import PageSelectionGroup from '../PageSelectionGroup';
 import { useState, useEffect, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
-import {
-  ExternalLink,
-  Globe,
-  Loader2,
-  RefreshCw,
-  StopCircle,
-} from 'lucide-react';
+import { Globe, StopCircle, Loader2, RefreshCw, ExternalLink } from 'lucide-react';
 import { resolveWorkflowServicePort, workflowAPI, WorkflowService } from '@/api/workflow';
 import { useToast } from '@/components/common/Toast';
 import EmptyState from '@/components/common/EmptyState';
@@ -52,7 +45,7 @@ function ServiceCard({
       <div className="flex items-start justify-between gap-3">
         <div className="flex items-center gap-2 min-w-0">
           <div className="w-8 h-8 rounded-lg bg-slate-100 flex items-center justify-center flex-shrink-0">
-            <Globe aria-hidden="true" className="w-4 h-4 text-slate-600" />
+            <Globe className="w-4 h-4 text-slate-600" />
           </div>
           <div className="min-w-0">
             <p className="text-sm font-semibold text-gray-900 truncate">{service.workflowName}</p>
@@ -79,7 +72,7 @@ function ServiceCard({
             className="p-1 rounded hover:bg-gray-200 text-gray-400 hover:text-gray-600 transition-colors flex-shrink-0"
             title={t('services.openInNewTab')}
           >
-            <ExternalLink aria-hidden="true" className="w-3.5 h-3.5" />
+            <ExternalLink className="w-3.5 h-3.5" />
           </a>
           <CopyButton text={service.invokeUrl} />
         </div>
@@ -121,7 +114,7 @@ function ServiceCard({
             disabled={restarting || stopping}
             className="flex items-center justify-center gap-2 py-2 border border-blue-200 text-blue-600 text-xs font-medium rounded-lg hover:bg-blue-50 disabled:opacity-60 transition-colors"
           >
-            {restarting ? <Loader2 aria-hidden="true" className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw aria-hidden="true" className="w-3.5 h-3.5" />}
+            {restarting ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
             {restarting ? t('services.restarting') : t('services.restartService')}
           </button>
           {isRunning && (
@@ -130,7 +123,7 @@ function ServiceCard({
               disabled={stopping || restarting}
               className="flex items-center justify-center gap-2 py-2 border border-gray-300 text-gray-700 text-xs font-medium rounded-lg hover:bg-gray-50 disabled:opacity-60 transition-colors"
             >
-              {stopping ? <Loader2 aria-hidden="true" className="w-3.5 h-3.5 animate-spin" /> : <StopCircle aria-hidden="true" className="w-3.5 h-3.5" />}
+              {stopping ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <StopCircle className="w-3.5 h-3.5" />}
               {stopping ? t('services.stopping') : t('services.stopService')}
             </button>
           )}
@@ -213,9 +206,9 @@ export default function ServicesSection() {
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between gap-3">
-        <PageSelectionGroup className="flex gap-1 bg-gray-100 rounded-lg p-1">
+        <div className="flex gap-1 bg-gray-100 rounded-lg p-1">
           {FILTERS.map(f => (
-            <button aria-pressed={filter === f.key}
+            <button
               key={f.key}
               onClick={() => setFilter(f.key)}
               className={`px-3 py-1.5 text-xs rounded-md transition-colors ${
@@ -232,23 +225,23 @@ export default function ServicesSection() {
               )}
             </button>
           ))}
-        </PageSelectionGroup>
+        </div>
         <button
           onClick={fetchServices}
           className="flex items-center gap-1.5 px-3 py-1.5 text-xs text-gray-600 border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors"
         >
-          <RefreshCw aria-hidden="true" className="w-3.5 h-3.5" />
+          <RefreshCw className="w-3.5 h-3.5" />
           {t('common:button.refresh')}
         </button>
       </div>
 
       {loading ? (
         <div className="flex items-center justify-center py-16">
-          <Loader2 aria-hidden="true" className="w-6 h-6 animate-spin text-gray-400" />
+          <Loader2 className="w-6 h-6 animate-spin text-gray-400" />
         </div>
       ) : filtered.length === 0 ? (
         <EmptyState
-          icon={<Globe aria-hidden="true" className="w-10 h-10" />}
+          icon={<Globe className="w-10 h-10" />}
           title={t('services.emptyTitle')}
           description={t('services.emptyDescription')}
         />

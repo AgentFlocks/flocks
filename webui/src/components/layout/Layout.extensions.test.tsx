@@ -211,17 +211,4 @@ describe('Layout extension registry integration', () => {
     expect(await screen.findByText('ext-version:v0.2.0')).toBeInTheDocument();
     expect(screen.getByTestId('ext-notifications')).toBeInTheDocument();
   });
-
-  it('keeps the username readable and truncates the role label instead', async () => {
-    renderLayout();
-    await flush();
-
-    const username = screen.getByTitle('admin');
-    expect(username).toHaveClass('shrink-0');
-    expect(username).toHaveClass('min-w-[4ch]');
-    const role = screen.getByTitle('admin.roleAdmin');
-    expect(role).toHaveClass('truncate');
-    expect(role).toHaveClass('min-w-0');
-    expect(role).not.toHaveClass('shrink-0');
-  });
 });

@@ -1,6 +1,8 @@
+import json
 from unittest.mock import AsyncMock
 
 import pytest
+from rich.console import Console
 from typer.testing import CliRunner
 
 import flocks.cli.commands.session as session_cmd
@@ -41,6 +43,44 @@ def test_session_list_uses_global_sessions(monkeypatch) -> None:
     assert result.exit_code == 0
     assert session.id in result.stdout
     assert session.title in result.stdout
+
+
+def test_session_list_json_is_plain_json_at_any_width(monkeypatch) -> None:
+    session = SessionInfo(
+        id="ses_json_width",
+        projectID="default",
+        directory="/tmp/long-worktree-" + "x" * 120,
+        title="Literal [red]JSON_VALUE[/red]",
+        time=SessionTime(created=1_000, updated=2_000),
+    )
+
+    async def fake_list_all():
+        return [session]
+
+    monkeypatch.setattr(session_cmd.Storage, "init", _noop_storage_init)
+    monkeypatch.setattr(session_cmd.Session, "list_all", fake_list_all)
+    # An 80-column terminal: Rich would wrap the long path inside the JSON string.
+    monkeypatch.setattr(session_cmd, "console", Console(width=80))
+
+    result = runner.invoke(session_cmd.session_app, ["list", "--format", "json"])
+
+    assert result.exit_code == 0
+    rows = json.loads(result.stdout)
+    assert rows[0]["title"] == "Literal [red]JSON_VALUE[/red]"
+    assert rows[0]["directory"] == session.directory
+
+
+def test_session_list_json_without_sessions_is_an_empty_array(monkeypatch) -> None:
+    async def fake_list_all():
+        return []
+
+    monkeypatch.setattr(session_cmd.Storage, "init", _noop_storage_init)
+    monkeypatch.setattr(session_cmd.Session, "list_all", fake_list_all)
+
+    result = runner.invoke(session_cmd.session_app, ["list", "--format", "json"])
+
+    assert result.exit_code == 0
+    assert json.loads(result.stdout) == []
 
 
 def test_session_show_uses_get_by_id_without_project(monkeypatch) -> None:

@@ -52,9 +52,7 @@ describe('ConnectionSettingsSheet', () => {
     expect(within(guide).getByRole('heading', { level: 1, name: heading })).toBeInTheDocument();
     expect(within(guide).getByRole('table')).toBeInTheDocument();
     await user.click(within(guide).getByRole('button', { name: messages.knowledge.close }));
-    // Only the guide closes; the settings drawer (itself a dialog) stays open with the draft.
-    expect(screen.queryByRole('dialog', { name: messages.knowledge.connection.guide })).not.toBeInTheDocument();
-    expect(screen.getAllByRole('dialog')).toHaveLength(1);
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
     expect(key).toHaveValue('unsaved-key');
     expect(onClose).not.toHaveBeenCalled();
     expect(api.saveConnection).not.toHaveBeenCalled();

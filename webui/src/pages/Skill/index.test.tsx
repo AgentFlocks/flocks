@@ -130,9 +130,8 @@ describe('SkillPage', () => {
     expect(toastWarningMock).toHaveBeenLastCalledWith('pluginGroups:readOnly.builtinSkill');
     expect(updateGroupMock).not.toHaveBeenCalled();
     expect(listMock).not.toHaveBeenCalled();
-    // The type badge renders twice per row: in the type column and, for phones, in the name cell.
-    expect(within(builtin).getAllByText('table.builtin').length).toBeGreaterThan(0);
-    expect(within(custom).getAllByText('table.custom').length).toBeGreaterThan(0);
+    expect(within(builtin).getByText('table.builtin')).toBeInTheDocument();
+    expect(within(custom).getByText('table.custom')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'renameNamed' })).toBeDisabled();
     expect(screen.getByRole('button', { name: 'deleteNamed' })).toBeDisabled();
     fireEvent.keyDown(builtin, { key: 'm', altKey: true });
@@ -143,8 +142,7 @@ describe('SkillPage', () => {
     fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'save' }));
     await waitFor(() => expect(updateGroupMock).toHaveBeenCalledExactlyOnceWith('custom', null));
     expect(refreshMock).not.toHaveBeenCalled();
-    // Two visible rows, each with the enabled-column switch and the phone switch beside the actions.
-    expect(screen.getAllByRole('switch')).toHaveLength(4);
+    expect(screen.getAllByRole('switch')).toHaveLength(2);
     fireEvent.click(screen.getByRole('button', { name: 'view.cards' }));
     const builtinCard = screen.getByText('builtin').closest('article')!;
     expect(fireEvent.dragStart(builtinCard, { dataTransfer })).toBe(false);
@@ -176,17 +174,6 @@ describe('SkillPage', () => {
     expect(screen.getByRole('button', { name: 'deleteNamed' })).toBeDisabled();
   });
 
-  it('says a Claude Code skill is regrouped outside Flocks, not that it is built in', async () => {
-    statusMock.mockResolvedValue({ data: [{ ...makeSkill('claude-skill'), source: 'claude', group: 'Claude', group_readonly: true }] });
-    render(<SkillPage />);
-    await screen.findByText('claude-skill');
-    const row = screen.getByText('claude-skill').closest('tr')!;
-    fireEvent.click(within(row).getByRole('button', { name: 'editGroup' }));
-    expect(toastWarningMock).toHaveBeenLastCalledWith('pluginGroups:readOnly.externalSkill');
-    expect(updateGroupMock).not.toHaveBeenCalled();
-    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
-  });
-
   it.each(['move', 'create'])('rechecks selected Skill ownership before %s', async (operation) => {
     const custom = { ...makeSkill('custom'), group: 'Ops', group_readonly: false };
     statusMock.mockResolvedValue({ data: [custom] });
@@ -204,14 +191,12 @@ describe('SkillPage', () => {
     expect(updateGroupMock).not.toHaveBeenCalled();
   });
 
-  it('keeps the list columns readable on narrow screens', async () => {
+  it('keeps the original list columns readable and horizontally scrollable on narrow screens', async () => {
     statusMock.mockResolvedValue({ data: [makeSkill('long-readable-skill-name')] });
     render(<SkillPage />);
     await screen.findByText('long-readable-skill-name');
     const table = screen.getByRole('table');
-    // Phones drop to name / actions (no horizontal scroll); from md up the table lays out like the
-    // dev table (no set width, a 40rem floor) and keeps all five columns.
-    expect(table).toHaveClass('w-full', 'md:w-auto', 'md:min-w-[max(100%,40rem)]');
+    expect(table).toHaveClass('min-w-[max(100%,40rem)]');
     expect(table.parentElement).toHaveClass('overflow-x-auto');
     expect(table.parentElement).not.toHaveClass('overflow-hidden');
     expect(within(table).getAllByRole('columnheader').map((cell) => cell.textContent)).toEqual(['类型', '名称', '来源', '启用', '操作']);
@@ -348,5 +333,16 @@ describe('SkillPage', () => {
     });
 
     expect(screen.queryByText('workflow-config-guide')).not.toBeInTheDocument();
+  });
+
+  it('says a Claude Code skill is regrouped outside Flocks, not that it is built in', async () => {
+    statusMock.mockResolvedValue({ data: [{ ...makeSkill('claude-skill'), source: 'claude', group: 'Claude', group_readonly: true }] });
+    render(<SkillPage />);
+    await screen.findByText('claude-skill');
+    const row = screen.getByText('claude-skill').closest('tr')!;
+    fireEvent.click(within(row).getByRole('button', { name: 'editGroup' }));
+    expect(toastWarningMock).toHaveBeenLastCalledWith('pluginGroups:readOnly.externalSkill');
+    expect(updateGroupMock).not.toHaveBeenCalled();
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
   });
 });

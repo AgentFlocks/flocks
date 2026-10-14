@@ -15,6 +15,7 @@ from datetime import datetime
 from typing import Any
 
 from flocks.db import sync_query
+from flocks.db.json_nul import escape_nul_for_json, replace_nul
 
 MAX_ALERT_ROWS = 500
 MAX_ALERT_BYTES = 2 * 1024 * 1024
@@ -122,6 +123,20 @@ def persist_triage_alerts(alerts: list[dict[str, Any]], run_id: str, source_file
             "threat_name": str(_first(record, ("threat_name", "rule_name"))),
             "dedup_key": key, "record_json": record,
         })
+    # PostgreSQL rejects U+0000 in jsonb and text, and one such string would
+    # fail the batch (binary evidence keeps it). The original evidence is
+    # stored escaped and marked, restorably; an update of the row keeps it,
+    # marker and all. The triage fields are replaced on every update (see the
+    # merge below), so a marker could not follow them: they, and the columns
+    # copied out of the record, only have U+0000 written as text.
+    for candidate in candidates:
+        record = candidate["record_json"]
+        for field in _TRIAGE_FIELDS:
+            if field in record:
+                record[field] = replace_nul(record[field])
+        candidate["record_json"] = escape_nul_for_json(record)
+        for column in ("record_id", "asset_date", "source_file", "source_type", "threat_name", "dedup_key"):
+            candidate[column] = replace_nul(candidate[column])
     result = {"backend": "postgres", "path": "postgres/alert_records", "table": "alert_records",
               "rows": len(candidates), "inserted_rows": 0, "updated_rows": 0, "unchanged_rows": 0}
     if not candidates:

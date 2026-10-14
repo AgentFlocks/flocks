@@ -126,6 +126,22 @@ export {
 
 export type MergedMessage = Message & { _merged?: boolean };
 
+/**
+ * Whether a permission request belongs in this chat: its own, or one from a
+ * subagent it delegated to (the user is waiting here, not in the subagent's
+ * session). The backend names the delegating sessions on the request.
+ */
+export function isPermissionRequestForSession(
+  requestSessionID: string,
+  metadata: Record<string, unknown> | undefined,
+  sessionId: string | null | undefined,
+): boolean {
+  if (!sessionId || !requestSessionID) return false;
+  if (requestSessionID === sessionId) return true;
+  const chain = metadata?.delegationChain;
+  return Array.isArray(chain) && chain.includes(sessionId);
+}
+
 /** Node reference shown above the chat input as a dismissible chip */
 export interface NodeRef {
   id: string;
@@ -1274,9 +1290,10 @@ export function getMessageGroupClassName({
   return isEditing ? 'w-full max-w-full' : 'w-fit max-w-[88%]';
 }
 
-export function getCompactionDividerClassName(compact: boolean): string {
-  const messageInset = compact ? 'pl-[38px]' : 'pl-[42px]';
-  return `${compact ? 'my-3' : 'my-4'} flex items-center gap-3 w-full min-w-0 ${messageInset} pr-1 text-xs text-zinc-500`;
+export function getCompactionDividerClassName(compact: boolean, inset = true): string {
+  // Inset into the assistant content column; bodies drawn without an avatar have none.
+  const messageInset = !inset ? 'pl-0' : compact ? 'pl-[38px]' : 'pl-[42px]';
+  return `${compact ? 'my-3' : 'my-4'} flex w-full min-w-0 items-center gap-3 ${messageInset} pr-1 text-xs text-zinc-500`;
 }
 
 export function getRegenerateTruncateTarget(
@@ -2706,12 +2723,32 @@ export default function SessionChat({
   const pendingQuestionsRef = useRef(pendingQuestions);
   useEffect(() => { pendingQuestionsRef.current = pendingQuestions; }, [pendingQuestions]);
 
+  // A list response can be overtaken by events: a request settled meanwhile
+  // must not come back, one announced meanwhile must not be dropped, and
+  // anything the list leaves out that was known before it is stale.
+  const settledPermissionIdsRef = useRef(new Set<string>());
+  const permissionChangeSeqRef = useRef(0);
+  const permissionAnnouncedAtRef = useRef(new Map<string, number>());
+  const permissionFetchSeqRef = useRef(0);
+  const permissionAppliedSeqRef = useRef(0);
+  const permissionSessionGenerationRef = useRef(0);
+
   const addPendingPermission = useCallback((request: PendingPermission) => {
+    permissionChangeSeqRef.current += 1;
+    if (settledPermissionIdsRef.current.has(request.id)) return;
+    permissionAnnouncedAtRef.current.set(request.id, permissionChangeSeqRef.current);
     setPendingPermissions((previous) => (
       previous.some((item) => item.id === request.id)
         ? previous
         : [...previous, request]
     ));
+  }, []);
+
+  const settlePendingPermission = useCallback((requestId: string) => {
+    permissionChangeSeqRef.current += 1;
+    settledPermissionIdsRef.current.add(requestId);
+    permissionAnnouncedAtRef.current.delete(requestId);
+    setPendingPermissions((previous) => previous.filter((item) => item.id !== requestId));
   }, []);
 
   const fetchPendingPermissions = useCallback(async () => {
@@ -2720,9 +2757,34 @@ export default function SessionChat({
       return;
     }
     const targetSessionId = sessionId;
+    const sessionGeneration = permissionSessionGenerationRef.current;
+    const fetchSeq = ++permissionFetchSeqRef.current;
+    const changeSeq = permissionChangeSeqRef.current;
     const requests = await permissionApi.list();
-    if (activePermissionSessionRef.current !== targetSessionId) return;
-    setPendingPermissions(requests.filter((item) => item.sessionID === targetSessionId));
+    // A newer answer already shown, or a switch to another session (even one
+    // coming back to this session), makes this answer stale. While a newer
+    // request is still out (or has failed) this one is the best there is.
+    if (
+      fetchSeq <= permissionAppliedSeqRef.current
+      || sessionGeneration !== permissionSessionGenerationRef.current
+      || activePermissionSessionRef.current !== targetSessionId
+    ) return;
+    permissionAppliedSeqRef.current = fetchSeq;
+    const settled = settledPermissionIdsRef.current;
+    const fetched = requests.filter((item) => (
+      isPermissionRequestForSession(item.sessionID, item.metadata, targetSessionId)
+      && !settled.has(item.id)
+    ));
+    const fetchedIds = new Set(fetched.map((item) => item.id));
+    // Only requests announced after this list was asked for are newer than it.
+    setPendingPermissions((previous) => [
+      ...fetched,
+      ...previous.filter((item) => (
+        !fetchedIds.has(item.id)
+        && !settled.has(item.id)
+        && (permissionAnnouncedAtRef.current.get(item.id) ?? 0) > changeSeq
+      )),
+    ]);
   }, [sessionId]);
 
   const handlePermissionReply = useCallback(async (decision: PermissionDecision) => {
@@ -2742,14 +2804,21 @@ export default function SessionChat({
           always: decision === 'always',
         });
       }
-      setPendingPermissions((previous) => previous.filter((item) => item.id !== request.id));
+      settlePendingPermission(request.id);
     } catch (error: unknown) {
+      if ((error as { response?: { status?: number } })?.response?.status === 404) {
+        // Answered elsewhere (the subagent's own chat) or no longer awaited:
+        // drop it so it does not hold up the requests behind it.
+        settlePendingPermission(request.id);
+        void fetchPendingPermissions().catch(() => {});
+        return;
+      }
       const message = error instanceof Error ? error.message : String(error);
       setPermissionError(message || t('chat.permission.replyFailed'));
     } finally {
       setPermissionSubmitting(false);
     }
-  }, [pendingPermissions, permissionSubmitting, t]);
+  }, [pendingPermissions, permissionSubmitting, fetchPendingPermissions, settlePendingPermission, t]);
 
   const sseEnabled = Boolean(sessionId) && (live || isStreaming || !hideInput);
 
@@ -2808,16 +2877,20 @@ export default function SessionChat({
       if (shouldForwardSSEEventToParent(event, sessionId)) onSSEEvent?.(event);
 
       const properties = event.properties;
+      const requestSessionID = typeof properties?.sessionID === 'string' ? properties.sessionID : '';
+      const requestMetadata = properties?.metadata && typeof properties.metadata === 'object'
+        ? properties.metadata as Record<string, unknown>
+        : {};
       if (
         event.type === 'permission.request'
         && properties
-        && properties.sessionID === sessionId
+        && isPermissionRequestForSession(requestSessionID, requestMetadata, sessionId)
       ) {
         const requestID = typeof properties.requestID === 'string' ? properties.requestID : '';
         if (requestID) {
           addPendingPermission({
             id: requestID,
-            sessionID: sessionId ?? '',
+            sessionID: requestSessionID,
             messageID: typeof properties.messageID === 'string' ? properties.messageID : '',
             toolID: typeof properties.tool?.name === 'string'
               ? properties.tool.name
@@ -2831,13 +2904,16 @@ export default function SessionChat({
             always: Array.isArray(properties.always)
               ? properties.always.filter((pattern): pattern is string => typeof pattern === 'string')
               : [],
-            metadata: properties.metadata && typeof properties.metadata === 'object'
-              ? properties.metadata as Record<string, unknown>
-              : {},
+            metadata: requestMetadata,
             time: { created: Date.now() },
           });
           setPermissionError(null);
         }
+      }
+      // A request is settled once for every chat showing it (the subagent's
+      // own and the ones that delegated to it).
+      if (event.type === 'permission.replied' && typeof properties?.requestID === 'string') {
+        settlePendingPermission(properties.requestID);
       }
 
       const action = resolveSessionChatSSEAction(event, sessionId);
@@ -3094,6 +3170,7 @@ export default function SessionChat({
       removeByRequestId,
       applyPromptQueueItems,
       addPendingPermission,
+      settlePendingPermission,
       onSSEEvent,
       onError,
       scrollToBottom,
@@ -3267,6 +3344,9 @@ export default function SessionChat({
     isAtBottomRef.current = true;
     clearPendingQuestions();
     setPendingPermissions([]);
+    settledPermissionIdsRef.current = new Set();
+    permissionAnnouncedAtRef.current = new Map();
+    permissionSessionGenerationRef.current += 1;
     setPermissionError(null);
     // Swap the draft when the session changes — needed for callers that
     // don't force a remount (Session/index.tsx does, but other consumers
@@ -3288,6 +3368,8 @@ export default function SessionChat({
     fetchPromptQueue();
   }, [fetchPromptQueue]);
 
+  // Keep after the session reset effect above: that one bumps the session
+  // generation, and a list requested before the bump is dropped as stale.
   useEffect(() => {
     fetchPendingPermissions().catch((err) => {
       console.warn('[SessionChat] Failed to fetch pending permissions:', err);
@@ -4598,9 +4680,7 @@ export default function SessionChat({
     : fullWidth
       ? 'space-y-5 w-full px-12'
       : pageCanvas
-        // Both avatars extend 40px beyond the message column. Reserve space
-        // on both edges below sm so virtual rows cannot widen the viewport.
-        ? 'space-y-[18px] w-full max-w-[760px] mx-auto px-12 sm:px-7'
+        ? 'space-y-[18px] w-full max-w-[760px] mx-auto px-7'
         : 'space-y-5 w-[min(76%,64rem)] mx-auto px-6';
   const visibleGoalBanner = goalBanner && getGoalBannerKey(goalBanner) !== dismissedGoalKey
     ? goalBanner
@@ -4672,7 +4752,7 @@ export default function SessionChat({
             {hasOlder && (
               <div className="flex justify-center py-2">
                 <button type="button" disabled={loadingOlder} onClick={() => void loadHistoryPage('older')}
-                  className="rounded-lg border border-line bg-surface px-3 py-2 text-sm text-fg-secondary disabled:bg-disabled disabled:text-fg-disabled dark:border-line dark:bg-surface dark:text-fg-secondary">
+                  className="rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-600 transition-colors hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300 dark:hover:bg-zinc-800">
                   {loadingOlder ? t('chat.history.loading') : t('chat.history.older')}
                 </button>
               </div>
@@ -4740,11 +4820,11 @@ export default function SessionChat({
             {hasNewer && (
               <div className="flex flex-wrap justify-center gap-2 py-2">
                 <button type="button" disabled={loadingNewer} onClick={() => void loadHistoryPage('newer')}
-                  className="rounded-lg border border-line bg-surface px-3 py-2 text-sm text-fg-secondary disabled:bg-disabled disabled:text-fg-disabled dark:border-line dark:bg-surface dark:text-fg-secondary">
+                  className="rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-600 transition-colors hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300 dark:hover:bg-zinc-800">
                   {loadingNewer ? t('chat.history.loading') : t('chat.history.newer')}
                 </button>
                 <button type="button" onClick={() => { isAtBottomRef.current = true; void loadLatest?.(); }}
-                  className="ui-btn ui-btn-primary">
+                  className="rounded-lg bg-slate-800 px-3 py-2 text-sm text-white transition-colors hover:bg-slate-900">
                   {t('chat.history.latest')}
                 </button>
               </div>
@@ -5554,6 +5634,8 @@ export interface ChatMessageBubbleProps {
   processGroupOpenState?: ProcessGroupOpenState;
   onProcessGroupOpenChange?: (key: string, open: boolean) => void;
   compact?: boolean;
+  /** Message body only: no avatar or agent name, for a caller that draws its own sender frame. */
+  bare?: boolean;
   onCopy?: (text: string) => void;
   editingMessageId?: string | null;
   editingText?: string;
@@ -5594,6 +5676,7 @@ function ChatMessageTimelineInner({
   processGroupOpenState,
   onProcessGroupOpenChange,
   compact,
+  bare,
   onCopy,
   editingMessageId,
   editingText,
@@ -5642,7 +5725,7 @@ function ChatMessageTimelineInner({
     const highlight = focusHighlightRef.current;
     if (highlight) {
       window.clearTimeout(highlight.timer);
-      highlight.row.classList.remove('ring-2', 'ring-focus');
+      highlight.row.classList.remove('ring-2', 'ring-sky-400', 'ring-offset-2', 'ring-offset-white', 'dark:ring-offset-zinc-950');
     }
   }, []);
   useEffect(() => { if (!focusMessageId) focusedRef.current = ''; }, [focusMessageId]);
@@ -5660,11 +5743,11 @@ function ChatMessageTimelineInner({
     const previous = focusHighlightRef.current;
     if (previous) {
       window.clearTimeout(previous.timer);
-      previous.row.classList.remove('ring-2', 'ring-focus');
+      previous.row.classList.remove('ring-2', 'ring-sky-400', 'ring-offset-2', 'ring-offset-white', 'dark:ring-offset-zinc-950');
     }
-    row.classList.add('ring-2', 'ring-focus');
+    row.classList.add('ring-2', 'ring-sky-400', 'ring-offset-2', 'ring-offset-white', 'dark:ring-offset-zinc-950');
     const timer = window.setTimeout(() => {
-      row.classList.remove('ring-2', 'ring-focus');
+      row.classList.remove('ring-2', 'ring-sky-400', 'ring-offset-2', 'ring-offset-white', 'dark:ring-offset-zinc-950');
       focusHighlightRef.current = null;
     }, 1800);
     focusHighlightRef.current = { row, timer };
@@ -5693,6 +5776,7 @@ function ChatMessageTimelineInner({
             processGroupOpenState={processGroupOpenState}
             onProcessGroupOpenChange={onProcessGroupOpenChange}
             compact={compact}
+            bare={bare}
             onCopy={onCopy}
             editingMessageId={editingMessageId}
             editingText={editingText}
@@ -5780,6 +5864,7 @@ function ChatMessageBubbleInner({
   processGroupOpenState,
   onProcessGroupOpenChange,
   compact = true,
+  bare = false,
   onCopy,
   editingMessageId,
   editingText = '',
@@ -5807,7 +5892,7 @@ function ChatMessageBubbleInner({
   const [previewImage, setPreviewImage] = useState<{ url: string; alt?: string } | null>(null);
   if (message.finish === 'summary') {
     return (
-      <div className={getCompactionDividerClassName(compact)}>
+      <div className={getCompactionDividerClassName(compact, !bare)}>
         <span className="h-px flex-1 bg-zinc-200" />
         <span className="px-1.5 font-medium text-zinc-500 shrink-0">
           {t('chat.contextCompressed')}
@@ -5920,7 +6005,7 @@ function ChatMessageBubbleInner({
         <div className="space-y-3">
           {/* The editor shows the stored markdown/raw text, not the rendered
               bubble; say so, since saving overwrites that text directly. */}
-          <p className="text-xs text-info dark:text-info" data-testid="chat-edit-raw-hint">
+          <p className="text-xs text-sky-600 dark:text-sky-300" data-testid="chat-edit-raw-hint">
             {t('chat.editRawHint')}
           </p>
           <textarea
@@ -6458,6 +6543,26 @@ function ChatMessageBubbleInner({
       {!isUser && footerTimestamp}
     </div>
   ) : null;
+
+  if (bare) {
+    return (
+      <div className={`group relative flex w-full min-w-0${isUser ? ' justify-end' : ''}`}>
+        <div className={`flex min-w-0 flex-col ${
+          isUser ? `items-end ${isEditing ? 'w-full' : 'max-w-[88%]'}` : 'w-full items-start'
+        }`}>
+          {bubble}
+          {footer}
+        </div>
+        {previewImage && (
+          <ImageLightbox
+            src={previewImage.url}
+            alt={previewImage.alt}
+            onClose={() => setPreviewImage(null)}
+          />
+        )}
+      </div>
+    );
+  }
 
   if (isUser) {
     if (!compact) {
@@ -7287,6 +7392,7 @@ export function ChatToolPart({
  */
 export const ChatMessageBubble = memo(ChatMessageBubbleInner, (prev, next) => {
   if (prev.isActive !== next.isActive) return false;
+  if (prev.bare !== next.bare) return false;
   if (prev.showActions !== next.showActions) return false;
   if (prev.collapseIntermediateSteps !== next.collapseIntermediateSteps) return false;
   if (prev.processGroupsDefaultOpen !== next.processGroupsDefaultOpen) return false;

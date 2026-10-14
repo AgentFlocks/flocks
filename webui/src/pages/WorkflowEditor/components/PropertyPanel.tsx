@@ -1,17 +1,5 @@
-import { pageActionLabel } from '../../pageActionLabel';
-import React, { useEffect, useRef, useState } from 'react';
-import {
-  AlertCircle,
-  Code2,
-  FileText,
-  Globe,
-  Key as KeyIcon,
-  Settings,
-  Sparkles,
-  Workflow as WorkflowIcon,
-  Wrench,
-  X,
-} from 'lucide-react';
+import React, { useState, useEffect, useRef } from 'react';
+import { X, Code2, FileText, Key, Settings, Wrench, Sparkles, Globe, Workflow as WorkflowIcon, AlertCircle } from 'lucide-react';
 import { Node } from '@xyflow/react';
 import { useTranslation } from 'react-i18next';
 import { workflowAPI, Workflow } from '@/api/workflow';
@@ -70,7 +58,7 @@ function JsonTextarea({
   return (
     <div>
       <label className="flex items-center gap-2 text-sm font-medium text-gray-700 mb-2">
-        <Settings aria-hidden="true" className="w-4 h-4" />
+        <Settings className="w-4 h-4" />
         {label}
       </label>
       <textarea
@@ -84,7 +72,7 @@ function JsonTextarea({
       />
       {error && (
         <p className="text-xs text-red-500 mt-1 flex items-center gap-1">
-          <AlertCircle aria-hidden="true" className="w-3 h-3" /> {error}
+          <AlertCircle className="w-3 h-3" /> {error}
         </p>
       )}
     </div>
@@ -136,15 +124,15 @@ export default function PropertyPanel({
   const handleSave = () => onUpdate(selectedNode.id, formData);
 
   return (
-    <div className="fixed right-0 top-0 h-full w-96 bg-white shadow-2xl border-l border-gray-200 flex flex-col max-w-full z-50">
+    <div className="fixed right-0 top-0 h-full w-96 bg-white shadow-2xl border-l border-gray-200 z-50 flex flex-col">
       {/* Header */}
       <div className="flex items-center justify-between p-4 border-b border-gray-200 bg-gray-50">
         <div>
           <h2 className="text-lg font-semibold text-gray-900">{t('editor.nodeProperties')}</h2>
           <p className="text-sm text-gray-500">{nodeTypeLabels[nodeType] || nodeType}</p>
         </div>
-        <button aria-label={pageActionLabel('close')} onClick={onClose} className="p-2 hover:bg-gray-200 rounded-lg transition-colors">
-          <X aria-hidden="true" className="w-5 h-5" />
+        <button onClick={onClose} className="p-2 hover:bg-gray-200 rounded-lg transition-colors">
+          <X className="w-5 h-5" />
         </button>
       </div>
 
@@ -153,7 +141,7 @@ export default function PropertyPanel({
         {/* Node ID */}
         <div>
           <label className="flex items-center gap-2 text-sm font-medium text-gray-700 mb-2">
-            <KeyIcon aria-hidden="true" className="w-4 h-4" />
+            <Key className="w-4 h-4" />
             {t('editor.nodeId')}
           </label>
           <input
@@ -168,7 +156,7 @@ export default function PropertyPanel({
         {/* Description */}
         <div>
           <label className="flex items-center gap-2 text-sm font-medium text-gray-700 mb-2">
-            <FileText aria-hidden="true" className="w-4 h-4" />
+            <FileText className="w-4 h-4" />
             {t('editor.description')}
           </label>
           <textarea
@@ -184,7 +172,7 @@ export default function PropertyPanel({
         {(nodeType === 'python' || nodeType === 'logic' || nodeType === 'loop') && (
           <div>
             <label className="flex items-center gap-2 text-sm font-medium text-gray-700 mb-2">
-              <Code2 aria-hidden="true" className="w-4 h-4" />
+              <Code2 className="w-4 h-4" />
               {t('editor.code')}
             </label>
             <textarea
@@ -202,7 +190,7 @@ export default function PropertyPanel({
         {['branch', 'loop', 'logic'].includes(nodeType) && (
           <div>
             <label className="flex items-center gap-2 text-sm font-medium text-gray-700 mb-2">
-              <Settings aria-hidden="true" className="w-4 h-4" />
+              <Settings className="w-4 h-4" />
               {t('editor.branchKey')}
             </label>
             <input
@@ -222,7 +210,7 @@ export default function PropertyPanel({
         <div className="rounded-lg border border-sky-100 bg-sky-50/60 p-3 space-y-3">
           <div>
             <label className="flex items-center gap-2 text-sm font-medium text-gray-700 mb-2">
-              <Settings aria-hidden="true" className="w-4 h-4" />
+              <Settings className="w-4 h-4" />
               {t('editor.joinMerge')}
             </label>
             <div className="flex items-center gap-2">
@@ -242,7 +230,7 @@ export default function PropertyPanel({
             <>
               <div>
                 <label className="flex items-center gap-2 text-sm font-medium text-gray-700 mb-2">
-                  <Settings aria-hidden="true" className="w-4 h-4" />
+                  <Settings className="w-4 h-4" />
                   {t('editor.joinMode')}
                 </label>
                 <select
@@ -256,7 +244,7 @@ export default function PropertyPanel({
               </div>
               <div>
                 <label className="flex items-center gap-2 text-sm font-medium text-gray-700 mb-2">
-                  <Settings aria-hidden="true" className="w-4 h-4" />
+                  <Settings className="w-4 h-4" />
                   Join Conflict
                 </label>
                 <select
@@ -271,7 +259,7 @@ export default function PropertyPanel({
               {formData.join_mode === 'namespace' && (
                 <div>
                   <label className="flex items-center gap-2 text-sm font-medium text-gray-700 mb-2">
-                    <Settings aria-hidden="true" className="w-4 h-4" />
+                    <Settings className="w-4 h-4" />
                     Namespace Key
                   </label>
                   <input
@@ -292,7 +280,7 @@ export default function PropertyPanel({
           <>
             <div>
               <label className="flex items-center gap-2 text-sm font-medium text-gray-700 mb-2">
-                <Wrench aria-hidden="true" className="w-4 h-4" />
+                <Wrench className="w-4 h-4" />
                 {t('editor.toolName')} <span className="text-red-500">*</span>
               </label>
               <input
@@ -312,7 +300,7 @@ export default function PropertyPanel({
             />
             <div>
               <label className="flex items-center gap-2 text-sm font-medium text-gray-700 mb-2">
-                <Settings aria-hidden="true" className="w-4 h-4" />
+                <Settings className="w-4 h-4" />
                 {t('editor.outputKey')}
               </label>
               <input
@@ -331,7 +319,7 @@ export default function PropertyPanel({
           <>
             <div>
               <label className="flex items-center gap-2 text-sm font-medium text-gray-700 mb-2">
-                <Sparkles aria-hidden="true" className="w-4 h-4" />
+                <Sparkles className="w-4 h-4" />
                 {t('editor.promptTemplate')} <span className="text-red-500">*</span>
               </label>
               <textarea
@@ -344,7 +332,7 @@ export default function PropertyPanel({
             </div>
             <div>
               <label className="flex items-center gap-2 text-sm font-medium text-gray-700 mb-2">
-                <Settings aria-hidden="true" className="w-4 h-4" />
+                <Settings className="w-4 h-4" />
                 {t('editor.model')}
               </label>
               <input
@@ -357,7 +345,7 @@ export default function PropertyPanel({
             </div>
             <div>
               <label className="flex items-center gap-2 text-sm font-medium text-gray-700 mb-2">
-                <Settings aria-hidden="true" className="w-4 h-4" />
+                <Settings className="w-4 h-4" />
                 {t('editor.outputKey')}
               </label>
               <input
@@ -377,7 +365,7 @@ export default function PropertyPanel({
             <div className="flex gap-2">
               <div className="w-28">
                 <label className="flex items-center gap-2 text-sm font-medium text-gray-700 mb-2">
-                  <Globe aria-hidden="true" className="w-4 h-4" />
+                  <Globe className="w-4 h-4" />
                   {t('editor.method')} <span className="text-red-500">*</span>
                 </label>
                 <select
@@ -419,7 +407,7 @@ export default function PropertyPanel({
             />
             <div>
               <label className="flex items-center gap-2 text-sm font-medium text-gray-700 mb-2">
-                <Settings aria-hidden="true" className="w-4 h-4" />
+                <Settings className="w-4 h-4" />
                 {t('editor.responseKey')}
               </label>
               <input
@@ -438,7 +426,7 @@ export default function PropertyPanel({
           <>
             <div>
               <label className="flex items-center gap-2 text-sm font-medium text-gray-700 mb-2">
-                <WorkflowIcon aria-hidden="true" className="w-4 h-4" />
+                <WorkflowIcon className="w-4 h-4" />
                 {t('editor.subworkflow')} <span className="text-red-500">*</span>
               </label>
               <select
@@ -473,7 +461,7 @@ export default function PropertyPanel({
             />
             <div>
               <label className="flex items-center gap-2 text-sm font-medium text-gray-700 mb-2">
-                <Settings aria-hidden="true" className="w-4 h-4" />
+                <Settings className="w-4 h-4" />
                 {t('editor.outputKey')}
               </label>
               <input

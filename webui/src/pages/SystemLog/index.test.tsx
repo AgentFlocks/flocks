@@ -27,22 +27,10 @@ describe('SystemLogPage toolbar', () => {
     });
   });
 
-  // At 375px a fixed-width select pushes the auto-scroll label into a
-  // character-per-line wrap and the refresh button off screen; the select has
-  // to yield width, the label must not wrap, and the button must stay pinned.
-  it('lets the file select shrink and keeps the auto-scroll label and refresh button in the row', async () => {
+  it('loads the latest file into the viewer and lists it in the file select', async () => {
     render(<SystemLogPage />);
-
-    const select = await screen.findByRole('combobox');
-    expect(select.className).toContain('min-w-0');
-    expect(select.className).toContain('truncate');
-
-    const label = screen.getByText('logs.autoScroll').closest('label') as HTMLElement;
-    expect(label.className).toContain('shrink-0');
-    expect(label.className).toContain('whitespace-nowrap');
-
-    const refresh = screen.getByTitle('logs.refresh');
-    expect(refresh.parentElement?.className).toContain('shrink-0');
-    expect(refresh.parentElement?.className).toContain('ml-auto');
+    expect(await screen.findByText('INFO line')).toBeInTheDocument();
+    expect(screen.getByRole('combobox')).toHaveValue('2026-09-15/flocks.log');
+    expect(logsAPI.readLatest).toHaveBeenCalled();
   });
 });

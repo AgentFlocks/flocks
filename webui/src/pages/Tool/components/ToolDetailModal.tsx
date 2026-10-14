@@ -1,19 +1,8 @@
-import { pageActionLabel } from '../../pageActionLabel';
-import PageDialog from '../../PageDialog';
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
-  AlertTriangle,
-  BookOpen,
-  CheckCircle,
-  ChevronDown,
-  Info,
-  Play,
-  RefreshCw,
-  TestTube,
-  Wrench,
-  X,
-  XCircle,
+  Wrench, X, Info, TestTube, Play, RefreshCw,
+  CheckCircle, XCircle, AlertTriangle, BookOpen, ChevronDown,
 } from 'lucide-react';
 import type { Tool, ToolFixture } from '@/api/tool';
 import { canDirectlyTestTool, toolAPI } from '@/api/tool';
@@ -66,6 +55,15 @@ export default function ToolDetailModal({ tool, initialSection, deviceId, onClos
     }
   }, [tool.name, canDirectTest]);
 
+  const handleKeyDown = useCallback((e: KeyboardEvent) => {
+    if (e.key === 'Escape') onClose();
+  }, [onClose]);
+
+  useEffect(() => {
+    document.addEventListener('keydown', handleKeyDown);
+    return () => document.removeEventListener('keydown', handleKeyDown);
+  }, [handleKeyDown]);
+
   const sb = SOURCE_BADGE[tool.source] ?? SOURCE_BADGE.custom;
   const sourceLabel = sb.labelKey ? t(sb.labelKey) : (sb.label ?? tool.source);
 
@@ -85,14 +83,14 @@ export default function ToolDetailModal({ tool, initialSection, deviceId, onClos
   };
 
   return (
-    <PageDialog onClose={onClose} className="fixed inset-0 bg-gray-600 bg-opacity-75 flex items-center justify-center z-50" >
-      <div className="bg-white rounded-xl shadow-2xl max-w-2xl w-full mx-4 flex flex-col max-h-[85vh] min-h-0" onClick={(e) => e.stopPropagation()}>
+    <div className="fixed inset-0 bg-gray-600 bg-opacity-75 flex items-center justify-center z-50" onClick={onClose}>
+      <div className="bg-white rounded-xl shadow-2xl max-w-2xl w-full mx-4 max-h-[85vh] min-h-0 flex flex-col" onClick={(e) => e.stopPropagation()}>
         {/* Header */}
         <div className="px-6 py-4 border-b border-gray-200 flex-shrink-0">
           <div className="flex items-center justify-between">
             <div className="flex items-center space-x-3">
               <div className="w-10 h-10 bg-gray-50 rounded-lg flex items-center justify-center">
-                <Wrench aria-hidden="true" className="w-5 h-5 text-gray-600" />
+                <Wrench className="w-5 h-5 text-gray-600" />
               </div>
               <div>
                 <h2 className="text-lg font-semibold text-gray-900 font-mono">{tool.name}</h2>
@@ -105,8 +103,8 @@ export default function ToolDetailModal({ tool, initialSection, deviceId, onClos
                 </div>
               </div>
             </div>
-            <button aria-label={pageActionLabel('close')} onClick={onClose} className="text-gray-400 hover:text-gray-600 p-1 rounded-lg hover:bg-gray-100">
-              <X aria-hidden="true" className="w-5 h-5" />
+            <button onClick={onClose} className="text-gray-400 hover:text-gray-600 p-1 rounded-lg hover:bg-gray-100">
+              <X className="w-5 h-5" />
             </button>
           </div>
           <div className="flex space-x-4 mt-4">
@@ -116,7 +114,7 @@ export default function ToolDetailModal({ tool, initialSection, deviceId, onClos
                 section === 'info' ? 'border-red-500 text-red-600' : 'border-transparent text-gray-500 hover:text-gray-700'
               }`}
             >
-              <Info aria-hidden="true" className="w-4 h-4 mr-1.5" />{t('toolDetail.tabInfo')}
+              <Info className="w-4 h-4 mr-1.5" />{t('toolDetail.tabInfo')}
             </button>
             <button
               onClick={() => setSection('test')}
@@ -124,7 +122,7 @@ export default function ToolDetailModal({ tool, initialSection, deviceId, onClos
                 section === 'test' ? 'border-red-500 text-red-600' : 'border-transparent text-gray-500 hover:text-gray-700'
               }`}
             >
-              <TestTube aria-hidden="true" className="w-4 h-4 mr-1.5" />{t('toolDetail.tabTest')}
+              <TestTube className="w-4 h-4 mr-1.5" />{t('toolDetail.tabTest')}
             </button>
           </div>
         </div>
@@ -135,7 +133,7 @@ export default function ToolDetailModal({ tool, initialSection, deviceId, onClos
             <div className="space-y-5">
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1.5">{t('toolDetail.description')}</label>
-                <p className="text-sm text-gray-600 leading-relaxed [overflow-wrap:anywhere] whitespace-pre-wrap break-words">{tool.description}</p>
+                <p className="text-sm text-gray-600 leading-relaxed whitespace-pre-wrap break-words [overflow-wrap:anywhere]">{tool.description}</p>
               </div>
               <div className="flex flex-wrap gap-4">
                 <div>
@@ -146,7 +144,7 @@ export default function ToolDetailModal({ tool, initialSection, deviceId, onClos
                   <div>
                     <label className="block text-sm font-medium text-gray-700 mb-1.5">{t('toolDetail.security')}</label>
                     <span className="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium bg-amber-100 text-amber-800">
-                      <AlertTriangle aria-hidden="true" className="w-3.5 h-3.5 mr-1" />{t('toolDetail.requiresConfirmation')}
+                      <AlertTriangle className="w-3.5 h-3.5 mr-1" />{t('toolDetail.requiresConfirmation')}
                     </span>
                   </div>
                 )}
@@ -156,7 +154,7 @@ export default function ToolDetailModal({ tool, initialSection, deviceId, onClos
                   <label className="block text-sm font-medium text-gray-700 mb-2">{t('toolDetail.params', { count: tool.parameters.length })}</label>
                   <div className="bg-gray-50 rounded-lg border border-gray-200 overflow-hidden">
                     <div className="overflow-x-auto">
-                      <table className="table-fixed divide-y divide-gray-200 min-w-full">
+                      <table className="min-w-full table-fixed divide-y divide-gray-200">
                       <thead className="bg-gray-100">
                         <tr>
                           <th className="w-[28%] px-4 py-2 text-left text-xs font-medium text-gray-500">{t('toolDetail.paramName')}</th>
@@ -171,13 +169,13 @@ export default function ToolDetailModal({ tool, initialSection, deviceId, onClos
                             <td className="px-4 py-2 align-top">
                               <code className="text-xs font-mono text-gray-900 bg-white px-1.5 py-0.5 rounded border border-gray-200 break-all">{param.name}</code>
                             </td>
-                            <td className="px-4 py-2 align-top text-xs text-gray-600 [overflow-wrap:anywhere] whitespace-pre-wrap break-words">{param.type}</td>
+                            <td className="px-4 py-2 align-top text-xs text-gray-600 whitespace-pre-wrap break-words [overflow-wrap:anywhere]">{param.type}</td>
                             <td className="px-4 py-2 align-top">
                               {param.required
                                 ? <span className="text-xs text-red-600 font-medium">{t('toolDetail.yes')}</span>
                                 : <span className="text-xs text-gray-400">{t('toolDetail.no')}</span>}
                             </td>
-                            <td className="px-4 py-2 align-top text-xs text-gray-600 [overflow-wrap:anywhere] whitespace-pre-wrap break-words">{param.description}</td>
+                            <td className="px-4 py-2 align-top text-xs text-gray-600 whitespace-pre-wrap break-words [overflow-wrap:anywhere]">{param.description}</td>
                           </tr>
                         ))}
                       </tbody>
@@ -206,10 +204,10 @@ export default function ToolDetailModal({ tool, initialSection, deviceId, onClos
                     className="w-full flex items-center justify-between px-4 py-2.5 text-sm font-medium text-blue-700 hover:bg-blue-100 transition-colors"
                   >
                     <span className="flex items-center gap-1.5">
-                      <BookOpen aria-hidden="true" className="w-3.5 h-3.5" />
+                      <BookOpen className="w-3.5 h-3.5" />
                       测试示例 ({fixtures.length})
                     </span>
-                    <ChevronDown aria-hidden="true" className={`w-3.5 h-3.5 transition-transform ${fixturesOpen ? 'rotate-180' : ''}`} />
+                    <ChevronDown className={`w-3.5 h-3.5 transition-transform ${fixturesOpen ? 'rotate-180' : ''}`} />
                   </button>
                   {fixturesOpen && (
                     <div className="border-t border-blue-100 divide-y divide-blue-100">
@@ -230,12 +228,12 @@ export default function ToolDetailModal({ tool, initialSection, deviceId, onClos
                           >
                             <div className="flex-1 min-w-0">
                               <p className="text-sm font-medium text-blue-800 truncate">{label}</p>
-                              <p className="text-xs text-blue-500 font-mono mt-0.5 truncate">
+                              <p className="text-xs text-blue-500 font-mono truncate mt-0.5">
                                 {JSON.stringify(fx.params)}
                               </p>
                             </div>
                             {fx.has_assertion && (
-                              <span className="text-[10px] bg-green-100 text-green-700 px-1.5 py-0.5 rounded mt-0.5 flex-shrink-0">断言</span>
+                              <span className="text-[10px] bg-green-100 text-green-700 px-1.5 py-0.5 rounded flex-shrink-0 mt-0.5">断言</span>
                             )}
                           </button>
                         );
@@ -246,7 +244,7 @@ export default function ToolDetailModal({ tool, initialSection, deviceId, onClos
               )}
               {fixtures.length === 0 && canDirectTest && (
                 <p className="text-xs text-zinc-400 flex items-center gap-1">
-                  <BookOpen aria-hidden="true" className="w-3 h-3" />
+                  <BookOpen className="w-3 h-3" />
                   此工具暂无预置测试示例，请手动填写参数
                 </p>
               )}
@@ -273,9 +271,9 @@ export default function ToolDetailModal({ tool, initialSection, deviceId, onClos
                 className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-red-600 text-white rounded-lg hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed font-medium text-sm"
               >
                 {testing ? (
-                  <><RefreshCw aria-hidden="true" className="w-4 h-4 animate-spin" />{t('toolDetail.executing')}</>
+                  <><RefreshCw className="w-4 h-4 animate-spin" />{t('toolDetail.executing')}</>
                 ) : (
-                  <><Play aria-hidden="true" className="w-4 h-4" />{t('toolDetail.runTest')}</>
+                  <><Play className="w-4 h-4" />{t('toolDetail.runTest')}</>
                 )}
               </button>
               {!tool.enabled && (
@@ -290,15 +288,15 @@ export default function ToolDetailModal({ tool, initialSection, deviceId, onClos
                   <div className={`rounded-lg border p-4 ${testResult.success ? 'bg-green-50 border-green-200' : 'bg-red-50 border-red-200'}`}>
                     <div className="flex items-center mb-2">
                       {testResult.success
-                        ? <CheckCircle aria-hidden="true" className="w-4 h-4 text-green-600 mr-2" />
-                        : <XCircle aria-hidden="true" className="w-4 h-4 text-red-600 mr-2" />}
+                        ? <CheckCircle className="w-4 h-4 text-green-600 mr-2" />
+                        : <XCircle className="w-4 h-4 text-red-600 mr-2" />}
                       <span className={`text-sm font-medium ${testResult.success ? 'text-green-800' : 'text-red-800'}`}>
                         {testResult.success ? t('toolDetail.execSuccess') : t('toolDetail.execFailed')}
                       </span>
                     </div>
                     {testResult.error && <p className="text-sm text-red-700 mb-2">{testResult.error}</p>}
                     {testResult.output != null && (
-                      <pre className="text-xs bg-white bg-opacity-60 p-3 rounded-md max-h-60 font-mono overflow-x-auto">
+                      <pre className="text-xs bg-white bg-opacity-60 p-3 rounded-md overflow-x-auto max-h-60 font-mono">
                         {typeof testResult.output === 'string' ? testResult.output : JSON.stringify(testResult.output, null, 2)}
                       </pre>
                     )}
@@ -321,11 +319,11 @@ export default function ToolDetailModal({ tool, initialSection, deviceId, onClos
               disabled={!canDirectTest}
               title={canDirectTest ? undefined : t('toolDetail.sessionTestOnly')}
             >
-              <TestTube aria-hidden="true" className="w-4 h-4 mr-1.5" />{t('toolDetail.testTool')}
+              <TestTube className="w-4 h-4 mr-1.5" />{t('toolDetail.testTool')}
             </button>
           )}
         </div>
       </div>
-    </PageDialog>
+    </div>
   );
 }

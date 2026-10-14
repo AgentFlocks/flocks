@@ -1,15 +1,6 @@
-import { pageActionLabel } from '../../pageActionLabel';
-import PageSelectionGroup from '../../PageSelectionGroup';
-import PageDialog from '../../PageDialog';
 import { useState } from 'react';
 import {
-  Database,
-  Info,
-  MessageSquare,
-  Plus,
-  RefreshCw,
-  Settings,
-  X,
+  Database, X, Settings, MessageSquare, Info, Plus, RefreshCw,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import client from '@/api/client';
@@ -73,37 +64,37 @@ export default function AddMCPDialog({ onClose, onSuccess, onSwitchToChat }: Add
   };
 
   return (
-    <PageDialog onClose={submitting ? undefined : onClose} className="fixed inset-0 bg-gray-600/75 flex items-center justify-center z-50">
+    <div className="fixed inset-0 bg-gray-600/75 flex items-center justify-center z-50">
       <div className="bg-white rounded-xl shadow-2xl max-w-lg w-full mx-4 max-h-[85vh] flex flex-col">
         {/* Header */}
         <div className="px-6 py-4 border-b border-gray-200 flex-shrink-0">
           <div className="flex items-center justify-between mb-3">
             <div className="flex items-center gap-3">
               <div className="w-10 h-10 rounded-lg bg-red-50 flex items-center justify-center">
-                <Database aria-hidden="true" className="w-5 h-5 text-red-600" />
+                <Database className="w-5 h-5 text-red-600" />
               </div>
               <div>
                 <h2 className="text-lg font-semibold text-gray-900">{t('addMCP.title')}</h2>
                 <p className="text-xs text-gray-500">{t('addMCP.subtitle')}</p>
               </div>
             </div>
-            <button aria-label={pageActionLabel('close')} onClick={onClose} className="text-gray-400 hover:text-gray-600 p-1 rounded-lg hover:bg-gray-100">
-              <X aria-hidden="true" className="w-5 h-5" />
+            <button onClick={onClose} className="text-gray-400 hover:text-gray-600 p-1 rounded-lg hover:bg-gray-100">
+              <X className="w-5 h-5" />
             </button>
           </div>
-          <PageSelectionGroup className="flex space-x-1 bg-gray-100 rounded-lg p-1">
-            <button aria-pressed={true} className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 rounded-md text-sm font-medium bg-white text-gray-900 shadow-sm">
-              <Settings aria-hidden="true" className="w-4 h-4" />
+          <div className="flex space-x-1 bg-gray-100 rounded-lg p-1">
+            <button className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 rounded-md text-sm font-medium bg-white text-gray-900 shadow-sm">
+              <Settings className="w-4 h-4" />
               {t('addMCP.formConfig')}
             </button>
-            <button aria-pressed={false}
+            <button
               onClick={openChat}
               className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 rounded-md text-sm font-medium text-gray-500 hover:text-gray-700"
             >
-              <MessageSquare aria-hidden="true" className="w-4 h-4" />
+              <MessageSquare className="w-4 h-4" />
               {t('addMCP.chatAssistant')}
             </button>
-          </PageSelectionGroup>
+          </div>
         </div>
 
         {/* Body */}
@@ -191,7 +182,7 @@ export default function AddMCPDialog({ onClose, onSuccess, onSwitchToChat }: Add
 
             <div className="p-3 bg-red-50 border border-red-200 rounded-lg">
               <div className="flex items-start gap-2">
-                <Info aria-hidden="true" className="w-4 h-4 text-red-600 mt-0.5 flex-shrink-0" />
+                <Info className="w-4 h-4 text-red-600 mt-0.5 flex-shrink-0" />
                 <div className="text-xs text-red-800">
                   <p className="font-medium mb-1">{t('addMCP.hintTitle')}</p>
                   <p>{t('addMCP.hintDesc')}</p>
@@ -204,7 +195,7 @@ export default function AddMCPDialog({ onClose, onSuccess, onSwitchToChat }: Add
         {/* Footer */}
         <div className="px-6 py-4 border-t border-gray-200 flex justify-between flex-shrink-0">
           <button onClick={openChat} className="inline-flex items-center px-4 py-2 border border-gray-300 rounded-lg text-sm font-medium text-gray-700 hover:bg-gray-50 transition-colors">
-            <MessageSquare aria-hidden="true" className="w-4 h-4 mr-1.5" />
+            <MessageSquare className="w-4 h-4 mr-1.5" />
             {t('addMCP.chatIntegration')}
           </button>
           <div className="flex gap-2">
@@ -217,14 +208,14 @@ export default function AddMCPDialog({ onClose, onSuccess, onSwitchToChat }: Add
               className="px-4 py-2 bg-red-600 text-white rounded-lg text-sm font-medium hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center"
             >
               {submitting ? (
-                <><RefreshCw aria-hidden="true" className="w-4 h-4 mr-1.5 animate-spin" />{t('addMCP.adding')}</>
+                <><RefreshCw className="w-4 h-4 mr-1.5 animate-spin" />{t('addMCP.adding')}</>
               ) : (
-                <><Plus aria-hidden="true" className="w-4 h-4 mr-1.5" />{t('addMCP.addService')}</>
+                <><Plus className="w-4 h-4 mr-1.5" />{t('addMCP.addService')}</>
               )}
             </button>
           </div>
         </div>
       </div>
-    </PageDialog>
+    </div>
   );
 }

@@ -34,12 +34,12 @@ export default function WorkflowMarkdownEditor({
   }, [lineNumbers.length, syncLineNumberOffset]);
 
   return (
-    <div className="flex w-full flex-1 bg-slate-950 h-full min-h-0 overflow-hidden">
+    <div className="flex h-full min-h-0 w-full flex-1 overflow-hidden bg-slate-950">
       <label htmlFor={id} className="sr-only">{label}</label>
       <div
         aria-hidden="true"
         data-testid="workflow-md-line-numbers"
-        className="h-full select-none border-r border-slate-800 bg-slate-900/80 py-5 pr-3 text-right font-mono text-sm leading-6 text-slate-500 flex-shrink-0 overflow-hidden"
+        className="h-full flex-shrink-0 overflow-hidden select-none border-r border-slate-800 bg-slate-900/80 py-5 pr-3 text-right font-mono text-sm leading-6 text-slate-500"
         style={{ width: gutterWidth }}
       >
         <div ref={lineNumberTrackRef}>
@@ -58,7 +58,7 @@ export default function WorkflowMarkdownEditor({
         onScroll={syncLineNumberOffset}
         placeholder={placeholder}
         wrap="off"
-        className="resize-none border-0 bg-slate-950 px-6 py-5 font-mono text-sm leading-6 text-slate-100 caret-red-300 outline-none selection:bg-red-500/30 placeholder:text-slate-500 h-full min-h-0 min-w-0 w-full overflow-auto"
+        className="h-full min-h-0 min-w-0 w-full resize-none overflow-auto border-0 bg-slate-950 px-6 py-5 font-mono text-sm leading-6 text-slate-100 caret-red-300 outline-none selection:bg-red-500/30 placeholder:text-slate-500"
         spellCheck={false}
       />
     </div>

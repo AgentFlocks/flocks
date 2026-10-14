@@ -28,6 +28,8 @@ export interface HeaderWorkspace {
 
 interface WorkspaceHeaderProps {
   productName: string;
+  /** Without a logo the mark shows the product name's initial. */
+  logoUrl?: string | null;
   update?: { title: string; onClick: () => void } | null;
   workspaces: HeaderWorkspace[];
   /** Null while navigation data is loading. */
@@ -39,8 +41,6 @@ interface WorkspaceHeaderProps {
   taskCounts?: { running: number; queued: number } | null;
   onOpenShortcuts: () => void;
   onOpenMobileNav: () => void;
-  /** Whether the off-canvas navigation is open (narrow screens). */
-  mobileNavOpen?: boolean;
 }
 
 const ICON_BUTTON_CLASS =
@@ -60,6 +60,7 @@ function NewBadge({ label }: { label: string }) {
  */
 export default function WorkspaceHeader({
   productName,
+  logoUrl,
   update,
   workspaces,
   currentWorkspace,
@@ -70,7 +71,6 @@ export default function WorkspaceHeader({
   taskCounts,
   onOpenShortcuts,
   onOpenMobileNav,
-  mobileNavOpen = false,
 }: WorkspaceHeaderProps) {
   const { t } = useTranslation('nav');
   const navigate = useNavigate();
@@ -90,16 +90,19 @@ export default function WorkspaceHeader({
         onClick={onOpenMobileNav}
         className={`${ICON_BUTTON_CLASS} lg:hidden`}
         aria-label={t('openNav')}
-        aria-expanded={mobileNavOpen}
         title={t('openNav')}
       >
-        <Menu aria-hidden="true" className="h-5 w-5" />
+        <Menu className="h-5 w-5" />
       </button>
 
       <Link to="/" className="flex min-w-0 shrink-0 items-center gap-2 rounded-lg focus:outline-none focus-visible:ring-2 focus-visible:ring-zinc-400" title={productName}>
-        <span aria-hidden="true" className="hidden h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-red-600 text-base font-bold text-white sm:flex">
-          {brandInitial}
-        </span>
+        {logoUrl ? (
+          <img src={logoUrl} alt="" aria-hidden="true" data-brand-logo className="hidden h-8 w-8 shrink-0 sm:block" />
+        ) : (
+          <span aria-hidden="true" className="hidden h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-red-600 text-base font-bold text-white sm:flex">
+            {brandInitial}
+          </span>
+        )}
         <span className="max-w-[9rem] truncate text-lg font-bold tracking-tight text-zinc-900 sm:max-w-[14rem] sm:text-xl dark:text-zinc-50">
           {productName}
         </span>

@@ -52,7 +52,7 @@ export default function ConnectionGuideSheet({ onClose }: { onClose: () => void 
     <div className="flex h-full flex-col">
       <div className="flex items-center justify-between border-b border-gray-200 px-6 py-4 dark:border-zinc-700">
         <h2 className="text-base font-semibold">{t('knowledge.connection.guide')}</h2>
-        <button type="button" aria-label={t('knowledge.close')} onClick={onClose} className="rounded p-1 text-gray-400 hover:text-gray-700 dark:hover:text-zinc-100"><X aria-hidden="true" className="h-5 w-5" /></button>
+        <button type="button" aria-label={t('knowledge.close')} onClick={onClose} className="rounded p-1 text-gray-400 hover:text-gray-700 dark:hover:text-zinc-100"><X className="h-5 w-5" /></button>
       </div>
       <div ref={bodyRef} className="min-h-0 flex-1 overflow-y-auto p-6">
         <div className="prose prose-sm max-w-none dark:prose-invert prose-pre:whitespace-pre-wrap">

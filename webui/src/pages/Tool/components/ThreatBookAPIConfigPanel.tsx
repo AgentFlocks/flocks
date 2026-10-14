@@ -36,9 +36,9 @@ function ResultMessage({ result }: { result: Exclude<OperationResult, null> }) {
       className={`flex items-start gap-2 rounded-lg border px-3 py-2.5 text-sm ${result.success ? "border-green-200 bg-green-50 text-green-700" : "border-red-200 bg-red-50 text-red-700"}`}
     >
       {result.success ? (
-        <CheckCircle2 aria-hidden="true" className="mt-0.5 h-4 w-4 flex-shrink-0" />
+        <CheckCircle2 className="mt-0.5 h-4 w-4 flex-shrink-0" />
       ) : (
-        <AlertCircle aria-hidden="true" className="mt-0.5 h-4 w-4 flex-shrink-0" />
+        <AlertCircle className="mt-0.5 h-4 w-4 flex-shrink-0" />
       )}
       <span>{result.message}</span>
     </div>
@@ -210,7 +210,7 @@ export default function ThreatBookAPIConfigPanel({
         <div className="rounded-lg border border-green-200 bg-green-50/60 p-4">
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div className="flex items-start gap-3">
-              <CheckCircle2 aria-hidden="true" className="mt-0.5 h-5 w-5 text-green-600" />
+              <CheckCircle2 className="mt-0.5 h-5 w-5 text-green-600" />
               <div>
                 <p className="text-sm font-semibold text-gray-900">
                   {t("detail.threatbookApi.configuredTitle", {
@@ -231,7 +231,7 @@ export default function ThreatBookAPIConfigPanel({
                 disabled={testing}
                 className="inline-flex h-9 items-center gap-1.5 rounded-md border border-gray-300 bg-white px-3 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
               >
-                <RefreshCw aria-hidden="true"
+                <RefreshCw
                   className={`h-4 w-4 ${testing ? "animate-spin" : ""}`}
                 />
                 {testing
@@ -246,7 +246,7 @@ export default function ThreatBookAPIConfigPanel({
                 }}
                 className="inline-flex h-9 items-center gap-1.5 rounded-md border border-gray-300 bg-white px-3 text-sm font-medium text-gray-700 hover:bg-gray-50"
               >
-                <Pencil aria-hidden="true" className="h-4 w-4" />
+                <Pencil className="h-4 w-4" />
                 {t("detail.threatbookApi.edit")}
               </button>
             </div>
@@ -330,11 +330,11 @@ export default function ThreatBookAPIConfigPanel({
                   className="absolute inset-y-0 right-0 flex w-10 items-center justify-center text-gray-400 hover:text-gray-600 disabled:opacity-50"
                 >
                   {revealing ? (
-                    <Loader2 aria-hidden="true" className="h-4 w-4 animate-spin" />
+                    <Loader2 className="h-4 w-4 animate-spin" />
                   ) : showApiKey ? (
-                    <EyeOff aria-hidden="true" className="h-4 w-4" />
+                    <EyeOff className="h-4 w-4" />
                   ) : (
-                    <Eye aria-hidden="true" className="h-4 w-4" />
+                    <Eye className="h-4 w-4" />
                   )}
                 </button>
               </div>
@@ -344,7 +344,7 @@ export default function ThreatBookAPIConfigPanel({
                 rel="noopener noreferrer"
                 className="inline-flex h-10 items-center justify-center gap-1.5 rounded-lg border border-green-200 bg-green-50 px-4 text-sm font-semibold text-green-700 hover:bg-green-100"
               >
-                <ExternalLink aria-hidden="true" className="h-4 w-4" />
+                <ExternalLink className="h-4 w-4" />
                 {t("detail.threatbookApi.claimFreeKey", {
                   region: regionLabel,
                 })}
@@ -392,7 +392,7 @@ export default function ThreatBookAPIConfigPanel({
               disabled={saving || !apiKey.trim()}
               className="inline-flex h-10 items-center gap-2 rounded-lg bg-red-600 px-4 text-sm font-semibold text-white hover:bg-red-700 disabled:opacity-40"
             >
-              {saving && <Loader2 aria-hidden="true" className="h-4 w-4 animate-spin" />}
+              {saving && <Loader2 className="h-4 w-4 animate-spin" />}
               {saving
                 ? t("detail.threatbookApi.saving")
                 : t("detail.threatbookApi.saveAndVerify")}

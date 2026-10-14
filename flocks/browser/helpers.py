@@ -338,10 +338,10 @@ def _collect_site_cookies(target_url: str) -> list[dict[str, Any]]:
     return filtered
 
 
-def _set_storage_entries(storage_name: str, entries: list[dict[str, Any]]) -> int:
+def _set_storage_entries(storage_name: str, entries: list[dict[str, Any]], session_id: str | None = None) -> int:
     payload = _stringify_json(entries)
     # Merge keys instead of clearing storage: flocks/browser reuses the user's real profile.
-    applied = js(
+    applied = _runtime_evaluate(
         f"""(() => {{
   const entries = JSON.parse({json.dumps(payload)});
   const storage = window[{json.dumps(storage_name)}];
@@ -352,9 +352,55 @@ def _set_storage_entries(storage_name: str, entries: list[dict[str, Any]]) -> in
     storage.setItem(String(item.name), String(item.value ?? ""));
   }}
   return entries.length;
-}})()"""
+}})()""",
+        session_id=session_id,
+        await_promise=True,
     )
     return int(applied or 0)
+
+
+def _set_storage_in_background_tab(origin: str, entries: list[dict[str, Any]], timeout: float = 15.0) -> int:
+    """Write one origin's storage from a temporary background tab, leaving the open page alone."""
+    target_id = cdp("Target.createTarget", url="about:blank", background=True)["targetId"]
+    try:
+        session_id = cdp("Target.attachToTarget", targetId=target_id, flatten=True)["sessionId"]
+        cdp("Page.navigate", session_id=session_id, url=_storage_origin_url(origin))
+        # about:blank is already "complete"; wait for the target origin's document.
+        expected = (_origin_from_url(origin) or origin).lower()
+        deadline = time.time() + timeout
+        while True:
+            try:
+                page = json.loads(_runtime_evaluate(
+                    "JSON.stringify([location.origin, document.readyState])", session_id=session_id,
+                ) or "[]")
+            except RuntimeError as error:
+                # While the tab navigates its old execution context goes away; ask again.
+                if "context" not in str(error).lower():
+                    raise
+                page = []
+            if page and str(page[0]).lower() == expected and page[1] == "complete":
+                break
+            if time.time() >= deadline:
+                raise RuntimeError(f"timed out loading {origin} to restore its storage")
+            time.sleep(0.2)
+        return _set_storage_entries("localStorage", entries, session_id=session_id)
+    finally:
+        try:
+            cdp("Target.closeTarget", targetId=target_id)
+        except Exception:
+            pass
+
+
+def _same_page_url(current: str | None, target: str | None) -> bool:
+    """Whether loading ``target`` would stay on ``current``.
+
+    "https://example.com" and the "https://example.com/" a tab reports are one
+    page; "#/login" and "#/dashboard" of a hash-routed app are not.
+    """
+    return (
+        _normalize_tab_url(current) == _normalize_tab_url(target)
+        and urlparse(current or "").fragment == urlparse(target or "").fragment
+    )
 
 
 def _sanitize_cookie_for_import(cookie: dict[str, Any]) -> dict[str, Any]:
@@ -430,6 +476,8 @@ def load_state(path: str | Path, url: str | None = None, reload: bool = True) ->
         cdp("Network.setCookies", cookies=imported_cookies)
 
     applied_local_storage = 0
+    start_url = current_tab().get("url")
+    start_origin = (_origin_from_url(start_url) or "").lower()
 
     for origin_entry in origins:
         if not isinstance(origin_entry, dict):
@@ -437,16 +485,21 @@ def load_state(path: str | Path, url: str | None = None, reload: bool = True) ->
         origin = origin_entry.get("origin")
         if not isinstance(origin, str) or not origin:
             continue
-        goto_url(_storage_origin_url(origin))
-        wait_for_load()
-        applied_local_storage += _set_storage_entries(
-            "localStorage",
-            origin_entry.get("localStorage") if isinstance(origin_entry.get("localStorage"), list) else [],
-        )
+        entries = origin_entry.get("localStorage") if isinstance(origin_entry.get("localStorage"), list) else []
+        if reload:
+            goto_url(_storage_origin_url(origin))
+            wait_for_load()
+            applied_local_storage += _set_storage_entries("localStorage", entries)
+        elif start_origin and (_origin_from_url(origin) or "").lower() == start_origin:
+            # --no-reload keeps the open page: its own origin is written in place...
+            applied_local_storage += _set_storage_entries("localStorage", entries)
+        else:
+            # ...and any other origin from a tab of its own.
+            applied_local_storage += _set_storage_in_background_tab(origin, entries)
 
-    final_url = url or current_tab().get("url")
+    final_url = url or (current_tab().get("url") if reload else start_url)
     if final_url:
-        if current_tab().get("url") == final_url:
+        if _same_page_url(current_tab().get("url"), final_url):
             if reload:
                 cdp("Page.reload")
                 wait_for_load()

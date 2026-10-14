@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-import json
 import re
 from datetime import datetime
 from typing import Any, Dict, Optional
+
+from flocks.ingest.syslog.sangfor import VARIANTS, decode_se_json
 
 _PRI_RE = re.compile(r"^<(\d{1,3})>")
 # After stripping PRI: MMM DD hh:mm:ss hostname tag: msg
@@ -72,6 +73,7 @@ def parse_syslog(raw: str, format_hint: str = "auto") -> Dict[str, Any]:
     format_hint: "auto" | "rfc3164" | "rfc5424" | "se"
     """
     text = raw.decode("utf-8", errors="replace") if isinstance(raw, (bytes, bytearray)) else raw
+    original_text = text
     text = text.strip()
     if not text:
         return {
@@ -88,7 +90,7 @@ def parse_syslog(raw: str, format_hint: str = "auto") -> Dict[str, Any]:
     m_pri = _PRI_RE.match(text)
     if not m_pri:
         if format_hint == "se" or (format_hint == "auto" and _looks_like_se(text)):
-            return _parse_se(text, raw=text, facility=1, severity=6)
+            return _parse_se(text, raw=original_text, facility=1, severity=6)
         return {
             "raw": text,
             "facility": 0,
@@ -105,7 +107,7 @@ def parse_syslog(raw: str, format_hint: str = "auto") -> Dict[str, Any]:
     rest = text[m_pri.end() :]
 
     if format_hint == "se" or (format_hint == "auto" and _looks_like_se(rest)):
-        return _parse_se(rest, raw=text, facility=facility, severity=severity)
+        return _parse_se(rest, raw=original_text, facility=facility, severity=severity)
     if format_hint == "rfc3164":
         return _parse_rfc3164(rest, raw=text, facility=facility, severity=severity)
     if format_hint == "rfc5424":
@@ -127,11 +129,7 @@ def parse_syslog(raw: str, format_hint: str = "auto") -> Dict[str, Any]:
 
 def _looks_like_se(rest: str) -> bool:
     parts = rest.strip().split("|!", 3)
-    return (
-        len(parts) == 4
-        and parts[1].strip() in {"secevent", "alarm"}
-        and parts[3].lstrip().startswith(("{", "["))
-    )
+    return len(parts) == 4 and parts[1].strip() in VARIANTS
 
 
 def _normalize_se_ts(prefix: str) -> str:
@@ -169,13 +167,19 @@ def _parse_se(
             "log_type": "",
             "client_ip": "",
             "data": None,
+            "parse_status": "error",
+            "parse_error": "SE envelope must contain timestamp, log type, device IP and JSON body",
         }
 
     timestamp, log_type, client_ip, message = (part.strip() for part in parts)
+    parse_error = ""
     try:
-        data = json.loads(message)
-    except (json.JSONDecodeError, TypeError):
+        if log_type not in VARIANTS:
+            raise ValueError(f"Unsupported SE log type: {log_type}")
+        message, data = decode_se_json(message)
+    except (ValueError, TypeError) as exc:
         data = None
+        parse_error = str(exc)
 
     return {
         "raw": raw,
@@ -189,6 +193,8 @@ def _parse_se(
         "log_type": log_type,
         "client_ip": client_ip,
         "data": data,
+        "parse_status": "error" if parse_error else "ok",
+        "parse_error": parse_error,
     }
 
 

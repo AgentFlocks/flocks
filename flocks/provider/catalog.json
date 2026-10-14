@@ -1413,6 +1413,9 @@
             "echo": "tool_calls",
             "cross_provider_policy": "promote"
           },
+          "thinking_level_map": {
+            "high": "enabled"
+          },
           "supports_streaming": true
         },
         "limits": {
@@ -1462,6 +1465,9 @@
             "field": "reasoning_content",
             "echo": "tool_calls",
             "cross_provider_policy": "promote"
+          },
+          "thinking_level_map": {
+            "high": "enabled"
           },
           "supports_streaming": true
         },

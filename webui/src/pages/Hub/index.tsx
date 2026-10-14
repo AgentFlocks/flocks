@@ -1,4 +1,3 @@
-import { pageActionLabel } from '../pageActionLabel';
 import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import {
@@ -10,6 +9,7 @@ import {
   Folder,
   FolderOpen,
   GitBranch,
+  Info,
   Loader2,
   RefreshCw,
   Search,
@@ -18,7 +18,6 @@ import {
   X,
 } from 'lucide-react';
 import PageHeader from '@/components/common/PageHeader';
-import { useNarrowViewport } from '@/components/common/sidePanelSizing';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
 import { useProtectedHubUpdate } from '@/components/hub/useProtectedHubUpdate';
 import { useToast } from '@/components/common/Toast';
@@ -585,15 +584,11 @@ export default function HubPage() {
       <PageHeader
         title={hubTitle}
         description={hubDescription}
-        icon={<Archive aria-hidden="true" className="w-8 h-8" />}
+        icon={<Archive className="w-8 h-8" />}
         action={
-          /* Phone widths: pin the action block to the header's width (viewport minus
-             the 1.5rem page padding a side). The header's action slot is an auto-width
-             flex item, so without this the block sizes to its max-content -- search box
-             plus both buttons in one row -- and runs off the right edge. */
-          <div className="flex items-center gap-2 flex-wrap w-[calc(100vw-3rem)] sm:w-auto">
-            <div className="relative w-full sm:w-80 2xl:w-96 min-w-0">
-              <Search aria-hidden="true" className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
+          <div className="flex items-center gap-2">
+            <div className="relative w-80 2xl:w-96">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
               <input
                 value={query}
                 onChange={e => {
@@ -608,7 +603,7 @@ export default function HubPage() {
               onClick={() => setViewMode(viewMode === 'table' ? 'tree' : 'table')}
               className="inline-flex items-center gap-2 px-3 py-2 border border-gray-300 rounded-lg text-sm hover:bg-gray-50"
             >
-              {viewMode === 'table' ? <Folder aria-hidden="true" className="w-4 h-4" /> : <Table2 aria-hidden="true" className="w-4 h-4" />}
+              {viewMode === 'table' ? <Folder className="w-4 h-4" /> : <Table2 className="w-4 h-4" />}
               {viewMode === 'table' ? text.treeView : text.tableView}
             </button>
             {canManageHub && (
@@ -617,7 +612,7 @@ export default function HubPage() {
                 disabled={refreshing}
                 className="inline-flex items-center gap-2 px-3 py-2 border border-gray-300 rounded-lg text-sm hover:bg-gray-50 disabled:opacity-50"
               >
-                <RefreshCw aria-hidden="true" className={`w-4 h-4 ${refreshing ? 'animate-spin' : ''}`} />
+                <RefreshCw className={`w-4 h-4 ${refreshing ? 'animate-spin' : ''}`} />
                 {text.refresh}
               </button>
             )}
@@ -701,7 +696,6 @@ export default function HubPage() {
             </div>
           )}
 
-          {/* h-5 so the h-5 handle below (anchored at -top-px) is not clipped by the card's overflow-hidden */}
           <div className="relative h-4 bg-gradient-to-r from-slate-50 via-white to-white">
             <button
               onClick={() => setFiltersOpen(!filtersOpen)}
@@ -710,7 +704,7 @@ export default function HubPage() {
               className="absolute left-1/2 -top-px -translate-x-1/2 h-5 w-28 rounded-b-xl border border-t-0 border-slate-300 bg-slate-100 shadow-sm flex items-center justify-center gap-1 text-slate-500 hover:bg-white hover:text-slate-700 hover:border-slate-400"
             >
               <span className="text-[10px] leading-none">{text.moreFilters}</span>
-              <ChevronRight aria-hidden="true" className={`w-3 h-3 transition-transform ${filtersOpen ? '-rotate-90' : 'rotate-90'}`} />
+              <ChevronRight className={`w-3 h-3 transition-transform ${filtersOpen ? '-rotate-90' : 'rotate-90'}`} />
             </button>
             {activeFilterCount > 0 && (
               <button
@@ -733,7 +727,7 @@ export default function HubPage() {
         {viewMode === 'table' ? (
           <HubTable items={pagedItems} actionId={actionId} tagLabels={taxonomy?.tagLabels} language={i18n.language} text={text} onSelect={setSelected} onAction={runAction} />
         ) : treeLoading && treeItems.length === 0 ? (
-          <div className="flex items-center justify-center rounded-lg border border-gray-200 bg-white min-h-[360px]">
+          <div className="flex min-h-[360px] items-center justify-center rounded-lg border border-gray-200 bg-white">
             <LoadingSpinner delayMs={HUB_LOADING_DELAY_MS} />
           </div>
         ) : (
@@ -797,18 +791,16 @@ function FilterRow({ label, value, options, onChange }: {
       <button
         key={option.value || 'all'}
         title={option.title}
-        aria-pressed={active}
         onClick={() => onChange(option.value)}
-        className={`inline-flex h-8 items-center rounded-md px-2 py-1 font-medium tabular-nums transition-colors max-w-full whitespace-nowrap ${
+        className={`inline-flex h-8 items-center whitespace-nowrap rounded-md px-2 py-1 font-medium tabular-nums transition-colors ${
           active
             ? 'bg-slate-800 text-white'
             : 'text-gray-600 hover:bg-white hover:text-gray-900'
         }`}
       >
-        {/* a long label truncates inside the chip instead of pushing past the row on a phone */}
-        <span className="min-w-0 truncate">{option.label}</span>
+        {option.label}
         {option.count !== undefined && option.value && (
-          <span className={active ? 'ml-1 inline-block text-right text-slate-200 min-w-3 shrink-0' : 'ml-1 inline-block text-right text-gray-400 min-w-3 shrink-0'}>{option.count}</span>
+          <span className={active ? 'ml-1 inline-block min-w-3 text-right text-slate-200' : 'ml-1 inline-block min-w-3 text-right text-gray-400'}>{option.count}</span>
         )}
       </button>
     );
@@ -843,10 +835,8 @@ function PaginationBar({ total, page, pageSize, totalPages, text, onPageChange, 
 }) {
   const start = total === 0 ? 0 : (page - 1) * pageSize + 1;
   const end = Math.min(total, page * pageSize);
-  // min-h + wrap: on a phone the "showing x-y" line and the controls stack, so a
-  // fixed h-12 clipped the second row.
   return (
-    <div className="px-4 py-2 border-t border-gray-200 bg-white flex items-center justify-between text-xs text-gray-500 min-h-12 shrink-0 flex-wrap">
+    <div className="h-12 shrink-0 px-4 py-2 border-t border-gray-200 bg-white flex items-center justify-between text-xs text-gray-500">
       <div>
         {text.showing} {start}-{end} / {text.of} {total} {text.plugins}
       </div>
@@ -855,7 +845,7 @@ function PaginationBar({ total, page, pageSize, totalPages, text, onPageChange, 
         <select
           value={pageSize}
           onChange={e => onPageSizeChange(Number(e.target.value))}
-          className="px-2 py-1 border border-gray-200 rounded-md bg-white outline-none focus:ring-2 focus:ring-slate-300"
+          className="px-2 py-1 border border-gray-200 rounded-md bg-white outline-none"
         >
           {[25, 50, 100].map(size => <option key={size} value={size}>{size}</option>)}
         </select>
@@ -888,48 +878,44 @@ function HubTable({ items, actionId, tagLabels, language, text, onSelect, onActi
   onSelect: (entry: HubCatalogEntry) => void;
   onAction: (entry: HubCatalogEntry, action: 'install' | 'update' | 'uninstall') => void;
 }) {
-  // Phone widths: only name + action stay as columns; type and state fold into
-  // the name cell and the action button is icon-only, so nothing scrolls off
-  // the right edge.
-  const narrow = useNarrowViewport();
   return (
-    <div className="bg-white border border-gray-200 rounded-xl min-h-full overflow-x-auto">
-      {/* From md up the 720px floor keeps five columns usable, split like the dev
-          table (7 / 38 / 31 / 10 / 14); widths live on the header cells because
-          table-fixed reads them from the first row and a hidden <col> cannot be dropped. */}
-      <table className="table-fixed text-xs w-full md:min-w-[720px]">
+    <div className="min-h-full bg-white border border-gray-200 rounded-xl overflow-hidden">
+      <table className="min-w-full table-fixed text-xs">
+        <colgroup>
+          <col style={{ width: '7%' }} />
+          <col style={{ width: '38%' }} />
+          <col style={{ width: '31%' }} />
+          <col style={{ width: '10%' }} />
+          <col style={{ width: '14%' }} />
+        </colgroup>
         <thead className="bg-gray-50 text-gray-500">
           <tr>
-            <th className="text-left px-3 py-2 font-medium hidden md:table-cell md:w-[7%]">{text.type}</th>
-            <th className="text-left px-3 py-2 font-medium md:w-[38%]">{text.name}</th>
-            <th className="text-left px-3 py-2 font-medium hidden md:table-cell md:w-[31%]">Tag</th>
-            <th className="text-left px-3 py-2 font-medium hidden md:table-cell md:w-[10%]">{text.status}</th>
-            <th className="text-right px-3 py-2 font-medium w-[64px] md:w-[14%]">{text.action}</th>
+            <th className="text-left px-3 py-2 font-medium">{text.type}</th>
+            <th className="text-left px-3 py-2 font-medium">{text.name}</th>
+            <th className="text-left px-3 py-2 font-medium">Tag</th>
+            <th className="text-left px-3 py-2 font-medium">{text.status}</th>
+            <th className="text-right px-3 py-2 font-medium">{text.action}</th>
           </tr>
         </thead>
         <tbody className="divide-y divide-gray-100">
           {items.map(item => (
             <tr key={`${item.type}:${item.id}`} className="hover:bg-gray-50">
-              <td className="px-3 py-2 text-gray-500 hidden md:table-cell">{formatPluginTypeLabel(item.type, language)}</td>
+              <td className="px-3 py-2 text-gray-500">{formatPluginTypeLabel(item.type, language)}</td>
               <td className="max-w-0 px-3 py-2">
                 <button onClick={() => onSelect(item)} className="w-full text-left">
-                  <div className="font-medium text-gray-900 hover:text-slate-700 truncate">{getHubName(item, language)}</div>
-                  <div className="text-[11px] text-gray-500 truncate">{getHubDescription(item, language)}</div>
+                  <div className="truncate font-medium text-gray-900 hover:text-slate-700">{getHubName(item, language)}</div>
+                  <div className="truncate text-[11px] text-gray-500">{getHubDescription(item, language)}</div>
                 </button>
-                <div className="md:hidden mt-1 flex items-center gap-2 text-xs text-fg-muted">
-                  <span className="shrink-0">{formatPluginTypeLabel(item.type, language)}</span>
-                  <StateBadge state={item.state} text={text} />
-                </div>
               </td>
-              <td className="max-w-0 px-3 py-2 hidden md:table-cell">
+              <td className="max-w-0 px-3 py-2">
                 <div className="flex gap-1 overflow-hidden">
                   {item.tags.slice(0, 3).map(tag => (
                     <Badge key={tag} title={tag}>{formatTaxonomyLabel(tag, tagLabels, language)}</Badge>
                   ))}
                 </div>
               </td>
-              <td className="px-3 py-2 hidden md:table-cell"><StateBadge state={item.state} text={text} /></td>
-              <td className="px-3 py-2 text-right"><ActionButtons item={item} actionId={actionId} text={text} onAction={onAction} compact={narrow} /></td>
+              <td className="px-3 py-2"><StateBadge state={item.state} text={text} /></td>
+              <td className="px-3 py-2 text-right"><ActionButtons item={item} actionId={actionId} text={text} onAction={onAction} /></td>
             </tr>
           ))}
           {items.length === 0 && (
@@ -986,7 +972,7 @@ function HubTree({ items, actionId, text, onSelect, onAction }: {
   }, [items]);
 
   return (
-    <div className="bg-white border border-gray-200 rounded-xl p-3 min-h-full">
+    <div className="min-h-full bg-white border border-gray-200 rounded-xl p-3">
       <HubTreeNodeView node={root} depth={0} actionId={actionId} text={text} onSelect={onSelect} onAction={onAction} root />
     </div>
   );
@@ -1019,20 +1005,20 @@ function HubTreeNodeView({ node, depth, actionId, text, onSelect, onAction, root
         style={{ paddingLeft }}
       >
         {hasChildren ? (
-          <button aria-label={pageActionLabel(open ? 'collapse' : 'expand')} onClick={() => setOpen(!open)} className="shrink-0">
-            <ChevronRight aria-hidden="true" className={`w-4 h-4 text-gray-400 transition-transform ${open ? 'rotate-90' : ''}`} />
+          <button onClick={() => setOpen(!open)} className="shrink-0">
+            <ChevronRight className={`w-4 h-4 text-gray-400 transition-transform ${open ? 'rotate-90' : ''}`} />
           </button>
         ) : (
           <span className="w-4 shrink-0" />
         )}
         {hasChildren ? (
-          open ? <FolderOpen aria-hidden="true" className="w-4 h-4 text-amber-500 shrink-0" /> : <Folder aria-hidden="true" className="w-4 h-4 text-amber-500 shrink-0" />
+          open ? <FolderOpen className="w-4 h-4 shrink-0 text-amber-500" /> : <Folder className="w-4 h-4 shrink-0 text-amber-500" />
         ) : (
-          <FileText aria-hidden="true" className="w-4 h-4 text-gray-400 shrink-0" />
+          <FileText className="w-4 h-4 shrink-0 text-gray-400" />
         )}
         {node.entry ? (
           <button onClick={() => onSelect(node.entry!)} className="flex-1 min-w-0 text-left">
-            <span className="font-mono text-sm text-gray-800 truncate">{node.name}</span>
+            <span className="truncate font-mono text-sm text-gray-800">{node.name}</span>
           </button>
         ) : (
           <button onClick={() => hasChildren && setOpen(!open)} className="flex-1 min-w-0 text-left">
@@ -1104,8 +1090,8 @@ function PluginDetail({ entry, language, onClose, onAction, actionId, text }: {
             setWorkflowJson(JSON.parse(res.data.content) as WorkflowJSON);
           } catch (err) {
             // JSON.parse always throws an Error, so the localized label must be the lead text;
-            // the engine message is kept as a hint for whoever edits the plugin.
-            setWorkflowError(err instanceof Error ? `${text.parseWorkflowFailed}: ${err.message}` : text.parseWorkflowFailed);
+          // the engine message is kept as a hint for whoever edits the plugin.
+          setWorkflowError(err instanceof Error ? `${text.parseWorkflowFailed}: ${err.message}` : text.parseWorkflowFailed);
           }
         })
         .catch(err => {
@@ -1120,7 +1106,7 @@ function PluginDetail({ entry, language, onClose, onAction, actionId, text }: {
   };
 
   return (
-    <div className="fixed inset-y-0 right-0 w-[860px] max-w-[95vw] bg-white border-l border-gray-200 shadow-xl flex flex-col z-40">
+    <div className="fixed inset-y-0 right-0 z-40 w-[860px] max-w-[95vw] bg-white border-l border-gray-200 shadow-xl flex flex-col">
       <div className="px-5 py-4 border-b border-gray-200 flex items-start justify-between">
         <div>
           <div className="flex items-center gap-2">
@@ -1129,7 +1115,7 @@ function PluginDetail({ entry, language, onClose, onAction, actionId, text }: {
           </div>
           <p className="text-sm text-gray-500 mt-1">{getHubDescription(entry, language)}</p>
         </div>
-        <button aria-label={pageActionLabel('close')} onClick={onClose} className="p-1 rounded-lg hover:bg-gray-100"><X aria-hidden="true" className="w-5 h-5" /></button>
+        <button onClick={onClose} className="p-1 rounded-lg hover:bg-gray-100"><X className="w-5 h-5" /></button>
       </div>
       <div className="px-5 py-3 border-b border-gray-100 flex items-center justify-between">
         <div className="flex gap-2">
@@ -1139,8 +1125,6 @@ function PluginDetail({ entry, language, onClose, onAction, actionId, text }: {
             <button
               key={tab}
               onClick={() => setActiveTab(tab)}
-              role="tab"
-              aria-selected={activeTab === tab}
               className={`px-3 py-1.5 text-sm rounded-lg ${activeTab === tab ? 'bg-slate-800 text-white' : 'text-gray-600 hover:bg-gray-100'}`}
             >
               {text.tabs[tab]}
@@ -1183,7 +1167,7 @@ function PluginDetail({ entry, language, onClose, onAction, actionId, text }: {
             {workflowJson ? (
               <div className="h-full">
                 <div className="h-10 px-4 border-b border-gray-200 bg-white flex items-center gap-2 text-sm text-gray-600">
-                  <GitBranch aria-hidden="true" className="w-4 h-4" />
+                  <GitBranch className="w-4 h-4" />
                   <span>{text.workflowDiagram}</span>
                 </div>
                 <div className="h-[calc(100%-2.5rem)]">
@@ -1201,14 +1185,14 @@ function PluginDetail({ entry, language, onClose, onAction, actionId, text }: {
         )}
         {activeTab === 'files' && (
           <div className="h-full grid grid-cols-[280px_1fr]">
-            <div className="border-r border-gray-200 p-3 overflow-auto">
+            <div className="border-r border-gray-200 overflow-auto p-3">
               {tree ? <FileTree node={tree} onOpen={openFile} root /> : <LoadingSpinner />}
             </div>
             <div className="overflow-auto">
               {content ? (
                 <div className="h-full flex flex-col">
                   <div className="px-4 py-2 border-b border-gray-100 text-xs text-gray-500 font-mono">{content.path} · {content.size} bytes</div>
-                  <pre className="p-4 text-xs leading-relaxed font-mono text-gray-800 whitespace-pre-wrap">{content.content}</pre>
+                  <pre className="p-4 text-xs leading-relaxed whitespace-pre-wrap font-mono text-gray-800">{content.content}</pre>
                 </div>
               ) : (
                 <div className="h-full flex items-center justify-center text-gray-400 text-sm">{text.selectFile}</div>
@@ -1233,7 +1217,7 @@ function FileTree({ node, onOpen, root = false }: { node: HubFileNode; onOpen: (
         disabled={!node.previewable}
         className="w-full flex items-center gap-2 px-2 py-1.5 rounded text-left text-sm hover:bg-gray-50 disabled:opacity-40"
       >
-        <FileText aria-hidden="true" className="w-4 h-4 text-gray-400" />
+        <FileText className="w-4 h-4 text-gray-400" />
         <span className="truncate font-mono">{node.name}</span>
       </button>
     );
@@ -1242,8 +1226,8 @@ function FileTree({ node, onOpen, root = false }: { node: HubFileNode; onOpen: (
     <div>
       {!root && (
         <button onClick={() => setOpen(!open)} className="w-full flex items-center gap-2 px-2 py-1.5 rounded text-left text-sm hover:bg-gray-50">
-          <ChevronRight aria-hidden="true" className={`w-4 h-4 text-gray-400 ${open ? 'rotate-90' : ''}`} />
-          <Folder aria-hidden="true" className="w-4 h-4 text-amber-500" />
+          <ChevronRight className={`w-4 h-4 text-gray-400 ${open ? 'rotate-90' : ''}`} />
+          <Folder className="w-4 h-4 text-amber-500" />
           <span className="truncate font-mono">{node.name}</span>
         </button>
       )}
@@ -1267,16 +1251,16 @@ function ActionButtons({ item, actionId, text, onAction, compact = false }: {
   const busy = actionId?.startsWith(`${item.type}:${item.id}:`);
   const buttonClass = compact
     ? 'p-1.5 rounded-md border border-gray-200 hover:bg-gray-50 disabled:opacity-50'
-    : 'inline-flex items-center gap-1 px-2 py-1 rounded-md border border-gray-200 text-xs hover:bg-gray-50 disabled:opacity-50 whitespace-nowrap';
-  if (busy) return <Loader2 aria-hidden="true" className="w-4 h-4 animate-spin text-gray-400" />;
+    : 'inline-flex items-center gap-1 whitespace-nowrap px-2 py-1 rounded-md border border-gray-200 text-xs hover:bg-gray-50 disabled:opacity-50';
+  if (busy) return <Loader2 className="w-4 h-4 animate-spin text-gray-400" />;
   if (user?.role !== 'admin') return null;
   if (item.native && item.state === 'installed') return null;
-  if (item.state === 'available') return <button className={buttonClass} onClick={() => onAction(item, 'install')}><Download aria-hidden="true" className="w-3.5 h-3.5" />{!compact && text.actions.install}</button>;
-  if (item.state === 'partial') return <button className={buttonClass} title={text.actions.repair} aria-label={text.actions.repair} onClick={() => onAction(item, 'install')}><Download aria-hidden="true" className="w-3.5 h-3.5" />{!compact && text.actions.repair}</button>;
-  if (item.state === 'updateAvailable') return <button className={buttonClass} onClick={() => onAction(item, 'update')}><RefreshCw aria-hidden="true" className="w-3.5 h-3.5" />{!compact && text.actions.update}</button>;
+  if (item.state === 'available') return <button className={buttonClass} onClick={() => onAction(item, 'install')}><Download className="w-3.5 h-3.5" />{!compact && text.actions.install}</button>;
+  if (item.state === 'partial') return <button className={buttonClass} title={text.actions.repair} aria-label={text.actions.repair} onClick={() => onAction(item, 'install')}><Download className="w-3.5 h-3.5" />{!compact && text.actions.repair}</button>;
+  if (item.state === 'updateAvailable') return <button className={buttonClass} onClick={() => onAction(item, 'update')}><RefreshCw className="w-3.5 h-3.5" />{!compact && text.actions.update}</button>;
   if (item.state === 'installed') {
     return (
-      <button className={buttonClass} onClick={() => onAction(item, 'uninstall')}><Trash2 aria-hidden="true" className="w-3.5 h-3.5" />{!compact && text.actions.uninstall}</button>
+      <button className={buttonClass} onClick={() => onAction(item, 'uninstall')}><Trash2 className="w-3.5 h-3.5" />{!compact && text.actions.uninstall}</button>
     );
   }
   return null;
@@ -1288,11 +1272,11 @@ function StateBadge({ state, text }: { state: string; text: HubText }) {
     : state === 'available'
       ? 'bg-blue-50 text-blue-700 border-blue-200'
       : 'bg-amber-50 text-amber-700 border-amber-200';
-  return <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full border text-xs whitespace-nowrap ${cls}`}>{state === 'installed' && <CheckCircle aria-hidden="true" className="w-3 h-3" />}{text.states[state as keyof HubText['states']] || state}</span>;
+  return <span className={`inline-flex items-center gap-1 whitespace-nowrap px-2 py-0.5 rounded-full border text-xs ${cls}`}>{state === 'installed' && <CheckCircle className="w-3 h-3" />}{text.states[state as keyof HubText['states']] || state}</span>;
 }
 
 function Badge({ children, title }: { children: React.ReactNode; title?: string }) {
-  return <span title={title} className="px-1.5 py-0.5 bg-gray-100 text-gray-500 rounded text-[10px] shrink-0 whitespace-nowrap">{children}</span>;
+  return <span title={title} className="shrink-0 whitespace-nowrap px-1.5 py-0.5 bg-gray-100 text-gray-500 rounded text-[10px]">{children}</span>;
 }
 
 function InfoBlock({ label, value }: { label: string; value: string }) {

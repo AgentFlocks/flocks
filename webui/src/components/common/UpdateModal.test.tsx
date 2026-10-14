@@ -175,7 +175,10 @@ describe('UpdateModal deploy-mode notices', () => {
 });
 
 describe('UpdateModal terminal states', () => {
+  // dev's progress card: the header X closes it once nothing runs, and an
+  // error adds the 「稍后」 button; the footer spinner only shows while upgrading.
   const initialInfo = { ...currentVersion, latest_version: '2026.09.20', has_update: true };
+  const headerClose = () => document.querySelector<HTMLButtonElement>('button:has(svg.lucide-x)')!;
   beforeEach(() => {
     vi.clearAllMocks();
     checkRestartReadiness.mockResolvedValue({ ready: false, reason: 'still restarting' });
@@ -187,21 +190,18 @@ describe('UpdateModal terminal states', () => {
     const onClose = vi.fn();
     render(<UpdateModal initialInfo={initialInfo} onClose={onClose} />);
     fireEvent.click(screen.getByRole('button', { name: 'confirmAction' }));
-    await screen.findByText('upgradeComplete');
+    await waitFor(() => expect(headerClose()).not.toBeDisabled());
     expect(screen.queryByText('upgrading')).toBeNull();
-    fireEvent.click(screen.getAllByRole('button', { name: 'closeAction' })[0]);
+    fireEvent.click(headerClose());
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
-  it('cannot dismiss an in-progress upgrade using Escape or the backdrop', async () => {
+  it('cannot dismiss an in-progress upgrade using the backdrop or the close button', async () => {
     applyUpdate.mockImplementationOnce(() => new Promise(() => {}));
     const onClose = vi.fn();
     render(<UpdateModal initialInfo={initialInfo} onClose={onClose} />);
     fireEvent.click(screen.getByRole('button', { name: 'confirmAction' }));
-    const dialog = screen.getByRole('dialog', { name: 'title' });
-    expect(dialog).toHaveAttribute('aria-modal', 'true');
-    expect(screen.getByRole('button', { name: 'closeAction' })).toBeDisabled();
-    fireEvent.keyDown(dialog, { key: 'Escape' });
+    expect(headerClose()).toBeDisabled();
     fireEvent.click(document.querySelector('div.fixed.inset-0')!);
     expect(onClose).not.toHaveBeenCalled();
   });
@@ -213,7 +213,8 @@ describe('UpdateModal terminal states', () => {
     fireEvent.click(screen.getByRole('button', { name: 'confirmAction' }));
     await screen.findByText('streamInterrupted');
     expect(screen.queryByText('upgrading')).toBeNull();
-    expect(screen.getAllByRole('button', { name: 'closeAction' }).every((button) => !button.hasAttribute('disabled'))).toBe(true);
+    expect(headerClose()).not.toBeDisabled();
+    expect(screen.getByRole('button', { name: 'laterAction' })).toBeEnabled();
   });
 
   it('surfaces server errors without retaining the progress spinner', async () => {
@@ -231,7 +232,7 @@ describe('UpdateModal terminal states', () => {
     fireEvent.click(screen.getByRole('button', { name: 'confirmAction' }));
     await screen.findByText('streamTimeout');
     expect(screen.queryByText('upgrading')).toBeNull();
-    expect(screen.getAllByRole('button', { name: 'closeAction' }).every((button) => !button.hasAttribute('disabled'))).toBe(true);
+    expect(screen.getByRole('button', { name: 'laterAction' })).toBeEnabled();
   });
 
   it('keeps restart polling after EOF then unlocks the dialog on restart timeout', async () => {
@@ -239,11 +240,12 @@ describe('UpdateModal terminal states', () => {
     applyUpdate.mockImplementation(async (_version, progress) => progress({ stage: 'restarting', message: 'Restarting' }));
     render(<UpdateModal initialInfo={initialInfo} onClose={vi.fn()} />);
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'confirmAction' })); });
-    expect(screen.getByRole('button', { name: 'closeAction' })).toBeDisabled();
+    expect(headerClose()).toBeDisabled();
     await act(async () => { await vi.advanceTimersByTimeAsync(303_000); });
     expect(checkRestartReadiness).toHaveBeenCalled();
     expect(screen.getByText('restartTimeout')).toBeInTheDocument();
     expect(document.querySelector('.animate-spin')).toBeNull();
-    expect(screen.getAllByRole('button', { name: 'closeAction' }).every((button) => !button.hasAttribute('disabled'))).toBe(true);
+    expect(headerClose()).not.toBeDisabled();
+    expect(screen.getByRole('button', { name: 'laterAction' })).toBeEnabled();
   });
 });

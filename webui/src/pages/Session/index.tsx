@@ -97,9 +97,9 @@ function ExecutionModeIcon({
   mode: SessionExecutionMode;
   className?: string;
 }) {
-  if (mode === 'plan') return <ClipboardList aria-hidden="true" className={className} />;
-  if (mode === 'goal') return <Target aria-hidden="true" className={className} />;
-  return <Hammer aria-hidden="true" className={className} />;
+  if (mode === 'plan') return <ClipboardList className={className} />;
+  if (mode === 'goal') return <Target className={className} />;
+  return <Hammer className={className} />;
 }
 type ProjectSummary = {
   id: string;
@@ -173,19 +173,19 @@ function ComposerResourcePicker({
         aria-haspopup="menu"
         aria-expanded={open}
       >
-        <span className="grid h-7 w-7 place-items-center text-zinc-500 transition-colors group-hover:text-zinc-800 dark:text-zinc-400 dark:group-hover:text-white shrink-0">
-          <Icon aria-hidden="true" className="h-3.5 w-3.5" />
+        <span className="grid h-7 w-7 shrink-0 place-items-center text-zinc-500 transition-colors group-hover:text-zinc-800 dark:text-zinc-400 dark:group-hover:text-white">
+          <Icon className="h-3.5 w-3.5" />
         </span>
         <span className="min-w-0 flex-1 truncate">{label}</span>
-        <ChevronRight aria-hidden="true" className={`h-3.5 w-3.5 text-zinc-400 transition-transform shrink-0 ${open ? '-rotate-90' : ''}`} />
+        <ChevronRight className={`h-3.5 w-3.5 shrink-0 text-zinc-400 transition-transform ${open ? '-rotate-90' : ''}`} />
       </button>
       {open && (
         <div className="absolute bottom-0 left-[calc(100%+0.5rem)] z-[60] w-[300px] max-w-[calc(100vw-2rem)] overflow-hidden rounded-[14px] border border-black/[0.09] bg-white/95 shadow-[0_18px_46px_rgba(22,27,34,0.14),0_2px_8px_rgba(22,27,34,0.06)] backdrop-blur-xl dark:border-white/[0.11] dark:bg-[#252c35]/95 dark:shadow-[0_20px_48px_rgba(8,10,13,0.44)]">
-          <div className="flex items-center justify-between gap-3 border-b border-zinc-100 px-3 py-2 dark:border-white/[0.08] min-h-12">
-            <span className="text-[12px] font-semibold text-zinc-800 dark:text-zinc-100 min-w-0 truncate">
+          <div className="flex min-h-12 items-center justify-between gap-3 border-b border-zinc-100 px-3 py-2 dark:border-white/[0.08]">
+            <span className="min-w-0 truncate text-[12px] font-semibold text-zinc-800 dark:text-zinc-100">
               {title}
             </span>
-            <div className="inline-flex items-center rounded-lg bg-zinc-100 p-0.5 text-[10px] dark:bg-black/15 shrink-0">
+            <div className="inline-flex shrink-0 items-center rounded-lg bg-zinc-100 p-0.5 text-[10px] dark:bg-black/15">
               {(['all', 'builtin', 'custom'] as AgentSourceFilter[]).map((filter) => (
                 <button
                   key={filter}
@@ -205,7 +205,7 @@ function ComposerResourcePicker({
           <div className="h-64 space-y-0.5 overflow-y-auto p-1.5">
             {loading ? (
               <div className="flex h-full items-center justify-center text-zinc-400">
-                <Loader2 aria-hidden="true" className="h-4 w-4 animate-spin" />
+                <Loader2 className="h-4 w-4 animate-spin" />
               </div>
             ) : filteredItems.length > 0 ? (
               filteredItems.map((item) => (
@@ -214,13 +214,13 @@ function ComposerResourcePicker({
                   type="button"
                   onClick={() => onSelect(item)}
                   title={item.description}
-                  className="flex items-center gap-2 rounded-lg px-2.5 py-2 text-left text-zinc-700 transition-colors hover:bg-zinc-50 hover:text-zinc-950 dark:text-zinc-300 dark:hover:bg-white/[0.06] dark:hover:text-white w-full min-w-0"
+                  className="flex w-full min-w-0 items-center gap-2 rounded-lg px-2.5 py-2 text-left text-zinc-700 transition-colors hover:bg-zinc-50 hover:text-zinc-950 dark:text-zinc-300 dark:hover:bg-white/[0.06] dark:hover:text-white"
                 >
-                  <span className="grid h-6 w-6 place-items-center rounded-md bg-zinc-100 text-zinc-400 dark:bg-white/[0.05] dark:text-zinc-500 shrink-0">
-                    <Icon aria-hidden="true" className="h-3 w-3" />
+                  <span className="grid h-6 w-6 shrink-0 place-items-center rounded-md bg-zinc-100 text-zinc-400 dark:bg-white/[0.05] dark:text-zinc-500">
+                    <Icon className="h-3 w-3" />
                   </span>
                   <span className="min-w-0 flex-1 truncate text-xs font-medium">{item.name}</span>
-                  <span className={`rounded px-1.5 py-0.5 text-[9px] font-medium shrink-0 ${
+                  <span className={`shrink-0 rounded px-1.5 py-0.5 text-[9px] font-medium ${
                     item.source === 'builtin'
                       ? 'bg-zinc-100 text-zinc-600 dark:bg-white/[0.08] dark:text-zinc-300'
                       : 'bg-teal-50 text-teal-600 dark:bg-teal-950/40 dark:text-teal-300'
@@ -228,7 +228,7 @@ function ComposerResourcePicker({
                     {t(`agentPicker.badge.${item.source}`)}
                   </span>
                   {item.badge && (
-                    <span className="max-w-20 rounded bg-zinc-100 px-1.5 py-0.5 text-[9px] font-medium text-zinc-500 dark:bg-white/[0.07] dark:text-zinc-400 shrink-0 truncate">
+                    <span className="max-w-20 shrink-0 truncate rounded bg-zinc-100 px-1.5 py-0.5 text-[9px] font-medium text-zinc-500 dark:bg-white/[0.07] dark:text-zinc-400">
                       {item.badge}
                     </span>
                   )}
@@ -346,19 +346,19 @@ function SSEStatusIndicator({ status, t }: { status: SSEConnectionStatus; t: (ke
       aria-live="polite"
       data-testid="sse-status"
       data-sse-status={status}
-      className={`flex min-w-0 items-center gap-2 rounded-pill border px-2.5 py-1 text-xs font-medium ${
+      className={`flex min-w-0 items-center gap-2 rounded-full border px-2.5 py-1 text-xs font-medium ${
         failed
-          ? 'border-danger bg-danger-soft text-danger '
-          : 'border-warning bg-warning-soft text-warning '
+          ? 'border-red-200 bg-red-50 text-red-600'
+          : 'border-amber-200 bg-amber-50 text-amber-700'
       }`}
     >
-      <span className={`h-1.5 w-1.5 shrink-0 rounded-pill ${failed ? 'bg-danger' : 'animate-pulse bg-warning'}`} />
+      <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${failed ? 'bg-red-500' : 'animate-pulse bg-amber-500'}`} />
       <span className="truncate">{failed ? t('connectionFailed') : t('reconnecting')}</span>
       {failed && (
         <button
           type="button"
           onClick={() => window.location.reload()}
-          className="rounded-tag px-1.5 py-0.5 text-xs font-medium underline-offset-2 hover:underline"
+          className="rounded px-1.5 py-0.5 text-xs font-medium underline-offset-2 hover:underline"
         >
           {t('chat.retry')}
         </button>
@@ -373,11 +373,11 @@ function WorkbenchRefreshStatus({ label }: { label: string }) {
       role="status"
       aria-live="polite"
       data-testid="workbench-refresh-status"
-      className="flex items-center gap-2 rounded-full border border-black/[0.06] bg-white/55 px-2.5 py-1 text-[11px] font-medium text-[#737980] shadow-[0_1px_2px_rgba(22,27,34,0.03)] dark:border-white/[0.08] dark:bg-white/[0.04] dark:text-[#aeb8c3] ml-auto min-w-0"
+      className="ml-auto flex min-w-0 items-center gap-2 rounded-full border border-black/[0.06] bg-white/55 px-2.5 py-1 text-[11px] font-medium text-[#737980] shadow-[0_1px_2px_rgba(22,27,34,0.03)] dark:border-white/[0.08] dark:bg-white/[0.04] dark:text-[#aeb8c3]"
     >
-      <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-[#4f92e8] shrink-0" />
+      <span className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-[#4f92e8]" />
       <span className="truncate">{label}</span>
-      <span className="h-px w-8 rounded-full bg-[#d9e5f4] dark:bg-[#46515e] shrink-0 overflow-hidden">
+      <span className="h-px w-8 shrink-0 overflow-hidden rounded-full bg-[#d9e5f4] dark:bg-[#46515e]">
         <span className="block h-full w-1/2 animate-pulse rounded-full bg-[#4f92e8]" />
       </span>
     </div>
@@ -1882,11 +1882,11 @@ export default function SessionPage() {
   return (
     <div className="flex h-full w-full overflow-hidden bg-[#fcfcfd] text-[#202328] dark:bg-[#303842] dark:text-[#d7dee8]">
       {/* ── Main area ── */}
-      <div className="flex h-full flex-1 flex-col bg-[#fcfcfd] dark:bg-[#303842] min-w-0 overflow-hidden">
+      <div className="flex h-full min-w-0 flex-1 flex-col overflow-hidden bg-[#fcfcfd] dark:bg-[#303842]">
         {/* Header */}
         <header className="relative flex h-[52px] flex-shrink-0 items-center gap-2 px-4 text-[13px]">
           <div className="flex min-w-0 items-center">
-            <h2 className="text-sm font-semibold text-[#555a61] dark:text-[#c3ccd6] truncate">
+            <h2 className="truncate text-sm font-semibold text-[#555a61] dark:text-[#c3ccd6]">
               {selectedSession?.title || t('newSession')}
             </h2>
           </div>
@@ -1905,7 +1905,7 @@ export default function SessionPage() {
               type="button"
               disabled={!activeChatSessionId}
               onClick={() => setContextPanelOpen((open) => !open)}
-              className={`flex h-8 items-center gap-1.5 rounded-lg px-2.5 text-xs font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-40 shrink-0 whitespace-nowrap ${
+              className={`flex h-8 items-center gap-1.5 rounded-lg px-2.5 text-xs font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
                 contextPanelOpen
                   ? 'bg-violet-50 text-violet-700 dark:bg-violet-500/15 dark:text-violet-200'
                   : 'text-[#7b8087] hover:bg-black/[0.04] hover:text-[#202328] dark:text-[#9aa7b4] dark:hover:bg-white/[0.06] dark:hover:text-white'
@@ -1913,7 +1913,7 @@ export default function SessionPage() {
               aria-label={t('context.title')}
               title={t('context.title')}
             >
-              <Sparkles aria-hidden="true" className="h-3.5 w-3.5" />
+              <Sparkles className="h-3.5 w-3.5" />
               <span>{t('context.title')}</span>
               {(contextSnapshot?.counts.total || 0) > 0 && (
                 <span className="rounded-full bg-current/10 px-1.5 py-0.5 text-[10px]">
@@ -2019,19 +2019,19 @@ export default function SessionPage() {
                 aria-haspopup="menu"
                 aria-expanded={showAgentOptions}
               >
-                <span className="grid h-7 w-7 place-items-center text-zinc-500 transition-colors group-hover:text-zinc-800 dark:text-zinc-400 dark:group-hover:text-white shrink-0">
-                  <Bot aria-hidden="true" className="h-3.5 w-3.5" />
+                <span className="grid h-7 w-7 shrink-0 place-items-center text-zinc-500 transition-colors group-hover:text-zinc-800 dark:text-zinc-400 dark:group-hover:text-white">
+                  <Bot className="h-3.5 w-3.5" />
                 </span>
                 <span className="min-w-0 flex-1 truncate">{t('chat.addMenu.agent')}</span>
-                <ChevronRight aria-hidden="true" className={`h-3.5 w-3.5 text-zinc-400 transition-transform shrink-0 ${showAgentOptions ? '-rotate-90' : ''}`} />
+                <ChevronRight className={`h-3.5 w-3.5 shrink-0 text-zinc-400 transition-transform ${showAgentOptions ? '-rotate-90' : ''}`} />
               </button>
               {showAgentOptions && (
                 <div className="absolute bottom-0 left-[calc(100%+0.5rem)] z-[60] w-[300px] max-w-[calc(100vw-2rem)] overflow-hidden rounded-[14px] border border-black/[0.09] bg-white/95 shadow-[0_18px_46px_rgba(22,27,34,0.14),0_2px_8px_rgba(22,27,34,0.06)] backdrop-blur-xl dark:border-white/[0.11] dark:bg-[#252c35]/95 dark:shadow-[0_20px_48px_rgba(8,10,13,0.44)]">
-                  <div className="flex items-center justify-between gap-3 border-b border-zinc-100 px-3 py-2 dark:border-white/[0.08] min-h-12">
+                  <div className="flex min-h-12 items-center justify-between gap-3 border-b border-zinc-100 px-3 py-2 dark:border-white/[0.08]">
                     <div className="min-w-0">
                       <div className="text-[12px] font-semibold text-zinc-800 dark:text-zinc-100">{t('agentPicker.title')}</div>
                       <div
-                        className="text-[10px] text-zinc-400 dark:text-zinc-500 truncate"
+                        className="truncate text-[10px] text-zinc-400 dark:text-zinc-500"
                         onPointerEnter={(event) => showSelectorTooltip(event.currentTarget, t('agentPicker.title'), [t('agentPicker.hint')])}
                         onMouseEnter={(event) => showSelectorTooltip(event.currentTarget, t('agentPicker.title'), [t('agentPicker.hint')])}
                         onMouseOver={(event) => showSelectorTooltip(event.currentTarget, t('agentPicker.title'), [t('agentPicker.hint')])}
@@ -2041,7 +2041,7 @@ export default function SessionPage() {
                         {t('agentPicker.hint')}
                       </div>
                     </div>
-                    <div className="inline-flex items-center rounded-lg bg-zinc-100 p-0.5 text-[10px] dark:bg-black/15 shrink-0">
+                    <div className="inline-flex shrink-0 items-center rounded-lg bg-zinc-100 p-0.5 text-[10px] dark:bg-black/15">
                       {(['all', 'builtin', 'custom'] as AgentSourceFilter[]).map((filter) => (
                         <button
                           key={filter}
@@ -2074,24 +2074,24 @@ export default function SessionPage() {
                               insertMention(agent.name);
                               closeMenu();
                             }}
-                            className={`rounded-lg border px-2.5 py-2 text-left transition-colors w-full min-w-0 ${
+                            className={`w-full min-w-0 rounded-lg border px-2.5 py-2 text-left transition-colors ${
                               selectedAgent === agent.name
                                 ? 'border-blue-300 bg-blue-50 text-zinc-950 shadow-sm dark:border-blue-500/60 dark:bg-blue-500/15 dark:text-zinc-50'
                                 : 'border-transparent text-zinc-700 hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-white/[0.06] dark:hover:text-zinc-50'
                             }`}
                           >
                             <div className="flex min-w-0 items-center gap-2">
-                              <span className={`grid h-6 w-6 place-items-center rounded-md shrink-0 ${
+                              <span className={`grid h-6 w-6 shrink-0 place-items-center rounded-md ${
                                 selectedAgent === agent.name
                                   ? 'bg-white text-zinc-700 shadow-[0_1px_3px_rgba(22,27,34,0.08)] dark:bg-white/[0.10] dark:text-white'
                                   : 'bg-zinc-100 text-zinc-400 dark:bg-white/[0.05] dark:text-zinc-500'
                               }`}>
-                                <Bot aria-hidden="true" className="h-3 w-3" />
+                                <Bot className="h-3 w-3" />
                               </span>
-                              <span className="flex-1 text-xs font-medium text-zinc-900 dark:text-zinc-100 min-w-0 truncate">
+                              <span className="min-w-0 flex-1 truncate text-xs font-medium text-zinc-900 dark:text-zinc-100">
                                 {displayName}
                               </span>
-                              <span className={`rounded px-1.5 py-0.5 text-[9px] font-medium shrink-0 ${
+                              <span className={`shrink-0 rounded px-1.5 py-0.5 text-[9px] font-medium ${
                                 agent.mode === 'primary'
                                   ? 'bg-zinc-100 text-zinc-600 dark:bg-white/[0.08] dark:text-zinc-300'
                                   : agent.native
@@ -2115,10 +2115,10 @@ export default function SessionPage() {
                                   onMouseLeave={() => setSelectorTooltip(null)}
                                   onPointerLeave={() => setSelectorTooltip(null)}
                                 >
-                                  <Info aria-hidden="true" className="h-3 w-3 text-zinc-300 transition-colors group-hover:text-zinc-500 dark:text-zinc-600 dark:group-hover:text-zinc-300" />
+                                  <Info className="h-3 w-3 text-zinc-300 transition-colors group-hover:text-zinc-500 dark:text-zinc-600 dark:group-hover:text-zinc-300" />
                                 </span>
                               )}
-                              {selectedAgent === agent.name && <Check aria-hidden="true" className="h-3.5 w-3.5 text-blue-600 dark:text-blue-300 shrink-0" />}
+                              {selectedAgent === agent.name && <Check className="h-3.5 w-3.5 shrink-0 text-blue-600 dark:text-blue-300" />}
                             </div>
                           </button>
                         );
@@ -2201,7 +2201,7 @@ export default function SessionPage() {
                   <span className="font-medium">
                     {t(`executionMode.options.${selectedExecutionMode}.label`)}
                   </span>
-                  <ChevronDown aria-hidden="true" className={`h-3 w-3 transition-transform shrink-0 ${showExecutionModeOptions ? 'rotate-180' : ''}`} />
+                  <ChevronDown className={`h-3 w-3 shrink-0 transition-transform ${showExecutionModeOptions ? 'rotate-180' : ''}`} />
                 </button>
                 {showExecutionModeOptions && (
                   <SessionComposerMenu
@@ -2242,18 +2242,18 @@ export default function SessionPage() {
                     setShowExecutionModeOptions(false);
                     setShowModelOptions(false);
                   }}
-                  className="flex h-7 items-center gap-1.5 rounded-lg px-2 text-xs text-[#5e646b] transition-colors hover:bg-black/[0.04] hover:text-[#202328] dark:text-[#b8c2cc] dark:hover:bg-white/[0.06] dark:hover:text-white max-w-[160px] min-w-0"
+                  className="flex h-7 max-w-[160px] min-w-0 items-center gap-1.5 rounded-lg px-2 text-xs text-[#5e646b] transition-colors hover:bg-black/[0.04] hover:text-[#202328] dark:text-[#b8c2cc] dark:hover:bg-white/[0.06] dark:hover:text-white"
                   title={t('projectPicker.title')}
                   aria-label={t('projectPicker.title')}
                   aria-expanded={showProjectOptions}
                 >
-                  <FolderGit2 aria-hidden="true" className="h-3 w-3 shrink-0" />
+                  <FolderGit2 className="h-3 w-3 shrink-0" />
                   <span className="truncate font-medium">{selectedProjectContextLabel}</span>
-                  <ChevronDown aria-hidden="true" className={`h-3 w-3 transition-transform shrink-0 ${showProjectOptions ? 'rotate-180' : ''}`} />
+                  <ChevronDown className={`h-3 w-3 shrink-0 transition-transform ${showProjectOptions ? 'rotate-180' : ''}`} />
                 </button>
                 {showProjectOptions && (
                   <div
-                    className="absolute bottom-full left-0 mb-2 grid w-64 gap-0.5 rounded-[10px] border border-black/[0.11] bg-[#fdfdfc] p-1 shadow-[0_8px_24px_rgba(22,27,34,0.10)] dark:border-white/[0.10] dark:bg-[#303842] dark:shadow-[0_12px_32px_rgba(15,18,22,0.35)] z-50"
+                    className="absolute bottom-full left-0 z-50 mb-2 grid w-64 gap-0.5 rounded-[10px] border border-black/[0.11] bg-[#fdfdfc] p-1 shadow-[0_8px_24px_rgba(22,27,34,0.10)] dark:border-white/[0.10] dark:bg-[#303842] dark:shadow-[0_12px_32px_rgba(15,18,22,0.35)]"
                     role="menu"
                     aria-label={t('projectPicker.title')}
                   >
@@ -2273,9 +2273,9 @@ export default function SessionPage() {
                             : 'border-transparent text-[#4e5359] hover:bg-black/[0.04] hover:text-[#202328] dark:text-[#c3ccd6] dark:hover:bg-white/[0.06] dark:hover:text-white'
                         }`}
                       >
-                        <FolderGit2 aria-hidden="true" className={`h-3.5 w-3.5 shrink-0 ${selectedProjectId === group.id ? 'text-blue-600 dark:text-blue-300' : 'text-[#7b8087] dark:text-[#9aa7b4]'}`} />
+                        <FolderGit2 className={`h-3.5 w-3.5 shrink-0 ${selectedProjectId === group.id ? 'text-blue-600 dark:text-blue-300' : 'text-[#7b8087] dark:text-[#9aa7b4]'}`} />
                         <span className="min-w-0 flex-1 truncate">{group.label}</span>
-                        {selectedProjectId === group.id && <Check aria-hidden="true" className="h-3.5 w-3.5 text-blue-600 dark:text-blue-300 shrink-0" />}
+                        {selectedProjectId === group.id && <Check className="h-3.5 w-3.5 shrink-0 text-blue-600 dark:text-blue-300" />}
                       </button>
                     ))}
                     <div className="mx-2 my-0.5 border-t border-black/[0.07] dark:border-white/[0.08]" />
@@ -2293,9 +2293,9 @@ export default function SessionPage() {
                           : 'border-transparent text-[#4e5359] hover:bg-black/[0.04] hover:text-[#202328] dark:text-[#c3ccd6] dark:hover:bg-white/[0.06] dark:hover:text-white'
                       }`}
                     >
-                      <X aria-hidden="true" className={`h-3.5 w-3.5 shrink-0 ${selectedProjectId === TASK_SESSION_GROUP_ID ? 'text-blue-600 dark:text-blue-300' : 'text-[#7b8087] dark:text-[#9aa7b4]'}`} />
+                      <X className={`h-3.5 w-3.5 shrink-0 ${selectedProjectId === TASK_SESSION_GROUP_ID ? 'text-blue-600 dark:text-blue-300' : 'text-[#7b8087] dark:text-[#9aa7b4]'}`} />
                       <span className="min-w-0 flex-1 truncate">{t('projectPicker.none')}</span>
-                      {selectedProjectId === TASK_SESSION_GROUP_ID && <Check aria-hidden="true" className="h-3.5 w-3.5 text-blue-600 dark:text-blue-300 shrink-0" />}
+                      {selectedProjectId === TASK_SESSION_GROUP_ID && <Check className="h-3.5 w-3.5 shrink-0 text-blue-600 dark:text-blue-300" />}
                     </button>
                     <button
                       type="button"
@@ -2306,7 +2306,7 @@ export default function SessionPage() {
                       }}
                       className="flex h-8 w-full items-center gap-2 rounded-lg px-2 text-left text-xs text-[#4e5359] transition-colors hover:bg-black/[0.04] hover:text-[#202328] dark:text-[#c3ccd6] dark:hover:bg-white/[0.06] dark:hover:text-white"
                     >
-                      <FolderPlus aria-hidden="true" className="h-3.5 w-3.5 text-[#7b8087] dark:text-[#9aa7b4] shrink-0" />
+                      <FolderPlus className="h-3.5 w-3.5 shrink-0 text-[#7b8087] dark:text-[#9aa7b4]" />
                       <span>{t('projectPicker.create')}</span>
                     </button>
                   </div>
@@ -2336,14 +2336,14 @@ export default function SessionPage() {
                     : t('modelPicker.empty')}
               >
                 {selectedModelAuto
-                  ? <Sparkles aria-hidden="true" className="h-3 w-3 shrink-0" />
-                  : <Cpu aria-hidden="true" className="h-3 w-3 shrink-0" />}
+                  ? <Sparkles className="h-3 w-3 shrink-0" />
+                  : <Cpu className="h-3 w-3 shrink-0" />}
                 <span className="truncate font-medium">
                   {selectedModelAuto
                     ? t('modelPicker.auto')
                     : selectedModelOption?.label ?? (loadingProviders || loadingEnabledModels ? t('loading') : t('modelPicker.empty'))}
                 </span>
-                <ChevronDown aria-hidden="true" className={`h-3 w-3 transition-transform shrink-0 ${showModelOptions ? 'rotate-180' : ''}`} />
+                <ChevronDown className={`h-3 w-3 shrink-0 transition-transform ${showModelOptions ? 'rotate-180' : ''}`} />
               </button>
               {showModelOptions && (
                 <SessionComposerMenu
@@ -2368,7 +2368,7 @@ export default function SessionPage() {
                         }}
                         className="flex w-full items-center justify-center gap-1.5 rounded-md px-2 py-1.5 text-xs font-medium text-zinc-600 transition-colors hover:bg-zinc-50 hover:text-zinc-900 dark:text-zinc-300 dark:hover:bg-zinc-800 dark:hover:text-zinc-50"
                       >
-                        <Plus aria-hidden="true" className="h-3 w-3" />
+                        <Plus className="h-3 w-3" />
                         {t('modelPicker.addModel')}
                       </button>
                     </div>
@@ -2391,8 +2391,8 @@ export default function SessionPage() {
                             }`}
                           >
                             <div className="flex min-w-0 items-center gap-2">
-                              <Sparkles aria-hidden="true" className={`h-3 w-3 shrink-0 ${selectedModelAuto ? 'text-zinc-600 dark:text-zinc-200' : 'text-zinc-400 dark:text-zinc-500'}`} />
-                              <span className="flex-1 text-xs font-medium text-zinc-900 dark:text-zinc-100 min-w-0 truncate">
+                              <Sparkles className={`h-3 w-3 shrink-0 ${selectedModelAuto ? 'text-zinc-600 dark:text-zinc-200' : 'text-zinc-400 dark:text-zinc-500'}`} />
+                              <span className="min-w-0 flex-1 truncate text-xs font-medium text-zinc-900 dark:text-zinc-100">
                                 {t('modelPicker.auto')}
                               </span>
                               <span
@@ -2405,17 +2405,17 @@ export default function SessionPage() {
                                 onMouseLeave={() => setSelectorTooltip(null)}
                                 onPointerLeave={() => setSelectorTooltip(null)}
                               >
-                                <Info aria-hidden="true" className="h-3 w-3 text-zinc-300 transition-colors group-hover:text-zinc-500 dark:text-zinc-600 dark:group-hover:text-zinc-300" />
+                                <Info className="h-3 w-3 text-zinc-300 transition-colors group-hover:text-zinc-500 dark:text-zinc-600 dark:group-hover:text-zinc-300" />
                               </span>
-                              <Check aria-hidden="true" className={`h-3.5 w-3.5 text-blue-600 dark:text-blue-300 shrink-0 ${selectedModelAuto ? '' : 'invisible'}`} />
+                              <Check aria-hidden="true" className={`h-3.5 w-3.5 shrink-0 text-blue-600 dark:text-blue-300 ${selectedModelAuto ? '' : 'invisible'}`} />
                             </div>
                           </button>
                         </div>
                         {groupedChatModelOptions.length > 0 ? groupedChatModelOptions.map((group) => (
                         <div key={group.providerID} className="py-1 first:pt-0 last:pb-0">
-                          <div className="sticky top-0 flex items-center justify-between gap-2 bg-white/95 px-1.5 py-1 text-[10px] font-semibold text-zinc-500 backdrop-blur dark:bg-zinc-900/95 dark:text-zinc-400 z-10">
+                          <div className="sticky top-0 z-10 flex items-center justify-between gap-2 bg-white/95 px-1.5 py-1 text-[10px] font-semibold text-zinc-500 backdrop-blur dark:bg-zinc-900/95 dark:text-zinc-400">
                             <span className="min-w-0 truncate" title={group.providerName}>{group.providerName}</span>
-                            <span className="rounded bg-zinc-50 px-1.5 py-0.5 text-[9px] text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400 shrink-0">
+                            <span className="shrink-0 rounded bg-zinc-50 px-1.5 py-0.5 text-[9px] text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400">
                               {t('modelPicker.count', { count: group.models.length })}
                             </span>
                           </div>
@@ -2433,10 +2433,10 @@ export default function SessionPage() {
                                 }`}
                               >
                                 <div className="flex min-w-0 items-center gap-2">
-                                  <Cpu aria-hidden="true" className={`h-3 w-3 shrink-0 ${selectedModelOption?.key === option.key ? 'text-zinc-600 dark:text-zinc-200' : 'text-zinc-400 dark:text-zinc-500'}`} />
-                                  <span className="flex-1 text-xs font-medium text-zinc-900 dark:text-zinc-100 min-w-0 truncate">{option.label}</span>
+                                  <Cpu className={`h-3 w-3 shrink-0 ${selectedModelOption?.key === option.key ? 'text-zinc-600 dark:text-zinc-200' : 'text-zinc-400 dark:text-zinc-500'}`} />
+                                  <span className="min-w-0 flex-1 truncate text-xs font-medium text-zinc-900 dark:text-zinc-100">{option.label}</span>
                                   {option.supportsVision === true && (
-                                    <span className="rounded bg-zinc-100 px-1.5 py-0.5 text-[9px] font-medium text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300 shrink-0">
+                                    <span className="shrink-0 rounded bg-zinc-100 px-1.5 py-0.5 text-[9px] font-medium text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">
                                       {t('modelPicker.vision')}
                                     </span>
                                   )}
@@ -2451,10 +2451,10 @@ export default function SessionPage() {
                                       onMouseLeave={() => setSelectorTooltip(null)}
                                       onPointerLeave={() => setSelectorTooltip(null)}
                                     >
-                                      <Info aria-hidden="true" className="h-3 w-3 text-zinc-300 transition-colors group-hover:text-zinc-500 dark:text-zinc-600 dark:group-hover:text-zinc-300" />
+                                      <Info className="h-3 w-3 text-zinc-300 transition-colors group-hover:text-zinc-500 dark:text-zinc-600 dark:group-hover:text-zinc-300" />
                                     </span>
                                   </div>
-                                  <Check aria-hidden="true" className={`h-3.5 w-3.5 text-blue-600 dark:text-blue-300 shrink-0 ${selectedModelOption?.key === option.key ? '' : 'invisible'}`} />
+                                  <Check aria-hidden="true" className={`h-3.5 w-3.5 shrink-0 text-blue-600 dark:text-blue-300 ${selectedModelOption?.key === option.key ? '' : 'invisible'}`} />
                                 </div>
                               </button>
                             ))}
@@ -2476,11 +2476,11 @@ export default function SessionPage() {
                     className="flex h-7 items-center gap-1.5 rounded-lg px-2 text-xs text-zinc-600 transition-colors hover:bg-zinc-200/60 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
                     title={t('permissionMode.executionControlTitle')}
                   >
-                    <Shield aria-hidden="true" className="h-3 w-3 shrink-0" />
+                    <Shield className="h-3 w-3 shrink-0" />
                     <span className="max-w-[116px] truncate font-medium">
                       {permissionModeLabels[currentPermissionMode]}
                     </span>
-                    <ChevronDown aria-hidden="true" className={`h-3 w-3 transition-transform shrink-0 ${showPermissionModeOptions ? 'rotate-180' : ''}`} />
+                    <ChevronDown className={`h-3 w-3 shrink-0 transition-transform ${showPermissionModeOptions ? 'rotate-180' : ''}`} />
                   </button>
                   {showPermissionModeOptions && (
                     <SessionComposerMenu
@@ -2492,7 +2492,7 @@ export default function SessionPage() {
                       <section>
                         <div className="flex min-w-0 items-center justify-between gap-3 px-2.5 py-1.5">
                           <div
-                            className="text-xs font-semibold text-zinc-500 dark:text-zinc-400 min-w-0 truncate"
+                            className="min-w-0 truncate text-xs font-semibold text-zinc-500 dark:text-zinc-400"
                             title={t('permissionMode.runtimeTitle', '平台开发模式')}
                           >
                             {t('permissionMode.runtimeTitle', '平台开发模式')}
@@ -2503,7 +2503,7 @@ export default function SessionPage() {
                               setShowPermissionModeOptions(false);
                               navigate('/settings/security-config');
                             }}
-                            className="text-xs font-medium text-blue-600 hover:underline dark:text-blue-400 shrink-0 whitespace-nowrap"
+                            className="shrink-0 whitespace-nowrap text-xs font-medium text-blue-600 hover:underline dark:text-blue-400"
                           >
                             {t('permissionMode.viewDetails')}
                           </button>
@@ -2525,7 +2525,7 @@ export default function SessionPage() {
                       </section>
                       <section className="border-t border-zinc-100 pt-1.5 dark:border-zinc-800">
                         <div
-                          className="px-2.5 py-1.5 text-xs font-semibold text-zinc-500 dark:text-zinc-400 truncate"
+                          className="truncate px-2.5 py-1.5 text-xs font-semibold text-zinc-500 dark:text-zinc-400"
                           title={t('permissionMode.networkTitle', '网络访问模式')}
                         >
                           {t('permissionMode.networkTitle', '网络访问模式')}
@@ -2547,7 +2547,7 @@ export default function SessionPage() {
                       </section>
                       <section className="border-t border-zinc-100 pt-1.5 dark:border-zinc-800">
                         <div
-                          className="px-2.5 py-1.5 text-xs font-semibold text-zinc-500 dark:text-zinc-400 truncate"
+                          className="truncate px-2.5 py-1.5 text-xs font-semibold text-zinc-500 dark:text-zinc-400"
                           title={t('permissionMode.title')}
                         >
                           {t('permissionMode.title')}
@@ -2616,12 +2616,12 @@ export default function SessionPage() {
       {selectorTooltip && (
         <div
           role="tooltip"
-          className="pointer-events-none fixed w-56 -translate-x-full -translate-y-1/2 rounded-lg border border-zinc-200 bg-white px-3 py-2 text-[11px] leading-relaxed text-zinc-700 shadow-md dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-300 dark:shadow-xl dark:shadow-black/30 z-[80]"
+          className="pointer-events-none fixed z-[80] w-56 -translate-x-full -translate-y-1/2 rounded-lg border border-zinc-200 bg-white px-3 py-2 text-[11px] leading-relaxed text-zinc-700 shadow-md dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-300 dark:shadow-xl dark:shadow-black/30"
           style={{ left: selectorTooltip.x, top: selectorTooltip.y }}
         >
           <div className="mb-0.5 font-semibold text-zinc-800 dark:text-zinc-100">{selectorTooltip.title}</div>
           {selectorTooltip.lines.map((line, index) => (
-            <div key={`${selectorTooltip.title}-${index}`} className={index === 0 ? '' : 'mt-1 text-zinc-500 dark:text-zinc-400 break-all'}>
+            <div key={`${selectorTooltip.title}-${index}`} className={index === 0 ? '' : 'mt-1 break-all text-zinc-500 dark:text-zinc-400'}>
               {line}
             </div>
           ))}
@@ -2671,8 +2671,8 @@ function WelcomeScreen({
   const { t } = useTranslation('session');
   return (
     <div className="w-full max-w-[660px] px-9 text-center">
-      <div className="mb-5 flex h-16 w-16 items-center justify-center rounded-full bg-slate-800 text-white shadow-[0_3px_10px_rgba(30,41,59,0.10)] dark:bg-[#46515e] mx-auto">
-        <Sparkles aria-hidden="true" className="h-[30px] w-[30px]" strokeWidth={1.7} />
+      <div className="mx-auto mb-5 flex h-16 w-16 items-center justify-center rounded-full bg-slate-800 text-white shadow-[0_3px_10px_rgba(30,41,59,0.10)] dark:bg-[#46515e]">
+        <Sparkles className="h-[30px] w-[30px]" strokeWidth={1.7} />
       </div>
       <h3 className="text-[22px] font-semibold tracking-[-0.01em] text-[#1f2937] dark:text-[#f0f3f7]">{t('welcome.title')}</h3>
       <p className="mt-3 text-sm leading-6 text-[#647084] dark:text-[#aeb9c5]">{t('welcome.description')}</p>
@@ -2684,9 +2684,9 @@ function WelcomeScreen({
           className="inline-flex h-11 items-center gap-2.5 rounded-[10px] border border-black/[0.11] bg-zinc-50 px-4 text-sm font-semibold text-[#374151] transition-colors hover:border-[#c2c9d2] hover:bg-white hover:text-[#111827] disabled:cursor-not-allowed disabled:opacity-70 dark:border-white/[0.10] dark:bg-[#303842] dark:text-[#d7dee8] dark:hover:border-white/[0.18] dark:hover:bg-[#3a434e] dark:hover:text-white"
         >
           {alertOperationsBusy ? (
-            <Loader2 aria-hidden="true" className="h-[18px] w-[18px] animate-spin text-[#657489] dark:text-[#aeb9c5]" />
+            <Loader2 className="h-[18px] w-[18px] animate-spin text-[#657489] dark:text-[#aeb9c5]" />
           ) : (
-            <Shield aria-hidden="true" className="h-[18px] w-[18px] text-[#657489] dark:text-[#aeb9c5]" />
+            <Shield className="h-[18px] w-[18px] text-[#657489] dark:text-[#aeb9c5]" />
           )}
           <span>{t('welcome.alertOperations')}</span>
         </button>
@@ -2694,14 +2694,14 @@ function WelcomeScreen({
           onClick={() => onSuggestion(t('welcome.threatHuntingSuggestion'))}
           className="inline-flex h-11 items-center gap-2.5 rounded-[10px] border border-black/[0.11] bg-zinc-50 px-4 text-sm font-semibold text-[#374151] transition-colors hover:border-[#c2c9d2] hover:bg-white hover:text-[#111827] dark:border-white/[0.10] dark:bg-[#303842] dark:text-[#d7dee8] dark:hover:border-white/[0.18] dark:hover:bg-[#3a434e] dark:hover:text-white"
         >
-          <Search aria-hidden="true" className="h-[18px] w-[18px] text-[#f4511e]" />
+          <Search className="h-[18px] w-[18px] text-[#f4511e]" />
           <span>{t('welcome.threatHunting')}</span>
         </button>
         <button
           onClick={() => onSuggestion(t('welcome.incidentResponseSuggestion'))}
           className="inline-flex h-11 items-center gap-2.5 rounded-[10px] border border-black/[0.11] bg-zinc-50 px-4 text-sm font-semibold text-[#374151] transition-colors hover:border-[#c2c9d2] hover:bg-white hover:text-[#111827] dark:border-white/[0.10] dark:bg-[#303842] dark:text-[#d7dee8] dark:hover:border-white/[0.18] dark:hover:bg-[#3a434e] dark:hover:text-white"
         >
-          <AlertTriangle aria-hidden="true" className="h-[18px] w-[18px] text-amber-500" />
+          <AlertTriangle className="h-[18px] w-[18px] text-amber-500" />
           <span>{t('welcome.incidentResponse')}</span>
         </button>
       </div>

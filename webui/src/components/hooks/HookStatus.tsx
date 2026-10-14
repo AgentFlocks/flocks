@@ -6,7 +6,7 @@
 
 import { useTranslation } from 'react-i18next';
 import { useHooks } from '@/hooks/useHooks';
-import { Activity, CheckCircle, Rocket, XCircle } from 'lucide-react';
+import { Rocket, CheckCircle, XCircle, Activity } from 'lucide-react';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
 
 export default function HookStatus() {
@@ -27,7 +27,7 @@ export default function HookStatus() {
     return (
       <div className="bg-white rounded-lg shadow p-6">
         <div className="flex items-center gap-2 mb-4">
-          <Rocket aria-hidden="true" className="w-5 h-5" />
+          <Rocket className="w-5 h-5" />
           <h2 className="text-lg font-semibold">{t('hookStatus.title')}</h2>
         </div>
         <div className="bg-red-50 border border-red-200 rounded-lg p-4">
@@ -46,7 +46,7 @@ export default function HookStatus() {
       {/* Header */}
       <div className="px-6 py-4 border-b border-gray-200">
         <div className="flex items-center gap-2">
-          <Rocket aria-hidden="true" className="w-5 h-5 text-red-600" />
+          <Rocket className="w-5 h-5 text-red-600" />
           <h2 className="text-lg font-semibold">{t('hookStatus.title')}</h2>
         </div>
       </div>
@@ -59,9 +59,9 @@ export default function HookStatus() {
             <div className="bg-gray-50 rounded-lg p-4">
               <div className="flex items-center gap-2 mb-1">
                 {status.enabled ? (
-                  <CheckCircle aria-hidden="true" className="w-4 h-4 text-green-600" />
+                  <CheckCircle className="w-4 h-4 text-green-600" />
                 ) : (
-                  <XCircle aria-hidden="true" className="w-4 h-4 text-gray-400" />
+                  <XCircle className="w-4 h-4 text-gray-400" />
                 )}
                 <span className="text-sm text-gray-600">{t('hookStatus.statusLabel')}</span>
               </div>
@@ -72,7 +72,7 @@ export default function HookStatus() {
             
             <div className="bg-gray-50 rounded-lg p-4">
               <div className="flex items-center gap-2 mb-1">
-                <Activity aria-hidden="true" className="w-4 h-4 text-red-600" />
+                <Activity className="w-4 h-4 text-red-600" />
                 <span className="text-sm text-gray-600">{t('hookStatus.totalHandlers')}</span>
               </div>
               <p className="text-lg font-semibold">{status.stats.total_handlers}</p>
@@ -80,7 +80,7 @@ export default function HookStatus() {
             
             <div className="bg-gray-50 rounded-lg p-4">
               <div className="flex items-center gap-2 mb-1">
-                <Activity aria-hidden="true" className="w-4 h-4 text-purple-600" />
+                <Activity className="w-4 h-4 text-purple-600" />
                 <span className="text-sm text-gray-600">{t('hookStatus.eventKeys')}</span>
               </div>
               <p className="text-lg font-semibold">{status.stats.total_event_keys}</p>

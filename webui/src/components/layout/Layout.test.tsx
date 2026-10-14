@@ -18,7 +18,7 @@ const {
   getActiveNotifications: vi.fn(),
   ackNotification: vi.fn(),
   getNotificationAckStatus: vi.fn(),
-  productNameContextValue: { productName: 'Flocks', configuredDisplayName: null as string | null },
+  productNameContextValue: { productName: 'Flocks', configuredDisplayName: null as string | null, logoUrl: '/favicon.svg' as string | null },
   useAuth: vi.fn(),
   useWebUIContractPages: vi.fn(),
   useSceneSuiteUpdates: vi.fn(() => ({ hasUnseenSuites: false })),
@@ -105,6 +105,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   updateModalProps.length = 0;
   localStorage.clear();
+  Object.assign(productNameContextValue, { productName: 'Flocks', configuredDisplayName: null, logoUrl: '/favicon.svg' });
   useAuth.mockReturnValue({ user: { id: 'u1', username: 'admin', role: 'admin' }, logout: vi.fn() });
   onboardingAPI.getStatus.mockResolvedValue({ data: { completed: true } });
   checkUpdate.mockResolvedValue({ has_update: false, current_version: '2026.9.1' });
@@ -123,6 +124,21 @@ describe('Layout chrome', () => {
     expect(screen.getByText('Flocks')).toBeInTheDocument();
     expect(screen.getByText('agentWorkspace')).toBeInTheDocument();
     expect(screen.getByTestId('history-panel')).toBeInTheDocument();
+  });
+
+  it('shows the Flocks logo beside the product name', () => {
+    renderAt('/');
+    const header = document.querySelector('[data-workspace-header]') as HTMLElement;
+    expect(header.querySelector('img[data-brand-logo]')).toHaveAttribute('src', '/favicon.svg');
+  });
+
+  it('keeps the initial mark for a custom product name', () => {
+    Object.assign(productNameContextValue, { productName: 'Acme SOC', configuredDisplayName: 'Acme SOC', logoUrl: null });
+    renderAt('/');
+    const header = document.querySelector('[data-workspace-header]') as HTMLElement;
+    expect(header.querySelector('img[data-brand-logo]')).toBeNull();
+    expect(within(header).getByText('A')).toBeInTheDocument();
+    expect(within(header).getByText('Acme SOC')).toBeInTheDocument();
   });
 
   it('lists enabled scenes and the scene manager in the switcher', async () => {
@@ -260,18 +276,6 @@ describe('Layout chrome', () => {
     fireEvent.click(screen.getByRole('button', { name: 'newChat' }));
     await waitFor(() => expect(activeProbe().textContent).toBe('/sessions'));
   });
-
-  it('keeps the closed off-canvas sidebar out of the tab order on narrow screens', async () => {
-    const { container } = renderAt('/');
-    const aside = container.querySelector('aside') as HTMLElement;
-    expect(aside.className).toContain('invisible');
-    expect(aside.className).toContain('lg:visible');
-    const menuButton = screen.getByRole('button', { name: 'openNav' });
-    expect(menuButton).toHaveAttribute('aria-expanded', 'false');
-    fireEvent.click(menuButton);
-    expect(aside.className).not.toContain('invisible');
-    expect(menuButton).toHaveAttribute('aria-expanded', 'true');
-  });
 });
 
 describe('Layout content panes', () => {
@@ -284,9 +288,6 @@ describe('Layout content panes', () => {
     const wrapper = (await screen.findByText(text)).parentElement as HTMLElement;
     expect(wrapper.className).toContain('min-h-full');
     expect(wrapper.className).not.toContain('min-h-0');
-    // The wrapper sits in a column that scrolls; without shrink-0 the column
-    // squeezes it to the viewport height and its content overflows the box.
-    expect(wrapper.className).toContain('shrink-0');
     expect(wrapper.parentElement?.className).toContain('overflow-y-auto');
   });
 });

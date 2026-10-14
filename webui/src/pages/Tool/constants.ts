@@ -1,4 +1,4 @@
-import { Cloud as CloudIcon, Code as CodeIcon, Database as DatabaseIcon, Grid as GridIcon } from 'lucide-react';
+import { Grid, Database, Cloud, Code } from 'lucide-react';
 import { createElement } from 'react';
 import type { TabKey } from './types';
 
@@ -16,11 +16,11 @@ export const TABS: TabOption[] = [
   { key: 'local', labelKey: 'tabs.local', sourceFilter: 'plugin_py' },
 ];
 
-export const TAB_ICONS = { Grid: GridIcon, Database: DatabaseIcon, Cloud: CloudIcon, Code: CodeIcon };
+export const TAB_ICONS = { Grid, Database, Cloud, Code };
 export function getTabIcon(key: TabKey) {
-  const icons = [GridIcon, DatabaseIcon, CloudIcon, CodeIcon];
+  const icons = [Grid, Database, Cloud, Code];
   const i = ['all', 'mcp', 'api', 'local'].indexOf(key);
-  return createElement(icons[i] ?? GridIcon, { className: 'w-5 h-5', 'aria-hidden': 'true' });
+  return createElement(icons[i] ?? Grid, { className: 'w-5 h-5' });
 }
 
 /** Source badge: labelKey for i18n (tool.source.*) for builtin/custom; label for proper nouns MCP/API. */

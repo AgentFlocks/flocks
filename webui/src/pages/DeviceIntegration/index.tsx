@@ -1,33 +1,10 @@
-import PageDialog from '../PageDialog';
-import { pageActionLabel } from '../pageActionLabel';
 import { lazy, Suspense, useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
-  Activity,
-  AlertTriangle,
-  Building2,
-  Check,
-  CheckCircle,
-  ChevronDown,
-  ChevronLeft,
-  ChevronRight,
-  Eye,
-  EyeOff,
-  Loader2,
-  Pencil,
-  PlugZap,
-  Plus,
-  RefreshCw,
-  Save,
-  Server,
-  ServerCog,
-  Settings,
-  Sparkles,
-  Trash2,
-  WifiOff,
-  Wrench,
-  X,
-  XCircle,
+  Shield, CheckCircle, XCircle, AlertTriangle, RefreshCw,
+  Plug, PlugZap, WifiOff, Plus, Settings, Loader2,
+  Eye, EyeOff, Save, Trash2, Activity, X, Server, Pencil, Check,
+  Wrench, ChevronRight, ChevronLeft, ChevronDown, Building2, ServerCog, Sparkles,
 } from 'lucide-react';
 import PageHeader from '@/components/common/PageHeader';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
@@ -54,13 +31,13 @@ import PluginViewToggle from '@/components/plugin-groups/PluginViewToggle';
 // ============================================================================
 
 const DEFAULT_GROUP_ID = 'default-room';
-const DEVICE_DRAWER_WIDTH = 480;
+const DEVICE_DRAWER_WIDTH = 560;
 const DEVICE_DRAWER_WIDTH_CSS = `${DEVICE_DRAWER_WIDTH}px`;
 const LazySessionChat = lazy(() => import('@/components/common/SessionChat'));
 
 function SessionChatFallback() {
   return (
-    <div className="flex flex-1 items-center justify-center text-gray-400 min-h-0">
+    <div className="flex flex-1 min-h-0 items-center justify-center text-gray-400">
       <LoadingSpinner />
     </div>
   );
@@ -167,16 +144,16 @@ function formatTemplateVersion(version: string): string {
 function StatusBadge({ status, enabled }: { status: string; enabled: boolean }) {
   const { t } = useTranslation('device');
   if (!enabled) return (
-    <span className="inline-flex items-center gap-1 text-xs text-zinc-400"><WifiOff aria-hidden="true" className="w-3 h-3" />{t('status.disabled')}</span>
+    <span className="inline-flex items-center gap-1 text-xs text-zinc-400"><WifiOff className="w-3 h-3" />{t('status.disabled')}</span>
   );
   if (status === 'ok' || status === 'connected') return (
-    <span className="inline-flex items-center gap-1 text-xs text-green-600"><CheckCircle aria-hidden="true" className="w-3 h-3" />{t('status.connected')}</span>
+    <span className="inline-flex items-center gap-1 text-xs text-green-600"><CheckCircle className="w-3 h-3" />{t('status.connected')}</span>
   );
   if (status === 'error') return (
-    <span className="inline-flex items-center gap-1 text-xs text-red-500"><XCircle aria-hidden="true" className="w-3 h-3" />{t('status.error')}</span>
+    <span className="inline-flex items-center gap-1 text-xs text-red-500"><XCircle className="w-3 h-3" />{t('status.error')}</span>
   );
   return (
-    <span className="inline-flex items-center gap-1 text-xs text-zinc-400"><AlertTriangle aria-hidden="true" className="w-3 h-3" />{t('status.unknown')}</span>
+    <span className="inline-flex items-center gap-1 text-xs text-zinc-400"><AlertTriangle className="w-3 h-3" />{t('status.unknown')}</span>
   );
 }
 
@@ -209,12 +186,12 @@ function ActiveCard({ device, grouping, vendorKey, selected, onClick, viewMode =
         <div className={`w-9 h-9 rounded-xl flex items-center justify-center flex-shrink-0 ${
           selected ? 'bg-blue-100' : 'bg-zinc-50 group-hover:bg-zinc-100'
         }`}>
-          <PlugZap aria-hidden="true" className={`w-4 h-4 ${selected ? 'text-blue-600' : 'text-zinc-500'}`} />
+          <PlugZap className={`w-4 h-4 ${selected ? 'text-blue-600' : 'text-zinc-500'}`} />
         </div>
         <div className={viewMode === 'cards' ? 'flex-1 min-w-0' : 'flex-1 min-w-0 grid gap-x-4 gap-y-1 md:grid-cols-2 xl:grid-cols-[minmax(160px,1fr)_minmax(150px,1fr)_minmax(180px,1fr)_auto] xl:items-center'}>
           <div className="flex items-center justify-between gap-2">
             <p className="text-sm font-semibold text-zinc-800 truncate">{device.name}</p>
-            <Settings aria-hidden="true" className={`w-3.5 h-3.5 flex-shrink-0 ${selected ? 'text-blue-400' : 'text-zinc-300 group-hover:text-zinc-400'}`} />
+            <Settings className={`w-3.5 h-3.5 flex-shrink-0 ${selected ? 'text-blue-400' : 'text-zinc-300 group-hover:text-zinc-400'}`} />
           </div>
           <p className="text-xs text-zinc-400 mt-0.5 truncate">{device.storage_key}</p>
           {device.fields.base_url && (
@@ -773,20 +750,20 @@ function DeviceAddRexPanel({
           onStreamingDone={() => void detectLatestDraft(true)}
           welcomeContent={
             <div className="flex min-h-[420px] w-full flex-col items-center justify-center px-5 py-8">
-              <div className="flex max-h-[min(620px,calc(100vh-260px))] w-full max-w-[420px] flex-col rounded-xl border border-gray-200 bg-white px-5 py-5 text-center shadow-sm overflow-hidden">
+              <div className="flex max-h-[min(620px,calc(100vh-260px))] w-full max-w-[420px] flex-col overflow-hidden rounded-xl border border-gray-200 bg-white px-5 py-5 text-center shadow-sm">
                 {!showBuiltInTemplates ? (
                   <>
                     <div className="flex-shrink-0">
-                      <div className="flex h-11 w-11 items-center justify-center rounded-xl border border-red-100 bg-red-50 text-red-500 mx-auto">
-                        <ServerCog aria-hidden="true" className="h-5 w-5" />
+                      <div className="mx-auto flex h-11 w-11 items-center justify-center rounded-xl border border-red-100 bg-red-50 text-red-500">
+                        <ServerCog className="h-5 w-5" />
                       </div>
                       <h3 className="mt-4 text-sm font-semibold text-gray-900">{t('wizard.guide.title')}</h3>
-                      <p className="mt-2 max-w-[300px] text-xs leading-relaxed text-gray-500 mx-auto">
+                      <p className="mx-auto mt-2 max-w-[300px] text-xs leading-relaxed text-gray-500">
                         {t('wizard.guide.subtitle')}
                       </p>
                     </div>
 
-                    <div className="mt-4 space-y-4 pr-1 text-left [scrollbar-width:thin] [scrollbar-color:#e4e4e7_transparent] min-h-0 overflow-y-auto">
+                    <div className="mt-4 min-h-0 space-y-4 overflow-y-auto pr-1 text-left [scrollbar-width:thin] [scrollbar-color:#e4e4e7_transparent]">
                       <WorkbenchSection title={t('wizard.guide.customTitle')}>
                         <WorkbenchAction
                           label={t('wizard.guide.actions.api')}
@@ -827,14 +804,14 @@ function DeviceAddRexPanel({
                         onClick={() => setShowBuiltInTemplates(false)}
                         className="mb-3 inline-flex items-center gap-1 text-xs font-medium text-gray-500 transition-colors hover:text-gray-800"
                       >
-                        <ChevronLeft aria-hidden="true" className="h-3.5 w-3.5" />
+                        <ChevronLeft className="h-3.5 w-3.5" />
                         {t('wizard.supportedList.back')}
                       </button>
                       <h3 className="text-sm font-semibold text-gray-900">{t('wizard.supportedList.title')}</h3>
                       <p className="mt-2 text-xs leading-relaxed text-gray-500">{t('wizard.supportedList.subtitle')}</p>
                     </div>
 
-                    <div className="mt-4 space-y-2 pr-1 text-left [scrollbar-width:thin] [scrollbar-color:#e4e4e7_transparent] min-h-0 overflow-y-auto">
+                    <div className="mt-4 min-h-0 space-y-2 overflow-y-auto pr-1 text-left [scrollbar-width:thin] [scrollbar-color:#e4e4e7_transparent]">
                       {vendorGroups.map(({ vendor, templates: vendorTemplates }) => {
                         const expanded = expandedVendors.has(vendor.id);
                         const vendorName = i18n.language.startsWith('zh') ? vendor.nameCn : vendor.nameEn;
@@ -851,12 +828,12 @@ function DeviceAddRexPanel({
                               aria-expanded={expanded}
                             >
                               <VendorMark vendor={vendor} label={vendorName} />
-                              <span className="flex-1 text-xs font-semibold text-gray-700 min-w-0 truncate">{vendorName}</span>
+                              <span className="min-w-0 flex-1 truncate text-xs font-semibold text-gray-700">{vendorName}</span>
                               <span className="text-[10px] font-medium text-gray-400">
                                 {t('wizard.supportedList.deviceCount', { count: vendorTemplates.length })}
                                 {integratedCount > 0 ? ` / ${t('wizard.supportedList.integratedCount', { count: integratedCount })}` : ''}
                               </span>
-                              <ChevronDown aria-hidden="true" className={`h-3.5 w-3.5 text-gray-400 transition-transform flex-shrink-0 ${expanded ? '' : '-rotate-90'}`} />
+                              <ChevronDown className={`h-3.5 w-3.5 flex-shrink-0 text-gray-400 transition-transform ${expanded ? '' : '-rotate-90'}`} />
                             </button>
                             {expanded && (
                               <div className="border-t border-gray-100 px-2 pb-2">
@@ -881,20 +858,20 @@ function DeviceAddRexPanel({
                                         void handleTemplatePrompt(tpl);
                                       }}
                                       title={[tpl.name, tpl.version, tpl.storage_key].filter(Boolean).join(' · ')}
-                                      className="group mt-1.5 flex w-full items-center justify-between gap-3 rounded-lg border border-gray-200 bg-white px-3 py-2 text-left text-xs font-semibold text-gray-700 transition-colors hover:border-rose-200 hover:bg-rose-50/70 hover:text-rose-600 disabled:cursor-wait disabled:opacity-60 min-h-11"
+                                      className="group mt-1.5 flex min-h-11 w-full items-center justify-between gap-3 rounded-lg border border-gray-200 bg-white px-3 py-2 text-left text-xs font-semibold text-gray-700 transition-colors hover:border-rose-200 hover:bg-rose-50/70 hover:text-rose-600 disabled:cursor-wait disabled:opacity-60"
                                     >
                                       <span className="min-w-0 flex-1">
                                         <span className="block truncate">{tpl.name}</span>
-                                        <span className="mt-0.5 block text-[10px] font-medium text-gray-400 group-hover:text-rose-400 truncate">
+                                        <span className="mt-0.5 block truncate text-[10px] font-medium text-gray-400 group-hover:text-rose-400">
                                           {templateMeta}
                                         </span>
                                       </span>
-                                      <span className="flex items-center gap-1.5 text-[10px] font-medium text-gray-400 flex-shrink-0">
+                                      <span className="flex flex-shrink-0 items-center gap-1.5 text-[10px] font-medium text-gray-400">
                                         {count > 0 && <span>{t('wizard.instanceCount', { count })}</span>}
                                         <span>{installing ? t(action === 'update' ? 'wizard.installState.updating' : 'wizard.installState.installing') : stateBadge}</span>
                                       </span>
                                       {installing
-                                        ? <Loader2 aria-hidden="true" className="h-4 w-4 animate-spin text-rose-400 flex-shrink-0" />
+                                        ? <Loader2 className="h-4 w-4 flex-shrink-0 animate-spin text-rose-400" />
                                         : (
                                           <GuideInfoIcon
                                             label={tpl.name}
@@ -927,8 +904,8 @@ function DeviceAddRexPanel({
       />
       </Suspense>
       {detectedAction && (
-        <div className="flex items-center justify-between gap-3 border-t border-blue-100 bg-blue-50 px-4 py-2.5 flex-shrink-0">
-          <div className="text-sm text-blue-800 min-w-0">
+        <div className="flex flex-shrink-0 items-center justify-between gap-3 border-t border-blue-100 bg-blue-50 px-4 py-2.5">
+          <div className="min-w-0 text-sm text-blue-800">
             {detectedAction.kind === 'install'
               ? t('wizard.rex.detectedInstall')
               : t('wizard.rex.detectedDraft')}
@@ -1029,17 +1006,15 @@ function AddDeviceWizardPanel({
   };
 
   return (
-    <PageDialog onClose={onClose} className="fixed inset-0 z-40 pointer-events-none">
+    <div className="fixed inset-0 z-40 pointer-events-none">
       <button
         type="button"
         aria-label={t('wizard.closeAriaLabel')}
-        tabIndex={-1}
-        aria-hidden="true"
         onClick={onClose}
         className="pointer-events-auto absolute left-0 bottom-0 bg-transparent"
         style={{ top: 0, right: `min(${DEVICE_DRAWER_WIDTH_CSS}, 100vw)` }}
       />
-      <div data-ui-overlay="drawer"
+      <div
         className="pointer-events-auto absolute right-0 top-0 bottom-0 w-full bg-white shadow-2xl border-l border-zinc-200 flex flex-col"
         style={{ maxWidth: DEVICE_DRAWER_WIDTH }}
       >
@@ -1047,10 +1022,10 @@ function AddDeviceWizardPanel({
         <div className="px-5 py-4 border-b border-zinc-100 flex-shrink-0">
           <div className="flex items-center justify-between gap-3">
             <div className="flex min-w-0 items-center gap-2">
-              <h3 className="text-lg font-semibold text-zinc-900 truncate">{t('wizard.title')}</h3>
+              <h3 className="truncate text-lg font-semibold text-zinc-900">{t('wizard.title')}</h3>
             </div>
-            <button aria-label={pageActionLabel('close')} onClick={onClose} className="p-1.5 rounded-lg hover:bg-zinc-100 text-zinc-400 hover:text-zinc-600">
-              <X aria-hidden="true" className="w-4 h-4" />
+            <button onClick={onClose} className="p-1.5 rounded-lg hover:bg-zinc-100 text-zinc-400 hover:text-zinc-600">
+              <X className="w-4 h-4" />
             </button>
           </div>
           <div className="mt-5 flex justify-center border-b border-red-500">
@@ -1059,7 +1034,7 @@ function AddDeviceWizardPanel({
               onClick={handleWorkbenchClick}
               className="flex items-center gap-2 px-4 pb-3 text-sm font-semibold text-red-600 transition-colors hover:text-red-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-red-200"
             >
-              <ServerCog aria-hidden="true" className="h-4 w-4" />
+              <ServerCog className="h-4 w-4" />
               {t('wizard.guide.workbenchTab')}
             </button>
           </div>
@@ -1083,7 +1058,7 @@ function AddDeviceWizardPanel({
           />
         </div>
       </div>
-    </PageDialog>
+    </div>
   );
 }
 
@@ -1110,15 +1085,11 @@ function applyCredentialDefaults(
 }
 
 function Toggle({ on, onToggle }: { on: boolean; onToggle: () => void }) {
-  const { t } = useTranslation('common');
   return (
     <button
       type="button"
-      role="switch"
-      aria-checked={on}
-      aria-label={t(on ? 'status.enabled' : 'status.disabled')}
       onClick={onToggle}
-      className={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors ${on ? 'bg-blue-500' : 'bg-zinc-300'}`}
+      className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${on ? 'bg-blue-500' : 'bg-zinc-300'}`}
     >
       <span className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white shadow transition-transform ${on ? 'translate-x-4' : 'translate-x-0.5'}`} />
     </button>
@@ -1373,26 +1344,24 @@ function DeviceConfigPanel({
   };
 
   const TABS: { key: PanelTab; label: string; icon: React.ReactNode }[] = [
-    { key: 'config', label: t('config.tabConfig'), icon: <Settings aria-hidden="true" className="w-3.5 h-3.5" /> },
+    { key: 'config', label: t('config.tabConfig'), icon: <Settings className="w-3.5 h-3.5" /> },
     ...(device
-      ? [{ key: 'tools' as PanelTab, label: serviceTools.length ? t('config.tabToolsCount', { count: serviceTools.length }) : t('config.tabTools'), icon: <Wrench aria-hidden="true" className="w-3.5 h-3.5" /> }]
+      ? [{ key: 'tools' as PanelTab, label: serviceTools.length ? t('config.tabToolsCount', { count: serviceTools.length }) : t('config.tabTools'), icon: <Wrench className="w-3.5 h-3.5" /> }]
       : []),
-    { key: 'overview', label: t('config.tabOverview'), icon: <AlertTriangle aria-hidden="true" className="w-3.5 h-3.5 opacity-60" /> },
+    { key: 'overview', label: t('config.tabOverview'), icon: <AlertTriangle className="w-3.5 h-3.5 opacity-60" /> },
   ];
 
   return (
     <>
-      <PageDialog onClose={onClose} className="fixed inset-0 z-40 pointer-events-none">
+      <div className="fixed inset-0 z-40 pointer-events-none">
         <button
           type="button"
           aria-label={t('config.closeAriaLabel')}
-          tabIndex={-1}
-          aria-hidden="true"
           onClick={onClose}
           className="pointer-events-auto absolute left-0 bottom-0 bg-transparent"
           style={{ top: 0, right: `min(${DEVICE_DRAWER_WIDTH_CSS}, 100vw)` }}
         />
-        <div data-ui-overlay="drawer"
+        <div
           className="pointer-events-auto absolute right-0 top-0 bottom-0 w-full bg-white shadow-2xl border-l border-zinc-200 flex flex-col"
           style={{ maxWidth: DEVICE_DRAWER_WIDTH }}
         >
@@ -1400,12 +1369,12 @@ function DeviceConfigPanel({
           <div className="flex items-center justify-between px-5 py-4 border-b border-zinc-100 flex-shrink-0">
             <div className="flex items-center gap-2.5 min-w-0">
               {onBack && (
-                <button aria-label={pageActionLabel('back')} onClick={onBack} className="p-1.5 rounded-lg hover:bg-zinc-100 text-zinc-500 hover:text-zinc-700 transition-colors flex-shrink-0">
-                  <ChevronLeft aria-hidden="true" className="w-4 h-4" />
+                <button onClick={onBack} className="p-1.5 rounded-lg hover:bg-zinc-100 text-zinc-500 hover:text-zinc-700 transition-colors flex-shrink-0">
+                  <ChevronLeft className="w-4 h-4" />
                 </button>
               )}
               <div className={`w-9 h-9 rounded-xl flex items-center justify-center flex-shrink-0 ${device ? 'bg-blue-50' : 'bg-zinc-50'}`}>
-                {device ? <PlugZap aria-hidden="true" className="w-4 h-4 text-blue-500" /> : <Plus aria-hidden="true" className="w-4 h-4 text-zinc-400" />}
+                {device ? <PlugZap className="w-4 h-4 text-blue-500" /> : <Plus className="w-4 h-4 text-zinc-400" />}
               </div>
               <div className="min-w-0">
                 <h3 className="text-sm font-semibold text-zinc-900 truncate">{device ? device.name : t('config.newDeviceTitle')}</h3>
@@ -1415,13 +1384,13 @@ function DeviceConfigPanel({
                 </div>
               </div>
             </div>
-            <button aria-label={pageActionLabel('close')} onClick={onClose} className="p-1.5 rounded-lg hover:bg-zinc-100 text-zinc-400 hover:text-zinc-600 flex-shrink-0">
-              <X aria-hidden="true" className="w-4 h-4" />
+            <button onClick={onClose} className="p-1.5 rounded-lg hover:bg-zinc-100 text-zinc-400 hover:text-zinc-600 flex-shrink-0">
+              <X className="w-4 h-4" />
             </button>
           </div>
 
           {/* Tab bar */}
-          <div className="flex border-b border-zinc-100 px-1 flex-shrink-0">
+          <div className="flex border-b border-zinc-100 flex-shrink-0 px-1">
             {TABS.map(({ key, label, icon }) => (
               <button
                 key={key}
@@ -1451,7 +1420,7 @@ function DeviceConfigPanel({
                     className="flex items-center justify-between gap-3 rounded-lg border border-blue-100 bg-blue-50 px-3 py-2 text-sm font-medium text-blue-700 transition-colors hover:border-blue-200 hover:bg-blue-100"
                   >
                     <span>{t('overview.viewDocs')}</span>
-                    <ChevronRight aria-hidden="true" className="h-4 w-4 flex-shrink-0" />
+                    <ChevronRight className="h-4 w-4 flex-shrink-0" />
                   </a>
                 )}
 
@@ -1478,8 +1447,8 @@ function DeviceConfigPanel({
                     </label>
                     {groupLocked ? (
                       <div className="flex items-center gap-2 rounded-lg border border-zinc-100 bg-zinc-50 px-3 py-2">
-                        <Server aria-hidden="true" className="w-3.5 h-3.5 text-zinc-400 flex-shrink-0" />
-                        <span className="text-sm text-zinc-600 truncate">
+                        <Server className="w-3.5 h-3.5 text-zinc-400 flex-shrink-0" />
+                        <span className="truncate text-sm text-zinc-600">
                           {groups.find((g) => g.id === groupId)?.name ?? groupId}
                         </span>
                       </div>
@@ -1536,7 +1505,7 @@ function DeviceConfigPanel({
                                 title={show ? t('config.hideSecretAction') : t('config.showSecretAction')}
                                 className="absolute right-2.5 top-1/2 -translate-y-1/2 text-zinc-400 hover:text-zinc-600 disabled:opacity-60"
                               >
-                                {revealing ? <Loader2 aria-hidden="true" className="w-4 h-4 animate-spin" /> : show ? <EyeOff aria-hidden="true" className="w-4 h-4" /> : <Eye aria-hidden="true" className="w-4 h-4" />}
+                                {revealing ? <Loader2 className="w-4 h-4 animate-spin" /> : show ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
                               </button>
                             )}
                           </div>
@@ -1568,10 +1537,10 @@ function DeviceConfigPanel({
                   <div className="rounded-xl border border-zinc-100 bg-white px-3 py-2.5">
                     <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
                       <div className="flex min-w-0 items-center gap-2">
-                        <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-red-50 text-red-500 flex-shrink-0">
-                          <Sparkles aria-hidden="true" className="h-3.5 w-3.5" />
+                        <div className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-lg bg-red-50 text-red-500">
+                          <Sparkles className="h-3.5 w-3.5" />
                         </div>
-                        <p className="text-sm font-semibold text-zinc-800 truncate">{t('config.aiAssistTitle')}</p>
+                        <p className="truncate text-sm font-semibold text-zinc-800">{t('config.aiAssistTitle')}</p>
                       </div>
                       <div className="grid grid-cols-2 gap-1.5 sm:w-auto sm:flex sm:flex-shrink-0">
                         {([
@@ -1589,7 +1558,7 @@ function DeviceConfigPanel({
                               title={disabled ? t('config.aiAssistSaveFirst') : undefined}
                               className="flex h-8 items-center justify-center gap-1.5 rounded-lg border border-zinc-200 bg-white px-2.5 text-xs font-medium text-zinc-700 transition-colors hover:border-red-200 hover:bg-red-50 hover:text-red-600 disabled:cursor-not-allowed disabled:border-zinc-100 disabled:bg-zinc-50 disabled:text-zinc-300"
                             >
-                              {loading ? <Loader2 aria-hidden="true" className="h-3.5 w-3.5 animate-spin" /> : <Icon aria-hidden="true" className="h-3.5 w-3.5 flex-shrink-0" />}
+                              {loading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Icon className="h-3.5 w-3.5 flex-shrink-0" />}
                               <span className="truncate">{label}</span>
                             </button>
                           );
@@ -1607,7 +1576,7 @@ function DeviceConfigPanel({
                       disabled={saving}
                       className="w-full flex items-center justify-center gap-1.5 px-3 py-2 text-sm rounded-lg bg-red-600 text-white hover:bg-red-700 disabled:opacity-50 transition-colors"
                     >
-                      {saving ? <Loader2 aria-hidden="true" className="w-3.5 h-3.5 animate-spin" /> : <Save aria-hidden="true" className="w-3.5 h-3.5" />}
+                      {saving ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5" />}
                       {device ? t('config.saveBtn') : t('config.addBtn')}
                     </button>
                   </div>
@@ -1617,7 +1586,7 @@ function DeviceConfigPanel({
                       disabled={deleting}
                       className="w-full flex items-center justify-center gap-1.5 py-2 text-sm rounded-lg border border-red-100 text-red-500 hover:bg-red-50 disabled:opacity-50 transition-colors"
                     >
-                      {deleting ? <Loader2 aria-hidden="true" className="w-3.5 h-3.5 animate-spin" /> : <Trash2 aria-hidden="true" className="w-3.5 h-3.5" />}
+                      {deleting ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Trash2 className="w-3.5 h-3.5" />}
                       {confirmDelete ? t('config.confirmDelete') : t('config.deleteBtn')}
                     </button>
                   )}
@@ -1630,7 +1599,7 @@ function DeviceConfigPanel({
               <div className="px-5 py-4">
                 {serviceTools.length === 0 ? (
                   <div className="flex flex-col items-center justify-center py-16 text-zinc-400 gap-2">
-                    <Wrench aria-hidden="true" className="w-8 h-8 opacity-30" />
+                    <Wrench className="w-8 h-8 opacity-30" />
                     <p className="text-sm">{t('tools.empty')}</p>
                   </div>
                 ) : (
@@ -1653,7 +1622,7 @@ function DeviceConfigPanel({
                                 <span className="text-xs font-mono text-zinc-800">{tool.name}</span>
                               </td>
                               <td className="px-4 py-3">
-                                <span className="text-xs text-zinc-500 leading-relaxed line-clamp-2">
+                                <span className="text-xs text-zinc-500 line-clamp-2 leading-relaxed">
                                   {tool.description_cn || tool.description}
                                 </span>
                               </td>
@@ -1692,7 +1661,7 @@ function DeviceConfigPanel({
                   ].filter(Boolean).map((row) => (
                     <div key={row!.label} className="flex justify-between items-center px-4 py-2.5 gap-4">
                       <span className="text-sm text-zinc-500 shrink-0">{row!.label}</span>
-                      <span className="text-sm text-zinc-900 text-right truncate">{row!.value}</span>
+                      <span className="text-sm text-zinc-900 truncate text-right">{row!.value}</span>
                     </div>
                   ))}
                 </div>
@@ -1713,7 +1682,7 @@ function DeviceConfigPanel({
                     rel="noopener noreferrer"
                     className="flex items-center gap-2 text-sm text-blue-600 hover:text-blue-800 px-1"
                   >
-                    <ChevronRight aria-hidden="true" className="w-4 h-4" />
+                    <ChevronRight className="w-4 h-4" />
                     {t('overview.viewDocs')}
                   </a>
                 )}
@@ -1721,7 +1690,7 @@ function DeviceConfigPanel({
             )}
           </div>
         </div>
-      </PageDialog>
+      </div>
 
       {toolModal && (
         <ToolDetailModal
@@ -1843,15 +1812,7 @@ function GroupSidebar({ groups, devices, selectedGroupId, onSelect, onRename, on
   return (
     // self-stretch ensures the panel fills the full flex-row height so the
     // right border reaches the bottom even when there are few rooms.
-    // Below md the room list cannot share the row with the device cards
-    // (375px leaves ~120px for the cards), so the rail stacks above them and
-    // only becomes the 208px side column from md up. The room list and the
-    // business groups each cap their own height there: a single cap on the
-    // rail let the groups squeeze the room list to nothing.
-    <div
-      data-testid="device-room-sidebar"
-      className="border-r border-zinc-200 flex flex-col bg-zinc-50 w-full flex-shrink-0 md:h-full md:w-52"
-    >
+    <div className="w-52 flex-shrink-0 border-r border-zinc-200 flex flex-col h-full bg-zinc-50">
       {/* Header */}
       <div className="px-3 py-2.5 flex items-center justify-between flex-shrink-0">
         <span className="text-[11px] font-semibold text-zinc-400 uppercase tracking-wider">{t('sidebar.heading')}</span>
@@ -1860,7 +1821,7 @@ function GroupSidebar({ groups, devices, selectedGroupId, onSelect, onRename, on
           className="p-1 rounded text-zinc-400 hover:text-zinc-700 transition-colors"
           title={t('sidebar.addRoom')}
         >
-          <Plus aria-hidden="true" className="w-3.5 h-3.5" />
+          <Plus className="w-3.5 h-3.5" />
         </button>
       </div>
 
@@ -1868,7 +1829,7 @@ function GroupSidebar({ groups, devices, selectedGroupId, onSelect, onRename, on
       <div className="h-px bg-zinc-200 mx-0" />
 
       {/* Scrollable list */}
-      <div data-testid="device-room-list" className="flex-1 py-1 px-2 max-h-36 overflow-y-auto md:max-h-none">
+      <div className="flex-1 overflow-y-auto py-1 px-2">
         {/* "全部机房" item */}
         <button
           onClick={() => { onSelect(null); cancelEdit(); }}
@@ -1878,7 +1839,7 @@ function GroupSidebar({ groups, devices, selectedGroupId, onSelect, onRename, on
               : 'text-zinc-500 hover:bg-zinc-100 hover:text-zinc-700'
           }`}
         >
-          <Building2 aria-hidden="true" className="w-3.5 h-3.5 flex-shrink-0" />
+          <Building2 className="w-3.5 h-3.5 flex-shrink-0" />
           <span className="text-sm flex-1 font-medium truncate">{t('sidebar.allRooms')}</span>
           <span className={`text-[11px] font-semibold tabular-nums ${
             selectedGroupId === null ? 'text-blue-500' : 'text-zinc-400'
@@ -1924,18 +1885,18 @@ function GroupSidebar({ groups, devices, selectedGroupId, onSelect, onRename, on
                     onClick={(e) => e.stopPropagation()}
                     disabled={busy}
                     maxLength={40}
-                    className="flex-1 text-sm text-zinc-900 bg-white border border-zinc-300 rounded px-1.5 py-0.5 focus:outline-none focus:border-blue-400 min-w-0"
+                    className="flex-1 min-w-0 text-sm text-zinc-900 bg-white border border-zinc-300 rounded px-1.5 py-0.5 focus:outline-none focus:border-blue-400"
                   />
                   <div className="flex items-center gap-0.5 flex-shrink-0" onClick={(e) => e.stopPropagation()}>
-                    <button aria-label={pageActionLabel('save')}
+                    <button
                       onClick={() => void saveEdit(group.id)}
                       disabled={busy}
                       className="p-1 rounded text-blue-600 hover:bg-blue-100 disabled:opacity-50"
                     >
-                      {busy ? <Loader2 aria-hidden="true" className="w-3 h-3 animate-spin" /> : <Check aria-hidden="true" className="w-3 h-3" />}
+                      {busy ? <Loader2 className="w-3 h-3 animate-spin" /> : <Check className="w-3 h-3" />}
                     </button>
-                    <button aria-label={pageActionLabel('close')} onClick={cancelEdit} className="p-1 rounded text-zinc-400 hover:bg-zinc-200">
-                      <X aria-hidden="true" className="w-3 h-3" />
+                    <button onClick={cancelEdit} className="p-1 rounded text-zinc-400 hover:bg-zinc-200">
+                      <X className="w-3 h-3" />
                     </button>
                   </div>
                 </>
@@ -1958,7 +1919,7 @@ function GroupSidebar({ groups, devices, selectedGroupId, onSelect, onRename, on
                       className="p-1 rounded text-zinc-400 hover:text-zinc-600 transition-colors"
                       title={t('sidebar.rename')}
                     >
-                      <Pencil aria-hidden="true" className="w-3 h-3" />
+                      <Pencil className="w-3 h-3" />
                     </button>
                     {!isDefault && (
                       <button
@@ -1970,7 +1931,7 @@ function GroupSidebar({ groups, devices, selectedGroupId, onSelect, onRename, on
                         }`}
                         title={count > 0 ? t('sidebar.deleteDisabled', { count }) : t('sidebar.deleteRoom')}
                       >
-                        <Trash2 aria-hidden="true" className="w-3 h-3" />
+                        <Trash2 className="w-3 h-3" />
                       </button>
                     )}
                   </div>
@@ -1983,7 +1944,7 @@ function GroupSidebar({ groups, devices, selectedGroupId, onSelect, onRename, on
         {/* Inline new room form */}
         {creating && (
           <div className="flex items-center gap-2 px-2.5 py-2 rounded bg-blue-50 mt-0.5">
-            <Server aria-hidden="true" className="w-3.5 h-3.5 text-blue-400 flex-shrink-0" />
+            <Server className="w-3.5 h-3.5 text-blue-400 flex-shrink-0" />
             <input
               autoFocus
               value={createDraft}
@@ -1995,25 +1956,25 @@ function GroupSidebar({ groups, devices, selectedGroupId, onSelect, onRename, on
               disabled={busy}
               placeholder={t('sidebar.roomNamePlaceholder')}
               maxLength={40}
-              className="flex-1 text-sm text-zinc-900 bg-white border border-zinc-300 rounded px-1.5 py-0.5 focus:outline-none focus:border-blue-400 min-w-0"
+              className="flex-1 min-w-0 text-sm text-zinc-900 bg-white border border-zinc-300 rounded px-1.5 py-0.5 focus:outline-none focus:border-blue-400"
             />
             <div className="flex items-center gap-0.5 flex-shrink-0">
-              <button aria-label={pageActionLabel('save')}
+              <button
                 onClick={() => void saveCreate()}
                 disabled={busy}
                 className="p-1 rounded text-blue-600 hover:bg-blue-100 disabled:opacity-50"
               >
-                {busy ? <Loader2 aria-hidden="true" className="w-3 h-3 animate-spin" /> : <Check aria-hidden="true" className="w-3 h-3" />}
+                {busy ? <Loader2 className="w-3 h-3 animate-spin" /> : <Check className="w-3 h-3" />}
               </button>
-              <button aria-label={pageActionLabel('close')} onClick={cancelCreate} className="p-1 rounded text-zinc-400 hover:bg-zinc-200">
-                <X aria-hidden="true" className="w-3 h-3" />
+              <button onClick={cancelCreate} className="p-1 rounded text-zinc-400 hover:bg-zinc-200">
+                <X className="w-3 h-3" />
               </button>
             </div>
           </div>
         )}
       </div>
       {/* Business groups share this 208px rail; room navigation stays independent. */}
-      <div className="border-t border-zinc-200 px-2 py-3 max-h-56 shrink-0 overflow-y-auto md:max-h-[50%]">
+      <div className="max-h-[50%] shrink-0 overflow-y-auto border-t border-zinc-200 px-2 py-3">
         <GroupNav {...businessNav} className="md:w-full" />
       </div>
     </div>
@@ -2456,10 +2417,10 @@ export default function DeviceIntegrationPage() {
 
   return (
     <div className="h-full flex flex-col p-6 bg-gray-50 overflow-hidden">
-      <PageHeader tone="data"
+      <PageHeader
         title={t('pageTitle')}
         description={t('pageDescription')}
-        icon={<ServerCog aria-hidden="true" className="w-8 h-8" />}
+        icon={<ServerCog className="w-8 h-8" />}
         action={
           <div className="flex items-center gap-2">
             <PluginViewToggle value={viewMode} onChange={setViewMode} />
@@ -2469,21 +2430,21 @@ export default function DeviceIntegrationPage() {
               title={t('toolbar.refresh')}
               className="p-1.5 rounded-lg border border-zinc-200 text-zinc-500 hover:bg-zinc-50 hover:text-zinc-700 disabled:opacity-50 transition-colors"
             >
-              <RefreshCw aria-hidden="true" className={`w-3.5 h-3.5 ${refreshing ? 'animate-spin' : ''}`} />
+              <RefreshCw className={`w-3.5 h-3.5 ${refreshing ? 'animate-spin' : ''}`} />
             </button>
             <button
               onClick={() => setPanel({ kind: 'wizard' })}
               className="flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-lg bg-red-600 text-white hover:bg-red-700 transition-colors font-medium"
             >
-              <Plus aria-hidden="true" className="w-3.5 h-3.5" />
+              <Plus className="w-3.5 h-3.5" />
               {t('toolbar.addDevice')}
             </button>
           </div>
         }
       />
 
-      {/* Content: sidebar + main area (stacked below md, side by side from md up) */}
-      <div className="flex-1 flex min-h-0 flex-col md:flex-row overflow-hidden">
+      {/* Content: sidebar + main area */}
+      <div className="flex-1 min-h-0 flex overflow-hidden">
         {/* Left: room sidebar */}
         {!loading && (
           <GroupSidebar
@@ -2505,10 +2466,10 @@ export default function DeviceIntegrationPage() {
           ) : (
             <>
               {/* Room / aggregate header bar */}
-              <div className="px-6 py-3 border-b border-zinc-100 flex items-center gap-3 flex-wrap flex-shrink-0">
+              <div className="px-6 py-3 border-b border-zinc-100 flex items-center gap-3 flex-shrink-0">
                 {selectedGroup ? (
                   <>
-                    <Server aria-hidden="true" className="w-4 h-4 text-zinc-400 flex-shrink-0" />
+                    <Server className="w-4 h-4 text-zinc-400 flex-shrink-0" />
                     <span className="text-sm font-semibold text-zinc-800">{selectedGroup.name}</span>
                     <span className="text-xs text-zinc-400">{t('header.devices', { count: filteredDevices.length })}</span>
                     {connectedCount > 0 && (
@@ -2526,7 +2487,7 @@ export default function DeviceIntegrationPage() {
                   </>
                 ) : (
                   <>
-                    <Building2 aria-hidden="true" className="w-4 h-4 text-zinc-400 flex-shrink-0" />
+                    <Building2 className="w-4 h-4 text-zinc-400 flex-shrink-0" />
                     <span className="text-sm font-semibold text-zinc-800">{t('header.allRooms')}</span>
                     <span className="text-xs text-zinc-400">
                       {t('header.deviceCount', { count: filteredDevices.length, rooms: groups.length })}
@@ -2549,9 +2510,9 @@ export default function DeviceIntegrationPage() {
                         onClick={() =>
                           setCollapsedGroups(allCollapsed ? new Set() : new Set(nonEmptyGroupIds))
                         }
-                        className="flex items-center gap-1 text-xs text-zinc-400 hover:text-zinc-700 transition-colors ml-auto"
+                        className="ml-auto flex items-center gap-1 text-xs text-zinc-400 hover:text-zinc-700 transition-colors"
                       >
-                        <ChevronDown aria-hidden="true" className={`w-3.5 h-3.5 transition-transform ${allCollapsed ? '-rotate-90' : ''}`} />
+                        <ChevronDown className={`w-3.5 h-3.5 transition-transform ${allCollapsed ? '-rotate-90' : ''}`} />
                         {allCollapsed ? t('toolbar.expandAll') : t('toolbar.collapseAll')}
                       </button>
                     )}
@@ -2565,7 +2526,7 @@ export default function DeviceIntegrationPage() {
                   /* Global empty state — no devices at all */
                   <div className="flex flex-col items-center justify-center py-24 gap-4">
                     <div className="w-16 h-16 rounded-2xl bg-zinc-100 flex items-center justify-center">
-                      <PlugZap aria-hidden="true" className="w-7 h-7 text-zinc-300" />
+                      <PlugZap className="w-7 h-7 text-zinc-300" />
                     </div>
                     <div className="text-center">
                       <p className="text-sm font-semibold text-zinc-700">{t('empty.noDevices')}</p>
@@ -2575,7 +2536,7 @@ export default function DeviceIntegrationPage() {
                       onClick={() => setPanel({ kind: 'wizard' })}
                       className="flex items-center gap-1.5 px-4 py-2 text-sm rounded-lg bg-blue-600 text-white hover:bg-blue-700 transition-colors font-medium"
                     >
-                      <Plus aria-hidden="true" className="w-3.5 h-3.5" />
+                      <Plus className="w-3.5 h-3.5" />
                       {t('empty.addNow')}
                     </button>
                   </div>
@@ -2597,10 +2558,10 @@ export default function DeviceIntegrationPage() {
                             className="w-full flex items-center gap-2 mb-4 group/sec text-left"
                             aria-expanded={!collapsed}
                           >
-                            <ChevronDown aria-hidden="true"
+                            <ChevronDown
                               className={`w-3.5 h-3.5 text-zinc-400 transition-transform ${collapsed ? '-rotate-90' : ''}`}
                             />
-                            <Server aria-hidden="true" className="w-4 h-4 text-zinc-400" />
+                            <Server className="w-4 h-4 text-zinc-400" />
                             <h3 className="text-sm font-semibold text-zinc-700 group-hover/sec:text-zinc-900">{group.name}</h3>
                             <span className="text-xs text-zinc-400 bg-zinc-100 px-1.5 py-0.5 rounded-md">
                               {gDevices.length}
@@ -2638,7 +2599,7 @@ export default function DeviceIntegrationPage() {
                       return (
                         <section>
                           <div className="flex items-center gap-2 mb-4">
-                            <AlertTriangle aria-hidden="true" className="w-4 h-4 text-yellow-500" />
+                            <AlertTriangle className="w-4 h-4 text-yellow-500" />
                             <h3 className="text-sm font-semibold text-zinc-700">{t('section.ungrouped')}</h3>
                             <span className="text-xs text-zinc-400 bg-zinc-100 px-1.5 py-0.5 rounded-md">
                               {orphans.length}
@@ -2666,7 +2627,7 @@ export default function DeviceIntegrationPage() {
                   /* ── Specific room, no devices ── */
                   <div className="flex flex-col items-center justify-center py-24 gap-4">
                     <div className="w-16 h-16 rounded-2xl bg-zinc-100 flex items-center justify-center">
-                      <Server aria-hidden="true" className="w-7 h-7 text-zinc-300" />
+                      <Server className="w-7 h-7 text-zinc-300" />
                     </div>
                     <div className="text-center">
                       <p className="text-sm font-semibold text-zinc-700">{t('empty.roomEmpty')}</p>
@@ -2676,7 +2637,7 @@ export default function DeviceIntegrationPage() {
                       onClick={() => setPanel({ kind: 'wizard' })}
                       className="flex items-center gap-1.5 px-4 py-2 text-sm rounded-lg bg-blue-600 text-white hover:bg-blue-700 transition-colors font-medium"
                     >
-                      <Plus aria-hidden="true" className="w-3.5 h-3.5" />
+                      <Plus className="w-3.5 h-3.5" />
                       {t('empty.addNow')}
                     </button>
                   </div>
@@ -2684,7 +2645,7 @@ export default function DeviceIntegrationPage() {
                   /* ── Specific room, has devices ── */
                   <section>
                     <div className="flex items-center gap-2 mb-4">
-                      <PlugZap aria-hidden="true" className="w-4 h-4 text-blue-600" />
+                      <PlugZap className="w-4 h-4 text-blue-600" />
                       <h3 className="text-sm font-semibold text-zinc-800">{t('section.activeDevices')}</h3>
                       <span className="text-xs text-zinc-400 bg-zinc-100 px-1.5 py-0.5 rounded-md">
                         {filteredDevices.length}

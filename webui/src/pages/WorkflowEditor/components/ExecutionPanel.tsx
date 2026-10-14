@@ -1,16 +1,6 @@
-import { pageActionLabel } from '../../pageActionLabel';
 import React, { useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import {
-  CheckCircle,
-  Clock,
-  Code,
-  FileText,
-  Play,
-  StopCircle,
-  X,
-  XCircle,
-} from 'lucide-react';
+import { X, Play, CheckCircle, XCircle, Clock, Code, FileText, StopCircle } from 'lucide-react';
 import { WorkflowExecution } from '@/api/workflow';
 
 interface ExecutionPanelProps {
@@ -78,14 +68,14 @@ export default function ExecutionPanel({
   const duration = execution.duration ? (execution.duration / 1000).toFixed(2) : 'N/A';
 
   return (
-    <div className="fixed bottom-0 left-0 right-0 h-96 bg-white shadow-2xl border-t-2 border-gray-200 flex flex-col z-50">
+    <div className="fixed bottom-0 left-0 right-0 h-96 bg-white shadow-2xl border-t-2 border-gray-200 z-50 flex flex-col">
       {/* Header */}
       <div className="flex items-center justify-between p-4 border-b border-gray-200 bg-gray-50">
         <div className="flex items-center gap-4">
           <h2 className="text-lg font-semibold text-gray-900">{t('editor.execution.title')}</h2>
           
           <div className={`flex items-center gap-2 px-3 py-1 rounded-full border ${config.bg} ${config.border}`}>
-            <Icon aria-hidden="true" className={`w-4 h-4 ${config.color}`} />
+            <Icon className={`w-4 h-4 ${config.color}`} />
             <span className={`text-sm font-medium ${config.color}`}>{config.label}</span>
           </div>
 
@@ -103,7 +93,7 @@ export default function ExecutionPanel({
               disabled={stopping}
               className="flex items-center gap-2 px-3 py-1 text-sm text-red-600 hover:bg-red-50 rounded-lg transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
             >
-              <StopCircle aria-hidden="true" className="w-4 h-4" />
+              <StopCircle className="w-4 h-4" />
               {stopping ? t('detail.run.stopping') : t('editor.execution.stop')}
             </button>
           )}
@@ -112,15 +102,15 @@ export default function ExecutionPanel({
               onClick={onRunAgain}
               className="flex items-center gap-2 px-3 py-1 text-sm text-red-600 hover:bg-red-50 rounded-lg transition-colors"
             >
-              <Play aria-hidden="true" className="w-4 h-4" />
+              <Play className="w-4 h-4" />
               {t('editor.execution.runAgain')}
             </button>
           )}
-          <button aria-label={pageActionLabel('close')}
+          <button
             onClick={onClose}
             className="p-2 hover:bg-gray-200 rounded-lg transition-colors"
           >
-            <X aria-hidden="true" className="w-5 h-5" />
+            <X className="w-5 h-5" />
           </button>
         </div>
       </div>
@@ -135,7 +125,7 @@ export default function ExecutionPanel({
               : 'text-gray-600 hover:text-gray-900'
           }`}
         >
-          <Code aria-hidden="true" className="w-4 h-4 inline mr-2" />
+          <Code className="w-4 h-4 inline mr-2" />
           {t('editor.execution.tabResult')}
         </button>
         <button
@@ -146,7 +136,7 @@ export default function ExecutionPanel({
               : 'text-gray-600 hover:text-gray-900'
           }`}
         >
-          <FileText aria-hidden="true" className="w-4 h-4 inline mr-2" />
+          <FileText className="w-4 h-4 inline mr-2" />
           {t('editor.execution.tabLog')}
         </button>
       </div>
@@ -159,7 +149,7 @@ export default function ExecutionPanel({
             {execution.inputParams && Object.keys(execution.inputParams).length > 0 && (
               <div>
                 <h3 className="text-sm font-semibold text-gray-700 mb-2">{t('editor.execution.inputParams')}</h3>
-                <pre className="p-4 bg-gray-900 text-gray-300 rounded-lg text-xs font-mono overflow-x-auto">
+                <pre className="p-4 bg-gray-900 text-gray-300 rounded-lg text-xs overflow-x-auto font-mono">
                   {JSON.stringify(execution.inputParams, null, 2)}
                 </pre>
               </div>
@@ -169,7 +159,7 @@ export default function ExecutionPanel({
             {execution.status === 'success' && execution.outputResults && (
               <div>
                 <h3 className="text-sm font-semibold text-gray-700 mb-2">{t('editor.execution.outputResults')}</h3>
-                <pre className="p-4 bg-gray-900 text-gray-300 rounded-lg text-xs font-mono overflow-x-auto">
+                <pre className="p-4 bg-gray-900 text-gray-300 rounded-lg text-xs overflow-x-auto font-mono">
                   {JSON.stringify(execution.outputResults, null, 2)}
                 </pre>
               </div>
@@ -224,7 +214,7 @@ export default function ExecutionPanel({
               </div>
             ) : (
               <div className="text-center py-8 text-gray-500">
-                <FileText aria-hidden="true" className="w-12 h-12 mb-2 opacity-50 mx-auto" />
+                <FileText className="w-12 h-12 mx-auto mb-2 opacity-50" />
                 <p className="text-sm">{t('editor.execution.noLog')}</p>
               </div>
             )}

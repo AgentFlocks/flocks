@@ -316,12 +316,9 @@ export default function AccountMenu({
         {!collapsed && (
           <>
             <span className="min-w-0 flex-1">
-              {/* The role label ("Administrator" in en-US) is the wider of the
-                  two, so it is the one that truncates; the username keeps at
-                  least a few characters visible instead of collapsing to "a…". */}
               <span className="flex min-w-0 items-baseline gap-1.5">
-                <span className="min-w-[4ch] shrink-0 truncate text-sm font-semibold text-zinc-800 dark:text-zinc-100" title={username}>{username}</span>
-                <span className="min-w-0 truncate text-xs text-zinc-400 dark:text-zinc-500" title={roleLabel}>{roleLabel}</span>
+                <span className="min-w-0 truncate text-sm font-semibold text-zinc-800 dark:text-zinc-100">{username}</span>
+                <span className="shrink-0 whitespace-nowrap text-xs text-zinc-400 dark:text-zinc-500">{roleLabel}</span>
               </span>
               <ExtensionSlot name="layout.version" context={versionContext ?? { version }}>
                 {version && (

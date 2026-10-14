@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -8,6 +10,7 @@ from typing import Any
 import pytest
 from httpx import AsyncClient
 
+from flocks.hooks.pipeline import HookBase, HookPipeline
 from flocks.server.routes import workflow as workflow_routes
 from flocks.workflow import fs_store
 
@@ -873,6 +876,403 @@ async def test_webhook_route_authorizes_and_dispatches_trigger(
     assert body["inputs"]["payload"] == {"severity": "high"}
     assert isinstance(body["deliveryId"], str)
     assert "result" not in body
+
+
+@pytest.fixture
+def _stop_workflow_trigger_ingress():
+    """Register an ingress hook that refuses workflow trigger runs, as Pro does."""
+
+    class _StopTriggerIngress(HookBase):
+        def __init__(self) -> None:
+            self.operations: list[str] = []
+
+        async def ingress_before(self, ctx):
+            self.operations.append(str(ctx.input.get("operation")))
+            return {"execution": {"stop": True, "detail": "headless_evidence_missing"}}
+
+    hook = _StopTriggerIngress()
+    HookPipeline.reset()
+    HookPipeline._initialized = True
+    HookPipeline.register("test.workflow.trigger.ingress", hook)
+    yield hook
+    HookPipeline.reset()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("path", "request_kwargs"),
+    [
+        (
+            "/api/workflow/wf-1/triggers/hook-default/test",
+            {"json": {"body": {"severity": "high"}}},
+        ),
+        (
+            "/webhook/workflows/wf-1/hook-default",
+            {"headers": {"x-api-key": "demo-secret"}, "json": {"severity": "high"}},
+        ),
+    ],
+)
+async def test_trigger_routes_answer_extension_stop_with_403_and_reason(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+    _stop_workflow_trigger_ingress,
+    path: str,
+    request_kwargs: dict[str, Any],
+) -> None:
+    monkeypatch.setattr(
+        workflow_routes,
+        "_read_workflow_from_fs",
+        lambda workflow_id: {
+            "id": workflow_id,
+            "workflowJson": {
+                "start": "n1",
+                "nodes": [{"id": "n1", "type": "python", "code": "result = {'ok': True}"}],
+                "edges": [],
+                "triggers": [
+                    {
+                        "id": "hook-default",
+                        "type": "custom_webhook",
+                        "enabled": True,
+                        "auth": {"type": "api_key", "apiKey": "demo-secret"},
+                        "mapping": {"payload": "$.body"},
+                    }
+                ],
+            },
+        },
+    )
+
+    async def _must_not_run(**_kwargs: Any) -> dict[str, Any]:
+        raise AssertionError("a refused trigger run must not execute the workflow")
+
+    # The real trigger runtime runs the ingress lifecycle; only its effect is
+    # replaced, so the refusal travels the same way it does in production.
+    monkeypatch.setattr(
+        workflow_routes.default_trigger_runtime,
+        "_execute_workflow_effect",
+        _must_not_run,
+    )
+    # Webhook replays are remembered per process; start from a clean window.
+    monkeypatch.setattr(workflow_routes, "_webhook_deliveries", {})
+
+    response = await client.post(path, **request_kwargs)
+
+    assert response.status_code == 403, response.text
+    assert response.json()["message"] == (
+        "Workflow trigger stopped by extension: headless_evidence_missing"
+    )
+    assert _stop_workflow_trigger_ingress.operations == ["workflow.trigger.execute"]
+
+    # A refused delivery is not remembered: the same request is refused
+    # again instead of being answered as a duplicate.
+    retry = await client.post(path, **request_kwargs)
+    assert retry.status_code == 403, retry.text
+
+
+@pytest.mark.asyncio
+async def test_webhook_stopped_after_the_run_is_not_run_again_on_retry(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stop in ingress.after comes once the workflow ran: a retry is a duplicate (arch_v2)."""
+
+    class _StopAfterRun(HookBase):
+        async def ingress_after(self, ctx):
+            return {"execution": {"stop": True, "detail": "post_run_check_failed"}}
+
+    HookPipeline.reset()
+    HookPipeline._initialized = True
+    HookPipeline.register("test.workflow.trigger.after", _StopAfterRun())
+    monkeypatch.setattr(
+        workflow_routes,
+        "_read_workflow_from_fs",
+        lambda workflow_id: {
+            "id": workflow_id,
+            "workflowJson": {
+                "start": "n1",
+                "nodes": [{"id": "n1", "type": "python", "code": "result = {'ok': True}"}],
+                "edges": [],
+                "triggers": [
+                    {
+                        "id": "hook-default",
+                        "type": "custom_webhook",
+                        "enabled": True,
+                        "auth": {"type": "api_key", "apiKey": "demo-secret"},
+                        "mapping": {"payload": "$.body"},
+                    }
+                ],
+            },
+        },
+    )
+    runs: list[dict[str, Any]] = []
+
+    async def _run(**kwargs: Any) -> dict[str, Any]:
+        runs.append(kwargs)
+        return {"matched": True, "executed": True, "inputs": {}}
+
+    monkeypatch.setattr(workflow_routes.default_trigger_runtime, "_execute_workflow_effect", _run)
+    monkeypatch.setattr(workflow_routes, "_webhook_deliveries", {})
+    request_kwargs = {"headers": {"x-api-key": "demo-secret"}, "json": {"severity": "high"}}
+
+    try:
+        first = await client.post("/webhook/workflows/wf-1/hook-default", **request_kwargs)
+        retry = await client.post("/webhook/workflows/wf-1/hook-default", **request_kwargs)
+    finally:
+        HookPipeline.reset()
+
+    assert first.status_code == 403, first.text
+    assert retry.status_code == 200, retry.text
+    assert retry.json()["duplicate"] is True
+    assert len(runs) == 1
+
+
+class _HeadlessIdentityContract(HookBase):
+    """The Pro ingress rule the 2026-10-11 report ran into (REG-004).
+
+    A headless workflow.* run without the top-level compatibility marker has
+    no identity and is refused with ``headless_evidence_missing``.
+    """
+
+    def __init__(self) -> None:
+        self.payloads: list[dict[str, Any]] = []
+
+    async def ingress_before(self, ctx):
+        payload = dict(ctx.input)
+        self.payloads.append(payload)
+        if (
+            payload.get("transport") == "headless"
+            and payload.get("legacy_compat") is not True
+            and str(payload.get("operation") or "").startswith("workflow.")
+        ):
+            return {"execution": {"stop": True, "detail": "headless_evidence_missing"}}
+        return {}
+
+
+@pytest.fixture
+def _headless_identity_contract():
+    hook = _HeadlessIdentityContract()
+    HookPipeline.reset()
+    HookPipeline._initialized = True
+    HookPipeline.register("test.headless.identity", hook)
+    yield hook
+    HookPipeline.reset()
+
+
+def _webhook_workflow(auth: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": "wf-1",
+        "workflowJson": {
+            "start": "n1",
+            "nodes": [{"id": "n1", "type": "python", "code": "outputs['answer'] = 42"}],
+            "edges": [],
+            "triggers": [
+                {
+                    "id": "hook-default",
+                    "type": "webhook",
+                    "enabled": True,
+                    "auth": auth,
+                    "mapping": {"payload": "$.body"},
+                }
+            ],
+        },
+    }
+
+
+@pytest.mark.asyncio
+async def test_verified_webhook_runs_with_its_verified_auth_under_headless_identity_rule(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+    _headless_identity_contract,
+) -> None:
+    monkeypatch.setattr(
+        workflow_routes,
+        "_read_workflow_from_fs",
+        lambda workflow_id: _webhook_workflow({"type": "api_key", "apiKey": "ledger-secret"}),
+    )
+    monkeypatch.setattr(workflow_routes, "_webhook_deliveries", {})
+
+    response = await client.post(
+        "/webhook/workflows/wf-1/hook-default",
+        headers={"x-api-key": "ledger-secret"},
+        json={"alert": "synthetic"},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["executed"] is True
+    carrier = _headless_identity_contract.payloads[0]
+    assert carrier["operation"] == "workflow.trigger.execute"
+    assert carrier["legacy_compat"] is True
+    assert carrier["evidence"] == {
+        "auth_scheme": "api_key",
+        "api_key_id": "sha256:" + hashlib.sha256(b"ledger-secret").hexdigest(),
+        "trigger_id": "hook-default",
+        "trigger_type": "webhook",
+    }
+    assert "ledger-secret" not in repr(carrier["evidence"])
+
+    history = await client.get("/api/workflow/wf-1/history")
+    assert history.status_code == 200, history.text
+    assert [item["status"] for item in history.json()] == ["success"]
+
+
+@pytest.mark.asyncio
+async def test_hmac_webhook_carries_its_verified_scheme(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+    _headless_identity_contract,
+) -> None:
+    monkeypatch.setattr(
+        workflow_routes,
+        "_read_workflow_from_fs",
+        lambda workflow_id: _webhook_workflow({"type": "hmac", "secretRef": "hook_secret"}),
+    )
+    monkeypatch.setattr(workflow_routes, "_resolve_trigger_secret", lambda ref: "hmac-secret")
+    monkeypatch.setattr(workflow_routes, "_webhook_deliveries", {})
+    raw = json.dumps({"alert": "synthetic"}).encode("utf-8")
+    signature = hmac.new(b"hmac-secret", raw, hashlib.sha256).hexdigest()
+
+    response = await client.post(
+        "/webhook/workflows/wf-1/hook-default",
+        headers={"x-flocks-signature": f"sha256={signature}", "content-type": "application/json"},
+        content=raw,
+    )
+
+    assert response.status_code == 200, response.text
+    carrier = _headless_identity_contract.payloads[0]
+    assert carrier["legacy_compat"] is True
+    assert carrier["evidence"]["auth_scheme"] == "hmac"
+    assert "hmac-secret" not in repr(carrier["evidence"])
+
+
+@pytest.mark.asyncio
+async def test_wrong_key_never_reaches_the_ingress_hooks(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+    _headless_identity_contract,
+) -> None:
+    monkeypatch.setattr(
+        workflow_routes,
+        "_read_workflow_from_fs",
+        lambda workflow_id: _webhook_workflow({"type": "api_key", "apiKey": "ledger-secret"}),
+    )
+
+    response = await client.post(
+        "/webhook/workflows/wf-1/hook-default",
+        headers={"x-api-key": "guessed"},
+        json={"legacy_compat": True, "evidence": {"api_key_id": "forged"}},
+    )
+
+    assert response.status_code == 401
+    assert _headless_identity_contract.payloads == []
+
+
+@pytest.mark.asyncio
+async def test_trigger_test_run_carries_no_verified_key_and_a_refusal_is_recorded(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """v2: an operator-issued test run is the compatibility carrier, but no key was verified."""
+
+    class _RefuseAll(HookBase):
+        def __init__(self) -> None:
+            self.payloads: list[dict[str, Any]] = []
+
+        async def ingress_before(self, ctx):
+            self.payloads.append(dict(ctx.input))
+            return {"execution": {"stop": True, "detail": "refused_for_test"}}
+
+    hook = _RefuseAll()
+    HookPipeline.reset()
+    HookPipeline._initialized = True
+    HookPipeline.register("test.refuse.all", hook)
+    monkeypatch.setattr(
+        workflow_routes,
+        "_read_workflow_from_fs",
+        lambda workflow_id: _webhook_workflow({"type": "api_key", "apiKey": "ledger-secret"}),
+    )
+    try:
+        response = await client.post(
+            "/api/workflow/wf-1/triggers/hook-default/test",
+            json={"body": {"legacy_compat": True, "evidence": {"api_key_id": "forged"}}},
+        )
+        history = (await client.get("/api/workflow/wf-1/history")).json()
+    finally:
+        HookPipeline.reset()
+
+    assert response.status_code == 403, response.text
+    carrier = hook.payloads[0]
+    assert carrier["legacy_compat"] is True
+    assert "api_key_id" not in carrier["evidence"] and "key_id" not in carrier["evidence"]
+    assert len(history) == 1
+    assert history[0]["status"] == "error"
+    assert history[0]["triggerId"] == "hook-default"
+    assert history[0]["errorMessage"] == (
+        "Run refused by extension (hook=test.refuse.all, stage=ingress.before)"
+    )
+
+
+@pytest.mark.asyncio
+async def test_refused_run_record_never_stores_the_extension_detail(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _ChattyRefusal(HookBase):
+        async def ingress_before(self, ctx):
+            return {"execution": {"stop": True, "detail": 'denied: password "test-secret" in alert'}}
+
+    HookPipeline.reset()
+    HookPipeline._initialized = True
+    HookPipeline.register("test.chatty.refusal", _ChattyRefusal())
+    monkeypatch.setattr(
+        workflow_routes,
+        "_read_workflow_from_fs",
+        lambda workflow_id: _webhook_workflow({"type": "api_key", "apiKey": "ledger-secret"}),
+    )
+    monkeypatch.setattr(workflow_routes, "_webhook_deliveries", {})
+    try:
+        response = await client.post(
+            "/webhook/workflows/wf-1/hook-default",
+            headers={"x-api-key": "ledger-secret"},
+            json={"alert": "synthetic"},
+        )
+        history = (await client.get("/api/workflow/wf-1/history")).json()
+    finally:
+        HookPipeline.reset()
+
+    assert response.status_code == 403
+    assert len(history) == 1
+    assert "test-secret" not in json.dumps(history)
+    assert history[0]["errorMessage"] == "Run refused by extension (hook=test.chatty.refusal, stage=ingress.before)"
+
+
+@pytest.mark.asyncio
+async def test_stop_after_the_run_does_not_add_a_refused_record(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _StopAfter(HookBase):
+        async def ingress_after(self, ctx):
+            return {"execution": {"stop": True, "detail": "post_run_stop"}}
+
+    HookPipeline.reset()
+    HookPipeline._initialized = True
+    HookPipeline.register("test.stop.after", _StopAfter())
+    monkeypatch.setattr(
+        workflow_routes,
+        "_read_workflow_from_fs",
+        lambda workflow_id: _webhook_workflow({"type": "api_key", "apiKey": "ledger-secret"}),
+    )
+    monkeypatch.setattr(workflow_routes, "_webhook_deliveries", {})
+    try:
+        await client.post(
+            "/webhook/workflows/wf-1/hook-default",
+            headers={"x-api-key": "ledger-secret"},
+            json={"alert": "synthetic"},
+        )
+        history = (await client.get("/api/workflow/wf-1/history")).json()
+    finally:
+        HookPipeline.reset()
+
+    assert [item["status"] for item in history] == ["success"]
 
 
 @pytest.mark.asyncio

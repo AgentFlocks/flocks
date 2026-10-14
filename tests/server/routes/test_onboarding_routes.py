@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import contextvars
+import json
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import ANY, AsyncMock
 
 import pytest
 
+from flocks.security.secrets import SecretChanges, SecretManager
 from flocks.server.routes import onboarding as onboarding_routes
 
 
@@ -41,16 +44,11 @@ def default_threatbook_intel_status(monkeypatch: pytest.MonkeyPatch):
 @pytest.mark.asyncio
 async def test_apply_rollback_restores_mcp_runtime(monkeypatch: pytest.MonkeyPatch):
     config_snapshot = {"mcp": {"threatbook_mcp": {"url": "old"}}}
-    secret_snapshot = {"threatbook_mcp_key": "old-key"}
     previous_config = {"type": "remote", "url": "old"}
     restore = AsyncMock()
     reload_runtime = AsyncMock()
 
-    monkeypatch.setattr(
-        onboarding_routes,
-        "_snapshot_config_and_secret_state",
-        lambda: (config_snapshot, secret_snapshot),
-    )
+    monkeypatch.setattr(onboarding_routes, "_snapshot_config_state", lambda: config_snapshot)
     monkeypatch.setattr(
         onboarding_routes,
         "_load_raw_mcp_server_config",
@@ -77,11 +75,32 @@ async def test_apply_rollback_restores_mcp_runtime(monkeypatch: pytest.MonkeyPat
     restore.assert_awaited_once_with(
         "threatbook_mcp",
         config_snapshot,
-        secret_snapshot,
+        ANY,
         previous_config,
         True,
     )
+    assert isinstance(restore.await_args.args[2], SecretChanges)
     reload_runtime.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_validation_takes_back_only_the_secrets_it_wrote(tmp_path, monkeypatch: pytest.MonkeyPatch):
+    path = tmp_path / ".secret.json"
+    path.write_text(json.dumps({"threatbook_llm_key": "saved"}))
+    manager = SecretManager(path)
+    config = {"provider": {}}
+    monkeypatch.setattr(onboarding_routes.ConfigWriter, "_read_raw", lambda: json.loads(json.dumps(config)))
+    monkeypatch.setattr(onboarding_routes.ConfigWriter, "_write_raw", lambda data: None)
+    monkeypatch.setattr(onboarding_routes, "_reload_runtime_state", AsyncMock())
+
+    async with onboarding_routes._temporary_config_and_secret_state():
+        manager.set("threatbook_llm_key", "candidate")
+        # Saved meanwhile by another request or the CLI, outside this validation.
+        contextvars.Context().run(SecretManager(path).set, "virustotal_api_key", "saved meanwhile")
+
+    assert json.loads(path.read_text()) == {
+        "threatbook_llm_key": "saved", "virustotal_api_key": "saved meanwhile",
+    }
 
 
 @pytest.mark.asyncio

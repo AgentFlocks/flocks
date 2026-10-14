@@ -179,3 +179,47 @@ async def test_legacy_alert_migration_feeds_host_sink_without_duplicate_record(t
             assert db.execute("SELECT rowid FROM alert_records WHERE dedup_key=?", ("new",)).fetchone()[0] > 7
             assert db.execute("SELECT COUNT(*) FROM alert_records").fetchone()[0] == 2
     await asyncio.to_thread(verify)
+
+
+def test_evidence_with_nul_is_persisted_escaped_and_restorable(dashboard):
+    """Sangfor SE evidence can hold U+0000, which jsonb and text reject (arch_v2)."""
+    from flocks.db.json_nul import NUL_ESCAPED_KEY, restore_nul_from_json
+
+    evidence = "observed\x00payload\\path"
+    alert = _alert("nul-evidence", threat_name="bad\x00name", _sip_raw={"event_evidence": evidence})
+
+    assert persist_triage_alerts([alert], "nul")["inserted_rows"] == 1
+
+    with sync_query.connect(readonly=True) as db:
+        row = db.execute(
+            "SELECT threat_name, record_json FROM alert_records WHERE dedup_key=?", ("nul-evidence",),
+        ).fetchone()
+    stored = json.loads(row["record_json"])
+    assert sorted(stored[NUL_ESCAPED_KEY]["strings"]) == ["/_sip_raw/event_evidence", "/threat_name"]
+    assert stored["_sip_raw"]["event_evidence"] == "observed\\u0000payload\\\\path"
+    assert row["threat_name"] == "bad\\u0000name"
+    restored = restore_nul_from_json(stored)
+    assert restored["_sip_raw"]["event_evidence"] == evidence
+    assert restored["threat_name"] == "bad\x00name"
+
+
+@pytest.mark.parametrize(("before", "after", "expected"), [
+    # A report gaining U+0000 on update: written as text, never "restored".
+    ("plain report", "new\x00evi\\dence", "new\\u0000evi\\dence"),
+    # A report losing it, now holding the literal text: left exactly as sent.
+    ("old\x00report", "literal \\u0000 text", "literal \\u0000 text"),
+])
+def test_triage_updates_keep_the_evidence_marker_consistent(dashboard, before, after, expected):
+    from flocks.db.json_nul import restore_nul_from_json
+
+    evidence = "observed\x00payload"
+    first = _alert("nul-update", triage_report=before, _sip_raw={"event_evidence": evidence})
+    assert persist_triage_alerts([first], "first")["inserted_rows"] == 1
+    second = _alert("nul-update", triage_report=after, _sip_raw={"event_evidence": "ignored on update"})
+    assert persist_triage_alerts([second], "second")["updated_rows"] == 1
+
+    with sync_query.connect(readonly=True) as db:
+        row = db.execute("SELECT record_json FROM alert_records WHERE dedup_key=?", ("nul-update",)).fetchone()
+    restored = restore_nul_from_json(json.loads(row["record_json"]))
+    assert restored["triage_report"] == expected
+    assert restored["_sip_raw"]["event_evidence"] == evidence

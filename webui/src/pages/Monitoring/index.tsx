@@ -1,11 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import {
-  Activity,
-  BarChart3,
-  Clock,
-  TrendingUp,
-  Zap,
-} from 'lucide-react';
+import { BarChart3, Activity, Clock, AlertCircle, TrendingUp, Zap } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import PageHeader from '@/components/common/PageHeader';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
@@ -142,14 +136,14 @@ export default function MonitoringPage() {
       <PageHeader
         title={t('pageTitle')}
         description={t('pageDescription')}
-        icon={<BarChart3 aria-hidden="true" className="w-8 h-8" />}
+        icon={<BarChart3 className="w-8 h-8" />}
       />
 
       {/* System Status Cards */}
       <div className="grid grid-cols-1 md:grid-cols-4 gap-6 mb-6">
         <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
           <div className="flex items-center justify-between mb-2">
-            <Activity aria-hidden="true" className="w-8 h-8 text-green-600" />
+            <Activity className="w-8 h-8 text-green-600" />
             <span
               className={`px-2 py-1 rounded-full text-xs font-medium ${
                 status?.status === 'healthy'
@@ -172,7 +166,7 @@ export default function MonitoringPage() {
 
         <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
           <div className="flex items-center justify-between mb-2">
-            <Activity aria-hidden="true" className="w-8 h-8 text-red-600" />
+            <Activity className="w-8 h-8 text-red-600" />
           </div>
           <div className="text-xl font-bold text-gray-900">
             {status?.activeSessions ?? t('unavailable')}
@@ -182,7 +176,7 @@ export default function MonitoringPage() {
 
         <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
           <div className="flex items-center justify-between mb-2">
-            <Zap aria-hidden="true" className="w-8 h-8 text-purple-600" />
+            <Zap className="w-8 h-8 text-purple-600" />
           </div>
           <div className="text-xl font-bold text-gray-900">
             {status?.activeAgents ?? t('unavailable')}
@@ -192,7 +186,7 @@ export default function MonitoringPage() {
 
         <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
           <div className="flex items-center justify-between mb-2">
-            <TrendingUp aria-hidden="true" className="w-8 h-8 text-orange-600" />
+            <TrendingUp className="w-8 h-8 text-orange-600" />
           </div>
           <div className="text-xl font-bold text-gray-900">
             {metrics?.messageRate == null ? t('unavailable') : metrics.messageRate.toFixed(1)}
@@ -251,7 +245,7 @@ export default function MonitoringPage() {
         {/* LLM Performance */}
         <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
           <h3 className="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
-            <Clock aria-hidden="true" className="w-5 h-5" />
+            <Clock className="w-5 h-5" />
             {t('llmPerformance')}
           </h3>
           {llmPerformance.length === 0 ? (
@@ -285,7 +279,7 @@ export default function MonitoringPage() {
         {/* Tool Performance */}
         <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
           <h3 className="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
-            <Zap aria-hidden="true" className="w-5 h-5" />
+            <Zap className="w-5 h-5" />
             {t('toolPerformance')}
           </h3>
           {toolPerformance.length === 0 ? (
@@ -322,7 +316,7 @@ export default function MonitoringPage() {
         <h3 className="text-lg font-semibold text-gray-900 mb-4">{t('performanceTrend')}</h3>
         <div className="h-64 flex items-center justify-center border-2 border-dashed border-gray-300 rounded-lg">
           <div className="text-center text-gray-500">
-            <BarChart3 aria-hidden="true" className="w-12 h-12 mb-2 text-gray-400 mx-auto" />
+            <BarChart3 className="w-12 h-12 mx-auto mb-2 text-gray-400" />
             <p>{t('chartHint')}</p>
             <p className="text-sm mt-1">{t('chartInstall')}</p>
           </div>

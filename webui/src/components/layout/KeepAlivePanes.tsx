@@ -51,7 +51,7 @@ function Pane({ active, location, routes }: PaneProps) {
         >
           {fullScreen ? element : (
             <div className="h-full overflow-y-auto">
-              <div className="p-6 min-h-full shrink-0">{element}</div>
+              <div className="min-h-full p-6">{element}</div>
             </div>
           )}
         </div>

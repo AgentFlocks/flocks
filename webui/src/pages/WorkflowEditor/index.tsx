@@ -1,4 +1,3 @@
-import { pageActionLabel } from '../pageActionLabel';
 import React, { useState, useCallback, useContext, useEffect, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useParams, useNavigate } from 'react-router-dom';
@@ -22,14 +21,14 @@ import {
   applyEdgeChanges,
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
-import {
-  AlertCircle,
-  ArrowLeft,
-  CheckCircle,
+import { 
+  Save, 
+  Play, 
+  ArrowLeft, 
+  Layout, 
   FileJson,
-  Layout,
-  Play,
-  Save,
+  AlertCircle,
+  CheckCircle,
   Trash2,
 } from 'lucide-react';
 import { workflowAPI, Workflow, WorkflowExecution, WorkflowJSON, WorkflowNode as APINode } from '@/api/workflow';
@@ -96,7 +95,6 @@ const nodeMiniMapColors: Record<string, string> = {
   subworkflow: '#fb923c',
 };
 
-
 type EdgeTheme = Record<WorkflowGraphEdgeRoute['kind'], {
   stroke: string;
   label: string;
@@ -107,27 +105,27 @@ type EdgeTheme = Record<WorkflowGraphEdgeRoute['kind'], {
 
 const LIGHT_EDGE_THEME: EdgeTheme = {
   default: {
-    stroke: 'var(--text-muted)',
-    label: 'var(--text-muted)',
-    labelBg: 'var(--bg-surface)',
+    stroke: '#94a3b8',
+    label: '#64748b',
+    labelBg: '#f8fafc',
     strokeWidth: 1.8,
   },
   branch: {
-    stroke: 'var(--text-secondary)',
-    label: 'var(--text-secondary)',
-    labelBg: 'var(--bg-subtle)',
+    stroke: '#d97706',
+    label: '#92400e',
+    labelBg: '#fffbeb',
     strokeWidth: 2.2,
   },
   loop: {
-    stroke: 'var(--text-secondary)',
-    label: 'var(--text-secondary)',
-    labelBg: 'var(--bg-subtle)',
+    stroke: '#8b5cf6',
+    label: '#6d28d9',
+    labelBg: '#f5f3ff',
     strokeWidth: 2,
   },
   back: {
-    stroke: 'var(--text-muted)',
-    label: 'var(--text-secondary)',
-    labelBg: 'var(--bg-surface)',
+    stroke: '#64748b',
+    label: '#475569',
+    labelBg: '#f8fafc',
     strokeWidth: 1.8,
     strokeDasharray: '6 5',
   },
@@ -135,27 +133,27 @@ const LIGHT_EDGE_THEME: EdgeTheme = {
 
 const DARK_EDGE_THEME: EdgeTheme = {
   default: {
-    stroke: 'var(--text-muted)',
-    label: 'var(--text-secondary)',
-    labelBg: 'var(--bg-surface)',
+    stroke: '#5a6573',
+    label: '#b8c2cc',
+    labelBg: '#303842',
     strokeWidth: 1.8,
   },
   branch: {
-    stroke: 'var(--text-secondary)',
-    label: 'var(--text-secondary)',
-    labelBg: 'var(--bg-subtle)',
+    stroke: '#f59e0b',
+    label: '#fbbf24',
+    labelBg: '#3d3424',
     strokeWidth: 2.2,
   },
   loop: {
-    stroke: 'var(--text-secondary)',
-    label: 'var(--text-secondary)',
-    labelBg: 'var(--bg-subtle)',
+    stroke: '#a78bfa',
+    label: '#c4b5fd',
+    labelBg: '#363047',
     strokeWidth: 2,
   },
   back: {
-    stroke: 'var(--text-muted)',
-    label: 'var(--text-secondary)',
-    labelBg: 'var(--bg-surface)',
+    stroke: '#5a6573',
+    label: '#b8c2cc',
+    labelBg: '#303842',
     strokeWidth: 1.8,
     strokeDasharray: '6 5',
   },
@@ -811,7 +809,7 @@ export default function WorkflowEditor() {
     return (
       <div className="flex items-center justify-center h-screen">
         <div className="text-center">
-          <AlertCircle aria-hidden="true" className="w-16 h-16 text-red-500 mb-4 mx-auto" />
+          <AlertCircle className="w-16 h-16 text-red-500 mx-auto mb-4" />
           <p className="text-gray-600">{t('editor.notFound')}</p>
           <button
             onClick={() => navigate('/workflows')}
@@ -827,13 +825,13 @@ export default function WorkflowEditor() {
   return (
     <div className="h-screen flex flex-col bg-gray-50 dark:bg-zinc-950">
       {/* 顶部工具栏 */}
-      <div className="bg-white border-b border-gray-200 pl-14 pr-6 py-4 flex flex-wrap items-center justify-between gap-y-2 lg:pl-6 dark:border-zinc-800 dark:bg-zinc-950">
-        <div className="flex items-center gap-4 min-w-0">
-          <button aria-label={pageActionLabel('back')}
+      <div className="bg-white border-b border-gray-200 px-6 py-4 flex items-center justify-between dark:border-zinc-800 dark:bg-zinc-950">
+        <div className="flex items-center gap-4">
+          <button
             onClick={() => navigate('/workflows')}
             className="p-2 hover:bg-gray-100 rounded-lg transition-colors dark:text-zinc-300 dark:hover:bg-zinc-800"
           >
-            <ArrowLeft aria-hidden="true" className="w-5 h-5" />
+            <ArrowLeft className="w-5 h-5" />
           </button>
           <div>
             <h1 className="text-xl font-semibold text-gray-900 dark:text-zinc-100">{getWorkflowDisplayName(workflow, i18n.language)}</h1>
@@ -842,9 +840,9 @@ export default function WorkflowEditor() {
           {validationResult && (
             <div className="flex items-center gap-2">
               {validationResult.valid ? (
-                <CheckCircle aria-hidden="true" className="w-5 h-5 text-green-600" />
+                <CheckCircle className="w-5 h-5 text-green-600" />
               ) : (
-                <AlertCircle aria-hidden="true" className="w-5 h-5 text-red-600" />
+                <AlertCircle className="w-5 h-5 text-red-600" />
               )}
               <span className={`text-sm ${validationResult.valid ? 'text-green-600' : 'text-red-600'}`}>
                 {validationResult.valid ? t('editor.validPass') : t('editor.validFail')}
@@ -853,35 +851,35 @@ export default function WorkflowEditor() {
           )}
         </div>
 
-        <div className="flex items-center gap-3 flex-wrap">
+        <div className="flex items-center gap-3">
           <button
             onClick={() => setShowNodeToolbar(!showNodeToolbar)}
             className={`flex items-center gap-2 px-4 py-2 border border-gray-300 rounded-lg transition-colors ${
               showNodeToolbar ? 'bg-red-50 text-red-700 border-red-500 dark:bg-red-950/30 dark:text-red-200 dark:border-red-500/40' : 'text-gray-700 bg-white hover:bg-gray-50 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200 dark:hover:bg-zinc-800'
             }`}
           >
-            <Trash2 aria-hidden="true" className="w-4 h-4" />
+            <Trash2 className="w-4 h-4" />
             {showNodeToolbar ? t('editor.hideToolbar') : t('editor.showToolbar')}
           </button>
           <button
             onClick={handleAutoLayout}
             className="flex items-center gap-2 px-4 py-2 text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200 dark:hover:bg-zinc-800"
           >
-            <Layout aria-hidden="true" className="w-4 h-4" />
+            <Layout className="w-4 h-4" />
             {t('editor.autoLayout')}
           </button>
           <button
             onClick={handleValidate}
             className="flex items-center gap-2 px-4 py-2 text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200 dark:hover:bg-zinc-800"
           >
-            <CheckCircle aria-hidden="true" className="w-4 h-4" />
+            <CheckCircle className="w-4 h-4" />
             {t('editor.validate')}
           </button>
           <button
             onClick={handleExport}
             className="flex items-center gap-2 px-4 py-2 text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200 dark:hover:bg-zinc-800"
           >
-            <FileJson aria-hidden="true" className="w-4 h-4" />
+            <FileJson className="w-4 h-4" />
             {t('editor.export')}
           </button>
           <button
@@ -889,14 +887,14 @@ export default function WorkflowEditor() {
             disabled={saving}
             className="flex items-center gap-2 px-4 py-2 text-white bg-red-600 rounded-lg hover:bg-red-700 transition-colors disabled:opacity-50"
           >
-            <Save aria-hidden="true" className="w-4 h-4" />
+            <Save className="w-4 h-4" />
             {saving ? t('editor.saving') : t('common:button.save')}
           </button>
           <button
             onClick={handleRun}
             className="flex items-center gap-2 px-4 py-2 text-white bg-green-600 rounded-lg hover:bg-green-700 transition-colors"
           >
-            <Play aria-hidden="true" className="w-4 h-4" />
+            <Play className="w-4 h-4" />
             {t('editor.execute')}
           </button>
         </div>
@@ -982,8 +980,7 @@ export default function WorkflowEditor() {
             style={{ backgroundColor: isDark ? '#303842' : '#f9fafb' }}
           />
           
-          {/* 图例（工具栏展开时由工具栏的节点类型列表替代，避免两者叠在左上角） */}
-          {!showNodeToolbar && (
+          {/* 图例 */}
           <Panel position="top-left" className="bg-white rounded-lg shadow-lg p-4 dark:border dark:border-zinc-800 dark:bg-zinc-900 dark:shadow-xl dark:shadow-black/30">
             <h3 className="text-sm font-semibold text-gray-900 mb-3 dark:text-zinc-100">{t('editor.nodeTypesLabel')}</h3>
             <div className="space-y-2">
@@ -995,7 +992,6 @@ export default function WorkflowEditor() {
               ))}
             </div>
           </Panel>
-          )}
 
           {/* 统计信息 */}
           <Panel position="top-right" className="bg-white rounded-lg shadow-lg p-4 dark:border dark:border-zinc-800 dark:bg-zinc-900 dark:shadow-xl dark:shadow-black/30">

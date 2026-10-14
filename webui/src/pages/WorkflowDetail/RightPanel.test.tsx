@@ -112,46 +112,6 @@ describe('RightPanel', () => {
     expect(screen.getByText('chat tab')).toBeInTheDocument();
   });
 
-  it('窄屏 overlay 模式铺满画布区域，关闭时不占位', () => {
-    const { container, rerender } = render(
-      <RightPanel
-        workflow={makeWorkflow()}
-        open
-        width={420}
-        overlay
-      />,
-    );
-
-    const root = container.firstElementChild as HTMLElement;
-    expect(root.className).toContain('absolute');
-    expect(root.className).toContain('inset-0');
-    expect(root.style.width).toBe('');
-
-    rerender(
-      <RightPanel
-        workflow={makeWorkflow()}
-        open={false}
-        width={420}
-        overlay
-      />,
-    );
-    expect((container.firstElementChild as HTMLElement).className).toContain('hidden');
-  });
-
-  it('桌面模式仍按传入宽度并排显示', () => {
-    const { container } = render(
-      <RightPanel
-        workflow={makeWorkflow()}
-        open
-        width={420}
-      />,
-    );
-
-    const root = container.firstElementChild as HTMLElement;
-    expect(root.style.width).toBe('420px');
-    expect(root.className).not.toContain('absolute');
-  });
-
   it('只在概览 Tab 显示删除工作流按钮', async () => {
     const user = userEvent.setup();
 

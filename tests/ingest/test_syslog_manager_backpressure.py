@@ -253,7 +253,8 @@ async def test_stop_workflow_signals_running_thread(
     )
     manager._worker_pools[workflow_id] = [worker]
 
-    assert await asyncio.wait_for(asyncio.to_thread(started.wait, 1.0), timeout=2.0)
+    # A loaded machine can take well over a second to start the worker thread.
+    assert await asyncio.wait_for(asyncio.to_thread(started.wait, 10.0), timeout=15.0)
     assert initial_cancel_states == [False]
     assert not stopped.is_set()
     await manager.stop_workflow(workflow_id)

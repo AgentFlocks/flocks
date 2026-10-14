@@ -435,9 +435,13 @@ async def test_abort_cascades_to_children_background_tasks_and_questions(monkeyp
     monkeypatch.setattr(Runner, "cancel", classmethod(lambda cls, sid: True))
     monkeypatch.setattr(Runner, "cancel_children", classmethod(lambda cls, sid: 2))
     monkeypatch.setattr("flocks.server.routes.question.reject_session_questions", AsyncMock(return_value=1))
+    # Background runs live in the manager of the instance that launched them:
+    # the abort reaches every instance's manager, not only the request's own.
     manager = MagicMock()
     manager.cancel_by_parent_session_id.return_value = 3
-    monkeypatch.setattr("flocks.task.background.get_background_manager", lambda: manager)
+    other_instance = MagicMock()
+    other_instance.cancel_by_parent_session_id.return_value = 1
+    monkeypatch.setattr("flocks.task.background.all_background_managers", lambda: [manager, other_instance])
     monkeypatch.setattr(event_routes, "publish_event", AsyncMock())
     logged = []
     monkeypatch.setattr(session_routes.log, "info", lambda event, payload=None: logged.append((event, payload)))
@@ -445,9 +449,10 @@ async def test_abort_cascades_to_children_background_tasks_and_questions(monkeyp
     assert await session_routes._abort_session_processing("ses_parent") is True
     payload = next(p for e, p in logged if e == "session.aborted")
     assert payload["children_loops_aborted"] == 2
-    assert payload["bg_tasks_cancelled"] == 3
+    assert payload["bg_tasks_cancelled"] == 4
     assert payload["questions_rejected"] == 1
     manager.cancel_by_parent_session_id.assert_called_once_with("ses_parent")
+    other_instance.cancel_by_parent_session_id.assert_called_once_with("ses_parent")
 
 
 @pytest.mark.asyncio

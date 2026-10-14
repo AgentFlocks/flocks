@@ -49,7 +49,7 @@ class WebUIContractPageErrorBoundary extends Component<
       const message = this.state.message || this.props.fallbackMessage;
       return (
         <div className="flex items-start gap-3 rounded-xl border border-rose-200 bg-rose-50 p-4 text-rose-800">
-          <AlertCircle aria-hidden="true" className="mt-0.5 h-5 w-5 flex-shrink-0" />
+          <AlertCircle className="mt-0.5 h-5 w-5 flex-shrink-0" />
           <div>
             <div className="font-medium">{this.props.errorTitle}</div>
             <div className="mt-1 text-sm">{message}</div>
@@ -177,19 +177,15 @@ export default function PageRuntimeHost({ pageId, initialBuildHash }: PageRuntim
     reconnect: { maxRetries: 5, initialDelay: 2000 },
   });
 
-  // Contract pages render full-bleed (no layout padding), so the host's own
-  // status views bring their own; custom page components manage their own layout.
-  const statusClassName = 'p-4 lg:p-6';
-
   if (!pageId) {
-    return <div className={`${statusClassName} text-sm text-zinc-500`}>{t('host.missingPageId')}</div>;
+    return <div className="text-sm text-zinc-500">{t('host.missingPageId')}</div>;
   }
 
   if (loading) {
     if (!showLoading) return null;
     return (
-      <div className={`${statusClassName} flex items-center gap-2 text-sm text-zinc-500`}>
-        <Loader2 aria-hidden="true" className="h-4 w-4 animate-spin" />
+      <div className="flex items-center gap-2 text-sm text-zinc-500">
+        <Loader2 className="h-4 w-4 animate-spin" />
         {t('host.loading')}
       </div>
     );
@@ -197,27 +193,25 @@ export default function PageRuntimeHost({ pageId, initialBuildHash }: PageRuntim
 
   if (error) {
     return (
-      <div className={statusClassName}>
-        <div className="flex items-start gap-3 rounded-xl border border-amber-200 bg-amber-50 p-4 text-amber-900">
-          <AlertCircle aria-hidden="true" className="mt-0.5 h-5 w-5 flex-shrink-0" />
-          <div>
-            <div className="font-medium">{t('host.unavailableTitle')}</div>
-            <div className="mt-1 text-sm">{error}</div>
-            <button
-              type="button"
-              onClick={() => void refreshPage(buildHash)}
-              className="mt-3 rounded-lg border border-amber-300 bg-white px-3 py-1.5 text-sm hover:bg-amber-100"
-            >
-              {t('host.retry')}
-            </button>
-          </div>
+      <div className="flex items-start gap-3 rounded-xl border border-amber-200 bg-amber-50 p-4 text-amber-900">
+        <AlertCircle className="mt-0.5 h-5 w-5 flex-shrink-0" />
+        <div>
+          <div className="font-medium">{t('host.unavailableTitle')}</div>
+          <div className="mt-1 text-sm">{error}</div>
+          <button
+            type="button"
+            onClick={() => void refreshPage(buildHash)}
+            className="mt-3 rounded-lg border border-amber-300 bg-white px-3 py-1.5 text-sm hover:bg-amber-100"
+          >
+            {t('host.retry')}
+          </button>
         </div>
       </div>
     );
   }
 
   if (!PageComponent) {
-    return <div className={`${statusClassName} text-sm text-zinc-500`}>{t('host.emptyComponent')}</div>;
+    return <div className="text-sm text-zinc-500">{t('host.emptyComponent')}</div>;
   }
 
   return (

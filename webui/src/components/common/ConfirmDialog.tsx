@@ -106,7 +106,6 @@ export function ConfirmProvider({ children }: { children: ReactNode }) {
           role="alertdialog"
           aria-modal="true"
           aria-labelledby={state.options.title ? titleId : undefined}
-          aria-label={state.options.title ? undefined : t('button.confirm')}
           aria-describedby={descriptionId}
           className="m-auto w-[calc(100%-2rem)] max-w-md overflow-visible bg-transparent p-0 backdrop:bg-black/40"
           onCancel={(event) => {
@@ -118,15 +117,13 @@ export function ConfirmProvider({ children }: { children: ReactNode }) {
             if (event.target === event.currentTarget) handleCancel();
           }}
         >
-          {/* dvh: on phones 100vh includes the browser bars and pushed the buttons off-screen. */}
           <div
-            data-ui-overlay="dialog"
-            className="flex max-h-[calc(100dvh-2rem)] w-full flex-col overflow-hidden rounded-xl border border-zinc-200 bg-white p-6 shadow-xl dark:border-zinc-700 dark:bg-zinc-900"
+            className="flex max-h-[calc(100vh-2rem)] w-full flex-col overflow-hidden rounded-xl border border-zinc-200 bg-white p-6 shadow-xl dark:border-zinc-700 dark:bg-zinc-900"
           >
             <div className="flex items-start gap-3">
               {state.options.variant === 'danger' && (
                 <div className="flex-shrink-0 rounded-lg bg-red-100 p-2 dark:bg-red-500/15">
-                  <AlertTriangle aria-hidden="true" className="h-5 w-5 text-red-600 dark:text-red-300" />
+                  <AlertTriangle className="h-5 w-5 text-red-600 dark:text-red-300" />
                 </div>
               )}
               <div className="min-w-0 flex-1">

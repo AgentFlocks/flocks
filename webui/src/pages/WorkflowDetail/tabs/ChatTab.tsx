@@ -527,13 +527,13 @@ export default function ChatTab({
   return (
     <div className="flex flex-col h-full">
       {/* ── Session toolbar ── */}
-      <div className="flex items-center justify-end gap-0.5 px-2 py-1 border-b border-gray-100 bg-white flex-shrink-0">
+      <div className="flex-shrink-0 flex items-center justify-end gap-0.5 px-2 py-1 border-b border-gray-100 bg-white">
         <button
           onClick={handleNewSession}
           className="flex items-center gap-1 px-1.5 py-1 rounded text-[10px] text-gray-400 hover:text-gray-600 hover:bg-gray-100 transition-colors"
           title={t('detail.chat.newSession')}
         >
-          <Plus aria-hidden="true" className="w-3 h-3" />
+          <Plus className="w-3 h-3" />
           <span>{t('detail.chat.newSession')}</span>
         </button>
         {sessions.length > 0 && (
@@ -547,11 +547,11 @@ export default function ChatTab({
               }`}
               title={t('detail.chat.historyLabel')}
             >
-              <Clock aria-hidden="true" className="w-3 h-3" />
+              <Clock className="w-3 h-3" />
               <span>{sessions.length}</span>
             </button>
             {showHistory && (
-              <div className="absolute right-0 top-full mt-1 w-52 bg-white rounded-lg border border-gray-200 shadow-lg z-50 overflow-hidden">
+              <div className="absolute right-0 top-full mt-1 z-50 w-52 bg-white rounded-lg border border-gray-200 shadow-lg overflow-hidden">
                 <div className="px-2.5 py-1.5 text-[9px] font-semibold text-gray-400 uppercase tracking-wider border-b border-gray-100">
                   {t('detail.chat.historyLabel')}
                 </div>
@@ -683,21 +683,21 @@ function WorkflowWelcome({
       <p className="mb-8 text-center text-sm font-medium text-gray-400">
         {t('detail.run.noHistory')}
       </p>
-      <div className="flex max-h-[min(560px,calc(100vh-260px))] w-full max-w-[420px] flex-col rounded-xl border border-gray-200 bg-white px-5 py-5 text-center shadow-sm overflow-hidden">
+      <div className="flex max-h-[min(560px,calc(100vh-260px))] w-full max-w-[420px] flex-col overflow-hidden rounded-xl border border-gray-200 bg-white px-5 py-5 text-center shadow-sm">
         <div className="flex-shrink-0">
-          <div className="flex h-11 w-11 items-center justify-center rounded-xl border border-red-100 bg-red-50 text-red-500 mx-auto">
-            <Bot aria-hidden="true" className="h-5 w-5" />
+          <div className="mx-auto flex h-11 w-11 items-center justify-center rounded-xl border border-red-100 bg-red-50 text-red-500">
+            <Bot className="h-5 w-5" />
           </div>
           <h3 className="mt-4 text-sm font-semibold text-gray-900">
             {t('detail.chat.welcome.editPanelTitle')}
           </h3>
-          <p className="mt-2 max-w-[320px] text-xs leading-relaxed text-gray-500 mx-auto">
+          <p className="mx-auto mt-2 max-w-[320px] text-xs leading-relaxed text-gray-500">
             {t('detail.chat.welcome.editPanelDesc', { name: workflowDisplayName })}
           </p>
         </div>
         <div
           data-testid="workflow-edit-guide-scroll"
-          className="mt-4 space-y-4 pr-1 text-left [scrollbar-width:thin] [scrollbar-color:#e4e4e7_transparent] min-h-0 overflow-y-auto"
+          className="mt-4 min-h-0 space-y-4 overflow-y-auto pr-1 text-left [scrollbar-width:thin] [scrollbar-color:#e4e4e7_transparent]"
         >
           <WorkflowGuideSection
             title={t('detail.chat.welcome.editSectionTitle')}
@@ -719,7 +719,7 @@ function WorkflowWelcome({
 
       {error && (
         <div className="mt-4 flex w-full max-w-[420px] items-center gap-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-600">
-          <AlertCircle aria-hidden="true" className="w-4 h-4 flex-shrink-0" />
+          <AlertCircle className="w-4 h-4 flex-shrink-0" />
           <span className="flex-1">{error}</span>
           <button onClick={onRetry} className="underline hover:no-underline flex-shrink-0">
             {t('detail.chat.welcome.retry')}

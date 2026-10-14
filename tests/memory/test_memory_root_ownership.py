@@ -7,6 +7,7 @@ from pathlib import Path
 import subprocess
 import sys
 from unittest.mock import patch
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import pytest
 
@@ -251,3 +252,103 @@ asyncio.run(main())
     assert await counts() == (2, 2, 2)
     assert await fts_search(Storage.get_db_path(), "prj_test", "alphaword")
     assert await fts_search(Storage.get_db_path(), "prj_test", "betaword")
+
+
+async def test_a_process_starting_while_another_writes_the_memory_index_waits_for_no_table(tmp_path):
+    await Storage.init()
+    data = tree(tmp_path, "starter", "starterword", "starter.md")
+    script = """
+import asyncio, os
+from pathlib import Path
+from flocks.memory.sync.indexer import MemoryIndexer
+from flocks.memory.config import MemoryConfig
+from flocks.storage import Storage
+async def main():
+    await Storage.init()
+    await MemoryIndexer('prj_test',Path(os.environ['HOME']),None,'unused',MemoryConfig()).sync()
+    await Storage.shutdown()
+asyncio.run(main())
+"""
+    parts = urlsplit(os.environ["FLOCKS_DB_DSN"])
+    # Waiting for a lock fails the start at once instead of hanging it.
+    dsn = urlunsplit(parts._replace(query=urlencode({**dict(parse_qsl(parts.query)), "lock_timeout": "5000"})))
+    env = {key: value for key, value in os.environ.items() if not key.startswith("FLOCKS_")}
+    env.update(HOME=str(data), USERPROFILE=str(data), FLOCKS_ROOT=str(data / "runtime"),
+               FLOCKS_DATA_DIR=str(data), FLOCKS_DB_DSN=dsn,
+               PYTHON_DOTENV_DISABLED="1", PYTHONDONTWRITEBYTECODE="1",
+               PYTHONPATH=str(Path(__file__).resolve().parents[2]))
+    async with Storage.transaction() as writer:
+        # Mid-replacement: chunks deleted, the file row not written yet. The
+        # writer also holds the lock every other writer holds on each table.
+        await writer.execute("DELETE FROM memory_chunks WHERE path = ?", ("writer.md",))
+        for (table,) in await writer.fetch_all("SELECT tablename FROM pg_tables WHERE schemaname = current_schema()"):
+            await writer.execute(f'LOCK TABLE "{table}" IN ROW EXCLUSIVE MODE')
+        started = await asyncio.to_thread(subprocess.run, [sys.executable, "-c", script],
+                                          cwd=data, env=env, capture_output=True, text=True, timeout=120)
+    assert started.returncode == 0, started.stderr + started.stdout
+    assert await fts_search(Storage.get_db_path(), "prj_test", "starterword")
+
+
+async def test_a_memory_index_write_chosen_as_deadlock_victim_runs_once_more():
+    import asyncpg
+
+    await Storage.init()
+    attempts = []
+
+    async def before_replace(db, entry):
+        attempts.append(entry["path"])
+
+    other = await asyncpg.connect(os.environ["FLOCKS_DB_DSN"], timeout=10)
+    try:
+        locks = other.transaction()
+        await locks.start()
+        await other.execute("LOCK TABLE memory_files IN SHARE MODE")
+        writing = asyncio.create_task(replace_memory_file_index(Storage.get_db_path(), file_entry={
+            "scope": "global", "scope_id": "", "path": "MEMORY.md",
+            "hash": compute_text_hash("deadlockword"), "mtime": 1, "size": 12,
+        }, chunks=[{
+            "id": "deadlock-chunk", "scope": "global", "scope_id": "", "path": "MEMORY.md",
+            "source": "memory", "start_line": 1, "end_line": 1, "hash": "chunk-hash", "text": "deadlockword",
+        }], before_replace=before_replace))
+        # The write has deleted its chunks and now waits for memory_files.
+        for _ in range(500):
+            if await other.fetchval(
+                "SELECT count(*) FROM pg_locks WHERE NOT granted AND relation = 'memory_files'::regclass"
+            ):
+                break
+            await asyncio.sleep(0.01)
+        else:
+            pytest.fail("the memory index write never waited for memory_files")
+        # Closing the cycle: PostgreSQL rolls back the write, which waited first.
+        await other.execute("LOCK TABLE memory_chunks IN SHARE MODE")
+        await locks.commit()
+        assert await asyncio.wait_for(writing, 30) == 1
+    finally:
+        await other.close()
+
+    assert attempts == ["MEMORY.md", "MEMORY.md"]
+    assert await counts() == (1, 1, 1)
+    assert await fts_search(Storage.get_db_path(), "prj_test", "deadlockword")
+
+
+async def test_a_memory_index_write_failing_otherwise_is_not_repeated():
+    await Storage.init()
+    attempts = []
+
+    async def before_replace(db, entry):
+        attempts.append(entry["path"])
+        raise MemoryOwnershipConflict("owned elsewhere")
+
+    with pytest.raises(MemoryOwnershipConflict):
+        await legacy_with(before_replace)
+    assert len(attempts) == 1 and await counts() == (0, 0, 0)
+
+
+async def legacy_with(before_replace, content="legacyword survives"):
+    await replace_memory_file_index(Storage.get_db_path(), file_entry={
+        "scope": "global", "scope_id": "", "path": "MEMORY.md",
+        "hash": compute_text_hash(content), "mtime": 1, "size": len(content),
+    }, chunks=[{
+        "id": "legacy-chunk", "scope": "global", "scope_id": "", "path": "MEMORY.md",
+        "source": "memory", "start_line": 1, "end_line": 1, "hash": "legacy-chunk-hash", "text": content,
+    }], before_replace=before_replace)

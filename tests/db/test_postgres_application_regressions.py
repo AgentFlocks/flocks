@@ -180,6 +180,13 @@ async def test_queue_finish_checks_terminal_state_and_generation(pg_backend):
     owner = await TaskStore.claim_execution(claimed.id, node_id="pg-owner", lease_seconds=60)
     await TaskStore.finish_queue_ref(claimed.id, expected_generation=owner.owner_generation)
     assert await TaskStore.get_queue_ref(claimed.id) is not None
+    # A live lease is never claimed again, not even by its own node: let it lapse first.
+    assert await TaskStore.claim_execution(claimed.id, node_id="pg-owner", lease_seconds=60) is None
+    db = await TaskStore._db()
+    await db.execute(
+        "UPDATE task_executions SET lease_expires_at = ? WHERE id = ?",
+        ((datetime.now(timezone.utc) - timedelta(seconds=5)).isoformat(), claimed.id),
+    )
     newer = await TaskStore.claim_execution(claimed.id, node_id="pg-owner", lease_seconds=60)
     newer.status = TaskStatus.COMPLETED
     assert await TaskStore.finish_execution(newer, node_id="pg-owner", expected_generation=newer.owner_generation)
@@ -212,6 +219,12 @@ async def test_recovery_requeue_and_bulk_reference_locking(pg_backend, monkeypat
     assert await TaskManager()._recover_stale_active_executions() == 0
     assert (await TaskStore.get_execution(execution.id)).owner_node_id == "peer-node"
     assert await TaskStore.requeue_running_refs(node_id="old-node") == 0
+    # Node identity is no proof of death: the peer's live lease stays put until it lapses.
+    assert await TaskStore.requeue_running_refs(node_id="peer-node") == 0
+    await db.execute(
+        "UPDATE task_executions SET lease_expires_at = ? WHERE id = ?",
+        ((datetime.now(timezone.utc) - timedelta(seconds=5)).isoformat(), execution.id),
+    )
     assert await TaskStore.requeue_running_refs(node_id="peer-node") == 1
     current = await TaskStore.get_execution(execution.id)
     await TaskStore.requeue_execution(

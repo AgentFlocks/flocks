@@ -217,6 +217,50 @@ async def test_session_last_scope_and_missing_id(runtime):
         await resolve_session(ExecOptions(runtime, session_id=first.id))
 
 
+async def test_last_finds_sessions_of_any_project_in_the_worktree(runtime):
+    from flocks.cli.headless import resolve_session
+    from flocks.session.session import Session
+    custom = await Session.create(project_id="prj_custom_cli", directory=str(runtime), agent="rex")
+    elsewhere = runtime / "elsewhere"
+    elsewhere.mkdir()
+    await Session.create(project_id="prj_custom_cli", directory=str(elsewhere), agent="rex")
+    last = await resolve_session(ExecOptions(runtime, last=True))
+    assert last.id == custom.id
+
+
+async def test_explicit_model_is_checked_then_pinned_to_the_session(runtime, monkeypatch):
+    from types import SimpleNamespace
+    from flocks.provider.provider import Provider
+    from flocks.session.message import Message, MessageRole
+    from flocks.session.session import Session
+    from flocks.session.session_loop import LoopResult, SessionLoop
+    monkeypatch.setattr(Provider, "get", lambda provider_id: SimpleNamespace(is_configured=lambda: True) if provider_id == "p" else None)
+    for bad, message in [("bogus", "provider/model"), ("p/", "provider/model"), ("/selected", "provider/model"),
+                         ("q/selected", "not configured")]:
+        rejected = await run_headless(ExecOptions(runtime, create_only=True, model=bad))
+        assert not rejected["success"] and message in rejected["error"], (bad, rejected)
+    assert await Session.list_all() == []
+    created = await run_headless(ExecOptions(runtime, create_only=True, model="p/selected"))
+    assert created["success"], created
+    stored = await Session.get_by_id(created["session_id"])
+    assert (stored.provider, stored.model, stored.model_pinned) == ("p", "selected", True)
+    used = []
+    async def loop(**kwargs):
+        used.append((kwargs["provider_id"], kwargs["model_id"]))
+        msg = await Message.create(kwargs["session_id"], MessageRole.ASSISTANT, "ok")
+        return LoopResult(action="stop", last_message=msg)
+    monkeypatch.setattr(SessionLoop, "run", loop)
+    sid = created["session_id"]
+    assert (await run_headless(ExecOptions(runtime, prompt="next", session_id=sid)))["success"]
+    # An explicit model on a later turn becomes the session's model, as in the WebUI.
+    assert (await run_headless(ExecOptions(runtime, prompt="switch", session_id=sid, model="p/other")))["success"]
+    assert (await run_headless(ExecOptions(runtime, prompt="again", last=True)))["success"]
+    assert used == [("p", "selected"), ("p", "other"), ("p", "other")]
+    # A rejected model leaves the session's model alone.
+    assert "not configured" in (await run_headless(ExecOptions(runtime, prompt="x", session_id=sid, model="q/selected")))["error"]
+    assert (await Session.get_by_id(sid)).model == "other"
+
+
 async def test_zero_budget_prevents_creation(runtime, monkeypatch):
     from flocks.session.session import Session
     create = AsyncMock()
@@ -312,6 +356,8 @@ async def test_real_session_loop_with_streaming_provider(runtime, monkeypatch, s
         assert len(calls) == (2 if scenario in {"tools", "denied"} else 1)
         assert result["usage"]["input_tokens"] == 3 * len(calls)
         assert any(event["type"] == "text_delta" for event in events)
+        # stream-json readers rebuild the answer by joining the deltas.
+        assert "".join(e["delta"] for e in events if e["type"] == "text_delta") == result["result"]
     if scenario == "tools":
         tool.execute.assert_awaited_once()
         assert any(e["type"] == "tool_end" and e["output"] == "tool-value" for e in events)

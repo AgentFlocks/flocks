@@ -1,39 +1,15 @@
-import PageDialog from '../PageDialog';
 import { useState, useEffect, useMemo, useCallback, useRef, useId } from 'react';
 import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
 import {
-  AlertCircle,
-  AlertTriangle,
-  ArrowDown,
-  ArrowUp,
-  Brain,
-  Check,
-  CheckCircle2,
-  ChevronDown,
-  Cog,
-  Cpu,
-  DollarSign,
-  ExternalLink,
-  Eye,
-  EyeOff,
-  Info,
-  Link2,
-  ListOrdered,
-  Loader2,
-  MessageSquare,
-  Pencil,
-  Plus,
-  Search,
-  Shield,
-  Star,
-  TestTube,
-  ToggleLeft,
-  ToggleRight,
-  Trash2,
-  Wrench,
-  X,
-  Zap,
+  Brain, Cog, TestTube, Trash2, Search,
+  Zap, Eye, EyeOff, Wrench, MessageSquare,
+  Link2, Link2Off, DollarSign, Cpu,
+  Plus, ToggleLeft, ToggleRight,
+  ChevronDown, Check, AlertCircle, Loader2,
+  X, Shield, Pencil, Star, AlertTriangle,
+  CheckCircle2, ArrowUp, ArrowDown, ListOrdered,
+  Info, ExternalLink,
 } from 'lucide-react';
 import PageHeader from '@/components/common/PageHeader';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
@@ -511,17 +487,17 @@ export default function ModelPage() {
   return (
     <div className="h-full flex flex-col">
       {/* Header */}
-      <PageHeader tone="ai"
+      <PageHeader
         title={t('pageTitle')}
         description={t('pageDescription')}
-        icon={<Brain aria-hidden="true" className="w-8 h-8" />}
+        icon={<Brain className="w-8 h-8" />}
         action={
           <div className="flex items-center gap-2">
             <button
               onClick={() => setShowAddProvider(true)}
               className="flex items-center gap-2 px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 transition-colors"
             >
-              <Plus aria-hidden="true" className="w-4 h-4" />
+              <Plus className="w-4 h-4" />
               {t('addProvider')}
             </button>
             {selectedProvider && (
@@ -529,7 +505,7 @@ export default function ModelPage() {
                 onClick={() => setShowAddModel(true)}
                 className="flex items-center gap-2 px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors"
               >
-                <Plus aria-hidden="true" className="w-4 h-4" />
+                <Plus className="w-4 h-4" />
                 {t('addModel')}
               </button>
             )}
@@ -550,15 +526,14 @@ export default function ModelPage() {
       />
 
       {/* Main Content: Provider List + Detail Panel */}
-      {/* Stacks vertically below md so the detail panel is not squeezed on phones */}
-      <div className="flex gap-3 flex-1 flex-col md:flex-row overflow-hidden min-h-0">
+      <div className="flex gap-3 flex-1 overflow-hidden min-h-0">
         {/* Provider List */}
-        <div className="flex flex-col w-full md:w-64 flex-shrink-0 min-w-0 max-h-[38vh] md:max-h-none">
+        <div className="w-64 flex-shrink-0 flex flex-col min-w-0">
           <div className="flex-1 overflow-y-auto space-y-1.5 pr-1">
             {configuredProviders.length === 0 ? (
               <div className="flex flex-col items-center justify-center py-12 text-center">
                 <div className="w-16 h-16 rounded-full bg-gray-100 flex items-center justify-center mb-3">
-                  <Brain aria-hidden="true" className="w-8 h-8 text-gray-400" />
+                  <Brain className="w-8 h-8 text-gray-400" />
                 </div>
                 <p className="text-sm font-medium text-gray-700 mb-1">{t('providerList.empty')}</p>
                 <p className="text-xs text-gray-500 mb-4">{t('providerList.emptyHint')}</p>
@@ -566,7 +541,7 @@ export default function ModelPage() {
                   onClick={() => setShowAddProvider(true)}
                   className="flex items-center gap-1.5 px-3 py-1.5 text-xs bg-slate-800 text-white rounded-lg hover:bg-slate-900 transition-colors"
                 >
-                  <Plus aria-hidden="true" className="w-3.5 h-3.5" />
+                  <Plus className="w-3.5 h-3.5" />
                   {t('providerList.addProvider')}
                 </button>
               </div>
@@ -599,7 +574,7 @@ export default function ModelPage() {
         </div>
 
         {/* Detail Panel */}
-        <div className="flex-1 bg-white rounded-lg shadow-sm border border-gray-200 min-h-0 overflow-hidden">
+        <div className="flex-1 bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden">
           {selectedProvider ? (
             <ProviderDetail
               key={selectedProvider.id}
@@ -619,7 +594,7 @@ export default function ModelPage() {
           ) : (
             <div className="h-full flex items-center justify-center">
               <EmptyState
-                icon={<Brain aria-hidden="true" className="w-16 h-16" />}
+                icon={<Brain className="w-16 h-16" />}
                 title={configuredProviders.length === 0 ? t('emptyDetail.addFirst') : t('emptyDetail.selectProvider')}
                 description={
                   configuredProviders.length === 0
@@ -770,7 +745,7 @@ function DashboardStrip({
       <div className="rounded-lg border p-3 bg-purple-50 text-purple-700 border-purple-200">
         <div className="flex items-center justify-between mb-1 opacity-70">
           <div className="flex items-center gap-2">
-            <Star aria-hidden="true" className="w-5 h-5" />
+            <Star className="w-5 h-5" />
             <span className="text-xs font-medium">{t('dashboard.defaultModel')}</span>
           </div>
           <button
@@ -778,18 +753,18 @@ function DashboardStrip({
             className="hover:opacity-100 opacity-60 transition-opacity"
             title={t('dashboard.setDefaultModel')}
           >
-            <Pencil aria-hidden="true" className="w-3.5 h-3.5" />
+            <Pencil className="w-3.5 h-3.5" />
           </button>
         </div>
-        <div className="text-lg font-bold truncate" title={defaultModel ? `${defaultModel.provider_id}/${defaultModel.model_id}` : undefined}>
+        <div className="text-lg font-bold truncate">
           {defaultModel ? defaultModel.model_id : t('dashboard.noDefaultModel')}
         </div>
         {defaultModel && (
-          <div className="text-xs opacity-60 truncate" title={defaultModel.provider_id}>{defaultModel.provider_id}</div>
+          <div className="text-xs opacity-60 truncate">{defaultModel.provider_id}</div>
         )}
       </div>
       <StatCard
-        icon={<ListOrdered aria-hidden="true" className="w-5 h-5" />}
+        icon={<ListOrdered className="w-5 h-5" />}
         label={t('dashboard.fallbackModels')}
         value={fallbackCount > 0
           ? t('dashboard.fallbackAvailability', { available: availableFallbackCount, total: fallbackCount })
@@ -799,16 +774,16 @@ function DashboardStrip({
         onClick={onEditFallbacks}
         title={t('dashboard.editFallbackModels')}
       />
-      <StatCard icon={<Link2 aria-hidden="true" className="w-5 h-5" />} label={t('dashboard.connected')} value={String(connectedCount)} color="green" />
-      <StatCard icon={<Cpu aria-hidden="true" className="w-5 h-5" />} label={t('dashboard.availableModels')} value={String(totalModels)} color="blue" />
+      <StatCard icon={<Link2 className="w-5 h-5" />} label={t('dashboard.connected')} value={String(connectedCount)} color="green" />
+      <StatCard icon={<Cpu className="w-5 h-5" />} label={t('dashboard.availableModels')} value={String(totalModels)} color="blue" />
       <StatCard
-        icon={<Brain aria-hidden="true" className="w-5 h-5" />}
+        icon={<Brain className="w-5 h-5" />}
         label={t('dashboard.totalTokens')}
         value={totalTokens > 0 ? formatTokenMillions(totalTokens) : t('dashboard.noUsage')}
         color="blue"
       />
       <StatCard
-        icon={<DollarSign aria-hidden="true" className="w-5 h-5" />}
+        icon={<DollarSign className="w-5 h-5" />}
         label={t('dashboard.totalCost')}
         value={totalCost ?? t('dashboard.noCost')}
         color="amber"
@@ -898,7 +873,7 @@ function ProviderCard({ provider, isSelected, connStatus, onClick, onConfigure }
         className="p-1.5 rounded text-gray-400 hover:text-gray-700 hover:bg-gray-100 flex-shrink-0"
         title={t('form.configure')}
       >
-        <Cog aria-hidden="true" className="w-3.5 h-3.5" />
+        <Cog className="w-3.5 h-3.5" />
       </button>
     </div>
   );
@@ -1024,7 +999,7 @@ function ProviderDetail({
               disabled={batchTesting || loadingModels || models.length === 0}
               className="flex items-center gap-1 px-2 py-1 text-xs border border-gray-300 text-gray-600 rounded hover:border-slate-400 hover:text-slate-800 hover:bg-slate-50 disabled:opacity-50"
             >
-              {batchTesting ? <Loader2 aria-hidden="true" className="w-3 h-3 animate-spin" /> : <TestTube aria-hidden="true" className="w-3 h-3" />}
+              {batchTesting ? <Loader2 className="w-3 h-3 animate-spin" /> : <TestTube className="w-3 h-3" />}
               {batchTesting ? t('detail.testing') : t('detail.batchTest')}
             </button>
           </div>
@@ -1036,7 +1011,7 @@ function ProviderDetail({
           </div>
         ) : models.length === 0 ? (
           <EmptyState
-            icon={<Brain aria-hidden="true" className="w-10 h-10" />}
+            icon={<Brain className="w-10 h-10" />}
             title={t('detail.noModels')}
             description={provider.configured ? t('detail.addModelHint') : t('detail.configureFirst')}
           />
@@ -1115,17 +1090,17 @@ function ModelCard({ model, enabled, testStatus, onOpenDetail, onTestModel, onTo
           )}
           {testStatus?.status === 'testing' && (
             <span className="inline-flex items-center gap-0.5 px-1 py-0.5 bg-amber-100 text-amber-800 text-[10px] rounded shrink-0">
-              <Loader2 aria-hidden="true" className="w-2.5 h-2.5 animate-spin" /> {t('status.testingModel')}
+              <Loader2 className="w-2.5 h-2.5 animate-spin" /> {t('status.testingModel')}
             </span>
           )}
           {testStatus?.status === 'success' && (
             <span className="inline-flex items-center gap-0.5 px-1 py-0.5 bg-green-100 text-green-700 text-[10px] rounded shrink-0" title={t('testSuccess')}>
-              <Link2 aria-hidden="true" className="w-2.5 h-2.5" /> {testStatus.latency ? `${testStatus.latency}ms` : t('status.available')}
+              <Link2 className="w-2.5 h-2.5" /> {testStatus.latency ? `${testStatus.latency}ms` : t('status.available')}
             </span>
           )}
           {testStatus?.status === 'failed' && (
             <span className="inline-flex items-center gap-0.5 px-1 py-0.5 bg-red-100 text-red-700 text-[10px] rounded shrink-0" title={testStatus.message ?? ''}>
-              <AlertCircle aria-hidden="true" className="w-2.5 h-2.5" /> {t('detail.failed')}
+              <AlertCircle className="w-2.5 h-2.5" /> {t('detail.failed')}
             </span>
           )}
           <span className="text-[11px] text-gray-400 font-mono break-all" title={`${model.provider_id}/${model.id}`}>
@@ -1140,10 +1115,10 @@ function ModelCard({ model, enabled, testStatus, onOpenDetail, onTestModel, onTo
           )}
           {enabled && (
             <span className="flex items-center gap-0.5 shrink-0">
-              {hasTools && <span className="text-slate-600" title={t('form.toolCall')}><Wrench aria-hidden="true" className="w-3 h-3" /></span>}
-              {hasVision && <span className="text-purple-500" title={t('form.vision')}><Eye aria-hidden="true" className="w-3 h-3" /></span>}
-              {hasReasoning && <span className="text-amber-500" title={t('form.reasoning')}><Zap aria-hidden="true" className="w-3 h-3" /></span>}
-              {model.capabilities?.supports_streaming && <span className="text-gray-400" title={t('form.streaming')}><MessageSquare aria-hidden="true" className="w-3 h-3" /></span>}
+              {hasTools && <span className="text-slate-600" title={t('form.toolCall')}><Wrench className="w-3 h-3" /></span>}
+              {hasVision && <span className="text-purple-500" title={t('form.vision')}><Eye className="w-3 h-3" /></span>}
+              {hasReasoning && <span className="text-amber-500" title={t('form.reasoning')}><Zap className="w-3 h-3" /></span>}
+              {model.capabilities?.supports_streaming && <span className="text-gray-400" title={t('form.streaming')}><MessageSquare className="w-3 h-3" /></span>}
             </span>
           )}
         </div>
@@ -1156,7 +1131,7 @@ function ModelCard({ model, enabled, testStatus, onOpenDetail, onTestModel, onTo
               className="p-1 rounded text-gray-400 hover:text-slate-700 hover:bg-slate-100 disabled:opacity-50"
               title={t('form.testConnection')}
             >
-              {testStatus?.status === 'testing' ? <Loader2 aria-hidden="true" className="w-4 h-4 animate-spin text-amber-600" /> : <TestTube aria-hidden="true" className="w-4 h-4" />}
+              {testStatus?.status === 'testing' ? <Loader2 className="w-4 h-4 animate-spin text-amber-600" /> : <TestTube className="w-4 h-4" />}
             </button>
           )}
           <button
@@ -1164,11 +1139,11 @@ function ModelCard({ model, enabled, testStatus, onOpenDetail, onTestModel, onTo
             className={`p-1 rounded ${enabled ? 'text-green-600 hover:text-slate-600' : 'text-gray-400 hover:text-green-600'}`}
             title={enabled ? t('status.disabled') : t('status.available')}
           >
-            {enabled ? <ToggleRight aria-hidden="true" className="w-4 h-4" /> : <ToggleLeft aria-hidden="true" className="w-4 h-4" />}
+            {enabled ? <ToggleRight className="w-4 h-4" /> : <ToggleLeft className="w-4 h-4" />}
           </button>
           {onDelete && (
             <button onClick={(e) => { e.stopPropagation(); onDelete(); }} className="p-1 rounded text-gray-400 hover:text-slate-700 hover:bg-slate-100" title={t('form.delete')}>
-              <Trash2 aria-hidden="true" className="w-4 h-4" />
+              <Trash2 className="w-4 h-4" />
             </button>
           )}
         </div>
@@ -1176,7 +1151,7 @@ function ModelCard({ model, enabled, testStatus, onOpenDetail, onTestModel, onTo
 
       {testStatus?.status === 'failed' && testStatus.message && (
         <div className="mt-1.5 flex items-start gap-1.5 px-2 py-1 bg-red-50 border border-red-200 rounded text-[11px] text-red-700">
-          <AlertCircle aria-hidden="true" className="w-3 h-3 mt-0.5 flex-shrink-0" />
+          <AlertCircle className="w-3 h-3 mt-0.5 flex-shrink-0" />
           <span className="break-all">{testStatus.message}</span>
         </div>
       )}
@@ -1518,7 +1493,7 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
               onClick={() => setStep('add-model')}
               className="flex items-center gap-1.5 px-4 py-2 text-sm text-slate-700 border border-slate-300 rounded-lg hover:bg-slate-50 transition-colors"
             >
-              <Plus aria-hidden="true" className="w-4 h-4" />
+              <Plus className="w-4 h-4" />
               {t('wizard.addCustomModel')}
             </button>
           ),
@@ -1535,7 +1510,7 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
                 onClick={resetModelFormState}
                 className="flex items-center gap-1.5 px-4 py-2 text-sm text-slate-700 border border-slate-300 rounded-lg hover:bg-slate-50 transition-colors"
               >
-                <Plus aria-hidden="true" className="w-4 h-4" />
+                <Plus className="w-4 h-4" />
                 {t('wizard.addAnother')}
               </button>
             ),
@@ -1588,7 +1563,7 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
       mode="create"
       entityType={step === 'add-model' ? 'Custom Model' : t('form.model')}
       entityName={step !== 'provider' ? savedProviderName : undefined}
-      icon={<Brain aria-hidden="true" className="w-5 h-5" />}
+      icon={<Brain className="w-5 h-5" />}
       rexSystemContext={rexContext}
       rexWelcomeMessage={rexWelcome}
       submitDisabled={sheetProps.submitDisabled}
@@ -1631,14 +1606,14 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
                         ) : (
                           <span className="text-gray-400">{t('form.selectProvider')}</span>
                         )}
-                        <ChevronDown aria-hidden="true" className={`w-4 h-4 text-gray-400 transition-transform ${showDropdown ? 'rotate-180' : ''}`} />
+                        <ChevronDown className={`w-4 h-4 text-gray-400 transition-transform ${showDropdown ? 'rotate-180' : ''}`} />
                       </button>
 
                       {showDropdown && (
-                        <div className="absolute mt-1 w-full bg-white border border-gray-200 rounded-lg shadow-lg max-h-[50vh] z-20 overflow-hidden">
+                        <div className="absolute z-20 mt-1 w-full bg-white border border-gray-200 rounded-lg shadow-lg max-h-[50vh] overflow-hidden">
                           <div className="p-2 border-b border-gray-100">
                             <div className="relative">
-                              <Search aria-hidden="true" className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-400" />
+                              <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-400" />
                               <input
                                 type="text"
                                 value={dropdownSearch}
@@ -1677,7 +1652,7 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
                                       <p className="text-xs text-gray-500 mt-0.5 truncate">{p.description}</p>
                                     </div>
                                     <span className="text-xs text-gray-400 flex-shrink-0">{t('status.models', { count: p.model_count })}</span>
-                                    {selectedCatalogId === p.id && <Check aria-hidden="true" className="w-4 h-4 text-slate-700 flex-shrink-0" />}
+                                    {selectedCatalogId === p.id && <Check className="w-4 h-4 text-slate-700 flex-shrink-0" />}
                                   </button>
                                 );
                               })
@@ -1755,7 +1730,7 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
                             className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-gray-400 hover:text-gray-600 rounded"
                             title={showApiKey ? t('form.hide') : t('form.show')}
                           >
-                            {showApiKey ? <EyeOff aria-hidden="true" className="w-4 h-4" /> : <Eye aria-hidden="true" className="w-4 h-4" />}
+                            {showApiKey ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
                           </button>
                         </div>
                         {isThreatBookLLMProviderId(selectedCatalogId) && (
@@ -1765,7 +1740,7 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
                             rel="noopener noreferrer"
                             className="mt-2 inline-flex items-center gap-1.5 rounded-lg border border-green-200 bg-green-50 px-3 py-2 text-sm font-medium text-green-700 transition-colors hover:border-green-300 hover:bg-green-100"
                           >
-                            <ExternalLink aria-hidden="true" className="h-4 w-4" />
+                            <ExternalLink className="h-4 w-4" />
                             {t('form.claimFreeKey')}
                           </a>
                         )}
@@ -1778,7 +1753,7 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
                         <div className={`flex items-start gap-2 p-3 rounded-lg text-sm ${
                           testResult.success ? 'bg-green-50 text-green-800 border border-green-200' : 'bg-red-50 text-red-800 border border-red-200'
                         }`}>
-                          {testResult.success ? <Check aria-hidden="true" className="w-4 h-4 mt-0.5 flex-shrink-0" /> : <AlertCircle aria-hidden="true" className="w-4 h-4 mt-0.5 flex-shrink-0" />}
+                          {testResult.success ? <Check className="w-4 h-4 mt-0.5 flex-shrink-0" /> : <AlertCircle className="w-4 h-4 mt-0.5 flex-shrink-0" />}
                           <span>{testResult.message}</span>
                         </div>
                       )}
@@ -1826,7 +1801,7 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
                               {selectedModelIds.size === selectedCatalog.models.length ? t('form.deselectAll') : t('form.selectAll')}
                             </button>
                           </div>
-                          <div className="border border-gray-200 rounded-lg max-h-64 divide-y divide-gray-100 overflow-y-auto">
+                          <div className="border border-gray-200 rounded-lg max-h-64 overflow-y-auto divide-y divide-gray-100">
                             {selectedCatalog.models.map(model => (
                               <label key={model.id} className="flex items-center gap-3 px-3 py-2 hover:bg-gray-50 cursor-pointer">
                                 <input
@@ -1864,7 +1839,7 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
                       )}
 
                       <div className="flex items-start gap-2 p-3 bg-slate-50 border border-slate-200 rounded-lg">
-                        <Shield aria-hidden="true" className="w-4 h-4 text-slate-600 mt-0.5 flex-shrink-0" />
+                        <Shield className="w-4 h-4 text-slate-600 mt-0.5 flex-shrink-0" />
                         <p className="text-xs text-slate-700">
                           {t('form.credentialNote')}
                         </p>
@@ -1882,7 +1857,7 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
               disabled={!canTest || testing || saving}
               className="flex items-center gap-2 px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 disabled:opacity-50 text-sm"
             >
-              {testing ? <Loader2 aria-hidden="true" className="w-4 h-4 animate-spin" /> : <TestTube aria-hidden="true" className="w-4 h-4" />}
+              {testing ? <Loader2 className="w-4 h-4 animate-spin" /> : <TestTube className="w-4 h-4" />}
               {testing ? t('form.testingConnection') : t('form.testConnection')}
             </button>
           </div>
@@ -1893,7 +1868,7 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
       {step === 'success' && (
         <div className="flex flex-col items-center justify-center py-8 text-center">
           <div className="w-16 h-16 rounded-full bg-green-100 flex items-center justify-center mb-4">
-            <CheckCircle2 aria-hidden="true" className="w-8 h-8 text-green-600" />
+            <CheckCircle2 className="w-8 h-8 text-green-600" />
           </div>
           <h3 className="text-lg font-semibold text-gray-900 mb-2">{t('wizard.providerSaved')}</h3>
           <p className="text-sm text-gray-500 max-w-xs">
@@ -1912,13 +1887,13 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
         <div className="space-y-4">
           {addedModelCount === 0 && (
             <div className="flex items-start gap-2 p-3 bg-amber-50 border border-amber-200 rounded-lg">
-              <AlertTriangle aria-hidden="true" className="w-4 h-4 text-amber-600 mt-0.5 flex-shrink-0" />
+              <AlertTriangle className="w-4 h-4 text-amber-600 mt-0.5 flex-shrink-0" />
               <p className="text-xs text-amber-800">{t('wizard.noModelsNote')}</p>
             </div>
           )}
           {addedModelCount > 0 && !modelTestResult && (
             <div className="flex items-center gap-2 p-3 bg-green-50 border border-green-200 rounded-lg">
-              <CheckCircle2 aria-hidden="true" className="w-4 h-4 text-green-600 flex-shrink-0" />
+              <CheckCircle2 className="w-4 h-4 text-green-600 flex-shrink-0" />
               <p className="text-xs text-green-800">{t('wizard.modelsAdded', { count: addedModelCount })}</p>
             </div>
           )}
@@ -1940,17 +1915,17 @@ function CatalogModelBadges({ model }: { model: CatalogModel }) {
     <div className="flex items-center gap-1">
       {model.capabilities.supports_tools && (
         <span className="inline-flex items-center px-1 py-0.5 bg-slate-100 text-slate-700 text-[9px] rounded">
-          <Wrench aria-hidden="true" className="w-2.5 h-2.5" />
+          <Wrench className="w-2.5 h-2.5" />
         </span>
       )}
       {model.capabilities.supports_vision && (
         <span className="inline-flex items-center px-1 py-0.5 bg-purple-100 text-purple-700 text-[9px] rounded">
-          <Eye aria-hidden="true" className="w-2.5 h-2.5" />
+          <Eye className="w-2.5 h-2.5" />
         </span>
       )}
       {model.capabilities.supports_reasoning && (
         <span className="inline-flex items-center px-1 py-0.5 bg-amber-100 text-amber-700 text-[9px] rounded">
-          <Zap aria-hidden="true" className="w-2.5 h-2.5" />
+          <Zap className="w-2.5 h-2.5" />
         </span>
       )}
     </div>
@@ -2159,11 +2134,11 @@ function ModelFormFields({ form, testResult, testing, modelIdPlaceholder, modelI
               : 'bg-red-50 text-red-800 border border-red-200'
         }`}>
           {testing ? (
-            <Loader2 aria-hidden="true" className="w-4 h-4 mt-0.5 flex-shrink-0 animate-spin" />
+            <Loader2 className="w-4 h-4 mt-0.5 flex-shrink-0 animate-spin" />
           ) : testResult?.success ? (
-            <Check aria-hidden="true" className="w-4 h-4 mt-0.5 flex-shrink-0" />
+            <Check className="w-4 h-4 mt-0.5 flex-shrink-0" />
           ) : (
-            <AlertCircle aria-hidden="true" className="w-4 h-4 mt-0.5 flex-shrink-0" />
+            <AlertCircle className="w-4 h-4 mt-0.5 flex-shrink-0" />
           )}
           <span>{testing ? t('form.testingConnection') : testResult?.message}</span>
         </div>
@@ -2249,7 +2224,7 @@ Provider: ${provider.name} (${provider.id})
       mode="create"
       entityType="Custom Model"
       entityName={provider.name}
-      icon={<Plus aria-hidden="true" className="w-5 h-5" />}
+      icon={<Plus className="w-5 h-5" />}
       rexSystemContext={rexContext}
       rexWelcomeMessage={rexWelcome}
       submitDisabled={loading || testing || !form.isValid}
@@ -2298,7 +2273,6 @@ function ToggleField({ label, checked, onChange, disabled, disabledHint }: {
         type="button"
         role="switch"
         aria-checked={checked}
-        aria-label={label}
         disabled={disabled}
         onClick={() => !disabled && onChange(!checked)}
         className={`relative w-10 h-6 rounded-full transition-colors flex-shrink-0 ${
@@ -2566,7 +2540,7 @@ ${hasExisting ? '你已有凭证配置，可以更新或测试连接。' : '请�
       mode="edit"
       entityType={t('form.model')}
       entityName={provider.name}
-      icon={<Brain aria-hidden="true" className="w-5 h-5" />}
+      icon={<Brain className="w-5 h-5" />}
       rexSystemContext={rexContext}
       rexWelcomeMessage={rexWelcome}
       submitDisabled={!canSave}
@@ -2579,7 +2553,7 @@ ${hasExisting ? '你已有凭证配置，可以更新或测试连接。' : '请�
           onClick={onDelete}
           className="flex items-center gap-1.5 px-3 py-2 text-sm text-red-600 hover:text-red-700 hover:bg-red-50 rounded-lg transition-colors"
         >
-          <Trash2 aria-hidden="true" className="w-4 h-4" />
+          <Trash2 className="w-4 h-4" />
           {t('form.removeProvider')}
         </button>
       }
@@ -2657,7 +2631,7 @@ ${hasExisting ? '你已有凭证配置，可以更新或测试连接。' : '请�
               className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-gray-400 hover:text-gray-600 rounded"
               title={showApiKey ? t('form.hide') : t('form.show')}
             >
-              {showApiKey ? <EyeOff aria-hidden="true" className="w-4 h-4" /> : <Eye aria-hidden="true" className="w-4 h-4" />}
+              {showApiKey ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
             </button>
           </div>
           {isThreatBookLLMProviderId(provider.id) && (
@@ -2667,7 +2641,7 @@ ${hasExisting ? '你已有凭证配置，可以更新或测试连接。' : '请�
               rel="noopener noreferrer"
               className="mt-2 inline-flex items-center gap-1.5 rounded-lg border border-green-200 bg-green-50 px-3 py-2 text-sm font-medium text-green-700 transition-colors hover:border-green-300 hover:bg-green-100"
             >
-              <ExternalLink aria-hidden="true" className="h-4 w-4" />
+              <ExternalLink className="h-4 w-4" />
               {t('form.claimFreeKey')}
             </a>
           )}
@@ -2690,7 +2664,7 @@ ${hasExisting ? '你已有凭证配置，可以更新或测试连接。' : '请�
                 {catalogModels.every(m => selectedModelIds.has(m.id)) ? t('form.deselectAll') : t('form.selectAll')}
               </button>
             </div>
-            <div className="border border-gray-200 rounded-lg max-h-48 divide-y divide-gray-100 overflow-y-auto">
+            <div className="border border-gray-200 rounded-lg max-h-48 overflow-y-auto divide-y divide-gray-100">
               {catalogModels.map(model => (
                 <label key={model.id} className="flex items-center gap-3 px-3 py-2 hover:bg-gray-50 cursor-pointer">
                   <input
@@ -2792,7 +2766,7 @@ ${hasExisting ? '你已有凭证配置，可以更新或测试连接。' : '请�
               disabled={models.length === 0 || loading || testing}
               className="flex items-center gap-2 px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 disabled:opacity-50 text-sm flex-shrink-0"
             >
-              {testing ? <Loader2 aria-hidden="true" className="w-4 h-4 animate-spin" /> : <TestTube aria-hidden="true" className="w-4 h-4" />}
+              {testing ? <Loader2 className="w-4 h-4 animate-spin" /> : <TestTube className="w-4 h-4" />}
               {testing ? t('form.testingConnection') : t('form.testConnection2')}
             </button>
           </div>
@@ -2800,11 +2774,11 @@ ${hasExisting ? '你已有凭证配置，可以更新或测试连接。' : '请�
           {testChat && (
             <div className="p-3 rounded-lg border border-green-200 bg-green-50 space-y-1.5">
               <div className="flex items-start gap-2">
-                <span className="text-xs font-medium text-slate-600 mt-0.5 flex-shrink-0">Q:</span>
+                <span className="text-xs font-medium text-slate-600 flex-shrink-0 mt-0.5">Q:</span>
                 <p className="text-sm text-gray-700">{testChat.question}</p>
               </div>
               <div className="flex items-start gap-2">
-                <span className="text-xs font-medium text-green-600 mt-0.5 flex-shrink-0">A:</span>
+                <span className="text-xs font-medium text-green-600 flex-shrink-0 mt-0.5">A:</span>
                 <p className="text-sm text-gray-900 font-medium">{testChat.answer}</p>
               </div>
               <p className="text-xs text-gray-400">{t('form.latencyMs', { model: testChat.model, latency: testChat.latency })}</p>
@@ -2812,7 +2786,7 @@ ${hasExisting ? '你已有凭证配置，可以更新或测试连接。' : '请�
           )}
           {testError && (
             <div className="flex items-start gap-2 p-3 rounded-lg border border-red-200 bg-red-50">
-              <AlertCircle aria-hidden="true" className="w-4 h-4 text-red-500 mt-0.5 flex-shrink-0" />
+              <AlertCircle className="w-4 h-4 text-red-500 flex-shrink-0 mt-0.5" />
               <span className="text-sm text-red-700">{testError}</span>
             </div>
           )}
@@ -2820,7 +2794,7 @@ ${hasExisting ? '你已有凭证配置，可以更新或测试连接。' : '请�
 
         {/* 凭证说明 — 与添加模型抽屉一致 */}
         <div className="flex items-start gap-2 p-3 bg-slate-50 border border-slate-200 rounded-lg">
-          <Shield aria-hidden="true" className="w-4 h-4 text-slate-600 mt-0.5 flex-shrink-0" />
+          <Shield className="w-4 h-4 text-slate-600 mt-0.5 flex-shrink-0" />
           <p className="text-xs text-slate-700">
             {t('form.credentialNote')}
           </p>
@@ -2948,7 +2922,7 @@ function ModelDetailSheet({
       mode="edit"
       entityType={t('form.model')}
       entityName={model.name}
-      icon={<Brain aria-hidden="true" className="w-5 h-5" />}
+      icon={<Brain className="w-5 h-5" />}
       rexSystemContext=""
       rexWelcomeMessage=""
       submitDisabled={false}
@@ -3068,12 +3042,10 @@ function ModelDetailSheet({
               <button
                 type="button"
                 onClick={() => setEnabled(!enabled)}
-                role="switch"
-                aria-label={t('form.enableModel')}
-                className="transition-colors shrink-0"
+                className="transition-colors"
                 aria-checked={enabled}
               >
-                {enabled ? <ToggleRight aria-hidden="true" className="w-8 h-8 text-green-500" /> : <ToggleLeft aria-hidden="true" className="w-8 h-8 text-gray-300" />}
+                {enabled ? <ToggleRight className="w-8 h-8 text-green-500" /> : <ToggleLeft className="w-8 h-8 text-gray-300" />}
               </button>
             </div>
           </>
@@ -3176,7 +3148,7 @@ function ModelSelectionInfo({ model }: { model: ModelDefinitionV2 }) {
         onPointerLeave={hide}
         onMouseEnter={event => show(event.currentTarget)}
         onMouseLeave={hide}
-        className="mr-3 inline-flex h-7 w-7 items-center justify-center rounded-md text-gray-300 transition-colors hover:bg-gray-100 hover:text-gray-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-400 focus-visible:ring-offset-1 shrink-0"
+        className="mr-3 inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-gray-300 transition-colors hover:bg-gray-100 hover:text-gray-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-400 focus-visible:ring-offset-1"
       >
         <Info className="h-4 w-4" aria-hidden="true" />
       </button>
@@ -3184,22 +3156,22 @@ function ModelSelectionInfo({ model }: { model: ModelDefinitionV2 }) {
         <div
           id={tooltipId}
           role="tooltip"
-          className="pointer-events-none fixed w-64 -translate-x-1/2 -translate-y-full rounded-lg border border-gray-200 bg-white px-3 py-2.5 text-xs leading-relaxed text-gray-600 shadow-lg z-[1000]"
+          className="pointer-events-none fixed z-[1000] w-64 -translate-x-1/2 -translate-y-full rounded-lg border border-gray-200 bg-white px-3 py-2.5 text-xs leading-relaxed text-gray-600 shadow-lg"
           style={{ left: position.x, top: position.y }}
         >
-          <div className="mb-1.5 font-semibold text-gray-900 truncate">{model.name || model.id}</div>
+          <div className="mb-1.5 truncate font-semibold text-gray-900">{model.name || model.id}</div>
           <dl className="space-y-1">
             <div className="flex gap-2">
-              <dt className="text-gray-400 shrink-0">{t('form.modelId')}</dt>
-              <dd className="flex-1 text-right font-mono text-[11px] text-gray-700 min-w-0 break-all">{model.id}</dd>
+              <dt className="shrink-0 text-gray-400">{t('form.modelId')}</dt>
+              <dd className="min-w-0 flex-1 break-all text-right font-mono text-[11px] text-gray-700">{model.id}</dd>
             </div>
             <div className="flex gap-2">
-              <dt className="text-gray-400 shrink-0">{t('form.contextWindow')}</dt>
-              <dd className="flex-1 text-right text-gray-700 min-w-0">{formatModelContextWindow(model)}</dd>
+              <dt className="shrink-0 text-gray-400">{t('form.contextWindow')}</dt>
+              <dd className="min-w-0 flex-1 text-right text-gray-700">{formatModelContextWindow(model)}</dd>
             </div>
             <div className="flex gap-2">
-              <dt className="text-gray-400 shrink-0">{t('form.pricing')}</dt>
-              <dd className="flex-1 text-right text-gray-700 min-w-0">
+              <dt className="shrink-0 text-gray-400">{t('form.pricing')}</dt>
+              <dd className="min-w-0 flex-1 text-right text-gray-700">
                 {formatModelPricing(model, t('modelSelection.free'), t('modelSelection.unavailable'))}
               </dd>
             </div>
@@ -3228,7 +3200,7 @@ function ModelSelectionList({
   const { t } = useTranslation('model');
 
   return (
-    <div className="rounded-xl border border-gray-200 bg-white overflow-hidden">
+    <div className="overflow-hidden rounded-xl border border-gray-200 bg-white">
       {groups.map(group => (
         <div key={group.providerId}>
           <div className="border-b border-gray-100 bg-gray-50 px-4 py-2 text-xs font-semibold uppercase tracking-wide text-gray-500">
@@ -3240,7 +3212,7 @@ function ModelSelectionList({
             return (
               <div
                 key={key}
-                className={`flex items-center border-b border-gray-100 transition-colors last:border-0 min-w-0 ${
+                className={`flex min-w-0 items-center border-b border-gray-100 transition-colors last:border-0 ${
                   selected ? 'bg-slate-50' : 'bg-white hover:bg-gray-50'
                 }`}
               >
@@ -3249,26 +3221,26 @@ function ModelSelectionList({
                   onClick={() => onSelect(model)}
                   disabled={disabled}
                   aria-pressed={selected}
-                  className="flex flex-1 items-center gap-3 px-4 py-3 text-left text-sm text-gray-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-slate-400 disabled:cursor-not-allowed disabled:opacity-50 min-w-0"
+                  className="flex min-w-0 flex-1 items-center gap-3 px-4 py-3 text-left text-sm text-gray-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-slate-400 disabled:cursor-not-allowed disabled:opacity-50"
                 >
-                  <span className={`flex-1 min-w-0 truncate ${selected ? 'font-semibold text-slate-900' : 'font-medium text-gray-800'}`}>
+                  <span className={`min-w-0 flex-1 truncate ${selected ? 'font-semibold text-slate-900' : 'font-medium text-gray-800'}`}>
                     {model.name || model.id}
                   </span>
                   {modelSupportsVision(model) && (
                     <span
                       title={t('form.vision')}
-                      className="rounded-md bg-gray-100 px-2 py-0.5 text-[10px] font-semibold text-gray-600 shrink-0"
+                      className="shrink-0 rounded-md bg-gray-100 px-2 py-0.5 text-[10px] font-semibold text-gray-600"
                     >
                       {t('form.vision')}
                     </span>
                   )}
-                  <span className="max-w-[42%] text-xs text-gray-400 shrink-0 truncate" title={model.id}>
+                  <span className="max-w-[42%] shrink-0 truncate text-xs text-gray-400" title={model.id}>
                     {model.id}
                   </span>
                   {pendingKey === key ? (
-                    <Loader2 aria-hidden="true" className="h-4 w-4 animate-spin text-gray-400 shrink-0" />
+                    <Loader2 className="h-4 w-4 shrink-0 animate-spin text-gray-400" />
                   ) : selected ? (
-                    <Check aria-hidden="true" className="h-4 w-4 text-slate-700 shrink-0" />
+                    <Check className="h-4 w-4 shrink-0 text-slate-700" />
                   ) : null}
                 </button>
                 <ModelSelectionInfo model={model} />
@@ -3303,6 +3275,24 @@ function SetDefaultModelDialog({
   const [saving, setSaving] = useState<string | null>(null);
   const [invalidWarning, setInvalidWarning] = useState<string | null>(null);
   const closeButtonRef = useRef<HTMLButtonElement>(null);
+
+  useEffect(() => {
+    const previouslyFocused = document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null;
+    closeButtonRef.current?.focus();
+    return () => previouslyFocused?.focus();
+  }, []);
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape' || saving) return;
+      event.preventDefault();
+      onClose();
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [onClose, saving]);
 
   useEffect(() => {
     setLoading(true);
@@ -3358,14 +3348,16 @@ function SetDefaultModelDialog({
   };
 
   return (
-    <PageDialog aria-labelledby="default-model-dialog-title" onClose={saving ? undefined : onClose}
+    <div
       className="fixed inset-0 bg-black/50 flex items-center justify-center z-50"
-
+      onClick={() => {
+        if (!saving) onClose();
+      }}
     >
       <div
-
-
-
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="default-model-dialog-title"
         className="bg-white rounded-xl shadow-xl w-full max-w-xl max-h-[78vh] flex flex-col"
         onClick={e => e.stopPropagation()}
       >
@@ -3379,20 +3371,20 @@ function SetDefaultModelDialog({
             aria-label={t('modelSelection.closeDefault')}
             className="text-gray-400 hover:text-gray-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-400 disabled:opacity-50"
           >
-            <X aria-hidden="true" className="w-5 h-5" />
+            <X className="w-5 h-5" />
           </button>
         </div>
 
         <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
           {invalidWarning && (
             <div className="mb-3 flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-700">
-              <AlertTriangle aria-hidden="true" className="mt-0.5 w-3.5 h-3.5 flex-shrink-0" />
+              <AlertTriangle className="mt-0.5 w-3.5 h-3.5 flex-shrink-0" />
               <span>{invalidWarning}</span>
             </div>
           )}
           {loading ? (
             <div className="flex justify-center py-10">
-              <Loader2 aria-hidden="true" className="w-6 h-6 animate-spin text-gray-400" />
+              <Loader2 className="w-6 h-6 animate-spin text-gray-400" />
             </div>
           ) : grouped.length === 0 ? (
             <div className="py-10 text-center text-sm text-gray-500">{t('detail.noModels')}</div>
@@ -3407,7 +3399,7 @@ function SetDefaultModelDialog({
           )}
         </div>
       </div>
-    </PageDialog>
+    </div>
   );
 }
 
@@ -3523,6 +3515,24 @@ function FallbackModelsDialog({
   );
   const closeButtonRef = useRef<HTMLButtonElement>(null);
 
+  useEffect(() => {
+    const previouslyFocused = document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null;
+    closeButtonRef.current?.focus();
+    return () => previouslyFocused?.focus();
+  }, []);
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape' || saving) return;
+      event.preventDefault();
+      onClose();
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [onClose, saving]);
+
   const move = (index: number, direction: -1 | 1) => {
     const target = index + direction;
     if (target < 0 || target >= draft.length) return;
@@ -3551,14 +3561,16 @@ function FallbackModelsDialog({
   };
 
   return (
-    <PageDialog aria-labelledby="fallback-models-dialog-title" onClose={saving ? undefined : onClose}
+    <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 px-4"
-
+      onClick={() => {
+        if (!saving) onClose();
+      }}
     >
       <div
-
-
-
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="fallback-models-dialog-title"
         className="flex max-h-[78vh] w-full max-w-xl flex-col rounded-xl bg-white shadow-xl"
         onClick={event => event.stopPropagation()}
       >
@@ -3577,18 +3589,18 @@ function FallbackModelsDialog({
             aria-label={t('fallbacks.close')}
             className="text-gray-400 hover:text-gray-600 disabled:opacity-50"
           >
-            <X aria-hidden="true" className="h-5 w-5" />
+            <X className="h-5 w-5" />
           </button>
         </div>
 
         <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
           {routingDataLoading ? (
             <div className="flex justify-center py-10">
-              <Loader2 aria-hidden="true" className="h-6 w-6 animate-spin text-gray-400" />
+              <Loader2 className="h-6 w-6 animate-spin text-gray-400" />
             </div>
           ) : loadFailed ? (
             <div role="alert" className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-6 text-center">
-              <AlertCircle aria-hidden="true" className="mb-2 h-6 w-6 text-amber-500 mx-auto" />
+              <AlertCircle className="mx-auto mb-2 h-6 w-6 text-amber-500" />
               <p className="text-sm font-medium text-amber-800">{t('fallbacks.loadFailed')}</p>
               <p className="mt-1 text-xs text-amber-700">{currentLoadError || modelsLoadError}</p>
               <button
@@ -3603,7 +3615,7 @@ function FallbackModelsDialog({
             <div className="space-y-3">
               {draft.length === 0 ? (
                 <div className="rounded-lg border border-dashed border-gray-300 px-4 py-8 text-center">
-                  <ListOrdered aria-hidden="true" className="mb-2 h-6 w-6 text-gray-300 mx-auto" />
+                  <ListOrdered className="mx-auto mb-2 h-6 w-6 text-gray-300" />
                   <p className="text-sm font-medium text-gray-600">{t('fallbacks.empty')}</p>
                   <p className="mt-1 text-xs text-gray-400">{t('fallbacks.emptyHint')}</p>
                 </div>
@@ -3617,21 +3629,21 @@ function FallbackModelsDialog({
                     const available = Boolean(definition) && !isPrimary;
                     return (
                       <div key={`${key}-${index}`} className="flex items-center gap-3 rounded-lg border border-gray-200 bg-white px-3 py-2.5">
-                        <span className="flex h-6 w-6 items-center justify-center rounded-md bg-gray-100 text-xs font-semibold text-gray-500 shrink-0">
+                        <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-gray-100 text-xs font-semibold text-gray-500">
                           {index + 1}
                         </span>
                         <div className="min-w-0 flex-1">
                           <div className="flex min-w-0 items-center gap-2">
-                            <span className="text-sm font-medium text-gray-800 truncate">
+                            <span className="truncate text-sm font-medium text-gray-800">
                               {definition?.name || fallback.model_id}
                             </span>
                             {!available && (
-                              <span className="rounded bg-amber-50 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 shrink-0">
+                              <span className="shrink-0 rounded bg-amber-50 px-1.5 py-0.5 text-[10px] font-medium text-amber-700">
                                 {t('fallbacks.unavailable')}
                               </span>
                             )}
                           </div>
-                          <div className="text-xs text-gray-400 truncate">
+                          <div className="truncate text-xs text-gray-400">
                             {providerNames.get(fallback.provider_id) || fallback.provider_id} / {fallback.model_id}
                           </div>
                         </div>
@@ -3644,7 +3656,7 @@ function FallbackModelsDialog({
                             aria-label={t('fallbacks.moveUp')}
                             className="rounded p-1.5 text-gray-400 hover:bg-gray-100 hover:text-gray-700 disabled:cursor-not-allowed disabled:opacity-30"
                           >
-                            <ArrowUp aria-hidden="true" className="h-3.5 w-3.5" />
+                            <ArrowUp className="h-3.5 w-3.5" />
                           </button>
                           <button
                             type="button"
@@ -3654,7 +3666,7 @@ function FallbackModelsDialog({
                             aria-label={t('fallbacks.moveDown')}
                             className="rounded p-1.5 text-gray-400 hover:bg-gray-100 hover:text-gray-700 disabled:cursor-not-allowed disabled:opacity-30"
                           >
-                            <ArrowDown aria-hidden="true" className="h-3.5 w-3.5" />
+                            <ArrowDown className="h-3.5 w-3.5" />
                           </button>
                           <button
                             type="button"
@@ -3664,7 +3676,7 @@ function FallbackModelsDialog({
                             aria-label={t('fallbacks.remove')}
                             className="rounded p-1.5 text-gray-400 hover:bg-red-50 hover:text-red-600 disabled:opacity-30"
                           >
-                            <Trash2 aria-hidden="true" className="h-3.5 w-3.5" />
+                            <Trash2 className="h-3.5 w-3.5" />
                           </button>
                         </div>
                       </div>
@@ -3685,10 +3697,10 @@ function FallbackModelsDialog({
                 disabled={saving || selectableGroups.length === 0}
                 className="flex w-full items-center justify-center gap-1.5 rounded-lg border border-gray-300 px-3 py-2 text-sm font-medium text-gray-700 transition-colors hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
               >
-                <Plus aria-hidden="true" className="h-4 w-4" />
+                <Plus className="h-4 w-4" />
                 {selectableGroups.length === 0 ? t('fallbacks.noModelsToAdd') : t('fallbacks.add')}
                 {selectableGroups.length > 0 && (
-                  <ChevronDown aria-hidden="true" className={`h-4 w-4 transition-transform ${adding ? 'rotate-180' : ''}`} />
+                  <ChevronDown className={`h-4 w-4 transition-transform ${adding ? 'rotate-180' : ''}`} />
                 )}
               </button>
 
@@ -3724,11 +3736,11 @@ function FallbackModelsDialog({
             disabled={!dirty || saving || routingDataLoading || loadFailed || hasInvalidDraft}
             className="flex items-center gap-1.5 rounded-lg bg-slate-800 px-4 py-2 text-sm font-medium text-white hover:bg-slate-900 disabled:cursor-not-allowed disabled:opacity-50"
           >
-            {saving && <Loader2 aria-hidden="true" className="h-4 w-4 animate-spin" />}
+            {saving && <Loader2 className="h-4 w-4 animate-spin" />}
             {t('fallbacks.save')}
           </button>
         </div>
       </div>
-    </PageDialog>
+    </div>
   );
 }

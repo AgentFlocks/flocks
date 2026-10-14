@@ -42,7 +42,7 @@ export default function GuideInfoIcon({
     <>
       <span
         tabIndex={interactive ? 0 : undefined}
-        className={`inline-flex h-5 w-5 items-center justify-center rounded-md text-zinc-300 transition-colors hover:bg-white/80 hover:text-rose-500 flex-shrink-0 ${className}`}
+        className={`inline-flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-md text-zinc-300 transition-colors hover:bg-white/80 hover:text-rose-500 ${className}`}
         aria-label={interactive ? `${label}说明` : undefined}
         aria-hidden={interactive ? undefined : true}
         aria-describedby={interactive && tooltip ? tooltipId : undefined}
@@ -69,7 +69,7 @@ export default function GuideInfoIcon({
         <div
           id={tooltipId}
           role="tooltip"
-          className="pointer-events-none fixed w-52 -translate-x-1/2 -translate-y-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-[11px] leading-relaxed text-zinc-600 shadow-md z-[1000]"
+          className="pointer-events-none fixed z-[1000] w-52 -translate-x-1/2 -translate-y-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-[11px] leading-relaxed text-zinc-600 shadow-md"
           style={{ left: tooltip.x, top: tooltip.y }}
         >
           <div className="mb-0.5 font-semibold text-zinc-800">{tooltip.title}</div>

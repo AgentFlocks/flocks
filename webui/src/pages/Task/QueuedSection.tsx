@@ -1,18 +1,8 @@
-import { pageActionLabel } from '../pageActionLabel';
-import PageDialog from '../PageDialog';
-import PageSelectionGroup from '../PageSelectionGroup';
 import { lazy, Suspense, useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
-  ChevronLeft,
-  ChevronRight,
-  GripVertical,
-  ListTodo,
-  Play,
-  RotateCcw,
-  Trash2,
-  X,
-  XCircle,
+  ListTodo, Play, RotateCcw, XCircle, Trash2,
+  ChevronLeft, ChevronRight, GripVertical, X,
 } from 'lucide-react';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
 import EmptyState from '@/components/common/EmptyState';
@@ -30,7 +20,7 @@ const LazySessionChat = lazy(() => import('@/components/common/SessionChat'));
 
 function SessionChatFallback() {
   return (
-    <div className="flex flex-1 items-center justify-center text-gray-400 min-h-0">
+    <div className="flex flex-1 min-h-0 items-center justify-center text-gray-400">
       <LoadingSpinner />
     </div>
   );
@@ -257,11 +247,10 @@ export default function QueuedSection({ onRefreshGlobal }: { onRefreshGlobal: ()
 
   return (
     <div className="space-y-3">
-      {/* 窄屏下「已选 N 项 / 批量取消 / 批量删除」换到下一行，按钮文案不逐字竖排 */}
-      <div className="flex items-center justify-between flex-wrap whitespace-nowrap">
-        <PageSelectionGroup className="flex gap-1 bg-gray-100 rounded-lg p-1">
+      <div className="flex items-center justify-between">
+        <div className="flex gap-1 bg-gray-100 rounded-lg p-1">
           {QUEUED_FILTERS.map(f => (
-            <button aria-pressed={filterKey === f.key}
+            <button
               key={f.key}
               onClick={() => handleFilterChange(f.key)}
               className={`px-3 py-1.5 text-sm rounded-md transition-colors ${
@@ -271,7 +260,7 @@ export default function QueuedSection({ onRefreshGlobal }: { onRefreshGlobal: ()
               {f.label}
             </button>
           ))}
-        </PageSelectionGroup>
+        </div>
         {hasVisibleSelection && (
           <div className="flex items-center gap-2">
             <span className="text-sm text-gray-500">{t('queued.selectedCount', { count: visibleSelectedIds.length })}</span>
@@ -284,16 +273,13 @@ export default function QueuedSection({ onRefreshGlobal }: { onRefreshGlobal: ()
       <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
         {effectiveTasks.length === 0 ? (
           <EmptyState
-            icon={<ListTodo aria-hidden="true" className="w-8 h-8" />}
+            icon={<ListTodo className="w-8 h-8" />}
             title={t('queued.emptyTitle')}
             description={t('queued.emptyDescription')}
           />
         ) : (
           <>
-            {/* 窄屏（375px）下表格比容器宽，overflow-hidden 会把后几列裁掉且无法滚动；改为容器内横向滚动。
-                whitespace-nowrap 让单元格保持自然宽度靠容器滚动，而不是把「已完成」「用户」逐字竖排 */}
-            <div className="overflow-x-auto">
-            <table className="w-full text-sm whitespace-nowrap">
+            <table className="w-full text-sm">
               <thead className="bg-gray-50 border-b border-gray-200">
                 <tr>
                   <th className="w-10 px-3 py-3">
@@ -343,17 +329,16 @@ export default function QueuedSection({ onRefreshGlobal }: { onRefreshGlobal: ()
                 ))}
               </tbody>
             </table>
-            </div>
             <div className="flex items-center justify-between px-4 py-3 border-t border-gray-200 bg-gray-50">
               <span className="text-sm text-gray-500">
                 {t('queued.pagination', { total, page: page + 1, totalPages })}
               </span>
               <div className="flex gap-2">
-                <button aria-label={pageActionLabel('previous')} onClick={() => handlePageChange(Math.max(0, page - 1))} disabled={page === 0} className="p-1.5 rounded hover:bg-gray-200 disabled:opacity-30 disabled:cursor-not-allowed">
-                  <ChevronLeft aria-hidden="true" className="w-4 h-4" />
+                <button onClick={() => handlePageChange(Math.max(0, page - 1))} disabled={page === 0} className="p-1.5 rounded hover:bg-gray-200 disabled:opacity-30 disabled:cursor-not-allowed">
+                  <ChevronLeft className="w-4 h-4" />
                 </button>
-                <button aria-label={pageActionLabel('next')} onClick={() => handlePageChange(Math.min(totalPages - 1, page + 1))} disabled={page >= totalPages - 1} className="p-1.5 rounded hover:bg-gray-200 disabled:opacity-30 disabled:cursor-not-allowed">
-                  <ChevronRight aria-hidden="true" className="w-4 h-4" />
+                <button onClick={() => handlePageChange(Math.min(totalPages - 1, page + 1))} disabled={page >= totalPages - 1} className="p-1.5 rounded hover:bg-gray-200 disabled:opacity-30 disabled:cursor-not-allowed">
+                  <ChevronRight className="w-4 h-4" />
                 </button>
               </div>
             </div>
@@ -414,15 +399,15 @@ function QueuedDetailPanel({ task, onClose, onAction, onRefresh }: {
   }, []);
 
   return (
-    <PageDialog variant="panels" className="contents" onClose={onClose}>
+    <>
       <div className="fixed inset-0 bg-black/40 z-40" onClick={onClose} />
-      <div data-ui-overlay="drawer"
-        className="fixed right-0 top-0 bottom-0 flex flex-col bg-white shadow-2xl transition-colors z-50"
+      <div
+        className="fixed right-0 top-0 bottom-0 z-50 flex flex-col bg-white shadow-2xl transition-colors"
         style={{ width: drawerWidth, maxWidth: '100%' }}
         onClick={(e) => e.stopPropagation()}
       >
         <div
-          className={`absolute -left-1 top-0 bottom-0 w-3 cursor-ew-resize transition-colors z-10 ${
+          className={`absolute -left-1 top-0 bottom-0 z-10 w-3 cursor-ew-resize transition-colors ${
             isDragging ? 'bg-red-500/10' : 'hover:bg-red-400/10'
           }`}
           onMouseDown={handleDragStart}
@@ -431,17 +416,17 @@ function QueuedDetailPanel({ task, onClose, onAction, onRefresh }: {
             isDragging ? 'bg-red-500' : 'bg-gray-200'
           }`} />
           <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2">
-            <GripVertical aria-hidden="true" className={`w-3 h-6 ${isDragging ? 'text-red-500' : 'text-gray-300 hover:text-gray-500'}`} />
+            <GripVertical className={`w-3 h-6 ${isDragging ? 'text-red-500' : 'text-gray-300 hover:text-gray-500'}`} />
           </div>
         </div>
         <div className="flex items-center justify-between px-6 py-4 border-b border-gray-200 flex-shrink-0">
-          <h3 className="font-semibold text-gray-900 pr-2 truncate">{task.title}</h3>
-          <button aria-label={pageActionLabel('close')} onClick={onClose} className="p-1 rounded hover:bg-gray-100 flex-shrink-0">
-            <X aria-hidden="true" className="w-4 h-4 text-gray-400" />
+          <h3 className="font-semibold text-gray-900 truncate pr-2">{task.title}</h3>
+          <button onClick={onClose} className="p-1 rounded hover:bg-gray-100 flex-shrink-0">
+            <X className="w-4 h-4 text-gray-400" />
           </button>
         </div>
 
-        <div className="px-6 py-4 border-b border-gray-100 space-y-2.5 flex-shrink-0">
+        <div className="px-6 py-4 border-b border-gray-100 flex-shrink-0 space-y-2.5">
           <div className="flex items-center gap-2 flex-wrap">
             <StatusBadge status={task.status} />
             <PriorityBadge priority={task.priority} />
@@ -463,15 +448,15 @@ function QueuedDetailPanel({ task, onClose, onAction, onRefresh }: {
 
           <div className="flex flex-wrap gap-1.5">
             {!['completed', 'cancelled', 'failed'].includes(task.status) && (
-              <ActionButton icon={<XCircle aria-hidden="true" className="w-3 h-3" />} label={t('queued.actionCancel')} onClick={() => onAction('cancel', task.id)} color="gray" />
+              <ActionButton icon={<XCircle className="w-3 h-3" />} label={t('queued.actionCancel')} onClick={() => onAction('cancel', task.id)} color="gray" />
             )}
             {task.status === 'failed' && (
-              <ActionButton icon={<RotateCcw aria-hidden="true" className="w-3 h-3" />} label={t('queued.actionRetry')} onClick={() => onAction('retry', task.id)} color="blue" />
+              <ActionButton icon={<RotateCcw className="w-3 h-3" />} label={t('queued.actionRetry')} onClick={() => onAction('retry', task.id)} color="blue" />
             )}
             {['completed', 'cancelled', 'failed'].includes(task.status) && (
-              <ActionButton icon={<Play aria-hidden="true" className="w-3 h-3" />} label={t('queued.actionRerun')} onClick={() => onAction('rerun', task.id)} color="green" />
+              <ActionButton icon={<Play className="w-3 h-3" />} label={t('queued.actionRerun')} onClick={() => onAction('rerun', task.id)} color="green" />
             )}
-            <ActionButton icon={<Trash2 aria-hidden="true" className="w-3 h-3" />} label={t('queued.actionDelete')} onClick={() => onAction('delete', task.id)} color="red" />
+            <ActionButton icon={<Trash2 className="w-3 h-3" />} label={t('queued.actionDelete')} onClick={() => onAction('delete', task.id)} color="red" />
           </div>
         </div>
 
@@ -503,7 +488,7 @@ function QueuedDetailPanel({ task, onClose, onAction, onRefresh }: {
           </Suspense>
         )}
       </div>
-    </PageDialog>
+    </>
   );
 }
 
@@ -546,7 +531,7 @@ function QueuedWorkflowDetail({ task, emptyText }: { task: TaskExecution; emptyT
             <div className="text-xs font-medium uppercase tracking-wide text-slate-500">
               {t('queued.workflowId')}
             </div>
-            <div className="mt-1 font-mono text-sm text-slate-700 break-all">
+            <div className="mt-1 break-all font-mono text-sm text-slate-700">
               {task.workflowID || '--'}
             </div>
           </div>
@@ -565,7 +550,7 @@ function QueuedWorkflowDetail({ task, emptyText }: { task: TaskExecution; emptyT
                   {tCommon('button.copy')}
                 </button>
               </div>
-              <pre className="rounded-lg bg-gray-900 p-4 text-xs text-gray-200 overflow-x-auto">
+              <pre className="overflow-x-auto rounded-lg bg-gray-900 p-4 text-xs text-gray-200">
                 {inputText}
               </pre>
             </div>
@@ -595,7 +580,7 @@ function QueuedWorkflowDetail({ task, emptyText }: { task: TaskExecution; emptyT
                   </button>
                 </div>
               </div>
-              <pre className="rounded-lg bg-gray-900 p-4 text-xs text-gray-200 overflow-x-auto whitespace-pre-wrap">
+              <pre className="overflow-x-auto whitespace-pre-wrap rounded-lg bg-gray-900 p-4 text-xs text-gray-200">
                 {displayedResultText}
               </pre>
             </div>

@@ -330,6 +330,20 @@ class PermissionNext:
             )
             await cls._persist_session_rules(resolved_session_id)
 
+    @staticmethod
+    async def _delegation_chain(session_id: str) -> List[str]:
+        """IDs of the sessions that delegated ``session_id``, nearest first."""
+        try:
+            from flocks.session.session import Session
+
+            session = await Session.get_by_id_unfiltered(session_id)
+            if session is None:
+                return []
+            return [parent.id for parent in await Session.delegating_sessions(session)]
+        except Exception as exc:
+            log.debug("permission.delegation_chain.failed", {"error": str(exc)})
+            return []
+
     @classmethod
     async def ask(
         cls,
@@ -348,7 +362,7 @@ class PermissionNext:
 
         Ported from original PermissionNext.ask().
         """
-        metadata = metadata or {}
+        metadata = dict(metadata or {})
 
         if auto_approve_enabled():
             log.debug("permission.auto_approved", {
@@ -356,6 +370,13 @@ class PermissionNext:
                 "reason": "FLOCKS_AUTO_APPROVE=true",
             })
             return "allow"
+
+        if "delegationChain" not in metadata:
+            # Every caller (session runner, Pro confirmations, tool routes)
+            # gets it, so the sessions that delegated this one show it too.
+            chain = await cls._delegation_chain(session_id)
+            if chain:
+                metadata["delegationChain"] = chain
 
         req_id = request_id or Identifier.create("permission")
         request_info = PermissionRequestInfo(
@@ -368,62 +389,73 @@ class PermissionNext:
             tool=tool,
         )
 
-        # Persist before exposing the request through callbacks/SSE.  A reply
-        # can now safely locate this request even when it reaches another
-        # process before the in-memory future is visible.
-        await cls._persist_pending_request(request_info)
-        future = asyncio.Future()
-        cls._pending[req_id] = {
-            "info": request_info,
-            "future": future,
-        }
-
-        if cls._on_permission_asked:
-            await cls._on_permission_asked(request_info)
-
-        try:
-            from flocks.server.routes.event import publish_event
-            await publish_event("permission.request", {
-                "requestID": req_id,
-                "sessionID": session_id,
-                "permission": permission,
-                "patterns": patterns,
-                "metadata": metadata or {},
-                "tool": tool,
-            })
-        except Exception as exc:
-            log.debug("permission.request.publish_failed", {"error": str(exc)})
-
-        timeout = (
-            cls._DEFAULT_TIMEOUT_SECONDS
-            if timeout_seconds is None
-            else max(float(timeout_seconds), 0.0)
-        )
-        timeout_at = asyncio.get_running_loop().time() + timeout
         reply: Optional[str] = None
-        while reply is None:
-            persisted_reply = await cls._consume_persisted_reply(req_id)
-            if persisted_reply is not None:
-                reply = persisted_reply
-                break
+        try:
+            # Persist before exposing the request through callbacks/SSE.  A reply
+            # can now safely locate this request even when it reaches another
+            # process before the in-memory future is visible.
+            await cls._persist_pending_request(request_info)
+            future = asyncio.Future()
+            cls._pending[req_id] = {
+                "info": request_info,
+                "future": future,
+            }
 
-            remaining = timeout_at - asyncio.get_running_loop().time()
-            if remaining <= 0:
-                cls._pending.pop(req_id, None)
-                await cls._delete_pending_request(req_id)
-                await cls._delete_reply(req_id)
-                raise asyncio.TimeoutError(
-                    f"Permission request timed out after {timeout:.0f}s: {permission}"
-                )
+            if cls._on_permission_asked:
+                await cls._on_permission_asked(request_info)
 
             try:
-                reply = await asyncio.wait_for(asyncio.shield(future), timeout=min(0.25, remaining))
-            except asyncio.TimeoutError:
-                continue
+                from flocks.server.routes.event import publish_event
+                await publish_event("permission.request", {
+                    "requestID": req_id,
+                    "sessionID": session_id,
+                    "permission": permission,
+                    "patterns": patterns,
+                    "metadata": metadata,
+                    "tool": tool,
+                })
+            except Exception as exc:
+                log.debug("permission.request.publish_failed", {"error": str(exc)})
 
-        cls._pending.pop(req_id, None)
-        await cls._delete_pending_request(req_id)
-        await cls._delete_reply(req_id)
+            timeout = (
+                cls._DEFAULT_TIMEOUT_SECONDS
+                if timeout_seconds is None
+                else max(float(timeout_seconds), 0.0)
+            )
+            timeout_at = asyncio.get_running_loop().time() + timeout
+            while reply is None:
+                persisted_reply = await cls._consume_persisted_reply(req_id)
+                if persisted_reply is not None:
+                    reply = persisted_reply
+                    break
+
+                remaining = timeout_at - asyncio.get_running_loop().time()
+                if remaining <= 0:
+                    raise asyncio.TimeoutError(
+                        f"Permission request timed out after {timeout:.0f}s: {permission}"
+                    )
+
+                try:
+                    reply = await asyncio.wait_for(asyncio.shield(future), timeout=min(0.25, remaining))
+                except asyncio.TimeoutError:
+                    continue
+        finally:
+            # Answered, timed out, or the waiting turn was stopped (even while
+            # the request was still being announced): nobody waits on it any
+            # more, so no view should offer it -- the session itself and the
+            # sessions that delegated it all show it.
+            cls._pending.pop(req_id, None)
+            await cls._delete_pending_request(req_id)
+            await cls._delete_reply(req_id)
+            try:
+                from flocks.server.routes.event import publish_event
+                await publish_event("permission.replied", {
+                    "requestID": req_id,
+                    "sessionID": session_id,
+                    "reply": reply,
+                })
+            except Exception as exc:
+                log.debug("permission.replied.publish_failed", {"error": str(exc)})
         # OSS only transports the reply; Pro decides whether it means a
         # denial, one-time grant, or durable authorization.
         return str(reply)
@@ -510,18 +542,32 @@ class PermissionNext:
         permission: str,
         patterns: List[str],
         ruleset: Ruleset,
+        aliases: Iterable[str] = (),
     ) -> Optional[str]:
-        """Evaluate a tool request, or return None when it has no configured rule."""
+        """Evaluate a tool request, or return None when it has no configured rule.
+
+        ``aliases`` are other names the request answers to: file tools ask for
+        ``edit`` while a rule may name the tool itself (``write``). A rule
+        applies when its permission matches any of the names, and the last
+        applicable rule still wins.
+        """
+        names = [permission, *(alias for alias in aliases if alias and alias != permission)]
         if not any(
-            cls._pattern_matches(permission, rule.permission or "*")
+            cls._pattern_matches(name, rule.permission or "*")
             for rule in ruleset
+            for name in names
         ):
             return None
 
         actions = {
-            cls._evaluate(permission, pattern, ruleset)
+            cls._evaluate_names(names, pattern, ruleset)
             for pattern in (patterns or ["*"])
         }
+        return cls.stricter(*actions)
+
+    @staticmethod
+    def stricter(*actions: Optional[str]) -> Optional[str]:
+        """Most restrictive configured action (deny > ask > allow), None if none."""
         for action in ("deny", "ask", "allow"):
             if action in actions:
                 return action
@@ -535,9 +581,19 @@ class PermissionNext:
         ruleset: Ruleset,
     ) -> str:
         """Evaluate permission action for a pattern."""
+        return cls._evaluate_names([permission], pattern, ruleset)
+
+    @classmethod
+    def _evaluate_names(
+        cls,
+        names: List[str],
+        pattern: str,
+        ruleset: Ruleset,
+    ) -> str:
+        """Last rule matching any of ``names`` and ``pattern`` wins; else ask."""
         matched_rule = None
         for rule in reversed(ruleset):
-            if not cls._pattern_matches(permission, rule.permission or "*"):
+            if not any(cls._pattern_matches(name, rule.permission or "*") for name in names):
                 continue
             if not cls._pattern_matches(pattern, rule.pattern or "*"):
                 continue

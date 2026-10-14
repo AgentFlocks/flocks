@@ -1,14 +1,7 @@
 import { Component, Suspense, useEffect, useRef, useState, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Link, useInRouterContext } from 'react-router-dom';
-import {
-  ArrowRight,
-  Check,
-  Database,
-  Plus,
-  RefreshCw,
-  X,
-} from 'lucide-react';
+import { ArrowRight, Check, Database, Plus, RefreshCw, X } from 'lucide-react';
 import { knowledgebaseAPI, type Dataset, type SessionDatasets } from '@/api/knowledgebase';
 import { useOptionalToast } from '@/components/common/Toast';
 import { Modal } from '@/pages/Workspace/knowledge/ui';
@@ -148,7 +141,7 @@ function DatasetBody({ sessionId }: { sessionId: string }) {
   return <section aria-label={t('dataset.title')} className="session-knowledge">
     <div className="session-knowledge-heading">
       <Database aria-hidden="true" className="h-4 w-4 text-zinc-500 dark:text-zinc-400" />
-      <h3 className="text-xs font-semibold text-zinc-700 dark:text-zinc-200 truncate">{t('dataset.title')}</h3>
+      <h3 className="truncate text-xs font-semibold text-zinc-700 dark:text-zinc-200">{t('dataset.title')}</h3>
       {binding && <span className="rounded bg-zinc-100 px-1.5 py-0.5 text-[10px] text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400">{binding.dataset_ids.length}</span>}
       <button type="button" className="session-knowledge-icon-button" aria-label={t('dataset.refresh')} title={t('dataset.refresh')} disabled={loading || saving} onClick={() => void load()}><RefreshCw aria-hidden="true" /></button>
     </div>

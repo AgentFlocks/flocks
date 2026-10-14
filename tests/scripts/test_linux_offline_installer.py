@@ -1766,10 +1766,16 @@ def test_postgres_missing_configuration_fails_before_stopping_old_service(tmp_pa
 @pytest.mark.skipif(BASH is None or not os.getenv("FLOCKS_TEST_PG_DSN"), reason="requires bash and isolated PostgreSQL")
 def test_postgres_unreachable_connection_fails_before_stopping_old_service(tmp_path):
     from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+    from uuid import uuid4
     parsed = urlsplit(os.environ["FLOCKS_TEST_PG_DSN"])
+    # A socket directory that does not exist is unreachable whether the test DSN
+    # names a TCP host and port (CI) or a local socket. Kept short: a socket path
+    # over the platform limit fails with a different error.
     query = dict(parse_qsl(parsed.query))
-    query["port"] = str(int(query.get("port", "5432")) + 31)
-    bad_dsn = urlunsplit(parsed._replace(query=urlencode(query)))
+    query["host"] = f"/tmp/flocks-no-postgres-{uuid4().hex[:12]}"
+    userinfo = parsed.netloc.rpartition("@")[0]
+    netloc = userinfo + "@" if userinfo else ""
+    bad_dsn = urlunsplit(parsed._replace(netloc=netloc, query=urlencode(query)))
     result, events, _, _ = _postgres_install_attempt(tmp_path, database_env={"FLOCKS_DB_DSN": bad_dsn})
     assert result.returncode != 0 and "stop" not in events
     assert "PostgreSQL" in result.stderr

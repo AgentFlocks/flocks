@@ -1,4 +1,3 @@
-import PageSelectionGroup from '../PageSelectionGroup';
 import { Suspense, lazy, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import type { ChangeEvent, ComponentType, ReactNode } from 'react';
 import { Link, Navigate, useParams } from 'react-router-dom';
@@ -366,7 +365,7 @@ function PreferencesPanel() {
           title={t('language')}
           description={t('languageDescription')}
         >
-          <PageSelectionGroup className="grid w-56 grid-cols-2 rounded-lg border border-zinc-200 bg-white p-1 dark:border-zinc-800 dark:bg-zinc-900">
+          <div className="grid w-56 grid-cols-2 rounded-lg border border-zinc-200 bg-white p-1 dark:border-zinc-800 dark:bg-zinc-900">
             <SegmentedOption
               active={language === 'en-US'}
               icon={Languages}
@@ -381,7 +380,7 @@ function PreferencesPanel() {
             >
               中
             </SegmentedOption>
-          </PageSelectionGroup>
+          </div>
         </PreferenceRow>
 
         <PreferenceRow
@@ -389,7 +388,7 @@ function PreferencesPanel() {
           title={t('theme')}
           description={t('themeDescription')}
         >
-          <PageSelectionGroup className="grid w-full grid-cols-3 rounded-lg border border-zinc-200 bg-white p-1 dark:border-zinc-800 dark:bg-zinc-900">
+          <div className="grid w-full grid-cols-3 rounded-lg border border-zinc-200 bg-white p-1 dark:border-zinc-800 dark:bg-zinc-900">
             <SegmentedOption
               active={themeMode === 'system'}
               icon={Monitor}
@@ -411,7 +410,7 @@ function PreferencesPanel() {
             >
               {t('darkTheme')}
             </SegmentedOption>
-          </PageSelectionGroup>
+          </div>
         </PreferenceRow>
 
         <PreferenceRow

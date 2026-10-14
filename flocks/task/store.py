@@ -790,6 +790,61 @@ class TaskStore:
         return execution
 
     @classmethod
+    async def list_active_executions_for_session(
+        cls, session_id: str
+    ) -> List[TaskExecution]:
+        db = await cls._db()
+        async with db.execute(
+            """
+            SELECT * FROM task_executions
+            WHERE session_id = ?
+              AND status IN ('pending', 'queued', 'running')
+            ORDER BY created_at ASC
+            """,
+            (session_id,),
+        ) as cur:
+            rows = await cur.fetchall()
+        return [cls._row_to_execution(row) for row in rows]
+
+    @classmethod
+    async def cancel_active_execution(
+        cls,
+        execution_id: str,
+        *,
+        completed_at: datetime,
+        duration_ms: Optional[int],
+        error: str,
+    ) -> bool:
+        """Mark a pending, queued or running execution cancelled.
+
+        Only the status columns change, so a session id the dispatcher wrote
+        meanwhile survives, and the owner columns stay: the owning node's next
+        lease renewal fails on the status and stops the run.  Returns False
+        when the execution had already finished or does not exist.
+        """
+        db = await cls._db()
+        cur = await db.execute(
+            """
+            UPDATE task_executions SET
+              status = 'cancelled',
+              completed_at = COALESCE(completed_at, ?),
+              duration_ms = COALESCE(duration_ms, ?),
+              error = COALESCE(error, ?),
+              updated_at = ?
+            WHERE id = ? AND status IN ('pending', 'queued', 'running')
+            """,
+            (
+                _iso(completed_at),
+                duration_ms,
+                error,
+                datetime.now(timezone.utc).isoformat(),
+                execution_id,
+            ),
+        )
+        await db.commit()
+        return cur.rowcount > 0
+
+    @classmethod
     async def delete_execution(cls, execution_id: str) -> bool:
         db = await cls._db()
         cur = await db.execute(

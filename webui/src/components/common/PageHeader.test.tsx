@@ -19,18 +19,6 @@ describe('PageHeader', () => {
     expect(screen.getByRole('button', { name: '添加设备' })).toBeInTheDocument();
   });
 
-  it('lets the action wrap under the title on narrow viewports instead of overflowing', () => {
-    render(<PageHeader title="设备接入" action={<button type="button">添加设备</button>} />);
-
-    const row = screen.getByRole('heading', { level: 1 }).closest('.flex.justify-between');
-    expect(row).not.toBeNull();
-    expect(row).toHaveClass('flex-wrap');
-
-    const actionWrapper = screen.getByRole('button', { name: '添加设备' }).parentElement;
-    expect(actionWrapper).toHaveClass('flex-shrink-0');
-    expect(actionWrapper).toHaveClass('ml-auto');
-  });
-
   it('omits the action slot when no action is given', () => {
     const { container } = render(<PageHeader title="系统日志" />);
 

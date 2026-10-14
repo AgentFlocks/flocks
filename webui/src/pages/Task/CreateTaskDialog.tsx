@@ -1,8 +1,6 @@
-import { pageActionLabel } from '../pageActionLabel';
-import PageDialog from '../PageDialog';
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Calendar, Loader2, X } from 'lucide-react';
+import { X, Calendar, Loader2 } from 'lucide-react';
 import { useToast } from '@/components/common/Toast';
 import {
   taskAPI,
@@ -56,11 +54,11 @@ export default function CreateTaskDialog({ onClose, onCreated }: { onClose: () =
   const update = (fields: Partial<TaskCreateParams>) => setForm(prev => ({ ...prev, ...fields }));
 
   return (
-    <PageDialog onClose={submitting ? undefined : onClose} className="fixed inset-0 flex items-center justify-center bg-black/40 z-50">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
       <div className="bg-white rounded-2xl shadow-xl w-full max-w-lg mx-4 max-h-[90vh] overflow-y-auto">
         <div className="flex items-center justify-between px-6 py-4 border-b border-gray-200">
           <h2 className="text-lg font-semibold text-gray-900">{t('form.createTitle')}</h2>
-          <button aria-label={pageActionLabel('close')} onClick={onClose} className="p-1 rounded hover:bg-gray-100"><X aria-hidden="true" className="w-5 h-5 text-gray-400" /></button>
+          <button onClick={onClose} className="p-1 rounded hover:bg-gray-100"><X className="w-5 h-5 text-gray-400" /></button>
         </div>
 
         <form onSubmit={handleSubmit} className="px-6 py-4 space-y-4">
@@ -88,7 +86,7 @@ export default function CreateTaskDialog({ onClose, onCreated }: { onClose: () =
                   setScheduleMode('recurring');
                   setRunAt('');
                 }}
-                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-slate-400 outline-none"
+                className="w-full px-3 py-2 border border-gray-300 rounded-lg outline-none"
               >
                 <option value="queued">{t('form.queueOption')}</option>
                 <option value="scheduled">{t('form.scheduledOption')}</option>
@@ -96,7 +94,7 @@ export default function CreateTaskDialog({ onClose, onCreated }: { onClose: () =
             </div>
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">{t('form.priorityLabel')}</label>
-              <select value={form.priority} onChange={e => update({ priority: e.target.value as TaskPriority })} className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-slate-400 outline-none">
+              <select value={form.priority} onChange={e => update({ priority: e.target.value as TaskPriority })} className="w-full px-3 py-2 border border-gray-300 rounded-lg outline-none">
                 <option value="urgent">{t('form.urgentLabel')}</option>
                 <option value="high">{t('form.highLabel')}</option>
                 <option value="normal">{t('form.normalLabel')}</option>
@@ -108,7 +106,7 @@ export default function CreateTaskDialog({ onClose, onCreated }: { onClose: () =
           {isScheduled && (
             <div className={`rounded-xl p-4 space-y-3 border ${isOnce ? 'bg-orange-50/60 border-orange-100' : 'bg-purple-50/60 border-purple-100'}`}>
               <p className={`text-sm font-semibold flex items-center gap-1.5 ${isOnce ? 'text-orange-800' : 'text-purple-800'}`}>
-                <Calendar aria-hidden="true" className="w-4 h-4" /> {t('form.scheduleConfig')}
+                <Calendar className="w-4 h-4" /> {t('form.scheduleConfig')}
               </p>
 
               <div>
@@ -186,7 +184,7 @@ export default function CreateTaskDialog({ onClose, onCreated }: { onClose: () =
           <div className="grid grid-cols-2 gap-4">
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">{t('form.modeLabel')}</label>
-              <select value={form.executionMode} onChange={e => update({ executionMode: e.target.value as ExecutionMode })} className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-slate-400 outline-none">
+              <select value={form.executionMode} onChange={e => update({ executionMode: e.target.value as ExecutionMode })} className="w-full px-3 py-2 border border-gray-300 rounded-lg outline-none">
                 <option value="agent">Agent</option>
                 <option value="workflow">Workflow</option>
               </select>
@@ -224,12 +222,12 @@ export default function CreateTaskDialog({ onClose, onCreated }: { onClose: () =
               className={`px-4 py-2 text-white rounded-lg disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2 ${
                 isOnce ? 'bg-orange-500 hover:bg-orange-600' : 'bg-slate-700 hover:bg-slate-800'
               }`}>
-              {submitting && <Loader2 aria-hidden="true" className="w-4 h-4 animate-spin" />}
+              {submitting && <Loader2 className="w-4 h-4 animate-spin" />}
               {t('common:button.create')}
             </button>
           </div>
         </form>
       </div>
-    </PageDialog>
+    </div>
   );
 }

@@ -28,6 +28,17 @@ _INACTIVITY_TIMEOUT_SECONDS = 300  # 5 minutes
 _WATCHDOG_CHECK_INTERVAL = 30
 
 
+def _cancel_requested() -> bool:
+    """Whether the running task itself was cancelled.
+
+    Supervision also reports a stopped loop (the session's stop button) as a
+    cancellation so the run is not recorded as completed; only a real cancel
+    goes on to whoever awaits the task.
+    """
+    current = asyncio.current_task()
+    return current is not None and current.cancelling() > 0
+
+
 def _new_task_id() -> str:
     # Keep the whole ascending id: its leading characters only encode the time,
     # so a truncated id is shared by every task started within the same minutes
@@ -312,7 +323,8 @@ class BackgroundManager:
                 task.status = "cancelled"
                 task.completed_at = int(datetime.now().timestamp() * 1000)
                 await self._inject_parent_completion(task)
-                raise
+                if _cancel_requested():
+                    raise
             except Exception as exc:
                 log.error("background.existing_session.error", {"error": str(exc), "task_id": task.id})
                 task.error = str(exc)
@@ -504,11 +516,8 @@ class BackgroundManager:
 
         for tid in task_ids:
             handle = self._task_handles.get(tid)
-            if not handle:
-                continue
-            if handle.done():
-                # Already finished (completed/error/cancelled): nothing to
-                # cancel, and the recorded outcome must stay intact.
+            # A finished task keeps its outcome and completion time.
+            if not handle or handle.done():
                 continue
             handle.cancel()
             cancelled += 1
@@ -520,8 +529,11 @@ class BackgroundManager:
 
     def cancel_by_session_id(self, session_id: str) -> int:
         """Cancel all background tasks associated with a given session ID."""
+        # A completed task may still be handing its result to the parent
+        # session; cancelling it then would turn the result into a cancel.
         task_ids = [
-            t.id for t in self._tasks.values() if t.session_id == session_id
+            t.id for t in self._tasks.values()
+            if t.session_id == session_id and t.status in ("pending", "running")
         ]
         cancelled = 0
         for tid in task_ids:
@@ -741,7 +753,8 @@ class BackgroundManager:
                 task.status = "cancelled"
                 task.completed_at = int(datetime.now().timestamp() * 1000)
                 await self._inject_parent_completion(task)
-                raise
+                if _cancel_requested():
+                    raise
             except Exception as exc:
                 log.error("background.task.error", {"error": str(exc), "task_id": task.id})
                 task.error = str(exc)
@@ -781,7 +794,8 @@ class BackgroundManager:
                 task.status = "cancelled"
                 task.completed_at = int(datetime.now().timestamp() * 1000)
                 await self._inject_parent_completion(task)
-                raise
+                if _cancel_requested():
+                    raise
             except Exception as exc:
                 log.error("background.resume.error", {"error": str(exc), "task_id": task.id})
                 task.error = str(exc)
@@ -799,3 +813,26 @@ _manager_state = Instance.state(_create_manager)
 
 def get_background_manager() -> BackgroundManager:
     return _manager_state()
+
+
+def all_background_managers() -> List[BackgroundManager]:
+    """Managers of every instance.
+
+    A task lives in the manager of the instance that launched it: scheduled
+    tasks run outside any request's instance, so a request only reaching its
+    own manager would not see them.
+    """
+    return _manager_state.all_values()
+
+
+def cancel_background_runs_for_session(session_id: str) -> int:
+    """Cancel the background runs of a session, whichever instance started them."""
+    return sum(manager.cancel_by_session_id(session_id) for manager in all_background_managers())
+
+
+def cancel_background_runs_for_parent(parent_session_id: str) -> int:
+    """Cancel the background runs a session spawned, whichever instance holds them."""
+    return sum(
+        manager.cancel_by_parent_session_id(parent_session_id)
+        for manager in all_background_managers()
+    )

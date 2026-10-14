@@ -1,4 +1,3 @@
-import PageDialog from '../PageDialog';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Archive, ArchiveRestore, Loader2, RefreshCw, Search, Trash2 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
@@ -159,7 +158,7 @@ export default function ArchivedDataPanel() {
 
       <div className="flex items-center gap-3">
         <label className="relative block w-full sm:max-w-sm">
-          <Search aria-hidden="true" className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-zinc-400" />
+          <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-zinc-400" />
           <input
             value={searchValue}
             onChange={(event) => setSearchValue(event.target.value)}
@@ -174,15 +173,15 @@ export default function ArchivedDataPanel() {
           disabled={loading}
           aria-label={t('archivedData.refresh')}
           title={t('archivedData.refresh')}
-          className="inline-flex h-10 w-10 items-center justify-center rounded-lg text-zinc-500 transition-colors hover:bg-zinc-100 hover:text-zinc-900 disabled:opacity-50 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100 ml-auto shrink-0"
+          className="ml-auto inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-lg text-zinc-500 transition-colors hover:bg-zinc-100 hover:text-zinc-900 disabled:opacity-50 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
         >
-          <RefreshCw aria-hidden="true" className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
+          <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
         </button>
       </div>
 
       {selectedIds.size > 0 && (
-        <div className="mt-4 flex items-center gap-2 rounded-lg border border-zinc-200 bg-zinc-50 p-3 dark:border-zinc-800 dark:bg-zinc-900/60 flex-wrap">
-          <span className="text-sm text-zinc-600 dark:text-zinc-300 mr-auto">
+        <div className="mt-4 flex flex-wrap items-center gap-2 rounded-lg border border-zinc-200 bg-zinc-50 p-3 dark:border-zinc-800 dark:bg-zinc-900/60">
+          <span className="mr-auto text-sm text-zinc-600 dark:text-zinc-300">
             {t('archivedData.selected', { count: selectedIds.size })}
           </span>
           <button
@@ -192,14 +191,14 @@ export default function ArchivedDataPanel() {
             title={t('archivedData.restoreSelected')}
             className="inline-flex h-9 w-9 items-center justify-center rounded-md text-zinc-600 transition-colors hover:bg-white hover:text-zinc-950 dark:text-zinc-300 dark:hover:bg-zinc-800 dark:hover:text-zinc-50"
           >
-            <ArchiveRestore aria-hidden="true" className="h-4 w-4" />
+            <ArchiveRestore className="h-4 w-4" />
           </button>
           <button
             type="button"
             onClick={() => setPendingDeleteIds(Array.from(selectedIds))}
             className="inline-flex h-9 items-center gap-2 rounded-md bg-red-600 px-3 text-sm font-semibold text-white hover:bg-red-700"
           >
-            <Trash2 aria-hidden="true" className="h-4 w-4" />
+            <Trash2 className="h-4 w-4" />
             {t('archivedData.deleteSelected')}
           </button>
         </div>
@@ -207,8 +206,8 @@ export default function ArchivedDataPanel() {
 
       <div className="mt-4 overflow-x-auto rounded-xl border border-zinc-200 dark:border-zinc-800">
         {loading ? (
-          <div className="flex items-center justify-center gap-2 text-sm text-zinc-500 min-h-48">
-            <Loader2 aria-hidden="true" className="h-5 w-5 animate-spin" />
+          <div className="flex min-h-48 items-center justify-center gap-2 text-sm text-zinc-500">
+            <Loader2 className="h-5 w-5 animate-spin" />
             {t('archivedData.loading')}
           </div>
         ) : error ? (
@@ -219,14 +218,14 @@ export default function ArchivedDataPanel() {
             </button>
           </div>
         ) : sessions.length === 0 ? (
-          <div className="flex flex-col items-center justify-center p-6 text-center text-zinc-500 min-h-48">
-            <ArchiveRestore aria-hidden="true" className="mb-3 h-8 w-8 text-zinc-300 dark:text-zinc-700" />
+          <div className="flex min-h-48 flex-col items-center justify-center p-6 text-center text-zinc-500">
+            <ArchiveRestore className="mb-3 h-8 w-8 text-zinc-300 dark:text-zinc-700" />
             <p className="text-sm font-semibold text-zinc-700 dark:text-zinc-300">{t('archivedData.empty')}</p>
             <p className="mt-1 text-xs">{t('archivedData.emptyDescription')}</p>
           </div>
         ) : (
           <>
-            <div className="grid-cols-[2.25rem_minmax(10rem,2fr)_minmax(6.5rem,0.8fr)_minmax(7rem,1fr)_9.5rem_7rem] items-center gap-4 border-b border-zinc-200 bg-zinc-50 px-4 py-2.5 text-sm font-normal text-zinc-500 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-400 hidden md:grid">
+            <div className="hidden grid-cols-[2.25rem_minmax(10rem,2fr)_minmax(6.5rem,0.8fr)_minmax(7rem,1fr)_9.5rem_7rem] items-center gap-4 border-b border-zinc-200 bg-zinc-50 px-4 py-2.5 text-sm font-normal text-zinc-500 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-400 md:grid">
               <input
                 type="checkbox"
                 checked={allSelected}
@@ -250,7 +249,7 @@ export default function ArchivedDataPanel() {
                 : session.ownerUsername || t('archivedData.systemOwner');
               const projectLabel = getProjectLabel(session);
               return (
-                <div key={session.id} className="grid border-b border-zinc-100 px-4 py-3.5 text-sm font-normal last:border-b-0 dark:border-zinc-900 gap-3 md:grid-cols-[2.25rem_minmax(10rem,2fr)_minmax(6.5rem,0.8fr)_minmax(7rem,1fr)_9.5rem_7rem] md:items-center md:gap-4">
+                <div key={session.id} className="grid gap-3 border-b border-zinc-100 px-4 py-3.5 text-sm font-normal last:border-b-0 dark:border-zinc-900 md:grid-cols-[2.25rem_minmax(10rem,2fr)_minmax(6.5rem,0.8fr)_minmax(7rem,1fr)_9.5rem_7rem] md:items-center md:gap-4">
                   <input
                     type="checkbox"
                     checked={selectedIds.has(session.id)}
@@ -260,12 +259,12 @@ export default function ArchivedDataPanel() {
                     className="h-4 w-4 justify-self-center"
                   />
                   <div className="min-w-0">
-                    <p className="text-sm font-normal text-zinc-900 dark:text-zinc-100 truncate">{session.title}</p>
+                    <p className="truncate text-sm font-normal text-zinc-900 dark:text-zinc-100">{session.title}</p>
                   </div>
-                  <p className="text-sm font-normal text-zinc-600 dark:text-zinc-400 truncate" title={ownerLabel}>
+                  <p className="truncate text-sm font-normal text-zinc-600 dark:text-zinc-400" title={ownerLabel}>
                     {ownerLabel}
                   </p>
-                  <p className="text-sm font-normal text-zinc-600 dark:text-zinc-400 truncate" title={projectLabel}>
+                  <p className="truncate text-sm font-normal text-zinc-600 dark:text-zinc-400" title={projectLabel}>
                     {projectLabel}
                   </p>
                   <p className="text-sm font-normal text-zinc-500">
@@ -308,15 +307,15 @@ export default function ArchivedDataPanel() {
             disabled={loadingMore}
             className="inline-flex h-9 items-center gap-2 rounded-md border border-zinc-200 px-4 text-sm font-semibold hover:bg-zinc-50 disabled:opacity-50 dark:border-zinc-800 dark:hover:bg-zinc-900"
           >
-            {loadingMore && <Loader2 aria-hidden="true" className="h-4 w-4 animate-spin" />}
+            {loadingMore && <Loader2 className="h-4 w-4 animate-spin" />}
             {t('archivedData.loadMore')}
           </button>
         </div>
       )}
 
       {pendingDeleteIds.length > 0 && (
-        <PageDialog aria-labelledby="permanent-delete-title" onClose={deleting ? undefined : () => setPendingDeleteIds([])} className="fixed inset-0 z-[100] flex items-center justify-center bg-black/45 p-4" >
-          <div    className="w-full max-w-md rounded-xl bg-white p-6 shadow-2xl dark:bg-zinc-900">
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/45 p-4" role="presentation">
+          <div role="dialog" aria-modal="true" aria-labelledby="permanent-delete-title" className="w-full max-w-md rounded-xl bg-white p-6 shadow-2xl dark:bg-zinc-900">
             <h2 id="permanent-delete-title" className="text-lg font-bold text-zinc-950 dark:text-zinc-50">
               {t('archivedData.deleteTitle')}
             </h2>
@@ -338,12 +337,12 @@ export default function ArchivedDataPanel() {
                 disabled={deleting}
                 className="inline-flex h-9 items-center gap-2 rounded-md bg-red-600 px-4 text-sm font-semibold text-white hover:bg-red-700 disabled:opacity-50"
               >
-                {deleting && <Loader2 aria-hidden="true" className="h-4 w-4 animate-spin" />}
+                {deleting && <Loader2 className="h-4 w-4 animate-spin" />}
                 {t('archivedData.confirmDelete')}
               </button>
             </div>
           </div>
-        </PageDialog>
+        </div>
       )}
     </div>
   );

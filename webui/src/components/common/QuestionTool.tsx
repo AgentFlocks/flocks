@@ -11,14 +11,7 @@
  */
 
 import { useState, useRef } from 'react';
-import {
-  Check,
-  CircleHelp,
-  Eye,
-  EyeOff,
-  Loader2,
-  Upload,
-} from 'lucide-react';
+import { Check, Loader2, Upload, Eye, EyeOff, CircleHelp } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 // ============================================================================
@@ -293,15 +286,15 @@ function ChoiceInput({
               >
                 {multiple ? (
                   <span
-                    className={`mt-0.5 w-4 h-4 rounded border-2 flex items-center justify-center flex-shrink-0 ${
+                    className={`mt-0.5 flex-shrink-0 w-4 h-4 rounded border-2 flex items-center justify-center ${
                       selected ? 'border-emerald-500 bg-emerald-500' : 'border-zinc-300 bg-transparent'
                     }`}
                   >
-                    {selected && <Check aria-hidden="true" className="w-2.5 h-2.5 text-white" />}
+                    {selected && <Check className="w-2.5 h-2.5 text-white" strokeWidth={3} />}
                   </span>
                 ) : (
                   <span
-                    className={`mt-0.5 w-4 h-4 rounded-full border-2 flex items-center justify-center flex-shrink-0 ${
+                    className={`mt-0.5 flex-shrink-0 w-4 h-4 rounded-full border-2 flex items-center justify-center ${
                       selected ? 'border-emerald-500' : 'border-zinc-300'
                     }`}
                   >
@@ -440,7 +433,7 @@ function PasswordInput({
         className="absolute right-2 top-1/2 -translate-y-1/2 text-zinc-400 hover:text-zinc-600"
         tabIndex={-1}
       >
-        {show ? <EyeOff aria-hidden="true" className="w-4 h-4" /> : <Eye aria-hidden="true" className="w-4 h-4" />}
+        {show ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
       </button>
     </div>
   );
@@ -498,7 +491,7 @@ function FileInput({
             : 'border-zinc-300 text-zinc-500 hover:border-emerald-300 hover:bg-emerald-50 hover:text-emerald-700'
         }`}
       >
-        <Upload aria-hidden="true" className="w-4 h-4 flex-shrink-0" />
+        <Upload className="w-4 h-4 flex-shrink-0" />
         <span className="truncate max-w-[240px]">
           {filename || q.placeholder || t('question.filePlaceholder')}
         </span>
@@ -593,10 +586,10 @@ export function QuestionTool({ questions, onAnswer, onReject, compact = false }:
   const textSm = compact ? 'text-xs' : 'text-sm';
 
   return (
-    <div className="rounded-lg border border-zinc-200 bg-white overflow-hidden">
+    <div className="overflow-hidden rounded-lg border border-zinc-200 bg-white">
       {/* Header */}
       <div className={`${px} flex items-center gap-2 border-b border-zinc-100 bg-white py-2`}>
-        <CircleHelp aria-hidden="true" className={`${compact ? 'h-3.5 w-3.5' : 'h-4 w-4'} text-emerald-500 flex-shrink-0`} />
+        <CircleHelp className={`${compact ? 'h-3.5 w-3.5' : 'h-4 w-4'} flex-shrink-0 text-emerald-500`} />
         <span className={`${textSm} font-medium text-zinc-700`}>{t('question.needsAnswer')}</span>
       </div>
 
@@ -661,8 +654,8 @@ export function QuestionTool({ questions, onAnswer, onReject, compact = false }:
             className={`flex flex-1 items-center justify-center gap-1.5 rounded-lg bg-emerald-600 py-2 ${textSm} font-medium text-white transition-colors hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-40`}
           >
             {submitting
-              ? <Loader2 aria-hidden="true" className={`${compact ? 'w-3 h-3' : 'w-4 h-4'} animate-spin`} />
-              : <Check aria-hidden="true" className={`${compact ? 'w-3 h-3' : 'w-4 h-4'}`} />
+              ? <Loader2 className={`${compact ? 'w-3 h-3' : 'w-4 h-4'} animate-spin`} />
+              : <Check className={`${compact ? 'w-3 h-3' : 'w-4 h-4'}`} />
             }
             {t('question.confirm')}
           </button>

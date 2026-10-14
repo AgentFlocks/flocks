@@ -1,6 +1,5 @@
-import PageDialog from '../PageDialog';
 import { useState, useEffect } from 'react';
-import { Plus, Shield } from 'lucide-react';
+import { Shield, Plus } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import PageHeader from '@/components/common/PageHeader';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
@@ -103,7 +102,7 @@ export default function PermissionPage() {
       <PageHeader
         title={t('pageTitle')}
         description={t('pageDescription')}
-        icon={<Shield aria-hidden="true" className="w-8 h-8" />}
+        icon={<Shield className="w-8 h-8" />}
       />
 
       <div className="flex items-center justify-between mb-6">
@@ -114,7 +113,7 @@ export default function PermissionPage() {
           onClick={() => setShowAddDialog(true)}
           className="flex items-center gap-2 px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700"
         >
-          <Plus aria-hidden="true" className="w-5 h-5" />
+          <Plus className="w-5 h-5" />
           {t('addRule')}
         </button>
       </div>
@@ -122,30 +121,30 @@ export default function PermissionPage() {
       <div className="flex-1 overflow-y-auto">
         {pending.length > 0 && (
           <div className="mb-6" data-testid="pending-requests">
-            <div className="text-sm font-medium text-fg-secondary mb-2">
+            <div className="text-sm font-medium text-gray-700 mb-2">
               {t('pending.title', { count: pending.length })}
             </div>
-            <div className="bg-surface rounded-control shadow-sm border border-warning overflow-x-auto">
-              <table className="min-w-full divide-y divide-line">
-                <thead className="bg-warning-soft">
+            <div className="bg-white rounded-lg shadow-sm border border-amber-200 overflow-hidden">
+              <table className="min-w-full divide-y divide-gray-200">
+                <thead className="bg-amber-50">
                   <tr>
-                    <th className="px-6 py-3 text-left text-xs font-medium text-fg-muted uppercase tracking-wider">{t('pending.session')}</th>
-                    <th className="px-6 py-3 text-left text-xs font-medium text-fg-muted uppercase tracking-wider">{t('table.tool')}</th>
-                    <th className="px-6 py-3 text-left text-xs font-medium text-fg-muted uppercase tracking-wider">{t('table.pattern')}</th>
-                    <th className="px-6 py-3 text-left text-xs font-medium text-fg-muted uppercase tracking-wider">{t('table.createdAt')}</th>
-                    <th className="px-6 py-3 text-right text-xs font-medium text-fg-muted uppercase tracking-wider">{t('table.operations')}</th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">{t('pending.session')}</th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">{t('table.tool')}</th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">{t('table.pattern')}</th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">{t('table.createdAt')}</th>
+                    <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">{t('table.operations')}</th>
                   </tr>
                 </thead>
-                <tbody className="bg-surface divide-y divide-line">
+                <tbody className="bg-white divide-y divide-gray-200">
                   {pending.map((req) => (
-                    <tr key={req.id}>
-                      <td className="px-6 py-4 whitespace-nowrap text-sm text-fg-secondary font-mono">{req.sessionID}</td>
-                      <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-fg">{req.toolID}</td>
-                      <td className="px-6 py-4 text-sm text-fg-secondary break-all">{req.patterns.join(', ')}</td>
-                      <td className="px-6 py-4 whitespace-nowrap text-sm text-fg-secondary">{new Date(req.time.created).toLocaleString()}</td>
+                    <tr key={req.id} className="hover:bg-gray-50">
+                      <td className="px-6 py-4 whitespace-nowrap text-sm font-mono text-gray-600">{req.sessionID}</td>
+                      <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">{req.toolID}</td>
+                      <td className="px-6 py-4 text-sm text-gray-600 break-all">{req.patterns.join(', ')}</td>
+                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-600">{new Date(req.time.created).toLocaleString()}</td>
                       <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-medium space-x-3">
-                        <button onClick={() => handleReply(req.id, true)} className="text-success hover:text-success">{t('action.allow')}</button>
-                        <button onClick={() => handleReply(req.id, false)} className="text-danger hover:text-danger">{t('action.deny')}</button>
+                        <button onClick={() => handleReply(req.id, true)} className="text-green-600 hover:text-green-900">{t('action.allow')}</button>
+                        <button onClick={() => handleReply(req.id, false)} className="text-red-600 hover:text-red-900">{t('action.deny')}</button>
                       </td>
                     </tr>
                   ))}
@@ -156,7 +155,7 @@ export default function PermissionPage() {
         )}
         {permissions.length === 0 ? (
           <EmptyState
-            icon={<Shield aria-hidden="true" className="w-16 h-16" />}
+            icon={<Shield className="w-16 h-16" />}
             title={t('emptyTitle')}
             description={t('emptyDescription')}
             action={
@@ -164,14 +163,14 @@ export default function PermissionPage() {
                 onClick={() => setShowAddDialog(true)}
                 className="inline-flex items-center gap-2 px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700"
               >
-                <Plus aria-hidden="true" className="w-5 h-5" />
+                <Plus className="w-5 h-5" />
                 {t('addRule')}
               </button>
             }
           />
         ) : (
-          <div className="bg-white rounded-lg shadow-sm border border-gray-200 overflow-x-auto">
-            <table className="divide-y divide-gray-200 min-w-full">
+          <div className="bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden">
+            <table className="min-w-full divide-y divide-gray-200">
               <thead className="bg-gray-50">
                 <tr>
                   <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
@@ -194,7 +193,7 @@ export default function PermissionPage() {
               <tbody className="bg-white divide-y divide-gray-200">
                 {permissions.map((perm) => (
                   <tr key={perm.id} className="hover:bg-gray-50">
-                    <td className="px-6 py-4 text-sm font-medium text-gray-900 whitespace-nowrap">
+                    <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">
                       {perm.permission}
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap">
@@ -208,10 +207,10 @@ export default function PermissionPage() {
                         {perm.action === 'allow' ? t('action.allow') : t('action.deny')}
                       </span>
                     </td>
-                    <td className="px-6 py-4 text-sm text-gray-600 whitespace-nowrap">
+                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-600">
                       {perm.pattern}
                     </td>
-                    <td className="px-6 py-4 text-sm text-gray-600 whitespace-nowrap">
+                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-600">
                       {perm.createdAt ? new Date(perm.createdAt).toLocaleString() : '-'}
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
@@ -276,7 +275,7 @@ function AddPermissionDialog({
   };
 
   return (
-    <PageDialog onClose={loading ? undefined : onClose} className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
       <div className="bg-white rounded-lg shadow-xl max-w-md w-full mx-4">
         <div className="px-6 py-4 border-b border-gray-200">
           <h3 className="text-lg font-semibold text-gray-900">{t('dialog.title')}</h3>
@@ -344,6 +343,6 @@ function AddPermissionDialog({
           </button>
         </div>
       </div>
-    </PageDialog>
+    </div>
   );
 }

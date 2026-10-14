@@ -1,8 +1,7 @@
 import { useEffect, useRef } from 'react';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
-import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { ConfirmProvider, requestConfirm, useConfirm } from './ConfirmDialog';
+import { ConfirmProvider, requestConfirm } from './ConfirmDialog';
 
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({ t: (key: string) => key }),
@@ -34,11 +33,6 @@ function NativeEditor({ onAsk }: { onAsk: () => void }) {
       <button type="button" onClick={onAsk}>save</button>
     </dialog>
   );
-}
-
-function Trigger({ completed }: { completed: (result: boolean) => void }) {
-  const confirm = useConfirm();
-  return <button onClick={async () => completed(await confirm({ title: 'Confirm change', description: 'Keep existing data.', variant: 'danger' }))}>Open confirmation</button>;
 }
 
 describe('ConfirmProvider', () => {
@@ -83,36 +77,6 @@ describe('ConfirmProvider', () => {
     act(() => { void requestConfirm({ description: 'Shortcuts', confirmText: 'Got it', hideCancel: true }); });
     await screen.findByRole('alertdialog');
     expect(screen.getAllByRole('button').map((button) => button.textContent)).toEqual(['Got it']);
-  });
-
-  it('exposes a labelled dialog, cancels on Escape, and returns focus', async () => {
-    const user = userEvent.setup();
-    const completed = vi.fn();
-    render(<ConfirmProvider><Trigger completed={completed} /></ConfirmProvider>);
-    const trigger = screen.getByRole('button', { name: 'Open confirmation' });
-    await user.click(trigger);
-    expect(screen.getByRole('alertdialog', { name: 'Confirm change' })).toHaveAccessibleDescription('Keep existing data.');
-    await user.keyboard('{Escape}');
-    expect(completed).toHaveBeenCalledWith(false);
-    expect(trigger).toHaveFocus();
-  });
-
-  it('keeps affirmative confirmation explicit', async () => {
-    const user = userEvent.setup();
-    const completed = vi.fn();
-    render(<ConfirmProvider><Trigger completed={completed} /></ConfirmProvider>);
-    await user.click(screen.getByRole('button', { name: 'Open confirmation' }));
-    await user.click(screen.getByRole('button', { name: 'button.confirm' }));
-    expect(completed).toHaveBeenCalledWith(true);
-    expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
-  });
-
-  it('names an untitled prompt after its confirm action and keeps the dvh height cap', async () => {
-    render(<ConfirmProvider><span /></ConfirmProvider>);
-    act(() => { void requestConfirm({ description: 'Proceed?' }); });
-    const prompt = await screen.findByRole('alertdialog', { name: 'button.confirm' });
-    const panel = prompt.querySelector('[data-ui-overlay="dialog"]') as HTMLElement;
-    expect(panel.className).toContain('max-h-[calc(100dvh-2rem)]');
   });
 });
 

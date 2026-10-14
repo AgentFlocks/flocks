@@ -14,12 +14,14 @@ from typing import Optional
 
 import typer
 from rich.console import Console
+from rich.markup import escape
 from rich.table import Table
 from rich.prompt import Prompt, Confirm
 
 from flocks.mcp import MCP, get_manager, McpStatus
 from flocks.mcp.types import McpStatusInfo
 from flocks.mcp.auth import McpAuth
+from flocks.mcp.utils import REMOTE_MCP_TYPES
 from flocks.config.config import Config
 
 
@@ -30,28 +32,6 @@ mcp_app = typer.Typer(
 )
 
 console = Console()
-
-
-def _configured_servers(config) -> dict[str, dict]:
-    """Return configured MCP servers as plain dicts.
-
-    ``Config.get()`` validates ``mcp`` entries into ``McpLocalConfig`` /
-    ``McpRemoteConfig`` models; the CLI used to skip every entry that was not
-    already a dict and reported "No MCP servers configured" for a populated file.
-    """
-    mcp_config = getattr(config, "mcp", None) or {}
-    servers: dict[str, dict] = {}
-    for name, server_config in mcp_config.items():
-        if hasattr(server_config, "model_dump"):
-            entry = server_config.model_dump(exclude_none=True)
-        elif isinstance(server_config, dict):
-            entry = dict(server_config)
-        else:
-            continue
-        if "type" not in entry:
-            continue
-        servers[name] = entry
-    return servers
 
 
 def _get_status_icon(status: McpStatus) -> str:
@@ -90,6 +70,26 @@ def _get_auth_status_icon(status: str) -> str:
     return icons.get(status, "[dim]?[/dim]")
 
 
+def _configured_servers(config) -> dict:
+    """Configured MCP servers as plain dicts.
+
+    Config validation turns valid entries into McpLocalConfig/McpRemoteConfig
+    models, so dict-only checks would skip every real server.
+    """
+    servers = {}
+    for name, server_config in (getattr(config, 'mcp', None) or {}).items():
+        if hasattr(server_config, 'model_dump'):
+            server_config = server_config.model_dump(exclude_none=True)
+        if isinstance(server_config, dict):
+            servers[name] = server_config
+    return servers
+
+
+def _is_remote(server_config: dict) -> bool:
+    """``sse`` is an accepted alias of ``remote`` (see flocks.mcp.utils)."""
+    return str(server_config.get("type", "")).strip().lower() in REMOTE_MCP_TYPES
+
+
 @mcp_app.command("list")
 def mcp_list(
     format: str = typer.Option(
@@ -120,7 +120,7 @@ async def _list_servers(format: str):
             status = McpStatusInfo(status=McpStatus.DISABLED)
         # OAuth support is determined by config, not manager method
         oauth_config = server_config.get('oauth')
-        supports_oauth = server_config.get('type') == 'remote' and oauth_config is not False
+        supports_oauth = _is_remote(server_config) and oauth_config is not False
         has_tokens = bool(await McpAuth.get(name))
         
         servers.append({
@@ -132,6 +132,9 @@ async def _list_servers(format: str):
         })
     
     if not servers:
+        if format == "json":
+            typer.echo("[]")
+            return
         console.print("[dim]No MCP servers configured[/dim]")
         console.print("\nAdd servers with: [cyan]flocks mcp add[/cyan]")
         return
@@ -148,7 +151,8 @@ async def _list_servers(format: str):
             }
             for s in servers
         ]
-        console.print(json.dumps(json_data, indent=2))
+        # Not console.print: Rich wraps long strings and eats [markup].
+        typer.echo(json.dumps(json_data, indent=2))
     else:
         console.print()
         console.print("[bold cyan]MCP Servers[/bold cyan]")
@@ -173,18 +177,18 @@ async def _list_servers(format: str):
                 hint = " [dim](OAuth)[/dim]"
             
             if status and status.error:
-                hint += f"\n    [red]{status.error}[/red]"
+                hint += f"\n    [red]{escape(status.error)}[/red]"
             
             # Type hint
             type_hint = ""
-            if config.get("type") == "remote":
+            if _is_remote(config):
                 type_hint = config.get("url", "")
             else:
                 cmd = config.get("command", [])
                 type_hint = " ".join(cmd) if isinstance(cmd, list) else str(cmd)
             
-            console.print(f"{icon} [bold]{name}[/bold] [dim]{status_text}[/dim]{hint}")
-            console.print(f"    [dim]{type_hint}[/dim]")
+            console.print(f"{icon} [bold]{escape(name)}[/bold] [dim]{status_text}[/dim]{hint}")
+            console.print(f"    [dim]{escape(type_hint)}[/dim]")
             console.print()
         
         console.print(f"[dim]{len(servers)} server(s)[/dim]")
@@ -370,9 +374,7 @@ async def _auth_server(name: Optional[str]):
     # Get OAuth-capable servers
     oauth_servers = []
     for server_name, server_config in mcp_config.items():
-        if not isinstance(server_config, dict):
-            continue
-        if server_config.get("type") != "remote":
+        if not _is_remote(server_config):
             continue
         oauth_config = server_config.get("oauth")
         if oauth_config is False:
@@ -420,7 +422,7 @@ async def _auth_server(name: Optional[str]):
         console.print(f"[red]MCP server not found: {name}[/red]")
         raise typer.Exit(1)
     
-    if server_config.get("type") != "remote":
+    if not _is_remote(server_config):
         console.print(f"[red]MCP server {name} is not a remote server[/red]")
         raise typer.Exit(1)
     
@@ -540,7 +542,7 @@ async def _debug_server(name: str):
         console.print(f"[red]MCP server not found: {name}[/red]")
         raise typer.Exit(1)
     
-    if server_config.get("type") != "remote":
+    if not _is_remote(server_config):
         console.print(f"[red]MCP server {name} is not a remote server[/red]")
         raise typer.Exit(1)
     
@@ -789,4 +791,8 @@ def mcp_serve(
     except ValueError as exc:
         raise typer.BadParameter(str(exc)) from exc
     server = create_server(path, permission_mode, split_tools(allowed_tools), split_tools(disallowed_tools), sandbox, max_budget)
-    asyncio.run(serve_stdio(server))
+    try:
+        asyncio.run(serve_stdio(server))
+    except KeyboardInterrupt:
+        # Ctrl+C is how an operator stops a terminal-attached server.
+        return

@@ -32,4 +32,15 @@ describe('session transcript', () => {
     act(() => timeline.mock.lastCall![0].onProcessGroupOpenChange('steps', false));
     expect(timeline.mock.lastCall![0].processGroupOpenState.steps).toBe(false);
   });
+
+  it('draws full chat messages by default and only their bodies inline', () => {
+    const messages = [{ id: 'a', role: 'assistant' as const, parts: [{ id: 't', type: 'text' as const, text: 'Done' }] }];
+    const { container, rerender } = render(<SessionTranscript messages={messages} />);
+    expect(timeline.mock.lastCall![0]).toEqual(expect.objectContaining({ compact: false, bare: false }));
+    expect(container.firstElementChild).toHaveClass('pl-10');
+
+    rerender(<SessionTranscript messages={messages} variant="inline" />);
+    expect(timeline.mock.lastCall![0]).toEqual(expect.objectContaining({ compact: true, bare: true, collapseIntermediateSteps: true }));
+    expect(container.firstElementChild).not.toHaveClass('pl-10');
+  });
 });

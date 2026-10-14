@@ -90,7 +90,8 @@ async def _import_legacy_task_snapshot(tmp_path: Path) -> None:
     await TaskStore.init()
 
 
-async def _wait_for_execution(execution_id: str, *, status: TaskStatus, timeout: float = 2.0):
+async def _wait_for_execution(execution_id: str, *, status: TaskStatus, timeout: float = 10.0):
+    # Returns as soon as the status is reached; the margin is for a heavily loaded machine.
     deadline = asyncio.get_running_loop().time() + timeout
     while asyncio.get_running_loop().time() < deadline:
         execution = await TaskManager.get_execution(execution_id)
@@ -212,8 +213,8 @@ async def test_dispatch_timeout_releases_queue_for_following_execution(
     first = (await TaskManager.list_scheduler_executions(first_scheduler.id))[0][0]
     second = (await TaskManager.list_scheduler_executions(second_scheduler.id))[0][0]
 
-    failed = await _wait_for_execution(first.id, status=TaskStatus.FAILED, timeout=1.0)
-    completed = await _wait_for_execution(second.id, status=TaskStatus.COMPLETED, timeout=1.0)
+    failed = await _wait_for_execution(first.id, status=TaskStatus.FAILED)
+    completed = await _wait_for_execution(second.id, status=TaskStatus.COMPLETED)
 
     assert "hard timeout" in (failed.error or "")
     assert completed.result_summary == "后续任务 done"
@@ -363,7 +364,7 @@ async def test_workflow_timeout_signals_cancel_and_stops_before_next_node(
     )
 
     execution = (await TaskManager.list_scheduler_executions(scheduler.id))[0][0]
-    failed = await _wait_for_execution(execution.id, status=TaskStatus.FAILED, timeout=1.0)
+    failed = await _wait_for_execution(execution.id, status=TaskStatus.FAILED)
     await asyncio.sleep(0.15)
 
     assert "hard timeout" in (failed.error or "")

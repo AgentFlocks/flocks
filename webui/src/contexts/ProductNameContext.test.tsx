@@ -16,12 +16,13 @@ vi.mock("@/api/uiConfig", () => ({
 }));
 
 function ProductNames() {
-  const { productName, displayName, configuredDisplayName } = useProductName();
+  const { productName, displayName, configuredDisplayName, logoUrl } = useProductName();
   return (
     <div>
       <span data-testid="product-name">{productName}</span>
       <span data-testid="display-name">{displayName}</span>
       <span data-testid="configured-name">{configuredDisplayName ?? "(none)"}</span>
+      <span data-testid="logo-url">{logoUrl ?? "none"}</span>
     </div>
   );
 }
@@ -50,6 +51,7 @@ describe("ProductNameProvider", () => {
     expect(screen.getByTestId("display-name")).toHaveTextContent("Flocks");
     expect(screen.getByTestId("configured-name")).toHaveTextContent("(none)");
     expect(document.title).toBe("Flocks");
+    expect(screen.getByTestId("logo-url")).toHaveTextContent("/favicon.svg");
   });
 
   it("uses the configured display name everywhere", async () => {
@@ -70,6 +72,7 @@ describe("ProductNameProvider", () => {
     );
     expect(screen.getByTestId("display-name")).toHaveTextContent("Acme SOC");
     expect(screen.getByTestId("configured-name")).toHaveTextContent("Acme SOC");
+    expect(screen.getByTestId("logo-url")).toHaveTextContent("none");
   });
 
   it("falls back to the default name when the display config cannot be loaded", async () => {

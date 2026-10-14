@@ -16,7 +16,14 @@ from typing import Optional
 from flocks.tool.registry import (
     ToolRegistry, ToolCategory, ToolParameter, ParameterType, ToolResult, ToolContext
 )
-from flocks.tool.path_utils import resolve_tool_path
+from flocks.tool.path_utils import (
+    changed_before_asking,
+    checked_error,
+    moved_since_resolved,
+    paths_changed,
+    resolve_tool_path,
+    resolved_identities,
+)
 from flocks.utils.id import Identifier
 from flocks.utils.log import Log
 
@@ -390,6 +397,10 @@ async def write_tool(
     # Get relative title for display
     title = resolution.display_path
     
+    # Nothing is read through a path that moved since it was checked.
+    if moved_since_resolved(filepath):
+        return ToolResult(success=False, error=changed_before_asking(filepath), title=title)
+
     # Check if file exists and get old content
     exists = os.path.exists(filepath)
     old_content = ""
@@ -401,7 +412,7 @@ async def write_tool(
         except Exception as e:
             return ToolResult(
                 success=False,
-                error=f"Failed to read existing file: {str(e)}",
+                error=checked_error((filepath,), f"Failed to read existing file: {str(e)}"),
                 title=title
             )
 
@@ -427,7 +438,28 @@ async def write_tool(
 
     # Generate diff
     diff = trim_diff(generate_diff(filepath, old_content, content))
-    
+
+    # Explicit edit/write rules (session, agent, delegating session) apply here.
+    # The request carries the diff: none read after the path moved.
+    if moved_since_resolved(filepath):
+        return ToolResult(success=False, error=changed_before_asking(filepath), title=title)
+    identities = resolved_identities(filepath)
+    await ctx.ask(
+        permission="edit",
+        patterns=[resolution.permission_pattern],
+        always=["*"],
+        metadata={
+            "tool": "write", "filepath": filepath, "diff": diff,
+            "pattern_base": resolution.worktree,
+        },
+    )
+    if paths_changed(identities):
+        return ToolResult(
+            success=False,
+            error=f"{filepath} changed while waiting for permission; check it again and retry.",
+            title=title,
+        )
+
     # Create parent directory if needed
     parent_dir = os.path.dirname(filepath)
     if parent_dir and not os.path.exists(parent_dir):

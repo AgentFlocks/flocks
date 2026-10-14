@@ -77,7 +77,7 @@ export function useProtectedHubUpdate() {
   }, []);
 
   const dialog = <>
-    {plan && <div className="fixed inset-0 flex items-center justify-center bg-black/40 p-4 z-[70]">
+    {plan && <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/40 p-4">
       <section ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby="hub-update-confirm-title" className="flex max-h-[85vh] w-full max-w-xl flex-col rounded-xl bg-white p-6 shadow-xl dark:bg-zinc-900">
         <h2 id="hub-update-confirm-title" className="text-lg font-semibold">{zh ? '备份并覆盖现有组件' : 'Back up and overwrite existing components'}</h2>
         <p className="my-3 text-sm text-gray-600 dark:text-zinc-300">{zh
@@ -103,7 +103,7 @@ export function useProtectedHubUpdate() {
         </div>
       </section>
     </div>}
-    {backupPath && <div role="status" className="fixed bottom-5 right-5 max-w-lg rounded-lg border bg-white p-4 shadow-lg dark:bg-zinc-900 z-[65] break-all">
+    {backupPath && <div role="status" className="fixed bottom-5 right-5 z-[65] max-w-lg break-all rounded-lg border bg-white p-4 shadow-lg dark:bg-zinc-900">
       <p>{zh ? '更新前的备份已保存：' : 'Pre-update backup saved:'}</p>
       <code className="text-sm">{backupPath}</code>
       <button className="ml-3 underline" onClick={() => setBackupPath(null)}>{zh ? '关闭' : 'Dismiss'}</button>

@@ -199,26 +199,6 @@ describe('Home create WebUI contract page entry', () => {
     expect(screen.queryByText(/backend is running/i)).not.toBeInTheDocument();
   });
 
-  it('lets the repository dropdown open past the hero card edge', async () => {
-    const user = userEvent.setup();
-    render(
-      <MemoryRouter>
-        <Home />
-      </MemoryRouter>,
-    );
-
-    await user.click(screen.getByRole('button', { name: 'openSource' }));
-
-    const menu = screen.getByRole('link', { name: 'GitHub' }).parentElement as HTMLElement;
-    expect(screen.getByRole('link', { name: /Gitee/ })).toBeInTheDocument();
-    expect(menu).toHaveClass('z-20');
-    // On phone widths the hero buttons wrap and the menu extends below the
-    // card, so no ancestor between the menu and the page may clip overflow.
-    for (let node = menu.parentElement; node && node !== document.body; node = node.parentElement) {
-      expect(node.className).not.toMatch(/(^|\s)overflow-hidden(\s|$)/);
-    }
-  });
-
   it('links dashboard stat cards to their matching pages', () => {
     useStatsMock.mockReturnValue({
       stats: {
@@ -243,31 +223,45 @@ describe('Home create WebUI contract page entry', () => {
     expect(
       screen.getByRole('link', { name: 'stats.agentCount' }),
     ).toHaveAttribute('href', '/agents');
-    expect(screen.getByRole('link', { name: 'stats.agentCount' })).toHaveClass('hover:border-purple-200');
+    expect(screen.getByRole('link', { name: 'stats.agentCount' })).toHaveClass(
+      'hover:border-purple-200',
+    );
     expect(
       screen.getByRole('link', { name: 'stats.workflowCount' }),
     ).toHaveAttribute('href', '/workflows');
-    expect(screen.getByRole('link', { name: 'stats.workflowCount' })).toHaveClass('hover:border-teal-200');
+    expect(
+      screen.getByRole('link', { name: 'stats.workflowCount' }),
+    ).toHaveClass('hover:border-teal-200');
     expect(
       screen.getByRole('link', { name: 'stats.skillCount' }),
     ).toHaveAttribute('href', '/skills');
-    expect(screen.getByRole('link', { name: 'stats.skillCount' })).toHaveClass('hover:border-green-200');
+    expect(screen.getByRole('link', { name: 'stats.skillCount' })).toHaveClass(
+      'hover:border-green-200',
+    );
     expect(
       screen.getByRole('link', { name: 'stats.toolCount' }),
     ).toHaveAttribute('href', '/tools');
-    expect(screen.getByRole('link', { name: 'stats.toolCount' })).toHaveClass('hover:border-orange-200');
+    expect(screen.getByRole('link', { name: 'stats.toolCount' })).toHaveClass(
+      'hover:border-orange-200',
+    );
     expect(
       screen.getByRole('link', { name: 'stats.weeklyTasks' }),
     ).toHaveAttribute('href', '/tasks');
-    expect(screen.getByRole('link', { name: 'stats.weeklyTasks' })).toHaveClass('hover:border-amber-200');
+    expect(screen.getByRole('link', { name: 'stats.weeklyTasks' })).toHaveClass(
+      'hover:border-amber-200',
+    );
     expect(
       screen.getByRole('link', { name: 'stats.activeScheduled' }),
     ).toHaveAttribute('href', '/tasks');
-    expect(screen.getByRole('link', { name: 'stats.activeScheduled' })).toHaveClass('hover:border-violet-200');
+    expect(
+      screen.getByRole('link', { name: 'stats.activeScheduled' }),
+    ).toHaveClass('hover:border-violet-200');
     expect(
       screen.getByRole('link', { name: 'stats.modelCount' }),
     ).toHaveAttribute('href', '/models');
-    expect(screen.getByRole('link', { name: 'stats.modelCount' })).toHaveClass('hover:border-pink-200');
+    expect(screen.getByRole('link', { name: 'stats.modelCount' })).toHaveClass(
+      'hover:border-pink-200',
+    );
     expect(screen.getByText('stats.systemStatus').closest('a')).toBeNull();
   });
 });

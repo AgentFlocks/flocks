@@ -83,7 +83,7 @@ function statusIcon(status: string | undefined): React.ReactNode {
     case 'completed':
       return (
         <span className="flex h-4 w-4 items-center justify-center rounded-full bg-emerald-500 text-white">
-          <Check aria-hidden="true" className="h-3 w-3" strokeWidth={2} />
+          <Check className="h-3 w-3" strokeWidth={3} />
         </span>
       );
     case 'in_progress':
@@ -95,7 +95,7 @@ function statusIcon(status: string | undefined): React.ReactNode {
     case 'cancelled':
       return (
         <span className="flex h-4 w-4 items-center justify-center rounded-full bg-zinc-200 text-zinc-500">
-          <X aria-hidden="true" className="h-2.5 w-2.5" strokeWidth={2} />
+          <X className="h-2.5 w-2.5" strokeWidth={2.5} />
         </span>
       );
     default:

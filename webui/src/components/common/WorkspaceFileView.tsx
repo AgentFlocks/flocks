@@ -20,7 +20,7 @@ function getDefaultPreviewPanelWidth(containerWidth = getViewportWidth()): numbe
   );
 }
 
-const paneClass = 'flex flex-col rounded-xl border border-gray-200 bg-white dark:border-zinc-700 dark:bg-zinc-900 h-full min-h-0 overflow-hidden';
+const paneClass = 'flex h-full min-h-0 flex-col overflow-hidden rounded-xl border border-gray-200 bg-white dark:border-zinc-700 dark:bg-zinc-900';
 export const fileActionClass = 'p-1 text-gray-400 hover:text-gray-600 rounded hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-50 dark:hover:bg-zinc-800 dark:hover:text-zinc-200';
 export const previewActionClass = 'p-1.5 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded dark:hover:bg-zinc-800 dark:hover:text-zinc-200';
 
@@ -106,7 +106,7 @@ export function WorkspaceFileSplit({ list, preview, className = '' }: {
     <div ref={listRef} className={`${paneClass} min-w-0 ${stacked ? 'flex-shrink-0' : 'flex-1'}`} style={stacked ? { height: 'calc(50% - 8px)', minHeight: 200 } : undefined}>
       {list(listWidth)}
     </div>
-    {hasPreview && <div data-workspace-preview="true" className={`${paneClass} relative flex-shrink-0`} style={stacked
+    {hasPreview && <div className={`${paneClass} relative flex-shrink-0`} style={stacked
       ? { width: '100%', minWidth: 0, height: 'calc(50% - 8px)', minHeight: 260 }
       : { width: previewWidth, minWidth: PREVIEW_PANEL_MIN_WIDTH }}>
       {!stacked && <button
@@ -114,7 +114,7 @@ export function WorkspaceFileSplit({ list, preview, className = '' }: {
         aria-label={t('files.preview.resize')}
         title={t('files.preview.resize')}
         onPointerDown={handleResizeStart}
-        className="absolute left-0 top-0 h-full w-2 touch-none cursor-col-resize border-l border-transparent transition-colors hover:border-sky-300 hover:bg-sky-50/70 active:border-sky-400 active:bg-sky-100 z-10"
+        className="absolute left-0 top-0 z-10 h-full w-2 touch-none cursor-col-resize border-l border-transparent transition-colors hover:border-sky-300 hover:bg-sky-50/70 active:border-sky-400 active:bg-sky-100"
       />}
       {preview}
     </div>}
@@ -148,11 +148,11 @@ export function PreviewPanelHeader({ title, icon, actions, meta }: {
   meta?: ReactNode;
 }) {
   return <>
-    <div className="flex items-center gap-2 px-4 py-2.5 border-b border-gray-100 dark:border-zinc-800 flex-shrink-0">
+    <div className="flex items-center gap-2 px-4 py-2.5 border-b border-gray-100 flex-shrink-0 dark:border-zinc-800">
       {icon && <span className="text-sm flex-shrink-0">{icon}</span>}
-      <span className="flex-1 text-sm font-medium text-gray-800 dark:text-zinc-100 min-w-0 truncate" title={title}>{title}</span>
+      <span className="flex-1 min-w-0 text-sm font-medium text-gray-800 truncate dark:text-zinc-100" title={title}>{title}</span>
       {actions && <div className="flex items-center gap-1 flex-shrink-0">{actions}</div>}
     </div>
-    {meta && <div className="px-4 py-1.5 bg-gray-50 border-b border-gray-100 flex gap-4 text-xs text-gray-400 dark:border-zinc-800 dark:bg-zinc-800/50 dark:text-zinc-500 flex-shrink-0">{meta}</div>}
+    {meta && <div className="px-4 py-1.5 bg-gray-50 border-b border-gray-100 flex gap-4 text-xs text-gray-400 flex-shrink-0 dark:border-zinc-800 dark:bg-zinc-800/50 dark:text-zinc-500">{meta}</div>}
   </>;
 }

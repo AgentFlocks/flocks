@@ -30,7 +30,7 @@ export default function LanguageSwitcher({ collapsed = false }: LanguageSwitcher
         className="flex items-center justify-center w-8 h-8 rounded-lg text-zinc-400 hover:text-zinc-600 hover:bg-white/60 transition-colors dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
         title={t('switchLanguage')}
       >
-        <Globe aria-hidden="true" className="w-4 h-4" />
+        <Globe className="w-4 h-4" />
       </button>
     );
   }

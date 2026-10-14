@@ -1,8 +1,6 @@
-import { pageActionLabel } from '../pageActionLabel';
-import PageDialog from '../PageDialog';
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Calendar, Clock, Loader2, X } from 'lucide-react';
+import { X, Calendar, Clock, Loader2 } from 'lucide-react';
 import { useToast } from '@/components/common/Toast';
 import { taskAPI, TaskScheduler, TaskPriority, ExecutionMode } from '@/api/task';
 import { describeCron, CRON_PRESETS } from './helpers';
@@ -84,12 +82,12 @@ export default function EditScheduledTaskDialog({ task, onClose, onSaved }: {
   };
 
   return (
-    <PageDialog onClose={submitting ? undefined : onClose} className="fixed inset-0 flex items-center justify-center bg-black/40 z-50">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
       <div className="bg-white rounded-2xl shadow-xl w-full max-w-lg mx-4 max-h-[90vh] overflow-y-auto">
         <div className="flex items-center justify-between px-6 py-4 border-b border-gray-200">
           <h2 className="text-lg font-semibold text-gray-900">{t('form.editTitle')}</h2>
-          <button aria-label={pageActionLabel('close')} onClick={onClose} className="p-1 rounded hover:bg-gray-100">
-            <X aria-hidden="true" className="w-5 h-5 text-gray-400" />
+          <button onClick={onClose} className="p-1 rounded hover:bg-gray-100">
+            <X className="w-5 h-5 text-gray-400" />
           </button>
         </div>
 
@@ -114,14 +112,14 @@ export default function EditScheduledTaskDialog({ task, onClose, onSaved }: {
 
           <div className={`rounded-xl p-4 space-y-3 border ${isRunOnce ? 'bg-orange-50/60 border-orange-100' : 'bg-purple-50/60 border-purple-100'}`}>
             <p className={`text-sm font-semibold flex items-center gap-1.5 ${isRunOnce ? 'text-orange-800' : 'text-purple-800'}`}>
-              <Calendar aria-hidden="true" className="w-4 h-4" /> {t('form.scheduleConfig')}
+              <Calendar className="w-4 h-4" /> {t('form.scheduleConfig')}
             </p>
 
             <div>
               <label className="block text-xs font-medium text-gray-600 mb-1">{t('form.freqRecurringLabel')}</label>
               {isRunOnce ? (
                 <div className="flex items-center gap-2 px-3 py-2 bg-white border border-orange-200 rounded-lg text-sm text-orange-700 font-medium">
-                  <Clock aria-hidden="true" className="w-4 h-4" /> {t('form.runOnce')}
+                  <Clock className="w-4 h-4" /> {t('form.runOnce')}
                 </div>
               ) : (
                 <select
@@ -205,7 +203,7 @@ export default function EditScheduledTaskDialog({ task, onClose, onSaved }: {
             <label className="block text-sm font-medium text-gray-700 mb-1">{t('form.priorityLabel')}</label>
             <select
               value={priority} onChange={e => setPriority(e.target.value as TaskPriority)}
-              className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500 outline-none"
+              className="w-full px-3 py-2 border border-gray-300 rounded-lg outline-none"
             >
               <option value="urgent">{t('form.urgentLabel')}</option>
               <option value="high">{t('form.highLabel')}</option>
@@ -219,7 +217,7 @@ export default function EditScheduledTaskDialog({ task, onClose, onSaved }: {
               <label className="block text-sm font-medium text-gray-700 mb-1">{t('form.modeLabel')}</label>
               <select
                 value={executionMode} onChange={e => setExecutionMode(e.target.value as ExecutionMode)}
-                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500 outline-none"
+                className="w-full px-3 py-2 border border-gray-300 rounded-lg outline-none"
               >
                 <option value="agent">Agent</option>
                 <option value="workflow">Workflow</option>
@@ -265,12 +263,12 @@ export default function EditScheduledTaskDialog({ task, onClose, onSaved }: {
             </button>
             <button type="submit" disabled={submitting || !canSubmit}
               className="px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2">
-              {submitting && <Loader2 aria-hidden="true" className="w-4 h-4 animate-spin" />}
+              {submitting && <Loader2 className="w-4 h-4 animate-spin" />}
               {t('common:button.save')}
             </button>
           </div>
         </form>
       </div>
-    </PageDialog>
+    </div>
   );
 }

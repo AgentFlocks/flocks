@@ -135,3 +135,40 @@ async def test_non_headless_read_keeps_workspace_semantics(sandbox):
     assert result.success, result.error
     assert "WORKSPACE_SENTINEL" in result.output
     assert "PROJECT_SENTINEL" not in result.output
+
+
+@pytest.mark.parametrize("shadow", [False, True])
+async def test_host_project_path_wins_over_an_overlapping_container_workdir(tmp_path, monkeypatch, shadow):
+    # Container workdir <T>/mount is also a prefix of the project <T>/mount/project.
+    mount = tmp_path / "mount"
+    project = mount / "project"
+    workspace = tmp_path / "sandbox" / "workspace"
+    project.mkdir(parents=True)
+    workspace.mkdir(parents=True)
+    (project / "source.txt").write_text("AUTHORIZED_PROJECT_SENTINEL", encoding="utf-8")
+    (workspace / "result.txt").write_text("WORKSPACE_RESULT", encoding="utf-8")
+    if shadow:
+        (workspace / "project").mkdir()
+        (workspace / "project" / "source.txt").write_text("WRONG_WORKSPACE_SHADOW_SENTINEL", encoding="utf-8")
+    monkeypatch.setenv("FLOCKS_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setattr(Config, "_global_config", None)
+    monkeypatch.setattr(Config, "_cached_config", ConfigInfo())
+    ctx = ToolContext("sandbox-read", "message", extra={"sandbox": {
+        "workspace_dir": str(workspace),
+        "agent_workspace_dir": str(project),
+        "workspace_access": "ro",
+        "container_name": "not-started",
+        "container_workdir": str(mount),
+    }})
+    token = runtime_controls.set(RuntimeControls(sandbox_required=True))
+    try:
+        host = await read_tool(ctx, str(project / "source.txt"))
+        container = await read_tool(ctx, str(mount / "result.txt"))
+    finally:
+        runtime_controls.reset(token)
+    assert host.success, host.error
+    assert "AUTHORIZED_PROJECT_SENTINEL" in host.output
+    assert "WRONG_WORKSPACE_SHADOW_SENTINEL" not in host.output
+    # Paths under the container workdir that are not host project paths still map to the workspace.
+    assert container.success, container.error
+    assert "WORKSPACE_RESULT" in container.output

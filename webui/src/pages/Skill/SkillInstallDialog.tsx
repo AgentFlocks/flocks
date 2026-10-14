@@ -1,11 +1,9 @@
-import { pageActionLabel } from '../pageActionLabel';
-import PageDialog from '../PageDialog';
 import { useState } from 'react';
-import { CloudDownload, Info, X } from 'lucide-react';
+import { CloudDownload, X, Info } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
-import { extractErrorMessage } from '@/utils/error';
 import { skillAPI, Skill } from '@/api/skill';
 import { useToast } from '@/components/common/Toast';
+import { extractErrorMessage } from '@/utils/error';
 
 interface SkillInstallDialogProps {
   onClose: () => void;
@@ -68,9 +66,9 @@ export default function SkillInstallDialog({ onClose, onInstalled }: SkillInstal
 
       onClose();
     } catch (err: unknown) {
-      // 422/409 carry the installer's reason in the response body; err.message is only axios' status line
       toast.error(
         t('installFailed'),
+        // 422/409 carry the installer's reason in the response body; err.message is only axios' status line
         extractErrorMessage(err, err instanceof Error ? err.message : String(err)),
       );
     } finally {
@@ -78,26 +76,30 @@ export default function SkillInstallDialog({ onClose, onInstalled }: SkillInstal
     }
   };
 
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === 'Escape') onClose();
+  };
+
   return (
-    <PageDialog onClose={installing ? undefined : onClose}
-      className="fixed inset-0 flex items-center justify-center bg-black/40 backdrop-blur-sm z-50"
-
-
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm"
+      onClick={(e) => e.target === e.currentTarget && onClose()}
+      onKeyDown={handleKeyDown}
     >
       <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg mx-4 overflow-hidden">
         {/* Header */}
         <div className="flex items-center gap-3 px-6 py-4 border-b border-gray-100">
           <div className="w-8 h-8 rounded-lg bg-red-100 flex items-center justify-center">
-            <CloudDownload aria-hidden="true" className="w-4 h-4 text-red-600" />
+            <CloudDownload className="w-4 h-4 text-red-600" />
           </div>
           <h2 className="text-lg font-semibold text-gray-900 flex-1">
             {t('installDialog.title')}
           </h2>
-          <button aria-label={pageActionLabel('close')}
+          <button
             onClick={onClose}
             className="p-1.5 hover:bg-gray-100 rounded-lg transition-colors"
           >
-            <X aria-hidden="true" className="w-4 h-4 text-gray-500" />
+            <X className="w-4 h-4 text-gray-500" />
           </button>
         </div>
 
@@ -113,7 +115,8 @@ export default function SkillInstallDialog({ onClose, onInstalled }: SkillInstal
               onChange={(e) => setSource(e.target.value)}
               placeholder={t('installDialog.sourcePlaceholder')}
               rows={3}
-              className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm font-mono focus:outline-none focus:ring-2 focus:ring-red-500 resize-none"
+              className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm font-mono
+                         focus:outline-none focus:ring-2 focus:ring-red-500 resize-none"
               autoFocus
             />
             {/* Quick fill examples */}
@@ -122,7 +125,9 @@ export default function SkillInstallDialog({ onClose, onInstalled }: SkillInstal
                 <button
                   key={ex.label}
                   onClick={() => setSource(ex.value)}
-                  className="text-xs px-2 py-0.5 rounded-full border border-gray-200 text-gray-500 hover:text-red-600 hover:border-red-300 transition-colors font-mono"
+                  className="text-xs px-2 py-0.5 rounded-full border border-gray-200
+                             text-gray-500 hover:text-red-600 hover:border-red-300
+                             transition-colors font-mono"
                 >
                   {ex.label}
                 </button>
@@ -132,7 +137,7 @@ export default function SkillInstallDialog({ onClose, onInstalled }: SkillInstal
 
           {/* Hint */}
           <div className="flex gap-2 p-3 bg-red-50 rounded-lg">
-            <Info aria-hidden="true" className="w-4 h-4 text-red-500 mt-0.5 shrink-0" />
+            <Info className="w-4 h-4 text-red-500 shrink-0 mt-0.5" />
             <p className="text-xs text-red-700 leading-relaxed">
               {t('installDialog.sourceHint')}
             </p>
@@ -144,20 +149,23 @@ export default function SkillInstallDialog({ onClose, onInstalled }: SkillInstal
           <button
             onClick={onClose}
             disabled={installing}
-            className="px-4 py-2 text-sm text-gray-600 hover:text-gray-800 border border-gray-300 rounded-lg hover:bg-gray-100 transition-colors"
+            className="px-4 py-2 text-sm text-gray-600 hover:text-gray-800
+                       border border-gray-300 rounded-lg hover:bg-gray-100 transition-colors"
           >
             {t('installDialog.cancel')}
           </button>
           <button
             onClick={handleInstall}
             disabled={!source.trim() || installing}
-            className="flex items-center gap-2 px-4 py-2 text-sm text-white bg-red-600 hover:bg-red-700 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            className="flex items-center gap-2 px-4 py-2 text-sm text-white
+                       bg-red-600 hover:bg-red-700 rounded-lg transition-colors
+                       disabled:opacity-50 disabled:cursor-not-allowed"
           >
-            <CloudDownload aria-hidden="true" className="w-4 h-4" />
+            <CloudDownload className="w-4 h-4" />
             {installing ? t('installDialog.installing') : t('installDialog.install')}
           </button>
         </div>
       </div>
-    </PageDialog>
+    </div>
   );
 }

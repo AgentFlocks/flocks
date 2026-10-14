@@ -49,7 +49,7 @@ export default function CommandDropdown({
 
   return (
     <div
-      className="absolute bottom-full left-0 right-0 mb-1 bg-white border border-gray-200 rounded-lg shadow-lg z-50 overflow-hidden"
+      className="absolute bottom-full left-0 right-0 mb-1 z-50 bg-white border border-gray-200 rounded-lg shadow-lg overflow-hidden"
       onMouseDown={(e) => e.preventDefault()}
     >
       <div className="px-3 py-1.5 text-[10px] font-semibold text-gray-400 uppercase tracking-wide border-b border-gray-100 bg-gray-50">

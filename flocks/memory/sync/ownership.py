@@ -10,6 +10,7 @@ from pathlib import Path
 import tempfile
 from uuid import UUID, uuid4
 
+from flocks.db.retry import retry_deadlock_once
 from flocks.storage import Storage
 
 
@@ -133,7 +134,9 @@ class MemoryIndexOwnership:
 
         if not await asyncio.to_thread(same_root):
             return 0
-        current = set(current_files)
+        return await retry_deadlock_once(lambda: self._clean_once(set(current_files)), name="memory.clean_index")
+
+    async def _clean_once(self, current: set[tuple[str, str, str]]) -> int:
         async with Storage.transaction() as db:
             await self._check_generation(db)
             owned = await db.fetch_all(

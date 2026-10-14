@@ -207,20 +207,20 @@ export default function SuiteInstallProgressPanel({ progress, language, onClose 
       : text.running;
 
   return (
-    <div className="fixed bottom-3 right-3 w-[280px] max-w-[calc(100vw-1.5rem)] rounded-lg border border-gray-200 bg-white shadow-2xl z-50">
+    <div className="fixed bottom-3 right-3 z-50 w-[280px] max-w-[calc(100vw-1.5rem)] rounded-lg border border-gray-200 bg-white shadow-2xl">
       <div className="px-3 py-2 border-b border-gray-100 flex items-start justify-between gap-2">
         <div className="min-w-0">
           <div className="flex items-center gap-1.5 text-xs font-semibold text-gray-900">
             {progress.status === 'completed' ? (
-              <CheckCircle aria-hidden="true" className="w-3.5 h-3.5 text-green-600" />
+              <CheckCircle className="w-3.5 h-3.5 text-green-600" />
             ) : progress.status === 'failed' ? (
-              <XCircle aria-hidden="true" className="w-3.5 h-3.5 text-red-600" />
+              <XCircle className="w-3.5 h-3.5 text-red-600" />
             ) : (
-              <Loader2 aria-hidden="true" className="w-3.5 h-3.5 animate-spin text-slate-600" />
+              <Loader2 className="w-3.5 h-3.5 animate-spin text-slate-600" />
             )}
             <span>{text.title}</span>
           </div>
-          <div className="mt-0.5 text-[10px] text-gray-500 truncate">
+          <div className="mt-0.5 truncate text-[10px] text-gray-500">
             {title}: {getSuiteDisplayName(progress, language)}
           </div>
         </div>
@@ -228,9 +228,9 @@ export default function SuiteInstallProgressPanel({ progress, language, onClose 
           onClick={onClose}
           aria-label={text.close}
           title={text.close}
-          className="rounded-md p-0.5 text-gray-400 hover:bg-gray-100 hover:text-gray-700 shrink-0"
+          className="shrink-0 rounded-md p-0.5 text-gray-400 hover:bg-gray-100 hover:text-gray-700"
         >
-          <X aria-hidden="true" className="w-3.5 h-3.5" />
+          <X className="w-3.5 h-3.5" />
         </button>
       </div>
 
@@ -239,7 +239,7 @@ export default function SuiteInstallProgressPanel({ progress, language, onClose 
           <span>{text.progress}</span>
           <span>{settledCount} / {total}</span>
         </div>
-        <div className="mt-1.5 h-1 rounded-full bg-gray-100 overflow-hidden">
+        <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-gray-100">
           <div
             className={`h-full rounded-full transition-all ${
               progress.status === 'failed' ? 'bg-red-500' : progress.status === 'completed' ? 'bg-green-500' : 'bg-slate-700'
@@ -257,11 +257,11 @@ export default function SuiteInstallProgressPanel({ progress, language, onClose 
           >
             <InstallProgressStatusIcon status={item.status} />
             <div className="min-w-0">
-              <div className="font-medium text-gray-800 truncate">{getProgressItemDisplayName(item, language)}</div>
-              <div className="text-[9px] text-gray-400 truncate">
+              <div className="truncate font-medium text-gray-800">{getProgressItemDisplayName(item, language)}</div>
+              <div className="truncate text-[9px] text-gray-400">
                 {formatPluginTypeLabel(item.type, language)} · {item.id}
               </div>
-              {item.message && <div className="mt-0.5 text-[9px] text-gray-500 truncate">{item.message}</div>}
+              {item.message && <div className="mt-0.5 truncate text-[9px] text-gray-500">{item.message}</div>}
             </div>
             <span className={`rounded-full px-1.5 py-0.5 text-[10px] ${
               item.status === 'installed'
@@ -287,9 +287,9 @@ export default function SuiteInstallProgressPanel({ progress, language, onClose 
 }
 
 function InstallProgressStatusIcon({ status }: { status: HubInstallProgressItem['status'] }) {
-  if (status === 'installing') return <Loader2 aria-hidden="true" className="w-3.5 h-3.5 animate-spin text-slate-600" />;
-  if (status === 'installed' || status === 'completed') return <CheckCircle aria-hidden="true" className="w-3.5 h-3.5 text-green-600" />;
-  if (status === 'failed') return <XCircle aria-hidden="true" className="w-3.5 h-3.5 text-red-600" />;
-  if (status === 'skipped') return <CheckCircle aria-hidden="true" className="w-3.5 h-3.5 text-gray-400" />;
+  if (status === 'installing') return <Loader2 className="w-3.5 h-3.5 animate-spin text-slate-600" />;
+  if (status === 'installed' || status === 'completed') return <CheckCircle className="w-3.5 h-3.5 text-green-600" />;
+  if (status === 'failed') return <XCircle className="w-3.5 h-3.5 text-red-600" />;
+  if (status === 'skipped') return <CheckCircle className="w-3.5 h-3.5 text-gray-400" />;
   return <span className="ml-1 h-1.5 w-1.5 rounded-full bg-gray-300" />;
 }

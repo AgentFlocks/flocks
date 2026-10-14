@@ -1,11 +1,5 @@
 import { useState, useEffect, createContext, useContext, useCallback, ReactNode } from 'react';
-import {
-  AlertCircle,
-  AlertTriangle,
-  CheckCircle,
-  Info,
-  X,
-} from 'lucide-react';
+import { X, CheckCircle, AlertCircle, AlertTriangle, Info } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 // Toast 类型
@@ -133,11 +127,10 @@ function Toast({ toast, onRemove }: { toast: ToastMessage; onRemove: () => void 
 
   return (
     <div
-      data-ui-toast
       className={`flex items-start gap-3 p-4 rounded-lg border shadow-lg animate-slide-in ${config.className}`}
       role={toast.type === 'error' || toast.type === 'warning' ? 'alert' : 'status'}
     >
-      <Icon aria-hidden="true" className="w-5 h-5 flex-shrink-0 mt-0.5" />
+      <Icon className="w-5 h-5 flex-shrink-0 mt-0.5" />
       <div className="flex-1 min-w-0">
         <p className="font-medium text-sm">{toast.title}</p>
         {toast.description && (
@@ -146,10 +139,10 @@ function Toast({ toast, onRemove }: { toast: ToastMessage; onRemove: () => void 
       </div>
       <button
         onClick={onRemove}
-        className="p-1 rounded hover:bg-black/10 transition-colors flex-shrink-0"
+        className="flex-shrink-0 p-1 rounded hover:bg-black/10 transition-colors"
         aria-label={t('button.close')}
       >
-        <X aria-hidden="true" className="w-4 h-4" />
+        <X className="w-4 h-4" />
       </button>
     </div>
   );
@@ -190,8 +183,7 @@ style.textContent = `
     }
   }
   .animate-slide-in {
-    animation: slide-in var(--motion-overlay) var(--motion-easing);
+    animation: slide-in 0.3s ease-out;
   }
-  @media (prefers-reduced-motion: reduce) { .animate-slide-in { animation: none; } }
 `;
 document.head.appendChild(style);

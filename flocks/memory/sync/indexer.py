@@ -10,6 +10,7 @@ import asyncio
 import math
 import uuid
 
+from flocks.db.retry import retry_deadlock_once
 from flocks.provider import Provider
 from flocks.storage import (
     Storage,
@@ -291,6 +292,11 @@ class MemoryIndexer:
 
     async def _update_file_metadata(self, file_entry: MemoryFileEntry) -> None:
         """Refresh metadata after a content-preserving filesystem change."""
+        await retry_deadlock_once(
+            lambda: self._update_file_metadata_once(file_entry), name="memory.update_file_metadata",
+        )
+
+    async def _update_file_metadata_once(self, file_entry: MemoryFileEntry) -> None:
         async with Storage.transaction(Storage.get_db_path()) as db:
             await db.execute("SELECT pg_advisory_xact_lock(hashtext(?))",
                              (f"memory:{file_entry.scope.value}:{file_entry.scope_id}:{file_entry.path}",))

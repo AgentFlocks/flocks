@@ -13,23 +13,16 @@ vi.mock('@/hooks/useSessionChat', () => ({ useSessionChat: () => session }));
 vi.mock('@/hooks/useDefaultModelVision', () => ({ useDefaultModelVision: () => false }));
 vi.mock('./SessionChat', () => ({ default: () => <><textarea aria-label="Message" /><button>Send</button></> }));
 
-it('contains keyboard navigation and returns focus to the chat trigger', () => {
-  const trigger = document.createElement('button');
-  document.body.appendChild(trigger);
-  trigger.focus();
+it('shows the title and closes from the header button', () => {
   const onClose = vi.fn();
-  const { rerender } = render(<ChatDialog open onClose={onClose} title="Rex conversation" />);
-  expect(screen.getByRole('dialog', { name: 'Rex conversation' })).toHaveAttribute('aria-modal', 'true');
-  const close = screen.getByRole('button', { name: 'button.close' });
-  const send = screen.getByRole('button', { name: 'Send' });
-  expect(close).toHaveFocus();
-  fireEvent.keyDown(close, { key: 'Tab', shiftKey: true });
-  expect(send).toHaveFocus();
-  fireEvent.keyDown(send, { key: 'Tab' });
-  expect(close).toHaveFocus();
-  fireEvent.keyDown(close, { key: 'Escape' });
+  render(<ChatDialog open onClose={onClose} title="Rex" subtitle="helper" />);
+  expect(screen.getByRole('heading', { name: 'Rex' })).toBeInTheDocument();
+  expect(screen.getByText('helper')).toBeInTheDocument();
+  fireEvent.click(screen.getByRole('heading', { name: 'Rex' }).closest('div.border-b')!.querySelector('button')!);
   expect(onClose).toHaveBeenCalledTimes(1);
-  rerender(<ChatDialog open={false} onClose={onClose} title="Rex conversation" />);
-  expect(trigger).toHaveFocus();
-  trigger.remove();
+});
+
+it('renders nothing while closed', () => {
+  const { container } = render(<ChatDialog open={false} onClose={vi.fn()} title="Rex" />);
+  expect(container).toBeEmptyDOMElement();
 });

@@ -19,7 +19,7 @@ export default function LoadingSpinner({ size = 'md', className = '', delayMs = 
 
   return (
     <div role="status" className={`flex items-center justify-center ${className}`}>
-      <Loader2 aria-hidden="true" className={`${sizeClasses[size]} animate-spin text-red-600`} />
+      <Loader2 className={`${sizeClasses[size]} animate-spin text-red-600`} />
     </div>
   );
 }

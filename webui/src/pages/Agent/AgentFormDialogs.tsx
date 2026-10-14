@@ -1,4 +1,3 @@
-import PageDialog from '../PageDialog';
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { agentAPI, Agent } from '@/api/agent';
@@ -166,12 +165,10 @@ function AgentFormModal({
   nameEditable: boolean;
 }) {
   const { t } = useTranslation(['agent', 'common']);
-  const themeColor = typeof document === 'undefined' ? '' : getComputedStyle(document.documentElement).getPropertyValue('--accent-ai').trim();
-  const defaultColor = /^#[0-9a-f]{6}$/i.test(themeColor) ? themeColor : '';
   const isSubmitDisabled = loading || !formData.prompt || (nameEditable && !formData.name);
 
   return (
-    <PageDialog onClose={loading ? undefined : onClose} className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
+    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
       <div className="bg-white rounded-xl shadow-2xl max-w-2xl w-full max-h-[90vh] overflow-y-auto">
         <div className="px-6 py-4 border-b border-gray-200">
           <h3 className="text-lg font-semibold text-gray-900">{title}</h3>
@@ -276,7 +273,7 @@ function AgentFormModal({
               <div className="flex items-center gap-2">
                 <input
                   type="color"
-                  value={formData.color || defaultColor}
+                  value={formData.color || '#6B7280'}
                   onChange={(e) => onChange({ ...formData, color: e.target.value })}
                   className="h-9 w-12 rounded border border-gray-300 cursor-pointer p-0.5"
                 />
@@ -285,7 +282,7 @@ function AgentFormModal({
                   value={formData.color}
                   onChange={(e) => onChange({ ...formData, color: e.target.value })}
                   className="flex-1 px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-400 text-sm font-mono"
-                  placeholder={t('agent:form.colorOptional')}
+                  placeholder="#6B7280"
                 />
               </div>
             </div>
@@ -309,6 +306,6 @@ function AgentFormModal({
           </button>
         </div>
       </div>
-    </PageDialog>
+    </div>
   );
 }

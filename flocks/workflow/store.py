@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from flocks.db.connect import open_transaction
+from flocks.db.json_nul import escape_nul_for_json, restore_nul_from_json
 from flocks.db.store import Transaction
 from flocks.storage.storage import Storage
 from flocks.utils.log import Log
@@ -129,14 +130,21 @@ class WorkflowStore:
 
     @staticmethod
     def _json_dumps(value: Any) -> str:
-        return json.dumps(value, ensure_ascii=False, default=str)
+        text = json.dumps(value, ensure_ascii=False, default=str)
+        if "\\u0000" not in text and "_pg_nul_" not in text:
+            return text
+        # Recovery reads the payload as jsonb, which cannot hold U+0000 (a
+        # NUL-terminated syslog frame in the inputs, for one); store it
+        # escaped and marked, and _json_loads gives the original back. A value
+        # using the marker's reserved names is wrapped so it reads back as is.
+        return json.dumps(escape_nul_for_json(json.loads(text)), ensure_ascii=False)
 
     @staticmethod
     def _json_loads(value: Optional[str], default: Any = None) -> Any:
         if value is None:
             return default
         try:
-            return json.loads(value)
+            return restore_nul_from_json(json.loads(value))
         except Exception:
             return default
 

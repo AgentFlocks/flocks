@@ -31,6 +31,7 @@ import {
   getUserAvatarSpacerClassName,
   hasActiveToolPart,
   isActiveSessionStatus,
+  isPermissionRequestForSession,
   shouldRenderMessage,
   shouldForwardSSEEventToParent,
   shouldRefetchFinishedMessage,
@@ -808,6 +809,276 @@ describe('SessionChat provider retry notice', () => {
   });
 });
 
+describe('SessionChat subagent permission requests', () => {
+  const userMessage = makeMessage({
+    id: 'msg-user',
+    role: 'user',
+    parts: [{ id: 'part-user', type: 'text', text: '让子 Agent 写文件' } as Message['parts'][number]],
+  });
+
+  // A grandchild two delegations down; the backend lists the sessions that
+  // delegated to it, nearest first.
+  const subagentWriteRequest = {
+    requestID: 'perm-grandchild',
+    sessionID: 'grandchild-1',
+    permission: 'edit',
+    patterns: ['markers/ask.marker'],
+    metadata: {
+      tool: 'write',
+      filepath: '/work/markers/ask.marker',
+      delegationChain: ['child-1', 'sess-1'],
+    },
+    tool: { name: 'write' },
+  };
+  const asPending = (request: typeof subagentWriteRequest, id: string) => ({
+    ...request, id, messageID: '', toolID: 'write', always: [], time: { created: 1 },
+  });
+
+  it('asks in the parent chat for a write a delegated subagent is waiting on', async () => {
+    mockStatefulSessionMessages([userMessage]);
+    render(React.createElement(SessionChat, { sessionId: 'sess-1', live: true }));
+    await act(async () => { await Promise.resolve(); });
+
+    act(() => {
+      // A session the user started from this one is its own conversation.
+      useSSEOptionsRef.current.onEvent({
+        type: 'permission.request',
+        properties: {
+          ...subagentWriteRequest,
+          requestID: 'perm-branch',
+          sessionID: 'user-branch',
+          metadata: { tool: 'write' },
+        },
+      });
+    });
+    expect(screen.queryByRole('alertdialog')).toBeNull();
+
+    act(() => {
+      useSSEOptionsRef.current.onEvent({ type: 'permission.request', properties: subagentWriteRequest });
+    });
+    expect(screen.getByRole('alertdialog')).toHaveTextContent('$ write markers/ask.marker');
+
+    await userEvent.setup().click(screen.getByRole('button', { name: 'chat.permission.allowOnce' }));
+    expect(clientPostMock).toHaveBeenCalledWith(
+      '/api/permission/perm-grandchild/reply',
+      { allow: true, always: false },
+    );
+  });
+
+  it('recovers a subagent request that was already pending when the chat opened', async () => {
+    clientGetMock.mockImplementation(async (url: string) => (
+      url === '/api/permission'
+        ? {
+          data: [
+            asPending(subagentWriteRequest, 'perm-grandchild'),
+            asPending({ ...subagentWriteRequest, sessionID: 'other-1', metadata: { ...subagentWriteRequest.metadata, delegationChain: ['other-parent'] } }, 'perm-other'),
+          ],
+        }
+        : { data: {} }
+    ));
+    mockStatefulSessionMessages([userMessage]);
+    render(React.createElement(SessionChat, { sessionId: 'sess-1', live: true }));
+
+    await waitFor(() => {
+      expect(screen.getByRole('alertdialog')).toHaveTextContent('$ write markers/ask.marker');
+    });
+  });
+
+  it('drops a request answered in another chat', async () => {
+    mockStatefulSessionMessages([userMessage]);
+    render(React.createElement(SessionChat, { sessionId: 'sess-1', live: true }));
+    await act(async () => { await Promise.resolve(); });
+    act(() => {
+      useSSEOptionsRef.current.onEvent({ type: 'permission.request', properties: subagentWriteRequest });
+    });
+    expect(screen.getByRole('alertdialog')).toBeTruthy();
+
+    act(() => {
+      useSSEOptionsRef.current.onEvent({
+        type: 'permission.replied',
+        properties: { requestID: 'perm-grandchild', sessionID: 'grandchild-1', reply: 'allow' },
+      });
+    });
+    expect(screen.queryByRole('alertdialog')).toBeNull();
+  });
+
+  it('moves on when the request it shows is no longer awaited', async () => {
+    mockStatefulSessionMessages([userMessage]);
+    const nextRequest = { ...subagentWriteRequest, requestID: 'perm-next', patterns: ['markers/next.marker'] };
+    let answeredElsewhere = false;
+    clientGetMock.mockImplementation(async (url: string) => (
+      url === '/api/permission'
+        ? { data: answeredElsewhere ? [asPending(nextRequest, 'perm-next')] : [] }
+        : { data: {} }
+    ));
+    clientPostMock.mockImplementation(async (url: string) => {
+      if (url === '/api/permission/perm-grandchild/reply') {
+        answeredElsewhere = true;
+        throw Object.assign(new Error('Request failed with status code 404'), { response: { status: 404 } });
+      }
+      return { data: {} };
+    });
+    render(React.createElement(SessionChat, { sessionId: 'sess-1', live: true }));
+    await act(async () => { await Promise.resolve(); });
+    act(() => {
+      useSSEOptionsRef.current.onEvent({ type: 'permission.request', properties: subagentWriteRequest });
+      useSSEOptionsRef.current.onEvent({ type: 'permission.request', properties: nextRequest });
+    });
+
+    await userEvent.setup().click(screen.getByRole('button', { name: 'chat.permission.allowOnce' }));
+
+    await waitFor(() => {
+      expect(screen.getByRole('alertdialog')).toHaveTextContent('$ write markers/next.marker');
+    });
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+
+  it('does not bring back a request settled while the list was loading', async () => {
+    const list = deferred<{ data: unknown }>();
+    clientGetMock.mockImplementation((url: string) => (
+      url === '/api/permission' ? list.promise : Promise.resolve({ data: {} })
+    ));
+    mockStatefulSessionMessages([userMessage]);
+    render(React.createElement(SessionChat, { sessionId: 'sess-1', live: true }));
+    await act(async () => { await Promise.resolve(); });
+
+    act(() => {
+      useSSEOptionsRef.current.onEvent({ type: 'permission.request', properties: subagentWriteRequest });
+      useSSEOptionsRef.current.onEvent({
+        type: 'permission.replied',
+        properties: { requestID: 'perm-grandchild', sessionID: 'grandchild-1', reply: 'allow' },
+      });
+    });
+    await act(async () => {
+      list.resolve({ data: [asPending(subagentWriteRequest, 'perm-grandchild')] });
+      await list.promise;
+    });
+
+    expect(screen.queryByRole('alertdialog')).toBeNull();
+  });
+
+  function queuePermissionLists() {
+    const lists: Array<ReturnType<typeof deferred<{ data: unknown }>>> = [];
+    clientGetMock.mockImplementation((url: string) => {
+      if (url !== '/api/permission') return Promise.resolve({ data: {} });
+      const next = deferred<{ data: unknown }>();
+      lists.push(next);
+      return next.promise;
+    });
+    return lists;
+  }
+
+  async function answer(list: ReturnType<typeof deferred<{ data: unknown }>>, data: unknown[]) {
+    await act(async () => {
+      list.resolve({ data });
+      await list.promise;
+    });
+  }
+
+  it('drops on reconnect a request that ended while the stream was down', async () => {
+    const lists = queuePermissionLists();
+    mockStatefulSessionMessages([userMessage]);
+    render(React.createElement(SessionChat, { sessionId: 'sess-1', live: true }));
+    await act(async () => { await Promise.resolve(); });
+    await answer(lists[0], [asPending(subagentWriteRequest, 'perm-grandchild')]);
+    expect(screen.getByRole('alertdialog')).toBeTruthy();
+
+    // perm-grandchild ended while the stream was down (its event was missed);
+    // another request settles while the reconnect list is loading.
+    act(() => { useSSEOptionsRef.current.onReconnect(); });
+    act(() => {
+      useSSEOptionsRef.current.onEvent({
+        type: 'permission.replied',
+        properties: { requestID: 'perm-unrelated', sessionID: 'child-9', reply: 'allow' },
+      });
+    });
+    await answer(lists[1], []);
+
+    expect(screen.queryByRole('alertdialog')).toBeNull();
+  });
+
+  it('lets a newer list answer win over an older one that arrives later', async () => {
+    const lists = queuePermissionLists();
+    mockStatefulSessionMessages([userMessage]);
+    render(React.createElement(SessionChat, { sessionId: 'sess-1', live: true }));
+    await act(async () => { await Promise.resolve(); });
+    act(() => { useSSEOptionsRef.current.onReconnect(); });
+
+    await answer(lists[1], [asPending(subagentWriteRequest, 'perm-grandchild')]);
+    await answer(lists[0], []);
+
+    expect(screen.getByRole('alertdialog')).toHaveTextContent('$ write markers/ask.marker');
+  });
+
+  it('still uses an older list answer when the newer request fails', async () => {
+    const lists = queuePermissionLists();
+    mockStatefulSessionMessages([userMessage]);
+    render(React.createElement(SessionChat, { sessionId: 'sess-1', live: true }));
+    await act(async () => { await Promise.resolve(); });
+    act(() => { useSSEOptionsRef.current.onReconnect(); });
+
+    await act(async () => {
+      lists[1].reject(new Error('Request failed with status code 503'));
+      await lists[1].promise.catch(() => {});
+    });
+    await answer(lists[0], [asPending(subagentWriteRequest, 'perm-grandchild')]);
+
+    expect(screen.getByRole('alertdialog')).toHaveTextContent('$ write markers/ask.marker');
+  });
+
+  it('ignores a list answer from before the chat left the session and came back', async () => {
+    const lists = queuePermissionLists();
+    const ownRequest = {
+      ...subagentWriteRequest, requestID: 'perm-own', sessionID: 'sess-1', metadata: { tool: 'write' },
+    };
+    mockStatefulSessionMessages([userMessage]);
+    const view = render(React.createElement(SessionChat, { sessionId: 'sess-1', live: true }));
+    await act(async () => { await Promise.resolve(); });
+    view.rerender(React.createElement(SessionChat, { sessionId: 'sess-2', live: true }));
+    await act(async () => { await Promise.resolve(); });
+    view.rerender(React.createElement(SessionChat, { sessionId: 'sess-1', live: true }));
+    await act(async () => { await Promise.resolve(); });
+
+    // The first answer for sess-1 predates both switches; the request in it
+    // has been answered since.
+    await answer(lists[0], [asPending(ownRequest, 'perm-own')]);
+    expect(screen.queryByRole('alertdialog')).toBeNull();
+    await answer(lists[lists.length - 1], []);
+    expect(screen.queryByRole('alertdialog')).toBeNull();
+  });
+
+  it('keeps a request announced while an older empty list was loading', async () => {
+    const list = deferred<{ data: unknown }>();
+    clientGetMock.mockImplementation((url: string) => (
+      url === '/api/permission' ? list.promise : Promise.resolve({ data: {} })
+    ));
+    mockStatefulSessionMessages([userMessage]);
+    render(React.createElement(SessionChat, { sessionId: 'sess-1', live: true }));
+    await act(async () => { await Promise.resolve(); });
+
+    act(() => {
+      useSSEOptionsRef.current.onEvent({ type: 'permission.request', properties: subagentWriteRequest });
+    });
+    await act(async () => {
+      list.resolve({ data: [] });
+      await list.promise;
+    });
+
+    expect(screen.getByRole('alertdialog')).toHaveTextContent('$ write markers/ask.marker');
+  });
+});
+
+describe('isPermissionRequestForSession', () => {
+  it('matches the session itself and the sessions that delegated to the requester', () => {
+    expect(isPermissionRequestForSession('sess-1', {}, 'sess-1')).toBe(true);
+    expect(isPermissionRequestForSession('grandchild-1', { delegationChain: ['child-1', 'sess-1'] }, 'sess-1')).toBe(true);
+    expect(isPermissionRequestForSession('grandchild-1', { delegationChain: ['child-1', 'sess-1'] }, 'child-1')).toBe(true);
+    expect(isPermissionRequestForSession('user-branch', {}, 'sess-1')).toBe(false);
+    expect(isPermissionRequestForSession('grandchild-1', { delegationChain: 'sess-1' }, 'sess-1')).toBe(false);
+    expect(isPermissionRequestForSession('sess-1', {}, undefined)).toBe(false);
+  });
+});
+
 describe('SessionChat focused message deep links', () => {
   it('scrolls to and consumes a rendered focus target', async () => {
     const onFocusMessageConsumed = vi.fn();
@@ -1367,38 +1638,6 @@ describe('SessionChat embedded full layout', () => {
     expect(container.querySelector('.space-y-5.px-12')).toBeInTheDocument();
   });
 
-  it('keeps a wide left gutter for the hanging avatar on the page canvas below sm', () => {
-    useSessionMessagesMock.mockReturnValue({
-      messages: [
-        makeMessage({
-          id: 'assistant-canvas-avatar',
-          role: 'assistant',
-          parts: [{ id: 'text-1', type: 'text', text: 'Task complete.' } as any],
-        }),
-      ],
-      loading: false,
-      refetch: vi.fn(),
-      addMessage: vi.fn(),
-      updateMessage: vi.fn(),
-      updateMessagePart: vi.fn(),
-      removeMessage: vi.fn(),
-      replaceMessageText: vi.fn(),
-      markMessageStopped: vi.fn(),
-      truncateAfterMessage: vi.fn(),
-    });
-
-    const { container } = render(React.createElement(SessionChat, {
-      sessionId: 'sess-1',
-      hideInput: true,
-      display: { compact: false, pageCanvas: true },
-    }));
-
-    // avatar sits at -left-10 (40px) of the message column; 375px viewports
-    // previously clipped it because the column only had a 28px gutter.
-    const list = container.querySelector('.max-w-\\[760px\\]');
-    expect(list).toHaveClass('px-12');
-    expect(list).toHaveClass('sm:px-7');
-  });
 });
 
 describe('SessionChat copy action', () => {
@@ -1555,6 +1794,11 @@ describe('getCompactionDividerClassName', () => {
 
   it('uses the compact assistant inset in compact layout', () => {
     expect(getCompactionDividerClassName(true)).toContain('pl-[38px]');
+  });
+
+  it('is not inset for message bodies drawn without an avatar column', () => {
+    expect(getCompactionDividerClassName(true, false)).not.toContain('pl-[38px]');
+    expect(getCompactionDividerClassName(false, false)).not.toContain('pl-[42px]');
   });
 });
 
@@ -2420,7 +2664,8 @@ describe('SessionChat composer controls', () => {
     clientGetMock.mockImplementation(async (url: string) => ({ data: url === '/api/permission' ? [] : {} }));
     render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
     const latest = screen.getByRole('button', { name: 'chat.history.latest' });
-    expect(latest).toHaveClass('ui-btn', 'ui-btn-primary');
+    // Drawn in dev's palette (the dark primary button), not the v2 token classes.
+    expect(latest).toHaveClass('bg-slate-800', 'text-white');
     await user.click(latest);
     expect(loadLatest).toHaveBeenCalledTimes(1);
   });
@@ -7545,5 +7790,35 @@ describe('agent communication', () => {
     render(React.createElement(SessionChat, { sessionId: 'sess-1', hideInput: true }));
     expect(screen.getByText('Halfway through the investigation')).toBeInTheDocument();
     expect(screen.queryByText('hidden reminder')).not.toBeInTheDocument();
+  });
+});
+
+describe('ChatMessageBubble without its sender frame', () => {
+  it('renders only the message body when the caller draws the sender', () => {
+    const message = {
+      id: 'msg-bare',
+      sessionID: 'sess-1',
+      role: 'assistant',
+      agent: 'rex',
+      timestamp: Date.now(),
+      finish: 'stop',
+      parts: [
+        { id: 'tool-read', sessionID: 'sess-1', type: 'tool', tool: 'read', state: { status: 'completed', input: { filePath: 'app.py' }, output: 'ok' } },
+        { id: 'text-answer', sessionID: 'sess-1', type: 'text', text: 'Threat model submitted.' },
+      ],
+    } as any;
+    // The same message object across renders: switching the frame must not be skipped by the memo.
+    const { container, rerender } = render(React.createElement(ChatMessageBubble, { message, collapseIntermediateSteps: true }));
+    expect(screen.getByText('Rex')).toBeInTheDocument();
+    expect(container.querySelector('.rounded-full.bg-red-600')).not.toBeNull();
+
+    rerender(React.createElement(ChatMessageBubble, { message, collapseIntermediateSteps: true, bare: true }));
+    expect(screen.getByText('Threat model submitted.')).toBeInTheDocument();
+    expect(screen.getByTestId('chat-process-group')).toBeInTheDocument();
+    expect(screen.queryByText('Rex')).toBeNull();
+    expect(container.querySelector('.rounded-full.bg-red-600')).toBeNull();
+
+    rerender(React.createElement(ChatMessageBubble, { message, collapseIntermediateSteps: true }));
+    expect(screen.getByText('Rex')).toBeInTheDocument();
   });
 });

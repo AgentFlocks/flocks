@@ -8,24 +8,13 @@
 
 import { useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { extractErrorMessage } from '@/utils/error';
-import {
-  Activity,
-  CheckCircle,
-  Cloud,
-  Code,
-  Database,
-  Info,
-  Loader2,
-  Wifi,
-  WifiOff,
-  XCircle,
-} from 'lucide-react';
+import { Database, Cloud, Code, Info, CheckCircle, XCircle, Activity, Wifi, WifiOff, Loader2 } from 'lucide-react';
 import EntitySheet from '@/components/common/EntitySheet';
 import { buildGuidedCreateGroups } from '@/components/common/GuidedCreatePanel';
 import { useRexComposerControls } from '@/components/common/useRexComposerControls';
 import client from '@/api/client';
 import { mcpAPI } from '@/api/mcp';
+import { extractErrorMessage } from '@/utils/error';
 
 // ─── MCPSheet ─────────────────────────────────────────────────────────────────
 
@@ -223,32 +212,32 @@ function ConnStatusBadge({ status }: { status: ConnStatus }) {
   const { t } = useTranslation('tool');
   if (status === 'idle') return (
     <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-gray-100 text-gray-600">
-      <WifiOff aria-hidden="true" className="w-3 h-3" />{t('sheet.connStatus.idle')}
+      <WifiOff className="w-3 h-3" />{t('sheet.connStatus.idle')}
     </span>
   );
   if (status === 'saving') return (
     <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-red-100 text-red-700">
-      <Loader2 aria-hidden="true" className="w-3 h-3 animate-spin" />{t('sheet.connStatus.saving')}
+      <Loader2 className="w-3 h-3 animate-spin" />{t('sheet.connStatus.saving')}
     </span>
   );
   if (status === 'testing') return (
     <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-red-100 text-red-700">
-      <Activity aria-hidden="true" className="w-3 h-3 animate-pulse" />{t('sheet.connStatus.testing')}
+      <Activity className="w-3 h-3 animate-pulse" />{t('sheet.connStatus.testing')}
     </span>
   );
   if (status === 'tested') return (
     <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-green-100 text-green-700">
-      <CheckCircle aria-hidden="true" className="w-3 h-3" />{t('sheet.connStatus.tested')}
+      <CheckCircle className="w-3 h-3" />{t('sheet.connStatus.tested')}
     </span>
   );
   if (status === 'connected') return (
     <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-green-100 text-green-700">
-      <Wifi aria-hidden="true" className="w-3 h-3" />{t('sheet.connStatus.connected')}
+      <Wifi className="w-3 h-3" />{t('sheet.connStatus.connected')}
     </span>
   );
   return (
     <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-red-100 text-red-700">
-      <WifiOff aria-hidden="true" className="w-3 h-3" />{t('sheet.connStatus.failed')}
+      <WifiOff className="w-3 h-3" />{t('sheet.connStatus.failed')}
     </span>
   );
 }
@@ -385,12 +374,12 @@ export function MCPFormFields({
                 type="button"
                 onClick={onTestConnection}
                 disabled={isTesting}
-                className="inline-flex items-center gap-1.5 px-3 py-2 bg-white border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 disabled:opacity-50 text-sm font-medium transition-colors flex-shrink-0 whitespace-nowrap"
+                className="flex-shrink-0 inline-flex items-center gap-1.5 px-3 py-2 bg-white border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 disabled:opacity-50 text-sm font-medium transition-colors whitespace-nowrap"
               >
                 {isTesting ? (
-                  <><Activity aria-hidden="true" className="w-3.5 h-3.5 animate-pulse" />{t('detail.testingConn')}</>
+                  <><Activity className="w-3.5 h-3.5 animate-pulse" />{t('detail.testingConn')}</>
                 ) : (
-                  <><Activity aria-hidden="true" className="w-3.5 h-3.5" />{t('detail.testConnection')}</>
+                  <><Activity className="w-3.5 h-3.5" />{t('detail.testConnection')}</>
                 )}
               </button>
             </div>
@@ -517,9 +506,9 @@ export function MCPFormFields({
           className="inline-flex items-center gap-2 px-4 py-2 bg-white border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 disabled:opacity-50 text-sm font-medium transition-colors"
         >
           {isTesting ? (
-            <><Activity aria-hidden="true" className="w-4 h-4 animate-pulse" />{t('detail.testingConn')}</>
+            <><Activity className="w-4 h-4 animate-pulse" />{t('detail.testingConn')}</>
           ) : (
-            <><Activity aria-hidden="true" className="w-4 h-4" />{t('detail.testConnection')}</>
+            <><Activity className="w-4 h-4" />{t('detail.testConnection')}</>
           )}
         </button>
       )}
@@ -530,8 +519,8 @@ export function MCPFormFields({
           testResult.success ? 'bg-green-50 border-green-200 text-green-800' : 'bg-red-50 border-red-200 text-red-800'
         }`}>
           {testResult.success
-            ? <CheckCircle aria-hidden="true" className="w-4 h-4 mt-0.5 flex-shrink-0" />
-            : <XCircle aria-hidden="true" className="w-4 h-4 mt-0.5 flex-shrink-0" />
+            ? <CheckCircle className="w-4 h-4 mt-0.5 flex-shrink-0" />
+            : <XCircle className="w-4 h-4 mt-0.5 flex-shrink-0" />
           }
           <span>{testResult.message}</span>
         </div>
@@ -540,7 +529,7 @@ export function MCPFormFields({
       {/* 提示（仅新建模式显示） */}
       {!readOnly && (
         <div className="flex items-start gap-2 p-3 bg-red-50 border border-red-200 rounded-lg">
-          <Info aria-hidden="true" className="w-4 h-4 text-red-600 mt-0.5 flex-shrink-0" />
+          <Info className="w-4 h-4 text-red-600 mt-0.5 flex-shrink-0" />
           <p className="text-xs text-red-800">
             {t('sheet.mcpHintDesc')}
           </p>
@@ -643,14 +632,14 @@ export function MCPSheet({ onClose, onSaved, onRefresh }: MCPSheetProps) {
       open
       mode="create"
       entityType={t('sheet.mcpEntityType')}
-      icon={<Database aria-hidden="true" className="w-5 h-5" />}
+      icon={<Database className="w-5 h-5" />}
       rexSystemContext={MCP_REX_CONTEXT}
       rexWelcomeMessage={MCP_REX_WELCOME}
       rexGuideGroups={guideGroups}
       rexGuidePanelTitle={t('create.mcp.guidePanelTitle')}
       rexGuidePanelDesc={t('create.mcp.guidePanelDesc')}
       rexGuideEmptyTitle={t('create.mcp.emptyStateTitle')}
-      rexGuideIcon={<Database aria-hidden="true" className="h-5 w-5" />}
+      rexGuideIcon={<Database className="h-5 w-5" />}
       {...rexComposerControls}
       submitDisabled={!canSubmit}
       submitLoading={submitting}
@@ -732,14 +721,14 @@ export function APISheet({ onClose }: APISheetProps) {
       open
       mode="create"
       entityType={t('sheet.apiEntityType')}
-      icon={<Cloud aria-hidden="true" className="w-5 h-5" />}
+      icon={<Cloud className="w-5 h-5" />}
       rexSystemContext={API_REX_CONTEXT}
       rexWelcomeMessage={API_REX_WELCOME}
       rexGuideGroups={guideGroups}
       rexGuidePanelTitle={t('create.api.guidePanelTitle')}
       rexGuidePanelDesc={t('create.api.guidePanelDesc')}
       rexGuideEmptyTitle={t('create.api.emptyStateTitle')}
-      rexGuideIcon={<Cloud aria-hidden="true" className="h-5 w-5" />}
+      rexGuideIcon={<Cloud className="h-5 w-5" />}
       {...rexComposerControls}
       submitDisabled
       submitLabel={t('button.submitToRex')}
@@ -801,14 +790,14 @@ export function GenerateToolSheet({ onClose }: GenerateToolSheetProps) {
       open
       mode="create"
       entityType={t('sheet.generateEntityType')}
-      icon={<Code aria-hidden="true" className="w-5 h-5" />}
+      icon={<Code className="w-5 h-5" />}
       rexSystemContext={GENERATE_REX_CONTEXT}
       rexWelcomeMessage={GENERATE_REX_WELCOME}
       rexGuideGroups={guideGroups}
       rexGuidePanelTitle={t('create.local.guidePanelTitle')}
       rexGuidePanelDesc={t('create.local.guidePanelDesc')}
       rexGuideEmptyTitle={t('create.local.emptyStateTitle')}
-      rexGuideIcon={<Code aria-hidden="true" className="h-5 w-5" />}
+      rexGuideIcon={<Code className="h-5 w-5" />}
       {...rexComposerControls}
       submitLabel={t('sheet.doneLabel')}
       onClose={onClose}
@@ -817,7 +806,7 @@ export function GenerateToolSheet({ onClose }: GenerateToolSheetProps) {
     >
       <div className="flex flex-col items-center justify-center py-12 gap-4 text-center">
         <div className="w-16 h-16 rounded-2xl bg-red-50 flex items-center justify-center">
-          <Code aria-hidden="true" className="w-8 h-8 text-red-500" />
+          <Code className="w-8 h-8 text-red-500" />
         </div>
         <div>
           <p className="text-sm font-medium text-gray-700 mb-1">{t('sheet.generateIntro')}</p>

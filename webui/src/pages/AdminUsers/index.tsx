@@ -1,4 +1,3 @@
-import PageDialog from '../PageDialog';
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { authApi } from '@/api/auth';
@@ -87,7 +86,7 @@ export default function AdminUsersPage() {
             <tr>
               <th className="text-left px-4 py-3">{t('admin.columnUsername')}</th>
               <th className="text-left px-4 py-3">{t('admin.columnRole')}</th>
-              <th className="text-left px-4 py-3 hidden md:table-cell">{t('admin.columnLastLogin')}</th>
+              <th className="text-left px-4 py-3">{t('admin.columnLastLogin')}</th>
               <th className="text-left px-4 py-3">{t('admin.columnActions')}</th>
             </tr>
           </thead>
@@ -99,7 +98,7 @@ export default function AdminUsersPage() {
                   <div className="mt-1 text-xs text-blue-600">{t('admin.currentAccountTag')}</div>
                 </td>
                 <td className="px-4 py-3">{roleLabel(user.role, t)}</td>
-                <td className="px-4 py-3 hidden md:table-cell whitespace-nowrap">
+                <td className="px-4 py-3 whitespace-nowrap">
                   {formatDateTime(user.last_login_at, i18n.language)}
                 </td>
                 <td className="px-4 py-3">
@@ -120,13 +119,7 @@ export default function AdminUsersPage() {
       {credentialModal && (
         <>
           <div className="fixed inset-0 bg-black/40 z-40" onClick={closeCredentialModal} />
-          {/* The centering wrapper sits above the backdrop and receives the
-              clicks on the dimmed area, so "click outside to close" must be
-              handled here (only when the wrapper itself is the target). */}
-          <PageDialog onClose={closeCredentialModal}
-            className="fixed inset-0 z-50 flex items-center justify-center p-4"
-
-          >
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
             <div className="w-full max-w-md rounded-2xl bg-white p-6 shadow-xl">
               <div className="flex items-start justify-between gap-4">
                 <div>
@@ -171,7 +164,7 @@ export default function AdminUsersPage() {
                 </div>
               </div>
             </div>
-          </PageDialog>
+          </div>
         </>
       )}
     </div>

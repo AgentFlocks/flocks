@@ -138,7 +138,7 @@ describe('SessionModeOption', () => {
     expect(screen.getByText(label, { exact: true })).toHaveTextContent(label);
     expect(screen.getByText(description, { exact: true })).toHaveTextContent(description);
     expect(screen.getByText(label, { exact: true })).toHaveClass('truncate', 'whitespace-nowrap', 'min-w-0');
-    expect(screen.getByText(description, { exact: true })).toHaveClass('truncate', 'whitespace-nowrap', 'min-w-0', 'text-[12px]');
+    expect(screen.getByText(description, { exact: true })).toHaveClass('truncate', 'whitespace-nowrap', 'min-w-0', 'text-[12px]', 'leading-[18px]');
     expect(button.querySelector('[title]')).toBeNull();
   });
 
@@ -153,7 +153,7 @@ describe('SessionModeOption', () => {
     expect(button.children).toHaveLength(3);
     expect(title).toContainElement(screen.getByText('开发模式'));
     expect(title).toContainElement(screen.getByTestId('mode-icon'));
-    expect(title).toHaveClass('flex', 'min-w-0', 'whitespace-nowrap', 'text-sm');
+    expect(title).toHaveClass('flex', 'min-w-0', 'whitespace-nowrap', 'text-sm', 'leading-[14px]');
     expect(description).toHaveClass('min-w-0', 'truncate', 'whitespace-nowrap');
     expect(check).toHaveClass('h-4', 'w-4', 'invisible');
     expect(check).toHaveAttribute('aria-hidden', 'true');
@@ -163,7 +163,7 @@ describe('SessionModeOption', () => {
     expect(button.children).toHaveLength(3);
     expect(button.lastElementChild).toBe(check);
     expect(check).not.toHaveClass('invisible');
-    expect(button).toHaveClass('border-blue-300', 'bg-blue-50');
+    expect(button).toHaveClass('border-blue-300', 'bg-blue-50', 'dark:bg-blue-500/15');
   });
 
   it('forwards radio-menu attributes and button behavior without imposing a role', () => {
@@ -174,7 +174,7 @@ describe('SessionModeOption', () => {
     const option = screen.getByRole('menuitemradio');
     expect(option).toHaveAttribute('aria-checked', 'true');
     expect(option).toHaveAttribute('type', 'button');
-    expect(option).toHaveClass('custom-option');
+    expect(option).toHaveClass('custom-option', 'focus-visible:ring-2', 'focus-visible:ring-blue-500');
     fireEvent.click(option);
     expect(onClick).toHaveBeenCalledOnce();
 
@@ -223,7 +223,7 @@ describe('SessionComposerMenu', () => {
         expect(menu).toHaveAttribute(marker, 'true');
         expect(menu).toHaveAttribute('id', 'composer-menu');
         expect(menu).toHaveStyle({ position: 'fixed', color: 'rgb(255, 0, 0)', visibility: 'visible' });
-        expect(menu).toHaveClass('custom-menu', 'z-50', 'flex', 'flex-col', 'overflow-hidden', 'rounded-lg', 'border-zinc-200', 'dark:border-zinc-800');
+        expect(menu).toHaveClass('custom-menu', 'z-50', 'flex', 'flex-col', 'overflow-hidden', 'rounded-lg', 'border-zinc-200', 'dark:border-zinc-800', 'bg-white', 'dark:bg-zinc-900');
         fireEvent.click(screen.getByRole('button', { name: 'Choose mode' }));
         expect(onClick).toHaveBeenCalledOnce();
         expect(nativeClick).toHaveReturnedWith(menu);
@@ -236,7 +236,7 @@ describe('SessionComposerMenu', () => {
   it('places a 520px-wide menu 8px above its anchor by default', () => {
     render(<MenuFixture />);
     const menu = getMenu();
-    expect(menu).toHaveStyle({ width: '520px', left: '200px', maxHeight: '280px' });
+    expect(menu).toHaveStyle({ width: '520px', left: '200px', maxHeight: '480px' });
     expect(menuRect(menu).bottom).toBe(anchorRect.top - 8);
     expectWithinViewport(menu);
   });
@@ -259,7 +259,7 @@ describe('SessionComposerMenu', () => {
     contentHeight = 300;
     render(<MenuFixture />);
     const menu = getMenu();
-    expect(menu).toHaveStyle({ top: '156px', bottom: 'auto', maxHeight: '280px' });
+    expect(menu).toHaveStyle({ top: '156px', bottom: 'auto', maxHeight: '480px' });
     expect(menuRect(menu).top).toBe(anchorRect.bottom + 8);
     expectWithinViewport(menu);
   });
@@ -362,12 +362,12 @@ describe('SessionComposerMenu', () => {
     fireEvent.resize(window);
     flushFrame();
     // The old rendered height (156) fits above (196), but the full content does not.
-    expect(menu).toHaveStyle({ width: '288px', left: '16px', top: '256px', maxHeight: '280px' });
+    expect(menu).toHaveStyle({ width: '288px', left: '16px', top: '256px', maxHeight: '328px' });
     expectWithinViewport(menu);
     for (let i = 0; i < 4; i += 1) {
       observers[0].trigger();
       flushFrame();
-      expect(menu).toHaveStyle({ top: '256px', maxHeight: '280px' });
+      expect(menu).toHaveStyle({ top: '256px', maxHeight: '328px' });
       expect(frames.size).toBe(0);
     }
   });
@@ -414,7 +414,7 @@ describe('SessionComposerMenu', () => {
     expect(anchorMeasurements).not.toHaveBeenCalled();
     flushFrame();
     expect(anchorMeasurements).toHaveBeenCalledOnce();
-    expect(getMenu()).toHaveStyle({ left: '400px', top: '260px', maxHeight: '280px' });
+    expect(getMenu()).toHaveStyle({ left: '400px', top: '260px', maxHeight: '480px' });
   });
 
   it('remeasures on parent content/header/footer updates and observes new fixed slots', () => {

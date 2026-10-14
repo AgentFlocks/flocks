@@ -14,7 +14,15 @@ from difflib import unified_diff
 from flocks.tool.registry import (
     ToolRegistry, ToolCategory, ToolParameter, ParameterType, ToolResult, ToolContext
 )
-from flocks.tool.path_utils import resolve_tool_path, safe_relpath as _safe_relpath
+from flocks.tool.path_utils import (
+    changed_before_asking,
+    checked_error,
+    moved_since_resolved,
+    paths_changed,
+    resolve_tool_path,
+    resolved_identities,
+    safe_relpath as _safe_relpath,
+)
 from flocks.utils.log import Log
 
 
@@ -251,6 +259,14 @@ def apply_chunks(content: str, chunks: List[PatchChunk]) -> str:
     return "\n".join(lines)
 
 
+def _read_file_state(path: str) -> Optional[str]:
+    """Current text of ``path`` (None when absent), read like the hunks are."""
+    if not os.path.exists(path):
+        return None
+    with open(path, 'r', encoding='utf-8', errors='replace') as f:
+        return f.read()
+
+
 def generate_diff(filepath: str, old_content: str, new_content: str) -> str:
     """Generate unified diff"""
     old_lines = old_content.splitlines(keepends=True)
@@ -341,12 +357,27 @@ async def apply_patch_tool(
     # Process hunks and collect changes
     file_changes: List[Dict[str, Any]] = []
     total_diff = ""
+    # What each touched path held when the patch was computed, to refuse
+    # writing a stale result after a permission wait.
+    states_before: Dict[str, Optional[str]] = {}
+    # Where the permission patterns are relative to; every hunk resolves
+    # against the same session workspace.
+    pattern_base: Optional[str] = None
     
     for hunk in hunks:
+        # The paths of this hunk once resolved: an error quoting what was read
+        # through one that moved is not passed on.
+        hunk_paths: list[str] = []
         try:
             resolution = await resolve_tool_path(ctx, hunk.path)
+            pattern_base = resolution.worktree
             filepath = resolution.resolved_path
             move_resolution = await resolve_tool_path(ctx, hunk.move_path) if hunk.move_path else None
+            hunk_paths = [filepath, *([move_resolution.resolved_path] if move_resolution else [])]
+            # Nothing is read through a path that moved since it was checked.
+            moved = moved_since_resolved(*hunk_paths)
+            if moved:
+                return ToolResult(success=False, error=changed_before_asking(moved[0]))
 
             if hunk.type == "add":
                 if os.path.exists(filepath):
@@ -357,6 +388,7 @@ async def apply_patch_tool(
                             "Use '*** Update File:' to change it or '*** Delete File:' first."
                         ),
                     )
+                states_before[filepath] = _read_file_state(filepath)
                 old_content = ""
                 new_content = hunk.contents if hunk.contents.endswith("\n") or not hunk.contents else hunk.contents + "\n"
                 diff = generate_diff(filepath, old_content, new_content)
@@ -389,6 +421,9 @@ async def apply_patch_tool(
                 
                 change_type = "move" if hunk.move_path else "update"
                 move_filepath = move_resolution.resolved_path if move_resolution else None
+                states_before[filepath] = old_content
+                if move_filepath:
+                    states_before[move_filepath] = _read_file_state(move_filepath)
                 
                 file_changes.append({
                     "displayPath": resolution.display_path,
@@ -416,6 +451,7 @@ async def apply_patch_tool(
                 with open(filepath, 'r', encoding='utf-8', errors='replace') as f:
                     old_content = f.read()
                 
+                states_before[filepath] = old_content
                 diff = generate_diff(filepath, old_content, "")
                 
                 file_changes.append({
@@ -434,12 +470,12 @@ async def apply_patch_tool(
         except ValueError as e:
             return ToolResult(
                 success=False,
-                error=f"Invalid patch path for {hunk.path}: {str(e)}"
+                error=checked_error(hunk_paths, f"Invalid patch path for {hunk.path}: {str(e)}")
             )
         except Exception as e:
             return ToolResult(
                 success=False,
-                error=f"Failed to process hunk for {hunk.path}: {str(e)}"
+                error=checked_error(hunk_paths, f"Failed to process hunk for {hunk.path}: {str(e)}")
             )
 
     if sandbox_read_only:
@@ -460,7 +496,38 @@ async def apply_patch_tool(
                     "Only the current session plan file may be changed in Plan mode."
                 ),
             )
-    
+
+    # Explicit edit rules (session, agent, delegating session) apply here.
+    # A move changes its source (displayPath) as well as its destination.
+    # The request carries the diff: none read after a path moved.
+    moved = moved_since_resolved(*states_before)
+    if moved:
+        return ToolResult(success=False, error=changed_before_asking(moved[0]))
+    identities = resolved_identities(*states_before)
+    await ctx.ask(
+        permission="edit",
+        patterns=list(dict.fromkeys(
+            pattern
+            for c in file_changes
+            for pattern in (c["displayPath"], c["permissionPattern"])
+        )),
+        always=["*"],
+        metadata={"tool": "apply_patch", "diff": total_diff, "pattern_base": pattern_base},
+    )
+    # A path that now leads elsewhere is not read through to compare.
+    changed_meanwhile = paths_changed(identities) or [
+        path for path, before in states_before.items()
+        if _read_file_state(path) != before
+    ]
+    if changed_meanwhile:
+        return ToolResult(
+            success=False,
+            error=(
+                f"{', '.join(changed_meanwhile)} changed while waiting for permission; "
+                "read it again and redo the patch."
+            ),
+        )
+
     # Apply changes
     changed_files = []
     

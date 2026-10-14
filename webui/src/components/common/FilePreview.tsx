@@ -1,15 +1,7 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
 import {
-  AlertTriangle,
-  ChevronLeft,
-  ChevronRight,
-  Code2,
-  Download,
-  Eye,
-  FolderOpen,
-  X,
-  ZoomIn,
-  ZoomOut,
+  AlertTriangle, ChevronLeft, ChevronRight, Code2, Download, Eye,
+  FolderOpen, X, ZoomIn, ZoomOut,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
@@ -138,7 +130,7 @@ function parseCsv(content: string): { rows: string[][]; truncated: boolean } {
 
 function SourcePreview({ content }: { content: string }) {
   return (
-    <pre className="h-full bg-white p-4 text-sm font-mono text-gray-700 overflow-auto whitespace-pre-wrap break-words">
+    <pre className="h-full overflow-auto bg-white p-4 text-sm font-mono text-gray-700 whitespace-pre-wrap break-words">
       {content}
     </pre>
   );
@@ -156,17 +148,17 @@ function CsvPreview({ content }: { content: string }) {
   const columnCount = Math.max(...rows.map((row) => row.length));
 
   return (
-    <div className="h-full bg-white overflow-auto">
+    <div className="h-full overflow-auto bg-white">
       {parsed.truncated && (
-        <div className="sticky left-0 top-0 border-b border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800 z-20">
+        <div className="sticky left-0 top-0 z-20 border-b border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
           {t('files.preview.csvTruncated', { rows: CSV_MAX_ROWS, columns: CSV_MAX_COLUMNS })}
         </div>
       )}
       <table className="min-w-full border-separate border-spacing-0 text-sm">
-        <thead className="sticky top-0 bg-gray-50 z-10">
+        <thead className="sticky top-0 z-10 bg-gray-50">
           <tr>
             {Array.from({ length: columnCount }).map((_, index) => (
-              <th key={index} className="border-b border-r border-gray-200 px-3 py-2 text-left text-xs font-semibold text-gray-600 whitespace-nowrap">
+              <th key={index} className="whitespace-nowrap border-b border-r border-gray-200 px-3 py-2 text-left text-xs font-semibold text-gray-600">
                 {header[index] || `Column ${index + 1}`}
               </th>
             ))}
@@ -176,7 +168,7 @@ function CsvPreview({ content }: { content: string }) {
           {body.map((row, rowIndex) => (
             <tr key={rowIndex} className={rowIndex % 2 === 0 ? 'bg-white' : 'bg-gray-50/50'}>
               {Array.from({ length: columnCount }).map((_, columnIndex) => (
-                <td key={columnIndex} className="max-w-[320px] border-b border-r border-gray-100 px-3 py-2 text-gray-700 whitespace-nowrap">
+                <td key={columnIndex} className="max-w-[320px] whitespace-nowrap border-b border-r border-gray-100 px-3 py-2 text-gray-700">
                   <span className="block truncate" title={row[columnIndex] ?? ''}>{row[columnIndex] ?? ''}</span>
                 </td>
               ))}
@@ -417,9 +409,9 @@ function PdfPreview({
 
   if (error) {
     return (
-      <div className="h-full bg-white p-5 overflow-auto">
+      <div className="h-full overflow-auto bg-white p-5">
         <div className="flex max-w-xl items-start gap-3 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-amber-800">
-          <AlertTriangle aria-hidden="true" className="mt-0.5 h-5 w-5 flex-shrink-0" />
+          <AlertTriangle className="mt-0.5 h-5 w-5 flex-shrink-0" />
           <div className="min-w-0 flex-1 space-y-3">
             <div className="space-y-1">
               <p className="text-sm font-medium">{t('files.preview.pdfLoadFailed')}</p>
@@ -431,7 +423,7 @@ function PdfPreview({
                 download={node.name}
                 className="flex items-center gap-2 rounded-lg bg-slate-700 px-3 py-1.5 text-sm text-white hover:bg-slate-800"
               >
-                <Download aria-hidden="true" className="h-4 w-4" />
+                <Download className="h-4 w-4" />
                 {t('files.downloadFile')}
               </a>
               {onReveal && (
@@ -440,7 +432,7 @@ function PdfPreview({
                   onClick={() => onReveal(node)}
                   className="flex items-center gap-2 rounded-lg border border-amber-200 bg-white px-3 py-1.5 text-sm text-amber-800 hover:bg-amber-100"
                 >
-                  <FolderOpen aria-hidden="true" className="h-4 w-4" />
+                  <FolderOpen className="h-4 w-4" />
                   {t('files.reveal')}
                 </button>
               )}
@@ -453,7 +445,7 @@ function PdfPreview({
 
   return (
     <div className="flex h-full flex-col bg-gray-100">
-      <div className="flex items-center justify-between gap-2 border-b border-gray-200 bg-white px-3 py-2 flex-wrap">
+      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-gray-200 bg-white px-3 py-2">
         <div className="flex items-center gap-1">
           <button
             type="button"
@@ -462,9 +454,9 @@ function PdfPreview({
             title={t('files.preview.previousPage')}
             className="rounded p-1.5 text-gray-500 hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-40"
           >
-            <ChevronLeft aria-hidden="true" className="h-4 w-4" />
+            <ChevronLeft className="h-4 w-4" />
           </button>
-          <span className="text-center text-xs text-gray-600 min-w-[5.5rem]">
+          <span className="min-w-[5.5rem] text-center text-xs text-gray-600">
             {loading ? t('files.preview.pdfLoading') : t('files.preview.pageIndicator', { page: pageNumber, total: pageCount })}
           </span>
           <button
@@ -474,7 +466,7 @@ function PdfPreview({
             title={t('files.preview.nextPage')}
             className="rounded p-1.5 text-gray-500 hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-40"
           >
-            <ChevronRight aria-hidden="true" className="h-4 w-4" />
+            <ChevronRight className="h-4 w-4" />
           </button>
         </div>
         <div className="flex items-center gap-1">
@@ -485,7 +477,7 @@ function PdfPreview({
             title={t('files.preview.zoomOut')}
             className="rounded p-1.5 text-gray-500 hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-40"
           >
-            <ZoomOut aria-hidden="true" className="h-4 w-4" />
+            <ZoomOut className="h-4 w-4" />
           </button>
           <span className="w-12 text-center text-xs text-gray-600">{Math.round(scale * 100)}%</span>
           <button
@@ -495,7 +487,7 @@ function PdfPreview({
             title={t('files.preview.zoomIn')}
             className="rounded p-1.5 text-gray-500 hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-40"
           >
-            <ZoomIn aria-hidden="true" className="h-4 w-4" />
+            <ZoomIn className="h-4 w-4" />
           </button>
         </div>
       </div>
@@ -575,7 +567,7 @@ function ImagePreview({ node, fileAccess }: { node: WorkspaceNode; fileAccess: P
             title={t('files.preview.zoomOut')}
             className="rounded p-1.5 text-gray-500 hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-40"
           >
-            <ZoomOut aria-hidden="true" className="h-4 w-4" />
+            <ZoomOut className="h-4 w-4" />
           </button>
           <span className="w-12 text-center text-xs text-gray-600">{Math.round(scale * 100)}%</span>
           <button
@@ -585,7 +577,7 @@ function ImagePreview({ node, fileAccess }: { node: WorkspaceNode; fileAccess: P
             title={t('files.preview.zoomIn')}
             className="rounded p-1.5 text-gray-500 hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-40"
           >
-            <ZoomIn aria-hidden="true" className="h-4 w-4" />
+            <ZoomIn className="h-4 w-4" />
           </button>
         </div>
       </div>
@@ -642,7 +634,7 @@ function RenderedPreview({
 
   if (kind === 'markdown') {
     return (
-      <div className="h-full bg-white p-5 overflow-auto">
+      <div className="h-full overflow-auto bg-white p-5">
         <Suspense fallback={<div className="flex h-32 items-center justify-center"><LoadingSpinner /></div>}>
           <LazyStreamingMarkdown content={content} isStreaming={false} />
         </Suspense>
@@ -660,7 +652,7 @@ function RenderedPreview({
           title={node.name}
           sandbox=""
           srcDoc={content}
-          className="flex-1 border-0 bg-white min-h-0"
+          className="min-h-0 flex-1 border-0 bg-white"
         />
       </div>
     );
@@ -716,9 +708,9 @@ function UnsupportedPreview({
 }) {
   const { t } = useTranslation('workspace');
   return (
-    <div className="h-full bg-white p-5 overflow-auto">
+    <div className="h-full overflow-auto bg-white p-5">
       <div className="flex max-w-xl items-start gap-3 rounded-lg border border-gray-200 bg-gray-50 px-4 py-3 text-gray-500">
-        <AlertTriangle aria-hidden="true" className="mt-0.5 h-5 w-5 text-orange-300 flex-shrink-0" />
+        <AlertTriangle className="mt-0.5 h-5 w-5 flex-shrink-0 text-orange-300" />
         <div className="min-w-0 flex-1 space-y-3">
           <div className="space-y-1">
             <p className="text-sm font-medium text-gray-700">{t('files.preview.unsupportedTitle')}</p>
@@ -730,7 +722,7 @@ function UnsupportedPreview({
               download={node.name}
               className="flex items-center gap-2 rounded-lg bg-slate-700 px-3 py-1.5 text-sm text-white hover:bg-slate-800"
             >
-              <Download aria-hidden="true" className="h-4 w-4" />
+              <Download className="h-4 w-4" />
               {t('files.downloadFile')}
             </a>
             {onReveal && (
@@ -739,7 +731,7 @@ function UnsupportedPreview({
                 onClick={() => onReveal(node)}
                 className="flex items-center gap-2 rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-sm text-gray-600 hover:bg-gray-50 hover:text-gray-800"
               >
-                <FolderOpen aria-hidden="true" className="h-4 w-4" />
+                <FolderOpen className="h-4 w-4" />
                 {t('files.reveal')}
               </button>
             )}
@@ -765,7 +757,7 @@ function PreviewModeToggle({
         onClick={() => onChange('preview')}
         className={`flex items-center gap-1 rounded px-2 py-1 text-xs ${mode === 'preview' ? 'bg-white text-gray-800 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}
       >
-        <Eye aria-hidden="true" className="h-3.5 w-3.5" />
+        <Eye className="h-3.5 w-3.5" />
         {t('files.preview.previewMode')}
       </button>
       <button
@@ -773,7 +765,7 @@ function PreviewModeToggle({
         onClick={() => onChange('source')}
         className={`flex items-center gap-1 rounded px-2 py-1 text-xs ${mode === 'source' ? 'bg-white text-gray-800 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}
       >
-        <Code2 aria-hidden="true" className="h-3.5 w-3.5" />
+        <Code2 className="h-3.5 w-3.5" />
         {t('files.preview.sourceMode')}
       </button>
     </div>
@@ -865,23 +857,23 @@ export function PreviewModal({
 }) {
   const { t } = useTranslation('workspace');
   return (
-    <div className="fixed inset-0 flex bg-black/40 p-4 z-50">
-      <div className="flex flex-1 flex-col rounded-xl bg-white shadow-2xl min-h-0 overflow-hidden">
+    <div className="fixed inset-0 z-50 flex bg-black/40 p-4">
+      <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl bg-white shadow-2xl">
         <div className="flex items-center gap-3 border-b border-gray-100 px-4 py-3">
           <span className="text-sm">{fileIcon(node)}</span>
-          <span className="flex-1 text-sm font-medium text-gray-900 min-w-0 truncate">{node.name}</span>
+          <span className="min-w-0 flex-1 truncate text-sm font-medium text-gray-900">{node.name}</span>
           <span className="text-xs text-gray-400">{formatBytes(node.size ?? 0)}</span>
           <span className="text-xs text-gray-400">{formatDate(node.modified_at)}</span>
           <a href={fileAccess.downloadUrl(node.path)} download={node.name} title={t('files.download')} className="rounded p-1.5 text-gray-400 hover:bg-gray-100 hover:text-gray-600">
-            <Download aria-hidden="true" className="h-4 w-4" />
+            <Download className="h-4 w-4" />
           </a>
           {onReveal && (
             <button onClick={() => onReveal(node)} title={t('files.reveal')} className="rounded p-1.5 text-gray-400 hover:bg-gray-100 hover:text-gray-600">
-              <FolderOpen aria-hidden="true" className="h-4 w-4" />
+              <FolderOpen className="h-4 w-4" />
             </button>
           )}
           <button onClick={onClose} title={t('files.close')} className="rounded p-1.5 text-gray-400 hover:bg-gray-100 hover:text-gray-600">
-            <X aria-hidden="true" className="h-4 w-4" />
+            <X className="h-4 w-4" />
           </button>
         </div>
         <div className="min-h-0 flex-1">

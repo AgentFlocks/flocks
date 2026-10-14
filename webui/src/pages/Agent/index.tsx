@@ -136,16 +136,16 @@ export default function AgentPage() {
 
   return (
     <div className="h-full flex flex-col">
-      <PageHeader tone="ai"
+      <PageHeader
         title={t('pageTitle')}
         description={t('pageDescription')}
-        icon={<Bot aria-hidden="true" className="w-8 h-8" />}
+        icon={<Bot className="w-8 h-8" />}
       />
 
       {error && <p role="alert" className="px-4 py-2 text-sm text-red-600">{error}</p>}
       {/* Toolbar — mirrors the Skill page toolbar style */}
-      <div className="px-4 py-2 border-b border-gray-100 flex items-center gap-2 flex-wrap">
-        <span className="text-xs text-gray-400 select-none whitespace-nowrap">
+      <div className="px-4 py-2 border-b border-gray-100 flex items-center gap-2">
+        <span className="text-xs text-gray-400 select-none">
           {t('totalCount', { total: primaryAgents.length + subAgents.length })}
         </span>
         <div className="ml-auto flex items-center gap-2">
@@ -160,13 +160,13 @@ export default function AgentPage() {
                 : 'border-gray-200 text-gray-400 hover:bg-gray-50 hover:text-gray-600 disabled:opacity-50'
             }`}
           >
-            <RefreshCw aria-hidden="true" className={`w-3.5 h-3.5 ${refreshing ? 'animate-spin' : ''}`} />
+            <RefreshCw className={`w-3.5 h-3.5 ${refreshing ? 'animate-spin' : ''}`} />
           </button>
           <button
             onClick={() => setShowCreateSheet(true)}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors text-sm whitespace-nowrap"
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors text-sm"
           >
-            <Plus aria-hidden="true" className="w-4 h-4" />
+            <Plus className="w-4 h-4" />
             {t('createSubAgent')}
           </button>
         </div>
@@ -180,7 +180,7 @@ export default function AgentPage() {
         <div className="min-w-0 flex-1 space-y-6">
         {agents.length === 0 ? (
           <EmptyState
-            icon={<Bot aria-hidden="true" className="w-16 h-16" />}
+            icon={<Bot className="w-16 h-16" />}
             title={t('emptyState.title')}
             description={t('emptyState.description')}
             action={
@@ -188,7 +188,7 @@ export default function AgentPage() {
                 onClick={() => setShowCreateSheet(true)}
                 className="inline-flex items-center gap-2 px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors"
               >
-                <Plus aria-hidden="true" className="w-5 h-5" />
+                <Plus className="w-5 h-5" />
                 {t('createSubAgent')}
               </button>
             }
@@ -199,7 +199,7 @@ export default function AgentPage() {
               <AgentSection
                 title={t('section.primary.title')}
                 subtitle={t('section.primary.subtitle')}
-                icon={<Shield aria-hidden="true" className="w-4 h-4" />}
+                icon={<Shield className="w-4 h-4" />}
                 agents={primaryAgents}
                 displayLang={i18n.language}
                 selectedAgent={editingAgent}
@@ -216,7 +216,7 @@ export default function AgentPage() {
               <AgentSection
                 title={t('section.sub.title')}
                 subtitle={t('section.sub.subtitle')}
-                icon={<Zap aria-hidden="true" className="w-4 h-4" />}
+                icon={<Zap className="w-4 h-4" />}
                 agents={subAgents}
                 displayLang={i18n.language}
                 selectedAgent={editingAgent}
@@ -308,7 +308,6 @@ function PaginationBar({
             key={p}
             type="button"
             onClick={() => onPageChange(p)}
-            aria-current={p === page ? 'page' : undefined}
             className={`w-6 h-5 rounded text-[11px] font-medium transition-colors ${
               p === page
                 ? 'bg-slate-700 text-white'
@@ -447,7 +446,7 @@ function AgentSection({
                   } ${idx > 0 ? 'ml-0.5' : ''}`}
                 >
                   <span>{chip.label}</span>
-                  <span className={`ml-1.5 inline-block px-1 rounded text-[10px] tabular-nums min-w-[1.25rem] ${
+                  <span className={`ml-1.5 inline-block min-w-[1.25rem] px-1 rounded text-[10px] tabular-nums ${
                     active ? 'bg-white/15' : 'bg-gray-100 text-gray-500'
                   }`}>
                     {chip.count}

@@ -344,3 +344,18 @@ async def test_route_cancelled_before_runner_starts_releases_claim(shared_pg, mo
     assert execution_id not in ownership._leases
     assert execution_id not in route._active_workflow_executions
     assert await WorkflowStore.recover_expired_executions("cancelled before dispatch") == 1
+
+
+async def test_recovery_of_an_execution_whose_inputs_hold_nul(shared_pg):
+    """A NUL-terminated syslog frame in the inputs must not stop crash recovery (arch_v2)."""
+    inputs = {"syslog_message": {"raw": "2026-10-12 10:00:00|!alarm|!192.0.2.10|!{}\x00", "data": {"brief": "a\x00b"}}}
+    expired = await WorkflowStore.start_execution(
+        build_initial_execution_record("wf-nul", input_params=inputs), owner_node_id="gone", lease_seconds=60,
+    )
+    await WorkflowStore.release_execution_lease(expired["id"], expired)
+
+    assert await WorkflowStore.recover_expired_executions("expired owner") == 1
+
+    recovered = await WorkflowStore.get_execution(expired["id"])
+    assert recovered["status"] == "error"
+    assert recovered["inputParams"] == inputs

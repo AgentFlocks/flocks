@@ -43,6 +43,23 @@ describe('PermissionApprovalDialog', () => {
     expect(onReply).toHaveBeenCalledWith('allow');
   });
 
+  it('shows the tool and the path for a file edit request', () => {
+    render(
+      <PermissionApprovalDialog
+        request={{
+          ...request,
+          toolID: 'write',
+          permission: 'edit',
+          patterns: ['markers/ask.marker'],
+          metadata: { tool: 'write', filepath: '/work/markers/ask.marker' },
+        }}
+        onReply={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole('alertdialog')).toHaveTextContent('$ write markers/ask.marker');
+  });
+
   it('uses the generic always-allow label for non-network requests', async () => {
     const user = userEvent.setup();
     const onReply = vi.fn();

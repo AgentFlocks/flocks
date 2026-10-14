@@ -41,6 +41,8 @@ export interface SettingsSection {
   i18nNamespaces?: ExtensionSettingsSection['i18nNamespaces'];
   /** Resolves false to hide the section for this install. */
   gate?: ExtensionSettingsSection['gate'];
+  /** Position within its group; built-in and registered sections share one scale. */
+  order?: number;
 }
 
 export interface SettingsGroup {
@@ -147,11 +149,14 @@ export function useSettingsSectionGroups(): { groups: SettingsGroup[]; ready: bo
     const byGroup: Record<SettingsGroup['id'], SettingsSection[]> = {
       preferences: [{ id: 'preferences', name: t('settingsPreferences'), icon: SettingsIcon }],
       data: [{ id: 'archived-data', name: t('archivedData'), icon: Archive }],
+      // dev's order is account, security config, system logs, audit logs: the
+      // built-in orders leave room for a registered section in between
+      // (security-config 10, audit-logs 20). Sections dev does not have go last.
       system: [
-        { id: 'account', name: t('accountManagement'), icon: UserCog },
-        { id: 'network-proxy', name: t('networkProxy'), icon: Shield, adminOnly: true },
-        { id: 'voice-input', name: t('voiceInput'), icon: Mic, adminOnly: true },
-        { id: 'system-logs', name: t('systemLog'), icon: ScrollText },
+        { id: 'account', name: t('accountManagement'), icon: UserCog, order: 0 },
+        { id: 'system-logs', name: t('systemLog'), icon: ScrollText, order: 15 },
+        { id: 'network-proxy', name: t('networkProxy'), icon: Shield, adminOnly: true, order: 50 },
+        { id: 'voice-input', name: t('voiceInput'), icon: Mic, adminOnly: true, order: 51 },
       ],
     };
     for (const section of registry.settingsSections) {
@@ -166,7 +171,12 @@ export function useSettingsSectionGroups(): { groups: SettingsGroup[]; ready: bo
         load: section.load,
         i18nNamespaces: section.i18nNamespaces,
         gate: section.gate,
+        order: section.order,
       });
+    }
+    // Stable sort: equal (or missing) orders keep registration order.
+    for (const items of Object.values(byGroup)) {
+      items.sort((a, b) => (a.order ?? 100) - (b.order ?? 100));
     }
     return [
       { id: 'preferences', name: t('settingsGroupPreferences'), items: byGroup.preferences },

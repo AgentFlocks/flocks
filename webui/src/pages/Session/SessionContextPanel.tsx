@@ -1,18 +1,7 @@
-import { pageActionLabel } from '../pageActionLabel';
 import { Suspense, useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import {
-  ArrowLeft,
-  ChevronDown,
-  Download,
-  FileText,
-  Folder,
-  FolderPlus,
-  Maximize2,
-  RefreshCw,
-  Search,
-  SlidersHorizontal,
-  Sparkles,
-  X,
+  ArrowLeft, ChevronDown, Download, FileText, Folder, FolderPlus,
+  Maximize2, RefreshCw, Search, SlidersHorizontal, Sparkles, X,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
@@ -101,13 +90,13 @@ function Section({
           className="flex min-w-0 flex-1 items-center gap-2 text-left"
         >
           <span className="text-zinc-500 dark:text-zinc-400">{icon}</span>
-          <span className="text-xs font-semibold text-zinc-700 dark:text-zinc-200 truncate">{title}</span>
+          <span className="truncate text-xs font-semibold text-zinc-700 dark:text-zinc-200">{title}</span>
           {typeof count === 'number' && (
             <span className="rounded bg-zinc-100 px-1.5 py-0.5 text-[10px] text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400">
               {count}
             </span>
           )}
-          <ChevronDown aria-hidden="true" className={`h-3.5 w-3.5 text-zinc-400 transition-transform ml-auto ${open ? 'rotate-180' : ''}`} />
+          <ChevronDown className={`ml-auto h-3.5 w-3.5 text-zinc-400 transition-transform ${open ? 'rotate-180' : ''}`} />
         </button>
         {actions}
       </div>
@@ -400,25 +389,25 @@ export default function SessionContextPanel({
   }, [cancelNavigation, onRefresh, root?.id, scope, sessionId]);
 
   const previewPending = previewLoading && (
-    <div className="pointer-events-none absolute inset-x-0 bottom-0 top-[52px] grid place-items-center bg-white/60 dark:bg-zinc-900/60 z-10"><LoadingSpinner /></div>
+    <div className="pointer-events-none absolute inset-x-0 bottom-0 top-[52px] z-10 grid place-items-center bg-white/60 dark:bg-zinc-900/60"><LoadingSpinner /></div>
   );
 
   if (preview) {
     return (
-      <div className="relative flex flex-col bg-white dark:bg-[#242b33] h-full min-h-0">
-        <div className="flex h-[52px] items-center gap-2 border-b border-zinc-100 px-3 dark:border-zinc-800 flex-shrink-0">
+      <div className="relative flex h-full min-h-0 flex-col bg-white dark:bg-[#242b33]">
+        <div className="flex h-[52px] flex-shrink-0 items-center gap-2 border-b border-zinc-100 px-3 dark:border-zinc-800">
           <button type="button" onClick={backFromPreview} aria-label={t('context.back')} className="rounded p-1.5 text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-800">
-            <ArrowLeft aria-hidden="true" className="h-4 w-4" />
+            <ArrowLeft className="h-4 w-4" />
           </button>
-          <span className="flex-1 text-sm font-medium text-zinc-800 dark:text-zinc-100 min-w-0 truncate">{preview.node.name}</span>
+          <span className="min-w-0 flex-1 truncate text-sm font-medium text-zinc-800 dark:text-zinc-100">{preview.node.name}</span>
           <a href={preview.downloadUrl} download={preview.node.name} className="rounded p-1.5 text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-800" title={t('context.download')}>
-            <Download aria-hidden="true" className="h-4 w-4" />
+            <Download className="h-4 w-4" />
           </a>
           <button type="button" onClick={() => setFullscreen(true)} className="rounded p-1.5 text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-800" title={t('context.fullscreen')}>
-            <Maximize2 aria-hidden="true" className="h-4 w-4" />
+            <Maximize2 className="h-4 w-4" />
           </button>
           <button type="button" onClick={closePanel} aria-label={t('context.close')} className="rounded p-1.5 text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-800">
-            <X aria-hidden="true" className="h-4 w-4" />
+            <X className="h-4 w-4" />
           </button>
         </div>
         {actionError && <div className="border-b border-red-200 bg-red-50 px-3 py-2 text-xs text-red-600">{actionError}</div>}
@@ -457,22 +446,22 @@ export default function SessionContextPanel({
   if (root) {
     const parentPath = rootPath.includes('/') ? rootPath.slice(0, rootPath.lastIndexOf('/')) : '';
     return (
-      <div className="relative flex flex-col bg-white dark:bg-[#242b33] h-full min-h-0">
-        <div className="flex h-[52px] items-center gap-2 border-b border-zinc-100 px-3 dark:border-zinc-800 flex-shrink-0">
+      <div className="relative flex h-full min-h-0 flex-col bg-white dark:bg-[#242b33]">
+        <div className="flex h-[52px] flex-shrink-0 items-center gap-2 border-b border-zinc-100 px-3 dark:border-zinc-800">
           <button type="button" onClick={backFromRoot} aria-label={t('context.back')} className="rounded p-1.5 text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-800">
-            <ArrowLeft aria-hidden="true" className="h-4 w-4" />
+            <ArrowLeft className="h-4 w-4" />
           </button>
           <div className="min-w-0 flex-1">
-            <div className="text-sm font-medium text-zinc-800 dark:text-zinc-100 truncate">{root.displayName}</div>
-            {rootPath && <div className="text-[10px] text-zinc-400 truncate">{rootPath}</div>}
+            <div className="truncate text-sm font-medium text-zinc-800 dark:text-zinc-100">{root.displayName}</div>
+            {rootPath && <div className="truncate text-[10px] text-zinc-400">{rootPath}</div>}
           </div>
-          <button type="button" onClick={closePanel} aria-label={t('context.close')} className="rounded p-1.5 text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-800"><X aria-hidden="true" className="h-4 w-4" /></button>
+          <button type="button" onClick={closePanel} aria-label={t('context.close')} className="rounded p-1.5 text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-800"><X className="h-4 w-4" /></button>
         </div>
         {actionError && <div className="border-b border-red-200 bg-red-50 px-3 py-2 text-xs text-red-600">{actionError}</div>}
         <div className="min-h-0 flex-1 overflow-y-auto p-3">
           {rootPath && (
             <button type="button" onClick={() => void loadRoot(root, parentPath)} className="mb-2 flex w-full items-center gap-2 rounded-lg px-2 py-2 text-xs text-zinc-500 hover:bg-zinc-50 dark:hover:bg-zinc-800">
-              <ArrowLeft aria-hidden="true" className="h-3.5 w-3.5" />
+              <ArrowLeft className="h-3.5 w-3.5" />
               {t('context.parentFolder')}
             </button>
           )}
@@ -489,8 +478,8 @@ export default function SessionContextPanel({
                     : void openRootFile(root, item)}
                   className="flex w-full items-center gap-2 rounded-lg px-2 py-2 text-left hover:bg-zinc-50 dark:hover:bg-zinc-800"
                 >
-                  {item.type === 'directory' ? <Folder aria-hidden="true" className="h-4 w-4 text-amber-500" /> : <FileText aria-hidden="true" className="h-4 w-4 text-zinc-500" />}
-                  <span className="flex-1 text-xs text-zinc-700 dark:text-zinc-200 min-w-0 truncate">{item.name}</span>
+                  {item.type === 'directory' ? <Folder className="h-4 w-4 text-amber-500" /> : <FileText className="h-4 w-4 text-zinc-500" />}
+                  <span className="min-w-0 flex-1 truncate text-xs text-zinc-700 dark:text-zinc-200">{item.name}</span>
                   {item.type === 'file' && item.size != null && <span className="text-[10px] text-zinc-400">{formatBytes(item.size)}</span>}
                 </button>
               ))}
@@ -508,22 +497,22 @@ export default function SessionContextPanel({
   }
 
   return (
-    <div className="relative flex flex-col bg-white dark:bg-[#242b33] h-full min-h-0">
-      <div className="flex h-[52px] items-center gap-2 border-b border-zinc-100 px-3 dark:border-zinc-800 flex-shrink-0">
+    <div className="relative flex h-full min-h-0 flex-col bg-white dark:bg-[#242b33]">
+      <div className="flex h-[52px] flex-shrink-0 items-center gap-2 border-b border-zinc-100 px-3 dark:border-zinc-800">
         {previewLoading ? (
-          <button type="button" onClick={cancelNavigation} aria-label={t('context.back')} className="rounded p-1.5 text-zinc-500"><ArrowLeft aria-hidden="true" className="h-4 w-4" /></button>
-        ) : <Sparkles aria-hidden="true" className="h-4 w-4 text-violet-500" />}
-        <span className="flex-1 text-sm font-semibold text-zinc-800 dark:text-zinc-100 min-w-0 truncate">{t('context.title')}</span>
+          <button type="button" onClick={cancelNavigation} aria-label={t('context.back')} className="rounded p-1.5 text-zinc-500"><ArrowLeft className="h-4 w-4" /></button>
+        ) : <Sparkles className="h-4 w-4 text-violet-500" />}
+        <span className="min-w-0 flex-1 truncate text-sm font-semibold text-zinc-800 dark:text-zinc-100">{t('context.title')}</span>
         <button type="button" onClick={() => void onRefresh()} className="rounded p-1.5 text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-800" title={t('context.refresh')}>
-          <RefreshCw aria-hidden="true" className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
+          <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
         </button>
-        <button type="button" onClick={closePanel} aria-label={t('context.close')} className="rounded p-1.5 text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-800"><X aria-hidden="true" className="h-4 w-4" /></button>
+        <button type="button" onClick={closePanel} aria-label={t('context.close')} className="rounded p-1.5 text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-800"><X className="h-4 w-4" /></button>
       </div>
 
       {/* In a narrow panel the filters move under the search box instead of squeezing it. */}
       <div className="flex flex-wrap items-center gap-2 border-b border-zinc-100 px-3 py-2 dark:border-zinc-800">
         <div className="relative min-w-[10rem] flex-[1_1_10rem]">
-          <Search aria-hidden="true" className="absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-zinc-400" />
+          <Search className="absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-zinc-400" />
           <input
             value={query}
             onChange={(event) => setQuery(event.target.value)}
@@ -532,7 +521,7 @@ export default function SessionContextPanel({
           />
         </div>
         <div className="flex shrink-0 items-center gap-2">
-          <SlidersHorizontal aria-hidden="true" className="h-3.5 w-3.5 text-zinc-400" />
+          <SlidersHorizontal className="h-3.5 w-3.5 text-zinc-400" />
           <select value={filter} onChange={(event) => setFilter(event.target.value as FileFilter)} className="h-8 rounded-lg border border-zinc-200 bg-white px-2 text-xs text-zinc-600 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300">
             <option value="all">{t('context.filter.all')}</option>
             <option value="outputs">{t('context.outputs')}</option>
@@ -555,11 +544,11 @@ export default function SessionContextPanel({
         )}
         {loading && !snapshot ? <div className="py-10"><LoadingSpinner /></div> : (
           <>
-            <Section title={t('context.progress')} count={snapshot?.progress.length || 0} icon={<SlidersHorizontal aria-hidden="true" className="h-4 w-4" />} defaultOpen={Boolean(snapshot?.progress.length)}>
+            <Section title={t('context.progress')} count={snapshot?.progress.length || 0} icon={<SlidersHorizontal className="h-4 w-4" />} defaultOpen={Boolean(snapshot?.progress.length)}>
               {snapshot?.progress.length ? <TodoList items={snapshot.progress} /> : <EmptySection>{t('context.noProgress')}</EmptySection>}
             </Section>
 
-            <Section title={t('context.outputs')} count={snapshot?.outputs.length || 0} icon={<Sparkles aria-hidden="true" className="h-4 w-4" />}>
+            <Section title={t('context.outputs')} count={snapshot?.outputs.length || 0} icon={<Sparkles className="h-4 w-4" />}>
               {outputFiles.length === 0 ? <EmptySection>{t('context.noOutputs')}</EmptySection> : (
                 <FileRows files={outputFiles} onOpen={openResource} onFocusMessage={onFocusMessage} sessionId={sessionId} />
               )}
@@ -568,16 +557,16 @@ export default function SessionContextPanel({
             <Section
               title={t('context.contextFiles')}
               count={(snapshot?.contextFiles.length || 0) + (snapshot?.roots.length || 0)}
-              icon={<Folder aria-hidden="true" className="h-4 w-4" />}
+              icon={<Folder className="h-4 w-4" />}
               actions={snapshot?.canManageFolders ? (
                 <button type="button" onClick={() => setShowFolderInput((value) => !value)} className="rounded p-1 text-zinc-400 hover:bg-zinc-100 hover:text-zinc-700 dark:hover:bg-zinc-800" title={t('context.addFolder')}>
-                  <FolderPlus aria-hidden="true" className="h-3.5 w-3.5" />
+                  <FolderPlus className="h-3.5 w-3.5" />
                 </button>
               ) : undefined}
             >
               {snapshot?.canManageFolders && showFolderInput && (
                 <div className="mb-2 flex gap-1.5">
-                  <input value={folderPath} onChange={(event) => setFolderPath(event.target.value)} placeholder={t('context.folderPathPlaceholder')} className="h-8 flex-1 rounded-lg border border-zinc-200 px-2 text-xs outline-none focus:border-zinc-400 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100 min-w-0" />
+                  <input value={folderPath} onChange={(event) => setFolderPath(event.target.value)} placeholder={t('context.folderPathPlaceholder')} className="h-8 min-w-0 flex-1 rounded-lg border border-zinc-200 px-2 text-xs outline-none dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100" />
                   <button type="button" disabled={folderBusy || !folderPath.trim()} onClick={() => void addFolder()} className="rounded-lg bg-zinc-800 px-2.5 text-xs text-white disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900">
                     {folderBusy ? '…' : t('context.add')}
                   </button>
@@ -586,13 +575,13 @@ export default function SessionContextPanel({
               <div className="space-y-1">
                 {(snapshot?.roots || []).map((item) => (
                   <div key={item.id} className="group flex items-center gap-1 rounded-lg hover:bg-zinc-50 dark:hover:bg-zinc-800">
-                    <button type="button" disabled={item.status !== 'available'} onClick={() => void loadRoot(item)} className="flex flex-1 items-center gap-2 px-2 py-2 text-left disabled:opacity-50 min-w-0">
-                      <Folder aria-hidden="true" className="h-4 w-4 text-amber-500" />
-                      <span className="flex-1 text-xs text-zinc-700 dark:text-zinc-200 min-w-0 truncate">{item.displayName}</span>
+                    <button type="button" disabled={item.status !== 'available'} onClick={() => void loadRoot(item)} className="flex min-w-0 flex-1 items-center gap-2 px-2 py-2 text-left disabled:opacity-50">
+                      <Folder className="h-4 w-4 text-amber-500" />
+                      <span className="min-w-0 flex-1 truncate text-xs text-zinc-700 dark:text-zinc-200">{item.displayName}</span>
                       <span className="text-[10px] text-zinc-400">{item.kind === 'project' ? t('context.project') : t('context.folder')}</span>
                     </button>
                     {item.kind === 'folder' && (
-                      <button aria-label={pageActionLabel('close')} type="button" onClick={() => void removeFolder(item)} className="mr-1 rounded p-1 text-zinc-300 opacity-0 hover:bg-zinc-100 hover:text-red-500 group-hover:opacity-100 dark:hover:bg-zinc-700"><X aria-hidden="true" className="h-3 w-3" /></button>
+                      <button type="button" onClick={() => void removeFolder(item)} className="mr-1 rounded p-1 text-zinc-300 opacity-0 hover:bg-zinc-100 hover:text-red-500 group-hover:opacity-100 dark:hover:bg-zinc-700"><X className="h-3 w-3" /></button>
                     )}
                   </div>
                 ))}
@@ -604,7 +593,7 @@ export default function SessionContextPanel({
             </Section>
 
             {(snapshot?.skills.length || 0) > 0 && (
-              <Section title={t('context.skills')} count={snapshot?.skills.length || 0} icon={<Sparkles aria-hidden="true" className="h-4 w-4" />} defaultOpen={false}>
+              <Section title={t('context.skills')} count={snapshot?.skills.length || 0} icon={<Sparkles className="h-4 w-4" />} defaultOpen={false}>
                 <div className="space-y-1">
                   {snapshot!.skills.map((skill) => <SkillRow key={skill.name} skill={skill} />)}
                 </div>
@@ -631,9 +620,9 @@ function SkillRow({ skill }: { skill: SessionContextSkill }) {
   const rowClassName = 'flex items-center gap-2 rounded-lg px-2 py-2 text-xs text-zinc-700 dark:text-zinc-200';
   const row = (
     <>
-      <Sparkles aria-hidden="true" className="h-3.5 w-3.5 text-violet-500 shrink-0" />
+      <Sparkles className="h-3.5 w-3.5 shrink-0 text-violet-500" />
       <span className="min-w-0 flex-1 truncate">{skill.name}</span>
-      <span className={`text-[10px] shrink-0 ${failed ? 'text-red-600 dark:text-red-400' : 'text-zinc-400'}`}>{label}</span>
+      <span className={`shrink-0 text-[10px] ${failed ? 'text-red-600 dark:text-red-400' : 'text-zinc-400'}`}>{label}</span>
     </>
   );
   if (!error) return <div className={rowClassName}>{row}</div>;
@@ -653,9 +642,9 @@ function SkillError({ error, rowClassName, children }: { error: string; rowClass
         className={`${rowClassName} w-full text-left focus-visible:outline focus-visible:outline-2 focus-visible:outline-violet-500`}
       >
         {children}
-        <ChevronDown aria-hidden="true" className={`h-3 w-3 text-zinc-400 shrink-0 ${open ? 'rotate-180' : ''}`} />
+        <ChevronDown aria-hidden="true" className={`h-3 w-3 shrink-0 text-zinc-400 ${open ? 'rotate-180' : ''}`} />
       </button>
-      <p id={errorId} hidden={!open} className="px-2 pb-2 text-xs text-red-600 [overflow-wrap:anywhere] dark:text-red-400 whitespace-pre-wrap">{error}</p>
+      <p id={errorId} hidden={!open} className="whitespace-pre-wrap px-2 pb-2 text-xs text-red-600 [overflow-wrap:anywhere] dark:text-red-400">{error}</p>
     </div>
   );
 }
@@ -676,19 +665,19 @@ function FileRows({
     <div className="space-y-1">
       {files.map((file) => (
         <div key={file.fileKey || file.resourceID} className="group flex items-center gap-1 rounded-lg hover:bg-zinc-50 dark:hover:bg-zinc-800">
-          <button type="button" disabled={file.status === 'missing'} onClick={() => void onOpen(file)} className="flex flex-1 items-center gap-2 px-2 py-2 text-left disabled:opacity-50 min-w-0">
-            <FileText aria-hidden="true" className="h-4 w-4 text-zinc-500" />
+          <button type="button" disabled={file.status === 'missing'} onClick={() => void onOpen(file)} className="flex min-w-0 flex-1 items-center gap-2 px-2 py-2 text-left disabled:opacity-50">
+            <FileText className="h-4 w-4 text-zinc-500" />
             <span className="min-w-0 flex-1">
-              <span className="block text-xs font-medium text-zinc-700 dark:text-zinc-200 truncate">{file.displayName}</span>
-              <span className="block text-[10px] text-zinc-400 truncate">{file.logicalPath}</span>
+              <span className="block truncate text-xs font-medium text-zinc-700 dark:text-zinc-200">{file.displayName}</span>
+              <span className="block truncate text-[10px] text-zinc-400">{file.logicalPath}</span>
             </span>
             {file.size != null && <span className="text-[10px] text-zinc-400">{formatBytes(file.size)}</span>}
           </button>
           <button type="button" onClick={() => onFocusMessage(file.sourceMessageID)} className="rounded p-1 text-zinc-300 opacity-0 hover:bg-zinc-100 hover:text-zinc-600 group-hover:opacity-100 dark:hover:bg-zinc-700" title={t('context.locateMessage')}>
-            <ArrowLeft aria-hidden="true" className="h-3 w-3" />
+            <ArrowLeft className="h-3 w-3" />
           </button>
           <a href={sessionApi.contextFileDownloadUrl(sessionId, file.resourceID)} download={file.displayName} className="mr-1 rounded p-1 text-zinc-300 opacity-0 hover:bg-zinc-100 hover:text-zinc-600 group-hover:opacity-100 dark:hover:bg-zinc-700" title={t('context.download')}>
-            <Download aria-hidden="true" className="h-3 w-3" />
+            <Download className="h-3 w-3" />
           </a>
         </div>
       ))}

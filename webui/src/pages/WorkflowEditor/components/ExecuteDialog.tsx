@@ -1,8 +1,6 @@
-import { pageActionLabel } from '../../pageActionLabel';
-import PageDialog from '../../PageDialog';
 import React, { useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { AlertCircle, Play, X } from 'lucide-react';
+import { X, Play, AlertCircle } from 'lucide-react';
 
 interface ExecuteDialogProps {
   onClose: () => void;
@@ -27,7 +25,7 @@ export default function ExecuteDialog({ onClose, onExecute }: ExecuteDialogProps
   };
 
   return (
-    <PageDialog onClose={onClose} className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
       <div className="bg-white rounded-lg shadow-2xl w-full max-w-2xl max-h-[80vh] flex flex-col">
         {/* Header */}
         <div className="flex items-center justify-between p-6 border-b border-gray-200">
@@ -35,11 +33,11 @@ export default function ExecuteDialog({ onClose, onExecute }: ExecuteDialogProps
             <h2 className="text-xl font-semibold text-gray-900">{t('editor.dialog.title')}</h2>
             <p className="text-sm text-gray-500 mt-1">{t('editor.dialog.subtitle')}</p>
           </div>
-          <button aria-label={pageActionLabel('close')}
+          <button
             onClick={onClose}
             className="p-2 hover:bg-gray-100 rounded-lg transition-colors"
           >
-            <X aria-hidden="true" className="w-5 h-5" />
+            <X className="w-5 h-5" />
           </button>
         </div>
 
@@ -63,7 +61,7 @@ export default function ExecuteDialog({ onClose, onExecute }: ExecuteDialogProps
             />
             {error && (
               <div className="mt-2 flex items-start gap-2 p-3 bg-red-50 border border-red-200 rounded-lg">
-                <AlertCircle aria-hidden="true" className="w-4 h-4 text-red-600 mt-0.5 flex-shrink-0" />
+                <AlertCircle className="w-4 h-4 text-red-600 flex-shrink-0 mt-0.5" />
                 <p className="text-sm text-red-800">{error}</p>
               </div>
             )}
@@ -125,11 +123,11 @@ export default function ExecuteDialog({ onClose, onExecute }: ExecuteDialogProps
             onClick={handleExecute}
             className="flex items-center gap-2 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors"
           >
-            <Play aria-hidden="true" className="w-4 h-4" />
+            <Play className="w-4 h-4" />
             {t('editor.dialog.startExecute')}
           </button>
         </div>
       </div>
-    </PageDialog>
+    </div>
   );
 }

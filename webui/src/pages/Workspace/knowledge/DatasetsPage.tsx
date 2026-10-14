@@ -1,19 +1,5 @@
 import { useEffect, useId, useRef, useState } from 'react';
-import {
-  ArrowLeft,
-  ChevronRight,
-  Database,
-  FileText,
-  Layers,
-  LayoutGrid,
-  List,
-  Pencil,
-  Play,
-  Plus,
-  Search,
-  Trash2,
-  Unlink,
-} from 'lucide-react';
+import { ArrowLeft, ChevronRight, Database, FileText, LayoutGrid, Layers, List, Pencil, Play, Plus, Search, Trash2, Unlink } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { knowledgebaseAPI, type Dataset, type KnowledgeDocument } from '@/api/knowledgebase';
 import { useConfirm } from '@/components/common/ConfirmDialog';

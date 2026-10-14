@@ -33,7 +33,7 @@ def _load_tool(yaml_name: str):
         / ".flocks"
         / "plugins"
         / "tools"
-        / "api"
+        / "device"
         / "onesec_v2_8_2"
         / yaml_name
     )

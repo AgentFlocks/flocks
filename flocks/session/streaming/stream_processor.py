@@ -7,6 +7,7 @@ Ported from Flocks' SessionProcessor pattern.
 
 import copy
 import json
+import os
 import re
 import asyncio
 import contextvars
@@ -201,7 +202,10 @@ class StreamProcessor:
         # Track tool calls
         self.tool_calls: Dict[str, ToolCallState] = {}
         self._last_visible_text: str = ""
-        
+        # What text_delta_callback has received so far; it moves on every
+        # callback, while _last_visible_text only moves when an event is published.
+        self._callback_visible_text: str = ""
+
         # Throttle event publishing for text/reasoning deltas to reduce network overhead
         # Send updates at most every 50ms during streaming
         self._last_text_event_time: float = 0
@@ -1600,7 +1604,8 @@ class StreamProcessor:
         """Handle text block start"""
         log.info("stream.text.start", {"session_id": self.session_id})
         self._last_visible_text = ""
-        
+        self._callback_visible_text = ""
+
         self.current_text_part = TextPart(
             id=Identifier.create("part"),
             sessionID=self.session_id,
@@ -1648,9 +1653,14 @@ class StreamProcessor:
                     "total_length": len(self.current_text_part.text),
                 })
             
-            # Call text delta callback if provided (for CLI display)
-            if self.text_delta_callback and visible_delta:
-                await self.text_delta_callback(visible_delta)
+            # Call text delta callback if provided (for CLI display). Callers append
+            # what they get, so measure from what they were already given: publishing
+            # is throttled, and headless runs have no publish callback at all.
+            if self.text_delta_callback:
+                callback_delta = self._appended_delta(self._callback_visible_text, visible_text)
+                self._callback_visible_text = visible_text
+                if callback_delta:
+                    await self.text_delta_callback(callback_delta)
             
             # Update metadata if provided
             if event.metadata:
@@ -1948,6 +1958,19 @@ class StreamProcessor:
         if current.startswith(previous):
             return current[len(previous):]
         return current
+
+    @staticmethod
+    def _appended_delta(previous: str, current: str) -> str:
+        """Text to append for a reader that already holds ``previous``.
+
+        Sent text cannot be taken back: when the display text shrinks (a tool
+        tag becomes recognisable), only what follows the shared prefix goes out.
+        """
+        # Plain appends are the common case; scanning the whole history on every
+        # delta would make a long reply quadratic.
+        if current.startswith(previous):
+            return current[len(previous):]
+        return current[len(os.path.commonprefix([previous, current])):]
 
     _DSML_NAMESPACE_RE = r"(?:\|\s*\|\s*DSML\s*\|\s*\||\|\s*DSML\s*\||｜\s*DSML\s*｜)"
     _DSML_TAG_RE = re.compile(

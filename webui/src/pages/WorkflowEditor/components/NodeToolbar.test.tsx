@@ -9,12 +9,6 @@ vi.mock('react-i18next', () => ({
 }));
 
 describe('NodeToolbar', () => {
-  it('锚定在画布容器内而不是视口（否则会压在侧边栏下面点不到）', () => {
-    const { container } = render(<NodeToolbar onAddNode={vi.fn()} />);
-    const root = container.firstElementChild as HTMLElement;
-    expect(root.className).toContain('absolute');
-    expect(root.className).not.toContain('fixed');
-  });
 
   it('点击节点类型按钮回调对应类型', async () => {
     const onAddNode = vi.fn();

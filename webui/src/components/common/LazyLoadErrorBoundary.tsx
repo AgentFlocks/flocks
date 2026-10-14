@@ -19,7 +19,7 @@ function LazyLoadErrorFallback({
 }: Required<Pick<LazyLoadErrorBoundaryProps, 'mode' | 'onRetry'>>) {
   const { t } = useTranslation('common');
   const containerClassName = mode === 'overlay'
-    ? 'fixed inset-0 flex items-center justify-center bg-black/30 p-6 z-[120]'
+    ? 'fixed inset-0 z-[120] flex items-center justify-center bg-black/30 p-6'
     : 'flex min-h-64 items-center justify-center p-6';
 
   return (

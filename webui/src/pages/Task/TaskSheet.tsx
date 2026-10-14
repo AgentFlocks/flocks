@@ -286,7 +286,7 @@ ${fields}
     throw new Error(t('taskSheet.extractTimeout'));
   };
 
-  const icon = isRecurring ? <Calendar aria-hidden="true" className="w-5 h-5" /> : <Clock aria-hidden="true" className="w-5 h-5" />;
+  const icon = isRecurring ? <Calendar className="w-5 h-5" /> : <Clock className="w-5 h-5" />;
 
   return (
     <EntitySheet
@@ -301,7 +301,7 @@ ${fields}
       rexGuidePanelTitle={t(isEdit ? 'taskSheet.edit.guidePanelTitle' : 'taskSheet.create.guidePanelTitle')}
       rexGuidePanelDesc={t(isEdit ? 'taskSheet.edit.guidePanelDesc' : 'taskSheet.create.guidePanelDesc', { name: task?.title ?? formData.title })}
       rexGuideEmptyTitle={t(isEdit ? 'taskSheet.edit.emptyStateTitle' : 'taskSheet.create.emptyStateTitle')}
-      rexGuideIcon={<Calendar aria-hidden="true" className="h-5 w-5" />}
+      rexGuideIcon={<Calendar className="h-5 w-5" />}
       {...rexComposerControls}
       submitDisabled={!canSubmit || loading}
       submitLoading={loading}
@@ -390,7 +390,7 @@ function TaskFormContent({
       {/* Priority + Scheduling */}
       <div className="space-y-2.5">
         <div className="flex items-center gap-3">
-          <span className="w-14 text-sm font-medium text-gray-700 shrink-0">{t('form.priorityLabel')}</span>
+          <span className="w-14 shrink-0 text-sm font-medium text-gray-700">{t('form.priorityLabel')}</span>
           <PillGroup
             options={[
               { value: 'urgent', label: t('form.urgentLabel'), activeClass: 'bg-amber-500 text-white border-amber-500' },
@@ -403,7 +403,7 @@ function TaskFormContent({
           />
         </div>
         <div className="flex items-center gap-3">
-          <span className="w-14 text-sm font-medium text-gray-700 shrink-0">{t('form.scheduleKindLabel')}</span>
+          <span className="w-14 shrink-0 text-sm font-medium text-gray-700">{t('form.scheduleKindLabel')}</span>
           {isEdit ? (
             <span className="px-3 py-1.5 bg-gray-50 border border-gray-200 rounded-lg text-sm text-gray-700">
               {isRunOnce ? t('form.onceAtTimeOption') : t('form.recurringOption')}
@@ -436,13 +436,13 @@ function TaskFormContent({
               isOnce || isRunOnce ? 'text-orange-800' : 'text-purple-800'
             }`}
           >
-            <Calendar aria-hidden="true" className="w-4 h-4" /> {t('form.scheduleConfig')}
+            <Calendar className="w-4 h-4" /> {t('form.scheduleConfig')}
           </p>
 
           {/* Run-once mode: locked badge (edit) */}
           {isEdit && isRunOnce && (
             <div className="flex items-center gap-2 px-3 py-2 bg-white border border-orange-200 rounded-lg text-sm text-orange-700 font-medium">
-              <Clock aria-hidden="true" className="w-4 h-4" /> {t('form.runOnce')}
+              <Clock className="w-4 h-4" /> {t('form.runOnce')}
             </div>
           )}
 
@@ -513,7 +513,7 @@ function TaskFormContent({
                 <select
                   value={formData.timezone}
                   onChange={(e) => update({ timezone: e.target.value })}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg outline-none text-sm bg-white focus:ring-2 focus:ring-slate-400"
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg outline-none text-sm bg-white"
                 >
                   <option value="Asia/Shanghai">{t('form.timezoneShanghai')}</option>
                   <option value="UTC">UTC</option>
@@ -543,7 +543,7 @@ function TaskFormContent({
       {/* Execution mode + Agent/Workflow selector */}
       <div className="space-y-2.5">
         <div className="flex items-center gap-3">
-          <span className="w-14 text-sm font-medium text-gray-700 shrink-0">{t('form.modeLabel')}</span>
+          <span className="w-14 shrink-0 text-sm font-medium text-gray-700">{t('form.modeLabel')}</span>
           <PillGroup
             options={[
               { value: 'agent', label: 'Agent', activeClass: 'bg-slate-600 text-white border-slate-600' },
@@ -555,7 +555,7 @@ function TaskFormContent({
         </div>
         {formData.executionMode === 'agent' ? (
           <div className="flex items-center gap-3">
-            <span className="w-14 text-sm font-medium text-gray-700 shrink-0">Agent</span>
+            <span className="w-14 shrink-0 text-sm font-medium text-gray-700">Agent</span>
             <select
               value={formData.agentName}
               onChange={(e) => update({ agentName: e.target.value })}
@@ -577,7 +577,7 @@ function TaskFormContent({
         ) : (
           <div className="space-y-3">
             <div className="flex items-center gap-3">
-              <span className="w-14 text-sm font-medium text-gray-700 shrink-0">Workflow</span>
+              <span className="w-14 shrink-0 text-sm font-medium text-gray-700">Workflow</span>
               <select
                 value={formData.workflowID}
                 onChange={(e) => update({ workflowID: e.target.value })}
@@ -602,7 +602,7 @@ function TaskFormContent({
               <textarea
                 value={formData.workflowContext}
                 onChange={(e) => update({ workflowContext: e.target.value })}
-                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500 outline-none resize-y text-sm font-mono min-h-[120px]"
+                className="w-full min-h-[120px] px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500 outline-none resize-y text-sm font-mono"
                 spellCheck={false}
                 placeholder={t('form.workflowParamsPlaceholder')}
               />
@@ -629,7 +629,7 @@ function TaskFormContent({
             }
             className="flex items-center gap-1 text-xs text-sky-600 hover:text-sky-700 transition-colors"
           >
-            <Sparkles aria-hidden="true" className="w-3.5 h-3.5" />
+            <Sparkles className="w-3.5 h-3.5" />
             {t('form.rexAssist')}
           </button>
         </div>
@@ -661,7 +661,7 @@ function TaskFormContent({
                         {record.startedAt ? formatTime(record.startedAt) : '--'}
                       </div>
                     </div>
-                    <div className="mt-1 flex items-center gap-3 text-xs text-slate-500 flex-wrap">
+                    <div className="mt-1 flex flex-wrap items-center gap-3 text-xs text-slate-500">
                       {record.durationMs != null && (
                         <span>{formatDuration(record.durationMs)}</span>
                       )}

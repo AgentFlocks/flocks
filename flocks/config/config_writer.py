@@ -65,7 +65,18 @@ def ensure_config_files() -> None:
             continue
 
         try:
-            if example_file.exists():
+            if target_name == ".secret.json":
+                # Created under the secret store's lock: a writer that got there first wins.
+                from flocks.security.secrets import initialize_secret_file
+
+                template = (
+                    example_file.read_text(encoding="utf-8")
+                    if example_file.exists()
+                    else json.dumps(_FALLBACK_CONFIG_TEMPLATES[target_name], indent=2) + "\n"
+                )
+                if not initialize_secret_file(target_file, template):
+                    continue
+            elif example_file.exists():
                 shutil.copy2(example_file, target_file)
             else:
                 target_file.write_text(
@@ -206,6 +217,33 @@ class ConfigWriter:
             pass
 
         log.debug("config_writer.written", {"path": str(path)})
+
+    @classmethod
+    def update_config_section(cls, section: str, values: Dict[str, Any]) -> Dict[str, Any]:
+        """Merge *values* into the object at the dotted *section*, e.g. ``channels.feishu``.
+
+        Keys *values* does not name keep what they hold; missing objects on the
+        way are created. Returns the section as written.
+        """
+        keys = section.split(".")
+        if not all(keys):
+            raise ValueError(f"Invalid configuration section: {section!r}")
+        if not isinstance(values, dict):
+            raise ValueError("Configuration section values must be an object")
+        path = cls._get_config_path()
+        data = cls._read_path_raw(path, strict=True)
+        if not isinstance(data, dict):
+            raise ValueError("Configuration must be an object")
+        node = data
+        for depth, key in enumerate(keys, 1):
+            child = node.setdefault(key, {})
+            if not isinstance(child, dict):
+                raise ValueError(f"{'.'.join(keys[:depth])} configuration must be an object")
+            node = child
+        node.update(values)
+        cls._write_raw(data, path)
+        log.info("config_writer.section_updated", {"section": section, "keys": sorted(values)})
+        return node
 
     @classmethod
     def ensure_memory_config(cls) -> bool:
