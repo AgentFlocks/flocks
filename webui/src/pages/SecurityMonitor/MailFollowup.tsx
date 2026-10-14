@@ -6,6 +6,12 @@ import {
   type ReactNode,
 } from "react";
 import {
+  Check,
+  CheckCircle2,
+  CircleSlash2,
+  Clock3,
+  CornerDownLeft,
+  Pencil,
   ChevronLeft,
   ChevronRight,
   Mail,
@@ -51,8 +57,8 @@ const date = (s: string) =>
   new Date(s).toLocaleString("zh-CN", { hour12: false });
 const button =
   "inline-flex items-center justify-center gap-1.5 rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-600 transition-colors hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-40 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-300 dark:hover:bg-gray-800";
-const cell = "px-4 py-4 align-top";
-type ManualTarget = "handled" | "ignored" | "unhandled";
+const cell = "px-5 py-4 align-middle";
+type ManualTarget = "handled" | "ignored";
 
 function requestId() {
   if (crypto.randomUUID) return crypto.randomUUID();
@@ -66,7 +72,13 @@ function requestId() {
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
-function DispositionBadge({ notice }: { notice: Notice }) {
+function DispositionBadge({
+  notice,
+  compact = false,
+}: {
+  notice: Notice;
+  compact?: boolean;
+}) {
   const handled =
     notice.disposition_state === "handled" ||
     (!notice.disposition_state && notice.manual?.state === "handled");
@@ -75,6 +87,42 @@ function DispositionBadge({ notice }: { notice: Notice }) {
     notice.manual?.state === "ignored";
   const source =
     notice.disposition_source || (notice.manual?.state ? "manual" : null);
+  if (compact) {
+    const pending = notice.manual?.state === "pending";
+    const value = pending
+      ? notice.manual?.target_status === 60
+        ? "已忽略 · 待同步"
+        : "已处置 · 待同步"
+      : handled
+        ? "已处置"
+        : ignored
+          ? "已忽略"
+          : "未处置";
+    const tone = pending
+      ? "border-sky-100 bg-sky-50 text-sky-700 dark:border-sky-900 dark:bg-sky-950/40 dark:text-sky-300"
+      : handled
+        ? "border-emerald-100 bg-emerald-50 text-emerald-700 dark:border-emerald-900 dark:bg-emerald-950/40 dark:text-emerald-300"
+        : ignored
+          ? "border-slate-200 bg-slate-50 text-slate-600 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300"
+          : "border-transparent text-gray-500 dark:text-gray-400";
+    return (
+      <span
+        title={notice.manual?.reason || undefined}
+        className={`inline-flex items-center gap-1.5 whitespace-nowrap rounded-md border px-2 py-1 text-xs font-medium ${tone}`}
+      >
+        {pending ? (
+          <Clock3 size={12} aria-hidden="true" />
+        ) : handled ? (
+          <CheckCircle2 size={12} aria-hidden="true" />
+        ) : ignored ? (
+          <CircleSlash2 size={12} aria-hidden="true" />
+        ) : (
+          <span className="h-1.5 w-1.5 rounded-full bg-gray-300 dark:bg-gray-600" />
+        )}
+        {value}
+      </span>
+    );
+  }
   return (
     <div className="space-y-1">
       <span
@@ -162,6 +210,80 @@ function DeliveryBadge({ notice }: { notice: Notice }) {
   );
 }
 
+function MailStatusPair({ notice }: { notice: Notice }) {
+  const received =
+    notice.reply_received || !!notice.replies?.length || !!notice.items.length;
+  const failed =
+    ["failed", "blocked"].includes(notice.state) ||
+    (notice.state === "queued" && !!notice.error);
+  const sent = notice.state === "sent";
+  const delivery =
+    notice.state === "blocked"
+      ? "通道异常"
+      : failed
+        ? notice.sent_at
+          ? "重发失败"
+          : "未发送"
+        : notice.state === "send_unknown"
+          ? "结果待确认"
+          : label(notice.state);
+  const fullDelivery =
+    notice.state === "blocked"
+      ? label("blocked")
+      : failed
+        ? notice.sent_at
+          ? "重发未成功 · 此前已发送"
+          : "未发送 · 可重试"
+        : label(notice.state);
+  return (
+    <div className="grid grid-cols-2 overflow-hidden rounded-lg border border-gray-200/80 dark:border-gray-700">
+      <div
+        title={notice.error || fullDelivery}
+        className={`min-w-0 px-3 py-2 ${failed ? "bg-amber-50/70 dark:bg-amber-950/20" : sent ? "bg-emerald-50/70 dark:bg-emerald-950/20" : "bg-sky-50/70 dark:bg-sky-950/20"}`}
+      >
+        <div className="mb-0.5 text-[10px] text-gray-400 dark:text-gray-500">
+          发信
+        </div>
+        <div
+          className={`flex items-center gap-1.5 whitespace-nowrap text-xs font-medium ${failed ? "text-amber-700 dark:text-amber-300" : sent ? "text-emerald-700 dark:text-emerald-300" : "text-sky-700 dark:text-sky-300"}`}
+        >
+          {sent ? (
+            <Check size={13} aria-hidden="true" />
+          ) : (
+            <Clock3 size={13} aria-hidden="true" />
+          )}
+          {delivery}
+        </div>
+      </div>
+      <div
+        title={
+          received
+            ? notice.items.length
+              ? label(notice.items[0].state)
+              : "回信已保存，等待自动处理"
+            : undefined
+        }
+        className={`min-w-0 border-l border-gray-200/80 px-3 py-2 dark:border-gray-700 ${received ? "bg-sky-50/70 dark:bg-sky-950/20" : "bg-gray-50/80 dark:bg-gray-800/50"}`}
+      >
+        <div className="mb-0.5 text-[10px] text-gray-400 dark:text-gray-500">
+          回信
+        </div>
+        <div
+          className={`flex items-center gap-1.5 whitespace-nowrap text-xs font-medium ${received ? "text-sky-700 dark:text-sky-300" : "text-gray-400 dark:text-gray-500"}`}
+        >
+          <CornerDownLeft size={13} aria-hidden="true" />
+          {received ? "已收到回信" : "尚无回信"}
+        </div>
+        {received && !!notice.items.length && (
+          <p className="mt-1 truncate text-[10px] text-sky-600 dark:text-sky-400">
+            {label(notice.items[0].state)}
+          </p>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export function AuthenticationNotice() {
   return (
     <div className="flex items-start gap-2 rounded-lg bg-amber-50 px-3 py-2.5 text-xs leading-relaxed text-amber-800 dark:bg-amber-950/30 dark:text-amber-300">
@@ -193,10 +315,14 @@ export function Sheet({
   title,
   close,
   children,
+  centered = false,
+  footer,
 }: {
   title: string;
   close: () => void;
   children: ReactNode;
+  centered?: boolean;
+  footer?: ReactNode;
 }) {
   const ref = useRef<HTMLElement>(null);
   const closeRef = useRef(close);
@@ -212,7 +338,7 @@ export function Sheet({
       if (e.key !== "Tab" || !ref.current) return;
       const controls = Array.from(
         ref.current.querySelectorAll<HTMLElement>(
-          'button:not(:disabled), input:not(:disabled), a[href], [tabindex="0"]',
+          'button:not(:disabled), input:not(:disabled), textarea:not(:disabled), select:not(:disabled), a[href], [tabindex="0"]',
         ),
       );
       const first = controls[0],
@@ -234,7 +360,7 @@ export function Sheet({
   }, []);
   return (
     <div
-      className="fixed inset-0 z-50 flex justify-end bg-gray-950/30 backdrop-blur-sm"
+      className={`fixed inset-0 z-50 flex bg-gray-950/30 backdrop-blur-sm ${centered ? "items-center justify-center p-4" : "justify-end"}`}
       onClick={close}
     >
       <section
@@ -242,7 +368,7 @@ export function Sheet({
         role="dialog"
         aria-modal="true"
         aria-label={title}
-        className="flex h-full w-full max-w-xl flex-col bg-white shadow-2xl dark:bg-gray-900"
+        className={`flex w-full flex-col bg-white shadow-2xl dark:bg-gray-900 ${centered ? "max-h-[90vh] max-w-md overflow-hidden rounded-2xl" : "h-full max-w-xl"}`}
         onClick={(e) => e.stopPropagation()}
       >
         <header className="flex shrink-0 items-center justify-between border-b border-gray-100 px-6 py-5 dark:border-gray-800">
@@ -258,6 +384,7 @@ export function Sheet({
           </button>
         </header>
         <div className="min-h-0 flex-1 overflow-auto p-6">{children}</div>
+        {footer}
       </section>
     </div>
   );
@@ -411,6 +538,158 @@ function NoticeDetail({ notice }: { notice: Notice }) {
   );
 }
 
+function DispositionDialog({
+  notice,
+  target,
+  notes,
+  busy,
+  locked,
+  error,
+  changeTarget,
+  changeNotes,
+  submit,
+  close,
+}: {
+  notice: Notice;
+  target: ManualTarget;
+  notes: string;
+  busy: boolean;
+  locked: boolean;
+  error?: string;
+  changeTarget: (value: ManualTarget) => void;
+  changeNotes: (value: string) => void;
+  submit: () => void;
+  close: () => void;
+}) {
+  const unavailable =
+    !notice.manual?.available || notice.manual.state === "pending";
+  return (
+    <Sheet
+      title="记录处置"
+      close={close}
+      centered
+      footer={
+        <div className="shrink-0 flex justify-end gap-2 border-t border-gray-100 bg-gray-50/60 px-6 py-4 dark:border-gray-800 dark:bg-gray-950/20">
+          <button className={button} onClick={close}>
+            {busy ? "关闭" : "取消"}
+          </button>
+          <button
+            disabled={busy || unavailable}
+            onClick={submit}
+            className="inline-flex items-center gap-2 rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {busy && (
+              <RefreshCw
+                size={13}
+                className="animate-spin"
+                aria-hidden="true"
+              />
+            )}
+            {busy
+              ? "保存中…"
+              : target === "handled"
+                ? "确认已处置"
+                : "确认已忽略"}
+          </button>
+        </div>
+      }
+    >
+      <p className="mb-5 text-sm leading-relaxed text-gray-600 dark:text-gray-400">
+        {notice.event.name}
+        <span className="mt-1 block text-xs text-gray-400">
+          {notice.event.host}
+        </span>
+      </p>
+      <div
+        role="radiogroup"
+        aria-label="处置结果"
+        className="mb-6 grid grid-cols-2 gap-3"
+      >
+        {(["handled", "ignored"] as const).map((value) => {
+          const active = target === value;
+          const Icon = value === "handled" ? CheckCircle2 : CircleSlash2;
+          return (
+            <button
+              key={value}
+              type="button"
+              role="radio"
+              aria-checked={active}
+              tabIndex={active ? 0 : -1}
+              disabled={busy || locked || unavailable}
+              onClick={() => changeTarget(value)}
+              onKeyDown={(e) => {
+                if (
+                  ![
+                    "ArrowLeft",
+                    "ArrowRight",
+                    "ArrowUp",
+                    "ArrowDown",
+                    "Home",
+                    "End",
+                  ].includes(e.key)
+                )
+                  return;
+                e.preventDefault();
+                const next =
+                  e.key === "Home"
+                    ? "handled"
+                    : e.key === "End"
+                      ? "ignored"
+                      : value === "handled"
+                        ? "ignored"
+                        : "handled";
+                changeTarget(next);
+                const radios =
+                  e.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>(
+                    '[role="radio"]',
+                  );
+                radios?.[next === "handled" ? 0 : 1]?.focus();
+              }}
+              className={`inline-flex items-center justify-center gap-2 rounded-xl border px-4 py-4 text-sm font-medium transition-colors disabled:cursor-not-allowed ${active ? (value === "handled" ? "border-emerald-500 bg-emerald-50 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300" : "border-sky-400 bg-sky-50 text-sky-700 dark:bg-sky-950/40 dark:text-sky-300") : "border-gray-200 text-gray-500 hover:bg-gray-50 dark:border-gray-700 dark:text-gray-400 dark:hover:bg-gray-800"}`}
+            >
+              <Icon size={17} aria-hidden="true" />
+              {value === "handled" ? "已处置" : "已忽略"}
+            </button>
+          );
+        })}
+      </div>
+      <label
+        className="mb-2 flex items-center gap-2 text-xs font-medium text-gray-600 dark:text-gray-300"
+        htmlFor={`disposition-notes-${notice.id}`}
+      >
+        备注<span className="font-normal text-gray-400">选填</span>
+      </label>
+      <textarea
+        id={`disposition-notes-${notice.id}`}
+        aria-label={`处置备注：${notice.event.id}`}
+        placeholder="记录处理措施、结果或忽略原因"
+        maxLength={2000}
+        rows={3}
+        value={notes}
+        disabled={busy || locked || unavailable}
+        onChange={(e) => changeNotes(e.target.value)}
+        className="w-full resize-y rounded-lg border border-gray-200 bg-transparent px-3 py-2.5 text-sm leading-relaxed outline-none transition-shadow placeholder:text-gray-400 focus:border-emerald-400 focus:ring-2 focus:ring-emerald-100 disabled:opacity-60 dark:border-gray-700 dark:focus:ring-emerald-900/40"
+      />
+      <p className="mt-1 text-right text-[10px] text-gray-400">
+        {notes.length}/2000
+      </p>
+      {error && (
+        <p
+          role="alert"
+          className="mt-3 rounded-lg bg-amber-50 px-3 py-2 text-xs leading-relaxed text-amber-800 dark:bg-amber-950/30 dark:text-amber-300"
+        >
+          {error}
+        </p>
+      )}
+      {unavailable && (
+        <p role="status" className="mt-3 text-xs text-gray-500">
+          {notice.manual?.reason || "当前状态不支持人工标记"}
+        </p>
+      )}
+    </Sheet>
+  );
+}
+
 function ReplyDetail({ reply }: { reply: Reply }) {
   return (
     <div className="space-y-6">
@@ -504,6 +783,10 @@ export default function MailFollowup() {
   const retryRequests = useRef(
     new Map<string, { request_id: string; expected_updated_at?: string }>(),
   );
+  const [manualDialog, setManualDialog] = useState<{
+    id: string;
+    target: ManualTarget;
+  } | null>(null);
   const [notes, setNotes] = useState<Record<string, string>>({});
   const [manualBusy, setManualBusy] = useState<Record<string, boolean>>({});
   const [manualErrors, setManualErrors] = useState<Record<string, string>>({});
@@ -562,23 +845,24 @@ export default function MailFollowup() {
     if (nextOffset === offset) return;
     sequence.current++;
     setSelection(null);
+    setManualDialog(null);
     setData(null);
     setError("");
     setOffset(nextOffset);
   };
   const updateManual = async (notice: Notice, target: ManualTarget) => {
-    if (inFlight.current.has(notice.id)) return;
+    if (inFlight.current.has(notice.id)) return false;
     if (
       target &&
       (!notice.manual?.available || notice.manual.state === "pending")
     )
-      return;
+      return false;
     inFlight.current.add(notice.id);
     setManualBusy((old) => ({ ...old, [notice.id]: true }));
     setManualErrors((old) => ({ ...old, [notice.id]: "" }));
     try {
       let request = manualRequests.current.get(notice.id);
-      if (request && request.state !== target) return;
+      if (request && request.state !== target) return false;
       if (!request) {
         request = {
           request_id: requestId(),
@@ -611,6 +895,7 @@ export default function MailFollowup() {
       );
       manualRequests.current.delete(notice.id);
       setUncertainTargets((old) => ({ ...old, [notice.id]: undefined }));
+      return true;
     } catch (err: unknown) {
       const detail = (err as { response?: { data?: { detail?: unknown } } })
         ?.response?.data?.detail;
@@ -624,6 +909,7 @@ export default function MailFollowup() {
       if (target)
         setUncertainTargets((old) => ({ ...old, [notice.id]: target }));
       void refresh();
+      return false;
     } finally {
       inFlight.current.delete(notice.id);
       setManualBusy((old) => ({ ...old, [notice.id]: false }));
@@ -734,6 +1020,9 @@ export default function MailFollowup() {
               selection.record,
           }
         : null;
+  const manualNotice = manualDialog
+    ? notices.find((n) => n.id === manualDialog.id)
+    : undefined;
   const empty = notices.length === 0;
   return (
     <div className="min-h-0 flex-1 overflow-auto bg-gray-50/40 p-4 sm:p-6 dark:bg-gray-950/20">
@@ -811,18 +1100,18 @@ export default function MailFollowup() {
           )}
           {data && !empty && (
             <div className="overflow-x-auto">
-              <table className="w-full min-w-[1120px] table-fixed text-left text-sm">
+              <table className="w-full min-w-[1180px] table-fixed text-left text-sm">
                 <caption className="sr-only">
                   告警邮件跟进，按时间从新到旧，包含发信、回信和处置状态
                 </caption>
                 <thead className="bg-gray-50/80 text-xs font-medium text-gray-500 dark:bg-gray-800/50">
                   <tr>
-                    <th className="w-40 px-4 py-3">发送 / 记录时间</th>
-                    <th className="px-4 py-3">关联事件 / ID</th>
-                    <th className="w-44 px-4 py-3">责任人邮箱</th>
-                    <th className="w-48 px-4 py-3">邮件状态</th>
-                    <th className="w-60 px-4 py-3">处置标签 / 操作</th>
-                    <th className="w-24 px-4 py-3">
+                    <th className="w-36 px-5 py-3.5">发送 / 记录时间</th>
+                    <th className="px-5 py-3.5">关联事件 / ID</th>
+                    <th className="w-44 px-5 py-3.5">责任人邮箱</th>
+                    <th className="w-72 px-5 py-3.5">邮件状态</th>
+                    <th className="w-56 px-5 py-3.5">处置</th>
+                    <th className="w-24 px-5 py-3.5">
                       <span className="sr-only">详情</span>
                     </th>
                   </tr>
@@ -859,11 +1148,10 @@ export default function MailFollowup() {
                       </td>
                       <td className={cell} onClick={(e) => e.stopPropagation()}>
                         <div className="space-y-2">
-                          <DeliveryBadge notice={n} />
-                          <ReplyBadge notice={n} />
+                          <MailStatusPair notice={n} />
                           {n.retry?.available && (
                             <button
-                              className={`${button} text-blue-700 dark:text-blue-300`}
+                              className="inline-flex items-center gap-1 rounded-md px-1 py-0.5 text-xs font-medium text-sky-700 transition-colors hover:bg-sky-50 disabled:cursor-not-allowed disabled:opacity-40 dark:text-sky-400 dark:hover:bg-sky-950/30"
                               disabled={
                                 retryBusy[n.id] ||
                                 manualBusy[n.id] ||
@@ -911,107 +1199,58 @@ export default function MailFollowup() {
                       </td>
                       <td className={cell} onClick={(e) => e.stopPropagation()}>
                         <div className="space-y-2">
-                          <DispositionBadge notice={n} />
-                          {n.manual?.available && (
-                            <textarea
-                              aria-label={`处置备注：${n.event.id}`}
-                              placeholder="备注（可选）"
-                              maxLength={2000}
-                              rows={2}
-                              className="w-full rounded-lg border border-gray-200 bg-transparent p-2 text-xs dark:border-gray-700"
-                              value={notes[n.id] ?? n.manual.notes ?? ""}
-                              disabled={
-                                manualBusy[n.id] ||
-                                retryBusy[n.id] ||
-                                !!uncertainTargets[n.id]
-                              }
-                              onChange={(e) =>
-                                setNotes((old) => ({
-                                  ...old,
-                                  [n.id]: e.target.value,
-                                }))
-                              }
-                            />
-                          )}
+                          <div className="flex flex-wrap items-center gap-2">
+                            <DispositionBadge notice={n} compact />
+                            {n.manual?.available &&
+                              n.manual.state !== "pending" && (
+                                <button
+                                  className="inline-flex items-center gap-1 rounded-md border border-gray-200 bg-white px-2 py-1 text-xs text-gray-600 transition-colors hover:border-emerald-300 hover:bg-emerald-50 hover:text-emerald-700 disabled:cursor-not-allowed disabled:opacity-40 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-400 dark:hover:border-emerald-700 dark:hover:bg-emerald-950/30 dark:hover:text-emerald-300"
+                                  disabled={
+                                    manualBusy[n.id] ||
+                                    retryBusy[n.id] ||
+                                    retryRequests.current.has(n.id)
+                                  }
+                                  aria-label={`标记处置：${n.event.id}`}
+                                  onClick={() =>
+                                    setManualDialog({
+                                      id: n.id,
+                                      target:
+                                        uncertainTargets[n.id] || "handled",
+                                    })
+                                  }
+                                >
+                                  <Pencil size={12} aria-hidden="true" />
+                                  {uncertainTargets[n.id] ? "继续提交" : "标记"}
+                                </button>
+                              )}
+                          </div>
                           {n.manual?.notes && (
-                            <p className="whitespace-pre-wrap break-words text-xs text-gray-500">
-                              备注：{n.manual.notes}
+                            <p
+                              title={n.manual.notes}
+                              className="max-w-48 truncate text-xs text-gray-400"
+                            >
+                              {n.manual.notes}
                             </p>
                           )}
-                          {n.manual?.state !== "pending" &&
-                            n.manual?.available && (
-                              <div className="flex flex-wrap gap-2">
-                                <button
-                                  className={`${button} text-emerald-700 dark:text-emerald-300`}
-                                  disabled={
-                                    manualBusy[n.id] ||
-                                    retryBusy[n.id] ||
-                                    retryRequests.current.has(n.id) ||
-                                    n.manual.state === "handled" ||
-                                    (!!uncertainTargets[n.id] &&
-                                      uncertainTargets[n.id] !== "handled")
-                                  }
-                                  aria-label={`标记已处置：${n.event.id}`}
-                                  onClick={() =>
-                                    void updateManual(n, "handled")
-                                  }
-                                >
-                                  {manualBusy[n.id] ? "处理中…" : "标记已处置"}
-                                </button>
-                                <button
-                                  className={`${button} text-amber-700 dark:text-amber-300`}
-                                  disabled={
-                                    manualBusy[n.id] ||
-                                    retryBusy[n.id] ||
-                                    retryRequests.current.has(n.id) ||
-                                    (!!uncertainTargets[n.id] &&
-                                      uncertainTargets[n.id] !== "ignored")
-                                  }
-                                  aria-label={`标记忽略：${n.event.id}`}
-                                  onClick={() =>
-                                    void updateManual(n, "ignored")
-                                  }
-                                >
-                                  标记忽略
-                                </button>
-                                <button
-                                  className={button}
-                                  disabled={
-                                    manualBusy[n.id] ||
-                                    retryBusy[n.id] ||
-                                    retryRequests.current.has(n.id) ||
-                                    (n.manual.state === "unhandled" &&
-                                      (
-                                        notes[n.id] ??
-                                        n.manual.notes ??
-                                        ""
-                                      ).trim() === (n.manual.notes ?? "")) ||
-                                    (!!uncertainTargets[n.id] &&
-                                      uncertainTargets[n.id] !== "unhandled")
-                                  }
-                                  aria-label={`标记未处置：${n.event.id}`}
-                                  onClick={() =>
-                                    void updateManual(n, "unhandled")
-                                  }
-                                >
-                                  标记未处置
-                                </button>
-                              </div>
+                          {n.manual?.reason &&
+                            !n.manual.available &&
+                            n.manual.state !== "pending" &&
+                            !["handled", "ignored"].includes(
+                              n.manual.state || "",
+                            ) && (
+                              <p className="text-xs leading-relaxed text-gray-500">
+                                {n.manual.reason}
+                              </p>
                             )}
-                          {n.manual?.reason && !n.manual.available && (
-                            <p className="text-xs leading-relaxed text-gray-500">
-                              {n.manual.reason}
-                            </p>
-                          )}
                           {n.manual?.error && (
                             <p className="text-xs text-amber-700 dark:text-amber-300">
                               {n.manual.error}
                             </p>
                           )}
-                          {manualErrors[n.id] && (
+                          {manualErrors[n.id] && manualDialog?.id !== n.id && (
                             <p
                               role="alert"
-                              className="text-xs text-red-700 dark:text-red-300"
+                              className="text-xs text-amber-700 dark:text-amber-300"
                             >
                               {manualErrors[n.id]}
                             </p>
@@ -1101,6 +1340,33 @@ export default function MailFollowup() {
             ))}
           </ul>
         </section>
+      )}
+      {manualDialog && manualNotice && (
+        <DispositionDialog
+          notice={manualNotice}
+          target={manualDialog.target}
+          notes={notes[manualNotice.id] ?? manualNotice.manual?.notes ?? ""}
+          busy={!!manualBusy[manualNotice.id]}
+          locked={!!uncertainTargets[manualNotice.id]}
+          error={manualErrors[manualNotice.id]}
+          changeTarget={(target) =>
+            setManualDialog({ id: manualNotice.id, target })
+          }
+          changeNotes={(value) =>
+            setNotes((old) => ({ ...old, [manualNotice.id]: value }))
+          }
+          close={() => setManualDialog(null)}
+          submit={() => {
+            void updateManual(manualNotice, manualDialog.target).then(
+              (saved) => {
+                if (saved)
+                  setManualDialog((old) =>
+                    old?.id === manualNotice.id ? null : old,
+                  );
+              },
+            );
+          }}
+        />
       )}
       {current && (
         <Sheet
