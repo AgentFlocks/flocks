@@ -20,7 +20,7 @@ import re
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Dict, Any, Optional
-from fastapi import APIRouter, File, HTTPException, UploadFile, status
+from fastapi import APIRouter, File, HTTPException, Request, UploadFile, status
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from defusedxml import ElementTree as DefusedET
@@ -29,6 +29,17 @@ from defusedxml.common import DefusedXmlException
 from flocks.config.config import Config, GlobalConfig, ConfigInfo as ConfigInfoModel, UIConfig
 from flocks.config.config_writer import ConfigWriter
 from flocks.provider.provider import Provider
+from flocks.retention import (
+    CONFIG_SECTION as DATA_RETENTION_SECTION,
+    MAX_RETENTION_DAYS,
+    DataRetentionScheduler,
+    RetentionPolicy,
+    apply_log_retention,
+    collect_targets,
+    load_policy,
+    policy_from_config,
+)
+from flocks.server.auth import require_admin
 from flocks.server.config_mutation import serialized_config_mutation
 from flocks.utils.log import Log
 
@@ -238,6 +249,49 @@ class ToolFailurePreference(BaseModel):
         ...,
         alias="disableOnRepeatedFailure",
     )
+
+
+class DataRetentionUpdateRequest(BaseModel):
+    """Retention days to save; 0 keeps that kind of data forever."""
+
+    model_config = {"populate_by_name": True}
+
+    log_days: int = Field(..., alias="logDays", ge=0, le=MAX_RETENTION_DAYS)
+    message_days: int = Field(..., alias="messageDays", ge=0, le=MAX_RETENTION_DAYS)
+    session_days: int = Field(..., alias="sessionDays", ge=0, le=MAX_RETENTION_DAYS)
+
+    def to_policy(self) -> RetentionPolicy:
+        return RetentionPolicy(
+            logDays=self.log_days,
+            messageDays=self.message_days,
+            sessionDays=self.session_days,
+        )
+
+
+class DataRetentionResponse(BaseModel):
+    """Effective retention policy plus the state of the cleanup job."""
+
+    model_config = {"populate_by_name": True}
+
+    log_days: int = Field(..., alias="logDays")
+    message_days: int = Field(..., alias="messageDays")
+    session_days: int = Field(..., alias="sessionDays")
+    running: bool = False
+    last_run: Optional[Dict[str, Any]] = Field(None, alias="lastRun")
+
+
+class DataRetentionPreviewResponse(BaseModel):
+    """What a policy would delete right now."""
+
+    model_config = {"populate_by_name": True}
+
+    sessions: int
+    messages: int
+    log_paths: int = Field(..., alias="logPaths")
+    log_bytes: int = Field(..., alias="logBytes")
+    record_files: int = Field(..., alias="recordFiles")
+    record_bytes: int = Field(..., alias="recordBytes")
+    skipped_busy: int = Field(..., alias="skippedBusy")
 
 
 DEFAULT_UI_DISPLAY_NAME = "Flocks"
@@ -671,6 +725,72 @@ async def update_tool_failure_preference(
         raise HTTPException(status_code=400, detail=str(e))
 
 
+async def _data_retention_status() -> DataRetentionResponse:
+    policy = await load_policy()
+    return DataRetentionResponse(
+        logDays=policy.log_days,
+        messageDays=policy.message_days,
+        sessionDays=policy.session_days,
+        running=DataRetentionScheduler.is_running(),
+        lastRun=await DataRetentionScheduler.last_run(),
+    )
+
+
+@router.get(
+    "/data-retention",
+    response_model=DataRetentionResponse,
+    summary="Get data retention policy",
+)
+async def get_data_retention(request: Request) -> DataRetentionResponse:
+    """Return how long logs, messages and sessions are kept, and the last cleanup."""
+    require_admin(request)
+    return await _data_retention_status()
+
+
+@router.post(
+    "/data-retention/preview",
+    response_model=DataRetentionPreviewResponse,
+    summary="Preview what a data retention policy would delete",
+)
+async def preview_data_retention(
+    request: Request,
+    body: DataRetentionUpdateRequest,
+) -> DataRetentionPreviewResponse:
+    """Count what saving ``body`` would delete now; nothing is deleted."""
+    require_admin(request)
+    targets = await collect_targets(body.to_policy())
+    return DataRetentionPreviewResponse(**targets.summary())
+
+
+@router.patch(
+    "/data-retention",
+    response_model=DataRetentionResponse,
+    summary="Update data retention policy",
+)
+@serialized_config_mutation
+async def update_data_retention(
+    request: Request,
+    body: DataRetentionUpdateRequest,
+) -> DataRetentionResponse:
+    """Save the policy in flocks.json and start a cleanup pass in the background."""
+    require_admin(request)
+    policy = body.to_policy()
+    try:
+        data = ConfigWriter._read_raw()
+        existing = data.get(DATA_RETENTION_SECTION)
+        section = dict(existing) if isinstance(existing, dict) else {}
+        section.update(policy.to_config())
+        data[DATA_RETENTION_SECTION] = section
+        ConfigWriter._write_raw(data)
+    except Exception as e:
+        log.error("config.data_retention.update.error", {"error": str(e)})
+        raise HTTPException(status_code=400, detail=str(e))
+    apply_log_retention(policy)
+    DataRetentionScheduler.request_run()
+    log.info("config.data_retention.updated", policy.to_config())
+    return await _data_retention_status()
+
+
 @router.get("", summary="Get configuration")
 async def get_config() -> Dict[str, Any]:
     """
@@ -690,12 +810,47 @@ async def get_config() -> Dict[str, Any]:
         raise HTTPException(status_code=500, detail=str(e))
 
 
+def _policy_config_of(section: Any) -> Dict[str, int]:
+    return policy_from_config(ConfigInfoModel.model_validate({"dataRetention": section})).to_config()
+
+
+async def _guard_data_retention_change(request: Request, config_data: Dict[str, Any]) -> bool:
+    """Changing the global retention policy through this generic endpoint needs admin.
+
+    Returns whether the effective policy changes (so the caller can notify the
+    scheduler). The dedicated /data-retention endpoint is already admin-only;
+    this closes the same escalation here, since the retention cleanup deletes
+    every user's data. A payload that leaves the effective policy unchanged (or
+    omits the key) is untouched, so normal member config saves and TUI (admin)
+    saves still work.
+    """
+    if not isinstance(config_data, dict):
+        return False
+    # The model accepts both the alias and the field name, so a snake_case key
+    # is just as effective as camelCase; check both.
+    if "dataRetention" not in config_data and "data_retention" not in config_data:
+        return False
+    incoming_section = config_data.get("dataRetention", config_data.get("data_retention"))
+    # Compare against what is persisted on disk, not a possibly-stale in-process
+    # cache: a worker whose cache lags an admin's change must not let a member
+    # re-establish the old (deleting) policy by echoing it.
+    try:
+        on_disk = ConfigWriter._read_raw()
+    except Exception:
+        on_disk = {}
+    current_section = on_disk.get("dataRetention", on_disk.get("data_retention"))
+    if _policy_config_of(incoming_section) == _policy_config_of(current_section):
+        return False
+    require_admin(request)
+    return True
+
+
 @router.patch("/", summary="Update configuration")
 @serialized_config_mutation
-async def update_config(config_data: Dict[str, Any]) -> Dict[str, Any]:
+async def update_config(request: Request, config_data: Dict[str, Any]) -> Dict[str, Any]:
     """
     Update configuration
-    
+
     Update Flocks configuration settings and preferences.
     Returns the updated Config in Flocks format.
 
@@ -704,6 +859,7 @@ async def update_config(config_data: Dict[str, Any]) -> Dict[str, Any]:
     {secret:channel_<id>_<field>} references before the config is written to
     flocks.json, so that plaintext secrets never land in that file.
     """
+    retention_changed = await _guard_data_retention_change(request, config_data)
     await _validate_plugin_group_updates(config_data)
     try:
         channel_allow_from_deletions = _channel_allow_from_deletion_ids(config_data)
@@ -748,6 +904,13 @@ async def update_config(config_data: Dict[str, Any]) -> Dict[str, Any]:
                 )
         else:
             invalidate_channel_config_cache()
+
+        if retention_changed:
+            # Mirror the dedicated endpoint: apply the new log period and kick a
+            # cleanup (which also bumps the scheduler generation so an in-flight
+            # round stops deleting under the superseded policy).
+            apply_log_retention(await load_policy())
+            DataRetentionScheduler.request_run()
 
         log.info("config.updated")
         return await get_config()

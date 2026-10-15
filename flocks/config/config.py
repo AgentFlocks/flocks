@@ -431,6 +431,48 @@ class ToolFailureConfig(BaseModel):
     )
 
 
+class DataRetentionConfig(BaseModel):
+    """How long logs, messages and sessions are kept (days; 0 keeps them forever).
+
+    A key left out of flocks.json falls back to the built-in default: logs use
+    FLOCKS_LOG_RETENTION_DAYS (30 days unset), messages and sessions are kept.
+    """
+
+    # A hand-edited bad value must not break loading the whole config: values
+    # that are not whole numbers read as "not set", and flocks.retention.policy
+    # treats negative numbers the same way.
+    model_config = {"populate_by_name": True}
+
+    log_days: Optional[int] = Field(None, alias="logDays")
+    message_days: Optional[int] = Field(None, alias="messageDays")
+    session_days: Optional[int] = Field(None, alias="sessionDays")
+
+    @field_validator("log_days", "message_days", "session_days", mode="before")
+    @classmethod
+    def _ignore_unreadable_days(cls, value: Any) -> Optional[int]:
+        if value is None or isinstance(value, bool):
+            return None
+        if isinstance(value, int):
+            return value
+        if isinstance(value, float):
+            return int(value) if value.is_integer() else None
+        if isinstance(value, str):
+            text = value.strip()
+            if not text:
+                return None
+            sign = ""
+            if text[0] in "+-":
+                sign, text = text[0], text[1:]
+            # Non-empty ASCII digits only: ``str.isdigit`` also accepts
+            # superscripts etc., and "" / "+" / "-" must not reach ``int``.
+            if text and text.isascii() and text.isdigit():
+                try:
+                    return int(f"{sign}{text}")
+                except ValueError:
+                    return None
+        return None
+
+
 class EnterpriseConfig(BaseModel):
     """Enterprise configuration"""
 
@@ -897,6 +939,21 @@ class ConfigInfo(BaseModel):
         alias="toolFailure",
         description="Repeated tool-failure handling.",
     )
+    data_retention: Optional[DataRetentionConfig] = Field(
+        None,
+        alias="dataRetention",
+        description="Retention days for logs, messages and sessions (0 keeps forever).",
+    )
+
+    @field_validator("data_retention", mode="before")
+    @classmethod
+    def _ignore_non_mapping_data_retention(cls, value: Any) -> Any:
+        # A hand-edited ``dataRetention: "soon"`` or ``[]`` must not break loading
+        # the whole config; drop it and fall back to the defaults.
+        if value is None or isinstance(value, (dict, DataRetentionConfig)):
+            return value
+        return None
+
     experimental: Optional[ExperimentalConfig] = None
     concurrency: Optional[ConcurrencyConfig] = Field(
         None,

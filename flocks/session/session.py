@@ -1079,25 +1079,56 @@ class Session:
                 await cls._end_lifecycle_transition(sessions)
     
     @classmethod
-    async def delete(cls, project_id: str, session_id: str) -> bool:
-        """Permanently delete a session tree and all application-owned data."""
+    async def delete(
+        cls,
+        project_id: str,
+        session_id: str,
+        *,
+        require_idle_before_ms: Optional[int] = None,
+    ) -> bool:
+        """Permanently delete a session tree and all application-owned data.
+
+        ``require_idle_before_ms`` lets data retention abort if the tree was used
+        since it planned the delete: under the lifecycle guard, if any session in
+        the tree has activity at or after that time, nothing is deleted.
+        """
 
         from flocks.project.project import Project
 
         async with Project.lifecycle_guard(project_id):
-            return await cls._delete_locked(project_id, session_id)
+            return await cls._delete_locked(
+                project_id, session_id, require_idle_before_ms=require_idle_before_ms,
+            )
+
+    @staticmethod
+    def _tree_is_idle_before(sessions: List["SessionInfo"], before_ms: int) -> bool:
+        """True iff no session in the tree is running or has activity at/after ``before_ms``."""
+        from flocks.session.session_loop import SessionLoop
+
+        for s in sessions:
+            if max(int(s.time.updated or 0), int(s.time.created or 0)) >= before_ms:
+                return False
+            if SessionLoop.is_running(s.id):
+                return False
+        return True
 
     @classmethod
-    async def _delete_locked(cls, project_id: str, session_id: str) -> bool:
+    async def _delete_locked(
+        cls,
+        project_id: str,
+        session_id: str,
+        *,
+        require_idle_before_ms: Optional[int] = None,
+    ) -> bool:
         """
         Permanently delete a session tree and all application-owned data.
-        
+
         Also deletes child sessions.
-        
+
         Args:
             project_id: Project ID
             session_id: Session ID
-            
+
         Returns:
             True if deleted
         """
@@ -1106,6 +1137,14 @@ class Session:
             return False
         deleted = False
         try:
+            # Retention: re-check the (freshly collected) tree BEFORE any abort
+            # side effect. If it was touched or started running since retention
+            # planned this, leave it untouched — don't stop it or clear its queue.
+            if require_idle_before_ms is not None and not cls._tree_is_idle_before(
+                sessions, require_idle_before_ms
+            ):
+                return False
+
             if not await cls._stop_session_tree_for_archive(sessions):
                 return False
             for session in sessions:
@@ -1115,6 +1154,10 @@ class Session:
             if not refreshed:
                 return False
             sessions = refreshed
+            if require_idle_before_ms is not None and not cls._tree_is_idle_before(
+                sessions, require_idle_before_ms
+            ):
+                return False
             session_ids = [session.id for session in sessions]
 
             from flocks.permission.next import PermissionNext
